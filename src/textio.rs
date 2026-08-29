@@ -53,6 +53,34 @@
 //! whole byte, so a two-pixel-wide bitmap is one byte a row and six bits of
 //! every row are padding rather than pixels.
 //!
+//! ### A `P1` sample is one character, which is where this leaves the oracle
+//!
+//! The plain-PBM specification says each pixel is a single ASCII `1` or `0` and
+//! that white space in the raster is *ignored* rather than required, and
+//! netpbm's own writers take it at its word: `pamtopnm -plain` emits a whole
+//! row as one unbroken run of digits, and `pnmtopnm` reads that straight back
+//! to the packed `P4` it came from.
+//!
+//! Measured on the pinned 8.18.6, **vips cannot read those files**. `ppmload`
+//! tokenises `P1` as whitespace-delimited integers, so it takes
+//! `101001010011` for one number, calls the first pixel ink and invents the
+//! rest:
+//!
+//! ```text
+//! source                         first row vips reports
+//! the P4 it came from            0 255 0 255 255 0 255 0 255 255 0 0
+//! ImageMagick's spaced P1        0 255 0 255 255 0 255 0 255 255 0 0
+//! netpbm's unspaced P1           0 0 255 255 255 255 255 255 255 255 255 255
+//! ```
+//!
+//! So this reads characters, and that is a **deliberate divergence from the
+//! oracle** (issue #928) rather than an oversight. The two parses agree
+//! wherever vips is right, because a legal sample is one character and a
+//! space-separated file tokenises identically either way; they differ only on
+//! files vips already garbles. This half is also the stricter one, since a
+//! character that is not `0` or `1` is refused by name where vips coerces `x`
+//! and `4294967296` into white.
+//!
 //! Nothing in this crate writes them, and that is a decision rather than an
 //! omission.
 //!
@@ -421,8 +449,12 @@ impl Raster {
     /// `Gray8` with **`1` black and `0` white**, which is inverted against
     /// every other format here (issue #919, and `bitmap_ink` carries the
     /// measurement). `P4` pads each row out to a whole byte, so the tail bits
-    /// of a short row are padding and not pixels. Nothing in this crate
-    /// writes either form; the module docs say why.
+    /// of a short row are padding and not pixels. A `P1` sample is **one
+    /// character**, not a whitespace-delimited integer, which is what the
+    /// plain-PBM specification says and what netpbm's own writers emit;
+    /// `next_bit` carries that measurement and the reason it diverges from
+    /// vips (issue #928). Nothing in this crate writes either form; the module
+    /// docs say why.
     ///
     /// The pixel buffer is bounded before it is reserved: the declared
     /// geometry is priced against the allocation budget through
@@ -526,10 +558,10 @@ pub(crate) fn decode_netpbm(
         let height = next_u32(data, &mut pos, "height")?;
         // The bitmap forms carry **no `maxval` field**: a `P1`/`P4` sample is
         // one bit, so its range is fixed and the header stops at the height.
-        // Reading one anyway would eat the first pixel, which is exactly what
-        // vips does to a file that wrongly carries one. Measured on 8.18.6:
-        // `P1 / 2 2 / 255 / 0 1 1 0` comes back `0 255 0 0`, so the `255` was
-        // consumed as a sample and the last `0` fell off the end.
+        // Reading one anyway would eat pixels. A `P1` that wrongly carries a
+        // `255` proves the field is not read: its first three samples are the
+        // digits `2`, `5`, `5`, so the picture is `0 0 0 255` where a reader
+        // that consumed a `maxval` would answer `255 0 0 255`.
         let maxval = if bitmap {
             1
         } else {
@@ -572,16 +604,15 @@ pub(crate) fn decode_netpbm(
             buf.try_reserve_exact(need)
                 .map_err(|_| malformed("ppm: cannot allocate pixel buffer"))?;
             for _ in 0..count {
-                let v = next_u32(data, &mut pos, "sample")?;
                 if bitmap {
-                    // No `maxval` to compare against, and vips does not treat a
-                    // sample above 1 as an error: measured on 8.18.6, a `P1`
-                    // reading `0 2 7 255` comes back `255 0 0 0`, so every
-                    // non-zero value is ink. Refusing them here would make
-                    // files vips reads unreachable.
-                    buf.push(bitmap_ink(v != 0));
+                    // A `P1` sample is **one character**, not a
+                    // whitespace-delimited integer: `next_bit` carries the
+                    // measurement and the reason this diverges from vips
+                    // (issue #928).
+                    buf.push(bitmap_ink(next_bit(data, &mut pos)?));
                     continue;
                 }
+                let v = next_u32(data, &mut pos, "sample")?;
                 if v > maxval {
                     return Err(malformed("ppm: sample exceeds maxval"));
                 }
@@ -687,6 +718,23 @@ const fn bitmap_ink(set: bool) -> u8 {
 /// Returns the token bytes, or `None` at end of input. Used only while reading
 /// the ASCII header and ASCII sample stream, never over the binary blob.
 fn next_token(data: &[u8], pos: &mut usize) -> Option<Vec<u8>> {
+    skip_blanks_and_comments(data, pos);
+    if *pos >= data.len() {
+        return None;
+    }
+    let start = *pos;
+    while *pos < data.len() && !data[*pos].is_ascii_whitespace() && data[*pos] != b'#' {
+        *pos += 1;
+    }
+    Some(data[start..*pos].to_vec())
+}
+
+/// Advance `pos` past whitespace and `#` comments (comments run to end of line).
+///
+/// Shared by [`next_token`] and [`next_bit`] rather than written twice, because
+/// the two readers have to agree about where a sample starts and a second copy
+/// is a second place for that to drift.
+fn skip_blanks_and_comments(data: &[u8], pos: &mut usize) {
     loop {
         while *pos < data.len() && data[*pos].is_ascii_whitespace() {
             *pos += 1;
@@ -699,14 +747,53 @@ fn next_token(data: &[u8], pos: &mut usize) -> Option<Vec<u8>> {
             break;
         }
     }
-    if *pos >= data.len() {
-        return None;
+}
+
+/// Read the next plain-PBM sample: **one** ASCII `0` or `1`.
+///
+/// A `P1` sample is a single character and the whitespace between samples is
+/// optional, which is what the plain-PBM specification says and what netpbm's
+/// own writers rely on: `pamtopnm -plain` emits a whole row as one unbroken
+/// run of digits, `101001010011`, and `pnmtopnm` reads that straight back to
+/// the packed `P4` it came from.
+///
+/// **This is a deliberate divergence from the oracle** (issue #928). Measured
+/// on the pinned vips 8.18.6, `ppmload` tokenises `P1` as whitespace-delimited
+/// integers, so it reads that row as the single number `101001010011`, calls
+/// the first pixel ink and invents every pixel after it: both rows come back
+/// nearly all white and neither is the picture. Reading integers there is not
+/// parity, it is copying a bug the format's own implementation does not have.
+///
+/// The two parses agree wherever vips is right, because a legal `P1` sample is
+/// one character, so a space-separated file tokenises identically either way,
+/// and so does an all-adjacent one under this reader. They separate on a file
+/// that mixes the two: `0 1 1 0` and `0110` both read `0 1 1 0` here, while
+/// `00 01 1 0` reads `0 0 0 1` here and `0 1 1 0` in vips, because vips takes
+/// `00` for one sample where the specification makes it two. Real writers emit
+/// one shape or the other and never that one.
+///
+/// This half is also the *stricter* one: a character that is not `0` or `1` is
+/// not a legal sample and is refused by name, where vips coerces `x`,
+/// `4294967296` and `0x1` into white and `+1` and `-1` into black.
+///
+/// # Errors
+///
+/// A typed [`DecodeError`] at end of input, or for a character that is neither
+/// `0` nor `1`.
+fn next_bit(data: &[u8], pos: &mut usize) -> Result<bool, DecodeError> {
+    skip_blanks_and_comments(data, pos);
+    let byte = *data
+        .get(*pos)
+        .ok_or_else(|| malformed("ppm: missing bitmap sample"))?;
+    *pos += 1;
+    match byte {
+        b'0' => Ok(false),
+        b'1' => Ok(true),
+        other => Err(malformed(format!(
+            "ppm: bitmap sample {:?} is not 0 or 1",
+            char::from(other)
+        ))),
     }
-    let start = *pos;
-    while *pos < data.len() && !data[*pos].is_ascii_whitespace() && data[*pos] != b'#' {
-        *pos += 1;
-    }
-    Some(data[start..*pos].to_vec())
 }
 
 /// Parse the next header token as a `u32`.
@@ -1182,41 +1269,125 @@ mod tests {
     }
 
     /**
-     * Tests that a `P1` sample above `1` is still ink rather than a refusal,
-     * and that a `P1` header has no `maxval` field to compare it against
-     * (issue #919).
+     * Tests that a plain `P1` whose samples are not whitespace-separated
+     * decodes the way netpbm writes it, which vips cannot do (issue #928).
      *
-     * Two measurements on the pinned 8.18.6, and the second is the one that
-     * proves the header shape:
+     * The fixture is not invented. It came out of netpbm's own writer:
      *
      * ```text
-     * $ printf 'P1\n2 2\n0 2 7 255\n'     -> 255 0 0 0
-     * $ printf 'P1\n2 2\n255\n0 1 1 0\n'  -> 0 255 0 0
+     * $ printf 'P4\n12 2\n\xa5\x30\x5a\xc0' > real_src.pbm
+     * $ pamtopnm -plain real_src.pbm
+     * P1
+     * 12 2
+     * 101001010011
+     * 010110101100
+     * $ pnmtopnm netpbm_plain.pbm     # straight back to the original bytes
+     * P4
+     * 12 2
+     * \xa5\x30\x5a\xc0
      * ```
      *
-     * The first says every non-zero value is ink, so refusing `2` would make
-     * files vips reads unreachable. The second says the `255` was **consumed
-     * as a pixel**: a reader that took it for a `maxval` would answer
-     * `255 0 0 255` instead, so this fixture separates "there is no maxval
-     * field" from "there is one and it happens not to matter".
-     * Input: the two files above -> Output: `255 0 0 0` and `0 255 0 0`.
+     * The expected pixels are not hand-written either: they are whatever the
+     * `P4` the file came from decodes to, so the two spellings of one picture
+     * have to agree. That makes the cell a round trip through a third-party
+     * writer rather than a transcription.
+     *
+     * Measured on the pinned vips 8.18.6, `ppmload` reads the `P4` and
+     * ImageMagick's space-separated `P1` correctly and answers
+     * `0 0 255 255 255 255 255 255 255 255 255 255` for this one, which is
+     * neither row of the picture. Reading integers here is not parity, it is
+     * copying a bug the format's own implementation does not have.
+     * Input: netpbm's plain `P1` and the `P4` it was made from -> Output: the
+     * same 12x2 raster from both.
      */
     #[test]
-    fn a_p1_sample_above_one_is_ink_and_the_header_carries_no_maxval() {
-        let above_one = Raster::ppm_load(b"P1\n2 2\n0 2 7 255\n").expect("P1 accepts 2, 7, 255");
+    fn a_plain_p1_with_unseparated_samples_decodes_the_way_netpbm_writes_it() {
+        let packed = Raster::ppm_load(b"P4\n12 2\n\xa5\x30\x5a\xc0").expect("the P4 source");
+        let plain = Raster::ppm_load(b"P1\n12 2\n101001010011\n010110101100\n")
+            .expect("netpbm's own plain P1 must decode");
+        assert_eq!((plain.width(), plain.height()), (12, 2));
+        assert_eq!(plain.format(), PixelFormat::Gray8);
         assert_eq!(
-            above_one.data(),
-            &[255, 0, 0, 0],
-            "every non-zero sample is ink, measured"
+            plain.data(),
+            packed.data(),
+            "the plain and packed spellings of one picture must agree"
         );
 
-        let stray_maxval =
-            Raster::ppm_load(b"P1\n2 2\n255\n0 1 1 0\n").expect("the stray 255 is a pixel");
+        // The other legal spelling, which ImageMagick writes and vips does
+        // read, as the control that this is about the separators and not
+        // about the picture.
+        let spaced =
+            Raster::ppm_load(b"P1\n12 2\n1 0 1 0 0 1 0 1 0 0 1 1\n0 1 0 1 1 0 1 0 1 1 0 0\n")
+                .expect("the space-separated spelling");
+        assert_eq!(spaced.data(), packed.data());
+    }
+
+    /**
+     * Tests that a `P1` sample that is not `0` or `1` is refused by name
+     * (issue #928).
+     *
+     * Reading characters makes this half **stricter** than vips, which is the
+     * direction that costs nothing: a character that is not `0` or `1` is not
+     * a legal plain-PBM sample, where vips coerces it. Measured on 8.18.6, a
+     * `P1` holding `0 x 1 0` comes back `255 255 0 255` and one holding
+     * `0 4294967296 1 0` comes back the same, because both tokens fail its
+     * integer parse and it substitutes zero, which is white. Neither of those
+     * files says what vips says it says.
+     *
+     * The refusal names the offending character so a caller can see which one
+     * it was, and a legal file beside it is the positive control that
+     * "refused" is not just what this path always does.
+     * Input: `P1 / 2 2 / 0 2 1 0` and a legal `0 1 1 0` -> Output: an error
+     * naming `'2'`, and a decoded raster.
+     */
+    #[test]
+    fn a_p1_sample_that_is_not_zero_or_one_is_refused_by_name() {
+        let err = Raster::ppm_load(b"P1\n2 2\n0 2 1 0\n").expect_err("2 is not a P1 sample");
+        let text = err.to_string();
+        assert!(
+            text.contains("'2'") && text.contains("not 0 or 1"),
+            "the refusal must name the character it refused, got {text}"
+        );
+
+        let legal = Raster::ppm_load(b"P1\n2 2\n0 1 1 0\n").expect("0 and 1 are legal");
+        assert_eq!(legal.data(), &[255, 0, 0, 255]);
+    }
+
+    /**
+     * Tests that a `P1` header carries no `maxval` field, from two directions
+     * (issues #919, #928).
+     *
+     * A `P1`/`P4` header stops at the height, so a file that wrongly carries a
+     * `maxval` has that value read as pixels. Two fixtures, because one of them
+     * alone leaves a reading open:
+     *
+     * A stray `1` is made of legal sample characters, so both readings decode
+     * and the answers differ: no `maxval` gives `0 255 0 0` (the samples are
+     * `1 0 1 1`) and a reader that consumed one would give `255 0 0 255` (the
+     * samples are `0 1 1 0`). The pictures are not each other's inverse, so
+     * this cannot pass by getting the polarity wrong as well.
+     *
+     * A stray `255` is refused on its `2`, which is not a legal plain-PBM
+     * sample. A reader that consumed a `maxval` would never have looked at
+     * that character at all, so the refusal itself is the assertion.
+     * Input: the two files above -> Output: `0 255 0 0`, and a refusal naming
+     * `'2'`.
+     */
+    #[test]
+    fn a_p1_bitmap_header_carries_no_maxval_field() {
+        let stray_one =
+            Raster::ppm_load(b"P1\n2 2\n1\n0 1 1 0\n").expect("the stray 1 is pixel data");
         assert_eq!(
-            stray_maxval.data(),
+            stray_one.data(),
             &[0, 255, 0, 0],
-            "a P1 header stops at the height, so the 255 is the first pixel \
-             and the trailing 0 falls off the end"
+            "the samples are 1 0 1 1, not the 0 1 1 0 a maxval reader would see"
+        );
+
+        let err = Raster::ppm_load(b"P1\n2 2\n255\n0 1 1 0\n")
+            .expect_err("the 2 of the stray 255 is not a sample");
+        assert!(
+            err.to_string().contains("'2'"),
+            "a maxval reader never reaches that character, got {err}"
         );
     }
 
