@@ -138,17 +138,25 @@
 //! * **Float is refused, matching vips.** `vips jp2ksave` on a `float` or
 //!   `double` image fails with `not an integer format`; measured, and
 //!   [`Raster::encode_jp2k`] refuses the float carriers rather than casting.
-//! * **A `colr` box is what makes a colour space specified.** The YCC
-//!   condition above is "bare codestream *and* subsampled", not "subsampled",
-//!   because a JP2 always carries a `colr` box and so is never unspecified by
-//!   construction. Measured on the same subsampled codestream wrapped three
-//!   ways: `EnumCS 16` gives `[128, 16, 240]` and no transform, `EnumCS 18`
-//!   gives `[255, 87, 0]` because the decoder has already undone it, and
-//!   `EnumCS 99` gives `[255, 87, 0]` in vips because an unrecognised enum
-//!   falls through to UNSPECIFIED and the subsampling turns the transform on.
-//!   That third one libviprs does not read at all: `hayro-jpeg2000` refuses a
-//!   `colr` box it does not recognise. It is a refusal rather than a wrong
-//!   picture, and it is issue #771.
+//! * **The `colr` box decides the inverse YCC, and `SIZ` decides it only when
+//!   the box does not.** The transform runs when the resolved colour space is
+//!   sYCC or e-YCC, and "resolved" means the box's enum where openjpeg
+//!   recognises one and `opj_j2k_read_siz`'s heuristic (three components with
+//!   the chroma pair subsampled) where it does not. Measured on 8.18.6 over
+//!   `chroma_sub_on.jp2`, whose chroma is halved on both axes, by rewriting
+//!   nothing but its `colr` box:
+//!
+//!   | box | `vips getpoint 0 0` | transform |
+//!   |---|---|---|
+//!   | `METH = 1`, sYCC, as committed | `4 1 241` | yes |
+//!   | `METH = 1`, sRGB | `29 248 110` | no |
+//!   | `METH = 2`, a profile | `4 1 241` | yes |
+//!
+//!   So a recognised non-YCC enum suppresses the heuristic and a profile box
+//!   does not, because a profile leaves the colour space exactly where `SIZ`
+//!   put it. This module asked `bare && subsampled` until #771, which is the
+//!   same answer as the rule above on every file whose enum the decoder
+//!   handled, and the wrong one on the third row.
 //! * **The interpretation comes from the `colr` box, not the band count.**
 //!   `jp2kload` reads the box's `EnumCS` and maps openjpeg's five recognised
 //!   values onto a tag; anything else falls through to UNSPECIFIED, where it
@@ -191,14 +199,20 @@
 //!   agree on where the image is and disagree only on how much of it there is.
 //!   Nothing `jp2ksave` writes reaches either, since it always starts at the
 //!   grid origin.
-//! * **A `colr` box this module cannot get past.** Three enumerated colour
-//!   spaces are still refused by the decoder where vips reads the file:
-//!   e-YCC (`EnumCS 24`, issue #848), anything openjpeg does not recognise
-//!   (issue #771), and CIELab (`EnumCS 14`), which also moves the pixels
-//!   rather than the label on the shapes that do decode (issue #849). All
-//!   three are `hayro-jpeg2000`'s colour-space resolution deciding more than
-//!   it should, so they are one upstream change and none of them is
-//!   reachable from here.
+//! * **The `colr` box does not reach the decoder unless the decoder gets it
+//!   right.** `hayro-jpeg2000` resolves the box itself, and on three kinds of
+//!   value that is a refusal or a conversion where `jp2kload` reads the file
+//!   and leaves the samples alone: an enum openjpeg does not recognise (#771),
+//!   e-YCC (#848), and CIELab, which also converts the pixels on the shapes
+//!   that do decode (#849). None of it is a property of the codestream, which
+//!   decodes perfectly well, so the enum is rewritten to sRGB on the way in
+//!   and this module keeps every decision the box makes: the interpretation,
+//!   and the inverse YCC.
+//!
+//!   Only the boxes the decoder gets wrong are rewritten. CMYK, sRGB,
+//!   greyscale and sYCC-over-three-components go through untouched, each of
+//!   them pinned by a committed fixture, so no file that decoded before this
+//!   hands the decoder different bytes.
 
 use std::path::Path;
 
@@ -641,9 +655,10 @@ fn encode_to_save(err: EncodeError) -> SaveError {
 ///
 /// `hayro-jpeg2000` reads the boxes too and reports none of what is in them
 /// beyond a colour space it could parse, so this module walks them again for
-/// four things it needs and cannot get otherwise: whether the file is a bare
-/// codestream (which is what makes the colour space unspecified, which is what
-/// turns the inverse YCC on), the `METH=2` ICC payload (which the decoder
+/// four things it needs and cannot get otherwise: the `colr` box's enumerated
+/// colour space (which decides the interpretation and the inverse YCC, and
+/// which the decoder must not be allowed to resolve itself), the `METH=2` ICC
+/// payload (which the decoder
 /// drops when it cannot parse it, and `icc_colr.jp2` deliberately cannot be
 /// parsed), the per-component sign bit and subsampling factors, and the tile
 /// geometry.
@@ -652,15 +667,13 @@ fn encode_to_save(err: EncodeError) -> SaveError {
 struct ContainerLayout {
     /// Offset of the `SOC` marker opening the contiguous codestream.
     codestream: usize,
-    /// True for a bare codestream, false for a JP2 box structure.
-    ///
-    /// This is the whole of the "unspecified colour space" test for the files
-    /// that reach it: a JP2 always carries a `colr` box, so a bare codestream
-    /// is the only shape whose colour space is unspecified by construction.
-    bare: bool,
     /// The payload of a `METH=2` `colr` box, which is an ICC profile, copied
     /// verbatim and unvalidated the way `jp2kload` copies it.
     icc: Option<Vec<u8>>,
+    /// Byte offset of the four `EnumCS` bytes inside the file, for the
+    /// neutralised copy [`decode`] hands the decoder. `None` whenever
+    /// [`ContainerLayout::enum_cs`] is `None`.
+    enum_cs_at: Option<usize>,
     /// The `EnumCS` of a `METH=1` `colr` box, which is what decides the
     /// interpretation for vips and now for this module too (#767).
     ///
@@ -791,28 +804,134 @@ impl ContainerLayout {
                     .map(|b| &bytes[b.start..b.end])
                     .collect();
                 icc = colr.iter().copied().find_map(icc_payload);
-                enum_cs = colr.iter().copied().find_map(enumerated_colour_space);
+                enum_cs = boxes.iter().filter(|b| &b.kind == b"colr").find_map(|b| {
+                    enumerated_colour_space(&bytes[b.start..b.end]).map(|cs| (cs, b.start + 3))
+                });
                 if icc.is_some() || enum_cs.is_some() {
                     break;
                 }
             }
             Ok(Self {
                 codestream,
-                bare: false,
                 icc,
-                enum_cs,
+                enum_cs_at: enum_cs.map(|(_, at)| at),
+                enum_cs: enum_cs.map(|(cs, _)| cs),
             })
         } else if bytes.starts_with(CODESTREAM_SIGNATURE) {
             Ok(Self {
                 codestream: 0,
-                bare: true,
                 icc: None,
+                enum_cs_at: None,
                 enum_cs: None,
             })
         } else {
             Err(container(
                 "the leading bytes are neither the JP2 signature box nor a SOC + SIZ pair",
             ))
+        }
+    }
+}
+
+#[cfg(feature = "jp2k")]
+impl ContainerLayout {
+    /// A copy of the file whose `METH = 1` `colr` box names a colour space the
+    /// decoder handles without deciding anything, or `None` when the file
+    /// already does.
+    ///
+    /// `hayro-jpeg2000` resolves the box itself, and on three of the values it
+    /// meets that is a refusal or a conversion where `jp2kload` reads the file
+    /// and leaves the samples alone (#771, #848, #849). Every decision the box
+    /// makes belongs to this module now, the interpretation since #767 and the
+    /// inverse YCC since #771, so the box is rewritten on the way in to say
+    /// only what the component count already says.
+    ///
+    /// Only the boxes the decoder gets wrong are rewritten, and
+    /// [`DECODER_SAFE_ENUMS`] is the closed set it gets right, each member
+    /// pinned by a committed fixture. Narrowing it that far is the point:
+    /// every file that decodes today hands the decoder byte-identical bytes
+    /// and comes out with the digest it already has, and only files that used
+    /// to be refused change route at all.
+    ///
+    /// sRGB is the neutral value for every component count, one included, and
+    /// that is measured rather than assumed: `hayro-jpeg2000` reconciles an
+    /// sRGB box against a one-component file by reporting `Gray` on its own,
+    /// so the rewrite cannot invent a channel. Choosing by component count
+    /// instead gets a palette wrong, where `SIZ` declares one component and
+    /// `pclr` expands it to three.
+    fn neutral_rewrite(&self, bytes: &[u8], header: &CodestreamHeader) -> Option<Vec<u8>> {
+        let at = self.enum_cs_at?;
+        if self.decoder_resolves_this_box(header) {
+            return None;
+        }
+        let mut copy = bytes.to_vec();
+        copy.get_mut(at..at + 4)?
+            .copy_from_slice(&ENUMCS_SRGB.to_be_bytes());
+        Some(copy)
+    }
+
+    /// Whether the decoder resolves this `colr` box the way `jp2kload` does,
+    /// so it can go through untouched.
+    ///
+    /// [`DECODER_SAFE_ENUMS`] is the set, with one condition on it: sYCC is
+    /// safe only over **three** components, because that is what its transform
+    /// reads. On any other count `hayro-jpeg2000` refuses with "failed to
+    /// convert from sYCC to RGB", which is the same shape as the e-YCC refusal
+    /// #848 filed, and vips's own answer there is the broken one, a three-band
+    /// header whose pixels never arrive.
+    ///
+    /// A file with no enum at all, a bare codestream or a `METH = 2` profile
+    /// box, has nothing to rewrite and nothing to get wrong, so it is safe by
+    /// construction.
+    fn decoder_resolves_this_box(&self, header: &CodestreamHeader) -> bool {
+        match self.enum_cs {
+            Some(ENUMCS_SYCC) => header.components.len() == 3,
+            Some(cs) => DECODER_SAFE_ENUMS.contains(&cs),
+            None => true,
+        }
+    }
+
+    /// Whether this module runs the inverse YCC itself, given the codestream's
+    /// `SIZ`.
+    ///
+    /// openjpeg's rule is that the transform runs when the resolved colour
+    /// space is sYCC or e-YCC, and "resolved" means the `colr` box's enum
+    /// where there is a recognised one and `opj_j2k_read_siz`'s heuristic
+    /// (three components with the chroma pair subsampled) where there is not.
+    /// Measured on 8.18.6 over `chroma_sub_on.jp2`, whose components are
+    /// subsampled, by rewriting only its `colr` box:
+    ///
+    /// | box | `vips getpoint 0 0` | transform |
+    /// |---|---|---|
+    /// | `METH = 1`, sYCC (the file as committed) | `4 1 241` | yes |
+    /// | `METH = 1`, sRGB | `29 248 110` | **no** |
+    /// | `METH = 2`, a profile | `4 1 241` | **yes** |
+    ///
+    /// So a recognised non-YCC enum suppresses the subsampling heuristic, and
+    /// a profile box does not, because it leaves the colour space exactly
+    /// where `SIZ` put it. Before #771 this module asked `bare && subsampled`,
+    /// which got the third row wrong.
+    ///
+    /// sYCC is the one case the decoder still handles, since its box is not
+    /// rewritten, so this answers `false` there and lets it. e-YCC is
+    /// rewritten, so the transform becomes this module's job.
+    fn runs_inverse_ycc(&self, header: &CodestreamHeader) -> bool {
+        // `sycc_to_rgb` reads three planes. vips reaches the same guard from
+        // the other side: on a one-component file tagged sYCC it produces a
+        // three-band header the pixels never fill, and any read of one fails.
+        if header.components.len() != 3 {
+            return false;
+        }
+        match self.enum_cs {
+            // Rewritten to sRGB on the way in, so nothing else will do it.
+            Some(ENUMCS_EYCC) => true,
+            // Left alone at three components, so the decoder does it, as it
+            // always has. Any other count returned above.
+            Some(ENUMCS_SYCC) => false,
+            // A recognised space that is not YCC suppresses the heuristic.
+            Some(cs) if DECODER_SAFE_ENUMS.contains(&cs) => false,
+            // Unspecified: a bare codestream, a profile box, or an enum nobody
+            // recognises. `SIZ` decides, which is openjpeg's rule.
+            _ => header.chroma_subsampled(),
         }
     }
 }
@@ -1113,7 +1232,33 @@ fn decode(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
         }
     }
 
-    let image = Jp2kImage::new(bytes, &DecodeSettings::default()).map_err(decode_error)?;
+    // What the decoder is allowed to see. `hayro-jpeg2000` resolves the `colr`
+    // box itself and refuses or converts on what it cannot map: an unrecognised
+    // enum (#771), e-YCC (#848) and CIELab (#849) all stop a decode that the
+    // codestream is perfectly capable of. None of that is the codestream's
+    // doing, and none of it is what `jp2kload` does, so the enum is replaced
+    // with a neutral one before the file goes in. This module already owns
+    // every decision the box makes: the interpretation since #767, and the
+    // inverse YCC below.
+    //
+    // Neutralised rather than stripped, because the boxes around it carry
+    // things the decode genuinely needs: `pclr` and `cmap` for a palette,
+    // `cdef` for alpha. Handing over the bare codestream would lose all three.
+    let neutralised;
+    let for_decoder: &[u8] = match layout.neutral_rewrite(bytes, &header) {
+        Some(copy) => {
+            // The one allocation this function makes that is not the raster,
+            // so it goes through the same budget. It is a copy of an input
+            // already resident, and JPEG 2000 files are small against the
+            // rasters they decode to, but "small" is not a bound and the
+            // caller set one.
+            limits.check_alloc("JPEG 2000 container rewrite", copy.len() as u64)?;
+            neutralised = copy;
+            &neutralised
+        }
+        None => bytes,
+    };
+    let image = Jp2kImage::new(for_decoder, &DecodeSettings::default()).map_err(decode_error)?;
     let (width, height) = (image.width(), image.height());
     // Two parsers read the same `SIZ`, and the allocation budget below is
     // spent on this one's answer while the sign bit and the subsampling
@@ -1201,7 +1346,7 @@ fn decode(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
     }
 
     let mut buffer = vec![0u8; samples * element_bytes as usize];
-    let ycc = layout.bare && header.chroma_subsampled();
+    let ycc = layout.runs_inverse_ycc(&header);
     if ycc {
         // `jp2kload` runs OpenJPEG's `sycc_to_rgb` over the component values
         // at their own precision, before the left-justification, so this does
@@ -1426,6 +1571,37 @@ fn interpretation(colour: &hayro_jpeg2000::ColorSpace, element_bytes: u64) -> In
     }
 }
 
+/// `EnumCS` for CMYK, the one enumerated space whose tag the element width
+/// does not change.
+#[cfg(feature = "jp2k")]
+const ENUMCS_CMYK: u32 = 12;
+/// `EnumCS` for sRGB, and the neutral value handed to the decoder for a file
+/// with three or more components.
+#[cfg(feature = "jp2k")]
+const ENUMCS_SRGB: u32 = 16;
+/// `EnumCS` for greyscale, and the neutral value for one or two components.
+#[cfg(feature = "jp2k")]
+const ENUMCS_GREY: u32 = 17;
+/// `EnumCS` for sYCC, which turns the inverse YCC on.
+#[cfg(feature = "jp2k")]
+const ENUMCS_SYCC: u32 = 18;
+/// `EnumCS` for e-YCC, which vips answers exactly as it answers sYCC.
+#[cfg(feature = "jp2k")]
+const ENUMCS_EYCC: u32 = 24;
+
+/// The enumerated colour spaces `hayro-jpeg2000` resolves the way `jp2kload`
+/// does, so their `colr` box reaches the decoder untouched.
+///
+/// A closed set on purpose, and every member is pinned by a committed
+/// fixture: CMYK by `cmyk_lossless.jp2`, sRGB by `rgb_lossless.jp2`,
+/// `rgba_lossless.jp2` and `chroma_sub_off.jp2`, greyscale by
+/// `grey_tile8.jp2`, sYCC by `chroma_sub_on.jp2` and
+/// `chroma_tiny_sub_on.jp2`. Everything outside it is rewritten by
+/// [`ContainerLayout::neutral_rewrite`], which is what keeps #771, #848 and
+/// #849 from being a change to any file that already decoded.
+#[cfg(feature = "jp2k")]
+const DECODER_SAFE_ENUMS: [u32; 4] = [ENUMCS_CMYK, ENUMCS_SRGB, ENUMCS_GREY, ENUMCS_SYCC];
+
 /// The interpretation an enumerated `colr` colour space maps to, or `None`
 /// when openjpeg does not recognise the value.
 ///
@@ -1449,18 +1625,17 @@ fn interpretation(colour: &hayro_jpeg2000::ColorSpace, element_bytes: u64) -> In
 fn enumerated_interpretation(enumcs: u32, element_bytes: u64) -> Option<Interpretation> {
     let wide = element_bytes > 1;
     Some(match enumcs {
-        // 12 is CMYK, and it is the one answer the element width does not
-        // change: vips reports `cmyk` for the 8-bit and the 16-bit file alike.
-        12 => Interpretation::Cmyk,
-        // 17 is greyscale. Three components tagged with it come back `b-w`,
-        // which is the row that proves the band count is not consulted.
-        17 if wide => Interpretation::Grey16,
-        17 => Interpretation::Bw,
-        // 16 sRGB, 18 sYCC and 24 e-YCC all land on the RGB tag. The last two
-        // also turn the inverse YCC on, which is the decoder's job and not
-        // this function's.
-        16 | 18 | 24 if wide => Interpretation::Rgb16,
-        16 | 18 | 24 => Interpretation::Srgb,
+        // CMYK is the one answer the element width does not change: vips
+        // reports `cmyk` for the 8-bit and the 16-bit file alike.
+        ENUMCS_CMYK => Interpretation::Cmyk,
+        // Greyscale. Three components tagged with it come back `b-w`, which is
+        // the row that proves the band count is not consulted.
+        ENUMCS_GREY if wide => Interpretation::Grey16,
+        ENUMCS_GREY => Interpretation::Bw,
+        // sRGB, sYCC and e-YCC all land on the RGB tag. The last two also turn
+        // the inverse YCC on, which `decode` decides, not this function.
+        ENUMCS_SRGB | ENUMCS_SYCC | ENUMCS_EYCC if wide => Interpretation::Rgb16,
+        ENUMCS_SRGB | ENUMCS_SYCC | ENUMCS_EYCC => Interpretation::Srgb,
         _ => return None,
     })
 }
@@ -2388,19 +2563,6 @@ mod tests {
         assert_eq!(decoded("rgb_lossless.jp2").width(), 4);
     }
 
-    /**
-     * The image origin is the one geometry this loader and vips disagree
-     * about, and it is pinned so the disagreement is a decision on the
-     * record rather than a surprise (issue #766).
-     * `origin57.j2k` declares `Xsiz = 37, XOsiz = 5, Ysiz = 31, YOsiz = 7`.
-     * The standard's image is `Xsiz - XOsiz` by `Ysiz - YOsiz`, which is
-     * 32x24 and is what this loader and `hayro-jpeg2000` both report. vips
-     * reports 27x17 with `xoffset = -5`, which is that size less the origin a
-     * second time.
-     * Input: `origin57.j2k` -> Output: 32x24, and explicitly not vips's
-     * 27x17.
-     */
-
     /// Rewrite a JP2's `METH = 1` `colr` box to name `enumcs`, leaving every
     /// other byte alone.
     ///
@@ -2473,67 +2635,33 @@ mod tests {
     #[cfg(feature = "jp2k")]
     fn the_colr_box_enum_decides_the_interpretation_not_the_component_count() {
         // (enum, what vipsheader printed for 3 components 8-bit, for 1
-        // component 8-bit, and for 3 components 16-bit). `None` is a cell
-        // `hayro-jpeg2000` refuses before the tag is reached; each one is an
-        // issue of its own and they are asserted separately below.
-        let cells: &[(
-            u32,
-            Option<Interpretation>,
-            Option<Interpretation>,
-            Option<Interpretation>,
-        )] = &[
-            (
-                12,
-                Some(Interpretation::Cmyk),
-                Some(Interpretation::Cmyk),
-                Some(Interpretation::Cmyk),
-            ),
-            (
-                14,
-                Some(Interpretation::Srgb),
-                None,
-                Some(Interpretation::Rgb16),
-            ),
-            (
-                16,
-                Some(Interpretation::Srgb),
-                Some(Interpretation::Srgb),
-                Some(Interpretation::Rgb16),
-            ),
-            (
-                17,
-                Some(Interpretation::Bw),
-                Some(Interpretation::Bw),
-                Some(Interpretation::Grey16),
-            ),
-            (
-                18,
-                Some(Interpretation::Srgb),
-                None,
-                Some(Interpretation::Rgb16),
-            ),
+        // component 8-bit, and for 3 components 16-bit). Every cell decodes,
+        // which it did not before: the three that used to be refusals were
+        // #771, #848 and #849, so a refusal anywhere here is now a failure
+        // rather than a table entry.
+        use Interpretation::{Bw, Cmyk, Grey16, Rgb16, Srgb};
+        let cells: &[(u32, Interpretation, Interpretation, Interpretation)] = &[
+            (12, Cmyk, Cmyk, Cmyk),
+            // CIELab, which openjpeg does not recognise, so vips guesses from
+            // the band count exactly as it does for the undefined 99.
+            (14, Srgb, Bw, Rgb16),
+            // sRGB, sYCC and e-YCC on one component are the combination vips
+            // gets wrong: it reports `3 bands, srgb` and then cannot read a
+            // pixel. This keeps the one real band and takes the tag, which is
+            // `a_one_component_file_tagged_srgb_keeps_its_band_and_takes_the_tag`.
+            (16, Srgb, Srgb, Rgb16),
+            (17, Bw, Bw, Grey16),
+            (18, Srgb, Srgb, Rgb16),
             // 20 (ROMM-RGB) and 21 (YPbPr) are registered JPEG 2000 values
-            // that openjpeg does not map, so vips takes the UNSPECIFIED arm
-            // and guesses from the band count. They are in the table because
-            // they are the only unrecognised enums `hayro-jpeg2000` reads
-            // rather than refuses, which makes them the only cells where the
-            // band-count fallback is observable on **one** component. Measured
-            // on 8.18.6 with a hand-built minimal JP2, the same wrapper the
-            // test uses, which vips reads exactly as it reads the capture's.
-            (
-                20,
-                Some(Interpretation::Srgb),
-                Some(Interpretation::Bw),
-                Some(Interpretation::Rgb16),
-            ),
-            (
-                21,
-                Some(Interpretation::Srgb),
-                Some(Interpretation::Bw),
-                Some(Interpretation::Rgb16),
-            ),
-            (24, None, None, None),
-            (99, None, None, None),
+            // openjpeg does not map, so vips takes the UNSPECIFIED arm and
+            // guesses from the band count. They are in the table because they
+            // were the only unrecognised enums `hayro-jpeg2000` read rather
+            // than refused, which made them the only cells where the
+            // band-count fallback was observable on **one** component.
+            (20, Srgb, Bw, Rgb16),
+            (21, Srgb, Bw, Rgb16),
+            (24, Srgb, Srgb, Rgb16),
+            (99, Srgb, Bw, Rgb16),
         ];
 
         let wide = Raster::new(
@@ -2548,7 +2676,7 @@ mod tests {
 
         let mut checked = 0;
         for (enumcs, three_8, one_8, three_16) in cells {
-            let cases: [(&str, Vec<u8>, Option<Interpretation>); 3] = [
+            let cases: [(&str, Vec<u8>, Interpretation); 3] = [
                 (
                     "3 components, 8-bit",
                     retagged(fixture("rgb_lossless.jp2"), *enumcs),
@@ -2562,28 +2690,21 @@ mod tests {
                 ("3 components, 16-bit", retagged(&wide, *enumcs), *three_16),
             ];
             for (shape, bytes, want) in cases {
-                match (decode_jp2k(&bytes, DecodeLimits::default()), want) {
-                    (Ok(raster), Some(want)) => {
-                        assert_eq!(
-                            raster.interpretation(),
-                            want,
-                            "EnumCS {enumcs} on {shape}: vips reports {want:?}"
-                        );
-                        checked += 1;
-                    }
-                    (Ok(raster), None) => panic!(
-                        "EnumCS {enumcs} on {shape} now decodes as {:?}; the decoder used to \
-                         refuse it, so #848 or #849 is fixed and this table is stale",
-                        raster.interpretation()
-                    ),
-                    (Err(_), None) => {}
-                    (Err(e), Some(want)) => {
-                        panic!("EnumCS {enumcs} on {shape} must decode as {want:?}, got {e}")
-                    }
-                }
+                let raster = decode_jp2k(&bytes, DecodeLimits::default())
+                    .unwrap_or_else(|e| panic!("EnumCS {enumcs} on {shape} must decode, got {e}"));
+                assert_eq!(
+                    raster.interpretation(),
+                    want,
+                    "EnumCS {enumcs} on {shape}: vips reports {want:?}"
+                );
+                checked += 1;
             }
         }
-        assert_eq!(checked, 19, "the sweep has to reach every readable cell");
+        assert_eq!(
+            checked, 27,
+            "the sweep has to reach every cell, and after #771, #848 and #849 every one \
+             of them decodes"
+        );
     }
 
     /**
@@ -2640,6 +2761,178 @@ mod tests {
             .expect("a METH=1 box decodes");
         assert_eq!(enumerated.interpretation(), Interpretation::Bw);
         assert_eq!(enumerated.icc_profile(), None);
+    }
+
+    /**
+     * A `colr` box the decoder cannot resolve no longer refuses the file
+     * (issues #771, #848, #849).
+     * Three enumerated colour spaces used to stop the decode dead where
+     * `jp2kload` reads the file and hands back pixels: anything openjpeg does
+     * not recognise (#771), e-YCC (#848), and CIELab on one component (#849).
+     * All three are `hayro-jpeg2000` resolving the `colr` box and refusing what
+     * it cannot map, and none of them is a property of the codestream, which
+     * decodes perfectly well.
+     * Every `want` here is `vips getpoint` on 8.18.6 over the same bytes, and
+     * the shape of the fix is that the enum never reaches the decoder at all:
+     * `crate::jp2k` reads it for the interpretation (#767) and for the inverse
+     * YCC, and hands the decoder a neutral one.
+     * Input: `rgb_lossless.jp2` and a wrapped `depth8u.j2k` at the four enums
+     * that used to refuse -> Output: a decode, with vips's pixel at (0, 0).
+     */
+    #[test]
+    #[cfg(feature = "jp2k")]
+    fn a_colr_box_the_decoder_cannot_resolve_no_longer_refuses_the_file() {
+        // (enum, vips's three bands at 0,0 on the retagged rgb_lossless.jp2,
+        // vips's one band at 0,0 on the wrapped depth8u.j2k).
+        let cases: &[(u32, [u8; 3], u8)] = &[
+            // Unrecognised, so vips takes UNSPECIFIED and touches nothing.
+            (99, [0, 0, 0], 0),
+            (20, [0, 0, 0], 0),
+            // e-YCC, which vips maps onto the same answer as sYCC, transform
+            // included: the 135 in the middle band is the inverse YCC running.
+            (24, [0, 135, 0], 0),
+            // CIELab, which openjpeg does not recognise either, so vips leaves
+            // the samples alone where the decoder used to convert them.
+            (14, [0, 0, 0], 0),
+        ];
+
+        for (enumcs, three, one) in cases {
+            let raster = decode_jp2k(
+                &retagged(fixture("rgb_lossless.jp2"), *enumcs),
+                DecodeLimits::default(),
+            )
+            .unwrap_or_else(|e| panic!("EnumCS {enumcs} on three components must decode: {e}"));
+            assert_eq!(
+                &raster.data()[..3],
+                three,
+                "EnumCS {enumcs}: vips reads {three:?} at (0, 0)"
+            );
+
+            let raster = decode_jp2k(
+                &wrapped(fixture("depth8u.j2k"), 5, 1, 1, 8, *enumcs),
+                DecodeLimits::default(),
+            )
+            .unwrap_or_else(|e| panic!("EnumCS {enumcs} on one component must decode: {e}"));
+            assert_eq!(
+                raster.data()[0],
+                *one,
+                "EnumCS {enumcs}: vips reads {one} at (0, 0)"
+            );
+        }
+    }
+
+    /**
+     * The inverse YCC follows the `colr` box's enum and the subsampling
+     * together, and the pixels stay vips's (issues #848, #771).
+     * This is the half of the fix that could go wrong quietly. The enum stops
+     * reaching the decoder, so `hayro-jpeg2000` stops running its own sYCC
+     * transform, and this module has to run it instead or a subsampled sYCC
+     * file comes back untransformed. The condition is openjpeg's: sYCC or
+     * e-YCC by enum, or an unspecified colour space over subsampled chroma.
+     * Every `want` is `vips getpoint FILE 0 0` on 8.18.6. The three lossy
+     * fixtures carry the tolerance their own pins carry, because the 9/7
+     * wavelet is float-specified; the tolerance is nowhere near wide enough to
+     * hide the failure this guards, since the same file read untransformed
+     * comes back at 30 in the first band against vips's 4.
+     * Input: the five container shapes that bracket the rule -> Output:
+     * transformed where vips transforms and not where it does not.
+     */
+    #[test]
+    #[cfg(feature = "jp2k")]
+    fn the_inverse_ycc_follows_the_enum_and_the_subsampling_together() {
+        fn close(got: &[u8], want: [u8; 3], tolerance: i32, what: &str) {
+            for (band, want) in want.iter().enumerate() {
+                let delta = i32::from(got[band]) - i32::from(*want);
+                assert!(
+                    delta.abs() <= tolerance,
+                    "{what}: band {band} is {} where vips reads {want}, off by {delta} \
+                     against a tolerance of {tolerance}",
+                    got[band]
+                );
+            }
+        }
+
+        // A bare codestream with subsampled chroma: unspecified colour space,
+        // so the SIZ heuristic turns it on. Reversible, so this one is exact.
+        assert_eq!(&decoded("sub420.j2k").data()[..3], &[255, 87, 0]);
+
+        // The same subsampling inside a JP2 tagged sYCC, which is where the
+        // enum has to carry the decision now.
+        close(
+            decoded("chroma_sub_on.jp2").data(),
+            [4, 1, 241],
+            3,
+            "chroma_sub_on.jp2",
+        );
+        close(
+            decoded("chroma_tiny_sub_on.jp2").data(),
+            [75, 75, 75],
+            3,
+            "chroma_tiny_sub_on.jp2",
+        );
+
+        // A JP2 tagged sRGB with no subsampling: no transform either way.
+        close(
+            decoded("chroma_sub_off.jp2").data(),
+            [0, 1, 255],
+            3,
+            "chroma_sub_off.jp2",
+        );
+
+        // An unsubsampled JP2 tagged sYCC: the enum alone turns it on, which
+        // the container shape cannot say. Lossless fixture, so exact.
+        let sycc = decode_jp2k(
+            &retagged(fixture("rgb_lossless.jp2"), 18),
+            DecodeLimits::default(),
+        )
+        .expect("decodes");
+        assert_eq!(&sycc.data()[..3], &[0, 135, 0]);
+
+        // And the control that says the enum is doing it rather than the retag
+        // machinery: the same file at sRGB is untouched.
+        let srgb = decode_jp2k(
+            &retagged(fixture("rgb_lossless.jp2"), 16),
+            DecodeLimits::default(),
+        )
+        .expect("decodes");
+        assert_eq!(&srgb.data()[..3], &[0, 0, 0]);
+
+        // The two rows that pin the *fallback*, both measured on 8.18.6 by
+        // rewriting nothing but `chroma_sub_on.jp2`'s `colr` box. They are the
+        // pair the old `bare && subsampled` condition could not tell apart,
+        // and it got the second one wrong.
+        //
+        //   METH = 1, sRGB      vips reads `29 248 110`, no transform
+        //   METH = 2, a profile vips reads `4 1 241`, transform
+        //
+        // A profile box leaves the colour space exactly where `SIZ` put it, so
+        // the subsampling still decides; a recognised non-YCC enum overrides
+        // it. Nothing about the codestream differs between them.
+        let mut as_srgb = fixture("chroma_sub_on.jp2").to_vec();
+        let at = as_srgb
+            .windows(4)
+            .position(|w| w == b"colr")
+            .expect("a colr box");
+        as_srgb[at + 7..at + 11].copy_from_slice(&16u32.to_be_bytes());
+        close(
+            decode_jp2k(&as_srgb, DecodeLimits::default())
+                .expect("decodes")
+                .data(),
+            [29, 248, 110],
+            3,
+            "chroma_sub_on.jp2 retagged sRGB",
+        );
+
+        let mut as_profile = fixture("chroma_sub_on.jp2").to_vec();
+        as_profile[at + 4] = 2; // METH = 2, so the payload is a profile
+        close(
+            decode_jp2k(&as_profile, DecodeLimits::default())
+                .expect("decodes")
+                .data(),
+            [4, 1, 241],
+            3,
+            "chroma_sub_on.jp2 as a METH=2 profile box",
+        );
     }
 
     /**
@@ -2717,6 +3010,18 @@ mod tests {
         );
     }
 
+    /**
+     * The image origin is the one geometry this loader and vips disagree
+     * about, and it is pinned so the disagreement is a decision on the
+     * record rather than a surprise (issue #766).
+     * `origin57.j2k` declares `Xsiz = 37, XOsiz = 5, Ysiz = 31, YOsiz = 7`.
+     * The standard's image is `Xsiz - XOsiz` by `Ysiz - YOsiz`, which is
+     * 32x24 and is what this loader and `hayro-jpeg2000` both report. vips
+     * reports 27x17 with `xoffset = -5`, which is that size less the origin a
+     * second time.
+     * Input: `origin57.j2k` -> Output: 32x24, and explicitly not vips's
+     * 27x17.
+     */
     #[test]
     #[cfg(feature = "jp2k")]
     fn the_image_origin_is_the_one_divergence_on_geometry() {
@@ -2960,44 +3265,66 @@ mod tests {
     }
 
     /**
-     * Pins the two container shapes apart, which is the whole of the
-     * "unspecified colour space" test the inverse YCC hangs off: a JP2
-     * always carries a `colr` box and a bare codestream never does, so
-     * `bare` is what says whether the colour space is unspecified.
-     * Without this, a JP2 whose components happen to be subsampled would
-     * have the YCC transform run over pixels the `colr` box already
-     * described: `chroma_sub_on.jp2` is exactly that file, and it is the
-     * control here.
-     * Input: `sub420.j2k` and `chroma_sub_on.jp2` -> Output: subsampled in
-     * both, bare in only one.
+     * Pins the rule that replaced "bare codestream and subsampled" as the
+     * inverse-YCC condition, at the level of the two predicates rather than
+     * the pixels (issues #771, #848).
+     * `layout.bare` used to be the whole of the "unspecified colour space"
+     * test, on the reasoning that a JP2 always carries a `colr` box. That is
+     * true and it is not the same question: a `METH = 2` profile box carries
+     * no colour space either, and vips transforms such a file (measured, see
+     * `ContainerLayout::runs_inverse_ycc`). The two predicates are asserted
+     * here directly because the pixel-level test cannot tell "the decoder did
+     * it" from "this module did it", and getting that split wrong applies the
+     * transform twice or not at all.
+     * Input: the same subsampled codestream in four containers -> Output: who
+     * does the transform in each.
      */
     #[test]
     #[cfg(feature = "jp2k")]
-    fn only_a_bare_codestream_counts_as_an_unspecified_colour_space() {
-        let bare = fixture("sub420.j2k");
-        let layout = ContainerLayout::parse(bare).expect("container");
-        assert!(layout.bare);
-        assert_eq!(layout.codestream, 0);
-        let header = CodestreamHeader::parse(&bare[layout.codestream..]).expect("codestream");
-        assert!(header.chroma_subsampled());
+    fn who_runs_the_inverse_ycc_follows_the_colr_box() {
+        fn layout_and_header(bytes: &[u8]) -> (ContainerLayout, CodestreamHeader) {
+            let layout = ContainerLayout::parse(bytes).expect("container");
+            let header = CodestreamHeader::parse(&bytes[layout.codestream..]).expect("codestream");
+            (layout, header)
+        }
 
-        // The control, and the reason `bare` is half the condition rather
-        // than the subsampling being the whole of it: this fixture is
-        // subsampled in exactly the same way and must NOT get the transform,
-        // because its colr box already says sYCC and the decoder has already
-        // undone it. Running the transform here would apply it twice.
-        let boxed = fixture("chroma_sub_on.jp2");
-        let layout = ContainerLayout::parse(boxed).expect("container");
-        assert!(
-            !layout.bare,
-            "a JP2 carries a colr box, so its colour space is not unspecified"
-        );
-        let header = CodestreamHeader::parse(&boxed[layout.codestream..]).expect("codestream");
-        assert!(
-            header.chroma_subsampled(),
-            "the subsampling alone is not what turns the transform on: this fixture has \
-             it and must not get it"
-        );
+        // A bare codestream: no box, so `SIZ` decides and this module runs it.
+        let (layout, header) = layout_and_header(fixture("sub420.j2k"));
+        assert_eq!(layout.enum_cs, None);
+        assert!(header.chroma_subsampled());
+        assert!(layout.decoder_resolves_this_box(&header));
+        assert!(layout.runs_inverse_ycc(&header));
+
+        // The same subsampling under a sYCC box: the decoder handles that one,
+        // so its bytes go through untouched and this module must NOT transform
+        // as well, or the file gets it twice.
+        let (layout, header) = layout_and_header(fixture("chroma_sub_on.jp2"));
+        assert_eq!(layout.enum_cs, Some(18));
+        assert!(header.chroma_subsampled());
+        assert!(layout.decoder_resolves_this_box(&header));
+        assert!(!layout.runs_inverse_ycc(&header));
+
+        // e-YCC means the same thing to vips and the decoder refuses it, so
+        // the box is rewritten and the transform becomes this module's job.
+        let eycc = retagged(fixture("chroma_sub_on.jp2"), 24);
+        let (layout, header) = layout_and_header(&eycc);
+        assert!(!layout.decoder_resolves_this_box(&header));
+        assert!(layout.runs_inverse_ycc(&header));
+
+        // A recognised non-YCC enum suppresses the subsampling heuristic
+        // entirely: nobody transforms, even though `SIZ` looks like YCC.
+        let srgb = retagged(fixture("chroma_sub_on.jp2"), 16);
+        let (layout, header) = layout_and_header(&srgb);
+        assert!(header.chroma_subsampled());
+        assert!(layout.decoder_resolves_this_box(&header));
+        assert!(!layout.runs_inverse_ycc(&header));
+
+        // And an unrecognised one does not, so `SIZ` decides again. This is
+        // the pair that says the enum is consulted rather than merely present.
+        let unknown = retagged(fixture("chroma_sub_on.jp2"), 99);
+        let (layout, header) = layout_and_header(&unknown);
+        assert!(!layout.decoder_resolves_this_box(&header));
+        assert!(layout.runs_inverse_ycc(&header));
     }
 
     /**
@@ -3450,12 +3777,14 @@ mod tests {
      * `[128, 16, 240]` and no transform, `EnumCS 18` gives `[255, 87, 0]` and
      * the inverse YCC, and `EnumCS 99` also gives `[255, 87, 0]`, because an
      * unrecognised enum falls through to UNSPECIFIED where the subsampling
-     * turns the transform on. libviprs matches the first two and **refuses**
-     * the third, because `hayro-jpeg2000` will not parse a `colr` box it does
-     * not recognise. That is a refusal rather than a wrong picture, and it is
-     * issue #771.
-     * Input: three hand-wrapped JP2s -> Output: two decodes matching vips and
-     * one typed refusal.
+     * turns the transform on. libviprs used to match the first two and
+     * **refuse** the third, because `hayro-jpeg2000` will not parse a `colr`
+     * box it does not recognise; #771 fixed that by keeping the enum away from
+     * the decoder, and the third row is now the one that proves the
+     * replacement rule works, since the transform it needs can only come from
+     * `SIZ`.
+     * Input: three hand-wrapped JP2s -> Output: three decodes, each matching
+     * vips.
      */
     #[test]
     #[cfg(feature = "jp2k")]
@@ -3509,13 +3838,26 @@ mod tests {
             );
         }
 
-        // EnumCS 99, not a defined value: vips reads it and this does not.
-        let err = decode_jp2k(&wrap(99), DecodeLimits::default())
-            .expect_err("hayro-jpeg2000 will not parse a colr box it does not recognise");
-        assert!(
-            matches!(err, SourceError::Jp2k(Jp2kError::Decode { .. })),
-            "issue #771: this is a refusal and not a wrong picture: {err:?}"
-        );
+        // EnumCS 99, not a defined value: UNSPECIFIED, so the subsampling in
+        // `SIZ` is the only thing that can turn the transform on, and it has
+        // to (issue #771). This is the row the decoder used to refuse outright,
+        // and it is the one that says the replacement rule is doing the work
+        // rather than the enum having been quietly honoured: 99 names nothing,
+        // so the only route to `[255, 87, 0]` is through `SIZ`.
+        let unknown = decode_jp2k(&wrap(99), DecodeLimits::default())
+            .expect("an unrecognised colr box must not stop the codestream decoding");
+        let got = &samples(&unknown)[..3];
+        for (band, (mine, want)) in got.iter().zip([255u32, 87, 0].iter()).enumerate() {
+            assert!(
+                mine.abs_diff(*want) <= 1,
+                "band {band}: {mine} against vips's {want}"
+            );
+        }
+
+        // And the control that keeps that from being "everything gets the
+        // transform": the sRGB row above is the same codestream, subsampled in
+        // exactly the same way, and must stay untransformed.
+        assert_eq!(&samples(&srgb)[..3], &[128, 16, 240]);
     }
 
     /**
@@ -3738,7 +4080,7 @@ mod tests {
     fn a_palette_is_where_siz_and_the_decoded_components_legitimately_disagree() {
         /// Wrap `depth8u.j2k` in a JP2 with a 256-entry, 3-column palette
         /// whose entries are `depth` bits wide.
-        fn palettised(depth: u8) -> Vec<u8> {
+        fn palettised(depth: u8, enumcs: u32) -> Vec<u8> {
             fn boxed(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
                 let mut out = ((payload.len() + 8) as u32).to_be_bytes().to_vec();
                 out.extend_from_slice(kind);
@@ -3768,7 +4110,7 @@ mod tests {
             ihdr.extend_from_slice(&1u16.to_be_bytes()); // components
             ihdr.extend_from_slice(&[7, 7, 1, 0]);
             let mut colr = vec![1, 0, 0];
-            colr.extend_from_slice(&16u32.to_be_bytes()); // EnumCS 16, sRGB
+            colr.extend_from_slice(&enumcs.to_be_bytes());
 
             let mut header = boxed(b"ihdr", &ihdr);
             header.extend_from_slice(&boxed(b"colr", &colr));
@@ -3787,7 +4129,7 @@ mod tests {
 
         // The 8-bit palette: one component in SIZ, three bands out, and vips's
         // pixels.
-        let bytes = palettised(8);
+        let bytes = palettised(8, 16);
         let layout = ContainerLayout::parse(&bytes).expect("container");
         let header = CodestreamHeader::parse(&bytes[layout.codestream..]).expect("codestream");
         assert_eq!(
@@ -3804,9 +4146,36 @@ mod tests {
             "the band count comes off the decoder because SIZ cannot see the palette"
         );
 
+        // The same palette under a `colr` box nobody recognises, which is the
+        // case that says why #771's rewrite neutralises to **sRGB** and not to
+        // the greyscale a one-component `SIZ` would suggest. The palette turns
+        // one component into three, so a greyscale neutral would hand the
+        // decoder a colour space with one channel and the decode would come
+        // back `BandCountMismatch`.
+        //
+        // vips is broken here, measured on 8.18.6: it reports
+        // `5x1 uchar, 1 band, b-w` and then any pixel read fails with
+        // "decoded image does not match container", because it guesses the
+        // interpretation from the component count **before** the palette. This
+        // keeps the three real bands and reads them, which is the same call
+        // #767 made for the one-component sRGB file.
+        let unknown_enum = decode_jp2k(&palettised(8, 99), DecodeLimits::default())
+            .expect("an unrecognised colr box must not cost a palettised file its palette");
+        assert_eq!(unknown_enum.format(), PixelFormat::Rgb8);
+        assert_eq!(
+            samples(&unknown_enum)[..9],
+            samples(&raster)[..9],
+            "the colr box does not touch the palette, so the samples are the same nine"
+        );
+        assert_eq!(
+            unknown_enum.interpretation(),
+            Interpretation::Srgb,
+            "unrecognised, so the band count decides, and it is three after the palette"
+        );
+
         // The 16-bit palette: wider than the index SIZ declared, so the
         // carrier the frame was priced for cannot hold it.
-        let err = decode_jp2k(&palettised(16), DecodeLimits::default())
+        let err = decode_jp2k(&palettised(16, 16), DecodeLimits::default())
             .expect_err("16-bit palette entries do not fit the 8-bit carrier SIZ priced");
         let SourceError::Jp2k(Jp2kError::PrecisionWiderThanDeclared {
             component,
