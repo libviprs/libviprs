@@ -803,6 +803,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The two frame-buffer prices in `decode_jxl` are pinned as two checks**
+  (issue #901). The loader prices the declared frame before feeding any
+  frame data and prices the stacked roll after the keyframe count is known,
+  and the #748 mutation sweep found that charging one byte per sample in the
+  **first** of them left the whole suite green.
+
+  Nothing was wrong with the code. For a single-page file the two prices are
+  the same product, so an under-charged pre-check leaves the second refusing
+  the identical file at the identical threshold with the identical error, and
+  every budget fixture in the module was single-page.
+
+  `tests/jxl_frame_price.rs` uses a two-page 16-bit fixture, sixteen bits so
+  a byte-per-sample mutation changes the product at all and two pages so the
+  two products differ. The checks then answer at different budgets and report
+  different geometry, one byte apart:
+
+  | budget | refused by | geometry reported |
+  |---|---|---|
+  | 131071 | the frame pre-check | 256x256 |
+  | 131072 | the roll check | 256x512 |
+
+  All four mutations of the two calls are red against it, including the one
+  that started this.
+
+
 - **`MetadataValue::DoubleArray(Vec<f64>)`**, the `VipsArrayDouble` half of
   the pair `IntArray` opened in #787, with `as_double_array`,
   `Raster::get_double_array`, the `From` impls, type code 6 and the `.v`
