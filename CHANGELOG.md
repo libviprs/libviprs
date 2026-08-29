@@ -3935,6 +3935,47 @@ and not under `Fixed`: this file is the only place they can be caught.
   it away, and `ConversionError::UnsupportedSampleKind` presented as landing
   when #931 removed it.
 
+- **The WebP animation scan bounds its own chunk walk** (issue #941).
+  `scan_animation` stepped the RIFF chain with `at + 8 + size` and
+  `at += 8 + size + (size & 1)`, where `size` is a `u32` straight off the wire
+  and can be `0xFFFFFFFF` whatever the file's real length. Where `usize` is 32
+  bits that overflows: a panic with overflow checks on, and a walk to a
+  wrapped offset with them off. `read_animation` runs on every WebP
+  `decode_bytes` sees, unconditionally, before `WebPDecoder::new` and before
+  any limit or validation, so about twenty bytes beginning `RIFF????WEBP`
+  reached it on the default decode path, still or animated.
+
+  This is issue #862's panic, on a walk PR #922 added (commit `c577b0d`), in
+  the file that already carried the checked step. #862's guard stayed green
+  throughout, and the reason is worth more than the fix. Its sharpest cell
+  read `next_chunk(12, u32::MAX as usize).is_none() == (usize::BITS == 32)`,
+  which on a 64-bit host asserts `false == false`: it passes with every check
+  deleted, so nobody running the suite on a 64-bit machine could ever watch it
+  fail. The step takes its address ceiling as a parameter now and does the
+  arithmetic in `u64`, so a cell passes `u32::MAX` and asks exactly what a
+  32-bit target asks, on any target.
+
+  Measured on a real 32-bit target rather than modelled. I lifted
+  `scan_animation` and its helpers verbatim out of both trees, compiled each
+  for `wasm32-unknown-unknown` where `usize` is 32 bits, and ran them under
+  node:
+
+  | tree | overflow checks | well-formed `VP8X` | the 20 bytes |
+  |---|---|---|---|
+  | before | on | `Some` | `RuntimeError: unreachable` |
+  | before | off | `Some` | `None`, off a wrapped offset |
+  | after | on | `Some` | `None` |
+
+  The well-formed file is the control saying the walk ran at all, and
+  `pointer_bits()` reports 32 in every wasm row against 64 natively, so the
+  target is the variable.
+
+  Every walk of a chunk chain in `src/webp.rs` steps through the one helper
+  now, and a census of the crate finds no other production site where a length
+  wider than 16 bits read off a buffer feeds unguarded offset arithmetic. The
+  census takes #941's two sites in the old file as its positive control and
+  aborts unless it finds both, so its zero is a zero rather than a scanner
+  that stopped working.
 - The image-origin test in `src/jp2k.rs` has its doc block back, and a check
   keeps it there (issue #926). The block had drifted onto the *band ceiling*
   test's own block, so that test's rendered doc opened with a paragraph about
