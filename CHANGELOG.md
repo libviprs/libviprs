@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- **`ConversionError::UnsupportedSampleKind` is removed** (issue #931). Nothing
+  in the crate could construct it. It was the sibling of
+  `ConversionError::FloatUnsupported` for the carriers that are not float, and
+  issue #909 widened this module's sample helpers so those carriers are read
+  rather than refused, leaving float as the only refusal and float with its own
+  variant.
+
+  Measured rather than assumed, with a positive control: scanning
+  `src/conversion.rs` for the name finds the definition and two doc references
+  and no construction, while the same scan for `FloatUnsupported`, which **is**
+  constructed, finds 19 hits.
+
+  Breaking for anyone matching it explicitly, and that is the right outcome,
+  because their arm could not fire. The refusal itself is not lost:
+  `BandError::UnsupportedSampleKind` and `ExtractError::UnsupportedSampleKind`
+  are both still live and both still reach a caller of a `conversion` op,
+  through `ConversionError::Band` and `ConversionError::Extract`.
+  `ConversionError` is `#[non_exhaustive]`, so adding a variant back is not a
+  breaking change if an eighth sample kind ever needs one.
+
 - **`profile` emits `Int32` and stops saturating at 65535** (issues #516, #759).
   Breaking because the output format changes, and a live defect until now:
   positions on any axis longer than 65535 were wrong. On a 1x65537 all-zero
@@ -2483,6 +2503,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The resamplers reproduce a constant signed field, which vips does not**
+  (issue #909). A resampler applied to a constant image must answer the
+  constant. Measured on `/opt/homebrew/bin/vips` 8.18.6 over a constant 64x1
+  `char` field of -50: `reduceh --kernel nearest` answers **-51**, so does
+  every other reduce kernel and `resize 0.5`; `affine --interpolate bicubic`
+  answers **-52** while `--interpolate bilinear` answers -50; `shrinkh 2`
+  answers **-49**. The same reduce on a `float` carrier answers -50, and on a
+  `uchar` carrier at 200 answers 200.
+
+  `--kernel nearest` is what settles it: a nearest-neighbour resample copies a
+  sample and cannot turn -50 into -51. The shift lands on `short` and `int`
+  too, is absent from the float and unsigned carriers, and two interpolators of
+  the same op disagree by two on the same input while one of them is exact.
+  That is a reference contradicting itself, and matching it is not parity, so
+  libviprs answers the constant and `every_resampler_reproduces_a_constant_signed_field`
+  pins it rather than leaving it to be rediscovered.
+
+  Where the oracle is self-consistent libviprs matches it exactly: `shrink`'s
+  `(sum + n/2) / n` truncation toward zero, `bandmean`'s round-half-away-from-zero,
+  and the region shrink's `(tot + 2) >> 2`.
+
 - **`Raster::ppm_load` prices against the decode budget instead of the raster
   construction one** (issue #910). It capped the declared geometry at
   `DEFAULT_MAX_ALLOC_BYTES`, **8 GiB**, where every route's default is
@@ -3459,6 +3500,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matching on the typed errors is unaffected; only the panic text changes.
 
 ### Fixed
+
+- **The signed carriers go through the ops that were refusing them** (issue
+  #909). #516 landed `Int8`, `Int16` and `Int32` and left seventeen op entry
+  points refusing them with a typed error, because their sample helpers
+  returned a `u32` that cannot hold a negative. vips runs every one of those
+  ops on a `char` raster, so the refusal was a parity regression held open on
+  purpose rather than an implementation, and the tests that asserted it said so
+  in their own docs. `bandjoin`, `bandjoin_const`, `bandmean`, `bandrank`,
+  `bandand` / `bandor` / `bandeor`, `addalpha`, `gamma`, `falsecolour`, `msb`,
+  `arrayjoin`, `join`, `embed`, `gravity`, `insert` and `smartcrop` all carry
+  them now. Float is the one refusal left, and it is the one the crate has
+  documented all along.
+
+  Measured on `/opt/homebrew/bin/vips` 8.18.6, and the answers are not the ones
+  a widening alone would give:
+
+  | call on a `char` input | vips, and now this |
+  |---|---|
+  | `bandmean` of `(-100, -101)` | **-101**, half away from zero |
+  | `addalpha` under `b-w` | **127**, the 255 ink clipped into the carrier |
+  | `embed --extend white` | **-1**, the all-bits-set byte read signed |
+  | `embed --extend background -200` | **-128**, clipped at the floor too |
+  | `msb` of `[-1, 0, 1, 127]` | **[127, 128, 129, 255]** UCHAR |
+  | `gamma` of `[-100, 100]` | **[0, 71]**, the positive ceiling is `mx` |
+  | `falsecolour` of -100 | the **bottom** LUT entry, (12, 0, 25) |
+  | `shrink 2 2` of a `-100, -101 / -100, -101` block | **-99** |
+
+  `bandmean` rounds half **away from zero** and `shrink` truncates **toward**
+  it, on the same numbers. Both are matched.
+
+- **Three ops answered zero or garbage on a signed carrier rather than
+  refusing**, so they were silent rather than loud (issue #909). `shrink`
+  accumulated its integer mean in a `u64`, and a negative `f64` cast to `u64`
+  saturates, so a `char` block whose vips answer is -99 came out **0**. The
+  `resize` box kernels accumulated in `u64` and `u128` the same way.
+  `affine`'s bicubic dispatch asked `bytes_per_channel == 1`, so `Int8` took
+  the `uchar` fixed-point table whose taps clamp into `0..=max`, and an 8x1
+  `char` ramp of four -128s and four 127s came out `[0, 0, 127, 127]` where
+  vips answers `[-128, -128, 127, 127]`.
+
+- **`ifthenelse` and `switch` read their condition numerically** instead of
+  testing its stored bytes for non-zero (issue #927). vips casts the condition
+  to `uchar` first, and `vips_cast` clips at both ends and truncates toward
+  zero, so a negative sample is false and a fraction below one is false.
+  Measured on 8.18.6 with the branches 10 and 20, `ifthenelse` on a `char`
+  condition `[-50, 0, 1, -1, 127]` answers `[20, 20, 10, 20, 10]` and this
+  answered `[10, 20, 10, 10, 10]`; on a `float` condition
+  `[0, 0.5, 1, -0.5, 300.7]` it answers `[20, 20, 10, 20, 10]` and this
+  answered `[20, 10, 10, 10, 10]`. The float half predates the carriers.
 
 - Animated WebP frames are composited by this loader rather than by
   `image-webp`, and come back byte-exact with vips (issues #837, #917). Every
