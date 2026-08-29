@@ -2076,6 +2076,86 @@ mod tests {
         assert!(opaque_blended_frame_offsets(&[]).is_empty());
     }
 
+    /// The 192 bytes `vips rawsave` writes for a **crafted** file: the
+    /// transparent capture with blending switched on and `alpha_is_used`
+    /// cleared on every frame, which is a header claiming an opacity the
+    /// pixels do not have.
+    ///
+    /// `vips webpsave` never writes that combination, so it has to be built
+    /// by hand, and it is the only input that separates "the frame declares
+    /// no alpha" from "the frame has no alpha". libwebp does not read the
+    /// declaration at all: `BlendPixelRowNonPremult` tests each pixel's own
+    /// alpha, so it blends this file and the picture changes, by 139 of 192
+    /// bytes against the same file with blending off.
+    const LYING_ROLL: [u8; 192] = [
+        0, 0, 0, 0, 5, 11, 3, 17, 10, 22, 6, 34, 15, 33, 9, 51, 25, 7, 13, 20, 30, 18, 16, 37, 35,
+        29, 19, 54, 40, 40, 22, 71, 50, 14, 26, 40, 55, 25, 29, 57, 60, 36, 32, 74, 65, 47, 35, 91,
+        75, 21, 39, 60, 69, 29, 36, 89, 71, 39, 37, 115, 74, 49, 39, 140, 88, 24, 46, 94, 90, 34,
+        47, 120, 94, 45, 49, 144, 99, 56, 52, 165, 110, 30, 57, 124, 114, 41, 59, 148, 119, 52, 62,
+        169, 125, 63, 66, 188, 134, 37, 69, 152, 135, 47, 70, 178, 139, 58, 73, 199, 145, 69, 76,
+        217, 154, 43, 80, 182, 159, 54, 83, 203, 165, 65, 86, 220, 173, 77, 91, 232, 179, 50, 93,
+        206, 186, 61, 97, 222, 194, 73, 101, 234, 203, 85, 106, 243, 206, 57, 107, 225, 213, 69,
+        111, 237, 222, 81, 116, 246, 232, 93, 122, 251, 234, 65, 121, 239, 243, 77, 126, 247, 15,
+        90, 132, 252, 11, 102, 138, 255, 37, 73, 137, 248, 34, 86, 142, 253, 29, 98, 148, 255, 192,
+        86, 108, 243,
+    ];
+
+    /**
+     * Tests that a header lying about transparency cannot make this loader
+     * skip a blend libwebp performs, which is the whole soundness question
+     * behind the blend-flag rewrite. Works by building the file vips will
+     * not write, decoding it, and asserting every byte is within one grey
+     * level of what vips read out of the same bytes.
+     *
+     * One level is the bound because `image-webp` blends opaque pixels
+     * where libwebp copies them, and that approximation is off by exactly
+     * one; anything larger is a blend that did not happen at all. Measured
+     * on the rewrite this replaces: 139 of 192 bytes differed and the
+     * largest delta was **228**, which is not a rounding error, it is a
+     * different picture.
+     * Input: `ANIM4_RGBA` with every frame's blend bit set and
+     * `alpha_is_used` cleared -> Output: within one of `LYING_ROLL`
+     * everywhere.
+     */
+    #[test]
+    fn a_header_that_lies_about_alpha_cannot_skip_a_blend() {
+        let mut lying = ANIM4_RGBA.to_vec();
+        let mut cursor = 12usize;
+        while let Some(header) = lying.get(cursor..cursor + 8) {
+            let size = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
+            if &header[..4] == b"ANMF" {
+                // Blending on, and the `VP8L` header claiming no alpha.
+                lying[cursor + 8 + 15] &= !0b10;
+                let bit = cursor + 8 + 24 + 1;
+                let declared = u32::from_le_bytes(lying[bit..bit + 4].try_into().unwrap());
+                lying[bit..bit + 4].copy_from_slice(&(declared & !(1 << 28)).to_le_bytes());
+            }
+            cursor = match next_chunk(cursor + 8, size) {
+                Some(next) => next,
+                None => break,
+            };
+        }
+        // The craft really happened, or everything below passes on the
+        // unmodified capture.
+        assert_ne!(lying, ANIM4_RGBA.to_vec());
+
+        let raster = decode_webp_with(&lying, DecodeLimits::default(), all_pages())
+            .expect("the crafted file still decodes");
+        assert_eq!((raster.width(), raster.height()), (4, 12));
+        let worst = raster
+            .data()
+            .iter()
+            .zip(LYING_ROLL.iter())
+            .map(|(a, b)| i32::from(*a).abs_diff(i32::from(*b)))
+            .max()
+            .expect("the roll is not empty");
+        assert!(
+            worst <= 1,
+            "every byte has to be within one grey level of libwebp; the worst \
+             was {worst}, which means a blend was skipped rather than rounded"
+        );
+    }
+
     /**
      * Tests that a transparent animation loads byte-exact without the
      * rewrite touching it, which is the positive control the opaque case
