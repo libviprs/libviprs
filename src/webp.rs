@@ -1343,14 +1343,14 @@ struct ChunkBounds {
 /// the address ceiling is a **parameter** rather than `usize::MAX` read off
 /// the target. That is the whole point of the shape. Issue #862 hoisted the
 /// same step into a `usize` helper so it could be tested, and the cell that
-/// asks the real question still reads `is_none() == (usize::BITS == 32)`,
-/// which on a 64-bit host asserts `false == false` and passes with every
-/// check removed. Passing `u32::MAX` for `addr_max` asks exactly what a
-/// 32-bit target asks, on any target, so the guard can fail where someone
-/// will see it (issue #941).
+/// asked the real question read `is_none() == (usize::BITS == 32)`, which on
+/// a 64-bit host asserts `false == false` and passes with every check
+/// removed. Passing `u32::MAX` for `addr_max` asks exactly what a 32-bit
+/// target asks, on any target, so the guard can fail where someone will see
+/// it (issue #941).
 ///
-/// Every walk of a chunk chain in this module steps through here: the
-/// animation scan, and the two test helpers that walk a file they built.
+/// Callers go through [`chunk_bounds_here`], which pins the ceiling; the
+/// ceiling is a parameter here only so a test can vary it.
 fn chunk_bounds(payload: u64, size: WireSize, addr_max: u64) -> Option<ChunkBounds> {
     let size = u64::from(size.0);
     let end = payload.checked_add(size)?;
@@ -1368,9 +1368,17 @@ fn chunk_bounds(payload: u64, size: WireSize, addr_max: u64) -> Option<ChunkBoun
 /// back. The ceiling stays a parameter one level down only so a test can
 /// ask what a 32-bit target asks.
 ///
-/// The narrowing is `try_from` rather than `as`, so even a wrong ceiling
-/// refuses instead of truncating to an offset behind the one the walk
-/// started at, which is what the same file does with overflow checks off.
+/// The narrowing is `try_from` rather than `as`, and it is worth being exact
+/// about what that buys, because it is not a second overflow caught. With a
+/// `u32` size the truncated end is `payload + size - 2^32`, always below
+/// `payload`, so `bytes.get(payload..end)` refuses and the walk leaves before
+/// it takes a step. The `as` cast was safe, by an argument about the order
+/// the two casts happen in rather than by anything local. `try_from` means
+/// the safety stops resting on that order, so a walk cannot be made to step
+/// backwards by reordering it.
+///
+/// Every walk of a chunk chain in this module goes through here: the
+/// animation scan, and the two test helpers that walk a file they built.
 fn chunk_bounds_here(payload: usize, size: WireSize) -> Option<(usize, usize)> {
     let bounds = chunk_bounds(payload as u64, size, usize::MAX as u64)?;
     Some((
