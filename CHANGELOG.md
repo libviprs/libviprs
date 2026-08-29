@@ -3799,6 +3799,85 @@ and not under `Fixed`: this file is the only place they can be caught.
   `bandmean` rounds half **away from zero** and `shrink` truncates **toward**
   it, on the same numbers. Both are matched.
 
+- **A float raster goes through `embed`, `gravity`, `insert`, `join`,
+  `arrayjoin` and `bandmean`** (issue #945). This is #909 one carrier family
+  further on, and the same argument: vips runs every one of those ops on a
+  `float` raster and answers FLOAT, so the refusal was a parity regression
+  rather than an implementation. #694 had turned the panics underneath them
+  into typed errors, which was an improvement, and what it did not ask was
+  which posture the refusal is.
+
+  Measured on `/opt/homebrew/bin/vips` 8.18.6 over a 3x1 `float` raster
+  holding `[1.5, -0.25, 3.75]`:
+
+  | call | vips, and now this |
+  |---|---|
+  | `embed 1 0 5 1 --extend black` | `[0, 1.5, -0.25, 3.75, 0]` |
+  | `embed --extend white` | `[255, ..., 255]`, the ink as a number |
+  | `embed --extend background -0.5` | `[-0.5, ...]`, **not** truncated |
+  | `insert` at `x = 1` | `[1.5, 10.5, -2.75]` |
+  | `join horizontal` | the six samples side by side |
+  | `arrayjoin --across 1` | the same six as a 3x2 grid |
+  | `bandmean` of `[1, 2] / [2, 3] / [100, 101]` | `[1.5, 2.5, 100.5]` |
+  | the same numbers as `uchar` | `[2, 3, 101]` |
+
+  The background is carried whole on a float carrier and still truncated on an
+  integer one, and `bandmean` does not round on the float path. Its
+  accumulator is the **sample's own width**, which is measurable: three bands
+  holding `[16777216, 1, 1]` answer **5592405.5**, where an `f64` accumulator
+  answers 5592406.
+
+  The refusals left are the ops that index a table by the sample value
+  (`gamma`, `falsecolour`, `msb`, `smartcrop`'s two analysing strategies) and
+  the band ops that take a constant or a bitwise operator. A float sample does
+  neither, so those stay. `Raster::linear` was already the float twin of
+  `vips linear` and is unchanged.
+
+- **Six claims about vips were false or invisible where a reader looks**
+  (issue #952). None was a behaviour bug, which is why nothing was looking at
+  any of them.
+
+  `hist_ismonotonic`'s divergence is on the public method now, with the
+  measured table: vips answers TRUE for the strictly decreasing `uint`
+  histogram `[70000, 65000]` and this answers `false`. The numbers were
+  measured when the op was written and they lived in a test's doc block, which
+  rustdoc never renders.
+
+  `src/extract.rs` carried a refuted account of the #692 white-ink mechanism.
+  It said vips premultiplies into float before painting the affine border, so
+  the memset never happens; #692's own closing measurement showed
+  `vips_affine_build` embeds before it premultiplies on every path, and what
+  moves the ink is the non-cancelling clipped-alpha round trip. #745 corrected
+  the resample side and left this one pointing at an issue that had closed.
+
+  `add_const` stops calling itself `vips linear` with `a = 1`. It is not:
+  measured over `uchar [200, 100]`, `+ 5` answers `Gray16 [205, 105]` where
+  vips answers `FLOAT [205, 105]`, `+ 0.5` answers `[201, 101]` where vips
+  answers `200.5`, and `sub_const(300)` answers `Gray8 [0, 0]` where vips
+  answers `FLOAT [-100, -200]`. The integer dialect is deliberate;
+  [`Raster::linear`] is the twin, and the doc points at it.
+
+  The `.hdr` save refusal says what vips does with the same image, the way the
+  `.ppm` one does: `vips radsave` accepts a `uchar` `srgb` image and writes a
+  working `.hdr`.
+
+  The PNG and tile-encoder integer refusals carry the oracle rather than only
+  the argument from the `image` crate. Measured over a 2x1 raster, `vips
+  pngsave` on a `uint` `[3000000000, 100]` answers `[0, 100]` under a `b-w`
+  tag and `[0, 0]` under a `multiband` one, `vips cast` to `uchar` answers
+  `[0, 100]`, and `vips dzsave` writes 0 in the full-resolution tile and 255
+  in the overview. No route answers the data, which makes refusing more
+  faithful than merely necessary.
+
+  `oracle-captures/ORACLE_PIN.json` gains a `frozen` state and a required
+  note on every off-pin area. Six areas recorded 8.18.4 with a state that
+  reads "not yet moved" and meant "will not move", because 8.18.4 cannot be
+  installed from the current tap and #650 is closed. I re-measured three of
+  them to write their notes: `foreign-fits` differs only in the version string
+  and 57 absolute paths, `foreign-gif` only in the version string, and
+  `foreign-jxl` loses two whole records on a bare re-run, because they read
+  `.jxl` files `Raster::encode_jxl` has to write first.
+
 - **Three ops answered zero or garbage on a signed carrier rather than
   refusing**, so they were silent rather than loud (issue #909). `shrink`
   accumulated its integer mean in a `u64`, and a negative `f64` cast to `u64`
