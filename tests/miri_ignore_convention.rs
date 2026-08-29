@@ -381,7 +381,7 @@ const EXPECTED_SRC_MODULES: usize = 25;
 /// eighteen, for exactly that reason. This is a count that two file-disjoint
 /// changes can both be right about and still break, so move it in the same
 /// change that moves the population.
-const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 19;
+const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 20;
 
 /// The filesystem-touching tests still allowed to run under Miri, and so still
 /// allowed to end the whole run on their first syscall.
@@ -417,7 +417,7 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// and the check green. Measured, not reasoned: three such deletions are in
 /// #739's and #781's mutation tables, one per marker that is the sole match for
 /// any test in the tree.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 280;
+const EXPECTED_FS_TOUCHING_TESTS: usize = 285;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
