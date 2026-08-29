@@ -240,6 +240,14 @@ jobs:
       # The virtual clock moved 12 seconds while the real one moved 51. Every
       # duration in this comment is measured outside the process.
       #
+      # The `run:` value below is quoted, and it has to be. A libtest module
+      # filter ends in `::`, so the command contains `":: "`, and a colon
+      # followed by a space in a plain YAML scalar is a mapping separator: the
+      # unquoted form makes this whole file unparseable. It got that far here,
+      # green under the guard in `tests/miri_invocation_parity.rs`, because that
+      # guard reads the file line by line rather than as YAML. It asserts the
+      # quoting now.
+      #
       # It runs these modules and no others:
       #
       #   analyze avif bands cancel checksum codec composite dedupe
@@ -370,7 +378,7 @@ jobs:
       # checked against" is worth discounting while no test is being checked at
       # all. If the backend pin ever becomes awkward, switching is a one line
       # change here and in the `Makefile`.
-      - run: cargo +nightly miri test --lib -- analyze:: avif:: bands:: cancel:: checksum:: codec:: composite:: dedupe:: encode_tiff:: exr:: extensions:: frames:: freqfilt:: geo:: hex:: jp2k:: jxl:: level_walk:: manifest:: mat:: nifti:: pixel:: radiance:: raster_ops:: resize:: resume:: retry:: sink:: svg:: sync_queue:: textio:: webp::
+      - run: 'cargo +nightly miri test --lib -- analyze:: avif:: bands:: cancel:: checksum:: codec:: composite:: dedupe:: encode_tiff:: exr:: extensions:: frames:: freqfilt:: geo:: hex:: jp2k:: jxl:: level_walk:: manifest:: mat:: nifti:: pixel:: radiance:: raster_ops:: resize:: resume:: retry:: sink:: svg:: sync_queue:: textio:: webp::'
         env:
           RUSTFLAGS: '-A deprecated --cfg sha2_backend="soft"'
 

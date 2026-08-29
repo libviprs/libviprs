@@ -472,6 +472,7 @@ fn workflow_invocation() -> Invocation {
         .trim_start_matches("- run:")
         .trim()
         .to_string();
+    let run = strip_yaml_quotes(&run);
     let (inline_env, toolchain, command) = split_command(&shell_tokens(&run));
     for (key, value) in inline_env {
         if SIGNIFICANT_ENV.contains(&key.as_str()) {
@@ -484,6 +485,25 @@ fn workflow_invocation() -> Invocation {
         command,
         env,
     }
+}
+
+/// Take one layer of YAML quoting off a scalar, so the shell tokeniser sees the
+/// command rather than one long quoted word.
+///
+/// The Miri command has to be quoted in the workflow, and that is not a style
+/// choice: a libtest module filter ends in `::`, so the command contains
+/// `":: "`, and a colon followed by a space in a plain YAML scalar is a mapping
+/// separator. Unquoted, the file does not parse at all.
+///
+/// [`the_miri_run_step_is_a_quoted_scalar`] is the assertion; this is what
+/// makes the rest of the parsing survive it.
+fn strip_yaml_quotes(value: &str) -> String {
+    for quote in ['\'', '"'] {
+        if value.len() >= 2 && value.starts_with(quote) && value.ends_with(quote) {
+            return value[1..value.len() - 1].to_string();
+        }
+    }
+    value.to_string()
 }
 
 /// The inventory rows, skipping its comment header, as `(annotated, path)`.
@@ -743,5 +763,36 @@ fn merge_gate_lists_exactly_the_modules_its_miri_command_runs() {
         "`make miri` and the `miri` job run different module sets. The command comparison \
          in `the_makefile_and_merge_gate_run_miri_the_same_way` catches this too; this says \
          it in terms of the modules rather than as a diff of two long strings."
+    );
+}
+
+#[test]
+fn the_miri_run_step_is_a_quoted_scalar() {
+    let lines: Vec<&str> = WORKFLOW.lines().collect();
+    let step = lines
+        .iter()
+        .find(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with("- run:") && trimmed.contains("miri test")
+        })
+        .expect("`merge-gate.yml` has no `run:` step invoking `miri test`");
+    let value = step.trim_start().trim_start_matches("- run:").trim();
+
+    let quoted = (value.starts_with('\'') && value.ends_with('\''))
+        || (value.starts_with('"') && value.ends_with('"'));
+    assert!(
+        quoted,
+        "the Miri `run:` value is a plain YAML scalar. It cannot be: a libtest module filter \
+         ends in `::`, so the command contains `\":: \"`, and a colon followed by a space in a \
+         plain scalar is a mapping separator. GitHub rejects the whole file, and nothing else \
+         here would tell you, because every other check in this file reads the workflow line \
+         by line rather than as YAML. Put the command back in quotes. Value was: {value}"
+    );
+
+    assert!(
+        value.contains(":: "),
+        "the Miri command no longer passes `module::` filters, so this assertion is guarding \
+         nothing. It exists because of the `\":: \"` sequence specifically; if the command \
+         stopped needing quotes, delete this test rather than leaving it green by accident."
     );
 }
