@@ -35,6 +35,11 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
+/// The manifest, at compile time, the way `tests/ci_feature_coverage.rs` pulls
+/// it in: the file this asserts about and the binary asserting cannot then
+/// drift apart, and editing it forces a rebuild.
+const CARGO_TOML: &str = include_str!("../Cargo.toml");
+
 /// Files under `src/` allowed to contain real `unsafe`, and why.
 ///
 /// `avif.rs` is the dav1d FFI boundary: an `unsafe extern "C"` block, a raw pointer
@@ -235,24 +240,106 @@ fn char_literal_end(b: &[u8], i: usize) -> Option<usize> {
     (i + 1 + len < n && b[i + 1 + len] == b'\'').then_some(i + 2 + len)
 }
 
+/// Every `.rs` file under `dir`, as `(path relative to `dir`, full path)`.
+fn rs_files_under(dir: &Path) -> Vec<(String, std::path::PathBuf)> {
+    let mut out: Vec<(String, std::path::PathBuf)> = fs::read_dir(dir)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()))
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("rs"))
+        .map(|p| {
+            (
+                p.file_name()
+                    .expect("a file has a name")
+                    .to_string_lossy()
+                    .into_owned(),
+                p,
+            )
+        })
+        .collect();
+    out.sort();
+    out
+}
+
 fn files_with_real_unsafe() -> BTreeSet<String> {
     let mut found = BTreeSet::new();
-    for entry in fs::read_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("src")).expect("read src/")
-    {
-        let path = entry.expect("dir entry").path();
-        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-            continue;
-        }
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let files = rs_files_under(&src);
+    assert!(
+        files.len() > 30,
+        "positive control failed: only {} files found under src/, so an empty \
+         answer below would be an empty answer about nothing",
+        files.len()
+    );
+    for (rel, path) in files {
         let text = fs::read_to_string(&path).expect("read source file");
         let code = code_only(&text);
         if code
             .split(|c: char| !c.is_alphanumeric() && c != '_')
             .any(|w| w == "unsafe")
         {
-            found.insert(path.file_name().unwrap().to_string_lossy().into_owned());
+            found.insert(rel);
         }
     }
     found
+}
+
+/// The features a plain `cargo build` enables, resolved through
+/// `[features]` from the roots given.
+///
+/// This is the rule as it stands at `b06ba973`, lifted into a function so the
+/// table below can measure it: it reads the literal `default = ` line and
+/// nothing else, so `default = ["pdfium"]` plus
+/// `pdfium = ["dep:pdfium-render", "avif"]` makes a default build compile the
+/// crate's own `unsafe` with every assertion here green (issue #949).
+fn feature_closure(manifest: &str, roots: &[&str]) -> BTreeSet<String> {
+    let _ = roots;
+    let Some(line) = manifest.lines().find(|l| l.starts_with("default = ")) else {
+        return BTreeSet::new();
+    };
+    line.split('"')
+        .skip(1)
+        .step_by(2)
+        .map(str::to_owned)
+        .collect()
+}
+
+/**
+ * Tests that the default-build feature set is resolved through `[features]`
+ * rather than read off one line.
+ * A feature list is a graph: `default = ["pdfium"]` with
+ * `pdfium = ["dep:pdfium-render", "avif"]` puts `avif` in a default build
+ * without the string "avif" appearing anywhere near `default`, and
+ * `the_crates_own_unsafe_stays_out_of_a_default_build` greps that one line
+ * (issue #949). `ci_feature_coverage.rs` would not catch it either: its
+ * `declared_features` drops `default` and never reads a feature's dependency
+ * array.
+ * Works by resolving a planted manifest that has exactly that shape, then
+ * resolving the real one from a root whose answer is known and not empty, so
+ * a resolver that returns nothing fails here rather than passing.
+ * Input: a planted manifest and this crate's -> Output: `avif` reachable in
+ * the first, `pdfium` reachable from `pdfium-static` in the second.
+ */
+#[test]
+fn the_default_build_feature_set_is_resolved_through_the_graph() {
+    const PLANTED: &str = "[package]\nname = \"x\"\n\n[features]\n\
+                           default = [\"pdfium\"]\n\
+                           pdfium = [\"dep:pdfium-render\", \"avif\"]\n\
+                           avif = [\"dep:rav1d\"]\n";
+    let planted = feature_closure(PLANTED, &["default"]);
+    assert!(
+        planted.contains("avif"),
+        "`default = [\"pdfium\"]` with `pdfium = [.., \"avif\"]` puts `avif` \
+         in a default build, and the resolver did not see it: {planted:?}"
+    );
+
+    // The control that cannot pass on nothing: a root in the real manifest
+    // whose closure is known and non-empty.
+    let real = feature_closure(CARGO_TOML, &["pdfium-static"]);
+    assert!(
+        real.contains("pdfium"),
+        "`pdfium-static = [\"pdfium\", ..]`, so the closure must carry \
+         `pdfium`; got {real:?}"
+    );
 }
 
 #[cfg_attr(miri, ignore)]
@@ -329,24 +416,45 @@ fn the_scanner_reads_code_and_not_prose() {
     }
 }
 
-#[cfg_attr(miri, ignore)]
 #[test]
 fn the_crates_own_unsafe_stays_out_of_a_default_build() {
     // The claim that survives from merge-gate.yml's old paragraph: a default build,
     // and so a bare `cargo miri test`, reaches none of this crate's own `unsafe`.
-    let manifest = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
-        .expect("read Cargo.toml");
-    let default = manifest
-        .lines()
-        .find(|l| l.starts_with("default = "))
-        .expect("Cargo.toml must declare a default feature list");
+    let default = feature_closure(CARGO_TOML, &["default"]);
     for (file, _) in ALLOWED {
         let feature = file.trim_end_matches(".rs");
         assert!(
             !default.contains(feature),
-            "`{feature}` is in the default feature list, so a default build now compiles \
-             this crate's own `unsafe`. merge-gate.yml's paragraph on Miri coverage is no \
-             longer true and must be rewritten (issue #897).\n  default = {default}"
+            "`{feature}` is reachable from the default feature list, so a default build \
+             now compiles this crate's own `unsafe`. merge-gate.yml's paragraph on Miri \
+             coverage is no longer true and must be rewritten (issue #897).\n  \
+             default closure = {default:?}"
         );
     }
+}
+
+/**
+ * Tests that the walk this inventory is built on descends into
+ * subdirectories.
+ * `src/` is flat today, so the file-count control cannot notice a walk that
+ * stops at the top: an `unsafe` block in the first `src/anything/mod.rs`
+ * anybody adds would be invisible and this guard would report a clean tree
+ * (issue #949). `fuzz/` is the directory in this repo that already has a
+ * nested `.rs`, so the control uses that rather than a fixture nobody would
+ * maintain.
+ * Works by walking `fuzz/` and asserting the nested target turns up under its
+ * subdirectory path.
+ * Input: `fuzz/` -> Output: `fuzz_targets/fuzz_fits.rs` is in the set.
+ */
+#[cfg_attr(miri, ignore)]
+#[test]
+fn the_walk_descends_into_subdirectories() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("fuzz");
+    let found: Vec<String> = rs_files_under(&root).into_iter().map(|(r, _)| r).collect();
+    assert!(
+        found.contains(&"fuzz_targets/fuzz_fits.rs".to_owned()),
+        "the walk did not descend into `fuzz/fuzz_targets/`, so a module in a \
+         subdirectory of `src/` would be invisible to this inventory and it \
+         would report a clean tree. Found: {found:?}"
+    );
 }

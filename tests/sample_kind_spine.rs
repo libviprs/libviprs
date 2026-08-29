@@ -490,14 +490,29 @@ fn width_comparisons(src: &str) -> Vec<(usize, String)> {
         .collect()
 }
 
-fn src_files() -> Vec<std::path::PathBuf> {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut files: Vec<_> = std::fs::read_dir(&dir)
-        .expect("src/ is readable")
+/// Every `.rs` file under `dir`, as `(path relative to `dir`, full path)`.
+fn rs_files_under(dir: &std::path::Path) -> Vec<(String, std::path::PathBuf)> {
+    let mut out: Vec<(String, std::path::PathBuf)> = std::fs::read_dir(dir)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()))
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().is_some_and(|e| e == "rs"))
+        .map(|p| {
+            (
+                p.file_name()
+                    .expect("a file has a name")
+                    .to_string_lossy()
+                    .into_owned(),
+                p,
+            )
+        })
         .collect();
-    files.sort();
+    out.sort();
+    out
+}
+
+fn src_files() -> Vec<(String, std::path::PathBuf)> {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let files = rs_files_under(&dir);
     assert!(
         files.len() > 30,
         "positive control failed: only {} files found under src/, so a zero \
@@ -505,6 +520,35 @@ fn src_files() -> Vec<std::path::PathBuf> {
         files.len()
     );
     files
+}
+
+/**
+ * Tests that the walk this scan is built on descends into subdirectories.
+ * `src/` is flat today, so `files.len() > 30` cannot notice a walk that stops
+ * at the top: the first `src/anything/mod.rs` anybody adds would be invisible
+ * to this guard and it would say nothing (issue #949). `fuzz/` is the
+ * directory in this repo that already has a nested `.rs`, so the control uses
+ * that rather than a fixture nobody would maintain.
+ * Works by walking `fuzz/` and asserting the nested target turns up under its
+ * subdirectory path, with a top-level file as the control that the walk ran
+ * at all.
+ * Input: `fuzz/` -> Output: `fuzz_targets/fuzz_fits.rs` is in the set.
+ *
+ * Carries `#[cfg_attr(miri, ignore)]` because it reads a directory, which
+ * Miri's isolation layer refuses; an unannotated one ends the whole run
+ * (issue #652).
+ */
+#[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+fn the_walk_descends_into_subdirectories() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fuzz");
+    let found: Vec<String> = rs_files_under(&root).into_iter().map(|(r, _)| r).collect();
+    assert!(
+        found.contains(&"fuzz_targets/fuzz_fits.rs".to_owned()),
+        "the walk did not descend into `fuzz/fuzz_targets/`, so a module in a \
+         subdirectory of `src/` would be invisible to this guard and it would \
+         report a clean tree. Found: {found:?}"
+    );
 }
 
 /**
@@ -708,13 +752,8 @@ fn the_documented_blind_spots_are_still_blind() {
 #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn a_byte_width_is_never_compared_outside_the_named_countdown() {
     let mut found: BTreeSet<(String, String)> = BTreeSet::new();
-    for path in src_files() {
-        let rel = format!(
-            "src/{}",
-            path.file_name()
-                .expect("a file has a name")
-                .to_string_lossy()
-        );
+    for (name, path) in src_files() {
+        let rel = format!("src/{name}");
         let src = std::fs::read_to_string(&path).expect("a source file is readable");
         for (n, text) in width_comparisons(&src) {
             found.insert((format!("{rel}:{n}"), text));
