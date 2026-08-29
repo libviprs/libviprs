@@ -41,7 +41,12 @@ const CHANGELOG: &str = include_str!("../CHANGELOG.md");
 const NEVER: &str = "has never been in a release";
 
 /// The phrase that says which tag an identifier first shipped in.
-const SHIPPED: &str = " shipped in `";
+///
+/// The tag after it may be backticked or bare. Requiring the backticks left a
+/// real hole: a true claim written `shipped in v0.4.0` was skipped, so a false
+/// one would have been too. Measured, as row C7 of this PR's mutation table
+/// before this widened.
+const SHIPPED: &str = " shipped in ";
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()
@@ -196,16 +201,17 @@ fn every_release_claim_in_the_changelog_is_true_of_the_tags() {
         from = at + NEVER.len();
     }
 
-    // "`X` shipped in `vN`"
+    // "`X` shipped in vN", with or without backticks round the tag.
     let mut from = 0usize;
     while let Some(i) = live[from..].find(SHIPPED) {
         let at = from + i;
         let tail = &live[at + SHIPPED.len()..];
+        let tail = tail.strip_prefix('`').unwrap_or(tail);
         let end = tail
-            .find('`')
-            .expect("the tag in a `shipped in` claim is backtick-quoted");
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '.'))
+            .unwrap_or(tail.len());
         let tag = &tail[..end];
-        from = at + SHIPPED.len() + end;
+        from = at + SHIPPED.len();
         // Only version tags are claims about a release; "shipped in `#547`" or
         // any other backticked thing is prose.
         if !tag.starts_with('v') || !have.contains(tag) {
