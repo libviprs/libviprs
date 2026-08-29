@@ -613,6 +613,15 @@ fn encode_jpeg(raster: &Raster, quality: u8) -> Result<Vec<u8>, SinkError> {
                 raster.format()
             )));
         }
+        // Every `image` colour type is unsigned, so this is not a width
+        // question and `Int8` is refused alongside `Int32` (issue #516).
+        PixelFormat::Int8(_) | PixelFormat::Int16(_) | PixelFormat::Int32(_) => {
+            return Err(SinkError::EncodeMsg(format!(
+                "signed raster ({:?}) cannot be encoded as an image tile; \
+                 the image colour types are all unsigned, so cast first",
+                raster.format()
+            )));
+        }
     };
 
     let mut buf = Vec::new();
