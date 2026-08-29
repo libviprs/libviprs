@@ -711,6 +711,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- GIF load attaches the three deprecated compatibility fields `gifload`
+  attaches beside the modern ones: **`gif-delay`**, **`gif-loop`** and
+  **`palette-bit-depth`** (issues #865, #875). `gif-delay` is the first delay
+  back in the centiseconds the wire counts, `gif-loop` is the NETSCAPE count
+  rather than the play count, so `loop 1` and `loop 0` both give 0 and a block
+  holding 3 gives 3, and `palette-bit-depth` is a second copy of
+  `bits-per-sample`. GIF was the last animated loader without them, on the two
+  fields that are named after GIF.
+
+  Every number came from `vipsheader -f` on 8.18.6, because **`vipsheader -a`
+  lists no deprecated compatibility field on any loader**, animated or not.
+  Reading them that way produces the opposite finding, that vips had dropped
+  the pair.
+
+  `gif-delay` follows the loaded raster rather than the file, which is the same
+  deliberate divergence `delay` already makes and the same call `src/webp.rs`
+  makes: vips takes it from element 0 of the file's whole array, so
+  `anim4.gif[page=2,n=2]` reports `gif-delay: 4` for a raster whose first page
+  really has a delay of 80 ms.
+
 - GIF load attaches **`gif-palette`**, the global colour table as one signed
   32-bit word per entry (issue #828). vips packs libnsgif's `R, G, B, A` byte
   quad as a machine integer, so on a little-endian host each entry reads
@@ -2785,6 +2805,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matching on the typed errors is unaffected; only the panic text changes.
 
 ### Fixed
+
+- A GIF frame carrying no graphic control extension gets a delay of **100 ms**
+  rather than 0 (issue #866). libnsgif initialises a frame's delay to 10
+  centiseconds when it allocates the frame and only an extension overwrites
+  it, so the default reaches the `delay` array. Measured on vips 8.18.6: a
+  still with no extension reports `delay: 100`, one whose extension holds an
+  explicit zero reports `delay: 0`, and a four-frame file with extensions on
+  frames 0 and 2 only reports `30 100 50 100`. The rule is per frame, and the
+  explicit zero is what makes it about the absent extension rather than a
+  floor on small delays.
+
+  `gif` 0.14.2 cannot tell the two apart: `next_frame_info` takes the frame
+  state fresh for every frame, so `Frame::delay` is 0 for both, and the
+  neighbouring fields do not separate them either. So this rides on the same
+  wire walk #827 added for the raw disposal code, which now reports
+  `WireControl::Absent` for a frame with no extension instead of standing in a
+  default one. The cross-check that guards the walk had to learn the
+  difference as well: the decoder's stand-in for a missing extension is
+  `Frame::default()`, whose disposal is `Keep`, not the `Any` a raw code of 0
+  maps to.
 
 - GIF disposal code **4** rewinds the canvas the way libnsgif does, instead of
   keeping it (issue #827). GIF89a reserves codes 4 to 7; libnsgif remaps 4 onto
