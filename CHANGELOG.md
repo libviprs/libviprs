@@ -2198,6 +2198,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`histogram.rs` reads a bin index and a histogram's own count through two
+  functions now, and only one of them folds at 65535** (issue #888). `read_flat`
+  became `read_bin`, and `read_value` is the new one.
+
+  Folding a 32-bit sample into the 16-bit table is what libvips does when it
+  casts a 32-bit input down before counting it, measured in #803, and it is
+  right as a **bin index**. It is wrong as a **count**: a count of 90000 is a
+  count of 90000. `hist_cum`, `hist_norm`, `hist_match`, `hist_ismonotonic`,
+  `hist_entropy`, `hist_plot` and `maplut`'s LUT entry all read counts through
+  the folding one.
+
+  Nothing changes today, because nothing in the crate can yet produce a count
+  above 65535. It goes in ahead of the widened counters of issue #532, because
+  widening them onto a folding read would have clamped every count straight back
+  to 65535 with every format assertion still passing.
+
+  Of the 30 call sites, 19 keep the fold and 11 lose it. Three functions read
+  both a few lines apart, `maplut`, `hist_find_indexed` and `hist_entropy`, and
+  they carry their own mutation rows.
+
 - The crate has one fallible-plane helper instead of three private copies of
   it: `raster::try_plane`, its `_len` and `_filled` forms, and a single
   `cfg(test)` probe over all of them that a check addresses **by site label**
@@ -2963,6 +2983,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matching on the typed errors is unaffected; only the panic text changes.
 
 ### Fixed
+
+- **`maplut` refuses a lookup table longer than 65536 elements**, the bound
+  libvips enforces (issue #894). `vips maplut` with a 70000-element table answers
+  "histograms must have not have more than 65536 elements" and exits non-zero,
+  measured on `/opt/homebrew/bin/vips` 8.18.6; libviprs accepted it.
+
+  Found while building #888's mutation table, as the explanation for a mutation
+  that would not redden. `maplut` reads an index and a LUT entry a line apart,
+  and pointing the index read at the non-folding reader changes nothing, because
+  the site already clamps with `.min(n_lut - 1)` and for any `n_lut <= 65536`
+  that clamp subsumes the fold at 65535 entirely. That argument only holds while
+  the table is bounded, and nothing bounded it: with a 70000-element table and a
+  sample of 68000, the folding read picks entry 65535 and the non-folding one
+  picks entry 68000. The missing bound was doing double duty as an accidental
+  correctness argument.
 
 - **`msb` accepted a float raster and shifted its bit pattern** (issue #860).
   `vips msb` answers "msb: image must be integer" and exits non-zero, measured on
