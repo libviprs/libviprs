@@ -711,6 +711,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **An unsigned 32-bit pixel carrier**, `PixelFormat::Uint32(NonZeroU16)`, the
+  libvips `VIPS_FORMAT_UINT` one (issue #517). It is what the counting ops need:
+  `hist_find`, `hist_cum`, `project` and the `hough_*` family all count pixels
+  and libvips emits every one of them as `uint`, so a 300x300 image already
+  overflows a 16-bit counter. Widening those counters onto it is issue #532 and
+  lands separately.
+
+  There is no named four-band spelling of it, so `Uint32(n)` is canonical at
+  every band count and carries no alias, unlike `FloatF32(4)` and `RgbaF32`.
+  Like the multiband and float variants it is a compute intermediate: the tile
+  sinks and the 8/16-bit container encoders refuse it with a typed error naming
+  it, rather than narrowing it behind the caller's back.
+
+  **`PixelFormat::with_kind` is the only constructor that reaches it.**
+  `with_channels(n, 4)` still answers the float carrier, because that is the
+  answer every existing caller asked for, and a byte width does not name a
+  carrier. That pair is the sharpest statement of issue #607 in the crate: two
+  constructors, one width, two different answers, and a test pinning both.
+
+  The ops that read samples one at a time carry it: `cast` both ways, `embed`,
+  `gravity`, `insert`, `bandjoin`, `bandjoin_const`, `bandmean`, the `bandbool`
+  family, `bandrank`, `extract_band`, `arrayjoin`, `ifthenelse`, `switch`,
+  `msb`, `flatten`, `falsecolour`, `gamma`, `downscale_half`, `downscale_to`
+  and `resize`. Every one of those answers were measured against
+  `/opt/homebrew/bin/vips` 8.18.6 rather than reasoned about, because vips
+  supports `uint` at all of them and preserves the value exactly: a 4x4 `uint`
+  image at 90000 comes back at 90000 from `resize 0.5`, `shrink 2 2` and
+  `bandmean`, `addalpha` appends 255, `embed --extend white` fills 4294967295,
+  `msb` gives 0 and `falsecolour` gives (174, 0, 0).
+
+  Two places where the answer is deliberately *not* vips's, both measured:
+
+  - **Narrowing.** libvips takes a `uint` sample through a signed `int` on the
+    way down, so on 8.18.6 a `uint` raster holding 2147483647 casts to `uchar`
+    255 and one holding 2147483648 casts to **0**, with the boundary exactly at
+    `INT_MAX`. `cast` clips at the target's ceiling instead, so both answer 255.
+  - **`resize`.** libviprs reads the reduce mask as `double` where vips reads
+    its 12-bit fixed-point copy, which is the divergence
+    `reduce_preserves_a_constant_where_the_vips_short_mask_does_not` already
+    pins on the narrower carriers. On a 4x4 `uint` ramp `vips resize 0.5`
+    answers 102360 and libviprs answers 102359; the same image cast to FLOAT
+    and resized by vips answers 102358.62, so the exact result rounds to
+    libviprs's number.
+
+  Two typed refusals replace panics out of `Result`-returning methods, the shape
+  issue #694 landed: `BandError::UnsupportedSampleKind` and
+  `ExtractError::UnsupportedSampleKind`, alongside
+  `ConversionError::UnsupportedSampleKind`. They also fix a message that named
+  the wrong carrier: the width-keyed `_` arms panicked saying "float rasters"
+  over a raster that is not float. `smartcrop`'s entropy and attention
+  strategies keep a stricter guard and refuse the 32-bit carrier, because both
+  build a value-indexed table and `SampleKind::hist_bins` is `None` at 32 bits,
+  the same answer it gives for float.
+
+  `Uint32` rasters round-trip through the `.v` container once #841 lands (PR
+  #858, which this stacks on): the `BandFmt` wire tag used to be written from a
+  byte width, and a byte width does not name a carrier.
 - **A gate against a byte width standing in for a sample kind**, which is what
   issue #607 step (e) asks for: `tests/sample_kind_spine.rs` refuses a
   `bytes_per_channel()` comparison anywhere under `src/`. It is a scan rather
