@@ -73,7 +73,8 @@
 //! # Header fields
 //!
 //! Every field `gifload` attaches beside the pixels, and what this loader
-//! does with it. The table is **checked**, three ways:
+//! does with it. **Every one of them is attached**, as of #852. The table is
+//! **checked**, three ways:
 //! `the_header_field_table_matches_what_this_loader_attaches` parses it out of
 //! this file and requires every "attached" row to be present on a raster built
 //! to satisfy every condition here, every "not attached" row to be absent from
@@ -93,7 +94,7 @@
 //! | `bits-per-sample` | `gint` | attached |
 //! | `interlaced` | `gint` | attached when some frame is stored interlaced |
 //! | `gif-palette` | `VipsArrayInt` | attached when no frame carries a local colour table |
-//! | `background` | `VipsArrayDouble` | not attached, see below |
+//! | `background` | `VipsArrayDouble` | attached, the colour table entry the screen descriptor points at |
 //! | `gif-loop` | `gint` | attached, `loop - 1`, except that `loop 0` and `loop 1` both give 0 |
 //! | `gif-delay` | `gint` | attached, this raster's first delay in centiseconds |
 //! | `palette-bit-depth` | `gint` | attached, the same number as `bits-per-sample` |
@@ -350,17 +351,12 @@
 //!
 //! # Not handled here
 //!
-//! **`background`.** It is the only `gifload` field this loader reads and
-//! does not attach, and the reason is its type: vips stores it as a
-//! `VipsArrayDouble` (measured, three doubles holding the RGB of the colour
-//! table entry the screen descriptor points at) and
-//! [`crate::imageio::MetadataValue`] has an integer array and no
-//! floating-point one. Writing it as a [`MetadataValue::IntArray`] would put
-//! the right numbers under a type every reader written against vips ignores,
-//! which is worse than leaving it off. The value itself is already computed
-//! here, by `background_rgb` for the restore-to-background disposal, so
-//! attaching it is a field write behind a variant that does not exist yet;
-//! issue #852 is that variant.
+//! **Nothing, of `gifload`'s header fields.** `background` was the last one
+//! this loader read and did not attach, and #852 landed the
+//! [`MetadataValue::DoubleArray`] it needed: vips stores it as a
+//! `VipsArrayDouble` and an integer array would have been numerically right
+//! and typed wrong, which is a field every reader written against vips
+//! ignores.
 //!
 //! `gifsave`'s `effort`, `reuse`,
 //! `interpalette-maxerror`, `interframe-maxerror` and `keep-duplicate-frames`
@@ -987,6 +983,18 @@ pub fn decode_gif_with(
     }
     raster.set_field("delay", MetadataValue::IntArray(delays));
     raster.set_field("palette", MetadataValue::Int(1));
+    // The colour table entry the logical screen descriptor points at, as the
+    // three doubles vips stores it as (`nsgifload.c:293`,
+    // `vips_image_set_array_double`). The value is already resolved above,
+    // for the restore-to-background disposal, so this is a field write and
+    // not new arithmetic; what it waited on was
+    // `MetadataValue::DoubleArray` (issue #852). An `IntArray` would have
+    // been numerically right and typed wrong, and a field of the wrong type
+    // is one this crate's own readers ignore.
+    raster.set_field(
+        "background",
+        MetadataValue::DoubleArray(background.iter().map(|&b| f64::from(b)).collect()),
+    );
     // The global colour table, and only when no frame in the file overrides
     // it with one of its own (issue #828). vips packs each entry as libnsgif's
     // `R, G, B, A` byte quad reinterpreted as a machine integer, which reads
@@ -5411,7 +5419,10 @@ mod tests {
      * Every row marked "attached" has to be present on the first, every row
      * marked "not attached" absent from both, and every row marked "attached
      * **when**" absent from the second, which is what puts the condition
-     * column inside the check instead of beside it. The first raster's whole
+     * column inside the check instead of beside it. Since #852 there are no
+     * "not attached" rows left, so two synthetic rows keep the parser honest
+     * about telling the verdicts apart; without them the whole check would
+     * pass with the verdict hard-coded. The first raster's whole
      * field set then has to be a subset of the rows, which is what makes
      * "every field `gifload` attaches" a claim rather than a sentence: without
      * it, a field the loader attaches and the table never mentions is
@@ -5433,33 +5444,48 @@ mod tests {
             .find(HEADER)
             .expect("the module doc's header-field table moved");
         // (name, attached, conditional)
-        let mut rows: Vec<(String, bool, bool)> = Vec::new();
-        for line in SRC[at + HEADER.len()..].lines().skip(1) {
-            let Some(row) = line.trim().strip_prefix("//! |") else {
-                break;
-            };
+        let parse_row = |row: &str| -> (String, bool, bool) {
             let cells: Vec<&str> = row.split('|').map(str::trim).collect();
-            if cells[0].starts_with("---") {
-                continue;
-            }
             let name = cells[0].trim_matches('`').to_string();
             let verdict = cells[2];
             assert!(
                 verdict.starts_with("attached") || verdict.starts_with("not attached"),
                 "row {name:?} says {verdict:?}, which is neither verdict"
             );
-            rows.push((
+            (
                 name,
                 verdict.starts_with("attached"),
                 verdict.starts_with("attached when"),
-            ));
+            )
+        };
+        let mut rows: Vec<(String, bool, bool)> = Vec::new();
+        for line in SRC[at + HEADER.len()..].lines().skip(1) {
+            let Some(row) = line.trim().strip_prefix("//! |") else {
+                break;
+            };
+            if row.trim_start().starts_with("---") {
+                continue;
+            }
+            rows.push(parse_row(row));
         }
         // The parser is the part most likely to rot into a vacuous pass, so
-        // pin that it found a real table with all three kinds of row on it.
+        // pin that it found a real table.
         assert!(rows.len() >= 10, "only parsed {} rows", rows.len());
         assert!(rows.iter().any(|(_, attached, _)| *attached));
-        assert!(rows.iter().any(|(_, attached, _)| !*attached));
         assert!(rows.iter().any(|(_, _, conditional)| *conditional));
+        // **Every row is now an "attached" row**, because #852 attached the
+        // last field this loader read and did not attach. So the table itself
+        // can no longer show that the parser tells the two verdicts apart,
+        // and two synthetic rows do it instead. Without this the whole check
+        // would pass with `attached` hard-coded true.
+        assert_eq!(
+            parse_row(" `x` | `gint` | not attached, because |"),
+            ("x".to_string(), false, false)
+        );
+        assert_eq!(
+            parse_row(" `y` | `gint` | attached when it feels like it |"),
+            ("y".to_string(), true, true)
+        );
         for must in ["background", "gif-palette", "delay", "n-pages"] {
             assert!(
                 rows.iter().any(|(name, _, _)| name == must),
