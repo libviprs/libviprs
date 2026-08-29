@@ -482,7 +482,19 @@ pub(crate) fn white_ink(format: PixelFormat, interpretation: Interpretation) -> 
         // 4294967295 (`0xFFFFFFFF`) and on an `int` one fills -1, the same
         // bytes read signed. The comment above about `int` + scRGB
         // measuring `0x01010101` is the low-ink end of the same rule.
-        PixelFormat::Uint32(_) => f64::from((byte << 24) | (byte << 16) | (byte << 8) | byte),
+        PixelFormat::Uint32(_) | PixelFormat::Int32(_) => {
+            f64::from((byte << 24) | (byte << 16) | (byte << 8) | byte)
+        }
+        // The signed carriers replicate the same byte their unsigned twins
+        // of the same width do, and the sign appears at the **store**
+        // rather than here, because `memset` fills bytes and does not know
+        // the type. Measured: `vips embed --extend white` fills -1 on
+        // `char`, `short` and `int` alike, which is 0xFF, 0xFFFF and
+        // 0xFFFFFFFF read signed, the same three patterns `uchar`,
+        // `ushort` and `uint` fill as 255, 65535 and 4294967295
+        // (issue #516).
+        PixelFormat::Int8(_) => f64::from(byte),
+        PixelFormat::Int16(_) => f64::from((byte << 8) | byte),
     }
 }
 
