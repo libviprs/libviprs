@@ -576,6 +576,68 @@ mod tests {
         assert_eq!(i8s(&to), vec![-100, -1, -1, 101]);
     }
 
+    /**
+     * Tests that the alpha-weighted box kernel carries a signed carrier
+     * exactly, and that its round-half-up rule is spelled as a floor so a
+     * negative weighted sum lands where the rule says rather than one step
+     * nearer zero.
+     * Measured on `/opt/homebrew/bin/vips` 8.18.6 by writing a `--pyramid`
+     * TIFF from a 512x512 four-band `char` raster of repeating 2x2 blocks
+     * and reading level 1, which runs `SHRINK_ALPHA_TYPE`:
+     *
+     * | colours | alphas | weighted / alpha | vips |
+     * |---|---|---|---|
+     * | -100, -101, -100, -101 | 4, 4, 4, 4 | -1608 / 16 = -100.5 | **-100** |
+     * | -1, -2, -1, -1 | 1, 3, 2, 2 | -11 / 8 = -1.375 | **-1** |
+     * | 100, 101, 100, 101 | 4, 4, 4, 4 | 1608 / 16 = 100.5 | 100 |
+     *
+     * The first two rows are asserted; the third is the divergence this
+     * kernel already documents and does not close, because it rounds half
+     * up where `SHRINK_ALPHA_TYPE` truncates, so that a fully-opaque RGBA
+     * image downscales bit-identically to its RGB twin. Both negative rows
+     * agree under either rule about the *tie*, and the second one is what
+     * separates flooring from truncation: `(-11 + 4) / 8` truncates to
+     * **0** and floors to -1.
+     * Works by driving the two measured blocks through
+     * [`downscale_half`] on a four-band `Int8` raster and asserting the
+     * colour and alpha bands, with the opaque-equals-RGB invariant beside
+     * them as the control that the alpha path is not simply averaging.
+     * Input: the blocks above -> Output: -100 and -1 with alphas 4 and 2.
+     */
+    #[test]
+    fn the_alpha_box_kernel_carries_a_signed_carrier() {
+        let fmt = PixelFormat::Int8(core::num::NonZeroU16::new(4).unwrap());
+        // Two 2x2 blocks side by side, each pixel (c, c, c, a).
+        let px = |c: i8, a: i8| [c, c, c, a];
+        #[rustfmt::skip]
+        let rows: [[[i8; 4]; 4]; 2] = [
+            [px(-100, 4), px(-101, 4), px(-1, 1), px(-2, 3)],
+            [px(-100, 4), px(-101, 4), px(-1, 2), px(-1, 2)],
+        ];
+        let data: Vec<u8> = rows
+            .iter()
+            .flat_map(|r| r.iter().flat_map(|p| p.iter().map(|v| *v as u8)))
+            .collect();
+        let src = Raster::new(4, 2, fmt, data).unwrap();
+        let half = downscale_half(&src).unwrap();
+        assert_eq!((half.width(), half.height()), (2, 1));
+        assert_eq!(i8s(&half), vec![-100, -100, -100, 4, -1, -1, -1, 2]);
+
+        // Control: a fully-opaque block downscales to the same colour its
+        // three-band twin does, which is the invariant this kernel's
+        // rounding exists to keep.
+        let opaque: Vec<u8> = [px(-100, 127), px(-101, 127), px(-100, 127), px(-101, 127)]
+            .iter()
+            .flat_map(|p| p.iter().map(|v| *v as u8))
+            .collect();
+        let rgba = Raster::new(2, 2, fmt, opaque).unwrap();
+        let rgb = int8(2, 2, &[-100, -101, -100, -101]);
+        assert_eq!(
+            i8s(&downscale_half(&rgba).unwrap())[0],
+            i8s(&downscale_half(&rgb).unwrap())[0]
+        );
+    }
+
     fn solid_raster(w: u32, h: u32, pixel: &[u8], fmt: PixelFormat) -> Raster {
         let bpp = fmt.bytes_per_pixel();
         assert_eq!(pixel.len(), bpp);
