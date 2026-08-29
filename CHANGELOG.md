@@ -3168,8 +3168,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   spelling went **29 -> 22 -> 18**. Both remaining heads are outside this
   work: `fits.rs:409` is already width-total, and `jp2k.rs:1721` arrived
   after the census.
-
-
 - **A 20-byte WebP file could panic the chunk walk on a 32-bit target**
   (issue #862). `opaque_blended_frame_offsets` steps over a RIFF chunk by
   `size + (size & 1)`, and only the outer addition was checked. `size` comes
@@ -3573,6 +3571,149 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `crate::resample`'s two thumbnail paths lose the `copy().interpretation(...)`
   restamps they carried to work around this, which also removes two
   image-sized clones from the linear and ICC thumbnail pipelines.
+
+- **Refusing a window past a still's only page is a divergence, not parity,
+  and the docs say so now** (issue #893). `src/webp.rs` described the
+  refusal as what vips does. It is not: vips validates `page` and `n` only
+  when the file is animated, so `vips copy 'still.webp[page=5]'` succeeds
+  and hands back the one image, and so do `[n=2]`, `[page=1,n=2]` and even
+  `[n=0]`. All five measured with `vips copy` rather than `vipsheader`, so
+  the pixel phase really runs.
+
+  The behaviour is unchanged and deliberate: a caller who asked for page 5
+  and got page 0 has no way to tell, which is the same silent-wrong-answer
+  shape the delay subsetting avoids. All three animated loaders agree on it
+  and `tests/animation_dialect.rs` holds them to it. Only the sentence
+  claiming vips agreed was wrong, in both `src/webp.rs` and `src/jxl.rs`.
+
+- **The WebP decode budget covers what `image-webp` allocates, not only what
+  libviprs fills** (issue #892). `max_alloc_bytes` is a ceiling on peak
+  memory and it was out by a factor: the decoder keeps a full-size RGBA
+  canvas and a full-size per-frame buffer of its own, and `set_memory_limit`
+  bounds neither, because it is consulted only on metadata chunks. Measured
+  with a counting global allocator on 512x512 fixtures, peak live bytes
+  against the amount priced:
+
+  | file | load | ratio | slack, in RGBA planes of one frame |
+  |---|---|---|---|
+  | lossless animation | one page | 3.67x | 2.00 |
+  | lossless animation | every page | 2.36x | 2.05 |
+  | lossy animation | one page | 3.33x | 1.75 |
+  | lossy animation | every page | 2.42x | 2.13 |
+  | lossless still | | 2.39x | 1.04 |
+  | lossy still | | 1.68x | 0.51 |
+
+  The price now carries three RGBA planes of one frame for an animation and
+  two for a still, both upper bounds with a plane of headroom, because the
+  measurements are asymptotic and the fixed overheads dominate below about
+  512x512. `webp::DECODER_PLANES_ANIMATED` and `DECODER_PLANES_STILL` are
+  the two numbers, public so the guard can restate them.
+
+  **This refuses files it used to accept**, at the same `max_alloc_bytes`,
+  which is the point: the old ceiling did not bound the decode. The WebP row
+  in `tests/decode_alloc_refusal_shape.rs` moves from 48 to 176 and that
+  shared guard grows a `decoder_planes` column, since "the reported geometry
+  is the one the price came from" is no longer the whole rule for a decoder
+  that lives in another crate.
+
+  `tests/webp_decode_working_set.rs` holds the model from both sides on a
+  committed 512x512 fixture: the peak must not exceed the price, and the
+  price must not exceed twice the peak.
+
+- **Three reasons a JPEG XL frame has no duration stopped being one**
+  (issue #889). `frame_millis` returned an `Option` and the loader read
+  `None` as "this is a page of a multipage document", which also swallowed
+  a keyframe the decoder could not describe and a `tps_numerator` of zero.
+  The second fabricated a `0 ms` delay; the third turned **every** frame
+  into `None`, so a malformed animation read back with no `delay`, no
+  `loop` and no `gif-delay` at all and nothing said the file was broken.
+
+  It now returns a `Result<Option<..>>` with three answers, and there are
+  two new `JxlError` variants, `BadAnimationRate` and `FrameHeaderMissing`,
+  on an enum that is already `#[non_exhaustive]`. Both are defensive: the
+  bitstream encodes `tps_numerator` as `U32(100, 1000, 1 + u(10), 1 + u(30))`
+  whose smallest value in any arm is 1, and `num_loaded_keyframes` bounds
+  the index `frame_header` is asked for, so neither is reachable from a file
+  I could build. That is a read of the format's spec rather than a
+  measurement, and the reason to fix it anyway is that the collapse was
+  silent in the direction that matters.
+
+  One fabrication is left and is documented at the line: a sentinel frame
+  inside a file that is otherwise an animation still reads as `0 ms`.
+  libjxl writes the sentinel on every frame or on none, and vips maps it to
+  `-1`, which an unsigned delay has no spelling for.
+
+- **Every per-frame field follows the loaded window, and the docs now say
+  so** (issue #890). The deliberate `delay` subsetting takes `gif-delay`
+  with it, because `gif-delay` is the first delay in centiseconds, and only
+  the `delay` array was written down. Measured across five windows on both
+  loaders, using `vipsheader -f` rather than `-a`, which does not list the
+  compat fields at all:
+
+  | load | vips `gif-delay` | here |
+  |---|---|---|
+  | default | 4 | 4 |
+  | `page=1` | 4 | 7 |
+  | `page=1,n=2` | 4 | 7 |
+  | `page=2,n=2` | 4 | 20 |
+  | `page=3` | 4 | 1 |
+
+  The `page=2,n=2` row is the one that makes the rule legible rather than
+  anecdotal: 20 is 200 ms, which is neither the file's first delay nor the
+  window's second. Both `src/webp.rs` and `src/jxl.rs` carry the table now.
+
+  The same section also fixes an argument rather than code. `ANIM4_DELAY`'s
+  doc claimed 45 ms proves `gif-delay` rounds half to even, and it does
+  not: `rint(4.5)` is 4 under half-to-even **and** under truncation, so that
+  window only rules out half-up. It takes two windows, and the second is
+  `page=1`, where 67 ms gives 7 and truncation would give 6. The rule is
+  round-half-to-even and the code was right; the sentence under it was not.
+
+- **A WebP frame marked dispose-to-background is disposed** (issue #884).
+  `image-webp` 0.2.4 clears a disposed frame's rectangle only when a
+  background colour has been set, and it has none unless a caller sets one,
+  so the disposal step was skipped and the previous frame's pixels stayed on
+  the canvas under the next one. Measured on an `img2webp` fixture whose
+  frame 0 covers the canvas in red and disposes to background: vips reads
+  the area outside frame 1's square as the cleared canvas and libviprs read
+  it as red.
+
+  libviprs now asks for transparent black, which is what libwebp clears to.
+  It **ignores** the colour the `ANIM` chunk declares: the fixture declares
+  `0xFFFFFFFF` and a copy patched to opaque green reads back the same, both
+  measured, so the declared colour is a hint for a display environment
+  rather than something a decoder paints.
+
+  Nothing in `oracle-captures/foreign-webp` could have caught this, because
+  `vips webpsave` has no disposal knob and writes `dispose: none` on every
+  frame. The fixture is `img2webp`'s output with the vips read recorded
+  beside it.
+
+- **The `ANMF` blend-flag rewrite is withdrawn, and animated WebP frames
+  the file asks to have blended decode one grey level low again** (issue
+  #863). The rewrite proved a frame opaque from its `VP8L` `alpha_is_used`
+  header bit, and libwebp never reads that bit: `BlendPixelRowNonPremult`
+  tests each pixel's own alpha. So a header claiming an opacity the pixels
+  do not have made libviprs copy where vips blends. Measured on a crafted
+  file, `ANIM4_RGBA` with blending switched on and `alpha_is_used` cleared:
+  139 of 192 bytes differ and the worst delta is **228**, which is not a
+  rounding error, it is a different picture.
+
+  Trading a bounded upstream error for an unbounded one this crate owns is
+  the wrong way round, and there is no sound way to prove a frame opaque
+  from a header, so the workaround is gone rather than narrowed. What comes
+  back is `image-webp` 0.2.4's own arithmetic: every non-zero channel of a
+  blended page one level low, zero unchanged. `vips webpsave` writes
+  blending on for every frame after the first of an **opaque** animation and
+  off for every frame of a **transparent** one, so an opaque animation loses
+  a level on pages 1 and up and a transparent one is byte-exact, both
+  measured and both pinned. `as_image_webp_blends` in the tests is that rule
+  written down, so the day it is fixed upstream is a red test rather than a
+  surprise.
+
+  This supersedes the entry below, which described the rewrite as the fix
+  for #837. #837 is reopened: the underlying defect is real and belongs
+  upstream.
 
 - **Animated WebP frames after the first no longer decode one grey level
   low.** `image-webp` 0.2.4 runs its approximate alpha blend on fully opaque
