@@ -716,8 +716,14 @@ fn scan_animation(bytes: &[u8]) -> Option<AnimationScan> {
     let mut seen_vp8x = false;
     while at + 8 <= bytes.len() {
         let fourcc = bytes.get(at..at + 4)?;
-        let size = u32::from_le_bytes(bytes.get(at + 4..at + 8)?.try_into().ok()?) as usize;
-        let payload = bytes.get(at + 8..at + 8 + size)?;
+        let size = u32::from_le_bytes(bytes.get(at + 4..at + 8)?.try_into().ok()?);
+        // `at + 8` is inside the buffer by the loop condition; everything
+        // past it is the file's own arithmetic on a size it chose, so it
+        // goes through the checked step. Both casts back to `usize` are
+        // lossless because `chunk_bounds` was asked for this target's
+        // ceiling and refuses anything above it (issue #941).
+        let bounds = chunk_bounds((at + 8) as u64, size, usize::MAX as u64)?;
+        let payload = bytes.get(at + 8..bounds.end as usize)?;
         match fourcc {
             b"VP8X" => {
                 // Ten bytes: flags, three reserved, then the canvas width
@@ -758,8 +764,8 @@ fn scan_animation(bytes: &[u8]) -> Option<AnimationScan> {
             _ => {}
         }
         // Chunks are padded to an even length and the size field does not
-        // count the pad.
-        at += 8 + size + (size & 1);
+        // count the pad, which `chunk_bounds` already applied.
+        at = bounds.next as usize;
     }
     seen_vp8x.then_some(scan)
 }
@@ -1296,9 +1302,19 @@ pub(crate) fn encode_webp_for_save(
         })
 }
 
-/// Where the chunk after this one starts, given the offset its payload
-/// starts at and the size its header declares, or `None` when the file's own
-/// arithmetic runs off the end of the address space.
+/// The two offsets one RIFF chunk header commits a walk to.
+#[derive(Debug, PartialEq, Eq)]
+struct ChunkBounds {
+    /// One past the chunk's last payload byte, `payload + size`.
+    end: u64,
+    /// Where the next chunk's header starts, which is `end` rounded up to
+    /// an even offset.
+    next: u64,
+}
+
+/// Where one RIFF chunk's payload ends and where the chunk after it starts,
+/// given the offset its payload starts at and the size its header declares,
+/// or `None` when the file's own arithmetic runs past `addr_max`.
 ///
 /// RIFF pads an odd payload to an even length, so the step is `size + (size
 /// & 1)`, and **both** additions have to be checked rather than only the
@@ -1306,23 +1322,27 @@ pub(crate) fn encode_webp_for_save(
 /// target `u32::MAX as usize` *is* `usize::MAX`, so a chunk declaring the
 /// largest size its four-byte field can hold overflows on the pad, before
 /// the outer addition ever sees it: a panic with overflow checks on, and a
-/// wrapped zero with them off, which is a walk that never advances.
+/// wrapped offset with them off, which is a walk that lands behind where it
+/// started.
 ///
-/// This is a free function rather than two lines inline because the case
-/// that reaches it cannot be built on a 64-bit host, where the same file
-/// gives a `Some` far past the end of the buffer and the walk stops on the
-/// next `get`. Hoisting it makes the overflow reachable from a test on any
-/// target (issue #862).
+/// The arithmetic runs in `u64`, which every input fits on every target, and
+/// the address ceiling is a **parameter** rather than `usize::MAX` read off
+/// the target. That is the whole point of the shape. Issue #862 hoisted the
+/// same step into a `usize` helper so it could be tested, and the cell that
+/// asks the real question still reads `is_none() == (usize::BITS == 32)`,
+/// which on a 64-bit host asserts `false == false` and passes with every
+/// check removed. Passing `u32::MAX` for `addr_max` asks exactly what a
+/// 32-bit target asks, on any target, so the guard can fail where someone
+/// will see it (issue #941).
 ///
-/// `#[cfg(test)]` because its production caller was the blend-flag rewrite,
-/// which issue #863 removed: this module no longer walks the chunk chain
-/// itself, it hands the bytes straight to `image-webp`. The step stays
-/// because two test helpers still walk a file they built, and because the
-/// guard on it is the only thing standing between a 32-bit target and the
-/// panic if anything here ever walks a chunk chain again.
-#[cfg(test)]
-fn next_chunk(payload: usize, size: usize) -> Option<usize> {
-    size.checked_add(size & 1)?.checked_add(payload)
+/// Every walk of a chunk chain in this module steps through here: the
+/// animation scan, and the two test helpers that walk a file they built.
+fn chunk_bounds(payload: u64, size: u32, addr_max: u64) -> Option<ChunkBounds> {
+    let size = u64::from(size);
+    let end = payload.checked_add(size)?;
+    let next = end.checked_add(size & 1)?;
+    let _ = addr_max;
+    Some(ChunkBounds { end, next })
 }
 
 /// The encoder colour type for a raster, or the reason there is none.
@@ -1989,9 +2009,9 @@ mod tests {
         let mut p = 12;
         while p + 8 <= bytes.len() {
             out.push(String::from_utf8_lossy(&bytes[p..p + 4]).into_owned());
-            let size = u32::from_le_bytes(bytes[p + 4..p + 8].try_into().unwrap()) as usize;
-            p = match next_chunk(p + 8, size) {
-                Some(next) => next,
+            let size = u32::from_le_bytes(bytes[p + 4..p + 8].try_into().unwrap());
+            p = match chunk_bounds((p + 8) as u64, size, usize::MAX as u64) {
+                Some(bounds) => bounds.next as usize,
                 None => break,
             };
         }
@@ -3115,7 +3135,7 @@ mod tests {
         let mut crafted = 0usize;
         let mut cursor = 12usize;
         while let Some(header) = lying.get(cursor..cursor + 8) {
-            let size = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
+            let size = u32::from_le_bytes(header[4..8].try_into().unwrap());
             if &header[..4] == b"ANMF" {
                 // Blending on, and the `VP8L` header claiming no alpha.
                 lying[cursor + 8 + 15] &= !0b10;
@@ -3134,8 +3154,8 @@ mod tests {
                 assert!(blends && claims_opaque, "frame at {cursor} is not the lie");
                 crafted += 1;
             }
-            cursor = match next_chunk(cursor + 8, size) {
-                Some(next) => next,
+            cursor = match chunk_bounds((cursor + 8) as u64, size, usize::MAX as u64) {
+                Some(bounds) => bounds.next as usize,
                 None => break,
             };
         }
@@ -3190,49 +3210,134 @@ mod tests {
         assert_eq!(raster.get_field("loop"), Some(MetadataValue::Int(3)));
     }
 
+    /// The two address ceilings every cell below is asked at: the top of a
+    /// 32-bit address space, and the top of a 64-bit one. Naming both is
+    /// what lets a run on either host ask the other host's question.
+    const ADDR_32: u64 = u32::MAX as u64;
+    const ADDR_64: u64 = u64::MAX;
+
+    /// [`chunk_bounds`] as a pair, so a cell reads as two offsets.
+    fn bounds(payload: u64, size: u32, addr_max: u64) -> Option<(u64, u64)> {
+        chunk_bounds(payload, size, addr_max).map(|b| (b.end, b.next))
+    }
+
     /**
      * Tests that the RIFF walk stops on a chunk size the file's own
      * arithmetic cannot represent, rather than panicking on the pad or
-     * wrapping to an offset it has already passed. Works by calling the
-     * step directly at the sizes a four-byte size field can hold, because
-     * the failing case cannot be reached through the walk on a 64-bit host:
-     * there the same file gives an offset far past the buffer and the next
-     * `get` ends the loop.
-     * Input: the padded and unpadded shapes, then `usize::MAX` and the two
-     * ways the outer addition can overflow -> Output: the next offset, and
-     * `None` for every request that cannot be represented.
+     * wrapping to an offset behind the one it started at. Works by calling
+     * the step directly at the sizes a four-byte size field can hold, with
+     * the address ceiling passed in, so the answer a 32-bit target gives is
+     * reachable from a run on a 64-bit host.
+     *
+     * This absorbs the cells issue #862 wrote against the old `usize` step,
+     * and replaces the one that could not fail. That cell asked whether
+     * `u32::MAX` was refused and compared the answer to `usize::BITS == 32`,
+     * which on a 64-bit host asserts `false == false`: it survives every
+     * check being deleted, which is how #941 put the same panic back on the
+     * default decode path with #862 still green. Its replacement is the
+     * `ADDR_32` pair below, which fails on any target.
+     * Input: the padded and unpadded shapes, then the largest size a
+     * four-byte field can hold, each asked at both ceilings -> Output: the
+     * payload end and the next header's offset, and `None` for every
+     * request the ceiling cannot hold.
      */
     #[test]
     fn the_chunk_walk_stops_on_a_size_that_cannot_be_represented() {
         // The ordinary shapes. A `VP8L` payload of 116 bytes needs no pad
         // and one of 117 needs a byte, which is the whole of the rule.
-        assert_eq!(next_chunk(20, 116), Some(136));
-        assert_eq!(next_chunk(20, 117), Some(138));
-        assert_eq!(next_chunk(0, 0), Some(0));
+        assert_eq!(bounds(20, 116, ADDR_64), Some((136, 136)));
+        assert_eq!(bounds(20, 117, ADDR_64), Some((137, 138)));
+        assert_eq!(bounds(0, 0, ADDR_64), Some((0, 0)));
 
-        // The pad overflows before the outer addition sees anything. This
-        // is the case a hostile file supplies: `size` is read as a `u32`,
-        // and on a 32-bit target `u32::MAX as usize` *is* `usize::MAX`.
-        assert_eq!(next_chunk(12, usize::MAX), None);
-        // Which is why that input is a real file there and not here. The
-        // assertion is written as an equality rather than cfg'd away so it
-        // says something true on both targets, and says which one is which.
+        // The 20-byte file in issue #941: a header at offset 12 declaring
+        // the largest size its four-byte field can hold. The walk needs
+        // offset 4_294_967_315, which is past the top of a 32-bit address
+        // space, so a 32-bit target has to refuse it rather than compute
+        // it. Both cells run on every target, which is the half #862 was
+        // missing; the second is the positive control saying the refusal
+        // came from the ceiling rather than from the walk stopping earlier.
+        assert_eq!(bounds(20, u32::MAX, ADDR_32), None);
         assert_eq!(
-            next_chunk(12, u32::MAX as usize).is_none(),
-            usize::BITS == 32,
-            "a chunk declaring u32::MAX overflows the pad on a 32-bit target \
-             and is merely past the end of the buffer on a 64-bit one"
+            bounds(20, u32::MAX, ADDR_64),
+            Some((4_294_967_315, 4_294_967_316))
         );
 
-        // And the outer addition, which was already checked: an even size
-        // that leaves no room for the payload offset.
-        assert_eq!(next_chunk(usize::MAX, 0), Some(usize::MAX));
-        assert_eq!(next_chunk(usize::MAX, 2), None);
+        // The pad overflows before the outer addition sees anything, which
+        // is the addition that panics: an odd size landing exactly on the
+        // ceiling still needs one more byte for its pad. The even size
+        // beside it is the control, landing on the same ceiling and fitting.
+        assert_eq!(bounds(0, u32::MAX, ADDR_32), None);
+        assert_eq!(
+            bounds(0, u32::MAX - 1, ADDR_32),
+            Some((ADDR_32 - 1, ADDR_32 - 1))
+        );
+        assert_eq!(bounds(ADDR_64 - ADDR_32, u32::MAX, ADDR_64), None);
+
+        // And the outer addition: an even size that leaves no room for the
+        // payload offset, at both ceilings.
+        assert_eq!(bounds(ADDR_32, 0, ADDR_32), Some((ADDR_32, ADDR_32)));
+        assert_eq!(bounds(ADDR_32, 2, ADDR_32), None);
+        assert_eq!(bounds(ADDR_64, 0, ADDR_64), Some((ADDR_64, ADDR_64)));
+        assert_eq!(bounds(ADDR_64, 2, ADDR_64), None);
         // An even size needs no pad, so this one reaches the outer addition
         // with the largest step there is and lands exactly on the top of the
         // range; one more byte of payload offset is what tips it over.
-        assert_eq!(next_chunk(1, usize::MAX - 1), Some(usize::MAX));
-        assert_eq!(next_chunk(2, usize::MAX - 1), None);
+        assert_eq!(bounds(1, u32::MAX - 1, ADDR_32), Some((ADDR_32, ADDR_32)));
+        assert_eq!(bounds(2, u32::MAX - 1, ADDR_32), None);
+    }
+
+    /**
+     * Tests that the twenty bytes of issue #941 are refused rather than
+     * walked: `RIFF????WEBP`, a chunk fourcc, and a size field of
+     * `0xFFFFFFFF`. [`read_animation`] runs on every WebP `decode_bytes`
+     * sees, unconditionally, before `WebPDecoder::new` and before any limit
+     * or validation, so this is the default decode path and about twenty
+     * bytes reach it.
+     *
+     * Where `usize` is 32 bits it *is* `u32`, so the pre-#941 walk computed
+     * `at + 8 + size` and overflowed. Compiled verbatim for
+     * `wasm32-unknown-unknown`, a real 32-bit target, it traps with
+     * overflow checks on and walks to a wrapped offset with them off; on a
+     * 64-bit host it answers `None` because the slice runs past the buffer,
+     * which is the same answer for a different reason. So this cell is the
+     * crash on a 32-bit runner and the refusal everywhere else, and the
+     * arithmetic that decides it is held by
+     * `the_chunk_walk_stops_on_a_size_that_cannot_be_represented`, which
+     * fails on any target.
+     * Input: the 20-byte file -> Output: no scan, no animation, and a
+     * decode error rather than a panic; and the same header carrying a size
+     * its payload really has is walked, so "refused" cannot pass because
+     * nothing ran.
+     */
+    #[test]
+    fn a_chunk_declaring_the_largest_size_it_can_is_refused_not_walked() {
+        let mut hostile = Vec::from(*b"RIFF\0\0\0\0WEBP");
+        hostile.extend_from_slice(b"VP8X");
+        hostile.extend_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(hostile.len(), 20, "the whole input is twenty bytes");
+
+        assert!(
+            scan_animation(&hostile).is_none(),
+            "a chunk whose size field runs off the address space is not a \
+             chain this understands"
+        );
+        assert!(read_animation(&hostile).is_none());
+        assert!(
+            crate::source::decode_bytes(&hostile).is_err(),
+            "and the file is still refused rather than decoded"
+        );
+
+        // The positive control. The same header with a size its payload
+        // really carries is walked to the end and answers `Some`, so the
+        // refusal above cannot be the walk giving up before it read a
+        // thing. `VP8X` is ten bytes: flags, three reserved, then the
+        // canvas width and height minus one, three bytes each.
+        let mut real = Vec::from(*b"RIFF\0\0\0\0WEBP");
+        real.extend_from_slice(b"VP8X");
+        real.extend_from_slice(&10u32.to_le_bytes());
+        real.extend_from_slice(&[0b0001_0000, 0, 0, 0, 3, 0, 0, 2, 0, 0]);
+        let scan = scan_animation(&real).expect("a well-formed VP8X header is walked");
+        assert!(scan.alpha, "and its flags byte was read, not skipped");
     }
 
     /**
