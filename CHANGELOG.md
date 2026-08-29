@@ -3075,6 +3075,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Reachable from any AVIF file that decodes, so from untrusted bytes.
 
+  Miri is the only thing that can see this, and the Miri job cannot run the
+  AVIF feature (issue #675 has the measurement), so
+  `the_av1_input_buffer_is_lent_to_dav1d_rather_than_taken_from_it` holds the
+  shape of the call sequence in an ordinary test run instead. It reads the
+  FFI region with the comments stripped, because the sentence explaining why
+  `dav1d_data_create` is not used names it.
+
 - **`maplut` refuses a lookup table longer than 65536 elements**, the bound
   libvips enforces (issue #894). `vips maplut` with a 70000-element table answers
   "histograms must have not have more than 65536 elements" and exits non-zero,
