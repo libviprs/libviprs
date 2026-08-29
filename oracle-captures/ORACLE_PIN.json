@@ -3,6 +3,7 @@
   "why": "A `brew upgrade` nobody ran deliberately replaced vips 8.18.4 with 8.18.6 mid-session and deleted the old keg, so the reference implementation for twenty-odd issues of work moved without anyone choosing to move it. Every area recorded `vips-8.18.4` in its own meta block, in its own key, and nothing compared those strings to each other or to the binary on the machine. This file is the one place the target is written down, `capture.py` refuses to run against a binary that disagrees with it, and `tests/oracle_capture_pins.rs` fails if a committed capture records a version this file does not declare for it.",
   "pinned_vips_version": "vips-8.18.6",
   "pinned_because": "8.18.6 is what exists on the capture host; 8.18.4 cannot be reinstalled from the current Homebrew tap without building it. The delta between the two is two loader-level behaviours (EXR refuses a data window under 2 pixels on either axis, and vips__mat_ismat now validates 128 bytes rather than 10) plus one byte of container metadata: `build_xml` in libvips/iofuncs/vips.c writes VIPS_MICRO_VERSION into the `.v` trailer's XML namespace, so every `.v` file written by 8.18.6 differs from the 8.18.4 one at exactly that byte and nowhere else. No arithmetic moved.",
+  "off_pin_states": "An area whose `vips_version` is not `pinned_vips_version` is one of two things, and the difference is the point of the word. `pre_pin` means a move is possible and has not been made; its `note` says what a re-measure found and what the repin would cost. `frozen` means the capture stays where it is: the pinned build cannot answer the question the capture asks, so re-taking it would delete records rather than move them. Both require a `note`, and `every_off_pin_capture_area_says_why_it_is_off_the_pin` in `tests/vips_claims.rs` fails without one. Before issue #952 all six off-pin areas were `pre_pin` and three carried no note at all, which made a permanent divergence read as a pending chore, and 8.18.4 is not installable from the current tap, so nobody was going to do the chore.",
   "how_to_move_the_pin": "Run the area's capture.py with --repin against the new binary, then edit this file. Both halves are needed: --repin alone leaves the committed capture recording a version this file does not declare, which is what the Rust guard fails on.",
   "codec_versions": "Not pinned here, and deliberately so. Each capture records the full transitive Homebrew keg version map of its own vips binary under `meta.provenance.homebrew_kegs`, derived automatically from `otool -L`, so provenance travels with the numbers instead of being reinvented per lane. The stack under vips moves independently of vips: the same upgrade took libheif 1.23.1 to 1.23.2, x265 4.2 to 4.3 and libultrahdr 1.5.1 to 2.0.2.",
   "areas": {
@@ -24,16 +25,18 @@
     },
     "foreign-exr": {
       "vips_version": "vips-8.18.4",
-      "state": "pre_pin",
-      "note": "Re-capturing this one is not mechanical. 8.18.6 refuses any EXR whose data window is under 2 pixels on either axis, so the `rgba_half_1x1` fixture that loaded to a 1x1 four-band raster under 8.18.4 now fails with `exr2vips: bad window geometry`. libviprs reads it, so the reconciliation is a real decision, not a re-run (issue #650)."
+      "state": "frozen",
+      "note": "Frozen at 8.18.4, and the divergence is accepted rather than pending. 8.18.6 refuses any EXR whose data window is under 2 pixels on either axis, so the `rgba_half_1x1` fixture that loaded to a 1x1 four-band raster under 8.18.4 now fails with `exr2vips: bad window geometry`. libviprs reads that file and keeps reading it, so there is no 8.18.6 answer for those records to be compared against: re-capturing would delete the rows rather than move them. This capture therefore stays where it is (issues #650, #952)."
     },
     "foreign-fits": {
       "vips_version": "vips-8.18.4",
-      "state": "pre_pin"
+      "state": "pre_pin",
+      "note": "Re-measured against 8.18.6 (issue #952): 850 leaves, 58 differ, and every one of them is either `meta.vips_version` or an absolute path. Nothing numeric moved. The paths are why this has not been repinned in passing: the capture records the absolute path of the tree it ran in, so a repin taken in a throwaway worktree replaces 57 leaves naming one checkout with 57 naming another, which is not an improvement over the stale version string."
     },
     "foreign-gif": {
       "vips_version": "vips-8.18.4",
-      "state": "pre_pin"
+      "state": "pre_pin",
+      "note": "Re-measured against 8.18.6 (issue #952): 486 leaves, 1 differs, and it is `vips_version`. So this one is mechanical, and the repin is a capture rewrite rather than a decision. It needs the reference suite at libviprs-tests/tmp/libvips-reference-tests, which the script hard-codes."
     },
     "foreign-jp2k": {
       "vips_version": "vips-8.18.6",
@@ -41,7 +44,8 @@
     },
     "foreign-jxl": {
       "vips_version": "vips-8.18.4",
-      "state": "pre_pin"
+      "state": "pre_pin",
+      "note": "Re-measured against 8.18.6 (issue #952): 978 leaves became 822, because two whole records (`viprs_grey`, `viprs_rgb`) disappeared. Those two read `.jxl` files that `Raster::encode_jxl` has to write first, so a bare re-run does not fail, it silently captures less. A repin here needs those fixtures regenerated in the same pass, and a leaf count compared afterwards; that is the trap, and it is why the version string is not the only thing standing between this area and the pin."
     },
     "foreign-mat": {
       "vips_version": "vips-8.18.6",

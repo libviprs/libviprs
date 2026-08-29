@@ -229,6 +229,14 @@ fn google_key(prefix: &str, image_name: &str, z: u32, x: u32, y: u32, ext: &str)
 // Local encoding helpers
 // ---------------------------------------------------------------------------
 
+/// The `image` colour type a tile is encoded through, or a typed refusal for
+/// the carriers that have none.
+///
+/// The same refusal [`crate::encode`]'s `image_color_type` makes, argued the
+/// same way, and its doc carries the measured oracle: three vips routes
+/// answer three different things for a `uint` or `float` raster and the
+/// interpretation tag moves one of them again, so there is no answer here to
+/// be faithful to (issue #952).
 fn color_type_for_format(fmt: PixelFormat) -> Result<image::ColorType, SinkError> {
     match fmt {
         PixelFormat::Gray8 => Ok(image::ColorType::L8),
@@ -255,7 +263,12 @@ fn color_type_for_format(fmt: PixelFormat) -> Result<image::ColorType, SinkError
         // all. A typed refusal is the implementation here rather than a
         // gap: unlike `resize` or the band ops, where vips supports `uint`
         // and refusing would have been a parity regression, there is
-        // nothing to be faithful to (issue #517).
+        // nothing to be faithful to (issue #517). Measured, rather than
+        // argued from the dependency: `vips pngsave` on a `uint`
+        // `[3000000000, 100]` answers `[0, 100]` under a `b-w` tag and
+        // `[0, 0]` under a `multiband` one, `vips cast` to `uchar` answers
+        // `[0, 100]`, and `vips dzsave` writes 0 in the full-resolution tile
+        // and 255 in the overview. No route answers the data (issue #952).
         PixelFormat::Uint32(_) => Err(SinkError::EncodeMsg(format!(
             "32-bit unsigned raster ({fmt:?}) cannot be encoded as an image tile; \
              cast to an unsigned 8/16-bit format first"

@@ -335,12 +335,21 @@ fn every_capture_declares_the_oracle_it_was_measured_against() {
                 "area {area} is marked on_pin but records {want}, not the \
                  pinned {pinned}"
             ),
-            "pre_pin" => assert_ne!(
+            // `pre_pin` and `frozen` are both "not on the pin", and they
+            // differ in whether a move is possible at all: `frozen` says the
+            // pinned build cannot answer the question this capture asks, so
+            // re-taking it would delete records rather than move them
+            // (issue #952). `every_off_pin_capture_area_says_why_it_is_off_the_pin`
+            // in `tests/vips_claims.rs` is what makes each of them carry the
+            // sentence that tells the two apart.
+            "pre_pin" | "frozen" => assert_ne!(
                 want, pinned,
-                "area {area} is marked pre_pin but already records the pinned \
+                "area {area} is marked {state} but already records the pinned \
                  {pinned}; mark it on_pin"
             ),
-            other => panic!("area {area} has unknown state {other:?}; use on_pin or pre_pin"),
+            other => {
+                panic!("area {area} has unknown state {other:?}; use on_pin, pre_pin or frozen")
+            }
         }
     }
 }
