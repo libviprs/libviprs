@@ -2928,6 +2928,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`msb` accepted a float raster and shifted its bit pattern** (issue #860).
+  `vips msb` answers "msb: image must be integer" and exits non-zero, measured on
+  `/opt/homebrew/bin/vips` 8.18.6; libviprs answered `Ok(Gray8)` with the `f32`'s
+  exponent and sign in the output byte. Reachable the ordinary way, since every
+  `colourspace` result for Lab, Lch, OkLab, OkLCh, XYZ, scRGB and Yxy is float,
+  so `im.colourspace(Lab).msb(None)` landed there. It is
+  `ConversionError::FloatUnsupported` now, and the integer carriers are
+  untouched.
+
 - **`addalpha` and `flatten` took their alpha ceiling from the byte width where
   libvips takes it from the interpretation** (issues #859, #861). The two rules
   agree on `uchar` and on a 16-bit raster tagged `grey16` / `rgb16`, which is
