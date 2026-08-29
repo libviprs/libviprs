@@ -41,6 +41,15 @@
 //! all five are rows, and the suffix only decides whether the file is written
 //! at all.
 //!
+//! **Ultra HDR is not in that table and is not missing from it.** `uhdrsave`
+//! registers no file suffix at all (measured on 8.18.6: an empty suffix list
+//! in `vips -l`, and `vips copy base.v out.uhdr` refused as an unknown
+//! format), and the four suffixes `uhdrload` claims on the way in at priority
+//! 100 all route to `jpegsave` on the way out. So there is no extension for
+//! this route to key on. Ultra HDR is written by name, through
+//! [`Raster::encode_to_buffer`] with `"uhdr"` or through
+//! [`Raster::encode_uhdr`] (issue #809).
+//!
 //! Structured EXIF tag writing (`exif-ifd0-*` fields into the TIFF
 //! directory of a JPEG APP1 segment) is also deferred to the foreign
 //! batch: those fields round-trip through `.v` and travel on the raster,
@@ -254,7 +263,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::conversion::Interpretation;
-use crate::pixel::PixelFormat;
+use crate::pixel::{PixelFormat, SampleKind};
 use crate::raster::Raster;
 use crate::sink::SinkError;
 use crate::source::{DecodeLimits, SourceError};
@@ -792,6 +801,98 @@ fn interpretation_code(i: Interpretation) -> i32 {
 /// other direction of the round trip for those four codes. Unknown codes
 /// read as `None` and the raster falls back to format inference, like an
 /// untagged image.
+/// The `VipsBandFormat` code a sample kind is written as in a `.v` header's
+/// `BandFmt` word (offset 20), and the nickname `vipsheader` prints for it.
+///
+/// This exists because the encoder used to derive that word from a byte
+/// width, through a `match bpc { 1 => 0, 2 => 2, _ => 6 }` whose trailing arm
+/// wrote **float** for every four-byte kind. A byte width does not name a
+/// sample kind, and here the wrong answer is not confined to one op: it goes
+/// into a file, and the next run reads it back as float (issue #841). The
+/// match below has no wildcard, so a kind added to [`SampleKind`] is a
+/// compile error here rather than another silently mistagged file.
+///
+/// # The measured table
+///
+/// Taken from `/opt/homebrew/bin/vips` 8.18.6, not read off the libvips
+/// headers:
+///
+/// ```text
+/// vips black base.v 4 3 --bands 1
+/// vips cast base.v fmt_<f>.v <f>          # for each of the ten formats
+/// ```
+///
+/// then reading the little-endian `i32` at header offset 20 out of each
+/// file, with the nickname from `vipsheader -a`'s `format:` line:
+///
+/// | vips format | Bbits | `BandFmt` | [`SampleKind`] |
+/// |---|---|---|---|
+/// | `uchar` | 8 | 0 | `U8` |
+/// | `char` | 8 | 1 | `I8` |
+/// | `ushort` | 16 | 2 | `U16` |
+/// | `short` | 16 | 3 | `I16` |
+/// | `uint` | 32 | 4 | `U32` |
+/// | `int` | 32 | 5 | `I32` |
+/// | `float` | 32 | 6 | `F32` |
+/// | `complex` | 64 | 7 | none |
+/// | `double` | 64 | 8 | none |
+/// | `dpcomplex` | 128 | 9 | none |
+///
+/// The three codes libviprs already wrote (0, 2 and 6) keep the values they
+/// had, so every `.v` this crate has ever written still reads back as the
+/// format it was written with. That is not a nicety: breaking `.v` would
+/// silently retype files nobody can re-derive.
+fn band_format_code(kind: SampleKind) -> i32 {
+    match kind {
+        SampleKind::U8 => 0,
+        SampleKind::I8 => 1,
+        SampleKind::U16 => 2,
+        SampleKind::I16 => 3,
+        SampleKind::U32 => 4,
+        SampleKind::I32 => 5,
+        SampleKind::F32 => 6,
+    }
+}
+
+/// The `vipsheader` nickname for a sample kind, which is what
+/// `get_field("format")` answers and what a refusal names.
+///
+/// The same table [`band_format_code`] measured, read in its other column.
+/// This used to be a third width-keyed match, with the same `_ => "float"`
+/// arm, so `header format` reported `float` for any four-byte kind.
+fn band_format_nickname(kind: SampleKind) -> &'static str {
+    match kind {
+        SampleKind::U8 => "uchar",
+        SampleKind::I8 => "char",
+        SampleKind::U16 => "ushort",
+        SampleKind::I16 => "short",
+        SampleKind::U32 => "uint",
+        SampleKind::I32 => "int",
+        SampleKind::F32 => "float",
+    }
+}
+
+/// The inverse of [`band_format_code`]: the sample kind a `.v` header's
+/// `BandFmt` word names, or `None` for a code with no libviprs sample kind.
+///
+/// `None` covers the three 64-bit-and-wider formats libvips has and libviprs
+/// does not (`complex` 7, `double` 8, `dpcomplex` 9) and every value that is
+/// not a `VipsBandFormat` at all. Both are corrupt-or-unsupported rather than
+/// a guess, which matters because this is the half `fuzz_decode` reaches from
+/// untrusted bytes.
+fn band_format_kind(code: i32) -> Option<SampleKind> {
+    Some(match code {
+        0 => SampleKind::U8,
+        1 => SampleKind::I8,
+        2 => SampleKind::U16,
+        3 => SampleKind::I16,
+        4 => SampleKind::U32,
+        5 => SampleKind::I32,
+        6 => SampleKind::F32,
+        _ => return None,
+    })
+}
+
 fn interpretation_from_code(code: i32) -> Option<Interpretation> {
     Some(match code {
         0 => Interpretation::Multiband,
@@ -870,14 +971,7 @@ impl Raster {
             "width" => MetadataValue::Int(i64::from(self.width())),
             "height" => MetadataValue::Int(i64::from(self.height())),
             "bands" => MetadataValue::Int(self.format().channels() as i64),
-            "format" => MetadataValue::Str(
-                match self.format().bytes_per_channel() {
-                    1 => "uchar",
-                    2 => "ushort",
-                    _ => "float",
-                }
-                .to_string(),
-            ),
+            "format" => MetadataValue::Str(band_format_nickname(self.format().kind()).to_string()),
             "coding" => MetadataValue::Str("none".to_string()),
             "interpretation" => {
                 MetadataValue::Str(interpretation_nickname(self.interpretation()).to_string())
@@ -1465,7 +1559,7 @@ impl Raster {
     }
 
     fn encode_vips_impl(&self, keep_metadata: bool) -> Vec<u8> {
-        let bpc = self.format().bytes_per_channel();
+        let kind = self.format().kind();
         let mut out = Vec::with_capacity(VIPS_HEADER_LEN + self.data().len());
         out.extend_from_slice(&VIPS_MAGIC_NATIVE);
         fn push_i32(out: &mut Vec<u8>, v: i32) {
@@ -1474,14 +1568,12 @@ impl Raster {
         push_i32(&mut out, self.width() as i32);
         push_i32(&mut out, self.height() as i32);
         push_i32(&mut out, self.format().channels() as i32);
-        push_i32(&mut out, 8 * bpc as i32); // deprecated Bbits
-        // BandFmt (VipsBandFormat codes): 0 = uchar, 2 = ushort, 6 = float.
-        let band_fmt = match bpc {
-            1 => 0,
-            2 => 2,
-            _ => 6,
-        };
-        push_i32(&mut out, band_fmt);
+        // Bbits is the sample width in bits, which is what vips writes: 8 for
+        // the one-byte formats, 16 for the two-byte ones and 32 for every
+        // four-byte one. Deprecated, and derived rather than tabulated,
+        // because unlike `BandFmt` it genuinely is a width.
+        push_i32(&mut out, 8 * kind.bytes() as i32); // deprecated Bbits
+        push_i32(&mut out, band_format_code(kind));
         push_i32(&mut out, 0); // Coding: none
         push_i32(&mut out, interpretation_code(self.interpretation()));
         out.extend_from_slice(&(self.xres() as f32).to_ne_bytes());
@@ -2141,17 +2233,25 @@ pub(crate) fn decode_vips_bytes(bytes: &[u8], limits: DecodeLimits) -> Result<Ra
             "unsupported .v coding {coding}; only uncoded images are supported"
         )));
     }
-    let bpc = match band_fmt {
-        0 => 1, // uchar
-        2 => 2, // ushort
-        6 => 4, // float
-        other => {
-            return Err(SourceError::VipsFormat(format!(
-                "unsupported .v band format {other}; only uchar, ushort, and float \
-                 are supported"
-            )));
-        }
+    let Some(kind) = band_format_kind(band_fmt) else {
+        return Err(SourceError::VipsFormat(format!(
+            "unsupported .v band format {band_fmt}; libviprs reads the six \
+             integer and float formats, not complex, double or dpcomplex"
+        )));
     };
+    // A sample kind with no carrier and a band count with no format are two
+    // different refusals, and saying which one it is here is the difference
+    // between "this build cannot carry a uint image yet" and "your file is
+    // corrupt". `with_kind` answers `None` to both, so probe the kind alone
+    // at one band first.
+    if PixelFormat::with_kind(1, kind).is_none() {
+        return Err(SourceError::VipsFormat(format!(
+            "unsupported .v band format {band_fmt} ({}); no libviprs pixel \
+             format carries that sample kind yet",
+            band_format_nickname(kind)
+        )));
+    }
+    let bpc = kind.bytes();
     if width <= 0 || height <= 0 || bands <= 0 {
         return Err(SourceError::VipsFormat(format!(
             "bad .v geometry {width}x{height} with {bands} bands"
@@ -2160,7 +2260,7 @@ pub(crate) fn decode_vips_bytes(bytes: &[u8], limits: DecodeLimits) -> Result<Ra
     let (width, height) = (width as u32, height as u32);
     limits.check_coord(width, height)?;
     limits.check_pixels(width, height)?;
-    let format = PixelFormat::with_channels(bands as usize, bpc)
+    let format = PixelFormat::with_kind(bands as usize, kind)
         .ok_or_else(|| SourceError::VipsFormat(format!("unrepresentable .v band count {bands}")))?;
 
     // And the allocation budget, which neither ceiling above implies: a pixel
@@ -2169,14 +2269,15 @@ pub(crate) fn decode_vips_bytes(bytes: &[u8], limits: DecodeLimits) -> Result<Ra
     // reader consulted it nowhere at all until issue #710, so it was the one
     // container out of ten where setting `max_alloc_bytes` bought nothing.
     //
-    // It sits after `with_channels` rather than before, for two reasons. A
+    // It sits after the format lookup rather than before, for two reasons. A
     // band count with no `PixelFormat` keeps coming back as the format error
     // it always was rather than as an allocation refusal. And the price is
-    // then provably the product the copy below is sized from: `with_channels`
-    // returns a format whose `channels` and `bytes_per_channel` are exactly
-    // the arguments, and `bytes_per_pixel` is their product, so `bands * bpc`
-    // is `format.bytes_per_pixel()` for every representable `.v`. That is why
-    // there is one spelling of the product here now and not two.
+    // then provably the product the copy below is sized from: `with_kind`
+    // returns a format whose band count is its argument and whose sample
+    // width is `kind.bytes()`, and `bytes_per_pixel` is their product, so
+    // `bands * bpc` is `format.bytes_per_pixel()` for every representable
+    // `.v`. That is why there is one spelling of the product here now and not
+    // two.
     let data_len =
         limits.check_image_alloc(".v pixel buffer", width, height, bands as u64, bpc as u64)?;
     let end = usize::try_from(data_len)
@@ -2595,6 +2696,347 @@ pub const DEFAULT_MAX_COORD: u32 = 10_000_000;
 mod tests {
     use super::*;
     use crate::source::{decode_bytes, decode_file};
+
+    /**
+     * Tests that this module dispatches on sample kind and never on byte
+     * width, by asserting that neither the byte-width accessor on
+     * [`PixelFormat`] nor its width-keyed constructor survives in
+     * `src/imageio.rs`.
+     * Works by scanning the module's own source, compiled in with
+     * `include_str!`, for the accessor's name; the needle is spelled in two
+     * halves so this assertion is not itself a hit. This module is the one
+     * where a width standing in for a kind reaches a **file**: the `.v`
+     * `BandFmt` word was written from a byte width, so a four-byte integer
+     * raster was tagged `float` on disk and read back as float on a later
+     * run, and `fuzz_decode` reaches the read half of the same word from
+     * untrusted bytes (issues #841, #607).
+     * Input: `src/imageio.rs` -> Output: zero occurrences.
+     */
+    #[test]
+    fn imageio_does_not_dispatch_on_byte_width() {
+        const SRC: &str = include_str!("imageio.rs");
+        let needles = [
+            concat!("bytes_per_", "channel"),
+            concat!("with_", "channels"),
+        ];
+        // Positive control: the same scan over the same string finds a token
+        // that is present, so the zero below is a real zero and not the
+        // vacuous pass an empty read would give.
+        assert!(
+            SRC.contains(concat!("fn ", "encode_vips_impl")),
+            "positive control failed: the scan cannot see this module's source"
+        );
+        assert!(
+            SRC.contains(concat!("fn band_format_", "code")),
+            "the .v BandFmt word must come from a SampleKind table, not from \
+             a byte width"
+        );
+        for needle in needles {
+            assert_eq!(
+                SRC.matches(needle).count(),
+                0,
+                "{needle} is back in src/imageio.rs; dispatch on \
+                 PixelFormat::kind() and PixelFormat::with_kind() instead"
+            );
+        }
+    }
+
+    /**
+     * Tests that the `.v` reader names the sample format it is refusing, for
+     * the four `VipsBandFormat` codes libvips writes that no libviprs
+     * [`PixelFormat`] carries yet: 1 `char`, 3 `short`, 4 `uint`, 5 `int`.
+     * A reader that only knows 0, 2 and 6 cannot tell "this is a real vips
+     * file this build has no carrier for" from "these bytes are not a band
+     * format at all", and those two want different answers from a caller.
+     * Works by patching the `BandFmt` word of a real encoded fixture and
+     * asserting the error text carries the vips nickname for that code.
+     * Input: a 2x2 RGB `.v` retagged 1 / 3 / 4 / 5 -> Output: a format error
+     * naming char / short / uint / int.
+     */
+    #[test]
+    fn the_v_reader_names_the_sample_format_it_cannot_carry() {
+        // Measured with `/opt/homebrew/bin/vips` 8.18.6, not read off the
+        // libvips headers: `vips cast base.v out.v <format>` for each format,
+        // then the `i32` at header offset 20 of each file.
+        let cases = [(1i32, "char"), (3, "short"), (4, "uint"), (5, "int")];
+        for (code, nickname) in cases {
+            let mut bytes = rgb_2x2().encode_vips_impl(false);
+            bytes[20..24].copy_from_slice(&code.to_ne_bytes());
+            let err = decode_vips_bytes(&bytes, DecodeLimits::default())
+                .expect_err("no libviprs PixelFormat carries that sample kind yet");
+            let SourceError::VipsFormat(msg) = &err else {
+                panic!("a band format with no carrier is a format error: {err:?}");
+            };
+            assert!(
+                msg.contains(nickname),
+                "refusing BandFmt {code} must name it as {nickname}, got {msg:?}"
+            );
+        }
+
+        // Positive control: the same probe on the three codes this build does
+        // carry decodes rather than refusing, so the four failures above are
+        // about the sample kind and not about the patched fixture.
+        let ok = rgb_2x2().encode_vips_impl(false);
+        assert_eq!(
+            i32::from_ne_bytes(ok[20..24].try_into().unwrap()),
+            0,
+            "an 8-bit fixture is BandFmt 0 (uchar)"
+        );
+        assert!(decode_vips_bytes(&ok, DecodeLimits::default()).is_ok());
+    }
+
+    /**
+     * Tests that the `.v` `BandFmt` table is the one vips writes, for every
+     * [`SampleKind`], and that it is a bijection with the codes it uses.
+     * Works by pinning each kind's code and nickname against the measured
+     * table and round-tripping every code back through [`band_format_kind`],
+     * plus the three formats libvips has and libviprs has no kind for.
+     * Measured on `/opt/homebrew/bin/vips` 8.18.6 with `vips cast` into each
+     * of the ten formats and the `i32` at header offset 20 read back out of
+     * each file; nicknames from `vipsheader -a`'s `format:` line.
+     * Input: all seven kinds and codes 7 / 8 / 9 / 42 -> Output: the measured
+     * codes, seven distinct values, and `None` for the four.
+     */
+    #[test]
+    fn the_band_format_table_is_the_one_vips_writes() {
+        let measured = [
+            (SampleKind::U8, 0, "uchar"),
+            (SampleKind::I8, 1, "char"),
+            (SampleKind::U16, 2, "ushort"),
+            (SampleKind::I16, 3, "short"),
+            (SampleKind::U32, 4, "uint"),
+            (SampleKind::I32, 5, "int"),
+            (SampleKind::F32, 6, "float"),
+        ];
+        for (kind, code, nickname) in measured {
+            assert_eq!(band_format_code(kind), code, "{kind:?} BandFmt code");
+            assert_eq!(band_format_nickname(kind), nickname, "{kind:?} nickname");
+            assert_eq!(
+                band_format_kind(code),
+                Some(kind),
+                "BandFmt {code} must read back as {kind:?}"
+            );
+        }
+
+        let codes: Vec<i32> = measured
+            .iter()
+            .map(|&(k, ..)| band_format_code(k))
+            .collect();
+        let mut sorted = codes.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            codes.len(),
+            "two sample kinds must never share a BandFmt code, or a file \
+             written as one reads back as the other"
+        );
+
+        // complex (7), double (8) and dpcomplex (9) are real vips formats
+        // with no libviprs sample kind, and 42 is not a VipsBandFormat at
+        // all. Both are refusals rather than a guess, which is what the
+        // fuzz_decode-reachable half of this needs.
+        for code in [7, 8, 9, 42, -1] {
+            assert_eq!(band_format_kind(code), None, "BandFmt {code}");
+        }
+    }
+
+    /**
+     * Tests that a four-byte sample kind is not written as `float` just
+     * because it is four bytes wide, which is the bug issue #841 is about:
+     * the encoder derived `BandFmt` from the byte width through a
+     * `_ => 6` arm, so `uint` and `int` rasters would both have gone into
+     * files tagged `float` and come back out as float on the next run.
+     * Works by asserting the float code and the float nickname belong to
+     * `F32` alone across every kind, and that the three four-byte kinds get
+     * three different codes despite sharing a width.
+     * Input: all seven kinds -> Output: code 6 and "float" only for `F32`;
+     * `U32` / `I32` / `F32` map to 4 / 5 / 6.
+     */
+    #[test]
+    fn a_four_byte_integer_kind_is_not_written_as_float() {
+        const ALL: [SampleKind; 7] = [
+            SampleKind::U8,
+            SampleKind::I8,
+            SampleKind::U16,
+            SampleKind::I16,
+            SampleKind::U32,
+            SampleKind::I32,
+            SampleKind::F32,
+        ];
+        for kind in ALL {
+            assert_eq!(
+                band_format_code(kind) == band_format_code(SampleKind::F32),
+                kind.is_float(),
+                "{kind:?} shares the float BandFmt code"
+            );
+            assert_eq!(
+                band_format_nickname(kind) == "float",
+                kind.is_float(),
+                "{kind:?} reports the float nickname"
+            );
+        }
+
+        // The three kinds a byte width cannot tell apart. All three are four
+        // bytes; all three take a different word in the file.
+        let four_byte = [SampleKind::U32, SampleKind::I32, SampleKind::F32];
+        for kind in four_byte {
+            assert_eq!(kind.bytes(), 4, "{kind:?} is a four-byte kind");
+        }
+        assert_eq!(
+            four_byte.map(band_format_code),
+            [4, 5, 6],
+            "the three four-byte kinds take three different BandFmt words"
+        );
+    }
+
+    /// The 64-byte header vips 8.18.6 wrote for a 2x2 three-band image, one
+    /// per sample format:
+    ///
+    /// ```text
+    /// vips black b2.v 2 2 --bands 3
+    /// vips cast b2.v h_<f>.v <f>
+    /// ```
+    ///
+    /// The four files differ in exactly two words, `Bbits` at offset 16 and
+    /// `BandFmt` at offset 20, and are byte-identical everywhere else, which
+    /// is why one array plus a pair of patches is the whole fixture. vips
+    /// writes the header in the machine's own byte order; these are the
+    /// little-endian bytes, so on a big-endian host this also exercises the
+    /// decoder's swap path.
+    const VIPS_UCHAR_HEADER: [u8; VIPS_HEADER_LEN] = [
+        0xb6, 0xa6, 0xf2, 0x08, // magic (little-endian)
+        0x02, 0x00, 0x00, 0x00, // Xsize 2
+        0x02, 0x00, 0x00, 0x00, // Ysize 2
+        0x03, 0x00, 0x00, 0x00, // Bands 3
+        0x08, 0x00, 0x00, 0x00, // Bbits 8
+        0x00, 0x00, 0x00, 0x00, // BandFmt 0 (uchar)
+        0x00, 0x00, 0x00, 0x00, // Coding 0 (none)
+        0x00, 0x00, 0x00, 0x00, // Type 0 (multiband)
+        0x00, 0x00, 0x80, 0x3f, // Xres 1.0
+        0x00, 0x00, 0x80, 0x3f, // Yres 1.0
+        0x00, 0x00, 0x00, 0x00, // Length (deprecated)
+        0x00, 0x00, 0x00, 0x00, // Compression + Level (deprecated)
+        0x00, 0x00, 0x00, 0x00, // Xoffset 0
+        0x00, 0x00, 0x00, 0x00, // Yoffset 0
+        0x00, 0x00, 0x00, 0x00, // reserved
+        0x00, 0x00, 0x00, 0x00, // reserved
+    ];
+
+    /// Where `Bbits` and `BandFmt` sit in a `.v` header.
+    const BBITS_OFFSET: usize = 16;
+    const BAND_FMT_OFFSET: usize = 20;
+
+    /// A vips-written header at `bits` / `code`, followed by a zeroed body of
+    /// the size that header promises.
+    fn vips_header_at(bits: i32, code: i32, sample_bytes: usize) -> Vec<u8> {
+        let mut bytes = VIPS_UCHAR_HEADER.to_vec();
+        bytes[BBITS_OFFSET..BBITS_OFFSET + 4].copy_from_slice(&bits.to_le_bytes());
+        bytes[BAND_FMT_OFFSET..BAND_FMT_OFFSET + 4].copy_from_slice(&code.to_le_bytes());
+        bytes.resize(VIPS_HEADER_LEN + 2 * 2 * 3 * sample_bytes, 0);
+        bytes
+    }
+
+    /**
+     * Tests that the three `BandFmt` words libviprs has always written keep
+     * their meaning, in both directions, so no `.v` this crate has already
+     * written changes what it decodes to.
+     * Works by decoding the byte-for-byte headers vips 8.18.6 wrote for
+     * `uchar` / `ushort` / `float`, re-encoding each result, and asserting
+     * the `Bbits` and `BandFmt` words that come back out are the same ones
+     * that went in. The `uint` header is included as the fourth case: it must
+     * be recognised as `uint` and refused by name, not misread as one of the
+     * three.
+     * Input: four vips-written 2x2x3 headers -> Output: the three carried
+     * kinds round-trip their wire words; `uint` is a named refusal.
+     */
+    #[test]
+    fn the_legacy_v_band_format_words_still_mean_what_they_meant() {
+        let legacy = [
+            (8i32, 0i32, 1usize, PixelFormat::Rgb8),
+            (16, 2, 2, PixelFormat::Rgb16),
+            (
+                32,
+                6,
+                4,
+                PixelFormat::with_kind(3, SampleKind::F32).unwrap(),
+            ),
+        ];
+        for (bits, code, sample_bytes, expect) in legacy {
+            let bytes = vips_header_at(bits, code, sample_bytes);
+            let back = decode_vips_bytes(&bytes, DecodeLimits::default())
+                .unwrap_or_else(|e| panic!("vips BandFmt {code} must decode: {e:?}"));
+            assert_eq!(
+                back.format(),
+                expect,
+                "BandFmt {code} decodes to {expect:?}"
+            );
+            assert_eq!((back.width(), back.height()), (2, 2));
+
+            let re = back.encode_vips_impl(false);
+            assert_eq!(
+                i32::from_ne_bytes(re[BBITS_OFFSET..BBITS_OFFSET + 4].try_into().unwrap()),
+                bits,
+                "re-encoding BandFmt {code} must write Bbits {bits} back"
+            );
+            assert_eq!(
+                i32::from_ne_bytes(re[BAND_FMT_OFFSET..BAND_FMT_OFFSET + 4].try_into().unwrap()),
+                code,
+                "re-encoding must write BandFmt {code} back; changing this \
+                 word silently retypes every .v libviprs has written"
+            );
+        }
+
+        // The fourth file vips wrote. Bbits 32 is the same word the float
+        // header carries, which is exactly why a width cannot decide this:
+        // only BandFmt separates them.
+        let uint = vips_header_at(32, 4, 4);
+        assert_eq!(
+            uint[BBITS_OFFSET..BBITS_OFFSET + 4],
+            vips_header_at(32, 6, 4)[BBITS_OFFSET..BBITS_OFFSET + 4],
+            "uint and float share Bbits 32"
+        );
+        let err = decode_vips_bytes(&uint, DecodeLimits::default())
+            .expect_err("no libviprs PixelFormat carries uint yet");
+        let SourceError::VipsFormat(msg) = &err else {
+            panic!("a band format with no carrier is a format error: {err:?}");
+        };
+        assert!(
+            msg.contains("uint"),
+            "the refusal must name uint, got {msg:?}"
+        );
+    }
+
+    /**
+     * Tests that `get_field("format")` answers the sample kind's vips
+     * nickname rather than a name picked from a byte width, for every format
+     * a [`PixelFormat`] can hold today.
+     * Works by asking each carrier for the field and comparing against the
+     * [`band_format_nickname`] table, which is the same table the wire tag
+     * comes from, so the header word and the reported field cannot disagree.
+     * Input: `Gray8`, `Gray16`, `RgbaF32` -> Output: uchar, ushort, float.
+     */
+    #[test]
+    fn get_field_format_names_the_sample_kind() {
+        let cases = [
+            (PixelFormat::Gray8, "uchar"),
+            (PixelFormat::Gray16, "ushort"),
+            (PixelFormat::RgbaF32, "float"),
+        ];
+        for (format, nickname) in cases {
+            let im = Raster::zeroed(2, 2, format).unwrap();
+            assert_eq!(
+                im.get_field("format").unwrap().as_str(),
+                nickname,
+                "{format:?} reports its sample kind"
+            );
+            assert_eq!(
+                band_format_nickname(format.kind()),
+                nickname,
+                "the field and the wire tag read the same table"
+            );
+        }
+    }
 
     #[test]
     fn metadata_value_len_reports_blob_and_string_bytes() {
@@ -3032,7 +3474,7 @@ mod tests {
      */
     #[test]
     fn vips_float_roundtrip_and_foreign_endian() {
-        let f1 = PixelFormat::with_channels(1, 4).unwrap();
+        let f1 = PixelFormat::with_kind(1, SampleKind::F32).unwrap();
         let im = Raster::from_f32_samples(2, 1, f1, &[0.5, -3.25]).unwrap();
         let bytes = im.encode_vips().unwrap();
         // Header words: Bbits (offset 16) is 32, BandFmt (offset 20) is 6.
@@ -3296,6 +3738,98 @@ mod tests {
         }
         // Positive control: a row that *is* live in every build.
         assert!(im.encode_for_extension("png", true).is_ok());
+    }
+
+    /// A 3-band `f32` linear-light ramp reaching past the SDR ceiling: the
+    /// input contract [`crate::uhdr::encode_uhdr`] computes a gain map from,
+    /// and the one raster on which "the extension route did not write Ultra
+    /// HDR" is a claim with anything behind it.
+    fn scrgb_ramp(w: u32, h: u32) -> Raster {
+        let mut px: Vec<f32> = Vec::with_capacity((w * h * 3) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let t = f64::from(x) / f64::from(w - 1);
+                let s = f64::from(y) / f64::from(h - 1);
+                px.push((0.02 + 6.0 * t * s) as f32);
+                px.push((0.5 * (1.0 - t) + 3.0 * s) as f32);
+                px.push((1.5 * t + 0.25) as f32);
+            }
+        }
+        Raster::new(
+            w,
+            h,
+            PixelFormat::FloatF32(std::num::NonZeroU16::new(3).unwrap()),
+            px.into_iter().flat_map(f32::to_ne_bytes).collect(),
+        )
+        .unwrap()
+    }
+
+    /**
+     * Tests that **no** extension selects the Ultra HDR writer, which is the
+     * measured answer rather than a gap (issue #809).
+     *
+     * Every other row in this table exists because vips registers the suffix.
+     * `uhdrsave` registers none: on the pinned 8.18.6, `vips -l` reports
+     * `VipsForeignSaveUhdrFile (uhdrsave), save image in UltraHDR format,
+     * nocache (), priority=0` with an empty suffix list, and
+     * `vips copy base.v out.uhdr` is refused with `"out.uhdr" is not a known
+     * file format`. So this table has nothing to add, and the format is
+     * reached by name through `Raster::encode_to_buffer("uhdr")` and
+     * [`Raster::encode_uhdr`] instead.
+     *
+     * The half that is worth a check is the collision. `uhdrload` **does**
+     * claim `.jpg`, `.jpeg`, `.jpe` and `.jfif` on the way in, at priority
+     * 100 against `jpegload`'s 50, so the obvious way to "fix" this issue
+     * later is to make `.jpg` route to Ultra HDR when the raster happens to
+     * suit it. vips does not: `vips copy base.v out.jpg` writes 803 bytes
+     * that `vips uhdrload` then refuses with `not an UltraHDR image`. This
+     * pins the same answer here, on the one raster where the two routes could
+     * possibly disagree.
+     *
+     * `is_uhdr` on the container `encode_uhdr` writes is the positive control.
+     * Without it, every assertion below is "this predicate said no", which a
+     * predicate that always says no also satisfies.
+     */
+    #[test]
+    fn no_extension_selects_the_ultra_hdr_writer_because_vips_registers_none() {
+        let hdr = scrgb_ramp(16, 16);
+
+        // The control: this raster genuinely does have an Ultra HDR encoding,
+        // and the gate genuinely does recognise it.
+        let container = hdr
+            .encode_uhdr(crate::uhdr::SaveOptions::default().quality)
+            .expect("a 3-band f32 raster encodes");
+        assert!(
+            crate::uhdr::is_uhdr(&container),
+            "positive control: the gate has to say yes to something"
+        );
+
+        // `.uhdr` is not a row, and the refusal does not advertise one.
+        let err = hdr.encode_for_extension("uhdr", true).unwrap_err();
+        assert!(
+            matches!(&err, SaveError::UnsupportedExtension { extension } if extension == "uhdr"),
+            "vips refuses the same suffix, so this must too, got {err}"
+        );
+        assert!(
+            !saveable_extensions().contains("uhdr"),
+            "the refusal must not advertise .uhdr: {}",
+            saveable_extensions()
+        );
+
+        // And the four suffixes `uhdrload` claims on the way in stay plain
+        // JPEG on the way out: either this build has no row for them, or the
+        // row writes something the Ultra HDR gate does not recognise.
+        for extension in ["jpg", "jpeg", "jpe", "jfif"] {
+            match hdr.encode_for_extension(extension, true) {
+                Ok(bytes) => assert!(
+                    !crate::uhdr::is_uhdr(&bytes),
+                    ".{extension} must not select the Ultra HDR writer: vips routes it to \
+                     jpegsave and `vips uhdrload` refuses the result"
+                ),
+                Err(SaveError::UnsupportedExtension { .. } | SaveError::Encode(_)) => {}
+                Err(other) => panic!(".{extension} answered with {other}"),
+            }
+        }
     }
 
     /**
@@ -4999,7 +5533,10 @@ mod tests {
                 interpretation_nickname(expected)
             );
             assert_eq!((back.width(), back.height()), (4, 4));
-            assert_eq!(back.format(), PixelFormat::with_channels(3, 4).unwrap());
+            assert_eq!(
+                back.format(),
+                PixelFormat::with_kind(3, SampleKind::F32).unwrap()
+            );
         }
     }
 
