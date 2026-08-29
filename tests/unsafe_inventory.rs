@@ -116,6 +116,46 @@ fn only_the_named_files_carry_the_crates_own_unsafe() {
 fn the_scanner_reads_code_and_not_prose() {
     // The positive control: a real block is found.
     assert!(code_only("fn f() { unsafe { g() } }").contains("unsafe"));
+    let mut lost: Vec<String> = Vec::new();
+    // And a real block is still found after each literal form that can flip
+    // the scanner's state and swallow the rest of the file. The first row is
+    // the one that was live: `src/raster.rs:2540` spells `.split_once('"')`,
+    // and a scan that does not know character literals reads that `"` as
+    // opening a string, so everything from line 2550 to the end of the file
+    // was string contents. Measured blind spans at the time: `src/raster.rs`
+    // 2550 to 3475, `src/jp2k.rs` 3675 to 6325, about 2650 lines, plus
+    // stretches of `src/imageio.rs` and `src/connection.rs` (issue #943).
+    for (label, code) in [
+        (
+            "a char literal holding a quote",
+            "fn f(s: &str) { let _ = s.split_once('\"'); }\nfn g() { unsafe { h() } }\n",
+        ),
+        (
+            "a char literal whose escape is a quote, beside one that holds a quote",
+            "fn f(s: &str) { let _ = (s.split_once('\\''), s.split_once('\"')); }\n\
+             fn g() { unsafe { h() } }\n",
+        ),
+        (
+            "a raw string holding an unmatched quote",
+            "fn f() { let _ = r#\"an unmatched \" quote\"#; }\nfn g() { unsafe { h() } }\n",
+        ),
+        (
+            "a lifetime on the line the block is on",
+            "fn f<'a>(s: &'a str) -> bool { let t: &'static str = \"n\"; unsafe { h(t) } }\n",
+        ),
+    ] {
+        // Collected rather than asserted row by row, so one run names every
+        // literal form the scanner loses the file to instead of the first.
+        if !code_only(code).contains("unsafe") {
+            lost.push(format!("{label}:\n{code}"));
+        }
+    }
+    assert!(
+        lost.is_empty(),
+        "the scanner lost the rest of the file to {} literal form(s):\n{}",
+        lost.len(),
+        lost.join("\n")
+    );
     // The negative controls, one per comment form, because pixel.rs:423 is a comment
     // that argues *for* a rule and a flat grep would have flagged it as a breach.
     for prose in [
