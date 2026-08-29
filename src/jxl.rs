@@ -509,7 +509,10 @@ pub struct LoadOptions {
     /// How many frames to load, `-1` for every frame from [`page`](Self::page)
     /// to the end. Defaults to 1, as vips does. Every value the file cannot
     /// serve, `0` and `-2` included, is refused with
-    /// [`SourceError::PageOutOfRange`], which is what vips does too.
+    /// [`SourceError::PageOutOfRange`]. vips refuses them on an
+    /// **animation** and ignores them on a **still**; this crate refuses
+    /// them on both, which is a deliberate divergence documented at
+    /// [`decode_jxl_with`] (issue #893).
     pub n: i32,
 }
 
@@ -670,8 +673,16 @@ pub fn decode_jxl(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceEr
 ///
 /// As [`decode_jxl`], plus [`SourceError::PageOutOfRange`] when `page` is
 /// past the last keyframe, when `page + n` runs off the end, or when `n`
-/// is `0` or below `-1`; vips refuses all of them with `jxlload: bad page
-/// number` and clamps none of them. The [`DecodeLimits`] ceilings are checked
+/// is `0` or below `-1`.
+///
+/// **On a multi-frame file that is parity**, with `jxlload: bad page
+/// number`, and vips clamps none of them either. **On a still it is a
+/// divergence**: vips validates `page` and `n` only when the file has more
+/// than one frame, so `vips copy 'still.jxl[page=5]'` succeeds and hands
+/// back the one image, and so does `[n=2]` (measured with `vips copy`, so
+/// the pixel phase really runs). libviprs refuses them, for the reason
+/// [`crate::webp::decode_webp_with`] gives, and all three animated loaders
+/// in this crate agree on it (issue #893). The [`DecodeLimits`] ceilings are checked
 /// against the **roll** rather than one frame.
 pub fn decode_jxl_with(
     bytes: &[u8],

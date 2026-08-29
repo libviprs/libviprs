@@ -294,9 +294,11 @@ pub struct LoadOptions {
     /// argument has, sentinel included, and because
     /// [`crate::gif::LoadOptions`] landed with the same field: three sibling
     /// loaders spelling one libvips argument two ways is worse than carrying
-    /// its sentinel. Every value the file cannot serve, `0` and `-2` included,
-    /// is refused with [`SourceError::PageOutOfRange`], which is what vips
-    /// does too.
+    /// its sentinel. Every value the file cannot serve, `0` and `-2`
+    /// included, is refused with [`SourceError::PageOutOfRange`]. vips
+    /// refuses them on an **animation** and ignores them on a **still**;
+    /// this crate refuses them on both, which is a deliberate divergence
+    /// documented at [`decode_webp_with`] (issue #893).
     pub n: i32,
 }
 
@@ -454,8 +456,25 @@ pub fn decode_webp(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceE
 ///
 /// As [`decode_webp`], plus [`SourceError::PageOutOfRange`] when `page` is
 /// past the last frame, when `page + n` runs off the end, or when `n` is
-/// `0` or below `-1`. vips refuses all of them the same way, with `webp:
-/// bad page number`, and clamps none of them.
+/// `0` or below `-1`.
+///
+/// **On an animation that is parity** and vips clamps none of them either:
+/// measured on 8.18.6, `[page=4]`, `[page=2,n=5]` and `[n=0]` on a
+/// four-page file all fail with `webp: bad page number`.
+///
+/// **On a still it is a divergence**, and issue #893 is where it was found
+/// being described as parity. vips validates `page` and `n` only when the
+/// file is animated, so `vips copy 'still.webp[page=5]'` succeeds and hands
+/// back the one image, and so do `[n=2]`, `[page=1,n=2]` and even `[n=0]`
+/// (all measured with `vips copy`, so the pixel phase really runs).
+///
+/// libviprs refuses them, because a caller who asked for page 5 and got
+/// page 0 has no way to tell, and that is the same silent-wrong-answer
+/// shape the delay subsetting above exists to avoid. All three animated
+/// loaders in this crate agree on it, and
+/// `a_still_is_one_page_in_every_container_and_refuses_the_same_windows`
+/// in `tests/animation_dialect.rs` holds them to it, so this is one
+/// dialect rather than one loader's opinion.
 ///
 /// The [`DecodeLimits`] ceilings are checked against the **roll**: a
 /// four-frame load of a 4x3 animation is priced as 4x12, so `max_coord`,
@@ -1848,6 +1867,57 @@ mod tests {
                 ),
                 "page={page} n={n} got {err:?}"
             );
+        }
+    }
+
+    /**
+     * Tests that a window past a still's only page is refused, and pins it
+     * as a **divergence** rather than as parity, because vips accepts every
+     * one of these and hands back the one image. Works by sweeping the
+     * windows measured with `vips copy`, so the pixel phase really runs
+     * rather than only the header read.
+     * Input: `LOSSLESS_RGB` at `page=1`, `page=5`, `n=2`, `page=1,n=2` and
+     * `n=0`, all of which vips loads -> Output: a typed refusal from each,
+     * naming one page.
+     */
+    #[test]
+    fn a_window_past_a_stills_only_page_is_refused_where_vips_accepts_it() {
+        // Measured on 8.18.6: `vips copy 'still.webp[page=5]' out.v`
+        // succeeds and writes a 4x3, and so do the other four. vips
+        // validates `page` and `n` only when the file is animated.
+        for (page, n) in [(1u32, 1i32), (5, 1), (0, 2), (1, 2), (0, 0)] {
+            let Err(err) = decode_webp_with(
+                &LOSSLESS_RGB,
+                DecodeLimits::default(),
+                LoadOptions::default().with_page(page).with_n(n),
+            ) else {
+                panic!("page={page} n={n} must be refused, and vips accepts it");
+            };
+            assert!(
+                matches!(
+                    err,
+                    SourceError::PageOutOfRange {
+                        format: "webp",
+                        pages: 1,
+                        ..
+                    }
+                ),
+                "page={page} n={n} got {err:?}"
+            );
+        }
+
+        // The positive control, and the reason the sweep above is not just
+        // "this loader refuses everything": the two windows a one-page file
+        // really can serve are still served.
+        for (page, n) in [(0u32, 1i32), (0, -1)] {
+            let raster = decode_webp_with(
+                &LOSSLESS_RGB,
+                DecodeLimits::default(),
+                LoadOptions::default().with_page(page).with_n(n),
+            )
+            .unwrap_or_else(|e| panic!("page={page} n={n}: {e}"));
+            assert_eq!((raster.width(), raster.height()), (4, 3));
+            assert_eq!(raster.pages_loaded(), 1);
         }
     }
 
