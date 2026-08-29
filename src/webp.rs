@@ -383,16 +383,39 @@ pub fn decode_webp(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceE
 ///
 /// # Where this diverges from vips, deliberately
 ///
-/// **The delay array is subset to the pages actually loaded.** vips
-/// attaches the file's whole array whatever it loaded: measured,
-/// `vipsheader -f delay 'anim4.webp[page=1,n=2]'` prints `45 67 200 12`
-/// onto a raster holding pages 1 and 2. Nothing on that raster records the
-/// offset, so the array cannot be lined up with the pages that are there,
-/// and a saver reading it writes 45 and 67 onto frames that are really 1
-/// and 2. Here `delay[i]` is the delay of loaded page `i`, so
-/// `delay.len() == pages_loaded()` always holds and the array is usable on
-/// its own. `n-pages` stays the file's count, because that one *is*
-/// readable without an offset.
+/// **Every per-frame field follows the loaded window, where vips's follow
+/// the whole file.** That is one rule with two visible consequences, and
+/// both are measured on 8.18.6 against a four-page animation carrying
+/// `delay 45 67 200 12`:
+///
+/// | load | vips `delay` | here | vips `gif-delay` | here |
+/// |---|---|---|---|---|
+/// | default (`page=0,n=1`) | `45 67 200 12` | `[45]` | 4 | 4 |
+/// | `page=1` | `45 67 200 12` | `[67]` | 4 | **7** |
+/// | `page=1,n=2` | `45 67 200 12` | `[67, 200]` | 4 | **7** |
+/// | `page=2,n=2` | `45 67 200 12` | `[200, 12]` | 4 | **20** |
+/// | `page=3` | `45 67 200 12` | `[12]` | 4 | **1** |
+/// | `n=-1` | `45 67 200 12` | `[45, 67, 200, 12]` | 4 | 4 |
+///
+/// `gif-delay` is the first delay in centiseconds, so once `delay` is the
+/// loaded window's, `gif-delay` is the first entry of *that*. The
+/// `page=2,n=2` row is the one that makes it unambiguous: 20 is 200 ms,
+/// which is neither the file's first delay nor the window's second.
+///
+/// The reason for subsetting is that **the file-scoped array is unusable on
+/// a raster that holds a subset, and `n-pages` is not**. `n-pages` answers
+/// a question about the file that needs no offset. `delay[i]` answers one
+/// about page `i`, and nothing on the raster records which file page its
+/// page 0 was, so a saver reading vips's array writes 45 and 67 onto frames
+/// that are really 1 and 2, silently.
+/// [`Raster::encode_gif`](crate::Raster::encode_gif) makes that concrete:
+/// it requires one delay per page, so under vips's rule a two-page load
+/// could not be saved as an animated GIF at all.
+///
+/// Here `delay.len() == pages_loaded()` always holds. `n-pages` stays the
+/// file's count, because that one *is* readable without an offset, and
+/// `loop` and `gif-loop` are properties of the animation rather than of a
+/// frame, so they do not move with the window either.
 ///
 /// # Errors
 ///
@@ -1426,10 +1449,19 @@ mod tests {
     /// from "the delay of file page i", which is the one place this crate
     /// diverges from vips.
     ///
-    /// 45 ms is chosen for the second job it does: `rint(45 / 10)` is 4
-    /// under round-half-to-even and 5 under half-up, so the `gif-delay`
-    /// this file produces tells the two apart. 12 ms is chosen because it
-    /// clears `webpsave`'s 10 ms floor by two.
+    /// The delays are also what pins `gif-delay`'s rounding, and it takes
+    /// **two** windows rather than one, which is worth saying because the
+    /// obvious reading is that the first delay does it alone. `gif-delay`
+    /// reads only the first delay of the loaded window, so:
+    ///
+    /// * a load starting at page 0 sees 45 ms, and `rint(4.5)` is 4 under
+    ///   round-half-to-even and 5 under half-up, so that window rules out
+    ///   half-up and says nothing about truncation, which also gives 4;
+    /// * a load starting at page 1 sees 67 ms, and `rint(6.7)` is 7 while
+    ///   truncation gives 6, so that window rules out truncation.
+    ///
+    /// Neither window alone separates all three rules. 12 ms is chosen for
+    /// a third reason, that it clears `webpsave`'s 10 ms floor by two.
     const ANIM4_DELAY: [u8; 488] = [
         0x52, 0x49, 0x46, 0x46, 0xe0, 0x01, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38,
         0x58, 0x0a, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x02, 0x00, 0x00,
@@ -2116,7 +2148,9 @@ mod tests {
         // frame 1 to be blended. The disposed area is zero and stays zero,
         // so the loss shows up only on the blue square: 255 becomes 254.
         let mut expected: Vec<u8> = DISPOSE_BG_ROLL
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .flat_map(|p| p[..3].to_vec())
             .collect();
         let blended = as_image_webp_blends(&expected[48..]);
