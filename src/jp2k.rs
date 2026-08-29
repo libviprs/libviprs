@@ -2590,53 +2590,56 @@ mod tests {
      * A `METH = 2` `colr` box is a profile and never an enumerated colour
      * space, however its first four bytes read (issue #767).
      * The two readers share the same three-byte `colr` prelude, so an
-     * enumerated-space reader that checked the length and not the method
-     * would take the first word of an ICC profile as an `EnumCS`. A real
-     * profile begins with its own size, and a 17-byte one would read as
-     * `EnumCS 17` and retag a three-band image `b-w`. Nothing in the fixture
-     * set happens to land on one of the five recognised values, so the fixture
-     * sweep alone leaves that mutation alive; this builds the byte pattern on
-     * purpose.
-     * Input: a three-component JP2 whose `METH = 2` profile payload starts
-     * `00 00 00 11` -> Output: `srgb`, the band-count guess, and the profile
-     * attached whole.
+     * enumerated-space reader that checked the length and not the method would
+     * take the first word of an ICC profile as an `EnumCS`. A real profile
+     * begins with its own size, and a 17-byte one would read as `EnumCS 17`
+     * and retag a **three**-band image `b-w`. Nothing in the fixture set
+     * happens to land on one of the five recognised values, so the sweep alone
+     * leaves that mutation alive; this builds the byte pattern on purpose, on
+     * three components, which is where honouring it and ignoring it give
+     * different answers.
+     * Input: `rgb_lossless.jp2` with its `colr` box switched to `METH = 2` and
+     * its payload set to `00 00 00 11` -> Output: `srgb`, the band-count
+     * guess, with those four bytes attached as the profile; and the same four
+     * bytes under `METH = 1` giving `b-w`, which is the control.
      */
     #[test]
     #[cfg(feature = "jp2k")]
     fn a_meth_2_profile_is_never_read_as_an_enumerated_colour_space() {
-        // 17 is greyscale, the enum that would be visible on a three-band
-        // file. `wrapped` writes METH = 1, so this rewrites the box by hand.
-        let mut bytes = wrapped(fixture("depth8u.j2k"), 5, 1, 1, 8, 16);
-        let at = bytes
-            .windows(4)
-            .position(|w| w == b"colr")
-            .expect("a colr box");
-        bytes[at + 4] = 2; // METH = 2, so the payload is a profile
-        bytes[at + 7..at + 11].copy_from_slice(&17u32.to_be_bytes());
+        fn retagged_meth(meth: u8, word: u32) -> Vec<u8> {
+            let mut bytes = fixture("rgb_lossless.jp2").to_vec();
+            let at = bytes
+                .windows(4)
+                .position(|w| w == b"colr")
+                .expect("a colr box");
+            bytes[at + 4] = meth;
+            bytes[at + 7..at + 11].copy_from_slice(&word.to_be_bytes());
+            bytes
+        }
 
-        let raster = decode_jp2k(&bytes, DecodeLimits::default()).expect("a METH=2 box decodes");
+        // 17 is greyscale, the enum whose answer differs from the band-count
+        // guess on a three-band file. Under METH = 2 those four bytes are the
+        // profile and nothing else.
+        let profile = decode_jp2k(&retagged_meth(2, 17), DecodeLimits::default())
+            .expect("a METH=2 box decodes");
         assert_eq!(
-            raster.interpretation(),
-            Interpretation::Bw,
-            "one component with no usable enum is the band-count guess"
+            profile.interpretation(),
+            Interpretation::Srgb,
+            "three bands with no usable enum is the band-count guess, not the \
+             first word of the profile"
         );
         assert_eq!(
-            raster.icc_profile(),
+            profile.icc_profile(),
             Some(&[0u8, 0, 0, 17][..]),
             "the four bytes are the profile, unvalidated, the way jp2kload copies it"
         );
 
-        // The control that makes the assertion above mean something: the same
-        // four bytes under METH = 1 *are* an enum and do retag the image.
-        let mut enumerated = wrapped(fixture("depth8u.j2k"), 5, 1, 1, 8, 16);
-        let at = enumerated
-            .windows(4)
-            .position(|w| w == b"colr")
-            .expect("a colr box");
-        enumerated[at + 7..at + 11].copy_from_slice(&12u32.to_be_bytes());
-        let raster = decode_jp2k(&enumerated, DecodeLimits::default()).expect("decodes");
-        assert_eq!(raster.interpretation(), Interpretation::Cmyk);
-        assert_eq!(raster.icc_profile(), None);
+        // The control that makes the assertion above mean something: the very
+        // same four bytes under METH = 1 *are* an enum and do retag the image.
+        let enumerated = decode_jp2k(&retagged_meth(1, 17), DecodeLimits::default())
+            .expect("a METH=1 box decodes");
+        assert_eq!(enumerated.interpretation(), Interpretation::Bw);
+        assert_eq!(enumerated.icc_profile(), None);
     }
 
     /**
