@@ -494,10 +494,12 @@ pub enum SourceError {
     /// four-page file both fail with `webp: bad page number`, and `[n=0]`
     /// does too. It does **not** clamp `page + n` to the end of the file.
     ///
-    /// The fields are [`GifError::BadPageNumber`](crate::gif::GifError::BadPageNumber)'s,
-    /// because that variant is the same refusal from the third loader and the
-    /// two should be one; folding them together needs `src/gif.rs` and is
-    /// filed separately.
+    /// All three multi-page loaders report it. GIF had a
+    /// `GifError::BadPageNumber` of its own carrying the same three numbers
+    /// under different names, which is why the fields are shaped the way they
+    /// are: the second was written against the first field for field so that
+    /// folding them would be a deletion rather than a redesign, and #845 was
+    /// that deletion.
     #[error("{format}: bad page number; page {page} count {n} on a {pages}-page file")]
     PageOutOfRange {
         /// The container, for the message (`"webp"`, `"jxl"`).
@@ -627,8 +629,9 @@ impl std::fmt::Display for ShowGeometry {
 /// Shared rather than written once per codec because the multi-page loaders
 /// take the same two arguments and have to answer them the same way; a loader
 /// that clamped where its neighbour refused would be a difference no caller
-/// could see coming. `crate::gif`'s `LoadOptions::window` is the same
-/// function and should be this one; folding them together needs `src/gif.rs`.
+/// could see coming. All three call it, GIF included since #845, where
+/// `LoadOptions::window` used to be a second copy of this with an error
+/// variant of its own.
 pub(crate) fn resolve_page_range(
     format: &'static str,
     page: u32,
