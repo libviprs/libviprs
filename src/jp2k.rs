@@ -616,11 +616,14 @@ impl SaveOptions {
 /// * [`Jp2kError::Container`] for a box structure or marker segment this
 ///   module cannot walk, and [`Jp2kError::Decode`] for a bitstream
 ///   `hayro-jpeg2000` refuses.
-/// * [`Jp2kError::SignedComponent`] for a signed component and
-///   [`Jp2kError::PrecisionNotSupported`] for one above [`MAX_PRECISION`],
-///   both of which are carrier gaps rather than format ones, and
-///   [`Jp2kError::PrecisionWiderThanDeclared`] for a palette whose entries are
-///   wider than the index `SIZ` declared.
+/// * [`Jp2kError::PrecisionNotSupported`] for a component above
+///   [`MAX_PRECISION`], which is the decoder's `f32` container rather than a
+///   format limit, and [`Jp2kError::PrecisionWiderThanDeclared`] for a
+///   palette whose entries are wider than the index `SIZ` declared.
+/// * [`Jp2kError::MixedComponentSignedness`] when the components disagree
+///   about the sign bit, and [`Jp2kError::SignedInverseYcc`] for a signed
+///   file in the shape `jp2kload` runs its inverse YCC over. A signed
+///   component on its own is a carrier and not a refusal (issue #905).
 /// * [`Jp2kError::UnsupportedBandCount`],
 ///   [`Jp2kError::BandCountMismatch`] and
 ///   [`Jp2kError::ComponentGeometryMismatch`], all defensive.

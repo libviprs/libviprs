@@ -778,7 +778,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the other side of the premultiply is a change to the ordering rather than to
   the ink, so it is issue #692's and not this one's.
 
+- **`Jp2kError::SignedComponent` is gone**, replaced by
+  `Jp2kError::MixedComponentSignedness` and `Jp2kError::SignedInverseYcc`
+  (issue #905). A signed component is a carrier now rather than a refusal, so
+  the variant that said "a raster has no signed sample carrier" was describing
+  something that is no longer true. `Jp2kError` is `#[non_exhaustive]`, so a
+  `match` with a wildcard arm is unaffected; one that named the variant moves
+  to the two above, and the file that used to reach it, a plain signed
+  codestream, now decodes.
+
 ### Added
+
+- **`jp2ksave` and `jp2kload` carry signed components**, so `PixelFormat::Int8`
+  and `PixelFormat::Int16` save and load through JPEG 2000 instead of being
+  refused (issue #905). The format has a per-component `sgnd` flag and vips
+  round-trips it exactly, which is what separates this from the 32-bit
+  carriers below.
+
+  The split is measured rather than assumed. On `/opt/homebrew/bin/vips`
+  8.18.6, `jp2ksave --lossless` then `jp2kload` over a raster holding
+  `[-5, 100, -100, 7]`:
+
+  | carrier | reads back | |
+  |---|---|---|
+  | `char` | `[-5, 100, -100, 7]` | **exact** |
+  | `short` | `[-5, 100, -100, 7]` | **exact** |
+  | `int` | `[-10, 200, -200, 14]` | doubled |
+  | `uint` | offset by 2^31 | no value survives |
+
+  So `Int32` and `Uint32` stay refused because **vips cannot read its own
+  files back** and matching it would mean writing a file nothing reads, while
+  `Int8` and `Int16` were a gap in this encoder. The two refusals sit one arm
+  apart in `sample_depth` and only the measurement separates them.
+
+  On the way out the encoder sets `Ssiz`'s top bit and reads the samples at
+  the raster's own signedness. The bytes are cross-checked rather than only
+  round-tripped: the `Ssiz` this writes is the `Ssiz` vips writes, `0x87` for
+  an 8-bit signed component and `0x8f` for a 16-bit one, and `vips jp2kload`
+  reads the files this encoder writes back sample for sample. A round trip
+  through one crate agrees with itself whatever convention it picked, so that
+  cross-check is the assertion that matters.
+
+  On the way in the loader takes the sign bit off the codestream's own `SIZ`,
+  because `hayro-jpeg2000` does not report signedness, and picks the carrier
+  by sample kind rather than by byte width. `hayro-jpeg2000` DC-level-shifts
+  every component whatever `SIZ` says, so the file's own sample is what it
+  returns less `2^(precision - 1)`; one clamp does both jobs, since clamping
+  to `[0, 2^p - 1]` and subtracting the shift is exactly a clamp to the signed
+  range. The committed `depth12s.j2k` decodes to `[-32768, -16, 0, 16, 32752]`
+  now, which is what the capture records for vips, where it used to be
+  refused.
+
+  Two signed shapes are still refused and neither is a carrier gap.
+  **Components that disagree about the sign bit** have no single carrier, and
+  vips refuses the same file: measured, `rgb_lossless.jp2` with component 1's
+  `Ssiz` bit flipped and nothing else touched fails with `jp2kload:
+  components differ in precision`, while the untouched file decodes. **A
+  signed file in the inverse-YCC shape** is refused because vips's answer
+  there loses the picture: it subtracts the YCC offset inside the component's
+  own signed carrier, so `-112 - 128` wraps to 16, then clamps the result into
+  the unsigned range before storing it in a `char`. Measured on the committed
+  `sub420.j2k` shape written signed, the red band is 0 at every pixel and the
+  blue band wraps past 127 into negatives, `[0, 5, 28]` at pixel 0 against
+  `[255, 87, 0]` unsigned.
 
 - **`MetadataValue::DoubleArray(Vec<f64>)`**, the `VipsArrayDouble` half of
   the pair `IntArray` opened in #787, with `as_double_array`,
@@ -1474,6 +1536,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bits** of precision is refused with `Jp2kError::PrecisionNotSupported`: there
   is no 32-bit integer carrier, and the decoder's `f32` container cannot hold a
   31-bit sample either.
+
+  Both halves of that paragraph have since moved inside this same release, so
+  it is left standing as what #501 shipped rather than rewritten. Issue #516
+  gave `PixelFormat` its signed and 32-bit carriers, and issue #905 turned the
+  signed refusal into a round trip and deleted
+  `Jp2kError::SignedComponent`; the precision ceiling stays, but its reason is
+  now only the decoder's `f32` container.
 
   The resolution count travels as **`jp2k-resolutions`**, not as `n-pages`.
   `vipsheader` calls it `n-pages` and vips's `page` selects a resolution level
@@ -3128,6 +3197,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matching on the typed errors is unaffected; only the panic text changes.
 
 ### Fixed
+
+- The image-origin test in `src/jp2k.rs` has its doc block back, and a check
+  keeps it there (issue #926). The block had drifted onto the *band ceiling*
+  test's own block, so that test's rendered doc opened with a paragraph about
+  image origins and the origin test had none. This is the second drift of the
+  same block: #869 filed the first and #891 moved it, but the re-measurement
+  behind closing #869 asked only whether it had left the function it landed
+  on, not whether it had reached its own.
+
+  Nothing went red on the current state. `cargo fmt -- --check` is clean,
+  `make clippy` is silent across all nine linted features, and `cargo doc`
+  with all three rustdoc lints denied has nothing to say, because rustdoc has
+  no opinion about a private test item's missing doc and every link still
+  resolves. The check reads the file, finds every `fn` whose attribute stack
+  contains `#[test]`, and requires a doc line immediately above it, with a
+  count assertion beside it so an empty offender list from a parse that
+  matched nothing cannot pass for a clean file.
 
 - Two GIFs that decode in vips and did not decode here now decode, because the
   loader hands the decoder the same file in the shape it will read (issues
