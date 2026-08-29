@@ -706,10 +706,7 @@ pub(crate) fn encode_webp_for_save(
 /// next `get`. Hoisting it makes the overflow reachable from a test on any
 /// target (issue #862).
 fn next_chunk(payload: usize, size: usize) -> Option<usize> {
-    // Only the outer addition is checked, which is issue #862 itself: the
-    // pad has already overflowed by the time this looks. The next commit is
-    // the fix.
-    payload.checked_add(size + (size & 1))
+    size.checked_add(size & 1)?.checked_add(payload)
 }
 
 /// Byte offsets of the `ANMF` frame-info bytes whose frame provably
@@ -2197,7 +2194,11 @@ mod tests {
         // that leaves no room for the payload offset.
         assert_eq!(next_chunk(usize::MAX, 0), Some(usize::MAX));
         assert_eq!(next_chunk(usize::MAX, 2), None);
-        assert_eq!(next_chunk(1, usize::MAX - 1), None);
+        // An even size needs no pad, so this one reaches the outer addition
+        // with the largest step there is and lands exactly on the top of the
+        // range; one more byte of payload offset is what tips it over.
+        assert_eq!(next_chunk(1, usize::MAX - 1), Some(usize::MAX));
+        assert_eq!(next_chunk(2, usize::MAX - 1), None);
     }
 
     /**

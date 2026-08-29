@@ -2758,6 +2758,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A 20-byte WebP file could panic the chunk walk on a 32-bit target**
+  (issue #862). `opaque_blended_frame_offsets` steps over a RIFF chunk by
+  `size + (size & 1)`, and only the outer addition was checked. `size` comes
+  straight off the wire as a `u32`, and on a 32-bit target `u32::MAX as
+  usize` *is* `usize::MAX`, so a chunk declaring the largest size its
+  four-byte field can hold overflows on the pad before the outer addition
+  ever looks: a panic with overflow checks on, and a wrapped zero with them
+  off, which is a walk that never advances. The comment directly above it
+  claimed the walk "stops rather than wrapping on a size a hostile file
+  inflated", which is exactly what it did not do.
+
+  It is reachable from untrusted bytes because the walk runs *before*
+  `WebPDecoder::new`, so nothing has validated the file first. The step is
+  now a free function with both additions checked, and the same expression
+  is gone from the two test helpers that had copied it.
+
+  The case cannot be built out of bytes on a 64-bit host, where the same
+  file gives an offset far past the buffer and the walk ends on the next
+  bounds check, so the guard is a unit test on the step itself rather than a
+  fixture, with one assertion written as an equality against `usize::BITS`
+  so it says something true on both targets.
+
 - **A JPEG 2000's `colr` box decides its interpretation, not its band count**
   (issue #767). `jp2kload` reads the box's enumerated colour space and maps
   openjpeg's five recognised values onto a tag; `decode_jp2k` was taking
