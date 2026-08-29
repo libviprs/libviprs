@@ -949,6 +949,34 @@ impl Raster {
     }
 }
 
+/// The shared save routes' entry point: encode uncompressed TIFF strips, or
+/// report why not.
+///
+/// Uncompressed because that is `tiffsave`'s own default, and that is
+/// measured on the pinned vips 8.18.6 rather than read off the option list:
+/// `vips tiffsave t.v d.tif` and `vips tiffsave t.v d2.tif --compression
+/// none` write byte-identical 240-byte files, while `--compression deflate`
+/// writes a different 254. So the row takes its saver's default the way the
+/// JPEG row takes `jpegsave`'s quality of 75 and the Ultra HDR row takes
+/// `uhdrsave`'s.
+///
+/// [`Raster::tiff_save`] stays on Deflate for the reason its own doc gives.
+/// Both are lossless, so what separates them is file size; nothing routes
+/// through `tiff_save` and nothing needs to, because it is infallible and
+/// answers an unencodable raster with an **empty** buffer. A save route that
+/// wrote a zero-byte `.tif` and returned `Ok` would be worse than the
+/// `UnsupportedExtension` it replaces, so the routes take this instead and
+/// keep the typed refusal (issue #948).
+///
+/// # Errors
+///
+/// [`SaveError::Encode`] if the raster's pixel format has no pure-Rust TIFF
+/// encoder, which is every float and signed carrier, or if the `tiff`
+/// encoder rejects the data.
+pub(crate) fn encode_tiff_for_save(raster: &Raster) -> Result<Vec<u8>, SaveError> {
+    encode_to_vec(raster, TiffCompression::None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

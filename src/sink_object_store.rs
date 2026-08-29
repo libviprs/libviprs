@@ -14,12 +14,35 @@
 //! Retry behaviour is **not** built into [`ObjectStoreSink`]. Callers who want
 //! automatic retries compose one externally:
 //!
-//! ```ignore
-//! use libviprs::retry::{FailurePolicy, RetryPolicy, RetryingSink};
+//! ```
+//! use std::sync::Arc;
+//!
+//! use libviprs::planner::{Layout, PyramidPlanner};
+//! use libviprs::retry::{RetryPolicy, RetryingSink};
+//! use libviprs::sink::{SinkError, TileFormat};
+//! use libviprs::sink_object_store::{ObjectStore, ObjectStoreConfig, ObjectStoreSink};
+//!
+//! /// The injected backend the sink needs. A real client puts bytes on the
+//! /// wire; this one drops them, which is all the example needs.
+//! struct NullStore;
+//! impl ObjectStore for NullStore {
+//!     fn put(&self, _key: &str, _bytes: &[u8]) -> Result<(), SinkError> {
+//!         Ok(())
+//!     }
+//! }
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let plan = PyramidPlanner::new(1024, 768, 256, 0, Layout::DeepZoom)?.plan();
+//! let cfg = ObjectStoreConfig::s3("https://example.invalid", "tiles")
+//!     .with_object_store(Arc::new(NullStore));
+//!
 //! let sink = RetryingSink::new(
-//!     ObjectStoreSink::new(cfg, plan, fmt)?,
+//!     ObjectStoreSink::new(cfg, plan, TileFormat::Png)?,
 //!     RetryPolicy::default(),
 //! );
+//! # let _ = sink;
+//! # Ok(())
+//! # }
 //! ```
 
 use std::sync::Arc;
