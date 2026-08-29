@@ -132,16 +132,13 @@
 //!   page really has a delay of 80 ms. [`crate::webp`] takes it off the
 //!   loaded delays too, so the animated loaders agree with each other.
 //!
-//! **A file that declares no global colour table diverges** (issue #851).
-//! libnsgif substitutes a two-entry black-and-white table for it and decodes
-//! through that, so vips reports `bits-per-sample: 1`, `gif-palette:
-//! -16777216 -1` and a white pixel wherever the frame stores index 1.
-//! libviprs refuses the file: `gif` 0.14.2's `Decoder::next_frame_info`
-//! (`reader/mod.rs:438-442`) errors on any frame that has neither a local
-//! palette nor a global one, before this module gets a chance to supply one,
-//! and `Decoder` has no way to set a global palette from outside. The file is
-//! malformed either way, and both answers are refusals of a sort; the gap is
-//! that vips's is a picture.
+//! **A file that declares no global colour table gets libnsgif's own**: two
+//! entries, black then white, with `bits-per-sample: 1`, `gif-palette:
+//! -16777216 -1`, and a white pixel wherever a frame stores index 1. The
+//! stored background index is ignored with it, so a restore-to-background
+//! disposal paints entry 0 whatever the descriptor says. All of that is
+//! measured; `normalise_for_decoder` is how it is reached, and issue #851 has
+//! the reason it needs reaching.
 //!
 //! # Where libviprs and vips diverge, and why it is not a bug
 //!
@@ -321,11 +318,35 @@
 //! restore-to-background with a delay of 3076 centiseconds, which is `0xAA`
 //! read as the packed byte and the two bytes after it read little-endian.
 //!
-//! One neighbouring case stays divergent and is issue #879: when the *last*
-//! sub-block is not four bytes, the crate's `read_control_extension` errors,
-//! which ends the header scan, so the frame never reaches this module at all.
-//! vips loads that file. No walk here can put the frame back, because the
-//! decoder is what decides where the frames are.
+//! # Two files the decoder is stricter about than the format
+//!
+//! The `gif` crate refuses two shapes libnsgif reads, and both refusals land
+//! before this module sees a frame, so no amount of careful reading recovers
+//! them. What does is handing the decoder *different bytes*:
+//! `normalise_for_decoder` rewrites the file into the shape the crate reads
+//! the way libnsgif reads it, and returns nothing at all for the ordinary GIF
+//! that needs neither rewrite.
+//!
+//! * **No global colour table** (issue #851). `Decoder::next_frame_info`
+//!   errors on a frame with neither a local palette nor a global one
+//!   (`reader/mod.rs:438-442`) and `Decoder` cannot be given one from
+//!   outside, so libnsgif's substitute table is spliced into the logical
+//!   screen descriptor and the background index forced to entry 0 with it.
+//! * **A control extension whose last sub-block is not four bytes** (issue
+//!   #879). `read_control_extension` refuses it and the error ends the header
+//!   scan, taking every later frame with it. The chain is rewritten into the
+//!   single four-byte sub-block libnsgif's own fixed-offset read produces, so
+//!   the decoder gets the same four bytes in the one shape it accepts.
+//!
+//! The copy is priced through [`DecodeLimits`], because it is a second
+//! whole-file buffer and it happens before every other price this module
+//! pays.
+//!
+//! This overlaps the two readings above on purpose. Once a chain is
+//! rewritten the crate and libnsgif agree about it, so the split reading has
+//! nothing left to disagree about; it stays because it is what covers the
+//! chains the rewrite leaves alone, and because a file
+//! `normalise_for_decoder` cannot parse is handed over untouched.
 //!
 //! # Not handled here
 //!
@@ -692,6 +713,11 @@ pub fn decode_gif_with(
     limits: DecodeLimits,
     options: LoadOptions,
 ) -> Result<Raster, SourceError> {
+    // Two shapes the `gif` crate refuses outright and libnsgif reads, so the
+    // decoder is handed the same file in the shape it will read (issues #851
+    // and #879). `None` for every ordinary GIF, and then nothing is copied.
+    let normalised = normalise_for_decoder(bytes, limits)?;
+    let bytes = normalised.as_deref().unwrap_or(bytes);
     let scan = scan_file(bytes, limits)?;
     if scan.frames == 0 {
         return Err(GifError::NoFrames.into());
@@ -1388,6 +1414,177 @@ fn reconcile_control(
     transparent: Option<u8>,
 ) -> Option<WireControl> {
     wire.filter(|wire| wire.decoder_fields() == (dispose, delay_cs, transparent))
+}
+
+/// libnsgif's stand-in colour table for a file that declares no global one:
+/// black, then white.
+///
+/// `nsgif__parse_extension` builds it when the logical screen descriptor's
+/// global-table flag is clear, and sets `colour_table_size` to 2 with it.
+/// Measured on vips 8.18.6 rather than read off that: such a file decodes
+/// index 0 to `0 0 0` and index 1 to `255 255 255`, reports `gif-palette:
+/// -16777216 -1` and `bits-per-sample: 1`.
+const SUBSTITUTE_COLOUR_TABLE: [u8; 2 * PALETTE_STRIDE] = [0, 0, 0, 255, 255, 255];
+
+/// Rewrite `bytes` into the shape the `gif` crate reads the way libnsgif
+/// reads it, or `None` when it already is that shape.
+///
+/// Two files decode in vips and do not decode here, and both are the same
+/// mistake in the other direction: the crate is stricter than the format
+/// where libnsgif is looser, so it refuses a file rather than reading it
+/// differently. Neither can be fixed by reading the bytes more carefully,
+/// because the crate is what decides where the frames are, and it stops.
+/// What can be fixed is *which* bytes it is handed.
+///
+/// * **No global colour table** (issue #851). `Decoder::next_frame_info`
+///   errors with "no color table available for current frame" for a frame
+///   with neither a local palette nor a global one
+///   (`reader/mod.rs:438-442`), and `Decoder` has no way to set one from
+///   outside. libnsgif invents [`SUBSTITUTE_COLOUR_TABLE`] instead, so that
+///   table is spliced in and the descriptor's flag set. The stored background
+///   index is forced to 0 with it, because libnsgif only honours a stored
+///   index when the file really declares a table: measured, index 1 with no
+///   table reports black, the substitute's entry 0, and not its white entry.
+/// * **A control extension whose last sub-block is not four bytes** (issue
+///   #879). `read_control_extension` refuses it and the error ends the header
+///   scan, so every frame from there on is lost. libnsgif never measures the
+///   chain and reads four bytes at a fixed offset from the label, so the
+///   chain is rewritten into the single four-byte sub-block that read
+///   produces. That is the same four bytes, in the only shape the crate
+///   accepts.
+///
+/// The copy is priced through [`DecodeLimits::check_alloc`] because it is a
+/// second whole-file buffer. Nothing is copied for a file that needs neither
+/// rewrite, which is every ordinary GIF, and the detection is one byte for
+/// the first case and a walk with no pixel decoding for the second.
+///
+/// A file this cannot parse is left alone rather than guessed at: `None` puts
+/// the original bytes in front of the decoder, which is exactly what happened
+/// before this existed.
+fn normalise_for_decoder(
+    bytes: &[u8],
+    limits: DecodeLimits,
+) -> Result<Option<Vec<u8>>, SourceError> {
+    let Some(descriptor) = bytes.get(6..13) else {
+        return Ok(None);
+    };
+    if !bytes.starts_with(b"GIF") {
+        return Ok(None);
+    }
+    let packed = descriptor[4];
+    let has_global = packed & 0x80 != 0;
+    let after_lsd = 13
+        + if has_global {
+            PALETTE_STRIDE * (2usize << (packed & 7))
+        } else {
+            0
+        };
+    if after_lsd > bytes.len() {
+        return Ok(None);
+    }
+
+    // Find the control extensions that need rewriting before allocating
+    // anything, so an ordinary file pays a walk and no copy.
+    let mut rewrites: Vec<(usize, usize, [u8; 4])> = Vec::new();
+    let mut at = after_lsd;
+    loop {
+        match bytes.get(at) {
+            Some(&0x21) => {
+                let label = *bytes.get(at + 1).unwrap_or(&0);
+                let Some((last, next)) = walk_sub_blocks(bytes, at + 2) else {
+                    break;
+                };
+                if label == 0xF9 {
+                    // libnsgif's four bytes, and whether the crate will read
+                    // the same ones. `last` is what the crate reads, so a
+                    // chain it cannot read at all is `None` and a chain whose
+                    // last sub-block holds something else is a mismatch; both
+                    // get the rewrite, and both end up with libnsgif's bytes
+                    // in front of the decoder.
+                    if let Some(quad) = bytes.get(at + 3..at + 7) {
+                        let wanted = [quad[0], quad[1], quad[2], quad[3]];
+                        if last != Some(wanted) {
+                            rewrites.push((at + 2, next, wanted));
+                        }
+                    }
+                }
+                at = next;
+            }
+            Some(&0x2C) => {
+                let Some(&flags) = bytes.get(at + 9) else {
+                    break;
+                };
+                let mut next = at + 10;
+                if flags & 0x80 != 0 {
+                    next += PALETTE_STRIDE * (2usize << (flags & 7));
+                }
+                let Some((_, after)) = walk_sub_blocks(bytes, next + 1) else {
+                    break;
+                };
+                at = after;
+            }
+            _ => break,
+        }
+    }
+
+    if has_global && rewrites.is_empty() {
+        return Ok(None);
+    }
+
+    // Every rewritten chain becomes six bytes; the table adds six more. The
+    // price is an upper bound rather than the exact length, which is the
+    // right way round for a budget.
+    let extra = if has_global {
+        0
+    } else {
+        SUBSTITUTE_COLOUR_TABLE.len()
+    };
+    let needed = bytes.len() as u64 + extra as u64 + 6 * rewrites.len() as u64;
+    limits.check_alloc("GIF normalised copy", needed)?;
+    let mut out = Vec::with_capacity(bytes.len() + extra);
+
+    out.extend_from_slice(&bytes[..10]);
+    if has_global {
+        out.push(packed);
+        out.extend_from_slice(&bytes[11..after_lsd]);
+    } else {
+        // The flag set and the size bits cleared, which is the two-entry
+        // table libnsgif builds, then the background index forced to entry 0.
+        out.push(packed | 0x80);
+        out.push(0);
+        out.push(descriptor[6]);
+        out.extend_from_slice(&SUBSTITUTE_COLOUR_TABLE);
+    }
+
+    let mut copied = after_lsd;
+    for (chain, end, quad) in rewrites {
+        out.extend_from_slice(&bytes[copied..chain]);
+        out.push(4);
+        out.extend_from_slice(&quad);
+        out.push(0);
+        copied = end;
+    }
+    out.extend_from_slice(&bytes[copied..]);
+    Ok(Some(out))
+}
+
+/// Walk a sub-block chain from `at`, returning its last sub-block when that
+/// one is exactly four bytes and the offset just past the terminator.
+///
+/// Free of [`ControlWalk`] because [`normalise_for_decoder`] runs before it,
+/// on bytes the walk has not seen yet. The rule is the same one and the
+/// reason is in [`ControlWalk::sub_blocks`].
+fn walk_sub_blocks(bytes: &[u8], mut at: usize) -> Option<(Option<[u8; 4]>, usize)> {
+    let mut last: Option<[u8; 4]> = None;
+    loop {
+        let size = usize::from(*bytes.get(at)?);
+        at += 1;
+        if size == 0 {
+            return Some((last, at));
+        }
+        last = <[u8; 4]>::try_from(bytes.get(at..at + size)?).ok();
+        at += size;
+    }
 }
 
 /// Open a decoder over `bytes` producing palette indices rather than RGBA.
@@ -4040,6 +4237,267 @@ mod tests {
                 drain(&corrupt);
             }
         }
+    }
+
+    /**
+     * Tests that a GIF declaring no global colour table decodes through
+     * libnsgif's own substitute rather than being refused. Works by decoding
+     * a two-pixel file whose logical screen descriptor clears the
+     * global-table flag and whose only frame paints indices 0 and 1.
+     * libnsgif builds a two-entry black-and-white table for such a file and
+     * sets its colour table size to 2, so the file has a picture. `gif`
+     * 0.14.2 refuses the frame outright instead: `next_frame_info` errors
+     * with "no color table available for current frame" when a frame has
+     * neither a local palette nor a global one, and `Decoder` has no way to
+     * supply one from outside. So the loader hands the decoder the same file
+     * with the table spliced in, which is the only shape the crate will read
+     * and is byte for byte what libnsgif invents.
+     * Measured on vips 8.18.6 against exactly this file: `getpoint 0 0` is
+     * `0 0 0`, `getpoint 1 0` is `255 255 255`, `gif-palette` is
+     * `-16777216 -1`, `bits-per-sample` is 1 and `background` is `0 0 0`.
+     * The stored background index is the control that says the substitute is
+     * never indexed: index 1 still reports black, which is its entry 0, and
+     * not the white its entry 1 holds.
+     * Input: a 2x1 GIF with no colour table anywhere -> Output: black then
+     * white, a two-entry palette and one bit per sample.
+     */
+    #[test]
+    fn a_gif_with_no_colour_table_decodes_through_libnsgifs_black_and_white() {
+        let bytes = fixture_tables((2, 1), None, 0, None, &[Frame::full(2, 1, vec![0, 1])]);
+        let raster = decode_bytes(&bytes).expect("decodes");
+        assert_eq!(raster.format(), PixelFormat::Rgb8);
+        assert_eq!(
+            raster.data(),
+            [0, 0, 0, 255, 255, 255],
+            "index 0 is the substitute's black and index 1 its white"
+        );
+        assert_eq!(
+            raster.get_int_array("gif-palette"),
+            Some(&[-16_777_216i64, -1][..]),
+            "and the substitute is the table that gets attached"
+        );
+        assert_eq!(raster.get_int("bits-per-sample"), Some(1));
+        assert_eq!(raster.get_int("palette-bit-depth"), Some(1));
+
+        // The stored index is ignored, whatever it says, because libnsgif
+        // only honours it when the file really declares a table. This needs
+        // the background colour to actually reach a pixel, so it is a
+        // restore-to-background disposal on a frame that is not the last:
+        // painting index 1 and disposing it shows black if the index was
+        // forced to entry 0 and white if it was kept, and those are the two
+        // entries of the substitute table.
+        for stored in [0u8, 1, 3, 255] {
+            let bytes = fixture_tables(
+                (2, 1),
+                None,
+                stored,
+                Some(0),
+                &[
+                    Frame {
+                        disposal: 2,
+                        ..Frame::full(2, 1, vec![1, 1])
+                    },
+                    Frame {
+                        width: 1,
+                        height: 1,
+                        indices: vec![0],
+                        ..Frame::full(1, 1, vec![0])
+                    },
+                ],
+            );
+            let raster = decode_gif_with(
+                &bytes,
+                DecodeLimits::default(),
+                LoadOptions::default().with_n(-1),
+            )
+            .expect("a valid GIF");
+            assert_eq!(
+                page_bytes(&raster, 0),
+                [255, 255, 255, 255, 255, 255],
+                "index 1 of the substitute is white, so the fixture can tell \
+                 the two entries apart"
+            );
+            assert_eq!(
+                page_bytes(&raster, 1),
+                [0, 0, 0, 0, 0, 0],
+                "background index {stored} with no table disposes to entry 0, \
+                 which is black, not to the white the index would name"
+            );
+        }
+
+        // The positive control: the same file *with* a table is a different
+        // picture, so "black then white" is not what any decode would give.
+        let declared = fixture(
+            (2, 1),
+            &[[9, 8, 7], [1, 2, 3]],
+            0,
+            None,
+            &[Frame::full(2, 1, vec![0, 1])],
+        );
+        assert_eq!(
+            decode_bytes(&declared).expect("decodes").data(),
+            [9, 8, 7, 1, 2, 3]
+        );
+    }
+
+    /**
+     * Tests that a graphic control extension whose **last** sub-block is not
+     * four bytes no longer truncates the file. Works by decoding two-frame
+     * fixtures whose frame 0 carries such a chain and requiring both frames
+     * back, with the disposal libnsgif reads out of it.
+     * `gif` 0.14.2's `read_control_extension` errors with "control extension
+     * has wrong length" unless the last sub-block is exactly four
+     * (`reader/decoder.rs:853-856`), and the error ends the header scan, so
+     * every frame from that extension onwards disappears. libnsgif does not
+     * measure the chain at all, so the file loads. The loader now rewrites
+     * each such chain into the single four-byte sub-block libnsgif's own read
+     * would produce, which is the only shape the crate accepts and carries
+     * exactly the bytes libnsgif uses.
+     * Measured on vips 8.18.6 against exactly these files: both report
+     * `n-pages: 2` and page 1 is `green black`, the rewind disposal 4 asks
+     * for. libviprs reported `NoFrames`.
+     * Input: chains of `04 quad(4) 01 AA 00` and `06 quad(4) AA BB 00` ->
+     * Output: two pages each, and the canvas rewound.
+     */
+    #[test]
+    fn a_control_extension_the_crate_refuses_no_longer_truncates_the_file() {
+        let quad = |disposal: u8| [(disposal & 7) << 2, 0u8, 0, 0];
+        let load = |raw: Vec<u8>| {
+            let bytes = fixture(
+                (2, 1),
+                &ANIM_PALETTE,
+                3,
+                Some(0),
+                &[
+                    Frame {
+                        raw_control: Some(raw),
+                        ..Frame::full(2, 1, vec![1, 1])
+                    },
+                    Frame {
+                        width: 1,
+                        height: 1,
+                        indices: vec![2],
+                        ..Frame::full(1, 1, vec![2])
+                    },
+                ],
+            );
+            decode_gif_with(
+                &bytes,
+                DecodeLimits::default(),
+                LoadOptions::default().with_n(-1),
+            )
+        };
+
+        // A trailing one-byte sub-block, so the last one is not four.
+        let mut trailing = vec![4u8];
+        trailing.extend_from_slice(&quad(4));
+        trailing.extend_from_slice(&[1, 0xAA, 0]);
+        let raster = load(trailing).expect("the file has two frames");
+        assert_eq!(raster.get_n_pages(), 2);
+        assert_eq!(
+            page_bytes(&raster, 1),
+            [0, 255, 0, 0, 0, 0],
+            "and frame 0's code 4 rewound the canvas"
+        );
+
+        // One six-byte sub-block, so no sub-block is four.
+        let mut six = vec![6u8];
+        six.extend_from_slice(&quad(4));
+        six.extend_from_slice(&[0xAA, 0xBB, 0]);
+        let raster = load(six).expect("the file has two frames");
+        assert_eq!(raster.get_n_pages(), 2);
+        assert_eq!(page_bytes(&raster, 1), [0, 255, 0, 0, 0, 0]);
+
+        // The control: the ordinary shape was never truncated, so "two
+        // pages" is not what every file gives.
+        let mut plain = vec![4u8];
+        plain.extend_from_slice(&quad(1));
+        plain.push(0);
+        let raster = load(plain).expect("a valid GIF");
+        assert_eq!(raster.get_n_pages(), 2);
+        assert_eq!(
+            page_bytes(&raster, 1),
+            [0, 255, 0, 255, 0, 0],
+            "disposal 1 keeps, so this fixture can tell the two apart"
+        );
+    }
+
+    /**
+     * Tests that the normalising copy is only made when it is needed, and is
+     * priced when it is. Works by calling `normalise_for_decoder` on the
+     * three shapes and checking which of them allocate, then running the two
+     * that do under a budget smaller than the file.
+     * The copy is a second whole-file buffer, so it is the kind of allocation
+     * `DecodeLimits` exists for, and it sits before every other price this
+     * module pays: a file that needs it has already been copied by the time
+     * the canvas is measured. The "no copy" half is what keeps that off every
+     * ordinary GIF, and it is asserted rather than assumed because a
+     * normaliser that copied unconditionally would pass every other test in
+     * this module.
+     * Input: an ordinary GIF, one with no colour table, one with an
+     * unreadable control chain -> Output: no copy, a copy, a copy, and a
+     * typed refusal for each copy under a 32-byte budget.
+     */
+    #[test]
+    fn the_normalising_copy_is_made_only_when_needed_and_is_priced() {
+        let ordinary = fixture(
+            (2, 1),
+            &ANIM_PALETTE,
+            0,
+            Some(0),
+            &[Frame::full(2, 1, vec![0, 1])],
+        );
+        assert!(
+            normalise_for_decoder(&ordinary, DecodeLimits::default())
+                .expect("no budget trouble")
+                .is_none(),
+            "an ordinary GIF is handed to the decoder untouched"
+        );
+
+        let no_table = fixture_tables((2, 1), None, 0, None, &[Frame::full(2, 1, vec![0, 1])]);
+        let mut chain = vec![4u8, 0b0001_0000, 0, 0, 0];
+        chain.extend_from_slice(&[1, 0xAA, 0]);
+        let bad_chain = fixture(
+            (2, 1),
+            &ANIM_PALETTE,
+            0,
+            Some(0),
+            &[Frame {
+                raw_control: Some(chain),
+                ..Frame::full(2, 1, vec![0, 1])
+            }],
+        );
+
+        for (name, bytes) in [("no colour table", &no_table), ("bad chain", &bad_chain)] {
+            let copy = normalise_for_decoder(bytes, DecodeLimits::default())
+                .expect("no budget trouble")
+                .unwrap_or_else(|| panic!("{name} needs a copy"));
+            assert_ne!(copy, *bytes, "{name}: the copy is not the original");
+
+            let err = decode_gif(bytes, DecodeLimits::default().with_max_alloc_bytes(32))
+                .expect_err("{name} is over a 32-byte budget");
+            assert!(
+                matches!(
+                    &err,
+                    SourceError::AllocLimitExceeded {
+                        what: "GIF normalised copy",
+                        geometry: None,
+                        ..
+                    }
+                ),
+                "{name}: {err:?}"
+            );
+        }
+
+        // The control: the same budget decodes the ordinary file, whose
+        // canvas is six bytes, so the two refusals above are the copy and not
+        // something every file at 32 bytes would hit.
+        assert_eq!(
+            decode_gif(&ordinary, DecodeLimits::default().with_max_alloc_bytes(32))
+                .expect("six bytes of canvas is under a 32-byte budget")
+                .data(),
+            [0, 0, 0, 255, 0, 0]
+        );
     }
 
     /**
