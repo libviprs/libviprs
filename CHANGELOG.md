@@ -9,6 +9,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- **The counting ops emit `Uint32` instead of a 16-bit format, and stop
+  saturating at 65535** (issue #532). `hist_find`, `hist_find_band`,
+  `hist_find_ndim`, `hist_cum`, `project`, `hough_line` and `hough_circle` all
+  count pixels, and a 16-bit counter is exhausted by any image over 256x256,
+  which is to say every real image. A 300x300 raster is 90000 pixels and the
+  count was 65535.
+
+  Breaking because the output **format** of seven ops changes, so anything
+  asserting on `.format()` moves. Sample *values* only change where they were
+  previously wrong, and every new number is the one vips gives, measured on
+  `/opt/homebrew/bin/vips` 8.18.6:
+
+  | call | before | after and vips |
+  |---|---|---|
+  | `hist_find` on 300x300 | 65535 | **90000** |
+  | `hist_find` on 256x256 of one value | 65535 | **65536** |
+  | `hist_cum` of `[60000, 60000, 60000]` | 60000, 65535, 65535 | **60000, 120000, 180000** |
+  | `project` down a 1x300 column of 255 | 65535 | **76500** |
+  | `hough_line` on a 70000-wide lit line | 65535 | **70000** |
+
+  That last row closes the accumulator deviation issue #495 recorded, which
+  existed only because there was no unsigned 32-bit carrier to hold the count.
+
+  **The issue's stated cause is partly wrong and the fix does not follow it.**
+  It says all five ops emit `VIPS_FORMAT_UINT`. Only `hist_find`,
+  `hist_find_ndim` and `hough_line` do that unconditionally; `hist_cum` and
+  `project` run a format table keyed on the input carrier, measured:
+
+  | op | uchar / ushort / uint | char / short / int | float | double |
+  |---|---|---|---|---|
+  | `hist_find`, `hist_find_ndim`, `hough_*` | UINT | UINT | UINT | - |
+  | `hist_cum` | UINT | INT | FLOAT | - |
+  | `project` | UINT | INT | DOUBLE | DOUBLE |
+
+  So `project` takes its output carrier from its input rather than writing one
+  constant, and `hist_cum` on a signed input is still a deviation until issue
+  #516 lands the signed carriers.
+
+  Two ops in the same family are deliberately **not** in this change:
+
+  - `hist_find_indexed` stays 16-bit. vips emits **DOUBLE** there whatever the
+    value image's carrier is, so it is a float decision rather than a `Uint32`
+    one, and it is issue #887.
+  - `profile` stays 16-bit. vips emits **INT** there for `uchar`, `ushort`,
+    `uint` and `float` alike, so it needs the signed carrier of issue #516.
+    Its values are coordinates bounded by the image dimension rather than
+    counts, so its ceiling only bites above 65535 pixels on an axis. Widening
+    it to `Uint32` would have been the wrong carrier for a reason no value
+    assertion would have caught.
+
 - Every public options struct is `#[non_exhaustive]` and grows a `with_*`
   builder setter per field, so a downstream struct literal no longer compiles
   (issue #630). Ten types: `gif::SaveOptions`, `jp2k::SaveOptions`,
