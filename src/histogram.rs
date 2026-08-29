@@ -481,17 +481,6 @@ fn plot_height(kind: SampleKind, values: &[u32]) -> usize {
     }
 }
 
-/// Saturate a `u64` sum into a 16-bit sample value.
-///
-/// One caller left: `hist_find_indexed`, whose output is still 16 bits.
-/// vips emits **DOUBLE** there whatever the value image's carrier is, so
-/// that op is not a `Uint32` fix but a float one, and it is issue #887.
-/// Everything else in this module counts into [`sat32`] now (issue #532).
-#[inline]
-fn sat16(v: u64) -> u32 {
-    v.min(u64::from(u16::MAX)) as u32
-}
-
 /// Saturate a `u64` count into a 32-bit sample value.
 ///
 /// The counters go out on [`PixelFormat::Uint32`] now (issue #532), so the
@@ -1540,7 +1529,7 @@ mod tests {
      * Works by writing an over-ceiling value at each unsigned kind and
      * reading it back through `read_flat`. Mutation found this one too:
      * every op-level caller reaching `write_flat` today either goes
-     * through `sat16` or is bounded by an index, so dropping this clamp
+     * through `sat32` or is bounded by an index, so dropping this clamp
      * left all 60 histogram tests green even though a truncating write
      * would turn 65536 into 0.
      * Input: 300 at U8 and 70000 at U16 -> Output: 255 and 65535.
@@ -1751,28 +1740,25 @@ mod tests {
     }
 
     /**
-     * Tests `sat16` at the narrowing it owns, which the whole-op saturation
-     * test above cannot reach.
-     * Works by calling it directly with counts either side of the 16-bit
-     * ceiling and at the top of `u64`. Mutation showed why this is needed:
-     * two independent clamps produce the op's observable 65535, `sat16`
-     * here and `write_flat`'s `v.min(65535)`, so breaking either one alone
-     * leaves `hist_find_saturates_a_count_past_the_16_bit_ceiling` green.
-     * They are not redundant, they cover different ranges: `sat16` guards
-     * the `u64` to `u32` narrowing, which only a count above 4.29e9 can
-     * cross and which needs a four-billion-pixel image to reach through the
-     * op. Calling it directly costs nothing.
-     * Input: 0, 65535, 65536, u64::MAX -> Output: 0, 65535, 65535, 65535.
+     * Tests `sat32` at the narrowing it owns, which the whole-op tests
+     * cannot reach.
+     * Works by calling it directly with counts either side of the 32-bit
+     * ceiling and at the top of `u64`. This was `sat16` and the argument
+     * for it is unchanged by the widening: it guards the `u64` to `u32`
+     * narrowing, which now needs a count above 1.8e19 to cross and which
+     * no image this crate will allocate can reach through an op. Calling
+     * it directly costs nothing, and a bare `as u32` there would wrap
+     * rather than saturate.
+     * Input: 0, u32::MAX, u32::MAX + 1, u64::MAX -> Output: 0,
+     * 4294967295, 4294967295, 4294967295.
      */
     #[test]
-    fn sat16_clamps_at_the_ceiling_and_across_the_u32_narrowing() {
-        assert_eq!(sat16(0), 0);
-        assert_eq!(sat16(65_535), 65_535);
-        assert_eq!(sat16(65_536), 65_535);
-        // Above `u32::MAX`, where a bare `as u32` would wrap to 4294967295
-        // and `write_flat`'s clamp would then have nothing to catch.
-        assert_eq!(sat16(u64::MAX), 65_535);
-        assert_eq!(sat16(u64::from(u32::MAX) + 1), 65_535);
+    fn sat32_clamps_across_the_u64_narrowing() {
+        assert_eq!(sat32(0), 0);
+        assert_eq!(sat32(65_536), 65_536, "the old 16-bit ceiling is not one");
+        assert_eq!(sat32(u64::from(u32::MAX)), u32::MAX);
+        assert_eq!(sat32(u64::from(u32::MAX) + 1), u32::MAX);
+        assert_eq!(sat32(u64::MAX), u32::MAX);
     }
 
     /**
