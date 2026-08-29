@@ -38,7 +38,8 @@ readers only need one group.
   disk.
 
 The independent items are the allocation-refusal collapse (#686), the decode
-budget becoming a real peak ceiling for jp2k, gif and avif (#944), the
+budget becoming a real peak ceiling for jp2k, gif and avif (#944),
+`AvifError` becoming `#[non_exhaustive]` (#946), the
 `ConversionError::FloatUnsupported` rename (#730), `compass`'s `times` range
 (#547), `arrayjoin`'s `across` clamp (#577), `decode_tiff_page`'s page index
 (#566) and `GifError::BadPageNumber` (#845).
@@ -51,6 +52,23 @@ they live in the file format rather than in the API, which is why they are here
 and not under `Fixed`: this file is the only place they can be caught.
 
 ### Breaking
+
+- **`AvifError` is `#[non_exhaustive]`** (issue #946). It was the only public
+  error enum in the crate without the attribute, and
+  `tests/non_exhaustive_enums.rs`, which exists to hold exactly this rule, did
+  not mention it: all 73 sibling growable enums carry it and this one did not.
+
+  Breaking for anyone matching it exhaustively, which is the point. Its own
+  `UnsupportedColour` doc says only two of the AV1 matrix encodings are
+  measured, so it is going to grow, and without the attribute the next measured
+  encoding would be a breaking change instead of an additive one. `AvifError`
+  is re-exported from the crate root unconditionally, so this lands in every
+  build, feature on or off.
+
+  New this window rather than inherited, so it is this epic's own miss. The
+  twelve older exhaustive public enums (`ChecksumMode`, `TileFormat`,
+  `PageRotation` and friends) predate v0.4.0 and are mostly genuinely closed
+  sets; they are out of scope here.
 
 - **The JPEG 2000, GIF and AVIF decode budgets cover what the decode really
   holds, so each refuses files it used to accept** (issue #944).
