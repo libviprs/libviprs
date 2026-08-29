@@ -2267,6 +2267,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Of the 30 call sites, 19 keep the fold and 11 lose it. Three functions read
   both a few lines apart, `maplut`, `hist_find_indexed` and `hist_entropy`, and
   they carry their own mutation rows.
+- `connection::encode_to_target`'s doc no longer keeps its own copy of the
+  format list, and a check refuses to let one come back (issue #881). It named
+  `"jpeg"`, `"jpg"`, `"png"`, `"v"` and `"vips"`, which was the whole dispatch
+  when it was written and five of seventeen spellings by the time anybody
+  measured it, so a caller reading it concluded WebP was unsupported years
+  after it was wired.
+
+  `Raster::encode_to_buffer` sits on the same dispatch and its doc **was**
+  current, because two lanes updated it. Nothing connected the two, so they
+  drifted one lane at a time, and that is why #770, #809 and #880 could each go
+  unnoticed as long as they did.
+
+  The extension route has had a guard since the `.jxl` arm landed while the
+  refusal message still read "png, jpg/jpeg, gif, webp, and v/vips". This is
+  its twin: the check reads the dispatch's arm heads and the surviving doc list
+  out of the module's own source and requires the two sets to be equal, so an
+  arm added without the doc moving and a doc naming something with no arm
+  behind it are both red. It then requires `encode_to_target` to name none, so
+  the property being held is "there is one list" and not "the two copies
+  agree".
 
 - The crate has one fallible-plane helper instead of three private copies of
   it: `raster::try_plane`, its `_len` and `_filled` forms, and a single
