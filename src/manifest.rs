@@ -1112,7 +1112,11 @@ mod tests {
         // than written per carrier, because mutation caught this list
         // holding only `Uint32` after issue #516 added three more:
         // tagging `Int16` as `int8` left it green.
-        let carriers: [(fn(core::num::NonZeroU16) -> PixelFormat, &str); 4] = [
+        /// One kind-tagged carrier: its constructor and the tag it writes.
+        /// Aliased because the tuple is a `clippy::type_complexity` hit
+        /// inline, and the alias is the fix rather than an `allow`.
+        type Carrier = (fn(core::num::NonZeroU16) -> PixelFormat, &'static str);
+        let carriers: [Carrier; 4] = [
             (PixelFormat::Uint32, "uint32"),
             (PixelFormat::Int8, "int8"),
             (PixelFormat::Int16, "int16"),
