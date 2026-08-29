@@ -521,6 +521,39 @@ fn next_u32(data: &[u8], pos: &mut usize, what: &str) -> Result<u32, DecodeError
 
 #[cfg(test)]
 mod tests {
+    /**
+     * Tests [`Raster::encode_netpbm`]'s refusal arm directly, because neither
+     * route can reach it (issue #882).
+     *
+     * Both callers match `"ppm" | "pgm"` before calling, so the `other` arm is
+     * unreachable through `Raster::save` and `Raster::encode_to_buffer` alike,
+     * and a mutation that replaced it with a silent `P6` fallback left the
+     * whole suite green. Every route check still passed, because every route
+     * check only ever asks for a suffix the routes already matched.
+     *
+     * That is the shape #696's first bullet is about, arriving through a
+     * different door: a branch the tests cannot drive is a branch nothing
+     * holds. So this drives it directly, with the two rows the routes do have
+     * as the positive control that the function works at all.
+     */
+    #[test]
+    fn encode_netpbm_refuses_a_suffix_it_has_no_container_for() {
+        let rgb = Raster::new(2, 2, PixelFormat::Rgb8, (0..12u8).collect()).unwrap();
+        for suffix in ["pbm", "pfm", "pnm", "ppm2", ""] {
+            let err = rgb
+                .encode_netpbm(suffix)
+                .expect_err("this build has no container for .{suffix}");
+            assert!(
+                matches!(&err, EncodeError::Unsupported { format } if format == suffix),
+                ".{suffix} must be refused by name, got {err}"
+            );
+        }
+        // Positive control: the two it does have.
+        assert!(rgb.encode_netpbm("ppm").unwrap().starts_with(b"P6"));
+        let gray = Raster::new(2, 2, PixelFormat::Gray8, vec![0, 64, 128, 255]).unwrap();
+        assert!(gray.encode_netpbm("pgm").unwrap().starts_with(b"P5"));
+    }
+
     use super::*;
 
     fn float1_test() -> PixelFormat {
