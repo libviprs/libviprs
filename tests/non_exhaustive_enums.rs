@@ -453,15 +453,15 @@ fn assert_join_direction_non_exhaustive(v: &JoinDirection) {
     }
 }
 
-/// `MetadataValue` grows with the vips GType set it covers, and #787 is the
-/// first variant to come through the door #609 held open: `VipsArrayInt`
-/// landed as `IntArray`, and a `.v` trailer still carries `VipsArrayDouble`
-/// and `gboolean` fields this crate only forwards opaquely. Marking the enum
-/// before the first of those landed cost a `_ =>` arm here; marking it after
-/// would have cost a major version (issue #609).
+/// `MetadataValue` grows with the vips GType set it covers, and two variants
+/// have come through the door #609 held open: `VipsArrayInt` landed as
+/// `IntArray` in #787 and `VipsArrayDouble` as `DoubleArray` in #852. A `.v`
+/// trailer still carries `gboolean` fields this crate only forwards
+/// opaquely. Marking the enum before the first of those landed cost a `_ =>`
+/// arm here; marking it after would have cost a major version (issue #609).
 ///
-/// The `IntArray` arm is not decoration. Without it the `_ =>` below would
-/// swallow the new variant and this file would keep compiling whatever the
+/// The named arms are not decoration. Without them the `_ =>` below would
+/// swallow each new variant and this file would keep compiling whatever the
 /// enum grew, which is the shape of guard that passes while it stops
 /// guarding.
 #[deny(unreachable_patterns)]
@@ -473,6 +473,7 @@ fn assert_metadata_value_non_exhaustive(v: &MetadataValue) {
         MetadataValue::Str(_) => {}
         MetadataValue::Blob(_) => {}
         MetadataValue::IntArray(_) => {}
+        MetadataValue::DoubleArray(_) => {}
         _ => {}
     }
 }

@@ -4337,12 +4337,12 @@ mod tests {
     /// is that adding a variant must not cost an older reader the rest of its
     /// metadata, so the future writer is modelled here instead of shipped.
     ///
-    /// `IntArray` used to be the unknown one. #787 shipped it, so it is the
-    /// **positive control** now: the same file exercises a variant this build
+    /// The unknown one rotates as variants land. `IntArray` held the role
+    /// until #787 shipped it, `DoubleArray` until #852 did, and both are
+    /// **positive controls** now: the same file exercises variants this build
     /// reads and one it does not, and the reader has to tell them apart. The
-    /// unknown one is `DoubleArray`, which is not invented either —
-    /// `VipsArrayDouble` is live in a `.v` trailer today (vips writes
-    /// `background` as one) and is the next variant in the queue.
+    /// unknown one is `Bool`, which is not invented either, since `gboolean`
+    /// is live in a `.v` trailer today and is the next type in the queue.
     ///
     /// The derive carries no serde attributes, exactly like [`MetadataValue`],
     /// so the bytes it produces are the bytes a future build would produce.
@@ -4353,8 +4353,9 @@ mod tests {
         Str(String),
         Blob(Vec<u8>),
         IntArray(Vec<i64>),
-        /// The variant this build has never heard of.
         DoubleArray(Vec<f64>),
+        /// The variant this build has never heard of.
+        Bool(bool),
     }
 
     /// The attached-field list as a newer libviprs writes it.
@@ -4498,6 +4499,7 @@ mod tests {
                         "background".to_string(),
                         FutureMetadataValue::DoubleArray(vec![1.5, 2.5]),
                     ),
+                    ("some-flag".to_string(), FutureMetadataValue::Bool(true)),
                     ("xres-hint".to_string(), FutureMetadataValue::Double(1.5)),
                     (
                         "icc-profile-data".to_string(),
@@ -4546,12 +4548,19 @@ mod tests {
         assert_eq!(back.get_typeof("delay"), 5);
         assert!(back.get_fields().iter().any(|n| n == "delay"));
 
+        // The second array this build now names, which #852 landed.
+        assert_eq!(
+            back.get_double_array("background"),
+            Some(&[1.5f64, 2.5][..])
+        );
+        assert_eq!(back.get_typeof("background"), 6);
+
         // The variant this build cannot represent reads as absent rather than
         // as a wrong value.
-        assert_eq!(back.get_field("background"), None);
-        assert_eq!(back.get_typeof("background"), 0);
+        assert_eq!(back.get_field("some-flag"), None);
+        assert_eq!(back.get_typeof("some-flag"), 0);
         assert!(
-            !back.get_fields().iter().any(|n| n == "background"),
+            !back.get_fields().iter().any(|n| n == "some-flag"),
             "an uninterpretable field must not be advertised as readable"
         );
     }
@@ -4573,16 +4582,17 @@ mod tests {
             .fields
             .entries
             .iter()
-            .find(|(n, _)| n == "background")
+            .find(|(n, _)| n == "some-flag")
             .map(|(_, v)| v);
         assert_eq!(
             background,
-            Some(&FutureMetadataValue::DoubleArray(vec![1.5, 2.5])),
+            Some(&FutureMetadataValue::Bool(true)),
             "the unknown field must round-trip untouched"
         );
         // And the fields this build does understand are still there too,
-        // including the array it now reads rather than carries (#787).
-        assert_eq!(trailer.fields.entries.len(), 6);
+        // including the two arrays it now reads rather than carries (#787,
+        // #852).
+        assert_eq!(trailer.fields.entries.len(), 7);
         assert!(trailer.fields.entries.iter().any(
             |(n, v)| n == "icc-profile-data" && *v == FutureMetadataValue::Blob(vec![5, 5, 5])
         ));
@@ -4628,7 +4638,7 @@ mod tests {
         // And the opaque one, which reads as absent through the field API and
         // is only visible on the way back out.
         assert_eq!(
-            out.get_field("background"),
+            out.get_field("some-flag"),
             None,
             "an uninterpretable field stays out of the field API"
         );
@@ -4652,10 +4662,10 @@ mod tests {
         // never ends up holding one name under both carriers.
         let main = decode_bytes(&file_from_a_newer_build()).unwrap();
         let mut sub = Raster::new(2, 2, PixelFormat::Rgb8, vec![1u8; 12]).unwrap();
-        sub.set_field("background", MetadataValue::Int(9));
+        sub.set_field("some-flag", MetadataValue::Int(9));
         let out = main.try_insert(&sub, 0, 0, true, None).unwrap();
         assert_eq!(
-            out.get_field("background"),
+            out.get_field("some-flag"),
             None,
             "main's opaque value wins the shared name"
         );
@@ -4671,33 +4681,30 @@ mod tests {
     #[test]
     fn setting_or_removing_a_field_supersedes_the_unknown_one() {
         let mut back = decode_bytes(&file_from_a_newer_build()).unwrap();
-        back.set_field("background", MetadataValue::Int(4));
+        back.set_field("some-flag", MetadataValue::Int(4));
         let fields = trailer_fields(&back.encode_vips().unwrap());
-        let hits: Vec<_> = fields
-            .iter()
-            .filter(|(n, _, _)| n == "background")
-            .collect();
+        let hits: Vec<_> = fields.iter().filter(|(n, _, _)| n == "some-flag").collect();
         assert_eq!(hits.len(), 1, "the field must not be written twice");
         assert_eq!(hits[0].1, GTYPE_INT);
         assert_eq!(hits[0].2, "4");
         assert_eq!(
             fields.len(),
-            7,
-            "overwriting one field must not disturb the other five, or the \
+            8,
+            "overwriting one field must not disturb the other six, or the \
              orientation tag: {fields:?}"
         );
 
         let mut back = decode_bytes(&file_from_a_newer_build()).unwrap();
-        back.set_typeof("background", 0);
+        back.set_typeof("some-flag", 0);
         let fields = trailer_fields(&back.encode_vips().unwrap());
         assert!(
-            !fields.iter().any(|(n, _, _)| n == "background"),
+            !fields.iter().any(|(n, _, _)| n == "some-flag"),
             "a removed field must not come back from the opaque carrier"
         );
         assert_eq!(
             fields.len(),
-            6,
-            "removing one field must not remove the other five: {fields:?}"
+            7,
+            "removing one field must not remove the other six: {fields:?}"
         );
     }
 
@@ -5026,10 +5033,12 @@ mod tests {
     /// `1.5 2.5`, and a `type` name libvips does not know is skipped
     /// with no warning at all, which is what makes the carrier safe to write.
     ///
-    /// `delay` sits in the same trailer as the positive control: #787 gave
-    /// `VipsArrayInt` a variant, so that one has to come back as a *value*
-    /// while the other two are still carried. Without it the test would pass
-    /// on a reader that carried everything, which is what it did before.
+    /// `delay` and `background` sit in the same trailer as the positive
+    /// controls: #787 gave `VipsArrayInt` a variant and #852 gave
+    /// `VipsArrayDouble` one, so those two have to come back as *values*
+    /// while `gboolean` and the invented type are still carried. Without them
+    /// the test would pass on a reader that carried everything, which is what
+    /// it did before.
     #[test]
     fn v_trailer_unknown_xml_type_is_carried_verbatim() {
         let body = rgb_2x2();
@@ -5040,6 +5049,7 @@ mod tests {
               \x20   <field type=\"VipsRefString\" name=\"note\">hi</field>\n\
               \x20   <field type=\"VipsArrayInt\" name=\"delay\">40 40 90</field>\n\
               \x20   <field type=\"VipsArrayDouble\" name=\"background\">1.5 2.5 </field>\n\
+              \x20   <field type=\"gboolean\" name=\"some-flag\">TRUE</field>\n\
               \x20   <field type=\"nosuchtype\" name=\"mystery\">a &amp; b</field>\n\
               \x20   <field type=\"gint\" name=\"orientation\">6</field>\n\
               \x20 </meta>\n</root>\n",
@@ -5049,11 +5059,15 @@ mod tests {
         // Readable things stay readable.
         assert_eq!(back.get_field("note").unwrap().as_str(), "hi");
         assert_eq!(back.orientation(), 6);
-        // The array this build now names comes back as a value.
+        // The two arrays this build now names come back as values.
         assert_eq!(back.get_int_array("delay"), Some(&[40i64, 40, 90][..]));
+        assert_eq!(
+            back.get_double_array("background"),
+            Some(&[1.5f64, 2.5][..])
+        );
         // The two it still cannot name read as absent rather than as a
         // wrong value.
-        for name in ["background", "mystery"] {
+        for name in ["some-flag", "mystery"] {
             assert_eq!(back.get_field(name), None);
             assert_eq!(back.get_typeof(name), 0);
             assert!(!back.get_fields().iter().any(|n| n == name));
@@ -5071,6 +5085,10 @@ mod tests {
         assert!(
             trailer
                 .contains("<field type=\"VipsArrayDouble\" name=\"background\">1.5 2.5 </field>"),
+            "got: {trailer}"
+        );
+        assert!(
+            trailer.contains("<field type=\"gboolean\" name=\"some-flag\">TRUE</field>"),
             "got: {trailer}"
         );
         assert!(
@@ -5383,17 +5401,103 @@ mod tests {
             "got: {trailer}"
         );
 
-        // Positive control: an array this build still cannot name keeps it.
+        // Positive control: a value this build still cannot name keeps it.
         let mut bytes = v_body();
         bytes.extend_from_slice(
-            br#"{"orientation":6,"fields":{"entries":[["background",{"DoubleArray":[1.5]}]]}}"#,
+            br#"{"orientation":6,"fields":{"entries":[["some-flag",{"Bool":true}]]}}"#,
         );
         let back = decode_bytes(&bytes).unwrap();
-        assert_eq!(back.get_field("background"), None);
+        assert_eq!(back.get_field("some-flag"), None);
         assert!(
             is_json_trailer(&back.encode_vips().unwrap()[v_body().len()..]),
             "a JSON-only carried value still keeps the JSON trailer"
         );
+    }
+
+    /// A `VipsArrayDouble` is all or nothing, like every other typed field.
+    ///
+    /// An element that will not parse leaves the whole field carried opaquely
+    /// rather than handing back the elements that happened to work, which is
+    /// the rule `gint`, `gdouble`, `VipsBlob` and `VipsArrayInt` already
+    /// follow. It is a deliberate divergence from vips, which hands back an
+    /// **empty** array and loses the elements that parsed.
+    ///
+    /// The good array in the same trailer is the positive control: without it
+    /// a reader that carried every double array would pass.
+    ///
+    /// Input: one parseable `VipsArrayDouble` and one with a word in it ->
+    /// Output: the first read as a value, the second carried and absent from
+    /// the field API, and both back out unchanged.
+    #[test]
+    fn a_double_array_with_an_unparseable_element_is_carried_not_truncated() {
+        let body = rgb_2x2();
+        let mut bytes = body.encode_vips_impl(false);
+        bytes.extend_from_slice(
+            b"<?xml version=\"1.0\"?>\n\
+              <root xmlns=\"http://www.vips.ecs.soton.ac.uk/vips/8.18.4\">\n  <meta>\n\
+              \x20   <field type=\"VipsArrayDouble\" name=\"good\">1.5 2.5 </field>\n\
+              \x20   <field type=\"VipsArrayDouble\" name=\"ragged\">1.5 nope 2.5 </field>\n\
+              \x20 </meta>\n</root>\n",
+        );
+        let back = decode_bytes(&bytes).unwrap();
+        assert_eq!(back.get_double_array("good"), Some(&[1.5f64, 2.5][..]));
+        assert_eq!(
+            back.get_field("ragged"),
+            None,
+            "an element that will not parse must not leave a truncated array"
+        );
+        assert_eq!(back.get_typeof("ragged"), 0);
+
+        let rewritten = back.encode_vips().unwrap();
+        let trailer = std::str::from_utf8(&rewritten[v_body().len()..]).unwrap();
+        assert!(
+            trailer
+                .contains("<field type=\"VipsArrayDouble\" name=\"ragged\">1.5 nope 2.5 </field>"),
+            "the carried one goes back out unchanged: {trailer}"
+        );
+    }
+
+    /// The two array types do not coerce into each other, in either
+    /// direction, and neither scalar coerces into its array.
+    ///
+    /// vips writes `VipsArrayInt` and `VipsArrayDouble` as different GTypes
+    /// and a reader asking for one does not accept the other, which is the
+    /// whole argument for `DoubleArray` being its own variant rather than
+    /// GIF's `background` riding in an `IntArray` (issue #852). Every arm is
+    /// asserted in both directions, because a reader that answered both from
+    /// one variant would pass a test that only looked one way.
+    ///
+    /// Input: an int array, a double array, and the two scalars ->
+    /// Output: each readable only through its own accessor.
+    #[test]
+    fn an_int_array_and_a_double_array_do_not_coerce_into_each_other() {
+        let mut im = rgb_2x2();
+        im.set_field("ints", MetadataValue::IntArray(vec![1, 2]));
+        im.set_field("doubles", MetadataValue::DoubleArray(vec![1.5, 2.5]));
+        im.set_field("scalar-int", MetadataValue::Int(1));
+        im.set_field("scalar-double", MetadataValue::Double(1.5));
+
+        assert_eq!(im.get_int_array("ints"), Some(&[1i64, 2][..]));
+        assert_eq!(im.get_double_array("doubles"), Some(&[1.5f64, 2.5][..]));
+
+        assert_eq!(
+            im.get_double_array("ints"),
+            None,
+            "an int array is not a double array"
+        );
+        assert_eq!(
+            im.get_int_array("doubles"),
+            None,
+            "and a double array is not an int array"
+        );
+        assert_eq!(im.get_double_array("scalar-double"), None);
+        assert_eq!(im.get_int_array("scalar-int"), None);
+        assert_eq!(im.get_double_array("absent"), None);
+
+        // The type codes are what `get_typeof` hands a ported call site, and
+        // they have to differ for the same reason.
+        assert_eq!(im.get_typeof("ints"), 5);
+        assert_eq!(im.get_typeof("doubles"), 6);
     }
 
     /// A value carried out of a *legacy JSON* trailer has no XML spelling, so
@@ -5429,7 +5533,7 @@ mod tests {
 
         // Drop the value that forced it and the format flips.
         let mut named = decode_bytes(&file_from_a_newer_build()).unwrap();
-        named.set_typeof("background", 0);
+        named.set_typeof("some-flag", 0);
         let rewritten = named.encode_vips().unwrap();
         assert!(
             !is_json_trailer(&rewritten[v_body().len()..]),
