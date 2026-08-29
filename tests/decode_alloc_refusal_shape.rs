@@ -157,7 +157,21 @@ struct Row {
     /// The `what` label the refusal names the buffer with, empty where the
     /// refusal is not libviprs's own.
     what: &'static str,
-    /// `width * height * bands * sample_bytes`.
+    /// RGBA planes of one frame the decoder needs **beside** the raster,
+    /// which the price has to cover for the ceiling to bound anything.
+    ///
+    /// Zero everywhere except WebP, which is the only row whose decoder is a
+    /// separate crate with a working set of its own that no knob bounds:
+    /// `image-webp` keeps a full-size RGBA canvas and a per-frame buffer,
+    /// and `set_memory_limit` reaches neither, because it is consulted only
+    /// on metadata chunks. Measured at up to 2.13 planes on a 512x512
+    /// animation and priced at three (issue #892).
+    ///
+    /// The other rows decode inside libviprs, where the buffer priced is the
+    /// buffer allocated.
+    decoder_planes: u64,
+    /// `width * height * bands * sample_bytes`, plus `decoder_planes` RGBA
+    /// planes of one frame.
     price: u64,
 }
 
@@ -185,6 +199,7 @@ fn priced_by_libviprs() -> Vec<Row> {
             decoded: (4, 4),
             priced_geometry: (4, 4, 3),
             sample_bytes: 1,
+            decoder_planes: 0,
             what: ".v pixel buffer",
             price: 48,
         },
@@ -198,6 +213,7 @@ fn priced_by_libviprs() -> Vec<Row> {
             // constant.
             priced_geometry: (4, 4, 4),
             sample_bytes: 1,
+            decoder_planes: 0,
             what: "GIF canvas",
             price: 64,
         },
@@ -209,6 +225,7 @@ fn priced_by_libviprs() -> Vec<Row> {
             decoded: (4, 3),
             priced_geometry: (4, 3, 3),
             sample_bytes: 4,
+            decoder_planes: 0,
             what: "Radiance pixel buffer",
             price: 144,
         },
@@ -218,6 +235,7 @@ fn priced_by_libviprs() -> Vec<Row> {
             decoded: (4, 3),
             priced_geometry: (4, 3, 1),
             sample_bytes: 1,
+            decoder_planes: 0,
             what: "FITS pixel buffer",
             price: 12,
         },
@@ -227,6 +245,7 @@ fn priced_by_libviprs() -> Vec<Row> {
             decoded: (8, 4),
             priced_geometry: (8, 4, 4),
             sample_bytes: 4,
+            decoder_planes: 0,
             what: "OpenEXR sample buffers",
             price: 512,
         },
@@ -240,6 +259,7 @@ fn priced_by_libviprs() -> Vec<Row> {
             decoded: (2, 3),
             priced_geometry: (2, 3, 1),
             sample_bytes: 1,
+            decoder_planes: 0,
             what: "NIfTI voxel buffer",
             price: 6,
         },
@@ -255,6 +275,7 @@ fn priced_by_libviprs() -> Vec<Row> {
             decoded: (3, 2),
             priced_geometry: (3, 2, 1),
             sample_bytes: 1,
+            decoder_planes: 0,
             what: "MAT sample buffer",
             price: 6,
         },
@@ -270,8 +291,11 @@ fn priced_by_libviprs() -> Vec<Row> {
             decoded: (4, 4),
             priced_geometry: (4, 4, 3),
             sample_bytes: 1,
+            // The still path's two planes; see the field's doc. 48 is the
+            // 4x4x3 raster and 128 is two RGBA planes of it.
+            decoder_planes: 2,
             what: "WebP frame buffer",
-            price: 48,
+            price: 176,
         },
         // Ultra HDR is the only row here that prices **two** images: a
         // container holds a base JPEG and a gain-map JPEG, and both go
@@ -288,6 +312,7 @@ fn priced_by_libviprs() -> Vec<Row> {
             decoded: (8, 8),
             priced_geometry: (8, 8, 3),
             sample_bytes: 1,
+            decoder_planes: 0,
             what: "Ultra HDR base image",
             price: 192,
         },
@@ -301,6 +326,7 @@ fn priced_by_libviprs() -> Vec<Row> {
             // decoded, which is the whole point for a compressed container.
             priced_geometry: (4, 3, 3),
             sample_bytes: 1,
+            decoder_planes: 0,
             what: "AVIF frame buffer",
             price: 36,
         });
@@ -314,6 +340,7 @@ fn priced_by_libviprs() -> Vec<Row> {
             decoded: (16, 16),
             priced_geometry: (16, 16, 3),
             sample_bytes: 1,
+            decoder_planes: 0,
             what: "JPEG XL frame buffer",
             price: 768,
         });
@@ -332,6 +359,7 @@ fn priced_by_libviprs() -> Vec<Row> {
             decoded: (4, 4),
             priced_geometry: (4, 4, 3),
             sample_bytes: 1,
+            decoder_planes: 0,
             what: "JPEG 2000 component buffers",
             price: 48,
         });
@@ -348,6 +376,7 @@ fn priced_by_the_image_crate() -> Vec<Row> {
             decoded: (4, 4),
             priced_geometry: (4, 4, 3),
             sample_bytes: 1,
+            decoder_planes: 0,
             what: "",
             price: 48,
         },
@@ -357,6 +386,7 @@ fn priced_by_the_image_crate() -> Vec<Row> {
             decoded: (4, 4),
             priced_geometry: (4, 4, 3),
             sample_bytes: 1,
+            decoder_planes: 0,
             what: "",
             price: 48,
         },
@@ -366,6 +396,7 @@ fn priced_by_the_image_crate() -> Vec<Row> {
             decoded: (4, 3),
             priced_geometry: (4, 3, 3),
             sample_bytes: 1,
+            decoder_planes: 0,
             what: "",
             price: 36,
         },
@@ -585,11 +616,16 @@ fn the_shape_carries_the_geometry_and_the_label_as_typed_fields() {
             "{} reports a geometry that is not the one it priced",
             row.format
         );
+        let raster =
+            u64::from(g.width) * u64::from(g.height) * u64::from(g.bands) * row.sample_bytes;
+        let planes = row.decoder_planes * u64::from(g.width) * u64::from(g.height) * 4;
         assert_eq!(
-            u64::from(g.width) * u64::from(g.height) * u64::from(g.bands) * row.sample_bytes,
+            raster + planes,
             needed_bytes,
-            "{}: the reported geometry must be the one the price came from",
-            row.format
+            "{}: the reported geometry must be the one the price came from, \
+             plus the {} RGBA planes its decoder needs beside it",
+            row.format,
+            row.decoder_planes
         );
         assert_eq!(needed_bytes, row.price, "{} price", row.format);
         assert_eq!(
@@ -863,6 +899,10 @@ const SOURCE_RS: &str = include_str!("../src/source.rs");
 /// needed_bytes: 48, max_alloc_bytes: 47 }`, and it cannot come back as
 /// anything else, because WebP is a `Native` row in the route table and the
 /// `image` crate never decodes one.
+///
+/// The price moved to 176 in issue #892: 48 is still the raster and 128 is
+/// the two RGBA planes `image-webp` allocates beside it, which the ceiling
+/// has to cover or it bounds nothing. The geometry it reports is unchanged.
 #[test]
 fn the_image_shape_doc_names_exactly_the_containers_that_report_it() {
     let bullet = SOURCE_RS
