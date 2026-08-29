@@ -9,6 +9,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- **`GifError::BadPageNumber` is gone**, folded into the
+  `SourceError::PageOutOfRange` the WebP and JPEG XL loaders already report
+  (issue #845). One refusal had two typed spellings, carrying the same three
+  numbers under different names (`frames` against `pages`) with the same
+  message bar the word before the colon, because GIF landed its animated load
+  in the same batch as the other two and put its refusal where every
+  self-decoded codec in this crate puts one.
+
+  `GifError` is `#[non_exhaustive]`, so a caller with a wildcard arm is
+  unaffected and a caller matching the variant by name moves to
+  `SourceError::PageOutOfRange { format: "gif", page, n, pages }`. That is the
+  same shape #686's collapse of five `AllocLimitExceeded` variants took.
+
+  `gif::LoadOptions::window` was a second copy of `source::resolve_page_range`
+  and is now a call to it. The two were written against each other field for
+  field so that folding them would be a deletion rather than a redesign, and it
+  was: the whole rule went, and every measurement behind it already lived on
+  the shared one.
+- **`hist_find_indexed` sums onto `FloatF32` instead of a 16-bit format**
+  (issue #887). Breaking for the same reason #532 is: the output format changes.
+
+  libvips emits **DOUBLE** there, and it does so whatever the value image's
+  carrier is. Measured on `/opt/homebrew/bin/vips` 8.18.6, a 4-pixel value image
+  `[10, 20, 30, 40]` binned by `[0, 1, 0, 1]` gives DOUBLE with bins 40 and 60
+  for `uchar`, `ushort`, `uint` and `float` inputs alike. libviprs wrote 16-bit
+  sums, so four `uchar` pixels of 255 in one bin already exceeded what a byte
+  could say and a 300x300 image summed to 65535 instead of 22,950,000.
+
+  **Why the float carrier rather than the wider integer one**, since this crate
+  has no `f64`: `Uint32` is exact to 4,294,967,295 and then overflows, and a
+  10000x10000 `uchar` image sums to 25,500,000,000, which is an image size
+  libvips exists to handle. `f32` never overflows and its error is relative: sums
+  stay exact to 2^24 and lose at most half a spacing above it, so it degrades
+  where the integer carrier would fail outright. It also matches vips's *kind*,
+  and it is the only one of the two that can hold a negative sum once the signed
+  carriers of issue #516 land. Neither matches DOUBLE's exactness to 2^53, and
+  that limitation is in the method's docs rather than left to be discovered.
+
+  A float value image works now too. It used to reach the storage reader and
+  panic on the kind, so `im.colourspace(Lab).hist_find_indexed(&idx)` was a
+  panic out of a `Result`.
+
 - **The counting ops emit `Uint32` instead of a 16-bit format, and stop
   saturating at 65535** (issue #532). `hist_find`, `hist_find_band`,
   `hist_find_ndim`, `hist_cum`, `project`, `hough_line` and `hough_circle` all
@@ -3145,6 +3187,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matching on the typed errors is unaffected; only the panic text changes.
 
 ### Fixed
+
+- **Two `src/draw.rs` sites #867 converted had no test holding them** (issue
+  #915). Both are the shape #607 exists to prevent and both were silent: the
+  `draw_smudge` saturation ceiling, which reads `SampleKind::max_value` and
+  could be replaced by a flat `255.0` with the whole suite staying green, and
+  the `Mask::apply` sample-kind guard, which could be deleted entirely with
+  the same result.
+
+  The mask one is the sharper miss, because a test for it already existed and
+  was **vacuous**: `draw_mask_requires_single_band_8bit_mask` built its masks
+  with `Raster::zeroed`, and an all-zero mask blends zero weight, so "refused"
+  and "accepted with weight 0" both leave a black target. Both masks are
+  saturated now, and the `Gray16` case is the one the kind test is really for:
+  without the guard its samples are walked as bytes, at half the stride, with
+  the low byte of each 16-bit value used as the weight.
+
+  The smudge test needed a fixture that separates the two constants, so it
+  smudges a uniform `Gray16` field of 40000: a 255 ceiling flattens it and the
+  kind's own ceiling does not.
+
+  Neither was a defect. The code on `main` is right in both places; what was
+  missing was anything that would notice if a later edit undid it.
 
 - Two GIFs that decode in vips and did not decode here now decode, because the
   loader hands the decoder the same file in the shape it will read (issues
