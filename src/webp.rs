@@ -421,6 +421,23 @@ pub fn decode_webp_with(
     // whole number of them.
     let (width, page_height) = decoder.dimensions();
     let animated = decoder.is_animated();
+    if animated {
+        // Ask for the disposal step at all. `image-webp` only clears a
+        // disposed frame's rectangle when a background colour has been set,
+        // and it has none by default, so without this a frame marked
+        // `dispose: background` leaves its pixels standing under the next
+        // one. Transparent black is what libwebp clears to, and it ignores
+        // the colour the `ANIM` chunk declares: measured on 8.18.6, a file
+        // declaring `0xFFFFFFFF` and a copy of it patched to opaque green
+        // both read back transparent outside the disposed rectangle.
+        //
+        // The `Err` arm cannot fire here, because it is only returned for a
+        // file that is not extended and animated, which `is_animated` has
+        // just answered.
+        decoder
+            .set_background_color([0, 0, 0, 0])
+            .map_err(decode_error)?;
+    }
     // A still image is a one-page file, so the same request resolves
     // against it and `page = 1` is refused there too, exactly as vips
     // refuses `still.webp[page=1]`.

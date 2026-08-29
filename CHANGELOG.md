@@ -3027,6 +3027,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   restamps they carried to work around this, which also removes two
   image-sized clones from the linear and ICC thumbnail pipelines.
 
+- **A WebP frame marked dispose-to-background is disposed** (issue #884).
+  `image-webp` 0.2.4 clears a disposed frame's rectangle only when a
+  background colour has been set, and it has none unless a caller sets one,
+  so the disposal step was skipped and the previous frame's pixels stayed on
+  the canvas under the next one. Measured on an `img2webp` fixture whose
+  frame 0 covers the canvas in red and disposes to background: vips reads
+  the area outside frame 1's square as the cleared canvas and libviprs read
+  it as red.
+
+  libviprs now asks for transparent black, which is what libwebp clears to.
+  It **ignores** the colour the `ANIM` chunk declares: the fixture declares
+  `0xFFFFFFFF` and a copy patched to opaque green reads back the same, both
+  measured, so the declared colour is a hint for a display environment
+  rather than something a decoder paints.
+
+  Nothing in `oracle-captures/foreign-webp` could have caught this, because
+  `vips webpsave` has no disposal knob and writes `dispose: none` on every
+  frame. The fixture is `img2webp`'s output with the vips read recorded
+  beside it.
+
 - **The `ANMF` blend-flag rewrite is withdrawn, and animated WebP frames
   the file asks to have blended decode one grey level low again** (issue
   #863). The rewrite proved a frame opaque from its `VP8L` `alpha_is_used`
