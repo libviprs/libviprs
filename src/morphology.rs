@@ -71,7 +71,7 @@
 //!   with a `[-1, 1]` mask whose negative lobe clips to zero in uchar,
 //!   `project`, `avg`, `/255`).
 
-use crate::pixel::PixelFormat;
+use crate::pixel::{PixelFormat, SampleKind};
 use crate::raster::{Raster, RasterError};
 use thiserror::Error;
 
@@ -199,7 +199,10 @@ fn clamp_coord(v: i64, size: u32) -> usize {
 /// independently and replicating edges.
 fn morph(src: &Raster, kernel: &Kernel, op: MorphOp) -> Result<Raster, MorphologyError> {
     let fmt = src.format();
-    if fmt.bytes_per_channel() != 1 {
+    // On the sample kind and not the byte width: one byte is `u8` or `i8`,
+    // and a width test would let a signed carrier through to be read as
+    // unsigned (issue #607).
+    if fmt.kind() != SampleKind::U8 {
         return Err(MorphologyError::EightBitOnly {
             op: match op {
                 MorphOp::Erode => "erode",
@@ -256,14 +259,53 @@ fn morph(src: &Raster, kernel: &Kernel, op: MorphOp) -> Result<Raster, Morpholog
 }
 
 /// Read the one-band sample at `(x, y)` as `u32` for the unsigned 8/16-bit
-/// depths (native byte order for 16-bit, matching [`crate::raster_ops`]).
+/// kinds (native byte order for 16-bit, matching [`crate::raster_ops`]).
+///
+/// Keyed on [`SampleKind`] rather than on the byte width, because the width
+/// spelling this replaced stepped by two bytes for *every* width that was
+/// not one. That is the right stride for `u16` and half the right stride
+/// for any four-byte kind, so it would have walked the wrong pixels rather
+/// than merely reading the wrong type (issue #607).
+///
+/// # Panics
+///
+/// Panics on a kind this module's callers refuse upstream. Every caller
+/// checks [`unsigned_8_or_16`] first, so the arm is unreachable; it is a
+/// panic rather than a wrong number so that moving a guard is loud.
 #[inline]
-fn sample_u32(data: &[u8], stride: usize, bpc: usize, x: usize, y: usize) -> u32 {
-    match bpc {
-        1 => data[y * stride + x] as u32,
-        _ => {
+fn sample_u32(data: &[u8], stride: usize, kind: SampleKind, x: usize, y: usize) -> u32 {
+    match kind {
+        SampleKind::U8 => data[y * stride + x] as u32,
+        SampleKind::U16 => {
             let b = y * stride + x * 2;
             u16::from_ne_bytes([data[b], data[b + 1]]) as u32
+        }
+        SampleKind::I8 | SampleKind::I16 | SampleKind::U32 | SampleKind::I32 | SampleKind::F32 => {
+            panic!("{UNSIGNED_ONLY_MSG}")
+        }
+    }
+}
+
+/// The message the unreachable arms of [`sample_u32`] and its write side
+/// carry, kept in one place so the two cannot drift.
+const UNSIGNED_ONLY_MSG: &str = "the morphology operations support unsigned 8/16-bit rasters only; \
+     cast first (this is guarded by unsigned_8_or_16 and should be unreachable)";
+
+/// Whether this kind is one of the two the rank, countlines and
+/// label-regions walkers can read.
+///
+/// The byte-width test it replaces refused float by refusing four bytes,
+/// which lets every one- and two-byte kind through:
+/// under a signed carrier an `i8` raster would be walked as `u8`, and its
+/// negative samples would sort above its positive ones in the rank window.
+/// Naming the two kinds that work is total the other way round (issue
+/// #607).
+#[inline]
+fn unsigned_8_or_16(kind: SampleKind) -> bool {
+    match kind {
+        SampleKind::U8 | SampleKind::U16 => true,
+        SampleKind::I8 | SampleKind::I16 | SampleKind::U32 | SampleKind::I32 | SampleKind::F32 => {
+            false
         }
     }
 }
@@ -351,10 +393,11 @@ impl Raster {
             return Err(MorphologyError::IndexOutOfRange { index, n });
         }
         let fmt = self.format();
-        let bpc = fmt.bytes_per_channel();
-        if bpc == 4 {
+        let kind = fmt.kind();
+        if !unsigned_8_or_16(kind) {
             return Err(MorphologyError::UnsignedOnly { op: "rank" });
         }
+        let bpc = kind.bytes();
         let (w, h) = (self.width(), self.height());
         let bands = fmt.channels();
         let stride = self.stride();
@@ -376,15 +419,25 @@ impl Raster {
                         let sy = clamp_coord(y + wy - ay, h);
                         for wx in 0..width as i64 {
                             let sx = clamp_coord(x + wx - ax, w);
-                            window.push(sample_u32(data, stride, bpc, sx * bands + b, sy));
+                            window.push(sample_u32(data, stride, kind, sx * bands + b, sy));
                         }
                     }
                     window.sort_unstable();
                     let v = window[index as usize];
                     let off = y as usize * out_stride + (x as usize * bands + b) * bpc;
-                    match bpc {
-                        1 => out_data[off] = v as u8,
-                        _ => out_data[off..off + 2].copy_from_slice(&(v as u16).to_ne_bytes()),
+                    // The write side of `sample_u32`, keyed the same way and
+                    // for the same reason: the old `_` arm wrote two bytes
+                    // at a four-byte stride (issue #607).
+                    match kind {
+                        SampleKind::U8 => out_data[off] = v as u8,
+                        SampleKind::U16 => {
+                            out_data[off..off + 2].copy_from_slice(&(v as u16).to_ne_bytes());
+                        }
+                        SampleKind::I8
+                        | SampleKind::I16
+                        | SampleKind::U32
+                        | SampleKind::I32
+                        | SampleKind::F32 => panic!("{UNSIGNED_ONLY_MSG}"),
                     }
                 }
             }
@@ -421,14 +474,14 @@ impl Raster {
                 bands: fmt.channels(),
             });
         }
-        let bpc = fmt.bytes_per_channel();
-        if bpc == 4 {
+        let kind = fmt.kind();
+        if !unsigned_8_or_16(kind) {
             return Err(MorphologyError::UnsignedOnly { op: "countlines" });
         }
         let (w, h) = (self.width() as usize, self.height() as usize);
         let stride = self.stride();
         let data = self.data();
-        let above = |x: usize, y: usize| sample_u32(data, stride, bpc, x, y) >= 128;
+        let above = |x: usize, y: usize| sample_u32(data, stride, kind, x, y) >= 128;
 
         // Count below-to-above transitions of the 128 threshold. The
         // libvips pipeline convolves the thresholded image with [-1, 1] in
@@ -486,7 +539,7 @@ impl Raster {
     /// Returns [`MorphologyError::UnsignedOnly`] for float rasters.
     pub fn try_label_regions(&self) -> Result<(Raster, u32), MorphologyError> {
         let fmt = self.format();
-        if fmt.bytes_per_channel() == 4 {
+        if !unsigned_8_or_16(fmt.kind()) {
             return Err(MorphologyError::UnsignedOnly {
                 op: "label_regions",
             });
@@ -580,6 +633,7 @@ impl Raster {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::num::NonZeroU16;
 
     fn black(w: u32, h: u32) -> Raster {
         Raster::zeroed(w, h, PixelFormat::Gray8).unwrap()
@@ -1010,5 +1064,134 @@ mod tests {
         im.draw_rect_filled(&[10, 9, 0], 3, 0, 3, 2);
         let (_, segments) = im.label_regions();
         assert_eq!(segments, 3, "two touching rects of distinct colour + 1");
+    }
+
+    /**
+     * Tests that this module dispatches on sample kind and never on byte
+     * width, by asserting that neither the byte-width accessor on
+     * [`PixelFormat`] nor its width-keyed constructor survives in
+     * `src/morphology.rs`.
+     * Works by scanning the module's own source, compiled in with
+     * `include_str!`, for the accessor's name; the needle is spelled in two
+     * halves so this assertion is not itself a hit. A byte width is not a
+     * sample kind: four bytes is `f32` today and would be `u32` under issue
+     * #517, and the sites this replaced stepped two bytes per sample for
+     * every width but one, so a four-byte carrier would have been walked at
+     * half stride (issue #607).
+     * Input: `src/morphology.rs` -> Output: zero occurrences.
+     */
+    #[test]
+    fn morphology_does_not_dispatch_on_byte_width() {
+        const SRC: &str = include_str!("morphology.rs");
+        let needles = [
+            concat!("bytes_per_", "channel"),
+            concat!("with_", "channels"),
+        ];
+        // Positive control: the same scan over the same string finds a token
+        // that is present, so the zero below is a real zero and not the
+        // vacuous pass an empty read would give.
+        assert!(
+            SRC.contains(concat!("fn sample_", "u32")),
+            "positive control failed: the scan cannot see this module's source"
+        );
+        for needle in needles {
+            assert_eq!(
+                SRC.matches(needle).count(),
+                0,
+                "{needle} is back in src/morphology.rs; dispatch on \
+                 PixelFormat::kind() and PixelFormat::with_kind() instead"
+            );
+        }
+    }
+
+    /**
+     * Tests that the rank walker reads a 16-bit raster at the 16-bit
+     * stride, which is the property the width-keyed helper got right only
+     * by accident: its `_` arm stepped two bytes for every width that was
+     * not one, so it is the arm a four-byte carrier would have taken.
+     * Works by ranking a one-band `u16` row whose samples are all above
+     * `u8::MAX` and asserting the median comes back as the middle sample
+     * rather than as a byte of one of them.
+     * Input: `[1000, 40000, 20000]` in one row, 3x1 window, index 1 ->
+     * Output: 20000 in every output pixel the window covers.
+     */
+    #[test]
+    fn rank_reads_sixteen_bit_samples_at_the_sixteen_bit_stride() {
+        let mut im = Raster::zeroed(3, 1, PixelFormat::Gray16).unwrap();
+        let data = im.data_mut();
+        for (i, v) in [1000u16, 40000, 20000].iter().enumerate() {
+            data[2 * i..2 * i + 2].copy_from_slice(&v.to_ne_bytes());
+        }
+        let out = im.try_rank(3, 1, 1).expect("16-bit rank is supported");
+        let got: Vec<u16> = out
+            .data()
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_ne_bytes(*c))
+            .collect();
+        // Edges replicate, so every window is {1000, 40000, 20000} with one
+        // sample doubled; the median is 20000 in the middle and at the right
+        // edge, and 1000 at the left edge where 1000 is doubled.
+        assert_eq!(got, vec![1000, 20000, 20000], "rank read the wrong bytes");
+    }
+
+    /**
+     * Tests that the erode/dilate guard names the 8-bit *kind* and not the
+     * one-byte width, so a one-byte signed carrier would be refused rather
+     * than walked as unsigned (issue #607).
+     * Works by checking the guard still refuses the deeper kinds the crate
+     * carries today and still accepts `U8`, which is the half of the
+     * contract that is observable before a signed carrier exists.
+     * Input: Gray16 and FloatF32(1) -> `EightBitOnly`; Gray8 -> Ok.
+     */
+    #[test]
+    fn erode_refuses_every_kind_but_u8() {
+        let kernel: &[&[u8]] = &[&[255, 255, 255]];
+        for fmt in [
+            PixelFormat::Gray16,
+            PixelFormat::FloatF32(NonZeroU16::new(1).unwrap()),
+        ] {
+            let im = Raster::zeroed(3, 3, fmt).unwrap();
+            assert!(
+                matches!(
+                    im.try_erode(kernel),
+                    Err(MorphologyError::EightBitOnly { .. })
+                ),
+                "{fmt:?} must be refused by the 8-bit guard"
+            );
+        }
+        let im = Raster::zeroed(3, 3, PixelFormat::Gray8).unwrap();
+        assert!(im.try_erode(kernel).is_ok(), "Gray8 must still be accepted");
+    }
+
+    /**
+     * Tests that the rank / countlines / label-regions guard is keyed on
+     * the sample kind, so it accepts exactly the two unsigned kinds its
+     * error variant documents.
+     * Works by driving all three ops at `Gray8`, `Gray16` and
+     * `FloatF32(1)` and asserting the float one is the only refusal.
+     * Input: three formats x three ops -> Output: `UnsignedOnly` for float
+     * only.
+     */
+    #[test]
+    fn the_unsigned_guard_accepts_u8_and_u16_and_refuses_float() {
+        for fmt in [PixelFormat::Gray8, PixelFormat::Gray16] {
+            let im = Raster::zeroed(4, 4, fmt).unwrap();
+            assert!(im.try_rank(3, 3, 4).is_ok(), "{fmt:?} rank");
+            assert!(im.try_countlines(Direction::Horizontal).is_ok(), "{fmt:?}");
+            assert!(im.try_label_regions().is_ok(), "{fmt:?} label_regions");
+        }
+        let f = Raster::zeroed(4, 4, PixelFormat::FloatF32(NonZeroU16::new(1).unwrap())).unwrap();
+        for got in [
+            f.try_rank(3, 3, 4).err(),
+            f.try_countlines(Direction::Horizontal).err(),
+            f.try_label_regions().map(|_| ()).err(),
+        ] {
+            assert!(
+                matches!(got, Some(MorphologyError::UnsignedOnly { .. })),
+                "a float raster must be refused, got {got:?}"
+            );
+        }
     }
 }

@@ -76,7 +76,7 @@ const OPTIONS_STRUCTS: [(&str, &str, &[&str]); 10] = [
     (
         "src/gif.rs",
         include_str!("../src/gif.rs"),
-        &["SaveOptions"],
+        &["LoadOptions", "SaveOptions"],
     ),
     (
         "src/jxl.rs",
@@ -212,6 +212,17 @@ fn gif_save_options_build_through_setters() {
     assert!(!d.interlaced);
     assert!((d.dither - 1.0).abs() < f64::EPSILON);
     assert_eq!(d.bitdepth, 8);
+}
+
+#[test]
+fn gif_load_options_build_through_setters() {
+    let o = gif::LoadOptions::default().with_page(2).with_n(-1);
+    assert_eq!(o.page, 2);
+    assert_eq!(o.n, -1);
+
+    let d = gif::LoadOptions::default();
+    assert_eq!(d.page, 0);
+    assert_eq!(d.n, 1, "vips's gifload loads one page by default");
 }
 
 #[test]

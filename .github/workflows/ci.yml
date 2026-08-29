@@ -94,6 +94,22 @@ jobs:
       # of which is `tracing`, so the default clippy job compiles neither
       # `src/jxl.rs`'s real bodies nor its unit tests (issue #500).
       - run: cargo clippy --all-targets --features jxl -- -D warnings -W clippy::incompatible_msrv -W deprecated
+      # And for JPEG 2000: `jp2k` is non-default on compile time rather than on
+      # crate count (it is +2 lock entries, the cheapest codec feature here), so
+      # the default clippy job compiles `src/jp2k.rs` with every real body
+      # cfg'd out (issue #772).
+      - run: cargo clippy --all-targets --features jp2k -- -D warnings -W clippy::incompatible_msrv -W deprecated
+      # The remaining four features gate code that no job named until #816.
+      # `avif` is the worst of them: the real decode bodies in `src/avif.rs` are
+      # `#[cfg(feature = "avif")]`, so nothing here type-checked them at all,
+      # and the ten oracle-comparison tests are `ignore`d without it.
+      - run: cargo clippy --all-targets --features avif -- -D warnings -W clippy::incompatible_msrv -W deprecated
+      # `packfile` is how the hole was proved rather than argued: the first run
+      # of this line on `main` was **red**, on a real `collapsible_if` in
+      # `src/sink_packfile.rs` that had been sitting there unlinted.
+      - run: cargo clippy --all-targets --features packfile -- -D warnings -W clippy::incompatible_msrv -W deprecated
+      - run: cargo clippy --all-targets --features serde -- -D warnings -W clippy::incompatible_msrv -W deprecated
+      - run: cargo clippy --all-targets --features tracing -- -D warnings -W clippy::incompatible_msrv -W deprecated
       # `s3` is a deprecated alias for `object-store-sink`, retained for consumers
       # that pinned the old feature name. Nothing else in CI exercises it, so a
       # broken alias would go unnoticed; build it explicitly so it keeps resolving.
@@ -144,6 +160,17 @@ jobs:
       # the graph at all and this job would never look at them; see the `jxl`
       # comment in Cargo.toml, which cites this line.
       - run: cargo check --all-targets --features jxl
+      # The same question, asked of every other feature that pulls in a crate
+      # declaring no `rust-version`, because those are exactly the ones the
+      # MSRV-aware resolver cannot see. Measured on the current lock: `avif`
+      # adds 9 such crates, `svg` adds 12, `packfile` adds 5 and `jp2k` adds 1
+      # (`openjpeg2-pure-rs` 0.1.1). `serde`, `tracing` and
+      # `object-store-sink` add none, which is why they are not here (issues
+      # #772, #816).
+      - run: cargo check --all-targets --features jp2k
+      - run: cargo check --all-targets --features avif
+      - run: cargo check --all-targets --features svg
+      - run: cargo check --all-targets --features packfile
 
   docs:
     name: Docs (deny broken, private and redundant intra-doc links)
@@ -189,6 +216,24 @@ jobs:
       # `tests/jxl_ported_surface.rs` round trips all run zero assertions
       # against the codec unless the feature is named (issue #500).
       - run: cargo test --features jxl
+      # Same for JPEG 2000: bare `cargo test` compiles `src/jp2k.rs` with every
+      # real body cfg'd out, so the oracle pins, the fuzz-corpus sweep and
+      # `tests/jp2k_ported_surface.rs` run zero assertions against the codec
+      # unless the feature is named (issue #772). Measured: 24 tests.
+      - run: cargo test --features jp2k
+      # And the four that nothing named until #816, with what each one is
+      # worth, measured by diffing the test list against a default run:
+      #   avif      10 tests that are `ignore`d without it, and they are the
+      #             oracle comparisons: bit-exactness, lossy 4:4:4, chroma
+      #             siting, alpha, deep samples, the decode ceilings
+      #   packfile   8 tests
+      #   serde      6 tests (all of tests/serde_wire.rs, which is
+      #             `#![cfg(feature = "serde")]` and had never run)
+      #   tracing    5 tests
+      - run: cargo test --features avif
+      - run: cargo test --features packfile
+      - run: cargo test --features serde
+      - run: cargo test --features tracing
 
   integration-test:
     name: Integration Tests (libviprs-tests)
