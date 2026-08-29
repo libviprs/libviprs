@@ -1541,6 +1541,20 @@ mod tests {
             ),
             "the parse runs before the pairing refusal"
         );
+        // The header half is priced as well as parsed, so a `.hdr` that
+        // declares a geometry past the budget says *that* rather than
+        // "the pixels are elsewhere". Without this the price call in
+        // `decode_analyze_header` is dead code that nothing notices the loss
+        // of: `dims_32767.hdr` is refused either way, just for the wrong
+        // reason.
+        match decode_bytes_with_limits(fixture!("dims_32767.hdr"), limits) {
+            Err(SourceError::AllocLimitExceeded { what, .. }) => {
+                assert_eq!(what, "Analyze pixel buffer");
+            }
+            other => panic!(
+                "a header half that prices past the budget reports the budget, got {other:?}"
+            ),
+        }
     }
 
     /**
@@ -1942,17 +1956,39 @@ mod tests {
      * pixel with `unable to open "fixtures/no_img.img"`. libviprs has one
      * entry point, so it arrives as an I/O error naming the sibling, which
      * is the same information at the only moment there is to report it.
-     * Input: `no_img.hdr`, which has no `.img` next to it -> Output:
-     * `SourceError::Io` with `NotFound`.
+     *
+     * And the second half, which is the one with teeth: the declared
+     * geometry is priced **before** the `.img` is opened at all, so a header
+     * that prices past a ceiling costs no second read. That claim is
+     * otherwise unfalsifiable from outside, because both orderings refuse
+     * every fixture in the capture; the missing `.img` is what separates
+     * them, since reading first gives `Io(NotFound)` and pricing first gives
+     * the ceiling by name. Reordering the two lines in
+     * `decode_analyze_file` was green before this half existed.
+     * Input: `no_img.hdr` under the default limits and under `max_coord = 1`
+     * -> Output: `SourceError::Io` with `NotFound`, and
+     * `CoordLimitExceeded`.
      */
     #[test]
-    fn a_missing_img_beside_a_valid_hdr_is_an_io_error() {
+    fn a_missing_img_is_an_io_error_and_the_header_is_priced_before_it_is_opened() {
         let path = format!("{FIXTURES}no_img.hdr");
         let err = decode_analyze_file(Path::new(&path), DecodeLimits::default())
             .expect_err("there is no no_img.img");
         match err {
             SourceError::Io(e) => assert_eq!(e.kind(), std::io::ErrorKind::NotFound),
             other => panic!("expected an I/O error naming the sibling, got {other:?}"),
+        }
+
+        // The same path, with a ceiling the 3x2 geometry cannot clear. If the
+        // `.img` were opened first this would still be `Io(NotFound)`.
+        let tight = DecodeLimits::default().with_max_coord(1);
+        match decode_analyze_file(Path::new(&path), tight) {
+            Err(SourceError::CoordLimitExceeded { width, height, .. }) => {
+                assert_eq!((width, height), (3, 2));
+            }
+            other => {
+                panic!("the header has to be priced before the sibling is opened, got {other:?}")
+            }
         }
     }
 }
