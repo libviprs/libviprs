@@ -658,7 +658,12 @@ mod plane {
     /// [`super::Raster::project`]'s row accumulator, the same for rows.
     pub(super) const PROJECT_ROW_SUMS: &str = "arithmetic.project.row_sums";
     /// [`super::Raster::try_stdif`]'s integral image of the padded input.
-    pub(super) const STDIF_INTEGRAL: &str = "arithmetic.stdif.integral";
+    ///
+    /// `_sums` rather than the bare `arithmetic.stdif.integral` it started as,
+    /// because that reads as a prefix of the label below and the probe matches
+    /// a cap site with `starts_with`: a ceiling naming the shorter one would
+    /// silently refuse the longer as well.
+    pub(super) const STDIF_INTEGRAL_SUMS: &str = "arithmetic.stdif.integral_sums";
     /// [`super::Raster::try_stdif`]'s integral image of the padded input's
     /// squares, the same size again and allocated straight after it.
     pub(super) const STDIF_INTEGRAL_SQUARES: &str = "arithmetic.stdif.integral_squares";
@@ -2738,7 +2743,7 @@ impl Raster {
                 bpp: 8,
             })?;
         let mut s = try_plane_len_filled(
-            plane::STDIF_INTEGRAL,
+            plane::STDIF_INTEGRAL_SUMS,
             self.width(),
             self.height(),
             scratch_len,
@@ -4073,7 +4078,7 @@ mod tests {
      */
     #[test]
     fn stdif_starves_each_integral_image_by_name_rather_than_aborting() {
-        for site in [plane::STDIF_INTEGRAL, plane::STDIF_INTEGRAL_SQUARES] {
+        for site in [plane::STDIF_INTEGRAL_SUMS, plane::STDIF_INTEGRAL_SQUARES] {
             let result = with_plane_cap_at(site, SCRATCH_TEST_CAP_BYTES, || {
                 scratch_probe().try_stdif(11, 11)
             });
