@@ -70,6 +70,58 @@
 //!   wrote for an 8-row image and recovering the order `0, 4, 2, 6, 1, 3, 5,
 //!   7`.
 //!
+//! # Header fields
+//!
+//! Every field `gifload` attaches beside the pixels, and what this loader
+//! does with it. The table is **checked**:
+//! `the_header_field_table_matches_what_this_loader_attaches` parses it out
+//! of this file and requires every "attached" row to be present on a decoded
+//! raster and every "not attached" row to be absent, which is what issue #801
+//! asked for after the paragraph this replaces named a blocker that had
+//! already gone.
+//!
+//! | `gifload` field | vips type | here |
+//! |---|---|---|
+//! | `n-pages` | `gint` | attached |
+//! | `loop` | `gint` | attached |
+//! | `delay` | `VipsArrayInt` | attached, one entry per loaded page |
+//! | `page-height` | `gint` | attached when more than one page is loaded |
+//! | `palette` | `gint` | attached, always 1 |
+//! | `bits-per-sample` | `gint` | attached |
+//! | `interlaced` | `gint` | attached when some frame is stored interlaced |
+//! | `gif-palette` | `VipsArrayInt` | attached when no frame carries a local colour table |
+//! | `background` | `VipsArrayDouble` | not attached, see below |
+//! | `gif-loop` | `gint` | not attached, a deprecated alias for `loop` |
+//! | `gif-delay` | `gint` | not attached, a deprecated alias for `delay` |
+//! | `palette-bit-depth` | `gint` | not attached, a deprecated alias for `bits-per-sample` |
+//!
+//! `gif-palette` is the global colour table as one signed 32-bit word per
+//! entry, `0xFF << 24 | B << 16 | G << 8 | R`, so every entry is negative.
+//! vips gets that number by reinterpreting libnsgif's `R, G, B, A` byte quad
+//! as a machine integer, which makes **vips's** answer host-dependent; this
+//! one is not. The little-endian reading is pinned, because the `.v` trailer
+//! carries the value as decimal text and a field that meant one thing on the
+//! machine that wrote it and another on the machine that read it would be
+//! worse than a divergence confined to big-endian hosts, where nothing in
+//! this project runs.
+//!
+//! The array is the table as it sits on the wire, padding included: a
+//! three-colour table comes back with a fourth, opaque-black entry. Its
+//! presence rule is about the **file** and not the window that was loaded, so
+//! a two-frame file whose frame 0 carries a local table reports no
+//! `gif-palette` at `[page=1]` either.
+//!
+//! **A file that declares no global colour table diverges** (issue #851).
+//! libnsgif substitutes a two-entry black-and-white table for it and decodes
+//! through that, so vips reports `bits-per-sample: 1`, `gif-palette:
+//! -16777216 -1` and a white pixel wherever the frame stores index 1.
+//! libviprs refuses the file: `gif` 0.14.2's `Decoder::next_frame_info`
+//! (`reader/mod.rs:438-442`) errors on any frame that has neither a local
+//! palette nor a global one, before this module gets a chance to supply one,
+//! and `Decoder` has no way to set a global palette from outside. The file is
+//! malformed either way, and both answers are refusals of a sort; the gap is
+//! that vips's is a picture.
+//!
 //! # Where libviprs and vips diverge, and why it is not a bug
 //!
 //! LZW is exactly lossless and deterministic in both directions, so the
@@ -198,29 +250,49 @@
 //! |---------------|---------------------------------------------------------------|
 //! | 0, 1          | nothing; the next frame draws over it                         |
 //! | 2             | this frame's rectangle is cleared, and only it                |
-//! | 3             | the whole canvas rewinds to before this frame drew            |
+//! | 3, 4          | the whole canvas rewinds to before this frame drew            |
 //! | 5, 6, 7       | nothing, as for 0 and 1                                       |
 //!
 //! Code 2 has two arms and one fixture cannot see both: the clear is
 //! **transparent** when the disposed frame declares a transparent index and
 //! the **background colour** when it does not, and the background colour is
-//! the global colour table entry the screen descriptor points at, or black
-//! when that index is past the end of the table. All three are pinned.
+//! the global colour table entry the screen descriptor points at, or **entry
+//! 0** when that index is past the end of the table. All three are pinned.
 //!
-//! **Code 4 is the one divergence.** libnsgif treats it as a second spelling
-//! of "restore to previous"; libviprs keeps the canvas, as for 0 and 1. The
-//! `gif` crate's decoder maps every code it does not know onto
-//! `DisposalMethod::Any`, so 4 arrives here indistinguishable from 0, and
-//! recovering it would mean a second block walk beside the decoder's own.
-//! Code 4 is reserved by GIF89a, the difference is only visible on a file
-//! that uses it, and `a_reserved_disposal_code_keeps_the_canvas` pins what
-//! libviprs does with it, alongside the codes 5, 6 and 7 that do agree.
-//! Issue #827 tracks it.
+//! **Code 4 costs a second walk, and it is worth it** (issue #827). GIF89a
+//! reserves 4 to 7; libnsgif remaps 4 onto restore-to-previous
+//! (`NSGIF_DISPOSAL_RESTORE_QUIRK`) and leaves the rest alone, and the `gif`
+//! crate's `DisposalMethod::from_u8` knows only 0 to 3 and folds every other
+//! code onto `Any`, so by the time [`decode_gif_with`] sees a frame the code
+//! is gone. `ControlWalk` walks the block chain a second time to read each
+//! frame's graphic control extension off the wire. It decodes no pixels, and
+//! it is not trusted blind: the extension carries the delay, the transparent
+//! index and the disposal alongside each other, so
+//! `reconcile_disposal` requires the three the decoder *did* keep to match
+//! before it believes the fourth, and falls back to the decoder's own answer
+//! for that frame when they do not.
+//!
+//! The alternative was to keep libviprs' answer and pin the gap, which is
+//! what [`crate::resample`]'s rule allows for a difference inside the
+//! carrier's noise. This one is not: it is a whole canvas, one-directional,
+//! and libviprs' answer is not the more accurate of the two, it is the
+//! `gif` crate's lossy mapping showing through.
 //!
 //! # Not handled here
 //!
-//! The array fields `background` and `gif-palette` are read but not
-//! attached; issue #828 has the measurements. `gifsave`'s `effort`, `reuse`,
+//! **`background`.** It is the only `gifload` field this loader reads and
+//! does not attach, and the reason is its type: vips stores it as a
+//! `VipsArrayDouble` (measured, three doubles holding the RGB of the colour
+//! table entry the screen descriptor points at) and
+//! [`crate::imageio::MetadataValue`] has an integer array and no
+//! floating-point one. Writing it as a [`MetadataValue::IntArray`] would put
+//! the right numbers under a type every reader written against vips ignores,
+//! which is worse than leaving it off. The value itself is already computed
+//! here, by `background_rgb` for the restore-to-background disposal, so
+//! attaching it is a field write behind a variant that does not exist yet;
+//! issue #852 is that variant.
+//!
+//! `gifsave`'s `effort`, `reuse`,
 //! `interpalette-maxerror`, `interframe-maxerror` and `keep-duplicate-frames`
 //! are cgif-specific palette-reuse and frame-coalescing machinery with no
 //! pure-Rust equivalent and are not modelled.
@@ -513,6 +585,13 @@ struct FileScan {
     colours: usize,
     /// The NETSCAPE loop count, translated to the vips `loop` convention.
     loop_count: i64,
+    /// Whether *any* frame declares a colour table of its own.
+    ///
+    /// vips attaches `gif-palette` only when none does (`nsgifload.c:315`,
+    /// `if (!gif->local_palette)`, over a flag its own header pass ORs across
+    /// every frame in the file at `:435`), so the rule is about the file and
+    /// not about the window that was loaded.
+    any_local_palette: bool,
 }
 
 /// Decode a GIF into a [`Raster`] (libvips `gifload`).
@@ -632,6 +711,10 @@ pub fn decode_gif_with(
     let mut delays: Vec<i64> = Vec::with_capacity(pages as usize);
     let global = decoder.global_palette().map(<[u8]>::to_vec);
     let background = background_rgb(global.as_deref(), decoder.bg_color());
+    // The second walk that recovers the raw disposal code, advanced one frame
+    // per turn of the loop below so it stays beside the decoder rather than
+    // running ahead of it into a buffer (issue #827).
+    let mut controls = ControlWalk::new(bytes);
 
     for index in 0..window.end {
         let Some(frame) = decoder.next_frame_info().map_err(decode_error)? else {
@@ -651,6 +734,7 @@ pub fn decode_gif_with(
         let transparent = frame.transparent;
         let dispose = frame.dispose;
         let delay_cs = frame.delay;
+        let disposal = reconcile_disposal(controls.next_frame(), dispose, delay_cs, transparent);
         let (left, top) = (u32::from(frame.left), u32::from(frame.top));
         let (fw, fh) = (u32::from(frame.width), u32::from(frame.height));
         let local = frame.palette.clone();
@@ -681,7 +765,7 @@ pub fn decode_gif_with(
         let palette = local.as_deref().or(global.as_deref()).unwrap_or(&[]);
 
         let last = index + 1 == window.end;
-        if !last && dispose == gif::DisposalMethod::Previous {
+        if !last && disposal == Disposal::Previous {
             previous.clear();
             previous.extend_from_slice(&canvas);
         }
@@ -726,14 +810,14 @@ pub fn decode_gif_with(
         if last {
             continue;
         }
-        match dispose {
+        match disposal {
             // Clear this frame's rectangle, and only it. libnsgif fills with
             // transparent when *this* frame declared a transparent index and
             // with the background colour when it did not, which is measured
             // rather than assumed: the same two-frame file loads with a
             // transparent hole when frame 0 carries the index and with an
             // opaque blue one when frame 1 carries it instead.
-            gif::DisposalMethod::Background => {
+            Disposal::Background => {
                 let fill: [u8; 4] = if transparent.is_some() {
                     [0, 0, 0, 0]
                 } else {
@@ -748,15 +832,14 @@ pub fn decode_gif_with(
             }
             // Rewind the whole canvas to the snapshot taken above. Only this
             // frame has drawn since, so restoring the canvas and restoring
-            // its rectangle are the same thing.
-            gif::DisposalMethod::Previous => canvas.copy_from_slice(&previous),
-            // `Any` (code 0) and `Keep` (code 1) both leave the canvas alone.
-            // So do the reserved codes 5, 6 and 7, measured on vips 8.18.6.
-            // Code 4 is where this differs from libnsgif, which treats it as
-            // a second spelling of "restore to previous": the `gif` crate maps
-            // every code it does not know onto `Any`, so the distinction is
-            // not visible here. See the module docs.
-            gif::DisposalMethod::Any | gif::DisposalMethod::Keep => {}
+            // its rectangle are the same thing. Codes 3 and 4 both land here:
+            // 4 is reserved by GIF89a and libnsgif remaps it onto 3, which is
+            // the code the `gif` crate cannot tell apart from 0 and which
+            // `controls` is walking the file a second time to recover.
+            Disposal::Previous => canvas.copy_from_slice(&previous),
+            // Codes 0 and 1 leave the canvas alone, and so do the reserved
+            // codes 5, 6 and 7, measured on vips 8.18.6.
+            Disposal::Keep => {}
         }
     }
 
@@ -786,6 +869,33 @@ pub fn decode_gif_with(
     // and 60 centiseconds onto frames whose real delays are 80 and 100.
     raster.set_field("delay", MetadataValue::IntArray(delays));
     raster.set_field("palette", MetadataValue::Int(1));
+    // The global colour table, and only when no frame in the file overrides
+    // it with one of its own (issue #828). vips packs each entry as libnsgif's
+    // `R, G, B, A` byte quad reinterpreted as a machine integer, which reads
+    // `0xFF << 24 | B << 16 | G << 8 | R` on a little-endian host and makes
+    // every entry negative. Measured on vips 8.18.6: a table of (71, 112, 76)
+    // and (60, 60, 60) comes back `-11767737 -12829636`.
+    //
+    // `from_le_bytes` rather than `from_ne_bytes`, so this value is the same
+    // wherever it was computed. Matching vips exactly would mean matching a
+    // number that changes with the host, and the `.v` trailer writes it as
+    // decimal text, so a native reading would put a different `gif-palette`
+    // in the file for the same GIF depending on the machine. The cost is a
+    // divergence from vips on a big-endian host, which is also the reason
+    // `from_le_bytes` rather than a cast: no wrap to reason about.
+    //
+    // The array is the table as it sits on the wire, padding included, which
+    // is what `global` already holds: a three-colour table is four entries
+    // with an opaque-black fourth.
+    if let Some(table) = global.as_deref().filter(|_| !scan.any_local_palette) {
+        let entries: Vec<i64> = table
+            .as_chunks::<PALETTE_STRIDE>()
+            .0
+            .iter()
+            .map(|rgb| i64::from(i32::from_le_bytes([rgb[0], rgb[1], rgb[2], u8::MAX])))
+            .collect();
+        raster.set_field("gif-palette", MetadataValue::IntArray(entries));
+    }
     if scan.colours > 0 {
         // `nsgifload.c:337-343`: ceil(log2(colours)) over the table as it
         // sits on the wire. The table is always a power of two there, so the
@@ -803,15 +913,274 @@ pub fn decode_gif_with(
 /// The colour a "restore to background" disposal paints, which is the global
 /// colour table entry the logical screen descriptor points at.
 ///
-/// Black when there is no global table, or when the index is past the end of
-/// the one there is. Measured on vips 8.18.6: a background index of 200 on a
-/// four-entry table reports `background: 0 0 0` and disposes to black, where
-/// index 3 on the same table reports `0 0 255` and disposes to blue.
+/// An index the table cannot serve resolves to **entry 0**, not to black
+/// (issue #850). libnsgif's rule is
+/// `if (global_palette && bg_index < colour_table_size) table[bg_index] else
+/// table[0]`, and it is measured rather than read: on a four-entry palette
+/// whose entry 0 is `(9, 8, 7)`, vips 8.18.6 reports `background: 9 8 7` for
+/// a stored index of 200 and disposes the canvas to it, where index 3 on the
+/// same table reports `0 0 255`. The fixture the animated-load lane wrote for
+/// this used a palette whose entry 0 was black, so the two answers were
+/// indistinguishable and the wrong one went in.
+///
+/// The fallback is not reachable through [`decode_gif_with`] today, and that
+/// is worth writing down rather than relying on: `gif` 0.14.2 clears
+/// `Decoder::bg_color()` to `None` when the stored index is past the global
+/// palette (`reader/mod.rs:354-358`), so this function used to arrive at
+/// entry 0 through `index.unwrap_or(0)` for the wrong reason. A release that
+/// stopped normalising, or a second caller, would have turned that into wrong
+/// pixels with nothing in the way.
 fn background_rgb(global: Option<&[u8]>, index: Option<usize>) -> [u8; PALETTE_STRIDE] {
-    let entry = index.unwrap_or(0) * PALETTE_STRIDE;
-    match global.and_then(|table| table.get(entry..entry + PALETTE_STRIDE)) {
+    // libnsgif substitutes a two-entry black-and-white table for a file that
+    // declares no global one, and then reads entry 0 of it whatever the
+    // descriptor stores: measured, a stored index of 1 with no global table
+    // reports `0 0 0` and not the substitute's white second entry. That file
+    // does not reach this module today, because `gif` 0.14.2 refuses a frame
+    // with no colour table at all (issue #851); this arm is what keeps the
+    // lookup total.
+    let Some(table) = global else {
+        return [0; PALETTE_STRIDE];
+    };
+    let entry = |i: usize| {
+        let at = i * PALETTE_STRIDE;
+        table.get(at..at + PALETTE_STRIDE)
+    };
+    match entry(index.unwrap_or(0)).or_else(|| entry(0)) {
         Some(rgb) => [rgb[0], rgb[1], rgb[2]],
         None => [0; PALETTE_STRIDE],
+    }
+}
+
+/// What a frame's disposal code says to do with the canvas before the next
+/// frame draws.
+///
+/// This is libnsgif's mapping rather than the `gif` crate's, which is the
+/// whole of issue #827: `DisposalMethod::from_u8` knows only codes 0 to 3 and
+/// folds every reserved code onto `Any`, while libnsgif remaps **4** onto
+/// restore-to-previous and leaves 5, 6 and 7 alone.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Disposal {
+    /// Leave the canvas alone: codes 0, 1, 5, 6 and 7.
+    Keep,
+    /// Clear this frame's rectangle, and only it: code 2.
+    Background,
+    /// Rewind the whole canvas to before this frame drew: codes 3 and 4.
+    Previous,
+}
+
+impl Disposal {
+    /// The disposal a raw GIF89a code selects.
+    ///
+    /// Measured on vips 8.18.6 over all eight codes on one two-frame file:
+    /// 0, 1, 5, 6 and 7 keep, 2 clears to the background colour, and 3 and 4
+    /// both rewind. Code 4 is `NSGIF_DISPOSAL_RESTORE_QUIRK` in libnsgif,
+    /// which remaps it onto `NSGIF_DISPOSAL_RESTORE_PREV` before anything
+    /// reads it.
+    fn from_code(code: u8) -> Self {
+        match code {
+            2 => Self::Background,
+            3 | 4 => Self::Previous,
+            _ => Self::Keep,
+        }
+    }
+
+    /// The disposal the `gif` crate's already-collapsed enum selects, which
+    /// is the answer when the wire walk cannot be trusted for a frame.
+    fn from_crate(method: gif::DisposalMethod) -> Self {
+        match method {
+            gif::DisposalMethod::Background => Self::Background,
+            gif::DisposalMethod::Previous => Self::Previous,
+            gif::DisposalMethod::Any | gif::DisposalMethod::Keep => Self::Keep,
+        }
+    }
+}
+
+/// The `gif` crate's own mapping of a raw disposal code, which is
+/// `DisposalMethod::from_u8` with every code it does not know folded onto
+/// `Any` (`reader/decoder.rs:862-865`).
+///
+/// Recomputing it is how [`reconcile_disposal`] checks that the wire walk and
+/// the decoder are looking at the same frame.
+fn crate_disposal(code: u8) -> gif::DisposalMethod {
+    gif::DisposalMethod::from_u8(code).unwrap_or(gif::DisposalMethod::Any)
+}
+
+/// One frame's graphic control extension, as it sits on the wire.
+///
+/// The `gif` crate hands back three of these four fields intact and the
+/// fourth already collapsed. This is the same block with the disposal code
+/// still raw.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+struct RawControl {
+    /// The disposal code, 0 to 7, out of bits 2 to 4 of the packed byte.
+    disposal: u8,
+    /// The delay in centiseconds, which is the unit the wire uses and not the
+    /// milliseconds `delay` reports.
+    delay_cs: u16,
+    /// The transparent index, when the packed byte's low bit is set.
+    transparent: Option<u8>,
+}
+
+/// A second walk over a GIF's block chain, recovering each frame's graphic
+/// control extension.
+///
+/// It exists for one field, the raw disposal code (issue #827), and it is the
+/// cheapest walk that can produce it: the block chain is self-describing, so
+/// stepping over an image's LZW data is a walk over sub-block lengths and no
+/// pixel is decoded. Nothing is allocated, and the walk advances one frame at
+/// a time in lockstep with the decode, so there is no per-frame buffer to
+/// price against [`DecodeLimits`].
+///
+/// It is deliberately **not** trusted on its own; see [`reconcile_disposal`].
+struct ControlWalk<'a> {
+    /// The whole file, the same slice the decoder reads.
+    bytes: &'a [u8],
+    /// The next byte to read, or `None` once the walk has stopped: at the
+    /// trailer, at an unknown block introducer, or at the end of the buffer.
+    pos: Option<usize>,
+    /// The most recent graphic control extension, waiting for the image
+    /// descriptor it belongs to.
+    pending: Option<RawControl>,
+}
+
+impl<'a> ControlWalk<'a> {
+    /// Position the walk after the signature, the logical screen descriptor
+    /// and the global colour table.
+    fn new(bytes: &'a [u8]) -> Self {
+        let mut walk = Self {
+            bytes,
+            pos: None,
+            pending: None,
+        };
+        // Three bytes of signature and three of version, then the seven-byte
+        // logical screen descriptor, whose fifth byte carries the global
+        // colour table flag and its size.
+        let Some(descriptor) = bytes.get(6..13) else {
+            return walk;
+        };
+        if !bytes.starts_with(b"GIF") {
+            return walk;
+        }
+        let packed = descriptor[4];
+        let mut at = 13;
+        if packed & 0x80 != 0 {
+            at += PALETTE_STRIDE * (2usize << (packed & 7));
+        }
+        walk.pos = (at <= bytes.len()).then_some(at);
+        walk
+    }
+
+    /// The next image descriptor's graphic control extension, or
+    /// [`RawControl::default`] when the frame carries none, which is the same
+    /// stand-in the `gif` crate uses.
+    ///
+    /// `None` once the walk has stopped.
+    fn next_frame(&mut self) -> Option<RawControl> {
+        let found = self.step();
+        if found.is_none() {
+            self.pos = None;
+        }
+        found
+    }
+
+    /// [`ControlWalk::next_frame`] without the stop bookkeeping, so every
+    /// short read can be a `?`.
+    fn step(&mut self) -> Option<RawControl> {
+        loop {
+            let at = self.pos?;
+            match self.bytes.get(at) {
+                // An extension block: a label byte, then a sub-block chain.
+                // Only the graphic control extension matters here and the
+                // rest are stepped over, which is also how the walk gets past
+                // the NETSCAPE application extension.
+                Some(&0x21) => {
+                    let label = *self.bytes.get(at + 1)?;
+                    let (payload, next) = self.sub_blocks(at + 2)?;
+                    if label == 0xF9 {
+                        self.pending = payload.map(|p| RawControl {
+                            disposal: (p[0] & 0b0001_1100) >> 2,
+                            delay_cs: u16::from_le_bytes([p[1], p[2]]),
+                            transparent: (p[0] & 1 != 0).then_some(p[3]),
+                        });
+                    }
+                    self.pos = Some(next);
+                }
+                // An image descriptor: nine bytes of geometry and flags, an
+                // optional local colour table, the LZW minimum code size, and
+                // the pixel sub-block chain.
+                Some(&0x2C) => {
+                    let packed = *self.bytes.get(at + 9)?;
+                    let mut next = at + 10;
+                    if packed & 0x80 != 0 {
+                        next += PALETTE_STRIDE * (2usize << (packed & 7));
+                    }
+                    let (_, next) = self.sub_blocks(next + 1)?;
+                    self.pos = Some(next);
+                    return Some(self.pending.take().unwrap_or_default());
+                }
+                // The trailer, an unknown introducer, or the end of the
+                // buffer. `open()` configures the decoder to stop at an
+                // unknown block rather than skip it, so this walk stops there
+                // too, and for the same reason: `garden.gif` carries a stray
+                // byte after its 35th frame and vips reports 35 pages.
+                _ => return None,
+            }
+        }
+    }
+
+    /// Walk a sub-block chain from `at`, returning the byte after it and,
+    /// when the chain totals exactly four bytes, those bytes.
+    ///
+    /// Four is a graphic control extension's payload length and the only
+    /// length the `gif` crate accepts for one, so a chain of any other length
+    /// is not a control extension that decoder will read either.
+    fn sub_blocks(&self, mut at: usize) -> Option<(Option<[u8; 4]>, usize)> {
+        let mut payload = [0u8; 4];
+        let mut len = 0usize;
+        loop {
+            let size = usize::from(*self.bytes.get(at)?);
+            at += 1;
+            if size == 0 {
+                return Some(((len == payload.len()).then_some(payload), at));
+            }
+            for &byte in self.bytes.get(at..at + size)? {
+                if let Some(slot) = payload.get_mut(len) {
+                    *slot = byte;
+                }
+                len += 1;
+            }
+            at += size;
+        }
+    }
+}
+
+/// The disposal to apply to a frame, preferring the raw wire code when the
+/// two walks demonstrably agree about which frame they are looking at.
+///
+/// [`ControlWalk`] is a second parser beside the one that decides where the
+/// frames are, and two parsers over one hostile file can come apart. They are
+/// checked against each other rather than assumed to agree: the graphic
+/// control extension carries the delay, the transparent index and the
+/// disposal side by side, the decoder kept the first two intact, and it kept
+/// the third in collapsed form. So all three are compared, and only then is
+/// the fourth piece of the same block, the code the decoder threw away,
+/// believed. A frame where they disagree keeps the decoder's answer, which is
+/// what this module did for every frame before #827.
+fn reconcile_disposal(
+    raw: Option<RawControl>,
+    dispose: gif::DisposalMethod,
+    delay_cs: u16,
+    transparent: Option<u8>,
+) -> Disposal {
+    match raw {
+        Some(raw)
+            if raw.delay_cs == delay_cs
+                && raw.transparent == transparent
+                && crate_disposal(raw.disposal) == dispose =>
+        {
+            Disposal::from_code(raw.disposal)
+        }
+        _ => Disposal::from_crate(dispose),
     }
 }
 
@@ -850,6 +1219,7 @@ fn scan_file(bytes: &[u8], limits: DecodeLimits) -> Result<FileScan, SourceError
         interlaced: false,
         colours: global,
         loop_count: 1,
+        any_local_palette: false,
     };
     // A scan that hits trouble stops where it is rather than failing:
     // vips' `fail-on` defaults to `VIPS_FAIL_ON_NONE`, so
@@ -876,6 +1246,7 @@ fn scan_file(bytes: &[u8], limits: DecodeLimits) -> Result<FileScan, SourceError
                 scan.has_transparency |= frame.transparent.is_some();
                 scan.interlaced |= frame.interlaced;
                 if let Some(local) = &frame.palette {
+                    scan.any_local_palette = true;
                     scan.colours = scan.colours.max(local.len() / PALETTE_STRIDE);
                 }
             }
@@ -1366,6 +1737,20 @@ mod tests {
         /// The graphic control extension's disposal code, 0 to 7. cgif
         /// writes 1 ("keep") on the last frame of everything it saves.
         disposal: u8,
+        /// The frame's own colour table, when it carries one. A frame with a
+        /// local table draws through it instead of the global one, and one
+        /// such frame anywhere in the file is what keeps `gif-palette` off
+        /// the header (issue #828).
+        local: Option<Vec<[u8; 3]>>,
+        /// Whether to write a graphic control extension at all. A frame
+        /// without one takes the default control, which is disposal 0, no
+        /// delay and no transparent index.
+        control: bool,
+        /// A comment extension written between the control extension and the
+        /// image descriptor, which is where a block that is not a control
+        /// extension can come between the two halves `ControlWalk` has to
+        /// keep together.
+        comment: Option<Vec<u8>>,
     }
 
     impl Frame {
@@ -1381,6 +1766,9 @@ mod tests {
                 interlaced: false,
                 delay_cs: 0,
                 disposal: 1,
+                local: None,
+                control: true,
+                comment: None,
             }
         }
     }
@@ -1398,16 +1786,41 @@ mod tests {
         loop_ext: Option<u16>,
         frames: &[Frame],
     ) -> Vec<u8> {
-        let table_size = flag_size(palette.len());
-        let entries = 2usize << table_size;
+        fixture_tables(screen, Some(palette), background, loop_ext, frames)
+    }
+
+    /// [`fixture`] with the global colour table made optional and per-frame
+    /// local tables honoured.
+    ///
+    /// `None` writes a logical screen descriptor with the global-table flag
+    /// clear, which is the file libnsgif answers with its own black-and-white
+    /// substitute table, and a frame carrying `local` writes its own table
+    /// after the image descriptor. Both are what `gif-palette`'s presence
+    /// rule turns on (issue #828).
+    fn fixture_tables(
+        screen: (u16, u16),
+        global: Option<&[[u8; 3]]>,
+        background: u8,
+        loop_ext: Option<u16>,
+        frames: &[Frame],
+    ) -> Vec<u8> {
         let mut out = Vec::from(*b"GIF89a");
         out.extend_from_slice(&screen.0.to_le_bytes());
         out.extend_from_slice(&screen.1.to_le_bytes());
-        out.push(0x80 | table_size);
-        out.push(background);
-        out.push(0);
-        for i in 0..entries {
-            out.extend_from_slice(palette.get(i).unwrap_or(&[0, 0, 0]));
+        match global {
+            Some(palette) => {
+                let table_size = flag_size(palette.len());
+                out.push(0x80 | table_size);
+                out.push(background);
+                out.push(0);
+                for i in 0..(2usize << table_size) {
+                    out.extend_from_slice(palette.get(i).unwrap_or(&[0, 0, 0]));
+                }
+            }
+            // The flag is clear, so no table follows. The background index is
+            // still written, because part of what this fixture shape proves is
+            // that libnsgif ignores it when there is no table to index into.
+            None => out.extend_from_slice(&[0, background, 0]),
         }
         if let Some(count) = loop_ext {
             out.extend_from_slice(b"\x21\xFF\x0BNETSCAPE2.0\x03\x01");
@@ -1415,21 +1828,48 @@ mod tests {
             out.push(0);
         }
         for frame in frames {
-            let mut flags = 0u8;
-            if frame.transparent.is_some() {
-                flags |= 1;
+            if frame.control {
+                let mut flags = 0u8;
+                if frame.transparent.is_some() {
+                    flags |= 1;
+                }
+                flags |= (frame.disposal & 7) << 2;
+                out.extend_from_slice(&[0x21, 0xF9, 4, flags]);
+                out.extend_from_slice(&frame.delay_cs.to_le_bytes());
+                out.push(frame.transparent.unwrap_or(0));
+                out.push(0);
             }
-            flags |= (frame.disposal & 7) << 2;
-            out.extend_from_slice(&[0x21, 0xF9, 4, flags]);
-            out.extend_from_slice(&frame.delay_cs.to_le_bytes());
-            out.push(frame.transparent.unwrap_or(0));
-            out.push(0);
+            if let Some(text) = &frame.comment {
+                out.extend_from_slice(&[0x21, 0xFE]);
+                for chunk in text.chunks(255) {
+                    out.push(chunk.len() as u8);
+                    out.extend_from_slice(chunk);
+                }
+                out.push(0);
+            }
             out.push(0x2C);
             out.extend_from_slice(&frame.left.to_le_bytes());
             out.extend_from_slice(&frame.top.to_le_bytes());
             out.extend_from_slice(&frame.width.to_le_bytes());
             out.extend_from_slice(&frame.height.to_le_bytes());
-            out.push(if frame.interlaced { 0x40 } else { 0 });
+            let mut descriptor = if frame.interlaced { 0x40 } else { 0 };
+            if let Some(local) = &frame.local {
+                descriptor |= 0x80 | flag_size(local.len());
+            }
+            out.push(descriptor);
+            if let Some(local) = &frame.local {
+                for i in 0..(2usize << flag_size(local.len())) {
+                    out.extend_from_slice(local.get(i).unwrap_or(&[0, 0, 0]));
+                }
+            }
+            // The code width follows whichever table the frame draws through,
+            // and 2 when there is none, which is the width libnsgif's
+            // two-entry substitute needs.
+            let table_size = match (&frame.local, global) {
+                (Some(local), _) => flag_size(local.len()),
+                (None, Some(palette)) => flag_size(palette.len()),
+                (None, None) => 0,
+            };
             let min_code_size = (table_size + 1).max(2);
             out.push(min_code_size);
             let stored = if frame.interlaced {
@@ -1592,6 +2032,9 @@ mod tests {
             interlaced: false,
             delay_cs: 0,
             disposal: 1,
+            local: None,
+            control: true,
+            comment: None,
         };
         let bytes = fixture((8, 8), &palette, 2, None, &[frame]);
         let raster = decode_bytes(&bytes).expect("the fixture is a valid GIF");
@@ -2509,6 +2952,9 @@ mod tests {
             interlaced: false,
             delay_cs,
             disposal,
+            local: None,
+            control: true,
+            comment: None,
         }
     }
 
@@ -3071,51 +3517,75 @@ mod tests {
 
     /**
      * Tests that a background index past the end of the global colour table
-     * clears to black rather than reading off the end of it. Works by
-     * running the restore-to-background fixture with the index set to 200 on
-     * a four-entry table, with the in-range index as the positive control.
-     * Measured on vips 8.18.6: background index 200 on a four-entry table
-     * reports `background: 0 0 0` and disposes to black, where index 3
-     * reports `0 0 255` and disposes to blue.
-     * Input: the same two-frame GIF with background index 200 and with 3 ->
-     * Output: a black clear and a blue clear.
+     * disposes to colour table **entry 0**, not to black. Works by running
+     * the restore-to-background fixture over a palette whose entry 0 is
+     * `(9, 8, 7)` rather than black, so the two answers are distinguishable,
+     * with the in-range index as the positive control.
+     * The fixture the animated lane wrote for this used a palette whose
+     * entry 0 *is* black, so "entry 0" and "black" gave the same pixels and
+     * it could not see the difference. Measured on vips 8.18.6 against
+     * exactly these files: background indices 200 and 0 both dispose to
+     * `9 8 7` and report `background: 9 8 7`, where index 3 disposes to blue
+     * and reports `0 0 255`.
+     * This test **passes on both sides of issue #850**, and that is the
+     * point rather than a weakness. `gif` 0.14.2 clears `bg_color()` to
+     * `None` when the stored index is past the palette
+     * (`reader/mod.rs:354-358`), so the loader reached entry 0 by way of
+     * `index.unwrap_or(0)` before the fallback existed. The divergence lives
+     * one level down, in `background_rgb` itself, where
+     * `the_background_lookup_takes_a_whole_entry_or_none` holds it; this is
+     * the end-to-end fixture that says which answer is right, and it is the
+     * one the original should have been written with.
+     * Input: the same two-frame GIF with background index 200, 0 and 3 ->
+     * Output: entry 0 twice, then blue.
      */
     #[test]
-    fn a_background_index_past_the_colour_table_clears_to_black() {
-        let build = |background: u8| {
-            fixture(
+    fn an_out_of_range_background_index_disposes_to_colour_table_entry_zero() {
+        // Entry 0 is deliberately not black: with ANIM_PALETTE this whole
+        // test passes against either implementation.
+        const PALETTE: [[u8; 3]; 4] = [[9, 8, 7], [255, 0, 0], [0, 255, 0], [0, 0, 255]];
+        let load = |background: u8| {
+            let bytes = fixture(
                 (2, 2),
-                &ANIM_PALETTE,
+                &PALETTE,
                 background,
                 Some(0),
                 &[
-                    anim_frame([1, 1, 1, 1], 2, 0),
+                    Frame {
+                        disposal: 2,
+                        ..Frame::full(2, 2, vec![1; 4])
+                    },
                     Frame {
                         width: 1,
                         height: 1,
                         indices: vec![2],
-                        ..anim_frame([0; 4], 1, 0)
+                        ..Frame::full(1, 1, vec![2])
                     },
                 ],
-            )
-        };
-        let load = |background: u8| {
-            decode_gif_with(
-                &build(background),
+            );
+            let raster = decode_gif_with(
+                &bytes,
                 DecodeLimits::default(),
                 LoadOptions::default().with_n(-1),
             )
-            .expect("a valid GIF")
+            .expect("a valid GIF");
+            page_bytes(&raster, 1)
         };
+        let entry_zero = [0, 255, 0, 9, 8, 7, 9, 8, 7, 9, 8, 7];
         assert_eq!(
-            page_bytes(&load(200), 1),
-            [0, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            "an out-of-range background index is black"
+            load(200),
+            entry_zero,
+            "an index past the end of the table falls back to entry 0"
         );
         assert_eq!(
-            page_bytes(&load(3), 1),
+            load(0),
+            entry_zero,
+            "and index 0 is the same entry, which is the arm that makes it entry 0 rather than black"
+        );
+        assert_eq!(
+            load(3),
             [0, 255, 0, 0, 0, 255, 0, 0, 255, 0, 0, 255],
-            "the positive control disposes to blue"
+            "the positive control: an in-range index still disposes to its own colour"
         );
     }
 
@@ -3131,7 +3601,8 @@ mod tests {
      * default are otherwise indistinguishable, and only one of them is
      * total by construction.
      * Input: a four-byte table at indices 0 and 1 -> Output: the first
-     * entry, then black.
+     * entry both times, because an index the table cannot serve falls back
+     * to entry 0 the way libnsgif's does.
      */
     #[test]
     fn the_background_lookup_takes_a_whole_entry_or_none() {
@@ -3143,13 +3614,20 @@ mod tests {
         );
         assert_eq!(
             background_rgb(Some(&ragged), Some(1)),
-            [0, 0, 0],
-            "an entry that runs off the end contributes nothing, not one byte"
+            [7, 8, 9],
+            "an entry that runs off the end contributes nothing, not one byte, \
+             so the whole lookup falls back to entry 0"
         );
         assert_eq!(
             background_rgb(None, Some(0)),
             [0, 0, 0],
-            "no table is black"
+            "no table is libnsgif's substitute, whose entry 0 is black"
+        );
+        assert_eq!(
+            background_rgb(None, Some(1)),
+            [0, 0, 0],
+            "and the substitute is never indexed: entry 1 of it is white, and \
+             vips reports black for a stored index of 1 with no global table"
         );
         assert_eq!(
             background_rgb(Some(&ragged), None),
@@ -3159,24 +3637,28 @@ mod tests {
     }
 
     /**
-     * Tests what libviprs does with the reserved disposal codes, which the
-     * module docs claim and, until the review that added this test, claimed
-     * without a check. Works by running the same two-frame file with each of
-     * codes 4, 5, 6 and 7 on frame 0 and reading page 1 back, with codes 1
-     * and 3 as the two controls that bracket the answer.
-     * Measured on vips 8.18.6 against exactly these files: codes 5 and 7
-     * keep the canvas, so page 1 is `green red`, and code 4 rewinds it the
-     * way code 3 does, so page 1 is `green black`. **libviprs keeps the
-     * canvas for 4 as well**, which is the divergence issue #827 tracks: the
-     * `gif` crate maps every code it does not know onto `DisposalMethod::Any`
-     * (`reader/decoder.rs:862`), so 4 arrives here indistinguishable from 0.
-     * Input: a two-frame 2x1 GIF with disposal 4, 5, 6, 7, 1 and 3 ->
-     * Output: `green red` for everything but 3, which rewinds.
+     * Tests that every GIF89a disposal code lands on the canvas rule
+     * libnsgif applies to it, code 4 included. Works by running the same
+     * two-frame file with each of codes 0 through 7 on frame 0 and reading
+     * page 1 back.
+     * Code 4 is reserved by GIF89a and libnsgif remaps it onto
+     * restore-to-previous (`NSGIF_DISPOSAL_RESTORE_QUIRK`), while codes 5, 6
+     * and 7 keep the canvas the way 0 and 1 do. Measured on vips 8.18.6
+     * against exactly these eight files, a 2x1 screen with background index
+     * 3, frame 0 painting both pixels red and frame 1 a green pixel at
+     * (0, 0): codes 0, 1, 5, 6 and 7 give `green red`, code 2 gives
+     * `green blue`, and codes 3 and 4 give `green black`. libviprs used to
+     * give `green red` for 4 because the `gif` crate folds every code it
+     * does not know onto `DisposalMethod::Any`, which is issue #827.
+     * The three answers are all different, so no single expectation can be
+     * satisfied by an implementation that ignores the code.
+     * Input: a two-frame 2x1 GIF with disposal 0 to 7 ->
+     * Output: keep, keep, background, previous, previous, keep, keep, keep.
      */
     #[test]
-    fn a_reserved_disposal_code_keeps_the_canvas() {
-        let build = |disposal: u8| {
-            fixture(
+    fn every_disposal_code_follows_libnsgif_including_the_reserved_four() {
+        let page_one = |disposal: u8| {
+            let bytes = fixture(
                 (2, 1),
                 &ANIM_PALETTE,
                 3,
@@ -3193,11 +3675,9 @@ mod tests {
                         ..Frame::full(1, 1, vec![2])
                     },
                 ],
-            )
-        };
-        let page_one = |disposal: u8| {
+            );
             let raster = decode_gif_with(
-                &build(disposal),
+                &bytes,
                 DecodeLimits::default(),
                 LoadOptions::default().with_n(-1),
             )
@@ -3205,20 +3685,630 @@ mod tests {
             page_bytes(&raster, 1)
         };
 
-        let kept = [0, 255, 0, 255, 0, 0];
-        for disposal in [1u8, 5, 6, 7] {
-            assert_eq!(page_one(disposal), kept, "disposal {disposal} keeps");
+        let keep = [0, 255, 0, 255, 0, 0];
+        let background = [0, 255, 0, 0, 0, 255];
+        let previous = [0, 255, 0, 0, 0, 0];
+        assert_ne!(keep, background);
+        assert_ne!(keep, previous);
+        assert_ne!(background, previous);
+
+        for (disposal, expected, name) in [
+            (0u8, keep, "keep"),
+            (1, keep, "keep"),
+            (2, background, "restore to background"),
+            (3, previous, "restore to previous"),
+            (4, previous, "restore to previous, the reserved quirk"),
+            (5, keep, "keep"),
+            (6, keep, "keep"),
+            (7, keep, "keep"),
+        ] {
+            assert_eq!(
+                page_one(disposal),
+                expected,
+                "disposal {disposal} is {name}"
+            );
+        }
+    }
+
+    /**
+     * Tests that the second walk terminates and does not panic on bytes that
+     * are not a well-formed GIF. Works by running `ControlWalk` to exhaustion
+     * over every prefix of a real fixture and over the same fixture with each
+     * byte in turn replaced by each of the four block introducers, bounding
+     * the number of frames it may yield so a walk that fails to advance is a
+     * failure rather than a hang.
+     * `ControlWalk` is the one place in this module that indexes a buffer by
+     * arithmetic on lengths the file itself supplies, which is where a decoder
+     * gets its panics. Every read goes through `get`, and this is what says so
+     * rather than the comment saying so.
+     * The positive control is the intact fixture, which must still yield its
+     * three frames with the disposal codes it was built with, so a walk that
+     * gave up immediately would pass the panic half and fail here.
+     * Input: 1 fixture, its 200-odd prefixes and about 800 corruptions ->
+     * Output: no panic, a bounded frame count, and the intact file unchanged.
+     */
+    #[test]
+    fn the_control_walk_is_total_over_bytes_that_are_not_a_gif() {
+        let bytes = fixture(
+            (2, 2),
+            &ANIM_PALETTE,
+            0,
+            Some(0),
+            &[
+                Frame {
+                    disposal: 4,
+                    local: Some(vec![[1, 2, 3], [4, 5, 6]]),
+                    comment: Some(b"hello".to_vec()),
+                    ..Frame::full(2, 2, vec![0, 1, 1, 0])
+                },
+                Frame {
+                    disposal: 2,
+                    control: false,
+                    ..Frame::full(2, 2, vec![1, 1, 1, 1])
+                },
+                Frame {
+                    disposal: 7,
+                    ..Frame::full(2, 2, vec![2, 2, 3, 3])
+                },
+            ],
+        );
+
+        // Every frame on the wire costs at least the ten bytes of an image
+        // descriptor, so a walk that yields more than that has stopped
+        // advancing rather than found something.
+        let drain = |input: &[u8]| {
+            let ceiling = input.len() + 1;
+            let mut walk = ControlWalk::new(input);
+            let mut seen = Vec::new();
+            while let Some(control) = walk.next_frame() {
+                seen.push(control);
+                assert!(seen.len() <= ceiling, "the walk is not advancing");
+            }
+            seen
+        };
+
+        let intact = drain(&bytes);
+        assert_eq!(
+            intact.iter().map(|c| c.disposal).collect::<Vec<_>>(),
+            [4, 0, 7],
+            "the control: the intact file still walks, and the middle frame's \
+             missing extension reads as code 0"
+        );
+
+        for cut in 0..bytes.len() {
+            drain(&bytes[..cut]);
+        }
+        for at in 0..bytes.len() {
+            for byte in [0x21u8, 0x2C, 0x3B, 0xFF] {
+                let mut corrupt = bytes.clone();
+                corrupt[at] = byte;
+                drain(&corrupt);
+            }
+        }
+    }
+
+    /**
+     * Tests that the raw disposal code survives the two things that can sit
+     * between a frame's graphic control extension and its pixels: another
+     * extension block, and a colour table on an earlier frame. Works by
+     * running disposal 4 behind a comment extension, and then behind a frame
+     * that carries a local colour table, and requiring the rewind both times.
+     * Both are places the second walk can lose its place, and both are
+     * **masked** by `reconcile_disposal`'s fallback: a walk that comes apart
+     * gives the answer libviprs gave before #827, so the pixels go quietly
+     * back to being wrong rather than failing loudly. The mutation sweep
+     * found exactly that, which is why the local table sits on the frame
+     * *before* the one carrying code 4: on the code-4 frame itself the walk
+     * has already returned that frame's control before it has to step over
+     * the table, so the fixture cannot see the mistake.
+     * Measured on vips 8.18.6 against exactly these two files. The comment
+     * one is `red red` then `green black`; the local-table one is
+     * `(200,100,50) (200,100,50)`, then `red red`, then `green
+     * (200,100,50)`, the last page being the rewind putting the first
+     * frame's colours back.
+     * Input: disposal 4 behind a comment extension, and behind a local
+     * colour table -> Output: the rewind in both.
+     */
+    #[test]
+    fn code_four_survives_a_comment_extension_and_an_earlier_local_table() {
+        let roll = |bytes: &[u8]| {
+            decode_gif_with(
+                bytes,
+                DecodeLimits::default(),
+                LoadOptions::default().with_n(-1),
+            )
+            .expect("a valid GIF")
+        };
+        let dot = || Frame {
+            width: 1,
+            height: 1,
+            indices: vec![2],
+            ..Frame::full(1, 1, vec![2])
+        };
+
+        // A comment extension between the control extension and the image
+        // descriptor. Its payload is thirteen bytes rather than four, which
+        // is what stops it from being read as a control extension, and the
+        // label check is what stops it from being read as one anyway.
+        let commented = fixture(
+            (2, 1),
+            &ANIM_PALETTE,
+            3,
+            Some(0),
+            &[
+                Frame {
+                    disposal: 4,
+                    comment: Some(b"libviprs #827".to_vec()),
+                    ..Frame::full(2, 1, vec![1, 1])
+                },
+                dot(),
+            ],
+        );
+        assert_eq!(
+            page_bytes(&roll(&commented), 1),
+            [0, 255, 0, 0, 0, 0],
+            "a comment extension does not displace the control extension"
+        );
+
+        // A local colour table on frame 0, which the walk has to step over
+        // to reach frame 1's control extension.
+        let local: Vec<[u8; 3]> = vec![[9, 8, 7], [200, 100, 50], [0, 255, 0], [1, 1, 1]];
+        let with_local = fixture(
+            (2, 1),
+            &ANIM_PALETTE,
+            3,
+            Some(0),
+            &[
+                Frame {
+                    local: Some(local),
+                    ..Frame::full(2, 1, vec![1, 1])
+                },
+                Frame {
+                    disposal: 4,
+                    ..Frame::full(2, 1, vec![1, 1])
+                },
+                dot(),
+            ],
+        );
+        let raster = roll(&with_local);
+        assert_eq!(
+            page_bytes(&raster, 0),
+            [200, 100, 50, 200, 100, 50],
+            "frame 0 really did draw through its own table, not the global one"
+        );
+        assert_eq!(page_bytes(&raster, 1), [255, 0, 0, 255, 0, 0]);
+        assert_eq!(
+            page_bytes(&raster, 2),
+            [0, 255, 0, 200, 100, 50],
+            "frame 1's code 4 rewound to frame 0's colours, so the walk kept its place"
+        );
+    }
+
+    /**
+     * Tests that a frame carrying no graphic control extension at all takes
+     * the default control rather than the last frame's. Works by putting a
+     * frame with no extension between one that disposes with code 4 and one
+     * that paints a second dot, so an inherited disposal shows up as a
+     * missing dot two pages later.
+     * GIF89a lets a frame go without a control extension and the `gif` crate
+     * substitutes `Frame::default()` for it, so the second walk has to drop
+     * each extension after the image descriptor it belongs to rather than
+     * hold on to it. Measured on vips 8.18.6 against exactly this file: page
+     * 0 is `red red`, page 1 is `green black` and page 2 is `green blue`.
+     * Input: a three-frame 2x1 GIF whose middle frame has no control
+     * extension -> Output: the middle frame keeps the canvas, so the last
+     * page carries both dots.
+     */
+    #[test]
+    fn a_frame_with_no_control_extension_does_not_inherit_the_last_one() {
+        let bytes = fixture(
+            (2, 1),
+            &ANIM_PALETTE,
+            0,
+            Some(0),
+            &[
+                Frame {
+                    disposal: 4,
+                    ..Frame::full(2, 1, vec![1, 1])
+                },
+                Frame {
+                    width: 1,
+                    height: 1,
+                    indices: vec![2],
+                    control: false,
+                    ..Frame::full(1, 1, vec![2])
+                },
+                Frame {
+                    left: 1,
+                    width: 1,
+                    height: 1,
+                    indices: vec![3],
+                    ..Frame::full(1, 1, vec![3])
+                },
+            ],
+        );
+        let raster = decode_gif_with(
+            &bytes,
+            DecodeLimits::default(),
+            LoadOptions::default().with_n(-1),
+        )
+        .expect("a valid GIF");
+        assert_eq!(page_bytes(&raster, 0), [255, 0, 0, 255, 0, 0]);
+        assert_eq!(
+            page_bytes(&raster, 1),
+            [0, 255, 0, 0, 0, 0],
+            "frame 0's code 4 rewound the canvas before the middle frame drew"
+        );
+        assert_eq!(
+            page_bytes(&raster, 2),
+            [0, 255, 0, 0, 0, 255],
+            "and the middle frame kept it, so both dots are here"
+        );
+    }
+
+    /**
+     * Tests that the wire walk which recovers the raw disposal code stays in
+     * step with the decoder that decides where the frames are, which is the
+     * risk #827 was filed rather than fixed over. Works by calling
+     * `reconcile_disposal` with a control whose delay, transparent index or
+     * mapped disposal disagrees with the frame the decoder handed back, and
+     * requiring it to fall back to the decoder's own answer.
+     * The three fields are the rest of the same graphic control extension,
+     * so a walk that is looking at a different frame than the decoder is
+     * almost certain to disagree on one of them, and disagreeing is the only
+     * thing this can do about it: the raw code is the half the decoder threw
+     * away, so there is nothing else to check it against.
+     * Input: an agreeing control, then one wrong in each field ->
+     * Output: the raw code once, the decoder's collapsed answer three times.
+     */
+    #[test]
+    fn a_control_walk_that_disagrees_with_the_decoder_is_not_trusted() {
+        let raw = RawControl {
+            disposal: 4,
+            delay_cs: 7,
+            transparent: Some(3),
+        };
+        assert_eq!(
+            reconcile_disposal(Some(raw), gif::DisposalMethod::Any, 7, Some(3)),
+            Disposal::Previous,
+            "agreeing on the other three fields is what lets code 4 through"
+        );
+        for (label, wrong) in [
+            (
+                "delay",
+                reconcile_disposal(Some(raw), gif::DisposalMethod::Any, 8, Some(3)),
+            ),
+            (
+                "transparent index",
+                reconcile_disposal(Some(raw), gif::DisposalMethod::Any, 7, Some(4)),
+            ),
+            (
+                "collapsed disposal",
+                reconcile_disposal(Some(raw), gif::DisposalMethod::Keep, 7, Some(3)),
+            ),
+        ] {
+            assert_eq!(
+                wrong,
+                Disposal::from_crate(if label == "collapsed disposal" {
+                    gif::DisposalMethod::Keep
+                } else {
+                    gif::DisposalMethod::Any
+                }),
+                "a walk that disagrees about the {label} is discarded"
+            );
         }
         assert_eq!(
-            page_one(3),
-            [0, 255, 0, 0, 0, 0],
-            "the control: 3 really does rewind, so `kept` is not what every code gives"
+            reconcile_disposal(None, gif::DisposalMethod::Previous, 0, None),
+            Disposal::Previous,
+            "a walk that ran out of frames leaves the decoder in charge"
+        );
+    }
+
+    /**
+     * Tests that the control walk reads the same graphic control extensions
+     * the decoder does, on every frame of a file that exercises the fields it
+     * cross-checks. Works by walking a four-frame fixture whose frames carry
+     * different delays, transparent indices and disposal codes, and requiring
+     * the walk's answer to equal the decoder's frame by frame.
+     * This is the positive control for the test above: the fallback is only
+     * worth having if the agreement it guards is the normal case, and a walk
+     * that agreed with nothing would make every raw code unreachable without
+     * failing a single pixel assertion.
+     * Input: a four-frame GIF -> Output: four controls matching the
+     * decoder's `delay`, `transparent` and `dispose` on each frame.
+     */
+    #[test]
+    fn the_control_walk_agrees_with_the_decoder_frame_by_frame() {
+        let frames = vec![
+            Frame {
+                delay_cs: 4,
+                disposal: 2,
+                transparent: Some(1),
+                ..Frame::full(2, 2, vec![0, 1, 2, 3])
+            },
+            Frame {
+                delay_cs: 0,
+                disposal: 3,
+                ..Frame::full(2, 2, vec![3, 2, 1, 0])
+            },
+            Frame {
+                delay_cs: 65535,
+                disposal: 7,
+                transparent: Some(0),
+                ..Frame::full(2, 2, vec![1, 1, 2, 2])
+            },
+            Frame {
+                delay_cs: 12,
+                disposal: 0,
+                ..Frame::full(2, 2, vec![2, 2, 3, 3])
+            },
+        ];
+        let bytes = fixture((2, 2), &ANIM_PALETTE, 0, Some(0), &frames);
+        let mut walk = ControlWalk::new(&bytes);
+        let mut decoder = open(&bytes).expect("a valid GIF");
+        let mut seen = 0;
+        while let Some(frame) = decoder.next_frame_info().expect("a valid GIF") {
+            let raw = walk.next_frame().expect("the walk has this frame too");
+            assert_eq!(raw.delay_cs, frame.delay, "frame {seen} delay");
+            assert_eq!(
+                raw.transparent, frame.transparent,
+                "frame {seen} transparent"
+            );
+            assert_eq!(
+                crate_disposal(raw.disposal),
+                frame.dispose,
+                "frame {seen} disposal"
+            );
+            assert_eq!(raw.disposal, frames[seen].disposal, "frame {seen} raw code");
+            seen += 1;
+        }
+        assert_eq!(seen, 4, "the walk and the decoder both saw four frames");
+        assert_eq!(
+            walk.next_frame(),
+            None,
+            "and the walk stops where the decoder does"
+        );
+    }
+
+    /**
+     * Tests that the global colour table comes back as `gif-palette`, packed
+     * the way vips packs it. Works by decoding three fixtures whose tables
+     * differ in size and contents and comparing the whole array.
+     * vips reinterprets libnsgif's `R, G, B, A` byte quad as a machine
+     * integer, so on a little-endian host the entry reads
+     * `0xFF << 24 | B << 16 | G << 8 | R` and every entry is negative.
+     * Measured on vips 8.18.6: a black/red/green/blue table is
+     * `-16777216 -16776961 -16711936 -65536`, `(71,112,76)` and `(60,60,60)`
+     * are `-11767737 -12829636`, and a three-colour table comes back with
+     * **four** entries, because the table on the wire is padded to a power of
+     * two and the pad is opaque black.
+     * Input: 4-, 2- and 3-colour tables -> Output: the measured arrays,
+     * including the padding entry.
+     */
+    #[test]
+    fn the_global_colour_table_is_attached_as_gif_palette() {
+        let cases: [(&[[u8; 3]], &[i64]); 3] = [
+            (
+                &ANIM_PALETTE,
+                &[-16_777_216, -16_776_961, -16_711_936, -65_536],
+            ),
+            (&[[71, 112, 76], [60, 60, 60]], &[-11_767_737, -12_829_636]),
+            (
+                &[[1, 2, 3], [4, 5, 6], [7, 8, 9]],
+                &[-16_580_095, -16_382_716, -16_185_337, -16_777_216],
+            ),
+        ];
+        for (palette, expected) in cases {
+            let bytes = fixture((2, 1), palette, 0, None, &[Frame::full(2, 1, vec![0, 1])]);
+            let raster = decode_bytes(&bytes).expect("decodes");
+            assert_eq!(
+                raster.get_int_array("gif-palette"),
+                Some(expected),
+                "{palette:?} should pack to {expected:?}"
+            );
+        }
+    }
+
+    /**
+     * Tests `gif-palette`'s presence rule: it is attached only when **no
+     * frame in the file** carries a local colour table, and the rule is about
+     * the file rather than the window that was loaded. Works by decoding
+     * seven fixtures that put a local table in different places, and loading
+     * one of them three ways.
+     * vips reaches this through `nsgifload.c:315`, `if (!gif->local_palette)`,
+     * over a flag its header pass ORs across every frame in the file
+     * (`:435`). Measured on vips 8.18.6 against exactly these files: a
+     * single-frame and a three-frame file with only a global table both
+     * report four entries; a four-frame file whose frames 1 to 3 carry local
+     * tables reports none; a two-frame file reports none whether the local
+     * table is on frame 0 or frame 1, whether it differs from the global one
+     * or is byte-identical to it, and at `[n=-1]`, the default window and
+     * `[page=1]` alike; and a file with no global table but a local one
+     * reports none.
+     * Input: seven fixtures and three windows -> Output: present twice,
+     * absent everywhere else.
+     */
+    #[test]
+    fn gif_palette_is_absent_when_any_frame_carries_a_local_colour_table() {
+        let local: Vec<[u8; 3]> = vec![[10, 20, 30], [40, 50, 60], [70, 80, 90], [100, 110, 120]];
+        let plain = || Frame::full(2, 2, vec![0, 1, 2, 3]);
+        let with_local = |table: &[[u8; 3]]| Frame {
+            local: Some(table.to_vec()),
+            ..Frame::full(2, 2, vec![0, 1, 2, 3])
+        };
+        let palette_of = |bytes: &[u8], options: LoadOptions| {
+            decode_gif_with(bytes, DecodeLimits::default(), options)
+                .expect("a valid GIF")
+                .get_int_array("gif-palette")
+                .map(<[i64]>::to_vec)
+        };
+        let all = LoadOptions::default().with_n(-1);
+
+        // Two positive controls first: without a local table anywhere the
+        // field is there, so "absent" below is a real answer and not a
+        // fixture that never attaches anything.
+        let global_only_one = fixture((2, 2), &ANIM_PALETTE, 0, Some(0), &[plain()]);
+        let global_only_three = fixture(
+            (2, 2),
+            &ANIM_PALETTE,
+            0,
+            Some(0),
+            &[plain(), plain(), plain()],
+        );
+        let four = [-16_777_216i64, -16_776_961, -16_711_936, -65_536];
+        assert_eq!(
+            palette_of(&global_only_one, all).as_deref(),
+            Some(&four[..]),
+            "one frame, global table only"
         );
         assert_eq!(
-            page_one(4),
-            kept,
-            "code 4 keeps here where libnsgif rewinds it; issue #827"
+            palette_of(&global_only_three, all).as_deref(),
+            Some(&four[..]),
+            "three frames, global table only"
         );
+
+        let last_three_local = fixture(
+            (2, 2),
+            &ANIM_PALETTE,
+            0,
+            Some(0),
+            &[
+                plain(),
+                with_local(&local),
+                with_local(&local),
+                with_local(&local),
+            ],
+        );
+        let first_local = fixture(
+            (2, 2),
+            &ANIM_PALETTE,
+            0,
+            Some(0),
+            &[with_local(&local), plain()],
+        );
+        let second_local = fixture(
+            (2, 2),
+            &ANIM_PALETTE,
+            0,
+            Some(0),
+            &[plain(), with_local(&local)],
+        );
+        // A local table byte-identical to the global one still suppresses the
+        // field: the flag vips reads is "this frame declared a table", not
+        // "this frame declared a different table".
+        let same_local = fixture(
+            (2, 2),
+            &ANIM_PALETTE,
+            0,
+            Some(0),
+            &[with_local(&ANIM_PALETTE), plain()],
+        );
+        let no_global = fixture_tables((2, 2), None, 0, Some(0), &[with_local(&local)]);
+        for (name, bytes) in [
+            ("frames 1 to 3 local", &last_three_local),
+            ("frame 0 local", &first_local),
+            ("frame 1 local", &second_local),
+            ("a local table equal to the global one", &same_local),
+            ("no global table at all", &no_global),
+        ] {
+            assert_eq!(palette_of(bytes, all), None, "{name}");
+        }
+
+        // The rule is about the file, not the window: loading page 1 of the
+        // file whose *frame 0* carries the local table still reports nothing.
+        for (name, options) in [
+            ("the default window", LoadOptions::default()),
+            ("page 1", LoadOptions::default().with_page(1)),
+            ("the whole roll", all),
+        ] {
+            assert_eq!(
+                palette_of(&first_local, options),
+                None,
+                "frame 0 local, loaded at {name}"
+            );
+        }
+    }
+
+    /**
+     * Tests that the module doc's header-field table says what this loader
+     * actually attaches. Works by parsing the table out of this file and
+     * decoding one fixture built to light up every conditional row, then
+     * requiring each row marked "attached" to be present on the raster and
+     * each row marked "not attached" to be absent.
+     * This is issue #801: the paragraph this table replaces named a blocker
+     * that had already been removed and a field set that had already moved,
+     * because nothing checked it. A doc claim about which fields exist is
+     * exactly the kind a test can hold, and the two-sided form matters: a
+     * check that only looked at the attached rows would pass with
+     * `background` quietly attached as the wrong type.
+     * Input: this file's own doc table and a two-page interlaced fixture ->
+     * Output: every row's verdict confirmed against the decoded raster.
+     */
+    #[test]
+    fn the_header_field_table_matches_what_this_loader_attaches() {
+        const SRC: &str = include_str!("gif.rs");
+        const HEADER: &str = "//! | `gifload` field | vips type | here |";
+        let at = SRC
+            .find(HEADER)
+            .expect("the module doc's header-field table moved");
+        let mut rows: Vec<(String, bool)> = Vec::new();
+        for line in SRC[at + HEADER.len()..].lines().skip(1) {
+            let Some(row) = line.trim().strip_prefix("//! |") else {
+                break;
+            };
+            let cells: Vec<&str> = row.split('|').map(str::trim).collect();
+            if cells[0].starts_with("---") {
+                continue;
+            }
+            let name = cells[0].trim_matches('`').to_string();
+            let verdict = cells[2];
+            assert!(
+                verdict.starts_with("attached") || verdict.starts_with("not attached"),
+                "row {name:?} says {verdict:?}, which is neither verdict"
+            );
+            rows.push((name, verdict.starts_with("attached")));
+        }
+        // The parser is the part most likely to rot into a vacuous pass, so
+        // pin that it found a real table with both verdicts on it.
+        assert!(rows.len() >= 10, "only parsed {} rows", rows.len());
+        assert!(rows.iter().any(|(_, attached)| *attached));
+        assert!(rows.iter().any(|(_, attached)| !*attached));
+        for must in ["background", "gif-palette", "delay", "n-pages"] {
+            assert!(
+                rows.iter().any(|(name, _)| name == must),
+                "the table does not mention {must}"
+            );
+        }
+
+        // Two pages so `page-height` is set, one interlaced frame so
+        // `interlaced` is, and no local colour table so `gif-palette` is.
+        let mut interlaced = Frame::full(2, 2, vec![0, 1, 2, 3]);
+        interlaced.interlaced = true;
+        let bytes = fixture(
+            (2, 2),
+            &ANIM_PALETTE,
+            0,
+            Some(0),
+            &[Frame::full(2, 2, vec![3, 2, 1, 0]), interlaced],
+        );
+        let raster = decode_gif_with(
+            &bytes,
+            DecodeLimits::default(),
+            LoadOptions::default().with_n(-1),
+        )
+        .expect("a valid GIF");
+        for (name, attached) in &rows {
+            assert_eq!(
+                raster.get_field(name).is_some(),
+                *attached,
+                "the table says {name} is {}",
+                if *attached {
+                    "attached"
+                } else {
+                    "not attached"
+                }
+            );
+        }
     }
 
     /**
