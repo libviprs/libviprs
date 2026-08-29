@@ -650,6 +650,85 @@ pub(crate) fn read_sample_f64(data: &[u8], kind: SampleKind, off: usize) -> f64 
     }
 }
 
+/// Write `v` into `data` at byte offset `off` as one sample of `kind`,
+/// with `vips_cast` semantics on the integer kinds.
+///
+/// The write counterpart of [`read_sample_f64`], and the other half of the
+/// answer to issue #607: a module that reads through the kind and writes
+/// through a byte width has only moved the silent misread to the other
+/// end of the loop.
+///
+/// On an integer kind the value is clipped into
+/// [`SampleKind::range`] and then **truncated toward zero**, and `NaN`
+/// pins to `0` (Rust's float-to-integer `as` cast is saturating and maps
+/// `NaN` to zero, so that last one comes free rather than from a branch). That is what `vips_cast` does ("Floats are truncated (not
+/// rounded). Out of range values are clipped", `conversion/cast.c:566`)
+/// and what [`Raster::try_cast`](crate::raster::Raster::try_cast) already
+/// did for the 8- and 16-bit carriers. On `F32` the value is stored as
+/// `v as f32`, which is the plain narrowing and rounds to nearest.
+///
+/// # A measured divergence from libvips on the 32-bit carrier
+///
+/// libvips narrows a `uint` sample through a signed `int`, so a value
+/// above `INT_MAX` comes out of the *bottom* of the range rather than
+/// the top. Measured on `/opt/homebrew/bin/vips` 8.18.6, casting a `uint`
+/// raster holding `[2147483647, 2147483648, 2147483649, 4294967295]`:
+///
+/// | target | 2147483647 | 2147483648 | 4294967295 |
+/// |---|---|---|---|
+/// | `uchar`  | 255   | **0** | **0** |
+/// | `ushort` | 65535 | **0** | **0** |
+/// | `int`    | 2147483647 | 2147483647 | 2147483647 |
+///
+/// The boundary sits exactly at `INT_MAX`, which is what says it is an
+/// `int` intermediate rather than a saturating narrow. This function
+/// clips instead, so those three cells answer 255 / 65535 and 255 /
+/// 65535. The divergence is deliberate and only reachable from a sample
+/// above `INT_MAX`, which no counting op in this crate produces.
+///
+/// # Panics
+///
+/// Panics if `data` is shorter than `off + kind.bytes()`, the way any
+/// out-of-range slice index does.
+#[inline]
+pub(crate) fn write_sample_f64(data: &mut [u8], kind: SampleKind, off: usize, v: f64) {
+    // Clip in `f64` and truncate, rather than casting to an integer and
+    // clipping there, because the range floor is not `0` for every kind
+    // and `clamp(0.0, max)` is only right for three of the six.
+    //
+    // There is no `is_nan` arm, and there was one until mutation testing
+    // showed nothing could tell it from its absence. `f64::clamp` returns
+    // `NaN` for a `NaN` input, `trunc` keeps it, and Rust's float-to-int
+    // `as` cast is saturating and maps `NaN` to zero, so the guard and the
+    // fall-through compute the same byte. A branch no test can enter
+    // belongs in a comment; `write_sample_f64_clips_and_truncates` pins the
+    // `NaN` answer either way.
+    let clipped = |lo: i64, hi: i64| -> f64 { v.clamp(lo as f64, hi as f64).trunc() };
+    match kind {
+        SampleKind::U8 => data[off] = clipped(0, 0xFF) as u8,
+        SampleKind::I8 => data[off] = clipped(i64::from(i8::MIN), i64::from(i8::MAX)) as i8 as u8,
+        SampleKind::U16 => {
+            let b = (clipped(0, 0xFFFF) as u16).to_ne_bytes();
+            data[off..off + 2].copy_from_slice(&b);
+        }
+        SampleKind::I16 => {
+            let b = (clipped(i64::from(i16::MIN), i64::from(i16::MAX)) as i16).to_ne_bytes();
+            data[off..off + 2].copy_from_slice(&b);
+        }
+        SampleKind::U32 => {
+            let b = (clipped(0, 0xFFFF_FFFF) as u32).to_ne_bytes();
+            data[off..off + 4].copy_from_slice(&b);
+        }
+        SampleKind::I32 => {
+            let b = (clipped(i64::from(i32::MIN), i64::from(i32::MAX)) as i32).to_ne_bytes();
+            data[off..off + 4].copy_from_slice(&b);
+        }
+        SampleKind::F32 => {
+            data[off..off + 4].copy_from_slice(&(v as f32).to_ne_bytes());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1580,6 +1659,125 @@ mod tests {
         assert_eq!(
             read_sample_f64(&(-2.5f32).to_ne_bytes(), SampleKind::F32, 0),
             -2.5
+        );
+    }
+    /**
+     * Tests that [`write_sample_f64`] lays down the right bytes for every
+     * sample kind, which is the write half of the answer to issue #607: a
+     * loop that reads through the kind and writes through a byte width has
+     * only moved the misread to the other end.
+     * Works by writing one sample at a one-sample offset and reading the
+     * bytes back with the plain typed read, so both the value and the
+     * stride are pinned; the padding sample stays untouched, which is what
+     * catches a write at half stride.
+     * Input: one in-range value per kind -> Output: those exact native
+     * bytes at the right offset, and the padding preserved.
+     */
+    #[test]
+    fn write_sample_f64_writes_every_kind() {
+        // (kind, value, native-order bytes of one sample)
+        let cases: [(SampleKind, f64, Vec<u8>); 7] = [
+            (SampleKind::U8, 200.0, vec![200]),
+            (SampleKind::I8, -100.0, vec![(-100i8) as u8]),
+            (SampleKind::U16, 40000.0, 40000u16.to_ne_bytes().to_vec()),
+            (
+                SampleKind::I16,
+                -30000.0,
+                (-30000i16).to_ne_bytes().to_vec(),
+            ),
+            // The value a 16-bit counter cannot hold, which is what the
+            // uint carrier exists for (issues #517, #532).
+            (SampleKind::U32, 90_000.0, 90_000u32.to_ne_bytes().to_vec()),
+            (
+                SampleKind::I32,
+                -90_000.0,
+                (-90_000i32).to_ne_bytes().to_vec(),
+            ),
+            (SampleKind::F32, -2.5, (-2.5f32).to_ne_bytes().to_vec()),
+        ];
+        for (kind, v, want) in cases {
+            assert_eq!(want.len(), kind.bytes(), "{kind:?} bytes disagree");
+            let mut buf = vec![0xAAu8; kind.bytes() * 3];
+            write_sample_f64(&mut buf, kind, kind.bytes(), v);
+            assert_eq!(
+                &buf[kind.bytes()..kind.bytes() * 2],
+                &want[..],
+                "{kind:?} wrote the wrong bytes for {v}"
+            );
+            // A write at half stride, or one that forgot the offset, moves
+            // one of these.
+            assert!(
+                buf[..kind.bytes()].iter().all(|&b| b == 0xAA),
+                "{kind:?} wrote below its offset"
+            );
+            assert!(
+                buf[kind.bytes() * 2..].iter().all(|&b| b == 0xAA),
+                "{kind:?} wrote past its sample"
+            );
+            // And the value survives a round trip through the reader.
+            assert_eq!(
+                read_sample_f64(&buf, kind, kind.bytes()),
+                v,
+                "{kind:?} did not round-trip {v}"
+            );
+        }
+    }
+
+    /**
+     * Tests the `vips_cast` edge semantics [`write_sample_f64`] applies on
+     * the integer kinds: clip into the kind's range, truncate toward zero,
+     * and pin `NaN` to zero.
+     * Works by writing values off both ends of each integer kind's range
+     * plus two fractional ones, and reading the stored sample back through
+     * [`read_sample_f64`]. The signed kinds are the case that says this is
+     * a range and not a `clamp(0, max)`: `-1` into `I16` has to stay `-1`
+     * while `-1` into `U16` has to become `0`.
+     * Input: 1e12 / -5.0 / 1.7 / -1.7 / NaN into each integer kind ->
+     * Output: the kind's ceiling, its floor, 1, -1 or 0, and 0.
+     */
+    #[test]
+    fn write_sample_f64_clips_and_truncates() {
+        for kind in [
+            SampleKind::U8,
+            SampleKind::I8,
+            SampleKind::U16,
+            SampleKind::I16,
+            SampleKind::U32,
+            SampleKind::I32,
+        ] {
+            let (lo, hi) = kind.range().expect("an integer kind has a range");
+            let mut buf = vec![0u8; kind.bytes()];
+            let write_read = |buf: &mut Vec<u8>, v: f64| {
+                write_sample_f64(buf, kind, 0, v);
+                read_sample_f64(buf, kind, 0)
+            };
+            assert_eq!(write_read(&mut buf, 1e12), hi as f64, "{kind:?} ceiling");
+            assert_eq!(write_read(&mut buf, -1e12), lo as f64, "{kind:?} floor");
+            assert_eq!(write_read(&mut buf, 1.7), 1.0, "{kind:?} truncates up");
+            assert_eq!(
+                write_read(&mut buf, -1.7),
+                if kind.is_signed() { -1.0 } else { 0.0 },
+                "{kind:?} truncates down"
+            );
+            assert_eq!(write_read(&mut buf, f64::NAN), 0.0, "{kind:?} NaN");
+            // The floor is the kind's, not a blanket zero: a signed kind
+            // has to keep a small negative rather than clamp it away.
+            assert_eq!(
+                write_read(&mut buf, -1.0),
+                if kind.is_signed() { -1.0 } else { 0.0 },
+                "{kind:?} floor at -1"
+            );
+        }
+        // The float kind has no range and no truncation: it rounds to
+        // nearest the way `as f32` does.
+        let mut buf = vec![0u8; 4];
+        write_sample_f64(&mut buf, SampleKind::F32, 0, 1.7);
+        assert_eq!(read_sample_f64(&buf, SampleKind::F32, 0), 1.7f32 as f64);
+        write_sample_f64(&mut buf, SampleKind::F32, 0, -1e12);
+        assert_eq!(
+            read_sample_f64(&buf, SampleKind::F32, 0),
+            f64::from(-1e12f32),
+            "the float kind clipped a value it can hold"
         );
     }
 }
