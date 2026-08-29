@@ -1546,15 +1546,17 @@ pub(crate) enum SniffedFormat {
     /// MATLAB level 5, either byte order: `MATLAB 5.0` at offset 0 plus the
     /// version word and endian indicator at 124.
     Mat,
-    /// Binary and ASCII Netpbm, from the two-byte magic: `P2` and `P3` for
-    /// the ASCII forms, `P5` and `P6` for the binary ones.
+    /// Binary and ASCII Netpbm, from the two-byte magic: `P1`, `P2` and `P3`
+    /// for the ASCII forms, `P4`, `P5` and `P6` for the binary ones.
     ///
-    /// **Exactly the four [`crate::textio::decode_netpbm`] decodes.** vips
-    /// also reads `P1` and `P4`, the bitmap forms, and this crate reads
-    /// neither by any route, so claiming their magic here would put a row in
+    /// **Exactly the six [`crate::textio::decode_netpbm`] decodes.** `P1` and
+    /// `P4` are the bitmap forms and they joined the set in #919, which is
+    /// why this doc says six where #910 left it saying four. `PF` is the
+    /// float PFM and `P7` is PAM; neither has a decoder here, so neither is
+    /// claimed. Claiming a magic with nothing behind it would put a row in
     /// [`Self::ALL`] that cannot decode and break
-    /// `every_container_is_reachable_from_its_own_magic`. Issue #919 is that
-    /// gap, and the polarity trap in it.
+    /// `every_container_is_reachable_from_its_own_magic`, so the sniffed set
+    /// is the decodable set in both directions.
     ///
     /// Two bytes and no more, which is as loose as `ppmload`'s own `is_a`:
     /// measured on 8.18.6, a file opening `P5xyzzy` is accepted as `ppmload`
@@ -1936,20 +1938,22 @@ impl SniffedFormat {
             // `image`'s Netpbm route is behind its `pnm` feature, which is
             // `pnm = []`, an empty feature with no dependency behind it, so
             // turning it on would cost nothing in the lock file. It is off
-            // anyway, because [`crate::textio`] already decodes `P2`, `P3`,
-            // `P5` and `P6` and has since #77, and the only thing the facade
-            // would add is `P1`, `P4` and the float `PF`, none of which
-            // `encode_ppm` writes either. A free-looking feature that buys
-            // decode paths with no matching encode paths is still a widening
-            // of what this crate claims (issue #910).
+            // anyway, because [`crate::textio`] decodes `P1`, `P2`, `P3`,
+            // `P4`, `P5` and `P6` itself, and the only thing the facade would
+            // still add is the float `PF`, which `encode_ppm` does not write
+            // either. A free-looking feature that buys decode paths with no
+            // matching encode paths is still a widening of what this crate
+            // claims (issues #910, #919).
             //
             // Read whole rather than streamed because the ASCII forms are
             // tokenised with a cursor over the buffer and the binary body is
             // checked to be wholly present before anything is reserved.
             Self::Netpbm => Route {
                 magics: &[
+                    Magic::Prefix(b"P1"),
                     Magic::Prefix(b"P2"),
                     Magic::Prefix(b"P3"),
+                    Magic::Prefix(b"P4"),
                     Magic::Prefix(b"P5"),
                     Magic::Prefix(b"P6"),
                 ],
@@ -3443,12 +3447,13 @@ mod tests {
             // The near-miss that matters most, because it is one byte away:
             // an ICO file opens `00 00 01 00`.
             ("ico is not analyze", b"\x00\x00\x01\x00\x01\x00 \x20", None),
-            // Netpbm's four magics, one per form, plus the near-misses that
-            // matter. `P1` and `P4` are the bitmap forms **vips reads and
-            // this crate does not**, so they are deliberately not claimed:
-            // a row in `ALL` that cannot decode would break
-            // `every_container_is_reachable_from_its_own_magic`. Issue #919.
-            // `PF` is the float PFM, same story.
+            // Netpbm's six magics, one per form, plus the near-misses that
+            // matter. `P1` and `P4` are the bitmap forms; #910 left them
+            // unclaimed because nothing here decoded them and #919 wired the
+            // decoder, so they are claimed now. `PF` is the float PFM and
+            // `P7` is PAM: still nothing behind either, so still unclaimed,
+            // because a row in `ALL` that cannot decode would break
+            // `every_container_is_reachable_from_its_own_magic`.
             (
                 "netpbm p2 ascii grey",
                 b"P2\n2 2\n255\n0 1 2 3\n",
@@ -3479,8 +3484,16 @@ mod tests {
                 b"P5xyzzy not netpbm",
                 Some(SniffedFormat::Netpbm),
             ),
-            ("netpbm p1 bitmap, unclaimed", b"P1\n2 2\n0 1 1 0\n", None),
-            ("netpbm p4 bitmap, unclaimed", b"P4\n2 2\n\xc0\x00", None),
+            (
+                "netpbm p1 ascii bitmap",
+                b"P1\n2 2\n0 1 1 0\n",
+                Some(SniffedFormat::Netpbm),
+            ),
+            (
+                "netpbm p4 binary bitmap",
+                b"P4\n2 2\n\x40\x80",
+                Some(SniffedFormat::Netpbm),
+            ),
             ("netpbm pf float, unclaimed", b"PF\n2 2\n-1.0\n", None),
             ("netpbm p7 pam, unclaimed", b"P7\nWIDTH 2\n", None),
             ("plain text", b"not an image at all", None),
@@ -3689,10 +3702,11 @@ mod tests {
                 // `image` has no MATLAB route, and the container is a tagged
                 // element stream with zlib inside it (issue #510).
                 SniffedFormat::Mat => Kind::Native,
-                // `image`'s `pnm` route is off and `crate::textio` has
-                // decoded `P2`/`P3`/`P5`/`P6` since #77, so the facade would
-                // add only the forms this crate cannot write either
-                // (issue #910).
+                // `image`'s `pnm` route is off and `crate::textio` decodes
+                // `P1`/`P2`/`P3`/`P4`/`P5`/`P6` itself, since #77 for the
+                // four grey and colour forms and since #919 for the two
+                // bitmap ones, so the facade would add only the float `PF`
+                // this crate cannot write either (issues #910, #919).
                 SniffedFormat::Netpbm => Kind::Native,
                 // Analyze is a `.hdr` plus an `.img`, and one buffer cannot
                 // carry both (issue #764).

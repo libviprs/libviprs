@@ -849,16 +849,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   either**. A free-looking feature that buys decode paths with no matching
   encode paths still widens what the crate claims.
 
-  So the sniffer claims exactly the four magics that decode, and the absences
-  are asserted rather than implied: `P1`, `P4`, `PF` and `P7` stay unclaimed,
-  because a row in `SniffedFormat::ALL` that cannot decode breaks the table's
-  own rule. vips does read `P1` and `P4`, and issue #919 is that gap.
+  So the sniffer claims exactly the magics that decode, and the absences are
+  asserted rather than implied, because a row in `SniffedFormat::ALL` that
+  cannot decode breaks the table's own rule. #910 landed with four claimed and
+  `P1`, `P4`, `PF` and `P7` unclaimed, and said the `P1`/`P4` half of that
+  assertion was what would go red the day #919 landed. It did, in this same
+  release: the entry below moved those two across and `PF` and `P7` are the
+  two that stay out.
 
   The magic is two bytes and no more, which is as loose as `ppmload`'s own
   `is_a`: measured on 8.18.6, a file opening `P5xyzzy` is accepted as `ppmload`
   and then fails with `bad image dimensions`. A sniffer stricter than the
   reference makes files vips reads unreachable, so the refusal stays in the
   loader, where re-tokenising the header gives it a type.
+
+- **Netpbm's bitmap forms decode**: `P1` (ASCII) and `P4` (binary) read through
+  `Raster::ppm_load` and through the sniffed route, so a `.pbm` vips reads is a
+  `.pbm` this crate reads (issue #919). They were the last two magics `ppmload`
+  handles that nothing here could decode by any route, named or sniffed.
+
+  **`0` is white and `1` is black**, inverted against every other format in this
+  crate, and that is why this is an entry rather than a line. Measured on the
+  pinned vips 8.18.6 rather than read out of the spec: a `P1` holding `0 1 1 0`
+  comes back `255 0 0 255`. A reader that assumes `0` is black produces a
+  perfectly plausible **negative image**, at the right width, the right height,
+  the right band count and the right sample kind, so no dimension check, band
+  check or allocation check notices. The polarity is one `const fn` carrying
+  those four pixels, and it has a direct cell rather than only end-to-end
+  coverage, because a direct cell fails on the mutation.
+
+  `P4` packs eight pixels to a byte most significant bit first and pads **each
+  row** out to a whole byte, so a 9-wide bitmap is two bytes a row and seven
+  bits of the second byte are padding rather than pixels. The fixture is 9 wide
+  for exactly that reason: at 8 a dropped `div_ceil` is the identity. Neither
+  form carries a `maxval` field, and a file that wrongly has one gets its
+  `maxval` read as the first pixel, which is what vips does with it too.
+
+  A truncated `P4` body is refused, where vips accepts it and fills the rows
+  that are not in the file with black. vips is not consistent about this: a
+  short `P5` body errors on the first pixel read. Inventing pixels is worse than
+  refusing bytes, and a short `P5` was already refused here.
+
+  The bitmap route prices the raster it builds, not the body it reads. A `P4`
+  body is about an eighth of what it unpacks into, so a budget check placed on
+  the packed size would let a caller through at eight times its own ceiling. The
+  refusal for a 1033x1031 bitmap names 1 065 023 bytes against the caller's
+  512 KiB, not the 134 030 bytes on disk.
+
+  **Decode only, and that is a decision rather than an omission.** The property
+  #882 established and #910 restored is that everything this crate *writes* it
+  can *read*. It has never been the converse: `P2` and `P3` have decoded since
+  #77 and no route has ever written either, so the decode set was already
+  strictly wider than the encode set and two more forms leave the invariant that
+  matters alone.
+
+  Writing `P4` would need a thresholding policy and there is no oracle to copy.
+  Measured on 8.18.6, `vips ppmsave` to `.pbm` thresholds at 128 and then
+  right-aligns the last partial byte of every row, where its own reader takes
+  those bits from the top of the byte:
+
+  | width | vips wrote | what vips then reads back from its own file |
+  |---|---|---|
+  | 4 | `0c` | all four white, for an input of `0 1 128 255` |
+  | 5 | `1a` | `255 255 255 0 0`, for an input of `0 0 255 0 255` |
+  | 9 | `80 01` | the ninth pixel white, where the input was black |
+  | 12 | `b2 0c` | the last four white, where the input ended `255 255` |
+
+  Only a width that is a multiple of eight survives that. Matching the oracle's
+  bytes means writing files the oracle itself misreads, and writing correct
+  bytes means diverging from it, so neither is parity. That is the same ground
+  #882 stood on when it left `.pbm` and `.pfm` out of the save routes, that no
+  encoder stands behind them.
+  `the_bitmap_forms_decode_and_nothing_here_writes_them` pins the asymmetry, so
+  the day an encoder does arrive it goes red and says so.
 
 - **`.ppm` and `.pgm` are rows in `Raster::save`, and `"ppm"` and `"pgm"` are
   rows in `Raster::encode_to_buffer`** (issue #882). `Raster::encode_ppm` has
