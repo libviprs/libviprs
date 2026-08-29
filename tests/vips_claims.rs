@@ -27,6 +27,8 @@ const EXTRACT_RS: &str = include_str!("../src/extract.rs");
 const RESAMPLE_RS: &str = include_str!("../src/resample.rs");
 const ARITHMETIC_RS: &str = include_str!("../src/arithmetic.rs");
 const ENCODE_RS: &str = include_str!("../src/encode.rs");
+const SINK_RS: &str = include_str!("../src/sink.rs");
+const SINK_OBJECT_STORE_RS: &str = include_str!("../src/sink_object_store.rs");
 const ORACLE_PIN_JSON: &str = include_str!("../oracle-captures/ORACLE_PIN.json");
 
 /// The doc block immediately above `needle` in `src`.
@@ -343,6 +345,16 @@ fn the_hdr_save_refusal_names_vips_like_its_netpbm_siblings() {
 /// them. No route answers the data. That makes the refusal *more* faithful
 /// than the dependency argument makes it, and none of the numbers were in
 /// the tree.
+/// # Three copies of the mapping, and the first draft drove the wrong one
+///
+/// `image_color_type` is one of **three**: `src/sink.rs` and
+/// `src/sink_object_store.rs` each carry their own `color_type_for_format`.
+/// `Raster::encode_to_buffer("png")` routes through `crate::sink::encode_png`,
+/// so the first version of this test asserted a refusal that
+/// `image_color_type` was not on the path of at all, and a mutation replacing
+/// its `Uint32` arm with `L16` came back **green**. Every route is driven
+/// here, and every copy's doc is checked, so a mutation of any one of them is
+/// visible.
 #[test]
 fn the_png_integer_refusals_carry_the_oracle_not_only_the_dependency() {
     let doc = doc_above(ENCODE_RS, "fn image_color_type");
@@ -353,10 +365,24 @@ fn the_png_integer_refusals_carry_the_oracle_not_only_the_dependency() {
              {needle:?} (issue #952). Doc was:\n{doc}"
         );
     }
+    // The other two copies point at it rather than repeating the table, and
+    // a copy that says nothing is how the argument-from-the-dependency
+    // survived in the first place.
+    for (name, src) in [
+        ("sink.rs", SINK_RS),
+        ("sink_object_store.rs", SINK_OBJECT_STORE_RS),
+    ] {
+        let doc = doc_above(src, "fn color_type_for_format");
+        assert!(
+            doc.contains("#952"),
+            "src/{name}'s copy of the mapping must point at the measured \
+             oracle. Doc was:\n{doc}"
+        );
+    }
 
-    // The executable half: the carriers the doc is about are refused, and
-    // the ones it is not about go through, so this is a refusal of a kind
-    // rather than of anything unusual.
+    // The executable half, on **each** route: `Raster::encode_png` and
+    // `Raster::encode_jpeg` reach `image_color_type`, and
+    // `Raster::encode_to_buffer` reaches `crate::sink`'s copy.
     let n = |v: u16| core::num::NonZeroU16::new(v).expect("non-zero");
     let uint = Raster::new(
         1,
@@ -365,7 +391,6 @@ fn the_png_integer_refusals_carry_the_oracle_not_only_the_dependency() {
         3_000_000_000u32.to_ne_bytes().to_vec(),
     )
     .expect("uint fixture");
-    assert!(uint.encode_to_buffer("png").is_err());
     let float = Raster::new(
         1,
         1,
@@ -373,15 +398,39 @@ fn the_png_integer_refusals_carry_the_oracle_not_only_the_dependency() {
         1.5f32.to_ne_bytes().to_vec(),
     )
     .expect("float fixture");
-    assert!(float.encode_to_buffer("png").is_err());
-    // Positive control.
-    assert!(gray8(&[7, 8]).encode_to_buffer("png").is_ok());
-    assert!(
-        Raster::new(1, 1, PixelFormat::Gray16, 300u16.to_ne_bytes().to_vec())
-            .expect("gray16 fixture")
-            .encode_to_buffer("png")
-            .is_ok()
-    );
+    let gray16 =
+        Raster::new(1, 1, PixelFormat::Gray16, 300u16.to_ne_bytes().to_vec()).expect("gray16");
+
+    for (route, bad_uint, bad_float, ok_8, ok_16) in [
+        (
+            "encode_png",
+            uint.encode_png(6).is_err(),
+            float.encode_png(6).is_err(),
+            gray8(&[7, 8]).encode_png(6).is_ok(),
+            gray16.encode_png(6).is_ok(),
+        ),
+        (
+            "encode_jpeg",
+            uint.encode_jpeg(80).is_err(),
+            float.encode_jpeg(80).is_err(),
+            gray8(&[7, 8]).encode_jpeg(80).is_ok(),
+            // JPEG has no 16-bit sample type, so `gray16` is not a control
+            // here; the 8-bit one carries it.
+            true,
+        ),
+        (
+            "encode_to_buffer",
+            uint.encode_to_buffer("png").is_err(),
+            float.encode_to_buffer("png").is_err(),
+            gray8(&[7, 8]).encode_to_buffer("png").is_ok(),
+            gray16.encode_to_buffer("png").is_ok(),
+        ),
+    ] {
+        assert!(bad_uint, "{route} must refuse the uint carrier");
+        assert!(bad_float, "{route} must refuse the float carrier");
+        assert!(ok_8, "{route} must still take Gray8");
+        assert!(ok_16, "{route} must still take Gray16");
+    }
 }
 
 // ---------------------------------------------------------------------------
