@@ -223,7 +223,7 @@ use moxcms::{
 use thiserror::Error;
 
 use crate::conversion::Interpretation;
-use crate::pixel::PixelFormat;
+use crate::pixel::{PixelFormat, SampleKind, read_sample_f64 as read_kind_sample};
 use crate::raster::{Raster, RasterError, buffer_len, try_plane, try_plane_filled};
 
 /// Typed errors for the colour operations in [`crate::colour`].
@@ -1051,29 +1051,27 @@ fn scrgb_luminance(rgb: [f64; 3]) -> f64 {
 // Colourspace routing
 // ---------------------------------------------------------------------------
 
-/// Storage depth of a colour space's canonical raster.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SpaceDepth {
-    U8,
-    U16,
-    F32,
+/// The ceiling a colour space's storage kind clips to, or `f64::INFINITY`
+/// for a float kind, whose meaningful range comes from the space and not
+/// from the sample.
+///
+/// [`SampleKind::max_value`] is the shared answer and this only puts it in
+/// the shape the clipping arithmetic here wants. It replaces a private
+/// `SpaceDepth` enum that was a hand-rolled duplicate of three of
+/// [`SampleKind`]'s seven variants, which is issue #607 step (a)'s second
+/// half: two enums answering "what are these bytes" drift, and this one had
+/// already lost the four kinds the carriers of #516 and #517 add.
+fn depth_ceiling(kind: SampleKind) -> f64 {
+    kind.max_value().map_or(f64::INFINITY, f64::from)
 }
 
-impl SpaceDepth {
-    fn bytes(self) -> usize {
-        match self {
-            Self::U8 => 1,
-            Self::U16 => 2,
-            Self::F32 => 4,
-        }
-    }
-
-    fn max_value(self) -> f64 {
-        match self {
-            Self::U8 => 255.0,
-            Self::U16 => 65535.0,
-            Self::F32 => f64::INFINITY,
-        }
+/// Round `v` and clip it into `kind`'s range: the libvips plain cast into an
+/// integer format. A float kind has no range to clip into, so it passes
+/// through.
+fn round_clip(v: f64, kind: SampleKind) -> f64 {
+    match kind.range() {
+        Some((lo, hi)) => v.round().clamp(lo as f64, hi as f64),
+        None => v,
     }
 }
 
@@ -1085,14 +1083,14 @@ fn space_bands(space: Interpretation) -> usize {
     space.space_bands()
 }
 
-/// Canonical storage depth of a space.
-fn space_depth(space: Interpretation) -> SpaceDepth {
+/// Canonical storage kind of a space.
+fn space_depth(space: Interpretation) -> SampleKind {
     match space {
         Interpretation::Srgb | Interpretation::Hsv | Interpretation::Cmyk | Interpretation::Bw => {
-            SpaceDepth::U8
+            SampleKind::U8
         }
-        Interpretation::Rgb16 | Interpretation::Grey16 => SpaceDepth::U16,
-        _ => SpaceDepth::F32,
+        Interpretation::Rgb16 | Interpretation::Grey16 => SampleKind::U16,
+        _ => SampleKind::F32,
     }
 }
 
@@ -1332,32 +1330,44 @@ fn from_xyz_into(space: Interpretation, xyz: [f64; 3], out: &mut [f64]) {
 /// Read the flat `i`-th channel sample of `raster` as `f64` (native byte
 /// order, matching the crate convention).
 fn read_sample_f64(raster: &Raster, i: usize) -> f64 {
-    let data = raster.data();
-    match raster.format().bytes_per_channel() {
-        1 => data[i] as f64,
-        2 => u16::from_ne_bytes([data[i * 2], data[i * 2 + 1]]) as f64,
-        _ => f32::from_ne_bytes([
-            data[i * 4],
-            data[i * 4 + 1],
-            data[i * 4 + 2],
-            data[i * 4 + 3],
-        ]) as f64,
-    }
+    // The crate's one width-independent read. This used to be a fourth copy
+    // of the width-keyed `match { 1, 2, _ }`, whose trailing arm handed
+    // every colour route an `f32` for four bytes that were not one: a `u32`
+    // sample of `1` arrived here as `1.4e-45` (issue #607).
+    let kind = raster.format().kind();
+    read_kind_sample(raster.data(), kind, i * kind.bytes())
 }
 
-/// Write the flat `i`-th channel sample into `buf` at `depth`, rounding
-/// and clipping integer depths.
-fn write_sample(buf: &mut [u8], depth: SpaceDepth, i: usize, v: f64) {
-    match depth {
-        SpaceDepth::U8 => buf[i] = v.round().clamp(0.0, 255.0) as u8,
-        SpaceDepth::U16 => {
-            let bytes = (v.round().clamp(0.0, 65535.0) as u16).to_ne_bytes();
-            buf[i * 2] = bytes[0];
-            buf[i * 2 + 1] = bytes[1];
-        }
-        SpaceDepth::F32 => {
-            buf[i * 4..i * 4 + 4].copy_from_slice(&(v as f32).to_ne_bytes());
-        }
+/// Write the flat `i`-th channel sample into `buf` at `kind`, rounding
+/// and clipping the integer kinds.
+///
+/// The offset is `i * kind.bytes()` for every kind, so the stride follows the
+/// sample rather than being spelled per arm. That is the half of issue #607
+/// a byte width gets wrong in the other direction: a four-byte kind written
+/// through a two-byte arm walks every second sample.
+///
+/// # Why this is not the crate-wide writer
+///
+/// It rounds. The colourspace routes quantise a continuous value into an
+/// integer space and libvips rounds that, which is why [`round_clip`] sits in
+/// front of the store. The shared writer issue #517 adds truncates instead,
+/// because it carries `vips_cast` semantics and `cast` is the operation that
+/// truncates toward zero. Both are right for their own operation and neither
+/// is right for the other: a colour result written through a truncating store
+/// moves every sample whose fraction is at or above a half by one count. When
+/// the shared writer lands this becomes a rounding step in front of it rather
+/// than a second store.
+fn write_sample(buf: &mut [u8], kind: SampleKind, i: usize, v: f64) {
+    let off = i * kind.bytes();
+    let clipped = round_clip(v, kind) as i64;
+    match kind {
+        SampleKind::U8 => buf[off] = clipped as u8,
+        SampleKind::I8 => buf[off] = clipped as i8 as u8,
+        SampleKind::U16 => buf[off..off + 2].copy_from_slice(&(clipped as u16).to_ne_bytes()),
+        SampleKind::I16 => buf[off..off + 2].copy_from_slice(&(clipped as i16).to_ne_bytes()),
+        SampleKind::U32 => buf[off..off + 4].copy_from_slice(&(clipped as u32).to_ne_bytes()),
+        SampleKind::I32 => buf[off..off + 4].copy_from_slice(&(clipped as i32).to_ne_bytes()),
+        SampleKind::F32 => buf[off..off + 4].copy_from_slice(&(v as f32).to_ne_bytes()),
     }
 }
 
@@ -1365,20 +1375,48 @@ fn write_sample(buf: &mut [u8], depth: SpaceDepth, i: usize, v: f64) {
 /// spaces shift between 8- and 16-bit storage (the libvips `shift` cast)
 /// and round-clip float storage (the libvips plain cast); float spaces
 /// take the stored value as is.
-fn normalise_sample(v: f64, storage_bpc: usize, depth: SpaceDepth) -> f64 {
-    match (depth, storage_bpc) {
-        (SpaceDepth::U8, 1) | (SpaceDepth::U16, 2) | (SpaceDepth::F32, _) => v,
-        (SpaceDepth::U8, 2) => (v / 256.0).floor(),
-        (SpaceDepth::U8, _) => v.round().clamp(0.0, 255.0),
-        (SpaceDepth::U16, 1) => v * 256.0,
-        (SpaceDepth::U16, _) => v.round().clamp(0.0, 65535.0),
+fn normalise_sample(v: f64, storage: SampleKind, depth: SampleKind) -> f64 {
+    // A float space takes the stored value as it is, whatever carried it.
+    if depth.is_float() {
+        return v;
+    }
+    match shift_bits(storage, depth) {
+        // Same unsigned width in and out: nothing to line up.
+        Some(0) => v,
+        // The libvips `shift` cast: a left or right shift by the width
+        // difference, which lines the ranges up without rescaling. 8-bit 255
+        // becomes 65280 and not 65535, which is the libvips answer.
+        Some(bits) if bits > 0 => v * f64::from(1u32 << bits),
+        Some(bits) => (v / f64::from(1u32 << -bits)).floor(),
+        // Everything else is the libvips plain cast.
+        None => round_clip(v, depth),
     }
 }
 
+/// How far the `shift` cast moves a sample between two **unsigned integer**
+/// kinds, in bits, or `None` where that cast does not apply.
+///
+/// `None` for a float on either side, and for a signed kind, whose zero is
+/// not at the bottom of its range, so lining widths up is not the same
+/// operation. Those take the plain cast instead. The match is total, so a
+/// kind added to [`SampleKind`] has to answer here rather than falling into
+/// whichever arm a `_` happened to be.
+fn shift_bits(storage: SampleKind, depth: SampleKind) -> Option<i32> {
+    fn unsigned_bits(kind: SampleKind) -> Option<i32> {
+        match kind {
+            SampleKind::U8 => Some(8),
+            SampleKind::U16 => Some(16),
+            SampleKind::U32 => Some(32),
+            SampleKind::I8 | SampleKind::I16 | SampleKind::I32 | SampleKind::F32 => None,
+        }
+    }
+    Some(unsigned_bits(depth)? - unsigned_bits(storage)?)
+}
+
 /// The canonical [`PixelFormat`] for `channels` at `depth`.
-fn format_for(channels: usize, depth: SpaceDepth) -> PixelFormat {
-    PixelFormat::with_channels(channels, depth.bytes())
-        .expect("colour op output has a valid channel count")
+fn format_for(channels: usize, depth: SampleKind) -> PixelFormat {
+    PixelFormat::with_kind(channels, depth)
+        .expect("colour op output has a valid channel count and a carried kind")
 }
 
 /// Allocate a colour operation's output byte buffer, fallibly.
@@ -1591,7 +1629,7 @@ fn raster_from_bytes(
     width: u32,
     height: u32,
     channels: usize,
-    depth: SpaceDepth,
+    depth: SampleKind,
     buf: Vec<u8>,
     like: &Raster,
     tag: Interpretation,
@@ -1612,7 +1650,7 @@ fn build_raster(
     width: u32,
     height: u32,
     channels: usize,
-    depth: SpaceDepth,
+    depth: SampleKind,
     samples: &[f64],
     like: &Raster,
     tag: Interpretation,
@@ -2279,13 +2317,25 @@ fn icc_lab_to_device_fallback(
 }
 
 /// Interpretation tag for a device raster of `channels` at `depth`.
-fn device_tag(channels: usize, depth: SpaceDepth) -> Interpretation {
-    match (channels, depth) {
-        (1, SpaceDepth::U16) => Interpretation::Grey16,
-        (1, _) => Interpretation::Bw,
+fn device_tag(channels: usize, depth: SampleKind) -> Interpretation {
+    // The tag question is "is this the 16-bit device depth", and answering it
+    // with a total match means a kind added to `SampleKind` has to decide
+    // rather than inheriting whatever a `_` arm meant.
+    let sixteen = match depth {
+        SampleKind::U16 => true,
+        SampleKind::U8
+        | SampleKind::I8
+        | SampleKind::I16
+        | SampleKind::U32
+        | SampleKind::I32
+        | SampleKind::F32 => false,
+    };
+    match (channels, sixteen) {
+        (1, true) => Interpretation::Grey16,
+        (1, false) => Interpretation::Bw,
         (4, _) => Interpretation::Cmyk,
-        (_, SpaceDepth::U16) => Interpretation::Rgb16,
-        _ => Interpretation::Srgb,
+        (_, true) => Interpretation::Rgb16,
+        (_, false) => Interpretation::Srgb,
     }
 }
 
@@ -2309,7 +2359,7 @@ fn device_tag(channels: usize, depth: SpaceDepth) -> Interpretation {
 fn read_device_normalised(raster: &Raster, channels: usize) -> Result<Vec<f32>, RasterError> {
     let total = raster.width() as usize * raster.height() as usize;
     let all = raster.format().channels();
-    let bpc = raster.format().bytes_per_channel();
+    let kind = raster.format().kind();
     let mut out = try_plane::<f32>(
         plane::IMPORT_DEVICE_PLANE,
         raster.width(),
@@ -2319,14 +2369,19 @@ fn read_device_normalised(raster: &Raster, channels: usize) -> Result<Vec<f32>, 
     for p in 0..total {
         for c in 0..channels {
             let v = read_sample_f64(raster, p * all + c);
-            out.push(match bpc {
-                1 => (v / 255.0) as f32,
-                2 => (v / 65535.0) as f32,
+            // An integer raster normalises by its own ceiling, which is what
+            // the 8- and 16-bit arms always did and what a four-byte integer
+            // kind needs too: dividing a `u32` by 255 is not a device sample
+            // (issue #607). `max_value` answers `None` for exactly the float
+            // kinds, so the float arm below is reached by kind and not by a
+            // leftover width.
+            out.push(match kind.max_value() {
+                Some(max) => (v / f64::from(max)) as f32,
                 // Float device raster: preserve sub-8-bit precision for the
                 // f32 CMS transform (issue #301). Do NOT re-add `.round()`
-                // here — it collapses float input to 8-bit before the
+                // here, it collapses float input to 8-bit before the
                 // transform and regresses precision for float callers.
-                _ => (v.clamp(0.0, 255.0) / 255.0) as f32,
+                None => (v.clamp(0.0, 255.0) / 255.0) as f32,
             });
         }
     }
@@ -2386,8 +2441,8 @@ impl Raster {
     /// contract of the ported-test surface.
     pub fn constant(w: u32, h: u32, values: &[f64], interpretation: Interpretation) -> Raster {
         assert!(!values.is_empty(), "constant: values must not be empty");
-        let format =
-            PixelFormat::with_channels(values.len(), 4).expect("constant: band count must fit u16");
+        let format = PixelFormat::with_kind(values.len(), SampleKind::F32)
+            .expect("constant: band count must fit u16");
         let mut raster = Raster::zeroed(w, h, format).expect("constant: valid dimensions");
         let stride = values.len();
         let count = w as usize * h as usize * stride;
@@ -2463,7 +2518,7 @@ impl Raster {
         let out_channels = tgt_bands + extras;
         let src_depth = space_depth(src);
         let tgt_depth = space_depth(target);
-        let bpc = self.format().bytes_per_channel();
+        let storage = self.format().kind();
 
         let total = self.width() as usize * self.height() as usize;
         // Stream row by row straight into the output byte buffer: no
@@ -2491,7 +2546,7 @@ impl Raster {
         for p in 0..total {
             let in_base = p * channels;
             for (c, slot) in src_px.iter_mut().enumerate() {
-                *slot = normalise_sample(read_sample_f64(self, in_base + c), bpc, src_depth);
+                *slot = normalise_sample(read_sample_f64(self, in_base + c), storage, src_depth);
             }
             let out_base = p * out_channels;
             if identity {
@@ -2512,7 +2567,7 @@ impl Raster {
             for c in src_bands..channels {
                 // Extra bands: plain cast (clip, no rescale), mirroring
                 // vips__colourspace_process_n. Clipping happens on write.
-                let v = read_sample_f64(self, in_base + c).min(tgt_depth.max_value());
+                let v = read_sample_f64(self, in_base + c).min(depth_ceiling(tgt_depth));
                 write_sample(
                     &mut buf,
                     tgt_depth,
@@ -2601,7 +2656,7 @@ impl Raster {
             left.width(),
             left.height(),
             out_channels,
-            SpaceDepth::F32,
+            SampleKind::F32,
             &samples,
             &left,
             Interpretation::Bw,
@@ -2826,7 +2881,7 @@ impl Raster {
             self.width(),
             self.height(),
             out_channels,
-            SpaceDepth::F32,
+            SampleKind::F32,
             &samples,
             self,
             tag,
@@ -2895,9 +2950,9 @@ impl Raster {
             return Err(ColourError::UnsupportedDepth { depth });
         }
         let out_depth = if depth == 16 {
-            SpaceDepth::U16
+            SampleKind::U16
         } else {
-            SpaceDepth::U8
+            SampleKind::U8
         };
 
         let source = if self.interpretation() == Interpretation::Lab {
@@ -2936,7 +2991,7 @@ impl Raster {
         }
         let device = icc_lab_to_device(&profile, &labs, intent, source.width(), source.height())?;
 
-        let scale = out_depth.max_value();
+        let scale = depth_ceiling(out_depth);
         let out_channels = dev_ch + extras;
         let mut samples = try_plane::<f64>(
             plane::EXPORT_SAMPLES,
@@ -3005,10 +3060,16 @@ impl Raster {
     /// The [`Raster::try_icc_import_with`] and
     /// [`Raster::try_icc_export_with`] errors.
     pub fn try_icc_transform(&self, output_profile: &Path) -> Result<Raster, ColourError> {
-        let depth = if self.format().bytes_per_channel() == 2 {
-            16
-        } else {
-            8
+        // The 16-bit export depth belongs to the 16-bit sample kinds, not to
+        // "two bytes wide": the question a width used to answer here is a
+        // kind question (issue #607).
+        let depth = match self.format().kind() {
+            SampleKind::U16 | SampleKind::I16 => 16,
+            SampleKind::U8
+            | SampleKind::I8
+            | SampleKind::U32
+            | SampleKind::I32
+            | SampleKind::F32 => 8,
         };
         self.try_icc_import_with(Intent::Perceptual, None, None)?
             .try_icc_export_with(depth, Intent::Perceptual, Some(output_profile))
@@ -3032,6 +3093,205 @@ impl Raster {
 mod tests {
     use super::*;
     use crate::raster::{counting_planes, with_plane_cap_after, with_plane_cap_at};
+
+    /**
+     * Tests that this module dispatches on sample kind and never on byte
+     * width, by asserting that neither the byte-width accessor on
+     * [`PixelFormat`] nor its width-keyed constructor survives in
+     * `src/colour.rs`.
+     * Works by scanning the module's own source, compiled in with
+     * `include_str!`, for the accessor's name; the needle is spelled in two
+     * halves so this assertion is not itself a hit. A byte width is not a
+     * sample kind: four bytes is `f32` today and would be `u32` under issue
+     * #517, so the reader this replaced handed every colour route a
+     * `1.4e-45` for a `u32` sample of `1`, and the ICC import divided it by
+     * 255 instead of by its own ceiling (issue #607).
+     * Input: `src/colour.rs` -> Output: zero occurrences.
+     */
+    /**
+     * Tests that the colour module's storage helpers answer the sample kind
+     * and not a byte width, for the four kinds no [`PixelFormat`] carries yet
+     * as well as the three it does.
+     * Works by driving `depth_ceiling`, `normalise_sample` and `format_for`
+     * with kinds directly, which is reachable today because
+     * [`SampleKind::U32`] and its siblings have been on `main` since #799
+     * even though no carrier produces them. A byte width answers `F32` for
+     * all three four-byte kinds, so the `U32` and `I32` rows below are the
+     * ones that could not be right before.
+     * Input: every [`SampleKind`] -> Output: each kind's own ceiling, and
+     * the shift cast only between the unsigned integer kinds.
+     */
+    #[test]
+    fn the_storage_helpers_answer_the_kind_and_not_the_width() {
+        // The ceiling a device sample normalises by, and the one an extra
+        // band clips to. Three four-byte kinds, three different answers.
+        assert_eq!(depth_ceiling(SampleKind::U8), 255.0);
+        assert_eq!(depth_ceiling(SampleKind::I8), 127.0);
+        assert_eq!(depth_ceiling(SampleKind::U16), 65535.0);
+        assert_eq!(depth_ceiling(SampleKind::I16), 32767.0);
+        assert_eq!(depth_ceiling(SampleKind::U32), 4_294_967_295.0);
+        assert_eq!(depth_ceiling(SampleKind::I32), 2_147_483_647.0);
+        assert_eq!(depth_ceiling(SampleKind::F32), f64::INFINITY);
+
+        // A space's canonical storage kind, which used to be a private
+        // three-variant enum of its own (issue #607 step (a)).
+        assert_eq!(space_depth(Interpretation::Srgb), SampleKind::U8);
+        assert_eq!(space_depth(Interpretation::Rgb16), SampleKind::U16);
+        assert_eq!(space_depth(Interpretation::Lab), SampleKind::F32);
+        assert_eq!(
+            format_for(3, SampleKind::U16),
+            PixelFormat::Rgb16,
+            "the output format comes from the kind"
+        );
+    }
+
+    /**
+     * Tests that `normalise_sample` shifts between two unsigned integer
+     * kinds and plain-casts everywhere else, which is the libvips rule, and
+     * that it keeps every answer it gave before for the three carried kinds.
+     * Works by pinning the five pairs the old width-keyed match could reach
+     * plus the pairs a four-byte integer kind adds. 255 shifting up to 16
+     * bits is 65280 and not 65535: a shift lines the ranges up, it does not
+     * rescale, and reading that off a width would have shifted a `u32` by 0
+     * bits instead of down by 16.
+     * Input: nine (storage, depth) pairs -> Output: the libvips answers.
+     */
+    #[test]
+    fn normalise_sample_shifts_only_between_the_unsigned_integer_kinds() {
+        use SampleKind::{F32, I16, U8, U16, U32};
+        // The five the old match could reach, unchanged.
+        assert_eq!(normalise_sample(200.0, U8, U8), 200.0);
+        assert_eq!(normalise_sample(40000.0, U16, U16), 40000.0);
+        assert_eq!(
+            normalise_sample(1.25, U8, F32),
+            1.25,
+            "a float space is as-is"
+        );
+        assert_eq!(normalise_sample(65535.0, U16, U8), 255.0);
+        assert_eq!(normalise_sample(255.0, U8, U16), 65280.0);
+        assert_eq!(
+            normalise_sample(300.7, F32, U8),
+            255.0,
+            "the plain cast clips"
+        );
+        assert_eq!(normalise_sample(-4.0, F32, U16), 0.0);
+
+        // The rows a byte width could not tell apart. `U32` is four bytes and
+        // so is `F32`, and they take opposite rules.
+        assert_eq!(normalise_sample(65535.0, U16, U32), 65535.0 * 65536.0);
+        assert_eq!(normalise_sample(4_294_967_295.0, U32, U8), 255.0);
+        assert_eq!(
+            normalise_sample(300.0, I16, U8),
+            255.0,
+            "a signed kind has no shift cast, so it takes the plain one"
+        );
+    }
+
+    /**
+     * Tests that `write_sample` stores every [`SampleKind`] as itself and at
+     * its own stride, which is the half of issue #607 a byte width gets
+     * wrong in the more damaging direction: a four-byte kind written through
+     * a two-byte arm stores the wrong type **and** walks every second
+     * sample.
+     * Works by writing one value into slot 1 of a two-slot buffer for each
+     * kind and reading it back through the shared reader, then asserting
+     * slot 0 was never touched. Slot 1 rather than slot 0 is what makes the
+     * stride visible at all: at `bytes() == 1` a dropped stride is the
+     * identity.
+     * Input: one value per kind at slot 1 -> Output: it reads back, and slot
+     * 0 is still zero.
+     */
+    #[test]
+    fn write_sample_stores_every_kind_at_its_own_stride() {
+        let cases = [
+            (SampleKind::U8, 200.0f64),
+            (SampleKind::I8, -100.0),
+            (SampleKind::U16, 40000.0),
+            (SampleKind::I16, -30000.0),
+            (SampleKind::U32, 3_000_000_000.0),
+            (SampleKind::I32, -2_000_000_000.0),
+            (SampleKind::F32, -2.5),
+        ];
+        for (kind, v) in cases {
+            let mut buf = vec![0u8; 2 * kind.bytes()];
+            write_sample(&mut buf, kind, 1, v);
+            assert_eq!(
+                read_kind_sample(&buf, kind, kind.bytes()),
+                v,
+                "{kind:?} must read back the value it was written"
+            );
+            assert!(
+                buf[..kind.bytes()].iter().all(|&b| b == 0),
+                "{kind:?} wrote outside its own slot: {buf:?}"
+            );
+        }
+    }
+
+    /**
+     * Tests that `write_sample` saturates into the sample kind's own range
+     * rather than into a range a byte width implies, and rounds rather than
+     * truncating.
+     * The ceiling is the thing a width cannot answer: `U32`, `I32` and `F32`
+     * are all four bytes and want three different limits. The rounding is
+     * what separates this store from the `vips_cast` one issue #517 adds,
+     * which truncates; libvips quantises a colourspace result with `rint`,
+     * so a truncating store here would move every sample whose fraction is
+     * at or above a half by one count.
+     * Input: values past both ends of each integer kind's range, and 200.5 /
+     * 200.4 into `U8` -> Output: the range endpoints, and 201 / 200.
+     */
+    #[test]
+    fn write_sample_saturates_into_the_kind_and_rounds_rather_than_truncating() {
+        for kind in [
+            SampleKind::U8,
+            SampleKind::I8,
+            SampleKind::U16,
+            SampleKind::I16,
+            SampleKind::U32,
+            SampleKind::I32,
+        ] {
+            let (lo, hi) = kind.range().expect("an integer kind has a range");
+            let mut buf = vec![0u8; kind.bytes()];
+            write_sample(&mut buf, kind, 0, hi as f64 * 4.0 + 1.0);
+            assert_eq!(
+                read_kind_sample(&buf, kind, 0),
+                hi as f64,
+                "{kind:?} ceiling"
+            );
+            write_sample(&mut buf, kind, 0, lo as f64 - 1.0 - hi as f64);
+            assert_eq!(read_kind_sample(&buf, kind, 0), lo as f64, "{kind:?} floor");
+        }
+
+        let mut buf = [0u8; 1];
+        write_sample(&mut buf, SampleKind::U8, 0, 200.5);
+        assert_eq!(buf[0], 201, "the colour store rounds half away from zero");
+        write_sample(&mut buf, SampleKind::U8, 0, 200.4);
+        assert_eq!(buf[0], 200, "and rounds down below a half");
+    }
+
+    #[test]
+    fn colour_does_not_dispatch_on_byte_width() {
+        const SRC: &str = include_str!("colour.rs");
+        let needles = [
+            concat!("bytes_per_", "channel"),
+            concat!("with_", "channels"),
+        ];
+        // Positive control: the same scan over the same string finds a token
+        // that is present, so the zero below is a real zero and not the
+        // vacuous pass an empty read would give.
+        assert!(
+            SRC.contains(concat!("fn ", "space_depth")),
+            "positive control failed: the scan cannot see this module's source"
+        );
+        for needle in needles {
+            assert_eq!(
+                SRC.matches(needle).count(),
+                0,
+                "{needle} is back in src/colour.rs; dispatch on \
+                 PixelFormat::kind() and PixelFormat::with_kind() instead"
+            );
+        }
+    }
 
     /// Every site label this module owns starts with this, so one prefix counts
     /// the module's own plane reservations and leaves `convolution.rs`'s and the
@@ -3089,7 +3349,10 @@ mod tests {
         assert_eq!(im.getpoint(7, 7), vec![50.0, 0.0, 0.0, 42.0]);
 
         let three = Raster::constant(2, 2, &[1.5, -2.0, 3.0], Interpretation::Xyz);
-        assert_eq!(three.format(), PixelFormat::with_channels(3, 4).unwrap());
+        assert_eq!(
+            three.format(),
+            PixelFormat::with_kind(3, SampleKind::F32).unwrap()
+        );
         assert_eq!(three.getpoint(1, 1), vec![1.5, -2.0, 3.0]);
     }
 
@@ -3885,7 +4148,7 @@ mod tests {
         }
 
         let rgb16 = g.colourspace(Interpretation::Rgb16);
-        assert_eq!(rgb16.format().bytes_per_channel(), 2);
+        assert_eq!(rgb16.format().kind(), SampleKind::U16);
         assert_eq!(rgb16.interpretation(), Interpretation::Rgb16);
         // 188 at 8 bits is 48316 (of 65535) at 16 bits with the shared
         // curve: 65535 * encode(decode(188/255)).
@@ -4158,7 +4421,8 @@ mod tests {
      */
     #[test]
     fn colourspace_typed_errors() {
-        let two_band = Raster::zeroed(2, 2, PixelFormat::with_channels(2, 4).unwrap()).unwrap();
+        let two_band =
+            Raster::zeroed(2, 2, PixelFormat::with_kind(2, SampleKind::F32).unwrap()).unwrap();
         let tagged = two_band.copy().interpretation(Interpretation::Lab).build();
         assert!(matches!(
             tagged.try_colourspace(Interpretation::Xyz),
@@ -4170,7 +4434,8 @@ mod tests {
         ));
 
         // Untagged multiband float infers Multiband: no route.
-        let multi = Raster::zeroed(2, 2, PixelFormat::with_channels(5, 4).unwrap()).unwrap();
+        let multi =
+            Raster::zeroed(2, 2, PixelFormat::with_kind(5, SampleKind::F32).unwrap()).unwrap();
         assert!(matches!(
             multi.try_colourspace(Interpretation::Lab),
             Err(ColourError::UnsupportedColourspace { .. })
@@ -4308,7 +4573,7 @@ mod tests {
      */
     #[test]
     fn icc_import_float_preserves_subcount_precision() {
-        let fmt = PixelFormat::with_channels(3, 4).unwrap();
+        let fmt = PixelFormat::with_kind(3, SampleKind::F32).unwrap();
         assert!(fmt.is_float(), "3-band float device raster");
         // Two grey pixels that both round to the 8-bit code 119.
         let samples = [118.6f32, 118.6, 118.6, 119.4, 119.4, 119.4];
@@ -4337,7 +4602,7 @@ mod tests {
         let imported = srgb_profiled_fixture().icc_import();
 
         let exported_16 = imported.icc_export_with(16, Intent::Perceptual, None);
-        assert_eq!(exported_16.format().bytes_per_channel(), 2);
+        assert_eq!(exported_16.format().kind(), SampleKind::U16);
         assert_eq!(exported_16.interpretation(), Interpretation::Rgb16);
 
         assert!(matches!(
@@ -5714,7 +5979,7 @@ mod tests {
     /// arm. Two bands keep the Lab staging (1536) and the sample buffer (2048)
     /// at different sizes.
     fn gray_profiled_fixture() -> Raster {
-        let format = PixelFormat::with_channels(2, 1).unwrap();
+        let format = PixelFormat::with_kind(2, SampleKind::U8).unwrap();
         let mut im = Raster::new(8, 8, format, vec![128u8; 8 * 8 * 2]).unwrap();
         im.set_icc_profile(&gray_profile_bytes());
         im

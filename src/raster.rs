@@ -1,7 +1,7 @@
 use crate::conversion::RasterMeta;
 use crate::frames::PageLayout;
 use crate::imageio::{MetadataFields, MetadataValue};
-use crate::pixel::PixelFormat;
+use crate::pixel::{PixelFormat, SampleKind};
 use thiserror::Error;
 
 /// The metadata key holding the page split, named here and nowhere else.
@@ -1094,8 +1094,9 @@ impl Raster {
     /// and the arithmetic on 16-bit samples use.
     ///
     /// ```
+    /// # use libviprs::pixel::SampleKind;
     /// # use libviprs::{PixelFormat, Raster};
-    /// let fmt = PixelFormat::with_channels(1, 4).unwrap(); // FloatF32(1)
+    /// let fmt = PixelFormat::with_kind(1, SampleKind::F32).unwrap(); // FloatF32(1)
     /// let im = Raster::from_f32_samples(2, 1, fmt, &[0.25, -1.5]).unwrap();
     /// assert_eq!(im.getpoint(0, 0), vec![0.25]);
     /// assert_eq!(im.getpoint(1, 0), vec![-1.5]);
@@ -1331,7 +1332,7 @@ impl Raster {
     /// no format can carry `bands` at that depth (zero or above
     /// `u16::MAX`), or any error from [`Raster::new`] (notably
     /// [`RasterError::BufferSizeMismatch`] when `data.len()` does not equal
-    /// `width * height * bands * bytes_per_channel`).
+    /// `width * height * bands * the sample width`).
     pub fn try_new_from_memory(
         data: &[u8],
         width: u32,
@@ -1339,10 +1340,18 @@ impl Raster {
         bands: u32,
         format: &str,
     ) -> Result<Raster, RasterError> {
-        let bytes_per_channel = match format {
-            "uchar" => 1,
-            "ushort" => 2,
-            "float" => 4,
+        // The vips format nickname names a **sample kind**, not a byte
+        // width, and this used to go through the width. That is the same
+        // shape as the `.v` `BandFmt` tag of issue #841 one layer over: vips
+        // has `char`, `short`, `uint` and `int` nicknames too, and a width
+        // cannot tell `uint` from `float`. Naming the kind means the day a
+        // carrier lands, wiring its nickname in is one line here and
+        // `with_kind` does the rest, instead of `"uint"` mapping to 4 and
+        // arriving as a float raster (issue #607).
+        let kind = match format {
+            "uchar" => SampleKind::U8,
+            "ushort" => SampleKind::U16,
+            "float" => SampleKind::F32,
             other => {
                 return Err(RasterError::UnknownMemoryFormat {
                     format: other.to_string(),
@@ -1351,7 +1360,7 @@ impl Raster {
         };
         let pixel_format = usize::try_from(bands)
             .ok()
-            .and_then(|b| PixelFormat::with_channels(b, bytes_per_channel))
+            .and_then(|b| PixelFormat::with_kind(b, kind))
             .ok_or_else(|| RasterError::InvalidMemoryBands {
                 bands,
                 format: format.to_string(),
@@ -2669,7 +2678,7 @@ mod tests {
      */
     #[test]
     fn try_f32_samples_reserves_fallibly_rather_than_aborting() {
-        let f1 = PixelFormat::with_channels(1, 4).unwrap();
+        let f1 = PixelFormat::with_kind(1, SampleKind::F32).unwrap();
         let im = Raster::from_f32_samples(4, 2, f1, &[1.5, -2.0, 0.0, 7.25, 3.0, 4.0, 5.0, 6.0])
             .unwrap();
 
@@ -2711,7 +2720,7 @@ mod tests {
      */
     #[test]
     fn f32_samples_panics_rather_than_aborting_when_the_widening_fails() {
-        let f1 = PixelFormat::with_channels(1, 4).unwrap();
+        let f1 = PixelFormat::with_kind(1, SampleKind::F32).unwrap();
         let im = Raster::from_f32_samples(4, 2, f1, &[1.5, -2.0, 0.0, 7.25, 3.0, 4.0, 5.0, 6.0])
             .unwrap();
 
@@ -2774,7 +2783,7 @@ mod tests {
         assert_eq!(again.f32_samples().unwrap(), samples.to_vec());
 
         // A zeroed float raster reads as all-0.0 samples.
-        let z = Raster::zeroed(3, 2, PixelFormat::with_channels(1, 4).unwrap()).unwrap();
+        let z = Raster::zeroed(3, 2, PixelFormat::with_kind(1, SampleKind::F32).unwrap()).unwrap();
         assert_eq!(z.f32_samples().unwrap(), vec![0.0f32; 6]);
     }
 
@@ -2791,7 +2800,7 @@ mod tests {
             Raster::from_f32_samples(1, 1, PixelFormat::Rgb8, &[0.0, 0.0, 0.0]),
             Err(RasterError::NotFloatFormat { .. })
         ));
-        let f1 = PixelFormat::with_channels(1, 4).unwrap();
+        let f1 = PixelFormat::with_kind(1, SampleKind::F32).unwrap();
         assert!(matches!(
             Raster::from_f32_samples(2, 1, f1, &[0.0, 0.0, 0.0]),
             Err(RasterError::BufferSizeMismatch {
@@ -2829,9 +2838,9 @@ mod tests {
     fn float_buffer_size_invariant() {
         for fmt in [
             PixelFormat::RgbaF32,
-            PixelFormat::with_channels(1, 4).unwrap(),
-            PixelFormat::with_channels(3, 4).unwrap(),
-            PixelFormat::with_channels(7, 4).unwrap(),
+            PixelFormat::with_kind(1, SampleKind::F32).unwrap(),
+            PixelFormat::with_kind(3, SampleKind::F32).unwrap(),
+            PixelFormat::with_kind(7, SampleKind::F32).unwrap(),
         ] {
             let r = Raster::zeroed(5, 4, fmt).unwrap();
             assert_eq!(r.data().len(), 20 * fmt.bytes_per_pixel(), "{fmt:?}");
