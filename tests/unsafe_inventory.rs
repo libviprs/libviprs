@@ -33,7 +33,7 @@
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// The manifest, at compile time, the way `tests/ci_feature_coverage.rs` pulls
 /// it in: the file this asserts about and the binary asserting cannot then
@@ -240,22 +240,41 @@ fn char_literal_end(b: &[u8], i: usize) -> Option<usize> {
     (i + 1 + len < n && b[i + 1 + len] == b'\'').then_some(i + 2 + len)
 }
 
-/// Every `.rs` file under `dir`, as `(path relative to `dir`, full path)`.
-fn rs_files_under(dir: &Path) -> Vec<(String, std::path::PathBuf)> {
-    let mut out: Vec<(String, std::path::PathBuf)> = fs::read_dir(dir)
-        .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()))
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("rs"))
-        .map(|p| {
-            (
-                p.file_name()
-                    .expect("a file has a name")
-                    .to_string_lossy()
-                    .into_owned(),
-                p,
-            )
-        })
-        .collect();
+/// Every `.rs` file under `dir`, recursively, as `(path relative to `dir`,
+/// full path)`.
+///
+/// Recursive on purpose. `src/` is flat today, so a walk that stops at the top
+/// gives the same answer and the `files.len() > 30` control cannot tell them
+/// apart; the first `src/anything/mod.rs` added would exit this guard in
+/// silence (issue #949). `tests/miri_ignore_convention.rs` already recurses,
+/// and two of the three walks agreeing is not a rule.
+fn rs_files_under(dir: &Path) -> Vec<(String, PathBuf)> {
+    fn walk(dir: &Path, prefix: &str, out: &mut Vec<(String, PathBuf)>) {
+        let mut entries: Vec<PathBuf> = fs::read_dir(dir)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()))
+            .map(|e| e.expect("cannot read a directory entry").path())
+            .collect();
+        entries.sort();
+        for path in entries {
+            let name = path
+                .file_name()
+                .expect("a directory entry has a name")
+                .to_string_lossy()
+                .into_owned();
+            let rel = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{prefix}/{name}")
+            };
+            if path.is_dir() {
+                walk(&path, &rel, out);
+            } else if name.ends_with(".rs") {
+                out.push((rel, path));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(dir, "", &mut out);
     out.sort();
     out
 }
@@ -283,24 +302,80 @@ fn files_with_real_unsafe() -> BTreeSet<String> {
     found
 }
 
-/// The features a plain `cargo build` enables, resolved through
-/// `[features]` from the roots given.
+/// The `[features]` table as a map from a feature to the features it enables,
+/// with `dep:` and `crate/feature` entries dropped.
 ///
-/// This is the rule as it stands at `b06ba973`, lifted into a function so the
-/// table below can measure it: it reads the literal `default = ` line and
-/// nothing else, so `default = ["pdfium"]` plus
-/// `pdfium = ["dep:pdfium-render", "avif"]` makes a default build compile the
-/// crate's own `unsafe` with every assertion here green (issue #949).
-fn feature_closure(manifest: &str, roots: &[&str]) -> BTreeSet<String> {
-    let _ = roots;
-    let Some(line) = manifest.lines().find(|l| l.starts_with("default = ")) else {
-        return BTreeSet::new();
-    };
-    line.split('"')
+/// Read as entries rather than as lines, because a `[features]` entry can span
+/// lines and `jxl` does.
+fn feature_table(manifest: &str) -> std::collections::BTreeMap<String, Vec<String>> {
+    let mut out = std::collections::BTreeMap::new();
+    let mut inside = false;
+    let mut pending: Option<(String, String)> = None;
+    for line in manifest.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') && pending.is_none() {
+            inside = trimmed == "[features]";
+            continue;
+        }
+        if !inside || trimmed.starts_with('#') {
+            continue;
+        }
+        if let Some((name, rest)) = pending.take() {
+            let joined = format!("{rest} {trimmed}");
+            if joined.contains(']') {
+                out.insert(name, enabled_features(&joined));
+            } else {
+                pending = Some((name, joined));
+            }
+            continue;
+        }
+        let Some((name, rest)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let (name, rest) = (name.trim(), rest.trim());
+        if name.is_empty() || !rest.starts_with('[') {
+            continue;
+        }
+        if rest.contains(']') {
+            out.insert(name.to_owned(), enabled_features(rest));
+        } else {
+            pending = Some((name.to_owned(), rest.to_owned()));
+        }
+    }
+    out
+}
+
+/// The feature names inside one `[..]` list, dropping `dep:x` and
+/// `crate/feature` entries, which turn on a dependency rather than a feature
+/// of this crate.
+fn enabled_features(list: &str) -> Vec<String> {
+    list.split('"')
         .skip(1)
         .step_by(2)
+        .filter(|s| !s.starts_with("dep:") && !s.contains('/'))
         .map(str::to_owned)
         .collect()
+}
+
+/// The features a build enables, resolved **transitively** from `roots`.
+///
+/// Transitive because a feature list is a graph and the guard below is about
+/// what a default build compiles. `default = ["pdfium"]` with
+/// `pdfium = ["dep:pdfium-render", "avif"]` puts `avif` in a default build
+/// without the string "avif" appearing anywhere near `default`, and the line
+/// grep this replaces was green over exactly that (issue #949).
+fn feature_closure(manifest: &str, roots: &[&str]) -> BTreeSet<String> {
+    let table = feature_table(manifest);
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut queue: Vec<String> = roots.iter().map(|r| (*r).to_owned()).collect();
+    while let Some(name) = queue.pop() {
+        for next in table.get(&name).map(Vec::as_slice).unwrap_or_default() {
+            if seen.insert(next.clone()) {
+                queue.push(next.clone());
+            }
+        }
+    }
+    seen
 }
 
 /**

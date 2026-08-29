@@ -32,6 +32,22 @@
 //! tree was **red**, on a `collapsible_if` in `src/sink_packfile.rs` that no
 //! job had ever compiled.
 //!
+//! # A cell has to run the tests, not merely name them
+//!
+//! The module title says CI "has to actually run them", and until #949 the
+//! check did not ask that. `job_runs` accepted a cell's command as a prefix
+//! followed by a space, so changing `- run: cargo test --features jp2k` to the
+//! same line plus `--no-run` left all six tests here **green** while the Test
+//! job compiled and ran nothing. A trailing `-- some::filter` selecting no test
+//! does the same.
+//!
+//! The prefix rule is not simply wrong: the Check & Lint job's lines end
+//! `-- -D warnings -W clippy::incompatible_msrv -W deprecated`, and a cell has
+//! to match those. So the tail a cell allows is now part of the question:
+//! nothing at all for a Test or MSRV cell, and lint configuration after a `--`
+//! separator for a lint one, read as flag-and-name pairs so `-- some::filter`
+//! is not one.
+//!
 //! # Why a table rather than a rule
 //!
 //! There is no honest rule that derives the right job set from the feature
@@ -43,9 +59,20 @@
 //! exactly the names this table covers?** A new feature fails here until
 //! somebody decides, in writing, which jobs it belongs in.
 //!
-//! Both files are pulled in with `include_str!` at compile time rather than
-//! read at runtime, so this test stays runnable under Miri and off
-//! `tests/miri_fs_test_inventory.txt` (#712).
+//! `Cargo.toml`, `ci.yml` and the `Makefile` are pulled in with `include_str!`
+//! at compile time rather than read at runtime, so those tests stay runnable
+//! under Miri and off `tests/miri_fs_test_inventory.txt` (#712).
+//!
+//! `test_util_is_only_ever_gated_alongside_cfg_test` is the exception, and it
+//! had to become one. Its claim is crate-wide ("every gate on the feature is
+//! `cfg(any(test, feature = "test-util"))`") and it was read out of one file,
+//! `src/sink.rs`, so a bare `#[cfg(feature = "test-util")] pub fn` planted in
+//! `src/colour.rs` was invisible to it, and code behind such a gate is
+//! compiled by no CI cell at all, which is the hole this row's `why` claims to
+//! close (issue #949). A crate-wide claim needs a crate-wide walk, an
+//! `include_str!` of every file would be a hand-written list of exactly the
+//! kind that rots, so it walks `src/` at runtime, carries
+//! `#[cfg_attr(miri, ignore)]` and has a line in the inventory.
 
 /// The manifest, at compile time.
 use std::collections::BTreeSet;
@@ -293,12 +320,33 @@ enum Tail {
 
 /// Whether one `- run:` line satisfies a cell's command.
 ///
-/// This is `job_runs`' rule as it stands at `b06ba973`, lifted into a function
-/// so the table below can measure it. It accepts the command as a prefix
-/// followed by a space, whatever comes next.
+/// The command has to be the whole line, or the whole line up to a tail the
+/// cell allows. Anything else before a `--` separator changes what cargo does:
+/// `--no-run` compiles and runs nothing, `--lib` narrows the set, another
+/// `--features` widens it, and each of those leaves the Test job green over a
+/// cell that ran no assertion at all (issue #949).
 fn cell_matches(line: &str, command: &str, tail: Tail) -> bool {
-    let _ = tail;
-    line == command || line.starts_with(&format!("{command} "))
+    let Some(rest) = line.strip_prefix(command) else {
+        return false;
+    };
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return true;
+    }
+    if tail == Tail::Nothing {
+        return false;
+    }
+    let Some(flags) = rest.strip_prefix("--") else {
+        return false;
+    };
+    // Pairs only, a lint flag then a lint name, so `-- some::filter` is not a
+    // lint tail and neither is `-- --ignored`.
+    let toks: Vec<&str> = flags.split_whitespace().collect();
+    !toks.is_empty()
+        && toks.len() % 2 == 0
+        && toks
+            .chunks(2)
+            .all(|p| matches!(p[0], "-D" | "-W" | "-A" | "-F") && !p[1].starts_with('-'))
 }
 
 /// Whether `job` runs `command`, allowing `tail` after it.
@@ -308,11 +356,18 @@ fn job_runs_with(job: &str, command: &str, tail: Tail) -> bool {
         .any(|line| cell_matches(line, command, tail))
 }
 
-/// Whether `job` runs exactly `command`.
+/// Whether `job` runs `command`, allowing only lint configuration after it.
+///
+/// The lint tail is what the Check & Lint job needs, since its lines end
+/// `-- -D warnings ..`. The Test and MSRV cells go through
+/// [`job_runs_exactly`], which allows nothing.
 fn job_runs(job: &str, command: &str) -> bool {
-    run_lines_of_job(job)
-        .iter()
-        .any(|line| *line == command || line.starts_with(&format!("{command} ")))
+    job_runs_with(job, command, Tail::LintFlags)
+}
+
+/// Whether `job` runs `command` and nothing else on the line.
+fn job_runs_exactly(job: &str, command: &str) -> bool {
+    job_runs_with(job, command, Tail::Nothing)
 }
 
 /// The table covers exactly the declared feature set.
@@ -373,7 +428,7 @@ fn ci_runs_every_cell_the_table_claims() {
             ));
         }
         if c.msrv
-            && !job_runs(
+            && !job_runs_exactly(
                 "msrv",
                 &format!("cargo check --all-targets --features {name}"),
             )
@@ -384,7 +439,7 @@ fn ci_runs_every_cell_the_table_claims() {
                 why = c.why
             ));
         }
-        if c.test && !job_runs("test", &format!("cargo test --features {name}")) {
+        if c.test && !job_runs_exactly("test", &format!("cargo test --features {name}")) {
             missing.push(format!(
                 "the Test job does not run `cargo test --features {name}` \
                  ({why})",
@@ -542,20 +597,63 @@ fn the_deprecated_s3_alias_is_still_built() {
 /// Every `#[cfg(feature = "test-util")]` gate under `src/`, as
 /// `(files scanned, bare gates, gates seen)`.
 fn test_util_gates() -> (Vec<String>, Vec<String>, usize) {
-    const SINK_RS: &str = include_str!("../src/sink.rs");
-    let scanned = vec!["src/sink.rs".to_owned()];
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut scanned = Vec::new();
     let mut bare = Vec::new();
     let mut seen = 0usize;
-    for (n, line) in SINK_RS.lines().enumerate() {
-        if !line.contains("feature = \"test-util\"") {
-            continue;
-        }
-        seen += 1;
-        if !line.contains("any(test,") && !line.contains("doc(cfg(") {
-            bare.push(format!("src/sink.rs:{}: {}", n + 1, line.trim()));
+    for (rel, path) in rs_files_under(&root) {
+        let rel = format!("src/{rel}");
+        scanned.push(rel.clone());
+        let text = std::fs::read_to_string(&path).expect("read a source file");
+        for (n, line) in text.lines().enumerate() {
+            if !line.contains("feature = \"test-util\"") {
+                continue;
+            }
+            seen += 1;
+            if !line.contains("any(test,") && !line.contains("doc(cfg(") {
+                bare.push(format!("{rel}:{}: {}", n + 1, line.trim()));
+            }
         }
     }
     (scanned, bare, seen)
+}
+
+/// Every `.rs` file under `dir`, recursively, as `(path relative to `dir`,
+/// full path)`.
+///
+/// Recursive for the reason issue #949 gives: `src/` is flat today, so a walk
+/// that stops at the top gives the same answer and no count can tell the two
+/// apart, and the first `src/anything/mod.rs` added would exit this scan in
+/// silence.
+fn rs_files_under(dir: &std::path::Path) -> Vec<(String, std::path::PathBuf)> {
+    fn walk(dir: &std::path::Path, prefix: &str, out: &mut Vec<(String, std::path::PathBuf)>) {
+        let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()))
+            .map(|e| e.expect("cannot read a directory entry").path())
+            .collect();
+        entries.sort();
+        for path in entries {
+            let name = path
+                .file_name()
+                .expect("a directory entry has a name")
+                .to_string_lossy()
+                .into_owned();
+            let rel = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{prefix}/{name}")
+            };
+            if path.is_dir() {
+                walk(&path, &rel, out);
+            } else if name.ends_with(".rs") {
+                out.push((rel, path));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(dir, "", &mut out);
+    out.sort();
+    out
 }
 
 /// `test-util`'s row is the only one claiming a feature needs no CI cell at
@@ -567,6 +665,7 @@ fn test_util_gates() -> (Vec<String>, Vec<String>, usize) {
 /// bare `#[cfg(feature = "test-util")]`, that stops being true and this fails,
 /// which is the moment the row needs revisiting.
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn test_util_is_only_ever_gated_alongside_cfg_test() {
     let (scanned, bare, seen) = test_util_gates();
     assert!(
