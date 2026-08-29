@@ -104,6 +104,17 @@ pub enum HistogramError {
     /// An operation requires a one-band image.
     #[error("{op} requires a one-band image, got {bands} bands")]
     OneBandOnly { op: &'static str, bands: usize },
+    /// `maplut` was given a lookup table longer than libvips accepts.
+    ///
+    /// `vips maplut` answers "histograms must have not have more than
+    /// 65536 elements" and exits non-zero, measured on
+    /// `/opt/homebrew/bin/vips` 8.18.6 with a 70000-element table
+    /// (issue #894). The bound is also what makes the index read's fold
+    /// provably harmless: the site clamps with `.min(n_lut - 1)`, and for
+    /// any `n_lut <= 65536` that clamp subsumes the fold at 65535
+    /// entirely.
+    #[error("maplut LUT has {len} elements; libvips accepts at most {max}")]
+    LutTooLong { len: usize, max: usize },
     /// Two rasters that must share pixel dimensions do not.
     #[error("dimension mismatch: {expected_w}x{expected_h} vs {got_w}x{got_h}")]
     DimensionMismatch {
@@ -161,8 +172,14 @@ fn expect_hist<T>(op: &str, r: Result<T, HistogramError>) -> T {
 // Sample-level helpers
 // ---------------------------------------------------------------------------
 
-/// Read the flat `i`-th sample as a `u32` bin index (native byte order for
-/// the multi-byte kinds, matching [`crate::raster_ops`]). Integer kinds
+/// The longest lookup table `maplut` accepts, matching libvips.
+///
+/// `vips maplut` refuses anything longer with "histograms must have not
+/// have more than 65536 elements", measured on 8.18.6 (issue #894).
+const MAX_LUT_LEN: usize = 65536;
+
+/// Read the flat `i`-th sample as a `u32` **bin index** (native byte order
+/// for the multi-byte kinds, matching [`crate::raster_ops`]). Integer kinds
 /// only: the [`SampleKind::F32`] arm panics rather than misreading float
 /// bytes as `u16` pairs, which is what the histogram ops did before the
 /// float formats existed.
@@ -173,16 +190,18 @@ fn expect_hist<T>(op: &str, r: Result<T, HistogramError>) -> T {
 /// last bin of the 16-bit table. Both are measured, not read out of the C,
 /// and the measurements are on [`SampleKind::hist_bins`].
 ///
-/// It doubles as the read for a histogram's own counts, which is exact for
-/// every carrier the crate has because a count is non-negative and
-/// saturates at 65535 anyway (issue #532). A wider count carrier needs the
-/// two reads separated.
+/// **Not** the read for a histogram's own counts. It used to be both, and
+/// the folding that is right here is wrong there: a count of 90000 is a
+/// count of 90000 and not a count of 65535. [`read_value`] is that read.
+/// The two only agreed while no carrier could hold a count past 65535, and
+/// merging them again would make every widened counter saturate on the way
+/// back in, silently (issues #532, #888).
 ///
 /// The match is over the kind and has no wildcard, so a carrier added to
 /// [`SampleKind`] is a compile error here instead of a silent misread
 /// (issue #607).
 #[inline]
-fn read_flat(data: &[u8], kind: SampleKind, i: usize) -> u32 {
+fn read_bin(data: &[u8], kind: SampleKind, i: usize) -> u32 {
     match kind {
         SampleKind::U8 => data[i] as u32,
         SampleKind::U16 => u16::from_ne_bytes([data[i * 2], data[i * 2 + 1]]) as u32,
@@ -219,8 +238,57 @@ fn read_flat(data: &[u8], kind: SampleKind, i: usize) -> u32 {
     }
 }
 
+/// Read the flat `i`-th sample as the **value** it is, with no folding
+/// (native byte order, integer kinds only).
+///
+/// The counterpart of [`read_bin`], and the reason the two exist
+/// separately. Every op here that reads a histogram's own counts wants
+/// this one: `hist_cum`, `hist_norm`, `hist_match`, `hist_ismonotonic`,
+/// `hist_entropy`, `hist_plot`, `maplut`'s LUT entry, and
+/// `hist_find_indexed`'s value image. A count of 90000 read through
+/// [`read_bin`] comes back 65535, which is correct for a bin index and
+/// nonsense for a count.
+///
+/// Reachable as soon as anything carries a count past 65535, which is the
+/// unsigned 32-bit carrier of issue #517 and then the widened counters of
+/// issue #532. Measured against `/opt/homebrew/bin/vips` 8.18.6, which
+/// gets this right: `vips hist_entropy` on a `uint` histogram holding
+/// `[100000, 300000]` answers **0.811278**, the entropy of a 1:3 split,
+/// and folding both counts into 65535 would answer 1.0.
+///
+/// Negative samples clamp at zero rather than sign-extending, because
+/// every caller is reading a count or a LUT entry and neither is negative.
+/// No `PixelFormat` carries a signed kind yet (issue #516), so that arm is
+/// unreachable today and is spelled out rather than left to a wildcard.
+#[inline]
+fn read_value(data: &[u8], kind: SampleKind, i: usize) -> u32 {
+    match kind {
+        SampleKind::U8 => u32::from(data[i]),
+        SampleKind::U16 => u32::from(u16::from_ne_bytes([data[i * 2], data[i * 2 + 1]])),
+        SampleKind::U32 => u32::from_ne_bytes([
+            data[i * 4],
+            data[i * 4 + 1],
+            data[i * 4 + 2],
+            data[i * 4 + 3],
+        ]),
+        SampleKind::I8 => (data[i] as i8).max(0) as u32,
+        SampleKind::I16 => i16::from_ne_bytes([data[i * 2], data[i * 2 + 1]]).max(0) as u32,
+        SampleKind::I32 => i32::from_ne_bytes([
+            data[i * 4],
+            data[i * 4 + 1],
+            data[i * 4 + 2],
+            data[i * 4 + 3],
+        ])
+        .max(0) as u32,
+        SampleKind::F32 => panic!(
+            "the histogram operations do not support float rasters yet; \
+             cast to an unsigned 8/16-bit format first"
+        ),
+    }
+}
+
 /// Write the flat `i`-th sample, saturating into the kind's ceiling.
-/// Unsigned kinds only; see [`read_flat`], including on why the match has
+/// Unsigned kinds only; see [`read_bin`], including on why the match has
 /// no wildcard arm.
 #[inline]
 fn write_flat(data: &mut [u8], kind: SampleKind, i: usize, v: u32) {
@@ -353,7 +421,7 @@ fn per_band_hist(r: &Raster) -> Vec<Vec<u64>> {
     let mut hists = vec![vec![0u64; bins]; bands];
     for i in 0..n {
         for (b, hist) in hists.iter_mut().enumerate() {
-            hist[read_flat(data, kind, i * bands + b) as usize] += 1;
+            hist[read_bin(data, kind, i * bands + b) as usize] += 1;
         }
     }
     hists
@@ -367,7 +435,7 @@ fn per_band_hist(r: &Raster) -> Vec<Vec<u64>> {
 #[inline]
 fn max_bin(data: &[u8], kind: SampleKind, count: usize) -> u32 {
     (0..count)
-        .map(|i| read_flat(data, kind, i))
+        .map(|i| read_bin(data, kind, i))
         .max()
         .unwrap_or(0)
 }
@@ -490,13 +558,13 @@ impl Raster {
         // This band's own maximum, not the image's: `vips hist_find --band 0`
         // on a two-band image whose bands max at 10 and 5000 gives 11.
         let widest = (0..n)
-            .map(|i| read_flat(data, kind, i * bands + band as usize))
+            .map(|i| read_bin(data, kind, i * bands + band as usize))
             .max()
             .unwrap_or(0);
         let bins = hist_width(kind, widest);
         let mut hist = vec![0u64; bins];
         for i in 0..n {
-            hist[read_flat(data, kind, i * bands + band as usize) as usize] += 1;
+            hist[read_bin(data, kind, i * bands + band as usize) as usize] += 1;
         }
         let mut out = Raster::zeroed(bins as u32, 1, PixelFormat::Gray16)?;
         let buf = out.data_mut();
@@ -558,9 +626,9 @@ impl Raster {
         let bins = hist_width(idx_kind, max_bin(idx_data, idx_kind, n));
         let mut sums = vec![0u64; bins * bands];
         for i in 0..n {
-            let slot = read_flat(idx_data, idx_kind, i) as usize;
+            let slot = read_bin(idx_data, idx_kind, i) as usize;
             for b in 0..bands {
-                sums[slot * bands + b] += read_flat(data, kind, i * bands + b) as u64;
+                sums[slot * bands + b] += read_value(data, kind, i * bands + b) as u64;
             }
         }
         let out_fmt = format_for(bands, SampleKind::U16)?;
@@ -631,19 +699,19 @@ impl Raster {
         let data = self.data();
         let bin_of = |v: u32| -> usize { (v as u64 * bins as u64 / range) as usize };
         for i in 0..n {
-            let bx = bin_of(read_flat(data, kind, i * bands));
+            let bx = bin_of(read_bin(data, kind, i * bands));
             let by = if bands >= 2 {
-                bin_of(read_flat(data, kind, i * bands + 1))
+                bin_of(read_bin(data, kind, i * bands + 1))
             } else {
                 0
             };
             let bz = if bands >= 3 {
-                bin_of(read_flat(data, kind, i * bands + 2))
+                bin_of(read_bin(data, kind, i * bands + 2))
             } else {
                 0
             };
             let cell = (by * out_w as usize + bx) * out_bands + bz;
-            let cur = read_flat(buf, SampleKind::U16, cell);
+            let cur = read_bin(buf, SampleKind::U16, cell);
             if cur < u16::MAX as u32 {
                 write_flat(buf, SampleKind::U16, cell, cur + 1);
             }
@@ -687,7 +755,7 @@ impl Raster {
         for b in 0..bands {
             let mut sum = 0u64;
             for i in 0..n {
-                sum += read_flat(data, kind, i * bands + b) as u64;
+                sum += read_value(data, kind, i * bands + b) as u64;
                 write_flat(buf, SampleKind::U16, i * bands + b, sat16(sum));
             }
         }
@@ -734,14 +802,14 @@ impl Raster {
         for b in 0..bands {
             let mut max = 0u32;
             for i in 0..n {
-                max = max.max(read_flat(data, kind, i * bands + b));
+                max = max.max(read_value(data, kind, i * bands + b));
             }
             if max == 0 {
                 continue;
             }
             let scale = (n - 1) as f64 / max as f64;
             for i in 0..n {
-                let v = read_flat(data, kind, i * bands + b) as f64;
+                let v = read_value(data, kind, i * bands + b) as f64;
                 write_flat(buf, out_kind, i * bands + b, (v * scale).round() as u32);
             }
         }
@@ -804,14 +872,14 @@ impl Raster {
             let mut in_cum = vec![0f64; n_in];
             let mut sum = 0u64;
             for (i, c) in in_cum.iter_mut().enumerate() {
-                sum += read_flat(data, kind, i * bands + b) as u64;
+                sum += read_value(data, kind, i * bands + b) as u64;
                 *c = sum as f64;
             }
             let in_total = sum;
             let mut ref_cum = vec![0f64; n_ref];
             let mut sum = 0u64;
             for (i, c) in ref_cum.iter_mut().enumerate() {
-                sum += read_flat(ref_data, ref_bpc, i * bands + b) as u64;
+                sum += read_value(ref_data, ref_bpc, i * bands + b) as u64;
                 *c = sum as f64;
             }
             let ref_total = sum;
@@ -872,11 +940,11 @@ impl Raster {
         }
         let kind = self.format().kind();
         let data = self.data();
-        let values: Vec<u32> = (0..n).map(|i| read_flat(data, kind, i)).collect();
+        let values: Vec<u32> = (0..n).map(|i| read_value(data, kind, i)).collect();
         // Total over the kind rather than "8-bit or not", so a carrier
         // added to `SampleKind` has to state its plot height here instead
         // of inheriting the 16-bit branch (issue #607). `F32` is
-        // unreachable in practice: `read_flat` above panics on it for any
+        // unreachable in practice: `read_value` above panics on it for any
         // non-empty histogram, and `hist_len` rejects the empty shape.
         let height = plot_height(kind, &values);
         let mut out = Raster::zeroed(n as u32, height as u32, PixelFormat::Gray8)?;
@@ -919,14 +987,14 @@ impl Raster {
         let count = n * bands;
         let mut total = 0u64;
         for i in 0..count {
-            total += read_flat(data, kind, i) as u64;
+            total += read_value(data, kind, i) as u64;
         }
         if total == 0 {
             return Ok(0.0);
         }
         let mut entropy = 0.0;
         for i in 0..count {
-            let v = read_flat(data, kind, i);
+            let v = read_value(data, kind, i);
             if v > 0 {
                 let p = v as f64 / total as f64;
                 entropy -= p * p.log2();
@@ -965,7 +1033,7 @@ impl Raster {
         for b in 0..bands {
             let mut prev = 0u32;
             for i in 0..n {
-                let v = read_flat(data, kind, i * bands + b);
+                let v = read_value(data, kind, i * bands + b);
                 if v < prev {
                     return Ok(false);
                 }
@@ -1025,7 +1093,7 @@ impl Raster {
         for b in 0..bands {
             let mut hist = vec![0u64; bins];
             for i in 0..n {
-                hist[read_flat(data, kind, i * bands + b) as usize] += 1;
+                hist[read_bin(data, kind, i * bands + b) as usize] += 1;
             }
             let mut lut = vec![0u32; bins];
             let mut cum = 0u64;
@@ -1034,7 +1102,7 @@ impl Raster {
                 *l = (cum as f64 * scale).round() as u32;
             }
             for i in 0..n {
-                let v = read_flat(data, kind, i * bands + b) as usize;
+                let v = read_bin(data, kind, i * bands + b) as usize;
                 write_flat(&mut out, kind, i * bands + b, lut[v]);
             }
         }
@@ -1096,7 +1164,7 @@ impl Raster {
         let sample = |x: i64, y: i64, b: usize| -> usize {
             let cx = x.clamp(0, iw - 1) as usize;
             let cy = y.clamp(0, ih - 1) as usize;
-            read_flat(data, kind, (cy * iw as usize + cx) * bands + b) as usize
+            read_bin(data, kind, (cy * iw as usize + cx) * bands + b) as usize
         };
         let limit = slope * area / bins as f64;
 
@@ -1176,11 +1244,21 @@ impl Raster {
     /// # Errors
     ///
     /// Returns [`HistogramError::NotAHistogram`] if `lut` is not
-    /// histogram-shaped, [`HistogramError::LutBandMismatch`] if neither
+    /// histogram-shaped, [`HistogramError::LutTooLong`] if it has more
+    /// than 65536 elements, [`HistogramError::LutBandMismatch`] if neither
     /// band-combination rule applies, or [`HistogramError::Raster`] if the
     /// result exceeds the allocation budget.
     pub fn try_maplut(&self, lut: &Raster) -> Result<Raster, HistogramError> {
         let n_lut = hist_len(lut)?;
+        // libvips refuses a longer table, and so does this: see
+        // `HistogramError::LutTooLong` for the measurement and for why the
+        // bound is load-bearing rather than cosmetic (issue #894).
+        if n_lut > MAX_LUT_LEN {
+            return Err(HistogramError::LutTooLong {
+                len: n_lut,
+                max: MAX_LUT_LEN,
+            });
+        }
         let image_bands = self.format().channels();
         let lut_bands = lut.format().channels();
         let out_bands = if image_bands == 1 {
@@ -1205,8 +1283,8 @@ impl Raster {
             for c in 0..out_bands {
                 let src_band = if image_bands == 1 { 0 } else { c };
                 let lut_band = if lut_bands == 1 { 0 } else { c };
-                let v = read_flat(data, kind, i * image_bands + src_band) as usize;
-                let entry = read_flat(lut_data, lut_bpc, v.min(n_lut - 1) * lut_bands + lut_band);
+                let v = read_bin(data, kind, i * image_bands + src_band) as usize;
+                let entry = read_value(lut_data, lut_bpc, v.min(n_lut - 1) * lut_bands + lut_band);
                 write_flat(buf, lut_bpc, i * out_bands + c, entry);
             }
         }
@@ -1265,7 +1343,7 @@ impl Raster {
         let data = self.data();
         let count = self.width() as usize * self.height() as usize * bands;
         for i in 0..count {
-            let idx = (read_flat(data, kind, i) as usize).min(values.len() - 1);
+            let idx = (read_bin(data, kind, i) as usize).min(values.len() - 1);
             write_flat(buf, out_kind, i, values[idx]);
         }
         Ok(out)
@@ -1309,7 +1387,7 @@ impl Raster {
         let data = self.data();
         let mut hist = vec![0u64; bins];
         for i in 0..count {
-            hist[read_flat(data, kind, i) as usize] += 1;
+            hist[read_bin(data, kind, i) as usize] += 1;
         }
         let target = percent / 100.0 * count as f64;
         let mut cum = 0u64;
@@ -1422,18 +1500,18 @@ mod tests {
     fn write_flat_saturates_into_the_kind() {
         let mut one = [0u8; 1];
         write_flat(&mut one, SampleKind::U8, 0, 300);
-        assert_eq!(read_flat(&one, SampleKind::U8, 0), 255);
+        assert_eq!(read_bin(&one, SampleKind::U8, 0), 255);
 
         let mut two = [0u8; 2];
         write_flat(&mut two, SampleKind::U16, 0, 70_000);
-        assert_eq!(read_flat(&two, SampleKind::U16, 0), 65_535);
+        assert_eq!(read_bin(&two, SampleKind::U16, 0), 65_535);
 
         // A value inside the kind is written through unchanged, so the
         // saturations above are a clamp and not a constant.
         write_flat(&mut one, SampleKind::U8, 0, 7);
-        assert_eq!(read_flat(&one, SampleKind::U8, 0), 7);
+        assert_eq!(read_bin(&one, SampleKind::U8, 0), 7);
         write_flat(&mut two, SampleKind::U16, 0, 4_242);
-        assert_eq!(read_flat(&two, SampleKind::U16, 0), 4_242);
+        assert_eq!(read_bin(&two, SampleKind::U16, 0), 4_242);
     }
 
     /**
@@ -1469,7 +1547,7 @@ mod tests {
                 _ => buf.copy_from_slice(&(bits as u16).to_ne_bytes()),
             }
             assert_eq!(
-                read_flat(&buf, kind, 0),
+                read_bin(&buf, kind, 0),
                 bin,
                 "{kind:?} read {bits:#x} into the wrong bin"
             );
@@ -1524,7 +1602,7 @@ mod tests {
         // bytes the module does.
         let mut two = vec![0u8; 2];
         write_flat(&mut two, SampleKind::U16, 0, 4_242);
-        assert_eq!(stored(&two), read_flat(&two, SampleKind::U16, 0));
+        assert_eq!(stored(&two), read_bin(&two, SampleKind::U16, 0));
     }
 
     /**
@@ -1590,7 +1668,7 @@ mod tests {
         ] {
             let mut buf = vec![0u8; 4];
             buf.copy_from_slice(&(stored as i32).to_ne_bytes());
-            let got = read_flat(&buf, kind, 0);
+            let got = read_bin(&buf, kind, 0);
             assert_eq!(got, index, "{kind:?} folded {stored} into the wrong bin");
             assert!(
                 (got as usize) < bins_for(kind),
@@ -1614,7 +1692,7 @@ mod tests {
             } else {
                 buf.copy_from_slice(&(bits as u16).to_ne_bytes());
             }
-            let got = read_flat(&buf, kind, 0) as usize;
+            let got = read_bin(&buf, kind, 0) as usize;
             assert!(got < bins_for(kind), "{kind:?} indexed past its table");
             assert!(
                 hist_width(kind, u32::try_from(got).unwrap()) <= bins_for(kind),
@@ -2756,5 +2834,267 @@ mod tests {
         let f1 = PixelFormat::with_kind(1, SampleKind::F32).unwrap();
         let im = Raster::zeroed(2, 2, f1).unwrap();
         let _ = im.hist_find();
+    }
+
+    // ------------------------------------------------------------------
+    // the bin read and the value read are different questions (#888)
+    // ------------------------------------------------------------------
+
+    /// A one-band `Uint32` histogram from counts.
+    fn uint_hist(counts: &[u32]) -> Raster {
+        let data: Vec<u8> = counts.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        let fmt = PixelFormat::Uint32(core::num::NonZeroU16::new(1).unwrap());
+        Raster::new(counts.len() as u32, 1, fmt, data).unwrap()
+    }
+
+    /**
+     * Tests that the bin read folds a 32-bit sample into the 16-bit table
+     * and the value read does not, which is the whole of issue #888: one
+     * function answered both questions and only one of the answers was
+     * right.
+     * Works by reading the same bytes through both, for a sample that is
+     * above 65535 and one that is below it. The below case is the control:
+     * the two readers must agree there, or the split would be about
+     * something other than the fold.
+     * Input: a `U32` sample of 90000 -> bin 65535, value 90000; a `U32`
+     * sample of 1234 -> bin 1234, value 1234.
+     */
+    #[test]
+    fn the_bin_read_folds_and_the_value_read_does_not() {
+        let big = 90_000u32.to_ne_bytes();
+        assert_eq!(read_bin(&big, SampleKind::U32, 0), 65535);
+        assert_eq!(read_value(&big, SampleKind::U32, 0), 90_000);
+
+        // Control: below the fold the two readers agree, so the difference
+        // above it is the fold and not a stride or an endianness bug.
+        let small = 1234u32.to_ne_bytes();
+        assert_eq!(read_bin(&small, SampleKind::U32, 0), 1234);
+        assert_eq!(read_value(&small, SampleKind::U32, 0), 1234);
+
+        // And they agree on every carrier that cannot reach the fold.
+        assert_eq!(read_bin(&[200], SampleKind::U8, 0), 200);
+        assert_eq!(read_value(&[200], SampleKind::U8, 0), 200);
+        let u16b = 40_000u16.to_ne_bytes();
+        assert_eq!(read_bin(&u16b, SampleKind::U16, 0), 40_000);
+        assert_eq!(read_value(&u16b, SampleKind::U16, 0), 40_000);
+    }
+
+    /**
+     * Tests that an op reading a histogram's own counts sees them whole,
+     * end to end, rather than folded at 65535.
+     * Works through `hist_entropy`, which is the clean vehicle here: it
+     * returns an `f64` computed from the counts, so nothing downstream can
+     * mask a folded read the way a 16-bit output would. Pinned to
+     * `/opt/homebrew/bin/vips` 8.18.6, where `vips hist_entropy` on a
+     * `uint` histogram holding `[100000, 300000]` answers **0.811278**.
+     * That number is independently checkable rather than merely copied: it
+     * is the entropy of a 1:3 split,
+     * `0.25*log2(4) + 0.75*log2(4/3)` = 0.8113, and the `[1, 3]` control
+     * below has the same distribution and must give the same answer.
+     * Folding both counts into 65535 makes the split 1:1 and the answer
+     * 1.0, which is what this catches.
+     * Input: Uint32 [100000, 300000] -> 0.811278; Gray16 [1, 3] -> the
+     * same; Uint32 [65535, 65535] -> 1.0.
+     */
+    #[test]
+    fn an_op_reading_counts_sees_them_above_65535() {
+        let entropy = uint_hist(&[100_000, 300_000]).try_hist_entropy().unwrap();
+        assert!(
+            (entropy - 0.811_278).abs() < 1e-5,
+            "hist_entropy on a uint histogram of [100000, 300000] gave {entropy}, \
+             vips gives 0.811278; 1.0 means the counts were folded at 65535"
+        );
+
+        // Control: the same distribution at counts no fold can touch.
+        let small = Raster::new(
+            2,
+            1,
+            PixelFormat::Gray16,
+            [1u16, 3].iter().flat_map(|v| v.to_ne_bytes()).collect(),
+        )
+        .unwrap();
+        let small_entropy = small.try_hist_entropy().unwrap();
+        assert!(
+            (small_entropy - entropy).abs() < 1e-9,
+            "the same 1:3 split gave {small_entropy} at small counts and {entropy} at large"
+        );
+
+        // And the value the folded read would have produced, so the
+        // assertion above is not passing because every input gives 0.81.
+        let even = uint_hist(&[65535, 65535]).try_hist_entropy().unwrap();
+        assert!(
+            (even - 1.0).abs() < 1e-9,
+            "an even split must be 1 bit, got {even}"
+        );
+    }
+
+    /**
+     * Tests the three functions that read *both* a bin index and a value,
+     * a few lines apart, which are the sites a sweep is most likely to
+     * convert wrongly: `maplut` reads an index into the LUT and then an
+     * entry out of it, `hist_find_indexed` reads a slot from the index
+     * image and a value from the value image, and `hist_entropy` reads a
+     * bin in its counting pass and counts in its entropy pass.
+     * Works by giving each one an input where the two reads want different
+     * answers: a LUT whose entries are above 65535 and whose indexes are
+     * not, and a value image whose samples are above 65535 under an index
+     * image whose slots are small.
+     * Input: maplut over a `Uint32` LUT holding 90000 -> 90000, not 65535;
+     * hist_find_indexed with a `uint` index sample of 90000 -> a 65536-bin
+     * result, the slot still folded.
+     */
+    #[test]
+    fn the_both_sides_sites_read_each_half_the_right_way() {
+        let n1 = core::num::NonZeroU16::new(1).unwrap();
+        let u32fmt = PixelFormat::Uint32(n1);
+
+        // maplut: the index is a small `Gray8` sample, the entry is a
+        // `Uint32` count above the fold.
+        let image = Raster::new(2, 1, PixelFormat::Gray8, vec![0, 1]).unwrap();
+        let lut = uint_hist(&[90_000, 7]);
+        let mapped = image.try_maplut(&lut).unwrap();
+        assert_eq!(mapped.format(), u32fmt);
+        let d = mapped.data();
+        assert_eq!(
+            u32::from_ne_bytes([d[0], d[1], d[2], d[3]]),
+            90_000,
+            "the LUT entry came back folded, so the entry read is the bin read"
+        );
+        assert_eq!(u32::from_ne_bytes([d[4], d[5], d[6], d[7]]), 7);
+
+        // hist_find_indexed reads a slot from the index image and a value
+        // from the value image. Only the slot half is assertable here: the
+        // sums still go out through a 16-bit sample, so a folded value read
+        // and an unfolded one both come back 65535 and no assertion can
+        // tell them apart. That half is **NO TEST REDDENS** until issue
+        // #887 moves the output off 16 bits.
+        //
+        // The slot half is assertable, and it must keep folding: a `uint`
+        // index sample of 90000 has to bin at 65535, so the histogram comes
+        // out 65536 wide rather than 90001 wide.
+        let values = Raster::new(2, 1, PixelFormat::Gray8, vec![10, 20]).unwrap();
+        let index = uint_hist(&[90_000, 0]);
+        let summed = values.try_hist_find_indexed(&index).unwrap();
+        assert_eq!(
+            summed.width(),
+            65536,
+            "the slot read stopped folding, so a 32-bit index would size a \
+             90001-bin table"
+        );
+        let d = summed.data();
+        assert_eq!(
+            u16::from_ne_bytes([d[0], d[1]]),
+            20,
+            "bin 0 holds the second pixel"
+        );
+        let last = (65535usize) * 2;
+        assert_eq!(
+            u16::from_ne_bytes([d[last], d[last + 1]]),
+            10,
+            "the folded slot put the first pixel in the last bin"
+        );
+    }
+
+    /**
+     * Tests that an op whose whole answer is a comparison between counts
+     * sees them unfolded, which is the second vehicle for issue #888 and
+     * the one where the answer is a single bit rather than a number.
+     * Works through `hist_ismonotonic` on a `Uint32` histogram whose two
+     * counts straddle 65535: unfolded it is `[70000, 66000]` and strictly
+     * decreasing, folded it is `[65535, 65535]` and non-decreasing, so the
+     * fold flips the answer outright. The `Gray16` control is the same
+     * shape at counts no fold can reach.
+     * Input: Uint32 [70000, 66000] -> false; Uint32 [66000, 70000] ->
+     * true; Gray16 [700, 660] -> false.
+     *
+     * Deliberately **not** pinned to vips here, and that is the finding
+     * rather than a gap: on 8.18.6 `vips hist_ismonotonic` on a `uint`
+     * histogram answers TRUE for `[70000, 65000]`, TRUE for
+     * `[400000, 300000, 200000, 100000]` and FALSE for
+     * `[100000, 100000, 100000, 99999]`, so it calls two strictly
+     * decreasing sequences monotonic while catching a decrease of one. I
+     * tested and refuted "it folds into ushort" (that predicts FALSE for
+     * the first) and "the convolution output wraps unsigned" (that
+     * predicts TRUE for the third). Matching an oracle that contradicts
+     * itself is not parity, so this asserts the correct answer.
+     */
+    #[test]
+    fn a_count_comparison_sees_counts_above_65535() {
+        assert!(
+            !uint_hist(&[70_000, 66_000]).try_hist_ismonotonic().unwrap(),
+            "a strictly decreasing histogram is not monotonic; folding both \
+             counts into 65535 makes it look flat"
+        );
+        assert!(uint_hist(&[66_000, 70_000]).try_hist_ismonotonic().unwrap());
+
+        // Control: the same shape at counts the fold cannot reach, so the
+        // assertion above is about the fold and not about the op.
+        let small = |a: u16, b: u16| {
+            Raster::new(
+                2,
+                1,
+                PixelFormat::Gray16,
+                [a, b].iter().flat_map(|v| v.to_ne_bytes()).collect(),
+            )
+            .unwrap()
+        };
+        assert!(!small(700, 660).try_hist_ismonotonic().unwrap());
+        assert!(small(660, 700).try_hist_ismonotonic().unwrap());
+    }
+
+    /**
+     * Tests that `hist_plot`'s height comes from the count it was given
+     * rather than from a folded one, the third vehicle for issue #888.
+     * Works by plotting a `Uint32` histogram whose largest count is far
+     * above 65535 and asserting the row count, which is the plot's whole
+     * geometry: a folded read would cap it at 65535. Pinned to
+     * `/opt/homebrew/bin/vips` 8.18.6, where `vips hist_plot` on a `uint`
+     * histogram of `[100000, 300000]` gives a **300000**-row image, and
+     * `[1, 3]` gives 3.
+     * Input: Uint32 [100, 300] -> 300 rows (the cheap control); Uint32
+     * [100000, 300000] -> 300000 rows.
+     */
+    #[test]
+    fn hist_plot_takes_its_height_from_the_unfolded_count() {
+        // Control first, at a size a fold cannot touch, so a failure below
+        // is about the fold rather than about the height rule.
+        let small = uint_hist(&[100, 300]).try_hist_plot().unwrap();
+        assert_eq!(small.height(), 300);
+        assert_eq!(small.width(), 2);
+
+        let big = uint_hist(&[100_000, 300_000]).try_hist_plot().unwrap();
+        assert_eq!(
+            big.height(),
+            300_000,
+            "the plot height folded at 65535; vips gives 300000 rows here"
+        );
+    }
+
+    /**
+     * Tests that `maplut` refuses a lookup table longer than libvips
+     * accepts (issue #894), and that the bound is what makes the index
+     * read's fold provably harmless rather than accidentally harmless.
+     * Works by handing it a 65537-element table and asserting the typed
+     * refusal, with a 65536-element one as the control that the bound is
+     * inclusive and not off by one.
+     * Input: a 65537-element LUT -> Err(LutTooLong); a 65536-element one ->
+     * Ok. Measured: `vips maplut` with a 70000-element table answers
+     * "histograms must have not have more than 65536 elements".
+     */
+    #[test]
+    fn maplut_refuses_a_lut_longer_than_vips_accepts() {
+        let image = Raster::new(1, 1, PixelFormat::Gray8, vec![0]).unwrap();
+        let lut = |n: u32| Raster::zeroed(n, 1, PixelFormat::Gray8).unwrap();
+        assert!(matches!(
+            image.try_maplut(&lut(65_537)),
+            Err(HistogramError::LutTooLong {
+                len: 65_537,
+                max: 65_536
+            })
+        ));
+        // Control: the bound is inclusive, so the largest legal table is
+        // still accepted and the refusal is not simply "any large LUT".
+        assert!(image.try_maplut(&lut(65_536)).is_ok());
+        assert!(image.try_maplut(&lut(256)).is_ok());
     }
 }
