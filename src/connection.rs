@@ -696,6 +696,45 @@ mod tests {
         }
     }
 
+    /// `"hdr"` is a live row in the shared format dispatch and it reaches the
+    /// Radiance writer (issue #880).
+    ///
+    /// One spelling, measured: `radsave`'s entry in `vips -l` on the pinned
+    /// 8.18.6 reads `nocache (.hdr)`, and `vips copy base.v x.rad`, `x.rgbe`
+    /// and `x.pic` are each refused with "is not a known file format". Those
+    /// three are the positive control below. `.pic` is in there because #506's
+    /// own title says `.hdr/.pic`; it is a load spelling elsewhere and not one
+    /// `radsave` registers.
+    ///
+    /// The bytes are compared against [`Raster::encode_radiance`] at the
+    /// defaults and their magic checked, so "reaches the writer" means a
+    /// Radiance file and not merely some bytes.
+    #[test]
+    fn encode_for_format_routes_hdr_to_the_radiance_writer() {
+        let raster = scrgb_ramp(8, 6);
+        let direct = raster
+            .encode_radiance(crate::radiance::SaveOptions::default())
+            .expect("a 3-band f32 raster encodes");
+        assert!(direct.starts_with(b"#?RADIANCE"));
+
+        for spelling in ["hdr", "HDR", ".hdr", " Hdr "] {
+            let bytes = raster
+                .encode_to_buffer(spelling)
+                .unwrap_or_else(|e| panic!("{spelling:?} must be a live row, got {e}"));
+            assert_eq!(bytes, direct, "{spelling:?} must write the same file");
+        }
+
+        for miss in ["rad", "rgbe", "pic", "radiance"] {
+            assert!(
+                matches!(
+                    raster.encode_to_buffer(miss),
+                    Err(EncodeError::Unsupported { .. })
+                ),
+                "{miss:?} is not a name radsave answers to either"
+            );
+        }
+    }
+
     /// The `"uhdr"` row answers a raster it cannot write with
     /// [`EncodeError::InvalidParameter`] naming the input, not with
     /// [`EncodeError::Unsupported`] naming the format (issue #809).
