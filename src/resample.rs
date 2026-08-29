@@ -7224,4 +7224,62 @@ mod tests {
         assert_eq!((out.width(), out.height()), (6, 6), "affine 1.5 of a 4x4");
         assert_close(&float_samples(&out), &want, "affine 1.5 bilinear");
     }
+
+    /**
+     * Tests that `resize` carries the unsigned 32-bit carrier through the
+     * reduce kernels at the right stride, and pins where the answer sits
+     * relative to vips.
+     * Works against `/opt/homebrew/bin/vips` 8.18.6 on a 4x4 `uint` ramp
+     * of 100000, 101000, ...: `vips resize 0.5` answers **102360** and
+     * **104416**, and this answers 102359 and 104415. The extra
+     * measurement is what says which is right. Casting the same image to
+     * FLOAT and DOUBLE and resizing gives vips **102358.62** and
+     * **104415.17**, so the exact result rounds to 102359 and 104415 and
+     * vips's integer answer is its own 12-bit mask error, the divergence
+     * `reduce_preserves_a_constant_where_the_vips_short_mask_does_not`
+     * already pins on the narrower carriers. The uniform case is the one
+     * that catches a stride bug on its own: 90000 came back as **144**
+     * before this.
+     * Input: 4x4 uint ramp -> 102359, 104415; 4x4 uint all 90000 -> 90000.
+     */
+    #[test]
+    fn resize_carries_the_uint_carrier() {
+        let n = core::num::NonZeroU16::new(1).unwrap();
+        let fmt = PixelFormat::Uint32(n);
+        let mk = |vals: &[u32]| {
+            let data: Vec<u8> = vals.iter().flat_map(|v| v.to_ne_bytes()).collect();
+            Raster::new(4, 4, fmt, data).unwrap()
+        };
+        let at = |r: &Raster, i: usize| {
+            let d = r.data();
+            u32::from_ne_bytes([d[i * 4], d[i * 4 + 1], d[i * 4 + 2], d[i * 4 + 3]])
+        };
+        let vals: Vec<u32> = (0..16).map(|i| 100_000 + i * 1000).collect();
+        let out = mk(&vals).try_resize(0.5).unwrap();
+        assert_eq!(out.format(), fmt);
+        assert_eq!((at(&out, 0), at(&out, 1)), (102_359, 104_415));
+
+        // A constant image has to come back constant, whatever the kernel:
+        // this is the assertion a dropped stride fails, because the halves
+        // of a `u32` sample are not the sample.
+        let flat = mk(&[90_000; 16]).try_resize(0.5).unwrap();
+        assert_eq!(at(&flat, 0), 90_000);
+        assert_eq!(at(&flat, 1), 90_000);
+
+        // Control: the same call on the 16-bit carrier still matches vips
+        // exactly, `vips resize 0.5` on the analogous ramp giving 10236
+        // and 10442, so the uint row above is not a kernel that changed.
+        let vals16: Vec<u16> = (0..16).map(|i| 10_000 + i * 100).collect();
+        let data: Vec<u8> = vals16.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        let r16 = Raster::new(4, 4, PixelFormat::Gray16, data).unwrap();
+        let o16 = r16.try_resize(0.5).unwrap();
+        let d = o16.data();
+        assert_eq!(
+            (
+                u16::from_ne_bytes([d[0], d[1]]),
+                u16::from_ne_bytes([d[2], d[3]])
+            ),
+            (10_236, 10_442)
+        );
+    }
 }

@@ -834,4 +834,38 @@ mod tests {
         let from_png = crate::source::decode_file(&png).unwrap();
         assert_eq!(from_png.data(), im.data());
     }
+
+    /**
+     * Tests that the 8/16-bit container encoders refuse the unsigned
+     * 32-bit carrier with a typed error naming it, rather than narrowing
+     * it behind the caller's back or reading it as float.
+     * Works by encoding a `Uint32` raster to PNG and asserting the error
+     * text names the carrier, with the float refusal beside it as the
+     * control that the two carriers get distinct messages even though they
+     * share a byte width.
+     * Input: Uint32(1) -> Err naming "32-bit unsigned"; FloatF32(1) -> Err
+     * naming "float".
+     */
+    #[test]
+    fn the_encoders_refuse_the_uint_carrier_by_name() {
+        let n = |v: u16| core::num::NonZeroU16::new(v).unwrap();
+        let u = Raster::zeroed(2, 2, PixelFormat::Uint32(n(1))).unwrap();
+        let err = u
+            .encode_png(6)
+            .expect_err("a uint raster has no PNG colour type");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("32-bit unsigned") && msg.contains("Uint32"),
+            "the refusal does not name the carrier: {msg}"
+        );
+        // Control: the float carrier of the same width gets its own
+        // message, so a caller can tell which one they handed over.
+        let f = Raster::zeroed(2, 2, PixelFormat::FloatF32(n(1))).unwrap();
+        let fmsg = f
+            .encode_png(6)
+            .expect_err("a float raster has no PNG colour type")
+            .to_string();
+        assert!(fmsg.contains("float"), "{fmsg}");
+        assert_ne!(msg, fmsg);
+    }
 }

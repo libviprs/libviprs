@@ -4032,4 +4032,33 @@ mod tests {
              occurrence plus the WriteNew holder; retained {large}"
         );
     }
+
+    /**
+     * Tests that the tile sinks refuse the unsigned 32-bit carrier with a
+     * typed error naming it, the way they already refuse the float and
+     * multiband compute intermediates.
+     * Works by asking the shared colour-type resolver for a `Uint32`
+     * raster and asserting the message, with the float carrier of the same
+     * byte width beside it so the two cannot be one message.
+     * Input: Uint32(1) -> Err naming "32-bit unsigned"; FloatF32(1) -> Err
+     * naming "float".
+     */
+    #[test]
+    fn the_tile_sinks_refuse_the_uint_carrier_by_name() {
+        let n = |v: u16| core::num::NonZeroU16::new(v).unwrap();
+        let u = crate::pixel::PixelFormat::Uint32(n(1));
+        let msg = color_type_for_format(u)
+            .expect_err("a uint raster is not an image tile")
+            .to_string();
+        assert!(
+            msg.contains("32-bit unsigned") && msg.contains("Uint32"),
+            "the refusal does not name the carrier: {msg}"
+        );
+        let f = crate::pixel::PixelFormat::FloatF32(n(1));
+        let fmsg = color_type_for_format(f)
+            .expect_err("a float raster is not an image tile")
+            .to_string();
+        assert!(fmsg.contains("float"), "{fmsg}");
+        assert_ne!(msg, fmsg);
+    }
 }

@@ -1348,14 +1348,121 @@ mod tests {
         assert_eq!(folded2.width(), mono.width() / 2);
     }
 
-    /// The band ops reject float rasters loudly instead of misreading
-    /// their bytes as u16 pairs (float band maths lands with a later
-    /// batch; cast to an unsigned format first).
+    /// The band ops reject a sample kind they cannot read instead of
+    /// misreading its bytes as `u16` pairs (float band maths lands with a
+    /// later batch; cast to an unsigned format first). The panicking
+    /// surface still panics, and the message now names the kind it was
+    /// handed: it used to say "float rasters" for anything four bytes
+    /// wide, which is the wrong carrier as soon as the unsigned 32-bit one
+    /// exists (issue #517).
     #[test]
-    #[should_panic(expected = "do not support float rasters")]
+    #[should_panic(expected = "does not support F32 samples")]
     fn bands_float_panics() {
         let f1 = PixelFormat::with_channels(1, 4).unwrap();
         let im = Raster::zeroed(2, 2, f1).unwrap();
         let _ = im.bandjoin_const(255.0);
+    }
+
+    // ------------------------------------------------------------------
+    // the unsigned 32-bit carrier (issue #517)
+    // ------------------------------------------------------------------
+
+    /// A one-band `Uint32` raster from sample values.
+    fn uint32(w: u32, h: u32, vals: &[u32]) -> Raster {
+        let data: Vec<u8> = vals.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        let fmt = PixelFormat::Uint32(core::num::NonZeroU16::new(1).unwrap());
+        Raster::new(w, h, fmt, data).unwrap()
+    }
+
+    fn u32_at(r: &Raster, i: usize) -> u32 {
+        let d = r.data();
+        u32::from_ne_bytes([d[i * 4], d[i * 4 + 1], d[i * 4 + 2], d[i * 4 + 3]])
+    }
+
+    /**
+     * Tests that the band ops carry the unsigned 32-bit carrier and keep a
+     * value no 16-bit carrier holds, and that the output format comes off
+     * the kind rather than the byte width.
+     * Works by joining two `uint` rasters and taking their band mean,
+     * against `/opt/homebrew/bin/vips` 8.18.6: `vips bandmean` on a
+     * two-band `uint` image holding (90000, 128) answers **45064**, which
+     * is `(90000 + 128) / 2`, and the output stays UINT. The mixed
+     * 8-with-uint join is the case the byte width gets wrong: four bytes
+     * names the float carrier.
+     * Input: bandjoin(uint 90000, uint 128) -> Uint32(2); bandmean of it
+     * -> 45064; bandjoin(u8, uint) -> Uint32(2).
+     */
+    #[test]
+    fn band_ops_carry_the_uint_carrier() {
+        let n = |v: u16| core::num::NonZeroU16::new(v).unwrap();
+        let a = uint32(1, 1, &[90_000]);
+        let b = uint32(1, 1, &[128]);
+        let joined = a.try_bandjoin(&b).unwrap();
+        assert_eq!(joined.format(), PixelFormat::Uint32(n(2)));
+        assert_eq!(u32_at(&joined, 0), 90_000);
+        assert_eq!(u32_at(&joined, 1), 128);
+
+        let mean = joined.try_bandmean().unwrap();
+        assert_eq!(mean.format(), PixelFormat::Uint32(n(1)));
+        assert_eq!(u32_at(&mean, 0), 45_064);
+
+        // The promotion the byte width cannot express.
+        let mixed = gray2x1()
+            .try_bandjoin(&uint32(2, 1, &[90_000, 90_000]))
+            .unwrap();
+        assert_eq!(mixed.format(), PixelFormat::Uint32(n(2)));
+        assert_eq!(u32_at(&mixed, 0), 7);
+        assert_eq!(u32_at(&mixed, 1), 90_000);
+
+        // A band extract is a byte copy, so it has to keep the carrier too.
+        let one = joined.try_extract_band(1).unwrap();
+        assert_eq!(one.format(), PixelFormat::Uint32(n(1)));
+        assert_eq!(u32_at(&one, 0), 128);
+
+        // Control: the 8-with-16 promotion that existed before.
+        let old = gray2x1().try_bandjoin(&gray2x1()).unwrap();
+        assert_eq!(old.format().bytes_per_channel(), 1);
+    }
+
+    /**
+     * Tests that a band op handed a sample kind it cannot read answers a
+     * typed error rather than panicking out of a `Result`, the shape issue
+     * #694 landed, and that the message names the kind it was given rather
+     * than claiming the raster is float.
+     * Works by handing a float raster to three band ops, with the uint
+     * carrier as the positive control that the guard is about the kind.
+     * Input: float -> Err(UnsupportedSampleKind { kind: F32 }); uint -> Ok.
+     */
+    #[test]
+    fn band_ops_refuse_a_kind_they_cannot_read() {
+        let n = |v: u16| core::num::NonZeroU16::new(v).unwrap();
+        let f = Raster::new(
+            1,
+            1,
+            PixelFormat::FloatF32(n(1)),
+            1.5f32.to_ne_bytes().to_vec(),
+        )
+        .unwrap();
+        for got in [f.try_bandmean(), f.try_bandand(), f.try_bandjoin(&f)] {
+            assert!(
+                matches!(
+                    got,
+                    Err(BandError::UnsupportedSampleKind {
+                        kind: SampleKind::F32,
+                        ..
+                    })
+                ),
+                "a float raster gave {got:?}"
+            );
+        }
+        assert_eq!(
+            f.try_bandmean().unwrap_err().to_string(),
+            "bandmean does not support F32 samples yet"
+        );
+        // Positive control: the uint carrier passes all three.
+        let u = uint32(1, 1, &[90_000]);
+        assert!(u.try_bandmean().is_ok());
+        assert!(u.try_bandand().is_ok());
+        assert!(u.try_bandjoin(&u).is_ok());
     }
 }
