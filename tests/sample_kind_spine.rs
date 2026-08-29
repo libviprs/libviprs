@@ -26,8 +26,14 @@
 //!
 //! # Why there is a countdown rather than a flat zero, for now
 //!
-//! Two code sites are left on `main` and neither is in a file this lane owns.
-//! They are named in [`REMAINING`] with the lane that clears each. The
+//! One code site is left on `main` and it is not in a file this lane owns.
+//! `src/conversion.rs`'s went with the carriers lane, and it went by being
+//! *deleted* rather than converted: the site was `addalpha`'s
+//! `bytes_per_channel() == 1` alpha ceiling, and issue #861's fix replaced
+//! the width rule with the interpretation's max alpha, so there is no
+//! comparison left to key on.
+//!
+//! It is named in [`REMAINING`] with the lane that clears it. The
 //! assertion is set equality in both directions, the way
 //! `tests/ci_feature_coverage.rs` holds the `Makefile` and the CI table
 //! together: a new site anywhere fails, and an entry here that has already been
@@ -39,8 +45,6 @@
 /// Shrink this, never grow it. An entry whose site is gone fails the test, so
 /// clearing a site means deleting its line here in the same PR.
 const REMAINING: &[(&str, &str)] = &[
-    // The carriers lane, #517. Already clear on its own branch.
-    ("src/conversion.rs", "carriers (#517)"),
     // The JPEG 2000 lane. Arrived after #748's census was taken, which is the
     // argument for landing this gate rather than finishing the sweep and
     // trusting review.
