@@ -31,43 +31,91 @@ pub fn downscale_half(src: &Raster) -> Result<Raster, RasterError> {
     }
 }
 
-/// Read one sample at byte offset `off` as a `u32`, honouring the sample
+/// Read one sample at byte offset `off` as an `i64`, honouring the sample
 /// kind.
 ///
 /// Keyed on the kind rather than on `bytes_per_channel() == 1`, whose
 /// `else` branch reads two bytes whatever the carrier actually is. That
 /// branch used to take a `uint` raster at half stride and average the
 /// halves: a uniform 90000 image downscaled to 24464 instead of 90000
-/// (issues #517, #607). The float kinds do not reach here, because the
-/// entry points refuse them before the kernel runs.
+/// (issues #517, #607).
+///
+/// `i64` and total over [`SampleKind`], the shape
+/// [`crate::convolution`]'s `put_sample` has carried since #748. Before
+/// issue #909 this returned `u32` and panicked on the three signed
+/// carriers of #516, which a `Result`-returning entry point could reach:
+/// [`downscale_half`] only refuses a float raster, so a `char` pyramid
+/// level panicked out of a fallible call. `F32` still cannot arrive,
+/// because both entry points refuse it, and the arm answers the
+/// `vips_cast` truncation rather than a panic so that stays a fact about
+/// the callers rather than a landmine inside the kernel.
 #[inline]
-fn sample_at(data: &[u8], kind: SampleKind, off: usize) -> u32 {
+fn sample_at(data: &[u8], kind: SampleKind, off: usize) -> i64 {
     match kind {
-        SampleKind::U8 => u32::from(data[off]),
-        SampleKind::U16 => u32::from(u16::from_ne_bytes([data[off], data[off + 1]])),
-        SampleKind::U32 => {
-            u32::from_ne_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]])
+        SampleKind::U8 => i64::from(data[off]),
+        SampleKind::I8 => i64::from(data[off] as i8),
+        SampleKind::U16 => i64::from(u16::from_ne_bytes([data[off], data[off + 1]])),
+        SampleKind::I16 => i64::from(i16::from_ne_bytes([data[off], data[off + 1]])),
+        SampleKind::U32 => i64::from(u32::from_ne_bytes([
+            data[off],
+            data[off + 1],
+            data[off + 2],
+            data[off + 3],
+        ])),
+        SampleKind::I32 => i64::from(i32::from_ne_bytes([
+            data[off],
+            data[off + 1],
+            data[off + 2],
+            data[off + 3],
+        ])),
+        SampleKind::F32 => {
+            f32::from_ne_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]) as i64
         }
-        SampleKind::I8 | SampleKind::I16 | SampleKind::I32 | SampleKind::F32 => panic!(
-            "the box-filter kernels do not support {kind:?} samples; \
-             the entry points must refuse them first"
-        ),
     }
 }
 
 /// Write `v` as one sample at byte offset `off`; the counterpart of
 /// [`sample_at`].
+///
+/// A store and not a cast: every caller has already divided a sum of
+/// samples of this kind by their count, so the result is inside the
+/// carrier's range and narrowing cannot clip.
 #[inline]
-fn put_sample(data: &mut [u8], kind: SampleKind, off: usize, v: u32) {
+fn put_sample(data: &mut [u8], kind: SampleKind, off: usize, v: i64) {
     match kind {
         SampleKind::U8 => data[off] = v as u8,
+        SampleKind::I8 => data[off] = v as i8 as u8,
         SampleKind::U16 => data[off..off + 2].copy_from_slice(&(v as u16).to_ne_bytes()),
-        SampleKind::U32 => data[off..off + 4].copy_from_slice(&v.to_ne_bytes()),
-        SampleKind::I8 | SampleKind::I16 | SampleKind::I32 | SampleKind::F32 => panic!(
-            "the box-filter kernels do not support {kind:?} samples; \
-             the entry points must refuse them first"
-        ),
+        SampleKind::I16 => data[off..off + 2].copy_from_slice(&(v as i16).to_ne_bytes()),
+        SampleKind::U32 => data[off..off + 4].copy_from_slice(&(v as u32).to_ne_bytes()),
+        SampleKind::I32 => data[off..off + 4].copy_from_slice(&(v as i32).to_ne_bytes()),
+        SampleKind::F32 => data[off..off + 4].copy_from_slice(&(v as f32).to_ne_bytes()),
     }
+}
+
+/// The rounding both kernels close every average with: add half the divisor
+/// and **floor**.
+///
+/// On a non-negative sum this is the round-half-up these kernels have always
+/// done, and `div_euclid` and `/` agree there. They part on a negative one,
+/// and the floor is the measured answer rather than the convenient one:
+/// libvips spells `SHRINK_TYPE_MEAN_INT` as `(tot + 2) >> 2`, an arithmetic
+/// shift on a signed `int`, so it floors. Measured on
+/// `/opt/homebrew/bin/vips` 8.18.6 by building a `--pyramid` TIFF from a
+/// 512x512 `char` raster of repeating 2x2 blocks and reading level 1:
+///
+/// | block | sum | exact | vips |
+/// |---|---|---|---|
+/// | `-100, -101, -100, -101` | -402 | -100.5 | **-100** |
+/// | `-1, -2, -1, -1` | -5 | -1.25 | **-1** |
+/// | `-1, -1, -2, -2` | -6 | -1.5 | **-1** |
+/// | `100, 101, 100, 101` | 402 | 100.5 | **101** |
+///
+/// The second row is the one that decides it: truncating toward zero
+/// answers **0** there and vips answers -1 (issue #909).
+#[inline]
+fn mean_round(sum: i64, count: i64) -> i64 {
+    (sum + count / 2).div_euclid(count)
 }
 
 /// Downscale without alpha — all channels averaged uniformly.
@@ -96,20 +144,19 @@ fn downscale_half_noalpha(src: &Raster) -> Result<Raster, RasterError> {
             let dst_offset = (dy as usize * dst_w as usize + dx as usize) * bpp;
 
             for c in 0..channels {
-                // `u64`, because four `u32` samples do not fit a `u32` sum.
-                let mut sum: u64 = 0;
-                let count = u64::from(x_count * y_count);
+                // `i64`, because four four-byte samples do not fit one.
+                let mut sum: i64 = 0;
+                let count = i64::from(x_count * y_count);
 
                 for oy in 0..y_count {
                     for ox in 0..x_count {
                         let src_offset =
                             (sy + oy) as usize * src_stride + (sx + ox) as usize * bpp + c * bpc;
-                        sum += u64::from(sample_at(src_data, kind, src_offset));
+                        sum += sample_at(src_data, kind, src_offset);
                     }
                 }
 
-                let avg = (sum + count / 2) / count;
-                put_sample(&mut dst, kind, dst_offset + c * bpc, avg as u32);
+                put_sample(&mut dst, kind, dst_offset + c * bpc, mean_round(sum, count));
             }
         }
     }
@@ -173,8 +220,8 @@ fn downscale_half_alpha(src: &Raster) -> Result<Raster, RasterError> {
 
             let dst_offset = (dy as usize * dst_w as usize + dx as usize) * bpp;
 
-            // Read a single unsigned sample as `u64`, honouring the kind.
-            let read = |off: usize| -> u64 { u64::from(sample_at(src_data, kind, off)) };
+            // Read a single sample, honouring the kind.
+            let read = |off: usize| -> i64 { sample_at(src_data, kind, off) };
 
             // Accumulate the alpha-weighted colour sums and the total alpha over
             // the (up-to) 2x2 source block in `u64`, mirroring `downscale_to`:
@@ -183,18 +230,18 @@ fn downscale_half_alpha(src: &Raster) -> Result<Raster, RasterError> {
             // pixels cannot bleed into opaque neighbours. All sums stay integer so
             // this path and `downscale_to` produce bit-identical output for the
             // same block.
-            let mut alpha_sum: u64 = 0;
-            // `u128` for the products: four `u32` alphas times four `u32`
-            // colours overflow a `u64` sum, and the whole point of this
-            // kernel is that it stays exact in integers.
-            let mut weighted = [0u128; 4];
+            let mut alpha_sum: i64 = 0;
+            // `i128` for the products: four four-byte alphas times four
+            // four-byte colours overflow an `i64` sum, and the whole point
+            // of this kernel is that it stays exact in integers.
+            let mut weighted = [0i128; 4];
             for oy in 0..y_count {
                 for ox in 0..x_count {
                     let off = (sy + oy) as usize * src_stride + (sx + ox) as usize * bpp;
                     let a = read(off + alpha_idx * bpc);
                     alpha_sum += a;
                     for (c, w) in weighted[..alpha_idx].iter_mut().enumerate() {
-                        *w += u128::from(a) * u128::from(read(off + c * bpc));
+                        *w += i128::from(a) * i128::from(read(off + c * bpc));
                     }
                 }
             }
@@ -209,21 +256,15 @@ fn downscale_half_alpha(src: &Raster) -> Result<Raster, RasterError> {
             // (matches the `downscale_to` fix, not a truncating C double→int cast),
             // so a fully-opaque RGBA image downscales bit-identically to its RGB
             // twin instead of carrying a systematic -0.5 LSB bias.
-            let alpha_sum128 = u128::from(alpha_sum);
+            let alpha_sum128 = i128::from(alpha_sum);
             for (c, &w) in weighted[..alpha_idx].iter().enumerate() {
-                let result = (w + alpha_sum128 / 2) / alpha_sum128;
-                put_sample(&mut dst, kind, dst_offset + c * bpc, result as u32);
+                let result = (w + alpha_sum128 / 2).div_euclid(alpha_sum128);
+                put_sample(&mut dst, kind, dst_offset + c * bpc, result as i64);
             }
 
-            // Alpha band: simple average, round-half-up like the no-alpha branch
-            // (`(alpha_sum + count / 2) / count`).
-            let avg_alpha = (alpha_sum + count as u64 / 2) / count as u64;
-            put_sample(
-                &mut dst,
-                kind,
-                dst_offset + alpha_idx * bpc,
-                avg_alpha as u32,
-            );
+            // Alpha band: simple average, round-half-up like the no-alpha branch.
+            let avg_alpha = mean_round(alpha_sum, i64::from(count));
+            put_sample(&mut dst, kind, dst_offset + alpha_idx * bpc, avg_alpha);
         }
     }
 
@@ -332,7 +373,7 @@ pub fn downscale_to(src: &Raster, dst_w: u32, dst_h: u32) -> Result<Raster, Rast
     let alpha_idx = if has_alpha { channels - 1 } else { 0 };
     // `u128`, for the reason `downscale_half_alpha` uses it: an alpha
     // times a colour on the 32-bit carrier does not fit a `u64` sum.
-    let mut weighted = vec![0u128; alpha_idx];
+    let mut weighted = vec![0i128; alpha_idx];
 
     for dy in 0..dst_h {
         for dx in 0..dst_w {
@@ -368,17 +409,17 @@ pub fn downscale_to(src: &Raster, dst_w: u32, dst_h: u32) -> Result<Raster, Rast
                 // rather than truncating (#416/#417), so a fully-opaque RGBA image
                 // downscales bit-identically to its RGB twin instead of carrying a
                 // systematic -0.5 LSB bias.
-                let read = |off: usize| -> u64 { u64::from(sample_at(src_data, kind, off)) };
+                let read = |off: usize| -> i64 { sample_at(src_data, kind, off) };
 
                 weighted.iter_mut().for_each(|w| *w = 0);
-                let mut alpha_sum: u64 = 0;
+                let mut alpha_sum: i64 = 0;
                 for sy in sy0..sy1 {
                     for sx in sx0..sx1 {
                         let px = sy as usize * src_stride + sx as usize * bpp;
                         let a = read(px + alpha_idx * bpc);
                         alpha_sum += a;
                         for (c, w) in weighted.iter_mut().enumerate() {
-                            *w += u128::from(a) * u128::from(read(px + c * bpc));
+                            *w += i128::from(a) * i128::from(read(px + c * bpc));
                         }
                     }
                 }
@@ -390,32 +431,31 @@ pub fn downscale_to(src: &Raster, dst_w: u32, dst_h: u32) -> Result<Raster, Rast
                 }
 
                 // Alpha-weighted colour bands, `weighted / alpha_sum` round-half-up.
-                let alpha_sum128 = u128::from(alpha_sum);
+                let alpha_sum128 = i128::from(alpha_sum);
                 for (c, &w) in weighted.iter().enumerate() {
-                    let result = (w + alpha_sum128 / 2) / alpha_sum128;
-                    put_sample(&mut dst, kind, dst_offset + c * bpc, result as u32);
+                    let result = (w + alpha_sum128 / 2).div_euclid(alpha_sum128);
+                    put_sample(&mut dst, kind, dst_offset + c * bpc, result as i64);
                 }
 
                 // Alpha band: simple average, round-half-up like the no-alpha
-                // branch (`(sum + count / 2) / count`).
-                let avg_alpha = (alpha_sum + count / 2) / count;
-                put_sample(
-                    &mut dst,
-                    kind,
-                    dst_offset + alpha_idx * bpc,
-                    avg_alpha as u32,
-                );
+                // branch.
+                let avg_alpha = mean_round(alpha_sum, count as i64);
+                put_sample(&mut dst, kind, dst_offset + alpha_idx * bpc, avg_alpha);
             } else {
                 for c in 0..channels {
-                    let mut sum: u64 = 0;
+                    let mut sum: i64 = 0;
                     for sy in sy0..sy1 {
                         for sx in sx0..sx1 {
                             let src_offset = sy as usize * src_stride + sx as usize * bpp + c * bpc;
-                            sum += u64::from(sample_at(src_data, kind, src_offset));
+                            sum += sample_at(src_data, kind, src_offset);
                         }
                     }
-                    let avg = (sum + count / 2) / count;
-                    put_sample(&mut dst, kind, dst_offset + c * bpc, avg as u32);
+                    put_sample(
+                        &mut dst,
+                        kind,
+                        dst_offset + c * bpc,
+                        mean_round(sum, count as i64),
+                    );
                 }
             }
         }
@@ -435,7 +475,106 @@ pub fn downscale_to(src: &Raster, dst_w: u32, dst_h: u32) -> Result<Raster, Rast
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pixel::PixelFormat;
+    use crate::pixel::{ALL_KINDS, PixelFormat};
+
+    /// A one-band `Int8` raster from signed sample values.
+    fn int8(w: u32, h: u32, vals: &[i8]) -> Raster {
+        let data: Vec<u8> = vals.iter().map(|v| *v as u8).collect();
+        let fmt = PixelFormat::Int8(core::num::NonZeroU16::new(1).unwrap());
+        Raster::new(w, h, fmt, data).unwrap()
+    }
+
+    /// Every sample of an `Int8` raster, read back signed.
+    fn i8s(r: &Raster) -> Vec<i8> {
+        r.data().iter().map(|b| *b as i8).collect()
+    }
+
+    /**
+     * Tests that the box-filter kernels' sample reader and writer
+     * round-trip every sample kind at its own stride and its own
+     * signedness, including the `F32` arm both entry points refuse.
+     * Works by sweeping [`ALL_KINDS`] rather than a hand-written list, and
+     * by writing at the second sample of a two-sample buffer so a wrong
+     * stride overwrites the first and is caught by the neighbour
+     * assertion as well as by the value.
+     * Input: each kind's `range()` endpoints and 0 -> Output: the same
+     * numbers back, byte 0 still zero.
+     */
+    #[test]
+    fn sample_at_and_put_sample_round_trip_every_kind_at_its_own_stride() {
+        for kind in ALL_KINDS {
+            let bytes = kind.bytes();
+            let cases: [i64; 3] = match kind.range() {
+                Some((lo, hi)) => [lo, 0, hi],
+                None => [-128, 0, 127],
+            };
+            for v in cases {
+                let mut buf = vec![0u8; bytes * 2];
+                put_sample(&mut buf, kind, bytes, v);
+                assert_eq!(
+                    sample_at(&buf, kind, bytes),
+                    v,
+                    "{kind:?} did not round-trip {v}"
+                );
+                assert!(
+                    buf[..bytes].iter().all(|&b| b == 0),
+                    "{kind:?} wrote outside the second sample"
+                );
+            }
+        }
+    }
+
+    /**
+     * Tests the rounding both box kernels close every average with: add
+     * half the divisor and **floor**.
+     * Measured on `/opt/homebrew/bin/vips` 8.18.6 by writing a `--pyramid`
+     * TIFF from a 512x512 `char` raster of repeating 2x2 blocks and
+     * reading level 1, which is what runs `vips_region_shrink`'s
+     * `SHRINK_TYPE_MEAN_INT`:
+     *
+     * | block | sum | exact | vips |
+     * |---|---|---|---|
+     * | `-100, -101, -100, -101` | -402 | -100.5 | -100 |
+     * | `-1, -2, -1, -1` | -5 | -1.25 | **-1** |
+     * | `-1, -1, -2, -2` | -6 | -1.5 | -1 |
+     * | `100, 101, 100, 101` | 402 | 100.5 | 101 |
+     *
+     * Works by driving [`mean_round`] on those four sums directly and then
+     * driving [`downscale_half`] over the same four blocks laid out as an
+     * 8x2 `Int8` raster, so the helper and the kernel are both held. The
+     * second row is the one that decides the rule: truncating toward zero
+     * answers **0** there, and it is the only row where truncation and
+     * flooring disagree, so a table without it passes under either.
+     * Input: the four blocks -> Output: `[-100, -1, -1, 101]`.
+     */
+    #[test]
+    fn the_box_mean_floors_after_adding_half_the_divisor() {
+        assert_eq!(mean_round(-402, 4), -100);
+        assert_eq!(mean_round(-5, 4), -1);
+        assert_eq!(mean_round(-6, 4), -1);
+        assert_eq!(mean_round(402, 4), 101);
+        // The unsigned behaviour is unchanged, which is what makes this a
+        // widening rather than a rounding change: on a non-negative sum
+        // `div_euclid` and `/` are the same function.
+        assert_eq!(mean_round(0, 4), 0);
+        assert_eq!(mean_round(1, 4), 0);
+        assert_eq!(mean_round(2, 4), 1);
+        assert_eq!(mean_round(1020, 4), 255);
+
+        #[rustfmt::skip]
+        let src = int8(8, 2, &[
+            -100, -101,  -1, -2,  -1, -1,  100, 101,
+            -100, -101,  -1, -1,  -2, -2,  100, 101,
+        ]);
+        let half = downscale_half(&src).unwrap();
+        assert_eq!(half.width(), 4);
+        assert_eq!(half.height(), 1);
+        assert_eq!(i8s(&half), vec![-100, -1, -1, 101]);
+
+        // `downscale_to` shares the rule, over the same blocks.
+        let to = downscale_to(&src, 4, 1).unwrap();
+        assert_eq!(i8s(&to), vec![-100, -1, -1, 101]);
+    }
 
     fn solid_raster(w: u32, h: u32, pixel: &[u8], fmt: PixelFormat) -> Raster {
         let bpp = fmt.bytes_per_pixel();
