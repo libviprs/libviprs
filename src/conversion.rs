@@ -130,9 +130,10 @@
 //! * **`rot45` / `Angle45`.** The 45-degree family has odd-square diagonal
 //!   semantics of its own and ships with a later geometry batch.
 
+use crate::arithmetic::interpretation_max_alpha;
 use crate::bands::BandError;
 use crate::extract::ExtractError;
-use crate::pixel::PixelFormat;
+use crate::pixel::{PixelFormat, read_sample_f64, write_sample_f64};
 use crate::raster::{Raster, RasterError};
 use core::num::NonZeroU16;
 use thiserror::Error;
@@ -704,21 +705,17 @@ impl RasterCopyBuilder<'_> {
 /// carried over from `src`.
 /// Read a flat `bpc`-byte sample as `u32` (native byte order), for the
 /// 1-, 2-, and 4-byte sample depths.
+///
+/// The **storage** read, as distinct from the numeric one
+/// [`read_sample_f64`](crate::pixel) gives: it hands back a float sample's
+/// bit pattern rather than its value, which is what `msb` and
+/// `ifthenelse`'s non-zero test want and what `flatten` did not
+/// (issue #859).
 fn read_sample_u32(bytes: &[u8], bpc: usize) -> u32 {
     match bpc {
         1 => bytes[0] as u32,
         2 => u16::from_ne_bytes([bytes[0], bytes[1]]) as u32,
         _ => u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
-    }
-}
-
-/// Write `v` as a flat `bpc`-byte sample (native byte order), for the 1- and
-/// 2-byte integer depths; wider depths take the low bytes.
-fn write_sample_u32(bytes: &mut [u8], bpc: usize, v: u32) {
-    match bpc {
-        1 => bytes[0] = v as u8,
-        2 => bytes[..2].copy_from_slice(&(v as u16).to_ne_bytes()),
-        _ => bytes[..4].copy_from_slice(&v.to_ne_bytes()),
     }
 }
 
@@ -1364,7 +1361,8 @@ impl Raster {
     /// or [`ConversionError::Raster`] on allocation failure.
     pub fn try_flatten(&self, background: Option<&[f64]>) -> Result<Raster, ConversionError> {
         let fmt = self.format();
-        let bpc = fmt.bytes_per_channel();
+        let kind = fmt.kind();
+        let bpc = kind.bytes();
         let in_bands = fmt.channels();
         if in_bands < 2 {
             return Err(ConversionError::BandCountMismatch {
@@ -1384,9 +1382,17 @@ impl Raster {
                 });
             }
         };
-        let out_fmt = PixelFormat::with_channels(out_bands, bpc)
-            .expect("a format exists for a band count already carried by this raster");
-        let max = ((1u64 << (bpc * 8)) - 1) as f64;
+        let out_fmt = PixelFormat::with_kind(out_bands, kind)
+            .expect("a format exists for a band count and kind already carried by this raster");
+        // The alpha denominator is a property of the **interpretation**,
+        // not of the byte width, and the two only agree on `uchar` and on
+        // a 16-bit raster tagged `grey16` / `rgb16`. Measured on
+        // `/opt/homebrew/bin/vips` 8.18.6 with alpha 128: a `ushort`
+        // raster tagged `b-w` holding 65535 flattens to **32896**, which
+        // is `65535 * 128 / 255`, and the width rule answered 128. Same
+        // source `white_ink` reads for the same reason (issues #667,
+        // #859).
+        let max_alpha = interpretation_max_alpha(self.interpretation());
         let w = self.width();
         let h = self.height();
         let src = self.data();
@@ -1397,14 +1403,20 @@ impl Raster {
         for y in 0..h as usize {
             for x in 0..w as usize {
                 let apos = y * sstride + (x * in_bands + (in_bands - 1)) * bpc;
-                let alpha = read_sample_u32(&src[apos..apos + bpc], bpc) as f64;
+                // The numeric read, not the storage one: a float sample
+                // used to arrive here as its own bit pattern reinterpreted
+                // as a `u32`, so the blend was computed on nonsense
+                // (issue #859).
+                let alpha = read_sample_f64(src, kind, apos);
                 for (b, &bgb) in bg.iter().enumerate() {
                     let so = y * sstride + (x * in_bands + b) * bpc;
-                    let s = read_sample_u32(&src[so..so + bpc], bpc) as f64;
-                    let val = s * alpha / max + bgb * (max - alpha) / max;
-                    let v = val.round().clamp(0.0, max) as u64;
+                    let s = read_sample_f64(src, kind, so);
+                    let val = s * alpha / max_alpha + bgb * (max_alpha - alpha) / max_alpha;
                     let oo = y * ostride + (x * out_bands + b) * bpc;
-                    write_sample_u32(&mut odata[oo..oo + bpc], bpc, v as u32);
+                    // `write_sample_f64` clips into the carrier's own range
+                    // and truncates toward zero, which is the `vips_cast`
+                    // the C performs on the way out of `flatten`.
+                    write_sample_f64(odata, kind, oo, val);
                 }
             }
         }
@@ -1764,21 +1776,29 @@ impl Raster {
     /// [`ConversionError::Band`] if the result would exceed the supported
     /// band count, or [`ConversionError::Raster`] on allocation failure.
     pub fn try_addalpha(&self) -> Result<Raster, ConversionError> {
-        let max = if self.format().bytes_per_channel() == 1 {
-            255.0
-        } else {
-            65535.0
-        };
+        // The ink is a property of the **interpretation**, not of the byte
+        // width, and the two only agree because a `Gray16` raster is
+        // normally tagged `Grey16`. Measured on vips 8.18.6: a `ushort`
+        // raster tagged `b-w` gets alpha **255**, one tagged `grey16` or
+        // `rgb16` gets 65535. Same reading `white_ink` takes for the same
+        // reason (issues #667, #861).
+        let max = interpretation_max_alpha(self.interpretation());
         let mut out = self.try_bandjoin_const(max)?;
         out.carry_meta_from(self);
         Ok(out)
     }
 
-    /// Append one fully-opaque alpha band: `255` for 8-bit formats,
-    /// `65535` for 16-bit (libvips `vips_addalpha`). `Rgb8` becomes
-    /// `Rgba8`; a mono input gains a second band and becomes a `Multi8` /
-    /// `Multi16` intermediate. Panicking form of
-    /// [`Raster::try_addalpha`].
+    /// Append one fully-opaque alpha band, `255` unless the tag says
+    /// otherwise (libvips `vips_addalpha`). `Rgb8` becomes `Rgba8`; a mono
+    /// input gains a second band and becomes a `Multi8` / `Multi16`
+    /// intermediate. The ink comes from the interpretation's max alpha, so
+    /// `Grey16` and `Rgb16` ink 65535 and `ScRgb` inks 1. Panicking form
+    /// of [`Raster::try_addalpha`].
+    ///
+    /// (Prose rather than an intra-doc link, because
+    /// `arithmetic::interpretation_max_alpha` is `pub(crate)` and this
+    /// method is public, which `-D rustdoc::private_intra_doc_links`
+    /// refuses.)
     ///
     /// # Panics
     ///
@@ -2572,6 +2592,7 @@ const FALSECOLOUR_PET: [[u8; 3]; 256] = [
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::num::NonZeroU16;
 
     fn gray8(w: u32, h: u32, data: Vec<u8>) -> Raster {
         Raster::new(w, h, PixelFormat::Gray8, data).unwrap()
@@ -4797,5 +4818,147 @@ mod tests {
                 "for_format({alias:?}) must match for_format({named:?})"
             );
         }
+    }
+
+    // ------------------------------------------------------------------
+    // the alpha ceiling comes from the tag, not the width (#859, #861)
+    // ------------------------------------------------------------------
+
+    /// Read the flat `i`-th `u16` sample of a raster.
+    fn u16_at(r: &Raster, i: usize) -> u16 {
+        let d = r.data();
+        u16::from_ne_bytes([d[i * 2], d[i * 2 + 1]])
+    }
+
+    /**
+     * Tests that `flatten` scales the alpha by the interpretation's
+     * `max_alpha` rather than by the byte width (issue #859), and that a
+     * float raster is blended as numbers rather than as the bit patterns
+     * the storage reader handed back.
+     * Works by flattening the same alpha of 128 over three carriers and
+     * comparing against `/opt/homebrew/bin/vips` 8.18.6, plus one
+     * background case, since the background is scaled by the same
+     * denominator and so moves with it. The `uchar` row is the control
+     * where the two rules agree, so a change that simply moved everything
+     * would fail there.
+     * Input/Output, all measured: uchar (200, 128) -> 100; ushort b-w
+     * (65535, 128) -> 32896; float (200.5, 128) -> 100.643; scRGB float
+     * (0.5, 0.5) -> 0.25; uchar (200, 128) with background 10 -> 105;
+     * uchar (201, 128) -> 100 and (51, 128) -> 25, the truncation.
+     */
+    #[test]
+    fn flatten_scales_alpha_by_the_interpretation_not_the_width() {
+        let n = |v: u16| NonZeroU16::new(v).unwrap();
+        // uchar, 2 bands: the row where the two rules agree.
+        let u8two = Raster::new(1, 1, PixelFormat::Multi8(n(2)), vec![200, 128]).unwrap();
+        assert_eq!(u8two.try_flatten(None).unwrap().data()[0], 100);
+        assert_eq!(
+            u8two.try_flatten(Some(&[10.0])).unwrap().data()[0],
+            105,
+            "the background is scaled by the same denominator"
+        );
+
+        // ushort tagged b-w: `65535 * 128 / 255`, not `65535 * 128 / 65535`.
+        let u16two = Raster::new(
+            1,
+            1,
+            PixelFormat::Multi16(n(2)),
+            [65535u16, 128]
+                .iter()
+                .flat_map(|v| v.to_ne_bytes())
+                .collect(),
+        )
+        .unwrap();
+        assert_eq!(u16_at(&u16two.try_flatten(None).unwrap(), 0), 32896);
+
+        // A float raster, which used to have its `f32` bits read as a
+        // `u32` and blended as an integer.
+        let ftwo = Raster::new(
+            1,
+            1,
+            PixelFormat::FloatF32(n(2)),
+            [200.5f32, 128.0]
+                .iter()
+                .flat_map(|v| v.to_ne_bytes())
+                .collect(),
+        )
+        .unwrap();
+        let ff = ftwo.try_flatten(None).unwrap();
+        assert_eq!(ff.format(), PixelFormat::FloatF32(n(1)));
+        let got = f32::from_ne_bytes([ff.data()[0], ff.data()[1], ff.data()[2], ff.data()[3]]);
+        assert!(
+            (f64::from(got) - 100.643_135).abs() < 1e-4,
+            "float flatten gave {got}, vips gives 100.643135"
+        );
+
+        // The interpretation is what is read, not the width, so a tag with
+        // its own ceiling moves the answer on the same bytes: `scRGB` has
+        // `max_alpha` 1, and `vips flatten` on a two-band scRGB raster
+        // holding (0.5, 0.5) answers **0.25**, which is `0.5 * 0.5 / 1`.
+        let mut sc = Raster::new(
+            1,
+            1,
+            PixelFormat::FloatF32(n(2)),
+            [0.5f32, 0.5].iter().flat_map(|v| v.to_ne_bytes()).collect(),
+        )
+        .unwrap();
+        sc.set_interpretation(Some(Interpretation::ScRgb));
+        let sf = sc.try_flatten(None).unwrap();
+        let d = sf.data();
+        assert_eq!(f32::from_ne_bytes([d[0], d[1], d[2], d[3]]), 0.25);
+
+        // And the integer store truncates rather than rounding, which is
+        // the `vips_cast` on the way out. Measured with alpha 128: band 0
+        // of 201 gives `201 * 128 / 255` = 100.894, and `vips flatten`
+        // answers **100**. Round-half-up answers 101.
+        let odd = Raster::new(1, 1, PixelFormat::Multi8(n(2)), vec![201, 128]).unwrap();
+        assert_eq!(odd.try_flatten(None).unwrap().data()[0], 100);
+        let odd = Raster::new(1, 1, PixelFormat::Multi8(n(2)), vec![51, 128]).unwrap();
+        assert_eq!(odd.try_flatten(None).unwrap().data()[0], 25);
+    }
+
+    /**
+     * Tests that `addalpha` inks from the interpretation, which is where
+     * vips takes it from, rather than from the byte width (issue #861).
+     * Works by adding alpha across the tags, with the `Gray16` row as the
+     * control that the 16-bit answer did not move: it is tagged `Grey16`
+     * and so still inks 65535, while a 16-bit raster tagged `Multiband`
+     * inks 255. Pinned to vips 8.18.6, where a `ushort` raster tagged
+     * `b-w` gets alpha 255 and one tagged `grey16` gets 65535.
+     * Input/Output: Gray8 -> 255, Gray16 -> 65535, Multi16(2) -> 255.
+     */
+    #[test]
+    fn addalpha_inks_from_the_interpretation() {
+        let n = |v: u16| NonZeroU16::new(v).unwrap();
+        let a8 = gray8(1, 1, vec![200]).try_addalpha().unwrap();
+        assert_eq!(a8.data()[1], 255);
+
+        let a16 = gray16(1, 1, &[40000]).try_addalpha().unwrap();
+        assert_eq!(
+            u16_at(&a16, 1),
+            65535,
+            "a Grey16-tagged raster still inks 65535"
+        );
+
+        let multi = Raster::new(
+            1,
+            1,
+            PixelFormat::Multi16(n(2)),
+            [40000u16, 40000]
+                .iter()
+                .flat_map(|v| v.to_ne_bytes())
+                .collect(),
+        )
+        .unwrap();
+        assert_eq!(
+            u16_at(&multi.try_addalpha().unwrap(), 2),
+            255,
+            "a Multiband-tagged 16-bit raster inks 255, as vips does"
+        );
+
+        // The float carrier would ink 255 too, and there is no assertion
+        // for it here because `bandjoin_const` refuses a float raster in
+        // `crate::bands` before the ink is used, so the row is not
+        // reachable to measure.
     }
 }
