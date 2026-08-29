@@ -5569,6 +5569,73 @@ mod tests {
         ));
     }
 
+    /// A one-band `FloatF32` raster from `f32` sample values.
+    fn float1(w: u32, h: u32, vals: &[f32]) -> Raster {
+        let data: Vec<u8> = vals.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        let fmt = PixelFormat::FloatF32(NonZeroU16::new(1).unwrap());
+        Raster::new(w, h, fmt, data).unwrap()
+    }
+
+    /// Every sample of a float raster, read back as `f32`.
+    fn f32s(r: &Raster) -> Vec<f32> {
+        r.data()
+            .chunks_exact(4)
+            .map(|c| f32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
+            .collect()
+    }
+
+    /**
+     * Tests that `join` and `arrayjoin` carry a float raster and answer
+     * with the samples vips produces, rather than refusing it.
+     * Both refusals were posture 1, a parity regression, and the same
+     * shape issue #909 closed for the signed carriers: the sample copy
+     * could not hold the value, so the op refused, and the refusal
+     * outlived the reason for it.
+     * Measured on `/opt/homebrew/bin/vips` 8.18.6 over two 3x1 `float`
+     * rasters `[1.5, -0.25, 3.75]` and `[10.5, -2.75, 0.125]`:
+     * `vips join a.v b.v out.v horizontal` answers **FLOAT** and the six
+     * samples side by side, `vips arrayjoin "a.v b.v" out.v --across 2`
+     * the same row, and `--across 1` the same six as two rows of three.
+     * Works by driving both ops on the pair and reading the samples back,
+     * with a `char` pair beside them as the control that the integer
+     * dialect is untouched, and with the fractional samples as the cells
+     * a truncating copy cannot pass.
+     * Input: two `FloatF32(1)` rows -> Output: the measured grids.
+     */
+    #[test]
+    fn join_and_arrayjoin_carry_a_float_raster_issue_945() {
+        let a = float1(3, 1, &[1.5, -0.25, 3.75]);
+        let b = float1(3, 1, &[10.5, -2.75, 0.125]);
+        let want = vec![1.5f32, -0.25, 3.75, 10.5, -2.75, 0.125];
+
+        let j = a
+            .try_join(&b, JoinDirection::Horizontal, false, None, None, None)
+            .unwrap();
+        assert_eq!(
+            j.format(),
+            PixelFormat::FloatF32(NonZeroU16::new(1).unwrap())
+        );
+        assert_eq!(j.width(), 6);
+        assert_eq!(f32s(&j), want);
+
+        let across2 = Raster::try_arrayjoin(&[&a, &b], Some(2), None).unwrap();
+        assert_eq!(across2.width(), 6);
+        assert_eq!(across2.height(), 1);
+        assert_eq!(f32s(&across2), want);
+
+        let across1 = Raster::try_arrayjoin(&[&a, &b], Some(1), None).unwrap();
+        assert_eq!((across1.width(), across1.height()), (3, 2));
+        assert_eq!(f32s(&across1), want);
+
+        // Control: the integer dialect is untouched.
+        let ia = int8(3, 1, &[-100, -1, 100]);
+        let ib = int8(3, 1, &[-101, 2, 101]);
+        let ij = ia
+            .try_join(&ib, JoinDirection::Horizontal, false, None, None, None)
+            .unwrap();
+        assert_eq!(i8s(&ij), vec![-100, -1, 100, -101, 2, 101]);
+    }
+
     /**
      * Tests that `ifthenelse` and `switch` read their condition
      * **numerically** and cast it into `uchar` before testing it, so a

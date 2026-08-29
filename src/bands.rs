@@ -1046,6 +1046,61 @@ mod tests {
         ));
     }
 
+    /// A `bands`-band `FloatF32` raster from `f32` sample values.
+    fn floatn(w: u32, h: u32, bands: u16, vals: &[f32]) -> Raster {
+        let data: Vec<u8> = vals.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        let fmt = PixelFormat::FloatF32(core::num::NonZeroU16::new(bands).unwrap());
+        Raster::new(w, h, fmt, data).unwrap()
+    }
+
+    /// Every sample of a float raster, read back as `f32`.
+    fn f32s(r: &Raster) -> Vec<f32> {
+        r.data()
+            .chunks_exact(4)
+            .map(|c| f32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
+            .collect()
+    }
+
+    /**
+     * Tests that `bandmean` carries a float raster and answers the plain
+     * mean vips answers, rather than refusing it.
+     * The refusal was posture 1, a parity regression, the same shape
+     * issue #909 closed for the signed carriers one paragraph up.
+     * Measured on `/opt/homebrew/bin/vips` 8.18.6: `vips bandmean` on a
+     * two-band `float` raster whose bands are `[1.5, -0.25, 3.75]` and
+     * `[10.5, -2.75, 0.125]` answers **FLOAT** `[6, -1.5, 1.9375]`, and
+     * on the bands `[1, 2, 100]` / `[2, 3, 101]` it answers
+     * **`[1.5, 2.5, 100.5]`** where the same numbers cast to `uchar`
+     * answer `[2, 3, 101]`. So the float path does **not** round.
+     * Works by asserting both rows, which is what separates a float mean
+     * from a float carrier holding a rounded integer mean: the first row
+     * alone passes under either rule, because every one of its means is
+     * already exact.
+     * Input: the two-band float rasters above -> Output: the measured
+     * means, at `FloatF32(1)`.
+     */
+    #[test]
+    fn bandmean_carries_a_float_raster_issue_945() {
+        let n = |v: u16| core::num::NonZeroU16::new(v).unwrap();
+        let two = floatn(3, 1, 2, &[1.5, 10.5, -0.25, -2.75, 3.75, 0.125]);
+        let m = two.try_bandmean().unwrap();
+        assert_eq!(m.format(), PixelFormat::FloatF32(n(1)));
+        assert_eq!(f32s(&m), vec![6.0, -1.5, 1.9375]);
+
+        // The row that separates a float mean from a rounded one. vips
+        // answers 1.5 / 2.5 / 100.5 here and 2 / 3 / 101 on the `uchar`
+        // twin, so a float path still carrying the integer rounding term
+        // answers the second row.
+        let halves = floatn(3, 1, 2, &[1.0, 2.0, 2.0, 3.0, 100.0, 101.0]);
+        assert_eq!(f32s(&halves.try_bandmean().unwrap()), vec![1.5, 2.5, 100.5]);
+
+        // Control: the integer dialect still rounds half away from zero on
+        // exactly those numbers, so the float answer is a property of the
+        // carrier rather than a dropped rounding step.
+        let u = Raster::new(3, 1, PixelFormat::Multi8(n(2)), vec![1, 2, 2, 3, 100, 101]).unwrap();
+        assert_eq!(u.try_bandmean().unwrap().data(), &[2, 3, 101]);
+    }
+
     /**
      * Tests that `bandmean` rounds **half away from zero**, which is the
      * round-half-up it has always done on the unsigned carriers and a

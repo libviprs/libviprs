@@ -3456,6 +3456,98 @@ mod tests {
         ));
     }
 
+    /// A one-band `FloatF32` raster from `f32` sample values.
+    fn float1(w: u32, h: u32, vals: &[f32]) -> Raster {
+        let data: Vec<u8> = vals.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        let fmt = PixelFormat::FloatF32(core::num::NonZeroU16::new(1).unwrap());
+        Raster::new(w, h, fmt, data).unwrap()
+    }
+
+    /// Every sample of a float raster, read back as `f32`.
+    fn f32s(r: &Raster) -> Vec<f32> {
+        r.data()
+            .chunks_exact(4)
+            .map(|c| f32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
+            .collect()
+    }
+
+    /**
+     * Tests that `embed`, `gravity` and `insert` carry a float raster and
+     * answer with the samples vips produces, rather than refusing it.
+     * The refusal was posture 1, a parity regression, and the same shape
+     * issue #909 closed one carrier family earlier: `read_s` could not
+     * hold the value, so the op refused, and the refusal outlived the
+     * reason for it.
+     * Measured on `/opt/homebrew/bin/vips` 8.18.6 over a 3x1 `float`
+     * raster holding `[1.5, -0.25, 3.75]`, cast from a `csvload` double:
+     * `vips embed a.v out.v 1 0 5 1` answers **FLOAT** and fills the
+     * border with 0 for `--extend black`, **255** for `--extend white`
+     * and **-0.5** for `--extend background --background -0.5`, that last
+     * one *unrounded*, which is what separates a float ink from the
+     * integer one. `vips gravity a.v out.v centre 5 1` gives the same
+     * canvas as the centred embed. `vips insert a.v b.v out.v 1 0` over
+     * `b = [10.5, -2.75, 0.125]` answers `[1.5, 10.5, -2.75]`, and
+     * `--expand --background -0.5` at x=4 answers the seven samples
+     * below.
+     * Works by asserting each of those canvases sample by sample, with
+     * the fractional background as the cell a truncating store cannot
+     * pass and the `Int8` white ink beside it as the control that the
+     * integer dialect is untouched.
+     * Input: `FloatF32(1)` `[1.5, -0.25, 3.75]` -> Output: the measured
+     * canvases, at `FloatF32(1)`.
+     */
+    #[test]
+    fn the_extract_ops_carry_a_float_raster_issue_945() {
+        let n = |v: u16| core::num::NonZeroU16::new(v).unwrap();
+        let a = float1(3, 1, &[1.5, -0.25, 3.75]);
+        let b = float1(3, 1, &[10.5, -2.75, 0.125]);
+
+        let black = a.try_embed(1, 0, 5, 1, Extend::Black, None).unwrap();
+        assert_eq!(black.format(), PixelFormat::FloatF32(n(1)));
+        assert_eq!(f32s(&black), vec![0.0, 1.5, -0.25, 3.75, 0.0]);
+
+        let white = a.try_embed(1, 0, 5, 1, Extend::White, None).unwrap();
+        assert_eq!(f32s(&white), vec![255.0, 1.5, -0.25, 3.75, 255.0]);
+
+        // The cell a truncating store cannot pass: vips fills -0.5, not 0.
+        let bg = a
+            .try_embed(1, 0, 5, 1, Extend::Background, Some(&[-0.5]))
+            .unwrap();
+        assert_eq!(f32s(&bg), vec![-0.5, 1.5, -0.25, 3.75, -0.5]);
+
+        // gravity is embed under another name, and vips centres the 3-wide
+        // image in a 5-wide canvas at the same offset.
+        let grav = a
+            .try_gravity(CompassDirection::Centre, 5, 1, Extend::Black, None)
+            .unwrap();
+        assert_eq!(f32s(&grav), vec![0.0, 1.5, -0.25, 3.75, 0.0]);
+
+        let ins = a.try_insert(&b, 1, 0, false, None).unwrap();
+        assert_eq!(ins.format(), PixelFormat::FloatF32(n(1)));
+        assert_eq!(f32s(&ins), vec![1.5, 10.5, -2.75]);
+
+        let expanded = a.try_insert(&b, 4, 0, true, Some(&[-0.5])).unwrap();
+        assert_eq!(expanded.width(), 7);
+        assert_eq!(
+            f32s(&expanded),
+            vec![1.5, -0.25, 3.75, -0.5, 10.5, -2.75, 0.125]
+        );
+
+        // Control: the integer dialect is untouched, so the `char` white
+        // ink is still the -1 a `memset` lays down rather than a clipped
+        // 127.
+        let one = int8(2, 2, &[-100, -1, 0, 100]);
+        let iwhite = one.try_embed(1, 1, 4, 4, Extend::White, None).unwrap();
+        assert_eq!(i8s(&iwhite)[0], -1);
+        // Control: an integer background is still truncated toward zero,
+        // so the float pass-through above is a property of the carrier and
+        // not a dropped rounding step.
+        let ibg = one
+            .try_embed(1, 1, 4, 4, Extend::Background, Some(&[-0.5]))
+            .unwrap();
+        assert_eq!(i8s(&ibg)[0], 0);
+    }
+
     /**
      * Tests that this module's sample reader and writer round-trip every
      * sample kind at its own stride and its own signedness.
