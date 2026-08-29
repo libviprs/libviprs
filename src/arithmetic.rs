@@ -36,8 +36,8 @@
 //! | [`Raster::find_trim`] | `vips_find_trim` | content bounding box |
 //! | [`Raster::profile`] | `vips_profile` | first non-zero positions |
 //! | [`Raster::project`] | `vips_project` | column and row sums |
-//! | [`Raster::add_const`], [`Raster::sub_const`], ... | `vips_linear1` family | per-sample constant arithmetic |
-//! | [`Raster::add_vec`], [`Raster::sub_vec`], ... | `vips_linear` family | per-band constant arithmetic |
+//! | [`Raster::add_const`], [`Raster::sub_const`], ... | `vips_linear1` family, in the integer dialect (diverges, see [`Raster::add_const`]) | per-sample constant arithmetic |
+//! | [`Raster::add_vec`], [`Raster::sub_vec`], ... | `vips_linear` family, in the integer dialect | per-band constant arithmetic |
 //! | [`Raster::sub`] | `vips_subtract` | float raster (signed differences survive) |
 //! | [`Raster::mul`] | `vips_multiply` | image-image arithmetic |
 //! | [`Raster::div`], [`Raster::div_const`], [`Raster::div_vec`] | `vips_divide` | float raster |
@@ -1590,13 +1590,32 @@ impl Raster {
     // Constant arithmetic
     // -----------------------------------------------------------------
 
-    /// Add a constant to every sample (libvips `linear` with `a = 1`).
+    /// Add a constant to every sample, in the crate's integer dialect.
     /// 8-bit input promotes to 16-bit so sums above 255 survive.
+    ///
+    /// **This is not `vips linear` with `a = 1`**, which is what this doc used
+    /// to call it. [`Raster::linear`] is, and it was verified matching; a
+    /// caller who wants what vips answers wants that one. Measured on
+    /// `/opt/homebrew/bin/vips` 8.18.6 over a 2x1 `uchar` raster
+    /// `[200, 100]`:
+    ///
+    /// | call | here | `vips linear` |
+    /// |---|---|---|
+    /// | `+ 5` | `Gray16 [205, 105]` | `FLOAT [205, 105]` |
+    /// | `+ 0.5` | `Gray16 [201, 101]` | `FLOAT [200.5, 100.5]` |
+    /// | `- 300` (via [`Raster::sub_const`]) | `Gray8 [0, 0]` | `FLOAT [-100, -200]` |
+    ///
+    /// The three rows disagree three different ways: the container, the
+    /// rounding, and the floor. That is the integer dialect the module docs
+    /// describe, and it is deliberate; the cross reference was the thing that
+    /// was wrong (issue #952).
     ///
     /// # Errors
     ///
     /// Returns [`ArithmeticError::FloatUnsupported`] if the input is a float
     /// raster (this integer op rounds and saturates into an unsigned output).
+    /// [`Raster::linear`] takes one and answers a float raster, which is what
+    /// `vips linear` does on a `float` input too.
     pub fn try_add_const(&self, c: f64) -> Result<Raster, ArithmeticError> {
         try_unary_map("add_const", self, SampleKind::U16, move |v| v + c)
     }
