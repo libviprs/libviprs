@@ -199,6 +199,50 @@ impl Raster {
         Ok(out)
     }
 
+    /// The shared save routes' entry point: encode the Netpbm container the
+    /// **suffix** names, or refuse.
+    ///
+    /// This is the one row in either route where the suffix picks a container
+    /// rather than only a codec. Measured on the pinned vips 8.18.6,
+    /// `ppmsave` registers five suffixes and writes something different for
+    /// each: `.ppm` a `P6`, `.pgm` a `P5`, `.pbm` a `P4` and `.pfm` a `PF`,
+    /// converting the colourspace to whatever the suffix means, while `.pnm`
+    /// is refused outright for every interpretation it was handed.
+    ///
+    /// [`Raster::encode_ppm`] picks its magic from the band count instead, so
+    /// the two agree only when the raster already matches the suffix. Where
+    /// they disagree this refuses rather than converting, the same call the
+    /// `.hdr` row makes (#880): no row in the save table converts, and these
+    /// are not going to be the first. The alternative is writing a `P5` body
+    /// into a file called `.ppm`, which is the one outcome neither vips nor
+    /// Netpbm reads as correct.
+    ///
+    /// `.pbm` and `.pfm` are not routed here at all, because this build has no
+    /// `P4` or `PF` encoder to route them to (issue #882).
+    ///
+    /// # Errors
+    ///
+    /// [`EncodeError::Unsupported`] for a suffix that is not `ppm` or `pgm`,
+    /// [`EncodeError::InvalidParameter`] for a raster whose band count is not
+    /// the one the suffix names, and whatever [`Raster::encode_ppm`] reports
+    /// for a sample kind Netpbm has no binary form for.
+    pub(crate) fn encode_netpbm(&self, suffix: &str) -> Result<Vec<u8>, EncodeError> {
+        let (want, magic) = match suffix {
+            "ppm" => (3usize, "P6"),
+            "pgm" => (1usize, "P5"),
+            other => return Err(EncodeError::unsupported(other.to_owned())),
+        };
+        let got = self.format().channels();
+        if got != want {
+            return Err(EncodeError::InvalidParameter(format!(
+                ".{suffix} is the {magic} Netpbm container, which carries {want} \
+                 bands, and this raster has {got}; vips converts the colourspace \
+                 to suit the suffix and libviprs does not"
+            )));
+        }
+        self.encode_ppm()
+    }
+
     /// Serialise as a binary Netpbm image, or empty bytes when unsupported.
     ///
     /// The infallible convenience over [`Raster::encode_ppm`]: it returns the

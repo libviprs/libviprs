@@ -240,7 +240,7 @@ impl Raster {
     /// Uses the same dispatch as [`encode_to_target`]: `"jpeg"` / `"jpg"`,
     /// `"png"`, `"gif"`, `"webp"`, `"jxl"`,
     /// `"jp2k"` / `"jp2"` / `"j2k"` / `"jpt"` / `"j2c"` / `"jpc"`, `"uhdr"`,
-    /// `"hdr"`, `"fits"` / `"fit"` / `"fts"` and
+    /// `"hdr"`, `"ppm"` / `"pgm"`, `"fits"` / `"fit"` / `"fts"` and
     /// `"v"` / `"vips"` are wired; any other format returns
     /// [`EncodeError::Unsupported`]. `"webp"` encodes losslessly at
     /// [`crate::webp::SaveOptions::default`], keeping any attached metadata,
@@ -275,6 +275,19 @@ impl Raster {
     /// `"hdr"` is Radiance RGBE (libvips `radsave`), and it has the same shape:
     /// a 3-band `f32` raster only, refused rather than cast, where `radsave`
     /// declares `mono rgb` and casts whatever it is handed.
+    ///
+    /// `"ppm"` and `"pgm"` are the two binary Netpbm containers this build
+    /// writes, and they are the one place a **name** picks the container
+    /// rather than the codec: `"ppm"` is `P6` and takes three bands, `"pgm"`
+    /// is `P5` and takes one, and each refuses the other's band count rather
+    /// than converting. The other three suffixes `ppmsave` registers are not
+    /// rows: `.pbm` is a `P4` and `.pfm` a `PF`, neither of which this build
+    /// encodes, and `.pnm` is one vips itself refuses.
+    ///
+    /// Those three are written as suffixes and not as quoted format names on
+    /// purpose. A quoted name in this block is a value a caller may pass, and
+    /// `the_format_dispatch_and_the_list_a_caller_is_given_cannot_drift_apart`
+    /// reads them as exactly that.
     ///
     /// # Errors
     ///
@@ -340,6 +353,10 @@ fn encode_for_format(raster: &Raster, format: &str) -> Result<Vec<u8>, EncodeErr
         // has an input contract, 3-band `f32`, and it propagates the refusal
         // rather than casting.
         "hdr" => raster.encode_radiance(crate::radiance::SaveOptions::default()),
+        // The two Netpbm containers this build writes, of the five `ppmsave`
+        // registers. The name picks the container, so the row refuses a band
+        // count that names the other one rather than converting.
+        "ppm" | "pgm" => raster.encode_netpbm(&key),
         // The three suffixes vips registers for FITS (`vips__fits_suffs`,
         // `fits.c:125`). `fitssave` takes no options, so there is nothing
         // to default here.

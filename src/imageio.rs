@@ -22,6 +22,7 @@
 //! | `.webp` | [`Raster::encode_webp`], lossless | `icc-profile-data` (`ICCP`), `exif-data` (`EXIF`), `xmp-data` (`XMP `) |
 //! | `.jxl` (needs the `jxl` feature) | [`Raster::encode_jxl`], lossless | none: the encoder writes a bare codestream with no box container |
 //! | `.jp2` / `.j2k` / `.jpt` / `.j2c` / `.jpc` (needs the `jp2k` feature) | [`Raster::encode_jp2k`] at the `jp2ksave` defaults | none: `jp2ksave.c` has no code for ICC, EXIF or XMP |
+//! | `.ppm` (3-band) / `.pgm` (1-band) | [`Raster::encode_ppm`], the container the suffix names | none: a binary Netpbm file is a three-line header and the body |
 //! | `.hdr` | [`Raster::encode_radiance`] at the `radsave` defaults, on a 3-band `f32` raster only | none EXIF-class: the `rad-` header records are format records and `SaveOptions::default` already takes them off the raster |
 //! | `.fits` / `.fit` / `.fts` | [`Raster::encode_fits`] | the `fits-` header records, minus the cards cfitsio regenerates |
 //! | `.v` / `.vips` | [`Raster::encode_vips`] | header geometry plus every attached field |
@@ -1470,13 +1471,13 @@ pub enum SaveError {
 fn saveable_extensions() -> &'static str {
     match (cfg!(feature = "jxl"), cfg!(feature = "jp2k")) {
         (true, true) => {
-            "png, jpg/jpeg, gif, webp, jxl, jp2/j2k/jpt/j2c/jpc, hdr, fits/fit/fts, and v/vips"
+            "png, jpg/jpeg, gif, webp, jxl, jp2/j2k/jpt/j2c/jpc, hdr, ppm/pgm, fits/fit/fts, and v/vips"
         }
-        (true, false) => "png, jpg/jpeg, gif, webp, jxl, hdr, fits/fit/fts, and v/vips",
+        (true, false) => "png, jpg/jpeg, gif, webp, jxl, hdr, ppm/pgm, fits/fit/fts, and v/vips",
         (false, true) => {
-            "png, jpg/jpeg, gif, webp, jp2/j2k/jpt/j2c/jpc, hdr, fits/fit/fts, and v/vips"
+            "png, jpg/jpeg, gif, webp, jp2/j2k/jpt/j2c/jpc, hdr, ppm/pgm, fits/fit/fts, and v/vips"
         }
-        (false, false) => "png, jpg/jpeg, gif, webp, hdr, fits/fit/fts, and v/vips",
+        (false, false) => "png, jpg/jpeg, gif, webp, hdr, ppm/pgm, fits/fit/fts, and v/vips",
     }
 }
 
@@ -1617,6 +1618,25 @@ impl Raster {
             // handed; no row in this table converts, and this one is not going
             // to be the first.
             "hdr" => crate::radiance::encode_radiance_for_save(self)?,
+            // Two of the five suffixes `ppmsave` registers, and the only two
+            // this build has a container for: measured on 8.18.6, `.ppm`
+            // writes a `P6` and `.pgm` a `P5` whatever they are handed, while
+            // `.pbm` writes a `P4` and `.pfm` a `PF`, neither of which
+            // `encode_ppm` produces. `.pnm` is absent because **vips** refuses
+            // it: it demands a `multiband` interpretation and was refused for
+            // `srgb`, `b-w` and an explicitly-`multiband` image alike.
+            //
+            // The suffix names the container here, which no other row in this
+            // table does, so `encode_netpbm` refuses a band count the suffix
+            // does not mean rather than converting to fit it.
+            //
+            // `keep_metadata` has nothing to act on: a binary Netpbm file is a
+            // three-line ASCII header and the raster body, with nowhere for a
+            // profile, an EXIF block or an XMP packet to live.
+            "ppm" | "pgm" => self.encode_netpbm(extension).map_err(|e| match e {
+                crate::codec::EncodeError::Io(io) => SaveError::Io(io),
+                other => SaveError::Encode(SinkError::EncodeMsg(other.to_string())),
+            })?,
             // All three suffixes vips registers (`vips__fits_suffs`,
             // `fits.c:125`). `keep_metadata` has nothing to act on: the
             // records a FITS header carries are the geometry cfitsio
@@ -4452,10 +4472,15 @@ mod tests {
             // the way `radsave` does. So the sweep hands each row a raster it
             // can write, or it would be asserting the contract and not the
             // list (issue #880).
-            let subject = if *extension == "hdr" {
-                float_rgb_2x2()
-            } else {
-                im.clone()
+            let subject = match *extension {
+                // The rows with an input contract: `.hdr` takes 3-band `f32`
+                // and `.pgm` takes one band, and both refuse rather than
+                // convert (issues #880, #882). The sweep hands each row a
+                // raster it can write, or it would be asserting the contract
+                // and calling it the list.
+                "hdr" => float_rgb_2x2(),
+                "pgm" => gray_2x2(),
+                _ => im.clone(),
             };
             subject
                 .save(&path)
