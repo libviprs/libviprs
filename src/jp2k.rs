@@ -28,7 +28,7 @@
 //! | libviprs method | libvips equivalent | result |
 //! |---|---|---|
 //! | [`decode_jp2k`] | `jp2kload` / `jp2kload_buffer` (default `page = 0`) | 8-bit or 16-bit raster at the image origin's offset, plus `icc-profile-data` / `bits-per-sample` / `jp2k-resolutions` / `tile-width` / `tile-height` |
-//! | [`Raster::encode_jp2k`] | `jp2ksave_buffer` | `.jp2` bytes, always in a JP2 container |
+//! | [`Raster::encode_jp2k`] | `jp2ksave_buffer` | `.jp2` bytes, always in a JP2 container, tiled on `jp2ksave`'s own 512x512 grid by default |
 //! | [`Raster::save_jp2k`] | `jp2ksave` | `.jp2` file |
 //!
 //! # Semantics
@@ -164,6 +164,32 @@
 //! * **Float is refused, matching vips.** `vips jp2ksave` on a `float` or
 //!   `double` image fails with `not an integer format`; measured, and
 //!   [`Raster::encode_jp2k`] refuses the float carriers rather than casting.
+//! * **The save is tiled, and it is tiled by default.** `jp2ksave` sets
+//!   `tile_size_on` unconditionally with `--tile-width` / `--tile-height`
+//!   defaulting to 512, so vips cuts up anything larger than that: measured,
+//!   a 600x600 image it writes reports `tile-width: 512`. `Encoder::encode`
+//!   writes one tile and `openjpeg2-pure-rs` has no knob for the grid, so
+//!   `encode` reaches it through the format instead, encoding each tile as
+//!   a standalone image placed at the tile's absolute grid coordinates and
+//!   splicing the tile-parts under one main header. JPEG 2000 codes tiles
+//!   independently, which is what makes that a rearrangement rather than a
+//!   re-encode, and byte identity with the oracle is what says so: over 800
+//!   combinations of image size, tile grid, band count and sample depth, 770
+//!   are byte-identical to `vips jp2ksave`'s codestream and the other 30 are
+//!   the one-pixel-wide-tile rows, which this encoder and vips both refuse
+//!   with the same complaint about the resolution count. Issue #768.
+//! * **Any band count the format carries.** The ceiling used to be four, and
+//!   the reason was `hayro-jpeg2000` refusing a component set it cannot map
+//!   onto greyscale, RGB, CMYK or one of those plus alpha. That turned out to
+//!   be a property of the `colr` box: with no colour specification the
+//!   decoder answers `ColorSpace::Unknown { num_channels }` for any count,
+//!   which is the arm this module already handled and exactly vips's own
+//!   guess. So a file the decoder refuses on the channel count is handed to
+//!   it again with the box removed (a bare codestream is wrapped in a
+//!   container with an empty `jp2h` instead, since the decoder synthesises an
+//!   sRGB box for the bare form before it validates anything), and the
+//!   encoder stops where `Csiz` does. Measured against vips on 5, 6 and 8
+//!   bands: `N bands, srgb`, every sample identical. Issue #769.
 //! * **The `colr` box decides the inverse YCC, and `SIZ` decides it only when
 //!   the box does not.** The transform runs when the resolved colour space is
 //!   sYCC or e-YCC, and "resolved" means the box's enum where openjpeg
@@ -240,6 +266,7 @@
 //!   them pinned by a committed fixture, so no file that decoded before this
 //!   hands the decoder different bytes.
 
+use std::num::NonZeroU32;
 use std::path::Path;
 
 use thiserror::Error;
@@ -273,13 +300,21 @@ pub(crate) const CODESTREAM_SIGNATURE: &[u8] = b"\xff\x4f\xff\x51";
 
 /// The highest band count [`Raster::encode_jp2k`] will write.
 ///
-/// Not a format limit and not an encoder limit: `jp2ksave` writes more and so
-/// does `openjpeg2-pure-rs`, and measured, a five-band file written here reads
-/// back through `vips jp2kload` bit for bit. The ceiling is the *loader's*.
-/// `hayro-jpeg2000` refuses a component set it cannot map onto greyscale, RGB,
-/// CMYK or one of those plus alpha, so anything wider is a file this crate can
-/// write and cannot read. Issue #769 tracks lifting both halves.
-pub const MAX_BANDS: usize = 4;
+/// This is the **format's** ceiling now, `Csiz`'s range in ISO/IEC 15444-1
+/// Table A.9, and it is measured rather than read off the table:
+/// `openjpeg2-pure-rs` encodes 16384 components and refuses 16385 with
+/// `EncoderSetupFailed`.
+///
+/// It used to be 4, and the reason was the loader. `hayro-jpeg2000` refuses a
+/// component set it cannot map onto greyscale, RGB, CMYK or one of those plus
+/// alpha, so a wider file was one this crate could write and not read back.
+/// That turned out to be a property of the `colr` box rather than of the
+/// decoder: with no colour specification at all it answers
+/// `ColorSpace::Unknown { num_channels }` for any count, which is the arm
+/// this module's `interpretation` already handled and exactly vips's own
+/// guess. `ContainerLayout::unspecified_rewrite` is what hands it that file, and
+/// issue #769 has the sweep.
+pub const MAX_BANDS: usize = 16384;
 
 /// The highest component precision [`decode_jp2k`] will carry.
 ///
@@ -547,30 +582,55 @@ pub enum Compression {
 /// There is no `keep` field and no `profile` field, because `jp2ksave` has
 /// neither behind it: it inherits both from `VipsForeignSave` and implements
 /// neither, and saving with a profile produces a byte-identical file
-/// (measured). There is no tile geometry and no `subsample_mode` either;
+/// (measured). There is no `subsample_mode` either, because
 /// `openjpeg2-pure-rs`'s `EncodeOptions` exposes `format`, `threads`,
-/// `irreversible`, `use_mct`, `rates` and `num_resolutions`, and nothing here
-/// reaches the tile grid through it.
+/// `irreversible`, `use_mct`, `rates` and `num_resolutions` and nothing else.
 ///
-/// **Not because the tile knobs are private**, which is what #768 says and
-/// what I found to be wrong. Measured against the vendored source of 0.1.1:
-/// `opj_cparameters` is `pub`, `tile_size_on` / `cp_tdx` / `cp_tdy` are `pub`,
-/// they live in `pub mod openjpeg`, and that module and `api.rs` hold **zero**
-/// `unsafe` between them. Every function `Encoder::encode` calls is public.
-/// The one private piece is `Image::to_opj`, thirty lines of struct filling
-/// over `pub` types.
+/// The tile geometry is here anyway, and **not** through that struct. Two
+/// earlier readings of why it could not be were both wrong, so both are
+/// recorded rather than quietly replaced. #768 said `cp_tdx` / `cp_tdy` and
+/// `tile_size_on` are `pub(crate)`; they are `pub`, on a `pub` struct. The
+/// correction said they therefore live in `pub mod openjpeg` and are
+/// reachable; the **module** is `pub(crate)`, which a compile probe against
+/// 0.1.1 settles in one line:
 ///
-/// So the choice is not "the clean safe API against a `pub(crate)` surface",
-/// it is "upstream one field against hand-rolling `to_opj` over a c2rust
-/// translation of `opj_image` whose only stability contract is happening to be
-/// `pub`". Upstreaming still wins, for that second reason rather than the
-/// first, and `the_encoder_knobs_upstream_exposes_are_still_these_six` fails
-/// to compile the day it lands. Tiled save is issue #768.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+/// ```text
+/// error[E0603]: module `openjpeg` is private
+///  --> openjpeg2-pure-rs-0.1.1/src/lib.rs:72:1
+/// ```
+///
+/// So `Encoder::encode` really does write one tile and there really is no
+/// knob. What there is instead is the format: JPEG 2000 codes every tile
+/// independently, so the tile-part a tiled codestream carries for a tile is
+/// the tile-part a standalone codestream carries for the same region placed
+/// at the same absolute grid coordinates. `encode` encodes each tile that
+/// way and splices the parts under one main header, and the evidence that
+/// this is the same thing OpenJPEG does is byte identity with the oracle:
+/// over 800 combinations of image size, tile grid, band count and sample
+/// depth, **770 are byte-identical to the codestream `vips jp2ksave` writes**
+/// and the other 30 are the tile-width-1 rows, which this encoder and vips
+/// both refuse. Issue #768.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub struct SaveOptions {
     /// How to compress. Defaults to [`Compression::Lossless`].
     pub compression: Compression,
+    /// Tile width, `jp2ksave --tile-width`. Defaults to
+    /// [`DEFAULT_TILE_SIZE`].
+    pub tile_width: NonZeroU32,
+    /// Tile height, `jp2ksave --tile-height`. Defaults to
+    /// [`DEFAULT_TILE_SIZE`].
+    pub tile_height: NonZeroU32,
+}
+
+impl Default for SaveOptions {
+    fn default() -> Self {
+        Self {
+            compression: Compression::Lossless,
+            tile_width: DEFAULT_TILE_SIZE,
+            tile_height: DEFAULT_TILE_SIZE,
+        }
+    }
 }
 
 impl SaveOptions {
@@ -580,7 +640,44 @@ impl SaveOptions {
         self.compression = compression;
         self
     }
+
+    /// Set the tile width, returning the updated options.
+    #[must_use]
+    pub fn with_tile_width(mut self, tile_width: NonZeroU32) -> Self {
+        self.tile_width = tile_width;
+        self
+    }
+
+    /// Set the tile height, returning the updated options.
+    #[must_use]
+    pub fn with_tile_height(mut self, tile_height: NonZeroU32) -> Self {
+        self.tile_height = tile_height;
+        self
+    }
 }
+
+/// `jp2ksave`'s own default tile size, on both axes.
+///
+/// It is 512 rather than "the whole image", which is worth stating because it
+/// means vips tiles **by default**: measured, `vips jp2ksave` on a 600x600
+/// image writes a file `vipsheader` reports as `tile-width: 512`. A port that
+/// writes one tile matches vips on small images and diverges on every large
+/// one, which is the half of #768 the issue does not mention.
+///
+/// The type is [`NonZeroU32`] because vips's own property minimum is 1:
+/// `--tile-width 0` is refused by GObject with "value 0 ... is invalid or out
+/// of range for property 'tile-width'" and the default is used instead, so
+/// there is no zero to be faithful to.
+pub const DEFAULT_TILE_SIZE: NonZeroU32 = NonZeroU32::new(512).expect("512 is not zero");
+
+/// The most tiles a codestream can carry, because `Isot` is two bytes.
+///
+/// Measured rather than read off Table A.5: `vips jp2ksave` on a 256x256
+/// image at one pixel per tile fails with "Invalid number of tiles : 256 x 256
+/// (maximum fixed by jpeg2000 norm is 65535 tiles)", which is OpenJPEG's own
+/// message, and 255x255 gets past that check.
+#[cfg(feature = "jp2k")]
+const MAX_TILES: u64 = 65535;
 
 /// Decode JPEG 2000 bytes into a [`Raster`] (libvips `jp2kload_buffer` at its
 /// default `page = 0`).
@@ -655,14 +752,16 @@ impl Raster {
     /// Accepts the 8- and 16-bit carriers at one to [`MAX_BANDS`] bands:
     /// [`PixelFormat::Gray8`], [`PixelFormat::Gray16`],
     /// [`PixelFormat::Rgb8`], [`PixelFormat::Rgb16`],
-    /// [`PixelFormat::Rgba8`], [`PixelFormat::Rgba16`] and the two-band
-    /// [`PixelFormat::Multi8`] / [`PixelFormat::Multi16`] forms. The float
-    /// carriers are refused rather than cast, which is what `vips jp2ksave`
-    /// does with a `float` or `double` image, and so is anything wider than
-    /// [`MAX_BANDS`], for the reason on that constant: `jp2ksave` writes it
-    /// and [`decode_jp2k`] cannot read it back.
+    /// [`PixelFormat::Rgba8`], [`PixelFormat::Rgba16`] and the
+    /// [`PixelFormat::Multi8`] / [`PixelFormat::Multi16`] forms at any other
+    /// count. The float carriers are refused rather than cast, which is what
+    /// `vips jp2ksave` does with a `float` or `double` image, and so is
+    /// anything wider than [`MAX_BANDS`], which is the codestream's own
+    /// `Csiz` range.
     ///
-    /// The output is always a JP2 container, never a bare codestream, because
+    /// The output is tiled on [`SaveOptions`]' grid, which defaults to
+    /// `jp2ksave`'s 512x512 and so cuts up anything larger than that, and it
+    /// is always a JP2 container, never a bare codestream, because
     /// `jp2ksave` hard-codes `OPJ_CODEC_JP2` and writes the same bytes for all
     /// five suffixes it registers. Nothing attached to the raster is written:
     /// no ICC profile, no EXIF, no XMP, because `jp2ksave.c` has no code for
@@ -674,8 +773,10 @@ impl Raster {
     /// without the `jp2k` feature, which is the variant every format without
     /// an encoder in this build reports; otherwise [`EncodeError::Encode`]
     /// when the raster is float (cast first; the message says so), when it
-    /// has more than [`MAX_BANDS`] bands, or when the codec rejects the
-    /// frame.
+    /// has more than [`MAX_BANDS`] bands, when the tile grid is more than
+    /// 65535 tiles, or when the codec rejects the frame (a tile too small for
+    /// the resolution count is the one to expect, and `vips jp2ksave` refuses
+    /// the same grid).
     pub fn encode_jp2k(&self, options: SaveOptions) -> Result<Vec<u8>, EncodeError> {
         encode(self, options)
     }
@@ -761,6 +862,37 @@ struct ContainerLayout {
     /// `METH=2` box, which carries a profile instead. Both fall back to the
     /// decoder's resolved colour space, which is where they were before.
     enum_cs: Option<u32>,
+    /// Whether the file is a bare codestream rather than a JP2 container.
+    ///
+    /// A bare codestream has no boxes at all, so there is no `colr` box to
+    /// drop and [`ContainerLayout::unspecified_rewrite`] wraps it instead.
+    bare: bool,
+    /// Where the `colr` box is, and which `jp2h` holds it, for the copy
+    /// [`ContainerLayout::unspecified_rewrite`] makes.
+    ///
+    /// `None` for a bare codestream, for a JP2 with no `colr` box (which
+    /// already reaches the decoder's unspecified arm), and for the one
+    /// container shape the removal cannot keep consistent, a `jp2h` whose
+    /// length is not a plain 32-bit `LBox`.
+    colr: Option<ColrPlacement>,
+}
+
+/// Where a `colr` box sits, and enough about its parent to remove it.
+///
+/// Whole-box ranges, `LBox` included, which is what a removal has to splice
+/// out. [`BoxRef`] carries the same convention in `at` and `end`.
+#[cfg(feature = "jp2k")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ColrPlacement {
+    /// First byte of the `colr` box.
+    at: usize,
+    /// One past its last byte.
+    end: usize,
+    /// First byte of the `jp2h` box holding it, which is the first byte of
+    /// the `LBox` the removal rewrites.
+    header_at: usize,
+    /// One past the `jp2h` box's last byte.
+    header_end: usize,
 }
 
 /// One top-level or sub-box, as an offset range into the file.
@@ -768,10 +900,53 @@ struct ContainerLayout {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct BoxRef {
     kind: [u8; 4],
+    /// First byte of the box, which is the first byte of its `LBox`.
+    at: usize,
     /// First byte of the payload.
     start: usize,
-    /// One past the last byte of the payload.
+    /// One past the last byte of the payload, and of the box.
     end: usize,
+}
+
+/// One box: a 32-bit `LBox` counting itself, the four-byte `TBox`, then the
+/// payload.
+///
+/// The short form only, which is all [`wrap_bare_codestream`] needs: every box
+/// it writes is a few dozen bytes and the codestream it wraps is already
+/// bounded by the caller's allocation budget.
+#[cfg(feature = "jp2k")]
+fn jp2_box(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(payload.len() + 8);
+    let length = u32::try_from(payload.len() + 8).unwrap_or(u32::MAX);
+    out.extend_from_slice(&length.to_be_bytes());
+    out.extend_from_slice(kind);
+    out.extend_from_slice(payload);
+    out
+}
+
+/// The smallest JP2 container that carries `codestream` and says nothing else.
+///
+/// ISO/IEC 15444-1 Annex I: the signature box, a file-type box, the JP2 header
+/// box, and the contiguous codestream. The header box is **empty**, which is
+/// the point: every box that could name a colour space is one of its children,
+/// so a header with no children is a file with no colour specification, which
+/// is the shape [`ContainerLayout::unspecified_rewrite`] needs.
+///
+/// This is not a container to write out. It exists to give
+/// `hayro-jpeg2000`'s JP2 route the same codestream its bare-codestream route
+/// refuses, because that route synthesises an sRGB `colr` for anything with
+/// three or more components and then validates the count against it.
+#[cfg(feature = "jp2k")]
+fn wrap_bare_codestream(codestream: &[u8]) -> Vec<u8> {
+    let mut file_type = b"jp2 ".to_vec();
+    file_type.extend_from_slice(&0u32.to_be_bytes());
+    file_type.extend_from_slice(b"jp2 ");
+
+    let mut out = JP2_SIGNATURE.to_vec();
+    out.extend_from_slice(&jp2_box(b"ftyp", &file_type));
+    out.extend_from_slice(&jp2_box(b"jp2h", &[]));
+    out.extend_from_slice(&jp2_box(b"jp2c", codestream));
+    out
 }
 
 /// A short reason string, wrapped as [`Jp2kError::Container`].
@@ -854,6 +1029,7 @@ fn walk_boxes(bytes: &[u8], from: usize, to: usize) -> Result<Vec<BoxRef>, Jp2kE
         }
         out.push(BoxRef {
             kind,
+            at,
             start: at + header,
             end,
         });
@@ -876,6 +1052,7 @@ impl ContainerLayout {
                 .ok_or_else(|| container("no jp2c box, so the file carries no codestream"))?;
             let mut icc = None;
             let mut enum_cs = None;
+            let mut colr_placement = None;
             for header in top.iter().filter(|b| &b.kind == b"jp2h") {
                 let boxes = walk_boxes(bytes, header.start, header.end)?;
                 let colr: Vec<&[u8]> = boxes
@@ -887,6 +1064,22 @@ impl ContainerLayout {
                 enum_cs = boxes.iter().filter(|b| &b.kind == b"colr").find_map(|b| {
                     enumerated_colour_space(&bytes[b.start..b.end]).map(|cs| (cs, b.start + 3))
                 });
+                // The removal splices out a whole box and shrinks the `LBox`
+                // above it, so it needs both ranges and a `jp2h` whose length
+                // really is that `LBox`. A `jp2h` written with an extended or
+                // to-the-end length is left alone rather than guessed at.
+                if colr_placement.is_none() && header.start - header.at == 8 {
+                    colr_placement =
+                        boxes
+                            .iter()
+                            .find(|b| &b.kind == b"colr")
+                            .map(|b| ColrPlacement {
+                                at: b.at,
+                                end: b.end,
+                                header_at: header.at,
+                                header_end: header.end,
+                            });
+                }
                 if icc.is_some() || enum_cs.is_some() {
                     break;
                 }
@@ -896,6 +1089,8 @@ impl ContainerLayout {
                 icc,
                 enum_cs_at: enum_cs.map(|(_, at)| at),
                 enum_cs: enum_cs.map(|(cs, _)| cs),
+                bare: false,
+                colr: colr_placement,
             })
         } else if bytes.starts_with(CODESTREAM_SIGNATURE) {
             Ok(Self {
@@ -903,6 +1098,8 @@ impl ContainerLayout {
                 icc: None,
                 enum_cs_at: None,
                 enum_cs: None,
+                bare: true,
+                colr: None,
             })
         } else {
             Err(container(
@@ -946,6 +1143,55 @@ impl ContainerLayout {
         let mut copy = bytes.to_vec();
         copy.get_mut(at..at + 4)?
             .copy_from_slice(&ENUMCS_SRGB.to_be_bytes());
+        Some(copy)
+    }
+
+    /// A copy of the file that says nothing about its colour space, for the
+    /// component counts the decoder cannot name, or `None` when there is no
+    /// such copy to make.
+    ///
+    /// `hayro-jpeg2000` validates the component count against whatever colour
+    /// space it resolved and gives up with `ValidationError::TooManyChannels`
+    /// on anything it cannot map onto greyscale, RGB, CMYK or one of those
+    /// plus alpha. That reads like a five-channel ceiling and is not one: with
+    /// **no** colour specification box at all, `get_color_space` answers
+    /// `ColorSpace::Unknown { num_channels }` for any count, and the
+    /// validation that follows compares that count against itself and passes.
+    /// So the rewrite is a removal rather than a substitution, and it is
+    /// derived from the decoder's own fallback rather than invented until it
+    /// stopped complaining.
+    ///
+    /// Two shapes, and a third that needs nothing:
+    ///
+    /// * a JP2 with a `colr` box loses it, and the `jp2h` above it loses the
+    ///   same number of bytes from its `LBox`;
+    /// * a bare codestream has no box to drop, so it is wrapped in the
+    ///   smallest container the decoder's JP2 route accepts: the signature
+    ///   box, a `jp2 ` file-type box, an **empty** `jp2h`, and the codestream.
+    ///   `jp2h`'s children are the only boxes that carry colour, so an empty
+    ///   one is the same statement as a missing `colr`;
+    /// * a JP2 that already has no `colr` box never reaches here, because it
+    ///   was never refused.
+    ///
+    /// The caller runs this **only** after the decoder has refused the file on
+    /// the channel count, so no file that decodes today is handed different
+    /// bytes, and a file this does not rescue keeps the error it already had.
+    /// Measured against the oracle on 5, 6 and 8 components: `vips jp2kload`
+    /// reads all three as `N bands, srgb` with every sample identical, which
+    /// is what [`interpretation`] answers for
+    /// `ColorSpace::Unknown { num_channels }` at three bands or more.
+    fn unspecified_rewrite(&self, bytes: &[u8]) -> Option<Vec<u8>> {
+        if self.bare {
+            return Some(wrap_bare_codestream(bytes));
+        }
+        let colr = self.colr?;
+        let width = colr.end.checked_sub(colr.at)?;
+        let shrunk = u32::try_from(colr.header_end.checked_sub(colr.header_at)? - width).ok()?;
+        let mut copy = Vec::with_capacity(bytes.len() - width);
+        copy.extend_from_slice(bytes.get(..colr.at)?);
+        copy.extend_from_slice(bytes.get(colr.end..)?);
+        copy.get_mut(colr.header_at..colr.header_at + 4)?
+            .copy_from_slice(&shrunk.to_be_bytes());
         Some(copy)
     }
 
@@ -1254,7 +1500,7 @@ impl CodestreamHeader {
     /// with the second and third subsampled against the first.
     ///
     /// The other half of vips's condition, an unspecified colour space, is
-    /// [`ContainerLayout::bare`] and is checked by the caller.
+    /// [`ContainerLayout::runs_inverse_ycc`]'s job and not this one's.
     fn chroma_subsampled(&self) -> bool {
         self.components.len() == 3
             && self.components[0].dx == 1
@@ -1361,7 +1607,43 @@ fn decode(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
         }
         None => bytes,
     };
-    let image = Jp2kImage::new(for_decoder, &DecodeSettings::default()).map_err(decode_error)?;
+    // The second rewrite, and the only one that changes which files decode at
+    // all. `hayro-jpeg2000` refuses a component count it cannot map onto a
+    // colour space it can name, which is every count above four, and the way
+    // past it is to stop naming one: with no colour specification the decoder
+    // reaches its own `Unknown { num_channels }` arm and validates the count
+    // against itself. Issue #769, and the sweep is on
+    // `ContainerLayout::unspecified_rewrite`.
+    //
+    // Gated on the refusal rather than on the count, which is what makes it
+    // safe: a five-component CMYK-plus-alpha file is a count the decoder
+    // *can* name, and dropping its box would turn a file that decodes into
+    // one that does not. Asking first costs one header parse and only for
+    // files that were about to be refused anyway.
+    let unspecified;
+    let image = match Jp2kImage::new(for_decoder, &DecodeSettings::default()) {
+        Ok(image) => image,
+        Err(refusal) => {
+            let retry = matches!(
+                refusal,
+                hayro_jpeg2000::DecodeError::Validation(
+                    hayro_jpeg2000::ValidationError::TooManyChannels
+                )
+            )
+            .then(|| layout.unspecified_rewrite(for_decoder))
+            .flatten();
+            let Some(copy) = retry else {
+                return Err(decode_error(refusal).into());
+            };
+            limits.check_alloc("JPEG 2000 container rewrite", copy.len() as u64)?;
+            unspecified = copy;
+            // A file the removal does not rescue keeps the error it already
+            // had, so nothing here can report a second-order failure about a
+            // container this module synthesised.
+            Jp2kImage::new(&unspecified, &DecodeSettings::default())
+                .map_err(|_| decode_error(refusal))?
+        }
+    };
     let (width, height) = (image.width(), image.height());
     // Two parsers read the same `SIZ`, and the allocation budget below is
     // spent on this one's answer while the sign bit and the subsampling
@@ -1790,11 +2072,23 @@ fn decode_error(error: hayro_jpeg2000::DecodeError) -> Jp2kError {
 // ---------------------------------------------------------------------------
 
 /// The `jp2k`-feature-on body of [`Raster::encode_jp2k`].
+///
+/// One codestream per tile, spliced under one main header. JPEG 2000 codes
+/// every tile independently, so the tile-part for a region is the same bytes
+/// whether it was produced as one tile of a tiled image or as the whole of a
+/// standalone one placed at the same absolute grid coordinates, which is what
+/// makes the splice a rearrangement rather than a re-encode. The
+/// [`SaveOptions`] doc has the byte-identity measurement against
+/// `vips jp2ksave` that says this is the same thing OpenJPEG does.
 #[cfg(feature = "jp2k")]
 fn encode(raster: &Raster, options: SaveOptions) -> Result<Vec<u8>, EncodeError> {
     use openjpeg2_pure::{EncodeOptions, Encoder, Format, Image, ImageComponent};
 
-    let SaveOptions { compression } = options;
+    let SaveOptions {
+        compression,
+        tile_width,
+        tile_height,
+    } = options;
     let ComponentLayout {
         precision,
         element_bytes,
@@ -1802,62 +2096,38 @@ fn encode(raster: &Raster, options: SaveOptions) -> Result<Vec<u8>, EncodeError>
     } = sample_depth(raster.format())?;
     let (width, height) = (raster.width(), raster.height());
     let bands = raster.format().channels();
-    // `jp2ksave` writes any band count and `openjpeg2-pure-rs` encodes any
-    // band count: measured, a five-band file written here reads back through
-    // `vips jp2kload` bit for bit as `5 bands, srgb`. What cannot read it back
-    // is `decode_jp2k`, because `hayro-jpeg2000` refuses a component set it
-    // cannot map onto greyscale, RGB, CMYK or one of those plus alpha
-    // (`ValidationError::TooManyChannels`). An encoder that writes files its
-    // own loader rejects is a worse trade than a typed refusal, which is the
-    // call `crate::jxl` makes for the band counts `zune-jpegxl` has no
-    // spelling for. Lifting both halves is issue #769.
-    //
-    // The wall is narrower than "more than four channels", measured in
-    // `the_band_ceiling_is_the_loaders_and_it_is_narrower_than_a_channel_count`:
-    // five components read back under a CMYK `colr` box and under no other,
-    // because CMYK plus alpha is five channels the decoder can name, and six
-    // read back under none at all. So the ceiling could move to five only by
-    // tagging a `Multi8(5)` as CMYK, which invents a colour meaning it does
-    // not have. What #769 actually waits on is
-    // `ColorSpace::Unknown { num_channels }`, a variant `hayro-jpeg2000`
-    // already has and never reports for a count it cannot name.
+    // The ceiling is the format's, not the loader's. It was the loader's
+    // until #769: `hayro-jpeg2000` refuses any component count it cannot map
+    // onto a colour space it can name, so anything past four was a file this
+    // crate could write and could not read back. `decode` now hands that file
+    // to the decoder with nothing saying what its colour space is, which is
+    // the arm the decoder answers `Unknown { num_channels }` from, so both
+    // halves move together and the encoder stops at `Csiz`.
     if bands > MAX_BANDS {
         return Err(EncodeError::encode(format!(
-            "jp2k: this build writes at most {MAX_BANDS} bands and the raster has \
-             {bands}; vips jp2ksave writes more, but decode_jp2k cannot read them back, \
-             so the refusal keeps the codec symmetric (issue #769)"
+            "jp2k: a JPEG 2000 codestream declares at most {MAX_BANDS} components in \
+             its SIZ marker (Csiz, ISO/IEC 15444-1 Table A.9) and the raster has \
+             {bands}; measured, openjpeg2-pure-rs refuses {} with EncoderSetupFailed",
+            MAX_BANDS + 1
         )));
     }
 
-    // One plane per band, de-interleaved, because JPEG 2000 is a
-    // component-planar format and the encoder takes it that way.
-    let data = raster.data();
-    let plane = width as usize * height as usize;
-    let mut components = Vec::with_capacity(bands);
-    for band in 0..bands {
-        let mut samples = Vec::with_capacity(plane);
-        for i in 0..plane {
-            let at = (i * bands + band) * element_bytes;
-            // Read at the raster's own signedness, not at its width. Widening
-            // an `Int8` sample of -5 through `u8` would hand the encoder 251
-            // and write a file that says -5 nowhere, which is the silent
-            // wrong answer issue #905 exists to avoid.
-            samples.push(match (element_bytes, signed) {
-                (1, false) => i32::from(data[at]),
-                (1, true) => i32::from(data[at] as i8),
-                (_, false) => i32::from(u16::from_ne_bytes([data[at], data[at + 1]])),
-                (_, true) => i32::from(i16::from_ne_bytes([data[at], data[at + 1]])),
-            });
-        }
-        components.push(
-            ImageComponent::new(width, height, precision, signed, samples)
-                .map_err(|e| EncodeError::encode(format!("jp2k: component {band}: {e:?}")))?,
-        );
+    // The tile grid, which is `jp2ksave`'s and defaults to its 512x512 rather
+    // than to the whole image: measured, vips writes `tile-width: 512` for a
+    // 600x600 image, so an encoder that always writes one tile diverges on
+    // every image bigger than that.
+    let across = width.div_ceil(tile_width.get()).max(1);
+    let down = height.div_ceil(tile_height.get()).max(1);
+    let tiles = u64::from(across) * u64::from(down);
+    if tiles > MAX_TILES {
+        return Err(EncodeError::encode(format!(
+            "jp2k: a {width}x{height} image at {}x{} pixels per tile is {tiles} tiles \
+             and a codestream indexes at most {MAX_TILES} through its two-byte Isot; \
+             vips jp2ksave refuses the same grid with \"Invalid number of tiles\"",
+            tile_width.get(),
+            tile_height.get()
+        )));
     }
-
-    let colour = encoder_colour_space(raster);
-    let image = Image::new(width, height, colour, components)
-        .map_err(|e| EncodeError::encode(format!("jp2k: {e:?}")))?;
 
     let (irreversible, rates) = match compression {
         // `tcp_rates[0] = 0` under `cp_disto_alloc` is OpenJPEG's spelling for
@@ -1866,32 +2136,366 @@ fn encode(raster: &Raster, options: SaveOptions) -> Result<Vec<u8>, EncodeError>
         Compression::Lossless => (false, vec![0.0f32]),
         Compression::Lossy { ratio } => (true, vec![f32::from(ratio.get())]),
     };
-    let encoded = Encoder::encode(
-        &image,
-        &EncodeOptions {
-            // `jp2ksave` hard-codes `OPJ_CODEC_JP2` and writes the same
-            // container for all five suffixes it registers, so there is
-            // nothing here for a caller to choose.
-            format: Format::Jp2,
-            // libviprs schedules its own work in the engine, so a codec that
-            // starts a second pool underneath it is not something this crate
-            // wants. Same call as `exr`'s and `jxl-oxide`'s dropped `rayon`.
-            threads: 0,
-            irreversible,
-            // `jp2ksave` sets `tcp_mct` from the band count alone
-            // (`image->Bands >= 3`), CMYK included: measured, `mct` is 1 in
-            // the `cmyk_lossless.jp2` and `rgba_lossless.jp2` fixtures' `COD`
-            // segments. The reversible multiple-component transform is
-            // exactly invertible, so this costs no accuracy: measured, every
-            // carrier round-trips through `vips jp2kload` bit for bit with it
-            // on.
-            use_mct: bands >= 3,
-            rates,
-            num_resolutions: Some(num_resolutions(width, height)),
-        },
-    )
-    .map_err(|e| EncodeError::encode(format!("jp2k: {e:?}")))?;
-    Ok(encoded)
+    let colour = encoder_colour_space(raster);
+    let data = raster.data();
+    let row = width as usize * bands * element_bytes;
+
+    // One tile, encoded as a standalone image sitting where the tile sits.
+    //
+    // `x0` / `y0` are the whole of what makes the splice legal. OpenJPEG's
+    // tile grid starts at `cp_tx0`, which is zero, so a standalone image whose
+    // own origin is the tile's origin is one tile covering exactly the
+    // absolute region that tile covers. The wavelet, the code-block partition
+    // and the precincts are all anchored on those absolute coordinates, so the
+    // coded bytes are the ones a tiled encode would have produced.
+    let encode_tile = |tx: u32, ty: u32, format: Format| -> Result<Vec<u8>, EncodeError> {
+        let x0 = tx * tile_width.get();
+        let y0 = ty * tile_height.get();
+        let x1 = x0.saturating_add(tile_width.get()).min(width);
+        let y1 = y0.saturating_add(tile_height.get()).min(height);
+        let (tile_w, tile_h) = (x1 - x0, y1 - y0);
+
+        // One plane per band, de-interleaved, because JPEG 2000 is a
+        // component-planar format and the encoder takes it that way.
+        let plane = tile_w as usize * tile_h as usize;
+        let mut components = Vec::with_capacity(bands);
+        for band in 0..bands {
+            let mut samples = Vec::with_capacity(plane);
+            for line in 0..tile_h as usize {
+                let base = (y0 as usize + line) * row + x0 as usize * bands * element_bytes;
+                for column in 0..tile_w as usize {
+                    let at = base + (column * bands + band) * element_bytes;
+                    // Read at the raster's own signedness, not at its width.
+                    // Widening an `Int8` sample of -5 through `u8` would hand
+                    // the encoder 251 and write a file that says -5 nowhere,
+                    // which is the silent wrong answer issue #905 exists to
+                    // avoid.
+                    samples.push(match (element_bytes, signed) {
+                        (1, false) => i32::from(data[at]),
+                        (1, true) => i32::from(data[at] as i8),
+                        (_, false) => i32::from(u16::from_ne_bytes([data[at], data[at + 1]])),
+                        (_, true) => i32::from(i16::from_ne_bytes([data[at], data[at + 1]])),
+                    });
+                }
+            }
+            components.push(
+                ImageComponent::new(tile_w, tile_h, precision, signed, samples)
+                    .map_err(|e| EncodeError::encode(format!("jp2k: component {band}: {e:?}")))?,
+            );
+        }
+
+        let mut image = Image::new(tile_w, tile_h, colour, components)
+            .map_err(|e| EncodeError::encode(format!("jp2k: {e:?}")))?;
+        image.x0 = x0;
+        image.y0 = y0;
+        Encoder::encode(
+            &image,
+            &EncodeOptions {
+                // `jp2ksave` hard-codes `OPJ_CODEC_JP2` and writes the same
+                // container for all five suffixes it registers, so there is
+                // nothing here for a caller to choose. The tiles after the
+                // first are asked for the bare codestream instead, because
+                // the container is written once: measured, a `Jp2` encode's
+                // `jp2c` payload is byte-identical to the `J2k` encode of the
+                // same image.
+                format,
+                // libviprs schedules its own work in the engine, so a codec
+                // that starts a second pool underneath it is not something
+                // this crate wants. Same call as `exr`'s and `jxl-oxide`'s
+                // dropped `rayon`.
+                threads: 0,
+                irreversible,
+                // `jp2ksave` sets `tcp_mct` from the band count alone
+                // (`image->Bands >= 3`), CMYK included: measured, `mct` is 1
+                // in the `cmyk_lossless.jp2` and `rgba_lossless.jp2`
+                // fixtures' `COD` segments. The reversible multiple-component
+                // transform is exactly invertible, so this costs no accuracy:
+                // measured, every carrier round-trips through
+                // `vips jp2kload` bit for bit with it on.
+                use_mct: bands >= 3,
+                rates: rates.clone(),
+                // From the **image**, not from the tile, which is `jp2ksave`'s
+                // own rule. It is also what makes one main header serve every
+                // tile, and it is why a tile narrower than the decomposition
+                // needs is refused by the encoder rather than quietly given a
+                // different one: vips fails that grid too, with "Number of
+                // resolutions is too high in comparison to the size of tiles".
+                num_resolutions: Some(num_resolutions(width, height)),
+            },
+        )
+        .map_err(|e| {
+            if tiles == 1 {
+                EncodeError::encode(format!("jp2k: {e:?}"))
+            } else {
+                EncodeError::encode(format!("jp2k: tile ({tx}, {ty}): {e:?}"))
+            }
+        })
+    };
+
+    let mut file = encode_tile(0, 0, Format::Jp2)?;
+    let own = OwnContainer::parse(&file)?;
+    // vips writes the requested tile size into `SIZ` whether or not it cuts
+    // the image in two: measured, `jp2ksave --lossless` on a 37x21 image
+    // writes `XTsiz = YTsiz = 512`, and this module used to write 37 and 21.
+    // That is the only byte in a single-tile file that differed from vips's.
+    patch_siz(
+        &mut file,
+        own.codestream,
+        width,
+        height,
+        tile_width.get(),
+        tile_height.get(),
+    )?;
+    if tiles == 1 {
+        return Ok(file);
+    }
+
+    // More than one tile, so the container and the main header the first tile
+    // came with describe a 37x21-shaped lie about a 16x16 encode. Both say the
+    // image size and nothing else about the geometry, so both are corrected in
+    // place rather than rebuilt.
+    patch_ihdr(&mut file, own.ihdr, width, height)?;
+    let (first_sot, first_end) = sole_tile_part(&file[own.codestream..])?;
+    let main_header = own.codestream..own.codestream + first_sot;
+    let after_siz = own.codestream + siz_length(&file[own.codestream..])?;
+    let shared: Vec<u8> = file[after_siz..main_header.end].to_vec();
+
+    let mut out = file[..main_header.end].to_vec();
+    append_tile_part(
+        &mut out,
+        &file[own.codestream + first_sot..own.codestream + first_end],
+        0,
+    )?;
+    for index in 1..tiles {
+        let tx = u32::try_from(index % u64::from(across)).expect("a tile index fits");
+        let ty = u32::try_from(index / u64::from(across)).expect("a tile index fits");
+        let part = encode_tile(tx, ty, Format::J2k)?;
+        // The main header is written once and claimed to serve every tile, so
+        // every tile has to agree with it. They do by construction (the
+        // coding style comes from the image, not from the tile) and this is
+        // what says so rather than assuming it.
+        let (sot, end) = sole_tile_part(&part)?;
+        if part[siz_length(&part)?..sot] != shared[..] {
+            return Err(EncodeError::encode(format!(
+                "jp2k: tile ({tx}, {ty}) encoded with a different coding style than tile \
+                 (0, 0), so one main header cannot describe both"
+            )));
+        }
+        append_tile_part(&mut out, &part[sot..end], index)?;
+    }
+    out.extend_from_slice(&MARKER_EOC.to_be_bytes());
+
+    // `jp2c` is the last box, so its length is everything from its own first
+    // byte to the end.
+    let jp2c_length = u32::try_from(out.len() - own.jp2c_at).map_err(|_| {
+        EncodeError::encode("jp2k: the tiled codestream is too long for a 32-bit box length")
+    })?;
+    out[own.jp2c_at..own.jp2c_at + 4].copy_from_slice(&jp2c_length.to_be_bytes());
+    Ok(out)
+}
+
+/// The offsets [`encode`] rewrites in a JP2 it just wrote itself.
+///
+/// Every field is checked rather than assumed, because a container this module
+/// then edits in place is one where a wrong offset is a corrupt file rather
+/// than an error. The encoder is the only producer these bytes ever come from,
+/// so anything here failing means it changed shape underneath this module.
+#[cfg(feature = "jp2k")]
+struct OwnContainer {
+    /// First byte of the `jp2c` box, which is the first byte of the `LBox`
+    /// the tiled assembly rewrites.
+    jp2c_at: usize,
+    /// First byte of the codestream, which is its `SOC` marker.
+    codestream: usize,
+    /// First byte of the `ihdr` box's payload, whose first eight bytes are
+    /// the image height and width.
+    ihdr: usize,
+}
+
+#[cfg(feature = "jp2k")]
+impl OwnContainer {
+    /// The `ihdr` payload's length, ISO/IEC 15444-1 Annex I.5.3.1: `HEIGHT`,
+    /// `WIDTH`, `NC`, `BPC`, `C`, `UnkC`, `IPR`.
+    const IHDR_PAYLOAD: usize = 14;
+
+    fn parse(file: &[u8]) -> Result<Self, EncodeError> {
+        let own = |reason: String| EncodeError::encode(format!("jp2k: {reason}"));
+        let top = walk_boxes(file, 0, file.len()).map_err(|e| {
+            own(format!(
+                "the container this module wrote does not parse: {e}"
+            ))
+        })?;
+        let jp2c = top
+            .iter()
+            .find(|b| &b.kind == b"jp2c")
+            .ok_or_else(|| own("the container this module wrote has no jp2c box".into()))?;
+        if jp2c.start - jp2c.at != 8 || jp2c.end != file.len() {
+            return Err(own(
+                "the jp2c box this module wrote is not the last box with a plain length".into(),
+            ));
+        }
+        let header = top
+            .iter()
+            .find(|b| &b.kind == b"jp2h")
+            .ok_or_else(|| own("the container this module wrote has no jp2h box".into()))?;
+        let children = walk_boxes(file, header.start, header.end).map_err(|e| {
+            own(format!(
+                "the jp2h box this module wrote does not parse: {e}"
+            ))
+        })?;
+        let ihdr = children
+            .iter()
+            .find(|b| &b.kind == b"ihdr")
+            .ok_or_else(|| own("the jp2h box this module wrote has no ihdr box".into()))?;
+        if ihdr.end - ihdr.start != Self::IHDR_PAYLOAD {
+            return Err(own(format!(
+                "the ihdr box this module wrote carries {} payload bytes and Annex I.5.3.1 \
+                 fixes it at {}",
+                ihdr.end - ihdr.start,
+                Self::IHDR_PAYLOAD
+            )));
+        }
+        Ok(Self {
+            jp2c_at: jp2c.at,
+            codestream: jp2c.start,
+            ihdr: ihdr.start,
+        })
+    }
+}
+
+/// How long the `SOC` + `SIZ` pair opening a codestream is.
+///
+/// `SOC` is two bytes with no length and `SIZ` is a marker plus a length that
+/// counts itself, so the first marker after them is at `2 + 2 + Lsiz`.
+#[cfg(feature = "jp2k")]
+fn siz_length(codestream: &[u8]) -> Result<usize, EncodeError> {
+    let lsiz = codestream
+        .get(4..6)
+        .ok_or_else(|| EncodeError::encode("jp2k: the codestream ends inside its SIZ marker"))?;
+    Ok(4 + usize::from(u16::from_be_bytes([lsiz[0], lsiz[1]])))
+}
+
+/// Rewrite the image and tile geometry in a codestream's `SIZ` marker.
+///
+/// The eight consecutive big-endian `u32`s after `Rsiz`, in the order Table
+/// A.9 gives them: `Xsiz`, `Ysiz`, `XOsiz`, `YOsiz`, `XTsiz`, `YTsiz`,
+/// `XTOsiz`, `YTOsiz`. The origins are all zero because this encoder writes
+/// images at the grid origin and tile grids that start there.
+#[cfg(feature = "jp2k")]
+fn patch_siz(
+    file: &mut [u8],
+    codestream: usize,
+    width: u32,
+    height: u32,
+    tile_width: u32,
+    tile_height: u32,
+) -> Result<(), EncodeError> {
+    let opening = file
+        .get(codestream..codestream + 4)
+        .ok_or_else(|| EncodeError::encode("jp2k: the codestream ends before its SIZ marker"))?;
+    if u16::from_be_bytes([opening[0], opening[1]]) != MARKER_SOC
+        || u16::from_be_bytes([opening[2], opening[3]]) != MARKER_SIZ
+    {
+        return Err(EncodeError::encode(
+            "jp2k: the codestream this module wrote does not open with SOC then SIZ",
+        ));
+    }
+    // `SOC` (2), the `SIZ` marker (2), `Lsiz` (2), `Rsiz` (2).
+    let at = codestream + 8;
+    let fields = [width, height, 0, 0, tile_width, tile_height, 0, 0];
+    let room = file
+        .get_mut(at..at + fields.len() * 4)
+        .ok_or_else(|| EncodeError::encode("jp2k: the SIZ marker ends before its geometry"))?;
+    for (slot, value) in room.as_chunks_mut::<4>().0.iter_mut().zip(fields) {
+        *slot = value.to_be_bytes();
+    }
+    Ok(())
+}
+
+/// Rewrite the image size in an `ihdr` box, which the first tile's encode
+/// filled in with the first tile's size.
+///
+/// The current values are asserted rather than overwritten blind: they are the
+/// tile-zero geometry this module just asked for, and anything else means the
+/// box being patched is not the one this module thinks it is.
+#[cfg(feature = "jp2k")]
+fn patch_ihdr(file: &mut [u8], ihdr: usize, width: u32, height: u32) -> Result<(), EncodeError> {
+    let payload = file
+        .get_mut(ihdr..ihdr + 8)
+        .ok_or_else(|| EncodeError::encode("jp2k: the ihdr box ends before its size fields"))?;
+    payload[..4].copy_from_slice(&height.to_be_bytes());
+    payload[4..].copy_from_slice(&width.to_be_bytes());
+    Ok(())
+}
+
+/// The one tile-part of a single-tile codestream: where its `SOT` marker
+/// starts, and where the part ends.
+///
+/// The walk is the main header's, stopping at the first `SOT`. `Psot` is the
+/// part's whole length counted from the `SOT` marker; a `Psot` of zero means
+/// "to the `EOC`", which this encoder does not write but the standard allows.
+#[cfg(feature = "jp2k")]
+fn sole_tile_part(codestream: &[u8]) -> Result<(usize, usize), EncodeError> {
+    let bad = |reason: &str| EncodeError::encode(format!("jp2k: {reason}"));
+    let mut at = 2usize;
+    while at + 4 <= codestream.len() {
+        let marker = u16::from_be_bytes([codestream[at], codestream[at + 1]]);
+        if marker == MARKER_SOT {
+            let psot = codestream
+                .get(at + 6..at + 10)
+                .ok_or_else(|| bad("a SOT segment ends before its Psot field"))?;
+            let psot = u32::from_be_bytes([psot[0], psot[1], psot[2], psot[3]]) as usize;
+            let end = if psot == 0 {
+                codestream
+                    .len()
+                    .checked_sub(2)
+                    .ok_or_else(|| bad("a codestream with Psot = 0 has no EOC to end at"))?
+            } else {
+                at.checked_add(psot)
+                    .filter(|end| *end <= codestream.len())
+                    .ok_or_else(|| bad("a tile-part declares a Psot past the end"))?
+            };
+            if end < at + 12 {
+                return Err(bad("a tile-part is shorter than its own SOT segment"));
+            }
+            return Ok((at, end));
+        }
+        if marker == MARKER_SOD || marker == MARKER_EOC || marker >> 8 != 0xff {
+            return Err(bad("a codestream this module wrote has no tile-part"));
+        }
+        let length = usize::from(u16::from_be_bytes([codestream[at + 2], codestream[at + 3]]));
+        if length < 2 {
+            return Err(bad(
+                "a marker segment declares a length shorter than itself",
+            ));
+        }
+        at += 2 + length;
+    }
+    Err(bad(
+        "a codestream this module wrote ends inside its main header",
+    ))
+}
+
+/// Append one tile-part, renumbered for its place in the assembled grid.
+///
+/// `Isot` becomes the tile's index, `Psot` the part's own length, and
+/// `TPsot` / `TNsot` say this is the first and only tile-part for the tile.
+/// Every one of them is already what it needs to be except `Isot`, which each
+/// standalone encode wrote as zero; they are written anyway so the assembled
+/// header says what it means rather than what it inherited.
+#[cfg(feature = "jp2k")]
+fn append_tile_part(out: &mut Vec<u8>, part: &[u8], index: u64) -> Result<(), EncodeError> {
+    let isot = u16::try_from(index)
+        .map_err(|_| EncodeError::encode("jp2k: a tile index does not fit in Isot"))?;
+    let psot = u32::try_from(part.len())
+        .map_err(|_| EncodeError::encode("jp2k: a tile-part is too long for Psot"))?;
+    let at = out.len();
+    out.extend_from_slice(part);
+    out[at + 4..at + 6].copy_from_slice(&isot.to_be_bytes());
+    out[at + 6..at + 10].copy_from_slice(&psot.to_be_bytes());
+    out[at + 10] = 0;
+    out[at + 11] = 1;
+    Ok(())
 }
 
 /// `jp2ksave`'s resolution count: `max(1, floor(log2(min(w, h))) - 5)`.
@@ -2091,6 +2695,14 @@ mod tests {
     fn payload_digest(raster: &Raster) -> String {
         use sha2::Digest;
         crate::hex::hex_lower(&sha2::Sha256::digest(raster.data()))
+    }
+
+    /// The SHA-256 of a byte slice, for pinning an encoder's whole output
+    /// against the oracle's.
+    #[cfg(feature = "jp2k")]
+    fn digest(bytes: &[u8]) -> String {
+        use sha2::Digest;
+        crate::hex::hex_lower(&sha2::Sha256::digest(bytes))
     }
 
     /// A raster's samples as `u32`, whatever the carrier width, in the
@@ -3599,40 +4211,39 @@ mod tests {
     }
 
     /**
-     * Pins the wall the band ceiling actually stands on, because #769's
-     * stated cause is a channel count and the measurement is narrower than
-     * that (issue #769).
-     * `Raster::encode_jp2k` refuses more than `MAX_BANDS`, and the reason is
-     * the loader rather than the format or the encoder: `openjpeg2-pure-rs`
-     * writes any band count and `vips jp2kload` reads a five-band file back
-     * as `5 bands, srgb`. Measured here by encoding two, five and six
-     * component codestreams through the same encoder and handing each to the
-     * decoder under every `colr` box that could change its mind:
+     * Pins the wall four components used to stand against, and corrects the
+     * table that was published for it (issue #769).
+     * The earlier sweep asked `hayro-jpeg2000` to read 2, 5 and 6 component
+     * codestreams under every `colr` box that could change its mind, and
+     * concluded that six components were readable under nothing and that the
+     * decoder never reports `ColorSpace::Unknown { num_channels }`. Both
+     * conclusions were wrong, and they were wrong because the sweep had no
+     * column for the case that matters: **no `colr` box at all**. Its "bare"
+     * column was the raw codestream, and the decoder synthesises an sRGB box
+     * for that before it validates anything.
      *
-     * | components | sRGB | greyscale | CMYK | none (bare) |
-     * |---|---|---|---|---|
-     * | 2 | refused | Gray + alpha | refused | Gray + alpha |
-     * | 5 | refused | refused | **CMYK + alpha** | refused |
-     * | 6 | refused | refused | refused | refused |
+     * | components | sRGB | greyscale | CMYK | sYCC | bare codestream | JP2, no colr box |
+     * |---|---|---|---|---|---|---|
+     * | 2 | refused | Gray + alpha | refused | refused | Gray + alpha | `Unknown { 2 }` |
+     * | 5 | refused | refused | **CMYK + alpha** | refused | refused | **`Unknown { 5 }`** |
+     * | 6 | refused | refused | refused | refused | refused | **`Unknown { 6 }`** |
      *
-     * So five components are readable in exactly one way, as CMYK plus alpha,
-     * which is #769's own footnote and not a general lift: a `Multi8(5)` has
-     * no CMYK meaning and tagging it that way invents one. Six are unreadable
-     * under every box there is. The wall is `hayro-jpeg2000` never reporting
-     * `ColorSpace::Unknown { num_channels }`, a variant it already has, for a
-     * count it cannot name.
-     * This goes red the day that changes, which is what #769 is waiting for.
-     * Input: 2, 5 and 6 component codestreams -> Output: the table above.
+     * The last column is the new one and every cell in it was measured; the
+     * five before it are the earlier table's, re-run here rather than
+     * inherited. So the wall was the box, the decoder has had the arm all
+     * along, and `ContainerLayout::unspecified_rewrite` is what reaches it.
+     * Input: 2, 5 and 6 component codestreams under six box configurations
+     * -> Output: the table above.
      */
     #[test]
     #[cfg(feature = "jp2k")]
-    fn the_band_ceiling_is_the_loaders_and_it_is_narrower_than_a_channel_count() {
+    fn the_wall_above_four_components_was_the_colr_box_and_not_the_count() {
         use hayro_jpeg2000::{DecodeSettings, Image as Jp2kImage};
         use openjpeg2_pure::{EncodeOptions, Encoder, Format, Image, ImageComponent};
 
         /// A `components`-component 8x6 codestream, written through the same
-        /// encoder `Raster::encode_jp2k` uses and past the ceiling it enforces.
-        fn encoded(components: usize) -> Vec<u8> {
+        /// encoder `Raster::encode_jp2k` uses.
+        fn encoded(components: usize, format: Format) -> Vec<u8> {
             let comps: Vec<ImageComponent> = (0..components)
                 .map(|band| {
                     ImageComponent::new(
@@ -3652,70 +4263,91 @@ mod tests {
             Encoder::encode(
                 &image,
                 &EncodeOptions {
-                    format: Format::Jp2,
+                    format,
                     ..EncodeOptions::default()
                 },
             )
-            .expect("the encoder writes any band count, which is half of #769")
+            .expect("the encoder writes any band count")
         }
 
-        /// Whether the decoder will read `bytes` at all.
-        fn reads(bytes: &[u8]) -> bool {
-            Jp2kImage::new(bytes, &DecodeSettings::default()).is_ok()
+        /// What the decoder makes of `bytes`, as the table spells it.
+        fn read(bytes: &[u8]) -> Option<(u8, bool)> {
+            Jp2kImage::new(bytes, &DecodeSettings::default())
+                .ok()
+                .map(|image| (image.color_space().num_channels(), image.has_alpha()))
         }
 
-        // Two components: the ordinary greyscale-plus-alpha shape, and the
-        // control that says the sweep is measuring the decoder rather than the
-        // encoder. Its own file is written sRGB and read as Gray + alpha,
-        // which is the decoder reconciling the box against the count.
-        let two = encoded(2);
-        assert!(reads(&retagged(&two, ENUMCS_GREY)));
-
-        // Five: readable under CMYK and nothing else.
-        let five = encoded(5);
-        assert!(
-            reads(&retagged(&five, ENUMCS_CMYK)),
-            "CMYK plus alpha is five channels the decoder can name, which is why \
-             #769 says the ceiling is not a flat Csiz <= 4"
-        );
-        for enumcs in [ENUMCS_SRGB, ENUMCS_GREY, ENUMCS_SYCC] {
-            assert!(
-                !reads(&retagged(&five, enumcs)),
-                "EnumCS {enumcs} on five components: if this reads now, the decoder \
-                 has grown the arm #769 is waiting for and the ceiling can move"
+        for (components, cmyk, no_box) in [
+            (2usize, None, Some((2u8, false))),
+            (5, Some((4u8, true)), Some((5, false))),
+            (6, None, Some((6, false))),
+        ] {
+            let jp2 = encoded(components, Format::Jp2);
+            // The five columns the earlier table had.
+            assert_eq!(
+                read(&retagged(&jp2, ENUMCS_CMYK)),
+                cmyk,
+                "{components} components under a CMYK box"
             );
-        }
+            for enumcs in [ENUMCS_SRGB, ENUMCS_GREY, ENUMCS_SYCC] {
+                // Greyscale over two components is the one cell here that
+                // reads: the decoder's non-strict repair takes the extra
+                // component for an opacity. sRGB over two is not, because
+                // three plus alpha is four and the repair only reaches one
+                // channel up.
+                let expected = (components == 2 && enumcs == ENUMCS_GREY).then_some((1u8, true));
+                assert_eq!(
+                    read(&retagged(&jp2, enumcs)),
+                    expected,
+                    "{components} components under EnumCS {enumcs}"
+                );
+            }
+            let bare = encoded(components, Format::J2k);
+            assert_eq!(
+                read(&bare).is_some(),
+                components == 2,
+                "{components} components as a bare codestream, where the decoder \
+                 synthesises its own sRGB box before validating"
+            );
 
-        // Six: nothing reads it, so no box rewrite can rescue this one and the
-        // ceiling cannot be lifted by anything in this crate.
-        let six = encoded(6);
-        for enumcs in [ENUMCS_SRGB, ENUMCS_GREY, ENUMCS_CMYK, ENUMCS_SYCC] {
-            assert!(
-                !reads(&retagged(&six, enumcs)),
-                "EnumCS {enumcs} on six components: if this reads now, #769 is unblocked"
+            // The column the earlier table did not have.
+            let layout = ContainerLayout::parse(&jp2).expect("the encoder's container");
+            let stripped = layout
+                .unspecified_rewrite(&jp2)
+                .expect("a JP2 with a colr box has a removal");
+            assert_eq!(
+                read(&stripped),
+                no_box,
+                "{components} components with no colr box at all, which is the arm \
+                 #769 turned out to need"
             );
         }
     }
 
     /**
      * The encoder knobs `openjpeg2-pure-rs` exposes, named exhaustively, so
-     * the tiled-save gap announces itself the day upstream closes it (#768).
-     * #768 says tiled save has no encoder parameter behind it because
-     * `cp_tdx` / `cp_tdy` and `tile_size_on` are `pub(crate)`. **They are
-     * not.** Measured against the vendored source of 0.1.1:
-     * `opj_cparameters` is `pub`, its three tile fields are `pub`, it lives in
-     * `pub mod openjpeg`, and that module and `api.rs` contain **zero**
-     * `unsafe` between them. Every function `Encoder::encode` calls is public
-     * too. The only private piece is `Image::to_opj`, thirty lines of struct
-     * filling over `pub` types.
+     * a seventh one announces itself the day upstream adds it (#768).
+     * The history is worth keeping because two readings of it were published
+     * and both were wrong. #768 said `cp_tdx` / `cp_tdy` and `tile_size_on`
+     * are `pub(crate)`; they are `pub`, on a `pub` struct. A correction then
+     * said they therefore live in `pub mod openjpeg` and are reachable by
+     * hand-rolling `Image::to_opj`; the **module** is `pub(crate)`, so
+     * nothing in it is reachable at all. A compile probe against 0.1.1
+     * settles it in one line, with the public surface beside it as the
+     * control that the probe can reach anything:
      *
-     * So the choice #768 asks for is not "clean API against `pub(crate)`", it
-     * is "upstream one field against hand-rolling `to_opj` over a c2rust
-     * translation of `opj_image` that has no stability contract beyond
-     * happening to be `pub`". Upstreaming still wins, for that reason rather
-     * than the one in the issue, and this is the guard that says when it
-     * lands: `EncodeOptions` is not `#[non_exhaustive]`, so a seventh field
-     * stops this literal compiling.
+     * ```text
+     * let _ok = openjp2::EncodeOptions::default();          // compiles
+     * let _p = openjp2::openjpeg::opj_cparameters::default();
+     * error[E0603]: module `openjpeg` is private
+     *  --> openjpeg2-pure-rs-0.1.1/src/lib.rs:72:1
+     * ```
+     *
+     * So there is no encoder knob for the tile grid and there is no route to
+     * one either, which is why `encode` reaches the tiled codestream through
+     * the format instead. This literal is what says the six have not become
+     * seven: `EncodeOptions` is not `#[non_exhaustive]`, so a new field stops
+     * it compiling.
      */
     #[test]
     #[cfg(feature = "jp2k")]
@@ -4167,6 +4799,18 @@ mod tests {
     // The encoder
     // -----------------------------------------------------------------------
 
+    /// The band counts every carrier sweep runs over.
+    ///
+    /// Not `1..=MAX_BANDS`, which was the same thing while the ceiling was 4
+    /// and is 16384 since #769. Each count is here for a reason: 1, 3 and 4
+    /// reach the named [`PixelFormat`] variants, 2 reaches the multiband one
+    /// and is where vips's own band-count guess splits (measured: 2 bands
+    /// read back `b-w`, 3 read back `srgb`), and 5 and 6 are the counts the
+    /// loader used to refuse, so they are what says the lift reaches the
+    /// round trip and not only the encoder.
+    #[cfg(feature = "jp2k")]
+    const SWEEP_BANDS: [usize; 6] = [1, 2, 3, 4, 5, 6];
+
     /// A `width` x `height` raster in `format` whose samples are a
     /// per-band ramp, so a band that ends up in the wrong place is visible.
     #[cfg(feature = "jp2k")]
@@ -4219,8 +4863,8 @@ mod tests {
 
     /**
      * Pins the lossless encoder as a true round trip at every carrier this
-     * codec reads: what goes in comes back out, sample for sample, at 1, 2, 3
-     * and 4 bands, at both element widths, and at both signs.
+     * codec reads: what goes in comes back out, sample for sample, at every
+     * count in `SWEEP_BANDS`, at both element widths, and at both signs.
      * The multiband rows are not padding. A 2-band raster is where vips's own
      * band-count guess splits (measured: 2 bands read back `b-w`, 3 read back
      * `srgb`), and a de-interleaver that transposed bands would still
@@ -4231,9 +4875,12 @@ mod tests {
      * happily through an encoder that never sets `Ssiz`'s sign bit, so each
      * signed row first asserts its fixture holds samples of both signs
      * (issue #905).
-     * Input: sixteen rasters, generated from the four sample kinds rather
-     * than listed -> Output: the same pixels back, at the same carrier, with
-     * the container always a JP2 whatever the raster.
+     * The five- and six-band rows are the ones #769 lifted, and they are in
+     * the same sweep as the rest rather than in a test of their own, because
+     * "a band count the loader reads" is one property and not two.
+     * Input: four sample kinds at every count in `SWEEP_BANDS`, generated
+     * from the kinds rather than listed -> Output: the same pixels back, at
+     * the same carrier, with the container always a JP2 whatever the raster.
      */
     #[test]
     #[cfg(feature = "jp2k")]
@@ -4243,10 +4890,9 @@ mod tests {
         // Generated from the kinds this codec carries rather than listed, so
         // a carrier added to `PixelFormat` cannot slip past the sweep the way
         // three did when issue #516 landed and every hand-written array
-        // stopped at the previous last variant. Four band counts because 1, 3
-        // and 4 reach the named variants and 2 reaches the multiband one, and
-        // 2 is also where vips's own band-count guess splits (measured: 2
-        // bands read back `b-w`, 3 read back `srgb`).
+        // stopped at the previous last variant. The band counts are
+        // [`SWEEP_BANDS`], which is not `1..=MAX_BANDS`: that ceiling is
+        // 16384 since #769 and a 16384-band sweep is a different test.
         let carriers: Vec<PixelFormat> = [
             SampleKind::U8,
             SampleKind::U16,
@@ -4255,16 +4901,16 @@ mod tests {
         ]
         .into_iter()
         .flat_map(|kind| {
-            (1..=MAX_BANDS).map(move |bands| {
-                PixelFormat::with_kind(bands, kind).expect("1 to 4 bands has a carrier")
+            SWEEP_BANDS.into_iter().map(move |bands| {
+                PixelFormat::with_kind(bands, kind).expect("every swept band count has a carrier")
             })
         })
         .collect();
         assert_eq!(
             carriers.len(),
-            16,
-            "four kinds at four band counts, and the count is spelled out so a kind \
-             dropped from the list is a failure rather than a shorter sweep"
+            4 * SWEEP_BANDS.len(),
+            "four kinds at every swept band count, and the count is spelled out so a \
+             kind dropped from the list is a failure rather than a shorter sweep"
         );
 
         for format in carriers {
@@ -4512,8 +5158,8 @@ mod tests {
         let mut written = 0;
         let mut refused = 0;
         for kind in kinds {
-            for bands in 1..=MAX_BANDS {
-                let format = PixelFormat::with_kind(bands, kind).expect("1 to 4 bands");
+            for bands in SWEEP_BANDS {
+                let format = PixelFormat::with_kind(bands, kind).expect("every swept band count");
                 match (sample_depth(format), expected(kind)) {
                     (Ok(got), Some(want)) => {
                         assert_eq!(got, want, "{format:?}");
@@ -4529,8 +5175,8 @@ mod tests {
         }
         assert_eq!(
             (written, refused),
-            (16, 12),
-            "four carriers written and three refused, at four band counts each; the \
+            (4 * SWEEP_BANDS.len(), 3 * SWEEP_BANDS.len()),
+            "four carriers written and three refused, at every swept band count; the \
              counts are spelled out so a kind that silently changed sides is a failure"
         );
 
@@ -4571,9 +5217,7 @@ mod tests {
             .encode_jp2k(SaveOptions::default())
             .expect("lossless encode");
         let lossy = source
-            .encode_jp2k(SaveOptions {
-                compression: Compression::Lossy { ratio },
-            })
+            .encode_jp2k(SaveOptions::default().with_compression(Compression::Lossy { ratio }))
             .expect("lossy encode");
         assert!(
             lossy.len() < lossless.len(),
@@ -4762,34 +5406,74 @@ mod tests {
     }
 
     /**
-     * Pins the band ceiling as a typed refusal with the reason on it, and
-     * pins that the ceiling is the *loader's* rather than the format's.
-     * `jp2ksave` writes a five-band file and so does this encoder's
-     * dependency: measured, one written here reads back through
-     * `vips jp2kload` as `5 bands, srgb`, bit for bit. What cannot read it is
-     * `decode_jp2k`, so the encoder refuses instead of writing files its own
-     * loader rejects (issue #769).
-     * The control is four bands, which must encode and round-trip, so the
-     * refusal is the count and not the multiband carrier.
-     * Input: `Multi8(5)` and `Multi16(5)` -> Output: `EncodeError::Encode`
-     * naming both numbers.
+     * Pins the band ceiling as the *format's* now, and pins that the counts
+     * the loader used to refuse round-trip through this crate (issue #769).
+     * The ceiling was four and the reason was the loader: `hayro-jpeg2000`
+     * refuses a component set it cannot map onto greyscale, RGB, CMYK or one
+     * of those plus alpha, so anything wider was a file this crate could
+     * write and could not read back. Measured, that is a property of the
+     * `colr` box and not of the decoder, so `decode` hands it the same file
+     * with nothing saying what its colour space is and the ceiling moves to
+     * `Csiz`.
+     * Three assertions, and the third is the one that would have caught a
+     * decoder that merely stopped erroring: the samples come back identical
+     * and the interpretation is `srgb`, which is what `vips jp2kload` reports
+     * for the same five-, six- and eight-band files (measured, bit for bit).
+     * The refusal is still pinned, one component above `MAX_BANDS`, where
+     * `openjpeg2-pure-rs` itself answers `EncoderSetupFailed`.
+     * Input: 5, 6 and 8 bands at both element widths, and `MAX_BANDS + 1` ->
+     * Output: round trips for the first three, a typed refusal for the last.
      */
     #[test]
     #[cfg(feature = "jp2k")]
-    fn more_bands_than_the_loader_reads_is_refused_on_the_way_out() {
-        let five = std::num::NonZeroU16::new(5).expect("5 is non-zero");
-        for format in [PixelFormat::Multi8(five), PixelFormat::Multi16(five)] {
-            let err = ramp(4, 3, format)
-                .encode_jp2k(SaveOptions::default())
-                .expect_err("five bands is past the loader's ceiling");
-            let message = err.to_string();
-            assert!(matches!(err, EncodeError::Encode(_)), "{format:?}: {err:?}");
-            assert!(
-                message.contains(&MAX_BANDS.to_string()) && message.contains('5'),
-                "{format:?}: the refusal must name the ceiling and the count: {message}"
-            );
+    fn the_band_counts_the_loader_used_to_refuse_now_round_trip() {
+        for bands in [5usize, 6, 8] {
+            for (kind, wide) in [(SampleKind::U8, false), (SampleKind::U16, true)] {
+                let format = PixelFormat::with_kind(bands, kind).expect("a multiband carrier");
+                let source = ramp(9, 7, format);
+                let bytes = source
+                    .encode_jp2k(SaveOptions::default())
+                    .unwrap_or_else(|e| panic!("{bands} bands at {kind:?}: {e}"));
+                let back = decode_jp2k(&bytes, DecodeLimits::default())
+                    .unwrap_or_else(|e| panic!("{bands} bands at {kind:?} decode: {e}"));
+                assert_eq!(back.format(), format, "{bands} bands at {kind:?}");
+                assert_eq!(
+                    back.data(),
+                    source.data(),
+                    "{bands} bands at {kind:?}: the round trip has to be exact, not merely \
+                     unrefused"
+                );
+                // vips's own answer for the same file, and the arm
+                // `interpretation` takes for `Unknown { num_channels }`.
+                assert_eq!(
+                    back.interpretation(),
+                    if wide {
+                        Interpretation::Rgb16
+                    } else {
+                        Interpretation::Srgb
+                    },
+                    "{bands} bands at {kind:?}"
+                );
+            }
         }
-        // The control: the ceiling itself encodes and round-trips.
+
+        // The ceiling itself, one past `Csiz`'s range. Measured on
+        // `openjpeg2-pure-rs`: 16384 components encode and 16385 come back
+        // `EncoderSetupFailed`, so the refusal is where the encoder's is.
+        let over = u16::try_from(MAX_BANDS + 1).expect("16385 fits in a u16");
+        let over = std::num::NonZeroU16::new(over).expect("16385 is non-zero");
+        let err = ramp(1, 1, PixelFormat::Multi8(over))
+            .encode_jp2k(SaveOptions::default())
+            .expect_err("one component past Csiz");
+        let message = err.to_string();
+        assert!(matches!(err, EncodeError::Encode(_)), "{err:?}");
+        assert!(
+            message.contains(&MAX_BANDS.to_string()) && message.contains(&over.to_string()),
+            "the refusal must name the ceiling and the count: {message}"
+        );
+
+        // The control: the old ceiling still round-trips, so the lift is a
+        // widening rather than a re-route.
         let four = ramp(4, 3, PixelFormat::Rgba8);
         let bytes = four
             .encode_jp2k(SaveOptions::default())
@@ -4799,6 +5483,457 @@ mod tests {
                 .expect("four bands decode")
                 .data(),
             four.data()
+        );
+    }
+
+    /**
+     * Pins that the rewrite lifting the band ceiling fires only on the files
+     * the decoder actually refuses, which is the whole of what makes it safe
+     * (issue #769).
+     * `hayro-jpeg2000` reads a five-component file tagged CMYK with a `cdef`
+     * box marking its last channel as an opacity: five is four colour
+     * channels and an alpha, a count it can name. Removing the `colr` box
+     * there does not widen anything, it **breaks** the file, because
+     * `Unknown { num_channels: 5 }` plus an alpha is six channels against
+     * five components and the decoder gives up. So a rewrite keyed on the
+     * component count rather than on the refusal would turn a file that
+     * decodes into one that does not.
+     * The positive control is the third assertion, and without it the first
+     * two could both pass against a rewrite that never runs: the same file
+     * with its box actually removed is handed to the decoder directly and has
+     * to be refused, which is what says the first assertion is about the
+     * rewrite being skipped rather than about the file being easy.
+     * Input: five components tagged CMYK with a `cdef`, and five tagged sRGB
+     * -> Output: `cmyk` from the first, `srgb` from the second, the same
+     * samples from both, and a refusal from the first with its box removed.
+     */
+    #[test]
+    #[cfg(feature = "jp2k")]
+    fn the_colr_box_only_goes_when_the_decoder_has_already_refused_the_file() {
+        /// The same file with a `cdef` box spliced into its `jp2h`, marking
+        /// the last channel an opacity and the rest colours.
+        ///
+        /// I.5.3.6: `N`, then `N` triples of `Cn`, `Typ`, `Asoc`. `Typ = 1`
+        /// is opacity and `Asoc = 0` associates it with the whole image,
+        /// which is how `jp2ksave` writes its own alpha (measured).
+        fn with_cdef(bytes: &[u8], channels: u16) -> Vec<u8> {
+            let mut payload = channels.to_be_bytes().to_vec();
+            for channel in 0..channels {
+                payload.extend_from_slice(&channel.to_be_bytes());
+                let (kind, association) = if channel + 1 == channels {
+                    (1u16, 0u16)
+                } else {
+                    (0, channel + 1)
+                };
+                payload.extend_from_slice(&kind.to_be_bytes());
+                payload.extend_from_slice(&association.to_be_bytes());
+            }
+            let mut cdef = u32::try_from(payload.len() + 8)
+                .expect("a cdef box is small")
+                .to_be_bytes()
+                .to_vec();
+            cdef.extend_from_slice(b"cdef");
+            cdef.extend_from_slice(&payload);
+
+            let boxes = walk_boxes(bytes, 0, bytes.len()).expect("the encoder's container");
+            let header = boxes
+                .iter()
+                .find(|b| &b.kind == b"jp2h")
+                .expect("a jp2h box");
+            let grown = u32::try_from(header.end - header.at + cdef.len()).expect("still small");
+            let mut out = bytes[..header.at].to_vec();
+            out.extend_from_slice(&grown.to_be_bytes());
+            out.extend_from_slice(&bytes[header.at + 4..header.end]);
+            out.extend_from_slice(&cdef);
+            out.extend_from_slice(&bytes[header.end..]);
+            out
+        }
+
+        let five = ramp(
+            9,
+            7,
+            PixelFormat::Multi8(std::num::NonZeroU16::new(5).expect("5 is non-zero")),
+        )
+        .encode_jp2k(SaveOptions::default())
+        .expect("five bands encode");
+
+        let named = with_cdef(&retagged(&five, ENUMCS_CMYK), 5);
+        let kept = decode_jp2k(&named, DecodeLimits::default())
+            .expect("CMYK plus an opacity is five channels the decoder can name");
+        assert_eq!(kept.format().channels(), 5);
+        assert_eq!(kept.interpretation(), Interpretation::Cmyk);
+
+        let rewritten = decode_jp2k(&retagged(&five, ENUMCS_SRGB), DecodeLimits::default())
+            .expect("sRGB over five components is the refusal the removal answers");
+        assert_eq!(rewritten.format().channels(), 5);
+        assert_eq!(rewritten.interpretation(), Interpretation::Srgb);
+        assert_eq!(
+            rewritten.data(),
+            kept.data(),
+            "the same codestream under two boxes: only the interpretation may differ"
+        );
+
+        // The positive control. Both assertions above would pass against a
+        // rewrite that never runs at all, so this is the one that says the
+        // first file survived *because* the rewrite was skipped.
+        let layout = ContainerLayout::parse(&named).expect("the spliced container");
+        let stripped = layout
+            .unspecified_rewrite(&named)
+            .expect("a JP2 with a colr box has a removal");
+        assert!(
+            hayro_jpeg2000::Image::new(&stripped, &hayro_jpeg2000::DecodeSettings::default())
+                .is_err(),
+            "removing the box from a file the decoder can already name breaks it, which \
+             is why the retry waits for a refusal"
+        );
+    }
+
+    /**
+     * Pins the two rewrites `ContainerLayout::unspecified_rewrite` makes,
+     * directly, because the caller reaches it only after the decoder has
+     * refused a file and end-to-end coverage of a caller says nothing about
+     * the arms the caller cannot reach (issues #689, #882, #769).
+     * The JP2 arm must produce a file whose `colr` box is gone and whose
+     * `jp2h` still parses, which is the pair a length left unshrunk would
+     * break. The bare arm must produce a container whose codestream is the
+     * one that went in, byte for byte.
+     * Input: a five-band JP2 and its bare codestream -> Output: a JP2 with
+     * no enumerated colour space, and a wrapped codestream that still parses.
+     */
+    #[test]
+    #[cfg(feature = "jp2k")]
+    fn the_unspecified_rewrite_removes_a_box_and_wraps_a_bare_codestream() {
+        let five = ramp(
+            9,
+            7,
+            PixelFormat::Multi8(std::num::NonZeroU16::new(5).expect("5 is non-zero")),
+        )
+        .encode_jp2k(SaveOptions::default())
+        .expect("five bands encode");
+        let layout = ContainerLayout::parse(&five).expect("the encoder's own container");
+        assert_eq!(
+            layout.enum_cs,
+            Some(ENUMCS_SRGB),
+            "the box this starts with"
+        );
+
+        let stripped = layout
+            .unspecified_rewrite(&five)
+            .expect("a JP2 with a colr box has a removal");
+        assert_eq!(
+            stripped.len(),
+            five.len() - 15,
+            "a METH=1 colr box is 15 bytes"
+        );
+        let after = ContainerLayout::parse(&stripped).expect("the shrunk jp2h still parses");
+        assert_eq!(
+            after.enum_cs, None,
+            "with the box gone the decoder reaches its unspecified arm"
+        );
+        assert_eq!(
+            &stripped[after.codestream..],
+            &five[layout.codestream..],
+            "the codestream is untouched; only the boxes above it moved"
+        );
+
+        // The bare arm, on the same codestream.
+        let bare = five[layout.codestream..].to_vec();
+        let bare_layout = ContainerLayout::parse(&bare).expect("a bare codestream");
+        assert!(bare_layout.bare);
+        let wrapped = bare_layout
+            .unspecified_rewrite(&bare)
+            .expect("a bare codestream is wrapped rather than edited");
+        let wrapped_layout = ContainerLayout::parse(&wrapped).expect("the wrapper parses");
+        assert_eq!(wrapped_layout.enum_cs, None);
+        assert_eq!(
+            &wrapped[wrapped_layout.codestream..],
+            &bare[..],
+            "the wrapper carries the codestream that went in"
+        );
+        // The positive control: the wrapper is not merely parseable, it is
+        // the thing that makes the file readable at all.
+        assert!(
+            decode_jp2k(&bare, DecodeLimits::default()).is_ok(),
+            "a bare five-component codestream decodes through the wrap"
+        );
+    }
+
+    /**
+     * Pins the tiled encoder against the oracle by whole-file digest: the
+     * bytes this module writes for a tiled save are the bytes
+     * `vips jp2ksave` writes for the same image and the same grid, all of
+     * them (issue #768).
+     * This is the assertion that says the splice is a rearrangement rather
+     * than a re-encode. `Encoder::encode` writes one tile and there is no
+     * knob to make it write more, because `openjpeg2-pure-rs` keeps its whole
+     * `openjpeg` module `pub(crate)`; what makes a tiled file reachable
+     * anyway is that JPEG 2000 codes every tile independently, so the
+     * tile-part for a region is the same bytes whether it came from a tiled
+     * encode or from a standalone one placed at the same absolute
+     * coordinates. Byte identity with OpenJPEG's own tiled encoder is how
+     * that stops being an argument.
+     * Each row was captured as, for the 37x21 row:
+     *
+     * ```text
+     * vips rawload ramp.raw ramp.v 37 21 3 --format uchar
+     * vips copy ramp.v ramp.i.v --interpretation srgb
+     * vips jp2ksave ramp.i.v out.jp2 --lossless --tile-width 16 --tile-height 16
+     * ```
+     *
+     * where `ramp.raw` is this module's own `ramp` fixture, whose digest is
+     * pinned beside the output's so a changed fixture is a failure here
+     * rather than a comparison against a different image.
+     * The untiled row is not filler: it pins that the default writes
+     * `XTsiz = YTsiz = 512` into `SIZ` the way vips does, which is the one
+     * byte a single-tile file used to differ by.
+     * Input: three rasters at three grids -> Output: the exact files vips
+     * writes.
+     */
+    #[test]
+    #[cfg(feature = "jp2k")]
+    fn the_files_this_encoder_writes_are_the_files_vips_writes() {
+        let cases: [(u32, u32, PixelFormat, u32, u32, &str, &str); 5] = [
+            (
+                37,
+                21,
+                PixelFormat::Rgb8,
+                16,
+                16,
+                "7bf37b54668d747667f0ca67412f795f153c5b6d9523469a23fc0d04095cac1e",
+                "e52bee5ba328433f3fb803bbf31575adf5b52fa8a1436076274e91135d2807e2",
+            ),
+            (
+                37,
+                21,
+                PixelFormat::Rgb8,
+                512,
+                512,
+                "7bf37b54668d747667f0ca67412f795f153c5b6d9523469a23fc0d04095cac1e",
+                "07c7807a8cf432e8a8ff53a54387e817664ea7b3f77ca1b2d9ef8a349df22474",
+            ),
+            (
+                70,
+                50,
+                PixelFormat::Gray16,
+                32,
+                32,
+                "fe7a6b815be477ac34a943efcceacaa78650690be2815c46e600e2251f6e7add",
+                "9073c8836c7a889d7dd0781ceb312305470406164fdddb6e62498284a4f570f0",
+            ),
+            // The row that needs more than one resolution level, and the only
+            // one here that does. `num_resolutions` is
+            // `max(1, floor(log2(min(w, h))) - 5)`, so it is 1 for every shape
+            // above and 2 for this one, which is what makes the wavelet run at
+            // all and the tile's absolute placement decide the coded bytes. A
+            // 4x3 grid with partial tiles on both edges.
+            (
+                200,
+                150,
+                PixelFormat::Rgb8,
+                64,
+                64,
+                "4ed24ad8b60b2a0119c3fc5b5bfc1b8c716ca92cd92044549a7ab9ba8d7a5b07",
+                "9126c417a44238f3540e6735efea0f22741d07a6da32806b467dfb0b57cc7bdb",
+            ),
+            // The row where the tile's own coordinates decide the bytes, and
+            // the reason it is 37x27 rather than another power of two. A tile
+            // grid whose step is even and code-block aligned puts every tile
+            // origin at the same parity and the same code-block offset as the
+            // image origin, so encoding a tile as though it sat at (0, 0)
+            // produces the same bytes and nothing catches it: measured, that
+            // mutation is green against all four rows above. An odd step is
+            // what separates them, because the wavelet's interleave parity is
+            // `tcx0 % 2`.
+            (
+                200,
+                150,
+                PixelFormat::Rgb8,
+                37,
+                27,
+                "4ed24ad8b60b2a0119c3fc5b5bfc1b8c716ca92cd92044549a7ab9ba8d7a5b07",
+                "ea70e0999c28dc436d00fcb19b859a3fb35207cec738d8277f1227f07d978aaf",
+            ),
+        ];
+        for (width, height, format, tile_w, tile_h, fixture, expected) in cases {
+            let source = ramp(width, height, format);
+            assert_eq!(
+                payload_digest(&source),
+                fixture,
+                "{width}x{height} {format:?}: the fixture the oracle saw, so a changed \
+                 ramp fails here rather than comparing a different image"
+            );
+            let bytes = source
+                .encode_jp2k(
+                    SaveOptions::default()
+                        .with_tile_width(NonZeroU32::new(tile_w).expect("non-zero"))
+                        .with_tile_height(NonZeroU32::new(tile_h).expect("non-zero")),
+                )
+                .expect("a tiled encode");
+            assert_eq!(
+                digest(&bytes),
+                expected,
+                "{width}x{height} {format:?} at {tile_w}x{tile_h}: {} bytes that are not \
+                 the ones vips writes",
+                bytes.len()
+            );
+        }
+    }
+
+    /**
+     * Pins the tiled save end to end: the grid reaches the file, the file
+     * reads back, and the pixels are the untiled ones (issue #768).
+     * Three assertions, and the middle one is the reason the first is not
+     * enough. A `tile-width` of 16 in the metadata says the `SIZ` marker says
+     * 16; it does not say the tile-parts after it are the right bytes in the
+     * right order. Comparing the decode against the untiled save's decode is
+     * what says that, and comparing both against the source is what says
+     * neither is wrong in the same way.
+     * The 37x21 shape is deliberate: at 16x16 it is a 3x2 grid with partial
+     * tiles down two edges, so a splice that assumed full tiles fails here.
+     * Input: a 37x21 RGB ramp at 16x16 and at the default 512x512 ->
+     * Output: `tile-width` / `tile-height` of 16 on the first and neither on
+     * the second, with identical pixels from both.
+     */
+    #[test]
+    #[cfg(feature = "jp2k")]
+    fn a_tiled_save_round_trips_and_reports_the_grid_it_was_given() {
+        let source = ramp(37, 21, PixelFormat::Rgb8);
+        let sixteen = NonZeroU32::new(16).expect("16 is non-zero");
+        let tiled = source
+            .encode_jp2k(
+                SaveOptions::default()
+                    .with_tile_width(sixteen)
+                    .with_tile_height(sixteen),
+            )
+            .expect("a tiled encode");
+        let untiled = source
+            .encode_jp2k(SaveOptions::default())
+            .expect("the default encode");
+
+        // A grid whose step is odd, so the tile origins do not share the image
+        // origin's parity. This is the shape that needs the tile's absolute
+        // coordinates to reach the encoder: on an even, code-block-aligned
+        // step every tile codes the same either way.
+        let odd = ramp(200, 150, PixelFormat::Rgb8);
+        let odd_tiled = odd
+            .encode_jp2k(
+                SaveOptions::default()
+                    .with_tile_width(NonZeroU32::new(37).expect("37 is non-zero"))
+                    .with_tile_height(NonZeroU32::new(27).expect("27 is non-zero")),
+            )
+            .expect("an odd tiled encode");
+        let from_odd = decode_jp2k(&odd_tiled, DecodeLimits::default()).expect("odd decode");
+        assert_eq!(int_field(&from_odd, "tile-width"), Some(37));
+        assert_eq!(
+            from_odd.data(),
+            odd.data(),
+            "a 6x6 grid on an odd step has to be lossless too"
+        );
+
+        let from_tiled = decode_jp2k(&tiled, DecodeLimits::default()).expect("tiled decode");
+        let from_untiled = decode_jp2k(&untiled, DecodeLimits::default()).expect("untiled decode");
+
+        assert_eq!(int_field(&from_tiled, "tile-width"), Some(16));
+        assert_eq!(int_field(&from_tiled, "tile-height"), Some(16));
+        assert_eq!(
+            int_field(&from_untiled, "tile-width"),
+            None,
+            "a 37x21 image at 512x512 is one tile, and vips attaches nothing there"
+        );
+
+        assert_eq!(
+            from_tiled.data(),
+            source.data(),
+            "a 3x2 grid with partial tiles on two edges has to be lossless"
+        );
+        assert_eq!(
+            from_tiled.data(),
+            from_untiled.data(),
+            "the tiling is a container decision and must not move a sample"
+        );
+    }
+
+    /**
+     * Pins that the default tile size is `jp2ksave`'s own 512 rather than
+     * "the whole image", which is the half of #768 the issue does not
+     * mention: vips tiles by default, so an encoder that always writes one
+     * tile diverges on every image larger than 512.
+     * Measured: `vips jp2ksave` on a 600x600 image with no tile options
+     * writes a file `vipsheader` reports as `tile-width: 512`.
+     * The 500x500 row is the control that says the constant is a tile size
+     * and not a flag: the same default writes one tile there, and one tile
+     * carries no geometry at all.
+     * Input: 600x600 and 500x500 at `SaveOptions::default` -> Output: a
+     * 512 grid on the first and none on the second.
+     */
+    #[test]
+    #[cfg(feature = "jp2k")]
+    fn the_default_tile_size_is_the_one_vips_defaults_to() {
+        assert_eq!(SaveOptions::default().tile_width, DEFAULT_TILE_SIZE);
+        assert_eq!(SaveOptions::default().tile_height, DEFAULT_TILE_SIZE);
+        assert_eq!(DEFAULT_TILE_SIZE.get(), 512);
+
+        let big = ramp(600, 600, PixelFormat::Gray8)
+            .encode_jp2k(SaveOptions::default())
+            .expect("a 600x600 default save");
+        let big = decode_jp2k(&big, DecodeLimits::default()).expect("decode");
+        assert_eq!(int_field(&big, "tile-width"), Some(512));
+        assert_eq!(int_field(&big, "tile-height"), Some(512));
+
+        let small = ramp(500, 500, PixelFormat::Gray8)
+            .encode_jp2k(SaveOptions::default())
+            .expect("a 500x500 default save");
+        let small = decode_jp2k(&small, DecodeLimits::default()).expect("decode");
+        assert_eq!(int_field(&small, "tile-width"), None);
+    }
+
+    /**
+     * Pins the tile-count ceiling as a typed refusal naming the same limit
+     * OpenJPEG names, because `Isot` is two bytes and a grid past it would
+     * otherwise be spliced with wrapped tile indices (issue #768).
+     * Measured on the oracle: `vips jp2ksave` on a 256x256 image at one pixel
+     * per tile fails with "Invalid number of tiles : 256 x 256 (maximum fixed
+     * by jpeg2000 norm is 65535 tiles)", and 255x255 gets past that check and
+     * fails on the resolution count instead.
+     * The refusal is before any encode, which is what the control says: a
+     * 255x255 grid at the same tile size gets far enough to be refused by the
+     * encoder rather than by this check, and the two messages are different.
+     * Input: 256x256 and 255x255 at one pixel per tile -> Output: this
+     * module's refusal for the first and the encoder's for the second.
+     */
+    #[test]
+    #[cfg(feature = "jp2k")]
+    fn a_tile_grid_past_isot_is_refused_before_anything_is_encoded() {
+        let one = NonZeroU32::new(1).expect("1 is non-zero");
+        let over = Raster::zeroed(256, 256, PixelFormat::Gray8)
+            .expect("a raster")
+            .encode_jp2k(
+                SaveOptions::default()
+                    .with_tile_width(one)
+                    .with_tile_height(one),
+            )
+            .expect_err("65536 tiles is one past Isot");
+        let message = over.to_string();
+        assert!(
+            message.contains("65535") && message.contains("65536"),
+            "the refusal names the limit and the count: {message}"
+        );
+
+        // The control: one tile fewer is refused by the encoder instead, so
+        // the check above is a count and not a blanket refusal of small
+        // tiles.
+        let under = Raster::zeroed(255, 255, PixelFormat::Gray8)
+            .expect("a raster")
+            .encode_jp2k(
+                SaveOptions::default()
+                    .with_tile_width(one)
+                    .with_tile_height(one),
+            )
+            .expect_err("a one-pixel tile cannot carry the resolution count");
+        assert!(
+            !under.to_string().contains("65535"),
+            "65025 tiles is inside Isot, so this must be the encoder's refusal and not \
+             this module's: {under}"
         );
     }
 
