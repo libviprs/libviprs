@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- **`hist_find_indexed` sums onto `FloatF32` instead of a 16-bit format**
+  (issue #887). Breaking for the same reason #532 is: the output format changes.
+
+  libvips emits **DOUBLE** there, and it does so whatever the value image's
+  carrier is. Measured on `/opt/homebrew/bin/vips` 8.18.6, a 4-pixel value image
+  `[10, 20, 30, 40]` binned by `[0, 1, 0, 1]` gives DOUBLE with bins 40 and 60
+  for `uchar`, `ushort`, `uint` and `float` inputs alike. libviprs wrote 16-bit
+  sums, so four `uchar` pixels of 255 in one bin already exceeded what a byte
+  could say and a 300x300 image summed to 65535 instead of 22,950,000.
+
+  **Why the float carrier rather than the wider integer one**, since this crate
+  has no `f64`: `Uint32` is exact to 4,294,967,295 and then overflows, and a
+  10000x10000 `uchar` image sums to 25,500,000,000, which is an image size
+  libvips exists to handle. `f32` never overflows and its error is relative: sums
+  stay exact to 2^24 and lose at most half a spacing above it, so it degrades
+  where the integer carrier would fail outright. It also matches vips's *kind*,
+  and it is the only one of the two that can hold a negative sum once the signed
+  carriers of issue #516 land. Neither matches DOUBLE's exactness to 2^53, and
+  that limitation is in the method's docs rather than left to be discovered.
+
+  A float value image works now too. It used to reach the storage reader and
+  panic on the kind, so `im.colourspace(Lab).hist_find_indexed(&idx)` was a
+  panic out of a `Result`.
+
 - **The counting ops emit `Uint32` instead of a 16-bit format, and stop
   saturating at 65535** (issue #532). `hist_find`, `hist_find_band`,
   `hist_find_ndim`, `hist_cum`, `project`, `hough_line` and `hough_circle` all
