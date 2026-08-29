@@ -497,7 +497,7 @@ fn the_loop_count_is_plays_in_every_container() {
 /// owns `src/gif.rs` and the fix; this table records the gap so it cannot be
 /// forgotten, and turns green by flipping `false` to `true`.
 const COMPAT_PAIR: [(&str, Option<i32>, Option<i32>, bool); 3] = [
-    ("gif", Some(4), Some(3), false),
+    ("gif", Some(4), Some(3), true),
     ("webp", Some(4), Some(3), true),
     ("jxl", Some(4), None, true),
 ];
@@ -562,15 +562,15 @@ fn each_loader_attaches_the_compatibility_pair_its_oracle_attaches() {
     }
 }
 
-/// The list of loaders still short of their oracle is exactly the one that is
-/// filed.
+/// The list of loaders still short of their oracle is empty.
 ///
-/// The exception above is only safe while it is an exception. Without this, a
-/// second loader could be added to `COMPAT_PAIR` with `false` and the suite
-/// would stay green over two gaps instead of one.
+/// It used to be `["gif"]`, which was issue #865, and #876 closed it. The test
+/// stays because the list is what stops a future gap taking a quiet seat: a
+/// loader added to `COMPAT_PAIR` with `false` would otherwise leave the suite
+/// green over a divergence nobody had filed.
 ///
 /// Input: `COMPAT_PAIR`.
-/// Output: exactly `["gif"]` short, and it is #865.
+/// Output: nothing short of its oracle.
 #[test]
 fn only_one_loader_is_short_of_its_oracle_and_it_is_filed() {
     let short: Vec<&str> = COMPAT_PAIR
@@ -581,11 +581,10 @@ fn only_one_loader_is_short_of_its_oracle_and_it_is_filed() {
 
     assert_eq!(
         short,
-        ["gif"],
-        "the GIF loader not attaching `gif-delay` and `gif-loop` is issue \
-         #865 and it is the only known gap in the dialect. A second `false` \
-         row needs its own issue and its number written next to it, not a \
-         quiet seat on this one"
+        [] as [&str; 0],
+        "a loader that does not attach `gif-delay` and `gif-loop` where its \
+         own oracle does needs its own issue and its number written next to \
+         the row, not a quiet seat on the one #876 closed"
     );
 }
 
