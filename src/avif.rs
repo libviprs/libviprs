@@ -2043,6 +2043,50 @@ mod tests {
     }
 
     /*
+     * An alpha item is a **second** decoded frame, held beside the primary's
+     * while `assemble` walks both, and the price has to carry it (issue
+     * #944). Its own row, because the opaque fixture above cannot see it: the
+     * alpha term is the only difference between the two prices.
+     * `rgba8.avif` is 4x3, 4:4:4 and lossless, so the primary frame is three
+     * full 4x3 planes and the alpha frame is one. 48 bytes of raster, 4 * 36
+     * for the primary's `Frame::planes` and `rav1d` picture together, and
+     * 4 * 12 for the alpha's: 48 + 144 + 48 = 240.
+     * The counting-allocator measurement in `tests/decode_working_set.rs`
+     * does not catch a missing alpha term, measured: dropping it leaves all
+     * four AVIF cases there green, because the four bytes a sample the
+     * primary frame is priced at have enough slack at 512x512 to cover the
+     * alpha frame as well. This row is what holds the term.
+     * Input: `rgba8.avif` at `max_alloc_bytes` 240 then 239 -> Output: a
+     * four-band 4x3 decode, then `AllocLimitExceeded { needed: 240 }`.
+     */
+    #[cfg_attr(not(feature = "avif"), ignore = "needs the avif feature")]
+    #[test]
+    fn an_alpha_item_is_priced_as_a_second_frame() {
+        let price = 48 + 4 * 36 + 4 * 12;
+        assert_eq!(price, 240, "the arithmetic in the doc block, spelled out");
+
+        let exact = DecodeLimits::default().with_max_alloc_bytes(price);
+        let raster = decode_avif(RGBA8, exact).expect("240 bytes is exactly the alpha decode");
+        assert_eq!((raster.width(), raster.height()), (4, 3));
+        assert_eq!(raster.format().channels(), 4, "the alpha item is a band");
+
+        let tight = DecodeLimits::default().with_max_alloc_bytes(price - 1);
+        match decode_avif(RGBA8, tight) {
+            Err(SourceError::AllocLimitExceeded {
+                what, needed_bytes, ..
+            }) => {
+                assert_eq!(what, "AVIF frame buffer");
+                assert_eq!(
+                    needed_bytes, price,
+                    "the price must carry the alpha item's frame; without it \
+                     this reads 192"
+                );
+            }
+            other => panic!("expected AllocLimitExceeded, got {other:?}"),
+        }
+    }
+
+    /*
      * The ceilings answer the same in a build without the feature, because
      * everything up to the AV1 decode runs either way. Without this a
      * default build could quietly stop pricing AVIF at all and no test in
