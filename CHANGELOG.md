@@ -3789,6 +3789,26 @@ and not under `Fixed`: this file is the only place they can be caught.
 
 ### Fixed
 
+- The JPEG 2000 decode sizes its output buffer from the price the allocation
+  check already validated, instead of rebuilding half of it (issue #951).
+  `check_image_alloc` returns `width * height * bands * element_bytes` as a
+  widened `u64` and the decode discarded it, then called `buffer_len(width,
+  height, bands)`, which validates `width * height * bands` and narrows *that*,
+  and multiplied the result by `element_bytes` in `usize` at the allocation.
+  Nothing checked the second multiply, so the two halves of one product were
+  validated against two different ceilings.
+
+  Reachable on a 32-bit target only, and only with `max_alloc_bytes` at the
+  `u64::MAX` spelling the crate documents for "no limit": a 1-gigapixel
+  four-band 16-bit image has 4e9 samples, which fits a 32-bit `usize`, and 8e9
+  bytes, which does not. That is a panic with overflow checks on and an
+  undersized buffer plus an out-of-bounds index in the `store` loop without
+  them.
+
+  The arithmetic is a helper taking the address space as an argument rather
+  than a `#[cfg(target_pointer_width = "32")]` block, so the arm that matters
+  runs on every host rather than on none of them.
+
 - The image-origin test in `src/jp2k.rs` has its doc block back, and a check
   keeps it there (issue #926). The block had drifted onto the *band ceiling*
   test's own block, so that test's rendered doc opened with a paragraph about
