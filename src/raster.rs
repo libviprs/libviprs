@@ -356,6 +356,30 @@ pub(crate) fn try_plane_filled<T: Clone>(
     Ok(out)
 }
 
+/// [`try_plane_len`], filled with `fill` to `len`, for a buffer whose size is
+/// an element count rather than a rate per pixel.
+///
+/// The zero-filled scratch planes in [`crate::arithmetic`] are all of this
+/// shape: an integral image is one element per *padded* pixel and a Hough vote
+/// accumulator is one per pixel per radius, so neither is priced off the
+/// driving raster's geometry the way [`try_plane_filled`] prices its caller's.
+///
+/// Fills to `len` and not to `capacity()`, for the reason [`try_plane_filled`]
+/// gives: [`Vec::try_reserve_exact`] is allowed to hand back more room than it
+/// was asked for, and the length is a contract with whatever writes into the
+/// buffer rather than whatever the allocator rounded up to.
+pub(crate) fn try_plane_len_filled<T: Clone>(
+    site: &'static str,
+    width: u32,
+    height: u32,
+    len: usize,
+    fill: T,
+) -> Result<Vec<T>, RasterError> {
+    let mut out = try_plane_len::<T>(site, width, height, len)?;
+    out.resize(len, fill);
+    Ok(out)
+}
+
 /// The one reservation every plane in the crate goes through.
 ///
 /// Split out so [`try_plane_len`] and [`try_plane`] price their request their
@@ -2093,6 +2117,49 @@ mod tests {
     }
 
     /**
+     * The same contract on [`try_plane_len_filled`], which is the form the
+     * scratch planes in [`crate::arithmetic`] reserve through: it fills to the
+     * `len` it was handed, not to whatever the allocator rounded the
+     * reservation up to.
+     *
+     * A separate cell rather than an arm of the one above, because the two
+     * forms compute their length differently and the mutation pass proved the
+     * difference matters: substituting `out.resize(out.capacity(), fill)` into
+     * `try_plane_len_filled` left the whole suite green, exactly as the same
+     * substitution into `try_plane_filled` did before that cell existed
+     * (issue #696). One over-reserve knob, two contracts, two checks.
+     *
+     * The capacity assertion is the positive control on the hook, for the same
+     * reason it is there above.
+     */
+    #[test]
+    fn a_filled_plane_sized_in_elements_is_as_long_as_its_len_and_not_its_capacity() {
+        const EXTRA: usize = 4096;
+        const LEN: usize = 150;
+        let plane = with_plane_over_reserve(EXTRA, || {
+            try_plane_len_filled::<u8>("test.filled_len", 8, 8, LEN, 7u8)
+        })
+        .expect("a 150-byte plane is servable");
+
+        assert!(
+            plane.capacity() >= LEN + EXTRA,
+            "the over-reserve has to have happened, or the length check below \
+             passes for the ordinary reason and says nothing; capacity is {}",
+            plane.capacity()
+        );
+        assert_eq!(
+            plane.len(),
+            LEN,
+            "the length is the one the caller asked for, however much room the \
+             allocator handed back"
+        );
+        assert!(
+            plane.iter().all(|&b| b == 7),
+            "and every element of that length is the fill"
+        );
+    }
+
+    /**
      * Tests that the ceiling refuses the site it names and no other, which is
      * the whole difference between a label and the ordinal the three private
      * ceilings kept (issue #696).
@@ -2375,7 +2442,10 @@ mod tests {
      * magic constant and moves for any reason at all; the split says which
      * module changed, and the total is then asserted to be the sum of the
      * parts, so a **fifth** prefix joining the funnel is caught too rather than
-     * being quietly absorbed.
+     * being quietly absorbed, and `arithmetic.` reaching one of these paths is
+     * caught that way. Its own rows are counted in `arithmetic.rs`, next to
+     * the radius ranges and window sizes they need, the same way the ICC entry
+     * points are counted in `colour.rs`.
      *
      * # What this counts, and what the neighbouring instrument counts
      *
@@ -2436,6 +2506,80 @@ mod tests {
                  prefixes above: a module joined the funnel and no row here names it",
                 row.op
             );
+        }
+    }
+
+    /// Every leaf site label declared in a module's `mod plane` block.
+    ///
+    /// Reads the block out of the module's own source rather than importing
+    /// the constants, which are `pub(super)` and deliberately not visible from
+    /// here. The counting prefixes the checks use (`"colour."`,
+    /// `"convolution."`, `"colour.export.fallback"`) are not in these blocks
+    /// and are not leaves, so they are correctly left out.
+    fn plane_labels(src: &str) -> Vec<&str> {
+        let start = match src.find("\nmod plane {\n") {
+            Some(i) => i,
+            None => return Vec::new(),
+        };
+        let body = &src[start..];
+        let end = body
+            .find("\n}\n")
+            .expect("`mod plane` closes at column zero");
+        body[..end]
+            .lines()
+            .filter_map(|line| line.split_once("&str = \""))
+            .filter_map(|(_, rest)| rest.split_once('"'))
+            .map(|(label, _)| label)
+            .collect()
+    }
+
+    /**
+     * Tests that no plane site label is a proper prefix of another (issue
+     * #696).
+     *
+     * The probe matches a cap site with `starts_with`, on purpose, so that
+     * `counting_planes("convolution.", ..)` can count a whole module and
+     * `counting_planes("colour.export.fallback", ..)` a whole family. The cost
+     * is that two *leaf* labels standing in a prefix relation are
+     * indistinguishable to a ceiling: capping the shorter one also refuses the
+     * longer, so a check that reads as naming one buffer starves two.
+     *
+     * That is the ordinal problem the labels exist to remove, arriving through
+     * a different door, and it is not hypothetical. `arithmetic.stdif.integral`
+     * and `arithmetic.stdif.integral_squares` were written as the first pair
+     * of them, and the mutation that routed the first integral image around
+     * the funnel entirely left the check naming it **green**, because the
+     * ceiling still landed on the second. Only the counting row caught it.
+     *
+     * The length assertion is the positive control: an empty scan would pass
+     * the comparison below for the wrong reason, and a scan that stopped
+     * finding the blocks is exactly how this check would rot.
+     */
+    #[test]
+    fn no_plane_site_label_is_a_prefix_of_another() {
+        let mut labels = vec![PLANE_OP_OUTPUT, PLANE_F32_SAMPLES];
+        for src in [
+            include_str!("arithmetic.rs"),
+            include_str!("colour.rs"),
+            include_str!("convolution.rs"),
+        ] {
+            labels.extend(plane_labels(src));
+        }
+        assert!(
+            labels.len() >= 20,
+            "the scan found only {} labels, so it has stopped reading the `mod plane` blocks \
+             rather than found them all agreeable: {labels:?}",
+            labels.len()
+        );
+
+        for a in &labels {
+            for b in &labels {
+                assert!(
+                    a == b || !b.starts_with(a),
+                    "site label {a:?} is a prefix of {b:?}, so a ceiling naming {a:?} also \
+                     refuses {b:?} and cannot tell the two buffers apart (issue #696)"
+                );
+            }
         }
     }
 
