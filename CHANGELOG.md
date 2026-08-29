@@ -2655,6 +2655,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A JPEG 2000 whose image starts away from the grid origin now says so**
+  (issue #766). `decode_jp2k` attached no `xoffset` / `yoffset` at all, so a
+  codestream declaring `XOsiz = 5, YOsiz = 7` came back looking as though it sat
+  at the origin. It now stamps `-XOsiz` / `-YOsiz`, which is both what
+  `vipsheader` reports for the same file and what `extract_area` stamps in this
+  crate for a crop at the same place (#721).
+
+  The size stays this crate's, and that is now measured rather than argued.
+  vips reports 27x17 for `origin57.j2k` where this reports 32x24
+  (`Xsiz - XOsiz` by `Ysiz - YOsiz`, what the standard calls the image), and
+  hashing the two settles which is which: our 32x24 cut to 27x17 **at (0, 0)**
+  reproduces the capture's `decoded_raster.sha256` byte for byte, so `jp2kload`
+  decodes 768 samples and hands back 459. Dropping 40% of the picture is neither
+  inside the carrier's noise nor two-directional, which is the test #732 and
+  #733 settled on for when to adopt vips and when not to.
+
+  Nothing `jp2ksave` writes reaches any of this: it always starts at the grid
+  origin, and every other fixture in `oracle-captures/foreign-jp2k/` reports
+  `0 / 0` on both sides.
+
 - `hist_find` sizes a 16-bit histogram from the data instead of from the depth,
   and `hist_equal` follows it (issues #803, #823). Measured on vips 8.18.6,
   `vips hist_find` of a `ushort` `[4096, 4096, 9]` gives width **4097** where

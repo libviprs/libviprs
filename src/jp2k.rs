@@ -27,7 +27,7 @@
 //!
 //! | libviprs method | libvips equivalent | result |
 //! |---|---|---|
-//! | [`decode_jp2k`] | `jp2kload` / `jp2kload_buffer` (default `page = 0`) | 8-bit or 16-bit raster, plus `icc-profile-data` / `bits-per-sample` / `jp2k-resolutions` / `tile-width` / `tile-height` |
+//! | [`decode_jp2k`] | `jp2kload` / `jp2kload_buffer` (default `page = 0`) | 8-bit or 16-bit raster at the image origin's offset, plus `icc-profile-data` / `bits-per-sample` / `jp2k-resolutions` / `tile-width` / `tile-height` |
 //! | [`Raster::encode_jp2k`] | `jp2ksave_buffer` | `.jp2` bytes, always in a JP2 container |
 //! | [`Raster::save_jp2k`] | `jp2ksave` | `.jp2` file |
 //!
@@ -152,13 +152,27 @@
 //!
 //! # Divergences worth knowing about
 //!
-//! * **The image origin.** A codestream may start away from the grid origin.
-//!   On `origin57.j2k`, whose SIZ says `Xsiz = 37, XOsiz = 5`, this module
-//!   reports `32x24`, which is `Xsiz - XOsiz` and what the standard says the
-//!   image is. vips reports `27x17` with `xoffset = -5`, which is that width
-//!   minus the offset a second time. The two disagree on every file with a
-//!   non-zero origin and agree on every file `jp2ksave` writes, since it
-//!   always starts at zero. Filed as issue #766.
+//! * **The image origin, on the size only.** A codestream may start away from
+//!   the grid origin. On `origin57.j2k`, whose SIZ says `Xsiz = 37, XOsiz = 5,
+//!   Ysiz = 31, YOsiz = 7`, this module reports `32x24`, which is
+//!   `Xsiz - XOsiz` by `Ysiz - YOsiz` and what the standard says the image is.
+//!   vips reports `27x17`, that size less the origin a second time.
+//!
+//!   **vips's answer is the top-left crop of this one**, measured by hashing
+//!   it: our 32x24 cut to 27x17 at (0, 0) reproduces the capture's
+//!   `decoded_raster.sha256` exactly, so `jp2kload` decodes 768 samples and
+//!   hands back 459 of them. That is what decided #766 in this direction; the
+//!   rule from #732 and #733 is to adopt vips when a difference is inside the
+//!   carrier's noise and points both ways, and to keep ours when it is large
+//!   or one-directional, and dropping 40% of the picture is both.
+//!
+//!   The **offsets** are not a divergence at all: this loader stamps
+//!   `xoffset = -XOsiz`, `yoffset = -YOsiz`, which is exactly what
+//!   `vipsheader` reports for the same file and exactly what `extract_area`
+//!   stamps in this crate for a crop at the same place (#721). So the two
+//!   agree on where the image is and disagree only on how much of it there is.
+//!   Nothing `jp2ksave` writes reaches either, since it always starts at the
+//!   grid origin.
 //! * **The `colr` box's enumerated colour space does not decide the tag
 //!   here.** `jp2kload` reads `EnumCS` and not the band count, so a
 //!   one-component file tagged CMYK comes back `cmyk` and a three-component
@@ -473,6 +487,7 @@ impl SaveOptions {
 /// value. The band count is the colour channels plus alpha, so a greyscale
 /// file stays one band.
 ///
+/// the image origin as a negative `xoffset` / `yoffset`,
 /// `icc-profile-data`, `bits-per-sample`, `jp2k-resolutions` and, when the
 /// image is more than one tile, `tile-width` and `tile-height` are lifted onto
 /// the raster. The first two use the names `jp2kload` uses; the third does not,
@@ -933,7 +948,6 @@ impl CodestreamHeader {
     ///
     /// So the loader and vips agree on the offsets even where they disagree on
     /// the size, which is the whole of the remaining #766 divergence.
-    #[allow(dead_code)] // wired into the decode by the fix commit
     fn origin_offset(&self) -> (i32, i32) {
         (negated_origin(self.x_origin), negated_origin(self.y_origin))
     }
@@ -942,7 +956,9 @@ impl CodestreamHeader {
     ///
     /// This is `Xsiz - XOsiz` by `Ysiz - YOsiz`, which is what the standard
     /// says the image is and what `hayro-jpeg2000` reports. vips subtracts the
-    /// origin a second time; see the module docs and issue #766.
+    /// origin a second time and hands back the top-left crop of this, measured
+    /// by digest; see the module docs and issue #766. Where the image sits is
+    /// reported separately, by [`CodestreamHeader::origin_offset`].
     fn image_size(&self) -> (u32, u32) {
         (
             self.xsiz.saturating_sub(self.x_origin),
@@ -1168,6 +1184,13 @@ fn decode(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
 
     let mut raster = Raster::new(width, height, format, buffer).map_err(Jp2kError::Raster)?;
     raster.meta.interpretation = Some(interpretation(image.color_space(), element_bytes));
+    // Where the image sits on the reference grid, as the negative offset
+    // `jp2kload` records and `extract_area` stamps for the same meaning
+    // (#766, #721). Zero for everything `jp2ksave` writes, since it always
+    // starts at the grid origin.
+    let (xoffset, yoffset) = header.origin_offset();
+    raster.meta.xoffset = xoffset;
+    raster.meta.yoffset = yoffset;
     if let Some(icc) = layout.icc {
         raster
             .fields
