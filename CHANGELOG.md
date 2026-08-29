@@ -3262,6 +3262,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   restamps they carried to work around this, which also removes two
   image-sized clones from the linear and ICC thumbnail pipelines.
 
+- **Refusing a window past a still's only page is a divergence, not parity,
+  and the docs say so now** (issue #893). `src/webp.rs` described the
+  refusal as what vips does. It is not: vips validates `page` and `n` only
+  when the file is animated, so `vips copy 'still.webp[page=5]'` succeeds
+  and hands back the one image, and so do `[n=2]`, `[page=1,n=2]` and even
+  `[n=0]`. All five measured with `vips copy` rather than `vipsheader`, so
+  the pixel phase really runs.
+
+  The behaviour is unchanged and deliberate: a caller who asked for page 5
+  and got page 0 has no way to tell, which is the same silent-wrong-answer
+  shape the delay subsetting avoids. All three animated loaders agree on it
+  and `tests/animation_dialect.rs` holds them to it. Only the sentence
+  claiming vips agreed was wrong, in both `src/webp.rs` and `src/jxl.rs`.
+
 - **The WebP decode budget covers what `image-webp` allocates, not only what
   libviprs fills** (issue #892). `max_alloc_bytes` is a ceiling on peak
   memory and it was out by a factor: the decoder keeps a full-size RGBA
