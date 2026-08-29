@@ -2928,6 +2928,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`addalpha` and `flatten` took their alpha ceiling from the byte width where
+  libvips takes it from the interpretation** (issues #859, #861). The two rules
+  agree on `uchar` and on a 16-bit raster tagged `grey16` / `rgb16`, which is
+  why nothing here caught it, and they part company everywhere else.
+
+  Measured on `/opt/homebrew/bin/vips` 8.18.6 with alpha 128: a `ushort` raster
+  tagged `b-w` holding 65535 flattens to **32896**, which is
+  `65535 * 128 / 255`, and the width rule answered 128. `addalpha` on that same
+  raster appends **255**, and the width rule appended 65535. `Multi16(n)` is
+  tagged `Multiband`, so any two-band 16-bit intermediate hit both. Both now
+  read `interpretation_max_alpha`, the source `white_ink` already reads (issue
+  #667), and the `Gray16` and `Rgb16` answers do not move because those rasters
+  are tagged `Grey16` / `Rgb16`. A background is scaled by the same denominator,
+  so it moved with it: `--background 10` on the `uchar` row gives 105 in both.
+
+  `flatten` also read its samples with the storage reader, so a float raster had
+  its `f32` bits reinterpreted as a `u32` and blended as an integer. It is one
+  numeric loop through `read_sample_f64` / `write_sample_f64` now, and
+  `vips flatten` on a float raster holding (200.5, 128) answers **100.643**,
+  which is what this answers. That path is reachable the ordinary way, since
+  every `colourspace` result for Lab, Lch, OkLab, OkLCh, XYZ, scRGB and Yxy is
+  float.
+
+  And it **truncates** where it used to round half up, which is the `vips_cast`
+  on the way out of the op. On the `uchar` carrier with alpha 128, band 0 of 201
+  gives `201 * 128 / 255` = 100.894 and vips answers 100; 51 gives 25.6 and vips
+  answers 25.
+
+  `pixel::write_sample_f64` lands with it: the write counterpart of
+  `read_sample_f64`, dispatching on `SampleKind` with `vips_cast` edge
+  semantics (clip into the kind's range, truncate toward zero, `NaN` to zero).
+  Reading through the kind and writing through a byte width only moves the
+  misread to the other end of the loop (issue #607).
 - **`draw` and `raster` stop asking for a byte width too** (issues #748,
   #607). `draw`'s `channel_at` / `set_channel_at` took a `bpc: usize` and
   panicked on the `_` arm, so the refusal covered float and would have covered
