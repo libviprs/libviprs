@@ -1001,6 +1001,24 @@ struct SampleLayout {
     kind: SampleKind,
     bpc: usize,
     is_float: bool,
+    /// Sample **floor** for the storage arithmetic, the other half of
+    /// [`max`].
+    ///
+    /// It exists because it is not always zero. `SampleLayout` carried a
+    /// ceiling and no floor, so every `clamp(0.0, layout.max)` in this
+    /// module was a `clamp` whose lower bound was a guess that happened to
+    /// be right for the three unsigned carriers, and issue #909 is the
+    /// point at which that stopped being true. Measured on
+    /// `/opt/homebrew/bin/vips` 8.18.6: `vips embed --extend background`
+    /// on a `char` raster fills **-50** for `--background -50` and
+    /// **-128** for -200, so the ink clips at both ends.
+    ///
+    /// `0.0` on a float carrier for the same reason [`max`] is 255 there:
+    /// this is the crate's storage convention, not a range the kind
+    /// implies, and `write` does not clamp a float sample at all.
+    ///
+    /// [`max`]: SampleLayout::max
+    min: f64,
     /// Sample ceiling for the **storage** arithmetic: what [`write`] rounds
     /// and clamps an unsigned sample into. 255 for 8-bit and float, 65535
     /// for 16-bit, and the kind's own ceiling for the wider carriers.
@@ -1027,14 +1045,15 @@ impl SampleLayout {
         // A float carrier's storage convention here is the crate's `0..255`
         // one, which is why it does not come off the kind; every integer
         // kind's ceiling does.
-        let max = match kind.max_value() {
-            Some(m) => f64::from(m),
-            None => 255.0,
+        let (min, max) = match kind.range() {
+            Some((lo, hi)) => (lo as f64, hi as f64),
+            None => (0.0, 255.0),
         };
         Self {
             kind,
             bpc,
             is_float,
+            min,
             max,
         }
     }
@@ -1045,13 +1064,54 @@ impl SampleLayout {
     }
 
     /// Write sample `i` from `f64`, rounding half up and clamping for the
-    /// unsigned formats and storing raw `f32` for the float formats.
+    /// integer formats and storing raw `f32` for the float formats.
+    ///
+    /// One rule for every integer carrier, `floor(v + 0.5)`, which is
+    /// round-to-nearest with ties going up. `write_sample_f64` truncates
+    /// toward zero and clamps into the kind's own range, so pre-rounding
+    /// here is what picks the rounding mode while the clamp stays stated
+    /// once per kind rather than once per branch.
+    ///
+    /// # vips rounds a negative sample differently, and it contradicts
+    /// itself doing it
+    ///
+    /// This is a deliberate divergence rather than an oversight, and the
+    /// numbers are why. Measured on `/opt/homebrew/bin/vips` 8.18.6 on a
+    /// **constant** 64x1 `char` field, where every resampler's correct
+    /// answer is the constant itself:
+    ///
+    /// | op on a constant `char` -50 | vips |
+    /// |---|---|
+    /// | `reduceh 2 --kernel nearest` | **-51** |
+    /// | `reduceh 2 --kernel linear` / `cubic` / `lanczos3` | -51 |
+    /// | `resize 0.5` | -51 |
+    /// | `affine "0.5 0 0 1" --interpolate bicubic` | **-52** |
+    /// | `affine "0.5 0 0 1" --interpolate bilinear` | -50 |
+    /// | `shrinkh 2` | **-49** |
+    /// | the same reduce on a `float` carrier | -50 |
+    /// | the same reduce on a `uchar` carrier at 200 | 200 |
+    ///
+    /// `--kernel nearest` is the one that settles it: a nearest-neighbour
+    /// resample copies a sample, and it cannot answer -51 for -50. The
+    /// shift is a full step, it lands on `short` and `int` too, and it is
+    /// absent from the float and unsigned carriers, so it is the signed
+    /// integer path's rounding and nothing about the kernels. Two
+    /// interpolators of the same op disagree by two on the same input, and
+    /// one of them is exact.
+    ///
+    /// So this is the brief's fourth oracle posture: the reference
+    /// contradicts itself, and matching a self-contradicting oracle is not
+    /// parity. libviprs answers the constant, and
+    /// `every_resampler_reproduces_a_constant_signed_field` pins that
+    /// rather than leaving it to be rediscovered.
+    ///
+    /// The ops whose rounding libviprs **does** match on a signed carrier
+    /// are the ones where the oracle is self-consistent, and they are
+    /// matched exactly: [`shrink_axis`]'s `(sum + n/2) / n` truncation,
+    /// `bandmean`'s round-half-away-from-zero, and
+    /// [`crate::resize`]'s `(tot + 2) >> 2` region shrink (issue #909).
     fn write(self, data: &mut [u8], i: usize, v: f64) {
         let o = i * self.bpc;
-        // `write_sample_f64` truncates toward zero and clamps into the
-        // kind's own range, so pre-rounding here keeps the round-half-up
-        // this resampler has always done while the clamp is stated once
-        // per kind rather than once per branch.
         let rounded = if self.is_float { v } else { (v + 0.5).floor() };
         write_sample_f64(data, self.kind, o, rounded);
     }
@@ -1081,7 +1141,7 @@ impl SampleLayout {
         if self.is_float {
             f64::from(v as f32)
         } else {
-            v.clamp(0.0, self.max).trunc()
+            v.clamp(self.min, self.max).trunc()
         }
     }
 }
@@ -1187,10 +1247,23 @@ fn shrink_axis(src: &Raster, factor: u32, ceil: bool, axis: Axis) -> Result<Rast
                     let sum: f64 = (0..f).map(sample).sum();
                     layout.write(&mut out, oi, sum / f as f64);
                 } else {
-                    // Integer mean with round-half-up, the libvips
-                    // `(sum + hshrink / 2) / hshrink`.
-                    let sum: u64 = (0..f).map(|k| sample(k) as u64).sum();
-                    let mean = (sum + f as u64 / 2) / f as u64;
+                    // Integer mean, the libvips `(sum + hshrink / 2) /
+                    // hshrink`, in C division that **truncates toward
+                    // zero**. The `u64` this used to accumulate in
+                    // saturated every negative sample to zero, so a `char`
+                    // block came out 0 where vips answers -99 (issue #909).
+                    //
+                    // Truncation is the measured rounding and it is not the
+                    // one `bandmean` uses on the same numbers. On
+                    // `/opt/homebrew/bin/vips` 8.18.6 a 2x2 `char` block of
+                    // `-100, -101 / -100, -101` shrinks 2x2 to **-99**: each
+                    // row goes `(-201 + 1) / 2 = -100`, then the column goes
+                    // `(-200 + 1) / 2 = -199 / 2`, which truncates to -99
+                    // rather than flooring to -100. `shrinkv 2` on the same
+                    // block answers `[-99, -100]`, which pins both
+                    // directions.
+                    let sum: i64 = (0..f).map(|k| sample(k) as i64).sum();
+                    let mean = (sum + f as i64 / 2) / f as i64;
                     layout.write(&mut out, oi, mean as f64);
                 }
             }
@@ -1422,7 +1495,16 @@ impl TapFetch<'_> {
     /// because `vips_affine_build` premultiplies into a FLOAT image before it
     /// resamples (`affine.c:551`), which is what `premultiply` stands for here.
     fn bicubic_is_fixed_point(&self, premultiply: bool) -> bool {
-        !premultiply && !self.layout.is_float && self.layout.bpc == 1
+        // On the **kind**, not on `bpc == 1`. A byte width does not name a
+        // carrier, and `Int8` is the second one-byte kind: sent down this
+        // path it took `uchar`'s 12-bit integer table, whose taps are
+        // clamped into `0..max`, so every negative sample resampled to
+        // zero. Measured on `/opt/homebrew/bin/vips` 8.18.6,
+        // `vips affine "0.5 0 0 1" --interpolate bicubic` on an 8x1 `char`
+        // ramp of four -128s and four 127s answers
+        // `[-128, -128, 127, 127]`; the width-keyed dispatch answered
+        // `[0, 0, 127, 127]` (issues #607, #909).
+        !premultiply && matches!(self.layout.kind, SampleKind::U8)
     }
 
     /// True when `vips_interpolate_bicubic_interpolate` would run
@@ -1565,7 +1647,7 @@ fn interpolate_at(
                         // border: `vips__vector_to_ink` casts the background
                         // through `vips_cast`, which clips and truncates
                         // (`affine.c:565`).
-                        *r += cxi * (p.clamp(0.0, fetch.layout.max) as i64);
+                        *r += cxi * (p.clamp(fetch.layout.min, fetch.layout.max) as i64);
                     }
                 }
             }
@@ -3634,6 +3716,236 @@ pub fn thumbnail_crop(
 mod tests {
     use super::*;
     use crate::conversion::Angle;
+    use crate::pixel::ALL_KINDS;
+
+    /// A one-band `Int8` raster from signed sample values.
+    fn int8(w: u32, h: u32, vals: &[i8]) -> Raster {
+        let data: Vec<u8> = vals.iter().map(|v| *v as u8).collect();
+        let fmt = PixelFormat::Int8(core::num::NonZeroU16::new(1).unwrap());
+        Raster::new(w, h, fmt, data).unwrap()
+    }
+
+    /// Every sample of a one-byte raster, read back signed.
+    fn i8s(r: &Raster) -> Vec<i8> {
+        r.data().iter().map(|b| *b as i8).collect()
+    }
+
+    /**
+     * Tests that `shrink` truncates its integer mean **toward zero** on a
+     * signed carrier, which is what the C `(sum + n/2) / n` does, and that
+     * it does so per axis because the op is separable.
+     * Measured on `/opt/homebrew/bin/vips` 8.18.6 over a 2x2 `char` block
+     * holding `-100, -101 / -100, -101`: `shrink 2 2` answers **-99**,
+     * `shrinkh 2` answers `[-100, -100]` and `shrinkv 2` answers
+     * `[-99, -100]`. The 2D answer is the composition: each row goes
+     * `(-201 + 1) / 2 = -100`, then the column goes `(-200 + 1) / 2`,
+     * which truncates to -99 rather than flooring to -100.
+     * Works by asserting all three, so the separability is pinned rather
+     * than assumed: an implementation that averaged the block in one pass
+     * would answer -100 and pass a test that only checked `shrink 2 2` if
+     * it also rounded differently.
+     * The `u64` this used to accumulate in saturated every negative
+     * sample to zero, so all three of these answered 0 (issue #909).
+     * Input: the block above -> Output: -99, `[-100, -100]`, `[-99, -100]`.
+     */
+    #[test]
+    fn shrink_truncates_its_integer_mean_toward_zero_on_a_signed_carrier() {
+        let blk = int8(2, 2, &[-100, -101, -100, -101]);
+        assert_eq!(i8s(&blk.try_shrink(2.0, 2.0).unwrap()), vec![-99]);
+        assert_eq!(i8s(&blk.try_shrinkh(2).unwrap()), vec![-100, -100]);
+        assert_eq!(i8s(&blk.try_shrinkv(2).unwrap()), vec![-99, -100]);
+        // The unsigned twin is untouched: 100/101 shrinks to 101 and 100,
+        // the round-half-up this has always given.
+        let up = Raster::new(2, 2, PixelFormat::Gray8, vec![100, 101, 100, 101]).unwrap();
+        assert_eq!(up.try_shrink(2.0, 2.0).unwrap().data(), &[101]);
+    }
+
+    /**
+     * Tests that `affine`'s bicubic dispatch keys on the sample **kind**
+     * and not on a byte width, so a `char` raster does not take the
+     * `uchar` fixed-point table whose taps are clamped into `0..=max`.
+     * `Int8` is the second one-byte kind, so `bpc == 1` selected it and
+     * every negative tap clamped to zero: an 8x1 `char` ramp of four
+     * -128s and four 127s came out `[0, 0, 127, 127]`. Measured on
+     * `/opt/homebrew/bin/vips` 8.18.6, `vips affine "0.5 0 0 1"
+     * --interpolate bicubic` on that ramp answers
+     * **`[-128, -128, 127, 127]`**.
+     * Works by asserting the ramp's four output samples and by asserting
+     * the predicate directly for every kind, with `U8` as the positive
+     * control that the fixed-point path is still selected where it
+     * belongs, since deleting the path entirely would also fix the ramp.
+     * Input: the ramp above -> Output: `[-128, -128, 127, 127]`.
+     */
+    #[test]
+    fn the_bicubic_fixed_point_path_is_the_uchar_kind_and_not_one_byte() {
+        let ramp = int8(8, 1, &[-128, -128, -128, -128, 127, 127, 127, 127]);
+        let out = ramp
+            .try_affine([0.5, 0.0, 0.0, 1.0], Interpolator::Bicubic)
+            .unwrap();
+        assert_eq!(i8s(&out), vec![-128, -128, 127, 127]);
+
+        // The predicate itself, per kind. `U8` is the positive control:
+        // without it, `fn bicubic_is_fixed_point(..) -> bool { false }`
+        // passes the assertion above.
+        for kind in ALL_KINDS {
+            let fmt = PixelFormat::with_kind(1, kind).expect("every kind has a carrier");
+            let data = vec![0u8; kind.bytes()];
+            let r = Raster::new(1, 1, fmt, data).unwrap();
+            let fetch = TapFetch {
+                data: r.data(),
+                w: 1,
+                h: 1,
+                bands: 1,
+                layout: SampleLayout::of(fmt),
+                extend: Extend::Black,
+                white: 0.0,
+                background: 0.0,
+                alpha_max: 255.0,
+            };
+            assert_eq!(
+                fetch.bicubic_is_fixed_point(false),
+                kind == SampleKind::U8,
+                "{kind:?} takes the wrong bicubic table"
+            );
+            // An alpha band premultiplies into float first, so nothing
+            // takes it then.
+            assert!(!fetch.bicubic_is_fixed_point(true), "{kind:?} with alpha");
+        }
+    }
+
+    /**
+     * Tests that every resampler reproduces a **constant** signed field,
+     * and pins a deliberate divergence from vips while doing it.
+     * A resampler applied to a constant image must answer the constant:
+     * that is true of every kernel, at every scale, by definition. vips
+     * does not, on a signed integer carrier, and it fails four different
+     * ways. Measured on `/opt/homebrew/bin/vips` 8.18.6 over a constant
+     * 64x1 `char` field of -50:
+     *
+     * | op | vips |
+     * |---|---|
+     * | `reduceh 2 --kernel nearest` | **-51** |
+     * | `reduceh 2 --kernel linear` / `cubic` / `lanczos3` | -51 |
+     * | `resize 0.5` | -51 |
+     * | `affine "0.5 0 0 1" --interpolate bicubic` | **-52** |
+     * | `affine "0.5 0 0 1" --interpolate bilinear` | -50 |
+     * | `shrinkh 2` | **-49** |
+     * | the same reduce on a `float` carrier | -50 |
+     * | the same reduce on a `uchar` carrier at 200 | 200 |
+     *
+     * `--kernel nearest` is what settles it: a nearest-neighbour resample
+     * copies a sample and cannot turn -50 into -51. The shift is a full
+     * step, it lands on `short` and `int` too, it is absent from the float
+     * and unsigned carriers, and two interpolators of the same op disagree
+     * by two on the same input while one of them is exact. That is the
+     * fourth oracle posture, a reference contradicting itself, and
+     * matching it is not parity.
+     * Works by asserting the constant survives `reduceh`, `reducev`,
+     * `resize` and both `affine` interpolators on all three signed
+     * carriers, with the `shrink` family **excluded on purpose** and its
+     * own test asserting the vips answer, because there the oracle is
+     * self-consistent and libviprs matches it.
+     * Input: a constant -50 field at each signed carrier -> Output: -50.
+     */
+    #[test]
+    fn every_resampler_reproduces_a_constant_signed_field() {
+        let n = |v: u16| core::num::NonZeroU16::new(v).unwrap();
+        // (format, the stored bytes of -50, how to read a sample back)
+        let carriers: [(PixelFormat, Vec<u8>); 3] = [
+            (PixelFormat::Int8(n(1)), vec![(-50i8) as u8]),
+            (PixelFormat::Int16(n(1)), (-50i16).to_ne_bytes().to_vec()),
+            (PixelFormat::Int32(n(1)), (-50i32).to_ne_bytes().to_vec()),
+        ];
+        for (fmt, unit) in carriers {
+            let w = 64usize;
+            let data: Vec<u8> = unit.iter().cycle().take(w * unit.len()).copied().collect();
+            let r = Raster::new(w as u32, 1, fmt, data).unwrap();
+            let read = |out: &Raster, i: usize| -> f64 {
+                crate::pixel::read_sample_f64(out.data(), fmt.kind(), i * fmt.bytes_per_channel())
+            };
+            let mut cases: Vec<(&str, Raster)> = vec![
+                (
+                    "reduceh cubic",
+                    r.try_reduceh(2.0, ReduceKernel::Cubic).unwrap(),
+                ),
+                (
+                    "reduceh nearest",
+                    r.try_reduceh(2.0, ReduceKernel::Nearest).unwrap(),
+                ),
+                (
+                    "reduceh lanczos3",
+                    r.try_reduceh(2.0, ReduceKernel::Lanczos3).unwrap(),
+                ),
+                ("resize 0.5", r.try_resize(0.5).unwrap()),
+            ];
+            for interp in [Interpolator::Bicubic, Interpolator::Bilinear] {
+                cases.push((
+                    "affine",
+                    r.try_affine([0.5, 0.0, 0.0, 1.0], interp).unwrap(),
+                ));
+            }
+            for (name, out) in cases {
+                for i in 0..out.width() as usize {
+                    assert_eq!(
+                        read(&out, i),
+                        -50.0,
+                        "{fmt:?} {name} moved a constant field at sample {i}"
+                    );
+                }
+            }
+        }
+        // The positive control that these ops are not simply copying their
+        // input: the same reduce on a non-constant field changes it.
+        let ramp = int8(8, 1, &[-128, -128, -128, -128, 127, 127, 127, 127]);
+        let reduced = ramp.try_reduceh(2.0, ReduceKernel::Cubic).unwrap();
+        assert_ne!(i8s(&reduced), vec![-128, -128, 127, 127]);
+    }
+
+    /**
+     * Tests that a background ink is cast into the carrier by clipping at
+     * **both** ends, which [`SampleLayout::cast_ink`] could not do while
+     * the layout carried a ceiling and no floor.
+     * `vips__vector_to_ink` casts the ink through `vips_cast`, which
+     * clips and then truncates toward zero. Measured on
+     * `/opt/homebrew/bin/vips` 8.18.6 through the op that shows it,
+     * `vips embed --extend background` on a `char` raster: -50 fills -50,
+     * -200 fills **-128** and 200 fills **127**.
+     * Works by driving `cast_ink` across [`ALL_KINDS`] at one constant
+     * past each end of every integer kind's range, so the floor is
+     * asserted per kind rather than at one carrier, with the unsigned
+     * kinds present as the control that their floor is still zero.
+     * Input: -200.0 and 1e12 at each kind -> Output: that kind's range
+     * endpoints.
+     */
+    #[test]
+    fn cast_ink_clips_into_every_carrier_at_both_ends() {
+        for kind in ALL_KINDS {
+            let fmt = PixelFormat::with_kind(1, kind).expect("every kind has a carrier");
+            let layout = SampleLayout::of(fmt);
+            let Some((lo, hi)) = kind.range() else {
+                // A float carrier narrows without clipping, which is the
+                // other half of what `vips_cast` does and the reason the
+                // loop cannot just use the layout's own `min` and `max`.
+                assert_eq!(layout.cast_ink(-200.0), -200.0, "{kind:?}");
+                assert_eq!(layout.cast_ink(1e12), f64::from(1e12f32), "{kind:?}");
+                continue;
+            };
+            assert_eq!(
+                layout.cast_ink(-200.0),
+                (-200.0f64).max(lo as f64),
+                "{kind:?}"
+            );
+            assert_eq!(layout.cast_ink(1e12), 1e12f64.min(hi as f64), "{kind:?}");
+        }
+        // The one-byte pair, which a per-width floor collides: the signed
+        // carrier keeps -50 and the unsigned one clips it to zero.
+        let n = |v: u16| core::num::NonZeroU16::new(v).unwrap();
+        assert_eq!(
+            SampleLayout::of(PixelFormat::Int8(n(1))).cast_ink(-50.0),
+            -50.0
+        );
+        assert_eq!(SampleLayout::of(PixelFormat::Gray8).cast_ink(-50.0), 0.0);
+    }
 
     /// A 4x4 Gray8 ramp with distinct values per pixel.
     fn ramp_4x4() -> Raster {

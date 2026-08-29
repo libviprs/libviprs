@@ -856,6 +856,25 @@ pub(crate) fn write_sample_f64(data: &mut [u8], kind: SampleKind, off: usize, v:
     }
 }
 
+/// Every [`SampleKind`], for the test sweeps across the crate.
+///
+/// One array in one place, deliberately. #516 added three carriers and
+/// four mutations came back green out of ten, every one of them a
+/// hand-written per-module list that stopped at the previous last variant.
+/// A sweep driven from here cannot skip a kind quietly: adding one makes
+/// this array literal disagree with its own declared length and the crate
+/// fails to compile.
+#[cfg(test)]
+pub(crate) const ALL_KINDS: [SampleKind; 7] = [
+    SampleKind::U8,
+    SampleKind::I8,
+    SampleKind::U16,
+    SampleKind::I16,
+    SampleKind::U32,
+    SampleKind::I32,
+    SampleKind::F32,
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1050,17 +1069,7 @@ mod tests {
         }
     }
 
-    /// Every [`SampleKind`], so a kind added without a test here fails to
-    /// compile at the array length rather than being quietly skipped.
-    const ALL_KINDS: [SampleKind; 7] = [
-        SampleKind::U8,
-        SampleKind::I8,
-        SampleKind::U16,
-        SampleKind::I16,
-        SampleKind::U32,
-        SampleKind::I32,
-        SampleKind::F32,
-    ];
+    use crate::pixel::ALL_KINDS;
 
     /**
      * Tests the signedness and the inclusive value range of every sample
