@@ -343,7 +343,7 @@ fn cell_matches(line: &str, command: &str, tail: Tail) -> bool {
     // lint tail and neither is `-- --ignored`.
     let toks: Vec<&str> = flags.split_whitespace().collect();
     !toks.is_empty()
-        && toks.len() % 2 == 0
+        && toks.len().is_multiple_of(2)
         && toks
             .chunks(2)
             .all(|p| matches!(p[0], "-D" | "-W" | "-A" | "-F") && !p[1].starts_with('-'))
