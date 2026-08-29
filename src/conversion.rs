@@ -478,9 +478,10 @@ impl Interpretation {
             PixelFormat::Gray16 => Self::Grey16,
             PixelFormat::Rgb8 | PixelFormat::Rgba8 | PixelFormat::RgbaF32 => Self::Srgb,
             PixelFormat::Rgb16 | PixelFormat::Rgba16 => Self::Rgb16,
-            PixelFormat::Multi8(_) | PixelFormat::Multi16(_) | PixelFormat::FloatF32(_) => {
-                Self::Multiband
-            }
+            PixelFormat::Multi8(_)
+            | PixelFormat::Multi16(_)
+            | PixelFormat::FloatF32(_)
+            | PixelFormat::Uint32(_) => Self::Multiband,
         }
     }
 }

@@ -337,6 +337,14 @@ fn image_color_type(fmt: PixelFormat) -> Result<image::ColorType, EncodeError> {
                 "float raster ({fmt:?}) has no 8/16-bit image colour type; cast first"
             )));
         }
+        // The `image` crate's widest integer colour type is 16-bit, so a
+        // `uint` raster is refused for the same reason a float one is
+        // rather than being narrowed behind the caller's back (issue #517).
+        PixelFormat::Uint32(_) => {
+            return Err(EncodeError::encode(format!(
+                "32-bit unsigned raster ({fmt:?}) has no 8/16-bit image colour type; cast first"
+            )));
+        }
     })
 }
 

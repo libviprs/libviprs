@@ -2252,6 +2252,13 @@ fn color_type_for_format(fmt: crate::pixel::PixelFormat) -> Result<image::ColorT
             "float raster ({fmt:?}) cannot be encoded as an image tile; \
              cast to an unsigned 8/16-bit format first"
         ))),
+        // 32-bit unsigned compute intermediates (the counting ops of issue
+        // #532) have no PNG/JPEG representation either; the widest integer
+        // colour type the `image` crate offers is 16-bit.
+        PixelFormat::Uint32(_) => Err(SinkError::EncodeMsg(format!(
+            "32-bit unsigned raster ({fmt:?}) cannot be encoded as an image tile; \
+             cast to an unsigned 8/16-bit format first"
+        ))),
     }
 }
 
