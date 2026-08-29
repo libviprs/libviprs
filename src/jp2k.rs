@@ -736,7 +736,12 @@ const MAX_TILES: u64 = 65535;
 ///   [`DecodeLimits::max_coord`], [`SourceError::DimensionLimitExceeded`] when
 ///   `width * height` exceeds `max_pixels`, and
 ///   [`SourceError::AllocLimitExceeded`] when the component buffers the header
-///   declares would exceed `max_alloc_bytes`.
+///   declares would exceed `max_alloc_bytes`. That price covers what
+///   `hayro-jpeg2000` holds beside the raster as well as the raster itself,
+///   because `max_alloc_bytes` is a ceiling on peak memory and this decoder
+///   was measured at 6.45x a raster-only price (issue #944). It is therefore
+///   stricter than it was, by roughly an order of magnitude for a small
+///   image and by about five times for a large one.
 pub fn decode_jp2k(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
     decode(bytes, limits)
 }
@@ -1695,12 +1700,53 @@ fn decode(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
     // 512 MiB default budget. Priced from the declared geometry before the
     // decoder reserves anything, the way `crate::exr` and `crate::fits` price
     // theirs, and reported through the one shared shape (issue #686).
-    limits.check_image_alloc(
+    //
+    // Plus what `hayro-jpeg2000` holds beside the buffer this module fills,
+    // which is much the larger half and is why this was the worst of the
+    // three decoders #944 measured: a 1024x1024 RGB file peaked at **6.45x**
+    // its price, and a 4096x4096 one at 244 MiB against a 48 MiB budget.
+    // `max_alloc_bytes` is documented as a ceiling on peak memory, so a
+    // caller sizing a container limit from it was killed by that factor, and
+    // the refusal message understated by the same one.
+    //
+    // The decoder has no budget of its own to hand this one to.
+    // `DecodeSettings` carries no allocation limit at all, which is why this
+    // takes `crate::webp`'s route rather than `crate::jxl`'s: jxl wires the
+    // caller's ceiling into `jxl-oxide`'s `AllocTracker` and lets the
+    // dependency refuse itself, and there is nothing here to wire it into.
+    //
+    // Two terms, both measured with a counting global allocator in
+    // `tests/decode_working_set.rs`:
+    //
+    // * **Per image**, one `f32` sample per component for the decoded
+    //   component data, and a second copy of all of them while the `cdef`
+    //   box's channel reorder clones the set. Eight bytes per band-pixel.
+    // * **Per tile**, the coefficient storage the code-block pass works in,
+    //   which `build` reallocates per tile and which therefore scales with
+    //   the *tile* rather than with the image, plus its bookkeeping. Measured
+    //   at 5.8 bytes per band-tile-pixel across four geometries and two
+    //   sample depths, priced at ten.
+    //
+    // The tile term is why a 512x512 file costs proportionally more than a
+    // 4096x4096 one: `jp2ksave` tiles on a 512 grid, so past that size the
+    // per-tile buffers stop growing. `min` with the image is the upper bound
+    // for the first tile, whose rectangle a non-zero `XTOsiz` can shrink but
+    // never grow.
+    let plane = u64::from(width).saturating_mul(u64::from(height));
+    let tile_plane = u64::from(header.tile_width.clamp(1, width.max(1)))
+        .saturating_mul(u64::from(header.tile_height.clamp(1, height.max(1))));
+    let working_set = u64::from(bands).saturating_mul(
+        plane
+            .saturating_mul(8)
+            .saturating_add(tile_plane.saturating_mul(10)),
+    );
+    limits.check_image_alloc_with_working_set(
         "JPEG 2000 component buffers",
         width,
         height,
         u64::from(bands),
         element_bytes,
+        working_set,
     )?;
     // Clearing the budget is not what makes this safe to compute: on a 32-bit
     // target a caller who lifts `max_alloc_bytes` can still pass a geometry
@@ -4893,8 +4939,12 @@ mod tests {
             "the pixel ceiling: {err:?}"
         );
 
-        let err = decode_jp2k(bytes, DecodeLimits::default().with_max_alloc_bytes(776))
-            .expect_err("777 bytes is past a 776-byte budget");
+        // 777 bytes of raster, plus what `hayro-jpeg2000` holds beside it
+        // (issue #944). One band, so the per-image term is 777 * 8 and the
+        // per-tile term is the 8x8 grid this fixture declares, 64 * 10:
+        // 777 + 6216 + 640 = 7633.
+        let err = decode_jp2k(bytes, DecodeLimits::default().with_max_alloc_bytes(7632))
+            .expect_err("7633 bytes is past a 7632-byte budget");
         let SourceError::AllocLimitExceeded {
             what,
             geometry,
@@ -4914,7 +4964,7 @@ mod tests {
             }),
             "a decoder that prices a declared geometry reports it"
         );
-        assert_eq!((needed_bytes, max_alloc_bytes), (777, 776));
+        assert_eq!((needed_bytes, max_alloc_bytes), (7633, 7632));
     }
 
     // -----------------------------------------------------------------------
