@@ -40,6 +40,32 @@
 //! - **`tracing`** — emits structured spans and events via the `tracing` crate.
 //! - **`packfile`** — gates [`PackfileSink`] for writing tiles into tar or zip
 //!   archives.
+//! - **`avif`** — gates the AV1 decode inside [`decode_avif`] (still images
+//!   only). Without it the entry point still parses the container, checks the
+//!   codec and applies all three decode limits, and refuses the decode itself.
+//! - **`svg`** — gates the SVG rasteriser in [`svg`] and the real body of
+//!   [`decode_svg`].
+//! - **`jxl`** — gates the JPEG XL loader and lossless encoder: [`decode_jxl`],
+//!   [`Raster::encode_jxl`], [`Raster::save_jxl`], the `.jxl` row in
+//!   [`Raster::save`]'s extension route and the `"jxl"` row in
+//!   [`Raster::encode_to_buffer`]'s format route.
+//! - **`jp2k`** — gates the JPEG 2000 loader and encoder: [`decode_jp2k`],
+//!   [`Raster::encode_jp2k`] and [`Raster::save_jp2k`].
+//! - **`serde`** — adds public `Serialize` / `Deserialize` derives to the wire
+//!   and config types ([`PyramidPlan`], [`EngineConfig`], [`TileCoord`],
+//!   [`Layout`], and the rest) so an out-of-process caller can rebuild a job
+//!   from a JSON envelope. Adds no dependencies.
+//! - **`test-util`** — exposes the crate's test-only sink doubles to dependent
+//!   crates, chiefly the external `libviprs-tests` suite. Adds no
+//!   dependencies.
+//!
+//! The four codec features all keep their entry points: with the feature off
+//! each one still exists, still compiles and keeps its signature, and returns
+//! a typed refusal, so a consumer compiles against either build.
+//!
+//! `tests/crate_doc_matches_the_crate.rs` holds this list against
+//! `[features]` in `Cargo.toml`, because it drifted to five of twelve while
+//! being the docs.rs front page (issue #950).
 //!
 //! ## Error handling and the dual API
 //!
