@@ -716,7 +716,9 @@ fn scan_animation(bytes: &[u8]) -> Option<AnimationScan> {
     let mut seen_vp8x = false;
     while at + 8 <= bytes.len() {
         let fourcc = bytes.get(at..at + 4)?;
-        let size = u32::from_le_bytes(bytes.get(at + 4..at + 8)?.try_into().ok()?);
+        let size = WireSize(u32::from_le_bytes(
+            bytes.get(at + 4..at + 8)?.try_into().ok()?,
+        ));
         // `at + 8` is inside the buffer by the loop condition; everything
         // past it is the file's own arithmetic on a size it chose, so it
         // goes through the checked step (issue #941).
@@ -1300,6 +1302,20 @@ pub(crate) fn encode_webp_for_save(
         })
 }
 
+/// A RIFF chunk's declared payload size, straight off the wire.
+///
+/// The wrapper is here to have no arithmetic on it. `size` is a `u32` the
+/// file chose, and adding it to an offset is the panic in #862 and #941
+/// where `usize` is 32 bits, while on a 64-bit host it changes nothing
+/// observable at all. That asymmetry is the whole problem: no test that can
+/// run on this repository's machines holds a walk to using the checked step,
+/// because stepping by hand gives the same answers here. The type can hold
+/// it. With no `Add` and no `From`, [`chunk_bounds_here`] is the only way
+/// from a declared size to an offset, and a walk that adds by hand stops
+/// compiling rather than waiting for a 32-bit runner nobody has.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct WireSize(u32);
+
 /// The two offsets one RIFF chunk header commits a walk to.
 #[derive(Debug, PartialEq, Eq)]
 struct ChunkBounds {
@@ -1335,8 +1351,8 @@ struct ChunkBounds {
 ///
 /// Every walk of a chunk chain in this module steps through here: the
 /// animation scan, and the two test helpers that walk a file they built.
-fn chunk_bounds(payload: u64, size: u32, addr_max: u64) -> Option<ChunkBounds> {
-    let size = u64::from(size);
+fn chunk_bounds(payload: u64, size: WireSize, addr_max: u64) -> Option<ChunkBounds> {
+    let size = u64::from(size.0);
     let end = payload.checked_add(size)?;
     let next = end.checked_add(size & 1)?;
     (next <= addr_max).then_some(ChunkBounds { end, next })
@@ -1355,7 +1371,7 @@ fn chunk_bounds(payload: u64, size: u32, addr_max: u64) -> Option<ChunkBounds> {
 /// The narrowing is `try_from` rather than `as`, so even a wrong ceiling
 /// refuses instead of truncating to an offset behind the one the walk
 /// started at, which is what the same file does with overflow checks off.
-fn chunk_bounds_here(payload: usize, size: u32) -> Option<(usize, usize)> {
+fn chunk_bounds_here(payload: usize, size: WireSize) -> Option<(usize, usize)> {
     let bounds = chunk_bounds(payload as u64, size, usize::MAX as u64)?;
     Some((
         usize::try_from(bounds.end).ok()?,
@@ -2027,7 +2043,7 @@ mod tests {
         let mut p = 12;
         while p + 8 <= bytes.len() {
             out.push(String::from_utf8_lossy(&bytes[p..p + 4]).into_owned());
-            let size = u32::from_le_bytes(bytes[p + 4..p + 8].try_into().unwrap());
+            let size = WireSize(u32::from_le_bytes(bytes[p + 4..p + 8].try_into().unwrap()));
             p = match chunk_bounds_here(p + 8, size) {
                 Some((_, next)) => next,
                 None => break,
@@ -3153,7 +3169,7 @@ mod tests {
         let mut crafted = 0usize;
         let mut cursor = 12usize;
         while let Some(header) = lying.get(cursor..cursor + 8) {
-            let size = u32::from_le_bytes(header[4..8].try_into().unwrap());
+            let size = WireSize(u32::from_le_bytes(header[4..8].try_into().unwrap()));
             if &header[..4] == b"ANMF" {
                 // Blending on, and the `VP8L` header claiming no alpha.
                 lying[cursor + 8 + 15] &= !0b10;
@@ -3236,7 +3252,7 @@ mod tests {
 
     /// [`chunk_bounds`] as a pair, so a cell reads as two offsets.
     fn bounds(payload: u64, size: u32, addr_max: u64) -> Option<(u64, u64)> {
-        chunk_bounds(payload, size, addr_max).map(|b| (b.end, b.next))
+        chunk_bounds(payload, WireSize(size), addr_max).map(|b| (b.end, b.next))
     }
 
     /**
@@ -3310,11 +3326,11 @@ mod tests {
         // picked a different ceiling fails here on a 32-bit host and is
         // invisible on a 64-bit one, which is why the ceiling is pinned in
         // one place rather than passed by three callers.
-        assert_eq!(chunk_bounds_here(20, 116), Some((136, 136)));
-        assert_eq!(chunk_bounds_here(20, 117), Some((137, 138)));
+        assert_eq!(chunk_bounds_here(20, WireSize(116)), Some((136, 136)));
+        assert_eq!(chunk_bounds_here(20, WireSize(117)), Some((137, 138)));
         assert_eq!(
-            chunk_bounds_here(20, u32::MAX),
-            chunk_bounds(20, u32::MAX, usize::MAX as u64)
+            chunk_bounds_here(20, WireSize(u32::MAX)),
+            chunk_bounds(20, WireSize(u32::MAX), usize::MAX as u64)
                 .map(|b| (b.end as usize, b.next as usize))
         );
     }
