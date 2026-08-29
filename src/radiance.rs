@@ -523,6 +523,12 @@ const SAMPLE_BYTES: usize = 4;
 
 /// The pixel format every decode produces and the only one
 /// [`Raster::encode_radiance`] accepts.
+fn float_rgb() -> PixelFormat {
+    PixelFormat::FloatF32(
+        std::num::NonZeroU16::new(BANDS as u16).expect("the band count is non-zero"),
+    )
+}
+
 /// The extension route's entry point (`imageio.rs`'s `.hdr` arm), at the
 /// `radsave` defaults.
 ///
@@ -552,12 +558,6 @@ fn encode_to_save(err: EncodeError) -> SaveError {
         EncodeError::Io(io) => SaveError::Io(io),
         other => SaveError::Encode(crate::sink::SinkError::EncodeMsg(other.to_string())),
     }
-}
-
-fn float_rgb() -> PixelFormat {
-    PixelFormat::FloatF32(
-        std::num::NonZeroU16::new(BANDS as u16).expect("the band count is non-zero"),
-    )
 }
 
 /// Whether a scanline of this width is run-length encoded.

@@ -4054,6 +4054,14 @@ mod tests {
                 "the message follows the feature for .{suffix}: {message}"
             );
         }
+        // `.hdr` is ungated, so it is in the message in every build. Without
+        // this the list can lose a row and only the sweep below notices, and
+        // the sweep derives itself *from* the message, so a row that vanishes
+        // from both simply stops being tested (issue #880).
+        assert!(
+            extensions.contains(&"hdr"),
+            "the Radiance row is ungated and must always be listed: {message}"
+        );
 
         for extension in &extensions {
             let path = dir.path().join(format!("listed.{extension}"));
