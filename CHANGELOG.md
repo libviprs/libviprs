@@ -1026,6 +1026,27 @@ and not under `Fixed`: this file is the only place they can be caught.
 
 ### Added
 
+- **`jp2ksave` labels the alpha channel**, writing the `cdef` box vips writes
+  (issue #935). Found by the byte-identity check the tiled save brought in
+  with issue #768: three of the
+  first four whole-file comparisons matched `vips jp2ksave` exactly and the
+  fourth, an `Rgba8` raster, was exactly 34 bytes shorter, which is one `cdef`
+  box for four channels.
+
+  The rule is narrower than it looks and it is measured rather than read off
+  the source. Over six band counts and six interpretations, 36 files, exactly
+  two carry the box: greyscale plus a band, and RGB plus a band. It is **not**
+  `vips_image_hasalpha`, which is true for two bands whatever the tag and for
+  anything past four, so CMYK plus a band gets no box and neither does a
+  five-band image. It is keyed here on the raster's `Interpretation` for the
+  same reason the `colr` box is, and that matters for one row: this module
+  writes a greyscale `colr` for an untagged two-band raster where vips writes
+  unspecified, so keying it on the box would give a compute intermediate an
+  alpha channel it never claimed.
+
+  Nine whole-file digests are now pinned against `vips jp2ksave`, four of them
+  the shapes that carry the box.
+
 - **`jp2ksave` writes a tiled codestream**, on `SaveOptions::tile_width` /
   `SaveOptions::tile_height`, which default to `jp2k::DEFAULT_TILE_SIZE` and
   so to vips's own 512 (issue #768). The parity gap was wider than the issue
