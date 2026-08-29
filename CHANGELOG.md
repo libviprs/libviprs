@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- **`ConversionError::UnsupportedSampleKind` is removed** (issue #931). Nothing
+  in the crate could construct it. It was the sibling of
+  `ConversionError::FloatUnsupported` for the carriers that are not float, and
+  issue #909 widened this module's sample helpers so those carriers are read
+  rather than refused, leaving float as the only refusal and float with its own
+  variant.
+
+  Measured rather than assumed, with a positive control: scanning
+  `src/conversion.rs` for the name finds the definition and two doc references
+  and no construction, while the same scan for `FloatUnsupported`, which **is**
+  constructed, finds 19 hits.
+
+  Breaking for anyone matching it explicitly, and that is the right outcome,
+  because their arm could not fire. The refusal itself is not lost:
+  `BandError::UnsupportedSampleKind` and `ExtractError::UnsupportedSampleKind`
+  are both still live and both still reach a caller of a `conversion` op,
+  through `ConversionError::Band` and `ConversionError::Extract`.
+  `ConversionError` is `#[non_exhaustive]`, so adding a variant back is not a
+  breaking change if an eighth sample kind ever needs one.
+
 - **`profile` emits `Int32` and stops saturating at 65535** (issues #516, #759).
   Breaking because the output format changes, and a live defect until now:
   positions on any axis longer than 65535 were wrong. On a 1x65537 all-zero
