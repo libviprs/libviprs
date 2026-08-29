@@ -3054,6 +3054,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Two GIFs that decode in vips and did not decode here now decode, because the
+  loader hands the decoder the same file in the shape it will read (issues
+  #851, #879). Both were filed as "upstream refuses it first, nothing here
+  helps", and both were wrong: the `gif` crate is stricter than the format
+  where libnsgif is looser, so it *refuses* rather than disagreeing, and what
+  can be fixed is which bytes it is given.
+
+  **A file declaring no global colour table** decodes through libnsgif's own
+  two-entry black-and-white substitute. Measured on vips 8.18.6: index 0 is
+  `0 0 0`, index 1 is `255 255 255`, `gif-palette` is `-16777216 -1` and
+  `bits-per-sample` is 1. The stored background index is ignored with it, so a
+  restore-to-background disposal paints entry 0 even when the descriptor names
+  index 1, whose entry is white. `Decoder::next_frame_info` used to error with
+  "no color table available for current frame" and `Decoder` has no way to be
+  given a palette, so the table is spliced into the logical screen descriptor
+  instead.
+
+  **A control extension whose last sub-block is not four bytes** no longer
+  truncates the file. `read_control_extension` refuses it and the error ends
+  the header scan, so every frame from there on disappeared; vips reports two
+  pages for the same file. The chain is rewritten into the single four-byte
+  sub-block libnsgif's own fixed-offset read produces, which is the same four
+  bytes in the one shape the crate accepts.
+
+  The copy is priced through `DecodeLimits` as a second whole-file buffer, and
+  it is made only for a file that needs one: an ordinary GIF is handed to the
+  decoder untouched, which is asserted rather than assumed.
+
 - **`maplut` refuses a lookup table longer than 65536 elements**, the bound
   libvips enforces (issue #894). `vips maplut` with a 70000-element table answers
   "histograms must have not have more than 65536 elements" and exits non-zero,
