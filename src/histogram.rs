@@ -47,28 +47,27 @@
 //!   return [`HistogramError::NotAHistogram`] otherwise. Element order is
 //!   identical for both orientations (row-major data with interleaved
 //!   bands), and outputs preserve the input's orientation.
-//! * **Count depth.** [`PixelFormat`] has no unsigned depth wider than 16
-//!   bits, so every op that produces counts or sums writes 16-bit samples
-//!   and saturates at `65535`. This is the documented contract until a
-//!   wider sample kind lands. Operations that consume pixel-value
-//!   distributions internally ([`Raster::hist_equal`],
-//!   [`Raster::hist_local`], [`Raster::percent`]) compute full-precision
-//!   `u64` histograms directly from the image and are exact regardless of
-//!   image size.
+//! * **Count depth.** Counts and sums go out on
+//!   [`PixelFormat::Uint32`], the libvips `UINT` carrier, so a count is a
+//!   count: a 300x300 image reports 90000 rather than the 65535 it
+//!   reported while the widest unsigned depth here was 16 bits (issues
+//!   #517, #532). Operations that consume pixel-value distributions
+//!   internally ([`Raster::hist_equal`], [`Raster::hist_local`],
+//!   [`Raster::percent`]) compute full-precision `u64` histograms directly
+//!   from the image and were always exact.
 //!
-//!   **The ceiling is a deviation and any image over 256x256 reaches it**,
-//!   because these are pixel counters. What libvips emits instead is not
-//!   one format, measured on 8.18.6 (issue #759):
+//!   What libvips emits is not one format, measured on 8.18.6 (issue
+//!   #759), and two rows are still out of reach:
 //!
-//!   | op | vips output format |
-//!   |---|---|
-//!   | `hist_find`, `hist_find_ndim` | `UINT`, whatever the input |
-//!   | `hist_find_indexed` | `DOUBLE`, whatever the input and either `combine` |
-//!   | `hist_cum` | `UINT` / `INT` / `FLOAT` / `DOUBLE`, following the input |
+//!   | op | vips output format | here |
+//!   |---|---|---|
+//!   | `hist_find`, `hist_find_ndim` | `UINT`, whatever the input | `Uint32` |
+//!   | `hist_cum` | `UINT` / `INT` / `FLOAT` / `DOUBLE`, following the input | `Uint32` |
+//!   | `hist_find_indexed` | `DOUBLE`, whatever the input and either `combine` | 16-bit, issue #887 |
 //!
-//!   So closing this needs more than the uint carrier of issue #517: the
-//!   signed carriers of #516 for `hist_cum` on a signed input, and a
-//!   double one, which is why #518 being closed matters here. Reading the
+//!   `hist_cum` on a **signed** input wants `INT` and needs the carriers
+//!   of issue #516; `hist_find_indexed` wants `DOUBLE` and is issue #887,
+//!   which is a float decision rather than a `Uint32` one. Reading the
 //!   libvips source will mislead you on `hist_find`: for a
 //!   `VipsStatisticClass` the per-op `format_table` is an **input cast**
 //!   table (`statistic.c`), not the output format, which is set separately
@@ -482,10 +481,27 @@ fn plot_height(kind: SampleKind, values: &[u32]) -> usize {
     }
 }
 
-/// Saturate a `u64` count into a 16-bit sample value.
+/// Saturate a `u64` sum into a 16-bit sample value.
+///
+/// One caller left: `hist_find_indexed`, whose output is still 16 bits.
+/// vips emits **DOUBLE** there whatever the value image's carrier is, so
+/// that op is not a `Uint32` fix but a float one, and it is issue #887.
+/// Everything else in this module counts into [`sat32`] now (issue #532).
 #[inline]
 fn sat16(v: u64) -> u32 {
-    v.min(u16::MAX as u64) as u32
+    v.min(u64::from(u16::MAX)) as u32
+}
+
+/// Saturate a `u64` count into a 32-bit sample value.
+///
+/// The counters go out on [`PixelFormat::Uint32`] now (issue #532), so the
+/// ceiling is `u32::MAX` rather than `u16::MAX`. Reaching it needs an image
+/// of more than 4,294,967,295 pixels in one bin, which the crate's decode
+/// allocation budget refuses long before, so this is a floor under the
+/// arithmetic rather than a behaviour anyone can observe.
+#[inline]
+fn sat32(v: u64) -> u32 {
+    v.min(u64::from(u32::MAX)) as u32
 }
 
 impl Raster {
@@ -502,8 +518,8 @@ impl Raster {
     /// libvips sweep behind that (issue #803). The result is an image
     /// with the input's band count: sample `(v, 0)` of band `b` is the
     /// number of band-`b` samples equal to `v`. Counts are written as
-    /// 16-bit samples and saturate at `65535` (see the module notes on
-    /// count depth).
+    /// 32-bit unsigned samples, so the 300x300 image of issue #532 reports
+    /// 90000 rather than 65535 (see the module notes on count depth).
     ///
     /// # Errors
     ///
@@ -513,12 +529,12 @@ impl Raster {
         let bands = self.format().channels();
         let hists = per_band_hist(self);
         let bins = hists.first().map_or(1, Vec::len);
-        let out_fmt = format_for(bands, SampleKind::U16)?;
+        let out_fmt = format_for(bands, SampleKind::U32)?;
         let mut out = Raster::zeroed(bins as u32, 1, out_fmt)?;
         let buf = out.data_mut();
         for (b, hist) in hists.iter().enumerate() {
             for (v, &n) in hist.iter().enumerate() {
-                write_flat(buf, SampleKind::U16, v * bands + b, sat16(n));
+                write_flat(buf, SampleKind::U32, v * bands + b, sat32(n));
             }
         }
         Ok(out)
@@ -566,10 +582,10 @@ impl Raster {
         for i in 0..n {
             hist[read_bin(data, kind, i * bands + band as usize) as usize] += 1;
         }
-        let mut out = Raster::zeroed(bins as u32, 1, PixelFormat::Gray16)?;
+        let mut out = Raster::zeroed(bins as u32, 1, format_for(1, SampleKind::U32)?)?;
         let buf = out.data_mut();
         for (v, &count) in hist.iter().enumerate() {
-            write_flat(buf, SampleKind::U16, v, sat16(count));
+            write_flat(buf, SampleKind::U32, v, sat32(count));
         }
         Ok(out)
     }
@@ -593,7 +609,10 @@ impl Raster {
     /// sized from the **index** image the same way [`Raster::try_hist_find`]
     /// is sized from its input, 256 elements for an 8-bit index and
     /// `max + 1` for a 16-bit one, and carries the input's band count. Sums
-    /// are written as 16-bit samples and saturate at `65535`.
+    /// are still written as 16-bit samples and saturate at `65535`: vips
+    /// emits `DOUBLE` here whatever the value image's carrier is, so this
+    /// one is a float fix rather than a `Uint32` one, and it is issue
+    /// #887.
     ///
     /// # Errors
     ///
@@ -659,8 +678,8 @@ impl Raster {
     /// selects the column, band 1 (when present) the row, and band 2 (when
     /// present) the output band. A sample value `v` falls in bin
     /// `v * bins / range` where `range` is 256 or 65536 by depth. `bins`
-    /// defaults to 10, matching libvips. Counts are written as 16-bit
-    /// samples and saturate at `65535`.
+    /// defaults to 10, matching libvips. Counts are written as 32-bit
+    /// unsigned samples (issue #532).
     ///
     /// The output is `bins` wide, `bins` high when the input has two or
     /// more bands (1 otherwise), and has `bins` bands when the input has
@@ -691,7 +710,7 @@ impl Raster {
         let out_w = bins;
         let out_h = if bands >= 2 { bins } else { 1 };
         let out_bands = if bands >= 3 { bins as usize } else { 1 };
-        let out_fmt = format_for(out_bands, SampleKind::U16)?;
+        let out_fmt = format_for(out_bands, SampleKind::U32)?;
         let mut out = Raster::zeroed(out_w, out_h, out_fmt)?;
         let buf = out.data_mut();
 
@@ -711,9 +730,9 @@ impl Raster {
                 0
             };
             let cell = (by * out_w as usize + bx) * out_bands + bz;
-            let cur = read_bin(buf, SampleKind::U16, cell);
-            if cur < u16::MAX as u32 {
-                write_flat(buf, SampleKind::U16, cell, cur + 1);
+            let cur = read_value(buf, SampleKind::U32, cell);
+            if cur < u32::MAX {
+                write_flat(buf, SampleKind::U32, cell, cur + 1);
             }
         }
         Ok(out)
@@ -736,9 +755,11 @@ impl Raster {
 
     /// Compute the cumulative histogram, like `vips_hist_cum`.
     ///
-    /// Each band is replaced by its running sum along the histogram.
-    /// 8-bit input is promoted to 16-bit output (libvips promotes to
-    /// 32-bit); sums saturate at `65535`.
+    /// Each band is replaced by its running sum along the histogram, on a
+    /// 32-bit unsigned output whatever the input carrier, which is what
+    /// libvips does for every unsigned input (issue #532). A **signed**
+    /// input wants `INT` there and needs issue #516's carriers, so that
+    /// row is still a deviation.
     ///
     /// # Errors
     ///
@@ -748,7 +769,7 @@ impl Raster {
         let n = hist_len(self)?;
         let bands = self.format().channels();
         let kind = self.format().kind();
-        let out_fmt = format_for(bands, SampleKind::U16)?;
+        let out_fmt = format_for(bands, SampleKind::U32)?;
         let mut out = Raster::zeroed(self.width(), self.height(), out_fmt)?;
         let buf = out.data_mut();
         let data = self.data();
@@ -756,7 +777,7 @@ impl Raster {
             let mut sum = 0u64;
             for i in 0..n {
                 sum += read_value(data, kind, i * bands + b) as u64;
-                write_flat(buf, SampleKind::U16, i * bands + b, sat16(sum));
+                write_flat(buf, SampleKind::U32, i * bands + b, sat32(sum));
             }
         }
         Ok(out)
@@ -1472,16 +1493,20 @@ mod tests {
      * `hist_find_indexed` emits `DOUBLE` for every input format and either
      * `combine` mode, which the module doc used to sweep into "32-bit
      * unsigned" (issue #759).
-     * Input: a 4x4 Gray8 image -> Output: Gray16 from all five.
+     * Input: a 4x4 Gray8 image -> Output: `Uint32` from four of the five,
+     * and `Gray16` from `hist_find_indexed`, which is issue #887.
      */
     #[test]
-    fn counting_ops_carry_16_bit_samples() {
+    fn counting_ops_carry_32_bit_samples() {
         let im = gray(4, 4, (0u8..16).collect());
-        assert_eq!(im.hist_find().format(), PixelFormat::Gray16);
-        assert_eq!(im.hist_find_band(0).format(), PixelFormat::Gray16);
+        assert_eq!(im.hist_find().format(), uint_fmt(1));
+        assert_eq!(im.hist_find_band(0).format(), uint_fmt(1));
+        assert_eq!(im.hist_find_ndim(Some(4)).format(), uint_fmt(1));
+        assert_eq!(im.hist_find().hist_cum().format(), uint_fmt(1));
+        // `hist_find_indexed` is deliberately not in that list. vips emits
+        // **DOUBLE** there whatever the value image's carrier is, so it is
+        // a float fix rather than a `Uint32` one, and it is issue #887.
         assert_eq!(im.hist_find_indexed(&im).format(), PixelFormat::Gray16);
-        assert_eq!(im.hist_find_ndim(Some(4)).format(), PixelFormat::Gray16);
-        assert_eq!(im.hist_find().hist_cum().format(), PixelFormat::Gray16);
     }
 
     /**
@@ -1727,23 +1752,24 @@ mod tests {
     }
 
     /**
-     * Tests that `hist_find` saturates a bin count past 65535 rather than
-     * wrapping, the deviation the 16-bit carrier forces.
+     * Tests that `hist_find` carries a bin count past 65535 instead of
+     * saturating there, which is the whole of issue #532 and the reason
+     * issue #517's carrier exists.
      * Works by histogramming a 256x256 single-valued image, whose one
-     * populated bin holds 65536 samples, one past the ceiling. That is the
-     * smallest square image that overflows it, and it is 64 KiB.
-     * Measured on vips 8.18.6, whose `UINT` output holds the true value: a
-     * 300x300 single-valued image gives `vips max` of `90000` on the
-     * histogram. libviprs reports the `65535` asserted here (issue #759).
-     * Input: 256x256 all-7 -> Output: bin 7 is 65535, not 65536.
+     * populated bin holds 65536 samples, exactly one past the old ceiling.
+     * That is the smallest square image that overflows it, and it is 64
+     * KiB. This test used to assert 65535 and named the shortfall as a
+     * deviation (issue #759); the number it asserts now is the count.
+     * The bins either side stay at zero, so the count is a real one and
+     * not every bin reading full.
+     * Input: 256x256 all-7 -> Output: bin 7 is 65536, not 65535.
      */
     #[test]
-    fn hist_find_saturates_a_count_past_the_16_bit_ceiling() {
+    fn hist_find_carries_a_count_past_the_16_bit_ceiling() {
         let im = gray(256, 256, vec![7u8; 256 * 256]);
         let h = im.hist_find();
-        assert_eq!(h.getpoint(7, 0), vec![65535.0]);
-        // The bins either side stay at zero, so the saturation above is a
-        // real count and not every bin reading full.
+        assert_eq!(h.format(), uint_fmt(1));
+        assert_eq!(h.getpoint(7, 0), vec![65536.0]);
         assert_eq!(h.getpoint(6, 0), vec![0.0]);
         assert_eq!(h.getpoint(8, 0), vec![0.0]);
     }
@@ -1788,7 +1814,7 @@ mod tests {
         let hist = im.hist_find();
         assert_eq!(hist.width(), 256);
         assert_eq!(hist.height(), 1);
-        assert_eq!(hist.format(), PixelFormat::Gray16);
+        assert_eq!(hist.format(), uint_fmt(1));
         assert_eq!(hist.getpoint(0, 0), vec![5000.0]);
         assert_eq!(hist.getpoint(10, 0), vec![5000.0]);
         assert_eq!(hist.getpoint(5, 0), vec![0.0]);
@@ -1804,7 +1830,7 @@ mod tests {
         let im = Raster::new(50, 40, PixelFormat::Rgb8, data).unwrap();
         let hist = im.hist_find();
         assert_eq!(hist.width(), 256);
-        assert_eq!(hist.format(), PixelFormat::Rgb16);
+        assert_eq!(hist.format(), uint_fmt(3));
         assert_eq!(hist.getpoint(1, 0), vec![2000.0, 0.0, 0.0]);
         assert_eq!(hist.getpoint(2, 0), vec![0.0, 2000.0, 0.0]);
         assert_eq!(hist.getpoint(3, 0), vec![0.0, 0.0, 2000.0]);
@@ -1894,13 +1920,15 @@ mod tests {
         assert_eq!(im.hist_find_band(1).getpoint(5000, 0), vec![1.0]);
     }
 
-    /// Counts saturate at 65535 rather than wrapping: 90000 zero-valued
-    /// pixels report 65535.
+    /// The image issue #532 opens with: a 300x300 raster is 90000 pixels,
+    /// and the count is 90000. `vips hist_find` on the same image reports
+    /// 90000 too, measured on 8.18.6; this used to report 65535.
     #[test]
-    fn hist_find_saturates_at_u16_max() {
+    fn hist_find_counts_all_90000_pixels_of_a_300_square() {
         let im = Raster::zeroed(300, 300, PixelFormat::Gray8).unwrap();
         let hist = im.hist_find();
-        assert_eq!(hist.getpoint(0, 0), vec![65535.0]);
+        assert_eq!(hist.format(), uint_fmt(1));
+        assert_eq!(hist.getpoint(0, 0), vec![90000.0]);
     }
 
     // ---- hist_find_band ----
@@ -1912,7 +1940,7 @@ mod tests {
         let data: Vec<u8> = std::iter::repeat_n([1u8, 2, 3], 100).flatten().collect();
         let im = Raster::new(10, 10, PixelFormat::Rgb8, data).unwrap();
         let hist = im.hist_find_band(1);
-        assert_eq!(hist.format(), PixelFormat::Gray16);
+        assert_eq!(hist.format(), uint_fmt(1));
         assert_eq!(hist.getpoint(2, 0), vec![100.0]);
         assert_eq!(hist.getpoint(1, 0), vec![0.0]);
 
@@ -2008,7 +2036,7 @@ mod tests {
         let hist = im.hist_find_ndim(Some(1));
         assert_eq!(hist.width(), 1);
         assert_eq!(hist.height(), 1);
-        assert_eq!(hist.format(), PixelFormat::Gray16);
+        assert_eq!(hist.format(), uint_fmt(1));
         assert_eq!(hist.getpoint(0, 0), vec![10000.0]);
     }
 
@@ -2019,7 +2047,7 @@ mod tests {
         let im = gray(2, 1, vec![255, 0]);
         let hist = im.hist_find_ndim(None);
         assert_eq!((hist.width(), hist.height()), (10, 1));
-        assert_eq!(hist.format(), PixelFormat::Gray16);
+        assert_eq!(hist.format(), uint_fmt(1));
         assert_eq!(hist.getpoint(9, 0), vec![1.0]);
         assert_eq!(hist.getpoint(0, 0), vec![1.0]);
 
@@ -2033,7 +2061,7 @@ mod tests {
         .unwrap();
         let hist = im.hist_find_ndim(None);
         assert_eq!((hist.width(), hist.height()), (10, 10));
-        assert_eq!(hist.format(), PixelFormat::Gray16);
+        assert_eq!(hist.format(), uint_fmt(1));
         // Pixel [0, 255] -> column 0, row 9; pixel [255, 0] -> column 9, row 0.
         assert_eq!(hist.getpoint(0, 9), vec![1.0]);
         assert_eq!(hist.getpoint(9, 0), vec![1.0]);
@@ -2073,7 +2101,7 @@ mod tests {
         let im = Raster::identity();
         let total = im.avg() * 256.0;
         let cum = im.hist_cum();
-        assert_eq!(cum.format(), PixelFormat::Gray16);
+        assert_eq!(cum.format(), uint_fmt(1));
         assert_eq!((cum.width(), cum.height()), (256, 1));
         let px = cum.getpoint(255, 0);
         assert!(
@@ -2103,11 +2131,12 @@ mod tests {
 
     /// 16-bit cumulative sums saturate at 65535 rather than wrapping.
     #[test]
-    fn hist_cum_saturates() {
+    fn hist_cum_carries_a_running_sum_past_the_16_bit_ceiling() {
         let cum = gray16(3, 1, &[60000, 60000, 60000]).hist_cum();
+        assert_eq!(cum.format(), uint_fmt(1));
         assert_eq!(cum.getpoint(0, 0), vec![60000.0]);
-        assert_eq!(cum.getpoint(1, 0), vec![65535.0]);
-        assert_eq!(cum.getpoint(2, 0), vec![65535.0]);
+        assert_eq!(cum.getpoint(1, 0), vec![120000.0]);
+        assert_eq!(cum.getpoint(2, 0), vec![180000.0]);
     }
 
     /// hist_cum rejects a 2D image with a typed error.
@@ -2840,6 +2869,11 @@ mod tests {
     // the bin read and the value read are different questions (#888)
     // ------------------------------------------------------------------
 
+    /// The `Uint32` format the counting ops emit (issue #532).
+    fn uint_fmt(bands: u16) -> PixelFormat {
+        PixelFormat::Uint32(core::num::NonZeroU16::new(bands).unwrap())
+    }
+
     /// A one-band `Uint32` histogram from counts.
     fn uint_hist(counts: &[u32]) -> Raster {
         let data: Vec<u8> = counts.iter().flat_map(|v| v.to_ne_bytes()).collect();
@@ -3096,5 +3130,62 @@ mod tests {
         // still accepted and the refusal is not simply "any large LUT".
         assert!(image.try_maplut(&lut(65_536)).is_ok());
         assert!(image.try_maplut(&lut(256)).is_ok());
+    }
+    /**
+     * Tests that the counting ops write their counts into the unsigned
+     * 32-bit carrier and stop saturating at 65535, which is issue #532 and
+     * the reason issue #517's carrier exists.
+     * Works on the exact image the issue opens with, a 300x300 single-band
+     * `uchar` raster of one value, which is 90000 pixels and so already
+     * past a 16-bit counter. Every expected number is measured on
+     * `/opt/homebrew/bin/vips` 8.18.6 rather than derived: `vips hist_find`
+     * gives a UINT histogram 256 wide with bin 200 = 90000, `vips hist_cum`
+     * gives UINT with max 90000, and `vips hist_find_ndim --bins 10` gives
+     * UINT with max 90000.
+     * The 4x4 control below is the one that says the change is about the
+     * ceiling and not about the arithmetic: at 16 pixels both the old and
+     * the new code count 16, so a test that only used it would pass either
+     * way.
+     * Input: 300x300 uchar of 200 -> hist_find bin 200 = 90000, not 65535.
+     */
+    #[test]
+    fn the_counting_ops_carry_counts_past_65535() {
+        let n1 = core::num::NonZeroU16::new(1).unwrap();
+        let u32fmt = PixelFormat::Uint32(n1);
+        let big = Raster::new(300, 300, PixelFormat::Gray8, vec![200u8; 90_000]).unwrap();
+
+        let hist = big.try_hist_find().unwrap();
+        assert_eq!(
+            hist.format(),
+            u32fmt,
+            "hist_find still writes 16-bit counts"
+        );
+        assert_eq!(hist.width(), 256);
+        let d = hist.data();
+        let at =
+            |i: usize| u32::from_ne_bytes([d[i * 4], d[i * 4 + 1], d[i * 4 + 2], d[i * 4 + 3]]);
+        assert_eq!(at(200), 90_000, "the count saturated; vips gives 90000");
+        assert_eq!(at(199), 0);
+
+        let cum = hist.try_hist_cum().unwrap();
+        assert_eq!(cum.format(), u32fmt);
+        let c = cum.data();
+        let cat =
+            |i: usize| u32::from_ne_bytes([c[i * 4], c[i * 4 + 1], c[i * 4 + 2], c[i * 4 + 3]]);
+        assert_eq!(cat(255), 90_000, "the running sum saturated");
+
+        let ndim = big.try_hist_find_ndim(Some(10)).unwrap();
+        assert_eq!(ndim.format(), u32fmt);
+
+        // Control: at 16 pixels nothing saturates either way, so this row
+        // pins the arithmetic while the rows above pin the ceiling.
+        let small = Raster::new(4, 4, PixelFormat::Gray8, vec![200u8; 16]).unwrap();
+        let sh = small.try_hist_find().unwrap();
+        assert_eq!(sh.format(), u32fmt);
+        let s = sh.data();
+        assert_eq!(
+            u32::from_ne_bytes([s[200 * 4], s[200 * 4 + 1], s[200 * 4 + 2], s[200 * 4 + 3]]),
+            16
+        );
     }
 }
