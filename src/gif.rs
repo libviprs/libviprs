@@ -96,12 +96,19 @@
 //! | `palette-bit-depth` | `gint` | not attached, a deprecated alias for `bits-per-sample` |
 //!
 //! `gif-palette` is the global colour table as one signed 32-bit word per
-//! entry, read out of libnsgif's `R, G, B, A` byte quad, so on a
-//! little-endian host it is `0xFF << 24 | B << 16 | G << 8 | R` and every
-//! entry is negative. The array is the table as it sits on the wire, padding
-//! included: a three-colour table comes back with a fourth, opaque-black
-//! entry. Its presence rule is about the **file** and not the window that was
-//! loaded, so a two-frame file whose frame 0 carries a local table reports no
+//! entry, `0xFF << 24 | B << 16 | G << 8 | R`, so every entry is negative.
+//! vips gets that number by reinterpreting libnsgif's `R, G, B, A` byte quad
+//! as a machine integer, which makes **vips's** answer host-dependent; this
+//! one is not. The little-endian reading is pinned, because the `.v` trailer
+//! carries the value as decimal text and a field that meant one thing on the
+//! machine that wrote it and another on the machine that read it would be
+//! worse than a divergence confined to big-endian hosts, where nothing in
+//! this project runs.
+//!
+//! The array is the table as it sits on the wire, padding included: a
+//! three-colour table comes back with a fourth, opaque-black entry. Its
+//! presence rule is about the **file** and not the window that was loaded, so
+//! a two-frame file whose frame 0 carries a local table reports no
 //! `gif-palette` at `[page=1]` either.
 //!
 //! **A file that declares no global colour table diverges** (issue #851).
@@ -864,12 +871,18 @@ pub fn decode_gif_with(
     raster.set_field("palette", MetadataValue::Int(1));
     // The global colour table, and only when no frame in the file overrides
     // it with one of its own (issue #828). vips packs each entry as libnsgif's
-    // `R, G, B, A` byte quad reinterpreted as a machine integer, so on a
-    // little-endian host it reads `0xFF << 24 | B << 16 | G << 8 | R` and
-    // every entry is negative; `from_le_bytes` over the quad is that number
-    // without a cast that could wrap differently. Measured on vips 8.18.6: a
-    // table of (71, 112, 76) and (60, 60, 60) comes back
-    // `-11767737 -12829636`.
+    // `R, G, B, A` byte quad reinterpreted as a machine integer, which reads
+    // `0xFF << 24 | B << 16 | G << 8 | R` on a little-endian host and makes
+    // every entry negative. Measured on vips 8.18.6: a table of (71, 112, 76)
+    // and (60, 60, 60) comes back `-11767737 -12829636`.
+    //
+    // `from_le_bytes` rather than `from_ne_bytes`, so this value is the same
+    // wherever it was computed. Matching vips exactly would mean matching a
+    // number that changes with the host, and the `.v` trailer writes it as
+    // decimal text, so a native reading would put a different `gif-palette`
+    // in the file for the same GIF depending on the machine. The cost is a
+    // divergence from vips on a big-endian host, which is also the reason
+    // `from_le_bytes` rather than a cast: no wrap to reason about.
     //
     // The array is the table as it sits on the wire, padding included, which
     // is what `global` already holds: a three-colour table is four entries
