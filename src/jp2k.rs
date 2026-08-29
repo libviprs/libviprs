@@ -27,7 +27,7 @@
 //!
 //! | libviprs method | libvips equivalent | result |
 //! |---|---|---|
-//! | [`decode_jp2k`] | `jp2kload` / `jp2kload_buffer` (default `page = 0`) | 8-bit or 16-bit raster, plus `icc-profile-data` / `bits-per-sample` / `jp2k-resolutions` / `tile-width` / `tile-height` |
+//! | [`decode_jp2k`] | `jp2kload` / `jp2kload_buffer` (default `page = 0`) | 8-bit or 16-bit raster at the image origin's offset, plus `icc-profile-data` / `bits-per-sample` / `jp2k-resolutions` / `tile-width` / `tile-height` |
 //! | [`Raster::encode_jp2k`] | `jp2ksave_buffer` | `.jp2` bytes, always in a JP2 container |
 //! | [`Raster::save_jp2k`] | `jp2ksave` | `.jp2` file |
 //!
@@ -152,13 +152,27 @@
 //!
 //! # Divergences worth knowing about
 //!
-//! * **The image origin.** A codestream may start away from the grid origin.
-//!   On `origin57.j2k`, whose SIZ says `Xsiz = 37, XOsiz = 5`, this module
-//!   reports `32x24`, which is `Xsiz - XOsiz` and what the standard says the
-//!   image is. vips reports `27x17` with `xoffset = -5`, which is that width
-//!   minus the offset a second time. The two disagree on every file with a
-//!   non-zero origin and agree on every file `jp2ksave` writes, since it
-//!   always starts at zero. Filed as issue #766.
+//! * **The image origin, on the size only.** A codestream may start away from
+//!   the grid origin. On `origin57.j2k`, whose SIZ says `Xsiz = 37, XOsiz = 5,
+//!   Ysiz = 31, YOsiz = 7`, this module reports `32x24`, which is
+//!   `Xsiz - XOsiz` by `Ysiz - YOsiz` and what the standard says the image is.
+//!   vips reports `27x17`, that size less the origin a second time.
+//!
+//!   **vips's answer is the top-left crop of this one**, measured by hashing
+//!   it: our 32x24 cut to 27x17 at (0, 0) reproduces the capture's
+//!   `decoded_raster.sha256` exactly, so `jp2kload` decodes 768 samples and
+//!   hands back 459 of them. That is what decided #766 in this direction; the
+//!   rule from #732 and #733 is to adopt vips when a difference is inside the
+//!   carrier's noise and points both ways, and to keep ours when it is large
+//!   or one-directional, and dropping 40% of the picture is both.
+//!
+//!   The **offsets** are not a divergence at all: this loader stamps
+//!   `xoffset = -XOsiz`, `yoffset = -YOsiz`, which is exactly what
+//!   `vipsheader` reports for the same file and exactly what `extract_area`
+//!   stamps in this crate for a crop at the same place (#721). So the two
+//!   agree on where the image is and disagree only on how much of it there is.
+//!   Nothing `jp2ksave` writes reaches either, since it always starts at the
+//!   grid origin.
 //! * **The `colr` box's enumerated colour space does not decide the tag
 //!   here.** `jp2kload` reads `EnumCS` and not the band count, so a
 //!   one-component file tagged CMYK comes back `cmyk` and a three-component
@@ -473,6 +487,7 @@ impl SaveOptions {
 /// value. The band count is the colour channels plus alpha, so a greyscale
 /// file stays one band.
 ///
+/// the image origin as a negative `xoffset` / `yoffset`,
 /// `icc-profile-data`, `bits-per-sample`, `jp2k-resolutions` and, when the
 /// image is more than one tile, `tile-width` and `tile-height` are lifted onto
 /// the raster. The first two use the names `jp2kload` uses; the third does not,
@@ -936,11 +951,28 @@ impl CodestreamHeader {
         Ok(header)
     }
 
+    /// The image origin as the offset vips records for it: `-XOsiz` by
+    /// `-YOsiz`.
+    ///
+    /// Negative, because that is what `jp2kload` writes (`xoffset = -5` for
+    /// `origin57.j2k`, measured) and because it is this crate's own
+    /// convention for the same meaning: `extract_area` stamps `-left` /
+    /// `-top` (#721), and a codestream whose image region begins at `x = 5` on
+    /// the reference grid is exactly that crop of the grid.
+    ///
+    /// So the loader and vips agree on the offsets even where they disagree on
+    /// the size, which is the whole of the remaining #766 divergence.
+    fn origin_offset(&self) -> (i32, i32) {
+        (negated_origin(self.x_origin), negated_origin(self.y_origin))
+    }
+
     /// The image size, which is the reference grid less the image origin.
     ///
     /// This is `Xsiz - XOsiz` by `Ysiz - YOsiz`, which is what the standard
     /// says the image is and what `hayro-jpeg2000` reports. vips subtracts the
-    /// origin a second time; see the module docs and issue #766.
+    /// origin a second time and hands back the top-left crop of this, measured
+    /// by digest; see the module docs and issue #766. Where the image sits is
+    /// reported separately, by [`CodestreamHeader::origin_offset`].
     fn image_size(&self) -> (u32, u32) {
         (
             self.xsiz.saturating_sub(self.x_origin),
@@ -1166,6 +1198,13 @@ fn decode(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
 
     let mut raster = Raster::new(width, height, format, buffer).map_err(Jp2kError::Raster)?;
     raster.meta.interpretation = Some(interpretation(image.color_space(), element_bytes));
+    // Where the image sits on the reference grid, as the negative offset
+    // `jp2kload` records and `extract_area` stamps for the same meaning
+    // (#766, #721). Zero for everything `jp2ksave` writes, since it always
+    // starts at the grid origin.
+    let (xoffset, yoffset) = header.origin_offset();
+    raster.meta.xoffset = xoffset;
+    raster.meta.yoffset = yoffset;
     if let Some(icc) = layout.icc {
         raster
             .fields
@@ -1193,6 +1232,24 @@ fn decode(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
         );
     }
     Ok(raster)
+}
+
+/// Negate an origin read off `SIZ`, saturating instead of wrapping.
+///
+/// `XOsiz` is a 32-bit field an attacker writes, and `-XOsiz` does not fit an
+/// `i32` above `2^31`. Going through `i64` first makes `2^31` negate exactly
+/// onto `i32::MIN` and everything above it saturate there, which is the one
+/// boundary worth getting right: `src/extract.rs`'s twin of this helper
+/// shipped saturating at `i32::MIN + 1` and survived review because the fix
+/// was "asserted only by reasoning" (#706). It is a private function of a
+/// `u32`, so reasoning was never necessary.
+///
+/// Deliberately a second copy rather than a shared helper: the twin is
+/// private to `crate::extract` and that module belongs to another lane. Six
+/// lines and a test beat a cross-module edit here.
+#[cfg(feature = "jp2k")]
+fn negated_origin(v: u32) -> i32 {
+    i32::try_from(-i64::from(v)).unwrap_or(i32::MIN)
 }
 
 /// Round a reconstructed sample onto the integer grid its precision defines.
@@ -2258,6 +2315,131 @@ mod tests {
             "if this has become vips's answer the divergence in the module docs is stale \
              and issue #766 is fixed"
         );
+    }
+
+    /**
+     * What vips's 27x17 actually is, measured rather than argued: the
+     * **top-left crop** of the 32x24 this loader reports, so `jp2kload`
+     * silently drops 309 of the image's 768 samples on a codestream whose
+     * origin is not the grid origin (issue #766).
+     * This is what decided #766. "Two libraries report different sizes" says
+     * nothing about which is right; "one of them returns 40% of the picture"
+     * does. Cropping our decode to vips's dimensions at (0, 0) and hashing it
+     * has to reproduce the capture's `decoded_raster.sha256` byte for byte,
+     * and the uncropped digest has to differ, or the crop is not what happened.
+     * Input: `origin57.j2k` -> Output: our 32x24 cropped to 27x17 digests to
+     * vips's payload; our full 32x24 does not.
+     */
+    #[test]
+    #[cfg(feature = "jp2k")]
+    fn vips_returns_the_top_left_crop_of_what_this_loader_decodes() {
+        use sha2::Digest;
+
+        let raster = decoded("origin57.j2k");
+        let (w, h) = (raster.width() as usize, raster.height() as usize);
+        let full = raster.data();
+
+        // `decoded_raster.sha256` for the `image_origin_offset` record, which
+        // is `vips rawsave` over the 459 bytes `jp2kload` handed back.
+        const VIPS_PAYLOAD: &str =
+            "d4c1e2f8b0f763add13ededfa4881780428c177187c6302a0616719e34b81f76";
+
+        let cropped: Vec<u8> = (0..17)
+            .flat_map(|y| (0..27).map(move |x| (y, x)))
+            .map(|(y, x)| full[y * w + x])
+            .collect();
+        assert_eq!(cropped.len(), 27 * 17);
+        assert_eq!(
+            crate::hex::hex_lower(&sha2::Sha256::digest(&cropped)),
+            VIPS_PAYLOAD,
+            "vips's whole answer is the top-left 27x17 of ours, so the 5 rightmost \
+             columns and 7 bottom rows are pixels it decoded and threw away"
+        );
+
+        // The control, so "the crop matches" cannot be "everything matches".
+        assert_eq!((w, h), (32, 24));
+        assert_ne!(
+            payload_digest(&raster),
+            VIPS_PAYLOAD,
+            "the uncropped decode must not digest to vips's, or there is no divergence"
+        );
+        assert_eq!(full.len() - cropped.len(), 309, "what vips drops");
+    }
+
+    /**
+     * The image origin travels as the negative `xoffset` / `yoffset` vips
+     * records for it, which is also this crate's own convention for a crop
+     * (issue #766, #721).
+     * `jp2kload` reports `xoffset = -5, yoffset = -7` for `origin57.j2k`, and
+     * `extract_area` in this crate stamps `-left` / `-top` for the same
+     * meaning, so the two agree on the offsets even where they disagree on the
+     * size. Before this the loader attached no offset at all, so a caller had
+     * no way to learn the image was not at the grid origin.
+     * Input: `origin57.j2k` and the other decodable fixtures -> Output:
+     * `-5 / -7` on the first, and `0 / 0` on the rest, matching every
+     * `header.xoffset` / `header.yoffset` in `oracle.json`.
+     */
+    #[test]
+    #[cfg(feature = "jp2k")]
+    fn the_image_origin_travels_as_the_negative_offset_vips_records() {
+        let raster = decoded("origin57.j2k");
+        assert_eq!(
+            (raster.xoffset(), raster.yoffset()),
+            (-5, -7),
+            "the same numbers `vipsheader -a` prints for this file"
+        );
+
+        // The positive control, and the reason a sweep rather than one case:
+        // every other fixture starts at the grid origin and the capture
+        // records `xoffset: 0` for all of them, so a loader that stamped
+        // something unconditionally would pass the assertion above. Sweeping
+        // `FIXTURES` rather than a hand-written list keeps that true for a
+        // fixture added later.
+        let mut zeroed = 0;
+        for (name, bytes) in FIXTURES {
+            if *name == "origin57.j2k" {
+                continue;
+            }
+            let Ok(other) = decode_jp2k(bytes, DecodeLimits::default()) else {
+                continue; // the five malformed ones and the three refused carriers
+            };
+            assert_eq!(
+                (other.xoffset(), other.yoffset()),
+                (0, 0),
+                "{name}: XOsiz and YOsiz are 0 here and vips reports 0 / 0"
+            );
+            zeroed += 1;
+        }
+        assert!(
+            zeroed >= 18,
+            "the sweep has to reach the decodable fixtures, it reached {zeroed}"
+        );
+    }
+
+    /**
+     * The negated origin saturates rather than wrapping, on a `u32` that
+     * comes straight off an untrusted `SIZ`.
+     * `-XOsiz` does not fit an `i32` above `2^31`, and `XOsiz` is a 32-bit
+     * field an attacker writes. Reaching that branch through a real decode
+     * needs a file declaring an origin past two billion; testing the
+     * arithmetic needs nothing, because it is a private function of a `u32`.
+     * That is #706's lesson: its own twin of this helper shipped off by one,
+     * saturating at `i32::MIN + 1`, and survived because the fix was
+     * "asserted only by reasoning".
+     * Input: the four values around the boundary -> Output: exact negation
+     * below `2^31`, exactly `i32::MIN` at `2^31`, and `i32::MIN` above it.
+     */
+    #[test]
+    #[cfg(feature = "jp2k")]
+    fn the_negated_origin_saturates_rather_than_wrapping() {
+        assert_eq!(negated_origin(0), 0);
+        assert_eq!(negated_origin(5), -5);
+        assert_eq!(negated_origin(i32::MAX as u32), -i32::MAX);
+        // 2^31 negates exactly onto i32::MIN, so this is the one value where
+        // "saturate" and "the right answer" are the same number.
+        assert_eq!(negated_origin(1 << 31), i32::MIN);
+        assert_eq!(negated_origin((1 << 31) + 1), i32::MIN);
+        assert_eq!(negated_origin(u32::MAX), i32::MIN);
     }
 
     // -----------------------------------------------------------------------
