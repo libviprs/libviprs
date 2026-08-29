@@ -923,6 +923,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reference makes files vips reads unreachable, so the refusal stays in the
   loader, where re-tokenising the header gives it a type.
 
+- **A plain `P1` sample is one character**, so the file netpbm's own writers
+  emit decodes here (issue #928). `pamtopnm -plain` and `pnmtopnm -plain` write
+  a whole row as one unbroken run of digits, `101001010011`, which is what the
+  plain-PBM specification says (each pixel is one ASCII `1` or `0`, and white
+  space in the raster is *ignored* rather than required). `pnmtopnm` reads that
+  straight back to the packed `P4` it came from, so the file is canonical
+  rather than odd.
+
+  **This is a deliberate divergence from the oracle.** Measured on the pinned
+  vips 8.18.6, `ppmload` tokenises `P1` as whitespace-delimited integers, so it
+  takes that row for the single number `101001010011`, calls the first pixel
+  ink and invents every pixel after it:
+
+  | source | first row vips reports |
+  |---|---|
+  | the `P4` it came from | `0 255 0 255 255 0 255 0 255 255 0 0` |
+  | ImageMagick's spaced `P1` | `0 255 0 255 255 0 255 0 255 255 0 0` |
+  | netpbm's unspaced `P1` | `0 0 255 255 255 255 255 255 255 255 255 255` |
+
+  Neither row of the third is the picture. Copying that is not parity, it is
+  keeping a bug the format's own implementation does not have, so this reads
+  characters instead.
+
+  The two parses agree wherever vips is right, because a legal sample is one
+  character and a space-separated file tokenises identically either way; they
+  differ only on files vips already garbles. And this half is the **stricter**
+  one: a character that is neither `0` nor `1` is refused by name, where vips
+  coerces `x` and `4294967296` into white. `P4` is unaffected, it is packed bits
+  with no tokenisation.
+
 - **Netpbm's bitmap forms decode**: `P1` (ASCII) and `P4` (binary) read through
   `Raster::ppm_load` and through the sniffed route, so a `.pbm` vips reads is a
   `.pbm` this crate reads (issue #919). They were the last two magics `ppmload`
