@@ -43,7 +43,7 @@
 //!
 //! # Intended use
 //!
-//! ```ignore
+//! ```
 //! use libviprs::resume::{JobCheckpoint, JobMetadata, PlanContract, compute_plan_hash};
 //!
 //! let contract = PlanContract::from_engine(&config, &sink);
