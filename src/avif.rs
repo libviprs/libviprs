@@ -105,7 +105,16 @@ use rav1d::include::dav1d::picture::Dav1dPicture;
 pub(crate) const MAGIC_AT_4: &[u8] = b"ftypavif";
 
 /// Everything that can go wrong reading an AVIF.
+///
+/// `#[non_exhaustive]`, like every other growable public enum in this crate,
+/// so a caller cannot write a match that a new variant breaks (issue #946).
+/// This one will grow: [`AvifError::UnsupportedColour`]'s own doc says only
+/// two of the matrix encodings are measured, and the next one measured would
+/// otherwise be a breaking change rather than an additive one. It is
+/// re-exported from the crate root unconditionally, so it is public API in a
+/// build with the **`avif`** feature and in a build without one alike.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum AvifError {
     /// The crate was built without the **`avif`** feature, so there is no AV1
     /// decoder behind [`decode_avif`] at all.
