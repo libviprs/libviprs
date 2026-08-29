@@ -54,8 +54,8 @@
 //!   see [`crate::arithmetic`]) precisely so it resolves to a non-genuine-16
 //!   space and reads here on 0..255 rather than being mistaken for a genuine
 //!   16-bit layer and washed out. The genuine-16 decision is additionally
-//!   gated on the actual storage depth
-//!   (`bytes_per_channel() == 2`): an interpretation tag is advisory and can
+//!   gated on the actual storage kind
+//!   (the samples really are `u16`): an interpretation tag is advisory and can
 //!   disagree with the bytes (the copy builder accepts any tag), so an
 //!   8-bit buffer mislabelled `Rgb16` / `Grey16` is *not* read on the 65535
 //!   scale — doing so would drive the read/write scale away from the actual
@@ -118,7 +118,7 @@
 //! `exclusion`) because the ported conversion suite exercises them.
 
 use crate::conversion::Interpretation;
-use crate::pixel::PixelFormat;
+use crate::pixel::{PixelFormat, SampleKind, read_sample_f64};
 use crate::raster::{Raster, RasterError};
 use thiserror::Error;
 
@@ -286,23 +286,15 @@ fn colour_bands(format: PixelFormat) -> Result<(usize, bool), CompositeError> {
 /// Read the flat `i`-th raw sample (not yet normalised: the caller divides
 /// by the input's own interpretation-derived maximum, so each layer reads on
 /// the scale its compositing space implies).
+///
+/// Reads through [`read_sample_f64`], the crate's one width-independent
+/// sample read. The caller normalises by the same interpretation-derived
+/// scale for every kind (libvips `max_band` comes from the compositing
+/// space, not the storage depth), so a float raster cast from 8-bit reads
+/// its 0..255 numeric values unchanged.
 #[inline]
-fn read_raw(data: &[u8], bpc: usize, i: usize) -> f64 {
-    match bpc {
-        1 => data[i] as f64,
-        2 => u16::from_ne_bytes([data[2 * i], data[2 * i + 1]]) as f64,
-        // Float: the raw sample, exact in f64. The caller normalises by
-        // the same interpretation-derived scale as the integer depths
-        // (libvips `max_band` comes from the compositing space, not the
-        // storage depth), so a float raster cast from 8-bit reads its
-        // 0..255 numeric values unchanged.
-        _ => f32::from_ne_bytes([
-            data[4 * i],
-            data[4 * i + 1],
-            data[4 * i + 2],
-            data[4 * i + 3],
-        ]) as f64,
-    }
+fn read_raw(data: &[u8], kind: SampleKind, i: usize) -> f64 {
+    read_sample_f64(data, kind, i * kind.bytes())
 }
 
 /// Write a scale-normalised sample at the given depth: the value is
@@ -312,20 +304,46 @@ fn read_raw(data: &[u8], bpc: usize, i: usize) -> f64 {
 /// instantiation of libvips `vips_combine_pixels`, whose numeric limits
 /// of `0, 0` mean "no limit". Fractional, negative, and beyond-scale
 /// (HDR) float samples therefore survive exactly at `f32` precision.
+///
+/// The integer arms take their clamp from [`SampleKind::range`] rather than
+/// from a literal ceiling per width, so a signed carrier would clamp at its
+/// own floor instead of at zero (issue #607). The match has no wildcard, so
+/// a kind added to that enum is a compile error here.
 #[inline]
-fn write_scaled(data: &mut [u8], bpc: usize, i: usize, v: f64, scale: f64) {
-    match bpc {
-        1 => data[i] = (v * scale).round().clamp(0.0, 255.0) as u8,
-        2 => {
-            let b = ((v * scale).round().clamp(0.0, 65535.0) as u16).to_ne_bytes();
-            data[2 * i] = b[0];
-            data[2 * i + 1] = b[1];
+fn write_scaled(data: &mut [u8], kind: SampleKind, i: usize, v: f64, scale: f64) {
+    let off = i * kind.bytes();
+    match kind {
+        SampleKind::U8 | SampleKind::I8 => {
+            data[off] = clamp_into(kind, v * scale) as u8;
         }
-        _ => {
+        SampleKind::U16 | SampleKind::I16 => {
+            let b = (clamp_into(kind, v * scale) as u16).to_ne_bytes();
+            data[off] = b[0];
+            data[off + 1] = b[1];
+        }
+        SampleKind::U32 | SampleKind::I32 => {
+            let b = (clamp_into(kind, v * scale) as u32).to_ne_bytes();
+            data[off..off + 4].copy_from_slice(&b);
+        }
+        SampleKind::F32 => {
             let b = ((v * scale) as f32).to_ne_bytes();
-            data[4 * i..4 * i + 4].copy_from_slice(&b);
+            data[off..off + 4].copy_from_slice(&b);
         }
     }
+}
+
+/// Round to nearest and saturate into an integer kind's own range, as the
+/// two-arm `clamp(0.0, 255.0)` / `clamp(0.0, 65535.0)` pair did per width.
+///
+/// Through `i64` because a negative `f64` casts to `0` in Rust while the
+/// two's-complement pattern the signed kinds store is not zero; on the
+/// unsigned kinds the crate carries today the two spellings agree.
+#[inline]
+fn clamp_into(kind: SampleKind, v: f64) -> i64 {
+    let (lo, hi) = kind
+        .range()
+        .expect("clamp_into is only reached from the integer arms");
+    v.round().clamp(lo as f64, hi as f64) as i64
 }
 
 /// Porter-Duff source/backdrop factors for the given source (`sa`) and
@@ -499,19 +517,23 @@ fn non_separable_blend(mode: CompositeMode, cb: [f64; 3], cs: [f64; 3]) -> [f64;
 /// it to a non-genuine-16 space and this returns `false` for it, keeping a
 /// fully-opaque promoted overlay visible instead of collapsing it to ~0.4%.
 ///
-/// The decision is additionally gated on the actual storage depth
-/// (`bytes_per_channel() == 2`). An interpretation tag is advisory and may
+/// The decision is additionally gated on the actual storage kind
+/// ([`SampleKind::U16`]). An interpretation tag is advisory and may
 /// disagree with the bytes — [`crate::conversion::RasterCopyBuilder::interpretation`]
 /// accepts any tag without validating depth — so an 8-bit buffer mislabelled
 /// `Rgb16` / `Grey16` must *not* be read on the 65535 scale: that would
 /// normalise its 0..255 samples by 65535 (≈0, near-black) while writing an
 /// 8-bit container at the 65535 scale (every non-zero channel saturating),
-/// i.e. total data loss from a merely mis-tagged input. Gating on
-/// `bytes_per_channel() == 2` keeps the tag and the sample depth in
-/// agreement, matching libvips' `formatalike`/`cast` which run before
-/// normalisation so interpretation and format never diverge.
+/// i.e. total data loss from a merely mis-tagged input. Gating on the
+/// sample kind keeps the tag and the samples in agreement, matching libvips'
+/// `formatalike`/`cast` which run before normalisation so interpretation and
+/// format never diverge.
+///
+/// The gate names [`SampleKind::U16`] rather than a two-byte width, because
+/// the width is also `i16`'s and an `i16` layer is not a 0..65535 one
+/// (issue #607).
 fn is_genuine_16bit(raster: &Raster) -> bool {
-    raster.format().bytes_per_channel() == 2
+    raster.format().kind() == SampleKind::U16
         && matches!(
             raster.interpretation(),
             Interpretation::Rgb16 | Interpretation::Grey16
@@ -572,12 +594,16 @@ impl Raster {
         // [`is_genuine_16bit`]). Anything that is not genuine-16 falls back to
         // the joint depth rule (65535 only for a fully 16-bit pipeline, else
         // 255).
-        let base_bpc = self.format().bytes_per_channel();
-        let overlay_bpc = overlay.format().bytes_per_channel();
-        let out_bpc = base_bpc.max(overlay_bpc);
+        let base_kind = self.format().kind();
+        let overlay_kind = overlay.format().kind();
+        // `promote` is the libvips formatalike order, not "the wider kind
+        // wins". They agree on every pair the crate carries today, and they
+        // disagree on four integer pairs a carrier would bring (issue #607),
+        // so this is the spelling that stays right.
+        let out_kind = base_kind.promote(overlay_kind);
         let base_genuine16 = is_genuine_16bit(self);
         let overlay_genuine16 = is_genuine_16bit(overlay);
-        let joint = if base_bpc == 2 && overlay_bpc == 2 {
+        let joint = if base_kind == SampleKind::U16 && overlay_kind == SampleKind::U16 {
             65535.0
         } else {
             255.0
@@ -590,16 +616,16 @@ impl Raster {
         // reads it on the same scale instead of the 255 ceiling.
         //
         // This applies only to an *integer* output container. When the deeper
-        // input is a float raster the output is float (`out_bpc == 4`), and a
+        // input is a float raster the output is float, and a
         // float image has no genuine-16 quantisation: writing it on the 65535
         // scale would inflate its samples ~257x, and stamping it `Rgb16` /
         // `Grey16` would mis-tag a float raster (the genuine-16 tags imply a
         // USHORT buffer). libvips likewise resolves the float compositing
         // space to sRGB, not a 16-bit space. So the genuine-16 write-back and
-        // tag are gated on `out_bpc != 4`; a genuine-16 input is still *read*
-        // on its own 0..65535 scale (`base_max` / `overlay_max` above),
-        // matching libvips' per-input `max_band`.
-        let output_is_integer = out_bpc != 4;
+        // tag are gated on the output kind not being float; a genuine-16
+        // input is still *read* on its own 0..65535 scale (`base_max` /
+        // `overlay_max` above), matching libvips' per-input `max_band`.
+        let output_is_integer = !out_kind.is_float();
         let out_is_genuine16 = output_is_integer && (base_genuine16 || overlay_genuine16);
         // Write-back scale = the output (compositing-space) max: genuine
         // 16-bit whenever either input is a genuine-16 layer *and* the output
@@ -609,8 +635,8 @@ impl Raster {
         let inv_base = 1.0 / base_max;
         let inv_overlay = 1.0 / overlay_max;
 
-        let out_format = PixelFormat::with_channels(colour + 1, out_bpc)
-            .expect("colour+1 is 2 or 4, always representable");
+        let out_format = PixelFormat::with_kind(colour + 1, out_kind)
+            .expect("colour+1 is 2 or 4 and the kind is one a PixelFormat carries");
         let mut out = Raster::zeroed(self.width(), self.height(), out_format)?;
 
         let base_ch = self.format().channels();
@@ -630,18 +656,18 @@ impl Raster {
             // Unpremultiplied colour values and alphas, 0..1. Each input
             // is normalised by its own interpretation-derived max.
             for k in 0..colour {
-                cb[k] = read_raw(bdata, base_bpc, p * base_ch + k) * inv_base;
-                cs[k] = read_raw(sdata, overlay_bpc, p * overlay_ch + k) * inv_overlay;
+                cb[k] = read_raw(bdata, base_kind, p * base_ch + k) * inv_base;
+                cs[k] = read_raw(sdata, overlay_kind, p * overlay_ch + k) * inv_overlay;
             }
             // Alphas are semantically 0..1; the clamp is a guard for
             // out-of-range samples once each side reads on its own scale.
             let ba = if base_alpha {
-                (read_raw(bdata, base_bpc, p * base_ch + colour) * inv_base).clamp(0.0, 1.0)
+                (read_raw(bdata, base_kind, p * base_ch + colour) * inv_base).clamp(0.0, 1.0)
             } else {
                 1.0
             };
             let sa = if overlay_alpha {
-                (read_raw(sdata, overlay_bpc, p * overlay_ch + colour) * inv_overlay)
+                (read_raw(sdata, overlay_kind, p * overlay_ch + colour) * inv_overlay)
                     .clamp(0.0, 1.0)
             } else {
                 1.0
@@ -688,9 +714,9 @@ impl Raster {
             // Unpremultiply and write back on the output numeric scale.
             for (k, &c_premul) in co.iter().enumerate().take(colour) {
                 let c = if ao > 0.0 { c_premul / ao } else { 0.0 };
-                write_scaled(odata, out_bpc, p * out_ch + k, c, out_max);
+                write_scaled(odata, out_kind, p * out_ch + k, c, out_max);
             }
-            write_scaled(odata, out_bpc, p * out_ch + colour, ao, out_max);
+            write_scaled(odata, out_kind, p * out_ch + colour, ao, out_max);
         }
 
         out.carry_meta_from(self);
@@ -743,7 +769,6 @@ impl Raster {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pixel::SampleKind;
 
     /// A 2x1 RGB base: left pixel [100, 100, 100], right [200, 50, 0].
     fn base_rgb() -> Raster {
@@ -1028,7 +1053,7 @@ mod tests {
         let overlay = Raster::new(
             1,
             1,
-            PixelFormat::with_channels(2, 1).unwrap(),
+            PixelFormat::with_kind(2, SampleKind::U8).unwrap(),
             vec![255, 128],
         )
         .unwrap();
@@ -1058,12 +1083,15 @@ mod tests {
         let overlay = Raster::new(
             1,
             1,
-            PixelFormat::with_channels(2, 1).unwrap(),
+            PixelFormat::with_kind(2, SampleKind::U8).unwrap(),
             vec![200, 128],
         )
         .unwrap();
         let out = base.composite(&overlay, CompositeMode::Over);
-        assert_eq!(out.format(), PixelFormat::with_channels(2, 2).unwrap());
+        assert_eq!(
+            out.format(),
+            PixelFormat::with_kind(2, SampleKind::U16).unwrap()
+        );
         assert_eq!(out.meta.interpretation, Some(Interpretation::Grey16));
         let px = out.getpoint(0, 0);
         // Over with an opaque base: unpremultiplied result = sa*cs + (1-sa)*cb,
@@ -1089,7 +1117,7 @@ mod tests {
         let overlay = Raster::new(
             1,
             1,
-            PixelFormat::with_channels(2, 2).unwrap(),
+            PixelFormat::with_kind(2, SampleKind::U16).unwrap(),
             [65535u16, 32768]
                 .iter()
                 .flat_map(|v| v.to_ne_bytes())
@@ -1241,7 +1269,10 @@ mod tests {
             .interpretation(Interpretation::Grey16)
             .build();
         let out = base.composite(&overlay, CompositeMode::Source);
-        assert_eq!(out.format(), PixelFormat::with_channels(2, 2).unwrap());
+        assert_eq!(
+            out.format(),
+            PixelFormat::with_kind(2, SampleKind::U16).unwrap()
+        );
         assert_eq!(
             out.meta.interpretation,
             Some(Interpretation::Grey16),
@@ -1318,7 +1349,8 @@ mod tests {
         let rgb = Raster::zeroed(2, 2, PixelFormat::Rgb8).unwrap();
         let small = Raster::zeroed(1, 2, PixelFormat::Rgb8).unwrap();
         let grey = Raster::zeroed(2, 2, PixelFormat::Gray8).unwrap();
-        let five = Raster::zeroed(2, 2, PixelFormat::with_channels(5, 1).unwrap()).unwrap();
+        let five =
+            Raster::zeroed(2, 2, PixelFormat::with_kind(5, SampleKind::U8).unwrap()).unwrap();
 
         assert!(matches!(
             rgb.try_composite2(&small, CompositeMode::Over),
@@ -1487,7 +1519,7 @@ mod tests {
     fn float_alpha_uses_numeric_scale_like_u8() {
         let base_u8 = Raster::new(1, 1, PixelFormat::Rgb8, vec![102, 103, 104]).unwrap();
         let overlay_u8 = Raster::new(1, 1, PixelFormat::Rgba8, vec![2, 3, 4, 128]).unwrap();
-        let base_f = base_u8.cast(PixelFormat::with_channels(3, 4).unwrap());
+        let base_f = base_u8.cast(PixelFormat::with_kind(3, SampleKind::F32).unwrap());
         let overlay_f = overlay_u8.cast(PixelFormat::RgbaF32);
 
         let out_f = base_f.composite(&overlay_f, CompositeMode::Over);
@@ -1537,15 +1569,23 @@ mod tests {
      */
     #[test]
     fn float_grey_composites_to_two_float_bands() {
-        let base = raster_f32(1, 1, PixelFormat::with_channels(1, 4).unwrap(), &[100.0]);
+        let base = raster_f32(
+            1,
+            1,
+            PixelFormat::with_kind(1, SampleKind::F32).unwrap(),
+            &[100.0],
+        );
         let overlay = raster_f32(
             1,
             1,
-            PixelFormat::with_channels(2, 4).unwrap(),
+            PixelFormat::with_kind(2, SampleKind::F32).unwrap(),
             &[200.0, 127.5],
         );
         let out = base.composite(&overlay, CompositeMode::Over);
-        assert_eq!(out.format(), PixelFormat::with_channels(2, 4).unwrap());
+        assert_eq!(
+            out.format(),
+            PixelFormat::with_kind(2, SampleKind::F32).unwrap()
+        );
         assert_eq!(out.getpoint(0, 0), vec![150.0, 255.0]);
     }
 
@@ -1651,5 +1691,27 @@ mod tests {
         // is a comparison and not a tautology.
         assert_eq!(SampleKind::U8.promote(SampleKind::I8), SampleKind::I16);
         assert_eq!(SampleKind::I8.promote(SampleKind::U16), SampleKind::I32);
+    }
+
+    /**
+     * Tests that the write-back saturates into the output kind's own range
+     * and rounds to nearest, which is what the per-width
+     * `clamp(0.0, 255.0)` / `clamp(0.0, 65535.0)` pair did before the
+     * conversion.
+     * Works by driving `clamp_into` past both ends of each carried integer
+     * kind and at a .5 boundary.
+     * Input: -10, 300, 254.6 at `U8`; 70000 at `U16`; -10 at `I8` ->
+     * Output: 0, 255, 255, 65535, -10.
+     */
+    #[test]
+    fn the_write_back_saturates_into_the_output_kind() {
+        assert_eq!(clamp_into(SampleKind::U8, -10.0), 0);
+        assert_eq!(clamp_into(SampleKind::U8, 300.0), 255);
+        assert_eq!(clamp_into(SampleKind::U8, 254.6), 255);
+        assert_eq!(clamp_into(SampleKind::U16, 70000.0), 65535);
+        // The floor is the kind's, not a literal zero: this is the half of
+        // issue #607 that a signed carrier needs.
+        assert_eq!(clamp_into(SampleKind::I8, -10.0), -10);
+        assert_eq!(clamp_into(SampleKind::I8, -300.0), -128);
     }
 }
