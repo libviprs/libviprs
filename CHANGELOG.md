@@ -2806,6 +2806,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A GIF graphic control extension spread over more than one sub-block, or
+  carrying a size byte that does not say 4, is read the way libnsgif reads it
+  (issue #878). libnsgif never looks at the chain: it takes the four bytes
+  straight after the size byte behind a bare length check. The `gif` crate
+  takes the **last** sub-block instead, because it clears its extension buffer
+  on every one, and `ControlWalk` used to require the whole chain to total
+  four, which is neither rule.
+
+  Measured on vips 8.18.6, on a 2x1 fixture whose frame 0 carries the chain:
+  `04 quad(4) 04 quad(0) 00` rewinds the canvas, so the **first** quad is what
+  counts, and `01 AA 04 quad(3) 00` comes back as restore-to-background with a
+  delay of 3076 centiseconds, which is `0xAA` read as the packed byte and the
+  two bytes after it read little-endian. libviprs kept the canvas on the first
+  and rewound on the second.
+
+  The walk now reads the extension twice on purpose: libnsgif's four bytes are
+  the answer, and the crate's last sub-block is what the desynchronisation
+  cross-check compares against, because that check is only ever asking whether
+  the two walks are on the same frame. A neighbouring case stays divergent and
+  is tracked as #879: when the last sub-block is not four bytes the crate
+  refuses the extension outright, which ends the header scan, so the frame
+  never reaches this module.
+
 - A GIF frame carrying no graphic control extension gets a delay of **100 ms**
   rather than 0 (issue #866). libnsgif initialises a frame's delay to 10
   centiseconds when it allocates the frame and only an extension overwrites

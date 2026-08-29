@@ -73,12 +73,15 @@
 //! # Header fields
 //!
 //! Every field `gifload` attaches beside the pixels, and what this loader
-//! does with it. The table is **checked**:
-//! `the_header_field_table_matches_what_this_loader_attaches` parses it out
-//! of this file and requires every "attached" row to be present on a decoded
-//! raster and every "not attached" row to be absent, which is what issue #801
-//! asked for after the paragraph this replaces named a blocker that had
-//! already gone.
+//! does with it. The table is **checked**, three ways:
+//! `the_header_field_table_matches_what_this_loader_attaches` parses it out of
+//! this file and requires every "attached" row to be present on a raster built
+//! to satisfy every condition here, every "not attached" row to be absent from
+//! it, and every row that says "attached **when**" to be absent from a second
+//! raster that satisfies none of them. It also requires the raster to carry
+//! nothing the table does not list, so "every field" is a claim rather than a
+//! sentence. That is what issue #801 asked for, after the paragraph this
+//! replaces named a blocker that had already gone.
 //!
 //! | `gifload` field | vips type | here |
 //! |---|---|---|
@@ -91,9 +94,9 @@
 //! | `interlaced` | `gint` | attached when some frame is stored interlaced |
 //! | `gif-palette` | `VipsArrayInt` | attached when no frame carries a local colour table |
 //! | `background` | `VipsArrayDouble` | not attached, see below |
-//! | `gif-loop` | `gint` | attached, the deprecated alias for `loop` |
-//! | `gif-delay` | `gint` | attached, the deprecated alias for `delay` |
-//! | `palette-bit-depth` | `gint` | attached, the deprecated alias for `bits-per-sample` |
+//! | `gif-loop` | `gint` | attached, `loop - 1`, except that `loop 0` and `loop 1` both give 0 |
+//! | `gif-delay` | `gint` | attached, this raster's first delay in centiseconds |
+//! | `palette-bit-depth` | `gint` | attached, the same number as `bits-per-sample` |
 //!
 //! `gif-palette` is the global colour table as one signed 32-bit word per
 //! entry, `0xFF << 24 | B << 16 | G << 8 | R`, so every entry is negative.
@@ -305,6 +308,24 @@
 //! carrier's noise. This one is not: it is a whole canvas, one-directional,
 //! and libviprs' answer is not the more accurate of the two, it is the
 //! `gif` crate's lossy mapping showing through.
+//!
+//! **The walk reads the extension twice, and that is not redundancy** (issue
+//! #878). A graphic control extension may arrive as more than one sub-block,
+//! or with a size byte that does not say 4, and the two implementations then
+//! read different bytes: libnsgif never looks at the chain and takes the four
+//! bytes straight after the size byte, while the `gif` crate takes the *last*
+//! sub-block, because it clears its extension buffer on every one. So the
+//! walk answers with libnsgif's four bytes and cross-checks with the crate's,
+//! which are the same bytes on every ordinary file and are not on these.
+//! Measured on vips 8.18.6: a chain of `01 AA 04 <quad> 00` comes back as
+//! restore-to-background with a delay of 3076 centiseconds, which is `0xAA`
+//! read as the packed byte and the two bytes after it read little-endian.
+//!
+//! One neighbouring case stays divergent and is issue #879: when the *last*
+//! sub-block is not four bytes, the crate's `read_control_extension` errors,
+//! which ends the header scan, so the frame never reaches this module at all.
+//! vips loads that file. No walk here can put the frame back, because the
+//! decoder is what decides where the frames are.
 //!
 //! # Not handled here
 //!
@@ -1096,6 +1117,21 @@ struct RawControl {
     transparent: Option<u8>,
 }
 
+impl RawControl {
+    /// Decode a graphic control extension's four-byte payload.
+    ///
+    /// The packed byte carries the disposal in bits 2 to 4 and the
+    /// transparency flag in bit 0, then two little-endian bytes of delay in
+    /// centiseconds, then the transparent index.
+    fn from_payload(payload: [u8; 4]) -> Self {
+        Self {
+            disposal: (payload[0] & 0b0001_1100) >> 2,
+            delay_cs: u16::from_le_bytes([payload[1], payload[2]]),
+            transparent: (payload[0] & 1 != 0).then_some(payload[3]),
+        }
+    }
+}
+
 /// What the wire walk found for one frame: the graphic control extension it
 /// carried, or the fact that it carried none.
 ///
@@ -1109,8 +1145,18 @@ struct RawControl {
 /// them, so vips reports 100 ms for one and 0 ms for the other (issue #866).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum WireControl {
-    /// The frame carried a graphic control extension, and this is it.
-    Present(RawControl),
+    /// The frame carried a graphic control extension.
+    Present {
+        /// libnsgif's reading, which is the answer this module wants: the
+        /// four bytes straight after the size byte, whatever the size byte
+        /// says and however many sub-blocks the chain has.
+        control: RawControl,
+        /// The same block as the `gif` crate will report it, which is what
+        /// the cross-check compares against and is **not** always the same
+        /// four bytes (issue #878). `None` when the crate will be left
+        /// holding `Frame::default()` for this frame.
+        as_decoder: Option<RawControl>,
+    },
     /// It carried none.
     Absent,
 }
@@ -1130,22 +1176,30 @@ impl WireControl {
     /// The three frame fields the `gif` crate reports once it has read this,
     /// which is what makes the two walks checkable against each other.
     ///
-    /// The absent case is `Frame::default()` (`common.rs:163-178`), whose
+    /// It is deliberately **not** the same bytes [`WireControl::disposal`]
+    /// and [`WireControl::delay_cs`] answer from (issue #878). This question
+    /// is only ever "are the two walks on the same frame", so it has to model
+    /// the decoder rather than the format.
+    ///
+    /// A `None` reading is `Frame::default()` (`common.rs:163-178`), whose
     /// disposal is `Keep` and **not** `Any`, so it is not the same triple
     /// that a control extension holding all zeroes produces. Getting that
     /// wrong would make every extension-less frame look like a
     /// desynchronised walk.
     fn decoder_fields(self) -> (gif::DisposalMethod, u16, Option<u8>) {
-        match self {
-            Self::Present(raw) => (crate_disposal(raw.disposal), raw.delay_cs, raw.transparent),
-            Self::Absent => (gif::DisposalMethod::Keep, 0, None),
-        }
+        let seen = match self {
+            Self::Present { as_decoder, .. } => as_decoder,
+            Self::Absent => None,
+        };
+        seen.map_or((gif::DisposalMethod::Keep, 0, None), |raw| {
+            (crate_disposal(raw.disposal), raw.delay_cs, raw.transparent)
+        })
     }
 
     /// What to do with the canvas after this frame draws.
     fn disposal(self) -> Disposal {
         match self {
-            Self::Present(raw) => Disposal::from_code(raw.disposal),
+            Self::Present { control, .. } => Disposal::from_code(control.disposal),
             // GIF89a's disposal 0, which libnsgif also writes into a fresh
             // frame, and which keeps the canvas.
             Self::Absent => Disposal::Keep,
@@ -1155,7 +1209,7 @@ impl WireControl {
     /// This frame's delay, in the centiseconds the wire counts.
     fn delay_cs(self) -> u16 {
         match self {
-            Self::Present(raw) => raw.delay_cs,
+            Self::Present { control, .. } => control.delay_cs,
             Self::Absent => ABSENT_CONTROL_DELAY_CS,
         }
     }
@@ -1180,7 +1234,7 @@ struct ControlWalk<'a> {
     pos: Option<usize>,
     /// The most recent graphic control extension, waiting for the image
     /// descriptor it belongs to.
-    pending: Option<RawControl>,
+    pending: Option<WireControl>,
 }
 
 impl<'a> ControlWalk<'a> {
@@ -1236,13 +1290,29 @@ impl<'a> ControlWalk<'a> {
                 // the NETSCAPE application extension.
                 Some(&0x21) => {
                     let label = *self.bytes.get(at + 1)?;
-                    let (payload, next) = self.sub_blocks(at + 2)?;
+                    let (last, next) = self.sub_blocks(at + 2)?;
                     if label == 0xF9 {
-                        self.pending = payload.map(|p| RawControl {
-                            disposal: (p[0] & 0b0001_1100) >> 2,
-                            delay_cs: u16::from_le_bytes([p[1], p[2]]),
-                            transparent: (p[0] & 1 != 0).then_some(p[3]),
-                        });
+                        // libnsgif reads four bytes at a fixed offset from the
+                        // label and never looks at the size byte or the rest
+                        // of the chain, so this is the answer (issue #878).
+                        // Measured: a chain of `01 AA 04 <quad> 00` comes back
+                        // from vips as disposal 2 and 3076 centiseconds, which
+                        // is `0xAA` read as the packed byte and the two bytes
+                        // after it read little-endian.
+                        //
+                        // The crate's reading is the *last* sub-block, which
+                        // is a different four bytes on that same file, and it
+                        // is kept only to check the two walks against each
+                        // other.
+                        self.pending =
+                            self.bytes
+                                .get(at + 3..at + 7)
+                                .map(|quad| WireControl::Present {
+                                    control: RawControl::from_payload([
+                                        quad[0], quad[1], quad[2], quad[3],
+                                    ]),
+                                    as_decoder: last.map(RawControl::from_payload),
+                                });
                     }
                     self.pos = Some(next);
                 }
@@ -1257,10 +1327,7 @@ impl<'a> ControlWalk<'a> {
                     }
                     let (_, next) = self.sub_blocks(next + 1)?;
                     self.pos = Some(next);
-                    return Some(match self.pending.take() {
-                        Some(raw) => WireControl::Present(raw),
-                        None => WireControl::Absent,
-                    });
+                    return Some(self.pending.take().unwrap_or(WireControl::Absent));
                 }
                 // The trailer, an unknown introducer, or the end of the
                 // buffer. `open()` configures the decoder to stop at an
@@ -1272,27 +1339,30 @@ impl<'a> ControlWalk<'a> {
         }
     }
 
-    /// Walk a sub-block chain from `at`, returning the byte after it and,
-    /// when the chain totals exactly four bytes, those bytes.
+    /// Walk a sub-block chain from `at`, returning the byte after it and the
+    /// **last** sub-block when that one is exactly four bytes long.
     ///
-    /// Four is a graphic control extension's payload length and the only
-    /// length the `gif` crate accepts for one, so a chain of any other length
-    /// is not a control extension that decoder will read either.
+    /// Last rather than the whole chain, because that is what the `gif` crate
+    /// measures: `ExtensionDataSubBlockStart` clears its buffer on every
+    /// sub-block (`reader/decoder.rs:734`), so `read_control_extension`'s
+    /// `ext.data.len() != 4` check only ever sees the final one, and a chain
+    /// of `04 <quad> 04 <quad> 00` reaches the decoder as the second quad.
+    /// This module used to require the whole chain to total four, which is
+    /// neither implementation's rule and made the walk disagree with the
+    /// decoder about a frame it had found perfectly well (issue #878).
+    ///
+    /// `None` when the last sub-block is some other length, which is the
+    /// shape the crate answers with `Frame::default()` or with an error.
     fn sub_blocks(&self, mut at: usize) -> Option<(Option<[u8; 4]>, usize)> {
-        let mut payload = [0u8; 4];
-        let mut len = 0usize;
+        let mut last: Option<[u8; 4]> = None;
         loop {
             let size = usize::from(*self.bytes.get(at)?);
             at += 1;
             if size == 0 {
-                return Some(((len == payload.len()).then_some(payload), at));
+                return Some((last, at));
             }
-            for &byte in self.bytes.get(at..at + size)? {
-                if let Some(slot) = payload.get_mut(len) {
-                    *slot = byte;
-                }
-                len += 1;
-            }
+            let block = self.bytes.get(at..at + size)?;
+            last = <[u8; 4]>::try_from(block).ok();
             at += size;
         }
     }
@@ -1889,6 +1959,12 @@ mod tests {
         /// extension can come between the two halves `ControlWalk` has to
         /// keep together.
         comment: Option<Vec<u8>>,
+        /// A graphic control extension written verbatim, sub-block chain and
+        /// all, in place of the one `control`, `disposal`, `delay_cs` and
+        /// `transparent` would produce. The bytes follow `21 F9` and have to
+        /// end with the chain terminator themselves. Issue #878 is about the
+        /// chains that are not one four-byte sub-block.
+        raw_control: Option<Vec<u8>>,
     }
 
     impl Frame {
@@ -1907,6 +1983,7 @@ mod tests {
                 local: None,
                 control: true,
                 comment: None,
+                raw_control: None,
             }
         }
     }
@@ -1966,7 +2043,10 @@ mod tests {
             out.push(0);
         }
         for frame in frames {
-            if frame.control {
+            if let Some(chain) = &frame.raw_control {
+                out.extend_from_slice(&[0x21, 0xF9]);
+                out.extend_from_slice(chain);
+            } else if frame.control {
                 let mut flags = 0u8;
                 if frame.transparent.is_some() {
                     flags |= 1;
@@ -2173,6 +2253,7 @@ mod tests {
             local: None,
             control: true,
             comment: None,
+            raw_control: None,
         };
         let bytes = fixture((8, 8), &palette, 2, None, &[frame]);
         let raster = decode_bytes(&bytes).expect("the fixture is a valid GIF");
@@ -3093,6 +3174,7 @@ mod tests {
             local: None,
             control: true,
             comment: None,
+            raw_control: None,
         }
     }
 
@@ -3738,13 +3820,19 @@ mod tests {
      * because the whole-slice read and a byte-at-a-time read with a zero
      * default are otherwise indistinguishable, and only one of them is
      * total by construction.
-     * Input: a four-byte table at indices 0 and 1 -> Output: the first
-     * entry both times, because an index the table cannot serve falls back
-     * to entry 0 the way libnsgif's does.
+     * The table is seven bytes rather than four so the three candidate rules
+     * come apart: index 2 wants bytes 6, 7 and 8 and only byte 6 is there, and
+     * "fall back to entry 0" answers `7 8 9` where "clamp to the last whole
+     * entry" answers `1 2 3` and "ignore the index" answers `7 8 9` for index
+     * 1 as well. Only the first rule gives all three of the answers below. A
+     * four-byte table cannot tell them apart, which is the #850 shape one
+     * level down.
+     * Input: a seven-byte table at indices 0, 1 and 2 -> Output: entry 0,
+     * entry 1, then entry 0 again.
      */
     #[test]
     fn the_background_lookup_takes_a_whole_entry_or_none() {
-        let ragged = [7u8, 8, 9, 10];
+        let ragged = [7u8, 8, 9, 1, 2, 3, 4];
         assert_eq!(
             background_rgb(Some(&ragged), Some(0)),
             [7, 8, 9],
@@ -3752,9 +3840,16 @@ mod tests {
         );
         assert_eq!(
             background_rgb(Some(&ragged), Some(1)),
+            [1, 2, 3],
+            "and so is the second one, which is what stops this passing for a \
+             lookup that ignores the index"
+        );
+        assert_eq!(
+            background_rgb(Some(&ragged), Some(2)),
             [7, 8, 9],
             "an entry that runs off the end contributes nothing, not one byte, \
-             so the whole lookup falls back to entry 0"
+             so the whole lookup falls back to entry 0 rather than clamping to \
+             the last whole entry, which would be 1 2 3"
         );
         assert_eq!(
             background_rgb(None, Some(0)),
@@ -3771,6 +3866,12 @@ mod tests {
             background_rgb(Some(&ragged), None),
             [7, 8, 9],
             "an absent index is index 0, which is what the descriptor stores"
+        );
+        assert_eq!(
+            background_rgb(Some(&ragged[..2]), Some(0)),
+            [0, 0, 0],
+            "a table with no whole entry at all is black, since there is no \
+             entry 0 to fall back to either"
         );
     }
 
@@ -3891,11 +3992,14 @@ mod tests {
             ],
         );
 
-        // Every frame on the wire costs at least the ten bytes of an image
-        // descriptor, so a walk that yields more than that has stopped
-        // advancing rather than found something.
+        // Every frame on the wire costs at least eleven bytes, the image
+        // descriptor's introducer and nine fields plus the LZW code size, so
+        // a walk yielding more than a tenth of the buffer has stopped
+        // advancing rather than found something. The loose `input.len()`
+        // bound this used to carry would have let a phantom frame every two
+        // bytes through.
         let drain = |input: &[u8]| {
-            let ceiling = input.len() + 1;
+            let ceiling = input.len() / 10 + 1;
             let mut walk = ControlWalk::new(input);
             let mut seen = Vec::new();
             while let Some(control) = walk.next_frame() {
@@ -3905,22 +4009,23 @@ mod tests {
             seen
         };
 
+        // A plain single-sub-block extension, where libnsgif's reading and
+        // the crate's are the same four bytes.
+        let present = |disposal: u8| {
+            let control = RawControl {
+                disposal,
+                delay_cs: 0,
+                transparent: None,
+            };
+            WireControl::Present {
+                control,
+                as_decoder: Some(control),
+            }
+        };
         let intact = drain(&bytes);
         assert_eq!(
             intact,
-            [
-                WireControl::Present(RawControl {
-                    disposal: 4,
-                    delay_cs: 0,
-                    transparent: None,
-                }),
-                WireControl::Absent,
-                WireControl::Present(RawControl {
-                    disposal: 7,
-                    delay_cs: 0,
-                    transparent: None,
-                }),
-            ],
+            [present(4), WireControl::Absent, present(7),],
             "the control: the intact file still walks, and the middle frame \
              comes back as carrying no extension rather than as code 0"
         );
@@ -3935,6 +4040,107 @@ mod tests {
                 drain(&corrupt);
             }
         }
+    }
+
+    /**
+     * Tests that a graphic control extension spread over more than one
+     * sub-block, or with a size byte that does not say 4, is read the way
+     * libnsgif reads it. Works by writing five `0xF9` chains verbatim in front
+     * of the same two-frame file and reading page 1 and the delay back.
+     * libnsgif never looks at the chain: it reads four bytes at a fixed offset
+     * from the label behind a bare length check, so the size byte and every
+     * sub-block after the first are invisible to it. The `gif` crate reads the
+     * **last** sub-block instead, because it clears its extension buffer on
+     * every sub-block, and this walk used to require the whole chain to total
+     * four, which is neither rule (issue #878).
+     * Measured on vips 8.18.6 against exactly these files. Row 2 separates
+     * libnsgif's rule from the crate's, because its two quads disagree; rows 3
+     * and 4 separate it from both, because `0xAA` is not a disposal anyone
+     * would write and comes back as restore-to-background with a delay of
+     * thousands of centiseconds, which is the strongest evidence available
+     * that the fixed offset is the rule.
+     * Input: five chains -> Output: the disposal and delay libnsgif reads.
+     */
+    #[test]
+    fn a_control_extension_split_across_sub_blocks_reads_the_way_libnsgif_does() {
+        // A four-byte payload: packed byte, two delay bytes, transparent index.
+        let quad = |disposal: u8| [(disposal & 7) << 2, 0, 0, 0];
+        let chain = |parts: &[&[u8]]| {
+            let mut out = Vec::new();
+            for part in parts {
+                out.push(part.len() as u8);
+                out.extend_from_slice(part);
+            }
+            out.push(0);
+            out
+        };
+        let load = |raw: Vec<u8>| {
+            let bytes = fixture(
+                (2, 1),
+                &ANIM_PALETTE,
+                3,
+                Some(0),
+                &[
+                    Frame {
+                        raw_control: Some(raw),
+                        ..Frame::full(2, 1, vec![1, 1])
+                    },
+                    Frame {
+                        width: 1,
+                        height: 1,
+                        indices: vec![2],
+                        ..Frame::full(1, 1, vec![2])
+                    },
+                ],
+            );
+            let raster = decode_gif_with(
+                &bytes,
+                DecodeLimits::default(),
+                LoadOptions::default().with_n(-1),
+            )
+            .expect("a valid GIF");
+            (page_bytes(&raster, 1), delays(&raster))
+        };
+
+        let previous = [0, 255, 0, 0, 0, 0];
+        let background = [0, 255, 0, 0, 0, 255];
+
+        // The control: one four-byte sub-block, where all three readings are
+        // the same four bytes.
+        assert_eq!(
+            load(chain(&[&quad(4)])).0,
+            previous,
+            "one sub-block, code 4"
+        );
+
+        // Two four-byte sub-blocks. libnsgif reads the first, the crate reads
+        // the second, and the second row is what tells them apart.
+        assert_eq!(
+            load(chain(&[&quad(4), &quad(4)])).0,
+            previous,
+            "two sub-blocks, both code 4"
+        );
+        assert_eq!(
+            load(chain(&[&quad(4), &quad(0)])).0,
+            previous,
+            "two sub-blocks, code 4 then code 0: the **first** one wins"
+        );
+
+        // A one-byte sub-block first, so libnsgif's four bytes start at 0xAA
+        // and run into the next sub-block's length byte and payload.
+        let (page, delay) = load(chain(&[&[0xAA], &quad(3)]));
+        assert_eq!(
+            page, background,
+            "0xAA is disposal 2, whatever the sub-block after it says"
+        );
+        assert_eq!(
+            delay,
+            Some(vec![30_760, 0]),
+            "and the delay is the two bytes after 0xAA, which are 04 0C"
+        );
+        let (page, delay) = load(chain(&[&[0xAA], &quad(4)]));
+        assert_eq!(page, background);
+        assert_eq!(delay, Some(vec![41_000, 0]));
     }
 
     /**
@@ -4287,6 +4493,42 @@ mod tests {
      */
     #[test]
     fn a_frame_with_no_control_extension_does_not_inherit_the_last_one() {
+        // The walk itself first, because that is what the name is about and
+        // the pixels below were being held by a different test.
+        let three = fixture(
+            (2, 1),
+            &ANIM_PALETTE,
+            0,
+            Some(0),
+            &[
+                Frame {
+                    disposal: 4,
+                    ..Frame::full(2, 1, vec![1, 1])
+                },
+                Frame {
+                    control: false,
+                    ..Frame::full(2, 1, vec![2, 2])
+                },
+                Frame {
+                    disposal: 2,
+                    ..Frame::full(2, 1, vec![3, 3])
+                },
+            ],
+        );
+        let mut walk = ControlWalk::new(&three);
+        let codes: Vec<Option<u8>> = std::iter::from_fn(|| walk.next_frame())
+            .map(|wire| match wire {
+                WireControl::Present { control, .. } => Some(control.disposal),
+                WireControl::Absent => None,
+            })
+            .collect();
+        assert_eq!(
+            codes,
+            [Some(4), None, Some(2)],
+            "the middle frame carried no extension, and the walk says so \
+             rather than handing back the one before it"
+        );
+
         let bytes = fixture(
             (2, 1),
             &ANIM_PALETTE,
@@ -4356,7 +4598,10 @@ mod tests {
             delay_cs: 7,
             transparent: Some(3),
         };
-        let present = WireControl::Present(raw);
+        let present = WireControl::Present {
+            control: raw,
+            as_decoder: Some(raw),
+        };
         assert_eq!(
             reconcile_control(Some(present), gif::DisposalMethod::Any, 7, Some(3)),
             Some(present),
@@ -4412,11 +4657,14 @@ mod tests {
             "libnsgif's default, which is 100 ms and not 0"
         );
         assert_eq!(
-            WireControl::Present(RawControl {
-                disposal: 0,
-                delay_cs: 0,
-                transparent: None,
-            })
+            WireControl::Present {
+                control: RawControl {
+                    disposal: 0,
+                    delay_cs: 0,
+                    transparent: None,
+                },
+                as_decoder: None,
+            }
             .delay_cs(),
             0,
             "the control: an extension holding zero really is zero"
@@ -4473,7 +4721,7 @@ mod tests {
                 (frame.dispose, frame.delay, frame.transparent),
                 "frame {seen}"
             );
-            let WireControl::Present(raw) = wire else {
+            let WireControl::Present { control: raw, .. } = wire else {
                 panic!("frame {seen} carries an extension in this fixture");
             };
             assert_eq!(raw.disposal, frames[seen].disposal, "frame {seen} raw code");
@@ -4648,18 +4896,26 @@ mod tests {
 
     /**
      * Tests that the module doc's header-field table says what this loader
-     * actually attaches. Works by parsing the table out of this file and
-     * decoding one fixture built to light up every conditional row, then
-     * requiring each row marked "attached" to be present on the raster and
-     * each row marked "not attached" to be absent.
-     * This is issue #801: the paragraph this table replaces named a blocker
-     * that had already been removed and a field set that had already moved,
-     * because nothing checked it. A doc claim about which fields exist is
-     * exactly the kind a test can hold, and the two-sided form matters: a
-     * check that only looked at the attached rows would pass with
-     * `background` quietly attached as the wrong type.
-     * Input: this file's own doc table and a two-page interlaced fixture ->
-     * Output: every row's verdict confirmed against the decoded raster.
+     * actually attaches, in all three of the things it claims. Works by
+     * parsing the table out of this file and decoding two rasters: one built
+     * to satisfy every condition the table names, and one built to satisfy
+     * none of them.
+     * Every row marked "attached" has to be present on the first, every row
+     * marked "not attached" absent from both, and every row marked "attached
+     * **when**" absent from the second, which is what puts the condition
+     * column inside the check instead of beside it. The first raster's whole
+     * field set then has to be a subset of the rows, which is what makes
+     * "every field `gifload` attaches" a claim rather than a sentence: without
+     * it, a field the loader attaches and the table never mentions is
+     * invisible.
+     * This is issue #801, and the shape of it is why: the paragraph the table
+     * replaces named a blocker that had already been removed and a field set
+     * that had already moved, because nothing checked it. The three-way form
+     * came out of a review that changed a condition's wording and a row's
+     * prose and watched the earlier version stay green both times.
+     * Input: this file's own doc table, a two-page interlaced fixture and a
+     * one-page one with a local colour table -> Output: every row's verdict
+     * and every condition confirmed, and no field left over.
      */
     #[test]
     fn the_header_field_table_matches_what_this_loader_attaches() {
@@ -4668,7 +4924,8 @@ mod tests {
         let at = SRC
             .find(HEADER)
             .expect("the module doc's header-field table moved");
-        let mut rows: Vec<(String, bool)> = Vec::new();
+        // (name, attached, conditional)
+        let mut rows: Vec<(String, bool, bool)> = Vec::new();
         for line in SRC[at + HEADER.len()..].lines().skip(1) {
             let Some(row) = line.trim().strip_prefix("//! |") else {
                 break;
@@ -4683,16 +4940,21 @@ mod tests {
                 verdict.starts_with("attached") || verdict.starts_with("not attached"),
                 "row {name:?} says {verdict:?}, which is neither verdict"
             );
-            rows.push((name, verdict.starts_with("attached")));
+            rows.push((
+                name,
+                verdict.starts_with("attached"),
+                verdict.starts_with("attached when"),
+            ));
         }
         // The parser is the part most likely to rot into a vacuous pass, so
-        // pin that it found a real table with both verdicts on it.
+        // pin that it found a real table with all three kinds of row on it.
         assert!(rows.len() >= 10, "only parsed {} rows", rows.len());
-        assert!(rows.iter().any(|(_, attached)| *attached));
-        assert!(rows.iter().any(|(_, attached)| !*attached));
+        assert!(rows.iter().any(|(_, attached, _)| *attached));
+        assert!(rows.iter().any(|(_, attached, _)| !*attached));
+        assert!(rows.iter().any(|(_, _, conditional)| *conditional));
         for must in ["background", "gif-palette", "delay", "n-pages"] {
             assert!(
-                rows.iter().any(|(name, _)| name == must),
+                rows.iter().any(|(name, _, _)| name == must),
                 "the table does not mention {must}"
             );
         }
@@ -4708,24 +4970,82 @@ mod tests {
             Some(0),
             &[Frame::full(2, 2, vec![3, 2, 1, 0]), interlaced],
         );
-        let raster = decode_gif_with(
+        let every = decode_gif_with(
             &bytes,
             DecodeLimits::default(),
             LoadOptions::default().with_n(-1),
         )
         .expect("a valid GIF");
-        for (name, attached) in &rows {
+
+        // One page, no interlace, and a local colour table, so none of the
+        // three conditions holds.
+        let none = decode_bytes(&fixture(
+            (2, 2),
+            &ANIM_PALETTE,
+            0,
+            Some(0),
+            &[Frame {
+                local: Some(vec![[9, 8, 7], [6, 5, 4]]),
+                ..Frame::full(2, 2, vec![0, 1, 1, 0])
+            }],
+        ))
+        .expect("decodes");
+
+        for (name, attached, conditional) in &rows {
             assert_eq!(
-                raster.get_field(name).is_some(),
+                every.get_field(name).is_some(),
                 *attached,
-                "the table says {name} is {}",
+                "with every condition met, the table says {name} is {}",
                 if *attached {
                     "attached"
                 } else {
                     "not attached"
                 }
             );
+            assert_eq!(
+                none.get_field(name).is_some(),
+                *attached && !*conditional,
+                "with no condition met, {name} should be {}",
+                if *attached && !*conditional {
+                    "attached"
+                } else {
+                    "absent"
+                }
+            );
         }
+
+        // And nothing the table does not list. Without this the table's
+        // "every field" is unheld in the one direction a reader cares about:
+        // a field this loader attaches and the table never mentions would be
+        // invisible to every assertion above.
+        //
+        // The intrinsics (`width`, `interpretation`, `xres` and the rest) are
+        // subtracted rather than listed, and they are taken from a raster
+        // built by hand rather than written down here, so the subtraction
+        // tracks the crate instead of somebody's memory of it. A field that
+        // stops being intrinsic therefore has to appear in the table.
+        let intrinsics = Raster::new(1, 1, PixelFormat::Rgb8, vec![0, 0, 0])
+            .expect("a 1x1 raster")
+            .get_fields();
+        assert!(
+            intrinsics.len() >= 4,
+            "the intrinsic set came back as {intrinsics:?}, which cannot be right"
+        );
+        let listed: Vec<&str> = rows
+            .iter()
+            .filter(|(_, attached, _)| *attached)
+            .map(|(name, _, _)| name.as_str())
+            .collect();
+        let mut extra: Vec<String> = every
+            .get_fields()
+            .into_iter()
+            .filter(|name| !listed.contains(&name.as_str()) && !intrinsics.contains(name))
+            .collect();
+        extra.sort();
+        assert!(
+            extra.is_empty(),
+            "the raster carries fields the table never mentions: {extra:?}"
+        );
     }
 
     /**
