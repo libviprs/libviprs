@@ -761,6 +761,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`MetadataValue::DoubleArray(Vec<f64>)`**, the `VipsArrayDouble` half of
+  the pair `IntArray` opened in #787, with `as_double_array`,
+  `Raster::get_double_array`, the `From` impls, type code 6 and the `.v`
+  trailer both ways (issue #852). GIF's `background` is the field it was
+  filed for and is attached with it, which makes **every header field
+  `gifload` attaches now attached** by this loader.
+
+  It is a separate variant rather than a widening of `IntArray`. `background`
+  holds three colour-table bytes widened to doubles, so its values are always
+  integral and it would have fitted an int array numerically, but vips writes
+  the two as different GTypes and a reader asking for one does not accept the
+  other, so it would have been a field nobody reads.
+
+  The trailer text is measured. I hand-wrote a `VipsArrayDouble` into a `.v`
+  and had vips rewrite it: `0.5`, `-1.25` and `3.0000000000000004` come back
+  unchanged, `71.0` goes out as `71` and `1e300` as `1.0000000000000001e+300`,
+  which is `%.17g`. This writes Rust's shortest round-tripping form instead,
+  because that is what `xml_field_of` already does for a scalar `Double` and
+  one trailer should not carry two conventions. Every one of those spellings
+  parses back to the same `f64` on both sides, so the difference is spelling
+  and not value.
+
 - **An unsigned 32-bit pixel carrier**, `PixelFormat::Uint32(NonZeroU16)`, the
   libvips `VIPS_FORMAT_UINT` one (issue #517). It is what the counting ops need:
   `hist_find`, `hist_cum`, `project` and the `hough_*` family all count pixels
