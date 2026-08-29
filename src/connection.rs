@@ -231,7 +231,9 @@ impl Raster {
     /// Encode this raster into a freshly allocated buffer in the named format.
     ///
     /// Uses the same dispatch as [`encode_to_target`]: `"jpeg"` / `"jpg"`,
-    /// `"png"`, `"gif"`, `"webp"`, `"jxl"`, `"fits"` / `"fit"` / `"fts"` and
+    /// `"png"`, `"gif"`, `"webp"`, `"jxl"`,
+    /// `"jp2k"` / `"jp2"` / `"j2k"` / `"jpt"` / `"j2c"` / `"jpc"`,
+    /// `"fits"` / `"fit"` / `"fts"` and
     /// `"v"` / `"vips"` are wired; any other format returns
     /// [`EncodeError::Unsupported`]. `"webp"` encodes losslessly at
     /// [`crate::webp::SaveOptions::default`], keeping any attached metadata,
@@ -241,12 +243,17 @@ impl Raster {
     /// [`Raster::encode_webp`], [`Raster::encode_gif`] and
     /// [`Raster::encode_jxl`] take the options explicitly.
     ///
-    /// `"jxl"` needs the non-default `jxl` feature to produce bytes. It
-    /// stays a live row without it and reports
-    /// [`EncodeError::Unsupported`] carrying `"jxl"`, which is the same
-    /// variant an unrecognised format name gets, so the dispatch has one
-    /// answer for "this build cannot write that" however the caller
+    /// `"jxl"` needs the non-default `jxl` feature to produce bytes, and the
+    /// six JPEG 2000 spellings need `jp2k`. They stay live rows without it and
+    /// report [`EncodeError::Unsupported`] carrying `"jxl"` or `"jp2k"`, which
+    /// is the same variant an unrecognised format name gets, so the dispatch
+    /// has one answer for "this build cannot write that" however the caller
     /// arrived at it.
+    ///
+    /// All six JPEG 2000 spellings write the **same** JP2 container. That is
+    /// not a shortcut: `jp2ksave` hard-codes `OPJ_CODEC_JP2` and, measured on
+    /// 8.18.6, writes byte-identical files under all five suffixes it
+    /// registers.
     ///
     /// # Errors
     ///
@@ -272,6 +279,22 @@ fn encode_for_format(raster: &Raster, format: &str) -> Result<Vec<u8>, EncodeErr
         "gif" => raster.encode_gif(crate::gif::SaveOptions::default()),
         "webp" => raster.encode_webp(crate::webp::SaveOptions::default()),
         "jxl" => raster.encode_jxl(crate::jxl::SaveOptions::default()),
+        // Every spelling `jp2ksave` answers to, on one arm, because vips
+        // writes the same JP2 container for all five suffixes: measured on
+        // 8.18.6, `vips copy base.v out.EXT` over `jp2`, `j2k`, `jpt`, `j2c`
+        // and `jpc` gives five files with one SHA-256 between them. `"jp2k"`
+        // is here too because that is the saver's name and what a caller who
+        // read `vips -l` would type; `jp2ksave` itself does not answer to it
+        // as a suffix, and neither does anything else, so it costs nothing.
+        //
+        // Not gated, like `"jxl"` above and unlike the extension route:
+        // without the feature `encode_jp2k` already reports
+        // `EncodeError::Unsupported { format: "jp2k" }`, which is the same
+        // variant an unrecognised name gets, so the row stays live and typed
+        // rather than disappearing.
+        "jp2k" | "jp2" | "j2k" | "jpt" | "j2c" | "jpc" => {
+            raster.encode_jp2k(crate::jp2k::SaveOptions::default())
+        }
         // The three suffixes vips registers for FITS (`vips__fits_suffs`,
         // `fits.c:125`). `fitssave` takes no options, so there is nothing
         // to default here.
@@ -370,6 +393,74 @@ mod tests {
         assert_eq!(&via_dispatch[..2], b"\xff\x0a");
         let back = crate::decode_bytes(&via_dispatch).unwrap();
         assert_eq!(back.data(), raster.data());
+    }
+
+    /// All six JPEG 2000 spellings are live rows in the shared format
+    /// dispatch and every one produces the same JP2 container (issue #770).
+    ///
+    /// Measured on the pinned vips 8.18.6 rather than read out of the C:
+    /// `vips copy base.v out.EXT` over `jp2`, `j2k`, `jpt`, `j2c` and `jpc`
+    /// writes five files with one SHA-256 between them, and `out.jp2000` is
+    /// refused as an unknown format. `"jp2k"` is here as well because that is
+    /// the saver's name, which is what a caller reading `vips -l` would type,
+    /// and it is the spelling #770 names.
+    ///
+    /// The normalisation the dispatch already does is exercised too, since a
+    /// six-way arm is exactly where a leading dot or a capital would get lost.
+    #[test]
+    #[cfg(feature = "jp2k")]
+    fn encode_for_format_routes_every_jpeg_2000_spelling_to_one_container() {
+        let raster = Raster::new(
+            8,
+            6,
+            PixelFormat::Rgb8,
+            (0..8u32 * 6 * 3).map(|i| (i % 251) as u8).collect(),
+        )
+        .unwrap();
+        let direct = raster
+            .encode_jp2k(crate::jp2k::SaveOptions::default())
+            .expect("the encoder takes an 8x6 RGB raster");
+
+        for spelling in ["jp2k", "jp2", "j2k", "jpt", "j2c", "jpc", ".JP2", " Jp2k "] {
+            let bytes = raster
+                .encode_to_buffer(spelling)
+                .unwrap_or_else(|e| panic!("{spelling:?} must be a live row, got {e}"));
+            assert_eq!(
+                bytes, direct,
+                "{spelling:?} must write the same container as encode_jp2k"
+            );
+        }
+
+        // The positive control for the sweep above: a name vips does not know
+        // either still has to come back typed rather than routed anywhere.
+        assert!(matches!(
+            raster.encode_to_buffer("jp2000"),
+            Err(EncodeError::Unsupported { .. })
+        ));
+    }
+
+    /// Without the `jp2k` feature the six rows are still there and still
+    /// typed: `Unsupported` carrying `"jp2k"`, which is the same variant an
+    /// unrecognised name gets (issue #770).
+    ///
+    /// #770 says the row "must be `#[cfg(feature = "jp2k")]` on both sides".
+    /// On this side that is wrong, and measurably so: `encode_jp2k` without
+    /// the feature already returns exactly this, so gating the arm would take
+    /// a live row out of the dispatch for no gain. The `.jxl` row above is
+    /// ungated for the same reason. The extension route is the side that does
+    /// need the cfg, because `saveable_extensions()` must not advertise an
+    /// encoder this build has not got.
+    #[test]
+    #[cfg(not(feature = "jp2k"))]
+    fn encode_for_format_refuses_every_jpeg_2000_spelling_by_name_without_the_feature() {
+        let raster = Raster::new(8, 6, PixelFormat::Rgb8, vec![0u8; 8 * 6 * 3]).unwrap();
+        for spelling in ["jp2k", "jp2", "j2k", "jpt", "j2c", "jpc"] {
+            let err = raster.encode_to_buffer(spelling).unwrap_err();
+            assert!(
+                matches!(err, EncodeError::Unsupported { ref format } if format == "jp2k"),
+                "{spelling:?} must report the codec name it has no encoder for, got {err}"
+            );
+        }
     }
 
     /// Without the `jxl` feature the row is still there and still typed:
