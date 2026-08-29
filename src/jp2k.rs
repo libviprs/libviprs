@@ -3619,17 +3619,38 @@ mod tests {
     /// per-band ramp, so a band that ends up in the wrong place is visible.
     #[cfg(feature = "jp2k")]
     fn ramp(width: u32, height: u32, format: PixelFormat) -> Raster {
+        // Scoped here rather than at module level: `ramp` is the only user and it
+        // is `cfg(feature = "jp2k")`, so a module-level import is unused without
+        // that feature and `-D warnings` refuses it.
+        use crate::pixel::SampleKind;
+
         let bands = format.channels();
-        let wide = format.bytes_per_channel() == 2;
+        let kind = format.kind();
         let mut data =
             Vec::with_capacity(width as usize * height as usize * format.bytes_per_pixel());
         for i in 0..(width as usize * height as usize) {
             for band in 0..bands {
                 let value = (i * 7 + band * 40) as u32;
-                if wide {
-                    data.extend_from_slice(&((value * 271 % 65536) as u16).to_ne_bytes());
-                } else {
-                    data.push((value % 256) as u8);
+                // Keyed on the sample kind, not on its byte width. A width cannot
+                // tell `U32` from `F32` or `I32`, so the old `== 2` form wrote one
+                // byte per sample for every kind wider than two and produced a
+                // fixture at the wrong stride (issue #607).
+                match kind {
+                    SampleKind::U8 => data.push((value % 256) as u8),
+                    SampleKind::I8 => data.push(((value % 256) as i8).to_ne_bytes()[0]),
+                    SampleKind::U16 => {
+                        data.extend_from_slice(&((value * 271 % 65536) as u16).to_ne_bytes());
+                    }
+                    SampleKind::I16 => {
+                        data.extend_from_slice(&((value * 271 % 32768) as i16).to_ne_bytes());
+                    }
+                    SampleKind::U32 => data.extend_from_slice(&(value * 271).to_ne_bytes()),
+                    SampleKind::I32 => {
+                        data.extend_from_slice(&((value * 271) as i32).to_ne_bytes());
+                    }
+                    SampleKind::F32 => {
+                        data.extend_from_slice(&(value as f32).to_ne_bytes());
+                    }
                 }
             }
         }
