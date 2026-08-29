@@ -71,6 +71,22 @@
 //!   file). There is no sound way to prove opacity from a header, so the
 //!   bounded upstream error is carried rather than traded for an unbounded
 //!   one this crate would own.
+//! * **The band count is not the `VP8X` alpha flag on its own** (issue
+//!   #885). `webp2vips.c:413` starts there and `:464-471` turns alpha on for
+//!   an animation when **any** frame carries alpha of its own or is smaller
+//!   than the canvas, the second because a frame that does not cover the
+//!   canvas leaves the area around it transparent. `image-webp` reads the
+//!   flag and nothing else, so a file with a sub-canvas frame came back
+//!   three-band with the transparent area as opaque black, which is lost
+//!   data rather than a wrong label.
+//!
+//!   The file is handed to the decoder with the flag set instead, so the
+//!   RGBA canvas it already keeps comes back whole. That is sound where the
+//!   withdrawn blend rewrite above was not, and the difference is worth
+//!   being precise about: the flag is an **output-format switch** inside
+//!   `image-webp`, deciding only whether the fourth channel is dropped on
+//!   the way out, so moving it cannot change a decoded value. The blend
+//!   flag decided *arithmetic*, from a header field libwebp never consults.
 //! * **Animated WebP can be read and never written.** No pure-Rust
 //!   encoder emits `ANIM`/`ANMF`: `image-webp` 0.2.4 writes one `VP8L`
 //!   chunk and has no animation surface at all, so [`SaveOptions`] has
@@ -373,6 +389,107 @@ pub fn decode_webp(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceE
     decode_webp_with(bytes, limits, LoadOptions::default())
 }
 
+/// The offset of the `VP8X` flags byte when libvips would report an alpha
+/// channel for this file and the flag is clear, so the byte needs setting
+/// before `image-webp` sees it.
+///
+/// `image-webp`'s `WebPDecoder::has_alpha` is that flag and nothing else, and
+/// it decides whether `read_frame` hands back the RGBA canvas it keeps
+/// internally or strips it to RGB (`decoder.rs:906-916`). vips's rule is
+/// wider: `webp2vips.c:413` starts from the flag and `:464-471` turns it on
+/// for an animation when **any** frame carries alpha of its own or is smaller
+/// than the canvas, the second because a frame that does not cover the canvas
+/// leaves the area around it transparent. libwebp's demuxer computes the
+/// per-frame half the same way, from an `ALPH` chunk or the `VP8L` header's
+/// `alpha_is_used` bit (`demux.c:204,245`).
+///
+/// So the file is handed to the decoder with the flag set, and the canvas it
+/// already has comes back whole (issue #885). This is not a claim about the
+/// pixels: the flag is an output-format switch inside `image-webp` and moving
+/// it cannot change a decoded value, only whether the fourth channel is
+/// dropped on the way out. That is the difference between this and the
+/// `alpha_is_used` rewrite #863 withdrew, which read a *hint* and used it to
+/// skip work libwebp does per pixel.
+///
+/// `None` for a file that is already flagged, is not animated, or that this
+/// cannot parse, and the last case is deliberate: an unparseable file goes to
+/// the decoder untouched rather than guessed at.
+fn vips_alpha_flag_to_set(bytes: &[u8]) -> Option<usize> {
+    if bytes.get(..4)? != b"RIFF" || bytes.get(8..12)? != b"WEBP" {
+        return None;
+    }
+    let mut at = 12;
+    let mut flags_at = None;
+    let mut canvas = None;
+    let mut alpha = false;
+    while at + 8 <= bytes.len() {
+        let fourcc = bytes.get(at..at + 4)?;
+        let size = u32::from_le_bytes(bytes.get(at + 4..at + 8)?.try_into().ok()?) as usize;
+        let payload = bytes.get(at + 8..at + 8 + size)?;
+        match fourcc {
+            b"VP8X" => {
+                // Ten bytes: flags, three reserved, canvas width minus one
+                // and canvas height minus one, three bytes each.
+                let flags = *payload.first()?;
+                if flags & 0b0001_0000 != 0 {
+                    return None;
+                }
+                flags_at = Some(at + 8);
+                canvas = Some((
+                    read_u24(payload.get(4..7)?) + 1,
+                    read_u24(payload.get(7..10)?) + 1,
+                ));
+            }
+            b"ANMF" => {
+                let (cw, ch) = canvas?;
+                let w = read_u24(payload.get(6..9)?) + 1;
+                let h = read_u24(payload.get(9..12)?) + 1;
+                if w != cw || h != ch {
+                    alpha = true;
+                }
+                alpha |= frame_carries_alpha(payload.get(16..)?);
+            }
+            _ => {}
+        }
+        // Chunks are padded to an even length.
+        at += 8 + size + (size & 1);
+    }
+    // Only an animation can reach this, because `alpha` is only ever set
+    // inside the `ANMF` arm: a still's flag is already the whole answer, and
+    // a file with no `VP8X` has no flag to set and no `flags_at`.
+    alpha.then_some(flags_at?)
+}
+
+/// A three-byte little-endian field, which is how `VP8X` and `ANMF` store
+/// every geometry number.
+fn read_u24(bytes: &[u8]) -> u32 {
+    u32::from(bytes[0]) | u32::from(bytes[1]) << 8 | u32::from(bytes[2]) << 16
+}
+
+/// Whether one `ANMF` frame carries alpha of its own, from the sub-chunk that
+/// follows its sixteen-byte header.
+///
+/// libwebp's demuxer sets `frame->has_alpha` from an `ALPH` chunk
+/// (`demux.c:245`) or from `WebPGetFeatures` on the bitstream
+/// (`demux.c:204`), which for a `VP8L` is the `alpha_is_used` header bit and
+/// for a lossy `VP8 ` is always zero.
+fn frame_carries_alpha(after_header: &[u8]) -> bool {
+    let Some(fourcc) = after_header.get(..4) else {
+        return false;
+    };
+    match fourcc {
+        b"ALPH" => true,
+        // A `VP8L` bitstream is a `0x2F` signature and then 14 bits of width,
+        // 14 of height, one of `alpha_is_used` and three of version, packed
+        // little-endian, so the flag is bit 28 of the four bytes after it.
+        b"VP8L" => after_header.get(8..13).is_some_and(|head| {
+            head[0] == 0x2F
+                && u32::from_le_bytes([head[1], head[2], head[3], head[4]]) & (1 << 28) != 0
+        }),
+        _ => false,
+    }
+}
+
 /// Decode WebP bytes, choosing which frames of an animation to read
 /// (libvips `webpload_buffer` with `page` and `n`).
 ///
@@ -485,6 +602,20 @@ pub fn decode_webp_with(
     limits: DecodeLimits,
     options: LoadOptions,
 ) -> Result<Raster, SourceError> {
+    // `image-webp` reads the band count off the `VP8X` alpha flag alone,
+    // where vips also infers it from sub-canvas frames and per-frame alpha,
+    // so the flag is set before the decoder sees it (issue #885). Nothing is
+    // copied for a file that already agrees, which is every file vips writes.
+    let flagged = match vips_alpha_flag_to_set(bytes) {
+        Some(at) => {
+            limits.check_alloc("WebP alpha-flagged copy", bytes.len() as u64)?;
+            let mut owned = bytes.to_vec();
+            owned[at] |= 0b0001_0000;
+            Some(owned)
+        }
+        None => None,
+    };
+    let bytes = flagged.as_deref().unwrap_or(bytes);
     let mut decoder = image_webp::WebPDecoder::new(Cursor::new(bytes)).map_err(decode_error)?;
     // Budget the metadata chunk reads before any of them run: `read_chunk`
     // refuses a chunk longer than this rather than allocating for it.
@@ -2272,9 +2403,19 @@ mod tests {
         // because this file asks for frame 1 to be blended. The disposed
         // area is zero and stays zero, so the loss shows up only on the blue
         // square: 255 becomes 254.
+        //
+        // **The colour channels only.** `image-webp`'s blend computes the
+        // output alpha as `src_a + dst_a * (255 - src_a) / 255`, which is
+        // exactly 255 when the source is opaque, and only the three colour
+        // channels go through the `(1 << 24) / 255` scale that loses the
+        // level. Applying the loss to all four here would have been wrong in
+        // the direction that hides the bug, since it would have expected the
+        // alpha this loader must not damage.
         let mut expected = DISPOSE_BG_ROLL.to_vec();
-        let blended = as_image_webp_blends(&expected[64..]);
-        expected[64..].copy_from_slice(&blended);
+        for pixel in expected[64..].as_chunks_mut::<4>().0 {
+            let lost = as_image_webp_blends(&pixel[..3]);
+            pixel[..3].copy_from_slice(&lost);
+        }
         assert_eq!(raster.data(), &expected[..]);
 
         // Said again as the property rather than as 128 bytes, because the
@@ -2284,8 +2425,9 @@ mod tests {
         let page1 = &raster.data()[64..];
         assert_eq!(
             &page1[..4],
-            &[0, 0, 254, 254],
-            "the square is blue and opaque, a level low"
+            &[0, 0, 254, 255],
+            "the square is blue and opaque, a level low on the colour and \
+             exact on the alpha"
         );
         assert_eq!(
             &page1[8..12],
@@ -2294,6 +2436,151 @@ mod tests {
              so frame 0's red is gone and the alpha says so"
         );
         assert_ne!(&page1[8..11], &[255, 0, 0], "and it is not the red");
+    }
+
+    /**
+     * Tests the two arms of the band rule that no vips-written file reaches,
+     * because libwebp's muxer sets the `VP8X` alpha flag whenever a frame
+     * carries alpha, so the per-frame term never decides anything on its own
+     * in a file vips produced. Works by clearing that flag on `ANIM4_RGBA`,
+     * which leaves a file whose frames all declare `alpha_is_used` and whose
+     * header does not.
+     * Measured on vips 8.18.6 against exactly this file: it still reports
+     * four bands, and `vips rawsave` gives byte-identical pixels to the
+     * original, so the flag really is only a claim about the header and the
+     * frames are the other half of the rule.
+     * The mutation sweep is why this exists: with only vips-written
+     * fixtures, dropping the per-frame term entirely and reading
+     * `alpha_is_used` from the wrong bit both left every test green, because
+     * `ANIM4_RGBA` returns early on the flag and no other fixture has a
+     * frame that declares alpha.
+     * Input: `ANIM4_RGBA` with its `VP8X` alpha flag cleared ->
+     * Output: four bands, and the same pixels as the flagged original.
+     */
+    #[test]
+    fn a_frame_declaring_alpha_means_alpha_even_when_the_header_does_not() {
+        let mut flagless = ANIM4_RGBA;
+        // The `VP8X` payload starts at 20 and its first byte is the flags.
+        assert_eq!(&flagless[12..16], b"VP8X");
+        assert_eq!(flagless[20] & 0b0001_0000, 0b0001_0000, "the flag is set");
+        flagless[20] &= !0b0001_0000;
+
+        let raster = decode_webp_with(&flagless, DecodeLimits::default(), all_pages())
+            .expect("clearing a header flag does not break the file");
+        assert_eq!(
+            raster.format(),
+            PixelFormat::Rgba8,
+            "every frame declares alpha, so the file has alpha whatever the \
+             header says"
+        );
+        let flagged = decode_webp_with(&ANIM4_RGBA, DecodeLimits::default(), all_pages())
+            .expect("the original decodes");
+        assert_eq!(
+            raster.data(),
+            flagged.data(),
+            "and the pixels are the original's, as vips reads them"
+        );
+    }
+
+    /**
+     * Tests that the chunk walk steps over the padding byte a RIFF chunk of
+     * odd length carries, so a file with one does not lose the frames after
+     * it. Works by splicing a three-byte `XMP ` chunk in front of the
+     * animation and requiring the band rule to answer the same as it does
+     * without it.
+     * RIFF pads every odd-length chunk to an even boundary and the length
+     * field does not count the pad, so a walk that adds only the length
+     * lands one byte early on the next header and reads a fourcc of
+     * rubbish. Here that means the `ANMF` chunks are never seen, the rule
+     * says no alpha, and a four-band file quietly comes back as three.
+     * No fixture in this module has an odd-length chunk, which is why the
+     * mutation that drops the pad survived until this existed.
+     * Input: `DISPOSE_BG` with a three-byte `XMP ` chunk spliced in ->
+     * Output: four bands, as without it, and the same pixels.
+     */
+    #[test]
+    fn the_chunk_walk_steps_over_an_odd_chunks_padding_byte() {
+        // After the `VP8X`, which is where the container puts `ICCP` and the
+        // only place an extra chunk is legal before the animation.
+        let split = 12 + 8 + 10;
+        assert_eq!(&DISPOSE_BG[12..16], b"VP8X");
+        assert_eq!(&DISPOSE_BG[split..split + 4], b"ANIM");
+        let mut padded = Vec::from(&DISPOSE_BG[..split]);
+        // A three-byte payload, so the chunk is 8 + 3 + 1 pad = 12 bytes.
+        padded.extend_from_slice(b"ICCP");
+        padded.extend_from_slice(&3u32.to_le_bytes());
+        padded.extend_from_slice(b"hi!");
+        padded.push(0);
+        padded.extend_from_slice(&DISPOSE_BG[split..]);
+        // The `VP8X` flags have to advertise the profile or the container is
+        // inconsistent; bit 5 is `ICC`.
+        padded[20] |= 0b0010_0000;
+        let added = (padded.len() - DISPOSE_BG.len()) as u32;
+        assert_eq!(added, 12, "the spliced chunk is padded to an even length");
+        // The RIFF size field counts everything after it.
+        let riff = u32::from_le_bytes(padded[4..8].try_into().unwrap()) + added;
+        padded[4..8].copy_from_slice(&riff.to_le_bytes());
+
+        let raster = decode_webp_with(&padded, DecodeLimits::default(), all_pages())
+            .expect("an extra metadata chunk does not break the file");
+        assert_eq!(
+            raster.format(),
+            PixelFormat::Rgba8,
+            "the walk found the frames past the odd chunk"
+        );
+        let plain = decode_webp_with(&DISPOSE_BG, DecodeLimits::default(), all_pages())
+            .expect("the original decodes");
+        assert_eq!(raster.data(), plain.data());
+    }
+
+    /**
+     * Tests that the copy the alpha-flag rewrite makes is priced, and made
+     * only for a file that needs it. Works by decoding a file that needs the
+     * rewrite under a budget smaller than the file, and the same budget
+     * against one that does not.
+     * The copy is a second whole-file buffer and it happens before every
+     * other price this loader pays, so a file that needs it is copied before
+     * the canvas is measured. The "not copied" half is the one worth
+     * asserting: a rewrite that copied unconditionally would pass every
+     * other test here.
+     * Input: `DISPOSE_BG` and `ANIM4_DELAY` under a 100-byte budget ->
+     * Output: a typed refusal naming the copy for the first, and a refusal
+     * naming something else for the second.
+     */
+    #[test]
+    fn the_alpha_flag_copy_is_priced_and_only_made_when_needed() {
+        let tight = DecodeLimits::default().with_max_alloc_bytes(100);
+        let err = decode_webp_with(&DISPOSE_BG, tight, all_pages())
+            .expect_err("140 bytes of copy is over a 100-byte budget");
+        assert!(
+            matches!(
+                &err,
+                SourceError::AllocLimitExceeded {
+                    what: "WebP alpha-flagged copy",
+                    geometry: None,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+
+        // The control: a file the rule leaves alone is not copied, so
+        // whatever refuses it at the same budget is not this price.
+        let err = decode_webp_with(&ANIM4_DELAY, tight, all_pages())
+            .expect_err("a four-page roll is over a 100-byte budget too");
+        assert!(
+            !matches!(
+                &err,
+                SourceError::AllocLimitExceeded {
+                    what: "WebP alpha-flagged copy",
+                    ..
+                }
+            ),
+            "an unflagged-but-opaque animation must not be copied: {err:?}"
+        );
+        // And it really does decode when the budget allows, so the control
+        // is a file this loader can read rather than one it always refuses.
+        assert!(decode_webp_with(&ANIM4_DELAY, DecodeLimits::default(), all_pages()).is_ok());
     }
 
     /**
