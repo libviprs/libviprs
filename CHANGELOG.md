@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+This is the largest breaking release libviprs has shipped, so every break is
+gathered in `### Breaking` below rather than spread across the other sections.
+There are four groups of them plus a handful of independent items, and most
+readers only need one group.
+
+- **Sample carriers and the counting ops** (issues #516, #532, #759, #887,
+  #905, #931). `PixelFormat` grew signed and 32-bit carriers, so the ops that
+  count pixels emit a 32-bit format and stop saturating at 65535, and the two
+  typed refusals that existed only because a carrier was missing are gone
+  (`ConversionError::UnsupportedSampleKind` and `Jp2kError::SignedComponent`).
+  Anything asserting on `.format()` moves.
+- **The interpretation decides, not the storage depth** (issues #531, #664,
+  #667). The premultiply bracket's alpha ceiling and `Extend::White`'s ink come
+  from the raster's tag now rather than from its byte width, and a pixel layout
+  has one canonical spelling, so `PixelFormat::has_alpha` and
+  `Interpretation::for_format` answer differently for the tuple spellings. An
+  untagged raster keeps the answer it had.
+- **Colour and rounding** (issues #547, #556, #561, #581, #583, #603, #604).
+  Every conversion into `srgb`, `rgb16`, `b-w`, `grey16` and `hsv`, the
+  Lab/LabS/Lch/Cmc routes, `cast`, the premultiply bracket, integer-precision
+  convolution's scale and `smartcrop(Attention)` all produce different output
+  bytes. No signature moves in this group, so a build that compiles keeps
+  compiling and gives different answers.
+- **Options structs and the `.v` container** (issues #501, #502, #535, #546,
+  #563, #568, #609, #620, #630). Five entry points take an options struct
+  instead of positional arguments (`encode_jp2k`, `encode_gif`, `encode_webp`,
+  `encode_jxl` and `decode_svg`), every public options struct is
+  `#[non_exhaustive]`, and two changes alter what goes into a `.v` file on
+  disk.
+
+The independent items are the allocation-refusal collapse (#686), the
+`ConversionError::FloatUnsupported` rename (#730), `compass`'s `times` range
+(#547), `arrayjoin`'s `across` clamp (#577), `decode_tiff_page`'s page index
+(#566) and `GifError::BadPageNumber` (#845).
+
+The line between `Breaking` and `Fixed` is whether the old answer was
+defensible. A `Fixed` entry can move output bytes too, but only where the old
+bytes were wrong against libvips 8.18 and the entry says which numbers moved.
+The two `.v` container breaks are invisible to `cargo semver-checks`, because
+they live in the file format rather than in the API, which is why they are here
+and not under `Fixed`: this file is the only place they can be caught.
+
 ### Breaking
 
 - **`ConversionError::UnsupportedSampleKind` is removed** (issue #931). Nothing
@@ -847,6 +889,140 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `match` with a wildcard arm is unaffected; one that named the variant moves
   to the two above, and the file that used to reach it, a plain signed
   codestream, now decodes.
+
+- **Breaking (cast): a float sample narrowing to an integer format is now
+  truncated toward zero, where it used to be rounded to nearest** (issue #561).
+  `Raster::cast` and `Raster::try_cast` are the operations that move, and so is
+  anything that narrows through them, `Raster::freqmult` included. This changes
+  output bytes for a public API shipped in 0.4.0: casting `1.7` to `Gray8` now
+  gives `1` where it used to give `2`, and `254.6` gives `254` where it used to
+  give `255`. Roughly half of all fractional samples shift down by one.
+
+  The old behaviour was simply wrong against libvips. `cast.c:566-567` says
+  "Floats are truncated (not rounded). Out of range values are clipped", and
+  vips 8.18.4 agrees on every row I measured: `1.7` to `1`, `2.5` to `2`,
+  `3.999` to `3`, `254.6` to `254`, and on the wider target `300.9` to `300`.
+  libviprs answered one above vips on all five. The rustdoc made it worse by
+  claiming the rounding and claiming parity with `vips_cast` in the same
+  paragraph, so it promised libvips compatibility while describing
+  libvips-incompatible behaviour; both halves of that are corrected, and the
+  doc now scopes the parity claim to the formats `PixelFormat` can actually
+  carry.
+
+  Clipping and the `NaN` pin do not move. Those already matched vips (below
+  range to `0`, above range to `255` or `65535`, `NaN` to `0`), and there are
+  now tests pinning each so the next change to this arm cannot quietly take
+  them with it. The truncation is `f64::trunc`, not `f64::floor`, which reads
+  as a distinction without a difference today because every carrier here is
+  unsigned and a negative sample clips to `0` before the rounding mode can
+  show. C's `(int)` conversion truncates toward zero, so `trunc` is the form
+  that stays correct once a signed carrier lands (#516).
+
+- **Breaking (WebP and GIF encode): `Raster::encode_webp` now takes a
+  `webp::SaveOptions` instead of a `quality: u8`, and the three GIF stubs
+  `encode_gif`, `encode_gif_interlaced`, and `encode_gif_dither` collapse into
+  one `Raster::encode_gif(gif::SaveOptions)`** (issue #563). Both still return
+  the same typed `EncodeError::Unsupported` they always have, so nothing that
+  worked stops working, but the call sites have to be updated.
+
+  The WebP change is the one with teeth. vips `webpsave` takes a `Q` factor
+  *and* a `lossless` flag, and quality only means anything on the lossy path.
+  The only pure-Rust WebP encoder libviprs can reach is lossless-only and has
+  no quality knob at all, so the `quality` argument was going to be accepted
+  and thrown away. That inverts the contract (ask for quality 10, get a
+  lossless file possibly larger than the PNG you started from) and it is a
+  semver time bomb: the day a lossy encoder lands, every existing
+  `encode_webp(10)` silently starts producing small lossy files in a patch
+  release. Quality is now unrepresentable rather than ignored, as a
+  `#[non_exhaustive] webp::Compression` whose only variant is `Lossless`, so
+  `Compression::Lossy { .. }` can be added later as a minor bump.
+
+  **Upgrading:** `im.encode_webp(80)` becomes
+  `im.encode_webp(webp::SaveOptions::default())`; `im.encode_gif()` becomes
+  `im.encode_gif(gif::SaveOptions::default())`; `im.encode_gif_interlaced()`
+  becomes `im.encode_gif(gif::SaveOptions { interlaced: true,
+  ..Default::default() })`; and `im.encode_gif_dither(d)` becomes
+  `im.encode_gif(gif::SaveOptions { dither: d, ..Default::default() })`.
+  Neither options struct is `#[non_exhaustive]`, so struct literals and
+  `..Default::default()` both work from outside the crate.
+
+- **Breaking (`.v` container): a file tagged `OkLab` or `OkLch` now carries the
+  real libvips interpretation codes `30` and `31` in its header `Type` word,**
+  so it interoperates with vips instead of only with libviprs (issue #535).
+  libvips 8.18 assigned those codes (`VIPS_INTERPRETATION_OKLAB` and
+  `VIPS_INTERPRETATION_OKLCH`, `libvips/include/vips/image.h:115-116`), but
+  libviprs still wrote the private extension codes `1000` and `1001` it had
+  picked while libvips had none. The consequence ran both ways: a `.v` written
+  by real vips came back tagged `Multiband`, because `30` matched no arm of the
+  reader and the raster fell through to format inference, and a `.v` written by
+  libviprs was unreadable as OkLab anywhere else. This changes what goes on
+  disk: newly written files hold `30` / `31` where they used to hold `1000` /
+  `1001`. The change is one-way. The reader keeps `1000` and `1001` as legacy
+  aliases, so files libviprs has already written still load with their
+  OkLab/OkLch tag intact, but nothing emits those codes any more, and a file
+  written by this version does not read as OkLab on libviprs 0.4.0 or earlier.
+  **Upgrading:** nothing to do to keep reading the files you already have. The
+  aliases are permanent, not a deprecation window: `1000` and `1001` stay
+  reserved for OkLab/OkLch forever and will never be reused, because retiring
+  them would silently re-break every `.v` libviprs has already written. To make
+  an already-written file readable by vips, re-encode it with this version
+  (load it and save it again); there is no in-place header rewrite.
+
+- **A `.v` written by this version does not hand its attached fields back to
+  libviprs 0.4.0**, because the metadata trailer is now the XML document vips
+  reads rather than libviprs's own JSON. That break lives in the file format
+  rather than in the API, so `cargo semver-checks` cannot see it and this file
+  is the only place it can be caught.
+
+  A `.v` file libviprs writes is now readable by real vips, metadata and all,
+  and no longer makes it print a warning on every open (issue #546). The
+  trailer after the pixel data was libviprs's own JSON. libvips parses that
+  slot as XML, so `vipsheader -a` on any file the crate wrote answered
+
+      VIPS-WARNING **: error reading vips image metadata: VipsImage: XML parse error
+
+  and then threw the whole metadata block away. Since `.v` exists for vips
+  interop, and is the only format here that round-trips a float raster, that
+  hit exactly the people moving compute intermediates between the two tools:
+  they lost their ICC profile, their EXIF blob and their orientation, and got
+  a warning they could not act on.
+
+  The warning fired even for a raster with no metadata at all, because the
+  writer always appended the 41 bytes of
+  `{"orientation":1,"fields":{"entries":[]}}`. Nothing is written there now
+  when there is nothing to say, which fixes the common case on its own.
+
+  Everything else goes out as the XML document vips writes, `<root>` with a
+  `<header>` and a `<meta>` block of `<field type="..." name="...">` elements.
+  The four `MetadataValue` variants land on the four GTypes vips can
+  round-trip: `gint`, `gdouble`, `VipsRefString`, and `VipsBlob` as base64.
+  The reader takes both that and the old JSON form, so every `.v` already
+  written keeps its metadata, and a `.v` vips itself wrote now reads whole
+  rather than down to its orientation tag.
+
+  Two places where this deliberately does not copy vips byte for byte. It
+  escapes only what XML needs, so non-ASCII text survives: vips's own writer
+  tests `*p < 32` on a signed `char` (`libvips/iofuncs/target.c:821`), which
+  catches every byte of a multi-byte UTF-8 sequence, and `vips copy` over a
+  `.v` carrying `café ☃ 日本` rewrites it as `caf&#x23c3;&#x23a9; …`
+  irreversibly. And a field name containing a quote is escaped as `&quot;`
+  where vips writes a backslash and leaves the attribute unterminated.
+
+  **libviprs 0.4.0 reads a `.v` written now for its pixels, its geometry and
+  its orientation, and not for its attached fields.** Its reader only takes a
+  trailer as metadata when the first non-whitespace byte is `{`, and no byte
+  sequence is both that and the XML vips requires, so vips interop and full
+  field recovery on 0.4.0 cannot both hold. Nothing errors, and it runs one
+  way only: this build reads every older file completely.
+
+  Forward compatibility is kept and is better than it was. A `<field>` whose
+  `type` this build does not know is carried opaquely and written back byte
+  for byte, same as before, but now the carrier is vips's own encoding, so
+  vips reads the carried field too. The one thing that cannot survive the
+  format change is a value carried out of an *old JSON* trailer: spelling it
+  in XML would mean interpreting it, which is the one thing a carried value
+  does not allow, so a raster still holding one keeps the JSON trailer rather
+  than losing it.
 
 ### Added
 
@@ -1702,7 +1878,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.jp2` and `.j2k` become live rows in the content sniffer, and
   `Raster::encode_jp2k` and `Raster::save_jp2k` write a JP2 container. The
   `Raster::encode_jp2k(quality, lossless)` and `Raster::encode_jp2k_chroma`
-  typed-`Unsupported` stubs are gone; see Breaking below.
+  typed-`Unsupported` stubs are gone; see Breaking above.
 
   Without the feature nothing about the surface moves: every entry point still
   exists at the same signature and returns a typed refusal naming the feature.
@@ -3527,62 +3703,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   allocation inside `try_cast` can reach in practice. `ConvolutionError` is
   `#[non_exhaustive]`, so matching code is unaffected.
 
-- **Breaking (cast): a float sample narrowing to an integer format is now
-  truncated toward zero, where it used to be rounded to nearest** (issue #561).
-  `Raster::cast` and `Raster::try_cast` are the operations that move, and so is
-  anything that narrows through them, `Raster::freqmult` included. This changes
-  output bytes for a public API shipped in 0.4.0: casting `1.7` to `Gray8` now
-  gives `1` where it used to give `2`, and `254.6` gives `254` where it used to
-  give `255`. Roughly half of all fractional samples shift down by one.
-
-  The old behaviour was simply wrong against libvips. `cast.c:566-567` says
-  "Floats are truncated (not rounded). Out of range values are clipped", and
-  vips 8.18.4 agrees on every row I measured: `1.7` to `1`, `2.5` to `2`,
-  `3.999` to `3`, `254.6` to `254`, and on the wider target `300.9` to `300`.
-  libviprs answered one above vips on all five. The rustdoc made it worse by
-  claiming the rounding and claiming parity with `vips_cast` in the same
-  paragraph, so it promised libvips compatibility while describing
-  libvips-incompatible behaviour; both halves of that are corrected, and the
-  doc now scopes the parity claim to the formats `PixelFormat` can actually
-  carry.
-
-  Clipping and the `NaN` pin do not move. Those already matched vips (below
-  range to `0`, above range to `255` or `65535`, `NaN` to `0`), and there are
-  now tests pinning each so the next change to this arm cannot quietly take
-  them with it. The truncation is `f64::trunc`, not `f64::floor`, which reads
-  as a distinction without a difference today because every carrier here is
-  unsigned and a negative sample clips to `0` before the rounding mode can
-  show. C's `(int)` conversion truncates toward zero, so `trunc` is the form
-  that stays correct once a signed carrier lands (#516).
-
-- **Breaking (WebP and GIF encode): `Raster::encode_webp` now takes a
-  `webp::SaveOptions` instead of a `quality: u8`, and the three GIF stubs
-  `encode_gif`, `encode_gif_interlaced`, and `encode_gif_dither` collapse into
-  one `Raster::encode_gif(gif::SaveOptions)`** (issue #563). Both still return
-  the same typed `EncodeError::Unsupported` they always have, so nothing that
-  worked stops working, but the call sites have to be updated.
-
-  The WebP change is the one with teeth. vips `webpsave` takes a `Q` factor
-  *and* a `lossless` flag, and quality only means anything on the lossy path.
-  The only pure-Rust WebP encoder libviprs can reach is lossless-only and has
-  no quality knob at all, so the `quality` argument was going to be accepted
-  and thrown away. That inverts the contract (ask for quality 10, get a
-  lossless file possibly larger than the PNG you started from) and it is a
-  semver time bomb: the day a lossy encoder lands, every existing
-  `encode_webp(10)` silently starts producing small lossy files in a patch
-  release. Quality is now unrepresentable rather than ignored, as a
-  `#[non_exhaustive] webp::Compression` whose only variant is `Lossless`, so
-  `Compression::Lossy { .. }` can be added later as a minor bump.
-
-  **Upgrading:** `im.encode_webp(80)` becomes
-  `im.encode_webp(webp::SaveOptions::default())`; `im.encode_gif()` becomes
-  `im.encode_gif(gif::SaveOptions::default())`; `im.encode_gif_interlaced()`
-  becomes `im.encode_gif(gif::SaveOptions { interlaced: true,
-  ..Default::default() })`; and `im.encode_gif_dither(d)` becomes
-  `im.encode_gif(gif::SaveOptions { dither: d, ..Default::default() })`.
-  Neither options struct is `#[non_exhaustive]`, so struct literals and
-  `..Default::default()` both work from outside the crate.
-
 - GIF and WebP files now decode. The `image` dependency is built with its
   `gif` and `webp` features on (issue #563), where before it carried only
   `jpeg`, `png`, and `tiff`, so `decode_file` and `decode_bytes` read those
@@ -3592,28 +3712,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is a 100% error at mantissa 0, so it was never usable for parity, and
   leaving it off is also what keeps the unchecked RLE multiply in its Radiance
   decoder unreachable.
-
-- **Breaking (`.v` container): a file tagged `OkLab` or `OkLch` now carries the
-  real libvips interpretation codes `30` and `31` in its header `Type` word,**
-  so it interoperates with vips instead of only with libviprs (issue #535).
-  libvips 8.18 assigned those codes (`VIPS_INTERPRETATION_OKLAB` and
-  `VIPS_INTERPRETATION_OKLCH`, `libvips/include/vips/image.h:115-116`), but
-  libviprs still wrote the private extension codes `1000` and `1001` it had
-  picked while libvips had none. The consequence ran both ways: a `.v` written
-  by real vips came back tagged `Multiband`, because `30` matched no arm of the
-  reader and the raster fell through to format inference, and a `.v` written by
-  libviprs was unreadable as OkLab anywhere else. This changes what goes on
-  disk: newly written files hold `30` / `31` where they used to hold `1000` /
-  `1001`. The change is one-way. The reader keeps `1000` and `1001` as legacy
-  aliases, so files libviprs has already written still load with their
-  OkLab/OkLch tag intact, but nothing emits those codes any more, and a file
-  written by this version does not read as OkLab on libviprs 0.4.0 or earlier.
-  **Upgrading:** nothing to do to keep reading the files you already have. The
-  aliases are permanent, not a deprecation window: `1000` and `1001` stay
-  reserved for OkLab/OkLch forever and will never be reused, because retiring
-  them would silently re-break every `.v` libviprs has already written. To make
-  an already-written file readable by vips, re-encode it with this version
-  (load it and save it again); there is no in-place header rewrite.
 
 - The panicking matrix operations no longer double the operation name in their
   panic message (issue #339's class, found while reviewing #533). Every
@@ -5668,55 +5766,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `current` and `peak` stay consistent. In-tree call sites never get near the
   ceiling, but the type is `pub` with a `Clone`-able `Arc` inside, so a caller
   can put it there.
-- A `.v` file libviprs writes is now readable by real vips, metadata and all,
-  and no longer makes it print a warning on every open (issue #546). The
-  trailer after the pixel data was libviprs's own JSON. libvips parses that
-  slot as XML, so `vipsheader -a` on any file the crate wrote answered
-
-      VIPS-WARNING **: error reading vips image metadata: VipsImage: XML parse error
-
-  and then threw the whole metadata block away. Since `.v` exists for vips
-  interop, and is the only format here that round-trips a float raster, that
-  hit exactly the people moving compute intermediates between the two tools:
-  they lost their ICC profile, their EXIF blob and their orientation, and got
-  a warning they could not act on.
-
-  The warning fired even for a raster with no metadata at all, because the
-  writer always appended the 41 bytes of
-  `{"orientation":1,"fields":{"entries":[]}}`. Nothing is written there now
-  when there is nothing to say, which fixes the common case on its own.
-
-  Everything else goes out as the XML document vips writes, `<root>` with a
-  `<header>` and a `<meta>` block of `<field type="..." name="...">` elements.
-  The four `MetadataValue` variants land on the four GTypes vips can
-  round-trip: `gint`, `gdouble`, `VipsRefString`, and `VipsBlob` as base64.
-  The reader takes both that and the old JSON form, so every `.v` already
-  written keeps its metadata, and a `.v` vips itself wrote now reads whole
-  rather than down to its orientation tag.
-
-  Two places where this deliberately does not copy vips byte for byte. It
-  escapes only what XML needs, so non-ASCII text survives: vips's own writer
-  tests `*p < 32` on a signed `char` (`libvips/iofuncs/target.c:821`), which
-  catches every byte of a multi-byte UTF-8 sequence, and `vips copy` over a
-  `.v` carrying `café ☃ 日本` rewrites it as `caf&#x23c3;&#x23a9; …`
-  irreversibly. And a field name containing a quote is escaped as `&quot;`
-  where vips writes a backslash and leaves the attribute unterminated.
-
-  **libviprs 0.4.0 reads a `.v` written now for its pixels, its geometry and
-  its orientation, and not for its attached fields.** Its reader only takes a
-  trailer as metadata when the first non-whitespace byte is `{`, and no byte
-  sequence is both that and the XML vips requires, so vips interop and full
-  field recovery on 0.4.0 cannot both hold. Nothing errors, and it runs one
-  way only: this build reads every older file completely.
-
-  Forward compatibility is kept and is better than it was. A `<field>` whose
-  `type` this build does not know is carried opaquely and written back byte
-  for byte, same as before, but now the carrier is vips's own encoding, so
-  vips reads the carried field too. The one thing that cannot survive the
-  format change is a value carried out of an *old JSON* trailer: spelling it
-  in XML would mean interpreting it, which is the one thing a carried value
-  does not allow, so a raster still holding one keeps the JSON trailer rather
-  than losing it.
 - A fallible convolution reports an allocation failure instead of aborting the
   process (issue #575). `samples_f64` widens every sample to `f64` before the
   traversal, eight bytes where the source carries one or two, and it did that
@@ -5944,7 +5993,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A `.v` written by real vips and tagged `OkLab` or `OkLch` now reads back with
   that tag instead of falling through to format inference and reporting
   `Multiband` (issue #535). See the **Breaking (`.v` container)** entry under
-  _Changed_ for what moved on disk and what an upgrader has to do.
+  _Breaking_ for what moved on disk and what an upgrader has to do.
 
 - A convolution at `Precision::Integer` over a float image with a negative mask
   scale wrote `-0.0` where vips 8.18.4 writes `+0.0` (issue #534). The integer
