@@ -711,6 +711,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- GIF load attaches the three deprecated compatibility fields `gifload`
+  attaches beside the modern ones: **`gif-delay`**, **`gif-loop`** and
+  **`palette-bit-depth`** (issues #865, #875). `gif-delay` is the first delay
+  back in the centiseconds the wire counts, `gif-loop` is the NETSCAPE count
+  rather than the play count, so `loop 1` and `loop 0` both give 0 and a block
+  holding 3 gives 3, and `palette-bit-depth` is a second copy of
+  `bits-per-sample`. GIF was the last animated loader without them, on the two
+  fields that are named after GIF.
+
+  Every number came from `vipsheader -f` on 8.18.6, because **`vipsheader -a`
+  lists no deprecated compatibility field on any loader**, animated or not.
+  Reading them that way produces the opposite finding, that vips had dropped
+  the pair.
+
+  `gif-delay` follows the loaded raster rather than the file, which is the same
+  deliberate divergence `delay` already makes and the same call `src/webp.rs`
+  makes: vips takes it from element 0 of the file's whole array, so
+  `anim4.gif[page=2,n=2]` reports `gif-delay: 4` for a raster whose first page
+  really has a delay of 80 ms.
+
+- GIF load attaches **`gif-palette`**, the global colour table as one signed
+  32-bit word per entry (issue #828). vips packs libnsgif's `R, G, B, A` byte
+  quad as a machine integer, so on a little-endian host each entry reads
+  `0xFF << 24 | B << 16 | G << 8 | R` and every one of them is negative:
+  measured on vips 8.18.6, a table of `(71, 112, 76)` and `(60, 60, 60)` comes
+  back `-11767737 -12829636`. The array is the table as it sits on the wire,
+  padding included, so a three-colour table has four entries with an
+  opaque-black fourth.
+
+  It carries vips's presence rule, which is about the **file** and not the
+  window that was loaded: the field is attached only when no frame anywhere in
+  the file declares a colour table of its own, so a two-frame file whose frame
+  0 has a local table reports no `gif-palette` at `[page=1]` either. Measured
+  across seven files and three windows, including a local table byte-identical
+  to the global one, which still suppresses it.
+
+  `background` is the one `gifload` header field still not attached, and now
+  for a measured reason rather than an expired one: vips stores it as a
+  `VipsArrayDouble` and `MetadataValue` has an integer array and no
+  floating-point one. Issue #852 is that variant.
+
+- `src/gif.rs`'s module docs carry a table of every `gifload` header field and
+  whether this loader attaches it, and the table is **checked**: a test parses
+  it out of the source and requires every "attached" row to be present on a
+  decoded raster and every "not attached" row to be absent (issue #801). The
+  paragraph it replaces named a blocker that had already been removed and a
+  field set that had already moved, because nothing held it.
+
 - **`.jp2` is a row in `Raster::save` and `"jp2k"` is one in
   `Raster::encode_to_buffer`** (issue #770). JPEG 2000 was wired into the
   content sniffer on the way in but into nothing shared on the way out, so
@@ -1107,6 +1155,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and carries the GIF off-by-one: the NETSCAPE2.0 block holds
   repeats-after-the-first and a single play carries no block at all, where
   WebP's `ANIM` chunk holds the play count unshifted.
+
+  All four consumers are landed, and `tests/animation_dialect.rs` now holds
+  them to **one** dialect: it loads the same four-frame animation as a GIF, a
+  WebP and a JPEG XL and compares the answers at four windows, rather than
+  taking three separate agreements measured module by module. That is what
+  found the drift the model was meant to prevent, because the compatibility
+  pair diverges three ways: `gifload` attaches `gif-delay` and `gif-loop` and
+  this crate's GIF loader attaches neither (issue #865), where the WebP loader
+  attaches both and the JPEG XL loader attaches one, those two matching their
+  oracles exactly.
+
+  Two things are worth carrying out of that measurement. **`vipsheader -a` is a
+  broken probe for `gif-delay` and `gif-loop`**: it lists neither on any file,
+  on any loader, while `vipsheader -f gif-loop` returns the value, so reading
+  the absence in `-a` gives the exact inverse of the truth. And geometry alone
+  does not prove a roll: stacking a four-page WebP backwards leaves the height,
+  the page count, `page-height`, `n-pages`, `delay`, `loop` and both
+  compatibility fields untouched, so the guard walks the pages through
+  `Raster::try_extract_page` and checks their pixels.
 
 - JPEG 2000 load and save, behind a new non-default **`jp2k`** feature (issue
   #501). Build with `--features jp2k` and `decode_jp2k` reads both container
@@ -2078,8 +2145,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   No public API moves and no behaviour changes: everything here is
   `pub(crate)` or `cfg(test)`, and the error payloads each site reports are the
-  ones it reported before. `arithmetic.rs`'s `try_scratch` is the copy still
-  outstanding; that file is held by another lane, so #696 stays open on it.
+  ones it reported before.
+
+- `arithmetic.rs`'s `try_scratch` is on the shared funnel too, which is the
+  third and last of the copies above and what closes issue #696. Its
+  `SCRATCH_ALLOC_CAP` ceiling and `with_scratch_alloc_cap` hook are gone, and
+  the module's five scratch reservations carry labels:
+  `arithmetic.project.col_sums` and `.row_sums`, `arithmetic.stdif.integral`
+  and `.integral_squares`, and `arithmetic.hough_circle.accumulator`.
+  `raster::try_plane_len_filled` is the form they reserve through, for a buffer
+  sized in elements rather than at a rate per pixel.
+
+  Three things the labels bought that the module's own ceiling could not. Each
+  half of both pairs can now be starved on its own: `col_sums` and `row_sums`
+  are the same size on a square raster and are reserved back to back, as are
+  the two integral images, so a ceiling refusing the *Nth* over-ceiling request
+  on the thread refused the first either way and never reached the second.
+  `try_hough_circle`'s vote accumulator, which is the largest buffer the module
+  holds and the only one a caller sizes directly through the radius range, had
+  no test ceiling at all and now has one. And the three ops' reservation counts
+  are pinned per entry point at exact equality, with the total asserted to be
+  the sum of the parts, so a site added to one of them is red rather than
+  absorbed.
+
+  The labels are also checked against each other: no leaf site label may be a
+  proper prefix of another, because the probe matches a cap site with
+  `starts_with` so a counting window can name a whole module. Two leaf labels in
+  a prefix relation inherit that and a ceiling naming one silently refuses both,
+  which is the ordinal reasoning the labels exist to remove arriving through a
+  different door. The first pair written here,
+  `arithmetic.stdif.integral` and `arithmetic.stdif.integral_squares`, was
+  exactly that, and the check naming the first of the two integral images stayed
+  green under a mutation that routed it around the funnel altogether.
+
+  No public API moves and no behaviour changes here either.
 
 - `src/resample.rs` records a fourth deliberate quantisation divergence from
   stock libvips and pins it from both sides (issue #777). `vips_reduce_make_mask`
@@ -2779,6 +2878,141 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bounds check, so the guard is a unit test on the step itself rather than a
   fixture, with one assertion written as an equality against `usize::BITS`
   so it says something true on both targets.
+- **The `.v` `BandFmt` wire tag comes from the sample kind, not from a byte
+  width** (issue #841). `encode_vips` derived that header word through
+  `match bpc { 1 => 0, 2 => 2, _ => 6 }`, so every four-byte sample kind that
+  is not `f32` was written into the file tagged **float**. It is the one site
+  of #748's list where a wrong answer is not confined to a single op: it lands
+  on disk and is read back wrong on every later run, and `fuzz_decode` routes
+  `.v` magic at `decode_vips_bytes`, so the read half of the same word is
+  reached from untrusted bytes. `get_field("format")` carried the same
+  three-arm match and answered `"float"` for the same inputs, so the reported
+  field and the wire tag were wrong together and agreed with each other.
+
+  All seven `SampleKind` values map to their real `VipsBandFormat` codes now,
+  rather than the fallthrough being patched, so the carriers of issues #516
+  and #517 get correct `.v` behaviour without touching this file again. The
+  table is measured on `/opt/homebrew/bin/vips` 8.18.6 (`vips black base.v 4 3
+  --bands 1`, then `vips cast base.v out.v <format>` for each of the ten
+  formats, reading the `i32` at header offset 20 back out of each file):
+  `uchar` 0, `char` 1, `ushort` 2, `short` 3, `uint` 4, `int` 5, `float` 6,
+  `complex` 7, `double` 8, `dpcomplex` 9. `uint`, `int` and `float` all carry
+  `Bbits` 32, which is why a width cannot decide this word.
+
+  **`.v` stays wire-compatible.** The three codes libviprs has always written
+  keep their values, so every `.v` this crate has written still decodes to the
+  format it was written with, and re-encoding writes the same two header words
+  back. That is pinned against the byte-for-byte 64-byte headers vips 8.18.6
+  wrote for `uchar`, `ushort` and `float`.
+
+  The reader also stops merging two refusals. A code that is not a sample kind
+  libviprs knows at all, and a real vips format this build has no carrier for,
+  answer differently now: the second names the format, so a `uint` file reads
+  as "no carrier yet" rather than as corruption.
+
+- A GIF graphic control extension spread over more than one sub-block, or
+  carrying a size byte that does not say 4, is read the way libnsgif reads it
+  (issue #878). libnsgif never looks at the chain: it takes the four bytes
+  straight after the size byte behind a bare length check. The `gif` crate
+  takes the **last** sub-block instead, because it clears its extension buffer
+  on every one, and `ControlWalk` used to require the whole chain to total
+  four, which is neither rule.
+
+  Measured on vips 8.18.6, on a 2x1 fixture whose frame 0 carries the chain:
+  `04 quad(4) 04 quad(0) 00` rewinds the canvas, so the **first** quad is what
+  counts, and `01 AA 04 quad(3) 00` comes back as restore-to-background with a
+  delay of 3076 centiseconds, which is `0xAA` read as the packed byte and the
+  two bytes after it read little-endian. libviprs kept the canvas on the first
+  and rewound on the second.
+
+  The walk now reads the extension twice on purpose: libnsgif's four bytes are
+  the answer, and the crate's last sub-block is what the desynchronisation
+  cross-check compares against, because that check is only ever asking whether
+  the two walks are on the same frame. A neighbouring case stays divergent and
+  is tracked as #879: when the last sub-block is not four bytes the crate
+  refuses the extension outright, which ends the header scan, so the frame
+  never reaches this module.
+
+- A GIF frame carrying no graphic control extension gets a delay of **100 ms**
+  rather than 0 (issue #866). libnsgif initialises a frame's delay to 10
+  centiseconds when it allocates the frame and only an extension overwrites
+  it, so the default reaches the `delay` array. Measured on vips 8.18.6: a
+  still with no extension reports `delay: 100`, one whose extension holds an
+  explicit zero reports `delay: 0`, and a four-frame file with extensions on
+  frames 0 and 2 only reports `30 100 50 100`. The rule is per frame, and the
+  explicit zero is what makes it about the absent extension rather than a
+  floor on small delays.
+
+  `gif` 0.14.2 cannot tell the two apart: `next_frame_info` takes the frame
+  state fresh for every frame, so `Frame::delay` is 0 for both, and the
+  neighbouring fields do not separate them either. So this rides on the same
+  wire walk #827 added for the raw disposal code, which now reports
+  `WireControl::Absent` for a frame with no extension instead of standing in a
+  default one. The cross-check that guards the walk had to learn the
+  difference as well: the decoder's stand-in for a missing extension is
+  `Frame::default()`, whose disposal is `Keep`, not the `Any` a raw code of 0
+  maps to.
+
+- **Three kinds of `colr` box no longer stop a JPEG 2000 decoding** (issues
+  #771, #848, #849). `decode_jp2k` refused a JP2 whose enumerated colour space
+  openjpeg does not recognise, refused e-YCC, and refused CIELab on one
+  component while converting its samples on three. `vips jp2kload` reads all of
+  them and, on the ones that are not YCC, leaves the samples exactly alone.
+
+  None of it was a property of the codestream, which decodes perfectly well:
+  `hayro-jpeg2000` resolves the `colr` box itself and refuses what it cannot
+  map. So the enum is rewritten to sRGB before the file reaches the decoder, and
+  `crate::jp2k` keeps every decision the box makes, the interpretation (#767)
+  and the inverse YCC.
+
+  **Only the boxes the decoder gets wrong are rewritten.** CMYK, sRGB,
+  greyscale and sYCC over three components go through untouched, each pinned by
+  a committed fixture, so no file that decoded before this hands the decoder
+  different bytes or comes back with a different digest.
+
+  The inverse-YCC condition moves with it, from "bare codestream and subsampled
+  chroma" to openjpeg's actual rule: sYCC or e-YCC by enum, or the `SIZ`
+  heuristic where no enum is recognised. Measured on the pinned 8.18.6 by
+  rewriting nothing but `chroma_sub_on.jp2`'s `colr` box, a `METH = 1` sRGB box
+  gives `29 248 110` and no transform where a `METH = 2` profile box gives
+  `4 1 241` and the transform, because a profile leaves the colour space where
+  `SIZ` put it. The old condition got that third case wrong and nothing had
+  filed it.
+
+- GIF disposal code **4** rewinds the canvas the way libnsgif does, instead of
+  keeping it (issue #827). GIF89a reserves codes 4 to 7; libnsgif remaps 4 onto
+  restore-to-previous and leaves 5, 6 and 7 as "keep". Measured on vips 8.18.6
+  over all eight codes on one two-frame file, page 1 comes back three different
+  ways: `green red` for 0, 1, 5, 6 and 7, `green blue` for 2, and `green black`
+  for 3 and 4. libviprs gave `green red` for 4.
+
+  The code never reached this module: `gif` 0.14.2's `DisposalMethod::from_u8`
+  knows only 0 to 3 and folds everything else onto `Any`, so 4 arrived
+  indistinguishable from 0. `ControlWalk` now walks the block chain a second
+  time and reads each frame's graphic control extension off the wire. It
+  decodes no pixels and allocates nothing, so there is no new buffer to price
+  against `DecodeLimits`, and it is not trusted blind: the extension carries
+  the delay, the transparent index and the disposal side by side, the decoder
+  kept the first two intact and the third in collapsed form, so all three are
+  compared before the fourth is believed. A frame where the two walks disagree
+  keeps the decoder's answer, which is what every frame got before.
+
+- `background_rgb` falls back to colour table **entry 0** for an index the
+  table cannot serve, where it used to answer black, and its doc no longer
+  claims vips answers black either (issue #850). Measured on vips 8.18.6 with
+  a palette whose entry 0 is `(9, 8, 7)`: a stored index of 200 reports
+  `background: 9 8 7` and disposes the canvas to it, where index 3 on the same
+  table reports `0 0 255`. The fixture that pinned this before used a palette
+  whose entry 0 was black, so "black" and "entry 0" could not be told apart,
+  and the doc and the test agreed with each other while neither agreed with
+  vips.
+
+  **No pixel moves today.** `gif` 0.14.2 clears `Decoder::bg_color()` to
+  `None` when the stored index is past the global palette, so the loader
+  already reached entry 0 through `index.unwrap_or(0)`, for the wrong reason.
+  That normalisation lives in a dependency and nothing in this module recorded
+  that the answer leaned on it; now the fallback is explicit and the reliance
+  is written down beside it.
 
 - **A JPEG 2000's `colr` box decides its interpretation, not its band count**
   (issue #767). `jp2kload` reads the box's enumerated colour space and maps
