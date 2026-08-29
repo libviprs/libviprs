@@ -2016,26 +2016,42 @@ mod tests {
         );
     }
 
+    /// The largest absolute difference between two decodes, per byte.
+    ///
+    /// A magnitude and not a count, because the whole question in issue #863
+    /// is *how far* apart two decodes are: one grey level is `image-webp`'s
+    /// blend approximation, and anything larger is a blend that did not
+    /// happen at all. A predicate that only asked "do these differ" would
+    /// answer the same for both and pin neither.
+    fn worst_delta(a: &[u8], b: &[u8]) -> u32 {
+        a.iter()
+            .zip(b.iter())
+            .map(|(x, y)| i32::from(*x).abs_diff(i32::from(*y)))
+            .max()
+            .unwrap_or(0)
+    }
+
     /**
      * Tests that a header lying about transparency cannot make this loader
      * skip a blend libwebp performs, which is the whole soundness question
-     * behind the blend-flag rewrite. Works by building the file vips will
-     * not write, decoding it, and asserting every byte is within one grey
-     * level of what vips read out of the same bytes.
+     * behind the blend-flag rewrite issue #863 withdrew. Works by building
+     * the file vips will not write, decoding it, and measuring how far the
+     * result is from what vips read out of the same bytes.
      *
-     * One level is the bound because `image-webp` blends opaque pixels
-     * where libwebp copies them, and that approximation is off by exactly
-     * one; anything larger is a blend that did not happen at all. Measured
-     * on the rewrite this replaces: 139 of 192 bytes differed and the
-     * largest delta was **228**, which is not a rounding error, it is a
-     * different picture.
+     * The bound is asserted exactly rather than as an inequality, because a
+     * loosened one survives every mutation: `<= 255` passes on a decode
+     * whose worst delta is 1 and passes on the broken one too. And the
+     * measure is checked against a positive control, the picture the
+     * withdrawn rewrite produced, so a metric that had stopped measuring
+     * magnitude fails here rather than passing quietly.
      * Input: `ANIM4_RGBA` with every frame's blend bit set and
-     * `alpha_is_used` cleared -> Output: within one of `LYING_ROLL`
-     * everywhere.
+     * `alpha_is_used` cleared -> Output: exactly one grey level from
+     * `LYING_ROLL` at worst, where the withdrawn rewrite was 228 away.
      */
     #[test]
     fn a_header_that_lies_about_alpha_cannot_skip_a_blend() {
         let mut lying = ANIM4_RGBA.to_vec();
+        let mut crafted = 0usize;
         let mut cursor = 12usize;
         while let Some(header) = lying.get(cursor..cursor + 8) {
             let size = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
@@ -2045,30 +2061,45 @@ mod tests {
                 let bit = cursor + 8 + 24 + 1;
                 let declared = u32::from_le_bytes(lying[bit..bit + 4].try_into().unwrap());
                 lying[bit..bit + 4].copy_from_slice(&(declared & !(1 << 28)).to_le_bytes());
+                // Both halves, asserted rather than assumed: this file only
+                // says anything if a frame asks to be blended *and* claims
+                // to have no alpha, and the withdrawn rewrite read the
+                // second half. Counting them here is what stops the craft
+                // quietly degrading into "blending on", which the loader
+                // would answer correctly for a different reason.
+                let blends = lying[cursor + 8 + 15] & 0b10 == 0;
+                let claims_opaque = &lying[cursor + 8 + 16..cursor + 8 + 20] == b"VP8L"
+                    && (u32::from_le_bytes(lying[bit..bit + 4].try_into().unwrap()) >> 28) & 1 == 0;
+                assert!(blends && claims_opaque, "frame at {cursor} is not the lie");
+                crafted += 1;
             }
             cursor = match next_chunk(cursor + 8, size) {
                 Some(next) => next,
                 None => break,
             };
         }
-        // The craft really happened, or everything below passes on the
-        // unmodified capture.
-        assert_ne!(lying, ANIM4_RGBA.to_vec());
+        assert_eq!(crafted, 4, "all four frames carry the lie");
+        assert_ne!(lying, ANIM4_RGBA.to_vec(), "the craft really happened");
 
         let raster = decode_webp_with(&lying, DecodeLimits::default(), all_pages())
             .expect("the crafted file still decodes");
         assert_eq!((raster.width(), raster.height()), (4, 12));
-        let worst = raster
-            .data()
-            .iter()
-            .zip(LYING_ROLL.iter())
-            .map(|(a, b)| i32::from(*a).abs_diff(i32::from(*b)))
-            .max()
-            .expect("the roll is not empty");
-        assert!(
-            worst <= 1,
-            "every byte has to be within one grey level of libwebp; the worst \
-             was {worst}, which means a blend was skipped rather than rounded"
+        assert_eq!(
+            worst_delta(raster.data(), &LYING_ROLL),
+            1,
+            "a blended decode is one grey level from libwebp; anything larger \
+             means a blend was skipped rather than rounded"
+        );
+
+        // The control. `ANIM4_RGBA_ROLL` is this same file decoded with
+        // blending off, which is exactly what the withdrawn rewrite made
+        // libviprs produce, and it is 228 away from what libwebp reads.
+        // Without this, a `worst_delta` that had stopped measuring
+        // magnitude would pass the assertion above.
+        assert_eq!(
+            worst_delta(&ANIM4_RGBA_ROLL, &LYING_ROLL),
+            228,
+            "the measure has to be able to see a skipped blend"
         );
     }
 
