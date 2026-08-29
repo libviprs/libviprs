@@ -2655,6 +2655,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The morphology walkers dispatch on `SampleKind` instead of on the byte width
+  (issue #831, part of #748 and #607 step (b)). `sample_u32` and its write side
+  stepped **two bytes per sample for every width that is not one**, which is the
+  right stride for `u16` and half the right stride for any four-byte kind, so a
+  32-bit carrier would have walked the wrong pixels rather than merely read the
+  wrong type.
+
+  The half-stride walk was not reachable today and would not have been reachable
+  under a `U32` carrier either: `try_rank`, `try_countlines` and
+  `try_label_regions` all refuse `bytes_per_channel() == 4` first. The kinds a
+  width test cannot see are the signed ones, and those pass every one of those
+  guards: a one-byte signed raster would have been read as unsigned, and in the
+  rank window every negative sample sorts above every positive one. `morph`'s
+  own 8-bit guard had the same shape one width down. All four are keyed on the
+  kind now, through one `unsigned_8_or_16` predicate that is total over the
+  enum, and the two sample helpers match the kind with no wildcard arm.
+
+  Nothing moves for the three kinds a `PixelFormat` carries today. The float
+  refusal for `rank`, `countlines` and `label_regions` had no test before this,
+  which is why breaking the guard stayed green; it has one now.
+
 - `hist_find` sizes a 16-bit histogram from the data instead of from the depth,
   and `hist_equal` follows it (issues #803, #823). Measured on vips 8.18.6,
   `vips hist_find` of a `ushort` `[4096, 4096, 9]` gives width **4097** where
