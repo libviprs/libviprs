@@ -53,24 +53,55 @@
 //!   [`decode_webp_with`] takes the `page` and `n` that ask for more,
 //!   stacking the frames into the toilet-roll layout
 //!   [`crate::frames`] describes (issue #569).
-//! * **A blended frame decodes one grey level low, and that is upstream.**
-//!   `image-webp` 0.2.4 runs its approximate alpha blend on opaque pixels
-//!   where libwebp copies them (`demux/anim_decode.c`,
-//!   `BlendPixelRowNonPremult` tests `src_alpha != 0xff` first), and with
-//!   `src_a = 255` the arithmetic is `s - 1` for every `s` from 1 to 255.
-//!   `vips webpsave` writes blending **on** for every frame after the first
-//!   of an opaque animation, so pages 1 and up of one come back a level
-//!   low; a transparent animation is written with blending off on every
-//!   frame and is byte-exact. Both measured, and both pinned.
+//! * **An animation is composited here, not by `image-webp`** (issues #837
+//!   and #917). vips does not use libwebp's animation decoder either:
+//!   `webp2vips.c` pulls each frame with `WebPDemuxGetFrame` and
+//!   `WebPDecode` and composites them itself, so there are three
+//!   implementations and only one of them is the oracle.
 //!
-//!   libviprs used to rewrite the `ANMF` blend flag on frames whose `VP8L`
-//!   header declared no alpha, which made the opaque case exact. Issue #863
-//!   withdrew that: libwebp never reads the declaration, it tests each
-//!   pixel's own alpha, so a file whose header lied decoded to a different
-//!   picture (139 of 192 bytes, worst delta 228, measured on a crafted
-//!   file). There is no sound way to prove opacity from a header, so the
-//!   bounded upstream error is carried rather than traded for an unbounded
-//!   one this crate would own.
+//!   | | `dst_factor_a` | rounding |
+//!   |---|---|---|
+//!   | vips | `(dst_a * (255 - src_a) + 127) >> 8` | `+ (1 << 12)` before the shift |
+//!   | libwebp | `(dst_a * (256 - src_a)) >> 8` | none |
+//!   | `image-webp` | `div_by_255(dst_a * (255 - src_a))` | none |
+//!
+//!   The rounding term is the whole of #837: with an opaque source the
+//!   factor is 0 and the product is one short of `s << 24`, so vips carries
+//!   it back and the other two truncate, and every blended page came back a
+//!   grey level low. #917 is the same table one column over, on translucent
+//!   pixels, where the three disagree by up to 26 levels.
+//!
+//!   vips's compositing model is simpler than libwebp's, and porting
+//!   libwebp's first made the crafted header-lie fixture *worse*: clear the
+//!   previous frame's rectangle if it disposed to background, then paste
+//!   this frame, blending only when it is not the first and its own header
+//!   asks for it. No key frames, no per-pixel opacity test, no partial blend
+//!   ranges.
+//!
+//!   `image-webp` exposes no per-frame decode, so the frames are recovered
+//!   by clearing every `ANMF` blend bit, which turns `composite_frame` into
+//!   a verbatim copy of each frame's rectangle. That is done through a
+//!   reader that patches the bytes on the way past, so nothing is copied.
+//!   The patch claims nothing about the pixels, which is what separates it
+//!   from the rewrite issue #863 withdrew: that one read `alpha_is_used` as
+//!   proof of opacity and skipped work the oracle does, where this decides
+//!   what to do with a frame afterwards from the frame's own alpha.
+//! * **The band count is not the `VP8X` alpha flag on its own** (issue
+//!   #885). `webp2vips.c:413` starts there and `:464-471` turns alpha on for
+//!   an animation when **any** frame carries alpha of its own or is smaller
+//!   than the canvas, the second because a frame that does not cover the
+//!   canvas leaves the area around it transparent. `image-webp` reads the
+//!   flag and nothing else, so a file with a sub-canvas frame came back
+//!   three-band with the transparent area as opaque black, which is lost
+//!   data rather than a wrong label.
+//!
+//!   The file is handed to the decoder with the flag set instead, so the
+//!   RGBA canvas it already keeps comes back whole. That is sound where the
+//!   withdrawn blend rewrite above was not, and the difference is worth
+//!   being precise about: the flag is an **output-format switch** inside
+//!   `image-webp`, deciding only whether the fourth channel is dropped on
+//!   the way out, so moving it cannot change a decoded value. The blend
+//!   flag decided *arithmetic*, from a header field libwebp never consults.
 //! * **Animated WebP can be read and never written.** No pure-Rust
 //!   encoder emits `ANIM`/`ANMF`: `image-webp` 0.2.4 writes one `VP8L`
 //!   chunk and has no animation surface at all, so [`SaveOptions`] has
@@ -131,7 +162,7 @@
 //! [`crate::radiance`] and [`crate::gif`]: a decoder's failures come from
 //! untrusted bytes, so a panicking spelling would have no honest caller.
 
-use std::io::Cursor;
+use std::io;
 use std::path::Path;
 
 use crate::codec::EncodeError;
@@ -151,14 +182,21 @@ use crate::source::{DeclaredGeometry, DecodeLimits, SourceError, resolve_page_ra
 /// ceiling instead of the crate's.
 pub const MAX_DIMENSION: u32 = 16383;
 
-/// How many RGBA planes of one frame `image-webp` 0.2.4 needs **beside** the
-/// buffer libviprs is filling, when decoding an animation.
+/// How many RGBA planes of one frame an animated decode works in **beside**
+/// the roll libviprs is filling.
 ///
 /// `DecodeLimits::max_alloc_bytes` is a ceiling on peak memory, and pricing
 /// only the raster left it out by a factor: the decoder keeps a full-size
 /// RGBA canvas and a full-size per-frame buffer of its own, and
 /// `set_memory_limit` does not bound either, because it is consulted only in
 /// `read_chunk`, which is metadata rather than pixels (issue #892).
+///
+/// Three of the five are the decoder's. The other two are this module's,
+/// since #837: an animation is composited here rather than by `image-webp`,
+/// which needs the plane the decoder writes each frame into and the
+/// accumulator `Compositor` pastes them onto. Both are measured rather
+/// than counted, and `tests/webp_decode_working_set.rs` fails at **four**,
+/// with the peak 8,644 bytes over the price on a 512x512 fixture.
 ///
 /// Measured with a counting global allocator on 512x512 fixtures, as peak
 /// live bytes against the amount priced:
@@ -172,12 +210,14 @@ pub const MAX_DIMENSION: u32 = 16383;
 /// | lossless still | | 2.39x | 1.04 |
 /// | lossy still | | 1.68x | 0.51 |
 ///
-/// Three and two rather than 2.13 and 1.04 because the measurements are
-/// asymptotic: below about 512x512 the decoder's fixed overheads dominate
-/// and the slack is larger in relative terms. The headroom is a plane, and
-/// `tests/webp_decode_working_set.rs` holds it from both sides, so neither
-/// an upstream regression nor an over-generous ceiling passes unnoticed.
-pub const DECODER_PLANES_ANIMATED: u64 = 3;
+/// The table above was measured before #837 moved the compositing here, so
+/// its slack column counts the decoder's planes alone; the two this module
+/// adds are on top of it. The measurements are asymptotic: below about
+/// 512x512 the decoder's fixed overheads dominate and the slack is larger in
+/// relative terms. `tests/webp_decode_working_set.rs` holds the total from
+/// both sides, so neither an upstream regression nor an over-generous
+/// ceiling passes unnoticed.
+pub const DECODER_PLANES_ANIMATED: u64 = 5;
 
 /// The same, for a still: `image-webp` keeps one temporary RGBA plane it
 /// narrows into the caller's RGB buffer rather than a canvas and a frame.
@@ -373,6 +413,387 @@ pub fn decode_webp(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceE
     decode_webp_with(bytes, limits, LoadOptions::default())
 }
 
+/// Blend one source pixel over one canvas pixel, **vips's** arithmetic.
+///
+/// `blend_pixel` and the `BLEND` macro in `webp2vips.c:236-274`. vips does
+/// not use libwebp's animation decoder at all: it pulls each frame with
+/// `WebPDemuxGetFrame` and `WebPDecode` and composites them itself, so
+/// libwebp's `anim_decode.c` is the wrong reference and this is the right
+/// one. Three implementations, three answers, and only one of them is the
+/// oracle:
+///
+/// | | `dst_factor_a` | rounding |
+/// |---|---|---|
+/// | vips | `(dst_a * (255 - src_a) + 127) >> 8` | `+ (1 << 12)` before the shift |
+/// | libwebp | `(dst_a * (256 - src_a)) >> 8` | none |
+/// | `image-webp` | `div_by_255(dst_a * (255 - src_a))` | none |
+///
+/// **The rounding term is the whole of issue #837.** With an opaque source
+/// the factor is 0, `blend_a` is 255 and `scale` is `(1 << 24) / 255`, whose
+/// product with `255 * s` is one short of `s << 24`; vips's `+ (1 << 12)`
+/// carries it back and the other two truncate, so a blended opaque pixel is
+/// `s` in vips and `s - 1` everywhere else. The issue put that down to
+/// libwebp skipping the blend for opaque pixels, which libwebp does do and
+/// which is not why vips agrees with it.
+///
+/// The arithmetic is `u32` and cannot overflow, which is worth showing
+/// because vips's own is `int` and **can**: `sum` is at most `255 * blend_a`,
+/// since the two alphas it weights add up to `blend_a`, and `scale` is
+/// `(1 << 24) / blend_a`, so the product is bounded by `255 << 24`, which is
+/// 4,278,190,080 and fits a `u32` with room for the rounding term. vips's
+/// signed `int` version wraps at that size and gets the same answer back
+/// through two's complement, which is a thing to reproduce only if it
+/// changes an answer, and it does not.
+fn blend_over(src: [u8; 4], dst: [u8; 4]) -> [u8; 4] {
+    if src[3] == 0 {
+        return dst;
+    }
+    let src_a = u32::from(src[3]);
+    let factor = (u32::from(dst[3]) * (255 - src_a) + 127) >> 8;
+    // At most 255, so it fits the alpha channel: `src_a + ((dst_a * (255 -
+    // src_a) + 127) >> 8)` peaks there.
+    let blend_a = src_a + factor;
+    let scale = (1u32 << 24) / blend_a;
+    let channel = |i: usize| -> u8 {
+        let sum = u32::from(src[i]) * src_a + u32::from(dst[i]) * factor;
+        ((sum * scale + (1 << 12)) >> 24) as u8
+    };
+    [
+        channel(0),
+        channel(1),
+        channel(2),
+        u8::try_from(blend_a).unwrap_or(u8::MAX),
+    ]
+}
+
+/// vips's animation compositor, which is not `image-webp`'s.
+///
+/// `read_next_frame` (`webp2vips.c:644-730`) is three steps and no more:
+/// clear the previous frame's rectangle if it disposed to background, decode
+/// this frame, and paste it at its own rectangle, blending only when it is
+/// not the first frame and its own header asks for it. There is no key-frame
+/// notion, no per-pixel opacity test and no partial blend range; libwebp's
+/// decoder has all three and vips never calls it.
+struct Compositor {
+    width: u32,
+    /// The accumulator every frame is pasted into, RGBA and full canvas.
+    canvas: Vec<u8>,
+    /// The previous frame, when it asked for the canvas to be cleared behind
+    /// it. vips disposes at the *start* of the next frame rather than after
+    /// the disposing one is handed back, so the rectangle is held over.
+    disposing: Option<AnimFrame>,
+}
+
+impl Compositor {
+    fn new(width: u32, height: u32) -> Self {
+        Self {
+            width,
+            canvas: vec![0; width as usize * height as usize * 4],
+            disposing: None,
+        }
+    }
+
+    /// Composite one frame and hand back the canvas it produced.
+    ///
+    /// `source` is the decoder's canvas after a frame whose blend bit this
+    /// loader cleared, so the frame's own rectangle in it holds that frame's
+    /// pixels verbatim and the two buffers share a geometry, which is why
+    /// one offset indexes both.
+    fn add(&mut self, index: u32, frame: AnimFrame, source: &[u8]) -> &[u8] {
+        if let Some(previous) = self.disposing.take() {
+            // Transparent black, and not the colour the `ANIM` chunk
+            // declares: `webp2vips.c:666-678` clears to zero and says why,
+            // and it is measured, a file declaring `0xFFFFFFFF` and a copy
+            // patched to opaque green both read back transparent.
+            self.each_pixel(previous, |canvas, at| canvas[at..at + 4].fill(0));
+        }
+        // `webp2vips.c:711-714`: blend only when this is not the first frame
+        // and its own header asks for it.
+        let blend = index > 0 && frame.blend;
+        self.each_pixel(frame, |canvas, at| {
+            let Some(src) = source
+                .get(at..at + 4)
+                .and_then(|s| <[u8; 4]>::try_from(s).ok())
+            else {
+                return;
+            };
+            let out = if blend {
+                let Ok(dst) = <[u8; 4]>::try_from(&canvas[at..at + 4]) else {
+                    return;
+                };
+                blend_over(src, dst)
+            } else {
+                src
+            };
+            canvas[at..at + 4].copy_from_slice(&out);
+        });
+        if frame.dispose {
+            self.disposing = Some(frame);
+        }
+        &self.canvas
+    }
+
+    /// Walk one frame's rectangle of the canvas, clipped to it.
+    fn each_pixel(&mut self, frame: AnimFrame, mut f: impl FnMut(&mut [u8], usize)) {
+        let width = self.width as usize;
+        for row in frame.y..frame.y.saturating_add(frame.h) {
+            for col in frame.x..frame.x.saturating_add(frame.w) {
+                let at = (row as usize * width + col as usize) * 4;
+                if at + 4 <= self.canvas.len() {
+                    f(&mut self.canvas, at);
+                }
+            }
+        }
+    }
+}
+
+/// One `ANMF` frame's placement and the rules libwebp applies to it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AnimFrame {
+    /// Offset into the canvas. `ANMF` stores it halved, so it is always even.
+    x: u32,
+    /// Offset into the canvas.
+    y: u32,
+    /// Frame extent.
+    w: u32,
+    /// Frame extent.
+    h: u32,
+    /// Whether this frame blends over the canvas rather than replacing it,
+    /// which is bit 1 of the frame-info byte **clear**.
+    blend: bool,
+    /// Whether the canvas is cleared to transparent after this frame, which
+    /// is bit 0 set.
+    dispose: bool,
+    /// Whether the frame's own bitstream carries alpha, which is an `ALPH`
+    /// sub-chunk or a `VP8L` with `alpha_is_used` set. libwebp's key-frame
+    /// rule reads it (`anim_decode.c:208`).
+    has_alpha: bool,
+}
+
+/// A reader over a WebP file with a handful of single bytes replaced on the
+/// way past, so `image-webp` sees a container that says what this loader
+/// needs it to say without a second copy of the file existing.
+///
+/// The patches are the `VP8X` flags byte and one frame-info byte per `ANMF`,
+/// so the list is bounded by the frame count and each entry is a `usize` and
+/// a `u8`. There is no pixel data in it and nothing scales with the image.
+struct Patched<'a> {
+    bytes: &'a [u8],
+    /// `(offset, replacement)`, in no particular order and never large.
+    patches: Vec<(usize, u8)>,
+    pos: usize,
+}
+
+impl io::Read for Patched<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let from = self.pos.min(self.bytes.len());
+        let n = buf.len().min(self.bytes.len() - from);
+        buf[..n].copy_from_slice(&self.bytes[from..from + n]);
+        for (at, byte) in &self.patches {
+            if (from..from + n).contains(at) {
+                buf[at - from] = *byte;
+            }
+        }
+        self.pos = from + n;
+        Ok(n)
+    }
+}
+
+impl io::Seek for Patched<'_> {
+    fn seek(&mut self, to: io::SeekFrom) -> io::Result<u64> {
+        let len = self.bytes.len() as i64;
+        let want = match to {
+            io::SeekFrom::Start(n) => n as i64,
+            io::SeekFrom::End(n) => len + n,
+            io::SeekFrom::Current(n) => self.pos as i64 + n,
+        };
+        if want < 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "seek before the start of the file",
+            ));
+        }
+        self.pos = want as usize;
+        Ok(self.pos as u64)
+    }
+}
+
+/// Read an animation's frame table and the patches that stop the decoder
+/// compositing.
+///
+/// `image-webp` 0.2.4 exposes no way to decode one frame on its own: its
+/// `read_frame` always composites onto a canvas it owns. But with a frame's
+/// blend bit clear and its own alpha present, `composite_frame` copies that
+/// frame's rectangle into the canvas verbatim (`extended.rs:124-140`), so a
+/// single pass over a file whose blend bits are all clear yields **every
+/// frame's true RGBA**, per-pixel alpha included, at its own rectangle. The
+/// compositing then happens here, with libwebp's rules, which is the only
+/// way to get them right:
+///
+/// * libwebp copies a source pixel whose alpha is 255 rather than blending
+///   it (`anim_decode.c:263-272`), and `image-webp` has no such test, which
+///   costs exactly one level on every opaque pixel of a blended frame
+///   (issue #837).
+/// * The two compute `dst_factor_a` differently, so they disagree on
+///   *translucent* pixels too, by up to 26 levels (issue #917).
+///
+/// Neither is fixable by rewriting a flag, because both are arithmetic. The
+/// patch here claims nothing about the pixels: clearing a blend bit makes the
+/// decoder hand back the frame it read, and what to do with that frame is
+/// decided afterwards from its own alpha rather than from a header. That is
+/// the difference from the rewrite #863 withdrew, which read `alpha_is_used`
+/// as proof of opacity and skipped work libwebp does per pixel.
+///
+/// The `VP8X` alpha flag goes on with it, for two reasons at once: it is what
+/// makes `read_frame` hand back the RGBA canvas rather than stripping it to
+/// RGB, and it is the band-count rule of issue #885, which is
+/// `webp2vips.c:413` plus `:464-471`, alpha when **any** frame carries alpha
+/// of its own or is smaller than the canvas. The two are kept apart in the
+/// result: [`Animation::alpha`] is vips's answer and the patched flag is
+/// always on.
+///
+/// `None` for a still, or for a file this cannot parse, and the second is
+/// deliberate: an unparseable animation goes to the decoder untouched and
+/// gets the behaviour it had before this existed, rather than a guess.
+fn read_animation(bytes: &[u8]) -> Option<Animation> {
+    let scan = scan_animation(bytes)?;
+    if scan.table.is_empty() {
+        return None;
+    }
+    let mut patches = Vec::with_capacity(scan.info_at.len() + 1);
+    patches.push((scan.flags_at, bytes[scan.flags_at] | 0b0001_0000));
+    for at in &scan.info_at {
+        // Bit 1 set is "do not blend", bit 0 clear is "do not dispose". The
+        // reserved bits above them are left alone.
+        patches.push((*at, (bytes[*at] & !0b0000_0011) | 0b0000_0010));
+    }
+    Some(Animation {
+        patches,
+        frames: scan.table,
+        alpha: scan.alpha,
+    })
+}
+
+/// A WebP animation this loader will composite itself.
+struct Animation {
+    /// The single-byte replacements that stop `image-webp` compositing and
+    /// make it hand the canvas back as RGBA.
+    patches: Vec<(usize, u8)>,
+    /// Every frame's placement and rules, off the wire.
+    frames: Vec<AnimFrame>,
+    /// Whether libvips reports an alpha channel for this file.
+    alpha: bool,
+}
+
+/// What one walk of the container found.
+struct AnimationScan {
+    /// Offset of the `VP8X` flags byte.
+    flags_at: usize,
+    /// Offset of each frame's `ANMF` frame-info byte.
+    info_at: Vec<usize>,
+    /// Each frame's placement and rules.
+    table: Vec<AnimFrame>,
+    /// Whether libvips reports alpha for the file.
+    alpha: bool,
+}
+
+/// Walk the RIFF container collecting what [`read_animation`] needs.
+///
+/// `None` for anything this does not understand, which includes a still, a
+/// file with no `VP8X`, and one whose chunk chain does not add up.
+fn scan_animation(bytes: &[u8]) -> Option<AnimationScan> {
+    if bytes.get(..4)? != b"RIFF" || bytes.get(8..12)? != b"WEBP" {
+        return None;
+    }
+    let mut at = 12;
+    let mut scan = AnimationScan {
+        flags_at: 0,
+        info_at: Vec::new(),
+        table: Vec::new(),
+        alpha: false,
+    };
+    let mut canvas = None;
+    let mut seen_vp8x = false;
+    while at + 8 <= bytes.len() {
+        let fourcc = bytes.get(at..at + 4)?;
+        let size = u32::from_le_bytes(bytes.get(at + 4..at + 8)?.try_into().ok()?) as usize;
+        let payload = bytes.get(at + 8..at + 8 + size)?;
+        match fourcc {
+            b"VP8X" => {
+                // Ten bytes: flags, three reserved, then the canvas width
+                // and height minus one, three bytes each.
+                scan.flags_at = at + 8;
+                seen_vp8x = true;
+                scan.alpha = payload.first()? & 0b0001_0000 != 0;
+                canvas = Some((
+                    read_u24(payload.get(4..7)?) + 1,
+                    read_u24(payload.get(7..10)?) + 1,
+                ));
+            }
+            b"ANMF" => {
+                let (cw, ch) = canvas?;
+                let frame = AnimFrame {
+                    x: read_u24(payload.get(0..3)?) * 2,
+                    y: read_u24(payload.get(3..6)?) * 2,
+                    w: read_u24(payload.get(6..9)?) + 1,
+                    h: read_u24(payload.get(9..12)?) + 1,
+                    blend: payload.get(15)? & 0b0000_0010 == 0,
+                    dispose: payload.get(15)? & 0b0000_0001 != 0,
+                    has_alpha: frame_carries_alpha(payload.get(16..)?),
+                };
+                // A frame the canvas cannot hold is a file this does not
+                // understand, and `image-webp` refuses it too.
+                if frame.x.checked_add(frame.w)? > cw || frame.y.checked_add(frame.h)? > ch {
+                    return None;
+                }
+                // vips reports alpha when any frame carries alpha of its own
+                // or is smaller than the canvas, because a frame that does
+                // not cover the canvas leaves the area around it transparent.
+                if frame.w != cw || frame.h != ch || frame.has_alpha {
+                    scan.alpha = true;
+                }
+                scan.info_at.push(at + 8 + 15);
+                scan.table.push(frame);
+            }
+            _ => {}
+        }
+        // Chunks are padded to an even length and the size field does not
+        // count the pad.
+        at += 8 + size + (size & 1);
+    }
+    seen_vp8x.then_some(scan)
+}
+
+/// A three-byte little-endian field, which is how `VP8X` and `ANMF` store
+/// every geometry number.
+fn read_u24(bytes: &[u8]) -> u32 {
+    u32::from(bytes[0]) | u32::from(bytes[1]) << 8 | u32::from(bytes[2]) << 16
+}
+
+/// Whether one `ANMF` frame carries alpha of its own, from the sub-chunk that
+/// follows its sixteen-byte header.
+///
+/// libwebp's demuxer sets `frame->has_alpha` from an `ALPH` chunk
+/// (`demux.c:245`) or from `WebPGetFeatures` on the bitstream
+/// (`demux.c:204`), which for a `VP8L` is the `alpha_is_used` header bit and
+/// for a lossy `VP8 ` is always zero.
+fn frame_carries_alpha(after_header: &[u8]) -> bool {
+    let Some(fourcc) = after_header.get(..4) else {
+        return false;
+    };
+    match fourcc {
+        b"ALPH" => true,
+        // A `VP8L` bitstream is a `0x2F` signature and then 14 bits of width,
+        // 14 of height, one of `alpha_is_used` and three of version, packed
+        // little-endian, so the flag is bit 28 of the four bytes after it.
+        b"VP8L" => after_header.get(8..13).is_some_and(|head| {
+            head[0] == 0x2F
+                && u32::from_le_bytes([head[1], head[2], head[3], head[4]]) & (1 << 28) != 0
+        }),
+        _ => false,
+    }
+}
+
 /// Decode WebP bytes, choosing which frames of an animation to read
 /// (libvips `webpload_buffer` with `page` and `n`).
 ///
@@ -384,10 +805,14 @@ pub fn decode_webp(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceE
 /// [`crate::frames`] describes. [`decode_webp`] is this function at
 /// [`LoadOptions::default`].
 ///
-/// A page the file asks to have blended comes back **one grey level low on
-/// every non-zero channel**, which is `image-webp` 0.2.4 blending opaque
-/// pixels where libwebp copies them. The module docs have the arithmetic
-/// and the reason libviprs no longer tries to work around it (issue #863).
+/// An **opaque** page the file asks to have blended comes back **one grey
+/// level low on every non-zero channel**, which is `image-webp` 0.2.4
+/// blending opaque pixels where libwebp copies them. The module docs have
+/// the arithmetic and the reason libviprs no longer tries to work around it
+/// (issue #863). A **translucent** blended page diverges further, up to 26
+/// levels, through a second difference in the same function (issue #917);
+/// no file `vips webpsave` writes reaches it, because it writes blending
+/// off on every frame of a transparent animation.
 ///
 /// # What comes back attached
 ///
@@ -485,7 +910,24 @@ pub fn decode_webp_with(
     limits: DecodeLimits,
     options: LoadOptions,
 ) -> Result<Raster, SourceError> {
-    let mut decoder = image_webp::WebPDecoder::new(Cursor::new(bytes)).map_err(decode_error)?;
+    // An animation is decoded frame by frame and composited here rather than
+    // by `image-webp`, whose blending disagrees with libwebp's on opaque
+    // pixels (issue #837) and on translucent ones (issue #917), and whose
+    // band count comes off the `VP8X` alpha flag alone where vips reads more
+    // than that (issue #885). `read_animation` rewrites the file so the
+    // decoder composites nothing; a still, or an animation this cannot
+    // parse, goes through untouched and gets exactly the old behaviour.
+    let animation = read_animation(bytes);
+    let source = Patched {
+        bytes,
+        patches: animation
+            .as_ref()
+            .map(|a| a.patches.clone())
+            .unwrap_or_default(),
+        pos: 0,
+    };
+    let mut decoder =
+        image_webp::WebPDecoder::new(io::BufReader::new(source)).map_err(decode_error)?;
     // Budget the metadata chunk reads before any of them run: `read_chunk`
     // refuses a chunk longer than this rather than allocating for it.
     decoder.set_memory_limit(usize::try_from(limits.max_alloc_bytes).unwrap_or(usize::MAX));
@@ -496,7 +938,7 @@ pub fn decode_webp_with(
     // whole number of them.
     let (width, page_height) = decoder.dimensions();
     let animated = decoder.is_animated();
-    if animated {
+    if animated && animation.is_none() {
         // Ask for the disposal step at all. `image-webp` only clears a
         // disposed frame's rectangle when a background colour has been set,
         // and it has none by default, so without this a frame marked
@@ -532,18 +974,33 @@ pub fn decode_webp_with(
     limits.check_coord(width, height)?;
     limits.check_pixels(width, height)?;
 
-    let format = if decoder.has_alpha() {
+    // For an animation the band count is vips's rule rather than the flag,
+    // and the flag in the rewritten bytes is always on because that is what
+    // makes `read_frame` hand back the RGBA canvas this composites from.
+    let alpha = match &animation {
+        Some(anim) => anim.alpha,
+        None => decoder.has_alpha(),
+    };
+    let format = if alpha {
         PixelFormat::Rgba8
     } else {
         PixelFormat::Rgb8
     };
-    let frame_size = decoder
-        .output_buffer_size()
-        .ok_or(SourceError::DimensionLimitExceeded {
-            width,
-            height,
-            max_pixels: limits.max_pixels,
-        })?;
+    // One page of the roll, in the bands this loader hands back. That is the
+    // decoder's own buffer size only on the untouched path: a composited
+    // animation is read into an RGBA plane of its own whatever `format` is,
+    // because the canvas it composites is RGBA either way.
+    let frame_size = match &animation {
+        Some(_) => (width as usize)
+            .checked_mul(page_height as usize)
+            .and_then(|px| px.checked_mul(format.channels())),
+        None => decoder.output_buffer_size(),
+    }
+    .ok_or(SourceError::DimensionLimitExceeded {
+        width,
+        height,
+        max_pixels: limits.max_pixels,
+    })?;
     let size =
         frame_size
             .checked_mul(loaded as usize)
@@ -613,7 +1070,46 @@ pub fn decode_webp_with(
 
     let mut data = vec![0u8; size];
     let mut delays: Vec<i64> = Vec::with_capacity(loaded as usize);
-    if animated {
+    if let Some(anim) = &animation {
+        // Three RGBA planes: what the decoder hands back, which after the
+        // patch is each frame's own pixels at its own rectangle, and the two
+        // the compositor keeps. `DECODER_PLANES_ANIMATED` counts all of
+        // them, so they are inside the ceiling checked above.
+        let mut source = vec![0u8; width as usize * page_height as usize * 4];
+        let mut compositor = Compositor::new(width, page_height);
+        for index in 0..pages.end {
+            let duration = decoder.read_frame(&mut source).map_err(decode_error)?;
+            // The two walks are over the same bytes and `image-webp` counts
+            // `ANMF` chunks the same way, so this cannot miss; it is a
+            // refusal rather than an index because the file is untrusted.
+            let frame = anim
+                .frames
+                .get(index as usize)
+                .copied()
+                .ok_or_else(|| decode_error(image_webp::DecodingError::NoMoreFrames))?;
+            let canvas = compositor.add(index, frame, &source);
+            if index >= pages.start {
+                let offset = (index - pages.start) as usize * frame_size;
+                let page = &mut data[offset..offset + frame_size];
+                if alpha {
+                    page.copy_from_slice(canvas);
+                } else {
+                    for (out, pixel) in page
+                        .as_chunks_mut::<3>()
+                        .0
+                        .iter_mut()
+                        .zip(canvas.as_chunks::<4>().0)
+                    {
+                        out.copy_from_slice(&pixel[..3]);
+                    }
+                }
+                delays.push(i64::from(FrameDelay::from_millis(duration).millis()));
+            }
+        }
+    } else if animated {
+        // The untouched path, for an animation `read_animation` could not
+        // parse: `image-webp` composites and this loader takes what it gets.
+        //
         // `read_frame` reads forward and has no seek, so a `page` past the
         // first costs the frames before it in decode time. They are read
         // into the roll's first slot and overwritten by page `page`
@@ -1409,9 +1905,10 @@ mod tests {
         // look like the three formats `image` refuses from inside its own
         // decoder, which threw away both (issue #686).
         //
-        // The price is 36 for the 4x3 RGB frame plus 144 for the three RGBA
-        // planes `image-webp` allocates beside it, because this file is an
-        // animation (issue #892). The geometry reported is still the frame's.
+        // The price is 36 for the 4x3 RGB frame plus 240 for the five RGBA
+        // planes an animated decode works in: three `image-webp` allocates
+        // beside the output (issue #892) and two this loader composites
+        // through (issue #837). The geometry reported is still the frame's.
         let starved = DecodeLimits::default().with_max_alloc_bytes(8);
         let err = decode_webp(&ANIM3, starved).expect_err("8 bytes is not a 4x3 RGB frame");
         assert!(
@@ -1424,7 +1921,7 @@ mod tests {
                         height: 3,
                         bands: 3,
                     }),
-                    needed_bytes: 180,
+                    needed_bytes: 276,
                     max_alloc_bytes: 8,
                 }
             ),
@@ -1581,43 +2078,58 @@ mod tests {
         103, 139, 19, 77, 143, 24, 88, 146, 29, 99, 149, 34, 110, 152,
     ];
 
-    /// The pixels `image-webp` 0.2.4 actually produces for a page `vips
+    /// The pixels `image-webp` 0.2.4 would produce for a page `vips
     /// webpsave` wrote with alpha blending switched **on**, given the pixels
-    /// vips reads out of the same bytes.
+    /// vips reads out of the same bytes: every channel one grey level low,
+    /// and zero unchanged.
     ///
-    /// Every channel comes back one grey level low, and zero stays zero.
-    /// That is not an approximation of the difference, it is the whole of
-    /// it: `image-webp` runs its approximate blend on opaque pixels where
-    /// libwebp copies them (`demux/anim_decode.c`,
-    /// `BlendPixelRowNonPremult`, which tests `src_alpha != 0xff` before
-    /// blending), and with `src_a = 255` the arithmetic is
+    /// **Nothing decodes this way any more**, and that is what the helper is
+    /// for. `image-webp` runs its approximate blend on opaque pixels where
+    /// libwebp copies them (`anim_decode.c:263-272` tests
+    /// `src_alpha != 0xff` first), and with `src_a = 255` the arithmetic is
     /// `(s * 255 * ((1 << 24) / 255)) >> 24`, which is `s - 1` for every `s`
-    /// from 1 to 255.
+    /// from 1 to 255. Since #837 this loader composites the frames itself
+    /// and never reaches that code, so this is kept as the **negative
+    /// control**: a decode that matched it would be the old bug back.
     ///
-    /// Issue #863 withdrew the workaround that used to hide this. It hid it
-    /// by reading the `VP8L` `alpha_is_used` header bit, which libwebp does
-    /// not consult at all, so a file whose header lied decoded to a
-    /// different picture: 139 of 192 bytes, worst delta 228. Carrying a
-    /// bounded upstream error beats introducing an unbounded one, and
-    /// pinning it here makes the day it is fixed upstream a red test rather
-    /// than a surprise.
-    ///
-    /// `vips webpsave` writes blending on for every frame after the first of
-    /// an **opaque** animation and off for every frame of a transparent one,
-    /// both measured, so this applies to pages 1 and up of `ANIM4_DELAY` and
-    /// to nothing at all in `ANIM4_RGBA`.
+    /// It has been that twice over. #863 withdrew a workaround that hid the
+    /// loss by reading the `VP8L` `alpha_is_used` header bit, which libwebp
+    /// does not consult at all, so a file whose header lied decoded to a
+    /// different picture: 139 of 192 bytes, worst delta 228. The fix that
+    /// stuck needed no claim about a header, only the frames' own alpha.
     fn as_image_webp_blends(vips: &[u8]) -> Vec<u8> {
         vips.iter().map(|v| v.saturating_sub(1)).collect()
     }
 
-    /// `ANIM4_ROLL` as this build decodes it: page 0 exactly as vips reads
-    /// it, and pages 1, 2 and 3 through [`as_image_webp_blends`].
-    fn anim4_as_decoded() -> Vec<u8> {
-        let mut out = ANIM4_ROLL.to_vec();
-        let blended = as_image_webp_blends(&ANIM4_ROLL[36..]);
-        out[36..].copy_from_slice(&blended);
-        out
-    }
+    /// A two-frame 2x2 animation whose second frame carries every arm of the
+    /// blend at once, built with `cwebp` and `webpmux` because `vips
+    /// webpsave` writes blending off on a transparent animation and so
+    /// cannot produce one.
+    ///
+    /// Frame 0 is opaque red. Frame 1 asks to be blended and holds, in
+    /// order, two **fully transparent** pixels, one at alpha 128 and one
+    /// opaque. So one file exercises `src_a == 0`, `0 < src_a < 255` and
+    /// `src_a == 255`, which are three different paths through
+    /// `blend_over` and were one fixture short of being covered.
+    const TRANSLUCENT: [u8; 146] = [
+        0x52, 0x49, 0x46, 0x46, 0x8A, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38,
+        0x58, 0x0A, 0x00, 0x00, 0x00, 0x12, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00,
+        0x41, 0x4E, 0x49, 0x4D, 0x06, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x41,
+        0x4E, 0x4D, 0x46, 0x28, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
+        0x00, 0x01, 0x00, 0x00, 0x64, 0x00, 0x00, 0x00, 0x56, 0x50, 0x38, 0x4C, 0x0F, 0x00, 0x00,
+        0x00, 0x2F, 0x01, 0x40, 0x00, 0x00, 0x07, 0x10, 0xFD, 0x8F, 0xFE, 0x07, 0x22, 0xA2, 0xFF,
+        0x01, 0x00, 0x41, 0x4E, 0x4D, 0x46, 0x2E, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x64, 0x00, 0x00, 0x00, 0x56, 0x50, 0x38, 0x4C,
+        0x15, 0x00, 0x00, 0x00, 0x2F, 0x01, 0x40, 0x00, 0x10, 0x17, 0x30, 0xFF, 0x11, 0x02, 0x82,
+        0xA2, 0xE7, 0x4C, 0x0F, 0x2E, 0x4C, 0x42, 0x44, 0xFF, 0x43, 0x00,
+    ];
+
+    /// `TRANSLUCENT` as `vips rawsave 'translucent.webp[n=-1]'` reads it on
+    /// 8.18.6: a 2x4 RGBA roll of two pages.
+    const TRANSLUCENT_ROLL: [u8; 32] = [
+        255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0,
+        255, 127, 128, 0, 255, 0, 255, 0, 255,
+    ];
 
     /// Every frame of an animation, which is `n = -1` in vips.
     fn all_pages() -> LoadOptions {
@@ -1640,7 +2152,7 @@ mod tests {
             .expect("the four-frame capture decodes");
         assert_eq!((raster.width(), raster.height()), (4, 12));
         assert_eq!(raster.format(), PixelFormat::Rgb8);
-        assert_eq!(raster.data(), &anim4_as_decoded()[..]);
+        assert_eq!(raster.data(), &ANIM4_ROLL[..]);
         // The split the loader wrote and the split the reader derives are
         // the same one: `vipsheader -a 'x.webp[n=-1]'` reports
         // `page-height: 3` and `n-pages: 4`.
@@ -1701,7 +2213,7 @@ mod tests {
         )
         .expect("frames 1 and 2 exist");
         assert_eq!((raster.width(), raster.height()), (4, 6));
-        assert_eq!(raster.data(), &anim4_as_decoded()[36..108]);
+        assert_eq!(raster.data(), &ANIM4_ROLL[36..108]);
         assert_eq!(raster.pages_loaded(), 2);
         assert_eq!(raster.get_page_height(), 3);
         // Measured: `vipsheader -f delay 'x.webp[page=1,n=2]'` prints
@@ -1791,7 +2303,7 @@ mod tests {
             assert_eq!(raster.pages_loaded(), 1, "page {page}");
             assert_eq!(
                 raster.data(),
-                &anim4_as_decoded()[page as usize * 36..page as usize * 36 + 36],
+                &ANIM4_ROLL[page as usize * 36..page as usize * 36 + 36],
                 "page {page}"
             );
             assert_eq!(
@@ -2050,19 +2562,19 @@ mod tests {
         ));
 
         // And the allocation budget prices four frames, not one. Both
-        // prices carry the same 144 bytes of decoder working set, three
-        // RGBA planes of a 4x3 frame (issue #892), so the difference
-        // between them is the roll: 36 + 144 = 180 for one page and
-        // 144 + 144 = 288 for four. A budget of 200 sits between.
-        let alloc = DecodeLimits::default().with_max_alloc_bytes(200);
+        // prices carry the same 240 bytes of working set, five RGBA planes
+        // of a 4x3 frame (issues #892 and #837), so the difference between
+        // them is the roll: 36 + 240 = 276 for one page and 144 + 240 = 384
+        // for four. A budget of 300 sits between.
+        let alloc = DecodeLimits::default().with_max_alloc_bytes(300);
         assert!(decode_webp_with(&ANIM4_DELAY, alloc, LoadOptions::default()).is_ok());
         let err = decode_webp_with(&ANIM4_DELAY, alloc, all_pages())
-            .expect_err("288 bytes is over a 200-byte budget");
+            .expect_err("384 bytes is over a 300-byte budget");
         assert!(
             matches!(
                 err,
                 SourceError::AllocLimitExceeded {
-                    needed_bytes: 288,
+                    needed_bytes: 384,
                     geometry: Some(DeclaredGeometry {
                         width: 4,
                         height: 12,
@@ -2246,54 +2758,338 @@ mod tests {
      * all, because `vips webpsave` writes `dispose: none` everywhere and
      * this shape has to come out of `img2webp`.
      *
-     * The comparison is on the colour channels only, because this file also
-     * trips a separate divergence: it declares no alpha in `VP8X` and no
-     * `alpha_is_used` on either frame, yet the disposal makes the canvas
-     * transparent, and vips hands back four bands where libviprs hands back
-     * three. That is filed separately and is not fixable through
-     * `image-webp`'s public API, so this test asserts the half that is:
-     * the pixels under the disposed area are the cleared canvas and not
-     * frame 0.
+     * It is also the file issue #885 was about: nothing in any header
+     * declares alpha, and the canvas is transparent anyway, because frame 1
+     * is 2x2 on a 4x4 canvas and frame 0 disposes to background. vips
+     * reports **four** bands for it and libviprs reported three, so the
+     * transparent area came back as opaque black and the information was
+     * gone rather than mislabelled. Both halves are asserted here now.
      * Input: `DISPOSE_BG`, whose frame 0 covers the canvas in opaque red
      * and disposes to background, and whose frame 1 is a 2x2 blue square ->
-     * Output: page 1 is blue in the square and black (vips's transparent
-     * black, without the alpha) everywhere else, not red.
+     * Output: four bands, page 1 blue in the square and transparent
+     * everywhere else, not red.
      */
     #[test]
     fn a_frame_disposed_to_the_background_clears_the_canvas() {
         let raster = decode_webp_with(&DISPOSE_BG, DecodeLimits::default(), all_pages())
             .expect("the two-frame capture decodes");
         assert_eq!((raster.width(), raster.height()), (4, 8));
-        // Three bands here and four in vips; see the note above.
-        assert_eq!(raster.format(), PixelFormat::Rgb8);
+        assert_eq!(
+            raster.format(),
+            PixelFormat::Rgba8,
+            "a frame smaller than the canvas means alpha, which is issue #885"
+        );
 
-        // Every colour channel vips reads, with its alpha dropped, and with
-        // page 1 through the upstream blend loss because this file asks for
-        // frame 1 to be blended. The disposed area is zero and stays zero,
-        // so the loss shows up only on the blue square: 255 becomes 254.
-        let mut expected: Vec<u8> = DISPOSE_BG_ROLL
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .flat_map(|p| p[..3].to_vec())
-            .collect();
-        let blended = as_image_webp_blends(&expected[48..]);
-        expected[48..].copy_from_slice(&blended);
-        assert_eq!(raster.data(), &expected[..]);
+        // Every byte vips reads, exactly. This file asks for frame 1 to be
+        // blended over an opaque frame 0, which is the case `image-webp`
+        // loses a level on and this loader composites itself (issue #837).
+        assert_eq!(raster.data(), &DISPOSE_BG_ROLL[..]);
 
-        // Said again as the property rather than as 96 bytes, because the
+        // Said again as the property rather than as 128 bytes, because the
         // comparison above passes for the wrong reason if the fixture is
         // ever regenerated: the pixel outside frame 1's square has to be
         // the cleared canvas and not frame 0's red.
-        let page1 = &raster.data()[48..];
-        assert_eq!(&page1[..3], &[0, 0, 254], "the square is blue, a level low");
+        let page1 = &raster.data()[64..];
         assert_eq!(
-            &page1[6..9],
-            &[0, 0, 0],
-            "outside the square the canvas was disposed to the background, \
-             so frame 0's red is gone"
+            &page1[..4],
+            &[0, 0, 255, 255],
+            "the square is opaque blue, exactly, where the upstream blend \
+             would have made it 254"
         );
-        assert_ne!(&page1[6..9], &[255, 0, 0], "and it is not the red");
+        assert_eq!(
+            &page1[8..12],
+            &[0, 0, 0, 0],
+            "outside the square the canvas was disposed to the background, \
+             so frame 0's red is gone and the alpha says so"
+        );
+        assert_ne!(&page1[8..11], &[255, 0, 0], "and it is not the red");
+    }
+
+    /**
+     * Tests the two arms of the band rule that no vips-written file reaches,
+     * because libwebp's muxer sets the `VP8X` alpha flag whenever a frame
+     * carries alpha, so the per-frame term never decides anything on its own
+     * in a file vips produced. Works by clearing that flag on `ANIM4_RGBA`,
+     * which leaves a file whose frames all declare `alpha_is_used` and whose
+     * header does not.
+     * Measured on vips 8.18.6 against exactly this file: it still reports
+     * four bands, and `vips rawsave` gives byte-identical pixels to the
+     * original, so the flag really is only a claim about the header and the
+     * frames are the other half of the rule.
+     * The mutation sweep is why this exists: with only vips-written
+     * fixtures, dropping the per-frame term entirely and reading
+     * `alpha_is_used` from the wrong bit both left every test green, because
+     * `ANIM4_RGBA` returns early on the flag and no other fixture has a
+     * frame that declares alpha.
+     * Input: `ANIM4_RGBA` with its `VP8X` alpha flag cleared ->
+     * Output: four bands, and the same pixels as the flagged original.
+     */
+    #[test]
+    fn a_frame_declaring_alpha_means_alpha_even_when_the_header_does_not() {
+        let mut flagless = ANIM4_RGBA;
+        // The `VP8X` payload starts at 20 and its first byte is the flags.
+        assert_eq!(&flagless[12..16], b"VP8X");
+        assert_eq!(flagless[20] & 0b0001_0000, 0b0001_0000, "the flag is set");
+        flagless[20] &= !0b0001_0000;
+
+        let raster = decode_webp_with(&flagless, DecodeLimits::default(), all_pages())
+            .expect("clearing a header flag does not break the file");
+        assert_eq!(
+            raster.format(),
+            PixelFormat::Rgba8,
+            "every frame declares alpha, so the file has alpha whatever the \
+             header says"
+        );
+        let flagged = decode_webp_with(&ANIM4_RGBA, DecodeLimits::default(), all_pages())
+            .expect("the original decodes");
+        assert_eq!(
+            raster.data(),
+            flagged.data(),
+            "and the pixels are the original's, as vips reads them"
+        );
+    }
+
+    /**
+     * Tests that the chunk walk steps over the padding byte a RIFF chunk of
+     * odd length carries, so a file with one does not lose the frames after
+     * it. Works by splicing a three-byte `XMP ` chunk in front of the
+     * animation and requiring the band rule to answer the same as it does
+     * without it.
+     * RIFF pads every odd-length chunk to an even boundary and the length
+     * field does not count the pad, so a walk that adds only the length
+     * lands one byte early on the next header and reads a fourcc of
+     * rubbish. Here that means the `ANMF` chunks are never seen, the rule
+     * says no alpha, and a four-band file quietly comes back as three.
+     * No fixture in this module has an odd-length chunk, which is why the
+     * mutation that drops the pad survived until this existed.
+     * Input: `DISPOSE_BG` with a three-byte `XMP ` chunk spliced in ->
+     * Output: four bands, as without it, and the same pixels.
+     */
+    #[test]
+    fn the_chunk_walk_steps_over_an_odd_chunks_padding_byte() {
+        // After the `VP8X`, which is where the container puts `ICCP` and the
+        // only place an extra chunk is legal before the animation.
+        let split = 12 + 8 + 10;
+        assert_eq!(&DISPOSE_BG[12..16], b"VP8X");
+        assert_eq!(&DISPOSE_BG[split..split + 4], b"ANIM");
+        let mut padded = Vec::from(&DISPOSE_BG[..split]);
+        // A three-byte payload, so the chunk is 8 + 3 + 1 pad = 12 bytes.
+        padded.extend_from_slice(b"ICCP");
+        padded.extend_from_slice(&3u32.to_le_bytes());
+        padded.extend_from_slice(b"hi!");
+        padded.push(0);
+        padded.extend_from_slice(&DISPOSE_BG[split..]);
+        // The `VP8X` flags have to advertise the profile or the container is
+        // inconsistent; bit 5 is `ICC`.
+        padded[20] |= 0b0010_0000;
+        let added = (padded.len() - DISPOSE_BG.len()) as u32;
+        assert_eq!(added, 12, "the spliced chunk is padded to an even length");
+        // The RIFF size field counts everything after it.
+        let riff = u32::from_le_bytes(padded[4..8].try_into().unwrap()) + added;
+        padded[4..8].copy_from_slice(&riff.to_le_bytes());
+
+        let raster = decode_webp_with(&padded, DecodeLimits::default(), all_pages())
+            .expect("an extra metadata chunk does not break the file");
+        assert_eq!(
+            raster.format(),
+            PixelFormat::Rgba8,
+            "the walk found the frames past the odd chunk"
+        );
+        let plain = decode_webp_with(&DISPOSE_BG, DecodeLimits::default(), all_pages())
+            .expect("the original decodes");
+        assert_eq!(raster.data(), plain.data());
+    }
+
+    /**
+     * Tests that making the decoder read a different container costs no
+     * second copy of the file. Works by decoding an animation under a budget
+     * that is exactly the roll plus the working set the loader prices, which
+     * is smaller than the file itself.
+     * The loader changes one `VP8X` flags byte and one frame-info byte per
+     * frame, and it does that through a reader that patches them on the way
+     * past rather than by rewriting the bytes. The first version of this did
+     * copy, and the copy dominated: on a 4x3 fixture the file is 488 bytes
+     * against 384 of pixels, so no budget could sit between a one-page and a
+     * four-page load any more and `the_ceilings_are_checked_against_the_roll_not_the_frame`
+     * had nothing left to say.
+     * The budget is exact rather than generous, because that is the whole
+     * assertion: a copy priced through `check_alloc` would need 140 bytes
+     * more than this and the decode would be refused instead.
+     * Input: `DISPOSE_BG`, 140 bytes, under a budget of its roll plus five
+     * RGBA planes -> Output: it decodes.
+     */
+    #[test]
+    fn patching_the_container_costs_no_second_copy_of_the_file() {
+        // 4x4 canvas, two pages, four bands out, five RGBA planes of working
+        // set: 128 + 320.
+        let priced = 4 * 4 * 2 * 4 + DECODER_PLANES_ANIMATED as usize * 4 * 4 * 4;
+        assert_eq!(priced, 448);
+        assert!(
+            priced < DISPOSE_BG.len() + priced,
+            "the file is not zero bytes, so the two budgets differ"
+        );
+        let exact = DecodeLimits::default().with_max_alloc_bytes(priced as u64);
+        let raster = decode_webp_with(&DISPOSE_BG, exact, all_pages())
+            .expect("the priced amount is what the decode actually needs");
+        assert_eq!(raster.data(), &DISPOSE_BG_ROLL[..]);
+
+        // The control: one byte less and it is refused, so the budget above
+        // really is the boundary rather than somewhere comfortably above it.
+        let tight = DecodeLimits::default().with_max_alloc_bytes(priced as u64 - 1);
+        assert!(matches!(
+            decode_webp_with(&DISPOSE_BG, tight, all_pages()),
+            Err(SourceError::AllocLimitExceeded {
+                what: "WebP frame buffer",
+                ..
+            })
+        ));
+    }
+
+    /**
+     * Tests the rule that decides an animation's band count, which is not
+     * the `VP8X` alpha flag on its own. Works by decoding four fixtures that
+     * sit on different arms of it and comparing the format libviprs picks
+     * against the one vips reports for the same bytes.
+     * `webp2vips.c:413` starts from the flag, and `:464-471` turns it on for
+     * an animation if **any** frame carries alpha of its own or is smaller
+     * than the canvas, the second because a frame that does not cover the
+     * canvas leaves the area around it transparent. Measured on 8.18.6 with
+     * `vipsheader` on each file.
+     * `ANIM4_DELAY` and `ANIM5` are the negative controls: same loader, same
+     * animation shape, flag clear and every frame full-size and opaque, and
+     * vips says three bands for both. Without them a loader that answered
+     * four bands for every animation would pass.
+     * Input: four animations -> Output: three bands, three bands, four
+     * (`VP8X` flag and `alpha_is_used` set), four (sub-canvas frame).
+     */
+    #[test]
+    fn the_band_count_follows_vipss_rule_and_not_the_vp8x_flag_alone() {
+        for (name, bytes, expected) in [
+            (
+                "ANIM4_DELAY, flag clear, frames full-size and opaque",
+                &ANIM4_DELAY[..],
+                PixelFormat::Rgb8,
+            ),
+            (
+                "ANIM5, the same shape with five frames",
+                &ANIM5[..],
+                PixelFormat::Rgb8,
+            ),
+            (
+                "ANIM4_RGBA, flag set and every frame carries alpha",
+                &ANIM4_RGBA[..],
+                PixelFormat::Rgba8,
+            ),
+            (
+                "DISPOSE_BG, flag clear but frame 1 is 2x2 on a 4x4 canvas",
+                &DISPOSE_BG[..],
+                PixelFormat::Rgba8,
+            ),
+        ] {
+            let raster = decode_webp_with(bytes, DecodeLimits::default(), all_pages())
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(raster.format(), expected, "{name}");
+        }
+    }
+
+    /**
+     * Tests that the first frame is pasted rather than blended, whatever its
+     * header asks for, which is vips's `frame_num > 1` guard
+     * (`webp2vips.c:711-714`). Works by driving the compositor directly with
+     * one translucent source pixel, at index 0 and at index 1 over the same
+     * canvas.
+     * No fixture reaches this, and that is the point: blending over the
+     * empty canvas is *nearly* the identity, because the destination alpha is
+     * zero so the factor is zero and the rounding term usually carries the
+     * value back. Usually. `scale` is `(1 << 24) / src_a` and the remainder
+     * it drops is `(1 << 24) mod src_a`, so at `src_a = 251` a channel of 255
+     * loses 31,875 against a rounding term of 4,096 and comes back **254**.
+     * That is the value used here, found by working out where the identity
+     * breaks rather than by trying values, and the mutation that drops the
+     * guard survived every animation fixture in this module before it.
+     * Input: one pixel at alpha 251 over an empty canvas, composited as
+     * frame 0 and as frame 1 -> Output: 255 for the first, 254 for the
+     * second.
+     */
+    #[test]
+    fn the_first_frame_is_pasted_rather_than_blended() {
+        let frame = AnimFrame {
+            x: 0,
+            y: 0,
+            w: 1,
+            h: 1,
+            blend: true,
+            dispose: false,
+            has_alpha: true,
+        };
+        let source = [255u8, 255, 255, 251];
+
+        let mut first = Compositor::new(1, 1);
+        assert_eq!(
+            first.add(0, frame, &source),
+            &source,
+            "frame 0 is a paste, so it is the source pixel exactly"
+        );
+
+        let mut later = Compositor::new(1, 1);
+        let blended = later.add(1, frame, &source).to_vec();
+        assert_eq!(
+            blended,
+            vec![254, 254, 254, 251],
+            "and frame 1 blends, which at this alpha is not the identity"
+        );
+        assert_ne!(
+            blended,
+            source.to_vec(),
+            "so the two arms really do differ on this input"
+        );
+    }
+
+    /**
+     * Tests all three arms of the blend against vips on one file: a fully
+     * transparent source pixel, a translucent one and an opaque one.
+     * Works on `TRANSLUCENT`, whose frame 1 asks to be blended over an
+     * opaque red frame 0 and holds alpha 0, 0, 128 and 255 across its four
+     * pixels.
+     * vips's `blend_pixel` returns the destination untouched for a source
+     * alpha of 0, and that arm had no fixture: every animation here either
+     * blends nothing or blends pixels that are opaque or nearly so. The
+     * mutation that blends a transparent source anyway survived the whole
+     * suite, and it is not a no-op, because `blend_over` of a transparent
+     * source over a transparent destination gives `blend_a == 0` and a zero
+     * scale rather than the destination.
+     * Measured on vips 8.18.6 against exactly this file: page 1 is red,
+     * red, `(127, 128, 0)` and green, all opaque. The opaque pixel is the
+     * #837 case and comes back `(0, 255, 0)` rather than `(0, 254, 0)`; the
+     * translucent one is the #917 case and needs vips's rounding rather
+     * than libwebp's or `image-webp`'s.
+     * Input: a two-frame 2x2 animation -> Output: vips's bytes, exactly.
+     */
+    #[test]
+    fn every_arm_of_the_blend_matches_vips_on_one_file() {
+        let raster = decode_webp_with(&TRANSLUCENT, DecodeLimits::default(), all_pages())
+            .expect("the two-frame fixture decodes");
+        assert_eq!(raster.format(), PixelFormat::Rgba8);
+        assert_eq!(raster.data(), &TRANSLUCENT_ROLL[..]);
+
+        // Said again as the three arms, because the 32-byte comparison above
+        // passes for the wrong reason if the fixture is ever regenerated.
+        let page1 = &raster.data()[16..];
+        assert_eq!(
+            &page1[..4],
+            &[255, 0, 0, 255],
+            "a fully transparent source leaves the canvas alone"
+        );
+        assert_eq!(
+            &page1[8..12],
+            &[127, 128, 0, 255],
+            "a half-transparent source blends, with vips's rounding"
+        );
+        assert_eq!(
+            &page1[12..],
+            &[0, 255, 0, 255],
+            "and an opaque source is exact, not a level low"
+        );
     }
 
     /**
@@ -2350,11 +3146,11 @@ mod tests {
             .expect("the crafted file still decodes");
         assert_eq!((raster.width(), raster.height()), (4, 12));
         assert_eq!(
-            worst_delta(raster.data(), &LYING_ROLL),
-            1,
-            "a blended decode is one grey level from libwebp; anything larger \
-             means a blend was skipped rather than rounded"
+            raster.data(),
+            &LYING_ROLL[..],
+            "a blended decode is byte-exact with vips, header lie and all"
         );
+        assert_eq!(worst_delta(raster.data(), &LYING_ROLL), 0);
 
         // The control. `ANIM4_RGBA_ROLL` is this same file decoded with
         // blending off, which is exactly what the withdrawn rewrite made
@@ -2519,7 +3315,7 @@ mod tests {
         // Re-encoded from what this build decoded, so the roll that comes
         // back is that, not vips's original: the loss happened on the way
         // in and a lossless save cannot undo it.
-        assert_eq!(back.data(), &anim4_as_decoded()[..]);
+        assert_eq!(back.data(), &ANIM4_ROLL[..]);
         assert_eq!(back.pages_loaded(), 1);
         for field in ["n-pages", "page-height", "delay", "loop"] {
             assert_eq!(back.get_field(field), None, "{field} on the round trip");

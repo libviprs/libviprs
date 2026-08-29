@@ -1,15 +1,17 @@
 //! Pure-Rust text and tabular raster codecs: the libvips `matrix` and `csv`
-//! text formats and the Netpbm `ppm`/`pgm` family.
+//! text formats and the Netpbm `ppm`/`pgm`/`pbm` family.
 //!
 //! These formats carry pixel values as plain text or as a tiny binary
-//! Netpbm blob, so they need no external codec crate. Each pairs an encoder
-//! with a decoder that round-trips it losslessly:
+//! Netpbm blob, so they need no external codec crate. Every encoder here has
+//! a decoder that round-trips it losslessly; the Netpbm decoder reads more
+//! than the Netpbm encoder writes, which is deliberate and is set out below:
 //!
 //! | format | encode | decode | reload as |
 //! |---|---|---|---|
 //! | libvips `matrix` | [`Raster::matrix_save`] | [`Raster::matrix_load`] | single-band float |
 //! | CSV | [`Raster::csv_save`] | [`Raster::csv_load`] | single-band float |
 //! | Netpbm PPM/PGM | [`Raster::ppm_save`] / [`Raster::encode_ppm`] | [`Raster::ppm_load`] | 1- or 3-band `uchar`/`ushort` |
+//! | Netpbm PBM (`P1`, `P4`) | nothing writes these | [`Raster::ppm_load`] | 1-band `uchar`, `1` black and `0` white |
 //!
 //! The decoders are associated functions on [`Raster`] (`Raster::matrix_load`,
 //! `Raster::csv_load`, `Raster::ppm_load`), so a caller reaches them through the
@@ -30,20 +32,97 @@
 //! fixes the width and the row count fixes the height. Like `matrix`, CSV is
 //! a one-band numeric format and reloads as `FloatF32(1)`.
 //!
-//! ## Netpbm PPM/PGM
+//! ## Netpbm PPM/PGM/PBM
 //!
-//! [`Raster::ppm_load`] reads the four ASCII/binary variants the ported cells
-//! exercise: `P2` (ASCII gray), `P3` (ASCII RGB), `P5` (binary gray), and
-//! `P6` (binary RGB), including `#` header comments. A `maxval` of `255` or
-//! less decodes to an 8-bit raster; a larger `maxval` (up to `65535`) decodes
-//! to 16-bit, with binary samples read most-significant-byte-first as the
-//! Netpbm specification requires. [`Raster::ppm_save`] and
+//! [`Raster::ppm_load`] reads six ASCII/binary variants: `P1` (ASCII bitmap),
+//! `P2` (ASCII grey), `P3` (ASCII RGB), `P4` (binary bitmap), `P5` (binary
+//! grey) and `P6` (binary RGB), including `#` header comments. A `maxval` of
+//! `255` or less decodes to an 8-bit raster; a larger `maxval` (up to `65535`)
+//! decodes to 16-bit, with binary samples read most-significant-byte-first as
+//! the Netpbm specification requires. [`Raster::ppm_save`] and
 //! [`Raster::encode_ppm`] emit the binary form: `P5` for a one-band raster and
 //! `P6` for a three-band one.
+//!
+//! ## The bitmap forms are read and not written, and that is the decision
+//!
+//! `P1` and `P4` carry one bit per pixel and no `maxval` field at all. They
+//! decode to `Gray8` with **`1` black and `0` white**, inverted against every
+//! other format in this crate, which is why the polarity lives in one place
+//! (`bitmap_ink`) with the four measured pixels on it. `P4` packs eight
+//! pixels to a byte most significant bit first and pads **each row** out to a
+//! whole byte, so a two-pixel-wide bitmap is one byte a row and six bits of
+//! every row are padding rather than pixels.
+//!
+//! ### A `P1` sample is one character, which is where this leaves the oracle
+//!
+//! The plain-PBM specification says each pixel is a single ASCII `1` or `0` and
+//! that white space in the raster is *ignored* rather than required, and
+//! netpbm's own writers take it at its word: `pamtopnm -plain` emits a whole
+//! row as one unbroken run of digits, and `pnmtopnm` reads that straight back
+//! to the packed `P4` it came from.
+//!
+//! Measured on the pinned 8.18.6, **vips cannot read those files**. `ppmload`
+//! tokenises `P1` as whitespace-delimited integers, so it takes
+//! `101001010011` for one number, calls the first pixel ink and invents the
+//! rest:
+//!
+//! ```text
+//! source                         first row vips reports
+//! the P4 it came from            0 255 0 255 255 0 255 0 255 255 0 0
+//! ImageMagick's spaced P1        0 255 0 255 255 0 255 0 255 255 0 0
+//! netpbm's unspaced P1           0 0 255 255 255 255 255 255 255 255 255 255
+//! ```
+//!
+//! So this reads characters, and that is a **deliberate divergence from the
+//! oracle** (issue #928) rather than an oversight. The two parses agree
+//! wherever vips is right, because a legal sample is one character and a
+//! space-separated file tokenises identically either way; they differ only on
+//! files vips already garbles. This half is also the stricter one, since a
+//! character that is not `0` or `1` is refused by name where vips coerces `x`
+//! and `4294967296` into white.
+//!
+//! Nothing in this crate writes them, and that is a decision rather than an
+//! omission.
+//!
+//! The property #882 established, and #910 restored, is that everything this
+//! crate **writes** it can **read**. It has never been the converse: `P2` and
+//! `P3` have decoded since #77 and no route has ever written either. The
+//! decode set has always been strictly wider than the encode set, so widening
+//! it by two more leaves the invariant that matters untouched.
+//!
+//! Writing `P4` would need a thresholding policy, and there is no oracle to
+//! copy. Measured on the pinned vips 8.18.6, `vips ppmsave` to `.pbm`
+//! thresholds at 128 (the grey ramp `0 1 2 127 128 129 254 255` writes `f0`,
+//! so a sample under 128 is ink) and then **right-aligns the last partial byte
+//! of every row**, where its own reader takes those bits from the top of the
+//! byte:
+//!
+//! ```text
+//! width  vips wrote  what vips then reads back out of its own file
+//! 4      0c          all four white, for an input of 0 1 128 255
+//! 5      1a          255 255 255 0 0, for an input of 0 0 255 0 255
+//! 9      80 01       the ninth pixel white, where the input was black
+//! 12     b2 0c       the last four white, where the input ended 255 255
+//! ```
+//!
+//! **The reader is the correct half of that, checked rather than assumed.**
+//! The same 5-wide picture hand-packed the way the spec says, left-aligned as
+//! `d0`, reads back through vips as `0 0 255 0 255`, which is the grey input
+//! thresholded. So `ppmload` is right and it is `ppmsave` that disagrees with
+//! it, and this decoder matches the reader. Without that control the table
+//! above has two readings and only one of them is true.
+//!
+//! Only a width that is a multiple of eight survives that. So matching the
+//! oracle's bytes means writing files the oracle itself misreads, and writing
+//! correct bytes means diverging from it; neither is parity. That is the same
+//! ground #882 stood on when it left `.pbm` and `.pfm` out of the save routes,
+//! that no encoder stands behind them.
+//! `the_bitmap_forms_decode_and_nothing_here_writes_them` pins the asymmetry,
+//! so the day an encoder does arrive it goes red and says so.
 
 use crate::codec::{DecodeError, EncodeError};
 use crate::pixel::{PixelFormat, SampleKind, read_sample_f64};
-use crate::raster::{DEFAULT_MAX_ALLOC_BYTES, Raster, RasterError};
+use crate::raster::Raster;
 use std::io::{Error as IoError, ErrorKind};
 
 /// Build a typed [`DecodeError`] for a malformed text or Netpbm input.
@@ -199,6 +278,50 @@ impl Raster {
         Ok(out)
     }
 
+    /// The shared save routes' entry point: encode the Netpbm container the
+    /// **suffix** names, or refuse.
+    ///
+    /// This is the one row in either route where the suffix picks a container
+    /// rather than only a codec. Measured on the pinned vips 8.18.6,
+    /// `ppmsave` registers five suffixes and writes something different for
+    /// each: `.ppm` a `P6`, `.pgm` a `P5`, `.pbm` a `P4` and `.pfm` a `PF`,
+    /// converting the colourspace to whatever the suffix means, while `.pnm`
+    /// is refused outright for every interpretation it was handed.
+    ///
+    /// [`Raster::encode_ppm`] picks its magic from the band count instead, so
+    /// the two agree only when the raster already matches the suffix. Where
+    /// they disagree this refuses rather than converting, the same call the
+    /// `.hdr` row makes (#880): no row in the save table converts, and these
+    /// are not going to be the first. The alternative is writing a `P5` body
+    /// into a file called `.ppm`, which is the one outcome neither vips nor
+    /// Netpbm reads as correct.
+    ///
+    /// `.pbm` and `.pfm` are not routed here at all, because this build has no
+    /// `P4` or `PF` encoder to route them to (issue #882).
+    ///
+    /// # Errors
+    ///
+    /// [`EncodeError::Unsupported`] for a suffix that is not `ppm` or `pgm`,
+    /// [`EncodeError::InvalidParameter`] for a raster whose band count is not
+    /// the one the suffix names, and whatever [`Raster::encode_ppm`] reports
+    /// for a sample kind Netpbm has no binary form for.
+    pub(crate) fn encode_netpbm(&self, suffix: &str) -> Result<Vec<u8>, EncodeError> {
+        let (want, magic) = match suffix {
+            "ppm" => (3usize, "P6"),
+            "pgm" => (1usize, "P5"),
+            other => return Err(EncodeError::unsupported(other.to_owned())),
+        };
+        let got = self.format().channels();
+        if got != want {
+            return Err(EncodeError::InvalidParameter(format!(
+                ".{suffix} is the {magic} Netpbm container, which carries {want} \
+                 bands, and this raster has {got}; vips converts the colourspace \
+                 to suit the suffix and libviprs does not"
+            )));
+        }
+        self.encode_ppm()
+    }
+
     /// Serialise as a binary Netpbm image, or empty bytes when unsupported.
     ///
     /// The infallible convenience over [`Raster::encode_ppm`]: it returns the
@@ -316,18 +439,41 @@ impl Raster {
         Ok(Raster::from_f32_samples(width, height, float1()?, &values)?)
     }
 
-    /// Decode a Netpbm PPM/PGM image (`P2`, `P3`, `P5`, or `P6`).
+    /// Decode a Netpbm image (`P1`, `P2`, `P3`, `P4`, `P5`, or `P6`).
     ///
     /// 8-bit (`maxval <= 255`) images decode to `Gray8`/`Rgb8`; 16-bit images
     /// (`maxval` up to `65535`) to `Gray16`/`Rgb16`, with binary samples read
     /// most-significant-byte-first. `#` comments are honoured in the header.
     ///
+    /// The bitmap forms `P1` and `P4` carry no `maxval` field and decode to
+    /// `Gray8` with **`1` black and `0` white**, which is inverted against
+    /// every other format here (issue #919, and `bitmap_ink` carries the
+    /// measurement). `P4` pads each row out to a whole byte, so the tail bits
+    /// of a short row are padding and not pixels. A `P1` sample is **one
+    /// character**, not a whitespace-delimited integer, which is what the
+    /// plain-PBM specification says and what netpbm's own writers emit;
+    /// `next_bit` carries that measurement and the reason it diverges from
+    /// vips (issue #928). Nothing in this crate writes either form; the module
+    /// docs say why.
+    ///
     /// The pixel buffer is bounded before it is reserved: the declared
-    /// dimensions are capped against [`DEFAULT_MAX_ALLOC_BYTES`] (the same
-    /// budget the [`Raster`] constructors enforce), the binary body must be
-    /// wholly present before any reservation, and the reservation itself is
-    /// fallible, so a hostile header cannot force a multi-gigabyte allocation
-    /// or a process abort. The inverse is [`Raster::ppm_save`].
+    /// geometry is priced against the allocation budget through
+    /// `DecodeLimits::check_image_alloc` (named rather than linked: it is
+    /// `pub(crate)` and these docs are public),
+    /// the binary body must be wholly present before any reservation, and the
+    /// reservation itself is fallible, so a hostile header cannot force a
+    /// multi-gigabyte allocation or a process abort. The inverse is
+    /// [`Raster::ppm_save`].
+    ///
+    /// This runs at [`DecodeLimits::default`](crate::source::DecodeLimits),
+    /// which is what the sniffed route uses, so decoding the same bytes by
+    /// name and by route gives the same answer (issue #563). It used to cap at
+    /// `DEFAULT_MAX_ALLOC_BYTES` instead, **8 GiB** against the route
+    /// default's **512 MiB**, so this entry point accepted declared sizes every
+    /// other container refused. `decode_netpbm` takes the
+    /// limits explicitly (issue #910). Named rather than linked because it is
+    /// `pub(crate)` and this method's docs are public, which
+    /// `-D rustdoc::private_intra_doc_links` refuses.
     ///
     /// # Errors
     ///
@@ -336,14 +482,70 @@ impl Raster {
     /// a non-numeric ASCII sample, a truncated binary body, declared
     /// dimensions past the allocation budget, or a raster the dimensions
     /// cannot construct.
+    ///
+    /// A truncated `P4` body is refused, the same as a truncated `P5` or `P6`
+    /// one. vips is not consistent here and this follows the half of it that
+    /// is defensible: measured on 8.18.6, a short `P5` body errors on the
+    /// first pixel read (`memory area too small`) while a short `P4` body
+    /// loads and fills the rows that are not in the file with **black**, so a
+    /// `2x2` carrying one of its two body bytes comes back four black pixels
+    /// when the byte present says the first row is `white black`. Inventing
+    /// pixels is worse than refusing bytes.
     pub fn ppm_load(data: &[u8]) -> Result<Raster, DecodeError> {
+        decode_netpbm(data, crate::source::DecodeLimits::default())
+    }
+}
+
+/// The route table's Netpbm entry point, under the caller's
+/// [`DecodeLimits`](crate::source::DecodeLimits).
+///
+/// [`Raster::ppm_load`] is this with the default limits, so the named entry
+/// point and the sniffed one give the same answer for the same bytes, which
+/// is the property issue #563 is about.
+///
+/// # It had a budget, and not the route's budget
+///
+/// Before issue #910 this capped the declared size against
+/// [`DEFAULT_MAX_ALLOC_BYTES`], **8 GiB**, where every route's default is
+/// `DecodeLimits::default().max_alloc_bytes`, **512 MiB**. Sixteen times
+/// apart, so a declared 4 GiB Netpbm was refused by every other container in
+/// the table and accepted here. A component enforcing *a* limit is not the
+/// same as one enforcing *the* limit, and a refusal table cannot tell the two
+/// apart from outside: the rows pass either way, which is worse than an
+/// absent row because it reads as coverage.
+///
+/// So the ceiling is now [`DecodeLimits::check_image_alloc`], the same call
+/// every other native container makes, and it reports
+/// [`SourceError::AllocLimitExceeded`] naming the caller's number rather than
+/// a constant.
+///
+/// # Errors
+///
+/// [`SourceError::AllocLimitExceeded`] if the declared geometry prices past
+/// the caller's allocation budget, and the malformed-input errors
+/// [`Raster::ppm_load`] documents.
+///
+/// # The bitmap forms price the raster, not the body
+///
+/// A `P4` body is one eighth of the raster it builds, rounded up per row, so
+/// the two numbers are not interchangeable and only one of them is the
+/// allocation. The budget check runs on `width * height * 1 * 1`, the buffer
+/// this returns, before the packed body is even located; a check on the packed
+/// size would let a caller through at eight times its own ceiling.
+pub(crate) fn decode_netpbm(
+    data: &[u8],
+    limits: crate::source::DecodeLimits,
+) -> Result<Raster, DecodeError> {
+    {
         let mut pos = 0usize;
         let magic = next_token(data, &mut pos).ok_or_else(|| malformed("ppm: empty input"))?;
-        let (channels, ascii) = match magic.as_slice() {
-            b"P2" => (1usize, true),
-            b"P3" => (3usize, true),
-            b"P5" => (1usize, false),
-            b"P6" => (3usize, false),
+        let (channels, ascii, bitmap) = match magic.as_slice() {
+            b"P1" => (1usize, true, true),
+            b"P2" => (1usize, true, false),
+            b"P3" => (3usize, true, false),
+            b"P4" => (1usize, false, true),
+            b"P5" => (1usize, false, false),
+            b"P6" => (3usize, false, false),
             other => {
                 let shown = String::from_utf8_lossy(other).into_owned();
                 return Err(malformed(format!(
@@ -354,7 +556,17 @@ impl Raster {
 
         let width = next_u32(data, &mut pos, "width")?;
         let height = next_u32(data, &mut pos, "height")?;
-        let maxval = next_u32(data, &mut pos, "maxval")?;
+        // The bitmap forms carry **no `maxval` field**: a `P1`/`P4` sample is
+        // one bit, so its range is fixed and the header stops at the height.
+        // Reading one anyway would eat pixels. A `P1` that wrongly carries a
+        // `255` proves the field is not read: its first three samples are the
+        // digits `2`, `5`, `5`, so the picture is `0 0 0 255` where a reader
+        // that consumed a `maxval` would answer `255 0 0 255`.
+        let maxval = if bitmap {
+            1
+        } else {
+            next_u32(data, &mut pos, "maxval")?
+        };
         if maxval == 0 || maxval > 65535 {
             return Err(malformed(format!(
                 "ppm: maxval {maxval} out of range 1..=65535"
@@ -379,18 +591,11 @@ impl Raster {
         let need = count
             .checked_mul(bpc)
             .ok_or_else(|| malformed("ppm: declared dimensions overflow"))?;
-        // Cap the declared size against the shared allocation budget before
-        // reserving, so a ~20-byte hostile header cannot request gigabytes.
-        if need as u64 > DEFAULT_MAX_ALLOC_BYTES {
-            return Err(RasterError::ByteBudgetExceeded {
-                width,
-                height,
-                format: fmt,
-                bytes: need as u64,
-                budget: DEFAULT_MAX_ALLOC_BYTES,
-            }
-            .into());
-        }
+        // Cap the declared geometry against the **caller's** budget before
+        // reserving, so a ~20-byte hostile header cannot request gigabytes,
+        // and so this route refuses at the same number every other container
+        // refuses at (issue #910). `check_image_alloc` is that shared call.
+        limits.check_image_alloc("ppm pixel data", width, height, channels as u64, bpc as u64)?;
 
         let mut buf: Vec<u8> = Vec::new();
         if ascii {
@@ -399,6 +604,14 @@ impl Raster {
             buf.try_reserve_exact(need)
                 .map_err(|_| malformed("ppm: cannot allocate pixel buffer"))?;
             for _ in 0..count {
+                if bitmap {
+                    // A `P1` sample is **one character**, not a
+                    // whitespace-delimited integer: `next_bit` carries the
+                    // measurement and the reason this diverges from vips
+                    // (issue #928).
+                    buf.push(bitmap_ink(next_bit(data, &mut pos)?));
+                    continue;
+                }
                 let v = next_u32(data, &mut pos, "sample")?;
                 if v > maxval {
                     return Err(malformed("ppm: sample exceeds maxval"));
@@ -407,6 +620,40 @@ impl Raster {
                     buf.push(v as u8);
                 } else {
                     buf.extend_from_slice(&(v as u16).to_ne_bytes());
+                }
+            }
+        } else if bitmap {
+            // Exactly one whitespace byte separates the height from the raster.
+            if pos < data.len() && data[pos].is_ascii_whitespace() {
+                pos += 1;
+            }
+            // A `P4` row is packed eight pixels to a byte, most significant bit
+            // first, and **each row is padded out to a whole byte**, so the body
+            // is `ceil(width / 8) * height` rather than `width * height / 8`
+            // and the tail bits of a short row are not pixels. Measured on
+            // 8.18.6: a 9-wide `P4` whose two body bytes are `80 80` reads as
+            // one black pixel, seven white, one black, which only works if the
+            // ninth pixel comes from the top bit of the second byte.
+            let row_bytes = (width as usize).div_ceil(8);
+            let packed = row_bytes
+                .checked_mul(height as usize)
+                .ok_or_else(|| malformed("ppm: declared dimensions overflow"))?;
+            // The packed body is what has to be present, and the *unpacked*
+            // raster is what gets reserved: `check_image_alloc` above already
+            // priced `width * height`, which is up to eight times the bytes on
+            // disk, so the budget bounds what this builds and not what it reads.
+            let end = pos
+                .checked_add(packed)
+                .ok_or_else(|| malformed("ppm: declared dimensions overflow"))?;
+            let body = data
+                .get(pos..end)
+                .ok_or_else(|| malformed("ppm: truncated binary pixel data"))?;
+            buf.try_reserve_exact(need)
+                .map_err(|_| malformed("ppm: cannot allocate pixel buffer"))?;
+            for y in 0..height as usize {
+                let row = &body[y * row_bytes..][..row_bytes];
+                for x in 0..width as usize {
+                    buf.push(bitmap_ink(row[x / 8] & (0x80u8 >> (x % 8)) != 0));
                 }
             }
         } else {
@@ -439,12 +686,55 @@ impl Raster {
     }
 }
 
+/// The 8-bit sample a Netpbm bitmap bit decodes to: **set is black**.
+///
+/// `P1` and `P4` invert the convention every other format in this crate uses.
+/// A `1` bit is ink and reads back as `0`; a `0` bit is paper and reads back as
+/// `255`. Measured on the pinned vips 8.18.6 rather than taken from the spec:
+///
+/// ```text
+/// $ printf 'P1\n2 2\n0 1 1 0\n' > ascii.pbm
+/// $ for y in 0 1; do for x in 0 1; do vips getpoint ascii.pbm $x $y; done; done
+/// 255
+/// 0
+/// 0
+/// 255
+/// ```
+///
+/// The source tokens were `0 1 1 0` and the pixels came back `255 0 0 255`.
+///
+/// It is one function rather than an inline `if` in each of the two decoders
+/// because getting it backwards produces a **negative image of the right size,
+/// the right band count and the right sample kind**, which no dimension, band
+/// or allocation check can see (issue #919). One place to be wrong is one place
+/// to test, and `netpbm_bitmap_ink_is_set_is_black` drives it directly.
+const fn bitmap_ink(set: bool) -> u8 {
+    if set { 0 } else { 255 }
+}
+
 /// Read the next whitespace-delimited token from a Netpbm header, skipping
 /// leading whitespace and `#` comments (comments run to end of line).
 ///
 /// Returns the token bytes, or `None` at end of input. Used only while reading
 /// the ASCII header and ASCII sample stream, never over the binary blob.
 fn next_token(data: &[u8], pos: &mut usize) -> Option<Vec<u8>> {
+    skip_blanks_and_comments(data, pos);
+    if *pos >= data.len() {
+        return None;
+    }
+    let start = *pos;
+    while *pos < data.len() && !data[*pos].is_ascii_whitespace() && data[*pos] != b'#' {
+        *pos += 1;
+    }
+    Some(data[start..*pos].to_vec())
+}
+
+/// Advance `pos` past whitespace and `#` comments (comments run to end of line).
+///
+/// Shared by [`next_token`] and [`next_bit`] rather than written twice, because
+/// the two readers have to agree about where a sample starts and a second copy
+/// is a second place for that to drift.
+fn skip_blanks_and_comments(data: &[u8], pos: &mut usize) {
     loop {
         while *pos < data.len() && data[*pos].is_ascii_whitespace() {
             *pos += 1;
@@ -457,14 +747,53 @@ fn next_token(data: &[u8], pos: &mut usize) -> Option<Vec<u8>> {
             break;
         }
     }
-    if *pos >= data.len() {
-        return None;
+}
+
+/// Read the next plain-PBM sample: **one** ASCII `0` or `1`.
+///
+/// A `P1` sample is a single character and the whitespace between samples is
+/// optional, which is what the plain-PBM specification says and what netpbm's
+/// own writers rely on: `pamtopnm -plain` emits a whole row as one unbroken
+/// run of digits, `101001010011`, and `pnmtopnm` reads that straight back to
+/// the packed `P4` it came from.
+///
+/// **This is a deliberate divergence from the oracle** (issue #928). Measured
+/// on the pinned vips 8.18.6, `ppmload` tokenises `P1` as whitespace-delimited
+/// integers, so it reads that row as the single number `101001010011`, calls
+/// the first pixel ink and invents every pixel after it: both rows come back
+/// nearly all white and neither is the picture. Reading integers there is not
+/// parity, it is copying a bug the format's own implementation does not have.
+///
+/// The two parses agree wherever vips is right, because a legal `P1` sample is
+/// one character, so a space-separated file tokenises identically either way,
+/// and so does an all-adjacent one under this reader. They separate on a file
+/// that mixes the two: `0 1 1 0` and `0110` both read `0 1 1 0` here, while
+/// `00 01 1 0` reads `0 0 0 1` here and `0 1 1 0` in vips, because vips takes
+/// `00` for one sample where the specification makes it two. Real writers emit
+/// one shape or the other and never that one.
+///
+/// This half is also the *stricter* one: a character that is not `0` or `1` is
+/// not a legal sample and is refused by name, where vips coerces `x`,
+/// `4294967296` and `0x1` into white and `+1` and `-1` into black.
+///
+/// # Errors
+///
+/// A typed [`DecodeError`] at end of input, or for a character that is neither
+/// `0` nor `1`.
+fn next_bit(data: &[u8], pos: &mut usize) -> Result<bool, DecodeError> {
+    skip_blanks_and_comments(data, pos);
+    let byte = *data
+        .get(*pos)
+        .ok_or_else(|| malformed("ppm: missing bitmap sample"))?;
+    *pos += 1;
+    match byte {
+        b'0' => Ok(false),
+        b'1' => Ok(true),
+        other => Err(malformed(format!(
+            "ppm: bitmap sample {:?} is not 0 or 1",
+            char::from(other)
+        ))),
     }
-    let start = *pos;
-    while *pos < data.len() && !data[*pos].is_ascii_whitespace() && data[*pos] != b'#' {
-        *pos += 1;
-    }
-    Some(data[start..*pos].to_vec())
 }
 
 /// Parse the next header token as a `u32`.
@@ -477,6 +806,162 @@ fn next_u32(data: &[u8], pos: &mut usize, what: &str) -> Result<u32, DecodeError
 
 #[cfg(test)]
 mod tests {
+    /**
+     * Tests that the sniffer claims exactly the six Netpbm magics this
+     * crate decodes, and no more (issues #910, #919).
+     *
+     * The route table's rule is that every row in `SniffedFormat::ALL` can
+     * reach a decoder, which `every_container_is_reachable_from_its_own_magic`
+     * enforces. So the sniffed set has to be the decodable set: `P1`, `P2` and
+     * `P3` for the ASCII forms, `P4`, `P5` and `P6` for the binary ones.
+     *
+     * **The absences are the assertion, not an oversight.** `PF` is the float
+     * PFM and `P7` is PAM, and this crate reads neither by any route, so
+     * claiming their magic would put a row in the table that cannot decode.
+     *
+     * #910 wrote this cell with `P1` and `P4` in the unclaimed half and said
+     * in its own body that the assertion was the thing that would go red the
+     * day #919 landed. It did, and this is that update rather than a
+     * deletion: the two magics moved across, and the half that keeps the rule
+     * honest kept its other two rows.
+     *
+     * An unasserted absence is a coincidence; this one is a rule.
+     */
+    #[test]
+    fn the_sniffer_claims_exactly_the_netpbm_magics_this_crate_decodes() {
+        use crate::source::{SniffedFormat, sniff};
+
+        for (magic, body) in [
+            (&b"P1"[..], &b"\n2 2\n0 1 1 0\n"[..]),
+            (&b"P2"[..], &b"\n2 2\n255\n0 1 2 3\n"[..]),
+            (&b"P3"[..], &b"\n1 1\n255\n0 1 2\n"[..]),
+            (&b"P4"[..], &b"\n2 2\n\x40\x80"[..]),
+            (&b"P5"[..], &b"\n2 2\n255\n\x00\x40\x80\xff"[..]),
+            (&b"P6"[..], &b"\n1 1\n255\n\x00\x40\x80"[..]),
+        ] {
+            let mut bytes = magic.to_vec();
+            bytes.extend_from_slice(body);
+            let name = String::from_utf8_lossy(magic).into_owned();
+            assert_eq!(
+                sniff(&bytes),
+                Some(SniffedFormat::Netpbm),
+                "{name} must be claimed"
+            );
+            // And claimed *because* it decodes, which is the table's rule.
+            assert!(
+                decode_netpbm(&bytes, crate::source::DecodeLimits::default()).is_ok(),
+                "{name} must decode, or it must not be a row"
+            );
+        }
+
+        for (magic, body) in [
+            (&b"PF"[..], &b"\n2 2\n-1.0\n"[..]),
+            (&b"P7"[..], &b"\nWIDTH 2\n"[..]),
+        ] {
+            let mut bytes = magic.to_vec();
+            bytes.extend_from_slice(body);
+            let name = String::from_utf8_lossy(magic).into_owned();
+            assert_eq!(
+                sniff(&bytes),
+                None,
+                "{name} has no decoder here, so it must not be a row"
+            );
+            // And unclaimed *because* it does not decode, which is the same
+            // rule read the other way. Without this half, deleting the
+            // decoder arms would leave the absences passing for the wrong
+            // reason.
+            assert!(
+                decode_netpbm(&bytes, crate::source::DecodeLimits::default()).is_err(),
+                "{name} must not decode, or it must be a row"
+            );
+        }
+    }
+
+    /**
+     * Tests that the Netpbm route refuses at the **caller's** budget and not
+     * at a constant of its own (issue #910).
+     *
+     * This is the whole substance of the change and it is invisible from a
+     * refusal table. Before #910 this path capped against
+     * `DEFAULT_MAX_ALLOC_BYTES`, **8 GiB**, where every route's default is
+     * `DecodeLimits::default().max_alloc_bytes`, **512 MiB**. Sixteen times
+     * apart, so a declared 4 GiB Netpbm was refused by every other container
+     * and accepted here. It had *a* budget and not *the* budget, and a row in
+     * `tests/decode_alloc_refusal_shape.rs` would have passed either way,
+     * which is worse than an absent row because it reads as coverage.
+     *
+     * Only varying the caller's limit can see the difference, so that is what
+     * this does: the same 3 MiB header is accepted under a 512 MiB budget and
+     * refused under a 1 MiB one, and the refusal names **1 MiB**. A route
+     * still using the constant would accept both and a route hard-coding any
+     * other number would report that number.
+     */
+    #[test]
+    fn the_netpbm_route_refuses_at_the_callers_budget_not_at_one_of_its_own() {
+        // 1024 x 1024 RGB8 is 3 MiB: comfortably inside the 512 MiB default
+        // and comfortably outside a 1 MiB ceiling.
+        let header = b"P6\n1024 1024\n255\n";
+        let mut bytes = header.to_vec();
+        bytes.resize(header.len() + 1024 * 1024 * 3, 0);
+
+        // Positive control: it decodes at all, so the refusal below is the
+        // ceiling and not the parser.
+        let ok = decode_netpbm(&bytes, crate::source::DecodeLimits::default())
+            .expect("3 MiB is inside the 512 MiB default");
+        assert_eq!((ok.width(), ok.height()), (1024, 1024));
+
+        let tight = crate::source::DecodeLimits::default().with_max_alloc_bytes(1024 * 1024);
+        let err = decode_netpbm(&bytes, tight).expect_err("3 MiB is outside a 1 MiB ceiling");
+        match &err {
+            crate::source::SourceError::AllocLimitExceeded {
+                needed_bytes,
+                max_alloc_bytes,
+                ..
+            } => {
+                assert_eq!(
+                    *max_alloc_bytes,
+                    1024 * 1024,
+                    "the refusal must name the caller's ceiling, not a constant"
+                );
+                assert_eq!(*needed_bytes, 1024 * 1024 * 3);
+            }
+            other => panic!("expected the route's alloc refusal, got {other:?}"),
+        }
+    }
+
+    /**
+     * Tests [`Raster::encode_netpbm`]'s refusal arm directly, because neither
+     * route can reach it (issue #882).
+     *
+     * Both callers match `"ppm" | "pgm"` before calling, so the `other` arm is
+     * unreachable through `Raster::save` and `Raster::encode_to_buffer` alike,
+     * and a mutation that replaced it with a silent `P6` fallback left the
+     * whole suite green. Every route check still passed, because every route
+     * check only ever asks for a suffix the routes already matched.
+     *
+     * That is the shape #696's first bullet is about, arriving through a
+     * different door: a branch the tests cannot drive is a branch nothing
+     * holds. So this drives it directly, with the two rows the routes do have
+     * as the positive control that the function works at all.
+     */
+    #[test]
+    fn encode_netpbm_refuses_a_suffix_it_has_no_container_for() {
+        let rgb = Raster::new(2, 2, PixelFormat::Rgb8, (0..12u8).collect()).unwrap();
+        for suffix in ["pbm", "pfm", "pnm", "ppm2", ""] {
+            let err = rgb
+                .encode_netpbm(suffix)
+                .expect_err("this build has no container for .{suffix}");
+            assert!(
+                matches!(&err, EncodeError::Unsupported { format } if format == suffix),
+                ".{suffix} must be refused by name, got {err}"
+            );
+        }
+        // Positive control: the two it does have.
+        assert!(rgb.encode_netpbm("ppm").unwrap().starts_with(b"P6"));
+        let gray = Raster::new(2, 2, PixelFormat::Gray8, vec![0, 64, 128, 255]).unwrap();
+        assert!(gray.encode_netpbm("pgm").unwrap().starts_with(b"P5"));
+    }
+
     use super::*;
 
     fn float1_test() -> PixelFormat {
@@ -663,14 +1148,18 @@ mod tests {
         assert!(!err.to_string().is_empty());
 
         // Dimensions whose byte size exceeds the allocation budget are rejected
-        // up front on the ASCII path too, before any per-sample parsing.
+        // up front on the ASCII path too, before any per-sample parsing. The
+        // variant is the route's, `AllocLimitExceeded`, and not the raster
+        // constructor's `ByteBudgetExceeded`, because this path now prices
+        // against the caller's `DecodeLimits` like every other container
+        // rather than against `DEFAULT_MAX_ALLOC_BYTES` (issue #910).
         let over_budget = b"P3\n65535 65535\n255\n";
         let err =
             Raster::ppm_load(over_budget).expect_err("over-budget header must be a typed error");
-        assert!(matches!(
-            err,
-            DecodeError::Raster(RasterError::ByteBudgetExceeded { .. })
-        ));
+        assert!(
+            matches!(err, DecodeError::AllocLimitExceeded { .. }),
+            "expected the route's alloc refusal, got {err:?}"
+        );
     }
 
     #[test]
@@ -713,6 +1202,440 @@ mod tests {
                 "{needle} is back in src/textio.rs; dispatch on \
                  PixelFormat::kind() and PixelFormat::with_kind() instead"
             );
+        }
+    }
+
+    /**
+     * Tests the bitmap polarity directly, on the one function that carries it
+     * (issue #919).
+     *
+     * `P1` and `P4` invert the convention every other format here uses: a set
+     * bit is ink and decodes to `0`, a clear bit is paper and decodes to
+     * `255`. Getting it backwards produces a negative image of the right
+     * width, the right height, the right band count and the right sample
+     * kind, so no dimension check, band check or allocation check can see it.
+     * That is why the polarity is one `const fn` and why it has a cell of its
+     * own rather than only being covered through the two decoders: a direct
+     * cell on the helper fails on the mutation, where an end-to-end cell can
+     * be argued about.
+     *
+     * Both directions, because "everything is white" and "everything is
+     * black" each pass half of this.
+     * Input: `bitmap_ink(true)` and `bitmap_ink(false)` -> Output: `0` and
+     * `255`.
+     */
+    #[test]
+    fn netpbm_bitmap_ink_is_set_is_black() {
+        assert_eq!(bitmap_ink(true), 0, "a set bit is ink, so it decodes to 0");
+        assert_eq!(
+            bitmap_ink(false),
+            255,
+            "a clear bit is paper, so it decodes to 255"
+        );
+    }
+
+    /**
+     * Tests that a `P1` ASCII bitmap decodes with `0` as white, pinned to the
+     * four pixels measured on the pinned vips 8.18.6 (issue #919).
+     *
+     * ```text
+     * $ printf 'P1\n2 2\n0 1 1 0\n' > ascii.pbm
+     * $ vipsheader ascii.pbm
+     * ascii.pbm: 2x2 uchar, 1 band, b-w, ppmload
+     * $ for y in 0 1; do for x in 0 1; do vips getpoint ascii.pbm $x $y; done; done
+     * 255
+     * 0
+     * 0
+     * 255
+     * ```
+     *
+     * The tokens were `0 1 1 0` and the pixels came back `255 0 0 255`. The
+     * fixture is deliberately not symmetric under inversion, so a reader that
+     * gets the polarity backwards cannot pass this.
+     * Input: `P1 / 2 2 / 0 1 1 0` -> Output: a 2x2 `Gray8` raster holding
+     * `255 0 0 255`.
+     */
+    #[test]
+    fn a_p1_ascii_bitmap_decodes_with_zero_as_white() {
+        let raster = Raster::ppm_load(b"P1\n2 2\n0 1 1 0\n").expect("P1 is a decodable form");
+        assert_eq!((raster.width(), raster.height()), (2, 2));
+        assert_eq!(raster.format(), PixelFormat::Gray8);
+        assert_eq!(
+            raster.data(),
+            &[255, 0, 0, 255],
+            "0 is white and 1 is black, which is inverted against every other \
+             format here (issue #919)"
+        );
+    }
+
+    /**
+     * Tests that a plain `P1` whose samples are not whitespace-separated
+     * decodes the way netpbm writes it, which vips cannot do (issue #928).
+     *
+     * The fixture is not invented. It came out of netpbm's own writer:
+     *
+     * ```text
+     * $ printf 'P4\n12 2\n\xa5\x30\x5a\xc0' > real_src.pbm
+     * $ pamtopnm -plain real_src.pbm
+     * P1
+     * 12 2
+     * 101001010011
+     * 010110101100
+     * $ pnmtopnm netpbm_plain.pbm     # straight back to the original bytes
+     * P4
+     * 12 2
+     * \xa5\x30\x5a\xc0
+     * ```
+     *
+     * The expected pixels are not hand-written either: they are whatever the
+     * `P4` the file came from decodes to, so the two spellings of one picture
+     * have to agree. That makes the cell a round trip through a third-party
+     * writer rather than a transcription.
+     *
+     * Measured on the pinned vips 8.18.6, `ppmload` reads the `P4` and
+     * ImageMagick's space-separated `P1` correctly and answers
+     * `0 0 255 255 255 255 255 255 255 255 255 255` for this one, which is
+     * neither row of the picture. Reading integers here is not parity, it is
+     * copying a bug the format's own implementation does not have.
+     * Input: netpbm's plain `P1` and the `P4` it was made from -> Output: the
+     * same 12x2 raster from both.
+     */
+    #[test]
+    fn a_plain_p1_with_unseparated_samples_decodes_the_way_netpbm_writes_it() {
+        let packed = Raster::ppm_load(b"P4\n12 2\n\xa5\x30\x5a\xc0").expect("the P4 source");
+        let plain = Raster::ppm_load(b"P1\n12 2\n101001010011\n010110101100\n")
+            .expect("netpbm's own plain P1 must decode");
+        assert_eq!((plain.width(), plain.height()), (12, 2));
+        assert_eq!(plain.format(), PixelFormat::Gray8);
+        assert_eq!(
+            plain.data(),
+            packed.data(),
+            "the plain and packed spellings of one picture must agree"
+        );
+
+        // The other legal spelling, which ImageMagick writes and vips does
+        // read, as the control that this is about the separators and not
+        // about the picture.
+        let spaced =
+            Raster::ppm_load(b"P1\n12 2\n1 0 1 0 0 1 0 1 0 0 1 1\n0 1 0 1 1 0 1 0 1 1 0 0\n")
+                .expect("the space-separated spelling");
+        assert_eq!(spaced.data(), packed.data());
+    }
+
+    /**
+     * Tests that a `P1` sample that is not `0` or `1` is refused by name
+     * (issue #928).
+     *
+     * Reading characters makes this half **stricter** than vips, which is the
+     * direction that costs nothing: a character that is not `0` or `1` is not
+     * a legal plain-PBM sample, where vips coerces it. Measured on 8.18.6, a
+     * `P1` holding `0 x 1 0` comes back `255 255 0 255` and one holding
+     * `0 4294967296 1 0` comes back the same, because both tokens fail its
+     * integer parse and it substitutes zero, which is white. Neither of those
+     * files says what vips says it says.
+     *
+     * The refusal names the offending character so a caller can see which one
+     * it was, and a legal file beside it is the positive control that
+     * "refused" is not just what this path always does.
+     * Input: `P1 / 2 2 / 0 2 1 0` and a legal `0 1 1 0` -> Output: an error
+     * naming `'2'`, and a decoded raster.
+     */
+    #[test]
+    fn a_p1_sample_that_is_not_zero_or_one_is_refused_by_name() {
+        let err = Raster::ppm_load(b"P1\n2 2\n0 2 1 0\n").expect_err("2 is not a P1 sample");
+        let text = err.to_string();
+        assert!(
+            text.contains("'2'") && text.contains("not 0 or 1"),
+            "the refusal must name the character it refused, got {text}"
+        );
+
+        let legal = Raster::ppm_load(b"P1\n2 2\n0 1 1 0\n").expect("0 and 1 are legal");
+        assert_eq!(legal.data(), &[255, 0, 0, 255]);
+    }
+
+    /**
+     * Tests that a `P1` header carries no `maxval` field, from two directions
+     * (issues #919, #928).
+     *
+     * A `P1`/`P4` header stops at the height, so a file that wrongly carries a
+     * `maxval` has that value read as pixels. Two fixtures, because one of them
+     * alone leaves a reading open:
+     *
+     * A stray `1` is made of legal sample characters, so both readings decode
+     * and the answers differ: no `maxval` gives `0 255 0 0` (the samples are
+     * `1 0 1 1`) and a reader that consumed one would give `255 0 0 255` (the
+     * samples are `0 1 1 0`). The pictures are not each other's inverse, so
+     * this cannot pass by getting the polarity wrong as well.
+     *
+     * A stray `255` is refused on its `2`, which is not a legal plain-PBM
+     * sample. A reader that consumed a `maxval` would never have looked at
+     * that character at all, so the refusal itself is the assertion.
+     * Input: the two files above -> Output: `0 255 0 0`, and a refusal naming
+     * `'2'`.
+     */
+    #[test]
+    fn a_p1_bitmap_header_carries_no_maxval_field() {
+        let stray_one =
+            Raster::ppm_load(b"P1\n2 2\n1\n0 1 1 0\n").expect("the stray 1 is pixel data");
+        assert_eq!(
+            stray_one.data(),
+            &[0, 255, 0, 0],
+            "the samples are 1 0 1 1, not the 0 1 1 0 a maxval reader would see"
+        );
+
+        let err = Raster::ppm_load(b"P1\n2 2\n255\n0 1 1 0\n")
+            .expect_err("the 2 of the stray 255 is not a sample");
+        assert!(
+            err.to_string().contains("'2'"),
+            "a maxval reader never reaches that character, got {err}"
+        );
+    }
+
+    /**
+     * Tests that a `P4` binary bitmap unpacks most significant bit first and
+     * that **each row** is padded out to a whole byte (issue #919).
+     *
+     * Nine pixels wide on purpose: eight would be a round number where a
+     * dropped `div_ceil` is the identity, and nine puts the last pixel of
+     * each row alone in a second byte with seven padding bits behind it.
+     * Measured on the pinned 8.18.6:
+     *
+     * ```text
+     * $ printf 'P4\n9 2\n\x80\x80\x01\x00' > bin.pbm
+     * row 0 -> 0 255 255 255 255 255 255 255 0
+     * row 1 -> 255 255 255 255 255 255 255 0 255
+     * ```
+     *
+     * Row 0's bytes are `80 80`: the first pixel is the top bit of byte one
+     * and the ninth is the top bit of byte two, which only works if the row
+     * restarts on a byte boundary. Row 1's `01 00` puts its only ink in the
+     * *bottom* bit of its first byte, the eighth pixel, so a reader that
+     * unpacked least significant bit first would put it first instead.
+     * Input: the file above -> Output: the two rows as measured.
+     */
+    #[test]
+    fn a_p4_binary_bitmap_unpacks_msb_first_and_pads_each_row_to_a_byte() {
+        let raster =
+            Raster::ppm_load(b"P4\n9 2\n\x80\x80\x01\x00").expect("P4 is a decodable form");
+        assert_eq!((raster.width(), raster.height()), (9, 2));
+        assert_eq!(raster.format(), PixelFormat::Gray8);
+        assert_eq!(
+            raster.data(),
+            &[
+                0, 255, 255, 255, 255, 255, 255, 255, 0, //
+                255, 255, 255, 255, 255, 255, 255, 0, 255,
+            ],
+            "nine pixels a row, two bytes a row, most significant bit first"
+        );
+    }
+
+    /**
+     * Tests that the bits past the end of a `P4` row are padding and not
+     * pixels (issue #919).
+     *
+     * The row-padding rule is only load-bearing if the padding is *ignored*,
+     * and a decoder that reads `width * height` bits as one continuous stream
+     * passes the previous cell's first row and fails here. So the fixture
+     * fills every padding bit with the opposite of what it should be:
+     * measured on 8.18.6, `P4 / 2 2 / 7f bf` reads `255 0 / 0 255` even
+     * though `7f` is six set bits after its two pixels and `bf` is six set
+     * bits after its two.
+     * Input: `P4 / 2 2 / 7f bf` -> Output: `255 0 0 255`, the same picture as
+     * the two-byte fixture whose padding is all zero.
+     */
+    #[test]
+    fn a_p4_rows_padding_bits_are_not_pixels() {
+        let junk_padding = Raster::ppm_load(b"P4\n2 2\n\x7f\xbf").expect("P4 with junk padding");
+        assert_eq!(
+            junk_padding.data(),
+            &[255, 0, 0, 255],
+            "six padding bits a row, none of them pixels"
+        );
+
+        // The same picture written with clean padding, as the control that
+        // says the assertion above is about the padding and not about the
+        // fixture.
+        let clean_padding = Raster::ppm_load(b"P4\n2 2\n\x40\x80").expect("P4 with clean padding");
+        assert_eq!(junk_padding.data(), clean_padding.data());
+    }
+
+    /**
+     * Tests that a truncated `P4` body is refused rather than filled in
+     * (issue #919).
+     *
+     * vips is not consistent here and this follows the half of it that is
+     * defensible. Measured on 8.18.6: a short `P5` body errors on the first
+     * pixel read (`VipsImage: memory area too small`), while a short `P4`
+     * body loads and fills the rows that are not in the file with **black**,
+     * so `P4 / 2 2 / 40` comes back four black pixels when the one byte
+     * present says the first row is `white black`. Inventing pixels is worse
+     * than refusing bytes, and this crate already refuses a short `P5`.
+     *
+     * The full two-byte file beside it is the positive control, so "refused"
+     * cannot pass because `P4` is broken generally.
+     * Input: `P4 / 2 2 / 40` and `P4 / 2 2 / 40 80` -> Output: a truncation
+     * error, and `255 0 0 255`.
+     */
+    #[test]
+    fn a_truncated_p4_body_is_refused_where_vips_fills_it_with_black() {
+        let err = Raster::ppm_load(b"P4\n2 2\n\x40").expect_err("one byte is half a 2x2 bitmap");
+        assert!(
+            err.to_string().contains("truncated"),
+            "a short P4 body must be named as truncated, got {err}"
+        );
+
+        let whole = Raster::ppm_load(b"P4\n2 2\n\x40\x80").expect("both body bytes present");
+        assert_eq!(whole.data(), &[255, 0, 0, 255]);
+    }
+
+    /**
+     * Tests that the `P4` route prices the raster it builds and not the body
+     * it reads, at the **caller's** ceiling (issue #919).
+     *
+     * A `P4` body is one eighth of the raster it unpacks into, rounded up per
+     * row, so the two numbers are not interchangeable and only one of them is
+     * the allocation. `1033 x 1031` unpacks to 1 065 023 bytes from a body of
+     * 134 030, which is a factor of about eight: under a 512 KiB ceiling the
+     * raster is over and the body is comfortably under, so a check placed on
+     * the packed size would let this through at eight times the caller's own
+     * limit and a refusal table could not tell the difference.
+     *
+     * The refusal has to name both numbers for that to be an assertion rather
+     * than a coincidence, so it asserts `max_alloc_bytes` is the caller's
+     * 512 KiB (not a constant of the route's own, which is what #910 fixed)
+     * and `needed_bytes` is the unpacked 1 065 023 (not the packed 134 030).
+     * The default-limits decode beside it is the positive control that the
+     * bytes are a valid bitmap.
+     *
+     * The width is not a multiple of eight and neither dimension is round,
+     * because a round one is where a dropped `div_ceil` is the identity.
+     * Input: a 1033x1031 `P4` under a 512 KiB budget and under the default ->
+     * Output: `AllocLimitExceeded { needed_bytes: 1065023, max_alloc_bytes:
+     * 524288 }`, and a decoded raster.
+     */
+    #[test]
+    fn the_p4_route_prices_the_raster_it_builds_not_the_body_it_reads() {
+        const WIDTH: usize = 1033;
+        const HEIGHT: usize = 1031;
+        const ROW_BYTES: usize = WIDTH.div_ceil(8); // 130
+        let header = format!("P4\n{WIDTH} {HEIGHT}\n");
+        let mut bytes = header.into_bytes();
+        bytes.resize(bytes.len() + ROW_BYTES * HEIGHT, 0);
+
+        // Positive control: the bytes are a valid bitmap, so the refusal
+        // below is the ceiling and not the parser.
+        let ok = decode_netpbm(&bytes, crate::source::DecodeLimits::default())
+            .expect("1 MiB is inside the 512 MiB default");
+        assert_eq!((ok.width() as usize, ok.height() as usize), (WIDTH, HEIGHT));
+
+        let tight = crate::source::DecodeLimits::default().with_max_alloc_bytes(512 * 1024);
+        let err = decode_netpbm(&bytes, tight).expect_err("the unpacked raster is over 512 KiB");
+        match &err {
+            crate::source::SourceError::AllocLimitExceeded {
+                needed_bytes,
+                max_alloc_bytes,
+                ..
+            } => {
+                assert_eq!(
+                    *max_alloc_bytes,
+                    512 * 1024,
+                    "the refusal must name the caller's ceiling, not a constant"
+                );
+                assert_eq!(
+                    *needed_bytes,
+                    (WIDTH * HEIGHT) as u64,
+                    "the price is the unpacked raster, not the {} packed body bytes",
+                    ROW_BYTES * HEIGHT
+                );
+            }
+            other => panic!("expected the route's alloc refusal, got {other:?}"),
+        }
+    }
+
+    /**
+     * Tests that the two bitmap forms decode and that nothing in this crate
+     * writes either, which is the decision #919 made rather than an omission
+     * (issue #919).
+     *
+     * The property #882 established, and #910 restored, is that everything
+     * this crate **writes** it can **read**. It has never been the converse:
+     * `P2` and `P3` have decoded since #77 and no route has ever written
+     * either, so the decode set has always been strictly wider than the
+     * encode set. Adding `P1` and `P4` widens it by two more and leaves the
+     * invariant that matters untouched.
+     *
+     * Writing `P4` would need a thresholding policy and there is no oracle to
+     * copy: measured on 8.18.6, `vips ppmsave` to `.pbm` right-aligns the
+     * last partial byte of every row where its own reader takes those bits
+     * from the top, so a 5-wide bitmap it writes reads back as a different
+     * picture. The module docs carry the four widths. Matching those bytes
+     * means writing files the oracle misreads and writing correct bytes means
+     * diverging from it, so neither is parity, which is the same ground #882
+     * stood on for `.pbm` and `.pfm`.
+     *
+     * This is the pin, so the day an encoder does arrive the asymmetry goes
+     * red and says so rather than being a surprise. The two decodes are its
+     * positive control, so "nothing writes them" cannot pass because nothing
+     * works.
+     * Input: a `P1` and a `P4` file, `encode_netpbm("pbm")`, and
+     * `encode_ppm` on a bilevel `Gray8` raster -> Output: both decode, `.pbm`
+     * is refused by name, and the encoder still writes `P5`.
+     */
+    #[test]
+    fn the_bitmap_forms_decode_and_nothing_here_writes_them() {
+        let p1 = Raster::ppm_load(b"P1\n2 2\n0 1 1 0\n").expect("P1 decodes");
+        let p4 = Raster::ppm_load(b"P4\n2 2\n\x40\x80").expect("P4 decodes");
+        assert_eq!(p1.data(), &[255, 0, 0, 255]);
+        assert_eq!(p4.data(), p1.data(), "the same picture in both forms");
+
+        // `.pbm` is the suffix `ppmsave` writes a `P4` to, and it is still
+        // refused by name here.
+        let err = p1
+            .encode_netpbm("pbm")
+            .expect_err(".pbm has no encoder here");
+        assert!(
+            matches!(&err, EncodeError::Unsupported { format } if format == "pbm"),
+            ".pbm must be refused by name, got {err}"
+        );
+
+        // And a raster that *is* bilevel still encodes as `P5`, so no writer
+        // can quietly start choosing the bitmap form without this saying so.
+        let written = p1.encode_ppm().expect("a Gray8 raster encodes");
+        assert!(
+            written.starts_with(b"P5"),
+            "a one-band raster encodes as P5, whatever its values"
+        );
+
+        // The invariant that actually matters, on the same bytes: what this
+        // crate writes, it reads.
+        let back = Raster::ppm_load(&written).expect("what we write we read");
+        assert_eq!(back.data(), p1.data());
+    }
+
+    /**
+     * Tests that a bitmap decodes the same by name and by route, which is the
+     * property issue #563 is about (issues #563, #919).
+     *
+     * `Raster::ppm_load` and the sniffed route are two entry points onto one
+     * decoder, and a magic wired into `SniffedFormat::Netpbm`'s row without a
+     * matching arm in `decode_netpbm` would sniff and then fail. Both forms,
+     * because the ASCII and binary halves are separate code paths and a round
+     * trip through one says nothing about the other.
+     * Input: a `P1` and a `P4` file through `Raster::ppm_load` and
+     * `crate::decode_bytes` -> Output: the same raster from both, four times.
+     */
+    #[test]
+    fn a_bitmap_decodes_the_same_by_name_and_by_route() {
+        for bytes in [&b"P1\n2 2\n0 1 1 0\n"[..], &b"P4\n2 2\n\x40\x80"[..]] {
+            let named = Raster::ppm_load(bytes).expect("the named entry point decodes it");
+            let routed = crate::decode_bytes(bytes).expect("the sniffed route decodes it");
+            assert_eq!(routed.format(), named.format());
+            assert_eq!(
+                (routed.width(), routed.height()),
+                (named.width(), named.height())
+            );
+            assert_eq!(routed.data(), named.data());
+            assert_eq!(named.data(), &[255, 0, 0, 255]);
         }
     }
 }
