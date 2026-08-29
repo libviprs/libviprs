@@ -1243,9 +1243,18 @@ impl Raster {
     ///
     /// # Errors
     ///
-    /// [`ConversionError::Band`] if `band` is out of range, or
+    /// [`ConversionError::Band`] if `band` is out of range,
+    /// [`ConversionError::FloatUnsupported`] for a float raster, which is
+    /// the refusal `vips msb` gives ("image must be integer"), or
     /// [`ConversionError::Raster`] on allocation failure.
     pub fn try_msb(&self, band: Option<u32>) -> Result<Raster, ConversionError> {
+        // `vips msb` on a float image answers "msb: image must be
+        // integer", measured on `/opt/homebrew/bin/vips` 8.18.6. Without
+        // this the `f32`'s exponent and sign get shifted into the output
+        // byte and the call looks like it worked (issue #860).
+        if self.format().is_float() {
+            return Err(ConversionError::FloatUnsupported { op: "msb" });
+        }
         let fmt = self.format();
         let bpc = fmt.bytes_per_channel();
         let bands = fmt.channels();
@@ -4960,5 +4969,39 @@ mod tests {
         // for it here because `bandjoin_const` refuses a float raster in
         // `crate::bands` before the ink is used, so the row is not
         // reachable to measure.
+    }
+
+    /**
+     * Tests that `msb` refuses a float raster the way vips does, instead
+     * of shifting the `f32`'s exponent and sign into the output byte
+     * (issue #860).
+     * Works by asserting the typed refusal for float, with 8-bit and
+     * 16-bit controls so the refusal cannot be passing because `msb`
+     * refuses everything. Measured on `/opt/homebrew/bin/vips` 8.18.6,
+     * where `vips msb` on a float image answers "msb: image must be
+     * integer" and exits non-zero.
+     * Input: float -> Err(FloatUnsupported { op: "msb" }); Gray16 0xABCD
+     * -> 0xAB; Gray8 200 -> 200.
+     */
+    #[test]
+    fn msb_refuses_a_float_raster() {
+        let f = Raster::new(
+            1,
+            1,
+            PixelFormat::FloatF32(NonZeroU16::new(1).unwrap()),
+            1.5f32.to_ne_bytes().to_vec(),
+        )
+        .unwrap();
+        assert!(matches!(
+            f.try_msb(None),
+            Err(ConversionError::FloatUnsupported { op: "msb" })
+        ));
+        // Controls: the integer carriers still work, so the refusal above
+        // is about the kind and not about `msb` being broken.
+        assert_eq!(
+            gray16(1, 1, &[0xABCD]).try_msb(None).unwrap().data()[0],
+            0xAB
+        );
+        assert_eq!(gray8(1, 1, vec![200]).try_msb(None).unwrap().data()[0], 200);
     }
 }
