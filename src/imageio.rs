@@ -22,6 +22,7 @@
 //! | `.webp` | [`Raster::encode_webp`], lossless | `icc-profile-data` (`ICCP`), `exif-data` (`EXIF`), `xmp-data` (`XMP `) |
 //! | `.jxl` (needs the `jxl` feature) | [`Raster::encode_jxl`], lossless | none: the encoder writes a bare codestream with no box container |
 //! | `.jp2` / `.j2k` / `.jpt` / `.j2c` / `.jpc` (needs the `jp2k` feature) | [`Raster::encode_jp2k`] at the `jp2ksave` defaults | none: `jp2ksave.c` has no code for ICC, EXIF or XMP |
+//! | `.hdr` | [`Raster::encode_radiance`] at the `radsave` defaults, on a 3-band `f32` raster only | none EXIF-class: the `rad-` header records are format records and `SaveOptions::default` already takes them off the raster |
 //! | `.fits` / `.fit` / `.fts` | [`Raster::encode_fits`] | the `fits-` header records, minus the cards cfitsio regenerates |
 //! | `.v` / `.vips` | [`Raster::encode_vips`] | header geometry plus every attached field |
 //!
@@ -1469,11 +1470,13 @@ pub enum SaveError {
 fn saveable_extensions() -> &'static str {
     match (cfg!(feature = "jxl"), cfg!(feature = "jp2k")) {
         (true, true) => {
-            "png, jpg/jpeg, gif, webp, jxl, jp2/j2k/jpt/j2c/jpc, fits/fit/fts, and v/vips"
+            "png, jpg/jpeg, gif, webp, jxl, jp2/j2k/jpt/j2c/jpc, hdr, fits/fit/fts, and v/vips"
         }
-        (true, false) => "png, jpg/jpeg, gif, webp, jxl, fits/fit/fts, and v/vips",
-        (false, true) => "png, jpg/jpeg, gif, webp, jp2/j2k/jpt/j2c/jpc, fits/fit/fts, and v/vips",
-        (false, false) => "png, jpg/jpeg, gif, webp, fits/fit/fts, and v/vips",
+        (true, false) => "png, jpg/jpeg, gif, webp, jxl, hdr, fits/fit/fts, and v/vips",
+        (false, true) => {
+            "png, jpg/jpeg, gif, webp, jp2/j2k/jpt/j2c/jpc, hdr, fits/fit/fts, and v/vips"
+        }
+        (false, false) => "png, jpg/jpeg, gif, webp, hdr, fits/fit/fts, and v/vips",
     }
 }
 
@@ -1593,6 +1596,27 @@ impl Raster {
             // no encoder, and `saveable_extensions()` stops naming them.
             #[cfg(feature = "jp2k")]
             "jp2" | "j2k" | "jpt" | "j2c" | "jpc" => crate::jp2k::encode_jp2k_for_save(self)?,
+            // The one suffix `radsave` registers, measured on 8.18.6: its
+            // entry in `vips -l` reads `nocache (.hdr)`, and `.rad`, `.rgbe`
+            // and `.pic` are each refused with "is not a known file format".
+            // `.pic` is worth naming because #506's own title says
+            // `.hdr/.pic`; that is a load spelling elsewhere and not a suffix
+            // vips saves under.
+            //
+            // Ungated, because Radiance costs no feature: #589 wrote the
+            // matched `float2rad` encode in this crate.
+            //
+            // `keep_metadata` has nothing to act on, like GIF, FITS and JPEG
+            // 2000 above: a Radiance header carries `EXPOSURE`, `COLORCORR`,
+            // `PIXASPECT` and the primaries, which are format records rather
+            // than an ICC profile or an EXIF block. Asserted, not assumed.
+            //
+            // Unlike every other row here it has an input contract, 3-band
+            // `f32`, and it propagates the refusal rather than casting.
+            // `radsave` declares `mono rgb` and vips casts whatever it is
+            // handed; no row in this table converts, and this one is not going
+            // to be the first.
+            "hdr" => crate::radiance::encode_radiance_for_save(self)?,
             // All three suffixes vips registers (`vips__fits_suffs`,
             // `fits.c:125`). `keep_metadata` has nothing to act on: the
             // records a FITS header carries are the geometry cfitsio
@@ -4033,6 +4057,152 @@ mod tests {
         }
     }
 
+    /// A 2x2 3-band `f32` raster, which is the input contract
+    /// [`Raster::encode_radiance`] holds: Radiance carries three float bands
+    /// and nothing else has an RGBE spelling.
+    fn float_rgb_2x2() -> Raster {
+        Raster::new(
+            2,
+            2,
+            PixelFormat::FloatF32(std::num::NonZeroU16::new(3).unwrap()),
+            [
+                0.1f32, 0.2, 0.4, 1.5, 0.0, 3.0, 0.5, 0.5, 0.5, 2.0, 1.0, 0.25,
+            ]
+            .into_iter()
+            .flat_map(f32::to_ne_bytes)
+            .collect(),
+        )
+        .unwrap()
+    }
+
+    /**
+     * Tests that `.hdr` is a live row in the extension route and writes a
+     * Radiance file (issue #880).
+     *
+     * One suffix and only one, measured on the pinned vips 8.18.6:
+     *
+     * ```text
+     * VipsForeignSaveRadFile (radsave), save image to Radiance file,
+     *   nocache (.hdr), priority=0, mono rgb
+     * ```
+     *
+     * ```text
+     * $ vips copy base.v r.hdr && vipsheader r.hdr
+     * r.hdr: 8x6, rad, radload
+     * $ for e in rad rgbe pic; do vips copy base.v x.$e; done
+     * VipsForeignSave: "x.rad" is not a known file format          (three times)
+     * ```
+     *
+     * The three near misses are the positive control: a route that took any
+     * string would pass the first assertion on its own. `.pic` is in there
+     * because #506's own title says `.hdr/.pic`, and `radsave` does not
+     * register it.
+     *
+     * The bytes are compared against [`Raster::encode_radiance`] at the
+     * defaults and their magic checked, so "wrote a file" means a Radiance
+     * file.
+     */
+    #[test]
+    fn hdr_is_the_one_suffix_radsave_registers_and_it_writes_radiance() {
+        let im = float_rgb_2x2();
+        let direct = im
+            .encode_radiance(crate::radiance::SaveOptions::default())
+            .expect("a 3-band f32 raster encodes");
+        assert!(
+            direct.starts_with(b"#?RADIANCE"),
+            "positive control: the encoder writes the Radiance magic"
+        );
+
+        let bytes = im
+            .encode_for_extension("hdr", true)
+            .expect(".hdr must be a live row");
+        assert_eq!(
+            bytes, direct,
+            ".hdr must write the same file as encode_radiance at the defaults"
+        );
+        assert!(saveable_extensions().contains("hdr"));
+
+        for extension in ["rad", "rgbe", "pic"] {
+            assert!(
+                matches!(
+                    im.encode_for_extension(extension, true),
+                    Err(SaveError::UnsupportedExtension { .. })
+                ),
+                "radsave does not register .{extension} either"
+            );
+            assert!(!saveable_extensions().contains(extension));
+        }
+    }
+
+    /**
+     * Tests that the `.hdr` row refuses a raster it cannot write rather than
+     * converting one, and says which it is (issue #880).
+     *
+     * `radsave` declares `mono rgb` and vips casts whatever it is handed:
+     * `vips copy base.v r2.hdr` on a 3-band **uchar** raster writes a Radiance
+     * file. `Raster::encode_radiance` refuses instead, and this row propagates
+     * that rather than growing a cast, because no other row in this table
+     * converts and this one should not be the first. The deviation is
+     * `encode_radiance`'s and predates this row; what is new is that the
+     * extension route now inherits it, so it is asserted here.
+     *
+     * The refusal must not read as `UnsupportedExtension`. That would tell a
+     * caller this build has no Radiance encoder, which is false since #589,
+     * and would send them looking in the wrong place.
+     */
+    #[test]
+    fn the_hdr_row_refuses_a_raster_it_cannot_write_without_pretending_it_has_no_encoder() {
+        let err = rgb_2x2().encode_for_extension("hdr", true).unwrap_err();
+        assert!(
+            !matches!(err, SaveError::UnsupportedExtension { .. }),
+            "this build has a Radiance encoder; the raster is what is wrong, got {err}"
+        );
+        assert!(
+            err.to_string().contains("RGBE") || err.to_string().contains("float"),
+            "the refusal must name what is wrong with the raster, got {err}"
+        );
+        // Positive control: the same raster on a row with no input contract.
+        assert!(rgb_2x2().encode_for_extension("png", true).is_ok());
+    }
+
+    /**
+     * Tests that the `.hdr` row has nothing for the strip flag to drop
+     * (issue #880).
+     *
+     * A Radiance header carries `EXPOSURE`, `COLORCORR`, `PIXASPECT` and the
+     * primaries, which vips surfaces as `rad-expos`, `rad-colcor-*`,
+     * `rad-aspect` and `rad-prims-*` (measured with `vipsheader -a` on a file
+     * 8.18.6 wrote). Those are format records the way FITS's cards are, not an
+     * ICC profile or an EXIF block, so a stripped save and a kept one write the
+     * same bytes and a `keep_metadata` parameter here would be a promise with
+     * nothing behind it. Same call as the `.fits` and `.jp2` rows.
+     *
+     * `.webp` in the same assertion is the control: that row does carry
+     * EXIF-class metadata and does differ under the flag, so "the two agree" is
+     * a fact about this row and not about the harness.
+     */
+    #[test]
+    fn the_hdr_row_has_nothing_for_the_strip_flag_to_drop() {
+        let mut im = float_rgb_2x2();
+        im.set_icc_profile(&[1, 2, 3, 4]);
+        im.fields
+            .set("exif-data", MetadataValue::Blob(vec![9, 8, 7]));
+
+        assert_eq!(
+            im.encode_for_extension("hdr", true).unwrap(),
+            im.encode_for_extension("hdr", false).unwrap(),
+            "a Radiance header holds format records, so the strip flag has nothing to drop"
+        );
+
+        let mut rgb = rgb_2x2();
+        rgb.set_icc_profile(&[1, 2, 3, 4]);
+        assert_ne!(
+            rgb.encode_for_extension("webp", true).unwrap(),
+            rgb.encode_for_extension("webp", false).unwrap(),
+            "positive control: the WebP row does carry metadata and does differ"
+        );
+    }
+
     /**
      * Tests that the `UnsupportedExtension` message names exactly the
      * extensions this build has an encoder behind, so the string and the
@@ -4085,10 +4255,29 @@ mod tests {
                 "the message follows the feature for .{suffix}: {message}"
             );
         }
+        // `.hdr` is ungated, so it is in the message in every build. Without
+        // this the list can lose a row and only the sweep below notices, and
+        // the sweep derives itself *from* the message, so a row that vanishes
+        // from both simply stops being tested (issue #880).
+        assert!(
+            extensions.contains(&"hdr"),
+            "the Radiance row is ungated and must always be listed: {message}"
+        );
 
         for extension in &extensions {
             let path = dir.path().join(format!("listed.{extension}"));
-            im.save(&path)
+            // `.hdr` is the one row with an input contract: `encode_radiance`
+            // takes 3-band `f32` and refuses anything else rather than casting
+            // the way `radsave` does. So the sweep hands each row a raster it
+            // can write, or it would be asserting the contract and not the
+            // list (issue #880).
+            let subject = if *extension == "hdr" {
+                float_rgb_2x2()
+            } else {
+                im.clone()
+            };
+            subject
+                .save(&path)
                 .unwrap_or_else(|e| panic!("save(.{extension}) is a live arm, got {e}"));
             assert!(path.exists(), ".{extension} wrote a file");
         }
