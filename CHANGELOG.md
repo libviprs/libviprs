@@ -534,8 +534,31 @@ and not under `Fixed`: this file is the only place they can be caught.
   a minute. The refusal is the typed
   `ConvolutionError::TimesOutOfRange { times, min, max }`, which replaces
   `ConvolutionError::ZeroTimes` and covers both ends of the range at once.
-  `ZeroTimes` has never been in a release, and the enum is
+  ~~`ZeroTimes` has never been in a release~~, and the enum is
   `#[non_exhaustive]`.
+
+  **The struck half was wrong when it was written** (issue #947), and it was
+  the sentence a 0.4.0 caller matching that variant would have read to decide
+  whether any of this reached them. It told them it could not.
+  `ConvolutionError::ZeroTimes` shipped in `v0.4.0`: it is the enum's variant
+  at `v0.4.0:src/convolution.rs:182`, constructed at `:839` and documented at
+  `:821`, introduced on 2026-07-11 in `2b9f9caf`, nine days before the tag on
+  2026-07-20, and `git tag --contains 2b9f9caf` answers `v0.4.0`. So anyone on
+  0.4.0 who matched `ZeroTimes` does have to move to `TimesOutOfRange`, and
+  the `#[non_exhaustive]` half is what makes that a behaviour change rather
+  than a compile error: their match already carried a wildcard arm, so the
+  variant they were naming simply stops arriving.
+
+  It is struck through rather than deleted, following the #501 and #920
+  entries below, which were annotated rather than rewritten when later PRs
+  falsified them so the record shows what changed. What is different here is
+  that this one was never true, so a reader needs to see both the sentence
+  that shipped and the correction rather than only the correction.
+
+  `tests/changelog_release_claims.rs` answers this class against `git tag`
+  now. "Has this identifier ever been in a release" is decidable, and nothing
+  was deciding it, which is the same shape as `merge-gate.yml` claiming the
+  crate had no `unsafe` of its own when it had ten (#897).
 
   Worth being explicit that this is a divergence rather than a match, because
   the accepted range is identical and that makes it easy to skim past: vips
@@ -1025,6 +1048,68 @@ and not under `Fixed`: this file is the only place they can be caught.
   than losing it.
 
 ### Added
+
+- **`.tif` and `.tiff` are save routes** (issue #948). `src/encode_tiff.rs` has
+  had a working `Raster::save_tiff` with round-trip tests behind it all along,
+  and neither save route ever grew a row, so `raster.save("out.tif")` answered
+  `SaveError::UnsupportedExtension` from a crate that writes TIFF. Both
+  suffixes are wired into `Raster::save`'s extension route and into
+  `Raster::encode_to_buffer`'s format route.
+
+  Both and no more: measured on the pinned vips 8.18.6, `tiffsave`'s `vips -l`
+  line reads `nocache (.tif, .tiff)`, and `vips copy t.v out.EXT` over `.btf`,
+  `.tf8`, `.bigtiff` and `.tfx` is refused with "is not a known file format"
+  every time.
+
+  The row writes **uncompressed strips**, which is `tiffsave`'s own default and
+  is measured rather than read off the option list: `vips tiffsave t.v d.tif`
+  and the same call with `--compression none` write byte-identical 240-byte
+  files while `--compression deflate` writes a different 254. Same call as the
+  JPEG row taking `jpegsave`'s quality of 75. [`Raster::tiff_save`] stays on
+  Deflate for the reason its own doc gives; all three modes are lossless, so
+  what separates them is file size.
+
+  Nothing routes through `tiff_save` and nothing should: it is infallible and
+  answers a raster it cannot encode with an **empty** buffer, so a save route
+  built on it would have written a zero-byte `.tif` and returned `Ok`. The
+  routes take a fallible helper and keep the typed refusal.
+
+  `keep_metadata` has nothing to act on, and unlike the GIF, FITS, JPEG 2000,
+  Radiance and Netpbm rows that is a **gap** rather than a property of the
+  container: TIFF has somewhere to put an ICC profile and `tiffsave` uses it,
+  while this build's encoder writes the colour tags and the strips and stops.
+  `the_tiff_row_has_nothing_for_the_strip_flag_to_drop` pins the equality, so
+  the day the encoder learns to embed one it goes red rather than the flag
+  silently doing nothing.
+
+- **A check that every public writer can be reached from a save route**
+  (issue #948), `tests/save_route_coverage.rs`. TIFF was the **fourth** time a
+  writer landed wired to nothing: #770 (jp2k), #809 (uhdr), #880 (radiance) and
+  #882 (netpbm) were each exactly this.
+
+  #881 put a guard behind the *doc*, so the format list a caller reads and the
+  arms the dispatch has cannot drift apart, and it has since caught a live
+  drift and two mutations. It could not catch TIFF, because a format that was
+  never wired at all is absent from **both** halves it compares, and two source
+  scans that agree on nothing agree perfectly.
+
+  So this asks the other question. Every `pub fn save_*`, `encode_*`, `*_save`
+  and `*save_buffer*` under `src/` needs a row with a `Reach`, checked by set
+  equality, so a new writer with no row is red on the commit that adds it. It
+  finds 44 today. A `Wired` row names the arms it is reached by and both are
+  read back out of the two dispatches; a `Deferred` row means the writer always
+  refuses, and the test **calls it** and requires the refusal, so implementing
+  HEIF or BigTIFF turns this red and hands whoever does it the routing step
+  that got skipped four times; an `Unrouted` row means it writes real bytes and
+  has no route on purpose, with the measurement and the issue in the reason.
+
+  The sweep turned up three more writers with no route, filed as issue #958:
+  `Raster::csv_save`, `Raster::matrix_save` and `Raster::dzsave_buffer`. Two of
+  them do not write what the vips saver they are named after writes, measured
+  on a 3x2 RGB ramp on 8.18.6: `csvsave` writes TAB separators and the
+  luminance where `csv_save` writes commas and band 0, and `matrixsave` writes
+  the luminance too. That wants an answer before a route, so they are recorded
+  rather than wired.
 
 - **`jp2ksave` labels the alpha channel**, writing the `cdef` box vips writes
   (issue #935). Found by the byte-identity check the tiled save brought in
@@ -1620,6 +1705,14 @@ and not under `Fixed`: this file is the only place they can be caught.
   A window the file cannot serve is `GifError::BadPageNumber` rather than a
   clamp, matching vips, which fails `[page=4]`, `[n=99]`, `[n=0]` and
   `[page=3,n=3]` on a four-frame file with `bad page number`.
+
+  **That variant is gone as of #845, inside this same release**, folded into
+  `SourceError::PageOutOfRange`, which carries the same three numbers under
+  different names and is what all three multi-page loaders report now
+  (issue #950). The refusal and the four cases it covers are unchanged; only
+  the variant a caller matches moved. Left standing rather than rewritten,
+  since the fields of the shared variant were shaped field for field against
+  this one so that folding them would be a deletion rather than a redesign.
 
   **The frame walk is bounded now, where the still loader's was not.** A GIF's
   frame list has no count in its header, so the only way to know how long it
@@ -2933,7 +3026,16 @@ and not under `Fixed`: this file is the only place they can be caught.
   Two typed refusals replace panics out of `Result`-returning methods, the shape
   issue #694 landed: `BandError::UnsupportedSampleKind` and
   `ExtractError::UnsupportedSampleKind`, alongside
-  `ConversionError::UnsupportedSampleKind`. They also fix a message that named
+  `ConversionError::UnsupportedSampleKind`.
+
+  **The third of those three is gone, removed by #931 inside this same
+  release** (issue #950), because nothing could reach it once the carriers
+  landed. The other two are live. Left standing rather than rewritten, for the
+  same reason as the two entries above: the paragraph is the record of what
+  this PR shipped, and the `### Breaking` list at the top of `Unreleased` is
+  the record of what the release ships.
+
+  They also fix a message that named
   the wrong carrier: the width-keyed `_` arms panicked saying "float rasters"
   over a raster that is not float. `smartcrop`'s entropy and attention
   strategies keep a stricter guard and refuse the 32-bit carrier, because both
@@ -2943,6 +3045,11 @@ and not under `Fixed`: this file is the only place they can be caught.
   `Uint32` rasters round-trip through the `.v` container once #841 lands (PR
   #858, which this stacks on): the `BandFmt` wire tag used to be written from a
   byte width, and a byte width does not name a carrier.
+
+  **#841 landed**, so that sentence's future tense is about something this
+  release already ships (issue #950). It is left standing because the
+  conditional is what the PR could honestly say at the time, and the stack it
+  names is how the two halves fit together.
 - **A gate against a byte width standing in for a sample kind**, which is what
   issue #607 step (e) asks for: `tests/sample_kind_spine.rs` refuses a
   `bytes_per_channel()` comparison anywhere under `src/`. It is a scan rather
@@ -3743,6 +3850,93 @@ and not under `Fixed`: this file is the only place they can be caught.
   matching on the typed errors is unaffected; only the panic text changes.
 
 ### Fixed
+
+- **The four lists a new user reads first are true now, and checked**
+  (issue #950). `src/lib.rs` is the docs.rs front page and its feature list
+  named five of the twelve features this crate declares. The four it missed
+  that matter are `avif`, `svg`, `jxl` and `jp2k`, every one of them gating
+  headline codec capability, so the page a new user lands on said the crate
+  cannot do things it does. `README.md` had the same gap in a different shape,
+  plus three more: it said the crate decodes "JPEG, PNG, TIFF via the `image`
+  crate" when the sniffer has seventeen containers and most of them are
+  decoders written here; it listed 21 of 61 public modules and none of the
+  format or operation ones; it gave `pixel` four carriers when `PixelFormat`
+  has fourteen and the ones it left out are this release's headline break; and
+  it described the pre-#844 clippy gate, default plus `pdfium`, when the
+  Makefile lints nine features.
+
+  Every one of those is prose enumerating something the code enumerates too,
+  with nothing connecting the two, which is the shape #881 fixed for
+  `encode_to_target`'s format list. `tests/crate_doc_matches_the_crate.rs`
+  connects them: nine set-equality checks, each against a list cargo or the
+  compiler already maintains, each with a positive control so a parser that has
+  stopped finding anything fails rather than agreeing.
+
+- **Every doc example under `src/` compiles now** (issue #950). Nine carried
+  ```` ```ignore ````, so nine snippets the modules recommend were never
+  compiled by anything, and one of them could not have compiled under any
+  circumstances: the `resume` module's own "Intended use" built a
+  `#[non_exhaustive]` struct with a struct literal, which is E0639 outside the
+  defining crate, and it was the first thing a reader of that module saw.
+  [`JobMetadata::new`] existed the whole time and the example ignored it.
+
+  The fix is handing the examples back to the compiler rather than writing a
+  scanner for that one mistake, because rustdoc finds the ones nobody thought
+  to scan for. All nine run, including the three in feature-gated modules,
+  which CI reaches through `cargo test --features packfile` and
+  `--features object-store-sink`, and the check is that no `ignore` fence is
+  left under `src/` at all.
+
+- **`SourceError::PageOutOfRange`'s `format` field names all three containers**
+  (issue #950). It said `("webp", "jxl")`, which was right until #845 folded
+  `GifError::BadPageNumber` into this variant and gave `resolve_page_range` a
+  third caller, so the field describing what a caller will see named two of the
+  three things a caller can see. The call sites are read out of the tree and
+  held against the doc now.
+
+- **`MIGRATION.md` no longer describes an API that does not exist**
+  (issue #950). It said `FsSink::new_with_format` "still compiles as a
+  deprecated alias"; it exists nowhere in the tree, was already gone by v0.4.0,
+  and the crate carries **zero** `#[deprecated]` attributes, so nothing in it
+  is a deprecated alias of anything. It also put the MSRV at 1.85 against a
+  `rust-version` of 1.97, which is the number a reader acts on. Both files that
+  state an MSRV are held to the manifest's now. The missing 0.4.0 and
+  current-release migration guides are issue #961; they derive from this
+  `Unreleased` block, so they wait on #636.
+
+- **The `ZeroTimes` sentence in this file was wrong, and the class has a
+  checker now** (issue #947). The `TimesOutOfRange` entry under `### Breaking`
+  closed with ~~"`ZeroTimes` has never been in a release"~~.
+  `ConvolutionError::ZeroTimes` shipped in `v0.4.0`, at
+  `v0.4.0:src/convolution.rs:182`, introduced 2026-07-11 in `2b9f9caf`, nine
+  days before the tag. That is the sentence a 0.4.0 caller matching the variant
+  reads to decide whether the removal reaches them, and it told them it could
+  not.
+
+  Same class as `merge-gate.yml` claiming the crate had no `unsafe` of its own
+  when it had ten (#897): a load-bearing factual claim in prose with nothing
+  verifying it. "Has this identifier ever been in a release" is decidable, so
+  `tests/changelog_release_claims.rs` answers both phrasings of it against
+  `git tag`. The Test job's checkout takes `fetch-depth: 0`, because the
+  default shallow checkout brings down no tags and a tagless clone would
+  satisfy every "never released" claim by finding nothing.
+
+  It reads the two phrasings that produced the bug rather than trying to parse
+  English, so a third wording is not covered and a quotation has to be struck
+  through to stay out of its way. The tag in a `shipped in` claim may be
+  backticked or bare, which is not cosmetic: requiring the backticks left a
+  true claim in this entry outside the check, and a mutation row proved a
+  false one would have been skipped the same way. That is the honest limit, and it is still the
+  difference between a claim nothing checks and a claim that is either true or
+  red: the quotation two paragraphs up went red on the first run and is struck
+  for exactly that reason.
+
+  Three more entries said things this release itself overtook, and all three
+  are annotated in place rather than rewritten, following the #501 and #920
+  entries: the #632 paragraph deferring the `AllocLimitExceeded` collapse #686
+  landed here, the GIF entry naming `GifError::BadPageNumber` after #845 folded
+  it away, and `ConversionError::UnsupportedSampleKind` presented as landing
+  when #931 removed it.
 
 - **The WebP animation scan bounds its own chunk walk** (issue #941).
   `scan_animation` stepped the RIFF chain with `at + 8 + size` and
@@ -5383,7 +5577,16 @@ and not under `Fixed`: this file is the only place they can be caught.
   `GifError::AllocLimitExceeded` and `RadianceError::AllocLimitExceeded` are all
   still what a caller sees, because collapsing them onto
   `SourceError::AllocLimitExceeded` is a breaking change to five public enums;
-  #632 deferred it and issue #686 carries it for 0.5.0. They are built from the
+  #632 deferred it and issue #686 carries it for 0.5.0.
+
+  **#686 landed inside this same release, so those five variants are gone**
+  and the `### Breaking` entry near the top of `Unreleased` is what a caller
+  sees today (issue #950). The paragraph is left standing as what #632 shipped
+  rather than rewritten, the way the #501 entry does the same thing: the
+  sentence deferring the collapse is why the migration note further up exists,
+  and deleting it would leave that note looking unprompted.
+
+  They are built from the
   budget's answer rather than retagged off its error, through the new
   `DecodeLimits::exceeds_alloc_budget`: `check_alloc`'s `what` label is only
   ever observable through a decoder that propagates the `SourceError` whole,
