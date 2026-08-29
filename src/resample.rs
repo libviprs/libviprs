@@ -426,7 +426,7 @@ use crate::arithmetic::{interpretation_max_alpha, unpremultiply_factor};
 use crate::colour::{ColourError, Intent, Pcs};
 use crate::conversion::Interpretation;
 use crate::extract::{Extend, ExtractError, white_ink};
-use crate::pixel::PixelFormat;
+use crate::pixel::{PixelFormat, SampleKind, read_sample_f64, write_sample_f64};
 use crate::raster::{Raster, RasterError};
 use crate::source::SourceError;
 use std::f64::consts::PI;
@@ -988,14 +988,22 @@ fn fixed_round(v: i64) -> i64 {
     (v + (INTERPOLATE_SCALE >> 1)) >> INTERPOLATE_SHIFT
 }
 
-/// Per-format sample layout: bytes per channel and float flag.
+/// Per-format sample layout: the sample kind, its byte width, and the
+/// storage ceiling.
+///
+/// The kind is the field that decides how bytes are read, and the width is
+/// kept beside it only as a stride. They used to be one number, and the
+/// `else` branch of `bpc == 2` read four bytes as a `u16` pair, so a
+/// `uint` raster resized to 144 where it should have stayed at 90000
+/// (issues #517, #607).
 #[derive(Clone, Copy)]
 struct SampleLayout {
+    kind: SampleKind,
     bpc: usize,
     is_float: bool,
     /// Sample ceiling for the **storage** arithmetic: what [`write`] rounds
-    /// and clamps an unsigned sample into. 255 for 8-bit and float, 65535 for
-    /// 16-bit.
+    /// and clamps an unsigned sample into. 255 for 8-bit and float, 65535
+    /// for 16-bit, and the kind's own ceiling for the wider carriers.
     ///
     /// Not the premultiply denominator, which is a property of the
     /// interpretation rather than of the depth and comes from
@@ -1013,49 +1021,39 @@ struct SampleLayout {
 
 impl SampleLayout {
     fn of(format: PixelFormat) -> Self {
-        let bpc = format.bytes_per_channel();
-        let is_float = format.is_float();
-        let max = if is_float {
-            255.0
-        } else if bpc == 2 {
-            65535.0
-        } else {
-            255.0
+        let kind = format.kind();
+        let bpc = kind.bytes();
+        let is_float = kind.is_float();
+        // A float carrier's storage convention here is the crate's `0..255`
+        // one, which is why it does not come off the kind; every integer
+        // kind's ceiling does.
+        let max = match kind.max_value() {
+            Some(m) => f64::from(m),
+            None => 255.0,
         };
-        Self { bpc, is_float, max }
+        Self {
+            kind,
+            bpc,
+            is_float,
+            max,
+        }
     }
 
     /// Read sample `i` (flat sample index, not byte index) as `f64`.
     fn read(self, data: &[u8], i: usize) -> f64 {
-        let o = i * self.bpc;
-        if self.is_float {
-            f64::from(f32::from_ne_bytes([
-                data[o],
-                data[o + 1],
-                data[o + 2],
-                data[o + 3],
-            ]))
-        } else if self.bpc == 2 {
-            f64::from(u16::from_ne_bytes([data[o], data[o + 1]]))
-        } else {
-            f64::from(data[o])
-        }
+        read_sample_f64(data, self.kind, i * self.bpc)
     }
 
     /// Write sample `i` from `f64`, rounding half up and clamping for the
     /// unsigned formats and storing raw `f32` for the float formats.
     fn write(self, data: &mut [u8], i: usize, v: f64) {
         let o = i * self.bpc;
-        if self.is_float {
-            data[o..o + 4].copy_from_slice(&(v as f32).to_ne_bytes());
-        } else {
-            let r = (v + 0.5).floor().clamp(0.0, self.max);
-            if self.bpc == 2 {
-                data[o..o + 2].copy_from_slice(&(r as u16).to_ne_bytes());
-            } else {
-                data[o] = r as u8;
-            }
-        }
+        // `write_sample_f64` truncates toward zero and clamps into the
+        // kind's own range, so pre-rounding here keeps the round-half-up
+        // this resampler has always done while the clamp is stated once
+        // per kind rather than once per branch.
+        let rounded = if self.is_float { v } else { (v + 0.5).floor() };
+        write_sample_f64(data, self.kind, o, rounded);
     }
 }
 
@@ -7225,5 +7223,63 @@ mod tests {
             .unwrap();
         assert_eq!((out.width(), out.height()), (6, 6), "affine 1.5 of a 4x4");
         assert_close(&float_samples(&out), &want, "affine 1.5 bilinear");
+    }
+
+    /**
+     * Tests that `resize` carries the unsigned 32-bit carrier through the
+     * reduce kernels at the right stride, and pins where the answer sits
+     * relative to vips.
+     * Works against `/opt/homebrew/bin/vips` 8.18.6 on a 4x4 `uint` ramp
+     * of 100000, 101000, ...: `vips resize 0.5` answers **102360** and
+     * **104416**, and this answers 102359 and 104415. The extra
+     * measurement is what says which is right. Casting the same image to
+     * FLOAT and DOUBLE and resizing gives vips **102358.62** and
+     * **104415.17**, so the exact result rounds to 102359 and 104415 and
+     * vips's integer answer is its own 12-bit mask error, the divergence
+     * `reduce_preserves_a_constant_where_the_vips_short_mask_does_not`
+     * already pins on the narrower carriers. The uniform case is the one
+     * that catches a stride bug on its own: 90000 came back as **144**
+     * before this.
+     * Input: 4x4 uint ramp -> 102359, 104415; 4x4 uint all 90000 -> 90000.
+     */
+    #[test]
+    fn resize_carries_the_uint_carrier() {
+        let n = core::num::NonZeroU16::new(1).unwrap();
+        let fmt = PixelFormat::Uint32(n);
+        let mk = |vals: &[u32]| {
+            let data: Vec<u8> = vals.iter().flat_map(|v| v.to_ne_bytes()).collect();
+            Raster::new(4, 4, fmt, data).unwrap()
+        };
+        let at = |r: &Raster, i: usize| {
+            let d = r.data();
+            u32::from_ne_bytes([d[i * 4], d[i * 4 + 1], d[i * 4 + 2], d[i * 4 + 3]])
+        };
+        let vals: Vec<u32> = (0..16).map(|i| 100_000 + i * 1000).collect();
+        let out = mk(&vals).try_resize(0.5).unwrap();
+        assert_eq!(out.format(), fmt);
+        assert_eq!((at(&out, 0), at(&out, 1)), (102_359, 104_415));
+
+        // A constant image has to come back constant, whatever the kernel:
+        // this is the assertion a dropped stride fails, because the halves
+        // of a `u32` sample are not the sample.
+        let flat = mk(&[90_000; 16]).try_resize(0.5).unwrap();
+        assert_eq!(at(&flat, 0), 90_000);
+        assert_eq!(at(&flat, 1), 90_000);
+
+        // Control: the same call on the 16-bit carrier still matches vips
+        // exactly, `vips resize 0.5` on the analogous ramp giving 10236
+        // and 10442, so the uint row above is not a kernel that changed.
+        let vals16: Vec<u16> = (0..16).map(|i| 10_000 + i * 100).collect();
+        let data: Vec<u8> = vals16.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        let r16 = Raster::new(4, 4, PixelFormat::Gray16, data).unwrap();
+        let o16 = r16.try_resize(0.5).unwrap();
+        let d = o16.data();
+        assert_eq!(
+            (
+                u16::from_ne_bytes([d[0], d[1]]),
+                u16::from_ne_bytes([d[2], d[3]])
+            ),
+            (10_236, 10_442)
+        );
     }
 }

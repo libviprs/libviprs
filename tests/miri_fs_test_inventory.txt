@@ -1,72 +1,72 @@
 # Every test in the tree that either touches the filesystem or carries
-# `#[cfg_attr(miri, ignore)]`, with its annotation state. Read and enforced by
-# `tests/miri_ignore_convention.rs` (issue #652); nothing else consumes it.
+
 #
-# Why it exists. `merge-gate.yml` runs `cargo +nightly miri test` as the only
-# check this repository has on undefined behaviour, and Miri aborts the whole
-# run on the first operation its isolation layer refuses rather than failing
-# that one test. So a single new test calling `tempfile::tempdir()` takes the
-# gate down and reports as "Miri failed", which sends the reader looking for UB
-# that is not there. The convention that avoids it, an
-# `#[cfg_attr(miri, ignore)]` on filesystem-touching tests, was enforced by
-# nothing at all until this file existed, and it duly broke:
-# `src/checksum.rs` grew three tempdir tests without one.
 #
-# Columns:
 #
-#   annotated | unannotated    whether the test carries `#[cfg_attr(miri, ignore)]`
-#   fs-detected | not-detected whether the scanner found a filesystem call in the
+#
+#
+#
+#
+#
+#
 #                              body itself, as opposed to reaching one through a
 #                              helper it cannot follow
 #   <file>::<test>             repo-relative path and function name
-#
-# There are no `unannotated fs-detected` rows left, and that is the state this
-# file is meant to be in. There were 138, kept as a ledger of known debt on the
-# argument that PR #644 disabled Miri's isolation so letting them run cost
-# nothing. #711 put isolation back, which made every one of them a way to end
-# the whole session on its first syscall. #712 and #739 annotated 134, #781
-# taught the detector to follow a call into a test helper and annotated what
-# that found, and #756 took the last four in `src/resample.rs`.
-#
-# So this is not a ledger any more.
-# `no_filesystem_touching_test_runs_under_miri_outside_the_named_exceptions` in
-# `tests/miri_ignore_convention.rs` refuses a filesystem-touching test that is
-# neither annotated nor named in `UNANNOTATED_FS_EXCEPTIONS`, and that list is
-# empty. A row spelled `unannotated` below means somebody put a name in that
-# constant, which wants a reason that survives review and an issue to carry it,
-# because the cost is the whole gate rather than one test.
-#
-# The rows stay, and the exact set-equality check with them, because they catch
-# a different edit from the refusal: an annotation being *deleted*, and an
-# annotation being added to a test the detector cannot see through. A refusal
-# alone is green when somebody annotates a pure test by mistake; this file is
-# what turns that into a new `annotated not-detected` row and a red build.
-#
-# The `annotated not-detected` rows are the scanner's blind spot made durable.
-# Those tests reach the filesystem through a library function that opens a path,
-# or through a helper in another file, so the detector reads their bodies as
-# pure. They are pinned anyway, which means their annotations cannot be deleted
-# unnoticed even though the detector could not have asked for them in the first
-# place. #781 halved the class, from 22 rows to 13, by teaching the detector to
-# follow a call into a *test* helper in the same file; what is left is the
-# library boundary, which it does not cross on purpose.
-#
+#   annotated | unannotated    whether the test carries `#[cfg_attr(miri, ignore)]`
+#   fs-detected | not-detected whether the scanner found a filesystem call in the
 # #765 added six of those rows, and they came from a measurement rather than
-# from reading: every test binary run single threaded under a syscall interposer
-# on `open`, `stat` and eleven others, with each path attributed to the test
-# that made it. 2143 tests, 264 touching the filesystem, six of them in neither
-# this file nor the annotated set. Three are `src/analyze.rs`, whose two-file
-# entry point resolves the `.img` from the `.hdr`'s path and so has no buffer
-# form; three are `src/colour.rs` and `src/pdf.rs` handing an entry point a path
-# that does not exist and asserting on the error, where the `open` still happens
-# and Miri refuses it before the kernel can answer `NotFound`. That is the same
-# shape as `src/source.rs::decode_file_not_found`, which is in here already.
-#
+# Columns:
+# So this is not a ledger any more.
+# The `annotated not-detected` rows are the scanner's blind spot made durable.
+# The rows stay, and the exact set-equality check with them, because they catch
+# There are no `unannotated fs-detected` rows left, and that is the state this
+# Those tests reach the filesystem through a library function that opens a path,
 # To update: run `cargo test --test miri_ignore_convention`. The failure prints
+# Why it exists. `merge-gate.yml` runs `cargo +nightly miri test` as the only
+# `#[cfg_attr(miri, ignore)]` on filesystem-touching tests, was enforced by
+# `#[cfg_attr(miri, ignore)]`, with its annotation state. Read and enforced by
+# `no_filesystem_touching_test_runs_under_miri_outside_the_named_exceptions` in
+# `src/checksum.rs` grew three tempdir tests without one.
+# `tests/miri_ignore_convention.rs` (issue #652); nothing else consumes it.
+# `tests/miri_ignore_convention.rs` refuses a filesystem-touching test that is
+# a different edit from the refusal: an annotation being *deleted*, and an
 # a regenerated body you can paste in below this header. A `+ unannotated` line
+# alone is green when somebody annotates a pure test by mistake; this file is
+# and Miri refuses it before the kernel can answer `NotFound`. That is the same
+# annotation being added to a test the detector cannot see through. A refusal
+# argument that PR #644 disabled Miri's isolation so letting them run cost
+# because the cost is the whole gate rather than one test.
+# check this repository has on undefined behaviour, and Miri aborts the whole
+# constant, which wants a reason that survives review and an issue to carry it,
+# empty. A row spelled `unannotated` below means somebody put a name in that
+# entry point resolves the `.img` from the `.hdr`'s path and so has no buffer
+# file is meant to be in. There were 138, kept as a ledger of known debt on the
+# follow a call into a *test* helper in the same file; what is left is the
+# form; three are `src/colour.rs` and `src/pdf.rs` handing an entry point a path
+# from reading: every test binary run single threaded under a syscall interposer
+# gate down and reports as "Miri failed", which sends the reader looking for UB
 # in that output is a test that will end the next Miri run on its first
+# library boundary, which it does not cross on purpose.
+# neither annotated nor named in `UNANNOTATED_FS_EXCEPTIONS`, and that list is
+# nothing at all until this file existed, and it duly broke:
+# nothing. #711 put isolation back, which made every one of them a way to end
+# on `open`, `stat` and eleven others, with each path attributed to the test
+# or through a helper in another file, so the detector reads their bodies as
+# place. #781 halved the class, from 22 rows to 13, by teaching the detector to
+# pure. They are pinned anyway, which means their annotations cannot be deleted
+# run on the first operation its isolation layer refuses rather than failing
+# shape as `src/source.rs::decode_file_not_found`, which is in here already.
 # syscall, so the answer to it is an annotation, not a paste.
-
+# taught the detector to follow a call into a test helper and annotated what
+# that does not exist and asserting on the error, where the `open` still happens
+# that found, and #756 took the last four in `src/resample.rs`.
+# that is not there. The convention that avoids it, an
+# that made it. 2143 tests, 264 touching the filesystem, six of them in neither
+# that one test. So a single new test calling `tempfile::tempdir()` takes the
+# the whole session on its first syscall. #712 and #739 annotated 134, #781
+# this file nor the annotated set. Three are `src/analyze.rs`, whose two-file
+# unnoticed even though the detector could not have asked for them in the first
+# what turns that into a new `annotated not-detected` row and a red build.
 annotated   fs-detected  src/checksum.rs::hash_file_matches_in_memory_hash_for_both_algos
 annotated   fs-detected  src/checksum.rs::hash_file_reports_not_found
 annotated   fs-detected  src/checksum.rs::verify_output_reports_tile_mismatch_in_report_not_as_error
@@ -341,6 +341,8 @@ annotated   fs-detected  tests/uhdr_ported_surface.rs::the_mono_path_reproduces_
 annotated   fs-detected  tests/uhdr_ported_surface.rs::the_three_band_path_linearises_the_gain_map_and_the_mono_path_does_not
 annotated   fs-detected  tests/uhdr_ported_surface.rs::the_two_powf_cases_are_within_a_measured_ulp_bound
 annotated   fs-detected  tests/uhdr_ported_surface.rs::v2y_8_matches_the_pinned_oracle_table
+annotated   fs-detected  tests/unsafe_inventory.rs::only_the_named_files_carry_the_crates_own_unsafe
+annotated   fs-detected  tests/unsafe_inventory.rs::the_crates_own_unsafe_stays_out_of_a_default_build
 annotated   fs-detected  tests/webp_ported_surface.rs::encode_and_save_round_trip_exactly
 annotated   fs-detected  tests/webp_ported_surface.rs::the_shared_dispatchers_carry_webp
 annotated   fs-detected  tests/workspace_layout.rs::fuzz_crate_is_a_member_of_the_root_workspace
