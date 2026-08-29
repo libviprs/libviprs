@@ -1213,7 +1213,13 @@ fn decode_av1(
     unsafe extern "C" {
         fn dav1d_default_settings(s: *mut Dav1dSettings);
         fn dav1d_open(c_out: *mut *mut c_void, s: *const Dav1dSettings) -> c_int;
-        fn dav1d_data_create(buf: *mut Dav1dData, sz: usize) -> *mut u8;
+        fn dav1d_data_wrap(
+            buf: *mut Dav1dData,
+            ptr: *const u8,
+            sz: usize,
+            free_callback: Option<unsafe extern "C" fn(*const u8, *mut c_void)>,
+            user_data: *mut c_void,
+        ) -> c_int;
         fn dav1d_data_unref(buf: *mut Dav1dData);
         fn dav1d_send_data(c: *mut c_void, data: *mut Dav1dData) -> c_int;
         fn dav1d_get_picture(c: *mut c_void, out: *mut Dav1dPicture) -> c_int;
@@ -1253,6 +1259,38 @@ fn decode_av1(
         }
     }
 
+    /// The payload buffer this crate lends the decoder, and what it takes to
+    /// give the allocation back.
+    ///
+    /// The pointer is the one [`Box::into_raw`] produced, kept so the buffer
+    /// is released through the tag it was allocated under. The pointer dav1d
+    /// hands back to a free callback is not that one: `dav1d_data_wrap`
+    /// rebuilds it through `slice::from_raw_parts`, so it arrives read-only
+    /// and deallocating through it would be the same defect this whole route
+    /// exists to avoid.
+    struct Lent {
+        ptr: *mut u8,
+        len: usize,
+    }
+
+    /// Give the lent buffer back. dav1d calls this exactly once, from the
+    /// last `dav1d_data_unref` on the `Dav1dData` that wrapped it.
+    ///
+    /// # Safety
+    ///
+    /// `cookie` is the `Box<Lent>` leaked below, or null.
+    unsafe extern "C" fn give_back(_data: *const u8, cookie: *mut c_void) {
+        if cookie.is_null() {
+            return;
+        }
+        // SAFETY: the caller passes back the cookie `dav1d_data_wrap` was
+        // given, which is the leaked `Box<Lent>`, once.
+        let lent = unsafe { Box::from_raw(cookie.cast::<Lent>()) };
+        // SAFETY: `ptr` and `len` came from `Box::into_raw` on a
+        // `Box<[u8]>` of exactly that length, so this is the same box.
+        drop(unsafe { Box::from_raw(std::ptr::slice_from_raw_parts_mut(lent.ptr, lent.len)) });
+    }
+
     // SAFETY: every call below is the documented dav1d sequence, on pointers
     // this function owns for the whole call. `settings`, `data` and `picture`
     // are stack locals that outlive the calls taking them; the context is
@@ -1282,13 +1320,27 @@ fn decode_av1(
         }
 
         let mut data = Data(MaybeUninit::<Dav1dData>::zeroed().assume_init());
-        let buffer = dav1d_data_create(&mut data.0, payload.len());
-        if buffer.is_null() {
+        // Lend dav1d a buffer this crate allocated rather than filling the
+        // one `dav1d_data_create` hands back. That call returns a pointer
+        // `rav1d` derives from a shared reference (`From<Rav1dData> for
+        // Dav1dData` builds it with `data.as_ref()`), so the tag it carries
+        // permits reads and nothing else, and writing the payload through it
+        // is undefined behaviour under both Stacked Borrows and Tree Borrows.
+        // Miri reports it on the first AVIF fixture that decodes. The wrap
+        // route costs the same single copy and writes only through a pointer
+        // this function owns.
+        let lent: Box<[u8]> = payload.to_vec().into_boxed_slice();
+        let len = lent.len();
+        let ptr = Box::into_raw(lent).cast::<u8>();
+        let cookie = Box::into_raw(Box::new(Lent { ptr, len })).cast::<c_void>();
+        if dav1d_data_wrap(&mut data.0, ptr, len, Some(give_back), cookie) != 0 {
+            // The wrap failed, so dav1d never took the buffer and will never
+            // call `give_back`. Reclaim it here instead of leaking it.
+            give_back(ptr, cookie);
             return Err(AvifError::Decode {
                 message: "could not allocate the AV1 input buffer".into(),
             });
         }
-        std::ptr::copy_nonoverlapping(payload.as_ptr(), buffer, payload.len());
 
         if dav1d_send_data(decoder.0, &mut data.0) != 0 {
             return Err(AvifError::Decode {
