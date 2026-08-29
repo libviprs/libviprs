@@ -98,6 +98,32 @@ const ANIM4_JXL: [u8; 103] = [
     0x00, 0x40, 0x7f, 0x00, 0xf4, 0x07, 0x00,
 ];
 
+/// The same 4x3 image as a **still** in each container, which is the other
+/// boundary a page model diverges at.
+///
+/// The GIF is one frame carrying a graphic control extension holding 1
+/// centisecond, and the WebP and the JPEG XL are `vips copy` of it. A still is
+/// a one-page file, so every window past page 0 is a request the file cannot
+/// serve, and the three loaders have to answer it the same way.
+const STILL_GIF: [u8; 55] = [
+    0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x04, 0x00, 0x03, 0x00, 0x81, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x21, 0xf9, 0x04, 0x04, 0x01, 0x00, 0x00,
+    0x00, 0x2c, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x03, 0x00, 0x00, 0x08, 0x08, 0x00, 0x01, 0x08,
+    0x1c, 0x48, 0x50, 0x60, 0x40, 0x00, 0x3b,
+];
+
+const STILL_WEBP: [u8; 34] = [
+    0x52, 0x49, 0x46, 0x46, 0x1a, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38, 0x4c,
+    0x0e, 0x00, 0x00, 0x00, 0x2f, 0x03, 0x80, 0x00, 0x00, 0x07, 0x10, 0x11, 0xfd, 0x0f, 0x44, 0x44,
+    0xff, 0x03,
+];
+
+#[cfg(feature = "jxl")]
+const STILL_JXL: [u8; 18] = [
+    0xff, 0x0a, 0x10, 0x30, 0x10, 0x09, 0x08, 0x00, 0x01, 0x00, 0x18, 0x00, 0x4b, 0x18, 0x8b, 0x15,
+    0x82, 0x01,
+];
+
 /// The delays the fixture carries, in milliseconds, one per file page.
 ///
 /// The GIF wire holds `4 6 8 10` centiseconds and vips reads them back as
@@ -596,6 +622,132 @@ fn the_compatibility_delay_follows_the_loaded_window_too() {
                 "{container} at page={page}, n={n}: `gif-delay` is loaded page \
                  0's delay, the same window the `delay` array follows"
             );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The single-page boundary
+// ---------------------------------------------------------------------------
+
+/// Load one window of the still fixture out of one container, without
+/// unwrapping.
+fn load_still(container: &str, page: u32, n: i32) -> Result<Raster, libviprs::source::SourceError> {
+    let limits = DecodeLimits::default();
+    match container {
+        "gif" => decode_gif_with(
+            &STILL_GIF,
+            limits,
+            gif::LoadOptions::default().with_page(page).with_n(n),
+        ),
+        "webp" => decode_webp_with(
+            &STILL_WEBP,
+            limits,
+            webp::LoadOptions::default().with_page(page).with_n(n),
+        ),
+        #[cfg(feature = "jxl")]
+        "jxl" => decode_jxl_with(
+            &STILL_JXL,
+            limits,
+            jxl::LoadOptions::default().with_page(page).with_n(n),
+        ),
+        other => panic!("no loader for {other}"),
+    }
+}
+
+/// The one-page refusal each loader reports, and whether it is the shared
+/// typed one.
+///
+/// The three agree on **whether** to refuse a window past a still's only page.
+/// They do not agree on what to call it: WebP and JPEG XL report the shared
+/// `SourceError::PageOutOfRange`, and GIF reports
+/// `SourceError::Gif(GifError::BadPageNumber)`, its own variant carrying the
+/// same three numbers under different names. That is issue #845, filed before
+/// this file existed and rediscovered here from the cross-container angle,
+/// which is the corroboration rather than a second finding.
+///
+/// The last field turns `true` when #845 lands, the way `COMPAT_PAIR`'s does.
+const ONE_PAGE_REFUSAL: [(&str, bool); 3] = [("gif", false), ("webp", true), ("jxl", true)];
+
+/// A still is a one-page file in every container, and every loader refuses the
+/// same windows against it.
+///
+/// This is the boundary the model is most likely to diverge at, and **the one
+/// place where all three loaders agree with each other and none of them agrees
+/// with vips**. Measured with `vips copy '<file>' out.v` on 8.18.6, so the
+/// pixel phase runs and the exit code is the answer rather than a header read:
+///
+/// | request | vips | here |
+/// |---|---|---|
+/// | `still.webp[page=1]`, `[page=5]`, `[n=2]` | **accepted**, arguments ignored | refused |
+/// | `still.jxl[page=5]` | **accepted** | refused |
+/// | `still.gif[page=1]` | refused, `gifload: bad page number` | refused |
+/// | `anim4.webp[page=9]` | refused, `webp: bad page number` | refused |
+///
+/// The last two rows are the positive control: the same command does produce a
+/// refusal, so the accepted rows are a real acceptance rather than a probe that
+/// cannot see an error. vips is the inconsistent one, `gifload` validating a
+/// page against a still where `webpload` and `jxlload` ignore it, and a
+/// `page = 5` that quietly hands back page 0 is the wrong half of the two
+/// answers. That divergence is issue #893, and what is actually wrong with it
+/// today is that `src/webp.rs` documents the refusal as parity.
+///
+/// What this pins is that the three agree with each other. A change applied to
+/// one container and not the others would put the dialect back where #865 had
+/// it.
+///
+/// Input: each container's still at five windows.
+/// Output: page 0 loads at `n = 1` and `n = -1` with no split declared, and
+/// `page = 1`, `page = 5` and `n = 2` are all refused, with the typed variant
+/// each container reports today.
+#[test]
+fn a_still_is_one_page_in_every_container_and_refuses_the_same_windows() {
+    use libviprs::GifError;
+    use libviprs::source::SourceError;
+
+    for container in CONTAINERS {
+        for (page, n) in [(0u32, 1i32), (0, -1)] {
+            let raster = load_still(container, page, n)
+                .unwrap_or_else(|e| panic!("{container} at page={page}, n={n}: {e}"));
+            assert_eq!(raster.height(), 3, "{container}: one page, three rows");
+            assert_eq!(raster.pages_loaded(), 1, "{container}: exactly one page");
+            assert_eq!(
+                raster.get_int("page-height"),
+                None,
+                "{container}: a still declares no split, in any container"
+            );
+        }
+
+        let shared = ONE_PAGE_REFUSAL
+            .iter()
+            .find(|(name, _)| name == container)
+            .map(|(_, shared)| *shared)
+            .unwrap_or_else(|| panic!("{container} has no row in ONE_PAGE_REFUSAL"));
+
+        for (page, n) in [(1u32, 1i32), (5, 1), (0, 2)] {
+            let err = load_still(container, page, n).expect_err(
+                "a one-page file cannot serve a window past its only page, and \
+                 all three loaders say so",
+            );
+            let where_ = format!("{container} at page={page}, n={n}");
+
+            if shared {
+                assert!(
+                    matches!(err, SourceError::PageOutOfRange { pages: 1, .. }),
+                    "{where_}: the shared typed refusal with a page count of 1, \
+                     got {err:?}"
+                );
+            } else {
+                assert!(
+                    matches!(
+                        err,
+                        SourceError::Gif(GifError::BadPageNumber { frames: 1, .. })
+                    ),
+                    "{where_}: issue #845, the GIF loader still has its own \
+                     variant for this refusal. If you have just collapsed the \
+                     two, flip this row in ONE_PAGE_REFUSAL. Got {err:?}"
+                );
+            }
         }
     }
 }
