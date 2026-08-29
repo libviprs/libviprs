@@ -199,6 +199,50 @@ impl Raster {
         Ok(out)
     }
 
+    /// The shared save routes' entry point: encode the Netpbm container the
+    /// **suffix** names, or refuse.
+    ///
+    /// This is the one row in either route where the suffix picks a container
+    /// rather than only a codec. Measured on the pinned vips 8.18.6,
+    /// `ppmsave` registers five suffixes and writes something different for
+    /// each: `.ppm` a `P6`, `.pgm` a `P5`, `.pbm` a `P4` and `.pfm` a `PF`,
+    /// converting the colourspace to whatever the suffix means, while `.pnm`
+    /// is refused outright for every interpretation it was handed.
+    ///
+    /// [`Raster::encode_ppm`] picks its magic from the band count instead, so
+    /// the two agree only when the raster already matches the suffix. Where
+    /// they disagree this refuses rather than converting, the same call the
+    /// `.hdr` row makes (#880): no row in the save table converts, and these
+    /// are not going to be the first. The alternative is writing a `P5` body
+    /// into a file called `.ppm`, which is the one outcome neither vips nor
+    /// Netpbm reads as correct.
+    ///
+    /// `.pbm` and `.pfm` are not routed here at all, because this build has no
+    /// `P4` or `PF` encoder to route them to (issue #882).
+    ///
+    /// # Errors
+    ///
+    /// [`EncodeError::Unsupported`] for a suffix that is not `ppm` or `pgm`,
+    /// [`EncodeError::InvalidParameter`] for a raster whose band count is not
+    /// the one the suffix names, and whatever [`Raster::encode_ppm`] reports
+    /// for a sample kind Netpbm has no binary form for.
+    pub(crate) fn encode_netpbm(&self, suffix: &str) -> Result<Vec<u8>, EncodeError> {
+        let (want, magic) = match suffix {
+            "ppm" => (3usize, "P6"),
+            "pgm" => (1usize, "P5"),
+            other => return Err(EncodeError::unsupported(other.to_owned())),
+        };
+        let got = self.format().channels();
+        if got != want {
+            return Err(EncodeError::InvalidParameter(format!(
+                ".{suffix} is the {magic} Netpbm container, which carries {want} \
+                 bands, and this raster has {got}; vips converts the colourspace \
+                 to suit the suffix and libviprs does not"
+            )));
+        }
+        self.encode_ppm()
+    }
+
     /// Serialise as a binary Netpbm image, or empty bytes when unsupported.
     ///
     /// The infallible convenience over [`Raster::encode_ppm`]: it returns the
@@ -477,6 +521,39 @@ fn next_u32(data: &[u8], pos: &mut usize, what: &str) -> Result<u32, DecodeError
 
 #[cfg(test)]
 mod tests {
+    /**
+     * Tests [`Raster::encode_netpbm`]'s refusal arm directly, because neither
+     * route can reach it (issue #882).
+     *
+     * Both callers match `"ppm" | "pgm"` before calling, so the `other` arm is
+     * unreachable through `Raster::save` and `Raster::encode_to_buffer` alike,
+     * and a mutation that replaced it with a silent `P6` fallback left the
+     * whole suite green. Every route check still passed, because every route
+     * check only ever asks for a suffix the routes already matched.
+     *
+     * That is the shape #696's first bullet is about, arriving through a
+     * different door: a branch the tests cannot drive is a branch nothing
+     * holds. So this drives it directly, with the two rows the routes do have
+     * as the positive control that the function works at all.
+     */
+    #[test]
+    fn encode_netpbm_refuses_a_suffix_it_has_no_container_for() {
+        let rgb = Raster::new(2, 2, PixelFormat::Rgb8, (0..12u8).collect()).unwrap();
+        for suffix in ["pbm", "pfm", "pnm", "ppm2", ""] {
+            let err = rgb
+                .encode_netpbm(suffix)
+                .expect_err("this build has no container for .{suffix}");
+            assert!(
+                matches!(&err, EncodeError::Unsupported { format } if format == suffix),
+                ".{suffix} must be refused by name, got {err}"
+            );
+        }
+        // Positive control: the two it does have.
+        assert!(rgb.encode_netpbm("ppm").unwrap().starts_with(b"P6"));
+        let gray = Raster::new(2, 2, PixelFormat::Gray8, vec![0, 64, 128, 255]).unwrap();
+        assert!(gray.encode_netpbm("pgm").unwrap().starts_with(b"P5"));
+    }
+
     use super::*;
 
     fn float1_test() -> PixelFormat {

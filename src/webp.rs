@@ -53,7 +53,8 @@
 //!   [`decode_webp_with`] takes the `page` and `n` that ask for more,
 //!   stacking the frames into the toilet-roll layout
 //!   [`crate::frames`] describes (issue #569).
-//! * **A blended frame decodes one grey level low, and that is upstream.**
+//! * **An opaque blended frame decodes one grey level low, and that is
+//!   upstream.**
 //!   `image-webp` 0.2.4 runs its approximate alpha blend on opaque pixels
 //!   where libwebp copies them (`demux/anim_decode.c`,
 //!   `BlendPixelRowNonPremult` tests `src_alpha != 0xff` first), and with
@@ -71,6 +72,15 @@
 //!   file). There is no sound way to prove opacity from a header, so the
 //!   bounded upstream error is carried rather than traded for an unbounded
 //!   one this crate would own.
+//!
+//!   **One level is the opaque bound, not the whole story.** The same
+//!   function diverges from libwebp a second way, on the `dst_factor_a`
+//!   term, and there the gap reaches 26 levels on translucent pixels; issue
+//!   #917 has that measurement. Nothing in this crate's fixtures reaches it,
+//!   because `vips webpsave` writes blending **off** on every frame of a
+//!   transparent animation, so the files that would show it are the ones
+//!   vips does not produce. Both halves are the same upstream function and
+//!   the same one-line-per-half fix in `image-webp`.
 //! * **Animated WebP can be read and never written.** No pure-Rust
 //!   encoder emits `ANIM`/`ANMF`: `image-webp` 0.2.4 writes one `VP8L`
 //!   chunk and has no animation surface at all, so [`SaveOptions`] has
@@ -384,10 +394,14 @@ pub fn decode_webp(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceE
 /// [`crate::frames`] describes. [`decode_webp`] is this function at
 /// [`LoadOptions::default`].
 ///
-/// A page the file asks to have blended comes back **one grey level low on
-/// every non-zero channel**, which is `image-webp` 0.2.4 blending opaque
-/// pixels where libwebp copies them. The module docs have the arithmetic
-/// and the reason libviprs no longer tries to work around it (issue #863).
+/// An **opaque** page the file asks to have blended comes back **one grey
+/// level low on every non-zero channel**, which is `image-webp` 0.2.4
+/// blending opaque pixels where libwebp copies them. The module docs have
+/// the arithmetic and the reason libviprs no longer tries to work around it
+/// (issue #863). A **translucent** blended page diverges further, up to 26
+/// levels, through a second difference in the same function (issue #917);
+/// no file `vips webpsave` writes reaches it, because it writes blending
+/// off on every frame of a transparent animation.
 ///
 /// # What comes back attached
 ///
@@ -1586,8 +1600,12 @@ mod tests {
     /// vips reads out of the same bytes.
     ///
     /// Every channel comes back one grey level low, and zero stays zero.
-    /// That is not an approximation of the difference, it is the whole of
-    /// it: `image-webp` runs its approximate blend on opaque pixels where
+    /// That is not an approximation of the difference, it is the whole of it
+    /// **for an opaque frame**, which is the only kind this applies to; a
+    /// translucent one diverges further through a second difference in the
+    /// same upstream function (issue #917), and no fixture here reaches that
+    /// because `vips webpsave` writes blending off on every frame of a
+    /// transparent animation. The arithmetic: `image-webp` runs its approximate blend on opaque pixels where
     /// libwebp copies them (`demux/anim_decode.c`,
     /// `BlendPixelRowNonPremult`, which tests `src_alpha != 0xff` before
     /// blending), and with `src_a = 255` the arithmetic is
