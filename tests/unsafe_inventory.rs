@@ -371,7 +371,14 @@ fn enabled_features(list: &str) -> Vec<String> {
 /// grep this replaces was green over exactly that (issue #949).
 fn feature_closure(manifest: &str, roots: &[&str]) -> BTreeSet<String> {
     let table = feature_table(manifest);
-    let mut seen: BTreeSet<String> = BTreeSet::new();
+    // Seeded with the roots themselves, not left empty: a cycle that loops
+    // back to touch a root by name would otherwise reprocess it once before
+    // the first successful `seen.insert` for it closes the loop. Harmless
+    // for this crate's actual, acyclic `Cargo.toml`, but a graph-walk
+    // function claiming to resolve "a feature list is a graph" should not
+    // carry an asymmetry a hand-edited manifest could expose (issue #940's
+    // panel).
+    let mut seen: BTreeSet<String> = roots.iter().map(|r| (*r).to_owned()).collect();
     let mut queue: Vec<String> = roots.iter().map(|r| (*r).to_owned()).collect();
     while let Some(name) = queue.pop() {
         for next in table.get(&name).map(Vec::as_slice).unwrap_or_default() {
@@ -419,6 +426,23 @@ fn the_default_build_feature_set_is_resolved_through_the_graph() {
         real.contains("pdfium"),
         "`pdfium-static = [\"pdfium\", ..]`, so the closure must carry \
          `pdfium`; got {real:?}"
+    );
+
+    // A cycle that loops back to touch the root by name. Nothing in this
+    // crate's real `Cargo.toml` has one, so nothing else exercises the
+    // graph-walk on one; a hand-edited manifest is not ruled out by the
+    // function's own contract, and the walk must still terminate with the
+    // right closure rather than hang or lose a feature (issue #940's panel).
+    const CYCLIC: &str = "[package]\nname = \"x\"\n\n[features]\n\
+                          a = [\"b\"]\npdfium = []\nb = [\"a\", \"pdfium\"]\n";
+    let cyclic = feature_closure(CYCLIC, &["a"]);
+    assert_eq!(
+        cyclic,
+        ["a", "b", "pdfium"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        "a cycle back to the root must still terminate with the full closure; got {cyclic:?}"
     );
 }
 
