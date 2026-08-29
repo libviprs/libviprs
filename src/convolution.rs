@@ -293,7 +293,7 @@
 
 use crate::colour::ColourError;
 use crate::conversion::{Angle45, ConversionError, Interpretation, cast_float_sample};
-use crate::pixel::PixelFormat;
+use crate::pixel::{PixelFormat, SampleKind, read_sample_f64};
 use crate::raster::{Raster, RasterError, alloc_op_output, try_plane_len};
 use thiserror::Error;
 
@@ -933,25 +933,20 @@ fn samples_f64(r: &Raster) -> Result<Vec<f64>, RasterError> {
     let n = r.width() as usize * r.height() as usize * fmt.channels();
     let data = r.data();
     let mut out = try_plane_len(plane::SAMPLES_F64, r.width(), r.height(), n)?;
-    match fmt.bytes_per_channel() {
-        1 => out.extend(data.iter().map(|&b| b as f64)),
-        2 => out.extend((0..n).map(|i| u16::from_ne_bytes([data[i * 2], data[i * 2 + 1]]) as f64)),
-        _ => out.extend((0..n).map(|i| {
-            f32::from_ne_bytes([
-                data[i * 4],
-                data[i * 4 + 1],
-                data[i * 4 + 2],
-                data[i * 4 + 3],
-            ]) as f64
-        })),
-    }
+    // One kind-keyed read rather than a fourth copy of the width-keyed match,
+    // whose trailing arm widened four bytes as `f32` whatever they were: a
+    // `u32` sample of `1` came out of here as `1.4e-45` (issue #607).
+    let kind = fmt.kind();
+    let bytes = kind.bytes();
+    out.extend((0..n).map(|i| read_sample_f64(data, kind, i * bytes)));
     Ok(out)
 }
 
 /// The 32-bit float format with `channels` bands (the `vips_convf` output
 /// depth).
 fn float_format(channels: usize) -> PixelFormat {
-    PixelFormat::with_channels(channels, 4).expect("validated channel count has a float format")
+    PixelFormat::with_kind(channels, SampleKind::F32)
+        .expect("validated channel count has a float format")
 }
 
 /// Build a float raster from `f64` samples (stored as `f32`, the crate's
@@ -1000,14 +995,14 @@ fn raster_from_i64(
 ) -> Result<Raster, RasterError> {
     debug_assert_eq!(samples.len(), w as usize * h as usize * fmt.channels());
     let mut data = alloc_op_output(w, h, fmt)?;
-    if fmt.bytes_per_channel() == 1 {
-        for (out, v) in data.iter_mut().zip(samples) {
-            *out = v as u8;
-        }
-    } else {
-        for (out, v) in data.as_chunks_mut::<2>().0.iter_mut().zip(samples) {
-            *out = (v as u16).to_ne_bytes();
-        }
+    // The stride follows the sample kind rather than being spelled per arm.
+    // The `else` this replaces wrote a `u16` for every kind that was not one
+    // byte, so a four-byte integer raster came out at half the stride with
+    // every second sample dropped (issue #607).
+    let kind = fmt.kind();
+    let bytes = kind.bytes();
+    for (i, v) in samples.enumerate() {
+        put_sample(&mut data, kind, i * bytes, v);
     }
     let mut out = Raster::from_op_output(w, h, fmt, data)?;
     out.carry_meta_from(src);
@@ -1034,22 +1029,13 @@ fn fold_abs_samples(acc: &mut [f64], r: &Raster, first: bool, combine: Combine) 
         };
     };
     let data = r.data();
-    match r.format().bytes_per_channel() {
-        1 => {
-            for (i, &b) in data.iter().enumerate() {
-                apply(i, f64::from(b));
-            }
-        }
-        2 => {
-            for (i, c) in data.as_chunks::<2>().0.iter().enumerate() {
-                apply(i, f64::from(u16::from_ne_bytes(*c)));
-            }
-        }
-        _ => {
-            for (i, c) in data.as_chunks::<4>().0.iter().enumerate() {
-                apply(i, f64::from(f32::from_ne_bytes(*c)));
-            }
-        }
+    // Same shape as `samples_f64`, decided once per result rather than once
+    // per sample, and now decided by the kind: the `_` arm this replaces read
+    // every four-byte sample as an `f32` (issue #607).
+    let kind = r.format().kind();
+    let bytes = kind.bytes();
+    for i in 0..data.len() / bytes {
+        apply(i, read_sample_f64(data, kind, i * bytes));
     }
 }
 
@@ -1132,13 +1118,61 @@ fn intize(dense: &DenseKernel) -> IntKernel {
     }
 }
 
-/// The clip ceiling for an unsigned format depth.
+/// The clip ceiling an integer format's samples saturate at.
+///
+/// The ceiling belongs to the sample kind and not to a byte width: the
+/// `else` this replaces answered 65535 for **every** width that was not one,
+/// so a four-byte integer kind would have been clipped to a sixteenth of its
+/// range and a float raster would have been clipped at all (issue #607).
+///
+/// A float kind has no ceiling its samples imply, which is what
+/// [`SampleKind::max_value`]'s `None` says, so this answers `i64::MAX`: the
+/// identity clamp rather than a wrong number. No caller reaches it that way
+/// today, because every call site sits inside an integer arm.
 #[inline]
 fn depth_max(fmt: PixelFormat) -> i64 {
-    if fmt.bytes_per_channel() == 1 {
-        255
-    } else {
-        65535
+    fmt.kind().max_value().map_or(i64::MAX, i64::from)
+}
+
+/// Store an already-clipped integer sample as `kind`, at a byte offset.
+///
+/// The samples reaching here have been through the traversal's own
+/// `clamp(0, depth_max)`, so this is a store and not a cast, and truncation
+/// and rounding cannot differ on a value that is already integral. Total over
+/// [`SampleKind`], which is the point: the `else` this replaced wrote a `u16`
+/// for every kind that was not one byte, so a four-byte integer raster came
+/// out at half the stride (issue #607). The shared writer issue #517 adds
+/// absorbs this.
+#[inline]
+fn put_sample(data: &mut [u8], kind: SampleKind, off: usize, v: i64) {
+    match kind {
+        SampleKind::U8 => data[off] = v as u8,
+        SampleKind::I8 => data[off] = v as i8 as u8,
+        SampleKind::U16 => data[off..off + 2].copy_from_slice(&(v as u16).to_ne_bytes()),
+        SampleKind::I16 => data[off..off + 2].copy_from_slice(&(v as i16).to_ne_bytes()),
+        SampleKind::U32 => data[off..off + 4].copy_from_slice(&(v as u32).to_ne_bytes()),
+        SampleKind::I32 => data[off..off + 4].copy_from_slice(&(v as i32).to_ne_bytes()),
+        SampleKind::F32 => data[off..off + 4].copy_from_slice(&(v as f32).to_ne_bytes()),
+    }
+}
+
+/// Whether a format's samples are libvips' `VIPS_FORMAT_UCHAR`, the depth
+/// the integer masks and their `+128` offsets are calibrated for
+/// (`canny.c:81-87` and the `convi` path).
+///
+/// Total on purpose. The width test this replaces (`== 1`, else) put
+/// every other kind in one bucket, so the 16-bit arm was also the arm a
+/// four-byte integer kind would have taken (issue #607).
+#[inline]
+fn is_uchar(fmt: PixelFormat) -> bool {
+    match fmt.kind() {
+        SampleKind::U8 => true,
+        SampleKind::I8
+        | SampleKind::U16
+        | SampleKind::I16
+        | SampleKind::U32
+        | SampleKind::I32
+        | SampleKind::F32 => false,
     }
 }
 
@@ -1240,7 +1274,7 @@ struct RowWindow<'a> {
     data: &'a [u8],
     /// Bytes per sample in `data`: 1, 2 or 4, the three carriers
     /// [`samples_f64`] widens.
-    depth: usize,
+    kind: SampleKind,
     /// `span` source rows widened to `f64`, source row `r` at slot
     /// `r % span`.
     window: Vec<f64>,
@@ -1285,7 +1319,7 @@ impl<'a> RowWindow<'a> {
         window.resize(span * row_stride, 0.0);
         Ok(RowWindow {
             data: src.data(),
-            depth: src.format().bytes_per_channel(),
+            kind: src.format().kind(),
             window,
             span,
             next: 0,
@@ -1314,29 +1348,34 @@ impl<'a> RowWindow<'a> {
     /// and producing the same values; the widening moved here rather than
     /// changing.
     fn advance(&mut self, y: usize) {
-        let (data, depth, stride) = (self.data, self.depth, self.row_stride);
+        let (data, kind, stride) = (self.data, self.kind, self.row_stride);
         let last = (y + self.trail).min(self.h - 1);
         while self.next <= last {
             let start = self.next * stride;
             let base = (self.next % self.span) * stride;
             let row = &mut self.window[base..base + stride];
-            match depth {
-                1 => {
+            // Keyed on the sample kind, so a four-byte integer carrier is
+            // widened as the integer it is rather than falling into the
+            // `_` arm and being read as `f32` (issue #607). The dispatch
+            // stays outside the row loop: the byte-at-a-time carrier keeps
+            // its tight `zip` because this is the traversal's hot path
+            // (issue #575), and every other kind goes through the shared
+            // reader at its own stride.
+            match kind {
+                SampleKind::U8 => {
                     for (out, &b) in row.iter_mut().zip(&data[start..start + stride]) {
-                        *out = b as f64;
+                        *out = f64::from(b);
                     }
                 }
-                2 => {
+                SampleKind::U16
+                | SampleKind::I8
+                | SampleKind::I16
+                | SampleKind::U32
+                | SampleKind::I32
+                | SampleKind::F32 => {
+                    let bytes = kind.bytes();
                     for (i, out) in row.iter_mut().enumerate() {
-                        let p = (start + i) * 2;
-                        *out = u16::from_ne_bytes([data[p], data[p + 1]]) as f64;
-                    }
-                }
-                _ => {
-                    for (i, out) in row.iter_mut().enumerate() {
-                        let p = (start + i) * 4;
-                        *out = f32::from_ne_bytes([data[p], data[p + 1], data[p + 2], data[p + 3]])
-                            as f64;
+                        *out = read_sample_f64(data, kind, (start + i) * bytes);
                     }
                 }
             }
@@ -1745,7 +1784,7 @@ fn conv_planes<const M: usize>(
                 let fmt = src.format();
                 let max = depth_max(fmt);
                 let mut out = out_buffers::<M>(w, h, fmt)?;
-                if fmt.bytes_per_channel() == 1 {
+                if is_uchar(fmt) {
                     scan.int(&taps, |i, sums| {
                         for ((buf, &sum), &(rounding, iscale, ioffset)) in
                             out.iter_mut().zip(&sums).zip(&params)
@@ -2040,7 +2079,7 @@ impl Raster {
             // bits and saturates, as the arithmetic batch does).
             let out_fmt = match combine {
                 Combine::Max => fmt,
-                Combine::Sum => PixelFormat::with_channels(channels, 2)
+                Combine::Sum => PixelFormat::with_kind(channels, SampleKind::U16)
                     .expect("validated channel count has a 16-bit format"),
             };
             let max = depth_max(out_fmt);
@@ -2545,12 +2584,13 @@ impl Raster {
         let rows: Vec<Vec<f64>> = mask.iter().map(|row| row.to_vec()).collect();
         let channels = self.format().channels();
         let (w, h) = (self.width(), self.height());
-        let fmt = PixelFormat::with_channels(channels, 1)
+        let fmt = PixelFormat::with_kind(channels, SampleKind::U8)
             .expect("an existing raster's band count has an 8-bit format");
 
-        // A 1-byte channel is exactly libvips' VIPS_FORMAT_UCHAR: the
-        // 16-bit and float carriers are 2 and 4 bytes wide.
-        let uchar = self.format().bytes_per_channel() == 1;
+        // `SampleKind::U8` is exactly libvips' VIPS_FORMAT_UCHAR. Asking
+        // the kind rather than the width is the difference between "this is
+        // uchar" and "this is not two or four bytes wide".
+        let uchar = is_uchar(self.format());
         let dense = if uchar {
             DenseKernel::new(&Kernel {
                 data: rows,
@@ -3030,9 +3070,9 @@ impl Raster {
             data: rows,
             scale: 1.0,
         })?;
-        // canny.c:81-87. A 1-byte channel is libvips' VIPS_FORMAT_UCHAR;
-        // the 16-bit and float carriers are 2 and 4 bytes wide.
-        let (mask, gradient_precision) = if blurred.format().bytes_per_channel() == 1 {
+        // canny.c:81-87. `SampleKind::U8` is libvips' VIPS_FORMAT_UCHAR,
+        // and the integer gradient mask is calibrated for that kind alone.
+        let (mask, gradient_precision) = if is_uchar(blurred.format()) {
             (mask.with_offset(EDGE_UCHAR_OFFSET), Precision::Integer)
         } else {
             (mask, Precision::Float)
@@ -3077,7 +3117,7 @@ impl Raster {
         let (uw, uh) = (w as usize, h as usize);
         let mut data = alloc_op_output(w, h, fmt)?;
 
-        if fmt.bytes_per_channel() == 1 {
+        if is_uchar(fmt) {
             // The polar image vips materialises is one raster of 2 * bands
             // interleaving (G, theta); a pair per sample is the same
             // layout without the doubled band count, and it is what the
@@ -3269,6 +3309,83 @@ mod tests {
      * (issue #607).
      * Input: `src/convolution.rs` -> Output: zero occurrences.
      */
+    /**
+     * Tests that [`RowWindow`] widens a row by the sample kind and at that
+     * kind's stride, which is the site the width-keyed match-head count
+     * could not see at all: the width lived in a `usize` field and the three
+     * arms were chosen from it, so a four-byte integer carrier would have
+     * been widened as `f32` (issue #607).
+     * Works by widening a 16-bit raster row through the window and comparing
+     * against the samples read straight out of the bytes. 16-bit is the
+     * narrowest width where a dropped stride is visible: at one byte per
+     * sample the wrong stride is the identity, so an 8-bit fixture proves
+     * nothing here.
+     * Input: a 4x3 `Gray16` raster with distinct per-pixel values ->
+     * Output: each row widens to its own samples.
+     */
+    #[test]
+    fn the_row_window_widens_by_the_kind_and_at_its_stride() {
+        let im = gray16_from(4, 3, |x, y| (1000 + x * 7 + y * 20011) as u16);
+        // A one-row lead and trail, so every row is resident by the time it
+        // is asked for.
+        let mut window = RowWindow::new(&im, 0, 0).unwrap();
+        for row in 0..im.height() as usize {
+            window.advance(row);
+            let base = window.slot(row);
+            let widened = &window.samples()[base..base + 4];
+            let expected: Vec<f64> = (0..4)
+                .map(|x| f64::from(1000 + x as u32 * 7 + row as u32 * 20011))
+                .collect();
+            assert_eq!(widened, expected.as_slice(), "row {row} widened wrong");
+        }
+
+        // Positive control: the same comparison over a row that genuinely
+        // differs fails, so the equalities above are not vacuous.
+        window.advance(0);
+        let base = window.slot(0);
+        assert_ne!(
+            &window.samples()[base..base + 4],
+            &[0.0f64; 4],
+            "the window must actually hold the raster's samples"
+        );
+    }
+
+    /**
+     * Tests that the two helpers the four width tests became read the sample
+     * kind, including for the kinds no [`PixelFormat`] carries yet.
+     * `depth_max` used to answer 65535 for **every** width that was not one,
+     * so a four-byte integer kind would have been clipped to a sixteenth of
+     * its range, and `is_uchar` used to be `== 1`, which put every other
+     * kind in the 16-bit arm (issue #607).
+     * Works by pinning `depth_max` for the three carried formats and
+     * checking it is [`SampleKind::max_value`] read through, plus `is_uchar`
+     * over every carried format.
+     * Input: the carried formats and all seven kinds -> Output: each kind's
+     * own ceiling, and `uchar` true for `U8` alone.
+     */
+    #[test]
+    fn the_clip_ceiling_and_the_uchar_test_read_the_kind() {
+        assert_eq!(depth_max(PixelFormat::Gray8), 255);
+        assert_eq!(depth_max(PixelFormat::Gray16), 65535);
+        // A float kind implies no ceiling, so the clamp is the identity
+        // rather than the 65535 a width used to hand it. No caller reaches
+        // it: both call sites sit inside an integer arm.
+        assert_eq!(depth_max(PixelFormat::RgbaF32), i64::MAX);
+
+        // The ceilings a width cannot reach, read off the shared spine. These
+        // are the numbers `depth_max` will answer the moment a carrier
+        // exists, and they are three different numbers for three kinds of
+        // the same width.
+        assert_eq!(SampleKind::U32.max_value(), Some(u32::MAX));
+        assert_eq!(SampleKind::I32.max_value(), Some(2_147_483_647));
+        assert_eq!(SampleKind::F32.max_value(), None);
+
+        assert!(is_uchar(PixelFormat::Gray8));
+        assert!(is_uchar(PixelFormat::Rgba8));
+        assert!(!is_uchar(PixelFormat::Gray16));
+        assert!(!is_uchar(PixelFormat::RgbaF32));
+    }
+
     #[test]
     fn convolution_does_not_dispatch_on_byte_width() {
         const SRC: &str = include_str!("convolution.rs");
@@ -5012,7 +5129,7 @@ mod tests {
     /// sharpen on an image with no LabS route is a typed colour error.
     #[test]
     fn sharpen_unsupported_source_is_typed_error() {
-        let two = PixelFormat::with_channels(2, 1).unwrap();
+        let two = PixelFormat::with_kind(2, SampleKind::U8).unwrap();
         let im = Raster::zeroed(4, 4, two).unwrap();
         assert!(matches!(
             im.try_sharpen(1.0, 0.0, 0.0),
@@ -5134,7 +5251,7 @@ mod tests {
     /// integer mask, real division, no clipping.
     #[test]
     fn conv_integer_on_float_raster() {
-        let fmt = PixelFormat::with_channels(1, 4).unwrap();
+        let fmt = PixelFormat::with_kind(1, SampleKind::F32).unwrap();
         let im = Raster::from_f32_samples(2, 1, fmt, &[-10.0, 350.5]).unwrap();
         let id = Kernel {
             data: vec![vec![1.0]],
@@ -5596,9 +5713,9 @@ mod tests {
     /// carriers all narrow to their 8-bit sibling.
     #[test]
     fn edge_output_is_always_uchar_with_the_input_bands() {
-        let two8 = PixelFormat::with_channels(2, 1).unwrap();
-        let five16 = PixelFormat::with_channels(5, 2).unwrap();
-        let five8 = PixelFormat::with_channels(5, 1).unwrap();
+        let two8 = PixelFormat::with_kind(2, SampleKind::U8).unwrap();
+        let five16 = PixelFormat::with_kind(5, SampleKind::U16).unwrap();
+        let five8 = PixelFormat::with_kind(5, SampleKind::U8).unwrap();
         let cases = [
             (PixelFormat::Gray8, PixelFormat::Gray8),
             (PixelFormat::Gray16, PixelFormat::Gray8),
