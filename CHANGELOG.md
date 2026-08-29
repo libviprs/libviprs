@@ -534,8 +534,31 @@ and not under `Fixed`: this file is the only place they can be caught.
   a minute. The refusal is the typed
   `ConvolutionError::TimesOutOfRange { times, min, max }`, which replaces
   `ConvolutionError::ZeroTimes` and covers both ends of the range at once.
-  `ZeroTimes` has never been in a release, and the enum is
+  ~~`ZeroTimes` has never been in a release~~, and the enum is
   `#[non_exhaustive]`.
+
+  **The struck half was wrong when it was written** (issue #947), and it was
+  the sentence a 0.4.0 caller matching that variant would have read to decide
+  whether any of this reached them. It told them it could not.
+  `ConvolutionError::ZeroTimes` shipped in `v0.4.0`: it is the enum's variant
+  at `v0.4.0:src/convolution.rs:182`, constructed at `:839` and documented at
+  `:821`, introduced on 2026-07-11 in `2b9f9caf`, nine days before the tag on
+  2026-07-20, and `git tag --contains 2b9f9caf` answers `v0.4.0`. So anyone on
+  0.4.0 who matched `ZeroTimes` does have to move to `TimesOutOfRange`, and
+  the `#[non_exhaustive]` half is what makes that a behaviour change rather
+  than a compile error: their match already carried a wildcard arm, so the
+  variant they were naming simply stops arriving.
+
+  It is struck through rather than deleted, following the #501 and #920
+  entries below, which were annotated rather than rewritten when later PRs
+  falsified them so the record shows what changed. What is different here is
+  that this one was never true, so a reader needs to see both the sentence
+  that shipped and the correction rather than only the correction.
+
+  `tests/changelog_release_claims.rs` answers this class against `git tag`
+  now. "Has this identifier ever been in a release" is decidable, and nothing
+  was deciding it, which is the same shape as `merge-gate.yml` claiming the
+  crate had no `unsafe` of its own when it had ten (#897).
 
   Worth being explicit that this is a divergence rather than a match, because
   the accepted range is identical and that makes it easy to skim past: vips
@@ -1620,6 +1643,14 @@ and not under `Fixed`: this file is the only place they can be caught.
   A window the file cannot serve is `GifError::BadPageNumber` rather than a
   clamp, matching vips, which fails `[page=4]`, `[n=99]`, `[n=0]` and
   `[page=3,n=3]` on a four-frame file with `bad page number`.
+
+  **That variant is gone as of #845, inside this same release**, folded into
+  `SourceError::PageOutOfRange`, which carries the same three numbers under
+  different names and is what all three multi-page loaders report now
+  (issue #950). The refusal and the four cases it covers are unchanged; only
+  the variant a caller matches moved. Left standing rather than rewritten,
+  since the fields of the shared variant were shaped field for field against
+  this one so that folding them would be a deletion rather than a redesign.
 
   **The frame walk is bounded now, where the still loader's was not.** A GIF's
   frame list has no count in its header, so the only way to know how long it
@@ -2933,7 +2964,16 @@ and not under `Fixed`: this file is the only place they can be caught.
   Two typed refusals replace panics out of `Result`-returning methods, the shape
   issue #694 landed: `BandError::UnsupportedSampleKind` and
   `ExtractError::UnsupportedSampleKind`, alongside
-  `ConversionError::UnsupportedSampleKind`. They also fix a message that named
+  `ConversionError::UnsupportedSampleKind`.
+
+  **The third of those three is gone, removed by #931 inside this same
+  release** (issue #950), because nothing could reach it once the carriers
+  landed. The other two are live. Left standing rather than rewritten, for the
+  same reason as the two entries above: the paragraph is the record of what
+  this PR shipped, and the `### Breaking` list at the top of `Unreleased` is
+  the record of what the release ships.
+
+  They also fix a message that named
   the wrong carrier: the width-keyed `_` arms panicked saying "float rasters"
   over a raster that is not float. `smartcrop`'s entropy and attention
   strategies keep a stricter guard and refuse the 32-bit carrier, because both
@@ -2943,6 +2983,11 @@ and not under `Fixed`: this file is the only place they can be caught.
   `Uint32` rasters round-trip through the `.v` container once #841 lands (PR
   #858, which this stacks on): the `BandFmt` wire tag used to be written from a
   byte width, and a byte width does not name a carrier.
+
+  **#841 landed**, so that sentence's future tense is about something this
+  release already ships (issue #950). It is left standing because the
+  conditional is what the PR could honestly say at the time, and the stack it
+  names is how the two halves fit together.
 - **A gate against a byte width standing in for a sample kind**, which is what
   issue #607 step (e) asks for: `tests/sample_kind_spine.rs` refuses a
   `bytes_per_channel()` comparison anywhere under `src/`. It is a scan rather
@@ -5342,7 +5387,16 @@ and not under `Fixed`: this file is the only place they can be caught.
   `GifError::AllocLimitExceeded` and `RadianceError::AllocLimitExceeded` are all
   still what a caller sees, because collapsing them onto
   `SourceError::AllocLimitExceeded` is a breaking change to five public enums;
-  #632 deferred it and issue #686 carries it for 0.5.0. They are built from the
+  #632 deferred it and issue #686 carries it for 0.5.0.
+
+  **#686 landed inside this same release, so those five variants are gone**
+  and the `### Breaking` entry near the top of `Unreleased` is what a caller
+  sees today (issue #950). The paragraph is left standing as what #632 shipped
+  rather than rewritten, the way the #501 entry does the same thing: the
+  sentence deferring the collapse is why the migration note further up exists,
+  and deleting it would leave that note looking unprompted.
+
+  They are built from the
   budget's answer rather than retagged off its error, through the new
   `DecodeLimits::exceeds_alloc_budget`: `check_alloc`'s `what` label is only
   ever observable through a decoder that propagates the `SourceError` whole,
