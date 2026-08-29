@@ -870,6 +870,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and #517 arrive as a typed refusal instead of through the arm that used to
   ask for `f32` samples and write float bit patterns into an integer raster.
 
+- **`.hdr` is a row in `Raster::save` and `"hdr"` is one in
+  `Raster::encode_to_buffer`** (issue #880). Radiance had a matched
+  `float2rad` encoder since #589 and no shared save route could reach it, so
+  `Raster::encode_radiance` by name was the only way to write one.
+
+  One suffix, measured on the pinned vips 8.18.6: `radsave`'s entry in `vips -l`
+  reads `nocache (.hdr)`, and `vips copy base.v x.rad`, `x.rgbe` and `x.pic` are
+  each refused with "is not a known file format". `.pic` is worth saying out
+  loud because #506's own title reads `.hdr/.pic`; that is a load spelling
+  elsewhere and not a suffix `radsave` saves under. Ungated, because #589 wrote
+  the encoder in this crate and it costs no feature.
+
+  **The row refuses rather than casts, and it is the first row in that table
+  with an input contract at all.** `radsave` declares `mono rgb` and vips casts
+  whatever it is handed, so `vips copy base.v r.hdr` on a 3-band uchar raster
+  writes a Radiance file. `Raster::encode_radiance` takes 3-band `f32` and
+  refuses anything else, which is its contract since #589, and the extension
+  route propagates that rather than growing a conversion: no row in that table
+  converts, and this one is not going to be the first. The refusal names the
+  raster and does **not** read as `UnsupportedExtension`, which would tell a
+  caller this build has no Radiance encoder.
+
+  `keep_metadata` has nothing to act on. A Radiance header carries `EXPOSURE`,
+  `COLORCORR`, `PIXASPECT` and the primaries, surfaced as `rad-expos`,
+  `rad-colcor-*`, `rad-aspect` and `rad-prims-*`, which are format records the
+  way a FITS card is rather than an ICC profile or an EXIF block, and
+  `radiance::SaveOptions::default` already takes them off the raster's own
+  fields. Asserted, with `.webp` beside it as the control that does differ under
+  the flag.
 
 - **`"uhdr"` is a row in `Raster::encode_to_buffer`**, so Ultra HDR is reachable
   from a shared save route and not only through `Raster::encode_uhdr` by name
