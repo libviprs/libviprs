@@ -148,12 +148,9 @@
 //! conversion helpers the ported statistics tests use for setup (`grey`,
 //! `insert`) live in their own batches.
 
-#[cfg(test)]
-use std::cell::Cell;
-
 use crate::conversion::Interpretation;
 use crate::pixel::{PixelFormat, SampleKind};
-use crate::raster::{Raster, RasterError, alloc_op_output};
+use crate::raster::{Raster, RasterError, alloc_op_output, try_plane_len_filled};
 use thiserror::Error;
 
 /// Typed errors for the arithmetic operations in [`crate::arithmetic`].
@@ -640,124 +637,78 @@ fn op_output_or_panic(width: u32, height: u32, format: PixelFormat) -> Vec<u8> {
         .unwrap_or_else(|e| panic!("arithmetic output allocation failed: {e}"))
 }
 
-/// Allocate a zero-filled scratch buffer of `len` elements fallibly.
+/// The site labels this module's plane reservations carry.
 ///
-/// Several `try_*` ops build intermediate buffers far larger than their
-/// output: the [`Raster::try_stdif`] integral images (two `f64` buffers,
-/// each ~8x a Gray8 input) and the [`Raster::try_hough_circle`] vote
-/// accumulator (`w * h * radii` `u32`s — twice the output and sized by the
-/// caller-controlled radius range). PR #339 made only the *output*
-/// allocation fallible ([`alloc_op_output`], issue #280) but left these
-/// dominant scratch buffers as infallible `vec![..]`, so an over-capacity
-/// size still reached `handle_alloc_error` and aborted the process (SIGABRT)
-/// before the fallible output path ever ran — the exact remote-DoS abort
-/// #280 set out to remove (issues #433 / #434 / #435).
+/// A label rather than an ordinal, which is the whole point of the shared
+/// probe: `raster::with_plane_cap_at` starves the one buffer a check names and
+/// leaves every other reservation on the path alone. The three private
+/// ceilings this module's used to be one of refused the *Nth* over-ceiling
+/// request instead, so a check that read as though it named a buffer was
+/// really naming a position, and told two same-sized buffers apart only by
+/// accident (issue #696).
 ///
-/// Routing the scratch through [`Vec::try_reserve_exact`] surfaces an
-/// unsatisfiable request as [`RasterError::AllocationFailed`], so the `try_*`
-/// op returns a typed `Err` (and its panicking form panics) instead of
-/// aborting. `width` / `height` name the driving raster for the error; the
-/// reported byte count is `len * size_of::<T>()`.
+/// `PROJECT_COL_SUMS` and `PROJECT_ROW_SUMS` are the pair #532 has to widen.
+/// They accumulate in `f64` and [`Raster::project`] then saturates the result
+/// into 16-bit samples where vips emits `VIPS_FORMAT_UINT`, so when the `uint`
+/// carrier lands the buffers keep these names and only what they hold moves.
+mod plane {
+    /// [`super::Raster::project`]'s column accumulator, one `f64` per column
+    /// per band, so a wide short raster makes it up to ~8x the input.
+    pub(super) const PROJECT_COL_SUMS: &str = "arithmetic.project.col_sums";
+    /// [`super::Raster::project`]'s row accumulator, the same for rows.
+    pub(super) const PROJECT_ROW_SUMS: &str = "arithmetic.project.row_sums";
+    /// [`super::Raster::try_stdif`]'s integral image of the padded input.
+    ///
+    /// `_sums` rather than the bare `arithmetic.stdif.integral` it started as,
+    /// because that reads as a prefix of the label below and the probe matches
+    /// a cap site with `starts_with`: a ceiling naming the shorter one would
+    /// silently refuse the longer as well.
+    pub(super) const STDIF_INTEGRAL_SUMS: &str = "arithmetic.stdif.integral_sums";
+    /// [`super::Raster::try_stdif`]'s integral image of the padded input's
+    /// squares, the same size again and allocated straight after it.
+    pub(super) const STDIF_INTEGRAL_SQUARES: &str = "arithmetic.stdif.integral_squares";
+    /// [`super::Raster::try_hough_circle`]'s vote accumulator, `w * h * radii`
+    /// `u32`s, sized by the caller's radius range rather than by the image.
+    pub(super) const HOUGH_CIRCLE_ACCUMULATOR: &str = "arithmetic.hough_circle.accumulator";
+}
+
+/// Allocate a zero-filled scratch plane for an infallible (panicking) op form,
+/// fallibly.
 ///
-/// Like [`alloc_op_output`], this re-imposes no [`DEFAULT_MAX_ALLOC_BYTES`]
-/// budget: the scratch size derives from an already-budget-checked input and a
-/// legal large op (a wide integral image, a deep vote accumulator) can exceed
-/// `8 GiB` legitimately, so the only ceiling is what the allocator will
-/// satisfy. A test lowers that ceiling per-thread via a `cfg(test)`-only hook
-/// to reach the fallible path without a multi-TiB input (#460); no such hook
-/// or ceiling compiles into production builds.
+/// Several ops here build intermediate buffers far larger than their output:
+/// the [`Raster::try_stdif`] integral images (two `f64` buffers, each ~8x a
+/// Gray8 input), the [`Raster::try_hough_circle`] vote accumulator (`w * h *
+/// radii` `u32`s, sized by the caller-controlled radius range) and
+/// [`Raster::project`]'s two input-scaled accumulators. PR #339 made only the
+/// *output* allocation fallible ([`alloc_op_output`], issue #280) and left
+/// these as infallible `vec![..]`, so an over-capacity size still reached
+/// `handle_alloc_error` and aborted the process (SIGABRT) before the fallible
+/// output path ever ran, which is the exact remote-DoS abort #280 set out to
+/// remove (issues #433 / #434 / #435).
 ///
-/// Every current caller fills with a zero value, so the `resize` performs a
-/// redundant zeroing pass over memory the allocator could hand back already
-/// zeroed. A `calloc`-preserving fallible path (reserve, then `alloc_zeroed`
-/// rather than `resize`) would drop that pass; std exposes no fallible zeroed
-/// `Vec` today (even [`alloc_op_output`] zero-fills the same way), so it is
-/// left as a follow-up (#460) rather than hand-rolled `unsafe`.
+/// The reservation itself is [`try_plane_len_filled`], the crate's one plane
+/// funnel. This function is only the panic mapping: a `try_*` form propagates
+/// [`RasterError::AllocationFailed`] and calls the funnel directly, while an
+/// infallible form (e.g. [`Raster::project`], whose `(Raster, Raster)`
+/// signature has no error channel) surfaces an unsatisfiable scratch as a
+/// panic here, never a process abort. That mirrors how [`op_output_or_panic`]
+/// guards the *output* allocation of the same forms.
 ///
-/// [`DEFAULT_MAX_ALLOC_BYTES`]: crate::raster::DEFAULT_MAX_ALLOC_BYTES
-fn try_scratch<T: Clone>(
+/// This used to be `try_scratch`, a private helper with its own
+/// `try_reserve_exact`, its own `SCRATCH_ALLOC_CAP` thread-local and its own
+/// `with_scratch_alloc_cap` hook, one of three such copies in three modules
+/// with three signatures and three different test-ceiling stories. There is
+/// one now, and a check addresses it by [site label](plane) (issue #696).
+#[track_caller]
+fn scratch_or_panic<T: Clone>(
+    site: &'static str,
     width: u32,
     height: u32,
     len: usize,
     fill: T,
-) -> Result<Vec<T>, RasterError> {
-    let bytes = len.saturating_mul(std::mem::size_of::<T>());
-    // Test-only: honour a lowered per-thread ceiling so the fallible path is
-    // reachable at a buildable input size (#460). This branch — and the
-    // thread-local it reads — compile only under `cfg(test)`, so production
-    // scratch allocation is bounded solely by the allocator, exactly as
-    // `alloc_op_output`, and no test-support surface ships in release builds.
-    #[cfg(test)]
-    if bytes as u64 > SCRATCH_ALLOC_CAP.with(Cell::get) {
-        return Err(RasterError::AllocationFailed {
-            width,
-            height,
-            bytes,
-        });
-    }
-    let mut v: Vec<T> = Vec::new();
-    v.try_reserve_exact(len)
-        .map_err(|_| RasterError::AllocationFailed {
-            width,
-            height,
-            bytes,
-        })?;
-    v.resize(len, fill);
-    Ok(v)
-}
-
-/// Allocate a `fill`-initialised scratch buffer for an infallible (panicking)
-/// op form, fallibly.
-///
-/// The `try_*` forms call [`try_scratch`] and propagate its
-/// [`RasterError::AllocationFailed`]; an infallible form — e.g.
-/// [`Raster::project`], whose `(Raster, Raster)` signature has no error channel
-/// — instead surfaces an unsatisfiable scratch as a panic here, never a process
-/// abort through `handle_alloc_error` (#460). This mirrors how
-/// [`op_output_or_panic`] guards the *output* allocation of the same forms.
-#[track_caller]
-fn scratch_or_panic<T: Clone>(width: u32, height: u32, len: usize, fill: T) -> Vec<T> {
-    try_scratch(width, height, len, fill)
+) -> Vec<T> {
+    try_plane_len_filled(site, width, height, len, fill)
         .unwrap_or_else(|e| panic!("arithmetic scratch allocation failed: {e}"))
-}
-
-#[cfg(test)]
-thread_local! {
-    /// Per-thread ceiling, in bytes, on a single [`try_scratch`] allocation.
-    ///
-    /// Defaults to `u64::MAX` (no ceiling) so scratch allocation is bounded
-    /// only by the allocator, matching [`alloc_op_output`]. Lowered by
-    /// [`with_scratch_alloc_cap`] so a test can drive the fallible-scratch path
-    /// at a buildable input: the genuine overflow for `try_stdif` (~16x input)
-    /// and `project` (input-scaled) needs multi-TiB inputs far past the 8 GiB
-    /// construction budget (#460). Compiled only under `cfg(test)`, so it never
-    /// exists in production builds.
-    static SCRATCH_ALLOC_CAP: Cell<u64> = const { Cell::new(u64::MAX) };
-}
-
-/// Test-only hook: run `f` with the calling thread's [`try_scratch`] allocation
-/// ceiling lowered to `max_bytes`, restoring the previous ceiling afterwards
-/// (including on unwind).
-///
-/// The fallible-scratch abort guard (`try_stdif`, `project`, `try_hough_circle`)
-/// only fires at scratch sizes the allocator refuses, which for the
-/// non-caller-scaled ops needs multi-TiB inputs beyond the construction budget.
-/// Lowering the per-thread ceiling makes the path reachable at a small input.
-/// The ceiling is thread-local, so parallel tests do not perturb one another.
-///
-/// This helper — and the thread-local it drives — compile only under
-/// `cfg(test)`, so no test-support symbol is shipped in production builds and
-/// the crate's public surface is unchanged (#460 panel follow-up).
-#[cfg(test)]
-fn with_scratch_alloc_cap<R>(max_bytes: u64, f: impl FnOnce() -> R) -> R {
-    struct Restore(u64);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            SCRATCH_ALLOC_CAP.with(|c| c.set(self.0));
-        }
-    }
-    let _restore = Restore(SCRATCH_ALLOC_CAP.with(|c| c.replace(max_bytes)));
-    f()
 }
 
 /// Write `v` as the flat `i`-th native-endian `f32` sample.
@@ -1583,8 +1534,20 @@ impl Raster {
         // `handle_alloc_error` and abort. Route them through the fallible
         // scratch path so an unsatisfiable size panics (project has no error
         // channel) rather than aborting (#460).
-        let mut col_sums = scratch_or_panic(self.width(), self.height(), w * bands, 0.0f64);
-        let mut row_sums = scratch_or_panic(self.width(), self.height(), h * bands, 0.0f64);
+        let mut col_sums = scratch_or_panic(
+            plane::PROJECT_COL_SUMS,
+            self.width(),
+            self.height(),
+            w * bands,
+            0.0f64,
+        );
+        let mut row_sums = scratch_or_panic(
+            plane::PROJECT_ROW_SUMS,
+            self.width(),
+            self.height(),
+            h * bands,
+            0.0f64,
+        );
         for y in 0..h {
             for x in 0..w {
                 for c in 0..bands {
@@ -2779,8 +2742,20 @@ impl Raster {
                 height: self.height(),
                 bpp: 8,
             })?;
-        let mut s = try_scratch(self.width(), self.height(), scratch_len, 0.0f64)?;
-        let mut s2 = try_scratch(self.width(), self.height(), scratch_len, 0.0f64)?;
+        let mut s = try_plane_len_filled(
+            plane::STDIF_INTEGRAL_SUMS,
+            self.width(),
+            self.height(),
+            scratch_len,
+            0.0f64,
+        )?;
+        let mut s2 = try_plane_len_filled(
+            plane::STDIF_INTEGRAL_SQUARES,
+            self.width(),
+            self.height(),
+            scratch_len,
+            0.0f64,
+        )?;
         // Map a (possibly out-of-range) coordinate onto the nearest edge
         // pixel — vips `EXTEND_COPY` / replicate border semantics.
         let clamp_edge = |i: i64, n: usize| -> usize {
@@ -3789,7 +3764,13 @@ impl Raster {
                 height: self.height(),
                 bpp: radii.saturating_mul(4),
             })?;
-        let mut acc = try_scratch(self.width(), self.height(), acc_len, 0u32)?;
+        let mut acc = try_plane_len_filled(
+            plane::HOUGH_CIRCLE_ACCUMULATOR,
+            self.width(),
+            self.height(),
+            acc_len,
+            0u32,
+        )?;
         {
             let mut vote = |cx: i32, cy: i32, band: usize, votes: u32| {
                 if cx >= 0 && cy >= 0 && (cx as usize) < w && (cy as usize) < h {
@@ -3865,6 +3846,7 @@ impl Raster {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::raster::{counting_planes, with_plane_cap_at};
 
     /**
      * Tests that this module dispatches on sample kind and never on byte
@@ -4009,59 +3991,213 @@ mod tests {
         Raster::new(w, h, PixelFormat::Gray16, data).unwrap()
     }
 
-    /// A per-thread `try_scratch` ceiling below every scratch buffer the ops
-    /// under test allocate for [`SCRATCH_PROBE_DIM`]², so the fallible path
-    /// trips deterministically at a tiny, instantly-constructible input instead
-    /// of the multi-TiB one the real overflow would need (#460).
+    /// A ceiling below every scratch plane the ops under test reserve for a
+    /// [`SCRATCH_PROBE_DIM`]² input, so the fallible path trips
+    /// deterministically at a tiny, instantly-constructible raster instead of
+    /// the multi-TiB one the real overflow would need (#460).
+    ///
+    /// It applies to **one named site** at a time now rather than to every
+    /// scratch allocation on the thread, which is what lets the checks below
+    /// starve `project`'s second accumulator and `try_stdif`'s second integral
+    /// image at all: under the old per-module ceiling both pairs are the same
+    /// size, so no ceiling existed that admitted the first and refused the
+    /// second (issue #696).
     const SCRATCH_TEST_CAP_BYTES: u64 = 64;
 
     /// A modest Gray8 raster (`64² = 4 KiB`, trivially within the construction
-    /// budget). Its `project` accumulators (`64 · 8 = 512` bytes) and its
-    /// `stdif` integral images (`65² · 8 ≈ 34 KiB`) both dwarf
-    /// [`SCRATCH_TEST_CAP_BYTES`], so the lowered cap forces the fallible
-    /// scratch path in each.
+    /// budget). Its `project` accumulators (`64 · 8 = 512` bytes), its `stdif`
+    /// integral images (`75² · 8 = 45000` bytes) and its `hough_circle` vote
+    /// accumulator (`64² · 3 · 4 = 49152` bytes) all dwarf
+    /// [`SCRATCH_TEST_CAP_BYTES`], so the capped site's reservation is refused
+    /// in each.
     const SCRATCH_PROBE_DIM: u32 = 64;
 
-    /// `project`'s input-scaled `col_sums` / `row_sums` accumulators must be
-    /// allocated through the fallible scratch path: an over-capacity size
-    /// surfaces as a panic (project's only error channel — it returns
-    /// `(Raster, Raster)`), never a process abort through `handle_alloc_error`
-    /// (#460). A panic unwinds and is catchable; an abort would take the test
-    /// process down with it. Co-located with the abort-safety hook it drives so
-    /// the hook stays `cfg(test)`-only (no shipped test-support surface); the
-    /// vips-differential golden for `project`'s numeric result stays in the
-    /// external `tests/op_oversized_input_fallible_alloc.rs`.
+    /// The probe raster the scratch checks below drive.
+    fn scratch_probe() -> Raster {
+        Raster::zeroed(SCRATCH_PROBE_DIM, SCRATCH_PROBE_DIM, PixelFormat::Gray8)
+            .expect("probe Gray8 raster is within the construction budget")
+    }
+
+    /**
+     * Tests that **each** of `project`'s two input-scaled accumulators is
+     * reserved through the crate's one fallible plane funnel, by starving them
+     * one at a time by name (issue #696).
+     *
+     * `project` returns `(Raster, Raster)` and so has no error channel, which
+     * makes a panic its only honest answer to a scratch it cannot have: a
+     * panic unwinds and is catchable, where `handle_alloc_error` takes the
+     * process down with it. That is what [`scratch_or_panic`] is for.
+     *
+     * The reason this is two cells and not one is the point of the labels.
+     * `col_sums` and `row_sums` are the same size on a square raster and are
+     * reserved one after the other, so a ceiling that refuses the Nth
+     * over-ceiling request on the thread cannot express "let the first
+     * through, starve the second": it would refuse `col_sums` either way and
+     * `row_sums` would never be exercised. Naming the site does express it.
+     *
+     * Input: a 64² Gray8 raster with one accumulator's site capped at 64 bytes
+     * -> a caught panic; the same raster uncapped -> two rasters.
+     */
     #[test]
-    fn project_oversize_scratch_panics_not_aborts() {
-        let prev = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
-        let caught = std::panic::catch_unwind(|| {
-            let raster = Raster::zeroed(SCRATCH_PROBE_DIM, SCRATCH_PROBE_DIM, PixelFormat::Gray8)
-                .expect("probe Gray8 raster is within the construction budget");
-            with_scratch_alloc_cap(SCRATCH_TEST_CAP_BYTES, || raster.project())
-        });
-        std::panic::set_hook(prev);
-        assert!(
-            caught.is_err(),
-            "over-capacity project scratch must panic (unwindable), not abort"
+    fn project_starves_each_accumulator_by_name_rather_than_aborting() {
+        for site in [plane::PROJECT_COL_SUMS, plane::PROJECT_ROW_SUMS] {
+            let prev = std::panic::take_hook();
+            std::panic::set_hook(Box::new(|_| {}));
+            let caught = std::panic::catch_unwind(|| {
+                with_plane_cap_at(site, SCRATCH_TEST_CAP_BYTES, || scratch_probe().project())
+            });
+            std::panic::set_hook(prev);
+            assert!(
+                caught.is_err(),
+                "an unservable {site} must panic (unwindable), not abort"
+            );
+        }
+
+        // Positive control: with nothing capped the same call completes, so
+        // the two panics above are the ceiling and not the op.
+        let (cols, rows) = scratch_probe().project();
+        assert_eq!(
+            (cols.width(), cols.height(), rows.width(), rows.height()),
+            (SCRATCH_PROBE_DIM, 1, 1, SCRATCH_PROBE_DIM)
         );
     }
 
-    /// `try_stdif`'s two `f64` integral-image scratch buffers must be allocated
-    /// fallibly: an over-capacity size returns a typed `Err` (routed through
-    /// [`RasterError::AllocationFailed`]), never a process abort. Exercises the
-    /// `try_stdif` abort path #459 fixed but left untested — reachable here only
-    /// via the lowered-cap hook #460 asked for, since the genuine overflow needs
-    /// a ~8 TiB input.
+    /**
+     * Tests that **each** of `try_stdif`'s two `f64` integral images is
+     * reserved fallibly: an unservable one comes back as a typed `Err` routed
+     * through [`RasterError::AllocationFailed`], never a process abort
+     * (issues #459, #460, #696).
+     *
+     * Same shape as `project` above and the same reason for being two cells:
+     * the sum and the sum-of-squares integral images are byte-for-byte the
+     * same size and are reserved back to back, so only a per-site ceiling can
+     * reach the second one.
+     *
+     * Input: a 64² Gray8 raster, `try_stdif(11, 11)`, one site capped at 64
+     * bytes -> `Err`; uncapped -> a raster.
+     */
     #[test]
-    fn stdif_oversize_scratch_returns_typed_error_not_abort() {
-        let raster = Raster::zeroed(SCRATCH_PROBE_DIM, SCRATCH_PROBE_DIM, PixelFormat::Gray8)
-            .expect("probe Gray8 raster is within the construction budget");
-        let result = with_scratch_alloc_cap(SCRATCH_TEST_CAP_BYTES, || raster.try_stdif(11, 11));
+    fn stdif_starves_each_integral_image_by_name_rather_than_aborting() {
+        for site in [plane::STDIF_INTEGRAL_SUMS, plane::STDIF_INTEGRAL_SQUARES] {
+            let result = with_plane_cap_at(site, SCRATCH_TEST_CAP_BYTES, || {
+                scratch_probe().try_stdif(11, 11)
+            });
+            assert!(
+                result.is_err(),
+                "an unservable {site} must return Err, not a raster"
+            );
+        }
+        assert!(scratch_probe().try_stdif(11, 11).is_ok());
+    }
+
+    /**
+     * Tests that `try_hough_circle`'s vote accumulator is reserved fallibly
+     * (issues #433, #434, #696).
+     *
+     * This one had **no test ceiling at all** before the shared funnel. Its
+     * buffer is the largest thing the op holds and it is sized by the caller's
+     * radius range rather than by the image, so it is the one an untrusted
+     * caller can steer, and the `try_` in the name promised something nothing
+     * checked. It got a hook the moment it joined the funnel, which is the
+     * argument for one funnel rather than a helper per module: the ceiling
+     * arrives with the reservation instead of having to be written again.
+     *
+     * Input: a 64² Gray8 raster, radii 3..=5, the accumulator site capped at
+     * 64 bytes -> `Err`; uncapped -> a raster.
+     */
+    #[test]
+    fn hough_circle_accumulator_is_reserved_fallibly_rather_than_aborting() {
+        let result = with_plane_cap_at(
+            plane::HOUGH_CIRCLE_ACCUMULATOR,
+            SCRATCH_TEST_CAP_BYTES,
+            || scratch_probe().try_hough_circle(3, 5),
+        );
         assert!(
             result.is_err(),
-            "over-capacity stdif scratch must return Err, not a raster"
+            "an unservable vote accumulator must return Err, not a raster"
         );
+        assert!(scratch_probe().try_hough_circle(3, 5).is_ok());
+    }
+
+    /**
+     * The arithmetic half of `raster.rs`'s funnel table: every plane these
+     * entry points reserve goes through `raster::try_plane_len`, and the count
+     * of them is what says so (issue #696).
+     *
+     * It lives here rather than in the table over in `raster.rs` for the same
+     * reason the ICC entry points live in `colour.rs`: these rows need this
+     * module's own inputs (a radius range, a window size) and dragging the
+     * fixtures across buys nothing. The table there gained an `arithmetic.`
+     * column all the same, at zero, so a convolution or colour path that
+     * started reaching into this module would be caught there.
+     *
+     * Exact equality, and the total asserted to be the sum of the parts, so a
+     * site added to one of these ops is red rather than absorbed. Measured,
+     * then written down.
+     */
+    #[test]
+    fn every_plane_these_arithmetic_paths_reserve_goes_through_the_one_funnel() {
+        struct Row {
+            op: &'static str,
+            run: fn(&Raster),
+            /// Reservations at an `arithmetic.` site.
+            scratch: usize,
+            /// Reservations at `raster.op_output`.
+            outputs: usize,
+        }
+        const ROWS: &[Row] = &[
+            Row {
+                op: "project",
+                run: |src| drop(src.project()),
+                scratch: 2,
+                outputs: 2,
+            },
+            Row {
+                op: "try_stdif",
+                run: |src| drop(src.try_stdif(11, 11)),
+                scratch: 2,
+                outputs: 1,
+            },
+            Row {
+                op: "try_hough_circle over 3 radii",
+                run: |src| drop(src.try_hough_circle(3, 5)),
+                scratch: 1,
+                outputs: 1,
+            },
+        ];
+
+        let src = scratch_probe();
+        for row in ROWS {
+            // Warm-up outside every window, so a one-time lazily built table
+            // cannot be charged to the first row that happens to touch it.
+            (row.run)(&src);
+
+            let count = |prefix| counting_planes(prefix, || (row.run)(&src)).1;
+            let parts = [
+                ("arithmetic planes", count("arithmetic."), row.scratch),
+                (
+                    "op outputs",
+                    count(crate::raster::PLANE_OP_OUTPUT),
+                    row.outputs,
+                ),
+            ];
+            for (what, got, want) in parts {
+                assert_eq!(
+                    got, want,
+                    "{} reserved {got} {what} against {want}: a site was added, removed, or \
+                     routed around `raster::try_plane` (issue #696)",
+                    row.op
+                );
+            }
+            let total = count("");
+            let sum: usize = parts.iter().map(|(_, got, _)| got).sum();
+            assert_eq!(
+                total, sum,
+                "{} made {total} reservations and only {sum} of them are under one of the \
+                 prefixes above: another module joined the funnel and no row here names it",
+                row.op
+            );
+        }
     }
 
     /// Issue #271: the fallible per-band `try_*` ops return the typed

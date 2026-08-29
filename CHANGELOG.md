@@ -711,6 +711,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A gate against a byte width standing in for a sample kind**, which is what
+  issue #607 step (e) asks for: `tests/sample_kind_spine.rs` refuses a
+  `bytes_per_channel()` comparison anywhere under `src/`. It is a scan rather
+  than a lint because `#[non_exhaustive]` on `SampleKind` turns a *`match`*
+  into a compile error and does nothing at all to a *comparison*, which is
+  precisely the shape that keeps coming back: `jp2k.rs:3122` arrived after
+  #748's census was taken.
+
+  It parses rather than greps. A shell `grep` cannot tell code from prose, and
+  the first thing it would have failed on is `pixel.rs`'s comment explaining
+  why `canonical()` does **not** take the width shortcut, which is prose
+  arguing *for* the rule. The scanner strips comments (tracking string
+  literals, so a `//` inside one does not blind it) and it is proved on both
+  directions before it is trusted: a comparison in code is found, the same
+  text in each of the four comment forms is not.
+
+  Two code sites are left and neither is in a file this lane owns, so they are
+  named in a countdown with the lane that clears each. The assertion is set
+  equality both ways, like `tests/ci_feature_coverage.rs`: a new site anywhere
+  fails, and a listed site that has already been cleared **also** fails, so the
+  list can only shrink and cannot rot into an allowlist. When it is empty,
+  #607 closes.
+
+- `JxlError::UnsupportedSampleKind`, for a header describing a sample kind the
+  JPEG XL loader has no stream type for (issue #607). Unreachable while
+  `PixelFormat` carries only `U8`, `U16` and `F32`, which are exactly the
+  three arms the frame loop implements; it is there so the carriers of #516
+  and #517 arrive as a typed refusal instead of through the arm that used to
+  ask for `f32` samples and write float bit patterns into an integer raster.
+
 - **`.hdr` is a row in `Raster::save` and `"hdr"` is one in
   `Raster::encode_to_buffer`** (issue #880). Radiance had a matched
   `float2rad` encoder since #589 and no shared save route could reach it, so
@@ -760,6 +790,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `EncodeError::InvalidParameter` naming the raster, not
   `EncodeError::Unsupported` naming the format. This build can write Ultra HDR;
   what is wrong is the input, and a caller can act on that.
+- GIF load attaches the three deprecated compatibility fields `gifload`
+  attaches beside the modern ones: **`gif-delay`**, **`gif-loop`** and
+  **`palette-bit-depth`** (issues #865, #875). `gif-delay` is the first delay
+  back in the centiseconds the wire counts, `gif-loop` is the NETSCAPE count
+  rather than the play count, so `loop 1` and `loop 0` both give 0 and a block
+  holding 3 gives 3, and `palette-bit-depth` is a second copy of
+  `bits-per-sample`. GIF was the last animated loader without them, on the two
+  fields that are named after GIF.
+
+  Every number came from `vipsheader -f` on 8.18.6, because **`vipsheader -a`
+  lists no deprecated compatibility field on any loader**, animated or not.
+  Reading them that way produces the opposite finding, that vips had dropped
+  the pair.
+
+  `gif-delay` follows the loaded raster rather than the file, which is the same
+  deliberate divergence `delay` already makes and the same call `src/webp.rs`
+  makes: vips takes it from element 0 of the file's whole array, so
+  `anim4.gif[page=2,n=2]` reports `gif-delay: 4` for a raster whose first page
+  really has a delay of 80 ms.
 
 - GIF load attaches **`gif-palette`**, the global colour table as one signed
   32-bit word per entry (issue #828). vips packs libnsgif's `R, G, B, A` byte
@@ -1185,6 +1234,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and carries the GIF off-by-one: the NETSCAPE2.0 block holds
   repeats-after-the-first and a single play carries no block at all, where
   WebP's `ANIM` chunk holds the play count unshifted.
+
+  All four consumers are landed, and `tests/animation_dialect.rs` now holds
+  them to **one** dialect: it loads the same four-frame animation as a GIF, a
+  WebP and a JPEG XL and compares the answers at four windows, rather than
+  taking three separate agreements measured module by module. That is what
+  found the drift the model was meant to prevent, because the compatibility
+  pair diverges three ways: `gifload` attaches `gif-delay` and `gif-loop` and
+  this crate's GIF loader attaches neither (issue #865), where the WebP loader
+  attaches both and the JPEG XL loader attaches one, those two matching their
+  oracles exactly.
+
+  Two things are worth carrying out of that measurement. **`vipsheader -a` is a
+  broken probe for `gif-delay` and `gif-loop`**: it lists neither on any file,
+  on any loader, while `vipsheader -f gif-loop` returns the value, so reading
+  the absence in `-a` gives the exact inverse of the truth. And geometry alone
+  does not prove a roll: stacking a four-page WebP backwards leaves the height,
+  the page count, `page-height`, `n-pages`, `delay`, `loop` and both
+  compatibility fields untouched, so the guard walks the pages through
+  `Raster::try_extract_page` and checks their pixels.
 
 - JPEG 2000 load and save, behind a new non-default **`jp2k`** feature (issue
   #501). Build with `--features jp2k` and `decode_jp2k` reads both container
@@ -2177,8 +2245,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   No public API moves and no behaviour changes: everything here is
   `pub(crate)` or `cfg(test)`, and the error payloads each site reports are the
-  ones it reported before. `arithmetic.rs`'s `try_scratch` is the copy still
-  outstanding; that file is held by another lane, so #696 stays open on it.
+  ones it reported before.
+
+- `arithmetic.rs`'s `try_scratch` is on the shared funnel too, which is the
+  third and last of the copies above and what closes issue #696. Its
+  `SCRATCH_ALLOC_CAP` ceiling and `with_scratch_alloc_cap` hook are gone, and
+  the module's five scratch reservations carry labels:
+  `arithmetic.project.col_sums` and `.row_sums`, `arithmetic.stdif.integral`
+  and `.integral_squares`, and `arithmetic.hough_circle.accumulator`.
+  `raster::try_plane_len_filled` is the form they reserve through, for a buffer
+  sized in elements rather than at a rate per pixel.
+
+  Three things the labels bought that the module's own ceiling could not. Each
+  half of both pairs can now be starved on its own: `col_sums` and `row_sums`
+  are the same size on a square raster and are reserved back to back, as are
+  the two integral images, so a ceiling refusing the *Nth* over-ceiling request
+  on the thread refused the first either way and never reached the second.
+  `try_hough_circle`'s vote accumulator, which is the largest buffer the module
+  holds and the only one a caller sizes directly through the radius range, had
+  no test ceiling at all and now has one. And the three ops' reservation counts
+  are pinned per entry point at exact equality, with the total asserted to be
+  the sum of the parts, so a site added to one of them is red rather than
+  absorbed.
+
+  The labels are also checked against each other: no leaf site label may be a
+  proper prefix of another, because the probe matches a cap site with
+  `starts_with` so a counting window can name a whole module. Two leaf labels in
+  a prefix relation inherit that and a ceiling naming one silently refuses both,
+  which is the ordinal reasoning the labels exist to remove arriving through a
+  different door. The first pair written here,
+  `arithmetic.stdif.integral` and `arithmetic.stdif.integral_squares`, was
+  exactly that, and the check naming the first of the two integral images stayed
+  green under a mutation that routed it around the funnel altogether.
+
+  No public API moves and no behaviour changes here either.
 
 - `src/resample.rs` records a fourth deliberate quantisation divergence from
   stock libvips and pins it from both sides (issue #777). `vips_reduce_make_mask`
@@ -2856,6 +2956,161 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matching on the typed errors is unaffected; only the panic text changes.
 
 ### Fixed
+
+- **`draw` and `raster` stop asking for a byte width too** (issues #748,
+  #607). `draw`'s `channel_at` / `set_channel_at` took a `bpc: usize` and
+  panicked on the `_` arm, so the refusal covered float and would have covered
+  the signed and 32-bit carriers only by accident; they take a `SampleKind`
+  and are total now. Its mask test was `bytes_per_channel() != 1`, which would
+  have accepted an `i8` mask as `u8`, and its `draw_smudge` ceiling was
+  `if bpc == 1 { 255 } else { 65535 }`, a sixteenth of a four-byte integer
+  kind's range. `raster`'s `try_new_from_memory` mapped a vips format
+  **nickname** through a byte width, which is #841's shape one layer over:
+  vips has `char`, `short`, `uint` and `int` nicknames as well, and a width
+  cannot tell `uint` from `float`. It names the kind now, so wiring a new
+  nickname in is one line.
+
+  The `!=` spelling in `draw` is worth naming: it is a width comparison that a
+  grep for `bytes_per_channel() ==` does not see. The new gate found it.
+
+- **The last five width-keyed sample sites are keyed on `SampleKind`**, which
+  finishes the sweep issue #748 opened (issues #748, #607). `colour.rs`,
+  `convolution.rs` and `jxl.rs` each carried a
+  `match bytes_per_channel() { 1, 2, _ }` whose trailing arm reads four bytes
+  as an `f32` whatever they are, so a `u32` sample of `1` arrives as
+  `1.4e-45`. All three dispatch on the sample kind now, with no wildcard arm,
+  so a kind added to `SampleKind` is a compile error rather than a silent
+  misread.
+
+  **Three more of the same shape that a count of `match` heads could not
+  see**, all in modules already being converted for the visible ones:
+
+  - `convolution`'s `RowWindow` kept the byte width in a `usize` field and
+    picked its widening arm from it. It is the traversal's hot path, so it is
+    the site a four-byte integer carrier would have hit hardest, and it is not
+    a `match` on an accessor, so nothing counted it.
+  - `convolution`'s `depth_max` answered 65535 for **every** width that was
+    not one, so a four-byte integer kind would have saturated at a sixteenth
+    of its range. It reads `SampleKind::max_value` now.
+  - `colour`'s `read_device_normalised` divided by 255 or by 65535 or clipped
+    to `0..255`, chosen by width. It divides by the kind's own ceiling now, so
+    `max_value()`'s `None` is what selects the float arm.
+
+  `colour.rs`'s private `SpaceDepth` enum is **gone**, which is issue #607
+  step (a)'s second half. It was a hand-rolled duplicate of three of
+  `SampleKind`'s seven variants and had already lost the four kinds the
+  carriers of #516 and #517 add; two enums answering "what are these bytes"
+  is exactly what #607 is about.
+
+  `jxl`'s frame loop and its interpretation tag are both total on the kind
+  now. The loop used to ask `jxl-oxide` for `f32` samples for any width that
+  was not one or two, and the tag handed `scrgb` to every four-byte kind,
+  which is linear light and is not what a `uint` raster is. Kinds with no
+  stream take a new `JxlError::UnsupportedSampleKind` rather than a nearest
+  guess, matching `MosaicError::UnsupportedSampleKind`.
+
+  Measured over the whole sweep, on the same scan the previous pass used:
+  width-keyed `match` heads went **12 -> 7 -> 2** and files carrying a width
+  spelling went **29 -> 22 -> 18**. Both remaining heads are outside this
+  work: `fits.rs:409` is already width-total, and `jp2k.rs:1721` arrived
+  after the census.
+
+
+- **A 20-byte WebP file could panic the chunk walk on a 32-bit target**
+  (issue #862). `opaque_blended_frame_offsets` steps over a RIFF chunk by
+  `size + (size & 1)`, and only the outer addition was checked. `size` comes
+  straight off the wire as a `u32`, and on a 32-bit target `u32::MAX as
+  usize` *is* `usize::MAX`, so a chunk declaring the largest size its
+  four-byte field can hold overflows on the pad before the outer addition
+  ever looks: a panic with overflow checks on, and a wrapped zero with them
+  off, which is a walk that never advances. The comment directly above it
+  claimed the walk "stops rather than wrapping on a size a hostile file
+  inflated", which is exactly what it did not do.
+
+  It is reachable from untrusted bytes because the walk runs *before*
+  `WebPDecoder::new`, so nothing has validated the file first. The step is
+  now a free function with both additions checked, and the same expression
+  is gone from the two test helpers that had copied it.
+
+  The case cannot be built out of bytes on a 64-bit host, where the same
+  file gives an offset far past the buffer and the walk ends on the next
+  bounds check, so the guard is a unit test on the step itself rather than a
+  fixture, with one assertion written as an equality against `usize::BITS`
+  so it says something true on both targets.
+- **The `.v` `BandFmt` wire tag comes from the sample kind, not from a byte
+  width** (issue #841). `encode_vips` derived that header word through
+  `match bpc { 1 => 0, 2 => 2, _ => 6 }`, so every four-byte sample kind that
+  is not `f32` was written into the file tagged **float**. It is the one site
+  of #748's list where a wrong answer is not confined to a single op: it lands
+  on disk and is read back wrong on every later run, and `fuzz_decode` routes
+  `.v` magic at `decode_vips_bytes`, so the read half of the same word is
+  reached from untrusted bytes. `get_field("format")` carried the same
+  three-arm match and answered `"float"` for the same inputs, so the reported
+  field and the wire tag were wrong together and agreed with each other.
+
+  All seven `SampleKind` values map to their real `VipsBandFormat` codes now,
+  rather than the fallthrough being patched, so the carriers of issues #516
+  and #517 get correct `.v` behaviour without touching this file again. The
+  table is measured on `/opt/homebrew/bin/vips` 8.18.6 (`vips black base.v 4 3
+  --bands 1`, then `vips cast base.v out.v <format>` for each of the ten
+  formats, reading the `i32` at header offset 20 back out of each file):
+  `uchar` 0, `char` 1, `ushort` 2, `short` 3, `uint` 4, `int` 5, `float` 6,
+  `complex` 7, `double` 8, `dpcomplex` 9. `uint`, `int` and `float` all carry
+  `Bbits` 32, which is why a width cannot decide this word.
+
+  **`.v` stays wire-compatible.** The three codes libviprs has always written
+  keep their values, so every `.v` this crate has written still decodes to the
+  format it was written with, and re-encoding writes the same two header words
+  back. That is pinned against the byte-for-byte 64-byte headers vips 8.18.6
+  wrote for `uchar`, `ushort` and `float`.
+
+  The reader also stops merging two refusals. A code that is not a sample kind
+  libviprs knows at all, and a real vips format this build has no carrier for,
+  answer differently now: the second names the format, so a `uint` file reads
+  as "no carrier yet" rather than as corruption.
+
+- A GIF graphic control extension spread over more than one sub-block, or
+  carrying a size byte that does not say 4, is read the way libnsgif reads it
+  (issue #878). libnsgif never looks at the chain: it takes the four bytes
+  straight after the size byte behind a bare length check. The `gif` crate
+  takes the **last** sub-block instead, because it clears its extension buffer
+  on every one, and `ControlWalk` used to require the whole chain to total
+  four, which is neither rule.
+
+  Measured on vips 8.18.6, on a 2x1 fixture whose frame 0 carries the chain:
+  `04 quad(4) 04 quad(0) 00` rewinds the canvas, so the **first** quad is what
+  counts, and `01 AA 04 quad(3) 00` comes back as restore-to-background with a
+  delay of 3076 centiseconds, which is `0xAA` read as the packed byte and the
+  two bytes after it read little-endian. libviprs kept the canvas on the first
+  and rewound on the second.
+
+  The walk now reads the extension twice on purpose: libnsgif's four bytes are
+  the answer, and the crate's last sub-block is what the desynchronisation
+  cross-check compares against, because that check is only ever asking whether
+  the two walks are on the same frame. A neighbouring case stays divergent and
+  is tracked as #879: when the last sub-block is not four bytes the crate
+  refuses the extension outright, which ends the header scan, so the frame
+  never reaches this module.
+
+- A GIF frame carrying no graphic control extension gets a delay of **100 ms**
+  rather than 0 (issue #866). libnsgif initialises a frame's delay to 10
+  centiseconds when it allocates the frame and only an extension overwrites
+  it, so the default reaches the `delay` array. Measured on vips 8.18.6: a
+  still with no extension reports `delay: 100`, one whose extension holds an
+  explicit zero reports `delay: 0`, and a four-frame file with extensions on
+  frames 0 and 2 only reports `30 100 50 100`. The rule is per frame, and the
+  explicit zero is what makes it about the absent extension rather than a
+  floor on small delays.
+
+  `gif` 0.14.2 cannot tell the two apart: `next_frame_info` takes the frame
+  state fresh for every frame, so `Frame::delay` is 0 for both, and the
+  neighbouring fields do not separate them either. So this rides on the same
+  wire walk #827 added for the raw disposal code, which now reports
+  `WireControl::Absent` for a frame with no extension instead of standing in a
+  default one. The cross-check that guards the walk had to learn the
+  difference as well: the decoder's stand-in for a missing extension is
+  `Frame::default()`, whose disposal is `Keep`, not the `Any` a raw code of 0
+  maps to.
 
 - **Three kinds of `colr` box no longer stop a JPEG 2000 decoding** (issues
   #771, #848, #849). `decode_jp2k` refused a JP2 whose enumerated colour space
