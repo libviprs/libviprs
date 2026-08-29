@@ -27,6 +27,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `int`, and `DOUBLE` for `float` and `double`. A negative sum survives now
   instead of clipping at zero. The float row is still a deviation: this crate
   has no `f64` carrier, so it sums into `FloatF32`.
+- **`GifError::BadPageNumber` is gone**, folded into the
+  `SourceError::PageOutOfRange` the WebP and JPEG XL loaders already report
+  (issue #845). One refusal had two typed spellings, carrying the same three
+  numbers under different names (`frames` against `pages`) with the same
+  message bar the word before the colon, because GIF landed its animated load
+  in the same batch as the other two and put its refusal where every
+  self-decoded codec in this crate puts one.
+
+  `GifError` is `#[non_exhaustive]`, so a caller with a wildcard arm is
+  unaffected and a caller matching the variant by name moves to
+  `SourceError::PageOutOfRange { format: "gif", page, n, pages }`. That is the
+  same shape #686's collapse of five `AllocLimitExceeded` variants took.
+
+  `gif::LoadOptions::window` was a second copy of `source::resolve_page_range`
+  and is now a call to it. The two were written against each other field for
+  field so that folding them would be a deletion rather than a redesign, and it
+  was: the whole rule went, and every measurement behind it already lived on
+  the shared one.
+- **`hist_find_indexed` sums onto `FloatF32` instead of a 16-bit format**
+  (issue #887). Breaking for the same reason #532 is: the output format changes.
+
+  libvips emits **DOUBLE** there, and it does so whatever the value image's
+  carrier is. Measured on `/opt/homebrew/bin/vips` 8.18.6, a 4-pixel value image
+  `[10, 20, 30, 40]` binned by `[0, 1, 0, 1]` gives DOUBLE with bins 40 and 60
+  for `uchar`, `ushort`, `uint` and `float` inputs alike. libviprs wrote 16-bit
+  sums, so four `uchar` pixels of 255 in one bin already exceeded what a byte
+  could say and a 300x300 image summed to 65535 instead of 22,950,000.
+
+  **Why the float carrier rather than the wider integer one**, since this crate
+  has no `f64`: `Uint32` is exact to 4,294,967,295 and then overflows, and a
+  10000x10000 `uchar` image sums to 25,500,000,000, which is an image size
+  libvips exists to handle. `f32` never overflows and its error is relative: sums
+  stay exact to 2^24 and lose at most half a spacing above it, so it degrades
+  where the integer carrier would fail outright. It also matches vips's *kind*,
+  and it is the only one of the two that can hold a negative sum once the signed
+  carriers of issue #516 land. Neither matches DOUBLE's exactness to 2^53, and
+  that limitation is in the method's docs rather than left to be discovered.
+
+  A float value image works now too. It used to reach the storage reader and
+  panic on the kind, so `im.colourspace(Lab).hist_find_indexed(&idx)` was a
+  panic out of a `Result`.
 
 - **The counting ops emit `Uint32` instead of a 16-bit format, and stop
   saturating at 65535** (issue #532). `hist_find`, `hist_find_band`,
@@ -780,6 +821,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The two frame-buffer prices in `decode_jxl` are pinned as two checks**
+  (issue #901). The loader prices the declared frame before feeding any
+  frame data and prices the stacked roll after the keyframe count is known,
+  and the #748 mutation sweep found that charging one byte per sample in the
+  **first** of them left the whole suite green.
+
+  Nothing was wrong with the code. For a single-page file the two prices are
+  the same product, so an under-charged pre-check leaves the second refusing
+  the identical file at the identical threshold with the identical error, and
+  every budget fixture in the module was single-page.
+
+  `tests/jxl_frame_price.rs` uses a two-page 16-bit fixture, sixteen bits so
+  a byte-per-sample mutation changes the product at all and two pages so the
+  two products differ. The checks then answer at different budgets and report
+  different geometry, one byte apart:
+
+  | budget | refused by | geometry reported |
+  |---|---|---|
+  | 131071 | the frame pre-check | 256x256 |
+  | 131072 | the roll check | 256x512 |
+
+  All four mutations of the two calls are red against it, including the one
+  that started this.
+
+
 - **`MetadataValue::DoubleArray(Vec<f64>)`**, the `VipsArrayDouble` half of
   the pair `IntArray` opened in #787, with `as_double_array`,
   `Raster::get_double_array`, the `From` impls, type code 6 and the `.v`
@@ -923,6 +989,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and #517 arrive as a typed refusal instead of through the arm that used to
   ask for `f32` samples and write float bit patterns into an integer raster.
 
+- **`.ppm` and `.pgm` are rows in `Raster::save`, and `"ppm"` and `"pgm"` are
+  rows in `Raster::encode_to_buffer`** (issue #882). `Raster::encode_ppm` has
+  written binary Netpbm since #77 and neither shared save route could reach it.
+
+  Two of the five suffixes `ppmsave` registers, and the reason it is two is
+  measured on the pinned vips 8.18.6. Those five are five different containers,
+  not five spellings of one: from the same input, `.ppm` writes a `P6`, `.pgm` a
+  `P5`, `.pbm` a `P4` and `.pfm` a `PF`, with a colourspace conversion behind
+  each so the file matches the suffix whatever it was handed. `.pnm` writes
+  nothing at all: it demands a `multiband` interpretation and was refused for
+  `srgb`, for `b-w` **and** for an image explicitly copied to `multiband`, every
+  time with `vips_colourspace: no known route from '...' to 'multiband'`.
+
+  `encode_ppm` writes `P5` and `P6` and nothing else, so `.pbm` and `.pfm` have
+  no encoder to route to and are not rows, and `.pnm` is not a row because vips
+  has not got one either. The table stays what it has always been, a strict
+  **subset** of what vips registers: every row is a row vips has, and the gap is
+  always in the safe direction.
+
+  **The suffix names the container, which no other row does.** `encode_ppm`
+  picks `P5` or `P6` from the band count; `ppmsave` picks it from the suffix and
+  converts to suit. Where the two disagree the row refuses, the same call `.hdr`
+  makes: no row in this table converts, and these are not going to be the first.
+  The alternative is a `P5` body in a file called `.ppm`, which is the one
+  outcome neither vips nor Netpbm reads as correct. The refusal names the band
+  count and does not read as `UnsupportedExtension`, because this build does
+  have a Netpbm encoder.
+
+  `keep_metadata` has nothing to act on: a binary Netpbm file is a three-line
+  ASCII header and the raster body, with nowhere for a profile, an EXIF block or
+  an XMP packet to live. Asserted, with `.webp` beside it as the control.
+
+  **One asymmetry, pinned rather than left implicit.** Netpbm is the only save
+  row whose output this crate cannot read back: `source::sniff` has no variant
+  for it and `image` is built without its `pnm` feature, so `decode_bytes`
+  recognises the container and refuses it, while `Raster::ppm_load` reads it
+  fine. Measured with a probe rather than inferred from an absent grep hit, and
+  filed as issue #910, which is a container addition and moves all six guarded
+  sites. A check now says so, so the day #910 lands it is the thing that goes
+  red.
+
+- **`.hdr` is a row in `Raster::save` and `"hdr"` is one in
+  `Raster::encode_to_buffer`** (issue #880). Radiance had a matched
+  `float2rad` encoder since #589 and no shared save route could reach it, so
+  `Raster::encode_radiance` by name was the only way to write one.
+
+  One suffix, measured on the pinned vips 8.18.6: `radsave`'s entry in `vips -l`
+  reads `nocache (.hdr)`, and `vips copy base.v x.rad`, `x.rgbe` and `x.pic` are
+  each refused with "is not a known file format". `.pic` is worth saying out
+  loud because #506's own title reads `.hdr/.pic`; that is a load spelling
+  elsewhere and not a suffix `radsave` saves under. Ungated, because #589 wrote
+  the encoder in this crate and it costs no feature.
+
+  **The row refuses rather than casts, and it is the first row in that table
+  with an input contract at all.** `radsave` declares `mono rgb` and vips casts
+  whatever it is handed, so `vips copy base.v r.hdr` on a 3-band uchar raster
+  writes a Radiance file. `Raster::encode_radiance` takes 3-band `f32` and
+  refuses anything else, which is its contract since #589, and the extension
+  route propagates that rather than growing a conversion: no row in that table
+  converts, and this one is not going to be the first. The refusal names the
+  raster and does **not** read as `UnsupportedExtension`, which would tell a
+  caller this build has no Radiance encoder.
+
+  `keep_metadata` has nothing to act on. A Radiance header carries `EXPOSURE`,
+  `COLORCORR`, `PIXASPECT` and the primaries, surfaced as `rad-expos`,
+  `rad-colcor-*`, `rad-aspect` and `rad-prims-*`, which are format records the
+  way a FITS card is rather than an ICC profile or an EXIF block, and
+  `radiance::SaveOptions::default` already takes them off the raster's own
+  fields. Asserted, with `.webp` beside it as the control that does differ under
+  the flag.
 
 - **`"uhdr"` is a row in `Raster::encode_to_buffer`**, so Ultra HDR is reachable
   from a shared save route and not only through `Raster::encode_uhdr` by name
@@ -2323,6 +2459,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The Miri job runs a named slice of the `--lib` target instead of the whole
+  suite, and says so** (issue #675). It has never reported: three dispatched
+  runs were killed at the 90 minute ceiling and one went 4h13m. Removing
+  `-Zmiri-disable-isolation` and annotating every filesystem-touching test
+  moved that wall rather than removing it, and what was behind it is the clock.
+
+  Measured on wall time, ten cores, nightly-2026-08-20, isolation on:
+  `arithmetic::proptests::no_try_method_panics_on_a_float_raster` is 256
+  property cases at 10.2s each (33s, 53s and 94s at 2, 4 and 8 cases, linear),
+  so about 44 minutes for one test out of 1940. Skipping every property test
+  does not rescue it either, because `arithmetic::tests` spent 725s on 67 tests
+  and then over twenty minutes inside one more without finishing, and seventeen
+  of the sixty-two lib modules do not finish inside a 120 second bound. The
+  slice that replaces it is about ten minutes for 436 tests, with 116 ignored;
+  two runs on the same tree came out 584s and 635s.
+
+  A module is in if Miri can run it to completion inside 120 seconds, which is
+  mechanical rather than a judgement about which code deserves interpreting.
+  The workflow lists the modules it runs and the reason each excluded one is
+  excluded, and `tests/miri_invocation_parity.rs` now holds that prose against
+  the command in both directions and against the `Makefile` mirror.
+
+  **The job's own description of its coverage was wrong and is corrected.** It
+  claimed to check "a dozen image decoders"; the decoders' tests mostly open
+  fixture files, so they carry `#[cfg_attr(miri, ignore)]` and Miri skips them.
+  `exr` runs 1 test of 22, `nifti` 3 of 26, `encode_tiff` 6 of 31. What
+  survives is `webp` (32), `mat` (27), `radiance` (21), `analyze` (19) and
+  `avif` (9). A gate that describes a tree it does not check is worse than no
+  gate.
+
+  Three things Miri cannot do here, each measured rather than assumed: anything
+  that decodes a JPEG reaches `zune-jpeg`'s NEON IDCT and two intrinsics Miri
+  does not implement (aarch64 only, so the hosted x86_64 runner is probably
+  fine, and those modules stay out of both invocations so a local green and a
+  hosted green keep meaning the same thing); seven modules read the real clock,
+  which isolation refuses; and with `--features avif` the interpreter cannot get
+  past `rav1d`'s picture allocator, which gates its memory pool on
+  `ptr::fn_addr_eq`.
+
+  Worth knowing before anyone quotes a duration from this job: libtest's
+  `--report-time` under isolation reports Miri's virtual clock, not wall time.
+  The slice printed "finished in 1514.54s" for a run that took 584s and
+  "1502.30s" for one that took 635s.
+
 - **`histogram.rs` reads a bin index and a histogram's own count through two
   functions now, and only one of them folds at 65535** (issue #888). `read_flat`
   became `read_bin`, and `read_value` is the new one.
@@ -3128,6 +3308,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matching on the typed errors is unaffected; only the panic text changes.
 
 ### Fixed
+
+- **`decode_avif` no longer writes the payload through a read-only pointer**
+  (issue #912). `decode_av1` filled the buffer `dav1d_data_create` hands back,
+  which is the documented dav1d sequence and correct against dav1d's C. Against
+  `rav1d` it is not: `From<Rav1dData> for Dav1dData` builds that pointer out of
+  a shared reference, so the tag it carries permits reads and nothing else, and
+  Miri reports the copy as undefined behaviour under **both** aliasing models,
+  `attempting a write access ... only grants SharedReadOnly permission` under
+  Stacked Borrows and `write access ... is forbidden ... state Frozen` under
+  `-Zmiri-tree-borrows`. Two models rather than one is what separates a model
+  being conservative from a pointer genuinely not being writable.
+
+  It now lends dav1d a buffer this crate allocated, through `dav1d_data_wrap`
+  and a free callback. The payload is copied exactly once either way, so
+  nothing about decode cost or behaviour moves: the eighteen `avif::tests` pass
+  unchanged. The free callback releases the buffer through the pointer it was
+  allocated under rather than the one dav1d hands back, because
+  `dav1d_data_wrap` rebuilds that one through `slice::from_raw_parts` and it
+  arrives read-only too.
+
+  Reachable from any AVIF file that decodes, so from untrusted bytes.
+
+  Miri is the only thing that can see this, and the Miri job cannot run the
+  AVIF feature (issue #675 has the measurement), so
+  `the_av1_input_buffer_is_lent_to_dav1d_rather_than_taken_from_it` holds the
+  shape of the call sequence in an ordinary test run instead. It reads the
+  FFI region with the comments stripped, because the sentence explaining why
+  `dav1d_data_create` is not used names it.
+- **The one-level bound in `src/webp.rs`'s docs is the opaque bound, and
+  says so now.** Issue #917 measured a second divergence in the same
+  `image-webp` blend, on the `dst_factor_a` term, reaching 26 levels on
+  translucent pixels, where issue #837 is about the opaque half at exactly
+  one. Three places here said "a blended frame decodes one grey level low"
+  without the qualifier, which reads as a bound on the whole function rather
+  than on half of it.
+
+  No fixture reaches the translucent half, because `vips webpsave` writes
+  blending **off** on every frame of a transparent animation, so the files
+  that would show it are the ones vips does not produce. That is worth
+  saying in the docs rather than leaving as a silence.
+
+
+- **Two `src/draw.rs` sites #867 converted had no test holding them** (issue
+  #915). Both are the shape #607 exists to prevent and both were silent: the
+  `draw_smudge` saturation ceiling, which reads `SampleKind::max_value` and
+  could be replaced by a flat `255.0` with the whole suite staying green, and
+  the `Mask::apply` sample-kind guard, which could be deleted entirely with
+  the same result.
+
+  The mask one is the sharper miss, because a test for it already existed and
+  was **vacuous**: `draw_mask_requires_single_band_8bit_mask` built its masks
+  with `Raster::zeroed`, and an all-zero mask blends zero weight, so "refused"
+  and "accepted with weight 0" both leave a black target. Both masks are
+  saturated now, and the `Gray16` case is the one the kind test is really for:
+  without the guard its samples are walked as bytes, at half the stride, with
+  the low byte of each 16-bit value used as the weight.
+
+  The smudge test needed a fixture that separates the two constants, so it
+  smudges a uniform `Gray16` field of 40000: a 255 ceiling flattens it and the
+  kind's own ceiling does not.
+
+  Neither was a defect. The code on `main` is right in both places; what was
+  missing was anything that would notice if a later edit undid it.
 
 - Two GIFs that decode in vips and did not decode here now decode, because the
   loader hands the decoder the same file in the shape it will read (issues

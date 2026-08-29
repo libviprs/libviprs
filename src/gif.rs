@@ -444,21 +444,6 @@ pub enum GifError {
     /// (`nsgifload.c:419-421`).
     #[error("gif: no frames in GIF")]
     NoFrames,
-    /// [`LoadOptions`] asked for pages the file does not have.
-    ///
-    /// vips raises this as `"bad page number"` and it covers every way the
-    /// window can miss: measured on 8.18.6 against a four-frame file,
-    /// `[page=4]`, `[n=99]`, `[n=0]` and `[page=3,n=3]` all fail that way,
-    /// while `[page=2,n=-1]` loads frames 2 and 3.
-    #[error("gif: bad page number; page {page} count {n} on a {frames}-frame file")]
-    BadPageNumber {
-        /// The first page asked for, counting from zero.
-        page: u32,
-        /// How many pages were asked for, `-1` for every remaining page.
-        n: i32,
-        /// How many frames the file actually holds.
-        frames: u32,
-    },
     /// A roll of `pages` screens is taller than a raster can be.
     ///
     /// Only reachable with the allocation, coordinate and pixel ceilings all
@@ -540,28 +525,20 @@ impl LoadOptions {
     /// The half-open range of frames these options select out of a file
     /// holding `frames` of them.
     ///
+    /// The rule is [`crate::source::resolve_page_range`], shared with the
+    /// WebP and JPEG XL loaders, and this used to be a second copy of it with
+    /// its own error variant (issue #845). The two were written against each
+    /// other field for field, so folding them was a deletion: `frames` is the
+    /// shared variant's `pages` under another name, and the message differs
+    /// only in the word before the colon, which the shared one takes as an
+    /// argument.
+    ///
     /// # Errors
     ///
-    /// [`GifError::BadPageNumber`] for any window the file cannot serve,
+    /// [`SourceError::PageOutOfRange`] for any window the file cannot serve,
     /// which is the single case vips reports for all of them.
-    fn window(self, frames: u32) -> Result<Range<u32>, GifError> {
-        let bad = || GifError::BadPageNumber {
-            page: self.page,
-            n: self.n,
-            frames,
-        };
-        if self.page >= frames {
-            return Err(bad());
-        }
-        let count = match self.n {
-            -1 => frames - self.page,
-            n => u32::try_from(n).map_err(|_| bad())?,
-        };
-        let end = self.page.checked_add(count).ok_or_else(bad)?;
-        if count == 0 || end > frames {
-            return Err(bad());
-        }
-        Ok(self.page..end)
+    fn window(self, frames: u32) -> Result<Range<u32>, SourceError> {
+        crate::source::resolve_page_range("gif", self.page, self.n, frames)
     }
 }
 
@@ -700,8 +677,8 @@ pub fn decode_gif(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceEr
 ///
 /// # Errors
 ///
-/// Everything [`decode_gif`] returns, plus [`GifError::BadPageNumber`] when
-/// `options` asks for pages the file does not hold, and
+/// Everything [`decode_gif`] returns, plus [`SourceError::PageOutOfRange`]
+/// when `options` asks for pages the file does not hold, and
 /// [`SourceError::PageLimitExceeded`] when the file declares more frames
 /// than [`DecodeLimits::max_pages`].
 pub fn decode_gif_with(
@@ -718,7 +695,7 @@ pub fn decode_gif_with(
     if scan.frames == 0 {
         return Err(GifError::NoFrames.into());
     }
-    let window = options.window(scan.frames).map_err(SourceError::from)?;
+    let window = options.window(scan.frames)?;
     let pages = window.end - window.start;
 
     let bands = if scan.has_transparency { 4 } else { 3 };
@@ -3614,13 +3591,14 @@ mod tests {
      * Tests that every window the file cannot serve is refused, rather than
      * being silently clamped to what is there. Works by asking a four-frame
      * fixture for each of the five shapes vips rejects and requiring the
-     * typed `BadPageNumber` back, with a load that does work as the positive
-     * control.
+     * shared typed `PageOutOfRange` back, with a load that does work as the
+     * positive control.
      * Measured on vips 8.18.6 against a four-frame file: `[page=4]`,
      * `[n=99]`, `[n=0]` and `[page=3,n=3]` all fail with
      * `gifload: bad page number`, while `[page=2,n=-1]` succeeds.
-     * Input: five out-of-range windows -> Output: `GifError::BadPageNumber`
-     * for each, and a page count for the one in range.
+     * Input: five out-of-range windows -> Output:
+     * `SourceError::PageOutOfRange` for each, and a page count for the one in
+     * range.
      */
     #[test]
     fn a_window_the_file_cannot_serve_is_refused() {
@@ -3640,11 +3618,12 @@ mod tests {
             assert!(
                 matches!(
                     err,
-                    SourceError::Gif(GifError::BadPageNumber {
+                    SourceError::PageOutOfRange {
+                        format: "gif",
                         page: p,
                         n: count,
-                        frames: 4,
-                    }) if p == page && count == n
+                        pages: 4,
+                    } if p == page && count == n
                 ),
                 "page {page} n {n}: {err:?}"
             );
