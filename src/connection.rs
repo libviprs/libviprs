@@ -238,7 +238,7 @@ impl Raster {
     /// Encode this raster into a freshly allocated buffer in the named format.
     ///
     /// Uses the same dispatch as [`encode_to_target`]: `"jpeg"` / `"jpg"`,
-    /// `"png"`, `"gif"`, `"webp"`, `"jxl"`,
+    /// `"png"`, `"gif"`, `"webp"`, `"tif"` / `"tiff"`, `"jxl"`,
     /// `"jp2k"` / `"jp2"` / `"j2k"` / `"jpt"` / `"j2c"` / `"jpc"`, `"uhdr"`,
     /// `"hdr"`, `"ppm"` / `"pgm"`, `"fits"` / `"fit"` / `"fts"` and
     /// `"v"` / `"vips"` are wired; any other format returns
@@ -271,6 +271,12 @@ impl Raster {
     /// [`EncodeError::InvalidParameter`] naming the raster rather than
     /// [`EncodeError::Unsupported`] naming the format: this build can write
     /// Ultra HDR, and what is wrong is the input.
+    ///
+    /// `"tif"` and `"tiff"` are the two spellings `tiffsave` registers, and
+    /// they write one container between them: uncompressed strips, which is
+    /// that saver's own default measured on 8.18.6. Unlike
+    /// [`Raster::tiff_save`], which is infallible and answers a raster it
+    /// cannot encode with an empty buffer, this row keeps the typed refusal.
     ///
     /// `"hdr"` is Radiance RGBE (libvips `radsave`), and it has the same shape:
     /// a 3-band `f32` raster only, refused rather than cast, where `radsave`
@@ -312,6 +318,19 @@ fn encode_for_format(raster: &Raster, format: &str) -> Result<Vec<u8>, EncodeErr
         "png" => crate::sink::encode_png(raster).map_err(sink_err_to_encode),
         "gif" => raster.encode_gif(crate::gif::SaveOptions::default()),
         "webp" => raster.encode_webp(crate::webp::SaveOptions::default()),
+        // Both suffixes `tiffsave` registers, on one arm because neither
+        // picks anything: measured on 8.18.6 its `vips -l` line reads
+        // `nocache (.tif, .tiff)`, and `.btf`, `.tf8`, `.bigtiff` and `.tfx`
+        // are each refused as an unknown format. Ungated, because the `tiff`
+        // crate is already required for decoding.
+        //
+        // Uncompressed strips, which is `tiffsave`'s measured default rather
+        // than a guess: the plain call and `--compression none` write
+        // byte-identical files and `--compression deflate` does not
+        // (issue #948).
+        "tif" | "tiff" => {
+            crate::encode_tiff::encode_tiff_for_save(raster).map_err(save_err_to_encode)
+        }
         "jxl" => raster.encode_jxl(crate::jxl::SaveOptions::default()),
         // Every spelling `jp2ksave` answers to, on one arm, because vips
         // writes the same JP2 container for all five suffixes: measured on
@@ -1003,11 +1022,16 @@ mod tests {
 
     /// An unwired format returns the typed [`EncodeError::Unsupported`], not a
     /// panic, through both the buffer and the target entry points.
+    ///
+    /// This asked for `"tiff"` until #948 wired that row, at which point it
+    /// went red and said so, which is what a check is for. `"bigtiff"` takes
+    /// its place because vips refuses it too, measured on 8.18.6: `vips copy
+    /// t.v o.bigtiff` reports "is not a known file format".
     #[test]
     fn unsupported_format_returns_typed_error() {
         let raster = sample_raster();
 
-        let buf_err = raster.encode_to_buffer("tiff").unwrap_err();
+        let buf_err = raster.encode_to_buffer("bigtiff").unwrap_err();
         assert!(
             matches!(buf_err, EncodeError::Unsupported { .. }),
             "expected Unsupported, got {buf_err:?}"
