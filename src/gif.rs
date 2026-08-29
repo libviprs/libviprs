@@ -3698,6 +3698,83 @@ mod tests {
     }
 
     /**
+     * Tests that the second walk terminates and does not panic on bytes that
+     * are not a well-formed GIF. Works by running `ControlWalk` to exhaustion
+     * over every prefix of a real fixture and over the same fixture with each
+     * byte in turn replaced by each of the four block introducers, bounding
+     * the number of frames it may yield so a walk that fails to advance is a
+     * failure rather than a hang.
+     * `ControlWalk` is the one place in this module that indexes a buffer by
+     * arithmetic on lengths the file itself supplies, which is where a decoder
+     * gets its panics. Every read goes through `get`, and this is what says so
+     * rather than the comment saying so.
+     * The positive control is the intact fixture, which must still yield its
+     * three frames with the disposal codes it was built with, so a walk that
+     * gave up immediately would pass the panic half and fail here.
+     * Input: 1 fixture, its 200-odd prefixes and about 800 corruptions ->
+     * Output: no panic, a bounded frame count, and the intact file unchanged.
+     */
+    #[test]
+    fn the_control_walk_is_total_over_bytes_that_are_not_a_gif() {
+        let bytes = fixture(
+            (2, 2),
+            &ANIM_PALETTE,
+            0,
+            Some(0),
+            &[
+                Frame {
+                    disposal: 4,
+                    local: Some(vec![[1, 2, 3], [4, 5, 6]]),
+                    comment: Some(b"hello".to_vec()),
+                    ..Frame::full(2, 2, vec![0, 1, 1, 0])
+                },
+                Frame {
+                    disposal: 2,
+                    control: false,
+                    ..Frame::full(2, 2, vec![1, 1, 1, 1])
+                },
+                Frame {
+                    disposal: 7,
+                    ..Frame::full(2, 2, vec![2, 2, 3, 3])
+                },
+            ],
+        );
+
+        // Every frame on the wire costs at least the ten bytes of an image
+        // descriptor, so a walk that yields more than that has stopped
+        // advancing rather than found something.
+        let drain = |input: &[u8]| {
+            let ceiling = input.len() + 1;
+            let mut walk = ControlWalk::new(input);
+            let mut seen = Vec::new();
+            while let Some(control) = walk.next_frame() {
+                seen.push(control);
+                assert!(seen.len() <= ceiling, "the walk is not advancing");
+            }
+            seen
+        };
+
+        let intact = drain(&bytes);
+        assert_eq!(
+            intact.iter().map(|c| c.disposal).collect::<Vec<_>>(),
+            [4, 0, 7],
+            "the control: the intact file still walks, and the middle frame's \
+             missing extension reads as code 0"
+        );
+
+        for cut in 0..bytes.len() {
+            drain(&bytes[..cut]);
+        }
+        for at in 0..bytes.len() {
+            for byte in [0x21u8, 0x2C, 0x3B, 0xFF] {
+                let mut corrupt = bytes.clone();
+                corrupt[at] = byte;
+                drain(&corrupt);
+            }
+        }
+    }
+
+    /**
      * Tests that the raw disposal code survives the two things that can sit
      * between a frame's graphic control extension and its pixels: another
      * extension block, and a colour table on an earlier frame. Works by
