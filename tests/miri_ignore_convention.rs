@@ -1683,6 +1683,68 @@ mod tests {
     );
 }
 
+/// The spellings of std's stat surface that read like accessors.
+///
+/// `.exists()`, `.is_file()` and `.metadata()` are in [`FS_MARKERS`];
+/// `.try_exists()`, `.is_symlink()` and `File::options(` were not, and a test
+/// reaching the filesystem through one of those skipped the inventory and took
+/// the whole Miri run down as "Miri failed", which is the exact failure #652
+/// exists to prevent. Measured: an unannotated `#[test]` calling
+/// `Path::try_exists()` planted in `tests/workspace_layout.rs` left all
+/// fourteen tests in this file green (issue #949).
+///
+/// One row per spelling, run through [`scan_source`] rather than through the
+/// tree, so a marker that stops matching is a named row rather than a count
+/// that moved.
+#[test]
+fn every_spelling_of_a_stat_call_is_a_filesystem_marker() {
+    let cases: [(&str, &str); 9] = [
+        ("exists", "let _ = p.exists();"),
+        ("try_exists", "let _ = p.try_exists().unwrap();"),
+        ("is_file", "let _ = p.is_file();"),
+        ("is_dir", "let _ = p.is_dir();"),
+        // Detected today, but by accident: `symlink(` is a marker and
+        // `is_symlink()` contains it. Spelling it out is what stops that
+        // being load-bearing.
+        ("is_symlink", "let _ = p.is_symlink();"),
+        ("symlink_metadata", "let _ = p.symlink_metadata().unwrap();"),
+        ("metadata", "let _ = p.metadata().unwrap();"),
+        ("canonicalize", "let _ = p.canonicalize().unwrap();"),
+        // Bare, the way `File::open(` and `OpenOptions::new(` are already
+        // spelled here, because `use std::fs::File;` sits at module scope and
+        // `fn_bodies` never reads it.
+        (
+            "File::options",
+            "let _ = File::options().read(true).open(p).unwrap();",
+        ),
+    ];
+    let mut missed = Vec::new();
+    for (label, call) in cases {
+        let src = format!(
+            "#[test]\nfn t() {{\n    let p = std::path::Path::new(\"x\");\n    {call}\n}}\n"
+        );
+        let found = scan_source("fixture.rs", &src);
+        assert_eq!(found.len(), 1, "the fixture must parse as one test: {src}");
+        if !found[0].touches_fs {
+            missed.push(label);
+        }
+    }
+    assert!(
+        missed.is_empty(),
+        "these spellings of a stat call are not filesystem markers, so a test \
+         using one skips the inventory and ends the whole Miri run on its \
+         first syscall (issue #949): {missed:?}"
+    );
+
+    // The negative control, so "every call is a marker" is not how this passes.
+    let pure = "#[test]\nfn t() {\n    assert_eq!(1 + 1, 2);\n}\n";
+    let found = scan_source("fixture.rs", pure);
+    assert!(
+        !found[0].touches_fs,
+        "a test that touches nothing must not be detected"
+    );
+}
+
 /// The filesystem detector follows a call into a test helper, and deliberately
 /// does not follow one into the library.
 ///
