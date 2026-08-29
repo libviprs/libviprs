@@ -317,7 +317,35 @@ fn parse_subsample_mode(mode: Option<&str>) -> JpegSubsample {
 }
 
 /// The `image` colour type for a [`PixelFormat`], or an [`EncodeError`] for the
-/// compute-intermediate formats (multiband / float) that have none.
+/// compute-intermediate formats (multiband / float / 32-bit) that have none.
+///
+/// # The oracle, which is a stronger case than the dependency
+///
+/// "The `image` crate's widest integer colour type is 16-bit" is true, and it
+/// is the weaker half of why these are refused. PNG the format has no 32-bit
+/// or float sample type either, and vips does not have one answer for what to
+/// do about that: it has several, and they disagree. Measured on
+/// `/opt/homebrew/bin/vips` 8.18.6 over a 2x1 raster:
+///
+/// | route | `uint [3000000000, 100]` | `float [1.5, -0.25]` |
+/// |---|---|---|
+/// | `vips pngsave`, `b-w` tag | `[0, 100]` | `[1, 0]` |
+/// | `vips pngsave`, `multiband` tag | `[0, 0]` | `[0, 0]` |
+/// | `vips cast` to `uchar` | `[0, 100]` | `[1, 0]` |
+/// | `vips dzsave`, full-resolution tile | `0` | `1` |
+/// | `vips dzsave`, overview tile | `255` | `0` |
+///
+/// Three routes, and inside one of them the **interpretation tag** moves the
+/// answer: the same `uint` raster saves as `[0, 100]` tagged `b-w` and
+/// `[0, 0]` tagged `multiband`. Not one route answers the data. The 255 in
+/// the overview row is the shrink: averaging 3000000000 with 100 and clipping
+/// gives white, on a raster whose full-resolution tile is black.
+///
+/// That is posture 3 with a posture-4 garnish, and it makes the refusal
+/// **more faithful** than merely necessary: there is no answer here to be
+/// faithful to, so returning one would be inventing it (issues #517, #952).
+/// [`crate::sink_object_store`]'s tile encoder refuses the same carriers for
+/// the same reason.
 fn image_color_type(fmt: PixelFormat) -> Result<image::ColorType, EncodeError> {
     Ok(match fmt {
         PixelFormat::Gray8 => image::ColorType::L8,
