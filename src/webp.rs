@@ -2016,6 +2016,41 @@ mod tests {
         );
     }
 
+    /// `img2webp -loop 0 -lossless -d 100 f0.png -d 100 f1.png`: two 4x4
+    /// frames where frame 0 is opaque red over the whole canvas with
+    /// **dispose to background**, and frame 1 is a 2x2 opaque blue square
+    /// at the origin with `blend: yes`.
+    ///
+    /// `vips webpsave` cannot write this: it has no disposal knob and emits
+    /// `dispose: none` on every frame, so the one shape that exercises the
+    /// disposal step has to come from libwebp's own tool. The file declares
+    /// a background of `0xFFFFFFFF`, and libwebp ignores it: measured, vips
+    /// clears to **transparent black** on both this file and a copy whose
+    /// `ANIM` background I patched to opaque green, so the declared colour
+    /// is a hint for a display environment rather than something a decoder
+    /// paints.
+    const DISPOSE_BG: [u8; 140] = [
+        0x52, 0x49, 0x46, 0x46, 0x84, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38,
+        0x58, 0x0a, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0x00,
+        0x41, 0x4e, 0x49, 0x4d, 0x06, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x41,
+        0x4e, 0x4d, 0x46, 0x28, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00,
+        0x00, 0x03, 0x00, 0x00, 0x64, 0x00, 0x00, 0x03, 0x56, 0x50, 0x38, 0x4c, 0x0f, 0x00, 0x00,
+        0x00, 0x2f, 0x03, 0xc0, 0x00, 0x00, 0x07, 0x10, 0xfd, 0x8f, 0xfe, 0x07, 0x22, 0xa2, 0xff,
+        0x01, 0x00, 0x41, 0x4e, 0x4d, 0x46, 0x28, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x64, 0x00, 0x00, 0x00, 0x56, 0x50, 0x38, 0x4c,
+        0x0f, 0x00, 0x00, 0x00, 0x2f, 0x01, 0x40, 0x00, 0x00, 0x07, 0x10, 0xd1, 0xff, 0xfe, 0x07,
+        0x22, 0xa2, 0xff, 0x01, 0x00,
+    ];
+
+    const DISPOSE_BG_ROLL: [u8; 128] = [
+        255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0,
+        255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255,
+        0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 255, 0, 0, 255, 255,
+        0, 0, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 255, 0, 0, 255, 255, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0,
+    ];
+
     /// The largest absolute difference between two decodes, per byte.
     ///
     /// A magnitude and not a count, because the whole question in issue #863
@@ -2029,6 +2064,61 @@ mod tests {
             .map(|(x, y)| i32::from(*x).abs_diff(i32::from(*y)))
             .max()
             .unwrap_or(0)
+    }
+
+    /**
+     * Tests that a frame asking to be disposed to the background really is,
+     * so the frame after it starts from a cleared canvas rather than from
+     * the one before. Works on the one fixture that carries a disposal at
+     * all, because `vips webpsave` writes `dispose: none` everywhere and
+     * this shape has to come out of `img2webp`.
+     *
+     * The comparison is on the colour channels only, because this file also
+     * trips a separate divergence: it declares no alpha in `VP8X` and no
+     * `alpha_is_used` on either frame, yet the disposal makes the canvas
+     * transparent, and vips hands back four bands where libviprs hands back
+     * three. That is filed separately and is not fixable through
+     * `image-webp`'s public API, so this test asserts the half that is:
+     * the pixels under the disposed area are the cleared canvas and not
+     * frame 0.
+     * Input: `DISPOSE_BG`, whose frame 0 covers the canvas in opaque red
+     * and disposes to background, and whose frame 1 is a 2x2 blue square ->
+     * Output: page 1 is blue in the square and black (vips's transparent
+     * black, without the alpha) everywhere else, not red.
+     */
+    #[test]
+    fn a_frame_disposed_to_the_background_clears_the_canvas() {
+        let raster = decode_webp_with(&DISPOSE_BG, DecodeLimits::default(), all_pages())
+            .expect("the two-frame capture decodes");
+        assert_eq!((raster.width(), raster.height()), (4, 8));
+        // Three bands here and four in vips; see the note above.
+        assert_eq!(raster.format(), PixelFormat::Rgb8);
+
+        // Every colour channel vips reads, with its alpha dropped, and with
+        // page 1 through the upstream blend loss because this file asks for
+        // frame 1 to be blended. The disposed area is zero and stays zero,
+        // so the loss shows up only on the blue square: 255 becomes 254.
+        let mut expected: Vec<u8> = DISPOSE_BG_ROLL
+            .chunks_exact(4)
+            .flat_map(|p| p[..3].to_vec())
+            .collect();
+        let blended = as_image_webp_blends(&expected[48..]);
+        expected[48..].copy_from_slice(&blended);
+        assert_eq!(raster.data(), &expected[..]);
+
+        // Said again as the property rather than as 96 bytes, because the
+        // comparison above passes for the wrong reason if the fixture is
+        // ever regenerated: the pixel outside frame 1's square has to be
+        // the cleared canvas and not frame 0's red.
+        let page1 = &raster.data()[48..];
+        assert_eq!(&page1[..3], &[0, 0, 254], "the square is blue, a level low");
+        assert_eq!(
+            &page1[6..9],
+            &[0, 0, 0],
+            "outside the square the canvas was disposed to the background, \
+             so frame 0's red is gone"
+        );
+        assert_ne!(&page1[6..9], &[255, 0, 0], "and it is not the red");
     }
 
     /**
