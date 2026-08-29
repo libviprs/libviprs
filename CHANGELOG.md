@@ -711,6 +711,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **CI runs the non-default features it had been compiling out**, and a guard
+  so the next one cannot be forgotten (issues #772, #816). `jp2k`, `avif`,
+  `packfile`, `serde` and `tracing` all gate code behind
+  `#[cfg(feature = ...)]`, and no job named any of them, so those bodies were
+  compiled *out* and 53 assertions never ran: 24 for `jp2k`, 8 for `packfile`,
+  6 for `serde` (all of `tests/serde_wire.rs`, which opens
+  `#![cfg(feature = "serde")]`), 5 for `tracing`, and 10 for `avif` that are the
+  codec's entire oracle comparison and are `ignore`d without the feature.
+
+  The lint half was not hypothetical either: the first
+  `cargo clippy --all-targets --features packfile` ever run on this tree came
+  back **red**, on a `collapsible_if` in `src/sink_packfile.rs` that no job had
+  ever compiled. That is fixed here too.
+
+  The MSRV cells are measured rather than assumed. A feature needs one when it
+  pulls in a crate declaring no `rust-version`, because that is exactly what the
+  MSRV-aware resolver cannot see and `Cargo.lock` is not committed: `svg` adds
+  12 such crates, `avif` 9, `packfile` 5 and `jp2k` 1 (`openjpeg2-pure-rs`
+  0.1.1). All four pass `cargo +1.97 check --all-targets` today, so the cells
+  are a guard rather than a fix.
+
+  The same issue had already been filed three times, once per format (#502 for
+  `svg`, #500 for `jxl`, #772 for `jp2k`), because nothing checked the class.
+  `tests/ci_feature_coverage.rs` now does: it reads `Cargo.toml` and `ci.yml` at
+  compile time and asserts that `[features]` holds exactly the names an explicit
+  table covers, and that every cell the table claims is in the right job. A new
+  feature fails there until somebody writes down which jobs it belongs in, and
+  why.
+
 - **Animated GIF save** (issue #573). `Raster::encode_gif` splits the raster by
   its page height and writes one GIF frame per page, taking the per-frame
   delays out of the `delay` field and the NETSCAPE loop block out of `loop`,
