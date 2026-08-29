@@ -55,7 +55,12 @@
 //! [`REMAINING`] is the countdown: files with a site somebody still owes a
 //! conversion, keyed by file because it tracks a lane's outstanding work. It
 //! only ever shrinks, and an entry whose site is gone fails, so it cannot turn
-//! into an allowlist. It is empty.
+//! into an allowlist. It has one entry, `src/fits.rs`, and it earned it: the
+//! match head there is not just a width standing in for a kind, it is a
+//! *wrong* answer for all four carriers #516 and #517 added, measured against
+//! vips 8.18.6 on both sides (issue #957). Converting it without adding the
+//! 32-bit integer carrier would freeze that answer in a shape that reads as
+//! done.
 //!
 //! [`DELIBERATE`] is the other kind: sites where the byte width **is** the
 //! thing under test, keyed by their exact text so a second comparison in the
@@ -76,7 +81,15 @@ use std::collections::BTreeSet;
 ///
 /// Shrink this, never grow it. An entry whose site is gone fails the test, so
 /// clearing a site means deleting its line here in the same PR.
-const REMAINING: &[(&str, &str)] = &[];
+const REMAINING: &[(&str, &str)] = &[(
+    "src/fits.rs",
+    "issue #957: Carrier::for_format keys the FITS carrier on the width, and \
+     converting it without adding the 32-bit integer carrier would freeze a \
+     measured-wrong answer. vips 8.18.6 writes an `int` image as BITPIX 32 \
+     with BZERO 2147483648; libviprs writes BITPIX -32 and reinterprets the \
+     integer bytes as f32, and it writes an `Int8` -5 as 251 where vips \
+     saturates to 0",
+)];
 
 /// Sites where the byte width **is** the thing under test, with the reason.
 ///
@@ -547,6 +560,98 @@ fn the_width_scanner_sees_code_and_not_comments() {
             width_comparisons(spelling).len(),
             1,
             "unseen spelling: {spelling}"
+        );
+    }
+
+    // Each literal form that can desynchronise the mask and swallow the rest
+    // of the file, with the crippling of the mask each row catches, measured
+    // by running the mask with that half removed:
+    //
+    // | row | catches |
+    // |---|---|
+    // | `'"'` | not tracking character literals at all, which is what cost
+    //   `tests/unsafe_inventory.rs` 2650 lines of `src/jp2k.rs` (issue #943) |
+    // | a lifetime on the comparison's own line | treating every `'` as
+    //   opening a literal, which swallows from `&'static` to the next quote |
+    // | a raw string holding an unmatched `"` | not knowing `r#"`, which is
+    //   how `src/svg.rs`'s `http://www.w3.org/2000/svg` reads as a comment |
+    //
+    // The escaped-quote row is inert as a mutation and kept anyway: under the
+    // rule below a mishandled `'\''` degrades into a lifetime rather than
+    // into a swallowed span, so nothing is lost, but the literal is common
+    // enough in this tree to be worth pinning.
+    for (label, src) in [
+        (
+            "a char literal holding a quote",
+            "fn f(s: &str, x: PixelFormat) -> bool {\n    let _ = s.split_once('\"');\n    \
+             x.bytes_per_channel() == 1\n}\n",
+        ),
+        (
+            "a char literal whose escape is a quote, beside one that holds a quote",
+            "fn f(s: &str, x: PixelFormat) -> bool {\n    \
+             let _ = (s.split_once('\\''), s.split_once('\"'));\n    \
+             x.bytes_per_channel() == 1\n}\n",
+        ),
+        (
+            "a raw string holding an unmatched quote",
+            "fn f(x: PixelFormat) -> bool {\n    let _ = r#\"an unmatched \" quote\"#;\n    \
+             x.bytes_per_channel() == 1\n}\n",
+        ),
+        (
+            "a lifetime on the line the comparison is on",
+            "fn f(x: PixelFormat) -> bool { let s: &'static str = \"n\"; \
+             x.bytes_per_channel() == 1 }\n",
+        ),
+    ] {
+        assert_eq!(
+            width_comparisons(src).len(),
+            1,
+            "the scanner lost the rest of the file to {label}:\n{src}"
+        );
+    }
+
+    // And the contents of a literal are prose, however they are spelled.
+    for cloaked in [
+        r#"fn f() { let _ = "x.bytes_per_channel() == 1"; }"#,
+        r###"fn f() { let _ = r#"x.bytes_per_channel() == 1"#; }"###,
+    ] {
+        assert_eq!(
+            width_comparisons(cloaked),
+            Vec::<(usize, String)>::new(),
+            "the same text inside a string literal must not be found: {cloaked:?}"
+        );
+    }
+}
+
+/**
+ * Tests that the shapes this scanner cannot see are still the two the module
+ * doc names, so the list of blind spots cannot grow in silence.
+ * Works by running the scanner over one source per documented blind spot and
+ * asserting it finds nothing. Both need a scan that follows values rather
+ * than one that reads tokens, which is a different kind of program from this
+ * one, so they are recorded rather than closed. Closing one turns this test
+ * red, which is the moment the module doc needs the paragraph rewritten.
+ * Input: a width read into a local, and a width passed to a helper ->
+ * Output: no hits, for now.
+ */
+#[test]
+fn the_documented_blind_spots_are_still_blind() {
+    for (label, src) in [
+        (
+            "a width read into a local and compared on the next line",
+            "fn f(kind: SampleKind) -> bool {\n    let bpc = kind.bytes();\n    bpc == 1\n}\n",
+        ),
+        (
+            "a width handed to a helper that does the comparing",
+            "fn f(kind: SampleKind) -> bool {\n    is_one_byte(kind.bytes())\n}\n",
+        ),
+    ] {
+        assert_eq!(
+            width_comparisons(src),
+            Vec::<(usize, String)>::new(),
+            "the scanner now sees `{label}`, which the module doc still lists \
+             as a blind spot. Rewrite the paragraph and move this row into \
+             MUST_BE_FOUND."
         );
     }
 }

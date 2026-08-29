@@ -1522,7 +1522,16 @@ fn transpose(src: &[f64], w: usize, h: usize) -> Vec<f64> {
 fn rgb_planes(im: &Raster) -> [Vec<f64>; 3] {
     let bands = im.format().channels();
     let kind = im.format().kind();
-    let scale = if kind.bytes() == 1 { 1.0 } else { 257.0 };
+    // The 8-bit scale, taken from the kind's own table size rather than from a
+    // byte width: 255/255 for the one-byte kinds and 65535/255 = 257 for the
+    // two-byte ones, which is exactly what the width rule answered. A width
+    // cannot separate the three four-byte kinds, and this never has to,
+    // because `hist_bins` is `None` precisely where `reject_untabulated_kind`
+    // has already refused the call (issues #607, #942).
+    let bins = kind
+        .hist_bins()
+        .expect("smartcrop refuses a kind with no bin table before the analysis image is read");
+    let scale = (bins - 1) as f64 / 255.0;
     let (w, h) = (im.width() as usize, im.height() as usize);
     let data = im.data();
     let mut planes: [Vec<f64>; 3] = [vec![0.0; w * h], vec![0.0; w * h], vec![0.0; w * h]];
