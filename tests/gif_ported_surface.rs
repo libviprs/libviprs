@@ -69,7 +69,11 @@ fn decode_gif_with_is_public_and_refuses_a_page_the_file_lacks() {
     assert!(
         matches!(
             err,
-            SourceError::Gif(GifError::BadPageNumber { frames: 1, .. })
+            SourceError::PageOutOfRange {
+                format: "gif",
+                pages: 1,
+                ..
+            }
         ),
         "{err:?}"
     );
