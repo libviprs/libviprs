@@ -2004,8 +2004,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   No public API moves and no behaviour changes: everything here is
   `pub(crate)` or `cfg(test)`, and the error payloads each site reports are the
-  ones it reported before. `arithmetic.rs`'s `try_scratch` is the copy still
-  outstanding; that file is held by another lane, so #696 stays open on it.
+  ones it reported before.
+
+- `arithmetic.rs`'s `try_scratch` is on the shared funnel too, which is the
+  third and last of the copies above and what closes issue #696. Its
+  `SCRATCH_ALLOC_CAP` ceiling and `with_scratch_alloc_cap` hook are gone, and
+  the module's five scratch reservations carry labels:
+  `arithmetic.project.col_sums` and `.row_sums`, `arithmetic.stdif.integral`
+  and `.integral_squares`, and `arithmetic.hough_circle.accumulator`.
+  `raster::try_plane_len_filled` is the form they reserve through, for a buffer
+  sized in elements rather than at a rate per pixel.
+
+  Three things the labels bought that the module's own ceiling could not. Each
+  half of both pairs can now be starved on its own: `col_sums` and `row_sums`
+  are the same size on a square raster and are reserved back to back, as are
+  the two integral images, so a ceiling refusing the *Nth* over-ceiling request
+  on the thread refused the first either way and never reached the second.
+  `try_hough_circle`'s vote accumulator, which is the largest buffer the module
+  holds and the only one a caller sizes directly through the radius range, had
+  no test ceiling at all and now has one. And the three ops' reservation counts
+  are pinned per entry point at exact equality, with the total asserted to be
+  the sum of the parts, so a site added to one of them is red rather than
+  absorbed.
+
+  No public API moves and no behaviour changes here either.
 
 - `src/resample.rs` records a fourth deliberate quantisation divergence from
   stock libvips and pins it from both sides (issue #777). `vips_reduce_make_mask`

@@ -356,6 +356,30 @@ pub(crate) fn try_plane_filled<T: Clone>(
     Ok(out)
 }
 
+/// [`try_plane_len`], filled with `fill` to `len`, for a buffer whose size is
+/// an element count rather than a rate per pixel.
+///
+/// The zero-filled scratch planes in [`crate::arithmetic`] are all of this
+/// shape: an integral image is one element per *padded* pixel and a Hough vote
+/// accumulator is one per pixel per radius, so neither is priced off the
+/// driving raster's geometry the way [`try_plane_filled`] prices its caller's.
+///
+/// Fills to `len` and not to `capacity()`, for the reason [`try_plane_filled`]
+/// gives: [`Vec::try_reserve_exact`] is allowed to hand back more room than it
+/// was asked for, and the length is a contract with whatever writes into the
+/// buffer rather than whatever the allocator rounded up to.
+pub(crate) fn try_plane_len_filled<T: Clone>(
+    site: &'static str,
+    width: u32,
+    height: u32,
+    len: usize,
+    fill: T,
+) -> Result<Vec<T>, RasterError> {
+    let mut out = try_plane_len::<T>(site, width, height, len)?;
+    out.resize(len, fill);
+    Ok(out)
+}
+
 /// The one reservation every plane in the crate goes through.
 ///
 /// Split out so [`try_plane_len`] and [`try_plane`] price their request their
@@ -2248,6 +2272,14 @@ mod tests {
         convolution: usize,
         /// Reservations at a `colour.` site.
         colour: usize,
+        /// Reservations at an `arithmetic.` site.
+        ///
+        /// Zero on every row, and that is the assertion: none of these paths
+        /// reaches into `arithmetic.rs`. The counts for the ops that *do*
+        /// reserve there live in `arithmetic.rs`'s own funnel check, next to
+        /// the radius ranges and window sizes those rows need, the same way
+        /// the ICC entry points live in `colour.rs` (issue #696).
+        arithmetic: usize,
     }
 
     /// The 3x3 box blur the `conv` and `compass` rows run.
@@ -2272,6 +2304,7 @@ mod tests {
             widenings: 0,
             convolution: 1,
             colour: 0,
+            arithmetic: 0,
         },
         Funnel {
             op: "try_conv, float arm",
@@ -2280,6 +2313,7 @@ mod tests {
             widenings: 0,
             convolution: 1,
             colour: 0,
+            arithmetic: 0,
         },
         Funnel {
             op: "try_sobel",
@@ -2288,6 +2322,7 @@ mod tests {
             widenings: 0,
             convolution: 1,
             colour: 0,
+            arithmetic: 0,
         },
         Funnel {
             op: "try_gaussblur, integer arm",
@@ -2296,6 +2331,7 @@ mod tests {
             widenings: 0,
             convolution: 2,
             colour: 0,
+            arithmetic: 0,
         },
         Funnel {
             op: "try_compass, Max over 4 rounds",
@@ -2312,6 +2348,7 @@ mod tests {
             widenings: 4,
             convolution: 5,
             colour: 0,
+            arithmetic: 0,
         },
         Funnel {
             op: "try_sharpen",
@@ -2320,6 +2357,7 @@ mod tests {
             widenings: 1,
             convolution: 3,
             colour: 2,
+            arithmetic: 0,
         },
         Funnel {
             op: "try_canny, float arm",
@@ -2328,6 +2366,7 @@ mod tests {
             widenings: 2,
             convolution: 4,
             colour: 0,
+            arithmetic: 0,
         },
         Funnel {
             op: "try_canny, uchar arm",
@@ -2336,6 +2375,7 @@ mod tests {
             widenings: 0,
             convolution: 4,
             colour: 0,
+            arithmetic: 0,
         },
         Funnel {
             op: "try_de00",
@@ -2344,6 +2384,7 @@ mod tests {
             widenings: 0,
             convolution: 0,
             colour: 4,
+            arithmetic: 0,
         },
         Funnel {
             op: "try_colourspace to Labs",
@@ -2352,6 +2393,7 @@ mod tests {
             widenings: 0,
             convolution: 0,
             colour: 1,
+            arithmetic: 0,
         },
     ];
 
@@ -2375,7 +2417,8 @@ mod tests {
      * magic constant and moves for any reason at all; the split says which
      * module changed, and the total is then asserted to be the sum of the
      * parts, so a **fifth** prefix joining the funnel is caught too rather than
-     * being quietly absorbed.
+     * being quietly absorbed. `arithmetic.` is the fifth column and is zero
+     * on every row here; its own counts are in `arithmetic.rs`.
      *
      * # What this counts, and what the neighbouring instrument counts
      *
@@ -2419,6 +2462,7 @@ mod tests {
                 ("f32 widenings", count(PLANE_F32_SAMPLES), row.widenings),
                 ("convolution planes", count("convolution."), row.convolution),
                 ("colour planes", count("colour."), row.colour),
+                ("arithmetic planes", count("arithmetic."), row.arithmetic),
             ];
             for (what, got, want) in parts {
                 assert_eq!(
@@ -2432,7 +2476,7 @@ mod tests {
             let sum: usize = parts.iter().map(|(_, got, _)| got).sum();
             assert_eq!(
                 total, sum,
-                "{} made {total} reservations and only {sum} of them are under one of the four \
+                "{} made {total} reservations and only {sum} of them are under one of the five \
                  prefixes above: a module joined the funnel and no row here names it",
                 row.op
             );
