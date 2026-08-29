@@ -4358,47 +4358,48 @@ mod tests {
     }
 
     /**
-     * Tests that a `.ppm` this crate writes does **not** read back through the
-     * shared decode entry points, which is the one asymmetry these rows
-     * introduce (issues #882, #910).
+     * Tests that a `.ppm` this crate writes reads back through the shared
+     * decode entry points (issue #910).
      *
-     * Every other row in the save table writes a container `decode_file` can
-     * read. Netpbm cannot, and it is not close: `source::sniff` has no variant
-     * for it, so `decode_file_with_limits` falls through to `image`'s
-     * `with_guessed_format`, which recognises the container and then refuses
-     * it because `Cargo.toml` builds `image` without the `pnm` feature. The
-     * refusal naming `Pnm` exactly is what says the guess worked and the codec
-     * was absent.
+     * This cell is the flip of the one #882 landed. That one asserted the
+     * opposite, that `sniff` was `None` and `decode_bytes` refused, and said
+     * in its own doc that the day #910 landed it would be the thing to go red
+     * and be updated. This is that update, renamed with it: the old name is a
+     * false sentence now, and a check whose name outlives the fact it pins is
+     * how a suite starts lying.
      *
-     * `Raster::ppm_load` is the positive control and the way back in: the
-     * bytes are a valid Netpbm file, and what is missing is the route.
+     * Netpbm was the only save row whose output this crate could not read
+     * back. `sniff` had no variant for it, so `decode_file_with_limits` fell
+     * through to `image`'s `with_guessed_format`, which recognised the
+     * container and refused it for want of the `pnm` feature.
      *
-     * This is pinned rather than left implicit because a reader who finds
-     * `save("x.ppm")` working will reasonably expect `decode_file("x.ppm")` to
-     * work, and because the day #910 lands this check is what says so.
+     * Both containers, because the two rows write different magics and a
+     * round trip through one says nothing about the other. `.png` stays
+     * beside them as the control it was before.
      */
     #[test]
-    fn a_netpbm_this_crate_writes_does_not_read_back_through_the_shared_decoder() {
-        let written = rgb_2x2()
-            .encode_for_extension("ppm", true)
-            .expect(".ppm is a row");
+    fn a_netpbm_this_crate_writes_reads_back_through_the_shared_decoder() {
+        for (extension, subject) in [("ppm", rgb_2x2()), ("pgm", gray_2x2())] {
+            let written = subject
+                .encode_for_extension(extension, true)
+                .unwrap_or_else(|e| panic!(".{extension} is a row, got {e}"));
 
-        // The way back in that does work, first, so the rest is about the
-        // route and not about the bytes.
-        let back = Raster::ppm_load(&written).expect("ppm_load reads what encode_ppm wrote");
-        assert_eq!((back.width(), back.height()), (2, 2));
-        assert_eq!(back.data(), rgb_2x2().data());
+            assert!(
+                crate::source::sniff(&written).is_some(),
+                ".{extension} must be a sniffed container now (issue #910)"
+            );
+            let back = crate::decode_bytes(&written)
+                .unwrap_or_else(|e| panic!(".{extension} must decode back, got {e}"));
+            assert_eq!((back.width(), back.height()), (2, 2));
+            assert_eq!(
+                back.data(),
+                subject.data(),
+                ".{extension} must round-trip its pixels"
+            );
+            assert_eq!(back.format(), subject.format());
+        }
 
-        // And the two shared entry points, which do not.
-        assert!(
-            crate::source::sniff(&written).is_none(),
-            "Netpbm is not a sniffed container (issue #910)"
-        );
-        assert!(
-            crate::decode_bytes(&written).is_err(),
-            "decode_bytes cannot read a Netpbm file this build wrote (issue #910)"
-        );
-        // Positive control on the assertions above: a row that does round-trip.
+        // The control it has always had: a row that already round-tripped.
         let png = rgb_2x2().encode_for_extension("png", true).unwrap();
         assert!(crate::source::sniff(&png).is_some());
         assert!(crate::decode_bytes(&png).is_ok());
