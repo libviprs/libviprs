@@ -280,6 +280,8 @@ annotated   fs-detected  src/stream_verify.rs::stream_verify_rejects_unknown_alg
 annotated   fs-detected  src/stream_verify.rs::stream_verify_rejects_wrong_format_strip
 annotated   fs-detected  src/stream_verify.rs::stream_verify_reports_missing_tile
 annotated   fs-detected  tests/colour_ported_surface.rs::ported_icc_call_site
+annotated   fs-detected  tests/crate_doc_matches_the_crate.rs::every_multi_page_loader_that_refuses_a_page_is_named_in_the_doc
+annotated   fs-detected  tests/crate_doc_matches_the_crate.rs::no_doc_example_under_src_carries_ignore
 annotated   fs-detected  tests/dependency_policy.rs::vendored_native_code_is_only_the_documented_crates
 annotated   fs-detected  tests/exr_ported_surface.rs::channel_names_and_compression_are_readable_downstream
 annotated   fs-detected  tests/exr_ported_surface.rs::decode_exr_is_public_and_returns_float_bands
