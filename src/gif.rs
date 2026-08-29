@@ -5194,6 +5194,56 @@ mod tests {
     }
 
     /**
+     * Tests that `background` comes back, as the three doubles vips stores
+     * it as. Works by decoding four fixtures whose logical screen descriptor
+     * points at different colour table entries, including one past the end of
+     * the table.
+     * It is the last `gifload` header field this loader read and did not
+     * attach, and the reason it waited is that vips stores it as a
+     * `VipsArrayDouble` where `MetadataValue` had only an integer array
+     * (issue #852). The values are colour-table bytes widened to doubles, so
+     * they are always integral, but writing them as an int array would have
+     * put them under a type every reader written against vips ignores.
+     * Measured on vips 8.18.6 with a palette whose entry 0 is `(9, 8, 7)`:
+     * index 0 reports `9 8 7`, index 1 `255 0 0`, index 3 `0 0 255`, and
+     * index 200 reports `9 8 7` again, because an index the table cannot
+     * serve falls back to entry 0. Entry 0 is deliberately not black, so the
+     * out-of-range row is distinguishable from a lookup that gives up.
+     * Input: four background indices -> Output: the three doubles each.
+     */
+    #[test]
+    fn the_background_colour_comes_back_as_three_doubles() {
+        const PALETTE: [[u8; 3]; 4] = [[9, 8, 7], [255, 0, 0], [0, 255, 0], [0, 0, 255]];
+        for (index, expected) in [
+            (0u8, [9.0, 8.0, 7.0]),
+            (1, [255.0, 0.0, 0.0]),
+            (3, [0.0, 0.0, 255.0]),
+            (200, [9.0, 8.0, 7.0]),
+        ] {
+            let bytes = fixture(
+                (2, 1),
+                &PALETTE,
+                index,
+                None,
+                &[Frame::full(2, 1, vec![0, 1])],
+            );
+            let raster = decode_bytes(&bytes).expect("decodes");
+            assert_eq!(
+                raster.get_double_array("background"),
+                Some(&expected[..]),
+                "background index {index}"
+            );
+            // And it is a double array, not an int array wearing the name:
+            // a reader written against vips asks for the one vips wrote.
+            assert_eq!(
+                raster.get_int_array("background"),
+                None,
+                "background index {index} is not an int array"
+            );
+        }
+    }
+
+    /**
      * Tests that the global colour table comes back as `gif-palette`, packed
      * the way vips packs it. Works by decoding three fixtures whose tables
      * differ in size and contents and comparing the whole array.
