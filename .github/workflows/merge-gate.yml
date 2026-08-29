@@ -367,6 +367,11 @@ jobs:
       # `x86_64-unknown-linux-gnu` carries `sse2` but none of `sha`, `ssse3` or
       # `sse4.1`, which is what sha2's x86 path needs.
       #
+      # That paragraph is 0.3.1's and only 0.3.1's: in `cpufeatures` 0.3.0
+      # the detection macro is a bare `false`, so Miri never selects the NEON
+      # path, nothing reproduces, and a stale lock reads as though #707 is
+      # already fixed (#731).
+      #
       # That gives two different facts, not one. On the dev machine the NEON
       # backend is selected and the run reaches `vld1q_u32(&K32[0])`, a 16 byte
       # load through a `&u32` whose retag covers four, and aborts about 30

@@ -836,3 +836,94 @@ fn the_external_library_features_stay_opt_in() {
         );
     }
 }
+
+/// The exact `sha2` release the Miri backend pin is written against.
+///
+/// `--cfg sha2_backend="soft"` is set in the `Makefile`'s `miri` recipe and in
+/// the `miri` job of `.github/workflows/merge-gate.yml`, and it is there for
+/// one reason: sha2 0.11.0's aarch64 backends load sixteen bytes through four
+/// and eight bytes of provenance (`vld1q_u32(&K32[t])` in
+/// `sha256/aarch64_sha2.rs`, `vld1q_u64(&K64[t])` in `sha512/aarch64_sha3.rs`),
+/// which Stacked Borrows rejects, so an unpinned `make miri` aborts about
+/// thirty seconds in on any host whose baseline carries the `sha2` target
+/// feature (#707, #731).
+const SHA2_PINNED_VERSION: &str = "0.11.0";
+
+/// The series [`SHA2_PINNED_VERSION`] belongs to, as `(major, minor)`.
+///
+/// The graph also carries sha2 0.10.9 transitively, through `lopdf` and
+/// `lzma-rust2`, and the pin has nothing to do with that copy. This floor is
+/// what keeps a 0.10 patch release from firing the tripwire below.
+const SHA2_PINNED_SERIES: (u64, u64) = (0, 11);
+
+/// `(major, minor)` out of a `cargo tree` version string.
+///
+/// Pre-release and build suffixes split off along with the dots, so
+/// `0.12.0-rc.1` reads as `(0, 12)`. Anything that does not start with two
+/// numeric fields is a shape this file does not understand, and it panics
+/// rather than guessing: a version quietly read as `(0, 0)` would sit below
+/// [`SHA2_PINNED_SERIES`] and take the tripwire out of service without
+/// changing a single test result.
+fn major_minor(version: &str) -> (u64, u64) {
+    let mut fields = version.split(['.', '-', '+']).map(str::parse::<u64>);
+    match (fields.next(), fields.next()) {
+        (Some(Ok(major)), Some(Ok(minor))) => (major, minor),
+        _ => panic!(
+            "`{version}` does not start with two numeric fields, so this file cannot tell \
+             which release series it is in. `cargo tree`'s `{{p}}` format changed, or a \
+             version string arrived in a shape nobody here expected."
+        ),
+    }
+}
+
+/// The Miri backend pin has a cause upstream, and this is what goes off when
+/// that cause might be gone.
+///
+/// Nothing else in the tree notices a new `sha2` release. The pin sits in two
+/// invocations, `tests/miri_invocation_parity.rs` holds those two in step with
+/// each other, and between them they would keep the flag alive forever after
+/// the defect it works around was fixed. `Cargo.lock` is gitignored, so every
+/// CI run resolves fresh and sees a new release within a day of it landing,
+/// and that fresh resolve is the clock this test reads.
+///
+/// It lives in this file rather than next to the parity test because
+/// [`graphs`] is memoized here: all twenty-two `cargo tree` invocations have
+/// already run by the time this test asks anything, so the tripwire costs no
+/// new process.
+///
+/// Every cell has to *carry* the pinned version, which is a stronger claim
+/// than "no cell carries a newer one" and deliberately so. A no-offenders
+/// assertion is satisfied by an empty set, so it passes precisely when the
+/// resolve or the parse has stopped working; comparing against a one-element
+/// expectation cannot, because an empty set fails it the same way a newer
+/// version does. `tests/changelog_preamble.rs` has the same argument written
+/// out at length.
+#[test]
+#[cfg_attr(miri, ignore)] // spawns a process, which Miri supports on no target (#714)
+fn the_sha2_miri_backend_pin_has_not_outlived_its_cause() {
+    let expected: BTreeSet<&str> = [SHA2_PINNED_VERSION].into_iter().collect();
+    for (cell, graph) in cells() {
+        let found: BTreeSet<&str> = graph
+            .iter()
+            .filter_map(|(name, version)| {
+                (name == "sha2" && major_minor(version) >= SHA2_PINNED_SERIES)
+                    .then_some(version.as_str())
+            })
+            .collect();
+        assert_eq!(
+            found, expected,
+            "the sha2 0.11 series resolved to something other than {SHA2_PINNED_VERSION} \
+             for {}. That is the whole trigger for revisiting the Miri backend pin, \
+             `--cfg sha2_backend=\"soft\"` in the `Makefile` and in \
+             `.github/workflows/merge-gate.yml`: read the new release's changelog and find \
+             out whether the aarch64 provenance defect (#707) is fixed. #731 carries the \
+             drop procedure and the upstream report, and its first step is not a code \
+             change. On an aarch64 host with a fresh resolve, run `make miri` without the \
+             pin at {SHA2_PINNED_VERSION} and watch it abort, then again at the new \
+             version. Skip that and a green run proves nothing, because a graph resolving \
+             `cpufeatures` below 0.3.1 never selects the NEON path at all. If the release \
+             does not fix it, move `SHA2_PINNED_VERSION` here and say so on #731.",
+            cell.label
+        );
+    }
+}
