@@ -2407,6 +2407,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The Miri job runs a named slice of the `--lib` target instead of the whole
+  suite, and says so** (issue #675). It has never reported: three dispatched
+  runs were killed at the 90 minute ceiling and one went 4h13m. Removing
+  `-Zmiri-disable-isolation` and annotating every filesystem-touching test
+  moved that wall rather than removing it, and what was behind it is the clock.
+
+  Measured on wall time, ten cores, nightly-2026-08-20, isolation on:
+  `arithmetic::proptests::no_try_method_panics_on_a_float_raster` is 256
+  property cases at 10.2s each (33s, 53s and 94s at 2, 4 and 8 cases, linear),
+  so about 44 minutes for one test out of 1940. Skipping every property test
+  does not rescue it either, because `arithmetic::tests` spent 725s on 67 tests
+  and then over twenty minutes inside one more without finishing, and seventeen
+  of the sixty-two lib modules do not finish inside a 120 second bound. The
+  slice that replaces it is about ten minutes for 436 tests, with 116 ignored;
+  two runs on the same tree came out 584s and 635s.
+
+  A module is in if Miri can run it to completion inside 120 seconds, which is
+  mechanical rather than a judgement about which code deserves interpreting.
+  The workflow lists the modules it runs and the reason each excluded one is
+  excluded, and `tests/miri_invocation_parity.rs` now holds that prose against
+  the command in both directions and against the `Makefile` mirror.
+
+  **The job's own description of its coverage was wrong and is corrected.** It
+  claimed to check "a dozen image decoders"; the decoders' tests mostly open
+  fixture files, so they carry `#[cfg_attr(miri, ignore)]` and Miri skips them.
+  `exr` runs 1 test of 22, `nifti` 3 of 26, `encode_tiff` 6 of 31. What
+  survives is `webp` (32), `mat` (27), `radiance` (21), `analyze` (19) and
+  `avif` (9). A gate that describes a tree it does not check is worse than no
+  gate.
+
+  Three things Miri cannot do here, each measured rather than assumed: anything
+  that decodes a JPEG reaches `zune-jpeg`'s NEON IDCT and two intrinsics Miri
+  does not implement (aarch64 only, so the hosted x86_64 runner is probably
+  fine, and those modules stay out of both invocations so a local green and a
+  hosted green keep meaning the same thing); seven modules read the real clock,
+  which isolation refuses; and with `--features avif` the interpreter cannot get
+  past `rav1d`'s picture allocator, which gates its memory pool on
+  `ptr::fn_addr_eq`.
+
+  Worth knowing before anyone quotes a duration from this job: libtest's
+  `--report-time` under isolation reports Miri's virtual clock, not wall time.
+  The slice printed "finished in 1514.54s" for a run that took 584s and
+  "1502.30s" for one that took 635s.
+
 - **`histogram.rs` reads a bin index and a histogram's own count through two
   functions now, and only one of them folds at 65535** (issue #888). `read_flat`
   became `read_bin`, and `read_value` is the new one.
@@ -3275,6 +3319,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   consults. The copy is priced through `DecodeLimits` and is made only for a
   file the rule moves, which is no file `vips webpsave` writes.
 
+- **`decode_avif` no longer writes the payload through a read-only pointer**
+  (issue #912). `decode_av1` filled the buffer `dav1d_data_create` hands back,
+  which is the documented dav1d sequence and correct against dav1d's C. Against
+  `rav1d` it is not: `From<Rav1dData> for Dav1dData` builds that pointer out of
+  a shared reference, so the tag it carries permits reads and nothing else, and
+  Miri reports the copy as undefined behaviour under **both** aliasing models,
+  `attempting a write access ... only grants SharedReadOnly permission` under
+  Stacked Borrows and `write access ... is forbidden ... state Frozen` under
+  `-Zmiri-tree-borrows`. Two models rather than one is what separates a model
+  being conservative from a pointer genuinely not being writable.
+
+  It now lends dav1d a buffer this crate allocated, through `dav1d_data_wrap`
+  and a free callback. The payload is copied exactly once either way, so
+  nothing about decode cost or behaviour moves: the eighteen `avif::tests` pass
+  unchanged. The free callback releases the buffer through the pointer it was
+  allocated under rather than the one dav1d hands back, because
+  `dav1d_data_wrap` rebuilds that one through `slice::from_raw_parts` and it
+  arrives read-only too.
+
+  Reachable from any AVIF file that decodes, so from untrusted bytes.
+
+  Miri is the only thing that can see this, and the Miri job cannot run the
+  AVIF feature (issue #675 has the measurement), so
+  `the_av1_input_buffer_is_lent_to_dav1d_rather_than_taken_from_it` holds the
+  shape of the call sequence in an ordinary test run instead. It reads the
+  FFI region with the comments stripped, because the sentence explaining why
+  `dav1d_data_create` is not used names it.
 - **The one-level bound in `src/webp.rs`'s docs is the opaque bound, and
   says so now.** Issue #917 measured a second divergence in the same
   `image-webp` blend, on the `dst_factor_a` term, reaching 26 levels on
