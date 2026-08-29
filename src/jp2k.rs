@@ -178,6 +178,13 @@
 //!   are byte-identical to `vips jp2ksave`'s codestream and the other 30 are
 //!   the one-pixel-wide-tile rows, which this encoder and vips both refuse
 //!   with the same complaint about the resolution count. Issue #768.
+//! * **An alpha channel is labelled, on the two shapes vips labels one on.**
+//!   `jp2ksave` writes a `cdef` box for greyscale plus a band and for RGB plus
+//!   a band, and for nothing else. That is narrower than
+//!   `vips_image_hasalpha`, which is true for two bands under any tag and for
+//!   anything past four: measured over six band counts and six
+//!   interpretations, CMYK plus a band gets no box and neither does a
+//!   five-band image. Issue #935.
 //! * **Any band count the format carries.** The ceiling used to be four, and
 //!   the reason was `hayro-jpeg2000` refusing a component set it cannot map
 //!   onto greyscale, RGB, CMYK or one of those plus alpha. That turned out to
@@ -766,6 +773,11 @@ impl Raster {
     /// five suffixes it registers. Nothing attached to the raster is written:
     /// no ICC profile, no EXIF, no XMP, because `jp2ksave.c` has no code for
     /// any of them.
+    ///
+    /// The one thing the raster's [`crate::conversion::Interpretation`] does
+    /// reach is the `cdef` box, which says which channel is the alpha.
+    /// `jp2ksave` writes one for greyscale plus a band and for RGB plus a
+    /// band and for nothing else, and so does this.
     ///
     /// # Errors
     ///
@@ -2247,7 +2259,7 @@ fn encode(raster: &Raster, options: SaveOptions) -> Result<Vec<u8>, EncodeError>
         tile_height.get(),
     )?;
     if tiles == 1 {
-        return Ok(file);
+        return splice_channel_definition(file, raster.interpretation(), bands);
     }
 
     // More than one tile, so the container and the main header the first tile
@@ -2291,6 +2303,106 @@ fn encode(raster: &Raster, options: SaveOptions) -> Result<Vec<u8>, EncodeError>
         EncodeError::encode("jp2k: the tiled codestream is too long for a 32-bit box length")
     })?;
     out[own.jp2c_at..own.jp2c_at + 4].copy_from_slice(&jp2c_length.to_be_bytes());
+    // Last, because it moves `jp2c` along without changing its length: the box
+    // counts only itself.
+    splice_channel_definition(out, raster.interpretation(), bands)
+}
+
+/// The `cdef` box `jp2ksave` writes for this interpretation and band count, or
+/// `None` for the shapes it writes none for.
+///
+/// Measured over six band counts and six interpretations on
+/// `/opt/homebrew/bin/vips` 8.18.6, reading the `jp2h` children back out of
+/// each file. Exactly two of the 36 shapes get a box:
+///
+/// | bands | `b-w` / `grey16` | `srgb` / `rgb16` | `cmyk` | `multiband` |
+/// |---|---|---|---|---|
+/// | 1 | none | none | none | none |
+/// | 2 | **`(0,0,1) (1,1,0)`** | none | none | none |
+/// | 3 | none | none | none | none |
+/// | 4 | none | **`(0,0,1) (1,0,2) (2,0,3) (3,1,0)`** | none | none |
+/// | 5 | none | none | none | none |
+/// | 6 | none | none | none | none |
+///
+/// So it is **not** `vips_image_hasalpha`, which is true for two bands
+/// whatever the interpretation and for anything past four. It is greyscale
+/// plus one and RGB plus one and nothing else: CMYK plus one gets no box, and
+/// neither does a five- or six-band image under any tag.
+///
+/// Keyed on the interpretation rather than on the band count, which is the
+/// same question [`encoder_colour_space`] asks and for the same reason: a
+/// four-band CMYK raster and a four-band RGBA one are the same
+/// [`PixelFormat`] and want different answers. Keying it on the enumerated
+/// colour space instead would get the multiband column wrong, because this
+/// module writes greyscale for a two-band raster where vips writes
+/// unspecified, so a `Multi8(2)` would pick up an alpha channel it never
+/// claimed to have.
+///
+/// The entries are `Cn`, `Typ`, `Asoc` (I.5.3.6): each colour channel is
+/// `Typ = 0` with a one-based association, and the alpha channel is
+/// `Typ = 1, Asoc = 0`, which associates it with the whole image.
+#[cfg(feature = "jp2k")]
+fn channel_definition(interpretation: Interpretation, bands: usize) -> Option<Vec<u8>> {
+    let colours = match interpretation {
+        Interpretation::Bw | Interpretation::Grey16 => 1usize,
+        Interpretation::Srgb | Interpretation::Rgb16 => 3,
+        _ => return None,
+    };
+    if bands != colours + 1 {
+        return None;
+    }
+    let count = u16::try_from(bands).ok()?;
+    let mut payload = count.to_be_bytes().to_vec();
+    for channel in 0..count {
+        let (kind, association) = if usize::from(channel) < colours {
+            (0u16, channel + 1)
+        } else {
+            (1, 0)
+        };
+        payload.extend_from_slice(&channel.to_be_bytes());
+        payload.extend_from_slice(&kind.to_be_bytes());
+        payload.extend_from_slice(&association.to_be_bytes());
+    }
+    Some(jp2_box(b"cdef", &payload))
+}
+
+/// Add the `cdef` box to a JP2 this module just wrote, if this shape gets one.
+///
+/// It goes last inside `jp2h`, which is after `colr`, because that is where
+/// `jp2ksave` puts it. Everything below `jp2h` moves along by the box's
+/// length and nothing needs rewriting for it: `jp2c`'s own `LBox` counts only
+/// itself, and no offset inside the codestream is a file offset.
+#[cfg(feature = "jp2k")]
+fn splice_channel_definition(
+    file: Vec<u8>,
+    interpretation: Interpretation,
+    bands: usize,
+) -> Result<Vec<u8>, EncodeError> {
+    let Some(cdef) = channel_definition(interpretation, bands) else {
+        return Ok(file);
+    };
+    let boxes = walk_boxes(&file, 0, file.len()).map_err(|e| {
+        EncodeError::encode(format!(
+            "jp2k: the container this module wrote does not parse: {e}"
+        ))
+    })?;
+    let header = boxes
+        .iter()
+        .find(|b| &b.kind == b"jp2h")
+        .ok_or_else(|| EncodeError::encode("jp2k: the container has no jp2h box"))?;
+    if header.start - header.at != 8 {
+        return Err(EncodeError::encode(
+            "jp2k: the jp2h box this module wrote does not carry a plain length",
+        ));
+    }
+    let grown = u32::try_from(header.end - header.at + cdef.len())
+        .map_err(|_| EncodeError::encode("jp2k: the jp2h box does not fit a 32-bit length"))?;
+    let mut out = Vec::with_capacity(file.len() + cdef.len());
+    out.extend_from_slice(&file[..header.at]);
+    out.extend_from_slice(&grown.to_be_bytes());
+    out.extend_from_slice(&file[header.at + 4..header.end]);
+    out.extend_from_slice(&cdef);
+    out.extend_from_slice(&file[header.end..]);
     Ok(out)
 }
 
@@ -5692,11 +5804,22 @@ mod tests {
     #[test]
     #[cfg(feature = "jp2k")]
     fn the_files_this_encoder_writes_are_the_files_vips_writes() {
-        let cases: [(u32, u32, PixelFormat, u32, u32, &str, &str); 5] = [
+        type Case = (
+            u32,
+            u32,
+            PixelFormat,
+            Option<Interpretation>,
+            u32,
+            u32,
+            &'static str,
+            &'static str,
+        );
+        let cases: [Case; 9] = [
             (
                 37,
                 21,
                 PixelFormat::Rgb8,
+                None,
                 16,
                 16,
                 "7bf37b54668d747667f0ca67412f795f153c5b6d9523469a23fc0d04095cac1e",
@@ -5706,6 +5829,7 @@ mod tests {
                 37,
                 21,
                 PixelFormat::Rgb8,
+                None,
                 512,
                 512,
                 "7bf37b54668d747667f0ca67412f795f153c5b6d9523469a23fc0d04095cac1e",
@@ -5715,6 +5839,7 @@ mod tests {
                 70,
                 50,
                 PixelFormat::Gray16,
+                None,
                 32,
                 32,
                 "fe7a6b815be477ac34a943efcceacaa78650690be2815c46e600e2251f6e7add",
@@ -5730,6 +5855,7 @@ mod tests {
                 200,
                 150,
                 PixelFormat::Rgb8,
+                None,
                 64,
                 64,
                 "4ed24ad8b60b2a0119c3fc5b5bfc1b8c716ca92cd92044549a7ab9ba8d7a5b07",
@@ -5748,14 +5874,69 @@ mod tests {
                 200,
                 150,
                 PixelFormat::Rgb8,
+                None,
                 37,
                 27,
                 "4ed24ad8b60b2a0119c3fc5b5bfc1b8c716ca92cd92044549a7ab9ba8d7a5b07",
                 "ea70e0999c28dc436d00fcb19b859a3fb35207cec738d8277f1227f07d978aaf",
             ),
+            // The four rows that carry a `cdef` box, which is the whole of
+            // issue #935: RGB plus alpha and greyscale plus alpha, at
+            // both element widths, tiled and not.
+            (
+                24,
+                18,
+                PixelFormat::Rgba8,
+                None,
+                8,
+                8,
+                "a31a0a167e6a59c89e45dd81711e701b4c1bc95fe950fda92e1f3b87f4756eab",
+                "fb20de0109771406dd8c73a51bf38bd18a3b053b7c5815e7ee5c36a5979cde3c",
+            ),
+            (
+                20,
+                14,
+                PixelFormat::Rgba16,
+                None,
+                512,
+                512,
+                "1c8be83b916938b338b04a95b4e941f315886af2082461222110572ec4c84a0a",
+                "a02e3d5b4226f95177f29e583ae7c2e07255bb58c839e860b75366be70e9abdc",
+            ),
+            (
+                30,
+                20,
+                PixelFormat::Multi8(std::num::NonZeroU16::new(2).expect("2 is non-zero")),
+                Some(Interpretation::Bw),
+                16,
+                16,
+                "fe6c69f1360e8c8725a77e70f02ef08bfe95e98061bfc70d90eea0bd3d141a9b",
+                "1ad7945dd499ebba063510f11b4c87a9d0b79df309c172bf57b9cc3ebcecf2fb",
+            ),
+            (
+                30,
+                20,
+                PixelFormat::Multi16(std::num::NonZeroU16::new(2).expect("2 is non-zero")),
+                Some(Interpretation::Grey16),
+                512,
+                512,
+                "b7ec85a75c62603248a9a1d9cbab3dfd61237b620e5efc6772fb7541ec437a20",
+                "2869b5d496697f95fdf807790104c55542cea5c593015ac7e50582ed27b49f1a",
+            ),
         ];
-        for (width, height, format, tile_w, tile_h, fixture, expected) in cases {
-            let source = ramp(width, height, format);
+        for (width, height, format, interpretation, tile_w, tile_h, fixture, expected) in cases {
+            let source = match interpretation {
+                // vips writes the `cdef` box off the interpretation and not off
+                // the band count, so a two-band raster has to be tagged for it
+                // to be greyscale plus alpha rather than a compute
+                // intermediate. `Rgba8` and `Rgba16` need no tag: they are
+                // `srgb` and `rgb16` already.
+                Some(tag) => ramp(width, height, format)
+                    .copy()
+                    .interpretation(tag)
+                    .build(),
+                None => ramp(width, height, format),
+            };
             assert_eq!(
                 payload_digest(&source),
                 fixture,
@@ -5777,6 +5958,109 @@ mod tests {
                 bytes.len()
             );
         }
+    }
+
+    /**
+     * Pins the `cdef` box against the whole of vips's rule rather than
+     * against the two shapes that get one, because a rule this narrow is easy
+     * to write too widely (issue #935).
+     * `jp2ksave` writes a channel definition box for greyscale plus one band
+     * and for RGB plus one band and for nothing else. Measured over six band
+     * counts and six interpretations, 36 files: two carry a box. It is **not**
+     * `vips_image_hasalpha`, which is true for two bands under any tag and for
+     * anything past four, so CMYK plus one and a five-band image are the rows
+     * that separate the real rule from the obvious one, and both are here.
+     * The untagged two-band raster is the third: this module writes it a
+     * greyscale `colr` box, so a rule keyed on that box rather than on the
+     * interpretation would give a compute intermediate an alpha channel.
+     * The positive control is the last row, which must carry the box with the
+     * exact entries, or the whole sweep passes by writing none anywhere.
+     * Input: six shapes -> Output: a box on one of them and its four entries.
+     */
+    #[test]
+    #[cfg(feature = "jp2k")]
+    fn the_channel_definition_box_goes_on_the_two_shapes_vips_puts_it_on() {
+        /// The `cdef` box's entries, or `None` when the file carries no such
+        /// box.
+        fn entries(bytes: &[u8]) -> Option<Vec<(u16, u16, u16)>> {
+            let top = walk_boxes(bytes, 0, bytes.len()).expect("the encoder's container");
+            let header = top.iter().find(|b| &b.kind == b"jp2h")?;
+            let children = walk_boxes(bytes, header.start, header.end).expect("jp2h children");
+            let cdef = children.iter().find(|b| &b.kind == b"cdef")?;
+            let payload = &bytes[cdef.start..cdef.end];
+            let count = usize::from(u16::from_be_bytes([payload[0], payload[1]]));
+            assert_eq!(
+                payload.len(),
+                2 + count * 6,
+                "a cdef box is N then N triples, so a length that does not fit means the \
+                 splice wrote a box nobody can read"
+            );
+            Some(
+                (0..count)
+                    .map(|i| {
+                        let at = 2 + i * 6;
+                        let field =
+                            |o: usize| u16::from_be_bytes([payload[at + o], payload[at + o + 1]]);
+                        (field(0), field(2), field(4))
+                    })
+                    .collect(),
+            )
+        }
+
+        let two = std::num::NonZeroU16::new(2).expect("2 is non-zero");
+        let five = std::num::NonZeroU16::new(5).expect("5 is non-zero");
+        let none: [(PixelFormat, Option<Interpretation>, &str); 5] = [
+            (
+                PixelFormat::Gray8,
+                None,
+                "one band is a colour channel and no more",
+            ),
+            (PixelFormat::Rgb8, None, "three bands fill sRGB exactly"),
+            (
+                PixelFormat::Rgba8,
+                Some(Interpretation::Cmyk),
+                "CMYK plus one gets no box, which is where hasalpha and vips disagree",
+            ),
+            (
+                PixelFormat::Multi8(five),
+                None,
+                "five bands get no box either, the second place hasalpha would",
+            ),
+            (
+                PixelFormat::Multi8(two),
+                None,
+                "an untagged two-band raster is a compute intermediate, not grey plus alpha",
+            ),
+        ];
+        for (format, tag, why) in none {
+            let source = match tag {
+                Some(tag) => ramp(9, 7, format).copy().interpretation(tag).build(),
+                None => ramp(9, 7, format),
+            };
+            let bytes = source
+                .encode_jp2k(SaveOptions::default())
+                .unwrap_or_else(|e| panic!("{format:?}: {e}"));
+            assert_eq!(entries(&bytes), None, "{format:?}: {why}");
+        }
+
+        // The positive control, without which every row above passes against
+        // an encoder that writes no box at all.
+        let rgba = ramp(9, 7, PixelFormat::Rgba8)
+            .encode_jp2k(SaveOptions::default())
+            .expect("RGBA encodes");
+        assert_eq!(
+            entries(&rgba),
+            Some(vec![(0, 0, 1), (1, 0, 2), (2, 0, 3), (3, 1, 0)]),
+            "the entries vips writes: each colour channel typed 0 with a one-based \
+             association, and the alpha typed 1 against the whole image"
+        );
+        let grey = ramp(9, 7, PixelFormat::Multi8(two))
+            .copy()
+            .interpretation(Interpretation::Bw)
+            .build()
+            .encode_jp2k(SaveOptions::default())
+            .expect("grey plus alpha encodes");
+        assert_eq!(entries(&grey), Some(vec![(0, 0, 1), (1, 1, 0)]));
     }
 
     /**
