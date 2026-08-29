@@ -287,6 +287,9 @@ mod pixel_format_serde {
             PixelFormat::Multi16(n) => format!("multi16:{n}"),
             PixelFormat::FloatF32(n) => format!("floatf32:{n}"),
             PixelFormat::Uint32(n) => format!("uint32:{n}"),
+            PixelFormat::Int8(n) => format!("int8:{n}"),
+            PixelFormat::Int16(n) => format!("int16:{n}"),
+            PixelFormat::Int32(n) => format!("int32:{n}"),
         };
         s.serialize_str(&name)
     }
@@ -307,13 +310,34 @@ mod pixel_format_serde {
             // so this tag has to build the format through the kind (issues
             // #517, #607). Read before the width-keyed tail below so a
             // "uint32:N" tag can never fall into the four-byte float arm.
-            other if other.starts_with("uint32:") => {
-                let n: usize = other
-                    .strip_prefix("uint32:")
-                    .expect("the guard above matched this prefix")
-                    .parse()
-                    .map_err(|_| unknown())?;
-                PixelFormat::with_kind(n, crate::pixel::SampleKind::U32).ok_or_else(unknown)
+            // The four kind-tagged carriers, read before the width-keyed
+            // tail below so none of them can fall into an arm keyed on a
+            // byte depth: `int8:N` and `multi8:N` share a width, as do
+            // `int16:N` / `multi16:N` and `uint32:N` / `int32:N` /
+            // `floatf32:N` (issues #516, #517, #607).
+            other
+                if other.starts_with("uint32:")
+                    || other.starts_with("int8:")
+                    || other.starts_with("int16:")
+                    || other.starts_with("int32:") =>
+            {
+                use crate::pixel::SampleKind;
+                let (prefix, kind) = if let Some(r) = other.strip_prefix("uint32:") {
+                    (r, SampleKind::U32)
+                } else if let Some(r) = other.strip_prefix("int8:") {
+                    (r, SampleKind::I8)
+                } else if let Some(r) = other.strip_prefix("int16:") {
+                    (r, SampleKind::I16)
+                } else {
+                    (
+                        other
+                            .strip_prefix("int32:")
+                            .expect("the guard above matched one of the four prefixes"),
+                        SampleKind::I32,
+                    )
+                };
+                let n: usize = prefix.parse().map_err(|_| unknown())?;
+                PixelFormat::with_kind(n, kind).ok_or_else(unknown)
             }
             other => {
                 let (depth, bands) = other

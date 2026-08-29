@@ -1456,24 +1456,22 @@ impl Raster {
     /// `x` (the image height when the column is all zero); `rows` is a
     /// `1 x height` image whose value at `y` is the column index of the
     /// first non-zero sample in row `y` (the image width when all zero).
-    /// Both outputs are 16-bit with the input band count, positions
-    /// saturating at `65535`.
+    /// Both outputs are [`PixelFormat::Int32`] with the input band count,
+    /// which is `VIPS_FORMAT_INT` and is what libvips emits here for every
+    /// one of the eight input formats, measured on 8.18.6.
     ///
-    /// **That ceiling is a deviation, and the saturation is visible on any
-    /// image longer than 65535 along the axis being profiled.** libvips
-    /// emits `VIPS_FORMAT_INT` here, measured on 8.18.6 for every one of
-    /// the eight input formats, so its positions are exact up to
-    /// `i32::MAX`: on a 1x65537 all-zero image `vips profile` reports
-    /// `65537` where this reports `65535`. Note the signedness. `INT` is
-    /// the *signed* 32-bit carrier, so closing this gap is a payoff of the
-    /// signed carriers (issue #516) and not of the uint one (issue #517),
-    /// which is the opposite of what issue #532 assumes about the counter
-    /// family. Values are unaffected below the ceiling.
+    /// Note the **signedness**: `INT` is the signed 32-bit carrier, so
+    /// closing this needed the signed carriers of issue #516 and not the
+    /// uint one of issue #517, which is the opposite of what issue #532
+    /// assumes about the counter family. Until then these were 16-bit and
+    /// saturated at `65535`, which was visible on any image longer than
+    /// 65535 along the axis being profiled: on a 1x65537 all-zero image
+    /// `vips profile` reports `65537` and this reported `65535`.
     pub fn profile(&self) -> (Raster, Raster) {
         let fmt = self.format();
         let (bands, kind) = (fmt.channels(), fmt.kind());
         let (w, h) = (self.width() as usize, self.height() as usize);
-        let out_fmt = PixelFormat::with_kind(bands, SampleKind::U16)
+        let out_fmt = PixelFormat::with_kind(bands, SampleKind::I32)
             .expect("band count unchanged, so the output format exists");
         let data = self.data();
 
@@ -1483,12 +1481,7 @@ impl Raster {
                 let first = (0..h)
                     .find(|&y| read_u32(data, kind, (y * w + x) * bands + c) != 0)
                     .unwrap_or(h);
-                write_u32(
-                    &mut cols,
-                    SampleKind::U16,
-                    x * bands + c,
-                    first.min(0xFFFF) as u32,
-                );
+                write_u32(&mut cols, SampleKind::I32, x * bands + c, first as u32);
             }
         }
         let mut rows = op_output_or_panic(1, self.height(), out_fmt);
@@ -1497,12 +1490,7 @@ impl Raster {
                 let first = (0..w)
                     .find(|&x| read_u32(data, kind, (y * w + x) * bands + c) != 0)
                     .unwrap_or(w);
-                write_u32(
-                    &mut rows,
-                    SampleKind::U16,
-                    y * bands + c,
-                    first.min(0xFFFF) as u32,
-                );
+                write_u32(&mut rows, SampleKind::I32, y * bands + c, first as u32);
             }
         }
         (
@@ -1526,11 +1514,11 @@ impl Raster {
     /// an unsigned input now sums into `Uint32` and a 300x300 image
     /// reports 60000 rather than saturating at 65535 (issue #532).
     ///
-    /// Two rows are still deviations, and both are carrier gaps rather
-    /// than arithmetic ones. A signed input wants `INT`, which needs issue
-    /// #516. A float input wants `DOUBLE`, which this crate has no carrier
-    /// for at all, so it sums into `FloatF32`: exact to 2^24 rather than
-    /// to 2^53.
+    /// Issue #516's carriers cover the second row, so a signed input sums
+    /// into `Int32`. One row is still a deviation, and it is a carrier gap
+    /// rather than an arithmetic one: a float input wants `DOUBLE`, which
+    /// this crate has no carrier for at all, so it sums into `FloatF32`,
+    /// exact to 2^24 rather than to 2^53.
     pub fn project(&self) -> (Raster, Raster) {
         let fmt = self.format();
         let (bands, kind) = (fmt.channels(), fmt.kind());
@@ -1539,10 +1527,14 @@ impl Raster {
         // carrier, because it is not one carrier: see the doc above.
         let out_kind = match kind {
             SampleKind::U8 | SampleKind::U16 | SampleKind::U32 => SampleKind::U32,
-            SampleKind::I8 | SampleKind::I16 | SampleKind::I32 | SampleKind::F32 => SampleKind::F32,
+            SampleKind::I8 | SampleKind::I16 | SampleKind::I32 => SampleKind::I32,
+            SampleKind::F32 => SampleKind::F32,
         };
         let out_fmt = PixelFormat::with_kind(bands, out_kind)
             .expect("band count unchanged, so the output format exists");
+        // The ceiling `write_f64` clips at. A float carrier has none, and
+        // the floor comes from the kind's own range inside `write_f64`, so
+        // a signed sum is not clamped at zero (issue #516).
         let out_max = match out_kind.max_value() {
             Some(m) => f64::from(m),
             None => f64::MAX,
@@ -4709,8 +4701,9 @@ mod tests {
      * Input: Gray8 and Rgb8 -> Output: Gray16 / Rgb16 from both ops.
      */
     #[test]
-    fn project_carries_32_bit_samples_and_profile_still_does_not() {
+    fn project_and_profile_each_carry_the_kind_vips_emits() {
         let uint = |bands: u16| PixelFormat::Uint32(core::num::NonZeroU16::new(bands).unwrap());
+        let int = |bands: u16| PixelFormat::Int32(core::num::NonZeroU16::new(bands).unwrap());
         let one = gray(4, 3, vec![0, 0, 5, 0, 0, 7, 0, 0, 0, 0, 0, 0]);
         let (jc, jr) = one.project();
         assert_eq!(jc.format(), uint(1));
@@ -4738,36 +4731,57 @@ mod tests {
             "a float input must not be summed into an integer carrier"
         );
 
-        // `profile` deliberately stays 16-bit, and it is not an oversight.
-        // `vips profile` emits **INT**, not UINT, for `uchar`, `ushort`,
-        // `uint` and `float` inputs alike, measured on 8.18.6, so it needs
-        // the signed carrier of issue #516 rather than the unsigned one of
-        // #517. Widening it to `Uint32` here would be the wrong carrier for
-        // a reason no value assertion would catch, since its values are
-        // coordinates bounded by the image dimension rather than counts.
+        // `profile` is `Int32` and not `Uint32`, and asserting it beside
+        // `project` is the point: two ops in the same family emit different
+        // carrier *families*. `vips profile` emits **INT** for `uchar`,
+        // `ushort`, `uint`, `char`, `short`, `int` and `float` alike,
+        // measured on 8.18.6, so it is a payoff of issue #516 rather than
+        // of #517. Widening it to `Uint32` would have been the wrong
+        // carrier for a reason no value assertion could catch, since its
+        // values are coordinates and never negative.
         let (pc, pr) = one.profile();
-        assert_eq!(pc.format(), PixelFormat::Gray16);
-        assert_eq!(pr.format(), PixelFormat::Gray16);
+        assert_eq!(pc.format(), int(1));
+        assert_eq!(pr.format(), int(1));
         let (pc3, _) = three.profile();
-        assert_eq!(pc3.format(), PixelFormat::Rgb16);
+        assert_eq!(pc3.format(), int(3));
+
+        // And a signed input sums into `Int32` rather than the float
+        // carrier, which is `project`'s own second row of the same table.
+        let signed = Raster::new(
+            2,
+            1,
+            PixelFormat::Int8(core::num::NonZeroU16::new(1).unwrap()),
+            vec![(-5i8) as u8, 100],
+        )
+        .unwrap();
+        let (sc, _) = signed.project();
+        assert_eq!(sc.format(), int(1));
+        assert_eq!(sc.getpoint(0, 0), vec![-5.0], "a negative sum must survive");
     }
 
     /**
-     * Tests that `profile` saturates a position past 65535 rather than
-     * wrapping, the deviation the 16-bit carrier forces.
+     * Tests that `profile` carries a position past 65535 instead of
+     * saturating there, which is the live defect issue #516's signed
+     * carrier closes and the one #532 could not, because vips emits INT
+     * here rather than UINT.
      * Works by profiling a 1x65537 all-zero image, whose columns entry is
      * the height because the column never goes non-zero. The image is 64
-     * KiB, so reaching the ceiling costs nothing.
-     * Measured on vips 8.18.6, whose `INT` output holds the true value:
-     * `vips profile` on this image reports `65537`. libviprs reports the
-     * `65535` asserted here (issue #759).
-     * Input: 1x65537 of zeros -> Output: columns(0,0) == 65535, not 65537.
+     * KiB, so reaching the old ceiling costs nothing. Measured on
+     * `/opt/homebrew/bin/vips` 8.18.6: `vips profile` reports **65537**,
+     * and this test used to assert 65535 and name the shortfall as a
+     * deviation (issue #759).
+     * Input: 1x65537 of zeros -> Output: columns(0,0) == 65537.
      */
     #[test]
-    fn profile_saturates_a_position_past_the_16_bit_ceiling() {
+    fn profile_carries_a_position_past_the_16_bit_ceiling() {
         let tall = gray(1, 65_537, vec![0u8; 65_537]);
         let (columns, _) = tall.profile();
-        assert_eq!(columns.getpoint(0, 0), vec![65535.0]);
+        assert_eq!(
+            columns.format(),
+            PixelFormat::Int32(core::num::NonZeroU16::new(1).unwrap()),
+            "vips emits INT here, the signed carrier, not the unsigned one"
+        );
+        assert_eq!(columns.getpoint(0, 0), vec![65537.0]);
     }
 
     /// project saturates sums past 65535 rather than wrapping.
