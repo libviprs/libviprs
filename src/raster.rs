@@ -2483,6 +2483,80 @@ mod tests {
         }
     }
 
+    /// Every leaf site label declared in a module's `mod plane` block.
+    ///
+    /// Reads the block out of the module's own source rather than importing
+    /// the constants, which are `pub(super)` and deliberately not visible from
+    /// here. The counting prefixes the checks use (`"colour."`,
+    /// `"convolution."`, `"colour.export.fallback"`) are not in these blocks
+    /// and are not leaves, so they are correctly left out.
+    fn plane_labels(src: &str) -> Vec<&str> {
+        let start = match src.find("\nmod plane {\n") {
+            Some(i) => i,
+            None => return Vec::new(),
+        };
+        let body = &src[start..];
+        let end = body
+            .find("\n}\n")
+            .expect("`mod plane` closes at column zero");
+        body[..end]
+            .lines()
+            .filter_map(|line| line.split_once("&str = \""))
+            .filter_map(|(_, rest)| rest.split_once('"'))
+            .map(|(label, _)| label)
+            .collect()
+    }
+
+    /**
+     * Tests that no plane site label is a proper prefix of another (issue
+     * #696).
+     *
+     * The probe matches a cap site with `starts_with`, on purpose, so that
+     * `counting_planes("convolution.", ..)` can count a whole module and
+     * `counting_planes("colour.export.fallback", ..)` a whole family. The cost
+     * is that two *leaf* labels standing in a prefix relation are
+     * indistinguishable to a ceiling: capping the shorter one also refuses the
+     * longer, so a check that reads as naming one buffer starves two.
+     *
+     * That is the ordinal problem the labels exist to remove, arriving through
+     * a different door, and it is not hypothetical. `arithmetic.stdif.integral`
+     * and `arithmetic.stdif.integral_squares` were written as the first pair
+     * of them, and the mutation that routed the first integral image around
+     * the funnel entirely left the check naming it **green**, because the
+     * ceiling still landed on the second. Only the counting row caught it.
+     *
+     * The length assertion is the positive control: an empty scan would pass
+     * the comparison below for the wrong reason, and a scan that stopped
+     * finding the blocks is exactly how this check would rot.
+     */
+    #[test]
+    fn no_plane_site_label_is_a_prefix_of_another() {
+        let mut labels = vec![PLANE_OP_OUTPUT, PLANE_F32_SAMPLES];
+        for src in [
+            include_str!("arithmetic.rs"),
+            include_str!("colour.rs"),
+            include_str!("convolution.rs"),
+        ] {
+            labels.extend(plane_labels(src));
+        }
+        assert!(
+            labels.len() >= 20,
+            "the scan found only {} labels, so it has stopped reading the `mod plane` blocks \
+             rather than found them all agreeable: {labels:?}",
+            labels.len()
+        );
+
+        for a in &labels {
+            for b in &labels {
+                assert!(
+                    a == b || !b.starts_with(a),
+                    "site label {a:?} is a prefix of {b:?}, so a ceiling naming {a:?} also \
+                     refuses {b:?} and cannot tell the two buffers apart (issue #696)"
+                );
+            }
+        }
+    }
+
     /**
      * The positive control for the row above. Every one of those numbers is an
      * equality on a counter, and a counter that has stopped counting reads
