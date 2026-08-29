@@ -22,6 +22,7 @@
 //! | `.webp` | [`Raster::encode_webp`], lossless | `icc-profile-data` (`ICCP`), `exif-data` (`EXIF`), `xmp-data` (`XMP `) |
 //! | `.jxl` (needs the `jxl` feature) | [`Raster::encode_jxl`], lossless | none: the encoder writes a bare codestream with no box container |
 //! | `.jp2` / `.j2k` / `.jpt` / `.j2c` / `.jpc` (needs the `jp2k` feature) | [`Raster::encode_jp2k`] at the `jp2ksave` defaults | none: `jp2ksave.c` has no code for ICC, EXIF or XMP |
+//! | `.hdr` | [`Raster::encode_radiance`] at the `radsave` defaults, on a 3-band `f32` raster only | none EXIF-class: the `rad-` header records are format records and `SaveOptions::default` already takes them off the raster |
 //! | `.fits` / `.fit` / `.fts` | [`Raster::encode_fits`] | the `fits-` header records, minus the cards cfitsio regenerates |
 //! | `.v` / `.vips` | [`Raster::encode_vips`] | header geometry plus every attached field |
 //!
@@ -1318,11 +1319,13 @@ pub enum SaveError {
 fn saveable_extensions() -> &'static str {
     match (cfg!(feature = "jxl"), cfg!(feature = "jp2k")) {
         (true, true) => {
-            "png, jpg/jpeg, gif, webp, jxl, jp2/j2k/jpt/j2c/jpc, fits/fit/fts, and v/vips"
+            "png, jpg/jpeg, gif, webp, jxl, jp2/j2k/jpt/j2c/jpc, hdr, fits/fit/fts, and v/vips"
         }
-        (true, false) => "png, jpg/jpeg, gif, webp, jxl, fits/fit/fts, and v/vips",
-        (false, true) => "png, jpg/jpeg, gif, webp, jp2/j2k/jpt/j2c/jpc, fits/fit/fts, and v/vips",
-        (false, false) => "png, jpg/jpeg, gif, webp, fits/fit/fts, and v/vips",
+        (true, false) => "png, jpg/jpeg, gif, webp, jxl, hdr, fits/fit/fts, and v/vips",
+        (false, true) => {
+            "png, jpg/jpeg, gif, webp, jp2/j2k/jpt/j2c/jpc, hdr, fits/fit/fts, and v/vips"
+        }
+        (false, false) => "png, jpg/jpeg, gif, webp, hdr, fits/fit/fts, and v/vips",
     }
 }
 
@@ -1442,6 +1445,27 @@ impl Raster {
             // no encoder, and `saveable_extensions()` stops naming them.
             #[cfg(feature = "jp2k")]
             "jp2" | "j2k" | "jpt" | "j2c" | "jpc" => crate::jp2k::encode_jp2k_for_save(self)?,
+            // The one suffix `radsave` registers, measured on 8.18.6: its
+            // entry in `vips -l` reads `nocache (.hdr)`, and `.rad`, `.rgbe`
+            // and `.pic` are each refused with "is not a known file format".
+            // `.pic` is worth naming because #506's own title says
+            // `.hdr/.pic`; that is a load spelling elsewhere and not a suffix
+            // vips saves under.
+            //
+            // Ungated, because Radiance costs no feature: #589 wrote the
+            // matched `float2rad` encode in this crate.
+            //
+            // `keep_metadata` has nothing to act on, like GIF, FITS and JPEG
+            // 2000 above: a Radiance header carries `EXPOSURE`, `COLORCORR`,
+            // `PIXASPECT` and the primaries, which are format records rather
+            // than an ICC profile or an EXIF block. Asserted, not assumed.
+            //
+            // Unlike every other row here it has an input contract, 3-band
+            // `f32`, and it propagates the refusal rather than casting.
+            // `radsave` declares `mono rgb` and vips casts whatever it is
+            // handed; no row in this table converts, and this one is not going
+            // to be the first.
+            "hdr" => crate::radiance::encode_radiance_for_save(self)?,
             // All three suffixes vips registers (`vips__fits_suffs`,
             // `fits.c:125`). `keep_metadata` has nothing to act on: the
             // records a FITS header carries are the geometry cfitsio
@@ -3600,7 +3624,18 @@ mod tests {
 
         for extension in &extensions {
             let path = dir.path().join(format!("listed.{extension}"));
-            im.save(&path)
+            // `.hdr` is the one row with an input contract: `encode_radiance`
+            // takes 3-band `f32` and refuses anything else rather than casting
+            // the way `radsave` does. So the sweep hands each row a raster it
+            // can write, or it would be asserting the contract and not the
+            // list (issue #880).
+            let subject = if *extension == "hdr" {
+                float_rgb_2x2()
+            } else {
+                im.clone()
+            };
+            subject
+                .save(&path)
                 .unwrap_or_else(|e| panic!("save(.{extension}) is a live arm, got {e}"));
             assert!(path.exists(), ".{extension} wrote a file");
         }
