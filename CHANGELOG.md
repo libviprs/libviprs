@@ -9,6 +9,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking
 
+- **The counting ops emit `Uint32` instead of a 16-bit format, and stop
+  saturating at 65535** (issue #532). `hist_find`, `hist_find_band`,
+  `hist_find_ndim`, `hist_cum`, `project`, `hough_line` and `hough_circle` all
+  count pixels, and a 16-bit counter is exhausted by any image over 256x256,
+  which is to say every real image. A 300x300 raster is 90000 pixels and the
+  count was 65535.
+
+  Breaking because the output **format** of seven ops changes, so anything
+  asserting on `.format()` moves. Sample *values* only change where they were
+  previously wrong, and every new number is the one vips gives, measured on
+  `/opt/homebrew/bin/vips` 8.18.6:
+
+  | call | before | after and vips |
+  |---|---|---|
+  | `hist_find` on 300x300 | 65535 | **90000** |
+  | `hist_find` on 256x256 of one value | 65535 | **65536** |
+  | `hist_cum` of `[60000, 60000, 60000]` | 60000, 65535, 65535 | **60000, 120000, 180000** |
+  | `project` down a 1x300 column of 255 | 65535 | **76500** |
+  | `hough_line` on a 70000-wide lit line | 65535 | **70000** |
+
+  That last row closes the accumulator deviation issue #495 recorded, which
+  existed only because there was no unsigned 32-bit carrier to hold the count.
+
+  **The issue's stated cause is partly wrong and the fix does not follow it.**
+  It says all five ops emit `VIPS_FORMAT_UINT`. Only `hist_find`,
+  `hist_find_ndim` and `hough_line` do that unconditionally; `hist_cum` and
+  `project` run a format table keyed on the input carrier, measured:
+
+  | op | uchar / ushort / uint | char / short / int | float | double |
+  |---|---|---|---|---|
+  | `hist_find`, `hist_find_ndim`, `hough_*` | UINT | UINT | UINT | - |
+  | `hist_cum` | UINT | INT | FLOAT | - |
+  | `project` | UINT | INT | DOUBLE | DOUBLE |
+
+  So `project` takes its output carrier from its input rather than writing one
+  constant, and `hist_cum` on a signed input is still a deviation until issue
+  #516 lands the signed carriers.
+
+  Two ops in the same family are deliberately **not** in this change:
+
+  - `hist_find_indexed` stays 16-bit. vips emits **DOUBLE** there whatever the
+    value image's carrier is, so it is a float decision rather than a `Uint32`
+    one, and it is issue #887.
+  - `profile` stays 16-bit. vips emits **INT** there for `uchar`, `ushort`,
+    `uint` and `float` alike, so it needs the signed carrier of issue #516.
+    Its values are coordinates bounded by the image dimension rather than
+    counts, so its ceiling only bites above 65535 pixels on an axis. Widening
+    it to `Uint32` would have been the wrong carrier for a reason no value
+    assertion would have caught.
+
 - Every public options struct is `#[non_exhaustive]` and grows a `with_*`
   builder setter per field, so a downstream struct literal no longer compiles
   (issue #630). Ten types: `gif::SaveOptions`, `jp2k::SaveOptions`,
@@ -711,6 +761,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **An unsigned 32-bit pixel carrier**, `PixelFormat::Uint32(NonZeroU16)`, the
+  libvips `VIPS_FORMAT_UINT` one (issue #517). It is what the counting ops need:
+  `hist_find`, `hist_cum`, `project` and the `hough_*` family all count pixels
+  and libvips emits every one of them as `uint`, so a 300x300 image already
+  overflows a 16-bit counter. Widening those counters onto it is issue #532 and
+  lands separately.
+
+  There is no named four-band spelling of it, so `Uint32(n)` is canonical at
+  every band count and carries no alias, unlike `FloatF32(4)` and `RgbaF32`.
+  Like the multiband and float variants it is a compute intermediate: the tile
+  sinks and the 8/16-bit container encoders refuse it with a typed error naming
+  it, rather than narrowing it behind the caller's back.
+
+  **`PixelFormat::with_kind` is the only constructor that reaches it.**
+  `with_channels(n, 4)` still answers the float carrier, because that is the
+  answer every existing caller asked for, and a byte width does not name a
+  carrier. That pair is the sharpest statement of issue #607 in the crate: two
+  constructors, one width, two different answers, and a test pinning both.
+
+  The ops that read samples one at a time carry it: `cast` both ways, `embed`,
+  `gravity`, `insert`, `bandjoin`, `bandjoin_const`, `bandmean`, the `bandbool`
+  family, `bandrank`, `extract_band`, `arrayjoin`, `ifthenelse`, `switch`,
+  `msb`, `flatten`, `falsecolour`, `gamma`, `downscale_half`, `downscale_to`
+  and `resize`. Every one of those answers were measured against
+  `/opt/homebrew/bin/vips` 8.18.6 rather than reasoned about, because vips
+  supports `uint` at all of them and preserves the value exactly: a 4x4 `uint`
+  image at 90000 comes back at 90000 from `resize 0.5`, `shrink 2 2` and
+  `bandmean`, `addalpha` appends 255, `embed --extend white` fills 4294967295,
+  `msb` gives 0 and `falsecolour` gives (174, 0, 0).
+
+  Two places where the answer is deliberately *not* vips's, both measured:
+
+  - **Narrowing.** libvips takes a `uint` sample through a signed `int` on the
+    way down, so on 8.18.6 a `uint` raster holding 2147483647 casts to `uchar`
+    255 and one holding 2147483648 casts to **0**, with the boundary exactly at
+    `INT_MAX`. `cast` clips at the target's ceiling instead, so both answer 255.
+  - **`resize`.** libviprs reads the reduce mask as `double` where vips reads
+    its 12-bit fixed-point copy, which is the divergence
+    `reduce_preserves_a_constant_where_the_vips_short_mask_does_not` already
+    pins on the narrower carriers. On a 4x4 `uint` ramp `vips resize 0.5`
+    answers 102360 and libviprs answers 102359; the same image cast to FLOAT
+    and resized by vips answers 102358.62, so the exact result rounds to
+    libviprs's number.
+
+  Two typed refusals replace panics out of `Result`-returning methods, the shape
+  issue #694 landed: `BandError::UnsupportedSampleKind` and
+  `ExtractError::UnsupportedSampleKind`, alongside
+  `ConversionError::UnsupportedSampleKind`. They also fix a message that named
+  the wrong carrier: the width-keyed `_` arms panicked saying "float rasters"
+  over a raster that is not float. `smartcrop`'s entropy and attention
+  strategies keep a stricter guard and refuse the 32-bit carrier, because both
+  build a value-indexed table and `SampleKind::hist_bins` is `None` at 32 bits,
+  the same answer it gives for float.
+
+  `Uint32` rasters round-trip through the `.v` container once #841 lands (PR
+  #858, which this stacks on): the `BandFmt` wire tag used to be written from a
+  byte width, and a byte width does not name a carrier.
 - **A gate against a byte width standing in for a sample kind**, which is what
   issue #607 step (e) asks for: `tests/sample_kind_spine.rs` refuses a
   `bytes_per_channel()` comparison anywhere under `src/`. It is a scan rather
@@ -2170,6 +2277,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`histogram.rs` reads a bin index and a histogram's own count through two
+  functions now, and only one of them folds at 65535** (issue #888). `read_flat`
+  became `read_bin`, and `read_value` is the new one.
+
+  Folding a 32-bit sample into the 16-bit table is what libvips does when it
+  casts a 32-bit input down before counting it, measured in #803, and it is
+  right as a **bin index**. It is wrong as a **count**: a count of 90000 is a
+  count of 90000. `hist_cum`, `hist_norm`, `hist_match`, `hist_ismonotonic`,
+  `hist_entropy`, `hist_plot` and `maplut`'s LUT entry all read counts through
+  the folding one.
+
+  Nothing changes today, because nothing in the crate can yet produce a count
+  above 65535. It goes in ahead of the widened counters of issue #532, because
+  widening them onto a folding read would have clamped every count straight back
+  to 65535 with every format assertion still passing.
+
+  Of the 30 call sites, 19 keep the fold and 11 lose it. Three functions read
+  both a few lines apart, `maplut`, `hist_find_indexed` and `hist_entropy`, and
+  they carry their own mutation rows.
 - `connection::encode_to_target`'s doc no longer keeps its own copy of the
   format list, and a check refuses to let one come back (issue #881). It named
   `"jpeg"`, `"jpg"`, `"png"`, `"v"` and `"vips"`, which was the whole dispatch
@@ -2957,6 +3083,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`maplut` refuses a lookup table longer than 65536 elements**, the bound
+  libvips enforces (issue #894). `vips maplut` with a 70000-element table answers
+  "histograms must have not have more than 65536 elements" and exits non-zero,
+  measured on `/opt/homebrew/bin/vips` 8.18.6; libviprs accepted it.
+
+  Found while building #888's mutation table, as the explanation for a mutation
+  that would not redden. `maplut` reads an index and a LUT entry a line apart,
+  and pointing the index read at the non-folding reader changes nothing, because
+  the site already clamps with `.min(n_lut - 1)` and for any `n_lut <= 65536`
+  that clamp subsumes the fold at 65535 entirely. That argument only holds while
+  the table is bounded, and nothing bounded it: with a 70000-element table and a
+  sample of 68000, the folding read picks entry 65535 and the non-folding one
+  picks entry 68000. The missing bound was doing double duty as an accidental
+  correctness argument.
+
+- **`msb` accepted a float raster and shifted its bit pattern** (issue #860).
+  `vips msb` answers "msb: image must be integer" and exits non-zero, measured on
+  `/opt/homebrew/bin/vips` 8.18.6; libviprs answered `Ok(Gray8)` with the `f32`'s
+  exponent and sign in the output byte. Reachable the ordinary way, since every
+  `colourspace` result for Lab, Lch, OkLab, OkLCh, XYZ, scRGB and Yxy is float,
+  so `im.colourspace(Lab).msb(None)` landed there. It is
+  `ConversionError::FloatUnsupported` now, and the integer carriers are
+  untouched.
+
+- **`addalpha` and `flatten` took their alpha ceiling from the byte width where
+  libvips takes it from the interpretation** (issues #859, #861). The two rules
+  agree on `uchar` and on a 16-bit raster tagged `grey16` / `rgb16`, which is
+  why nothing here caught it, and they part company everywhere else.
+
+  Measured on `/opt/homebrew/bin/vips` 8.18.6 with alpha 128: a `ushort` raster
+  tagged `b-w` holding 65535 flattens to **32896**, which is
+  `65535 * 128 / 255`, and the width rule answered 128. `addalpha` on that same
+  raster appends **255**, and the width rule appended 65535. `Multi16(n)` is
+  tagged `Multiband`, so any two-band 16-bit intermediate hit both. Both now
+  read `interpretation_max_alpha`, the source `white_ink` already reads (issue
+  #667), and the `Gray16` and `Rgb16` answers do not move because those rasters
+  are tagged `Grey16` / `Rgb16`. A background is scaled by the same denominator,
+  so it moved with it: `--background 10` on the `uchar` row gives 105 in both.
+
+  `flatten` also read its samples with the storage reader, so a float raster had
+  its `f32` bits reinterpreted as a `u32` and blended as an integer. It is one
+  numeric loop through `read_sample_f64` / `write_sample_f64` now, and
+  `vips flatten` on a float raster holding (200.5, 128) answers **100.643**,
+  which is what this answers. That path is reachable the ordinary way, since
+  every `colourspace` result for Lab, Lch, OkLab, OkLCh, XYZ, scRGB and Yxy is
+  float.
+
+  And it **truncates** where it used to round half up, which is the `vips_cast`
+  on the way out of the op. On the `uchar` carrier with alpha 128, band 0 of 201
+  gives `201 * 128 / 255` = 100.894 and vips answers 100; 51 gives 25.6 and vips
+  answers 25.
+
+  `pixel::write_sample_f64` lands with it: the write counterpart of
+  `read_sample_f64`, dispatching on `SampleKind` with `vips_cast` edge
+  semantics (clip into the kind's range, truncate toward zero, `NaN` to zero).
+  Reading through the kind and writing through a byte width only moves the
+  misread to the other end of the loop (issue #607).
 - **`draw` and `raster` stop asking for a byte width too** (issues #748,
   #607). `draw`'s `channel_at` / `set_channel_at` took a `bpc: usize` and
   panicked on the `_` arm, so the refusal covered float and would have covered
