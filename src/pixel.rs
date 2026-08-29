@@ -45,11 +45,16 @@ use core::num::NonZeroU16;
 /// | `Multi16(n)` | n        | 16           | 2n          |
 /// | `FloatF32(n)`| n        | 32 (float)   | 4n          |
 /// | `Uint32(n)`  | n        | 32 (unsigned)| 4n          |
+/// | `Int8(n)`    | n        | 8 (signed)   | n           |
+/// | `Int16(n)`   | n        | 16 (signed)  | 2n          |
+/// | `Int32(n)`   | n        | 32 (signed)  | 4n          |
 ///
-/// `Uint32` and `FloatF32` share a byte width and are not the same carrier,
-/// which is why [`PixelFormat::kind`] rather than
-/// [`PixelFormat::bytes_per_channel`] is what to dispatch on when the
-/// question is how to read a sample (issues #517, #607).
+/// Three of those share a byte width: `Uint32`, `Int32` and `FloatF32` are
+/// all four bytes and none of them is the others. `Multi8` and `Int8` are
+/// both one byte, `Multi16` and `Int16` both two. That is why
+/// [`PixelFormat::kind`] rather than [`PixelFormat::bytes_per_channel`] is
+/// what to dispatch on when the question is how to read a sample (issues
+/// #516, #517, #607).
 ///
 /// # Example usage
 ///
@@ -108,6 +113,27 @@ pub enum PixelFormat {
     /// intermediate: the tile encoding sinks and the 8/16-bit container
     /// encoders reject it with a typed error.
     Uint32(NonZeroU16),
+    /// N-channel signed 8-bit integer image, stored as `i8` samples: the
+    /// libvips `VIPS_FORMAT_CHAR` carrier (issue #516).
+    ///
+    /// The signed carriers exist because several vips ops emit signed
+    /// intermediates that had nowhere to go: `profile` emits `INT`, and
+    /// `cast` could not target a signed format at all, so a negative
+    /// intermediate only ever existed inside `f64` maths and clipped at
+    /// zero on the way back out.
+    ///
+    /// Like the other tuple carriers it is a compute intermediate with no
+    /// named spelling, so `Int8(n)` is canonical at every band count.
+    Int8(NonZeroU16),
+    /// N-channel signed 16-bit integer image, native byte order: the
+    /// libvips `VIPS_FORMAT_SHORT` carrier; see [`PixelFormat::Int8`].
+    Int16(NonZeroU16),
+    /// N-channel signed 32-bit integer image, native byte order: the
+    /// libvips `VIPS_FORMAT_INT` carrier, and the one
+    /// [`Raster::profile`](crate::raster::Raster::profile) needs, since
+    /// vips emits `INT` there for every input carrier; see
+    /// [`PixelFormat::Int8`].
+    Int32(NonZeroU16),
 }
 
 /// What the bytes at one channel sample *are*: the sample's type, as
@@ -141,19 +167,19 @@ pub enum PixelFormat {
 /// Multi-byte samples are stored in **native** byte order throughout the
 /// crate.
 ///
-/// # Kinds without a carrier
+/// # Every kind has a carrier
 ///
-/// [`PixelFormat`] carries `U8`, `U16`, `U32` and `F32`. `I8`, `I16` and
-/// `I32` are the signed carriers issue #516 asks for, and no `PixelFormat`
-/// variant produces them yet, so [`PixelFormat::kind`] never returns one
-/// and [`PixelFormat::with_kind`] answers `None` for them.
+/// [`PixelFormat`] carries all seven: `U8`, `U16` and `F32` from the
+/// original three, `U32` from issue #517, and `I8`, `I16` and `I32` from
+/// issue #516. So [`PixelFormat::with_kind`] is total over this enum and
+/// [`PixelFormat::kind`] can return any of them.
 ///
-/// They are named here rather than when the carriers land because the
-/// answers this enum gives are the part of those issues that has to be
-/// measured rather than reasoned about, and measuring them costs nothing
-/// while the carriers cost a crate-wide refactor. [`SampleKind::promote`]
-/// is the case in point: it is the libvips `vips__formatalike` order, and
-/// four of its pairs are ones "the wider kind wins" gets wrong.
+/// This enum was written before three of those carriers existed, and the
+/// answers it gives were measured then rather than reasoned about later,
+/// which is why the carriers could be added without re-deriving them.
+/// [`SampleKind::promote`] is the case in point: it is the libvips
+/// `vips__formatalike` order, and four of its pairs are ones "the wider
+/// kind wins" gets wrong.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum SampleKind {
@@ -163,20 +189,21 @@ pub enum SampleKind {
     U16,
     /// 32-bit IEEE-754 float samples (`f32`), native byte order.
     F32,
-    /// Signed 8-bit samples (`i8`), the libvips `VIPS_FORMAT_CHAR` carrier
-    /// (issue #516). No [`PixelFormat`] produces this kind yet.
+    /// Signed 8-bit samples (`i8`), the libvips `VIPS_FORMAT_CHAR`
+    /// carrier. [`PixelFormat::Int8`] carries it (issue #516).
     I8,
     /// Signed 16-bit samples (`i16`), native byte order, the libvips
-    /// `VIPS_FORMAT_SHORT` carrier (issue #516). No [`PixelFormat`]
-    /// produces this kind yet.
+    /// `VIPS_FORMAT_SHORT` carrier. [`PixelFormat::Int16`] carries it
+    /// (issue #516).
     I16,
     /// Unsigned 32-bit samples (`u32`), native byte order, the libvips
     /// `VIPS_FORMAT_UINT` carrier (issue #517) and the one the counting
     /// ops of issue #532 need. [`PixelFormat::Uint32`] carries it.
     U32,
     /// Signed 32-bit samples (`i32`), native byte order, the libvips
-    /// `VIPS_FORMAT_INT` carrier (issue #516) and the one the `profile`
-    /// op would need. No [`PixelFormat`] produces this kind yet.
+    /// `VIPS_FORMAT_INT` carrier and the one
+    /// [`Raster::profile`](crate::raster::Raster::profile) needs.
+    /// [`PixelFormat::Int32`] carries it (issue #516).
     I32,
 }
 
@@ -371,9 +398,13 @@ impl PixelFormat {
             Self::Gray8 | Self::Gray16 => 1,
             Self::Rgb8 | Self::Rgb16 => 3,
             Self::Rgba8 | Self::Rgba16 | Self::RgbaF32 => 4,
-            Self::Multi8(n) | Self::Multi16(n) | Self::FloatF32(n) | Self::Uint32(n) => {
-                n.get() as usize
-            }
+            Self::Multi8(n)
+            | Self::Multi16(n)
+            | Self::FloatF32(n)
+            | Self::Uint32(n)
+            | Self::Int8(n)
+            | Self::Int16(n)
+            | Self::Int32(n) => n.get() as usize,
         }
     }
 
@@ -484,9 +515,9 @@ impl PixelFormat {
                 4 => Self::RgbaF32,
                 _ => self,
             },
-            // No band count of the unsigned 32-bit carrier has a named
-            // variant, so every `Uint32(n)` is already canonical.
-            Self::Uint32(_) => self,
+            // No band count of the signed or unsigned integer carriers has
+            // a named variant, so every one of them is already canonical.
+            Self::Uint32(_) | Self::Int8(_) | Self::Int16(_) | Self::Int32(_) => self,
         }
     }
 
@@ -518,7 +549,7 @@ impl PixelFormat {
     pub fn has_alpha(self) -> bool {
         match self.canonical() {
             Self::Rgba8 | Self::Rgba16 | Self::RgbaF32 => true,
-            Self::Uint32(n) => n.get() == 4,
+            Self::Uint32(n) | Self::Int8(n) | Self::Int16(n) | Self::Int32(n) => n.get() == 4,
             Self::Gray8
             | Self::Gray16
             | Self::Rgb8
@@ -549,7 +580,9 @@ impl PixelFormat {
         match self {
             Self::Gray8 | Self::Rgb8 | Self::Rgba8 | Self::Multi8(_) => 1,
             Self::Gray16 | Self::Rgb16 | Self::Rgba16 | Self::Multi16(_) => 2,
-            Self::RgbaF32 | Self::FloatF32(_) | Self::Uint32(_) => 4,
+            Self::Int8(_) => 1,
+            Self::Int16(_) => 2,
+            Self::RgbaF32 | Self::FloatF32(_) | Self::Uint32(_) | Self::Int32(_) => 4,
         }
     }
 
@@ -570,6 +603,9 @@ impl PixelFormat {
             Self::Gray16 | Self::Rgb16 | Self::Rgba16 | Self::Multi16(_) => SampleKind::U16,
             Self::RgbaF32 | Self::FloatF32(_) => SampleKind::F32,
             Self::Uint32(_) => SampleKind::U32,
+            Self::Int8(_) => SampleKind::I8,
+            Self::Int16(_) => SampleKind::I16,
+            Self::Int32(_) => SampleKind::I32,
         }
     }
 
@@ -580,22 +616,17 @@ impl PixelFormat {
     /// means, and today it answers "float" for every caller including one
     /// that wanted an integer. This cannot be asked ambiguously.
     ///
-    /// Returns `None` for two different reasons, and a caller that needs to
-    /// tell them apart has to check the kind itself:
+    /// Returns `None` only for the channel counts `with_channels` rejects,
+    /// zero and anything above `u16::MAX`. **Every [`SampleKind`] has a
+    /// carrier now**, since issue #517 landed `U32` and issue #516 landed
+    /// the three signed ones, so the second reason this used to answer
+    /// `None` is gone.
     ///
-    /// * the channel counts `with_channels` rejects, zero and anything
-    ///   above `u16::MAX`;
-    /// * a [`SampleKind`] no `PixelFormat` carries. `I8`, `I16` and `I32`
-    ///   are named by issue #516 and have no variant yet, so there is no
-    ///   format to return. Falling through to
-    ///   `with_channels(channels, kind.bytes())` would answer `Rgb16` for
-    ///   three bands of `I16`, which is the silent retag
-    ///   [`PixelFormat::canonical`]'s comment warns about, arriving through
-    ///   the very constructor built to make the question unambiguous.
-    ///
-    /// `U32` does have a carrier now (issue #517), and this is the only
-    /// constructor that reaches it: `with_channels(n, 4)` answers with the
-    /// float carrier.
+    /// It is the only constructor that reaches four of the seven.
+    /// `with_channels` is keyed on a byte depth and answers `Rgb16` for two
+    /// bytes and the float carrier for four, so a caller who knows the kind
+    /// and asks by width gets a silent retag, which is what
+    /// [`PixelFormat::canonical`]'s comment warns about.
     ///
     /// The match is total, so a carrier variant added to `PixelFormat` has
     /// to move its kind out of the refusing arm here.
@@ -604,11 +635,22 @@ impl PixelFormat {
             SampleKind::U8 | SampleKind::U16 | SampleKind::F32 => {
                 Self::with_channels(channels, kind.bytes())
             }
-            SampleKind::U32 => {
+            SampleKind::U32 | SampleKind::I8 | SampleKind::I16 | SampleKind::I32 => {
                 let n = NonZeroU16::new(u16::try_from(channels).ok()?)?;
-                Some(Self::Uint32(n))
+                Some(match kind {
+                    SampleKind::U32 => Self::Uint32(n),
+                    SampleKind::I8 => Self::Int8(n),
+                    SampleKind::I16 => Self::Int16(n),
+                    SampleKind::I32 => Self::Int32(n),
+                    // The three above are the only kinds this arm matches,
+                    // and the outer match has no wildcard, so a kind added
+                    // to `SampleKind` is a compile error there rather than
+                    // a silent fall-through here.
+                    SampleKind::U8 | SampleKind::U16 | SampleKind::F32 => unreachable!(
+                        "the outer arm matches only the four kinds with tuple carriers"
+                    ),
+                })
             }
-            SampleKind::I8 | SampleKind::I16 | SampleKind::I32 => None,
         }
     }
 
@@ -638,6 +680,15 @@ impl PixelFormat {
             Self::Uint32(n) if matches!(n.get(), 1 | 3) => {
                 Self::Uint32(NonZeroU16::new(4).expect("4 is non-zero"))
             }
+            Self::Int8(n) if matches!(n.get(), 1 | 3) => {
+                Self::Int8(NonZeroU16::new(4).expect("4 is non-zero"))
+            }
+            Self::Int16(n) if matches!(n.get(), 1 | 3) => {
+                Self::Int16(NonZeroU16::new(4).expect("4 is non-zero"))
+            }
+            Self::Int32(n) if matches!(n.get(), 1 | 3) => {
+                Self::Int32(NonZeroU16::new(4).expect("4 is non-zero"))
+            }
             other => other,
         }
     }
@@ -658,6 +709,13 @@ impl PixelFormat {
             Self::RgbaF32 => Self::FloatF32(NonZeroU16::new(3).expect("3 is non-zero")),
             Self::Uint32(n) if n.get() == 4 => {
                 Self::Uint32(NonZeroU16::new(3).expect("3 is non-zero"))
+            }
+            Self::Int8(n) if n.get() == 4 => Self::Int8(NonZeroU16::new(3).expect("3 is non-zero")),
+            Self::Int16(n) if n.get() == 4 => {
+                Self::Int16(NonZeroU16::new(3).expect("3 is non-zero"))
+            }
+            Self::Int32(n) if n.get() == 4 => {
+                Self::Int32(NonZeroU16::new(3).expect("3 is non-zero"))
             }
             other => other,
         }
@@ -839,7 +897,9 @@ mod tests {
     #[test]
     fn kind_agrees_with_width_and_floatness() {
         let n = |v: u16| NonZeroU16::new(v).unwrap();
-        for fmt in [
+        // The named variants, spelled out because they have no `with_kind`
+        // spelling to be generated from.
+        let named = [
             PixelFormat::Gray8,
             PixelFormat::Gray16,
             PixelFormat::Rgb8,
@@ -850,8 +910,16 @@ mod tests {
             PixelFormat::Multi8(n(7)),
             PixelFormat::Multi16(n(7)),
             PixelFormat::FloatF32(n(7)),
-            PixelFormat::Uint32(n(7)),
-        ] {
+        ];
+        // And every carrier, generated from `ALL_KINDS` rather than listed.
+        // Mutation is why: this was a hand-written list, and putting `Int8`
+        // at four bytes left it green, because the list had never been
+        // extended past `Uint32` when issue #516 added three more.
+        let generated: Vec<PixelFormat> = ALL_KINDS
+            .iter()
+            .map(|&k| PixelFormat::with_kind(7, k).expect("every kind has a carrier"))
+            .collect();
+        for fmt in named.into_iter().chain(generated) {
             assert_eq!(
                 fmt.kind().bytes(),
                 fmt.bytes_per_channel(),
@@ -862,7 +930,20 @@ mod tests {
                 fmt.is_float(),
                 "kind floatness disagrees for {fmt:?}"
             );
+            assert_eq!(
+                fmt.bytes_per_pixel(),
+                fmt.channels() * fmt.bytes_per_channel(),
+                "bytes_per_pixel disagrees for {fmt:?}"
+            );
         }
+        // The exact widths, pinned per kind, so the identity above cannot
+        // pass with two accessors that are wrong together.
+        assert_eq!(SampleKind::I8.bytes(), 1);
+        assert_eq!(SampleKind::I16.bytes(), 2);
+        assert_eq!(SampleKind::I32.bytes(), 4);
+        assert_eq!(PixelFormat::Int8(n(7)).bytes_per_channel(), 1);
+        assert_eq!(PixelFormat::Int16(n(7)).bytes_per_channel(), 2);
+        assert_eq!(PixelFormat::Int32(n(7)).bytes_per_channel(), 4);
     }
 
     /**
@@ -888,6 +969,29 @@ mod tests {
         assert_eq!(PixelFormat::Uint32(n(1)).kind(), SampleKind::U32);
         assert_eq!(PixelFormat::Uint32(n(4)).kind(), SampleKind::U32);
         assert_eq!(PixelFormat::Uint32(n(5)).kind(), SampleKind::U32);
+        assert_eq!(PixelFormat::Int8(n(1)).kind(), SampleKind::I8);
+        assert_eq!(PixelFormat::Int8(n(5)).kind(), SampleKind::I8);
+        assert_eq!(PixelFormat::Int16(n(1)).kind(), SampleKind::I16);
+        assert_eq!(PixelFormat::Int32(n(1)).kind(), SampleKind::I32);
+        // The three pairs that share a byte width and are not the same
+        // carrier, which is what a width-keyed `match` cannot tell apart:
+        // one byte, two bytes, and the three-way tie at four.
+        assert_ne!(
+            PixelFormat::Int8(n(5)).kind(),
+            PixelFormat::Multi8(n(5)).kind()
+        );
+        assert_ne!(
+            PixelFormat::Int16(n(5)).kind(),
+            PixelFormat::Multi16(n(5)).kind()
+        );
+        assert_ne!(
+            PixelFormat::Int32(n(5)).kind(),
+            PixelFormat::Uint32(n(5)).kind()
+        );
+        assert_ne!(
+            PixelFormat::Int32(n(5)).kind(),
+            PixelFormat::FloatF32(n(5)).kind()
+        );
         // The pair that shares a byte width and is not the same carrier,
         // which is what issue #517 adds and what a width-keyed `match`
         // cannot tell apart.
@@ -1123,76 +1227,102 @@ mod tests {
     }
 
     /**
-     * Tests that `with_kind` refuses the sample kinds no `PixelFormat`
-     * carries, rather than handing back a format of the same byte width
-     * (issues #516, #517).
-     * Works by asserting `None` for the three carrierless kinds at band
-     * counts that are themselves perfectly legal, with a positive control
-     * that `with_channels` at the same width *does* answer `Some` there, so
-     * the `None` cannot be passing for a band-count rejection. Also pins
-     * which format the width-keyed fall-through would have produced, since
-     * that silent retag is the whole reason for the refusal.
-     * `U32` left this list when issue #517 gave it a carrier.
-     * Input: (3, I16) -> None while (3, 2 bytes) -> Some(Rgb16); (3, U32)
-     * -> Some(Uint32(3)) while (3, 4 bytes) -> Some(FloatF32(3)).
+     * Tests that `with_kind` answers a distinct carrier for **every**
+     * sample kind, and that four of the seven are unreachable through the
+     * width-keyed constructor, which is the silent retag the kind-keyed one
+     * exists to prevent (issues #516, #517, #607).
+     * Works by asserting a format for all seven kinds at legal band counts,
+     * then pinning what `with_channels` answers at the same widths: it
+     * cannot reach `Int8`, `Int16`, `Int32` or `Uint32` at all, because a
+     * byte width does not name a carrier. This test used to assert `None`
+     * for the carrierless kinds; there are none left.
+     * Input: (3, I16) -> Some(Int16(3)) while (3, 2 bytes) -> Some(Rgb16);
+     * (3, U32) -> Some(Uint32(3)) while (3, 4 bytes) -> Some(FloatF32(3)).
      */
     #[test]
-    fn with_kind_refuses_a_kind_no_format_carries() {
+    fn with_kind_answers_a_distinct_carrier_for_every_kind() {
         let n = |v: u16| NonZeroU16::new(v).unwrap();
-        for kind in [SampleKind::I8, SampleKind::I16, SampleKind::I32] {
+        // Every kind has a carrier, and no two kinds share one.
+        let mut seen = Vec::new();
+        for kind in ALL_KINDS {
+            let fmt = PixelFormat::with_kind(3, kind)
+                .unwrap_or_else(|| panic!("{kind:?} has no carrier"));
+            assert_eq!(fmt.kind(), kind, "{kind:?} round-trips through with_kind");
+            assert!(!seen.contains(&fmt), "{fmt:?} is the carrier for two kinds");
+            seen.push(fmt);
+            assert_eq!(PixelFormat::with_kind(0, kind), None);
+            assert_eq!(PixelFormat::with_kind(65_536, kind), None);
+        }
+        // The four the width-keyed constructor cannot reach, each with the
+        // format it answers instead.
+        for kind in [
+            SampleKind::I8,
+            SampleKind::I16,
+            SampleKind::I32,
+            SampleKind::U32,
+        ] {
             for channels in [1usize, 2, 3, 4, 7] {
-                assert_eq!(
-                    PixelFormat::with_kind(channels, kind),
-                    None,
-                    "with_kind answered a format for the carrierless {kind:?}"
+                let by_kind =
+                    PixelFormat::with_kind(channels, kind).expect("every kind has a carrier");
+                let by_width = PixelFormat::with_channels(channels, kind.bytes())
+                    .expect("the control: the width does name some format here");
+                assert_ne!(
+                    by_kind, by_width,
+                    "the width-keyed constructor reached {kind:?}'s carrier"
                 );
-                // Positive control: the band count is fine and the width
-                // does name a format, so the `None` above is about the
-                // kind and nothing else.
-                assert!(
-                    PixelFormat::with_channels(channels, kind.bytes()).is_some(),
-                    "the control failed: {channels} channels at {} bytes names no format",
-                    kind.bytes()
+                assert_ne!(
+                    by_width.kind(),
+                    kind,
+                    "asking by width for {kind:?} answered a {:?} format",
+                    by_width.kind()
                 );
             }
         }
-        // What the width-keyed fall-through would have answered, which is
-        // an unsigned format for a signed kind and a float one for an
-        // integer kind.
+        // The exact retags the width-keyed constructor performs, spelled
+        // out because they are the whole reason `with_kind` exists: an
+        // unsigned format for a signed kind, and the float carrier for both
+        // 32-bit integer ones.
+        assert_eq!(
+            PixelFormat::with_channels(3, SampleKind::I8.bytes()),
+            Some(PixelFormat::Rgb8)
+        );
         assert_eq!(
             PixelFormat::with_channels(3, SampleKind::I16.bytes()),
             Some(PixelFormat::Rgb16)
         );
         assert_eq!(
+            PixelFormat::with_channels(3, SampleKind::I32.bytes()),
+            Some(PixelFormat::FloatF32(n(3)))
+        );
+        assert_eq!(
             PixelFormat::with_channels(3, SampleKind::U32.bytes()),
             Some(PixelFormat::FloatF32(n(3)))
         );
-        // And the retag the uint carrier would still suffer if anything
-        // reached it through the width, which is why `with_kind` exists.
         assert_eq!(
             PixelFormat::with_kind(3, SampleKind::U32),
             Some(PixelFormat::Uint32(n(3)))
         );
+        assert_eq!(
+            PixelFormat::with_kind(3, SampleKind::I32),
+            Some(PixelFormat::Int32(n(3)))
+        );
     }
 
     /**
-     * Tests that no `PixelFormat` reports a sample kind the crate has no
-     * carrier for, which is the claim every carrierless arm added in this
-     * change rests on.
+     * Tests both directions of the carrier relation, which is a flat
+     * statement now that issues #517 and #516 have landed all four missing
+     * carriers: every `PixelFormat` reports a `SampleKind`, and every
+     * `SampleKind` is reachable from a `PixelFormat`.
      * Works by sweeping every variant, including both spellings of the
-     * tuple carriers, and asserting the kind is one of the four carried
-     * ones, with a control that the sweep would have caught a fifth.
-     * Input: every `PixelFormat` -> U8, U16, U32 or F32.
+     * tuple carriers, and then sweeping `SampleKind` the other way. The
+     * second half is the one that used to assert the opposite, for `I8`,
+     * `I16` and `I32`.
+     * Input: every `PixelFormat` -> some kind; every kind -> some format.
      */
     #[test]
-    fn no_format_reports_a_carrierless_kind() {
+    fn every_kind_is_carried_and_every_carrier_reports_one() {
         let n = |v: u16| NonZeroU16::new(v).unwrap();
-        let carried = [
-            SampleKind::U8,
-            SampleKind::U16,
-            SampleKind::U32,
-            SampleKind::F32,
-        ];
+        let carried = ALL_KINDS;
         let formats = [
             PixelFormat::Gray8,
             PixelFormat::Gray16,
@@ -1210,18 +1340,27 @@ mod tests {
             PixelFormat::Uint32(n(1)),
             PixelFormat::Uint32(n(4)),
             PixelFormat::Uint32(n(7)),
+            PixelFormat::Int8(n(1)),
+            PixelFormat::Int8(n(7)),
+            PixelFormat::Int16(n(1)),
+            PixelFormat::Int16(n(7)),
+            PixelFormat::Int32(n(1)),
+            PixelFormat::Int32(n(4)),
+            PixelFormat::Int32(n(7)),
         ];
         for fmt in formats {
             assert!(
                 carried.contains(&fmt.kind()),
-                "{fmt:?} reports the carrierless {:?}",
-                fmt.kind()
+                "{fmt:?} reports a kind outside SampleKind, which cannot happen"
             );
         }
-        // Control: the membership test does discriminate, so the sweep
-        // above is not passing because `carried` accepts everything.
-        for kind in [SampleKind::I8, SampleKind::I16, SampleKind::I32] {
-            assert!(!carried.contains(&kind));
+        // The direction that used to be the interesting one, and now is
+        // the whole statement: **every** kind is reachable from some
+        // format. This test used to assert the opposite for three of them.
+        for kind in ALL_KINDS {
+            let fmt = PixelFormat::with_kind(1, kind)
+                .unwrap_or_else(|| panic!("{kind:?} has no carrier"));
+            assert_eq!(fmt.kind(), kind);
         }
     }
 
