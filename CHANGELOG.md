@@ -3213,6 +3213,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The one-level bound in `src/webp.rs`'s docs is the opaque bound, and
+  says so now.** Issue #917 measured a second divergence in the same
+  `image-webp` blend, on the `dst_factor_a` term, reaching 26 levels on
+  translucent pixels, where issue #837 is about the opaque half at exactly
+  one. Three places here said "a blended frame decodes one grey level low"
+  without the qualifier, which reads as a bound on the whole function rather
+  than on half of it.
+
+  No fixture reaches the translucent half, because `vips webpsave` writes
+  blending **off** on every frame of a transparent animation, so the files
+  that would show it are the ones vips does not produce. That is worth
+  saying in the docs rather than leaving as a silence.
+
+
 - **Two `src/draw.rs` sites #867 converted had no test holding them** (issue
   #915). Both are the shape #607 exists to prevent and both were silent: the
   `draw_smudge` saturation ceiling, which reads `SampleKind::max_value` and
