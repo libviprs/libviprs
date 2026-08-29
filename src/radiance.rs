@@ -523,6 +523,37 @@ const SAMPLE_BYTES: usize = 4;
 
 /// The pixel format every decode produces and the only one
 /// [`Raster::encode_radiance`] accepts.
+/// The extension route's entry point (`imageio.rs`'s `.hdr` arm), at the
+/// `radsave` defaults.
+///
+/// Takes no `keep_metadata`, for the reason [`crate::fits`]'s and
+/// [`crate::jp2k`]'s twins do not: there is nothing EXIF-class to drop. A
+/// Radiance header carries `EXPOSURE`, `COLORCORR`, `PIXASPECT` and the
+/// primaries, which are format records the way a FITS card is, and
+/// [`SaveOptions::default`] already takes them from the raster's own
+/// `rad-expos` and `rad-aspect` fields. Asserted rather than assumed
+/// (issue #880).
+pub(crate) fn encode_radiance_for_save(raster: &Raster) -> Result<Vec<u8>, SaveError> {
+    raster
+        .encode_radiance(SaveOptions::default())
+        .map_err(encode_to_save)
+}
+
+/// Carry an [`EncodeError`] onto the save spine, the way [`crate::jp2k`] and
+/// [`crate::jxl`] do: an I/O failure stays an I/O failure and everything else
+/// flattens onto the sink's message variant, which is the only shape
+/// [`SaveError::Encode`] has.
+///
+/// The refusal `encode_radiance` gives a raster that is not 3-band `f32`
+/// travels through here as a message, so `Raster::save("x.hdr")` on the wrong
+/// raster reports the raster and not an unsupported extension.
+fn encode_to_save(err: EncodeError) -> SaveError {
+    match err {
+        EncodeError::Io(io) => SaveError::Io(io),
+        other => SaveError::Encode(crate::sink::SinkError::EncodeMsg(other.to_string())),
+    }
+}
+
 fn float_rgb() -> PixelFormat {
     PixelFormat::FloatF32(
         std::num::NonZeroU16::new(BANDS as u16).expect("the band count is non-zero"),

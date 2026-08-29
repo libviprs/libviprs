@@ -240,7 +240,7 @@ impl Raster {
     /// Uses the same dispatch as [`encode_to_target`]: `"jpeg"` / `"jpg"`,
     /// `"png"`, `"gif"`, `"webp"`, `"jxl"`,
     /// `"jp2k"` / `"jp2"` / `"j2k"` / `"jpt"` / `"j2c"` / `"jpc"`, `"uhdr"`,
-    /// `"fits"` / `"fit"` / `"fts"` and
+    /// `"hdr"`, `"fits"` / `"fit"` / `"fts"` and
     /// `"v"` / `"vips"` are wired; any other format returns
     /// [`EncodeError::Unsupported`]. `"webp"` encodes losslessly at
     /// [`crate::webp::SaveOptions::default`], keeping any attached metadata,
@@ -271,6 +271,10 @@ impl Raster {
     /// [`EncodeError::InvalidParameter`] naming the raster rather than
     /// [`EncodeError::Unsupported`] naming the format: this build can write
     /// Ultra HDR, and what is wrong is the input.
+    ///
+    /// `"hdr"` is Radiance RGBE (libvips `radsave`), and it has the same shape:
+    /// a 3-band `f32` raster only, refused rather than cast, where `radsave`
+    /// declares `mono rgb` and casts whatever it is handed.
     ///
     /// # Errors
     ///
@@ -329,6 +333,13 @@ fn encode_for_format(raster: &Raster, format: &str) -> Result<Vec<u8>, EncodeErr
         // gain-map scale factor calls `Raster::encode_uhdr` or
         // `Raster::encode_uhdr_gainmap_scale`, which is where those knobs live.
         "uhdr" => raster.encode_uhdr(crate::uhdr::SaveOptions::default().quality),
+        // The saver's own suffix, and the only one it registers (measured:
+        // `radsave`'s `vips -l` entry reads `nocache (.hdr)`, and `.rad`,
+        // `.rgbe` and `.pic` are all refused). Ungated; #589 wrote the encoder
+        // in this crate. Like `"uhdr"` above and unlike everything else here it
+        // has an input contract, 3-band `f32`, and it propagates the refusal
+        // rather than casting.
+        "hdr" => raster.encode_radiance(crate::radiance::SaveOptions::default()),
         // The three suffixes vips registers for FITS (`vips__fits_suffs`,
         // `fits.c:125`). `fitssave` takes no options, so there is nothing
         // to default here.
