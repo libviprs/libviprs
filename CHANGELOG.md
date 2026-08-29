@@ -3054,6 +3054,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`decode_avif` no longer writes the payload through a read-only pointer**
+  (issue #912). `decode_av1` filled the buffer `dav1d_data_create` hands back,
+  which is the documented dav1d sequence and correct against dav1d's C. Against
+  `rav1d` it is not: `From<Rav1dData> for Dav1dData` builds that pointer out of
+  a shared reference, so the tag it carries permits reads and nothing else, and
+  Miri reports the copy as undefined behaviour under **both** aliasing models,
+  `attempting a write access ... only grants SharedReadOnly permission` under
+  Stacked Borrows and `write access ... is forbidden ... state Frozen` under
+  `-Zmiri-tree-borrows`. Two models rather than one is what separates a model
+  being conservative from a pointer genuinely not being writable.
+
+  It now lends dav1d a buffer this crate allocated, through `dav1d_data_wrap`
+  and a free callback. The payload is copied exactly once either way, so
+  nothing about decode cost or behaviour moves: the eighteen `avif::tests` pass
+  unchanged. The free callback releases the buffer through the pointer it was
+  allocated under rather than the one dav1d hands back, because
+  `dav1d_data_wrap` rebuilds that one through `slice::from_raw_parts` and it
+  arrives read-only too.
+
+  Reachable from any AVIF file that decodes, so from untrusted bytes.
+
 - **`maplut` refuses a lookup table longer than 65536 elements**, the bound
   libvips enforces (issue #894). `vips maplut` with a 70000-element table answers
   "histograms must have not have more than 65536 elements" and exits non-zero,
