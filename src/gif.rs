@@ -111,6 +111,24 @@
 //! a two-frame file whose frame 0 carries a local table reports no
 //! `gif-palette` at `[page=1]` either.
 //!
+//! **`gif-delay`, `gif-loop` and `palette-bit-depth` are deprecated aliases**
+//! that `gifload` attaches to every GIF, still (issues #865, #875).
+//! `gif-delay` is the first delay back in centiseconds, `gif-loop` is the
+//! NETSCAPE count rather than the play count (`loop 1` and `loop 0` both give
+//! 0), and `palette-bit-depth` is a second copy of `bits-per-sample`. Two
+//! things about measuring them:
+//!
+//! * **`vipsheader -a` cannot see any of the three.** It lists no deprecated
+//!   compatibility field, on any loader, animated or not, so checking them
+//!   that way produces the opposite finding. `vipsheader -f gif-loop` returns
+//!   the value, and so does the `.v` trailer.
+//! * **`gif-delay` follows this raster, not the file**, which is the same
+//!   deliberate divergence `delay` makes and for the same reason: vips takes
+//!   it from element 0 of the file's whole array, so
+//!   `anim4.gif[page=2,n=2]` reports `gif-delay: 4` for a raster whose first
+//!   page really has a delay of 80 ms. [`crate::webp`] takes it off the
+//!   loaded delays too, so the animated loaders agree with each other.
+//!
 //! **A file that declares no global colour table diverges** (issue #851).
 //! libnsgif substitutes a two-entry black-and-white table for it and decodes
 //! through that, so vips reports `bits-per-sample: 1`, `gif-palette:
@@ -172,6 +190,14 @@
 //!   [`FrameDelay::from_centiseconds`] is the crossing and the unit is in
 //!   the type, because an integer that passes straight through is a silent
 //!   factor of ten no other assertion catches.
+//! * **A frame with no graphic control extension is 100 ms, not 0** (issue
+//!   #866). libnsgif initialises a frame's delay to 10 centiseconds when it
+//!   allocates it and only an extension overwrites it, so the default reaches
+//!   the array: measured, a still with no extension reports `delay: 100`
+//!   while one whose extension holds an explicit zero reports `delay: 0`, and
+//!   a four-frame file with extensions on frames 0 and 2 only reports
+//!   `30 100 50 100`. The `gif` crate cannot tell the two apart, which is why
+//!   this rides on the same wire walk code 4 does.
 //! * **The delay array covers the pages this raster holds**, one entry per
 //!   page, and that is a deliberate divergence. vips reports the whole
 //!   file's array whatever window was loaded: `anim4.gif[page=2,n=2]` loads
@@ -268,9 +294,11 @@
 //! frame's graphic control extension off the wire. It decodes no pixels, and
 //! it is not trusted blind: the extension carries the delay, the transparent
 //! index and the disposal alongside each other, so
-//! `reconcile_disposal` requires the three the decoder *did* keep to match
-//! before it believes the fourth, and falls back to the decoder's own answer
-//! for that frame when they do not.
+//! `reconcile_control` requires the three the decoder *did* keep to match
+//! before it believes what only the wire knows, and falls back to the
+//! decoder's own answer for that frame when they do not. The raw code is one
+//! of those two things; whether there was an extension at all is the other,
+//! and that one is issue #866.
 //!
 //! The alternative was to keep libviprs' answer and pin the gap, which is
 //! what [`crate::resample`]'s rule allows for a difference inside the
@@ -734,7 +762,12 @@ pub fn decode_gif_with(
         let transparent = frame.transparent;
         let dispose = frame.dispose;
         let delay_cs = frame.delay;
-        let disposal = reconcile_disposal(controls.next_frame(), dispose, delay_cs, transparent);
+        // The wire walk's answer for this frame, `None` when it cannot be
+        // shown to be looking at the same frame the decoder is. Two things
+        // hang off it: the raw disposal code (#827) and whether the frame
+        // carried a control extension at all (#866).
+        let wire = reconcile_control(controls.next_frame(), dispose, delay_cs, transparent);
+        let disposal = wire.map_or_else(|| Disposal::from_crate(dispose), WireControl::disposal);
         let (left, top) = (u32::from(frame.left), u32::from(frame.top));
         let (fw, fh) = (u32::from(frame.width), u32::from(frame.height));
         let local = frame.palette.clone();
@@ -796,11 +829,21 @@ pub fn decode_gif_with(
         if index >= window.start {
             let page = (index - window.start) as usize * page_bytes;
             data[page..page + page_bytes].copy_from_slice(&canvas);
-            // The one conversion this issue exists for: the graphic control
+            // The one conversion #572 exists for: the graphic control
             // extension counts centiseconds and vips's `delay` counts
             // milliseconds, so the type carries the unit across the boundary
             // rather than an integer that looks the same either way.
-            delays.push(i64::from(FrameDelay::from_centiseconds(delay_cs).millis()));
+            //
+            // The centiseconds come off the wire walk when it can be trusted,
+            // because a frame with **no** control extension is 10 of them and
+            // not 0, and `gif` 0.14.2 reports 0 for that case and for an
+            // extension holding zero alike (#866). An untrusted walk falls
+            // back to the decoder's number, which is this module's answer
+            // from before #866 and is right for every frame that has an
+            // extension.
+            let frame_delay =
+                FrameDelay::from_centiseconds(wire.map_or(delay_cs, WireControl::delay_cs));
+            delays.push(i64::from(frame_delay.millis()));
         }
 
         // The disposal after the last frame walked is invisible, since
@@ -862,11 +905,39 @@ pub fn decode_gif_with(
     }
     raster.set_n_pages(scan.frames);
     raster.set_field("loop", MetadataValue::Int(scan.loop_count));
+    // `gif-loop` is the deprecated scalar beside `loop`, and it is the
+    // NETSCAPE count rather than the play count: `nsgifload.c:303-306` is
+    // `loop_max == 0 ? 0 : loop_max - 1`, which is what
+    // `LoopCount::to_gif_wire` computes, with `None` (the file that plays
+    // once and carries no block) reported as 0. Measured on vips 8.18.6 with
+    // `vipsheader -f`: no block reports 0, a block holding 0 reports 0, and
+    // blocks holding 1, 3 and 65535 report themselves.
+    raster.set_field(
+        "gif-loop",
+        MetadataValue::Int(i64::from(
+            LoopCount::from_plays(u32::try_from(scan.loop_count).unwrap_or(u32::MAX))
+                .to_gif_wire()
+                .unwrap_or(0),
+        )),
+    );
     // One delay per page this raster holds, which vips does not promise: it
     // reports the whole file's array whatever window was loaded, so
     // `delay[0]` on a `[page=2,n=2]` load is frame 0's delay sitting on a
     // page that is really frame 2. Measured, re-saving that raster writes 40
     // and 60 centiseconds onto frames whose real delays are 80 and 100.
+    // `gif-delay` is the deprecated scalar beside `delay`, and vips defines it
+    // as `delay[0] / 10` (`nsgifload.c:469`), so it is the first frame's delay
+    // back in the centiseconds the wire counts. It follows **this raster**
+    // rather than the file, which diverges from vips for exactly the reason
+    // and in exactly the way `delay` already does: vips reports the file's
+    // whole array whatever window was loaded and then takes element 0 of it,
+    // so `anim4.gif[page=2,n=2]` reports `gif-delay: 4` for a raster whose
+    // first page has a delay of 80 ms. `src/webp.rs` takes it off
+    // `delays.first()` for the same reason, so the animated loaders agree.
+    if let Some(&first) = delays.first() {
+        let centiseconds = FrameDelay::from_millis(first.unsigned_abs() as u32).to_centiseconds();
+        raster.set_field("gif-delay", MetadataValue::Int(i64::from(centiseconds)));
+    }
     raster.set_field("delay", MetadataValue::IntArray(delays));
     raster.set_field("palette", MetadataValue::Int(1));
     // The global colour table, and only when no frame in the file overrides
@@ -903,6 +974,10 @@ pub fn decode_gif_with(
         // the float round trip.
         let bits = scan.colours.next_power_of_two().trailing_zeros();
         raster.set_field("bits-per-sample", MetadataValue::Int(i64::from(bits)));
+        // `palette-bit-depth` is the deprecated name for the same number, and
+        // vips writes the two one after the other off one `ceil(log2(colours))`
+        // (`nsgifload.c:339-345`), so they can never differ (issue #875).
+        raster.set_field("palette-bit-depth", MetadataValue::Int(i64::from(bits)));
     }
     if scan.interlaced {
         raster.set_field("interlaced", MetadataValue::Int(1));
@@ -999,7 +1074,7 @@ impl Disposal {
 /// `DisposalMethod::from_u8` with every code it does not know folded onto
 /// `Any` (`reader/decoder.rs:862-865`).
 ///
-/// Recomputing it is how [`reconcile_disposal`] checks that the wire walk and
+/// Recomputing it is how [`reconcile_control`] checks that the wire walk and
 /// the decoder are looking at the same frame.
 fn crate_disposal(code: u8) -> gif::DisposalMethod {
     gif::DisposalMethod::from_u8(code).unwrap_or(gif::DisposalMethod::Any)
@@ -1021,6 +1096,71 @@ struct RawControl {
     transparent: Option<u8>,
 }
 
+/// What the wire walk found for one frame: the graphic control extension it
+/// carried, or the fact that it carried none.
+///
+/// The distinction is not recoverable from the `gif` crate. Its
+/// `Decoder::next_frame_info` takes the frame state fresh for every frame
+/// (`reader/mod.rs:436`), so `Frame::delay` is `0` both for an extension
+/// holding zero and for no extension at all, and the neighbouring fields do
+/// not separate them either: a control extension with disposal 0, no
+/// transparency and delay 0 leaves `dispose`, `transparent` and `delay` at
+/// exactly the values an absent one leaves them at. libnsgif does separate
+/// them, so vips reports 100 ms for one and 0 ms for the other (issue #866).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum WireControl {
+    /// The frame carried a graphic control extension, and this is it.
+    Present(RawControl),
+    /// It carried none.
+    Absent,
+}
+
+/// The delay libnsgif gives a frame that carries no graphic control
+/// extension, in centiseconds.
+///
+/// `nsgif__get_frame` initialises `frame->info.delay = 10` when it allocates
+/// the frame and only a control extension overwrites it, so the default
+/// survives into the `delay` array rather than being a playback-time floor.
+/// Measured on vips 8.18.6 rather than read off that: a still GIF with no
+/// extension reports `delay: 100` and `gif-delay: 10`, while one whose
+/// extension holds an explicit zero reports `delay: 0`.
+const ABSENT_CONTROL_DELAY_CS: u16 = 10;
+
+impl WireControl {
+    /// The three frame fields the `gif` crate reports once it has read this,
+    /// which is what makes the two walks checkable against each other.
+    ///
+    /// The absent case is `Frame::default()` (`common.rs:163-178`), whose
+    /// disposal is `Keep` and **not** `Any`, so it is not the same triple
+    /// that a control extension holding all zeroes produces. Getting that
+    /// wrong would make every extension-less frame look like a
+    /// desynchronised walk.
+    fn decoder_fields(self) -> (gif::DisposalMethod, u16, Option<u8>) {
+        match self {
+            Self::Present(raw) => (crate_disposal(raw.disposal), raw.delay_cs, raw.transparent),
+            Self::Absent => (gif::DisposalMethod::Keep, 0, None),
+        }
+    }
+
+    /// What to do with the canvas after this frame draws.
+    fn disposal(self) -> Disposal {
+        match self {
+            Self::Present(raw) => Disposal::from_code(raw.disposal),
+            // GIF89a's disposal 0, which libnsgif also writes into a fresh
+            // frame, and which keeps the canvas.
+            Self::Absent => Disposal::Keep,
+        }
+    }
+
+    /// This frame's delay, in the centiseconds the wire counts.
+    fn delay_cs(self) -> u16 {
+        match self {
+            Self::Present(raw) => raw.delay_cs,
+            Self::Absent => ABSENT_CONTROL_DELAY_CS,
+        }
+    }
+}
+
 /// A second walk over a GIF's block chain, recovering each frame's graphic
 /// control extension.
 ///
@@ -1031,7 +1171,7 @@ struct RawControl {
 /// a time in lockstep with the decode, so there is no per-frame buffer to
 /// price against [`DecodeLimits`].
 ///
-/// It is deliberately **not** trusted on its own; see [`reconcile_disposal`].
+/// It is deliberately **not** trusted on its own; see [`reconcile_control`].
 struct ControlWalk<'a> {
     /// The whole file, the same slice the decoder reads.
     bytes: &'a [u8],
@@ -1071,11 +1211,12 @@ impl<'a> ControlWalk<'a> {
     }
 
     /// The next image descriptor's graphic control extension, or
-    /// [`RawControl::default`] when the frame carries none, which is the same
-    /// stand-in the `gif` crate uses.
+    /// [`WireControl::Absent`] when the frame carries none.
     ///
-    /// `None` once the walk has stopped.
-    fn next_frame(&mut self) -> Option<RawControl> {
+    /// `None` once the walk has stopped, which is a different thing again and
+    /// the reason this is not one `Option`: "the frame had no extension" is
+    /// an answer, and "the walk has nothing left to say" is not.
+    fn next_frame(&mut self) -> Option<WireControl> {
         let found = self.step();
         if found.is_none() {
             self.pos = None;
@@ -1085,7 +1226,7 @@ impl<'a> ControlWalk<'a> {
 
     /// [`ControlWalk::next_frame`] without the stop bookkeeping, so every
     /// short read can be a `?`.
-    fn step(&mut self) -> Option<RawControl> {
+    fn step(&mut self) -> Option<WireControl> {
         loop {
             let at = self.pos?;
             match self.bytes.get(at) {
@@ -1116,7 +1257,10 @@ impl<'a> ControlWalk<'a> {
                     }
                     let (_, next) = self.sub_blocks(next + 1)?;
                     self.pos = Some(next);
-                    return Some(self.pending.take().unwrap_or_default());
+                    return Some(match self.pending.take() {
+                        Some(raw) => WireControl::Present(raw),
+                        None => WireControl::Absent,
+                    });
                 }
                 // The trailer, an unknown introducer, or the end of the
                 // buffer. `open()` configures the decoder to stop at an
@@ -1154,34 +1298,26 @@ impl<'a> ControlWalk<'a> {
     }
 }
 
-/// The disposal to apply to a frame, preferring the raw wire code when the
-/// two walks demonstrably agree about which frame they are looking at.
+/// The wire control to use for a frame, or `None` when the two walks do not
+/// demonstrably agree about which frame they are looking at.
 ///
 /// [`ControlWalk`] is a second parser beside the one that decides where the
 /// frames are, and two parsers over one hostile file can come apart. They are
 /// checked against each other rather than assumed to agree: the graphic
 /// control extension carries the delay, the transparent index and the
 /// disposal side by side, the decoder kept the first two intact, and it kept
-/// the third in collapsed form. So all three are compared, and only then is
-/// the fourth piece of the same block, the code the decoder threw away,
-/// believed. A frame where they disagree keeps the decoder's answer, which is
-/// what this module did for every frame before #827.
-fn reconcile_disposal(
-    raw: Option<RawControl>,
+/// the third in collapsed form. So all three are compared, and only then are
+/// the two things only the wire knows, the raw disposal code (#827) and
+/// whether there was an extension at all (#866), believed. A frame where they
+/// disagree falls back to the decoder, which is what this module did for
+/// every frame before #827.
+fn reconcile_control(
+    wire: Option<WireControl>,
     dispose: gif::DisposalMethod,
     delay_cs: u16,
     transparent: Option<u8>,
-) -> Disposal {
-    match raw {
-        Some(raw)
-            if raw.delay_cs == delay_cs
-                && raw.transparent == transparent
-                && crate_disposal(raw.disposal) == dispose =>
-        {
-            Disposal::from_code(raw.disposal)
-        }
-        _ => Disposal::from_crate(dispose),
-    }
+) -> Option<WireControl> {
+    wire.filter(|wire| wire.decoder_fields() == (dispose, delay_cs, transparent))
 }
 
 /// Open a decoder over `bytes` producing palette indices rather than RGBA.
@@ -1266,8 +1402,10 @@ fn scan_file(bytes: &[u8], limits: DecodeLimits) -> Result<FileScan, SourceError
     }
     // vips reports `loop` as libnsgif's `loop_max`, which is one more than
     // the NETSCAPE count except that a count of zero means forever and no
-    // extension at all means play once. Measured across the reference
-    // suite; `gif-loop`, the deprecated field, is the raw count instead.
+    // extension at all means play once. Measured across the reference suite.
+    // The deprecated `gif-loop` is the other direction, `loop_max == 0 ? 0 :
+    // loop_max - 1`, which is the count a file with a block carries and 0 for
+    // a file with none, and it is attached from `loop` rather than from here.
     scan.loop_count = match decoder.repeat() {
         gif::Repeat::Infinite => 0,
         gif::Repeat::Finite(0) => 1,
@@ -3769,10 +3907,22 @@ mod tests {
 
         let intact = drain(&bytes);
         assert_eq!(
-            intact.iter().map(|c| c.disposal).collect::<Vec<_>>(),
-            [4, 0, 7],
-            "the control: the intact file still walks, and the middle frame's \
-             missing extension reads as code 0"
+            intact,
+            [
+                WireControl::Present(RawControl {
+                    disposal: 4,
+                    delay_cs: 0,
+                    transparent: None,
+                }),
+                WireControl::Absent,
+                WireControl::Present(RawControl {
+                    disposal: 7,
+                    delay_cs: 0,
+                    transparent: None,
+                }),
+            ],
+            "the control: the intact file still walks, and the middle frame \
+             comes back as carrying no extension rather than as code 0"
         );
 
         for cut in 0..bytes.len() {
@@ -3794,7 +3944,7 @@ mod tests {
      * running disposal 4 behind a comment extension, and then behind a frame
      * that carries a local colour table, and requiring the rewind both times.
      * Both are places the second walk can lose its place, and both are
-     * **masked** by `reconcile_disposal`'s fallback: a walk that comes apart
+     * **masked** by `reconcile_control`'s fallback: a walk that comes apart
      * gives the answer libviprs gave before #827, so the pixels go quietly
      * back to being wrong rather than failing loudly. The mutation sweep
      * found exactly that, which is why the local table sits on the frame
@@ -4186,7 +4336,7 @@ mod tests {
      * Tests that the wire walk which recovers the raw disposal code stays in
      * step with the decoder that decides where the frames are, which is the
      * risk #827 was filed rather than fixed over. Works by calling
-     * `reconcile_disposal` with a control whose delay, transparent index or
+     * `reconcile_control` with a control whose delay, transparent index or
      * mapped disposal disagrees with the frame the decoder handed back, and
      * requiring it to fall back to the decoder's own answer.
      * The three fields are the rest of the same graphic control extension,
@@ -4194,8 +4344,10 @@ mod tests {
      * almost certain to disagree on one of them, and disagreeing is the only
      * thing this can do about it: the raw code is the half the decoder threw
      * away, so there is nothing else to check it against.
-     * Input: an agreeing control, then one wrong in each field ->
-     * Output: the raw code once, the decoder's collapsed answer three times.
+     * Input: an agreeing control, then one wrong in each field, then an
+     * absent extension against both decoder shapes ->
+     * Output: trusted once, discarded three times, and the absent case
+     * separated from the all-zero one.
      */
     #[test]
     fn a_control_walk_that_disagrees_with_the_decoder_is_not_trusted() {
@@ -4204,39 +4356,70 @@ mod tests {
             delay_cs: 7,
             transparent: Some(3),
         };
+        let present = WireControl::Present(raw);
         assert_eq!(
-            reconcile_disposal(Some(raw), gif::DisposalMethod::Any, 7, Some(3)),
-            Disposal::Previous,
+            reconcile_control(Some(present), gif::DisposalMethod::Any, 7, Some(3)),
+            Some(present),
             "agreeing on the other three fields is what lets code 4 through"
         );
         for (label, wrong) in [
             (
                 "delay",
-                reconcile_disposal(Some(raw), gif::DisposalMethod::Any, 8, Some(3)),
+                reconcile_control(Some(present), gif::DisposalMethod::Any, 8, Some(3)),
             ),
             (
                 "transparent index",
-                reconcile_disposal(Some(raw), gif::DisposalMethod::Any, 7, Some(4)),
+                reconcile_control(Some(present), gif::DisposalMethod::Any, 7, Some(4)),
             ),
             (
                 "collapsed disposal",
-                reconcile_disposal(Some(raw), gif::DisposalMethod::Keep, 7, Some(3)),
+                reconcile_control(Some(present), gif::DisposalMethod::Keep, 7, Some(3)),
             ),
         ] {
             assert_eq!(
-                wrong,
-                Disposal::from_crate(if label == "collapsed disposal" {
-                    gif::DisposalMethod::Keep
-                } else {
-                    gif::DisposalMethod::Any
-                }),
+                wrong, None,
                 "a walk that disagrees about the {label} is discarded"
             );
         }
         assert_eq!(
-            reconcile_disposal(None, gif::DisposalMethod::Previous, 0, None),
-            Disposal::Previous,
+            reconcile_control(None, gif::DisposalMethod::Previous, 0, None),
+            None,
             "a walk that ran out of frames leaves the decoder in charge"
+        );
+
+        // The absent case is checked against `Frame::default()`, whose
+        // disposal is `Keep`. Checking it against `Any`, which is what a raw
+        // code of 0 maps to, would discard every extension-less frame and
+        // take #866's 100 ms with it.
+        assert_eq!(
+            reconcile_control(
+                Some(WireControl::Absent),
+                gif::DisposalMethod::Keep,
+                0,
+                None
+            ),
+            Some(WireControl::Absent),
+            "no extension is the decoder's default frame, disposal `Keep`"
+        );
+        assert_eq!(
+            reconcile_control(Some(WireControl::Absent), gif::DisposalMethod::Any, 0, None),
+            None,
+            "and it is not the same as an extension holding all zeroes"
+        );
+        assert_eq!(
+            WireControl::Absent.delay_cs(),
+            10,
+            "libnsgif's default, which is 100 ms and not 0"
+        );
+        assert_eq!(
+            WireControl::Present(RawControl {
+                disposal: 0,
+                delay_cs: 0,
+                transparent: None,
+            })
+            .delay_cs(),
+            0,
+            "the control: an extension holding zero really is zero"
         );
     }
 
@@ -4284,17 +4467,15 @@ mod tests {
         let mut decoder = open(&bytes).expect("a valid GIF");
         let mut seen = 0;
         while let Some(frame) = decoder.next_frame_info().expect("a valid GIF") {
-            let raw = walk.next_frame().expect("the walk has this frame too");
-            assert_eq!(raw.delay_cs, frame.delay, "frame {seen} delay");
+            let wire = walk.next_frame().expect("the walk has this frame too");
             assert_eq!(
-                raw.transparent, frame.transparent,
-                "frame {seen} transparent"
+                wire.decoder_fields(),
+                (frame.dispose, frame.delay, frame.transparent),
+                "frame {seen}"
             );
-            assert_eq!(
-                crate_disposal(raw.disposal),
-                frame.dispose,
-                "frame {seen} disposal"
-            );
+            let WireControl::Present(raw) = wire else {
+                panic!("frame {seen} carries an extension in this fixture");
+            };
             assert_eq!(raw.disposal, frames[seen].disposal, "frame {seen} raw code");
             seen += 1;
         }
