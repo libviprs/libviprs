@@ -257,11 +257,11 @@
 //! (`NSGIF_DISPOSAL_RESTORE_QUIRK`) and leaves the rest alone, and the `gif`
 //! crate's `DisposalMethod::from_u8` knows only 0 to 3 and folds every other
 //! code onto `Any`, so by the time [`decode_gif_with`] sees a frame the code
-//! is gone. [`ControlWalk`] walks the block chain a second time to read each
+//! is gone. `ControlWalk` walks the block chain a second time to read each
 //! frame's graphic control extension off the wire. It decodes no pixels, and
 //! it is not trusted blind: the extension carries the delay, the transparent
 //! index and the disposal alongside each other, so
-//! [`reconcile_disposal`] requires the three the decoder *did* keep to match
+//! `reconcile_disposal` requires the three the decoder *did* keep to match
 //! before it believes the fourth, and falls back to the decoder's own answer
 //! for that frame when they do not.
 //!
@@ -281,7 +281,7 @@
 //! floating-point one. Writing it as a [`MetadataValue::IntArray`] would put
 //! the right numbers under a type every reader written against vips ignores,
 //! which is worse than leaving it off. The value itself is already computed
-//! here, by [`background_rgb`] for the restore-to-background disposal, so
+//! here, by `background_rgb` for the restore-to-background disposal, so
 //! attaching it is a field write behind a variant that does not exist yet;
 //! issue #852 is that variant.
 //!
@@ -578,6 +578,13 @@ struct FileScan {
     colours: usize,
     /// The NETSCAPE loop count, translated to the vips `loop` convention.
     loop_count: i64,
+    /// Whether *any* frame declares a colour table of its own.
+    ///
+    /// vips attaches `gif-palette` only when none does (`nsgifload.c:315`,
+    /// `if (!gif->local_palette)`, over a flag its own header pass ORs across
+    /// every frame in the file at `:435`), so the rule is about the file and
+    /// not about the window that was loaded.
+    any_local_palette: bool,
 }
 
 /// Decode a GIF into a [`Raster`] (libvips `gifload`).
@@ -697,6 +704,10 @@ pub fn decode_gif_with(
     let mut delays: Vec<i64> = Vec::with_capacity(pages as usize);
     let global = decoder.global_palette().map(<[u8]>::to_vec);
     let background = background_rgb(global.as_deref(), decoder.bg_color());
+    // The second walk that recovers the raw disposal code, advanced one frame
+    // per turn of the loop below so it stays beside the decoder rather than
+    // running ahead of it into a buffer (issue #827).
+    let mut controls = ControlWalk::new(bytes);
 
     for index in 0..window.end {
         let Some(frame) = decoder.next_frame_info().map_err(decode_error)? else {
@@ -716,6 +727,7 @@ pub fn decode_gif_with(
         let transparent = frame.transparent;
         let dispose = frame.dispose;
         let delay_cs = frame.delay;
+        let disposal = reconcile_disposal(controls.next_frame(), dispose, delay_cs, transparent);
         let (left, top) = (u32::from(frame.left), u32::from(frame.top));
         let (fw, fh) = (u32::from(frame.width), u32::from(frame.height));
         let local = frame.palette.clone();
@@ -746,7 +758,7 @@ pub fn decode_gif_with(
         let palette = local.as_deref().or(global.as_deref()).unwrap_or(&[]);
 
         let last = index + 1 == window.end;
-        if !last && dispose == gif::DisposalMethod::Previous {
+        if !last && disposal == Disposal::Previous {
             previous.clear();
             previous.extend_from_slice(&canvas);
         }
@@ -791,14 +803,14 @@ pub fn decode_gif_with(
         if last {
             continue;
         }
-        match dispose {
+        match disposal {
             // Clear this frame's rectangle, and only it. libnsgif fills with
             // transparent when *this* frame declared a transparent index and
             // with the background colour when it did not, which is measured
             // rather than assumed: the same two-frame file loads with a
             // transparent hole when frame 0 carries the index and with an
             // opaque blue one when frame 1 carries it instead.
-            gif::DisposalMethod::Background => {
+            Disposal::Background => {
                 let fill: [u8; 4] = if transparent.is_some() {
                     [0, 0, 0, 0]
                 } else {
@@ -813,15 +825,14 @@ pub fn decode_gif_with(
             }
             // Rewind the whole canvas to the snapshot taken above. Only this
             // frame has drawn since, so restoring the canvas and restoring
-            // its rectangle are the same thing.
-            gif::DisposalMethod::Previous => canvas.copy_from_slice(&previous),
-            // `Any` (code 0) and `Keep` (code 1) both leave the canvas alone.
-            // So do the reserved codes 5, 6 and 7, measured on vips 8.18.6.
-            // Code 4 is where this differs from libnsgif, which treats it as
-            // a second spelling of "restore to previous": the `gif` crate maps
-            // every code it does not know onto `Any`, so the distinction is
-            // not visible here. See the module docs.
-            gif::DisposalMethod::Any | gif::DisposalMethod::Keep => {}
+            // its rectangle are the same thing. Codes 3 and 4 both land here:
+            // 4 is reserved by GIF89a and libnsgif remaps it onto 3, which is
+            // the code the `gif` crate cannot tell apart from 0 and which
+            // `controls` is walking the file a second time to recover.
+            Disposal::Previous => canvas.copy_from_slice(&previous),
+            // Codes 0 and 1 leave the canvas alone, and so do the reserved
+            // codes 5, 6 and 7, measured on vips 8.18.6.
+            Disposal::Keep => {}
         }
     }
 
@@ -851,6 +862,27 @@ pub fn decode_gif_with(
     // and 60 centiseconds onto frames whose real delays are 80 and 100.
     raster.set_field("delay", MetadataValue::IntArray(delays));
     raster.set_field("palette", MetadataValue::Int(1));
+    // The global colour table, and only when no frame in the file overrides
+    // it with one of its own (issue #828). vips packs each entry as libnsgif's
+    // `R, G, B, A` byte quad reinterpreted as a machine integer, so on a
+    // little-endian host it reads `0xFF << 24 | B << 16 | G << 8 | R` and
+    // every entry is negative; `from_le_bytes` over the quad is that number
+    // without a cast that could wrap differently. Measured on vips 8.18.6: a
+    // table of (71, 112, 76) and (60, 60, 60) comes back
+    // `-11767737 -12829636`.
+    //
+    // The array is the table as it sits on the wire, padding included, which
+    // is what `global` already holds: a three-colour table is four entries
+    // with an opaque-black fourth.
+    if let Some(table) = global.as_deref().filter(|_| !scan.any_local_palette) {
+        let entries: Vec<i64> = table
+            .as_chunks::<PALETTE_STRIDE>()
+            .0
+            .iter()
+            .map(|rgb| i64::from(i32::from_le_bytes([rgb[0], rgb[1], rgb[2], u8::MAX])))
+            .collect();
+        raster.set_field("gif-palette", MetadataValue::IntArray(entries));
+    }
     if scan.colours > 0 {
         // `nsgifload.c:337-343`: ceil(log2(colours)) over the table as it
         // sits on the wire. The table is always a power of two there, so the
@@ -868,15 +900,266 @@ pub fn decode_gif_with(
 /// The colour a "restore to background" disposal paints, which is the global
 /// colour table entry the logical screen descriptor points at.
 ///
-/// Black when there is no global table, or when the index is past the end of
-/// the one there is. Measured on vips 8.18.6: a background index of 200 on a
-/// four-entry table reports `background: 0 0 0` and disposes to black, where
-/// index 3 on the same table reports `0 0 255` and disposes to blue.
+/// An index the table cannot serve resolves to **entry 0**, not to black
+/// (issue #850). libnsgif's rule is
+/// `if (global_palette && bg_index < colour_table_size) table[bg_index] else
+/// table[0]`, and it is measured rather than read: on a four-entry palette
+/// whose entry 0 is `(9, 8, 7)`, vips 8.18.6 reports `background: 9 8 7` for
+/// a stored index of 200 and disposes the canvas to it, where index 3 on the
+/// same table reports `0 0 255`. The fixture the animated-load lane wrote for
+/// this used a palette whose entry 0 was black, so the two answers were
+/// indistinguishable and the wrong one went in.
 fn background_rgb(global: Option<&[u8]>, index: Option<usize>) -> [u8; PALETTE_STRIDE] {
-    let entry = index.unwrap_or(0) * PALETTE_STRIDE;
-    match global.and_then(|table| table.get(entry..entry + PALETTE_STRIDE)) {
+    // libnsgif substitutes a two-entry black-and-white table for a file that
+    // declares no global one, and then reads entry 0 of it whatever the
+    // descriptor stores: measured, a stored index of 1 with no global table
+    // reports `0 0 0` and not the substitute's white second entry. That file
+    // does not reach this module today, because `gif` 0.14.2 refuses a frame
+    // with no colour table at all (issue #851); this arm is what keeps the
+    // lookup total.
+    let Some(table) = global else {
+        return [0; PALETTE_STRIDE];
+    };
+    let entry = |i: usize| {
+        let at = i * PALETTE_STRIDE;
+        table.get(at..at + PALETTE_STRIDE)
+    };
+    match entry(index.unwrap_or(0)).or_else(|| entry(0)) {
         Some(rgb) => [rgb[0], rgb[1], rgb[2]],
         None => [0; PALETTE_STRIDE],
+    }
+}
+
+/// What a frame's disposal code says to do with the canvas before the next
+/// frame draws.
+///
+/// This is libnsgif's mapping rather than the `gif` crate's, which is the
+/// whole of issue #827: `DisposalMethod::from_u8` knows only codes 0 to 3 and
+/// folds every reserved code onto `Any`, while libnsgif remaps **4** onto
+/// restore-to-previous and leaves 5, 6 and 7 alone.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Disposal {
+    /// Leave the canvas alone: codes 0, 1, 5, 6 and 7.
+    Keep,
+    /// Clear this frame's rectangle, and only it: code 2.
+    Background,
+    /// Rewind the whole canvas to before this frame drew: codes 3 and 4.
+    Previous,
+}
+
+impl Disposal {
+    /// The disposal a raw GIF89a code selects.
+    ///
+    /// Measured on vips 8.18.6 over all eight codes on one two-frame file:
+    /// 0, 1, 5, 6 and 7 keep, 2 clears to the background colour, and 3 and 4
+    /// both rewind. Code 4 is `NSGIF_DISPOSAL_RESTORE_QUIRK` in libnsgif,
+    /// which remaps it onto `NSGIF_DISPOSAL_RESTORE_PREV` before anything
+    /// reads it.
+    fn from_code(code: u8) -> Self {
+        match code {
+            2 => Self::Background,
+            3 | 4 => Self::Previous,
+            _ => Self::Keep,
+        }
+    }
+
+    /// The disposal the `gif` crate's already-collapsed enum selects, which
+    /// is the answer when the wire walk cannot be trusted for a frame.
+    fn from_crate(method: gif::DisposalMethod) -> Self {
+        match method {
+            gif::DisposalMethod::Background => Self::Background,
+            gif::DisposalMethod::Previous => Self::Previous,
+            gif::DisposalMethod::Any | gif::DisposalMethod::Keep => Self::Keep,
+        }
+    }
+}
+
+/// The `gif` crate's own mapping of a raw disposal code, which is
+/// `DisposalMethod::from_u8` with every code it does not know folded onto
+/// `Any` (`reader/decoder.rs:862-865`).
+///
+/// Recomputing it is how [`reconcile_disposal`] checks that the wire walk and
+/// the decoder are looking at the same frame.
+fn crate_disposal(code: u8) -> gif::DisposalMethod {
+    gif::DisposalMethod::from_u8(code).unwrap_or(gif::DisposalMethod::Any)
+}
+
+/// One frame's graphic control extension, as it sits on the wire.
+///
+/// The `gif` crate hands back three of these four fields intact and the
+/// fourth already collapsed. This is the same block with the disposal code
+/// still raw.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+struct RawControl {
+    /// The disposal code, 0 to 7, out of bits 2 to 4 of the packed byte.
+    disposal: u8,
+    /// The delay in centiseconds, which is the unit the wire uses and not the
+    /// milliseconds `delay` reports.
+    delay_cs: u16,
+    /// The transparent index, when the packed byte's low bit is set.
+    transparent: Option<u8>,
+}
+
+/// A second walk over a GIF's block chain, recovering each frame's graphic
+/// control extension.
+///
+/// It exists for one field, the raw disposal code (issue #827), and it is the
+/// cheapest walk that can produce it: the block chain is self-describing, so
+/// stepping over an image's LZW data is a walk over sub-block lengths and no
+/// pixel is decoded. Nothing is allocated, and the walk advances one frame at
+/// a time in lockstep with the decode, so there is no per-frame buffer to
+/// price against [`DecodeLimits`].
+///
+/// It is deliberately **not** trusted on its own; see [`reconcile_disposal`].
+struct ControlWalk<'a> {
+    /// The whole file, the same slice the decoder reads.
+    bytes: &'a [u8],
+    /// The next byte to read, or `None` once the walk has stopped: at the
+    /// trailer, at an unknown block introducer, or at the end of the buffer.
+    pos: Option<usize>,
+    /// The most recent graphic control extension, waiting for the image
+    /// descriptor it belongs to.
+    pending: Option<RawControl>,
+}
+
+impl<'a> ControlWalk<'a> {
+    /// Position the walk after the signature, the logical screen descriptor
+    /// and the global colour table.
+    fn new(bytes: &'a [u8]) -> Self {
+        let mut walk = Self {
+            bytes,
+            pos: None,
+            pending: None,
+        };
+        // Three bytes of signature and three of version, then the seven-byte
+        // logical screen descriptor, whose fifth byte carries the global
+        // colour table flag and its size.
+        let Some(descriptor) = bytes.get(6..13) else {
+            return walk;
+        };
+        if !bytes.starts_with(b"GIF") {
+            return walk;
+        }
+        let packed = descriptor[4];
+        let mut at = 13;
+        if packed & 0x80 != 0 {
+            at += PALETTE_STRIDE * (2usize << (packed & 7));
+        }
+        walk.pos = (at <= bytes.len()).then_some(at);
+        walk
+    }
+
+    /// The next image descriptor's graphic control extension, or
+    /// [`RawControl::default`] when the frame carries none, which is the same
+    /// stand-in the `gif` crate uses.
+    ///
+    /// `None` once the walk has stopped.
+    fn next_frame(&mut self) -> Option<RawControl> {
+        let found = self.step();
+        if found.is_none() {
+            self.pos = None;
+        }
+        found
+    }
+
+    /// [`ControlWalk::next_frame`] without the stop bookkeeping, so every
+    /// short read can be a `?`.
+    fn step(&mut self) -> Option<RawControl> {
+        loop {
+            let at = self.pos?;
+            match self.bytes.get(at) {
+                // An extension block: a label byte, then a sub-block chain.
+                // Only the graphic control extension matters here and the
+                // rest are stepped over, which is also how the walk gets past
+                // the NETSCAPE application extension.
+                Some(&0x21) => {
+                    let label = *self.bytes.get(at + 1)?;
+                    let (payload, next) = self.sub_blocks(at + 2)?;
+                    if label == 0xF9 {
+                        self.pending = payload.map(|p| RawControl {
+                            disposal: (p[0] & 0b0001_1100) >> 2,
+                            delay_cs: u16::from_le_bytes([p[1], p[2]]),
+                            transparent: (p[0] & 1 != 0).then_some(p[3]),
+                        });
+                    }
+                    self.pos = Some(next);
+                }
+                // An image descriptor: nine bytes of geometry and flags, an
+                // optional local colour table, the LZW minimum code size, and
+                // the pixel sub-block chain.
+                Some(&0x2C) => {
+                    let packed = *self.bytes.get(at + 9)?;
+                    let mut next = at + 10;
+                    if packed & 0x80 != 0 {
+                        next += PALETTE_STRIDE * (2usize << (packed & 7));
+                    }
+                    let (_, next) = self.sub_blocks(next + 1)?;
+                    self.pos = Some(next);
+                    return Some(self.pending.take().unwrap_or_default());
+                }
+                // The trailer, an unknown introducer, or the end of the
+                // buffer. `open()` configures the decoder to stop at an
+                // unknown block rather than skip it, so this walk stops there
+                // too, and for the same reason: `garden.gif` carries a stray
+                // byte after its 35th frame and vips reports 35 pages.
+                _ => return None,
+            }
+        }
+    }
+
+    /// Walk a sub-block chain from `at`, returning the byte after it and,
+    /// when the chain totals exactly four bytes, those bytes.
+    ///
+    /// Four is a graphic control extension's payload length and the only
+    /// length the `gif` crate accepts for one, so a chain of any other length
+    /// is not a control extension that decoder will read either.
+    fn sub_blocks(&self, mut at: usize) -> Option<(Option<[u8; 4]>, usize)> {
+        let mut payload = [0u8; 4];
+        let mut len = 0usize;
+        loop {
+            let size = usize::from(*self.bytes.get(at)?);
+            at += 1;
+            if size == 0 {
+                return Some(((len == payload.len()).then_some(payload), at));
+            }
+            for &byte in self.bytes.get(at..at + size)? {
+                if let Some(slot) = payload.get_mut(len) {
+                    *slot = byte;
+                }
+                len += 1;
+            }
+            at += size;
+        }
+    }
+}
+
+/// The disposal to apply to a frame, preferring the raw wire code when the
+/// two walks demonstrably agree about which frame they are looking at.
+///
+/// [`ControlWalk`] is a second parser beside the one that decides where the
+/// frames are, and two parsers over one hostile file can come apart. They are
+/// checked against each other rather than assumed to agree: the graphic
+/// control extension carries the delay, the transparent index and the
+/// disposal side by side, the decoder kept the first two intact, and it kept
+/// the third in collapsed form. So all three are compared, and only then is
+/// the fourth piece of the same block, the code the decoder threw away,
+/// believed. A frame where they disagree keeps the decoder's answer, which is
+/// what this module did for every frame before #827.
+fn reconcile_disposal(
+    raw: Option<RawControl>,
+    dispose: gif::DisposalMethod,
+    delay_cs: u16,
+    transparent: Option<u8>,
+) -> Disposal {
+    match raw {
+        Some(raw)
+            if raw.delay_cs == delay_cs
+                && raw.transparent == transparent
+                && crate_disposal(raw.disposal) == dispose =>
+        {
+            Disposal::from_code(raw.disposal)
+        }
+        _ => Disposal::from_crate(dispose),
     }
 }
 
@@ -915,6 +1198,7 @@ fn scan_file(bytes: &[u8], limits: DecodeLimits) -> Result<FileScan, SourceError
         interlaced: false,
         colours: global,
         loop_count: 1,
+        any_local_palette: false,
     };
     // A scan that hits trouble stops where it is rather than failing:
     // vips' `fail-on` defaults to `VIPS_FAIL_ON_NONE`, so
@@ -941,6 +1225,7 @@ fn scan_file(bytes: &[u8], limits: DecodeLimits) -> Result<FileScan, SourceError
                 scan.has_transparency |= frame.transparent.is_some();
                 scan.interlaced |= frame.interlaced;
                 if let Some(local) = &frame.palette {
+                    scan.any_local_palette = true;
                     scan.colours = scan.colours.max(local.len() / PALETTE_STRIDE);
                 }
             }
@@ -3368,6 +3653,130 @@ mod tests {
                 "disposal {disposal} is {name}"
             );
         }
+    }
+
+    /**
+     * Tests that the wire walk which recovers the raw disposal code stays in
+     * step with the decoder that decides where the frames are, which is the
+     * risk #827 was filed rather than fixed over. Works by calling
+     * `reconcile_disposal` with a control whose delay, transparent index or
+     * mapped disposal disagrees with the frame the decoder handed back, and
+     * requiring it to fall back to the decoder's own answer.
+     * The three fields are the rest of the same graphic control extension,
+     * so a walk that is looking at a different frame than the decoder is
+     * almost certain to disagree on one of them, and disagreeing is the only
+     * thing this can do about it: the raw code is the half the decoder threw
+     * away, so there is nothing else to check it against.
+     * Input: an agreeing control, then one wrong in each field ->
+     * Output: the raw code once, the decoder's collapsed answer three times.
+     */
+    #[test]
+    fn a_control_walk_that_disagrees_with_the_decoder_is_not_trusted() {
+        let raw = RawControl {
+            disposal: 4,
+            delay_cs: 7,
+            transparent: Some(3),
+        };
+        assert_eq!(
+            reconcile_disposal(Some(raw), gif::DisposalMethod::Any, 7, Some(3)),
+            Disposal::Previous,
+            "agreeing on the other three fields is what lets code 4 through"
+        );
+        for (label, wrong) in [
+            (
+                "delay",
+                reconcile_disposal(Some(raw), gif::DisposalMethod::Any, 8, Some(3)),
+            ),
+            (
+                "transparent index",
+                reconcile_disposal(Some(raw), gif::DisposalMethod::Any, 7, Some(4)),
+            ),
+            (
+                "collapsed disposal",
+                reconcile_disposal(Some(raw), gif::DisposalMethod::Keep, 7, Some(3)),
+            ),
+        ] {
+            assert_eq!(
+                wrong,
+                Disposal::from_crate(if label == "collapsed disposal" {
+                    gif::DisposalMethod::Keep
+                } else {
+                    gif::DisposalMethod::Any
+                }),
+                "a walk that disagrees about the {label} is discarded"
+            );
+        }
+        assert_eq!(
+            reconcile_disposal(None, gif::DisposalMethod::Previous, 0, None),
+            Disposal::Previous,
+            "a walk that ran out of frames leaves the decoder in charge"
+        );
+    }
+
+    /**
+     * Tests that the control walk reads the same graphic control extensions
+     * the decoder does, on every frame of a file that exercises the fields it
+     * cross-checks. Works by walking a four-frame fixture whose frames carry
+     * different delays, transparent indices and disposal codes, and requiring
+     * the walk's answer to equal the decoder's frame by frame.
+     * This is the positive control for the test above: the fallback is only
+     * worth having if the agreement it guards is the normal case, and a walk
+     * that agreed with nothing would make every raw code unreachable without
+     * failing a single pixel assertion.
+     * Input: a four-frame GIF -> Output: four controls matching the
+     * decoder's `delay`, `transparent` and `dispose` on each frame.
+     */
+    #[test]
+    fn the_control_walk_agrees_with_the_decoder_frame_by_frame() {
+        let frames = vec![
+            Frame {
+                delay_cs: 4,
+                disposal: 2,
+                transparent: Some(1),
+                ..Frame::full(2, 2, vec![0, 1, 2, 3])
+            },
+            Frame {
+                delay_cs: 0,
+                disposal: 3,
+                ..Frame::full(2, 2, vec![3, 2, 1, 0])
+            },
+            Frame {
+                delay_cs: 65535,
+                disposal: 7,
+                transparent: Some(0),
+                ..Frame::full(2, 2, vec![1, 1, 2, 2])
+            },
+            Frame {
+                delay_cs: 12,
+                disposal: 0,
+                ..Frame::full(2, 2, vec![2, 2, 3, 3])
+            },
+        ];
+        let bytes = fixture((2, 2), &ANIM_PALETTE, 0, Some(0), &frames);
+        let mut walk = ControlWalk::new(&bytes);
+        let mut decoder = open(&bytes).expect("a valid GIF");
+        let mut seen = 0;
+        while let Some(frame) = decoder.next_frame_info().expect("a valid GIF") {
+            let raw = walk.next_frame().expect("the walk has this frame too");
+            assert_eq!(raw.delay_cs, frame.delay, "frame {seen} delay");
+            assert_eq!(
+                raw.transparent, frame.transparent,
+                "frame {seen} transparent"
+            );
+            assert_eq!(
+                crate_disposal(raw.disposal),
+                frame.dispose,
+                "frame {seen} disposal"
+            );
+            assert_eq!(raw.disposal, frames[seen].disposal, "frame {seen} raw code");
+            seen += 1;
+        }
+        assert_eq!(seen, 4, "the walk and the decoder both saw four frames");
+        assert_eq!(
+            walk.next_frame(),
+            None,
+            "and the walk stops where the decoder does"
+        );
     }
 
     /**

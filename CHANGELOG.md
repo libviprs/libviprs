@@ -711,6 +711,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- GIF load attaches **`gif-palette`**, the global colour table as one signed
+  32-bit word per entry (issue #828). vips packs libnsgif's `R, G, B, A` byte
+  quad as a machine integer, so on a little-endian host each entry reads
+  `0xFF << 24 | B << 16 | G << 8 | R` and every one of them is negative:
+  measured on vips 8.18.6, a table of `(71, 112, 76)` and `(60, 60, 60)` comes
+  back `-11767737 -12829636`. The array is the table as it sits on the wire,
+  padding included, so a three-colour table has four entries with an
+  opaque-black fourth.
+
+  It carries vips's presence rule, which is about the **file** and not the
+  window that was loaded: the field is attached only when no frame anywhere in
+  the file declares a colour table of its own, so a two-frame file whose frame
+  0 has a local table reports no `gif-palette` at `[page=1]` either. Measured
+  across seven files and three windows, including a local table byte-identical
+  to the global one, which still suppresses it.
+
+  `background` is the one `gifload` header field still not attached, and now
+  for a measured reason rather than an expired one: vips stores it as a
+  `VipsArrayDouble` and `MetadataValue` has an integer array and no
+  floating-point one. Issue #852 is that variant.
+
+- `src/gif.rs`'s module docs carry a table of every `gifload` header field and
+  whether this loader attaches it, and the table is **checked**: a test parses
+  it out of the source and requires every "attached" row to be present on a
+  decoded raster and every "not attached" row to be absent (issue #801). The
+  paragraph it replaces named a blocker that had already been removed and a
+  field set that had already moved, because nothing held it.
+
 - **Animated GIF save** (issue #573). `Raster::encode_gif` splits the raster by
   its page height and writes one GIF frame per page, taking the per-frame
   delays out of the `delay` field and the NETSCAPE loop block out of `loop`,
@@ -2654,6 +2682,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matching on the typed errors is unaffected; only the panic text changes.
 
 ### Fixed
+
+- GIF disposal code **4** rewinds the canvas the way libnsgif does, instead of
+  keeping it (issue #827). GIF89a reserves codes 4 to 7; libnsgif remaps 4 onto
+  restore-to-previous and leaves 5, 6 and 7 as "keep". Measured on vips 8.18.6
+  over all eight codes on one two-frame file, page 1 comes back three different
+  ways: `green red` for 0, 1, 5, 6 and 7, `green blue` for 2, and `green black`
+  for 3 and 4. libviprs gave `green red` for 4.
+
+  The code never reached this module: `gif` 0.14.2's `DisposalMethod::from_u8`
+  knows only 0 to 3 and folds everything else onto `Any`, so 4 arrived
+  indistinguishable from 0. `ControlWalk` now walks the block chain a second
+  time and reads each frame's graphic control extension off the wire. It
+  decodes no pixels and allocates nothing, so there is no new buffer to price
+  against `DecodeLimits`, and it is not trusted blind: the extension carries
+  the delay, the transparent index and the disposal side by side, the decoder
+  kept the first two intact and the third in collapsed form, so all three are
+  compared before the fourth is believed. A frame where the two walks disagree
+  keeps the decoder's answer, which is what every frame got before.
+
+- A background index past the end of the global colour table disposes to
+  colour table **entry 0**, not to black (issue #850). Measured on vips 8.18.6
+  with a palette whose entry 0 is `(9, 8, 7)`: a stored index of 200 reports
+  `background: 9 8 7` and disposes the canvas to it, where index 3 on the same
+  table reports `0 0 255`. The fixture that pinned this before used a palette
+  whose entry 0 was black, so "black" and "entry 0" could not be told apart.
 
 - `hist_find` sizes a 16-bit histogram from the data instead of from the depth,
   and `hist_equal` follows it (issues #803, #823). Measured on vips 8.18.6,
