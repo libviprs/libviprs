@@ -608,11 +608,16 @@ impl Raster {
     /// element selected by the corresponding `index` pixel. The result is
     /// sized from the **index** image the same way [`Raster::try_hist_find`]
     /// is sized from its input, 256 elements for an 8-bit index and
-    /// `max + 1` for a 16-bit one, and carries the input's band count. Sums
-    /// are still written as 16-bit samples and saturate at `65535`: vips
-    /// emits `DOUBLE` here whatever the value image's carrier is, so this
-    /// one is a float fix rather than a `Uint32` one, and it is issue
-    /// #887.
+    /// `max + 1` for a 16-bit one, and carries the input's band count.
+    ///
+    /// Sums go out on [`PixelFormat::FloatF32`]. vips emits **DOUBLE**
+    /// here whatever the value image's carrier is, measured on 8.18.6 for
+    /// `uchar`, `ushort`, `uint` and `float` alike, and this crate has no
+    /// `f64` carrier, so the nearest kind is the float one (issue #887).
+    /// Sums are exact to 2^24 and lose at most half a spacing above it,
+    /// where vips's `DOUBLE` is exact to 2^53. `Uint32` would have been
+    /// exact further, to 4294967295, and then **overflowed** on a
+    /// 10000x10000 `uchar` image whose sums reach 25.5e9.
     ///
     /// # Errors
     ///
@@ -643,18 +648,32 @@ impl Raster {
         let idx_data = index.data();
         // Sized from the index image, which is the one being binned.
         let bins = hist_width(idx_kind, max_bin(idx_data, idx_kind, n));
-        let mut sums = vec![0u64; bins * bands];
+        // `f64` sums on a float output, which is the carrier vips uses:
+        // `vips hist_find_indexed` emits **DOUBLE** whatever the value
+        // image's carrier is, measured on 8.18.6 for `uchar`, `ushort`,
+        // `uint` and `float` alike. This crate has no `f64` carrier, so the
+        // nearest *kind* is `FloatF32` rather than the nearest width
+        // (issue #887): `Uint32` would be exact to 4294967295 and overflow
+        // on a 10000x10000 `uchar` image, whose sums reach 25.5e9, which is
+        // an image size libvips exists to handle. `f32` never overflows and
+        // its error is relative: sums stay exact to 2^24 and lose at most
+        // half a spacing above it.
+        //
+        // The read is the numeric one rather than `read_value`, so a float
+        // value image works at all: it used to panic on the kind.
+        let mut sums = vec![0f64; bins * bands];
         for i in 0..n {
             let slot = read_bin(idx_data, idx_kind, i) as usize;
             for b in 0..bands {
-                sums[slot * bands + b] += read_value(data, kind, i * bands + b) as u64;
+                let off = (i * bands + b) * kind.bytes();
+                sums[slot * bands + b] += crate::pixel::read_sample_f64(data, kind, off);
             }
         }
-        let out_fmt = format_for(bands, SampleKind::U16)?;
+        let out_fmt = format_for(bands, SampleKind::F32)?;
         let mut out = Raster::zeroed(bins as u32, 1, out_fmt)?;
         let buf = out.data_mut();
         for (i, &s) in sums.iter().enumerate() {
-            write_flat(buf, SampleKind::U16, i, sat16(s));
+            crate::pixel::write_sample_f64(buf, SampleKind::F32, i * 4, s);
         }
         Ok(out)
     }
@@ -1494,7 +1513,8 @@ mod tests {
      * `combine` mode, which the module doc used to sweep into "32-bit
      * unsigned" (issue #759).
      * Input: a 4x4 Gray8 image -> Output: `Uint32` from four of the five,
-     * and `Gray16` from `hist_find_indexed`, which is issue #887.
+     * and `FloatF32` from `hist_find_indexed`, which is issue #887 and a
+     * different carrier family for a measured reason.
      */
     #[test]
     fn counting_ops_carry_32_bit_samples() {
@@ -1503,10 +1523,14 @@ mod tests {
         assert_eq!(im.hist_find_band(0).format(), uint_fmt(1));
         assert_eq!(im.hist_find_ndim(Some(4)).format(), uint_fmt(1));
         assert_eq!(im.hist_find().hist_cum().format(), uint_fmt(1));
-        // `hist_find_indexed` is deliberately not in that list. vips emits
-        // **DOUBLE** there whatever the value image's carrier is, so it is
-        // a float fix rather than a `Uint32` one, and it is issue #887.
-        assert_eq!(im.hist_find_indexed(&im).format(), PixelFormat::Gray16);
+        // `hist_find_indexed` is in a different carrier family and not a
+        // wider integer: vips emits **DOUBLE** there whatever the value
+        // image's carrier is, and `FloatF32` is the nearest kind this crate
+        // has (issue #887).
+        assert_eq!(
+            im.hist_find_indexed(&im).format(),
+            PixelFormat::FloatF32(core::num::NonZeroU16::new(1).unwrap())
+        );
     }
 
     /**
@@ -2963,6 +2987,75 @@ mod tests {
     }
 
     /**
+     * Tests that `hist_find_indexed` sums onto the float carrier vips uses,
+     * and pins exactly what that costs (issue #887).
+     * Works on three fixtures chosen so each one can only pass for the
+     * right reason. The small pair is the vips oracle: values
+     * `[10, 20, 30, 40]` under index `[0, 1, 0, 1]` give bins 40 and 60 on
+     * 8.18.6, and `f32` holds both exactly. The second is **2^24 + 1**,
+     * the first integer `f32` cannot represent, so the sum comes back one
+     * low and the assertion cannot pass by accident: a round number at that
+     * magnitude would land on a representable value and pass against a
+     * 16-bit write-back too. The third is the argument for the carrier
+     * choice made into a test: a sum of 8000000001 that a `Uint32` output
+     * could not hold at all, which `f32` holds to a relative error of
+     * 1.25e-10.
+     * Input/Output: (10,20,30,40) by (0,1,0,1) -> 40 and 60; 16777216 + 1
+     * -> **16777216**, not 16777217; 4000000000 + 4000000001 ->
+     * **8000000000**, where `u32::MAX` is 4294967295.
+     */
+    #[test]
+    fn hist_find_indexed_sums_onto_the_float_carrier() {
+        let n1 = core::num::NonZeroU16::new(1).unwrap();
+        let at = |r: &Raster, i: usize| {
+            let d = r.data();
+            f32::from_ne_bytes([d[i * 4], d[i * 4 + 1], d[i * 4 + 2], d[i * 4 + 3]])
+        };
+
+        // The vips oracle, at sums `f32` holds exactly.
+        let values = Raster::new(4, 1, PixelFormat::Gray8, vec![10, 20, 30, 40]).unwrap();
+        let index = Raster::new(4, 1, PixelFormat::Gray8, vec![0, 1, 0, 1]).unwrap();
+        let out = values.try_hist_find_indexed(&index).unwrap();
+        assert_eq!(out.format(), PixelFormat::FloatF32(n1));
+        assert_eq!(at(&out, 0), 40.0);
+        assert_eq!(at(&out, 1), 60.0);
+
+        // 2^24 + 1, the first integer `f32` misses. The sum is 16777217 and
+        // the answer is 16777216, off by exactly one, so this fails against
+        // any carrier that is exact here and against any that saturates.
+        let big = uint_hist(&[16_777_216, 1]);
+        let flat = Raster::new(2, 1, PixelFormat::Gray8, vec![0, 0]).unwrap();
+        let out = big.try_hist_find_indexed(&flat).unwrap();
+        assert_eq!(
+            at(&out, 0),
+            16_777_216.0,
+            "2^24 + 1 is the first integer f32 cannot represent"
+        );
+        // The control that says the loss starts exactly there: 2^24 + 2 is
+        // representable and comes back whole.
+        let even = uint_hist(&[16_777_216, 2]);
+        assert_eq!(
+            even.try_hist_find_indexed(&flat)
+                .map(|r| at(&r, 0))
+                .unwrap(),
+            16_777_218.0
+        );
+
+        // And the sum a `Uint32` output could not have held. This is the
+        // whole argument for choosing the float carrier over the wider
+        // integer one: `u32` stops at 4294967295 and a 10000x10000 `uchar`
+        // image sums to 25.5e9, which is an image size libvips exists to
+        // handle.
+        let over = uint_hist(&[4_000_000_000, 4_000_000_001]);
+        let out = over.try_hist_find_indexed(&flat).unwrap();
+        assert!(
+            u64::from(u32::MAX) < 8_000_000_001,
+            "the control: this sum really is past what a u32 output holds"
+        );
+        assert_eq!(at(&out, 0), 8_000_000_000.0);
+    }
+
+    /**
      * Tests the three functions that read *both* a bin index and a value,
      * a few lines apart, which are the sites a sweep is most likely to
      * convert wrongly: `maplut` reads an index into the LUT and then an
@@ -2997,13 +3090,12 @@ mod tests {
         assert_eq!(u32::from_ne_bytes([d[4], d[5], d[6], d[7]]), 7);
 
         // hist_find_indexed reads a slot from the index image and a value
-        // from the value image. Only the slot half is assertable here: the
-        // sums still go out through a 16-bit sample, so a folded value read
-        // and an unfolded one both come back 65535 and no assertion can
-        // tell them apart. That half is **NO TEST REDDENS** until issue
-        // #887 moves the output off 16 bits.
+        // from the value image, and both halves are assertable now that
+        // issue #887 has moved its output to `FloatF32`. While that output
+        // was 16 bits the value half was **NO TEST REDDENS**: a folded read
+        // and an unfolded one both came back 65535.
         //
-        // The slot half is assertable, and it must keep folding: a `uint`
+        // The slot half must keep folding: a `uint`
         // index sample of 90000 has to bin at 65535, so the histogram comes
         // out 65536 wide rather than 90001 wide.
         let values = Raster::new(2, 1, PixelFormat::Gray8, vec![10, 20]).unwrap();
@@ -3015,17 +3107,26 @@ mod tests {
             "the slot read stopped folding, so a 32-bit index would size a \
              90001-bin table"
         );
-        let d = summed.data();
+        let at = |r: &Raster, i: usize| {
+            let d = r.data();
+            f32::from_ne_bytes([d[i * 4], d[i * 4 + 1], d[i * 4 + 2], d[i * 4 + 3]])
+        };
+        assert_eq!(at(&summed, 0), 20.0, "bin 0 holds the second pixel");
         assert_eq!(
-            u16::from_ne_bytes([d[0], d[1]]),
-            20,
-            "bin 0 holds the second pixel"
-        );
-        let last = (65535usize) * 2;
-        assert_eq!(
-            u16::from_ne_bytes([d[last], d[last + 1]]),
-            10,
+            at(&summed, 65535),
+            10.0,
             "the folded slot put the first pixel in the last bin"
+        );
+
+        // And the value half, which was untestable while the output was
+        // 16 bits: a `Uint32` value above the fold has to arrive whole.
+        let big_values = uint_hist(&[90_000, 7]);
+        let flat_index = Raster::new(2, 1, PixelFormat::Gray8, vec![0, 0]).unwrap();
+        let summed = big_values.try_hist_find_indexed(&flat_index).unwrap();
+        assert_eq!(
+            at(&summed, 0),
+            90_007.0,
+            "the value read folded, so the sum came back 65542"
         );
     }
 
