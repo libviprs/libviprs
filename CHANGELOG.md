@@ -3540,10 +3540,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `make clippy` is silent across all nine linted features, and `cargo doc`
   with all three rustdoc lints denied has nothing to say, because rustdoc has
   no opinion about a private test item's missing doc and every link still
-  resolves. The check reads the file, finds every `fn` whose attribute stack
-  contains `#[test]`, and requires a doc line immediately above it, with a
-  count assertion beside it so an empty offender list from a parse that
-  matched nothing cannot pass for a clean file.
+  resolves.
+
+  Two checks rather than one, because they catch different things. The first
+  reads the file, finds every `fn` whose attribute stack contains `#[test]`,
+  and requires a doc line immediately above it. The second asks whether the
+  block is on the test it *describes*, which the first cannot see: a block
+  above the wrong test satisfies "every test has a doc" perfectly. Position
+  drifted here and content did not, so the content identifies the owner, and
+  every doc block in that file names the fixtures its test drives. The reach
+  is one hop through a `const` the body names, because the reversible-fixtures
+  test documents three fixtures it touches only through `EXACT`.
+
+  Both carry a count assertion, because an offender list that is empty from a
+  parse that matched nothing looks exactly like a clean file.
 - Animated WebP frames are composited by this loader rather than by
   `image-webp`, and come back byte-exact with vips (issues #837, #917). Every
   blended page used to be a grey level low, which is #837, and translucent
