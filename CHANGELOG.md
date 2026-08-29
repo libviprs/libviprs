@@ -3840,16 +3840,6 @@ and not under `Fixed`: this file is the only place they can be caught.
   `bandmean` rounds half **away from zero** and `shrink` truncates **toward**
   it, on the same numbers. Both are matched.
 
-- **Three ops answered zero or garbage on a signed carrier rather than
-  refusing**, so they were silent rather than loud (issue #909). `shrink`
-  accumulated its integer mean in a `u64`, and a negative `f64` cast to `u64`
-  saturates, so a `char` block whose vips answer is -99 came out **0**. The
-  `resize` box kernels accumulated in `u64` and `u128` the same way.
-  `affine`'s bicubic dispatch asked `bytes_per_channel == 1`, so `Int8` took
-  the `uchar` fixed-point table whose taps clamp into `0..=max`, and an 8x1
-  `char` ramp of four -128s and four 127s came out `[0, 0, 127, 127]` where
-  vips answers `[-128, -128, 127, 127]`.
-
 - **A float raster goes through `embed`, `gravity`, `insert`, `join`,
   `arrayjoin` and `bandmean`** (issue #945). This is #909 one carrier family
   further on, and the same argument: vips runs every one of those ops on a
