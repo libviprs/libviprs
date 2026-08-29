@@ -4080,7 +4080,7 @@ mod tests {
     fn a_palette_is_where_siz_and_the_decoded_components_legitimately_disagree() {
         /// Wrap `depth8u.j2k` in a JP2 with a 256-entry, 3-column palette
         /// whose entries are `depth` bits wide.
-        fn palettised(depth: u8) -> Vec<u8> {
+        fn palettised(depth: u8, enumcs: u32) -> Vec<u8> {
             fn boxed(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
                 let mut out = ((payload.len() + 8) as u32).to_be_bytes().to_vec();
                 out.extend_from_slice(kind);
@@ -4110,7 +4110,7 @@ mod tests {
             ihdr.extend_from_slice(&1u16.to_be_bytes()); // components
             ihdr.extend_from_slice(&[7, 7, 1, 0]);
             let mut colr = vec![1, 0, 0];
-            colr.extend_from_slice(&16u32.to_be_bytes()); // EnumCS 16, sRGB
+            colr.extend_from_slice(&enumcs.to_be_bytes());
 
             let mut header = boxed(b"ihdr", &ihdr);
             header.extend_from_slice(&boxed(b"colr", &colr));
@@ -4129,7 +4129,7 @@ mod tests {
 
         // The 8-bit palette: one component in SIZ, three bands out, and vips's
         // pixels.
-        let bytes = palettised(8);
+        let bytes = palettised(8, 16);
         let layout = ContainerLayout::parse(&bytes).expect("container");
         let header = CodestreamHeader::parse(&bytes[layout.codestream..]).expect("codestream");
         assert_eq!(
@@ -4146,9 +4146,36 @@ mod tests {
             "the band count comes off the decoder because SIZ cannot see the palette"
         );
 
+        // The same palette under a `colr` box nobody recognises, which is the
+        // case that says why #771's rewrite neutralises to **sRGB** and not to
+        // the greyscale a one-component `SIZ` would suggest. The palette turns
+        // one component into three, so a greyscale neutral would hand the
+        // decoder a colour space with one channel and the decode would come
+        // back `BandCountMismatch`.
+        //
+        // vips is broken here, measured on 8.18.6: it reports
+        // `5x1 uchar, 1 band, b-w` and then any pixel read fails with
+        // "decoded image does not match container", because it guesses the
+        // interpretation from the component count **before** the palette. This
+        // keeps the three real bands and reads them, which is the same call
+        // #767 made for the one-component sRGB file.
+        let unknown_enum = decode_jp2k(&palettised(8, 99), DecodeLimits::default())
+            .expect("an unrecognised colr box must not cost a palettised file its palette");
+        assert_eq!(unknown_enum.format(), PixelFormat::Rgb8);
+        assert_eq!(
+            samples(&unknown_enum)[..9],
+            samples(&raster)[..9],
+            "the colr box does not touch the palette, so the samples are the same nine"
+        );
+        assert_eq!(
+            unknown_enum.interpretation(),
+            Interpretation::Srgb,
+            "unrecognised, so the band count decides, and it is three after the palette"
+        );
+
         // The 16-bit palette: wider than the index SIZ declared, so the
         // carrier the frame was priced for cannot hold it.
-        let err = decode_jp2k(&palettised(16), DecodeLimits::default())
+        let err = decode_jp2k(&palettised(16, 16), DecodeLimits::default())
             .expect_err("16-bit palette entries do not fit the 8-bit carrier SIZ priced");
         let SourceError::Jp2k(Jp2kError::PrecisionWiderThanDeclared {
             component,
