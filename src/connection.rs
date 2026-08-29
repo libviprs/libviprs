@@ -232,7 +232,7 @@ impl Raster {
     ///
     /// Uses the same dispatch as [`encode_to_target`]: `"jpeg"` / `"jpg"`,
     /// `"png"`, `"gif"`, `"webp"`, `"jxl"`,
-    /// `"jp2k"` / `"jp2"` / `"j2k"` / `"jpt"` / `"j2c"` / `"jpc"`,
+    /// `"jp2k"` / `"jp2"` / `"j2k"` / `"jpt"` / `"j2c"` / `"jpc"`, `"uhdr"`,
     /// `"fits"` / `"fit"` / `"fts"` and
     /// `"v"` / `"vips"` are wired; any other format returns
     /// [`EncodeError::Unsupported`]. `"webp"` encodes losslessly at
@@ -254,6 +254,16 @@ impl Raster {
     /// not a shortcut: `jp2ksave` hard-codes `OPJ_CODEC_JP2` and, measured on
     /// 8.18.6, writes byte-identical files under all five suffixes it
     /// registers.
+    ///
+    /// `"uhdr"` is Ultra HDR (gain-map JPEG, libvips `uhdrsave`) at that
+    /// saver's default quality of 75, and it is the **only** route to the
+    /// writer that takes a format name: `uhdrsave` registers no file suffix
+    /// at all, so [`Raster::save`] has no row for it. Unlike the rows above
+    /// it has an input contract, a 3-band `f32` raster holding linear-light
+    /// scRGB, and a raster that does not meet it is refused with
+    /// [`EncodeError::InvalidParameter`] naming the raster rather than
+    /// [`EncodeError::Unsupported`] naming the format: this build can write
+    /// Ultra HDR, and what is wrong is the input.
     ///
     /// # Errors
     ///
@@ -295,6 +305,23 @@ fn encode_for_format(raster: &Raster, format: &str) -> Result<Vec<u8>, EncodeErr
         "jp2k" | "jp2" | "j2k" | "jpt" | "j2c" | "jpc" => {
             raster.encode_jp2k(crate::jp2k::SaveOptions::default())
         }
+        // `uhdrsave`'s nickname, and the only name it has: measured on 8.18.6,
+        // `vips -l` gives `VipsForeignSaveUhdrFile (uhdrsave), save image in
+        // UltraHDR format, nocache (), priority=0`, an **empty** suffix list,
+        // and `vips copy base.v out.uhdr` is refused as an unknown format. So
+        // one spelling here and no row at all in the extension table, which is
+        // the reverse of the JPEG 2000 arm above.
+        //
+        // Not gated because there is nothing to gate: #508 wrote the container
+        // out of the JPEG codec the crate already required, so Ultra HDR costs
+        // no feature and no dependency.
+        //
+        // The default quality is `uhdrsave`'s own 75, through
+        // `uhdr::SaveOptions::default`, the same way the rows above take their
+        // codec's defaults. A caller who wants another quality or another
+        // gain-map scale factor calls `Raster::encode_uhdr` or
+        // `Raster::encode_uhdr_gainmap_scale`, which is where those knobs live.
+        "uhdr" => raster.encode_uhdr(crate::uhdr::SaveOptions::default().quality),
         // The three suffixes vips registers for FITS (`vips__fits_suffs`,
         // `fits.c:125`). `fitssave` takes no options, so there is nothing
         // to default here.
@@ -461,6 +488,110 @@ mod tests {
                 "{spelling:?} must report the codec name it has no encoder for, got {err}"
             );
         }
+    }
+
+    /// A 3-band `f32` linear-light ramp reaching past the SDR ceiling, which
+    /// is the input contract [`crate::uhdr::encode_uhdr`] computes a gain map
+    /// from. Same shape as the fixture in `foreign_stubs.rs`.
+    fn scrgb_ramp(w: u32, h: u32) -> Raster {
+        let mut px: Vec<f32> = Vec::with_capacity((w * h * 3) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let t = f64::from(x) / f64::from(w - 1);
+                let s = f64::from(y) / f64::from(h - 1);
+                px.push((0.02 + 6.0 * t * s) as f32);
+                px.push((0.5 * (1.0 - t) + 3.0 * s) as f32);
+                px.push((1.5 * t + 0.25) as f32);
+            }
+        }
+        Raster::new(
+            w,
+            h,
+            PixelFormat::FloatF32(std::num::NonZeroU16::new(3).unwrap()),
+            px.into_iter().flat_map(f32::to_ne_bytes).collect(),
+        )
+        .unwrap()
+    }
+
+    /// `"uhdr"` is a live row in the shared format dispatch and it reaches the
+    /// Ultra HDR writer (issue #809).
+    ///
+    /// One spelling, not six like JPEG 2000, and that is measured rather than
+    /// chosen: on the pinned vips 8.18.6, `vips -l` reports
+    /// `VipsForeignSaveUhdrFile (uhdrsave), save image in UltraHDR format,
+    /// nocache (), priority=0` with an **empty** suffix list, so `uhdrsave`'s
+    /// nickname is the only name there is. `"ultrahdr"` is the nearest miss
+    /// and is the positive control below: a dispatch that accepted every
+    /// string would pass the first half of this on its own.
+    ///
+    /// The bytes are compared against [`Raster::encode_uhdr`] at the default
+    /// quality and then put through the crate's own two-stage Ultra HDR gate,
+    /// so "reaches the writer" means a real container and not merely "some
+    /// bytes came back".
+    #[test]
+    fn encode_for_format_routes_uhdr_to_the_ultra_hdr_writer() {
+        let raster = scrgb_ramp(16, 16);
+        let direct = raster
+            .encode_uhdr(crate::uhdr::SaveOptions::default().quality)
+            .expect("a 3-band f32 raster encodes");
+
+        for spelling in ["uhdr", "UHDR", ".uhdr", " Uhdr "] {
+            let bytes = raster
+                .encode_to_buffer(spelling)
+                .unwrap_or_else(|e| panic!("{spelling:?} must be a live row, got {e}"));
+            assert_eq!(
+                bytes, direct,
+                "{spelling:?} must write the same container as encode_uhdr at the default quality"
+            );
+            assert!(
+                crate::uhdr::is_uhdr(&bytes),
+                "{spelling:?} must produce something that satisfies the Ultra HDR gate"
+            );
+        }
+
+        // vips has no `ultrahdr` anything, so neither has this.
+        for miss in ["ultrahdr", "uhdr2", "gainmap"] {
+            assert!(
+                matches!(
+                    raster.encode_to_buffer(miss),
+                    Err(EncodeError::Unsupported { .. })
+                ),
+                "{miss:?} is not a name vips knows either"
+            );
+        }
+    }
+
+    /// The `"uhdr"` row answers a raster it cannot write with
+    /// [`EncodeError::InvalidParameter`] naming the input, not with
+    /// [`EncodeError::Unsupported`] naming the format (issue #809).
+    ///
+    /// The two are different answers and the difference is the whole value of
+    /// the row being live. `Unsupported` says "this build cannot write Ultra
+    /// HDR", which is false: it can, and #508 and #757 are why. What is wrong
+    /// is the raster, and a caller can act on that by casting to 3-band `f32`
+    /// scRGB.
+    ///
+    /// Contrast the `"jxl"` and JPEG 2000 rows above, where `Unsupported` is
+    /// exactly right because the feature really is off.
+    #[test]
+    fn the_uhdr_row_refuses_the_wrong_raster_by_naming_the_raster() {
+        let rgb = Raster::new(8, 6, PixelFormat::Rgb8, vec![128u8; 8 * 6 * 3]).unwrap();
+        let err = rgb.encode_to_buffer("uhdr").unwrap_err();
+        assert!(
+            matches!(err, EncodeError::InvalidParameter(_)),
+            "expected InvalidParameter naming the raster, got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("Rgb8"),
+            "the refusal must name what it got, given {err}"
+        );
+        // Positive control: the same raster through a row this build has no
+        // encoder for still reports `Unsupported`, so the two answers are
+        // genuinely distinguishable here and not just one variant everywhere.
+        assert!(matches!(
+            rgb.encode_to_buffer("heic"),
+            Err(EncodeError::Unsupported { .. })
+        ));
     }
 
     /// Without the `jxl` feature the row is still there and still typed:
