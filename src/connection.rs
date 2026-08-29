@@ -240,7 +240,7 @@ impl Raster {
     /// Uses the same dispatch as [`encode_to_target`]: `"jpeg"` / `"jpg"`,
     /// `"png"`, `"gif"`, `"webp"`, `"jxl"`,
     /// `"jp2k"` / `"jp2"` / `"j2k"` / `"jpt"` / `"j2c"` / `"jpc"`, `"uhdr"`,
-    /// `"fits"` / `"fit"` / `"fts"` and
+    /// `"hdr"`, `"ppm"` / `"pgm"`, `"fits"` / `"fit"` / `"fts"` and
     /// `"v"` / `"vips"` are wired; any other format returns
     /// [`EncodeError::Unsupported`]. `"webp"` encodes losslessly at
     /// [`crate::webp::SaveOptions::default`], keeping any attached metadata,
@@ -271,6 +271,23 @@ impl Raster {
     /// [`EncodeError::InvalidParameter`] naming the raster rather than
     /// [`EncodeError::Unsupported`] naming the format: this build can write
     /// Ultra HDR, and what is wrong is the input.
+    ///
+    /// `"hdr"` is Radiance RGBE (libvips `radsave`), and it has the same shape:
+    /// a 3-band `f32` raster only, refused rather than cast, where `radsave`
+    /// declares `mono rgb` and casts whatever it is handed.
+    ///
+    /// `"ppm"` and `"pgm"` are the two binary Netpbm containers this build
+    /// writes, and they are the one place a **name** picks the container
+    /// rather than the codec: `"ppm"` is `P6` and takes three bands, `"pgm"`
+    /// is `P5` and takes one, and each refuses the other's band count rather
+    /// than converting. The other three suffixes `ppmsave` registers are not
+    /// rows: `.pbm` is a `P4` and `.pfm` a `PF`, neither of which this build
+    /// encodes, and `.pnm` is one vips itself refuses.
+    ///
+    /// Those three are written as suffixes and not as quoted format names on
+    /// purpose. A quoted name in this block is a value a caller may pass, and
+    /// `the_format_dispatch_and_the_list_a_caller_is_given_cannot_drift_apart`
+    /// reads them as exactly that.
     ///
     /// # Errors
     ///
@@ -329,6 +346,17 @@ fn encode_for_format(raster: &Raster, format: &str) -> Result<Vec<u8>, EncodeErr
         // gain-map scale factor calls `Raster::encode_uhdr` or
         // `Raster::encode_uhdr_gainmap_scale`, which is where those knobs live.
         "uhdr" => raster.encode_uhdr(crate::uhdr::SaveOptions::default().quality),
+        // The saver's own suffix, and the only one it registers (measured:
+        // `radsave`'s `vips -l` entry reads `nocache (.hdr)`, and `.rad`,
+        // `.rgbe` and `.pic` are all refused). Ungated; #589 wrote the encoder
+        // in this crate. Like `"uhdr"` above and unlike everything else here it
+        // has an input contract, 3-band `f32`, and it propagates the refusal
+        // rather than casting.
+        "hdr" => raster.encode_radiance(crate::radiance::SaveOptions::default()),
+        // The two Netpbm containers this build writes, of the five `ppmsave`
+        // registers. The name picks the container, so the row refuses a band
+        // count that names the other one rather than converting.
+        "ppm" | "pgm" => raster.encode_netpbm(&key),
         // The three suffixes vips registers for FITS (`vips__fits_suffs`,
         // `fits.c:125`). `fitssave` takes no options, so there is nothing
         // to default here.
@@ -692,6 +720,90 @@ mod tests {
                     Err(EncodeError::Unsupported { .. })
                 ),
                 "{miss:?} is not a name vips knows either"
+            );
+        }
+    }
+
+    /// `"ppm"` and `"pgm"` are live rows in the shared format dispatch and each
+    /// reaches its own Netpbm container (issue #882).
+    ///
+    /// Two spellings out of the five `ppmsave` registers, because the other
+    /// three name containers this build cannot write (`P4`, `PF`) or one vips
+    /// itself refuses (`.pnm`, which demands a `multiband` interpretation and
+    /// was refused for `srgb`, `b-w` and an explicitly-`multiband` image
+    /// alike). The three are the positive control here.
+    #[test]
+    fn encode_for_format_routes_ppm_and_pgm_to_their_own_containers() {
+        let rgb = Raster::new(8, 6, PixelFormat::Rgb8, vec![128u8; 8 * 6 * 3]).unwrap();
+        let gray = Raster::new(8, 6, PixelFormat::Gray8, vec![128u8; 8 * 6]).unwrap();
+
+        for spelling in ["ppm", "PPM", ".ppm", " Ppm "] {
+            let bytes = rgb
+                .encode_to_buffer(spelling)
+                .unwrap_or_else(|e| panic!("{spelling:?} must be a live row, got {e}"));
+            assert_eq!(bytes, rgb.encode_ppm().unwrap());
+            assert!(bytes.starts_with(b"P6"));
+        }
+        let bytes = gray.encode_to_buffer("pgm").expect("pgm is a live row");
+        assert_eq!(bytes, gray.encode_ppm().unwrap());
+        assert!(bytes.starts_with(b"P5"));
+
+        // The band count has to match the container the spelling names.
+        assert!(matches!(
+            gray.encode_to_buffer("ppm"),
+            Err(EncodeError::InvalidParameter(_))
+        ));
+        assert!(matches!(
+            rgb.encode_to_buffer("pgm"),
+            Err(EncodeError::InvalidParameter(_))
+        ));
+
+        for miss in ["pbm", "pfm", "pnm", "netpbm"] {
+            assert!(
+                matches!(
+                    rgb.encode_to_buffer(miss),
+                    Err(EncodeError::Unsupported { .. })
+                ),
+                "{miss:?} names a container this build cannot write"
+            );
+        }
+    }
+
+    /// `"hdr"` is a live row in the shared format dispatch and it reaches the
+    /// Radiance writer (issue #880).
+    ///
+    /// One spelling, measured: `radsave`'s entry in `vips -l` on the pinned
+    /// 8.18.6 reads `nocache (.hdr)`, and `vips copy base.v x.rad`, `x.rgbe`
+    /// and `x.pic` are each refused with "is not a known file format". Those
+    /// three are the positive control below. `.pic` is in there because #506's
+    /// own title says `.hdr/.pic`; it is a load spelling elsewhere and not one
+    /// `radsave` registers.
+    ///
+    /// The bytes are compared against [`Raster::encode_radiance`] at the
+    /// defaults and their magic checked, so "reaches the writer" means a
+    /// Radiance file and not merely some bytes.
+    #[test]
+    fn encode_for_format_routes_hdr_to_the_radiance_writer() {
+        let raster = scrgb_ramp(8, 6);
+        let direct = raster
+            .encode_radiance(crate::radiance::SaveOptions::default())
+            .expect("a 3-band f32 raster encodes");
+        assert!(direct.starts_with(b"#?RADIANCE"));
+
+        for spelling in ["hdr", "HDR", ".hdr", " Hdr "] {
+            let bytes = raster
+                .encode_to_buffer(spelling)
+                .unwrap_or_else(|e| panic!("{spelling:?} must be a live row, got {e}"));
+            assert_eq!(bytes, direct, "{spelling:?} must write the same file");
+        }
+
+        for miss in ["rad", "rgbe", "pic", "radiance"] {
+            assert!(
+                matches!(
+                    raster.encode_to_buffer(miss),
+                    Err(EncodeError::Unsupported { .. })
+                ),
+                "{miss:?} is not a name radsave answers to either"
             );
         }
     }

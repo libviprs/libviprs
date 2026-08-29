@@ -805,10 +805,14 @@ fn frame_carries_alpha(after_header: &[u8]) -> bool {
 /// [`crate::frames`] describes. [`decode_webp`] is this function at
 /// [`LoadOptions::default`].
 ///
-/// A page the file asks to have blended comes back **one grey level low on
-/// every non-zero channel**, which is `image-webp` 0.2.4 blending opaque
-/// pixels where libwebp copies them. The module docs have the arithmetic
-/// and the reason libviprs no longer tries to work around it (issue #863).
+/// An **opaque** page the file asks to have blended comes back **one grey
+/// level low on every non-zero channel**, which is `image-webp` 0.2.4
+/// blending opaque pixels where libwebp copies them. The module docs have
+/// the arithmetic and the reason libviprs no longer tries to work around it
+/// (issue #863). A **translucent** blended page diverges further, up to 26
+/// levels, through a second difference in the same function (issue #917);
+/// no file `vips webpsave` writes reaches it, because it writes blending
+/// off on every frame of a transparent animation.
 ///
 /// # What comes back attached
 ///
