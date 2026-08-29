@@ -5490,20 +5490,65 @@ mod tests {
      * Pins that the rewrite lifting the band ceiling fires only on the files
      * the decoder actually refuses, which is the whole of what makes it safe
      * (issue #769).
-     * `hayro-jpeg2000` reads a five-component file tagged CMYK as CMYK plus
-     * alpha, because five is four channels and an opacity. Dropping its
-     * `colr` box would turn that into `Unknown { num_channels: 5 }` and the
-     * file would come back `srgb`, so a rewrite keyed on the component count
-     * rather than on the refusal would change a file that already decoded.
-     * The two rows are the same codestream under two boxes, so the only
-     * variable is the box.
-     * Input: five components tagged CMYK and tagged sRGB -> Output: `cmyk`
-     * from the first, which says the box survived, and `srgb` from the
-     * second, which says the removal ran.
+     * `hayro-jpeg2000` reads a five-component file tagged CMYK with a `cdef`
+     * box marking its last channel as an opacity: five is four colour
+     * channels and an alpha, a count it can name. Removing the `colr` box
+     * there does not widen anything, it **breaks** the file, because
+     * `Unknown { num_channels: 5 }` plus an alpha is six channels against
+     * five components and the decoder gives up. So a rewrite keyed on the
+     * component count rather than on the refusal would turn a file that
+     * decodes into one that does not.
+     * The positive control is the third assertion, and without it the first
+     * two could both pass against a rewrite that never runs: the same file
+     * with its box actually removed is handed to the decoder directly and has
+     * to be refused, which is what says the first assertion is about the
+     * rewrite being skipped rather than about the file being easy.
+     * Input: five components tagged CMYK with a `cdef`, and five tagged sRGB
+     * -> Output: `cmyk` from the first, `srgb` from the second, the same
+     * samples from both, and a refusal from the first with its box removed.
      */
     #[test]
     #[cfg(feature = "jp2k")]
     fn the_colr_box_only_goes_when_the_decoder_has_already_refused_the_file() {
+        /// The same file with a `cdef` box spliced into its `jp2h`, marking
+        /// the last channel an opacity and the rest colours.
+        ///
+        /// I.5.3.6: `N`, then `N` triples of `Cn`, `Typ`, `Asoc`. `Typ = 1`
+        /// is opacity and `Asoc = 0` associates it with the whole image,
+        /// which is how `jp2ksave` writes its own alpha (measured).
+        fn with_cdef(bytes: &[u8], channels: u16) -> Vec<u8> {
+            let mut payload = channels.to_be_bytes().to_vec();
+            for channel in 0..channels {
+                payload.extend_from_slice(&channel.to_be_bytes());
+                let (kind, association) = if channel + 1 == channels {
+                    (1u16, 0u16)
+                } else {
+                    (0, channel + 1)
+                };
+                payload.extend_from_slice(&kind.to_be_bytes());
+                payload.extend_from_slice(&association.to_be_bytes());
+            }
+            let mut cdef = u32::try_from(payload.len() + 8)
+                .expect("a cdef box is small")
+                .to_be_bytes()
+                .to_vec();
+            cdef.extend_from_slice(b"cdef");
+            cdef.extend_from_slice(&payload);
+
+            let boxes = walk_boxes(bytes, 0, bytes.len()).expect("the encoder's container");
+            let header = boxes
+                .iter()
+                .find(|b| &b.kind == b"jp2h")
+                .expect("a jp2h box");
+            let grown = u32::try_from(header.end - header.at + cdef.len()).expect("still small");
+            let mut out = bytes[..header.at].to_vec();
+            out.extend_from_slice(&grown.to_be_bytes());
+            out.extend_from_slice(&bytes[header.at + 4..header.end]);
+            out.extend_from_slice(&cdef);
+            out.extend_from_slice(&bytes[header.end..]);
+            out
+        }
+
         let five = ramp(
             9,
             7,
@@ -5512,24 +5557,34 @@ mod tests {
         .encode_jp2k(SaveOptions::default())
         .expect("five bands encode");
 
-        let cmyk = decode_jp2k(&retagged(&five, ENUMCS_CMYK), DecodeLimits::default())
-            .expect("CMYK plus alpha is five channels the decoder can name");
-        assert_eq!(
-            cmyk.interpretation(),
-            Interpretation::Cmyk,
-            "the box the decoder resolves must reach it: a `cmyk` here is the box \
-             surviving and an `srgb` is the removal firing when it should not"
-        );
-        assert_eq!(cmyk.format().channels(), 5);
+        let named = with_cdef(&retagged(&five, ENUMCS_CMYK), 5);
+        let kept = decode_jp2k(&named, DecodeLimits::default())
+            .expect("CMYK plus an opacity is five channels the decoder can name");
+        assert_eq!(kept.format().channels(), 5);
+        assert_eq!(kept.interpretation(), Interpretation::Cmyk);
 
-        let srgb = decode_jp2k(&retagged(&five, ENUMCS_SRGB), DecodeLimits::default())
+        let rewritten = decode_jp2k(&retagged(&five, ENUMCS_SRGB), DecodeLimits::default())
             .expect("sRGB over five components is the refusal the removal answers");
-        assert_eq!(srgb.interpretation(), Interpretation::Srgb);
-        assert_eq!(srgb.format().channels(), 5);
+        assert_eq!(rewritten.format().channels(), 5);
+        assert_eq!(rewritten.interpretation(), Interpretation::Srgb);
         assert_eq!(
-            srgb.data(),
-            cmyk.data(),
+            rewritten.data(),
+            kept.data(),
             "the same codestream under two boxes: only the interpretation may differ"
+        );
+
+        // The positive control. Both assertions above would pass against a
+        // rewrite that never runs at all, so this is the one that says the
+        // first file survived *because* the rewrite was skipped.
+        let layout = ContainerLayout::parse(&named).expect("the spliced container");
+        let stripped = layout
+            .unspecified_rewrite(&named)
+            .expect("a JP2 with a colr box has a removal");
+        assert!(
+            hayro_jpeg2000::Image::new(&stripped, &hayro_jpeg2000::DecodeSettings::default())
+                .is_err(),
+            "removing the box from a file the decoder can already name breaks it, which \
+             is why the retry waits for a refusal"
         );
     }
 
@@ -5637,7 +5692,7 @@ mod tests {
     #[test]
     #[cfg(feature = "jp2k")]
     fn the_files_this_encoder_writes_are_the_files_vips_writes() {
-        let cases: [(u32, u32, PixelFormat, u32, u32, &str, &str); 3] = [
+        let cases: [(u32, u32, PixelFormat, u32, u32, &str, &str); 4] = [
             (
                 37,
                 21,
@@ -5664,6 +5719,21 @@ mod tests {
                 32,
                 "fe7a6b815be477ac34a943efcceacaa78650690be2815c46e600e2251f6e7add",
                 "9073c8836c7a889d7dd0781ceb312305470406164fdddb6e62498284a4f570f0",
+            ),
+            // The row that needs more than one resolution level, and the only
+            // one here that does. `num_resolutions` is
+            // `max(1, floor(log2(min(w, h))) - 5)`, so it is 1 for every shape
+            // above and 2 for this one, which is what makes the wavelet run at
+            // all and the tile's absolute placement decide the coded bytes. A
+            // 4x3 grid with partial tiles on both edges.
+            (
+                200,
+                150,
+                PixelFormat::Rgb8,
+                64,
+                64,
+                "4ed24ad8b60b2a0119c3fc5b5bfc1b8c716ca92cd92044549a7ab9ba8d7a5b07",
+                "9126c417a44238f3540e6735efea0f22741d07a6da32806b467dfb0b57cc7bdb",
             ),
         ];
         for (width, height, format, tile_w, tile_h, fixture, expected) in cases {
