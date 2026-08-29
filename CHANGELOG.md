@@ -2786,6 +2786,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Three kinds of `colr` box no longer stop a JPEG 2000 decoding** (issues
+  #771, #848, #849). `decode_jp2k` refused a JP2 whose enumerated colour space
+  openjpeg does not recognise, refused e-YCC, and refused CIELab on one
+  component while converting its samples on three. `vips jp2kload` reads all of
+  them and, on the ones that are not YCC, leaves the samples exactly alone.
+
+  None of it was a property of the codestream, which decodes perfectly well:
+  `hayro-jpeg2000` resolves the `colr` box itself and refuses what it cannot
+  map. So the enum is rewritten to sRGB before the file reaches the decoder, and
+  `crate::jp2k` keeps every decision the box makes, the interpretation (#767)
+  and the inverse YCC.
+
+  **Only the boxes the decoder gets wrong are rewritten.** CMYK, sRGB,
+  greyscale and sYCC over three components go through untouched, each pinned by
+  a committed fixture, so no file that decoded before this hands the decoder
+  different bytes or comes back with a different digest.
+
+  The inverse-YCC condition moves with it, from "bare codestream and subsampled
+  chroma" to openjpeg's actual rule: sYCC or e-YCC by enum, or the `SIZ`
+  heuristic where no enum is recognised. Measured on the pinned 8.18.6 by
+  rewriting nothing but `chroma_sub_on.jp2`'s `colr` box, a `METH = 1` sRGB box
+  gives `29 248 110` and no transform where a `METH = 2` profile box gives
+  `4 1 241` and the transform, because a profile leaves the colour space where
+  `SIZ` put it. The old condition got that third case wrong and nothing had
+  filed it.
+
 - GIF disposal code **4** rewinds the canvas the way libnsgif does, instead of
   keeping it (issue #827). GIF89a reserves codes 4 to 7; libnsgif remaps 4 onto
   restore-to-previous and leaves 5, 6 and 7 as "keep". Measured on vips 8.18.6
