@@ -850,6 +850,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`jp2ksave` writes a tiled codestream**, on `SaveOptions::tile_width` /
+  `SaveOptions::tile_height`, which default to `jp2k::DEFAULT_TILE_SIZE` and
+  so to vips's own 512 (issue #768). The parity gap was wider than the issue
+  said: `jp2ksave` sets `tile_size_on` unconditionally, so vips tiles **by
+  default** and a 600x600 image it writes reports `tile-width: 512` while this
+  crate wrote one tile.
+
+  There is no encoder knob behind it and no route to one. #768 said
+  `openjpeg2-pure-rs` keeps `cp_tdx` / `cp_tdy` / `tile_size_on` `pub(crate)`;
+  they are `pub`. A correction said they are therefore reachable through
+  `pub mod openjpeg`; the module is `pub(crate)`, which a compile probe
+  answers with `error[E0603]: module openjpeg is private`. What made the
+  feature reachable anyway is the format: JPEG 2000 codes every tile
+  independently, so the tile-part for a region is the same bytes whether it
+  came from a tiled encode or from a standalone encode of that region placed
+  at the same absolute grid coordinates. Each tile is encoded that way and the
+  parts are spliced under one main header.
+
+  The evidence is byte identity with the oracle rather than a round trip:
+  over 800 combinations of image size, tile grid, band count and sample depth,
+  **770 are byte-identical to the codestream `vips jp2ksave` writes**, and the
+  other 30 are the one-pixel-wide-tile rows, which this encoder and vips both
+  refuse with the same complaint about the resolution count. Three whole-file
+  digests are pinned in the suite.
+
+- **`jp2ksave` and `jp2kload` carry more than four bands** (issue #769). The
+  ceiling was four and it was the loader's: `hayro-jpeg2000` refuses a
+  component set it cannot map onto greyscale, RGB, CMYK or one of those plus
+  alpha, so a wider file was one this crate could write and could not read
+  back, and the encoder refused rather than writing it.
+
+  Measured, that refusal is a property of the `colr` box and not of the
+  decoder. With no colour specification at all the decoder answers
+  `ColorSpace::Unknown { num_channels }` for any count and validates the count
+  against itself, and that is the arm this module's `interpretation` already
+  handled, because it is vips's own guess. So a file the decoder refuses on
+  the channel count is handed to it a second time with the `colr` box removed,
+  and a bare codestream, for which the decoder synthesises an sRGB box before
+  validating anything, is wrapped in a container with an empty `jp2h` instead.
+  The retry is gated on the refusal rather than on the count, so a five-
+  component file tagged CMYK, which the decoder reads as CMYK plus alpha,
+  still reaches it untouched.
+
+  The encoder now stops where the format does, at `Csiz`'s 16384 components,
+  so `jp2k::MAX_BANDS` is 16384 rather than 4. Measured against
+  `/opt/homebrew/bin/vips` 8.18.6 on 5, 6 and 8 bands at both element widths:
+  `N bands, srgb`, every sample identical.
+
 - **`jp2ksave` and `jp2kload` carry signed components**, so `PixelFormat::Int8`
   and `PixelFormat::Int16` save and load through JPEG 2000 instead of being
   refused (issue #905). The format has a per-component `sgnd` flag and vips
@@ -2570,6 +2618,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   new variant is additive.
 
 ### Changed
+
+- **A JPEG 2000 save writes the tile grid into `SIZ`**, so its bytes change
+  even where the grid is one tile (issue #768). `jp2ksave` writes `XTsiz` and
+  `YTsiz` from its tile options whether or not they cut the image up, and this
+  crate wrote the image size there; measured, that was the only byte a
+  single-tile file differed from vips by, and correcting it makes the whole
+  file byte-identical. An image larger than the default 512 on either axis is
+  now written tiled, which is what vips has always done with it.
 
 - **The resamplers reproduce a constant signed field, which vips does not**
   (issue #909). A resampler applied to a constant image must answer the
