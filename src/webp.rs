@@ -688,6 +688,30 @@ pub(crate) fn encode_webp_for_save(
         })
 }
 
+/// Where the chunk after this one starts, given the offset its payload
+/// starts at and the size its header declares, or `None` when the file's own
+/// arithmetic runs off the end of the address space.
+///
+/// RIFF pads an odd payload to an even length, so the step is `size + (size
+/// & 1)`, and **both** additions have to be checked rather than only the
+/// outer one. `size` comes straight off the wire as a `u32`, and on a 32-bit
+/// target `u32::MAX as usize` *is* `usize::MAX`, so a chunk declaring the
+/// largest size its four-byte field can hold overflows on the pad, before
+/// the outer addition ever sees it: a panic with overflow checks on, and a
+/// wrapped zero with them off, which is a walk that never advances.
+///
+/// This is a free function rather than two lines inline because the case
+/// that reaches it cannot be built on a 64-bit host, where the same file
+/// gives a `Some` far past the end of the buffer and the walk stops on the
+/// next `get`. Hoisting it makes the overflow reachable from a test on any
+/// target (issue #862).
+fn next_chunk(payload: usize, size: usize) -> Option<usize> {
+    // Only the outer addition is checked, which is issue #862 itself: the
+    // pad has already overflowed by the time this looks. The next commit is
+    // the fix.
+    payload.checked_add(size + (size & 1))
+}
+
 /// Byte offsets of the `ANMF` frame-info bytes whose frame provably
 /// carries no transparency **and** asks to be alpha-blended anyway.
 ///
@@ -734,8 +758,10 @@ fn opaque_blended_frame_offsets(bytes: &[u8]) -> Vec<usize> {
             }
         }
         // Chunk payloads are padded to an even length, and the walk stops
-        // rather than wrapping on a size a hostile file inflated.
-        cursor = match payload.checked_add(size + (size & 1)) {
+        // rather than wrapping on a size a hostile file inflated. Both
+        // additions are checked inside `next_chunk`; doing only the outer
+        // one here is what issue #862 was.
+        cursor = match next_chunk(payload, size) {
             Some(next) => next,
             None => break,
         };
@@ -1451,7 +1477,10 @@ mod tests {
         while p + 8 <= bytes.len() {
             out.push(String::from_utf8_lossy(&bytes[p..p + 4]).into_owned());
             let size = u32::from_le_bytes(bytes[p + 4..p + 8].try_into().unwrap()) as usize;
-            p += 8 + size + (size & 1);
+            p = match next_chunk(p + 8, size) {
+                Some(next) => next,
+                None => break,
+            };
         }
         out
     }
@@ -2102,7 +2131,10 @@ mod tests {
                 if &header[..4] == b"ANMF" {
                     owned[cursor + 8 + 15] &= !ANMF_NO_BLEND;
                 }
-                cursor += 8 + size + (size & 1);
+                cursor = match next_chunk(cursor + 8, size) {
+                    Some(next) => next,
+                    None => break,
+                };
             }
             owned
         };
@@ -2125,6 +2157,47 @@ mod tests {
         // a buffer nothing had touched.
         assert_ne!(transparent, ANIM4_RGBA.to_vec());
         assert_ne!(opaque, ANIM4_DELAY.to_vec());
+    }
+
+    /**
+     * Tests that the RIFF walk stops on a chunk size the file's own
+     * arithmetic cannot represent, rather than panicking on the pad or
+     * wrapping to an offset it has already passed. Works by calling the
+     * step directly at the sizes a four-byte size field can hold, because
+     * the failing case cannot be reached through the walk on a 64-bit host:
+     * there the same file gives an offset far past the buffer and the next
+     * `get` ends the loop.
+     * Input: the padded and unpadded shapes, then `usize::MAX` and the two
+     * ways the outer addition can overflow -> Output: the next offset, and
+     * `None` for every request that cannot be represented.
+     */
+    #[test]
+    fn the_chunk_walk_stops_on_a_size_that_cannot_be_represented() {
+        // The ordinary shapes. A `VP8L` payload of 116 bytes needs no pad
+        // and one of 117 needs a byte, which is the whole of the rule.
+        assert_eq!(next_chunk(20, 116), Some(136));
+        assert_eq!(next_chunk(20, 117), Some(138));
+        assert_eq!(next_chunk(0, 0), Some(0));
+
+        // The pad overflows before the outer addition sees anything. This
+        // is the case a hostile file supplies: `size` is read as a `u32`,
+        // and on a 32-bit target `u32::MAX as usize` *is* `usize::MAX`.
+        assert_eq!(next_chunk(12, usize::MAX), None);
+        // Which is why that input is a real file there and not here. The
+        // assertion is written as an equality rather than cfg'd away so it
+        // says something true on both targets, and says which one is which.
+        assert_eq!(
+            next_chunk(12, u32::MAX as usize).is_none(),
+            usize::BITS == 32,
+            "a chunk declaring u32::MAX overflows the pad on a 32-bit target \
+             and is merely past the end of the buffer on a 64-bit one"
+        );
+
+        // And the outer addition, which was already checked: an even size
+        // that leaves no room for the payload offset.
+        assert_eq!(next_chunk(usize::MAX, 0), Some(usize::MAX));
+        assert_eq!(next_chunk(usize::MAX, 2), None);
+        assert_eq!(next_chunk(1, usize::MAX - 1), None);
     }
 
     /**
