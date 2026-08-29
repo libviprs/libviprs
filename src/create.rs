@@ -2183,6 +2183,7 @@ impl Raster {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pixel::SampleKind;
 
     // ---- black ----
 
@@ -2842,5 +2843,71 @@ mod tests {
                 bands: 0
             })
         ));
+    }
+
+    /**
+     * Tests that this module dispatches on sample kind and never on byte
+     * width, by asserting that neither the byte-width accessor on
+     * [`PixelFormat`] nor its width-keyed constructor survives in
+     * `src/create.rs`.
+     * Works by scanning the module's own source, compiled in with
+     * `include_str!`, for the accessor's name; the needle is spelled in two
+     * halves so this assertion is not itself a hit. A byte width is not a
+     * sample kind: four bytes is `f32` today and would be `u32` under issue
+     * #517, so the sites this replaced would store a 32-bit integer constant as the float bit pattern of its own value (issue #607).
+     * Input: `src/create.rs` -> Output: zero occurrences.
+     */
+    #[test]
+    fn create_does_not_dispatch_on_byte_width() {
+        const SRC: &str = include_str!("create.rs");
+        let needles = [
+            concat!("bytes_per_", "channel"),
+            concat!("with_", "channels"),
+        ];
+        // Positive control: the same scan over the same string finds a token
+        // that is present, so the zero below is a real zero and not the
+        // vacuous pass an empty read would give.
+        assert!(
+            SRC.contains(concat!("fn ", "push_constant_sample")),
+            "positive control failed: the scan cannot see this module's source"
+        );
+        for needle in needles {
+            assert_eq!(
+                SRC.matches(needle).count(),
+                0,
+                "{needle} is back in src/create.rs; dispatch on \
+                 PixelFormat::kind() and PixelFormat::with_kind() instead"
+            );
+        }
+    }
+
+    /**
+     * Tests that `new_from_image` keeps the source's sample kind and writes
+     * the constant at that kind's width, which the byte-width spelling got
+     * right only because four bytes happened to mean float.
+     * Works by building the constant from a `Gray16` source and reading the
+     * samples back as `u16`, with a value above `u8::MAX` so a truncating
+     * write cannot pass.
+     * Input: Gray16 source, `[4096.0, 300.0]` -> Output: a two-band 16-bit
+     * raster holding 4096 and 300 in every pixel.
+     */
+    #[test]
+    fn new_from_image_writes_the_source_kind_at_its_own_width() {
+        let src = Raster::zeroed(2, 2, PixelFormat::Gray16).expect("gray16 source");
+        let out = src
+            .try_new_from_image(&[4096.0, 300.0])
+            .expect("two bands is representable");
+        assert_eq!(
+            out.format(),
+            PixelFormat::with_kind(2, SampleKind::U16).unwrap()
+        );
+        let got: Vec<u16> = out
+            .data()
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_ne_bytes(*c))
+            .collect();
+        assert_eq!(got, vec![4096, 300, 4096, 300, 4096, 300, 4096, 300]);
     }
 }
