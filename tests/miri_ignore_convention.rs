@@ -381,7 +381,7 @@ const EXPECTED_SRC_MODULES: usize = 25;
 /// eighteen, for exactly that reason. This is a count that two file-disjoint
 /// changes can both be right about and still break, so move it in the same
 /// change that moves the population.
-const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 19;
+const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 20;
 
 /// The filesystem-touching tests still allowed to run under Miri, and so still
 /// allowed to end the whole run on their first syscall.
