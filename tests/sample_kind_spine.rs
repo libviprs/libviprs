@@ -721,28 +721,6 @@ fn the_documented_blind_spots_are_still_blind() {
 
 /**
  * Tests that no file under `src/` compares a byte width, except the ones
- * [`REMAINING`] names, and that every file [`REMAINING`] names still has one.
- * A byte width is not a sample kind: 4 is `f32` today and would be `u32`
- * under #517 and `i32` under #516, so a width comparison is a question with
- * three right answers and one arm. `#[non_exhaustive]` on `SampleKind` turns
- * a `match` into a compile error and does nothing at all to a comparison,
- * which is why this is a scan and not a lint (issue #607 step (e)).
- * Works by stripping comments from each file and looking for the comparison
- * in either order with either operator. Set equality in both directions, so
- * the list can only shrink.
- * Input: every Rust file under `src` -> Output: comparisons only in the
- * named files, and a comparison in each of them.
- *
- * Carries `#[cfg_attr(miri, ignore)]` because it walks `src/` and reads every
- * file, which Miri's isolation layer refuses. Miri aborts the whole run on
- * the first refused operation rather than failing one test, so an
- * unannotated filesystem test takes the undefined-behaviour gate down and
- * reports as "Miri failed" (issue #652). It is recorded in
- * `tests/miri_fs_test_inventory.txt` too, which is what stops the annotation
- * being deleted unnoticed.
- */
-/**
- * Tests that no file under `src/` compares a byte width, except the ones
  * [`REMAINING`] names and the ones [`DELIBERATE`] explains, and that every
  * entry in both is still there.
  * A byte width is not a sample kind: 4 is `f32`, `u32` and `i32` at once, so
