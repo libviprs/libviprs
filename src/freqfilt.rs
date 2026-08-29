@@ -58,7 +58,7 @@ use rustfft::num_complex::Complex;
 use thiserror::Error;
 
 use crate::conversion::{ConversionError, Interpretation};
-use crate::pixel::PixelFormat;
+use crate::pixel::{PixelFormat, SampleKind, read_sample_f64};
 use crate::raster::{Raster, RasterError};
 
 /// The `vips_scale` log-mode exponent (its libvips default), shared
@@ -162,29 +162,25 @@ fn drop_invalidated_profile(raster: &mut Raster) {
 }
 
 /// Read every sample as `f64` in raster order (row-major, bands
-/// interleaved), whatever the depth.
+/// interleaved), whatever the sample kind.
+///
+/// Reads through [`read_sample_f64`], the crate's one width-independent
+/// sample read: the width-keyed spelling this replaces read four bytes as
+/// an `f32` whatever they were, so a 32-bit integer carrier's `1` would
+/// have entered the transform as `1.4e-45` (issue #607).
 fn samples_f64(r: &Raster) -> Vec<f64> {
     let fmt = r.format();
-    let bpc = fmt.bytes_per_channel();
+    let kind = fmt.kind();
     let data = r.data();
     let n = r.width() as usize * r.height() as usize * fmt.channels();
     (0..n)
-        .map(|i| match bpc {
-            1 => f64::from(data[i]),
-            2 => f64::from(u16::from_ne_bytes([data[i * 2], data[i * 2 + 1]])),
-            _ => f64::from(f32::from_ne_bytes([
-                data[i * 4],
-                data[i * 4 + 1],
-                data[i * 4 + 2],
-                data[i * 4 + 3],
-            ])),
-        })
+        .map(|i| read_sample_f64(data, kind, i * kind.bytes()))
         .collect()
 }
 
 /// The canonical float format for `bands` bands, or `TooManyBands`.
 fn float_format(op: &'static str, bands: usize) -> Result<PixelFormat, FreqfiltError> {
-    PixelFormat::with_channels(bands, 4).ok_or(FreqfiltError::TooManyBands { op, bands })
+    PixelFormat::with_kind(bands, SampleKind::F32).ok_or(FreqfiltError::TooManyBands { op, bands })
 }
 
 /// Build a float raster from `f64` samples in raster order.
@@ -467,11 +463,8 @@ impl Raster {
             let product = fourier_multiply("freqmult", &fourier, mask)?;
             let real = product.try_invfft_real()?;
             Ok(real.try_cast(
-                PixelFormat::with_channels(
-                    self.format().channels(),
-                    self.format().bytes_per_channel(),
-                )
-                .expect("input format is valid, so its channel/depth pair is too"),
+                PixelFormat::with_kind(self.format().channels(), self.format().kind())
+                    .expect("the input format is one, so its channel/kind pair is too"),
             )?)
         }
     }
@@ -534,10 +527,11 @@ impl Raster {
         let mx = mag.iter().copied().fold(f64::NEG_INFINITY, f64::max);
         let denom = (1.0 + mx.powf(SCALE_LOG_EXP)).log10();
         let f = if denom > 0.0 { 255.0 / denom } else { 0.0 };
-        let format = PixelFormat::with_channels(pairs, 1).ok_or(FreqfiltError::TooManyBands {
-            op: "spectrum",
-            bands: pairs,
-        })?;
+        let format =
+            PixelFormat::with_kind(pairs, SampleKind::U8).ok_or(FreqfiltError::TooManyBands {
+                op: "spectrum",
+                bands: pairs,
+            })?;
         let data: Vec<u8> = mag
             .iter()
             .map(|&v| {
@@ -738,7 +732,7 @@ fn test_image(width: u32, height: u32) -> Raster {
     float_raster(
         width,
         height,
-        PixelFormat::with_channels(1, 4).expect("one float band"),
+        PixelFormat::with_kind(1, SampleKind::F32).expect("one float band"),
         &samples,
     )
     .expect("test image allocates")
@@ -830,7 +824,7 @@ mod tests {
         let im = float_raster(
             4,
             4,
-            PixelFormat::with_channels(2, 4).expect("two float bands"),
+            PixelFormat::with_kind(2, SampleKind::F32).expect("two float bands"),
             &joined,
         )
         .expect("raster");
@@ -857,7 +851,7 @@ mod tests {
         let im = float_raster(
             4,
             1,
-            PixelFormat::with_channels(1, 4).expect("one float band"),
+            PixelFormat::with_kind(1, SampleKind::F32).expect("one float band"),
             &[0.0, 1.0, 0.0, 0.0],
         )
         .expect("raster");
@@ -880,7 +874,7 @@ mod tests {
         let mask = float_raster(
             6,
             4,
-            PixelFormat::with_channels(1, 4).expect("one float band"),
+            PixelFormat::with_kind(1, SampleKind::F32).expect("one float band"),
             &[1.0; 24],
         )
         .expect("mask");
@@ -902,7 +896,7 @@ mod tests {
         let mask3 = float_raster(
             4,
             4,
-            PixelFormat::with_channels(3, 4).expect("three float bands"),
+            PixelFormat::with_kind(3, SampleKind::F32).expect("three float bands"),
             &[1.0; 48],
         )
         .expect("mask");
@@ -948,7 +942,7 @@ mod tests {
         let b = float_raster(
             w,
             h,
-            PixelFormat::with_channels(1, 4).expect("one float band"),
+            PixelFormat::with_kind(1, SampleKind::F32).expect("one float band"),
             &shifted,
         )
         .expect("raster");
@@ -999,5 +993,41 @@ mod tests {
         let sum: f64 = samples_f64(&im).iter().sum();
         let dc = out.getpoint(0, 0);
         assert!((dc[0] - sum).abs() < 0.35, "{} vs {sum}", dc[0]);
+    }
+
+    /**
+     * Tests that this module dispatches on sample kind and never on byte
+     * width, by asserting that neither the byte-width accessor on
+     * [`PixelFormat`] nor its width-keyed constructor survives in
+     * `src/freqfilt.rs`.
+     * Works by scanning the module's own source, compiled in with
+     * `include_str!`, for the accessor's name; the needle is spelled in two
+     * halves so this assertion is not itself a hit. A byte width is not a
+     * sample kind: four bytes is `f32` today and would be `u32` under issue
+     * #517, so the sites this replaced would feed a 32-bit integer sample into the transform as `1.4e-45` (issue #607).
+     * Input: `src/freqfilt.rs` -> Output: zero occurrences.
+     */
+    #[test]
+    fn freqfilt_does_not_dispatch_on_byte_width() {
+        const SRC: &str = include_str!("freqfilt.rs");
+        let needles = [
+            concat!("bytes_per_", "channel"),
+            concat!("with_", "channels"),
+        ];
+        // Positive control: the same scan over the same string finds a token
+        // that is present, so the zero below is a real zero and not the
+        // vacuous pass an empty read would give.
+        assert!(
+            SRC.contains(concat!("fn ", "samples_f64")),
+            "positive control failed: the scan cannot see this module's source"
+        );
+        for needle in needles {
+            assert_eq!(
+                SRC.matches(needle).count(),
+                0,
+                "{needle} is back in src/freqfilt.rs; dispatch on \
+                 PixelFormat::kind() and PixelFormat::with_kind() instead"
+            );
+        }
     }
 }
