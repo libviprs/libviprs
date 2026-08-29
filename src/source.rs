@@ -486,25 +486,27 @@ pub enum SourceError {
     /// Distinct from [`PageLimitExceeded`](SourceError::PageLimitExceeded),
     /// which is the configured ceiling rather than the file's own count: this
     /// one says the file is shorter than the request, and no knob makes it
-    /// longer. Raised by the animated loaders before anything is decoded.
+    /// longer. Raised by the WebP and JPEG XL loaders before anything is
+    /// decoded.
     ///
     /// libvips draws the line in the same place and says so less: measured on
     /// 8.18.6, `vips copy 'anim4.webp[page=5]'` and `[page=2,n=5]` on a
     /// four-page file both fail with `webp: bad page number`, and `[n=0]`
     /// does too. It does **not** clamp `page + n` to the end of the file.
-    #[error(
-        "{format} cannot load pages {page}..{end}: pages are indexed from 0 \
-         and this file has {pages}"
-    )]
+    ///
+    /// The fields are [`GifError::BadPageNumber`](crate::gif::GifError::BadPageNumber)'s,
+    /// because that variant is the same refusal from the third loader and the
+    /// two should be one; folding them together needs `src/gif.rs` and is
+    /// filed separately.
+    #[error("{format}: bad page number; page {page} count {n} on a {pages}-page file")]
     PageOutOfRange {
-        /// The container, for the message (`"WebP"`, `"JPEG XL"`).
+        /// The container, for the message (`"webp"`, `"jxl"`).
         format: &'static str,
-        /// The first page asked for.
+        /// The first page asked for, counting from zero.
         page: u32,
-        /// One past the last page asked for, so `page..end` is the request.
-        /// Equal to `page` when the request was for no pages at all.
-        end: u32,
-        /// How many pages the file holds.
+        /// How many pages were asked for, `-1` for every remaining page.
+        n: i32,
+        /// How many pages the file actually holds.
         pages: u32,
     },
 }
@@ -604,10 +606,11 @@ impl std::fmt::Display for ShowGeometry {
 /// pages the file actually holds, returning the zero-based half-open range of
 /// pages to load.
 ///
-/// `n` is `Some(count)` for an exact number of pages and `None` for "every
-/// page from `page` to the end", which is what libvips spells `n = -1`. The
-/// `Option` is the sentinel's replacement: `-1` in an `i32` is only a page
-/// count by convention, and the convention is not in the type.
+/// `n` is a page count, `-1` meaning every page from `page` to the end. The
+/// sentinel is kept rather than replaced by an `Option` because that is the
+/// shape libvips's argument has, and because `crate::gif::LoadOptions` landed
+/// with the same field: three sibling loaders spelling one libvips argument
+/// two ways is worse than carrying its sentinel.
 ///
 /// Every rule here was measured against `/opt/homebrew/bin/vips` 8.18.6 on a
 /// four-page animation, and vips refuses each of them rather than clamping:
@@ -619,33 +622,39 @@ impl std::fmt::Display for ShowGeometry {
 /// | `page=1, n=-1` | 4x9, three pages | `1..4` |
 /// | `page=2, n=5` | `bad page number` | `PageOutOfRange` |
 /// | `n=0` | `bad page number` | `PageOutOfRange` |
+/// | `n=-2` | refused by GObject before the loader | `PageOutOfRange` |
 ///
-/// Shared rather than written once per codec because the four multi-page
-/// loaders take the same two arguments and have to answer them the same way;
-/// a loader that clamped where its neighbour refused would be a difference no
-/// caller could see coming.
+/// Shared rather than written once per codec because the multi-page loaders
+/// take the same two arguments and have to answer them the same way; a loader
+/// that clamped where its neighbour refused would be a difference no caller
+/// could see coming. `crate::gif`'s `LoadOptions::window` is the same
+/// function and should be this one; folding them together needs `src/gif.rs`.
 pub(crate) fn resolve_page_range(
     format: &'static str,
     page: u32,
-    n: Option<u32>,
+    n: i32,
     pages: u32,
 ) -> Result<std::ops::Range<u32>, SourceError> {
-    // `saturating_sub` rather than a plain subtraction guarded by the
-    // `page >= pages` test below: the guard runs after this line, so an
-    // unsaturated `pages - page` would already have panicked in a debug
-    // build on the very request the guard exists to refuse.
-    let count = n.unwrap_or_else(|| pages.saturating_sub(page));
-    // `saturating_add` for the same reason on the other side: a
-    // `Some(u32::MAX)` count would wrap `page + count` back under `pages`
-    // and turn a refusal into an accepted range.
-    let end = page.saturating_add(count);
-    if count == 0 || page >= pages || end > pages {
-        return Err(SourceError::PageOutOfRange {
-            format,
-            page,
-            end,
-            pages,
-        });
+    let bad = || SourceError::PageOutOfRange {
+        format,
+        page,
+        n,
+        pages,
+    };
+    if page >= pages {
+        return Err(bad());
+    }
+    let count = match n {
+        // `page < pages` is settled above, so this cannot underflow.
+        -1 => pages - page,
+        n => u32::try_from(n).map_err(|_| bad())?,
+    };
+    // `checked_add` rather than a saturating one: an `i32::MAX` count would
+    // otherwise wrap `page + count` back under `pages` and turn a refusal
+    // into an accepted range.
+    let end = page.checked_add(count).ok_or_else(bad)?;
+    if count == 0 || end > pages {
+        return Err(bad());
     }
     Ok(page..end)
 }
@@ -4310,8 +4319,8 @@ mod tests {
     /**
      * Tests that the shared page-range resolver answers a `page` / `n`
      * request the way vips 8.18.6 answers it, refusing rather than clamping.
-     * Works by sweeping the five requests measured against a four-page
-     * animation with the binary and asserting the range or the refusal.
+     * Works by sweeping the requests measured against a four-page animation
+     * with the binary and asserting the range or the refusal.
      * Input: `(page, n)` over `pages = 4` -> Output: `page..end`, or
      * `SourceError::PageOutOfRange` for every request vips calls a bad page
      * number.
@@ -4322,62 +4331,56 @@ mod tests {
         // animation: `vipsheader 'roll4.webp[page=1,n=-1]'` reports 4x9,
         // which is three 4x3 pages, and `[page=2,n=5]` fails with
         // `webp: bad page number` rather than loading the two that exist.
-        type Request = (u32, Option<u32>);
+        type Request = (u32, i32);
         let accepted: [(Request, std::ops::Range<u32>); 6] = [
-            ((0, Some(1)), 0..1),
-            ((0, None), 0..4),
-            ((1, None), 1..4),
-            ((3, Some(1)), 3..4),
-            ((3, None), 3..4),
-            ((1, Some(2)), 1..3),
+            ((0, 1), 0..1),
+            ((0, -1), 0..4),
+            ((1, -1), 1..4),
+            ((3, 1), 3..4),
+            ((3, -1), 3..4),
+            ((1, 2), 1..3),
         ];
         for ((page, n), expected) in accepted {
             assert_eq!(
-                resolve_page_range("WebP", page, n, 4).expect("vips loads this one"),
+                resolve_page_range("webp", page, n, 4).expect("vips loads this one"),
                 expected,
-                "page={page} n={n:?}"
+                "page={page} n={n}"
             );
         }
 
-        let refused: [Request; 5] = [
-            (4, Some(1)),
-            (5, Some(1)),
-            (4, None),
-            (2, Some(5)),
-            (0, Some(0)),
-        ];
+        let refused: [Request; 6] = [(4, 1), (5, 1), (4, -1), (2, 5), (0, 0), (0, -2)];
         for (page, n) in refused {
-            let err = resolve_page_range("WebP", page, n, 4)
+            let err = resolve_page_range("webp", page, n, 4)
                 .expect_err("vips calls this a bad page number");
             assert!(
                 matches!(err, SourceError::PageOutOfRange { pages: 4, .. }),
-                "page={page} n={n:?} must be a typed page refusal, got {err:?}"
+                "page={page} n={n} must be a typed page refusal, got {err:?}"
             );
             let message = err.to_string();
             assert!(
-                message.contains("indexed from 0") && message.contains("this file has 4"),
-                "the refusal must name the base and the count, got {message}"
+                message.contains("bad page number") && message.contains("4-page file"),
+                "the refusal must name the case and the count, got {message}"
             );
         }
     }
 
     /**
-     * Tests that a `page` past the end cannot wrap the "all pages" arm into
+     * Tests that a `page` past the end cannot wrap the "every page" arm into
      * a huge range. Works by asking for every page from an index past the
      * last one, where `pages - page` would underflow.
-     * Input: `page = 9`, `n = None`, `pages = 4` -> Output: a refusal
-     * naming an empty `9..9` request, not a range and not a panic.
+     * Input: `page = 9`, `n = -1`, `pages = 4` -> Output: a refusal carrying
+     * the request back, not a range and not a panic.
      */
     #[test]
-    fn all_pages_from_past_the_end_is_an_empty_request_not_an_underflow() {
-        let err = resolve_page_range("JPEG XL", 9, None, 4).expect_err("page 9 does not exist");
+    fn all_pages_from_past_the_end_is_refused_before_the_subtraction() {
+        let err = resolve_page_range("jxl", 9, -1, 4).expect_err("page 9 does not exist");
         assert!(
             matches!(
                 err,
                 SourceError::PageOutOfRange {
-                    format: "JPEG XL",
+                    format: "jxl",
                     page: 9,
-                    end: 9,
+                    n: -1,
                     pages: 4
                 }
             ),
@@ -4387,26 +4390,29 @@ mod tests {
 
     /**
      * Tests that a count large enough to overflow the addition is refused
-     * rather than saturating into an accepted range. Works by asking for
-     * `u32::MAX` pages from page 2, where `page + count` wraps.
-     * Input: `page = 2`, `n = Some(u32::MAX)`, `pages = 4` -> Output: a
-     * refusal whose `end` saturated at `u32::MAX`.
+     * rather than wrapping into an accepted range. Works by asking for
+     * `i32::MAX` pages from page 2, where `page + count` overflows a `u32`
+     * only just, and from a page high enough that it wraps.
+     * Input: `page = 2` and `page = 4_000_000_000`, `n = i32::MAX`,
+     * `pages = 4` -> Output: a refusal both times.
      */
     #[test]
     fn a_count_that_overflows_the_end_is_refused() {
-        let err =
-            resolve_page_range("WebP", 2, Some(u32::MAX), 4).expect_err("the file has four pages");
-        assert!(
-            matches!(
-                err,
-                SourceError::PageOutOfRange {
-                    page: 2,
-                    end: u32::MAX,
-                    pages: 4,
-                    ..
-                }
-            ),
-            "got {err:?}"
+        for page in [2u32, 4_000_000_000] {
+            let err =
+                resolve_page_range("webp", page, i32::MAX, 4).expect_err("the file has four pages");
+            assert!(
+                matches!(err, SourceError::PageOutOfRange { pages: 4, .. }),
+                "page={page} got {err:?}"
+            );
+        }
+        // The second one is the case a `saturating_add` would let through if
+        // the `end > pages` test were the only guard: 4_000_000_000 plus
+        // `i32::MAX` wraps back to 1_852_516_351, which is not larger than
+        // `pages` in the wrapping arithmetic a naive version would use.
+        assert_eq!(
+            4_000_000_000_u32.wrapping_add(i32::MAX as u32),
+            1_852_516_351
         );
     }
 }

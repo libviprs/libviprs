@@ -847,8 +847,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   them into one toilet-roll raster with the page geometry #564's model
   derives. `decode_webp` and `decode_jxl` are those functions at their
   default, which is page 0 and one frame, so nothing about the still path
-  moved. `n` is an `Option<u32>` rather than vips's `-1`-means-all `i32`,
-  because a negative page count is not a page count.
+  moved.
+
+  Both structs are `#[non_exhaustive]` with `with_page` / `with_n` builders,
+  as #630 requires, and they are `gif::LoadOptions` field for field: same
+  `page: u32`, same `n: i32` with `-1` meaning every remaining page, same
+  argument order on the entry point. Three sibling loaders spelling one
+  libvips argument two ways is worse than carrying its sentinel, and
+  `non_exhaustive_options.rs` now asserts the three defaults against each
+  other rather than restating them.
 
   An animation now carries `page-height` (when more than one page was
   loaded), `delay` as a `MetadataValue::IntArray` of milliseconds, `loop`,

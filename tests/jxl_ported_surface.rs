@@ -271,30 +271,25 @@ fn without_the_feature_the_surface_is_unchanged_and_typed() {
 
 /// The animated entry point and its options struct resolve from outside the
 /// crate in **either** build, and the option shape is the one a caller
-/// writes: struct-update syntax over a `Default` that is page 0 and one
-/// frame, not every frame (issue #621).
+/// writes: a `Default` that is page 0 and one frame, reached through `with_*`
+/// setters because the struct is `#[non_exhaustive]` and a literal does not
+/// compile out here (issues #621, #630).
 ///
-/// The refusal under test is the feature-off one, `JxlError::FeatureNotEnabled`,
-/// so this half runs in both builds; the page refusal needs a real file and
-/// lives in the unit tests.
+/// The refusal under test is the feature-off one,
+/// `JxlError::FeatureNotEnabled`, so this runs in both builds; the page
+/// refusal needs a real file and lives in the unit tests.
 #[test]
 fn the_animated_load_surface_resolves_from_outside_the_crate() {
-    let explicit = jxl::LoadOptions {
-        page: 0,
-        n: Some(1),
-    };
-    assert_eq!(jxl::LoadOptions::default(), explicit);
-    let all = jxl::LoadOptions {
-        n: None,
-        ..Default::default()
-    };
-    assert_eq!(all.page, 0);
+    let one = jxl::LoadOptions::default();
+    assert_eq!((one.page, one.n), (0, 1));
+    let all = jxl::LoadOptions::default().with_page(1).with_n(-1);
+    assert_eq!((all.page, all.n), (1, -1));
 
     // Not a JPEG XL file, so the call fails either way; what is pinned here
     // is that it is callable, that it is typed the same in both builds, and
     // that the feature-off build says so rather than reporting a bad file.
-    let result = decode_jxl_with(b"not a jxl file at all", all, DecodeLimits::default());
-    let err = result.expect_err("those bytes are not JPEG XL");
+    let err = decode_jxl_with(b"not a jxl file at all", DecodeLimits::default(), all)
+        .expect_err("those bytes are not JPEG XL");
     if cfg!(feature = "jxl") {
         assert!(matches!(err, SourceError::Jxl(_)), "{err:?}");
     } else {

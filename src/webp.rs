@@ -233,48 +233,54 @@ impl SaveOptions {
 /// Which frames [`decode_webp_with`] reads out of an animation (libvips
 /// `webpload`'s `page` and `n`).
 ///
-/// The default is page 0 and one frame, which is exactly what a bare
-/// `vips webpload` does, so [`decode_webp`] is this struct's default and
-/// nothing about the still path moved.
+/// `#[non_exhaustive]`, `Default`, and module-scoped, the same shape as
+/// [`SaveOptions`], [`crate::gif::LoadOptions`] and [`DecodeLimits`]: start
+/// from [`LoadOptions::default`] and set what you need with the `with_*`
+/// builders, e.g. `webp::LoadOptions::default().with_n(-1)` (issue #630).
 ///
-/// ```
-/// use libviprs::webp;
-///
-/// // Every frame, from the first.
-/// let all = webp::LoadOptions { n: None, ..Default::default() };
-/// // The middle two frames of a four-frame animation.
-/// let middle = webp::LoadOptions { page: 1, n: Some(2) };
-/// assert_eq!(webp::LoadOptions::default(), webp::LoadOptions { page: 0, n: Some(1) });
-/// # let _ = (all, middle);
-/// ```
+/// The default is vips's: page 0, one page, so [`decode_webp`] is
+/// `decode_webp_with(bytes, limits, LoadOptions::default())` and a still load
+/// is unchanged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct LoadOptions {
-    /// The first frame to read, zero-based (libvips `page`), matching
-    /// [`crate::decode_tiff_page`] and [`crate::frames::PageLayout::rows`].
+    /// The first frame to load, counting from **zero**, matching vips's
+    /// `page` and [`crate::decode_tiff_page`]'s convention (issue #566).
+    /// Defaults to 0.
     pub page: u32,
-    /// How many frames to read from [`page`](LoadOptions::page), or `None`
-    /// for every frame to the end of the file, which is what libvips spells
-    /// `n = -1`.
+    /// How many frames to load, `-1` for every frame from [`page`](Self::page)
+    /// to the end. Defaults to 1, as vips does.
     ///
-    /// `Some(0)` is refused with [`SourceError::PageOutOfRange`], as vips
-    /// refuses `n = 0`. There is no `-1` here because a negative page count
-    /// is not a page count; the `Option` carries the same meaning with the
-    /// convention in the type instead of in the documentation.
-    pub n: Option<u32>,
+    /// An `i32` rather than an `Option<u32>` because that is the shape vips's
+    /// argument has, sentinel included, and because
+    /// [`crate::gif::LoadOptions`] landed with the same field: three sibling
+    /// loaders spelling one libvips argument two ways is worse than carrying
+    /// its sentinel. Every value the file cannot serve, `0` and `-2` included,
+    /// is refused with [`SourceError::PageOutOfRange`], which is what vips
+    /// does too.
+    pub n: i32,
 }
 
 impl Default for LoadOptions {
-    /// Page 0, one frame: the default `vips webpload` reads frame 0 of an
-    /// animation and hands back one frame's worth of pixels.
-    ///
-    /// Written by hand rather than derived, because a derived `Default`
-    /// would put `None` under `n` and quietly turn every default load into
-    /// a whole-animation load.
     fn default() -> Self {
-        Self {
-            page: 0,
-            n: Some(1),
-        }
+        Self { page: 0, n: 1 }
+    }
+}
+
+impl LoadOptions {
+    /// Set the first page to load, returning the updated options.
+    #[must_use]
+    pub fn with_page(mut self, page: u32) -> Self {
+        self.page = page;
+        self
+    }
+
+    /// Set how many pages to load, `-1` for every remaining page, returning
+    /// the updated options.
+    #[must_use]
+    pub fn with_n(mut self, n: i32) -> Self {
+        self.n = n;
+        self
     }
 }
 
@@ -323,14 +329,14 @@ impl Default for LoadOptions {
 /// * [`SourceError::Raster`] when the decoded frame cannot be wrapped
 ///   (a zero-sized canvas).
 pub fn decode_webp(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
-    decode_webp_with(bytes, LoadOptions::default(), limits)
+    decode_webp_with(bytes, limits, LoadOptions::default())
 }
 
 /// Decode WebP bytes, choosing which frames of an animation to read
 /// (libvips `webpload_buffer` with `page` and `n`).
 ///
 /// `options.page` is the first frame, zero-based, and `options.n` is how
-/// many to read from there, `None` meaning every one to the end of the
+/// many to read from there, `-1` meaning every one to the end of the
 /// file. Frames are **composited** by the decoder (disposal and blending
 /// applied), so each one is a full-size page, and the pages are stacked
 /// top to bottom into a single raster in the toilet-roll layout
@@ -381,8 +387,8 @@ pub fn decode_webp(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceE
 ///
 /// As [`decode_webp`], plus [`SourceError::PageOutOfRange`] when `page` is
 /// past the last frame, when `page + n` runs off the end, or when `n` is
-/// `Some(0)`. vips refuses all three the same way, with `webp: bad page
-/// number`, and clamps none of them.
+/// `0` or below `-1`. vips refuses all of them the same way, with `webp:
+/// bad page number`, and clamps none of them.
 ///
 /// The [`DecodeLimits`] ceilings are checked against the **roll**: a
 /// four-frame load of a 4x3 animation is priced as 4x12, so `max_coord`,
@@ -390,8 +396,8 @@ pub fn decode_webp(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceE
 /// actually be allocated.
 pub fn decode_webp_with(
     bytes: &[u8],
-    options: LoadOptions,
     limits: DecodeLimits,
+    options: LoadOptions,
 ) -> Result<Raster, SourceError> {
     // Rewrite the blend flag of any frame that provably carries no
     // transparency before the decoder sees it; the function says why, and
@@ -413,7 +419,7 @@ pub fn decode_webp_with(
     // against it and `page = 1` is refused there too, exactly as vips
     // refuses `still.webp[page=1]`.
     let file_pages = if animated { decoder.num_frames() } else { 1 };
-    let pages = resolve_page_range("WebP", options.page, options.n, file_pages)?;
+    let pages = resolve_page_range("webp", options.page, options.n, file_pages)?;
     let loaded = pages.end - pages.start;
 
     // The ceilings are the roll's, not one frame's. Widened to `u64`
@@ -1523,25 +1529,22 @@ mod tests {
 
     /// Every frame of an animation, which is `n = -1` in vips.
     fn all_pages() -> LoadOptions {
-        LoadOptions {
-            n: None,
-            ..Default::default()
-        }
+        LoadOptions::default().with_n(-1)
     }
 
     /**
      * Tests that asking for every frame stacks them into one toilet-roll
      * raster with the page geometry the frames model derives, rather than
      * handing back frame 0 the way the still lane did. Works by decoding
-     * the four-frame capture with `n = None` and comparing the whole
+     * the four-frame capture with `n = -1` and comparing the whole
      * buffer to what `vips rawsave 'x.webp[n=-1]'` wrote.
-     * Input: `ANIM4_DELAY` with `n = None` -> Output: a 4x12 `Rgb8` raster
+     * Input: `ANIM4_DELAY` with `n = -1` -> Output: a 4x12 `Rgb8` raster
      * whose bytes are `ANIM4_ROLL`, four pages of three rows, with
      * `n-pages` 4 as vips reports.
      */
     #[test]
     fn every_frame_stacks_into_one_roll() {
-        let raster = decode_webp_with(&ANIM4_DELAY, all_pages(), DecodeLimits::default())
+        let raster = decode_webp_with(&ANIM4_DELAY, DecodeLimits::default(), all_pages())
             .expect("the four-frame capture decodes");
         assert_eq!((raster.width(), raster.height()), (4, 12));
         assert_eq!(raster.format(), PixelFormat::Rgb8);
@@ -1560,12 +1563,12 @@ mod tests {
      * and that the loop count arrives unshifted. Works by reading the
      * `delay`, `loop`, `gif-delay` and `gif-loop` fields off a whole-file
      * load and comparing them to `vipsheader -f` on the same bytes.
-     * Input: `ANIM4_DELAY` with `n = None` -> Output: `delay` = `[45, 67,
+     * Input: `ANIM4_DELAY` with `n = -1` -> Output: `delay` = `[45, 67,
      * 200, 12]`, `loop` = 3, `gif-delay` = 4, `gif-loop` = 2.
      */
     #[test]
     fn the_delays_are_milliseconds_and_the_loop_count_is_unshifted() {
-        let raster = decode_webp_with(&ANIM4_DELAY, all_pages(), DecodeLimits::default())
+        let raster = decode_webp_with(&ANIM4_DELAY, DecodeLimits::default(), all_pages())
             .expect("the four-frame capture decodes");
         // `vipsheader -f delay` prints `45 67 200 12 `. The WebP `ANMF`
         // duration is milliseconds on the wire, so nothing is divided by
@@ -1601,11 +1604,8 @@ mod tests {
     fn a_partial_load_subsets_the_delay_array() {
         let raster = decode_webp_with(
             &ANIM4_DELAY,
-            LoadOptions {
-                page: 1,
-                n: Some(2),
-            },
             DecodeLimits::default(),
+            LoadOptions::default().with_page(1).with_n(2),
         )
         .expect("frames 1 and 2 exist");
         assert_eq!((raster.width(), raster.height()), (4, 6));
@@ -1639,36 +1639,36 @@ mod tests {
      */
     #[test]
     fn the_delay_array_is_always_as_long_as_the_pages_loaded() {
-        let requests = [
-            (0, Some(1)),
-            (0, Some(2)),
-            (0, Some(4)),
-            (0, None),
-            (1, Some(1)),
-            (1, Some(3)),
-            (1, None),
-            (2, Some(2)),
-            (3, Some(1)),
-            (3, None),
+        let requests: [(u32, i32); 10] = [
+            (0, 1),
+            (0, 2),
+            (0, 4),
+            (0, -1),
+            (1, 1),
+            (1, 3),
+            (1, -1),
+            (2, 2),
+            (3, 1),
+            (3, -1),
         ];
         for (page, n) in requests {
             let raster = decode_webp_with(
                 &ANIM4_DELAY,
-                LoadOptions { page, n },
                 DecodeLimits::default(),
+                LoadOptions::default().with_page(page).with_n(n),
             )
-            .unwrap_or_else(|e| panic!("page={page} n={n:?} is in range: {e}"));
+            .unwrap_or_else(|e| panic!("page={page} n={n} is in range: {e}"));
             let delays = raster
                 .get_int_array("delay")
-                .unwrap_or_else(|| panic!("page={page} n={n:?} must carry a delay"));
+                .unwrap_or_else(|| panic!("page={page} n={n} must carry a delay"));
             assert_eq!(
                 delays.len() as u32,
                 raster.pages_loaded(),
-                "page={page} n={n:?}: one delay per loaded page"
+                "page={page} n={n}: one delay per loaded page"
             );
             let expected: Vec<i64> =
                 [45i64, 67, 200, 12][page as usize..page as usize + delays.len()].to_vec();
-            assert_eq!(delays, expected, "page={page} n={n:?}");
+            assert_eq!(delays, expected, "page={page} n={n}");
         }
     }
 
@@ -1686,8 +1686,8 @@ mod tests {
         for (page, delay) in [(0u32, 45i64), (1, 67), (2, 200), (3, 12)] {
             let raster = decode_webp_with(
                 &ANIM4_DELAY,
-                LoadOptions { page, n: Some(1) },
                 DecodeLimits::default(),
+                LoadOptions::default().with_page(page),
             )
             .expect("every page of a four-frame file loads");
             assert_eq!((raster.width(), raster.height()), (4, 3), "page {page}");
@@ -1729,10 +1729,7 @@ mod tests {
         assert_eq!(raster.get_int_array("delay"), Some(&[45i64][..]));
         assert_eq!(
             LoadOptions::default(),
-            LoadOptions {
-                page: 0,
-                n: Some(1)
-            }
+            LoadOptions::default().with_page(0).with_n(1)
         );
     }
 
@@ -1753,33 +1750,30 @@ mod tests {
         assert!(
             decode_webp_with(
                 &ANIM4_DELAY,
-                LoadOptions {
-                    page: 3,
-                    n: Some(1)
-                },
-                DecodeLimits::default()
+                DecodeLimits::default(),
+                LoadOptions::default().with_page(3).with_n(1),
             )
             .is_ok()
         );
         // And `[page=4]`, `[page=2,n=5]` and `[n=0]` all fail with
         // `webp: bad page number`.
-        for (page, n) in [(4u32, Some(1u32)), (2, Some(5)), (0, Some(0)), (9, None)] {
+        for (page, n) in [(4u32, 1i32), (2, 5), (0, 0), (9, -1), (0, -2)] {
             let err = decode_webp_with(
                 &ANIM4_DELAY,
-                LoadOptions { page, n },
                 DecodeLimits::default(),
+                LoadOptions::default().with_page(page).with_n(n),
             )
             .expect_err("vips calls this a bad page number");
             assert!(
                 matches!(
                     err,
                     SourceError::PageOutOfRange {
-                        format: "WebP",
+                        format: "webp",
                         pages: 4,
                         ..
                     }
                 ),
-                "page={page} n={n:?} got {err:?}"
+                "page={page} n={n} got {err:?}"
             );
         }
     }
@@ -1797,7 +1791,7 @@ mod tests {
         // `vipsheader -a still.webp` lists none of these, and neither does
         // `still.webp[n=-1]`.
         for options in [LoadOptions::default(), all_pages()] {
-            let raster = decode_webp_with(&LOSSLESS_RGB, options, DecodeLimits::default())
+            let raster = decode_webp_with(&LOSSLESS_RGB, DecodeLimits::default(), options)
                 .expect("a still loads under either option shape");
             assert_eq!((raster.width(), raster.height()), (4, 3));
             for field in ["delay", "loop", "gif-delay", "gif-loop", "n-pages"] {
@@ -1806,11 +1800,8 @@ mod tests {
         }
         let err = decode_webp_with(
             &LOSSLESS_RGB,
-            LoadOptions {
-                page: 1,
-                n: Some(1),
-            },
             DecodeLimits::default(),
+            LoadOptions::default().with_page(1).with_n(1),
         )
         .expect_err("a still has one page");
         assert!(
@@ -1825,12 +1816,12 @@ mod tests {
      * the clamp is pinned as a property of the wire rather than of this
      * loader. Works by loading the three-frame default-save capture and
      * reading the fields.
-     * Input: `ANIM3` with `n = None` -> Output: 4x9, `delay` = `[100, 100,
+     * Input: `ANIM3` with `n = -1` -> Output: 4x9, `delay` = `[100, 100,
      * 100]`, `loop` = 0, `gif-delay` = 10, `gif-loop` = 0.
      */
     #[test]
     fn a_default_save_carries_the_browser_floor_and_a_forever_loop() {
-        let raster = decode_webp_with(&ANIM3, all_pages(), DecodeLimits::default())
+        let raster = decode_webp_with(&ANIM3, DecodeLimits::default(), all_pages())
             .expect("the three-frame capture decodes");
         assert_eq!((raster.width(), raster.height()), (4, 9));
         assert_eq!(raster.pages_loaded(), 3);
@@ -1857,7 +1848,7 @@ mod tests {
      */
     #[test]
     fn a_page_of_the_roll_is_the_page_loaded_on_its_own() {
-        let roll = decode_webp_with(&ANIM4_DELAY, all_pages(), DecodeLimits::default())
+        let roll = decode_webp_with(&ANIM4_DELAY, DecodeLimits::default(), all_pages())
             .expect("the four-frame capture decodes");
         // Asserted before the loop, because a roll holding one page makes
         // the comparison below trivially true.
@@ -1866,8 +1857,8 @@ mod tests {
             let extracted = roll.try_extract_page(page).expect("page is in range");
             let alone = decode_webp_with(
                 &ANIM4_DELAY,
-                LoadOptions { page, n: Some(1) },
                 DecodeLimits::default(),
+                LoadOptions::default().with_page(page),
             )
             .expect("page is in range");
             assert_eq!(
@@ -1895,12 +1886,12 @@ mod tests {
         // one frame from four.
         let pixels = DecodeLimits::default().with_max_pixels(40);
         assert!(
-            decode_webp_with(&ANIM4_DELAY, LoadOptions::default(), pixels).is_ok(),
+            decode_webp_with(&ANIM4_DELAY, pixels, LoadOptions::default()).is_ok(),
             "one frame fits under 40 pixels"
         );
         assert!(
             matches!(
-                decode_webp_with(&ANIM4_DELAY, all_pages(), pixels),
+                decode_webp_with(&ANIM4_DELAY, pixels, all_pages()),
                 Err(SourceError::DimensionLimitExceeded { height: 12, .. })
             ),
             "four frames do not"
@@ -1909,17 +1900,17 @@ mod tests {
         // The single-axis ceiling sees the roll's 12 rows, not the frame's
         // 3.
         let coord = DecodeLimits::default().with_max_coord(6);
-        assert!(decode_webp_with(&ANIM4_DELAY, LoadOptions::default(), coord).is_ok());
+        assert!(decode_webp_with(&ANIM4_DELAY, coord, LoadOptions::default()).is_ok());
         assert!(matches!(
-            decode_webp_with(&ANIM4_DELAY, all_pages(), coord),
+            decode_webp_with(&ANIM4_DELAY, coord, all_pages()),
             Err(SourceError::CoordLimitExceeded { height: 12, .. })
         ));
 
         // And the allocation budget prices four frames, 144 bytes, not one
         // frame's 36.
         let alloc = DecodeLimits::default().with_max_alloc_bytes(100);
-        assert!(decode_webp_with(&ANIM4_DELAY, LoadOptions::default(), alloc).is_ok());
-        let err = decode_webp_with(&ANIM4_DELAY, all_pages(), alloc)
+        assert!(decode_webp_with(&ANIM4_DELAY, alloc, LoadOptions::default()).is_ok());
+        let err = decode_webp_with(&ANIM4_DELAY, alloc, all_pages())
             .expect_err("144 bytes is over a 100-byte budget");
         assert!(
             matches!(
@@ -2065,13 +2056,13 @@ mod tests {
      * needs: the pixels have to be right whether or not any flag moved.
      * Works by loading every page of the RGBA capture and comparing to
      * what `vips rawsave 'x.webp[n=-1]'` wrote.
-     * Input: `ANIM4_RGBA` with `n = None` -> Output: 4x12 `Rgba8` equal to
+     * Input: `ANIM4_RGBA` with `n = -1` -> Output: 4x12 `Rgba8` equal to
      * `ANIM4_RGBA_ROLL`, with the same delays and loop as the opaque roll
      * it was written from.
      */
     #[test]
     fn a_transparent_animation_loads_exactly() {
-        let raster = decode_webp_with(&ANIM4_RGBA, all_pages(), DecodeLimits::default())
+        let raster = decode_webp_with(&ANIM4_RGBA, DecodeLimits::default(), all_pages())
             .expect("the transparent capture decodes");
         assert_eq!((raster.width(), raster.height()), (4, 12));
         assert_eq!(raster.format(), PixelFormat::Rgba8);
@@ -2148,7 +2139,7 @@ mod tests {
      */
     #[test]
     fn an_animation_saved_back_is_one_tall_still() {
-        let roll = decode_webp_with(&ANIM4_DELAY, all_pages(), DecodeLimits::default())
+        let roll = decode_webp_with(&ANIM4_DELAY, DecodeLimits::default(), all_pages())
             .expect("the four-frame capture decodes");
         assert_eq!(roll.pages_loaded(), 4);
 
