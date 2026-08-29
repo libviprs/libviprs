@@ -2246,54 +2246,101 @@ mod tests {
      * all, because `vips webpsave` writes `dispose: none` everywhere and
      * this shape has to come out of `img2webp`.
      *
-     * The comparison is on the colour channels only, because this file also
-     * trips a separate divergence: it declares no alpha in `VP8X` and no
-     * `alpha_is_used` on either frame, yet the disposal makes the canvas
-     * transparent, and vips hands back four bands where libviprs hands back
-     * three. That is filed separately and is not fixable through
-     * `image-webp`'s public API, so this test asserts the half that is:
-     * the pixels under the disposed area are the cleared canvas and not
-     * frame 0.
+     * It is also the file issue #885 was about: nothing in any header
+     * declares alpha, and the canvas is transparent anyway, because frame 1
+     * is 2x2 on a 4x4 canvas and frame 0 disposes to background. vips
+     * reports **four** bands for it and libviprs reported three, so the
+     * transparent area came back as opaque black and the information was
+     * gone rather than mislabelled. Both halves are asserted here now.
      * Input: `DISPOSE_BG`, whose frame 0 covers the canvas in opaque red
      * and disposes to background, and whose frame 1 is a 2x2 blue square ->
-     * Output: page 1 is blue in the square and black (vips's transparent
-     * black, without the alpha) everywhere else, not red.
+     * Output: four bands, page 1 blue in the square and transparent
+     * everywhere else, not red.
      */
     #[test]
     fn a_frame_disposed_to_the_background_clears_the_canvas() {
         let raster = decode_webp_with(&DISPOSE_BG, DecodeLimits::default(), all_pages())
             .expect("the two-frame capture decodes");
         assert_eq!((raster.width(), raster.height()), (4, 8));
-        // Three bands here and four in vips; see the note above.
-        assert_eq!(raster.format(), PixelFormat::Rgb8);
+        assert_eq!(
+            raster.format(),
+            PixelFormat::Rgba8,
+            "a frame smaller than the canvas means alpha, which is issue #885"
+        );
 
-        // Every colour channel vips reads, with its alpha dropped, and with
-        // page 1 through the upstream blend loss because this file asks for
-        // frame 1 to be blended. The disposed area is zero and stays zero,
-        // so the loss shows up only on the blue square: 255 becomes 254.
-        let mut expected: Vec<u8> = DISPOSE_BG_ROLL
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .flat_map(|p| p[..3].to_vec())
-            .collect();
-        let blended = as_image_webp_blends(&expected[48..]);
-        expected[48..].copy_from_slice(&blended);
+        // Every byte vips reads, with page 1 through the upstream blend loss
+        // because this file asks for frame 1 to be blended. The disposed
+        // area is zero and stays zero, so the loss shows up only on the blue
+        // square: 255 becomes 254.
+        let mut expected = DISPOSE_BG_ROLL.to_vec();
+        let blended = as_image_webp_blends(&expected[64..]);
+        expected[64..].copy_from_slice(&blended);
         assert_eq!(raster.data(), &expected[..]);
 
-        // Said again as the property rather than as 96 bytes, because the
+        // Said again as the property rather than as 128 bytes, because the
         // comparison above passes for the wrong reason if the fixture is
         // ever regenerated: the pixel outside frame 1's square has to be
         // the cleared canvas and not frame 0's red.
-        let page1 = &raster.data()[48..];
-        assert_eq!(&page1[..3], &[0, 0, 254], "the square is blue, a level low");
+        let page1 = &raster.data()[64..];
         assert_eq!(
-            &page1[6..9],
-            &[0, 0, 0],
-            "outside the square the canvas was disposed to the background, \
-             so frame 0's red is gone"
+            &page1[..4],
+            &[0, 0, 254, 254],
+            "the square is blue and opaque, a level low"
         );
-        assert_ne!(&page1[6..9], &[255, 0, 0], "and it is not the red");
+        assert_eq!(
+            &page1[8..12],
+            &[0, 0, 0, 0],
+            "outside the square the canvas was disposed to the background, \
+             so frame 0's red is gone and the alpha says so"
+        );
+        assert_ne!(&page1[8..11], &[255, 0, 0], "and it is not the red");
+    }
+
+    /**
+     * Tests the rule that decides an animation's band count, which is not
+     * the `VP8X` alpha flag on its own. Works by decoding four fixtures that
+     * sit on different arms of it and comparing the format libviprs picks
+     * against the one vips reports for the same bytes.
+     * `webp2vips.c:413` starts from the flag, and `:464-471` turns it on for
+     * an animation if **any** frame carries alpha of its own or is smaller
+     * than the canvas, the second because a frame that does not cover the
+     * canvas leaves the area around it transparent. Measured on 8.18.6 with
+     * `vipsheader` on each file.
+     * `ANIM4_DELAY` and `ANIM5` are the negative controls: same loader, same
+     * animation shape, flag clear and every frame full-size and opaque, and
+     * vips says three bands for both. Without them a loader that answered
+     * four bands for every animation would pass.
+     * Input: four animations -> Output: three bands, three bands, four
+     * (`VP8X` flag and `alpha_is_used` set), four (sub-canvas frame).
+     */
+    #[test]
+    fn the_band_count_follows_vipss_rule_and_not_the_vp8x_flag_alone() {
+        for (name, bytes, expected) in [
+            (
+                "ANIM4_DELAY, flag clear, frames full-size and opaque",
+                &ANIM4_DELAY[..],
+                PixelFormat::Rgb8,
+            ),
+            (
+                "ANIM5, the same shape with five frames",
+                &ANIM5[..],
+                PixelFormat::Rgb8,
+            ),
+            (
+                "ANIM4_RGBA, flag set and every frame carries alpha",
+                &ANIM4_RGBA[..],
+                PixelFormat::Rgba8,
+            ),
+            (
+                "DISPOSE_BG, flag clear but frame 1 is 2x2 on a 4x4 canvas",
+                &DISPOSE_BG[..],
+                PixelFormat::Rgba8,
+            ),
+        ] {
+            let raster = decode_webp_with(bytes, DecodeLimits::default(), all_pages())
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(raster.format(), expected, "{name}");
+        }
     }
 
     /**
