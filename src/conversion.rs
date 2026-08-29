@@ -1292,10 +1292,11 @@ impl Raster {
         // `vips msb` on a float image answers "msb: image must be
         // integer", measured on `/opt/homebrew/bin/vips` 8.18.6. Without
         // this the `f32`'s exponent and sign get shifted into the output
-        // byte and the call looks like it worked (issue #860).
-        if self.format().is_float() {
-            return Err(ConversionError::FloatUnsupported { op: "msb" });
-        }
+        // byte and the call looks like it worked (issue #860). Through
+        // `reject_unreadable_kind` rather than `is_float`, so the signed
+        // carriers of issue #516 are refused by the same guard when they
+        // land, and float keeps the variant it has always had.
+        reject_unreadable_kind("msb", self)?;
         let fmt = self.format();
         let kind = fmt.kind();
         let bpc = kind.bytes();
@@ -1446,8 +1447,8 @@ impl Raster {
         // raster tagged `b-w` holding 65535 flattens to **32896**, which
         // is `65535 * 128 / 255`, and the width rule answered 128; a
         // `uint` raster at 90000 flattens to 45176 and the width rule
-        // answered 0. Same source `white_ink` reads for the same reason
-        // (issues #667, #859).
+        // answered 0. Same source `white_ink` and `addalpha` read (issues
+        // #667, #859).
         let max_alpha = interpretation_max_alpha(self.interpretation());
         let w = self.width();
         let h = self.height();
@@ -2675,6 +2676,25 @@ mod tests {
 
     fn gray8(w: u32, h: u32, data: Vec<u8>) -> Raster {
         Raster::new(w, h, PixelFormat::Gray8, data).unwrap()
+    }
+
+    /// A one-band `Uint32` raster from sample values.
+    fn uint32(w: u32, h: u32, vals: &[u32]) -> Raster {
+        let data: Vec<u8> = vals.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        let fmt = PixelFormat::Uint32(NonZeroU16::new(1).unwrap());
+        Raster::new(w, h, fmt, data).unwrap()
+    }
+
+    /// Read the flat `i`-th `u32` sample of a raster.
+    fn u32_at(r: &Raster, i: usize) -> u32 {
+        let d = r.data();
+        u32::from_ne_bytes([d[i * 4], d[i * 4 + 1], d[i * 4 + 2], d[i * 4 + 3]])
+    }
+
+    /// Read the flat `i`-th `u16` sample of a raster.
+    fn u16_at(r: &Raster, i: usize) -> u16 {
+        let d = r.data();
+        u16::from_ne_bytes([d[i * 2], d[i * 2 + 1]])
     }
 
     fn gray16(w: u32, h: u32, vals: &[u16]) -> Raster {
@@ -4900,13 +4920,50 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // the alpha ceiling comes from the tag, not the width (#859, #861)
+    // the unsigned 32-bit carrier (issue #517)
     // ------------------------------------------------------------------
 
-    /// Read the flat `i`-th `u16` sample of a raster.
-    fn u16_at(r: &Raster, i: usize) -> u16 {
-        let d = r.data();
-        u16::from_ne_bytes([d[i * 2], d[i * 2 + 1]])
+    /**
+     * Tests that `cast` reaches the unsigned 32-bit carrier in both
+     * directions and keeps a value no 16-bit carrier can hold, which is the
+     * whole point of adding it (issues #517, #532).
+     * Works by casting a `Gray16` raster up to `Uint32` and back, and by
+     * narrowing a `uint` sample of 70000 to both smaller carriers. The
+     * narrowing pair is pinned to `/opt/homebrew/bin/vips` 8.18.6: `vips
+     * cast` on a `uint` raster holding 70000 answers `uchar` 255 and
+     * `ushort` 65535. 90000 is the count a 300x300 image produces, the
+     * number issue #532 opens with.
+     * Input: u16 40000 -> uint 40000 -> u16 40000; uint 90000 -> u16
+     * 65535 and u8 255.
+     */
+    #[test]
+    fn cast_carries_the_uint_carrier_both_ways() {
+        let u32fmt = PixelFormat::Uint32(NonZeroU16::new(1).unwrap());
+        let up = gray16(1, 1, &[40000]).try_cast(u32fmt).unwrap();
+        assert_eq!(up.format(), u32fmt);
+        assert_eq!(u32_at(&up, 0), 40000);
+        let back = up.try_cast(PixelFormat::Gray16).unwrap();
+        assert_eq!(back.format(), PixelFormat::Gray16);
+        assert_eq!(u16_at(&back, 0), 40000);
+
+        // The value that does not survive a 16-bit carrier, and the one
+        // that does not survive an 8-bit one. Both pinned to vips 8.18.6.
+        let big = uint32(1, 1, &[90_000]);
+        assert_eq!(u32_at(&big, 0), 90_000);
+        assert_eq!(
+            u16_at(&big.try_cast(PixelFormat::Gray16).unwrap(), 0),
+            65535
+        );
+        assert_eq!(big.try_cast(PixelFormat::Gray8).unwrap().data()[0], 255);
+
+        // Widening from 8 bits keeps the number rather than rescaling it,
+        // the same rule the 8-to-16 cast follows.
+        let from8 = gray8(1, 1, vec![200]).try_cast(u32fmt).unwrap();
+        assert_eq!(u32_at(&from8, 0), 200);
+
+        // And the whole `u32` range round-trips through the carrier.
+        let extreme = uint32(1, 1, &[u32::MAX]);
+        assert_eq!(u32_at(&extreme.try_cast(u32fmt).unwrap(), 0), u32::MAX);
     }
 
     /**
@@ -4923,12 +4980,14 @@ mod tests {
      * Input/Output, all measured: uchar (200, 128) -> 100; ushort b-w
      * (65535, 128) -> 32896; float (200.5, 128) -> 100.643; scRGB float
      * (0.5, 0.5) -> 0.25; uchar (200, 128) with background 10 -> 105;
-     * uchar (201, 128) -> 100 and (51, 128) -> 25, the truncation.
+     * uint (90000, 128) -> 45176; uchar (201, 128) -> 100 and
+     * (51, 128) -> 25, the truncation.
      */
     #[test]
     fn flatten_scales_alpha_by_the_interpretation_not_the_width() {
         let n = |v: u16| NonZeroU16::new(v).unwrap();
-        // uchar, 2 bands: the row where the two rules agree.
+        // uchar, 2 bands: the row where the two rules agree, so it is the
+        // control that the change did not simply move everything.
         let u8two = Raster::new(1, 1, PixelFormat::Multi8(n(2)), vec![200, 128]).unwrap();
         assert_eq!(u8two.try_flatten(None).unwrap().data()[0], 100);
         assert_eq!(
@@ -4949,6 +5008,21 @@ mod tests {
         )
         .unwrap();
         assert_eq!(u16_at(&u16two.try_flatten(None).unwrap(), 0), 32896);
+
+        // The uint carrier, where the width rule answered 0.
+        let utwo = Raster::new(
+            1,
+            1,
+            PixelFormat::Uint32(n(2)),
+            [90_000u32, 128]
+                .iter()
+                .flat_map(|v| v.to_ne_bytes())
+                .collect(),
+        )
+        .unwrap();
+        let flat = utwo.try_flatten(None).unwrap();
+        assert_eq!(flat.format(), PixelFormat::Uint32(n(1)));
+        assert_eq!(u32_at(&flat, 0), 45176);
 
         // A float raster, which used to have its `f32` bits read as a
         // `u32` and blended as an integer.
@@ -5002,9 +5076,10 @@ mod tests {
      * Works by adding alpha across the tags, with the `Gray16` row as the
      * control that the 16-bit answer did not move: it is tagged `Grey16`
      * and so still inks 65535, while a 16-bit raster tagged `Multiband`
-     * inks 255. Pinned to vips 8.18.6, where a `ushort` raster tagged
-     * `b-w` gets alpha 255 and one tagged `grey16` gets 65535.
-     * Input/Output: Gray8 -> 255, Gray16 -> 65535, Multi16(2) -> 255.
+     * inks 255. All four pinned to vips 8.18.6, where a `ushort` raster
+     * tagged `b-w` gets alpha 255 and one tagged `grey16` gets 65535.
+     * Input/Output: Gray8 -> 255, Gray16 -> 65535, Multi16(2) -> 255,
+     * Uint32(1) -> 255.
      */
     #[test]
     fn addalpha_inks_from_the_interpretation() {
@@ -5035,6 +5110,10 @@ mod tests {
             "a Multiband-tagged 16-bit raster inks 255, as vips does"
         );
 
+        let au = uint32(1, 1, &[90_000]).try_addalpha().unwrap();
+        assert_eq!(au.format(), PixelFormat::Uint32(n(2)));
+        assert_eq!(u32_at(&au, 1), 255);
+
         // The float carrier would ink 255 too, and there is no assertion
         // for it here because `bandjoin_const` refuses a float raster in
         // `crate::bands` before the ink is used, so the row is not
@@ -5042,23 +5121,21 @@ mod tests {
     }
 
     /**
-     * Tests that `msb` refuses a float raster the way vips does, instead
-     * of shifting the `f32`'s exponent and sign into the output byte
-     * (issue #860).
-     * Works by asserting the typed refusal for float, with 8-bit and
-     * 16-bit controls so the refusal cannot be passing because `msb`
-     * refuses everything. Measured on `/opt/homebrew/bin/vips` 8.18.6,
-     * where `vips msb` on a float image answers "msb: image must be
-     * integer" and exits non-zero.
-     * Input: float -> Err(FloatUnsupported { op: "msb" }); Gray16 0xABCD
-     * -> 0xAB; Gray8 200 -> 200.
+     * Tests that `msb` refuses a float raster the way vips does, and reads
+     * the top byte of the uint carrier correctly (issue #860).
+     * Works by asserting the typed refusal for float and the measured byte
+     * for `uint`, with an 8-bit and a 16-bit control so the refusal cannot
+     * be passing because `msb` refuses everything.
+     * Input: float -> Err(FloatUnsupported); uint 90000 (0x00015F90) -> 0,
+     * which is what `vips msb` gives; Gray16 0xABCD -> 0xAB.
      */
     #[test]
-    fn msb_refuses_a_float_raster() {
+    fn msb_refuses_float_and_reads_the_uint_top_byte() {
+        let n = |v: u16| NonZeroU16::new(v).unwrap();
         let f = Raster::new(
             1,
             1,
-            PixelFormat::FloatF32(NonZeroU16::new(1).unwrap()),
+            PixelFormat::FloatF32(n(1)),
             1.5f32.to_ne_bytes().to_vec(),
         )
         .unwrap();
@@ -5068,10 +5145,135 @@ mod tests {
         ));
         // Controls: the integer carriers still work, so the refusal above
         // is about the kind and not about `msb` being broken.
+        assert_eq!(uint32(1, 1, &[90_000]).try_msb(None).unwrap().data()[0], 0);
+        assert_eq!(
+            uint32(1, 1, &[0xAB00_0000]).try_msb(None).unwrap().data()[0],
+            0xAB
+        );
         assert_eq!(
             gray16(1, 1, &[0xABCD]).try_msb(None).unwrap().data()[0],
             0xAB
         );
         assert_eq!(gray8(1, 1, vec![200]).try_msb(None).unwrap().data()[0], 200);
+    }
+
+    /**
+     * Tests that `gamma` carries the uint carrier through the same curve
+     * rather than building a 2^32-entry lookup table, and that the answer
+     * is the one vips gives.
+     * Works by running the default exponent over a `uint` raster and
+     * asserting 0, which is what `vips gamma` answers for *every* `uint`
+     * input on 8.18.6 because `mx / pow(mx, 2.4)` underflows the f32
+     * coefficient at mx = 4294967295. The 8-bit control is the positive
+     * one: the same call on 100 gives 26, so a blanket zero would fail.
+     * Input: uint 100 and 90000 -> 0; uchar 100 -> 26.
+     */
+    #[test]
+    fn gamma_on_the_uint_carrier_reproduces_the_vips_underflow() {
+        assert_eq!(u32_at(&uint32(1, 1, &[100]).try_gamma(None).unwrap(), 0), 0);
+        assert_eq!(
+            u32_at(&uint32(1, 1, &[90_000]).try_gamma(None).unwrap(), 0),
+            0
+        );
+        // Positive control, measured the same way: `vips gamma` on a
+        // `uchar` raster holding 100 answers 26.
+        assert_eq!(
+            gray8(1, 1, vec![100]).try_gamma(None).unwrap().data()[0],
+            26
+        );
+    }
+
+    /**
+     * Tests that `falsecolour` clamps a uint sample into the 256-entry PET
+     * table instead of indexing past it.
+     * Works by mapping a `uint` sample far above 255 and comparing against
+     * the measured vips answer, with an in-range control so the clamp is
+     * not the only thing exercised.
+     * Input: uint 90000 -> (174, 0, 0), which is `vips falsecolour`'s
+     * answer and `FALSECOLOUR_PET[255]`; uint 0 -> the table's first row.
+     */
+    #[test]
+    fn falsecolour_clamps_the_uint_carrier_into_the_pet_table() {
+        let hot = uint32(1, 1, &[90_000]).try_falsecolour().unwrap();
+        assert_eq!(hot.format(), PixelFormat::Rgb8);
+        assert_eq!(&hot.data()[0..3], &[174, 0, 0]);
+        let cold = uint32(1, 1, &[0]).try_falsecolour().unwrap();
+        assert_eq!(&cold.data()[0..3], &FALSECOLOUR_PET[0]);
+    }
+
+    /**
+     * Tests that the two-input ops pick their output carrier through
+     * `SampleKind::promote` rather than through the wider byte width,
+     * which answers the float carrier at four bytes (issues #517, #607).
+     * Works by joining and selecting across mixed carriers and asserting
+     * the output format, with the mixed 8/16 pair as the control that the
+     * existing promotion is unchanged.
+     * Input: arrayjoin(uint, uint) -> Uint32; arrayjoin(u8, uint) ->
+     * Uint32; ifthenelse(u8 branches with a uint condition) -> Rgb8-ish
+     * u8; ifthenelse(u8, uint) -> Uint32.
+     */
+    #[test]
+    fn two_input_ops_promote_through_the_kind() {
+        let n = |v: u16| NonZeroU16::new(v).unwrap();
+        let u = uint32(1, 1, &[90_000]);
+        let g8 = gray8(1, 1, vec![200]);
+        let g16 = gray16(1, 1, &[40000]);
+
+        let joined = Raster::try_arrayjoin(&[&u, &u], None, None).unwrap();
+        assert_eq!(joined.format(), PixelFormat::Uint32(n(1)));
+        let mixed = Raster::try_arrayjoin(&[&g8, &u], None, None).unwrap();
+        assert_eq!(
+            mixed.format(),
+            PixelFormat::Uint32(n(1)),
+            "the width rule would have answered the float carrier here"
+        );
+        // Control: the promotion that existed before is untouched.
+        let old = Raster::try_arrayjoin(&[&g8, &g16], None, None).unwrap();
+        assert_eq!(old.format(), PixelFormat::Gray16);
+
+        let cond = gray8(1, 1, vec![1]);
+        let sel = cond.try_ifthenelse(&g8, &u).unwrap();
+        assert_eq!(sel.format(), PixelFormat::Uint32(n(1)));
+        let sel_old = cond.try_ifthenelse(&g8, &g16).unwrap();
+        assert_eq!(sel_old.format(), PixelFormat::Gray16);
+    }
+
+    /**
+     * Tests that the ops in this module which cannot read a sample kind
+     * refuse it as a typed error instead of panicking out of a `Result`,
+     * the shape issue #694 landed.
+     * Works by handing a float raster to each guarded op, and by asserting
+     * that the same ops accept the uint carrier, so the guard is about the
+     * kind and not a blanket refusal of anything unusual.
+     * Input: float -> Err(FloatUnsupported { op }); uint -> Ok.
+     */
+    #[test]
+    fn the_unsigned_only_ops_refuse_a_kind_they_cannot_read() {
+        let n = |v: u16| NonZeroU16::new(v).unwrap();
+        let f = Raster::new(
+            1,
+            1,
+            PixelFormat::FloatF32(n(1)),
+            1.5f32.to_ne_bytes().to_vec(),
+        )
+        .unwrap();
+        assert!(matches!(
+            f.try_gamma(None),
+            Err(ConversionError::FloatUnsupported { op: "gamma" })
+        ));
+        assert!(matches!(
+            f.try_falsecolour(),
+            Err(ConversionError::FloatUnsupported { op: "falsecolour" })
+        ));
+        assert!(matches!(
+            Raster::try_arrayjoin(&[&f, &f], None, None),
+            Err(ConversionError::FloatUnsupported { op: "arrayjoin" })
+        ));
+        // Positive control: the uint carrier goes through every one of
+        // them, so these are refusals of a kind and not of a stride.
+        let u = uint32(1, 1, &[90_000]);
+        assert!(u.try_gamma(None).is_ok());
+        assert!(u.try_falsecolour().is_ok());
+        assert!(Raster::try_arrayjoin(&[&u, &u], None, None).is_ok());
     }
 }

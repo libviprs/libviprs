@@ -1066,4 +1066,50 @@ mod tests {
             );
         }
     }
+
+    /**
+     * Tests that the unsigned 32-bit carrier round-trips through the
+     * manifest wire tag, and that its tag is read before the width-keyed
+     * tail so it cannot fall into the four-byte float arm (issue #517).
+     * Works by serialising a `Uint32` format, asserting the exact tag
+     * string, and reading it back, with the float carrier at the same band
+     * count as the control that the two tags are distinct and neither
+     * reads as the other.
+     * Input: Uint32(3) -> "uint32:3" -> Uint32(3); FloatF32(3) ->
+     * "floatf32:3" -> FloatF32(3).
+     */
+    #[test]
+    fn uint32_round_trips_through_the_manifest_tag() {
+        let n = |v: u16| core::num::NonZeroU16::new(v).unwrap();
+        for bands in [1u16, 3, 4, 7] {
+            let fmt = PixelFormat::Uint32(n(bands));
+            let json = serde_json::to_string(&SourceMetadata {
+                width: 4,
+                height: 4,
+                pixel_format: fmt,
+                bytes_hash: None,
+            })
+            .unwrap();
+            assert!(
+                json.contains(&format!("\"uint32:{bands}\"")),
+                "the tag for {fmt:?} is not uint32:{bands} in {json}"
+            );
+            let back: SourceMetadata = serde_json::from_str(&json).unwrap();
+            assert_eq!(back.pixel_format, fmt);
+        }
+        // Control: the float carrier of the same width keeps its own tag
+        // and reads back as itself, so the two four-byte carriers are not
+        // one tag with two names.
+        let f = PixelFormat::FloatF32(n(3));
+        let json = serde_json::to_string(&SourceMetadata {
+            width: 4,
+            height: 4,
+            pixel_format: f,
+            bytes_hash: None,
+        })
+        .unwrap();
+        assert!(json.contains("\"floatf32:3\""));
+        let back: SourceMetadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.pixel_format, f);
+    }
 }

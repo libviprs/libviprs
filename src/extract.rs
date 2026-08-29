@@ -3200,4 +3200,123 @@ mod tests {
             "srgb twice"
         );
     }
+
+    // ------------------------------------------------------------------
+    // the unsigned 32-bit carrier (issue #517)
+    // ------------------------------------------------------------------
+
+    /// A one-band `Uint32` raster from sample values.
+    fn uint32(w: u32, h: u32, vals: &[u32]) -> Raster {
+        let data: Vec<u8> = vals.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        let fmt = PixelFormat::Uint32(core::num::NonZeroU16::new(1).unwrap());
+        Raster::new(w, h, fmt, data).unwrap()
+    }
+
+    fn u32_at(r: &Raster, i: usize) -> u32 {
+        let d = r.data();
+        u32::from_ne_bytes([d[i * 4], d[i * 4 + 1], d[i * 4 + 2], d[i * 4 + 3]])
+    }
+
+    /**
+     * Tests that `embed` carries the unsigned 32-bit carrier: it copies
+     * the source samples at the right stride and inks the border with the
+     * carrier's own white.
+     * Works by embedding a 1x1 `uint` raster in the middle of a 3x3 canvas
+     * with `Extend::White` and reading both a source sample and a border
+     * one, so a read at half stride moves the first and a wrong ink moves
+     * the second. Both pinned to `/opt/homebrew/bin/vips` 8.18.6, where
+     * `vips embed --extend white` on a `uint` raster fills **4294967295**
+     * and an `int` one fills -1, the same bytes read signed.
+     * Input: uint 90000 embedded at (1, 1) in 3x3 -> centre 90000, border
+     * 4294967295.
+     */
+    #[test]
+    fn embed_carries_the_uint_carrier_and_its_white_ink() {
+        let src = uint32(1, 1, &[90_000]);
+        let out = src
+            .try_embed(1, 1, 3, 3, Extend::White, None)
+            .expect("embed carries the uint carrier");
+        assert_eq!(out.format(), src.format());
+        assert_eq!(
+            u32_at(&out, 4),
+            90_000,
+            "the source sample moved or was misread"
+        );
+        assert_eq!(
+            u32_at(&out, 0),
+            4_294_967_295,
+            "the white ink is not the carrier's"
+        );
+        // Controls: the same call on the carriers that already worked.
+        let g8 = gray(1, 1, vec![200]);
+        let o8 = g8.try_embed(1, 1, 3, 3, Extend::White, None).unwrap();
+        assert_eq!(o8.data()[4], 200);
+        assert_eq!(o8.data()[0], 255);
+        let g16 = gray16(1, 1, &[40000]);
+        let o16 = g16.try_embed(1, 1, 3, 3, Extend::White, None).unwrap();
+        assert_eq!(u16::from_ne_bytes([o16.data()[8], o16.data()[9]]), 40000);
+    }
+
+    /**
+     * Tests that `insert` picks the output carrier through
+     * `SampleKind::promote` rather than through the wider byte width,
+     * which answers the float carrier at four bytes (issues #517, #607).
+     * Works by inserting an 8-bit raster into a `uint` one and asserting
+     * both the format and a sample, with the 8-into-16 pair as the control
+     * that the existing promotion did not move.
+     * Input: insert(uint, u8) -> Uint32 carrying 90000; insert(u16, u8) ->
+     * Gray16.
+     */
+    #[test]
+    fn insert_promotes_through_the_kind() {
+        let n = |v: u16| core::num::NonZeroU16::new(v).unwrap();
+        let main = uint32(2, 1, &[90_000, 90_000]);
+        let sub = gray(1, 1, vec![7]);
+        let out = main.try_insert(&sub, 0, 0, false, None).unwrap();
+        assert_eq!(out.format(), PixelFormat::Uint32(n(1)));
+        assert_eq!(u32_at(&out, 1), 90_000);
+        assert_eq!(u32_at(&out, 0), 7);
+        // Control: the promotion that existed before is untouched.
+        let out16 = gray16(2, 1, &[40000, 40000])
+            .try_insert(&sub, 0, 0, false, None)
+            .unwrap();
+        assert_eq!(out16.format(), PixelFormat::Gray16);
+    }
+
+    /**
+     * Tests that the two smartcrop strategies which build a value-indexed
+     * table refuse the 32-bit carrier as a typed error rather than
+     * panicking on an out-of-range histogram index.
+     * Works by asking for both strategies on a `uint` raster whose samples
+     * are far above 65536, with the pure-geometry strategies as the
+     * control that smartcrop itself still works on that carrier.
+     * Input: Entropy / Attention on uint -> Err(UnsupportedSampleKind);
+     * Centre on uint -> Ok.
+     */
+    #[test]
+    fn smartcrop_refuses_the_uint_carrier_where_it_needs_a_table() {
+        let r = uint32(4, 4, &[90_000; 16]);
+        for interesting in [
+            SmartcropInteresting::Entropy,
+            SmartcropInteresting::Attention,
+        ] {
+            let got = r.try_smartcrop(2, 2, interesting, false);
+            assert!(
+                matches!(
+                    got,
+                    Err(ExtractError::UnsupportedSampleKind {
+                        op: "smartcrop",
+                        kind: SampleKind::U32
+                    })
+                ),
+                "{interesting:?} on a uint raster gave {got:?}"
+            );
+        }
+        // Control: the geometry strategies are depth-agnostic and still
+        // carry the same raster, so the refusal is about the table.
+        assert!(
+            r.try_smartcrop(2, 2, SmartcropInteresting::Centre, false)
+                .is_ok()
+        );
+    }
 }

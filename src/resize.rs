@@ -936,4 +936,78 @@ mod tests {
             Err(RasterError::FloatUnsupported { .. })
         ));
     }
+
+    /// A one-band `Uint32` raster from sample values.
+    fn uint32(w: u32, h: u32, vals: &[u32]) -> Raster {
+        let data: Vec<u8> = vals.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        let fmt = PixelFormat::Uint32(core::num::NonZeroU16::new(1).unwrap());
+        Raster::new(w, h, fmt, data).unwrap()
+    }
+
+    fn u32_at(r: &Raster, i: usize) -> u32 {
+        let d = r.data();
+        u32::from_ne_bytes([d[i * 4], d[i * 4 + 1], d[i * 4 + 2], d[i * 4 + 3]])
+    }
+
+    /**
+     * Tests that the box-filter kernels average the unsigned 32-bit
+     * carrier at its own stride, which is the site where a width-keyed
+     * `else` branch silently halved the stride and averaged the halves.
+     * Works against `/opt/homebrew/bin/vips` 8.18.6: `vips shrink in 2 2`
+     * on a 4x4 `uint` ramp of 100000, 101000, ... answers **102500** and
+     * **104500** in row 0 and stays UINT. The uniform case is the sharper
+     * one, because a stride bug on a constant image still returns a
+     * constant: 90000 came back as **24464** before this, and that is the
+     * number to break the fix against.
+     * Input: 4x4 uint ramp -> 102500, 104500; 2x2 uint all 90000 -> 90000.
+     */
+    #[test]
+    fn downscale_half_carries_the_uint_carrier() {
+        let vals: Vec<u32> = (0..16).map(|i| 100_000 + i * 1000).collect();
+        let out = downscale_half(&uint32(4, 4, &vals)).unwrap();
+        assert_eq!(
+            out.format(),
+            PixelFormat::Uint32(core::num::NonZeroU16::new(1).unwrap())
+        );
+        assert_eq!((u32_at(&out, 0), u32_at(&out, 1)), (102_500, 104_500));
+
+        // The uniform case: any stride error shows up as a value that is
+        // not the constant, and 24464 is what the `u16` read gave.
+        let flat = downscale_half(&uint32(2, 2, &[90_000; 4])).unwrap();
+        assert_eq!(u32_at(&flat, 0), 90_000);
+
+        // Control: the same shape on the carriers that already worked, so
+        // this cannot pass by the kernel having stopped averaging.
+        let g8 = Raster::new(2, 2, PixelFormat::Gray8, vec![10, 20, 30, 40]).unwrap();
+        assert_eq!(downscale_half(&g8).unwrap().data()[0], 25);
+    }
+
+    /**
+     * Tests that the alpha-weighted kernel carries the 32-bit carrier
+     * without overflowing its accumulator, since an alpha times a colour
+     * on that carrier does not fit a `u64` sum.
+     * Works by downscaling a 2x2 four-band `uint` raster whose alpha is
+     * `u32::MAX` and whose colour is `u32::MAX`, which is the largest
+     * product the accumulator can be asked for: a `u64` sum wraps there
+     * and answers something below the constant.
+     * Input: 2x2 Uint32(4) all `u32::MAX` -> 1x1 all `u32::MAX`.
+     */
+    #[test]
+    fn the_alpha_kernel_does_not_overflow_on_the_uint_carrier() {
+        let n = core::num::NonZeroU16::new(4).unwrap();
+        let fmt = PixelFormat::Uint32(n);
+        assert!(
+            fmt.has_alpha(),
+            "the four-band uint carrier must take the alpha path"
+        );
+        let data: Vec<u8> = std::iter::repeat_n(u32::MAX, 16)
+            .flat_map(|v| v.to_ne_bytes())
+            .collect();
+        let r = Raster::new(2, 2, fmt, data).unwrap();
+        let out = downscale_half(&r).unwrap();
+        assert_eq!(out.format(), fmt);
+        for b in 0..4 {
+            assert_eq!(u32_at(&out, b), u32::MAX, "band {b} wrapped");
+        }
+    }
 }
