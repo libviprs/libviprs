@@ -86,6 +86,21 @@ MIRI_TOOLCHAIN ?= nightly-2026-08-20
 ## so the two run the same command and the same flags on different nightlies.
 ## Treat a local green as evidence about the crate, not as a prediction of the
 ## hosted run.
+##
+## The long filter list is the point rather than an accident: `cargo miri test`
+## with no filter does not finish on this crate, and the workflow carries the
+## measurements and the reason each excluded module is excluded. The list is
+## held against the workflow's, in both directions, by
+## `tests/miri_invocation_parity.rs`, so add a module in both places or in
+## neither.
+##
+## Five of the exclusions are this machine's rather than the crate's. Anything
+## that decodes a JPEG reaches `zune-jpeg`'s NEON IDCT, which is unconditional
+## on aarch64, and Miri does not implement `llvm.aarch64.neon.sqxtn.v4i16` or
+## `llvm.aarch64.neon.sqshrun.v4i16`. The hosted runner is x86_64 and has no
+## NEON path compiled in, so it could probably run those five; they stay out of
+## both invocations so that a local green and a hosted green keep meaning the
+## same thing.
 miri:
 	@echo "==> cargo +$(MIRI_TOOLCHAIN) miri test"
 	@msrv=$$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml | head -1); \
@@ -102,7 +117,7 @@ miri:
 		echo "error: miri is not installed for '$(MIRI_TOOLCHAIN)'. Run 'rustup component add miri --toolchain $(MIRI_TOOLCHAIN)'." >&2; \
 		exit 1; \
 	}
-	RUSTFLAGS='-A deprecated --cfg sha2_backend="soft"' cargo +$(MIRI_TOOLCHAIN) miri test
+	RUSTFLAGS='-A deprecated --cfg sha2_backend="soft"' cargo +$(MIRI_TOOLCHAIN) miri test --lib -- analyze:: avif:: bands:: cancel:: checksum:: codec:: composite:: dedupe:: encode_tiff:: exr:: extensions:: frames:: freqfilt:: geo:: hex:: jp2k:: jxl:: level_walk:: manifest:: mat:: nifti:: pixel:: radiance:: raster_ops:: resize:: resume:: retry:: sink:: svg:: sync_queue:: textio:: webp::
 
 ## Run Loom concurrency tests (Loom job)
 loom:
