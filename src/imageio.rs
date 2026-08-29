@@ -20,6 +20,7 @@
 //! | `.jpg` / `.jpeg` | the sink JPEG encoder at quality 75 | `icc-profile-data` (APP2), `exif-data` (APP1, raw blob) |
 //! | `.gif` | [`Raster::encode_gif`] at the vips defaults | none: what a GIF carries (palette, `loop`, `delay`) is structural, not EXIF-class |
 //! | `.webp` | [`Raster::encode_webp`], lossless | `icc-profile-data` (`ICCP`), `exif-data` (`EXIF`), `xmp-data` (`XMP `) |
+//! | `.tif` / `.tiff` | the pure-Rust TIFF encoder behind [`Raster::save_tiff`], at `tiffsave`'s default of uncompressed strips | none yet: this build writes the colour tags and the strips, and unlike the rows below it that is a gap rather than the container's doing |
 //! | `.jxl` (needs the `jxl` feature) | [`Raster::encode_jxl`], lossless | none: the encoder writes a bare codestream with no box container |
 //! | `.jp2` / `.j2k` / `.jpt` / `.j2c` / `.jpc` (needs the `jp2k` feature) | [`Raster::encode_jp2k`] at the `jp2ksave` defaults | none: `jp2ksave.c` has no code for ICC, EXIF or XMP |
 //! | `.ppm` (3-band) / `.pgm` (1-band) | [`Raster::encode_ppm`], the container the suffix names | none: a binary Netpbm file is a three-line header and the body |
@@ -27,8 +28,8 @@
 //! | `.fits` / `.fit` / `.fts` | [`Raster::encode_fits`] | the `fits-` header records, minus the cards cfitsio regenerates |
 //! | `.v` / `.vips` | [`Raster::encode_vips`] | header geometry plus every attached field |
 //!
-//! Formats libviprs cannot encode yet (TIFF-with-metadata, ...) return
-//! [`SaveError::UnsupportedExtension`]; they arrive with the
+//! Formats libviprs cannot encode yet (HEIF/AVIF, BigTIFF, tiled TIFF, ...)
+//! return [`SaveError::UnsupportedExtension`]; they arrive with the
 //! foreign-format batch. `.jxl` and the five JPEG 2000 suffixes join them
 //! when the crate is built without their non-default feature, and the
 //! refusal follows the build: it names the extensions this binary actually
@@ -1471,13 +1472,17 @@ pub enum SaveError {
 fn saveable_extensions() -> &'static str {
     match (cfg!(feature = "jxl"), cfg!(feature = "jp2k")) {
         (true, true) => {
-            "png, jpg/jpeg, gif, webp, jxl, jp2/j2k/jpt/j2c/jpc, hdr, ppm/pgm, fits/fit/fts, and v/vips"
+            "png, jpg/jpeg, gif, webp, tif/tiff, jxl, jp2/j2k/jpt/j2c/jpc, hdr, ppm/pgm, fits/fit/fts, and v/vips"
         }
-        (true, false) => "png, jpg/jpeg, gif, webp, jxl, hdr, ppm/pgm, fits/fit/fts, and v/vips",
+        (true, false) => {
+            "png, jpg/jpeg, gif, webp, tif/tiff, jxl, hdr, ppm/pgm, fits/fit/fts, and v/vips"
+        }
         (false, true) => {
-            "png, jpg/jpeg, gif, webp, jp2/j2k/jpt/j2c/jpc, hdr, ppm/pgm, fits/fit/fts, and v/vips"
+            "png, jpg/jpeg, gif, webp, tif/tiff, jp2/j2k/jpt/j2c/jpc, hdr, ppm/pgm, fits/fit/fts, and v/vips"
         }
-        (false, false) => "png, jpg/jpeg, gif, webp, hdr, ppm/pgm, fits/fit/fts, and v/vips",
+        (false, false) => {
+            "png, jpg/jpeg, gif, webp, tif/tiff, hdr, ppm/pgm, fits/fit/fts, and v/vips"
+        }
     }
 }
 
@@ -1567,6 +1572,25 @@ impl Raster {
                     other => SaveError::Encode(SinkError::EncodeMsg(other.to_string())),
                 })?,
             "webp" => crate::webp::encode_webp_for_save(self, keep_metadata)?,
+            // Both suffixes `tiffsave` registers and no more, measured on
+            // 8.18.6: its `vips -l` line reads `nocache (.tif, .tiff)`, and
+            // `.btf`, `.tf8`, `.bigtiff` and `.tfx` are each refused with
+            // "is not a known file format". One arm rather than two rows
+            // because the suffix does not pick anything here, the way it does
+            // for Netpbm: `.tif` and `.tiff` name the same container.
+            //
+            // Ungated: the TIFF encoder is the pure-Rust `tiff` crate this
+            // build already requires for decoding, so it costs no feature.
+            //
+            // `keep_metadata` has nothing to act on, and unlike GIF, FITS,
+            // JPEG 2000, Radiance and Netpbm that is a **gap** rather than a
+            // property of the container. TIFF has somewhere to put an ICC
+            // profile and `tiffsave` uses it; this build's encoder writes the
+            // colour tags and the strips and stops.
+            // `the_tiff_row_has_nothing_for_the_strip_flag_to_drop` pins the
+            // equality, so the day the encoder learns to embed one it goes
+            // red rather than the flag silently doing nothing.
+            "tif" | "tiff" => crate::encode_tiff::encode_tiff_for_save(self)?,
             // JPEG XL takes no `keep_metadata` because `zune-jpegxl` writes
             // a bare codestream with no box container, so there is nowhere
             // to put an ICC profile, an EXIF block or an XMP packet and
@@ -4596,7 +4620,10 @@ mod tests {
      * about to happen to the five JPEG 2000 suffixes (#770), which is why
      * they are swept here by feature rather than named in one build.
      * `jp2000` sits in the unlisted set because vips refuses that suffix too,
-     * measured, so it is the nearest miss to a live row. Works by parsing
+     * measured, so it is the nearest miss to a live row. `.tif` used to sit
+     * beside it and moved to the live side with #948; the four that replaced
+     * it, `btf`, `tf8`, `bigtiff` and `tfx`, are the TIFF spellings vips
+     * itself answers "is not a known file format" to, measured on 8.18.6. Works by parsing
      * the extension list back out of a rendered message, saving under every
      * name it holds, and then checking a name it does not hold is refused.
      * Input: the message from `save("out.avif")` -> Output: every listed
@@ -4646,6 +4673,14 @@ mod tests {
             extensions.contains(&"hdr"),
             "the Radiance row is ungated and must always be listed: {message}"
         );
+        // Same argument for TIFF, which costs no feature either: the `tiff`
+        // crate is already required for decoding (issue #948).
+        for suffix in ["tif", "tiff"] {
+            assert!(
+                extensions.contains(&suffix),
+                "the TIFF row is ungated and must always list .{suffix}: {message}"
+            );
+        }
 
         for extension in &extensions {
             let path = dir.path().join(format!("listed.{extension}"));
@@ -4672,7 +4707,7 @@ mod tests {
 
         // The other direction, so the list cannot go stale by growing
         // either: an extension it does not name has no arm behind it.
-        let mut unlisted = vec!["avif", "heic", "tif", "jp2000"];
+        let mut unlisted = vec!["avif", "heic", "btf", "tf8", "bigtiff", "tfx", "jp2000"];
         if !cfg!(feature = "jxl") {
             unlisted.push("jxl");
         }
