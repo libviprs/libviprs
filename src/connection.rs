@@ -238,7 +238,7 @@ impl Raster {
     /// Encode this raster into a freshly allocated buffer in the named format.
     ///
     /// Uses the same dispatch as [`encode_to_target`]: `"jpeg"` / `"jpg"`,
-    /// `"png"`, `"gif"`, `"webp"`, `"jxl"`,
+    /// `"png"`, `"gif"`, `"webp"`, `"tif"` / `"tiff"`, `"jxl"`,
     /// `"jp2k"` / `"jp2"` / `"j2k"` / `"jpt"` / `"j2c"` / `"jpc"`, `"uhdr"`,
     /// `"hdr"`, `"ppm"` / `"pgm"`, `"fits"` / `"fit"` / `"fts"` and
     /// `"v"` / `"vips"` are wired; any other format returns
@@ -271,6 +271,12 @@ impl Raster {
     /// [`EncodeError::InvalidParameter`] naming the raster rather than
     /// [`EncodeError::Unsupported`] naming the format: this build can write
     /// Ultra HDR, and what is wrong is the input.
+    ///
+    /// `"tif"` and `"tiff"` are the two spellings `tiffsave` registers, and
+    /// they write one container between them: uncompressed strips, which is
+    /// that saver's own default measured on 8.18.6. Unlike
+    /// [`Raster::tiff_save`], which is infallible and answers a raster it
+    /// cannot encode with an empty buffer, this row keeps the typed refusal.
     ///
     /// `"hdr"` is Radiance RGBE (libvips `radsave`), and it has the same shape:
     /// a 3-band `f32` raster only, refused rather than cast, where `radsave`
@@ -312,6 +318,19 @@ fn encode_for_format(raster: &Raster, format: &str) -> Result<Vec<u8>, EncodeErr
         "png" => crate::sink::encode_png(raster).map_err(sink_err_to_encode),
         "gif" => raster.encode_gif(crate::gif::SaveOptions::default()),
         "webp" => raster.encode_webp(crate::webp::SaveOptions::default()),
+        // Both suffixes `tiffsave` registers, on one arm because neither
+        // picks anything: measured on 8.18.6 its `vips -l` line reads
+        // `nocache (.tif, .tiff)`, and `.btf`, `.tf8`, `.bigtiff` and `.tfx`
+        // are each refused as an unknown format. Ungated, because the `tiff`
+        // crate is already required for decoding.
+        //
+        // Uncompressed strips, which is `tiffsave`'s measured default rather
+        // than a guess: the plain call and `--compression none` write
+        // byte-identical files and `--compression deflate` does not
+        // (issue #948).
+        "tif" | "tiff" => {
+            crate::encode_tiff::encode_tiff_for_save(raster).map_err(save_err_to_encode)
+        }
         "jxl" => raster.encode_jxl(crate::jxl::SaveOptions::default()),
         // Every spelling `jp2ksave` answers to, on one arm, because vips
         // writes the same JP2 container for all five suffixes: measured on
@@ -653,6 +672,68 @@ mod tests {
         );
     }
 
+    /// `"tif"` and `"tiff"` are live rows in the shared format dispatch and
+    /// both reach the TIFF writer (issue #948).
+    ///
+    /// Two spellings and only two, measured on the pinned vips 8.18.6:
+    /// `tiffsave` registers `(.tif, .tiff)` and `vips copy t.v out.EXT` over
+    /// `.btf`, `.tf8`, `.bigtiff` and `.tfx` is refused with "is not a known
+    /// file format" every time. Those four are the positive control here: a
+    /// dispatch that accepted every string would pass the first half of this
+    /// on its own.
+    ///
+    /// The bytes are put back through [`Raster::tiff_load`] rather than
+    /// compared against a second encoder, so "reaches the writer" means a
+    /// container that reads back with the same pixels and not merely that
+    /// some bytes came back.
+    #[test]
+    fn encode_for_format_routes_tif_and_tiff_to_the_tiff_writer() {
+        let subject = Raster::new(8, 6, PixelFormat::Rgb8, {
+            let mut v = Vec::with_capacity(8 * 6 * 3);
+            for i in 0..8u32 * 6 * 3 {
+                v.push((i * 7 % 251) as u8);
+            }
+            v
+        })
+        .unwrap();
+
+        let mut seen: Vec<Vec<u8>> = Vec::new();
+        for spelling in ["tif", "tiff", "TIFF", ".tif", " Tiff "] {
+            let bytes = subject
+                .encode_to_buffer(spelling)
+                .unwrap_or_else(|e| panic!("{spelling:?} must be a live row, got {e}"));
+            assert_eq!(
+                crate::source::sniff(&bytes),
+                Some(crate::source::SniffedFormat::Tiff),
+                "{spelling:?} must write something the sniffer calls a TIFF"
+            );
+            let back = Raster::tiff_load(&bytes)
+                .unwrap_or_else(|e| panic!("{spelling:?} must read back, got {e}"));
+            assert_eq!(
+                back.data(),
+                subject.data(),
+                "{spelling:?} must round-trip its pixels"
+            );
+            assert_eq!(back.format(), subject.format());
+            seen.push(bytes);
+        }
+        assert!(
+            seen.windows(2).all(|w| w[0] == w[1]),
+            "every spelling names one container"
+        );
+
+        // The four nearest misses, all of which vips refuses too.
+        for miss in ["btf", "tf8", "bigtiff", "tfx"] {
+            assert!(
+                matches!(
+                    subject.encode_to_buffer(miss),
+                    Err(EncodeError::Unsupported { .. })
+                ),
+                "{miss:?} is not a name vips knows either"
+            );
+        }
+    }
+
     /// A 3-band `f32` linear-light ramp reaching past the SDR ceiling, which
     /// is the input contract [`crate::uhdr::encode_uhdr`] computes a gain map
     /// from. Same shape as the fixture in `foreign_stubs.rs`.
@@ -941,11 +1022,16 @@ mod tests {
 
     /// An unwired format returns the typed [`EncodeError::Unsupported`], not a
     /// panic, through both the buffer and the target entry points.
+    ///
+    /// This asked for `"tiff"` until #948 wired that row, at which point it
+    /// went red and said so, which is what a check is for. `"bigtiff"` takes
+    /// its place because vips refuses it too, measured on 8.18.6: `vips copy
+    /// t.v o.bigtiff` reports "is not a known file format".
     #[test]
     fn unsupported_format_returns_typed_error() {
         let raster = sample_raster();
 
-        let buf_err = raster.encode_to_buffer("tiff").unwrap_err();
+        let buf_err = raster.encode_to_buffer("bigtiff").unwrap_err();
         assert!(
             matches!(buf_err, EncodeError::Unsupported { .. }),
             "expected Unsupported, got {buf_err:?}"
