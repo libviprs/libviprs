@@ -653,6 +653,68 @@ mod tests {
         );
     }
 
+    /// `"tif"` and `"tiff"` are live rows in the shared format dispatch and
+    /// both reach the TIFF writer (issue #948).
+    ///
+    /// Two spellings and only two, measured on the pinned vips 8.18.6:
+    /// `tiffsave` registers `(.tif, .tiff)` and `vips copy t.v out.EXT` over
+    /// `.btf`, `.tf8`, `.bigtiff` and `.tfx` is refused with "is not a known
+    /// file format" every time. Those four are the positive control here: a
+    /// dispatch that accepted every string would pass the first half of this
+    /// on its own.
+    ///
+    /// The bytes are put back through [`Raster::tiff_load`] rather than
+    /// compared against a second encoder, so "reaches the writer" means a
+    /// container that reads back with the same pixels and not merely that
+    /// some bytes came back.
+    #[test]
+    fn encode_for_format_routes_tif_and_tiff_to_the_tiff_writer() {
+        let subject = Raster::new(8, 6, PixelFormat::Rgb8, {
+            let mut v = Vec::with_capacity(8 * 6 * 3);
+            for i in 0..8u32 * 6 * 3 {
+                v.push((i * 7 % 251) as u8);
+            }
+            v
+        })
+        .unwrap();
+
+        let mut seen: Vec<Vec<u8>> = Vec::new();
+        for spelling in ["tif", "tiff", "TIFF", ".tif", " Tiff "] {
+            let bytes = subject
+                .encode_to_buffer(spelling)
+                .unwrap_or_else(|e| panic!("{spelling:?} must be a live row, got {e}"));
+            assert_eq!(
+                crate::source::sniff(&bytes),
+                Some(crate::source::SniffedFormat::Tiff),
+                "{spelling:?} must write something the sniffer calls a TIFF"
+            );
+            let back = Raster::tiff_load(&bytes)
+                .unwrap_or_else(|e| panic!("{spelling:?} must read back, got {e}"));
+            assert_eq!(
+                back.data(),
+                subject.data(),
+                "{spelling:?} must round-trip its pixels"
+            );
+            assert_eq!(back.format(), subject.format());
+            seen.push(bytes);
+        }
+        assert!(
+            seen.windows(2).all(|w| w[0] == w[1]),
+            "every spelling names one container"
+        );
+
+        // The four nearest misses, all of which vips refuses too.
+        for miss in ["btf", "tf8", "bigtiff", "tfx"] {
+            assert!(
+                matches!(
+                    subject.encode_to_buffer(miss),
+                    Err(EncodeError::Unsupported { .. })
+                ),
+                "{miss:?} is not a name vips knows either"
+            );
+        }
+    }
+
     /// A 3-band `f32` linear-light ramp reaching past the SDR ceiling, which
     /// is the input contract [`crate::uhdr::encode_uhdr`] computes a gain map
     /// from. Same shape as the fixture in `foreign_stubs.rs`.
