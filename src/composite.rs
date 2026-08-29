@@ -743,6 +743,7 @@ impl Raster {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pixel::SampleKind;
 
     /// A 2x1 RGB base: left pixel [100, 100, 100], right [200, 50, 0].
     fn base_rgb() -> Raster {
@@ -1584,5 +1585,71 @@ mod tests {
                 );
             }
         }
+    }
+
+    /**
+     * Tests that this module dispatches on sample kind and never on byte
+     * width, by asserting that neither the byte-width accessor on
+     * [`PixelFormat`] nor its width-keyed constructor survives in
+     * `src/composite.rs`.
+     * Works by scanning the module's own source, compiled in with
+     * `include_str!`, for the accessor's name; the needle is spelled in two
+     * halves so this assertion is not itself a hit. A byte width is not a
+     * sample kind: four bytes is `f32` today and would be `u32` under issue
+     * #517, so the sites this replaced would read four bytes as an `f32` whatever they actually were (issue #607).
+     * Input: `src/composite.rs` -> Output: zero occurrences.
+     */
+    #[test]
+    fn composite_does_not_dispatch_on_byte_width() {
+        const SRC: &str = include_str!("composite.rs");
+        let needles = [
+            concat!("bytes_per_", "channel"),
+            concat!("with_", "channels"),
+        ];
+        // Positive control: the same scan over the same string finds a token
+        // that is present, so the zero below is a real zero and not the
+        // vacuous pass an empty read would give.
+        assert!(
+            SRC.contains(concat!("fn ", "read_raw")),
+            "positive control failed: the scan cannot see this module's source"
+        );
+        for needle in needles {
+            assert_eq!(
+                SRC.matches(needle).count(),
+                0,
+                "{needle} is back in src/composite.rs; dispatch on \
+                 PixelFormat::kind() and PixelFormat::with_kind() instead"
+            );
+        }
+    }
+
+    /**
+     * Tests that swapping the output-depth rule from "the wider width
+     * wins" to [`SampleKind::promote`] moved nothing for the three kinds a
+     * [`PixelFormat`] carries, which is the positive control behind this
+     * conversion's "no behaviour changes" claim.
+     * Works by walking all nine ordered pairs of `U8`, `U16` and `F32` and
+     * asserting `promote` picks the same kind the old `max` of the byte
+     * widths did. The two rules genuinely disagree on four integer pairs
+     * (issue #607), and none of those pairs is reachable yet.
+     * Input: 9 pairs -> Output: `promote` == wider width for all 9.
+     */
+    #[test]
+    fn promote_agrees_with_the_old_width_rule_on_the_carried_kinds() {
+        let kinds = [SampleKind::U8, SampleKind::U16, SampleKind::F32];
+        for a in kinds {
+            for b in kinds {
+                let by_width = if a.bytes() >= b.bytes() { a } else { b };
+                assert_eq!(
+                    a.promote(b),
+                    by_width,
+                    "promote({a:?}, {b:?}) left the old width rule"
+                );
+            }
+        }
+        // And the four pairs that make the swap worth making, so this test
+        // is a comparison and not a tautology.
+        assert_eq!(SampleKind::U8.promote(SampleKind::I8), SampleKind::I16);
+        assert_eq!(SampleKind::I8.promote(SampleKind::U16), SampleKind::I32);
     }
 }

@@ -1000,4 +1000,40 @@ mod tests {
         let dc = out.getpoint(0, 0);
         assert!((dc[0] - sum).abs() < 0.35, "{} vs {sum}", dc[0]);
     }
+
+    /**
+     * Tests that this module dispatches on sample kind and never on byte
+     * width, by asserting that neither the byte-width accessor on
+     * [`PixelFormat`] nor its width-keyed constructor survives in
+     * `src/freqfilt.rs`.
+     * Works by scanning the module's own source, compiled in with
+     * `include_str!`, for the accessor's name; the needle is spelled in two
+     * halves so this assertion is not itself a hit. A byte width is not a
+     * sample kind: four bytes is `f32` today and would be `u32` under issue
+     * #517, so the sites this replaced would feed a 32-bit integer sample into the transform as `1.4e-45` (issue #607).
+     * Input: `src/freqfilt.rs` -> Output: zero occurrences.
+     */
+    #[test]
+    fn freqfilt_does_not_dispatch_on_byte_width() {
+        const SRC: &str = include_str!("freqfilt.rs");
+        let needles = [
+            concat!("bytes_per_", "channel"),
+            concat!("with_", "channels"),
+        ];
+        // Positive control: the same scan over the same string finds a token
+        // that is present, so the zero below is a real zero and not the
+        // vacuous pass an empty read would give.
+        assert!(
+            SRC.contains(concat!("fn ", "samples_f64")),
+            "positive control failed: the scan cannot see this module's source"
+        );
+        for needle in needles {
+            assert_eq!(
+                SRC.matches(needle).count(),
+                0,
+                "{needle} is back in src/freqfilt.rs; dispatch on \
+                 PixelFormat::kind() and PixelFormat::with_kind() instead"
+            );
+        }
+    }
 }

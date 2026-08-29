@@ -2637,4 +2637,151 @@ mod tests {
         .unwrap();
         assert_eq!(s.data, vec![0, 0, 0], "zero range scales to black");
     }
+
+    /**
+     * Tests that this module dispatches on sample kind and never on byte
+     * width, by asserting that neither the byte-width accessor on
+     * [`PixelFormat`] nor its width-keyed constructor survives in
+     * `src/mosaicing.rs`.
+     * Works by scanning the module's own source, compiled in with
+     * `include_str!`, for the accessor's name; the needle is spelled in two
+     * halves so this assertion is not itself a hit. A byte width is not a
+     * sample kind: four bytes is `f32` today and would be `u32` under issue
+     * #517, so the sites this replaced would blend a 32-bit integer raster as float, and write its width into the join-tree header (issue #607).
+     * Input: `src/mosaicing.rs` -> Output: zero occurrences.
+     */
+    #[test]
+    fn mosaicing_does_not_dispatch_on_byte_width() {
+        const SRC: &str = include_str!("mosaicing.rs");
+        let needles = [
+            concat!("bytes_per_", "channel"),
+            concat!("with_", "channels"),
+        ];
+        // Positive control: the same scan over the same string finds a token
+        // that is present, so the zero below is a real zero and not the
+        // vacuous pass an empty read would give.
+        assert!(
+            SRC.contains(concat!("fn ", "kind_code")),
+            "positive control failed: the scan cannot see this module's source"
+        );
+        for needle in needles {
+            assert_eq!(
+                SRC.matches(needle).count(),
+                0,
+                "{needle} is back in src/mosaicing.rs; dispatch on \
+                 PixelFormat::kind() and PixelFormat::with_kind() instead"
+            );
+        }
+    }
+
+    /**
+     * Tests that the header byte still means what it meant when it was a
+     * byte width, so a `mosaic-join-tree` blob written before the kind
+     * codes existed still deserializes to the same format.
+     * Works by hand-assembling a one-leaf `VMJ1` blob with the literal
+     * bytes the old writer emitted (`1` for uchar, `2` for ushort, `4` for
+     * float) and asserting the leaf's format.
+     * Input: the three legacy width bytes -> Output: Gray8, Gray16,
+     * FloatF32(1).
+     */
+    #[test]
+    fn the_leaf_header_still_reads_the_widths_it_used_to_write() {
+        for (legacy_byte, want) in [
+            (1u8, PixelFormat::Gray8),
+            (2, PixelFormat::Gray16),
+            (
+                4,
+                PixelFormat::FloatF32(std::num::NonZeroU16::new(1).unwrap()),
+            ),
+        ] {
+            let mut blob = b"VMJ1".to_vec();
+            blob.push(0); // leaf
+            blob.extend_from_slice(&1u32.to_le_bytes()); // width
+            blob.extend_from_slice(&1u32.to_le_bytes()); // height
+            blob.extend_from_slice(&1u16.to_le_bytes()); // channels
+            blob.push(legacy_byte);
+            blob.extend(std::iter::repeat_n(0u8, want.bytes_per_pixel()));
+            let tree = JoinTree::deserialize(&blob).expect("legacy blob must still parse");
+            match &tree {
+                JoinTree::Leaf(r) => assert_eq!(r.format(), want, "byte {legacy_byte}"),
+                JoinTree::Join { .. } => panic!("expected a leaf"),
+            }
+        }
+    }
+
+    /**
+     * Tests that `merge` blends a 16-bit pair as `u16`, which is the arm
+     * the width-keyed dispatch picked by width and the kind-keyed one
+     * picks by kind. Nothing covered it before: monomorphising
+     * `render_merge::<u8>` for a `Gray16` input left the whole suite
+     * green, because every merge fixture in the module is 8-bit or float.
+     * Works by mirroring `lrmerge_blend_band`'s geometry at 16-bit depth
+     * and asserting every column of the overlap against the integer
+     * coefficient table, with sample values above `u8::MAX` so a byte-wide
+     * blend cannot land on the same numbers.
+     * Input: two 60x20 Gray16 fills at 1000 and 40000, 30-pixel overlap ->
+     * Output: the flat ends and the 11-column feather, exactly.
+     */
+    #[test]
+    fn merge_blends_a_sixteen_bit_pair_as_u16() {
+        let fill = |v: u16| {
+            let mut r = Raster::zeroed(60, 20, PixelFormat::Gray16).expect("gray16");
+            for c in r.data_mut().as_chunks_mut::<2>().0 {
+                *c = v.to_ne_bytes();
+            }
+            r
+        };
+        let left = fill(1000);
+        let right = fill(40000);
+        let dx = 30 - left.width() as i32; // 30-pixel overlap at x 30..60
+        let join = left
+            .try_merge(&right, MergeDirection::Horizontal, dx, 0)
+            .expect("a 30-pixel horizontal overlap");
+        assert_eq!(join.format(), PixelFormat::Gray16);
+        assert_eq!(join.width(), 90);
+        // Same shrink as the 8-bit case: first = 39, last = 50.
+        let (first, last) = (39i64, 50i64);
+        let luts = blend_luts();
+        for x in 30..60i64 {
+            let expected = if x < first {
+                1000.0
+            } else if x >= last {
+                40000.0
+            } else {
+                let inx = ((x - first) << BLEND_SHIFT) / (last - first);
+                (luts.icoef1[inx as usize] * 1000 / BLEND_SCALE
+                    + luts.icoef2[inx as usize] * 40000 / BLEND_SCALE) as f64
+            };
+            assert_eq!(
+                join.getpoint(x as u32, 10)[0],
+                expected,
+                "overlap column {x}"
+            );
+        }
+    }
+
+    /**
+     * Tests that `elem_f64` steps by the sample kind's own width, the
+     * property the balance path depends on and that a one-byte fixture
+     * cannot see: with `bytes() == 1` a dropped stride is the identity.
+     * Works by reading every element of a `Gray16` raster whose samples are
+     * all above `u8::MAX`.
+     * Input: `[1000, 40000, 20000, 7]` as Gray16 -> Output: the same four
+     * numbers as `f64`.
+     */
+    #[test]
+    fn elem_f64_steps_by_the_sample_kind_width() {
+        let mut r = Raster::zeroed(4, 1, PixelFormat::Gray16).expect("gray16");
+        for (c, v) in r
+            .data_mut()
+            .as_chunks_mut::<2>()
+            .0
+            .iter_mut()
+            .zip([1000u16, 40000, 20000, 7])
+        {
+            *c = v.to_ne_bytes();
+        }
+        let got: Vec<f64> = (0..4).map(|i| elem_f64(&r, i)).collect();
+        assert_eq!(got, vec![1000.0, 40000.0, 20000.0, 7.0]);
+    }
 }
