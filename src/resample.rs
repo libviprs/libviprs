@@ -1099,10 +1099,9 @@ impl SampleLayout {
     /// interpolators of the same op disagree by two on the same input, and
     /// one of them is exact.
     ///
-    /// So this is the brief's fourth oracle posture: the reference
-    /// contradicts itself, and matching a self-contradicting oracle is not
-    /// parity. libviprs answers the constant, and
-    /// `every_resampler_reproduces_a_constant_signed_field` pins that
+    /// A reference that contradicts itself cannot be matched, only picked
+    /// from, so matching it is not parity. libviprs answers the constant,
+    /// and `every_resampler_reproduces_a_constant_signed_field` pins that
     /// rather than leaving it to be rediscovered.
     ///
     /// The ops whose rounding libviprs **does** match on a signed carrier
@@ -3837,9 +3836,8 @@ mod tests {
      * copies a sample and cannot turn -50 into -51. The shift is a full
      * step, it lands on `short` and `int` too, it is absent from the float
      * and unsigned carriers, and two interpolators of the same op disagree
-     * by two on the same input while one of them is exact. That is the
-     * fourth oracle posture, a reference contradicting itself, and
-     * matching it is not parity.
+     * by two on the same input while one of them is exact. A reference
+     * contradicting itself cannot be matched, only picked from.
      * Works by asserting the constant survives `reduceh`, `reducev`,
      * `resize` and both `affine` interpolators on all three signed
      * carriers, with the `shrink` family **excluded on purpose** and its
