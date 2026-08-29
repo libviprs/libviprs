@@ -4,6 +4,13 @@
 flips `FsSink::new` to a 2-arg constructor plus a `with_format` builder. This
 guide covers the call sites you are most likely to update.
 
+**This is the 0.2.0 to 0.3.0 guide and nothing else.** There is no equivalent
+for 0.4.0 or for the release in progress, which is the largest breaking one so
+far: the signed and 32-bit `PixelFormat` carriers, the folded allocation
+refusals, and the removed per-format error variants are all in the `Unreleased`
+section of [CHANGELOG.md](CHANGELOG.md), under `### Breaking`, and that is where
+to look until this file grows the section (issue #961).
+
 ## `FsSink`
 
 The third format argument is gone. Set the format via the builder; default is
@@ -17,8 +24,11 @@ let sink = FsSink::new("out", plan.clone(), TileFormat::Png);
 let sink = FsSink::new("out", plan.clone()).with_format(TileFormat::Png);
 ```
 
-`FsSink::new_with_format(...)` still compiles as a deprecated alias of
-`FsSink::new(...).with_format(...)`.
+There is no `FsSink::new_with_format`. This file said it "still compiles as a
+deprecated alias" for three releases; it was already gone by v0.4.0 and the
+crate carries **zero** `#[deprecated]` attributes, so nothing here is a
+deprecated alias of anything (issue #950). The 3-arg call is a compile error
+and the builder above is the only form.
 
 ## Free `generate_pyramid_*` functions → `EngineBuilder`
 
@@ -142,4 +152,12 @@ all of them. `PixelFormat` is now public and re-exported at the crate root.
 | `tracing` | off | Structured spans/events |
 | `packfile` | off | `PackfileSink` (write tiles into a tar/zip), now with `PackfileSinkBuilder` |
 
-`default = []` — no features enabled by default. MSRV is 1.85, edition 2024.
+`default = []`, so no features are enabled by default. MSRV is 1.97, edition
+2024. That number is `rust-version` in `Cargo.toml` and
+`tests/crate_doc_matches_the_crate.rs` holds both files to it; this line named a
+floor three minor versions under the manifest's for as long as nothing checked
+it (issue #950).
+
+The table above is the feature set as of 0.3.0 and is deliberately left at
+that. `README.md` and the crate root carry the current one, both checked
+against `[features]`.

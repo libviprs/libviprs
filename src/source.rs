@@ -502,7 +502,15 @@ pub enum SourceError {
     /// that deletion.
     #[error("{format}: bad page number; page {page} count {n} on a {pages}-page file")]
     PageOutOfRange {
-        /// The container, for the message (`"webp"`, `"jxl"`).
+        /// The container, for the message: `"gif"`, `"webp"` or `"jxl"`,
+        /// which are exactly the three loaders that call
+        /// `resolve_page_range` (crate-private, so it is named rather than
+        /// linked). This said `("webp", "jxl")` for as long as
+        /// GIF had a `BadPageNumber` of its own, and stayed saying it after
+        /// #845 folded that variant in here, so the doc named two of the three
+        /// containers a caller can actually see (issue #950). The
+        /// `every_multi_page_loader_that_refuses_a_page_is_named_in_the_doc`
+        /// cell holds the list against the call sites now.
         format: &'static str,
         /// The first page asked for, counting from zero.
         page: u32,
