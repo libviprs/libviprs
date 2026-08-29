@@ -3255,6 +3255,44 @@ mod tests {
     /// (issue #696).
     const CONV_PLANES: &str = "convolution.";
 
+    /**
+     * Tests that this module dispatches on sample kind and never on byte
+     * width, by asserting that neither the byte-width accessor on
+     * [`PixelFormat`] nor its width-keyed constructor survives in
+     * `src/convolution.rs`.
+     * Works by scanning the module's own source, compiled in with
+     * `include_str!`, for the accessor's name; the needle is spelled in two
+     * halves so this assertion is not itself a hit. A byte width is not a
+     * sample kind: four bytes is `f32` today and would be `u32` under issue
+     * #517, so the widener this replaced read a 32-bit integer raster as
+     * float, and every `== 1` branch below it wrote the wrong depth back
+     * (issue #607).
+     * Input: `src/convolution.rs` -> Output: zero occurrences.
+     */
+    #[test]
+    fn convolution_does_not_dispatch_on_byte_width() {
+        const SRC: &str = include_str!("convolution.rs");
+        let needles = [
+            concat!("bytes_per_", "channel"),
+            concat!("with_", "channels"),
+        ];
+        // Positive control: the same scan over the same string finds a token
+        // that is present, so the zero below is a real zero and not the
+        // vacuous pass an empty read would give.
+        assert!(
+            SRC.contains(concat!("fn ", "samples_f64")),
+            "positive control failed: the scan cannot see this module's source"
+        );
+        for needle in needles {
+            assert_eq!(
+                SRC.matches(needle).count(),
+                0,
+                "{needle} is back in src/convolution.rs; dispatch on \
+                 PixelFormat::kind() and PixelFormat::with_kind() instead"
+            );
+        }
+    }
+
     /// Deterministic pseudo-random byte stream for synthetic images.
     fn lcg(seed: u32) -> impl FnMut() -> u8 {
         let mut state = seed;
