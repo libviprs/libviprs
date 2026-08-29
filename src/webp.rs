@@ -2172,6 +2172,58 @@ mod tests {
     }
 
     /**
+     * Tests the escape hatch the read-only asymmetry points at, end to end:
+     * two pages of an animated WebP, saved as an animated GIF, come back
+     * with those two pages' delays on those two pages. This is also the
+     * decisive argument for subsetting the delay array, because
+     * `Raster::encode_gif` refuses an array whose length is not the page
+     * count, so under vips's file-scoped rule this save could not happen at
+     * all.
+     * Input: `ANIM4_DELAY` at `page = 1, n = 2` -> Output: a two-frame GIF
+     * that reads back as a 4x6 two-page roll with `delay` `[70, 200]`, the
+     * centisecond rounding of 67 and 200, and `loop` 3.
+     */
+    #[test]
+    fn two_pages_of_an_animation_save_as_a_two_frame_gif() {
+        let roll = decode_webp_with(
+            &ANIM4_DELAY,
+            DecodeLimits::default(),
+            LoadOptions::default().with_page(1).with_n(2),
+        )
+        .expect("frames 1 and 2 exist");
+        assert_eq!(roll.pages_loaded(), 2);
+        assert_eq!(roll.get_int_array("delay"), Some(&[67i64, 200][..]));
+
+        // The refusal this avoids, spelled out: `encode_gif` reads `delay`
+        // and requires one entry per page, so a four-entry array on a
+        // two-page roll is an error rather than a silent mis-timing.
+        let mut mistimed = roll.try_clone().expect("a 4x6 raster clones");
+        mistimed.set_field("delay", MetadataValue::IntArray(vec![45, 67, 200, 12]));
+        let message = mistimed
+            .encode_gif(crate::gif::SaveOptions::default())
+            .expect_err("four delays do not fit two pages")
+            .to_string();
+        assert!(message.contains("4 entries for 2 page"), "{message}");
+
+        let bytes = roll
+            .encode_gif(crate::gif::SaveOptions::default())
+            .expect("a two-page roll writes a two-frame GIF");
+        let back = crate::gif::decode_gif_with(
+            &bytes,
+            DecodeLimits::default(),
+            crate::gif::LoadOptions::default().with_n(-1),
+        )
+        .expect("it reads back");
+        assert_eq!((back.width(), back.height()), (4, 6));
+        assert_eq!(back.pages_loaded(), 2);
+        // 67 ms is 7 centiseconds on the GIF wire and comes back as 70; 200
+        // survives exactly. The 10 ms floor `webpsave` applies is a WebP
+        // save behaviour and does not reach this path.
+        assert_eq!(back.get_int_array("delay"), Some(&[70i64, 200][..]));
+        assert_eq!(back.get_field("loop"), Some(MetadataValue::Int(3)));
+    }
+
+    /**
      * Tests what saving an animation back as WebP actually does, which is
      * the read-only asymmetry made concrete: the roll comes out as one
      * tall still image, where `vips webpsave` on the same raster writes a
