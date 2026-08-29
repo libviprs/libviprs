@@ -3923,7 +3923,10 @@ and not under `Fixed`: this file is the only place they can be caught.
 
   It reads the two phrasings that produced the bug rather than trying to parse
   English, so a third wording is not covered and a quotation has to be struck
-  through to stay out of its way. That is the honest limit, and it is still the
+  through to stay out of its way. The tag in a `shipped in` claim may be
+  backticked or bare, which is not cosmetic: requiring the backticks left a
+  true claim in this entry outside the check, and a mutation row proved a
+  false one would have been skipped the same way. That is the honest limit, and it is still the
   difference between a claim nothing checks and a claim that is either true or
   red: the quotation two paragraphs up went red on the first run and is struck
   for exactly that reason.
