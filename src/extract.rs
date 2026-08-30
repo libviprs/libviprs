@@ -87,7 +87,7 @@
 
 use crate::arithmetic::interpretation_max_alpha;
 use crate::conversion::Interpretation;
-use crate::pixel::{PixelFormat, SampleKind};
+use crate::pixel::{PixelFormat, SampleKind, read_sample_f64, write_f32_sample};
 use crate::raster::{Raster, RasterError};
 use crate::resample::{ReduceKernel, ResizeOptions};
 use thiserror::Error;
@@ -429,12 +429,11 @@ fn write_s(data: &mut [u8], kind: SampleKind, i: usize, v: i64) {
     }
 }
 
-/// Read the flat `i`-th sample as `f64`: [`read_s`] widened so a float
-/// carrier travels through as a *value* rather than truncated to an integer
-/// (issue #945).
+/// Read the flat `i`-th sample as `f64`: the widened read `embed` and
+/// `insert` carry a float raster through (issue #945).
 ///
 /// This is #909's move made a second time, one carrier family further on.
-/// `read_s` is total over [`SampleKind`], so `embed` and `insert` compiled
+/// [`read_s`] is total over [`SampleKind`], so `embed` and `insert` compiled
 /// on a float raster the whole time; what they could not do was carry the
 /// fraction, because the pipeline between the read and the store was an
 /// `i64`. Measured on `/opt/homebrew/bin/vips` 8.18.6, `vips embed` on a
@@ -442,28 +441,14 @@ fn write_s(data: &mut [u8], kind: SampleKind, i: usize, v: i64) {
 /// three samples intact, so truncating them was a parity regression rather
 /// than an implementation.
 ///
-/// The six integer kinds go through [`read_s`] rather than being spelled
-/// out again, which keeps one reader for them: `f64` represents every value
-/// of every one of those kinds exactly, `u32::MAX` and `i32::MIN`
-/// included, so the widening is lossless and this cannot disagree with the
-/// integer path. Enumerated rather than reached through a `_` arm, so
-/// adding a kind is a decision the compiler forces here too.
+/// Delegates straight to [`crate::pixel::read_sample_f64`] rather than
+/// re-matching on [`SampleKind`] (issue #969): that function already reads
+/// every kind as `f64` losslessly, `u32::MAX` and `i32::MIN` included, and
+/// three modules re-matching the same six-arm dispatch is exactly the
+/// pattern that produced #607's silent misread in the first place.
 #[inline]
 fn read_v(data: &[u8], kind: SampleKind, i: usize) -> f64 {
-    match kind {
-        SampleKind::U8
-        | SampleKind::I8
-        | SampleKind::U16
-        | SampleKind::I16
-        | SampleKind::U32
-        | SampleKind::I32 => read_s(data, kind, i) as f64,
-        SampleKind::F32 => f64::from(f32::from_ne_bytes([
-            data[4 * i],
-            data[4 * i + 1],
-            data[4 * i + 2],
-            data[4 * i + 3],
-        ])),
-    }
+    read_sample_f64(data, kind, i * kind.bytes())
 }
 
 /// Store the flat `i`-th sample from an `f64`: [`write_s`] widened, the
@@ -479,7 +464,10 @@ fn read_v(data: &[u8], kind: SampleKind, i: usize) -> f64 {
 ///
 /// So the `f64` narrows to `i64` first and then goes through the same
 /// store, rather than through [`crate::pixel::write_sample_f64`], whose
-/// clip-and-truncate is right for a cast and wrong for this.
+/// clip-and-truncate is right for a cast and wrong for this. The `F32` arm
+/// is the one part that agrees with `write_sample_f64`, and calls the same
+/// [`crate::pixel::write_f32_sample`] `bands::write_flat_v` and
+/// `conversion::write_flat_v` do (issue #969).
 #[inline]
 fn write_v(data: &mut [u8], kind: SampleKind, i: usize, v: f64) {
     match kind {
@@ -489,7 +477,7 @@ fn write_v(data: &mut [u8], kind: SampleKind, i: usize, v: f64) {
         | SampleKind::I16
         | SampleKind::U32
         | SampleKind::I32 => write_s(data, kind, i, v as i64),
-        SampleKind::F32 => data[4 * i..4 * i + 4].copy_from_slice(&(v as f32).to_ne_bytes()),
+        SampleKind::F32 => write_f32_sample(data, i * kind.bytes(), v),
     }
 }
 

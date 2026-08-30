@@ -913,6 +913,20 @@ pub(crate) fn write_sample_f64(data: &mut [u8], kind: SampleKind, off: usize, v:
     }
 }
 
+/// Write `v` into `data` at byte offset `off` as one `F32` sample: `v as
+/// f32`, the plain narrowing store.
+///
+/// [`crate::extract::write_v`], `bands::write_flat_v` and
+/// `conversion::write_flat_v` each keep their own narrow store for the six
+/// integer kinds, because that divergence from [`write_sample_f64`] is real
+/// (`Extend::White`'s byte-pattern ink depends on it, issue #945), but there
+/// was never a second way to narrow an `f64` into an `f32`, so this one arm
+/// is shared rather than repeated a third time (issue #969).
+#[inline]
+pub(crate) fn write_f32_sample(data: &mut [u8], off: usize, v: f64) {
+    data[off..off + 4].copy_from_slice(&(v as f32).to_ne_bytes());
+}
+
 /// Every [`SampleKind`], for the test sweeps across the crate.
 ///
 /// One array in one place, deliberately. #516 added three carriers and
