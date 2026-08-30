@@ -104,22 +104,61 @@ fn the_shared_dispatch_carries_a_fits_row() {
 
 /// A BITPIX libviprs has no carrier for is refused by name rather than
 /// silently narrowed, and the refusal arrives as a typed variant through
-/// `SourceError`.
+/// `SourceError`. BITPIX -64 (double) is the one that still refuses;
+/// BITPIX 32 unscaled used to be this test's fixture, until issue #966
+/// gave it a signed carrier, at which point
+/// `an_unscaled_signed_carrier_decodes_from_outside_the_crate` below
+/// became its positive control.
 #[test]
 fn an_unreachable_carrier_surfaces_a_typed_fits_error() {
     let mut file = sample();
-    // Rewrite BITPIX 8 as BITPIX 32, which vips loads as `int`.
+    // Rewrite BITPIX 8 as BITPIX -64, which vips's own table has no row
+    // for either (`fits.c:196-204`).
+    let card = format!(
+        "{:<80}",
+        "BITPIX  =                  -64 / number of bits per data pixel"
+    );
+    file[80..160].copy_from_slice(card.as_bytes());
+    match decode_fits(&file, DecodeLimits::default()) {
+        Err(SourceError::Fits(FitsError::UnsupportedCarrier { bitpix, .. })) => {
+            assert_eq!(bitpix, -64);
+        }
+        other => panic!("expected a typed UnsupportedCarrier, got {other:?}"),
+    }
+}
+
+/// The 32-bit twin of `an_unreachable_carrier_surfaces_a_typed_fits_error`
+/// used to live here, before issue #966: an unscaled BITPIX 32 array is a
+/// genuine signed integer and this crate's public surface now decodes it
+/// onto `Int32` instead of refusing, matching `vips fitsload`.
+#[test]
+fn an_unscaled_signed_carrier_decodes_from_outside_the_crate() {
+    let mut file = sample();
     let card = format!(
         "{:<80}",
         "BITPIX  =                   32 / number of bits per data pixel"
     );
     file[80..160].copy_from_slice(card.as_bytes());
-    match decode_fits(&file, DecodeLimits::default()) {
-        Err(SourceError::Fits(FitsError::UnsupportedCarrier { bitpix, .. })) => {
-            assert_eq!(bitpix, 32);
-        }
-        other => panic!("expected a typed UnsupportedCarrier, got {other:?}"),
+    // BITPIX 32 widens each sample from one byte to four, so the payload
+    // needs to widen with it: reuse the same twelve values the BITPIX 8
+    // fixture carries, sign-extended, big-endian i32.
+    let pixels: [i32; 12] = [56, 63, 70, 77, 28, 35, 42, 49, 0, 7, 14, 21];
+    let mut payload = Vec::new();
+    for p in pixels {
+        payload.extend_from_slice(&p.to_be_bytes());
     }
+    file.truncate(2880);
+    file.extend_from_slice(&payload);
+    file.resize(2880 * 2, 0);
+
+    let raster = decode_fits(&file, DecodeLimits::default()).unwrap();
+    assert_eq!(
+        raster.format(),
+        PixelFormat::with_kind(1, SampleKind::I32).unwrap()
+    );
+    let want: [i32; 12] = [0, 7, 14, 21, 28, 35, 42, 49, 56, 63, 70, 77];
+    let want_bytes: Vec<u8> = want.iter().flat_map(|v| v.to_ne_bytes()).collect();
+    assert_eq!(raster.data(), want_bytes);
 }
 
 /// The geometry ceilings are the ones every other decoder honours, checked
