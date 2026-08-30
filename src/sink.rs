@@ -2248,6 +2248,20 @@ fn hash_tile_raw(bytes: &[u8], algo: crate::manifest::ChecksumAlgo) -> [u8; 32] 
 // Encoding helpers
 // ---------------------------------------------------------------------------
 
+/// The `image` colour type a sink encode goes through, or a typed refusal for
+/// the carriers that have none.
+///
+/// The **third** copy of the mapping [`crate::encode`]'s `image_color_type`
+/// makes, beside [`crate::sink_object_store`]'s. `image_color_type` carries the
+/// measured oracle: three vips routes answer three different things for a
+/// `uint` or `float` raster and the interpretation tag moves one of them again,
+/// so there is no answer here to be faithful to (issue #952).
+///
+/// Three copies is what let the first draft of
+/// `the_png_integer_refusals_carry_the_oracle_not_only_the_dependency` drive
+/// the wrong one: `Raster::encode_to_buffer("png")` routes through
+/// `crate::sink::encode_png`, not through `Raster::encode_png`, so a mutation
+/// of `image_color_type` came back green.
 fn color_type_for_format(fmt: crate::pixel::PixelFormat) -> Result<image::ColorType, SinkError> {
     use crate::pixel::PixelFormat;
     match fmt {
