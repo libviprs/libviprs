@@ -431,8 +431,9 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #739's and #781's mutation tables, one per marker that is the sole match for
 /// any test in the tree.
 ///
-/// #949 moved it 280 to 282, and the arithmetic is worth keeping because the
-/// change that moved it also *added* three markers. Three tests arrived
+/// #949 moved it 280 to 282 on the branch it was measured on, and the
+/// arithmetic was worth keeping because the change that moved it also
+/// *added* three markers. Three tests arrived
 /// (`test_util_is_only_ever_gated_alongside_cfg_test` walks `src/` now instead
 /// of reading one file, and both `the_walk_descends_into_subdirectories`
 /// guards read a directory) and one left
@@ -441,10 +442,17 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// `.try_exists()`, `.is_symlink()` and `File::options(`, moved this by
 /// **zero**: nothing in the tree reaches the filesystem through those
 /// spellings today, which is exactly why an unannotated test using one was
-/// invisible. This value is re-derived from the detector on every compose
-/// rather than added by hand, because a hand-added delta is exactly the
-/// shared-count hazard this constant already is.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 0; // placeholder, set from the detector below
+/// invisible.
+///
+/// This value is re-derived from the detector on every compose rather than
+/// added by hand, because a hand-added delta is exactly the shared-count
+/// hazard this constant already is (issue #971). #963 left a literal `0`
+/// placeholder here for whoever composed the batch it was part of to fill
+/// in, and it merged into `main` unfilled, which held this test red from
+/// `e82e03a8` through five more merges until someone re-ran the detector.
+/// 287 is that re-derived number, measured at the tip of #955 and #962
+/// landing on top of #963.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 287;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
