@@ -318,43 +318,35 @@ fn parse_subsample_mode(mode: Option<&str>) -> JpegSubsample {
 
 /// The `image` colour type for a [`PixelFormat`], or an [`EncodeError`] for the
 /// compute-intermediate formats (multiband / float) that have none.
+///
+/// The mapping itself lives once, in [`crate::pixel::image_color_type`]
+/// (issue #969); this wraps its [`ColorTypeRefusal`](crate::pixel::ColorTypeRefusal)
+/// in this module's own error type and wording.
 fn image_color_type(fmt: PixelFormat) -> Result<image::ColorType, EncodeError> {
-    Ok(match fmt {
-        PixelFormat::Gray8 => image::ColorType::L8,
-        PixelFormat::Gray16 => image::ColorType::L16,
-        PixelFormat::Rgb8 => image::ColorType::Rgb8,
-        PixelFormat::Rgba8 => image::ColorType::Rgba8,
-        PixelFormat::Rgb16 => image::ColorType::Rgb16,
-        PixelFormat::Rgba16 => image::ColorType::Rgba16,
-        PixelFormat::Multi8(_) | PixelFormat::Multi16(_) => {
-            return Err(EncodeError::encode(format!(
-                "multiband raster ({} bands) has no image colour type; reduce to 1/3/4 bands first",
-                fmt.channels()
-            )));
-        }
-        PixelFormat::RgbaF32 | PixelFormat::FloatF32(_) => {
-            return Err(EncodeError::encode(format!(
-                "float raster ({fmt:?}) has no 8/16-bit image colour type; cast first"
-            )));
-        }
-        // The `image` crate's widest integer colour type is 16-bit, so a
-        // `uint` raster is refused for the same reason a float one is
-        // rather than being narrowed behind the caller's back (issue #517).
-        PixelFormat::Uint32(_) => {
-            return Err(EncodeError::encode(format!(
+    use crate::pixel::ColorTypeRefusal;
+    crate::pixel::image_color_type(fmt).map_err(|refusal| {
+        EncodeError::encode(match refusal {
+            ColorTypeRefusal::Multiband(bands) => format!(
+                "multiband raster ({bands} bands) has no image colour type; reduce to 1/3/4 bands first"
+            ),
+            ColorTypeRefusal::Float => {
+                format!("float raster ({fmt:?}) has no 8/16-bit image colour type; cast first")
+            }
+            // The `image` crate's widest integer colour type is 16-bit, so a
+            // `uint` raster is refused for the same reason a float one is
+            // rather than being narrowed behind the caller's back (issue #517).
+            ColorTypeRefusal::Uint32 => format!(
                 "32-bit unsigned raster ({fmt:?}) has no 8/16-bit image colour type; cast first"
-            )));
-        }
-        // The `image` crate has no signed colour type at any width, so the
-        // signed carriers of issue #516 are refused whatever their size.
-        // Not a width question: `Int8` is one byte and still has no L8 to
-        // map to, because L8 is unsigned.
-        PixelFormat::Int8(_) | PixelFormat::Int16(_) | PixelFormat::Int32(_) => {
-            return Err(EncodeError::encode(format!(
+            ),
+            // The `image` crate has no signed colour type at any width, so the
+            // signed carriers of issue #516 are refused whatever their size.
+            // Not a width question: `Int8` is one byte and still has no L8 to
+            // map to, because L8 is unsigned.
+            ColorTypeRefusal::Signed => format!(
                 "signed raster ({fmt:?}) has no image colour type, which are all unsigned; \
                  cast to an unsigned 8/16-bit format first"
-            )));
-        }
+            ),
+        })
     })
 }
 

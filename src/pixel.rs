@@ -722,6 +722,63 @@ impl PixelFormat {
     }
 }
 
+/// Why a [`PixelFormat`] has no `image::ColorType` mapping.
+///
+/// Returned by [`image_color_type`] instead of a ready-made message, because
+/// each caller wants its own wording and its own error type: `encode.rs`
+/// says "has no image colour type", the tile sinks say "cannot be encoded as
+/// an image tile", and both need the original format back to render it with
+/// `{fmt:?}` or to read its channel count. This carries only the reason.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ColorTypeRefusal {
+    /// A multiband intermediate ([`PixelFormat::Multi8`] /
+    /// [`PixelFormat::Multi16`]), carrying its channel count.
+    Multiband(usize),
+    /// A float compute intermediate ([`PixelFormat::RgbaF32`] /
+    /// [`PixelFormat::FloatF32`]).
+    Float,
+    /// [`PixelFormat::Uint32`]: the `image` crate's widest integer colour
+    /// type is 16-bit (issue #517).
+    Uint32,
+    /// A signed carrier ([`PixelFormat::Int8`] / [`PixelFormat::Int16`] /
+    /// [`PixelFormat::Int32`]): every `image` colour type is unsigned, which
+    /// is not a width question (issue #516).
+    Signed,
+}
+
+/// The `image` crate's [`image::ColorType`] for a [`PixelFormat`], or the
+/// reason it has none.
+///
+/// This is the crate's one `PixelFormat -> image::ColorType` mapping, and
+/// issue #969 is why it exists as one function rather than three: `encode.rs`,
+/// `sink.rs` and `sink_object_store.rs` each carried an identical copy of
+/// this match, and the triplication produced a real mutation-testing
+/// near-miss while #962 authored tests for `encode.rs`'s copy. A mutation of
+/// that copy came back green, because `Raster::encode_to_buffer("png")`
+/// actually routes through `sink.rs`'s separate copy, not the one under
+/// test. Callers map [`ColorTypeRefusal`] to their own local error type.
+#[inline]
+pub(crate) fn image_color_type(fmt: PixelFormat) -> Result<image::ColorType, ColorTypeRefusal> {
+    Ok(match fmt {
+        PixelFormat::Gray8 => image::ColorType::L8,
+        PixelFormat::Gray16 => image::ColorType::L16,
+        PixelFormat::Rgb8 => image::ColorType::Rgb8,
+        PixelFormat::Rgba8 => image::ColorType::Rgba8,
+        PixelFormat::Rgb16 => image::ColorType::Rgb16,
+        PixelFormat::Rgba16 => image::ColorType::Rgba16,
+        PixelFormat::Multi8(_) | PixelFormat::Multi16(_) => {
+            return Err(ColorTypeRefusal::Multiband(fmt.channels()));
+        }
+        PixelFormat::RgbaF32 | PixelFormat::FloatF32(_) => {
+            return Err(ColorTypeRefusal::Float);
+        }
+        PixelFormat::Uint32(_) => return Err(ColorTypeRefusal::Uint32),
+        PixelFormat::Int8(_) | PixelFormat::Int16(_) | PixelFormat::Int32(_) => {
+            return Err(ColorTypeRefusal::Signed);
+        }
+    })
+}
+
 /// Read the sample at byte offset `off` in `data` as `f64`, honouring
 /// `kind`.
 ///

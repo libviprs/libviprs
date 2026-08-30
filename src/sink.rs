@@ -2248,43 +2248,44 @@ fn hash_tile_raw(bytes: &[u8], algo: crate::manifest::ChecksumAlgo) -> [u8; 32] 
 // Encoding helpers
 // ---------------------------------------------------------------------------
 
+/// The `image` colour type for a [`PixelFormat`], or a [`SinkError`] for the
+/// compute-intermediate formats that have none.
+///
+/// The mapping itself lives once, in [`crate::pixel::image_color_type`]
+/// (issue #969); this wraps its
+/// [`ColorTypeRefusal`](crate::pixel::ColorTypeRefusal) in this module's own
+/// error type and wording.
 fn color_type_for_format(fmt: crate::pixel::PixelFormat) -> Result<image::ColorType, SinkError> {
-    use crate::pixel::PixelFormat;
-    match fmt {
-        PixelFormat::Gray8 => Ok(image::ColorType::L8),
-        PixelFormat::Gray16 => Ok(image::ColorType::L16),
-        PixelFormat::Rgb8 => Ok(image::ColorType::Rgb8),
-        PixelFormat::Rgba8 => Ok(image::ColorType::Rgba8),
-        PixelFormat::Rgb16 => Ok(image::ColorType::Rgb16),
-        PixelFormat::Rgba16 => Ok(image::ColorType::Rgba16),
-        // Multiband intermediates (from the band ops in `crate::bands`) have
-        // no image-crate colour type; reduce or extract to 1/3/4 bands first.
-        PixelFormat::Multi8(_) | PixelFormat::Multi16(_) => Err(SinkError::EncodeMsg(format!(
-            "multiband raster ({} bands) cannot be encoded as an image tile",
-            fmt.channels()
-        ))),
-        // Float compute intermediates have no PNG/JPEG representation;
-        // cast to an unsigned 8/16-bit format before encoding tiles.
-        PixelFormat::RgbaF32 | PixelFormat::FloatF32(_) => Err(SinkError::EncodeMsg(format!(
-            "float raster ({fmt:?}) cannot be encoded as an image tile; \
-             cast to an unsigned 8/16-bit format first"
-        ))),
-        // 32-bit unsigned compute intermediates (the counting ops of issue
-        // #532) have no PNG/JPEG representation either; the widest integer
-        // colour type the `image` crate offers is 16-bit.
-        PixelFormat::Uint32(_) => Err(SinkError::EncodeMsg(format!(
-            "32-bit unsigned raster ({fmt:?}) cannot be encoded as an image tile; \
-             cast to an unsigned 8/16-bit format first"
-        ))),
-        // Every `image` colour type is unsigned, so this is not a width
-        // question and `Int8` is refused alongside `Int32` (issue #516).
-        PixelFormat::Int8(_) | PixelFormat::Int16(_) | PixelFormat::Int32(_) => {
-            Err(SinkError::EncodeMsg(format!(
+    use crate::pixel::ColorTypeRefusal;
+    crate::pixel::image_color_type(fmt).map_err(|refusal| {
+        SinkError::EncodeMsg(match refusal {
+            // Multiband intermediates (from the band ops in `crate::bands`)
+            // have no image-crate colour type; reduce or extract to 1/3/4
+            // bands first.
+            ColorTypeRefusal::Multiband(bands) => {
+                format!("multiband raster ({bands} bands) cannot be encoded as an image tile")
+            }
+            // Float compute intermediates have no PNG/JPEG representation;
+            // cast to an unsigned 8/16-bit format before encoding tiles.
+            ColorTypeRefusal::Float => format!(
+                "float raster ({fmt:?}) cannot be encoded as an image tile; \
+                 cast to an unsigned 8/16-bit format first"
+            ),
+            // 32-bit unsigned compute intermediates (the counting ops of
+            // issue #532) have no PNG/JPEG representation either; the widest
+            // integer colour type the `image` crate offers is 16-bit.
+            ColorTypeRefusal::Uint32 => format!(
+                "32-bit unsigned raster ({fmt:?}) cannot be encoded as an image tile; \
+                 cast to an unsigned 8/16-bit format first"
+            ),
+            // Every `image` colour type is unsigned, so this is not a width
+            // question and `Int8` is refused alongside `Int32` (issue #516).
+            ColorTypeRefusal::Signed => format!(
                 "signed raster ({fmt:?}) cannot be encoded as an image tile; \
                  the image colour types are all unsigned, so cast first"
-            )))
-        }
-    }
+            ),
+        })
+    })
 }
 
 /// Encodes a [`Raster`] as a PNG image and returns the raw PNG bytes.
