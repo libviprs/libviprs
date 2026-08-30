@@ -2239,6 +2239,68 @@ mod tests {
     }
 
     /**
+     * Tests that `Carrier::bitpix` answers for the two load-only signed
+     * variants too, even though the encode path never actually reaches
+     * them: `Carrier::for_format` still promotes a signed sample to its
+     * unsigned twin on save, matching vips, so nothing constructs `I16` or
+     * `I32` there (see the `Carrier` type doc, issue #966).
+     * Input: `Carrier::I16`, `Carrier::I32` -> Output: `(16, None)`,
+     * `(32, None)`, an unscaled BITPIX of each one's own width.
+     */
+    #[test]
+    fn bitpix_answers_for_the_load_only_signed_carriers_too() {
+        assert_eq!(Carrier::I16.bitpix(), (16, None));
+        assert_eq!(Carrier::I32.bitpix(), (32, None));
+    }
+
+    /**
+     * Tests that `write_planes` would write the two load-only signed
+     * carriers unshifted, the direct counterpart of `deplanarise`'s read
+     * side, and the only way to prove that arm from a test: nothing on the
+     * public encode path can reach it, since `Carrier::for_format` never
+     * produces `I16` or `I32` (issue #966). Calls `write_planes` directly
+     * with each one, bypassing `for_format`. Negative values are included
+     * so a mutation that reintroduced `unsigned_sample`'s promotion, or a
+     * `U16`/`U32`-style `BZERO` shift, would be caught: either one changes
+     * what a negative sample writes as.
+     * Input: `Int16` raster [-3, 2, 100, -100], `Int32` raster
+     * [-3, 2, 1000000, -1000000] -> Output: the same values, big-endian,
+     * unshifted, bottom row first.
+     */
+    #[test]
+    fn write_planes_writes_the_signed_carriers_unshifted() {
+        let format16 = PixelFormat::with_kind(1, SampleKind::I16).unwrap();
+        let values16: [i16; 4] = [-3, 2, 100, -100];
+        let mut data16 = Vec::new();
+        for v in values16 {
+            data16.extend_from_slice(&v.to_ne_bytes());
+        }
+        let raster16 = Raster::new(2, 2, format16, data16).unwrap();
+        let mut out16 = Vec::new();
+        raster16.write_planes(&mut out16, Carrier::I16);
+        let mut want16 = Vec::new();
+        for v in [values16[2], values16[3], values16[0], values16[1]] {
+            want16.extend_from_slice(&v.to_be_bytes());
+        }
+        assert_eq!(out16, want16);
+
+        let format32 = PixelFormat::with_kind(1, SampleKind::I32).unwrap();
+        let values32: [i32; 4] = [-3, 2, 1_000_000, -1_000_000];
+        let mut data32 = Vec::new();
+        for v in values32 {
+            data32.extend_from_slice(&v.to_ne_bytes());
+        }
+        let raster32 = Raster::new(2, 2, format32, data32).unwrap();
+        let mut out32 = Vec::new();
+        raster32.write_planes(&mut out32, Carrier::I32);
+        let mut want32 = Vec::new();
+        for v in [values32[2], values32[3], values32[0], values32[1]] {
+            want32.extend_from_slice(&v.to_be_bytes());
+        }
+        assert_eq!(out32, want32);
+    }
+
+    /**
      * Tests that a load followed by a save reproduces the input bytes.
      * Works by round-tripping the mono fixture, which carries the same
      * cards cfitsio generates, so nothing should survive the record filter
