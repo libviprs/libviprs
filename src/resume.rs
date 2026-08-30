@@ -43,22 +43,49 @@
 //!
 //! # Intended use
 //!
-//! ```ignore
-//! use libviprs::resume::{JobCheckpoint, JobMetadata, PlanContract, compute_plan_hash};
+//! [`JobMetadata`] is `#[non_exhaustive]`, so a struct literal does not
+//! compile outside this crate at all (E0639). This example built one for as
+//! long as it carried `ignore`, which meant the snippet the module recommends
+//! was one nobody could run and the compiler was never asked (issue #950).
+//! [`JobMetadata::new`] is the constructor; the fields it does not take are
+//! public and assignable afterwards.
 //!
-//! let contract = PlanContract::from_engine(&config, &sink);
-//! let hash = compute_plan_hash(&plan, &contract);
-//! let meta = JobMetadata {
-//!     schema_version: "1".to_string(),
-//!     plan_hash: hash,
-//!     completed_tiles: Vec::new(),
-//!     levels_completed: Vec::new(),
-//!     started_at: now_rfc3339(),
-//!     last_checkpoint_at: now_rfc3339(),
-//!     content_format: contract.format,
-//! };
-//! JobCheckpoint::save(output_dir, &meta)?;
 //! ```
+//! use libviprs::dedupe::DedupeStrategy;
+//! use libviprs::engine::BlankTileStrategy;
+//! use libviprs::planner::{Layout, PyramidPlanner};
+//! use libviprs::resume::{JobCheckpoint, JobMetadata, PlanContract, compute_plan_hash};
+//! use libviprs::sink::TileFormat;
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let plan = PyramidPlanner::new(4096, 3072, 256, 0, Layout::DeepZoom)?.plan();
+//! let contract = PlanContract {
+//!     format: Some(TileFormat::Png),
+//!     background_rgb: [255, 255, 255],
+//!     blank_strategy: BlankTileStrategy::Emit,
+//!     dedupe: DedupeStrategy::None,
+//!     source_digest: None,
+//! };
+//!
+//! let mut meta = JobMetadata::new(
+//!     compute_plan_hash(&plan, &contract),
+//!     "2026-08-29T00:00:00Z".to_string(),
+//! );
+//! meta.content_format = contract.format;
+//!
+//! let dir = tempfile::tempdir()?;
+//! JobCheckpoint::save(dir.path(), &meta)?;
+//!
+//! let resumed = JobCheckpoint::load(dir.path())?.expect("just written");
+//! assert_eq!(resumed.plan_hash, meta.plan_hash);
+//! assert_eq!(resumed.content_format, Some(TileFormat::Png));
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! A run driven by [`crate::engine`] builds the contract with
+//! [`PlanContract::from_engine`] instead, so the value derived at
+//! checkpoint-write time and the value derived at the resume gate agree.
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};

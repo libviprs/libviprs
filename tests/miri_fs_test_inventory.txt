@@ -281,6 +281,8 @@ annotated   fs-detected  src/stream_verify.rs::stream_verify_rejects_wrong_forma
 annotated   fs-detected  src/stream_verify.rs::stream_verify_reports_missing_tile
 annotated   fs-detected  tests/ci_feature_coverage.rs::test_util_is_only_ever_gated_alongside_cfg_test
 annotated   fs-detected  tests/colour_ported_surface.rs::ported_icc_call_site
+annotated   fs-detected  tests/crate_doc_matches_the_crate.rs::every_multi_page_loader_that_refuses_a_page_is_named_in_the_doc
+annotated   fs-detected  tests/crate_doc_matches_the_crate.rs::no_doc_example_under_src_carries_ignore
 annotated   fs-detected  tests/dependency_policy.rs::vendored_native_code_is_only_the_documented_crates
 annotated   fs-detected  tests/exr_ported_surface.rs::channel_names_and_compression_are_readable_downstream
 annotated   fs-detected  tests/exr_ported_surface.rs::decode_exr_is_public_and_returns_float_bands
@@ -331,6 +333,9 @@ annotated   fs-detected  tests/pdfium_source_audit.rs::audit_gate_accepts_patche
 annotated   fs-detected  tests/pdfium_source_audit.rs::audit_gate_rejects_unpatched_consumer
 annotated   fs-detected  tests/pdfium_source_audit.rs::patchless_downstream_consumer_resolves_the_fork
 annotated   fs-detected  tests/radiance_ported_surface.rs::encode_and_save_round_trip_from_outside_the_crate
+annotated   fs-detected  tests/save_route_coverage.rs::every_dispatch_arm_is_claimed_by_a_writer
+annotated   fs-detected  tests/save_route_coverage.rs::every_public_writer_is_reachable_or_recorded
+annotated   fs-detected  tests/save_route_coverage.rs::every_wired_writer_names_arms_the_dispatches_have
 annotated   fs-detected  tests/sample_kind_spine.rs::a_byte_width_is_never_compared_outside_the_named_countdown
 annotated   fs-detected  tests/sample_kind_spine.rs::the_walk_descends_into_subdirectories
 annotated   fs-detected  tests/uhdr_ported_surface.rs::a_smaller_gain_map_is_resampled_linearly_and_not_by_nearest
@@ -356,6 +361,7 @@ annotated   not-detected src/colour.rs::icc_typed_errors
 annotated   not-detected src/pdf.rs::password_and_dpi_extract_return_a_clean_typed_error
 annotated   not-detected src/pdf.rs::pdf_info_with_password_passes_through_open_error
 annotated   not-detected src/source.rs::decode_file_not_found
+annotated   not-detected tests/changelog_release_claims.rs::every_release_claim_in_the_changelog_is_true_of_the_tags
 annotated   not-detected tests/dependency_policy.rs::every_links_key_is_on_the_allowlist
 annotated   not-detected tests/dependency_policy.rs::library_discovery_is_confined_to_packfile
 annotated   not-detected tests/dependency_policy.rs::runtime_library_loaders_are_confined_to_the_pdfium_features

@@ -105,7 +105,16 @@ use rav1d::include::dav1d::picture::Dav1dPicture;
 pub(crate) const MAGIC_AT_4: &[u8] = b"ftypavif";
 
 /// Everything that can go wrong reading an AVIF.
+///
+/// `#[non_exhaustive]`, like every other growable public enum in this crate,
+/// so a caller cannot write a match that a new variant breaks (issue #946).
+/// This one will grow: [`AvifError::UnsupportedColour`]'s own doc says only
+/// two of the matrix encodings are measured, and the next one measured would
+/// otherwise be a breaking change rather than an additive one. It is
+/// re-exported from the crate root unconditionally, so it is public API in a
+/// build with the **`avif`** feature and in a build without one alike.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum AvifError {
     /// The crate was built without the **`avif`** feature, so there is no AV1
     /// decoder behind [`decode_avif`] at all.
@@ -950,6 +959,13 @@ impl Frame {
 ///   against `ispe` **before** the AV1 decode runs, which is the point: AVIF
 ///   is a compressed container, so a 300-byte file can declare a
 ///   65535x65535 frame.
+///
+///   The price is the raster **plus** the decoded AV1 frame it is built from,
+///   because `max_alloc_bytes` is a ceiling on peak memory and both are live
+///   at once (issue #944). The frame's size follows `av1C`, so a 4:2:0 file
+///   is priced at less than a 4:4:4 one, and an alpha item adds a second
+///   frame. That makes this stricter than it was: a budget between the raster
+///   and the peak is now refused.
 pub fn decode_avif(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
     let container = parse_container(bytes)?;
     let item = container
@@ -979,7 +995,70 @@ pub fn decode_avif(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceE
     // Priced from the container's own declared geometry, before a byte of
     // AV1 is decoded. The price is the raster this returns, which is why the
     // band count follows the alpha item and the sample width follows `av1C`.
-    limits.check_image_alloc("AVIF frame buffer", width, height, bands, sample_bytes)?;
+    //
+    // Plus what the decode holds *beside* that raster, which the ceiling has
+    // to cover or it is not a ceiling (issue #944). `max_alloc_bytes` is
+    // documented as peak memory, and a 4:4:4 decode was peaking at 3.89x a
+    // price that counted only the interleaved output, measured with a
+    // counting global allocator in `tests/decode_working_set.rs`.
+    //
+    // Two buffers per decoded item, both the shape of the AV1 frame rather
+    // than of the RGB raster:
+    //
+    // * `Frame::planes`, which this module fills, is `Vec<u16>` whatever the
+    //   bit depth, so two bytes a sample;
+    // * `rav1d`'s own picture, which is still reffed while that copy runs, at
+    //   one byte a sample for 8-bit and two for 10- and 12-bit.
+    //
+    // Four bytes a sample covers the pair at every depth. The sample count is
+    // the frame's, not the raster's, so it follows `av1C`: 4:2:0 keeps a full
+    // luma plane and two quarter chroma planes, and a monochrome frame keeps
+    // one plane. Reading it off the configuration rather than assuming the
+    // widest case is what keeps a subsampled file from being priced at twice
+    // what it costs.
+    //
+    // An alpha item is a second `decode_item`, and its frame is live
+    // alongside the primary's while `assemble` walks both, so it is a second
+    // pair of buffers over a monochrome plane.
+    //
+    // That last term is held by `an_alpha_item_is_priced_as_a_second_frame`
+    // and **not** by the counting allocator, which is measured rather than
+    // assumed: dropping it leaves all four AVIF cases in
+    // `tests/decode_working_set.rs` green, because at 512x512 the four bytes
+    // a sample the primary frame is priced at have enough slack to cover the
+    // alpha frame too.
+    let plane = u64::from(width).saturating_mul(u64::from(height));
+    let chroma = if config.monochrome {
+        0
+    } else {
+        let cw = if config.subsampling_x {
+            width.div_ceil(2)
+        } else {
+            width
+        };
+        let ch = if config.subsampling_y {
+            height.div_ceil(2)
+        } else {
+            height
+        };
+        u64::from(cw).saturating_mul(u64::from(ch))
+    };
+    let frame_samples = plane.saturating_add(chroma.saturating_mul(2));
+    let working_set = frame_samples
+        .saturating_mul(4)
+        .saturating_add(if has_alpha {
+            plane.saturating_mul(4)
+        } else {
+            0
+        });
+    limits.check_image_alloc_with_working_set(
+        "AVIF frame buffer",
+        width,
+        height,
+        bands,
+        sample_bytes,
+        working_set,
+    )?;
 
     let primary = decode_item(&container, item, bytes, limits)?;
     let alpha = match container.alpha_item(container.primary) {
@@ -1938,8 +2017,12 @@ mod tests {
     #[cfg_attr(not(feature = "avif"), ignore = "needs the avif feature")]
     #[test]
     fn every_decode_ceiling_is_applied_to_the_declared_geometry() {
-        // 4x3x3 bands x 1 byte.
-        let price = 36;
+        // 4x3x3 bands x 1 byte for the raster, plus what the decode holds
+        // beside it (issue #944): `rgb8.avif` is 4:4:4 and opaque, so the
+        // frame is three full 4x3 planes, and four bytes a sample covers
+        // `Frame::planes` at two and `rav1d`'s picture at up to two more.
+        // 36 + 4 * 36 = 180.
+        let price = 36 + 4 * 36;
         let exact = DecodeLimits::default().with_max_alloc_bytes(price);
         assert!(
             decode_avif(RGB8, exact).is_ok(),
@@ -1976,6 +2059,50 @@ mod tests {
     }
 
     /*
+     * An alpha item is a **second** decoded frame, held beside the primary's
+     * while `assemble` walks both, and the price has to carry it (issue
+     * #944). Its own row, because the opaque fixture above cannot see it: the
+     * alpha term is the only difference between the two prices.
+     * `rgba8.avif` is 4x3, 4:4:4 and lossless, so the primary frame is three
+     * full 4x3 planes and the alpha frame is one. 48 bytes of raster, 4 * 36
+     * for the primary's `Frame::planes` and `rav1d` picture together, and
+     * 4 * 12 for the alpha's: 48 + 144 + 48 = 240.
+     * The counting-allocator measurement in `tests/decode_working_set.rs`
+     * does not catch a missing alpha term, measured: dropping it leaves all
+     * four AVIF cases there green, because the four bytes a sample the
+     * primary frame is priced at have enough slack at 512x512 to cover the
+     * alpha frame as well. This row is what holds the term.
+     * Input: `rgba8.avif` at `max_alloc_bytes` 240 then 239 -> Output: a
+     * four-band 4x3 decode, then `AllocLimitExceeded { needed: 240 }`.
+     */
+    #[cfg_attr(not(feature = "avif"), ignore = "needs the avif feature")]
+    #[test]
+    fn an_alpha_item_is_priced_as_a_second_frame() {
+        let price = 48 + 4 * 36 + 4 * 12;
+        assert_eq!(price, 240, "the arithmetic in the doc block, spelled out");
+
+        let exact = DecodeLimits::default().with_max_alloc_bytes(price);
+        let raster = decode_avif(RGBA8, exact).expect("240 bytes is exactly the alpha decode");
+        assert_eq!((raster.width(), raster.height()), (4, 3));
+        assert_eq!(raster.format().channels(), 4, "the alpha item is a band");
+
+        let tight = DecodeLimits::default().with_max_alloc_bytes(price - 1);
+        match decode_avif(RGBA8, tight) {
+            Err(SourceError::AllocLimitExceeded {
+                what, needed_bytes, ..
+            }) => {
+                assert_eq!(what, "AVIF frame buffer");
+                assert_eq!(
+                    needed_bytes, price,
+                    "the price must carry the alpha item's frame; without it \
+                     this reads 192"
+                );
+            }
+            other => panic!("expected AllocLimitExceeded, got {other:?}"),
+        }
+    }
+
+    /*
      * The ceilings answer the same in a build without the feature, because
      * everything up to the AV1 decode runs either way. Without this a
      * default build could quietly stop pricing AVIF at all and no test in
@@ -1985,7 +2112,7 @@ mod tests {
      */
     #[test]
     fn the_budget_refusal_does_not_depend_on_the_avif_feature() {
-        let tight = DecodeLimits::default().with_max_alloc_bytes(35);
+        let tight = DecodeLimits::default().with_max_alloc_bytes(179);
         let err = decode_avif(RGB8, tight).expect_err("must be refused either way");
         assert!(
             err.is_alloc_limit(),

@@ -286,8 +286,6 @@ use crate::imageio::MetadataValue;
 use crate::imageio::SaveError;
 #[cfg(feature = "jp2k")]
 use crate::pixel::{PixelFormat, SampleKind};
-#[cfg(feature = "jp2k")]
-use crate::raster::buffer_len;
 use crate::raster::{Raster, RasterError};
 use crate::source::{DecodeLimits, SourceError};
 
@@ -736,7 +734,12 @@ const MAX_TILES: u64 = 65535;
 ///   [`DecodeLimits::max_coord`], [`SourceError::DimensionLimitExceeded`] when
 ///   `width * height` exceeds `max_pixels`, and
 ///   [`SourceError::AllocLimitExceeded`] when the component buffers the header
-///   declares would exceed `max_alloc_bytes`.
+///   declares would exceed `max_alloc_bytes`. That price covers what
+///   `hayro-jpeg2000` holds beside the raster as well as the raster itself,
+///   because `max_alloc_bytes` is a ceiling on peak memory and this decoder
+///   was measured at 6.45x a raster-only price (issue #944). It is therefore
+///   stricter than it was, by roughly an order of magnitude for a small
+///   image and by about five times for a large one.
 pub fn decode_jp2k(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
     decode(bytes, limits)
 }
@@ -1536,6 +1539,52 @@ fn tile_count(size: u32, origin: u32, tile: u32) -> u32 {
 // Decode
 // ---------------------------------------------------------------------------
 
+/// The interleaved output buffer's byte length, and whether the target can
+/// address it.
+///
+/// **One product, and it is the one the budget already cleared** (issue
+/// #951). `check_image_alloc_with_working_set` returns
+/// `width * height * bands * element_bytes` as a `u64`, widened and
+/// saturating; this takes that number and asks one question of it, which is
+/// whether the target can address it. It used to discard the return, rebuild
+/// half of it with [`crate::raster::buffer_len`], which validates
+/// `width * height * bands` and narrows *that*, and multiply the result by
+/// `element_bytes` in `usize` at the allocation, where nothing checked it.
+/// The two halves of one product were validated against two different
+/// ceilings.
+///
+/// The `.v` reader does exactly this: `check_image_alloc`'s `data_len` is
+/// what it narrows and what it slices the file with, so there is one
+/// spelling of the product there and not two. This is the same move.
+///
+/// `address_space` is what makes the defect reachable from a test on any
+/// host. It is `usize::MAX` at the call site; a 32-bit value stands in for
+/// the target where the product does not fit, which is the only target where
+/// this is a live bug and is not a target anyone here runs. Gating a test on
+/// `#[cfg(target_pointer_width = "32")]` would mean nothing ever ran it.
+///
+/// A length above `address_space` used to come back `Ok`, and on that target
+/// `vec![0u8; len]` wraps it into an undersized buffer with the `store` loop
+/// indexing past the end. It is a `SizeOverflow` now, carrying the real
+/// bytes per pixel rather than the band count the old spelling reported.
+#[cfg(feature = "jp2k")]
+fn frame_buffer_bytes(
+    priced_bytes: u64,
+    width: u32,
+    height: u32,
+    bands: u32,
+    element_bytes: u64,
+    address_space: u64,
+) -> Result<u64, RasterError> {
+    // What a pixel really costs, bands times the sample width. The old
+    // spelling split that product in two and checked one half.
+    let bpp = (bands as usize).saturating_mul(element_bytes as usize);
+    if priced_bytes > address_space {
+        return Err(RasterError::SizeOverflow { width, height, bpp });
+    }
+    Ok(priced_bytes)
+}
+
 /// The `jp2k`-feature-on body of [`decode_jp2k`].
 #[cfg(feature = "jp2k")]
 fn decode(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
@@ -1695,18 +1744,75 @@ fn decode(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
     // 512 MiB default budget. Priced from the declared geometry before the
     // decoder reserves anything, the way `crate::exr` and `crate::fits` price
     // theirs, and reported through the one shared shape (issue #686).
-    limits.check_image_alloc(
+    //
+    // Plus what `hayro-jpeg2000` holds beside the buffer this module fills,
+    // which is much the larger half and is why this was the worst of the
+    // three decoders #944 measured: a 1024x1024 RGB file peaked at **6.45x**
+    // its price, and a 4096x4096 one at 244 MiB against a 48 MiB budget.
+    // `max_alloc_bytes` is documented as a ceiling on peak memory, so a
+    // caller sizing a container limit from it was killed by that factor, and
+    // the refusal message understated by the same one.
+    //
+    // The decoder has no budget of its own to hand this one to.
+    // `DecodeSettings` carries no allocation limit at all, which is why this
+    // takes `crate::webp`'s route rather than `crate::jxl`'s: jxl wires the
+    // caller's ceiling into `jxl-oxide`'s `AllocTracker` and lets the
+    // dependency refuse itself, and there is nothing here to wire it into.
+    //
+    // Two terms, both measured with a counting global allocator in
+    // `tests/decode_working_set.rs`:
+    //
+    // * **Per image**, one `f32` sample per component for the decoded
+    //   component data, and a second copy of all of them while the `cdef`
+    //   box's channel reorder clones the set. Eight bytes per band-pixel.
+    // * **Per tile**, the coefficient storage the code-block pass works in,
+    //   which `build` reallocates per tile and which therefore scales with
+    //   the *tile* rather than with the image, plus its bookkeeping. Measured
+    //   at 5.8 bytes per band-tile-pixel across four geometries and two
+    //   sample depths, priced at ten.
+    //
+    // The tile term is why a 512x512 file costs proportionally more than a
+    // 4096x4096 one: `jp2ksave` tiles on a 512 grid, so past that size the
+    // per-tile buffers stop growing. `min` with the image is the upper bound
+    // for the first tile, whose rectangle a non-zero `XTOsiz` can shrink but
+    // never grow.
+    let plane = u64::from(width).saturating_mul(u64::from(height));
+    let tile_plane = u64::from(header.tile_width.clamp(1, width.max(1)))
+        .saturating_mul(u64::from(header.tile_height.clamp(1, height.max(1))));
+    let working_set = u64::from(bands).saturating_mul(
+        plane
+            .saturating_mul(8)
+            .saturating_add(tile_plane.saturating_mul(10)),
+    );
+    let frame_bytes = limits.check_image_alloc_with_working_set(
         "JPEG 2000 component buffers",
         width,
         height,
         u64::from(bands),
         element_bytes,
+        working_set,
     )?;
     // Clearing the budget is not what makes this safe to compute: on a 32-bit
     // target a caller who lifts `max_alloc_bytes` can still pass a geometry
-    // whose sample count pins a `usize`. `buffer_len` does the same widened
-    // product and checks the narrowing, so the count is right by construction.
-    let samples = buffer_len(width, height, bands as usize).map_err(Jp2kError::Raster)?;
+    // whose byte count pins a `usize`. Both steps live in
+    // `frame_buffer_bytes` now, so a test can drive them at a pointer width
+    // this host does not have (issue #951).
+    let buffer_bytes = frame_buffer_bytes(
+        frame_bytes,
+        width,
+        height,
+        bands,
+        element_bytes,
+        u64::try_from(usize::MAX).unwrap_or(u64::MAX),
+    )
+    .map_err(Jp2kError::Raster)?;
+    let buffer_len = usize::try_from(buffer_bytes).map_err(|_| {
+        Jp2kError::Raster(RasterError::SizeOverflow {
+            width,
+            height,
+            bpp: bands as usize,
+        })
+    })?;
 
     // Pass two: the actual decode.
     let mut context = DecoderContext::default();
@@ -1752,7 +1858,7 @@ fn decode(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
         }
     }
 
-    let mut buffer = vec![0u8; samples * element_bytes as usize];
+    let mut buffer = vec![0u8; buffer_len];
     let ycc = layout.runs_inverse_ycc(&header);
     if ycc {
         // `jp2kload` runs OpenJPEG's `sycc_to_rgb` over the component values
@@ -4855,6 +4961,91 @@ mod tests {
     // -----------------------------------------------------------------------
 
     /**
+     * Tests that the byte length the decode sizes its output buffer from is
+     * one the target can actually address, at every geometry the ceilings
+     * admit. `check_image_alloc` validates
+     * `width * height * bands * element_bytes` as a `u64` and hands it back;
+     * the decode threw that away, revalidated only `width * height * bands`
+     * and multiplied by `element_bytes` afterwards in `usize`, against
+     * nothing (issue #951).
+     * The `address_space` parameter is what makes this runnable here. The
+     * arm that matters is a 32-bit one and this host is 64-bit, so a test
+     * gated on `target_pointer_width` would never run; passing the width in
+     * exercises it on any host, and the 64-bit rows below are the control
+     * that says the refusal is about the width and not about the geometry.
+     * The geometry is the one the issue names, and it is reachable: a caller
+     * with the documented `max_alloc_bytes = u64::MAX` spelling and the
+     * *default* `max_pixels` of 2^30. 32768x32767 is 1,073,709,056 pixels,
+     * just under that ceiling, and both axes are far under `max_coord`. Four
+     * bands gives 4,294,836,224 samples, which fits a 32-bit `usize` by
+     * 131,071; two bytes each gives 8,589,672,448, which does not fit by a
+     * factor of two.
+     * That margin is the point of the geometry. A rounder one either misses
+     * the window entirely (32768x32768x4 is 2^32 samples, one past `u32`, so
+     * the *sample* count is refused and the second multiply never runs) or
+     * sits so far outside it that a price wrong by a factor would pass too.
+     * Input: 32768x32767x4 at two bytes a sample, against a 32-bit and a
+     * 64-bit address space -> Output: refused on the first, and a length of
+     * exactly 8,589,672,448 on the second.
+     */
+    #[test]
+    #[cfg(feature = "jp2k")]
+    fn the_buffer_length_is_refused_rather_than_wrapped_on_a_narrow_target() {
+        let thirty_two = u64::from(u32::MAX);
+        let sixty_four = u64::MAX;
+        let (w, h, bands, element_bytes) = (32768u32, 32767u32, 4u32, 2u64);
+
+        // The price the budget check hands back, built by the same function
+        // it uses, so the test feeds the helper what the decode feeds it.
+        let priced = crate::raster::decode_alloc_bytes(w, h, u64::from(bands), element_bytes);
+        assert_eq!(priced, 8_589_672_448, "the price the budget check returns");
+
+        let wide = frame_buffer_bytes(priced, w, h, bands, element_bytes, sixty_four)
+            .expect("a 64-bit target addresses eight gigabytes");
+        assert_eq!(
+            wide, 8_589_672_448,
+            "the control: the product itself is right, so the row below is \
+             about the narrowing and not about the arithmetic"
+        );
+
+        let narrow = frame_buffer_bytes(priced, w, h, bands, element_bytes, thirty_two);
+        assert!(
+            matches!(
+                narrow,
+                Err(RasterError::SizeOverflow {
+                    width: 32768,
+                    height: 32767,
+                    // Four bands at two bytes each. The old spelling reported
+                    // the band count here, which is the same number the
+                    // second, unchecked multiply was missing.
+                    bpp: 8,
+                })
+            ),
+            "a length a 32-bit target cannot address must be refused, not \
+             wrapped into an undersized buffer, and the refusal must name what \
+             a pixel really costs: {narrow:?}"
+        );
+
+        // And the sample count on its own *does* fit, which is why
+        // `buffer_len(width, height, bands)` waved this geometry through:
+        // 2^32 - 2^30 is under `u32::MAX`.
+        let samples = u64::from(w) * u64::from(h) * u64::from(bands);
+        assert!(
+            samples <= thirty_two,
+            "the sample count fits where the byte count does not, which is \
+             the whole shape of the bug: {samples}"
+        );
+
+        // A geometry that fits everywhere still answers, so the refusal above
+        // is not "this helper refuses everything".
+        assert_eq!(
+            frame_buffer_bytes(96, 4, 4, 3, 2, thirty_two)
+                .expect("4x4x3 at two bytes fits anywhere"),
+            96
+        );
+    }
+
+    /**
      * Pins that all three decode ceilings reach this loader, each with its
      * own typed refusal, and that none of them fires on the same file with
      * the ceiling lifted.
@@ -4893,8 +5084,12 @@ mod tests {
             "the pixel ceiling: {err:?}"
         );
 
-        let err = decode_jp2k(bytes, DecodeLimits::default().with_max_alloc_bytes(776))
-            .expect_err("777 bytes is past a 776-byte budget");
+        // 777 bytes of raster, plus what `hayro-jpeg2000` holds beside it
+        // (issue #944). One band, so the per-image term is 777 * 8 and the
+        // per-tile term is the 8x8 grid this fixture declares, 64 * 10:
+        // 777 + 6216 + 640 = 7633.
+        let err = decode_jp2k(bytes, DecodeLimits::default().with_max_alloc_bytes(7632))
+            .expect_err("7633 bytes is past a 7632-byte budget");
         let SourceError::AllocLimitExceeded {
             what,
             geometry,
@@ -4914,7 +5109,7 @@ mod tests {
             }),
             "a decoder that prices a declared geometry reports it"
         );
-        assert_eq!((needed_bytes, max_alloc_bytes), (777, 776));
+        assert_eq!((needed_bytes, max_alloc_bytes), (7633, 7632));
     }
 
     // -----------------------------------------------------------------------

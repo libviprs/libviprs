@@ -1018,8 +1018,16 @@ impl FsSink {
     /// [`TileFormat::Png`]; override it via [`FsSink::with_format`] when
     /// writing JPEG or Raw tiles:
     ///
-    /// ```ignore
-    /// FsSink::new(dir, plan).with_format(TileFormat::Jpeg { quality: 85 });
+    /// ```
+    /// use libviprs::planner::{Layout, PyramidPlanner};
+    /// use libviprs::sink::{FsSink, TileFormat};
+    ///
+    /// let plan = PyramidPlanner::new(1024, 768, 256, 0, Layout::DeepZoom)
+    ///     .unwrap()
+    ///     .plan();
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let sink = FsSink::new(dir.path(), plan).with_format(TileFormat::Jpeg { quality: 85 });
+    /// assert_eq!(sink.base_dir(), dir.path());
     /// ```
     pub fn new(base_dir: impl Into<PathBuf>, plan: PyramidPlan) -> Self {
         let format = TileFormat::Png;
@@ -1155,10 +1163,19 @@ impl FsSink {
     /// defaults to [`TileFormat::Png`]). Chain with the other `with_*`
     /// methods to configure the full sink in builder style:
     ///
-    /// ```ignore
-    /// FsSink::new(dir, plan)
+    /// ```
+    /// use libviprs::dedupe::DedupeStrategy;
+    /// use libviprs::planner::{Layout, PyramidPlanner};
+    /// use libviprs::sink::{FsSink, TileFormat};
+    ///
+    /// let plan = PyramidPlanner::new(1024, 768, 256, 0, Layout::DeepZoom)
+    ///     .unwrap()
+    ///     .plan();
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let sink = FsSink::new(dir.path(), plan)
     ///     .with_format(TileFormat::Jpeg { quality: 85 })
     ///     .with_dedupe(DedupeStrategy::Blanks);
+    /// assert_eq!(sink.base_dir(), dir.path());
     /// ```
     ///
     /// **See also:** [interactive example](https://libviprs.org/cli/#flag-format)

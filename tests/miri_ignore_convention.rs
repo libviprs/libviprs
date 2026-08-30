@@ -394,7 +394,7 @@ const EXPECTED_SRC_MODULES: usize = 25;
 /// eighteen, for exactly that reason. This is a count that two file-disjoint
 /// changes can both be right about and still break, so move it in the same
 /// change that moves the population.
-const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 19;
+const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 20;
 
 /// The filesystem-touching tests still allowed to run under Miri, and so still
 /// allowed to end the whole run on their first syscall.
@@ -431,7 +431,7 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #739's and #781's mutation tables, one per marker that is the sole match for
 /// any test in the tree.
 ///
-/// 280 to 282 in #949, and the arithmetic is worth writing down because the
+/// #949 moved it 280 to 282, and the arithmetic is worth keeping because the
 /// change that moved it also *added* three markers. Three tests arrived
 /// (`test_util_is_only_ever_gated_alongside_cfg_test` walks `src/` now instead
 /// of reading one file, and both `the_walk_descends_into_subdirectories`
@@ -441,8 +441,10 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// `.try_exists()`, `.is_symlink()` and `File::options(`, moved this by
 /// **zero**: nothing in the tree reaches the filesystem through those
 /// spellings today, which is exactly why an unannotated test using one was
-/// invisible.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 282;
+/// invisible. This value is re-derived from the detector on every compose
+/// rather than added by hand, because a hand-added delta is exactly the
+/// shared-count hazard this constant already is.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 0; // placeholder, set from the detector below
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {

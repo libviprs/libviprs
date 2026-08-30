@@ -46,17 +46,22 @@
 //! * **The carrier ceiling is the interesting constraint.** cfitsio hands
 //!   vips an *equivalent* type rather than the raw one (`fits.c:246`), so
 //!   what a BITPIX means depends on the `BSCALE` / `BZERO` pair beside it.
-//!   Three combinations reach a carrier libviprs has, and every other one
-//!   is refused by name rather than narrowed; see [`FitsError`].
+//!   Four combinations reach a carrier this loader has (BITPIX 8 unscaled,
+//!   BITPIX 16 and BITPIX 32 in their standard unsigned spelling, and
+//!   BITPIX -32 under any scaling), and every other one is refused by name
+//!   rather than narrowed; see [`FitsError`].
 //! * **Interpretation follows band count and carrier** (`fits.c:307-320`):
 //!   one band is [`Interpretation::Bw`] or [`Interpretation::Grey16`],
 //!   three bands [`Interpretation::Srgb`] or [`Interpretation::Rgb16`],
 //!   anything else [`Interpretation::Multiband`].
 //! * **Save is total over [`PixelFormat`].** vips promotes on the way out
 //!   (`bandfmt_fits`, `fitssave.c`): char to uchar, short to ushort, int to
-//!   uint. libviprs's carriers are already the unsigned ones, so every
-//!   format this crate has maps onto a BITPIX and there is nothing for the
-//!   encoder to refuse. Only the loader has a ceiling.
+//!   uint, each with a saturating cast that clamps a negative sample to
+//!   zero. libviprs follows the same table for its signed carriers
+//!   (issue #957) and writes every unsigned one, including the 32-bit
+//!   carrier of issue #517, through its own BITPIX, so every format this
+//!   crate has maps onto one and there is nothing for the encoder to
+//!   refuse. Only the loader has a ceiling.
 //! * **The saved header is cfitsio's, not vips's.** vips filters its own
 //!   attached records through the `vips_fits_basic` prefix table
 //!   (`fits.c:596-613`) precisely because cfitsio generates those cards
@@ -102,7 +107,7 @@ use thiserror::Error;
 use crate::codec::EncodeError;
 use crate::conversion::Interpretation;
 use crate::imageio::{MetadataValue, SaveError};
-use crate::pixel::PixelFormat;
+use crate::pixel::{PixelFormat, SampleKind};
 use crate::raster::{Raster, RasterError};
 use crate::source::{DecodeLimits, SourceError};
 
@@ -165,6 +170,16 @@ pub const MAX_HEADER_UNITS: usize = 128;
 /// `vips fitssave` on a ushort image writes exactly this pair, and
 /// `vips fitsload` reads it back as ushort.
 const UNSIGNED_16_BZERO: f64 = 32768.0;
+
+/// The `BZERO` that makes a BITPIX 32 array unsigned: the 32-bit twin of
+/// [`UNSIGNED_16_BZERO`].
+///
+/// What cfitsio's `fits_get_img_equivtype` turns into `ULONG_IMG`, which is
+/// the row vips maps to `VIPS_FORMAT_UINT` (`fits.c:200`). Measured:
+/// `vips fitssave` on a uint image writes exactly this pair, and on an int
+/// image too, since `bandfmt_fits` promotes `INT` to `UINT` before the save
+/// ever reaches the header (issue #957).
+const UNSIGNED_32_BZERO: f64 = 2_147_483_648.0;
 
 /// The comment cfitsio writes on the `SIMPLE` card.
 const SIMPLE_COMMENT: &str = "file does conform to FITS standard";
@@ -312,22 +327,29 @@ pub enum FitsError {
         /// it resolves to when that is what vips reports.
         bitpix: i64,
     },
-    /// A BITPIX vips loads but libviprs has no sample carrier for.
+    /// A BITPIX vips loads but this loader does not carry a mapping for
+    /// yet.
     ///
-    /// This is a "not yet" rather than a "never", and each one is waiting
-    /// on a specific carrier:
+    /// This is a "not yet" rather than a "never", and each remaining one is
+    /// waiting on a specific issue:
     ///
-    /// * BITPIX 16 with default scaling is signed 16-bit, which needs
-    ///   issue #516. The *unsigned* spelling (`BZERO = 32768`) is loaded,
-    ///   because [`PixelFormat::Gray16`] already carries it.
-    /// * BITPIX 32, signed or unsigned, needs issue #517.
+    /// * BITPIX 16 with default scaling is a genuine signed 16-bit array.
+    ///   The carrier itself landed in #516, but nothing yet maps this
+    ///   BITPIX onto it (issue #966). The *unsigned* spelling
+    ///   (`BZERO = 32768`) is loaded, because [`PixelFormat::Gray16`]
+    ///   already carries it.
+    /// * BITPIX 32 with default scaling is the 32-bit twin of the same gap,
+    ///   also issue #966. The *unsigned* spelling
+    ///   (`BZERO = 2147483648`) is loaded, onto [`PixelFormat::Uint32`]
+    ///   (issue #957).
     /// * BITPIX -64 is double, which is issue #518 and closed as not worth
     ///   building on its own.
     ///
-    /// The sample-kind spine (issue #607) is what makes those carriers
-    /// cheap, so the ceiling lifts there rather than never. Until then the
-    /// loader refuses by name: narrowing a 16-bit array into 8 bits would
-    /// lose data silently, which is worse than failing.
+    /// The sample-kind spine (issue #607) is what made those carriers
+    /// cheap to add; #966 is what is left, mapping a BITPIX this loader
+    /// still refuses onto one. Until then it refuses by name: narrowing a
+    /// 16-bit array into 8 bits would lose data silently, which is worse
+    /// than failing.
     #[error(
         "fits: BITPIX {bitpix} carries {sample} samples, which libviprs has no pixel \
          format for yet (issue #{issue})"
@@ -337,7 +359,7 @@ pub enum FitsError {
         bitpix: i64,
         /// The sample kind that BITPIX needs, in words.
         sample: &'static str,
-        /// The issue that would add the carrier.
+        /// The issue that would teach the loader this BITPIX.
         issue: u32,
     },
     /// A `BSCALE` / `BZERO` pair that moves an integer array onto a
@@ -368,13 +390,25 @@ pub enum FitsError {
     Raster(#[from] RasterError),
 }
 
-/// The sample carrier a BITPIX and its scaling resolve to.
+/// The sample carrier a BITPIX and its scaling resolve to, and the one a
+/// raster's [`PixelFormat`] is written through on save.
+///
+/// Every variant here is an *unsigned* on-disk carrier: a signed
+/// [`SampleKind`] goes out through the unsigned one of the same width,
+/// with the saturating cast `Carrier::for_format` and `write_planes` apply,
+/// exactly as `bandfmt_fits` (`fitssave.c`) promotes `CHAR`/`SHORT`/`INT`
+/// to `UCHAR`/`USHORT`/`UINT` before cfitsio ever sees a sample. So there
+/// is no separate signed variant here; the width and the BZERO convention
+/// are all a signed carrier needs from this type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Carrier {
     /// BITPIX 8 with default scaling: `TBYTE`, vips `uchar`.
     U8,
     /// BITPIX 16 with `BZERO = 32768`: `TUSHORT`, vips `ushort`.
     U16,
+    /// BITPIX 32 with `BZERO = 2147483648`: `TUINT`, vips `uint`. The
+    /// 32-bit twin of `U16`'s convention (issue #517).
+    U32,
     /// BITPIX -32: `TFLOAT`, vips `float`.
     F32,
 }
@@ -385,31 +419,64 @@ impl Carrier {
         match self {
             Self::U8 => 1,
             Self::U16 => 2,
-            Self::F32 => 4,
+            Self::U32 | Self::F32 => 4,
         }
     }
 
-    /// The BITPIX this carrier is written as, and the `BZERO` that goes
-    /// with it. `None` means no `BZERO` / `BSCALE` cards at all, which is
-    /// what cfitsio writes for the unscaled types.
-    const fn bitpix(self) -> (i64, Option<i64>) {
+    /// The [`SampleKind`] a loaded raster carries.
+    ///
+    /// Every variant here is an unsigned or float on-disk carrier, so this
+    /// is the direct counterpart of [`SampleKind::bytes`]; the loader needs
+    /// it rather than [`Carrier::sample_bytes`] alone because a byte width
+    /// does not name a kind (`U32` and `F32` share one), which is the same
+    /// reason [`PixelFormat::with_kind`] exists rather than
+    /// [`PixelFormat::with_channels`] alone (issue #607).
+    const fn kind(self) -> SampleKind {
+        match self {
+            Self::U8 => SampleKind::U8,
+            Self::U16 => SampleKind::U16,
+            Self::U32 => SampleKind::U32,
+            Self::F32 => SampleKind::F32,
+        }
+    }
+
+    /// The BITPIX this carrier is written as, and the `BZERO` value and
+    /// card comment that go with it. `None` means no `BZERO` / `BSCALE`
+    /// cards at all, which is what cfitsio writes for the unscaled types.
+    /// The comment text differs by width (measured: cfitsio 4.6.4 writes
+    /// "unsigned short" for BITPIX 16 and "unsigned long" for BITPIX 32),
+    /// so it travels with the value rather than being reconstructed at the
+    /// call site.
+    const fn bitpix(self) -> (i64, Option<(i64, &'static str)>) {
         match self {
             Self::U8 => (8, None),
-            Self::U16 => (16, Some(32768)),
+            Self::U16 => (
+                16,
+                Some((32768, "offset data range to that of unsigned short")),
+            ),
+            Self::U32 => (
+                32,
+                Some((2_147_483_648, "offset data range to that of unsigned long")),
+            ),
             Self::F32 => (-32, None),
         }
     }
 
     /// The carrier a raster's [`PixelFormat`] is written through.
     ///
-    /// Total, because vips's promotion table (`bandfmt_fits`,
-    /// `fitssave.c`) already sends every signed integer format to its
-    /// unsigned twin and libviprs only has the unsigned ones.
+    /// Dispatches on [`PixelFormat::kind`] rather than on the byte width,
+    /// and has no wildcard arm, so a [`SampleKind`] this crate adds later
+    /// is a compile error here rather than a width some carrier happens to
+    /// share (issue #957, the same discipline issue #607 asks for
+    /// everywhere else). The pairing is vips's own promotion table
+    /// (`bandfmt_fits`, `fitssave.c`): `CHAR`/`SHORT`/`INT` go out through
+    /// their same-width unsigned twin.
     fn for_format(format: PixelFormat) -> Self {
-        match format.bytes_per_channel() {
-            1 => Self::U8,
-            2 => Self::U16,
-            _ => Self::F32,
+        match format.kind() {
+            SampleKind::U8 | SampleKind::I8 => Self::U8,
+            SampleKind::U16 | SampleKind::I16 => Self::U16,
+            SampleKind::U32 | SampleKind::I32 => Self::U32,
+            SampleKind::F32 => Self::F32,
         }
     }
 
@@ -440,15 +507,14 @@ fn resolve_carrier(bitpix: i64, bscale: f64, bzero: f64) -> Result<Carrier, Fits
         16 if unscaled => Err(FitsError::UnsupportedCarrier {
             bitpix,
             sample: "signed 16-bit integer",
-            issue: 516,
+            issue: 966,
         }),
-        32 if unscaled || (bscale == 1.0 && bzero == 2_147_483_648.0) => {
-            Err(FitsError::UnsupportedCarrier {
-                bitpix,
-                sample: "32-bit integer",
-                issue: 517,
-            })
-        }
+        32 if bscale == 1.0 && bzero == UNSIGNED_32_BZERO => Ok(Carrier::U32),
+        32 if unscaled => Err(FitsError::UnsupportedCarrier {
+            bitpix,
+            sample: "signed 32-bit integer",
+            issue: 966,
+        }),
         -64 => Err(FitsError::UnsupportedCarrier {
             bitpix,
             sample: "64-bit float",
@@ -669,8 +735,10 @@ fn pad_card(text: &str) -> Vec<u8> {
 ///
 /// The carrier is [`PixelFormat::Gray8`] and friends for BITPIX 8,
 /// [`PixelFormat::Gray16`] and friends for the standard unsigned spelling
-/// of BITPIX 16, and [`PixelFormat::FloatF32`] / [`PixelFormat::RgbaF32`]
-/// for BITPIX -32. Any other BITPIX is refused by name; see
+/// of BITPIX 16, [`PixelFormat::Uint32`] for the standard unsigned
+/// spelling of BITPIX 32 (`BZERO = 2147483648`, issue #957), and
+/// [`PixelFormat::FloatF32`] / [`PixelFormat::RgbaF32`] for BITPIX -32.
+/// Any other BITPIX is refused by name; see
 /// [`FitsError::UnsupportedCarrier`] for what each one is waiting on.
 ///
 /// A header unit with `NAXIS = 0` carries no image, so the loader walks
@@ -803,8 +871,8 @@ pub fn decode_fits(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceE
     }
     let payload = &bytes[data_start..data_start + needed as usize];
 
-    let format = PixelFormat::with_channels(usize::from(bands), carrier.sample_bytes())
-        .ok_or_else(out_of_bounds)?;
+    let format =
+        PixelFormat::with_kind(usize::from(bands), carrier.kind()).ok_or_else(out_of_bounds)?;
     let out = deplanarise(
         payload,
         width,
@@ -864,6 +932,16 @@ fn deplanarise(
                         let value = (i32::from(raw) + 32768) as u16;
                         out[dst..dst + 2].copy_from_slice(&value.to_ne_bytes());
                     }
+                    Carrier::U32 => {
+                        // The 32-bit twin of the `U16` arm above:
+                        // `BZERO = 2147483648` shifts the stored signed
+                        // value into the unsigned range (issue #957).
+                        let mut raw = [0u8; 4];
+                        raw.copy_from_slice(&payload[src..src + 4]);
+                        let stored = i32::from_be_bytes(raw);
+                        let value = (i64::from(stored) + 2_147_483_648) as u32;
+                        out[dst..dst + 4].copy_from_slice(&value.to_ne_bytes());
+                    }
                     Carrier::F32 => {
                         let mut raw = [0u8; 4];
                         raw.copy_from_slice(&payload[src..src + 4]);
@@ -889,11 +967,14 @@ fn deplanarise(
 impl Raster {
     /// Encode as FITS bytes (libvips `fitssave` into a buffer).
     ///
-    /// Total over [`PixelFormat`]: the 8-bit formats go out as BITPIX 8,
-    /// the 16-bit ones as BITPIX 16 with the standard `BZERO = 32768`, and
-    /// the float ones as BITPIX -32. That is vips's own promotion table
-    /// (`bandfmt_fits`, `fitssave.c`) reaching the same place from a wider
-    /// starting set, since libviprs has only the unsigned carriers.
+    /// Total over [`PixelFormat`]: the unsigned 8-, 16- and 32-bit carriers
+    /// go out as BITPIX 8, BITPIX 16 with the standard `BZERO = 32768`, and
+    /// BITPIX 32 with `BZERO = 2147483648`; the float carriers as
+    /// BITPIX -32; and a signed carrier goes out through the unsigned
+    /// BITPIX of the same width, saturating a negative sample to zero
+    /// first. That is vips's own promotion table (`bandfmt_fits`,
+    /// `fitssave.c`): `CHAR` to `UCHAR`, `SHORT` to `USHORT`, `INT` to
+    /// `UINT`, each with the same clamp (issue #957).
     ///
     /// The generated header is cfitsio's, card for card, so a file this
     /// writes and a file `vips fitssave` writes from the same pixels are
@@ -961,12 +1042,8 @@ impl Raster {
         for comment in PROVENANCE_COMMENTS {
             cards.push(pad_card(comment));
         }
-        if let Some(bzero) = bzero {
-            cards.push(fixed_card(
-                "BZERO",
-                &bzero.to_string(),
-                "offset data range to that of unsigned short",
-            ));
+        if let Some((bzero, comment)) = bzero {
+            cards.push(fixed_card("BZERO", &bzero.to_string(), comment));
             cards.push(fixed_card("BSCALE", "1", "default scaling factor"));
         }
         for record in self.fits_records() {
@@ -1027,8 +1104,15 @@ impl Raster {
 
     /// Append the sample array: one plane per band, bottom row first,
     /// big-endian.
+    ///
+    /// A signed source kind (`I8`, `I16`, `I32`) is read through
+    /// [`unsigned_sample`] first, which is where the saturating cast
+    /// `bandfmt_fits` applies lives; an already-unsigned kind passes
+    /// through it unchanged. Every carrier below that point is unsigned,
+    /// so only the `BZERO` shift differs between them.
     fn write_planes(&self, out: &mut Vec<u8>, carrier: Carrier) {
         let format = self.format();
+        let kind = format.kind();
         let bands = format.channels();
         let sample = carrier.sample_bytes();
         let (w, h) = (self.width() as usize, self.height() as usize);
@@ -1041,22 +1125,76 @@ impl Raster {
                 for x in 0..w {
                     let src = base + (x * bands + band) * sample;
                     match carrier {
-                        Carrier::U8 => out.push(data[src]),
-                        Carrier::U16 => {
-                            let value = u16::from_ne_bytes([data[src], data[src + 1]]);
-                            // Undo the `BZERO` shift the header declares.
-                            let stored = (i32::from(value) - 32768) as i16;
-                            out.extend_from_slice(&stored.to_be_bytes());
-                        }
                         Carrier::F32 => {
                             let mut raw = [0u8; 4];
                             raw.copy_from_slice(&data[src..src + 4]);
                             out.extend_from_slice(&f32::from_ne_bytes(raw).to_be_bytes());
                         }
+                        Carrier::U8 => {
+                            out.push(unsigned_sample(data, src, kind) as u8);
+                        }
+                        Carrier::U16 => {
+                            let value = unsigned_sample(data, src, kind) as u16;
+                            // Undo the `BZERO` shift the header declares.
+                            let stored = (i32::from(value) - 32768) as i16;
+                            out.extend_from_slice(&stored.to_be_bytes());
+                        }
+                        Carrier::U32 => {
+                            let value = unsigned_sample(data, src, kind) as u32;
+                            // The 32-bit twin of the `U16` arm above.
+                            let stored = (i64::from(value) - 2_147_483_648) as i32;
+                            out.extend_from_slice(&stored.to_be_bytes());
+                        }
                     }
                 }
             }
         }
+    }
+}
+
+/// Read one native-endian sample of `kind` at `data[src..]` as the
+/// unsigned value `bandfmt_fits` promotes it to before an unsigned FITS
+/// carrier ever sees it.
+///
+/// An already-unsigned kind passes through unchanged. A signed kind is
+/// read at its own width and clamped to zero at the low end: vips's
+/// `CHAR` to `UCHAR`, `SHORT` to `USHORT` and `INT` to `UINT` casts are
+/// same-width narrowing casts, and every signed kind's positive half fits
+/// its unsigned twin without a high-end clamp (`i8::MAX` is 127 against
+/// `u8::MAX` 255, and the pattern repeats at 16 and 32 bits), so the low
+/// end is the only one this needs to bound. Measured against
+/// `vips fitssave` 8.18.6: an `Int16` raster carrying -5 saves as 0, not
+/// as the bit pattern 65531 a plain reinterpret would produce (issue
+/// #957).
+///
+/// # Panics
+///
+/// If `kind` is [`SampleKind::F32`]. Every carrier that reaches this
+/// function through [`Carrier::for_format`] is one of the six integer
+/// kinds; the float carrier takes its own path in `write_planes`, which
+/// never calls this.
+fn unsigned_sample(data: &[u8], src: usize, kind: SampleKind) -> u64 {
+    match kind {
+        SampleKind::U8 => u64::from(data[src]),
+        SampleKind::I8 => u64::from((data[src] as i8).max(0) as u8),
+        SampleKind::U16 => u64::from(u16::from_ne_bytes([data[src], data[src + 1]])),
+        SampleKind::I16 => {
+            let raw = i16::from_ne_bytes([data[src], data[src + 1]]);
+            u64::from(raw.max(0) as u16)
+        }
+        SampleKind::U32 => u64::from(u32::from_ne_bytes([
+            data[src],
+            data[src + 1],
+            data[src + 2],
+            data[src + 3],
+        ])),
+        SampleKind::I32 => {
+            let raw = i32::from_ne_bytes([data[src], data[src + 1], data[src + 2], data[src + 3]]);
+            u64::from(raw.max(0) as u32)
+        }
+        SampleKind::F32 => unreachable!(
+            "write_planes routes Carrier::F32 through its own branch, which never calls this"
+        ),
     }
 }
 
@@ -1194,6 +1332,48 @@ mod tests {
     }
 
     /**
+     * Tests that the standard unsigned-32 spelling loads as `Uint32`, the
+     * 32-bit twin of `load_reads_the_unsigned_16_convention` above.
+     * Works by storing values shifted down by 2147483648 as signed ints,
+     * the way `vips fitssave` writes a uint image (measured against
+     * `vips fitssave` 8.18.6), and asserting the decoded samples come back
+     * at their unsigned value, including the `u32::MAX` boundary.
+     * Input: BITPIX 32 with BZERO 2147483648 -> Output: `Uint32` samples
+     * 0, 5, 70000, `u32::MAX`.
+     */
+    #[test]
+    fn load_reads_the_unsigned_32_convention() {
+        let mut file = header(&[
+            "SIMPLE  =                    T",
+            "BITPIX  =                   32",
+            "NAXIS   =                    2",
+            "NAXIS1  =                    4",
+            "NAXIS2  =                    1",
+            "BZERO   =           2147483648",
+            "BSCALE  =                    1",
+        ]);
+        for i in [0u32, 5, 70000, u32::MAX] {
+            let stored = (i64::from(i) - 2_147_483_648) as i32;
+            file.extend_from_slice(&stored.to_be_bytes());
+        }
+        pad_to_block(&mut file, 0);
+        let raster = decode_fits(&file, DecodeLimits::default()).unwrap();
+        assert_eq!(
+            raster.format(),
+            PixelFormat::with_kind(1, SampleKind::U32).unwrap()
+        );
+        assert_eq!(raster.interpretation(), Interpretation::Bw);
+        let samples: Vec<u32> = raster
+            .data()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| u32::from_ne_bytes(*c))
+            .collect();
+        assert_eq!(samples, vec![0, 5, 70000, u32::MAX]);
+    }
+
+    /**
      * Tests that BITPIX -32 honours BSCALE and BZERO.
      * Works by decoding a float array with `BSCALE 2 / BZERO 10` and
      * checking the samples land on `raw * 2 + 10`, which is what cfitsio
@@ -1269,19 +1449,21 @@ mod tests {
     }
 
     /**
-     * Tests that every BITPIX vips loads but libviprs cannot carry is
+     * Tests that every BITPIX vips loads but this loader cannot carry is
      * refused by name rather than narrowed.
-     * Works by sweeping the four measured cases and matching on the typed
-     * variant plus the issue number its doc points at.
-     * Input: BITPIX 16 unscaled, 32, 32 unsigned, -64 -> Output:
-     * `UnsupportedCarrier` citing #516, #517, #517, #518.
+     * Works by sweeping the three still-unreachable cases and matching on
+     * the typed variant plus the issue number its doc points at. BITPIX 32
+     * with `BZERO = 2147483648` used to be a fourth row here; #957 gives
+     * it a carrier, and `load_reads_the_unsigned_32_convention` is its
+     * positive control below.
+     * Input: BITPIX 16 unscaled, 32 unscaled, -64 -> Output:
+     * `UnsupportedCarrier` citing #966, #966, #518.
      */
     #[test]
     fn unreachable_carriers_name_the_issue_that_unblocks_them() {
-        let cases: [(i64, f64, f64, u32); 4] = [
-            (16, 1.0, 0.0, 516),
-            (32, 1.0, 0.0, 517),
-            (32, 1.0, 2_147_483_648.0, 517),
+        let cases: [(i64, f64, f64, u32); 3] = [
+            (16, 1.0, 0.0, 966),
+            (32, 1.0, 0.0, 966),
             (-64, 1.0, 0.0, 518),
         ];
         for (bitpix, bscale, bzero, issue) in cases {
@@ -1776,6 +1958,113 @@ mod tests {
     }
 
     /**
+     * Tests that the four carriers #516 and #517 added go out through
+     * vips's own promotion table rather than as a bare bit-pattern copy or
+     * the float wildcard: a saturating cast to the same-width unsigned
+     * carrier for the signed kinds (`bandfmt_fits`'s `CHAR` to `UCHAR`,
+     * `SHORT` to `USHORT`, `INT` to `UINT`), and BITPIX 32 with
+     * `BZERO = 2147483648` for the already-unsigned 32-bit kind, the exact
+     * 32-bit twin of `Gray16`'s `BZERO = 32768`.
+     * Works by encoding a 2x2 raster of each carrier and comparing the
+     * written BITPIX card, the BZERO card (or its absence), and the data
+     * bytes against `vips fitssave` 8.18.6, measured with `vipsheader` and
+     * a raw byte dump on a file built from the same four pixel values with
+     * `vips rawload --format {char,short,int,uint}` (issue #957).
+     * Input: `Int8`, `Int16`, `Int32` rasters carrying
+     * `[-5, 0, 5, big]`, and a `Uint32` raster carrying `[1, 0, 5, 70000]`
+     * -> Output: the oracle's BITPIX/BZERO cards and data bytes, exactly.
+     */
+    #[test]
+    fn encode_promotes_signed_and_32_bit_carriers_like_vips() {
+        struct Case {
+            kind: SampleKind,
+            // Top-down, row-major: [row0_x0, row0_x1, row1_x0, row1_x1].
+            pixels: [i64; 4],
+            bitpix_card: &'static str,
+            bzero_card: Option<&'static str>,
+            data: &'static [u8],
+        }
+        let cases = [
+            Case {
+                kind: SampleKind::I8,
+                pixels: [-5, 0, 5, 127],
+                bitpix_card: "BITPIX  =                    8 / number of bits per data pixel",
+                bzero_card: None,
+                data: &[5, 127, 0, 0],
+            },
+            Case {
+                kind: SampleKind::I16,
+                pixels: [-5, 0, 5, 300],
+                bitpix_card: "BITPIX  =                   16 / number of bits per data pixel",
+                bzero_card: Some(
+                    "BZERO   =                32768 / offset data range to that of unsigned short",
+                ),
+                data: &[128, 5, 129, 44, 128, 0, 128, 0],
+            },
+            Case {
+                kind: SampleKind::I32,
+                pixels: [-5, 0, 5, 70000],
+                bitpix_card: "BITPIX  =                   32 / number of bits per data pixel",
+                bzero_card: Some(
+                    "BZERO   =           2147483648 / offset data range to that of unsigned long",
+                ),
+                data: &[128, 0, 0, 5, 128, 1, 17, 112, 128, 0, 0, 0, 128, 0, 0, 0],
+            },
+            Case {
+                kind: SampleKind::U32,
+                pixels: [1, 0, 5, 70000],
+                bitpix_card: "BITPIX  =                   32 / number of bits per data pixel",
+                bzero_card: Some(
+                    "BZERO   =           2147483648 / offset data range to that of unsigned long",
+                ),
+                data: &[128, 0, 0, 5, 128, 1, 17, 112, 128, 0, 0, 1, 128, 0, 0, 0],
+            },
+        ];
+
+        for case in cases {
+            let format = PixelFormat::with_kind(1, case.kind).unwrap();
+            let mut data = Vec::new();
+            for &p in &case.pixels {
+                match case.kind {
+                    SampleKind::I8 => data.push(p as i8 as u8),
+                    SampleKind::I16 => data.extend_from_slice(&(p as i16).to_ne_bytes()),
+                    SampleKind::I32 => data.extend_from_slice(&(p as i32).to_ne_bytes()),
+                    SampleKind::U32 => data.extend_from_slice(&(p as u32).to_ne_bytes()),
+                    other => unreachable!("cases cover only the four measured carriers: {other:?}"),
+                }
+            }
+            let raster = Raster::new(2, 2, format, data).unwrap();
+            let encoded = raster.encode_fits().unwrap();
+            let header = String::from_utf8(encoded[..BLOCK].to_vec()).unwrap();
+            assert!(
+                header.contains(case.bitpix_card),
+                "{:?}: expected {:?} in header:\n{header}",
+                case.kind,
+                case.bitpix_card
+            );
+            match case.bzero_card {
+                Some(card) => assert!(
+                    header.contains(card),
+                    "{:?}: expected {:?} in header:\n{header}",
+                    case.kind,
+                    card
+                ),
+                None => assert!(
+                    !header.contains("BZERO"),
+                    "{:?}: expected no BZERO card in header:\n{header}",
+                    case.kind
+                ),
+            }
+            assert_eq!(
+                &encoded[BLOCK..BLOCK + case.data.len()],
+                case.data,
+                "{:?}: data bytes should match vips fitssave",
+                case.kind
+            );
+        }
+    }
+
+    /**
      * Tests that a save writes planes bottom row first.
      * Works by encoding a two-band raster whose samples are all distinct
      * and reading the data segment back by hand, which pins both halves of
@@ -2009,9 +2298,15 @@ mod tests {
 
     /**
      * Tests that every `PixelFormat` has a FITS spelling.
-     * Works by sweeping one raster per carrier width and asserting the
-     * encoder accepts it and the decoder gives the same pixels back, which
-     * is what makes the save side total where the load side has a ceiling.
+     * Works by sweeping one raster per unsigned carrier width, plus the
+     * unsigned 32-bit integer carrier of issue #517, and asserting the
+     * encoder accepts it and the decoder gives the same pixels back
+     * (byte-identical, since none of these kinds needs the saturating
+     * cast), which is what makes the save side total where the load side
+     * has a ceiling. The signed carriers are *not* here: their save is
+     * lossy by design, matching vips's own promotion, so
+     * `encode_promotes_signed_and_32_bit_carriers_like_vips` above checks
+     * their bytes directly instead of asserting a round trip.
      * Input: 8-, 16- and 32-bit carriers -> Output: a clean round trip
      * for each.
      */
@@ -2027,6 +2322,7 @@ mod tests {
             (PixelFormat::RgbaF32, 192),
             (PixelFormat::with_channels(5, 1).unwrap(), 60),
             (PixelFormat::with_channels(2, 4).unwrap(), 96),
+            (PixelFormat::with_kind(2, SampleKind::U32).unwrap(), 96),
         ];
         for (format, len) in cases {
             let data: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
