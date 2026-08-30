@@ -450,9 +450,21 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// placeholder here for whoever composed the batch it was part of to fill
 /// in, and it merged into `main` unfilled, which held this test red from
 /// `e82e03a8` through five more merges until someone re-ran the detector.
-/// 287 is that re-derived number, measured at the tip of #955 and #962
-/// landing on top of #963.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 287;
+/// #971 (PR #972) re-derived it as 287, measured at the tip of #955 and
+/// #962 landing on top of #963.
+///
+/// #968 moved it 287 to 285, in the other direction from every earlier entry
+/// in this history: it shares `sample_kind_spine.rs` and `unsafe_inventory.rs`'s
+/// masking lexer and file walker into `tests/common/mask.rs`, and this
+/// detector's own [`reaching_fns`] only follows a call graph within one file.
+/// Both copies of `the_walk_descends_into_subdirectories` still carry
+/// `#[cfg_attr(miri, ignore)]`, so nothing new runs under Miri, but the
+/// detector can no longer see either one touching the filesystem through
+/// `mask::rs_files_under`, so they moved from `annotated fs-detected` to
+/// `annotated not-detected` in `tests/miri_fs_test_inventory.txt`, which is
+/// exactly the state [`TestFn::is_tracked`]'s own doc comment describes for a
+/// helper-reached case the detector cannot see.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 285;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
