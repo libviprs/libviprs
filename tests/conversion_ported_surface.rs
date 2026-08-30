@@ -306,7 +306,7 @@ fn ported_arrayjoin_call_sites() {
     assert_eq!(im.width(), colour.width());
     assert_eq!(im.height(), mono.height() + colour.height());
 
-    // The same two guards `join` carries, matchable from outside the crate.
+    // The guard `join` carries too, matchable from outside the crate.
     assert!(matches!(
         Raster::try_arrayjoin(&[&mono, &colour], None, Some(1_000_001)),
         Err(ConversionError::ShimTooLarge {
@@ -314,11 +314,16 @@ fn ported_arrayjoin_call_sites() {
             max: 1_000_000
         })
     ));
+    // A float cell used to be refused here, which was a parity regression:
+    // `vips arrayjoin` runs on a `float` raster and answers FLOAT. Issue
+    // #945 carries it, so the grid promotes and the float samples arrive
+    // unchanged at the origin.
     let ramp = Raster::grey(4, 4, false);
-    assert!(matches!(
-        Raster::try_arrayjoin(&[&ramp, &mono], None, None),
-        Err(ConversionError::FloatUnsupported { op: "arrayjoin" })
-    ));
+    assert!(ramp.format().is_float());
+    let mixed = Raster::try_arrayjoin(&[&ramp, &mono], None, None).unwrap();
+    assert!(mixed.format().is_float(), "got {:?}", mixed.format());
+    assert_eq!(mixed.getpoint(0, 0), ramp.getpoint(0, 0));
+    assert_eq!(mixed.getpoint(3, 0), ramp.getpoint(3, 0));
 }
 
 /// The ported `test_grey` body (`ported_create.rs`), both halves: the
@@ -434,9 +439,8 @@ fn ported_join_call_sites() {
         .unwrap();
     assert_eq!((im.width(), im.height()), (2, 5));
 
-    // The guards a caller outside the crate has to be able to name and
-    // match: the libvips shim bound, and float input, which reaches this
-    // through any `colourspace` result rather than as an exotic case.
+    // The guard a caller outside the crate has to be able to name and
+    // match: the libvips shim bound.
     assert!(matches!(
         a.try_join(
             &c,
@@ -451,11 +455,18 @@ fn ported_join_call_sites() {
             max: 1_000_000
         })
     ));
+    // Float input used to be refused here, and it reaches this through any
+    // `colourspace` result rather than as an exotic case. `vips join` runs
+    // on a `float` raster and answers FLOAT, so issue #945 carries it: the
+    // pair promotes and the float operand's samples arrive unchanged.
     let ramp = Raster::grey(4, 4, false);
-    assert!(matches!(
-        ramp.try_join(&c, JoinDirection::Horizontal, false, None, None, None),
-        Err(ConversionError::FloatUnsupported { op: "join" })
-    ));
+    assert!(ramp.format().is_float());
+    let joined = ramp
+        .try_join(&c, JoinDirection::Horizontal, false, None, None, None)
+        .unwrap();
+    assert!(joined.format().is_float(), "got {:?}", joined.format());
+    assert_eq!(joined.getpoint(0, 0), ramp.getpoint(0, 0));
+    assert_eq!(joined.getpoint(3, 0), ramp.getpoint(3, 0));
 }
 
 /// The interpretation a band-promoting join and arrayjoin report, pinned

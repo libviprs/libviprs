@@ -4127,6 +4127,40 @@ and not under `Fixed`: this file is the only place they can be caught.
   `char` ramp of four -128s and four 127s came out `[0, 0, 127, 127]` where
   vips answers `[-128, -128, 127, 127]`.
 
+- **A float raster goes through `embed`, `gravity`, `insert`, `join`,
+  `arrayjoin` and `bandmean`** (issue #945). This is #909 one carrier family
+  further on, and the same argument: vips runs every one of those ops on a
+  `float` raster and answers FLOAT, so the refusal was a parity regression
+  rather than an implementation. #694 had turned the panics underneath them
+  into typed errors, which was an improvement, and what it did not ask was
+  which posture the refusal is.
+
+  Measured on `/opt/homebrew/bin/vips` 8.18.6 over a 3x1 `float` raster
+  holding `[1.5, -0.25, 3.75]`:
+
+  | call | vips, and now this |
+  |---|---|
+  | `embed 1 0 5 1 --extend black` | `[0, 1.5, -0.25, 3.75, 0]` |
+  | `embed --extend white` | `[255, ..., 255]`, the ink as a number |
+  | `embed --extend background -0.5` | `[-0.5, ...]`, **not** truncated |
+  | `insert` at `x = 1` | `[1.5, 10.5, -2.75]` |
+  | `join horizontal` | the six samples side by side |
+  | `arrayjoin --across 1` | the same six as a 3x2 grid |
+  | `bandmean` of `[1, 2] / [2, 3] / [100, 101]` | `[1.5, 2.5, 100.5]` |
+  | the same numbers as `uchar` | `[2, 3, 101]` |
+
+  The background is carried whole on a float carrier and still truncated on an
+  integer one, and `bandmean` does not round on the float path. Its
+  accumulator is the **sample's own width**, which is measurable: three bands
+  holding `[16777216, 1, 1]` answer **5592405.5**, where an `f64` accumulator
+  answers 5592406.
+
+  The refusals left are the ops that index a table by the sample value
+  (`gamma`, `falsecolour`, `msb`, `smartcrop`'s two analysing strategies) and
+  the band ops that take a constant or a bitwise operator. A float sample does
+  neither, so those stay. `Raster::linear` was already the float twin of
+  `vips linear` and is unchanged.
+
 - **`ifthenelse` and `switch` read their condition numerically** instead of
   testing its stored bytes for non-zero (issue #927). vips casts the condition
   to `uchar` first, and `vips_cast` clips at both ends and truncates toward
