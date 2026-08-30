@@ -1374,6 +1374,129 @@ mod tests {
     }
 
     /**
+     * Tests that unscaled BITPIX 16 loads as a genuine signed 16-bit array
+     * instead of being refused.
+     * Works by writing raw two's-complement `i16` samples, including both
+     * extremes, unscaled (no `BZERO` / `BSCALE` cards), and checking the
+     * raster comes back as `Int16` with the exact signed values. Measured
+     * against `vips fitsload` 8.18.6 on a hand-authored file, since
+     * `vips fitssave` always promotes a signed array to its unsigned twin
+     * and cannot produce this fixture itself: format `short`,
+     * interpretation `b-w`, `vips getpoint` reports the same twelve values.
+     * Input: -32768, -32767, -1, 0, 1, 2, 100, -100, 12345, -12345, 32766,
+     * 32767 -> Output: `Int16` samples, unchanged (issue #966).
+     */
+    #[test]
+    fn load_reads_native_signed_16() {
+        let mut file = header(&[
+            "SIMPLE  =                    T",
+            "BITPIX  =                   16",
+            "NAXIS   =                    2",
+            "NAXIS1  =                    4",
+            "NAXIS2  =                    3",
+        ]);
+        let values: [i16; 12] = [
+            -32768, -32767, -1, 0, 1, 2, 100, -100, 12345, -12345, 32766, 32767,
+        ];
+        for v in values {
+            file.extend_from_slice(&v.to_be_bytes());
+        }
+        pad_to_block(&mut file, 0);
+        let raster = decode_fits(&file, DecodeLimits::default()).unwrap();
+        assert_eq!(
+            raster.format(),
+            PixelFormat::with_kind(1, SampleKind::I16).unwrap()
+        );
+        assert_eq!(raster.interpretation(), Interpretation::Bw);
+        let samples: Vec<i16> = raster
+            .data()
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| i16::from_ne_bytes(*c))
+            .collect();
+        // The file's first row is the bottom of the image (vips flips on
+        // load), so the last four values written come out first; measured
+        // against `vips getpoint`.
+        assert_eq!(
+            samples,
+            vec![
+                12345, -12345, 32766, 32767, 1, 2, 100, -100, -32768, -32767, -1, 0
+            ]
+        );
+    }
+
+    /**
+     * Tests that unscaled BITPIX 32 loads as a genuine signed 32-bit array,
+     * the 32-bit twin of `load_reads_native_signed_16` above.
+     * Works the same way: raw two's-complement `i32` samples including both
+     * extremes, unscaled, checked against `Int32` and against
+     * `vips fitsload` 8.18.6 on the same hand-authored fixture (format
+     * `int`, interpretation `b-w`).
+     * Input: `i32::MIN`, `i32::MIN + 1`, -1, 0, 1, 2, 1000000, -1000000,
+     * 123456789, -123456789, `i32::MAX - 1`, `i32::MAX` -> Output: `Int32`
+     * samples, unchanged (issue #966).
+     */
+    #[test]
+    fn load_reads_native_signed_32() {
+        let mut file = header(&[
+            "SIMPLE  =                    T",
+            "BITPIX  =                   32",
+            "NAXIS   =                    2",
+            "NAXIS1  =                    4",
+            "NAXIS2  =                    3",
+        ]);
+        let values: [i32; 12] = [
+            i32::MIN,
+            i32::MIN + 1,
+            -1,
+            0,
+            1,
+            2,
+            1_000_000,
+            -1_000_000,
+            123_456_789,
+            -123_456_789,
+            i32::MAX - 1,
+            i32::MAX,
+        ];
+        for v in values {
+            file.extend_from_slice(&v.to_be_bytes());
+        }
+        pad_to_block(&mut file, 0);
+        let raster = decode_fits(&file, DecodeLimits::default()).unwrap();
+        assert_eq!(
+            raster.format(),
+            PixelFormat::with_kind(1, SampleKind::I32).unwrap()
+        );
+        assert_eq!(raster.interpretation(), Interpretation::Bw);
+        let samples: Vec<i32> = raster
+            .data()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| i32::from_ne_bytes(*c))
+            .collect();
+        assert_eq!(
+            samples,
+            vec![
+                123_456_789,
+                -123_456_789,
+                i32::MAX - 1,
+                i32::MAX,
+                1,
+                2,
+                1_000_000,
+                -1_000_000,
+                i32::MIN,
+                i32::MIN + 1,
+                -1,
+                0,
+            ]
+        );
+    }
+
+    /**
      * Tests that BITPIX -32 honours BSCALE and BZERO.
      * Works by decoding a float array with `BSCALE 2 / BZERO 10` and
      * checking the samples land on `raw * 2 + 10`, which is what cfitsio
