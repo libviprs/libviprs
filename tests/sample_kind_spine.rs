@@ -55,12 +55,12 @@
 //! [`REMAINING`] is the countdown: files with a site somebody still owes a
 //! conversion, keyed by file because it tracks a lane's outstanding work. It
 //! only ever shrinks, and an entry whose site is gone fails, so it cannot turn
-//! into an allowlist. It has one entry, `src/fits.rs`, and it earned it: the
-//! match head there is not just a width standing in for a kind, it is a
+//! into an allowlist. It is empty now: its one entry, `src/fits.rs`, was a
+//! match head that was not just a width standing in for a kind, it was a
 //! *wrong* answer for all four carriers #516 and #517 added, measured against
-//! vips 8.18.6 on both sides (issue #957). Converting it without adding the
-//! 32-bit integer carrier would freeze that answer in a shape that reads as
-//! done.
+//! vips 8.18.6 on both sides, and issue #957 fixed it rather than converting
+//! it in place, since converting it without adding the 32-bit integer carrier
+//! would have frozen that answer in a shape that read as done.
 //!
 //! [`DELIBERATE`] is the other kind: sites where the byte width **is** the
 //! thing under test, keyed by their exact text so a second comparison in the
@@ -80,16 +80,13 @@ use std::collections::BTreeSet;
 /// The width comparisons still on `main`, each with the lane that owns the file.
 ///
 /// Shrink this, never grow it. An entry whose site is gone fails the test, so
-/// clearing a site means deleting its line here in the same PR.
-const REMAINING: &[(&str, &str)] = &[(
-    "src/fits.rs",
-    "issue #957: Carrier::for_format keys the FITS carrier on the width, and \
-     converting it without adding the 32-bit integer carrier would freeze a \
-     measured-wrong answer. vips 8.18.6 writes an `int` image as BITPIX 32 \
-     with BZERO 2147483648; libviprs writes BITPIX -32 and reinterprets the \
-     integer bytes as f32, and it writes an `Int8` -5 as 251 where vips \
-     saturates to 0",
-)];
+/// clearing a site means deleting its line here in the same PR. Empty since
+/// issue #957 fixed the last entry, `src/fits.rs`, rather than converting it
+/// in place. `#607` closes on this being `&[]` and staying that way: the next
+/// entry has to earn its place the same way that one did, with a measurement
+/// showing the site is a wrong answer and not only a width standing in for a
+/// kind.
+const REMAINING: &[(&str, &str)] = &[];
 
 /// Sites where the byte width **is** the thing under test, with the reason.
 ///
