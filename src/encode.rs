@@ -82,7 +82,7 @@ impl Raster {
             std::io::Cursor::new(&mut buf),
             quality.clamp(1, 100),
         );
-        let ct = image_color_type(self.format())?;
+        let ct = color_type_for_format(self.format())?;
         image::ImageEncoder::write_image(
             encoder,
             self.data(),
@@ -157,7 +157,7 @@ impl Raster {
             CompressionType::Level(compression.min(9)),
             FilterType::Adaptive,
         );
-        let ct = image_color_type(self.format())?;
+        let ct = color_type_for_format(self.format())?;
         image::ImageEncoder::write_image(
             encoder,
             self.data(),
@@ -350,7 +350,7 @@ fn parse_subsample_mode(mode: Option<&str>) -> JpegSubsample {
 /// faithful to, so returning one would be inventing it (issues #517, #952).
 /// [`crate::sink_object_store`]'s tile encoder refuses the same carriers for
 /// the same reason.
-fn image_color_type(fmt: PixelFormat) -> Result<image::ColorType, EncodeError> {
+fn color_type_for_format(fmt: PixelFormat) -> Result<image::ColorType, EncodeError> {
     use crate::pixel::ColorTypeRefusal;
     crate::pixel::image_color_type(fmt).map_err(|refusal| {
         EncodeError::encode(match refusal {

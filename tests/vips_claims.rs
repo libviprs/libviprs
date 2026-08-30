@@ -29,6 +29,7 @@ const ARITHMETIC_RS: &str = include_str!("../src/arithmetic.rs");
 const ENCODE_RS: &str = include_str!("../src/encode.rs");
 const SINK_RS: &str = include_str!("../src/sink.rs");
 const SINK_OBJECT_STORE_RS: &str = include_str!("../src/sink_object_store.rs");
+const SINK_PACKFILE_RS: &str = include_str!("../src/sink_packfile.rs");
 const ORACLE_PIN_JSON: &str = include_str!("../oracle-captures/ORACLE_PIN.json");
 
 /// The doc block immediately above `needle` in `src`.
@@ -41,7 +42,14 @@ fn doc_above(src: &str, needle: &str) -> String {
     let at = src
         .find(needle)
         .unwrap_or_else(|| panic!("{needle:?} is not in this file"));
-    let head = &src[..at];
+    // Walk back to the start of the line the needle is on, not the needle's
+    // own byte offset: a needle like `"fn color_type_for_format"` can sit
+    // mid-line behind a `pub(crate) ` (or any other) modifier, and cutting
+    // `head` there leaves that modifier as a dangling partial "line" that
+    // the walk below reads as real code and stops on, coming back with no
+    // doc at all rather than a wrong one (issue #940).
+    let line_start = src[..at].rfind('\n').map_or(0, |i| i + 1);
+    let head = &src[..line_start];
     let mut lines: Vec<&str> = Vec::new();
     for line in head.lines().rev() {
         let t = line.trim_start();
@@ -345,38 +353,53 @@ fn the_hdr_save_refusal_names_vips_like_its_netpbm_siblings() {
 /// them. No route answers the data. That makes the refusal *more* faithful
 /// than the dependency argument makes it, and none of the numbers were in
 /// the tree.
-/// # Three copies of the mapping, and the first draft drove the wrong one
+/// # Two wrappers around the one mapping, and the first draft drove the wrong one
 ///
-/// `image_color_type` is one of **three**: `src/sink.rs` and
-/// `src/sink_object_store.rs` each carry their own `color_type_for_format`.
+/// `src/encode.rs`'s `color_type_for_format` is one of two: `src/sink.rs`
+/// carries the other, and issue #940's batch-1 review folded
+/// `src/sink_object_store.rs` and `src/sink_packfile.rs` onto that same one
+/// rather than letting either keep its own copy, closing a fourth
+/// independent copy the review found still live in `sink_packfile.rs`.
 /// `Raster::encode_to_buffer("png")` routes through `crate::sink::encode_png`,
-/// so the first version of this test asserted a refusal that
-/// `image_color_type` was not on the path of at all, and a mutation replacing
-/// its `Uint32` arm with `L16` came back **green**. Every route is driven
-/// here, and every copy's doc is checked, so a mutation of any one of them is
+/// so the first version of this test asserted a refusal that `encode.rs`'s
+/// wrapper was not on the path of at all, and a mutation replacing its
+/// `Uint32` arm with `L16` came back **green**. Every route is driven here,
+/// and every wrapper's doc is checked, so a mutation of either one is
 /// visible.
 #[test]
 fn the_png_integer_refusals_carry_the_oracle_not_only_the_dependency() {
-    let doc = doc_above(ENCODE_RS, "fn image_color_type");
+    let doc = doc_above(ENCODE_RS, "fn color_type_for_format");
     for needle in ["8.18.6", "3000000000", "dzsave"] {
         assert!(
             doc.contains(needle),
-            "image_color_type's doc must carry the measured oracle and name \
+            "color_type_for_format's doc must carry the measured oracle and name \
              {needle:?} (issue #952). Doc was:\n{doc}"
         );
     }
-    // The other two copies point at it rather than repeating the table, and
-    // a copy that says nothing is how the argument-from-the-dependency
+    // `src/sink.rs` points at the same table rather than repeating it, and a
+    // copy that says nothing is how the argument-from-the-dependency
     // survived in the first place.
+    let sink_doc = doc_above(SINK_RS, "fn color_type_for_format");
+    assert!(
+        sink_doc.contains("#952"),
+        "src/sink.rs's copy of the mapping must point at the measured oracle. \
+         Doc was:\n{sink_doc}"
+    );
+    // `src/sink_object_store.rs` and `src/sink_packfile.rs` used to carry
+    // their own copies of this exact wrapper (byte-identical to sink.rs's,
+    // in sink_object_store.rs's case, and a fourth copy of the mapping
+    // itself in sink_packfile.rs's, found by issue #940's batch-1 review).
+    // Both now call `crate::sink::color_type_for_format` instead, so a
+    // regression back to a local copy in either file is a real risk this
+    // consolidation exists to close, not a hypothetical one.
     for (name, src) in [
-        ("sink.rs", SINK_RS),
         ("sink_object_store.rs", SINK_OBJECT_STORE_RS),
+        ("sink_packfile.rs", SINK_PACKFILE_RS),
     ] {
-        let doc = doc_above(src, "fn color_type_for_format");
         assert!(
-            doc.contains("#952"),
-            "src/{name}'s copy of the mapping must point at the measured \
-             oracle. Doc was:\n{doc}"
+            !src.contains("fn color_type_for_format"),
+            "src/{name} must not reintroduce its own copy of the mapping; it \
+             should call crate::sink::color_type_for_format instead (issue #940)"
         );
     }
 

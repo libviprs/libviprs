@@ -2268,7 +2268,15 @@ fn hash_tile_raw(bytes: &[u8], algo: crate::manifest::ChecksumAlgo) -> [u8; 32] 
 /// of `crate::encode`'s copy came back green. Consolidating onto one function
 /// closes that gap: a mutation of [`crate::pixel::image_color_type`] now
 /// reaches every route, this one included.
-fn color_type_for_format(fmt: crate::pixel::PixelFormat) -> Result<image::ColorType, SinkError> {
+///
+/// `pub(crate)` because [`crate::sink_object_store`] and
+/// [`crate::sink_packfile`] carried byte-identical copies of this exact
+/// wrapper (same [`SinkError`], same wording) and now call this one instead,
+/// closing the batch-1 review's finding that #969 had consolidated the
+/// mapping but left the wrapper around it tripled (issue #940).
+pub(crate) fn color_type_for_format(
+    fmt: crate::pixel::PixelFormat,
+) -> Result<image::ColorType, SinkError> {
     use crate::pixel::ColorTypeRefusal;
     crate::pixel::image_color_type(fmt).map_err(|refusal| {
         SinkError::EncodeMsg(match refusal {

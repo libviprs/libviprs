@@ -215,6 +215,14 @@ impl SampleKind {
     /// [`PixelFormat::kind`]`().bytes()` equals it for every variant. The
     /// direction that does *not* hold is the reason this enum exists: a
     /// byte width does not name a kind.
+    ///
+    /// `#[inline]` since issue #940's review: every flat-index reader
+    /// (`read_flat_v`/`read_v`, issue #969) calls this to compute a byte
+    /// offset and then hands it to `read_sample_f64`, which matches on the
+    /// same `kind` again. Inlining this three-arm match gives the optimizer
+    /// the best chance to fold both matches into one rather than
+    /// dispatching on the same discriminant twice.
+    #[inline]
     pub fn bytes(self) -> usize {
         match self {
             Self::U8 | Self::I8 => 1,
@@ -907,9 +915,7 @@ pub(crate) fn write_sample_f64(data: &mut [u8], kind: SampleKind, off: usize, v:
             let b = (clipped(i64::from(i32::MIN), i64::from(i32::MAX)) as i32).to_ne_bytes();
             data[off..off + 4].copy_from_slice(&b);
         }
-        SampleKind::F32 => {
-            data[off..off + 4].copy_from_slice(&(v as f32).to_ne_bytes());
-        }
+        SampleKind::F32 => write_f32_sample(data, off, v),
     }
 }
 
