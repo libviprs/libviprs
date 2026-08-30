@@ -24,6 +24,8 @@
 //! | `.jxl` (needs the `jxl` feature) | [`Raster::encode_jxl`], lossless | none: the encoder writes a bare codestream with no box container |
 //! | `.jp2` / `.j2k` / `.jpt` / `.j2c` / `.jpc` (needs the `jp2k` feature) | [`Raster::encode_jp2k`] at the `jp2ksave` defaults | none: `jp2ksave.c` has no code for ICC, EXIF or XMP |
 //! | `.ppm` (3-band) / `.pgm` (1-band) | [`Raster::encode_ppm`], the container the suffix names | none: a binary Netpbm file is a three-line header and the body |
+//! | `.csv` | [`Raster::csv_save`], TAB-separated, mono-converted (issue #958) | none: a text grid has nowhere to put one |
+//! | `.mat` | [`Raster::matrix_save`], mono-converted (issue #958); does not decode back through [`crate::decode_file`] (`.mat` is also MATLAB's suffix on the way in, content-sniffed, and this crate has no text-matrix sniffing to disambiguate) | none, same reason as `.csv` |
 //! | `.hdr` | [`Raster::encode_radiance`] at the `radsave` defaults, on a 3-band `f32` raster only | none EXIF-class: the `rad-` header records are format records and `SaveOptions::default` already takes them off the raster |
 //! | `.fits` / `.fit` / `.fts` | [`Raster::encode_fits`] | the `fits-` header records, minus the cards cfitsio regenerates |
 //! | `.v` / `.vips` | [`Raster::encode_vips`] | header geometry plus every attached field |
@@ -1472,16 +1474,16 @@ pub enum SaveError {
 fn saveable_extensions() -> &'static str {
     match (cfg!(feature = "jxl"), cfg!(feature = "jp2k")) {
         (true, true) => {
-            "png, jpg/jpeg, gif, webp, tif/tiff, jxl, jp2/j2k/jpt/j2c/jpc, hdr, ppm/pgm, fits/fit/fts, and v/vips"
+            "png, jpg/jpeg, gif, webp, tif/tiff, jxl, jp2/j2k/jpt/j2c/jpc, hdr, ppm/pgm, csv, mat, fits/fit/fts, and v/vips"
         }
         (true, false) => {
-            "png, jpg/jpeg, gif, webp, tif/tiff, jxl, hdr, ppm/pgm, fits/fit/fts, and v/vips"
+            "png, jpg/jpeg, gif, webp, tif/tiff, jxl, hdr, ppm/pgm, csv, mat, fits/fit/fts, and v/vips"
         }
         (false, true) => {
-            "png, jpg/jpeg, gif, webp, tif/tiff, jp2/j2k/jpt/j2c/jpc, hdr, ppm/pgm, fits/fit/fts, and v/vips"
+            "png, jpg/jpeg, gif, webp, tif/tiff, jp2/j2k/jpt/j2c/jpc, hdr, ppm/pgm, csv, mat, fits/fit/fts, and v/vips"
         }
         (false, false) => {
-            "png, jpg/jpeg, gif, webp, tif/tiff, hdr, ppm/pgm, fits/fit/fts, and v/vips"
+            "png, jpg/jpeg, gif, webp, tif/tiff, hdr, ppm/pgm, csv, mat, fits/fit/fts, and v/vips"
         }
     }
 }
@@ -1658,6 +1660,33 @@ impl Raster {
             // three-line ASCII header and the raster body, with nowhere for a
             // profile, an EXIF block or an XMP packet to live.
             "ppm" | "pgm" => self.encode_netpbm(extension).map_err(|e| match e {
+                crate::codec::EncodeError::Io(io) => SaveError::Io(io),
+                other => SaveError::Encode(SinkError::EncodeMsg(other.to_string())),
+            })?,
+            // `csvsave`'s one registered suffix, measured on 8.18.6: its
+            // `vips -l` line reads `nocache (.csv), priority=0, mono`. Both
+            // that entry and `matrixsave` below refuse a multi-band raster
+            // whose interpretation has no colourspace route (issue #958),
+            // rather than guessing one.
+            //
+            // `keep_metadata` has nothing to act on: a text grid has nowhere
+            // to put an ICC profile, an EXIF block or an XMP packet.
+            "csv" => self.csv_save().map_err(|e| match e {
+                crate::codec::EncodeError::Io(io) => SaveError::Io(io),
+                other => SaveError::Encode(SinkError::EncodeMsg(other.to_string())),
+            })?,
+            // `matrixsave`'s one registered suffix, measured the same way:
+            // `nocache (.mat), priority=0, mono`. `.mat` is also MATLAB's
+            // suffix on the way in (`SniffedFormat::Mat`, content-sniffed),
+            // and this crate has no text-matrix sniffing to disambiguate the
+            // way vips' own `is_a` does, so a `.mat` this writes does not
+            // decode back through `decode_file`/`decode_bytes`; pinned by
+            // `matrix_saved_bytes_do_not_decode_back_through_the_sniffer` in
+            // `tests/save_route_coverage.rs` (issue #958), the same
+            // asymmetry-pin shape `.ppm` carried before #910.
+            //
+            // `keep_metadata` has nothing to act on, same as `csv` above.
+            "mat" => self.matrix_save().map_err(|e| match e {
                 crate::codec::EncodeError::Io(io) => SaveError::Io(io),
                 other => SaveError::Encode(SinkError::EncodeMsg(other.to_string())),
             })?,

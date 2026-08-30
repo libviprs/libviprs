@@ -464,7 +464,13 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// `annotated not-detected` in `tests/miri_fs_test_inventory.txt`, which is
 /// exactly the state [`TestFn::is_tracked`]'s own doc comment describes for a
 /// helper-reached case the detector cannot see.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 285;
+///
+/// #958 moved it 285 to 286: `csv_and_mat_route_through_both_dispatches_to_the_same_bytes`
+/// in `tests/save_route_coverage.rs` saves `.csv` and `.mat` files to a
+/// `tempfile::tempdir()` and reads them back, so it is both annotated and
+/// fs-detected, the ordinary case, and its row is in
+/// `tests/miri_fs_test_inventory.txt` beside the rest of that file's.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 286;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
