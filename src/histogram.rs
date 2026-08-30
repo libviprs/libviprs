@@ -1445,6 +1445,20 @@ impl Raster {
 mod tests {
     use super::*;
 
+    /// The native-endian bit pattern of `bits`, at the width `kind` stores.
+    ///
+    /// Keyed on the kind rather than on the byte width. The two sites this
+    /// replaced both wrote `match kind.bytes() { 1 => .., _ => u16 pair }`,
+    /// which reads a four-byte carrier as two bytes and says nothing about
+    /// it: a width is `f32`, `u32` and `i32` at once (issues #607, #942).
+    fn bit_pattern(kind: SampleKind, bits: u32) -> Vec<u8> {
+        match kind {
+            SampleKind::U8 | SampleKind::I8 => vec![bits as u8],
+            SampleKind::U16 | SampleKind::I16 => (bits as u16).to_ne_bytes().to_vec(),
+            SampleKind::U32 | SampleKind::I32 | SampleKind::F32 => bits.to_ne_bytes().to_vec(),
+        }
+    }
+
     /**
      * Tests that this module dispatches on sample kind and never on byte
      * width, by asserting that neither the byte-width accessor on
@@ -1579,11 +1593,7 @@ mod tests {
             (SampleKind::I16, 0xFFFF, 0),
             (SampleKind::I16, 0x7FFF, 32_767),
         ] {
-            let mut buf = vec![0u8; kind.bytes()];
-            match kind.bytes() {
-                1 => buf[0] = bits as u8,
-                _ => buf.copy_from_slice(&(bits as u16).to_ne_bytes()),
-            }
+            let buf = bit_pattern(kind, bits);
             assert_eq!(
                 read_bin(&buf, kind, 0),
                 bin,
@@ -1724,12 +1734,7 @@ mod tests {
             (SampleKind::U16, 0xFFFF),
             (SampleKind::I16, 0xFFFF),
         ] {
-            let mut buf = vec![0u8; kind.bytes()];
-            if kind.bytes() == 1 {
-                buf[0] = bits as u8;
-            } else {
-                buf.copy_from_slice(&(bits as u16).to_ne_bytes());
-            }
+            let buf = bit_pattern(kind, bits);
             let got = read_bin(&buf, kind, 0) as usize;
             assert!(got < bins_for(kind), "{kind:?} indexed past its table");
             assert!(
