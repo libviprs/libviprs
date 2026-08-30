@@ -218,6 +218,15 @@ fn char_literal_end(b: &[u8], i: usize) -> Option<usize> {
 /// apart; the first `src/anything/mod.rs` added would exit this guard in
 /// silence (issue #949). `tests/miri_ignore_convention.rs` already recurses,
 /// and two of the three walks agreeing is not a rule.
+///
+/// A new test calling this (or any other filesystem-touching helper added to
+/// this module) must self-annotate `#[cfg_attr(miri, ignore)]`.
+/// `tests/miri_ignore_convention.rs`'s own detector only follows a call graph
+/// within one file, so it cannot see a test reach the filesystem through a
+/// call into `tests/common/`: nothing will catch a missing annotation on a
+/// new caller the way it would for filesystem access written inline (issue
+/// #940, found while extracting this function out of the files that used to
+/// carry the annotated calls it could still see).
 pub fn rs_files_under(dir: &std::path::Path) -> Vec<(String, std::path::PathBuf)> {
     fn walk(dir: &std::path::Path, prefix: &str, out: &mut Vec<(String, std::path::PathBuf)>) {
         let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(dir)

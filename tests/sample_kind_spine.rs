@@ -77,8 +77,8 @@
 
 use std::collections::BTreeSet;
 
-#[path = "common/mask.rs"]
-mod mask;
+#[path = "common/scan.rs"]
+mod scan;
 
 /// The width comparisons still on `main`, each with the lane that owns the file.
 ///
@@ -290,7 +290,7 @@ fn head_ranges(toks: &[(usize, &str)]) -> Vec<(usize, usize)> {
 /// the list cannot grow in silence.
 fn width_comparisons(src: &str) -> Vec<(usize, String)> {
     const NEEDLES: [&str; 2] = ["bytes_per_channel", "bytes"];
-    let masked = mask::mask_literals_and_comments(src);
+    let masked = scan::mask_literals_and_comments(src);
     let toks = tokens(&masked);
     let heads = head_ranges(&toks);
     let mut lines: Vec<usize> = Vec::new();
@@ -349,7 +349,7 @@ fn width_comparisons(src: &str) -> Vec<(usize, String)> {
 
 fn src_files() -> Vec<(String, std::path::PathBuf)> {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let files = mask::rs_files_under(&dir);
+    let files = scan::rs_files_under(&dir);
     assert!(
         files.len() > 30,
         "positive control failed: only {} files found under src/, so a zero \
@@ -379,7 +379,7 @@ fn src_files() -> Vec<(String, std::path::PathBuf)> {
 #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn the_walk_descends_into_subdirectories() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fuzz");
-    let found: Vec<String> = mask::rs_files_under(&root)
+    let found: Vec<String> = scan::rs_files_under(&root)
         .into_iter()
         .map(|(r, _)| r)
         .collect();

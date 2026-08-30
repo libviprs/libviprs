@@ -27,8 +27,8 @@
 //! comment forms and a string literal and never a character literal, so it passed
 //! over the exact hole.
 //!
-//! The mask is now `tests/common/mask.rs`'s shared
-//! [`mask::mask_literals_and_comments`], the same one
+//! The mask is now `tests/common/scan.rs`'s shared
+//! [`scan::mask_literals_and_comments`], the same one
 //! `tests/sample_kind_spine.rs` calls, so there is no second copy left to fall
 //! out of step (issue #968).
 
@@ -36,8 +36,8 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
-#[path = "common/mask.rs"]
-mod mask;
+#[path = "common/scan.rs"]
+mod scan;
 
 /// The manifest, at compile time, the way `tests/ci_feature_coverage.rs` pulls
 /// it in: the file this asserts about and the binary asserting cannot then
@@ -59,7 +59,7 @@ const ALLOWED: [(&str, &str); 1] = [(
 fn files_with_real_unsafe() -> BTreeSet<String> {
     let mut found = BTreeSet::new();
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let files = mask::rs_files_under(&src);
+    let files = scan::rs_files_under(&src);
     assert!(
         files.len() > 30,
         "positive control failed: only {} files found under src/, so an empty \
@@ -68,7 +68,7 @@ fn files_with_real_unsafe() -> BTreeSet<String> {
     );
     for (rel, path) in files {
         let text = fs::read_to_string(&path).expect("read source file");
-        let code = mask::mask_literals_and_comments(&text);
+        let code = scan::mask_literals_and_comments(&text);
         if code
             .split(|c: char| !c.is_alphanumeric() && c != '_')
             .any(|w| w == "unsafe")
@@ -223,7 +223,7 @@ fn only_the_named_files_carry_the_crates_own_unsafe() {
 #[test]
 fn the_scanner_reads_code_and_not_prose() {
     // The positive control: a real block is found.
-    assert!(mask::mask_literals_and_comments("fn f() { unsafe { g() } }").contains("unsafe"));
+    assert!(scan::mask_literals_and_comments("fn f() { unsafe { g() } }").contains("unsafe"));
     let mut lost: Vec<String> = Vec::new();
     // And a real block is still found after each literal form that can flip
     // the scanner's state and swallow the rest of the file. The first row is
@@ -258,7 +258,7 @@ fn the_scanner_reads_code_and_not_prose() {
     ] {
         // Collected rather than asserted row by row, so one run names every
         // literal form the scanner loses the file to instead of the first.
-        if !mask::mask_literals_and_comments(code).contains("unsafe") {
+        if !scan::mask_literals_and_comments(code).contains("unsafe") {
             lost.push(format!("{label}:\n{code}"));
         }
     }
@@ -278,7 +278,7 @@ fn the_scanner_reads_code_and_not_prose() {
         "let s = \"unsafe\";",
     ] {
         assert!(
-            !mask::mask_literals_and_comments(prose).contains("unsafe"),
+            !scan::mask_literals_and_comments(prose).contains("unsafe"),
             "the scanner read prose as code: {prose}"
         );
     }
@@ -318,7 +318,7 @@ fn the_crates_own_unsafe_stays_out_of_a_default_build() {
 #[test]
 fn the_walk_descends_into_subdirectories() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("fuzz");
-    let found: Vec<String> = mask::rs_files_under(&root)
+    let found: Vec<String> = scan::rs_files_under(&root)
         .into_iter()
         .map(|(r, _)| r)
         .collect();

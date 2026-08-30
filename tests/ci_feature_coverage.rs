@@ -77,8 +77,8 @@
 /// The manifest, at compile time.
 use std::collections::BTreeSet;
 
-#[path = "common/mask.rs"]
-mod mask;
+#[path = "common/scan.rs"]
+mod scan;
 
 const CARGO_TOML: &str = include_str!("../Cargo.toml");
 /// The only CI workflow that gates a merge (issue #585), at compile time.
@@ -604,7 +604,7 @@ fn test_util_gates() -> (Vec<String>, Vec<String>, usize) {
     let mut scanned = Vec::new();
     let mut bare = Vec::new();
     let mut seen = 0usize;
-    for (rel, path) in mask::rs_files_under(&root) {
+    for (rel, path) in scan::rs_files_under(&root) {
         let rel = format!("src/{rel}");
         scanned.push(rel.clone());
         let text = std::fs::read_to_string(&path).expect("read a source file");

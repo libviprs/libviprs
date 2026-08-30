@@ -455,12 +455,12 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 ///
 /// #968 moved it 287 to 285, in the other direction from every earlier entry
 /// in this history: it shares `sample_kind_spine.rs` and `unsafe_inventory.rs`'s
-/// masking lexer and file walker into `tests/common/mask.rs`, and this
+/// masking lexer and file walker into `tests/common/scan.rs`, and this
 /// detector's own [`reaching_fns`] only follows a call graph within one file.
 /// Both copies of `the_walk_descends_into_subdirectories` still carry
 /// `#[cfg_attr(miri, ignore)]`, so nothing new runs under Miri, but the
 /// detector can no longer see either one touching the filesystem through
-/// `mask::rs_files_under`, so they moved from `annotated fs-detected` to
+/// `scan::rs_files_under`, so they moved from `annotated fs-detected` to
 /// `annotated not-detected` in `tests/miri_fs_test_inventory.txt`, which is
 /// exactly the state [`TestFn::is_tracked`]'s own doc comment describes for a
 /// helper-reached case the detector cannot see.
