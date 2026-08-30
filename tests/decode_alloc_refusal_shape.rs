@@ -63,6 +63,9 @@
 //! prose here and in `SourceError::is_alloc_limit`'s doc went on saying four
 //! until #782.
 
+#[path = "common/working_set_coverage.rs"]
+mod coverage;
+
 use libviprs::analyze::decode_analyze;
 use libviprs::jxl::JxlError;
 use libviprs::source::{DecodeLimits, decode_bytes_with_limits};
@@ -157,21 +160,29 @@ struct Row {
     /// The `what` label the refusal names the buffer with, empty where the
     /// refusal is not libviprs's own.
     what: &'static str,
-    /// RGBA planes of one frame the decoder needs **beside** the raster,
-    /// which the price has to cover for the ceiling to bound anything.
+    /// Bytes the decode holds **beside** the raster, which the price has to
+    /// cover for the ceiling to bound anything.
     ///
-    /// Zero everywhere except WebP, which is the only row whose decoder is a
-    /// separate crate with a working set of its own that no knob bounds:
-    /// `image-webp` keeps a full-size RGBA canvas and a per-frame buffer,
-    /// and `set_memory_limit` reaches neither, because it is consulted only
-    /// on metadata chunks. Measured at up to 2.13 planes on a 512x512
-    /// animation and priced at three (issue #892).
+    /// This used to be `decoder_planes`, a count of RGBA planes of one frame,
+    /// and it used to read zero for every row but WebP. Four of those zeroes
+    /// were wrong and nothing here checked them: jp2k peaked at 6.45x its
+    /// price, gif at 2.35x and avif at 2.00x, so `max_alloc_bytes` bounded
+    /// nothing for any of the three and their refusal messages understated by
+    /// the same factor (issue #944).
     ///
-    /// The other rows decode inside libviprs, where the buffer priced is the
-    /// buffer allocated.
-    decoder_planes: u64,
-    /// `width * height * bands * sample_bytes`, plus `decoder_planes` RGBA
-    /// planes of one frame.
+    /// It is a byte count now rather than a plane count because the three
+    /// working sets are not RGBA planes: GIF holds a palette-indexed frame
+    /// and a canvas at the raster's own band count, JPEG 2000 holds `f32`
+    /// component data and per-tile coefficients, and AVIF holds a YCbCr frame
+    /// whose planes follow `av1C`'s subsampling.
+    ///
+    /// A zero here is a claim, and `every_priced_container_is_on_exactly_one_working_set_list`
+    /// is what stops it being an unexamined one: the row's format has to
+    /// appear on one of the two lists in `tests/common/working_set_coverage.rs`,
+    /// so it is either measured under a counting global allocator or listed
+    /// with a reason it is not.
+    working_set: u64,
+    /// `width * height * bands * sample_bytes`, plus `working_set`.
     price: u64,
 }
 
@@ -199,7 +210,7 @@ fn priced_by_libviprs() -> Vec<Row> {
             decoded: (4, 4),
             priced_geometry: (4, 4, 3),
             sample_bytes: 1,
-            decoder_planes: 0,
+            working_set: 0,
             what: ".v pixel buffer",
             price: 48,
         },
@@ -214,7 +225,7 @@ fn priced_by_libviprs() -> Vec<Row> {
             decoded: (4, 4),
             priced_geometry: (4, 4, 3),
             sample_bytes: 1,
-            decoder_planes: 0,
+            working_set: 0,
             what: "ppm pixel data",
             price: 48,
         },
@@ -228,9 +239,9 @@ fn priced_by_libviprs() -> Vec<Row> {
             // constant.
             priced_geometry: (4, 4, 4),
             sample_bytes: 1,
-            decoder_planes: 0,
+            working_set: 144,
             what: "GIF canvas",
-            price: 64,
+            price: 208,
         },
         Row {
             format: "radiance",
@@ -240,7 +251,7 @@ fn priced_by_libviprs() -> Vec<Row> {
             decoded: (4, 3),
             priced_geometry: (4, 3, 3),
             sample_bytes: 4,
-            decoder_planes: 0,
+            working_set: 0,
             what: "Radiance pixel buffer",
             price: 144,
         },
@@ -250,7 +261,7 @@ fn priced_by_libviprs() -> Vec<Row> {
             decoded: (4, 3),
             priced_geometry: (4, 3, 1),
             sample_bytes: 1,
-            decoder_planes: 0,
+            working_set: 0,
             what: "FITS pixel buffer",
             price: 12,
         },
@@ -260,7 +271,7 @@ fn priced_by_libviprs() -> Vec<Row> {
             decoded: (8, 4),
             priced_geometry: (8, 4, 4),
             sample_bytes: 4,
-            decoder_planes: 0,
+            working_set: 0,
             what: "OpenEXR sample buffers",
             price: 512,
         },
@@ -274,7 +285,7 @@ fn priced_by_libviprs() -> Vec<Row> {
             decoded: (2, 3),
             priced_geometry: (2, 3, 1),
             sample_bytes: 1,
-            decoder_planes: 0,
+            working_set: 0,
             what: "NIfTI voxel buffer",
             price: 6,
         },
@@ -290,7 +301,7 @@ fn priced_by_libviprs() -> Vec<Row> {
             decoded: (3, 2),
             priced_geometry: (3, 2, 1),
             sample_bytes: 1,
-            decoder_planes: 0,
+            working_set: 0,
             what: "MAT sample buffer",
             price: 6,
         },
@@ -308,7 +319,7 @@ fn priced_by_libviprs() -> Vec<Row> {
             sample_bytes: 1,
             // The still path's two planes; see the field's doc. 48 is the
             // 4x4x3 raster and 128 is two RGBA planes of it.
-            decoder_planes: 2,
+            working_set: 128,
             what: "WebP frame buffer",
             price: 176,
         },
@@ -327,7 +338,7 @@ fn priced_by_libviprs() -> Vec<Row> {
             decoded: (8, 8),
             priced_geometry: (8, 8, 3),
             sample_bytes: 1,
-            decoder_planes: 0,
+            working_set: 0,
             what: "Ultra HDR base image",
             price: 192,
         },
@@ -341,9 +352,9 @@ fn priced_by_libviprs() -> Vec<Row> {
             // decoded, which is the whole point for a compressed container.
             priced_geometry: (4, 3, 3),
             sample_bytes: 1,
-            decoder_planes: 0,
+            working_set: 144,
             what: "AVIF frame buffer",
-            price: 36,
+            price: 180,
         });
     }
     if cfg!(feature = "jxl") {
@@ -355,7 +366,7 @@ fn priced_by_libviprs() -> Vec<Row> {
             decoded: (16, 16),
             priced_geometry: (16, 16, 3),
             sample_bytes: 1,
-            decoder_planes: 0,
+            working_set: 0,
             what: "JPEG XL frame buffer",
             price: 768,
         });
@@ -374,9 +385,9 @@ fn priced_by_libviprs() -> Vec<Row> {
             decoded: (4, 4),
             priced_geometry: (4, 4, 3),
             sample_bytes: 1,
-            decoder_planes: 0,
+            working_set: 864,
             what: "JPEG 2000 component buffers",
-            price: 48,
+            price: 912,
         });
     }
     rows
@@ -391,7 +402,7 @@ fn priced_by_the_image_crate() -> Vec<Row> {
             decoded: (4, 4),
             priced_geometry: (4, 4, 3),
             sample_bytes: 1,
-            decoder_planes: 0,
+            working_set: 0,
             what: "",
             price: 48,
         },
@@ -401,7 +412,7 @@ fn priced_by_the_image_crate() -> Vec<Row> {
             decoded: (4, 4),
             priced_geometry: (4, 4, 3),
             sample_bytes: 1,
-            decoder_planes: 0,
+            working_set: 0,
             what: "",
             price: 48,
         },
@@ -411,7 +422,7 @@ fn priced_by_the_image_crate() -> Vec<Row> {
             decoded: (4, 3),
             priced_geometry: (4, 3, 3),
             sample_bytes: 1,
-            decoder_planes: 0,
+            working_set: 0,
             what: "",
             price: 36,
         },
@@ -492,6 +503,75 @@ fn the_two_tables_account_for_every_container() {
         "the two tables plus the one documented exclusion must account for all \
          seventeen containers libviprs sniffs; see SniffedFormat::ALL"
     );
+}
+
+/// Issue #944. Every container this file prices has to say, somewhere, what
+/// its decode holds beside the raster, and a zero has to be a measurement or
+/// an admission rather than a default nobody looked at.
+///
+/// That is exactly how three under-priced decoders shipped. The `Row` struct
+/// grew a column for the working set, jp2k, gif and avif were spelled zero
+/// because nobody had run a counting allocator over them, and no assertion in
+/// this file or any other read the column. The two decoded at 6.45x and 2.35x
+/// their stated budget.
+///
+/// So the column now points outward. Each row's format has to appear on
+/// exactly one of the two lists in `tests/common/working_set_coverage.rs`:
+/// the measured one, which `tests/decode_working_set.rs` asserts it really
+/// covers, or the unmeasured one, which carries a sentence per container
+/// saying why not. Both directions are checked, because a list naming a
+/// container this file does not price is as much a drift as a row on neither
+/// list.
+#[test]
+fn every_priced_container_is_on_exactly_one_working_set_list() {
+    let measured: Vec<&str> = coverage::measured().into_iter().map(|(f, _)| f).collect();
+    let unmeasured: Vec<&str> = coverage::unmeasured().into_iter().map(|(f, _)| f).collect();
+
+    let both: Vec<&str> = measured
+        .iter()
+        .filter(|f| unmeasured.contains(f))
+        .copied()
+        .collect();
+    assert!(
+        both.is_empty(),
+        "a container cannot be measured and unmeasured at once: {both:?}"
+    );
+
+    let rows: Vec<&str> = priced_by_libviprs().iter().map(|r| r.format).collect();
+    let missing: Vec<&str> = rows
+        .iter()
+        .filter(|f| !measured.contains(f) && !unmeasured.contains(f))
+        .copied()
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "{} container(s) this file prices are on neither working-set list, so \
+         whatever their `working_set` column says is a number nobody checked \
+         (issue #944): {missing:?}",
+        missing.len()
+    );
+
+    let stray: Vec<&str> = measured
+        .iter()
+        .chain(&unmeasured)
+        .filter(|f| !rows.contains(f))
+        .copied()
+        .collect();
+    assert!(
+        stray.is_empty(),
+        "the working-set lists name {} container(s) this file does not price, \
+         so one of the two has drifted: {stray:?}",
+        stray.len()
+    );
+
+    // Without this the three assertions above all pass on an empty table,
+    // which is the state they exist to catch.
+    assert_eq!(
+        rows.len(),
+        measured.len() + unmeasured.len(),
+        "every priced container appears exactly once across the two lists"
+    );
+    assert!(!rows.is_empty(), "and there is a table to check at all");
 }
 
 /// Issue #764. The paired decoder is not a row in either table above, because
@@ -633,14 +713,13 @@ fn the_shape_carries_the_geometry_and_the_label_as_typed_fields() {
         );
         let raster =
             u64::from(g.width) * u64::from(g.height) * u64::from(g.bands) * row.sample_bytes;
-        let planes = row.decoder_planes * u64::from(g.width) * u64::from(g.height) * 4;
         assert_eq!(
-            raster + planes,
+            raster + row.working_set,
             needed_bytes,
             "{}: the reported geometry must be the one the price came from, \
-             plus the {} RGBA planes its decoder needs beside it",
+             plus the {} bytes the decode holds beside it",
             row.format,
-            row.decoder_planes
+            row.working_set
         );
         assert_eq!(needed_bytes, row.price, "{} price", row.format);
         assert_eq!(

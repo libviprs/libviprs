@@ -12,8 +12,8 @@
 //! this test crate fails to build.
 
 use libviprs::{
-    Align, BandError, ColourError, Combine, DrawError, EngineEvent, ExrError, FitsError, GifError,
-    Intent, Interpretation, JoinDirection, Jp2kError, JxlError, Layout, ManifestError,
+    Align, AvifError, BandError, ColourError, Combine, DrawError, EngineEvent, ExrError, FitsError,
+    GifError, Intent, Interpretation, JoinDirection, Jp2kError, JxlError, Layout, ManifestError,
     MetadataValue, Pcs, PdfError, PixelFormat, PlannerError, Precision, RadianceError, RasterError,
     ResumeError, SourceError, VerifyError,
 };
@@ -87,6 +87,29 @@ fn assert_jxl_error_non_exhaustive(v: &JxlError) {
         JxlError::ChannelCountMismatch { .. } => {}
         JxlError::DecoderAllocLimitExceeded { .. } => {}
         JxlError::Raster(_) => {}
+        _ => {}
+    }
+}
+
+/// `AvifError` was the one public error enum in the tree without the
+/// attribute, and this file, which exists to hold exactly that rule, did not
+/// mention it (issue #946). It is re-exported unconditionally from the crate
+/// root, so it is public API in a build with the `avif` feature and in a
+/// build without one, and its own `UnsupportedColour` doc says only two of
+/// the matrix encodings are measured, which is a promise that it will grow.
+///
+/// Listed here the same way as the seventy-three siblings, so the next
+/// variant is additive rather than breaking.
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_avif_error_non_exhaustive(v: &AvifError) {
+    match v {
+        AvifError::FeatureNotEnabled => {}
+        AvifError::Container(_) => {}
+        AvifError::UnsupportedCodec { .. } => {}
+        AvifError::UnsupportedColour { .. } => {}
+        AvifError::Decode { .. } => {}
+        AvifError::Raster(_) => {}
         _ => {}
     }
 }
@@ -437,6 +460,7 @@ fn non_exhaustive_checks_compile() {
     assert_jxl_error_non_exhaustive(&JxlError::FeatureNotEnabled);
     assert_jp2k_compression_non_exhaustive(&libviprs::jp2k::Compression::Lossless);
     assert_jp2k_error_non_exhaustive(&Jp2kError::FeatureNotEnabled);
+    assert_avif_error_non_exhaustive(&AvifError::FeatureNotEnabled);
     assert_pixel_format_non_exhaustive(&PixelFormat::Gray8);
     assert_interpretation_non_exhaustive(&Interpretation::OkLch);
     assert_intent_non_exhaustive(&Intent::Perceptual);

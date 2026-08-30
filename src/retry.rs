@@ -23,7 +23,7 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```
 //! use libviprs::retry::{FailurePolicy, RetryPolicy, RetryingSink};
 //! use libviprs::sink::MemorySink;
 //!

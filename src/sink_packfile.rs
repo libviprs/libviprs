@@ -114,12 +114,23 @@ impl PackfileSink {
     /// and [`PackfileSinkBuilder::tile_format`] (default:
     /// [`TileFormat::Png`]), then [`PackfileSinkBuilder::build`]:
     ///
-    /// ```ignore
-    /// PackfileSink::builder("out.zip")
+    /// ```
+    /// use libviprs::planner::{Layout, PyramidPlanner};
+    /// use libviprs::sink::TileFormat;
+    /// use libviprs::sink_packfile::{PackfileFormat, PackfileSink};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let plan = PyramidPlanner::new(1024, 768, 256, 0, Layout::DeepZoom)?.plan();
+    /// let dir = tempfile::tempdir()?;
+    ///
+    /// let sink = PackfileSink::builder(dir.path().join("out.zip"))
     ///     .plan(plan)
     ///     .format(PackfileFormat::Zip)
     ///     .tile_format(TileFormat::Jpeg { quality: 85 })
     ///     .build()?;
+    /// # let _ = sink;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn builder(path: impl Into<PathBuf>) -> PackfileSinkBuilder {
         PackfileSinkBuilder {
@@ -306,8 +317,18 @@ impl PackfileSink {
 /// [`PackfileFormat::Tar`] and [`TileFormat::Png`] respectively so the
 /// minimum-viable call is:
 ///
-/// ```ignore
-/// PackfileSink::builder("out.tar").plan(plan).build()?;
+/// ```
+/// use libviprs::planner::{Layout, PyramidPlanner};
+/// use libviprs::sink_packfile::PackfileSink;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let plan = PyramidPlanner::new(1024, 768, 256, 0, Layout::DeepZoom)?.plan();
+/// let dir = tempfile::tempdir()?;
+///
+/// let sink = PackfileSink::builder(dir.path().join("out.tar")).plan(plan).build()?;
+/// # let _ = sink;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct PackfileSinkBuilder {
