@@ -276,11 +276,24 @@ const FS_MARKERS: &[&str] = &[
     // `Path` methods that stat the path even though they read like accessors.
     ".canonicalize()",
     ".exists()",
+    // `Path::try_exists` is the fallible twin of `.exists()` and stats just the
+    // same. It was missing, and an unannotated `#[test]` calling it left all
+    // fourteen tests in this file green while ending the whole Miri run on its
+    // first syscall (issue #949).
+    ".try_exists()",
     ".is_file()",
     ".is_dir()",
+    // Matched today only because `symlink(` above is a substring of it, which
+    // is not a property worth leaning on.
+    ".is_symlink()",
     ".metadata()",
     ".read_dir()",
     ".symlink_metadata()",
+    // The third constructor on `File`, beside `open` and `create` above: the
+    // `OpenOptions` builder reached through `File`. The bare spelling needs
+    // its own entry for the same reason those two do, since `use std::fs::File`
+    // sits at module scope where `fn_bodies` never reads it.
+    "File::options(",
 ];
 
 /// Substrings that mean "this function reaches `std::process`".
@@ -417,7 +430,21 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// and the check green. Measured, not reasoned: three such deletions are in
 /// #739's and #781's mutation tables, one per marker that is the sole match for
 /// any test in the tree.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 285;
+///
+/// #949 moved it 280 to 282, and the arithmetic is worth keeping because the
+/// change that moved it also *added* three markers. Three tests arrived
+/// (`test_util_is_only_ever_gated_alongside_cfg_test` walks `src/` now instead
+/// of reading one file, and both `the_walk_descends_into_subdirectories`
+/// guards read a directory) and one left
+/// (`the_crates_own_unsafe_stays_out_of_a_default_build` moved to
+/// `include_str!` and touches nothing any more). The three new markers,
+/// `.try_exists()`, `.is_symlink()` and `File::options(`, moved this by
+/// **zero**: nothing in the tree reaches the filesystem through those
+/// spellings today, which is exactly why an unannotated test using one was
+/// invisible. This value is re-derived from the detector on every compose
+/// rather than added by hand, because a hand-added delta is exactly the
+/// shared-count hazard this constant already is.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 0; // placeholder, set from the detector below
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
@@ -1680,6 +1707,68 @@ mod tests {
         ],
         "the detector must ignore comments and string literals and must read the \
          annotation off the attribute block"
+    );
+}
+
+/// The spellings of std's stat surface that read like accessors.
+///
+/// `.exists()`, `.is_file()` and `.metadata()` are in [`FS_MARKERS`];
+/// `.try_exists()`, `.is_symlink()` and `File::options(` were not, and a test
+/// reaching the filesystem through one of those skipped the inventory and took
+/// the whole Miri run down as "Miri failed", which is the exact failure #652
+/// exists to prevent. Measured: an unannotated `#[test]` calling
+/// `Path::try_exists()` planted in `tests/workspace_layout.rs` left all
+/// fourteen tests in this file green (issue #949).
+///
+/// One row per spelling, run through [`scan_source`] rather than through the
+/// tree, so a marker that stops matching is a named row rather than a count
+/// that moved.
+#[test]
+fn every_spelling_of_a_stat_call_is_a_filesystem_marker() {
+    let cases: [(&str, &str); 9] = [
+        ("exists", "let _ = p.exists();"),
+        ("try_exists", "let _ = p.try_exists().unwrap();"),
+        ("is_file", "let _ = p.is_file();"),
+        ("is_dir", "let _ = p.is_dir();"),
+        // Detected today, but by accident: `symlink(` is a marker and
+        // `is_symlink()` contains it. Spelling it out is what stops that
+        // being load-bearing.
+        ("is_symlink", "let _ = p.is_symlink();"),
+        ("symlink_metadata", "let _ = p.symlink_metadata().unwrap();"),
+        ("metadata", "let _ = p.metadata().unwrap();"),
+        ("canonicalize", "let _ = p.canonicalize().unwrap();"),
+        // Bare, the way `File::open(` and `OpenOptions::new(` are already
+        // spelled here, because `use std::fs::File;` sits at module scope and
+        // `fn_bodies` never reads it.
+        (
+            "File::options",
+            "let _ = File::options().read(true).open(p).unwrap();",
+        ),
+    ];
+    let mut missed = Vec::new();
+    for (label, call) in cases {
+        let src = format!(
+            "#[test]\nfn t() {{\n    let p = std::path::Path::new(\"x\");\n    {call}\n}}\n"
+        );
+        let found = scan_source("fixture.rs", &src);
+        assert_eq!(found.len(), 1, "the fixture must parse as one test: {src}");
+        if !found[0].touches_fs {
+            missed.push(label);
+        }
+    }
+    assert!(
+        missed.is_empty(),
+        "these spellings of a stat call are not filesystem markers, so a test \
+         using one skips the inventory and ends the whole Miri run on its \
+         first syscall (issue #949): {missed:?}"
+    );
+
+    // The negative control, so "every call is a marker" is not how this passes.
+    let pure = "#[test]\nfn t() {\n    assert_eq!(1 + 1, 2);\n}\n";
+    let found = scan_source("fixture.rs", pure);
+    assert!(
+        !found[0].touches_fs,
+        "a test that touches nothing must not be detected"
     );
 }
 

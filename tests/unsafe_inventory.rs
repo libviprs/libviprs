@@ -33,7 +33,12 @@
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// The manifest, at compile time, the way `tests/ci_feature_coverage.rs` pulls
+/// it in: the file this asserts about and the binary asserting cannot then
+/// drift apart, and editing it forces a rebuild.
+const CARGO_TOML: &str = include_str!("../Cargo.toml");
 
 /// Files under `src/` allowed to contain real `unsafe`, and why.
 ///
@@ -240,24 +245,205 @@ fn char_literal_end(b: &[u8], i: usize) -> Option<usize> {
     (i + 1 + len < n && b[i + 1 + len] == b'\'').then_some(i + 2 + len)
 }
 
+/// Every `.rs` file under `dir`, recursively, as `(path relative to `dir`,
+/// full path)`.
+///
+/// Recursive on purpose. `src/` is flat today, so a walk that stops at the top
+/// gives the same answer and the `files.len() > 30` control cannot tell them
+/// apart; the first `src/anything/mod.rs` added would exit this guard in
+/// silence (issue #949). `tests/miri_ignore_convention.rs` already recurses,
+/// and two of the three walks agreeing is not a rule.
+fn rs_files_under(dir: &Path) -> Vec<(String, PathBuf)> {
+    fn walk(dir: &Path, prefix: &str, out: &mut Vec<(String, PathBuf)>) {
+        let mut entries: Vec<PathBuf> = fs::read_dir(dir)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()))
+            .map(|e| e.expect("cannot read a directory entry").path())
+            .collect();
+        entries.sort();
+        for path in entries {
+            let name = path
+                .file_name()
+                .expect("a directory entry has a name")
+                .to_string_lossy()
+                .into_owned();
+            let rel = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{prefix}/{name}")
+            };
+            if path.is_dir() {
+                walk(&path, &rel, out);
+            } else if name.ends_with(".rs") {
+                out.push((rel, path));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(dir, "", &mut out);
+    out.sort();
+    out
+}
+
 fn files_with_real_unsafe() -> BTreeSet<String> {
     let mut found = BTreeSet::new();
-    for entry in fs::read_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("src")).expect("read src/")
-    {
-        let path = entry.expect("dir entry").path();
-        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
-            continue;
-        }
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let files = rs_files_under(&src);
+    assert!(
+        files.len() > 30,
+        "positive control failed: only {} files found under src/, so an empty \
+         answer below would be an empty answer about nothing",
+        files.len()
+    );
+    for (rel, path) in files {
         let text = fs::read_to_string(&path).expect("read source file");
         let code = code_only(&text);
         if code
             .split(|c: char| !c.is_alphanumeric() && c != '_')
             .any(|w| w == "unsafe")
         {
-            found.insert(path.file_name().unwrap().to_string_lossy().into_owned());
+            found.insert(rel);
         }
     }
     found
+}
+
+/// The `[features]` table as a map from a feature to the features it enables,
+/// with `dep:` and `crate/feature` entries dropped.
+///
+/// Read as entries rather than as lines, because a `[features]` entry can span
+/// lines and `jxl` does.
+fn feature_table(manifest: &str) -> std::collections::BTreeMap<String, Vec<String>> {
+    let mut out = std::collections::BTreeMap::new();
+    let mut inside = false;
+    let mut pending: Option<(String, String)> = None;
+    for line in manifest.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') && pending.is_none() {
+            inside = trimmed == "[features]";
+            continue;
+        }
+        if !inside || trimmed.starts_with('#') {
+            continue;
+        }
+        if let Some((name, rest)) = pending.take() {
+            let joined = format!("{rest} {trimmed}");
+            if joined.contains(']') {
+                out.insert(name, enabled_features(&joined));
+            } else {
+                pending = Some((name, joined));
+            }
+            continue;
+        }
+        let Some((name, rest)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let (name, rest) = (name.trim(), rest.trim());
+        if name.is_empty() || !rest.starts_with('[') {
+            continue;
+        }
+        if rest.contains(']') {
+            out.insert(name.to_owned(), enabled_features(rest));
+        } else {
+            pending = Some((name.to_owned(), rest.to_owned()));
+        }
+    }
+    out
+}
+
+/// The feature names inside one `[..]` list, dropping `dep:x` and
+/// `crate/feature` entries, which turn on a dependency rather than a feature
+/// of this crate.
+fn enabled_features(list: &str) -> Vec<String> {
+    list.split('"')
+        .skip(1)
+        .step_by(2)
+        .filter(|s| !s.starts_with("dep:") && !s.contains('/'))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The features a build enables, resolved **transitively** from `roots`.
+///
+/// Transitive because a feature list is a graph and the guard below is about
+/// what a default build compiles. `default = ["pdfium"]` with
+/// `pdfium = ["dep:pdfium-render", "avif"]` puts `avif` in a default build
+/// without the string "avif" appearing anywhere near `default`, and the line
+/// grep this replaces was green over exactly that (issue #949).
+fn feature_closure(manifest: &str, roots: &[&str]) -> BTreeSet<String> {
+    let table = feature_table(manifest);
+    // Seeded with the roots themselves, not left empty: a cycle that loops
+    // back to touch a root by name would otherwise reprocess it once before
+    // the first successful `seen.insert` for it closes the loop. Harmless
+    // for this crate's actual, acyclic `Cargo.toml`, but a graph-walk
+    // function claiming to resolve "a feature list is a graph" should not
+    // carry an asymmetry a hand-edited manifest could expose (issue #940's
+    // panel).
+    let mut seen: BTreeSet<String> = roots.iter().map(|r| (*r).to_owned()).collect();
+    let mut queue: Vec<String> = roots.iter().map(|r| (*r).to_owned()).collect();
+    while let Some(name) = queue.pop() {
+        for next in table.get(&name).map(Vec::as_slice).unwrap_or_default() {
+            if seen.insert(next.clone()) {
+                queue.push(next.clone());
+            }
+        }
+    }
+    seen
+}
+
+/**
+ * Tests that the default-build feature set is resolved through `[features]`
+ * rather than read off one line.
+ * A feature list is a graph: `default = ["pdfium"]` with
+ * `pdfium = ["dep:pdfium-render", "avif"]` puts `avif` in a default build
+ * without the string "avif" appearing anywhere near `default`, and
+ * `the_crates_own_unsafe_stays_out_of_a_default_build` greps that one line
+ * (issue #949). `ci_feature_coverage.rs` would not catch it either: its
+ * `declared_features` drops `default` and never reads a feature's dependency
+ * array.
+ * Works by resolving a planted manifest that has exactly that shape, then
+ * resolving the real one from a root whose answer is known and not empty, so
+ * a resolver that returns nothing fails here rather than passing.
+ * Input: a planted manifest and this crate's -> Output: `avif` reachable in
+ * the first, `pdfium` reachable from `pdfium-static` in the second.
+ */
+#[test]
+fn the_default_build_feature_set_is_resolved_through_the_graph() {
+    const PLANTED: &str = "[package]\nname = \"x\"\n\n[features]\n\
+                           default = [\"pdfium\"]\n\
+                           pdfium = [\"dep:pdfium-render\", \"avif\"]\n\
+                           avif = [\"dep:rav1d\"]\n";
+    let planted = feature_closure(PLANTED, &["default"]);
+    assert!(
+        planted.contains("avif"),
+        "`default = [\"pdfium\"]` with `pdfium = [.., \"avif\"]` puts `avif` \
+         in a default build, and the resolver did not see it: {planted:?}"
+    );
+
+    // The control that cannot pass on nothing: a root in the real manifest
+    // whose closure is known and non-empty.
+    let real = feature_closure(CARGO_TOML, &["pdfium-static"]);
+    assert!(
+        real.contains("pdfium"),
+        "`pdfium-static = [\"pdfium\", ..]`, so the closure must carry \
+         `pdfium`; got {real:?}"
+    );
+
+    // A cycle that loops back to touch the root by name. Nothing in this
+    // crate's real `Cargo.toml` has one, so nothing else exercises the
+    // graph-walk on one; a hand-edited manifest is not ruled out by the
+    // function's own contract, and the walk must still terminate with the
+    // right closure rather than hang or lose a feature (issue #940's panel).
+    const CYCLIC: &str = "[package]\nname = \"x\"\n\n[features]\n\
+                          a = [\"b\"]\npdfium = []\nb = [\"a\", \"pdfium\"]\n";
+    let cyclic = feature_closure(CYCLIC, &["a"]);
+    assert_eq!(
+        cyclic,
+        ["a", "b", "pdfium"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+        "a cycle back to the root must still terminate with the full closure; got {cyclic:?}"
+    );
 }
 
 #[cfg_attr(miri, ignore)]
@@ -338,24 +524,45 @@ fn the_scanner_reads_code_and_not_prose() {
     }
 }
 
-#[cfg_attr(miri, ignore)]
 #[test]
 fn the_crates_own_unsafe_stays_out_of_a_default_build() {
     // The claim that survives from merge-gate.yml's old paragraph: a default build,
     // and so a bare `cargo miri test`, reaches none of this crate's own `unsafe`.
-    let manifest = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
-        .expect("read Cargo.toml");
-    let default = manifest
-        .lines()
-        .find(|l| l.starts_with("default = "))
-        .expect("Cargo.toml must declare a default feature list");
+    let default = feature_closure(CARGO_TOML, &["default"]);
     for (file, _) in ALLOWED {
         let feature = file.trim_end_matches(".rs");
         assert!(
             !default.contains(feature),
-            "`{feature}` is in the default feature list, so a default build now compiles \
-             this crate's own `unsafe`. merge-gate.yml's paragraph on Miri coverage is no \
-             longer true and must be rewritten (issue #897).\n  default = {default}"
+            "`{feature}` is reachable from the default feature list, so a default build \
+             now compiles this crate's own `unsafe`. merge-gate.yml's paragraph on Miri \
+             coverage is no longer true and must be rewritten (issue #897).\n  \
+             default closure = {default:?}"
         );
     }
+}
+
+/**
+ * Tests that the walk this inventory is built on descends into
+ * subdirectories.
+ * `src/` is flat today, so the file-count control cannot notice a walk that
+ * stops at the top: an `unsafe` block in the first `src/anything/mod.rs`
+ * anybody adds would be invisible and this guard would report a clean tree
+ * (issue #949). `fuzz/` is the directory in this repo that already has a
+ * nested `.rs`, so the control uses that rather than a fixture nobody would
+ * maintain.
+ * Works by walking `fuzz/` and asserting the nested target turns up under its
+ * subdirectory path.
+ * Input: `fuzz/` -> Output: `fuzz_targets/fuzz_fits.rs` is in the set.
+ */
+#[cfg_attr(miri, ignore)]
+#[test]
+fn the_walk_descends_into_subdirectories() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("fuzz");
+    let found: Vec<String> = rs_files_under(&root).into_iter().map(|(r, _)| r).collect();
+    assert!(
+        found.contains(&"fuzz_targets/fuzz_fits.rs".to_owned()),
+        "the walk did not descend into `fuzz/fuzz_targets/`, so a module in a \
+         subdirectory of `src/` would be invisible to this inventory and it \
+         would report a clean tree. Found: {found:?}"
+    );
 }

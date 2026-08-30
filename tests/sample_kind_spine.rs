@@ -531,14 +531,48 @@ fn width_comparisons(src: &str) -> Vec<(usize, String)> {
         .collect()
 }
 
-fn src_files() -> Vec<std::path::PathBuf> {
+/// Every `.rs` file under `dir`, recursively, as `(path relative to `dir`,
+/// full path)`.
+///
+/// Recursive on purpose. `src/` is flat today, so a walk that stops at the top
+/// gives the same answer and the `files.len() > 30` control cannot tell them
+/// apart; the first `src/anything/mod.rs` added would exit this guard in
+/// silence (issue #949). `tests/miri_ignore_convention.rs` already recurses,
+/// and two of the three walks agreeing is not a rule.
+fn rs_files_under(dir: &std::path::Path) -> Vec<(String, std::path::PathBuf)> {
+    fn walk(dir: &std::path::Path, prefix: &str, out: &mut Vec<(String, std::path::PathBuf)>) {
+        let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()))
+            .map(|e| e.expect("cannot read a directory entry").path())
+            .collect();
+        entries.sort();
+        for path in entries {
+            let name = path
+                .file_name()
+                .expect("a directory entry has a name")
+                .to_string_lossy()
+                .into_owned();
+            let rel = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{prefix}/{name}")
+            };
+            if path.is_dir() {
+                walk(&path, &rel, out);
+            } else if name.ends_with(".rs") {
+                out.push((rel, path));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(dir, "", &mut out);
+    out.sort();
+    out
+}
+
+fn src_files() -> Vec<(String, std::path::PathBuf)> {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut files: Vec<_> = std::fs::read_dir(&dir)
-        .expect("src/ is readable")
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|e| e == "rs"))
-        .collect();
-    files.sort();
+    let files = rs_files_under(&dir);
     assert!(
         files.len() > 30,
         "positive control failed: only {} files found under src/, so a zero \
@@ -546,6 +580,35 @@ fn src_files() -> Vec<std::path::PathBuf> {
         files.len()
     );
     files
+}
+
+/**
+ * Tests that the walk this scan is built on descends into subdirectories.
+ * `src/` is flat today, so `files.len() > 30` cannot notice a walk that stops
+ * at the top: the first `src/anything/mod.rs` anybody adds would be invisible
+ * to this guard and it would say nothing (issue #949). `fuzz/` is the
+ * directory in this repo that already has a nested `.rs`, so the control uses
+ * that rather than a fixture nobody would maintain.
+ * Works by walking `fuzz/` and asserting the nested target turns up under its
+ * subdirectory path, with a top-level file as the control that the walk ran
+ * at all.
+ * Input: `fuzz/` -> Output: `fuzz_targets/fuzz_fits.rs` is in the set.
+ *
+ * Carries `#[cfg_attr(miri, ignore)]` because it reads a directory, which
+ * Miri's isolation layer refuses; an unannotated one ends the whole run
+ * (issue #652).
+ */
+#[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+fn the_walk_descends_into_subdirectories() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fuzz");
+    let found: Vec<String> = rs_files_under(&root).into_iter().map(|(r, _)| r).collect();
+    assert!(
+        found.contains(&"fuzz_targets/fuzz_fits.rs".to_owned()),
+        "the walk did not descend into `fuzz/fuzz_targets/`, so a module in a \
+         subdirectory of `src/` would be invisible to this guard and it would \
+         report a clean tree. Found: {found:?}"
+    );
 }
 
 /**
@@ -741,13 +804,8 @@ fn the_documented_blind_spots_are_still_blind() {
 #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn a_byte_width_is_never_compared_outside_the_named_countdown() {
     let mut found: BTreeSet<(String, String)> = BTreeSet::new();
-    for path in src_files() {
-        let rel = format!(
-            "src/{}",
-            path.file_name()
-                .expect("a file has a name")
-                .to_string_lossy()
-        );
+    for (name, path) in src_files() {
+        let rel = format!("src/{name}");
         let src = std::fs::read_to_string(&path).expect("a source file is readable");
         for (n, text) in width_comparisons(&src) {
             found.insert((format!("{rel}:{n}"), text));
