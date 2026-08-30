@@ -15,10 +15,16 @@
 //! * The deferred **decoders** are free functions that return
 //!   [`DecodeError`] (an alias of [`crate::source::SourceError`]) naming the
 //!   capability that is not available in this build.
-//! * [`Raster::dzsave_buffer`] is real: it packs a DeepZoom manifest and the
-//!   image tile into a valid, self-contained zip in memory. The zip container
-//!   is written by hand (STORE method, CRC-32 via `flate2`) because the
-//!   `zip`-crate path lives behind the optional `packfile` feature.
+//! * [`Raster::dzsave_buffer`] is real in the sense that it packs a valid,
+//!   self-contained zip in memory (STORE method, CRC-32 via `flate2`, so it
+//!   depends on no more than the always-present `flate2` crate rather than
+//!   the `zip`-crate path behind the optional `packfile` feature). It is
+//!   **not** a DeepZoom pyramid: it writes exactly one tile, at the source
+//!   raster's native resolution and with no compression, and tags it
+//!   `Format="raw"` inside the `.dzi`, a value no real DeepZoom viewer
+//!   accepts. It is a stand-in kept unrouted on purpose rather than wired
+//!   into [`Raster::save`] / [`Raster::encode_to_buffer`]; see its own doc
+//!   and `tests/save_route_coverage.rs` (issue #958).
 //!
 //! When a pure-Rust or delegate backend for one of these formats lands, the
 //! stub body is replaced with the real codec while the signature stays put.
@@ -316,14 +322,29 @@ pub fn decode_bytes_fail_on(data: &[u8], fail_on: &str) -> Result<Raster, Decode
 // ---------------------------------------------------------------------------
 
 impl Raster {
-    /// Save the raster as a DeepZoom image set packed into an in-memory zip
-    /// blob (libvips `dzsave_buffer`).
+    /// Pack a stand-in for a DeepZoom image set into an in-memory zip blob
+    /// (libvips `dzsave_buffer`), **not** a real pyramid.
     ///
-    /// The blob is a valid, self-contained zip carrying the DeepZoom `.dzi`
-    /// manifest for the raster's dimensions plus the image tile. It is
-    /// written with the STORE method (no compression) and a hand-computed
-    /// CRC-32, so it depends only on the always-present `flate2` crate rather
-    /// than the optional `packfile`/`zip` path.
+    /// The blob is a valid, self-contained zip carrying a `.dzi` manifest for
+    /// the raster's dimensions plus one tile: the whole raster, uncompressed,
+    /// at native resolution, at `_files/0/0_0.raw`. It is written with the
+    /// STORE method (no compression) and a hand-computed CRC-32, so it
+    /// depends only on the always-present `flate2` crate rather than the
+    /// optional `packfile`/`zip` path.
+    ///
+    /// A real DeepZoom pyramid has multiple resolution levels, each tiled and
+    /// each tile compressed with a real image codec (`.jpg` by default), and
+    /// the `.dzi` `Format` attribute names that codec (`"jpeg"`, `"png"`,
+    /// ...). This writes one level, one uncompressed tile, and `Format="raw"`,
+    /// a value no real DeepZoom viewer accepts, so it is honest about what it
+    /// is rather than a smaller pyramid. Building the real thing means the
+    /// same multi-level, checkpointed tiling machinery
+    /// [`crate::engine::generate_pyramid_region`] and
+    /// [`crate::planner::PyramidPlanner`] already run for the object-store and
+    /// packfile sinks (large distributed jobs), not a synchronous call
+    /// returning one `Vec<u8>`, so this stays a documented stand-in rather
+    /// than a half pyramid; it is deliberately kept off [`Raster::save`] and
+    /// [`Raster::encode_to_buffer`] (issue #958).
     pub fn dzsave_buffer(&self) -> Vec<u8> {
         const STEM: &str = "image";
         const TILE_SIZE: u32 = 256;

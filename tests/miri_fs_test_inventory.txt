@@ -333,6 +333,7 @@ annotated   fs-detected  tests/pdfium_source_audit.rs::audit_gate_accepts_patche
 annotated   fs-detected  tests/pdfium_source_audit.rs::audit_gate_rejects_unpatched_consumer
 annotated   fs-detected  tests/pdfium_source_audit.rs::patchless_downstream_consumer_resolves_the_fork
 annotated   fs-detected  tests/radiance_ported_surface.rs::encode_and_save_round_trip_from_outside_the_crate
+annotated   fs-detected  tests/save_route_coverage.rs::csv_and_mat_route_through_both_dispatches_to_the_same_bytes
 annotated   fs-detected  tests/save_route_coverage.rs::every_dispatch_arm_is_claimed_by_a_writer
 annotated   fs-detected  tests/save_route_coverage.rs::every_public_writer_is_reachable_or_recorded
 annotated   fs-detected  tests/save_route_coverage.rs::every_wired_writer_names_arms_the_dispatches_have

@@ -240,8 +240,8 @@ impl Raster {
     /// Uses the same dispatch as [`encode_to_target`]: `"jpeg"` / `"jpg"`,
     /// `"png"`, `"gif"`, `"webp"`, `"tif"` / `"tiff"`, `"jxl"`,
     /// `"jp2k"` / `"jp2"` / `"j2k"` / `"jpt"` / `"j2c"` / `"jpc"`, `"uhdr"`,
-    /// `"hdr"`, `"ppm"` / `"pgm"`, `"fits"` / `"fit"` / `"fts"` and
-    /// `"v"` / `"vips"` are wired; any other format returns
+    /// `"hdr"`, `"ppm"` / `"pgm"`, `"csv"`, `"mat"`, `"fits"` / `"fit"` / `"fts"`
+    /// and `"v"` / `"vips"` are wired; any other format returns
     /// [`EncodeError::Unsupported`]. `"webp"` encodes losslessly at
     /// [`crate::webp::SaveOptions::default`], keeping any attached metadata,
     /// `"gif"` at [`crate::gif::SaveOptions::default`], and `"jxl"` losslessly at
@@ -294,6 +294,21 @@ impl Raster {
     /// purpose. A quoted name in this block is a value a caller may pass, and
     /// `the_format_dispatch_and_the_list_a_caller_is_given_cannot_drift_apart`
     /// reads them as exactly that.
+    ///
+    /// `"csv"` and `"mat"` are `csvsave` and `matrixsave`'s one registered
+    /// suffix apiece (measured on 8.18.6: `nocache (.csv)` and `nocache
+    /// (.mat)`, both `priority=0, mono`). Both convert a raster with more
+    /// than one band to mono first, the same way both saves declaring the
+    /// `mono` flag do in libvips itself, and both refuse (typed
+    /// [`EncodeError::Encode`]) a multi-band raster whose interpretation has
+    /// no colourspace route rather than guessing one; `"csv"` also writes
+    /// TAB rather than a comma, matching `csvsave` despite the format's name
+    /// (issue #958, and see `src/textio.rs` for the conversion and the
+    /// measurement it is pinned against). `"mat"` carries a known asymmetry:
+    /// vips also registers `.mat` for the MATLAB binary loader and
+    /// disambiguates on the way in by content-sniffing, and this crate's
+    /// sniffer has no text-matrix row, so bytes this writes for `"mat"` do
+    /// not decode back through [`crate::decode_bytes`]/[`crate::decode_file`].
     ///
     /// # Errors
     ///
@@ -376,6 +391,16 @@ fn encode_for_format(raster: &Raster, format: &str) -> Result<Vec<u8>, EncodeErr
         // registers. The name picks the container, so the row refuses a band
         // count that names the other one rather than converting.
         "ppm" | "pgm" => raster.encode_netpbm(&key),
+        // `csvsave`'s and `matrixsave`'s one registered suffix apiece,
+        // measured on 8.18.6 (`vips -l`: `nocache (.csv), priority=0, mono`
+        // and `nocache (.mat), priority=0, mono`). Both refuse a multi-band
+        // raster whose interpretation has no colourspace route, rather than
+        // guessing one the way `vips_image_write` does; see `src/textio.rs`
+        // for the mono conversion and `imageio.rs::encode_for_extension` for
+        // the `.mat` decode-back asymmetry these two rows share with that
+        // route (issue #958).
+        "csv" => raster.csv_save(),
+        "mat" => raster.matrix_save(),
         // The three suffixes vips registers for FITS (`vips__fits_suffs`,
         // `fits.c:125`). `fitssave` takes no options, so there is nothing
         // to default here.
