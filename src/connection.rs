@@ -299,10 +299,16 @@ impl Raster {
     /// suffix apiece (measured on 8.18.6: `nocache (.csv)` and `nocache
     /// (.mat)`, both `priority=0, mono`). Both convert a raster with more
     /// than one band to mono first, the same way both saves declaring the
-    /// `mono` flag do in libvips itself; `"csv"` also writes TAB rather than
-    /// a comma, matching `csvsave` despite the format's name (issue #958,
-    /// and see `src/textio.rs` for the conversion and the measurement it is
-    /// pinned against).
+    /// `mono` flag do in libvips itself, and both refuse (typed
+    /// [`EncodeError::Encode`]) a multi-band raster whose interpretation has
+    /// no colourspace route rather than guessing one; `"csv"` also writes
+    /// TAB rather than a comma, matching `csvsave` despite the format's name
+    /// (issue #958, and see `src/textio.rs` for the conversion and the
+    /// measurement it is pinned against). `"mat"` carries a known asymmetry:
+    /// vips also registers `.mat` for the MATLAB binary loader and
+    /// disambiguates on the way in by content-sniffing, and this crate's
+    /// sniffer has no text-matrix row, so bytes this writes for `"mat"` do
+    /// not decode back through [`crate::decode_bytes`]/[`crate::decode_file`].
     ///
     /// # Errors
     ///
@@ -387,13 +393,14 @@ fn encode_for_format(raster: &Raster, format: &str) -> Result<Vec<u8>, EncodeErr
         "ppm" | "pgm" => raster.encode_netpbm(&key),
         // `csvsave`'s and `matrixsave`'s one registered suffix apiece,
         // measured on 8.18.6 (`vips -l`: `nocache (.csv), priority=0, mono`
-        // and `nocache (.mat), priority=0, mono`). Both are infallible, so
-        // there is no error for either to carry; see `src/textio.rs` for the
-        // mono conversion and `imageio.rs::encode_for_extension` for the
-        // `.mat` decode-back asymmetry these two rows share with that route
-        // (issue #958).
-        "csv" => Ok(raster.csv_save()),
-        "mat" => Ok(raster.matrix_save()),
+        // and `nocache (.mat), priority=0, mono`). Both refuse a multi-band
+        // raster whose interpretation has no colourspace route, rather than
+        // guessing one the way `vips_image_write` does; see `src/textio.rs`
+        // for the mono conversion and `imageio.rs::encode_for_extension` for
+        // the `.mat` decode-back asymmetry these two rows share with that
+        // route (issue #958).
+        "csv" => raster.csv_save(),
+        "mat" => raster.matrix_save(),
         // The three suffixes vips registers for FITS (`vips__fits_suffs`,
         // `fits.c:125`). `fitssave` takes no options, so there is nothing
         // to default here.

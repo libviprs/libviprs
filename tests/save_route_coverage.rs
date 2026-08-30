@@ -798,7 +798,7 @@ fn csv_and_mat_route_through_both_dispatches_to_the_same_bytes() {
     let im = rgb();
     let dir = tempfile::tempdir().expect("tempdir");
 
-    let direct_csv = im.csv_save();
+    let direct_csv = im.csv_save().expect("sRGB has a colourspace route");
     let via_buffer_csv = im.encode_to_buffer("csv").expect("csv is wired");
     assert_eq!(via_buffer_csv, direct_csv);
     let csv_path = dir.path().join("out.csv");
@@ -808,7 +808,7 @@ fn csv_and_mat_route_through_both_dispatches_to_the_same_bytes() {
         direct_csv
     );
 
-    let direct_mat = im.matrix_save();
+    let direct_mat = im.matrix_save().expect("sRGB has a colourspace route");
     let via_buffer_mat = im.encode_to_buffer("mat").expect("mat is wired");
     assert_eq!(via_buffer_mat, direct_mat);
     let mat_path = dir.path().join("out.mat");
@@ -832,7 +832,7 @@ fn csv_and_mat_route_through_both_dispatches_to_the_same_bytes() {
 #[test]
 fn matrix_saved_bytes_do_not_decode_back_through_the_sniffer() {
     let im = rgb();
-    let mat_bytes = im.matrix_save();
+    let mat_bytes = im.matrix_save().expect("sRGB has a colourspace route");
     assert!(
         decode_bytes(&mat_bytes).is_err(),
         "a text-matrix `.mat` must not decode back until this crate sniffs \

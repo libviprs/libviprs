@@ -128,6 +128,7 @@
 //! so the day an encoder does arrive it goes red and says so.
 
 use crate::codec::{DecodeError, EncodeError};
+use crate::colour::ColourError;
 use crate::conversion::Interpretation;
 use crate::pixel::{PixelFormat, SampleKind, read_sample_f64};
 use crate::raster::Raster;
@@ -188,19 +189,22 @@ fn fmt_sample(data: &[u8], off: usize, fmt: PixelFormat) -> String {
 /// one band to begin with.
 ///
 /// A raster whose colour space [`Raster::try_colourspace`] does not
-/// recognise (a `multiband`-tagged raster with more than one band, which
-/// `vips_image_write` would still convert by guessing sRGB or CMYK from the
-/// band count, a step this crate's colour machinery does not have) falls
-/// back to band 0 rather than guessing at that heuristic; unlike the
-/// measured RGB case, that fallback is not checked against the oracle.
-fn mono_view(raster: &Raster) -> Cow<'_, Raster> {
+/// recognise (a `multiband`-tagged raster with more than one band, which is
+/// what an untagged multiband raster carries by default, is the reachable
+/// case) refuses rather than falling back to band 0: `vips_image_write`
+/// would still convert it by guessing sRGB or CMYK from the band count, a
+/// step this crate's colour machinery does not have, so there is no answer
+/// here this crate can measure against the oracle, and band 0 is not that
+/// answer either (issue #958's own review found this: the refusal was
+/// briefly a silent band-0 fallback, exactly the divergence this file
+/// exists to close, reachable through completely ordinary usage since
+/// `Interpretation::for_format` tags an untagged multiband raster
+/// `Multiband` by default).
+fn mono_view(raster: &Raster) -> Result<Cow<'_, Raster>, ColourError> {
     if raster.format().channels() <= 1 {
-        return Cow::Borrowed(raster);
+        return Ok(Cow::Borrowed(raster));
     }
-    match raster.try_colourspace(Interpretation::Bw) {
-        Ok(bw) => Cow::Owned(bw),
-        Err(_) => Cow::Borrowed(raster),
-    }
+    raster.try_colourspace(Interpretation::Bw).map(Cow::Owned)
 }
 
 impl Raster {
@@ -210,9 +214,8 @@ impl Raster {
     /// a space-separated decimal. `matrix` is a one-band numeric format
     /// (`matrixsave` carries the `mono` saveable flag), so a raster with
     /// more than one band is converted to mono first, through the same
-    /// path [`Raster::colourspace`] uses to reach [`Interpretation::Bw`];
-    /// see `mono_view` for what is and is not measured about that. A
-    /// raster that already has one band passes through untouched. The
+    /// path [`Raster::colourspace`] uses to reach [`Interpretation::Bw`].
+    /// A raster that already has one band passes through untouched. The
     /// inverse is [`Raster::matrix_load`].
     ///
     /// Measured against the pinned vips 8.18.6 on a 3x2 sRGB ramp (issue
@@ -220,8 +223,18 @@ impl Raster {
     /// for pixels `(1,100,200) (11,101,201) (21,102,202)` over
     /// `(31,103,203) (41,104,204) (51,105,205)`, and this now writes the
     /// same bytes.
-    pub fn matrix_save(&self) -> Vec<u8> {
-        let mono = mono_view(self);
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EncodeError::Encode`] for a multi-band raster whose
+    /// interpretation this crate's colourspace machinery has no route for
+    /// (an untagged multiband raster is the ordinary case: `Interpretation::
+    /// for_format` tags it `Multiband` by default). `vips_image_write`
+    /// would still guess a colourspace from the band count in that case;
+    /// this crate refuses instead of guessing, since a guess with no oracle
+    /// measurement behind it is not a claim this function can back up.
+    pub fn matrix_save(&self) -> Result<Vec<u8>, EncodeError> {
+        let mono = mono_view(self).map_err(|e| EncodeError::Encode(e.to_string()))?;
         let w = mono.width() as usize;
         let h = mono.height() as usize;
         let fmt = mono.format();
@@ -243,7 +256,7 @@ impl Raster {
             }
             out.push('\n');
         }
-        out.into_bytes()
+        Ok(out.into_bytes())
     }
 
     /// Serialise as **TAB**-separated values, matching libvips `csvsave`
@@ -252,8 +265,8 @@ impl Raster {
     /// Writes one line per image row, TAB-joined. CSV is a one-band numeric
     /// format the same way `matrix` is (`csvsave` carries the `mono`
     /// saveable flag), so a raster with more than one band is converted to
-    /// mono first; see `mono_view`. The inverse is [`Raster::csv_load`],
-    /// which reads either a comma or a TAB.
+    /// mono first. The inverse is [`Raster::csv_load`], which reads either
+    /// a comma or a TAB.
     ///
     /// Measured against the pinned vips 8.18.6 on the same 3x2 sRGB ramp as
     /// [`Raster::matrix_save`] (issue #958): `vips csvsave` writes
@@ -262,8 +275,15 @@ impl Raster {
     /// Earlier versions of this function wrote commas and band 0 only,
     /// which was never libvips' `csvsave` format despite the name; see
     /// `CHANGELOG.md`.
-    pub fn csv_save(&self) -> Vec<u8> {
-        let mono = mono_view(self);
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EncodeError::Encode`] for the same reason and the same
+    /// reachable case as [`Raster::matrix_save`]: a multi-band raster whose
+    /// interpretation has no colourspace route, which is what an untagged
+    /// multiband raster carries by default.
+    pub fn csv_save(&self) -> Result<Vec<u8>, EncodeError> {
+        let mono = mono_view(self).map_err(|e| EncodeError::Encode(e.to_string()))?;
         let w = mono.width() as usize;
         let h = mono.height() as usize;
         let fmt = mono.format();
@@ -281,7 +301,7 @@ impl Raster {
             }
             out.push('\n');
         }
-        out.into_bytes()
+        Ok(out.into_bytes())
     }
 
     /// Encode as a binary Netpbm image (`P5` for one band, `P6` for three).
@@ -1084,7 +1104,9 @@ mod tests {
      */
     #[test]
     fn matrix_save_matches_the_oracle_on_a_multiband_raster() {
-        let bytes = oracle_ramp().matrix_save();
+        let bytes = oracle_ramp()
+            .matrix_save()
+            .expect("sRGB has a colourspace route");
         assert_eq!(bytes, b"3 2\n102 103 105\n105 107 109\n");
     }
 
@@ -1099,8 +1121,51 @@ mod tests {
      */
     #[test]
     fn csv_save_matches_the_oracle_on_a_multiband_raster() {
-        let bytes = oracle_ramp().csv_save();
+        let bytes = oracle_ramp()
+            .csv_save()
+            .expect("sRGB has a colourspace route");
         assert_eq!(bytes, b"102\t103\t105\n105\t107\t109\n");
+    }
+
+    /**
+     * Tests that an untagged multi-band raster refuses rather than silently
+     * writing band 0 (issue #940's batch-1 review of #958: `mono_view`
+     * briefly fell back to `Cow::Borrowed` on any `try_colourspace` error,
+     * reintroducing the exact band-0 divergence this file exists to close,
+     * reachable through completely ordinary usage since
+     * `Interpretation::for_format` tags an untagged multiband raster
+     * `Multiband` by default and that tag has no colourspace route).
+     *
+     * A 5-band `Multi8` raster, untagged, is exactly that ordinary case.
+     * Before the fix this silently wrote `"10\t60\n"` (band 0 of each
+     * pixel) with no error; it must now refuse instead.
+     */
+    #[test]
+    fn an_untagged_multiband_raster_refuses_rather_than_writing_band_zero() {
+        let n = core::num::NonZeroU16::new(5).unwrap();
+        let r = Raster::new(
+            1,
+            2,
+            PixelFormat::Multi8(n),
+            vec![10, 20, 30, 40, 50, 60, 70, 80, 90, 100],
+        )
+        .expect("well-formed 5-band raster");
+        assert_eq!(
+            r.interpretation(),
+            crate::conversion::Interpretation::Multiband,
+            "the fixture must be untagged, which is the ordinary case this \
+             test exists to cover"
+        );
+        assert!(
+            r.matrix_save().is_err(),
+            "an untagged multiband raster has no colourspace route and must \
+             refuse rather than silently writing band 0"
+        );
+        assert!(
+            r.csv_save().is_err(),
+            "an untagged multiband raster has no colourspace route and must \
+             refuse rather than silently writing band 0"
+        );
     }
 
     /**
@@ -1137,14 +1202,23 @@ mod tests {
         // If `mono_view` ran this through `try_colourspace` unconditionally,
         // both calls below would panic on Cow::Owned(Err) instead of writing
         // the passthrough bytes.
-        assert_eq!(r.matrix_save(), b"3 2\n0 1 -2.5\n0.25 100 -0.75\n");
-        assert_eq!(r.csv_save(), b"0\t1\t-2.5\n0.25\t100\t-0.75\n");
+        assert_eq!(
+            r.matrix_save()
+                .expect("one-band raster, no colourspace step"),
+            b"3 2\n0 1 -2.5\n0.25 100 -0.75\n"
+        );
+        assert_eq!(
+            r.csv_save().expect("one-band raster, no colourspace step"),
+            b"0\t1\t-2.5\n0.25\t100\t-0.75\n"
+        );
     }
 
     #[test]
     fn matrix_round_trips_losslessly() {
         let r = synth_float();
-        let bytes = r.matrix_save();
+        let bytes = r
+            .matrix_save()
+            .expect("one-band raster, no colourspace step");
         let back = Raster::matrix_load(&bytes).expect("matrix reload");
         assert_eq!((back.width(), back.height()), (r.width(), r.height()));
         assert_eq!(max_abs_diff(&r, &back), 0.0);
@@ -1163,7 +1237,7 @@ mod tests {
     #[test]
     fn csv_round_trips_losslessly() {
         let r = synth_float();
-        let bytes = r.csv_save();
+        let bytes = r.csv_save().expect("one-band raster, no colourspace step");
         let back = Raster::csv_load(&bytes).expect("csv reload");
         assert_eq!((back.width(), back.height()), (r.width(), r.height()));
         assert_eq!(max_abs_diff(&r, &back), 0.0);
@@ -1267,9 +1341,13 @@ mod tests {
         // functions. Drive each one through that path so the surface the cells
         // depend on cannot silently regress to a free fn.
         let r = synth_float();
-        let m = <Raster>::matrix_load(&r.matrix_save()).expect("matrix reload");
+        let matrix_bytes = r
+            .matrix_save()
+            .expect("one-band raster, no colourspace step");
+        let m = <Raster>::matrix_load(&matrix_bytes).expect("matrix reload");
         assert_eq!((m.width(), m.height()), (r.width(), r.height()));
-        let c = <Raster>::csv_load(&r.csv_save()).expect("csv reload");
+        let csv_bytes = r.csv_save().expect("one-band raster, no colourspace step");
+        let c = <Raster>::csv_load(&csv_bytes).expect("csv reload");
         assert_eq!((c.width(), c.height()), (r.width(), r.height()));
         let gray =
             Raster::new(2, 1, PixelFormat::Gray8, vec![7, 8]).expect("well-formed gray raster");

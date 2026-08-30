@@ -1112,17 +1112,21 @@ and not under `Fixed`: this file is the only place they can be caught.
   than losing it.
 
 - **`csv_save` and `matrix_save` write what libvips `csvsave` and
-  `matrixsave` write, which is not what they wrote before** (issue #958). No
-  signature moves; the bytes do, for any raster with more than one band, and
-  `csv_save`'s bytes change for every raster.
+  `matrixsave` write, which is not what they wrote before, and both now
+  return `Result` instead of `Vec<u8>`** (issue #958). The bytes change for
+  any raster with more than one band, `csv_save`'s bytes change for every
+  raster, and both signatures move from infallible to
+  `Result<Vec<u8>, EncodeError>`.
 
   Measured on the pinned 8.18.6 against a 3x2 sRGB ramp (pixels
   `(1,100,200) (11,101,201) (21,102,202)` over
   `(31,103,203) (41,104,204) (51,105,205)`): `vips csvsave` writes
-  `102\t103\t105\n105\t107\t109\n` and `vips matrixsave` writes
-  `3 2\n102 103 105\n105 107 109\n`. Both saves carry libvips' `mono`
-  saveable flag, so a wider image goes through the same sRGB -> linear ->
-  Rec.709 luminance -> sRGB lookup-table conversion
+  `102\t103\t105\n105\t107\t109\n` where `csv_save` used to write
+  `1,11,21\n31,41,51\n`, and `vips matrixsave` writes
+  `3 2\n102 103 105\n105 107 109\n` where `matrix_save` used to write
+  `3 2\n1 11 21\n31 41 51\n`. Both saves carry libvips' `mono` saveable
+  flag, so a wider image goes through the same sRGB -> linear -> Rec.709
+  luminance -> sRGB lookup-table conversion
   `Raster::colourspace(Interpretation::Bw)` already keeps bit-exact against
   libvips (issue #581), not a band-0 read. `csv_save` also swaps its
   separator from a comma to a TAB, which is what `csvsave` writes despite the
@@ -1131,6 +1135,16 @@ and not under `Fixed`: this file is the only place they can be caught.
   whatever its interpretation tag, which is what libvips itself does too:
   measured the same way, `matrixsave` on a 1-band image writes identical
   values whether it is tagged `matrix`, `b-w` or `multiband`.
+
+  The signature change is why both now return `Result`: a multi-band raster
+  whose interpretation this crate's colourspace machinery has no route for
+  (an untagged multiband raster is the ordinary case, since
+  `Interpretation::for_format` tags one `Multiband` by default) has no mono
+  conversion to perform. `vips_image_write` would still guess a colourspace
+  from the band count for that case; this crate refuses
+  ([`EncodeError::Encode`]) rather than guessing one with no oracle
+  measurement behind it, the same "refuse rather than diverge silently"
+  choice the rest of this crate already makes.
 
   The old behaviour was never a documented promise about matching vips; it
   was `matrix_save`'s own doc claiming libvips `matrix` format parity while

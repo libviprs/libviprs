@@ -1665,12 +1665,16 @@ impl Raster {
             })?,
             // `csvsave`'s one registered suffix, measured on 8.18.6: its
             // `vips -l` line reads `nocache (.csv), priority=0, mono`. Both
-            // that entry and `matrixsave` below are infallible, so there is
-            // nothing for `?` to propagate.
+            // that entry and `matrixsave` below refuse a multi-band raster
+            // whose interpretation has no colourspace route (issue #958),
+            // rather than guessing one.
             //
             // `keep_metadata` has nothing to act on: a text grid has nowhere
             // to put an ICC profile, an EXIF block or an XMP packet.
-            "csv" => self.csv_save(),
+            "csv" => self.csv_save().map_err(|e| match e {
+                crate::codec::EncodeError::Io(io) => SaveError::Io(io),
+                other => SaveError::Encode(SinkError::EncodeMsg(other.to_string())),
+            })?,
             // `matrixsave`'s one registered suffix, measured the same way:
             // `nocache (.mat), priority=0, mono`. `.mat` is also MATLAB's
             // suffix on the way in (`SniffedFormat::Mat`, content-sniffed),
@@ -1682,7 +1686,10 @@ impl Raster {
             // asymmetry-pin shape `.ppm` carried before #910.
             //
             // `keep_metadata` has nothing to act on, same as `csv` above.
-            "mat" => self.matrix_save(),
+            "mat" => self.matrix_save().map_err(|e| match e {
+                crate::codec::EncodeError::Io(io) => SaveError::Io(io),
+                other => SaveError::Encode(SinkError::EncodeMsg(other.to_string())),
+            })?,
             // All three suffixes vips registers (`vips__fits_suffs`,
             // `fits.c:125`). `keep_metadata` has nothing to act on: the
             // records a FITS header carries are the geometry cfitsio
