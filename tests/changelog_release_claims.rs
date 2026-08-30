@@ -30,12 +30,25 @@
 //! #501 and #920 entries set) without this reading it as live. The stripper has
 //! its own control below, because a stripper that removed everything would make
 //! every claim disappear and this pass on nothing.
+//!
+//! # `MIGRATION.md` makes the same kind of claim
+//!
+//! Issue #961's 0.4.0-to-0.5.0 section says
+//! "`ConvolutionError::ZeroTimes` shipped in `v0.4.0`" and
+//! "`ConversionError::UnsupportedSampleKind` has never been in a release",
+//! the exact two phrasings this file already checks, about the exact two
+//! identifiers this file already carries as controls for `CHANGELOG.md`. A
+//! migration guide making an unchecked claim about what shipped is the same
+//! failure this file exists to catch, so the scan runs over both documents
+//! rather than staying CHANGELOG-only and leaving the second copy to drift on
+//! its own.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const CHANGELOG: &str = include_str!("../CHANGELOG.md");
+const MIGRATION: &str = include_str!("../MIGRATION.md");
 
 /// The phrase that says an identifier was never released.
 const NEVER: &str = "has never been in a release";
@@ -125,14 +138,17 @@ fn tag_src_contains(tag: &str, needle: &str) -> bool {
 }
 
 /**
- * Tests that every release claim in `CHANGELOG.md` is true of the tags
- * (issue #947).
+ * Tests that every release claim in `CHANGELOG.md` and `MIGRATION.md` is true
+ * of the tags (issues #947, #961).
  *
  * Two phrasings are claims: "`X` has never been in a release", which requires
  * `X` to be absent from every tag, and "`X` shipped in `vN`", which requires it
  * to be present in that one. Both are answered by `git grep` over the tag's
  * `src/`, which catches an identifier that arrived and left inside a single
- * release as well as one that survived.
+ * release as well as one that survived. `MIGRATION.md` picked up the same two
+ * phrasings once its 0.4.0-to-0.5.0 section existed, about the same two
+ * identifiers this file already carries controls for, so the scan runs over
+ * both documents rather than leaving the second copy unchecked.
  *
  * Four controls, because every step here has a state where it agrees with
  * everything:
@@ -143,8 +159,9 @@ fn tag_src_contains(tag: &str, needle: &str) -> bool {
  *   unrelated to the CHANGELOG;
  * * the grep is checked in both directions on known answers, because an
  *   invocation that always returns "no match" satisfies every "never" claim;
- * * at least one live claim has to be found, because a scan that has stopped
- *   parsing agrees with any CHANGELOG;
+ * * at least one live claim has to be found **in each document**, because a
+ *   scan that has stopped parsing one of them agrees with any claim written
+ *   there;
  * * the retraction stripper is run on a planted string, because one that
  *   removed everything would empty the document.
  */
@@ -182,54 +199,71 @@ fn every_release_claim_in_the_changelog_is_true_of_the_tags() {
         "the retraction stripper is wrong"
     );
 
-    let live = without_retractions(CHANGELOG);
     let mut claims = 0usize;
 
-    // "`X` has never been in a release"
-    let mut from = 0usize;
-    while let Some(i) = live[from..].find(NEVER) {
-        let at = from + i;
-        let ident = identifier_before(&live, at);
-        claims += 1;
-        let released: Vec<&String> = tags.iter().filter(|t| tag_src_contains(t, ident)).collect();
-        assert!(
-            released.is_empty(),
-            "CHANGELOG.md says `{ident}` has never been in a release, and it is \
-             in {released:?}. That sentence is what a user of those releases \
-             reads to decide whether a removal affects them (issue #947)"
-        );
-        from = at + NEVER.len();
-    }
+    for (file, doc) in [("CHANGELOG.md", CHANGELOG), ("MIGRATION.md", MIGRATION)] {
+        let live = without_retractions(doc);
+        let mut claims_here = 0usize;
 
-    // "`X` shipped in vN", with or without backticks round the tag.
-    let mut from = 0usize;
-    while let Some(i) = live[from..].find(SHIPPED) {
-        let at = from + i;
-        let tail = &live[at + SHIPPED.len()..];
-        let tail = tail.strip_prefix('`').unwrap_or(tail);
-        let end = tail
-            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '.'))
-            .unwrap_or(tail.len());
-        let tag = &tail[..end];
-        from = at + SHIPPED.len();
-        // Only version tags are claims about a release; "shipped in `#547`" or
-        // any other backticked thing is prose.
-        if !tag.starts_with('v') || !have.contains(tag) {
-            continue;
+        // "`X` has never been in a release"
+        let mut from = 0usize;
+        while let Some(i) = live[from..].find(NEVER) {
+            let at = from + i;
+            let ident = identifier_before(&live, at);
+            claims += 1;
+            claims_here += 1;
+            let released: Vec<&String> =
+                tags.iter().filter(|t| tag_src_contains(t, ident)).collect();
+            assert!(
+                released.is_empty(),
+                "{file} says `{ident}` has never been in a release, and it is \
+                 in {released:?}. That sentence is what a user of those \
+                 releases reads to decide whether a removal affects them \
+                 (issue #947)"
+            );
+            from = at + NEVER.len();
         }
-        let ident = identifier_before(&live, at);
-        claims += 1;
+
+        // "`X` shipped in vN", with or without backticks round the tag.
+        let mut from = 0usize;
+        while let Some(i) = live[from..].find(SHIPPED) {
+            let at = from + i;
+            let tail = &live[at + SHIPPED.len()..];
+            let tail = tail.strip_prefix('`').unwrap_or(tail);
+            let end = tail
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '.'))
+                .unwrap_or(tail.len());
+            let tag = &tail[..end];
+            from = at + SHIPPED.len();
+            // Only version tags are claims about a release; "shipped in
+            // `#547`" or any other backticked thing is prose.
+            if !tag.starts_with('v') || !have.contains(tag) {
+                continue;
+            }
+            let ident = identifier_before(&live, at);
+            claims += 1;
+            claims_here += 1;
+            assert!(
+                tag_src_contains(tag, ident),
+                "{file} says `{ident}` shipped in {tag}, and it is not in \
+                 that tag's src/"
+            );
+        }
+
+        // Control 3, per document: something was actually examined in each
+        // one, because an empty MIGRATION.md-side scan would agree with any
+        // claim added there later, exactly the hole a CHANGELOG-only version
+        // of this control has.
         assert!(
-            tag_src_contains(tag, ident),
-            "CHANGELOG.md says `{ident}` shipped in {tag}, and it is not in that \
-             tag's src/"
+            claims_here >= 1,
+            "the claim scan found nothing in {file}, so it has stopped \
+             parsing and would agree with any release claim written there"
         );
     }
 
-    // Control 3: something was actually examined.
     assert!(
-        claims >= 1,
-        "the claim scan found nothing in CHANGELOG.md, so it has stopped \
-         parsing and would agree with any release claim written there"
+        claims >= 2,
+        "the claim scan found {claims} claim(s) total across both documents, \
+         fewer than the two per-document positive controls above require"
     );
 }
