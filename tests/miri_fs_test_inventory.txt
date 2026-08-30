@@ -337,7 +337,7 @@ annotated   fs-detected  tests/save_route_coverage.rs::every_dispatch_arm_is_cla
 annotated   fs-detected  tests/save_route_coverage.rs::every_public_writer_is_reachable_or_recorded
 annotated   fs-detected  tests/save_route_coverage.rs::every_wired_writer_names_arms_the_dispatches_have
 annotated   fs-detected  tests/sample_kind_spine.rs::a_byte_width_is_never_compared_outside_the_named_countdown
-annotated   fs-detected  tests/sample_kind_spine.rs::the_walk_descends_into_subdirectories
+annotated   not-detected tests/sample_kind_spine.rs::the_walk_descends_into_subdirectories
 annotated   fs-detected  tests/uhdr_ported_surface.rs::a_smaller_gain_map_is_resampled_linearly_and_not_by_nearest
 annotated   fs-detected  tests/uhdr_ported_surface.rs::an_ordinary_jpeg_stays_jpeg_and_a_uhdr_file_does_not
 annotated   fs-detected  tests/uhdr_ported_surface.rs::degenerate_metadata_reproduces_the_captured_zeros_and_nans
@@ -349,7 +349,7 @@ annotated   fs-detected  tests/uhdr_ported_surface.rs::the_three_band_path_linea
 annotated   fs-detected  tests/uhdr_ported_surface.rs::the_two_powf_cases_are_within_a_measured_ulp_bound
 annotated   fs-detected  tests/uhdr_ported_surface.rs::v2y_8_matches_the_pinned_oracle_table
 annotated   fs-detected  tests/unsafe_inventory.rs::only_the_named_files_carry_the_crates_own_unsafe
-annotated   fs-detected  tests/unsafe_inventory.rs::the_walk_descends_into_subdirectories
+annotated   not-detected tests/unsafe_inventory.rs::the_walk_descends_into_subdirectories
 annotated   fs-detected  tests/webp_ported_surface.rs::encode_and_save_round_trip_exactly
 annotated   fs-detected  tests/webp_ported_surface.rs::the_shared_dispatchers_carry_webp
 annotated   fs-detected  tests/workspace_layout.rs::fuzz_crate_is_a_member_of_the_root_workspace
