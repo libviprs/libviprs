@@ -77,6 +77,9 @@
 /// The manifest, at compile time.
 use std::collections::BTreeSet;
 
+#[path = "common/scan.rs"]
+mod scan;
+
 const CARGO_TOML: &str = include_str!("../Cargo.toml");
 /// The only CI workflow that gates a merge (issue #585), at compile time.
 const CI_YML: &str = include_str!("../.github/workflows/ci.yml");
@@ -601,7 +604,7 @@ fn test_util_gates() -> (Vec<String>, Vec<String>, usize) {
     let mut scanned = Vec::new();
     let mut bare = Vec::new();
     let mut seen = 0usize;
-    for (rel, path) in rs_files_under(&root) {
+    for (rel, path) in scan::rs_files_under(&root) {
         let rel = format!("src/{rel}");
         scanned.push(rel.clone());
         let text = std::fs::read_to_string(&path).expect("read a source file");
@@ -616,44 +619,6 @@ fn test_util_gates() -> (Vec<String>, Vec<String>, usize) {
         }
     }
     (scanned, bare, seen)
-}
-
-/// Every `.rs` file under `dir`, recursively, as `(path relative to `dir`,
-/// full path)`.
-///
-/// Recursive for the reason issue #949 gives: `src/` is flat today, so a walk
-/// that stops at the top gives the same answer and no count can tell the two
-/// apart, and the first `src/anything/mod.rs` added would exit this scan in
-/// silence.
-fn rs_files_under(dir: &std::path::Path) -> Vec<(String, std::path::PathBuf)> {
-    fn walk(dir: &std::path::Path, prefix: &str, out: &mut Vec<(String, std::path::PathBuf)>) {
-        let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
-            .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()))
-            .map(|e| e.expect("cannot read a directory entry").path())
-            .collect();
-        entries.sort();
-        for path in entries {
-            let name = path
-                .file_name()
-                .expect("a directory entry has a name")
-                .to_string_lossy()
-                .into_owned();
-            let rel = if prefix.is_empty() {
-                name.clone()
-            } else {
-                format!("{prefix}/{name}")
-            };
-            if path.is_dir() {
-                walk(&path, &rel, out);
-            } else if name.ends_with(".rs") {
-                out.push((rel, path));
-            }
-        }
-    }
-    let mut out = Vec::new();
-    walk(dir, "", &mut out);
-    out.sort();
-    out
 }
 
 /// `test-util`'s row is the only one claiming a feature needs no CI cell at

@@ -13,7 +13,7 @@
 //!
 //! # The scan had to read code before it could pin anything
 //!
-//! Until #943 it did not. [`code_only`] tracked `"` strings and not character
+//! Until #943 it did not. The scan tracked `"` strings and not character
 //! literals, so the `'"'` in `.split_once('"')` at `src/raster.rs:2540` inverted
 //! its string state and everything after it was swallowed as string contents. A
 //! real `unsafe { std::ptr::read(&x) }` planted in `src/raster.rs` left this
@@ -27,13 +27,17 @@
 //! comment forms and a string literal and never a character literal, so it passed
 //! over the exact hole.
 //!
-//! The mask is now the one `tests/sample_kind_spine.rs` uses, which got character
-//! literals right from the start. Keeping the two in step is the cheap half of
-//! this; the expensive half was noticing.
+//! The mask is now `tests/common/scan.rs`'s shared
+//! [`scan::mask_literals_and_comments`], the same one
+//! `tests/sample_kind_spine.rs` calls, so there is no second copy left to fall
+//! out of step (issue #968).
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+
+#[path = "common/scan.rs"]
+mod scan;
 
 /// The manifest, at compile time, the way `tests/ci_feature_coverage.rs` pulls
 /// it in: the file this asserts about and the binary asserting cannot then
@@ -52,242 +56,10 @@ const ALLOWED: [(&str, &str); 1] = [(
     "dav1d FFI, behind the non-default `avif` feature",
 )];
 
-/// Replace comments and the *contents* of every literal with spaces, so the scan
-/// reads code and not prose. A scanner that counts the sentence explaining a rule
-/// as a breach of that rule is worse than no scanner, and one that reads 2650
-/// lines of code as a string is worse than both.
-///
-/// Deliberately not a Rust parser, and deliberately more than a line-oriented
-/// strip. It tracks strings, byte strings, raw strings of any hash depth, and
-/// character literals, because each of those can carry a `//` or a `"` that a
-/// simpler scan reads as a delimiter and then loses the rest of the file to.
-/// That is not hypothetical, it is what this file did until #943: the `'"'` in
-/// `.split_once('"')` at `src/raster.rs:2540` inverted the string state, and
-/// everything after it was swallowed as string contents while the real code was
-/// thrown away. Measured blind spans, probing every 25 lines: `src/raster.rs`
-/// 2550 to 3475, `src/jp2k.rs` 3675 to 6325 (about 2650 lines),
-/// `src/imageio.rs` 2800 to 3950 and 5050 to 5350, `src/connection.rs` 550 to
-/// 600. The inventory's answer was right by luck.
-///
-/// It is the same masking `tests/sample_kind_spine.rs` runs, deliberately kept
-/// in step: that file got character literals right from the start, which is
-/// what made this one's blindness a copy away from being avoided.
-///
-/// A `'` is a character literal only when it really closes one. `&'a str` is a
-/// lifetime, and swallowing from there to the next `'` would be the same
-/// desynchronisation in a new dress, so [`char_literal_end`] decides.
-fn code_only(src: &str) -> String {
-    let b = src.as_bytes();
-    let n = b.len();
-    let mut out: Vec<u8> = Vec::with_capacity(n);
-    let mut i = 0usize;
-    while i < n {
-        if b[i] == b'/' && i + 1 < n && b[i + 1] == b'/' {
-            let mut j = i;
-            while j < n && b[j] != b'\n' {
-                j += 1;
-            }
-            blank(&mut out, b, i, j);
-            i = j;
-            continue;
-        }
-        if b[i] == b'/' && i + 1 < n && b[i + 1] == b'*' {
-            let mut j = i + 2;
-            let mut depth = 1usize;
-            while j < n && depth > 0 {
-                if j + 1 < n && b[j] == b'/' && b[j + 1] == b'*' {
-                    depth += 1;
-                    j += 2;
-                } else if j + 1 < n && b[j] == b'*' && b[j + 1] == b'/' {
-                    depth -= 1;
-                    j += 2;
-                } else {
-                    j += 1;
-                }
-            }
-            let j = j.min(n);
-            blank(&mut out, b, i, j);
-            i = j;
-            continue;
-        }
-        if let Some((body, hashes)) = raw_string_start(b, i) {
-            // Keep the `r##"` opener and the `"##` closer, blank the body.
-            blank_span(&mut out, b, i, body);
-            let mut j = body;
-            let close = loop {
-                if j >= n {
-                    break n;
-                }
-                if b[j] == b'"'
-                    && j + hashes < n
-                    && b[j + 1..=j + hashes].iter().all(|&c| c == b'#')
-                {
-                    break j;
-                }
-                if b[j] == b'"' && hashes == 0 {
-                    break j;
-                }
-                j += 1;
-            };
-            blank(&mut out, b, body, close.min(n));
-            let after = (close + 1 + hashes).min(n);
-            blank_span(&mut out, b, close.min(n), after);
-            i = after;
-            continue;
-        }
-        if b[i] == b'"' {
-            let mut j = i + 1;
-            while j < n {
-                if b[j] == b'\\' {
-                    j += 2;
-                    continue;
-                }
-                if b[j] == b'"' {
-                    break;
-                }
-                j += 1;
-            }
-            let j = j.min(n);
-            out.push(b'"');
-            blank(&mut out, b, i + 1, j);
-            if j < n {
-                out.push(b'"');
-            }
-            i = j + 1;
-            continue;
-        }
-        if b[i] == b'\''
-            && let Some(e) = char_literal_end(b, i)
-        {
-            out.push(b'\'');
-            blank(&mut out, b, i + 1, e - 1);
-            out.push(b'\'');
-            i = e;
-            continue;
-        }
-        out.push(b[i]);
-        i += 1;
-    }
-    String::from_utf8(out).expect("only ASCII delimiters are rewritten, and each as one byte")
-}
-
-/// Push `[from, to)` as spaces, keeping newlines so line numbers survive.
-fn blank(out: &mut Vec<u8>, b: &[u8], from: usize, to: usize) {
-    for &c in &b[from..to] {
-        out.push(if c == b'\n' { b'\n' } else { b' ' });
-    }
-}
-
-/// Push `[from, to)` unchanged.
-fn blank_span(out: &mut Vec<u8>, b: &[u8], from: usize, to: usize) {
-    out.extend_from_slice(&b[from..to]);
-}
-
-/// The byte after the opening quote of a raw string at `i`, with its hash
-/// count, or `None` when `i` does not open one.
-///
-/// `r` and `br` only open a raw string when they do not continue an
-/// identifier, which is what tells `br"x"` apart from the `r"` inside
-/// `holder.expect("..`.
-fn raw_string_start(b: &[u8], i: usize) -> Option<(usize, usize)> {
-    let prev_ident = i > 0 && (b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_');
-    if prev_ident {
-        return None;
-    }
-    // `c"..."` needs nothing here: it falls through to the plain `"` branch
-    // a byte later and is masked correctly by luck. `cr"..."` does need to
-    // be here, the same as `br"..."` beside it, kept in step with
-    // `tests/sample_kind_spine.rs`'s copy (issue #940's panel).
-    let mut k = if b[i] == b'r' {
-        i + 1
-    } else if (b[i] == b'b' || b[i] == b'c') && i + 1 < b.len() && b[i + 1] == b'r' {
-        i + 2
-    } else {
-        return None;
-    };
-    let hashes_from = k;
-    while k < b.len() && b[k] == b'#' {
-        k += 1;
-    }
-    if k < b.len() && b[k] == b'"' {
-        Some((k + 1, k - hashes_from))
-    } else {
-        None
-    }
-}
-
-/// One past the closing quote of the character literal at `i`, or `None` when
-/// the `'` opens a lifetime instead.
-///
-/// The distinction is the whole point: treating `&'a str` as a literal
-/// swallows to the next `'` and is exactly the blindness this file exists to
-/// avoid.
-fn char_literal_end(b: &[u8], i: usize) -> Option<usize> {
-    let n = b.len();
-    if i + 1 >= n {
-        return None;
-    }
-    if b[i + 1] == b'\\' {
-        // The escaped character sits at `i + 2`, so the search for the closing
-        // quote starts past it; `'\''` is the case that needs this.
-        let mut j = i + 3;
-        while j < n && b[j] != b'\'' && b[j] != b'\n' {
-            j += 1;
-        }
-        return (j < n && b[j] == b'\'').then_some(j + 1);
-    }
-    let len = match b[i + 1] {
-        0x00..=0x7f => 1,
-        0xc0..=0xdf => 2,
-        0xe0..=0xef => 3,
-        _ => 4,
-    };
-    (i + 1 + len < n && b[i + 1 + len] == b'\'').then_some(i + 2 + len)
-}
-
-/// Every `.rs` file under `dir`, recursively, as `(path relative to `dir`,
-/// full path)`.
-///
-/// Recursive on purpose. `src/` is flat today, so a walk that stops at the top
-/// gives the same answer and the `files.len() > 30` control cannot tell them
-/// apart; the first `src/anything/mod.rs` added would exit this guard in
-/// silence (issue #949). `tests/miri_ignore_convention.rs` already recurses,
-/// and two of the three walks agreeing is not a rule.
-fn rs_files_under(dir: &Path) -> Vec<(String, PathBuf)> {
-    fn walk(dir: &Path, prefix: &str, out: &mut Vec<(String, PathBuf)>) {
-        let mut entries: Vec<PathBuf> = fs::read_dir(dir)
-            .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()))
-            .map(|e| e.expect("cannot read a directory entry").path())
-            .collect();
-        entries.sort();
-        for path in entries {
-            let name = path
-                .file_name()
-                .expect("a directory entry has a name")
-                .to_string_lossy()
-                .into_owned();
-            let rel = if prefix.is_empty() {
-                name.clone()
-            } else {
-                format!("{prefix}/{name}")
-            };
-            if path.is_dir() {
-                walk(&path, &rel, out);
-            } else if name.ends_with(".rs") {
-                out.push((rel, path));
-            }
-        }
-    }
-    let mut out = Vec::new();
-    walk(dir, "", &mut out);
-    out.sort();
-    out
-}
-
 fn files_with_real_unsafe() -> BTreeSet<String> {
     let mut found = BTreeSet::new();
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let files = rs_files_under(&src);
+    let files = scan::rs_files_under(&src);
     assert!(
         files.len() > 30,
         "positive control failed: only {} files found under src/, so an empty \
@@ -296,7 +68,7 @@ fn files_with_real_unsafe() -> BTreeSet<String> {
     );
     for (rel, path) in files {
         let text = fs::read_to_string(&path).expect("read source file");
-        let code = code_only(&text);
+        let code = scan::mask_literals_and_comments(&text);
         if code
             .split(|c: char| !c.is_alphanumeric() && c != '_')
             .any(|w| w == "unsafe")
@@ -310,53 +82,41 @@ fn files_with_real_unsafe() -> BTreeSet<String> {
 /// The `[features]` table as a map from a feature to the features it enables,
 /// with `dep:` and `crate/feature` entries dropped.
 ///
-/// Read as entries rather than as lines, because a `[features]` entry can span
-/// lines and `jxl` does.
+/// Structurally parsed with the `toml` crate (issue #968) rather than a
+/// hand-rolled line-based state machine: the state machine this replaced
+/// tracked `[section]` headers and multi-line array continuation by hand,
+/// which is a strict superset in complexity of the plain line-grep #949
+/// proved insufficient, on code that gates whether `unsafe` FFI enters a
+/// default build. `[dep:x` and `crate/feature` filtering stays bespoke in
+/// [`enabled_features`], since that decision is about this crate's own
+/// features and not something a general TOML parser knows.
 fn feature_table(manifest: &str) -> std::collections::BTreeMap<String, Vec<String>> {
-    let mut out = std::collections::BTreeMap::new();
-    let mut inside = false;
-    let mut pending: Option<(String, String)> = None;
-    for line in manifest.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('[') && trimmed.ends_with(']') && pending.is_none() {
-            inside = trimmed == "[features]";
-            continue;
-        }
-        if !inside || trimmed.starts_with('#') {
-            continue;
-        }
-        if let Some((name, rest)) = pending.take() {
-            let joined = format!("{rest} {trimmed}");
-            if joined.contains(']') {
-                out.insert(name, enabled_features(&joined));
-            } else {
-                pending = Some((name, joined));
-            }
-            continue;
-        }
-        let Some((name, rest)) = trimmed.split_once('=') else {
-            continue;
-        };
-        let (name, rest) = (name.trim(), rest.trim());
-        if name.is_empty() || !rest.starts_with('[') {
-            continue;
-        }
-        if rest.contains(']') {
-            out.insert(name.to_owned(), enabled_features(rest));
-        } else {
-            pending = Some((name.to_owned(), rest.to_owned()));
-        }
-    }
-    out
+    let doc: toml::Value = manifest.parse().expect("Cargo.toml must be valid TOML");
+    let features = doc
+        .get("features")
+        .and_then(toml::Value::as_table)
+        .cloned()
+        .unwrap_or_default();
+    features
+        .into_iter()
+        .map(|(name, value)| {
+            let entries = value
+                .as_array()
+                .unwrap_or_else(|| panic!("[features].{name} is not an array in Cargo.toml"));
+            (name, enabled_features(entries))
+        })
+        .collect()
 }
 
 /// The feature names inside one `[..]` list, dropping `dep:x` and
 /// `crate/feature` entries, which turn on a dependency rather than a feature
 /// of this crate.
-fn enabled_features(list: &str) -> Vec<String> {
-    list.split('"')
-        .skip(1)
-        .step_by(2)
+fn enabled_features(list: &[toml::Value]) -> Vec<String> {
+    list.iter()
+        .map(|v| {
+            v.as_str()
+                .unwrap_or_else(|| panic!("a [features] list entry is not a string: {v:?}"))
+        })
         .filter(|s| !s.starts_with("dep:") && !s.contains('/'))
         .map(str::to_owned)
         .collect()
@@ -463,7 +223,7 @@ fn only_the_named_files_carry_the_crates_own_unsafe() {
 #[test]
 fn the_scanner_reads_code_and_not_prose() {
     // The positive control: a real block is found.
-    assert!(code_only("fn f() { unsafe { g() } }").contains("unsafe"));
+    assert!(scan::mask_literals_and_comments("fn f() { unsafe { g() } }").contains("unsafe"));
     let mut lost: Vec<String> = Vec::new();
     // And a real block is still found after each literal form that can flip
     // the scanner's state and swallow the rest of the file. The first row is
@@ -498,7 +258,7 @@ fn the_scanner_reads_code_and_not_prose() {
     ] {
         // Collected rather than asserted row by row, so one run names every
         // literal form the scanner loses the file to instead of the first.
-        if !code_only(code).contains("unsafe") {
+        if !scan::mask_literals_and_comments(code).contains("unsafe") {
             lost.push(format!("{label}:\n{code}"));
         }
     }
@@ -518,7 +278,7 @@ fn the_scanner_reads_code_and_not_prose() {
         "let s = \"unsafe\";",
     ] {
         assert!(
-            !code_only(prose).contains("unsafe"),
+            !scan::mask_literals_and_comments(prose).contains("unsafe"),
             "the scanner read prose as code: {prose}"
         );
     }
@@ -558,7 +318,10 @@ fn the_crates_own_unsafe_stays_out_of_a_default_build() {
 #[test]
 fn the_walk_descends_into_subdirectories() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("fuzz");
-    let found: Vec<String> = rs_files_under(&root).into_iter().map(|(r, _)| r).collect();
+    let found: Vec<String> = scan::rs_files_under(&root)
+        .into_iter()
+        .map(|(r, _)| r)
+        .collect();
     assert!(
         found.contains(&"fuzz_targets/fuzz_fits.rs".to_owned()),
         "the walk did not descend into `fuzz/fuzz_targets/`, so a module in a \
