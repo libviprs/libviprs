@@ -21,7 +21,7 @@ use std::sync::Mutex;
 
 use crate::planner::{PyramidPlan, TileCoord};
 use crate::raster::Raster;
-use crate::sink::{SinkError, Tile, TileFormat, TileSink, encode_png};
+use crate::sink::{SinkError, Tile, TileFormat, TileSink, color_type_for_format, encode_png};
 
 // ---------------------------------------------------------------------------
 // PackfileFormat
@@ -594,56 +594,15 @@ fn append_zip<W: Write + std::io::Seek>(
 /// intentionally so the packfile sink does not need the main `sink`
 /// module's private helpers to become `pub`.
 fn encode_jpeg(raster: &Raster, quality: u8) -> Result<Vec<u8>, SinkError> {
-    use crate::pixel::PixelFormat;
-
-    let ct = match raster.format() {
-        PixelFormat::Gray8 => image::ColorType::L8,
-        PixelFormat::Gray16 => image::ColorType::L16,
-        PixelFormat::Rgb8 => image::ColorType::Rgb8,
-        PixelFormat::Rgba8 => image::ColorType::Rgba8,
-        PixelFormat::Rgb16 => image::ColorType::Rgb16,
-        PixelFormat::Rgba16 => image::ColorType::Rgba16,
-        // Multiband intermediates (from the band ops in `crate::bands`) have
-        // no image-crate colour type; reduce or extract to 1/3/4 bands first.
-        PixelFormat::Multi8(_) | PixelFormat::Multi16(_) => {
-            return Err(SinkError::EncodeMsg(format!(
-                "multiband raster ({} bands) cannot be encoded as an image tile",
-                raster.format().channels()
-            )));
-        }
-        // Float compute intermediates have no PNG/JPEG representation;
-        // cast to an unsigned 8/16-bit format before encoding tiles.
-        PixelFormat::RgbaF32 | PixelFormat::FloatF32(_) => {
-            return Err(SinkError::EncodeMsg(format!(
-                "float raster ({:?}) cannot be encoded as an image tile; \
-                 cast to an unsigned 8/16-bit format first",
-                raster.format()
-            )));
-        }
-        // The `image` crate's widest integer colour type is 16-bit (L8,
-        // L16, Rgb8, Rgba8, Rgb16, Rgba16, and two 32-bit *float* ones),
-        // so the 32-bit unsigned carrier has no representation there at
-        // all. A typed refusal is the implementation here rather than a
-        // gap: unlike `resize` or the band ops, where vips supports `uint`
-        // and refusing would have been a parity regression, there is
-        // nothing to be faithful to (issue #517).
-        PixelFormat::Uint32(_) => {
-            return Err(SinkError::EncodeMsg(format!(
-                "32-bit unsigned raster ({:?}) cannot be encoded as an image tile; \
-                 cast to an unsigned 8/16-bit format first",
-                raster.format()
-            )));
-        }
-        // Every `image` colour type is unsigned, so this is not a width
-        // question and `Int8` is refused alongside `Int32` (issue #516).
-        PixelFormat::Int8(_) | PixelFormat::Int16(_) | PixelFormat::Int32(_) => {
-            return Err(SinkError::EncodeMsg(format!(
-                "signed raster ({:?}) cannot be encoded as an image tile; \
-                 the image colour types are all unsigned, so cast first",
-                raster.format()
-            )));
-        }
-    };
+    // Was its own fourth copy of `sink.rs`'s mapping, kept separate so this
+    // module would not need `sink`'s private helpers to become `pub`. That
+    // rationale went away once #969 made the mapping `crate::pixel::image_
+    // color_type` and #940's review made the wrapper around it
+    // `pub(crate)`: this now calls the same one `sink.rs` and
+    // `sink_object_store.rs` do, closing the gap the review found (a live,
+    // untested fourth copy of exactly the mapping #969 set out to
+    // consolidate).
+    let ct = color_type_for_format(raster.format())?;
 
     let mut buf = Vec::new();
     let encoder =
@@ -867,5 +826,32 @@ mod tests {
             names.iter().any(|n| n == "pyramid.dzi"),
             "zip must contain the DeepZoom manifest `pyramid.dzi`, got: {names:?}"
         );
+    }
+
+    /// `encode_jpeg` had no direct test of the uint/float refusal before
+    /// issue #940's batch-1 review: it carried its own fourth copy of the
+    /// mapping `sink.rs` and `sink_object_store.rs` already had direct tests
+    /// for (`the_tile_sinks_refuse_the_uint_carrier_by_name`,
+    /// `the_object_store_sink_refuses_the_uint_carrier_by_name`), so a
+    /// mutation landing only in this module's copy had nothing to catch it.
+    /// Mirrors those two now that this module calls the same
+    /// [`crate::sink::color_type_for_format`] they do.
+    #[test]
+    fn the_packfile_sink_refuses_the_uint_carrier_by_name() {
+        let n = |v: u16| core::num::NonZeroU16::new(v).unwrap();
+        let u = PixelFormat::Uint32(n(1));
+        let msg = color_type_for_format(u)
+            .expect_err("a uint raster is not an image tile")
+            .to_string();
+        assert!(
+            msg.contains("32-bit unsigned") && msg.contains("Uint32"),
+            "the refusal does not name the carrier: {msg}"
+        );
+        let f = PixelFormat::FloatF32(n(1));
+        let fmsg = color_type_for_format(f)
+            .expect_err("a float raster is not an image tile")
+            .to_string();
+        assert!(fmsg.contains("float"), "{fmsg}");
+        assert_ne!(msg, fmsg);
     }
 }
