@@ -248,12 +248,25 @@ pub enum Extend {
     /// The resamplers that read this mode for taps landing outside the input
     /// ([`Raster::affine`] and the interpolating forms in [`crate::resample`])
     /// match the table only on a raster **without** an alpha band. Once alpha
-    /// is present `vips_affine` premultiplies into a **float** image before it
-    /// paints the border, so vips runs `FILL_LINE(float, ...)`, the byte
-    /// `memset` never happens, and its border comes out at the plain
-    /// interpretation maximum instead (255 for sRGB, 1 for scRGB). libviprs
-    /// paints the ink first and premultiplies after, so on an alpha raster it
-    /// keeps the memset values; issue #692 tracks that reordering.
+    /// is present, vips' border comes out at the plain interpretation maximum
+    /// instead (255 for sRGB, 1 for scRGB) and libviprs keeps the values
+    /// above.
+    ///
+    /// **The reason is not the paint order**, which is what #692 was filed
+    /// believing and what its closing measurement refuted.
+    /// `vips_affine_build` embeds *before* it premultiplies (`affine.c:529`
+    /// then `:551`), so the ink is memset into the raster's own domain either
+    /// way and the byte `memset` runs exactly as it does for a bare
+    /// `vips_embed`. What moves the value afterwards is that the premultiply
+    /// and un-premultiply pair does **not** cancel on a border pixel:
+    /// `vips_premultiply` builds its multiplier from a **clipped** alpha and
+    /// `vips_unpremultiply` builds its reciprocal from the **raw** one, so a
+    /// pixel holding the same ink `E` in every band comes back
+    /// `clip(E, 0, M)` against the interpretation's ceiling `M`. libviprs
+    /// runs the same arithmetic against the depth's ceiling, where the white
+    /// ink never exceeds it, so the clip is the identity.
+    /// [`crate::resample`] carries the 11-cell measurement and the reason not
+    /// to follow.
     White,
     /// Fill with the background colour passed alongside the extend mode
     /// (black when the background is `None`).
@@ -521,13 +534,31 @@ fn write_v(data: &mut [u8], kind: SampleKind, i: usize, v: f64) {
 /// `vips affine --extend white` gives the same values **on a raster without an
 /// alpha band**, because it builds its resampling border with `vips_embed`
 /// (`affine.c:534`); that is [`crate::resample`]'s side of the same ink. It
-/// cannot once the raster carries alpha, because `vips_image_hasalpha()` sends
-/// `vips_affine` through a premultiply into a **float** image before it paints
-/// that border: `FILL_LINE(float, ...)` runs, the memset above never happens,
-/// and the border lands on the plain interpretation maximum (255 for sRGB, 1
-/// for scRGB) instead. libviprs paints the ink first and premultiplies after,
-/// so it keeps the memset ink there; issue #692 tracks the reordering and
-/// [`crate::resample`] pins the divergence.
+/// stops giving them once the raster carries alpha, and **the reason is not
+/// the paint order**. This doc said it was, and #692's own closing
+/// measurement refuted that: `vips_affine_build` embeds before it
+/// premultiplies on every path (`affine.c:529` then `:551`), so the ink is
+/// memset into the raster's own domain either way and the memset above runs
+/// exactly as it does for a bare `vips_embed`.
+///
+/// What moves the value is that the premultiply / un-premultiply pair does
+/// **not** cancel on a border pixel. `vips_premultiply` builds its multiplier
+/// from a **clipped** alpha, `nalpha = clip(a, 0, M) / M`, while
+/// `vips_unpremultiply` builds its reciprocal from the **raw** one,
+/// `factor = M / a`, deliberately ("we want over and undershoots on alpha and
+/// RGB to cancel", `unpremultiply.c:78`). Every band of a border pixel holds
+/// the same ink `E`, so the round trip is `E * clip(E, 0, M) / M * M / E`,
+/// which is `clip(E, 0, M)`: the ink comes back clipped to the
+/// **interpretation's** ceiling. libviprs runs the same arithmetic against its
+/// own ceiling, the depth's on an unsigned carrier (issue #664), and the white
+/// ink never exceeds that, so `clip(E, 0, D)` is `E`.
+///
+/// #745 corrected this on the resample side and left this one stating the
+/// refuted story while pointing at an issue that had closed; #952 is that.
+/// [`crate::resample`] carries the 11-cell measurement, and
+/// `the_white_ink_mechanism_reads_the_same_in_extract_and_in_resample` in
+/// `tests/vips_claims.rs` is what stops the two accounts drifting apart
+/// again.
 //
 // This is `pub(crate)`, so nothing public may link it: rustdoc renders a
 // `[white_ink]` from a public doc as literal brackets with no anchor. The two
@@ -1581,7 +1612,16 @@ fn transpose(src: &[f64], w: usize, h: usize) -> Vec<f64> {
 fn rgb_planes(im: &Raster) -> [Vec<f64>; 3] {
     let bands = im.format().channels();
     let kind = im.format().kind();
-    let scale = if kind.bytes() == 1 { 1.0 } else { 257.0 };
+    // The 8-bit scale, taken from the kind's own table size rather than from a
+    // byte width: 255/255 for the one-byte kinds and 65535/255 = 257 for the
+    // two-byte ones, which is exactly what the width rule answered. A width
+    // cannot separate the three four-byte kinds, and this never has to,
+    // because `hist_bins` is `None` precisely where `reject_untabulated_kind`
+    // has already refused the call (issues #607, #942).
+    let bins = kind
+        .hist_bins()
+        .expect("smartcrop refuses a kind with no bin table before the analysis image is read");
+    let scale = (bins - 1) as f64 / 255.0;
     let (w, h) = (im.width() as usize, im.height() as usize);
     let data = im.data();
     let mut planes: [Vec<f64>; 3] = [vec![0.0; w * h], vec![0.0; w * h], vec![0.0; w * h]];

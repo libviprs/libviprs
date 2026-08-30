@@ -33,7 +33,7 @@
 //! | [`Raster::hist_match`] | `vips_hist_match` | histogram-specification LUT |
 //! | [`Raster::hist_plot`] | `vips_hist_plot` | bar-graph image of a histogram |
 //! | [`Raster::hist_entropy`] | `vips_hist_entropy` | Shannon entropy, `f64` bits |
-//! | [`Raster::hist_ismonotonic`] | `vips_hist_ismonotonic` | `bool` |
+//! | [`Raster::hist_ismonotonic`] | `vips_hist_ismonotonic` (diverges, see the method) | `bool` |
 //! | [`Raster::maplut`] | `vips_maplut` | image mapped through a LUT |
 //! | [`Raster::case`] | `vips_case` | index image mapped to scalar cases |
 //! | [`Raster::percent`] | `vips_percent` | percentile threshold, `f64` |
@@ -1043,12 +1043,37 @@ impl Raster {
         expect_hist("hist_entropy", self.try_hist_entropy())
     }
 
-    /// Whether a histogram is monotonically non-decreasing, like
-    /// `vips_hist_ismonotonic`.
+    /// Whether a histogram is monotonically non-decreasing, the question
+    /// `vips_hist_ismonotonic` answers.
     ///
     /// Returns `true` only if every band is non-decreasing along the
     /// histogram. A LUT must be monotonic to preserve value ordering when
     /// applied with [`Raster::maplut`].
+    ///
+    /// # Divergence from libvips
+    ///
+    /// **This does not match `vips_hist_ismonotonic` on a `uint` histogram,
+    /// on purpose.** Measured on `/opt/homebrew/bin/vips` 8.18.6:
+    ///
+    /// | histogram | `vips hist_ismonotonic` | here |
+    /// |---|---|---|
+    /// | `[70000, 65000]` | **TRUE** | `false` |
+    /// | `[400000, 300000, 200000, 100000]` | **TRUE** | `false` |
+    /// | `[100000, 100000, 100000, 99999]` | FALSE | `false` |
+    ///
+    /// So vips calls two strictly decreasing sequences monotonic while
+    /// catching a decrease of one in the third. I tested and refuted both
+    /// candidate explanations: "it folds the counts into `ushort`" predicts
+    /// FALSE for the first row, and "the convolution output wraps unsigned"
+    /// predicts TRUE for the third. Matching an oracle that contradicts
+    /// itself is not parity, so this answers the question rather than the
+    /// oracle. The numbers are here rather than only in
+    /// `a_count_comparison_sees_counts_above_65535`'s doc block, which
+    /// rustdoc does not render (issues #888, #952).
+    ///
+    /// The unsigned 8- and 16-bit carriers agree with vips throughout; the
+    /// divergence needs counts above 65535, which is what `hist_find` emits
+    /// once an image is larger than 65535 pixels (issue #532).
     ///
     /// # Errors
     ///
@@ -1445,6 +1470,20 @@ impl Raster {
 mod tests {
     use super::*;
 
+    /// The native-endian bit pattern of `bits`, at the width `kind` stores.
+    ///
+    /// Keyed on the kind rather than on the byte width. The two sites this
+    /// replaced both wrote `match kind.bytes() { 1 => .., _ => u16 pair }`,
+    /// which reads a four-byte carrier as two bytes and says nothing about
+    /// it: a width is `f32`, `u32` and `i32` at once (issues #607, #942).
+    fn bit_pattern(kind: SampleKind, bits: u32) -> Vec<u8> {
+        match kind {
+            SampleKind::U8 | SampleKind::I8 => vec![bits as u8],
+            SampleKind::U16 | SampleKind::I16 => (bits as u16).to_ne_bytes().to_vec(),
+            SampleKind::U32 | SampleKind::I32 | SampleKind::F32 => bits.to_ne_bytes().to_vec(),
+        }
+    }
+
     /**
      * Tests that this module dispatches on sample kind and never on byte
      * width, by asserting that neither the byte-width accessor on
@@ -1579,11 +1618,7 @@ mod tests {
             (SampleKind::I16, 0xFFFF, 0),
             (SampleKind::I16, 0x7FFF, 32_767),
         ] {
-            let mut buf = vec![0u8; kind.bytes()];
-            match kind.bytes() {
-                1 => buf[0] = bits as u8,
-                _ => buf.copy_from_slice(&(bits as u16).to_ne_bytes()),
-            }
+            let buf = bit_pattern(kind, bits);
             assert_eq!(
                 read_bin(&buf, kind, 0),
                 bin,
@@ -1724,12 +1759,7 @@ mod tests {
             (SampleKind::U16, 0xFFFF),
             (SampleKind::I16, 0xFFFF),
         ] {
-            let mut buf = vec![0u8; kind.bytes()];
-            if kind.bytes() == 1 {
-                buf[0] = bits as u8;
-            } else {
-                buf.copy_from_slice(&(bits as u16).to_ne_bytes());
-            }
+            let buf = bit_pattern(kind, bits);
             let got = read_bin(&buf, kind, 0) as usize;
             assert!(got < bins_for(kind), "{kind:?} indexed past its table");
             assert!(

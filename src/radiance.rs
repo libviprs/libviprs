@@ -457,12 +457,23 @@ impl Raster {
     ///
     /// [`EncodeError::Encode`] when the raster is not `FloatF32(3)`, or
     /// when its dimensions do not fit the format's 32-bit resolution line.
+    ///
+    /// The carrier refusal says what vips does with the same image, the way
+    /// the `.ppm` / `.pgm` refusal in [`crate::textio`] does, because it is
+    /// the same call: vips converts to suit the container and libviprs does
+    /// not. Measured on `/opt/homebrew/bin/vips` 8.18.6, `vips radsave` on a
+    /// 3x1 `uchar` `srgb` image writes a 238-byte `.hdr` that loads back as
+    /// `3x1 rad, 4 bands`, with the samples RGBE-quantised (10 comes back
+    /// 9.96875, 200 comes back 199.5, 30 comes back 29.9375). So it accepts
+    /// the image this refuses, and a caller reading only what libviprs wants
+    /// had no way to know that (issue #952).
     pub fn encode_radiance(&self, options: SaveOptions) -> Result<Vec<u8>, EncodeError> {
         let format = self.format();
         if format != float_rgb() {
             return Err(EncodeError::encode(format!(
                 "radiance carries three float bands; {format:?} has no RGBE spelling, \
-                 cast to FloatF32(3) first"
+                 cast to FloatF32(3) first; vips converts the colourspace to suit \
+                 the container and libviprs does not"
             )));
         }
         let (width, height) = (self.width(), self.height());

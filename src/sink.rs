@@ -2254,7 +2254,20 @@ fn hash_tile_raw(bytes: &[u8], algo: crate::manifest::ChecksumAlgo) -> [u8; 32] 
 /// The mapping itself lives once, in [`crate::pixel::image_color_type`]
 /// (issue #969); this wraps its
 /// [`ColorTypeRefusal`](crate::pixel::ColorTypeRefusal) in this module's own
-/// error type and wording.
+/// error type and wording. The same refusal [`crate::encode`]'s
+/// `image_color_type` makes, argued the same way: its doc carries the
+/// measured oracle, showing three vips routes answer three different things
+/// for a `uint` or `float` raster and the interpretation tag moves one of
+/// them again, so there is no answer here to be faithful to (issue #952).
+///
+/// Before #969 this was the **third** independent copy of the mapping, and
+/// that triplication is what let the first draft of
+/// `the_png_integer_refusals_carry_the_oracle_not_only_the_dependency` drive
+/// the wrong one: `Raster::encode_to_buffer("png")` routes through
+/// `crate::sink::encode_png`, not through `Raster::encode_png`, so a mutation
+/// of `crate::encode`'s copy came back green. Consolidating onto one function
+/// closes that gap: a mutation of [`crate::pixel::image_color_type`] now
+/// reaches every route, this one included.
 fn color_type_for_format(fmt: crate::pixel::PixelFormat) -> Result<image::ColorType, SinkError> {
     use crate::pixel::ColorTypeRefusal;
     crate::pixel::image_color_type(fmt).map_err(|refusal| {
