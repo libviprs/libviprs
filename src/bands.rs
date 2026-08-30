@@ -65,7 +65,7 @@
 //! tile-encoding sinks reject them, so reduce or extract back to 1/3/4 bands
 //! before handing a raster to the pyramid pipeline.
 
-use crate::pixel::{PixelFormat, SampleKind};
+use crate::pixel::{PixelFormat, SampleKind, read_sample_f64, write_f32_sample};
 use crate::raster::{Raster, RasterError};
 use thiserror::Error;
 
@@ -217,39 +217,26 @@ fn write_flat(data: &mut [u8], kind: SampleKind, i: usize, v: i64) {
     }
 }
 
-/// Read the flat `i`-th sample as `f64`: [`read_flat`] widened so a float
-/// carrier travels through as a *value* rather than truncated to an integer
-/// (issue #945).
+/// Read the flat `i`-th sample as `f64`: the widened read `bandmean`
+/// carries a float raster through (issue #945).
 ///
-/// The six integer kinds go through [`read_flat`] rather than being spelled
-/// out again, which keeps one reader for them: `f64` represents every value
-/// of every one of those kinds exactly, `u32::MAX` and `i32::MIN` included,
-/// so the widening is lossless and this cannot disagree with the integer
-/// path. Enumerated rather than reached through a `_` arm, so adding a kind
-/// is a decision the compiler forces here too.
+/// Delegates straight to [`crate::pixel::read_sample_f64`] rather than
+/// re-matching on [`SampleKind`] (issue #969): that function already reads
+/// every kind as `f64` losslessly, `u32::MAX` and `i32::MIN` included, and
+/// three modules re-matching the same six-arm dispatch is exactly the
+/// pattern that produced #607's silent misread in the first place.
 #[inline]
 fn read_flat_v(data: &[u8], kind: SampleKind, i: usize) -> f64 {
-    match kind {
-        SampleKind::U8
-        | SampleKind::I8
-        | SampleKind::U16
-        | SampleKind::I16
-        | SampleKind::U32
-        | SampleKind::I32 => read_flat(data, kind, i) as f64,
-        SampleKind::F32 => f64::from(f32::from_ne_bytes([
-            data[4 * i],
-            data[4 * i + 1],
-            data[4 * i + 2],
-            data[4 * i + 3],
-        ])),
-    }
+    read_sample_f64(data, kind, i * kind.bytes())
 }
 
 /// Store the flat `i`-th sample from an `f64`: [`write_flat`] widened, the
 /// other half of [`read_flat_v`].
 ///
 /// The integer kinds keep [`write_flat`]'s narrow exactly, so this stays a
-/// **store** and not a cast.
+/// **store** and not a cast. The `F32` arm calls the same
+/// [`crate::pixel::write_f32_sample`] `extract::write_v` and
+/// `conversion::write_flat_v` do (issue #969).
 #[inline]
 fn write_flat_v(data: &mut [u8], kind: SampleKind, i: usize, v: f64) {
     match kind {
@@ -259,7 +246,7 @@ fn write_flat_v(data: &mut [u8], kind: SampleKind, i: usize, v: f64) {
         | SampleKind::I16
         | SampleKind::U32
         | SampleKind::I32 => write_flat(data, kind, i, v as i64),
-        SampleKind::F32 => data[4 * i..4 * i + 4].copy_from_slice(&(v as f32).to_ne_bytes()),
+        SampleKind::F32 => write_f32_sample(data, i * kind.bytes(), v),
     }
 }
 
@@ -1198,6 +1185,50 @@ mod tests {
         // carrier rather than a dropped rounding step.
         let u = Raster::new(3, 1, PixelFormat::Multi8(n(2)), vec![1, 2, 2, 3, 100, 101]).unwrap();
         assert_eq!(u.try_bandmean().unwrap().data(), &[2, 3, 101]);
+    }
+
+    /**
+     * Tests that the consolidated read path (`read_flat_v`, delegating to
+     * `crate::pixel::read_sample_f64` as of issue #969, rather than
+     * re-matching on `SampleKind` itself) still carries `NaN`, `Infinity`
+     * and a subnormal float through `bandmean` the way vips does.
+     * Measured on `/opt/homebrew/bin/vips` 8.18.6 via `rawload` (`csvload`
+     * rejects "nan"/"inf" as numbers, so the fixture has to go in as raw
+     * `f32` bytes): `bandmean` on a three-band float raster holding
+     * `[NaN, Infinity, 5e-40]` answers NaN; on a two-band float raster
+     * holding `[-Infinity, Infinity]` it also answers NaN, because
+     * opposite-signed infinities cancel to NaN under IEEE 754 addition,
+     * the same rule Rust's `f32` arithmetic uses; and `bandmean` of a
+     * single-band raster holding the subnormal `5e-40` answers the
+     * identical subnormal back, un-flushed.
+     * Works by checking `is_nan()` rather than equality for the two NaN
+     * rows, since NaN does not equal itself, and by asserting the
+     * subnormal row bit-for-bit, so a future accumulator change that
+     * flushes subnormals to zero (some FPU modes do) would show here
+     * rather than only in a fixture chosen to avoid the corner.
+     * Input: the three rasters above -> Output: NaN, NaN, `5e-40`.
+     */
+    #[test]
+    fn bandmean_nan_infinity_and_subnormal_parity() {
+        let nan_row = floatn(1, 1, 3, &[f32::NAN, f32::INFINITY, 5e-40]);
+        assert!(
+            f32s(&nan_row.try_bandmean().unwrap())[0].is_nan(),
+            "NaN must propagate through the mean, the way vips's does"
+        );
+
+        let cancelling_infinities = floatn(1, 1, 2, &[f32::NEG_INFINITY, f32::INFINITY]);
+        assert!(
+            f32s(&cancelling_infinities.try_bandmean().unwrap())[0].is_nan(),
+            "-Infinity + Infinity is NaN under IEEE 754, and vips agrees"
+        );
+
+        let subnormal = floatn(1, 1, 1, &[5e-40]);
+        let out = f32s(&subnormal.try_bandmean().unwrap())[0];
+        assert_eq!(
+            out.to_bits(),
+            5e-40f32.to_bits(),
+            "a subnormal sample must not flush to zero on the way through"
+        );
     }
 
     /**

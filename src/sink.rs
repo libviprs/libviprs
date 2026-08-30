@@ -2248,57 +2248,65 @@ fn hash_tile_raw(bytes: &[u8], algo: crate::manifest::ChecksumAlgo) -> [u8; 32] 
 // Encoding helpers
 // ---------------------------------------------------------------------------
 
-/// The `image` colour type a sink encode goes through, or a typed refusal for
-/// the carriers that have none.
+/// The `image` colour type for a [`PixelFormat`], or a [`SinkError`] for the
+/// compute-intermediate formats that have none.
 ///
-/// The **third** copy of the mapping [`crate::encode`]'s `image_color_type`
-/// makes, beside [`crate::sink_object_store`]'s. `image_color_type` carries the
-/// measured oracle: three vips routes answer three different things for a
-/// `uint` or `float` raster and the interpretation tag moves one of them again,
-/// so there is no answer here to be faithful to (issue #952).
+/// The mapping itself lives once, in [`crate::pixel::image_color_type`]
+/// (issue #969); this wraps its
+/// [`ColorTypeRefusal`](crate::pixel::ColorTypeRefusal) in this module's own
+/// error type and wording. The same refusal [`crate::encode`]'s
+/// `image_color_type` makes, argued the same way: its doc carries the
+/// measured oracle, showing three vips routes answer three different things
+/// for a `uint` or `float` raster and the interpretation tag moves one of
+/// them again, so there is no answer here to be faithful to (issue #952).
 ///
-/// Three copies is what let the first draft of
+/// Before #969 this was the **third** independent copy of the mapping, and
+/// that triplication is what let the first draft of
 /// `the_png_integer_refusals_carry_the_oracle_not_only_the_dependency` drive
 /// the wrong one: `Raster::encode_to_buffer("png")` routes through
 /// `crate::sink::encode_png`, not through `Raster::encode_png`, so a mutation
-/// of `image_color_type` came back green.
-fn color_type_for_format(fmt: crate::pixel::PixelFormat) -> Result<image::ColorType, SinkError> {
-    use crate::pixel::PixelFormat;
-    match fmt {
-        PixelFormat::Gray8 => Ok(image::ColorType::L8),
-        PixelFormat::Gray16 => Ok(image::ColorType::L16),
-        PixelFormat::Rgb8 => Ok(image::ColorType::Rgb8),
-        PixelFormat::Rgba8 => Ok(image::ColorType::Rgba8),
-        PixelFormat::Rgb16 => Ok(image::ColorType::Rgb16),
-        PixelFormat::Rgba16 => Ok(image::ColorType::Rgba16),
-        // Multiband intermediates (from the band ops in `crate::bands`) have
-        // no image-crate colour type; reduce or extract to 1/3/4 bands first.
-        PixelFormat::Multi8(_) | PixelFormat::Multi16(_) => Err(SinkError::EncodeMsg(format!(
-            "multiband raster ({} bands) cannot be encoded as an image tile",
-            fmt.channels()
-        ))),
-        // Float compute intermediates have no PNG/JPEG representation;
-        // cast to an unsigned 8/16-bit format before encoding tiles.
-        PixelFormat::RgbaF32 | PixelFormat::FloatF32(_) => Err(SinkError::EncodeMsg(format!(
-            "float raster ({fmt:?}) cannot be encoded as an image tile; \
-             cast to an unsigned 8/16-bit format first"
-        ))),
-        // 32-bit unsigned compute intermediates (the counting ops of issue
-        // #532) have no PNG/JPEG representation either; the widest integer
-        // colour type the `image` crate offers is 16-bit.
-        PixelFormat::Uint32(_) => Err(SinkError::EncodeMsg(format!(
-            "32-bit unsigned raster ({fmt:?}) cannot be encoded as an image tile; \
-             cast to an unsigned 8/16-bit format first"
-        ))),
-        // Every `image` colour type is unsigned, so this is not a width
-        // question and `Int8` is refused alongside `Int32` (issue #516).
-        PixelFormat::Int8(_) | PixelFormat::Int16(_) | PixelFormat::Int32(_) => {
-            Err(SinkError::EncodeMsg(format!(
+/// of `crate::encode`'s copy came back green. Consolidating onto one function
+/// closes that gap: a mutation of [`crate::pixel::image_color_type`] now
+/// reaches every route, this one included.
+///
+/// `pub(crate)` because [`crate::sink_object_store`] and
+/// [`crate::sink_packfile`] carried byte-identical copies of this exact
+/// wrapper (same [`SinkError`], same wording) and now call this one instead,
+/// closing the batch-1 review's finding that #969 had consolidated the
+/// mapping but left the wrapper around it tripled (issue #940).
+pub(crate) fn color_type_for_format(
+    fmt: crate::pixel::PixelFormat,
+) -> Result<image::ColorType, SinkError> {
+    use crate::pixel::ColorTypeRefusal;
+    crate::pixel::image_color_type(fmt).map_err(|refusal| {
+        SinkError::EncodeMsg(match refusal {
+            // Multiband intermediates (from the band ops in `crate::bands`)
+            // have no image-crate colour type; reduce or extract to 1/3/4
+            // bands first.
+            ColorTypeRefusal::Multiband(bands) => {
+                format!("multiband raster ({bands} bands) cannot be encoded as an image tile")
+            }
+            // Float compute intermediates have no PNG/JPEG representation;
+            // cast to an unsigned 8/16-bit format before encoding tiles.
+            ColorTypeRefusal::Float => format!(
+                "float raster ({fmt:?}) cannot be encoded as an image tile; \
+                 cast to an unsigned 8/16-bit format first"
+            ),
+            // 32-bit unsigned compute intermediates (the counting ops of
+            // issue #532) have no PNG/JPEG representation either; the widest
+            // integer colour type the `image` crate offers is 16-bit.
+            ColorTypeRefusal::Uint32 => format!(
+                "32-bit unsigned raster ({fmt:?}) cannot be encoded as an image tile; \
+                 cast to an unsigned 8/16-bit format first"
+            ),
+            // Every `image` colour type is unsigned, so this is not a width
+            // question and `Int8` is refused alongside `Int32` (issue #516).
+            ColorTypeRefusal::Signed => format!(
                 "signed raster ({fmt:?}) cannot be encoded as an image tile; \
                  the image colour types are all unsigned, so cast first"
-            )))
-        }
-    }
+            ),
+        })
+    })
 }
 
 /// Encodes a [`Raster`] as a PNG image and returns the raw PNG bytes.

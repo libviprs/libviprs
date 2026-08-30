@@ -133,7 +133,7 @@
 use crate::arithmetic::interpretation_max_alpha;
 use crate::bands::BandError;
 use crate::extract::ExtractError;
-use crate::pixel::{PixelFormat, SampleKind, read_sample_f64, write_sample_f64};
+use crate::pixel::{PixelFormat, SampleKind, read_sample_f64, write_f32_sample, write_sample_f64};
 use crate::raster::{Raster, RasterError};
 use core::num::NonZeroU16;
 use thiserror::Error;
@@ -379,32 +379,18 @@ fn write_flat(data: &mut [u8], kind: SampleKind, i: usize, v: i64) {
     }
 }
 
-/// Read the flat `i`-th sample as `f64`: [`read_flat`] widened so a float
-/// carrier travels through as a *value* rather than truncated to an integer
-/// (issue #945).
+/// Read the flat `i`-th sample as `f64`: the widened read `arrayjoin` and
+/// `join` carry a float raster through (issue #945).
 ///
-/// The six integer kinds go through [`read_flat`] rather than being spelled
-/// out again, which keeps one reader for them: `f64` represents every value
-/// of every one of those kinds exactly, `u32::MAX` and `i32::MIN` included,
-/// so the widening is lossless and this cannot disagree with the integer
-/// path. Enumerated rather than reached through a `_` arm, so adding a kind
-/// is a decision the compiler forces here too.
+/// Delegates straight to [`read_sample_f64`] rather than re-matching on
+/// [`SampleKind`] (issue #969): that function already reads every kind as
+/// `f64` losslessly, `u32::MAX` and `i32::MIN` included, and three modules
+/// re-matching the same six-arm dispatch is exactly the pattern that
+/// produced #607's silent misread in the first place. [`read_flat`] stays,
+/// for the callers that want the integer-only reader.
 #[inline]
 fn read_flat_v(data: &[u8], kind: SampleKind, i: usize) -> f64 {
-    match kind {
-        SampleKind::U8
-        | SampleKind::I8
-        | SampleKind::U16
-        | SampleKind::I16
-        | SampleKind::U32
-        | SampleKind::I32 => read_flat(data, kind, i) as f64,
-        SampleKind::F32 => f64::from(f32::from_ne_bytes([
-            data[4 * i],
-            data[4 * i + 1],
-            data[4 * i + 2],
-            data[4 * i + 3],
-        ])),
-    }
+    read_sample_f64(data, kind, i * kind.bytes())
 }
 
 /// Store the flat `i`-th sample from an `f64`: [`write_flat`] widened, the
@@ -412,7 +398,9 @@ fn read_flat_v(data: &[u8], kind: SampleKind, i: usize) -> f64 {
 ///
 /// The integer kinds keep [`write_flat`]'s narrow exactly, so this stays a
 /// **store** and not a cast: every caller copies a sample it read at the
-/// same kind, or one promoted into a kind that holds it.
+/// same kind, or one promoted into a kind that holds it. The `F32` arm
+/// calls the same [`write_f32_sample`] `extract::write_v` and
+/// `bands::write_flat_v` do (issue #969).
 #[inline]
 fn write_flat_v(data: &mut [u8], kind: SampleKind, i: usize, v: f64) {
     match kind {
@@ -422,7 +410,7 @@ fn write_flat_v(data: &mut [u8], kind: SampleKind, i: usize, v: f64) {
         | SampleKind::I16
         | SampleKind::U32
         | SampleKind::I32 => write_flat(data, kind, i, v as i64),
-        SampleKind::F32 => data[4 * i..4 * i + 4].copy_from_slice(&(v as f32).to_ne_bytes()),
+        SampleKind::F32 => write_f32_sample(data, i * kind.bytes(), v),
     }
 }
 

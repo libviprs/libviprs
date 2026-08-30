@@ -215,6 +215,14 @@ impl SampleKind {
     /// [`PixelFormat::kind`]`().bytes()` equals it for every variant. The
     /// direction that does *not* hold is the reason this enum exists: a
     /// byte width does not name a kind.
+    ///
+    /// `#[inline]` since issue #940's review: every flat-index reader
+    /// (`read_flat_v`/`read_v`, issue #969) calls this to compute a byte
+    /// offset and then hands it to `read_sample_f64`, which matches on the
+    /// same `kind` again. Inlining this three-arm match gives the optimizer
+    /// the best chance to fold both matches into one rather than
+    /// dispatching on the same discriminant twice.
+    #[inline]
     pub fn bytes(self) -> usize {
         match self {
             Self::U8 | Self::I8 => 1,
@@ -722,6 +730,63 @@ impl PixelFormat {
     }
 }
 
+/// Why a [`PixelFormat`] has no `image::ColorType` mapping.
+///
+/// Returned by [`image_color_type`] instead of a ready-made message, because
+/// each caller wants its own wording and its own error type: `encode.rs`
+/// says "has no image colour type", the tile sinks say "cannot be encoded as
+/// an image tile", and both need the original format back to render it with
+/// `{fmt:?}` or to read its channel count. This carries only the reason.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ColorTypeRefusal {
+    /// A multiband intermediate ([`PixelFormat::Multi8`] /
+    /// [`PixelFormat::Multi16`]), carrying its channel count.
+    Multiband(usize),
+    /// A float compute intermediate ([`PixelFormat::RgbaF32`] /
+    /// [`PixelFormat::FloatF32`]).
+    Float,
+    /// [`PixelFormat::Uint32`]: the `image` crate's widest integer colour
+    /// type is 16-bit (issue #517).
+    Uint32,
+    /// A signed carrier ([`PixelFormat::Int8`] / [`PixelFormat::Int16`] /
+    /// [`PixelFormat::Int32`]): every `image` colour type is unsigned, which
+    /// is not a width question (issue #516).
+    Signed,
+}
+
+/// The `image` crate's [`image::ColorType`] for a [`PixelFormat`], or the
+/// reason it has none.
+///
+/// This is the crate's one `PixelFormat -> image::ColorType` mapping, and
+/// issue #969 is why it exists as one function rather than three: `encode.rs`,
+/// `sink.rs` and `sink_object_store.rs` each carried an identical copy of
+/// this match, and the triplication produced a real mutation-testing
+/// near-miss while #962 authored tests for `encode.rs`'s copy. A mutation of
+/// that copy came back green, because `Raster::encode_to_buffer("png")`
+/// actually routes through `sink.rs`'s separate copy, not the one under
+/// test. Callers map [`ColorTypeRefusal`] to their own local error type.
+#[inline]
+pub(crate) fn image_color_type(fmt: PixelFormat) -> Result<image::ColorType, ColorTypeRefusal> {
+    Ok(match fmt {
+        PixelFormat::Gray8 => image::ColorType::L8,
+        PixelFormat::Gray16 => image::ColorType::L16,
+        PixelFormat::Rgb8 => image::ColorType::Rgb8,
+        PixelFormat::Rgba8 => image::ColorType::Rgba8,
+        PixelFormat::Rgb16 => image::ColorType::Rgb16,
+        PixelFormat::Rgba16 => image::ColorType::Rgba16,
+        PixelFormat::Multi8(_) | PixelFormat::Multi16(_) => {
+            return Err(ColorTypeRefusal::Multiband(fmt.channels()));
+        }
+        PixelFormat::RgbaF32 | PixelFormat::FloatF32(_) => {
+            return Err(ColorTypeRefusal::Float);
+        }
+        PixelFormat::Uint32(_) => return Err(ColorTypeRefusal::Uint32),
+        PixelFormat::Int8(_) | PixelFormat::Int16(_) | PixelFormat::Int32(_) => {
+            return Err(ColorTypeRefusal::Signed);
+        }
+    })
+}
+
 /// Read the sample at byte offset `off` in `data` as `f64`, honouring
 /// `kind`.
 ///
@@ -850,10 +915,22 @@ pub(crate) fn write_sample_f64(data: &mut [u8], kind: SampleKind, off: usize, v:
             let b = (clipped(i64::from(i32::MIN), i64::from(i32::MAX)) as i32).to_ne_bytes();
             data[off..off + 4].copy_from_slice(&b);
         }
-        SampleKind::F32 => {
-            data[off..off + 4].copy_from_slice(&(v as f32).to_ne_bytes());
-        }
+        SampleKind::F32 => write_f32_sample(data, off, v),
     }
+}
+
+/// Write `v` into `data` at byte offset `off` as one `F32` sample: `v as
+/// f32`, the plain narrowing store.
+///
+/// [`crate::extract::write_v`], `bands::write_flat_v` and
+/// `conversion::write_flat_v` each keep their own narrow store for the six
+/// integer kinds, because that divergence from [`write_sample_f64`] is real
+/// (`Extend::White`'s byte-pattern ink depends on it, issue #945), but there
+/// was never a second way to narrow an `f64` into an `f32`, so this one arm
+/// is shared rather than repeated a third time (issue #969).
+#[inline]
+pub(crate) fn write_f32_sample(data: &mut [u8], off: usize, v: f64) {
+    data[off..off + 4].copy_from_slice(&(v as f32).to_ne_bytes());
 }
 
 /// Every [`SampleKind`], for the test sweeps across the crate.
