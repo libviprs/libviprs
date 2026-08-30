@@ -2923,19 +2923,29 @@ mod tests {
         crate::hex::hex_lower(&sha2::Sha256::digest(bytes))
     }
 
-    /// A raster's samples as `u32`, whatever the carrier width, in the
+    /// A raster's samples as `u32`, read at its own sample kind, in the
     /// band-interleaved order the oracle's `getpoint_all` uses.
+    ///
+    /// Keyed on [`PixelFormat::kind`] rather than on a byte width, the same
+    /// way [`signed_samples`] below already is. The width form's `_ =>` arm
+    /// read a four-byte carrier as `u16` pairs and said nothing about it,
+    /// which is the shape issue #607 is about and the one the #942 scanner
+    /// found here.
     #[cfg(feature = "jp2k")]
     fn samples(raster: &Raster) -> Vec<u32> {
         let data = raster.data();
-        match raster.format().bytes_per_channel() {
-            1 => data.iter().map(|b| u32::from(*b)).collect(),
-            _ => data
+        match raster.format().kind() {
+            SampleKind::U8 | SampleKind::I8 => data.iter().map(|b| u32::from(*b)).collect(),
+            SampleKind::U16 | SampleKind::I16 => data
                 .as_chunks::<2>()
                 .0
                 .iter()
                 .map(|c| u32::from(u16::from_ne_bytes(*c)))
                 .collect(),
+            other @ (SampleKind::U32 | SampleKind::I32 | SampleKind::F32) => panic!(
+                "samples reads a one- or two-byte carrier's bit pattern, not {other:?}; \
+                 a four-byte one would come back as u16 pairs"
+            ),
         }
     }
 
