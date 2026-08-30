@@ -35,11 +35,25 @@
 //! That is the pin: the day somebody implements HEIF encoding or BigTIFF, this
 //! goes red and hands them the reason, instead of the new encoder sitting
 //! unreachable for four releases the way TIFF's did.
+//!
+//! # The `.mat` asymmetry, wired in on purpose and pinned rather than fixed
+//!
+//! `#958` wired `.mat` into both save routes as libvips' text `matrix`
+//! format, and vips also registers `.mat` for `matload`, the MATLAB binary
+//! reader, disambiguating on the way in by content-sniffing (`is_a`).
+//! `SniffedFormat::Mat` is content-sniffed too, but only for the MATLAB
+//! binary signature; there is no text-matrix row in it. So a `.mat` this
+//! crate now writes does not decode back through `decode_file` /
+//! `decode_bytes`, the same asymmetry `.ppm` carried before #910 added
+//! Netpbm sniffing. `matrix_saved_bytes_do_not_decode_back_through_the_sniffer`
+//! pins it exactly the way #910's own predecessor check did, so the day
+//! text-matrix sniffing lands this goes red and says so, rather than a
+//! caller finding out by writing a `.mat` and reading it back to `None`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use libviprs::{EncodeError, PixelFormat, Raster, SaveError, TiffCompression};
+use libviprs::{EncodeError, PixelFormat, Raster, SaveError, TiffCompression, decode_bytes};
 
 /// How a caller reaches the container a writer produces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -302,27 +316,37 @@ const WRITERS: &[(&str, Reach)] = &[
     ),
     ("foreign_stubs.rs::encode_heif_tune", Reach::Deferred),
     ("foreign_stubs.rs::magicksave_buffer", Reach::Deferred),
-    // The three the #948 sweep turned up, all of them writers that produce
-    // real bytes with nothing routing to them. Filed rather than wired,
-    // because each needs an oracle answer first and none of them is a
-    // mechanical two-line arm the way TIFF was (issue #958).
+    // CSV and matrix, wired by #958 once each matched the vips saver it is
+    // named after: mono conversion (through the same colourspace path
+    // `Raster::colourspace(Interpretation::Bw)` uses) and, for CSV, TAB
+    // rather than a comma. Measured on the pinned 8.18.6 on a 3-band ramp:
+    // `vips csvsave` writes `102\t103\t105\n105\t107\t109\n` and
+    // `vips matrixsave` writes `3 2\n102 103 105\n105 107 109\n`.
     (
         "textio.rs::csv_save",
-        Reach::Unrouted {
-            why: "vips `csvsave` registers `.csv`, but it writes TAB separators \
-                  and converts to mono first; this writes commas and band 0. \
-                  Measured on 8.18.6 (issue #958)",
+        Reach::Wired {
+            extensions: &["csv"],
+            formats: &["csv"],
         },
     ),
     (
         "textio.rs::matrix_save",
-        Reach::Unrouted {
-            why: "vips `matrixsave` registers `.mat`, and on a 3-band ramp it \
-                  writes the luminance (102 103 105) where this writes band 0 \
-                  (1 11 21). `.mat` is also MATLAB's suffix on the way in. \
-                  Measured on 8.18.6 (issue #958)",
+        Reach::Wired {
+            extensions: &["mat"],
+            formats: &["mat"],
         },
     ),
+    // The #948 sweep's third writer, still recorded rather than wired: a
+    // real DeepZoom pyramid is a multi-level, per-tile-compressed
+    // container, and this writes exactly one tile at native resolution with
+    // no compression, tagged `Format="raw"` (which is not a value a real
+    // DeepZoom viewer accepts). Growing it into an actual pyramid means the
+    // same checkpointed, multi-resolution tiling machinery
+    // `generate_pyramid_region` and `PyramidPlanner` already run for the
+    // object-store and packfile sinks, aimed at large distributed jobs, not
+    // a synchronous call returning one in-memory `Vec<u8>`; retrofitting
+    // that here is a project of its own rather than this issue's fix
+    // (issue #958).
     (
         "foreign_stubs.rs::dzsave_buffer",
         Reach::Unrouted {
@@ -708,11 +732,15 @@ fn every_deferred_writer_still_refuses() {
  * Tests that every `Reach::Unrouted` row carries a reason and stays unrouted
  * (issue #948).
  *
- * These three write real bytes and vips registers a suffix for two of them, so
- * the honest state is "not yet", not "no". The reason has to name the measured
- * divergence and the issue, and the extension has to stay refused. Wiring one
+ * This one writes real bytes and vips registers a suffix for it, so the
+ * honest state is "not yet", not "no". The reason has to name the measured
+ * divergence and the issue, and the extension has to stay refused. Wiring it
  * turns this red, which is the handover: whoever wires it moves the row to
- * `Wired` and gets the sweep's other three checks for free.
+ * `Wired` and gets the sweep's other checks for free.
+ *
+ * `csv_save` and `matrix_save` left this list in #958, once each matched
+ * the vips saver it is named after; `every_wired_writer_names_arms_the_dispatches_have`
+ * covers their rows now.
  */
 #[test]
 fn every_unrouted_writer_is_still_unrouted_and_says_why() {
@@ -726,8 +754,8 @@ fn every_unrouted_writer_is_still_unrouted_and_says_why() {
         .collect();
     assert_eq!(
         unrouted.len(),
-        3,
-        "the sweep found three unrouted writers; this is {unrouted:?}"
+        1,
+        "the sweep found one unrouted writer left; this is {unrouted:?}"
     );
 
     for (key, why) in &unrouted {
@@ -737,8 +765,8 @@ fn every_unrouted_writer_is_still_unrouted_and_says_why() {
         );
     }
 
-    // The suffixes vips registers for the two text formats, still refused here.
-    for extension in ["csv", "mat", "dz", "szi"] {
+    // The suffixes vips registers for DeepZoom, still refused here.
+    for extension in ["dz", "szi"] {
         let err = im
             .encode_to_buffer(extension)
             .expect_err("still unrouted (issue #958)");
@@ -748,9 +776,75 @@ fn every_unrouted_writer_is_still_unrouted_and_says_why() {
         );
     }
 
-    // The control: the writers themselves are alive and do produce bytes, so
+    // The control: the writer itself is alive and does produce bytes, so
     // this is a routing gap and not a dead function.
-    assert!(!im.csv_save().is_empty());
-    assert!(!im.matrix_save().is_empty());
     assert!(!im.dzsave_buffer().is_empty());
+}
+
+/**
+ * Tests that `.csv` and `.mat` reach `csv_save`/`matrix_save` through both
+ * routes, and that both routes hand back exactly the direct call's bytes
+ * (issue #958).
+ *
+ * `WRITERS`' `Reach::Wired` rows for these two are checked structurally by
+ * `every_wired_writer_names_arms_the_dispatches_have` (the arm exists) and
+ * `every_dispatch_arm_is_claimed_by_a_writer` (nothing else claims it); this
+ * is the behavioural half, the same shape as `save_png_and_unknown_extension`
+ * and the webp/jxl dispatch-parity cells in `src/connection.rs`.
+ */
+#[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+fn csv_and_mat_route_through_both_dispatches_to_the_same_bytes() {
+    let im = rgb();
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    let direct_csv = im.csv_save();
+    let via_buffer_csv = im.encode_to_buffer("csv").expect("csv is wired");
+    assert_eq!(via_buffer_csv, direct_csv);
+    let csv_path = dir.path().join("out.csv");
+    im.save(&csv_path).expect("save(.csv) is a live arm");
+    assert_eq!(
+        std::fs::read(&csv_path).expect("saved csv file"),
+        direct_csv
+    );
+
+    let direct_mat = im.matrix_save();
+    let via_buffer_mat = im.encode_to_buffer("mat").expect("mat is wired");
+    assert_eq!(via_buffer_mat, direct_mat);
+    let mat_path = dir.path().join("out.mat");
+    im.save(&mat_path).expect("save(.mat) is a live arm");
+    assert_eq!(
+        std::fs::read(&mat_path).expect("saved mat file"),
+        direct_mat
+    );
+}
+
+/**
+ * Tests the `.mat` decode-back asymmetry the module doc above describes:
+ * bytes `matrix_save` writes do not decode through `decode_bytes`, because
+ * `SniffedFormat::Mat` claims only the MATLAB binary signature and this
+ * crate has no text-matrix sniffing (issue #958).
+ *
+ * The positive control is the same raster's PNG bytes decoding fine, so a
+ * broken sniffer entirely (which would refuse everything) cannot pass this
+ * for the wrong reason.
+ */
+#[test]
+fn matrix_saved_bytes_do_not_decode_back_through_the_sniffer() {
+    let im = rgb();
+    let mat_bytes = im.matrix_save();
+    assert!(
+        decode_bytes(&mat_bytes).is_err(),
+        "a text-matrix `.mat` must not decode back until this crate sniffs \
+         the text format, not only the MATLAB binary one; if this now \
+         passes, move `textio.rs::matrix_load` onto the sniffed route and \
+         update this pin"
+    );
+
+    // The control: decode_bytes works at all, on the same raster's PNG.
+    let png_bytes = im.encode_to_buffer("png").expect("png is wired");
+    assert!(
+        decode_bytes(&png_bytes).is_ok(),
+        "positive control: the sniffer decodes a real container"
+    );
 }

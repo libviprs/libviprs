@@ -42,7 +42,8 @@ budget becoming a real peak ceiling for jp2k, gif and avif (#944),
 `AvifError` becoming `#[non_exhaustive]` (#946), the
 `ConversionError::FloatUnsupported` rename (#730), `compass`'s `times` range
 (#547), `arrayjoin`'s `across` clamp (#577), `decode_tiff_page`'s page index
-(#566) and `GifError::BadPageNumber` (#845).
+(#566), `GifError::BadPageNumber` (#845) and `csv_save`/`matrix_save` matching
+`csvsave`/`matrixsave` (#958).
 
 The line between `Breaking` and `Fixed` is whether the old answer was
 defensible. A `Fixed` entry can move output bytes too, but only where the old
@@ -1110,6 +1111,32 @@ and not under `Fixed`: this file is the only place they can be caught.
   does not allow, so a raster still holding one keeps the JSON trailer rather
   than losing it.
 
+- **`csv_save` and `matrix_save` write what libvips `csvsave` and
+  `matrixsave` write, which is not what they wrote before** (issue #958). No
+  signature moves; the bytes do, for any raster with more than one band, and
+  `csv_save`'s bytes change for every raster.
+
+  Measured on the pinned 8.18.6 against a 3x2 sRGB ramp (pixels
+  `(1,100,200) (11,101,201) (21,102,202)` over
+  `(31,103,203) (41,104,204) (51,105,205)`): `vips csvsave` writes
+  `102\t103\t105\n105\t107\t109\n` and `vips matrixsave` writes
+  `3 2\n102 103 105\n105 107 109\n`. Both saves carry libvips' `mono`
+  saveable flag, so a wider image goes through the same sRGB -> linear ->
+  Rec.709 luminance -> sRGB lookup-table conversion
+  `Raster::colourspace(Interpretation::Bw)` already keeps bit-exact against
+  libvips (issue #581), not a band-0 read. `csv_save` also swaps its
+  separator from a comma to a TAB, which is what `csvsave` writes despite the
+  format's name; `csv_load` now reads either, so it still reads what it used
+  to write as well as what it writes now. A one-band raster is untouched,
+  whatever its interpretation tag, which is what libvips itself does too:
+  measured the same way, `matrixsave` on a 1-band image writes identical
+  values whether it is tagged `matrix`, `b-w` or `multiband`.
+
+  The old behaviour was never a documented promise about matching vips; it
+  was `matrix_save`'s own doc claiming libvips `matrix` format parity while
+  writing band 0 in commas, which this closes rather than renaming away
+  from. `.csv` and `.mat` are also save routes now; see the Added entry.
+
 ### Added
 
 - **`.tif` and `.tiff` are save routes** (issue #948). `src/encode_tiff.rs` has
@@ -1173,6 +1200,30 @@ and not under `Fixed`: this file is the only place they can be caught.
   luminance where `csv_save` writes commas and band 0, and `matrixsave` writes
   the luminance too. That wants an answer before a route, so they are recorded
   rather than wired.
+
+- **`.csv` and `.mat` are save routes** (issue #958). `csv_save` and
+  `matrix_save` matched the vips saver they are named after (see the Breaking
+  entry below), then both are wired into `Raster::save` and
+  `Raster::encode_to_buffer`, the same as `.tif`/`.tiff` above: each
+  `csvsave`/`matrixsave` registers exactly one suffix, measured on the pinned
+  8.18.6 (`nocache (.csv)` and `nocache (.mat)`, both `priority=0, mono`).
+
+  `.mat` carries a second wrinkle the entry closes rather than fixes: vips
+  registers `.mat` for `matload` (the MATLAB binary reader) too, and
+  disambiguates on the way in by content-sniffing (`is_a`). This crate's
+  `SniffedFormat::Mat` sniffs the MATLAB binary signature only, so a `.mat`
+  this crate now writes does not decode back through `decode_file` /
+  `decode_bytes`. That is the asymmetry `.ppm` carried before #910 taught it
+  to read what it writes, and it gets the same treatment here: pinned by
+  `matrix_saved_bytes_do_not_decode_back_through_the_sniffer` in
+  `tests/save_route_coverage.rs` rather than left as a silent surprise.
+
+  `dzsave_buffer` stays unrouted and its own doc now says why in more detail:
+  it writes one uncompressed tile at native resolution tagged `Format="raw"`,
+  not a multi-level, per-tile-compressed pyramid, and building the real thing
+  means reusing the checkpointed tiling machinery the object-store and
+  packfile sinks already run for large distributed jobs, not retrofitting a
+  synchronous `Vec<u8>` call into a project of its own.
 
 - **`jp2ksave` labels the alpha channel**, writing the `cdef` box vips writes
   (issue #935). Found by the byte-identity check the tiled save brought in

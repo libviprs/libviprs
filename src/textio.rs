@@ -25,12 +25,19 @@
 //! `width` whitespace-separated numbers. libvips reports it as a `double`,
 //! one-band image; the pipeline's float carrier is `f32`, matching
 //! [`Raster::from_matrix`], so the values are stored as `FloatF32(1)`.
+//! `matrixsave` carries the `mono` saveable flag, so [`Raster::matrix_save`]
+//! converts a raster with more than one band to mono first (issue #958);
+//! see `mono_view` for the conversion.
 //!
 //! ## CSV
 //!
-//! A comma-separated grid with no header: the column count of the first row
-//! fixes the width and the row count fixes the height. Like `matrix`, CSV is
-//! a one-band numeric format and reloads as `FloatF32(1)`.
+//! A TAB-separated grid with no header, despite the name: `csvsave` writes
+//! TAB rather than a comma, measured on the pinned 8.18.6 (issue #958), and
+//! [`Raster::csv_save`] matches it. [`Raster::csv_load`] reads a comma or a
+//! TAB, so it still reads what it used to write as well as what it writes
+//! now. The column count of the first row fixes the width and the row count
+//! fixes the height. Like `matrix`, CSV carries the `mono` saveable flag
+//! and reloads as `FloatF32(1)`.
 //!
 //! ## Netpbm PPM/PGM/PBM
 //!
@@ -121,8 +128,10 @@
 //! so the day an encoder does arrive it goes red and says so.
 
 use crate::codec::{DecodeError, EncodeError};
+use crate::conversion::Interpretation;
 use crate::pixel::{PixelFormat, SampleKind, read_sample_f64};
 use crate::raster::Raster;
+use std::borrow::Cow;
 use std::io::{Error as IoError, ErrorKind};
 
 /// Build a typed [`DecodeError`] for a malformed text or Netpbm input.
@@ -161,25 +170,69 @@ fn fmt_sample(data: &[u8], off: usize, fmt: PixelFormat) -> String {
     }
 }
 
+/// The mono view `matrix_save`/`csv_save` write through: libvips registers
+/// both `matrixsave` and `csvsave` with the `mono` saveable flag, so
+/// `vips_image_write` converts a wider image down to one band before either
+/// ever sees it.
+///
+/// Measured on the pinned 8.18.6 with a 3-band sRGB ramp, `vips colourspace
+/// x.v x_bw.v b-w` and `vips matrixsave`/`vips csvsave` on the original
+/// 3-band image write the same numbers, so the conversion is exactly
+/// [`Raster::try_colourspace`] targeting [`Interpretation::Bw`], the same
+/// sRGB -> linear -> Rec.709 luminance -> sRGB lookup-table path this crate
+/// already keeps bit-exact against libvips elsewhere (issue #581). A
+/// **one-band** raster is passed through untouched instead, whatever its
+/// interpretation tag: measured the same way, `matrixsave` on a 1-band
+/// image tagged `matrix`, `b-w` and `multiband` alike writes the identical
+/// values, so libvips never runs the colourspace step when there is only
+/// one band to begin with.
+///
+/// A raster whose colour space [`Raster::try_colourspace`] does not
+/// recognise (a `multiband`-tagged raster with more than one band, which
+/// `vips_image_write` would still convert by guessing sRGB or CMYK from the
+/// band count, a step this crate's colour machinery does not have) falls
+/// back to band 0 rather than guessing at that heuristic; unlike the
+/// measured RGB case, that fallback is not checked against the oracle.
+fn mono_view(raster: &Raster) -> Cow<'_, Raster> {
+    if raster.format().channels() <= 1 {
+        return Cow::Borrowed(raster);
+    }
+    match raster.try_colourspace(Interpretation::Bw) {
+        Ok(bw) => Cow::Owned(bw),
+        Err(_) => Cow::Borrowed(raster),
+    }
+}
+
 impl Raster {
     /// Serialise as the libvips `matrix` text format.
     ///
-    /// Writes a `width height` header line, then one row per image row with the
-    /// band-0 sample of each pixel formatted as a space-separated decimal.
-    /// `matrix` is a one-band numeric format, so only the first band is
-    /// written; the inverse is [`Raster::matrix_load`].
+    /// Writes a `width height` header line, then one row per image row with
+    /// a space-separated decimal. `matrix` is a one-band numeric format
+    /// (`matrixsave` carries the `mono` saveable flag), so a raster with
+    /// more than one band is converted to mono first, through the same
+    /// path [`Raster::colourspace`] uses to reach [`Interpretation::Bw`];
+    /// see `mono_view` for what is and is not measured about that. A
+    /// raster that already has one band passes through untouched. The
+    /// inverse is [`Raster::matrix_load`].
+    ///
+    /// Measured against the pinned vips 8.18.6 on a 3x2 sRGB ramp (issue
+    /// #958): `vips matrixsave` writes `3 2\n102 103 105\n105 107 109\n`
+    /// for pixels `(1,100,200) (11,101,201) (21,102,202)` over
+    /// `(31,103,203) (41,104,204) (51,105,205)`, and this now writes the
+    /// same bytes.
     pub fn matrix_save(&self) -> Vec<u8> {
-        let w = self.width() as usize;
-        let h = self.height() as usize;
-        let fmt = self.format();
+        let mono = mono_view(self);
+        let w = mono.width() as usize;
+        let h = mono.height() as usize;
+        let fmt = mono.format();
         let bpp = fmt.bytes_per_pixel();
-        let stride = self.stride();
-        let data = self.data();
+        let stride = mono.stride();
+        let data = mono.data();
 
         let mut out = String::new();
-        out.push_str(&self.width().to_string());
+        out.push_str(&mono.width().to_string());
         out.push(' ');
-        out.push_str(&self.height().to_string());
+        out.push_str(&mono.height().to_string());
         out.push('\n');
         for y in 0..h {
             for x in 0..w {
@@ -193,23 +246,36 @@ impl Raster {
         out.into_bytes()
     }
 
-    /// Serialise as comma-separated values.
+    /// Serialise as **TAB**-separated values, matching libvips `csvsave`
+    /// despite the "comma" in the format's name.
     ///
-    /// Writes one line per image row, the band-0 sample of each pixel joined by
-    /// commas. CSV is a one-band numeric format; the inverse is [`Raster::csv_load`].
+    /// Writes one line per image row, TAB-joined. CSV is a one-band numeric
+    /// format the same way `matrix` is (`csvsave` carries the `mono`
+    /// saveable flag), so a raster with more than one band is converted to
+    /// mono first; see `mono_view`. The inverse is [`Raster::csv_load`],
+    /// which reads either a comma or a TAB.
+    ///
+    /// Measured against the pinned vips 8.18.6 on the same 3x2 sRGB ramp as
+    /// [`Raster::matrix_save`] (issue #958): `vips csvsave` writes
+    /// `102\t103\t105\n105\t107\t109\n`, TAB rather than comma and the
+    /// luminance rather than band 0, and this now writes the same bytes.
+    /// Earlier versions of this function wrote commas and band 0 only,
+    /// which was never libvips' `csvsave` format despite the name; see
+    /// `CHANGELOG.md`.
     pub fn csv_save(&self) -> Vec<u8> {
-        let w = self.width() as usize;
-        let h = self.height() as usize;
-        let fmt = self.format();
+        let mono = mono_view(self);
+        let w = mono.width() as usize;
+        let h = mono.height() as usize;
+        let fmt = mono.format();
         let bpp = fmt.bytes_per_pixel();
-        let stride = self.stride();
-        let data = self.data();
+        let stride = mono.stride();
+        let data = mono.data();
 
         let mut out = String::new();
         for y in 0..h {
             for x in 0..w {
                 if x > 0 {
-                    out.push(',');
+                    out.push('\t');
                 }
                 out.push_str(&fmt_sample(data, y * stride + x * bpp, fmt));
             }
@@ -386,11 +452,17 @@ impl Raster {
         Ok(Raster::from_f32_samples(width, height, float1()?, &values)?)
     }
 
-    /// Decode a comma-separated-values grid into a single-band float raster.
+    /// Decode a comma- or TAB-separated-values grid into a single-band float
+    /// raster.
     ///
     /// The first non-empty row's column count fixes the width; the number of
     /// non-empty rows fixes the height. Blank lines are skipped and fields are
-    /// trimmed before parsing.
+    /// trimmed before parsing. A field separates on a comma **or** a TAB, so
+    /// this reads both the bytes [`Raster::csv_save`] writes now (TAB, issue
+    /// #958) and the comma-separated bytes it used to; libvips' own
+    /// `csvload` separator set is wider still (it also takes `;` and plain
+    /// whitespace, measured on 8.18.6), and only the two `csv_save` can
+    /// itself produce are read here.
     ///
     /// Ragged input is tolerated by default, matching libvips' default-lenient
     /// `csvload`: a row shorter than the established width is right-padded with
@@ -412,7 +484,7 @@ impl Raster {
                 continue;
             }
             let mut row: Vec<f32> = Vec::new();
-            for field in line.split(',') {
+            for field in line.split([',', '\t']) {
                 let t = field.trim();
                 let v: f32 = t
                     .parse()
@@ -982,6 +1054,91 @@ mod tests {
             .zip(&sb)
             .map(|(x, y)| (x - y).abs())
             .fold(0.0f32, f32::max)
+    }
+
+    /// The exact 3x2 sRGB ramp issue #958 measured against the pinned vips
+    /// 8.18.6: `(1,100,200) (11,101,201) (21,102,202)` over
+    /// `(31,103,203) (41,104,204) (51,105,205)`.
+    fn oracle_ramp() -> Raster {
+        #[rustfmt::skip]
+        let px: [[u8; 3]; 6] = [
+            [1, 100, 200], [11, 101, 201], [21, 102, 202],
+            [31, 103, 203], [41, 104, 204], [51, 105, 205],
+        ];
+        let data: Vec<u8> = px.into_iter().flatten().collect();
+        Raster::new(3, 2, PixelFormat::Rgb8, data).expect("well-formed rgb ramp")
+    }
+
+    /**
+     * Tests that `matrix_save` matches `vips matrixsave` byte for byte on a
+     * multi-band raster (issue #958).
+     *
+     * `vips matrixsave` on [`oracle_ramp`] writes `3 2\n102 103 105\n105 107
+     * 109\n`, measured directly against the pinned 8.18.6: `vips colourspace
+     * x.v x_bw.v b-w` and `vips matrixsave x.v x.mat` on the un-converted
+     * 3-band image write the same numbers, which is what pins the luminance
+     * conversion as `vips_colourspace`'s own rather than something invented
+     * to fit one row. Before this fix `matrix_save` wrote band 0 only
+     * (`1 11 21\n31 41 51\n`), which the row's own doc claimed was libvips
+     * `matrix` format and was not.
+     */
+    #[test]
+    fn matrix_save_matches_the_oracle_on_a_multiband_raster() {
+        let bytes = oracle_ramp().matrix_save();
+        assert_eq!(bytes, b"3 2\n102 103 105\n105 107 109\n");
+    }
+
+    /**
+     * Tests that `csv_save` matches `vips csvsave` byte for byte on a
+     * multi-band raster: TAB rather than comma, and the luminance rather
+     * than band 0 (issue #958).
+     *
+     * `vips csvsave` on [`oracle_ramp`] writes `102\t103\t105\n105\t107\t109\n`,
+     * measured on the pinned 8.18.6. Before this fix `csv_save` wrote
+     * `1,11,21\n31,41,51\n`: wrong separator and wrong bytes both.
+     */
+    #[test]
+    fn csv_save_matches_the_oracle_on_a_multiband_raster() {
+        let bytes = oracle_ramp().csv_save();
+        assert_eq!(bytes, b"102\t103\t105\n105\t107\t109\n");
+    }
+
+    /**
+     * Tests that a raster with only one band still passes straight through,
+     * whatever its band count used to imply about `mono_view` (issue #958).
+     *
+     * Measured on 8.18.6: `matrixsave` on a 1-band image writes the same
+     * values whether the image is tagged `matrix`, `b-w` or `multiband`, so
+     * libvips never runs a colourspace conversion when there is only one
+     * band to start with. `synth_float` is exactly that case (`FloatF32(1)`,
+     * tagged `multiband` by `Interpretation::for_format`), and this is the
+     * positive control that `mono_view`'s one-band early return is really
+     * what is carrying `matrix_round_trips_losslessly` and
+     * `csv_round_trips_losslessly` rather than the colourspace path
+     * happening to be a no-op for it.
+     */
+    #[test]
+    fn a_one_band_raster_is_not_run_through_the_colourspace_conversion() {
+        let r = synth_float();
+        assert_eq!(
+            r.interpretation(),
+            crate::conversion::Interpretation::Multiband,
+            "the fixture must be untagged for `try_colourspace` to reject it \
+             outright, which is the case this test exists to cover"
+        );
+        assert!(
+            r.try_colourspace(crate::conversion::Interpretation::Bw)
+                .is_err(),
+            "a Multiband-tagged raster is not a colourspace `try_colourspace` \
+             recognises, which is the point: the one-band fixture must reach \
+             `matrix_save`/`csv_save` through the early return, not through a \
+             conversion that happens to succeed"
+        );
+        // If `mono_view` ran this through `try_colourspace` unconditionally,
+        // both calls below would panic on Cow::Owned(Err) instead of writing
+        // the passthrough bytes.
+        assert_eq!(r.matrix_save(), b"3 2\n0 1 -2.5\n0.25 100 -0.75\n");
+        assert_eq!(r.csv_save(), b"0\t1\t-2.5\n0.25\t100\t-0.75\n");
     }
 
     #[test]
