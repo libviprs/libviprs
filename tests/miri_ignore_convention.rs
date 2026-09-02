@@ -396,10 +396,12 @@ const EXPECTED_SRC_MODULES: usize = 25;
 /// change that moves the population.
 ///
 /// Twenty-one since #977, which added
-/// `no_two_tracked_paths_differ_only_in_case`. That one also runs `git
-/// ls-files`, and for the same underlying reason as the #701 row above: the
-/// index is the only place that can answer a question the working tree cannot.
-const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 21;
+/// `no_two_tracked_paths_differ_only_in_case`, and twenty-two since #979,
+/// which added `every_embedded_fixture_is_committed_under_the_name_the_source_uses`.
+/// Both run `git ls-files`, for the same underlying reason as the #701 row
+/// above: the index is the only place that can answer a question the working
+/// tree cannot.
+const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 22;
 
 /// The filesystem-touching tests still allowed to run under Miri, and so still
 /// allowed to end the whole run on their first syscall.
@@ -475,7 +477,7 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// `tempfile::tempdir()` and reads them back, so it is both annotated and
 /// fs-detected, the ordinary case, and its row is in
 /// `tests/miri_fs_test_inventory.txt` beside the rest of that file's.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 286;
+const EXPECTED_FS_TOUCHING_TESTS: usize = 287;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {

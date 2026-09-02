@@ -3979,6 +3979,31 @@ and not under `Fixed`: this file is the only place they can be caught.
 
 ### Fixed
 
+- **An `include_bytes!` path that nothing committed now fails a test rather
+  than a Linux runner** (issue #979). #977 fixed the missing MAT fixture and
+  added `tests/case_only_path_collisions.rs`, and that guard would not have
+  caught the bug it came from: when `main` was broken there was no collision in
+  the index at all, just a name nothing had committed.
+
+  No gate that builds could catch it either, including the containerised one.
+  `include_bytes!` resolves through the filesystem, so on a case-insensitive
+  host the source asks for `magic_MATLAB_50.mat` and gets `magic_matlab_50.mat`,
+  and `tools/local-ci.py` hands the tree to its Linux container as a bind mount,
+  which stays case-insensitive off such a host. Pointing a `mat_fixture!` at a
+  name no committed file has still gives a clean `cargo build --lib --tests` on
+  this machine, which is the measurement that says why this is a test about the
+  index and not about the tree.
+
+  `tests/fixture_paths_are_committed.rs` resolves every `include_bytes!` in
+  `src/` and `tests/`, 269 of them, and asserts each is in `git ls-files` under
+  exactly the spelling the source uses. It reads the two macro `concat!` prefix
+  forms, `jp2k`'s `fixtures![...]` list and `analyze`'s nested
+  `decoded!("stem")`, and it reconciles what it resolved against every
+  `include_bytes!` token left in the masked source, so a form it was never
+  taught fails the test naming the file and byte rather than being skipped. That
+  is the failure `tests/unsafe_inventory.rs` hit in #943, where a masking bug
+  lost 2650 lines of `src/jp2k.rs` while looking green.
+
 - **The crate compiles on a case-sensitive filesystem again** (issue #977).
   `main` had not built on Linux since #645. `src/mat.rs` and `src/source.rs`
   both `include_bytes!` a fixture named
