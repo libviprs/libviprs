@@ -69,7 +69,11 @@ fn tracked_paths() -> Vec<String> {
         .map(|s| String::from_utf8_lossy(s).replace('\\', "/"))
         .collect();
 
-    for anchor in ["Cargo.toml", "src/lib.rs", "tests/case_only_path_collisions.rs"] {
+    for anchor in [
+        "Cargo.toml",
+        "src/lib.rs",
+        "tests/case_only_path_collisions.rs",
+    ] {
         assert!(
             files.iter().any(|f| f == anchor),
             "git tracks {} paths and {anchor} is not one of them, so this is \
