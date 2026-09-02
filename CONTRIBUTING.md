@@ -403,6 +403,21 @@ removed. `src/arithmetic.rs`'s `try_scratch` is the one copy left, held open on
 
 ## Before you push
 
-`make ci` runs the lot: `fmt`, `clippy`, `test`, `doc`, plus `miri` and `loom`,
-which are the merge gate rather than the per-push CI. Any of those runs on its
-own, and the README has the longer version.
+`make ci` is the gate, and it is the real job list rather than a copy of one:
+it hands `.github/workflows/ci.yml` and `.github/workflows/merge-gate.yml` to
+`tools/local-ci.py`, which runs what is in them, in a container, over a tree it
+checks out of git. It used to be six hand-written targets standing in for eight
+hosted jobs, and by the time anyone compared the two they had drifted in six
+places at once, so a green `make ci` predicted nothing (#982).
+
+Two things follow from that git checkout, and both are the point. Your
+uncommitted edits are still checked, because what goes in is the working tree's
+tracked content. Your untracked files are not, because no runner would have
+them either, and the run lists what it left out before it starts rather than
+quietly building against it.
+
+`make fmt`, `make clippy`, `make test`, `make doc`, `make miri` and `make loom`
+still run on this machine, and they are spot checks for iterating rather than
+the gate: each covers part of one job, on this host's architecture and
+filesystem. `tools/local-ci.py --worktree` is the same trade for a whole run.
+The README has the longer version.

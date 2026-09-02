@@ -10,16 +10,93 @@ step to ci.yml and it runs here next time, with no second place to update.
     tools/local-ci.py --list             # show what would run, run nothing
     tools/local-ci.py --fast             # skip Test and Integration
     tools/local-ci.py Check Docs         # only jobs matching a filter
-    tools/local-ci.py --workflow merge-gate.yml   # Miri, Loom, pdfium audit
+    tools/local-ci.py --workflow merge-gate.yml   # Loom and the pdfium audit
     tools/local-ci.py --native           # host arch instead of x86_64
+    tools/local-ci.py --worktree         # bind-mount the tree (fast, NOT the gate)
 
 Two things cannot run verbatim and are adapted, out loud:
 
   * `actions/checkout` and the integration job's `git clone` of libviprs-tests.
-    The sibling checkout is bind-mounted instead, so what runs is the tree you
-    have rather than whatever is on its remote.
+    Both are provisioned from git instead, per the section below.
   * Nothing else. Any other `${{ }}` expression is a hard error rather than a
     guess, because a silently mis-substituted step is worse than a missing one.
+
+Where the tree in the container comes from, and why it is not a bind mount
+------------------------------------------------------------------------
+
+This used to hand the container the working tree with `-v {REPO}:/src/libviprs`
+and that is the one thing about the mirror that was never honest. A Docker
+Desktop bind mount off an APFS host is case-insensitive, and it carries
+untracked files, so the container saw a tree no runner could ever see:
+
+    $ printf 'lower\\n' > castest/probe_case.txt
+    $ docker run --rm -v "$PWD/castest:/m" alpine:3 sh -c 'cat /m/PROBE_CASE.txt'
+    lower
+
+That is not a curiosity. It is how `main` stayed red for about 55 hours in
+#977 and #979: a capture script derived two fixture names that differed only in
+case, APFS merged them, one was never committed, and this mirror resolved the
+missing uppercase name to the surviving lowercase file and printed PASS on
+every run. `ubuntu-latest` could not. `tests/fixture_paths_are_committed.rs`
+now guards that one shape from the index, which is the right layer for it, but
+it guards one shape and the mirror was blind to the whole class.
+
+So by default nothing is bind-mounted. The repository's git directory goes in
+read-only, and the container makes its own checkout of it:
+
+    git clone --shared --no-checkout /gitsrc/libviprs /src/libviprs
+    git -C /src/libviprs checkout --detach <rev>
+
+`--shared` means no objects are copied, so this costs about a second even
+though the object store is gigabytes. What comes out is a tree on a
+case-sensitive filesystem, built from git's byte-exact names, with no untracked
+file in it and with the real history and tags, which several tests in this
+repository read.
+
+`<rev>` is `git stash create` when the working tree is dirty and `HEAD` when it
+is clean. That is deliberate and it is the interesting half: `git stash create`
+builds a commit out of the working tree's *tracked* content without touching
+the working tree, the index or the stash ref. So local edits are still what
+gets checked, which is what anyone running a gate actually wants, and untracked
+files still are not, which is what CI would see. Anything excluded gets listed
+before the run rather than silently dropped.
+
+Why a clone and not `git archive`
+--------------------------------
+
+`git archive <rev> | tar -x` is the obvious way to get a case-exact,
+untracked-free tree, and it is much cheaper: its entries all carry the commit's
+timestamp, so extracting the same commit twice gives byte-identical mtimes and
+cargo stays warm. Measured back to back on an unchanged tree with the
+dependencies warm, `cargo test --no-run` costs 0.58s over the old bind mount,
+1.1s over an archive extraction and 26s over the clone below.
+
+It is the wrong trade twice over.
+
+It ships no `.git`, and four test files here shell out to git:
+`tests/case_only_path_collisions.rs`, `tests/fixture_paths_are_committed.rs`
+and `tests/oracle_capture_pins.rs` read `git ls-files`, and
+`tests/changelog_release_claims.rs` reads `git tag` and `git grep <tag>`.
+Synthesising a repository around the extraction with `git init && git add -A`
+gets the first three back and not the fourth: a fresh repository has no tags,
+and that guard opens by asserting `v0.1.1`, `v0.2.0` and `v0.4.0` are in the
+listing precisely so that a clone without them fails instead of finding no
+counterexamples. So the archive route buys case-exactness and pays for it with
+a gate that is red for a reason that has nothing to do with the change in front
+of it, which is the other way to make a check worth ignoring.
+
+And the stable mtimes are a hazard rather than a feature. Cargo decides a crate
+is fresh when no source file is *newer* than the artifact, so a tree whose
+timestamps go backwards, which is every `git bisect` step and every "check the
+commit before this one", reads as fresh and hands you the previous commit's
+binaries. `git checkout` stamps the files with the time it ran, so that cannot
+happen: the 26 seconds is the price of never silently testing the wrong build,
+and dependencies stay warm through it either way because the target directory
+lives on the `/cargo` volume rather than in the tree. Cold, that same build is
+3 minutes.
+
+`--worktree` puts the old bind mount back for the times when the rebuild is not
+worth it, and says loudly that it is not the gate.
 
 On architecture: the image is x86_64, the same as GitHub's ubuntu-latest, so
 on an Apple Silicon host Docker emulates it. That is slower than running
@@ -35,8 +112,22 @@ the address space, and the process SIGTRAPs rather than the allocation
 failing cleanly. That is a Rosetta limit, not a bug in the code: those
 tests pass natively. Use `--native` for them, which trades the x86 fidelity
 for a host-architecture run.
+
+A job that does not run is not a job that passed
+------------------------------------------------
+
+A skipped job makes the whole run exit non-zero. It used to exit 0 with a note,
+and a note is not a gate: the one job that crosses repos reported SKIP and the
+run still said "All jobs passed" to anybody who had not cloned the sibling.
+`--allow-skips` is there for when a subset is genuinely what you asked for.
+
+A job carrying a job-level `if:` is reported HELD and not run, for the same
+reason the `${{ }}` rule above refuses to guess. Today that is only
+`merge-gate.yml`'s Miri, which is held at the release boundary; `make miri`
+runs it here on a pinned nightly, and `tests/local_gate_is_the_job_list.rs`
+fails if a job grows an `if:` with nothing covering it.
 """
-import argparse, collections, json, os, shlex, subprocess, sys
+import argparse, collections, os, shlex, subprocess, sys
 
 try:
     import yaml
@@ -50,6 +141,90 @@ IMAGE_AMD64 = "libviprs-ci:local"
 IMAGE_NATIVE = "libviprs-ci:native"
 VOLUME = "libviprs-ci-cargo"
 SLOW = ("test", "integration")
+
+# Where each repository's git directory is mounted, and where its checkout is
+# made. The checkout paths are the ones every step's `working-directory`
+# resolves against, so they match what ci.yml's `actions/checkout` produces.
+CHECKOUT = {"libviprs": "/src/libviprs", "libviprs-tests": "/src/libviprs-tests"}
+GITSRC = {"libviprs": "/gitsrc/libviprs", "libviprs-tests": "/gitsrc/libviprs-tests"}
+
+
+def git(repo, *args, check=True):
+    """One git command against `repo`, with its stderr surfaced on failure."""
+    out = subprocess.run(
+        ["git", "-C", repo, *args], capture_output=True, text=True
+    )
+    if check and out.returncode != 0:
+        sys.exit(
+            f"git {' '.join(args)} failed in {repo}, so there is nothing to "
+            f"provision from:\n{out.stderr.strip()}"
+        )
+    return out.stdout.strip()
+
+
+def is_git_repo(path):
+    """Whether `path` is something the git-provisioned mode can read.
+
+    A sibling checkout that is not a git repository cannot be provisioned from
+    git, and quietly bind-mounting that one while checking the other one out
+    would be the worst of both: a run that looks faithful and is not.
+    """
+    return (
+        subprocess.run(
+            ["git", "-C", path, "rev-parse", "--git-common-dir"],
+            capture_output=True,
+        ).returncode
+        == 0
+    )
+
+
+def git_common_dir(repo):
+    """The real git directory for `repo`, resolved for linked worktrees.
+
+    A linked worktree's `.git` is a file rather than a directory, and its
+    objects live in the main checkout's store, so mounting `repo/.git` would
+    mount a one line pointer at a host path the container cannot follow.
+    `--git-common-dir` is the thing that is always a real directory holding the
+    objects and the refs.
+    """
+    d = git(repo, "rev-parse", "--git-common-dir")
+    return d if os.path.isabs(d) else os.path.abspath(os.path.join(repo, d))
+
+
+def source_rev(repo):
+    """The commit whose tree a push from `repo` right now would carry.
+
+    `git stash create` writes a commit for the working tree's tracked content
+    and prints its sha, without touching the working tree, the index or the
+    stash ref. It prints nothing when there is nothing to stash, and then HEAD
+    already is that commit.
+
+    It can also refuse, in a repository mid-merge or mid-rebase for instance,
+    and that must not take the whole gate down: HEAD is still a tree CI could
+    have, so fall back to it and say which one is being used. Silently falling
+    back would be the bad half of this, because the difference is exactly the
+    uncommitted work somebody is asking about.
+    """
+    head = git(repo, "rev-parse", "HEAD")
+    rev = git(repo, "stash", "create", check=False)
+    if rev:
+        return rev
+    if git(repo, "status", "--porcelain", "--untracked-files=no", check=False):
+        print(
+            f"note: {repo} has uncommitted changes and `git stash create` gave "
+            "nothing back, so this runs HEAD instead of your working tree.",
+            file=sys.stderr,
+        )
+    return head
+
+
+def untracked(repo):
+    """Files git does not track, which is exactly what CI would not see."""
+    return [
+        line
+        for line in git(repo, "ls-files", "--others", "--exclude-standard").splitlines()
+        if line
+    ]
 
 
 def build_plan(workflow, fast, filters):
@@ -71,13 +246,63 @@ def build_plan(workflow, fast, filters):
         env.update(j.get("env") or {})
         steps = [s for s in (j.get("steps") or []) if s.get("run")]
         if steps:
-            plan.append({"name": name, "toolchain": toolchain, "env": env, "steps": steps})
+            plan.append(
+                {
+                    "name": name,
+                    "toolchain": toolchain,
+                    "env": env,
+                    "steps": steps,
+                    # A job-level `if:` is a condition this tool does not
+                    # evaluate, and guessing at it is the thing the `${{ }}`
+                    # rule above exists to forbid. It is carried so the summary
+                    # can name it instead of running a job GitHub would have
+                    # held back (merge-gate.yml's Miri is the live case: it is
+                    # held at the release boundary and does not finish here).
+                    "if": j.get("if"),
+                }
+            )
     return plan
 
 
-def container_script(job, tag):
+def provision(needs_tests, revs):
+    """The shell that puts the checkouts in place before any step runs.
+
+    Cloning rather than copying is what makes this cheap: `--shared` leaves the
+    objects in the mounted store and writes an `alternates` line pointing at
+    it, so a gigabyte-scale history costs no copy at all.
+    """
+    lines = [
+        # The mounted git directories are owned by the host user, not root, and
+        # git refuses to read a repository it thinks somebody else owns.
+        "git config --global --add safe.directory '*'",
+    ]
+    for repo in ["libviprs"] + (["libviprs-tests"] if needs_tests else []):
+        dest, src = CHECKOUT[repo], GITSRC[repo]
+        lines += [
+            f"git clone --quiet --shared --no-checkout {src} {dest}",
+            f"git -C {dest} checkout --quiet --detach {revs[repo]}",
+        ]
+    return lines
+
+
+def uses_the_sibling(job):
+    """Whether this job touches the libviprs-tests checkout at all.
+
+    Only the integration job does, so the other four have no reason to pay for
+    a second clone.
+    """
+    return any(
+        (s.get("working-directory") or "").startswith("libviprs-tests")
+        or "libviprs-tests" in s["run"]
+        for s in job["steps"]
+    )
+
+
+def container_script(job, tag, mode, revs, tests_mounted):
     """Turn one job into a shell script to run inside the container."""
     out = ["set -eo pipefail"]
+    if mode == "git":
+        out += provision(tests_mounted and uses_the_sibling(job), revs)
     for k, v in job["env"].items():
         out.append(f"export {k}={shlex.quote(str(v))}")
     out.append(f"export RUSTUP_TOOLCHAIN={shlex.quote(job['toolchain'])}")
@@ -94,7 +319,7 @@ def container_script(job, tag):
         label = s.get("name") or run.splitlines()[0][:60]
         if "${{" in run:
             if "libviprs-tests.git" in run:
-                if not os.path.isdir(TESTS_DIR):
+                if not tests_mounted:
                     # Exit 99, not 0. Exiting 0 here made the runner print
                     # "PASS Integration Tests" for a job that compiled nothing,
                     # and counted it toward "All jobs passed". A lane worktree
@@ -104,7 +329,9 @@ def container_script(job, tag):
                     # cloned the other repo.
                     out.append('echo "SKIP: no libviprs-tests sibling to mount"; exit 99')
                 else:
-                    out.append('echo ">> adapted: using the bind-mounted libviprs-tests sibling, not git clone"')
+                    out.append(
+                        'echo ">> adapted: using the libviprs-tests sibling checkout, not git clone"'
+                    )
                 continue
             out.append(
                 f'echo "REFUSING to guess at the expression in step: {label}"; exit 90'
@@ -127,6 +354,36 @@ def container_script(job, tag):
     return "\n".join(out)
 
 
+def report_source(repo, label, rev, is_sibling=False):
+    """Say what is going into the container, and what is being left out."""
+    head = git(repo, "rev-parse", "HEAD")
+    state = "HEAD" if rev == head else f"working tree over {head[:12]}"
+    print(f"==> {label}: {rev[:12]} ({state}), tracked files only")
+    others = untracked(repo)
+    if others:
+        shown = others[:10]
+        print(f"    {len(others)} untracked file(s) excluded, as on a runner:")
+        for f in shown:
+            print(f"      {f}")
+        if len(others) > len(shown):
+            print(f"      ... and {len(others) - len(shown)} more")
+    if not is_sibling:
+        return
+    # The sibling is the one repository whose revision the hosted job picks for
+    # itself: ci.yml clones the matching branch of libviprs-tests, or its main,
+    # from origin. This checkout is whatever it happens to be, and a stale one
+    # fails the integration job on a signature that moved months ago, which
+    # reads exactly like the change in front of you breaking the API. Mine was
+    # twelve commits behind and cost me a confused half hour.
+    if not git(repo, "rev-parse", "--verify", "--quiet", "origin/main", check=False):
+        return
+    behind = git(repo, "rev-list", "--count", "HEAD..origin/main", check=False)
+    if behind and behind != "0":
+        print(f"    NOTE: {behind} commit(s) behind its own origin/main, which is what")
+        print("    the hosted integration job clones. The count is as of your last")
+        print("    fetch, so it is a floor rather than the answer.")
+
+
 def main():
     p = argparse.ArgumentParser(add_help=False)
     p.add_argument("filters", nargs="*")
@@ -135,6 +392,11 @@ def main():
     p.add_argument("--workflow", default="ci.yml")
     p.add_argument("--native", action="store_true",
                    help="run on the host architecture instead of x86_64")
+    p.add_argument("--worktree", action="store_true",
+                   help="bind-mount the working tree instead of checking it "
+                        "out from git (fast, case-insensitive, NOT the gate)")
+    p.add_argument("--allow-skips", action="store_true",
+                   help="let a skipped job leave the run green")
     p.add_argument("-h", "--help", action="store_true")
     a = p.parse_args()
     if a.help:
@@ -151,7 +413,8 @@ def main():
 
     if a.list:
         for j in plan:
-            print(f'[{j["name"]}]  toolchain={j["toolchain"]}  env={j["env"]}')
+            held = f'  HELD by `if: {j["if"]}`' if j["if"] else ""
+            print(f'[{j["name"]}]  toolchain={j["toolchain"]}  env={j["env"]}{held}')
             for s in j["steps"]:
                 cwd = f'({s["working-directory"]}) ' if s.get("working-directory") else ""
                 print("   $", cwd + " ".join(s["run"].split())[:150])
@@ -159,6 +422,18 @@ def main():
 
     if subprocess.run(["docker", "info"], capture_output=True).returncode != 0:
         return "Docker is not running."
+
+    mode = "worktree" if a.worktree else "git"
+    tests_mounted = os.path.isdir(TESTS_DIR)
+    if tests_mounted and mode == "git" and not is_git_repo(TESTS_DIR):
+        print(
+            f"note: {TESTS_DIR} is not a git repository, so it cannot be "
+            "provisioned the way this mode provisions everything else, so "
+            "the integration job reports SKIP and the run fails unless you "
+            "pass --allow-skips.",
+            file=sys.stderr,
+        )
+        tests_mounted = False
 
     image = IMAGE_NATIVE if a.native else IMAGE_AMD64
     build = ["docker", "build", "-q", "-f", f"{REPO}/tools/Dockerfile.ci", "-t", image]
@@ -172,15 +447,49 @@ def main():
     if subprocess.run(["docker", "volume", "inspect", VOLUME], capture_output=True).returncode != 0:
         subprocess.run(["docker", "volume", "create", VOLUME], check=True, stdout=subprocess.DEVNULL)
 
-    mounts = ["-v", f"{REPO}:/src/libviprs", "-v", f"{VOLUME}:/cargo"]
-    if os.path.isdir(TESTS_DIR):
-        mounts += ["-v", f"{TESTS_DIR}:/src/libviprs-tests"]
+    mounts = ["-v", f"{VOLUME}:/cargo"]
+    revs = {}
+    if mode == "git":
+        revs["libviprs"] = source_rev(REPO)
+        report_source(REPO, "libviprs", revs["libviprs"])
+        mounts += ["-v", f"{git_common_dir(REPO)}:{GITSRC['libviprs']}:ro"]
+        if tests_mounted:
+            revs["libviprs-tests"] = source_rev(TESTS_DIR)
+            report_source(
+                TESTS_DIR, "libviprs-tests", revs["libviprs-tests"], is_sibling=True
+            )
+            mounts += ["-v", f"{git_common_dir(TESTS_DIR)}:{GITSRC['libviprs-tests']}:ro"]
     else:
-        print(f"note: {TESTS_DIR} not found, the integration job will skip", file=sys.stderr)
+        print("!! --worktree bind-mounts this tree into the container. A Docker")
+        print("!! Desktop bind mount off an APFS host is CASE-INSENSITIVE and it")
+        print("!! carries untracked files, so this mode cannot see the two bug")
+        print("!! classes the default mode exists for (#977, #979). Use it to")
+        print("!! iterate, not to decide whether something is ready to push.")
+        mounts += ["-v", f"{REPO}:{CHECKOUT['libviprs']}"]
+        if tests_mounted:
+            mounts += ["-v", f"{TESTS_DIR}:{CHECKOUT['libviprs-tests']}"]
+    if not os.path.isdir(TESTS_DIR):
+        print(
+            f"note: {TESTS_DIR} not found, so the integration job cannot run. "
+            "It reports SKIP, and a skip fails the run unless you pass "
+            "--allow-skips.",
+            file=sys.stderr,
+        )
 
     failed = []
     skipped = []
+    held = []
     for j in plan:
+        if j["if"]:
+            # Not a guess in either direction. Running it would run a job
+            # GitHub holds back, and calling it green would be the "skipped
+            # reads as passing" trap the workflow's own comment warns about.
+            print(f"\n{'=' * 64}\n  {j['name']}   HELD\n{'=' * 64}")
+            print(f"  This job carries `if: {j['if']}`, which this tool does not")
+            print("  evaluate. It has NOT run. The Makefile has a host-native")
+            print("  target for it where one exists (`make miri`).")
+            held.append(j["name"])
+            continue
         print(f"\n{'=' * 64}\n  {j['name']}   (toolchain {j['toolchain']})\n{'=' * 64}")
         # Stream the output AND keep it, so a failure can never be reported
         # without the reason. Relying on inherited stdout alone lost the
@@ -190,8 +499,9 @@ def main():
         if not a.native:
             run_cmd += ["--platform", "linux/amd64"]
         proc = subprocess.Popen(
-            run_cmd + mounts + ["-w", "/src/libviprs", image,
-             "bash", "-c", container_script(j, "native" if a.native else "amd64")],
+            run_cmd + mounts + ["-w", "/src", image,
+             "bash", "-c", container_script(
+                 j, "native" if a.native else "amd64", mode, revs, tests_mounted)],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
         )
         tail = collections.deque(maxlen=40)
@@ -209,6 +519,21 @@ def main():
             print(f"  --- last lines of {j['name']} ---")
             for line in tail:
                 print("  | " + line.rstrip())
+            if any("No space left on device" in ln for ln in tail):
+                # Worth naming, because the message arrives as a compiler or a
+                # git error and reads like the change is broken. It is not:
+                # running the whole job list materialises about two dozen
+                # distinct artifact sets on the /cargo volume, because Check &
+                # Lint compiles ten feature permutations, Test nine more and
+                # MSRV another seven under a second toolchain, and each one
+                # gets its own metadata hash rather than replacing the last.
+                print("")
+                print("  The Docker VM's disk is full, not your code. The whole job")
+                print("  list materialises about two dozen artifact sets on the cargo")
+                print("  volume, one per feature permutation per toolchain. See what")
+                print("  is on there with:")
+                print(f"      docker run --rm -v {VOLUME}:/cargo alpine:3 du -sh /cargo/*")
+                print("  Docker Desktop's disk size is under Settings, Resources.")
             if any("rosetta error" in ln for ln in tail):
                 print("")
                 print("  This is Rosetta, not your code. Emulating x86_64 on Apple")
@@ -218,14 +543,24 @@ def main():
                 print("      tools/local-ci.py --native " + j["name"].split()[0])
 
     print()
+    if held:
+        print("HELD (did NOT run, carry a job-level `if:`): " + ", ".join(held))
     if skipped:
-        print("SKIPPED: " + ", ".join(skipped))
+        print("SKIPPED (did NOT run): " + ", ".join(skipped))
     if failed:
         print("FAILED: " + ", ".join(failed))
         return 1
-    ran = len(plan) - len(skipped)
-    if skipped:
-        print(f"{ran} of {len(plan)} jobs passed; {len(skipped)} skipped and did NOT run.")
+    ran = len(plan) - len(skipped) - len(held)
+    if skipped and not a.allow_skips:
+        print(f"{ran} of {len(plan)} jobs passed. {len(skipped)} did not run, so this")
+        print("is not a green gate. Pass --allow-skips if a subset is what you meant.")
+        return 1
+    if skipped or held:
+        print(f"{ran} of {len(plan)} jobs passed; the rest did NOT run.")
+        return 0
+    if mode == "worktree":
+        print("All jobs passed, over a bind-mounted tree. That is not the gate:")
+        print("re-run without --worktree before you push.")
         return 0
     print("All jobs passed.")
     return 0
