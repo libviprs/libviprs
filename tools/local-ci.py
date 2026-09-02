@@ -10,7 +10,7 @@ step to ci.yml and it runs here next time, with no second place to update.
     tools/local-ci.py --list             # show what would run, run nothing
     tools/local-ci.py --fast             # skip Test and Integration
     tools/local-ci.py Check Docs         # only jobs matching a filter
-    tools/local-ci.py --workflow merge-gate.yml   # Miri, Loom, pdfium audit
+    tools/local-ci.py --workflow merge-gate.yml   # Loom and the pdfium audit
     tools/local-ci.py --native           # host arch instead of x86_64
     tools/local-ci.py --worktree         # bind-mount the tree (fast, NOT the gate)
 
@@ -65,9 +65,11 @@ Why a clone and not `git archive`
 --------------------------------
 
 `git archive <rev> | tar -x` is the obvious way to get a case-exact,
-untracked-free tree, and it is cheaper: its entries all carry the commit's
+untracked-free tree, and it is much cheaper: its entries all carry the commit's
 timestamp, so extracting the same commit twice gives byte-identical mtimes and
-cargo stays warm. Measured here, that is 0.6s a job against 26s.
+cargo stays warm. Measured back to back on an unchanged tree with the
+dependencies warm, `cargo test --no-run` costs 0.58s over the old bind mount,
+1.1s over an archive extraction and 26s over the clone below.
 
 It is the wrong trade twice over.
 
@@ -118,6 +120,12 @@ A skipped job makes the whole run exit non-zero. It used to exit 0 with a note,
 and a note is not a gate: the one job that crosses repos reported SKIP and the
 run still said "All jobs passed" to anybody who had not cloned the sibling.
 `--allow-skips` is there for when a subset is genuinely what you asked for.
+
+A job carrying a job-level `if:` is reported HELD and not run, for the same
+reason the `${{ }}` rule above refuses to guess. Today that is only
+`merge-gate.yml`'s Miri, which is held at the release boundary; `make miri`
+runs it here on a pinned nightly, and `tests/local_gate_is_the_job_list.rs`
+fails if a job grows an `if:` with nothing covering it.
 """
 import argparse, collections, os, shlex, subprocess, sys
 
