@@ -73,7 +73,7 @@ dependencies warm, `cargo test --no-run` costs 0.58s over the old bind mount,
 
 It is the wrong trade twice over.
 
-It ships no `.git`, and five tests in this repository shell out to git:
+It ships no `.git`, and four test files here shell out to git:
 `tests/case_only_path_collisions.rs`, `tests/fixture_paths_are_committed.rs`
 and `tests/oracle_capture_pins.rs` read `git ls-files`, and
 `tests/changelog_release_claims.rs` reads `git tag` and `git grep <tag>`.
