@@ -1283,7 +1283,7 @@ fn obj_to_f64(obj: &lopdf::Object) -> Option<f64> {
 /// safety at the libviprs boundary.
 ///
 /// pdfium itself is not thread-safe at the C library level. The
-/// `pdfium-render` `sync` feature wraps every FPDF call in a global
+/// `pdfium-render` `thread_safe` feature wraps every FPDF call in a global
 /// mutex, but **only** in the per-call locking fork that libviprs
 /// declares as a direct git dependency. Consumers that build libviprs
 /// from git or a path inherit that edge, but the crates.io-published
@@ -1697,7 +1697,7 @@ pub(crate) fn strip_matrix(scale: f32, y_offset: u32) -> [f32; 6] {
 ///
 /// FPDF calls underneath this function are serialised by
 /// `pdfium-render`'s `ThreadSafePdfiumBindings` (active via the
-/// `sync` feature plus the direct git dependency on the per-call
+/// `thread_safe` feature plus the direct git dependency on the per-call
 /// locking fork in `libviprs/Cargo.toml`).
 ///
 /// `dpi`, `y_offset`, `strip_height` semantics match the device matrix
