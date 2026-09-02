@@ -291,6 +291,7 @@ annotated   fs-detected  tests/exr_ported_surface.rs::the_sniff_route_reaches_th
 annotated   fs-detected  tests/exr_ported_surface.rs::the_typed_error_is_matchable_downstream
 annotated   fs-detected  tests/fits_ported_surface.rs::encode_and_save_round_trip_from_outside_the_crate
 annotated   fs-detected  tests/fits_ported_surface.rs::the_shared_dispatch_carries_a_fits_row
+annotated   fs-detected  tests/fixture_paths_are_committed.rs::every_embedded_fixture_is_committed_under_the_name_the_source_uses
 annotated   fs-detected  tests/gif_ported_surface.rs::encode_and_save_round_trip_from_outside_the_crate
 annotated   fs-detected  tests/io_ported_surface.rs::ported_exif_field_call_sites
 annotated   fs-detected  tests/io_ported_surface.rs::ported_keep_custom_profile_call_site
