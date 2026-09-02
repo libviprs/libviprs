@@ -61,12 +61,40 @@ gets checked, which is what anyone running a gate actually wants, and untracked
 files still are not, which is what CI would see. Anything excluded gets listed
 before the run rather than silently dropped.
 
-The cost is that a dirty tree gets a fresh commit timestamp, so every file in
-the checkout has a new mtime and cargo rebuilds this crate (not its
-dependencies, which live on the `/cargo` volume and are untouched). On a clean
-tree the timestamps come from the commit, so they are identical run to run and
-cargo stays warm. `--worktree` puts the old bind mount back for the times when
-that rebuild is not worth it, and says loudly that it is not the gate.
+Why a clone and not `git archive`
+--------------------------------
+
+`git archive <rev> | tar -x` is the obvious way to get a case-exact,
+untracked-free tree, and it is cheaper: its entries all carry the commit's
+timestamp, so extracting the same commit twice gives byte-identical mtimes and
+cargo stays warm. Measured here, that is 0.6s a job against 26s.
+
+It is the wrong trade twice over.
+
+It ships no `.git`, and five tests in this repository shell out to git:
+`tests/case_only_path_collisions.rs`, `tests/fixture_paths_are_committed.rs`
+and `tests/oracle_capture_pins.rs` read `git ls-files`, and
+`tests/changelog_release_claims.rs` reads `git tag` and `git grep <tag>`.
+Synthesising a repository around the extraction with `git init && git add -A`
+gets the first three back and not the fourth: a fresh repository has no tags,
+and that guard opens by asserting `v0.1.1`, `v0.2.0` and `v0.4.0` are in the
+listing precisely so that a clone without them fails instead of finding no
+counterexamples. So the archive route buys case-exactness and pays for it with
+a gate that is red for a reason that has nothing to do with the change in front
+of it, which is the other way to make a check worth ignoring.
+
+And the stable mtimes are a hazard rather than a feature. Cargo decides a crate
+is fresh when no source file is *newer* than the artifact, so a tree whose
+timestamps go backwards, which is every `git bisect` step and every "check the
+commit before this one", reads as fresh and hands you the previous commit's
+binaries. `git checkout` stamps the files with the time it ran, so that cannot
+happen: the 26 seconds is the price of never silently testing the wrong build,
+and dependencies stay warm through it either way because the target directory
+lives on the `/cargo` volume rather than in the tree. Cold, that same build is
+3 minutes.
+
+`--worktree` puts the old bind mount back for the times when the rebuild is not
+worth it, and says loudly that it is not the gate.
 
 On architecture: the image is x86_64, the same as GitHub's ubuntu-latest, so
 on an Apple Silicon host Docker emulates it. That is slower than running
@@ -124,6 +152,22 @@ def git(repo, *args, check=True):
             f"provision from:\n{out.stderr.strip()}"
         )
     return out.stdout.strip()
+
+
+def is_git_repo(path):
+    """Whether `path` is something the git-provisioned mode can read.
+
+    A sibling checkout that is not a git repository cannot be provisioned from
+    git, and quietly bind-mounting that one while checking the other one out
+    would be the worst of both: a run that looks faithful and is not.
+    """
+    return (
+        subprocess.run(
+            ["git", "-C", path, "rev-parse", "--git-common-dir"],
+            capture_output=True,
+        ).returncode
+        == 0
+    )
 
 
 def git_common_dir(repo):
@@ -233,11 +277,24 @@ def provision(needs_tests, revs):
     return lines
 
 
+def uses_the_sibling(job):
+    """Whether this job touches the libviprs-tests checkout at all.
+
+    Only the integration job does, so the other four have no reason to pay for
+    a second clone.
+    """
+    return any(
+        (s.get("working-directory") or "").startswith("libviprs-tests")
+        or "libviprs-tests" in s["run"]
+        for s in job["steps"]
+    )
+
+
 def container_script(job, tag, mode, revs, tests_mounted):
     """Turn one job into a shell script to run inside the container."""
     out = ["set -eo pipefail"]
     if mode == "git":
-        out += provision(tests_mounted, revs)
+        out += provision(tests_mounted and uses_the_sibling(job), revs)
     for k, v in job["env"].items():
         out.append(f"export {k}={shlex.quote(str(v))}")
     out.append(f"export RUSTUP_TOOLCHAIN={shlex.quote(job['toolchain'])}")
@@ -345,6 +402,15 @@ def main():
 
     mode = "worktree" if a.worktree else "git"
     tests_mounted = os.path.isdir(TESTS_DIR)
+    if tests_mounted and mode == "git" and not is_git_repo(TESTS_DIR):
+        print(
+            f"note: {TESTS_DIR} is not a git repository, so it cannot be "
+            "provisioned the way this mode provisions everything else, so "
+            "the integration job reports SKIP and the run fails unless you "
+            "pass --allow-skips.",
+            file=sys.stderr,
+        )
+        tests_mounted = False
 
     image = IMAGE_NATIVE if a.native else IMAGE_AMD64
     build = ["docker", "build", "-q", "-f", f"{REPO}/tools/Dockerfile.ci", "-t", image]
@@ -377,8 +443,13 @@ def main():
         mounts += ["-v", f"{REPO}:{CHECKOUT['libviprs']}"]
         if tests_mounted:
             mounts += ["-v", f"{TESTS_DIR}:{CHECKOUT['libviprs-tests']}"]
-    if not tests_mounted:
-        print(f"note: {TESTS_DIR} not found, the integration job will skip", file=sys.stderr)
+    if not os.path.isdir(TESTS_DIR):
+        print(
+            f"note: {TESTS_DIR} not found, so the integration job cannot run. "
+            "It reports SKIP, and a skip fails the run unless you pass "
+            "--allow-skips.",
+            file=sys.stderr,
+        )
 
     failed = []
     skipped = []
