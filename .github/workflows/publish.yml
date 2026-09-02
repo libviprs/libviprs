@@ -21,14 +21,27 @@ name: publish
 # keeps the `dry_run` toggle, which is how you would want to test this anyway.
 #
 # To re-arm it, uncomment the two `push` lines, having first confirmed that
-# `CARGO_REGISTRY_TOKEN` resolves and that #344 is resolved.
+# `CARGO_REGISTRY_TOKEN` resolves and that #981 is resolved.
 #
-# NOTE (issue #344): the crate currently depends on the libviprs pdfium-render
-# *fork* (git-pinned) for its `sync` feature, which upstream `pdfium-render`
-# 0.9.x on crates.io does not expose — so `cargo publish` is blocked until the
-# fork dependency is reconciled for crates.io (rename+publish the fork, or drop
-# the fork-only feature from the published manifest and rely on the in-tree
-# `pdfium_lock` fallback). This workflow is ready for when that lands.
+# NOTE (issue #981): this job used to die at dependency resolution, because the
+# manifest asked `pdfium-render` for a `sync` feature that upstream deleted in
+# 0.9.0 and only the fork still carries as a synonym. `cargo publish` resolves
+# against crates.io, where a git source does not survive, so it was the one
+# resolver that ever saw the mismatch. The manifest now asks for `thread_safe`,
+# which both the fork and the registry crate have, and the dry run passes.
+#
+# Publishing for real is still refused, by the guard step below, and for a
+# different reason. Registry `pdfium-render` 0.9.0 through 0.9.3 dropped
+# `src/bindings/thread_safe.rs` entirely, so there `thread_safe` is a bare
+# `unsafe impl Send + Sync for Pdfium` with no serialisation at all
+# (ajrcarey/pdfium-render#262). The fork restores the per-call locking, but the
+# published crate cannot carry the fork, so uploading today would hand crates.io
+# consumers the unsound wrapper. The published 0.3.1 depends on `^0.8`, where
+# the locking bindings still shipped, and stays the newest sound release.
+#
+# Upstream has reinstated those bindings on master and has said they ship in
+# 0.9.4. Raising the `pdfium-render` requirement in `Cargo.toml` from `0.9` to
+# `0.9.4` once that release exists clears the guard step on its own.
 
 on:
   # push:
@@ -78,6 +91,31 @@ jobs:
             echo "::notice::libviprs ${version} is already published on crates.io — skipping."
           else
             echo "already=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Loud refusal, not a silent skip. A dry run still packages and verifies;
+      # only a real upload is blocked, and only while the manifest would publish
+      # a `pdfium-render` requirement that can resolve to a version with no
+      # thread-safe bindings in it. See the NOTE at the top of this file.
+      - name: Refuse a real upload while the registry pdfium-render is unsound
+        if: steps.check.outputs.already == 'false' && github.event.inputs.dry_run != 'true'
+        run: |
+          req="$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "libviprs") | .dependencies[]
+                     | select(.name == "pdfium-render") | .req' | head -1)"
+          floor="${req#^}"; floor="${floor#>=}"; floor="${floor%% *}"
+          echo "libviprs declares pdfium-render \"$req\" (floor $floor)"
+          if [ "$(printf '%s\n0.9.4\n' "$floor" | sort -V | head -1)" = "0.9.4" ]; then
+            echo "::notice::Floor is at or above 0.9.4, the release carrying the reinstated per-call locking bindings. Upload allowed."
+          else
+            echo "::error::Refusing to upload libviprs while it declares pdfium-render \"$req\"."
+            echo "Registry pdfium-render 0.9.0 through 0.9.3 ship no thread-safe bindings:"
+            echo "there, the thread_safe feature is a bare unsafe impl Send + Sync for Pdfium"
+            echo "with no serialisation (ajrcarey/pdfium-render#262). The git-pinned fork fixes"
+            echo "that, but a git source does not survive publish, so this upload would hand"
+            echo "crates.io consumers the unsound wrapper. Raise the requirement in Cargo.toml"
+            echo "to 0.9.4 once upstream releases it, then this step passes. Tracked in #981."
+            exit 1
           fi
 
       - name: Publish to crates.io
