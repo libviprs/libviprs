@@ -3250,8 +3250,8 @@ mod tests {
         const MAT_FREE_TEXT: &[u8] = mat_fixture!("prefix_only.mat");
         const MAT_HEADER_ONLY: &[u8] = mat_fixture!("header_only.mat");
         const MAT_51: &[u8] = mat_fixture!("magic_MATLAB_51.mat");
-        const MAT_LOWERCASE: &[u8] = mat_fixture!("magic_matlab_50.mat");
-        const MAT_UNDERSCORE: &[u8] = mat_fixture!("magic_MATLAB_50.mat");
+        const MAT_LOWERCASE: &[u8] = mat_fixture!("magic_lowercase_50.mat");
+        const MAT_UNDERSCORE: &[u8] = mat_fixture!("magic_underscore_50.mat");
         const MAT_BAD_VERSION: &[u8] = mat_fixture!("magic_only.mat");
         const MAT_BAD_INDICATOR: &[u8] = mat_fixture!("endian_bogus.mat");
         const MAT_NINE_BYTES: &[u8] = mat_fixture!("nine_bytes.mat");
