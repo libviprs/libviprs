@@ -23,8 +23,8 @@
       "matio": "libmatio 1.5.30_1, from `otool -L /opt/homebrew/lib/libvips.42.dylib` (libmatio.14.dylib) resolved through /opt/homebrew/opt/libmatio. Not named by --vips-config, which prints booleans only.",
       "hdf5": "hdf5 2.2.0, which is what prints the HDF5-DIAG block when matio is handed a MAT-7.3 file"
     },
-    "fixture_count": 48,
-    "fixture_bytes": 9695
+    "fixture_count": 49,
+    "fixture_bytes": 9895
   },
   "notes": [
     "matload is priority 0 and untrusted (matload.c:120-125). Unlike analyzeload it does not lower its priority, because the sniff is a fixed 128-byte read off the front of the file and costs nothing.",
@@ -204,14 +204,14 @@
         "matlab 5.0": {
           "sniffed": {
             "exit": 1,
-            "stderr": "vipsheader: VipsForeignLoad: \"fixtures/magic_matlab_50.mat\" is not a known file format"
+            "stderr": "vipsheader: VipsForeignLoad: \"fixtures/magic_lowercase_50.mat\" is not a known file format"
           },
           "direct_exit": 0
         },
         "MATLAB_5.0": {
           "sniffed": {
             "exit": 1,
-            "stderr": "vipsheader: VipsForeignLoad: \"fixtures/magic_MATLAB_50.mat\" is not a known file format"
+            "stderr": "vipsheader: VipsForeignLoad: \"fixtures/magic_underscore_50.mat\" is not a known file format"
           },
           "direct_exit": 0
         }

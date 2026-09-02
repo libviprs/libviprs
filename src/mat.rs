@@ -19,7 +19,7 @@
 //!
 //! # The oracle
 //!
-//! `oracle-captures/foreign-mat/`, 48 fixtures and 10 records, measured
+//! `oracle-captures/foreign-mat/`, 49 fixtures and 10 records, measured
 //! against `/opt/homebrew/bin/vips` 8.18.6 (`matload`, `Matlab load with
 //! matio: true`), recorded `on_pin` in `ORACLE_PIN.json`. libvips is a real
 //! oracle for this format, unlike its NIfTI sibling.
@@ -1062,13 +1062,13 @@ mod tests {
     use super::*;
     use crate::source::decode_bytes_with_limits;
 
-    /// One of the 48 fixtures `oracle-captures/foreign-mat/capture.py`
+    /// One of the 49 fixtures `oracle-captures/foreign-mat/capture.py`
     /// writes and pins, embedded rather than read.
     ///
     /// `include_bytes!` rather than `std::fs::read` on purpose: it keeps
     /// every test in this module runnable under Miri, where the isolation
     /// layer refuses a real `open` and aborts the whole session on the first
-    /// one it meets (issue #652). The whole fixture set is 9,695 bytes, so
+    /// one it meets (issue #652). The whole fixture set is 9,895 bytes, so
     /// embedding the dozen these tests name costs nothing.
     macro_rules! fixture {
         ($name:literal) => {
@@ -1799,11 +1799,11 @@ mod tests {
             Err(MatError::BadMagic { .. })
         ));
         assert!(matches!(
-            Header::parse(fixture!("magic_matlab_50.mat")),
+            Header::parse(fixture!("magic_lowercase_50.mat")),
             Err(MatError::BadMagic { .. })
         ));
         assert!(matches!(
-            Header::parse(fixture!("magic_MATLAB_50.mat")),
+            Header::parse(fixture!("magic_underscore_50.mat")),
             Err(MatError::BadMagic { .. })
         ));
         assert!(matches!(

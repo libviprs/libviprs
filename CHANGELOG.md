@@ -3979,6 +3979,43 @@ and not under `Fixed`: this file is the only place they can be caught.
 
 ### Fixed
 
+- **The crate compiles on a case-sensitive filesystem again** (issue #977).
+  `main` had not built on Linux since #645. `src/mat.rs` and `src/source.rs`
+  both `include_bytes!` a fixture named
+  `oracle-captures/foreign-mat/fixtures/magic_MATLAB_50.mat`, and that file was
+  never committed, so Check & Lint, Test, MSRV and the merge gate's Loom job
+  were all red on one compile error.
+
+  `foreign-mat`'s `capture.py` built two of its three near-miss fixture names by
+  slugging a label, and `"matlab 5.0"` and `"MATLAB_5.0"` slug to names that
+  differ only in case. On the capture host they are one path, so the third write
+  reopened the second one's file and truncated it: two fixtures reached the tree
+  where the loop writes three, and the survivor carried the underscore bytes
+  under the lowercase name. `include_bytes!` resolved the missing name through
+  the same case-insensitive lookup, which is why the host that made the mistake
+  is the one place it could not be seen.
+
+  The two fixtures are `magic_lowercase_50.mat` and `magic_underscore_50.mat`
+  now, `capture.py` writes the name out per case instead of deriving it, and the
+  lowercase fixture exists for the first time. That also gives
+  `source::tests`' sniff table a real lowercase row: `MAT_LOWERCASE` and
+  `MAT_UNDERSCORE` have held identical bytes until now, and `src/mat.rs`
+  asserted the same file twice.
+
+  The recorded verdicts did not move and none of them needed to. Each
+  `header(p)` runs inside the loop body, before the next iteration overwrites
+  anything, so every measurement in `oracle.json` was taken against the right
+  bytes; only what got persisted was wrong. The paths quoted back in the two
+  recorded `vipsheader` messages follow the rename, because those strings are
+  vips echoing the path it was handed.
+
+  Committing the missing name as it stood was not an option: it would have given
+  the repo its first pair of tracked paths differing only in case, and no macOS
+  or Windows checkout can materialise both.
+  `tests/case_only_path_collisions.rs` now fails on any such pair. It reads the
+  index rather than walking the tree, because on a case-insensitive filesystem
+  the walk cannot see the collision at all: only one of the two files is there.
+
 - The JPEG 2000 decode sizes its output buffer from the price the allocation
   check already validated, instead of rebuilding half of it (issue #951).
   `check_image_alloc` returns `width * height * bands * element_bytes` as a

@@ -388,11 +388,24 @@ magic["prefix_then_arbitrary_text"] = {
 }
 
 # 2f. One byte off.
-for label, text in (("MATLAB 5.1", b"MATLAB 5.1 MAT-file"),
-                    ("matlab 5.0", b"matlab 5.0 MAT-file"),
-                    ("MATLAB_5.0", b"MATLAB_5.0 MAT-file")):
-    p = matfile(f"magic_{label.replace(' ', '_').replace('.', '')}.mat",
-                [matrix("<", "a", mxUINT8, miUINT8, (2, 3), BASE)], text=text)
+#
+# The filename is written out per case rather than slugged from the label,
+# and that is not a style preference. `label.replace(' ', '_').replace('.', '')`
+# maps "matlab 5.0" to `magic_matlab_50.mat` and "MATLAB_5.0" to
+# `magic_MATLAB_50.mat`, which are the same path on the case-insensitive
+# filesystem this capture is taken on. The third iteration reopened the second
+# one's file and truncated it, so the tree ended up with two fixtures where
+# this loop writes three, the survivor carried the underscore bytes under the
+# lowercase name, and `magic_MATLAB_50.mat` was never committed at all. The
+# records here were fine, because each `header(p)` runs before the next
+# iteration overwrites anything, so the only casualty was what got persisted.
+# Nothing noticed for two months: `include_bytes!` resolved the missing name
+# through the same case-insensitive lookup, so the crate built on the capture
+# host and failed to compile on every Linux CI runner (issue #977).
+for label, name, text in (("MATLAB 5.1", "magic_MATLAB_51.mat", b"MATLAB 5.1 MAT-file"),
+                          ("matlab 5.0", "magic_lowercase_50.mat", b"matlab 5.0 MAT-file"),
+                          ("MATLAB_5.0", "magic_underscore_50.mat", b"MATLAB_5.0 MAT-file")):
+    p = matfile(name, [matrix("<", "a", mxUINT8, miUINT8, (2, 3), BASE)], text=text)
     magic[label] = {"sniffed": header(p), "direct_exit": direct(p)["exit"]}
 
 records["magic_and_dispatch"] = {

@@ -33,11 +33,11 @@ set +e
 /opt/homebrew/bin/vipsheader fixtures/magic_MATLAB_51.mat
 /opt/homebrew/bin/vips matload fixtures/magic_MATLAB_51.mat outputs/direct.v
 /opt/homebrew/bin/vipsheader outputs/direct.v
-/opt/homebrew/bin/vipsheader fixtures/magic_matlab_50.mat
-/opt/homebrew/bin/vips matload fixtures/magic_matlab_50.mat outputs/direct.v
+/opt/homebrew/bin/vipsheader fixtures/magic_lowercase_50.mat
+/opt/homebrew/bin/vips matload fixtures/magic_lowercase_50.mat outputs/direct.v
 /opt/homebrew/bin/vipsheader outputs/direct.v
-/opt/homebrew/bin/vipsheader fixtures/magic_MATLAB_50.mat
-/opt/homebrew/bin/vips matload fixtures/magic_MATLAB_50.mat outputs/direct.v
+/opt/homebrew/bin/vipsheader fixtures/magic_underscore_50.mat
+/opt/homebrew/bin/vips matload fixtures/magic_underscore_50.mat outputs/direct.v
 /opt/homebrew/bin/vipsheader outputs/direct.v
 /opt/homebrew/bin/vipsheader fixtures/probe_byte.mat
 /opt/homebrew/bin/vipsheader fixtures/probe_byte.mat

@@ -362,6 +362,7 @@ annotated   not-detected src/colour.rs::icc_typed_errors
 annotated   not-detected src/pdf.rs::password_and_dpi_extract_return_a_clean_typed_error
 annotated   not-detected src/pdf.rs::pdf_info_with_password_passes_through_open_error
 annotated   not-detected src/source.rs::decode_file_not_found
+annotated   not-detected tests/case_only_path_collisions.rs::no_two_tracked_paths_differ_only_in_case
 annotated   not-detected tests/changelog_release_claims.rs::every_release_claim_in_the_changelog_is_true_of_the_tags
 annotated   not-detected tests/dependency_policy.rs::every_links_key_is_on_the_allowlist
 annotated   not-detected tests/dependency_policy.rs::library_discovery_is_confined_to_packfile
