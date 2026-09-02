@@ -354,7 +354,7 @@ def container_script(job, tag, mode, revs, tests_mounted):
     return "\n".join(out)
 
 
-def report_source(repo, label, rev):
+def report_source(repo, label, rev, is_sibling=False):
     """Say what is going into the container, and what is being left out."""
     head = git(repo, "rev-parse", "HEAD")
     state = "HEAD" if rev == head else f"working tree over {head[:12]}"
@@ -367,6 +367,21 @@ def report_source(repo, label, rev):
             print(f"      {f}")
         if len(others) > len(shown):
             print(f"      ... and {len(others) - len(shown)} more")
+    if not is_sibling:
+        return
+    # The sibling is the one repository whose revision the hosted job picks for
+    # itself: ci.yml clones the matching branch of libviprs-tests, or its main,
+    # from origin. This checkout is whatever it happens to be, and a stale one
+    # fails the integration job on a signature that moved months ago, which
+    # reads exactly like the change in front of you breaking the API. Mine was
+    # twelve commits behind and cost me a confused half hour.
+    if not git(repo, "rev-parse", "--verify", "--quiet", "origin/main", check=False):
+        return
+    behind = git(repo, "rev-list", "--count", "HEAD..origin/main", check=False)
+    if behind and behind != "0":
+        print(f"    NOTE: {behind} commit(s) behind its own origin/main, which is what")
+        print("    the hosted integration job clones. The count is as of your last")
+        print("    fetch, so it is a floor rather than the answer.")
 
 
 def main():
@@ -440,7 +455,9 @@ def main():
         mounts += ["-v", f"{git_common_dir(REPO)}:{GITSRC['libviprs']}:ro"]
         if tests_mounted:
             revs["libviprs-tests"] = source_rev(TESTS_DIR)
-            report_source(TESTS_DIR, "libviprs-tests", revs["libviprs-tests"])
+            report_source(
+                TESTS_DIR, "libviprs-tests", revs["libviprs-tests"], is_sibling=True
+            )
             mounts += ["-v", f"{git_common_dir(TESTS_DIR)}:{GITSRC['libviprs-tests']}:ro"]
     else:
         print("!! --worktree bind-mounts this tree into the container. A Docker")
