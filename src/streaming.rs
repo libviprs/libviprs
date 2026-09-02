@@ -270,13 +270,13 @@ enum PdfiumSourceState {
 /// keeps the cached-handle lifecycle obvious to readers. The actual
 /// FPDF synchronisation that protects `FPDF_CloseDocument` against
 /// concurrent renders lives in `pdfium-render`'s
-/// `ThreadSafePdfiumBindings` wrapper (active via the `sync` feature
+/// `ThreadSafePdfiumBindings` wrapper (active via the `thread_safe` feature
 /// plus the per-call locking fork declared as a direct git dependency
 /// in `libviprs/Cargo.toml`).
 ///
 /// Lifetime is `'static` because the document borrows from
 /// [`crate::pdf::init_pdfium`]'s `OnceLock`-backed `&'static Pdfium`.
-/// With the pdfium-render `sync` feature on, `PdfDocument<'static>` is
+/// With the pdfium-render `thread_safe` feature on, `PdfDocument<'static>` is
 /// `Send + Sync`.
 #[cfg(feature = "pdfium")]
 struct StreamingState {
@@ -461,7 +461,7 @@ impl PdfiumStripSource {
     ///
     /// # Concurrency
     ///
-    /// pdfium itself is not thread-safe. The `pdfium-render` `sync`
+    /// pdfium itself is not thread-safe. The `pdfium-render` `thread_safe`
     /// feature, plus the direct git dependency in `libviprs/Cargo.toml`
     /// that pins the patched fork at `libviprs/pdfium-render` branch
     /// `libviprs/integration` (per-call FFI locking),

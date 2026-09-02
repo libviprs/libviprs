@@ -228,14 +228,16 @@ openjpeg2-pure = { package = "openjpeg2-pure-rs", version = "0.1.1" }
 # fork: it carries every one of our pdfium-render PRs (as though merged), so
 # all fixes are single-sourced from one branch rather than one branch per PR.
 # The headline fix is proper per-call thread-safety locking in
-# `ThreadSafePdfiumBindings`. Upstream pdfium-render's wrapper (0.9.x on
-# crates.io) acquires the pdfium global mutex only once on
-# `FPDF_InitLibrary` and bypasses it for every other method, which
-# segfaults under any concurrent access pattern when a single `Pdfium`
-# instance is shared across threads (the common pattern when callers use a
-# process-wide singleton). The fork rewrites every method to acquire the
-# lock per-call. The consolidated fork tracks the 0.9.x upstream line, so
-# the `version` requirement below is `^0.9`.
+# `ThreadSafePdfiumBindings`. Upstream deleted that bindings layer in
+# 0.9.0, on the assumption that stashing the bindings in a global
+# `OnceCell` had made it redundant, so 0.9.0 through 0.9.3 on crates.io
+# serialise nothing past library init while still marking `Pdfium` as
+# `Send + Sync` under `thread_safe`. That segfaults under any concurrent
+# access pattern when a single `Pdfium` instance is shared across threads
+# (the common pattern when callers use a process-wide singleton), and is
+# filed as ajrcarey/pdfium-render#262. The fork restores the per-call
+# lock on every method. The consolidated fork tracks the 0.9.x upstream
+# line, so the `version` requirement below is `^0.9`.
 #
 # This used to be a `[patch.crates-io]` entry, but a [patch] table only
 # takes effect from the build root: consumers of libviprs (by git or
@@ -245,18 +247,42 @@ openjpeg2-pure = { package = "openjpeg2-pure-rs", version = "0.1.1" }
 # with no [patch] hygiene required.
 #
 # The `version` key is a fallback for `cargo publish`: crates.io strips
-# git sources, so the PUBLISHED libviprs still depends on the registry
-# `pdfium-render ^0.9` and crates.io consumers still link the unpatched
-# wrapper. libviprs's own FPDF calls stay safe there via the internal
-# process-wide lock (`src/pdf.rs::pdfium_lock`), but the wrapper's
-# `Send + Sync` remains unsound for direct use by crates.io consumers.
-# PR #333 (which closed #286) deliberately descoped this published-crate
-# soundness leg. The two real fixes — upstream the per-call locking
-# (ajrcarey/pdfium-render#262) or publish the fork under a distinct crate
-# name and depend on it by version — were the original #149 plan, which is
-# now closed; the divergence is therefore carried as a known, accepted
-# limitation and any renewed work is tracked under the PR #333 follow-up
-# epic (#344), not #149.
+# git sources, so the PUBLISHED libviprs depends on the registry
+# `pdfium-render ^0.9`, not on this fork.
+#
+# That is why the feature list has to name features BOTH sources have,
+# and why it says `thread_safe` rather than `sync`. `sync` was never a
+# fork capability: upstream 0.8.x carried it as a plain alias
+# (`sync = ["thread_safe"]`) and deleted it in 0.9.0, and the fork only
+# re-added it as a synonym so downstream manifests kept building. When
+# this entry moved from `version = "0.8"` to `version = "0.9"` the
+# feature name did not move with it, so every git-resolved build went on
+# working through the fork's synonym while `cargo publish`, the one
+# resolver that sees the registry crate, hard-failed with "pdfium-render
+# does not have that feature" (issue #981). Requesting `thread_safe`
+# directly is the same feature set for the fork and a name the registry
+# crate actually has.
+#
+# What that does NOT fix is soundness for crates.io consumers, and it is
+# worse than the old comment here claimed. Registry `pdfium-render`
+# 0.9.0 through 0.9.3 deleted `src/bindings/thread_safe.rs` outright, so
+# on the registry `thread_safe` gates a bare `unsafe impl Send + Sync for
+# Pdfium` with no serialisation at all: ajrcarey/pdfium-render#262.
+# libviprs's own FPDF calls stay safe either way through the internal
+# process-wide lock (`src/pdf.rs::pdfium_lock`), but a crates.io consumer
+# touching `pdfium-render` directly would get the unsound wrapper. The
+# published 0.3.1 predates this: it depends on `^0.8`, where the per-call
+# locking bindings still shipped, so it is sound and is the newest sound
+# release until this is fixed.
+#
+# Upstream has already reinstated the per-call locking bindings on master
+# and has said they ship in 0.9.4, so the fix is to raise the requirement
+# below from `0.9` to `0.9.4` once that release exists. Doing that also
+# clears the guard step in `.github/workflows/publish.yml`, which refuses
+# a real upload while the floor is lower. PR #333 (which closed #286)
+# descoped this published-crate soundness leg to #149, which was already
+# closed, and the follow-up epic #344 is closed too, so #981 is the live
+# tracker.
 #
 # The `rev` below pins an exact commit SHA rather than a bare `branch`. A
 # `branch` pin lets a force-push silently change the dependency on the next
@@ -275,11 +301,11 @@ openjpeg2-pure = { package = "openjpeg2-pure-rs", version = "0.1.1" }
 # therefore still rests on the mutable branch keeping the commit reachable;
 # anchoring to an immutable ref (an annotated tag on a protected tag ref that
 # is never force-pushed) or publishing the fork as a renamed versioned crate
-# is the deeper fix, tracked under #344. When intentionally advancing the
+# is the deeper fix, tracked under #981. When intentionally advancing the
 # fork, fast-forward the branch and update this `rev` to the new head in
 # lockstep.
 pdfium-render = { version = "0.9", features = [
-	"sync",
+	"thread_safe",
 ], git = "https://github.com/libviprs/pdfium-render.git", rev = "3b03093295b85486c2e42f514cef9647eb629c63" }
 proptest = "1"
 # Pure-Rust FFT (MIT OR Apache-2.0) used by the frequency-domain filter

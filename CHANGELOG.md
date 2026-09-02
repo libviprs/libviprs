@@ -3977,6 +3977,19 @@ and not under `Fixed`: this file is the only place they can be caught.
   applied only to the `Raster` tail, whose message names no operation. Code
   matching on the typed errors is unaffected; only the panic text changes.
 
+- The manifest asks `pdfium-render` for `thread_safe` rather than `sync`
+  (issue #981). `sync` was an upstream alias (`sync = ["thread_safe"]`) that
+  upstream deleted in 0.9.0 and only the libviprs fork still carries as a
+  synonym, so when the requirement moved from `0.8` to `0.9` the feature name
+  was left behind. Every git-resolved build kept working through the fork's
+  synonym; `cargo publish`, which resolves against crates.io and drops the git
+  source, was the only thing that saw it, and it had been failing at dependency
+  resolution ever since. The feature set is identical either way, so nothing
+  about the build or the thread-safety fix moves. `.github/workflows/publish.yml`
+  now also refuses a real upload while the declared `pdfium-render` floor is
+  below 0.9.4, because registry 0.9.0 through 0.9.3 ship no thread-safe
+  bindings at all and a published crate cannot carry the fork.
+
 ### Fixed
 
 - **An `include_bytes!` path that nothing committed now fails a test rather
