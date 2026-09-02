@@ -10,12 +10,42 @@
 # is gated on it; `test-util` only exposes existing doubles to dependents.
 LINTED_FEATURES := pdfium object-store-sink tracing avif svg jxl packfile serde jp2k
 
-## Run all CI workflows locally (mirrors .github/workflows/ci.yml)
-ci: fmt clippy test doc miri loom
+## The gate: the real CI job list, in the container, over a tree provisioned
+## from git.
+##
+## This used to read `ci: fmt clippy test doc miri loom`, six hand-written
+## targets standing in for the eight jobs the two workflows actually run. By
+## the time anyone compared the two lists they had drifted in six separate
+## places at once: no MSRV job, no integration job, no pdfium-render source
+## audit, `make test` running one of the Test job's nine cells, `make clippy`
+## missing the `cargo build --features s3` cell, and `make loom` running one of
+## the Loom job's two invocations. Every one of those is a way to run the
+## documented gate, see green, and get a red push.
+##
+## So the list is not written here any more. `tools/local-ci.py` reads the
+## workflow files and runs what is in them, which is the property a second copy
+## can never have: add a step to ci.yml and it runs here next time, with no
+## other place to update. It also provisions the tree from git rather than
+## bind-mounting it, which is what makes a local green mean something on a
+## case-insensitive host; the tool's own docstring has that story.
+##
+## `merge-gate.yml`'s Miri job carries a job-level `if:`. The tool refuses to
+## evaluate it rather than guess, and reports it HELD, so `make miri` runs it
+## here on this machine's pinned nightly exactly as it did before.
+## `tests/local_gate_is_the_job_list.rs` holds this recipe to that shape.
+ci:
+	tools/local-ci.py
+	tools/local-ci.py --workflow merge-gate.yml
+	$(MAKE) miri
 	@echo ""
 	@echo "All CI checks passed."
 
 ## Build the docs and fail on any bad intra-doc link (Docs job).
+##
+## This and the four targets below it are host-native spot checks for
+## iterating, not the gate. They run one job's commands, on this machine's
+## architecture and filesystem, against the working tree including whatever
+## in it is untracked. `make ci` is the gate.
 ## Runs with every feature so the gated surface resolves (issue #146).
 ## `private_intra_doc_links` and `redundant_explicit_links` are both
 ## warn-by-default: a link to a `pub(crate)` item renders as inert bracketed

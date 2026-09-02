@@ -3990,6 +3990,50 @@ and not under `Fixed`: this file is the only place they can be caught.
   below 0.9.4, because registry 0.9.0 through 0.9.3 ship no thread-safe
   bindings at all and a published crate cannot carry the fork.
 
+- **`make ci` runs the real CI job list, and the containerised runner stops
+  reading a tree no runner can have** (issue #982). Two things landed together
+  because neither is worth much without the other.
+
+  `make ci` was `ci: fmt clippy test doc miri loom`, six hand-written targets
+  standing in for the eight jobs the two workflows run, and nothing compared
+  the two lists. They had drifted in six places at once: `MSRV (1.97)`,
+  `Integration Tests (libviprs-tests)` and `pdfium-render source audit (#149)`
+  were not run at all, `make test` ran one of the `Test` job's nine cells,
+  `make clippy` skipped the `cargo build --features s3` cell, and `make loom`
+  ran one of the `Loom` job's two invocations. Measured on this machine, the
+  three missing jobs cost 78 seconds cold and about 2 seconds warm between
+  them, so nothing about the gap was a cost decision. `make ci` now hands both
+  workflow files to `tools/local-ci.py`, which reads the job list out of them,
+  and `tests/local_gate_is_the_job_list.rs` refuses a recipe that goes back to
+  spelling commands out.
+
+  The runner used to hand its container the working tree with
+  `-v {REPO}:/src/libviprs`. A Docker Desktop bind mount off an APFS host is
+  case-insensitive and carries untracked files, so it saw a tree no runner
+  could: that is the generating condition behind #977 and #979, where `main`
+  stayed red for about 55 hours while every local run said PASS. It now mounts
+  the repository's git directory read only and checks the tree out inside the
+  container instead, which costs about a second on a gigabyte-scale history
+  because `--shared` copies no objects. What gets checked out is the working
+  tree's tracked content, via `git stash create`, so uncommitted edits still
+  count and untracked files still do not, and the run lists what it left out
+  before it starts. `--worktree` puts the bind mount back for iterating and
+  says in its output that it is not the gate.
+
+  Falsified both ways before it landed: a fixture committed as
+  `probe_lower.bin` and read as `PROBE_LOWER.bin`, and a fixture that was never
+  committed at all, both of which the bind-mounted run resolved and reported
+  PASS on, and both of which the git-provisioned run fails.
+
+  Two other honesty fixes came with it. A skipped job now makes the run exit
+  non-zero unless `--allow-skips` says otherwise, where before the integration
+  job could report SKIP and the run still print "All jobs passed". And a job
+  carrying a job-level `if:`, which today is only `merge-gate.yml`'s Miri, is
+  reported HELD and not run, because guessing at the condition and calling it
+  green is the "skipped reads as passing" trap that workflow's own comment
+  warns about; `make miri` covers it here and the guard holds the `ci` recipe
+  to running it.
+
 ### Fixed
 
 - **An `include_bytes!` path that nothing committed now fails a test rather

@@ -477,7 +477,15 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// `tempfile::tempdir()` and reads them back, so it is both annotated and
 /// fs-detected, the ordinary case, and its row is in
 /// `tests/miri_fs_test_inventory.txt` beside the rest of that file's.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 287;
+///
+/// #982 moved it 287 to 288:
+/// `the_workflow_directory_holds_only_files_this_guard_has_classified` in
+/// `tests/local_gate_is_the_job_list.rs` reads `.github/workflows/` so that a
+/// new workflow file cannot appear outside the two lists that file classifies.
+/// It has to be a directory listing rather than an `include_str!` of a name it
+/// already knows, because the thing it is looking for is the file nobody told
+/// it about. Annotated and fs-detected, the ordinary case.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 288;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
