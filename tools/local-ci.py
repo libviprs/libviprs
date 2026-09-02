@@ -502,6 +502,21 @@ def main():
             print(f"  --- last lines of {j['name']} ---")
             for line in tail:
                 print("  | " + line.rstrip())
+            if any("No space left on device" in ln for ln in tail):
+                # Worth naming, because the message arrives as a compiler or a
+                # git error and reads like the change is broken. It is not:
+                # running the whole job list materialises about two dozen
+                # distinct artifact sets on the /cargo volume, because Check &
+                # Lint compiles ten feature permutations, Test nine more and
+                # MSRV another seven under a second toolchain, and each one
+                # gets its own metadata hash rather than replacing the last.
+                print("")
+                print("  The Docker VM's disk is full, not your code. The whole job")
+                print("  list materialises about two dozen artifact sets on the cargo")
+                print("  volume, one per feature permutation per toolchain. See what")
+                print("  is on there with:")
+                print(f"      docker run --rm -v {VOLUME}:/cargo alpine:3 du -sh /cargo/*")
+                print("  Docker Desktop's disk size is under Settings, Resources.")
             if any("rosetta error" in ln for ln in tail):
                 print("")
                 print("  This is Rosetta, not your code. Emulating x86_64 on Apple")

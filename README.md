@@ -330,6 +330,9 @@ make loom     # `loom_tests`, which is the Loom job's first invocation of two
 ```
 
 > **Prerequisites:** `make ci` needs Docker running and PyYAML (`pip3 install pyyaml`).
+> Budget disk for it: the whole job list compiles ten clippy feature permutations,
+> nine test ones and seven more under the 1.97 toolchain, and each gets its own
+> artifact set on the `libviprs-ci-cargo` volume rather than replacing the last.
 > `make miri` requires a nightly toolchain with the miri component, at or above this
 > crate's MSRV; the `Makefile` pins a dated one and explains why.
 
