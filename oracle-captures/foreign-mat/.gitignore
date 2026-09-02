@@ -3,7 +3,7 @@
 # with `python3 capture.py` and no Rust toolchain and no scipy.
 #
 # fixtures/ IS pinned: matload is load-only, so a port has no way to produce
-# these inputs for itself and needs them checked in. They are 48 tiny files,
+# these inputs for itself and needs them checked in. They are 49 tiny files,
 # under 10K in total, because MAT balloons fast and every array here is 2x2
 # or 2x3.
 #
