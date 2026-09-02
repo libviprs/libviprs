@@ -4034,6 +4034,15 @@ and not under `Fixed`: this file is the only place they can be caught.
   warns about; `make miri` covers it here and the guard holds the `ci` recipe
   to running it.
 
+  Two smaller things the output now says, both found by running it. The
+  integration job is the one job whose second revision the hosted run picks for
+  itself, from `libviprs-tests`' origin, so a sibling checkout behind its own
+  `origin/main` now says by how much rather than failing to compile on a
+  signature that moved months ago. And a full Docker disk is named as such,
+  because it arrives as a linker bus error and a git "cannot create directory";
+  the README says up front that the whole job list keeps an artifact set per
+  feature permutation per toolchain on the cargo volume.
+
 ### Fixed
 
 - **An `include_bytes!` path that nothing committed now fails a test rather
