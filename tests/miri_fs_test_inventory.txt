@@ -302,6 +302,7 @@ annotated   fs-detected  tests/io_ported_surface.rs::save_accepts_path_ref
 annotated   fs-detected  tests/jxl_ported_surface.rs::encode_and_save_round_trip_exactly
 annotated   fs-detected  tests/jxl_ported_surface.rs::the_shared_dispatchers_carry_jxl
 annotated   fs-detected  tests/jxl_ported_surface.rs::without_the_feature_the_surface_is_unchanged_and_typed
+annotated   fs-detected  tests/local_gate_is_the_job_list.rs::the_workflow_directory_holds_only_files_this_guard_has_classified
 annotated   fs-detected  tests/miri_ignore_convention.rs::filesystem_touching_tests_match_the_recorded_inventory
 annotated   fs-detected  tests/miri_ignore_convention.rs::no_filesystem_touching_test_runs_under_miri_outside_the_named_exceptions
 annotated   fs-detected  tests/miri_ignore_convention.rs::no_process_spawning_test_can_run_under_miri
@@ -334,12 +335,11 @@ annotated   fs-detected  tests/pdfium_source_audit.rs::audit_gate_accepts_patche
 annotated   fs-detected  tests/pdfium_source_audit.rs::audit_gate_rejects_unpatched_consumer
 annotated   fs-detected  tests/pdfium_source_audit.rs::patchless_downstream_consumer_resolves_the_fork
 annotated   fs-detected  tests/radiance_ported_surface.rs::encode_and_save_round_trip_from_outside_the_crate
+annotated   fs-detected  tests/sample_kind_spine.rs::a_byte_width_is_never_compared_outside_the_named_countdown
 annotated   fs-detected  tests/save_route_coverage.rs::csv_and_mat_route_through_both_dispatches_to_the_same_bytes
 annotated   fs-detected  tests/save_route_coverage.rs::every_dispatch_arm_is_claimed_by_a_writer
 annotated   fs-detected  tests/save_route_coverage.rs::every_public_writer_is_reachable_or_recorded
 annotated   fs-detected  tests/save_route_coverage.rs::every_wired_writer_names_arms_the_dispatches_have
-annotated   fs-detected  tests/sample_kind_spine.rs::a_byte_width_is_never_compared_outside_the_named_countdown
-annotated   not-detected tests/sample_kind_spine.rs::the_walk_descends_into_subdirectories
 annotated   fs-detected  tests/uhdr_ported_surface.rs::a_smaller_gain_map_is_resampled_linearly_and_not_by_nearest
 annotated   fs-detected  tests/uhdr_ported_surface.rs::an_ordinary_jpeg_stays_jpeg_and_a_uhdr_file_does_not
 annotated   fs-detected  tests/uhdr_ported_surface.rs::degenerate_metadata_reproduces_the_captured_zeros_and_nans
@@ -351,7 +351,6 @@ annotated   fs-detected  tests/uhdr_ported_surface.rs::the_three_band_path_linea
 annotated   fs-detected  tests/uhdr_ported_surface.rs::the_two_powf_cases_are_within_a_measured_ulp_bound
 annotated   fs-detected  tests/uhdr_ported_surface.rs::v2y_8_matches_the_pinned_oracle_table
 annotated   fs-detected  tests/unsafe_inventory.rs::only_the_named_files_carry_the_crates_own_unsafe
-annotated   not-detected tests/unsafe_inventory.rs::the_walk_descends_into_subdirectories
 annotated   fs-detected  tests/webp_ported_surface.rs::encode_and_save_round_trip_exactly
 annotated   fs-detected  tests/webp_ported_surface.rs::the_shared_dispatchers_carry_webp
 annotated   fs-detected  tests/workspace_layout.rs::fuzz_crate_is_a_member_of_the_root_workspace
@@ -377,4 +376,6 @@ annotated   not-detected tests/icc_lut_alloc.rs::refusing_what_moxcms_still_allo
 annotated   not-detected tests/icc_lut_alloc.rs::the_lut_export_hands_moxcms_nothing_that_scales_with_the_image
 annotated   not-detected tests/icc_lut_alloc.rs::the_lut_import_hands_moxcms_nothing_that_scales_with_the_image
 annotated   not-detected tests/oracle_capture_pins.rs::no_compiled_python_is_tracked_under_oracle_captures
+annotated   not-detected tests/sample_kind_spine.rs::the_walk_descends_into_subdirectories
+annotated   not-detected tests/unsafe_inventory.rs::the_walk_descends_into_subdirectories
 annotated   not-detected tests/workspace_layout.rs::root_workspace_contains_both_crates
