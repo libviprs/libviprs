@@ -213,6 +213,7 @@ annotated   fs-detected  src/pmtiles/range.rs::a_short_read_is_an_error_rather_t
 annotated   fs-detected  src/pmtiles/range.rs::an_empty_file_is_never_an_archive
 annotated   fs-detected  src/pmtiles/range.rs::one_reader_serves_several_threads_at_once
 annotated   fs-detected  src/pmtiles/range.rs::the_bound_is_on_offset_plus_length_not_on_length_alone
+annotated   fs-detected  src/pmtiles/range.rs::the_out_of_range_refusal_names_the_range_and_the_file
 annotated   fs-detected  src/radiance.rs::save_radiance_writes_a_file_decode_radiance_reads_back
 annotated   fs-detected  src/radiance.rs::the_fuzz_corpus_decodes_or_fails_exactly_as_named
 annotated   fs-detected  src/resample.rs::thumbnail_crop_free_fn_fills_and_crops_the_box
