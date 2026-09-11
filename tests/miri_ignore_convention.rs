@@ -499,7 +499,14 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// temporary file and read byte ranges back out of it. The eighth opens a path
 /// through the library and so is annotated without being detected, which is
 /// why this number moved by seven rather than by eight.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 295;
+///
+/// #988 moved it 295 to 299. The reader suite adds twenty-four tests that open
+/// a golden archive, and only four of them reach a filesystem call the scanner
+/// can follow: the four that ask for the metadata, which the reader fetches
+/// through the library. The other twenty go through helpers that open a path
+/// inside `FileRangeReader`, so they are the `annotated not-detected` shape
+/// this ledger exists to record.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 299;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
