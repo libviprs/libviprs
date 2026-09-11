@@ -190,6 +190,7 @@ pub mod sink_object_store;
 pub mod sink_packfile;
 pub mod sink_pmtiles;
 pub mod source;
+pub mod storage;
 pub mod stream_verify;
 pub mod streaming;
 pub mod streaming_mapreduce;
@@ -359,6 +360,7 @@ pub use source::{
     decode_file_sequential, decode_file_with_options, decode_file_with_shrink,
     generate_test_raster, set_load_cache_max_bytes, set_load_cache_max_entries,
 };
+pub use storage::{PMTILES_EXTENSION, PyramidStorage};
 pub use streaming::{
     BudgetPolicy, RasterStripSource, StreamingConfig, StripSource, compute_strip_height,
     estimate_streaming_memory,

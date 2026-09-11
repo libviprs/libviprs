@@ -30,7 +30,7 @@ Takes blueprint PDFs and images, extracts raster data, optionally geo-references
 - **Edge tile background** — configurable background color (`background_rgb`) for padding partial tiles at image edges (defaults to white)
 - **Geo-referencing** — affine transform mapping pixel coordinates to geographic coordinates, GCP support ([`--geo-reference`](https://libviprs.org/cli/#flag-geo-reference))
 - **Restart-safe runs** — checkpoint and [resume](https://libviprs.org/cli/#flag-resume) interrupted jobs, with content-addressed [tile dedupe](https://libviprs.org/cli/#flag-dedupe) and per-tile [checksums](https://libviprs.org/cli/#flag-checksums)
-- **Sinks** — filesystem, [packfile](https://libviprs.org/cli/#flag-packfile) (tar/zip), and [S3-compatible](https://libviprs.org/cli/#flag-s3) object stores
+- **Sinks** — a single PMTiles v3 archive (the default, see [Storage formats](#storage-formats)), a filesystem tree, a [packfile](https://libviprs.org/cli/#flag-packfile) (tar/zip), or an [S3-compatible](https://libviprs.org/cli/#flag-s3) object store
 - **Observability** — progress events, per-level callbacks, peak memory tracking, optional structured [tracing](https://libviprs.org/cli/#flag-tracing)
 
 ## Usage
@@ -110,6 +110,104 @@ println!(
 
 > See [interactive example](https://libviprs.org/cli/#cli-generator) — tick flags on the CLI docs page to generate a tailored version of this snippet.
 
+## Storage formats
+
+A pyramid can land in **one PMTiles v3 archive** as of 0.5.0, or in the tree of
+loose files under `{z}/{x}/{y}` this crate has always written. Nothing flipped
+underneath you: `EngineBuilder` writes the sink you hand it, the same as it
+always has. What is new is that the choice has a name, and that asking it what
+to use gets an answer: `PyramidStorage::default()` is `PyramidStorage::PmTiles`.
+
+The reason is arithmetic. A pyramid is around 20k tiles and a fleet is around
+100k pyramids, so the tree costs about 2 billion files: inodes you run out of,
+backups that never finish, and an object-store bill made mostly of request
+count. An archive is one file that still answers "give me tile `(z, x, y)`" in
+a couple of ranged reads, because its index rides along inside it.
+
+`PyramidStorage` is the one place that choice is made, so nothing downstream
+has to reinvent it:
+
+<!-- storage-example -->
+```rust
+use libviprs::{Layout, PyramidStorage};
+use std::path::Path;
+
+// Nothing said otherwise, so the pyramid lands in one indexed archive.
+let storage = PyramidStorage::default();
+assert_eq!(storage, PyramidStorage::PmTiles);
+assert_eq!(storage.output_path("city"), Path::new("city.pmtiles"));
+
+// An archive addresses a tile by (z, x, y), so those are the layouts it takes.
+assert!(storage.accepts_layout(Layout::Xyz));
+assert!(storage.accepts_layout(Layout::Google));
+assert!(!storage.accepts_layout(Layout::DeepZoom));
+
+// The tree of loose files is still one value away, and it takes all five.
+let storage = PyramidStorage::Directory;
+assert_eq!(storage.output_path("city"), Path::new("city"));
+assert_eq!(storage.extension(), None);
+assert!(storage.accepts_layout(Layout::DeepZoom));
+```
+
+### Where the output lands
+
+| You ask for | `PmTiles` writes | `Directory` writes |
+|---|---|---|
+| `city` | `city.pmtiles` | `city/` |
+| `city.pmtiles` | `city.pmtiles` | `city.pmtiles/` |
+| `tiles.v2` | `tiles.v2.pmtiles` | `tiles.v2/` |
+
+The extension is appended, never substituted. `PathBuf::set_extension` replaces
+everything after the last dot, so it would turn `tiles.v2` into
+`tiles.pmtiles` and lose the `v2`. A base that already ends in `.pmtiles` is
+handed back untouched, compared without case, because on macOS and Windows
+`city.PMTILES` and `city.PMTILES.pmtiles` are two names for one file. If you
+want `city.tif` to become `city.pmtiles`, pass the stem rather than the whole
+name.
+
+### Picking a sink
+
+A default is a default, not a rewrite. `EngineBuilder::new(source, plan, sink)`
+still writes whatever sink you hand it, so every Rust caller that compiles
+today compiles unchanged and keeps producing exactly what it produced before.
+What moved is the answer to "and if I do not say?".
+
+| Storage | Sink to build |
+|---|---|
+| PMTiles archive | `PmTilesSink::builder(&out).plan(plan).build()?`, with `out` from `PyramidStorage::PmTiles.output_path(base)` |
+| Directory tree | `FsSink::new(base, plan)`, exactly as before |
+| Packfile, object store | `PackfileSink` and `ObjectStoreSink`, both unchanged and unaffected |
+
+### An archive appears whole or it does not appear
+
+The writer stages into `<path>.tmp` and its siblings, flushes with `sync_all`
+and renames into place, so nothing exists at `<path>` until the run finishes.
+An interrupted run leaves its staging files beside the destination, which is
+evidence that it was working, and never a short `.pmtiles` wearing the name a
+complete one would.
+
+One destination has one writer. Two runs aimed at the same archive would share
+those staging names, so the second sink is refused when it is built rather than
+left to race the first.
+
+### Two things an archive constrains
+
+- **The layout has to address `(z, x, y)`.** An archive keys a tile on a
+  single `u64` derived from `(z, x, y)`, so `Layout::Xyz` and `Layout::Google`
+  both fit. Google differs from XYZ in the order it spells a path on disk
+  (`z/y/x` against `z/x/y`) and not in what it addresses, so there is no
+  coordinate migration in either direction. DeepZoom, Zoomify and IIIF do not
+  fit: their level index is a tier rather than a zoom, so those three stay on
+  the directory tree. `PyramidStorage::accepts_layout` says which is which in
+  code rather than in a sentence.
+- **Tiles are PNG or JPEG.** The spec has a tile type for each and none for
+  raw pixel bytes, so `TileFormat::Raw` has nowhere to go in an archive. Write
+  raw tiles to a directory.
+
+Reading an archive back is the `pmtiles` module: the 127-byte v3 header, the
+Hilbert tile ids, the directory model and the ranged-read abstraction a reader
+fetches bytes through.
+
 ## Modules
 
 Every public module, in four groups. `tests/crate_doc_matches_the_crate.rs`
@@ -133,6 +231,7 @@ from here for exactly one commit.
 | `sink` | Tile output (filesystem, memory, slow sink for testing) |
 | `sink_packfile` | `PackfileSink` writing tiles into a tar/zip archive (gated by `packfile`) |
 | `sink_object_store` | `ObjectStoreSink` for user-injected object storage backends (gated by `object-store-sink`; the deprecated `s3` alias also enables it) |
+| `storage` | `PyramidStorage`: which storage a pyramid lands in, the output path that choice resolves to, and the layouts each one holds |
 | `pmtiles` | PMTiles v3 archive format: 127-byte header, Hilbert TileIDs, directories, metadata, ranged reads, and a streaming bounded-memory `Writer` |
 | `sink_pmtiles` | `PmTilesSink` writing a whole pyramid into one PMTiles v3 archive |
 | `pyramid_reader` | `PyramidReader` and its directory and PMTiles implementations, for reading a generated pyramid back whatever it was stored in |
