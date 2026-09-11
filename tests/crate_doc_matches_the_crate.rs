@@ -38,6 +38,7 @@ const SOURCE_RS: &str = include_str!("../src/source.rs");
 const PIXEL_RS: &str = include_str!("../src/pixel.rs");
 const MAKEFILE: &str = include_str!("../Makefile");
 const MIGRATION: &str = include_str!("../MIGRATION.md");
+const SINK_RS: &str = include_str!("../src/sink.rs");
 
 // ---------------------------------------------------------------------------
 // Parsers over the lists the code keeps
@@ -717,5 +718,113 @@ fn every_document_that_states_an_msrv_states_the_manifests() {
         claims >= 3,
         "the MSRV scan found {claims} claims across the two documents, so it has \
          stopped matching and would agree with any number"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The storage example, which the README shows and rustdoc compiles
+// ---------------------------------------------------------------------------
+
+/// The HTML comment that opens the shared storage example in both documents.
+///
+/// An HTML comment renders as nothing in GitHub's markdown and as nothing in
+/// rustdoc, so the same marker sits invisibly in `README.md` and in the doc
+/// comment on `PyramidStorage` without either reader seeing it.
+const STORAGE_EXAMPLE_MARKER: &str = "<!-- storage-example -->";
+
+/// The fenced Rust block that follows [`STORAGE_EXAMPLE_MARKER`] in `doc`.
+///
+/// `doc_comment` says whether every line carries a `///` prefix to strip, which
+/// is the difference between reading `src/sink.rs` and reading `README.md`.
+fn storage_example(doc: &str, doc_comment: bool) -> String {
+    let count = doc.matches(STORAGE_EXAMPLE_MARKER).count();
+    assert_eq!(
+        count, 1,
+        "{STORAGE_EXAMPLE_MARKER} has to appear exactly once per document, and \
+         this one has it {count} time(s)"
+    );
+    let at = doc
+        .find(STORAGE_EXAMPLE_MARKER)
+        .expect("counted just above");
+
+    let mut out: Vec<&str> = Vec::new();
+    let mut inside = false;
+    for raw in doc[at..].lines().skip(1) {
+        let line = if doc_comment {
+            let trimmed = raw.trim_start();
+            let body = trimmed.strip_prefix("///").unwrap_or_else(|| {
+                panic!("the example ran off the end of the doc comment at {raw:?}")
+            });
+            body.strip_prefix(' ').unwrap_or(body)
+        } else {
+            raw
+        };
+        if line.trim_start().starts_with("```") {
+            if inside {
+                return out.join("\n");
+            }
+            inside = true;
+            continue;
+        }
+        if inside {
+            out.push(line);
+        }
+    }
+    panic!("the fenced block after {STORAGE_EXAMPLE_MARKER} is never closed");
+}
+
+/**
+ * Tests that the README's storage example is the one rustdoc compiles
+ * (issue #992).
+ *
+ * Nothing in this repository compiles a code block out of `README.md`: it is
+ * not pulled in with `#![doc = include_str!("../README.md")]` and no test
+ * extracts it, so the `Usage` example at the top has never been checked by
+ * anything. That is fine for a snippet nobody copies and bad for the one the
+ * storage section exists to be copied from, because an example that does not
+ * compile is worse than no example at all.
+ *
+ * So the storage example lives in the doc comment on `PyramidStorage`, where
+ * `cargo test --doc` compiles and runs it, and the README carries the same
+ * lines. This holds the two together character for character.
+ */
+#[test]
+fn the_readme_storage_example_is_the_compiled_doctest() {
+    let readme = storage_example(README, false);
+    let doctest = storage_example(SINK_RS, true);
+
+    // The positive control. An extractor that came back with nothing would
+    // make the equality below hold on two empty strings, which is the vacuous
+    // green this whole file exists to avoid.
+    assert!(
+        readme.lines().count() >= 6,
+        "the README block parsed to {} line(s), so the extractor has stopped \
+         finding it: {readme:?}",
+        readme.lines().count()
+    );
+    assert!(
+        readme.contains("PyramidStorage::default()"),
+        "the block the extractor found is not the storage example: {readme:?}"
+    );
+
+    assert_eq!(
+        readme, doctest,
+        "`README.md`'s storage example and the doctest on `PyramidStorage` in \
+         `src/sink.rs` have drifted. The doctest is the copy CI compiles, so \
+         make the README match it rather than the other way round."
+    );
+
+    // The negative control, in the same shape the rest of this file uses: the
+    // comparison has to be able to fail, and a mutation of one side is what
+    // shows it can.
+    let mutated = doctest.replacen("city.pmtiles", "city.tiles", 1);
+    assert_ne!(
+        mutated, doctest,
+        "the mutation did not reach the example, so what follows proves nothing"
+    );
+    assert_ne!(
+        readme, mutated,
+        "the comparison above passes against a changed example, so it is not \
+         comparing what it says it is"
     );
 }
