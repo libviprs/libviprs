@@ -302,6 +302,7 @@ annotated   fs-detected  tests/io_ported_surface.rs::save_accepts_path_ref
 annotated   fs-detected  tests/jxl_ported_surface.rs::encode_and_save_round_trip_exactly
 annotated   fs-detected  tests/jxl_ported_surface.rs::the_shared_dispatchers_carry_jxl
 annotated   fs-detected  tests/jxl_ported_surface.rs::without_the_feature_the_surface_is_unchanged_and_typed
+annotated   fs-detected  tests/local_ci_invocation.rs::the_host_architecture_comes_from_the_daemon_and_degrades_rather_than_refusing
 annotated   fs-detected  tests/local_gate_is_the_job_list.rs::the_workflow_directory_holds_only_files_this_guard_has_classified
 annotated   fs-detected  tests/miri_ignore_convention.rs::filesystem_touching_tests_match_the_recorded_inventory
 annotated   fs-detected  tests/miri_ignore_convention.rs::no_filesystem_touching_test_runs_under_miri_outside_the_named_exceptions
@@ -375,6 +376,18 @@ annotated   not-detected tests/icc_lut_alloc.rs::refusing_the_crate_s_own_device
 annotated   not-detected tests/icc_lut_alloc.rs::refusing_what_moxcms_still_allocates_itself_ends_the_process
 annotated   not-detected tests/icc_lut_alloc.rs::the_lut_export_hands_moxcms_nothing_that_scales_with_the_image
 annotated   not-detected tests/icc_lut_alloc.rs::the_lut_import_hands_moxcms_nothing_that_scales_with_the_image
+annotated   not-detected tests/local_ci_invocation.rs::a_lane_can_name_its_own_volume
+annotated   not-detected tests/local_ci_invocation.rs::a_step_that_exits_ends_only_itself_and_a_failing_step_still_fails_the_job
+annotated   not-detected tests/local_ci_invocation.rs::an_empty_volume_name_falls_back_and_an_impossible_one_is_refused
+annotated   not-detected tests/local_ci_invocation.rs::different_volumes_do_not_share_a_target_dir
+annotated   not-detected tests/local_ci_invocation.rs::native_ignores_docker_default_platform
+annotated   not-detected tests/local_ci_invocation.rs::native_states_the_host_platform_on_both_docker_calls
+annotated   not-detected tests/local_ci_invocation.rs::printing_the_argv_does_not_need_pyyaml
+annotated   not-detected tests/local_ci_invocation.rs::the_default_cargo_volume_is_unchanged
+annotated   not-detected tests/local_ci_invocation.rs::the_emulated_default_still_pins_amd64
+annotated   not-detected tests/local_ci_invocation.rs::the_run_command_is_the_whole_command_not_a_prefix
+annotated   not-detected tests/local_ci_invocation.rs::the_workflow_path_parses_a_plan_rather_than_only_importing_yaml
+annotated   not-detected tests/local_ci_invocation.rs::the_worktree_flag_changes_the_command_that_runs
 annotated   not-detected tests/oracle_capture_pins.rs::no_compiled_python_is_tracked_under_oracle_captures
 annotated   not-detected tests/sample_kind_spine.rs::the_walk_descends_into_subdirectories
 annotated   not-detected tests/unsafe_inventory.rs::the_walk_descends_into_subdirectories
