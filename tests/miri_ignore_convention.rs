@@ -363,7 +363,7 @@ const ANCHOR_FILES: &[&str] = &[
 /// that write real files, three of them driving the writer's external merge
 /// over a spilled index log and the fourth checking that two writers sharing
 /// one scratch directory do not collide on a filename.
-const EXPECTED_SRC_ANNOTATIONS: usize = 234;
+const EXPECTED_SRC_ANNOTATIONS: usize = 235;
 /// Companion to [`EXPECTED_SRC_ANNOTATIONS`]: how many `src/` modules carry at
 /// least one annotation. #765 made it 25 by putting the first annotation in
 /// `src/analyze.rs`; `src/colour.rs` and `src/pdf.rs`, which took the other
@@ -520,7 +520,7 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// index log and reads an archive back. Twenty-one of the twenty-five are in
 /// `tests/pmtiles_writer.rs` and four are the unit tests in
 /// `src/pmtiles/writer.rs`.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 325;
+const EXPECTED_FS_TOUCHING_TESTS: usize = 326;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
