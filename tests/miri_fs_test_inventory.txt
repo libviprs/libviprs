@@ -221,6 +221,7 @@ annotated   fs-detected  src/pmtiles/range.rs::one_reader_serves_several_threads
 annotated   not-detected src/pmtiles/range.rs::opening_something_that_is_not_there_is_a_typed_error
 annotated   fs-detected  src/pmtiles/range.rs::the_bound_is_on_offset_plus_length_not_on_length_alone
 annotated   fs-detected  src/pmtiles/writer.rs::a_partial_write_latches_and_finish_refuses_to_publish
+annotated   fs-detected  src/pmtiles/writer.rs::a_partial_write_to_the_index_log_latches_too
 annotated   fs-detected  src/pmtiles/writer.rs::a_refusal_before_the_write_leaves_the_writer_usable
 annotated   fs-detected  src/pmtiles/writer.rs::a_run_list_wider_than_the_fan_in_is_merged_in_passes
 annotated   fs-detected  src/pmtiles/writer.rs::a_writer_that_spilled_several_runs_still_sorts
