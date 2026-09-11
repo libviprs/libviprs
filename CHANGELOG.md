@@ -1166,6 +1166,42 @@ and not under `Fixed`: this file is the only place they can be caught.
   the sink integration land separately, and nothing in the crate writes a
   `.pmtiles` file yet.
 
+- **A streaming PMTiles v3 writer** (issue #989). `libviprs::pmtiles::Writer`
+  takes tiles in any order, stores one blob per distinct payload, and assembles
+  a spec-correct archive at `finish()` through a staged temp file, an `fsync`
+  and an atomic rename, so a run that is interrupted or fails leaves the
+  destination untouched rather than a partial archive wearing a complete one's
+  name. `Writer::create` is the path flavour and `Writer::try_new` writes into
+  any `Write + Seek`.
+
+  Peak memory does not grow with the tile count. The per-tile index is spilled
+  to an append-only log and externally sorted at finalize, the entry list is
+  spilled and streamed into leaf directories one chunk at a time, and payloads
+  are copied one blob at a time. What does scale, and cannot not, is the
+  content hash table, which is bounded by the number of *distinct* payloads the
+  same way `DedupeIndex` already is.
+
+  The data region is written in TileID order and `clustered` is `true`. The
+  issue asked for arrival order and also for a byte-identical archive from two
+  arrival orders, and those cannot both hold; the root has to fit in the first
+  16384 bytes, so its size is unknown until the entries are sorted and the
+  payloads are copied at finalize whichever layout is chosen. Given the copy
+  happens anyway, TileID order costs one pass and buys determinism, an honest
+  `clustered`, and read locality.
+
+  Archive-level dedupe is unconditional and keyed on the content hash the
+  caller passes in. It deliberately does not consult `DedupeStrategy`, which
+  defaults to `None` and under which `DedupeIndex::record` returns `WriteNew`
+  for every call by design: storing one blob per payload is a property of the
+  archive, not of the engine's blank-tile policy. `DedupeIndex::content_digest`
+  is new and exposes the digest the engine already computed, so nothing is
+  hashed twice.
+
+  The writer is pinned against `go-pmtiles` v1.31.2 rather than against this
+  crate's own reader, byte for byte: fed the tiles out of a reference archive,
+  it reproduces that archive's decompressed root directory and its tile data
+  section exactly.
+
 - **`.tif` and `.tiff` are save routes** (issue #948). `src/encode_tiff.rs` has
   had a working `Raster::save_tiff` with round-trip tests behind it all along,
   and neither save route ever grew a row, so `raster.save("out.tif")` answered

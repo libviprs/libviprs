@@ -109,12 +109,14 @@ pub mod metadata;
 pub mod range;
 pub mod tileid;
 pub mod varint;
+pub mod writer;
 
 pub use directory::Entry;
 pub use header::{Compression, Header, TileType};
 pub use metadata::{LibviprsMetadata, Metadata};
 pub use range::{FileRangeReader, RangeReader};
 pub use tileid::{tileid_to_zxy, zxy_to_tileid};
+pub use writer::{Writer, WriterOptions};
 
 // ---------------------------------------------------------------------------
 // PmTilesError
@@ -263,4 +265,26 @@ pub enum PmTilesError {
     /// self-describing image blob and raw pixel bytes are not one.
     #[error("{format:?} has no PMTiles tile type")]
     UnsupportedTileFormat { format: crate::sink::TileFormat },
+
+    /// Two tiles claimed one TileID. The directory encoding cannot express it:
+    /// the tile id column holds unsigned deltas, so a repeat would need a zero
+    /// delta, and a lookup landing on it could not say which of the two wins.
+    /// Surfaced by [`Writer::finish`](crate::pmtiles::Writer::finish) rather
+    /// than by `add_tile`, because a streaming writer only learns the ids are
+    /// equal once they are in order.
+    #[error("tile id {tile_id} was added more than once")]
+    DuplicateTile { tile_id: u64 },
+
+    /// Two payloads arrived under one content hash with different lengths.
+    /// The writer trusts the caller's digest and never re-derives it, so this
+    /// is the one inconsistency it can see: either the hash is not a hash of
+    /// the bytes it came with, or two different payloads collided.
+    #[error("content hash covers {stored} stored bytes but {length} were offered")]
+    ContentHashMismatch { length: u32, stored: u32 },
+
+    /// The root directory would not fit the spec's 16384-byte ceiling even
+    /// with every entry pushed down into one leaf, so there is no leaf size
+    /// that satisfies the budget.
+    #[error("root directory is {length} bytes, over the {budget} byte budget")]
+    RootDirectoryTooLarge { length: usize, budget: usize },
 }
