@@ -352,12 +352,20 @@ const ANCHOR_FILES: &[&str] = &[
 /// now, on purpose: an exact number in the workflow made it a file every
 /// unrelated pull request had to edit, which is the reasoning written up in
 /// `tests/miri_invocation_parity.rs`.
-const EXPECTED_SRC_ANNOTATIONS: usize = 219;
+/// #987 moved it 219 to 225: `src/pmtiles/range.rs` arrived with six tests
+/// that open a real file. Five of them reach `tempfile::NamedTempFile` through
+/// a `ramp_file()` helper the detector follows, and the sixth hands a path
+/// straight to `FileRangeReader::try_open`, which opens it inside the library,
+/// so that one is the `annotated not-detected` shape this ledger exists to
+/// pin.
+const EXPECTED_SRC_ANNOTATIONS: usize = 225;
 /// Companion to [`EXPECTED_SRC_ANNOTATIONS`]: how many `src/` modules carry at
 /// least one annotation. #765 made it 25 by putting the first annotation in
 /// `src/analyze.rs`; `src/colour.rs` and `src/pdf.rs`, which took the other
 /// three, were already in the set.
-const EXPECTED_SRC_MODULES: usize = 25;
+/// #987 made it 26 by putting the first annotation in `src/pmtiles/range.rs`,
+/// which is also the first annotated module that is not directly under `src/`.
+const EXPECTED_SRC_MODULES: usize = 26;
 
 /// How many tests in the tree reach `std::process`.
 ///
@@ -485,7 +493,13 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// It has to be a directory listing rather than an `include_str!` of a name it
 /// already knows, because the thing it is looking for is the file nobody told
 /// it about. Annotated and fs-detected, the ordinary case.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 288;
+///
+/// #987 moved it 288 to 295: seven of the eight tests `src/pmtiles/range.rs`
+/// and `tests/pmtiles_format.rs` added for the PMTiles range reader write a
+/// temporary file and read byte ranges back out of it. The eighth opens a path
+/// through the library and so is annotated without being detected, which is
+/// why this number moved by seven rather than by eight.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 295;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {

@@ -291,7 +291,10 @@ mod tests {
         assert_eq!(json, want);
 
         // And it parses back to what it came from.
-        assert_eq!(Metadata::try_from_json(json.as_bytes()).unwrap(), saturated());
+        assert_eq!(
+            Metadata::try_from_json(json.as_bytes()).unwrap(),
+            saturated()
+        );
     }
 
     #[test]
@@ -299,16 +302,25 @@ mod tests {
         // The format has no other extension point, so the metadata object is
         // where every tool puts what it cares about. A read-modify-write that
         // dropped what it did not recognise would destroy their data.
-        let meta = Metadata::try_from_json(ORACLE_METADATA.as_bytes()).expect("a real archive's metadata");
+        let meta =
+            Metadata::try_from_json(ORACLE_METADATA.as_bytes()).expect("a real archive's metadata");
         assert_eq!(meta.name.as_deref(), Some("libviprs-oracle-raster"));
         assert_eq!(meta.tileset_type.as_deref(), Some("baselayer"));
         assert_eq!(meta.version.as_deref(), Some("1"));
-        assert!(meta.vnd_libviprs.is_none(), "go-pmtiles wrote no libviprs namespace");
+        assert!(
+            meta.vnd_libviprs.is_none(),
+            "go-pmtiles wrote no libviprs namespace"
+        );
 
         // `format`, `minzoom` and `maxzoom` are not keys the v3 spec defines
         // and not keys this struct names, so they can only have survived
         // through `extra`.
-        assert_eq!(meta.extra.len(), 3, "extra holds {:?}", meta.extra.keys().collect::<Vec<_>>());
+        assert_eq!(
+            meta.extra.len(),
+            3,
+            "extra holds {:?}",
+            meta.extra.keys().collect::<Vec<_>>()
+        );
         assert_eq!(meta.extra["format"], serde_json::json!("png"));
         assert_eq!(meta.extra["minzoom"], serde_json::json!("0"));
         assert_eq!(meta.extra["maxzoom"], serde_json::json!("2"));
@@ -333,7 +345,10 @@ mod tests {
         // else in the world looks for.
         let json = String::from_utf8(saturated().to_json().unwrap()).unwrap();
         assert!(json.contains(r#""vnd.libviprs":"#), "got {json}");
-        assert!(!json.contains("vnd_libviprs"), "the field name leaked: {json}");
+        assert!(
+            !json.contains("vnd_libviprs"),
+            "the field name leaked: {json}"
+        );
         assert_eq!(LIBVIPRS_METADATA_KEY, "vnd.libviprs");
 
         // And a document using the dotted key parses into the typed field

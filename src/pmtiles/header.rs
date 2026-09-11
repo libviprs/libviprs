@@ -733,7 +733,11 @@ mod tests {
 
     fn oracle_header_bytes() -> Vec<u8> {
         let hex = ORACLE_HEADER_HEX;
-        assert_eq!(hex.len(), HEADER_BYTES * 2, "the golden hex is not 127 bytes");
+        assert_eq!(
+            hex.len(),
+            HEADER_BYTES * 2,
+            "the golden hex is not 127 bytes"
+        );
         (0..hex.len())
             .step_by(2)
             .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("golden hex"))
@@ -804,9 +808,15 @@ mod tests {
         assert_eq!(header.max_lat_e7, 850_511_287);
         let (min_lon, min_lat, max_lon, max_lat) = header.bounds_degrees();
         assert!((min_lon - -180.0).abs() < 1e-9, "min lon was {min_lon}");
-        assert!((min_lat - -85.051_128_7).abs() < 1e-9, "min lat was {min_lat}");
+        assert!(
+            (min_lat - -85.051_128_7).abs() < 1e-9,
+            "min lat was {min_lat}"
+        );
         assert!((max_lon - 180.0).abs() < 1e-9, "max lon was {max_lon}");
-        assert!((max_lat - 85.051_128_7).abs() < 1e-9, "max lat was {max_lat}");
+        assert!(
+            (max_lat - 85.051_128_7).abs() < 1e-9,
+            "max lat was {max_lat}"
+        );
 
         // And what this crate encodes from that decode is the same 127 bytes.
         assert_eq!(header.encode().to_vec(), oracle_header_bytes());
@@ -939,7 +949,10 @@ mod tests {
 
         assert!(matches!(
             Header::try_decode(&good[..126]),
-            Err(PmTilesError::ShortHeader { got: 126, want: 127 })
+            Err(PmTilesError::ShortHeader {
+                got: 126,
+                want: 127
+            })
         ));
         assert!(matches!(
             Header::try_decode(&[]),
@@ -1069,7 +1082,10 @@ mod tests {
         // ceiling is the only thing between a reader and a gzip bomb. A few
         // hundred stored bytes expand to a megabyte here.
         let bomb = Compression::Gzip.compress(&vec![0u8; 1 << 20]).unwrap();
-        assert!(bomb.len() < 4096, "the bomb fixture is not compressed enough");
+        assert!(
+            bomb.len() < 4096,
+            "the bomb fixture is not compressed enough"
+        );
 
         assert!(matches!(
             Compression::Gzip.decompress(&bomb, 4096),
@@ -1079,7 +1095,10 @@ mod tests {
         // The boundary in both directions, because an off-by-one here either
         // refuses a legitimate directory or lets one byte past the cap.
         let exact = Compression::Gzip.compress(&vec![7u8; 1000]).unwrap();
-        assert_eq!(Compression::Gzip.decompress(&exact, 1000).unwrap().len(), 1000);
+        assert_eq!(
+            Compression::Gzip.decompress(&exact, 1000).unwrap().len(),
+            1000
+        );
         assert!(matches!(
             Compression::Gzip.decompress(&exact, 999),
             Err(PmTilesError::DecompressionLimit { limit: 999 })
@@ -1091,7 +1110,13 @@ mod tests {
             Compression::None.decompress(&[0u8; 100], 99),
             Err(PmTilesError::DecompressionLimit { .. })
         ));
-        assert_eq!(Compression::None.decompress(&[0u8; 100], 100).unwrap().len(), 100);
+        assert_eq!(
+            Compression::None
+                .decompress(&[0u8; 100], 100)
+                .unwrap()
+                .len(),
+            100
+        );
     }
 
     #[test]

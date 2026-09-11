@@ -178,12 +178,12 @@ pub fn push_entry(
     if let Some(last) = entries.last_mut() {
         // The first id a new entry may claim: one past the end of the previous
         // run, or one past a leaf pointer's own id since a leaf covers nothing.
-        let run_end = last
-            .tile_id
-            .checked_add(u64::from(last.run_length))
-            .ok_or(PmTilesError::Overflow {
-                what: "the end of the previous run",
-            })?;
+        let run_end =
+            last.tile_id
+                .checked_add(u64::from(last.run_length))
+                .ok_or(PmTilesError::Overflow {
+                    what: "the end of the previous run",
+                })?;
         let first_free = if last.is_leaf() {
             last.tile_id.checked_add(1).ok_or(PmTilesError::Overflow {
                 what: "the id after a leaf pointer",
@@ -196,14 +196,15 @@ pub fn push_entry(
                 index: entries.len(),
             });
         }
-        let extends_the_run = !last.is_leaf()
-            && tile_id == run_end
-            && last.offset == offset
-            && last.length == length;
+        let extends_the_run =
+            !last.is_leaf() && tile_id == run_end && last.offset == offset && last.length == length;
         if extends_the_run {
-            last.run_length = last.run_length.checked_add(1).ok_or(PmTilesError::Overflow {
-                what: "a run length",
-            })?;
+            last.run_length = last
+                .run_length
+                .checked_add(1)
+                .ok_or(PmTilesError::Overflow {
+                    what: "a run length",
+                })?;
             return Ok(());
         }
     }
@@ -273,18 +274,18 @@ pub fn serialize_entries(entries: &[Entry]) -> Result<Vec<u8>, PmTilesError> {
         if index > 0 && entry.offset == next_byte {
             encode_uvarint(0, &mut out);
         } else {
-            let shifted = entry
-                .offset
-                .checked_add(1)
-                .ok_or(PmTilesError::Overflow { what: "an entry offset" })?;
+            let shifted = entry.offset.checked_add(1).ok_or(PmTilesError::Overflow {
+                what: "an entry offset",
+            })?;
             encode_uvarint(shifted, &mut out);
         }
-        next_byte = entry
-            .offset
-            .checked_add(u64::from(entry.length))
-            .ok_or(PmTilesError::Overflow {
-                what: "the end of an entry",
-            })?;
+        next_byte =
+            entry
+                .offset
+                .checked_add(u64::from(entry.length))
+                .ok_or(PmTilesError::Overflow {
+                    what: "the end of an entry",
+                })?;
     }
 
     Ok(out)
@@ -333,9 +334,9 @@ pub fn deserialize_entries(bytes: &[u8]) -> Result<Vec<Entry>, PmTilesError> {
         if index > 0 && delta == 0 {
             return Err(PmTilesError::NonAscendingEntry { index });
         }
-        last_id = last_id
-            .checked_add(delta)
-            .ok_or(PmTilesError::Overflow { what: "a tile id delta" })?;
+        last_id = last_id.checked_add(delta).ok_or(PmTilesError::Overflow {
+            what: "a tile id delta",
+        })?;
         if last_id > MAX_TILE_ID {
             return Err(PmTilesError::TileIdOutOfRange {
                 id: last_id,
@@ -470,7 +471,12 @@ mod tests {
         for (index, &(tile_id, offset, length, run_length)) in want.iter().enumerate() {
             assert_eq!(
                 entries[index],
-                Entry { tile_id, offset, length, run_length },
+                Entry {
+                    tile_id,
+                    offset,
+                    length,
+                    run_length
+                },
                 "entry {index}"
             );
         }
@@ -496,12 +502,27 @@ mod tests {
         // columns fails here with a readable diff rather than only failing the
         // 276-byte golden above.
         let entries = vec![
-            Entry { tile_id: 0, offset: 0, length: 10, run_length: 1 },
+            Entry {
+                tile_id: 0,
+                offset: 0,
+                length: 10,
+                run_length: 1,
+            },
             // Contiguous with the previous entry, so the offset column stores 0.
-            Entry { tile_id: 1, offset: 10, length: 20, run_length: 2 },
+            Entry {
+                tile_id: 1,
+                offset: 10,
+                length: 20,
+                run_length: 2,
+            },
             // A gap, so the offset column stores offset + 1. A delta of 4 on
             // the id column, and a leaf pointer's run length of 0.
-            Entry { tile_id: 5, offset: 100, length: 30, run_length: 0 },
+            Entry {
+                tile_id: 5,
+                offset: 100,
+                length: 30,
+                run_length: 0,
+            },
         ];
         let want: &[u8] = &[
             0x03, // three entries
@@ -519,7 +540,12 @@ mod tests {
         // Its offset is 0 and the shorthand byte is also 0, so an encoder that
         // dropped the `index > 0` guard would write a `0` that decodes as an
         // underflow. Every clustered archive has exactly this entry.
-        let entries = vec![Entry { tile_id: 0, offset: 0, length: 5, run_length: 1 }];
+        let entries = vec![Entry {
+            tile_id: 0,
+            offset: 0,
+            length: 5,
+            run_length: 1,
+        }];
         let bytes = serialize_entries(&entries).unwrap();
         assert_eq!(bytes, vec![0x01, 0x00, 0x01, 0x05, 0x01]);
         assert_eq!(deserialize_entries(&bytes).unwrap(), entries);
@@ -539,12 +565,30 @@ mod tests {
         // Every case starts from the same valid three-entry directory and
         // changes one thing, so each refusal is attributable.
         let valid = serialize_entries(&[
-            Entry { tile_id: 1, offset: 0, length: 10, run_length: 1 },
-            Entry { tile_id: 2, offset: 10, length: 10, run_length: 1 },
-            Entry { tile_id: 9, offset: 40, length: 10, run_length: 1 },
+            Entry {
+                tile_id: 1,
+                offset: 0,
+                length: 10,
+                run_length: 1,
+            },
+            Entry {
+                tile_id: 2,
+                offset: 10,
+                length: 10,
+                run_length: 1,
+            },
+            Entry {
+                tile_id: 9,
+                offset: 40,
+                length: 10,
+                run_length: 1,
+            },
         ])
         .unwrap();
-        assert!(deserialize_entries(&valid).is_ok(), "the fixture must be valid");
+        assert!(
+            deserialize_entries(&valid).is_ok(),
+            "the fixture must be valid"
+        );
 
         // A claimed count of zero.
         assert!(matches!(
@@ -609,7 +653,10 @@ mod tests {
         crate::pmtiles::varint::encode_uvarint(1, &mut huge_length);
         assert!(matches!(
             deserialize_entries(&huge_length),
-            Err(PmTilesError::EntryFieldTooLarge { field: "length", .. })
+            Err(PmTilesError::EntryFieldTooLarge {
+                field: "length",
+                ..
+            })
         ));
     }
 
@@ -622,13 +669,28 @@ mod tests {
             Err(PmTilesError::EmptyDirectory)
         ));
         assert!(matches!(
-            serialize_entries(&[Entry { tile_id: 1, offset: 0, length: 0, run_length: 1 }]),
+            serialize_entries(&[Entry {
+                tile_id: 1,
+                offset: 0,
+                length: 0,
+                run_length: 1
+            }]),
             Err(PmTilesError::ZeroLengthEntry { index: 0 })
         ));
         assert!(matches!(
             serialize_entries(&[
-                Entry { tile_id: 5, offset: 0, length: 1, run_length: 1 },
-                Entry { tile_id: 5, offset: 1, length: 1, run_length: 1 },
+                Entry {
+                    tile_id: 5,
+                    offset: 0,
+                    length: 1,
+                    run_length: 1
+                },
+                Entry {
+                    tile_id: 5,
+                    offset: 1,
+                    length: 1,
+                    run_length: 1
+                },
             ]),
             Err(PmTilesError::NonAscendingEntry { index: 1 })
         ));
@@ -656,8 +718,18 @@ mod tests {
         // The positive control: the valid neighbour of each of those writes.
         assert!(
             serialize_entries(&[
-                Entry { tile_id: 5, offset: 0, length: 1, run_length: 1 },
-                Entry { tile_id: 6, offset: 1, length: 1, run_length: 1 },
+                Entry {
+                    tile_id: 5,
+                    offset: 0,
+                    length: 1,
+                    run_length: 1
+                },
+                Entry {
+                    tile_id: 6,
+                    offset: 1,
+                    length: 1,
+                    run_length: 1
+                },
             ])
             .is_ok()
         );
@@ -695,7 +767,12 @@ mod tests {
         assert_eq!(entries.len(), 4);
 
         // A leaf pointer is never extended.
-        let mut with_leaf = vec![Entry { tile_id: 5, offset: 0, length: 9, run_length: 0 }];
+        let mut with_leaf = vec![Entry {
+            tile_id: 5,
+            offset: 0,
+            length: 9,
+            run_length: 0,
+        }];
         push_entry(&mut with_leaf, 6, 0, 9).unwrap();
         assert_eq!(with_leaf.len(), 2);
         assert_eq!(with_leaf[0].run_length, 0);
@@ -724,7 +801,12 @@ mod tests {
 
     #[test]
     fn landing_on_an_entry_is_not_the_same_as_being_inside_its_run() {
-        let run = Entry { tile_id: 5, offset: 0, length: 9, run_length: 3 };
+        let run = Entry {
+            tile_id: 5,
+            offset: 0,
+            length: 9,
+            run_length: 3,
+        };
         assert!(!run.run_contains(4), "below the run");
         assert!(run.run_contains(5));
         assert!(run.run_contains(6));
@@ -736,7 +818,12 @@ mod tests {
         assert_eq!(run.last_tile_id(), Some(7));
 
         // A leaf pointer contains nothing; it is followed, not read.
-        let leaf = Entry { tile_id: 5, offset: 0, length: 9, run_length: 0 };
+        let leaf = Entry {
+            tile_id: 5,
+            offset: 0,
+            length: 9,
+            run_length: 0,
+        };
         assert!(leaf.is_leaf());
         assert!(!leaf.run_contains(5));
         assert_eq!(leaf.last_tile_id(), None);
@@ -762,9 +849,24 @@ mod tests {
         // the only discriminant between a tile entry and a pointer, so a
         // codec that normalised it to 1 would turn every leaf into a tile.
         let entries = vec![
-            Entry { tile_id: 0, offset: 0, length: 100, run_length: 5 },
-            Entry { tile_id: 5, offset: 100, length: 250, run_length: 0 },
-            Entry { tile_id: 21, offset: 350, length: 90, run_length: 0 },
+            Entry {
+                tile_id: 0,
+                offset: 0,
+                length: 100,
+                run_length: 5,
+            },
+            Entry {
+                tile_id: 5,
+                offset: 100,
+                length: 250,
+                run_length: 0,
+            },
+            Entry {
+                tile_id: 21,
+                offset: 350,
+                length: 90,
+                run_length: 0,
+            },
         ];
         let back = deserialize_entries(&serialize_entries(&entries).unwrap()).unwrap();
         assert_eq!(back, entries);
@@ -778,9 +880,24 @@ mod tests {
         // this puts every offset above 2^32 and asks for them back.
         let base: u64 = 5_000_000_000;
         let entries = vec![
-            Entry { tile_id: 1, offset: base, length: 4096, run_length: 1 },
-            Entry { tile_id: 2, offset: base + 4096, length: 8192, run_length: 1 },
-            Entry { tile_id: 3, offset: 12_000_000_000, length: 1, run_length: 1 },
+            Entry {
+                tile_id: 1,
+                offset: base,
+                length: 4096,
+                run_length: 1,
+            },
+            Entry {
+                tile_id: 2,
+                offset: base + 4096,
+                length: 8192,
+                run_length: 1,
+            },
+            Entry {
+                tile_id: 3,
+                offset: 12_000_000_000,
+                length: 1,
+                run_length: 1,
+            },
         ];
         let back = deserialize_entries(&serialize_entries(&entries).unwrap()).unwrap();
         assert_eq!(back, entries);
