@@ -915,8 +915,13 @@ fn clustered_is_true_and_the_layout_backs_it_up() {
     );
     let mut next_byte = 0u64;
     for entry in &mine.entries {
+        // Spelled as two named conditions rather than as `<=`, because the
+        // spec's definition of clustered is two separate permissions and
+        // collapsing them loses which one each entry is using.
+        let contiguous_with_the_previous_blob = entry.offset == next_byte;
+        let back_reference_to_a_deduplicated_one = entry.offset < next_byte;
         assert!(
-            entry.offset == next_byte || entry.offset < next_byte,
+            contiguous_with_the_previous_blob || back_reference_to_a_deduplicated_one,
             "entry at {} is neither contiguous nor a back reference",
             entry.tile_id
         );
