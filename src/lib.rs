@@ -173,6 +173,7 @@ pub mod pixel;
 pub mod planner;
 pub mod pmtiles;
 pub(crate) mod poison;
+pub mod pyramid_reader;
 pub mod radiance;
 pub mod raster;
 pub(crate) mod raster_ops;
@@ -187,6 +188,7 @@ pub mod sink_object_store;
 #[cfg(feature = "packfile")]
 #[cfg_attr(docsrs, doc(cfg(feature = "packfile")))]
 pub mod sink_packfile;
+pub mod sink_pmtiles;
 pub mod source;
 pub mod stream_verify;
 pub mod streaming;
@@ -329,6 +331,9 @@ pub use mat::{MatError, decode_mat};
 // caller who already knows the format actually wants. The buffer-pair and
 // filename-resolving halves stay behind `libviprs::analyze::` (issue #764).
 pub use analyze::{AnalyzeError, decode_analyze_file};
+pub use pyramid_reader::{
+    DirectoryPyramidReader, PyramidDescription, PyramidReadError, PyramidReader,
+};
 pub use raster::{Raster, RasterError, RegionView};
 pub use resample::{
     AffineOptions, Interpolator, ReduceKernel, ResampleError, ResizeOptions, ThumbnailError,
@@ -347,6 +352,7 @@ pub use sink_object_store::{ObjectStore, ObjectStoreConfig, ObjectStoreSink};
 #[cfg(feature = "packfile")]
 #[cfg_attr(docsrs, doc(cfg(feature = "packfile")))]
 pub use sink_packfile::{PackfileFormat, PackfileSink, PackfileSinkBuilder, ZipSink};
+pub use sink_pmtiles::{PmTilesSink, PmTilesSinkBuilder};
 pub use source::{
     DeclaredGeometry, SourceError, clear_load_cache, decode_bytes, decode_file,
     decode_file_sequential, decode_file_with_options, decode_file_with_shrink,

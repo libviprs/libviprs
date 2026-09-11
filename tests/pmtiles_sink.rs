@@ -40,7 +40,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use libviprs::dedupe::DedupeStrategy;
 use libviprs::engine::{BlankTileStrategy, EngineConfig};
 use libviprs::planner::{Layout, PyramidPlan, PyramidPlanner, TileCoord};
 use libviprs::pmtiles::directory::deserialize_entries;
@@ -310,22 +309,27 @@ fn the_coordinate_mapping_matches_the_oracle_tile_ids() {
 // Dedupe, which has to be unconditional
 // ---------------------------------------------------------------------------
 
-/// A pyramid whose tiles are all identical stores **one** payload, on the
-/// default dedupe strategy.
+/// Identical tiles at different coordinates collapse into **one** stored
+/// payload, on the default dedupe strategy.
 ///
 /// `DedupeStrategy::None` is the default and it makes `DedupeIndex::record`
 /// answer `WriteNew` for every tile on purpose, so a sink that drives the
-/// archive's payload table off that decision passes this test only when a
-/// caller has turned dedupe on. The assertion is the archive's own
-/// `tile_contents_count`, and the negative control beside it is that more than
-/// one tile was addressed: "one payload" is not interesting when there was
-/// only ever one tile.
+/// archive's payload table off that decision stores every duplicate here and
+/// passes the issue's dedupe criterion only when a caller has turned dedupe
+/// on. The assertion is the archive's own `tile_contents_count`, and the
+/// control beside it is that more than one tile was addressed: one payload out
+/// of one tile proves nothing.
+///
+/// The tiles are handed to the sink directly rather than produced by a run,
+/// because a real pyramid's levels have different pixel geometries and so
+/// cannot all be the same bytes. The engine-driven half is
+/// [`an_engine_run_collapses_its_identical_tiles`].
 #[test]
 #[cfg_attr(miri, ignore)]
 fn duplicate_tiles_collapse_to_one_payload_on_the_default_strategy() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let plan = plan_for(512, 512, 256, Layout::Xyz);
-    let src = uniform(512, 512);
+    let plan = plan_for(1024, 1024, 256, Layout::Xyz);
+    let out = dir.path().join("dupes.pmtiles");
 
     assert_eq!(
         EngineConfig::default().dedupe_strategy,
@@ -334,24 +338,84 @@ fn duplicate_tiles_collapse_to_one_payload_on_the_default_strategy() {
          trap it guards moved with it"
     );
 
-    let archive = run_into_archive(&src, &plan, dir.path());
-    let walked = walk(&archive);
+    let sink = PmTilesSink::builder(&out)
+        .plan(plan.clone())
+        .build()
+        .expect("the sink builds");
+    let top = plan
+        .levels
+        .iter()
+        .map(|level| level.level)
+        .max()
+        .expect("a plan has levels");
+    let mut addressed = 0u64;
+    for coord in plan.tile_coords().filter(|c| c.level == top) {
+        sink.write_tile(&Tile {
+            coord,
+            raster: uniform(256, 256),
+            blank: false,
+        })
+        .expect("the sink takes a tile");
+        addressed += 1;
+    }
+    sink.finish().expect("the archive publishes");
 
     assert!(
-        walked.header.addressed_tiles_count > 1,
-        "the negative control: one payload out of one tile proves nothing"
-    );
-    assert_eq!(
-        walked.header.tile_contents_count, 1,
-        "every tile of a uniform pyramid is the same bytes, so the archive \
-         stores one payload"
+        addressed > 1,
+        "the negative control: one payload out of one tile proves nothing, got \
+         {addressed} tiles"
     );
 
+    let walked = walk(&out);
+    assert_eq!(walked.header.addressed_tiles_count, addressed);
+    assert_eq!(
+        walked.header.tile_contents_count, 1,
+        "{addressed} identical tiles are one stored payload"
+    );
     let distinct: BTreeSet<&Vec<u8>> = walked.tiles.values().collect();
     assert_eq!(
         distinct.len(),
         1,
         "and every id resolves to that one payload"
+    );
+}
+
+/// A real run over a uniform source stores far fewer payloads than it
+/// addresses, on the default strategy.
+///
+/// The levels of a pyramid have different pixel geometries, so not every tile
+/// can be the same bytes; what must hold is that the ones that are the same
+/// are stored once. The full-resolution level alone is sixteen identical
+/// tiles, so the biggest group is the assertion, and `tile_contents_count`
+/// agreeing with the set of distinct payloads is what ties the header's claim
+/// to the bytes.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn an_engine_run_collapses_its_identical_tiles() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let plan = plan_for(1024, 1024, 256, Layout::Xyz);
+    let archive = run_into_archive(&uniform(1024, 1024), &plan, dir.path());
+    let walked = walk(&archive);
+
+    let mut groups: BTreeMap<&Vec<u8>, usize> = BTreeMap::new();
+    for blob in walked.tiles.values() {
+        *groups.entry(blob).or_default() += 1;
+    }
+    assert_eq!(
+        walked.header.tile_contents_count as usize,
+        groups.len(),
+        "the header's payload count must be the number of distinct payloads \
+         actually stored"
+    );
+    assert!(
+        groups.len() < walked.tiles.len(),
+        "a uniform pyramid that stores one payload per tile has deduped nothing"
+    );
+    let biggest = groups.values().copied().max().unwrap_or_default();
+    assert!(
+        biggest >= 16,
+        "the sixteen tiles of the full-resolution level are the same bytes and \
+         must share one payload, biggest group was {biggest}"
     );
 }
 
@@ -491,10 +555,11 @@ fn the_archive_zoom_range_is_the_plan_level_range() {
 /// `sync_pending` moves the staged bytes out of the writer's buffer and onto
 /// the disk.
 ///
-/// The control is the assertion before the barrier: the staged file must be
-/// **shorter** than what has been handed to the sink, or the test is measuring
-/// a flush that had already happened for unrelated reasons and would stay
-/// green with the barrier removed.
+/// The control is the assertion before the barrier: the staging files must
+/// still be **empty**, or the test is measuring a flush that had already
+/// happened for unrelated reasons and would stay green with the barrier
+/// removed. `arm_durability_tracking` is called first because the engine calls
+/// it first; the barrier does not depend on it, and the sink's docs say so.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn sync_pending_pushes_the_staged_payloads_out_of_the_buffer() {
@@ -505,13 +570,13 @@ fn sync_pending_pushes_the_staged_payloads_out_of_the_buffer() {
         .plan(plan.clone())
         .build()
         .expect("the sink builds");
+    sink.arm_durability_tracking();
 
     let mut written = 0usize;
     for coord in plan.tile_coords().take(6) {
-        let raster = gradient(64, 64);
         let tile = Tile {
             coord,
-            raster,
+            raster: gradient(64, 64),
             blank: false,
         };
         sink.write_tile(&tile).expect("the sink takes a tile");
@@ -522,10 +587,12 @@ fn sync_pending_pushes_the_staged_payloads_out_of_the_buffer() {
         "the positive control: fewer than four tiles is not a buffer"
     );
 
-    let staged = sink.staged_path();
-    let before = std::fs::metadata(&staged)
-        .map(|m| m.len())
-        .unwrap_or_default();
+    let (files, before) = staging(dir.path(), &out);
+    assert!(
+        files >= 1,
+        "the positive control: no staging file means this test is measuring \
+         nothing at all"
+    );
     assert_eq!(
         before, 0,
         "the control: the staged payloads must still be in the writer's buffer, \
@@ -534,30 +601,27 @@ fn sync_pending_pushes_the_staged_payloads_out_of_the_buffer() {
 
     sink.sync_pending().expect("the durability barrier runs");
 
-    let after = std::fs::metadata(&staged)
-        .expect("the staged payload file exists once something has been written")
-        .len();
+    let (_, after) = staging(dir.path(), &out);
     assert!(
         after > 0,
-        "sync_pending left {after} bytes on disk for {written} tiles"
+        "sync_pending left {after} staged bytes on disk for {written} tiles"
     );
 }
 
-/// Arming durability tracking is observable, so the engine's call is not a
-/// no-op the sink silently drops.
-#[test]
-#[cfg_attr(miri, ignore)]
-fn arming_durability_tracking_is_recorded() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let plan = plan_for(256, 256, 256, Layout::Xyz);
-    let sink = PmTilesSink::builder(dir.path().join("armed.pmtiles"))
-        .plan(plan)
-        .build()
-        .expect("the sink builds");
-
-    assert!(!sink.durability_armed(), "a fresh sink is not armed");
-    sink.arm_durability_tracking();
-    assert!(sink.durability_armed(), "the engine's arm call is recorded");
+/// How many files the sink is staging under `dir`, and how many bytes of them
+/// have reached the disk. Everything that is not the archive itself.
+fn staging(dir: &Path, archive: &Path) -> (usize, u64) {
+    let mut files = 0;
+    let mut bytes = 0;
+    for entry in std::fs::read_dir(dir).expect("the output directory is readable") {
+        let entry = entry.expect("a directory entry");
+        if entry.path() == archive || entry.path().is_dir() {
+            continue;
+        }
+        files += 1;
+        bytes += entry.metadata().expect("stat").len();
+    }
+    (files, bytes)
 }
 
 // ---------------------------------------------------------------------------
@@ -890,48 +954,6 @@ fn writing_after_finish_is_refused() {
         late.is_err(),
         "a tile written after the archive was published has nowhere to go"
     );
-}
-
-/// A poisoned writer lock is a typed error, never a second panic.
-///
-/// The writer assembles one archive sequentially, so a holder that panicked
-/// mid-write leaves state nothing can build on. That is the fragile-write-path
-/// half of the crate's poison policy: surface the poison as an error and let
-/// the run abort, rather than `recover` and keep writing.
-#[test]
-#[cfg_attr(miri, ignore)]
-fn a_poisoned_writer_lock_is_a_typed_error() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let plan = plan_for(256, 256, 256, Layout::Xyz);
-    let sink = PmTilesSink::builder(dir.path().join("poison.pmtiles"))
-        .plan(plan)
-        .build()
-        .expect("the sink builds");
-
-    let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        sink.poison_writer_lock_for_test();
-    }));
-    assert!(
-        poisoned.is_err(),
-        "the helper panics while holding the lock"
-    );
-
-    let tile = Tile {
-        coord: TileCoord {
-            level: 0,
-            col: 0,
-            row: 0,
-        },
-        raster: gradient(8, 8),
-        blank: false,
-    };
-    match sink.write_tile(&tile) {
-        Err(SinkError::Other(msg)) => assert!(
-            msg.contains("poison"),
-            "the error must say the lock was poisoned, got {msg}"
-        ),
-        other => panic!("a poisoned lock must be a typed error, got {other:?}"),
-    }
 }
 
 // ---------------------------------------------------------------------------

@@ -614,6 +614,38 @@ impl<W: Write + Seek> Writer<W> {
         self.runs.len()
     }
 
+    /// Make every tile accepted so far durable, without finalising anything.
+    ///
+    /// The durability barrier a checkpointed engine run needs
+    /// ([`TileSink::sync_pending`](crate::sink::TileSink::sync_pending)): the
+    /// records still in the sort buffer are appended to the index log as a
+    /// run, both scratch files are pushed through their buffers, and both are
+    /// `sync_data`d. After it returns, every `add_tile` that has been accepted
+    /// has its payload and its index record on stable storage.
+    ///
+    /// It does **not** make an archive appear. Nothing exists at the
+    /// destination until [`finish`](Writer::finish) renames it there, by
+    /// design, so what this buys a crashed run is that its staging is intact
+    /// and not that its output is half usable. A single-file archive has no
+    /// intermediate state a reader could open, which is the whole reason the
+    /// destination stays untouched until the end.
+    ///
+    /// Flushing the sort buffer as a run costs nothing: the external merge
+    /// takes any number of sorted runs, so a barrier that lands mid-buffer
+    /// produces a shorter run and no other difference.
+    pub fn sync_pending(&mut self) -> Result<(), PmTilesError> {
+        self.flush_run()?;
+        if let Some(staged) = self.staged.as_mut() {
+            staged.flush()?;
+            staged.get_ref().sync_data()?;
+        }
+        if let Some(log) = self.log.as_mut() {
+            log.flush()?;
+            log.get_ref().sync_data()?;
+        }
+        Ok(())
+    }
+
     fn push_spill(&mut self, record: Spill) -> Result<(), PmTilesError> {
         self.sort_buffer.push(record);
         if self.sort_buffer.len() >= self.options.sort_buffer_records.max(1) {
