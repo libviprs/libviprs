@@ -716,13 +716,17 @@ pub const PMTILES_EXTENSION: &str = "pmtiles";
 /// let storage = PyramidStorage::default();
 /// assert_eq!(storage, PyramidStorage::PmTiles);
 /// assert_eq!(storage.output_path("city"), Path::new("city.pmtiles"));
-/// assert_eq!(storage.required_layout(), Some(Layout::Xyz));
 ///
-/// // The tree of loose files is still one value away.
+/// // An archive addresses a tile by (z, x, y), so those are the layouts it takes.
+/// assert!(storage.accepts_layout(Layout::Xyz));
+/// assert!(storage.accepts_layout(Layout::Google));
+/// assert!(!storage.accepts_layout(Layout::DeepZoom));
+///
+/// // The tree of loose files is still one value away, and it takes all five.
 /// let storage = PyramidStorage::Directory;
 /// assert_eq!(storage.output_path("city"), Path::new("city"));
 /// assert_eq!(storage.extension(), None);
-/// assert_eq!(storage.required_layout(), None);
+/// assert!(storage.accepts_layout(Layout::DeepZoom));
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -751,19 +755,37 @@ impl PyramidStorage {
         }
     }
 
-    /// The layout this storage forces, or `None` where any layout works.
+    /// Whether this storage can hold a pyramid planned with `layout`.
     ///
+    /// A directory takes all five. The layout decides the shape of the paths
+    /// inside the tree and nothing else.
+    ///
+    /// An archive takes the two whose level index is a zoom and whose tile is
+    /// a `(z, x, y)` triple, [`Layout::Xyz`] and [`Layout::Google`], because
     /// PMTiles v3 addresses a tile by a single `u64` derived from `(z, x, y)`
-    /// on a Hilbert curve, and that `(z, x, y)` is the same convention as
-    /// [`Layout::Xyz`]. There is no encoding in the format for DeepZoom's
-    /// `{level}/{col}_{row}` naming or for Google's `z/y/x`, so an archive is
-    /// XYZ or it is nothing. A directory carries its layout in its own path
-    /// shape and takes all three.
+    /// on a Hilbert curve. Google differs from XYZ in the order it spells a
+    /// path on disk (`z/y/x` against `z/x/y`) and not in what it addresses, so
+    /// there is no coordinate migration between either of them and an archive.
+    ///
+    /// [`Layout::DeepZoom`], [`Layout::Zoomify`] and [`Layout::Iiif`] do not
+    /// fit. Their level index is a tier rather than a zoom and their tile is
+    /// not a `(z, x, y)` triple, so an archive built from one would be
+    /// addressable and would render nonsense in anything that opened it.
+    ///
+    /// This answers the question before the work starts. The sink is what
+    /// enforces it, and it refuses when it is built rather than at the first
+    /// tile.
+    ///
+    /// The match on [`Layout`] has no wildcard arm, so a sixth layout fails to
+    /// compile here rather than quietly landing on one side.
     #[must_use]
-    pub const fn required_layout(self) -> Option<Layout> {
+    pub const fn accepts_layout(self, layout: Layout) -> bool {
         match self {
-            Self::PmTiles => Some(Layout::Xyz),
-            Self::Directory => None,
+            Self::Directory => true,
+            Self::PmTiles => match layout {
+                Layout::Xyz | Layout::Google => true,
+                Layout::DeepZoom | Layout::Zoomify | Layout::Iiif => false,
+            },
         }
     }
 
@@ -824,7 +846,7 @@ mod storage_selection_tests {
         assert_eq!(storage, PyramidStorage::PmTiles);
         assert_eq!(storage.extension(), Some(PMTILES_EXTENSION));
         assert_eq!(storage.output_path("city"), Path::new("city.pmtiles"));
-        assert_eq!(storage.required_layout(), Some(Layout::Xyz));
+        assert!(storage.accepts_layout(Layout::Xyz));
     }
 
     /// The loose-file tree is one value away, and it answers differently.
@@ -839,7 +861,7 @@ mod storage_selection_tests {
         assert_ne!(tree, PyramidStorage::default());
         assert_eq!(tree.extension(), None);
         assert_eq!(tree.output_path("city"), Path::new("city"));
-        assert_eq!(tree.required_layout(), None);
+        assert!(tree.accepts_layout(Layout::DeepZoom));
 
         assert_ne!(
             tree.output_path("city"),
@@ -847,6 +869,46 @@ mod storage_selection_tests {
             "the two storages must resolve one output base to two different \
              paths, or the default assertion holds on a build where the choice \
              does not reach the output at all"
+        );
+        assert_ne!(
+            tree.accepts_layout(Layout::DeepZoom),
+            PyramidStorage::default().accepts_layout(Layout::DeepZoom),
+            "the two storages must answer DeepZoom differently, or an \
+             `accepts_layout` that said yes to everything would pass here"
+        );
+    }
+
+    /// The archive takes the two layouts addressed by `(z, x, y)`; the tree
+    /// takes all five.
+    #[test]
+    fn the_archive_takes_the_two_zxy_layouts_and_the_tree_takes_every_one() {
+        // `accepts_layout` matches on `Layout` with no wildcard arm, so a
+        // sixth layout fails to compile there rather than quietly landing on
+        // one side of this table without anyone deciding.
+        let table = [
+            (Layout::DeepZoom, false),
+            (Layout::Xyz, true),
+            (Layout::Google, true),
+            (Layout::Zoomify, false),
+            (Layout::Iiif, false),
+        ];
+        for (layout, archivable) in table {
+            assert_eq!(
+                PyramidStorage::PmTiles.accepts_layout(layout),
+                archivable,
+                "the archive's answer for {layout:?} moved"
+            );
+            assert!(
+                PyramidStorage::Directory.accepts_layout(layout),
+                "the tree takes every layout, and it did not take {layout:?}"
+            );
+        }
+        // The control. A table with no refusal in it would pass against an
+        // `accepts_layout` that answered `true` for everything, which is the
+        // shape this test exists to catch.
+        assert!(
+            table.iter().any(|(_, archivable)| !archivable),
+            "a table with nothing refused in it cannot fail"
         );
     }
 
