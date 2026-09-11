@@ -50,11 +50,16 @@ Both say so in their own text, and both are read that way by
 
 ## How they are consumed
 
-`tests/pmtiles_reader.rs` loads each file by repo-relative path at run time and checks its sha256
-against a constant in the test before parsing it, then checks the number of rows it parsed against
-a pinned count. A transcribed literal is indistinguishable from an invented one, and a parse that
-silently yields an empty set passes every assertion made over it, so both halves are there on
-purpose.
+`tests/common/pmtiles_oracle.rs` is the only thing that opens them. It checks each file's sha256
+against a pinned constant and each file's own `produced_by` block against the pinned release tag
+and source commit before handing anything back, and `declared_count` cross-checks the number of
+rows a test parsed against the `counts` block the dump program wrote. A transcribed literal is
+indistinguishable from an invented one, and a parse that silently yields an empty set passes every
+assertion made over it, so both halves are there on purpose.
+
+The suites that pin against them (`tests/pmtiles_format.rs`, `tests/pmtiles_reader.rs`) share that
+one module rather than each growing its own loader, so a fixture regenerated from a different
+go-pmtiles release breaks one constant instead of several copies that can drift apart.
 
 The sha256 of each file as committed:
 

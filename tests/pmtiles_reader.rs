@@ -66,7 +66,7 @@
 //! *refuses*. No assertion about what the format *means* rests on one.
 
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 use libviprs::pmtiles::directory::serialize_entries;
@@ -80,62 +80,50 @@ use libviprs::pmtiles::{
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+#[path = "common/pmtiles_oracle.rs"]
+mod oracle;
+
 // ---------------------------------------------------------------------------
 // The fixtures, and the pins that say they are the ones the oracle produced
 // ---------------------------------------------------------------------------
 
-/// `(file name, sha256)` for every fixture this file reads.
+/// The three golden archives, by the names they have in the fixture
+/// directory.
 ///
-/// The archive hashes are the ones `tests/fixtures/pmtiles/PROVENANCE.md`
-/// records; the vector hashes are in `vectors/PROVENANCE.md`. A fixture
-/// regenerated from a different go-pmtiles release fails here rather than
-/// somewhere subtle.
+/// The sha256 of each, and of every vector file, lives in
+/// `tests/common/pmtiles_oracle.rs`. That module is shared with the format
+/// suite and the writer suite on purpose: a fixture regenerated from a
+/// different go-pmtiles release has to break one constant, not three copies of
+/// it that can drift apart.
 const RASTER: &str = "raster-z0z2.pmtiles";
 const DUPES: &str = "dupes-z0z3.pmtiles";
 const LEAVES: &str = "leaves-z0z7.pmtiles";
 
-const FIXTURE_SHA256: &[(&str, &str)] = &[
-    (
-        RASTER,
-        "e2ed5e64f3c29efa3ec3b679ec5f1b06569c1b234c6eea762fb9f02fc23e9c12",
-    ),
-    (
-        DUPES,
-        "bfc9db4c6ce6a04194e02b3d4815814adb05209f1aaba8591e4e1332f6e56a27",
-    ),
-    (
-        LEAVES,
-        "fe5c9636be61abc60046d7f13837f8a3efb20ce3c38303644dac0cbec8248b8d",
-    ),
-    (
-        "vectors/header.json",
-        "99258d11ea1fa9cd99c8b28a74ea1bf217e0dea87b4ee00776a6b0c1ea36f1c3",
-    ),
-    (
-        "vectors/directory.json",
-        "9f01472702fd4e93c3025bd9897cc336429a1bc05385f35ae555f238490e4d47",
-    ),
-    (
-        "vectors/directory-leaves.json",
-        "acc033de338def6a600a806a03cf803cacfe87470a3a8a059f0bace3b9320d58",
-    ),
-    (
-        "vectors/tiles.json",
-        "efaebeee9399d9e1e6e0395059caf38c659f134353442bfe29fd0065e5ae6581",
-    ),
-    (
-        "vectors/tileid.json",
-        "a486b48b09ab1b9d8f20208b992fc47b89ba67c235506f5f47cccd808e82b265",
-    ),
-];
-
-/// `tests/fixtures/pmtiles`.
-fn fixture_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/pmtiles")
+/// A golden's bytes, sha256-checked against the oracle's provenance.
+fn fixture_bytes(name: &str) -> Vec<u8> {
+    match name {
+        RASTER => oracle::golden(RASTER, oracle::RASTER_GOLDEN_SHA256),
+        DUPES => oracle::golden(DUPES, oracle::DUPES_GOLDEN_SHA256),
+        LEAVES => oracle::golden(LEAVES, oracle::LEAVES_GOLDEN_SHA256),
+        other => panic!("{other} is not one of the goldens"),
+    }
 }
 
 fn fixture_path(name: &str) -> PathBuf {
-    fixture_dir().join(name)
+    oracle::fixtures_dir().join(name)
+}
+
+/// One vector file, sha256-checked and confirmed to name the pinned
+/// go-pmtiles release in its own `produced_by` block.
+fn vectors(name: &str) -> Value {
+    match name {
+        "tiles.json" => oracle::vectors("tiles.json", oracle::TILES_JSON_SHA256),
+        "header.json" => oracle::header_vectors(),
+        "directory.json" => oracle::directory_vectors(),
+        "directory-leaves.json" => oracle::directory_leaves_vectors(),
+        "tileid.json" => oracle::tileid_vectors(),
+        other => panic!("{other} is not one of the oracle's vector files"),
+    }
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -146,33 +134,6 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect()
-}
-
-/// The sha256 this file pins for `name`.
-fn pinned_sha256(name: &str) -> &'static str {
-    FIXTURE_SHA256
-        .iter()
-        .find(|(fixture, _)| *fixture == name)
-        .map(|(_, sha)| *sha)
-        .unwrap_or_else(|| panic!("{name} has no pinned sha256 in FIXTURE_SHA256"))
-}
-
-/// Read a fixture and check it is the file the oracle produced.
-fn fixture_bytes(name: &str) -> Vec<u8> {
-    let path = fixture_path(name);
-    let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
-    assert_eq!(
-        sha256_hex(&bytes),
-        pinned_sha256(name),
-        "{name} is not the fixture this test was written against"
-    );
-    bytes
-}
-
-/// Parse a reference vector file, after checking its hash.
-fn vectors(name: &str) -> Value {
-    let bytes = fixture_bytes(&format!("vectors/{name}"));
-    serde_json::from_slice(&bytes).unwrap_or_else(|e| panic!("parsing vectors/{name}: {e}"))
 }
 
 /// A JSON number as a `u64`, with the path named in the failure.
@@ -309,24 +270,32 @@ fn memory_reader(bytes: Vec<u8>) -> Result<Reader<InMemory>, PmTilesError> {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn the_vector_files_are_the_ones_the_oracle_produced_and_they_parse_to_the_rows_they_claim() {
-    // Hashes first: `fixture_bytes` checks each one, so reading all eight is
-    // the check.
-    for (name, _) in FIXTURE_SHA256 {
-        let bytes = fixture_bytes(name);
-        assert!(!bytes.is_empty(), "{name} is empty");
+    // Hashes first. Every loader below checks the file's sha256 against the
+    // shared pin and its `produced_by` block against the release tag before
+    // handing anything back, so reading all eight is the check.
+    for name in [RASTER, DUPES, LEAVES] {
+        assert!(!fixture_bytes(name).is_empty(), "{name} is empty");
+    }
+    for name in [
+        "tiles.json",
+        "header.json",
+        "directory.json",
+        "directory-leaves.json",
+        "tileid.json",
+    ] {
+        assert!(vectors(name).is_object(), "vectors/{name} is not an object");
     }
 
     // `tileid.json` carries its own count block, so it is checked against
     // itself as well as against this file.
     let tileid = vectors("tileid.json");
-    let counts = &tileid["counts"];
     assert_eq!(
-        rows(&tileid, "convention_discriminators").len() as u64,
-        u64_at(counts, "convention_discriminators"),
+        rows(&tileid, "convention_discriminators").len(),
+        oracle::declared_count(&tileid, "convention_discriminators"),
         "the discriminator rows parsed do not match the file's own count"
     );
     assert_eq!(
-        u64_at(counts, "convention_discriminators"),
+        oracle::declared_count(&tileid, "convention_discriminators"),
         12,
         "the twelve rows that tell the Hilbert conventions apart"
     );
@@ -1268,6 +1237,7 @@ fn metadata_is_read_lazily_and_only_once() {
 /// by anyone else. I found that by mutating the rename and watching this test
 /// stay green.
 #[test]
+#[cfg_attr(miri, ignore)]
 fn the_libviprs_namespace_round_trips_through_an_archive() {
     let mut metadata =
         Metadata::try_from_json(br#"{"name":"drawing"}"#).expect("the seed metadata parses");
@@ -1553,6 +1523,7 @@ fn a_root_reaching_past_the_sixteen_kilobyte_budget_is_refused() {
 /// rather than inflated into memory. No length field in PMTiles v3 is an
 /// uncompressed length, so the cap is the only defence there is.
 #[test]
+#[cfg_attr(miri, ignore)]
 fn a_metadata_bomb_is_refused_at_the_ceiling_rather_than_inflated() {
     let bomb_source = vec![b'{'; MAX_METADATA_BYTES + 4096];
     let root = vec![Entry {
