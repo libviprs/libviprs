@@ -107,6 +107,33 @@ pub enum SinkError {
     /// reported with the same variant regardless of code path (issue #140).
     #[error("checkpoint write failed: {0}")]
     Checkpoint(#[source] crate::resume::ResumeError),
+    /// A PMTiles reader or writer refused something. Typed rather than
+    /// stringified, so the `source()` chain still carries the
+    /// [`PmTilesError`](crate::pmtiles::PmTilesError) that names what was
+    /// wrong with the archive, which `tests/error_source_typing.rs` exists to
+    /// keep honest.
+    #[error("pmtiles error: {0}")]
+    PmTiles(#[source] crate::pmtiles::PmTilesError),
+    /// The sink cannot honour the [`ResumeMode`](crate::resume::ResumeMode)
+    /// the run was configured with, and says so rather than half-supporting
+    /// it.
+    ///
+    /// [`PmTilesSink`](crate::sink_pmtiles::PmTilesSink) is the case:
+    /// `Verify` reads a pyramid back by stat-ing one file per coordinate and
+    /// `Resume` needs a writer's staging to be reconstructible from a
+    /// checkpoint, and a single-file archive offers neither. Refusing by name
+    /// is the correct implementation there, not a gap: the alternative is a
+    /// Verify that reports every tile missing and a Resume that publishes an
+    /// archive with the pre-crash tiles silently absent.
+    #[error("{mode:?} is not a resume mode this sink can honour")]
+    UnsupportedResumeMode { mode: crate::resume::ResumeMode },
+    /// Another live run holds the advisory lock on this sink's output.
+    ///
+    /// Carries the [`ResumeError`](crate::resume::ResumeError) verbatim, so
+    /// the `Locked { path }` naming the lock file survives into the
+    /// `source()` chain instead of being flattened into a sentence.
+    #[error("run lock: {0}")]
+    RunLock(#[source] crate::resume::ResumeError),
 }
 
 /// Single-byte marker written in place of blank tiles when using
