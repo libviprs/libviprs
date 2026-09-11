@@ -481,6 +481,24 @@ mod tests {
             );
         }
 
+        // Deduplication shows up in a directory two different ways, and a
+        // reader that handles one and not the other looks correct on most
+        // archives. Identical tiles at consecutive ids collapse into a run;
+        // identical tiles that are *not* consecutive stay separate entries
+        // pointing at the same offset. This golden has both, deliberately:
+        // runs of 4 and 16, and offset 148 shared by four entries that are
+        // nowhere near each other (3, 31, 45 and 58).
+        assert_eq!(entries.iter().filter(|e| e.offset == 148).count(), 4);
+        let shared: Vec<usize> = entries
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.offset == 148)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(shared, vec![3, 31, 45, 58]);
+        let runs: std::collections::BTreeSet<u32> = entries.iter().map(|e| e.run_length).collect();
+        assert_eq!(runs, [1u32, 4, 16].into_iter().collect());
+
         // The backwards offset jump: entry 2 points at offset 0 while entry 1
         // sits at 74. A signed or zigzagged offset column would have to show
         // itself here and does not, because the column stores `offset + 1`
