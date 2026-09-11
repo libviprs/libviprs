@@ -512,22 +512,22 @@ fn the_twelve_convention_discriminators_from_the_oracle_hold() {
     assert_eq!(swapped, 6, "three swapped pairs, seen from both ends");
 }
 
-/// The level firsts and lasts, the quadrant corners and the centre seam.
+/// The level firsts and lasts, the quadrant corners and the centre seam: 76
+/// rows that a wrong convention still passes.
 ///
-/// Kept separate from the discriminators on purpose. These are the rows a
-/// wrong convention still passes, so their value is not that they are green;
-/// it is that they say what the mapping does at the edges, and they are the
-/// control half of the Z-order negative control.
+/// This test is here to be **green under the Z-order mutation**, which is the
+/// only way the discriminator tests can be shown to be doing the work. I
+/// measured which rows separate the two mappings rather than assuming it: with
+/// `rotate` turned into a no-op, `first_and_last_of_level` gives 0 mismatches
+/// out of 32 and `orientation_boundaries` gives 0 out of 44. So these 76 rows
+/// are the control half, and their value is not that they are green, it is
+/// that they say what the mapping does at the edges.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn the_structural_oracle_rows_hold() {
     let vectors = oracle::tileid_vectors();
     let mut checked = 0;
-    for section in [
-        "first_and_last_of_level",
-        "orientation_boundaries",
-        "off_grid",
-    ] {
+    for section in ["first_and_last_of_level", "orientation_boundaries"] {
         for row in oracle::tile_id_rows(&vectors, section) {
             assert_eq!(
                 zxy_to_tileid(row.z, row.x, row.y).expect("a structural row is addressable"),
@@ -546,7 +546,39 @@ fn the_structural_oracle_rows_hold() {
             checked += 1;
         }
     }
-    assert_eq!(checked, 32 + 44 + 17, "the structural sweep lost rows");
+    assert_eq!(checked, 32 + 44, "the structural sweep lost rows");
+}
+
+/// The `off_grid` rows, which are not structural and are not advertised as
+/// discriminators either.
+///
+/// They are here in their own test because I measured them: 12 of the 17 change
+/// under a no-rotation mapping, so this section discriminates nearly as hard as
+/// the twelve rows that are named for it. Filing them with the structural rows
+/// would have made the control half of the negative control go red and told me
+/// nothing about why.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn the_off_grid_oracle_rows_hold() {
+    let vectors = oracle::tileid_vectors();
+    let rows = oracle::tile_id_rows(&vectors, "off_grid");
+    assert_eq!(rows.len(), 17, "the off-grid section is seventeen rows");
+    for row in &rows {
+        assert_eq!(
+            zxy_to_tileid(row.z, row.x, row.y).expect("an off-grid row is addressable"),
+            row.tile_id,
+            "zxy_to_tileid({}, {}, {})",
+            row.z,
+            row.x,
+            row.y
+        );
+        assert_eq!(
+            tileid_to_zxy(row.tile_id).expect("an off-grid id decodes"),
+            (row.z, row.x, row.y),
+            "tileid_to_zxy({})",
+            row.tile_id
+        );
+    }
 }
 
 /// Zoom 2 and zoom 3 enumerated in tile id order, from the oracle.
@@ -734,17 +766,13 @@ fn the_rows_go_pmtiles_masks_are_refused_by_name() {
         "four rows saturate the zoom rather than mask a coordinate"
     );
 
-    // And the broader control: every in-range row in the same file still
-    // answers, so "everything is refused" cannot pass here either.
+    // And the broader control: 76 in-range rows in the same file still answer,
+    // so "everything is refused" cannot pass here either. Deliberately the two
+    // sections that do not depend on the curve's orientation, so a convention
+    // bug reddens the convention tests and not this one, which is about
+    // refusal.
     let mut answered = 0;
-    for section in [
-        "first_and_last_of_level",
-        "orientation_boundaries",
-        "off_grid",
-        "hilbert_order_z2",
-        "hilbert_order_z3",
-        "convention_discriminators",
-    ] {
+    for section in ["first_and_last_of_level", "orientation_boundaries"] {
         for row in oracle::tile_id_rows(&vectors, section) {
             assert_eq!(
                 zxy_to_tileid(row.z, row.x, row.y).expect("a live oracle row still answers"),
@@ -755,7 +783,7 @@ fn the_rows_go_pmtiles_masks_are_refused_by_name() {
     }
     assert_eq!(
         answered,
-        32 + 44 + 17 + 16 + 64 + 12,
+        32 + 44,
         "the positive control ran on nothing like the whole file"
     );
 }
