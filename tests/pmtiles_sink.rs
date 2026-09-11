@@ -512,7 +512,19 @@ fn content_format_is_the_configured_format() {
 fn the_engine_config_reaches_the_archive_metadata() {
     let dir = tempfile::tempdir().expect("tempdir");
     let plan = plan_for(512, 512, 256, Layout::Xyz);
-    let archive = run_into_archive(&gradient(512, 512), &plan, dir.path());
+    let archive = dir.path().join("meta.pmtiles");
+    let sink = PmTilesSink::builder(&archive)
+        .plan(plan.clone())
+        .build()
+        .expect("the sink builds");
+    // A concurrency the fallback cannot produce. Without it, a
+    // `record_engine_config` that dropped the config on the floor would leave
+    // `concurrency: 0`, which is also what the default says, and this test
+    // would pass while proving the hook is wired.
+    EngineBuilder::new(&gradient(512, 512), plan.clone(), sink)
+        .with_concurrency(3)
+        .run()
+        .expect("a run with three workers succeeds");
 
     let meta = walk_metadata(&archive);
     let vnd = meta
@@ -525,6 +537,11 @@ fn the_engine_config_reaches_the_archive_metadata() {
     assert_eq!(generation.tile_size, 256);
     assert_eq!(generation.layout, Layout::Xyz);
     assert_eq!(generation.format, TileFormat::Png);
+    assert_eq!(
+        generation.concurrency, 3,
+        "the run's worker count comes from the engine config the hook captured, \
+         and 3 is a value no fallback produces"
+    );
 
     let source = vnd.source.expect("the source block records the raster");
     assert_eq!((source.width, source.height), (512, 512));
@@ -808,11 +825,17 @@ fn a_verify_run_against_an_archive_does_not_report_success() {
         .with_engine(libviprs::EngineKind::Monolithic)
         .with_resume(ResumePolicy::verify())
         .run();
-    assert!(
-        result.is_err(),
-        "Verify walks a loose-file tree, so it cannot audit a single-file \
-         archive and must not say it did"
-    );
+    match result {
+        Err(libviprs::EngineError::VerifyRequiresOnDiskSink) => {}
+        // Naming the variant is what makes this a guard. `is_err()` alone stays
+        // green for a sink that hands Verify a directory to walk and gets
+        // "missing tile for coord" back on the first coordinate, which is the
+        // half-supported shape this is here to rule out.
+        other => panic!(
+            "Verify walks a loose-file tree, so it must refuse a single-file \
+             archive outright, got {other:?}"
+        ),
+    }
 }
 
 // ---------------------------------------------------------------------------
