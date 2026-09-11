@@ -352,12 +352,12 @@ const ANCHOR_FILES: &[&str] = &[
 /// now, on purpose: an exact number in the workflow made it a file every
 /// unrelated pull request had to edit, which is the reasoning written up in
 /// `tests/miri_invocation_parity.rs`.
-const EXPECTED_SRC_ANNOTATIONS: usize = 219;
+const EXPECTED_SRC_ANNOTATIONS: usize = 245;
 /// Companion to [`EXPECTED_SRC_ANNOTATIONS`]: how many `src/` modules carry at
 /// least one annotation. #765 made it 25 by putting the first annotation in
 /// `src/analyze.rs`; `src/colour.rs` and `src/pdf.rs`, which took the other
 /// three, were already in the set.
-const EXPECTED_SRC_MODULES: usize = 25;
+const EXPECTED_SRC_MODULES: usize = 30;
 
 /// How many tests in the tree reach `std::process`.
 ///
@@ -413,7 +413,7 @@ const EXPECTED_SRC_MODULES: usize = 25;
 /// shape [`process_spawning_fns`] exists for. The other two drive that file's
 /// own `parse` on a string literal and spawn nothing, so they carry no
 /// annotation and the detector is right to leave them out.
-const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 35;
+const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 36;
 
 /// The filesystem-touching tests still allowed to run under Miri, and so still
 /// allowed to end the whole run on their first syscall.
@@ -507,7 +507,7 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// compares the tool's answer against the host can fail. Twelve more tests in
 /// that file spawn python3 and touch nothing, which is why they are
 /// `annotated not-detected` rows, and the last two spawn nothing at all.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 289;
+const EXPECTED_FS_TOUCHING_TESTS: usize = 368;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
