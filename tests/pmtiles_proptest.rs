@@ -37,9 +37,15 @@
 //! `(13, 5107, 2884) = 79053962` against `(13, 2884, 5107) = 53847284` also
 //! rules out any symmetric mapping.
 //! [`the_twelve_convention_discriminators_match_go_pmtiles`]
-//! is therefore the test in this file that would go red on a wrong curve, and
-//! [`the_structural_vector_rows_agree_as_well`] is a regression net rather than
-//! evidence. They are separate tests so that a failure says which.
+//! is therefore the test in this file that would go red on a wrong curve.
+//!
+//! I measured how much the rest are worth rather than assuming it. Against a
+//! candidate mapping that keeps the quadrant order and drops the Hilbert
+//! reflection, all twelve discriminators change, all 76 rows in
+//! [`the_purely_structural_rows_agree_and_could_not_have_failed`] stay the
+//! same, and the 97 rows in [`the_scattered_and_ordering_rows_agree_too`] are
+//! in between, with 44 of them changing. Three tests rather than two, so a
+//! failure says which kind of wrong the curve is.
 //!
 //! # And ten rows are evidence *against* the reference
 //!
@@ -153,24 +159,9 @@ fn the_twelve_convention_discriminators_match_go_pmtiles() {
     );
 }
 
-/// The other five sections, 173 rows: first and last of each level, quadrant
-/// corners, the two full zoom orderings, and a scatter of arbitrary
-/// coordinates.
-///
-/// Worth having and worth not overrating. Several different conventions agree
-/// on all of these, so this passing says the curve is self-consistent and
-/// nothing about which curve it is. That is what the twelve rows above are
-/// for.
-#[test]
-#[cfg_attr(miri, ignore)]
-fn the_structural_vector_rows_agree_as_well() {
-    let sections = [
-        "first_and_last_of_level",
-        "orientation_boundaries",
-        "off_grid",
-        "hilbert_order_z2",
-        "hilbert_order_z3",
-    ];
+/// Check one group of `tileid.json` sections forward and backward, and return
+/// how many rows it covered.
+fn check_sections(sections: &[&str]) -> usize {
     let mut checked = 0usize;
     for section in sections {
         for row in tileid_section(section) {
@@ -192,12 +183,38 @@ fn the_structural_vector_rows_agree_as_well() {
             checked += 1;
         }
     }
-    // 32 + 44 + 17 + 16 + 64. A miscount here means a section stopped being
-    // read, which would otherwise leave this test green over fewer rows.
-    assert_eq!(
-        checked, 173,
-        "expected 173 structural rows across the five sections"
-    );
+    checked
+}
+
+/// The 76 rows that genuinely cannot discriminate: the first and last tile of
+/// every level, and the quadrant and centre boundaries.
+///
+/// Worth having as a regression net and worth not overrating. I measured this
+/// rather than taking it on faith: against a candidate mapping that keeps the
+/// quadrant order and drops the Hilbert reflection, **every one of these 76
+/// rows still agrees**, so a suite built only on them would be green on a
+/// mapping that is wrong at every zoom above 2.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn the_purely_structural_rows_agree_and_could_not_have_failed() {
+    let checked = check_sections(&["first_and_last_of_level", "orientation_boundaries"]);
+    assert_eq!(checked, 76, "32 first-and-last rows plus 44 boundary rows");
+}
+
+/// The 97 rows that turn out to discriminate after all: the scattered
+/// coordinates and the two full zoom orderings.
+///
+/// The oracle's own notes group these with the structural rows as
+/// non-discriminating, and measured against the no-reflection candidate that
+/// is not quite right: 12 of the 17 `off_grid` rows, 4 of the 16 `z2`
+/// orderings and 28 of the 64 `z3` orderings change. They are weaker than the
+/// twelve discriminators, which all change, and they are not nothing, so they
+/// are in their own test rather than pooled with the 76 above.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn the_scattered_and_ordering_rows_agree_too() {
+    let checked = check_sections(&["off_grid", "hilbert_order_z2", "hilbert_order_z3"]);
+    assert_eq!(checked, 97, "17 off-grid rows plus 16 z2 plus 64 z3");
 }
 
 /// The first and last id of every zoom level, and the level's tile count.
