@@ -1,0 +1,877 @@
+{
+  "produced_by": {
+    "tool": "go-pmtiles",
+    "release_tag": "v1.31.2",
+    "cli_version_line": "pmtiles 1.31.2, commit a3e4951ea6a0477b784c27c1dcbfd9c130878c5a, built at 2026-07-22T18:59:03Z",
+    "source_commit": "a3e4951ea6a0477b784c27c1dcbfd9c130878c5a",
+    "linux_arm64_tarball_sha256": "f8bd47e7ea866863489cad588fbaf2f31f42e5821f7a03f009b3769f05801cb1",
+    "linux_amd64_tarball_sha256": "3ed7dbf4ec2e6dfe5e25b6f70d1ffc932729f93c86db353bf514dd71010a312f",
+    "see": "../PROVENANCE.md"
+  },
+  "what_this_is": "Directory entries as go-pmtiles decodes them, plus the raw compressed bytes they were decoded from. raster-z0z2 is the simple case with no repeats; dupes-z0z3 is the interesting one, with run_length > 1 and with several entries sharing an offset.",
+  "how_each_number_was_obtained": {
+    "raw_gzip_hex": "archive[root_offset : root_offset+root_length], read verbatim; this is the directory exactly as it sits in the file, still gzipped",
+    "decompressed_hex": "the same bytes through compress/gzip in the dump program. This is a convenience, not a measurement: the entries below are the oracle.",
+    "entries": "pmtiles.DeserializeEntries(bytes.NewBuffer(raw), header.InternalCompression); tile_id, offset, length and run_length are the EntryV3 fields verbatim",
+    "z/x/y on each entry": "pmtiles.IDToZxy(tile_id), added so the entry is readable",
+    "reserialize_roundtrip_ok": "pmtiles.SerializeEntries(entries, NoCompression) compared byte for byte against decompressed_hex. True means go-pmtiles' own serializer reproduces the directory body exactly, so a writer can be checked against decompressed_hex directly."
+  },
+  "invariants_worth_asserting": [
+    "sum of run_length over all entries == header.addressed_tiles_count",
+    "count of entries == header.tile_entries_count",
+    "an entry with run_length == 0 is a leaf directory pointer, and its offset is relative to header.leaf_directory_offset, not to the start of the file",
+    "entries are sorted by tile_id and the ids are strictly increasing",
+    "a repeated offset means a deduplicated tile, and it does not have to be adjacent"
+  ],
+  "primary": "dupes-z0z3.pmtiles",
+  "archives": {
+    "raster-z0z2.pmtiles": {
+      "golden_sha256": "e2ed5e64f3c29efa3ec3b679ec5f1b06569c1b234c6eea762fb9f02fc23e9c12",
+      "header_root_offset": 127,
+      "header_root_length": 35,
+      "header_leaf_directory_offset": 324,
+      "header_leaf_directory_length": 0,
+      "header_addressed_tiles_count": 21,
+      "header_tile_entries_count": 21,
+      "header_tile_contents_count": 21,
+      "root_directory": {
+        "absolute_offset": 127,
+        "compressed_length": 35,
+        "decompressed_hex": "150001010101010101010101010101010101010101010101010101010101010101010101010101010101014a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a010000000000000000000000000000000000000000",
+        "decompressed_len": 85,
+        "entries": [
+          {
+            "tile_id": 0,
+            "offset": 0,
+            "length": 74,
+            "run_length": 1,
+            "z": 0,
+            "x": 0,
+            "y": 0
+          },
+          {
+            "tile_id": 1,
+            "offset": 74,
+            "length": 74,
+            "run_length": 1,
+            "z": 1,
+            "x": 0,
+            "y": 0
+          },
+          {
+            "tile_id": 2,
+            "offset": 148,
+            "length": 74,
+            "run_length": 1,
+            "z": 1,
+            "x": 0,
+            "y": 1
+          },
+          {
+            "tile_id": 3,
+            "offset": 222,
+            "length": 74,
+            "run_length": 1,
+            "z": 1,
+            "x": 1,
+            "y": 1
+          },
+          {
+            "tile_id": 4,
+            "offset": 296,
+            "length": 74,
+            "run_length": 1,
+            "z": 1,
+            "x": 1,
+            "y": 0
+          },
+          {
+            "tile_id": 5,
+            "offset": 370,
+            "length": 74,
+            "run_length": 1,
+            "z": 2,
+            "x": 0,
+            "y": 0
+          },
+          {
+            "tile_id": 6,
+            "offset": 444,
+            "length": 74,
+            "run_length": 1,
+            "z": 2,
+            "x": 1,
+            "y": 0
+          },
+          {
+            "tile_id": 7,
+            "offset": 518,
+            "length": 74,
+            "run_length": 1,
+            "z": 2,
+            "x": 1,
+            "y": 1
+          },
+          {
+            "tile_id": 8,
+            "offset": 592,
+            "length": 74,
+            "run_length": 1,
+            "z": 2,
+            "x": 0,
+            "y": 1
+          },
+          {
+            "tile_id": 9,
+            "offset": 666,
+            "length": 74,
+            "run_length": 1,
+            "z": 2,
+            "x": 0,
+            "y": 2
+          },
+          {
+            "tile_id": 10,
+            "offset": 740,
+            "length": 74,
+            "run_length": 1,
+            "z": 2,
+            "x": 0,
+            "y": 3
+          },
+          {
+            "tile_id": 11,
+            "offset": 814,
+            "length": 74,
+            "run_length": 1,
+            "z": 2,
+            "x": 1,
+            "y": 3
+          },
+          {
+            "tile_id": 12,
+            "offset": 888,
+            "length": 74,
+            "run_length": 1,
+            "z": 2,
+            "x": 1,
+            "y": 2
+          },
+          {
+            "tile_id": 13,
+            "offset": 962,
+            "length": 74,
+            "run_length": 1,
+            "z": 2,
+            "x": 2,
+            "y": 2
+          },
+          {
+            "tile_id": 14,
+            "offset": 1036,
+            "length": 74,
+            "run_length": 1,
+            "z": 2,
+            "x": 2,
+            "y": 3
+          },
+          {
+            "tile_id": 15,
+            "offset": 1110,
+            "length": 74,
+            "run_length": 1,
+            "z": 2,
+            "x": 3,
+            "y": 3
+          },
+          {
+            "tile_id": 16,
+            "offset": 1184,
+            "length": 74,
+            "run_length": 1,
+            "z": 2,
+            "x": 3,
+            "y": 2
+          },
+          {
+            "tile_id": 17,
+            "offset": 1258,
+            "length": 74,
+            "run_length": 1,
+            "z": 2,
+            "x": 3,
+            "y": 1
+          },
+          {
+            "tile_id": 18,
+            "offset": 1332,
+            "length": 74,
+            "run_length": 1,
+            "z": 2,
+            "x": 2,
+            "y": 1
+          },
+          {
+            "tile_id": 19,
+            "offset": 1406,
+            "length": 74,
+            "run_length": 1,
+            "z": 2,
+            "x": 2,
+            "y": 0
+          },
+          {
+            "tile_id": 20,
+            "offset": 1480,
+            "length": 74,
+            "run_length": 1,
+            "z": 2,
+            "x": 3,
+            "y": 0
+          }
+        ],
+        "entry_count": 21,
+        "raw_gzip_hex": "1f8b08000000000002ff12656024167861038c0c5800200000ffff81125f9055000000",
+        "reserialize_roundtrip_ok": true
+      },
+      "leaf_directories": [],
+      "metadata": {
+        "absolute_offset": 162,
+        "compressed_length": 162,
+        "decompressed": "{\"description\":\"libviprs EPIC F oracle golden, distinct 8x8 PNG per tile\",\"format\":\"png\",\"maxzoom\":\"2\",\"minzoom\":\"0\",\"name\":\"libviprs-oracle-raster\",\"type\":\"baselayer\",\"version\":\"1\"}",
+        "raw_gzip_hex": "1f8b08000000000002ff4c8ecb8a834010457fa5b8eb166666256e8799904df0175aad4841bfa82e4413f2efc1984596e7dec539774c5c47956292133a041916295ae9af3fffd23f65f563609a739838399aa49aa4d1a85d5bea2f272aac6412180ed7acd11b3a9434c321faf5967344879f9d24bde90b0ec947fe903587a5515f8d150eb695fd1f7ce5e0b7d7b4b0d623f11b8f67000000ffff7ab3cc4fb6000000"
+      }
+    },
+    "dupes-z0z3.pmtiles": {
+      "golden_sha256": "bfc9db4c6ce6a04194e02b3d4815814adb05209f1aaba8591e4e1332f6e56a27",
+      "header_root_offset": 127,
+      "header_root_length": 59,
+      "header_leaf_directory_offset": 345,
+      "header_leaf_directory_length": 0,
+      "header_addressed_tiles_count": 85,
+      "header_tile_entries_count": 67,
+      "header_tile_contents_count": 63,
+      "root_directory": {
+        "absolute_offset": 127,
+        "compressed_length": 59,
+        "decompressed_hex": "4300010410010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010410010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101010101014a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a01000195010000000000000000000000000000000000000000000000000000009501ad110000000000000000000000009501ef1800000000000000000000009501e71f00000000000000",
+        "decompressed_len": 276,
+        "entries": [
+          {
+            "tile_id": 0,
+            "offset": 0,
+            "length": 74,
+            "run_length": 1,
+            "z": 0,
+            "x": 0,
+            "y": 0
+          },
+          {
+            "tile_id": 1,
+            "offset": 74,
+            "length": 74,
+            "run_length": 4,
+            "z": 1,
+            "x": 0,
+            "y": 0
+          },
+          {
+            "tile_id": 5,
+            "offset": 0,
+            "length": 74,
+            "run_length": 16,
+            "z": 2,
+            "x": 0,
+            "y": 0
+          },
+          {
+            "tile_id": 21,
+            "offset": 148,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 0,
+            "y": 0
+          },
+          {
+            "tile_id": 22,
+            "offset": 222,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 0,
+            "y": 1
+          },
+          {
+            "tile_id": 23,
+            "offset": 296,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 1,
+            "y": 1
+          },
+          {
+            "tile_id": 24,
+            "offset": 370,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 1,
+            "y": 0
+          },
+          {
+            "tile_id": 25,
+            "offset": 444,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 2,
+            "y": 0
+          },
+          {
+            "tile_id": 26,
+            "offset": 518,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 3,
+            "y": 0
+          },
+          {
+            "tile_id": 27,
+            "offset": 592,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 3,
+            "y": 1
+          },
+          {
+            "tile_id": 28,
+            "offset": 666,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 2,
+            "y": 1
+          },
+          {
+            "tile_id": 29,
+            "offset": 740,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 2,
+            "y": 2
+          },
+          {
+            "tile_id": 30,
+            "offset": 814,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 3,
+            "y": 2
+          },
+          {
+            "tile_id": 31,
+            "offset": 888,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 3,
+            "y": 3
+          },
+          {
+            "tile_id": 32,
+            "offset": 962,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 2,
+            "y": 3
+          },
+          {
+            "tile_id": 33,
+            "offset": 1036,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 1,
+            "y": 3
+          },
+          {
+            "tile_id": 34,
+            "offset": 1110,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 1,
+            "y": 2
+          },
+          {
+            "tile_id": 35,
+            "offset": 1184,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 0,
+            "y": 2
+          },
+          {
+            "tile_id": 36,
+            "offset": 1258,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 0,
+            "y": 3
+          },
+          {
+            "tile_id": 37,
+            "offset": 1332,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 0,
+            "y": 4
+          },
+          {
+            "tile_id": 38,
+            "offset": 1406,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 1,
+            "y": 4
+          },
+          {
+            "tile_id": 39,
+            "offset": 1480,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 1,
+            "y": 5
+          },
+          {
+            "tile_id": 40,
+            "offset": 1554,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 0,
+            "y": 5
+          },
+          {
+            "tile_id": 41,
+            "offset": 1628,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 0,
+            "y": 6
+          },
+          {
+            "tile_id": 42,
+            "offset": 1702,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 0,
+            "y": 7
+          },
+          {
+            "tile_id": 43,
+            "offset": 1776,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 1,
+            "y": 7
+          },
+          {
+            "tile_id": 44,
+            "offset": 1850,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 1,
+            "y": 6
+          },
+          {
+            "tile_id": 45,
+            "offset": 1924,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 2,
+            "y": 6
+          },
+          {
+            "tile_id": 46,
+            "offset": 1998,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 2,
+            "y": 7
+          },
+          {
+            "tile_id": 47,
+            "offset": 2072,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 3,
+            "y": 7
+          },
+          {
+            "tile_id": 48,
+            "offset": 2146,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 3,
+            "y": 6
+          },
+          {
+            "tile_id": 49,
+            "offset": 148,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 3,
+            "y": 5
+          },
+          {
+            "tile_id": 50,
+            "offset": 2220,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 2,
+            "y": 5
+          },
+          {
+            "tile_id": 51,
+            "offset": 2294,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 2,
+            "y": 4
+          },
+          {
+            "tile_id": 52,
+            "offset": 2368,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 3,
+            "y": 4
+          },
+          {
+            "tile_id": 53,
+            "offset": 2442,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 4,
+            "y": 4
+          },
+          {
+            "tile_id": 54,
+            "offset": 2516,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 5,
+            "y": 4
+          },
+          {
+            "tile_id": 55,
+            "offset": 2590,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 5,
+            "y": 5
+          },
+          {
+            "tile_id": 56,
+            "offset": 2664,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 4,
+            "y": 5
+          },
+          {
+            "tile_id": 57,
+            "offset": 2738,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 4,
+            "y": 6
+          },
+          {
+            "tile_id": 58,
+            "offset": 2812,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 4,
+            "y": 7
+          },
+          {
+            "tile_id": 59,
+            "offset": 2886,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 5,
+            "y": 7
+          },
+          {
+            "tile_id": 60,
+            "offset": 2960,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 5,
+            "y": 6
+          },
+          {
+            "tile_id": 61,
+            "offset": 3034,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 6,
+            "y": 6
+          },
+          {
+            "tile_id": 62,
+            "offset": 3108,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 6,
+            "y": 7
+          },
+          {
+            "tile_id": 63,
+            "offset": 148,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 7,
+            "y": 7
+          },
+          {
+            "tile_id": 64,
+            "offset": 3182,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 7,
+            "y": 6
+          },
+          {
+            "tile_id": 65,
+            "offset": 3256,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 7,
+            "y": 5
+          },
+          {
+            "tile_id": 66,
+            "offset": 3330,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 6,
+            "y": 5
+          },
+          {
+            "tile_id": 67,
+            "offset": 3404,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 6,
+            "y": 4
+          },
+          {
+            "tile_id": 68,
+            "offset": 3478,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 7,
+            "y": 4
+          },
+          {
+            "tile_id": 69,
+            "offset": 3552,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 7,
+            "y": 3
+          },
+          {
+            "tile_id": 70,
+            "offset": 3626,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 7,
+            "y": 2
+          },
+          {
+            "tile_id": 71,
+            "offset": 3700,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 6,
+            "y": 2
+          },
+          {
+            "tile_id": 72,
+            "offset": 3774,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 6,
+            "y": 3
+          },
+          {
+            "tile_id": 73,
+            "offset": 3848,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 5,
+            "y": 3
+          },
+          {
+            "tile_id": 74,
+            "offset": 3922,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 4,
+            "y": 3
+          },
+          {
+            "tile_id": 75,
+            "offset": 3996,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 4,
+            "y": 2
+          },
+          {
+            "tile_id": 76,
+            "offset": 148,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 5,
+            "y": 2
+          },
+          {
+            "tile_id": 77,
+            "offset": 4070,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 5,
+            "y": 1
+          },
+          {
+            "tile_id": 78,
+            "offset": 4144,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 4,
+            "y": 1
+          },
+          {
+            "tile_id": 79,
+            "offset": 4218,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 4,
+            "y": 0
+          },
+          {
+            "tile_id": 80,
+            "offset": 4292,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 5,
+            "y": 0
+          },
+          {
+            "tile_id": 81,
+            "offset": 4366,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 6,
+            "y": 0
+          },
+          {
+            "tile_id": 82,
+            "offset": 4440,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 6,
+            "y": 1
+          },
+          {
+            "tile_id": 83,
+            "offset": 4514,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 7,
+            "y": 1
+          },
+          {
+            "tile_id": 84,
+            "offset": 4588,
+            "length": 74,
+            "run_length": 1,
+            "z": 3,
+            "x": 7,
+            "y": 0
+          }
+        ],
+        "entry_count": 67,
+        "raw_gzip_hex": "1f8b08000000000002ff726660641160a410506e8217e5809181712a23036e309571ad202affbd040af7b93c9409080000ffff01304d7a14010000",
+        "reserialize_roundtrip_ok": true
+      },
+      "leaf_directories": [],
+      "metadata": {
+        "absolute_offset": 186,
+        "compressed_length": 159,
+        "decompressed": "{\"description\":\"libviprs EPIC F oracle golden, deliberate duplicate tiles\",\"format\":\"png\",\"maxzoom\":\"3\",\"minzoom\":\"0\",\"name\":\"libviprs-oracle-dupes\",\"type\":\"baselayer\",\"version\":\"1\"}",
+        "raw_gzip_hex": "1f8b08000000000002ff4c8e4daac2401084af32d47a02efe12e5b5170e7153a993634f4fcd0330946f1ee12e3c25d7d14d4574f04aea3496992137aa80c8b14abee74bd1cddd965a351d94d590327ef02ab0c6cd4d885b9a88c5b6aa25ce171cb16a9a14749133c22dd1f3947f4386c24e94b7ff04814f9c7d6ed9a2ecce5b3d4d6b2d50355565ad9e0b1b0d5fde23f5eef000000ffff1818d77fb6000000"
+      }
+    }
+  }
+}
