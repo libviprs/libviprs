@@ -402,18 +402,18 @@ const EXPECTED_SRC_MODULES: usize = 25;
 /// above: the index is the only place that can answer a question the working
 /// tree cannot.
 ///
-/// Thirty-four since #994, and that jump of twelve is one file:
+/// Thirty-five since #994, and that jump of thirteen is one file:
 /// `tests/local_ci_invocation.rs` asks `tools/local-ci.py` what it would hand
-/// Docker, so twelve of its fourteen tests run `python3`. A grep over the
+/// Docker, so thirteen of its fifteen tests run `python3`. A grep over the
 /// Python would pass on a `--platform` that is built and then dropped, which
 /// is the whole reason those tests shell out rather than read the source, so
-/// the spawn is not incidental to them. The detector sees all twelve through
+/// the spawn is not incidental to them. The detector sees all thirteen through
 /// the file-local `run`, `run_raw`, `daemon_platform` and
 /// `interpreter_platform` helpers as well as directly, which is the two-hop
 /// shape [`process_spawning_fns`] exists for. The other two drive that file's
 /// own `parse` on a string literal and spawn nothing, so they carry no
 /// annotation and the detector is right to leave them out.
-const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 34;
+const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 35;
 
 /// The filesystem-touching tests still allowed to run under Miri, and so still
 /// allowed to end the whole run on their first syscall.
@@ -504,7 +504,7 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// each first on `PATH` in turn, because `tools/local-ci.py` now takes the
 /// host architecture from the daemon rather than from `platform.machine()`
 /// and on this host both sources say the same thing, so nothing that merely
-/// compares the tool's answer against the host can fail. Eleven more tests in
+/// compares the tool's answer against the host can fail. Twelve more tests in
 /// that file spawn python3 and touch nothing, which is why they are
 /// `annotated not-detected` rows, and the last two spawn nothing at all.
 const EXPECTED_FS_TOUCHING_TESTS: usize = 289;

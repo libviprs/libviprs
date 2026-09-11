@@ -377,6 +377,7 @@ annotated   not-detected tests/icc_lut_alloc.rs::refusing_what_moxcms_still_allo
 annotated   not-detected tests/icc_lut_alloc.rs::the_lut_export_hands_moxcms_nothing_that_scales_with_the_image
 annotated   not-detected tests/icc_lut_alloc.rs::the_lut_import_hands_moxcms_nothing_that_scales_with_the_image
 annotated   not-detected tests/local_ci_invocation.rs::a_lane_can_name_its_own_volume
+annotated   not-detected tests/local_ci_invocation.rs::a_step_that_exits_ends_only_itself_and_a_failing_step_still_fails_the_job
 annotated   not-detected tests/local_ci_invocation.rs::an_empty_volume_name_falls_back_and_an_impossible_one_is_refused
 annotated   not-detected tests/local_ci_invocation.rs::different_volumes_do_not_share_a_target_dir
 annotated   not-detected tests/local_ci_invocation.rs::native_ignores_docker_default_platform
