@@ -1202,6 +1202,42 @@ and not under `Fixed`: this file is the only place they can be caught.
   it reproduces that archive's decompressed root directory and its tile data
   section exactly.
 
+- **A PMTiles tile sink, and one way to read a pyramid back** (issue #990).
+  `libviprs::sink_pmtiles::PmTilesSink` implements `TileSink` over the writer
+  above, so `EngineBuilder::new(&src, plan, PmTilesSink::builder(path).plan(plan).build()?)`
+  produces a `.pmtiles` from a real run. `libviprs::pyramid_reader` adds the
+  storage-agnostic `PyramidReader` trait with `describe()` and
+  `tile(TileCoord)`, plus `DirectoryPyramidReader` over a loose-file tree and
+  `PmTilesPyramidReader` over an archive, so a caller can ask for `z/x/y`
+  without knowing which of the two it is holding. An absent tile is `Ok(None)`
+  on both.
+
+  The sink stores blank tiles rather than skipping them or writing the 1-byte
+  placeholder marker: PMTiles has no placeholder concept, so a skipped blank is
+  a hole in the archive, and unconditional payload dedupe already collapses ten
+  thousand identical blanks into one stored blob and one long run, which is the
+  size win the marker exists for.
+
+  It refuses three things by name rather than half-supporting them.
+  `TileFormat::Raw`, because a PMTiles tile is a self-describing image blob and
+  there is nowhere in the format to record what raw pixel bytes are. Layouts
+  other than `Xyz` and `Google`, because the rest address tiers rather than
+  `(z, x, y)`. And `ResumeMode::Resume` and `ResumeMode::Verify`, because
+  Verify reads a pyramid back by stat-ing one file per coordinate and Resume
+  needs a writer's staging to be reconstructible from a checkpoint, and a
+  single-file archive offers neither; the refusal is enforced at the builder
+  and again at `seed_completed_tile`, which is the hook a resume actually
+  reaches.
+
+  `checkpoint_root()` returns `None`, deliberately. Whatever a sink returns
+  there is handed to `wipe_directory` on every Overwrite run, whose ownership
+  guard refuses any directory that is non-empty and holds no checkpoint marker,
+  so a sink naming the archive's parent would refuse every Overwrite run the
+  moment the user keeps anything else beside their output. The advisory run
+  lock the archive does need lives in a `<archive>.job` sidecar the sink takes
+  itself and removes when it is dropped, so two sinks aimed at one archive are
+  refused instead of corrupting each other's staging.
+
 - **`.tif` and `.tiff` are save routes** (issue #948). `src/encode_tiff.rs` has
   had a working `Raster::save_tiff` with round-trip tests behind it all along,
   and neither save route ever grew a row, so `raster.save("out.tif")` answered
