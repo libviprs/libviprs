@@ -339,7 +339,8 @@ pub use resume::{
 };
 pub use retry::{FailurePolicy, RetryPolicy, RetryingSink};
 pub use sink::{
-    BLANK_TILE_MARKER, CollectedTile, FsSink, MemorySink, SinkError, Tile, TileFormat, TileSink,
+    BLANK_TILE_MARKER, CollectedTile, FsSink, MemorySink, PMTILES_EXTENSION, PyramidStorage,
+    SinkError, Tile, TileFormat, TileSink,
 };
 #[cfg(feature = "object-store-sink")]
 #[cfg_attr(docsrs, doc(cfg(feature = "object-store-sink")))]
