@@ -1269,9 +1269,14 @@ fn a_finalize_that_cannot_publish_leaves_no_partial_archive() {
 fn an_external_merge_produces_the_same_archive_as_an_in_memory_sort() {
     let dir = scratch();
 
-    // Zoom 6 is ids 1365..=5460. Take 3000 of them, added back to front so the
-    // arrival order is the reverse of the order the archive needs.
-    let ids: Vec<u64> = (1365u64..1365 + 3000).rev().collect();
+    // Zoom 6 is ids 1365..=5460. Take 3000 of them and SHUFFLE them.
+    //
+    // Reversing them was the obvious thing and it was wrong, which a mutation
+    // caught: replacing the run sort with `reverse()` is the identity on a
+    // perfectly reverse-ordered input, so the test stayed green against a
+    // writer that does not sort at all. A shuffle has no such symmetry.
+    let mut ids: Vec<u64> = (1365u64..1365 + 3000).collect();
+    shuffled(&mut ids, 0x5eed_0009);
 
     let build = |name: &str, buffer: usize| -> (Vec<u8>, usize) {
         let out = dir.path().join(name);
