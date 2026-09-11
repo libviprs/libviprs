@@ -234,9 +234,11 @@ pub fn serialize_entries(entries: &[Entry]) -> Result<Vec<u8>, PmTilesError> {
         return Err(PmTilesError::EmptyDirectory);
     }
 
-    // Four columns of at most ten bytes each, plus the count. Over-reserving
-    // by a factor of a few is cheaper than growing a directory buffer while
-    // writing four passes over it.
+    // A guess, not a bound. A worst-case entry is four ten-byte varints, but
+    // no real archive has one: measured across the three go-pmtiles goldens,
+    // an entry costs four to seven bytes. Twelve is comfortably over that and
+    // well under 40, so the common case takes no regrowth and the rare one
+    // lets `Vec` do its job.
     let mut out = Vec::with_capacity(uvarint_len(entries.len() as u64) + entries.len() * 12);
     encode_uvarint(entries.len() as u64, &mut out);
 
