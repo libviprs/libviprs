@@ -2066,9 +2066,11 @@ mod tests {
     }
 
     /// The sort buffer spills once it fills, and the merge still produces one
-    /// ascending sequence. Driven through the public surface with a lowered
-    /// run size would be better, but the constant is not configurable, so this
-    /// drives the same machinery directly with three runs' worth of records.
+    /// ascending sequence. This one forces the boundary by hand; the run size
+    /// is configurable through
+    /// [`WriterOptions::with_sort_buffer_records`](super::WriterOptions::with_sort_buffer_records)
+    /// and `a_run_list_wider_than_the_fan_in_is_merged_in_passes` drives it
+    /// that way instead.
     #[test]
     #[cfg_attr(miri, ignore)]
     fn a_writer_that_spilled_several_runs_still_sorts() {
