@@ -138,9 +138,9 @@ impl RangeReader for FileRangeReader {
         // directory entry, so it is a number an attacker chooses, and
         // `Vec::with_capacity` on it would be an allocation of their size
         // before a single byte has been read. The bound is cheap and exact.
-        let end = offset
-            .checked_add(len as u64)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "range end overflows u64"))?;
+        let end = offset.checked_add(len as u64).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "range end overflows u64")
+        })?;
         if end > self.len {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
@@ -240,8 +240,14 @@ mod tests {
         let (file, _) = ramp_file();
         let reader = FileRangeReader::try_open(file.path()).unwrap();
 
-        assert!(reader.read_range(999_999, 10).is_err(), "offset past the end");
-        assert!(reader.read_range(250, 10).is_err(), "the sum is past the end");
+        assert!(
+            reader.read_range(999_999, 10).is_err(),
+            "offset past the end"
+        );
+        assert!(
+            reader.read_range(250, 10).is_err(),
+            "the sum is past the end"
+        );
         assert!(reader.read_range(256, 1).is_err(), "one byte past the end");
 
         // The positive control, and it is the one that matters: the same

@@ -208,11 +208,29 @@ fn base(zoom: u8) -> u64 {
 ///
 /// Dropping either half leaves something that still passes every row of the
 /// spec's table up to zoom 2 and is wrong from zoom 3 onward.
+///
+/// # The mask is not decoration
+///
+/// `n` here is the size of the *sub*-square, which on the way in is smaller
+/// than the coordinates: `zxy_to_tileid` walks `s` down from `n/2` while `x`
+/// and `y` keep their full value. So `n - 1 - x` is a subtraction that goes
+/// negative, and the reference implementations lean on it wrapping (C `int`
+/// overflow, Go's unsigned wrap-around) rather than meaning it. Rust in a
+/// debug build panics on that subtraction instead, which is how this was
+/// found.
+///
+/// Masking first gives the same answer without the wrap. Only the bits below
+/// `n` are ever read again, because each following step halves `n`, and `n` is
+/// a power of two, so `(n - 1) - (x & (n - 1))` agrees with the wrapped
+/// `n - 1 - x` on exactly those bits. The 185 oracle rows hold that claim:
+/// they run to zoom 31, and a coordinate whose high bits mattered would
+/// disagree there.
 fn rotate(n: u64, x: &mut u64, y: &mut u64, rx: u64, ry: u64) {
     if ry == 0 {
         if rx == 1 {
-            *x = n - 1 - *x;
-            *y = n - 1 - *y;
+            let mask = n - 1;
+            *x = mask - (*x & mask);
+            *y = mask - (*y & mask);
         }
         std::mem::swap(x, y);
     }
@@ -246,71 +264,71 @@ mod tests {
     /// 20757839.
     const ORACLE_DISCRIMINATORS: &[(u8, u32, u32, u64)] = &[
         (12, 3423, 1763, 19078479), // the row that discriminates between candidate Hilbert conventions: x odd, y odd, mid-zoom, off every quadrant boundary
-        (9, 173, 298, 210828), // z9, x odd and y even
-        (9, 306, 91, 324512), // z9, x even and y odd
-        (11, 1337, 642, 5020316), // z11, x odd and y even
-        (11, 908, 1511, 3238970), // z11, x even and y odd
+        (9, 173, 298, 210828),      // z9, x odd and y even
+        (9, 306, 91, 324512),       // z9, x even and y odd
+        (11, 1337, 642, 5020316),   // z11, x odd and y even
+        (11, 908, 1511, 3238970),   // z11, x even and y odd
         (13, 5107, 2884, 79053962), // z13, x odd and y even
         (13, 2884, 5107, 53847284), // z13, the same pair with x and y swapped, which a symmetric mapping would collide
         (15, 20749, 9310, 1284441852), // z15, x odd and y even
         (15, 9310, 20749, 856223324), // z15, the same pair swapped
         (12, 1763, 3423, 12796581), // z12, the discriminating pair swapped
         (14, 11113, 6006, 321880274), // z14, x odd and y even
-        (10, 617, 428, 1232398), // z10, x odd and y even
+        (10, 617, 428, 1232398),    // z10, x odd and y even
     ];
 
     /// The first and last tile of each level the oracle dumped, and a spread of
     /// coordinates that are not round numbers.
     const ORACLE_STRUCTURAL: &[(u8, u32, u32, u64)] = &[
-        (0, 0, 0, 0), // first tile of z=0
-        (0, 0, 0, 0), // last tile of z=0, coords from IDToZxy(base(z+1)-1)
-        (1, 0, 0, 1), // first tile of z=1
-        (1, 1, 0, 4), // last tile of z=1, coords from IDToZxy(base(z+1)-1)
-        (2, 0, 0, 5), // first tile of z=2
-        (2, 3, 0, 20), // last tile of z=2, coords from IDToZxy(base(z+1)-1)
-        (3, 0, 0, 21), // first tile of z=3
-        (3, 7, 0, 84), // last tile of z=3, coords from IDToZxy(base(z+1)-1)
-        (4, 0, 0, 85), // first tile of z=4
-        (4, 15, 0, 340), // last tile of z=4, coords from IDToZxy(base(z+1)-1)
-        (5, 0, 0, 341), // first tile of z=5
-        (5, 31, 0, 1364), // last tile of z=5, coords from IDToZxy(base(z+1)-1)
-        (6, 0, 0, 1365), // first tile of z=6
-        (6, 63, 0, 5460), // last tile of z=6, coords from IDToZxy(base(z+1)-1)
-        (7, 0, 0, 5461), // first tile of z=7
-        (7, 127, 0, 21844), // last tile of z=7, coords from IDToZxy(base(z+1)-1)
-        (8, 0, 0, 21845), // first tile of z=8
-        (8, 255, 0, 87380), // last tile of z=8, coords from IDToZxy(base(z+1)-1)
-        (10, 0, 0, 349525), // first tile of z=10
-        (10, 1023, 0, 1398100), // last tile of z=10, coords from IDToZxy(base(z+1)-1)
-        (12, 0, 0, 5592405), // first tile of z=12
-        (12, 4095, 0, 22369620), // last tile of z=12, coords from IDToZxy(base(z+1)-1)
-        (14, 0, 0, 89478485), // first tile of z=14
-        (14, 16383, 0, 357913940), // last tile of z=14, coords from IDToZxy(base(z+1)-1)
-        (16, 0, 0, 1431655765), // first tile of z=16
+        (0, 0, 0, 0),                             // first tile of z=0
+        (0, 0, 0, 0),               // last tile of z=0, coords from IDToZxy(base(z+1)-1)
+        (1, 0, 0, 1),               // first tile of z=1
+        (1, 1, 0, 4),               // last tile of z=1, coords from IDToZxy(base(z+1)-1)
+        (2, 0, 0, 5),               // first tile of z=2
+        (2, 3, 0, 20),              // last tile of z=2, coords from IDToZxy(base(z+1)-1)
+        (3, 0, 0, 21),              // first tile of z=3
+        (3, 7, 0, 84),              // last tile of z=3, coords from IDToZxy(base(z+1)-1)
+        (4, 0, 0, 85),              // first tile of z=4
+        (4, 15, 0, 340),            // last tile of z=4, coords from IDToZxy(base(z+1)-1)
+        (5, 0, 0, 341),             // first tile of z=5
+        (5, 31, 0, 1364),           // last tile of z=5, coords from IDToZxy(base(z+1)-1)
+        (6, 0, 0, 1365),            // first tile of z=6
+        (6, 63, 0, 5460),           // last tile of z=6, coords from IDToZxy(base(z+1)-1)
+        (7, 0, 0, 5461),            // first tile of z=7
+        (7, 127, 0, 21844),         // last tile of z=7, coords from IDToZxy(base(z+1)-1)
+        (8, 0, 0, 21845),           // first tile of z=8
+        (8, 255, 0, 87380),         // last tile of z=8, coords from IDToZxy(base(z+1)-1)
+        (10, 0, 0, 349525),         // first tile of z=10
+        (10, 1023, 0, 1398100),     // last tile of z=10, coords from IDToZxy(base(z+1)-1)
+        (12, 0, 0, 5592405),        // first tile of z=12
+        (12, 4095, 0, 22369620),    // last tile of z=12, coords from IDToZxy(base(z+1)-1)
+        (14, 0, 0, 89478485),       // first tile of z=14
+        (14, 16383, 0, 357913940),  // last tile of z=14, coords from IDToZxy(base(z+1)-1)
+        (16, 0, 0, 1431655765),     // first tile of z=16
         (16, 65535, 0, 5726623060), // last tile of z=16, coords from IDToZxy(base(z+1)-1)
-        (18, 0, 0, 22906492245), // first tile of z=18
+        (18, 0, 0, 22906492245),    // first tile of z=18
         (18, 262143, 0, 91625968980), // last tile of z=18, coords from IDToZxy(base(z+1)-1)
-        (20, 0, 0, 366503875925), // first tile of z=20
+        (20, 0, 0, 366503875925),   // first tile of z=20
         (20, 1048575, 0, 1466015503700), // last tile of z=20, coords from IDToZxy(base(z+1)-1)
         (31, 0, 0, 1537228672809129301), // first tile of z=31
         (31, 2147483647, 0, 6148914691236517204), // last tile of z=31, coords from IDToZxy(base(z+1)-1)
-        (5, 17, 11, 1209), // arbitrary
-        (6, 37, 23, 4835), // arbitrary, both prime
-        (7, 73, 101, 14797), // arbitrary, both prime
-        (9, 291, 177, 309339), // arbitrary
-        (10, 601, 383, 1238035), // arbitrary, 383 is 2^k-1 shaped
-        (11, 1279, 809, 4933265), // arbitrary
-        (12, 1207, 1539, 8633061), // arbitrary
-        (13, 4123, 2871, 79362511), // arbitrary
-        (14, 8171, 5680, 129937594), // z14 tile over Denver
-        (14, 9649, 12321, 241770071), // z14 tile over Sydney
-        (14, 8377, 5449, 317666519), // z14 tile over Chicago
-        (14, 16383, 0, 357913940), // z14 max x with y=0
-        (14, 0, 16383, 178956970), // z14 x=0 with max y
-        (15, 21845, 32767, 1002159035), // arbitrary at z15, y is the maximum
-        (18, 200000, 131072, 73019712853), // arbitrary at z18, y is a power of two
-        (20, 1048575, 1048575, 1099511627775), // z20 max x, max y
-        (20, 524287, 524288, 916259689812), // z20 straddling the centre seam
+        (5, 17, 11, 1209),                        // arbitrary
+        (6, 37, 23, 4835),                        // arbitrary, both prime
+        (7, 73, 101, 14797),                      // arbitrary, both prime
+        (9, 291, 177, 309339),                    // arbitrary
+        (10, 601, 383, 1238035),                  // arbitrary, 383 is 2^k-1 shaped
+        (11, 1279, 809, 4933265),                 // arbitrary
+        (12, 1207, 1539, 8633061),                // arbitrary
+        (13, 4123, 2871, 79362511),               // arbitrary
+        (14, 8171, 5680, 129937594),              // z14 tile over Denver
+        (14, 9649, 12321, 241770071),             // z14 tile over Sydney
+        (14, 8377, 5449, 317666519),              // z14 tile over Chicago
+        (14, 16383, 0, 357913940),                // z14 max x with y=0
+        (14, 0, 16383, 178956970),                // z14 x=0 with max y
+        (15, 21845, 32767, 1002159035),           // arbitrary at z15, y is the maximum
+        (18, 200000, 131072, 73019712853),        // arbitrary at z18, y is a power of two
+        (20, 1048575, 1048575, 1099511627775),    // z20 max x, max y
+        (20, 524287, 524288, 916259689812),       // z20 straddling the centre seam
     ];
 
     /// Every tile of zoom 2 in tile id order, from the oracle.
@@ -352,9 +370,9 @@ mod tests {
     /// router would otherwise serve a real, decodable tile for a coordinate
     /// that does not exist, which is indistinguishable from working.
     const ORACLE_MASKED_OUT_OF_RANGE: &[(u8, u32, u32, u64)] = &[
-        (2, 4, 0, 5), // x is out of range for z=2 (valid x is 0..3)
-        (2, 0, 4, 5), // y is out of range for z=2
-        (1, 2, 2, 1), // both out of range for z=1
+        (2, 4, 0, 5),                    // x is out of range for z=2 (valid x is 0..3)
+        (2, 0, 4, 5),                    // y is out of range for z=2
+        (1, 2, 2, 1),                    // both out of range for z=1
         (15, 32771, 21845, 688296049), // x=32771 is out of range for z=15, whose maximum x is 32767
         (1, 0, 2, 1), // y is out of range for z=1; this is one of the tile-fetch probes
         (2, 5, 1, 7), // x is out of range for z=2; this is one of the tile-fetch probes
@@ -413,7 +431,11 @@ mod tests {
 
         // And the whole level, in order, against the oracle.
         for (index, &(z, x, y, id)) in ORACLE_Z2_ORDER.iter().enumerate() {
-            assert_eq!(id, 5 + index as u64, "the oracle's zoom-2 rows are in id order");
+            assert_eq!(
+                id,
+                5 + index as u64,
+                "the oracle's zoom-2 rows are in id order"
+            );
             assert_eq!(tileid_to_zxy(id).unwrap(), (z, x, y));
         }
     }
@@ -475,7 +497,11 @@ mod tests {
             }
         }
         // 4 + 16 + ... + 16384, less one step per level.
-        assert_eq!(steps, 21844 - 7, "the adjacency sweep did not cover every level");
+        assert_eq!(
+            steps,
+            21844 - 7,
+            "the adjacency sweep did not cover every level"
+        );
     }
 
     #[test]
