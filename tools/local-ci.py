@@ -14,6 +14,7 @@ step to ci.yml and it runs here next time, with no second place to update.
     tools/local-ci.py --native           # host arch instead of x86_64
     tools/local-ci.py --volume lane-f11  # a cargo volume of your own
     tools/local-ci.py --worktree         # bind-mount the tree (fast, NOT the gate)
+    tools/local-ci.py --print-docker-argv   # the docker commands, run nothing
 
 Two things cannot run verbatim and are adapted, out loud:
 
@@ -99,7 +100,39 @@ lives on the `/cargo` volume rather than in the tree. Cold, that same build is
 `--worktree` puts the old bind mount back for the times when the rebuild is not
 worth it, and says loudly that it is not the gate.
 
-On architecture: the image is x86_64, the same as GitHub's ubuntu-latest, so
+On architecture: what `--native` asks the host, and who answers
+---------------------------------------------------------------
+
+`platform.machine()` reports the architecture of the *interpreter*, not of the
+machine. On this host `uname -m` is `arm64` and `arch -x86_64 /usr/bin/uname -m`
+is `x86_64`, and an x86_64 python3 is exactly what a shell configured to prefer
+amd64 tends to end up running. So sourcing the host architecture from the
+interpreter makes `--native` pin `linux/amd64` and call it the host, which is
+#994 again with a different origin.
+
+The daemon is the thing that actually runs the container, so it is asked first:
+`docker version --format '{{.Server.Arch}}'`, which answers `arm64` here.
+`platform.machine()` is the fallback for when there is no daemon to ask, which
+is the ordinary case inside the CI image, where `--print-docker-argv` still has
+to work and has no docker CLI at all. Whichever answered is printed, on the
+build line and as the `arch-source` field of `--print-docker-argv`, because a
+fallback nobody can see is a fallback nobody checks.
+
+`DOCKER_BUILDKIT=0` and the image that is not the platform you asked for
+-----------------------------------------------------------------------
+
+The legacy builder neither refuses `--platform` nor honours it. Measured here
+on Docker 29.7.2, arm64 host, `DOCKER_DEFAULT_PLATFORM` unset:
+`DOCKER_BUILDKIT=0 docker build --platform linux/arm64` and the same command
+with `linux/amd64` produced the *identical* image id, and
+`docker image inspect --format '{{.Architecture}}'` calls it `amd64` both
+times, while BuildKit built a genuinely arm64 image from the same Dockerfile.
+So with BuildKit off, `--native` would build an amd64 image, tag it
+`libviprs-ci:native`, and then run it under `--platform linux/arm64`. That is
+quieter than the bug this flag was fixed for, so the build is followed by a
+check that the image really is the architecture that was asked for.
+
+On emulation: the image is x86_64, the same as GitHub's ubuntu-latest, so
 on an Apple Silicon host Docker emulates it. Both the build and the run name
 that platform explicitly rather than leaving the flag off, because leaving it
 off does not mean "the host", it means `DOCKER_DEFAULT_PLATFORM`, and that is
@@ -127,6 +160,32 @@ each other, cargo's lock sees to that, but they do invalidate each other's build
 cache, because each run checks a different tree out into the same target
 directory. Give each lane its own name and they stay warm.
 
+What a lane's volume costs, and how to get it back
+--------------------------------------------------
+
+Each volume is a full copy of `CARGO_HOME` and of every target directory the
+job list materialises, which is about two dozen artifact sets: Check & Lint
+compiles ten feature permutations, Test nine more, and MSRV another seven under
+a second toolchain, each with its own metadata hash rather than replacing the
+last. Five lanes is five of those on the Docker VM's disk. That disk filling up
+is not hypothetical, it is why this tool has a dedicated handler for the
+message; I cleared 19 GB off it on the day I wrote this paragraph.
+
+So look at what a lane is holding, and throw it away when the lane is done:
+
+    docker run --rm -v libviprs-ci-f11:/cargo alpine:3 du -sh /cargo/*
+    docker volume rm libviprs-ci-f11
+
+`docker volume rm` refuses while a container still has the volume open, which
+is the behaviour you want: a running gate cannot have its build cache pulled
+out from under it.
+
+An empty name is not a name. `LIBVIPRS_CI_VOLUME=` and `--volume ''` used to
+reach `docker run -v :/cargo`, after paying for the image build, and die there
+with a message naming neither the flag nor the variable. Both fall back to the
+shared default now, and anything Docker would not accept as a volume name is
+refused up front.
+
 
 A job that does not run is not a job that passed
 ------------------------------------------------
@@ -142,7 +201,7 @@ reason the `${{ }}` rule above refuses to guess. Today that is only
 runs it here on a pinned nightly, and `tests/local_gate_is_the_job_list.rs`
 fails if a job grows an `if:` with nothing covering it.
 """
-import argparse, collections, os, platform, shlex, subprocess, sys
+import argparse, collections, os, platform, re, shlex, subprocess, sys
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 WORKSPACE = os.path.abspath(os.path.join(REPO, ".."))
@@ -151,6 +210,18 @@ IMAGE_AMD64 = "libviprs-ci:local"
 IMAGE_NATIVE = "libviprs-ci:native"
 VOLUME = "libviprs-ci-cargo"
 SLOW = ("test", "integration")
+# Where every step runs from, and the one `docker run` working directory. Both
+# checkouts sit under it, so a step's `working-directory` resolves the same way
+# `actions/checkout` makes it resolve on a runner.
+WORKDIR = "/src"
+# Docker's own rule for a volume name: an alphanumeric first character, then
+# alphanumerics, underscore, dot or dash. Nothing else, which is what keeps a
+# tab or a newline out of the tab-separated `--print-docker-argv` output.
+VOLUME_NAME = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*")
+# Every architecture spelling either the daemon or the interpreter produces,
+# mapped to the half of a Docker platform string that follows `linux/`.
+DOCKER_ARCH = {"x86_64": "amd64", "amd64": "amd64",
+               "aarch64": "arm64", "arm64": "arm64"}
 
 # Where each repository's git directory is mounted, and where its checkout is
 # made. The checkout paths are the ones every step's `working-directory`
@@ -237,8 +308,31 @@ def untracked(repo):
     ]
 
 
+def daemon_arch():
+    """What the Docker daemon says it runs on, or `None` if it cannot say.
+
+    `docker version --format {{.Server.Arch}}` is a GOARCH, so it comes back
+    `arm64` or `amd64` and needs no translation, but it is put through
+    [`DOCKER_ARCH`] anyway so that a daemon answering `aarch64` (which
+    `docker info --format {{.Architecture}}` does) is handled the same way.
+
+    Every failure is the same answer here, on purpose: no docker CLI on PATH,
+    no daemon listening, a daemon too slow to answer. The caller has a real
+    fallback and `--print-docker-argv` has to work in the CI image, which has
+    no docker at all.
+    """
+    try:
+        out = subprocess.run(
+            ["docker", "version", "--format", "{{.Server.Arch}}"],
+            capture_output=True, text=True, timeout=20,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return out.stdout.strip() or None if out.returncode == 0 else None
+
+
 def host_platform():
-    """The Docker platform string for the machine this is running on.
+    """`(platform string or None, which source answered, the raw architecture)`.
 
     `--native` used to mean "leave `--platform` off and let Docker decide", and
     what Docker decides is `DOCKER_DEFAULT_PLATFORM` when that is set. It is
@@ -254,30 +348,120 @@ def host_platform():
     login problem or a typo in the tag rather than the one thing it is. Naming
     the platform on both the build and the run costs one argument and makes the
     flag mean what it says (#994). `tests/local_ci_invocation.rs` holds it there.
+
+    The architecture itself comes from the daemon rather than from
+    `platform.machine()`, which reports the *interpreter's* architecture: see
+    the module docstring for the measurement. `platform.machine()` is still the
+    fallback, because there is nothing else to ask when there is no daemon, and
+    which one answered is reported rather than assumed.
+
+    An architecture neither of them can be mapped to gives `None` rather than a
+    `sys.exit`. This is called from `--list` and `--print-docker-argv`, which
+    print and quit and touch no daemon, and a refusal that reaches those is a
+    refusal on a path that has nothing to refuse. `main` turns the `None` into
+    a failure at the point a run would actually need the platform.
     """
-    m = platform.machine()
-    arch = {"x86_64": "amd64", "amd64": "amd64",
-            "aarch64": "arm64", "arm64": "arm64"}.get(m)
+    arch, source = daemon_arch(), "daemon"
     if arch is None:
-        sys.exit(f"no Docker platform mapping for host architecture {m!r}")
-    return f"linux/{arch}"
+        arch, source = platform.machine(), "platform.machine"
+    mapped = DOCKER_ARCH.get(arch)
+    return (f"linux/{mapped}" if mapped else None), source, arch
 
 
-def docker_argv(native, volume):
-    """The platform, image, build command and run prefix this invocation uses.
+def resolve_volume(requested):
+    """The cargo volume name, with an empty request falling back to the default.
 
-    Pulled out of `main` so the tests can ask what the tool would do without a
-    daemon, a workflow file or PyYAML. `run` is a prefix: `main` appends the
-    remaining mounts, the working directory, the image and the script, and the
-    cargo volume is the first of those mounts, so what this prints really is
-    the head of the command that runs.
+    `os.environ.get("LIBVIPRS_CI_VOLUME", VOLUME)` falls back when the key is
+    absent and not when it is empty, so `export LIBVIPRS_CI_VOLUME=` and
+    `--volume ''` both got through. `docker volume inspect ''` fails, and the
+    `docker volume create ''` that follows it fails too and is not checked, so
+    the run died inside `docker run` on `-v :/cargo` with a message naming
+    neither the flag nor the variable, after paying for the image build.
+
+    Refusing a name Docker would not take closes a second hole with the same
+    edit. The `--print-docker-argv` format is tab separated, so a name carrying
+    a tab and a newline injects whole extra fields into it:
+    `--volume "$(printf 'x\nplatform\tlinux/amd64')"` put a second `platform`
+    line into the output, and the test harness's `fields.insert` kept the
+    injected one. The parser refuses a duplicate key now as well, because two
+    checks on that are cheap and it is the sort of thing that comes back.
     """
-    plat = host_platform() if native else "linux/amd64"
-    image = IMAGE_NATIVE if native else IMAGE_AMD64
-    build = ["docker", "build", "-q", "--platform", plat,
-             "-f", f"{REPO}/tools/Dockerfile.ci", "-t", image, f"{REPO}/tools"]
-    run = ["docker", "run", "--rm", "--platform", plat, "-v", f"{volume}:/cargo"]
-    return plat, image, build, run
+    name = requested or VOLUME
+    if not VOLUME_NAME.fullmatch(name):
+        sys.exit(
+            f"{name!r} is not a Docker volume name, so --volume (env "
+            "LIBVIPRS_CI_VOLUME) cannot be used as given. Docker takes an "
+            "alphanumeric first character followed by alphanumerics, "
+            "underscore, dot or dash. Leave it empty for the shared default "
+            f"{VOLUME!r}."
+        )
+    return name
+
+
+def target_dirs(tag):
+    """Where cargo builds inside the container, for this architecture.
+
+    One function rather than two f-strings, because `container_script` exports
+    these and `--print-docker-argv` reports them, and a reported value that is
+    a restatement of the real one is a value that drifts.
+    """
+    return f"/cargo/target-{tag}", f"/cargo/target-{tag}-tests"
+
+
+def build_argv(plat, image):
+    """The `docker build` command, naming its platform rather than inheriting."""
+    return ["docker", "build", "-q", "--platform", plat,
+            "-f", f"{REPO}/tools/Dockerfile.ci", "-t", image, f"{REPO}/tools"]
+
+
+def source_mounts(mode, tests_mounted):
+    """The bind mounts that put the source trees where the steps expect them.
+
+    In `git` mode that is each repository's git directory, read-only, which the
+    container clones from. In `worktree` mode it is the working trees
+    themselves. The two are genuinely different commands, and they used to
+    print identically because the printer restated the first few arguments
+    instead of composing the real thing.
+    """
+    if mode == "worktree":
+        mounts = [f"{REPO}:{CHECKOUT['libviprs']}"]
+        if tests_mounted:
+            mounts.append(f"{TESTS_DIR}:{CHECKOUT['libviprs-tests']}")
+        return mounts
+    mounts = [f"{git_common_dir(REPO)}:{GITSRC['libviprs']}:ro"]
+    if tests_mounted:
+        mounts.append(f"{git_common_dir(TESTS_DIR)}:{GITSRC['libviprs-tests']}:ro")
+    return mounts
+
+
+def sibling_available(mode):
+    """Whether the libviprs-tests checkout can be provisioned in `mode`."""
+    if not os.path.isdir(TESTS_DIR):
+        return False
+    return mode == "worktree" or is_git_repo(TESTS_DIR)
+
+
+def run_argv(plat, image, volume, mounts):
+    """The whole `docker run` command bar the script, and the only one there is.
+
+    This used to be a prefix that `main` took apart and put back together:
+    `mounts = run_prefix[run_prefix.index("-v"):]` and then
+    `run_prefix[:run_prefix.index("-v")] + mounts`. Two things were wrong with
+    that beyond the obvious fragility. `--print-docker-argv` printed the prefix
+    and called it the command, so it never showed the source mounts, the
+    working directory or the image, and `--worktree --print-docker-argv`
+    printed exactly what `--print-docker-argv` did while the real `--worktree`
+    run carried a different mount. And a reviewer changed the reassembly to
+    `run_prefix[:3] + mounts`, which drops `--platform` from the real run and
+    restores #994 verbatim, with every test still green.
+
+    So there is one function, the job loop calls it, the printer calls it, and
+    the printer is right by construction rather than by inspection.
+    """
+    argv = ["docker", "run", "--rm", "--platform", plat, "-v", f"{volume}:/cargo"]
+    for mount in mounts:
+        argv += ["-v", mount]
+    return argv + ["-w", WORKDIR, image]
 
 
 def build_plan(workflow, fast, filters):
@@ -374,8 +558,9 @@ def container_script(job, tag, mode, revs, tests_mounted):
     # stale one: --native kept failing under Rosetta because it was executing
     # the x86_64 test binary the previous run had built. It also keeps this
     # tool from clobbering the target/ you use by hand.
-    out.append(f"export CARGO_TARGET_DIR=/cargo/target-{tag}")
-    out.append(f"export CARGO_TARGET_DIR_TESTS=/cargo/target-{tag}-tests")
+    main_target, tests_target = target_dirs(tag)
+    out.append(f"export CARGO_TARGET_DIR={main_target}")
+    out.append(f"export CARGO_TARGET_DIR_TESTS={tests_target}")
     for s in job["steps"]:
         run = s["run"]
         label = s.get("name") or run.splitlines()[0][:60]
@@ -471,15 +656,42 @@ def main():
         print(__doc__)
         return 0
 
-    plat, image, build, run_prefix = docker_argv(a.native, a.volume)
+    volume = resolve_volume(a.volume)
+    if a.native:
+        plat, arch_source, raw_arch = host_platform()
+    else:
+        # Not a lookup at all, so there is no source to report beyond the
+        # decision itself: ubuntu-latest is x86_64 and the emulated run exists
+        # to match it.
+        plat, arch_source, raw_arch = "linux/amd64", "pinned", None
+    image = IMAGE_NATIVE if a.native else IMAGE_AMD64
+    tag = "native" if a.native else "amd64"
+    mode = "worktree" if a.worktree else "git"
+    tests_mounted = sibling_available(mode)
+    # An architecture nothing maps still has to print. `shown` is what goes in
+    # the argv, and `plat is None` is what stops a run below.
+    shown = plat or f"UNMAPPED:{raw_arch}"
+    build = build_argv(shown, image)
+
+    def the_run_command():
+        """The one composition of the run command, called twice, written once."""
+        return run_argv(shown, image, volume, source_mounts(mode, tests_mounted))
 
     if a.print_docker_argv:
         # Tab separated because a docker argument never contains a tab, which
         # keeps the tests free of a quoting round trip that could disagree with
-        # this tool about where one argument ends and the next begins.
-        for key, value in (("platform", [plat]), ("image", [image]),
-                           ("volume", [a.volume]), ("build", build),
-                           ("run", run_prefix)):
+        # this tool about where one argument ends and the next begins. A volume
+        # name carrying a tab would break that, which is half of why
+        # `resolve_volume` refuses one.
+        main_target, tests_target = target_dirs(tag)
+        for key, value in (("platform", [shown]),
+                           ("arch-source", [arch_source]),
+                           ("image", [image]),
+                           ("volume", [volume]),
+                           ("mode", [mode]),
+                           ("cargo-target", [main_target, tests_target]),
+                           ("build", build),
+                           ("run", the_run_command())):
             print("\t".join([key] + value))
         return 0
 
@@ -500,12 +712,20 @@ def main():
                 print("   $", cwd + " ".join(s["run"].split())[:150])
         return 0
 
+    if plat is None:
+        # Deliberately here and not in `host_platform`, which `--list` and
+        # `--print-docker-argv` both reach without touching a daemon. A refusal
+        # belongs at the point something actually needs the platform.
+        return (
+            f"no Docker platform mapping for host architecture {raw_arch!r} "
+            f"(reported by {arch_source}). --list and --print-docker-argv still "
+            "work; a run cannot."
+        )
+
     if subprocess.run(["docker", "info"], capture_output=True).returncode != 0:
         return "Docker is not running."
 
-    mode = "worktree" if a.worktree else "git"
-    tests_mounted = os.path.isdir(TESTS_DIR)
-    if tests_mounted and mode == "git" and not is_git_repo(TESTS_DIR):
+    if os.path.isdir(TESTS_DIR) and mode == "git" and not is_git_repo(TESTS_DIR):
         print(
             f"note: {TESTS_DIR} is not a git repository, so it cannot be "
             "provisioned the way this mode provisions everything else, so "
@@ -513,38 +733,48 @@ def main():
             "pass --allow-skips.",
             file=sys.stderr,
         )
-        tests_mounted = False
 
     print(f"==> building {image} ({plat}"
-          + ("" if a.native else ", matching ubuntu-latest")
+          + (f", host architecture per {arch_source}" if a.native
+             else ", matching ubuntu-latest")
           + ") (cached after the first run)")
     subprocess.run(build, check=True, stdout=subprocess.DEVNULL)
-    if subprocess.run(["docker", "volume", "inspect", a.volume], capture_output=True).returncode != 0:
-        subprocess.run(["docker", "volume", "create", a.volume], check=True, stdout=subprocess.DEVNULL)
-    if a.volume != VOLUME:
-        print(f"==> cargo volume {a.volume}, not the shared {VOLUME}")
+    built = subprocess.run(
+        ["docker", "image", "inspect", image, "--format", "{{.Architecture}}"],
+        capture_output=True, text=True,
+    )
+    got = DOCKER_ARCH.get(built.stdout.strip(), built.stdout.strip())
+    if built.returncode == 0 and got and got != plat.split("/", 1)[1]:
+        # The classic builder takes `--platform` and ignores it: measured on
+        # Docker 29.7.2, `DOCKER_BUILDKIT=0 docker build --platform linux/arm64`
+        # and the same command asking for amd64 produced one identical amd64
+        # image on an arm64 host. Running that under `--platform linux/arm64`
+        # is the #994 failure again, one layer down and quieter.
+        return (f"{image} came out {got}, not {plat.split('/', 1)[1]}, so the "
+                "build ignored --platform. The legacy builder does that "
+                "silently: unset DOCKER_BUILDKIT (or set it to 1) and run this "
+                "again.")
+    if subprocess.run(["docker", "volume", "inspect", volume], capture_output=True).returncode != 0:
+        subprocess.run(["docker", "volume", "create", volume], check=True, stdout=subprocess.DEVNULL)
+    if volume != VOLUME:
+        print(f"==> cargo volume {volume}, not the shared {VOLUME}")
 
-    mounts = run_prefix[run_prefix.index("-v"):]
     revs = {}
     if mode == "git":
         revs["libviprs"] = source_rev(REPO)
         report_source(REPO, "libviprs", revs["libviprs"])
-        mounts += ["-v", f"{git_common_dir(REPO)}:{GITSRC['libviprs']}:ro"]
         if tests_mounted:
             revs["libviprs-tests"] = source_rev(TESTS_DIR)
             report_source(
                 TESTS_DIR, "libviprs-tests", revs["libviprs-tests"], is_sibling=True
             )
-            mounts += ["-v", f"{git_common_dir(TESTS_DIR)}:{GITSRC['libviprs-tests']}:ro"]
     else:
         print("!! --worktree bind-mounts this tree into the container. A Docker")
         print("!! Desktop bind mount off an APFS host is CASE-INSENSITIVE and it")
         print("!! carries untracked files, so this mode cannot see the two bug")
         print("!! classes the default mode exists for (#977, #979). Use it to")
         print("!! iterate, not to decide whether something is ready to push.")
-        mounts += ["-v", f"{REPO}:{CHECKOUT['libviprs']}"]
-        if tests_mounted:
-            mounts += ["-v", f"{TESTS_DIR}:{CHECKOUT['libviprs-tests']}"]
+    run = the_run_command()
     if not os.path.isdir(TESTS_DIR):
         print(
             f"note: {TESTS_DIR} not found, so the integration job cannot run. "
@@ -573,9 +803,8 @@ def main():
         # "cargo-fmt is not installed" line the first time this ran, which
         # made a failing job indistinguishable from a mysterious one.
         proc = subprocess.Popen(
-            run_prefix[:run_prefix.index("-v")] + mounts + ["-w", "/src", image,
-             "bash", "-c", container_script(
-                 j, "native" if a.native else "amd64", mode, revs, tests_mounted)],
+            run + ["bash", "-c",
+                   container_script(j, tag, mode, revs, tests_mounted)],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
         )
         tail = collections.deque(maxlen=40)
@@ -606,7 +835,9 @@ def main():
                 print("  list materialises about two dozen artifact sets on the cargo")
                 print("  volume, one per feature permutation per toolchain. See what")
                 print("  is on there with:")
-                print(f"      docker run --rm -v {a.volume}:/cargo alpine:3 du -sh /cargo/*")
+                print(f"      docker run --rm -v {volume}:/cargo alpine:3 du -sh /cargo/*")
+                print("  A lane's volume is disposable once the lane is done:")
+                print(f"      docker volume rm {volume}")
                 print("  Docker Desktop's disk size is under Settings, Resources.")
             if any("rosetta error" in ln for ln in tail):
                 print("")
