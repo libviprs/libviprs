@@ -675,6 +675,87 @@ impl TileFormat {
     }
 }
 
+#[cfg(test)]
+mod storage_selection_tests {
+    use super::*;
+    use crate::planner::Layout;
+
+    /// With nothing said, a pyramid lands in one PMTiles archive.
+    ///
+    /// The tag is the least of it. What a caller actually sees is the
+    /// extension the choice carries and the path it resolves an output base
+    /// to, so those are asserted here too: a test comparing
+    /// `PyramidStorage::default()` against `PyramidStorage::PmTiles` and
+    /// nothing else would still pass on a build where both arms resolved to
+    /// the same loose-file tree.
+    #[test]
+    fn the_default_storage_is_one_pmtiles_archive() {
+        let storage = PyramidStorage::default();
+        assert_eq!(storage, PyramidStorage::PmTiles);
+        assert_eq!(storage.extension(), Some(PMTILES_EXTENSION));
+        assert_eq!(storage.output_path("city"), Path::new("city.pmtiles"));
+        assert_eq!(storage.required_layout(), Some(Layout::Xyz));
+    }
+
+    /// The loose-file tree is one value away, and it answers differently.
+    ///
+    /// This is the negative control for the test above. Two arms collapsing
+    /// onto one answer is the shape that lets a default assertion pass for the
+    /// wrong reason, so the two are compared against each other here rather
+    /// than each against its own literal.
+    #[test]
+    fn the_directory_tree_is_reachable_and_is_not_the_default() {
+        let tree = PyramidStorage::Directory;
+        assert_ne!(tree, PyramidStorage::default());
+        assert_eq!(tree.extension(), None);
+        assert_eq!(tree.output_path("city"), Path::new("city"));
+        assert_eq!(tree.required_layout(), None);
+
+        assert_ne!(
+            tree.output_path("city"),
+            PyramidStorage::default().output_path("city"),
+            "the two storages must resolve one output base to two different \
+             paths, or the default assertion holds on a build where the choice \
+             does not reach the output at all"
+        );
+    }
+
+    /// The extension is appended, never substituted.
+    #[test]
+    fn an_output_base_keeps_the_extension_it_already_had() {
+        let pm = PyramidStorage::PmTiles;
+        // `Path::set_extension` replaces everything after the last dot, so it
+        // would turn `tiles.v2` into `tiles.pmtiles` and lose the `v2`.
+        assert_eq!(pm.output_path("tiles.v2"), Path::new("tiles.v2.pmtiles"));
+        assert_eq!(pm.output_path("city.tif"), Path::new("city.tif.pmtiles"));
+        assert_eq!(
+            pm.output_path("/var/tiles/city"),
+            Path::new("/var/tiles/city.pmtiles")
+        );
+    }
+
+    /// A base that already names an archive is handed back untouched.
+    #[test]
+    fn a_base_that_already_names_an_archive_is_left_alone() {
+        let pm = PyramidStorage::PmTiles;
+        assert_eq!(pm.output_path("city.pmtiles"), Path::new("city.pmtiles"));
+        // Case-insensitively. On macOS and Windows `city.PMTILES` and
+        // `city.PMTILES.pmtiles` are two names for one file, so appending
+        // there would write the archive over the base it was derived from.
+        assert_eq!(pm.output_path("city.PMTILES"), Path::new("city.PMTILES"));
+    }
+
+    /// An empty base is pinned rather than left to surprise someone.
+    #[test]
+    fn an_empty_output_base_takes_the_extension_like_any_other() {
+        assert_eq!(
+            PyramidStorage::PmTiles.output_path(""),
+            Path::new(".pmtiles")
+        );
+        assert_eq!(PyramidStorage::Directory.output_path(""), Path::new(""));
+    }
+}
+
 /// Writes tiles to the local filesystem.
 ///
 /// Directory structure follows the plan's layout:
