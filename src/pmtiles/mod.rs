@@ -107,6 +107,7 @@ pub mod directory;
 pub mod header;
 pub mod metadata;
 pub mod range;
+pub mod reader;
 pub mod tileid;
 pub mod validate;
 pub mod varint;
@@ -116,6 +117,7 @@ pub use directory::Entry;
 pub use header::{Compression, Header, TileType};
 pub use metadata::{LibviprsMetadata, Metadata};
 pub use range::{FileRangeReader, RangeReader};
+pub use reader::Reader;
 pub use tileid::{tileid_to_zxy, zxy_to_tileid};
 pub use writer::{Writer, WriterOptions};
 
@@ -306,4 +308,46 @@ pub enum PmTilesError {
     /// this writer needs roughly twice the archive's size in scratch.
     #[error("the writer failed while {during}, so it will not publish an archive")]
     WriterFailed { during: &'static str },
+
+    /// A section the header describes does not fit inside the archive.
+    ///
+    /// The check is on `offset + length`, never on the length alone. The
+    /// reference implementation's `verify` checks only the length, which is
+    /// how a root offset of 999999 in an 1878-byte file passes it and then
+    /// crashes the parser behind it.
+    #[error(
+        "the {section} at offset {offset} for {length} bytes does not fit in a {archive} byte archive"
+    )]
+    SectionOutOfBounds {
+        section: &'static str,
+        offset: u64,
+        length: u64,
+        archive: u64,
+    },
+
+    /// The root directory reaches past the first 16384 bytes of the archive.
+    /// The spec makes that a `MUST` so a latency-sensitive client can fetch
+    /// the header and the whole root in one request.
+    #[error("the root directory ends at byte {end}, past the {limit} byte budget")]
+    RootDirectoryTooLarge { end: u64, limit: u64 },
+
+    /// A directory entry addresses bytes outside the section it belongs to.
+    /// The section is chosen by the entry's kind: the tile data section for a
+    /// tile entry, wherever it was found, and the leaf directories section for
+    /// a leaf pointer.
+    #[error(
+        "an entry at offset {offset} for {length} bytes does not fit in the {section} section of {section_length} bytes"
+    )]
+    EntryOutOfBounds {
+        section: &'static str,
+        offset: u64,
+        length: u64,
+        section_length: u64,
+    },
+
+    /// A lookup followed leaf pointers past the depth this reader allows. The
+    /// spec only discourages nesting and states no limit, so a cycle is
+    /// expressible and a reader without a cap of its own follows it forever.
+    #[error("a lookup followed more than {limit} levels of leaf directory")]
+    LeafDepthExceeded { limit: u8 },
 }
