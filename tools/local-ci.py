@@ -281,6 +281,15 @@ def docker_argv(native, volume):
 
 
 def build_plan(workflow, fast, filters):
+    # Imported here rather than at module scope so `--print-docker-argv` works
+    # in the CI image, which carries python3 and no PyYAML. Nothing before this
+    # point needs to parse a workflow. `tests/local_ci_invocation.rs` checks
+    # both halves: that the argv path runs without PyYAML, and that this path
+    # either works or says PyYAML is missing, rather than raising NameError.
+    try:
+        import yaml
+    except ImportError:
+        sys.exit("PyYAML is required: pip3 install pyyaml")
     d = yaml.safe_load(open(workflow))
     wf_env = d.get("env") or {}
     plan = []
