@@ -10,7 +10,7 @@
 //!
 //! [`PyramidReader`] is that one way in. Two implementations ship with it:
 //! [`DirectoryPyramidReader`] over a `{z}/{x}/{y}.{ext}` tree, and
-//! `PmTilesPyramidReader` over a single archive.
+//! [`PmTilesPyramidReader`] over a single archive.
 //!
 //! # An absent tile is not an error
 //!
@@ -225,6 +225,105 @@ impl PyramidReader for DirectoryPyramidReader {
 
     fn tile_format(&self) -> Option<TileFormat> {
         Some(self.format)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PmTilesPyramidReader
+// ---------------------------------------------------------------------------
+
+/// A pyramid stored as one PMTiles v3 archive.
+///
+/// Wraps the indexed [`Reader`](crate::pmtiles::Reader) from #988 and maps
+/// [`TileCoord`] onto `(z, x, y)` through
+/// [`tile_coord_to_zxy`](crate::sink_pmtiles::tile_coord_to_zxy), the same
+/// function [`PmTilesSink`](crate::sink_pmtiles::PmTilesSink) writes through,
+/// so the two cannot drift apart on where a tile lives.
+#[derive(Debug)]
+pub struct PmTilesPyramidReader {
+    reader: crate::pmtiles::Reader<crate::pmtiles::FileRangeReader>,
+}
+
+impl PmTilesPyramidReader {
+    /// Open the archive at `path`.
+    ///
+    /// Reads the header and the root directory and nothing else; a tile is
+    /// fetched when it is asked for.
+    ///
+    /// # Errors
+    ///
+    /// [`PyramidReadError::PmTiles`] for a file that is not a readable v3
+    /// archive, and [`PyramidReadError::Io`] if it cannot be opened at all.
+    pub fn try_open(path: impl AsRef<Path>) -> Result<Self, PyramidReadError> {
+        Ok(Self {
+            reader: crate::pmtiles::Reader::try_open(path)?,
+        })
+    }
+
+    /// Wrap a reader the caller already opened.
+    pub fn from_reader(reader: crate::pmtiles::Reader<crate::pmtiles::FileRangeReader>) -> Self {
+        Self { reader }
+    }
+
+    /// The archive reader underneath, for the questions this trait does not
+    /// ask: the raw header, the root entries, the bounding box.
+    pub fn reader(&self) -> &crate::pmtiles::Reader<crate::pmtiles::FileRangeReader> {
+        &self.reader
+    }
+
+    /// What the archive says libviprs recorded about the run that produced it,
+    /// when it was libviprs that produced it.
+    fn generation(&self) -> Option<crate::manifest::GenerationSettings> {
+        self.reader
+            .metadata()
+            .ok()?
+            .vnd_libviprs
+            .as_ref()?
+            .generation
+            .clone()
+    }
+}
+
+impl PyramidReader for PmTilesPyramidReader {
+    fn describe(&self) -> Result<PyramidDescription, PyramidReadError> {
+        let header = self.reader.header();
+        let generation = self.generation();
+        Ok(PyramidDescription {
+            min_level: u32::from(header.min_zoom),
+            max_level: u32::from(header.max_zoom),
+            tile_size: generation.as_ref().map(|g| g.tile_size),
+            layout: generation.as_ref().map(|g| g.layout),
+            format: self.tile_format(),
+        })
+    }
+
+    fn tile(&self, coord: TileCoord) -> Result<Option<Vec<u8>>, PyramidReadError> {
+        // A coordinate PMTiles cannot address is a tile this pyramid does not
+        // have, the same answer the directory reader gives for a coordinate
+        // outside the plan. It is not an error, and it is emphatically not
+        // masked into a different, valid tile.
+        let Ok((z, x, y)) = crate::sink_pmtiles::tile_coord_to_zxy(coord) else {
+            return Ok(None);
+        };
+        Ok(self.reader.get_tile(z, x, y)?)
+    }
+
+    /// The encoding the stored bytes are in.
+    ///
+    /// From the `vnd.libviprs` namespace when the archive carries it, because
+    /// that is the only place the JPEG quality a [`TileFormat::Jpeg`] carries
+    /// is written down. A foreign JPEG archive therefore reports `None` rather
+    /// than a quality nobody measured; ask
+    /// [`Reader::tile_format`](crate::pmtiles::Reader::tile_format) for the
+    /// `TileType`, which is what the archive actually records.
+    fn tile_format(&self) -> Option<TileFormat> {
+        if let Some(generation) = self.generation() {
+            return Some(generation.format);
+        }
+        match self.reader.tile_format() {
+            crate::pmtiles::TileType::Png => Some(TileFormat::Png),
+            _ => None,
+        }
     }
 }
 
