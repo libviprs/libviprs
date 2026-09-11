@@ -224,10 +224,11 @@ One command over your own tree tells you how exposed you are:
 grep -rn 'EngineBuilder::new' src/
 ```
 
-Every hit names its sink, so **if you are a Rust caller this release changes
-nothing for you** and you can skip to the next section. The default is what a
-caller gets when they do not choose, and until 0.5.0 there was no way not to
-choose.
+Every hit names its sink, so **if you are a Rust caller this particular change
+costs you nothing** and you can skip to the next section. The release has other
+breaks and they are below; this one is not among them for you. A default is
+what a caller gets when they do not choose, and until 0.5.0 there was no way
+not to choose.
 
 ### Where the choice lives now
 
@@ -273,6 +274,12 @@ whole name.
 
 `output_path` is path arithmetic. It reads nothing, creates nothing and checks
 nothing; the sink is what touches the filesystem.
+
+Writing one is atomic. The archive is staged into `<path>.tmp` and its
+siblings, flushed with `sync_all` and renamed into place, so nothing exists at
+`<path>` until the run finishes and an interrupted run never leaves a short
+file wearing the name a complete one would. Two runs aimed at one archive would
+share those staging names, so the second sink is refused when it is built.
 
 ### Two things an archive will not do
 

@@ -677,8 +677,7 @@ impl TileFormat {
 
 /// The extension a PMTiles archive carries, without the dot.
 ///
-/// One spelling, so the library, the CLI and the documentation cannot drift
-/// apart on it.
+/// One spelling, so nothing has to spell it a second time.
 pub const PMTILES_EXTENSION: &str = "pmtiles";
 
 /// Where a pyramid lands when nothing says otherwise.
