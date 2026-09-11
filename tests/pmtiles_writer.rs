@@ -638,31 +638,34 @@ fn non_adjacent_duplicates_share_one_payload_without_sharing_an_entry() {
 fn identical_payloads_are_stored_once_whatever_the_engine_dedupe_strategy_is() {
     let dir = scratch();
     let out = dir.path().join("dupes.pmtiles");
-    let blob = b"the same forty-two bytes, over and over ok".to_vec();
-    let hash = content_hash(&blob);
+    let ocean = b"the same forty-two bytes, over and over ok".to_vec();
+    let land = b"something else entirely".to_vec();
 
     let mut w = Writer::create(&out, WriterOptions::default().with_tile_type(TileType::Png))
         .expect("a writer opens");
-    // Adjacent in tile id order, so they collapse into a run: zoom 1 is ids
-    // 1..=4 and they are contiguous.
+    // Zoom 0 is id 0, zoom 1 is ids 1..=4, zoom 2 starts at id 5. Putting the
+    // ocean blob at zoom 0 and at two zoom 2 tiles, with four zoom 1 tiles of
+    // something else in between, produces both shapes at once: the zoom 2 pair
+    // is a run, and the zoom 0 tile is a separate entry pointing at the same
+    // offset with four entries' worth of ids between them.
+    w.add_tile(0, 0, 0, &ocean, content_hash(&ocean)).unwrap();
     for (x, y) in [(0, 0), (0, 1), (1, 1), (1, 0)] {
-        w.add_tile(1, x, y, &blob, hash).unwrap();
+        w.add_tile(1, x, y, &land, content_hash(&land)).unwrap();
     }
-    // Not adjacent: zoom 0 is id 0 and zoom 2 starts at id 5, so these two sit
-    // on either side of the run above.
-    w.add_tile(0, 0, 0, &blob, hash).unwrap();
-    w.add_tile(2, 0, 0, &blob, hash).unwrap();
+    w.add_tile(2, 0, 0, &ocean, content_hash(&ocean)).unwrap();
+    w.add_tile(2, 1, 0, &ocean, content_hash(&ocean)).unwrap();
     let done = w.finish().unwrap();
 
     assert_eq!(
         done.header.tile_data_length,
-        blob.len() as u64,
-        "six identical tiles stored more than one payload"
+        (ocean.len() + land.len()) as u64,
+        "seven tiles over two distinct payloads stored more than two blobs"
     );
-    assert_eq!(done.header.tile_contents_count, 1);
-    assert_eq!(done.header.addressed_tiles_count, 6);
-    // One entry for id 0, one for the run of four, one for id 5. The run is
-    // the first shape of dedupe and the other two are the second.
+    assert_eq!(done.header.tile_contents_count, 2);
+    assert_eq!(done.header.addressed_tiles_count, 7);
+    // One entry for id 0, one for the zoom 1 run of four, one for the zoom 2
+    // run of two. The runs are the first shape of dedupe; ids 0 and 5 sharing
+    // offset 0 across a gap is the second.
     assert_eq!(done.header.tile_entries_count, 3);
 
     let bytes = std::fs::read(&out).unwrap();
@@ -673,23 +676,27 @@ fn identical_payloads_are_stored_once_whatever_the_engine_dedupe_strategy_is() {
             Entry {
                 tile_id: 0,
                 offset: 0,
-                length: blob.len() as u32,
+                length: ocean.len() as u32,
                 run_length: 1
             },
             Entry {
                 tile_id: 1,
-                offset: 0,
-                length: blob.len() as u32,
+                offset: ocean.len() as u64,
+                length: land.len() as u32,
                 run_length: 4
             },
             Entry {
                 tile_id: 5,
                 offset: 0,
-                length: blob.len() as u32,
-                run_length: 1
+                length: ocean.len() as u32,
+                run_length: 2
             },
         ]
     );
+    // Positive control on the gap: without it the three entries would have
+    // collapsed into one run and this test would be about runs alone.
+    assert_eq!(mine.entries[0].offset, mine.entries[2].offset);
+    assert!(mine.entries[2].tile_id > mine.entries[0].tile_id + 1);
 }
 
 /// A run of identical adjacent tiles is one entry with `run_length = N`, and

@@ -228,6 +228,36 @@ impl DedupeIndex {
         }
     }
 
+    /// The raw content digest this index keys `bytes` on, and the algorithm
+    /// that produced it.
+    ///
+    /// # Why this is public
+    ///
+    /// A sink that stores tiles in one archive rather than one file per tile
+    /// still has to collapse identical payloads, and it has to do so
+    /// *unconditionally*: storing one blob per distinct payload is a property
+    /// of the archive format, not of the engine's blank-tile policy.
+    /// [`DedupeDecision`] cannot carry that, and it is right not to: under
+    /// [`DedupeStrategy::None`] [`record`](Self::record) is a true passthrough
+    /// and returns [`DedupeDecision::WriteNew`] for every call by design, so a
+    /// sink driving its payload table off those decisions would store every
+    /// duplicate on default settings.
+    ///
+    /// What such a sink needs is the digest itself, which this index has
+    /// already computed for every tile the engine produced.
+    /// [`Writer::add_tile`](crate::pmtiles::Writer::add_tile) takes it and
+    /// never rehashes, so the bytes are hashed once per tile however many
+    /// consumers want the answer.
+    ///
+    /// The algorithm comes back alongside the digest because it is not fixed:
+    /// [`DedupeStrategy::All`] honours a caller-chosen [`ChecksumAlgo`] while
+    /// the other two always use Blake3. A consumer keying a map on the digest
+    /// alone would merge two different hash spaces if the strategy ever
+    /// changed under it.
+    pub fn content_digest(&self, bytes: &[u8]) -> (ChecksumAlgo, [u8; 32]) {
+        self.hash_content_raw(bytes)
+    }
+
     /// Returns the strategy this index was built for.
     pub fn strategy(&self) -> DedupeStrategy {
         self.strategy
