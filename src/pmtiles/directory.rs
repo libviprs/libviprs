@@ -364,12 +364,11 @@ pub fn deserialize_entries(bytes: &[u8]) -> Result<Vec<Entry>, PmTilesError> {
         if length == 0 {
             return Err(PmTilesError::ZeroLengthEntry { index });
         }
-        entry.length =
-            u32::try_from(length).map_err(|_| PmTilesError::EntryFieldTooLarge {
-                index,
-                field: "length",
-                value: length,
-            })?;
+        entry.length = u32::try_from(length).map_err(|_| PmTilesError::EntryFieldTooLarge {
+            index,
+            field: "length",
+            value: length,
+        })?;
     }
 
     for index in 0..count {
