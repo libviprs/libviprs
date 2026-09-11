@@ -349,9 +349,9 @@ pub fn deserialize_entries(bytes: &[u8]) -> Result<Vec<Entry>, PmTilesError> {
         });
     }
 
-    for index in 0..count {
+    for (index, entry) in entries.iter_mut().enumerate() {
         let run_length = cursor.next_uvarint()?;
-        entries[index].run_length =
+        entry.run_length =
             u32::try_from(run_length).map_err(|_| PmTilesError::EntryFieldTooLarge {
                 index,
                 field: "run length",
@@ -359,12 +359,12 @@ pub fn deserialize_entries(bytes: &[u8]) -> Result<Vec<Entry>, PmTilesError> {
             })?;
     }
 
-    for index in 0..count {
+    for (index, entry) in entries.iter_mut().enumerate() {
         let length = cursor.next_uvarint()?;
         if length == 0 {
             return Err(PmTilesError::ZeroLengthEntry { index });
         }
-        entries[index].length =
+        entry.length =
             u32::try_from(length).map_err(|_| PmTilesError::EntryFieldTooLarge {
                 index,
                 field: "length",
