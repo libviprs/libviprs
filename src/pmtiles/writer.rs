@@ -465,6 +465,26 @@ impl Staging {
         }
     }
 
+    /// Push everything written so far through to the device, without closing.
+    ///
+    /// The barrier lives on `Staging` rather than at the call site so a caller
+    /// does not have to know which variant it is holding. This arrived with
+    /// `sync_pending` rather than with `Staging` itself, deliberately: a
+    /// capability with no caller is `dead_code` under `-D warnings`, and the two
+    /// halves were written on separate branches, which is how `sync_pending`
+    /// came to reach past this type for `flush` and `get_ref` and only failed
+    /// once the branches met.
+    fn sync(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Real(w) => {
+                w.flush()?;
+                w.get_ref().sync_data()
+            }
+            #[cfg(test)]
+            Self::FailsAfter(w) => w.sync(),
+        }
+    }
+
     /// Push everything through to the device and close.
     fn finish(self) -> std::io::Result<()> {
         match self {
@@ -835,12 +855,10 @@ impl<W: Write + Seek> Writer<W> {
     pub fn sync_pending(&mut self) -> Result<(), PmTilesError> {
         self.flush_run()?;
         if let Some(staged) = self.staged.as_mut() {
-            staged.flush()?;
-            staged.get_ref().sync_data()?;
+            staged.sync()?;
         }
         if let Some(log) = self.log.as_mut() {
-            log.flush()?;
-            log.get_ref().sync_data()?;
+            log.sync()?;
         }
         Ok(())
     }
@@ -1635,6 +1653,15 @@ mod tests {
         }
 
         pub(super) fn finish(self) -> std::io::Result<()> {
+            self.into.sync_data()
+        }
+
+        /// The durability barrier, honoured here too.
+        ///
+        /// A stand-in that skipped it would let a partial-write test pass for
+        /// the wrong reason: the bytes the assertion reads would not have
+        /// reached the file it reads them from.
+        pub(super) fn sync(&mut self) -> std::io::Result<()> {
             self.into.sync_data()
         }
     }
