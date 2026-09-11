@@ -32,8 +32,8 @@
 //! without wondering whether it was supposed to mean something.
 //!
 //! Two of those fields are types this crate already has:
-//! [`SourceMetadata`](crate::manifest::SourceMetadata) and
-//! [`GenerationSettings`](crate::manifest::GenerationSettings), the same ones
+//! [`SourceMetadata`] and
+//! [`GenerationSettings`], the same ones
 //! `manifest.json` uses. Reusing them is deliberate: the manifest and this
 //! object answer the same question, "what produced this pyramid", and two
 //! schemas that answer one question drift apart. The cost is that a change to
