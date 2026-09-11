@@ -368,7 +368,10 @@ const WRITERS: &[(&str, Reach)] = &[
     (
         "pmtiles/varint.rs::encode_uvarint",
         Reach::NotAContainer {
-            why: "the LEB128 encoder the PMTiles directory codec is built from.                   It appends varint bytes to a caller's buffer and produces no                   container, so there is no route for a save to take. It matched                   the `encode_*` shape and nothing else (issue #987)",
+            why: "the LEB128 encoder the PMTiles directory codec is built from. It \
+                  appends varint bytes to a caller's buffer and produces no \
+                  container, so there is no route for a save to take. It matched \
+                  the `encode_*` shape and nothing else (issue #987)",
         },
     ),
 ];
