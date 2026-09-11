@@ -363,7 +363,14 @@ const ANCHOR_FILES: &[&str] = &[
 /// that write real files, three of them driving the writer's external merge
 /// over a spilled index log and the fourth checking that two writers sharing
 /// one scratch directory do not collide on a filename.
-const EXPECTED_SRC_ANNOTATIONS: usize = 229;
+///
+/// #990 moved it 229 to 236: five of the seven are in `src/sink_pmtiles.rs`,
+/// which publishes an archive and so writes one whichever way a test goes, and
+/// two are in `src/pyramid_reader.rs`. They are unit tests rather than
+/// integration ones because each needs something the public surface does not
+/// expose: the writer's `Mutex` to poison it, and the private plan to ask what
+/// a coordinate resolves to.
+const EXPECTED_SRC_ANNOTATIONS: usize = 236;
 /// Companion to [`EXPECTED_SRC_ANNOTATIONS`]: how many `src/` modules carry at
 /// least one annotation. #765 made it 25 by putting the first annotation in
 /// `src/analyze.rs`; `src/colour.rs` and `src/pdf.rs`, which took the other
@@ -371,7 +378,8 @@ const EXPECTED_SRC_ANNOTATIONS: usize = 229;
 /// #987 made it 26 by putting the first annotation in `src/pmtiles/range.rs`,
 /// which is also the first annotated module that is not directly under `src/`.
 /// #989 made it 27 the same way, with `src/pmtiles/writer.rs`.
-const EXPECTED_SRC_MODULES: usize = 27;
+/// #990 made it 29, with `src/sink_pmtiles.rs` and `src/pyramid_reader.rs`.
+const EXPECTED_SRC_MODULES: usize = 29;
 
 /// How many tests in the tree reach `std::process`.
 ///
@@ -520,7 +528,16 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// index log and reads an archive back. Twenty-one of the twenty-five are in
 /// `tests/pmtiles_writer.rs` and four are the unit tests in
 /// `src/pmtiles/writer.rs`.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 320;
+///
+/// #990 moved it 320 to 354, for the same underlying reason: a sink whose
+/// output is one file on disk cannot be tested without writing that file, and
+/// a reader over a directory of tiles cannot be tested without the directory.
+/// Twenty-two are in `tests/pmtiles_sink.rs`, five in
+/// `tests/pmtiles_pyramid_reader.rs` and seven are unit tests under `src/`.
+/// The two rows that are `annotated not-detected` are the ones that only read
+/// the committed oracle vectors through a shared helper the scanner does not
+/// follow into.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 354;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
