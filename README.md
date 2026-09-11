@@ -112,9 +112,11 @@ println!(
 
 ## Storage formats
 
-A pyramid lands in **one PMTiles v3 archive** by default as of 0.5.0. Until
-then the only thing this crate could produce was a tree of loose files under
-`{z}/{x}/{y}`, and that tree is still here, one explicit value away.
+A pyramid can land in **one PMTiles v3 archive** as of 0.5.0, or in the tree of
+loose files under `{z}/{x}/{y}` this crate has always written. Nothing flipped
+underneath you: `EngineBuilder` writes the sink you hand it, the same as it
+always has. What is new is that the choice has a name, and that asking it what
+to use gets an answer: `PyramidStorage::default()` is `PyramidStorage::PmTiles`.
 
 The reason is arithmetic. A pyramid is around 20k tiles and a fleet is around
 100k pyramids, so the tree costs about 2 billion files: inodes you run out of,
