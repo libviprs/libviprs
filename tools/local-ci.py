@@ -12,6 +12,7 @@ step to ci.yml and it runs here next time, with no second place to update.
     tools/local-ci.py Check Docs         # only jobs matching a filter
     tools/local-ci.py --workflow merge-gate.yml   # Loom and the pdfium audit
     tools/local-ci.py --native           # host arch instead of x86_64
+    tools/local-ci.py --volume lane-f11  # a cargo volume of your own
     tools/local-ci.py --worktree         # bind-mount the tree (fast, NOT the gate)
 
 Two things cannot run verbatim and are adapted, out loud:
@@ -99,7 +100,10 @@ lives on the `/cargo` volume rather than in the tree. Cold, that same build is
 worth it, and says loudly that it is not the gate.
 
 On architecture: the image is x86_64, the same as GitHub's ubuntu-latest, so
-on an Apple Silicon host Docker emulates it. That is slower than running
+on an Apple Silicon host Docker emulates it. Both the build and the run name
+that platform explicitly rather than leaving the flag off, because leaving it
+off does not mean "the host", it means `DOCKER_DEFAULT_PLATFORM`, and that is
+`linux/amd64` in this repository's usual shell (#994). That is slower than running
 native arm64 and it is the right trade, because the differences that matter
 are architecture-sensitive. The worked example in this repo is `f32::mul_add`,
 which lowers to a libm `fmaf` call on baseline x86-64 and to a single `fmadd`
@@ -112,6 +116,17 @@ the address space, and the process SIGTRAPs rather than the allocation
 failing cleanly. That is a Rosetta limit, not a bug in the code: those
 tests pass natively. Use `--native` for them, which trades the x86 fidelity
 for a host-architecture run.
+
+One cargo volume per lane
+-------------------------
+
+`--volume NAME` (env `LIBVIPRS_CI_VOLUME`) picks the volume holding `CARGO_HOME`
+and the target directories, and it defaults to the shared `libviprs-ci-cargo` so
+ordinary use is unchanged. Several worktrees running this at once do not corrupt
+each other, cargo's lock sees to that, but they do invalidate each other's build
+cache, because each run checks a different tree out into the same target
+directory. Give each lane its own name and they stay warm.
+
 
 A job that does not run is not a job that passed
 ------------------------------------------------
@@ -127,12 +142,7 @@ reason the `${{ }}` rule above refuses to guess. Today that is only
 runs it here on a pinned nightly, and `tests/local_gate_is_the_job_list.rs`
 fails if a job grows an `if:` with nothing covering it.
 """
-import argparse, collections, os, shlex, subprocess, sys
-
-try:
-    import yaml
-except ImportError:
-    sys.exit("PyYAML is required: pip3 install pyyaml")
+import argparse, collections, os, platform, shlex, subprocess, sys
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 WORKSPACE = os.path.abspath(os.path.join(REPO, ".."))
@@ -225,6 +235,49 @@ def untracked(repo):
         for line in git(repo, "ls-files", "--others", "--exclude-standard").splitlines()
         if line
     ]
+
+
+def host_platform():
+    """The Docker platform string for the machine this is running on.
+
+    `--native` used to mean "leave `--platform` off and let Docker decide", and
+    what Docker decides is `DOCKER_DEFAULT_PLATFORM` when that is set. It is
+    `linux/amd64` in the shell this repository is developed in, so `--native`
+    asked the daemon for an amd64 variant of a local arm64 image and reported:
+
+        Unable to find image 'libviprs-ci:native' locally
+        docker: Error response from daemon: pull access denied for libviprs-ci,
+        repository does not exist or may require 'docker login': denied: ...
+
+    The image was right there. That message is about authentication and a
+    missing repository and says nothing about a platform, so it reads like a
+    login problem or a typo in the tag rather than the one thing it is. Naming
+    the platform on both the build and the run costs one argument and makes the
+    flag mean what it says (#994). `tests/local_ci_invocation.rs` holds it there.
+    """
+    m = platform.machine()
+    arch = {"x86_64": "amd64", "amd64": "amd64",
+            "aarch64": "arm64", "arm64": "arm64"}.get(m)
+    if arch is None:
+        sys.exit(f"no Docker platform mapping for host architecture {m!r}")
+    return f"linux/{arch}"
+
+
+def docker_argv(native, volume):
+    """The platform, image, build command and run prefix this invocation uses.
+
+    Pulled out of `main` so the tests can ask what the tool would do without a
+    daemon, a workflow file or PyYAML. `run` is a prefix: `main` appends the
+    remaining mounts, the working directory, the image and the script, and the
+    cargo volume is the first of those mounts, so what this prints really is
+    the head of the command that runs.
+    """
+    plat = host_platform() if native else "linux/amd64"
+    image = IMAGE_NATIVE if native else IMAGE_AMD64
+    build = ["docker", "build", "-q", "--platform", plat,
+             "-f", f"{REPO}/tools/Dockerfile.ci", "-t", image, f"{REPO}/tools"]
+    run = ["docker", "run", "--rm", "--platform", plat, "-v", f"{volume}:/cargo"]
+    return plat, image, build, run
 
 
 def build_plan(workflow, fast, filters):
@@ -397,10 +450,28 @@ def main():
                         "out from git (fast, case-insensitive, NOT the gate)")
     p.add_argument("--allow-skips", action="store_true",
                    help="let a skipped job leave the run green")
+    p.add_argument("--volume", default=os.environ.get("LIBVIPRS_CI_VOLUME", VOLUME),
+                   help="cargo volume to use, so parallel worktrees do not "
+                        "invalidate each other's build cache "
+                        "(env LIBVIPRS_CI_VOLUME)")
+    p.add_argument("--print-docker-argv", action="store_true",
+                   help="print the docker commands this run would use, and exit")
     p.add_argument("-h", "--help", action="store_true")
     a = p.parse_args()
     if a.help:
         print(__doc__)
+        return 0
+
+    plat, image, build, run_prefix = docker_argv(a.native, a.volume)
+
+    if a.print_docker_argv:
+        # Tab separated because a docker argument never contains a tab, which
+        # keeps the tests free of a quoting round trip that could disagree with
+        # this tool about where one argument ends and the next begins.
+        for key, value in (("platform", [plat]), ("image", [image]),
+                           ("volume", [a.volume]), ("build", build),
+                           ("run", run_prefix)):
+            print("\t".join([key] + value))
         return 0
 
     workflow = os.path.join(REPO, ".github/workflows", a.workflow)
@@ -435,19 +506,16 @@ def main():
         )
         tests_mounted = False
 
-    image = IMAGE_NATIVE if a.native else IMAGE_AMD64
-    build = ["docker", "build", "-q", "-f", f"{REPO}/tools/Dockerfile.ci", "-t", image]
-    if not a.native:
-        build += ["--platform", "linux/amd64"]
-    build.append(f"{REPO}/tools")
-    print(f"==> building {image}"
-          + ("" if a.native else " (x86_64, matching ubuntu-latest)")
-          + " (cached after the first run)")
+    print(f"==> building {image} ({plat}"
+          + ("" if a.native else ", matching ubuntu-latest")
+          + ") (cached after the first run)")
     subprocess.run(build, check=True, stdout=subprocess.DEVNULL)
-    if subprocess.run(["docker", "volume", "inspect", VOLUME], capture_output=True).returncode != 0:
-        subprocess.run(["docker", "volume", "create", VOLUME], check=True, stdout=subprocess.DEVNULL)
+    if subprocess.run(["docker", "volume", "inspect", a.volume], capture_output=True).returncode != 0:
+        subprocess.run(["docker", "volume", "create", a.volume], check=True, stdout=subprocess.DEVNULL)
+    if a.volume != VOLUME:
+        print(f"==> cargo volume {a.volume}, not the shared {VOLUME}")
 
-    mounts = ["-v", f"{VOLUME}:/cargo"]
+    mounts = run_prefix[run_prefix.index("-v"):]
     revs = {}
     if mode == "git":
         revs["libviprs"] = source_rev(REPO)
@@ -495,11 +563,8 @@ def main():
         # without the reason. Relying on inherited stdout alone lost the
         # "cargo-fmt is not installed" line the first time this ran, which
         # made a failing job indistinguishable from a mysterious one.
-        run_cmd = ["docker", "run", "--rm"]
-        if not a.native:
-            run_cmd += ["--platform", "linux/amd64"]
         proc = subprocess.Popen(
-            run_cmd + mounts + ["-w", "/src", image,
+            run_prefix[:run_prefix.index("-v")] + mounts + ["-w", "/src", image,
              "bash", "-c", container_script(
                  j, "native" if a.native else "amd64", mode, revs, tests_mounted)],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
@@ -532,7 +597,7 @@ def main():
                 print("  list materialises about two dozen artifact sets on the cargo")
                 print("  volume, one per feature permutation per toolchain. See what")
                 print("  is on there with:")
-                print(f"      docker run --rm -v {VOLUME}:/cargo alpine:3 du -sh /cargo/*")
+                print(f"      docker run --rm -v {a.volume}:/cargo alpine:3 du -sh /cargo/*")
                 print("  Docker Desktop's disk size is under Settings, Resources.")
             if any("rosetta error" in ln for ln in tail):
                 print("")
