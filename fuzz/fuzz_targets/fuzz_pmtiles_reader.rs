@@ -37,10 +37,28 @@ use libviprs::pmtiles::{Header, tileid_to_zxy, zxy_to_tileid};
 /// * `decode_uvarint`, the primitive the other three are built from.
 ///
 /// The assertions are properties rather than fixtures, so a failure is a real
-/// contradiction and not a stale expectation. The limits are deliberately
-/// small: a fuzzer will find a directory claiming a huge entry count in
-/// seconds, and the point is to prove that claim is refused rather than to
-/// watch it be honoured.
+/// contradiction and not a stale expectation.
+///
+/// # Two passes, and the second one is the one that ships
+///
+/// The walk runs twice over the same input. The first pass uses deliberately
+/// small limits, because a fuzzer will find a directory claiming a huge entry
+/// count in seconds and the point there is to prove the claim is refused
+/// rather than to watch it be honoured. Those small limits used to be the only
+/// pass, and that was a hole: `max_leaf_directories = 64` and
+/// `max_directory_bytes = 1 << 20` are precisely the two knobs whose **default**
+/// values multiply into an unbounded walk, so the target structurally could
+/// not reach the bug the CLI ships with. A 21,620-byte archive whose root
+/// holds 1,048,577 leaf pointers that all resolve to one valid 16 MiB leaf
+/// asks for roughly 16 TiB of gzip output at `ValidationLimits::default()`,
+/// and for 64 MiB under the limits above, which is over in a blink and looks
+/// like nothing.
+///
+/// So the second pass runs at `ValidationLimits::default()`, which is what
+/// `viprs pmtiles verify` uses. It costs nothing on ordinary input, because
+/// only an input that actually carries a fat gzip stream can spend the budget,
+/// and the budget is what makes even that bounded. `nocrash-leaf-fanout` in
+/// the seed corpus is the archive above.
 ///
 /// # The seed corpus
 ///
@@ -53,6 +71,13 @@ use libviprs::pmtiles::{Header, tileid_to_zxy, zxy_to_tileid};
 /// leaf pointer resolving outside the leaf region, a directory header claiming
 /// more entries than its own bytes could hold, and a varint that never
 /// terminates.
+///
+/// `nocrash-leaf-fanout` is the odd one out and the most valuable: nothing
+/// about it is malformed. 21,620 bytes, a header that decodes, a root of
+/// 1,048,577 leaf pointers every one of which is in bounds, and one valid
+/// 16 MiB leaf of 4,194,303 in-bounds entries behind all of them. It is the
+/// amplification seed, and the thing it is a regression test for is the walk
+/// returning at all.
 fuzz_target!(|data: &[u8]| {
     // Small on purpose. `max_directory_bytes` is the decompression ceiling,
     // and a gzip bomb is the cheapest thing for a fuzzer to stumble into.
@@ -77,6 +102,50 @@ fuzz_target!(|data: &[u8]| {
         // Leaf bookkeeping has to stay consistent with the limits it works
         // under, or the bound is not a bound.
         assert!(report.leaves.len() <= 64);
+    }
+
+    // The same walk at the limits the CLI ships with. This is the pass that
+    // would have caught the leaf storm, and the assertions are about the work
+    // the walk admits to doing rather than about the verdict.
+    let shipped = ValidationLimits::default();
+    if let Ok(report) = validate_bytes(data, &shipped) {
+        // The total-work budget is what makes this pass affordable. It is
+        // derived from the archive's own section lengths and floored at one
+        // directory, and the walk may overshoot it by the directory it was
+        // already reading when it ran out.
+        let floor = shipped.max_directory_bytes as u64;
+        let budget = report
+            .header
+            .as_ref()
+            .map(|header| {
+                header
+                    .root_length
+                    .saturating_add(header.leaf_directories_length)
+                    .saturating_mul(64)
+                    .max(floor)
+                    .min(shipped.max_total_directory_bytes)
+            })
+            .unwrap_or(floor);
+        assert!(
+            report.directory_bytes <= budget.saturating_add(floor),
+            "the walk inflated {} bytes against a {budget} byte budget",
+            report.directory_bytes
+        );
+        // One directory's worth of overshoot, and a directory body spends at
+        // least four bytes an entry, so the ceiling on that overshoot is the
+        // per-directory byte cap.
+        assert!(
+            report.entries_visited <= shipped.max_total_entries.saturating_add(floor),
+            "the walk visited {} entries against a {} budget",
+            report.entries_visited,
+            shipped.max_total_entries
+        );
+        // Anything that stopped the walk early has to have said so, or a
+        // clean-looking report is one nobody can act on.
+        assert!(
+            report.shared_leaf_pointers == 0 || !report.findings.is_empty(),
+            "leaf pointers were collapsed and nothing was reported"
+        );
     }
 
     // The header, on the raw bytes. Total over every input: either a header or
