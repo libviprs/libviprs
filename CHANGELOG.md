@@ -1153,6 +1153,19 @@ and not under `Fixed`: this file is the only place they can be caught.
 
 ### Added
 
+- **PMTiles v3 format primitives** (issue #987). A new always-compiled
+  `libviprs::pmtiles` module carrying the 127-byte v3 header, the `(z, x, y)`
+  to `u64` Hilbert TileID mapping and its inverse, a bounded LEB128 varint, the
+  directory `Entry` model with the spec's column-oriented delta encoding and
+  its run-length rule, the libviprs metadata schema under a `vnd.libviprs` key,
+  and an object-safe `RangeReader` with a positional-read `FileRangeReader`
+  over a local file. No new dependency: the spec's gzip is `flate2`, which was
+  already here.
+
+  This is the format layer only. The indexed reader, the streaming writer and
+  the sink integration land separately, and nothing in the crate writes a
+  `.pmtiles` file yet.
+
 - **`.tif` and `.tiff` are save routes** (issue #948). `src/encode_tiff.rs` has
   had a working `Raster::save_tiff` with round-trip tests behind it all along,
   and neither save route ever grew a row, so `raster.save("out.tif")` answered

@@ -171,6 +171,7 @@ pub mod observe;
 pub mod pdf;
 pub mod pixel;
 pub mod planner;
+pub mod pmtiles;
 pub(crate) mod poison;
 pub mod radiance;
 pub mod raster;
