@@ -133,7 +133,7 @@ from here for exactly one commit.
 | `sink` | Tile output (filesystem, memory, slow sink for testing) |
 | `sink_packfile` | `PackfileSink` writing tiles into a tar/zip archive (gated by `packfile`) |
 | `sink_object_store` | `ObjectStoreSink` for user-injected object storage backends (gated by `object-store-sink`; the deprecated `s3` alias also enables it) |
-| `pmtiles` | PMTiles v3 archive format: 127-byte header, Hilbert TileIDs, directories, metadata, ranged reads |
+| `pmtiles` | PMTiles v3 archive format: 127-byte header, Hilbert TileIDs, directories, metadata, ranged reads, and a streaming bounded-memory `Writer` |
 | `resume` | Job checkpoints and resume policy for restart-safe runs |
 | `retry` | Failure / retry policy and `RetryingSink` wrapper |
 | `dedupe` | Content-addressed tile deduplication |
