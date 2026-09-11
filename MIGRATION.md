@@ -5,8 +5,8 @@ flips `FsSink::new` to a 2-arg constructor plus a `with_format` builder. This
 guide covers the call sites you are most likely to update.
 
 **This file also covers 0.4.0 to 0.5.0, further down.** That section covers the
-pyramid storage default moving to PMTiles, plus five specific renames and
-removals: the signed and 32-bit `PixelFormat` carriers, the collapsed
+new `PyramidStorage` type and the PMTiles archive behind it, plus five specific
+renames and removals: the signed and 32-bit `PixelFormat` carriers, the collapsed
 allocation refusals, `GifError::BadPageNumber`,
 `ConvolutionError::TimesOutOfRange`, and `ConversionError::UnsupportedSampleKind`.
 The rest of that release, the colour and rounding changes that move output
@@ -191,19 +191,26 @@ than silence. The other two, `PixelFormat`'s new carriers and
 `ConvolutionError::ZeroTimes`, are real: both existed in 0.4.0 in a form this
 release changes.
 
-## PMTiles is the default pyramid storage
+## PMTiles storage, and where the default actually flips
 
-This is the release's one behavioural break, and the only change anywhere in it
-that moves what lands on disk without moving a signature. It comes out of
-[EPIC F](https://github.com/libviprs/libviprs/issues/986), which put PMTiles v3
-in the crate.
+For a Rust caller this section is additive and you can read it for the new
+type rather than for a migration. Nothing here moves what your code writes.
+It comes out of [EPIC F](https://github.com/libviprs/libviprs/issues/986),
+which put PMTiles v3 in the crate.
 
 Before 0.5.0 a pyramid was always a tree of loose files under `{z}/{x}/{y}`,
-because `FsSink` was the only thing that could write one. From 0.5.0 the
-default storage is a single PMTiles v3 archive: every tile, the directories
-that index them and the pyramid's metadata in one `.pmtiles` file. At one
-pyramid it is a convenience. At 100k pyramids of 20k tiles it is the difference
-between one file each and about 2 billion files in total.
+because `FsSink` was the only thing that could write one. From 0.5.0 there is a
+second shape, and it is the one `PyramidStorage::default()` names: every tile,
+the directories that index them and the pyramid's metadata in a single
+`.pmtiles` file. At one pyramid it is a convenience. At 100k pyramids of 20k
+tiles it is the difference between one file each and about 2 billion files in
+total.
+
+The behaviour that actually flips is the `viprs` command line, where
+`viprs pyramid input.tif` writes an archive instead of a tree. That is
+[libviprs-cli#54](https://github.com/libviprs/libviprs-cli/issues/54), a
+different repository on a release of its own. The library stays sink-explicit,
+which is what EPIC F's compatibility section asks of it.
 
 ### Nothing you wrote stops compiling
 
@@ -226,7 +233,7 @@ grep -rn 'EngineBuilder::new' src/
 
 Every hit names its sink, so **if you are a Rust caller this particular change
 costs you nothing** and you can skip to the next section. The release has other
-breaks and they are below; this one is not among them for you. A default is
+breaks and they are below; this is not one of them. A default is
 what a caller gets when they do not choose, and until 0.5.0 there was no way
 not to choose.
 
@@ -238,7 +245,7 @@ has to reinvent it:
 ```rust
 use libviprs::{FsSink, Layout, PyramidStorage};
 
-// The default, which is the part that changed.
+// The default, which is the part that is new.
 assert_eq!(PyramidStorage::default(), PyramidStorage::PmTiles);
 
 // The old behaviour, restored by naming it.
