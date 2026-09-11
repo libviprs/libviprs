@@ -441,7 +441,7 @@ impl<W: Write + Seek> Sink<W> {
     }
 }
 
-/// Where payloads are staged on their way into the archive.
+/// Where payloads are staged, and where the index log is appended.
 ///
 /// One real variant and one that only exists under `cfg(test)`. The failure
 /// this writer has to survive is a `write_all` that writes some of its bytes
@@ -535,7 +535,7 @@ pub struct Writer<W: Write + Seek> {
     /// Staged payloads, appended in arrival order.
     staged: Option<Staging>,
     /// The append-only index log.
-    log: Option<BufWriter<File>>,
+    log: Option<Staging>,
     log_len: u64,
 
     /// Distinct payloads: content hash to a dense index.
@@ -649,7 +649,7 @@ impl<W: Write + Seek> Writer<W> {
             base,
             destination: None,
             staged: Some(Staging::Real(BufWriter::new(staged))),
-            log: Some(BufWriter::new(log)),
+            log: Some(Staging::Real(BufWriter::new(log))),
             log_len: 0,
             payloads: HashMap::new(),
             // The sentinel, which is what makes `payload_starts` self
@@ -736,12 +736,12 @@ impl<W: Write + Seek> Writer<W> {
             }
         };
 
-        let spilled = self.push_spill(Spill {
+        // `flush_run` latches its own write, so this is only a `?`.
+        self.push_spill(Spill {
             tile_id,
             payload,
             length,
-        });
-        self.latch("appending to the index log", spilled)?;
+        })?;
 
         self.tile_count += 1;
         self.min_zoom = self.min_zoom.min(z);
@@ -822,17 +822,31 @@ impl<W: Write + Seek> Writer<W> {
     }
 
     /// Sort what is in memory and append it to the log as one run.
+    ///
+    /// The write is latched here rather than at the call site, because this is
+    /// reached from more than one place and a half-written run leaves the log
+    /// in the same shape a half-written payload leaves the staging file: bytes
+    /// nothing accounts for, which the next run would be recorded after. The
+    /// durability barrier F1.4's sink calls (`sync_pending`, issue 990) lands
+    /// on this method, so it inherits the latch rather than having to remember
+    /// it.
     fn flush_run(&mut self) -> Result<(), PmTilesError> {
         if self.sort_buffer.is_empty() {
             return Ok(());
         }
         self.sort_buffer.sort_unstable();
-        let log = self.log.as_mut().expect("a live writer has its log");
         let start = self.log_len;
         let count = self.sort_buffer.len() as u64;
-        for record in &self.sort_buffer {
-            log.write_all(&record.encode())?;
-        }
+        let written = {
+            let Self {
+                log, sort_buffer, ..
+            } = self;
+            let log = log.as_mut().expect("a live writer has its log");
+            sort_buffer
+                .iter()
+                .try_for_each(|record| log.write_all(&record.encode()))
+        };
+        self.latch("appending to the index log", written)?;
         self.log_len += count * SPILL_RECORD_BYTES as u64;
         self.runs.push(Run { start, count });
         self.sort_buffer.clear();
@@ -885,7 +899,7 @@ impl<W: Write + Seek> Writer<W> {
             staged.finish()?;
         }
         if let Some(log) = self.log.take() {
-            log.into_inner().map_err(|e| e.into_error())?.sync_data()?;
+            log.finish()?;
         }
 
         let plan = self.plan_entries()?;
@@ -1576,6 +1590,18 @@ mod tests {
     }
 
     impl FailAfter {
+        fn over(base: &Path, suffix: &str, budget: usize) -> Self {
+            let into = std::fs::OpenOptions::new()
+                .write(true)
+                .open(suffixed(base, suffix))
+                .expect("a scratch file this writer just created");
+            Self {
+                into,
+                budget,
+                written: 0,
+            }
+        }
+
         pub(super) fn finish(self) -> std::io::Result<()> {
             self.into.sync_data()
         }
@@ -1604,16 +1630,16 @@ mod tests {
         /// Swap the staging writer for one that runs out of room, keeping the
         /// same underlying file.
         fn stage_into_a_full_disk_after(&mut self, budget: usize) {
-            let path = suffixed(&self.base, ".data");
-            let into = std::fs::OpenOptions::new()
-                .write(true)
-                .open(&path)
-                .expect("the staging file this writer just created");
-            self.staged = Some(Staging::FailsAfter(FailAfter {
-                into,
-                budget,
-                written: 0,
-            }));
+            self.staged = Some(Staging::FailsAfter(FailAfter::over(
+                &self.base, ".data", budget,
+            )));
+        }
+
+        /// The same, for the index log.
+        fn log_into_a_full_disk_after(&mut self, budget: usize) {
+            self.log = Some(Staging::FailsAfter(FailAfter::over(
+                &self.base, ".idx", budget,
+            )));
         }
     }
 
@@ -1815,6 +1841,75 @@ mod tests {
             !destination.exists(),
             "a run that could not write a tile published an archive anyway"
         );
+    }
+
+    /// The index log gets the same treatment, latched inside `flush_run`.
+    ///
+    /// The latch lives in `flush_run` rather than at its call site because
+    /// `add_tile` is not the only thing that reaches it: F1.4's sink calls a
+    /// durability barrier that flushes the sort buffer as a run, and a barrier
+    /// that failed half way through writing one would otherwise leave a
+    /// writer that still publishes.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_partial_write_to_the_index_log_latches_too() {
+        let dir = temp_dir();
+        let destination = dir.path().join("pyramid.pmtiles");
+        // One record a run, so every tile writes 20 bytes of log. 30 bytes of
+        // room means the second run is accepted for 10 and then refused.
+        let mut w = Writer::create(
+            &destination,
+            WriterOptions::default().with_sort_buffer_records(1),
+        )
+        .unwrap();
+        w.log_into_a_full_disk_after(30);
+
+        let first = b"one".as_slice();
+        w.add_tile(3, 0, 0, first, content_hash(first))
+            .expect("the first tile fits");
+
+        let second = b"two".as_slice();
+        let err = w
+            .add_tile(3, 1, 0, second, content_hash(second))
+            .expect_err("the log runs out of room");
+        assert!(matches!(err, PmTilesError::Io(_)), "got {err:?}");
+
+        let log_path = suffixed(&w.base, ".idx");
+        let on_disk = std::fs::metadata(&log_path).unwrap().len();
+        assert_eq!(
+            on_disk, 30,
+            "the log should hold one whole record and half of another"
+        );
+        assert_eq!(
+            w.log_len, SPILL_RECORD_BYTES as u64,
+            "and the writer should only account for the whole one"
+        );
+
+        let third = b"three".as_slice();
+        let err = w
+            .add_tile(3, 2, 0, third, content_hash(third))
+            .expect_err("a latched writer accepts nothing more");
+        assert!(
+            matches!(
+                err,
+                PmTilesError::WriterFailed {
+                    during: "appending to the index log"
+                }
+            ),
+            "got {err:?}"
+        );
+
+        let err = w.finish().expect_err("a latched writer must not publish");
+        assert!(
+            matches!(
+                err,
+                PmTilesError::WriterFailed {
+                    during: "appending to the index log"
+                }
+            ),
+            "got {err:?}"
+        );
+        assert!(!destination.exists());
     }
 
     /// A refusal that happens before any byte moves does not latch.
