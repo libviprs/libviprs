@@ -358,14 +358,20 @@ const ANCHOR_FILES: &[&str] = &[
 /// straight to `FileRangeReader::try_open`, which opens it inside the library,
 /// so that one is the `annotated not-detected` shape this ledger exists to
 /// pin.
-const EXPECTED_SRC_ANNOTATIONS: usize = 225;
+///
+/// #989 moved it 225 to 229: `src/pmtiles/writer.rs` arrived with four tests
+/// that write real files, three of them driving the writer's external merge
+/// over a spilled index log and the fourth checking that two writers sharing
+/// one scratch directory do not collide on a filename.
+const EXPECTED_SRC_ANNOTATIONS: usize = 229;
 /// Companion to [`EXPECTED_SRC_ANNOTATIONS`]: how many `src/` modules carry at
 /// least one annotation. #765 made it 25 by putting the first annotation in
 /// `src/analyze.rs`; `src/colour.rs` and `src/pdf.rs`, which took the other
 /// three, were already in the set.
 /// #987 made it 26 by putting the first annotation in `src/pmtiles/range.rs`,
 /// which is also the first annotated module that is not directly under `src/`.
-const EXPECTED_SRC_MODULES: usize = 26;
+/// #989 made it 27 the same way, with `src/pmtiles/writer.rs`.
+const EXPECTED_SRC_MODULES: usize = 27;
 
 /// How many tests in the tree reach `std::process`.
 ///
@@ -409,7 +415,15 @@ const EXPECTED_SRC_MODULES: usize = 26;
 /// Both run `git ls-files`, for the same underlying reason as the #701 row
 /// above: the index is the only place that can answer a question the working
 /// tree cannot.
-const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 22;
+///
+/// Twenty-three since #989, which added
+/// `killing_the_process_leaves_no_final_archive` in `tests/pmtiles_writer.rs`.
+/// That one spawns for a different reason from every row above it: it is not
+/// asking git a question the working tree cannot answer, it is re-executing
+/// the test binary as a child so the child can be killed with a real
+/// `SIGABRT` partway through writing an archive. Simulating the kill in
+/// process would test the simulation.
+const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 23;
 
 /// The filesystem-touching tests still allowed to run under Miri, and so still
 /// allowed to end the whole run on their first syscall.
@@ -499,7 +513,14 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// temporary file and read byte ranges back out of it. The eighth opens a path
 /// through the library and so is annotated without being detected, which is
 /// why this number moved by seven rather than by eight.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 295;
+///
+/// #989 moved it 295 to 320, which is the largest single move this count has
+/// taken: the PMTiles writer is a thing whose whole job is to put a file on
+/// disk atomically, so nearly every test of it stages payloads, spills an
+/// index log and reads an archive back. Twenty-one of the twenty-five are in
+/// `tests/pmtiles_writer.rs` and four are the unit tests in
+/// `src/pmtiles/writer.rs`.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 320;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
