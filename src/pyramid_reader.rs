@@ -1,0 +1,390 @@
+//! Reading a generated pyramid back, whatever it was written to.
+//!
+//! The engine has always had one way in and several ways out: a run can land
+//! in a directory of loose tiles, in a packfile, in an object store or, since
+//! #990, in one PMTiles archive. What it has not had is one way to ask "give
+//! me the tile at `z/x/y`" that does not care which of those it was. Anything
+//! that wanted to read a pyramid back had to know how it was stored, which is
+//! why the verify path is a directory walk and why nothing but a viewer ever
+//! opened an archive.
+//!
+//! [`PyramidReader`] is that one way in. Two implementations ship with it:
+//! [`DirectoryPyramidReader`] over a `{z}/{x}/{y}.{ext}` tree, and
+//! [`PmTilesPyramidReader`] over a single archive.
+//!
+//! # An absent tile is not an error
+//!
+//! [`PyramidReader::tile`] answers `Ok(None)` for a coordinate the pyramid
+//! does not have, and reserves `Err` for a pyramid it could not read. The
+//! distinction matters more than it looks: a sparse pyramid legitimately has
+//! holes, and a reader that cannot tell "there is no tile here" from "I could
+//! not find out" turns every hole into a failed run.
+//!
+//! # The comparison this module makes possible, and the way it lies
+//!
+//! Two backends that agree tile for tile are evidence that they agree, and
+//! nothing more. A sink and a reader that share a coordinate-mapping mistake
+//! agree perfectly and are both wrong, and a comparison over an empty
+//! coordinate set agrees most perfectly of all. So a cross-backend test needs
+//! a positive control on the tile set it compared, and at least one coordinate
+//! pinned against something neither backend produced.
+
+use std::path::{Path, PathBuf};
+
+use crate::planner::{Layout, PyramidPlan, TileCoord};
+use crate::sink::TileFormat;
+
+// ---------------------------------------------------------------------------
+// PyramidReadError
+// ---------------------------------------------------------------------------
+
+/// Everything that can go wrong reading a pyramid back.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum PyramidReadError {
+    /// An underlying read failed.
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+    /// A PMTiles archive refused something.
+    #[error("pmtiles error: {0}")]
+    PmTiles(#[from] crate::pmtiles::PmTilesError),
+    /// The backend is there but it cannot say what the pyramid is: no plan, no
+    /// metadata, nothing to describe it with.
+    #[error("the pyramid does not describe itself: {0}")]
+    NoDescription(String),
+    /// The path handed to a constructor is not the kind of thing that
+    /// constructor opens.
+    #[error("{path} is not {expected}")]
+    NotAPyramid { path: PathBuf, expected: String },
+}
+
+// ---------------------------------------------------------------------------
+// PyramidDescription
+// ---------------------------------------------------------------------------
+
+/// What a pyramid is, as far as its storage can say.
+///
+/// Every field past the level range is an `Option`, because the two backends
+/// know different things. A directory reader holds the plan that produced the
+/// tree and can answer all of it; an archive carries whatever its writer chose
+/// to record, and a foreign archive may carry none of it. An `Option` is the
+/// honest shape for "this backend does not know", and it is better than a
+/// plausible default that a caller cannot tell apart from a measurement.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct PyramidDescription {
+    /// Lowest level with tiles.
+    pub min_level: u32,
+    /// Highest level with tiles.
+    pub max_level: u32,
+    /// Tile edge in pixels, when the backend records it.
+    pub tile_size: Option<u32>,
+    /// The layout the tiles were placed with, when the backend records it.
+    pub layout: Option<Layout>,
+    /// The encoding the stored bytes are in, when the backend commits to one.
+    pub format: Option<TileFormat>,
+}
+
+// ---------------------------------------------------------------------------
+// PyramidReader
+// ---------------------------------------------------------------------------
+
+/// One way to read a generated pyramid, whatever it was stored in.
+///
+/// # Examples
+///
+/// ```
+/// use libviprs::planner::{Layout, PyramidPlanner, TileCoord};
+/// use libviprs::pyramid_reader::{DirectoryPyramidReader, PyramidReader};
+/// use libviprs::sink::TileFormat;
+/// use libviprs::{EngineBuilder, FsSink, PixelFormat, Raster};
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let dir = tempfile::tempdir()?;
+/// let plan = PyramidPlanner::new(256, 256, 256, 0, Layout::Xyz)?.plan();
+/// let src = Raster::new(256, 256, PixelFormat::Rgb8, vec![9u8; 256 * 256 * 3])?;
+///
+/// let root = dir.path().join("tiles");
+/// EngineBuilder::new(&src, plan.clone(), FsSink::new(&root, plan.clone())).run()?;
+///
+/// let reader = DirectoryPyramidReader::try_open(&root, plan, TileFormat::Png)?;
+/// let described = reader.describe()?;
+/// assert_eq!(described.tile_size, Some(256));
+///
+/// let coord = TileCoord { level: described.max_level, col: 0, row: 0 };
+/// assert!(reader.tile(coord)?.is_some());
+/// # Ok(())
+/// # }
+/// ```
+pub trait PyramidReader: Send + Sync {
+    /// What the pyramid is: levels, tile size, layout, encoding.
+    fn describe(&self) -> Result<PyramidDescription, PyramidReadError>;
+
+    /// The stored bytes of one tile, or `None` when the pyramid has no tile
+    /// there.
+    ///
+    /// The bytes come back exactly as they are stored, which for every backend
+    /// in this crate means the encoded image, not decoded pixels. An absent
+    /// tile is `Ok(None)`, never an error.
+    fn tile(&self, coord: TileCoord) -> Result<Option<Vec<u8>>, PyramidReadError>;
+
+    /// The encoding the stored bytes are in, when the backend commits to one.
+    fn tile_format(&self) -> Option<TileFormat> {
+        None
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DirectoryPyramidReader
+// ---------------------------------------------------------------------------
+
+/// A pyramid stored as loose files under the layout's own tile paths.
+///
+/// Reads through [`PyramidPlan::tile_path`], the same function
+/// [`FsSink`](crate::sink::FsSink) writes through, so the two cannot drift
+/// apart on where a tile lives.
+#[derive(Debug)]
+pub struct DirectoryPyramidReader {
+    base_dir: PathBuf,
+    plan: PyramidPlan,
+    format: TileFormat,
+}
+
+impl DirectoryPyramidReader {
+    /// Open the tree at `base_dir` as the pyramid `plan` describes.
+    ///
+    /// The plan is required rather than inferred. A directory of tiles does
+    /// not say what its level indices mean, how big a tile is or which layout
+    /// placed it, and a reader that guessed from the directory names would be
+    /// inventing a description rather than reporting one.
+    ///
+    /// # Errors
+    ///
+    /// [`PyramidReadError::NotAPyramid`] when `base_dir` is not a directory.
+    pub fn try_open(
+        base_dir: impl Into<PathBuf>,
+        plan: PyramidPlan,
+        format: TileFormat,
+    ) -> Result<Self, PyramidReadError> {
+        let base_dir = base_dir.into();
+        if !base_dir.is_dir() {
+            return Err(PyramidReadError::NotAPyramid {
+                path: base_dir,
+                expected: "a directory of tiles".to_string(),
+            });
+        }
+        Ok(Self {
+            base_dir,
+            plan,
+            format,
+        })
+    }
+
+    /// The directory the tiles are read from.
+    pub fn base_dir(&self) -> &Path {
+        &self.base_dir
+    }
+
+    /// The plan the tree was written with.
+    pub fn plan(&self) -> &PyramidPlan {
+        &self.plan
+    }
+}
+
+impl PyramidReader for DirectoryPyramidReader {
+    fn describe(&self) -> Result<PyramidDescription, PyramidReadError> {
+        let mut levels = self.plan.levels.iter().map(|level| level.level);
+        let first = levels
+            .next()
+            .ok_or_else(|| PyramidReadError::NoDescription("the plan has no levels".to_string()))?;
+        let (min_level, max_level) = levels.fold((first, first), |(lo, hi), level| {
+            (lo.min(level), hi.max(level))
+        });
+
+        Ok(PyramidDescription {
+            min_level,
+            max_level,
+            tile_size: Some(self.plan.tile_size),
+            layout: Some(self.plan.layout),
+            format: Some(self.format),
+        })
+    }
+
+    fn tile(&self, coord: TileCoord) -> Result<Option<Vec<u8>>, PyramidReadError> {
+        // `tile_path` answers `None` for a coordinate outside the plan's grid,
+        // which is a tile the pyramid does not have rather than a failure.
+        let Some(relative) = self.plan.tile_path(coord, self.format.extension()) else {
+            return Ok(None);
+        };
+        match std::fs::read(self.base_dir.join(relative)) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(PyramidReadError::Io(e)),
+        }
+    }
+
+    fn tile_format(&self) -> Option<TileFormat> {
+        Some(self.format)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PmTilesPyramidReader
+// ---------------------------------------------------------------------------
+
+/// A pyramid stored as one PMTiles v3 archive.
+///
+/// Wraps the indexed [`Reader`](crate::pmtiles::Reader) from #988 and maps
+/// [`TileCoord`] onto `(z, x, y)` through
+/// [`tile_coord_to_zxy`](crate::sink_pmtiles::tile_coord_to_zxy), the same
+/// function [`PmTilesSink`](crate::sink_pmtiles::PmTilesSink) writes through,
+/// so the two cannot drift apart on where a tile lives.
+#[derive(Debug)]
+pub struct PmTilesPyramidReader {
+    reader: crate::pmtiles::Reader<crate::pmtiles::FileRangeReader>,
+}
+
+impl PmTilesPyramidReader {
+    /// Open the archive at `path`.
+    ///
+    /// Reads the header and the root directory and nothing else; a tile is
+    /// fetched when it is asked for.
+    ///
+    /// # Errors
+    ///
+    /// [`PyramidReadError::PmTiles`] for a file that is not a readable v3
+    /// archive, and [`PyramidReadError::Io`] if it cannot be opened at all.
+    pub fn try_open(path: impl AsRef<Path>) -> Result<Self, PyramidReadError> {
+        Ok(Self {
+            reader: crate::pmtiles::Reader::try_open(path)?,
+        })
+    }
+
+    /// Wrap a reader the caller already opened.
+    pub fn from_reader(reader: crate::pmtiles::Reader<crate::pmtiles::FileRangeReader>) -> Self {
+        Self { reader }
+    }
+
+    /// The archive reader underneath, for the questions this trait does not
+    /// ask: the raw header, the root entries, the bounding box.
+    pub fn reader(&self) -> &crate::pmtiles::Reader<crate::pmtiles::FileRangeReader> {
+        &self.reader
+    }
+
+    /// What the archive says libviprs recorded about the run that produced it,
+    /// when it was libviprs that produced it.
+    fn generation(&self) -> Option<crate::manifest::GenerationSettings> {
+        self.reader
+            .metadata()
+            .ok()?
+            .vnd_libviprs
+            .as_ref()?
+            .generation
+            .clone()
+    }
+}
+
+impl PyramidReader for PmTilesPyramidReader {
+    fn describe(&self) -> Result<PyramidDescription, PyramidReadError> {
+        let header = self.reader.header();
+        let generation = self.generation();
+        Ok(PyramidDescription {
+            min_level: u32::from(header.min_zoom),
+            max_level: u32::from(header.max_zoom),
+            tile_size: generation.as_ref().map(|g| g.tile_size),
+            layout: generation.as_ref().map(|g| g.layout),
+            format: self.tile_format(),
+        })
+    }
+
+    fn tile(&self, coord: TileCoord) -> Result<Option<Vec<u8>>, PyramidReadError> {
+        // A coordinate PMTiles cannot address is a tile this pyramid does not
+        // have, the same answer the directory reader gives for a coordinate
+        // outside the plan. It is not an error, and it is emphatically not
+        // masked into a different, valid tile.
+        let Ok((z, x, y)) = crate::sink_pmtiles::tile_coord_to_zxy(coord) else {
+            return Ok(None);
+        };
+        Ok(self.reader.get_tile(z, x, y)?)
+    }
+
+    /// The encoding the stored bytes are in.
+    ///
+    /// From the `vnd.libviprs` namespace when the archive carries it, because
+    /// that is the only place the JPEG quality a [`TileFormat::Jpeg`] carries
+    /// is written down. A foreign JPEG archive therefore reports `None` rather
+    /// than a quality nobody measured; ask
+    /// [`Reader::tile_format`](crate::pmtiles::Reader::tile_format) for the
+    /// `TileType`, which is what the archive actually records.
+    fn tile_format(&self) -> Option<TileFormat> {
+        if let Some(generation) = self.generation() {
+            return Some(generation.format);
+        }
+        match self.reader.tile_format() {
+            crate::pmtiles::TileType::Png => Some(TileFormat::Png),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::planner::PyramidPlanner;
+
+    fn plan() -> PyramidPlan {
+        PyramidPlanner::new(512, 512, 256, 0, Layout::Xyz)
+            .expect("a square plan is valid")
+            .plan()
+    }
+
+    /// Opening something that is not a directory is a typed refusal rather
+    /// than a reader that answers `None` for everything.
+    ///
+    /// A reader over a path that does not exist would be indistinguishable
+    /// from a reader over an empty pyramid, and every test written against it
+    /// would pass.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn opening_a_path_that_is_not_a_directory_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("not-a-tree");
+        std::fs::write(&file, b"x").expect("write");
+
+        for candidate in [file, dir.path().join("absent")] {
+            match DirectoryPyramidReader::try_open(&candidate, plan(), TileFormat::Png) {
+                Err(PyramidReadError::NotAPyramid { .. }) => {}
+                other => panic!("{} must be refused, got {other:?}", candidate.display()),
+            }
+        }
+    }
+
+    /// A tile that is simply not on disk is absent, and one the plan does not
+    /// have is absent too. Neither is an error.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_missing_tile_and_an_impossible_coordinate_are_both_absent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let reader = DirectoryPyramidReader::try_open(dir.path(), plan(), TileFormat::Png)
+            .expect("an empty directory is still a directory");
+
+        let real = TileCoord {
+            level: 0,
+            col: 0,
+            row: 0,
+        };
+        assert!(
+            reader.plan().tile_path(real, "png").is_some(),
+            "the positive control: this coordinate is one the plan has, so the \
+             `None` below is about the file being missing"
+        );
+        assert_eq!(reader.tile(real).expect("absence is not an error"), None);
+
+        let impossible = TileCoord {
+            level: 99,
+            col: 0,
+            row: 0,
+        };
+        assert_eq!(reader.tile(impossible).expect("out of range"), None);
+    }
+}

@@ -465,6 +465,26 @@ impl Staging {
         }
     }
 
+    /// Push everything written so far through to the device, without closing.
+    ///
+    /// The barrier lives on `Staging` rather than at the call site so a caller
+    /// does not have to know which variant it is holding. This arrived with
+    /// `sync_pending` rather than with `Staging` itself, deliberately: a
+    /// capability with no caller is `dead_code` under `-D warnings`, and the two
+    /// halves were written on separate branches, which is how `sync_pending`
+    /// came to reach past this type for `flush` and `get_ref` and only failed
+    /// once the branches met.
+    fn sync(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Real(w) => {
+                w.flush()?;
+                w.get_ref().sync_data()
+            }
+            #[cfg(test)]
+            Self::FailsAfter(w) => w.sync(),
+        }
+    }
+
     /// Push everything through to the device and close.
     fn finish(self) -> std::io::Result<()> {
         match self {
@@ -811,6 +831,36 @@ impl<W: Write + Seek> Writer<W> {
     /// reporting the hard one.
     pub fn spilled_run_count(&self) -> usize {
         self.runs.len()
+    }
+
+    /// Make every tile accepted so far durable, without finalising anything.
+    ///
+    /// The durability barrier a checkpointed engine run needs
+    /// ([`TileSink::sync_pending`](crate::sink::TileSink::sync_pending)): the
+    /// records still in the sort buffer are appended to the index log as a
+    /// run, both scratch files are pushed through their buffers, and both are
+    /// `sync_data`d. After it returns, every `add_tile` that has been accepted
+    /// has its payload and its index record on stable storage.
+    ///
+    /// It does **not** make an archive appear. Nothing exists at the
+    /// destination until [`finish`](Writer::finish) renames it there, by
+    /// design, so what this buys a crashed run is that its staging is intact
+    /// and not that its output is half usable. A single-file archive has no
+    /// intermediate state a reader could open, which is the whole reason the
+    /// destination stays untouched until the end.
+    ///
+    /// Flushing the sort buffer as a run costs nothing: the external merge
+    /// takes any number of sorted runs, so a barrier that lands mid-buffer
+    /// produces a shorter run and no other difference.
+    pub fn sync_pending(&mut self) -> Result<(), PmTilesError> {
+        self.flush_run()?;
+        if let Some(staged) = self.staged.as_mut() {
+            staged.sync()?;
+        }
+        if let Some(log) = self.log.as_mut() {
+            log.sync()?;
+        }
+        Ok(())
     }
 
     fn push_spill(&mut self, record: Spill) -> Result<(), PmTilesError> {
@@ -1603,6 +1653,15 @@ mod tests {
         }
 
         pub(super) fn finish(self) -> std::io::Result<()> {
+            self.into.sync_data()
+        }
+
+        /// The durability barrier, honoured here too.
+        ///
+        /// A stand-in that skipped it would let a partial-write test pass for
+        /// the wrong reason: the bytes the assertion reads would not have
+        /// reached the file it reads them from.
+        pub(super) fn sync(&mut self) -> std::io::Result<()> {
             self.into.sync_data()
         }
     }

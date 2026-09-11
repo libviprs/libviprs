@@ -134,6 +134,8 @@ from here for exactly one commit.
 | `sink_packfile` | `PackfileSink` writing tiles into a tar/zip archive (gated by `packfile`) |
 | `sink_object_store` | `ObjectStoreSink` for user-injected object storage backends (gated by `object-store-sink`; the deprecated `s3` alias also enables it) |
 | `pmtiles` | PMTiles v3 archive format: 127-byte header, Hilbert TileIDs, directories, metadata, ranged reads, and a streaming bounded-memory `Writer` |
+| `sink_pmtiles` | `PmTilesSink` writing a whole pyramid into one PMTiles v3 archive |
+| `pyramid_reader` | `PyramidReader` and its directory and PMTiles implementations, for reading a generated pyramid back whatever it was stored in |
 | `resume` | Job checkpoints and resume policy for restart-safe runs |
 | `retry` | Failure / retry policy and `RetryingSink` wrapper |
 | `dedupe` | Content-addressed tile deduplication |

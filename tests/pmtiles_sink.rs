@@ -1,0 +1,1181 @@
+//! `PmTilesSink` driven by the real engine, and `DirectoryPyramidReader`
+//! (issue #990).
+//!
+//! # Nothing here reads the archive with our reader
+//!
+//! F1.2 (#988) owns the indexed reader and it is a sibling branch, so every
+//! archive this file produces is opened with the **format module** instead:
+//! [`Header::try_decode`], [`Compression::decompress`] and
+//! [`deserialize_entries`], which are #987's primitives and the same ones the
+//! writer's own suite uses. That is deliberate on two counts. It keeps this
+//! file green on a branch that does not carry the reader, and it keeps the
+//! sink from being proved correct by a reader that could share its mistake.
+//! The cross-backend equivalence through both [`PyramidReader`] impls lives in
+//! `tests/pmtiles_pyramid_reader.rs`, which does need the reader.
+//!
+//! The one thing a self-consistent walk still cannot settle is whether
+//! `TileCoord { level, col, row }` maps onto `(z, x, y)` the way the rest of
+//! the world does. A sink, a walk and a reader that all transpose `col` and
+//! `row` agree with each other perfectly. So the mapping is pinned against
+//! go-pmtiles' own tile ids, loaded at run time from
+//! `tests/fixtures/pmtiles/vectors/tileid.json`, by
+//! [`the_coordinate_mapping_matches_the_oracle_tile_ids`].
+//!
+//! # The two traps this file exists to catch
+//!
+//! * **Archive dedupe has to be unconditional.** [`DedupeStrategy`] defaults
+//!   to `None`, and under `None` `DedupeIndex::record` answers `WriteNew` for
+//!   every call by design. A sink that keys the archive's payload table off
+//!   that decision stores every duplicate on the default settings, and the
+//!   "duplicates collapse into one payload" criterion would then only hold for
+//!   a caller who had opted into `--dedupe-all`.
+//!   [`duplicate_tiles_collapse_to_one_payload_on_the_default_strategy`] runs
+//!   on the default and asserts the archive's own `tile_contents_count`.
+//! * **`checkpoint_root()` must not name the archive's directory.** Whatever
+//!   it returns is fed to `wipe_directory` on every `Overwrite`, whose
+//!   ownership guard then refuses any directory holding an unrelated file.
+//!   [`overwrite_leaves_the_unrelated_file_beside_the_archive_alone`] puts a
+//!   file there and runs Overwrite.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+
+use libviprs::engine::{BlankTileStrategy, EngineConfig};
+use libviprs::planner::{Layout, PyramidPlan, PyramidPlanner, TileCoord};
+use libviprs::pmtiles::directory::deserialize_entries;
+use libviprs::pmtiles::header::HEADER_BYTES;
+use libviprs::pmtiles::tileid::zxy_to_tileid;
+use libviprs::pmtiles::{Compression, Entry, Header, Metadata, TileType};
+use libviprs::pyramid_reader::{DirectoryPyramidReader, PyramidReader};
+use libviprs::resume::{ResumeMode, ResumePolicy};
+use libviprs::sink::{SinkError, Tile, TileFormat, TileSink};
+use libviprs::sink_pmtiles::{PmTilesSink, tile_coord_to_zxy};
+use libviprs::{EngineBuilder, FsSink, PixelFormat, Raster};
+
+#[path = "common/pmtiles_oracle.rs"]
+mod oracle;
+
+/// A generous ceiling for the gunzips below. Nothing a unit-scale run produces
+/// comes near it; the point of naming one at all is that PMTiles v3 stores no
+/// uncompressed length anywhere, so the output has to be capped rather than
+/// pre-sized.
+const DECOMPRESS_CEILING: usize = 1 << 22;
+
+// ---------------------------------------------------------------------------
+// Sources and plans
+// ---------------------------------------------------------------------------
+
+/// A raster where no two tiles can come out the same.
+fn gradient(w: u32, h: u32) -> Raster {
+    let mut data = vec![0u8; w as usize * h as usize * 3];
+    for y in 0..h {
+        for x in 0..w {
+            let off = (y as usize * w as usize + x as usize) * 3;
+            data[off] = (x % 251) as u8;
+            data[off + 1] = (y % 241) as u8;
+            data[off + 2] = ((x * 7 + y * 13) % 239) as u8;
+        }
+    }
+    Raster::new(w, h, PixelFormat::Rgb8, data).expect("a gradient raster is well formed")
+}
+
+/// A raster where every tile comes out the same, which is what a drawing
+/// pyramid mostly is.
+fn uniform(w: u32, h: u32) -> Raster {
+    Raster::new(
+        w,
+        h,
+        PixelFormat::Rgb8,
+        vec![0xf0; w as usize * h as usize * 3],
+    )
+    .expect("a uniform raster is well formed")
+}
+
+fn plan_for(w: u32, h: u32, tile: u32, layout: Layout) -> PyramidPlan {
+    PyramidPlanner::new(w, h, tile, 0, layout)
+        .expect("a square power-of-two plan is valid")
+        .plan()
+}
+
+// ---------------------------------------------------------------------------
+// Opening an archive with nothing but the format module
+// ---------------------------------------------------------------------------
+
+/// Every addressed tile of an archive, with the header that described it.
+struct Walked {
+    header: Header,
+    /// TileID to the stored payload, runs expanded and leaves followed.
+    tiles: BTreeMap<u64, Vec<u8>>,
+}
+
+impl Walked {
+    /// The payload stored for a plan coordinate.
+    ///
+    /// The mapping is spelled out here rather than routed through
+    /// `tile_coord_to_zxy`, which is the code under test. A walk that asks the
+    /// sink where it put a tile agrees with the sink whatever it answers, so a
+    /// transposition of `col` and `row` survived every comparison in this file
+    /// when it was written the other way. Measured: the mutation reddened only
+    /// the oracle test until this changed.
+    fn tile(&self, coord: TileCoord) -> Option<&Vec<u8>> {
+        let z = u8::try_from(coord.level).ok()?;
+        self.tiles
+            .get(&zxy_to_tileid(z, coord.col, coord.row).ok()?)
+    }
+}
+
+fn section(bytes: &[u8], header: &Header, offset: u64, length: u64) -> Vec<u8> {
+    let start = usize::try_from(offset).expect("a unit-scale archive fits in a usize");
+    let end = start + usize::try_from(length).expect("a unit-scale section fits in a usize");
+    header
+        .internal_compression
+        .decompress(&bytes[start..end], DECOMPRESS_CEILING)
+        .expect("the writer compresses its own sections with something it can read back")
+}
+
+fn push_run(tiles: &mut BTreeMap<u64, Vec<u8>>, bytes: &[u8], header: &Header, entry: Entry) {
+    let start = usize::try_from(header.tile_data_offset + entry.offset)
+        .expect("a unit-scale archive fits in a usize");
+    let blob = bytes[start..start + entry.length as usize].to_vec();
+    for i in 0..u64::from(entry.run_length) {
+        let previous = tiles.insert(entry.tile_id + i, blob.clone());
+        assert!(
+            previous.is_none(),
+            "tile id {} was addressed twice by one archive",
+            entry.tile_id + i
+        );
+    }
+}
+
+/// Read an archive with the format primitives and nothing else.
+fn walk(path: &Path) -> Walked {
+    let bytes =
+        std::fs::read(path).unwrap_or_else(|e| panic!("{} unreadable: {e}", path.display()));
+    let header = Header::try_decode(&bytes[..HEADER_BYTES]).expect("the sink wrote a v3 header");
+
+    let root = section(&bytes, &header, header.root_offset, header.root_length);
+    let mut tiles = BTreeMap::new();
+    for entry in deserialize_entries(&root).expect("the root directory parses") {
+        if entry.is_leaf() {
+            let leaf = section(
+                &bytes,
+                &header,
+                header.leaf_directories_offset + entry.offset,
+                u64::from(entry.length),
+            );
+            for inner in deserialize_entries(&leaf).expect("a leaf directory parses") {
+                assert!(!inner.is_leaf(), "this writer emits no leaves under leaves");
+                push_run(&mut tiles, &bytes, &header, inner);
+            }
+        } else {
+            push_run(&mut tiles, &bytes, &header, entry);
+        }
+    }
+    Walked { header, tiles }
+}
+
+/// The metadata object the archive stores, decompressed and parsed.
+fn walk_metadata(path: &Path) -> Metadata {
+    let bytes = std::fs::read(path).expect("the archive is readable");
+    let header = Header::try_decode(&bytes[..HEADER_BYTES]).expect("the sink wrote a v3 header");
+    let raw = section(
+        &bytes,
+        &header,
+        header.metadata_offset,
+        header.metadata_length,
+    );
+    Metadata::try_from_json(&raw).expect("the sink wrote parseable metadata")
+}
+
+// ---------------------------------------------------------------------------
+// Running the engine into a sink
+// ---------------------------------------------------------------------------
+
+/// Run one pyramid into a fresh `.pmtiles` under `dir` and return its path.
+fn run_into_archive(src: &Raster, plan: &PyramidPlan, dir: &Path) -> PathBuf {
+    let out = dir.join("pyramid.pmtiles");
+    let sink = PmTilesSink::builder(&out)
+        .plan(plan.clone())
+        .build()
+        .expect("a PNG XYZ sink builds");
+    EngineBuilder::new(src, plan.clone(), sink)
+        .run()
+        .expect("a unit-scale run into a PMTiles archive succeeds");
+    out
+}
+
+/// Run the same pyramid into a loose-file tree and return its root.
+fn run_into_directory(src: &Raster, plan: &PyramidPlan, dir: &Path) -> PathBuf {
+    let root = dir.join("tree");
+    let sink = FsSink::new(&root, plan.clone());
+    EngineBuilder::new(src, plan.clone(), sink)
+        .run()
+        .expect("a unit-scale run into a directory succeeds");
+    root
+}
+
+// ---------------------------------------------------------------------------
+// The headline criterion
+// ---------------------------------------------------------------------------
+
+/// An engine run into a `PmTilesSink` produces an archive that holds every
+/// planned coordinate, with the same bytes the loose-file sink wrote.
+///
+/// The positive control is the part that matters. An equivalence assertion
+/// over two backends that both answer nothing for every coordinate passes
+/// while proving nothing, so the planned coordinate set is asserted non-empty
+/// and the archive's addressed count is asserted to equal it before a single
+/// payload is compared.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn an_engine_run_produces_an_archive_holding_every_planned_tile() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    // Not square, deliberately: a square grid maps onto itself under a
+    // col/row transposition, so half the evidence would be missing.
+    let plan = plan_for(1024, 768, 256, Layout::Xyz);
+    let src = gradient(1024, 768);
+
+    let archive = run_into_archive(&src, &plan, dir.path());
+    let tree = run_into_directory(&src, &plan, dir.path());
+
+    let coords: Vec<TileCoord> = plan.tile_coords().collect();
+    assert!(
+        coords.len() >= 4,
+        "the positive control: a plan with fewer than four tiles cannot tell a \
+         working sink from one that writes nothing, got {}",
+        coords.len()
+    );
+
+    let walked = walk(&archive);
+    assert_eq!(
+        walked.tiles.len(),
+        coords.len(),
+        "the archive addresses a different number of tiles than the plan has"
+    );
+    assert_eq!(
+        walked.header.addressed_tiles_count,
+        coords.len() as u64,
+        "the header's addressed count disagrees with the plan"
+    );
+
+    let fs = DirectoryPyramidReader::try_open(&tree, plan.clone(), TileFormat::Png)
+        .expect("the directory the run just filled opens");
+    for coord in &coords {
+        let from_archive = walked
+            .tile(*coord)
+            .unwrap_or_else(|| panic!("{coord:?} is missing from the archive"));
+        let from_tree = fs
+            .tile(*coord)
+            .expect("the directory reader answers")
+            .unwrap_or_else(|| panic!("{coord:?} is missing from the tree"));
+        assert_eq!(
+            from_archive, &from_tree,
+            "{coord:?} differs between the archive and the loose-file tree"
+        );
+    }
+}
+
+/// `TileCoord { level, col, row }` addresses the `(z, x, y)` go-pmtiles
+/// addresses, and the tile id that comes out is the one it computes.
+///
+/// This is the only assertion in the file that does not come from this crate.
+/// Twelve rows from zoom 9 to 15, off every quadrant boundary, four of them
+/// arranged as swapped pairs, so a mapping that transposes `col` and `row` has
+/// nowhere to hide: `(13, 5107, 2884)` is 79053962 and `(13, 2884, 5107)` is
+/// 53847284.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn the_coordinate_mapping_matches_the_oracle_tile_ids() {
+    let vectors = oracle::tileid_vectors();
+    let rows = oracle::tile_id_rows(&vectors, "convention_discriminators");
+    assert_eq!(
+        rows.len(),
+        12,
+        "the discriminating set is twelve rows; a parse that found fewer would \
+         pass every loop below vacuously"
+    );
+
+    for row in &rows {
+        let coord = TileCoord {
+            level: u32::from(row.z),
+            col: row.x,
+            row: row.y,
+        };
+        let (z, x, y) = tile_coord_to_zxy(coord).expect("a discriminator is addressable");
+        assert_eq!(
+            (z, x, y),
+            (row.z, row.x, row.y),
+            "level/col/row must map straight onto z/x/y"
+        );
+        assert_eq!(
+            zxy_to_tileid(z, x, y).expect("a discriminator has an id"),
+            row.tile_id,
+            "({z}, {x}, {y}) must be tile id {}",
+            row.tile_id
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Dedupe, which has to be unconditional
+// ---------------------------------------------------------------------------
+
+/// Identical tiles at different coordinates collapse into **one** stored
+/// payload, on the default dedupe strategy.
+///
+/// `DedupeStrategy::None` is the default and it makes `DedupeIndex::record`
+/// answer `WriteNew` for every tile on purpose, so a sink that drives the
+/// archive's payload table off that decision stores every duplicate here and
+/// passes the issue's dedupe criterion only when a caller has turned dedupe
+/// on. The assertion is the archive's own `tile_contents_count`, and the
+/// control beside it is that more than one tile was addressed: one payload out
+/// of one tile proves nothing.
+///
+/// The tiles are handed to the sink directly rather than produced by a run,
+/// because a real pyramid's levels have different pixel geometries and so
+/// cannot all be the same bytes. The engine-driven half is
+/// [`an_engine_run_collapses_its_identical_tiles`].
+#[test]
+#[cfg_attr(miri, ignore)]
+fn duplicate_tiles_collapse_to_one_payload_on_the_default_strategy() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let plan = plan_for(1024, 1024, 256, Layout::Xyz);
+    let out = dir.path().join("dupes.pmtiles");
+
+    assert_eq!(
+        EngineConfig::default().dedupe_strategy,
+        None,
+        "this test is about the DEFAULT strategy; if the default changed the \
+         trap it guards moved with it"
+    );
+
+    let sink = PmTilesSink::builder(&out)
+        .plan(plan.clone())
+        .build()
+        .expect("the sink builds");
+    let top = plan
+        .levels
+        .iter()
+        .map(|level| level.level)
+        .max()
+        .expect("a plan has levels");
+    let mut addressed = 0u64;
+    for coord in plan.tile_coords().filter(|c| c.level == top) {
+        sink.write_tile(&Tile {
+            coord,
+            raster: uniform(256, 256),
+            blank: false,
+        })
+        .expect("the sink takes a tile");
+        addressed += 1;
+    }
+    sink.finish().expect("the archive publishes");
+
+    assert!(
+        addressed > 1,
+        "the negative control: one payload out of one tile proves nothing, got \
+         {addressed} tiles"
+    );
+
+    let walked = walk(&out);
+    assert_eq!(walked.header.addressed_tiles_count, addressed);
+    assert_eq!(
+        walked.header.tile_contents_count, 1,
+        "{addressed} identical tiles are one stored payload"
+    );
+    let distinct: BTreeSet<&Vec<u8>> = walked.tiles.values().collect();
+    assert_eq!(
+        distinct.len(),
+        1,
+        "and every id resolves to that one payload"
+    );
+}
+
+/// A real run over a uniform source stores far fewer payloads than it
+/// addresses, on the default strategy.
+///
+/// The levels of a pyramid have different pixel geometries, so not every tile
+/// can be the same bytes; what must hold is that the ones that are the same
+/// are stored once. The full-resolution level alone is sixteen identical
+/// tiles, so the biggest group is the assertion, and `tile_contents_count`
+/// agreeing with the set of distinct payloads is what ties the header's claim
+/// to the bytes.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn an_engine_run_collapses_its_identical_tiles() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let plan = plan_for(1024, 1024, 256, Layout::Xyz);
+    let archive = run_into_archive(&uniform(1024, 1024), &plan, dir.path());
+    let walked = walk(&archive);
+
+    let mut groups: BTreeMap<&Vec<u8>, usize> = BTreeMap::new();
+    for blob in walked.tiles.values() {
+        *groups.entry(blob).or_default() += 1;
+    }
+    assert_eq!(
+        walked.header.tile_contents_count as usize,
+        groups.len(),
+        "the header's payload count must be the number of distinct payloads \
+         actually stored"
+    );
+    assert!(
+        groups.len() < walked.tiles.len(),
+        "a uniform pyramid that stores one payload per tile has deduped nothing"
+    );
+    let biggest = groups.values().copied().max().unwrap_or_default();
+    assert!(
+        biggest >= 16,
+        "the sixteen tiles of the full-resolution level are the same bytes and \
+         must share one payload, biggest group was {biggest}"
+    );
+}
+
+/// A blank tile is stored, not skipped, even under
+/// `BlankTileStrategy::Placeholder`.
+///
+/// `PackfileSink::write_tile` returns early on `tile.blank`, and copying that
+/// into a PMTiles sink leaves a hole: the format has no placeholder concept, a
+/// missing tile id is a missing tile, and the whole point of keying the
+/// payload table on content is that ten thousand blanks cost one payload. The
+/// 1-byte `BLANK_TILE_MARKER` is not written either, because a one-byte blob
+/// is not a decodable tile.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn blank_tiles_are_stored_as_real_tiles_rather_than_skipped_or_marked() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let plan = plan_for(512, 512, 256, Layout::Xyz);
+    let src = uniform(512, 512);
+    let out = dir.path().join("blank.pmtiles");
+
+    let sink = PmTilesSink::builder(&out)
+        .plan(plan.clone())
+        .build()
+        .expect("the sink builds");
+    EngineBuilder::new(&src, plan.clone(), sink)
+        .with_blank_strategy(BlankTileStrategy::Placeholder)
+        .run()
+        .expect("a placeholder run into a PMTiles archive succeeds");
+
+    let walked = walk(&out);
+    let coords: Vec<TileCoord> = plan.tile_coords().collect();
+    assert_eq!(
+        walked.tiles.len(),
+        coords.len(),
+        "a blank tile is still a tile and still needs an id"
+    );
+    for coord in &coords {
+        let blob = walked
+            .tile(*coord)
+            .unwrap_or_else(|| panic!("{coord:?} was skipped"));
+        assert!(
+            blob.starts_with(&[0x89, b'P', b'N', b'G']),
+            "{coord:?} stored {} bytes that are not a PNG, so the placeholder \
+             marker reached the archive",
+            blob.len()
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The engine hooks
+// ---------------------------------------------------------------------------
+
+/// The sink reports the format it encodes, and the resume plan contract picks
+/// it up.
+///
+/// A `None` here is not cosmetic: it changes the plan hash and makes
+/// `raster_verify` probe every known extension instead of the one the sink
+/// writes, which silently loosens both.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn content_format_is_the_configured_format() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let plan = plan_for(256, 256, 256, Layout::Xyz);
+
+    let png = PmTilesSink::builder(dir.path().join("a.pmtiles"))
+        .plan(plan.clone())
+        .build()
+        .expect("a PNG sink builds");
+    assert_eq!(png.content_format(), Some(TileFormat::Png));
+
+    let jpeg = PmTilesSink::builder(dir.path().join("b.pmtiles"))
+        .plan(plan.clone())
+        .tile_format(TileFormat::Jpeg { quality: 71 })
+        .build()
+        .expect("a JPEG sink builds");
+    assert_eq!(
+        jpeg.content_format(),
+        Some(TileFormat::Jpeg { quality: 71 })
+    );
+
+    let config = EngineConfig::default();
+    let contract = libviprs::resume::PlanContract::from_engine(&config, &jpeg);
+    assert_eq!(
+        contract.format,
+        Some(TileFormat::Jpeg { quality: 71 }),
+        "the resume contract reads the format through the sink"
+    );
+}
+
+/// The run's engine settings reach the archive's `vnd.libviprs` namespace.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn the_engine_config_reaches_the_archive_metadata() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let plan = plan_for(512, 512, 256, Layout::Xyz);
+    let archive = dir.path().join("meta.pmtiles");
+    let sink = PmTilesSink::builder(&archive)
+        .plan(plan.clone())
+        .build()
+        .expect("the sink builds");
+    // A concurrency the fallback cannot produce. Without it, a
+    // `record_engine_config` that dropped the config on the floor would leave
+    // `concurrency: 0`, which is also what the default says, and this test
+    // would pass while proving the hook is wired.
+    EngineBuilder::new(&gradient(512, 512), plan.clone(), sink)
+        .with_concurrency(3)
+        .run()
+        .expect("a run with three workers succeeds");
+
+    let meta = walk_metadata(&archive);
+    let vnd = meta
+        .vnd_libviprs
+        .expect("the sink stamps its own namespace into the metadata");
+    assert_eq!(vnd.coordinate_convention, "zxy");
+    let generation = vnd
+        .generation
+        .expect("record_engine_config gives the namespace its generation block");
+    assert_eq!(generation.tile_size, 256);
+    assert_eq!(generation.layout, Layout::Xyz);
+    assert_eq!(generation.format, TileFormat::Png);
+    assert_eq!(
+        generation.concurrency, 3,
+        "the run's worker count comes from the engine config the hook captured, \
+         and 3 is a value no fallback produces"
+    );
+
+    let source = vnd.source.expect("the source block records the raster");
+    assert_eq!((source.width, source.height), (512, 512));
+}
+
+/// The archive's zoom range is the plan's level range.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn the_archive_zoom_range_is_the_plan_level_range() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let plan = plan_for(512, 512, 256, Layout::Xyz);
+    let archive = run_into_archive(&gradient(512, 512), &plan, dir.path());
+    let walked = walk(&archive);
+
+    let levels: Vec<u32> = plan.levels.iter().map(|l| l.level).collect();
+    assert_eq!(
+        u32::from(walked.header.min_zoom),
+        *levels.iter().min().expect("a plan has levels")
+    );
+    assert_eq!(
+        u32::from(walked.header.max_zoom),
+        *levels.iter().max().expect("a plan has levels")
+    );
+    assert_eq!(walked.header.tile_type, TileType::Png);
+    assert_eq!(walked.header.tile_compression, Compression::None);
+}
+
+/// `sync_pending` moves the staged bytes out of the writer's buffer and onto
+/// the disk.
+///
+/// The control is the assertion before the barrier: the staging files must
+/// still be **empty**, or the test is measuring a flush that had already
+/// happened for unrelated reasons and would stay green with the barrier
+/// removed. `arm_durability_tracking` is called first because the engine calls
+/// it first; the barrier does not depend on it, and the sink's docs say so.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn sync_pending_pushes_the_staged_payloads_out_of_the_buffer() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let plan = plan_for(512, 512, 256, Layout::Xyz);
+    let out = dir.path().join("durable.pmtiles");
+    let sink = PmTilesSink::builder(&out)
+        .plan(plan.clone())
+        .build()
+        .expect("the sink builds");
+    sink.arm_durability_tracking();
+
+    let mut written = 0usize;
+    for coord in plan.tile_coords().take(6) {
+        let tile = Tile {
+            coord,
+            raster: gradient(64, 64),
+            blank: false,
+        };
+        sink.write_tile(&tile).expect("the sink takes a tile");
+        written += 1;
+    }
+    assert!(
+        written >= 4,
+        "the positive control: fewer than four tiles is not a buffer"
+    );
+
+    let (files, before) = staging(dir.path(), &out);
+    assert!(
+        files >= 1,
+        "the positive control: no staging file means this test is measuring \
+         nothing at all"
+    );
+    assert_eq!(
+        before, 0,
+        "the control: the staged payloads must still be in the writer's buffer, \
+         otherwise the barrier below is not what put them on disk"
+    );
+
+    sink.sync_pending().expect("the durability barrier runs");
+
+    let (_, after) = staging(dir.path(), &out);
+    assert!(
+        after > 0,
+        "sync_pending left {after} staged bytes on disk for {written} tiles"
+    );
+}
+
+/// How many files the sink is staging under `dir`, and how many bytes of them
+/// have reached the disk. Everything that is not the archive itself.
+fn staging(dir: &Path, archive: &Path) -> (usize, u64) {
+    let mut files = 0;
+    let mut bytes = 0;
+    for entry in std::fs::read_dir(dir).expect("the output directory is readable") {
+        let entry = entry.expect("a directory entry");
+        if entry.path() == archive || entry.path().is_dir() {
+            continue;
+        }
+        files += 1;
+        bytes += entry.metadata().expect("stat").len();
+    }
+    (files, bytes)
+}
+
+// ---------------------------------------------------------------------------
+// checkpoint_root, the run lock, and the resume modes
+// ---------------------------------------------------------------------------
+
+/// An `Overwrite` run does not wipe the directory the archive sits in.
+///
+/// `prepare_resume_state` hands `sink.checkpoint_root()` to `wipe_directory`,
+/// whose ownership guard refuses any directory that is non-empty and holds no
+/// `.libviprs-job.json`. A sink returning the archive's own parent therefore
+/// either deletes a user's files or refuses every Overwrite run the moment one
+/// of their files is there. Both halves are asserted: the unrelated file
+/// survives **and** the run succeeds.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn overwrite_leaves_the_unrelated_file_beside_the_archive_alone() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let bystander = dir.path().join("notes.txt");
+    std::fs::write(&bystander, b"someone else's file").expect("write the bystander");
+
+    let plan = plan_for(512, 512, 256, Layout::Xyz);
+    let out = dir.path().join("over.pmtiles");
+    let sink = PmTilesSink::builder(&out)
+        .plan(plan.clone())
+        .build()
+        .expect("the sink builds");
+
+    EngineBuilder::new(&gradient(512, 512), plan, sink)
+        .with_resume(ResumePolicy::overwrite())
+        .run()
+        .expect("an Overwrite run into a PMTiles archive is not refused");
+
+    assert_eq!(
+        std::fs::read(&bystander).expect("the bystander survives"),
+        b"someone else's file",
+        "Overwrite wiped a file it does not own"
+    );
+    assert!(out.is_file(), "the archive was still produced");
+}
+
+/// The sink exposes no checkpoint root at all.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn the_sink_exposes_no_checkpoint_root() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let plan = plan_for(256, 256, 256, Layout::Xyz);
+    let sink = PmTilesSink::builder(dir.path().join("cp.pmtiles"))
+        .plan(plan)
+        .build()
+        .expect("the sink builds");
+
+    assert!(
+        sink.checkpoint_root().is_none(),
+        "a single-file archive has no directory of tiles to checkpoint against, \
+         and anything it returned here would be wiped on Overwrite"
+    );
+}
+
+/// Two sinks aimed at one archive cannot both exist.
+///
+/// They would share `<path>.tmp.data` and `<path>.tmp.idx` and corrupt each
+/// other's staging, so the second one is refused rather than allowed to race.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_second_sink_on_one_archive_is_refused() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let plan = plan_for(256, 256, 256, Layout::Xyz);
+    let out = dir.path().join("contended.pmtiles");
+
+    let first = PmTilesSink::builder(&out)
+        .plan(plan.clone())
+        .build()
+        .expect("the first sink takes the lock");
+    assert!(
+        first.job_dir().is_dir(),
+        "the lock lives in a sidecar directory the sink owns"
+    );
+
+    let second = PmTilesSink::builder(&out).plan(plan.clone()).build();
+    match second {
+        Err(SinkError::RunLock(libviprs::ResumeError::Locked { .. })) => {}
+        other => panic!("a second sink on one archive must be refused, got {other:?}"),
+    }
+
+    // And the refusal is not permanent: releasing the first one frees it.
+    drop(first);
+    PmTilesSink::builder(&out)
+        .plan(plan)
+        .build()
+        .expect("the lock is released with the sink that held it");
+}
+
+/// `ResumeMode::Resume` is refused by name at build time.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn resume_is_refused_by_name() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let plan = plan_for(256, 256, 256, Layout::Xyz);
+
+    let built = PmTilesSink::builder(dir.path().join("r.pmtiles"))
+        .plan(plan)
+        .resume_mode(ResumeMode::Resume)
+        .build();
+    match built {
+        Err(SinkError::UnsupportedResumeMode {
+            mode: ResumeMode::Resume,
+        }) => {}
+        other => panic!("Resume must be refused by name, got {other:?}"),
+    }
+    assert!(
+        !dir.path().join("r.pmtiles").exists(),
+        "a refused build leaves nothing behind"
+    );
+}
+
+/// `ResumeMode::Verify` is refused by name at build time.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn verify_is_refused_by_name() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let plan = plan_for(256, 256, 256, Layout::Xyz);
+
+    let built = PmTilesSink::builder(dir.path().join("v.pmtiles"))
+        .plan(plan)
+        .resume_mode(ResumeMode::Verify)
+        .build();
+    match built {
+        Err(SinkError::UnsupportedResumeMode {
+            mode: ResumeMode::Verify,
+        }) => {}
+        other => panic!("Verify must be refused by name, got {other:?}"),
+    }
+}
+
+/// A resume that would actually drop a tile is refused at the tile, not
+/// silently honoured.
+///
+/// `seed_completed_tile` is the one hook the engine calls for each coordinate
+/// a resume skips. A sink that leaves it at the trait default answers `Ok` and
+/// the archive comes out missing every pre-crash tile, which is the silent
+/// corruption the issue asks to avoid.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn seeding_a_completed_tile_is_refused_rather_than_accepted() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let plan = plan_for(256, 256, 256, Layout::Xyz);
+    let sink = PmTilesSink::builder(dir.path().join("seed.pmtiles"))
+        .plan(plan)
+        .build()
+        .expect("the sink builds");
+
+    let tile = Tile {
+        coord: TileCoord {
+            level: 0,
+            col: 0,
+            row: 0,
+        },
+        raster: gradient(8, 8),
+        blank: false,
+    };
+    match sink.seed_completed_tile(&tile) {
+        Err(SinkError::UnsupportedResumeMode {
+            mode: ResumeMode::Resume,
+        }) => {}
+        other => panic!("a skipped resume tile must be refused, got {other:?}"),
+    }
+}
+
+/// A `Verify` run against a PMTiles sink fails instead of reporting a green
+/// audit of a directory tree that does not exist.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_verify_run_against_an_archive_does_not_report_success() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let plan = plan_for(256, 256, 256, Layout::Xyz);
+    let out = dir.path().join("verify.pmtiles");
+    let sink = PmTilesSink::builder(&out)
+        .plan(plan.clone())
+        .build()
+        .expect("the sink builds");
+
+    let result = EngineBuilder::new(&gradient(256, 256), plan, sink)
+        .with_engine(libviprs::EngineKind::Monolithic)
+        .with_resume(ResumePolicy::verify())
+        .run();
+    match result {
+        Err(libviprs::EngineError::VerifyRequiresOnDiskSink) => {}
+        // Naming the variant is what makes this a guard. `is_err()` alone stays
+        // green for a sink that hands Verify a directory to walk and gets
+        // "missing tile for coord" back on the first coordinate, which is the
+        // half-supported shape this is here to rule out.
+        other => panic!(
+            "Verify walks a loose-file tree, so it must refuse a single-file \
+             archive outright, got {other:?}"
+        ),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// What the sink refuses
+// ---------------------------------------------------------------------------
+
+/// A layout whose level index is not a zoom is refused.
+///
+/// `Layout::Xyz` and `Layout::Google` address `(z, x, y)`. DeepZoom, Zoomify
+/// and IIIF do not: their level index is a tier and their tile path is not a
+/// `z/x/y` triple, so an archive built from one is addressable and renders
+/// nonsense in anything that opens it.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_layout_that_is_not_addressed_by_zxy_is_refused() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    for layout in [Layout::DeepZoom, Layout::Zoomify] {
+        let plan = plan_for(512, 512, 256, layout);
+        let built = PmTilesSink::builder(dir.path().join("layout.pmtiles"))
+            .plan(plan)
+            .build();
+        match built {
+            Err(SinkError::Unsupported(msg)) => {
+                assert!(
+                    msg.contains("layout"),
+                    "the refusal must name the layout, got {msg}"
+                );
+            }
+            other => panic!("{layout:?} must be refused, got {other:?}"),
+        }
+    }
+
+    // The control: the two layouts that do map onto (z, x, y) still build.
+    for layout in [Layout::Xyz, Layout::Google] {
+        let plan = plan_for(512, 512, 256, layout);
+        PmTilesSink::builder(dir.path().join(format!("{layout:?}.pmtiles")))
+            .plan(plan)
+            .build()
+            .unwrap_or_else(|e| panic!("{layout:?} must still build, got {e}"));
+    }
+}
+
+/// `TileFormat::Raw` is refused, because PMTiles has no tile type for it.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn raw_tiles_are_refused_because_the_format_cannot_describe_them() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let plan = plan_for(256, 256, 256, Layout::Xyz);
+    let built = PmTilesSink::builder(dir.path().join("raw.pmtiles"))
+        .plan(plan)
+        .tile_format(TileFormat::Raw)
+        .build();
+    match built {
+        Err(SinkError::PmTiles(libviprs::pmtiles::PmTilesError::UnsupportedTileFormat {
+            format: TileFormat::Raw,
+        })) => {}
+        other => panic!("raw pixel bytes are not a PMTiles tile, got {other:?}"),
+    }
+}
+
+/// The builder refuses to build without a plan.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn the_builder_refuses_to_build_without_a_plan() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    match PmTilesSink::builder(dir.path().join("noplan.pmtiles")).build() {
+        Err(SinkError::MissingField("PmTilesSinkBuilder::plan")) => {}
+        other => panic!("a sink without a plan must not build, got {other:?}"),
+    }
+}
+
+/// Finishing twice is a typed error rather than a second archive.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn finishing_twice_is_a_typed_error() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let plan = plan_for(512, 512, 256, Layout::Xyz);
+    let out = dir.path().join("twice.pmtiles");
+    let sink = PmTilesSink::builder(&out)
+        .plan(plan.clone())
+        .build()
+        .expect("the sink builds");
+
+    for coord in plan.tile_coords() {
+        let tile = Tile {
+            coord,
+            raster: gradient(32, 32),
+            blank: false,
+        };
+        sink.write_tile(&tile).expect("the sink takes a tile");
+    }
+    sink.finish()
+        .expect("the first finish publishes the archive");
+    assert!(out.is_file(), "the archive is there after the first finish");
+
+    match sink.finish() {
+        Err(SinkError::Unsupported(msg)) => {
+            assert!(
+                msg.contains("finished"),
+                "the second finish must say the sink is finished, got {msg}"
+            );
+        }
+        other => panic!("a second finish must be a typed error, got {other:?}"),
+    }
+}
+
+/// Writing after `finish` is refused rather than silently dropped.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn writing_after_finish_is_refused() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let plan = plan_for(256, 256, 256, Layout::Xyz);
+    let out = dir.path().join("after.pmtiles");
+    let sink = PmTilesSink::builder(&out)
+        .plan(plan.clone())
+        .build()
+        .expect("the sink builds");
+
+    for coord in plan.tile_coords() {
+        sink.write_tile(&Tile {
+            coord,
+            raster: gradient(16, 16),
+            blank: false,
+        })
+        .expect("the sink takes a tile");
+    }
+    sink.finish().expect("finish publishes");
+
+    let late = sink.write_tile(&Tile {
+        coord: TileCoord {
+            level: 0,
+            col: 0,
+            row: 0,
+        },
+        raster: gradient(16, 16),
+        blank: false,
+    });
+    assert!(
+        late.is_err(),
+        "a tile written after the archive was published has nowhere to go"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The one hashing call site
+// ---------------------------------------------------------------------------
+
+/// The tile path hashes each tile exactly once, through `DedupeIndex`.
+///
+/// #990 says the engine's digest must be passed into the writer rather than
+/// recomputed, and #989's `add_tile` takes the digest as a parameter precisely
+/// so it never re-derives one. The only way that promise is broken is a second
+/// hashing call site inside the sink, so this reads the module and asserts
+/// there is exactly one, with a positive control that the read found the file
+/// it thinks it did.
+#[test]
+fn the_sink_hashes_a_tile_in_exactly_one_place() {
+    let source = include_str!("../src/sink_pmtiles.rs");
+    assert!(
+        source.len() > 4_000,
+        "the positive control: this assertion is worthless if the include \
+         picked up an empty or truncated file ({} bytes)",
+        source.len()
+    );
+
+    let code: Vec<&str> = source
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect();
+    let code = code.join("\n");
+
+    let digests = code.matches("content_digest(").count();
+    assert_eq!(
+        digests, 1,
+        "the sink takes its digest from DedupeIndex in exactly one place"
+    );
+    for forbidden in ["blake3", "content_hash(", "hash_content"] {
+        assert!(
+            !code.contains(forbidden),
+            "the sink must not hash a tile itself; found {forbidden:?}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DirectoryPyramidReader
+// ---------------------------------------------------------------------------
+
+/// The directory reader returns the bytes `FsSink` wrote, and `None` for a
+/// coordinate the pyramid does not have.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn the_directory_reader_returns_what_the_run_wrote_and_none_elsewhere() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let plan = plan_for(512, 512, 256, Layout::Xyz);
+    let tree = run_into_directory(&gradient(512, 512), &plan, dir.path());
+
+    let reader = DirectoryPyramidReader::try_open(&tree, plan.clone(), TileFormat::Png)
+        .expect("the tree opens");
+
+    let mut seen = 0usize;
+    for coord in plan.tile_coords() {
+        let bytes = reader
+            .tile(coord)
+            .expect("the reader answers")
+            .unwrap_or_else(|| panic!("{coord:?} is missing"));
+        let on_disk = std::fs::read(
+            tree.join(
+                plan.tile_path(coord, "png")
+                    .expect("a planned coord has a path"),
+            ),
+        )
+        .expect("the file is there");
+        assert_eq!(bytes, on_disk);
+        seen += 1;
+    }
+    assert!(
+        seen >= 4,
+        "the positive control: a reader that answered nothing would pass an \
+         empty loop"
+    );
+
+    let off_the_end = TileCoord {
+        level: 0,
+        col: 4_000,
+        row: 4_000,
+    };
+    assert_eq!(
+        reader
+            .tile(off_the_end)
+            .expect("out of range is not an error"),
+        None,
+        "a coordinate the plan does not have is absent, not a failure"
+    );
+}
+
+/// The directory reader resolves a tile through the plan's own tile path, not
+/// through a hardcoded `{z}/{x}/{y}.png`.
+///
+/// This test exists because a mutation that replaced the `plan.tile_path` call
+/// with exactly that literal reddened nothing: every other test in this file
+/// uses `Layout::Xyz` and PNG, which is the one shape the literal reproduces.
+/// Two things tell them apart and both are here, a layout whose tile path is
+/// not a `z/x/y` triple and a tile encoding whose extension is not `png`.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn the_directory_reader_resolves_a_tile_through_the_plan_not_a_literal_path() {
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    // DeepZoom writes `{level}/{col}_{row}.{ext}`, which is not a z/x/y triple.
+    let deep = plan_for(512, 512, 256, Layout::DeepZoom);
+    let deep_root = dir.path().join("deep");
+    EngineBuilder::new(
+        &gradient(512, 512),
+        deep.clone(),
+        FsSink::new(&deep_root, deep.clone()),
+    )
+    .run()
+    .expect("a DeepZoom run into a directory succeeds");
+
+    let reader = DirectoryPyramidReader::try_open(&deep_root, deep.clone(), TileFormat::Png)
+        .expect("the DeepZoom tree opens");
+    let mut seen = 0usize;
+    for coord in deep.tile_coords() {
+        assert!(
+            reader.tile(coord).expect("the reader answers").is_some(),
+            "{coord:?} is missing from a DeepZoom tree, so the reader is not              reading through the plan"
+        );
+        seen += 1;
+    }
+    assert!(
+        seen >= 4,
+        "the positive control: an empty loop proves nothing"
+    );
+
+    // And an encoding whose extension is not `png`.
+    let jpeg = plan_for(512, 512, 256, Layout::Xyz);
+    let jpeg_root = dir.path().join("jpeg");
+    let quality = TileFormat::Jpeg { quality: 80 };
+    EngineBuilder::new(
+        &gradient(512, 512),
+        jpeg.clone(),
+        FsSink::new(&jpeg_root, jpeg.clone()).with_format(quality),
+    )
+    .run()
+    .expect("a JPEG run into a directory succeeds");
+
+    let reader = DirectoryPyramidReader::try_open(&jpeg_root, jpeg.clone(), quality)
+        .expect("the JPEG tree opens");
+    let mut seen = 0usize;
+    for coord in jpeg.tile_coords() {
+        let bytes = reader
+            .tile(coord)
+            .expect("the reader answers")
+            .unwrap_or_else(|| panic!("{coord:?} is missing from a JPEG tree"));
+        assert!(
+            bytes.starts_with(&[0xff, 0xd8, 0xff]),
+            "{coord:?} came back without a JPEG signature, so the extension the              reader used was not the one the sink wrote"
+        );
+        seen += 1;
+    }
+    assert!(
+        seen >= 4,
+        "the positive control: an empty loop proves nothing"
+    );
+}
+
+/// The directory reader describes the pyramid it was opened over.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn the_directory_reader_describes_the_pyramid() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let plan = plan_for(512, 512, 256, Layout::Xyz);
+    let tree = run_into_directory(&gradient(512, 512), &plan, dir.path());
+
+    let reader = DirectoryPyramidReader::try_open(&tree, plan.clone(), TileFormat::Png)
+        .expect("the tree opens");
+    let described = reader.describe().expect("the plan describes itself");
+
+    assert_eq!(described.tile_size, Some(256));
+    assert_eq!(described.layout, Some(Layout::Xyz));
+    assert_eq!(described.format, Some(TileFormat::Png));
+    assert_eq!(
+        described.max_level,
+        plan.levels
+            .iter()
+            .map(|l| l.level)
+            .max()
+            .expect("a plan has levels")
+    );
+    assert_eq!(reader.tile_format(), Some(TileFormat::Png));
+}
