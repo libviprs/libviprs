@@ -220,6 +220,7 @@ annotated   fs-detected  src/pmtiles/range.rs::an_empty_file_is_never_an_archive
 annotated   fs-detected  src/pmtiles/range.rs::one_reader_serves_several_threads_at_once
 annotated   not-detected src/pmtiles/range.rs::opening_something_that_is_not_there_is_a_typed_error
 annotated   fs-detected  src/pmtiles/range.rs::the_bound_is_on_offset_plus_length_not_on_length_alone
+annotated   fs-detected  src/pmtiles/range.rs::the_out_of_range_refusal_names_the_range_and_the_file
 annotated   fs-detected  src/radiance.rs::save_radiance_writes_a_file_decode_radiance_reads_back
 annotated   fs-detected  src/radiance.rs::the_fuzz_corpus_decodes_or_fails_exactly_as_named
 annotated   fs-detected  src/resample.rs::thumbnail_crop_free_fn_fills_and_crops_the_box
@@ -361,8 +362,19 @@ annotated   fs-detected  tests/path_traversal.rs::verify_streams_large_tile_with
 annotated   fs-detected  tests/pdfium_source_audit.rs::audit_gate_accepts_patched_core
 annotated   fs-detected  tests/pdfium_source_audit.rs::audit_gate_rejects_unpatched_consumer
 annotated   fs-detected  tests/pdfium_source_audit.rs::patchless_downstream_consumer_resolves_the_fork
+annotated   not-detected tests/pmtiles_format.rs::every_golden_header_decodes_and_re_encodes_byte_for_byte
 annotated   fs-detected  tests/pmtiles_format.rs::file_range_reader_returns_exactly_the_bytes_asked_for
 annotated   fs-detected  tests/pmtiles_format.rs::range_reader_is_object_safe
+annotated   not-detected tests/pmtiles_format.rs::the_dupes_golden_carries_both_shapes_of_deduplication
+annotated   not-detected tests/pmtiles_format.rs::the_enumerated_low_zoom_orders_are_hilbert_and_not_z_order
+annotated   not-detected tests/pmtiles_format.rs::the_golden_root_directories_decode_and_re_serialise_byte_for_byte
+annotated   not-detected tests/pmtiles_format.rs::the_leaf_golden_decodes_and_re_serialises_every_one_of_its_six_leaves
+annotated   not-detected tests/pmtiles_format.rs::the_off_grid_oracle_rows_hold
+annotated   not-detected tests/pmtiles_format.rs::the_oracle_level_bases_are_where_each_zoom_starts_and_ends
+annotated   not-detected tests/pmtiles_format.rs::the_oracle_tile_id_vectors_are_the_file_this_suite_was_pinned_against
+annotated   not-detected tests/pmtiles_format.rs::the_rows_go_pmtiles_masks_are_refused_by_name
+annotated   not-detected tests/pmtiles_format.rs::the_structural_oracle_rows_hold
+annotated   not-detected tests/pmtiles_format.rs::the_twelve_convention_discriminators_from_the_oracle_hold
 annotated   fs-detected  tests/radiance_ported_surface.rs::encode_and_save_round_trip_from_outside_the_crate
 annotated   fs-detected  tests/sample_kind_spine.rs::a_byte_width_is_never_compared_outside_the_named_countdown
 annotated   not-detected tests/sample_kind_spine.rs::the_walk_descends_into_subdirectories
