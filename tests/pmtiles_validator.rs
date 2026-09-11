@@ -293,8 +293,11 @@ fn the_leaf_pointers_resolve_relative_to_the_leaf_section() {
 #[cfg_attr(miri, ignore)]
 fn the_walked_leaf_entries_are_the_ones_go_pmtiles_decoded() {
     let bytes = golden("leaves-z0z7.pmtiles", LEAVES_GOLDEN_SHA256);
-    let report = validate_bytes(&bytes, &ValidationLimits::default().with_collect_entries(true))
-        .expect("the archive reads");
+    let report = validate_bytes(
+        &bytes,
+        &ValidationLimits::default().with_collect_entries(true),
+    )
+    .expect("the archive reads");
 
     let oracle = oracle_leaves();
     let mut compared = 0usize;
@@ -342,7 +345,10 @@ fn the_walk_counts_both_shapes_of_deduplication() {
     )
     .expect("the archive reads");
     assert!(report.findings.is_empty(), "{:?}", report.findings);
-    assert_eq!(report.root_entries, 67, "entries after run-length collapsing");
+    assert_eq!(
+        report.root_entries, 67,
+        "entries after run-length collapsing"
+    );
     assert_eq!(report.addressed_tiles, 85, "tiles the archive addresses");
     assert_eq!(report.tile_contents, Some(63), "distinct tile payloads");
 }
@@ -459,9 +465,7 @@ fn wrong_magic_and_wrong_version_are_each_their_own_finding() {
     let report = validate_bytes(&wrong_magic, &ValidationLimits::default()).expect("readable");
     assert_eq!(
         report.findings,
-        vec![Finding::BadMagic {
-            found: *b"NOTPMTs"
-        }],
+        vec![Finding::BadMagic { found: *b"NOTPMTs" }],
         "a non-archive should produce exactly one finding and stop"
     );
     assert!(report.header.is_none());
@@ -482,8 +486,7 @@ fn wrong_magic_and_wrong_version_are_each_their_own_finding() {
 fn an_archive_shorter_than_the_header_is_flagged() {
     let full = golden("raster-z0z2.pmtiles", RASTER_GOLDEN_SHA256);
     for len in [0usize, 1, 7, 8, 126] {
-        let report =
-            validate_bytes(&full[..len], &ValidationLimits::default()).expect("readable");
+        let report = validate_bytes(&full[..len], &ValidationLimits::default()).expect("readable");
         assert_eq!(
             report.findings,
             vec![Finding::ArchiveTooShort {
@@ -593,8 +596,11 @@ fn overlapping_runs_are_flagged() {
             run_length: 1,
         },
     ];
-    let report = validate_bytes(&archive_around(&entries, &[0u8; 20]), &ValidationLimits::default())
-        .expect("readable");
+    let report = validate_bytes(
+        &archive_around(&entries, &[0u8; 20]),
+        &ValidationLimits::default(),
+    )
+    .expect("readable");
     assert!(
         report.findings.iter().any(|f| matches!(
             f,
@@ -622,8 +628,11 @@ fn an_entry_pointing_outside_the_tile_data_is_flagged() {
         run_length: 1,
     }];
     // Only 20 bytes of tile data, and the entry claims 64.
-    let report = validate_bytes(&archive_around(&entries, &[0u8; 20]), &ValidationLimits::default())
-        .expect("readable");
+    let report = validate_bytes(
+        &archive_around(&entries, &[0u8; 20]),
+        &ValidationLimits::default(),
+    )
+    .expect("readable");
     assert!(
         report.findings.iter().any(|f| matches!(
             f,
