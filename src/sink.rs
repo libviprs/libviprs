@@ -6,7 +6,7 @@ use std::sync::MutexGuard;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use crate::planner::{PyramidPlan, TileCoord};
+use crate::planner::{Layout, PyramidPlan, TileCoord};
 use crate::raster::Raster;
 use thiserror::Error;
 
@@ -671,6 +671,136 @@ impl TileFormat {
             Self::Png => "png",
             Self::Jpeg { .. } => "jpeg",
             Self::Raw => "raw",
+        }
+    }
+}
+
+/// The extension a PMTiles archive carries, without the dot.
+///
+/// One spelling, so the library, the CLI and the documentation cannot drift
+/// apart on it.
+pub const PMTILES_EXTENSION: &str = "pmtiles";
+
+/// Where a pyramid lands when nothing says otherwise.
+///
+/// A pyramid is an immutable, indexed artifact, and until 0.5.0 this crate
+/// only ever materialised one as a tree of loose files under `{z}/{x}/{y}`
+/// ([`FsSink`]). That is fine for one pyramid on a laptop and ruinous at fleet
+/// scale: 100k pyramids of 20k tiles each is around 2 billion files, which is
+/// inode pressure, a backup that never finishes, and an object-store bill made
+/// mostly of request counts. [`PyramidStorage::PmTiles`] puts the whole
+/// pyramid, its index and its metadata in one PMTiles v3 archive that still
+/// answers a single-tile question in a couple of ranged reads, and it is the
+/// default.
+///
+/// This type is the one place that choice is made, so nothing downstream has
+/// to guess at it. It picks the storage and the output path and stops there:
+/// the sink is still constructed by name and handed to
+/// [`EngineBuilder`](crate::engine_builder::EngineBuilder), so no existing
+/// caller changes shape. A `PmTilesSink` aimed at [`output_path`] writes the
+/// archive; an [`FsSink`] aimed at the same base writes the tree.
+///
+/// The match in each method below has no wildcard arm, so a third storage
+/// fails to compile here rather than quietly inheriting the archive's answers.
+///
+/// [`output_path`]: PyramidStorage::output_path
+///
+/// # Examples
+///
+/// <!-- storage-example -->
+/// ```
+/// use libviprs::{Layout, PyramidStorage};
+/// use std::path::Path;
+///
+/// // Nothing said otherwise, so the pyramid lands in one indexed archive.
+/// let storage = PyramidStorage::default();
+/// assert_eq!(storage, PyramidStorage::PmTiles);
+/// assert_eq!(storage.output_path("city"), Path::new("city.pmtiles"));
+/// assert_eq!(storage.required_layout(), Some(Layout::Xyz));
+///
+/// // The tree of loose files is still one value away.
+/// let storage = PyramidStorage::Directory;
+/// assert_eq!(storage.output_path("city"), Path::new("city"));
+/// assert_eq!(storage.extension(), None);
+/// assert_eq!(storage.required_layout(), None);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[non_exhaustive]
+pub enum PyramidStorage {
+    /// One PMTiles v3 archive holding every tile, the directories that index
+    /// them and the metadata describing the pyramid. The default since 0.5.0.
+    #[default]
+    PmTiles,
+    /// The tree of loose files under `{z}/{x}/{y}` that [`FsSink`] writes,
+    /// and the only storage this crate had before 0.5.0.
+    Directory,
+}
+
+impl PyramidStorage {
+    /// The extension this storage's output carries, or `None` for a directory.
+    ///
+    /// A directory has no extension of its own. DeepZoom's `.dzi` manifest is
+    /// a sibling file rather than the output itself, which is why this answers
+    /// `None` there rather than `"dzi"`.
+    #[must_use]
+    pub const fn extension(self) -> Option<&'static str> {
+        match self {
+            Self::PmTiles => Some(PMTILES_EXTENSION),
+            Self::Directory => None,
+        }
+    }
+
+    /// The layout this storage forces, or `None` where any layout works.
+    ///
+    /// PMTiles v3 addresses a tile by a single `u64` derived from `(z, x, y)`
+    /// on a Hilbert curve, and that `(z, x, y)` is the same convention as
+    /// [`Layout::Xyz`]. There is no encoding in the format for DeepZoom's
+    /// `{level}/{col}_{row}` naming or for Google's `z/y/x`, so an archive is
+    /// XYZ or it is nothing. A directory carries its layout in its own path
+    /// shape and takes all three.
+    #[must_use]
+    pub const fn required_layout(self) -> Option<Layout> {
+        match self {
+            Self::PmTiles => Some(Layout::Xyz),
+            Self::Directory => None,
+        }
+    }
+
+    /// Where the output actually lands, given the base a caller asked for.
+    ///
+    /// A directory is the base, unchanged. An archive is the base with
+    /// `.pmtiles` **appended**, unless it already ends in `.pmtiles`
+    /// (compared without case, because on macOS and Windows `city.PMTILES`
+    /// and `city.PMTILES.pmtiles` name the same file and appending there
+    /// would write the archive over the base it came from).
+    ///
+    /// Appended rather than substituted, deliberately.
+    /// [`Path::set_extension`] replaces everything after the last dot, so it
+    /// turns `tiles.v2` into `tiles.pmtiles` and loses the `v2`. Appending
+    /// gives `tiles.v2.pmtiles`, which is uglier and never surprising. If you
+    /// want `city.tif` to become `city.pmtiles`, hand this the stem rather
+    /// than the whole name.
+    ///
+    /// The base is not read, created or checked here. This is path
+    /// arithmetic, and the sink is what touches the filesystem.
+    #[must_use]
+    pub fn output_path(self, base: impl AsRef<Path>) -> PathBuf {
+        let base = base.as_ref();
+        match self {
+            Self::Directory => base.to_path_buf(),
+            Self::PmTiles => {
+                if base
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case(PMTILES_EXTENSION))
+                {
+                    return base.to_path_buf();
+                }
+                let mut name = base.as_os_str().to_os_string();
+                name.push(".");
+                name.push(PMTILES_EXTENSION);
+                PathBuf::from(name)
+            }
         }
     }
 }
