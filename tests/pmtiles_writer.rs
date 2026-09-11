@@ -507,6 +507,120 @@ fn a_tile_entry_inside_a_leaf_is_relative_to_the_tile_data_section() {
     );
 }
 
+/// Every tile in every leaf resolves through `tile_data_offset`, on an archive
+/// whose leaves do **not** all start at offset 0.
+///
+/// # Why the golden cannot do this on its own
+///
+/// I found this with a mutation and it is worth writing down, because it is a
+/// hole in the only leaf-bearing fixture that exists. `leaves-z0z7` holds two
+/// distinct payloads, at offsets 0 and 72, alternating, and **all six of its
+/// leaves have a first entry at offset 0**. So "relative to the leaf's own
+/// start" and "relative to the tile data section" produce byte-identical
+/// archives for it, and the test above, which pins the golden, stays green for
+/// a writer that rebases its leaf entries onto the leaf. I mutated the writer
+/// to do exactly that and nothing went red.
+///
+/// This builds the fixture the golden is not: 16384 tiles with 16384 distinct
+/// payloads, forced into eight leaves, so leaf `k`'s first entry sits far from
+/// zero and a rebase changes every offset in seven leaves out of eight. The
+/// positive control below is the one the golden fails, and it is what makes
+/// the sweep over every entry mean something.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn every_tile_in_every_leaf_resolves_through_the_tile_data_offset() {
+    let dir = scratch();
+    let out = dir.path().join("many-leaves.pmtiles");
+
+    // Zoom 7 is exactly 16384 tiles, ids 5461..=21844, which is also the point
+    // at which the writer stops trying to fit everything in the root.
+    let ids: Vec<u64> = (5461u64..5461 + 16384).collect();
+    let payload_for = |id: u64| format!("a distinct payload for tile {id}").into_bytes();
+
+    let mut w = Writer::create(
+        &out,
+        WriterOptions::default()
+            .with_tile_type(TileType::Png)
+            .with_leaf_entries(2048),
+    )
+    .unwrap();
+    for id in &ids {
+        let (z, x, y) = libviprs::pmtiles::tileid_to_zxy(*id).unwrap();
+        let payload = payload_for(*id);
+        w.add_tile(z, x, y, &payload, content_hash(&payload))
+            .unwrap();
+    }
+    w.finish().unwrap();
+
+    let bytes = std::fs::read(&out).unwrap();
+    let header = Header::try_decode(&bytes[..127]).unwrap();
+    assert!(
+        header.leaf_directories_length > 0,
+        "this should have spilled"
+    );
+
+    let root = deserialize_entries(&gunzip(section(
+        &bytes,
+        header.root_offset,
+        header.root_length,
+    )))
+    .unwrap();
+    assert!(
+        root.len() >= 8,
+        "expected at least eight leaves, got {}",
+        root.len()
+    );
+
+    let mut leaf_starts = Vec::new();
+    let mut checked = 0usize;
+    let mut leaf_base_would_differ = 0usize;
+    for pointer in &root {
+        assert!(pointer.is_leaf());
+        let leaf_start = header.leaf_directories_offset + pointer.offset;
+        let leaf = deserialize_entries(&gunzip(section(
+            &bytes,
+            leaf_start,
+            u64::from(pointer.length),
+        )))
+        .unwrap();
+        leaf_starts.push(leaf[0].offset);
+        for entry in &leaf {
+            let want = payload_for(entry.tile_id);
+            let got = section(
+                &bytes,
+                header.tile_data_offset + entry.offset,
+                u64::from(entry.length),
+            );
+            assert_eq!(
+                got,
+                &want[..],
+                "tile {} resolved to the wrong bytes",
+                entry.tile_id
+            );
+            checked += 1;
+            // The negative control, counted rather than asserted one at a
+            // time: resolving through the leaf's own first entry instead of
+            // the tile data section has to land somewhere else for this
+            // fixture to be discriminating at all.
+            if leaf[0].offset != 0 {
+                leaf_base_would_differ += 1;
+            }
+        }
+    }
+
+    assert_eq!(checked, 16384, "the sweep did not visit every tile");
+    // The positive control the golden cannot give: leaves that start away from
+    // zero. Without this the whole sweep above passes for a rebasing writer.
+    let away_from_zero = leaf_starts.iter().filter(|o| **o != 0).count();
+    assert!(
+        away_from_zero >= 7,
+        "only {away_from_zero} of {} leaves start away from offset 0, so this \
+         fixture cannot tell the two bases apart",
+        leaf_starts.len()
+    );
+    assert!(leaf_base_would_differ >= 14000);
+}
+
 /// `leaf_directories_offset` is not zero when there are no leaves: it equals
 /// `tile_data_offset`, and the **length** is the flag.
 ///
@@ -1133,6 +1247,79 @@ fn a_finalize_that_cannot_publish_leaves_no_partial_archive() {
         .filter(|n| n != "blocked.pmtiles")
         .collect();
     assert!(left.is_empty(), "a failed finalize left {left:?} behind");
+}
+
+// ---------------------------------------------------------------------------
+// Bounded memory
+// ---------------------------------------------------------------------------
+
+/// An archive built through a real external merge is byte-identical to one
+/// built with everything sorted in memory.
+///
+/// The sort buffer is an option rather than a constant precisely so this test
+/// can exist: the default is a million records and writing a million tiles to
+/// reach the merge would make the suite unusable, so this writes 3000 with a
+/// 128-record buffer and gets 24 runs out of it.
+///
+/// The positive control is `spilled_run_count`. Without it the test passes
+/// unchanged against a writer that never spills at all, which is exactly the
+/// path it is supposed to be avoiding.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn an_external_merge_produces_the_same_archive_as_an_in_memory_sort() {
+    let dir = scratch();
+
+    // Zoom 6 is ids 1365..=5460. Take 3000 of them, added back to front so the
+    // arrival order is the reverse of the order the archive needs.
+    let ids: Vec<u64> = (1365u64..1365 + 3000).rev().collect();
+
+    let build = |name: &str, buffer: usize| -> (Vec<u8>, usize) {
+        let out = dir.path().join(name);
+        let mut w = Writer::create(
+            &out,
+            WriterOptions::default()
+                .with_tile_type(TileType::Png)
+                .with_sort_buffer_records(buffer),
+        )
+        .unwrap();
+        for id in &ids {
+            let (z, x, y) = libviprs::pmtiles::tileid_to_zxy(*id).unwrap();
+            // Four distinct payloads, so dedupe and the RLE both have work to
+            // do and the merge is not sorting a set of identical records.
+            let payload = format!("payload {}", id % 4).into_bytes();
+            w.add_tile(z, x, y, &payload, content_hash(&payload))
+                .unwrap();
+        }
+        let runs = w.spilled_run_count();
+        w.finish().unwrap();
+        (std::fs::read(&out).unwrap(), runs)
+    };
+
+    let (merged, merged_runs) = build("merged.pmtiles", 128);
+    let (in_memory, in_memory_runs) = build("in-memory.pmtiles", usize::MAX);
+
+    assert!(
+        merged_runs >= 23,
+        "3000 records at 128 to a run should spill 23 runs, got {merged_runs}"
+    );
+    assert_eq!(
+        in_memory_runs, 0,
+        "the in-memory build should not have spilled a run before finish"
+    );
+    assert_eq!(
+        merged, in_memory,
+        "the external merge produced a different archive than the in-memory sort"
+    );
+
+    // And the archive is actually right, not merely consistent with itself.
+    let mine = parse_ours(&merged);
+    assert_eq!(mine.header.addressed_tiles_count, 3000);
+    assert_eq!(mine.header.tile_contents_count, 4);
+    assert!(
+        mine.entries.windows(2).all(|w| w[0].tile_id < w[1].tile_id),
+        "the merge did not produce ascending tile ids"
+    );
+    assert_eq!(mine.tiles.len(), 3000);
 }
 
 // ---------------------------------------------------------------------------
