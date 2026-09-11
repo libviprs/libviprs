@@ -1260,12 +1260,24 @@ fn metadata_is_read_lazily_and_only_once() {
 }
 
 /// The libviprs namespace survives a write and a read through a real archive.
+///
+/// The stored spelling is asserted on the bytes, not only through the round
+/// trip. A round trip through our own serialiser and our own parser is blind
+/// to a symmetric rename: call the key `vnd_libviprs` in both directions and
+/// every assertion below still passes while the archive stops being readable
+/// by anyone else. I found that by mutating the rename and watching this test
+/// stay green.
 #[test]
 fn the_libviprs_namespace_round_trips_through_an_archive() {
     let mut metadata =
         Metadata::try_from_json(br#"{"name":"drawing"}"#).expect("the seed metadata parses");
     metadata.vnd_libviprs = Some(LibviprsMetadata::default());
     let json = metadata.to_json().expect("serialising metadata");
+    assert!(
+        String::from_utf8_lossy(&json).contains("\"vnd.libviprs\""),
+        "the namespace is stored under its dotted name: {}",
+        String::from_utf8_lossy(&json)
+    );
 
     let root = vec![Entry {
         tile_id: 0,
