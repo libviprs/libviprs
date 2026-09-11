@@ -112,11 +112,17 @@ const ROOT_BUDGET: usize = (ROOT_CEILING as usize) - HEADER_BYTES;
 
 /// Above this many entries, do not even try to fit them all in the root.
 ///
-/// A directory entry cannot encode in fewer than four bytes (one per column),
-/// so 16384 entries cannot fit in a 16257-byte budget even before compression
-/// is considered. Trying anyway would mean serialising the whole entry list
-/// into memory to find that out, which is the one allocation this writer is
-/// built to avoid.
+/// This is a cutoff, not an arithmetic impossibility, and it is worth being
+/// precise about which: 21844 entries of a two-payload pyramid gzip to a few
+/// hundred bytes and **would** fit the 16257-byte budget comfortably. What the
+/// cutoff buys is that the try itself is bounded, because finding out means
+/// holding the whole entry list in memory, which is the one allocation this
+/// writer exists to avoid.
+///
+/// It is also go-pmtiles' cutoff, at the same value, and that is why an
+/// archive built here from a given tile set has the same leaf structure as one
+/// the reference builds from it rather than a flat root the reference would
+/// never produce.
 const ROOT_ONLY_MAX_ENTRIES: u64 = 16384;
 
 /// Entries per leaf directory, before the doubling loop in
@@ -143,13 +149,6 @@ const ENTRY_RECORD_BYTES: usize = 8 + 8 + 4 + 4;
 
 /// Copy buffer for moving staged payloads and leaf bytes into the archive.
 const COPY_BUFFER_BYTES: usize = 64 * 1024;
-
-/// The whole Web Mercator extent, in the header's degrees-times-ten-million
-/// units. `85.0511287` is the latitude where the projection is square.
-const WORLD_MIN_LON_E7: i32 = -1_800_000_000;
-const WORLD_MIN_LAT_E7: i32 = -850_511_287;
-const WORLD_MAX_LON_E7: i32 = 1_800_000_000;
-const WORLD_MAX_LAT_E7: i32 = 850_511_287;
 
 /// Disambiguates the scratch prefix of two writers sharing one directory.
 static SCRATCH_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -224,6 +223,15 @@ pub struct WriterOptions {
     /// the root fit. Lower it to make a leaf cheaper to fetch, raise it to
     /// make the root smaller.
     pub leaf_entries: usize,
+    /// How many index records are sorted in memory before a sorted run is
+    /// written out to the log.
+    ///
+    /// This is the writer's memory ceiling for the sort, at 20 bytes a record,
+    /// and it is an option rather than a constant so a test can reach the
+    /// external merge without writing a million tiles. A bounded-memory claim
+    /// that only an unreachable constant can exercise is a claim nothing
+    /// checks.
+    pub sort_buffer_records: usize,
 }
 
 impl Default for WriterOptions {
@@ -237,6 +245,7 @@ impl Default for WriterOptions {
             center_degrees: (0.0, 0.0),
             center_zoom: None,
             leaf_entries: DEFAULT_LEAF_ENTRIES,
+            sort_buffer_records: SORT_RUN_RECORDS,
         }
     }
 }
@@ -288,6 +297,13 @@ impl WriterOptions {
     /// Set how many entries a leaf directory starts out holding.
     pub fn with_leaf_entries(mut self, entries: usize) -> Self {
         self.leaf_entries = entries;
+        self
+    }
+
+    /// Set how many index records are sorted in memory before a run is
+    /// spilled.
+    pub fn with_sort_buffer_records(mut self, records: usize) -> Self {
+        self.sort_buffer_records = records;
         self
     }
 }
@@ -588,9 +604,19 @@ impl<W: Write + Seek> Writer<W> {
         self.payloads.len()
     }
 
+    /// How many sorted runs have been spilled to the index log so far.
+    ///
+    /// Public because it is the only way to tell a real external merge from an
+    /// in-memory sort that happened to fit, and a bounded-memory test with no
+    /// way to check that it exercised the merge is testing the easy path and
+    /// reporting the hard one.
+    pub fn spilled_run_count(&self) -> usize {
+        self.runs.len()
+    }
+
     fn push_spill(&mut self, record: Spill) -> Result<(), PmTilesError> {
         self.sort_buffer.push(record);
-        if self.sort_buffer.len() >= SORT_RUN_RECORDS {
+        if self.sort_buffer.len() >= self.options.sort_buffer_records.max(1) {
             self.flush_run()?;
         }
         Ok(())
@@ -935,10 +961,14 @@ impl<W: Write + Seek> Writer<W> {
             tile_type: self.options.tile_type,
             min_zoom: self.min_zoom,
             max_zoom: self.max_zoom,
-            min_lon_e7: WORLD_MIN_LON_E7,
-            min_lat_e7: WORLD_MIN_LAT_E7,
-            max_lon_e7: WORLD_MAX_LON_E7,
-            max_lat_e7: WORLD_MAX_LAT_E7,
+            // The six position fields are filled in by the two setters
+            // immediately below, which own the degrees-to-e7 conversion. They
+            // are zero here only because a struct literal has to name every
+            // field.
+            min_lon_e7: 0,
+            min_lat_e7: 0,
+            max_lon_e7: 0,
+            max_lat_e7: 0,
             center_zoom,
             center_lon_e7: 0,
             center_lat_e7: 0,
