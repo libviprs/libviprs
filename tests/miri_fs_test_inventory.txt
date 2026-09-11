@@ -302,7 +302,7 @@ annotated   fs-detected  tests/io_ported_surface.rs::save_accepts_path_ref
 annotated   fs-detected  tests/jxl_ported_surface.rs::encode_and_save_round_trip_exactly
 annotated   fs-detected  tests/jxl_ported_surface.rs::the_shared_dispatchers_carry_jxl
 annotated   fs-detected  tests/jxl_ported_surface.rs::without_the_feature_the_surface_is_unchanged_and_typed
-annotated   fs-detected  tests/local_ci_invocation.rs::the_daemon_beats_the_interpreter_when_they_disagree
+annotated   fs-detected  tests/local_ci_invocation.rs::the_host_architecture_comes_from_the_daemon_and_degrades_rather_than_refusing
 annotated   fs-detected  tests/local_gate_is_the_job_list.rs::the_workflow_directory_holds_only_files_this_guard_has_classified
 annotated   fs-detected  tests/miri_ignore_convention.rs::filesystem_touching_tests_match_the_recorded_inventory
 annotated   fs-detected  tests/miri_ignore_convention.rs::no_filesystem_touching_test_runs_under_miri_outside_the_named_exceptions
