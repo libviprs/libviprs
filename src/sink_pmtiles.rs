@@ -28,8 +28,8 @@
 //! # Dedupe here is not the engine's dedupe
 //!
 //! Collapsing identical payloads into one stored blob is a property of the
-//! archive format, not of the run's [`DedupeStrategy`](crate::dedupe::DedupeStrategy).
-//! `DedupeStrategy` defaults to `None`, under which
+//! archive format, not of the run's [`DedupeStrategy`]. `DedupeStrategy`
+//! defaults to `None`, under which
 //! [`DedupeIndex::record`](crate::dedupe::DedupeIndex::record) answers
 //! `WriteNew` for every tile on purpose so that `None` is a true passthrough.
 //! A sink that keyed the archive's payload table off those decisions would
@@ -37,11 +37,11 @@
 //! tiles cost one payload" would only be true for callers who had opted in.
 //!
 //! So the payload table is keyed on the content digest unconditionally, and
-//! [`DedupeIndex`](crate::dedupe::DedupeIndex) is used for the digest rather
-//! than for the decision. The digest is the one the engine has already
-//! computed; [`Writer::add_tile`](crate::pmtiles::Writer::add_tile) takes it
-//! and never re-derives one, so a tile is hashed once however many consumers
-//! want the answer.
+//! [`DedupeIndex`] is used for the digest rather than for the decision. The
+//! digest is the one the engine has already computed;
+//! [`Writer::add_tile`](crate::pmtiles::Writer::add_tile) takes it and never
+//! re-derives one, so a tile is hashed once however many consumers want the
+//! answer.
 //!
 //! # What this sink refuses, and why refusing is the implementation
 //!
