@@ -290,7 +290,7 @@ pub enum PmTilesError {
 
     /// A write failed part way through and the writer will not publish.
     ///
-    /// [`writer::Writer`](crate::pmtiles::writer::Writer) latches the first
+    /// [`writer::Writer`] latches the first
     /// failure and refuses everything afterwards, because a `write_all` that
     /// fails has usually written *some* of its bytes. Without the latch those
     /// orphan bytes stay in the staging file, the next accepted tile records an
