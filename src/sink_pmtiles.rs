@@ -517,6 +517,15 @@ impl PmTilesSinkBuilder {
 // TileSink
 // ---------------------------------------------------------------------------
 
+// Eight of the trait's methods are deliberately left at their defaults, which
+// for a terminal sink bottom out at a no-op, `0`, `false` or `None`:
+// `inner_sink` (this sink wraps nothing), `sink_retry_count`,
+// `sink_skipped_due_to_failure`, `note_sink_skipped` and `applies_retry_policy`
+// (no retry loop of its own, so `RetryingSink` wraps it the ordinary way),
+// `init_level_count` (there are no per-level counters to pre-size: the writer
+// keeps one payload table for the whole archive) and `arm_durability_tracking`
+// (`sync_pending` below is unconditional, so there is nothing to turn on, and a
+// flag nobody reads is worse than no override at all).
 impl TileSink for PmTilesSink {
     fn write_tile(&self, tile: &Tile) -> Result<(), SinkError> {
         // The plan is the authority on which coordinates exist, the same check

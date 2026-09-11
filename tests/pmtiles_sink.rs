@@ -109,9 +109,18 @@ struct Walked {
 }
 
 impl Walked {
+    /// The payload stored for a plan coordinate.
+    ///
+    /// The mapping is spelled out here rather than routed through
+    /// `tile_coord_to_zxy`, which is the code under test. A walk that asks the
+    /// sink where it put a tile agrees with the sink whatever it answers, so a
+    /// transposition of `col` and `row` survived every comparison in this file
+    /// when it was written the other way. Measured: the mutation reddened only
+    /// the oracle test until this changed.
     fn tile(&self, coord: TileCoord) -> Option<&Vec<u8>> {
-        let (z, x, y) = tile_coord_to_zxy(coord).ok()?;
-        self.tiles.get(&zxy_to_tileid(z, x, y).ok()?)
+        let z = u8::try_from(coord.level).ok()?;
+        self.tiles
+            .get(&zxy_to_tileid(z, coord.col, coord.row).ok()?)
     }
 }
 
@@ -221,8 +230,10 @@ fn run_into_directory(src: &Raster, plan: &PyramidPlan, dir: &Path) -> PathBuf {
 #[cfg_attr(miri, ignore)]
 fn an_engine_run_produces_an_archive_holding_every_planned_tile() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let plan = plan_for(512, 512, 256, Layout::Xyz);
-    let src = gradient(512, 512);
+    // Not square, deliberately: a square grid maps onto itself under a
+    // col/row transposition, so half the evidence would be missing.
+    let plan = plan_for(1024, 768, 256, Layout::Xyz);
+    let src = gradient(1024, 768);
 
     let archive = run_into_archive(&src, &plan, dir.path());
     let tree = run_into_directory(&src, &plan, dir.path());
@@ -1069,6 +1080,77 @@ fn the_directory_reader_returns_what_the_run_wrote_and_none_elsewhere() {
             .expect("out of range is not an error"),
         None,
         "a coordinate the plan does not have is absent, not a failure"
+    );
+}
+
+/// The directory reader resolves a tile through the plan's own tile path, not
+/// through a hardcoded `{z}/{x}/{y}.png`.
+///
+/// This test exists because a mutation that replaced the `plan.tile_path` call
+/// with exactly that literal reddened nothing: every other test in this file
+/// uses `Layout::Xyz` and PNG, which is the one shape the literal reproduces.
+/// Two things tell them apart and both are here, a layout whose tile path is
+/// not a `z/x/y` triple and a tile encoding whose extension is not `png`.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn the_directory_reader_resolves_a_tile_through_the_plan_not_a_literal_path() {
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    // DeepZoom writes `{level}/{col}_{row}.{ext}`, which is not a z/x/y triple.
+    let deep = plan_for(512, 512, 256, Layout::DeepZoom);
+    let deep_root = dir.path().join("deep");
+    EngineBuilder::new(
+        &gradient(512, 512),
+        deep.clone(),
+        FsSink::new(&deep_root, deep.clone()),
+    )
+    .run()
+    .expect("a DeepZoom run into a directory succeeds");
+
+    let reader = DirectoryPyramidReader::try_open(&deep_root, deep.clone(), TileFormat::Png)
+        .expect("the DeepZoom tree opens");
+    let mut seen = 0usize;
+    for coord in deep.tile_coords() {
+        assert!(
+            reader.tile(coord).expect("the reader answers").is_some(),
+            "{coord:?} is missing from a DeepZoom tree, so the reader is not              reading through the plan"
+        );
+        seen += 1;
+    }
+    assert!(
+        seen >= 4,
+        "the positive control: an empty loop proves nothing"
+    );
+
+    // And an encoding whose extension is not `png`.
+    let jpeg = plan_for(512, 512, 256, Layout::Xyz);
+    let jpeg_root = dir.path().join("jpeg");
+    let quality = TileFormat::Jpeg { quality: 80 };
+    EngineBuilder::new(
+        &gradient(512, 512),
+        jpeg.clone(),
+        FsSink::new(&jpeg_root, jpeg.clone()).with_format(quality),
+    )
+    .run()
+    .expect("a JPEG run into a directory succeeds");
+
+    let reader = DirectoryPyramidReader::try_open(&jpeg_root, jpeg.clone(), quality)
+        .expect("the JPEG tree opens");
+    let mut seen = 0usize;
+    for coord in jpeg.tile_coords() {
+        let bytes = reader
+            .tile(coord)
+            .expect("the reader answers")
+            .unwrap_or_else(|| panic!("{coord:?} is missing from a JPEG tree"));
+        assert!(
+            bytes.starts_with(&[0xff, 0xd8, 0xff]),
+            "{coord:?} came back without a JPEG signature, so the extension the              reader used was not the one the sink wrote"
+        );
+        seen += 1;
+    }
+    assert!(
+        seen >= 4,
+        "the positive control: an empty loop proves nothing"
     );
 }
 
