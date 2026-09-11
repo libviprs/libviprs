@@ -43,9 +43,9 @@
 //! That makes the expectation here awkward in a useful way. Deriving it from
 //! `uname -m` would be the tool agreeing with a copy of its own logic, so the
 //! rows below take it from the daemon where there is one, and
-//! [`the_daemon_beats_the_interpreter_when_they_disagree`] is what covers the
-//! preference itself: on this host both sources say arm64, so nothing that only
-//! compares them can fail.
+//! [`the_host_architecture_comes_from_the_daemon_and_degrades_rather_than_refusing`]
+//! is what covers the preference itself: on this host both sources say arm64, so
+//! nothing that only compares them can fail.
 //!
 //! # The volume promise
 //!
@@ -148,14 +148,11 @@ fn run_raw(args: &[&str], env: &[(&str, &str)]) -> Output {
         .expect("python3 is required to run the container gate's own tests")
 }
 
-fn run(args: &[&str], env: &[(&str, &str)]) -> Argv {
-    let out = run_raw(args, env);
-    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-    assert!(
-        out.status.success(),
-        "local-ci.py {args:?} --print-docker-argv failed: {}\n{stdout}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+/// Parse one `--print-docker-argv` output. Its own function so
+/// [`the_parser_refuses_an_injected_duplicate_field`] can drive it directly,
+/// which is the only way to reach the duplicate arm now that the tool refuses
+/// the volume name that produced one.
+fn parse(stdout: &str) -> Argv {
     let mut fields: HashMap<String, Vec<String>> = HashMap::new();
     for line in stdout.lines() {
         let mut parts = line.split('\t');
@@ -175,11 +172,41 @@ fn run(args: &[&str], env: &[(&str, &str)]) -> Argv {
     // The positive control for every assertion below: a run that printed
     // nothing at all would otherwise fail with "no `build` line", which reads
     // like a missing feature rather than a tool that did not run.
-    assert!(
-        !fields.is_empty(),
-        "--print-docker-argv printed nothing for {args:?}"
-    );
+    assert!(!fields.is_empty(), "--print-docker-argv printed nothing");
     Argv { fields }
+}
+
+fn run(args: &[&str], env: &[(&str, &str)]) -> Argv {
+    let out = run_raw(args, env);
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        out.status.success(),
+        "local-ci.py {args:?} --print-docker-argv failed: {}\n{stdout}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    parse(&stdout)
+}
+
+/// The parser must refuse a second `platform` line rather than keep the last.
+///
+/// `tools/local-ci.py` will not emit one any more, because a volume name
+/// carrying a tab and a newline is refused at the source, so this drives the
+/// parser on the output that hole used to produce. Without it the duplicate
+/// check is a branch nothing can reach, which is the shape this whole review
+/// was about.
+#[test]
+#[should_panic(expected = "printed two `platform` lines")]
+fn the_parser_refuses_an_injected_duplicate_field() {
+    parse("platform\tlinux/arm64\nimage\tlibviprs-ci:native\nplatform\tlinux/386\n");
+}
+
+/// And the ordinary output still parses, so the row above is not passing
+/// because the parser refuses everything.
+#[test]
+fn the_parser_accepts_output_with_no_duplicate() {
+    let a = parse("platform\tlinux/arm64\nimage\tlibviprs-ci:native\n");
+    assert_eq!(a.one("platform"), "linux/arm64");
+    assert_eq!(a.one("image"), "libviprs-ci:native");
 }
 
 /// `linux/<arch>` for an architecture spelling, matching the tool's own table.
@@ -227,8 +254,8 @@ fn interpreter_platform() -> String {
 /// `platform.machine()` and so does this, which proves nothing about the
 /// preference by itself. Pinning the source is what keeps that honest: the weak
 /// arm cannot be taken silently on a host that has a daemon, and
-/// [`the_daemon_beats_the_interpreter_when_they_disagree`] covers the preference
-/// on every host.
+/// [`the_host_architecture_comes_from_the_daemon_and_degrades_rather_than_refusing`]
+/// covers the preference on every host.
 fn expected_native() -> (String, &'static str) {
     match daemon_platform() {
         Some(p) => (p, "daemon"),
@@ -324,18 +351,27 @@ fn native_ignores_docker_default_platform() {
     }
 }
 
-/// The daemon is the authority, and this is the only row that can prove it.
+/// Where the host architecture comes from, and what happens when nobody can
+/// map it.
 ///
-/// On this host `docker version --format {{.Server.Arch}}` and
+/// Three cases, and the first is the only row that can prove the preference at
+/// all: on this host `docker version --format {{.Server.Arch}}` and
 /// `platform.machine()` both say arm64, so every row that merely compares the
-/// tool's answer against the host passes whichever source it used. This one puts
-/// a fake `docker` first on `PATH` that reports the *opposite* architecture to
-/// the interpreter's, so the two answers cannot coincide, and then swaps in one
-/// that cannot answer at all, to check the fallback is real rather than a crash.
+/// tool's answer against the host passes whichever source it used. So a fake
+/// `docker` goes first on `PATH` reporting the *opposite* architecture to the
+/// interpreter's, and the two answers cannot coincide.
+///
+/// Then one that cannot answer at all, because the fallback has to be real:
+/// `--print-docker-argv` runs in the CI image, which has no docker CLI.
+///
+/// Then one that answers something neither can map, because `host_platform`
+/// used to `sys.exit` there and this is a print-and-quit path with nothing to
+/// refuse. It prints what it found and says it could not map it, and `main`
+/// turns that into a failure only where a run would need the platform.
 #[cfg(unix)]
 #[test]
 #[cfg_attr(miri, ignore)] // spawns python3, which Miri supports on no target (#714)
-fn the_daemon_beats_the_interpreter_when_they_disagree() {
+fn the_host_architecture_comes_from_the_daemon_and_degrades_rather_than_refusing() {
     use std::os::unix::fs::PermissionsExt;
 
     let interpreter = interpreter_platform();
@@ -348,8 +384,10 @@ fn the_daemon_beats_the_interpreter_when_they_disagree() {
     let dir = tempfile::tempdir().expect("tempdir");
     let answering = dir.path().join("answering");
     let silent = dir.path().join("silent");
-    std::fs::create_dir(&answering).expect("mkdir");
-    std::fs::create_dir(&silent).expect("mkdir");
+    let exotic = dir.path().join("exotic");
+    for d in [&answering, &silent, &exotic] {
+        std::fs::create_dir(d).expect("mkdir");
+    }
     // `docker version` answers and nothing else does, so a tool reaching for a
     // daemon call this row does not know about fails loudly rather than quietly
     // picking up a stub answer.
@@ -361,6 +399,11 @@ fn the_daemon_beats_the_interpreter_when_they_disagree() {
             ),
         ),
         (silent.join("docker"), "#!/bin/sh\nexit 1\n".to_string()),
+        (
+            exotic.join("docker"),
+            "#!/bin/sh\nif [ \"$1\" = version ]; then echo riscv64; exit 0; fi\nexit 1\n"
+                .to_string(),
+        ),
     ];
     for (path, body) in &fakes {
         std::fs::write(path, body).expect("write the fake docker");
@@ -393,6 +436,17 @@ fn the_daemon_beats_the_interpreter_when_they_disagree() {
     let b = run(&["--native"], &[("PATH", &with(&silent))]);
     assert_eq!(b.one("arch-source"), "platform.machine");
     assert_eq!(b.one("platform"), interpreter);
+
+    // An architecture nothing maps is not a reason to refuse on a path that
+    // prints and quits. `run` asserts the exit status, so a `sys.exit` here
+    // fails this row rather than passing it.
+    let c = run(&["--native"], &[("PATH", &with(&exotic))]);
+    assert_eq!(c.one("arch-source"), "daemon");
+    assert_eq!(
+        c.one("platform"),
+        "UNMAPPED:riscv64",
+        "an unmappable architecture must be printed and named, not refused"
+    );
 }
 
 /// What `--print-docker-argv` prints is the whole `docker run`, not its head.
