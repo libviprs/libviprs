@@ -352,13 +352,13 @@ const ANCHOR_FILES: &[&str] = &[
 /// now, on purpose: an exact number in the workflow made it a file every
 /// unrelated pull request had to edit, which is the reasoning written up in
 /// `tests/miri_invocation_parity.rs`.
-/// #987 moved it 219 to 225: `src/pmtiles/range.rs` arrived with six tests
-/// that open a real file. Five of them reach `tempfile::NamedTempFile` through
-/// a `ramp_file()` helper the detector follows, and the sixth hands a path
+/// #987 moved it 219 to 226: `src/pmtiles/range.rs` arrived with seven tests
+/// that open a real file. Six of them reach `tempfile::NamedTempFile` through
+/// a `ramp_file()` helper the detector follows, and the seventh hands a path
 /// straight to `FileRangeReader::try_open`, which opens it inside the library,
 /// so that one is the `annotated not-detected` shape this ledger exists to
 /// pin.
-const EXPECTED_SRC_ANNOTATIONS: usize = 225;
+const EXPECTED_SRC_ANNOTATIONS: usize = 226;
 /// Companion to [`EXPECTED_SRC_ANNOTATIONS`]: how many `src/` modules carry at
 /// least one annotation. #765 made it 25 by putting the first annotation in
 /// `src/analyze.rs`; `src/colour.rs` and `src/pdf.rs`, which took the other
@@ -494,12 +494,20 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// already knows, because the thing it is looking for is the file nobody told
 /// it about. Annotated and fs-detected, the ordinary case.
 ///
-/// #987 moved it 288 to 295: seven of the eight tests `src/pmtiles/range.rs`
-/// and `tests/pmtiles_format.rs` added for the PMTiles range reader write a
-/// temporary file and read byte ranges back out of it. The eighth opens a path
-/// through the library and so is annotated without being detected, which is
-/// why this number moved by seven rather than by eight.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 295;
+/// #987 moved it 288 to 296. Eight of the nine tests `src/pmtiles/range.rs` and
+/// `tests/pmtiles_format.rs` added for the PMTiles range reader write a
+/// temporary file and read byte ranges back out of it. The ninth opens a path
+/// through the library and so is annotated without being detected, which is why
+/// this number moved by eight rather than by nine.
+///
+/// The eleven oracle tests the same issue added to `tests/pmtiles_format.rs`
+/// move it by **zero**, and that is worth writing down rather than looking like
+/// an omission: they read their vectors through `tests/common/pmtiles_oracle.rs`,
+/// and this detector's call graph only reaches within one file. So they are
+/// `annotated not-detected` in the ledger, the same state #968 put both copies
+/// of `the_walk_descends_into_subdirectories` in when they moved to
+/// `tests/common/scan.rs`.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 296;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
