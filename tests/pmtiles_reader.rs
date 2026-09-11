@@ -75,7 +75,7 @@ use libviprs::pmtiles::reader::{
 };
 use libviprs::pmtiles::{
     Compression, Entry, FileRangeReader, Header, LibviprsMetadata, Metadata, PmTilesError,
-    RangeReader, TileType, tileid_to_zxy,
+    RangeReader, TileType, tileid_to_zxy, zxy_to_tileid,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -838,6 +838,10 @@ fn both_shapes_of_deduplication_resolve_and_both_are_exercised() {
         shared_offsets.contains(&148),
         "the fixture's four non-adjacent duplicates share offset 148, found {shared_offsets:?}"
     );
+    assert!(
+        shared_offsets.contains(&0),
+        "the z0 tile and the whole of z2 are the same red PNG at offset 0, found {shared_offsets:?}"
+    );
 
     let mut served_by_a_run = 0usize;
     let mut served_from_a_shared_offset = 0usize;
@@ -887,8 +891,15 @@ fn both_shapes_of_deduplication_resolve_and_both_are_exercised() {
     );
     // The fixture's numbers, so a future regeneration that quietly loses one
     // of the two shapes fails here rather than weakening the test in silence.
+    // 18 is the run shape: a run of 4 and a run of 16 each serve every id
+    // after their first from the same entry, so 3 + 15.
     assert_eq!(served_by_a_run, 18, "85 addressed tiles across 67 entries");
-    assert_eq!(served_from_a_shared_offset, 4, "the four offset-148 tiles");
+    // 21 is the shared-offset shape: the four offset-148 tiles, plus the z0
+    // tile and the sixteen z2 tiles that are all the same red PNG at offset 0.
+    assert_eq!(
+        served_from_a_shared_offset, 21,
+        "4 at offset 148, 1 + 16 at offset 0"
+    );
 }
 
 /// The root directory of the two leafless goldens is the entry list
@@ -976,6 +987,16 @@ fn the_leaf_path_runs_and_every_entry_behind_it_resolves() {
             .unwrap_or_else(|e| panic!("tile {id}: {e}"))
             .unwrap_or_else(|| panic!("tile {id} came back absent"));
         assert_eq!(tile.len(), 72);
+    }
+    // The first entry of all six leaves happens to carry entry offset 0, so
+    // the loop above only ever reaches the first of the two payloads. These
+    // are two of the oracle's own hit rows, both recorded at entry offset 72,
+    // and without them the exact payload set below would be half a test.
+    for (z, x, y) in [(5u8, 10u32, 11u32), (7, 63, 64)] {
+        assert!(
+            reader.get_tile(z, x, y).expect("a lookup").is_some(),
+            "{z}/{x}/{y} is one of the oracle's offset-72 rows"
+        );
     }
 
     let leaf_reads = reader.source().reads_within(
@@ -1134,7 +1155,8 @@ fn a_leaf_read_once_serves_the_next_tile_without_a_second_fetch() {
     let header = *reader.header();
 
     reader.source().clear();
-    assert!(reader.get_tile(7, 0, 0).expect("a lookup").is_some());
+    // Tile id 0. The first leaf covers ids 0 to 4096.
+    assert!(reader.get_tile(0, 0, 0).expect("a lookup").is_some());
     let first = reader
         .source()
         .reads_within(
@@ -1145,8 +1167,10 @@ fn a_leaf_read_once_serves_the_next_tile_without_a_second_fetch() {
     assert_eq!(first, 1, "the first tile fetched its leaf");
 
     reader.source().clear();
-    // Tile id 1 is in the same leaf as tile id 0.
-    assert!(reader.get_tile(0, 0, 0).expect("a lookup").is_some());
+    // Tile id 1, which is in that same leaf. Zoom 7 is not: its first tile is
+    // id 5461, which lives in the second leaf.
+    assert_eq!(zxy_to_tileid(1, 0, 0).expect("an addressable id"), 1);
+    assert!(reader.get_tile(1, 0, 0).expect("a lookup").is_some());
     let second = reader
         .source()
         .reads_within(
@@ -1448,18 +1472,46 @@ fn a_root_that_is_not_gzip_is_a_typed_error_and_not_a_panic() {
 
 /// The root must fit in the first 16384 bytes, which the spec makes a MUST so
 /// a latency-sensitive client can fetch the header and the whole root at once.
+///
+/// The archive here is genuinely big enough to hold the root where the header
+/// says it is, so the only thing wrong with it is the budget. An archive that
+/// was also too short would be caught by the section bounds first and this
+/// test would be measuring the wrong rule.
 #[test]
 fn a_root_reaching_past_the_sixteen_kilobyte_budget_is_refused() {
-    let root = vec![Entry {
+    let entries = [Entry {
         tile_id: 0,
         offset: 0,
         length: 4,
         run_length: 1,
     }];
-    let archive = build_archive(&root, &[], b"{}", b"TILE", |header| {
-        header.root_offset = MAX_ROOT_SPAN - 4;
-        header.root_length = 8;
-    });
+    let root = Compression::Gzip
+        .compress(&serialize_entries(&entries).expect("the root serialises"))
+        .expect("gzip");
+
+    // Start the root four bytes short of the budget, so it ends past it.
+    let root_offset = MAX_ROOT_SPAN - 4;
+    let tail = root_offset + root.len() as u64;
+    let header = Header {
+        root_offset,
+        root_length: root.len() as u64,
+        metadata_offset: tail,
+        metadata_length: 0,
+        leaf_directories_offset: tail,
+        leaf_directories_length: 0,
+        tile_data_offset: tail,
+        tile_data_length: 4,
+        ..Header::default()
+    };
+
+    let mut archive = vec![0u8; (tail + 4) as usize];
+    archive[..127].copy_from_slice(&header.encode());
+    archive[root_offset as usize..tail as usize].copy_from_slice(&root);
+    assert!(
+        archive.len() as u64 > MAX_ROOT_SPAN,
+        "the archive is long enough that only the budget is violated"
+    );
+
     let got = memory_reader(archive);
     assert!(
         matches!(&got, Err(PmTilesError::RootDirectoryTooLarge { .. })),
