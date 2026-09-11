@@ -194,3 +194,155 @@ impl FileRangeReader {
         file.read_exact(buf)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    /// A file of 256 distinct bytes, so a range that comes back shifted by one
+    /// is visible rather than being a repeat of the same byte.
+    fn ramp_file() -> (tempfile::NamedTempFile, Vec<u8>) {
+        let mut file = tempfile::NamedTempFile::new().expect("temp file");
+        let payload: Vec<u8> = (0..=255u8).collect();
+        file.write_all(&payload).expect("write");
+        file.flush().expect("flush");
+        (file, payload)
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_range_comes_back_exactly_as_asked_for() {
+        let (file, payload) = ramp_file();
+        let reader = FileRangeReader::try_open(file.path()).unwrap();
+
+        assert_eq!(reader.len(), 256);
+        assert!(!reader.is_empty());
+        assert_eq!(reader.size().unwrap(), Some(256));
+
+        assert_eq!(reader.read_range(0, 4).unwrap(), payload[0..4]);
+        assert_eq!(reader.read_range(127, 1).unwrap(), vec![127]);
+        assert_eq!(reader.read_range(200, 56).unwrap(), payload[200..256]);
+        assert_eq!(reader.read_range(255, 1).unwrap(), vec![255]);
+        // A zero-length read is the empty answer, not an error: a directory
+        // section can legitimately be empty.
+        assert!(reader.read_range(0, 0).unwrap().is_empty());
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn the_bound_is_on_offset_plus_length_not_on_length_alone() {
+        // This is the exact shape of a live bug in the reference
+        // implementation: `pmtiles verify` checks `length > fileSize` and
+        // never `offset + length`, so a root directory offset of 999999 in an
+        // 1878-byte archive walks straight past the check and segfaults in the
+        // gzip reader. Checking the sum is what makes that a refusal here.
+        let (file, _) = ramp_file();
+        let reader = FileRangeReader::try_open(file.path()).unwrap();
+
+        assert!(reader.read_range(999_999, 10).is_err(), "offset past the end");
+        assert!(reader.read_range(250, 10).is_err(), "the sum is past the end");
+        assert!(reader.read_range(256, 1).is_err(), "one byte past the end");
+
+        // The positive control, and it is the one that matters: the same
+        // length one byte earlier succeeds, so these refusals are about the
+        // bound rather than about the length being large.
+        assert_eq!(reader.read_range(246, 10).unwrap().len(), 10);
+
+        // And the arithmetic cannot be made to wrap into a pass.
+        assert!(reader.read_range(u64::MAX, 2).is_err());
+        assert!(reader.read_range(u64::MAX - 1, usize::MAX).is_err());
+        assert!(reader.read_range(0, usize::MAX).is_err());
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_short_read_is_an_error_rather_than_a_shorter_buffer() {
+        // The return type carries no length the caller did not ask for, so an
+        // implementation that returned fewer bytes would hand back a directory
+        // page that stops in the middle of a column and looks complete.
+        let (file, _) = ramp_file();
+        let reader = FileRangeReader::try_open(file.path()).unwrap();
+        let err = reader.read_range(254, 4).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn an_empty_file_is_never_an_archive() {
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let reader = FileRangeReader::try_open(file.path()).unwrap();
+        assert!(reader.is_empty());
+        assert_eq!(reader.size().unwrap(), Some(0));
+        // The header alone is 127 bytes, so this is the first thing a reader
+        // asks for and the first thing it must not get a panic from.
+        assert!(reader.read_range(0, 127).is_err());
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn opening_something_that_is_not_there_is_a_typed_error() {
+        let missing = std::path::Path::new("/nonexistent/f11/definitely-not-here.pmtiles");
+        assert!(matches!(
+            FileRangeReader::try_open(missing),
+            Err(PmTilesError::Io(_))
+        ));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn one_reader_serves_several_threads_at_once() {
+        // The reason for positional reads rather than seek-then-read. With a
+        // shared cursor, two threads reading two ranges interleave and hand
+        // each other the wrong bytes, and the failure is intermittent.
+        let (file, payload) = ramp_file();
+        let reader = FileRangeReader::try_open(file.path()).unwrap();
+
+        std::thread::scope(|scope| {
+            for start in 0..8u64 {
+                let reader = &reader;
+                let payload = &payload;
+                scope.spawn(move || {
+                    for _ in 0..64 {
+                        let at = start * 32;
+                        let got = reader.read_range(at, 32).unwrap();
+                        assert_eq!(got, payload[at as usize..at as usize + 32]);
+                    }
+                });
+            }
+        });
+    }
+
+    /// A `RangeReader` that is not a file, proving the trait is implementable
+    /// outside this module without touching anything else.
+    struct InMemory(Vec<u8>);
+
+    impl RangeReader for InMemory {
+        fn read_range(&self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+            let start = usize::try_from(offset)
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "offset"))?;
+            let end = start
+                .checked_add(len)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "end"))?;
+            if end > self.0.len() {
+                return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
+            }
+            Ok(self.0[start..end].to_vec())
+        }
+    }
+
+    #[test]
+    fn a_backend_that_does_not_know_its_size_says_so() {
+        // The default `size()` is `None` rather than a required method,
+        // because a streaming backend genuinely may not know and a number it
+        // invented would turn a bounds check into a false refusal.
+        let reader = InMemory(b"PMTiles".to_vec());
+        assert_eq!(reader.size().unwrap(), None);
+        assert_eq!(reader.read_range(0, 7).unwrap(), b"PMTiles".to_vec());
+
+        // And it works behind a trait object, which is what a CLI picking a
+        // backend from a URI scheme needs.
+        let boxed: Box<dyn RangeReader> = Box::new(InMemory(b"PMTiles".to_vec()));
+        assert_eq!(boxed.read_range(3, 4).unwrap(), b"iles".to_vec());
+    }
+}

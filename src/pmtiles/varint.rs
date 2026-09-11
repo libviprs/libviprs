@@ -160,3 +160,152 @@ impl<'a> VarintCursor<'a> {
         self.bytes.len() - self.position
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `(value, bytes)` for the encodings worth naming, including the two the
+    /// bound is about.
+    const CANONICAL: &[(u64, &[u8])] = &[
+        (0, &[0x00]),
+        (1, &[0x01]),
+        (127, &[0x7F]),
+        (128, &[0x80, 0x01]),
+        (300, &[0xAC, 0x02]),
+        (16383, &[0xFF, 0x7F]),
+        (16384, &[0x80, 0x80, 0x01]),
+        // The spec's own zoom-12 tile id, which is what a real directory
+        // carries in its first column.
+        (19_078_479, &[0xCF, 0xBA, 0x8C, 0x09]),
+        (4_294_967_295, &[0xFF, 0xFF, 0xFF, 0xFF, 0x0F]),
+        (
+            u64::MAX,
+            &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01],
+        ),
+    ];
+
+    #[test]
+    fn the_encoding_is_the_protobuf_base_128_one() {
+        for &(value, want) in CANONICAL {
+            let mut out = Vec::new();
+            encode_uvarint(value, &mut out);
+            assert_eq!(out, want, "encoding {value}");
+            assert_eq!(uvarint_len(value), want.len(), "uvarint_len({value})");
+            assert_eq!(
+                decode_uvarint(want, 0).unwrap(),
+                (value, want.len()),
+                "decoding {value:?}"
+            );
+        }
+        assert_eq!(CANONICAL.len(), 10, "the table stopped being read");
+    }
+
+    #[test]
+    fn a_decode_stops_at_its_own_last_byte() {
+        // Trailing bytes belong to the next column, so a decoder that consumed
+        // them would shift every value after it by one and still produce
+        // plausible numbers.
+        let mut buf = Vec::new();
+        encode_uvarint(300, &mut buf);
+        buf.extend_from_slice(&[0xFF, 0xFF, 0x7F]);
+        assert_eq!(decode_uvarint(&buf, 0).unwrap(), (300, 2));
+    }
+
+    #[test]
+    fn a_truncated_varint_is_refused_rather_than_completed() {
+        // The continuation bit is set on the last byte available, so the value
+        // is not finished. Returning what has accumulated so far would answer
+        // 0 for a buffer that says nothing of the kind.
+        assert!(matches!(
+            decode_uvarint(&[0x80], 0),
+            Err(PmTilesError::TruncatedVarint { .. })
+        ));
+        assert!(matches!(
+            decode_uvarint(&[], 0),
+            Err(PmTilesError::TruncatedVarint { .. })
+        ));
+        assert!(matches!(
+            decode_uvarint(&[0xFF, 0xFF, 0xFF], 0),
+            Err(PmTilesError::TruncatedVarint { .. })
+        ));
+        // The positive control: the same bytes with a terminator decode.
+        assert_eq!(decode_uvarint(&[0x80, 0x01], 0).unwrap(), (128, 2));
+    }
+
+    #[test]
+    fn ten_bytes_is_the_ceiling_and_the_tenth_may_only_be_one() {
+        // An eleventh byte: no u64 needs one.
+        assert!(matches!(
+            decode_uvarint(&[0xFF; 11], 0),
+            Err(PmTilesError::VarintOverflow { .. })
+        ));
+
+        // Ten bytes whose last carries more than bit 63. This is the subtle
+        // one: the length is legal and the value is not.
+        let mut over = vec![0xFFu8; 9];
+        over.push(0x02);
+        assert!(matches!(
+            decode_uvarint(&over, 0),
+            Err(PmTilesError::VarintOverflow { .. })
+        ));
+
+        // The positive control for both: the largest value that does fit is
+        // ten bytes ending in exactly 0x01, and it decodes.
+        let mut at_the_limit = vec![0xFFu8; 9];
+        at_the_limit.push(0x01);
+        assert_eq!(decode_uvarint(&at_the_limit, 0).unwrap(), (u64::MAX, 10));
+    }
+
+    #[test]
+    fn a_non_canonical_encoding_is_accepted_and_normalised_on_the_way_out() {
+        // `0x80 0x00` is an overlong zero. Nothing in the format forbids it
+        // and refusing it would refuse an archive every other implementation
+        // reads, so it decodes; re-encoding gives the short form.
+        assert_eq!(decode_uvarint(&[0x80, 0x00], 0).unwrap(), (0, 2));
+        let mut out = Vec::new();
+        encode_uvarint(0, &mut out);
+        assert_eq!(out, vec![0x00]);
+    }
+
+    #[test]
+    fn round_trips_over_a_spread_of_magnitudes() {
+        let mut values: Vec<u64> = vec![0, 1, u64::MAX];
+        // Every byte-length boundary, from both sides, plus a value inside
+        // each band that is not a power of two.
+        for bits in 0..64u32 {
+            let at = 1u64 << bits;
+            values.push(at);
+            values.push(at.saturating_sub(1));
+            values.push(at | 0x2B);
+        }
+        let mut checked = 0;
+        for value in values {
+            let mut buf = Vec::new();
+            encode_uvarint(value, &mut buf);
+            assert_eq!(buf.len(), uvarint_len(value));
+            assert!(buf.len() <= MAX_UVARINT_LEN);
+            assert_eq!(decode_uvarint(&buf, 0).unwrap(), (value, buf.len()));
+            checked += 1;
+        }
+        assert_eq!(checked, 195, "the magnitude sweep did not run");
+    }
+
+    #[test]
+    fn the_cursor_advances_by_what_it_read() {
+        let mut buf = Vec::new();
+        for value in [1u64, 300, 0, u64::MAX] {
+            encode_uvarint(value, &mut buf);
+        }
+        let total = buf.len();
+        let mut cursor = VarintCursor::new(&buf);
+        assert_eq!(cursor.remaining(), total);
+        assert_eq!(cursor.next_uvarint().unwrap(), 1);
+        assert_eq!(cursor.next_uvarint().unwrap(), 300);
+        assert_eq!(cursor.next_uvarint().unwrap(), 0);
+        assert_eq!(cursor.next_uvarint().unwrap(), u64::MAX);
+        assert_eq!(cursor.remaining(), 0);
+        // Reading past the end is an error, not a panic on an empty slice.
+        assert!(cursor.next_uvarint().is_err());
+    }
+}

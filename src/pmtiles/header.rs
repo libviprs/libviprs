@@ -604,6 +604,18 @@ impl Header {
         })
     }
 
+    /// Whether the archive has leaf directories, which is a question about the
+    /// **length** and never about the offset.
+    ///
+    /// Measured on the oracle goldens: an archive with no leaves still carries
+    /// a non-zero `leaf_directories_offset`, equal to `tile_data_offset`,
+    /// because the section is empty rather than absent and an empty section
+    /// starts where the next one does. Anything deciding this from the offset
+    /// answers "yes" for every archive there is.
+    pub fn has_leaves(&self) -> bool {
+        self.leaf_directories_length > 0
+    }
+
     /// The bounding box as degrees: `(min_lon, min_lat, max_lon, max_lat)`.
     ///
     /// The stored form is an `i32` of degrees times 10,000,000, so this is
@@ -695,4 +707,416 @@ fn read_i32(bytes: &[u8], at: usize) -> i32 {
     let mut buf = [0u8; 4];
     buf.copy_from_slice(&bytes[at..at + 4]);
     i32::from_le_bytes(buf)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The first 127 bytes of `raster-z0z2.pmtiles`, a golden archive written
+    /// by go-pmtiles v1.31.2 (commit a3e4951ea6a0477b784c27c1dcbfd9c130878c5a,
+    /// archive sha256
+    /// `e2ed5e64f3c29efa3ec3b679ec5f1b06569c1b234c6eea762fb9f02fc23e9c12`),
+    /// read verbatim out of the file.
+    ///
+    /// The expected field values in
+    /// [`the_oracle_s_header_decodes_to_the_values_go_pmtiles_reports`] are
+    /// what `pmtiles.DeserializeHeader` answered for these same bytes, so this
+    /// is a comparison against another implementation rather than against this
+    /// one's own encoder.
+    const ORACLE_HEADER_HEX: &str = concat!(
+        "504d54696c6573037f000000000000002300000000000000a200000000000000",
+        "a200000000000000440100000000000000000000000000004401000000000000",
+        "1206000000000000150000000000000015000000000000001500000000000000",
+        "010201020002002eb694493a4ecd00d2496bb7c5b132010000000000000000",
+    );
+
+    fn oracle_header_bytes() -> Vec<u8> {
+        let hex = ORACLE_HEADER_HEX;
+        assert_eq!(hex.len(), HEADER_BYTES * 2, "the golden hex is not 127 bytes");
+        (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("golden hex"))
+            .collect()
+    }
+
+    /// A header with a distinct value in every field, so a comparison of two
+    /// headers cannot pass by two fields happening to hold the same number,
+    /// and a swapped pair of same-typed fields cannot survive.
+    fn saturated_header() -> Header {
+        Header {
+            root_offset: 0x1122_3344_5566_7788,
+            root_length: 0x0102_0304_0506_0708,
+            metadata_offset: 0x1111_2222_3333_4444,
+            metadata_length: 0x5555_6666_7777_8888,
+            leaf_directories_offset: 0x0A0B_0C0D_0E0F_1011,
+            leaf_directories_length: 0x1213_1415_1617_1819,
+            tile_data_offset: 0x2021_2223_2425_2627,
+            tile_data_length: 0x3031_3233_3435_3637,
+            addressed_tiles_count: 0x4041_4243_4445_4647,
+            tile_entries_count: 0x5051_5253_5455_5657,
+            tile_contents_count: 0x6061_6263_6465_6667,
+            clustered: true,
+            internal_compression: Compression::Gzip,
+            tile_compression: Compression::None,
+            tile_type: TileType::Webp,
+            min_zoom: 3,
+            max_zoom: 17,
+            min_lon_e7: -123_456_789,
+            min_lat_e7: -45_678_901,
+            max_lon_e7: 109_876_543,
+            max_lat_e7: 78_901_234,
+            center_zoom: 11,
+            center_lon_e7: -12_345_678,
+            center_lat_e7: 87_654_321,
+        }
+    }
+
+    #[test]
+    fn the_oracle_s_header_decodes_to_the_values_go_pmtiles_reports() {
+        let header = Header::try_decode(&oracle_header_bytes()).expect("a real archive's header");
+
+        assert_eq!(header.root_offset, 127);
+        assert_eq!(header.root_length, 35);
+        assert_eq!(header.metadata_offset, 162);
+        assert_eq!(header.metadata_length, 162);
+        assert_eq!(header.leaf_directories_offset, 324);
+        assert_eq!(header.leaf_directories_length, 0);
+        assert_eq!(header.tile_data_offset, 324);
+        assert_eq!(header.tile_data_length, 1554);
+        assert_eq!(header.addressed_tiles_count, 21);
+        assert_eq!(header.tile_entries_count, 21);
+        assert_eq!(header.tile_contents_count, 21);
+        assert!(header.clustered);
+        assert_eq!(header.internal_compression, Compression::Gzip);
+        assert_eq!(header.tile_compression, Compression::None);
+        assert_eq!(header.tile_type, TileType::Png);
+        assert_eq!(header.min_zoom, 0);
+        assert_eq!(header.max_zoom, 2);
+        assert_eq!(header.center_zoom, 1);
+
+        // Longitude first, latitude second, and both signed. Reading the pair
+        // the other way round gives (-85.05, -180.0), which still looks like a
+        // bounding box, which is why this is pinned rather than eyeballed.
+        assert_eq!(header.min_lon_e7, -1_800_000_000);
+        assert_eq!(header.min_lat_e7, -850_511_287);
+        assert_eq!(header.max_lon_e7, 1_800_000_000);
+        assert_eq!(header.max_lat_e7, 850_511_287);
+        let (min_lon, min_lat, max_lon, max_lat) = header.bounds_degrees();
+        assert!((min_lon - -180.0).abs() < 1e-9, "min lon was {min_lon}");
+        assert!((min_lat - -85.051_128_7).abs() < 1e-9, "min lat was {min_lat}");
+        assert!((max_lon - 180.0).abs() < 1e-9, "max lon was {max_lon}");
+        assert!((max_lat - 85.051_128_7).abs() < 1e-9, "max lat was {max_lat}");
+
+        // And what this crate encodes from that decode is the same 127 bytes.
+        assert_eq!(header.encode().to_vec(), oracle_header_bytes());
+    }
+
+    #[test]
+    fn the_length_is_the_flag_for_leaves_not_the_offset() {
+        // Measured on the oracle goldens: an archive with no leaf directories
+        // still carries a non-zero `leaf_directories_offset`, equal to
+        // `tile_data_offset`. Anything deciding "does this archive have
+        // leaves" from the offset answers yes for every archive there is.
+        let header = Header::try_decode(&oracle_header_bytes()).unwrap();
+        assert_eq!(header.leaf_directories_offset, header.tile_data_offset);
+        assert_ne!(header.leaf_directories_offset, 0);
+        assert!(!header.has_leaves());
+
+        // The positive control: a header that does have leaves says so.
+        let with_leaves = Header {
+            leaf_directories_length: 1,
+            ..header
+        };
+        assert!(with_leaves.has_leaves());
+    }
+
+    #[test]
+    fn every_field_lands_at_the_byte_offset_the_spec_gives_it() {
+        // The offsets here are integer literals from the spec's byte grid, not
+        // the module's own constants: a test that shares a wrong constant with
+        // the code it checks proves nothing. This is also the only test that
+        // can catch two same-typed fields being swapped, which a round trip
+        // cannot see at all.
+        let bytes = saturated_header().encode();
+        let u64_at = |at: usize| {
+            let mut buf = [0u8; 8];
+            buf.copy_from_slice(&bytes[at..at + 8]);
+            u64::from_le_bytes(buf)
+        };
+        let i32_at = |at: usize| {
+            let mut buf = [0u8; 4];
+            buf.copy_from_slice(&bytes[at..at + 4]);
+            i32::from_le_bytes(buf)
+        };
+
+        assert_eq!(&bytes[0..7], b"PMTiles");
+        assert_eq!(bytes[7], 3);
+        assert_eq!(u64_at(8), 0x1122_3344_5566_7788, "root offset at 8");
+        assert_eq!(u64_at(16), 0x0102_0304_0506_0708, "root length at 16");
+        assert_eq!(u64_at(24), 0x1111_2222_3333_4444, "metadata offset at 24");
+        assert_eq!(u64_at(32), 0x5555_6666_7777_8888, "metadata length at 32");
+        assert_eq!(u64_at(40), 0x0A0B_0C0D_0E0F_1011, "leaf offset at 40");
+        assert_eq!(u64_at(48), 0x1213_1415_1617_1819, "leaf length at 48");
+        assert_eq!(u64_at(56), 0x2021_2223_2425_2627, "tile data offset at 56");
+        assert_eq!(u64_at(64), 0x3031_3233_3435_3637, "tile data length at 64");
+        assert_eq!(u64_at(72), 0x4041_4243_4445_4647, "addressed tiles at 72");
+        assert_eq!(u64_at(80), 0x5051_5253_5455_5657, "tile entries at 80");
+        assert_eq!(u64_at(88), 0x6061_6263_6465_6667, "tile contents at 88");
+        assert_eq!(bytes[96], 1, "clustered at 96");
+        assert_eq!(bytes[97], 2, "internal compression at 97");
+        assert_eq!(bytes[98], 1, "tile compression at 98");
+        assert_eq!(bytes[99], 4, "tile type at 99");
+        assert_eq!(bytes[100], 3, "min zoom at 100");
+        assert_eq!(bytes[101], 17, "max zoom at 101");
+        assert_eq!(i32_at(102), -123_456_789, "min lon at 102");
+        assert_eq!(i32_at(106), -45_678_901, "min lat at 106");
+        assert_eq!(i32_at(110), 109_876_543, "max lon at 110");
+        assert_eq!(i32_at(114), 78_901_234, "max lat at 114");
+        assert_eq!(bytes[118], 11, "center zoom at 118");
+        assert_eq!(i32_at(119), -12_345_678, "center lon at 119");
+        assert_eq!(i32_at(123), 87_654_321, "center lat at 123");
+        assert_eq!(bytes.len(), 127);
+    }
+
+    #[test]
+    fn a_header_round_trips_through_its_bytes() {
+        let header = saturated_header();
+        assert_eq!(Header::try_decode(&header.encode()).unwrap(), header);
+
+        // A longer buffer is accepted and only the first 127 bytes are read,
+        // so a caller that fetched the customary first 16 KiB does not have to
+        // subslice.
+        let mut padded = header.encode().to_vec();
+        padded.extend_from_slice(&[0xAB; 500]);
+        assert_eq!(Header::try_decode(&padded).unwrap(), header);
+    }
+
+    #[test]
+    fn a_negative_position_survives_the_round_trip() {
+        // The three positions are the only signed fields in the header.
+        // Reading them as `u32` turns every western longitude into a number
+        // just under 4.3 billion, and the archive still opens.
+        let header = Header {
+            min_lon_e7: i32::MIN,
+            min_lat_e7: -1,
+            max_lon_e7: i32::MAX,
+            max_lat_e7: 1,
+            center_lon_e7: -900_000_000,
+            center_lat_e7: -450_000_000,
+            ..Header::default()
+        };
+        let back = Header::try_decode(&header.encode()).unwrap();
+        assert_eq!(back.min_lon_e7, i32::MIN);
+        assert_eq!(back.min_lat_e7, -1);
+        assert_eq!(back.center_lon_e7, -900_000_000);
+        assert_eq!(back.center_lat_e7, -450_000_000);
+        let (center_lon, center_lat) = back.center_degrees();
+        assert!((center_lon - -90.0).abs() < 1e-9);
+        assert!((center_lat - -45.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_three_refusals_are_short_magic_and_version() {
+        let good = saturated_header().encode();
+
+        let mut bad_magic = good;
+        bad_magic[3] = b'X';
+        assert!(matches!(
+            Header::try_decode(&bad_magic),
+            Err(PmTilesError::BadMagic { .. })
+        ));
+
+        // Version 2 is the interesting one: it shares these seven magic bytes
+        // and lays its fields out completely differently, so reading it as v3
+        // produces plausible garbage rather than an error.
+        let mut v2 = good;
+        v2[7] = 2;
+        assert!(matches!(
+            Header::try_decode(&v2),
+            Err(PmTilesError::UnsupportedVersion { found: 2 })
+        ));
+
+        assert!(matches!(
+            Header::try_decode(&good[..126]),
+            Err(PmTilesError::ShortHeader { got: 126, want: 127 })
+        ));
+        assert!(matches!(
+            Header::try_decode(&[]),
+            Err(PmTilesError::ShortHeader { got: 0, .. })
+        ));
+
+        // The positive control: the unmodified bytes decode, so each refusal
+        // above is about what was changed rather than about the fixture.
+        assert!(Header::try_decode(&good).is_ok());
+    }
+
+    #[test]
+    fn a_descriptive_field_this_build_does_not_understand_is_kept_not_refused() {
+        let mut bytes = saturated_header().encode();
+        bytes[97] = 9; // an internal compression from a future revision
+        bytes[98] = 3; // brotli, legal and not built here
+        bytes[99] = 7; // a tile type from a future revision
+        bytes[100] = 20; // min zoom above max zoom, which the spec lowercases
+        bytes[101] = 4;
+
+        let header = Header::try_decode(&bytes).expect("an archive must still open");
+        assert_eq!(header.internal_compression, Compression::Other(9));
+        assert_eq!(header.tile_compression, Compression::Brotli);
+        assert_eq!(header.tile_type, TileType::Other(7));
+        assert_eq!(header.min_zoom, 20);
+        assert_eq!(header.max_zoom, 4);
+
+        // The byte survives, which is the point: `Other(7)` and `Unknown` mean
+        // different things and flattening one into the other throws away the
+        // only signal that this build is out of date.
+        assert_eq!(header.encode(), bytes);
+
+        // And the refusal happens where it is load-bearing instead.
+        assert!(matches!(
+            header.internal_compression.decompress(b"anything", 1024),
+            Err(PmTilesError::UnsupportedCompression { .. })
+        ));
+    }
+
+    #[test]
+    fn tile_types_and_compressions_round_trip_through_their_bytes() {
+        for byte in 0u8..=255 {
+            assert_eq!(TileType::from_byte(byte).to_byte(), byte);
+            assert_eq!(Compression::from_byte(byte).to_byte(), byte);
+        }
+        // The named values, by name, so a renumbering fails here rather than
+        // silently producing archives nothing else reads.
+        assert_eq!(TileType::from_byte(0), TileType::Unknown);
+        assert_eq!(TileType::from_byte(1), TileType::Mvt);
+        assert_eq!(TileType::from_byte(2), TileType::Png);
+        assert_eq!(TileType::from_byte(3), TileType::Jpeg);
+        assert_eq!(TileType::from_byte(4), TileType::Webp);
+        assert_eq!(TileType::from_byte(5), TileType::Avif);
+        assert_eq!(TileType::from_byte(6), TileType::Mlt);
+        assert_eq!(TileType::from_byte(7), TileType::Other(7));
+        assert_eq!(Compression::from_byte(0), Compression::Unknown);
+        assert_eq!(Compression::from_byte(1), Compression::None);
+        assert_eq!(Compression::from_byte(2), Compression::Gzip);
+        assert_eq!(Compression::from_byte(3), Compression::Brotli);
+        assert_eq!(Compression::from_byte(4), Compression::Zstd);
+    }
+
+    #[test]
+    fn the_libviprs_tile_formats_map_to_tile_types_and_raw_does_not() {
+        assert_eq!(
+            TileType::try_from_tile_format(TileFormat::Png).unwrap(),
+            TileType::Png
+        );
+        assert_eq!(
+            TileType::try_from_tile_format(TileFormat::Jpeg { quality: 80 }).unwrap(),
+            TileType::Jpeg
+        );
+        // Raw pixel bytes carry neither their dimensions nor their pixel
+        // format, so there is no tile type that could describe them.
+        assert!(matches!(
+            TileType::try_from_tile_format(TileFormat::Raw),
+            Err(PmTilesError::UnsupportedTileFormat { .. })
+        ));
+        assert_eq!(TileType::Png.extension(), Some("png"));
+        assert_eq!(TileType::Other(7).extension(), None);
+        assert_eq!(TileType::Unknown.extension(), None);
+    }
+
+    #[test]
+    fn gzip_round_trips_and_only_two_schemes_are_supported() {
+        let payload = b"the quick brown fox jumps over the lazy dog, repeatedly".repeat(20);
+
+        let squashed = Compression::Gzip.compress(&payload).unwrap();
+        assert!(squashed.len() < payload.len(), "gzip did not compress");
+        assert_eq!(
+            Compression::Gzip.decompress(&squashed, 1 << 20).unwrap(),
+            payload
+        );
+
+        assert_eq!(Compression::None.compress(&payload).unwrap(), payload);
+        assert_eq!(
+            Compression::None.decompress(&payload, 1 << 20).unwrap(),
+            payload
+        );
+
+        for unsupported in [
+            Compression::Brotli,
+            Compression::Zstd,
+            Compression::Unknown,
+            Compression::Other(9),
+        ] {
+            assert!(
+                matches!(
+                    unsupported.compress(&payload),
+                    Err(PmTilesError::UnsupportedCompression { .. })
+                ),
+                "{unsupported} must refuse to compress rather than pass bytes through"
+            );
+            assert!(matches!(
+                unsupported.decompress(&squashed, 1 << 20),
+                Err(PmTilesError::UnsupportedCompression { .. })
+            ));
+            assert!(!unsupported.is_supported());
+        }
+        assert!(Compression::None.is_supported());
+        assert!(Compression::Gzip.is_supported());
+    }
+
+    #[test]
+    fn decompression_stops_at_the_ceiling_it_was_given() {
+        // No length field in PMTiles v3 is an uncompressed length, so this
+        // ceiling is the only thing between a reader and a gzip bomb. A few
+        // hundred stored bytes expand to a megabyte here.
+        let bomb = Compression::Gzip.compress(&vec![0u8; 1 << 20]).unwrap();
+        assert!(bomb.len() < 4096, "the bomb fixture is not compressed enough");
+
+        assert!(matches!(
+            Compression::Gzip.decompress(&bomb, 4096),
+            Err(PmTilesError::DecompressionLimit { limit: 4096 })
+        ));
+
+        // The boundary in both directions, because an off-by-one here either
+        // refuses a legitimate directory or lets one byte past the cap.
+        let exact = Compression::Gzip.compress(&vec![7u8; 1000]).unwrap();
+        assert_eq!(Compression::Gzip.decompress(&exact, 1000).unwrap().len(), 1000);
+        assert!(matches!(
+            Compression::Gzip.decompress(&exact, 999),
+            Err(PmTilesError::DecompressionLimit { limit: 999 })
+        ));
+
+        // The uncompressed path is capped too, or a `None` archive would be
+        // the way around the ceiling.
+        assert!(matches!(
+            Compression::None.decompress(&[0u8; 100], 99),
+            Err(PmTilesError::DecompressionLimit { .. })
+        ));
+        assert_eq!(Compression::None.decompress(&[0u8; 100], 100).unwrap().len(), 100);
+    }
+
+    #[test]
+    fn degrees_convert_through_the_e7_fixed_point_without_wrapping() {
+        let mut header = Header::default();
+        header.set_bounds_degrees(-180.0, -85.0511287, 180.0, 85.0511287);
+        assert_eq!(header.min_lon_e7, -1_800_000_000);
+        assert_eq!(header.min_lat_e7, -850_511_287);
+        assert_eq!(header.max_lon_e7, 1_800_000_000);
+        assert_eq!(header.max_lat_e7, 850_511_287);
+
+        // Rounds half away from zero rather than truncating toward it:
+        // truncation shrinks a bounding box, and a box one unit too small
+        // excludes tiles at its own edge.
+        header.set_bounds_degrees(0.000_000_05, -0.000_000_05, 0.000_000_14, -0.000_000_14);
+        assert_eq!(header.min_lon_e7, 1);
+        assert_eq!(header.min_lat_e7, -1);
+        assert_eq!(header.max_lon_e7, 1);
+        assert_eq!(header.max_lat_e7, -1);
+
+        // Nonsense stays nonsense rather than becoming its own negation.
+        header.set_bounds_degrees(1e9, -1e9, f64::NAN, f64::INFINITY);
+        assert_eq!(header.min_lon_e7, i32::MAX);
+        assert_eq!(header.min_lat_e7, i32::MIN);
+        assert_eq!(header.max_lon_e7, 0);
+        assert_eq!(header.max_lat_e7, i32::MAX);
+    }
 }

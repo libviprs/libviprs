@@ -217,3 +217,322 @@ fn rotate(n: u64, x: &mut u64, y: &mut u64, rx: u64, ry: u64) {
         std::mem::swap(x, y);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `(z, x, y, tile_id)` measured with `pmtiles.ZxyToID` from go-pmtiles
+    /// v1.31.2, commit a3e4951ea6a0477b784c27c1dcbfd9c130878c5a, the
+    /// `linux_arm64` release tarball with sha256
+    /// `f8bd47e7ea866863489cad588fbaf2f31f42e5821f7a03f009b3769f05801cb1`.
+    ///
+    /// Nothing in this table was computed here. The oracle lane ran the
+    /// reference implementation and wrote the numbers down; they also match a
+    /// derivation made independently from the specification text, and a second
+    /// one made here from a recursive quadrant construction, which is as much
+    /// agreement as three parties who never saw each other's work can produce.
+    ///
+    /// # The rows that carry the weight are the deep ones
+    ///
+    /// The structural coordinates (level firsts and lasts, grid corners) agree
+    /// under several different mappings, **plain Z-order with no rotation
+    /// among them**, so on their own they cannot say which convention PMTiles
+    /// uses. The discriminating rows below are mid-to-high zoom, off every
+    /// quadrant boundary, with `x` and `y` of differing parity, and four of
+    /// them are swapped pairs so a mapping that is accidentally symmetric does
+    /// not survive either. `(12, 3423, 1763) -> 19078479` is the row the spec
+    /// itself publishes and the one that rules out 21314735, 19217573 and
+    /// 20757839.
+    const ORACLE_DISCRIMINATORS: &[(u8, u32, u32, u64)] = &[
+        (12, 3423, 1763, 19078479), // the row that discriminates between candidate Hilbert conventions: x odd, y odd, mid-zoom, off every quadrant boundary
+        (9, 173, 298, 210828), // z9, x odd and y even
+        (9, 306, 91, 324512), // z9, x even and y odd
+        (11, 1337, 642, 5020316), // z11, x odd and y even
+        (11, 908, 1511, 3238970), // z11, x even and y odd
+        (13, 5107, 2884, 79053962), // z13, x odd and y even
+        (13, 2884, 5107, 53847284), // z13, the same pair with x and y swapped, which a symmetric mapping would collide
+        (15, 20749, 9310, 1284441852), // z15, x odd and y even
+        (15, 9310, 20749, 856223324), // z15, the same pair swapped
+        (12, 1763, 3423, 12796581), // z12, the discriminating pair swapped
+        (14, 11113, 6006, 321880274), // z14, x odd and y even
+        (10, 617, 428, 1232398), // z10, x odd and y even
+    ];
+
+    /// The first and last tile of each level the oracle dumped, and a spread of
+    /// coordinates that are not round numbers.
+    const ORACLE_STRUCTURAL: &[(u8, u32, u32, u64)] = &[
+        (0, 0, 0, 0), // first tile of z=0
+        (0, 0, 0, 0), // last tile of z=0, coords from IDToZxy(base(z+1)-1)
+        (1, 0, 0, 1), // first tile of z=1
+        (1, 1, 0, 4), // last tile of z=1, coords from IDToZxy(base(z+1)-1)
+        (2, 0, 0, 5), // first tile of z=2
+        (2, 3, 0, 20), // last tile of z=2, coords from IDToZxy(base(z+1)-1)
+        (3, 0, 0, 21), // first tile of z=3
+        (3, 7, 0, 84), // last tile of z=3, coords from IDToZxy(base(z+1)-1)
+        (4, 0, 0, 85), // first tile of z=4
+        (4, 15, 0, 340), // last tile of z=4, coords from IDToZxy(base(z+1)-1)
+        (5, 0, 0, 341), // first tile of z=5
+        (5, 31, 0, 1364), // last tile of z=5, coords from IDToZxy(base(z+1)-1)
+        (6, 0, 0, 1365), // first tile of z=6
+        (6, 63, 0, 5460), // last tile of z=6, coords from IDToZxy(base(z+1)-1)
+        (7, 0, 0, 5461), // first tile of z=7
+        (7, 127, 0, 21844), // last tile of z=7, coords from IDToZxy(base(z+1)-1)
+        (8, 0, 0, 21845), // first tile of z=8
+        (8, 255, 0, 87380), // last tile of z=8, coords from IDToZxy(base(z+1)-1)
+        (10, 0, 0, 349525), // first tile of z=10
+        (10, 1023, 0, 1398100), // last tile of z=10, coords from IDToZxy(base(z+1)-1)
+        (12, 0, 0, 5592405), // first tile of z=12
+        (12, 4095, 0, 22369620), // last tile of z=12, coords from IDToZxy(base(z+1)-1)
+        (14, 0, 0, 89478485), // first tile of z=14
+        (14, 16383, 0, 357913940), // last tile of z=14, coords from IDToZxy(base(z+1)-1)
+        (16, 0, 0, 1431655765), // first tile of z=16
+        (16, 65535, 0, 5726623060), // last tile of z=16, coords from IDToZxy(base(z+1)-1)
+        (18, 0, 0, 22906492245), // first tile of z=18
+        (18, 262143, 0, 91625968980), // last tile of z=18, coords from IDToZxy(base(z+1)-1)
+        (20, 0, 0, 366503875925), // first tile of z=20
+        (20, 1048575, 0, 1466015503700), // last tile of z=20, coords from IDToZxy(base(z+1)-1)
+        (31, 0, 0, 1537228672809129301), // first tile of z=31
+        (31, 2147483647, 0, 6148914691236517204), // last tile of z=31, coords from IDToZxy(base(z+1)-1)
+        (5, 17, 11, 1209), // arbitrary
+        (6, 37, 23, 4835), // arbitrary, both prime
+        (7, 73, 101, 14797), // arbitrary, both prime
+        (9, 291, 177, 309339), // arbitrary
+        (10, 601, 383, 1238035), // arbitrary, 383 is 2^k-1 shaped
+        (11, 1279, 809, 4933265), // arbitrary
+        (12, 1207, 1539, 8633061), // arbitrary
+        (13, 4123, 2871, 79362511), // arbitrary
+        (14, 8171, 5680, 129937594), // z14 tile over Denver
+        (14, 9649, 12321, 241770071), // z14 tile over Sydney
+        (14, 8377, 5449, 317666519), // z14 tile over Chicago
+        (14, 16383, 0, 357913940), // z14 max x with y=0
+        (14, 0, 16383, 178956970), // z14 x=0 with max y
+        (15, 21845, 32767, 1002159035), // arbitrary at z15, y is the maximum
+        (18, 200000, 131072, 73019712853), // arbitrary at z18, y is a power of two
+        (20, 1048575, 1048575, 1099511627775), // z20 max x, max y
+        (20, 524287, 524288, 916259689812), // z20 straddling the centre seam
+    ];
+
+    /// Every tile of zoom 2 in tile id order, from the oracle.
+    ///
+    /// This is the cheapest discriminator after the deep rows: a Hilbert curve
+    /// visits `(0,0), (1,0), (1,1), (0,1)` for ids 5 to 8 while Z-order visits
+    /// `(0,0), (0,1), (1,0), (1,1)`, and both agree on the spec's only zoom-2
+    /// row.
+    const ORACLE_Z2_ORDER: &[(u8, u32, u32, u64)] = &[
+        (2, 0, 0, 5),
+        (2, 1, 0, 6),
+        (2, 1, 1, 7),
+        (2, 0, 1, 8),
+        (2, 0, 2, 9),
+        (2, 0, 3, 10),
+        (2, 1, 3, 11),
+        (2, 1, 2, 12),
+        (2, 2, 2, 13),
+        (2, 2, 3, 14),
+        (2, 3, 3, 15),
+        (2, 3, 2, 16),
+        (2, 3, 1, 17),
+        (2, 2, 1, 18),
+        (2, 2, 0, 19),
+        (2, 3, 0, 20),
+    ];
+
+    /// What go-pmtiles answers for coordinates that are outside the grid.
+    ///
+    /// **These are not values to reproduce.** `ZxyToID` masks its inputs
+    /// instead of checking them, so it answers a question it was not asked:
+    /// `(2, 4, 0)` comes back as tile id 5, which is the `(2, 0, 0)` tile, and
+    /// zooms 32, 33 and 63 all come back as 6148914691236517205, the first id
+    /// past what a `u64` can address.
+    ///
+    /// This is the third oracle posture from the campaign's list: the
+    /// reference accepts the input and produces garbage, so **refusing is more
+    /// faithful than matching**. A pyramid reader handed `(2, 4, 0)` by a URL
+    /// router would otherwise serve a real, decodable tile for a coordinate
+    /// that does not exist, which is indistinguishable from working.
+    const ORACLE_MASKED_OUT_OF_RANGE: &[(u8, u32, u32, u64)] = &[
+        (2, 4, 0, 5), // x is out of range for z=2 (valid x is 0..3)
+        (2, 0, 4, 5), // y is out of range for z=2
+        (1, 2, 2, 1), // both out of range for z=1
+        (15, 32771, 21845, 688296049), // x=32771 is out of range for z=15, whose maximum x is 32767
+        (1, 0, 2, 1), // y is out of range for z=1; this is one of the tile-fetch probes
+        (2, 5, 1, 7), // x is out of range for z=2; this is one of the tile-fetch probes
+        (32, 0, 0, 6148914691236517205), // z=32, past what a uint64 tile id can address
+        (32, 1, 0, 6148914691236517206), // z=32 with a non-zero x
+        (33, 0, 0, 6148914691236517205), // z=33
+        (63, 0, 0, 6148914691236517205), // z=63
+    ];
+
+    #[test]
+    fn tile_ids_match_the_go_pmtiles_oracle() {
+        let mut checked = 0;
+        for &(z, x, y, want) in ORACLE_DISCRIMINATORS
+            .iter()
+            .chain(ORACLE_STRUCTURAL)
+            .chain(ORACLE_Z2_ORDER)
+        {
+            assert_eq!(
+                zxy_to_tileid(z, x, y).expect("an oracle row is inside the addressable range"),
+                want,
+                "zxy_to_tileid({z}, {x}, {y})"
+            );
+            assert_eq!(
+                tileid_to_zxy(want).expect("an oracle id decodes"),
+                (z, x, y),
+                "tileid_to_zxy({want})"
+            );
+            checked += 1;
+        }
+        // The positive control. Three `chain`ed slices are three chances to
+        // iterate nothing, and a loop that runs zero times passes every
+        // assertion inside it.
+        assert_eq!(
+            checked,
+            ORACLE_DISCRIMINATORS.len() + ORACLE_STRUCTURAL.len() + ORACLE_Z2_ORDER.len(),
+            "the sweep did not visit every oracle row"
+        );
+        assert!(checked >= 70, "only {checked} oracle rows were checked");
+    }
+
+    #[test]
+    fn zoom_2_is_walked_in_hilbert_order_not_z_order() {
+        // Ids 5, 6, 7, 8 are the four tiles of the first quadrant, and the
+        // order they are visited in is what separates the two curves.
+        let visited: Vec<(u32, u32)> = (5..=8)
+            .map(|id| {
+                let (_, x, y) = tileid_to_zxy(id).unwrap();
+                (x, y)
+            })
+            .collect();
+        assert_eq!(
+            visited,
+            vec![(0, 0), (1, 0), (1, 1), (0, 1)],
+            "this is Z-order, not the Hilbert order the oracle measured"
+        );
+
+        // And the whole level, in order, against the oracle.
+        for (index, &(z, x, y, id)) in ORACLE_Z2_ORDER.iter().enumerate() {
+            assert_eq!(id, 5 + index as u64, "the oracle's zoom-2 rows are in id order");
+            assert_eq!(tileid_to_zxy(id).unwrap(), (z, x, y));
+        }
+    }
+
+    #[test]
+    fn swapping_x_and_y_changes_the_tile_id() {
+        // The oracle's swapped pairs. A mapping that is symmetric in x and y
+        // round-trips perfectly and fails every one of these.
+        let pairs = [
+            ((13u8, 5107u32, 2884u32), (13u8, 2884u32, 5107u32)),
+            ((15, 20749, 9310), (15, 9310, 20749)),
+            ((12, 3423, 1763), (12, 1763, 3423)),
+        ];
+        for ((za, xa, ya), (zb, xb, yb)) in pairs {
+            let a = zxy_to_tileid(za, xa, ya).unwrap();
+            let b = zxy_to_tileid(zb, xb, yb).unwrap();
+            assert_ne!(a, b, "({za},{xa},{ya}) and ({zb},{xb},{yb}) share an id");
+        }
+    }
+
+    #[test]
+    fn out_of_grid_coordinates_are_refused_where_go_pmtiles_masks_them() {
+        for &(z, x, y, masked) in ORACLE_MASKED_OUT_OF_RANGE {
+            let got = zxy_to_tileid(z, x, y);
+            assert!(
+                matches!(
+                    got,
+                    Err(PmTilesError::ZoomOutOfRange { .. } | PmTilesError::CoordOutOfRange { .. })
+                ),
+                "({z}, {x}, {y}) must be refused, not answered; go-pmtiles masks it to {masked}"
+            );
+        }
+
+        // The positive control, and it is the whole point of this test: the
+        // in-range neighbour of each masked row still works, so "everything is
+        // refused" cannot pass here.
+        assert_eq!(zxy_to_tileid(2, 3, 0).unwrap(), 20);
+        assert_eq!(zxy_to_tileid(1, 1, 1).unwrap(), 3);
+        assert_eq!(zxy_to_tileid(15, 21845, 32767).unwrap(), 1_002_159_035);
+        assert_eq!(zxy_to_tileid(31, 0, 0).unwrap(), 1_537_228_672_809_129_301);
+    }
+
+    #[test]
+    fn consecutive_ids_on_one_level_land_on_adjacent_tiles() {
+        // The defining property of a Hilbert curve, and one no Z-order
+        // implementation has: step by one id and you step to a tile that
+        // shares an edge. It is an invariant rather than a vector, so it holds
+        // the mapping even where the oracle table has no row.
+        let mut steps = 0;
+        for z in 1..=7u8 {
+            let first = first_tileid_of_zoom(z).unwrap();
+            let count = 1u64 << (2 * u32::from(z));
+            for id in first..first + count - 1 {
+                let (_, x0, y0) = tileid_to_zxy(id).unwrap();
+                let (_, x1, y1) = tileid_to_zxy(id + 1).unwrap();
+                let distance = x0.abs_diff(x1) + y0.abs_diff(y1);
+                assert_eq!(distance, 1, "ids {id} and {} are not neighbours", id + 1);
+                steps += 1;
+            }
+        }
+        // 4 + 16 + ... + 16384, less one step per level.
+        assert_eq!(steps, 21844 - 7, "the adjacency sweep did not cover every level");
+    }
+
+    #[test]
+    fn every_level_is_a_bijection_onto_its_id_range() {
+        for z in 0..=6u8 {
+            let side = 1u32 << z;
+            let first = first_tileid_of_zoom(z).unwrap();
+            let mut seen = std::collections::BTreeSet::new();
+            for y in 0..side {
+                for x in 0..side {
+                    let id = zxy_to_tileid(z, x, y).unwrap();
+                    assert!(
+                        (first..first + u64::from(side) * u64::from(side)).contains(&id),
+                        "({z}, {x}, {y}) -> {id} is outside zoom {z}'s id range"
+                    );
+                    assert!(seen.insert(id), "id {id} is produced twice at zoom {z}");
+                }
+            }
+            assert_eq!(seen.len(), (side as usize) * (side as usize));
+        }
+    }
+
+    #[test]
+    fn level_bases_are_the_closed_form_and_the_ceiling_is_where_u64_ends() {
+        // (4^z - 1)/3, checked against the oracle's own level_bases rows.
+        for (z, want) in [
+            (0u8, 0u64),
+            (1, 1),
+            (2, 5),
+            (3, 21),
+            (12, 5_592_405),
+            (20, 366_503_875_925),
+            (31, 1_537_228_672_809_129_301),
+        ] {
+            assert_eq!(first_tileid_of_zoom(z).unwrap(), want);
+            assert_eq!(zxy_to_tileid(z, 0, 0).unwrap(), want);
+        }
+
+        // `MAX_TILE_ID` derived a second way, in `u128` where zoom 32's base is
+        // not a special case at all: it is `(4^32 - 1)/3 - 1`.
+        let base_of_zoom_32 = (((1u128 << 64) - 1) / 3) as u64;
+        assert_eq!(MAX_TILE_ID, base_of_zoom_32 - 1);
+        // And it is what go-pmtiles saturates to for z=32, measured.
+        assert_eq!(base_of_zoom_32, 6_148_914_691_236_517_205);
+
+        assert_eq!(tileid_to_zxy(MAX_TILE_ID).unwrap(), (31, 2_147_483_647, 0));
+        assert!(matches!(
+            tileid_to_zxy(base_of_zoom_32),
+            Err(PmTilesError::TileIdOutOfRange { .. })
+        ));
+        assert!(matches!(
+            tileid_to_zxy(u64::MAX),
+            Err(PmTilesError::TileIdOutOfRange { .. })
+        ));
+        assert!(matches!(
+            first_tileid_of_zoom(32),
+            Err(PmTilesError::ZoomOutOfRange { .. })
+        ));
+    }
+}

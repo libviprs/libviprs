@@ -398,3 +398,393 @@ pub fn deserialize_entries(bytes: &[u8]) -> Result<Vec<Entry>, PmTilesError> {
 
     Ok(entries)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The root directory of `dupes-z0z3.pmtiles`, decompressed, as
+    /// go-pmtiles v1.31.2 wrote it (commit
+    /// a3e4951ea6a0477b784c27c1dcbfd9c130878c5a, archive sha256
+    /// `bfc9db4c6ce6a04194e02b3d4815814adb05209f1aaba8591e4e1332f6e56a27`).
+    ///
+    /// The oracle lane confirmed that go-pmtiles' own `SerializeEntries`
+    /// reproduces these bytes exactly from the entries it decoded, so this is
+    /// a byte-for-byte target for a serializer and not only a fixture for a
+    /// parser.
+    ///
+    /// It is the interesting golden rather than the simple one: 67 entries
+    /// covering 85 addressed tiles across zooms 0 to 3, with deliberate
+    /// duplicate tiles, so it exercises run lengths above 1, repeated offsets,
+    /// and a **backwards** offset jump from 74 to 0 where a deduplicated tile
+    /// points back at an earlier blob.
+    const ORACLE_DIRECTORY_HEX: &str = concat!(
+        "4300010410010101010101010101010101010101010101010101010101010101",
+        "0101010101010101010101010101010101010101010101010101010101010101",
+        "0101010101041001010101010101010101010101010101010101010101010101",
+        "0101010101010101010101010101010101010101010101010101010101010101",
+        "010101010101014a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a",
+        "4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a",
+        "4a4a4a4a4a4a4a4a4a4a01000195010000000000000000000000000000000000",
+        "000000000000000000009501ad110000000000000000000000009501ef180000",
+        "0000000000000000009501e71f00000000000000",
+    );
+
+    /// Header counts go-pmtiles reports for the same archive, which the entry
+    /// list has to agree with.
+    const ORACLE_ADDRESSED_TILES: u64 = 85;
+    const ORACLE_TILE_ENTRIES: usize = 67;
+    const ORACLE_TILE_CONTENTS: usize = 63;
+
+    fn oracle_directory_bytes() -> Vec<u8> {
+        let hex = ORACLE_DIRECTORY_HEX;
+        assert_eq!(hex.len() % 2, 0, "the golden hex is not whole bytes");
+        (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("golden hex"))
+            .collect()
+    }
+
+    #[test]
+    fn the_oracle_s_directory_decodes_to_the_entries_go_pmtiles_reports() {
+        let bytes = oracle_directory_bytes();
+        let entries = deserialize_entries(&bytes).expect("a real archive's root directory");
+
+        // The three header counts, which come from go-pmtiles rather than from
+        // this decode, so they cross-check the entry list from outside.
+        assert_eq!(entries.len(), ORACLE_TILE_ENTRIES);
+        let addressed: u64 = entries.iter().map(|e| u64::from(e.run_length)).sum();
+        assert_eq!(addressed, ORACLE_ADDRESSED_TILES);
+        let distinct: std::collections::BTreeSet<u64> = entries.iter().map(|e| e.offset).collect();
+        assert_eq!(distinct.len(), ORACLE_TILE_CONTENTS);
+
+        // The first four entries verbatim. The second covers a run of four and
+        // the third a run of sixteen, which is what a pyramid of identical
+        // tiles looks like.
+        let want: &[(u64, u64, u32, u32)] = &[
+            (0, 0, 74, 1),
+            (1, 74, 74, 4),
+            (5, 0, 74, 16),
+            (21, 148, 74, 1),
+        ];
+        for (index, &(tile_id, offset, length, run_length)) in want.iter().enumerate() {
+            assert_eq!(
+                entries[index],
+                Entry { tile_id, offset, length, run_length },
+                "entry {index}"
+            );
+        }
+
+        // The backwards offset jump: entry 2 points at offset 0 while entry 1
+        // sits at 74. A signed or zigzagged offset column would have to show
+        // itself here and does not, because the column stores `offset + 1`
+        // outright rather than a delta.
+        assert!(entries[2].offset < entries[1].offset);
+
+        // Strictly ascending ids, which the unsigned delta encoding forces.
+        for pair in entries.windows(2) {
+            assert!(pair[0].tile_id < pair[1].tile_id, "ids are not ascending");
+        }
+
+        // And what this crate serialises from those entries is the same bytes.
+        assert_eq!(serialize_entries(&entries).unwrap(), bytes);
+    }
+
+    #[test]
+    fn the_column_order_and_the_two_shorthands_are_what_the_spec_says() {
+        // Hand-computed from the spec's five-part layout, so a swapped pair of
+        // columns fails here with a readable diff rather than only failing the
+        // 276-byte golden above.
+        let entries = vec![
+            Entry { tile_id: 0, offset: 0, length: 10, run_length: 1 },
+            // Contiguous with the previous entry, so the offset column stores 0.
+            Entry { tile_id: 1, offset: 10, length: 20, run_length: 2 },
+            // A gap, so the offset column stores offset + 1. A delta of 4 on
+            // the id column, and a leaf pointer's run length of 0.
+            Entry { tile_id: 5, offset: 100, length: 30, run_length: 0 },
+        ];
+        let want: &[u8] = &[
+            0x03, // three entries
+            0x00, 0x01, 0x04, // tile id deltas: 0, 1, 4
+            0x01, 0x02, 0x00, // run lengths: 1, 2, 0
+            0x0A, 0x14, 0x1E, // lengths: 10, 20, 30
+            0x01, 0x00, 0x65, // offsets: 0+1, contiguous, 100+1
+        ];
+        assert_eq!(serialize_entries(&entries).unwrap(), want);
+        assert_eq!(deserialize_entries(want).unwrap(), entries);
+    }
+
+    #[test]
+    fn the_first_entry_never_uses_the_contiguous_shorthand() {
+        // Its offset is 0 and the shorthand byte is also 0, so an encoder that
+        // dropped the `index > 0` guard would write a `0` that decodes as an
+        // underflow. Every clustered archive has exactly this entry.
+        let entries = vec![Entry { tile_id: 0, offset: 0, length: 5, run_length: 1 }];
+        let bytes = serialize_entries(&entries).unwrap();
+        assert_eq!(bytes, vec![0x01, 0x00, 0x01, 0x05, 0x01]);
+        assert_eq!(deserialize_entries(&bytes).unwrap(), entries);
+
+        // And the decoder refuses the malformed spelling by name rather than
+        // underflowing a u64 to 18446744073709551615, which is what
+        // `value - 1` does in a release build.
+        let malformed: &[u8] = &[0x01, 0x00, 0x01, 0x05, 0x00];
+        assert!(matches!(
+            deserialize_entries(malformed),
+            Err(PmTilesError::ContiguousOffsetAtFirstEntry)
+        ));
+    }
+
+    #[test]
+    fn a_malformed_directory_is_refused_field_by_field() {
+        // Every case starts from the same valid three-entry directory and
+        // changes one thing, so each refusal is attributable.
+        let valid = serialize_entries(&[
+            Entry { tile_id: 1, offset: 0, length: 10, run_length: 1 },
+            Entry { tile_id: 2, offset: 10, length: 10, run_length: 1 },
+            Entry { tile_id: 9, offset: 40, length: 10, run_length: 1 },
+        ])
+        .unwrap();
+        assert!(deserialize_entries(&valid).is_ok(), "the fixture must be valid");
+
+        // A claimed count of zero.
+        assert!(matches!(
+            deserialize_entries(&[0x00]),
+            Err(PmTilesError::EmptyDirectory)
+        ));
+
+        // A count no honest directory could fill: four columns need at least
+        // one byte per entry each.
+        assert!(matches!(
+            deserialize_entries(&[0x7F, 0x01, 0x01, 0x01, 0x01]),
+            Err(PmTilesError::DirectoryTooManyEntries { claimed: 127, .. })
+        ));
+
+        // A repeated tile id, spelled as a zero delta on the second entry.
+        let mut duplicate = valid.clone();
+        duplicate[2] = 0x00;
+        assert!(matches!(
+            deserialize_entries(&duplicate),
+            Err(PmTilesError::NonAscendingEntry { index: 1 })
+        ));
+
+        // A zero length, which the spec forbids twice and which would make the
+        // contiguous shorthand ambiguous.
+        let mut zero_length = valid.clone();
+        zero_length[7] = 0x00;
+        assert!(matches!(
+            deserialize_entries(&zero_length),
+            Err(PmTilesError::ZeroLengthEntry { .. })
+        ));
+
+        // Trailing bytes after the fourth column.
+        let mut trailing = valid.clone();
+        trailing.push(0x00);
+        assert!(matches!(
+            deserialize_entries(&trailing),
+            Err(PmTilesError::TrailingDirectoryBytes { remaining: 1 })
+        ));
+
+        // A column that runs off the end.
+        assert!(deserialize_entries(&valid[..valid.len() - 1]).is_err());
+
+        // A tile id past the addressable range, built directly rather than by
+        // corrupting a byte: the delta is the id itself on the first entry.
+        let mut too_far = Vec::new();
+        crate::pmtiles::varint::encode_uvarint(1, &mut too_far);
+        crate::pmtiles::varint::encode_uvarint(MAX_TILE_ID + 1, &mut too_far);
+        crate::pmtiles::varint::encode_uvarint(1, &mut too_far);
+        crate::pmtiles::varint::encode_uvarint(10, &mut too_far);
+        crate::pmtiles::varint::encode_uvarint(1, &mut too_far);
+        assert!(matches!(
+            deserialize_entries(&too_far),
+            Err(PmTilesError::TileIdOutOfRange { .. })
+        ));
+
+        // A length that does not fit the u32 this crate models it with.
+        let mut huge_length = Vec::new();
+        crate::pmtiles::varint::encode_uvarint(1, &mut huge_length);
+        crate::pmtiles::varint::encode_uvarint(7, &mut huge_length);
+        crate::pmtiles::varint::encode_uvarint(1, &mut huge_length);
+        crate::pmtiles::varint::encode_uvarint(u64::from(u32::MAX) + 1, &mut huge_length);
+        crate::pmtiles::varint::encode_uvarint(1, &mut huge_length);
+        assert!(matches!(
+            deserialize_entries(&huge_length),
+            Err(PmTilesError::EntryFieldTooLarge { field: "length", .. })
+        ));
+    }
+
+    #[test]
+    fn a_directory_this_crate_will_not_write() {
+        // The writer side refuses the same shapes the reader does, so a
+        // libviprs archive cannot contain one.
+        assert!(matches!(
+            serialize_entries(&[]),
+            Err(PmTilesError::EmptyDirectory)
+        ));
+        assert!(matches!(
+            serialize_entries(&[Entry { tile_id: 1, offset: 0, length: 0, run_length: 1 }]),
+            Err(PmTilesError::ZeroLengthEntry { index: 0 })
+        ));
+        assert!(matches!(
+            serialize_entries(&[
+                Entry { tile_id: 5, offset: 0, length: 1, run_length: 1 },
+                Entry { tile_id: 5, offset: 1, length: 1, run_length: 1 },
+            ]),
+            Err(PmTilesError::NonAscendingEntry { index: 1 })
+        ));
+        assert!(matches!(
+            serialize_entries(&[Entry {
+                tile_id: MAX_TILE_ID + 1,
+                offset: 0,
+                length: 1,
+                run_length: 1
+            }]),
+            Err(PmTilesError::TileIdOutOfRange { .. })
+        ));
+        // An offset one below the ceiling would encode as `offset + 1` and
+        // wrap. The arithmetic is checked rather than trusted.
+        assert!(matches!(
+            serialize_entries(&[Entry {
+                tile_id: 1,
+                offset: u64::MAX,
+                length: 1,
+                run_length: 1
+            }]),
+            Err(PmTilesError::Overflow { .. })
+        ));
+
+        // The positive control: the valid neighbour of each of those writes.
+        assert!(
+            serialize_entries(&[
+                Entry { tile_id: 5, offset: 0, length: 1, run_length: 1 },
+                Entry { tile_id: 6, offset: 1, length: 1, run_length: 1 },
+            ])
+            .is_ok()
+        );
+        assert!(
+            serialize_entries(&[Entry {
+                tile_id: MAX_TILE_ID,
+                offset: 0,
+                length: 1,
+                run_length: 1
+            }])
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_run_absorbs_the_next_tile_only_when_all_three_conditions_hold() {
+        let mut entries = Vec::new();
+        push_entry(&mut entries, 5, 1337, 42).unwrap();
+        push_entry(&mut entries, 6, 1337, 42).unwrap(); // same blob, next id
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].run_length, 2);
+
+        // A gap in the ids starts a new entry even with the same blob.
+        push_entry(&mut entries, 9, 1337, 42).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[1].run_length, 1);
+
+        // A different offset starts a new entry even with consecutive ids.
+        push_entry(&mut entries, 10, 4096, 42).unwrap();
+        assert_eq!(entries.len(), 3);
+
+        // So does a different length at the same offset, which is the case a
+        // comparison on the offset alone would fold together.
+        push_entry(&mut entries, 11, 4096, 11).unwrap();
+        assert_eq!(entries.len(), 4);
+
+        // A leaf pointer is never extended.
+        let mut with_leaf = vec![Entry { tile_id: 5, offset: 0, length: 9, run_length: 0 }];
+        push_entry(&mut with_leaf, 6, 0, 9).unwrap();
+        assert_eq!(with_leaf.len(), 2);
+        assert_eq!(with_leaf[0].run_length, 0);
+
+        // Out-of-order and zero-length are refused rather than accepted into a
+        // directory nothing can encode.
+        let mut refused = Vec::new();
+        push_entry(&mut refused, 10, 0, 5).unwrap();
+        assert!(matches!(
+            push_entry(&mut refused, 10, 5, 5),
+            Err(PmTilesError::NonAscendingEntry { .. })
+        ));
+        assert!(matches!(
+            push_entry(&mut refused, 11, 5, 0),
+            Err(PmTilesError::ZeroLengthEntry { .. })
+        ));
+        // The positive control: the next valid id, pointing at the same blob,
+        // still goes in and extends the run.
+        push_entry(&mut refused, 11, 0, 5).unwrap();
+        assert_eq!(refused.len(), 1);
+        assert_eq!(refused[0].run_length, 2);
+
+        // What came out is a directory that serialises.
+        assert!(serialize_entries(&entries).is_ok());
+    }
+
+    #[test]
+    fn landing_on_an_entry_is_not_the_same_as_being_inside_its_run() {
+        let run = Entry { tile_id: 5, offset: 0, length: 9, run_length: 3 };
+        assert!(!run.run_contains(4), "below the run");
+        assert!(run.run_contains(5));
+        assert!(run.run_contains(6));
+        assert!(run.run_contains(7));
+        // This is the one that matters. A lookup for tile 8 lands on this
+        // entry because it is the largest with a tile id at or below 8, and a
+        // reader without the run-end check returns tile 5's bytes for it.
+        assert!(!run.run_contains(8), "past the end of the run");
+        assert_eq!(run.last_tile_id(), Some(7));
+
+        // A leaf pointer contains nothing; it is followed, not read.
+        let leaf = Entry { tile_id: 5, offset: 0, length: 9, run_length: 0 };
+        assert!(leaf.is_leaf());
+        assert!(!leaf.run_contains(5));
+        assert_eq!(leaf.last_tile_id(), None);
+
+        // A hostile entry whose run runs off the end of the id space. The sum
+        // wraps in a release build, and a wrapped end is below every id, so
+        // the naive comparison answers "not contained" for everything.
+        let hostile = Entry {
+            tile_id: u64::MAX - 1,
+            offset: 0,
+            length: 9,
+            run_length: u32::MAX,
+        };
+        assert!(hostile.run_contains(u64::MAX));
+        assert!(hostile.run_contains(u64::MAX - 1));
+        assert!(!hostile.run_contains(u64::MAX - 2));
+        assert_eq!(hostile.last_tile_id(), Some(u64::MAX));
+    }
+
+    #[test]
+    fn a_leaf_pointer_survives_the_round_trip() {
+        // Round-tripping a run length of 0 is the whole leaf mechanism: it is
+        // the only discriminant between a tile entry and a pointer, so a
+        // codec that normalised it to 1 would turn every leaf into a tile.
+        let entries = vec![
+            Entry { tile_id: 0, offset: 0, length: 100, run_length: 5 },
+            Entry { tile_id: 5, offset: 100, length: 250, run_length: 0 },
+            Entry { tile_id: 21, offset: 350, length: 90, run_length: 0 },
+        ];
+        let back = deserialize_entries(&serialize_entries(&entries).unwrap()).unwrap();
+        assert_eq!(back, entries);
+        assert!(back[1].is_leaf());
+        assert!(back[2].is_leaf());
+    }
+
+    #[test]
+    fn a_large_archive_s_offsets_survive_past_four_gigabytes() {
+        // The arithmetic that silently does not work is the 32-bit one, so
+        // this puts every offset above 2^32 and asks for them back.
+        let base: u64 = 5_000_000_000;
+        let entries = vec![
+            Entry { tile_id: 1, offset: base, length: 4096, run_length: 1 },
+            Entry { tile_id: 2, offset: base + 4096, length: 8192, run_length: 1 },
+            Entry { tile_id: 3, offset: 12_000_000_000, length: 1, run_length: 1 },
+        ];
+        let back = deserialize_entries(&serialize_entries(&entries).unwrap()).unwrap();
+        assert_eq!(back, entries);
+        assert_eq!(back[1].offset, 5_000_004_096);
+        assert_eq!(back[2].offset, 12_000_000_000);
+    }
+}
