@@ -47,7 +47,14 @@ RUN case "${TARGETARCH}" in \
     rm /tmp/pdfium.tgz
 
 FROM rust:latest
-RUN apt-get update && apt-get install -y ca-certificates git && rm -rf /var/lib/apt/lists/*
+# `shellcheck` is here because `ubuntu-latest` ships it and this image did not,
+# which is the one thing this file exists to prevent. The integration job runs
+# `shellcheck tools/*.sh tools/hooks/pre-push` from libviprs-tests' own CI, and
+# its hook-installer test drives the pre-commit hook with every command stubbed
+# to succeed. `shellcheck` was not among the stubs because on a real runner it
+# does not need to be, so the test failed here and passed there, which is a
+# mirror that lies rather than a mirror that is strict.
+RUN apt-get update && apt-get install -y ca-certificates git shellcheck && rm -rf /var/lib/apt/lists/*
 COPY --from=pdfium /opt/pdfium/lib/libpdfium.so /usr/local/lib/libpdfium.so
 RUN ldconfig
 
