@@ -238,6 +238,47 @@ fn different_volumes_do_not_share_a_target_dir() {
     assert_ne!(a.get("run"), b.get("run"));
 }
 
+/// The other half of moving the yaml import, and the reason this test exists at
+/// all: I moved it out of module scope and forgot to put it back inside
+/// `build_plan`, so every real run died with `NameError: name 'yaml' is not
+/// defined` while all seven tests above stayed green, because not one of them
+/// asks the tool to parse a workflow.
+///
+/// It cannot simply assert that `--list` works, because the CI image this runs
+/// in has no PyYAML and a refusal there is correct. What it can assert is that
+/// the two legitimate outcomes are the only outcomes: the listing works, or the
+/// tool says PyYAML is missing. A `NameError` is neither, and it is what the
+/// mistake produces.
+#[test]
+fn the_workflow_path_either_works_or_says_pyyaml_is_missing() {
+    let out = Command::new("python3")
+        .arg(tool())
+        .arg("--list")
+        .env_remove("DOCKER_DEFAULT_PLATFORM")
+        .output()
+        .expect("python3 is required to run the container gate's own tests");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("NameError") && !stdout.contains("NameError"),
+        "--list raised a NameError, which means an import went missing:\n{stderr}"
+    );
+    if out.status.success() {
+        // The positive control. A listing that succeeded but printed nothing
+        // would satisfy the NameError check above without proving the workflow
+        // was ever parsed.
+        assert!(
+            stdout.contains("toolchain="),
+            "--list succeeded without listing a job: {stdout}"
+        );
+    } else {
+        assert!(
+            stderr.contains("PyYAML is required"),
+            "--list failed for a reason other than a missing PyYAML:\n{stderr}"
+        );
+    }
+}
+
 /// `--print-docker-argv` has to work in the CI image, which carries python3 and
 /// no PyYAML. If the YAML import is at module scope this refuses to run at all,
 /// and the whole file above it becomes untestable in the place it matters most.
