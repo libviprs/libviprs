@@ -631,9 +631,12 @@ impl<W: Write + Seek> Writer<W> {
     }
 
     fn finish_inner(&mut self) -> Result<Finish, PmTilesError> {
-        if self.tile_count == 0 {
-            return Err(PmTilesError::EmptyDirectory);
-        }
+        // There is deliberately no early "did you add any tiles" check here.
+        // A zero-tile archive is refused by `serialize_entries`, which is
+        // where the spec's "MUST be greater than 0" lives, and a second
+        // refusal in front of it would be a guard no test can distinguish
+        // from the real one: removing it changes no observable behaviour,
+        // which makes it exactly the kind of code that rots unnoticed.
         self.flush_run()?;
 
         // Both scratch files are done being written. Flush them through their
@@ -905,7 +908,10 @@ impl<W: Write + Seek> Writer<W> {
         let center_zoom = self
             .options
             .center_zoom
-            .unwrap_or_else(|| self.min_zoom + (self.max_zoom - self.min_zoom) / 2);
+            // `saturating_sub` because the zoom range is only meaningful once
+            // a tile has arrived, and the empty case reaches here in the
+            // refusal path with `min_zoom` still at its sentinel.
+            .unwrap_or_else(|| self.min_zoom + self.max_zoom.saturating_sub(self.min_zoom) / 2);
 
         let mut header = Header {
             root_offset,
