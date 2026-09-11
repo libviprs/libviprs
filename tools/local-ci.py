@@ -195,6 +195,11 @@ and a note is not a gate: the one job that crosses repos reported SKIP and the
 run still said "All jobs passed" to anybody who had not cloned the sibling.
 `--allow-skips` is there for when a subset is genuinely what you asked for.
 
+Each step runs in its own subshell, as it does on a runner. The MSRV job's
+version-pin step ends with `exit $rc`, and spliced straight into one script
+that `exit 0` ended the job after one of its eight steps, with PASS printed
+over the seven `cargo check`s that never ran (#995).
+
 A job carrying a job-level `if:` is reported HELD and not run, for the same
 reason the `${{ }}` rule above refuses to guess. Today that is only
 `merge-gate.yml`'s Miri, which is held at the release boundary; `make miri`
@@ -584,20 +589,31 @@ def container_script(job, tag, mode, revs, tests_mounted):
                 f'echo "REFUSING to guess at the expression in step: {label}"; exit 90'
             )
             continue
+        # One subshell per step, the way a runner gives each step its own
+        # shell. ci.yml's MSRV version-pin step ends with `exit $rc`, and
+        # spliced straight into this script that `exit 0` ended the whole job
+        # after one of its eight steps, with PASS printed over seven `cargo
+        # check`s that never ran (#995). The subshell inherits `set -e`, and a
+        # non-zero subshell status still ends the job, so a failing step fails
+        # the job exactly as before. The step's own `env:` and its working
+        # directory live inside the parentheses for the same reason: a runner
+        # does not carry one step's environment into the next.
+        step = []
         for k, v in (s.get("env") or {}).items():
-            out.append(f"export {k}={shlex.quote(str(v))}")
+            step.append(f"export {k}={shlex.quote(str(v))}")
         cwd = s.get("working-directory") or "libviprs"
         if not cwd.startswith("/"):
             cwd = "/src/" + cwd if cwd.startswith("libviprs") else "/src/libviprs/" + cwd
-        out.append(f"cd {shlex.quote(cwd)}")
+        step.append(f"cd {shlex.quote(cwd)}")
         if cwd.startswith("/src/libviprs-tests"):
-            out.append('export CARGO_TARGET_DIR="$CARGO_TARGET_DIR_TESTS"')
+            step.append('export CARGO_TARGET_DIR="$CARGO_TARGET_DIR_TESTS"')
         # Quote the echoed copy properly. Inlining a TRUNCATED command into a
         # double-quoted echo breaks the moment a step is a multi-line shell
         # script with parens in it, which the MSRV guard is: the cut landed
         # mid-token and bash died on "syntax error near unexpected token `('".
-        out.append("echo " + shlex.quote("  $ " + " ".join(run.split())[:150]))
-        out.append(run)
+        step.append("echo " + shlex.quote("  $ " + " ".join(run.split())[:150]))
+        step.append(run)
+        out.append("(\n" + "\n".join(step) + "\n)")
     return "\n".join(out)
 
 
