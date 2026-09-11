@@ -1177,7 +1177,7 @@ impl<W: Write + Seek> Writer<W> {
                 // One leaf holding everything and a root of one pointer that
                 // still does not fit means the budget cannot be met at any
                 // leaf size, so doubling again would spin forever.
-                return Err(PmTilesError::RootDirectoryTooLarge {
+                return Err(PmTilesError::RootDirectoryOverBudget {
                     length: root.len(),
                     budget: ROOT_BUDGET,
                 });
@@ -1198,7 +1198,7 @@ impl<W: Write + Seek> Writer<W> {
         let root_offset = HEADER_BYTES as u64;
         let root_length = root.len() as u64;
         if root_offset + root_length > ROOT_CEILING {
-            return Err(PmTilesError::RootDirectoryTooLarge {
+            return Err(PmTilesError::RootDirectoryOverBudget {
                 length: root.len(),
                 budget: ROOT_BUDGET,
             });

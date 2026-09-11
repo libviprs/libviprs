@@ -286,7 +286,7 @@ pub enum PmTilesError {
     /// with every entry pushed down into one leaf, so there is no leaf size
     /// that satisfies the budget.
     #[error("root directory is {length} bytes, over the {budget} byte budget")]
-    RootDirectoryTooLarge { length: usize, budget: usize },
+    RootDirectoryOverBudget { length: usize, budget: usize },
 
     /// A write failed part way through and the writer will not publish.
     ///
