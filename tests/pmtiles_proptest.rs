@@ -507,7 +507,10 @@ fn directories_round_trip_through_their_column_encoding() {
     );
 
     let cases = DIRECTORY_CASES.load(Ordering::Relaxed);
-    assert!(cases >= STRUCTURAL_CASES as usize, "only {cases} directories were built");
+    assert!(
+        cases >= STRUCTURAL_CASES as usize,
+        "only {cases} directories were built"
+    );
     // Positive controls. If the generator stopped producing contiguous
     // offsets or leaf pointers, this test would still pass while covering
     // neither of the two shapes it exists for.

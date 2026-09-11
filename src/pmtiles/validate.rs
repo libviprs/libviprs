@@ -601,7 +601,8 @@ pub fn validate<R: RangeReader + ?Sized>(
     ];
     let mut root_in_bounds = true;
     for (section, offset, length) in sections {
-        if !check_section(&mut report, limits, section, offset, length, size) && section == Section::Root
+        if !check_section(&mut report, limits, section, offset, length, size)
+            && section == Section::Root
         {
             root_in_bounds = false;
         }
@@ -720,7 +721,9 @@ fn read_header<R: RangeReader + ?Sized>(
     if let Some(size) = size
         && size < need
     {
-        report.findings.push(Finding::ArchiveTooShort { size, need });
+        report
+            .findings
+            .push(Finding::ArchiveTooShort { size, need });
         return Ok(None);
     }
 
@@ -731,7 +734,9 @@ fn read_header<R: RangeReader + ?Sized>(
         // as an I/O error would make an unreadable archive indistinguishable
         // from an unreachable one.
         Err(e) if size.is_none() && e.kind() == io::ErrorKind::UnexpectedEof => {
-            report.findings.push(Finding::ArchiveTooShort { size: 0, need });
+            report
+                .findings
+                .push(Finding::ArchiveTooShort { size: 0, need });
             return Ok(None);
         }
         Err(e) => return Err(e.into()),
@@ -744,9 +749,7 @@ fn read_header<R: RangeReader + ?Sized>(
             Ok(None)
         }
         Err(PmTilesError::UnsupportedVersion { found }) => {
-            report
-                .findings
-                .push(Finding::UnsupportedVersion { found });
+            report.findings.push(Finding::UnsupportedVersion { found });
             Ok(None)
         }
         Err(PmTilesError::ShortHeader { got, .. }) => {
@@ -1262,10 +1265,7 @@ mod tests {
                 directory: DirectoryRef::Root,
                 index: 0,
             },
-            Finding::TooManyLeafDirectories {
-                found: 2,
-                limit: 1,
-            },
+            Finding::TooManyLeafDirectories { found: 2, limit: 1 },
             Finding::LeafDepthExceeded {
                 directory: DirectoryRef::Leaf(0),
                 index: 0,
