@@ -108,6 +108,7 @@ pub mod header;
 pub mod metadata;
 pub mod range;
 pub mod tileid;
+pub mod validate;
 pub mod varint;
 pub mod writer;
 
