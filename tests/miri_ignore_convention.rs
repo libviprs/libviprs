@@ -358,14 +358,14 @@ const ANCHOR_FILES: &[&str] = &[
 /// straight to `FileRangeReader::try_open`, which opens it inside the library,
 /// so that one is the `annotated not-detected` shape this ledger exists to
 /// pin.
-const EXPECTED_SRC_ANNOTATIONS: usize = 225;
+const EXPECTED_SRC_ANNOTATIONS: usize = 226;
 /// Companion to [`EXPECTED_SRC_ANNOTATIONS`]: how many `src/` modules carry at
 /// least one annotation. #765 made it 25 by putting the first annotation in
 /// `src/analyze.rs`; `src/colour.rs` and `src/pdf.rs`, which took the other
 /// three, were already in the set.
 /// #987 made it 26 by putting the first annotation in `src/pmtiles/range.rs`,
 /// which is also the first annotated module that is not directly under `src/`.
-const EXPECTED_SRC_MODULES: usize = 26;
+const EXPECTED_SRC_MODULES: usize = 27;
 
 /// How many tests in the tree reach `std::process`.
 ///
@@ -499,7 +499,7 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// temporary file and read byte ranges back out of it. The eighth opens a path
 /// through the library and so is annotated without being detected, which is
 /// why this number moved by seven rather than by eight.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 295;
+const EXPECTED_FS_TOUCHING_TESTS: usize = 296;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
