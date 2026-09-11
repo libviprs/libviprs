@@ -2,10 +2,49 @@
 //!
 //! [`Writer`] takes tiles in **any order**, stores each distinct payload
 //! exactly once, and assembles a spec-correct archive at [`Writer::finish`]
-//! with a staged temp file, an `fsync` and an atomic rename. Peak memory does
-//! not grow with the number of tiles: the per-tile index is spilled to an
-//! append-only log on disk and externally sorted at finalize, and the
-//! directories are built one leaf at a time.
+//! with a staged temp file, an `fsync` and an atomic rename.
+//!
+//! # What the memory actually is
+//!
+//! Peak memory does not grow with the number of **tiles**: the per-tile index
+//! is spilled to an append-only log on disk and externally sorted at finalize,
+//! and the directories are built one leaf at a time. It does grow with the
+//! number of **distinct payloads**, linearly, and that is the number that
+//! matters for this crate's main job. Tiling a large photograph produces
+//! essentially no duplicate tiles, so "distinct payloads" and "tiles" are the
+//! same figure and the two sentences above describe the same allocation.
+//!
+//! This paragraph used to be sixty lines further down and phrased as a
+//! qualification. It belongs here with the numbers attached. Peak RSS of one
+//! process per row, every payload distinct, measured rather than reasoned
+//! about:
+//!
+//! | distinct payloads | peak RSS |
+//! |---|---|
+//! | 500,000 | 79.0 MB |
+//! | 1,000,000 | 155.4 MB |
+//! | 2,000,000 | 288.5 MB |
+//! | 4,000,000 | 563.2 MB |
+//! | 10,000,000 | **1,083.8 MB** |
+//!
+//! So a ten-million-tile photograph costs about a gigabyte, and the sort
+//! buffer, which is the part that genuinely does not grow, is 24 MB of it.
+//! Two percent. Do not read the sort buffer as this writer's memory ceiling.
+//!
+//! Most of the rest is the content-hash table, which is inherent to storing
+//! each payload once and is the same bound
+//! [`DedupeIndex`](crate::dedupe::DedupeIndex) already carries. The other
+//! three tables are as small as they can be made: the payload table is one
+//! `u64` a payload plus a sentinel, and an offset and a length both come out
+//! of it by subtraction; the final-offset lookup is a `Vec` indexed by a dense
+//! payload index rather than a `HashMap` keyed on a staged offset; and the
+//! write order is a `Vec<u64>` of those indices. Those three together took the
+//! ten-million figure from 1,236.4 MB, and they took the peak off the finalize
+//! and back onto ingestion, where the hash table is: the two numbers above and
+//! below `finish` are now the same.
+//!
+//! A pyramid of mostly blank tiles has very few distinct payloads, which is
+//! the case this design exists for. A photograph is the case the table is for.
 //!
 //! The lifecycle is [`PackfileSink`](crate::sink_packfile::PackfileSink)'s:
 //! open once, feed it, finish once. The atomicity is
@@ -60,14 +99,27 @@
 //!
 //! Bounded, and independent of the tile count: the per-tile index (spilled,
 //! sorted in fixed-size runs), the entry list (spilled, streamed into leaves),
-//! the leaf section (spilled), and the payload copy (one blob at a time).
+//! the leaf section (spilled), the payload copy (one blob at a time), and the
+//! external merge, which reads every run through **one** file descriptor with
+//! a capped fan-in rather than holding one open file per run.
 //!
 //! **Not** bounded by the tile count but bounded by the number of *distinct
-//! payloads*: the content hash table, and the map from a staged offset to a
-//! final one. That is inherent to content dedupe and it is the same bound
-//! [`DedupeIndex`](crate::dedupe::DedupeIndex) already carries. A pyramid of
-//! mostly blank tiles has very few distinct payloads, which is the case this
-//! exists for.
+//! payloads*: the content hash table, the payload table, and the final-offset
+//! lookup. See the numbers at the top of this page.
+//!
+//! # A failed write is never published
+//!
+//! [`add_tile`](Writer::add_tile) latches the first I/O failure and
+//! [`finish`](Writer::finish) refuses from there with
+//! [`PmTilesError::WriterFailed`]. A `write_all` that fails has usually
+//! written some of its bytes, and without the latch those orphan bytes sit in
+//! the staging file unaccounted for, the next accepted payload records an
+//! offset pointing into the middle of them, and every later payload is shifted
+//! by the same amount. That is a structurally valid archive full of the wrong
+//! tile bytes, and under a retrying sink with
+//! [`FailurePolicy::RetryThenSkip`](crate::sink::FailurePolicy) the run reports
+//! success while producing it. ENOSPC is the realistic trigger, because this
+//! writer needs roughly twice the archive's size in scratch.
 //!
 //! # Examples
 //!
@@ -136,19 +188,53 @@ const DEFAULT_LEAF_ENTRIES: usize = 4096;
 
 /// How many spill records are sorted in memory before a run is written out.
 ///
-/// 1 Mi records is 20 MB of buffer, and it keeps the number of runs (and so
-/// the number of open file handles during the merge) low: a billion tiles is
-/// 954 runs, which is a merge a `BinaryHeap` handles without noticing.
+/// A record is 20 bytes on disk and **24 in memory**, because `Spill` is a
+/// `u64`, a `u64` and a `u32` and the compiler pads that to the alignment of
+/// its widest field. So 1 Mi records is 20 MB written and 24 MB of `Vec`, and
+/// the buffer is the larger of the two. The earlier comment here quoted 20 MB
+/// for both and understated the live figure by a fifth.
+///
+/// It also keeps the run count low, which used to matter a great deal more
+/// than it does: the merge held one open file handle per run, so a long enough
+/// job ran out of descriptors. It reads through a single handle now
+/// ([`SortedSpill`]) and caps its fan-in ([`MAX_MERGE_FANIN`]), so the run
+/// count costs merge passes rather than a failure.
 const SORT_RUN_RECORDS: usize = 1 << 20;
 
-/// One spilled index record: `tile_id`, staged offset, length.
+/// One spilled index record: `tile_id`, payload index, length.
 const SPILL_RECORD_BYTES: usize = 8 + 8 + 4;
+
+/// How many runs one merge pass will read at once.
+///
+/// The merge used to open every run at once and hold the descriptors for the
+/// whole pass. macOS ships a soft `RLIMIT_NOFILE` of 256 and Linux usually
+/// 1024, so a job with enough runs died of `EMFILE` inside `finish`, after the
+/// entire run, with nothing salvageable because the archive only exists at the
+/// rename. Reading through one handle fixed the descriptors; this caps what is
+/// left, which is the per-cursor read buffers and the heap, and turns any
+/// number of runs into repeated passes instead of one impossible one.
+const MAX_MERGE_FANIN: usize = 128;
+
+/// Records one merge cursor buffers at a time.
+///
+/// 256 records is 5 KB a cursor, so a full-width pass holds 640 KB of buffers
+/// however many runs the job produced.
+const MERGE_CURSOR_RECORDS: usize = 256;
 
 /// One spilled directory entry: `tile_id`, final offset, length, run length.
 const ENTRY_RECORD_BYTES: usize = 8 + 8 + 4 + 4;
 
 /// Copy buffer for moving staged payloads and leaf bytes into the archive.
 const COPY_BUFFER_BYTES: usize = 64 * 1024;
+
+/// "This payload has not been placed in the data region yet."
+///
+/// A sentinel rather than an `Option<u64>` because the `Option` would double
+/// the table it lives in, and it cannot collide with a real offset: an offset
+/// is assigned before its length is added, the addition is checked, and every
+/// entry is at least one byte, so a run that assigned `u64::MAX` fails on the
+/// next `checked_add` before the value is ever stored.
+const UNPLACED: u64 = u64::MAX;
 
 /// Disambiguates the scratch prefix of two writers sharing one directory.
 static SCRATCH_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -355,12 +441,53 @@ impl<W: Write + Seek> Sink<W> {
     }
 }
 
-/// One record in the append-only index log: which tile, and which staged
+/// Where payloads are staged on their way into the archive.
+///
+/// One real variant and one that only exists under `cfg(test)`. The failure
+/// this writer has to survive is a `write_all` that writes some of its bytes
+/// and then errors, and there is no portable way to make a real `File` do that
+/// on demand: ENOSPC is the production trigger and a test cannot fill a
+/// filesystem. The test variant writes its accepted prefix into the same real
+/// file, so the orphan bytes land on disk exactly as they would in the field
+/// and the test can measure them.
+enum Staging {
+    Real(BufWriter<File>),
+    #[cfg(test)]
+    FailsAfter(tests::FailAfter),
+}
+
+impl Staging {
+    fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        match self {
+            Self::Real(w) => w.write_all(bytes),
+            #[cfg(test)]
+            Self::FailsAfter(w) => w.write_all(bytes),
+        }
+    }
+
+    /// Push everything through to the device and close.
+    fn finish(self) -> std::io::Result<()> {
+        match self {
+            Self::Real(w) => w.into_inner().map_err(|e| e.into_error())?.sync_data(),
+            #[cfg(test)]
+            Self::FailsAfter(w) => w.finish(),
+        }
+    }
+}
+
+/// One record in the append-only index log: which tile, and which distinct
 /// payload it points at.
+///
+/// `payload` is a dense index into [`Writer::payload_starts`], assigned in
+/// arrival order at `add_tile` time, and not a staged byte offset. That is
+/// what lets the sorting pass resolve a payload's final offset through a
+/// `Vec` rather than a `HashMap<u64, u64>` keyed on the staged offset, which
+/// at ten million distinct payloads was the second largest allocation in the
+/// writer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct Spill {
     tile_id: u64,
-    staged_offset: u64,
+    payload: u64,
     length: u32,
 }
 
@@ -368,7 +495,7 @@ impl Spill {
     fn encode(&self) -> [u8; SPILL_RECORD_BYTES] {
         let mut out = [0u8; SPILL_RECORD_BYTES];
         out[0..8].copy_from_slice(&self.tile_id.to_le_bytes());
-        out[8..16].copy_from_slice(&self.staged_offset.to_le_bytes());
+        out[8..16].copy_from_slice(&self.payload.to_le_bytes());
         out[16..20].copy_from_slice(&self.length.to_le_bytes());
         out
     }
@@ -376,7 +503,7 @@ impl Spill {
     fn decode(bytes: &[u8; SPILL_RECORD_BYTES]) -> Self {
         Self {
             tile_id: u64::from_le_bytes(bytes[0..8].try_into().expect("8 bytes")),
-            staged_offset: u64::from_le_bytes(bytes[8..16].try_into().expect("8 bytes")),
+            payload: u64::from_le_bytes(bytes[8..16].try_into().expect("8 bytes")),
             length: u32::from_le_bytes(bytes[16..20].try_into().expect("4 bytes")),
         }
     }
@@ -406,18 +533,30 @@ pub struct Writer<W: Write + Seek> {
     destination: Option<PathBuf>,
 
     /// Staged payloads, appended in arrival order.
-    staged: Option<BufWriter<File>>,
-    staged_len: u64,
+    staged: Option<Staging>,
     /// The append-only index log.
     log: Option<BufWriter<File>>,
     log_len: u64,
 
-    /// Distinct payloads: content hash to `(staged offset, length)`.
-    payloads: HashMap<[u8; 32], (u64, u32)>,
+    /// Distinct payloads: content hash to a dense index.
+    ///
+    /// The value used to be `(staged offset, length)`, which is 16 bytes and
+    /// pads the whole entry to 48. An index is 8, and both of the numbers it
+    /// replaced are one subtraction away in `payload_starts`.
+    payloads: HashMap<[u8; 32], u64>,
+    /// Where each distinct payload starts in the staging file, in index order,
+    /// **plus a sentinel** equal to the staged length. So payload `i` occupies
+    /// `payload_starts[i]..payload_starts[i + 1]` and there is exactly one
+    /// record of where a payload is and how long it is.
+    payload_starts: Vec<u64>,
     /// Records not yet written to a run.
     sort_buffer: Vec<Spill>,
     /// Runs already written to the log.
     runs: Vec<Run>,
+
+    /// The step a write failed at, if one has. Set once and never cleared: see
+    /// [`PmTilesError::WriterFailed`].
+    failed: Option<&'static str>,
 
     tile_count: u64,
     min_zoom: u8,
@@ -431,7 +570,8 @@ impl<W: Write + Seek> std::fmt::Debug for Writer<W> {
             .field("destination", &self.destination)
             .field("tiles", &self.tile_count)
             .field("distinct_payloads", &self.payloads.len())
-            .field("staged_bytes", &self.staged_len)
+            .field("staged_bytes", &self.staged_len())
+            .field("failed", &self.failed)
             .finish_non_exhaustive()
     }
 }
@@ -508,13 +648,17 @@ impl<W: Write + Seek> Writer<W> {
             scratch: vec![data_path, log_path],
             base,
             destination: None,
-            staged: Some(BufWriter::new(staged)),
-            staged_len: 0,
+            staged: Some(Staging::Real(BufWriter::new(staged))),
             log: Some(BufWriter::new(log)),
             log_len: 0,
             payloads: HashMap::new(),
+            // The sentinel, which is what makes `payload_starts` self
+            // describing: an empty table still says the staging file is zero
+            // bytes long.
+            payload_starts: vec![0],
             sort_buffer: Vec::new(),
             runs: Vec::new(),
+            failed: None,
             tile_count: 0,
             min_zoom: u8::MAX,
             max_zoom: 0,
@@ -546,6 +690,9 @@ impl<W: Write + Seek> Writer<W> {
         bytes: &[u8],
         content_hash: [u8; 32],
     ) -> Result<(), PmTilesError> {
+        if let Some(during) = self.failed {
+            return Err(PmTilesError::WriterFailed { during });
+        }
         let tile_id = zxy_to_tileid(z, x, y)?;
         if bytes.is_empty() {
             return Err(PmTilesError::ZeroLengthEntry {
@@ -558,39 +705,91 @@ impl<W: Write + Seek> Writer<W> {
             value: bytes.len() as u64,
         })?;
 
-        let staged_offset = match self.payloads.get(&content_hash) {
-            Some(&(offset, stored)) => {
+        let payload = match self.payloads.get(&content_hash).copied() {
+            Some(index) => {
+                let stored = self.payload_length(index);
                 if stored != length {
                     return Err(PmTilesError::ContentHashMismatch { length, stored });
                 }
-                offset
+                index
             }
             None => {
-                let offset = self.staged_len;
-                self.staged
+                let index = self.payload_count();
+                let offset = self.staged_len();
+                // Everything from here down can leave bytes behind, so it is
+                // latched.
+                let written = self
+                    .staged
                     .as_mut()
                     .expect("a live writer has its staging file")
-                    .write_all(bytes)?;
-                self.staged_len = self.staged_len.checked_add(u64::from(length)).ok_or(
-                    PmTilesError::Overflow {
+                    .write_all(bytes);
+                self.latch("staging a payload", written)?;
+                let end = offset
+                    .checked_add(u64::from(length))
+                    .ok_or(PmTilesError::Overflow {
                         what: "the staged payload region",
-                    },
-                )?;
-                self.payloads.insert(content_hash, (offset, length));
-                offset
+                    });
+                let end = self.latch("staging a payload", end)?;
+                self.payload_starts.push(end);
+                self.payloads.insert(content_hash, index);
+                index
             }
         };
 
-        self.push_spill(Spill {
+        let spilled = self.push_spill(Spill {
             tile_id,
-            staged_offset,
+            payload,
             length,
-        })?;
+        });
+        self.latch("appending to the index log", spilled)?;
 
         self.tile_count += 1;
         self.min_zoom = self.min_zoom.min(z);
         self.max_zoom = self.max_zoom.max(z);
         Ok(())
+    }
+
+    /// Record that a step failed after it could have written something.
+    ///
+    /// Called on the I/O paths of [`add_tile`](Self::add_tile) and nowhere
+    /// else, on purpose. The refusals in front of them, a coordinate outside
+    /// its own grid, an empty payload, a content hash covering a different
+    /// length, all happen before a byte moves, and latching those would turn
+    /// an engine's `FailurePolicy::Skip` into a failed run.
+    fn latch<T, E: Into<PmTilesError>>(
+        &mut self,
+        during: &'static str,
+        result: Result<T, E>,
+    ) -> Result<T, PmTilesError> {
+        match result {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                self.failed.get_or_insert(during);
+                Err(error.into())
+            }
+        }
+    }
+
+    /// How many bytes of payload are staged. The sentinel at the end of
+    /// `payload_starts` is that number, so there is no second copy of it to
+    /// drift.
+    fn staged_len(&self) -> u64 {
+        *self
+            .payload_starts
+            .last()
+            .expect("the payload table always carries its sentinel")
+    }
+
+    /// How many distinct payloads are staged, as the index the next one gets.
+    fn payload_count(&self) -> u64 {
+        (self.payload_starts.len() - 1) as u64
+    }
+
+    /// The staged length of one distinct payload.
+    fn payload_length(&self, index: u64) -> u32 {
+        let at = index as usize;
+        let span = self.payload_starts[at + 1] - self.payload_starts[at];
+        u32::try_from(span).expect("a payload length came in as a u32 and has not changed")
     }
 
     /// How many tiles have been added so far. Runs are not collapsed until
@@ -657,6 +856,21 @@ impl<W: Write + Seek> Writer<W> {
     }
 
     fn finish_inner(&mut self) -> Result<Finish, PmTilesError> {
+        // A run that could not write a tile does not get to publish one.
+        //
+        // `add_tile` advances its bookkeeping only after `write_all` returns,
+        // so a write that fails part way leaves orphan bytes in the staging
+        // file that nothing accounts for. The next accepted payload would be
+        // recorded at an offset pointing into the middle of them and every
+        // later payload would be shifted by the same amount, which is a
+        // structurally perfect archive full of the wrong tile bytes. A
+        // retrying sink under `FailurePolicy::RetryThenSkip` turns that into a
+        // *successful* run, so the refusal has to be here rather than left to
+        // the caller noticing an error it was told to tolerate.
+        if let Some(during) = self.failed {
+            return Err(PmTilesError::WriterFailed { during });
+        }
+
         // There is deliberately no early "did you add any tiles" check here.
         // A zero-tile archive is refused by `serialize_entries`, which is
         // where the spec's "MUST be greater than 0" lives, and a second
@@ -668,10 +882,7 @@ impl<W: Write + Seek> Writer<W> {
         // Both scratch files are done being written. Flush them through their
         // buffers and close the handles before anything reads them back.
         if let Some(staged) = self.staged.take() {
-            staged
-                .into_inner()
-                .map_err(|e| e.into_error())?
-                .sync_data()?;
+            staged.finish()?;
         }
         if let Some(log) = self.log.take() {
             log.into_inner().map_err(|e| e.into_error())?.sync_data()?;
@@ -697,9 +908,10 @@ struct Plan {
     entries_path: PathBuf,
     entry_count: u64,
     addressed_tiles: u64,
-    /// Distinct payloads, in the order they are written into the archive,
-    /// as `(staged offset, length)`.
-    order: Vec<(u64, u32)>,
+    /// Distinct payloads, in the order they are written into the archive, as
+    /// indices into [`Writer::payload_starts`]. One `u64` each rather than the
+    /// `(u64, u32)` pair this used to hold, which padded to 16 bytes.
+    order: Vec<u64>,
     tile_data_length: u64,
 }
 
@@ -720,8 +932,14 @@ impl<W: Write + Seek> Writer<W> {
         self.scratch.push(entries_path.clone());
         let mut out = BufWriter::new(File::create(&entries_path)?);
 
-        let mut final_offsets: HashMap<u64, u64> = HashMap::with_capacity(self.payloads.len());
-        let mut order: Vec<(u64, u32)> = Vec::with_capacity(self.payloads.len());
+        // Final offsets, indexed by the dense payload index rather than looked
+        // up by staged offset. This used to be a `HashMap<u64, u64>`, which at
+        // ten million distinct payloads is 285 MB of hash table against 80 MB
+        // of `Vec`, and it cost a hash lookup in the one pass that sees every
+        // tile.
+        let payload_count = self.payload_count() as usize;
+        let mut final_offsets: Vec<u64> = vec![UNPLACED; payload_count];
+        let mut order: Vec<u64> = Vec::with_capacity(payload_count);
         let mut next_offset: u64 = 0;
 
         let mut entry_count: u64 = 0;
@@ -729,7 +947,8 @@ impl<W: Write + Seek> Writer<W> {
         let mut open: Option<Entry> = None;
         let mut previous_id: Option<u64> = None;
 
-        let mut source = SortedSpill::open(&suffixed(&self.base, ".idx"), &self.runs)?;
+        let (log_path, runs) = self.reduce_runs()?;
+        let mut source = SortedSpill::open(&log_path, &runs)?;
         while let Some(record) = source.next_record()? {
             if previous_id == Some(record.tile_id) {
                 return Err(PmTilesError::DuplicateTile {
@@ -738,19 +957,24 @@ impl<W: Write + Seek> Writer<W> {
             }
             previous_id = Some(record.tile_id);
 
-            let offset = match final_offsets.get(&record.staged_offset) {
-                Some(&offset) => offset,
-                None => {
-                    let offset = next_offset;
-                    next_offset = next_offset.checked_add(u64::from(record.length)).ok_or(
-                        PmTilesError::Overflow {
-                            what: "the tile data section",
-                        },
-                    )?;
-                    final_offsets.insert(record.staged_offset, offset);
-                    order.push((record.staged_offset, record.length));
-                    offset
-                }
+            let slot = usize::try_from(record.payload).map_err(|_| PmTilesError::Overflow {
+                what: "a payload index",
+            })?;
+            let placed = *final_offsets.get(slot).ok_or(PmTilesError::Overflow {
+                what: "a payload index",
+            })?;
+            let offset = if placed == UNPLACED {
+                let offset = next_offset;
+                next_offset = next_offset.checked_add(u64::from(record.length)).ok_or(
+                    PmTilesError::Overflow {
+                        what: "the tile data section",
+                    },
+                )?;
+                final_offsets[slot] = offset;
+                order.push(record.payload);
+                offset
+            } else {
+                placed
             };
 
             addressed += 1;
@@ -798,6 +1022,54 @@ impl<W: Write + Seek> Writer<W> {
             order,
             tile_data_length: next_offset,
         })
+    }
+
+    /// Fold the run list down until one merge pass can take it.
+    ///
+    /// Returns the log the merge should read and the runs inside it. With
+    /// `MAX_MERGE_FANIN` at 128 this is a no-op below 128 runs, one extra pass
+    /// below 16384, two below 2 Mi and three below 268 Mi, so even a run list
+    /// produced by a checkpoint every thousand tiles over a billion-tile job
+    /// costs three sequential rewrites of the index rather than a failure.
+    ///
+    /// Two scratch files, used alternately, because a pass cannot write into
+    /// the file it is reading. Both are registered for cleanup the first time
+    /// they are created.
+    fn reduce_runs(&mut self) -> Result<(PathBuf, Vec<Run>), PmTilesError> {
+        let mut path = suffixed(&self.base, ".idx");
+        let mut runs = self.runs.clone();
+        let mut pass = 0usize;
+        while runs.len() > MAX_MERGE_FANIN {
+            let out_path = suffixed(
+                &self.base,
+                if pass.is_multiple_of(2) {
+                    ".mrg0"
+                } else {
+                    ".mrg1"
+                },
+            );
+            if !self.scratch.contains(&out_path) {
+                self.scratch.push(out_path.clone());
+            }
+            let mut out = BufWriter::new(File::create(&out_path)?);
+            let mut folded = Vec::with_capacity(runs.len().div_ceil(MAX_MERGE_FANIN));
+            let mut at: u64 = 0;
+            for group in runs.chunks(MAX_MERGE_FANIN) {
+                let mut source = SortedSpill::open(&path, group)?;
+                let mut count: u64 = 0;
+                while let Some(record) = source.next_record()? {
+                    out.write_all(&record.encode())?;
+                    count += 1;
+                }
+                folded.push(Run { start: at, count });
+                at += count * SPILL_RECORD_BYTES as u64;
+            }
+            out.into_inner().map_err(|e| e.into_error())?.sync_data()?;
+            path = out_path;
+            runs = folded;
+            pass += 1;
+        }
+        Ok((path, runs))
     }
 
     /// Build the root directory, spilling into leaves when the root will not
@@ -999,7 +1271,15 @@ impl<W: Write + Seek> Writer<W> {
         let mut staged_data = BufReader::new(staged_data);
         let mut buffer = vec![0u8; COPY_BUFFER_BYTES];
 
-        let sink = self.sink.as_mut().expect("a sink exists by now");
+        // Destructured rather than reached through `self`, because the copy
+        // loop below reads the payload table while the sink is borrowed
+        // mutably, and those are two different fields.
+        let Self {
+            sink,
+            payload_starts,
+            ..
+        } = self;
+        let sink = sink.as_mut().expect("a sink exists by now");
         let out = sink.as_write();
 
         out.write_all(&header.encode())?;
@@ -1009,9 +1289,12 @@ impl<W: Write + Seek> Writer<W> {
             let mut leaf_file = BufReader::new(File::open(&leaves.path)?);
             copy_exactly(&mut leaf_file, out, leaves.length, &mut buffer)?;
         }
-        for &(staged_offset, length) in &plan.order {
-            staged_data.seek(SeekFrom::Start(staged_offset))?;
-            copy_exactly(&mut staged_data, out, u64::from(length), &mut buffer)?;
+        for &payload in &plan.order {
+            let at = payload as usize;
+            let start = payload_starts[at];
+            let length = payload_starts[at + 1] - start;
+            staged_data.seek(SeekFrom::Start(start))?;
+            copy_exactly(&mut staged_data, out, length, &mut buffer)?;
         }
         out.flush()?;
         Ok(())
@@ -1114,33 +1397,76 @@ fn copy_exactly<R: Read>(
     Ok(())
 }
 
+/// Read exactly `buf.len()` bytes from `at`, without touching a shared cursor.
+///
+/// This is what lets the whole merge run on one open file. On Unix it is one
+/// `pread`; elsewhere it is a seek and a read, which is equivalent here because
+/// [`SortedSpill`] is not shared between threads.
+#[cfg(unix)]
+fn read_exact_at(file: &File, buf: &mut [u8], at: u64) -> std::io::Result<()> {
+    use std::os::unix::fs::FileExt;
+    file.read_exact_at(buf, at)
+}
+
+#[cfg(not(unix))]
+fn read_exact_at(file: &File, buf: &mut [u8], at: u64) -> std::io::Result<()> {
+    let mut file = file;
+    file.seek(SeekFrom::Start(at))?;
+    file.read_exact(buf)
+}
+
 /// One run's cursor during the k-way merge.
+///
+/// It owns a position and a buffer and **not** a file handle. The version that
+/// owned a `BufReader<File>` each was the whole of the descriptor problem:
+/// `SortedSpill::open` called `File::open` once per run and held every one of
+/// them for the length of the merge, so a job with more runs than the process
+/// had descriptors died of `EMFILE` inside `finish`, after all the work, with
+/// nothing to salvage because the archive only exists at the rename.
 struct RunCursor {
-    reader: BufReader<File>,
+    /// Next byte of the log this cursor will read.
+    at: u64,
+    /// Records not yet decoded, buffered ones included.
     left: u64,
+    buffer: Vec<u8>,
+    /// Bytes of `buffer` already handed out, and bytes of it that are valid.
+    taken: usize,
+    filled: usize,
     head: Option<Spill>,
 }
 
 impl RunCursor {
-    fn open(path: &Path, run: Run) -> Result<Self, PmTilesError> {
-        let mut file = File::open(path)?;
-        file.seek(SeekFrom::Start(run.start))?;
+    fn open(file: &File, run: Run) -> Result<Self, PmTilesError> {
         let mut cursor = Self {
-            reader: BufReader::new(file),
+            at: run.start,
             left: run.count,
+            buffer: vec![0u8; MERGE_CURSOR_RECORDS * SPILL_RECORD_BYTES],
+            taken: 0,
+            filled: 0,
             head: None,
         };
-        cursor.advance()?;
+        cursor.advance(file)?;
         Ok(cursor)
     }
 
-    fn advance(&mut self) -> Result<(), PmTilesError> {
+    fn advance(&mut self, file: &File) -> Result<(), PmTilesError> {
         if self.left == 0 {
             self.head = None;
             return Ok(());
         }
-        let mut bytes = [0u8; SPILL_RECORD_BYTES];
-        self.reader.read_exact(&mut bytes)?;
+        if self.taken == self.filled {
+            let records = self.left.min(MERGE_CURSOR_RECORDS as u64) as usize;
+            let want = records * SPILL_RECORD_BYTES;
+            read_exact_at(file, &mut self.buffer[..want], self.at)?;
+            self.at += want as u64;
+            self.taken = 0;
+            self.filled = want;
+        }
+        let bytes: [u8; SPILL_RECORD_BYTES] = self.buffer
+            [self.taken..self.taken + SPILL_RECORD_BYTES]
+            .try_into()
+            .expect("one record's worth");
+        self.taken += SPILL_RECORD_BYTES;
         self.left -= 1;
         self.head = Some(Spill::decode(&bytes));
         Ok(())
@@ -1152,24 +1478,40 @@ impl RunCursor {
 /// One run means everything fitted in the sort buffer and there is nothing to
 /// merge; that is the common case and it costs one sequential read. More than
 /// one means a real k-way merge, which is what keeps a billion-tile archive
-/// inside a 20 MB buffer.
+/// inside the sort buffer.
+///
+/// It holds **one** file handle whatever the run count, and refuses more than
+/// [`MAX_MERGE_FANIN`] runs in a pass. [`Writer::reduce_runs`] is what makes
+/// that refusal unreachable in practice, by folding a long run list down in
+/// passes first.
 struct SortedSpill {
+    file: File,
     cursors: Vec<RunCursor>,
     queue: BinaryHeap<Reverse<(u64, usize)>>,
 }
 
 impl SortedSpill {
     fn open(path: &Path, runs: &[Run]) -> Result<Self, PmTilesError> {
+        if runs.len() > MAX_MERGE_FANIN {
+            return Err(PmTilesError::Overflow {
+                what: "the merge fan-in",
+            });
+        }
+        let file = File::open(path)?;
         let mut cursors = Vec::with_capacity(runs.len());
         let mut queue = BinaryHeap::with_capacity(runs.len());
         for (index, run) in runs.iter().enumerate() {
-            let cursor = RunCursor::open(path, *run)?;
+            let cursor = RunCursor::open(&file, *run)?;
             if let Some(head) = cursor.head {
                 queue.push(Reverse((head.tile_id, index)));
             }
             cursors.push(cursor);
         }
-        Ok(Self { cursors, queue })
+        Ok(Self {
+            file,
+            cursors,
+            queue,
+        })
     }
 
     fn next_record(&mut self) -> Result<Option<Spill>, PmTilesError> {
@@ -1177,7 +1519,7 @@ impl SortedSpill {
             return Ok(None);
         };
         let record = self.cursors[index].head.expect("a queued run has a head");
-        self.cursors[index].advance()?;
+        self.cursors[index].advance(&self.file)?;
         if let Some(head) = self.cursors[index].head {
             self.queue.push(Reverse((head.tile_id, index)));
         }
@@ -1219,11 +1561,84 @@ mod tests {
         tempfile::tempdir().expect("a scratch directory")
     }
 
+    /// A staging writer that accepts `budget` bytes into the real file and
+    /// then reports the disk full.
+    ///
+    /// The accepted prefix really is written, so a `write_all` that crosses the
+    /// budget leaves bytes behind and returns an error, which is the shape of
+    /// the failure this writer has to survive. `BufWriter` is deliberately not
+    /// in the way: buffering would make the point at which the error surfaces
+    /// depend on `BufWriter`'s internals instead of on the budget.
+    pub(super) struct FailAfter {
+        into: File,
+        budget: usize,
+        written: usize,
+    }
+
+    impl FailAfter {
+        pub(super) fn finish(self) -> std::io::Result<()> {
+            self.into.sync_data()
+        }
+    }
+
+    impl Write for FailAfter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if self.written >= self.budget {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::StorageFull,
+                    "no space left on device",
+                ));
+            }
+            let room = (self.budget - self.written).min(buf.len());
+            let n = self.into.write(&buf[..room])?;
+            self.written += n;
+            Ok(n)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.into.flush()
+        }
+    }
+
+    impl<W: Write + Seek> Writer<W> {
+        /// Swap the staging writer for one that runs out of room, keeping the
+        /// same underlying file.
+        fn stage_into_a_full_disk_after(&mut self, budget: usize) {
+            let path = suffixed(&self.base, ".data");
+            let into = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .expect("the staging file this writer just created");
+            self.staged = Some(Staging::FailsAfter(FailAfter {
+                into,
+                budget,
+                written: 0,
+            }));
+        }
+    }
+
+    /// How many descriptors this process holds open **on `path`**.
+    ///
+    /// Counting every open descriptor instead would be measuring the rest of
+    /// the suite: `cargo test` runs these in parallel threads of one process
+    /// and the total moves under you between two reads of it. Per-path is
+    /// exact, and `/proc/self/fd` is where the target of a descriptor is
+    /// readable, so this is Linux-only and the gate is where it runs.
+    #[cfg(target_os = "linux")]
+    fn descriptors_on(path: &Path) -> usize {
+        let want = path.canonicalize().expect("the log exists");
+        std::fs::read_dir("/proc/self/fd")
+            .expect("/proc is mounted")
+            .filter_map(|entry| std::fs::read_link(entry.ok()?.path()).ok())
+            .filter(|target| *target == want)
+            .count()
+    }
+
     #[test]
     fn a_spill_record_round_trips_through_its_twenty_bytes() {
         let record = Spill {
             tile_id: u64::MAX - 3,
-            staged_offset: 1 << 40,
+            payload: 1 << 40,
             length: u32::MAX,
         };
         assert_eq!(Spill::decode(&record.encode()), record);
@@ -1259,7 +1674,7 @@ mod tests {
                 file.write_all(
                     &Spill {
                         tile_id: *id,
-                        staged_offset: *id * 10,
+                        payload: *id * 10,
                         length: 1,
                     }
                     .encode(),
@@ -1324,6 +1739,276 @@ mod tests {
         )
         .unwrap();
         assert_ne!(a.base, b.base);
+    }
+
+    /// A tile that could not be written means no archive, not a wrong one.
+    ///
+    /// This is the whole failure. `add_tile` advances its bookkeeping only
+    /// after `write_all` returns, so a write that fails part way leaves bytes
+    /// in the staging file that nothing accounts for. `PmTilesSink` does not
+    /// apply its own retry policy, so `EngineBuilder` wraps it in
+    /// `RetryingSink`: without the latch the retry appends after the orphan and
+    /// records an offset pointing into the middle of it, every later payload is
+    /// shifted by the same amount, and under `FailurePolicy::RetryThenSkip` the
+    /// run *succeeds* and publishes a structurally valid archive full of the
+    /// wrong tile bytes.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_partial_write_latches_and_finish_refuses_to_publish() {
+        let dir = temp_dir();
+        let destination = dir.path().join("pyramid.pmtiles");
+        let mut w = Writer::create(&destination, WriterOptions::default()).unwrap();
+        // 6000 bytes of room and 4096-byte payloads, so the second tile is
+        // accepted for 1904 bytes and then refused.
+        w.stage_into_a_full_disk_after(6000);
+
+        let first = vec![1u8; 4096];
+        w.add_tile(3, 0, 0, &first, content_hash(&first))
+            .expect("the first tile fits");
+
+        let second = vec![2u8; 4096];
+        let err = w
+            .add_tile(3, 1, 0, &second, content_hash(&second))
+            .expect_err("the second tile runs out of room");
+        assert!(matches!(err, PmTilesError::Io(_)), "got {err:?}");
+
+        // The partial write really happened: the staging file is longer than
+        // the writer's own account of it. Those extra bytes are the orphan the
+        // latch exists for, and without it the next payload's offset would be
+        // recorded on the far side of them.
+        let staged_path = suffixed(&w.base, ".data");
+        let on_disk = std::fs::metadata(&staged_path).unwrap().len();
+        assert_eq!(w.staged_len(), 4096, "only the first payload is accounted");
+        assert!(
+            on_disk > w.staged_len(),
+            "the staging file is {on_disk} bytes and the writer accounts for {}, so no \
+             partial write happened and this test is not testing anything",
+            w.staged_len()
+        );
+
+        // The retry is refused rather than appended after the orphan.
+        let third = vec![3u8; 16];
+        let err = w
+            .add_tile(3, 2, 0, &third, content_hash(&third))
+            .expect_err("a latched writer accepts nothing more");
+        assert!(
+            matches!(
+                err,
+                PmTilesError::WriterFailed {
+                    during: "staging a payload"
+                }
+            ),
+            "got {err:?}"
+        );
+
+        let err = w.finish().expect_err("a latched writer must not publish");
+        assert!(
+            matches!(
+                err,
+                PmTilesError::WriterFailed {
+                    during: "staging a payload"
+                }
+            ),
+            "got {err:?}"
+        );
+        assert!(
+            !destination.exists(),
+            "a run that could not write a tile published an archive anyway"
+        );
+    }
+
+    /// A refusal that happens before any byte moves does not latch.
+    ///
+    /// The distinction matters: an engine running `FailurePolicy::Skip` is
+    /// entitled to hand this writer a tile it will refuse and carry on, and a
+    /// latch on those would turn every skipped tile into a failed run.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_refusal_before_the_write_leaves_the_writer_usable() {
+        let dir = temp_dir();
+        let destination = dir.path().join("pyramid.pmtiles");
+        let mut w = Writer::create(&destination, WriterOptions::default()).unwrap();
+
+        let empty: &[u8] = &[];
+        assert!(w.add_tile(3, 0, 0, empty, content_hash(empty)).is_err());
+        // A coordinate outside its own zoom's grid, refused rather than masked.
+        let payload = b"tile".as_slice();
+        assert!(
+            w.add_tile(3, 99, 0, payload, content_hash(payload))
+                .is_err()
+        );
+
+        w.add_tile(3, 0, 0, payload, content_hash(payload))
+            .expect("the writer is still usable");
+        let done = w.finish().expect("and it still publishes");
+        assert_eq!(done.header.addressed_tiles_count, 1);
+        assert!(destination.exists());
+    }
+
+    /// The merge holds one descriptor, whatever the run count.
+    ///
+    /// The count itself is Linux-only, because `/proc/self/fd` is where a
+    /// descriptor's target is readable and counting descriptors any other way
+    /// would be counting the rest of the suite. The merge's output is checked
+    /// everywhere.
+    ///
+    /// It used to hold one per run and keep them for the whole pass, so a job
+    /// with more runs than the process had descriptors died of `EMFILE` inside
+    /// `finish`, after all the work, with nothing to salvage because the
+    /// archive only exists at the rename. macOS ships a soft `RLIMIT_NOFILE` of
+    /// 256 and Linux usually 1024, and a checkpoint every thousand tiles forces
+    /// a run boundary, so it was a quarter of a million tiles away on a laptop.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn the_merge_opens_one_file_however_many_runs_it_reads() {
+        let dir = temp_dir();
+        let path = dir.path().join("idx");
+        let mut file = File::create(&path).unwrap();
+        let mut runs = Vec::new();
+        let mut at = 0u64;
+        // The widest pass the merge will take, so the descriptor count is
+        // measured at the limit rather than somewhere comfortable.
+        for run in 0..MAX_MERGE_FANIN as u64 {
+            for step in 0..4u64 {
+                file.write_all(
+                    &Spill {
+                        tile_id: run + step * MAX_MERGE_FANIN as u64,
+                        payload: run,
+                        length: 1,
+                    }
+                    .encode(),
+                )
+                .unwrap();
+            }
+            runs.push(Run {
+                start: at,
+                count: 4,
+            });
+            at += 4 * SPILL_RECORD_BYTES as u64;
+        }
+        file.sync_all().unwrap();
+        drop(file);
+
+        #[cfg(target_os = "linux")]
+        let before = descriptors_on(&path);
+        let mut merged = SortedSpill::open(&path, &runs).unwrap();
+        #[cfg(target_os = "linux")]
+        {
+            let during = descriptors_on(&path);
+            // Nothing else in this process has the log open, which is what
+            // makes the second number meaningful rather than a coincidence.
+            assert_eq!(before, 0, "something already had the log open");
+            assert_eq!(
+                during,
+                1,
+                "{} runs cost {during} descriptors on the log",
+                runs.len()
+            );
+        }
+
+        // And it still merges: every id once, ascending.
+        let mut ids = Vec::new();
+        while let Some(record) = merged.next_record().unwrap() {
+            ids.push(record.tile_id);
+        }
+        assert_eq!(ids.len(), MAX_MERGE_FANIN * 4);
+        assert!(
+            ids.windows(2).all(|w| w[0] < w[1]),
+            "the merge is not sorted"
+        );
+    }
+
+    /// More runs than one pass will take is folded down rather than refused.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_run_list_wider_than_the_fan_in_is_merged_in_passes() {
+        let dir = temp_dir();
+        let destination = dir.path().join("wide.pmtiles");
+        // One record a run, so the run count is the tile count.
+        let tiles = MAX_MERGE_FANIN * 2 + 45;
+        let mut w = Writer::create(
+            &destination,
+            WriterOptions::default().with_sort_buffer_records(1),
+        )
+        .unwrap();
+        // Added back to front, so an unsorted merge is visible in the output.
+        for id in (0..tiles as u64).rev() {
+            let (z, x, y) = crate::pmtiles::tileid_to_zxy(id + 5).unwrap();
+            let payload = format!("tile {id}").into_bytes();
+            w.add_tile(z, x, y, &payload, content_hash(&payload))
+                .unwrap();
+        }
+        assert_eq!(
+            w.spilled_run_count(),
+            tiles,
+            "the point of this test is a run list wider than the fan-in"
+        );
+        assert!(w.spilled_run_count() > MAX_MERGE_FANIN);
+
+        let done = w.finish().expect("a wide run list still finishes");
+        assert_eq!(done.header.addressed_tiles_count, tiles as u64);
+        assert_eq!(done.header.tile_contents_count, tiles as u64);
+        assert!(destination.exists());
+
+        // And the archive really is in tile id order, checked by decoding its
+        // root rather than by trusting the header's own count. This entry count
+        // is below `ROOT_ONLY_MAX_ENTRIES`, so the root is flat.
+        let bytes = std::fs::read(&destination).unwrap();
+        let header = Header::try_decode(&bytes).expect("the header decodes");
+        let root =
+            &bytes[header.root_offset as usize..(header.root_offset + header.root_length) as usize];
+        let plain = header
+            .internal_compression
+            .decompress(root, 1 << 20)
+            .expect("the root decompresses");
+        let entries =
+            crate::pmtiles::directory::deserialize_entries(&plain).expect("the root parses");
+        assert_eq!(
+            entries.len(),
+            tiles,
+            "the root is not flat, adjust the test"
+        );
+        assert!(
+            entries.windows(2).all(|w| w[0].tile_id < w[1].tile_id),
+            "the entries are not in tile id order"
+        );
+        assert!(
+            entries.iter().all(|e| e.run_length == 1),
+            "distinct payloads must not collapse into runs"
+        );
+    }
+
+    /// The payload table answers both questions the staged-offset map used to.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn the_payload_table_carries_every_offset_and_length() {
+        let dir = temp_dir();
+        let mut sink = std::io::Cursor::new(Vec::new());
+        let mut w = Writer::try_new(&mut sink, dir.path(), WriterOptions::default()).unwrap();
+
+        let payloads: Vec<Vec<u8>> = (1..=5u8).map(|n| vec![n; n as usize * 3]).collect();
+        for (index, payload) in payloads.iter().enumerate() {
+            w.add_tile(3, index as u32, 0, payload, content_hash(payload))
+                .unwrap();
+        }
+        // A duplicate, which must not extend the table.
+        w.add_tile(3, 6, 0, &payloads[2], content_hash(&payloads[2]))
+            .unwrap();
+
+        assert_eq!(w.payload_count(), 5);
+        assert_eq!(w.distinct_payload_count(), 5);
+        let mut expected_offset = 0u64;
+        for (index, payload) in payloads.iter().enumerate() {
+            assert_eq!(w.payload_length(index as u64), payload.len() as u32);
+            assert_eq!(w.payload_starts[index], expected_offset);
+            expected_offset += payload.len() as u64;
+        }
+        assert_eq!(w.staged_len(), expected_offset);
+        assert_eq!(
+            *w.payload_starts.last().unwrap(),
+            expected_offset,
+            "the sentinel is the staged length and there is no second copy of it"
+        );
     }
 
     /// The sort buffer spills once it fills, and the merge still produces one
