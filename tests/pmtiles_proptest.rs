@@ -102,6 +102,22 @@ const STRUCTURAL_CASES: u32 = 512;
 /// small enough that 512 cases stay in milliseconds.
 const MAX_GENERATED_ENTRIES: usize = 64;
 
+/// `cases` cases, and **no failure-persistence file**.
+///
+/// proptest's default writes a `.proptest-regressions` file next to the
+/// source on the first failure. In an integration test it cannot even find
+/// the crate root to write it ("FileFailurePersistence::SourceParallel set,
+/// but failed to find lib.rs or main.rs"), and where it can, it drops an
+/// untracked file into the tree that the next run then treats as input. A
+/// failing property here should print its minimal input and nothing else.
+fn config(cases: u32) -> ProptestConfig {
+    ProptestConfig {
+        cases,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The vectors
 // ---------------------------------------------------------------------------
@@ -416,7 +432,7 @@ static TILEID_ZOOMS: AtomicU32 = AtomicU32::new(0);
 #[test]
 fn zxy_and_tileid_are_inverses() {
     proptest!(
-        ProptestConfig::with_cases(CHEAP_CASES),
+        config(CHEAP_CASES),
         |(z in 0u8..=MAX_ZOOM, raw_x in any::<u32>(), raw_y in any::<u32>())| {
             TILEID_CASES.fetch_add(1, Ordering::Relaxed);
             TILEID_ZOOMS.fetch_or(1u32 << z, Ordering::Relaxed);
@@ -460,7 +476,7 @@ static ID_CASES: AtomicUsize = AtomicUsize::new(0);
 #[test]
 fn every_addressable_tile_id_decodes_and_re_encodes() {
     proptest!(
-        ProptestConfig::with_cases(CHEAP_CASES),
+        config(CHEAP_CASES),
         |(id in 0u64..=MAX_TILE_ID)| {
             ID_CASES.fetch_add(1, Ordering::Relaxed);
             let (z, x, y) = tileid_to_zxy(id).unwrap();
@@ -485,7 +501,7 @@ static REFUSAL_CASES: AtomicUsize = AtomicUsize::new(0);
 #[test]
 fn coordinates_outside_the_grid_are_always_refused() {
     proptest!(
-        ProptestConfig::with_cases(CHEAP_CASES),
+        config(CHEAP_CASES),
         |(z in 0u8..=MAX_ZOOM, over in 0u32..1024, swap in any::<bool>())| {
             REFUSAL_CASES.fetch_add(1, Ordering::Relaxed);
             let side = 1u64 << z;
@@ -518,7 +534,7 @@ static ZOOM_REFUSAL_CASES: AtomicUsize = AtomicUsize::new(0);
 #[test]
 fn zooms_and_ids_past_the_addressable_range_are_always_refused() {
     proptest!(
-        ProptestConfig::with_cases(CHEAP_CASES),
+        config(CHEAP_CASES),
         |(z in (MAX_ZOOM + 1)..=u8::MAX, id in (MAX_TILE_ID + 1)..=u64::MAX)| {
             ZOOM_REFUSAL_CASES.fetch_add(1, Ordering::Relaxed);
             prop_assert!(
@@ -559,7 +575,7 @@ static VARINT_CASES: AtomicUsize = AtomicUsize::new(0);
 #[test]
 fn varints_round_trip_and_stop_where_they_should() {
     proptest!(
-        ProptestConfig::with_cases(CHEAP_CASES),
+        config(CHEAP_CASES),
         |(value in any::<u64>(), tail in proptest::collection::vec(any::<u8>(), 0..8))| {
             VARINT_CASES.fetch_add(1, Ordering::Relaxed);
 
@@ -611,7 +627,7 @@ static VARINT_REFUSAL_CASES: AtomicUsize = AtomicUsize::new(0);
 #[test]
 fn over_long_and_truncated_varints_are_refused() {
     proptest!(
-        ProptestConfig::with_cases(CHEAP_CASES),
+        config(CHEAP_CASES),
         |(extra in 1usize..16, short in 0usize..MAX_UVARINT_LEN, last in 2u8..=0x7F)| {
             VARINT_REFUSAL_CASES.fetch_add(1, Ordering::Relaxed);
 
@@ -676,7 +692,7 @@ static ARBITRARY_VARINT_CASES: AtomicUsize = AtomicUsize::new(0);
 #[test]
 fn arbitrary_bytes_never_panic_the_varint_decoder() {
     proptest!(
-        ProptestConfig::with_cases(CHEAP_CASES),
+        config(CHEAP_CASES),
         |(bytes in proptest::collection::vec(any::<u8>(), 0..24))| {
             ARBITRARY_VARINT_CASES.fetch_add(1, Ordering::Relaxed);
             if let Ok((value, used)) = decode_uvarint(&bytes, 0) {
@@ -709,15 +725,30 @@ fn arbitrary_bytes_never_panic_the_varint_decoder() {
 /// A strategy for a directory that a conformant writer could have produced:
 /// strictly ascending ids, non-zero lengths, and a run length that is
 /// sometimes zero so leaf pointers are covered too.
+///
+/// The `contiguous` flag is the part that earns its place. A tile laid down
+/// immediately after the previous one is the common case in a real archive and
+/// it is what the offset column's `0` sentinel exists for, and drawing an
+/// offset independently of the previous entry's end produces it essentially
+/// never: the first version of this generator picked both from `0..4096` and
+/// the run of 512 cases hit the shorthand once by luck and then, on the next
+/// seed, not at all. That made the positive control below flaky, which is
+/// worse than not having one.
 fn directory_strategy() -> impl Strategy<Value = Vec<Entry>> {
     proptest::collection::vec(
-        (1u64..4096, 0u64..4096, 1u32..4096, 0u32..8),
+        (1u64..4096, 0u64..4096, 1u32..4096, 0u32..8, any::<bool>()),
         1..MAX_GENERATED_ENTRIES,
     )
     .prop_map(|rows| {
         let mut id: u64 = 0;
+        let mut next_byte: u64 = 0;
         let mut entries = Vec::with_capacity(rows.len());
-        for (gap, offset, length, run_length) in rows {
+        for (gap, drawn_offset, length, run_length, contiguous) in rows {
+            let offset = if !entries.is_empty() && contiguous {
+                next_byte
+            } else {
+                drawn_offset
+            };
             entries.push(Entry {
                 tile_id: id,
                 offset,
@@ -725,9 +756,47 @@ fn directory_strategy() -> impl Strategy<Value = Vec<Entry>> {
                 run_length,
             });
             id += gap;
+            next_byte = offset + u64::from(length);
         }
         entries
     })
+}
+
+/// The contiguous-offset shorthand, deterministically, so the coverage does
+/// not rest on a random draw.
+///
+/// Three entries where each starts exactly where the last one ended, which
+/// means entries 1 and 2 both encode their offset as a literal `0`. Two
+/// shorthand entries in a row is the shape that separates a decoder tracking
+/// the running position correctly from one that only advances it on the long
+/// form: the second `0` is where the drift shows.
+#[test]
+fn two_contiguous_entries_in_a_row_round_trip() {
+    let entries = vec![
+        Entry {
+            tile_id: 0,
+            offset: 0,
+            length: 10,
+            run_length: 1,
+        },
+        Entry {
+            tile_id: 1,
+            offset: 10,
+            length: 20,
+            run_length: 1,
+        },
+        Entry {
+            tile_id: 2,
+            offset: 30,
+            length: 5,
+            run_length: 1,
+        },
+    ];
+    let bytes = serialize_entries(&entries).expect("these entries serialize");
+    // The last three bytes are the offset column: 1 for entry 0 (offset + 1),
+    // then the sentinel twice.
+    assert_eq!(&bytes[bytes.len() - 3..], &[1, 0, 0], "the offset column");
+    assert_eq!(deserialize_entries(&bytes).expect("it parses"), entries);
 }
 
 static DIRECTORY_CASES: AtomicUsize = AtomicUsize::new(0);
@@ -745,7 +814,7 @@ static DIRECTORY_LEAF_HITS: AtomicUsize = AtomicUsize::new(0);
 #[test]
 fn directories_round_trip_through_their_column_encoding() {
     proptest!(
-        ProptestConfig::with_cases(STRUCTURAL_CASES),
+        config(STRUCTURAL_CASES),
         |(entries in directory_strategy())| {
             DIRECTORY_CASES.fetch_add(1, Ordering::Relaxed);
 
@@ -800,7 +869,7 @@ static RUN_COLLAPSES: AtomicUsize = AtomicUsize::new(0);
 #[test]
 fn run_length_collapsing_preserves_the_addressed_tile_count() {
     proptest!(
-        ProptestConfig::with_cases(STRUCTURAL_CASES),
+        config(STRUCTURAL_CASES),
         |(blobs in proptest::collection::vec((0u64..4, 1u32..4), 1..MAX_GENERATED_ENTRIES))| {
             RUN_CASES.fetch_add(1, Ordering::Relaxed);
 
@@ -847,7 +916,7 @@ static HEADER_CASES: AtomicUsize = AtomicUsize::new(0);
 #[test]
 fn headers_round_trip_through_their_127_bytes() {
     proptest!(
-        ProptestConfig::with_cases(STRUCTURAL_CASES),
+        config(STRUCTURAL_CASES),
         |(
             offsets in proptest::collection::vec(any::<u64>(), 11),
             flags in proptest::collection::vec(any::<u8>(), 6),
@@ -921,7 +990,7 @@ static BAD_HEADER_CASES: AtomicUsize = AtomicUsize::new(0);
 #[test]
 fn arbitrary_bytes_are_never_decoded_as_a_header_by_accident() {
     proptest!(
-        ProptestConfig::with_cases(STRUCTURAL_CASES),
+        config(STRUCTURAL_CASES),
         |(bytes in proptest::collection::vec(any::<u8>(), 0..300))| {
             BAD_HEADER_CASES.fetch_add(1, Ordering::Relaxed);
             match Header::try_decode(&bytes) {
