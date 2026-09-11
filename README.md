@@ -176,6 +176,18 @@ What moved is the answer to "and if I do not say?".
 | Directory tree | `FsSink::new(base, plan)`, exactly as before |
 | Packfile, object store | `PackfileSink` and `ObjectStoreSink`, both unchanged and unaffected |
 
+### An archive appears whole or it does not appear
+
+The writer stages into `<path>.tmp` and its siblings, flushes with `sync_all`
+and renames into place, so nothing exists at `<path>` until the run finishes.
+An interrupted run leaves its staging files beside the destination, which is
+evidence that it was working, and never a short `.pmtiles` wearing the name a
+complete one would.
+
+One destination has one writer. Two runs aimed at the same archive would share
+those staging names, so the second sink is refused when it is built rather than
+left to race the first.
+
 ### Two things an archive constrains
 
 - **The layout has to address `(z, x, y)`.** An archive keys a tile on a
