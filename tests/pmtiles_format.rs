@@ -403,13 +403,13 @@ const DECOMPRESS_CEILING: usize = 1 << 20;
 ///
 /// The count comes from the `counts` block that go-pmtiles' dump program
 /// wrote, not from this parser, so a parse that silently found half the rows
-/// fails here instead of passing seven loops vacuously.
+/// fails here instead of passing six loops vacuously.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn the_oracle_tile_id_vectors_are_the_file_this_suite_was_pinned_against() {
     let vectors = oracle::tileid_vectors();
 
-    // Seven sections of `(z, x, y) -> id` rows. `level_bases` is a different
+    // Six sections of `(z, x, y) -> id` rows. `level_bases` is a different
     // shape and `out_of_range_observations` is behaviour rather than vectors,
     // so neither is counted into the distinct-pair total the file declares.
     let sections = [

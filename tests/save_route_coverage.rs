@@ -72,6 +72,14 @@ enum Reach {
     Deferred,
     /// Produces real bytes and has no route, on purpose, with the reason.
     Unrouted { why: &'static str },
+    /// Matched [`is_writer_name`]'s shape and is not a writer at all: it
+    /// produces no container, so there is nothing for a route to reach.
+    ///
+    /// Kept apart from [`Reach::Unrouted`] on purpose. "an image container
+    /// nothing routes to" and "not an image container" are different facts
+    /// that look identical in a table, and only the first one is a gap
+    /// somebody should close.
+    NotAContainer { why: &'static str },
 }
 
 /// Every public writer under `src/`, with the route that reaches it.
@@ -353,6 +361,14 @@ const WRITERS: &[(&str, Reach)] = &[
             why: "vips `dzsave` registers `.dz` and `.szi` and writes a tile \
                   pyramid; this writes a one-tile STORE zip with `Format=\"raw\"` \
                   that nothing in the crate reads back (issue #958)",
+        },
+    ),
+    // Not a writer. `is_writer_name` is a name-shape heuristic and this is the
+    // first thing in the crate to match it without producing a container.
+    (
+        "pmtiles/varint.rs::encode_uvarint",
+        Reach::NotAContainer {
+            why: "the LEB128 encoder the PMTiles directory codec is built from.                   It appends varint bytes to a caller's buffer and produces no                   container, so there is no route for a save to take. It matched                   the `encode_*` shape and nothing else (issue #987)",
         },
     ),
 ];
@@ -779,6 +795,55 @@ fn every_unrouted_writer_is_still_unrouted_and_says_why() {
     // The control: the writer itself is alive and does produce bytes, so
     // this is a routing gap and not a dead function.
     assert!(!im.dzsave_buffer().is_empty());
+}
+
+/**
+ * Tests that every `Reach::NotAContainer` row carries a reason and stays a
+ * deliberate entry rather than a growing dumping ground (issue #987).
+ *
+ * `is_writer_name` matches on the shape of a name, which is the right call for
+ * a guard whose whole job is to notice a writer nobody told it about. The cost
+ * is that a name-shaped function that is not a writer has to be recorded
+ * somewhere, and the wrong place to record it is `Unrouted`, which means "a
+ * real container with no route" and carries an assertion that the route really
+ * does still refuse. This variant means "not a container at all", and it has
+ * no such assertion to make, so what it needs instead is to stay small and to
+ * say why.
+ *
+ * The set-equality check in `every_public_writer_is_reachable_or_recorded` is
+ * what makes it safe: a second one cannot appear without somebody adding a row
+ * here on purpose.
+ */
+#[test]
+fn every_not_a_container_row_says_why_it_is_not_one() {
+    let not_containers: Vec<(&str, &str)> = WRITERS
+        .iter()
+        .filter_map(|(key, reach)| match reach {
+            Reach::NotAContainer { why } => Some((*key, *why)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        not_containers.len(),
+        1,
+        "one name-shaped non-writer is recorded; this is {not_containers:?}"
+    );
+    for (key, why) in &not_containers {
+        assert!(
+            why.contains("issue #"),
+            "{key}'s reason must name the issue carrying it, got {why:?}"
+        );
+    }
+
+    // The control, and it is the one that matters: the rows are keyed by
+    // `<file>::<fn>`, and every other row in the table is a real writer, so a
+    // variant that had quietly swallowed one would show up as a shrunken
+    // writer set rather than as an empty list here.
+    let real_writers = WRITERS.len() - not_containers.len();
+    assert!(
+        real_writers > 40,
+        "only {real_writers} real writer rows left, so something has been          reclassified rather than recorded"
+    );
 }
 
 /**

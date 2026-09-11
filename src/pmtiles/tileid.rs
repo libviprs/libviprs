@@ -222,9 +222,11 @@ fn base(zoom: u8) -> u64 {
 /// Masking first gives the same answer without the wrap. Only the bits below
 /// `n` are ever read again, because each following step halves `n`, and `n` is
 /// a power of two, so `(n - 1) - (x & (n - 1))` agrees with the wrapped
-/// `n - 1 - x` on exactly those bits. The 185 oracle rows hold that claim:
-/// they run to zoom 31, and a coordinate whose high bits mattered would
-/// disagree there.
+/// `n - 1 - x` on exactly those bits. The oracle rows hold that claim: the 77
+/// in this file's own tests, and all 162 distinct pairs in
+/// `tests/fixtures/pmtiles/vectors/tileid.json`, which `tests/pmtiles_format.rs`
+/// reads at run time. They run to zoom 31, and a coordinate whose high bits
+/// mattered would disagree there.
 fn rotate(n: u64, x: &mut u64, y: &mut u64, rx: u64, ry: u64) {
     if ry == 0 {
         if rx == 1 {

@@ -261,6 +261,61 @@ mod tests {
         assert!(reader.read_range(0, usize::MAX).is_err());
     }
 
+    /// The refusal has to come from the bound in [`FileRangeReader::read_range`],
+    /// not from the positional read underneath it.
+    ///
+    /// **NO TEST REDDENED** this before I wrote it, and the mutation that
+    /// exposed the hole is one line: bound on `len as u64 > self.len` instead
+    /// of on `offset + len`, the exact mistake `pmtiles verify` makes. All 79
+    /// tests stayed green, because the short read fails anyway and every
+    /// assertion above is `is_err()`.
+    ///
+    /// So the two are not distinguishable by whether they error. They are
+    /// distinguishable by **what the caller is told**, and by **when**: the
+    /// bound runs before the `len`-sized allocation, and `len` came out of a
+    /// directory entry, which makes it a number somebody else chose. Bounding
+    /// on the length alone allocates their number first and finds out
+    /// afterwards. `read_exact_at` answers the bare "failed to fill whole
+    /// buffer"; this message names the range and the size of the file, which
+    /// is what somebody debugging a corrupt archive can act on.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn the_out_of_range_refusal_names_the_range_and_the_file() {
+        let (file, _) = ramp_file();
+        let reader = FileRangeReader::try_open(file.path()).unwrap();
+
+        let err = reader.read_range(250, 10).unwrap_err();
+        let text = err.to_string();
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+        assert!(
+            text.contains("250..260"),
+            "the refusal must name the range it refused, got: {text}"
+        );
+        assert!(
+            text.contains("256 byte file"),
+            "the refusal must name the size it was measured against, got: {text}"
+        );
+
+        // A wildly out-of-bounds offset with an honest length, which is the
+        // shape that walks past `pmtiles verify` and segfaults it.
+        let err = reader.read_range(999_999, 10).unwrap_err();
+        let text = err.to_string();
+        assert!(
+            text.contains("999999..1000009") && text.contains("256 byte file"),
+            "an offset past the end must be refused by the bound, got: {text}"
+        );
+
+        // An end that overflows `u64` is a different refusal, by a different
+        // kind, so one over-broad arm is not carrying both.
+        let err = reader.read_range(u64::MAX, 2).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("overflows"), "{err}");
+
+        // The positive control: the same length one byte earlier reads, and
+        // says nothing, so this is about the bound and not about the length.
+        assert_eq!(reader.read_range(246, 10).unwrap().len(), 10);
+    }
+
     #[test]
     #[cfg_attr(miri, ignore)]
     fn a_short_read_is_an_error_rather_than_a_shorter_buffer() {
