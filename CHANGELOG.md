@@ -45,6 +45,10 @@ budget becoming a real peak ceiling for jp2k, gif and avif (#944),
 (#566), `GifError::BadPageNumber` (#845) and `csv_save`/`matrix_save` matching
 `csvsave`/`matrixsave` (#958).
 
+The crate version moves to 0.5.0 in this window, and no single entry below is
+why. The manifest still read 0.4.0 while this block had already collected four
+groups of breaking changes, so the bump is the semver marker catching up.
+
 The line between `Breaking` and `Fixed` is whether the old answer was
 defensible. A `Fixed` entry can move output bytes too, but only where the old
 bytes were wrong against libvips 8.18 and the entry says which numbers moved.
@@ -1202,41 +1206,53 @@ and not under `Fixed`: this file is the only place they can be caught.
   it reproduces that archive's decompressed root directory and its tile data
   section exactly.
 
-- **A PMTiles tile sink, and one way to read a pyramid back** (issue #990).
-  `libviprs::sink_pmtiles::PmTilesSink` implements `TileSink` over the writer
-  above, so `EngineBuilder::new(&src, plan, PmTilesSink::builder(path).plan(plan).build()?)`
-  produces a `.pmtiles` from a real run. `libviprs::pyramid_reader` adds the
-  storage-agnostic `PyramidReader` trait with `describe()` and
-  `tile(TileCoord)`, plus `DirectoryPyramidReader` over a loose-file tree and
-  `PmTilesPyramidReader` over an archive, so a caller can ask for `z/x/y`
-  without knowing which of the two it is holding. An absent tile is `Ok(None)`
-  on both.
+- **`PyramidStorage`, the type that names where a pyramid lands** (issue #992).
+  A new always-compiled `libviprs::storage` module holding one enum.
+  `PyramidStorage::PmTiles` is one indexed PMTiles v3 archive carrying every
+  tile, the directories that index them and the pyramid's metadata, and it is
+  what `default()` answers. `PyramidStorage::Directory` is the tree of loose
+  files under `{z}/{x}/{y}` that `FsSink` has always written. Both re-export
+  from the crate root, along with `PMTILES_EXTENSION`.
 
-  The sink stores blank tiles rather than skipping them or writing the 1-byte
-  placeholder marker: PMTiles has no placeholder concept, so a skipped blank is
-  a hole in the archive, and unconditional payload dedupe already collapses ten
-  thousand identical blanks into one stored blob and one long run, which is the
-  size win the marker exists for.
+  **Purely additive, on purpose.** `EngineBuilder::new(source, plan, sink)`
+  still writes the sink it is handed, `FsSink` and `Layout` are untouched, that
+  third argument was always required, and no caller that compiles today
+  produces a different byte after this. What is new is an answer to "and if I
+  do not choose?", which nobody could ask before, because there was no way not
+  to choose. EPIC F's compatibility section says the library stays
+  sink-explicit with no silent default flip for downstream Rust consumers, and
+  this is that: a stated policy other things derive from rather than a switch
+  that redirects anybody's output.
 
-  It refuses three things by name rather than half-supporting them.
-  `TileFormat::Raw`, because a PMTiles tile is a self-describing image blob and
-  there is nowhere in the format to record what raw pixel bytes are. Layouts
-  other than `Xyz` and `Google`, because the rest address tiers rather than
-  `(z, x, y)`. And `ResumeMode::Resume` and `ResumeMode::Verify`, because
-  Verify reads a pyramid back by stat-ing one file per coordinate and Resume
-  needs a writer's staging to be reconstructible from a checkpoint, and a
-  single-file archive offers neither; the refusal is enforced at the builder
-  and again at `seed_completed_tile`, which is the hook a resume actually
-  reaches.
+  The behavioural flip is the command line's. `viprs pyramid input.tif` writes
+  an archive where it used to write a tree, in libviprs/libviprs-cli#54, which
+  is a different repository and a different release.
 
-  `checkpoint_root()` returns `None`, deliberately. Whatever a sink returns
-  there is handed to `wipe_directory` on every Overwrite run, whose ownership
-  guard refuses any directory that is non-empty and holds no checkpoint marker,
-  so a sink naming the archive's parent would refuse every Overwrite run the
-  moment the user keeps anything else beside their output. The advisory run
-  lock the archive does need lives in a `<archive>.job` sidecar the sink takes
-  itself and removes when it is dropped, so two sinks aimed at one archive are
-  refused instead of corrupting each other's staging.
+  Three questions that had nowhere to live before. `PyramidStorage::extension`
+  answers `Some("pmtiles")` or `None`. `PyramidStorage::output_path` appends
+  the extension rather than substituting it: `PathBuf::set_extension` replaces
+  everything after the last dot, so a base of `tiles.v2` would come back
+  `tiles.pmtiles` with the `v2` gone. A base that already ends in `.pmtiles` is
+  handed back untouched, matched without case, because `city.PMTILES` and
+  `city.PMTILES.pmtiles` are two names for one file on macOS and on Windows and
+  appending there would write the archive over the base it was derived from.
+
+  `PyramidStorage::accepts_layout` answers `true` for `Layout::Xyz` and
+  `Layout::Google` and `false` for `Layout::DeepZoom`, `Layout::Zoomify` and
+  `Layout::Iiif`, because an archive keys a tile on a single `u64` derived from
+  `(z, x, y)` while those three index a tier rather than a zoom. Google differs
+  from XYZ in the order it spells a path on disk and not in what it addresses,
+  which is why it fits. And `TileFormat::Raw` has no tile type in the spec at
+  all, so raw tiles stay on the directory tree. No method here has a wildcard
+  arm, so a third storage or a sixth layout fails to compile rather than
+  quietly inheriting somebody else's answer.
+
+  What actually writes an archive is elsewhere: the format and the streaming
+  writer are the `pmtiles` module (issues #987 and #989) and the sink is
+  `PmTilesSink` (issue #990). `MIGRATION.md` has the upgrade note, including
+  the one command that tells a caller how exposed they are, the path and
+  extension table, and what to name to keep the tree. This comes out of the
+  PMTiles epic, #986.
 
 - **`.tif` and `.tiff` are save routes** (issue #948). `src/encode_tiff.rs` has
   had a working `Raster::save_tiff` with round-trip tests behind it all along,

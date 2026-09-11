@@ -14,8 +14,8 @@
 use libviprs::{
     Align, AvifError, BandError, ColourError, Combine, DrawError, EngineEvent, ExrError, FitsError,
     GifError, Intent, Interpretation, JoinDirection, Jp2kError, JxlError, Layout, ManifestError,
-    MetadataValue, Pcs, PdfError, PixelFormat, PlannerError, Precision, RadianceError, RasterError,
-    ResumeError, SourceError, VerifyError,
+    MetadataValue, Pcs, PdfError, PixelFormat, PlannerError, Precision, PyramidStorage,
+    RadianceError, RasterError, ResumeError, SourceError, VerifyError,
 };
 
 #[deny(unreachable_patterns)]
@@ -195,6 +195,16 @@ fn assert_pixel_format_non_exhaustive(v: &PixelFormat) {
         PixelFormat::Rgba16 => {}
         PixelFormat::RgbaF32 => {}
         PixelFormat::FloatF32(_) => {}
+        _ => {}
+    }
+}
+
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_pyramid_storage_non_exhaustive(v: &PyramidStorage) {
+    match v {
+        PyramidStorage::PmTiles => {}
+        PyramidStorage::Directory => {}
         _ => {}
     }
 }
@@ -454,6 +464,7 @@ fn pdf_error_pdfium_variant_is_feature_independent() {
 #[test]
 fn non_exhaustive_checks_compile() {
     assert_layout_non_exhaustive(&Layout::DeepZoom);
+    assert_pyramid_storage_non_exhaustive(&PyramidStorage::default());
     assert_webp_compression_non_exhaustive(&libviprs::webp::Compression::Lossless);
     assert_webp_keep_non_exhaustive(&libviprs::webp::Keep::All);
     assert_jxl_compression_non_exhaustive(&libviprs::jxl::Compression::Lossless);
