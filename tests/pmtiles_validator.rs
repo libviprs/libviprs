@@ -1,6 +1,6 @@
 //! The structural validator, against the `go-pmtiles` goldens and against
-//! archives deliberately broken in the ways the reference implementation does
-//! not survive (issue #991).
+//! archives deliberately broken in the ways the reference does not survive
+//! (issue #991).
 //!
 //! `libviprs::pmtiles::validate` is the core of the future
 //! `viprs pmtiles verify`, so it is written to answer "what is wrong with this
@@ -37,23 +37,39 @@
 //! both wrong. [`the_leaf_pointers_resolve_relative_to_the_leaf_section`]
 //! pins the six absolute offsets against what `go-pmtiles` reported, so the
 //! agreement is with something outside this crate.
+//!
+//! # What this file does not do
+//!
+//! It does not re-pin the directory bytes or the tile id mapping.
+//! `tests/pmtiles_format.rs` (issue #987) owns the oracle vectors and pins
+//! those, and duplicating them here would be two copies of one claim that can
+//! drift apart. Everything here runs through [`validate_bytes`], so a test
+//! that mentions a golden is asserting something about the *walk*.
 
-use std::collections::BTreeSet;
-
-use libviprs::pmtiles::directory::{deserialize_entries, serialize_entries};
 use libviprs::pmtiles::validate::{
     DirectoryRef, Finding, Section, ValidationLimits, validate_bytes,
 };
 use libviprs::pmtiles::{Compression, Header};
+use serde_json::Value;
 
 #[path = "common/pmtiles_oracle.rs"]
 mod pmtiles_oracle;
 
-use pmtiles_oracle::{GOLDEN_DIGESTS, golden, leaf_directories, root_directory};
+use pmtiles_oracle::{
+    DUPES_GOLDEN_SHA256, LEAVES_GOLDEN_SHA256, RASTER_GOLDEN_SHA256, directory_leaves_vectors,
+    golden,
+};
+
+/// The three goldens with the digests the shared loader pins them by.
+const GOLDENS: &[(&str, &str)] = &[
+    ("raster-z0z2.pmtiles", RASTER_GOLDEN_SHA256),
+    ("dupes-z0z3.pmtiles", DUPES_GOLDEN_SHA256),
+    ("leaves-z0z7.pmtiles", LEAVES_GOLDEN_SHA256),
+];
 
 /// Where the 64-bit little-endian header fields sit, for the tests that break
-/// one on purpose. Taken from the v3 layout, which puts the seven-byte magic
-/// and the version byte first and then eleven `u64`s.
+/// one on purpose. From the v3 layout: seven bytes of magic, a version byte,
+/// then eleven `u64`s.
 const OFF_ROOT_OFFSET: usize = 8;
 const OFF_ROOT_LENGTH: usize = 16;
 const OFF_LEAF_OFFSET: usize = 40;
@@ -66,6 +82,101 @@ fn with_u64(bytes: &[u8], offset: usize, value: u64) -> Vec<u8> {
     out
 }
 
+/// One leaf directory as the oracle dumped it.
+///
+/// Parsed here rather than in `tests/common/pmtiles_oracle.rs` because this is
+/// the only caller: the shared loader is read by three lanes at once and a
+/// helper only one of them uses is a merge conflict for the other two.
+#[derive(Debug, Clone)]
+struct OracleLeaf {
+    offset_in_section: u64,
+    absolute_offset: u64,
+    compressed_length: u64,
+    /// `(tile_id, offset, length, run_length)` per entry.
+    entries: Vec<(u64, u64, u32, u32)>,
+}
+
+fn u64_at(value: &Value, key: &str) -> u64 {
+    value
+        .get(key)
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| panic!("a leaf block has no unsigned {key}"))
+}
+
+/// Every leaf of `leaves-z0z7.pmtiles`, with each leaf's entry count checked
+/// against the `entry_count` the dump program wrote beside it.
+///
+/// That cross-check is the positive control: a parse that silently produced
+/// empty columns would make every comparison in the caller's loop vacuous.
+fn oracle_leaves() -> Vec<OracleLeaf> {
+    let doc = directory_leaves_vectors();
+    let leaves = doc
+        .get("leaf_directories")
+        .and_then(Value::as_array)
+        .expect("directory-leaves.json has a leaf_directories array");
+    assert!(
+        !leaves.is_empty(),
+        "the leaf-bearing golden parsed to zero leaves, so nothing below could fail"
+    );
+
+    leaves
+        .iter()
+        .map(|leaf| {
+            let declared =
+                usize::try_from(u64_at(leaf, "entry_count")).expect("a count fits in a usize");
+            let columns = leaf
+                .get("entries_columnar")
+                .expect("a leaf block has entries_columnar");
+            let column = |name: &str| -> Vec<u64> {
+                columns
+                    .get(name)
+                    .and_then(Value::as_array)
+                    .unwrap_or_else(|| panic!("a leaf block has no {name} column"))
+                    .iter()
+                    .map(|v| v.as_u64().expect("a column holds unsigned integers"))
+                    .collect()
+            };
+            let ids = column("tile_id");
+            let offsets = column("offset");
+            let lengths = column("length");
+            let runs = column("run_length");
+            assert_eq!(
+                ids.len(),
+                declared,
+                "a leaf's tile_id column has {} values against a declared entry_count of \
+                 {declared}",
+                ids.len()
+            );
+            for (name, col) in [
+                ("offset", &offsets),
+                ("length", &lengths),
+                ("run_length", &runs),
+            ] {
+                assert_eq!(
+                    col.len(),
+                    ids.len(),
+                    "a leaf's {name} column is a different length from its tile_id column"
+                );
+            }
+            OracleLeaf {
+                offset_in_section: u64_at(leaf, "offset_in_leaf_section"),
+                absolute_offset: u64_at(leaf, "absolute_offset"),
+                compressed_length: u64_at(leaf, "compressed_length"),
+                entries: (0..ids.len())
+                    .map(|i| {
+                        (
+                            ids[i],
+                            offsets[i],
+                            u32::try_from(lengths[i]).expect("a length fits in a u32"),
+                            u32::try_from(runs[i]).expect("a run length fits in a u32"),
+                        )
+                    })
+                    .collect(),
+            }
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // The goldens
 // ---------------------------------------------------------------------------
@@ -76,14 +187,14 @@ fn with_u64(bytes: &[u8], offset: usize, value: u64) -> Vec<u8> {
 #[cfg_attr(miri, ignore)]
 fn every_golden_archive_validates_clean() {
     let mut checked = 0;
-    for (name, _) in GOLDEN_DIGESTS {
-        let bytes = golden(name);
+    for (name, sha) in GOLDENS {
+        let bytes = golden(name, sha);
         let report = validate_bytes(&bytes, &ValidationLimits::default())
             .unwrap_or_else(|e| panic!("{name}: the validator could not read the archive: {e}"));
         assert!(
             report.findings.is_empty(),
-            "{name} is an archive the reference implementation wrote and it \
-             produced findings: {:?}",
+            "{name} is an archive the reference implementation wrote and it produced findings: \
+             {:?}",
             report.findings
         );
         assert!(report.is_valid());
@@ -118,11 +229,11 @@ fn every_golden_archive_validates_clean() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn the_leaf_pointers_resolve_relative_to_the_leaf_section() {
-    let bytes = golden("leaves-z0z7.pmtiles");
+    let bytes = golden("leaves-z0z7.pmtiles", LEAVES_GOLDEN_SHA256);
     let report = validate_bytes(&bytes, &ValidationLimits::default()).expect("the archive reads");
     assert!(report.findings.is_empty(), "{:?}", report.findings);
 
-    let oracle = leaf_directories();
+    let oracle = oracle_leaves();
     assert_eq!(oracle.len(), 6, "the oracle recorded six leaves");
     assert_eq!(
         report.leaves.len(),
@@ -139,7 +250,7 @@ fn the_leaf_pointers_resolve_relative_to_the_leaf_section() {
     let mut lengths = 0u64;
     for (found, expected) in report.leaves.iter().zip(&oracle) {
         assert_eq!(
-            found.offset_in_section, expected.offset_in_leaf_section,
+            found.offset_in_section, expected.offset_in_section,
             "a leaf pointer's relative offset"
         );
         assert_eq!(
@@ -148,7 +259,7 @@ fn the_leaf_pointers_resolve_relative_to_the_leaf_section() {
         );
         assert_eq!(
             found.absolute_offset,
-            header.leaf_directories_offset + expected.offset_in_leaf_section,
+            header.leaf_directories_offset + expected.offset_in_section,
             "the base for a leaf offset is header.leaf_directories_offset"
         );
         assert_eq!(found.compressed_length, expected.compressed_length);
@@ -170,18 +281,22 @@ fn the_leaf_pointers_resolve_relative_to_the_leaf_section() {
     assert_eq!(report.addressed_tiles, 21845);
 }
 
-/// Every one of the 21844 leaf entries is the entry `go-pmtiles` decoded.
+/// Every one of the 21844 entries the walk pulled out of the six leaves is the
+/// entry `go-pmtiles` decoded there.
 ///
-/// A per-leaf comparison rather than a total, because a total is satisfied by
-/// two errors that cancel.
+/// A per-entry comparison rather than a total, because a total is satisfied by
+/// two errors that cancel. This is about the *walk* rather than the directory
+/// parser: `tests/pmtiles_format.rs` already pins the leaf bytes, and what is
+/// being checked here is that following six pointers lands on the right six
+/// directories in the right order.
 #[test]
 #[cfg_attr(miri, ignore)]
-fn the_leaf_entries_are_the_ones_go_pmtiles_decoded() {
-    let bytes = golden("leaves-z0z7.pmtiles");
+fn the_walked_leaf_entries_are_the_ones_go_pmtiles_decoded() {
+    let bytes = golden("leaves-z0z7.pmtiles", LEAVES_GOLDEN_SHA256);
     let report = validate_bytes(&bytes, &ValidationLimits::default().with_collect_entries(true))
         .expect("the archive reads");
 
-    let oracle = leaf_directories();
+    let oracle = oracle_leaves();
     let mut compared = 0usize;
     for (index, (found, expected)) in report.leaves.iter().zip(&oracle).enumerate() {
         let decoded = found
@@ -198,7 +313,7 @@ fn the_leaf_entries_are_the_ones_go_pmtiles_decoded() {
         for (position, (got, want)) in decoded.iter().zip(&expected.entries).enumerate() {
             assert_eq!(
                 (got.tile_id, got.offset, got.length, got.run_length),
-                (want.tile_id, want.offset, want.length, want.run_length),
+                *want,
                 "leaf {index} entry {position}"
             );
             compared += 1;
@@ -210,96 +325,26 @@ fn the_leaf_entries_are_the_ones_go_pmtiles_decoded() {
     );
 }
 
-/// The decompressed root directory is byte-for-byte what `go-pmtiles` wrote,
-/// and re-serialising the entries reproduces those same bytes.
+/// The walk's three totals on the archive that deduplicates two different
+/// ways.
 ///
-/// The second half is what makes this a target for a writer rather than a
-/// fixture for a parser: the oracle recorded that `SerializeEntries` over the
-/// entries `DeserializeEntries` had just decoded gives the directory body
-/// back exactly, so a serializer that produces anything else is producing a
-/// different file.
-#[test]
-#[cfg_attr(miri, ignore)]
-fn root_directory_bytes_match_the_reference_byte_for_byte() {
-    let mut checked = 0;
-    for name in ["raster-z0z2.pmtiles", "dupes-z0z3.pmtiles"] {
-        let archive = golden(name);
-        let header = Header::try_decode(&archive).expect("a golden header decodes");
-        let start = usize::try_from(header.root_offset).unwrap();
-        let end = start + usize::try_from(header.root_length).unwrap();
-        let plain = header
-            .internal_compression
-            .decompress(&archive[start..end], 1 << 20)
-            .expect("the root directory decompresses");
-
-        let (want_bytes, want_entries) = root_directory(name);
-        assert_eq!(plain, want_bytes, "{name}: decompressed root directory");
-
-        let entries = deserialize_entries(&plain).expect("the root directory parses");
-        assert_eq!(entries.len(), want_entries.len(), "{name}: entry count");
-        for (got, want) in entries.iter().zip(&want_entries) {
-            assert_eq!(
-                (got.tile_id, got.offset, got.length, got.run_length),
-                (want.tile_id, want.offset, want.length, want.run_length),
-                "{name}"
-            );
-        }
-        assert_eq!(
-            serialize_entries(&entries).expect("the entries re-serialize"),
-            plain,
-            "{name}: our serializer does not reproduce the reference's bytes"
-        );
-        checked += 1;
-    }
-    assert_eq!(checked, 2);
-}
-
-/// Both deduplication shapes in `dupes-z0z3.pmtiles` survive the walk.
-///
-/// They are genuinely different and a reader can handle one without the other.
 /// Runs collapse identical *consecutive* tiles into one entry with
-/// `run_length > 1`. Identical tiles that are not consecutive stay separate
-/// entries with `run_length` 1 that point at the same offset. A reader that
-/// only handles runs returns the wrong bytes for the second shape while
-/// looking correct on most archives.
+/// `run_length > 1`; identical tiles that are not consecutive stay separate
+/// entries with `run_length` 1 pointing at the same offset. A walk that
+/// handled only the first would count 85 entries rather than 67, and one that
+/// handled only the second would count 63 addressed tiles rather than 85.
 #[test]
 #[cfg_attr(miri, ignore)]
-fn both_deduplication_shapes_are_present_and_counted() {
-    let (_, entries) = root_directory("dupes-z0z3.pmtiles");
-    assert_eq!(entries.len(), 67);
-
-    let runs: Vec<u32> = entries
-        .iter()
-        .map(|e| e.run_length)
-        .filter(|r| *r > 1)
-        .collect();
-    assert!(
-        runs.contains(&4) && runs.contains(&16),
-        "the four z1 tiles and sixteen z2 tiles should be runs of 4 and 16, got {runs:?}"
-    );
-
-    let at_148: Vec<u64> = entries
-        .iter()
-        .filter(|e| e.offset == 148)
-        .map(|e| e.tile_id)
-        .collect();
-    assert_eq!(
-        at_148,
-        vec![21, 49, 63, 76],
-        "four non-adjacent entries share offset 148"
-    );
-
-    let addressed: u64 = entries.iter().map(|e| u64::from(e.run_length)).sum();
-    assert_eq!(addressed, 85, "the run lengths sum to addressed_tiles_count");
-    let distinct: BTreeSet<u64> = entries.iter().map(|e| e.offset).collect();
-    assert_eq!(distinct.len(), 63, "distinct offsets are tile_contents_count");
-
-    let report = validate_bytes(&golden("dupes-z0z3.pmtiles"), &ValidationLimits::default())
-        .expect("the archive reads");
+fn the_walk_counts_both_shapes_of_deduplication() {
+    let report = validate_bytes(
+        &golden("dupes-z0z3.pmtiles", DUPES_GOLDEN_SHA256),
+        &ValidationLimits::default(),
+    )
+    .expect("the archive reads");
     assert!(report.findings.is_empty(), "{:?}", report.findings);
-    assert_eq!(report.addressed_tiles, 85);
-    assert_eq!(report.tile_entries, 67);
-    assert_eq!(report.tile_contents, Some(63));
+    assert_eq!(report.root_entries, 67, "entries after run-length collapsing");
+    assert_eq!(report.addressed_tiles, 85, "tiles the archive addresses");
+    assert_eq!(report.tile_contents, Some(63), "distinct tile payloads");
 }
 
 // ---------------------------------------------------------------------------
@@ -315,7 +360,11 @@ fn both_deduplication_shapes_are_present_and_counted() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn the_root_offset_that_walks_past_the_end_of_the_file_is_flagged() {
-    let broken = with_u64(&golden("raster-z0z2.pmtiles"), OFF_ROOT_OFFSET, 999_999);
+    let broken = with_u64(
+        &golden("raster-z0z2.pmtiles", RASTER_GOLDEN_SHA256),
+        OFF_ROOT_OFFSET,
+        999_999,
+    );
     let report = validate_bytes(&broken, &ValidationLimits::default()).expect("bytes are readable");
     assert!(
         report.findings.contains(&Finding::SectionOutOfBounds {
@@ -335,7 +384,11 @@ fn the_root_offset_that_walks_past_the_end_of_the_file_is_flagged() {
 #[cfg_attr(miri, ignore)]
 fn a_section_whose_offset_plus_length_overflows_is_flagged() {
     let broken = with_u64(
-        &with_u64(&golden("raster-z0z2.pmtiles"), OFF_ROOT_OFFSET, u64::MAX - 4),
+        &with_u64(
+            &golden("raster-z0z2.pmtiles", RASTER_GOLDEN_SHA256),
+            OFF_ROOT_OFFSET,
+            u64::MAX - 4,
+        ),
         OFF_ROOT_LENGTH,
         64,
     );
@@ -356,13 +409,20 @@ fn a_section_whose_offset_plus_length_overflows_is_flagged() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn a_root_length_larger_than_the_archive_is_flagged() {
-    let broken = with_u64(&golden("raster-z0z2.pmtiles"), OFF_ROOT_LENGTH, 1 << 40);
+    let broken = with_u64(
+        &golden("raster-z0z2.pmtiles", RASTER_GOLDEN_SHA256),
+        OFF_ROOT_LENGTH,
+        1 << 40,
+    );
     let report = validate_bytes(&broken, &ValidationLimits::default()).expect("bytes are readable");
     assert!(
-        report
-            .findings
-            .iter()
-            .any(|f| matches!(f, Finding::SectionOutOfBounds { section: Section::Root, .. })),
+        report.findings.iter().any(|f| matches!(
+            f,
+            Finding::SectionOutOfBounds {
+                section: Section::Root,
+                ..
+            }
+        )),
         "{:?}",
         report.findings
     );
@@ -373,7 +433,7 @@ fn a_root_length_larger_than_the_archive_is_flagged() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn a_truncated_archive_is_flagged() {
-    let full = golden("raster-z0z2.pmtiles");
+    let full = golden("raster-z0z2.pmtiles", RASTER_GOLDEN_SHA256);
     let report =
         validate_bytes(&full[..900], &ValidationLimits::default()).expect("bytes are readable");
     assert!(
@@ -394,7 +454,7 @@ fn a_truncated_archive_is_flagged() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn wrong_magic_and_wrong_version_are_each_their_own_finding() {
-    let mut wrong_magic = golden("raster-z0z2.pmtiles");
+    let mut wrong_magic = golden("raster-z0z2.pmtiles", RASTER_GOLDEN_SHA256);
     wrong_magic[..7].copy_from_slice(b"NOTPMTs");
     let report = validate_bytes(&wrong_magic, &ValidationLimits::default()).expect("readable");
     assert_eq!(
@@ -406,7 +466,7 @@ fn wrong_magic_and_wrong_version_are_each_their_own_finding() {
     );
     assert!(report.header.is_none());
 
-    let mut wrong_version = golden("raster-z0z2.pmtiles");
+    let mut wrong_version = golden("raster-z0z2.pmtiles", RASTER_GOLDEN_SHA256);
     wrong_version[7] = 2;
     let report = validate_bytes(&wrong_version, &ValidationLimits::default()).expect("readable");
     assert_eq!(
@@ -420,9 +480,10 @@ fn wrong_magic_and_wrong_version_are_each_their_own_finding() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn an_archive_shorter_than_the_header_is_flagged() {
+    let full = golden("raster-z0z2.pmtiles", RASTER_GOLDEN_SHA256);
     for len in [0usize, 1, 7, 8, 126] {
-        let report = validate_bytes(&golden("raster-z0z2.pmtiles")[..len], &ValidationLimits::default())
-            .expect("readable");
+        let report =
+            validate_bytes(&full[..len], &ValidationLimits::default()).expect("readable");
         assert_eq!(
             report.findings,
             vec![Finding::ArchiveTooShort {
@@ -444,11 +505,11 @@ fn an_archive_shorter_than_the_header_is_flagged() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn a_directory_that_does_not_decompress_is_a_finding_and_not_a_crash() {
-    let mut broken = golden("raster-z0z2.pmtiles");
-    // Point the root at the tile data, which is PNG bytes and not gzip.
-    let header = Header::try_decode(&broken).expect("the header decodes");
+    let archive = golden("raster-z0z2.pmtiles", RASTER_GOLDEN_SHA256);
+    let header = Header::try_decode(&archive).expect("the header decodes");
     assert_eq!(header.internal_compression, Compression::Gzip);
-    broken = with_u64(&broken, OFF_ROOT_OFFSET, header.tile_data_offset);
+    // Point the root at the tile data, which is PNG bytes and not gzip.
+    let broken = with_u64(&archive, OFF_ROOT_OFFSET, header.tile_data_offset);
 
     let report = validate_bytes(&broken, &ValidationLimits::default()).expect("readable");
     assert!(
@@ -464,14 +525,18 @@ fn a_directory_that_does_not_decompress_is_a_finding_and_not_a_crash() {
     );
 }
 
-/// A leaf pointer whose target is outside the leaf section is flagged, and the
-/// walk does not follow it.
+/// A leaf pointer whose target is outside the archive is flagged, and the walk
+/// does not follow it.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn a_leaf_pointer_outside_the_leaf_section_is_flagged() {
-    // Shrink the leaf section to nothing by moving its offset to the end of
-    // the file; the six pointers then resolve past the archive.
-    let broken = with_u64(&golden("leaves-z0z7.pmtiles"), OFF_LEAF_OFFSET, 860);
+    // Move the leaf region to the end of the file; the six pointers, whose
+    // offsets are relative to it, then resolve past the archive.
+    let broken = with_u64(
+        &golden("leaves-z0z7.pmtiles", LEAVES_GOLDEN_SHA256),
+        OFF_LEAF_OFFSET,
+        860,
+    );
     let report = validate_bytes(&broken, &ValidationLimits::default()).expect("readable");
     assert!(
         report
@@ -487,7 +552,11 @@ fn a_leaf_pointer_outside_the_leaf_section_is_flagged() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn a_header_count_that_disagrees_with_the_directories_is_flagged() {
-    let broken = with_u64(&golden("dupes-z0z3.pmtiles"), OFF_ADDRESSED_TILES, 84);
+    let broken = with_u64(
+        &golden("dupes-z0z3.pmtiles", DUPES_GOLDEN_SHA256),
+        OFF_ADDRESSED_TILES,
+        84,
+    );
     let report = validate_bytes(&broken, &ValidationLimits::default()).expect("readable");
     assert!(
         report.findings.contains(&Finding::AddressedTilesMismatch {
@@ -524,10 +593,8 @@ fn overlapping_runs_are_flagged() {
             run_length: 1,
         },
     ];
-    let directory = serialize_entries(&entries).expect("these entries serialize");
-    let archive = archive_around(&directory, &[0u8; 20]);
-
-    let report = validate_bytes(&archive, &ValidationLimits::default()).expect("readable");
+    let report = validate_bytes(&archive_around(&entries, &[0u8; 20]), &ValidationLimits::default())
+        .expect("readable");
     assert!(
         report.findings.iter().any(|f| matches!(
             f,
@@ -554,11 +621,9 @@ fn an_entry_pointing_outside_the_tile_data_is_flagged() {
         length: 64,
         run_length: 1,
     }];
-    let directory = serialize_entries(&entries).expect("these entries serialize");
     // Only 20 bytes of tile data, and the entry claims 64.
-    let archive = archive_around(&directory, &[0u8; 20]);
-
-    let report = validate_bytes(&archive, &ValidationLimits::default()).expect("readable");
+    let report = validate_bytes(&archive_around(&entries, &[0u8; 20]), &ValidationLimits::default())
+        .expect("readable");
     assert!(
         report.findings.iter().any(|f| matches!(
             f,
@@ -576,13 +641,13 @@ fn an_entry_pointing_outside_the_tile_data_is_flagged() {
 /// No input, however malformed, makes the validator panic or hand back an
 /// error it has no name for.
 ///
-/// Two sweeps over a real archive: every truncation, and a single byte
-/// flipped at every position. Both are cheap on a 1878-byte file and both are
-/// the shapes a fuzzer finds first.
+/// Two sweeps over a real archive: every truncation, and a single byte flipped
+/// at every position. Both are cheap on a 1878-byte file and both are the
+/// shapes a fuzzer finds first.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn no_mutation_of_a_real_archive_makes_the_validator_panic() {
-    let archive = golden("raster-z0z2.pmtiles");
+    let archive = golden("raster-z0z2.pmtiles", RASTER_GOLDEN_SHA256);
     let limits = ValidationLimits::default();
 
     let mut truncations = 0;
@@ -602,15 +667,25 @@ fn no_mutation_of_a_real_archive_makes_the_validator_panic() {
         let _ = validate_bytes(&broken, &limits).expect("a slice is always readable");
         flips += 1;
     }
-    assert_eq!(flips, 1878, "the flip sweep covered every byte of the archive");
+    assert_eq!(
+        flips, 1878,
+        "the flip sweep covered every byte of the archive"
+    );
 }
 
-/// Wrap a serialised directory in the smallest archive that can hold it, so a
-/// test can build a directory by hand and hand it to the validator.
+/// Wrap a directory in the smallest archive that can hold it, so a test can
+/// build one by hand and hand it to the validator.
 ///
 /// Uncompressed internally, which is legal (`Compression::None` is `0x01`) and
-/// keeps the fixture readable in a hex dump.
-fn archive_around(directory: &[u8], tile_data: &[u8]) -> Vec<u8> {
+/// keeps the fixture readable in a hex dump. The header's three counts are
+/// derived from the entries, so an archive built this way is clean unless the
+/// test deliberately made it otherwise.
+fn archive_around(entries: &[libviprs::pmtiles::Entry], tile_data: &[u8]) -> Vec<u8> {
+    use std::collections::BTreeSet;
+
+    use libviprs::pmtiles::directory::serialize_entries;
+
+    let directory = serialize_entries(entries).expect("the entries serialize");
     let mut header = Header {
         internal_compression: Compression::None,
         tile_compression: Compression::None,
@@ -624,8 +699,6 @@ fn archive_around(directory: &[u8], tile_data: &[u8]) -> Vec<u8> {
     header.leaf_directories_length = 0;
     header.tile_data_offset = header.metadata_offset;
     header.tile_data_length = tile_data.len() as u64;
-
-    let entries = deserialize_entries(directory).expect("the directory parses");
     header.tile_entries_count = entries.iter().filter(|e| !e.is_leaf()).count() as u64;
     header.addressed_tiles_count = entries.iter().map(|e| u64::from(e.run_length)).sum();
     header.tile_contents_count = entries
@@ -636,7 +709,7 @@ fn archive_around(directory: &[u8], tile_data: &[u8]) -> Vec<u8> {
         .len() as u64;
 
     let mut out = header.encode().to_vec();
-    out.extend_from_slice(directory);
+    out.extend_from_slice(&directory);
     out.extend_from_slice(tile_data);
     out
 }

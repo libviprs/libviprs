@@ -1,67 +1,35 @@
-//! PMTiles v3 format invariants, as properties and as `go-pmtiles` vectors
-//! (issue #991).
+//! PMTiles v3 format invariants, as properties (issue #991).
 //!
-//! Two kinds of test share this file because they answer two halves of one
-//! question, and either half alone is misleading.
+//! Every test here is a property over a generated input space rather than a
+//! fixture, and that division is deliberate: `tests/pmtiles_format.rs` pins the
+//! same primitives to numbers that came out of the real `go-pmtiles` v1.31.2,
+//! and this file says what has to hold for inputs nobody wrote down. Neither
+//! half is worth much alone.
 //!
-//! The **properties** say the primitives are each other's inverse over a wide
-//! input space: `zxy_to_tileid` and `tileid_to_zxy`, `encode_uvarint` and
-//! `decode_uvarint`, `serialize_entries` and `deserialize_entries`,
-//! `Header::encode` and `Header::try_decode`. That catches an off-by-one at a
-//! zoom nobody wrote a fixture for, and it catches a decoder that drifts after
-//! the contiguous-offset shorthand, which is the kind of bug a three-entry
-//! example never reaches.
+//! The properties catch an off-by-one at a zoom nobody made a fixture for, a
+//! decoder that drifts after two contiguous-offset entries in a row, a varint
+//! that loses a bit at the tenth byte. What they structurally **cannot** catch
+//! is a wrong convention: a Hilbert mapping and its transpose are both perfect
+//! inverses of themselves, and a varint reader that read its bytes backwards
+//! would round-trip with a writer that wrote them backwards. That is what the
+//! oracle vectors next door are for, and it is why nothing in this file claims
+//! to establish which curve PMTiles uses.
 //!
-//! It cannot catch a *wrong convention*. A Hilbert mapping and its transpose
-//! are both perfect inverses of themselves, and a varint reader that read the
-//! bytes backwards would round-trip with a writer that wrote them backwards.
-//! So the **vectors** pin the same primitives to numbers that came out of the
-//! real `go-pmtiles` v1.31.2, loaded from the committed JSON under
-//! `tests/fixtures/pmtiles/vectors/` at run time rather than copied into a
-//! table here, because a transcribed literal and an invented one are the same
-//! thing in a diff.
+//! # Each property asserts that it ran
 //!
-//! # Twelve of the 162 vector rows are the ones that mean anything
+//! A `proptest!` block whose strategy produced nothing passes. So does one
+//! whose case count is zero, and so does a loop over an empty generated
+//! vector. Every test below counts its own invocations into a static and
+//! asserts the count afterwards, and the two that depend on a *shape* being
+//! generated (the contiguous-offset shorthand, a run collapsing) count those
+//! separately and assert they happened.
 //!
-//! This is the part worth reading before adding a row. The oracle carries 162
-//! distinct `(z, x, y)` pairs, and 150 of them are *structural*: the first and
-//! last tile of a level, the four quadrant corners, the tiles straddling the
-//! centre. Four different candidate conventions agree on every one of those,
-//! plain Z-order with no rotation included, so a suite that pins all 150 and
-//! passes has demonstrated nothing about which curve this crate implements. It
-//! has a large green table and no discrimination.
-//!
-//! The twelve rows in `convention_discriminators` are the ones that separate
-//! them: zoom 9 to 15, off every quadrant boundary, `x` and `y` of differing
-//! parity, and four of them arranged as swapped pairs, so
-//! `(13, 5107, 2884) = 79053962` against `(13, 2884, 5107) = 53847284` also
-//! rules out any symmetric mapping.
-//! [`the_twelve_convention_discriminators_match_go_pmtiles`]
-//! is therefore the test in this file that would go red on a wrong curve.
-//!
-//! I measured how much the rest are worth rather than assuming it. Against a
-//! candidate mapping that keeps the quadrant order and drops the Hilbert
-//! reflection, all twelve discriminators change, all 76 rows in
-//! [`the_purely_structural_rows_agree_and_could_not_have_failed`] stay the
-//! same, and the 97 rows in [`the_scattered_and_ordering_rows_agree_too`] are
-//! in between, with 44 of them changing. Three tests rather than two, so a
-//! failure says which kind of wrong the curve is.
-//!
-//! # And ten rows are evidence *against* the reference
-//!
-//! `out_of_range_observations` records what `ZxyToID` does when the coordinate
-//! is impossible, which is not to refuse it. It masks `x` and `y` into a
-//! different valid tile, so `(2, 4, 0)` comes back as id 5, which is really
-//! `(2, 0, 0)`, and `pmtiles tile archive 2 4 0` will happily hand over the
-//! payload of `(2, 0, 0)` with exit code 0. Above zoom 31 it saturates instead,
-//! and z=32, z=33 and z=63 all return one id that `IDToZxy` then decodes as
-//! zoom 127.
-//!
-//! libviprs refuses every one of those, per the crate's `try_*` convention, so
-//! [`the_rows_where_the_reference_masks_or_saturates_are_refused`] asserts an
-//! error and never a value. Pinning them as expectations would be building a
-//! reader that reproduces a reference bug, and it would look *better* than
-//! getting it right, because the table would be bigger.
+//! That is not defensive writing, it is a bug I shipped and had to fix here.
+//! The first version of the directory generator drew an entry's offset and its
+//! length independently, so an offset landing exactly on the previous entry's
+//! end almost never happened: the control fired once on one seed and zero
+//! times on the next. A control that turns on a coin flip is worse than none,
+//! because its green says nothing.
 
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
@@ -72,11 +40,6 @@ use libviprs::pmtiles::{
     Compression, Entry, Header, PmTilesError, TileType, tileid_to_zxy, zxy_to_tileid,
 };
 use proptest::prelude::*;
-
-#[path = "common/pmtiles_oracle.rs"]
-mod pmtiles_oracle;
-
-use pmtiles_oracle::{header_u64, level_bases, oracle_header, tileid_section};
 
 // ---------------------------------------------------------------------------
 // How many cases, and why that many
@@ -119,306 +82,8 @@ fn config(cases: u32) -> ProptestConfig {
 }
 
 // ---------------------------------------------------------------------------
-// The vectors
-// ---------------------------------------------------------------------------
-
-/// The twelve rows that tell a real Hilbert mapping apart from the plausible
-/// imitations, forward and inverse, from `go-pmtiles` v1.31.2.
-///
-/// A failure here is a wrong curve. A failure in
-/// [`the_structural_vector_rows_agree_as_well`] and not here is a wrong
-/// *detail* in a curve that is otherwise the right shape.
-#[test]
-#[cfg_attr(miri, ignore)]
-fn the_twelve_convention_discriminators_match_go_pmtiles() {
-    let rows = tileid_section("convention_discriminators");
-    assert_eq!(
-        rows.len(),
-        12,
-        "the discriminator set is the whole point of this test"
-    );
-
-    let mut swapped_pairs = 0;
-    for row in &rows {
-        assert!(
-            row.roundtrip_ok,
-            "a discriminator row that does not round-trip in the reference is \
-             not a target: {row:?}"
-        );
-        let got = zxy_to_tileid(row.z, row.x, row.y)
-            .unwrap_or_else(|e| panic!("({}, {}, {}) was refused: {e}", row.z, row.x, row.y));
-        assert_eq!(
-            got, row.tile_id,
-            "zxy_to_tileid({}, {}, {}) is {got}, go-pmtiles says {}",
-            row.z, row.x, row.y, row.tile_id
-        );
-        assert_eq!(
-            tileid_to_zxy(row.tile_id).expect("a reference id decodes"),
-            (row.z, row.x, row.y),
-            "tileid_to_zxy({}) does not come back to the coordinate that \
-             produced it",
-            row.tile_id
-        );
-        if rows.iter().any(|other| other.x == row.y && other.y == row.x) && row.x != row.y {
-            swapped_pairs += 1;
-        }
-    }
-
-    // The swapped pairs are what rule out a symmetric mapping, so their
-    // presence is part of what this test claims. Three pairs, counted from
-    // both ends, is six rows: (12, 3423, 1763), (13, 5107, 2884) and
-    // (15, 20749, 9310), each with its transpose.
-    assert_eq!(
-        swapped_pairs, 6,
-        "the discriminators no longer contain the swapped pairs that rule out \
-         a symmetric mapping, so this test has quietly stopped discriminating"
-    );
-}
-
-/// Check one group of `tileid.json` sections forward and backward, and return
-/// how many rows it covered.
-fn check_sections(sections: &[&str]) -> usize {
-    let mut checked = 0usize;
-    for section in sections {
-        for row in tileid_section(section) {
-            assert!(row.roundtrip_ok, "{section} row {row:?} is an observation");
-            assert_eq!(
-                zxy_to_tileid(row.z, row.x, row.y).expect("an in-range vector"),
-                row.tile_id,
-                "{section}: zxy_to_tileid({}, {}, {})",
-                row.z,
-                row.x,
-                row.y
-            );
-            assert_eq!(
-                tileid_to_zxy(row.tile_id).expect("a reference id decodes"),
-                (row.z, row.x, row.y),
-                "{section}: tileid_to_zxy({})",
-                row.tile_id
-            );
-            checked += 1;
-        }
-    }
-    checked
-}
-
-/// The 76 rows that genuinely cannot discriminate: the first and last tile of
-/// every level, and the quadrant and centre boundaries.
-///
-/// Worth having as a regression net and worth not overrating. I measured this
-/// rather than taking it on faith: against a candidate mapping that keeps the
-/// quadrant order and drops the Hilbert reflection, **every one of these 76
-/// rows still agrees**, so a suite built only on them would be green on a
-/// mapping that is wrong at every zoom above 2.
-#[test]
-#[cfg_attr(miri, ignore)]
-fn the_purely_structural_rows_agree_and_could_not_have_failed() {
-    let checked = check_sections(&["first_and_last_of_level", "orientation_boundaries"]);
-    assert_eq!(checked, 76, "32 first-and-last rows plus 44 boundary rows");
-}
-
-/// The 97 rows that turn out to discriminate after all: the scattered
-/// coordinates and the two full zoom orderings.
-///
-/// The oracle's own notes group these with the structural rows as
-/// non-discriminating, and measured against the no-reflection candidate that
-/// is not quite right: 12 of the 17 `off_grid` rows, 4 of the 16 `z2`
-/// orderings and 28 of the 64 `z3` orderings change. They are weaker than the
-/// twelve discriminators, which all change, and they are not nothing, so they
-/// are in their own test rather than pooled with the 76 above.
-#[test]
-#[cfg_attr(miri, ignore)]
-fn the_scattered_and_ordering_rows_agree_too() {
-    let checked = check_sections(&["off_grid", "hilbert_order_z2", "hilbert_order_z3"]);
-    assert_eq!(checked, 97, "17 off-grid rows plus 16 z2 plus 64 z3");
-}
-
-/// The first and last id of every zoom level, and the level's tile count.
-#[test]
-#[cfg_attr(miri, ignore)]
-fn level_bases_match_go_pmtiles() {
-    let rows = level_bases();
-    assert_eq!(rows.len(), 16, "the oracle covers sixteen zoom levels");
-    for (z, first, last, count) in rows {
-        assert_eq!(
-            first_tileid_of_zoom(z).expect("an in-range zoom"),
-            first,
-            "the first id of zoom {z}"
-        );
-        assert_eq!(
-            tileid_to_zxy(first).expect("a level base decodes"),
-            (z, 0, 0),
-            "the first id of zoom {z} is not (z, 0, 0)"
-        );
-        assert_eq!(
-            last - first + 1,
-            count,
-            "zoom {z}'s span does not match its tile count"
-        );
-        let (decoded_z, _, _) = tileid_to_zxy(last).expect("a level's last id decodes");
-        assert_eq!(decoded_z, z, "the last id of zoom {z} decoded to another zoom");
-    }
-}
-
-/// The rows where `go-pmtiles` masks or saturates rather than refusing.
-///
-/// The assertion is that libviprs returns an error, and specifically **not**
-/// the id the reference returned. Both halves matter: an implementation that
-/// happened to return a different wrong id would satisfy "not equal" while
-/// being just as wrong.
-#[test]
-#[cfg_attr(miri, ignore)]
-fn the_rows_where_the_reference_masks_or_saturates_are_refused() {
-    let rows = tileid_section("out_of_range_observations");
-    assert_eq!(rows.len(), 10, "the oracle recorded ten such rows");
-
-    let mut masked = 0;
-    let mut saturated = 0;
-    for row in &rows {
-        assert!(
-            !row.roundtrip_ok,
-            "an out-of-range row that round-trips in the reference is not one \
-             of these: {row:?}"
-        );
-        let got = zxy_to_tileid(row.z, row.x, row.y);
-        match &got {
-            Err(PmTilesError::ZoomOutOfRange { zoom, max }) => {
-                assert!(row.z > MAX_ZOOM, "{row:?} was refused for the wrong reason");
-                assert_eq!((*zoom, *max), (row.z, MAX_ZOOM));
-                saturated += 1;
-            }
-            Err(PmTilesError::CoordOutOfRange { z, x, y, .. }) => {
-                assert!(
-                    row.z <= MAX_ZOOM,
-                    "{row:?} should have been refused on its zoom"
-                );
-                assert_eq!((*z, *x, *y), (row.z, row.x, row.y));
-                masked += 1;
-            }
-            other => panic!(
-                "({}, {}, {}) gave {other:?}. go-pmtiles answers {} here, which \
-                 is a different, valid tile; we refuse instead.",
-                row.z, row.x, row.y, row.tile_id
-            ),
-        }
-    }
-
-    // A positive control on the match above: if every row landed in one arm,
-    // half of what this test claims to cover would not be covered at all.
-    assert_eq!(masked, 6, "six rows are an out-of-grid x or y");
-    assert_eq!(saturated, 4, "four rows are a zoom above 31");
-
-    // The reference's three saturating zooms collapse onto one id. Ours has no
-    // id to collapse onto, and this is the sharpest statement of the
-    // difference: 6148914691236517205 is one past the last addressable id.
-    assert_eq!(MAX_TILE_ID + 1, 6_148_914_691_236_517_205);
-    assert!(tileid_to_zxy(MAX_TILE_ID + 1).is_err());
-}
-
-/// The header fields `go-pmtiles` decoded, against ours, on all three goldens.
-///
-/// This is a header-only read, so it needs the archive bytes but none of the
-/// reader: `Header::try_decode` takes the first 127 bytes.
-#[test]
-#[cfg_attr(miri, ignore)]
-fn golden_headers_decode_to_the_fields_go_pmtiles_reports() {
-    let mut checked = 0;
-    for (name, _) in pmtiles_oracle::GOLDEN_DIGESTS {
-        let bytes = pmtiles_oracle::golden(name);
-        let header = Header::try_decode(&bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
-        let fields = oracle_header(name);
-
-        assert_eq!(header.root_offset, header_u64(&fields, "root_offset"));
-        assert_eq!(header.root_length, header_u64(&fields, "root_length"));
-        assert_eq!(
-            header.metadata_offset,
-            header_u64(&fields, "metadata_offset")
-        );
-        assert_eq!(
-            header.metadata_length,
-            header_u64(&fields, "metadata_length")
-        );
-        assert_eq!(
-            header.leaf_directories_offset,
-            header_u64(&fields, "leaf_directory_offset")
-        );
-        assert_eq!(
-            header.leaf_directories_length,
-            header_u64(&fields, "leaf_directory_length")
-        );
-        assert_eq!(
-            header.tile_data_offset,
-            header_u64(&fields, "tile_data_offset")
-        );
-        assert_eq!(
-            header.tile_data_length,
-            header_u64(&fields, "tile_data_length")
-        );
-        assert_eq!(
-            header.addressed_tiles_count,
-            header_u64(&fields, "addressed_tiles_count")
-        );
-        assert_eq!(
-            header.tile_entries_count,
-            header_u64(&fields, "tile_entries_count")
-        );
-        assert_eq!(
-            header.tile_contents_count,
-            header_u64(&fields, "tile_contents_count")
-        );
-        assert_eq!(
-            u64::from(header.min_zoom),
-            header_u64(&fields, "min_zoom"),
-            "{name} min zoom"
-        );
-        assert_eq!(
-            u64::from(header.max_zoom),
-            header_u64(&fields, "max_zoom"),
-            "{name} max zoom"
-        );
-        assert_eq!(
-            u64::from(header.internal_compression.to_byte()),
-            header_u64(&fields, "internal_compression")
-        );
-        assert_eq!(
-            u64::from(header.tile_compression.to_byte()),
-            header_u64(&fields, "tile_compression")
-        );
-        assert_eq!(
-            u64::from(header.tile_type.to_byte()),
-            header_u64(&fields, "tile_type")
-        );
-
-        // The finding worth pinning from this file rather than reading in
-        // prose: a no-leaf archive does NOT carry a zero leaf offset. Both
-        // small goldens set it to `tile_data_offset`, so anything deciding
-        // "are there leaves" from the offset answers yes for every archive
-        // go-pmtiles writes.
-        assert_eq!(
-            header.has_leaves(),
-            header.leaf_directories_length > 0,
-            "{name}: has_leaves must read the length"
-        );
-        if !header.has_leaves() {
-            assert_eq!(
-                header.leaf_directories_offset, header.tile_data_offset,
-                "{name}: a no-leaf archive still carries a non-zero leaf offset"
-            );
-        }
-        checked += 1;
-    }
-    assert_eq!(checked, 3, "all three goldens were compared");
-}
-
-// ---------------------------------------------------------------------------
 // The properties
 // ---------------------------------------------------------------------------
-//
-// Every proptest below counts its own invocations into a static and asserts
-// the count afterwards. A `proptest!` block whose strategy produced nothing,
-// or which was filtered down to nothing, passes silently, and so does one
-// whose case count somebody set to zero. The counter is the positive control
-// that says the assertions actually ran.
 
 static TILEID_CASES: AtomicUsize = AtomicUsize::new(0);
 static TILEID_ZOOMS: AtomicU32 = AtomicU32::new(0);
