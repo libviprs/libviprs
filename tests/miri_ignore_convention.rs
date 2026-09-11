@@ -402,15 +402,16 @@ const EXPECTED_SRC_MODULES: usize = 25;
 /// above: the index is the only place that can answer a question the working
 /// tree cannot.
 ///
-/// Thirty since #994, and that jump of eight is one file:
+/// Thirty-four since #994, and that jump of twelve is one file:
 /// `tests/local_ci_invocation.rs` asks `tools/local-ci.py` what it would hand
 /// Docker, so every one of its tests runs `python3`. A grep over the Python
 /// would pass on a `--platform` that is built and then dropped, which is the
 /// whole reason those tests shell out rather than read the source, so the
-/// spawn is not incidental to them. The detector sees all eight through the
-/// file-local `run` and `host_platform` helpers as well as directly, which is
-/// the two-hop shape [`process_spawning_fns`] exists for.
-const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 30;
+/// spawn is not incidental to them. The detector sees all twelve through the
+/// file-local `run`, `run_raw`, `daemon_platform` and `interpreter_platform`
+/// helpers as well as directly, which is the two-hop shape
+/// [`process_spawning_fns`] exists for.
+const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 34;
 
 /// The filesystem-touching tests still allowed to run under Miri, and so still
 /// allowed to end the whole run on their first syscall.
@@ -494,7 +495,16 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// It has to be a directory listing rather than an `include_str!` of a name it
 /// already knows, because the thing it is looking for is the file nobody told
 /// it about. Annotated and fs-detected, the ordinary case.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 288;
+///
+/// #994 moved it 288 to 289, and one test is the whole of it.
+/// `the_daemon_beats_the_interpreter_when_they_disagree` writes a fake `docker`
+/// into a `tempfile::tempdir()` and puts it first on `PATH`, because
+/// `tools/local-ci.py` now takes the host architecture from the daemon rather
+/// than from `platform.machine()` and on this host both sources say the same
+/// thing, so nothing that merely compares the tool's answer against the host
+/// can fail. The other eleven tests in that file spawn python3 and touch
+/// nothing, which is why they are `annotated not-detected` rows.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 289;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
