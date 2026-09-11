@@ -75,9 +75,9 @@
 //! data section. The two tempting mistakes are making it relative to the
 //! leaf's own start or to the leaf section, and both of them are invisible to
 //! a round trip because a writer that makes the same wrong choice agrees with
-//! the reader exactly. [`Reader::entry_position`] is the one place that
-//! decision is made, and `tests/pmtiles_reader.rs` pins the resulting absolute
-//! byte ranges against an archive go-pmtiles wrote.
+//! the reader exactly. `Reader::entry_position` is the one place that decision
+//! is made, and `tests/pmtiles_reader.rs` pins the resulting absolute byte
+//! ranges against an archive go-pmtiles wrote.
 //!
 //! # Every archive is hostile
 //!
@@ -171,6 +171,7 @@ pub const LEAF_CACHE_ENTRIES: usize = 4;
 /// # use std::io;
 ///
 /// // Any byte source will do. This one is a slice.
+/// #[derive(Debug)]
 /// struct Bytes(Vec<u8>);
 /// impl RangeReader for Bytes {
 ///     fn read_range(&self, offset: u64, len: usize) -> io::Result<Vec<u8>> {

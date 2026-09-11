@@ -1394,7 +1394,11 @@ fn a_version_two_archive_is_refused_by_the_version_it_carries() {
 fn an_archive_shorter_than_a_header_is_refused_rather_than_read_short() {
     for len in [0usize, 1, 7, 126] {
         let got = memory_reader(vec![0u8; len]);
-        assert!(got.is_err(), "{len} bytes is not an archive");
+        assert!(
+            matches!(&got, Err(PmTilesError::ShortHeader { .. })),
+            "{len} bytes is not an archive, got {:?}",
+            got.err()
+        );
     }
 }
 
@@ -1404,7 +1408,14 @@ fn a_truncated_archive_is_refused_rather_than_read_short() {
     let mut bytes = fixture_bytes(RASTER);
     bytes.truncate(900);
     let got = memory_reader(bytes);
-    assert!(got.is_err(), "a truncated archive cannot be opened");
+    // The tile data section is the one that no longer fits. Naming the variant
+    // matters: an archive this broken is refused by several layers and only
+    // the bounds check is the one this test is about.
+    assert!(
+        matches!(&got, Err(PmTilesError::SectionOutOfBounds { .. })),
+        "got {:?}",
+        got.err()
+    );
 }
 
 /// The case that makes `pmtiles verify` segfault.
@@ -1437,8 +1448,9 @@ fn a_section_whose_offset_and_length_overflow_is_refused_without_wrapping() {
     bytes[16..24].copy_from_slice(&64u64.to_le_bytes());
     let got = memory_reader(bytes);
     assert!(
-        got.is_err(),
-        "a root whose offset and length wrap must be refused"
+        matches!(&got, Err(PmTilesError::Overflow { .. })),
+        "a root whose offset and length wrap must be refused, got {:?}",
+        got.err()
     );
 }
 
@@ -1448,7 +1460,11 @@ fn a_root_length_past_the_end_is_refused() {
     let mut bytes = fixture_bytes(RASTER);
     bytes[16..24].copy_from_slice(&(1u64 << 40).to_le_bytes());
     let got = memory_reader(bytes);
-    assert!(got.is_err(), "got {:?}", got.err());
+    assert!(
+        matches!(&got, Err(PmTilesError::SectionOutOfBounds { .. })),
+        "got {:?}",
+        got.err()
+    );
 }
 
 /// A root that is not gzip is a typed error. This is the other half of the
@@ -1465,8 +1481,9 @@ fn a_root_that_is_not_gzip_is_a_typed_error_and_not_a_panic() {
     }
     let got = memory_reader(bytes);
     assert!(
-        got.is_err(),
-        "a root that will not inflate has to be an error"
+        matches!(&got, Err(PmTilesError::Io(_))),
+        "a root that will not inflate is the gzip error, surfaced, got {:?}",
+        got.err()
     );
 }
 
