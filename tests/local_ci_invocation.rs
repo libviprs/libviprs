@@ -59,9 +59,12 @@ struct Argv {
 
 impl Argv {
     fn get(&self, key: &str) -> &[String] {
-        self.fields
-            .get(key)
-            .unwrap_or_else(|| panic!("--print-docker-argv printed no `{key}` line; got {:?}", self.fields.keys().collect::<Vec<_>>()))
+        self.fields.get(key).unwrap_or_else(|| {
+            panic!(
+                "--print-docker-argv printed no `{key}` line; got {:?}",
+                self.fields.keys().collect::<Vec<_>>()
+            )
+        })
     }
 
     fn one(&self, key: &str) -> &str {
@@ -141,6 +144,7 @@ fn host_platform() -> String {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // spawns python3, which Miri supports on no target (#714)
 fn native_states_the_host_platform_on_both_docker_calls() {
     let a = run(&["--native"], &[]);
     let host = host_platform();
@@ -158,6 +162,7 @@ fn native_states_the_host_platform_on_both_docker_calls() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // spawns python3, which Miri supports on no target (#714)
 fn the_emulated_default_still_pins_amd64() {
     let a = run(&[], &[]);
     assert_eq!(a.one("platform"), "linux/amd64");
@@ -171,6 +176,7 @@ fn the_emulated_default_still_pins_amd64() {
 /// passes without the variable set, and this one proves the variable is not
 /// what was carrying it.
 #[test]
+#[cfg_attr(miri, ignore)] // spawns python3, which Miri supports on no target (#714)
 fn native_ignores_docker_default_platform() {
     let a = run(&["--native"], &[("DOCKER_DEFAULT_PLATFORM", "linux/amd64")]);
     let host = host_platform();
@@ -184,22 +190,28 @@ fn native_ignores_docker_default_platform() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // spawns python3, which Miri supports on no target (#714)
 fn the_default_cargo_volume_is_unchanged() {
     let a = run(&[], &[]);
     assert_eq!(a.one("volume"), "libviprs-ci-cargo");
     assert!(
-        a.get("run").windows(2).any(|w| w[0] == "-v" && w[1] == "libviprs-ci-cargo:/cargo"),
+        a.get("run")
+            .windows(2)
+            .any(|w| w[0] == "-v" && w[1] == "libviprs-ci-cargo:/cargo"),
         "the default volume must still be mounted at /cargo: {:?}",
         a.get("run")
     );
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // spawns python3, which Miri supports on no target (#714)
 fn a_lane_can_name_its_own_volume() {
     let flag = run(&["--volume", "libviprs-ci-f11"], &[]);
     assert_eq!(flag.one("volume"), "libviprs-ci-f11");
     assert!(
-        flag.get("run").windows(2).any(|w| w[0] == "-v" && w[1] == "libviprs-ci-f11:/cargo"),
+        flag.get("run")
+            .windows(2)
+            .any(|w| w[0] == "-v" && w[1] == "libviprs-ci-f11:/cargo"),
         "the named volume must reach the mount: {:?}",
         flag.get("run")
     );
@@ -224,15 +236,20 @@ fn a_lane_can_name_its_own_volume() {
 /// the default anyway, so this reads the run command itself and requires the two
 /// to differ.
 #[test]
+#[cfg_attr(miri, ignore)] // spawns python3, which Miri supports on no target (#714)
 fn different_volumes_do_not_share_a_target_dir() {
     let a = run(&["--volume", "libviprs-ci-a"], &[]);
     let b = run(&["--volume", "libviprs-ci-b"], &[]);
     assert_ne!(
-        a.get("run").iter().position(|x| x == "libviprs-ci-a:/cargo"),
+        a.get("run")
+            .iter()
+            .position(|x| x == "libviprs-ci-a:/cargo"),
         None
     );
     assert_ne!(
-        b.get("run").iter().position(|x| x == "libviprs-ci-b:/cargo"),
+        b.get("run")
+            .iter()
+            .position(|x| x == "libviprs-ci-b:/cargo"),
         None
     );
     assert_ne!(a.get("run"), b.get("run"));
@@ -250,6 +267,7 @@ fn different_volumes_do_not_share_a_target_dir() {
 /// tool says PyYAML is missing. A `NameError` is neither, and it is what the
 /// mistake produces.
 #[test]
+#[cfg_attr(miri, ignore)] // spawns python3, which Miri supports on no target (#714)
 fn the_workflow_path_either_works_or_says_pyyaml_is_missing() {
     let out = Command::new("python3")
         .arg(tool())
@@ -283,6 +301,7 @@ fn the_workflow_path_either_works_or_says_pyyaml_is_missing() {
 /// no PyYAML. If the YAML import is at module scope this refuses to run at all,
 /// and the whole file above it becomes untestable in the place it matters most.
 #[test]
+#[cfg_attr(miri, ignore)] // spawns python3, which Miri supports on no target (#714)
 fn printing_the_argv_does_not_need_pyyaml() {
     let out = Command::new("python3")
         .arg("-c")

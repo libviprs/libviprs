@@ -375,6 +375,14 @@ annotated   not-detected tests/icc_lut_alloc.rs::refusing_the_crate_s_own_device
 annotated   not-detected tests/icc_lut_alloc.rs::refusing_what_moxcms_still_allocates_itself_ends_the_process
 annotated   not-detected tests/icc_lut_alloc.rs::the_lut_export_hands_moxcms_nothing_that_scales_with_the_image
 annotated   not-detected tests/icc_lut_alloc.rs::the_lut_import_hands_moxcms_nothing_that_scales_with_the_image
+annotated   not-detected tests/local_ci_invocation.rs::a_lane_can_name_its_own_volume
+annotated   not-detected tests/local_ci_invocation.rs::different_volumes_do_not_share_a_target_dir
+annotated   not-detected tests/local_ci_invocation.rs::native_ignores_docker_default_platform
+annotated   not-detected tests/local_ci_invocation.rs::native_states_the_host_platform_on_both_docker_calls
+annotated   not-detected tests/local_ci_invocation.rs::printing_the_argv_does_not_need_pyyaml
+annotated   not-detected tests/local_ci_invocation.rs::the_default_cargo_volume_is_unchanged
+annotated   not-detected tests/local_ci_invocation.rs::the_emulated_default_still_pins_amd64
+annotated   not-detected tests/local_ci_invocation.rs::the_workflow_path_either_works_or_says_pyyaml_is_missing
 annotated   not-detected tests/oracle_capture_pins.rs::no_compiled_python_is_tracked_under_oracle_captures
 annotated   not-detected tests/sample_kind_spine.rs::the_walk_descends_into_subdirectories
 annotated   not-detected tests/unsafe_inventory.rs::the_walk_descends_into_subdirectories

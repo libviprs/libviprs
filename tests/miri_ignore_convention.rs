@@ -401,7 +401,16 @@ const EXPECTED_SRC_MODULES: usize = 25;
 /// Both run `git ls-files`, for the same underlying reason as the #701 row
 /// above: the index is the only place that can answer a question the working
 /// tree cannot.
-const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 22;
+///
+/// Thirty since #994, and that jump of eight is one file:
+/// `tests/local_ci_invocation.rs` asks `tools/local-ci.py` what it would hand
+/// Docker, so every one of its tests runs `python3`. A grep over the Python
+/// would pass on a `--platform` that is built and then dropped, which is the
+/// whole reason those tests shell out rather than read the source, so the
+/// spawn is not incidental to them. The detector sees all eight through the
+/// file-local `run` and `host_platform` helpers as well as directly, which is
+/// the two-hop shape [`process_spawning_fns`] exists for.
+const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 30;
 
 /// The filesystem-touching tests still allowed to run under Miri, and so still
 /// allowed to end the whole run on their first syscall.
