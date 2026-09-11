@@ -151,7 +151,7 @@ assert_eq!(storage.required_layout(), None);
 | `city.pmtiles` | `city.pmtiles` | `city.pmtiles/` |
 | `tiles.v2` | `tiles.v2.pmtiles` | `tiles.v2/` |
 
-The extension is appended, never substituted. `Path::set_extension` replaces
+The extension is appended, never substituted. `PathBuf::set_extension` replaces
 everything after the last dot, so it would turn `tiles.v2` into
 `tiles.pmtiles` and lose the `v2`. A base that already ends in `.pmtiles` is
 handed back untouched, compared without case, because on macOS and Windows

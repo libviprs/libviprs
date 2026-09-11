@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 This is the largest breaking release libviprs has shipped, so every break is
 gathered in `### Breaking` below rather than spread across the other sections.
-There are four groups of them plus a handful of independent items, and most
+There are five groups of them plus a handful of independent items, and most
 readers only need one group.
 
 - **Sample carriers and the counting ops** (issues #516, #532, #759, #887,
@@ -37,6 +37,12 @@ readers only need one group.
   `#[non_exhaustive]`, and two changes alter what goes into a `.v` file on
   disk.
 
+- **PMTiles is the default pyramid storage** (issue #992). A pyramid lands in
+  one indexed `.pmtiles` archive now rather than a tree of loose files under
+  `{z}/{x}/{y}`. It is the only change in this release that moves what ends up
+  on disk without moving a signature: `EngineBuilder` still writes the sink it
+  is handed, so a caller who names `FsSink` keeps the tree and keeps compiling.
+
 The independent items are the allocation-refusal collapse (#686), the decode
 budget becoming a real peak ceiling for jp2k, gif and avif (#944),
 `AvifError` becoming `#[non_exhaustive]` (#946), the
@@ -53,6 +59,51 @@ they live in the file format rather than in the API, which is why they are here
 and not under `Fixed`: this file is the only place they can be caught.
 
 ### Breaking
+
+- **PMTiles v3 is the default pyramid storage** (issue #992). A pyramid used to
+  be a tree of loose files under `{z}/{x}/{y}` and nothing else, because
+  `FsSink` was the only sink that could write one. `PyramidStorage` makes that
+  choice in one place now and defaults to `PyramidStorage::PmTiles`, a single
+  indexed archive carrying every tile, the directories that index them and the
+  pyramid's metadata. At one pyramid that is a convenience; at 100k pyramids of
+  20k tiles it is the difference between 100k files and about 2 billion.
+
+  **The API is additive and no signature moved.**
+  `EngineBuilder::new(source, plan, sink)` still writes the sink it is handed,
+  `FsSink` and `Layout` are untouched, and that third argument was always
+  required, so every Rust caller that compiles today compiles after this and
+  produces the same bytes it produced before. What breaks is the answer to "and
+  if I do not choose?", which until now nobody could ask, because there was no
+  way not to choose. It is filed here rather than under `Added` because that
+  answer is a documented default that other things derive from: the `viprs`
+  pyramid command flips to match in libviprs/libviprs-cli#54, and three
+  downstream repositories carry committed expectations about it.
+
+  `PyramidStorage::output_path` appends the extension rather than substituting
+  it. `PathBuf::set_extension` replaces everything after the last dot, so a base
+  of `tiles.v2` would come back `tiles.pmtiles` with the `v2` gone. A base that
+  already ends in `.pmtiles` is handed back untouched, matched without case,
+  because `city.PMTILES` and `city.PMTILES.pmtiles` are two names for one file
+  on macOS and on Windows and appending there would write the archive over the
+  base it was derived from.
+
+  Two constraints come with the archive, and both are in code rather than in a
+  sentence. `PyramidStorage::required_layout` answers `Some(Layout::Xyz)`,
+  because PMTiles v3 addresses a tile by a single `u64` derived from
+  `(z, x, y)` and the format has no encoding for DeepZoom's
+  `{level}/{col}_{row}` or for Google's `z/y/x`. And `TileFormat::Raw` has no
+  tile type in the spec at all, so raw tiles stay on the directory tree. The
+  match in each method has no wildcard arm, so a third storage fails to compile
+  there rather than quietly inheriting the archive's answers.
+
+  The crate version moves to 0.5.0 for this, which is the semver marker the
+  `Unreleased` window has been missing: the manifest still read 0.4.0 while
+  this block had already collected four groups of breaking changes.
+
+  `MIGRATION.md` has the upgrade note, including the one command that tells a
+  caller how exposed they are, the path and extension table, and what to name
+  to get the old tree back. This is the headline change of the PMTiles epic,
+  #986.
 
 - **`AvifError` is `#[non_exhaustive]`** (issue #946). It was the only public
   error enum in the crate without the attribute, and

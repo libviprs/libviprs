@@ -776,7 +776,7 @@ impl PyramidStorage {
     /// would write the archive over the base it came from).
     ///
     /// Appended rather than substituted, deliberately.
-    /// [`Path::set_extension`] replaces everything after the last dot, so it
+    /// [`PathBuf::set_extension`] replaces everything after the last dot, so it
     /// turns `tiles.v2` into `tiles.pmtiles` and loses the `v2`. Appending
     /// gives `tiles.v2.pmtiles`, which is uglier and never surprising. If you
     /// want `city.tif` to become `city.pmtiles`, hand this the stem rather
@@ -854,7 +854,7 @@ mod storage_selection_tests {
     #[test]
     fn an_output_base_keeps_the_extension_it_already_had() {
         let pm = PyramidStorage::PmTiles;
-        // `Path::set_extension` replaces everything after the last dot, so it
+        // `PathBuf::set_extension` replaces everything after the last dot, so it
         // would turn `tiles.v2` into `tiles.pmtiles` and lose the `v2`.
         assert_eq!(pm.output_path("tiles.v2"), Path::new("tiles.v2.pmtiles"));
         assert_eq!(pm.output_path("city.tif"), Path::new("city.tif.pmtiles"));
