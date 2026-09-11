@@ -188,6 +188,7 @@ pub mod sink_object_store;
 #[cfg_attr(docsrs, doc(cfg(feature = "packfile")))]
 pub mod sink_packfile;
 pub mod source;
+pub mod storage;
 pub mod stream_verify;
 pub mod streaming;
 pub mod streaming_mapreduce;
@@ -339,8 +340,7 @@ pub use resume::{
 };
 pub use retry::{FailurePolicy, RetryPolicy, RetryingSink};
 pub use sink::{
-    BLANK_TILE_MARKER, CollectedTile, FsSink, MemorySink, PMTILES_EXTENSION, PyramidStorage,
-    SinkError, Tile, TileFormat, TileSink,
+    BLANK_TILE_MARKER, CollectedTile, FsSink, MemorySink, SinkError, Tile, TileFormat, TileSink,
 };
 #[cfg(feature = "object-store-sink")]
 #[cfg_attr(docsrs, doc(cfg(feature = "object-store-sink")))]
@@ -353,6 +353,7 @@ pub use source::{
     decode_file_sequential, decode_file_with_options, decode_file_with_shrink,
     generate_test_raster, set_load_cache_max_bytes, set_load_cache_max_entries,
 };
+pub use storage::{PMTILES_EXTENSION, PyramidStorage};
 pub use streaming::{
     BudgetPolicy, RasterStripSource, StreamingConfig, StripSource, compute_strip_height,
     estimate_streaming_memory,

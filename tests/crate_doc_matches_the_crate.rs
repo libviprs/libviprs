@@ -38,7 +38,7 @@ const SOURCE_RS: &str = include_str!("../src/source.rs");
 const PIXEL_RS: &str = include_str!("../src/pixel.rs");
 const MAKEFILE: &str = include_str!("../Makefile");
 const MIGRATION: &str = include_str!("../MIGRATION.md");
-const SINK_RS: &str = include_str!("../src/sink.rs");
+const STORAGE_RS: &str = include_str!("../src/storage.rs");
 
 // ---------------------------------------------------------------------------
 // Parsers over the lists the code keeps
@@ -735,7 +735,7 @@ const STORAGE_EXAMPLE_MARKER: &str = "<!-- storage-example -->";
 /// The fenced Rust block that follows [`STORAGE_EXAMPLE_MARKER`] in `doc`.
 ///
 /// `doc_comment` says whether every line carries a `///` prefix to strip, which
-/// is the difference between reading `src/sink.rs` and reading `README.md`.
+/// is the difference between reading `src/storage.rs` and reading `README.md`.
 fn storage_example(doc: &str, doc_comment: bool) -> String {
     let count = doc.matches(STORAGE_EXAMPLE_MARKER).count();
     assert_eq!(
@@ -791,7 +791,7 @@ fn storage_example(doc: &str, doc_comment: bool) -> String {
 #[test]
 fn the_readme_storage_example_is_the_compiled_doctest() {
     let readme = storage_example(README, false);
-    let doctest = storage_example(SINK_RS, true);
+    let doctest = storage_example(STORAGE_RS, true);
 
     // The positive control. An extractor that came back with nothing would
     // make the equality below hold on two empty strings, which is the vacuous
@@ -810,7 +810,7 @@ fn the_readme_storage_example_is_the_compiled_doctest() {
     assert_eq!(
         readme, doctest,
         "`README.md`'s storage example and the doctest on `PyramidStorage` in \
-         `src/sink.rs` have drifted. The doctest is the copy CI compiles, so \
+         `src/storage.rs` have drifted. The doctest is the copy CI compiles, so \
          make the README match it rather than the other way round."
     );
 
