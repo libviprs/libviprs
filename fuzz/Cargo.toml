@@ -50,3 +50,8 @@ doc = false
 name = "fuzz_jp2k"
 path = "fuzz_targets/fuzz_jp2k.rs"
 doc = false
+
+[[bin]]
+name = "fuzz_pmtiles_reader"
+path = "fuzz_targets/fuzz_pmtiles_reader.rs"
+doc = false
