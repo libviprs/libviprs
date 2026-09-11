@@ -231,8 +231,8 @@ choose.
 
 ### Where the choice lives now
 
-`PyramidStorage` is the one place the decision is made, so the library, the
-`viprs` CLI and the documentation cannot answer it differently:
+`PyramidStorage` is the one place the decision is made, so nothing downstream
+has to reinvent it:
 
 ```rust
 use libviprs::{FsSink, Layout, PyramidStorage};
@@ -276,11 +276,11 @@ nothing; the sink is what touches the filesystem.
 
 ### Two things an archive will not do
 
-- **A layout other than XYZ.** PMTiles v3 addresses a tile by one `u64`
-  derived from `(z, x, y)`, which is exactly `Layout::Xyz`. The format has no
-  encoding for DeepZoom's `{level}/{col}_{row}` or for Google's `z/y/x`, so
-  those two stay on the directory tree. `PyramidStorage::required_layout`
-  answers `Some(Layout::Xyz)` for the archive and `None` for the tree, and
+- **A layout that is not addressed by `(z, x, y)`.** An archive keys a tile
+  on one `u64` derived from `(z, x, y)`, so `Layout::Xyz` and `Layout::Google`
+  both fit and `Layout::DeepZoom`, `Layout::Zoomify` and `Layout::Iiif` do
+  not: their level index is a tier rather than a zoom. Those three stay on the
+  directory tree. `PyramidStorage::accepts_layout` answers which is which, and
   there is no coordinate migration in either direction: an XYZ tree and an
   archive of the same pyramid hold the same tiles at the same addresses.
 - **`TileFormat::Raw`.** The spec has a tile type for PNG and one for JPEG and

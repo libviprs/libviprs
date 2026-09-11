@@ -122,8 +122,8 @@ backups that never finish, and an object-store bill made mostly of request
 count. An archive is one file that still answers "give me tile `(z, x, y)`" in
 a couple of ranged reads, because its index rides along inside it.
 
-`PyramidStorage` is the one place that choice is made, so the library, the CLI
-and these docs cannot drift apart on it:
+`PyramidStorage` is the one place that choice is made, so nothing downstream
+has to reinvent it:
 
 <!-- storage-example -->
 ```rust
@@ -134,13 +134,17 @@ use std::path::Path;
 let storage = PyramidStorage::default();
 assert_eq!(storage, PyramidStorage::PmTiles);
 assert_eq!(storage.output_path("city"), Path::new("city.pmtiles"));
-assert_eq!(storage.required_layout(), Some(Layout::Xyz));
 
-// The tree of loose files is still one value away.
+// An archive addresses a tile by (z, x, y), so those are the layouts it takes.
+assert!(storage.accepts_layout(Layout::Xyz));
+assert!(storage.accepts_layout(Layout::Google));
+assert!(!storage.accepts_layout(Layout::DeepZoom));
+
+// The tree of loose files is still one value away, and it takes all five.
 let storage = PyramidStorage::Directory;
 assert_eq!(storage.output_path("city"), Path::new("city"));
 assert_eq!(storage.extension(), None);
-assert_eq!(storage.required_layout(), None);
+assert!(storage.accepts_layout(Layout::DeepZoom));
 ```
 
 ### Where the output lands
@@ -174,11 +178,14 @@ What moved is the answer to "and if I do not say?".
 
 ### Two things an archive constrains
 
-- **The layout is XYZ.** PMTiles v3 addresses a tile by a single `u64` derived
-  from `(z, x, y)`, which is `Layout::Xyz` and nothing else. The format has no
-  encoding for DeepZoom's `{level}/{col}_{row}` or for Google's `z/y/x`, so an
-  archive is XYZ or it is not an archive. `PyramidStorage::required_layout`
-  says so in code rather than in a sentence.
+- **The layout has to address `(z, x, y)`.** An archive keys a tile on a
+  single `u64` derived from `(z, x, y)`, so `Layout::Xyz` and `Layout::Google`
+  both fit. Google differs from XYZ in the order it spells a path on disk
+  (`z/y/x` against `z/x/y`) and not in what it addresses, so there is no
+  coordinate migration in either direction. DeepZoom, Zoomify and IIIF do not
+  fit: their level index is a tier rather than a zoom, so those three stay on
+  the directory tree. `PyramidStorage::accepts_layout` says which is which in
+  code rather than in a sentence.
 - **Tiles are PNG or JPEG.** The spec has a tile type for each and none for
   raw pixel bytes, so `TileFormat::Raw` has nowhere to go in an archive. Write
   raw tiles to a directory.

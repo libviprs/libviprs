@@ -88,13 +88,15 @@ and not under `Fixed`: this file is the only place they can be caught.
   base it was derived from.
 
   Two constraints come with the archive, and both are in code rather than in a
-  sentence. `PyramidStorage::required_layout` answers `Some(Layout::Xyz)`,
-  because PMTiles v3 addresses a tile by a single `u64` derived from
-  `(z, x, y)` and the format has no encoding for DeepZoom's
-  `{level}/{col}_{row}` or for Google's `z/y/x`. And `TileFormat::Raw` has no
-  tile type in the spec at all, so raw tiles stay on the directory tree. The
-  match in each method has no wildcard arm, so a third storage fails to compile
-  there rather than quietly inheriting the archive's answers.
+  sentence. `PyramidStorage::accepts_layout` answers `true` for `Layout::Xyz`
+  and `Layout::Google` and `false` for `Layout::DeepZoom`, `Layout::Zoomify`
+  and `Layout::Iiif`, because an archive keys a tile on a single `u64` derived
+  from `(z, x, y)` while those three index a tier rather than a zoom. Google
+  differs from XYZ in the order it spells a path on disk and not in what it
+  addresses, which is why it fits. And `TileFormat::Raw` has no tile type in
+  the spec at all, so raw tiles stay on the directory tree. No method here has
+  a wildcard arm, so a third storage or a sixth layout fails to compile rather
+  than quietly inheriting somebody else's answer.
 
   The crate version moves to 0.5.0 for this, which is the semver marker the
   `Unreleased` window has been missing: the manifest still read 0.4.0 while
