@@ -4,9 +4,10 @@
 flips `FsSink::new` to a 2-arg constructor plus a `with_format` builder. This
 guide covers the call sites you are most likely to update.
 
-**This file also covers 0.4.0 to 0.5.0, further down.** That section covers
-five specific renames and removals: the signed and 32-bit `PixelFormat`
-carriers, the collapsed allocation refusals, `GifError::BadPageNumber`,
+**This file also covers 0.4.0 to 0.5.0, further down.** That section covers the
+pyramid storage default moving to PMTiles, plus five specific renames and
+removals: the signed and 32-bit `PixelFormat` carriers, the collapsed
+allocation refusals, `GifError::BadPageNumber`,
 `ConvolutionError::TimesOutOfRange`, and `ConversionError::UnsupportedSampleKind`.
 The rest of that release, the colour and rounding changes that move output
 bytes without touching a signature, the options-struct and `.v` container
@@ -168,15 +169,16 @@ against `[features]`.
 # Migrating from libviprs 0.4.0 to 0.5.0
 
 0.5.0 is the largest breaking release this crate has shipped, grouped into
-four stories plus a handful of independent items in the `Unreleased` block's
-own preamble in [CHANGELOG.md](CHANGELOG.md). This section covers five
-specific renames and removals. For the rest, colour and rounding changes that
+five stories plus a handful of independent items in the `Unreleased` block's
+own preamble in [CHANGELOG.md](CHANGELOG.md). This section covers the storage
+default flip and five specific renames and removals. For the rest, colour and
+rounding changes that
 move output bytes without touching a signature, the options-struct and `.v`
 container group, and the group where the raster's tag decides instead of its
 storage depth, read the preamble and follow its issue numbers into
 `### Breaking`.
 
-Three of the five below, the folded allocation refusals,
+Three of the five renames below, the folded allocation refusals,
 `GifError::BadPageNumber`, and `ConversionError::UnsupportedSampleKind`, name
 things that were introduced and removed inside this same release and so
 never shipped: GIF, FITS, OpenEXR and Radiance decoding, and JPEG XL and WebP
@@ -188,6 +190,110 @@ whether a removal reaches them deserves to be told "nothing shipped" rather
 than silence. The other two, `PixelFormat`'s new carriers and
 `ConvolutionError::ZeroTimes`, are real: both existed in 0.4.0 in a form this
 release changes.
+
+## PMTiles is the default pyramid storage
+
+This is the release's one behavioural break, and the only change anywhere in it
+that moves what lands on disk without moving a signature. It comes out of
+[EPIC F](https://github.com/libviprs/libviprs/issues/986), which put PMTiles v3
+in the crate.
+
+Before 0.5.0 a pyramid was always a tree of loose files under `{z}/{x}/{y}`,
+because `FsSink` was the only thing that could write one. From 0.5.0 the
+default storage is a single PMTiles v3 archive: every tile, the directories
+that index them and the pyramid's metadata in one `.pmtiles` file. At one
+pyramid it is a convenience. At 100k pyramids of 20k tiles it is the difference
+between one file each and about 2 billion files in total.
+
+### Nothing you wrote stops compiling
+
+`EngineBuilder::new(source, plan, sink)` still writes the sink you hand it and
+nothing else. No signature moved, `FsSink` did not move, `Layout` did not move,
+and `EngineBuilder` grew no required argument. Your third argument already
+names a sink, because it always had to:
+
+```rust
+// 0.4.0, and 0.5.0, byte for byte the same tree.
+let sink = FsSink::new("output_tiles", plan.clone()).with_format(TileFormat::Png);
+let result = EngineBuilder::new(&raster, plan, sink).run()?;
+```
+
+One command over your own tree tells you how exposed you are:
+
+```sh
+grep -rn 'EngineBuilder::new' src/
+```
+
+Every hit names its sink, so **if you are a Rust caller this release changes
+nothing for you** and you can skip to the next section. The default is what a
+caller gets when they do not choose, and until 0.5.0 there was no way not to
+choose.
+
+### Where the choice lives now
+
+`PyramidStorage` is the one place the decision is made, so the library, the
+`viprs` CLI and the documentation cannot answer it differently:
+
+```rust
+use libviprs::{FsSink, Layout, PyramidStorage};
+
+// The default, which is the part that changed.
+assert_eq!(PyramidStorage::default(), PyramidStorage::PmTiles);
+
+// The old behaviour, restored by naming it.
+let storage = PyramidStorage::Directory;
+let out = storage.output_path("output_tiles");   // `output_tiles`, unchanged
+let sink = FsSink::new(&out, plan.clone());
+```
+
+For the archive, build a `PmTilesSink` over
+`PyramidStorage::PmTiles.output_path(base)` and hand that to `EngineBuilder`
+instead. Reading one back is the `pmtiles` module.
+
+The `viprs` command-line flip is
+[libviprs-cli#54](https://github.com/libviprs/libviprs-cli/issues/54) and has
+its own notes; this file is the library.
+
+### Path and extension rules
+
+| You ask for | `PmTiles` writes | `Directory` writes |
+|---|---|---|
+| `city` | `city.pmtiles` | `city/` |
+| `city.pmtiles` | `city.pmtiles` | `city.pmtiles/` |
+| `city.PMTILES` | `city.PMTILES` | `city.PMTILES/` |
+| `tiles.v2` | `tiles.v2.pmtiles` | `tiles.v2/` |
+
+The extension is appended, never substituted. `PathBuf::set_extension` replaces
+everything after the last dot, so it would turn `tiles.v2` into
+`tiles.pmtiles` and drop the `v2`. A base that already ends in `.pmtiles` comes
+back untouched, matched without case, because `city.PMTILES` and
+`city.PMTILES.pmtiles` are two names for one file on macOS and Windows. If you
+want `city.tif` to become `city.pmtiles`, hand it the stem rather than the
+whole name.
+
+`output_path` is path arithmetic. It reads nothing, creates nothing and checks
+nothing; the sink is what touches the filesystem.
+
+### Two things an archive will not do
+
+- **A layout other than XYZ.** PMTiles v3 addresses a tile by one `u64`
+  derived from `(z, x, y)`, which is exactly `Layout::Xyz`. The format has no
+  encoding for DeepZoom's `{level}/{col}_{row}` or for Google's `z/y/x`, so
+  those two stay on the directory tree. `PyramidStorage::required_layout`
+  answers `Some(Layout::Xyz)` for the archive and `None` for the tree, and
+  there is no coordinate migration in either direction: an XYZ tree and an
+  archive of the same pyramid hold the same tiles at the same addresses.
+- **`TileFormat::Raw`.** The spec has a tile type for PNG and one for JPEG and
+  none for raw pixel bytes. Raw tiles keep working; they keep working in a
+  directory.
+
+### If you were already reading the tree yourself
+
+A directory of tiles is a stable public artifact and it is not going anywhere,
+so code that globs `{z}/{x}/{y}.png` off an `FsSink` run keeps working as long
+as it keeps asking for `PyramidStorage::Directory`. What will break is code
+that assumed the directory was the *only* thing a run could produce, and the
+fix for that is to name the storage rather than to infer it from the path.
 
 ## `PixelFormat` gains signed and 32-bit carriers
 
