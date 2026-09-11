@@ -51,6 +51,44 @@
 //! fifty million entries should not cost a set of fifty million `u64` to
 //! verify.
 //!
+//! # Capping each step is not capping the walk
+//!
+//! Those are all per-step ceilings and their product is not bounded by any of
+//! them, which is a hole you can drive a 21 KB file through. A root holding
+//! 1,048,577 leaf pointers that every one resolve to the same fat, valid leaf
+//! sits inside every one of the caps above: the root is one directory, each
+//! leaf read is one directory under `max_directory_bytes`, the pointer count
+//! is at the `max_leaf_directories` default of 2^20, the depth is 1, and every
+//! entry in every directory is genuinely in bounds so not one finding fires.
+//! Multiplied out it is roughly **16 TiB of gzip output and 4.4e12 entry-walk
+//! steps out of 21,620 bytes on disk**, with memory flat because each leaf is
+//! freed before the next. `viprs pmtiles verify` on defaults simply never
+//! returns, which is the same failure the reference implementation is mocked
+//! for two sections up, moved from a segfault to a hang.
+//!
+//! Two things close it, and they are independent:
+//!
+//! * **a budget across the whole walk, not per directory.** A running total of
+//!   decompressed directory bytes and of entries visited, checked before each
+//!   directory is read, raising [`Finding::TotalDirectoryBytesExceeded`] or
+//!   [`Finding::TotalEntriesExceeded`] and unwinding. The byte budget is sized
+//!   from the archive's **own** `root_length + leaf_directories_length`, so it
+//!   scales with the file rather than being a constant a large honest archive
+//!   could reach;
+//! * **leaf offsets are deduplicated.** A leaf is read once however many
+//!   pointers reach it, counted once in [`Report::leaves`], counted in
+//!   [`Report::shared_leaf_pointers`] and reported as
+//!   [`Finding::LeafDirectoryRevisited`].
+//!
+//! Either one alone collapses the archive above. Both are here because they
+//! fail differently: dedupe does nothing against a leaf region holding a
+//! million *distinct* fat leaves, and the budget does nothing about the report
+//! counting one leaf a million times.
+//!
+//! [`Report::directory_bytes`] and [`Report::entries_visited`] carry what the
+//! walk actually spent, so "this is bounded" is a number a caller can read
+//! rather than a sentence in these docs.
+//!
 //! # Examples
 //!
 //! ```no_run
@@ -120,11 +158,51 @@ pub struct ValidationLimits {
     /// `None` and the count is not compared.
     pub max_tracked_contents: usize,
 
+    /// The most decompressed directory bytes the **whole walk** will inflate,
+    /// as an absolute ceiling.
+    ///
+    /// [`max_directory_bytes`](Self::max_directory_bytes) caps one directory
+    /// and says nothing about how many of them there are, which is the hole a
+    /// 21 KB archive walked through: a root holding 2^20 + 1 leaf pointers
+    /// that all resolve to one fat, valid leaf inflated that leaf once per
+    /// pointer, 16 TiB of gzip output with every entry in bounds and not one
+    /// finding raised. Memory stayed flat because each leaf is freed before
+    /// the next, so it was a hang rather than a kill.
+    ///
+    /// The budget an individual walk actually works under is the smaller of
+    /// this and a figure derived from the archive's own section lengths, so an
+    /// honest archive can never reach it: see [`validate`].
+    pub max_total_directory_bytes: u64,
+
+    /// The most directory entries the **whole walk** will visit.
+    ///
+    /// The same amplification measured in operations rather than bytes:
+    /// 4.4e12 entry-walk steps out of 21,620 bytes. Every directory body
+    /// spends at least four bytes per entry (four parallel varint columns, one
+    /// byte minimum each), so
+    /// [`max_total_directory_bytes`](Self::max_total_directory_bytes) already
+    /// bounds this at a quarter of its value and the two defaults are set to
+    /// bind at the same point. It is tracked separately because an operator
+    /// reading a report wants to know which ceiling stopped the walk.
+    pub max_total_entries: u64,
+
     /// Whether to keep the decoded entries of every leaf directory in the
     /// report. Off by default: a real archive has millions and a verify does
     /// not need them, but a test comparing against a reference decode does.
     pub collect_entries: bool,
 }
+
+/// How far past its own compressed size a walk will let the directory region
+/// inflate before it calls the archive hostile.
+///
+/// The honest bound on a walk's total decompressed directory bytes is the
+/// compressed size of the regions those directories live in, `root_length +
+/// leaf_directories_length`, times whatever ratio gzip achieved. Directory
+/// bodies are columns of small varints and compress at roughly 2:1 to 5:1 in
+/// everything go-pmtiles writes, so 64 leaves two orders of magnitude of
+/// headroom over a conformant archive while still turning the 794,000:1 the
+/// leaf storm asked for into a refusal.
+const DIRECTORY_INFLATION_ALLOWANCE: u64 = 64;
 
 impl Default for ValidationLimits {
     fn default() -> Self {
@@ -134,6 +212,8 @@ impl Default for ValidationLimits {
             max_leaf_depth: 4,
             max_findings: 256,
             max_tracked_contents: 4 * 1024 * 1024,
+            max_total_directory_bytes: 1 << 30,
+            max_total_entries: 1 << 28,
             collect_entries: false,
         }
     }
@@ -155,6 +235,18 @@ impl ValidationLimits {
     /// Set how many leaf directories will be followed.
     pub fn with_max_leaf_directories(mut self, leaves: usize) -> Self {
         self.max_leaf_directories = leaves;
+        self
+    }
+
+    /// Set the ceiling on the decompressed directory bytes of the whole walk.
+    pub fn with_max_total_directory_bytes(mut self, bytes: u64) -> Self {
+        self.max_total_directory_bytes = bytes;
+        self
+    }
+
+    /// Set the ceiling on the directory entries the whole walk visits.
+    pub fn with_max_total_entries(mut self, entries: u64) -> Self {
+        self.max_total_entries = entries;
         self
     }
 }
@@ -330,6 +422,35 @@ pub enum Finding {
     /// `tile_contents_count`.
     ContentsCountMismatch { counted: u64, header: u64 },
 
+    /// A leaf pointer resolved to a leaf this walk had already read.
+    ///
+    /// Nothing in the spec forbids it and no writer produces it, so it is
+    /// reported rather than followed: the leaf's contents cannot depend on
+    /// which pointer reached it, and following it again is how one valid 21 KB
+    /// archive asked for 16 TiB of gzip output.
+    LeafDirectoryRevisited {
+        directory: DirectoryRef,
+        index: usize,
+        absolute_offset: u64,
+    },
+
+    /// The walk stopped because it had inflated as many directory bytes as the
+    /// whole archive is worth. Carries the budget it was working under, which
+    /// is derived from the archive's own section lengths rather than fixed.
+    TotalDirectoryBytesExceeded {
+        directory: DirectoryRef,
+        inflated: u64,
+        budget: u64,
+    },
+
+    /// The walk stopped because it had visited as many directory entries as it
+    /// is willing to.
+    TotalEntriesExceeded {
+        directory: DirectoryRef,
+        visited: u64,
+        budget: u64,
+    },
+
     /// The walk stopped because it had collected as many findings as it is
     /// willing to.
     FindingLimitReached { limit: usize },
@@ -444,6 +565,33 @@ impl fmt::Display for Finding {
                 "the entries point at {counted} distinct offsets and the header's \
                  tile_contents_count is {header}"
             ),
+            Self::LeafDirectoryRevisited {
+                directory,
+                index,
+                absolute_offset,
+            } => write!(
+                f,
+                "{directory} entry {index} is a leaf pointer at file offset {absolute_offset}, \
+                 which another pointer already reached; it was read once"
+            ),
+            Self::TotalDirectoryBytesExceeded {
+                directory,
+                inflated,
+                budget,
+            } => write!(
+                f,
+                "the walk stopped at {directory} after decompressing {inflated} directory \
+                 bytes, past the {budget} this archive's own section lengths allow"
+            ),
+            Self::TotalEntriesExceeded {
+                directory,
+                visited,
+                budget,
+            } => write!(
+                f,
+                "the walk stopped at {directory} after visiting {visited} directory entries, \
+                 past the {budget} this check will walk"
+            ),
             Self::FindingLimitReached { limit } => {
                 write!(f, "stopped after {limit} findings; there may be more")
             }
@@ -491,12 +639,36 @@ pub struct Report {
     /// Distinct entry offsets, which is what `tile_contents_count` counts, or
     /// `None` when there were more than the run was willing to track.
     pub tile_contents: Option<u64>,
-    /// Every leaf directory the walk followed.
+    /// Every **distinct** leaf directory the walk followed. Two pointers at
+    /// one leaf produce one entry here and one count in
+    /// [`shared_leaf_pointers`](Self::shared_leaf_pointers).
     pub leaves: Vec<LeafReport>,
+    /// Decompressed directory bytes the walk inflated, root and leaves
+    /// together. This is the number the total-work budget is spent against,
+    /// and it is in the report so a bounded-work claim is something a caller
+    /// can check rather than something the docs assert.
+    pub directory_bytes: u64,
+    /// Directory entries the walk visited, leaf pointers included.
+    pub entries_visited: u64,
+    /// Leaf pointers that resolved to a leaf the walk had already read.
+    ///
+    /// Nothing in the spec forbids two pointers sharing one leaf and no writer
+    /// produces it, so a non-zero value here is either a clever writer or a
+    /// file built to make a verify do the same work a million times. Either
+    /// way the leaf is read once, and the header's three counts are not
+    /// compared afterwards because the walk's totals no longer count what the
+    /// header counts.
+    pub shared_leaf_pointers: u64,
 }
 
 impl Report {
     /// Whether the archive is structurally sound: no findings at all.
+    ///
+    /// This rests on an invariant the walk keeps: **anything that stops it
+    /// early also raises a finding**. Without that, a file that made the walk
+    /// give up quietly would report clean, which is worse than reporting the
+    /// defect, because the header's three counts are only compared when the
+    /// walk reached the end.
     pub fn is_valid(&self) -> bool {
         self.findings.is_empty()
     }
@@ -510,6 +682,9 @@ impl Report {
             addressed_tiles: 0,
             tile_contents: Some(0),
             leaves: Vec::new(),
+            directory_bytes: 0,
+            entries_visited: 0,
+            shared_leaf_pointers: 0,
         }
     }
 }
@@ -564,6 +739,14 @@ pub fn validate<R: RangeReader + ?Sized>(
         limits,
         offsets: BTreeSet::new(),
         tracking_offsets: true,
+        visited_leaves: BTreeSet::new(),
+        bytes_spent: 0,
+        // Filled in below, once the header says how large the directory
+        // regions are. Zero until then, and nothing is read until then.
+        byte_budget: 0,
+        entries_spent: 0,
+        entry_budget: limits.max_total_entries,
+        exhausted: false,
     };
 
     let size = reader.size()?;
@@ -612,6 +795,22 @@ pub fn validate<R: RangeReader + ?Sized>(
         return Ok(report);
     }
 
+    // The total-work budget, sized against the archive rather than picked.
+    //
+    // Every directory this walk reads lives in the root region or the leaf
+    // region, and leaf offsets are deduplicated below, so the compressed bytes
+    // it can legitimately read are bounded by those two lengths. Multiply by
+    // the inflation allowance and an honest archive is two orders of magnitude
+    // inside the budget, while an archive claiming to inflate a thousandfold
+    // is stopped. The floor is one directory's worth, because a tiny archive
+    // has a tiny span and still has to be allowed to read its own root.
+    walk.byte_budget = header
+        .root_length
+        .saturating_add(header.leaf_directories_length)
+        .saturating_mul(DIRECTORY_INFLATION_ALLOWANCE)
+        .max(limits.max_directory_bytes as u64)
+        .min(limits.max_total_directory_bytes);
+
     let Some(entries) = read_directory(
         reader,
         &header,
@@ -619,9 +818,10 @@ pub fn validate<R: RangeReader + ?Sized>(
         header.root_offset,
         header.root_length,
         &mut report,
-        limits,
+        &mut walk,
     )?
     else {
+        report.directory_bytes = walk.bytes_spent;
         return Ok(report);
     };
     report.root_entries = entries.len();
@@ -642,6 +842,8 @@ pub fn validate<R: RangeReader + ?Sized>(
     } else {
         None
     };
+    report.directory_bytes = walk.bytes_spent;
+    report.entries_visited = walk.entries_spent;
 
     // The header's three counts, checked only when the walk actually finished.
     // Comparing a partial count against the header would bury the real finding
@@ -691,6 +893,18 @@ struct Walk<'a> {
     limits: &'a ValidationLimits,
     offsets: BTreeSet<u64>,
     tracking_offsets: bool,
+    /// Absolute file positions of every leaf already read, so a second pointer
+    /// at one leaf costs a set lookup instead of a second inflate.
+    visited_leaves: BTreeSet<u64>,
+    /// Decompressed directory bytes spent so far, against `byte_budget`.
+    bytes_spent: u64,
+    byte_budget: u64,
+    /// Directory entries visited so far, against `entry_budget`.
+    entries_spent: u64,
+    entry_budget: u64,
+    /// Set once a budget runs out. Every level of the recursion checks it, so
+    /// the walk unwinds instead of finishing the directory it is in.
+    exhausted: bool,
 }
 
 /// Add a finding, unless the run has already collected as many as it will.
@@ -808,6 +1022,7 @@ fn check_section(
 }
 
 /// Fetch, decompress and parse one directory, recording why not if it fails.
+#[allow(clippy::too_many_arguments)]
 fn read_directory<R: RangeReader + ?Sized>(
     reader: &R,
     header: &Header,
@@ -815,8 +1030,28 @@ fn read_directory<R: RangeReader + ?Sized>(
     offset: u64,
     length: u64,
     report: &mut Report,
-    limits: &ValidationLimits,
+    walk: &mut Walk<'_>,
 ) -> Result<Option<Vec<Entry>>, PmTilesError> {
+    let limits = walk.limits;
+    // The total-work check, and the reason a 21 KB archive can no longer cost
+    // 16 TiB of gzip output. It is deliberately in front of the read rather
+    // than inside the decompressor: the budget is a ceiling on the whole walk,
+    // so the last directory may overshoot it by at most one
+    // `max_directory_bytes`, and in exchange a directory that would have been
+    // legal on its own is never reported as unreadable.
+    if walk.bytes_spent >= walk.byte_budget {
+        push(
+            report,
+            Finding::TotalDirectoryBytesExceeded {
+                directory: which,
+                inflated: walk.bytes_spent,
+                budget: walk.byte_budget,
+            },
+            limits,
+        );
+        walk.exhausted = true;
+        return Ok(None);
+    }
     let Ok(length_usize) = usize::try_from(length) else {
         push(
             report,
@@ -876,6 +1111,8 @@ fn read_directory<R: RangeReader + ?Sized>(
         }
     };
 
+    walk.bytes_spent = walk.bytes_spent.saturating_add(plain.len() as u64);
+
     match deserialize_entries(&plain) {
         Ok(entries) => Ok(Some(entries)),
         Err(e) => {
@@ -910,12 +1147,36 @@ fn walk_directory<R: RangeReader + ?Sized>(
 ) -> Result<bool, PmTilesError> {
     let limits = walk.limits;
     let mut complete = true;
+
+    // The other half of the total-work budget. Charged for the whole directory
+    // before a single entry is inspected, because the cost of walking it is
+    // already committed by the time the loop starts.
+    walk.entries_spent = walk.entries_spent.saturating_add(entries.len() as u64);
+    if walk.entries_spent > walk.entry_budget {
+        push(
+            report,
+            Finding::TotalEntriesExceeded {
+                directory: which,
+                visited: walk.entries_spent,
+                budget: walk.entry_budget,
+            },
+            limits,
+        );
+        walk.exhausted = true;
+        return Ok(false);
+    }
+
     // One past the last tile id the previous entry covers. `deserialize_entries`
     // has already refused a repeated or decreasing id, so the only ordering
     // defect left is a run that reaches past the next entry.
     let mut previous_end: u64 = 0;
 
     for (index, entry) in entries.iter().enumerate() {
+        // A budget that ran out deeper in the tree unwinds the whole walk
+        // rather than finishing the directory it happened to be in.
+        if walk.exhausted {
+            return Ok(false);
+        }
         if index > 0 && entry.tile_id < previous_end {
             complete = false;
             if !push(
@@ -1061,6 +1322,36 @@ fn follow_leaf<R: RangeReader + ?Sized>(
     }
     let absolute = absolute.expect("the bound above proved the sum exists");
 
+    // Already read this leaf. Follow it once and only once.
+    //
+    // A root holding 2^20 + 1 pointers that all resolve to the same valid leaf
+    // is the shape that turned a 21,620-byte archive into an unbounded walk:
+    // every pointer was in bounds, every entry inside the leaf was in bounds,
+    // no finding fired, and the leaf was inflated a million times. The leaf's
+    // contents cannot depend on which pointer reached it, so a second visit
+    // can only repeat the first one's work and the first one's findings.
+    //
+    // The walk is marked incomplete because the header's three counts count
+    // every reference and this walk now counts each leaf once, so comparing
+    // them would manufacture a mismatch that says nothing about the archive.
+    // A finding goes with it, because this module's contract is that anything
+    // that stops the walk is something the operator gets told about, and an
+    // incomplete walk with an empty finding list would let `is_valid` certify
+    // an archive whose header counts were never checked.
+    if !walk.visited_leaves.insert(absolute) {
+        report.shared_leaf_pointers = report.shared_leaf_pointers.saturating_add(1);
+        push(
+            report,
+            Finding::LeafDirectoryRevisited {
+                directory: which,
+                index,
+                absolute_offset: absolute,
+            },
+            limits,
+        );
+        return Ok(false);
+    }
+
     let position = report.leaves.len();
     let leaf_ref = DirectoryRef::Leaf(position);
     let Some(entries) = read_directory(
@@ -1070,7 +1361,7 @@ fn follow_leaf<R: RangeReader + ?Sized>(
         absolute,
         u64::from(entry.length),
         report,
-        limits,
+        walk,
     )?
     else {
         report.leaves.push(LeafReport {
@@ -1150,6 +1441,91 @@ mod tests {
         }
     }
 
+    /// Build a gzip-internal archive whose root is nothing but leaf pointers.
+    ///
+    /// `leaves` is the leaf region, laid out in order. `pointers` is one index
+    /// into it per root entry, so a repeated index is two pointers at one
+    /// leaf, which is the shape the dedupe guard exists for. The header's three
+    /// counts are filled in **per pointer**, the way a writer that really
+    /// emitted this file would fill them, so the only thing a test is looking
+    /// at is the walk.
+    fn leafy_archive(leaves: &[Vec<Entry>], pointers: &[usize], tile_data: &[u8]) -> Vec<u8> {
+        let gzip = Compression::Gzip;
+        let mut bodies = Vec::new();
+        let mut offsets = Vec::new();
+        let mut at: u64 = 0;
+        for leaf in leaves {
+            let body = gzip
+                .compress(&serialize_entries(leaf).expect("a leaf serializes"))
+                .expect("a leaf compresses");
+            offsets.push((at, body.len() as u32));
+            at += body.len() as u64;
+            bodies.push(body);
+        }
+        let leaf_region_length = at;
+
+        let root: Vec<Entry> = pointers
+            .iter()
+            .enumerate()
+            .map(|(index, &which)| {
+                let (offset, length) = offsets[which];
+                Entry {
+                    // Ascending and unique, which is all `deserialize_entries`
+                    // asks of the id column. Two pointers at one leaf are two
+                    // different root entries whatever their target.
+                    tile_id: index as u64,
+                    offset,
+                    length,
+                    run_length: 0,
+                }
+            })
+            .collect();
+        let root_body = gzip
+            .compress(&serialize_entries(&root).expect("the root serializes"))
+            .expect("the root compresses");
+
+        let mut header = Header {
+            internal_compression: gzip,
+            ..Header::default()
+        };
+        header.root_offset = HEADER_BYTES as u64;
+        header.root_length = root_body.len() as u64;
+        header.metadata_offset = header.root_offset + header.root_length;
+        header.metadata_length = 0;
+        header.leaf_directories_offset = header.metadata_offset;
+        header.leaf_directories_length = leaf_region_length;
+        header.tile_data_offset = header.leaf_directories_offset + leaf_region_length;
+        header.tile_data_length = tile_data.len() as u64;
+        header.tile_entries_count = pointers.iter().map(|&w| leaves[w].len() as u64).sum();
+        header.addressed_tiles_count = pointers
+            .iter()
+            .map(|&w| {
+                leaves[w]
+                    .iter()
+                    .map(|e| u64::from(e.run_length))
+                    .sum::<u64>()
+            })
+            .sum();
+        header.tile_contents_count = pointers
+            .iter()
+            .flat_map(|&w| leaves[w].iter().map(|e| e.offset))
+            .collect::<BTreeSet<u64>>()
+            .len() as u64;
+
+        let mut out = header.encode().to_vec();
+        out.extend_from_slice(&root_body);
+        for body in &bodies {
+            out.extend_from_slice(body);
+        }
+        out.extend_from_slice(tile_data);
+        out
+    }
+
+    /// A leaf of `count` one-byte tile entries starting at `first`.
+    fn leaf_of(first: u64, count: u64) -> Vec<Entry> {
+        (0..count).map(|i| tile(first + i, 0, 1, 1)).collect()
+    }
+
     #[test]
     fn a_hand_built_archive_validates_clean() {
         let entries = [tile(0, 0, 4, 1), tile(1, 4, 4, 2)];
@@ -1211,6 +1587,209 @@ mod tests {
             vec![Finding::ArchiveTooShort { size: 0, need: 127 }]
         );
         assert!(report.header.is_none());
+    }
+
+    /// A thousand pointers at one leaf cost one read, not a thousand.
+    ///
+    /// This is the leaf storm in miniature. Every pointer is in bounds, every
+    /// entry inside the leaf is in bounds, and before the dedupe set the walk
+    /// inflated the same leaf once per pointer.
+    #[test]
+    fn a_leaf_reached_by_a_thousand_pointers_is_read_once() {
+        let leaves = vec![leaf_of(0, 512)];
+        let pointers = vec![0usize; 1000];
+        let bytes = leafy_archive(&leaves, &pointers, &[0u8]);
+
+        let report = validate_bytes(&bytes, &ValidationLimits::default()).expect("a slice reads");
+
+        assert_eq!(report.leaves.len(), 1, "one distinct leaf, read once");
+        assert_eq!(report.shared_leaf_pointers, 999);
+        assert_eq!(
+            report.tile_entries, 512,
+            "the leaf's entries are counted once, not once per pointer"
+        );
+        // The whole walk inflated one root and one leaf, so the bytes are on
+        // the order of a single leaf rather than a thousand of them.
+        assert!(
+            report.directory_bytes < 64 * 1024,
+            "the walk inflated {} bytes for a 512-entry leaf",
+            report.directory_bytes
+        );
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| matches!(f, Finding::LeafDirectoryRevisited { .. })),
+            "a repeat has to be reported, not swallowed: {:?}",
+            report.findings
+        );
+    }
+
+    /// The archive the reviewer built, at the limits the CLI ships with.
+    ///
+    /// 21,620 bytes on disk, a root of 1,048,577 leaf pointers, every one of
+    /// them resolving to one valid 16 MiB leaf of 4,194,303 in-bounds entries.
+    /// Before the guards this walked forever; the assertion is on the work the
+    /// walk reports doing, not on a stopwatch, because a stopwatch on a shared
+    /// machine measures the machine.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn the_leaf_storm_seed_is_bounded_work_at_default_limits() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/fuzz/corpus/fuzz_pmtiles_reader/nocrash-leaf-fanout"
+        );
+        let bytes = std::fs::read(path).expect("the seed is committed next to the fuzz target");
+        // Pinned, because the whole point of this test is the shape of these
+        // particular bytes and a regenerated fixture is a different test.
+        assert_eq!(bytes.len(), 21_620, "the seed changed size");
+
+        let limits = ValidationLimits::default();
+        let report = validate_bytes(&bytes, &limits).expect("a slice reads");
+
+        // One leaf read, a million pointers collapsed onto it.
+        assert_eq!(report.leaves.len(), 1);
+        assert_eq!(report.shared_leaf_pointers, 1_048_576);
+        // The budget this archive earns is the floor, one directory's worth,
+        // because its own section lengths are tiny. The walk is allowed to
+        // overshoot by the directory it was already reading and no further.
+        let budget = limits.max_directory_bytes as u64;
+        assert!(
+            report.directory_bytes <= budget + limits.max_directory_bytes as u64,
+            "the walk inflated {} bytes against a {budget} byte budget",
+            report.directory_bytes
+        );
+        // Positive control: it really did walk the archive rather than
+        // refusing it at the door, which would satisfy the bound above for the
+        // wrong reason.
+        assert!(
+            report.directory_bytes > 16 * 1024 * 1024,
+            "the walk only inflated {} bytes, so it never reached the leaf",
+            report.directory_bytes
+        );
+        assert_eq!(report.tile_entries, 4_194_303);
+        assert!(!report.is_valid());
+    }
+
+    /// Distinct fat leaves are what dedupe cannot help with, and the budget
+    /// can.
+    #[test]
+    fn the_total_byte_budget_stops_a_region_full_of_distinct_leaves() {
+        let leaves: Vec<Vec<Entry>> = (0..32).map(|i| leaf_of(i * 1000, 256)).collect();
+        let pointers: Vec<usize> = (0..32).collect();
+        let bytes = leafy_archive(&leaves, &pointers, &[0u8]);
+
+        let budget = 4096;
+        let limits = ValidationLimits::default().with_max_total_directory_bytes(budget);
+        let report = validate_bytes(&bytes, &limits).expect("a slice reads");
+
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| matches!(f, Finding::TotalDirectoryBytesExceeded { .. })),
+            "no budget finding in {:?}",
+            report.findings
+        );
+        assert!(
+            report.leaves.len() < 32,
+            "the budget did not stop anything: {} leaves read",
+            report.leaves.len()
+        );
+        // Positive control. A guard that refuses everything satisfies the line
+        // above without being a budget at all.
+        assert!(
+            !report.leaves.is_empty(),
+            "the budget refused the first leaf too, so it is not a budget"
+        );
+        assert!(
+            report.directory_bytes <= budget + limits.max_directory_bytes as u64,
+            "spent {} against a {budget} byte budget",
+            report.directory_bytes
+        );
+    }
+
+    /// The same walk, measured in entries rather than bytes.
+    #[test]
+    fn the_total_entry_budget_stops_a_region_full_of_distinct_leaves() {
+        let leaves: Vec<Vec<Entry>> = (0..32).map(|i| leaf_of(i * 1000, 256)).collect();
+        let pointers: Vec<usize> = (0..32).collect();
+        let bytes = leafy_archive(&leaves, &pointers, &[0u8]);
+
+        let limits = ValidationLimits::default().with_max_total_entries(1024);
+        let report = validate_bytes(&bytes, &limits).expect("a slice reads");
+
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| matches!(f, Finding::TotalEntriesExceeded { .. })),
+            "no entry budget finding in {:?}",
+            report.findings
+        );
+        assert!(report.leaves.len() < 32);
+        assert!(!report.leaves.is_empty());
+        // 32 root pointers plus whole leaves of 256, so the overshoot is one
+        // leaf and never more.
+        assert!(
+            report.entries_visited <= 1024 + 256,
+            "visited {} entries against a 1024 budget",
+            report.entries_visited
+        );
+    }
+
+    /// The negative control for both budgets: an ordinary leafy archive at the
+    /// default limits must not come anywhere near them.
+    ///
+    /// The byte budget is derived from the archive's own section lengths, so
+    /// this is the assertion that says an honest file cannot trip a guard
+    /// aimed at a hostile one.
+    #[test]
+    fn an_honest_leafy_archive_never_reaches_a_budget() {
+        let leaves: Vec<Vec<Entry>> = (0..64).map(|i| leaf_of(i * 1000, 256)).collect();
+        let pointers: Vec<usize> = (0..64).collect();
+        let bytes = leafy_archive(&leaves, &pointers, &[0u8]);
+
+        let report = validate_bytes(&bytes, &ValidationLimits::default()).expect("a slice reads");
+
+        assert_eq!(report.findings, Vec::new());
+        assert_eq!(report.leaves.len(), 64);
+        assert_eq!(report.shared_leaf_pointers, 0);
+        assert_eq!(report.tile_entries, 64 * 256);
+        assert!(report.directory_bytes > 0);
+    }
+
+    /// The budget has a floor of one directory's worth, and this is the archive
+    /// that needs it.
+    ///
+    /// The derived half of the budget is the archive's own compressed
+    /// directory span times an inflation allowance, which is generous against
+    /// anything a real writer emits and stingy against a directory of
+    /// identical entries, where gzip gets hundreds to one. The floor is what
+    /// keeps a legal, tiny, absurdly compressible archive out of the refusal
+    /// path.
+    #[test]
+    fn a_tiny_archive_whose_directories_compress_hugely_still_verifies() {
+        let leaves = vec![leaf_of(0, 50_000), leaf_of(1_000_000, 50_000)];
+        let bytes = leafy_archive(&leaves, &[0, 1], &[0u8]);
+
+        let report = validate_bytes(&bytes, &ValidationLimits::default()).expect("a slice reads");
+
+        assert_eq!(report.findings, Vec::new());
+        assert_eq!(report.leaves.len(), 2);
+        // The control. Without it this test would pass for an archive whose
+        // ratio is ordinary, which would make it a test of nothing: the
+        // derived budget has to be genuinely below the work involved, so that
+        // the floor is the only thing that let the archive through.
+        let header = report.header.expect("a header decoded");
+        let derived =
+            (header.root_length + header.leaf_directories_length) * DIRECTORY_INFLATION_ALLOWANCE;
+        assert!(
+            derived < report.directory_bytes,
+            "the derived budget is {derived} and the archive only inflates {}, so the floor \
+             is not what this test is measuring",
+            report.directory_bytes
+        );
     }
 
     #[test]
@@ -1283,12 +1862,27 @@ mod tests {
                 counted: 63,
                 header: 62,
             },
+            Finding::LeafDirectoryRevisited {
+                directory: DirectoryRef::Root,
+                index: 7,
+                absolute_offset: 334,
+            },
+            Finding::TotalDirectoryBytesExceeded {
+                directory: DirectoryRef::Leaf(1),
+                inflated: 17_000_000,
+                budget: 16_777_216,
+            },
+            Finding::TotalEntriesExceeded {
+                directory: DirectoryRef::Leaf(1),
+                visited: 5_000_000,
+                budget: 4_194_304,
+            },
             Finding::FindingLimitReached { limit: 256 },
         ];
-        // Eighteen variants. If a new one is added without a sample here, this
-        // count is what notices, because a `Display` arm nobody exercises
+        // Twenty-one variants. If a new one is added without a sample here,
+        // this count is what notices, because a `Display` arm nobody exercises
         // renders for the first time in front of a user.
-        assert_eq!(samples.len(), 18);
+        assert_eq!(samples.len(), 21);
         for finding in &samples {
             let text = finding.to_string();
             assert!(!text.is_empty(), "{finding:?} renders as nothing");
