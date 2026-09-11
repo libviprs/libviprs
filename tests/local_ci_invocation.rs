@@ -826,3 +826,72 @@ except SystemExit as e:
         "a job with no `run` steps has nothing to run here and must be dropped:\n{stdout}"
     );
 }
+
+/// A step that `exit`s ends that step and not the job, and a step that fails
+/// still fails the job.
+///
+/// `container_script` splices every step of a job into one `bash -c` script
+/// under `set -eo pipefail`. The MSRV job's version-pin step in `ci.yml` ends
+/// with `exit $rc`, which on a runner ends that step's own shell and here
+/// ended the whole script, so the job printed PASS having run one of its
+/// eight steps and none of its seven `cargo check`s. Each step runs in its
+/// own subshell now, which is what a runner does too.
+///
+/// This executes the generated script with `bash` rather than grepping it
+/// for parentheses, because a subshell that is built and then dropped passes
+/// a grep. The markers are spelled `MAR""KER` and `NEV""ER` so the tool's own
+/// `$ ...` echo of the command cannot satisfy them: only a step that actually
+/// ran prints the joined word.
+///
+/// The second half is the control. With each step in its own subshell a
+/// non-zero step still has to take the job down with its status, or the
+/// change has traded one hollow PASS for another.
+#[test]
+#[cfg_attr(miri, ignore)] // spawns python3, which Miri supports on no target (#714)
+fn a_step_that_exits_ends_only_itself_and_a_failing_step_still_fails_the_job() {
+    let program = format!(
+        r#"
+import runpy, subprocess
+TOOL = r'''{tool}'''
+tool = runpy.run_path(TOOL)
+
+def job(steps):
+    return {{'name': 'stub', 'toolchain': 'stable', 'env': {{}}, 'if': None,
+            'steps': [{{'run': s, 'working-directory': r'''{cwd}'''}} for s in steps]}}
+
+def drive(label, steps):
+    script = tool['container_script'](job(steps), 'native', 'worktree', {{}}, False)
+    out = subprocess.run(['bash', '-c', script], capture_output=True, text=True)
+    print(label, 'rc=%d' % out.returncode,
+          'marker=%s' % ('MARKER' in out.stdout), 'never=%s' % ('NEVER' in out.stdout))
+
+drive('EXIT_THEN_MARKER', ['exit 0', 'echo MAR""KER'])
+drive('FAIL_THEN_NEVER', ['exit 3', 'echo NEV""ER'])
+"#,
+        tool = tool().to_str().expect("utf8 path"),
+        cwd = env!("CARGO_MANIFEST_DIR"),
+    );
+    let out = Command::new("python3")
+        .arg("-c")
+        .arg(program)
+        .env_remove("DOCKER_DEFAULT_PLATFORM")
+        .output()
+        .expect("python3");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "the driver itself failed, so nothing below was measured.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("EXIT_THEN_MARKER rc=0 marker=True never=False"),
+        "a step ending in `exit 0` must end that step only, and the step after it \
+         must still run. It did not: the marker never printed, which is the MSRV \
+         job reporting PASS after one of its eight steps.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("FAIL_THEN_NEVER rc=3 marker=False never=False"),
+        "a step exiting 3 must fail the job with that status and stop it there, \
+         subshell or no subshell.\nstdout: {stdout}\nstderr: {stderr}"
+    );
+}
