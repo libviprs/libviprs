@@ -286,5 +286,23 @@ pub enum PmTilesError {
     /// with every entry pushed down into one leaf, so there is no leaf size
     /// that satisfies the budget.
     #[error("root directory is {length} bytes, over the {budget} byte budget")]
-    RootDirectoryTooLarge { length: usize, budget: usize },
+    RootDirectoryOverBudget { length: usize, budget: usize },
+
+    /// A write failed part way through and the writer will not publish.
+    ///
+    /// [`writer::Writer`] latches the first
+    /// failure and refuses everything afterwards, because a `write_all` that
+    /// fails has usually written *some* of its bytes. Without the latch those
+    /// orphan bytes stay in the staging file, the next accepted tile records an
+    /// offset pointing into the middle of them, every later payload is shifted
+    /// by the same amount, and `finish` publishes a structurally valid archive
+    /// full of the wrong tile bytes. Under a retrying sink and
+    /// `FailurePolicy::RetryThenSkip` the run reports success while doing it,
+    /// which is the worst possible way to lose data.
+    ///
+    /// `during` names the step that failed, because "the writer failed" without
+    /// it sends an operator to the wrong place. ENOSPC is the realistic cause:
+    /// this writer needs roughly twice the archive's size in scratch.
+    #[error("the writer failed while {during}, so it will not publish an archive")]
+    WriterFailed { during: &'static str },
 }
