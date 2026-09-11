@@ -1918,6 +1918,60 @@ mod tests {
         );
     }
 
+    /// One pass refuses a run list wider than the fan-in rather than opening
+    /// it.
+    ///
+    /// `reduce_runs` is what makes this unreachable from `finish`, and that is
+    /// exactly why the refusal needs its own test: a guard whose caller always
+    /// satisfies it has nothing else watching it.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn one_merge_pass_refuses_more_runs_than_its_fan_in() {
+        let dir = temp_dir();
+        let path = dir.path().join("idx");
+        let mut file = File::create(&path).unwrap();
+        let mut runs = Vec::new();
+        let mut at = 0u64;
+        for id in 0..=MAX_MERGE_FANIN as u64 {
+            file.write_all(
+                &Spill {
+                    tile_id: id,
+                    payload: id,
+                    length: 1,
+                }
+                .encode(),
+            )
+            .unwrap();
+            runs.push(Run {
+                start: at,
+                count: 1,
+            });
+            at += SPILL_RECORD_BYTES as u64;
+        }
+        file.sync_all().unwrap();
+        drop(file);
+
+        assert_eq!(runs.len(), MAX_MERGE_FANIN + 1);
+        let Err(err) = SortedSpill::open(&path, &runs) else {
+            panic!("one run too many was accepted");
+        };
+        assert!(
+            matches!(
+                err,
+                PmTilesError::Overflow {
+                    what: "the merge fan-in"
+                }
+            ),
+            "got {err:?}"
+        );
+        // The positive control: one fewer run is accepted, so the refusal is
+        // about the width and not about the file.
+        assert!(
+            SortedSpill::open(&path, &runs[..MAX_MERGE_FANIN]).is_ok(),
+            "the full width should be fine"
+        );
+    }
+
     /// More runs than one pass will take is folded down rather than refused.
     #[test]
     #[cfg_attr(miri, ignore)]

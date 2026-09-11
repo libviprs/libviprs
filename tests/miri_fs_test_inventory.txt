@@ -224,6 +224,7 @@ annotated   fs-detected  src/pmtiles/writer.rs::a_partial_write_latches_and_fini
 annotated   fs-detected  src/pmtiles/writer.rs::a_refusal_before_the_write_leaves_the_writer_usable
 annotated   fs-detected  src/pmtiles/writer.rs::a_run_list_wider_than_the_fan_in_is_merged_in_passes
 annotated   fs-detected  src/pmtiles/writer.rs::a_writer_that_spilled_several_runs_still_sorts
+annotated   fs-detected  src/pmtiles/writer.rs::one_merge_pass_refuses_more_runs_than_its_fan_in
 annotated   fs-detected  src/pmtiles/writer.rs::the_external_merge_handles_one_run_and_no_runs
 annotated   fs-detected  src/pmtiles/writer.rs::the_external_merge_puts_interleaved_runs_back_in_order
 annotated   fs-detected  src/pmtiles/writer.rs::the_merge_opens_one_file_however_many_runs_it_reads
