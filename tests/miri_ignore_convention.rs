@@ -507,7 +507,7 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// compares the tool's answer against the host can fail. Twelve more tests in
 /// that file spawn python3 and touch nothing, which is why they are
 /// `annotated not-detected` rows, and the last two spawn nothing at all.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 369;
+const EXPECTED_FS_TOUCHING_TESTS: usize = 373;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
