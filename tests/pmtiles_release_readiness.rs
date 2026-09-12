@@ -120,6 +120,7 @@ fn a_publish_can_be_rehearsed_before_it_is_made() {
 /// exists, so a renamed test file fails here rather than in six months when
 /// somebody tries to rerun the numbers.
 #[test]
+#[cfg_attr(miri, ignore)]
 fn the_benchmark_doc_names_tests_that_exist() {
     let mut named = 0;
     for line in BENCHMARK_DOC.lines() {

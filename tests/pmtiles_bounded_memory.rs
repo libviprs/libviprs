@@ -176,7 +176,14 @@ const PAYLOAD_TABLE_BYTES: u64 = 128;
 /// and its serialised form, the root directory, and the copy buffer. All of it
 /// is fixed by constants in the writer rather than by anything the caller
 /// passes.
-const FIXED_OVERHEAD_BYTES: u64 = 16 * 1024 * 1024;
+///
+/// Measured at about 550 KiB on 262144 tiles with a 4096-record sort buffer
+/// and 257 distinct payloads (a 650 KiB peak, 98 KiB of which is the buffer
+/// itself). Carried at 4 MiB, which is seven times that: enough headroom for
+/// the merge's extra passes above a 128-run fan-in and for a different
+/// allocator's rounding, and not so much that a writer which started holding
+/// the whole entry list would slip under it.
+const FIXED_OVERHEAD_BYTES: u64 = 4 * 1024 * 1024;
 
 fn bound_for(sort_buffer_records: usize, distinct_payloads: u64) -> u64 {
     SORT_BUFFER_SLACK * SPILL_BYTES_IN_MEMORY * sort_buffer_records as u64
@@ -342,14 +349,18 @@ fn the_finalize_peak_does_not_move_when_the_tile_count_quadruples() {
 
     assert_really_wrote(&small, 65_536, DISTINCT);
     assert_really_wrote(&large, 262_144, DISTINCT);
+    println!(
+        "tile-count independence: 65536 tiles peak={} finalize=+{}, 262144 tiles peak={} finalize=+{}",
+        small.peak, small.finalize_growth, large.peak, large.finalize_growth
+    );
 
     // Four times the tiles may cost a little: the run table is 16 bytes per
     // spilled run and the tile count decides how many runs there are. At this
-    // sort buffer that is 16 runs against 64, so 768 bytes. A mebibyte of
-    // slack is three orders of magnitude over that and still three orders
-    // under a peak that tracked the tile count, which at 24 bytes a record
-    // would be 4.7 MB more.
-    let slack = 1024 * 1024;
+    // sort buffer that is 16 runs against 64, so 768 bytes. Measured, the two
+    // peaks differ by under 2 KB. The slack is 256 KiB, over a hundred times
+    // the measured difference and eighteen times under the 4.7 MB a peak that
+    // really tracked the tile count would add at 24 bytes a record.
+    let slack = 256 * 1024;
     assert!(
         large.peak <= small.peak + slack,
         "the peak followed the tile count: {} tiles peaked at {} bytes, {} tiles at {} bytes",
@@ -380,6 +391,12 @@ fn the_finalize_peak_grows_with_the_sort_buffer_it_was_given() {
 
     assert_really_wrote(&small, TILES, DISTINCT);
     assert_really_wrote(&large, TILES, DISTINCT);
+    println!(
+        "sort-buffer scaling: {SMALL} records peak={}, {LARGE} records peak={}, delta={}",
+        small.peak,
+        large.peak,
+        large.peak.saturating_sub(small.peak)
+    );
 
     // The buffer itself is 24 bytes a record, so the difference between the
     // two is at least 6 MiB of `Vec`. Half of that is the floor, because the
@@ -407,6 +424,10 @@ fn the_finalize_peak_stays_under_the_stated_bound() {
     assert_really_wrote(&measured, TILES, DISTINCT);
 
     let bound = bound_for(RECORDS, DISTINCT);
+    println!(
+        "absolute bound: peak={} finalize=+{} bound={bound} ({RECORDS} records, {DISTINCT} distinct)",
+        measured.peak, measured.finalize_growth
+    );
     assert!(
         measured.peak <= bound,
         "peak {} bytes over a bound of {bound} bytes for {RECORDS} sort-buffer records and \
@@ -518,7 +539,10 @@ fn the_flat_index_maps_onto_distinct_tiles() {
     for index in [0u64, 1, side - 1, side, side + 1, side * side - 1] {
         let x = (index % side) as u32;
         let y = (index / side) as u32;
-        assert!(u64::from(x) < side && u64::from(y) < side, "inside the grid");
+        assert!(
+            u64::from(x) < side && u64::from(y) < side,
+            "inside the grid"
+        );
         let id = zxy_to_tileid(zoom, x, y).expect("inside the grid");
         assert!(seen.insert(id), "the flat index handed {id} in twice");
     }
