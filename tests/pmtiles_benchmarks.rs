@@ -1069,6 +1069,7 @@ fn a_platform_without_a_peak_rss_reports_null_not_a_flattering_zero() {
 
 /// A pyramid the harness cannot stat is a hole, not one entry of nothing.
 #[test]
+#[cfg_attr(miri, ignore)]
 fn an_unmeasurable_pyramid_publishes_no_entry_count() {
     let missing = std::path::Path::new("/this/path/does/not/exist/pyramid.pmtiles");
     assert_eq!(
