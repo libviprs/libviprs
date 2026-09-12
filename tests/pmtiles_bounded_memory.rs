@@ -119,9 +119,18 @@ unsafe impl GlobalAlloc for Counting {
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         let out = unsafe { System.realloc(ptr, layout, new_size) };
         if !out.is_null() {
-            // Charge the growth before discharging the old block so a growing
-            // realloc ratchets the peak through the larger of the two, which
-            // is what the allocator really holds at that instant.
+            // Charge the new block before discharging the old one, so the peak
+            // this records is the **sum** of the two and not the larger of
+            // them. That is deliberate and it is not what the allocator really
+            // holds: `System.realloc` may grow a block in place and hold one.
+            // It is the conservative direction for an upper-bound test, which
+            // is the only kind of test here, and the cost is that a peak
+            // dominated by one big growing `Vec` reads high. Measured on the
+            // 262144-record sort buffer, this order reports 9454340 bytes and
+            // discharging first reports 6809585, so 28% of that figure is the
+            // wrapper rather than the process. The 4096-record cell is
+            // identical either way and the absolute-bound cell moves by 1550
+            // bytes on 650215, which is why nothing published here moves.
             Self::charge(new_size);
             Self::discharge(layout.size());
         }
@@ -470,14 +479,22 @@ fn an_archive_past_four_gibibytes_finalizes_in_bounded_memory() {
         .with_tile_type(TileType::Png)
         .with_sort_buffer_records(RECORDS);
 
+    // One 16 MiB buffer, rewritten in place per tile, so the test's own
+    // footprint is a constant and the measurement is of the writer.
+    //
+    // Allocated **before** the baseline is taken, which is the whole point of
+    // where this line sits. It used to be below `start_measuring()`, so the
+    // harness's own 16 MiB landed inside the measured peak and the bound had
+    // to be padded to accommodate it: 54.8 MB of headroom over a writer
+    // contributing 410368 bytes, a factor of 136, and a regression that made
+    // the writer hold fifty megabytes would have passed.
+    let mut payload = vec![0u8; PAYLOAD_BYTES];
+
     let (_guard, baseline) = start_measuring();
 
     let mut writer =
         Writer::try_new(Discard::default(), scratch.path(), options).expect("the writer opens");
 
-    // One 16 MiB buffer, rewritten in place per tile, so the test's own
-    // footprint is a constant and the measurement is of the writer.
-    let mut payload = vec![0u8; PAYLOAD_BYTES];
     let zoom: u8 = 9;
     let side: u64 = 1 << zoom;
     for index in 0..PAYLOADS {
@@ -504,12 +521,23 @@ fn an_archive_past_four_gibibytes_finalizes_in_bounded_memory() {
     );
     assert_eq!(finished.header.addressed_tiles_count, PAYLOADS);
 
-    // The bound has to account for the 16 MiB payload buffer this test holds
-    // and the copy the writer makes of one blob at a time.
-    let bound = bound_for(RECORDS, PAYLOADS) + 4 * PAYLOAD_BYTES as u64;
+    // The same formula the cheap tests use, with nothing added for the
+    // harness: the payload buffer is outside the measurement now, and the
+    // writer copies payloads through a 64 KiB buffer rather than holding one.
+    // Measured at 410368 bytes against this bound of 4425728, which is the
+    // same order of headroom `FIXED_OVERHEAD_BYTES` carries everywhere else
+    // and eleven times tighter than the 136 this test used to allow.
+    let bound = bound_for(RECORDS, PAYLOADS);
     assert!(
         peak <= bound,
         "a 4.25 GiB archive peaked at {peak} bytes, over a bound of {bound}"
+    );
+
+    // And the harness's own buffer really is outside the measurement, so the
+    // bound above is not quietly paying for it again.
+    assert!(
+        peak < PAYLOAD_BYTES as u64,
+        "the measured peak {peak} is at least the {PAYLOAD_BYTES} byte payload buffer, so the          harness's own allocation is inside the measurement"
     );
 
     println!(
