@@ -170,9 +170,24 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
+          # No `--locked`, and that is not a relaxation. `Cargo.lock` is in
+          # this repository's `.gitignore` and has never been tracked, so a
+          # clean checkout has no lock file to be locked to, and cargo refuses
+          # before it packages anything: "cannot create the lock file
+          # /src/Cargo.lock because --locked was passed to prevent this". Both
+          # branches below died there, so this job could not have published or
+          # rehearsed a publish at all. Found by rehearsing the dry run for
+          # #993, which is what a rehearsal is for.
+          #
+          # The honest fix is one of two, and they are not equivalent. Track
+          # `Cargo.lock` and `--locked` becomes meaningful, which is a policy
+          # this repository has deliberately not adopted. Or drop the flag and
+          # say so, which is this. `tests/pmtiles_release_readiness.rs` asserts
+          # the pair rather than either half, so adopting the other fix later
+          # fails there until the flag comes back with it.
           if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
             echo "Dry run — packaging + verifying only."
-            cargo publish --dry-run --locked
+            cargo publish --dry-run
           else
-            cargo publish --locked
+            cargo publish
           fi
