@@ -139,73 +139,75 @@ the same answer that producer gives when its denominator is zero.
 
 ## The numbers, as measured
 
-Run on 2026-09-12 in the Linux container (`rust:1.98.1`, 8 CPUs, 15.6 GB),
-release profile, cheap profile, on the container's own filesystem. A gradient
-source at 2048x2048 with 256 pixel tiles, which the planner turns into 93 tiles
-over twelve levels.
-
-**The host was not quiet.** A second Docker gate was running throughout, at a
-load average of about 9.5 on 8 CPUs. Every absolute number below is therefore
-slower than the machine can go, and the concurrent row is the one to trust
-least, since it is the only scenario competing for cores with something else.
-The comparison survives it better than the absolutes do, because the two
-backends are measured one after the other inside one sweep under the same
-contention, but a figure quoted anywhere that matters should be re-measured on
-an idle machine. Re-running is one command and it is the one at the top of this
-page.
+Run on 2026-09-12 in the Linux container (`rust` 1.98.1, 8 CPUs, 15.6 GB),
+release profile, on the container's own filesystem, with nothing else running on
+the host. A gradient source, `Layout::Xyz`, PNG tiles.
 
 ### Generation
 
-| Measurement | Directory | PMTiles |
-|---|---|---|
-| Wall time | 357.8 ms | 434.4 ms |
-| Throughput | 259.9 tiles/s | 214.1 tiles/s |
-| Engine working set | 12.0 MB | 12.0 MB |
-| Process peak RSS | 34.0 MB | 34.1 MB |
-| Output bytes | 8 147 032 | 8 147 559 |
-| Filesystem entries | 129 | **1** |
+| Cell | Tiles | Backend | Wall time | Tiles/s | Peak RSS | Output bytes | Filesystem entries |
+|---|---|---|---|---|---|---|---|
+| 2048x2048 @256 | 93 | directory | 84.5 ms | 1100.3 | 33.9 MB | 8 147 032 | 129 |
+| 2048x2048 @256 | 93 | pmtiles | 110.7 ms | 840.1 | 34.1 MB | 8 147 559 | **1** |
+| 8192x8192 @256 | 1373 | directory | 1221.9 ms | 1123.7 | 438.8 MB | 130 159 233 | 1459 |
+| 8192x8192 @256 | 1373 | pmtiles | 1366.7 ms | 1004.6 | 439.3 MB | 130 160 332 | **1** |
+| 16384x16384 @256 | 5469 | directory | 4958.0 ms | 1103.1 | 1734.9 MB | 520 598 291 | 5620 |
+| 16384x16384 @256 | 5469 | pmtiles | 5562.6 ms | 983.2 | 1735.6 MB | 520 600 896 | **1** |
+| 8192x8192 @64 | 21851 | directory | 1667.6 ms | 13103.1 | 438.5 MB | 133 748 027 | 22127 |
+| 8192x8192 @64 | 21851 | pmtiles | 1684.0 ms | 12975.4 | 440.6 MB | 133 758 824 | **1** |
 
-PMTiles generation costs 21% more wall time, and that is structural rather than
-an oversight. The root directory has to fit the spec's first 16 KiB, and an
-entry's offset is not known until the tiles are sorted, so the payloads are
-staged and then copied into the archive: roughly twice the archive's size in
-writes for the same tiles. The archive is 527 bytes larger than the sum of the
-tree's files, which is the header, the directory and the metadata.
+The engine's tracked working set is identical for the two backends at every
+cell, which it should be: it charges raster buffers and a sink is not one.
+
+PMTiles generation costs between 1% and 31% more wall time, and that is
+structural rather than an oversight. The root directory has to fit the spec's
+first 16 KiB, and an entry's offset is not known until the tiles are sorted, so
+the payloads are staged and then copied into the archive: roughly twice the
+archive's size in writes for the same tiles. The gap closes as the tiles get
+smaller, because the fixed cost of a file goes up relative to its contents:
+at 21851 tiles of 6 KB the two backends are within 1%.
+
+The last column does not move with any of that. 22127 filesystem entries against
+1, for the same 133 MB of tiles.
 
 ### Reads
 
-93 lookups per scenario (64 for the cold and warm rows), microseconds per
-lookup:
+Microseconds per lookup. The lookup count is 64 for the cold and warm rows and
+the whole plan (capped at 20000) for the other three.
 
-| Scenario | Directory p50 | PMTiles p50 | Directory p99 | PMTiles p99 |
-|---|---|---|---|---|
-| Cold | 14.9 | 27.9 | 3407.7 | 5687.5 |
-| Warm | 10.7 | 12.5 | 174.3 | 403.6 |
-| Sequential | 10.2 | 13.5 | 2379.0 | 515.3 |
-| Random | 12.3 | 11.7 | 4338.9 | **63.8** |
-| Concurrent | 14.5 | 11.7 | 8225.2 | 1817.4 |
+| Cell | Scenario | Directory p50 | PMTiles p50 | Directory p99 | PMTiles p99 |
+|---|---|---|---|---|---|
+| 2048x2048 @256 | cold | 7.25 | 14.17 | 196.6 | 223.3 |
+| 2048x2048 @256 | warm | 4.75 | **4.21** | 5.5 | 5.7 |
+| 2048x2048 @256 | sequential | 5.04 | **4.62** | 12.8 | 6.8 |
+| 2048x2048 @256 | random | 4.88 | **4.21** | 5.9 | 10.0 |
+| 2048x2048 @256 | concurrent | 5.58 | **5.04** | 131.6 | 32.6 |
+| 16384x16384 @256 | sequential | 6.83 | 7.25 | 8.9 | 10.0 |
+| 16384x16384 @256 | random | 6.71 | 7.29 | 8.9 | 10.2 |
+| 8192x8192 @64 | warm | 2.00 | **0.46** | 2.1 | 0.5 |
+| 8192x8192 @64 | sequential | 3.38 | **1.00** | 4.4 | 1.8 |
+| 8192x8192 @64 | random | 3.42 | **1.21** | 4.5 | 2.0 |
+| 8192x8192 @64 | concurrent | 4.46 | **2.38** | 9.1 | 43.6 |
 
-Whole-scenario wall time, milliseconds: sequential 6.11 against 2.11, random
-15.81 against 1.20, concurrent 65.77 against 37.75, all three in the archive's
-favour.
+The bar #986 sections 9 and 18 set is competitive local read latency, not
+beating a raw `pread` on every single local read, and the archive clears it: it
+is ahead on most rows and within half a microsecond on the rest. Where it is
+furthest ahead is the cell with the most tiles, which is the direction that
+matters: at 21851 tiles a lookup is 1.21 microseconds against 3.42, because one
+`pread` into a file that is already open does not care how many tiles the
+pyramid has and a path resolution through a directory tree does.
 
-The median is where the epic set the bar (#986 sections 9 and 18: competitive
-local read latency, not necessarily beating a raw `pread` on every single
-local read), and the medians are within a few microseconds of each other in
-both directions. The tail is where the archive wins outright: random access at
-a p99 of 63.8 microseconds against 4338.9 is a 68x difference, and it is the
-difference between one `pread` into a file that is already open and a path
-resolution through a directory tree the kernel has to walk.
-
-Cold is the one row the archive loses, by 13 microseconds, and that is its open
-cost: the header fetch and the root-directory fetch a client pays once before
-its first tile. A tree pays nothing to open because there is nothing to read.
+Cold is the row the archive loses, and that is its open cost: the header fetch
+and the root-directory fetch, and on the 64 pixel cell a leaf fetch too, all of
+which a client pays once before its first tile. A tree pays nothing to open
+because there is nothing to read. The gap grows with the archive because the
+root grows with it: 14 microseconds at 93 tiles, 91 at 5469.
 
 ### What an unhelpful filesystem does to this
 
-The same cheap profile, run with the scratch directory on a bind mount from the
-host (Docker Desktop's virtiofs), rather than on the container's own
-filesystem:
+The same cheap profile, run earlier with the scratch directory on a bind mount
+from the host (Docker Desktop's virtiofs) instead of the container's own
+filesystem, and on a busy machine:
 
 | Scenario | Directory p50 | PMTiles p50 |
 |---|---|---|
@@ -217,34 +219,33 @@ filesystem:
 The archive barely moves, because a lookup is a `pread` into one open file
 whatever the filesystem is. The tree collapses, because every lookup is a fresh
 path resolution and that is the operation a virtualised or networked filesystem
-is worst at. Neither set of numbers is the "true" one. They are the two ends of
-the range the storage decision sits in, and the second is the one that looks
-like an object store.
+is worst at. Neither set is the "true" one. They are the two ends of the range
+the storage decision sits in, and the second is the one that looks like an
+object store.
 
-### The large profile
+### Which cells have leaf directories
 
-Four cells, same container, same contention. Generation, with the number the
-whole epic is about in the last column:
+Measured rather than assumed, by asking each archive's root what it holds:
 
-| Cell | Backend | Wall time | Tiles/s | Output bytes | Filesystem entries |
-|---|---|---|---|---|---|
-| 8192x8192 @256, 5467 tiles | directory | 5487.7 ms | 250.2 | 130 159 233 | 1459 |
-| 8192x8192 @256 | pmtiles | 4280.7 ms | 320.7 | 130 160 332 | **1** |
-| 16384x16384 @256, 21851 tiles | directory | 18846.6 ms | 290.2 | 520 598 291 | 5620 |
-| 16384x16384 @256 | pmtiles | 25081.8 ms | 218.0 | 520 600 896 | **1** |
-| 8192x8192 @64, 21851 tiles | directory | 11088.3 ms | 1970.6 | 133 748 027 | 22127 |
-| 8192x8192 @64 | pmtiles | 7278.7 ms | 3002.0 | 133 758 824 | **1** |
+| Cell | Entries | Root holds |
+|---|---|---|
+| 2048x2048 @256 | 93 | 93 tile entries, no leaves |
+| 8192x8192 @256 | 1373 | 1373 tile entries, no leaves |
+| 16384x16384 @256 | 5469 | 5469 tile entries, no leaves |
+| 8192x8192 @64 | 21851 | 6 pointers, all of them leaves |
 
-Generation goes both ways and the spread between repeats of one cell is wider
-than the gap between the two backends, which is what a loaded host looks like.
-The entry counts are exact and do not move: 22127 filesystem entries against 1,
-for the same 133 MB of tiles.
+Under 16384 entries the writer keeps the whole directory in the root, so only
+the last cell exercises the leaf lookup, the leaf cache and the second ranged
+read at all. A sweep without it measures one half of the read path and reports
+it as the read path, which is exactly what the first version of this one did.
+`the_large_profile_reaches_the_leaf_directory_path` asserts the sweep still
+crosses the cutoff, so an edit to the cell list cannot quietly drop it.
 
 ### The optimisation pass, and what the measurement asked for
 
-Issue #993 asks for an optimisation pass **as guided by the measurements**, over
-the finalize merge buffering, the reader's directory page caching and the IO
-buffering. Two of those three the measurements had nothing to say about:
+Issue #993 asks for one **as guided by the measurements**, over the finalize
+merge buffering, the reader's directory page caching and the IO buffering. Two
+of those three the measurements had nothing to say about:
 
 - the external merge already reads every run through one file descriptor with a
   capped fan-in, and the bounded-memory tests measure it at 650 KiB of live heap
@@ -252,11 +253,10 @@ buffering. Two of those three the measurements had nothing to say about:
 - the payload copy already runs through a 64 KiB buffer, and the payloads
   themselves arrive in `write_all` calls larger than any buffer would hold.
 
-The third was a real finding, and only the 64 pixel tile cell could see it,
-because it is the only cell whose archive has leaf directories at all. On that
-archive, random access was **thirteen to fifteen times slower than sequential
-access over the same 20000 coordinates**, and slower than the directory
-backend:
+The third was a real finding, and only the 64 pixel tile cell could see it. On
+that archive, random access was **thirteen to fifteen times slower than
+sequential access over the same 20000 coordinates**, and slower than the
+directory backend:
 
 | 20000 lookups, 8192x8192 @64 | Before | After |
 |---|---|---|
@@ -266,13 +266,12 @@ backend:
 | PMTiles random, p99 | 1486.2 / 608.6 us | 5.6 / 5.6 us |
 | Directory random, wall (control) | 204.2 / 345.2 ms | 135.5 / 126.6 ms |
 
-Two runs of each, and the two numbers in every cell are those two runs.
-
-The ratio row is the one to read. The host was busy and got less busy between
-the two sets, so the absolutes moved for the directory control too, and an
-improvement claimed off the absolutes alone would be partly a claim about the
-machine. Random over sequential is measured inside one process seconds apart,
-so contention cancels: 13.4x and 15.4x before, 1.45x and 0.90x after.
+Two runs of each, and the two numbers in every cell are those two runs. That
+whole table was taken on a busy host, which is why the ratio row is the one to
+read: the machine got less busy between the two sets and moved the directory
+control with it, while random over sequential is measured inside one process
+seconds apart so the contention cancels out of it. On the idle machine the
+tables above were taken on, the same ratio is 24.90 over 21.25, or 1.17x.
 
 The cause was the reader's leaf cache holding four decoded leaves. That is the
 right size for the clustered walk it was written for, and the wrong size for
@@ -285,18 +284,18 @@ that it degrades the way an LRU does rather than falling off a cliff.
 Raising a count is not free, so a count is no longer the only bound.
 `LEAF_CACHE_ENTRY_BUDGET` caps the decoded entries the cache holds across every
 leaf, because one leaf can decode to as many entries as `MAX_DIRECTORY_BYTES`
-allows and sixteen of those would be hundreds of megabytes held by a reader
-that was asked for a tile. The budget is 262144 entries, about 6 MiB, which an
+allows and sixteen of those would be hundreds of megabytes held by a reader that
+was asked for a tile. The budget is 262144 entries, about 6 MiB, which an
 ordinary archive never comes near.
 
 `every_leaf_of_a_multi_leaf_archive_stays_cached` in
 `tests/pmtiles_index_only_reads.rs` is the regression guard, and it **counts
 reads rather than timing them**: an eight-leaf fabricated archive, walked once
-to warm and once backwards to check, has to answer the second pass with one
-read per tile and no directory reads at all. At a cache of four it answers with
+to warm and once backwards to check, has to answer the second pass with one read
+per tile and no directory reads at all. At a cache of four it answers with
 twelve reads instead of eight, which is how that test was checked. A timing
-assertion in that position would have been a benchmark pretending to be a
-guard, and it would say something different on every machine.
+assertion in that position would have been a benchmark pretending to be a guard,
+and it would say something different on every machine.
 
 ## The bounded-memory proof
 
