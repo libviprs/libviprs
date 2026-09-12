@@ -375,7 +375,7 @@ with the checklist in CONTRIBUTING.md.
 GitHub Actions runs two workflows, eight jobs between them:
 
 **CI**, on every branch push and on pull requests that no push accompanies (`.github/workflows/ci.yml`):
-- `Check & Lint`: `cargo fmt --check`, then `cargo clippy -D warnings` once per feature. Since #844 that is the default build plus `pdfium`, `object-store-sink`, `tracing`, `avif`, `svg`, `jxl`, `packfile`, `serde` and `jp2k`, because code behind any other `cfg` used to be linted by nothing, and a `cargo build --features s3` for the deprecated alias
+- `Check & Lint`: `cargo fmt --check`, then `cargo clippy -D warnings` once per feature. That is the default build plus `pdfium`, `object-store-sink`, `tracing`, `avif`, `svg`, `jxl`, `packfile`, `serde` and `jp2k`, because code behind any other `cfg` used to be linted by nothing, and a `cargo build --features s3` for the deprecated alias
 - `MSRV (1.97)`: `cargo check` on the pinned toolchain, once per feature family that declares no `rust-version` of its own, plus a guard that the four written-out MSRV claims still agree
 - `Docs`: `cargo doc --no-deps --all-features` with broken, private and redundant intra-doc links all denied
 - `Test`: `cargo test`, once per feature that gates code, because a feature nobody names compiles its bodies out and runs zero assertions
@@ -383,7 +383,7 @@ GitHub Actions runs two workflows, eight jobs between them:
 
 **Merge Gate** (`.github/workflows/merge-gate.yml`):
 - `Loom` and `pdfium-render source audit (#149)`, on every branch push and on pull requests into `main` or `release`
-- `Miri`, at the release boundary only, because a whole-suite invocation still does not finish (#675)
+- `Miri`, at the release boundary only, because a whole-suite invocation still does not finish
 
 ### Running CI locally
 
@@ -402,7 +402,7 @@ rumour. A Docker Desktop bind mount off an APFS host is case-insensitive and it
 carries untracked files, so a bind-mounted run happily resolves a fixture that
 was committed under a different case, or one that was never committed at all.
 `main` was red for about 55 hours on exactly that while every local run said
-PASS (#977, #979, #982).
+PASS.
 
 What goes in is the working tree's **tracked** content, so your uncommitted
 edits are still checked and your untracked files are not, and the run lists
