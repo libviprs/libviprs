@@ -34,7 +34,10 @@ use std::io;
 use std::sync::Mutex;
 
 use libviprs::pmtiles::directory::serialize_entries;
-use libviprs::pmtiles::{Compression, Entry, Header, RangeReader, Reader, TileType, zxy_to_tileid};
+use libviprs::pmtiles::reader::{MAX_CACHED_LEAF_ENTRIES, MAX_CACHED_LEAVES};
+use libviprs::pmtiles::{
+    Compression, Entry, Header, RangeReader, Reader, TileType, WriterOptions, zxy_to_tileid,
+};
 
 /// The archive this file describes. Six gibibytes of tile data, which is
 /// comfortably past the `u32` ceiling of 4 GiB.
@@ -107,8 +110,22 @@ impl Counting {
 /// A function of the offset rather than a constant, so a reader that fetched
 /// the right length from the wrong place comes back with the wrong bytes
 /// instead of with bytes that happen to match.
+///
+/// `splitmix64`'s finaliser, and the choice is load bearing. This was
+/// `(offset * 0x9E3779B9) >> 24`, and a multiply only carries bits upward, so
+/// dropping the offset's high 32 bits left bits 24 through 31 of the product
+/// exactly where they were: `synthetic_byte(x)` and `synthetic_byte(x + 2^32)`
+/// were the same byte. Every byte comparison in this file was therefore blind
+/// to the one mutation the file exists to catch, which is what
+/// [`the_synthetic_bytes_can_tell_a_truncated_offset_from_a_whole_one`]
+/// now checks before anything else relies on it. The finaliser folds the high
+/// half down through two xor-shifts, so every bit of the offset reaches the
+/// byte.
 fn synthetic_byte(offset: u64) -> u8 {
-    (offset.wrapping_mul(0x9E37_79B9) >> 24) as u8
+    let mut z = offset.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    (z ^ (z >> 31)) as u8
 }
 
 impl RangeReader for Counting {
@@ -334,6 +351,13 @@ fn opening_an_archive_reads_the_header_and_the_root_and_nothing_else() {
         fetched < 16_384,
         "opening fetched {fetched} bytes, which is past the spec's 16 KiB header-plus-root budget"
     );
+    // Zero is not a pass. Opening reads the header and the root, so a reader
+    // that fetched nothing at all did not open the archive, and the ratio
+    // below would divide by zero and panic with the wrong message.
+    assert!(
+        fetched > 0,
+        "opening fetched no bytes at all, so there is no ratio to report"
+    );
     assert!(
         archive_size / fetched > 100_000,
         "opening a {archive_size} byte archive fetched {fetched} bytes, a ratio of {}",
@@ -453,21 +477,32 @@ fn the_reads_really_land_past_the_four_gibibyte_line() {
 fn a_whole_workload_never_fetches_the_metadata() {
     let fabricated = fabricate();
     let archive_size = fabricated.source.size;
-    let coords: Vec<(u32, u32)> = fabricated
+    let tiles: Vec<Placed> = fabricated
         .from_root
         .iter()
         .chain(fabricated.from_leaf.iter())
-        .map(|t| (t.x, t.y))
+        .copied()
         .collect();
     let missing = fabricated.missing;
     let reader = Reader::try_new(fabricated.source).expect("the fabricated archive opens");
 
     for _ in 0..8 {
-        for (x, y) in &coords {
-            reader
-                .get_tile(ZOOM, *x, *y)
+        for tile in &tiles {
+            let got = reader
+                .get_tile(ZOOM, tile.x, tile.y)
                 .expect("the lookup succeeds")
                 .expect("the archive holds this tile");
+            // The bytes, not just the `Ok`. Without this the whole loop is 33
+            // calls to `expect`, and every one of them succeeds with the wrong
+            // payload under the 32-bit offset truncation that reddens four of
+            // this file's other tests.
+            assert_eq!(
+                got,
+                tile.expected(),
+                "({}, {}) came back from the wrong offset",
+                tile.x,
+                tile.y
+            );
         }
     }
     assert!(
@@ -490,6 +525,10 @@ fn a_whole_workload_never_fetches_the_metadata() {
         "33 lookups over a {archive_size} byte archive fetched {fetched} bytes"
     );
     assert!(
+        fetched > 0,
+        "33 lookups fetched no bytes at all, which is not a workload"
+    );
+    assert!(
         archive_size / fetched > 100_000,
         "the whole workload read 1 byte for every {} in the archive, which is not index-only",
         archive_size / fetched
@@ -500,30 +539,33 @@ fn a_whole_workload_never_fetches_the_metadata() {
 // The leaf cache, counted rather than timed
 // ---------------------------------------------------------------------------
 
-/// How many leaf directories the archive below has.
+/// How many leaf directories the archive the cache-hit guard builds has.
 ///
 /// Eight, which is over the four the leaf cache held before issue #993 and
-/// inside the sixteen it holds now. Both halves of that matter: at four this
-/// test fails, and at more than `LEAF_CACHE_ENTRIES` it would be asserting
-/// something no cache promises.
+/// inside the count it holds now. It is a plain number rather than something
+/// derived from the cache size on purpose: lowering the cache has to fail a
+/// test here, and the failure has to be an assertion with a message rather
+/// than the compile error a `const _: () = assert!(LEAVES <= ...)` used to
+/// produce, because a compile error in a test file invites bumping `LEAVES`
+/// instead of reading why it is there.
 const LEAVES: usize = 8;
 
-/// Tiles inside each of them.
+/// Tiles inside each leaf.
 const TILES_PER_LEAF: usize = 4;
 
-// Both sides of [`LEAVES`] are constants, so they are checked when this file
-// compiles rather than when the test runs. Clippy is right that a runtime
-// assertion over two constants is not an assertion, and a compile error is a
-// better place to learn that the archive no longer has more leaves than the
-// cache used to hold (four, before issue #993) or that it has more than the
-// cache holds now, which would be asserting something no cache promises.
-const _: () = assert!(LEAVES > 4);
-const _: () = assert!(LEAVES <= libviprs::pmtiles::reader::LEAF_CACHE_ENTRIES);
+/// Leaves in the archive [`the_miss_rate_over_a_cache_too_small_tracks_the_cache_size`]
+/// builds, which is deliberately more than the cache holds.
+///
+/// That case was unreachable while the guard above compile-asserted its own
+/// archive fitted the cache, and it is the only interesting one: a cache that
+/// covers everything cannot be measured, and the whole of issue #993 is what
+/// happens on the archives it does not cover.
+const OVER_CACHE_LEAVES: usize = 96;
 
-/// An archive whose root holds nothing but leaf pointers.
-fn fabricate_leafy() -> (Counting, Vec<Vec<Placed>>) {
+/// An archive of `leaves` leaf directories, whose root holds nothing else.
+fn fabricate_leafy(leaves: usize) -> (Counting, Vec<Vec<Placed>>) {
     let four_gib = u64::from(u32::MAX) + 1;
-    let mut placed: Vec<Placed> = (0..(LEAVES * TILES_PER_LEAF) as u32)
+    let mut placed: Vec<Placed> = (0..(leaves * TILES_PER_LEAF) as u32)
         .map(|i| {
             Placed::at(
                 i,
@@ -539,7 +581,7 @@ fn fabricate_leafy() -> (Counting, Vec<Vec<Placed>>) {
         .chunks(TILES_PER_LEAF)
         .map(<[Placed]>::to_vec)
         .collect();
-    assert_eq!(groups.len(), LEAVES);
+    assert_eq!(groups.len(), leaves);
 
     let mut leaf_section: Vec<u8> = Vec::new();
     let mut pointers: Vec<Entry> = Vec::new();
@@ -578,9 +620,9 @@ fn fabricate_leafy() -> (Counting, Vec<Vec<Placed>>) {
         leaf_directories_length: leaf_section.len() as u64,
         tile_data_offset: TILE_DATA_OFFSET,
         tile_data_length: TILE_DATA_LENGTH,
-        addressed_tiles_count: (LEAVES * TILES_PER_LEAF) as u64,
-        tile_entries_count: (LEAVES * TILES_PER_LEAF) as u64,
-        tile_contents_count: (LEAVES * TILES_PER_LEAF) as u64,
+        addressed_tiles_count: (leaves * TILES_PER_LEAF) as u64,
+        tile_entries_count: (leaves * TILES_PER_LEAF) as u64,
+        tile_contents_count: (leaves * TILES_PER_LEAF) as u64,
         clustered: true,
         internal_compression: Compression::None,
         tile_compression: Compression::None,
@@ -610,8 +652,8 @@ fn fabricate_leafy() -> (Counting, Vec<Vec<Placed>>) {
 /// held four leaves, which is right for a clustered walk and wrong for random
 /// access: on a real 21851-tile archive with six leaves, 20000 random lookups
 /// cost 1699 ms against 127 ms for the same 20000 walked in order, because a
-/// third of them missed and paid a ranged read plus a gzip inflate of a
-/// 4096-entry directory. The number is sixteen now.
+/// third of them missed and paid a ranged read plus a directory decode. The
+/// count comes out of the memory budget now, at 64.
 ///
 /// It counts reads rather than timing them, so it says the same thing on a
 /// loaded machine as on an idle one, and it fails for the one reason it is
@@ -619,7 +661,7 @@ fn fabricate_leafy() -> (Counting, Vec<Vec<Placed>>) {
 /// mistake dressed up as a benchmark.
 #[test]
 fn every_leaf_of_a_multi_leaf_archive_stays_cached() {
-    let (source, groups) = fabricate_leafy();
+    let (source, groups) = fabricate_leafy(LEAVES);
     let reader = Reader::try_new(source).expect("the fabricated archive opens");
     assert_eq!(
         reader.root_entries().len(),
@@ -670,4 +712,153 @@ fn every_leaf_of_a_multi_leaf_archive_stays_cached() {
             .all(|r| r.offset >= TILE_DATA_OFFSET + u64::from(u32::MAX)),
         "every read in the second pass should be a tile past 4 GiB, got {second:?}"
     );
+}
+
+/// A deterministic sequence, so "random access" is the same coordinates on
+/// every run and on every machine.
+///
+/// `splitmix64`, which is eight lines and needs no dependency. A seeded
+/// generator is what makes the miss-rate assertion below a fact about the
+/// cache rather than a sample that might come out differently tomorrow.
+struct Splitmix(u64);
+
+impl Splitmix {
+    fn new(seed: u64) -> Self {
+        Self(seed)
+    }
+
+    fn below(&mut self, bound: usize) -> usize {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        ((z ^ (z >> 31)) % bound as u64) as usize
+    }
+}
+
+/// Over an archive with more leaves than the cache holds, the miss rate is
+/// `1 - k/N`, and the cache is the size the memory budget says it is.
+///
+/// The guard above can only say that a cache big enough for an archive holds
+/// all of it. This is the other side, and it is the side issue #993 was about:
+/// what an LRU of `k` does over `N` uniformly random leaves. The answer is
+/// exactly `1 - k/N`, because the cache holds the `k` most recently referenced
+/// distinct leaves and every leaf is equally likely to be one of them, and
+/// that is what makes the size a cliff rather than a slope. At `k = 16` the
+/// step from 16 leaves to 17 was 0.38 us to 7.37 us a lookup.
+///
+/// It also pins the size itself. `MAX_CACHED_LEAVES` is derived from
+/// `MAX_CACHED_LEAF_ENTRIES` in `src/pmtiles/reader.rs`, and the assertion
+/// here is that the derivation still holds against the writer's own leaf size,
+/// so somebody re-hardcoding a count fails this rather than shrinking the
+/// archive a test builds and staying green.
+///
+/// Reads are counted, never timed.
+#[test]
+fn the_miss_rate_over_a_cache_too_small_tracks_the_cache_size() {
+    const LOOKUPS: usize = 4_096;
+
+    let (source, groups) = fabricate_leafy(OVER_CACHE_LEAVES);
+    let reader = Reader::try_new(source).expect("the fabricated archive opens");
+
+    // The cache covers every leaf of an archive this crate's own writer
+    // produces, right up to the entry budget. Both halves are read at run time
+    // so this is an assertion rather than a compile error somebody bumps.
+    let cache = MAX_CACHED_LEAVES;
+    let writer_leaf_entries = WriterOptions::default().leaf_entries;
+    assert_eq!(
+        cache * writer_leaf_entries,
+        MAX_CACHED_LEAF_ENTRIES,
+        "the leaf count ({cache}) and the entry budget ({MAX_CACHED_LEAF_ENTRIES}) disagree at \
+         the writer's {writer_leaf_entries} entries a leaf, which is the mistake #993 found"
+    );
+
+    // And the archive really is bigger than the cache, which is the case the
+    // guard above cannot reach.
+    let total = groups.len();
+    assert!(
+        total > cache,
+        "this archive has {total} leaves and the cache holds {cache}, so there is nothing here \
+         a full cache would not also pass"
+    );
+
+    // Warm to steady state. From empty, the first `k` lookups miss for a
+    // reason that has nothing to do with the cache's size.
+    for group in &groups {
+        let tile = group[0];
+        reader
+            .get_tile(ZOOM, tile.x, tile.y)
+            .expect("the lookup succeeds")
+            .expect("the archive holds this tile");
+    }
+
+    reader.source().forget();
+    let mut rng = Splitmix::new(0x5EED_0993_CACE_0001);
+    for _ in 0..LOOKUPS {
+        let group = &groups[rng.below(total)];
+        let tile = group[rng.below(TILES_PER_LEAF)];
+        let got = reader
+            .get_tile(ZOOM, tile.x, tile.y)
+            .expect("the lookup succeeds")
+            .expect("the archive holds this tile");
+        assert_eq!(
+            got,
+            tile.expected(),
+            "a lookup came back from the wrong offset"
+        );
+    }
+
+    let leaf_reads = reader
+        .source()
+        .requests()
+        .iter()
+        .filter(|r| r.offset >= LEAF_OFFSET && r.offset < TILE_DATA_OFFSET)
+        .count();
+    let observed = leaf_reads as f64 / LOOKUPS as f64;
+    let predicted = 1.0 - cache as f64 / total as f64;
+    println!(
+        "{cache} of {total} leaves cached: {leaf_reads} misses in {LOOKUPS} lookups, \
+         {observed:.4} against a predicted {predicted:.4}"
+    );
+    assert!(
+        (observed - predicted).abs() < 0.05,
+        "an LRU of {cache} over {total} uniformly random leaves missed {observed:.4} of the \
+         time, and 1 - k/N says {predicted:.4}"
+    );
+}
+
+/// The synthetic filler can tell an offset from the same offset with its high
+/// half dropped.
+///
+/// The control on every `assert_eq!(got, tile.expected())` in this file. A
+/// fill function that is blind to the top 32 bits makes all of them pass
+/// against a reader that truncated an offset to a `u32`, which is precisely
+/// the bug the fabrication is built to catch, and that is not a hypothetical:
+/// the first version here was `(offset * 0x9E3779B9) >> 24` and it was blind
+/// in exactly that way.
+///
+/// It probes the offsets this file really uses rather than a round number,
+/// because a probe that lands on a fixed point of the mistake cannot fail.
+#[test]
+fn the_synthetic_bytes_can_tell_a_truncated_offset_from_a_whole_one() {
+    let four_gib = u64::from(u32::MAX) + 1;
+    let probes = [
+        TILE_DATA_OFFSET + four_gib + 4_096,
+        TILE_DATA_OFFSET + four_gib + 1_048_576,
+        TILE_DATA_OFFSET + TILE_DATA_LENGTH - 100_000,
+        TILE_DATA_OFFSET + TILE_DATA_LENGTH - 50_000,
+    ];
+    for offset in probes {
+        let truncated = TILE_DATA_OFFSET + u64::from(offset as u32);
+        assert_ne!(
+            offset, truncated,
+            "{offset} is unchanged by a 32-bit truncation, so it probes nothing"
+        );
+        assert_ne!(
+            synthetic_byte(offset),
+            synthetic_byte(truncated),
+            "the filler gives {offset} and its truncation {truncated} the same byte, so a byte \
+             comparison cannot see a reader that dropped the high half of an offset"
+        );
+    }
 }

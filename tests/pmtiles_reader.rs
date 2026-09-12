@@ -1949,3 +1949,208 @@ fn a_tile_entry_in_a_leaf_resolves_against_tile_data_and_not_against_any_other_b
          tell two bases apart"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The leaf cache is keyed on the range, not on where the range starts
+// ---------------------------------------------------------------------------
+
+/// The zoom the collision archive addresses its tiles at.
+///
+/// Three, because its id span is 21 through 84 and every id below is one the
+/// archive can carry in one directory.
+const COLLIDING_ZOOM: u8 = 3;
+
+/// The id the short leaf pointer covers, and the id only the long one reaches.
+const SHORT_POINTER_ID: u64 = 30;
+const LONG_POINTER_ID: u64 = 65;
+
+/// The coordinate at `zoom` whose tile id is `tile_id`.
+///
+/// Searched rather than computed, because PMTiles orders a zoom by its Hilbert
+/// curve and the inverse of that is not something worth writing twice. The
+/// search is over 64 coordinates.
+fn coordinate_of(zoom: u8, tile_id: u64) -> (u32, u32) {
+    let side = 1u32 << zoom;
+    for y in 0..side {
+        for x in 0..side {
+            if zxy_to_tileid(zoom, x, y).is_ok_and(|id| id == tile_id) {
+                return (x, y);
+            }
+        }
+    }
+    panic!("no coordinate at z={zoom} has tile id {tile_id}");
+}
+
+/// An archive whose root points two entries at one leaf-section offset with
+/// two different lengths.
+///
+/// This is legal. Nothing in the format says a leaf pointer's offset is unique
+/// across the root, and the two ranges here are `[0, len0)` and
+/// `[0, len0 + len1)` of the leaf section, which are two different directories:
+/// the first decodes, the second is the first followed by another leaf's bytes
+/// and is a typed refusal.
+///
+/// The internal compression is `None` rather than gzip, which is what makes the
+/// second range a refusal rather than a silent success: `GzDecoder` stops at
+/// the end of the first member, so a gzip archive would inflate the long range
+/// to exactly the short range's bytes and the two would agree by accident.
+fn archive_with_two_pointers_at_one_leaf_offset() -> Vec<u8> {
+    let tile_data: &[u8] = b"AAAABBBB";
+
+    // The leaf the short pointer addresses. Its second entry carries a run
+    // long enough to cover `LONG_POINTER_ID`, so a lookup that reaches these
+    // entries by mistake comes back with a tile rather than with `None`.
+    let leaf = vec![
+        Entry {
+            tile_id: SHORT_POINTER_ID,
+            offset: 0,
+            length: 4,
+            run_length: 1,
+        },
+        Entry {
+            tile_id: 40,
+            offset: 4,
+            length: 4,
+            run_length: 50,
+        },
+    ];
+    // A second leaf, whose only job is to put bytes after the first one so the
+    // long range has something extra in it.
+    let filler = vec![Entry {
+        tile_id: 100,
+        offset: 0,
+        length: 4,
+        run_length: 1,
+    }];
+
+    let leaf_bytes = serialize_entries(&leaf).expect("the leaf serialises");
+    let filler_bytes = serialize_entries(&filler).expect("the filler serialises");
+    let short_length = u32::try_from(leaf_bytes.len()).expect("a leaf this small fits a u32");
+    let long_length = u32::try_from(leaf_bytes.len() + filler_bytes.len())
+        .expect("two leaves this small fit a u32");
+    assert!(
+        long_length > short_length,
+        "the two pointers have to differ in length or there is nothing to collide"
+    );
+
+    let root = vec![
+        Entry {
+            tile_id: SHORT_POINTER_ID,
+            offset: 0,
+            length: short_length,
+            run_length: 0,
+        },
+        Entry {
+            tile_id: 60,
+            offset: 0,
+            length: long_length,
+            run_length: 0,
+        },
+    ];
+    let root_bytes = serialize_entries(&root).expect("the root serialises");
+    let metadata_json: &[u8] = b"{}";
+
+    let root_offset = 127u64;
+    let metadata_offset = root_offset + root_bytes.len() as u64;
+    let leaf_offset = metadata_offset + metadata_json.len() as u64;
+    let leaf_length = long_length as u64;
+    let tile_data_offset = leaf_offset + leaf_length;
+
+    let header = Header {
+        root_offset,
+        root_length: root_bytes.len() as u64,
+        metadata_offset,
+        metadata_length: metadata_json.len() as u64,
+        leaf_directories_offset: leaf_offset,
+        leaf_directories_length: leaf_length,
+        tile_data_offset,
+        tile_data_length: tile_data.len() as u64,
+        addressed_tiles_count: 51,
+        tile_entries_count: 2,
+        tile_contents_count: 2,
+        clustered: true,
+        internal_compression: Compression::None,
+        tile_compression: Compression::None,
+        tile_type: TileType::Png,
+        min_zoom: COLLIDING_ZOOM,
+        max_zoom: COLLIDING_ZOOM,
+        ..Header::default()
+    };
+
+    let mut out = Vec::new();
+    out.extend_from_slice(&header.encode());
+    out.extend_from_slice(&root_bytes);
+    out.extend_from_slice(metadata_json);
+    out.extend_from_slice(&leaf_bytes);
+    out.extend_from_slice(&filler_bytes);
+    out.extend_from_slice(tile_data);
+    out
+}
+
+/// A warm reader answers a lookup the way a cold reader answers it.
+///
+/// The invariant the leaf cache is written under, restated in the module doc
+/// above: a cold cache changes how many reads happen and never what they
+/// return. It was false. `cached_leaf` matched on the offset alone while the
+/// decode is a function of `(offset, length)`, so the two root pointers this
+/// archive carries at one offset collided, and the same coordinate on the same
+/// bytes came back as `Err(TrailingDirectoryBytes)` from a cold reader and as
+/// a tile from a reader that had followed the other pointer first.
+///
+/// That also made the reader non-deterministic on input somebody else wrote,
+/// which is the property the fuzzing and the differential oracle in #991 rest
+/// on: the same archive has to produce the same answer whatever order the
+/// lookups arrive in.
+#[test]
+fn a_warm_leaf_cache_answers_a_lookup_the_way_a_cold_one_does() {
+    let bytes = archive_with_two_pointers_at_one_leaf_offset();
+
+    // The control, first. Two root entries really do point at one offset with
+    // two lengths, so the collision is reachable rather than described.
+    let control = memory_reader(bytes.clone()).expect("the archive opens");
+    let pointers: Vec<(u64, u32)> = control
+        .root_entries()
+        .iter()
+        .filter(|entry| entry.is_leaf())
+        .map(|entry| (entry.offset, entry.length))
+        .collect();
+    assert_eq!(pointers.len(), 2, "the root should hold two leaf pointers");
+    assert_eq!(
+        pointers[0].0, pointers[1].0,
+        "the two pointers should share an offset"
+    );
+    assert_ne!(
+        pointers[0].1, pointers[1].1,
+        "the two pointers should differ in length"
+    );
+
+    let (short_x, short_y) = coordinate_of(COLLIDING_ZOOM, SHORT_POINTER_ID);
+    let (long_x, long_y) = coordinate_of(COLLIDING_ZOOM, LONG_POINTER_ID);
+
+    // Cold: a reader that has never followed the short pointer.
+    let cold_reader = memory_reader(bytes.clone()).expect("the archive opens");
+    let cold = cold_reader.get_tile(COLLIDING_ZOOM, long_x, long_y);
+
+    // Warm: the same lookup on a reader that followed the short pointer first,
+    // so the leaf section's offset 0 is already in the cache under the short
+    // pointer's length.
+    let warm_reader = memory_reader(bytes).expect("the archive opens");
+    let first = warm_reader
+        .get_tile(COLLIDING_ZOOM, short_x, short_y)
+        .expect("the short pointer resolves");
+    assert_eq!(
+        first.as_deref(),
+        Some(&b"AAAA"[..]),
+        "the short pointer should serve its own tile, or nothing here is warm"
+    );
+    let warm = warm_reader.get_tile(COLLIDING_ZOOM, long_x, long_y);
+
+    // `PmTilesError` is not `PartialEq`, and a rendered pair of results says
+    // more in a failure than a boolean would.
+    assert_eq!(
+        format!("{cold:?}"),
+        format!("{warm:?}"),
+        "the same coordinate on the same archive answered differently depending on \
+         whether an earlier lookup had warmed the leaf cache"
+    );
+}
