@@ -1371,3 +1371,129 @@ fn the_writer_works_over_any_write_and_seek_sink() {
         "the same tiles through a Cursor produced a different archive"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The header we write, not the one we meant
+// ---------------------------------------------------------------------------
+
+/// The bounds the writer is asked for are the bounds the archive carries, in
+/// the fields they belong in.
+///
+/// # The hole this closes
+///
+/// The decoder's positions are pinned twice over:
+/// `pmtiles_reader::the_header_decodes_to_what_go_pmtiles_reports_for_every_golden`
+/// compares all six `i32`s against what `DeserializeHeader` returned, and
+/// `pmtiles_format::every_golden_header_decodes_and_re_encodes_byte_for_byte`
+/// catches a read that disagrees with the write. Nothing read back the
+/// positions of a header **we** produced. Measured: exchange latitude and
+/// longitude inside `Header::set_bounds_degrees` and all 128 tests in this
+/// crate's PMTiles suite pass, while every archive libviprs writes carries
+/// bounds that are nonsense and every consumer renders the wrong extent.
+///
+/// Two halves, and they catch different mistakes. The values have to come back
+/// as asked, which catches a field written to the wrong offset or at the wrong
+/// scale. And they have to be **in range for what they are**, which needs no
+/// expectation at all: longitude runs to 180 and latitude stops at 90, so a
+/// longitude sitting in a latitude field is out of range on its face. The
+/// second half is what survives somebody changing the numbers below.
+///
+/// The numbers are deliberately not symmetric and not each other's negation.
+/// A fixture sitting on the identity element of the operation under test is
+/// the mistake this whole area has already made once.
+#[test]
+fn the_bounds_the_writer_is_given_are_the_bounds_the_archive_carries() {
+    const WEST: f64 = -12.25;
+    const SOUTH: f64 = 4.5;
+    const EAST: f64 = 33.75;
+    const NORTH: f64 = 51.125;
+    const CENTRE: (f64, f64) = (7.5, 22.25);
+
+    // The control for the control. If any two of these were equal, or one were
+    // another's negation, an exchange or a sign flip would be the identity.
+    let corners = [WEST, SOUTH, EAST, NORTH, CENTRE.0, CENTRE.1];
+    for (i, a) in corners.iter().enumerate() {
+        for b in corners.iter().skip(i + 1) {
+            assert_ne!(a, b, "two of the bounds are the same number");
+            assert_ne!(*a, -*b, "two of the bounds are each other's negation");
+        }
+    }
+
+    let dir = scratch();
+    let out = dir.path().join("bounded.pmtiles");
+    let tile = b"a payload, of some length or other".to_vec();
+
+    let mut w = Writer::create(
+        &out,
+        WriterOptions::default()
+            .with_tile_type(TileType::Png)
+            .with_bounds_degrees([WEST, SOUTH, EAST, NORTH])
+            .with_center_degrees(CENTRE.0, CENTRE.1),
+    )
+    .expect("a writer opens");
+    for (z, x, y) in [
+        (0u8, 0u32, 0u32),
+        (1, 0, 0),
+        (1, 1, 0),
+        (1, 0, 1),
+        (1, 1, 1),
+    ] {
+        w.add_tile(z, x, y, &tile, content_hash(&tile)).unwrap();
+    }
+    w.finish().expect("the writer finishes");
+
+    let bytes = std::fs::read(&out).expect("read the archive back");
+    let header = Header::try_decode(&bytes[..127]).expect("decode the header we wrote");
+    let (west, south, east, north) = header.bounds_degrees();
+    let (lon, lat) = header.center_degrees();
+
+    for (label, got, want) in [
+        ("west", west, WEST),
+        ("south", south, SOUTH),
+        ("east", east, EAST),
+        ("north", north, NORTH),
+        ("centre longitude", lon, CENTRE.0),
+        ("centre latitude", lat, CENTRE.1),
+    ] {
+        assert!(
+            (got - want).abs() < 1e-6,
+            "the writer was asked for a {label} of {want} and the archive \
+             carries {got}"
+        );
+    }
+
+    for (label, value) in [("west", west), ("east", east), ("centre longitude", lon)] {
+        assert!(
+            value.is_finite() && (-180.0..=180.0).contains(&value),
+            "the {label} in the archive is {value}, which is not a longitude. \
+             A latitude and a longitude exchanged on the way out reads exactly \
+             like this."
+        );
+    }
+    for (label, value) in [("south", south), ("north", north), ("centre latitude", lat)] {
+        assert!(
+            value.is_finite() && (-90.0..=90.0).contains(&value),
+            "the {label} in the archive is {value}, which is not a latitude. \
+             A latitude and a longitude exchanged on the way out reads exactly \
+             like this."
+        );
+    }
+
+    assert!(west <= east, "the bounds run west {west} to east {east}");
+    assert!(
+        south <= north,
+        "the bounds run south {south} to north {north}"
+    );
+    assert!(
+        (west..=east).contains(&lon) && (south..=north).contains(&lat),
+        "the centre ({lon}, {lat}) is outside the bounds"
+    );
+    assert!(
+        header.min_zoom <= header.max_zoom
+            && (header.min_zoom..=header.max_zoom).contains(&header.center_zoom),
+        "the zoom range is {}..={} with a centre zoom of {}",
+        header.min_zoom,
+        header.max_zoom,
+        header.center_zoom
+    );
+}
