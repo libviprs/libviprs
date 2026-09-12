@@ -28,18 +28,40 @@ filesystem entries it occupies. That last column is the one the whole epic is
 about: an archive is one entry however many tiles it holds, and a tree is one
 entry per tile plus every level and column directory above it.
 
-Reads report five scenarios. `read_cold` is one lookup on a reader that has
-never been used, `read_warm` is the same lookup again on the same reader,
-`read_sequential` walks the plan in order, `read_random` walks a deterministic
-shuffle, and `read_concurrent` runs the same shuffle across every available
-core.
+Reads report five scenarios. `read_cold` gives every lookup a reader that has
+never been used, `read_warm` walks the same coordinates on one reader that has
+already seen them, `read_sequential` walks the plan in order, `read_random`
+walks a deterministic shuffle, and `read_concurrent` runs the same shuffle
+across every available core.
+
+The cold row times the open as well as the lookup. For PMTiles that is a header
+fetch and a root-directory fetch, which is what a client really pays before its
+first tile; for the directory backend opening reads nothing at all, because a
+tree has nothing to read up front. Leaving it out would price one backend for
+work the other does not do.
 
 **Cold means a cold reader, not a cold page cache.** Dropping the OS page cache
 needs root on Linux and has no portable equivalent, so the harness does not
-claim to have done it. The gap between the cold and warm rows is the
-in-process caches alone (the PMTiles leaf cache, the directory reader's lack of
-one), which is the part libviprs controls and the part an optimisation would
+claim to have done it. The gap between the cold and warm rows is the open cost
+plus the in-process caches (the PMTiles leaf cache, the directory reader's lack
+of one), which is the part libviprs controls and the part an optimisation would
 move.
+
+### Root-only archives, and the one cell that is not
+
+Under 16384 directory entries the writer puts the whole directory in the root,
+so an archive of a few thousand tiles never exercises the leaf lookup, the leaf
+cache or the second ranged read. Three of the four cells in the large profile
+are in that regime and so is the CI cell.
+
+The fourth is 8192 pixels at a **64 pixel** tile: 21845 tiles, past the cutoff,
+so its archive really has leaf directories. Reaching that through the tile size
+rather than through a bigger canvas is deliberate, because 21845 tiles at 256
+pixel tiles needs a 32768 pixel source and that is a 3.2 GB raster, while what
+the read path cares about is the directory shape rather than the pixels behind
+it. `the_large_profile_reaches_the_leaf_directory_path` asserts the sweep still
+crosses the cutoff, so a future edit to the cell list cannot quietly drop the
+only cell that covers half the read path.
 
 ## Running it
 
@@ -49,9 +71,9 @@ The cheap profile is the default and takes seconds:
 cargo test --release --test pmtiles_benchmarks -- --ignored --nocapture
 ```
 
-The large profile walks three canvases up to 16384x16384 and takes minutes. It
-is opt-in on purpose, since a benchmark nobody runs because it is too expensive
-is a benchmark nobody runs:
+The large profile walks four cells, up to 16384x16384 pixels and up to 21845
+tiles, and takes minutes. It is opt-in on purpose, since a benchmark nobody runs
+because it is too expensive is a benchmark nobody runs:
 
 ```sh
 LIBVIPRS_BENCH_PROFILE=large \
@@ -91,6 +113,7 @@ by the site's JavaScript.
 | `width` | Source canvas width in pixels |
 | `height` | Source canvas height in pixels |
 | `megapixels` | `width * height / 1e6` |
+| `tile_size` | Tile edge in pixels. Two rows at one canvas and two tile sizes are not the same measurement: the tile count, and so the archive's directory shape, follows from it |
 | `engine` | `"pmtiles"` or `"directory"`. Named `engine` because that is the key the renderer groups on |
 | `concurrency` | Threads the row was measured at. 1 everywhere except `read_concurrent` |
 | `wall_time_ms` | Wall-clock milliseconds for the whole row |
@@ -179,8 +202,13 @@ and that the peak is still under the same formula.
    both name `PyramidStorage`, and MIGRATION.md states what `default()` answers
    and which variant keeps the old behaviour.
 3. **A publish can be rehearsed.** `publish.yml` offers a `dry_run` input, a
-   step honours it with `cargo publish --dry-run --locked`, and the real upload
-   stays behind the published-contract gate.
+   step honours it with `cargo publish --dry-run`, and the real upload stays
+   behind the published-contract gate. The publish commands also have to be
+   runnable on the checkout the workflow makes: `--locked` means something only
+   where `Cargo.lock` is tracked, this repository gitignores it, and both
+   branches carried the flag until the rehearsal for this issue hit "cannot
+   create the lock file because --locked was passed". The guard asserts the
+   pair, so tracking the lock file later fails it until the flag comes back.
 4. **This document is runnable.** Every `--test` command above names a test
    file that exists, and the column table above is checked against the field
    list the harness actually emits.

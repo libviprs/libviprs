@@ -69,16 +69,31 @@ impl Profile {
         }
     }
 
-    /// The source canvases a generation sweep walks, in pixels.
+    /// The cells a generation sweep walks: source width, source height, tile
+    /// size.
     ///
-    /// The CI row is one canvas, because the comparison this issue is about is
+    /// The CI row is one cell, because the comparison this issue is about is
     /// between two storage backends at one size rather than a scaling curve,
-    /// and a second canvas doubles the cost of the cheap profile to say the
-    /// same thing twice.
-    pub fn canvases(self) -> &'static [(u32, u32)] {
+    /// and a second cell doubles the cost of the cheap profile to say the same
+    /// thing twice.
+    ///
+    /// The last large cell is 8192 pixels at a **64 pixel** tile, which is the
+    /// only one of the four that produces more than `ROOT_ONLY_MAX_ENTRIES`
+    /// directory entries and so the only one whose archive has leaf
+    /// directories at all. Reaching that through the tile size rather than
+    /// through a bigger canvas is deliberate: 21845 entries at 256 pixel tiles
+    /// needs a 32768 pixel source, which is a 3.2 GB raster, and the archive's
+    /// directory shape is what the read path cares about rather than the
+    /// pixels behind it.
+    pub fn canvases(self) -> &'static [(u32, u32, u32)] {
         match self {
-            Self::Ci => &[(2048, 2048)],
-            Self::Large => &[(2048, 2048), (8192, 8192), (16384, 16384)],
+            Self::Ci => &[(2048, 2048, 256)],
+            Self::Large => &[
+                (2048, 2048, 256),
+                (8192, 8192, 256),
+                (16384, 16384, 256),
+                (8192, 8192, 64),
+            ],
         }
     }
 
@@ -108,6 +123,10 @@ pub struct Measurement {
     // --- the scalability_results.json shape ---
     pub width: u32,
     pub height: u32,
+    /// Tile edge in pixels. The archive's directory shape follows from how
+    /// many tiles a plan has, so two rows at one canvas size and two tile
+    /// sizes are not the same measurement.
+    pub tile_size: u32,
     pub megapixels: f64,
     /// `"pmtiles"` or `"directory"`. Named `engine` because that is the key
     /// the renderer groups on; the storage backend is what varies here.
@@ -155,6 +174,7 @@ impl Measurement {
         profile: Profile,
         width: u32,
         height: u32,
+        tile_size: u32,
         concurrency: usize,
         elapsed: Duration,
         tracked_bytes: u64,
@@ -177,6 +197,7 @@ impl Measurement {
         Self {
             width,
             height,
+            tile_size,
             megapixels: f64::from(width) * f64::from(height) / 1_000_000.0,
             engine: storage.to_string(),
             concurrency,
@@ -216,6 +237,7 @@ impl Measurement {
         push_u64(&mut out, "width", u64::from(self.width));
         push_u64(&mut out, "height", u64::from(self.height));
         push_f64(&mut out, "megapixels", self.megapixels);
+        push_u64(&mut out, "tile_size", u64::from(self.tile_size));
         push_str(&mut out, "engine", &self.engine);
         push_u64(&mut out, "concurrency", self.concurrency as u64);
         push_f64(&mut out, "wall_time_ms", self.wall_time_ms);
@@ -251,10 +273,11 @@ impl Measurement {
 /// The shape guard reads this rather than repeating the list, so a field added
 /// to [`Measurement::to_json`] and not here fails that guard instead of
 /// quietly shipping.
-pub const FIELDS: [&str; 20] = [
+pub const FIELDS: [&str; 21] = [
     "width",
     "height",
     "megapixels",
+    "tile_size",
     "engine",
     "concurrency",
     "wall_time_ms",
