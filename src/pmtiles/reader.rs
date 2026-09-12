@@ -150,11 +150,51 @@ pub const MAX_LEAF_DEPTH: u8 = 4;
 
 /// How many decoded leaf directories are kept.
 ///
-/// Small on purpose. This is a latency optimisation for a clustered walk,
-/// where thousands of consecutive lookups land in the same leaf, and it is
-/// deliberately off the correctness path: a cold cache changes how many reads
-/// happen and never what they return.
-pub const LEAF_CACHE_ENTRIES: usize = 4;
+/// Sixteen, and the number came out of a measurement rather than out of taste.
+///
+/// It was four, which is the right size for the clustered walk it was written
+/// for and the wrong size for random access. An archive of 21851 tiles has six
+/// leaves, and an LRU of four over six uniformly random leaves misses about a
+/// third of the time, with every miss paying a ranged read **and** a gzip
+/// inflate of a 4096-entry directory. Measured on exactly that archive while
+/// benchmarking issue #993: 20000 random lookups cost 1699 ms, against 127 ms
+/// for the same 20000 walked in order, and the directory backend beat the
+/// archive outright at 204 ms. Sequential was fine the whole time, which is
+/// why nothing had noticed: the failure only shows up in the access pattern
+/// the cache was not sized for.
+///
+/// Sixteen holds every leaf of an archive up to about 65000 tiles, which is
+/// where the leaf structure starts at all (`ROOT_ONLY_MAX_ENTRIES` is 16384
+/// and a leaf is 4096 entries). Past that the cache degrades the way any LRU
+/// does rather than falling off a cliff.
+///
+/// This is still deliberately off the correctness path: a cold cache changes
+/// how many reads happen and never what they return.
+///
+/// It is a *count*, and a count is not a memory bound, so
+/// [`LEAF_CACHE_ENTRY_BUDGET`] caps what the count cannot.
+pub const LEAF_CACHE_ENTRIES: usize = 16;
+
+/// Decoded directory entries the leaf cache may hold across every leaf it is
+/// holding.
+///
+/// [`LEAF_CACHE_ENTRIES`] bounds the cache at a leaf **count**, and a count is
+/// not a memory bound: `read_directory` lets one leaf decode to
+/// [`MAX_DIRECTORY_BYTES`] of wire format, and at four bytes an entry that is
+/// about a million entries, so sixteen of them would be hundreds of megabytes
+/// of [`Entry`] held by a reader that was asked for a tile. Raising the count
+/// from four to sixteen without this would have quadrupled a worst case
+/// nobody had ever written down.
+///
+/// 262144 entries is 6 MiB of `Entry` on a 64-bit target, and an ordinary
+/// archive never comes near it: sixteen 4096-entry leaves is 65536. So this is
+/// the bound that never binds in practice and always binds in principle, which
+/// is the only kind worth having.
+///
+/// The leaf just decoded is always kept, even when that one blob is over the
+/// budget by itself. The lookup in flight is holding it either way, so
+/// evicting it would cost a re-read and save nothing.
+pub const LEAF_CACHE_ENTRY_BUDGET: usize = 256 * 1024;
 
 /// A PMTiles v3 archive opened for random access.
 ///
@@ -533,6 +573,18 @@ impl<R: RangeReader> Reader<R> {
         leaves.retain(|(offset, _)| *offset != at);
         leaves.insert(0, (at, entries));
         leaves.truncate(LEAF_CACHE_ENTRIES);
+
+        // Then the budget, which is what makes the count a memory bound rather
+        // than a leaf count. Evicting from the back is the same LRU order the
+        // truncate above uses, and the loop stops at one entry so the leaf just
+        // decoded survives however large it is.
+        let mut held: usize = leaves.iter().map(|(_, leaf)| leaf.len()).sum();
+        while leaves.len() > 1 && held > LEAF_CACHE_ENTRY_BUDGET {
+            let Some((_, dropped)) = leaves.pop() else {
+                break;
+            };
+            held -= dropped.len();
+        }
     }
 
     /// The cache lock, recovered rather than unwrapped.
@@ -750,6 +802,57 @@ mod tests {
         assert!(reader.cached_leaf(0).is_none());
         assert!(reader.cached_leaf(1).is_none());
         assert!(reader.cached_leaf(LEAF_CACHE_ENTRIES as u64 + 1).is_some());
+    }
+
+    /// The budget evicts before the count does, when the leaves are big.
+    ///
+    /// Without this the cache is bounded by a leaf count, and a leaf has no
+    /// size limit short of [`MAX_DIRECTORY_BYTES`], so "sixteen leaves" is not
+    /// a number of bytes at all. The control is the second half: leaves small
+    /// enough to fit the budget are all kept, so this is not simply a cache
+    /// that evicts everything.
+    #[test]
+    fn the_leaf_cache_evicts_on_its_entry_budget_before_its_leaf_count() {
+        let entries = [Entry {
+            tile_id: 0,
+            offset: 0,
+            length: 4,
+            run_length: 1,
+        }];
+        let reader = Reader::try_new(Sized(archive(&entries, b"TILE"), true)).expect("opens");
+
+        // Three leaves, each 40% of the budget: the third pushes the total
+        // over and the oldest goes, long before the count cap of sixteen.
+        let big = LEAF_CACHE_ENTRY_BUDGET * 2 / 5;
+        let leaf = || Arc::new(vec![Entry::default(); big]);
+        for offset in 0..3u64 {
+            reader.remember_leaf(offset, leaf());
+        }
+        assert!(
+            reader.lock_leaves().len() < 3,
+            "three leaves at 40% of the budget each should not all be held"
+        );
+        assert!(
+            reader.cached_leaf(2).is_some(),
+            "the leaf just decoded is always kept"
+        );
+
+        // One leaf bigger than the whole budget is still kept, because the
+        // lookup that decoded it is holding it anyway.
+        reader.remember_leaf(
+            9,
+            Arc::new(vec![Entry::default(); LEAF_CACHE_ENTRY_BUDGET + 1]),
+        );
+        assert_eq!(reader.lock_leaves().len(), 1);
+        assert!(reader.cached_leaf(9).is_some());
+
+        // The control: small leaves are not evicted by the budget, so the
+        // count is what binds for an ordinary archive.
+        let fresh = Reader::try_new(Sized(archive(&entries, b"TILE"), true)).expect("opens");
+        for offset in 0..LEAF_CACHE_ENTRIES as u64 {
+            fresh.remember_leaf(offset, Arc::new(vec![Entry::default(); 4096]));
+        }
+        assert_eq!(fresh.lock_leaves().len(), LEAF_CACHE_ENTRIES);
     }
 
     #[test]

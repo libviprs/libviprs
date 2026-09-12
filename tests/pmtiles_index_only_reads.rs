@@ -495,3 +495,184 @@ fn a_whole_workload_never_fetches_the_metadata() {
         archive_size / fetched
     );
 }
+
+// ---------------------------------------------------------------------------
+// The leaf cache, counted rather than timed
+// ---------------------------------------------------------------------------
+
+/// How many leaf directories the archive below has.
+///
+/// Eight, which is over the four the leaf cache held before issue #993 and
+/// inside the sixteen it holds now. Both halves of that matter: at four this
+/// test fails, and at more than `LEAF_CACHE_ENTRIES` it would be asserting
+/// something no cache promises.
+const LEAVES: usize = 8;
+
+/// Tiles inside each of them.
+const TILES_PER_LEAF: usize = 4;
+
+/// An archive whose root holds nothing but leaf pointers.
+fn fabricate_leafy() -> (Counting, Vec<Vec<Placed>>) {
+    let four_gib = u64::from(u32::MAX) + 1;
+    let mut placed: Vec<Placed> = (0..(LEAVES * TILES_PER_LEAF) as u32)
+        .map(|i| {
+            Placed::at(
+                i,
+                (i * 3) % 1024,
+                four_gib + u64::from(i) * 4_096,
+                64 + i % 7,
+            )
+        })
+        .collect();
+    placed.sort_by_key(|t| t.tile_id);
+
+    let groups: Vec<Vec<Placed>> = placed
+        .chunks(TILES_PER_LEAF)
+        .map(<[Placed]>::to_vec)
+        .collect();
+    assert_eq!(groups.len(), LEAVES);
+
+    let mut leaf_section: Vec<u8> = Vec::new();
+    let mut pointers: Vec<Entry> = Vec::new();
+    for group in &groups {
+        let entries: Vec<Entry> = group
+            .iter()
+            .map(|t| Entry {
+                tile_id: t.tile_id,
+                offset: t.offset,
+                length: t.length,
+                run_length: 1,
+            })
+            .collect();
+        let body = Compression::None
+            .compress(&serialize_entries(&entries).expect("a leaf serialises"))
+            .expect("no compression is the identity");
+        pointers.push(Entry {
+            tile_id: group[0].tile_id,
+            offset: leaf_section.len() as u64,
+            length: u32::try_from(body.len()).expect("a leaf this small fits a u32"),
+            run_length: 0,
+        });
+        leaf_section.extend_from_slice(&body);
+    }
+
+    let root_bytes = Compression::None
+        .compress(&serialize_entries(&pointers).expect("the root serialises"))
+        .expect("no compression is the identity");
+
+    let header = Header {
+        root_offset: ROOT_OFFSET,
+        root_length: root_bytes.len() as u64,
+        metadata_offset: METADATA_OFFSET,
+        metadata_length: METADATA.len() as u64,
+        leaf_directories_offset: LEAF_OFFSET,
+        leaf_directories_length: leaf_section.len() as u64,
+        tile_data_offset: TILE_DATA_OFFSET,
+        tile_data_length: TILE_DATA_LENGTH,
+        addressed_tiles_count: (LEAVES * TILES_PER_LEAF) as u64,
+        tile_entries_count: (LEAVES * TILES_PER_LEAF) as u64,
+        tile_contents_count: (LEAVES * TILES_PER_LEAF) as u64,
+        clustered: true,
+        internal_compression: Compression::None,
+        tile_compression: Compression::None,
+        tile_type: TileType::Png,
+        min_zoom: ZOOM,
+        max_zoom: ZOOM,
+        ..Header::default()
+    };
+
+    let source = Counting {
+        segments: vec![
+            (0, header.encode().to_vec()),
+            (ROOT_OFFSET, root_bytes),
+            (METADATA_OFFSET, METADATA.to_vec()),
+            (LEAF_OFFSET, leaf_section),
+        ],
+        size: TILE_DATA_OFFSET + TILE_DATA_LENGTH,
+        requests: Mutex::new(Vec::new()),
+    };
+    (source, groups)
+}
+
+/// Every leaf of an eight-leaf archive stays cached, so a second pass over all
+/// of them reads tiles and no directories.
+///
+/// This is the regression guard on the leaf cache size (issue #993). The cache
+/// held four leaves, which is right for a clustered walk and wrong for random
+/// access: on a real 21851-tile archive with six leaves, 20000 random lookups
+/// cost 1699 ms against 127 ms for the same 20000 walked in order, because a
+/// third of them missed and paid a ranged read plus a gzip inflate of a
+/// 4096-entry directory. The number is sixteen now.
+///
+/// It counts reads rather than timing them, so it says the same thing on a
+/// loaded machine as on an idle one, and it fails for the one reason it is
+/// about rather than for load. A timing assertion here would be the sampling
+/// mistake dressed up as a benchmark.
+#[test]
+fn every_leaf_of_a_multi_leaf_archive_stays_cached() {
+    use libviprs::pmtiles::reader::LEAF_CACHE_ENTRIES;
+
+    assert!(
+        LEAVES > 4,
+        "this archive has to have more leaves than the cache used to hold, or it proves nothing"
+    );
+    assert!(
+        LEAVES <= LEAF_CACHE_ENTRIES,
+        "the cache holds {LEAF_CACHE_ENTRIES} leaves and this archive has {LEAVES}, so a miss \
+         on the second pass would be the cache working as designed"
+    );
+
+    let (source, groups) = fabricate_leafy();
+    let leaf_span = source.size;
+    let reader = Reader::try_new(source).expect("the fabricated archive opens");
+    assert_eq!(
+        reader.root_entries().len(),
+        LEAVES,
+        "the root should hold one pointer per leaf and no tile entries"
+    );
+    let _ = leaf_span;
+
+    // First pass: one tile out of every leaf, so every leaf is decoded once.
+    reader.source().forget();
+    for group in &groups {
+        let tile = group[0];
+        let got = reader
+            .get_tile(ZOOM, tile.x, tile.y)
+            .expect("the lookup succeeds")
+            .expect("the archive holds this tile");
+        assert_eq!(got, tile.expected());
+    }
+    let warming = reader.source().requests();
+    let leaf_reads = warming
+        .iter()
+        .filter(|r| r.offset >= LEAF_OFFSET && r.offset < TILE_DATA_OFFSET)
+        .count();
+    assert_eq!(
+        leaf_reads, LEAVES,
+        "the first pass should decode each leaf exactly once, got {warming:?}"
+    );
+
+    // Second pass: a different tile from each leaf, walked backwards, which is
+    // the order an LRU that is one short would evict in.
+    reader.source().forget();
+    for group in groups.iter().rev() {
+        let tile = group[TILES_PER_LEAF - 1];
+        let got = reader
+            .get_tile(ZOOM, tile.x, tile.y)
+            .expect("the lookup succeeds")
+            .expect("the archive holds this tile");
+        assert_eq!(got, tile.expected());
+    }
+    let second = reader.source().requests();
+    assert_eq!(
+        second.len(),
+        LEAVES,
+        "the second pass should be one read per tile and nothing else, got {second:?}"
+    );
+    assert!(
+        second
+            .iter()
+            .all(|r| r.offset >= TILE_DATA_OFFSET + u64::from(u32::MAX)),
+        "every read in the second pass should be a tile past 4 GiB, got {second:?}"
+    );
+}

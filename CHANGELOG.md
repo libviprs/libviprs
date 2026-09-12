@@ -3166,6 +3166,27 @@ and not under `Fixed`: this file is the only place they can be caught.
 
 ### Changed
 
+- **The PMTiles reader's leaf cache holds sixteen directories, not four**
+  (issue #993). `LEAF_CACHE_ENTRIES` was sized for a clustered walk, where
+  thousands of consecutive lookups land in one leaf, and it is the wrong size
+  for random access. Measured on a 21851-tile archive with six leaves: 20000
+  random lookups cost 1699 ms against 127 ms for the same 20000 walked in
+  order, a thirteen-fold gap, and the directory backend beat the archive
+  outright. An LRU of four over six uniformly random leaves misses about a
+  third of the time and every miss pays a ranged read plus a gzip inflate of a
+  4096-entry directory. At sixteen the same measurement is 55 ms against 38 ms.
+
+  A leaf count was never a memory bound, and quadrupling it would have
+  quadrupled a worst case nobody had written down: one leaf may decode to as
+  many entries as `MAX_DIRECTORY_BYTES` allows. So the new
+  `LEAF_CACHE_ENTRY_BUDGET` caps the decoded entries the cache holds across
+  every leaf at 262144, about 6 MiB, and evicts on whichever bound binds first.
+  The leaf a lookup just decoded is always kept even when it is over the budget
+  by itself, because the lookup in flight is holding it anyway.
+
+  Nothing about what a read returns changes: the cache was and remains off the
+  correctness path, and a cold cache only changes how many reads happen.
+
 - **A JPEG 2000 save writes the tile grid into `SIZ`**, so its bytes change
   even where the grid is one tile (issue #768). `jp2ksave` writes `XTsiz` and
   `YTsiz` from its tile options whether or not they cut the image up, and this
