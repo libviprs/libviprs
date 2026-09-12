@@ -511,6 +511,15 @@ const LEAVES: usize = 8;
 /// Tiles inside each of them.
 const TILES_PER_LEAF: usize = 4;
 
+// Both sides of [`LEAVES`] are constants, so they are checked when this file
+// compiles rather than when the test runs. Clippy is right that a runtime
+// assertion over two constants is not an assertion, and a compile error is a
+// better place to learn that the archive no longer has more leaves than the
+// cache used to hold (four, before issue #993) or that it has more than the
+// cache holds now, which would be asserting something no cache promises.
+const _: () = assert!(LEAVES > 4);
+const _: () = assert!(LEAVES <= libviprs::pmtiles::reader::LEAF_CACHE_ENTRIES);
+
 /// An archive whose root holds nothing but leaf pointers.
 fn fabricate_leafy() -> (Counting, Vec<Vec<Placed>>) {
     let four_gib = u64::from(u32::MAX) + 1;
@@ -610,27 +619,13 @@ fn fabricate_leafy() -> (Counting, Vec<Vec<Placed>>) {
 /// mistake dressed up as a benchmark.
 #[test]
 fn every_leaf_of_a_multi_leaf_archive_stays_cached() {
-    use libviprs::pmtiles::reader::LEAF_CACHE_ENTRIES;
-
-    assert!(
-        LEAVES > 4,
-        "this archive has to have more leaves than the cache used to hold, or it proves nothing"
-    );
-    assert!(
-        LEAVES <= LEAF_CACHE_ENTRIES,
-        "the cache holds {LEAF_CACHE_ENTRIES} leaves and this archive has {LEAVES}, so a miss \
-         on the second pass would be the cache working as designed"
-    );
-
     let (source, groups) = fabricate_leafy();
-    let leaf_span = source.size;
     let reader = Reader::try_new(source).expect("the fabricated archive opens");
     assert_eq!(
         reader.root_entries().len(),
         LEAVES,
         "the root should hold one pointer per leaf and no tile entries"
     );
-    let _ = leaf_span;
 
     // First pass: one tile out of every leaf, so every leaf is decoded once.
     reader.source().forget();

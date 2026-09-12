@@ -61,6 +61,13 @@ use bench::{Measurement, Profile, Splitmix};
 /// Environment variable a child cell reads to learn what to measure.
 const CELL_VAR: &str = "LIBVIPRS_BENCH_CELL";
 
+/// Prefix a child puts on the lines it wants the parent to reprint.
+///
+/// A child's stdout goes nowhere unless it fails, so anything it says about
+/// the pyramid it just built is lost. This is the one line per cell worth
+/// keeping: what shape the archive's directory came out.
+const SAY_PREFIX: &str = "CELL ";
+
 /// Environment variable naming the file a child writes its rows into.
 ///
 /// A file rather than a line on stdout, because a row is pretty-printed JSON
@@ -455,10 +462,35 @@ fn read_scenarios(
     rows
 }
 
+/// Print what shape the archive's directory came out, for a PMTiles cell.
+///
+/// Nothing in a result row carries this and every read number depends on it.
+/// Under the writer's `ROOT_ONLY_MAX_ENTRIES` the whole directory lives in the
+/// root, so the leaf lookup, the leaf cache and the second ranged read never
+/// run at all, and a sweep whose cells are all in that regime measures one
+/// half of the read path and reports it as the read path. It is printed rather
+/// than asserted because it is a property of the cell rather than a
+/// requirement on it; `the_large_profile_reaches_the_leaf_directory_path` is
+/// the assertion.
+fn report_directory_shape(storage: &str, cell: Cell, output: &Path) {
+    if storage != PMTILES {
+        return;
+    }
+    let reader = PmTilesPyramidReader::try_open(output).expect("the archive opens for reading");
+    let root = reader.reader().root_entries();
+    let leaves = root.iter().filter(|entry| entry.is_leaf()).count();
+    println!(
+        "{SAY_PREFIX}{storage} {}: root holds {} entries, {leaves} of them leaf pointers",
+        cell.spec(),
+        root.len(),
+    );
+}
+
 /// One cell: generate into one backend, then read it back every way.
 fn run_cell(storage: &str, profile: Profile, cell: Cell) -> Vec<Measurement> {
     let dir = tempfile::tempdir().expect("a scratch directory");
     let generated = generate(storage, profile, dir.path(), cell);
+    report_directory_shape(storage, cell, &generated.output);
     let mut rows = vec![generated.row];
     rows.extend(read_scenarios(
         storage,
@@ -560,6 +592,12 @@ fn spawn_cell(storage: &str, cell: Cell, into: &Path) -> String {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    for line in String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.strip_prefix(SAY_PREFIX))
+    {
+        println!("  {line}");
+    }
     let document = std::fs::read_to_string(into).unwrap_or_else(|e| {
         panic!(
             "the {storage} {} cell wrote no rows to {}: {e}\n{}",
