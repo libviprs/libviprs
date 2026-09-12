@@ -45,7 +45,7 @@ pub const TILEID_JSON_SHA256: &str =
     "a486b48b09ab1b9d8f20208b992fc47b89ba67c235506f5f47cccd808e82b265";
 /// sha256 of `tests/fixtures/pmtiles/vectors/header.json`.
 pub const HEADER_JSON_SHA256: &str =
-    "99258d11ea1fa9cd99c8b28a74ea1bf217e0dea87b4ee00776a6b0c1ea36f1c3";
+    "92e0d18f2b10781249f8b731cafe54aa16936404270cfd30c9dc28e58559af39";
 /// sha256 of `tests/fixtures/pmtiles/vectors/directory.json`.
 pub const DIRECTORY_JSON_SHA256: &str =
     "9f01472702fd4e93c3025bd9897cc336429a1bc05385f35ae555f238490e4d47";
@@ -65,6 +65,16 @@ pub const DUPES_GOLDEN_SHA256: &str =
 /// sha256 of `tests/fixtures/pmtiles/leaves-z0z7.pmtiles`.
 pub const LEAVES_GOLDEN_SHA256: &str =
     "fe5c9636be61abc60046d7f13837f8a3efb20ce3c38303644dac0cbec8248b8d";
+/// sha256 of `tests/fixtures/pmtiles/distinct-z0z7.pmtiles`.
+///
+/// The leaf golden with leaves that start somewhere. Every leaf in
+/// `leaves-z0z7` holds tile entries starting at offset 0, which makes
+/// "rebase each leaf on its own first entry" the identity, and measured, a
+/// reader that does exactly that passes all 128 tests here. This archive's five
+/// leaves start at 0, 49164, 98324, 147497 and 196597, so the mistake moves
+/// bytes in four of the five.
+pub const DISTINCT_GOLDEN_SHA256: &str =
+    "a32dce77a93a304dbd27b80d72160b29455446931b477b5b1b7a84155ecd2dd5";
 
 /// The release the whole fixture set was produced by, asserted out of the
 /// `produced_by` block of every vector file so a fixture swapped for one from

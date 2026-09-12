@@ -33,6 +33,7 @@ downloaded assets, cross-checked against the sizes the GitHub API reports for th
 | `raster-z0z2.pmtiles` | 1878 | `e2ed5e64f3c29efa3ec3b679ec5f1b06569c1b234c6eea762fb9f02fc23e9c12` |
 | `dupes-z0z3.pmtiles` | 5007 | `bfc9db4c6ce6a04194e02b3d4815814adb05209f1aaba8591e4e1332f6e56a27` |
 | `leaves-z0z7.pmtiles` | 869 | `fe5c9636be61abc60046d7f13837f8a3efb20ce3c38303644dac0cbec8248b8d` |
+| `distinct-z0z7.pmtiles` | 246114 | `a32dce77a93a304dbd27b80d72160b29455446931b477b5b1b7a84155ecd2dd5` |
 
 All three pass `pmtiles verify` with exit code 0.
 
@@ -138,6 +139,35 @@ directory region instead.
 Two more numbers that line up and are worth asserting: the six leaf lengths sum to 391, which is
 `header.leaf_directory_length`, and `leaf_directory_offset + leaf_directory_length` is 725, which
 is `header.tile_data_offset`.
+
+### distinct-z0z7.pmtiles
+
+The leaf fixture whose leaves start somewhere, and it is here because the paragraph above turned out
+to be half wrong about `leaves-z0z7`.
+
+Everything that paragraph says about the leaf *pointer* base holds. What it misses is the other
+candidate, and it is the one that hides: a writer rebasing each leaf onto that leaf's own first
+entry. Every tile entry in every leaf of `leaves-z0z7` carries offset 0 or 72 and every leaf's first
+entry is the one at 0, so subtracting it is the identity. Measured rather than argued: a reader doing
+exactly that passes all 128 tests in this crate's PMTiles suite, and
+`all_twenty_one_thousand_entries_behind_the_leaves_come_back_correct` is in that count. It resolves
+every one of the 21845 entries against recorded entry data and the rebase moves none of it. The
+fixture is sitting on the identity element of the operation under test, which is not a weakness of
+any test written against it.
+
+Zooms 1 to 7, 19858 addressed tiles, 19843 distinct payloads, 5 leaf directories of 4096, 4096, 4096,
+4096 and 3463 entries. The tile entries in those leaves start at offsets 0, 49164, 98324, 147497 and
+196597, so a self-rebase is the identity for the first leaf only and moves bytes for the other four.
+`a_tile_entry_in_a_leaf_resolves_against_tile_data_and_not_against_any_other_base` in
+`tests/pmtiles_reader.rs` checks all four candidate bases against it and skips the first leaf's
+comparison rather than counting it as evidence.
+
+The payloads are not PNGs, whatever the `tile_type` byte says: each one is a self-describing record,
+a `T` then the zoom then x and y as `u16`s then coordinate-derived padding, which is what makes every
+tile distinguishable from every other. That is the whole point of the archive, and it is why it is
+240 KB rather than 869 bytes. It came out of the same pinned `pmtiles convert`; the generator for its
+MBTiles input is `discrimination/tools/fixtures.py` in the oracle lane, and it is committed in
+`libviprs-tests` with the same provenance.
 
 ## One warning about the reference
 
