@@ -142,11 +142,9 @@ fn generate(storage: &str, profile: Profile, dir: &Path, width: u32, height: u32
                 .tile_format(TileFormat::Png)
                 .build()
                 .expect("the archive sink builds");
-            let started = Instant::now();
             let result = EngineBuilder::new(&source, plan.clone(), sink)
                 .run()
                 .expect("the archive run succeeds");
-            let _ = started;
             (result, archive)
         }
         DIRECTORY => {
@@ -364,10 +362,13 @@ fn read_scenarios(
         random_pass,
     ));
 
+    // At least two, because a "concurrent" row measured on one thread is a
+    // sequential row wearing the wrong label, and a container pinned to one
+    // CPU is exactly where that would happen unnoticed.
     let threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4)
-        .min(8);
+        .clamp(2, 8);
     let concurrent = concurrent_pass(reader.as_ref(), &random, threads);
     rows.push(read_row(
         "read_concurrent",
@@ -676,7 +677,9 @@ fn the_exported_json_carries_every_field_the_site_reads() {
     let document = bench::to_json(&rows);
     let parsed: serde_json::Value =
         serde_json::from_str(&document).expect("the exported document is JSON");
-    let array = parsed.as_array().expect("the document is a top-level array");
+    let array = parsed
+        .as_array()
+        .expect("the document is a top-level array");
     assert_eq!(array.len(), 2, "one object per measurement");
 
     for record in array {

@@ -1254,6 +1254,34 @@ and not under `Fixed`: this file is the only place they can be caught.
   extension table, and what to name to keep the tree. This comes out of the
   PMTiles epic, #986.
 
+- **The PMTiles numbers, and the two proofs under them** (issue #993).
+  `docs/pmtiles-benchmarks.md` is the procedure behind the figures
+  libviprs.org publishes for archive storage: `FsSink` against `PmTilesSink`
+  over one source and one plan, reporting wall time, tiles per second, the
+  engine's tracked working set, process peak RSS, output bytes and the
+  filesystem-entry count an archive collapses to one. Reads cover cold, warm,
+  sequential, random and concurrent on both backends. A cheap profile runs in
+  seconds and a larger one is opt-in through `LIBVIPRS_BENCH_PROFILE`, and the
+  export is a JSON array whose first twelve fields are spelled the way the
+  existing scalability data spells them.
+
+  No `criterion` and no `benches/` directory. Criterion measures the
+  distribution of many calls to one function, and the numbers that decide this
+  comparison are properties of a single run: peak RSS, output size, entry
+  count. The harness reuses the `#[ignore]`d wall-clock convention and the
+  `MemoryTracker` the engine already reports through `EngineResult`.
+
+  Two claims the format rests on are now measured rather than asserted in
+  prose. The writer's memory is watched by a counting global allocator, and
+  the peak is held to a formula built from the sort-buffer size and the
+  distinct-payload count, with a control that fails a writer whose peak cannot
+  move at all. And a read is shown to be the index and the tile: a fabricated
+  6 GiB archive, served through a counting `RangeReader`, answers a lookup in
+  one or two small ranged reads at offsets past `u32::MAX` and never touches
+  its own metadata section. Neither costs a real 4 GiB archive on a CI run;
+  the write half of that boundary is the opt-in profile the doc describes.
+  This closes out the PMTiles epic, #986.
+
 - **`.tif` and `.tiff` are save routes** (issue #948). `src/encode_tiff.rs` has
   had a working `Raster::save_tiff` with round-trip tests behind it all along,
   and neither save route ever grew a row, so `raster.save("out.tif")` answered

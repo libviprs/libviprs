@@ -118,9 +118,9 @@ impl RangeReader for Counting {
             .unwrap_or_else(|e| e.into_inner())
             .push(Request { offset, len });
 
-        let end = offset
-            .checked_add(len as u64)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "offset + len overflowed"))?;
+        let end = offset.checked_add(len as u64).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "offset + len overflowed")
+        })?;
         if end > self.size {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
@@ -212,25 +212,27 @@ struct Fabricated {
 fn fabricate() -> Fabricated {
     let four_gib = u64::from(u32::MAX) + 1;
 
-    // Four tiles, all of them at offsets a `u32` cannot hold. The two the leaf
-    // addresses sit further out again, so following a leaf pointer is also
-    // doing 64-bit arithmetic rather than inheriting the root's.
-    let mut root_tiles = [
+    // Four tiles, every one of them at an offset a `u32` cannot hold, at four
+    // offsets spread across the section so a reader that computed the wrong
+    // one comes back with the wrong synthetic bytes.
+    let mut placed = [
         Placed::at(1, 1, four_gib + 4_096, 512),
         Placed::at(2, 2, four_gib + 1_048_576, 700),
-    ];
-    let mut leaf_tiles = [
         Placed::at(300, 300, TILE_DATA_LENGTH - 100_000, 1_024),
         Placed::at(301, 301, TILE_DATA_LENGTH - 50_000, 256),
     ];
 
-    // Directory entries must ascend by tile id, and the Hilbert ordering of a
-    // zoom does not follow `(x, y)`, so sort rather than assume.
-    root_tiles.sort_by_key(|t| t.tile_id);
-    leaf_tiles.sort_by_key(|t| t.tile_id);
+    // Which two end up in the root and which two behind the leaf is decided by
+    // the tile ids, not by the coordinates. PMTiles orders a zoom by its
+    // Hilbert curve, so `(300, 300)` is not necessarily above `(1, 1)`, and a
+    // directory whose entries do not strictly ascend is a file the format
+    // cannot express.
+    placed.sort_by_key(|t| t.tile_id);
+    let root_tiles = [placed[0], placed[1]];
+    let leaf_tiles = [placed[2], placed[3]];
     assert!(
         root_tiles[1].tile_id < leaf_tiles[0].tile_id,
-        "the leaf has to cover ids above everything the root addresses directly"
+        "the four tile ids should be distinct and ordered"
     );
 
     let leaf_entries: Vec<Entry> = leaf_tiles
@@ -298,11 +300,21 @@ fn fabricate() -> Fabricated {
         requests: Mutex::new(Vec::new()),
     };
 
+    // A coordinate the archive deliberately does not hold. Asserted rather
+    // than assumed: the Hilbert ordering means a "clearly different" pair of
+    // coordinates is not obviously a different tile id.
+    let missing = (900u32, 900u32);
+    let missing_id = zxy_to_tileid(ZOOM, missing.0, missing.1).expect("inside the zoom's grid");
+    assert!(
+        placed.iter().all(|t| t.tile_id != missing_id),
+        "the coordinate chosen as a miss is one of the four the archive holds"
+    );
+
     Fabricated {
         source,
         from_root: root_tiles,
         from_leaf: leaf_tiles,
-        missing: (900, 900),
+        missing,
     }
 }
 
