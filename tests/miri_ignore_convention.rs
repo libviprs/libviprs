@@ -413,7 +413,15 @@ const EXPECTED_SRC_MODULES: usize = 30;
 /// shape [`process_spawning_fns`] exists for. The other two drive that file's
 /// own `parse` on a string literal and spawn nothing, so they carry no
 /// annotation and the detector is right to leave them out.
-const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 36;
+///
+/// Thirty-seven since #993, and the one is
+/// `tests/pmtiles_benchmarks.rs::pmtiles_versus_directory`. It re-executes its
+/// own test binary once per benchmark cell, because peak RSS is a high-water
+/// mark the kernel never lowers and two storage backends measured in one
+/// process hand the second one the first one's peak. The child,
+/// `benchmark_cell`, spawns nothing itself and so is not in this set; it is in
+/// the filesystem one.
+const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 37;
 
 /// The filesystem-touching tests still allowed to run under Miri, and so still
 /// allowed to end the whole run on their first syscall.
@@ -507,7 +515,17 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// compares the tool's answer against the host can fail. Twelve more tests in
 /// that file spawn python3 and touch nothing, which is why they are
 /// `annotated not-detected` rows, and the last two spawn nothing at all.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 373;
+///
+/// #993 moved it 373 to 382, and the nine are the PMTiles benchmark and
+/// bounded-memory suites: four in `tests/pmtiles_benchmarks.rs`, four in
+/// `tests/pmtiles_bounded_memory.rs` and the one in
+/// `tests/pmtiles_release_readiness.rs` that checks the benchmark document
+/// names test files that exist. Every one of them writes a pyramid, an archive
+/// or a writer's scratch directory into a `tempfile::tempdir()`, so all nine
+/// are `annotated fs-detected` and none of them is a judgement call.
+/// `tests/pmtiles_index_only_reads.rs` arrived in the same change and adds
+/// none, because it fabricates its archive in memory and never opens a file.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 382;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
