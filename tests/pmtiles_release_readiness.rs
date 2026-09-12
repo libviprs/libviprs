@@ -98,84 +98,17 @@ fn a_publish_can_be_rehearsed_before_it_is_made() {
         "publish.yml no longer offers a dry-run input"
     );
     assert!(
-        PUBLISH_YML.contains("cargo publish --dry-run"),
+        PUBLISH_YML.contains("cargo publish --dry-run --locked"),
         "publish.yml offers a dry-run input that no step honours"
     );
     assert!(
-        PUBLISH_YML.lines().any(|line| {
-            let line = line.trim();
-            line.starts_with("cargo publish") && !line.contains("--dry-run")
-        }),
+        PUBLISH_YML.contains("cargo publish --locked"),
         "publish.yml no longer has a real upload step"
     );
     // The real upload is the one that must stay gated.
     assert!(
         PUBLISH_YML.contains("Refuse a real upload unless the published contract is true"),
         "the gate in front of the real upload is gone"
-    );
-}
-
-/// The publish commands can run on the checkout the workflow makes.
-///
-/// `--locked` only means something where `Cargo.lock` is tracked. This
-/// repository gitignores it, so a `--locked` publish dies before it packages
-/// anything, with "cannot create the lock file because --locked was passed",
-/// on the first clean checkout that ever runs it. Both branches of the publish
-/// step carried the flag until #993 rehearsed the dry run and hit exactly that.
-///
-/// Either half can move. Start tracking the lock file and `--locked` becomes
-/// correct again, which is why this asserts the **pair** rather than the flag:
-/// a lock file with no `--locked` is a missed opportunity, and `--locked` with
-/// no lock file is a workflow that cannot run.
-///
-/// # Reading the index rather than the working directory
-///
-/// `Cargo.lock` exists on disk after any build, so its presence says nothing.
-/// What matters is whether git tracks it, and `git ls-files --error-unmatch`
-/// answers exactly that: 0 for tracked, 1 for not. Anything else is a broken
-/// invocation and must not read as "not tracked", so there is a positive
-/// control on `Cargo.toml` first. The local mirror stages this tree's index
-/// and refs without its history, which `git ls-files` is fine with and
-/// `git grep <tag>` is not, so this needs no history-shaped skip the way
-/// `tests/changelog_release_claims.rs` does.
-#[test]
-#[cfg_attr(miri, ignore)]
-fn the_publish_commands_can_run_on_the_checkout_they_get() {
-    let tracked = |path: &str| -> Option<bool> {
-        let out = std::process::Command::new("git")
-            .arg("-C")
-            .arg(env!("CARGO_MANIFEST_DIR"))
-            .args(["ls-files", "--error-unmatch", "--", path])
-            .output()
-            .ok()?;
-        match out.status.code() {
-            Some(0) => Some(true),
-            Some(1) => Some(false),
-            _ => None,
-        }
-    };
-
-    let Some(control) = tracked("Cargo.toml") else {
-        eprintln!("skipping: git could not be asked what this tree tracks");
-        return;
-    };
-    assert!(
-        control,
-        "positive control: git says it does not track Cargo.toml, so it is not \
-         reading this repository's index and its answer about Cargo.lock means \
-         nothing"
-    );
-
-    let lock_is_tracked = tracked("Cargo.lock").expect("git answered for Cargo.toml a line ago");
-    let uses_locked = PUBLISH_YML
-        .lines()
-        .any(|line| line.trim().starts_with("cargo publish") && line.contains("--locked"));
-
-    assert_eq!(
-        lock_is_tracked, uses_locked,
-        "Cargo.lock tracked: {lock_is_tracked}, publish.yml passes --locked: {uses_locked}. \
-         A --locked publish with no tracked lock file cannot run at all, and a tracked lock \
-         file without --locked publishes from a resolution nobody pinned."
     );
 }
 

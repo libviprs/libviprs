@@ -534,7 +534,10 @@ fn splice(documents: &[String]) -> String {
                 .strip_prefix('[')
                 .and_then(|rest| rest.strip_suffix(']'))
                 .unwrap_or_else(|| panic!("a cell document is a JSON array, got {doc:?}"))
-                .trim()
+                // Only the newlines the brackets sat on, so the records keep
+                // the two-space indent the rest of the document is written at.
+                .trim_start_matches('\n')
+                .trim_end()
         })
         .filter(|body| !body.is_empty())
         .collect();
