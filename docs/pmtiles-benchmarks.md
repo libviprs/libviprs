@@ -54,14 +54,24 @@ so an archive of a few thousand tiles never exercises the leaf lookup, the leaf
 cache or the second ranged read. Three of the four cells in the large profile
 are in that regime and so is the CI cell.
 
-The fourth is 8192 pixels at a **64 pixel** tile: 21845 tiles, past the cutoff,
+The fourth is 8192 pixels at a **64 pixel** tile: 21851 tiles, past the cutoff,
 so its archive really has leaf directories. Reaching that through the tile size
-rather than through a bigger canvas is deliberate, because 21845 tiles at 256
-pixel tiles needs a 32768 pixel source and that is a 3.2 GB raster, while what
-the read path cares about is the directory shape rather than the pixels behind
-it. `the_large_profile_reaches_the_leaf_directory_path` asserts the sweep still
-crosses the cutoff, so a future edit to the cell list cannot quietly drop the
-only cell that covers half the read path.
+rather than through a bigger canvas is deliberate, because that many tiles at
+256 pixel tiles needs a 32768 pixel source and that is a 3.2 GB raster, while
+what the read path cares about is the directory shape rather than the pixels
+behind it. `the_large_profile_reaches_the_leaf_directory_path` asserts the sweep
+still crosses the cutoff, so a future edit to the cell list cannot quietly drop
+the only cell that covers half the read path.
+
+The count is 21851 and not 21845, and both numbers are real, which is why this
+document carried one in its prose and the other in its tables until I checked.
+21845 is the sum of the eight levels whose source is at least one tile across,
+which is the number most people mean by a full pyramid at 8192 pixels and 64
+pixel tiles. The planner keeps halving the source until it is one pixel, so
+there are fourteen levels rather than eight and the last six carry one tile
+each. `the_eight_thousand_pixel_cell_plans_the_tile_count_the_doc_publishes`
+pins both numbers and the level count, so the next person does not have to
+derive it again.
 
 ## Running it
 
@@ -71,7 +81,7 @@ The cheap profile is the default and takes seconds:
 cargo test --release --test pmtiles_benchmarks -- --ignored --nocapture
 ```
 
-The large profile walks four cells, up to 16384x16384 pixels and up to 21845
+The large profile walks four cells, up to 16384x16384 pixels and up to 21851
 tiles, and takes minutes. It is opt-in on purpose, since a benchmark nobody runs
 because it is too expensive is a benchmark nobody runs:
 
@@ -83,12 +93,14 @@ cargo test --release --test pmtiles_benchmarks -- --ignored --nocapture
 
 `LIBVIPRS_BENCH_PROFILE` selects `ci` (the default) or `large`.
 `LIBVIPRS_BENCH_JSON` chooses where the export lands; without it the export
-goes to `target/pmtiles-benchmarks.json`.
+goes to `target/pmtiles_results.json`. It is deliberately not named
+`scalability_results.json`: that file is a generated artefact of libviprs-bench
+and a hand-placed file on its name is a number nobody can trace back to a run.
 
 Run it in the Linux container rather than on a developer machine if the peak
 RSS column matters. It comes from `/proc/self/status`, which exists on Linux
-and nowhere else this crate builds for, and a platform with no answer reports
-`0.0` rather than a number invented to fill the column.
+and nowhere else this crate builds for, and a platform with no answer publishes
+`null` rather than a number invented to fill the column.
 
 ### Every measurement is a fresh process
 
@@ -101,12 +113,23 @@ become the read scenario's floor.
 
 ## The exported JSON
 
-A top-level array of objects, one per measured row, written to the path
-`LIBVIPRS_BENCH_JSON` names. The first twelve fields are spelled exactly as
-`scalability_results.json` spells them, so the libviprs.org renderer and the
-`ScalabilityPoint` deserialiser in libviprs-bench read this file with no second
-code path. The rest are additive: an unknown key is ignored by `serde_json` and
-by the site's JavaScript.
+An envelope, `{"schema": 1, "rows": [...]}`, written to the path
+`LIBVIPRS_BENCH_JSON` names. The envelope is there so a consumer can refuse a
+document it was not written against instead of reading a renamed column as
+absent, and `schema` is the number that changes when a field changes meaning.
+
+`engine` says which engine produced the row and is `"libviprs"` on every row
+here, because both sides of this comparison run the same one. `storage` says
+which backend, and that is what varies. They used to hold the same string,
+which made one of them a duplicate under a name that says something else.
+
+**A column a row did not measure is `null`, never `0`.** A generation row
+measures the pyramid it wrote and no latencies; a read row measures latencies
+and not the pyramid, which the generation row for the same pyramid already did.
+A zero would be a value on a scale somebody plots: `filesystem_entries: 0` reads
+as better than the `1` a real archive costs, and `resource_cost: 0` is the best
+possible score on a column where lower is better. Both of those were what a
+failed measurement used to publish.
 
 | Column | Meaning |
 |---|---|
@@ -114,28 +137,35 @@ by the site's JavaScript.
 | `height` | Source canvas height in pixels |
 | `megapixels` | `width * height / 1e6` |
 | `tile_size` | Tile edge in pixels. Two rows at one canvas and two tile sizes are not the same measurement: the tile count, and so the archive's directory shape, follows from it |
-| `engine` | `"pmtiles"` or `"directory"`. Named `engine` because that is the key the renderer groups on |
+| `engine` | The engine under test. `"libviprs"` on every row here |
 | `concurrency` | Threads the row was measured at. 1 everywhere except `read_concurrent` |
 | `wall_time_ms` | Wall-clock milliseconds for the whole row |
-| `tracked_memory_mb` | The engine's own `MemoryTracker` peak: raster buffers, nothing else. 0 for a read row |
-| `peak_rss_mb` | Process peak resident set for this phase. 0 where the platform has no answer |
+| `tracked_memory_mb` | The engine's own `MemoryTracker` peak: raster buffers, nothing else. `null` on a read row, which allocates none |
+| `peak_rss_mb` | Process peak resident set for this phase. `null` where the platform has no answer |
 | `tiles_produced` | Tiles written, or tiles read back for a read row |
-| `tiles_per_second` | `tiles_produced` over wall time |
-| `tiles_per_second_per_mb` | Throughput per peak-RSS megabyte. Higher is better |
-| `resource_cost` | RSS-megabyte-seconds per tile. Lower is better |
+| `tiles_per_second` | `tiles_produced` over wall time. `null` when the row took no measurable time |
+| `tiles_per_second_per_mb` | Throughput per peak-RSS megabyte, higher is better. `null` whenever `peak_rss_mb` is |
+| `resource_cost` | RSS-megabyte-seconds per tile, lower is better. `null` whenever `peak_rss_mb` is |
 | `scenario` | `generate`, `read_cold`, `read_warm`, `read_sequential`, `read_random` or `read_concurrent` |
-| `storage` | The same value as `engine`, under the name that says what it is |
+| `storage` | `pmtiles` or `directory`, the backend the row measured |
 | `profile` | `ci` or `large` |
-| `output_bytes` | Bytes the pyramid occupies on disk |
-| `filesystem_entries` | Filesystem entries it occupies, directories included. 1 for an archive |
-| `bytes_fetched` | Tile payload bytes the row's lookups returned. 0 for a generation row |
-| `p50_latency_us` | Median per-lookup latency in microseconds. 0 for a generation row |
-| `p99_latency_us` | 99th-percentile per-lookup latency in microseconds. 0 for a generation row |
+| `output_bytes` | Bytes the pyramid occupies on disk. `null` on a read row, and `null` when the path could not be walked |
+| `filesystem_entries` | Filesystem entries it occupies, directories included. 1 for an archive. `null` on a read row, and `null` when the path could not be walked |
+| `tile_bytes_returned` | Tile payload bytes the row's lookups returned, summed. `null` on a generation row |
+| `p50_latency_us` | Median per-lookup latency in microseconds. `null` on a generation row |
+| `p99_latency_us` | 99th-percentile per-lookup latency in microseconds. `null` on a generation row |
 
-The two ratio columns are derived exactly the way the existing scalability
-producer derives them, both on the peak-RSS basis, so a row here means the same
-thing as a row there. Both are 0 when the RSS basis is unavailable, which is
-the same answer that producer gives when its denominator is zero.
+`tile_bytes_returned` was `bytes_fetched`, and the rename is the point of it.
+It sums the lengths of the payloads the lookups handed back, which is not bytes
+off the transport, and bytes off the transport is exactly what the index-only
+proof is about. A reader would have taken that column as evidence for a claim it
+does not measure. Transport bytes are counted in
+`tests/pmtiles_index_only_reads.rs`, against a `RangeReader` that can see them.
+
+The two ratio columns are derived the way the existing scalability producer
+derives them, both on the peak-RSS basis, so a row here means the same thing as
+a row there. The one difference is the missing denominator: that producer
+answers `0` and this one answers `null`.
 
 ## The numbers, as measured
 
@@ -277,25 +307,73 @@ The cause was the reader's leaf cache holding four decoded leaves. That is the
 right size for the clustered walk it was written for, and the wrong size for
 random access: this archive has six leaves, an LRU of four over six uniformly
 random leaves misses about a third of the time, and every miss pays a ranged
-read **and** a gzip inflate of a 4096-entry directory. The cache holds sixteen
-now, which covers every leaf of an archive up to about 65000 tiles, and past
-that it degrades the way an LRU does rather than falling off a cliff.
+read **and** a decode of a 4096-entry directory.
 
-Raising a count is not free, so a count is no longer the only bound.
-`LEAF_CACHE_ENTRY_BUDGET` caps the decoded entries the cache holds across every
-leaf, because one leaf can decode to as many entries as `MAX_DIRECTORY_BYTES`
-allows and sixteen of those would be hundreds of megabytes held by a reader that
-was asked for a tile. The budget is 262144 entries, about 6 MiB, which an
-ordinary archive never comes near.
+### The size is a step, not a slope
+
+The first fix here raised the count to sixteen and said that past sixteen
+leaves the cache "degrades the way any LRU does rather than falling off a
+cliff". That is false, and measuring it is what says so. The miss rate of an
+LRU of `k` over `N` uniformly random leaves is exactly `1 - k/N`, because the
+cache holds the `k` most recently referenced distinct leaves and every leaf is
+equally likely to be one of them. On fabricated archives of 4096-entry leaves,
+20000 random lookups each:
+
+| leaves | tiles | cache of 16 | cache of 64 |
+|---|---|---|---|
+| 16 | 65536 | 0.38 us, 0.1% miss | 0.36 us |
+| **17** | **69632** | **7.37 us, 5.9% miss** | 0.37 us |
+| 24 | 98304 | 37.61 us, 32.9% miss | 0.43 us |
+| 64 | 262144 | 93.40 us, 75.1% miss | 0.69 us |
+| 256 | 1048576 | 112.12 us, 93.6% miss | 70.75 us |
+
+Sixteen leaves to seventeen is a nineteenfold jump for one more leaf. The cliff
+does not soften with size, it moves.
+
+So the count is derived from the memory bound rather than picked. It is
+`MAX_CACHED_LEAF_ENTRIES / 4096`, which is **64**, and a `const _` assertion in
+`src/pmtiles/reader.rs` holds the two together so they cannot disagree again.
+They did disagree: sixteen leaves at 4096 entries is 65536, a quarter of the
+262144-entry budget, so the count bound always bit first and the budget never
+bound at all on any archive this crate writes. Going to 64 costs nothing the
+budget had not already declared acceptable.
+
+`MAX_CACHED_LEAF_ENTRIES` is the memory bound, at 262144 entries or about 6
+MiB, and that figure is now the real ceiling. It leads with the budget because a
+count of leaves is not a bound at all: one leaf may decode to as many entries as
+`MAX_DIRECTORY_BYTES` allows, which is about a million. A leaf over the whole
+budget by itself is handed back to the lookup and not cached, where it used to
+be kept on the argument that the lookup holds it anyway. That is true of the
+`Arc` and not of the cache slot, and the difference between the two is a 6 MiB
+ceiling and a 24 MiB one.
+
+### What a miss actually costs
+
+Not the gzip, which is what this document, the CHANGELOG and the reader's own
+rustdoc all said. Measured on a realistic leaf, 9157 stored bytes inflating to
+22647: `deserialize_entries` is 52 to 68 us, the gzip inflate is 32 to 35, and
+the whole miss is 84 to 103. The varint decode is about 62% of it. Per-entry
+decode cost is flat at 11.6 to 12.9 ns from 64 entries to 16384, so this is the
+varint loop itself at roughly 3 ns a varint rather than cache locality across
+the column passes. Anyone who wants a cheaper miss should go at the decode.
+
+### The guards
 
 `every_leaf_of_a_multi_leaf_archive_stays_cached` in
-`tests/pmtiles_index_only_reads.rs` is the regression guard, and it **counts
-reads rather than timing them**: an eight-leaf fabricated archive, walked once
-to warm and once backwards to check, has to answer the second pass with one read
-per tile and no directory reads at all. At a cache of four it answers with
-twelve reads instead of eight, which is how that test was checked. A timing
-assertion in that position would have been a benchmark pretending to be a guard,
-and it would say something different on every machine.
+`tests/pmtiles_index_only_reads.rs` **counts reads rather than timing them**: an
+eight-leaf fabricated archive, walked once to warm and once backwards to check,
+has to answer the second pass with one read per tile and no directory reads at
+all. A timing assertion in that position would have been a benchmark pretending
+to be a guard, and it would say something different on every machine.
+
+`the_miss_rate_over_a_cache_too_small_tracks_the_cache_size` is the other side,
+and it is the side that was unreachable before: the guard above used to
+compile-assert that its own archive fitted the cache, so the only interesting
+case, more leaves than the cache holds, could not be written. It builds a
+96-leaf archive, walks 4096 seeded random lookups and asserts the miss rate
+tracks `1 - k/N`: measured 0.3323 against a predicted 0.3333. It also pins the
+cache size against the writer's own leaf size, so somebody re-hardcoding a count
+fails there rather than shrinking a test archive and staying green.
 
 ## The bounded-memory proof
 

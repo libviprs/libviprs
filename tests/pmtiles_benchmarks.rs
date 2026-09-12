@@ -112,12 +112,17 @@ fn reset_peak_rss() -> bool {
 }
 
 /// Peak RSS in bytes for a phase that began with a successful
-/// [`reset_peak_rss`], or `0` where the platform has no answer.
-fn phase_peak_rss(reset_worked: bool) -> u64 {
+/// [`reset_peak_rss`], or `None` where the platform has no answer.
+///
+/// `None` rather than `0`, all the way out to a `null` in the exported row.
+/// A zero here divided into `resource_cost`, where lower is better, so every
+/// platform without `/proc` published the best possible score on that column
+/// as though it had measured it.
+fn phase_peak_rss(reset_worked: bool) -> Option<u64> {
     if reset_worked {
-        bench::peak_rss_bytes_or_zero()
+        bench::peak_rss_bytes()
     } else {
-        0
+        None
     }
 }
 
@@ -201,7 +206,6 @@ fn generate(storage: &str, profile: Profile, dir: &Path, cell: Cell) -> Generate
     };
     let rss = phase_peak_rss(reset);
 
-    let (bytes, entries) = bench::occupancy(&output);
     let row = Measurement::new(
         "generate",
         storage,
@@ -211,11 +215,11 @@ fn generate(storage: &str, profile: Profile, dir: &Path, cell: Cell) -> Generate
         cell.tile_size,
         1,
         result.duration,
-        result.peak_memory_bytes,
+        Some(result.peak_memory_bytes),
         rss,
         result.tiles_produced,
     )
-    .with_output(bytes, entries);
+    .with_output(bench::occupancy(&output));
 
     Generated { row, output, plan }
 }
@@ -336,7 +340,7 @@ fn read_row(
     profile: Profile,
     cell: Cell,
     concurrency: usize,
-    rss: u64,
+    rss: Option<u64>,
     mut pass: Pass,
 ) -> Measurement {
     let bytes = pass.bytes;
@@ -349,7 +353,9 @@ fn read_row(
         cell.tile_size,
         concurrency,
         pass.elapsed,
-        0,
+        // The engine's tracker charges raster buffers, and a read allocates
+        // none, so this column has no answer on a read row rather than a zero.
+        None,
         rss,
         pass.hits,
     )
@@ -543,7 +549,9 @@ fn benchmark_cell() {
         .unwrap_or_else(|_| panic!("{CELL_VAR} is set and {CELL_OUT_VAR} is not"));
     let (storage, cell) = parse_spec(&spec);
     let rows = run_cell(&storage, Profile::from_env(), cell);
-    std::fs::write(&out, bench::to_json(&rows)).expect("a cell can write its rows");
+    // A bare array, because the envelope belongs to the parent that owns every
+    // cell's rows rather than to one cell.
+    std::fs::write(&out, bench::rows_to_json(&rows)).expect("a cell can write its rows");
     println!(
         "{storage} {} wrote {} rows to {out}",
         cell.spec(),
@@ -551,13 +559,12 @@ fn benchmark_cell() {
     );
 }
 
-/// Splice several children's documents into one.
+/// Splice several children's row arrays into one array.
 ///
 /// Each child writes a complete JSON array of its own rows. Stripping the
 /// brackets and joining keeps every record's field order and pretty printing,
 /// which re-serialising through `serde_json` would not: its map is a
-/// `BTreeMap`, so a round trip alphabetises the columns and the exported file
-/// stops looking like the scalability data it is meant to match.
+/// `BTreeMap`, so a round trip alphabetises the columns.
 fn splice(documents: &[String]) -> String {
     let bodies: Vec<&str> = documents
         .iter()
@@ -637,16 +644,15 @@ fn pmtiles_versus_directory() {
             documents.push(spawn_cell(storage, cell, &into));
         }
     }
-    let document = splice(&documents);
+    let document = bench::document(&splice(&documents));
+    let path = bench::write_document(&document);
 
-    let path = bench::results_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).expect("the results directory can be created");
-    }
-    std::fs::write(&path, &document).expect("the results file can be written");
-
-    let parsed: Vec<serde_json::Value> =
+    let envelope: serde_json::Value =
         serde_json::from_str(&document).expect("the exported document is JSON");
+    let parsed = envelope["rows"]
+        .as_array()
+        .expect("the document carries a rows array")
+        .clone();
     assert!(
         !parsed.is_empty(),
         "the sweep produced no rows at all, which is not a benchmark"
@@ -666,9 +672,19 @@ fn pmtiles_versus_directory() {
         "entries",
         "p50_us",
     );
+    // A column the row did not measure prints as a dash, the same way it
+    // exports as `null`. A zero in this table would read as a measurement.
+    let number = |value: &serde_json::Value, places: usize| match value.as_f64() {
+        Some(value) => format!("{value:.places$}"),
+        None => "-".to_string(),
+    };
+    let count = |value: &serde_json::Value| match value.as_u64() {
+        Some(value) => value.to_string(),
+        None => "-".to_string(),
+    };
     for row in &parsed {
         println!(
-            "{:<10} {:<6} {:<16} {:<10} {:>12.2} {:>10.1} {:>12.1} {:>12} {:>10} {:>10.2}",
+            "{:<10} {:<6} {:<16} {:<10} {:>12} {:>10} {:>12} {:>12} {:>10} {:>10}",
             format!(
                 "{}x{}",
                 row["width"].as_u64().unwrap_or(0),
@@ -677,12 +693,12 @@ fn pmtiles_versus_directory() {
             row["tile_size"].as_u64().unwrap_or(0),
             row["scenario"].as_str().unwrap_or("?"),
             row["storage"].as_str().unwrap_or("?"),
-            row["wall_time_ms"].as_f64().unwrap_or(0.0),
-            row["peak_rss_mb"].as_f64().unwrap_or(0.0),
-            row["tiles_per_second"].as_f64().unwrap_or(0.0),
-            row["output_bytes"].as_u64().unwrap_or(0),
-            row["filesystem_entries"].as_u64().unwrap_or(0),
-            row["p50_latency_us"].as_f64().unwrap_or(0.0),
+            number(&row["wall_time_ms"], 2),
+            number(&row["peak_rss_mb"], 1),
+            number(&row["tiles_per_second"], 1),
+            count(&row["output_bytes"]),
+            count(&row["filesystem_entries"]),
+            number(&row["p50_latency_us"], 2),
         );
     }
 }
@@ -726,23 +742,34 @@ fn both_backends_measure_the_same_pyramid() {
     );
 
     assert_eq!(
-        archive.row.filesystem_entries, 1,
+        archive.row.filesystem_entries,
+        Some(1),
         "a PMTiles pyramid is one file"
     );
+    let tree_entries = tree
+        .row
+        .filesystem_entries
+        .expect("the tree's occupancy was measured");
     assert!(
-        tree.row.filesystem_entries > planned,
-        "a directory pyramid is at least one entry per tile plus its directories, got {}",
-        tree.row.filesystem_entries
+        tree_entries > planned,
+        "a directory pyramid is at least one entry per tile plus its directories, got \
+         {tree_entries}"
     );
     assert!(
-        tree.row.output_bytes > 0 && archive.row.output_bytes > 0,
+        tree.row.output_bytes.is_some_and(|bytes| bytes > 0)
+            && archive.row.output_bytes.is_some_and(|bytes| bytes > 0),
         "both backends should have written bytes"
     );
     assert!(
-        tree.row.tiles_per_second > 0.0 && archive.row.tiles_per_second > 0.0,
+        tree.row.tiles_per_second.is_some_and(|tps| tps > 0.0)
+            && archive.row.tiles_per_second.is_some_and(|tps| tps > 0.0),
         "a run that took no measurable time is not a measurement"
     );
     assert_eq!(archive.row.tile_size, CI_CELL.tile_size);
+    // The two columns that used to hold the same string.
+    assert_eq!(archive.row.engine, bench::ENGINE);
+    assert_eq!(archive.row.storage, PMTILES);
+    assert_eq!(tree.row.storage, DIRECTORY);
 
     // The two pyramids hold the same tiles. Byte equality across backends is
     // `tests/pmtiles_pyramid_reader.rs`' job; what this needs is that the
@@ -794,16 +821,23 @@ fn every_read_scenario_reports_a_row() {
             row.scenario
         );
         assert!(
-            row.bytes_fetched > 0,
+            row.tile_bytes_returned.is_some_and(|bytes| bytes > 0),
             "{} returned no tile bytes",
             row.scenario
         );
-        assert!(
-            row.p99_latency_us >= row.p50_latency_us,
-            "{}: p99 {} is below p50 {}",
-            row.scenario,
-            row.p99_latency_us,
-            row.p50_latency_us
+        let p50 = row.p50_latency_us.expect("a read row has a median");
+        let p99 = row.p99_latency_us.expect("a read row has a p99");
+        assert!(p99 >= p50, "{}: p99 {p99} is below p50 {p50}", row.scenario);
+        // A read row measures no pyramid and no raster buffers, and says so.
+        assert_eq!(
+            row.output_bytes, None,
+            "{} priced the pyramid",
+            row.scenario
+        );
+        assert_eq!(
+            row.tracked_memory_mb, None,
+            "{} charged the raster tracker",
+            row.scenario
         );
     }
     assert!(
@@ -851,8 +885,8 @@ fn the_large_profile_reaches_the_leaf_directory_path() {
     }
 }
 
-/// The exported document is the shape `scalability_results.json` is, parsed by
-/// something other than the code that wrote it.
+/// The exported document is the shape libviprs.org reads, parsed by something
+/// other than the code that wrote it.
 ///
 /// This is the contract with libviprs.org (issue #62). A field renamed here is
 /// a chart that silently stops drawing there, and nothing else in either
@@ -869,11 +903,11 @@ fn the_exported_json_carries_every_field_the_site_reads() {
             256,
             1,
             Duration::from_millis(1234),
-            5 * 1024 * 1024,
-            90 * 1024 * 1024,
+            Some(5 * 1024 * 1024),
+            Some(90 * 1024 * 1024),
             349,
         )
-        .with_output(4_194_304, 1),
+        .with_output(Some((4_194_304, 1))),
         Measurement::new(
             "read_random",
             DIRECTORY,
@@ -883,8 +917,8 @@ fn the_exported_json_carries_every_field_the_site_reads() {
             64,
             8,
             Duration::from_micros(9_876),
-            0,
-            0,
+            None,
+            None,
             512,
         )
         .with_latencies(
@@ -897,12 +931,28 @@ fn the_exported_json_carries_every_field_the_site_reads() {
         ),
     ];
 
-    let document = bench::to_json(&rows);
+    let text = bench::to_json(&rows);
     let parsed: serde_json::Value =
-        serde_json::from_str(&document).expect("the exported document is JSON");
-    let array = parsed
-        .as_array()
-        .expect("the document is a top-level array");
+        serde_json::from_str(&text).expect("the exported document is JSON");
+    let envelope = parsed.as_object().expect("the document is an object");
+
+    // The envelope, which is what lets a consumer refuse a shape it does not
+    // understand rather than read a renamed column as absent. The key set is
+    // read off the parsed value and the order off the text, because a
+    // `serde_json::Map` is a `BTreeMap` and has no order left to check.
+    let mut keys: Vec<&str> = envelope.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        vec!["rows", "schema"],
+        "the document is a schema and its rows, and nothing else"
+    );
+    assert!(
+        text.find("\"schema\"") < text.find("\"rows\""),
+        "the schema should come first, so a consumer can decide before it reads a row"
+    );
+    assert_eq!(envelope["schema"], serde_json::json!(bench::SCHEMA_VERSION));
+    let array = envelope["rows"].as_array().expect("rows is an array");
     assert_eq!(array.len(), 2, "one object per measurement");
 
     for record in array {
@@ -919,25 +969,43 @@ fn the_exported_json_carries_every_field_the_site_reads() {
             bench::FIELDS.len(),
             "the record carries a field bench::FIELDS does not list: {keys:?}"
         );
-        // The twelve the existing consumer reads have to be the types it reads
-        // them as: numbers everywhere except `engine`.
-        for field in bench::SCALABILITY_FIELDS {
+
+        for field in bench::FIELDS {
             let value = &object[field];
-            if field == "engine" {
+            if bench::STRING_FIELDS.contains(&field) {
                 assert!(value.is_string(), "{field} should be a string, got {value}");
-            } else {
-                assert!(value.is_number(), "{field} should be a number, got {value}");
-                assert!(
-                    value.as_f64().expect("a number").is_finite(),
-                    "{field} is not finite: {value}"
-                );
+                continue;
             }
+            if value.is_null() {
+                assert!(
+                    bench::NULLABLE_FIELDS.contains(&field),
+                    "{field} is null, and it is not a column a row is allowed to leave unmeasured"
+                );
+                continue;
+            }
+            assert!(value.is_number(), "{field} should be a number, got {value}");
+            assert!(
+                value.as_f64().expect("a number").is_finite(),
+                "{field} is not finite: {value}"
+            );
         }
     }
 
+    // `engine` says which engine, `storage` says which backend, and they are
+    // no longer the same string under two names.
+    let generation = array[0].as_object().expect("an object");
+    assert_eq!(generation["engine"], bench::ENGINE);
+    assert_eq!(generation["storage"], PMTILES);
+    assert_ne!(generation["engine"], generation["storage"]);
+    assert_eq!(generation["filesystem_entries"], 1);
+    assert_eq!(generation["tile_size"], 256);
+    assert!(
+        generation["p50_latency_us"].is_null(),
+        "a generation row measures no latency, so it publishes no latency"
+    );
+
     // The derived columns are derived the way the existing producer derives
     // them, which is what makes a row here comparable with a row there.
-    let generation = array[0].as_object().expect("an object");
     let rss_mb = generation["peak_rss_mb"].as_f64().expect("a number");
     let tps = generation["tiles_per_second"].as_f64().expect("a number");
     let per_mb = generation["tiles_per_second_per_mb"]
@@ -947,16 +1015,31 @@ fn the_exported_json_carries_every_field_the_site_reads() {
         (per_mb - tps / rss_mb).abs() < 1e-9,
         "tiles_per_second_per_mb should be tiles_per_second over peak_rss_mb"
     );
-    assert_eq!(generation["engine"], generation["storage"]);
-    assert_eq!(generation["filesystem_entries"], 1);
-    assert_eq!(generation["tile_size"], 256);
+
+    // And a row that measured no RSS publishes holes, not the flattering zero
+    // that used to be the best score on `resource_cost`.
+    let read = array[1].as_object().expect("an object");
+    for field in [
+        "peak_rss_mb",
+        "tracked_memory_mb",
+        "tiles_per_second_per_mb",
+        "resource_cost",
+        "output_bytes",
+        "filesystem_entries",
+    ] {
+        assert!(
+            read[field].is_null(),
+            "{field} on an unmeasured row is {} rather than null",
+            read[field]
+        );
+    }
+    assert_eq!(read["tile_bytes_returned"], 123_456);
 }
 
-/// A row measured on a platform with no `/proc` reports zero rather than a
-/// stale peak.
+/// A row measured on a platform with no `/proc` publishes a hole.
 #[test]
-fn a_platform_without_a_peak_rss_reports_zero_not_a_stale_number() {
-    assert_eq!(phase_peak_rss(false), 0);
+fn a_platform_without_a_peak_rss_reports_null_not_a_flattering_zero() {
+    assert_eq!(phase_peak_rss(false), None);
     let row = Measurement::new(
         "generate",
         PMTILES,
@@ -966,15 +1049,78 @@ fn a_platform_without_a_peak_rss_reports_zero_not_a_stale_number() {
         256,
         1,
         Duration::from_millis(10),
-        0,
+        None,
         phase_peak_rss(false),
         5,
     );
-    assert_eq!(row.peak_rss_mb, 0.0);
-    // And the two ratios that divide by it stay finite rather than becoming an
-    // infinity no JSON parser accepts.
-    assert_eq!(row.tiles_per_second_per_mb, 0.0);
-    assert_eq!(row.resource_cost, 0.0);
+    assert_eq!(row.peak_rss_mb, None);
+    // And the two ratios that divide by it are holes rather than zeroes. On
+    // `resource_cost` lower is better, so a zero was the best possible score
+    // and every platform without `/proc` published one as a measurement.
+    assert_eq!(row.tiles_per_second_per_mb, None);
+    assert_eq!(row.resource_cost, None);
+
+    let text = bench::to_json(&[row]);
+    let parsed: serde_json::Value = serde_json::from_str(&text).expect("JSON");
+    for field in ["peak_rss_mb", "tiles_per_second_per_mb", "resource_cost"] {
+        assert!(parsed["rows"][0][field].is_null(), "{field} should be null");
+    }
+}
+
+/// A pyramid the harness cannot stat is a hole, not one entry of nothing.
+#[test]
+fn an_unmeasurable_pyramid_publishes_no_entry_count() {
+    let missing = std::path::Path::new("/this/path/does/not/exist/pyramid.pmtiles");
+    assert_eq!(
+        bench::occupancy(missing),
+        None,
+        "a path that cannot be stat'd has no occupancy"
+    );
+
+    let row = Measurement::new(
+        "generate",
+        PMTILES,
+        Profile::Ci,
+        512,
+        512,
+        256,
+        1,
+        Duration::from_millis(10),
+        None,
+        None,
+        5,
+    )
+    .with_output(bench::occupancy(missing));
+    assert_eq!(row.filesystem_entries, None);
+    assert_eq!(row.output_bytes, None);
+
+    // The control: a path that does exist is measured rather than skipped.
+    let dir = tempfile::tempdir().expect("a scratch directory");
+    let file = dir.path().join("pyramid.pmtiles");
+    std::fs::write(&file, b"not really an archive").expect("the file is written");
+    assert_eq!(bench::occupancy(&file), Some((21, 1)));
+}
+
+/// The 64 pixel cell plans the tile count the doc and the CHANGELOG publish.
+///
+/// The doc said 21845 in its prose and 21851 in its tables, and both numbers
+/// are real: 21845 is the full-pyramid count for 8192 pixels at 64 pixel
+/// tiles if the pyramid stops at a one-tile level, and the planner keeps
+/// halving the source down to a single pixel, which adds six more one-tile
+/// levels. Nothing checked either. This is the three-line guard that settles
+/// it, and it is the shape of guard this repository already writes.
+#[test]
+fn the_eight_thousand_pixel_cell_plans_the_tile_count_the_doc_publishes() {
+    assert_eq!(coordinates(&plan_for(8192, 8192, 64)).len(), 21_851);
+    // The 21845 the prose used to carry, and where it comes from: the levels
+    // whose source is at least one tile wide.
+    let full_levels: usize = (0..8).map(|level| 1usize << (2 * level)).sum();
+    assert_eq!(full_levels, 21_845);
+    assert_eq!(
+        plan_for(8192, 8192, 64).levels.len(),
+        14,
+        "the planner halves to a single pixel, which is where the other six tiles come from"
+    );
 }
 
 /// A child's document splices into the parent's, parsed rather than eyeballed.
@@ -988,8 +1134,8 @@ fn a_platform_without_a_peak_rss_reports_zero_not_a_stale_number() {
 /// minutes rather than one afternoon.
 #[test]
 fn a_child_row_file_splices_into_the_document() {
-    let one = bench::to_json(&[sample_row("generate", PMTILES)]);
-    let two = bench::to_json(&[
+    let one = bench::rows_to_json(&[sample_row("generate", PMTILES)]);
+    let two = bench::rows_to_json(&[
         sample_row("read_cold", DIRECTORY),
         sample_row("read_warm", DIRECTORY),
     ]);
@@ -1005,8 +1151,11 @@ fn a_child_row_file_splices_into_the_document() {
     );
 
     let spliced = splice(&[one, two]);
-    let parsed: Vec<serde_json::Value> =
-        serde_json::from_str(&spliced).expect("the spliced document is JSON");
+    let document = bench::document(&spliced);
+    let envelope: serde_json::Value =
+        serde_json::from_str(&document).expect("the spliced document is JSON");
+    assert_eq!(envelope["schema"], serde_json::json!(bench::SCHEMA_VERSION));
+    let parsed = envelope["rows"].as_array().expect("rows is an array");
     assert_eq!(parsed.len(), 3, "one record per row, from both documents");
     assert_eq!(parsed[0]["scenario"], "generate");
     assert_eq!(parsed[2]["scenario"], "read_warm");
@@ -1014,14 +1163,14 @@ fn a_child_row_file_splices_into_the_document() {
     // rather than a re-serialisation. It has to be read off the text: a
     // `serde_json::Map` is a `BTreeMap`, so the parsed value has no order left
     // to check.
-    let width_at = spliced.find("\"width\"").expect("the width column");
-    let engine_at = spliced.find("\"engine\"").expect("the engine column");
-    let cost_at = spliced
+    let width_at = document.find("\"width\"").expect("the width column");
+    let engine_at = document.find("\"engine\"").expect("the engine column");
+    let cost_at = document
         .find("\"resource_cost\"")
         .expect("the resource_cost column");
     assert!(
         width_at < engine_at && engine_at < cost_at,
-        "the exported text should keep the scalability_results.json column order"
+        "the exported text should keep the column order bench::FIELDS lists"
     );
 }
 
@@ -1035,8 +1184,8 @@ fn sample_row(scenario: &str, storage: &str) -> Measurement {
         256,
         1,
         Duration::from_millis(7),
-        1024,
-        2048,
+        Some(1024),
+        Some(2048),
         42,
     )
 }

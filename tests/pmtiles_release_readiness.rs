@@ -186,8 +186,18 @@ fn the_benchmark_doc_documents_every_exported_column() {
 #[test]
 fn the_benchmark_doc_names_the_hand_off() {
     assert!(
-        BENCHMARK_DOC.contains("scalability_results.json"),
-        "the doc should name the file whose shape the export matches"
+        BENCHMARK_DOC.contains(bench::DEFAULT_RESULTS_PATH),
+        "the doc should name the file a run writes, which is {}",
+        bench::DEFAULT_RESULTS_PATH
+    );
+    assert!(
+        !BENCHMARK_DOC.contains("goes to `target/scalability_results.json`"),
+        "the doc should not send a run's export to scalability_results.json, which is a \
+         generated artefact of libviprs-bench"
+    );
+    assert!(
+        BENCHMARK_DOC.contains("\"schema\": 1"),
+        "the doc should show the envelope a consumer has to unwrap"
     );
     assert!(
         BENCHMARK_DOC.contains("LIBVIPRS_BENCH_JSON"),
