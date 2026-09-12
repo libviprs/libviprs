@@ -1402,6 +1402,7 @@ fn the_writer_works_over_any_write_and_seek_sink() {
 /// A fixture sitting on the identity element of the operation under test is
 /// the mistake this whole area has already made once.
 #[test]
+#[cfg_attr(miri, ignore)]
 fn the_bounds_the_writer_is_given_are_the_bounds_the_archive_carries() {
     const WEST: f64 = -12.25;
     const SOUTH: f64 = 4.5;
