@@ -47,6 +47,13 @@ plus the in-process caches (the PMTiles leaf cache, the directory reader's lack
 of one), which is the part libviprs controls and the part an optimisation would
 move.
 
+Two more things the read rows are not, so nobody reads more into them than they
+hold. `read_random` runs on the reader `read_sequential` has just walked end to
+end, so its leaf cache is whatever that pass left behind rather than empty; the
+row is a warm random walk and it is compared against a warm sequential one.
+And `read_concurrent` is one thread count per backend, chosen from the machine,
+so these rows are not a scaling curve and nothing here reports one.
+
 ### Root-only archives, and the one cell that is not
 
 Under 16384 directory entries the writer puts the whole directory in the root,
@@ -296,6 +303,11 @@ directory backend:
 | PMTiles random, p99 | 1486.2 / 608.6 us | 5.6 / 5.6 us |
 | Directory random, wall (control) | 204.2 / 345.2 ms | 135.5 / 126.6 ms |
 
+The "after" column was taken at a cache of sixteen, which is what this fix
+first shipped as. The section below is why it is sixty-four now, and on this
+archive, which has six leaves, both sizes hold every leaf and the numbers do
+not move between them.
+
 Two runs of each, and the two numbers in every cell are those two runs. That
 whole table was taken on a busy host, which is why the ratio row is the one to
 read: the machine got less busy between the two sets and moved the directory
@@ -395,6 +407,15 @@ Three assertions, because one number proves nothing:
 Each also asserts the header the writer produced, because a run that dropped
 its tiles on the floor would beat all three bounds.
 
+The allocator's `realloc` charges the new block before discharging the old one,
+so a growing `Vec` is counted twice for an instant and a peak dominated by one
+of them reads high. That is deliberate, because conservative is the right
+direction for an upper-bound test, and it is worth knowing when reading a
+number: on the 262144-record sort buffer this order reports 9454340 bytes and
+discharging first reports 6809585. The 4096-record cell is identical either way
+and the absolute-bound cell moves by 1550 bytes on 650215, which is why the one
+figure this document publishes does not move.
+
 The bound is **not** independent of everything. `src/pmtiles/writer.rs` says so
 itself: the content-hash table, the payload table and the final-offset lookup
 all scale with the number of *distinct payloads*, and no amount of spilling
@@ -427,7 +448,14 @@ That profile writes 272 distinct 16 MiB payloads through a sink that keeps the
 position and drops the bytes, so the writer performs every copy, seek and
 offset computation while the measurement stays a measurement of the writer
 rather than of the filesystem. It asserts `tile_data_length` is past `u32::MAX`
-and that the peak is still under the same formula.
+and that the peak is still under the same formula, with nothing added for the
+harness: the payload buffer is allocated before the baseline is taken, and
+there is a second assertion that the peak is under one payload so the bound
+cannot quietly start paying for it again. The run:
+
+```text
+4 GiB profile: tile_data_length=4563402752 peak_heap_bytes=410369 bound=4425728
+```
 
 ## Release readiness
 
