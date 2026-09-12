@@ -184,7 +184,11 @@ const ROOT_ONLY_MAX_ENTRIES: u64 = 16384;
 /// an archive this writer produces from the same tiles has the same leaf
 /// structure as one the reference produces, which is what makes a golden
 /// archive a usable target rather than merely a plausible one.
-const DEFAULT_LEAF_ENTRIES: usize = 4096;
+///
+/// `pub(crate)` because the reader sizes its leaf cache off it: the count of
+/// leaves it holds is the entry budget divided by this, so the two numbers
+/// cannot drift apart the way they did in issue #993.
+pub(crate) const DEFAULT_LEAF_ENTRIES: usize = 4096;
 
 /// How many spill records are sorted in memory before a run is written out.
 ///
