@@ -69,7 +69,7 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use libviprs::pmtiles::directory::serialize_entries;
+use libviprs::pmtiles::directory::{deserialize_entries, serialize_entries};
 use libviprs::pmtiles::reader::{
     MAX_DIRECTORY_BYTES, MAX_LEAF_DEPTH, MAX_METADATA_BYTES, MAX_ROOT_SPAN, Reader,
 };
@@ -98,6 +98,7 @@ mod oracle;
 const RASTER: &str = "raster-z0z2.pmtiles";
 const DUPES: &str = "dupes-z0z3.pmtiles";
 const LEAVES: &str = "leaves-z0z7.pmtiles";
+const DISTINCT: &str = "distinct-z0z7.pmtiles";
 
 /// A golden's bytes, sha256-checked against the oracle's provenance.
 fn fixture_bytes(name: &str) -> Vec<u8> {
@@ -105,6 +106,7 @@ fn fixture_bytes(name: &str) -> Vec<u8> {
         RASTER => oracle::golden(RASTER, oracle::RASTER_GOLDEN_SHA256),
         DUPES => oracle::golden(DUPES, oracle::DUPES_GOLDEN_SHA256),
         LEAVES => oracle::golden(LEAVES, oracle::LEAVES_GOLDEN_SHA256),
+        DISTINCT => oracle::golden(DISTINCT, oracle::DISTINCT_GOLDEN_SHA256),
         other => panic!("{other} is not one of the goldens"),
     }
 }
@@ -273,7 +275,7 @@ fn the_vector_files_are_the_ones_the_oracle_produced_and_they_parse_to_the_rows_
     // Hashes first. Every loader below checks the file's sha256 against the
     // shared pin and its `produced_by` block against the release tag before
     // handing anything back, so reading all eight is the check.
-    for name in [RASTER, DUPES, LEAVES] {
+    for name in [RASTER, DUPES, LEAVES, DISTINCT] {
         assert!(!fixture_bytes(name).is_empty(), "{name} is empty");
     }
     for name in [
@@ -335,13 +337,26 @@ fn the_vector_files_are_the_ones_the_oracle_produced_and_they_parse_to_the_rows_
         "the 21844 entries behind the six leaves"
     );
 
+    // Every committed golden has to be described, and every archive described
+    // has to be committed. A block for an archive nobody commits is read by
+    // nothing, and an archive with no block is compared against nothing.
     let header = vectors("header.json");
+    let described: Vec<&String> = header["archives"]
+        .as_object()
+        .expect("archives is an object")
+        .keys()
+        .collect();
+    for name in [RASTER, DUPES, LEAVES, DISTINCT] {
+        assert!(
+            described.iter().any(|d| d.as_str() == name),
+            "{name} is committed and header.json does not describe it; it \
+             describes {described:?}"
+        );
+    }
     assert_eq!(
-        header["archives"]
-            .as_object()
-            .expect("archives is an object")
-            .len(),
-        3
+        described.len(),
+        4,
+        "header.json describes {described:?} and four archives are committed"
     );
 }
 
@@ -355,7 +370,7 @@ fn the_vector_files_are_the_ones_the_oracle_produced_and_they_parse_to_the_rows_
 #[cfg_attr(miri, ignore)]
 fn the_header_decodes_to_what_go_pmtiles_reports_for_every_golden() {
     let vectors_json = vectors("header.json");
-    for name in [RASTER, DUPES, LEAVES] {
+    for name in [RASTER, DUPES, LEAVES, DISTINCT] {
         let want = &vectors_json["archives"][name]["decoded_by_pmtiles_DeserializeHeader"];
         let reader = counted(name);
         let got: &Header = reader.header();
@@ -1803,4 +1818,134 @@ fn an_archive_opens_by_path_through_the_convenience_constructor() {
     assert_eq!(reader.max_zoom(), 2);
     assert_eq!(reader.tile_format(), TileType::Png);
     assert!(reader.get_tile(0, 0, 0).expect("a lookup").is_some());
+}
+
+/// A tile entry found inside a leaf resolves against `tile_data_offset`, and
+/// against nothing else that happens to work on one fixture.
+///
+/// # Why this needs a second leaf golden
+///
+/// `leaves-z0z7` is the archive every other leaf cell here runs on, and it
+/// cannot see the mistake that matters most. The spec keys an entry's base off
+/// the entry kind rather than off the directory it was read from, so a writer
+/// and a reader that make the same wrong choice round-trip perfectly and the
+/// only thing that can catch it is a fixture where the candidates differ.
+/// Every leaf in `leaves-z0z7` holds tile entries starting at offset 0, which
+/// makes "rebase each leaf onto its own first entry" the identity. Measured:
+/// a reader doing exactly that passes all 128 tests in this crate's PMTiles
+/// suite, `all_twenty_one_thousand_entries_behind_the_leaves_come_back_correct`
+/// included, because that cell resolves every entry against recorded entry data
+/// and the rebase does not move any of it.
+///
+/// `distinct-z0z7`'s five leaves start at 0, 49164, 98324, 147497 and 196597,
+/// so four of the five move. Its first leaf still starts at 0 and cannot tell
+/// a self-rebase from the right base, which is why that comparison is skipped
+/// rather than counted as evidence.
+#[test]
+fn a_tile_entry_in_a_leaf_resolves_against_tile_data_and_not_against_any_other_base() {
+    let headers = vectors("header.json");
+    let want = &headers["archives"][DISTINCT]["decoded_by_pmtiles_DeserializeHeader"];
+    let leaf_offset = u64_at(want, "leaf_directory_offset");
+    let leaf_length = u64_at(want, "leaf_directory_length");
+    let data_offset = u64_at(want, "tile_data_offset");
+    let root_offset = u64_at(want, "root_offset");
+    let root_length = u64_at(want, "root_length");
+
+    assert!(leaf_length > 0, "{DISTINCT} has no leaf directories");
+    assert_ne!(
+        leaf_offset, data_offset,
+        "the two candidate bases are the same number in this fixture, so it \
+         cannot tell them apart"
+    );
+
+    let archive = fixture_bytes(DISTINCT);
+    let reader = Reader::try_open(fixture_path(DISTINCT)).expect("open the distinct golden");
+    assert_eq!(reader.header().leaf_directories_offset, leaf_offset);
+    assert_eq!(reader.header().tile_data_offset, data_offset);
+
+    let section = |offset: u64, length: u64| -> Vec<u8> {
+        let at = usize::try_from(offset).expect("a committed offset");
+        let len = usize::try_from(length).expect("a committed length");
+        Compression::Gzip
+            .decompress(&archive[at..at + len], MAX_DIRECTORY_BYTES)
+            .expect("a committed directory decompresses")
+    };
+    let at = |offset: u64, length: u32| -> Option<&[u8]> {
+        let start = usize::try_from(offset).ok()?;
+        let end = start.checked_add(length as usize)?;
+        (end <= archive.len()).then(|| &archive[start..end])
+    };
+
+    let root = deserialize_entries(&section(root_offset, root_length)).expect("the root");
+    let pointers: Vec<Entry> = root.iter().filter(|e| e.run_length == 0).copied().collect();
+    assert!(
+        pointers.len() >= 2,
+        "{DISTINCT} has {} leaf pointers, so there is no second leaf for a \
+         per-leaf base to be wrong about",
+        pointers.len()
+    );
+    let starts: Vec<u64> = pointers.iter().map(|p| p.offset).collect();
+    assert!(
+        starts.iter().any(|s| *s != 0),
+        "every leaf starts at 0, which makes a per-leaf rebase the identity and \
+         this cell decorative. They start at {starts:?}"
+    );
+
+    let mut checked = 0usize;
+    let mut discriminating = 0usize;
+    for pointer in &pointers {
+        let leaf = section(leaf_offset + pointer.offset, u64::from(pointer.length));
+        let entries = deserialize_entries(&leaf).expect("a leaf directory");
+        let first_offset = entries.first().map(|e| e.offset).unwrap_or(0);
+
+        for entry in entries.iter().filter(|e| e.run_length > 0).take(16) {
+            let (z, x, y) = tileid_to_zxy(entry.tile_id).expect("a committed id");
+            let got = reader
+                .get_tile(z, x, y)
+                .unwrap_or_else(|e| panic!("({z}, {x}, {y}): {e}"))
+                .unwrap_or_else(|| panic!("({z}, {x}, {y}) is absent"));
+            let right = at(data_offset + entry.offset, entry.length)
+                .expect("a committed entry is inside the archive");
+            assert_eq!(
+                sha256_hex(&got),
+                sha256_hex(right),
+                "({z}, {x}, {y}) did not come back from tile_data_offset + entry.offset"
+            );
+            checked += 1;
+
+            for (label, base) in [
+                ("leaf_directory_offset", leaf_offset),
+                ("the leaf's own start", leaf_offset + pointer.offset),
+                ("the leaf's first entry offset", data_offset + first_offset),
+                ("root_offset", root_offset),
+            ] {
+                if base == data_offset {
+                    // The first leaf's entries do start at 0, and then this
+                    // candidate *is* the right base. Not evidence either way.
+                    continue;
+                }
+                let Some(wrong) = at(base + entry.offset, entry.length) else {
+                    continue;
+                };
+                assert_ne!(
+                    sha256_hex(wrong),
+                    sha256_hex(right),
+                    "({z}, {x}, {y}) reads the same whether the base is \
+                     tile_data_offset or {label}, so this fixture cannot tell \
+                     those two apart"
+                );
+                discriminating += 1;
+            }
+        }
+    }
+
+    assert!(
+        checked >= 32,
+        "only {checked} entries behind a leaf were resolved"
+    );
+    assert!(
+        discriminating >= checked * 2,
+        "only {discriminating} base comparisons over {checked} entries could \
+         tell two bases apart"
+    );
 }

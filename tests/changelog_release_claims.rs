@@ -117,6 +117,28 @@ fn tags() -> Vec<String> {
         .collect()
 }
 
+/// Whether every tag this repository lists resolves to a tree it holds.
+///
+/// `git tag` reads the refs and `git grep <tag>` reads the objects behind them,
+/// so a tree staged with its refs and without its history answers the first and
+/// not the second. One `cat-file -e` per tag tells the two apart.
+fn tags_resolve_to_objects() -> bool {
+    let tags = tags();
+    if tags.is_empty() {
+        // No tags at all is the state control 1 exists for, and it has its own
+        // message. Not this one.
+        return true;
+    }
+    tags.iter().all(|tag| {
+        Command::new("git")
+            .arg("-C")
+            .arg(repo_root())
+            .args(["cat-file", "-e", &format!("{tag}^{{tree}}")])
+            .output()
+            .is_ok_and(|out| out.status.success())
+    })
+}
+
 /// Whether `tag`'s `src/` contains `needle` anywhere.
 fn tag_src_contains(tag: &str, needle: &str) -> bool {
     let out = Command::new("git")
@@ -168,6 +190,37 @@ fn tag_src_contains(tag: &str, needle: &str) -> bool {
 #[test]
 #[cfg_attr(miri, ignore)] // spawns git, blocked by Miri isolation
 fn every_release_claim_in_the_changelog_is_true_of_the_tags() {
+    // Control 0: the tags resolve to objects this repository actually holds.
+    //
+    // There is a state between "a clone with its tags" and "a clone without
+    // them", and the local mirror is in it. `libviprs-tests`' run-tests.sh
+    // stages this tree into a Docker build context without `.git`, because ours
+    // is 1.8 GB, and stages the index, the refs and a HEAD back so the guards
+    // that ask git what is tracked can answer. That leaves the tags present and
+    // their history absent, and `git grep <tag>` then exits 128 with `unable to
+    // parse object`, which `tag_src_contains` correctly refuses to read as "no
+    // match" and reports as a broken invocation. The invocation is fine.
+    //
+    // Saying which state it is costs one command and turns a red that is about
+    // neither the change being pushed nor a real problem into a skip that names
+    // itself. VIPRS_REQUIRE_GIT_HISTORY=1 turns it back into a failure, which is
+    // what CI sets, so this cannot become a way for the guard to stop running.
+    if !tags_resolve_to_objects() {
+        assert!(
+            !std::env::var("VIPRS_REQUIRE_GIT_HISTORY").is_ok_and(|v| v == "1"),
+            "VIPRS_REQUIRE_GIT_HISTORY=1 and this repository's tags do not \
+             resolve to objects it holds, so every claim in the CHANGELOG would \
+             go unchecked"
+        );
+        eprintln!(
+            "skipping: the tags are here and the objects behind them are not, \
+             so this is a tree staged without its history rather than a clone \
+             missing its tags. Set VIPRS_REQUIRE_GIT_HISTORY=1 to make this a \
+             failure."
+        );
+        return;
+    }
+
     // Control 1: the tags are here.
     let tags = tags();
     let have: BTreeSet<&str> = tags.iter().map(String::as_str).collect();

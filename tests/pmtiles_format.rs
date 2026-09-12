@@ -794,6 +794,7 @@ fn golden_sha256(name: &str) -> &'static str {
         "raster-z0z2.pmtiles" => oracle::RASTER_GOLDEN_SHA256,
         "dupes-z0z3.pmtiles" => oracle::DUPES_GOLDEN_SHA256,
         "leaves-z0z7.pmtiles" => oracle::LEAVES_GOLDEN_SHA256,
+        "distinct-z0z7.pmtiles" => oracle::DISTINCT_GOLDEN_SHA256,
         other => panic!("no pinned sha256 for the golden {other:?}"),
     }
 }
@@ -811,9 +812,17 @@ fn golden_sha256(name: &str) -> &'static str {
 /// The header is little-endian throughout, `u64` and `i32` alike, and the four
 /// bounds fields are what prove it: `min_lon_e7` is -1800000000 and it decodes
 /// little-endian at offset 102 and big-endian nowhere in the buffer. The two
-/// centre fields are **zero** in all three goldens and therefore match at about
+/// centre fields are **zero** in all four goldens and therefore match at about
 /// fifty offsets in both endiannesses, which is the zero-has-two-explanations
 /// trap in its purest form. A check built on the centre alone proves nothing.
+///
+/// The bounds are the same whole world in all four as well, which is worth
+/// saying because it bounds what this cell can show: it pins the decoder and
+/// the encoder against each other and against the reference, on values that
+/// happen to be symmetric. What it cannot see is the writer choosing the wrong
+/// field for a value nobody recorded, and
+/// `pmtiles_writer::the_bounds_the_writer_is_given_are_the_bounds_the_archive_carries`
+/// is the cell for that.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn every_golden_header_decodes_and_re_encodes_byte_for_byte() {
@@ -821,7 +830,7 @@ fn every_golden_header_decodes_and_re_encodes_byte_for_byte() {
     let archives = vectors["archives"]
         .as_object()
         .expect("header.json has an archives object");
-    assert_eq!(archives.len(), 3, "three goldens are pinned");
+    assert_eq!(archives.len(), 4, "four goldens are pinned");
 
     let mut checked = 0;
     for (name, entry) in archives {
@@ -977,8 +986,8 @@ fn every_golden_header_decodes_and_re_encodes_byte_for_byte() {
         checked += 1;
     }
     assert_eq!(
-        checked, 3,
-        "the header sweep did not visit all three goldens"
+        checked, 4,
+        "the header sweep did not visit all four goldens"
     );
 }
 
