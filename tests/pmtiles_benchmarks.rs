@@ -29,9 +29,11 @@
 //! not become the read scenario's floor.
 //!
 //! On a platform with no `/proc`, both mechanisms are unavailable and every
-//! `peak_rss_mb` is `0.0`. That is a column the platform cannot fill, not a
-//! number invented to fill it, and it is why the published figures come from
-//! the Linux container.
+//! `peak_rss_mb` is `null`, along with the two ratios computed from it. That is
+//! a column the platform cannot fill, not a number invented to fill it, and it
+//! is why the published figures come from the Linux container. It used to be
+//! `0.0`, which was worse than useless on `resource_cost`, where zero is the
+//! best possible score and a failed measurement therefore published a record.
 //!
 //! # Running it
 //!
