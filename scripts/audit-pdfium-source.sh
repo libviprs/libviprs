@@ -1,31 +1,42 @@
 #!/usr/bin/env bash
 #
-# audit-pdfium-source.sh — release gate for issue #149.
+# audit-pdfium-source.sh — release gate for issues #149 and #981.
 #
-# The `pdfium-render` thread-safety fork (per-call locking in
-# `ThreadSafePdfiumBindings`) is a direct git dependency of this crate,
-# so git/path consumers of libviprs inherit it. But cargo strips git
-# sources on publish, so crates.io consumers of the PUBLISHED libviprs
-# still resolve the unpatched `pdfium-render 0.8.x` wrapper, which
-# segfaults under concurrent direct access. Sibling repos that depend on
-# `pdfium-render` directly must pin the fork themselves.
+# This gate used to require the opposite of what it requires now, and the
+# reversal is the point, so here is why.
 #
-# This script resolves the dependency graph for a given manifest and fails
-# if `pdfium-render` is sourced from the crates.io registry instead of the
-# pinned libviprs git fork. Run it in every repo that enables the `pdfium`
-# feature before publishing / releasing.
+# It was written for #149: `pdfium-render` 0.9.0 through 0.9.3 deleted
+# `src/bindings/thread_safe.rs` and left the `thread_safe` feature gating a
+# bare `unsafe impl Send + Sync` with nothing behind it, so the gate demanded
+# the libviprs fork, which carried per-call locking. Cargo strips a git source
+# on publish, so that demand could never be met by a crates.io consumer, and
+# the split it created is exactly what #981 is about: whoever built from git
+# got the fork, whoever installed from the registry got the unpatched wrapper,
+# and only the first was ever tested.
+#
+# Upstream reinstated the locking in 0.9.4 (2026-09-06). It is not complete:
+# 290 of its 484 binding methods take the lock, and
+# `FPDF_RenderPageBitmapWithMatrix` is one of the ones that does not. libviprs
+# does not rely on it either way, because it holds `pdfium_lock()` across whole
+# operations itself and exposes no pdfium-render type in its public API, so a
+# consumer cannot reach the wrapper's `Send + Sync` through libviprs at all.
+#
+# So the invariant worth gating flipped. One source for everybody beats two
+# sources wearing one name, and this script now fails if `pdfium-render`
+# resolves from anywhere other than the registry. `tests/pdfium_dependency_
+# contract.rs` guards the manifest side of the same claim.
 #
 # Usage:
 #   scripts/audit-pdfium-source.sh [MANIFEST_DIR] [-- <extra cargo metadata args>]
 #
 # MANIFEST_DIR defaults to the current directory. Exit status:
-#   0  pdfium-render resolves from the libviprs git fork (or is absent).
-#   1  pdfium-render resolves from the crates.io registry (unpatched).
+#   0  pdfium-render resolves from the crates.io registry (or is absent).
+#   1  pdfium-render resolves from somewhere else, usually a git fork.
 #   2  usage / tooling error.
 
 set -euo pipefail
 
-EXPECTED_HOST="github.com/libviprs/pdfium-render"
+FORK_HOST="github.com/libviprs/pdfium-render"
 
 manifest_dir="."
 extra_args=()
@@ -62,15 +73,21 @@ case "$source_field" in
   ABSENT)
     echo "audit-pdfium-source: OK — pdfium-render is not in the graph for '$manifest_path'"
     exit 0 ;;
-  git+*"$EXPECTED_HOST"*)
-    echo "audit-pdfium-source: OK — pdfium-render resolves from the libviprs fork:"
+  registry+*crates.io*)
+    echo "audit-pdfium-source: OK — pdfium-render resolves from crates.io:"
     echo "  $source_field"
     exit 0 ;;
+  git+*"$FORK_HOST"*)
+    echo "audit-pdfium-source: FAIL — pdfium-render resolves from the libviprs fork (issue #981)." >&2
+    echo "  resolved source: $source_field" >&2
+    echo "  The fork was retired: upstream reinstated the per-call locking in" >&2
+    echo "  0.9.4, and what the fork still carried over it is nothing libviprs" >&2
+    echo "  calls. A git source cannot survive publish, so it makes the crate" >&2
+    echo "  everyone builds different from the crate everyone installs." >&2
+    echo "  Depend on the registry: pdfium-render = { version = \"0.9.4\", ... }" >&2
+    exit 1 ;;
   *)
-    echo "audit-pdfium-source: FAIL — pdfium-render does NOT resolve from the libviprs fork (issue #149)." >&2
-    echo "  resolved source: ${source_field:-<empty/registry>}" >&2
-    echo "  expected a git source containing: $EXPECTED_HOST" >&2
-    echo "  depend on libviprs by git/path (it pins the fork directly), or pin the" >&2
-    echo "  fork yourself: pdfium-render = { git = \"https://github.com/libviprs/pdfium-render.git\", branch = \"libviprs/per-call-thread-safety\" }" >&2
+    echo "audit-pdfium-source: FAIL — pdfium-render resolves from neither crates.io nor a known fork." >&2
+    echo "  resolved source: ${source_field:-<empty>}" >&2
     exit 1 ;;
 esac

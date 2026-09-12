@@ -1724,6 +1724,16 @@ pub(crate) fn render_page_strip_with_page(
     // past the page, return a zero raster of the requested height to
     // keep the StripSource contract.
     let strip_h = strip_height.min(display_h_px.saturating_sub(y_offset));
+    // Same span guard the full-page paths apply, and for a sharper reason here.
+    // `pdfium-render` 0.9.4 still computes a bitmap's buffer length as
+    // `stride * height` in `c_int` (`src/bindings.rs`), so a raster whose span
+    // passes `i32::MAX` wraps there and is handed to `slice::from_raw_parts`.
+    // pdfium's own size arithmetic is unsigned, so it will happily create the
+    // bitmap first. A 28800x21600 sheet, which is 48x36 inches at 600 dpi and
+    // squarely in this crate's domain, spans 2_488_320_000 bytes and lands
+    // inside that window. The full-page paths already refuse it; this one is
+    // the only render path that did not, and its width is unbounded.
+    pdfium_bitmap_span(display_w_px, strip_h)?;
     if strip_h == 0 {
         let data = alloc_zeroed_rgba(display_w_px, strip_height)?;
         return Raster::new(display_w_px, strip_height, PixelFormat::Rgba8, data)

@@ -80,17 +80,22 @@ fn root_workspace_contains_both_crates() {
     );
 }
 
-/// The workspace must still pin `pdfium-render` to the libviprs fork
-/// (per-call thread-safety locking), as a direct git dependency rather than
-/// a `[patch.crates-io]` entry. It is pinned to an immutable commit `rev` on
-/// the consolidated `libviprs/integration` fork line (the 0.9.x branch
-/// carrying all of our fork PRs) rather than the bare mutable branch, so a
-/// force-push to that branch cannot silently change the resolved dependency
-/// (reproducible builds, libviprs#286). The workspace lockfile is the single
-/// source of truth for that resolution.
+/// `pdfium-render` resolves from crates.io, and the lockfile says so.
+///
+/// This guard used to assert the opposite, that the dependency came from the
+/// libviprs fork at an immutable `rev` (libviprs#286). The fork existed to
+/// carry per-call locking upstream had deleted; upstream reinstated it in
+/// 0.9.4 and what the fork still carried over that is nothing this crate calls,
+/// so the fork was retired in #981.
+///
+/// The invariant that replaced it is the one the old guard could never give us.
+/// A git source does not survive `cargo publish`, so pinning one made the crate
+/// everyone builds from git a different piece of software from the crate
+/// everyone installs from crates.io, under one name, with only the first ever
+/// tested. That split is what #149 was about and what #981 closed.
 #[test]
 #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
-fn workspace_lockfile_pins_pdfium_render_to_the_fork() {
+fn workspace_lockfile_resolves_pdfium_render_from_the_registry() {
     let lock = std::fs::read_to_string(repo_root().join("Cargo.lock"))
         .expect("workspace Cargo.lock must exist at the repo root");
 
@@ -115,20 +120,14 @@ fn workspace_lockfile_pins_pdfium_render_to_the_fork() {
     );
     let source = source_lines[0];
     assert!(
-        source.contains("git+https://github.com/libviprs/pdfium-render.git"),
-        "pdfium-render must resolve from the fork, got: {source}"
+        source.contains("registry+https://github.com/rust-lang/crates.io-index"),
+        "pdfium-render must resolve from crates.io, not from a git fork \
+         (libviprs#981): a git source does not survive `cargo publish`, so it \
+         makes the crate everyone builds different from the crate everyone \
+         installs. Got: {source}"
     );
-    // Must be pinned to an immutable commit rev (40-char hex), not a mutable
-    // branch, so the resolution is reproducible (libviprs#286). Cargo forbids
-    // `branch` and `rev` on the same source, so the fork line is documented in
-    // Cargo.toml prose while the rev is the actual pin.
-    let rev = source
-        .split("rev=")
-        .nth(1)
-        .map(|s| s.split(['#', '"']).next().unwrap_or(""))
-        .unwrap_or("");
     assert!(
-        rev.len() == 40 && rev.bytes().all(|b| b.is_ascii_hexdigit()),
-        "pdfium-render must be pinned to an immutable 40-char commit rev for reproducible builds, got: {source}"
+        !source.contains("git+"),
+        "pdfium-render resolves from a git source: {source}"
     );
 }

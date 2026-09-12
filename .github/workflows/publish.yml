@@ -25,23 +25,36 @@ name: publish
 #
 # NOTE (issue #981): this job used to die at dependency resolution, because the
 # manifest asked `pdfium-render` for a `sync` feature that upstream deleted in
-# 0.9.0 and only the fork still carries as a synonym. `cargo publish` resolves
+# 0.9.0 and only our fork still carried as a synonym. `cargo publish` resolves
 # against crates.io, where a git source does not survive, so it was the one
-# resolver that ever saw the mismatch. The manifest now asks for `thread_safe`,
-# which both the fork and the registry crate have, and the dry run passes.
+# resolver that ever saw the mismatch. Renaming it to `thread_safe` fixed that
+# half.
 #
-# Publishing for real is still refused, by the guard step below, and for a
-# different reason. Registry `pdfium-render` 0.9.0 through 0.9.3 dropped
-# `src/bindings/thread_safe.rs` entirely, so there `thread_safe` is a bare
+# The other half was soundness, and it is now settled. Registry 0.9.0 through
+# 0.9.3 dropped `src/bindings/thread_safe.rs`, so there `thread_safe` is a bare
 # `unsafe impl Send + Sync for Pdfium` with no serialisation at all
-# (ajrcarey/pdfium-render#262). The fork restores the per-call locking, but the
-# published crate cannot carry the fork, so uploading today would hand crates.io
-# consumers the unsound wrapper. The published 0.3.1 depends on `^0.8`, where
-# the locking bindings still shipped, and stays the newest sound release.
+# (ajrcarey/pdfium-render#262). Upstream reinstated the bindings in 0.9.4, which
+# published on 2026-09-06, and `Cargo.toml` now declares that as the floor.
 #
-# Upstream has reinstated those bindings on master and has said they ship in
-# 0.9.4. Raising the `pdfium-render` requirement in `Cargo.toml` from `0.9` to
-# `0.9.4` once that release exists clears the guard step on its own.
+# Do not read "0.9.4 reinstated the per-call locking" as more than it is. That
+# release locks 290 of its 484 binding methods, and
+# `FPDF_RenderPageBitmapWithMatrix`, which every `.apply_matrix()` render goes
+# through, is not one of them. libviprs is unaffected because it serialises
+# with its own `pdfium_lock()` across whole operations and exposes no
+# pdfium-render type in its public API, so the wrapper's `Send + Sync` is not
+# reachable from this crate. That is the argument for publishing, and it is an
+# argument about libviprs rather than about the dependency.
+#
+# The guard step below therefore checks the things that argument rests on
+# rather than a version number: a registry source, a floor of 0.9.4, an
+# explicitly named libpdfium ABI, and `thread_safe` requested. A floor compare
+# on its own would have passed 0.9.4 while printing a justification that is not
+# true.
+#
+# Still to confirm before re-arming the `push:` trigger below: that
+# `CARGO_REGISTRY_TOKEN` resolves. The next publish is 0.3.1 to 0.5.0 as far as
+# crates.io is concerned, because 0.4.0 was cut in CHANGELOG.md and never
+# uploaded.
 
 on:
   # push:
@@ -94,29 +107,63 @@ jobs:
           fi
 
       # Loud refusal, not a silent skip. A dry run still packages and verifies;
-      # only a real upload is blocked, and only while the manifest would publish
-      # a `pdfium-render` requirement that can resolve to a version with no
-      # thread-safe bindings in it. See the NOTE at the top of this file.
-      - name: Refuse a real upload while the registry pdfium-render is unsound
+      # only a real upload is blocked.
+      #
+      # This step used to compare the declared floor against 0.9.4 and stop
+      # there. That was the right instinct and the wrong instrument. "0.9.4
+      # carries the reinstated per-call locking bindings" is only about 60%
+      # true: the file is back, but 290 of its 484 binding methods take the
+      # lock and `FPDF_RenderPageBitmapWithMatrix` is not one of them. A version
+      # compare would have waved that through while printing a justification
+      # that is false, which is worse than no guard, because it looks like it
+      # checked.
+      #
+      # So the floor is still asserted, because it is what keeps a consumer off
+      # 0.9.0 to 0.9.3 where `thread_safe` gates a bare `unsafe impl Send +
+      # Sync` with nothing behind it. But the two things that actually make this
+      # crate safe to publish are asserted directly instead of assumed: the
+      # dependency resolves from crates.io rather than a git fork that cannot
+      # survive publish, and the libpdfium ABI is named rather than inherited
+      # from the floating `pdfium_latest`. `tests/pdfium_dependency_contract.rs`
+      # holds the same three claims, so this is the release-time copy of a check
+      # that also runs on every PR.
+      - name: Refuse a real upload unless the published contract is true
         if: steps.check.outputs.already == 'false' && github.event.inputs.dry_run != 'true'
         run: |
-          req="$(cargo metadata --no-deps --format-version 1 \
-            | jq -r '.packages[] | select(.name == "libviprs") | .dependencies[]
-                     | select(.name == "pdfium-render") | .req' | head -1)"
+          set -euo pipefail
+          meta="$(cargo metadata --no-deps --format-version 1)"
+          dep="$(printf '%s' "$meta" | jq -r '.packages[] | select(.name == "libviprs")
+                   | .dependencies[] | select(.name == "pdfium-render")')"
+          req="$(printf '%s' "$dep" | jq -r .req | head -1)"
+          src="$(printf '%s' "$dep" | jq -r '.source // "registry"' | head -1)"
+          feats="$(printf '%s' "$dep" | jq -r '.features | join(",")' | head -1)"
+          uses_default="$(printf '%s' "$dep" | jq -r .uses_default_features | head -1)"
+          echo "pdfium-render: req=$req source=$src features=$feats defaults=$uses_default"
+
+          fail() { echo "::error::$1"; exit 1; }
+
+          case "$src" in
+            *git+*) fail "pdfium-render resolves from a git source ($src). Cargo strips that on publish, so this upload would hand crates.io consumers different code from the one CI tested. See #981." ;;
+          esac
+
           floor="${req#^}"; floor="${floor#>=}"; floor="${floor%% *}"
-          echo "libviprs declares pdfium-render \"$req\" (floor $floor)"
-          if [ "$(printf '%s\n0.9.4\n' "$floor" | sort -V | head -1)" = "0.9.4" ]; then
-            echo "::notice::Floor is at or above 0.9.4, the release carrying the reinstated per-call locking bindings. Upload allowed."
-          else
-            echo "::error::Refusing to upload libviprs while it declares pdfium-render \"$req\"."
-            echo "Registry pdfium-render 0.9.0 through 0.9.3 ship no thread-safe bindings:"
-            echo "there, the thread_safe feature is a bare unsafe impl Send + Sync for Pdfium"
-            echo "with no serialisation (ajrcarey/pdfium-render#262). The git-pinned fork fixes"
-            echo "that, but a git source does not survive publish, so this upload would hand"
-            echo "crates.io consumers the unsound wrapper. Raise the requirement in Cargo.toml"
-            echo "to 0.9.4 once upstream releases it, then this step passes. Tracked in #981."
-            exit 1
+          if [ "$(printf '%s\n0.9.4\n' "$floor" | sort -V | head -1)" != "0.9.4" ]; then
+            fail "libviprs declares pdfium-render \"$req\" (floor $floor). 0.9.0 through 0.9.3 gate thread_safe on a bare unsafe impl Send + Sync with no serialisation (ajrcarey/pdfium-render#262), and none of them is yanked, so this floor lets a consumer resolve one."
           fi
+
+          case "$feats" in
+            *pdfium_7881*) ;;
+            *) fail "no pdfium_XXXX feature is named (features: $feats). Inheriting pdfium_latest lets a wrapper patch release swap the whole bindgen ABI under a libpdfium this project pins separately, and a changed signature on a kept symbol is silent rather than a link error." ;;
+          esac
+          if [ "$uses_default" != "false" ]; then
+            fail "pdfium-render takes default features, which turns pdfium_latest back on."
+          fi
+          case "$feats" in
+            *thread_safe*) ;;
+            *) fail "thread_safe is not requested, and static PDFIUM: OnceLock<Pdfium> does not compile without it." ;;
+          esac
+
+          echo "::notice::Published contract holds: registry source, floor $floor, ABI pinned, thread_safe requested."
 
       - name: Publish to crates.io
         if: steps.check.outputs.already == 'false'
