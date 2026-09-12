@@ -492,6 +492,7 @@ annotated   fs-detected  tests/pmtiles_writer.rs::identical_payloads_are_stored_
 annotated   fs-detected  tests/pmtiles_writer.rs::killing_the_process_leaves_no_final_archive
 annotated   fs-detected  tests/pmtiles_writer.rs::non_adjacent_duplicates_share_one_payload_without_sharing_an_entry
 annotated   fs-detected  tests/pmtiles_writer.rs::serialising_the_reference_entries_reproduces_the_reference_bytes
+annotated   fs-detected  tests/pmtiles_writer.rs::the_bounds_the_writer_is_given_are_the_bounds_the_archive_carries
 annotated   fs-detected  tests/pmtiles_writer.rs::the_leaf_offset_is_not_the_flag_the_leaf_length_is
 annotated   fs-detected  tests/pmtiles_writer.rs::the_metadata_section_carries_the_libviprs_namespace
 annotated   fs-detected  tests/pmtiles_writer.rs::the_root_directory_fits_the_sixteen_kilobyte_budget
