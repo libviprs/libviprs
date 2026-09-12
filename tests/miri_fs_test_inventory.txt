@@ -364,6 +364,7 @@ annotated   fs-detected  tests/pdfium_dependency_contract.rs::thread_safe_is_req
 annotated   fs-detected  tests/pdfium_source_audit.rs::audit_gate_accepts_this_crate
 annotated   fs-detected  tests/pdfium_source_audit.rs::audit_gate_rejects_a_consumer_still_pinning_the_fork
 annotated   fs-detected  tests/pdfium_source_audit.rs::patchless_downstream_consumer_resolves_the_same_crate_we_do
+annotated   fs-detected  tests/pmtiles_benchmarks.rs::an_unmeasurable_pyramid_publishes_no_entry_count
 annotated   fs-detected  tests/pmtiles_benchmarks.rs::benchmark_cell
 annotated   fs-detected  tests/pmtiles_benchmarks.rs::both_backends_measure_the_same_pyramid
 annotated   fs-detected  tests/pmtiles_benchmarks.rs::every_read_scenario_reports_a_row

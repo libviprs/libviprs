@@ -525,7 +525,13 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// are `annotated fs-detected` and none of them is a judgement call.
 /// `tests/pmtiles_index_only_reads.rs` arrived in the same change and adds
 /// none, because it fabricates its archive in memory and never opens a file.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 382;
+///
+/// The review pass on #993 moved it 382 to 383, and the one is
+/// `an_unmeasurable_pyramid_publishes_no_entry_count`, which stats a path that
+/// does not exist and then writes a real file into a `tempfile::tempdir()` as
+/// the positive control that the first half measured an absence rather than a
+/// broken walker.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 383;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
