@@ -33,7 +33,7 @@
 //! After that, a tile in a leafless archive is **one** read. A tile in an
 //! archive with one level of leaves is two: the leaf, then the payload. A leaf
 //! that has already been fetched is served from a small cache
-//! ([`LEAF_CACHE_ENTRIES`]) so a clustered walk does not refetch the same
+//! ([`MAX_CACHED_LEAVES`]) so a clustered walk does not refetch the same
 //! 4096-entry page for every tile in it.
 //!
 //! # The lookup rule, which the specification does not contain
@@ -113,6 +113,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::pmtiles::directory::deserialize_entries;
 use crate::pmtiles::header::HEADER_BYTES;
+use crate::pmtiles::writer::DEFAULT_LEAF_ENTRIES;
 use crate::pmtiles::{
     Entry, FileRangeReader, Header, Metadata, PmTilesError, RangeReader, TileType, zxy_to_tileid,
 };
@@ -148,13 +149,71 @@ pub const MAX_METADATA_BYTES: usize = 4 * 1024 * 1024;
 /// against a format whose own writers emit one level.
 pub const MAX_LEAF_DEPTH: u8 = 4;
 
-/// How many decoded leaf directories are kept.
+/// Decoded directory entries the leaf cache may hold, summed across every
+/// leaf it is holding.
 ///
-/// Small on purpose. This is a latency optimisation for a clustered walk,
-/// where thousands of consecutive lookups land in the same leaf, and it is
-/// deliberately off the correctness path: a cold cache changes how many reads
-/// happen and never what they return.
-pub const LEAF_CACHE_ENTRIES: usize = 4;
+/// This is the cache's memory bound and the number the leaf count is derived
+/// from, in that order, because a count of leaves is not a bound at all:
+/// `read_directory` lets one leaf decode to [`MAX_DIRECTORY_BYTES`] of wire
+/// format, and at four bytes an entry that is about a million entries.
+///
+/// 262144 entries is 6 MiB of [`Entry`] on a 64-bit target, and that figure is
+/// the real ceiling rather than a leading one. `remember_leaf` refuses a leaf
+/// that is over the budget on its own instead of keeping it, so the sum the
+/// cache holds is under this number at every instant rather than under it
+/// except for one retained blob. The lookup that decoded such a leaf is
+/// holding the [`Arc`] either way, so the cache slot bought nothing and cost
+/// the ceiling four times over.
+pub const MAX_CACHED_LEAF_ENTRIES: usize = 256 * 1024;
+
+/// How many decoded leaf directories the cache holds.
+///
+/// Derived from [`MAX_CACHED_LEAF_ENTRIES`] rather than picked, and that is
+/// the whole of it. I picked 16 by hand first, against a budget of 262144
+/// entries and a writer that puts 4096 entries in a leaf, so the count bound
+/// bit at 25% of the memory bound and the memory bound never bound at all on
+/// any archive this crate writes. Dividing one by the other means the two
+/// cannot disagree again, and the `const _` below says so at compile time.
+///
+/// Sizing it matters more than it looks, because an LRU over uniformly random
+/// leaves is a step and not a slope. Measured on fabricated archives of
+/// 4096-entry leaves, 20000 random lookups each: at a cache of 16, sixteen
+/// leaves cost 0.38 us a lookup and **seventeen cost 7.37 us**, a nineteenfold
+/// jump for one more leaf, because the miss rate of an LRU of `k` over `N`
+/// uniformly random leaves is `1 - k/N` and the first miss is the one that
+/// pays a ranged read and a directory decode. At 64 leaves the same archive is
+/// 93.40 us at a cache of 16 and 0.69 us at a cache of 64. So the cliff does
+/// not soften with size, it only moves, and putting it where the memory bound
+/// already sits is free.
+///
+/// What a miss costs, measured on a realistic leaf (9157 stored bytes, 22647
+/// plain): 84 to 103 us in total, of which `deserialize_entries` is 52 to 68
+/// and the gzip inflate is 32 to 35. The varint decode is about 62% of it and
+/// the compression is a third, which is the opposite of what I wrote here
+/// first. Anyone reaching for a cheaper miss should go at the decode.
+///
+/// This is still deliberately off the correctness path: a cold cache changes
+/// how many reads happen and never what they return. The key is `(offset,
+/// length)` rather than the offset alone for exactly that reason, since the
+/// decode is a function of the range and two root entries may point at one
+/// offset with two lengths.
+pub const MAX_CACHED_LEAVES: usize = MAX_CACHED_LEAF_ENTRIES / DEFAULT_LEAF_ENTRIES;
+
+// The two bounds, held together where a change to either one has to pass.
+// Picking the count by hand is what let it sit at a quarter of the budget in
+// the first place.
+const _: () = assert!(MAX_CACHED_LEAVES * DEFAULT_LEAF_ENTRIES <= MAX_CACHED_LEAF_ENTRIES);
+const _: () = assert!(MAX_CACHED_LEAVES > 0);
+
+/// What the leaf cache is keyed on: where a leaf starts and how long it is.
+///
+/// Both halves, because `read_directory` decodes a range. An archive may
+/// legally carry two root entries whose leaf pointers share an offset and
+/// differ in length, and the two decode to different directories (or one
+/// decodes and the other is a typed refusal). Keying on the offset alone made
+/// the second lookup answer with the first lookup's directory, which is a
+/// reader whose result depends on what was asked before it.
+type LeafKey = (u64, u32);
 
 /// A PMTiles v3 archive opened for random access.
 ///
@@ -202,7 +261,14 @@ pub struct Reader<R: RangeReader> {
     metadata: OnceLock<Metadata>,
     /// Most recently used first. Behind a `Mutex` rather than a lock-free
     /// structure because it is touched once per leaf, not once per byte.
-    leaves: Mutex<Vec<(u64, Arc<Vec<Entry>>)>>,
+    ///
+    /// Keyed on the **range**, `(offset, length)`, and not on the offset
+    /// alone. What a leaf decodes to is a function of both, because
+    /// `read_directory` reads a range, so two root entries pointing at one
+    /// offset with two lengths are two different directories and a cache that
+    /// could not tell them apart made a warm reader answer what a cold reader
+    /// refused.
+    leaves: Mutex<Vec<(LeafKey, Arc<Vec<Entry>>)>>,
 }
 
 impl Reader<FileRangeReader> {
@@ -505,8 +571,12 @@ impl<R: RangeReader> Reader<R> {
     }
 
     /// A leaf directory, from the cache if it is there.
+    ///
+    /// The cache is consulted with the whole range rather than with the
+    /// offset, so a hit is a leaf that was decoded from exactly these bytes.
     fn leaf_directory(&self, at: u64, length: u32) -> Result<Arc<Vec<Entry>>, PmTilesError> {
-        if let Some(cached) = self.cached_leaf(at) {
+        let key: LeafKey = (at, length);
+        if let Some(cached) = self.cached_leaf(key) {
             return Ok(cached);
         }
         let entries = Arc::new(read_directory(
@@ -515,24 +585,47 @@ impl<R: RangeReader> Reader<R> {
             at,
             u64::from(length),
         )?);
-        self.remember_leaf(at, Arc::clone(&entries));
+        self.remember_leaf(key, Arc::clone(&entries));
         Ok(entries)
     }
 
-    fn cached_leaf(&self, at: u64) -> Option<Arc<Vec<Entry>>> {
+    fn cached_leaf(&self, key: LeafKey) -> Option<Arc<Vec<Entry>>> {
         let mut leaves = self.lock_leaves();
-        let index = leaves.iter().position(|(offset, _)| *offset == at)?;
+        let index = leaves.iter().position(|(cached, _)| *cached == key)?;
         let hit = leaves.remove(index);
         let entries = Arc::clone(&hit.1);
         leaves.insert(0, hit);
         Some(entries)
     }
 
-    fn remember_leaf(&self, at: u64, entries: Arc<Vec<Entry>>) {
+    fn remember_leaf(&self, key: LeafKey, entries: Arc<Vec<Entry>>) {
         let mut leaves = self.lock_leaves();
-        leaves.retain(|(offset, _)| *offset != at);
-        leaves.insert(0, (at, entries));
-        leaves.truncate(LEAF_CACHE_ENTRIES);
+        leaves.retain(|(cached, _)| *cached != key);
+
+        // A leaf over the whole budget by itself is handed back and not held.
+        // The alternative is to keep it because the lookup in flight is
+        // holding it anyway, which is true of the `Arc` and not of the cache
+        // slot: the slot keeps it alive after the lookup ends, and that is the
+        // difference between a 6 MiB ceiling and a 24 MiB one.
+        if entries.len() > MAX_CACHED_LEAF_ENTRIES {
+            return;
+        }
+
+        leaves.insert(0, (key, entries));
+        leaves.truncate(MAX_CACHED_LEAVES);
+
+        // Then the budget, which is the bound the count is derived from.
+        // Evicting from the back is the same LRU order the truncate above
+        // uses, and the leaf just inserted is at the front, so it is the last
+        // thing this could reach and the early return above means it never
+        // has to.
+        let mut held: usize = leaves.iter().map(|(_, leaf)| leaf.len()).sum();
+        while held > MAX_CACHED_LEAF_ENTRIES {
+            let Some((_, dropped)) = leaves.pop() else {
+                break;
+            };
+            held -= dropped.len();
+        }
     }
 
     /// The cache lock, recovered rather than unwrapped.
@@ -540,7 +633,7 @@ impl<R: RangeReader> Reader<R> {
     /// Nothing in this module can panic while holding it, so poisoning would
     /// have to come from somewhere else entirely, and a cache is not worth a
     /// panicking public entry point on an archive somebody handed us.
-    fn lock_leaves(&self) -> std::sync::MutexGuard<'_, Vec<(u64, Arc<Vec<Entry>>)>> {
+    fn lock_leaves(&self) -> std::sync::MutexGuard<'_, Vec<(LeafKey, Arc<Vec<Entry>>)>> {
         match self.leaves.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
@@ -732,6 +825,11 @@ mod tests {
         ));
     }
 
+    /// A leaf key, with the length fixed, for the tests that only vary offset.
+    fn at(offset: u64) -> LeafKey {
+        (offset, 64)
+    }
+
     #[test]
     fn the_leaf_cache_keeps_the_most_recent_and_forgets_the_oldest() {
         let entries = [Entry {
@@ -742,14 +840,129 @@ mod tests {
         }];
         let reader = Reader::try_new(Sized(archive(&entries, b"TILE"), true)).expect("opens");
 
-        for offset in 0..(LEAF_CACHE_ENTRIES as u64 + 2) {
-            reader.remember_leaf(offset, Arc::new(Vec::new()));
+        for offset in 0..(MAX_CACHED_LEAVES as u64 + 2) {
+            reader.remember_leaf(at(offset), Arc::new(Vec::new()));
         }
-        assert_eq!(reader.lock_leaves().len(), LEAF_CACHE_ENTRIES);
+        assert_eq!(reader.lock_leaves().len(), MAX_CACHED_LEAVES);
         // The two oldest are gone and the newest is first.
-        assert!(reader.cached_leaf(0).is_none());
-        assert!(reader.cached_leaf(1).is_none());
-        assert!(reader.cached_leaf(LEAF_CACHE_ENTRIES as u64 + 1).is_some());
+        assert!(reader.cached_leaf(at(0)).is_none());
+        assert!(reader.cached_leaf(at(1)).is_none());
+        assert!(
+            reader
+                .cached_leaf(at(MAX_CACHED_LEAVES as u64 + 1))
+                .is_some()
+        );
+    }
+
+    /// Two leaves at one offset with two lengths are two cache entries.
+    ///
+    /// The unit half of the regression in `tests/pmtiles_reader.rs`, which
+    /// builds the archive that makes this reachable through `get_tile`. Here
+    /// it is just the key: a cache keyed on the offset would answer the second
+    /// lookup with the first leaf's entries, and the entries are what a tile
+    /// lookup then resolves against.
+    #[test]
+    fn two_leaves_at_one_offset_with_two_lengths_do_not_collide() {
+        let entries = [Entry {
+            tile_id: 0,
+            offset: 0,
+            length: 4,
+            run_length: 1,
+        }];
+        let reader = Reader::try_new(Sized(archive(&entries, b"TILE"), true)).expect("opens");
+
+        let short = Arc::new(vec![Entry::default(); 1]);
+        let long = Arc::new(vec![Entry::default(); 2]);
+        reader.remember_leaf((4096, 100), Arc::clone(&short));
+        reader.remember_leaf((4096, 200), Arc::clone(&long));
+
+        assert_eq!(
+            reader.cached_leaf((4096, 100)).map(|leaf| leaf.len()),
+            Some(1),
+            "the short range should still answer with the short leaf"
+        );
+        assert_eq!(
+            reader.cached_leaf((4096, 200)).map(|leaf| leaf.len()),
+            Some(2),
+            "the long range should answer with the long leaf"
+        );
+        assert!(
+            reader.cached_leaf((4096, 300)).is_none(),
+            "a range nothing decoded is a miss, not the nearest offset"
+        );
+    }
+
+    /// The budget evicts before the count does, when the leaves are big.
+    ///
+    /// Without this the cache is bounded by a leaf count, and a leaf has no
+    /// size limit short of [`MAX_DIRECTORY_BYTES`], so a count of leaves is
+    /// not a number of bytes at all. The control is the last third: leaves
+    /// small enough to fit the budget are all kept, so this is not simply a
+    /// cache that evicts everything.
+    #[test]
+    fn the_leaf_cache_evicts_on_its_entry_budget_before_its_leaf_count() {
+        let entries = [Entry {
+            tile_id: 0,
+            offset: 0,
+            length: 4,
+            run_length: 1,
+        }];
+        let reader = Reader::try_new(Sized(archive(&entries, b"TILE"), true)).expect("opens");
+
+        // Three leaves, each 40% of the budget: the third pushes the total
+        // over and the oldest goes, long before the count cap.
+        let big = MAX_CACHED_LEAF_ENTRIES * 2 / 5;
+        let leaf = || Arc::new(vec![Entry::default(); big]);
+        for offset in 0..3u64 {
+            reader.remember_leaf(at(offset), leaf());
+        }
+        assert!(
+            reader.lock_leaves().len() < 3,
+            "three leaves at 40% of the budget each should not all be held"
+        );
+        assert!(
+            reader.cached_leaf(at(2)).is_some(),
+            "the leaf just decoded is still held while it fits the budget"
+        );
+        assert!(
+            held_entries(&reader) <= MAX_CACHED_LEAF_ENTRIES,
+            "the cache held {} entries over a budget of {MAX_CACHED_LEAF_ENTRIES}",
+            held_entries(&reader)
+        );
+
+        // One leaf bigger than the whole budget is handed back and not held.
+        // Keeping it would make the advertised ceiling a quarter of the real
+        // one, and the lookup that decoded it holds the `Arc` regardless.
+        reader.remember_leaf(
+            at(9),
+            Arc::new(vec![Entry::default(); MAX_CACHED_LEAF_ENTRIES + 1]),
+        );
+        assert!(
+            reader.cached_leaf(at(9)).is_none(),
+            "a leaf over the whole budget should not take a cache slot"
+        );
+        assert!(
+            held_entries(&reader) <= MAX_CACHED_LEAF_ENTRIES,
+            "an over-budget leaf left {} entries in the cache",
+            held_entries(&reader)
+        );
+
+        // The control: a full cache of ordinary 4096-entry leaves is kept, so
+        // this is not simply a cache that evicts everything.
+        let fresh = Reader::try_new(Sized(archive(&entries, b"TILE"), true)).expect("opens");
+        for offset in 0..MAX_CACHED_LEAVES as u64 {
+            fresh.remember_leaf(at(offset), Arc::new(vec![Entry::default(); 4096]));
+        }
+        assert_eq!(fresh.lock_leaves().len(), MAX_CACHED_LEAVES);
+    }
+
+    /// Entries the cache is holding, which is the quantity the budget bounds.
+    fn held_entries<R: RangeReader>(reader: &Reader<R>) -> usize {
+        reader
+            .lock_leaves()
+            .iter()
+            .map(|(_, leaf)| leaf.len())
+            .sum()
     }
 
     #[test]
@@ -762,14 +975,14 @@ mod tests {
         }];
         let reader = Reader::try_new(Sized(archive(&entries, b"TILE"), true)).expect("opens");
 
-        for offset in 0..LEAF_CACHE_ENTRIES as u64 {
-            reader.remember_leaf(offset, Arc::new(Vec::new()));
+        for offset in 0..MAX_CACHED_LEAVES as u64 {
+            reader.remember_leaf(at(offset), Arc::new(Vec::new()));
         }
         // Touch the oldest, then push one more in. Without the move-to-front
         // the touched one would be the one evicted.
-        assert!(reader.cached_leaf(0).is_some());
-        reader.remember_leaf(99, Arc::new(Vec::new()));
-        assert!(reader.cached_leaf(0).is_some());
-        assert!(reader.cached_leaf(1).is_none());
+        assert!(reader.cached_leaf(at(0)).is_some());
+        reader.remember_leaf(at(9999), Arc::new(Vec::new()));
+        assert!(reader.cached_leaf(at(0)).is_some());
+        assert!(reader.cached_leaf(at(1)).is_none());
     }
 }

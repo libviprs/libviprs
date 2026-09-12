@@ -1157,6 +1157,17 @@ and not under `Fixed`: this file is the only place they can be caught.
 
 ### Added
 
+- **`libviprs::pmtiles::reader::MAX_CACHED_LEAVES` and
+  `MAX_CACHED_LEAF_ENTRIES`** (issue #993), the two public constants the
+  PMTiles reader's leaf cache is bounded by: how many decoded leaf directories
+  it holds and how many directory entries it holds across all of them. The
+  second is the memory bound and the first is derived from it.
+
+  They replace `LEAF_CACHE_ENTRIES`, which was added and never released under
+  that name. Both words in the old pair meant "entries" and neither meant the
+  same thing, so the docs had to bold **count** and **entry** to keep them
+  apart, and a name needing bold to disambiguate is a name failing.
+
 - **PMTiles v3 format primitives** (issue #987). A new always-compiled
   `libviprs::pmtiles` module carrying the 127-byte v3 header, the `(z, x, y)`
   to `u64` Hilbert TileID mapping and its inverse, a bounded LEB128 varint, the
@@ -1253,6 +1264,34 @@ and not under `Fixed`: this file is the only place they can be caught.
   the one command that tells a caller how exposed they are, the path and
   extension table, and what to name to keep the tree. This comes out of the
   PMTiles epic, #986.
+
+- **The PMTiles numbers, and the two proofs under them** (issue #993).
+  `docs/pmtiles-benchmarks.md` is the procedure behind the figures
+  libviprs.org publishes for archive storage: `FsSink` against `PmTilesSink`
+  over one source and one plan, reporting wall time, tiles per second, the
+  engine's tracked working set, process peak RSS, output bytes and the
+  filesystem-entry count an archive collapses to one. Reads cover cold, warm,
+  sequential, random and concurrent on both backends. A cheap profile runs in
+  seconds and a larger one is opt-in through `LIBVIPRS_BENCH_PROFILE`, and the
+  export is a JSON array whose first twelve fields are spelled the way the
+  existing scalability data spells them.
+
+  No `criterion` and no `benches/` directory. Criterion measures the
+  distribution of many calls to one function, and the numbers that decide this
+  comparison are properties of a single run: peak RSS, output size, entry
+  count. The harness reuses the `#[ignore]`d wall-clock convention and the
+  `MemoryTracker` the engine already reports through `EngineResult`.
+
+  Two claims the format rests on are now measured rather than asserted in
+  prose. The writer's memory is watched by a counting global allocator, and
+  the peak is held to a formula built from the sort-buffer size and the
+  distinct-payload count, with a control that fails a writer whose peak cannot
+  move at all. And a read is shown to be the index and the tile: a fabricated
+  6 GiB archive, served through a counting `RangeReader`, answers a lookup in
+  one or two small ranged reads at offsets past `u32::MAX` and never touches
+  its own metadata section. Neither costs a real 4 GiB archive on a CI run;
+  the write half of that boundary is the opt-in profile the doc describes.
+  This closes out the PMTiles epic, #986.
 
 - **`.tif` and `.tiff` are save routes** (issue #948). `src/encode_tiff.rs` has
   had a working `Raster::save_tiff` with round-trip tests behind it all along,
@@ -3138,6 +3177,49 @@ and not under `Fixed`: this file is the only place they can be caught.
 
 ### Changed
 
+- **The PMTiles reader's leaf cache holds sixty-four directories, not four**
+  (issue #993). `MAX_CACHED_LEAVES` was sized for a clustered walk, where
+  thousands of consecutive lookups land in one leaf, and it is the wrong size
+  for random access. Measured on a 21851-tile archive with six leaves: 20000
+  random lookups cost 1699 ms against 127 ms for the same 20000 walked in
+  order, a thirteen-fold gap, and the directory backend beat the archive
+  outright. An LRU of four over six uniformly random leaves misses about a
+  third of the time and every miss pays a ranged read plus a decode of a
+  4096-entry directory. At the new size the same measurement is 55 ms against
+  38 ms.
+
+  The count is **derived from the memory bound** rather than picked, which is
+  the part worth keeping. `MAX_CACHED_LEAF_ENTRIES` caps the decoded entries
+  the cache holds across every leaf at 262144, about 6 MiB, because a count of
+  leaves was never a memory bound at all: one leaf may decode to as many
+  entries as `MAX_DIRECTORY_BYTES` allows. The count is that budget divided by
+  the 4096 entries this crate's writer puts in a leaf, with a `const _`
+  assertion holding the two together. Picked by hand they disagreed: sixteen
+  leaves is 65536 entries, a quarter of the budget, so the count always bound
+  first and the budget never bound on anything this crate writes.
+
+  Sizing it is a step and not a slope. The miss rate of an LRU of `k` over `N`
+  uniformly random leaves is exactly `1 - k/N`, so at a cache of sixteen the
+  move from sixteen leaves to seventeen is 0.38 us to 7.37 us a lookup, a
+  nineteenfold jump for one more leaf. The cliff does not soften with size, it
+  moves, and putting it where the memory bound already sits costs nothing.
+
+  A leaf over the whole budget by itself is now handed back to the lookup and
+  not cached. It used to be kept, on the argument that the lookup holds it
+  anyway, which is true of the `Arc` and not of the cache slot, and the
+  difference between the two is the advertised 6 MiB ceiling and a real one
+  four times higher.
+
+  What a miss costs is the varint decode and not the gzip, which is what an
+  earlier version of this entry said. Measured on a realistic leaf, 9157 stored
+  bytes inflating to 22647: `deserialize_entries` is 52 to 68 us, the inflate is
+  32 to 35, and the whole miss is 84 to 103.
+
+  Nothing about what a read returns changes with the size: the cache is off the
+  correctness path, and a cold cache only changes how many reads happen. It was
+  not off the correctness path before this release, though, which is the `Fixed`
+  entry below.
+
 - **A JPEG 2000 save writes the tile grid into `SIZ`**, so its bytes change
   even where the grid is one tile (issue #768). `jp2ksave` writes `XTsiz` and
   `YTsiz` from its tile options whether or not they cut the image up, and this
@@ -4145,6 +4227,26 @@ and not under `Fixed`: this file is the only place they can be caught.
   feature permutation per toolchain on the cargo volume.
 
 ### Fixed
+
+- **A warm PMTiles reader answered what a cold one refused** (issue #993). The
+  leaf cache matched on a leaf's offset and nothing else, while what a leaf
+  decodes to is a function of `(offset, length)`, because `read_directory`
+  reads a range. Nothing in the format says a leaf pointer's offset is unique
+  across the root, so an archive may carry two pointers at one offset with two
+  lengths, and on such an archive the same coordinate came back as
+  `Err(TrailingDirectoryBytes)` from a fresh reader and as a tile from a reader
+  that had followed the other pointer first.
+
+  That is a reader whose answer depends on the order the lookups arrived in,
+  on bytes somebody else wrote, which is the property the PMTiles fuzzing and
+  the differential oracle from #991 rest on. The cache is keyed on the whole
+  range now. `a_warm_leaf_cache_answers_a_lookup_the_way_a_cold_one_does` in
+  `tests/pmtiles_reader.rs` builds exactly that archive and asserts the two
+  agree.
+
+  It predates the cache resize in this release and is not caused by it,
+  although raising the cache widens the window in which two pointers are both
+  resident.
 
 - **An `include_bytes!` path that nothing committed now fails a test rather
   than a Linux runner** (issue #979). #977 fixed the missing MAT fixture and
