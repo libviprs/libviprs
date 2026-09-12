@@ -483,7 +483,7 @@ fn the_readme_describes_the_clippy_gate_the_makefile_runs() {
         "the LINTED_FEATURES parser found only {linted:?}"
     );
 
-    let marker = "Since #844 that is the default build plus ";
+    let marker = "the default build plus ";
     let at = README
         .find(marker)
         .expect("the CI bullet names the linted set");
