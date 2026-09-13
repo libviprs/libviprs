@@ -58,12 +58,40 @@ on:
 
   workflow_dispatch:
 
-# One group per branch, shared by the push run and any pull_request run for the
-# same branch, so a newer push supersedes an older run rather than racing it.
+# Only `push` runs supersede each other. That is narrower than it looks and the
+# reasoning took two wrong turns to get right, so it is written out.
+#
+# A cancelled check run lands on the same head sha as the successful ones and
+# GraphQL reports `isRequired: true` on it. What decides the merge is not that
+# flag: branch protection evaluates the **latest** check run per context name,
+# so a cancelled run blocks only when nothing later reran that same name.
+#
+# Measured rather than assumed. Opening a PR as a draft and marking it ready
+# three seconds later produced three runs on one sha. The `opened` run was
+# cancelled at :34; the `push` and `ready_for_review` runs finished at :55 and
+# :58 with the same job names. Result: every cancelled row `isRequired: true`,
+# `statusCheckRollup.state` FAILURE, and `mergeStateStatus` CLEAN. The rollup
+# aggregates every run; protection reads the last one per name. That gap is
+# what makes a cancelled row look fatal when it is not, and what makes it
+# genuinely fatal when it is.
+#
+# It is genuinely fatal when the run that did the cancelling does not produce a
+# check run of the same name, so the cancelled row stays latest. A job rename
+# in flight does exactly that, and it blocked three PRs in `libviprs` whose
+# bodies blamed the rename itself.
+#
+# Two earlier explanations of this in the org were wrong. The first called a
+# cancelled check cosmetic; it is not. The second said keying the group on
+# `github.event_name` fixes it; it does not, because `opened` and
+# `ready_for_review` are both `pull_request` and still share a group. So the
+# key keeps the event, and cancellation is limited to `push`, where a
+# superseding run always reruns the same names. `pull_request` runs are rare
+# here (no `synchronize`), so letting them all finish costs almost nothing.
+#
 # `main` is excluded: that run is the record of what actually landed.
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
-  cancel-in-progress: ${{ (github.head_ref || github.ref_name) != 'main' }}
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: ${{ github.event_name == 'push' && (github.head_ref || github.ref_name) != 'main' }}
 
 env:
   CARGO_TERM_COLOR: always
