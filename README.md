@@ -332,17 +332,24 @@ The `pdfium` feature requires `libpdfium.so` at runtime. Pre-compiled binaries b
 ```bash
 # x86_64
 curl -L -o pdfium.tgz \
-  https://github.com/libviprs/libviprs-dep/releases/download/pdfium-7881/pdfium-linux-x64.tgz
+  https://github.com/libviprs/libviprs-dep/releases/download/pdfium-8054/pdfium-linux-x64.tgz
 
 # arm64
 curl -L -o pdfium.tgz \
-  https://github.com/libviprs/libviprs-dep/releases/download/pdfium-7881/pdfium-linux-arm64.tgz
+  https://github.com/libviprs/libviprs-dep/releases/download/pdfium-8054/pdfium-linux-arm64.tgz
 
 # Extract and install
 tar xzf pdfium.tgz
 sudo cp pdfium-linux-*/lib/libpdfium.so /usr/local/lib/
 sudo ldconfig
 ```
+
+`pdfium-8054` is what CI installs and what `libviprs-tests` pins, so these
+instructions reproduce what the suite runs. One caveat worth knowing rather than
+discovering: the crate requests `pdfium-render`'s `pdfium_7881` feature, which
+selects the bindgen set, so the bindings and the library are a version apart.
+`pdfium-render 0.9.4` offers no newer ABI (`pdfium_latest = ["pdfium_7881"]`), so
+there is nothing to move to yet. That is tracked in #1017.
 
 See the [libviprs-dep pdfium README](https://github.com/libviprs/libviprs-dep/tree/main/pdfium) for building PDFium from source or finding other versions.
 
