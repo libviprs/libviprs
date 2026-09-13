@@ -8,8 +8,8 @@
 //! actually run. Nothing compared the two lists, so they drifted, and by the
 //! time anyone did compare them the drift was in six separate places at once:
 //!
-//! * `MSRV (1.97)` was not run at all, so neither were its seven `cargo check`
-//!   cells nor the guard that holds the four written-out MSRV claims together;
+//! * `MSRV` was not run at all, so neither were its seven `cargo check`
+//!   cells nor the guard that holds the written-out MSRV claims together;
 //! * `Integration Tests (libviprs-tests)` was not run at all, which is the one
 //!   job that compiles the ported cells against this crate's API;
 //! * `pdfium-render source audit (#149)` was not run at all;
@@ -39,6 +39,17 @@
 //! so every held job needs a `make` target the `ci` recipe invokes. Today that
 //! is Miri, covered by `make miri` on this machine's pinned nightly.
 //!
+//! # Why the README is in here too
+//!
+//! README.md's `## CI` section spells out the job list in prose, and nothing
+//! read it. That is a second copy in the same sense as the `Makefile` one, and
+//! it went stale the same way: #1011 renamed the `msrv` job and the README
+//! still advertised the old name, with every check in the repository green.
+//! A job's display name is not decoration, because branch protection matches a
+//! required check by that exact string, so the README naming a job that no
+//! longer exists is the reader's only warning that the protection list may be
+//! naming it too.
+//!
 //! `Makefile` and both workflow files come in through `include_str!` at
 //! compile time, the same way `tests/ci_feature_coverage.rs` reads them, so
 //! most of this file runs under Miri. The one test that lists a directory
@@ -50,6 +61,7 @@ use std::path::Path;
 const MAKEFILE: &str = include_str!("../Makefile");
 const CI_YML: &str = include_str!("../.github/workflows/ci.yml");
 const MERGE_GATE_YML: &str = include_str!("../.github/workflows/merge-gate.yml");
+const README: &str = include_str!("../README.md");
 
 /// The workflow files whose jobs decide whether a change is good.
 const GATE_WORKFLOWS: &[(&str, &str)] = &[("ci.yml", CI_YML), ("merge-gate.yml", MERGE_GATE_YML)];
@@ -113,6 +125,104 @@ fn declared_targets() -> BTreeSet<&'static str> {
         .map(|(name, _)| name.trim())
         .filter(|n| !n.is_empty() && !n.starts_with('.'))
         .collect()
+}
+
+/// Every job in `yml`, by display name.
+///
+/// Same two-space/four-space rule as `jobs_with_a_condition` below, and the
+/// same reason it is enough. A job with no `name:` of its own would be missing
+/// here, and there is no such job: GitHub falls back to the job id, which is
+/// not what any of these are called.
+/// Every job key under `jobs:`, whether or not it carries a `name:`.
+///
+/// [`job_names`] only sees jobs that declare a display name, and GitHub falls
+/// back to the job **id** when one does not. So a job added without `name:`
+/// creates a real check run that the README never lists and the count never
+/// counts, and both guards below would agree with each other about a job list
+/// that had quietly gone wrong. Forgetting `name:` is exactly how a job list
+/// grows, so the two are compared rather than assumed equal.
+fn job_ids(yml: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let mut in_jobs = false;
+    for line in yml.lines() {
+        if line == "jobs:" {
+            in_jobs = true;
+            continue;
+        }
+        if !in_jobs {
+            continue;
+        }
+        let indent = line.len() - line.trim_start().len();
+        if !line.trim().is_empty() && indent == 0 {
+            break;
+        }
+        if indent == 2 && line.trim_end().ends_with(':') && !line.trim_start().starts_with('#') {
+            out.insert(line.trim().trim_end_matches(':').to_string());
+        }
+    }
+    out
+}
+
+fn job_names(yml: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let mut in_jobs = false;
+    let mut want_name = false;
+    for line in yml.lines() {
+        if line == "jobs:" {
+            in_jobs = true;
+            continue;
+        }
+        if !in_jobs {
+            continue;
+        }
+        let indent = line.len() - line.trim_start().len();
+        if !line.trim().is_empty() && indent == 0 {
+            break;
+        }
+        if indent == 2 && line.trim_end().ends_with(':') && !line.trim_start().starts_with('#') {
+            want_name = true;
+            continue;
+        }
+        if indent == 4
+            && want_name
+            && let Some(rest) = line.trim_start().strip_prefix("name:")
+        {
+            out.insert(rest.trim().to_owned());
+            want_name = false;
+        }
+    }
+    out
+}
+
+/// The job names README.md's `## CI` section lists, in backticks.
+///
+/// A bullet in that section opens with the job it describes, and the two
+/// Merge Gate jobs that share a schedule share a bullet as `` `A` and `B` ``,
+/// so the parser takes backticked runs from the head of the bullet and stops
+/// at the first thing that is not one. Everything after that is prose about
+/// the job and is not a name.
+fn readme_job_list() -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let section = README
+        .lines()
+        .skip_while(|l| l.trim_end() != "## CI")
+        .skip(1)
+        .take_while(|l| !l.starts_with('#'));
+    for line in section {
+        let Some(mut rest) = line.strip_prefix("- ") else {
+            continue;
+        };
+        while let Some(body) = rest.strip_prefix('`') {
+            let Some(end) = body.find('`') else { break };
+            out.insert(body[..end].to_owned());
+            rest = &body[end + 1..];
+            match rest.strip_prefix(" and ") {
+                Some(more) => rest = more,
+                None => break,
+            }
+        }
+    }
+    out
 }
 
 /// Every job in `yml` that carries a job-level `if:`, by name.
@@ -341,4 +451,111 @@ fn the_workflow_directory_holds_only_files_this_guard_has_classified() {
         found.difference(&classified).collect::<Vec<_>>(),
         classified.difference(&found).collect::<Vec<_>>(),
     );
+}
+
+/// README.md's CI section names exactly the jobs the workflows declare.
+///
+/// Set equality in both directions, because both halves are a real failure: a
+/// job the README does not name is one a contributor will not know ran, and a
+/// name the README has that the workflows do not is the stale-rename case that
+/// #1011 was about. The rename that prompted this test passed every other
+/// check in the repository with the README still advertising `MSRV (1.97)`.
+#[test]
+fn the_readme_names_exactly_the_jobs_the_workflows_declare() {
+    let declared: BTreeSet<String> = GATE_WORKFLOWS
+        .iter()
+        .flat_map(|(_, text)| job_names(text))
+        .collect();
+    assert!(
+        !declared.is_empty(),
+        "no job names parsed out of the gate workflows, so this guard has \
+         nothing to compare"
+    );
+    let advertised = readme_job_list();
+    assert_eq!(
+        advertised,
+        declared,
+        "README.md's `## CI` section is a prose copy of the job list and \
+         nothing but this test reads it. Declared by a workflow and not named \
+         in the README: {:?}. Named in the README and declared by no workflow: \
+         {:?}. Required checks on `main` are matched by these exact strings, \
+         so a name that has drifted here has probably drifted there too. See \
+         issue #1011.",
+        declared.difference(&advertised).collect::<Vec<_>>(),
+        advertised.difference(&declared).collect::<Vec<_>>(),
+    );
+}
+
+/// The README's job count agrees with the list under it.
+///
+/// The sentence above the list says how many jobs there are. It is one more
+/// place the number can go stale, it is the first line a reader takes on
+/// trust, and checking it costs a lookup table of number words.
+#[test]
+fn the_readme_job_count_agrees_with_the_list() {
+    const WORDS: &[&str] = &[
+        "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+        "eleven", "twelve",
+    ];
+    let claim = README
+        .lines()
+        .find(|l| l.contains("jobs between them"))
+        .expect(
+            "README.md's `## CI` section must open with a sentence saying how \
+             many jobs the workflows run between them (issue #1011)",
+        );
+    let word = claim
+        .split_whitespace()
+        .zip(claim.split_whitespace().skip(1))
+        .find(|(_, next)| *next == "jobs")
+        .map(|(w, _)| w)
+        .unwrap_or_else(|| panic!("no count word before `jobs` in: {claim}"));
+    let claimed = WORDS
+        .iter()
+        .position(|w| *w == word)
+        .unwrap_or_else(|| panic!("`{word}` is not a number word this guard knows: {WORDS:?}"));
+    let actual: usize = GATE_WORKFLOWS
+        .iter()
+        .map(|(_, text)| job_names(text).len())
+        .sum();
+    assert_eq!(
+        claimed, actual,
+        "README.md says the two workflows run {word} ({claimed}) jobs between \
+         them and they declare {actual}. See issue #1011."
+    );
+}
+
+/// Every job declares a `name:`, so the two guards above can see all of them.
+///
+/// Without this, appending a job with no display name leaves both of them
+/// green: `job_names` never sees it, so the README is not asked to list it and
+/// the count does not count it, while GitHub happily creates a check run named
+/// after the job id. Verified by appending exactly such a job and watching the
+/// rest of this file stay green.
+#[test]
+fn every_job_declares_a_display_name() {
+    for (path, yml) in GATE_WORKFLOWS {
+        let ids = job_ids(yml);
+        let names = job_names(yml);
+
+        // Positive control. If the id parser stopped finding anything, the
+        // comparison below would pass over two empty sets.
+        assert!(
+            !ids.is_empty(),
+            "{path} parsed to zero jobs, so this guard is reading nothing"
+        );
+
+        assert_eq!(
+            ids.len(),
+            names.len(),
+            "{path} declares {} job(s) but only {} of them carry a `name:`.\n\
+             ids:   {ids:?}\n\
+             names: {names:?}\n\
+             GitHub names a check run after the job id when `name:` is absent, \
+             so such a job is a real required-check candidate that the README \
+             never lists and the count never counts.",
+            ids.len(),
+            names.len(),
+        );
+    }
 }
