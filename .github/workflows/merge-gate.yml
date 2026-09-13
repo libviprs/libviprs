@@ -84,14 +84,26 @@ on:
         type: boolean
         default: false
 
-# One group per branch, shared by the push run and any pull_request run for the
-# same branch, so a newer push supersedes an older run rather than racing it.
-# `main` is excluded: that run is the record of what actually landed. Same
-# shape as ci.yml, keyed on `github.workflow` as well as the branch so the two
-# workflows never cancel each other.
+# Same rule as ci.yml, and it has to be, because two of the three jobs below
+# (`Loom` and the pdfium audit) are required contexts. A cancelled row here
+# blocks a merge on exactly the same terms.
+#
+# Branch protection evaluates the latest check run per context name, so a
+# cancelled run blocks only when nothing later reran that same name. The rollup
+# aggregates every run on the sha, which is why a cancelled row shows FAILURE
+# in `gh pr checks` while `mergeStateStatus` can still be CLEAN. Both are right;
+# they answer different questions.
+#
+# `github.workflow` in the key already stops this workflow and ci.yml cancelling
+# each other. What it does not stop is this workflow's own push and
+# pull_request runs colliding, which is what cancelled `Loom` on the very PR
+# that fixed ci.yml. So the event joins the key and cancellation is limited to
+# push, where a superseding run always reruns the same names.
+#
+# `main` is excluded: that run is the record of what actually landed.
 concurrency:
-  group: merge-gate-${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
-  cancel-in-progress: ${{ (github.head_ref || github.ref_name) != 'main' }}
+  group: merge-gate-${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: ${{ github.event_name == 'push' && (github.head_ref || github.ref_name) != 'main' }}
 
 env:
   CARGO_TERM_COLOR: always
