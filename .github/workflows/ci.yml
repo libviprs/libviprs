@@ -252,11 +252,61 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: libviprs
-      - name: Clone libviprs-tests (matching branch or main)
+      # Take the same-named libviprs-tests branch when it is this change's
+      # counterpart, and `main` when the name is just a leftover.
+      #
+      # This org keeps every branch it has ever pushed: `delete_branch_on_merge`
+      # is off on all seven repos, and on 2026-09-12 this repo alone had 377
+      # non-default remote branches with 271 of them already merged. So a new
+      # branch reusing an old name in either repo used to get built against a
+      # sibling frozen at whatever that old branch was, and it has happened: a
+      # merged-but-undeleted same-named libviprs-tests branch failed this job
+      # with what read as a dependency conflict (#1013), and this job is a
+      # required check now.
+      #
+      # The test is "does libviprs-tests' main already contain every commit on
+      # it", not "is it ahead of main". Ahead-of-main sounds stricter and is
+      # wrong here: main moves constantly, so a counterpart branch cut this
+      # morning has diverged by the afternoon, and rejecting it would silently
+      # build against main, which is green and wrong rather than red and
+      # confusing. Measured 2026-09-12, excluding `main` itself: 21 names live
+      # in both repos, of which 9 are `behind`, 12 have diverged and none is
+      # `ahead`. This catches the first group. The second cannot be told from a
+      # live counterpart by the git graph, and retiring those is the owner's
+      # branch cleanup rather than something this step can do.
+      #
+      # Treat those numbers as a dated observation rather than a fact about the
+      # repo: both branch lists move, and the split is only stable enough to say
+      # that the diverged group is the larger one. An earlier version of this
+      # comment said 11 and 11, which was already wrong when it was written.
+      #
+      # `--depth 1` had to go, because one commit cannot answer an ancestry
+      # question. `--filter=blob:none --no-checkout` brings down the commit
+      # graph and no file content; the checkout at the end fetches blobs for
+      # the one tree it materialises.
+      #
+      # Keep the `${{ }}` expression and the literal `libviprs-tests.git` in
+      # this `run:` text. tools/local-ci.py recognises this step by exactly
+      # those two strings and substitutes the mounted sibling checkout for the
+      # clone; move the URL into an `env:` block and `make ci` would start
+      # cloning over the mount instead.
+      - name: Clone libviprs-tests (its counterpart branch, or main)
         run: |
           BRANCH="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME}}"
-          git clone --depth 1 --branch "$BRANCH" https://github.com/${{ github.repository_owner }}/libviprs-tests.git libviprs-tests 2>/dev/null \
-            || git clone --depth 1 https://github.com/${{ github.repository_owner }}/libviprs-tests.git libviprs-tests
+          git clone --quiet --filter=blob:none --no-checkout \
+            https://github.com/${{ github.repository_owner }}/libviprs-tests.git libviprs-tests
+          take=origin/main
+          if ! git -C libviprs-tests rev-parse --verify --quiet "origin/$BRANCH" >/dev/null; then
+            echo "libviprs-tests has no branch called '$BRANCH', so this job builds against its main."
+          elif git -C libviprs-tests merge-base --is-ancestor "origin/$BRANCH" origin/main; then
+            echo "libviprs-tests has a branch called '$BRANCH' and its main already contains every commit on it."
+            echo "That is a leftover name, not this change's counterpart, so this job builds against main (#1013)."
+          else
+            take="origin/$BRANCH"
+            echo "libviprs-tests' '$BRANCH' carries commits its main does not, so it is this change's counterpart."
+          fi
+          echo "==> libviprs-tests at $take ($(git -C libviprs-tests rev-parse --short "$take"))"
+          git -C libviprs-tests checkout --quiet --detach "$take"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
