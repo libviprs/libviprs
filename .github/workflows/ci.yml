@@ -146,7 +146,14 @@ jobs:
           pinned=$(rustc --version | sed -E 's/^rustc ([0-9]+\.[0-9]+).*/\1/')
           advertised=$(grep -oE 'rust-[0-9]+\.[0-9]+%2B|Rust [0-9]+\.[0-9]+\+' README.md \
             | grep -oE '[0-9]+\.[0-9]+' | sort -u | paste -sd/ -)
-          named=$(grep -oE 'name: MSRV \([0-9]+\.[0-9]+\)' .github/workflows/ci.yml || true)
+          # Anchored to a `name:` line, and not fussy about how the version is
+          # written. Unanchored it matches a comment quoting the bad form, so
+          # the guard reddens on its own explanation; the acadsharp-rs copy hit
+          # exactly that the first time it ran. And `MSRV \([0-9.]+\)` alone
+          # misses `name: "MSRV (1.98)"` and `name: MSRV 1.98`, both of which
+          # are ordinary things to write. Any digit after MSRV on a name line
+          # is the thing being refused.
+          named=$(grep -oE '^[[:space:]]*name:[[:space:]]*"?MSRV[^"]*[0-9]' .github/workflows/*.yml || true)
           echo "declared (Cargo.toml): $declared"
           echo "pinned (this job):     $pinned"
           echo "advertised (README):   $advertised"
