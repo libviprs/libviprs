@@ -133,6 +133,36 @@ fn declared_targets() -> BTreeSet<&'static str> {
 /// same reason it is enough. A job with no `name:` of its own would be missing
 /// here, and there is no such job: GitHub falls back to the job id, which is
 /// not what any of these are called.
+/// Every job key under `jobs:`, whether or not it carries a `name:`.
+///
+/// [`job_names`] only sees jobs that declare a display name, and GitHub falls
+/// back to the job **id** when one does not. So a job added without `name:`
+/// creates a real check run that the README never lists and the count never
+/// counts, and both guards below would agree with each other about a job list
+/// that had quietly gone wrong. Forgetting `name:` is exactly how a job list
+/// grows, so the two are compared rather than assumed equal.
+fn job_ids(yml: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let mut in_jobs = false;
+    for line in yml.lines() {
+        if line == "jobs:" {
+            in_jobs = true;
+            continue;
+        }
+        if !in_jobs {
+            continue;
+        }
+        let indent = line.len() - line.trim_start().len();
+        if !line.trim().is_empty() && indent == 0 {
+            break;
+        }
+        if indent == 2 && line.trim_end().ends_with(':') && !line.trim_start().starts_with('#') {
+            out.insert(line.trim().trim_end_matches(':').to_string());
+        }
+    }
+    out
+}
+
 fn job_names(yml: &str) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     let mut in_jobs = false;
@@ -493,4 +523,39 @@ fn the_readme_job_count_agrees_with_the_list() {
         "README.md says the two workflows run {word} ({claimed}) jobs between \
          them and they declare {actual}. See issue #1011."
     );
+}
+
+/// Every job declares a `name:`, so the two guards above can see all of them.
+///
+/// Without this, appending a job with no display name leaves both of them
+/// green: `job_names` never sees it, so the README is not asked to list it and
+/// the count does not count it, while GitHub happily creates a check run named
+/// after the job id. Verified by appending exactly such a job and watching the
+/// rest of this file stay green.
+#[test]
+fn every_job_declares_a_display_name() {
+    for (path, yml) in GATE_WORKFLOWS {
+        let ids = job_ids(yml);
+        let names = job_names(yml);
+
+        // Positive control. If the id parser stopped finding anything, the
+        // comparison below would pass over two empty sets.
+        assert!(
+            !ids.is_empty(),
+            "{path} parsed to zero jobs, so this guard is reading nothing"
+        );
+
+        assert_eq!(
+            ids.len(),
+            names.len(),
+            "{path} declares {} job(s) but only {} of them carry a `name:`.\n\
+             ids:   {ids:?}\n\
+             names: {names:?}\n\
+             GitHub names a check run after the job id when `name:` is absent, \
+             so such a job is a real required-check candidate that the README \
+             never lists and the count never counts.",
+            ids.len(),
+            names.len(),
+        );
+    }
 }
