@@ -269,11 +269,16 @@ jobs:
       # wrong here: main moves constantly, so a counterpart branch cut this
       # morning has diverged by the afternoon, and rejecting it would silently
       # build against main, which is green and wrong rather than red and
-      # confusing. Of the 22 names live in both repos today, none is `ahead`,
-      # 11 are `behind` or `identical` and 11 have diverged. This catches the
-      # first group. The second group cannot be told from a live counterpart by
-      # the git graph, and retiring those is the owner's branch cleanup rather
-      # than something this step can do.
+      # confusing. Measured 2026-09-12, excluding `main` itself: 21 names live
+      # in both repos, of which 9 are `behind`, 12 have diverged and none is
+      # `ahead`. This catches the first group. The second cannot be told from a
+      # live counterpart by the git graph, and retiring those is the owner's
+      # branch cleanup rather than something this step can do.
+      #
+      # Treat those numbers as a dated observation rather than a fact about the
+      # repo: both branch lists move, and the split is only stable enough to say
+      # that the diverged group is the larger one. An earlier version of this
+      # comment said 11 and 11, which was already wrong when it was written.
       #
       # `--depth 1` had to go, because one commit cannot answer an ancestry
       # question. `--filter=blob:none --no-checkout` brings down the commit
