@@ -158,14 +158,7 @@ fn the_benchmark_doc_names_tests_that_exist() {
 /// renamed in one and not the other, fails here.
 #[test]
 fn the_benchmark_doc_documents_every_exported_column() {
-    let documented: Vec<&str> = BENCHMARK_DOC
-        .lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            let rest = line.strip_prefix("| `")?;
-            rest.split('`').next()
-        })
-        .collect();
+    let documented = table_after(BENCHMARK_DOC, "| Column | Meaning |");
 
     for field in bench::FIELDS {
         assert!(
@@ -182,6 +175,41 @@ fn the_benchmark_doc_documents_every_exported_column() {
     }
 }
 
+/// The first column of the markdown table that follows `header`, as backticked
+/// names.
+///
+/// It used to be every line in the document that began with `` | ` ``, which
+/// was fine while the doc had one such table and stopped being fine the moment
+/// it gained a second one: the cold-split phase table's rows read as columns
+/// the harness does not emit. Scoping to one table is what makes both checkable
+/// against their own list.
+fn table_after<'a>(doc: &'a str, header: &str) -> Vec<&'a str> {
+    let mut lines = doc.lines().skip_while(|line| line.trim() != header);
+    // The header itself, then the `|---|---|` rule.
+    lines.next();
+    lines.next();
+    lines
+        .take_while(|line| line.trim_start().starts_with('|'))
+        .filter_map(|line| line.trim().strip_prefix("| `")?.split('`').next())
+        .collect()
+}
+
+/// The doc's cold-split table is the harness's phase list.
+///
+/// The six phases are new scenario values in the exported JSON, so a reader of
+/// libviprs.org meets them as rows whether or not anything explains them.
+/// Same treatment as the column table: a phase renamed in one place and not the
+/// other fails here.
+#[test]
+fn the_benchmark_doc_documents_every_cold_phase() {
+    let documented = table_after(BENCHMARK_DOC, "| Phase | What it is |");
+    assert_eq!(
+        documented,
+        bench::COLD_PHASES.to_vec(),
+        "docs/pmtiles-benchmarks.md's phase table and the harness's COLD_PHASES disagree"
+    );
+}
+
 /// The doc says which file the numbers are handed to, and in what shape.
 #[test]
 fn the_benchmark_doc_names_the_hand_off() {
@@ -195,9 +223,19 @@ fn the_benchmark_doc_names_the_hand_off() {
         "the doc should not send a run's export to scalability_results.json, which is a \
          generated artefact of libviprs-bench"
     );
+    // Read off the constant rather than written out, so a schema bump that
+    // leaves the doc showing the old envelope fails here. It used to be the
+    // literal `"schema": 1`, which would have gone on passing against a
+    // document nobody could parse with it.
+    let envelope = format!("\"schema\": {}", bench::SCHEMA_VERSION);
     assert!(
-        BENCHMARK_DOC.contains("\"schema\": 1"),
-        "the doc should show the envelope a consumer has to unwrap"
+        BENCHMARK_DOC.contains(&envelope),
+        "the doc should show the envelope a consumer has to unwrap, which is now {envelope}"
+    );
+    assert!(
+        BENCHMARK_DOC.contains("\"provenance\""),
+        "the doc should show the provenance the envelope carries, since a consumer that does \
+         not know it is there cannot tell an emulated run from a native one"
     );
     assert!(
         BENCHMARK_DOC.contains("LIBVIPRS_BENCH_JSON"),

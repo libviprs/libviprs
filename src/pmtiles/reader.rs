@@ -591,7 +591,11 @@ impl<R: RangeReader> Reader<R> {
 
     fn cached_leaf(&self, key: LeafKey) -> Option<Arc<Vec<Entry>>> {
         let mut leaves = self.lock_leaves();
+        #[cfg(pmtiles_lock_probe)]
+        let depth = leaves.len();
         let index = leaves.iter().position(|(cached, _)| *cached == key)?;
+        #[cfg(pmtiles_lock_probe)]
+        lock_probe::record_hit(depth, index);
         let hit = leaves.remove(index);
         let entries = Arc::clone(&hit.1);
         leaves.insert(0, hit);
@@ -633,11 +637,27 @@ impl<R: RangeReader> Reader<R> {
     /// Nothing in this module can panic while holding it, so poisoning would
     /// have to come from somewhere else entirely, and a cache is not worth a
     /// panicking public entry point on an archive somebody handed us.
+    #[cfg(not(pmtiles_lock_probe))]
     fn lock_leaves(&self) -> std::sync::MutexGuard<'_, Vec<(LeafKey, Arc<Vec<Entry>>)>> {
         match self.leaves.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         }
+    }
+
+    /// The same lock, with the wait and the hold timed (see [`lock_probe`]).
+    ///
+    /// Written as a second whole function rather than as `#[cfg]` lines inside
+    /// the first so that the shipped body above is exactly the body that was
+    /// there before the probe existed, character for character.
+    #[cfg(pmtiles_lock_probe)]
+    fn lock_leaves(&self) -> lock_probe::TimedGuard<'_> {
+        let before = std::time::Instant::now();
+        let guard = match self.leaves.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        lock_probe::TimedGuard::new(guard, before)
     }
 
     fn load_metadata(&self) -> Result<Metadata, PmTilesError> {
@@ -692,6 +712,187 @@ fn read_directory<R: RangeReader>(
     let raw = source.read_range(offset, stored)?;
     let plain = compression.decompress(&raw, MAX_DIRECTORY_BYTES)?;
     deserialize_entries(&plain)
+}
+
+/// Lock-wait instrumentation for the leaf cache (issue #1021).
+///
+/// This exists because the concurrent p99 tail on the leaf-bearing cell was
+/// measured as *latency* and blamed on the [`Mutex`] around `leaves`, and a
+/// latency number cannot tell the lock apart from anything else in the
+/// lookup. Nothing outside this crate can see how long a private mutex was
+/// waited on or held, so the only honest way to answer it is from in here.
+///
+/// It is compiled **only** under `--cfg pmtiles_lock_probe`, which nothing in
+/// `ci.yml`, `merge-gate.yml`, the `Makefile`, `tools/local-ci.py` or any
+/// published profile sets. Without that cfg every item below disappears and
+/// `Reader::lock_leaves` is the `MutexGuard` function it has always been,
+/// which is why that one is written out twice rather than sprinkled with
+/// `#[cfg]` lines: the shipped body has to stay byte-identical to what it was.
+/// The cfg is declared in `Cargo.toml`'s `check-cfg` list beside `cfg(loom)`,
+/// which is the same shape for the same reason.
+///
+/// Counters are thread-local and monotonic, so a caller reads
+/// [`snapshot`] before and after a lookup and subtracts. That costs one `Cell`
+/// read per lookup instead of an allocation per lock acquisition, which
+/// matters when the thing being measured is a few hundred nanoseconds.
+///
+/// What it perturbs: two `Instant::now` calls per acquisition (a vDSO
+/// `clock_gettime`, tens of nanoseconds) and one more inside the critical
+/// section when the guard drops. So a hold time reported here is an
+/// overestimate by roughly one clock read, and that is the direction that
+/// flatters the "the lock is the problem" hypothesis rather than the reverse.
+#[cfg(pmtiles_lock_probe)]
+pub mod lock_probe {
+    use std::cell::Cell;
+    use std::time::Duration;
+
+    /// What one thread has spent on the leaf-cache lock so far.
+    ///
+    /// Everything is a running total except the two maxima, so two snapshots
+    /// subtract into "what that lookup cost" and the maxima are read whole.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct Stats {
+        /// How many times this thread took the lock.
+        pub acquisitions: u64,
+        /// Nanoseconds spent blocked in `Mutex::lock`, summed.
+        pub blocked_ns: u64,
+        /// Nanoseconds spent holding the guard, summed.
+        pub held_ns: u64,
+        /// The longest single block, in nanoseconds.
+        pub blocked_max_ns: u64,
+        /// The longest single hold, in nanoseconds.
+        pub held_max_ns: u64,
+        /// Cache hits served, which is the path that reorders.
+        pub hits: u64,
+        /// Slots the linear scan walked before finding the hit, summed. This
+        /// is `index + 1` per hit.
+        pub scanned: u64,
+        /// Slots the `remove` plus `insert(0)` reorder has to memmove,
+        /// summed. That is `index` slots shifted down and then `index` back
+        /// up, so `2 * index` per hit.
+        pub reordered: u64,
+        /// The deepest the cache was seen to be, in slots. This is the number
+        /// the "a hit memmoves up to 64 slots" claim rests on.
+        pub max_depth: u64,
+    }
+
+    impl Stats {
+        const ZERO: Self = Self {
+            acquisitions: 0,
+            blocked_ns: 0,
+            held_ns: 0,
+            blocked_max_ns: 0,
+            held_max_ns: 0,
+            hits: 0,
+            scanned: 0,
+            reordered: 0,
+            max_depth: 0,
+        };
+    }
+
+    thread_local! {
+        static STATS: Cell<Stats> = const { Cell::new(Stats::ZERO) };
+    }
+
+    /// This thread's totals as they stand.
+    pub fn snapshot() -> Stats {
+        STATS.with(|stats| stats.get())
+    }
+
+    /// Put this thread's totals back to zero.
+    pub fn reset() {
+        STATS.with(|stats| stats.set(Stats::ZERO));
+    }
+
+    fn update(f: impl FnOnce(&mut Stats)) {
+        STATS.with(|stats| {
+            let mut current = stats.get();
+            f(&mut current);
+            stats.set(current);
+        });
+    }
+
+    /// One acquisition, recorded once when the guard drops.
+    ///
+    /// Both halves land in a single thread-local update on purpose. The
+    /// critical section has to carry whatever this costs, and the thing being
+    /// measured is a few tens of nanoseconds, so the probe holds the lock for
+    /// exactly one clock read on the way in, one on the way out and one `Cell`
+    /// round trip, and not a byte more.
+    fn record(blocked: Duration, held: Duration) {
+        let blocked_ns = blocked.as_nanos() as u64;
+        let held_ns = held.as_nanos() as u64;
+        update(|stats| {
+            stats.acquisitions += 1;
+            stats.blocked_ns += blocked_ns;
+            stats.blocked_max_ns = stats.blocked_max_ns.max(blocked_ns);
+            stats.held_ns += held_ns;
+            stats.held_max_ns = stats.held_max_ns.max(held_ns);
+        });
+    }
+
+    /// A hit at `index` in a cache `depth` slots deep.
+    pub(super) fn record_hit(depth: usize, index: usize) {
+        update(|stats| {
+            stats.hits += 1;
+            stats.scanned += index as u64 + 1;
+            stats.reordered += 2 * index as u64;
+            stats.max_depth = stats.max_depth.max(depth as u64);
+        });
+    }
+
+    /// The guard `Reader::lock_leaves` hands back under this cfg.
+    ///
+    /// It derefs to the `Vec` the real guard derefs to, so every call site
+    /// reads exactly as it does without the probe, and its `Drop` records the
+    /// hold before the inner guard releases the lock.
+    pub struct TimedGuard<'a> {
+        guard: std::sync::MutexGuard<'a, Vec<(super::LeafKey, std::sync::Arc<Vec<super::Entry>>)>>,
+        /// When the caller asked for the lock, and when it got it. The wait is
+        /// the difference and the hold runs from the second one.
+        asked: std::time::Instant,
+        acquired: std::time::Instant,
+    }
+
+    impl<'a> TimedGuard<'a> {
+        pub(super) fn new(
+            guard: std::sync::MutexGuard<
+                'a,
+                Vec<(super::LeafKey, std::sync::Arc<Vec<super::Entry>>)>,
+            >,
+            asked: std::time::Instant,
+        ) -> Self {
+            Self {
+                guard,
+                asked,
+                acquired: std::time::Instant::now(),
+            }
+        }
+    }
+
+    impl std::ops::Deref for TimedGuard<'_> {
+        type Target = Vec<(super::LeafKey, std::sync::Arc<Vec<super::Entry>>)>;
+
+        fn deref(&self) -> &Self::Target {
+            &self.guard
+        }
+    }
+
+    impl std::ops::DerefMut for TimedGuard<'_> {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.guard
+        }
+    }
+
+    impl Drop for TimedGuard<'_> {
+        fn drop(&mut self) {
+            let released = std::time::Instant::now();
+            record(
+                self.acquired.duration_since(self.asked),
+                released.duration_since(self.acquired),
+            );
+        }
+    }
 }
 
 #[cfg(test)]
