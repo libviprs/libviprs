@@ -32,7 +32,42 @@ Reads report five scenarios. `read_cold` gives every lookup a reader that has
 never been used, `read_warm` walks the same coordinates on one reader that has
 already seen them, `read_sequential` walks the plan in order, `read_random`
 walks a deterministic shuffle, and `read_concurrent` runs the same shuffle
-across every available core.
+across a ladder of thread counts.
+
+### The cold row, split
+
+`read_cold` is one number over five different pieces of work, and issue #1021
+is about the fact that a fix would be different for each of them. So the same
+cold open is measured a second time with each step timed on its own, and the
+six phases are published alongside the combined row rather than instead of it,
+so the history stays comparable:
+
+| Phase | What it is |
+|---|---|
+| `read_cold_open` | opening the file and asking its size |
+| `read_cold_header` | the 127-byte header read and decode |
+| `read_cold_root_fetch` | the ranged read of the compressed root |
+| `read_cold_root_inflate` | inflating it, capped at `MAX_DIRECTORY_BYTES` |
+| `read_cold_root_decode` | `deserialize_entries` and its four varint passes |
+| `read_cold_lookup` | the binary search and the one `pread` for the tile |
+
+The phases are walked by hand through the same public API in the same order
+`Reader::try_new` uses, rather than by instrumenting the reader, because #1021
+is a measurement issue and nothing on the product's hot path should change to
+be measured. What makes that honest is that the phases have to add up:
+`the_cold_split_accounts_for_the_whole_combined_row` measures a cell both ways
+and fails if the sum sits more than 25% from the combined row, which is about
+three times the measured p50 noise floor. A split that does not reconcile is
+measuring something else, and it would look exactly as plausible on a chart.
+
+Only `read_cold_lookup` fetches a tile, so it is the only phase with
+`tile_bytes_returned`. The other five publish `null` there rather than `0`,
+which would read as a phase that fetched a tile for free.
+
+Only PMTiles is split. The directory backend's open is one `is_dir()` stat with
+no header, no ranged read and no index to decode, so splitting it would give
+four rows of nothing and one that is the whole cost. That asymmetry is the
+finding, and the combined row already carries it.
 
 The cold row times the open as well as the lookup. For PMTiles that is a header
 fetch and a root-directory fetch, which is what a client really pays before its
@@ -47,19 +82,40 @@ plus the in-process caches (the PMTiles leaf cache, the directory reader's lack
 of one), which is the part libviprs controls and the part an optimisation would
 move.
 
-Two more things the read rows are not, so nobody reads more into them than they
+One more thing the read rows are not, so nobody reads more into them than they
 hold. `read_random` runs on the reader `read_sequential` has just walked end to
 end, so its leaf cache is whatever that pass left behind rather than empty; the
 row is a warm random walk and it is compared against a warm sequential one.
-And `read_concurrent` is one thread count per backend, chosen from the machine,
-so these rows are not a scaling curve and nothing here reports one.
 
-### Root-only archives, and the one cell that is not
+### The thread ladder
+
+`read_concurrent` runs at 1, 2, 4 and 8 threads and publishes a row for each,
+with the thread count in `concurrency`. **One thread is the control.** It used
+to be a single row at whatever `available_parallelism` reported, and a slow row
+there could have been contention or could have been per-lookup cost that was
+present at every width, with nothing in the export able to separate them. The
+shape of the curve against its own T=1 point is what answers that.
+
+Eight threads run even on a box with fewer cores. That is oversubscription
+rather than parallelism and it is left in deliberately, because the envelope's
+provenance records `ncpu` and a reader can see which points on the curve had a
+core to themselves.
+
+### Root-only archives, the cell that is not, and the cell at the brink
 
 Under 16384 directory entries the writer puts the whole directory in the root,
 so an archive of a few thousand tiles never exercises the leaf lookup, the leaf
-cache or the second ranged read. Three of the four cells in the large profile
+cache or the second ranged read. Three of the five cells in the large profile
 are in that regime and so is the CI cell.
+
+Two notes on that number. The comparison in `build_directories` is strict
+(`plan.entry_count < ROOT_ONLY_MAX_ENTRIES`), so the largest flat root this
+writer emits holds **16383** entries and not 16384. And `entry_count` counts
+run-length-encoded **entries**, not tiles: neighbouring tiles that share a
+payload collapse into one entry, so a deduplicating pyramid has far fewer
+entries than tiles. The benchmark's source is a gradient, whose tiles are all
+distinct, so for these cells the two numbers are equal, and the brink cell's
+test asserts that rather than assuming it.
 
 The fourth is 8192 pixels at a **64 pixel** tile: 21851 tiles, past the cutoff,
 so its archive really has leaf directories. Reaching that through the tile size
@@ -80,6 +136,27 @@ each. `the_eight_thousand_pixel_cell_plans_the_tile_count_the_doc_publishes`
 pins both numbers and the level count, so the next person does not have to
 derive it again.
 
+The fifth cell is the brink: 4096 by 6256 pixels at a **46 pixel** tile, which
+plans 16369 tiles and comes out as a flat root of 16369 entries, 14 under the
+16383 the writer will still keep flat. It is there because the other four sit
+at 93, 1373, 5469 and 6 root entries, so the sweep bracketed the worst case
+without ever touching it and issue #1021's 277 us peak was a line fitted
+through three points. The shape looks arbitrary because it is a search result
+rather than a choice: `the_brink_cell_is_the_largest_root_the_search_space_reaches`
+re-runs that search over tile sizes from 16 pixels and canvases up to 4096, and
+fails if some other cell gets closer.
+
+What pins it is not the arithmetic, though.
+`the_brink_cells_root_stops_just_under_the_writers_cutoff` builds the archive,
+opens it and asks `root_entries()`, because a cell pinned by arithmetic over
+the writer's own halving silently stops being the brink cell the day the writer
+changes. It is `#[ignore]`d, since it writes a fifty megabyte archive:
+
+```sh
+cargo test --release --test pmtiles_benchmarks -- --ignored --nocapture \
+  the_brink_cells_root_stops_just_under_the_writers_cutoff
+```
+
 ## Running it
 
 The cheap profile is the default and takes seconds:
@@ -88,7 +165,7 @@ The cheap profile is the default and takes seconds:
 cargo test --release --test pmtiles_benchmarks -- --ignored --nocapture
 ```
 
-The large profile walks four cells, up to 16384x16384 pixels and up to 21851
+The large profile walks five cells, up to 16384x16384 pixels and up to 21851
 tiles, and takes minutes. It is opt-in on purpose, since a benchmark nobody runs
 because it is too expensive is a benchmark nobody runs:
 
@@ -120,10 +197,59 @@ become the read scenario's floor.
 
 ## The exported JSON
 
-An envelope, `{"schema": 1, "rows": [...]}`, written to the path
-`LIBVIPRS_BENCH_JSON` names. The envelope is there so a consumer can refuse a
-document it was not written against instead of reading a renamed column as
+An envelope, `{"schema": 2, "provenance": {...}, "rows": [...]}`, written to the
+path `LIBVIPRS_BENCH_JSON` names. The envelope is there so a consumer can refuse
+a document it was not written against instead of reading a renamed column as
 absent, and `schema` is the number that changes when a field changes meaning.
+
+Schema 2 is issue #1021's: the envelope gained `provenance`, rows gained
+`root_entries`, `scenario` gained the six `read_cold_*` phases, and
+`read_concurrent` became one row per thread count. All of it is additive, so a
+schema 1 consumer reading by name still finds every column it knew, but it
+would plot the phase rows as though they were whole cold opens, which is why
+the number moved rather than staying put.
+
+### Where the numbers came from
+
+```json
+"provenance": {
+  "commit": "d4f13924",
+  "dirty": false,
+  "rustc_version": "rustc 1.90.0 (1159e78c4 2025-09-14)",
+  "build_profile": "release",
+  "host": {
+    "cpu_model": null,
+    "ncpu": 10,
+    "arch": "aarch64",
+    "os": "linux",
+    "in_container": true
+  },
+  "load_average": { "one_min": 0.52, "five_min": 0.58, "fifteen_min": 0.59 }
+}
+```
+
+A wall-clock number with no host attached is not a measurement anybody else can
+check. The published figures before this carried none of it, and their own
+prose said "amd64 container" on an Apple Silicon machine, which means Rosetta
+and nothing in the document could have told a reader that. So the parent
+process samples the host once, before any cell runs, and prints a warning to
+stderr for every condition that spoils the numbers: a debug build, a one-minute
+load average at or above the CPU count, a dirty tree whose commit therefore
+describes nothing, or no commit at all.
+
+`arch` is the field that answers the emulation question and it is a
+compile-time fact, so it cannot be wrong. `cpu_model` is `null` on aarch64
+Linux, where `/proc/cpuinfo` carries no `model name` line, rather than a name
+invented to fill it. `commit` is `null` when git cannot answer, and the case
+that turns up in practice is a linked git worktree bind-mounted into a
+container: its `.git` is a file pointing at a gitdir outside the mount, so a
+run from an agent worktree publishes a null commit while a run from a clone
+publishes a real one.
+
+The shape mirrors `libviprs_bench::provenance::Provenance`, which solved this
+first (its issue #159) and already had the load-average warning. It is copied
+rather than imported, because `libviprs-bench` depends on this crate and a
+benchmark harness is the last place to take a dependency for seven fields.
 
 `engine` says which engine produced the row and is `"libviprs"` on every row
 here, because both sides of this comparison run the same one. `storage` says
@@ -145,7 +271,7 @@ failed measurement used to publish.
 | `megapixels` | `width * height / 1e6` |
 | `tile_size` | Tile edge in pixels. Two rows at one canvas and two tile sizes are not the same measurement: the tile count, and so the archive's directory shape, follows from it |
 | `engine` | The engine under test. `"libviprs"` on every row here |
-| `concurrency` | Threads the row was measured at. 1 everywhere except `read_concurrent` |
+| `concurrency` | Threads the row was measured at. 1 everywhere except `read_concurrent`, which publishes a row at each of 1, 2, 4 and 8 |
 | `wall_time_ms` | Wall-clock milliseconds for the whole row |
 | `tracked_memory_mb` | The engine's own `MemoryTracker` peak: raster buffers, nothing else. `null` on a read row, which allocates none |
 | `peak_rss_mb` | Process peak resident set for this phase. `null` where the platform has no answer |
@@ -153,11 +279,12 @@ failed measurement used to publish.
 | `tiles_per_second` | `tiles_produced` over wall time. `null` when the row took no measurable time |
 | `tiles_per_second_per_mb` | Throughput per peak-RSS megabyte, higher is better. `null` whenever `peak_rss_mb` is |
 | `resource_cost` | RSS-megabyte-seconds per tile, lower is better. `null` whenever `peak_rss_mb` is |
-| `scenario` | `generate`, `read_cold`, `read_warm`, `read_sequential`, `read_random` or `read_concurrent` |
+| `scenario` | `generate`, `read_cold`, `read_warm`, `read_sequential`, `read_random`, `read_concurrent`, or one of the six `read_cold_*` phases the cold row splits into |
 | `storage` | `pmtiles` or `directory`, the backend the row measured |
 | `profile` | `ci` or `large` |
 | `output_bytes` | Bytes the pyramid occupies on disk. `null` on a read row, and `null` when the path could not be walked |
 | `filesystem_entries` | Filesystem entries it occupies, directories included. 1 for an archive. `null` on a read row, and `null` when the path could not be walked |
+| `root_entries` | Entries in the archive's root directory, as the archive answers it. This is the x axis of the cold-open ramp: an open decodes the whole root, so what a first lookup costs follows from this and not from the tile count or the file size. Run-length-encoded entries, not tiles. `null` on every directory row, because a tree has no root to decode |
 | `tile_bytes_returned` | Tile payload bytes the row's lookups returned, summed. `null` on a generation row |
 | `p50_latency_us` | Median per-lookup latency in microseconds. `null` on a generation row |
 | `p99_latency_us` | 99th-percentile per-lookup latency in microseconds. `null` on a generation row |
