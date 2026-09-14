@@ -375,6 +375,7 @@ annotated   fs-detected  tests/pmtiles_bounded_memory.rs::the_finalize_peak_grow
 annotated   fs-detected  tests/pmtiles_bounded_memory.rs::the_finalize_peak_stays_under_the_stated_bound
 annotated   fs-detected  tests/pmtiles_format.rs::file_range_reader_returns_exactly_the_bytes_asked_for
 annotated   fs-detected  tests/pmtiles_format.rs::range_reader_is_object_safe
+annotated   fs-detected  tests/pmtiles_lock_probe.rs::the_concurrent_tail_is_attributed
 annotated   fs-detected  tests/pmtiles_pyramid_reader.rs::a_coordinate_outside_the_pyramid_is_absent_from_both
 annotated   fs-detected  tests/pmtiles_pyramid_reader.rs::both_backends_describe_the_same_pyramid
 annotated   fs-detected  tests/pmtiles_pyramid_reader.rs::both_backends_read_through_one_trait_object
