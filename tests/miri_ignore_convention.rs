@@ -531,7 +531,7 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// does not exist and then writes a real file into a `tempfile::tempdir()` as
 /// the positive control that the first half measured an absence rather than a
 /// broken walker.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 383;
+const EXPECTED_FS_TOUCHING_TESTS: usize = 386;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {

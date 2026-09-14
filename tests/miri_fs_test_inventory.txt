@@ -364,11 +364,14 @@ annotated   fs-detected  tests/pdfium_dependency_contract.rs::thread_safe_is_req
 annotated   fs-detected  tests/pdfium_source_audit.rs::audit_gate_accepts_this_crate
 annotated   fs-detected  tests/pdfium_source_audit.rs::audit_gate_rejects_a_consumer_still_pinning_the_fork
 annotated   fs-detected  tests/pdfium_source_audit.rs::patchless_downstream_consumer_resolves_the_same_crate_we_do
+annotated   fs-detected  tests/pmtiles_benchmarks.rs::a_repository_with_a_commit_is_read_back
 annotated   fs-detected  tests/pmtiles_benchmarks.rs::an_unmeasurable_pyramid_publishes_no_entry_count
 annotated   fs-detected  tests/pmtiles_benchmarks.rs::benchmark_cell
 annotated   fs-detected  tests/pmtiles_benchmarks.rs::both_backends_measure_the_same_pyramid
 annotated   fs-detected  tests/pmtiles_benchmarks.rs::every_read_scenario_reports_a_row
 annotated   fs-detected  tests/pmtiles_benchmarks.rs::pmtiles_versus_directory
+annotated   fs-detected  tests/pmtiles_benchmarks.rs::the_brink_cells_root_stops_just_under_the_writers_cutoff
+annotated   fs-detected  tests/pmtiles_benchmarks.rs::the_cold_split_accounts_for_the_whole_combined_row
 annotated   fs-detected  tests/pmtiles_bounded_memory.rs::an_archive_past_four_gibibytes_finalizes_in_bounded_memory
 annotated   fs-detected  tests/pmtiles_bounded_memory.rs::the_finalize_peak_does_not_move_when_the_tile_count_quadruples
 annotated   fs-detected  tests/pmtiles_bounded_memory.rs::the_finalize_peak_grows_with_the_sort_buffer_it_was_given
@@ -484,6 +487,8 @@ annotated   not-detected tests/local_ci_invocation.rs::the_run_command_is_the_wh
 annotated   not-detected tests/local_ci_invocation.rs::the_workflow_path_parses_a_plan_rather_than_only_importing_yaml
 annotated   not-detected tests/local_ci_invocation.rs::the_worktree_flag_changes_the_command_that_runs
 annotated   not-detected tests/oracle_capture_pins.rs::no_compiled_python_is_tracked_under_oracle_captures
+annotated   not-detected tests/pmtiles_benchmarks.rs::the_envelope_says_which_host_produced_the_numbers
+annotated   not-detected tests/pmtiles_benchmarks.rs::the_exported_json_carries_every_field_the_site_reads
 annotated   not-detected tests/pmtiles_format.rs::every_golden_header_decodes_and_re_encodes_byte_for_byte
 annotated   not-detected tests/pmtiles_format.rs::the_dupes_golden_carries_both_shapes_of_deduplication
 annotated   not-detected tests/pmtiles_format.rs::the_enumerated_low_zoom_orders_are_hilbert_and_not_z_order
