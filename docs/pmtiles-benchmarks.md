@@ -482,8 +482,8 @@ against 2.83 and 5.42 us for a tree the same size.
 The gap is the PMTiles cold p50 minus the directory cold p50, and it is not a
 clean function of the root size, because it also carries one `pread` of a tile
 whose size depends on the cell rather than on the root. The 93-entry cell hands
-back 87 KB tiles and the 16369-entry cell hands back tiles a few hundred bytes
-long, so a line fitted through the gap column is fitting two variables at once.
+back 87 KB tiles and the 16369-entry cell hands back tiles of about 3 KB, so a
+line fitted through the gap column is fitting two variables at once.
 That is what the split is for.
 
 ### The cold open, phase by phase
