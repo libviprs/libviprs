@@ -3217,6 +3217,25 @@ and not under `Fixed`: this file is the only place they can be caught.
   `root_entries`, the x axis the ramp is actually a function of, which is
   `null` on every directory row because a tree has no root to decode.
 
+  `docs/pmtiles-benchmarks.md` is re-measured against all of that, twice on a
+  quiet Apple M5 and twice on a native x86_64 box, and every table now says
+  which. The decode really is the ramp and its slope is almost the same on both
+  machines, 12.65 ns an entry against 13.95, while the file open, the header
+  read and the ranged read together come to under 1% of the open. The document
+  also used to say PMTiles generation is within 1% of the directory backend at
+  21851 small tiles; measured, the archive is about 10% faster than the tree on
+  one machine and 44% slower on the other, so that sentence was one host's
+  number written down as though it were the crate's and it is gone.
+
+  `tests/pmtiles_lock_probe.rs` attributes the concurrent p99 tail rather than
+  comparing runs, because the harness's replicate noise on p99 is bigger than
+  any A/B could clear. It confirms the leaf-cache `Mutex` is the tail and
+  disproves the reorder as its cause: on the cell that shows the tail the cache
+  never holds more than six of its `MAX_CACHED_LEAVES` slots. The timing lives
+  behind `--cfg pmtiles_lock_probe`, which nothing in this repository sets, and
+  `Reader::lock_leaves` is written out twice so the shipped body is the body it
+  always was.
+
 - **The PMTiles reader's leaf cache holds sixty-four directories, not four**
   (issue #993). `MAX_CACHED_LEAVES` was sized for a clustered walk, where
   thousands of consecutive lookups land in one leaf, and it is the wrong size
