@@ -585,10 +585,14 @@ reader and each inherits whatever the previous left behind.
 | 8192x8192 @64 | 2.9 / 2.0 | 3.1 / 3.3 | 4.0 / 5.6 | **13.1 / 21.8** |
 | 4096x6256 @46 | 2.3 / 2.2 | 2.5 / 2.4 | 4.2 / 2.8 | 5.2 / 3.1 |
 
-Only one cell has a tail, and it is the only cell whose archive has leaf
-directories. The brink cell has the biggest root in the sweep and no tail at all,
-which rules the root out: the cost is the single `Mutex` around the leaf cache
-that every lookup on a leaf-bearing archive takes.
+Every cell's p99 rises with the thread count, because eight threads competing for
+cache and for the scheduler cost something whatever the storage is. One cell
+rises differently. 8192x8192 @64 goes from 1.8 to 38.5 us on arm64, a factor of
+21, where the next worst cell moves by 3x and the brink cell by 1.8x. It is also
+the only cell whose archive has leaf directories, and the brink cell has the
+biggest root in the sweep and barely moves, which rules the root out: the cost is
+the single `Mutex` around the leaf cache that every lookup on a leaf-bearing
+archive takes.
 
 The curve knees in a different place on the two machines. On arm64 it is at
 **four threads**, where p99 goes 2.0 to 8.8 and then to 38.5; on x86_64 the first
