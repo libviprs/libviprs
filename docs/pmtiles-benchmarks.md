@@ -488,9 +488,11 @@ That is what the split is for.
 
 ### The cold open, phase by phase
 
-PMTiles p50 per phase, microseconds. `sum` is the per-iteration sum of the six
-phases and `combined` is the single `read_cold` row, so the two columns
-reconciling is what says the split measures the same work.
+PMTiles p50 per phase, microseconds. `combined` is the single `read_cold` row and
+`sum` adds the six phase medians, so the two columns reconciling is what says the
+split measures the same work. `sum` is not quite the statistic the guard uses:
+that one takes the median of the per-iteration sums, which is the stricter
+reading and comes out a few tenths of a percent different here.
 
 **Native arm64**
 
@@ -540,7 +542,7 @@ close to the 11.6 to 12.9 ns an entry the micro measurement further down this
 document already recorded for `deserialize_entries`.
 
 **The inflate is not free and it is not the ramp either.** It is 32 us on arm64
-and 69 on x86_64 at the brink, roughly 15% and 22% of the whole open, and it
+and 69 on x86_64 at the brink, 13% and 22% of the whole open, and it
 grows with the compressed size rather than with the entry count. Anyone going at
 the decode should know the gzip is the next thing behind it.
 
@@ -549,9 +551,10 @@ the decode should know the gzip is the next thing behind it.
 batched or elided them would be fixing the cheap part.
 
 The phases reconcile with the combined row within 1% on the cells whose root
-dominates (0.7% and 0.9% at the brink on arm64, 5% on x86_64) and drift on the
-cells where it does not: -24% on the 93-entry cell, where the whole open is 11 us
-and a few hundred nanoseconds of per-iteration overhead is a fifth of it.
+dominates (the guard's own reading is -0.7% and -0.9% at the brink on arm64,
+-4.3% on x86_64) and drift on the cells where it does not: -24% and -13% on the
+93-entry cell, where the whole open is 11 us and a few hundred nanoseconds of
+per-iteration overhead is a fifth of it.
 `the_cold_split_accounts_for_the_whole_combined_row` allows 25% and measures a
 cell with about 1400 entries for exactly that reason.
 
