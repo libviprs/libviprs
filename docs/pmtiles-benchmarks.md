@@ -637,9 +637,10 @@ reader afterwards. None of those rows is a cold-cache measurement and none of
 them is comparable to one.
 
 **`peak_rss_mb` is still `/proc`-only** and publishes `null` where the platform
-has no answer. Both machines above are Linux containers so every row has one, and
-the phase rows report the same process-wide high-water mark as the row they split,
-because a phase does not get its own process.
+has no answer. Both machines above are Linux containers so every row has one. All
+six phase rows carry the same number, sampled once after the split pass finished,
+because a phase does not get a process of its own and a high-water mark cannot be
+attributed to a part of one.
 
 
 ### The tables from here down predate the provenance block
