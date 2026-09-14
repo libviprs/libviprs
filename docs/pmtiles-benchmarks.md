@@ -327,9 +327,9 @@ Silicon Mac, which is Rosetta, and nothing in the document could have told a
 reader, because the document had nowhere to record it. Every table from here on
 names its architecture, and the exported JSON carries the rest.
 
-The two machines are not peers. The M5 is roughly three times quicker per core
-on every read row here, and the 8505's four E cores are not the same core as its
-one P core. So what is worth reading across the two columns is shape rather than
+The two machines are not peers. Depending on the row the M5 is between about one
+and a half and three times quicker per core, and the 8505's four E cores are not
+the same core as its one P core. So what is worth reading across the two columns is shape rather than
 size: whether the ramp has the same slope, whether the thread curve knees in the
 same place, whether the sign of a comparison flips.
 
@@ -533,9 +533,9 @@ x86_64   decode_us = 2.73 + 13.95 ns/entry * root
   16369 entries: measured 230.38   predicted 231.02
 ```
 
-Two boxes that differ by a factor of three on nearly every other read row agree
-on this slope to within 10%, and the brink point sits on the line rather than
-being extrapolated to. That is the number an optimisation has to move, and it is
+Two boxes whose other read rows sit anywhere from 1.5x to 3x apart agree on this
+slope to within 10%, and the brink point sits on the line rather than being
+extrapolated to. That is the number an optimisation has to move, and it is
 close to the 11.6 to 12.9 ns an entry the micro measurement further down this
 document already recorded for `deserialize_entries`.
 
