@@ -531,7 +531,12 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// does not exist and then writes a real file into a `tempfile::tempdir()` as
 /// the positive control that the first half measured an absence rather than a
 /// broken walker.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 383;
+///
+/// #1021 moved it 383 to 384, and the one is
+/// `the_concurrent_tail_is_attributed` in `tests/pmtiles_lock_probe.rs`, which
+/// generates two pyramids into a directory the caller names and writes its
+/// measurements back out beside them.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 384;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
