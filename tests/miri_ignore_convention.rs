@@ -531,7 +531,21 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// does not exist and then writes a real file into a `tempfile::tempdir()` as
 /// the positive control that the first half measured an absence rather than a
 /// broken walker.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 386;
+///
+/// #1021 moved it 383 to 387, and the four are the two measurement lanes
+/// landing together. Three come from the cold-open ramp work in
+/// `tests/pmtiles_benchmarks.rs`: `a_repository_with_a_commit_is_read_back`,
+/// `the_brink_cells_root_stops_just_under_the_writers_cutoff` and
+/// `the_cold_split_accounts_for_the_whole_combined_row`, each of which writes a
+/// pyramid, an archive or a git repository into a `tempfile::tempdir()`. The
+/// fourth is `the_concurrent_tail_is_attributed` in
+/// `tests/pmtiles_lock_probe.rs`, which generates two pyramids into a directory
+/// the caller names and writes its measurements back out beside them. The same
+/// change adds two `annotated not-detected` rows,
+/// `the_envelope_says_which_host_produced_the_numbers` and
+/// `the_exported_json_carries_every_field_the_site_reads`, and those do not
+/// move this count because the detector does not see them touch the filesystem.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 387;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
