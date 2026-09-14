@@ -3177,6 +3177,65 @@ and not under `Fixed`: this file is the only place they can be caught.
 
 ### Changed
 
+- **The PMTiles benchmark export is schema 2, and it now measures the peak of
+  the cold-open ramp instead of extrapolating it** (issue #1021). A cold open
+  of a PMTiles archive costs what its root directory costs to decode, and the
+  sweep's four cells sat at 93, 1373, 5469 and 6 root entries, so it bracketed
+  the worst case without ever touching it and the published 277 us peak was a
+  line fitted through three points. A fifth cell, 4096 by 6256 pixels at a 46
+  pixel tile, plans 16369 tiles and comes out as a flat root of 16369 entries,
+  fourteen under the largest root this writer emits. It is pinned by opening
+  the archive and asking `root_entries()`, not by arithmetic over the planner,
+  because arithmetic stops being the brink the day the planner changes.
+
+  Two numbers in the issue's own reasoning are off by a step and both are
+  corrected here. The writer's cutoff comparison is strict, so the largest flat
+  root holds **16383** entries rather than 16384. And what it counts is
+  run-length-encoded **entries**, not tiles: a pyramid whose neighbouring tiles
+  share a payload collapses runs and has far fewer entries than tiles. A solid
+  colour source makes the difference stark, 261 entries for the same 16369
+  planned tiles, which is exactly what a cell pinned by arithmetic would have
+  published as a brink measurement.
+
+  `read_cold` is still exported unchanged so the history stays comparable, and
+  it is now published alongside the six phases it is made of: the file open,
+  the header read, the root's ranged read, the gzip inflate, the
+  `deserialize_entries` passes, and the lookup. The phases are walked by hand
+  through the same public API in the same order `Reader::try_new` uses, so
+  nothing on the read path changed to be measured, and
+  `the_cold_split_accounts_for_the_whole_combined_row` fails when the sum sits
+  more than 25% from the combined row. `read_concurrent` became a curve at 1,
+  2, 4 and 8 threads with the single-thread row as the control, because one
+  thread count cannot separate contention from per-lookup cost.
+
+  The envelope carries `provenance` now: commit, dirty flag, rustc, build
+  profile, CPU model, core count, architecture, OS, container flag and load
+  average, with a stderr warning for every condition that spoils a run. The
+  figures this issue corrects were published with none of it, and their own
+  prose said "amd64 container" on an Apple Silicon machine, which means an
+  emulated run that no consumer of the JSON could have spotted. Rows gained
+  `root_entries`, the x axis the ramp is actually a function of, which is
+  `null` on every directory row because a tree has no root to decode.
+
+  `docs/pmtiles-benchmarks.md` is re-measured against all of that, twice on a
+  quiet Apple M5 and twice on a native x86_64 box, and every table now says
+  which. The decode really is the ramp and its slope is almost the same on both
+  machines, 12.65 ns an entry against 13.95, while the file open, the header
+  read and the ranged read together come to under 1% of the open. The document
+  also used to say PMTiles generation is within 1% of the directory backend at
+  21851 small tiles; measured, the archive is about 10% faster than the tree on
+  one machine and 44% slower on the other, so that sentence was one host's
+  number written down as though it were the crate's and it is gone.
+
+  `tests/pmtiles_lock_probe.rs` attributes the concurrent p99 tail rather than
+  comparing runs, because the harness's replicate noise on p99 is bigger than
+  any A/B could clear. It confirms the leaf-cache `Mutex` is the tail and
+  disproves the reorder as its cause: on the cell that shows the tail the cache
+  never holds more than six of its `MAX_CACHED_LEAVES` slots. The timing lives
+  behind `--cfg pmtiles_lock_probe`, which nothing in this repository sets, and
+  `Reader::lock_leaves` is written out twice so the shipped body is the body it
+  always was.
+
 - **The PMTiles reader's leaf cache holds sixty-four directories, not four**
   (issue #993). `MAX_CACHED_LEAVES` was sized for a clustered walk, where
   thousands of consecutive lookups land in one leaf, and it is the wrong size

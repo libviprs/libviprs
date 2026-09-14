@@ -38,10 +38,27 @@
 //!
 //! # The envelope
 //!
-//! The document is `{"schema": 1, "rows": [...]}` rather than a bare array, so
-//! a consumer that does not understand a future shape can say so instead of
-//! reading a renamed column as absent. [`SCHEMA_VERSION`] is the number to
-//! bump when a field changes meaning.
+//! The document is `{"schema": 2, "provenance": {...}, "rows": [...]}` rather
+//! than a bare array, so a consumer that does not understand a future shape
+//! can say so instead of reading a renamed column as absent.
+//! [`SCHEMA_VERSION`] is the number to bump when a field changes meaning.
+//!
+//! # The envelope says where the numbers came from
+//!
+//! Schema 2 adds [`Provenance`]: the commit, whether the tree was dirty, the
+//! architecture, the OS, the CPU count, the load average and the rustc that
+//! ran. Issue #1021 exists because a published ramp was extrapolated from
+//! three points, and the same run's own provenance said only "amd64
+//! container", which on an Apple Silicon host means Rosetta and nobody could
+//! tell from the document. A wall-clock number with no host attached is not a
+//! measurement anybody else can check, so the envelope carries one now.
+//!
+//! It mirrors `libviprs_bench::provenance::Provenance` field for field where
+//! the fields overlap, on purpose: that harness solved this already (its issue
+//! #159), including the `measurement_condition_warnings()` that flags a run
+//! taken while the box was busy. No dependency is added for it, because
+//! `libviprs-bench` depends on this crate and not the other way round, so the
+//! shape is copied rather than imported.
 //!
 //! # The writer here and the reader that checks it are not the same code
 //!
@@ -78,7 +95,14 @@ pub const DEFAULT_RESULTS_PATH: &str = "target/pmtiles_results.json";
 /// Bump it when a field changes meaning or leaves, so a consumer can refuse a
 /// document it was not written against instead of quietly reading a renamed
 /// column as absent.
-pub const SCHEMA_VERSION: u32 = 1;
+///
+/// 2 (issue #1021): the envelope gained [`Provenance`], rows gained
+/// `root_entries`, and `scenario` gained the six `read_cold_*` phases and a
+/// `read_concurrent` row per thread count rather than one. All of it is
+/// additive, so a schema 1 consumer that reads by name still finds every
+/// column it knew, but it would silently plot the phase rows as though they
+/// were whole cold opens, which is why the number moved.
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// What `engine` carries.
 ///
@@ -87,6 +111,45 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// string, which made `engine` a duplicate of `storage` under a name that says
 /// something else.
 pub const ENGINE: &str = "libviprs";
+
+/// The phases a cold PMTiles open goes through, in the order
+/// `Reader::try_new` runs them, plus the lookup that follows.
+///
+/// `read_cold` times all six as one number, which is what issue #1021 is
+/// complaining about: the fix for a slow gzip inflate, a slow varint loop and
+/// a slow `pread` are three different pieces of work and the combined row
+/// cannot say which one is the problem. Every one of these is measured
+/// alongside the combined row rather than instead of it, so the history stays
+/// comparable, and `the_cold_split_accounts_for_the_whole_combined_row` in
+/// `tests/pmtiles_benchmarks.rs`
+/// checks that they add up to it.
+pub const COLD_PHASES: [&str; 6] = [
+    "read_cold_open",
+    "read_cold_header",
+    "read_cold_root_fetch",
+    "read_cold_root_inflate",
+    "read_cold_root_decode",
+    "read_cold_lookup",
+];
+
+/// The cell whose root stops just under the writer's root-only cutoff.
+///
+/// 4096 by 6256 pixels at a 46 pixel tile plans 16369 tiles, and because a
+/// gradient's tiles are all distinct that is also 16369 run-length-encoded
+/// directory entries, 14 under the 16383 the writer will still put in a flat
+/// root. `the_brink_cell_is_the_largest_root_the_search_space_reaches` re-runs
+/// the search that found it, and
+/// `the_brink_cells_root_stops_just_under_the_writers_cutoff` opens the
+/// archive and asks it, which is the assertion that matters: this triple is
+/// arithmetic over a planner, and arithmetic over a planner stops being the
+/// brink the day the planner changes.
+///
+/// The shape looks arbitrary because it is a search result rather than a
+/// choice. What it is optimising is the distance to the cutoff: the planner
+/// only produces the tile counts it produces, and stepping the canvas by a
+/// pixel at this tile size moves the total by about 150, so 14 under is close
+/// to the best any cell can do.
+pub const BRINK_CANVAS: (u32, u32, u32) = (4096, 6256, 46);
 
 /// Which of the two profiles a benchmark run is on.
 ///
@@ -123,7 +186,7 @@ impl Profile {
     /// and a second cell doubles the cost of the cheap profile to say the same
     /// thing twice.
     ///
-    /// The last large cell is 8192 pixels at a **64 pixel** tile, which is the
+    /// The fourth large cell is 8192 pixels at a **64 pixel** tile, which is the
     /// only one of the four that produces more than `ROOT_ONLY_MAX_ENTRIES`
     /// directory entries and so the only one whose archive has leaf
     /// directories at all. It plans 21851 tiles, which
@@ -133,6 +196,14 @@ impl Profile {
     /// tiles needs a 32768 pixel source, which is a 3.2 GB raster, and the
     /// archive's directory shape is what the read path cares about rather than
     /// the pixels behind it.
+    ///
+    /// The fifth is [`BRINK_CANVAS`], and it is there because the other four
+    /// sit at 93, 1373, 5469 and 6 root entries, which brackets the worst case
+    /// without ever touching it. Issue #1021 fitted a line through three of
+    /// those and put the worst open at about 277 us, and an extrapolation from
+    /// three points is not a measurement. This cell's root stops one step
+    /// under the writer's own cutoff, so the peak of the ramp is measured
+    /// rather than predicted.
     pub fn canvases(self) -> &'static [(u32, u32, u32)] {
         match self {
             Self::Ci => &[(2048, 2048, 256)],
@@ -141,6 +212,7 @@ impl Profile {
                 (8192, 8192, 256),
                 (16384, 16384, 256),
                 (8192, 8192, 64),
+                BRINK_CANVAS,
             ],
         }
     }
@@ -210,6 +282,21 @@ pub struct Measurement {
     /// `None` when the path could not be walked, because a zero here reads as
     /// better than the `1` an archive really costs.
     pub filesystem_entries: Option<u64>,
+    /// Entries in the archive's **root** directory, as the archive itself
+    /// answers it.
+    ///
+    /// This is the x axis of issue #1021's ramp: a cold open decodes the whole
+    /// root, so what a first lookup costs is a function of this number and not
+    /// of the tile count, the canvas or the file size. It is the count of
+    /// run-length-encoded entries rather than of tiles, which is what the
+    /// writer's own cutoff counts too, and on a gradient source the two are
+    /// equal because no two neighbouring tiles share a payload.
+    ///
+    /// `None` on every directory-backend row, because a tree has no root to
+    /// decode, and `None` where the archive was not asked. Never `0`: a root
+    /// of no entries is not a directory a reader can open, so a zero here
+    /// would be a free open on the one column the ramp is measured against.
+    pub root_entries: Option<u64>,
     /// Tile payload bytes the row's lookups returned, summed. `None` on a
     /// generation row.
     ///
@@ -283,6 +370,7 @@ impl Measurement {
             profile: profile.label().to_string(),
             output_bytes: None,
             filesystem_entries: None,
+            root_entries: None,
             tile_bytes_returned: None,
             p50_latency_us: None,
             p99_latency_us: None,
@@ -296,8 +384,32 @@ impl Measurement {
         self
     }
 
+    /// Record how many entries the archive's root holds, which is what the
+    /// cold-open ramp is measured against.
+    ///
+    /// Takes an `Option` rather than a count so the directory backend's rows
+    /// say "there is no root here" in the one spelling this harness has for
+    /// that, instead of claiming a root of zero entries.
+    pub fn with_root_entries(mut self, entries: Option<u64>) -> Self {
+        self.root_entries = entries;
+        self
+    }
+
     pub fn with_latencies(mut self, samples: &mut [Duration], returned: u64) -> Self {
         self.tile_bytes_returned = Some(returned);
+        self.p50_latency_us = percentile_micros(samples);
+        self.p99_latency_us = percentile_micros_at(samples, 0.99);
+        self
+    }
+
+    /// The latency half of [`Measurement::with_latencies`], for a row that
+    /// returned no tile bytes because its phase does not fetch a tile.
+    ///
+    /// The four index phases of a cold open read the header, the root's bytes,
+    /// the inflated root and the decoded entries, and not one of them returns
+    /// a tile. `tile_bytes_returned` is `null` on those rows rather than `0`,
+    /// which would read as a phase that fetched a tile for free.
+    pub fn with_latency_samples(mut self, samples: &mut [Duration]) -> Self {
         self.p50_latency_us = percentile_micros(samples);
         self.p99_latency_us = percentile_micros_at(samples, 0.99);
         self
@@ -327,6 +439,7 @@ impl Measurement {
         push_str(&mut out, "profile", &self.profile);
         push_opt_u64(&mut out, "output_bytes", self.output_bytes);
         push_opt_u64(&mut out, "filesystem_entries", self.filesystem_entries);
+        push_opt_u64(&mut out, "root_entries", self.root_entries);
         push_opt_u64(&mut out, "tile_bytes_returned", self.tile_bytes_returned);
         push_opt_f64(&mut out, "p50_latency_us", self.p50_latency_us);
         // The last field carries no trailing comma.
@@ -344,7 +457,7 @@ impl Measurement {
 /// The shape guard reads this rather than repeating the list, so a field added
 /// to [`Measurement::to_json`] and not here fails that guard instead of
 /// quietly shipping.
-pub const FIELDS: [&str; 21] = [
+pub const FIELDS: [&str; 22] = [
     "width",
     "height",
     "megapixels",
@@ -363,6 +476,7 @@ pub const FIELDS: [&str; 21] = [
     "profile",
     "output_bytes",
     "filesystem_entries",
+    "root_entries",
     "tile_bytes_returned",
     "p50_latency_us",
     "p99_latency_us",
@@ -375,7 +489,7 @@ pub const STRING_FIELDS: [&str; 4] = ["engine", "scenario", "storage", "profile"
 ///
 /// Everything else has to be a finite number on every row, which is what stops
 /// a `null` spreading into a column that always has an answer.
-pub const NULLABLE_FIELDS: [&str; 10] = [
+pub const NULLABLE_FIELDS: [&str; 11] = [
     "tracked_memory_mb",
     "peak_rss_mb",
     "tiles_per_second",
@@ -383,6 +497,7 @@ pub const NULLABLE_FIELDS: [&str; 10] = [
     "resource_cost",
     "output_bytes",
     "filesystem_entries",
+    "root_entries",
     "tile_bytes_returned",
     "p50_latency_us",
     "p99_latency_us",
@@ -468,7 +583,12 @@ pub fn rows_to_json(rows: &[Measurement]) -> String {
 /// text rather than rows is what lets the parent keep each child's field order
 /// and pretty printing, which re-serialising through `serde_json` would not:
 /// its map is a `BTreeMap`, so a round trip alphabetises the columns.
-pub fn document(rows_array: &str) -> String {
+///
+/// The provenance comes in as a value rather than being captured here, because
+/// the host has to be sampled once for the whole run by the parent process and
+/// not once per child cell: a load average read after four cells have already
+/// run is the benchmark measuring itself.
+pub fn document(rows_array: &str, provenance: &Provenance) -> String {
     let indented: String = rows_array
         .trim_end()
         .lines()
@@ -482,14 +602,433 @@ pub fn document(rows_array: &str) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     format!(
-        "{{\n  \"schema\": {SCHEMA_VERSION},\n  \"rows\": {}\n}}\n",
+        "{{\n  \"schema\": {SCHEMA_VERSION},\n  \"provenance\": {},\n  \"rows\": {}\n}}\n",
+        provenance.to_json(),
         indented.trim_start()
     )
 }
 
 /// The published document for a run's rows.
-pub fn to_json(rows: &[Measurement]) -> String {
-    document(&rows_to_json(rows))
+pub fn to_json(rows: &[Measurement], provenance: &Provenance) -> String {
+    document(&rows_to_json(rows), provenance)
+}
+
+// ---------------------------------------------------------------------------
+// Provenance
+// ---------------------------------------------------------------------------
+
+/// Where a run's numbers came from.
+///
+/// Modelled on `libviprs_bench::provenance::Provenance`, which already carries
+/// exactly this and learned the hard way why (its issue #159). Copied rather
+/// than imported: `libviprs-bench` depends on this crate, so importing it here
+/// would be a cycle, and a benchmark harness is the last place to take a
+/// dependency for seven fields.
+///
+/// Two deliberate differences from that shape. An unknown value here is `null`
+/// rather than the string `"unknown"`, because the rest of this file already
+/// spells "nobody measured this" as a hole and two spellings for it in one
+/// document is one too many. And it carries `commit` and `dirty`, which that
+/// harness gets from a build script: this crate has none, so both are read
+/// from git at run time.
+#[derive(Debug, Clone)]
+pub struct Provenance {
+    /// Short commit the tree was at, or `None` when git could not answer.
+    pub commit: Option<String>,
+    /// Whether the working tree had uncommitted changes to tracked files.
+    ///
+    /// `Some(true)` is the one that matters: the commit above then does not
+    /// describe what was measured, so the numbers cannot be reproduced from
+    /// it. `None` when git could not answer at all, which is not the same
+    /// claim as a clean tree.
+    pub dirty: Option<bool>,
+    /// What `rustc --version` says **at run time**.
+    ///
+    /// This crate has no build script, so there is nowhere to stamp the
+    /// compiler that actually built the harness. The harness is built and run
+    /// inside one container, so the two agree in the way it is meant to be
+    /// used; a binary carried to a box with a different toolchain would
+    /// record that box's rustc, and this doc comment is the only thing that
+    /// says so.
+    pub rustc_version: Option<String>,
+    /// `"release"` or `"debug"`, from `cfg!(debug_assertions)`, so it is the
+    /// profile the harness was compiled with rather than the one somebody
+    /// meant to use. A timing number from a debug build is not a measurement
+    /// and [`Provenance::measurement_condition_warnings`] says so.
+    pub build_profile: &'static str,
+    pub host: HostInfo,
+    /// 1/5/15-minute load average sampled before the run.
+    pub load_average: Option<LoadAverage>,
+}
+
+/// The machine a run happened on.
+#[derive(Debug, Clone)]
+pub struct HostInfo {
+    pub cpu_model: Option<String>,
+    pub ncpu: Option<u32>,
+    pub arch: &'static str,
+    pub os: &'static str,
+    /// Best effort. Container CPU quotas move both timing and RSS, and the
+    /// published PMTiles numbers were taken in one.
+    pub in_container: bool,
+}
+
+/// The 1/5/15-minute run-queue averages.
+#[derive(Debug, Clone, Copy)]
+pub struct LoadAverage {
+    pub one_min: f64,
+    pub five_min: f64,
+    pub fifteen_min: f64,
+}
+
+impl Provenance {
+    /// Sample the environment.
+    ///
+    /// Call it once, in the parent, before any cell runs.
+    pub fn capture() -> Self {
+        let (commit, dirty) = commit_and_dirty(Path::new(env!("CARGO_MANIFEST_DIR")));
+        Self {
+            commit,
+            dirty,
+            rustc_version: rustc_version(),
+            build_profile: if cfg!(debug_assertions) {
+                "debug"
+            } else {
+                "release"
+            },
+            host: HostInfo {
+                cpu_model: cpu_model(),
+                ncpu: std::thread::available_parallelism()
+                    .ok()
+                    .map(|n| n.get() as u32),
+                arch: std::env::consts::ARCH,
+                os: std::env::consts::OS,
+                in_container: detect_container(),
+            },
+            load_average: load_average(),
+        }
+    }
+
+    /// Provenance for a document nobody captured one for.
+    ///
+    /// Every field a hole, which is what a schema 1 document effectively
+    /// carried, and it is distinguishable from a real capture precisely
+    /// because a real one fills something in.
+    pub fn unknown() -> Self {
+        Self {
+            commit: None,
+            dirty: None,
+            rustc_version: None,
+            build_profile: "unknown",
+            host: HostInfo {
+                cpu_model: None,
+                ncpu: None,
+                arch: "unknown",
+                os: "unknown",
+                in_container: false,
+            },
+            load_average: None,
+        }
+    }
+
+    /// Whether the box already had every core queued when the load was
+    /// sampled, so the wall-clock numbers are contended.
+    ///
+    /// `false` when either half is missing: a signal nobody has must not cry
+    /// wolf. The threshold is `libviprs-bench`'s, one-minute load at or above
+    /// the CPU count.
+    pub fn host_looked_contended(&self) -> bool {
+        match (self.load_average, self.host.ncpu) {
+            (Some(load), Some(ncpu)) if ncpu > 0 => load.one_min >= f64::from(ncpu),
+            _ => false,
+        }
+    }
+
+    /// Everything about this run that makes its numbers less believable, one
+    /// string per line, in a stable order.
+    ///
+    /// The caller prints them to stderr. They are warnings and not failures
+    /// because a contended run is still a run somebody may have meant to take,
+    /// and a benchmark that refuses to produce a number is worse than one that
+    /// produces a number with a label on it.
+    pub fn measurement_condition_warnings(&self) -> Vec<String> {
+        let mut warnings = Vec::new();
+        if self.build_profile != "release" {
+            warnings.push(format!(
+                "WARNING: this harness was built in the {} profile, so its wall-clock numbers \
+                 measure an unoptimised build and are not comparable to anything published.",
+                self.build_profile
+            ));
+        }
+        if self.host_looked_contended() {
+            warnings.push(format!(
+                "WARNING: 1-minute host load {} against {} CPUs when it was sampled, so the box \
+                 was already busy and these numbers are inflated by scheduling pressure rather \
+                 than by the code under test.",
+                self.load_average_line(),
+                self.host.ncpu.unwrap_or(0),
+            ));
+        }
+        if self.dirty == Some(true) {
+            warnings.push(format!(
+                "WARNING: the working tree had uncommitted changes, so commit {} does not \
+                 describe what was measured and nobody can reproduce these numbers from it.",
+                self.commit.as_deref().unwrap_or("unknown"),
+            ));
+        }
+        if self.commit.is_none() {
+            warnings.push(
+                "WARNING: no commit could be read, so this document does not say which tree \
+                 produced it."
+                    .to_string(),
+            );
+        }
+        warnings
+    }
+
+    /// `"1.23 / 1.05 / 0.98"`, or that there was no sample.
+    pub fn load_average_line(&self) -> String {
+        match self.load_average {
+            Some(load) => format!(
+                "{:.2} / {:.2} / {:.2}",
+                load.one_min, load.five_min, load.fifteen_min
+            ),
+            None => "unavailable".to_string(),
+        }
+    }
+
+    /// The provenance object, indented to sit inside the envelope.
+    pub fn to_json(&self) -> String {
+        let mut out = String::from("{\n");
+        push_opt_str(&mut out, 4, "commit", self.commit.as_deref());
+        push_opt_bool(&mut out, 4, "dirty", self.dirty);
+        push_opt_str(&mut out, 4, "rustc_version", self.rustc_version.as_deref());
+        push_opt_str(&mut out, 4, "build_profile", Some(self.build_profile));
+        out.push_str("    \"host\": {\n");
+        push_opt_str(&mut out, 6, "cpu_model", self.host.cpu_model.as_deref());
+        push_indented_opt_u64(&mut out, 6, "ncpu", self.host.ncpu.map(u64::from));
+        push_opt_str(&mut out, 6, "arch", Some(self.host.arch));
+        push_opt_str(&mut out, 6, "os", Some(self.host.os));
+        out.push_str(&format!(
+            "      \"in_container\": {}\n    }},\n",
+            self.host.in_container
+        ));
+        match self.load_average {
+            Some(load) => out.push_str(&format!(
+                "    \"load_average\": {{\n      \"one_min\": {},\n      \"five_min\": {},\n      \
+                 \"fifteen_min\": {}\n    }}\n",
+                json_opt_number(Some(load.one_min)),
+                json_opt_number(Some(load.five_min)),
+                json_opt_number(Some(load.fifteen_min)),
+            )),
+            None => out.push_str("    \"load_average\": null\n"),
+        }
+        out.push_str("  }");
+        out
+    }
+}
+
+/// Every key the provenance object carries, in order, including the nested
+/// ones under their parent's name.
+///
+/// The shape guard reads this rather than repeating the list, the same way it
+/// reads [`FIELDS`] for a row.
+pub const PROVENANCE_FIELDS: [&str; 6] = [
+    "commit",
+    "dirty",
+    "rustc_version",
+    "build_profile",
+    "host",
+    "load_average",
+];
+
+/// Every key inside `provenance.host`, in order.
+pub const PROVENANCE_HOST_FIELDS: [&str; 5] = ["cpu_model", "ncpu", "arch", "os", "in_container"];
+
+fn push_opt_str(out: &mut String, indent: usize, key: &str, value: Option<&str>) {
+    let pad = " ".repeat(indent);
+    match value {
+        Some(value) => out.push_str(&format!("{pad}\"{key}\": \"{}\",\n", escape(value))),
+        None => out.push_str(&format!("{pad}\"{key}\": null,\n")),
+    }
+}
+
+fn push_opt_bool(out: &mut String, indent: usize, key: &str, value: Option<bool>) {
+    let pad = " ".repeat(indent);
+    match value {
+        Some(value) => out.push_str(&format!("{pad}\"{key}\": {value},\n")),
+        None => out.push_str(&format!("{pad}\"{key}\": null,\n")),
+    }
+}
+
+fn push_indented_opt_u64(out: &mut String, indent: usize, key: &str, value: Option<u64>) {
+    let pad = " ".repeat(indent);
+    match value {
+        Some(value) => out.push_str(&format!("{pad}\"{key}\": {value},\n")),
+        None => out.push_str(&format!("{pad}\"{key}\": null,\n")),
+    }
+}
+
+/// What commit a tree is at and whether it has been edited since.
+///
+/// Both `None` when git cannot answer, and there are more ways for that to
+/// happen than there look to be. A git-less container and a tarball with no
+/// `.git` are the obvious two. The one that actually turned up here is a
+/// **linked worktree bind-mounted into a container**: its `.git` is a file
+/// pointing at a gitdir under the main checkout, that path is outside the
+/// mount, and git answers `not a git repository`. So a run taken from an agent
+/// worktree publishes a null commit, honestly, and a run taken from a clone
+/// (which is what `tools/local-ci.py` makes inside the container) publishes a
+/// real one.
+///
+/// Takes the directory rather than reading `CARGO_MANIFEST_DIR` itself so
+/// `a_repository_with_a_commit_is_read_back` can point it at a repository it
+/// built, and prove the reading works without depending on how this checkout
+/// happens to be mounted.
+pub fn commit_and_dirty(dir: &Path) -> (Option<String>, Option<bool>) {
+    (
+        git_in(dir, &["rev-parse", "--short", "HEAD"]),
+        git_in(dir, &["status", "--porcelain"]).map(|out| !out.is_empty()),
+    )
+}
+
+/// Run one git command in `dir`, or answer `None`.
+pub fn git_in(dir: &Path, args: &[&str]) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Whether `git` can be run at all.
+///
+/// Used by the control that proves [`commit_and_dirty`] reads a repository,
+/// so that the control asserts the null path instead of skipping when there is
+/// no git to read one with. A test that skips is the same colour as a test
+/// that passed.
+pub fn git_is_available() -> bool {
+    std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .is_ok_and(|out| out.status.success())
+}
+
+fn rustc_version() -> Option<String> {
+    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
+    let out = std::process::Command::new(rustc)
+        .arg("--version")
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let line = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if line.is_empty() { None } else { Some(line) }
+}
+
+/// What the CPU calls itself, where it says.
+///
+/// `/proc/cpuinfo` on aarch64 Linux carries no `model name` line at all, so
+/// this answers `None` in the arm64 container rather than inventing one. The
+/// architecture is recorded separately and that is the field that matters for
+/// the question this issue asks, which is whether a run was emulated.
+fn cpu_model() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        let out = std::process::Command::new("sysctl")
+            .args(["-n", "machdep.cpu.brand_string"])
+            .output()
+            .ok()?;
+        if out.status.success() {
+            let model = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !model.is_empty() {
+                return Some(model);
+            }
+        }
+        None
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let text = std::fs::read_to_string("/proc/cpuinfo").ok()?;
+        for line in text.lines() {
+            if line.starts_with("model name")
+                && let Some((_, rest)) = line.split_once(':')
+            {
+                return Some(rest.trim().to_string());
+            }
+        }
+        None
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        None
+    }
+}
+
+/// The 1/5/15-minute load average, where the platform reports one.
+///
+/// `/proc/loadavg` on Linux. On macOS `getloadavg` needs `libc`, which this
+/// crate does not depend on and will not gain one for a benchmark's banner, so
+/// it shells out to `sysctl -n vm.loadavg` instead, whose output is
+/// `{ 1.83 1.92 1.98 }`.
+fn load_average() -> Option<LoadAverage> {
+    #[cfg(target_os = "linux")]
+    let text = std::fs::read_to_string("/proc/loadavg").ok()?;
+    #[cfg(not(target_os = "linux"))]
+    let text = {
+        let out = std::process::Command::new("sysctl")
+            .args(["-n", "vm.loadavg"])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+    parse_load_average(&text)
+}
+
+/// Pull three averages out of either platform's spelling of them.
+///
+/// Separated from the reading so it can be tested without a host under load:
+/// Linux writes `0.52 0.58 0.59 1/523 12345` and macOS writes
+/// `{ 1.83 1.92 1.98 }`, and the braces are the part a naive split gets wrong.
+pub fn parse_load_average(text: &str) -> Option<LoadAverage> {
+    let mut parts = text
+        .split(|c: char| c.is_whitespace() || c == '{' || c == '}')
+        .filter(|part| !part.is_empty())
+        .filter_map(|part| part.parse::<f64>().ok());
+    let one_min = parts.next()?;
+    let five_min = parts.next()?;
+    let fifteen_min = parts.next()?;
+    Some(LoadAverage {
+        one_min,
+        five_min,
+        fifteen_min,
+    })
+}
+
+/// Best-effort "is this a container?".
+///
+/// The same two probes `libviprs-bench` uses. It matters here because the
+/// published PMTiles numbers were taken in one and the document did not say
+/// so, which is half of why nobody spotted that they were emulated.
+fn detect_container() -> bool {
+    if Path::new("/.dockerenv").exists() {
+        return true;
+    }
+    match std::fs::read_to_string("/proc/1/cgroup") {
+        Ok(text) => {
+            text.contains("docker") || text.contains("kubepods") || text.contains("containerd")
+        }
+        Err(_) => false,
+    }
 }
 
 /// Where the results of this run go.
