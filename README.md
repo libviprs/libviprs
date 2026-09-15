@@ -349,7 +349,16 @@ instructions reproduce what the suite runs. One caveat worth knowing rather than
 discovering: the crate requests `pdfium-render`'s `pdfium_7881` feature, which
 selects the bindgen set, so the bindings and the library are a version apart.
 `pdfium-render 0.9.4` offers no newer ABI (`pdfium_latest = ["pdfium_7881"]`), so
-there is nothing to move to yet. That is tracked in #1017.
+there is nothing to move to yet.
+
+That gap is measured rather than tolerated on trust. The 8054 library exports a
+strict superset of 7881's symbols, so every binding resolves, and the only
+declaration that differs between the two builds' public headers is
+`FPDF_LIBRARY_CONFIG`, which gained two trailing fields that PDFium reads only
+at config versions 6 and 7 while `pdfium-render` sets version 2.
+`tests/pdfium_abi_and_binary_pins.rs` records the pair and fails if either half
+moves, so the next person to bump one has to redo that comparison rather than
+inherit this paragraph.
 
 See the [libviprs-dep pdfium README](https://github.com/libviprs/libviprs-dep/tree/main/pdfium) for building PDFium from source or finding other versions.
 
