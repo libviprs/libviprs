@@ -121,8 +121,9 @@ pub const ENGINE: &str = "libviprs";
 /// cannot say which one is the problem. Every one of these is measured
 /// alongside the combined row rather than instead of it, so the history stays
 /// comparable, and `the_cold_split_accounts_for_the_whole_combined_row` in
-/// `tests/pmtiles_benchmarks.rs`
-/// checks that they add up to it.
+/// `tests/pmtiles_benchmarks.rs` checks that they are the same work it does,
+/// by the byte ranges each one reads and the values each one decodes rather
+/// than by comparing durations.
 pub const COLD_PHASES: [&str; 6] = [
     "read_cold_open",
     "read_cold_header",

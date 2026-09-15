@@ -357,6 +357,9 @@ annotated   fs-detected  tests/path_traversal.rs::verify_accepts_wellformed_rela
 annotated   fs-detected  tests/path_traversal.rs::verify_rejects_absolute_path
 annotated   fs-detected  tests/path_traversal.rs::verify_rejects_parent_directory_traversal
 annotated   fs-detected  tests/path_traversal.rs::verify_streams_large_tile_without_buffering_whole_file
+annotated   fs-detected  tests/pdfium_abi_and_binary_pins.rs::every_place_that_installs_a_libpdfium_installs_the_same_build
+annotated   fs-detected  tests/pdfium_abi_and_binary_pins.rs::every_place_that_names_the_bindgen_abi_names_the_same_one
+annotated   fs-detected  tests/pdfium_abi_and_binary_pins.rs::the_bindgen_abi_and_the_installed_build_agree_or_the_gap_is_declared
 annotated   fs-detected  tests/pdfium_dependency_contract.rs::pdfium_render_comes_from_the_registry
 annotated   fs-detected  tests/pdfium_dependency_contract.rs::the_floor_excludes_every_release_with_no_serialisation
 annotated   fs-detected  tests/pdfium_dependency_contract.rs::the_libpdfium_abi_is_pinned_explicitly

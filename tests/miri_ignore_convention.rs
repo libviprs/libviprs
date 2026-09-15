@@ -545,7 +545,12 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// `the_envelope_says_which_host_produced_the_numbers` and
 /// `the_exported_json_carries_every_field_the_site_reads`, and those do not
 /// move this count because the detector does not see them touch the filesystem.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 387;
+/// #1017 moves it 387 to 390, and the three are
+/// `tests/pdfium_abi_and_binary_pins.rs`' whole file. Each reads pins out of
+/// `Cargo.toml`, `tools/Dockerfile.ci`, `README.md`, `publish.yml` and a
+/// sibling test through one `std::fs::read_to_string` helper, so all three are
+/// `annotated fs-detected` and none of them is a judgement call.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 390;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
