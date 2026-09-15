@@ -70,8 +70,9 @@ mod scan;
 /// Both resolve through the filesystem and both therefore fail in exactly the
 /// same way: on a case-insensitive host `include_str!("../Changelog.md")`
 /// happily opens a tracked `CHANGELOG.md`, and on a case-sensitive one it does
-/// not. This guard covered only `include_bytes!` until #1018, which left 94
-/// `include_str!` sites, several of them naming machine-generated
+/// not. This guard covered only `include_bytes!` until #1018, which left 95
+/// `include_str!` sites (94 plain literals and one `concat!` in
+/// `src/analyze.rs`), several of them naming machine-generated
 /// `oracle-captures/*/capture.py` paths, outside a check written for exactly
 /// that hazard.
 const INCLUDE_MACROS: [&str; 2] = ["include_bytes!", "include_str!"];
