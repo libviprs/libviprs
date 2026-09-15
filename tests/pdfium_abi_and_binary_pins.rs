@@ -96,7 +96,7 @@ fn read(rel: &str) -> String {
 /// Whoever moves one has to come back here, redo the symbol-and-header
 /// comparison in the module docs above, and either record the new pair or
 /// delete this because the two finally converged.
-const DECLARED_GAP: Option<(&str, &str)> = None;
+const DECLARED_GAP: Option<(&str, &str)> = Some(("7881", "8054"));
 
 /// The `pdfium-render = { ... }` declaration from `Cargo.toml`, flattened.
 ///
