@@ -212,88 +212,88 @@ fn embeds_in(raw: &str, masked: &str, file: &Path) -> (Vec<String>, BTreeSet<usi
     // an opinion about.
     let mut prefixes: BTreeMap<String, String> = BTreeMap::new();
     for macro_name in INCLUDE_MACROS {
-    for (at, _) in raw.match_indices(macro_name) {
-        if masked.as_bytes()[at] != b'i' {
-            continue; // inside a comment or a literal
-        }
-        let after = skip_ws(rb, at + macro_name.len());
-        if rb.get(after) != Some(&b'(') {
-            panic!(
-                "{}: {macro_name} at byte {at} is not followed by `(`, which \
+        for (at, _) in raw.match_indices(macro_name) {
+            if masked.as_bytes()[at] != b'i' {
+                continue; // inside a comment or a literal
+            }
+            let after = skip_ws(rb, at + macro_name.len());
+            if rb.get(after) != Some(&b'(') {
+                panic!(
+                    "{}: {macro_name} at byte {at} is not followed by `(`, which \
                  this scanner does not understand",
-                file.display()
-            );
-        }
-        let inner = skip_ws(rb, after + 1);
-        if let Some((leaf, _)) = string_at(rb, inner) {
-            out.push(resolve(file_dir(file), &leaf));
-            claimed.insert(at);
-            continue;
-        }
-        if raw[inner..].starts_with("concat!") {
-            // Collect the leading constant parts of the concat: string
-            // literals and `env!("CARGO_MANIFEST_DIR")`. Anything else ends
-            // the prefix, and what follows is assumed to be the metavariable.
-            let mut i = skip_ws(rb, inner + "concat!".len());
-            if rb.get(i) != Some(&b'(') {
-                panic!("{}: concat! at byte {inner} is not a call", file.display());
+                    file.display()
+                );
             }
-            i = skip_ws(rb, i + 1);
-            let mut prefix = String::new();
-            loop {
-                if raw[i..].starts_with("env!(\"CARGO_MANIFEST_DIR\")") {
-                    prefix.push_str(&repo_root().to_string_lossy());
-                    i = skip_ws(rb, i + "env!(\"CARGO_MANIFEST_DIR\")".len());
-                } else if let Some((lit, next)) = string_at(rb, i) {
-                    prefix.push_str(&lit);
-                    i = skip_ws(rb, next);
-                } else {
-                    break;
-                }
-                if rb.get(i) == Some(&b',') {
-                    i = skip_ws(rb, i + 1);
-                }
-            }
-            if rb.get(i) == Some(&b')') {
-                // Every part was constant, so the concat! is the whole path
-                // and no macro fills anything in. `src/source.rs` splits the
-                // NIfTI paths over two literals purely to fit the line.
-                out.push(resolve(file_dir(file), &prefix));
+            let inner = skip_ws(rb, after + 1);
+            if let Some((leaf, _)) = string_at(rb, inner) {
+                out.push(resolve(file_dir(file), &leaf));
                 claimed.insert(at);
                 continue;
             }
-            // The enclosing `macro_rules!` name, if this body is one. Searching
-            // backwards is enough because a fixture macro's body is the only
-            // thing between its header and its `include_*!`.
-            let name = raw[..at]
-                .rfind("macro_rules!")
-                .map(|m| {
-                    raw[m + "macro_rules!".len()..]
-                        .trim_start()
-                        .split(|c: char| !c.is_alphanumeric() && c != '_')
-                        .next()
-                        .unwrap_or("")
-                        .to_string()
-                })
-                .filter(|n| !n.is_empty())
-                .unwrap_or_else(|| {
-                    panic!(
-                        "{}: the concat! {macro_name} at byte {at} is not \
+            if raw[inner..].starts_with("concat!") {
+                // Collect the leading constant parts of the concat: string
+                // literals and `env!("CARGO_MANIFEST_DIR")`. Anything else ends
+                // the prefix, and what follows is assumed to be the metavariable.
+                let mut i = skip_ws(rb, inner + "concat!".len());
+                if rb.get(i) != Some(&b'(') {
+                    panic!("{}: concat! at byte {inner} is not a call", file.display());
+                }
+                i = skip_ws(rb, i + 1);
+                let mut prefix = String::new();
+                loop {
+                    if raw[i..].starts_with("env!(\"CARGO_MANIFEST_DIR\")") {
+                        prefix.push_str(&repo_root().to_string_lossy());
+                        i = skip_ws(rb, i + "env!(\"CARGO_MANIFEST_DIR\")".len());
+                    } else if let Some((lit, next)) = string_at(rb, i) {
+                        prefix.push_str(&lit);
+                        i = skip_ws(rb, next);
+                    } else {
+                        break;
+                    }
+                    if rb.get(i) == Some(&b',') {
+                        i = skip_ws(rb, i + 1);
+                    }
+                }
+                if rb.get(i) == Some(&b')') {
+                    // Every part was constant, so the concat! is the whole path
+                    // and no macro fills anything in. `src/source.rs` splits the
+                    // NIfTI paths over two literals purely to fit the line.
+                    out.push(resolve(file_dir(file), &prefix));
+                    claimed.insert(at);
+                    continue;
+                }
+                // The enclosing `macro_rules!` name, if this body is one. Searching
+                // backwards is enough because a fixture macro's body is the only
+                // thing between its header and its `include_*!`.
+                let name = raw[..at]
+                    .rfind("macro_rules!")
+                    .map(|m| {
+                        raw[m + "macro_rules!".len()..]
+                            .trim_start()
+                            .split(|c: char| !c.is_alphanumeric() && c != '_')
+                            .next()
+                            .unwrap_or("")
+                            .to_string()
+                    })
+                    .filter(|n| !n.is_empty())
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{}: the concat! {macro_name} at byte {at} is not \
                          inside a macro_rules!, so nothing tells this scanner \
                          what fills the rest of the path",
-                        file.display()
-                    )
-                });
-            prefixes.insert(name, prefix);
-            claimed.insert(at);
-            continue;
-        }
-        panic!(
-            "{}: {macro_name} at byte {at} takes neither a string literal \
+                            file.display()
+                        )
+                    });
+                prefixes.insert(name, prefix);
+                claimed.insert(at);
+                continue;
+            }
+            panic!(
+                "{}: {macro_name} at byte {at} takes neither a string literal \
              nor a concat!, which this scanner does not understand",
-            file.display()
-        );
-    }
+                file.display()
+            );
+        }
     }
 
     // Pass 1b: the call sites of every prefix macro found above.
@@ -445,8 +445,7 @@ fn every_embedded_fixture_is_committed_under_the_name_the_source_uses() {
         }
 
         for macro_name in INCLUDE_MACROS {
-            *sites_by_macro.entry(macro_name).or_default() +=
-                masked.matches(macro_name).count();
+            *sites_by_macro.entry(macro_name).or_default() += masked.matches(macro_name).count();
         }
 
         for embedded in embeds {

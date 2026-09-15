@@ -266,7 +266,10 @@ fn declared_abis() -> Vec<(&'static str, String)> {
     vec![
         ("Cargo.toml pdfium-render features", manifest),
         (".github/workflows/publish.yml case pattern", publish_abi),
-        ("tests/pdfium_dependency_contract.rs assertion", contract_abi),
+        (
+            "tests/pdfium_dependency_contract.rs assertion",
+            contract_abi,
+        ),
     ]
 }
 
@@ -301,10 +304,8 @@ fn every_place_that_installs_a_libpdfium_installs_the_same_build() {
 fn every_place_that_names_the_bindgen_abi_names_the_same_one() {
     let declared = declared_abis();
     let manifest = declared[0].1.clone();
-    let disagreeing: Vec<&(&str, String)> = declared
-        .iter()
-        .filter(|(_, m)| *m != manifest)
-        .collect();
+    let disagreeing: Vec<&(&str, String)> =
+        declared.iter().filter(|(_, m)| *m != manifest).collect();
     assert!(
         disagreeing.is_empty(),
         "Cargo.toml requests pdfium_{manifest} and these do not agree, so the \
