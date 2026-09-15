@@ -70,6 +70,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use libviprs::planner::{Layout, PyramidPlan, PyramidPlanner, TileCoord};
+use libviprs::pmtiles::{Entry, FileRangeReader, Header, RangeReader};
 use libviprs::pyramid_reader::{DirectoryPyramidReader, PmTilesPyramidReader, PyramidReader};
 use libviprs::sink::TileFormat;
 use libviprs::sink_pmtiles::PmTilesSink;
@@ -135,17 +136,6 @@ const LARGEST_FLAT_ROOT: usize = ROOT_ONLY_MAX_ENTRIES - 1;
 /// the row is the shape of a first lookup rather than a tight confidence
 /// interval on it.
 const COLD_SAMPLES: usize = 64;
-
-/// How far the split's phases may sit from the combined row.
-///
-/// They are two passes over the same work on the same file, so the difference
-/// is measurement noise plus the handful of `checked_add` bounds checks
-/// `Reader::try_new` makes that the split does not repeat. The replicate pair
-/// already in the committed sweep puts p50 noise at about 7% between two runs
-/// of identical code, so 25% is roughly three times the noise floor: wide
-/// enough not to go red on a busy afternoon, narrow enough that a phase left
-/// out of the split fails it.
-const COLD_SPLIT_TOLERANCE: f64 = 0.25;
 
 /// The thread counts the concurrent scenario walks.
 ///
@@ -396,12 +386,161 @@ impl SplitPass {
     }
 }
 
-fn cold_split_pass(output: &Path, coords: &[TileCoord]) -> SplitPass {
+/// A [`RangeReader`] that records every `(offset, len)` it is asked for.
+///
+/// The reconciliation guard needs to know which byte ranges a cold open
+/// actually touches, and asking the source is the only way to know it that
+/// does not involve a clock. `tests/pmtiles_reader.rs` has its own copy for
+/// its own questions; they are separate test binaries and consolidating them
+/// is a change for its own PR rather than a rider on this one.
+///
+/// `size` is deliberately not logged. `Reader::try_new` calls it to
+/// bounds-check the header and it moves no bytes, so counting it would put an
+/// entry in the log that no phase of the split corresponds to.
+struct ReadLog<R: RangeReader> {
+    inner: R,
+    log: ReadTally,
+}
+
+/// A read log that several sources write into and a caller can read back after
+/// every one of them has been dropped.
+///
+/// Shared rather than owned because the split builds its source inside the
+/// phase that times the build, so the guard never holds that source and cannot
+/// ask it anything afterwards. The log outlives it.
+type ReadTally = std::sync::Arc<std::sync::Mutex<Vec<(u64, usize)>>>;
+
+fn read_tally() -> ReadTally {
+    std::sync::Arc::new(std::sync::Mutex::new(Vec::new()))
+}
+
+/// Every range served into `log` so far, in order.
+fn tallied(log: &ReadTally) -> Vec<(u64, usize)> {
+    log.lock().expect("the read log is not poisoned").clone()
+}
+
+impl<R: RangeReader> ReadLog<R> {
+    fn sharing(inner: R, log: ReadTally) -> Self {
+        Self { inner, log }
+    }
+}
+
+impl<R: RangeReader> RangeReader for ReadLog<R> {
+    fn read_range(&self, offset: u64, len: usize) -> std::io::Result<Vec<u8>> {
+        self.log
+            .lock()
+            .expect("the read log is not poisoned")
+            .push((offset, len));
+        self.inner.read_range(offset, len)
+    }
+
+    fn size(&self) -> std::io::Result<Option<u64>> {
+        self.inner.size()
+    }
+}
+
+/// What one split iteration produced, beside its six durations.
+///
+/// The products are here because the reconciliation guard needs them. Three of
+/// the six phases do no I/O at all, so nothing a read log can see tells an
+/// inflate that ran from one that was skipped; what tells them apart is the
+/// bytes that came out. Carrying them costs the measurement nothing, because
+/// every timed region is closed before this is built.
+struct SplitIteration {
+    /// In [`bench::COLD_PHASES`] order.
+    phases: [Duration; 6],
+    /// What the header phase decoded.
+    header: Header,
+    /// What the inflate and decode phases turned the root into.
+    entries: Vec<Entry>,
+    /// What the lookup phase returned.
+    tile: Option<Vec<u8>>,
+}
+
+/// One iteration of the split: `Reader::try_new`'s own steps, by hand, in its
+/// order, each one timed.
+///
+/// Split out of [`cold_split_pass`] so that
+/// `the_cold_split_accounts_for_the_whole_combined_row` can run these steps
+/// rather than a second copy of them. That is the whole reason the function
+/// exists: a guard that re-implemented this sequence would be asserting that
+/// its own copy matches the reader, which is the one thing never in doubt,
+/// while the copy that actually drifts went unchecked.
+fn split_iteration(output: &Path, coord: TileCoord) -> SplitIteration {
+    split_iteration_over(output, coord, |path| {
+        FileRangeReader::try_open(path).expect("the archive opens")
+    })
+}
+
+/// [`split_iteration`], with the byte source its hand-rolled phases read
+/// through supplied by the caller.
+///
+/// The reconciliation guard passes a source that writes down what it was asked
+/// for, which is how the split's own reads become comparable with the combined
+/// row's. Products alone would leave a split that read the right bytes twice
+/// looking exactly like one that read them once, and a phase doing more work
+/// than the row does is the same defect as a phase doing less.
+fn split_iteration_over<R: RangeReader>(
+    output: &Path,
+    coord: TileCoord,
+    open_source: impl Fn(&Path) -> R,
+) -> SplitIteration {
     use libviprs::pmtiles::directory::deserialize_entries;
     use libviprs::pmtiles::header::HEADER_BYTES;
     use libviprs::pmtiles::reader::MAX_DIRECTORY_BYTES;
-    use libviprs::pmtiles::{FileRangeReader, Header, RangeReader};
 
+    let at = Instant::now();
+    let source = open_source(output);
+    std::hint::black_box(source.size().expect("the archive has a size"));
+    let open = at.elapsed();
+
+    let at = Instant::now();
+    let header = Header::try_decode(
+        &source
+            .read_range(0, HEADER_BYTES)
+            .expect("the header can be read"),
+    )
+    .expect("the header decodes");
+    let header_time = at.elapsed();
+
+    let at = Instant::now();
+    let raw = source
+        .read_range(
+            header.root_offset,
+            usize::try_from(header.root_length).expect("a root length fits a usize"),
+        )
+        .expect("the root can be read");
+    let fetch = at.elapsed();
+
+    let at = Instant::now();
+    let plain = header
+        .internal_compression
+        .decompress(&raw, MAX_DIRECTORY_BYTES)
+        .expect("the root inflates");
+    let inflate = at.elapsed();
+
+    let at = Instant::now();
+    let entries = std::hint::black_box(deserialize_entries(&plain).expect("the root decodes"));
+    let decode = at.elapsed();
+    assert!(!entries.is_empty(), "a root of no entries is not a root");
+
+    // Untimed: the lookup phase has to run against a reader the crate built,
+    // because that is the code path a caller takes, and rebuilding `locate`
+    // here would be measuring this file instead of the crate.
+    let reader = PmTilesPyramidReader::try_open(output).expect("the archive opens for reading");
+    let at = Instant::now();
+    let tile = reader.tile(coord).expect("a lookup succeeds");
+    let lookup = at.elapsed();
+
+    SplitIteration {
+        phases: [open, header_time, fetch, inflate, decode, lookup],
+        header,
+        entries,
+        tile,
+    }
+}
+
+fn cold_split_pass(output: &Path, coords: &[TileCoord]) -> SplitPass {
     let mut phases: Vec<Vec<Duration>> = bench::COLD_PHASES
         .iter()
         .map(|_| Vec::with_capacity(coords.len()))
@@ -411,56 +550,13 @@ fn cold_split_pass(output: &Path, coords: &[TileCoord]) -> SplitPass {
     let mut hits = 0;
 
     for coord in coords {
-        let at = Instant::now();
-        let source = FileRangeReader::try_open(output).expect("the archive opens");
-        std::hint::black_box(source.size().expect("the archive has a size"));
-        let open = at.elapsed();
-
-        let at = Instant::now();
-        let header = Header::try_decode(
-            &source
-                .read_range(0, HEADER_BYTES)
-                .expect("the header can be read"),
-        )
-        .expect("the header decodes");
-        let header_time = at.elapsed();
-
-        let at = Instant::now();
-        let raw = source
-            .read_range(
-                header.root_offset,
-                usize::try_from(header.root_length).expect("a root length fits a usize"),
-            )
-            .expect("the root can be read");
-        let fetch = at.elapsed();
-
-        let at = Instant::now();
-        let plain = header
-            .internal_compression
-            .decompress(&raw, MAX_DIRECTORY_BYTES)
-            .expect("the root inflates");
-        let inflate = at.elapsed();
-
-        let at = Instant::now();
-        let entries = std::hint::black_box(deserialize_entries(&plain).expect("the root decodes"));
-        let decode = at.elapsed();
-        assert!(!entries.is_empty(), "a root of no entries is not a root");
-
-        // Untimed: the lookup phase has to run against a reader the crate
-        // built, because that is the code path a caller takes, and rebuilding
-        // `locate` here would be measuring this file instead of the crate.
-        let reader = PmTilesPyramidReader::try_open(output).expect("the archive opens for reading");
-        let at = Instant::now();
-        let tile = reader.tile(*coord).expect("a lookup succeeds");
-        let lookup = at.elapsed();
-        if let Some(tile) = tile {
+        let iteration = split_iteration(output, *coord);
+        if let Some(tile) = &iteration.tile {
             bytes += tile.len() as u64;
             hits += 1;
         }
-
-        let sample = [open, header_time, fetch, inflate, decode, lookup];
-        totals.push(sample.iter().copied().sum());
-        for (slot, value) in phases.iter_mut().zip(sample) {
+        totals.push(iteration.phases.iter().copied().sum());
+        for (slot, value) in phases.iter_mut().zip(iteration.phases) {
             slot.push(value);
         }
     }
@@ -1192,11 +1288,47 @@ fn every_read_scenario_reports_a_row() {
     );
 }
 
-/// The split's phases add up to the row they split.
+/// The split's phases are the work the combined row does, shown without a clock.
 ///
 /// This is the assertion that makes the split worth having. Six phases that do
 /// not reconcile with the combined row are six numbers about some other piece
 /// of work, and they would look exactly as plausible on a chart.
+///
+/// # Why this is no longer a timing comparison
+///
+/// It used to measure the cell both ways and allow the sum of the phases to
+/// sit within 25% of the combined row. That reads as a reconciliation and is
+/// really a race between two independent samples: the split is measured, then
+/// the combined is measured, and on a host doing anything else the two land in
+/// different conditions. Five consecutive runs of that assertion at one commit
+/// on one machine came out at +6.3%, -0.8%, +19.0%, -20.3% and -2.9%: a
+/// 39-point spread against a 25% allowance. It failed on a busy host and
+/// passed on a quiet one for reasons that had nothing to do with the code.
+/// `docs/pmtiles-benchmarks.md` put the p50 noise floor near 8% and chose 25%
+/// as three times that, but 8% is a quiet-host number and 25% is not three
+/// times the spread this actually has under load.
+///
+/// Widening the allowance only moves the load at which it lies, and each
+/// widening makes it mean less. What is being claimed is that the split walks
+/// the same steps over the same bytes, and that is a fact about I/O and about
+/// decoded values rather than about duration. Checked that way it holds on any
+/// host at any load, and it is a stronger statement than the percentage was:
+/// the old form passed just as happily on a split that read the right bytes
+/// and threw them away.
+///
+/// # What the phases are held to
+///
+/// Three of the six move bytes and are checked against the reads the combined
+/// row's own path makes, one for one. Two move no bytes at all, so no read log
+/// can see them and they are checked by what they produced instead. The sixth
+/// is the open, which nothing needs to assert because every other step reads
+/// through the source it returns: a missing open is a missing everything.
+///
+/// The quantitative form of this claim, that the six durations sum to the
+/// combined duration, is worth having and does not belong in this repository.
+/// It needs repetitions, a dispersion the run itself measured, and a host that
+/// holds still, which is what the storage family in `libviprs-bench` is for.
+/// This is the guard left behind.
 ///
 /// The cell is not one the sweep publishes. What the guard needs is a root big
 /// enough that a dropped phase moves the total and a generation that costs
@@ -1222,37 +1354,119 @@ fn the_cold_split_accounts_for_the_whole_combined_row() {
         .into_iter()
         .take(COLD_SAMPLES)
         .collect();
-    let mut combined = cold_pass(PMTILES, &generated.output, &generated.plan, &coords);
-    let mut split = cold_split_pass(&generated.output, &coords);
+    let coord = *coords.first().expect("the plan produced a coordinate");
 
-    let combined_p50 =
-        bench::percentile_micros(&mut combined.latencies).expect("the combined row has a median");
-    let split_p50 = split.total_p50_us().expect("the split has a median");
-    let residual = (split_p50 - combined_p50).abs() / combined_p50;
-    for (phase, samples) in bench::COLD_PHASES.iter().zip(&mut split.phases) {
-        println!(
-            "  {phase:<24} p50 {:>8.3} us",
-            bench::percentile_micros(samples).unwrap_or(f64::NAN)
-        );
-    }
-    println!(
-        "  {:<24} p50 {split_p50:>8.3} us against combined {combined_p50:.3} us, {:+.1}%",
-        "sum of the phases",
-        100.0 * (split_p50 - combined_p50) / combined_p50,
+    // The combined row's own path, over a source that writes down what it was
+    // asked for. The substitution is exact rather than close:
+    // `PmTilesPyramidReader::try_open` is `pmtiles::Reader::try_open` and its
+    // `tile` is `tile_coord_to_zxy` then `get_tile` (`src/pyramid_reader.rs`),
+    // and `Reader::try_open(path)` is `Reader::try_new(FileRangeReader::
+    // try_open(path)?)` (`src/pmtiles/reader.rs`). Wrapping the file source
+    // changes which reads are written down and none of which reads happen.
+    let combined_log = read_tally();
+    let reader = libviprs::pmtiles::Reader::try_new(ReadLog::sharing(
+        FileRangeReader::try_open(&generated.output).expect("the archive opens"),
+        std::sync::Arc::clone(&combined_log),
+    ))
+    .expect("the archive opens for reading");
+    let opening = tallied(&combined_log);
+    let (z, x, y) = libviprs::sink_pmtiles::tile_coord_to_zxy(coord)
+        .expect("a coordinate the plan produced is addressable in PMTiles");
+    let combined_tile = reader.get_tile(z, x, y).expect("a lookup succeeds");
+    let lookup: Vec<(u64, usize)> = tallied(&combined_log)[opening.len()..].to_vec();
+
+    // The split's own steps, run rather than described a second time, through
+    // a source that keeps the same kind of log.
+    let split_log = read_tally();
+    let split = {
+        let log = std::sync::Arc::clone(&split_log);
+        split_iteration_over(&generated.output, coord, move |path| {
+            ReadLog::sharing(
+                FileRangeReader::try_open(path).expect("the archive opens"),
+                std::sync::Arc::clone(&log),
+            )
+        })
+    };
+
+    // The reads the split's timed phases make are the reads a cold open makes:
+    // same ranges, same order, and the same number of them. This is the
+    // reconciliation the percentage was standing in for, and it is the half a
+    // products-only check would miss, because a phase that reads the right
+    // bytes twice is doing work the combined row does not.
+    assert_eq!(
+        tallied(&split_log),
+        opening,
+        "the split's timed phases do not read what opening the archive reads"
+    );
+
+    // The split's lookup phase runs through `PmTilesPyramidReader`, which is
+    // the crate's own code and therefore cannot read differently from the
+    // combined row's `get_tile`; what it returned is checked below instead.
+
+    // Phase 2, the header: the combined row's first read, and the same header
+    // came back out of it.
+    assert_eq!(
+        opening.first().copied(),
+        Some((0, libviprs::pmtiles::header::HEADER_BYTES)),
+        "a cold open starts by reading the header, and the split times a read of that same range"
+    );
+    assert_eq!(
+        split.header,
+        *reader.header(),
+        "the split decoded a different header from the one the reader went on to use, so every \
+         phase after it is addressing a different archive"
+    );
+
+    // Phase 3, the root fetch: the combined row's second read is exactly the
+    // range the split's own header says the root lives at.
+    assert_eq!(
+        opening.get(1).copied(),
+        Some((
+            split.header.root_offset,
+            usize::try_from(split.header.root_length).expect("a root length fits a usize")
+        )),
+        "the combined row's second read is not the root range the split fetched"
+    );
+    assert_eq!(
+        opening.len(),
+        2,
+        "a cold open is the header and the root and nothing else, so a split of six phases that \
+         covers more than two reads before the lookup is covering work the row does not do: \
+         {opening:?}"
+    );
+
+    // Phases 4 and 5, inflate and decode. Neither touches the archive, so the
+    // only thing that can say they ran is what came out of them. A skipped
+    // inflate hands the decoder gzip and a skipped decode has no entries, and
+    // both land here rather than inside a percentage.
+    assert_eq!(
+        split.entries.as_slice(),
+        reader.root_entries(),
+        "the split's inflate and decode did not reproduce the root directory the reader built"
+    );
+
+    // Phase 6, the lookup: one payload read, and the same bytes.
+    assert_eq!(
+        lookup.len(),
+        1,
+        "a leafless archive needs exactly one read for the payload: {lookup:?}"
     );
     assert!(
-        residual <= COLD_SPLIT_TOLERANCE,
-        "the split's phases sum to {split_p50:.2} us against the combined row's \
-         {combined_p50:.2} us, {:.1}% apart and over the {:.0}% this harness allows, so the \
-         split is measuring something the combined row does not",
-        100.0 * residual,
-        100.0 * COLD_SPLIT_TOLERANCE,
+        combined_tile.is_some(),
+        "the guard's coordinate has to be a tile the archive holds, or the lookup phase is timing \
+         a miss and the payload read above is not the one a caller pays for"
+    );
+    assert_eq!(
+        split.tile, combined_tile,
+        "the split's lookup returned different bytes from the combined row's"
     );
 
-    // And every phase really ran. The tolerance above cannot catch a phase
-    // that was cheap enough to hide inside it, so the list is checked too.
-    assert_eq!(split.phases.len(), bench::COLD_PHASES.len());
-    for (phase, samples) in bench::COLD_PHASES.iter().zip(&split.phases) {
+    // And every phase really ran, for every coordinate the pass walks. The
+    // reconciliation above is one iteration; this is the shape of all of them,
+    // and it is what catches a phase cheap enough to hide.
+    let pass = cold_split_pass(&generated.output, &coords);
+    assert_eq!(pass.phases.len(), bench::COLD_PHASES.len());
+    for (phase, samples) in bench::COLD_PHASES.iter().zip(&pass.phases) {
         assert_eq!(
             samples.len(),
             coords.len(),
