@@ -63,6 +63,17 @@ use std::process::Command;
 #[path = "common/scan.rs"]
 mod scan;
 
+/// The `include_*!` macros that embed a file by path at compile time.
+///
+/// Both resolve through the filesystem and both therefore fail in exactly the
+/// same way: on a case-insensitive host `include_str!("../Changelog.md")`
+/// happily opens a tracked `CHANGELOG.md`, and on a case-sensitive one it does
+/// not. This guard covered only `include_bytes!` until #1018, which left 94
+/// `include_str!` sites, several of them naming machine-generated
+/// `oracle-captures/*/capture.py` paths, outside a check written for exactly
+/// that hazard.
+const INCLUDE_MACROS: [&str; 2] = ["include_bytes!", "include_str!"];
+
 /// Repo root (the directory containing the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -405,20 +416,22 @@ fn every_embedded_fixture_is_committed_under_the_name_the_source_uses() {
     for (_, path) in &sources {
         let raw = std::fs::read_to_string(path)
             .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
-        if !raw.contains("include_bytes!") {
+        if !INCLUDE_MACROS.iter().any(|m| raw.contains(m)) {
             continue;
         }
         let masked = scan::mask_literals_and_comments(&raw);
         let (embeds, claimed) = embeds_in(&raw, &masked, path);
 
         // Nothing in real code may be left unclaimed.
-        for (at, _) in masked.match_indices("include_bytes!") {
-            assert!(
-                claimed.contains(&at),
-                "{}: the include_bytes! at byte {at} is a form this scanner \
-                 did not resolve, so it would have been skipped silently",
-                path.display()
-            );
+        for macro_name in INCLUDE_MACROS {
+            for (at, _) in masked.match_indices(macro_name) {
+                assert!(
+                    claimed.contains(&at),
+                    "{}: the {macro_name} at byte {at} is a form this scanner \
+                     did not resolve, so it would have been skipped silently",
+                    path.display()
+                );
+            }
         }
 
         for embedded in embeds {
