@@ -118,35 +118,75 @@ fn pdfium_render_declaration() -> String {
     rest[..end].split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// The milestone in the first `pdfium_<digits>` of `haystack`.
-///
-/// Returns `None` rather than a default, so every caller has to say what an
-/// absence means instead of quietly comparing against an empty string.
-fn abi_milestone(haystack: &str) -> Option<String> {
-    milestone_after(haystack, "pdfium_")
-}
-
-/// The milestone in the first `pdfium-<digits>` of `haystack`.
+/// The milestone in the first `pdfium-<digits>` of `haystack`, if it has one.
 ///
 /// The separator is what tells the two kinds of pin apart and it is worth
 /// stating: a bindgen feature is `pdfium_7881` with an underscore and a
 /// release tag is `pdfium-8054` with a hyphen. Neither pattern can match the
 /// other, so a file naming both (`README.md` does) reads correctly to both.
+///
+/// This one returns an `Option` because its caller scans `README.md` line by
+/// line and most lines have no pin on them. Everything else goes through
+/// [`sole_milestone`], where an absence is a failure rather than a skip.
 fn build_milestone(haystack: &str) -> Option<String> {
-    milestone_after(haystack, "pdfium-")
+    all_milestones_after(haystack, "pdfium-").into_iter().next()
 }
 
-fn milestone_after(haystack: &str, prefix: &str) -> Option<String> {
+/// Every `<prefix><digits>` milestone in `haystack`, in order, with duplicates
+/// kept.
+///
+/// Enumerating rather than taking the first match is not tidiness, it is the
+/// bug this function was written twice for. The contract test's assertions read
+///
+/// ```text
+/// !decl.contains("pdfium_latest"),
+///  let named = decl.contains("pdfium_7881");
+/// ```
+///
+/// and a "first line that mentions the literal" search lands on `pdfium_latest`,
+/// which carries no digits. The extractor then returned nothing and the guard
+/// failed claiming the contract test names no milestone, which is the opposite
+/// of true. A scan that finds one thing and reads nothing out of it has to keep
+/// looking rather than conclude.
+fn all_milestones_after(haystack: &str, prefix: &str) -> Vec<String> {
+    let mut out = Vec::new();
     let mut from = 0usize;
     while let Some(i) = haystack[from..].find(prefix) {
         let at = from + i + prefix.len();
-        let digits: String = haystack[at..].chars().take_while(|c| c.is_ascii_digit()).collect();
+        let digits: String = haystack[at..]
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
         if !digits.is_empty() {
-            return Some(digits);
+            out.push(digits);
         }
         from = at.max(from + i + 1);
     }
-    None
+    out
+}
+
+/// The one milestone `haystack` names, or a panic saying which way it failed.
+///
+/// Zero and "more than one distinct" are different mistakes and neither may
+/// pass: an extractor that reads nothing would make the agreement checks
+/// vacuously true, and one that reads two would have to pick, which is the
+/// guess this whole file exists to remove.
+fn sole_milestone(haystack: &str, prefix: &str, what: &str) -> String {
+    let found = all_milestones_after(haystack, prefix);
+    assert!(
+        !found.is_empty(),
+        "{what} names no `{prefix}<digits>` milestone, so nothing was read out \
+         of it and every comparison against it would be vacuous"
+    );
+    let mut distinct: Vec<&String> = found.iter().collect();
+    distinct.sort();
+    distinct.dedup();
+    assert!(
+        distinct.len() == 1,
+        "{what} names more than one `{prefix}<digits>` milestone ({distinct:?}), \
+         so there is no single pin here to compare"
+    );
+    found[0].clone()
 }
 
 /// Every place naming the libpdfium *build*, as `(what it is, milestone)`.
@@ -160,8 +200,11 @@ fn declared_builds() -> Vec<(&'static str, String)> {
         .lines()
         .find(|l| l.trim_start().starts_with("ARG PDFIUM_RELEASE="))
         .expect("tools/Dockerfile.ci declares `ARG PDFIUM_RELEASE=`");
-    let image = build_milestone(arg_line)
-        .expect("tools/Dockerfile.ci's PDFIUM_RELEASE names a `pdfium-<digits>` release");
+    let image = sole_milestone(
+        arg_line,
+        "pdfium-",
+        "tools/Dockerfile.ci's ARG PDFIUM_RELEASE",
+    );
 
     let readme = read("README.md");
     let mut out = vec![("tools/Dockerfile.ci ARG PDFIUM_RELEASE", image)];
@@ -190,24 +233,35 @@ fn declared_builds() -> Vec<(&'static str, String)> {
 /// manifest pinned to a *newer* ABI. Bump `Cargo.toml` alone and the release
 /// gate refuses the upload while reporting a reason that is not the reason.
 fn declared_abis() -> Vec<(&'static str, String)> {
-    let manifest = abi_milestone(&pdfium_render_declaration())
-        .expect("the pdfium-render declaration names a `pdfium_<digits>` feature");
+    let manifest = sole_milestone(
+        &pdfium_render_declaration(),
+        "pdfium_",
+        "Cargo.toml's pdfium-render feature list",
+    );
 
     let publish = read(".github/workflows/publish.yml");
-    let publish_case = publish
+    let publish_cases: String = publish
         .lines()
-        .find(|l| l.contains("*pdfium_") && l.contains(')'))
-        .expect(".github/workflows/publish.yml matches a `*pdfium_...*)` case pattern");
-    let publish_abi = abi_milestone(publish_case)
-        .expect("publish.yml's case pattern names a `pdfium_<digits>` feature");
+        .filter(|l| l.contains("*pdfium_") && l.contains(')'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let publish_abi = sole_milestone(
+        &publish_cases,
+        "pdfium_",
+        ".github/workflows/publish.yml's `*pdfium_...*)` case patterns",
+    );
 
     let contract = read("tests/pdfium_dependency_contract.rs");
-    let contract_line = contract
+    let contract_assertions: String = contract
         .lines()
-        .find(|l| l.contains("decl.contains(\"pdfium_"))
-        .expect("tests/pdfium_dependency_contract.rs asserts on a `pdfium_<digits>` literal");
-    let contract_abi = abi_milestone(contract_line)
-        .expect("the contract test's assertion names a `pdfium_<digits>` feature");
+        .filter(|l| l.contains("decl.contains(\"pdfium_"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let contract_abi = sole_milestone(
+        &contract_assertions,
+        "pdfium_",
+        "tests/pdfium_dependency_contract.rs's `decl.contains(\"pdfium_...\")` assertions",
+    );
 
     vec![
         ("Cargo.toml pdfium-render features", manifest),
