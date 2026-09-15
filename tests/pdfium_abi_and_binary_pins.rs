@@ -19,7 +19,12 @@
 //!
 //! `pdfium-render 0.9.4` cannot bind 8054. `pdfium_7881` is the newest ABI it
 //! ships and its own `pdfium_latest` is an alias for it, so requesting
-//! anything newer is not an option that exists. The choice is to pin every
+//! anything newer is not an option that exists. Checked three ways rather than
+//! taken from the issue: the published feature list for 0.9.4 stops at
+//! `pdfium_7881`, the crate's vendored source has no `src/bindgen/` file and no
+//! `include/` directory past that milestone, and crates.io reports 0.9.4 as the
+//! newest release (published 2026-09-06, confirmed 2026-09-14). A newer wrapper
+//! is the event that makes staying here a choice nobody made. The choice is to pin every
 //! libpdfium back to 7881 or to run the gap knowingly, and the binaries moved
 //! to 8054 deliberately (libviprs-tests#208, and this repo's image in #1012).
 //! So the gap is real, it is currently the correct state, and what was missing
