@@ -54,10 +54,12 @@ so the history stays comparable:
 The phases are walked by hand through the same public API in the same order
 `Reader::try_new` uses, rather than by instrumenting the reader, because #1021
 is a measurement issue and nothing on the product's hot path should change to
-be measured. What makes that honest is that the phases have to add up:
-`the_cold_split_accounts_for_the_whole_combined_row` measures a cell both ways
-and fails if the sum sits more than 25% from the combined row, which is about
-three times the measured p50 noise floor. A split that does not reconcile is
+be measured. What makes that honest is that the phases have to be the same work:
+`the_cold_split_accounts_for_the_whole_combined_row` runs the split's own steps
+and a real cold open side by side, over a source that records every byte range
+it is asked for, and fails unless the split's timed phases read exactly what the
+open reads, decode the header the reader goes on to use, rebuild the reader's
+root directory and return the reader's tile. A split that does not reconcile is
 measuring something else, and it would look exactly as plausible on a chart.
 
 Only `read_cold_lookup` fetches a tile, so it is the only phase with
@@ -555,8 +557,21 @@ dominates (the guard's own reading is -0.7% and -0.9% at the brink on arm64,
 -4.3% on x86_64) and drift on the cells where it does not: -24% and -13% on the
 93-entry cell, where the whole open is 11 us and a few hundred nanoseconds of
 per-iteration overhead is a fifth of it.
-`the_cold_split_accounts_for_the_whole_combined_row` allows 25% and measures a
-cell with about 1400 entries for exactly that reason.
+`the_cold_split_accounts_for_the_whole_combined_row` used to allow 25% and pick
+a cell with about 1400 entries for exactly that reason, which is a tolerance
+chosen to fit the instrument rather than the claim. It no longer compares
+durations at all. A 25% allowance against a spread that reached 39 points
+between consecutive runs at one commit on one machine went red under load and
+green when idle, for reasons that had nothing to do with the code, and widening
+it would only move the load at which it lies. The guard now reconciles the split
+against a real cold open by the byte ranges each one reads and the values each
+one decodes, which is the same claim without the instrument.
+
+The percentages above stay because they are worth knowing, not because anything
+asserts them. The quantitative form of the claim, that the six durations sum to
+the combined duration, wants repetitions and a dispersion the run itself
+measured, and belongs with the storage family in `libviprs-bench` rather than in
+a guard that has to pass on every CI job.
 
 ### The thread ladder, and where it knees
 
