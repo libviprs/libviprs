@@ -681,7 +681,12 @@ impl Arc {
     /// ```
     #[must_use]
     pub fn sweep(&self) -> f64 {
-        let span = (self.end_angle - self.start_angle).rem_euclid(std::f64::consts::TAU);
+        // Each angle is reduced before the subtraction: the difference of two
+        // raw finite angles can overflow to infinity, and `inf.rem_euclid` is
+        // `NaN`.
+        let start = self.start_angle.rem_euclid(std::f64::consts::TAU);
+        let end = self.end_angle.rem_euclid(std::f64::consts::TAU);
+        let span = (end - start).rem_euclid(std::f64::consts::TAU);
         if span == 0.0 {
             std::f64::consts::TAU
         } else {
@@ -1140,15 +1145,20 @@ impl Text {
 
 /// The first undecoded transport escape in `text`, if there is one.
 ///
-/// Two shapes, and both are *transport* rather than content: `\U+XXXX` is MIF
-/// and `\M+NXXXX` is CIF, and a writer emits one when a character falls
-/// outside the file's code page. A reader with no decoding layer for them
-/// hands the escape through as though the drawing said `\U+00B0` rather than
-/// `°`.
+/// Three spellings, and all of them are *transport* rather than content.
+/// `\U+XXXX` is MIF and `\M+NXXXX` is CIF, and a writer emits one when a
+/// character falls outside the file's code page. AutoCAD's own control codes
+/// are the third: `%%c` is `∅`, `%%d` is `°`, `%%p` is `±`, and `%%nnn` is
+/// the character at decimal `nnn`. A reader with no decoding layer for any of
+/// them hands the escape through as though the drawing said `\U+00B0` or
+/// `%%d` rather than `°`.
 ///
 /// `\\` is a literal backslash in MTEXT, so a run of two is skipped and what
-/// follows is content. Nothing else is interpreted: MTEXT *formatting* codes
-/// (`\P`, `{\fArial|b0|i0;…}`) do not change which characters the drawing
+/// follows is content; `%%%` is a literal percent sign, so `%%%c` is `%c`
+/// rather than the `%%c` a naive three-byte window sees inside it. Nothing
+/// else is interpreted: MTEXT *formatting* codes (`\P`,
+/// `{\fArial|b0|i0;…}`) and the `%%o`, `%%u` and `%%k` overscore, underscore
+/// and strikethrough toggles do not change which characters the drawing
 /// holds, so they are not this function's business.
 ///
 /// ```
@@ -1169,6 +1179,49 @@ pub fn undecoded_escape(text: &str) -> Option<&str> {
     let bytes = text.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
+        // AutoCAD's own control codes, which are transport in exactly the
+        // sense `\U+XXXX` is: `%%c` is `\u{2205}`, `%%d` is `\u{b0}`, `%%p`
+        // is `\u{b1}`, and `%%nnn` is the character at decimal `nnn`. A
+        // reader with no decoding layer draws `%%c45,6` where the drawing
+        // says `\u{2205}45,6`.
+        //
+        // Three things are deliberately not transport. `%%%` is a literal
+        // percent sign, so it is consumed here rather than read as the `%%c`
+        // that a naive three-byte window sees in `%%%c`. `%%o`, `%%u` and
+        // `%%k` are overscore, underscore and strikethrough toggles, which
+        // do not change which characters the drawing holds. And a `%%` that
+        // introduces nothing is content.
+        if bytes[i] == b'%' && bytes.get(i + 1) == Some(&b'%') {
+            match bytes.get(i + 2) {
+                // A literal `%`.
+                Some(b'%') => {
+                    i += 3;
+                    continue;
+                }
+                // Formatting toggles.
+                Some(b'o' | b'O' | b'u' | b'U' | b'k' | b'K') => {
+                    i += 3;
+                    continue;
+                }
+                // Character-producing: the three named codes, and the
+                // decimal form. Every byte is ASCII, so `i + 3` is a char
+                // boundary.
+                Some(b'd' | b'D' | b'p' | b'P' | b'c' | b'C') => {
+                    return Some(&text[i..i + 3]);
+                }
+                Some(digit) if digit.is_ascii_digit() => {
+                    let mut end = i + 3;
+                    while bytes.get(end).is_some_and(u8::is_ascii_digit) {
+                        end += 1;
+                    }
+                    return Some(&text[i..end]);
+                }
+                _ => {
+                    i += 2;
+                    continue;
+                }
+            }
+        }
         if bytes[i] != b'\\' {
             i += 1;
             continue;
@@ -1371,6 +1424,149 @@ mod tests {
         // assertions above cannot be passing because `Line::new` refuses
         // everything.
         assert!(Line::new([0.0, 0.0, 0.0], [1.0, 1.0, 2.0]).is_ok());
+    }
+
+    /// Every entry point that takes a number refuses a `NaN`.
+    ///
+    /// The module's headline claim is that a non-finite number cannot become a
+    /// primitive; the sibling test above drives one of the 27 places a number
+    /// enters the IR. This drives all 27, so a guard deleted in L1.2's
+    /// provider adaptation is a failure here rather than a silent hole.
+    #[test]
+    fn a_non_finite_number_never_becomes_a_primitive() {
+        let n = f64::NAN;
+        let ring = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0]];
+        let z = [0.0, 0.0, 1.0];
+        let refused: Vec<(&str, bool)> = vec![
+            ("Line.start", Line::new([n, 0.0, 0.0], [1.0; 3]).is_err()),
+            ("Line.end", Line::new([0.0; 3], [n, 0.0, 0.0]).is_err()),
+            (
+                "Polyline.vertex",
+                Polyline::straight(&[[0.0; 3], [n, 0.0, 0.0]]).is_err(),
+            ),
+            (
+                "Polyline.bulge",
+                Polyline::new(&ring, false, z, &[n, 0.0, 0.0]).is_err(),
+            ),
+            (
+                "Polyline.normal",
+                Polyline::new(&ring, false, [n, 0.0, 1.0], &[]).is_err(),
+            ),
+            (
+                "Polygon.vertex",
+                Polygon::straight(&[[0.0; 3], [n, 0.0, 0.0]]).is_err(),
+            ),
+            (
+                "Polygon.bulge",
+                Polygon::new(&ring, z, &[n, 0.0, 0.0]).is_err(),
+            ),
+            (
+                "Arc.centre",
+                Arc::new([n, 0.0, 0.0], 1.0, 0.0, 1.0, z).is_err(),
+            ),
+            ("Arc.radius", Arc::new([0.0; 3], n, 0.0, 1.0, z).is_err()),
+            (
+                "Arc.start_angle",
+                Arc::new([0.0; 3], 1.0, n, 1.0, z).is_err(),
+            ),
+            ("Arc.end_angle", Arc::new([0.0; 3], 1.0, 0.0, n, z).is_err()),
+            (
+                "Arc.normal",
+                Arc::new([0.0; 3], 1.0, 0.0, 1.0, [n, 0.0, 1.0]).is_err(),
+            ),
+            ("Circle.centre", Circle::new([n, 0.0, 0.0], 1.0, z).is_err()),
+            ("Circle.radius", Circle::new([0.0; 3], n, z).is_err()),
+            (
+                "Circle.normal",
+                Circle::new([0.0; 3], 1.0, [n, 0.0, 1.0]).is_err(),
+            ),
+            (
+                "Ellipse.centre",
+                Ellipse::new([n, 0.0, 0.0], [1.0, 0.0, 0.0], 0.5, 0.0, TAU, z).is_err(),
+            ),
+            (
+                "Ellipse.major_axis",
+                Ellipse::new([0.0; 3], [n, 0.0, 0.0], 0.5, 0.0, TAU, z).is_err(),
+            ),
+            (
+                "Ellipse.ratio",
+                Ellipse::new([0.0; 3], [1.0, 0.0, 0.0], n, 0.0, TAU, z).is_err(),
+            ),
+            (
+                "Ellipse.start_param",
+                Ellipse::new([0.0; 3], [1.0, 0.0, 0.0], 0.5, n, TAU, z).is_err(),
+            ),
+            (
+                "Ellipse.end_param",
+                Ellipse::new([0.0; 3], [1.0, 0.0, 0.0], 0.5, 0.0, n, z).is_err(),
+            ),
+            (
+                "Ellipse.normal",
+                Ellipse::new([0.0; 3], [1.0, 0.0, 0.0], 0.5, 0.0, TAU, [n, 0.0, 1.0]).is_err(),
+            ),
+            (
+                "Spline.knot",
+                Spline::new(1, 0, &[0.0, 0.0, n, 1.0], &[[0.0; 3], [1.0; 3]], &[]).is_err(),
+            ),
+            (
+                "Spline.control",
+                Spline::new(1, 0, &[0.0, 0.0, 1.0, 1.0], &[[0.0; 3], [n, 0.0, 0.0]], &[]).is_err(),
+            ),
+            (
+                "Spline.weight",
+                Spline::new(
+                    1,
+                    Spline::RATIONAL,
+                    &[0.0, 0.0, 1.0, 1.0],
+                    &[[0.0; 3], [1.0; 3]],
+                    &[1.0, n],
+                )
+                .is_err(),
+            ),
+            (
+                "Text.position",
+                Text::new([n, 0.0, 0.0], 2.0, 0.0, "A").is_err(),
+            ),
+            ("Text.height", Text::new([0.0; 3], n, 0.0, "A").is_err()),
+            ("Text.rotation", Text::new([0.0; 3], 2.0, n, "A").is_err()),
+        ];
+        let holes: Vec<&str> = refused
+            .iter()
+            .filter(|(_, r)| !r)
+            .map(|(k, _)| *k)
+            .collect();
+        assert!(
+            holes.is_empty(),
+            "a NaN reached a primitive through {holes:?}"
+        );
+
+        // The positive control, one row per constructor the table drives: a
+        // constructor that refused everything would satisfy every row above,
+        // so each of the eight has to build from finite numbers.
+        let built: Vec<(&str, bool)> = vec![
+            ("Line", Line::new([0.0; 3], [1.0, 1.0, 2.0]).is_ok()),
+            (
+                "Polyline",
+                Polyline::new(&ring, false, z, &[0.5, 0.0, 0.0]).is_ok(),
+            ),
+            ("Polygon", Polygon::new(&ring, z, &[0.5, 0.0, 0.0]).is_ok()),
+            ("Arc", Arc::new([0.0; 3], 1.0, 0.0, 1.0, z).is_ok()),
+            ("Circle", Circle::new([0.0; 3], 1.0, z).is_ok()),
+            (
+                "Ellipse",
+                Ellipse::new([0.0; 3], [1.0, 0.0, 0.0], 0.5, 0.0, TAU, z).is_ok(),
+            ),
+            (
+                "Spline",
+                Spline::new(1, 0, &[0.0, 0.0, 1.0, 1.0], &[[0.0; 3], [1.0; 3]], &[]).is_ok(),
+            ),
+            ("Text", Text::new([0.0; 3], 2.0, 0.0, "A").is_ok()),
+        ];
+        let dead: Vec<&str> = built.iter().filter(|(_, r)| !r).map(|(k, _)| *k).collect();
+        assert!(
+            dead.is_empty(),
+            "{dead:?} refuse finite numbers, so their rows above prove nothing"
+        );
     }
 
     /// A zero normal is refused, including the signed-zero spelling of it.
@@ -1693,6 +1889,7 @@ mod tests {
                 ..
             })
         ));
+        assert!(Text::new([0.0; 3], f64::MIN_POSITIVE, 0.0, "A").is_ok());
     }
 
     /// Every kind has a slot, and no two kinds share one.
