@@ -721,13 +721,14 @@ mod tests {
         assert_eq!(
             sink.collected()
                 .iter()
-                .map(Primitive::kind)
+                .map(|p| (p.kind(), p.origin().item_handle()))
                 .collect::<Vec<_>>(),
             vec![
-                PrimitiveKind::Line,
-                PrimitiveKind::Line,
-                PrimitiveKind::Text
-            ]
+                (PrimitiveKind::Line, Some(ItemHandle::new(1))),
+                (PrimitiveKind::Line, Some(ItemHandle::new(2))),
+                (PrimitiveKind::Text, Some(ItemHandle::new(0x64C))),
+            ],
+            "the batch path has to preserve draw order, which is part of the data"
         );
         assert!(sink.is_finished());
 

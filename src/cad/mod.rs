@@ -481,8 +481,9 @@ mod tests {
         );
     }
 
-    /// Every refusal maps onto a code, and the text contract's two do not
-    /// collapse onto the generic one.
+    /// Every refusal maps onto a code, the text contract's two do not
+    /// collapse onto the generic one, and neither does the non-finite
+    /// refusal — the one arm of the mapping nothing else reaches.
     ///
     /// This is the negative control for `diagnostic_code`: a mapping that
     /// answered `PRIMITIVE_REFUSED` for everything would satisfy an
@@ -496,6 +497,11 @@ mod tests {
             }
             .diagnostic_code(),
             CadError::TextEmpty.diagnostic_code(),
+            CadError::NonFinite {
+                field: "centre",
+                value: f64::NAN,
+            }
+            .diagnostic_code(),
             CadError::NonPositive {
                 field: "radius",
                 value: 0.0,
@@ -509,8 +515,9 @@ mod tests {
                 .iter()
                 .collect::<std::collections::BTreeSet<_>>()
                 .len(),
-            "two of {codes:?} answered the same code, so a report cannot tell \
-             an undecoded escape from a negative radius"
+            "two of the four in {codes:?} answered the same code, so a report \
+             cannot tell an undecoded escape from a non-finite coordinate or \
+             a negative radius"
         );
     }
 
