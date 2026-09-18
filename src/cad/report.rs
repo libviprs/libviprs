@@ -345,8 +345,9 @@ impl PrimitiveCounts {
 
 /// What a decode has to say about itself.
 ///
-/// Returned by [`CadDrawing::decode`](crate::cad::CadDrawing::decode), and the
-/// only channel a fidelity question is answered through.
+/// Filled in by [`CadDrawing::decode`](crate::cad::CadDrawing::decode), which
+/// takes it as an out-parameter, and the only channel a fidelity question is
+/// answered through.
 ///
 /// # Examples
 ///
@@ -435,12 +436,23 @@ impl DecodeReport {
     /// A limit of zero retains none and counts all of them, which is the shape
     /// a batch job wants when it only needs to know whether anything happened.
     ///
+    /// Lowering the limit under what a report already retains discards the
+    /// excess, and counts it: the discarded entries are added to
+    /// [`DecodeReport::dropped_diagnostics`], because a report that stopped
+    /// writing diagnostics down has to say so however the bound was reached.
+    /// Raising it discards nothing and counts nothing.
+    ///
     /// The limit bounds the *retained set* and nothing else:
     /// [`DecodeReport::is_complete`] and [`DecodeReport::is_truncated`] are
     /// flags, and no limit can erase them.
     #[must_use]
     pub fn with_diagnostic_limit(mut self, limit: usize) -> Self {
         self.limit = limit;
+        // Trimming is dropping: a report that stopped writing diagnostics down
+        // has to say so, whether the bound was reached by pushing or by being
+        // lowered underneath what was already retained.
+        let trimmed = self.diagnostics.len().saturating_sub(limit);
+        self.dropped = self.dropped.saturating_add(trimmed as u64);
         self.diagnostics.truncate(limit);
         self
     }
@@ -679,21 +691,56 @@ mod tests {
         );
     }
 
-    /// Lowering the limit on a report that already holds more drops the excess
-    /// rather than leaving the retained set over its own bound.
+    /// Lowering the limit drops the excess rather than leaving the retained
+    /// set over its own bound, and counts every entry it drops.
+    ///
+    /// The pair is the point. A report that trims silently answers
+    /// `dropped_diagnostics() == 0` while holding less than was filed, which
+    /// is the reading the module documentation tells a caller to interpret as
+    /// "nothing else went wrong" — and with an all-error report it pairs with
+    /// `has_errors() == false`, so every error a decode filed disappears
+    /// without trace. Checked at the limit, one under it, and far under it.
     #[test]
-    fn lowering_the_limit_trims_what_is_already_retained() {
-        let mut report = DecodeReport::new();
-        for i in 0..5 {
-            report.push(Diagnostic::warning(
-                DiagnosticCode::READER_NOTIFICATION,
-                format!("note {i}"),
-            ));
-        }
-        let report = report.with_diagnostic_limit(2);
+    fn lowering_the_limit_counts_every_diagnostic_it_trims() {
+        let filed = |severity_is_error: bool| {
+            let mut report = DecodeReport::new();
+            for i in 0..5 {
+                report.push(if severity_is_error {
+                    Diagnostic::error(DiagnosticCode::TEXT_NOT_RECOVERED, format!("lost {i}"))
+                } else {
+                    Diagnostic::warning(DiagnosticCode::READER_NOTIFICATION, format!("note {i}"))
+                });
+            }
+            assert_eq!(report.dropped_diagnostics(), 0, "the default bound is 1024");
+            report
+        };
 
-        assert_eq!(report.diagnostics().len(), 2);
-        assert_eq!(report.diagnostic_limit(), 2);
+        // At the limit: nothing is over the bound, so nothing is dropped.
+        let at_cap = filed(false).with_diagnostic_limit(5);
+        assert_eq!(at_cap.diagnostics().len(), 5);
+        assert_eq!(at_cap.dropped_diagnostics(), 0);
+
+        // One over: exactly one entry goes, and exactly one is counted.
+        let one_over = filed(false).with_diagnostic_limit(4);
+        assert_eq!(one_over.diagnostics().len(), 4);
+        assert_eq!(one_over.dropped_diagnostics(), 1);
+
+        // Far over, and all five are errors: the retained set empties, so
+        // `dropped_diagnostics` is the only thing left that knows they existed.
+        let far_over = filed(true).with_diagnostic_limit(0);
+        assert!(far_over.diagnostics().is_empty());
+        assert_eq!(far_over.dropped_diagnostics(), 5);
+        assert!(
+            !far_over.has_errors(),
+            "has_errors reads the retained set, so a trim that did not count \
+             would leave five errors reading as a clean decode"
+        );
+        assert_eq!(far_over.diagnostic_limit(), 0);
+
+        // Raising the limit discards nothing, so it counts nothing.
+        let raised = filed(false).with_diagnostic_limit(4096);
+        assert_eq!(raised.diagnostics().len(), 5);
+        assert_eq!(raised.dropped_diagnostics(), 0);
     }
 
     /// Counts are per kind, which is what makes a fidelity loss measurable.
@@ -762,18 +809,45 @@ mod tests {
         assert_eq!(code.to_string(), "a code this build has no name for (142)");
     }
 
-    /// A diagnostic renders with everything it was given.
+    /// A diagnostic names the entity and the view it was given, and says
+    /// nothing about either when it was given neither.
+    ///
+    /// Asserted as presence and absence rather than as one exact sentence.
+    /// The wording is for a person reading a log and is free to change; what
+    /// a reader cannot afford to lose is the attribution, because a
+    /// diagnostic that stops naming its entity no longer says which part of
+    /// the drawing was affected. Pinning the sentence would have made a
+    /// comma a test failure and a missing suffix a passing one, and the
+    /// `None` branches were never rendered at all.
     #[test]
-    fn a_diagnostic_displays_its_code_entity_and_view() {
-        let diagnostic = Diagnostic::error(DiagnosticCode::TEXT_NOT_RECOVERED, "embedded MTEXT")
-            .with_entity(ItemHandle::new(0x79D))
-            .with_view(0);
+    fn a_diagnostic_renders_its_entity_and_view_only_when_it_has_them() {
+        let entity = ItemHandle::new(0x79D);
+        let bare = Diagnostic::error(DiagnosticCode::TEXT_NOT_RECOVERED, "embedded MTEXT");
+        let attributed = bare.clone().with_entity(entity).with_view(7);
 
-        assert_eq!(
-            diagnostic.to_string(),
-            "error: text not recovered (501): embedded MTEXT, on entity 1949, in view 0"
+        let rendered = attributed.to_string();
+        assert!(
+            rendered.contains(&format!("entity {entity}")),
+            "a diagnostic with an entity must name it: {rendered}"
         );
-        assert_eq!(diagnostic.entity(), Some(ItemHandle::new(0x79D)));
-        assert_eq!(diagnostic.view(), Some(0));
+        assert!(
+            rendered.contains("view 7"),
+            "a diagnostic with a view must name it: {rendered}"
+        );
+        assert!(
+            rendered.contains(&DiagnosticCode::TEXT_NOT_RECOVERED.to_string())
+                && rendered.contains("embedded MTEXT"),
+            "the code and the message are what the suffixes qualify: {rendered}"
+        );
+
+        let rendered = bare.to_string();
+        assert!(
+            !rendered.contains("entity") && !rendered.contains(&entity.to_string()),
+            "a diagnostic with no entity must not invent one: {rendered}"
+        );
+        assert!(
+            !rendered.contains("view"),
+            "a diagnostic with no view must not invent one: {rendered}"
+        );
     }
 }
