@@ -125,6 +125,7 @@ pub mod analyze;
 pub mod arithmetic;
 pub mod avif;
 pub mod bands;
+pub mod cad;
 pub mod cancel;
 pub mod checksum;
 pub mod codec;
@@ -207,6 +208,12 @@ pub mod webp;
 // flood callers with implementation detail.
 pub use arithmetic::{ArithmeticError, Comparand};
 pub use bands::BandError;
+// The decoder contract and the primitive IR (issue #1029). Types and entry
+// points only: the eight primitive structs stay behind `libviprs::cad::`
+// because `Line`, `Text` and `Arc` are names a crate root has no business
+// claiming — `draw::DrawOp::Line` and `std::sync::Arc` are both one glob
+// import away.
+pub use cad::{CadDecoder, CadDrawing, CadError, CadSource, CadView, DecodeReport, PrimitiveSink};
 pub use cancel::CancelToken;
 pub use checksum::{ChecksumMode, VerifyError, VerifyReport};
 pub use codec::{DecodeError, EncodeError, JpegSubsample, TiffCompression};

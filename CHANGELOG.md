@@ -1157,6 +1157,49 @@ and not under `Fixed`: this file is the only place they can be caught.
 
 ### Added
 
+- **The `CadDecoder` contract and the CAD primitive IR** (issue #1029). A new
+  always-compiled `libviprs::cad` module carrying `CadDecoder`, `CadDrawing`,
+  `CadSource`, `CadView`, `PrimitiveSink` and `DecodeReport`, and the eight
+  primitives a drawing decodes into: `Line`, `Polyline`, `Arc`, `Circle`,
+  `Ellipse`, `Spline`, `Polygon` and `Text`. No new dependency, and no new
+  Cargo feature: the module is arithmetic, `Vec` and `thiserror`, all of which
+  were already here.
+
+  Curves stay curves. An `Arc` is a centre, a radius and two angles, a
+  `Spline` is a degree, a knot vector and control points, and a `Polyline`
+  carries its bulges verbatim. Tessellation needs a deviation budget and the
+  budget depends on tile zoom, so a decoder that tessellated would bake in a
+  tolerance it is not in a position to choose. Coordinates are 3D for the same
+  reason: projecting to a plane is also a choice, and it belongs downstream.
+
+  Every primitive has private fields and a validating constructor, so a
+  malformed entity becomes a typed `CadError` its provider reports as a
+  `Diagnostic` rather than geometry the tiler trusts. A `NaN` coordinate, a
+  zero-length normal, a non-positive radius, an arc that sweeps nothing, a
+  knot vector too short for its control points and a polyline of one vertex
+  are all refused by name, with the value quoted.
+
+  `DecodeReport` is structured from the start: bounded retained diagnostics
+  with a dropped count so a hostile drawing cannot exhaust memory through the
+  reporting channel, per-kind primitive counts so fidelity loss is measurable,
+  and an `is_complete` that starts `false` — "the loop ended" and "the loop
+  ended for a good reason" look identical from outside, so a truncated decode
+  cannot pass itself off as a short drawing.
+
+  `Text` carries a contract rather than a convention, because two independent
+  readers of the same drawings disagreed about what the text said and both
+  disagreements were silent. One returned `\U+220545,6` where the other
+  returned `∅45,6`; one returned `""` for a multiline attribute whose text the
+  file carried all along. So a primitive's text is the decoded, user-visible
+  string: `Text::new` refuses a string carrying an undecoded `\U+XXXX` (MIF)
+  or `\M+NXXXX` (CIF) transport escape, and refuses the empty string, and the
+  provider files `DiagnosticCode::TEXT_ESCAPE_NOT_DECODED` or
+  `TEXT_NOT_RECOVERED` instead. Both defects are unrepresentable in the IR.
+
+  This is the contract only. Nothing in the crate reads a DWG yet: the
+  ACadSharp provider, the MVT encoder, the tiler and the viewer land
+  separately, and the provider is the part that gets a Cargo feature.
+
 - **`libviprs::pmtiles::reader::MAX_CACHED_LEAVES` and
   `MAX_CACHED_LEAF_ENTRIES`** (issue #993), the two public constants the
   PMTiles reader's leaf cache is bounded by: how many decoded leaf directories
