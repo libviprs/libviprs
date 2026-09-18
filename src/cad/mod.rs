@@ -157,11 +157,15 @@
 //!         Ok(vec![CadView::new(0, 0, [0.0, 0.0, 10.0, 2.0], 3, "Model")])
 //!     }
 //!
-//!     fn decode(&self, view: u32, sink: &mut dyn PrimitiveSink) -> Result<DecodeReport, CadError> {
+//!     fn decode(
+//!         &self,
+//!         view: u32,
+//!         sink: &mut dyn PrimitiveSink,
+//!         report: &mut DecodeReport,
+//!     ) -> Result<(), CadError> {
 //!         if view != 0 {
 //!             return Err(CadError::NoSuchView { index: view, views: 1 });
 //!         }
-//!         let mut report = DecodeReport::new();
 //!         for rung in 0..3 {
 //!             let y = f64::from(rung);
 //!             sink.primitive(Line::new([0.0, y, 0.0], [10.0, y, 0.0])?.into())?;
@@ -169,7 +173,8 @@
 //!         }
 //!         // Only after the totals say the stream ended for a good reason.
 //!         report.mark_complete();
-//!         Ok(report)
+//!         // The implementation finishes the sink it was handed.
+//!         sink.finish()
 //!     }
 //! }
 //!
@@ -177,11 +182,13 @@
 //! assert_eq!(drawing.views()?[0].name(), "Model");
 //!
 //! let mut sink = CollectSink::new();
-//! let report = drawing.decode(0, &mut sink)?;
+//! let mut report = DecodeReport::new();
+//! drawing.decode(0, &mut sink, &mut report)?;
 //!
 //! assert_eq!(sink.collected().len(), 3);
 //! assert_eq!(report.counts().get(PrimitiveKind::Line), 3);
 //! assert!(report.is_complete());
+//! assert!(sink.is_finished(), "a complete decode finishes its sink");
 //! # Ok::<(), CadError>(())
 //! ```
 

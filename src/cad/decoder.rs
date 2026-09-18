@@ -327,8 +327,8 @@ pub trait CadDrawing {
     /// `view` is a [`CadView::index`]. The primitives arrive in the drawing's
     /// own order — see [`PrimitiveSink`] on why that matters.
     ///
-    /// The returned [`DecodeReport`] is the only channel a fidelity question
-    /// is answered through, and an implementation is expected to
+    /// [`DecodeReport`] is the only channel a fidelity question is answered
+    /// through, and an implementation is expected to
     /// [`record`](DecodeReport::record) every primitive it emits and to call
     /// [`mark_complete`](DecodeReport::mark_complete) only once whatever
     /// totals the provider gives have agreed.
@@ -337,12 +337,41 @@ pub trait CadDrawing {
     /// report, not an error: a decode that could not represent one entity out
     /// of a hundred thousand succeeded.
     ///
+    /// # The report is the caller's, and it is filled in either way
+    ///
+    /// `report` is an out-parameter rather than a return value because a
+    /// decode that fails partway holds three facts at once — the provider's
+    /// typed error, the counts and diagnostics accumulated so far, and the
+    /// fact that the sink holds a valid prefix — and a `Result<DecodeReport,
+    /// CadError>` can carry exactly two of them. An implementation must leave
+    /// `report` describing however far it got, on the error path as well as
+    /// on the success path. It also lets the caller choose the diagnostic
+    /// bound: `DecodeReport::new().with_diagnostic_limit(4096)`.
+    ///
+    /// A report is per decode. Counts accumulate, so passing one report to
+    /// two `decode` calls sums them; hand each decode a fresh report unless
+    /// summing is what you want.
+    ///
+    /// # The implementation finishes the sink
+    ///
+    /// `decode` must call [`PrimitiveSink::finish`] exactly once before
+    /// returning `Ok(())`, and must not call it on the error path — which is
+    /// what makes [`CollectSink::is_finished`] the signal its documentation
+    /// says it is. This is the same division as
+    /// [`TileSink`](crate::sink::TileSink), where the engine and not the
+    /// engine's caller finishes the sink it was handed.
+    ///
     /// # Errors
     ///
     /// [`CadError::NoSuchView`] for an index the drawing does not have,
     /// [`CadError::Sink`] when the sink refused a primitive, and
     /// [`CadError::Provider`] for the provider's own failures.
-    fn decode(&self, view: u32, sink: &mut dyn PrimitiveSink) -> Result<DecodeReport, CadError>;
+    fn decode(
+        &self,
+        view: u32,
+        sink: &mut dyn PrimitiveSink,
+        report: &mut DecodeReport,
+    ) -> Result<(), CadError>;
 }
 
 /// Where a decode's primitives go.
@@ -593,14 +622,14 @@ mod tests {
             &self,
             view: u32,
             sink: &mut dyn PrimitiveSink,
-        ) -> Result<DecodeReport, CadError> {
+            report: &mut DecodeReport,
+        ) -> Result<(), CadError> {
             if view > 1 {
                 return Err(CadError::NoSuchView {
                     index: view,
                     views: 2,
                 });
             }
-            let mut report = DecodeReport::new();
 
             // The batch path, because this "provider" holds a buffer.
             let batch = vec![
@@ -648,13 +677,13 @@ mod tests {
                 .with_view(view),
             );
 
-            sink.finish()?;
             if self.truncate {
                 report.mark_truncated("view 0 ended 2 records short of its total");
             } else {
                 report.mark_complete();
             }
-            Ok(report)
+            // The implementation finishes the sink it was handed.
+            sink.finish()
         }
     }
 
@@ -683,7 +712,8 @@ mod tests {
         );
 
         let mut sink = CollectSink::new();
-        let report = drawing.decode(0, &mut sink).unwrap();
+        let mut report = DecodeReport::new();
+        drawing.decode(0, &mut sink, &mut report).unwrap();
 
         // Two primitives arrived through `primitives`, one through
         // `primitive`, and the order they were emitted in survived.
@@ -713,7 +743,8 @@ mod tests {
         let decoder = FixtureDecoder { truncate: false };
         let drawing = decoder.open(CadSource::Bytes(b"AC1032...")).unwrap();
         let mut sink = CollectSink::new();
-        let report = drawing.decode(0, &mut sink).unwrap();
+        let mut report = DecodeReport::new();
+        drawing.decode(0, &mut sink, &mut report).unwrap();
 
         let texts: Vec<&str> = sink
             .collected()
@@ -753,17 +784,19 @@ mod tests {
     #[test]
     fn a_truncated_decode_is_distinguishable_from_a_short_drawing() {
         let mut short = CollectSink::new();
-        let complete = FixtureDecoder { truncate: false }
+        let mut complete = DecodeReport::new();
+        FixtureDecoder { truncate: false }
             .open(CadSource::Bytes(b"AC1032"))
             .unwrap()
-            .decode(0, &mut short)
+            .decode(0, &mut short, &mut complete)
             .unwrap();
 
         let mut cut = CollectSink::new();
-        let truncated = FixtureDecoder { truncate: true }
+        let mut truncated = DecodeReport::new();
+        FixtureDecoder { truncate: true }
             .open(CadSource::Bytes(b"AC1032"))
             .unwrap()
-            .decode(0, &mut cut)
+            .decode(0, &mut cut, &mut truncated)
             .unwrap();
 
         assert_eq!(
@@ -781,15 +814,134 @@ mod tests {
         );
     }
 
+    /// A decode that dies partway hands the caller all three facts at once.
+    ///
+    /// This is the arm the out-parameter exists for, and the one no other
+    /// fixture in this module can reach: the provider failed *after* pushing
+    /// primitives. Three things are true at that moment — the provider's
+    /// typed error, the counts and diagnostics accumulated so far, and the
+    /// fact that the sink holds a valid prefix — and a
+    /// `Result<DecodeReport, CadError>` can carry two of them. All three are
+    /// asserted here, off the same failing call.
+    #[test]
+    fn a_decode_that_fails_partway_keeps_the_report_the_prefix_and_the_typed_error() {
+        /// The provider's own error, which is what has to survive the wrap.
+        #[derive(Debug, thiserror::Error)]
+        #[error("the drawing stream was cancelled")]
+        struct Cancelled {
+            after: u64,
+        }
+
+        /// Three lines, one warning, then the provider gives up.
+        struct DyingDrawing;
+
+        impl CadDrawing for DyingDrawing {
+            fn views(&self) -> Result<Vec<CadView>, CadError> {
+                Ok(vec![CadView::new(0, 0, [0.0, 0.0, 10.0, 10.0], 9, "Model")])
+            }
+
+            fn decode(
+                &self,
+                view: u32,
+                sink: &mut dyn PrimitiveSink,
+                report: &mut DecodeReport,
+            ) -> Result<(), CadError> {
+                for rung in 0..3 {
+                    let y = f64::from(rung);
+                    sink.primitive(Line::new([0.0, y, 0.0], [10.0, y, 0.0])?.into())?;
+                    report.record(PrimitiveKind::Line);
+                }
+                report.push(
+                    Diagnostic::warning(
+                        DiagnosticCode::UNRESOLVED_BLOCK,
+                        "the insert at 0x41 names a block this drawing does not hold",
+                    )
+                    .with_entity(ItemHandle::new(0x41))
+                    .with_view(view),
+                );
+
+                // The stream died with six of the nine entities unread, so
+                // the report says so and the sink is deliberately left
+                // unfinished.
+                report.mark_truncated("the stream ended 6 entities short of the view's total");
+                Err(CadError::provider("fixture", Cancelled { after: 3 }))
+            }
+        }
+
+        // Two drawings held open at once, which is what `&self` on `decode`
+        // buys: the one that dies and the healthy fixture it is read against.
+        let healthy = FixtureDecoder { truncate: false }
+            .open(CadSource::Bytes(b"AC1032"))
+            .unwrap();
+        let dying: Box<dyn CadDrawing> = Box::new(DyingDrawing);
+
+        let mut sink = CollectSink::new();
+        let mut report = DecodeReport::new().with_diagnostic_limit(4096);
+        let err = dying
+            .decode(0, &mut sink, &mut report)
+            .expect_err("the provider gave up mid-stream");
+
+        // One: the typed error. `Provider` carries the provider's own error
+        // rather than its `to_string()`, and a mid-stream failure is the one
+        // place that could have flattened it into a diagnostic instead.
+        let concrete = std::error::Error::source(&err)
+            .expect("the provider's error is the source")
+            .downcast_ref::<Cancelled>()
+            .expect("and it is still a Cancelled");
+        assert_eq!(concrete.after, 3);
+
+        // Two: the report, which is the caller's and is still in the
+        // caller's hand.
+        assert_eq!(report.counts().get(PrimitiveKind::Line), 3);
+        assert_eq!(
+            report.diagnostics().len(),
+            2,
+            "the unresolved block and the truncation both survived the failure"
+        );
+        assert!(report.is_truncated());
+        assert!(!report.is_complete());
+        assert!(
+            report
+                .errors()
+                .any(|d| d.code() == DiagnosticCode::DECODE_TRUNCATED)
+        );
+        assert_eq!(report.dropped_diagnostics(), 0);
+        assert_eq!(
+            report.diagnostic_limit(),
+            4096,
+            "the caller's own bound took effect, which it cannot when the \
+             report is the decode's return value"
+        );
+
+        // Three: the prefix. Three primitives arrived, and the sink was not
+        // finished — which is the whole difference between a prefix and a
+        // drawing.
+        assert_eq!(sink.len(), 3);
+        assert!(
+            !sink.is_finished(),
+            "an implementation that returns `Err` must not finish the sink, \
+             or `is_finished` stops discriminating"
+        );
+
+        // And the positive half of that same signal, from the drawing held
+        // open alongside: a decode that returned `Ok` did finish its sink.
+        let mut whole = CollectSink::new();
+        let mut whole_report = DecodeReport::new();
+        healthy.decode(0, &mut whole, &mut whole_report).unwrap();
+        assert!(whole.is_finished());
+        assert!(whole_report.is_complete());
+    }
+
     /// A view index the drawing does not have is a typed error.
     #[test]
     fn an_unknown_view_index_is_refused_by_name() {
         let decoder = FixtureDecoder { truncate: false };
         let drawing = decoder.open(CadSource::Bytes(b"AC1032")).unwrap();
         let mut sink = CollectSink::new();
+        let mut report = DecodeReport::new();
 
         let err = drawing
-            .decode(9, &mut sink)
+            .decode(9, &mut sink, &mut report)
             .expect_err("view 9 does not exist");
         assert!(matches!(err, CadError::NoSuchView { index: 9, views: 2 }));
     }
