@@ -11,7 +11,7 @@
 //! * [`verify_from_strip_source`]
 //!   — strip-driven verify for pull-based sources or when the caller
 //!   explicitly picks `EngineKind::Streaming` / `EngineKind::MapReduce`.
-//! * [`pyramid_verify`] — reads the pyramid back through
+//! * [`pyramid_verify`] reads the pyramid back through
 //!   [`PyramidReader`](crate::pyramid_reader::PyramidReader), for a sink that
 //!   can open its own output. Used when the output is not a tree of files, so
 //!   there is nothing for the two above to stat.
