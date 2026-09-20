@@ -551,12 +551,12 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// sibling test through one `std::fs::read_to_string` helper, so all three are
 /// `annotated fs-detected` and none of them is a judgement call.
 ///
-/// #1118 moves it 390 to 391, and the one is
-/// `a_wrong_plan_reads_a_real_tile_from_the_wrong_coordinate` in
-/// `tests/pyramid_migrate.rs`, which generates a real tree into a
-/// `tempfile::tempdir()` and then reads two of its tiles back with
-/// `std::fs::read`.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 391;
+/// #1118 moves it 390 to 402, and the twelve are the whole of
+/// `tests/pyramid_migrate.rs`. Every one of them writes a tree of loose tiles
+/// into a `tempfile::tempdir()`, migrates it into an archive beside it and
+/// reads the archive back with `std::fs::read`, so all twelve are
+/// `annotated fs-detected` and none of them is a judgement call.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 402;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
