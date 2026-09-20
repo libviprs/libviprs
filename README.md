@@ -235,6 +235,7 @@ from here for exactly one commit.
 | `pmtiles` | PMTiles v3 archive format: 127-byte header, Hilbert TileIDs, directories, metadata, ranged reads, and a streaming bounded-memory `Writer` |
 | `sink_pmtiles` | `PmTilesSink` writing a whole pyramid into one PMTiles v3 archive |
 | `pyramid_reader` | `PyramidReader` and its directory and PMTiles implementations, for reading a generated pyramid back whatever it was stored in |
+| `pyramid_migrate` | Converting a pyramid that already exists into a PMTiles archive, without going back to the source image |
 | `resume` | Job checkpoints and resume policy for restart-safe runs |
 | `retry` | Failure / retry policy and `RetryingSink` wrapper |
 | `dedupe` | Content-addressed tile deduplication |

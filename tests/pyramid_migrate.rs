@@ -69,13 +69,14 @@ use libviprs::pmtiles::header::HEADER_BYTES;
 use libviprs::pmtiles::writer::WriterOptions;
 use libviprs::pmtiles::{Entry, Header, PmTilesError};
 use libviprs::pyramid_migrate::{
-    MigrateError, MigrateOptions, MigrateReport, migrate_directory_to_pmtiles, migrate_to_pmtiles,
+    MigrateError, MigrateOptions, migrate_directory_to_pmtiles, migrate_to_pmtiles,
 };
 use libviprs::pyramid_reader::{
     DirectoryPyramidReader, PyramidDescription, PyramidReadError, PyramidReader,
 };
 use libviprs::resume::ResumeMode;
 use libviprs::sink::{SinkError, TileFormat};
+use libviprs::sink_pmtiles::PmTilesSink;
 use libviprs::{EngineBuilder, FsSink, PixelFormat, Raster};
 
 #[path = "common/pmtiles_oracle.rs"]
@@ -184,8 +185,16 @@ fn quad_plan(levels: u32) -> PyramidPlan {
 /// tile itself rather than by a bookkeeping map alongside it.
 fn self_describing(z: u8, x: u32, y: u32) -> Vec<u8> {
     let mut out = vec![b'T', z];
-    out.extend_from_slice(&u16::try_from(x).expect("x fits in a u16 here").to_be_bytes());
-    out.extend_from_slice(&u16::try_from(y).expect("y fits in a u16 here").to_be_bytes());
+    out.extend_from_slice(
+        &u16::try_from(x)
+            .expect("x fits in a u16 here")
+            .to_be_bytes(),
+    );
+    out.extend_from_slice(
+        &u16::try_from(y)
+            .expect("y fits in a u16 here")
+            .to_be_bytes(),
+    );
     // Varying length as well as varying content, so an entry whose `length`
     // came from the wrong tile is wrong in the directory and not only in the
     // payload.
@@ -312,8 +321,7 @@ fn parse_archive(bytes: Vec<u8>, what: &str) -> Archive {
                 u64::from(entry.length),
             ));
             entries.extend(
-                deserialize_entries(&leaf)
-                    .unwrap_or_else(|e| panic!("{what}'s leaf decodes: {e}")),
+                deserialize_entries(&leaf).unwrap_or_else(|e| panic!("{what}'s leaf decodes: {e}")),
             );
         } else {
             entries.push(entry);
@@ -569,18 +577,17 @@ fn every_migrated_tile_sits_at_the_tile_id_go_pmtiles_gives_its_coordinate() {
         .expect("a full pyramid migrates");
 
     assert_eq!(
-        report,
-        MigrateReport {
-            coords_visited: 85,
-            tiles_written: 85,
-            tiles_absent: 0,
-            distinct_payloads: 85,
-            spilled_run_count: report.spilled_run_count,
-            tile_format: TileFormat::Png,
-            out_path: out.clone(),
-        },
+        (
+            report.coords_visited,
+            report.tiles_written,
+            report.tiles_absent,
+            report.distinct_payloads
+        ),
+        (85, 85, 0, 85),
         "the migration did not do the work this cell then measures"
     );
+    assert_eq!(report.tile_format, TileFormat::Png);
+    assert_eq!(report.out_path, out);
 
     let archive = read_archive(&out, "the migrated quad pyramid");
     let tiles = archive.tiles();
@@ -603,7 +610,12 @@ fn every_migrated_tile_sits_at_the_tile_id_go_pmtiles_gives_its_coordinate() {
             "z{z} {x},{y} appears twice in the archive"
         );
     }
-    assert_eq!(checked.len(), 85, "only {} tiles were pinned", checked.len());
+    assert_eq!(
+        checked.len(),
+        85,
+        "only {} tiles were pinned",
+        checked.len()
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -706,9 +718,12 @@ fn the_distinct_golden_comes_back_at_the_ids_and_bytes_it_arrived_with() {
             key.0, key.1, key.2
         );
         assert_eq!(
-            payload, golden_bytes.as_slice(),
+            payload,
+            golden_bytes.as_slice(),
             "z{} {},{} came back with different bytes",
-            key.0, key.1, key.2
+            key.0,
+            key.1,
+            key.2
         );
         compared += 1;
     }
@@ -750,8 +765,8 @@ fn the_same_tree_migrates_differently_under_a_guessed_layout() {
     });
 
     let migrate = |plan: PyramidPlan, name: &str| {
-        let reader = DirectoryPyramidReader::try_open(&tree, plan, TileFormat::Png)
-            .expect("the tree opens");
+        let reader =
+            DirectoryPyramidReader::try_open(&tree, plan, TileFormat::Png).expect("the tree opens");
         let out = dir.path().join(format!("{name}.pmtiles"));
         let report = migrate_directory_to_pmtiles(&reader, &out, MigrateOptions::default())
             .expect("the migration runs");
@@ -768,7 +783,11 @@ fn the_same_tree_migrates_differently_under_a_guessed_layout() {
         "the right plan did not find the whole tree"
     );
     assert_eq!(
-        (wrong.coords_visited, wrong.tiles_written, wrong.tiles_absent),
+        (
+            wrong.coords_visited,
+            wrong.tiles_written,
+            wrong.tiles_absent
+        ),
         (
             right.coords_visited,
             right.tiles_written,
@@ -954,9 +973,8 @@ fn a_small_sort_buffer_spills_runs_and_produces_the_same_archive() {
     .expect("the bounded migration runs");
 
     let roomy = dir.path().join("roomy.pmtiles");
-    let roomy_report =
-        migrate_directory_to_pmtiles(&reader, &roomy, MigrateOptions::default())
-            .expect("the default migration runs");
+    let roomy_report = migrate_directory_to_pmtiles(&reader, &roomy, MigrateOptions::default())
+        .expect("the default migration runs");
 
     assert!(
         bounded_report.spilled_run_count > 0,
@@ -1027,6 +1045,21 @@ fn a_layout_pmtiles_cannot_address_is_refused_by_name() {
         other => panic!("expected SinkError::Unsupported, got {other:?}"),
     }
     assert!(!out.exists(), "the refusal left an archive behind");
+
+    // The sentence above is a literal, and a literal drifts. So it is also
+    // compared against the one the sink raises for the same plan, which is the
+    // statement that matters: two routes into one format saying two things
+    // about the same refusal is how a caller ends up handling one and not the
+    // other.
+    let from_the_sink = PmTilesSink::builder(dir.path().join("sink.pmtiles"))
+        .plan(plan.clone())
+        .build()
+        .expect_err("the sink refuses a DeepZoom plan too");
+    assert_eq!(
+        from_the_sink.to_string(),
+        error.to_string(),
+        "the sink and the migration refuse the same layout in different words"
+    );
 
     // The same refusal for a reader that cannot describe itself at all, which
     // is what a foreign archive looks like.
@@ -1111,8 +1144,8 @@ fn resume_and_verify_are_refused_by_name() {
     write_tree(&tree, &plan, TileFormat::Png, |c| {
         Some(self_describing(c.level as u8, c.col, c.row))
     });
-    let reader = DirectoryPyramidReader::try_open(&tree, plan, TileFormat::Png)
-        .expect("the tree opens");
+    let reader =
+        DirectoryPyramidReader::try_open(&tree, plan, TileFormat::Png).expect("the tree opens");
 
     for mode in [ResumeMode::Resume, ResumeMode::Verify] {
         let out = dir.path().join(format!("{mode:?}.pmtiles"));

@@ -1157,6 +1157,41 @@ and not under `Fixed`: this file is the only place they can be caught.
 
 ### Added
 
+- **`libviprs::pyramid_migrate`** (issue #1118), which turns a pyramid that
+  already exists as a `{z}/{x}/{y}` tree into a PMTiles archive without going
+  back to the source image. `migrate_to_pmtiles` takes any `PyramidReader`, a
+  `PyramidPlan`, a destination and a `MigrateOptions`, so archive-to-archive
+  works too; `migrate_directory_to_pmtiles` is the same call with the plan
+  taken off the `DirectoryPyramidReader` that was already holding it. It walks
+  one tile at a time, so a tree that does not fit in memory still converts, and
+  it keys the archive's payload table on the content hash, which is where a
+  mostly blank pyramid gets nearly free.
+
+  `MigrateReport` carries `coords_visited`, `tiles_written`, `tiles_absent`,
+  `distinct_payloads` and `spilled_run_count`. Those are positive controls
+  rather than progress reporting: a migration that wrote nothing produces a
+  structurally valid empty archive, and so does a migration over an empty tree,
+  and without the counts every assertion downstream of either passes.
+
+  The plan is a parameter and there is no flag to infer one. A directory of
+  tiles does not say what its level indices mean, how big a tile is or which
+  layout placed it, and each of those guessed wrong produces an archive that
+  `pmtiles verify` passes with every tile at the wrong tile id. Reading such an
+  archive back through this crate cannot catch it either, because the same
+  wrong plan un-applies the permutation it applied.
+
+  Four refusals, three of them the ones `PmTilesSink` already makes and with
+  the same errors: a layout not addressed by `(z, x, y)`, `TileFormat::Raw`,
+  and any resume mode but `Overwrite`. The fourth is
+  `SinkError::MissingField("MigrateOptions::tile_format")` for a source that
+  will not say what its bytes are, because defaulting to PNG there writes a
+  `tile_type` byte nobody measured.
+
+- **`libviprs::sink_pmtiles::layout_is_zxy`** (issue #1118) is public. The sink
+  and the migration both have to refuse the same set of layouts, and a second
+  copy of `matches!(layout, Xyz | Google)` is a second place to update the day
+  that pair changes.
+
 - **`libviprs::pmtiles::reader::MAX_CACHED_LEAVES` and
   `MAX_CACHED_LEAF_ENTRIES`** (issue #993), the two public constants the
   PMTiles reader's leaf cache is bounded by: how many decoded leaf directories

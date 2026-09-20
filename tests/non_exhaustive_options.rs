@@ -62,6 +62,10 @@
 //! Every file arrives through `include_str!` at compile time, so there is no
 //! filesystem access to isolate and no `#[cfg_attr(miri, ignore)]` is needed.
 
+use libviprs::pmtiles::writer::WriterOptions;
+use libviprs::pyramid_migrate::MigrateOptions;
+use libviprs::resume::ResumeMode;
+use libviprs::sink::TileFormat;
 use libviprs::{
     AffineOptions, Extend, MagickLoadOptions, ReduceKernel, ResizeOptions, SvgOptions, gif, jp2k,
     jxl, radiance, uhdr, webp,
@@ -72,7 +76,7 @@ use libviprs::{
 /// The pairing is the assertion: a struct named here that the file does not
 /// declare fails, and a `pub struct *Options` the file declares that is not
 /// named here fails too.
-const OPTIONS_STRUCTS: [(&str, &str, &[&str]); 10] = [
+const OPTIONS_STRUCTS: [(&str, &str, &[&str]); 11] = [
     (
         "src/gif.rs",
         include_str!("../src/gif.rs"),
@@ -118,6 +122,11 @@ const OPTIONS_STRUCTS: [(&str, &str, &[&str]); 10] = [
         "src/source.rs",
         include_str!("../src/source.rs"),
         &["DecodeLimits"],
+    ),
+    (
+        "src/pyramid_migrate.rs",
+        include_str!("../src/pyramid_migrate.rs"),
+        &["MigrateOptions"],
     ),
 ];
 
@@ -397,4 +406,27 @@ fn magick_load_options_build_through_setters() {
     assert_eq!(o.n, Some(-1));
 
     assert_eq!(MagickLoadOptions::default(), MagickLoadOptions::default());
+}
+
+/// The migration's options, added by issue #1118. The two knobs with a real
+/// default are the resume mode and the writer's own options; the tile format
+/// has none, because `None` there is a refusal rather than a fallback, and
+/// that is asserted here rather than only in the migration's own suite.
+#[test]
+fn migrate_options_build_through_setters() {
+    let o = MigrateOptions::default()
+        .with_tile_format(TileFormat::Jpeg { quality: 80 })
+        .with_resume_mode(ResumeMode::Verify)
+        .with_writer(WriterOptions::default().with_sort_buffer_records(7));
+    assert_eq!(o.tile_format, Some(TileFormat::Jpeg { quality: 80 }));
+    assert_eq!(o.resume_mode, ResumeMode::Verify);
+    assert_eq!(o.writer.sort_buffer_records, 7);
+
+    let d = MigrateOptions::default();
+    assert_eq!(
+        d.tile_format, None,
+        "a default tile format would be a guess about bytes nobody measured"
+    );
+    assert_eq!(d.resume_mode, ResumeMode::Overwrite);
+    assert_eq!(d.writer, WriterOptions::default());
 }
