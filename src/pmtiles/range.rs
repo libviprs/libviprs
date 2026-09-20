@@ -353,7 +353,7 @@ impl ObjectStoreRangeReader {
         key: impl Into<String>,
     ) -> Self {
         Self {
-            store: store.into(),
+            store,
             key: key.into(),
         }
     }

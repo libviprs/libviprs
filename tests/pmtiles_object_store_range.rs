@@ -381,6 +381,7 @@ fn the_defaulted_read_methods_refuse_and_size_does_not_answer_ok_none() {
 /// reads a valid header out of a 40 GB body and goes on to inflate whatever
 /// sits at the root offset.
 #[test]
+#[cfg_attr(miri, ignore)] // reads the committed oracle golden from disk
 fn a_backend_that_ignores_the_range_is_refused_rather_than_read_from_the_front() {
     let bytes = golden();
 
@@ -417,6 +418,7 @@ fn a_backend_that_ignores_the_range_is_refused_rather_than_read_from_the_front()
 /// in the middle of a column, and `Vec<u8>` carries no length the caller did
 /// not ask for, so nothing downstream can tell.
 #[test]
+#[cfg_attr(miri, ignore)] // reads the committed oracle golden from disk
 fn a_truncated_body_is_refused_rather_than_handed_back_short() {
     let bytes = golden();
     let reader =
@@ -448,6 +450,7 @@ fn a_truncated_body_is_refused_rather_than_handed_back_short() {
 /// A round trip for nothing is a round trip, and the reader asks for a
 /// zero-length section whenever an archive has no leaves.
 #[test]
+#[cfg_attr(miri, ignore)] // reads the committed oracle golden from disk
 fn a_zero_length_range_is_answered_without_touching_the_backend() {
     let store = Arc::new(RecordingStore::new(golden()));
     let reader = ObjectStoreRangeReader::new(store.clone(), "archive.pmtiles");
@@ -471,6 +474,7 @@ fn a_zero_length_range_is_answered_without_touching_the_backend() {
 
 /// A backend that cannot say how big the object is still serves the archive.
 #[test]
+#[cfg_attr(miri, ignore)] // reads the committed oracle golden from disk
 fn a_backend_with_no_size_opens_the_archive_and_serves_tiles() {
     let reader = Reader::try_new(sizeless(golden())).expect("an archive with no known size opens");
 
@@ -504,6 +508,7 @@ fn a_backend_with_no_size_opens_the_archive_and_serves_tiles() {
 /// in this file: the archive still opens, the tiles still serve, and the only
 /// thing that changed is that four bounds checks are gone and nobody was told.
 #[test]
+#[cfg_attr(miri, ignore)] // reads the committed oracle golden from disk
 fn a_transient_size_failure_stops_the_open_rather_than_reading_as_unknown() {
     for failure in [
         (|| SinkError::Io(io::Error::from(io::ErrorKind::ConnectionReset))) as fn() -> SinkError,
@@ -550,6 +555,7 @@ fn a_transient_size_failure_stops_the_open_rather_than_reading_as_unknown() {
 /// size-refusing one the first opens, because the check that would have caught
 /// it needs a total, and only fails when a tile past the cut is fetched.
 #[test]
+#[cfg_attr(miri, ignore)] // reads the committed oracle golden from disk
 fn what_a_missing_size_costs_on_an_archive_that_is_actually_broken() {
     // ---- truncated to 900 bytes -------------------------------------------
     let mut truncated = golden();
@@ -625,6 +631,7 @@ fn what_a_missing_size_costs_on_an_archive_that_is_actually_broken() {
 /// `root_offset` and `root_length` as the header spells them leaves that
 /// nowhere to hide.
 #[test]
+#[cfg_attr(miri, ignore)] // reads the committed oracle golden from disk
 fn opening_an_archive_is_one_size_and_two_ranges_at_the_header_s_own_offsets() {
     let bytes = golden();
     let header = Header::try_decode(&bytes[..HEADER_BYTES]).expect("the golden's header decodes");
@@ -687,6 +694,7 @@ fn opening_an_archive_is_one_size_and_two_ranges_at_the_header_s_own_offsets() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the committed oracle golden from disk
 fn the_bridge_reports_the_store_and_the_key_it_was_built_with() {
     let store: Arc<dyn ObjectStore> = Arc::new(ExactStore(golden()));
     let reader = ObjectStoreRangeReader::new(store.clone(), "tiles/drawing.pmtiles");
@@ -705,6 +713,7 @@ fn the_bridge_reports_the_store_and_the_key_it_was_built_with() {
 /// chance to flatten it into a sentence. `tests/error_source_typing.rs` is the
 /// file that made that a rule; this is the same rule at the transport seam.
 #[test]
+#[cfg_attr(miri, ignore)] // reads the committed oracle golden from disk
 fn an_object_store_failure_keeps_its_typed_sink_error_in_the_source_chain() {
     let reader = ObjectStoreRangeReader::new(
         Arc::new(BrokenSizeStore {
@@ -747,6 +756,7 @@ fn an_object_store_failure_keeps_its_typed_sink_error_in_the_source_chain() {
 /// position is what asks the real question, and a CLI picking a backend from a
 /// URI scheme at runtime has nothing but a trait object to hand over.
 #[test]
+#[cfg_attr(miri, ignore)] // reads the committed oracle golden from disk
 fn a_boxed_and_an_arced_range_reader_can_open_an_archive() {
     let boxed: Box<dyn RangeReader> = Box::new(InMemory(golden()));
     let from_box = Reader::try_new(boxed).expect("a boxed trait object opens an archive");
@@ -783,6 +793,7 @@ fn a_boxed_and_an_arced_range_reader_can_open_an_archive() {
 /// compiling, so the `try_open` half of this test is the regression guard for
 /// the change rather than a restatement of an old test.
 #[test]
+#[cfg_attr(miri, ignore)] // reads the committed oracle golden from disk
 fn the_pyramid_reader_opens_over_an_injected_store() {
     let store: Arc<dyn ObjectStore> = Arc::new(ExactStore(golden()));
     let pyramid = PmTilesPyramidReader::try_from_object_store(store, "tiles/drawing.pmtiles")
@@ -820,6 +831,7 @@ fn the_pyramid_reader_opens_over_an_injected_store() {
 
 /// The reader underneath is reachable whichever backend it was built over.
 #[test]
+#[cfg_attr(miri, ignore)] // reads the committed oracle golden from disk
 fn from_reader_and_reader_work_for_a_non_file_backend() {
     let inner = Reader::try_new(sized(golden())).expect("the golden opens");
     let pyramid = PmTilesPyramidReader::from_reader(inner);
