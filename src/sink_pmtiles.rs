@@ -124,7 +124,22 @@ pub fn tile_coord_to_zxy(coord: TileCoord) -> Result<(u8, u32, u32), PmTilesErro
 }
 
 /// Whether a layout places its tiles at coordinates PMTiles can address.
-fn layout_is_zxy(layout: Layout) -> bool {
+///
+/// Public because it is the gate two different routes into the format have to
+/// agree on: this sink refuses a layout here at `build`, and
+/// [`migrate_to_pmtiles`](crate::pyramid_migrate::migrate_to_pmtiles) refuses
+/// the same layouts before it opens a writer. A second copy of
+/// `matches!(layout, Xyz | Google)` in the migration would be a second place
+/// to update the day a layout joins or leaves the pair, and the two would
+/// disagree for exactly as long as nobody noticed.
+///
+/// It takes the layout rather than a
+/// [`PyramidDescription`](crate::pyramid_reader::PyramidDescription) on
+/// purpose. The description's `layout` is an `Option` that is `None` for a
+/// backend carrying no plan, and a gate that took it would have to decide what
+/// `None` means, which is "wave it through" on the reading that keeps the
+/// signature honest.
+pub fn layout_is_zxy(layout: Layout) -> bool {
     matches!(layout, Layout::Xyz | Layout::Google)
 }
 
