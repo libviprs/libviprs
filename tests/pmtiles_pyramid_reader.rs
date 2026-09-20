@@ -340,15 +340,12 @@ impl libviprs::sink_object_store::ObjectStore for ArchiveStore {
         len: usize,
     ) -> Result<Vec<u8>, libviprs::sink::SinkError> {
         let start = usize::try_from(offset).expect("an offset inside a test archive fits");
-        let end = start.checked_add(len).expect("a range inside a test archive");
-        self.0
-            .get(start..end)
-            .map(<[u8]>::to_vec)
-            .ok_or_else(|| {
-                libviprs::sink::SinkError::Io(std::io::Error::from(
-                    std::io::ErrorKind::UnexpectedEof,
-                ))
-            })
+        let end = start
+            .checked_add(len)
+            .expect("a range inside a test archive");
+        self.0.get(start..end).map(<[u8]>::to_vec).ok_or_else(|| {
+            libviprs::sink::SinkError::Io(std::io::Error::from(std::io::ErrorKind::UnexpectedEof))
+        })
     }
 
     fn size(&self, _key: &str) -> Result<Option<u64>, libviprs::sink::SinkError> {
@@ -397,15 +394,33 @@ fn fs_pmtiles_and_object_store_return_the_same_tiles() {
         coords.len()
     );
 
-    // The pin. `hilbert_order_z2` is go-pmtiles' own enumeration of z=2, so
-    // every coordinate of this plan's top level that it names carries a tile
-    // id this crate did not compute.
+    // The pin. Four sections of go-pmtiles' own dump, so every compared
+    // coordinate the oracle names carries a tile id this crate did not
+    // compute. An Xyz plan of this size runs z=0 to z=10, and what the oracle
+    // names inside that set is the first tile of every level, so the pin here
+    // is eleven rows spanning the whole pyramid. The twelve rows that
+    // discriminate between candidate Hilbert conventions are pinned by
+    // `the_coordinates_both_backends_use_are_the_oracle_s_coordinates` above,
+    // which is the sharper pin and does not need a pyramid to make it.
     let vectors = oracle::tileid_vectors();
-    let oracle_rows = oracle::tile_id_rows(&vectors, "hilbert_order_z2");
-    assert_eq!(oracle_rows.len(), 16, "z=2 has sixteen tiles");
+    let mut oracle_rows = Vec::new();
+    for section in [
+        "first_and_last_of_level",
+        "orientation_boundaries",
+        "hilbert_order_z2",
+        "hilbert_order_z3",
+    ] {
+        oracle_rows.extend(oracle::tile_id_rows(&vectors, section));
+    }
+    assert_eq!(
+        oracle_rows.len(),
+        32 + 44 + 16 + 64,
+        "every section has to have parsed, or the pin below is over fewer rows          than it claims"
+    );
 
     let mut compared = 0usize;
     let mut pinned = 0usize;
+    let mut pinned_levels = std::collections::BTreeSet::new();
     for coord in &coords {
         let from_archive = pmt
             .tile(*coord)
@@ -441,6 +456,7 @@ fn fs_pmtiles_and_object_store_return_the_same_tiles() {
                 "({z}, {x}, {y}) is the row that disagrees with go-pmtiles"
             );
             pinned += 1;
+            pinned_levels.insert(z);
         }
     }
 
@@ -454,11 +470,19 @@ fn fs_pmtiles_and_object_store_return_the_same_tiles() {
         "the pin has to bite: at least eight of the compared coordinates must \
          be ones go-pmtiles named, got {pinned}"
     );
+    assert!(
+        pinned_levels.len() >= 8,
+        "and they must span the pyramid rather than all sitting on one level, \
+         got {pinned_levels:?}"
+    );
 
     // The three describe the same pyramid too, which is what a caller reaches
     // for before it asks for a tile.
     let from_disk = pmt.describe().expect("the archive describes itself");
     let over_the_wire = remote.describe().expect("the transport describes it too");
     assert_eq!(from_disk, over_the_wire);
-    assert_eq!(over_the_wire, fs.describe().expect("the plan describes the tree"));
+    assert_eq!(
+        over_the_wire,
+        fs.describe().expect("the plan describes the tree")
+    );
 }

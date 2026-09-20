@@ -237,7 +237,10 @@ impl RecordingStore {
     }
 
     fn ranges(&self) -> Vec<(u64, usize)> {
-        self.ranges.lock().expect("the recorder is not poisoned").clone()
+        self.ranges
+            .lock()
+            .expect("the recorder is not poisoned")
+            .clone()
     }
 
     fn size_calls(&self) -> usize {
@@ -245,7 +248,10 @@ impl RecordingStore {
     }
 
     fn keys(&self) -> Vec<String> {
-        self.keys.lock().expect("the recorder is not poisoned").clone()
+        self.keys
+            .lock()
+            .expect("the recorder is not poisoned")
+            .clone()
     }
 }
 
@@ -304,7 +310,7 @@ impl RangeReader for InMemory {
 /// not be laundered into a string on its way up. A backend failure crosses two
 /// layers here (`SinkError` into `io::Error` into [`PmTilesError`]) and the
 /// concrete variant has to survive both.
-fn sink_error_in_chain(err: &(dyn Error + 'static)) -> Option<&SinkError> {
+fn sink_error_in_chain<'a>(err: &'a (dyn Error + 'static)) -> Option<&'a SinkError> {
     let mut current = Some(err);
     while let Some(link) = current {
         if let Some(sink) = link.downcast_ref::<SinkError>() {
@@ -385,10 +391,8 @@ fn a_backend_that_ignores_the_range_is_refused_rather_than_read_from_the_front()
          header, which is why a bridge with no length check cannot notice"
     );
 
-    let reader = ObjectStoreRangeReader::new(
-        Arc::new(WholeObjectStore(bytes.clone())),
-        "archive.pmtiles",
-    );
+    let reader =
+        ObjectStoreRangeReader::new(Arc::new(WholeObjectStore(bytes.clone())), "archive.pmtiles");
 
     let err = reader
         .read_range(0, HEADER_BYTES)
@@ -415,10 +419,8 @@ fn a_backend_that_ignores_the_range_is_refused_rather_than_read_from_the_front()
 #[test]
 fn a_truncated_body_is_refused_rather_than_handed_back_short() {
     let bytes = golden();
-    let reader = ObjectStoreRangeReader::new(
-        Arc::new(TruncatingStore(bytes.clone())),
-        "archive.pmtiles",
-    );
+    let reader =
+        ObjectStoreRangeReader::new(Arc::new(TruncatingStore(bytes.clone())), "archive.pmtiles");
 
     let err = reader
         .read_range(0, HEADER_BYTES)
@@ -450,7 +452,12 @@ fn a_zero_length_range_is_answered_without_touching_the_backend() {
     let store = Arc::new(RecordingStore::new(golden()));
     let reader = ObjectStoreRangeReader::new(store.clone(), "archive.pmtiles");
 
-    assert!(reader.read_range(324, 0).expect("empty is not an error").is_empty());
+    assert!(
+        reader
+            .read_range(324, 0)
+            .expect("empty is not an error")
+            .is_empty()
+    );
     assert!(
         store.ranges().is_empty(),
         "a zero-length range must not become a request, got {:?}",
@@ -579,7 +586,11 @@ fn what_a_missing_size_costs_on_an_archive_that_is_actually_broken() {
 
     // ---- root offset past the end -----------------------------------------
     let mut moved_root = golden();
-    assert_eq!(moved_root.len(), 1878, "the golden is the one the pin names");
+    assert_eq!(
+        moved_root.len(),
+        1878,
+        "the golden is the one the pin names"
+    );
     moved_root[8..16].copy_from_slice(&999_999u64.to_le_bytes());
 
     let err = Reader::try_new(sized(moved_root.clone()))
@@ -592,8 +603,8 @@ fn what_a_missing_size_costs_on_an_archive_that_is_actually_broken() {
     // Without a size the bounds check cannot fire, and what stops it is the
     // root's own 16 KiB budget: a second line of defence that happens to cover
     // this one shape and covers nothing about the other three sections.
-    let err = Reader::try_new(sizeless(moved_root))
-        .expect_err("the root budget still refuses this one");
+    let err =
+        Reader::try_new(sizeless(moved_root)).expect_err("the root budget still refuses this one");
     assert!(
         matches!(err, PmTilesError::RootDirectoryTooLarge { .. }),
         "a different, weaker refusal than the bounds check, got {err:?}"
@@ -744,8 +755,14 @@ fn a_boxed_and_an_arced_range_reader_can_open_an_archive() {
     let from_arc = Reader::try_new(arced).expect("an arced trait object opens an archive");
 
     let (z, x, y) = LAST_TILE;
-    let a = from_box.get_tile(z, x, y).expect("a lookup").expect("a tile");
-    let b = from_arc.get_tile(z, x, y).expect("a lookup").expect("a tile");
+    let a = from_box
+        .get_tile(z, x, y)
+        .expect("a lookup")
+        .expect("a tile");
+    let b = from_arc
+        .get_tile(z, x, y)
+        .expect("a lookup")
+        .expect("a tile");
     assert_eq!(a, b, "the two wrappers must read the same bytes");
 
     // A sized implementation behind a box too, so the impls are not secretly
@@ -817,5 +834,8 @@ fn from_reader_and_reader_work_for_a_non_file_backend() {
         Reader::try_new(Box::new(InMemory(golden())) as Box<dyn RangeReader>)
             .expect("a boxed backend opens");
     let pyramid = PmTilesPyramidReader::from_reader(boxed);
-    assert_eq!(pyramid.describe().expect("it describes itself").max_level, 2);
+    assert_eq!(
+        pyramid.describe().expect("it describes itself").max_level,
+        2
+    );
 }
