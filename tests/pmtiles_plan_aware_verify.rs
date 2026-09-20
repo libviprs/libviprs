@@ -54,7 +54,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use libviprs::planner::{Layout, PyramidPlan, PyramidPlanner, TileCoord};
-use libviprs::pyramid_reader::{PmTilesPyramidReader, PyramidReader};
+use libviprs::pyramid_reader::{PmTilesPyramidReader, PyramidReadError, PyramidReader};
 use libviprs::resume::{ResumeMode, ResumePolicy};
 use libviprs::sink::SinkError;
 use libviprs::sink_pmtiles::PmTilesSink;
@@ -425,12 +425,22 @@ fn a_damaged_archive_is_refused_as_damaged_rather_than_as_a_missing_tile() {
     let truncated = dir.path().join("truncated.pmtiles");
     std::fs::write(&truncated, &good[..good.len() - 64]).expect("write the truncated archive");
     let (result, _observer) = verify_archive(&truncated, &plan, &src);
-    let message = result
-        .expect_err("a truncated archive cannot verify")
-        .to_string();
+    let err = result.expect_err("a truncated archive cannot verify");
+    // Named rather than asserted absent. "It did not say missing tile" is
+    // satisfied by any message at all, including one about a file that could
+    // not be opened for a reason nobody looked at; the variant says the
+    // refusal came back through the reader seam, carrying the archive's own
+    // typed complaint.
     assert!(
-        !message.contains("missing tile"),
-        "a truncated archive is damaged, not short of a tile: {message}"
+        matches!(
+            err,
+            EngineError::Sink(SinkError::PyramidRead(PyramidReadError::PmTiles(_)))
+        ),
+        "a truncated archive is damaged, not short of a tile, got {err:?}"
+    );
+    assert!(
+        !err.to_string().contains("missing tile"),
+        "and it must not read as a missing tile either: {err}"
     );
 
     // `addressed_tiles_count` is a u64 at offset 72 of the 127-byte header.
@@ -464,16 +474,20 @@ fn a_damaged_archive_is_refused_as_damaged_rather_than_as_a_missing_tile() {
     }
 
     let (result, _observer) = verify_archive(&lying, &plan, &src);
-    let message = result
-        .expect_err("an archive whose header miscounts its own tiles cannot verify")
-        .to_string();
+    let err = result.expect_err("an archive whose header miscounts its own tiles cannot verify");
     assert!(
-        !message.contains("missing tile"),
-        "every tile is present; the defect is structural: {message}"
+        matches!(
+            err,
+            EngineError::Sink(SinkError::PyramidRead(
+                PyramidReadError::StructuralDefects { .. }
+            ))
+        ),
+        "every tile is present, so the only thing that can refuse this is the \
+         structural walk, got {err:?}"
     );
     assert!(
-        message.contains("addressed_tiles_count"),
-        "the refusal must name the field that does not add up, got: {message}"
+        err.to_string().contains("addressed_tiles_count"),
+        "the refusal must name the field that does not add up, got: {err}"
     );
 }
 

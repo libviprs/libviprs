@@ -11,10 +11,9 @@
 //! * [`verify_from_strip_source`]
 //!   — strip-driven verify for pull-based sources or when the caller
 //!   explicitly picks `EngineKind::Streaming` / `EngineKind::MapReduce`.
-//! * [`pyramid_verify`] reads the pyramid back through
-//!   [`PyramidReader`](crate::pyramid_reader::PyramidReader), for a sink that
-//!   can open its own output. Used when the output is not a tree of files, so
-//!   there is nothing for the two above to stat.
+//! * [`pyramid_verify`] reads the pyramid back through [`PyramidReader`], for
+//!   a sink that can open its own output. Used when the output is not a tree
+//!   of files, so there is nothing for the two above to stat.
 //!
 //! All three emit the same `LevelStarted` / `TileCompleted` / `LevelCompleted`
 //! / `Finished` event stream so observers see verify runs as first-class, and
@@ -82,7 +81,7 @@ fn unreadable(error: PyramidReadError) -> EngineError {
 /// * **the self-description against the plan** ([`PyramidReader::describe`]):
 ///   the level range, and the tile size, layout and encoding the pyramid
 ///   recorded for itself. This is the archive's stand-in for
-///   [`verify_checkpoint_contract`](crate::resume::verify_checkpoint_contract),
+///   `resume::verify_checkpoint_contract` (crate-private, so no link),
 ///   and it is the check an implementation drops first, because the sweep
 ///   passes without it: a 256-pixel tile at `0/0/0` is a perfectly readable
 ///   tile whatever the plan meant by a tile;
