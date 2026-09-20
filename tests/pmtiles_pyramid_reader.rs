@@ -1,9 +1,16 @@
-//! One pyramid, two backends, the same tiles (issue #990).
+//! One pyramid, three backends, the same tiles (issues #990, #1121).
 //!
 //! [`DirectoryPyramidReader`] and [`PmTilesPyramidReader`] are the two
 //! implementations of [`PyramidReader`], and the acceptance criterion is that
 //! a `z/x/y` request returns the same visual tile whichever of them is
 //! holding the pyramid.
+//!
+//! #1121 added a third way in without adding a third implementation: the same
+//! `PmTilesPyramidReader` over an injected [`ObjectStore`] instead of a local
+//! file. It belongs in this comparison because the interesting failure is not
+//! "the transport errors", it is "the transport quietly serves different
+//! bytes", and only a three-way comparison over the whole planned coordinate
+//! set says it does not.
 //!
 //! # The way this comparison lies, and what stops it
 //!
@@ -302,4 +309,156 @@ fn both_backends_read_through_one_trait_object() {
     }
     assert_eq!(answers.len(), 2, "both backends answered");
     assert_eq!(answers[0], answers[1], "and they answered the same thing");
+}
+
+// ---------------------------------------------------------------------------
+// The third backend: the same archive, served over a transport (issue #1121)
+// ---------------------------------------------------------------------------
+
+/// A read-only `ObjectStore` holding one archive's bytes.
+///
+/// It answers exactly the range it is asked for, which is what makes it a fair
+/// third backend here and exactly what makes it useless for testing the bridge
+/// itself. The doubles that misbehave the way a transport does live in
+/// `tests/pmtiles_object_store_range.rs`; this one is only here to prove the
+/// archive reads the same through the seam as it does off the disk.
+#[cfg(feature = "object-store-sink")]
+struct ArchiveStore(Vec<u8>);
+
+#[cfg(feature = "object-store-sink")]
+impl libviprs::sink_object_store::ObjectStore for ArchiveStore {
+    fn put(&self, _key: &str, _bytes: &[u8]) -> Result<(), libviprs::sink::SinkError> {
+        Err(libviprs::sink::SinkError::Unsupported(
+            "this double only reads".into(),
+        ))
+    }
+
+    fn get_range(
+        &self,
+        _key: &str,
+        offset: u64,
+        len: usize,
+    ) -> Result<Vec<u8>, libviprs::sink::SinkError> {
+        let start = usize::try_from(offset).expect("an offset inside a test archive fits");
+        let end = start.checked_add(len).expect("a range inside a test archive");
+        self.0
+            .get(start..end)
+            .map(<[u8]>::to_vec)
+            .ok_or_else(|| {
+                libviprs::sink::SinkError::Io(std::io::Error::from(
+                    std::io::ErrorKind::UnexpectedEof,
+                ))
+            })
+    }
+
+    fn size(&self, _key: &str) -> Result<Option<u64>, libviprs::sink::SinkError> {
+        Ok(Some(self.0.len() as u64))
+    }
+}
+
+/// The same pyramid through three backends: a tree, an archive on disk, and
+/// the same archive over an injected object store.
+///
+/// The three controls this file already carries apply unchanged and are
+/// repeated here rather than assumed, because the failure they guard against
+/// is the comparison being over nothing. On top of them, the coordinates
+/// compared are pinned against `go-pmtiles`' own tile ids, loaded from the
+/// committed vectors at run time, so agreement between three pieces of this
+/// crate is not the whole of the evidence.
+#[test]
+#[cfg_attr(miri, ignore)]
+#[cfg(feature = "object-store-sink")]
+fn fs_pmtiles_and_object_store_return_the_same_tiles() {
+    use std::sync::Arc;
+
+    use libviprs::pmtiles::tileid::zxy_to_tileid;
+    use libviprs::sink_object_store::ObjectStore;
+    use libviprs::sink_pmtiles::tile_coord_to_zxy;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let plan = plan_for(1024, 768);
+    let (archive, tree) = both_backends(dir.path(), &plan);
+
+    let bytes = std::fs::read(&archive).expect("the archive is on disk");
+    let store: Arc<dyn ObjectStore> = Arc::new(ArchiveStore(bytes));
+
+    let pmt = PmTilesPyramidReader::try_open(&archive).expect("the archive opens");
+    let remote = PmTilesPyramidReader::try_from_object_store(store, "runs/pyramid.pmtiles")
+        .expect("the archive opens over an object store");
+    let fs = DirectoryPyramidReader::try_open(&tree, plan.clone(), TileFormat::Png)
+        .expect("the tree opens");
+
+    let coords: Vec<TileCoord> = plan.tile_coords().collect();
+    assert!(
+        coords.len() >= 8,
+        "the positive control: three backends that all answer nothing for every \
+         coordinate agree perfectly, so the comparison needs a real tile set, \
+         got {}",
+        coords.len()
+    );
+
+    // The pin. `hilbert_order_z2` is go-pmtiles' own enumeration of z=2, so
+    // every coordinate of this plan's top level that it names carries a tile
+    // id this crate did not compute.
+    let vectors = oracle::tileid_vectors();
+    let oracle_rows = oracle::tile_id_rows(&vectors, "hilbert_order_z2");
+    assert_eq!(oracle_rows.len(), 16, "z=2 has sixteen tiles");
+
+    let mut compared = 0usize;
+    let mut pinned = 0usize;
+    for coord in &coords {
+        let from_archive = pmt
+            .tile(*coord)
+            .expect("the archive answers")
+            .unwrap_or_else(|| panic!("{coord:?} is missing from the archive"));
+        let from_store = remote
+            .tile(*coord)
+            .expect("the object store answers")
+            .unwrap_or_else(|| panic!("{coord:?} is missing over the object store"));
+        let from_tree = fs
+            .tile(*coord)
+            .expect("the tree answers")
+            .unwrap_or_else(|| panic!("{coord:?} is missing from the tree"));
+
+        assert_eq!(
+            from_archive, from_store,
+            "{coord:?} reads differently over the transport than off the disk"
+        );
+        assert_eq!(
+            from_store, from_tree,
+            "{coord:?} is stored as different bytes in the tree and over the transport"
+        );
+        compared += 1;
+
+        let (z, x, y) = tile_coord_to_zxy(*coord).expect("a planned coordinate is addressable");
+        if let Some(row) = oracle_rows
+            .iter()
+            .find(|row| (row.z, row.x, row.y) == (z, x, y))
+        {
+            assert_eq!(
+                zxy_to_tileid(z, x, y).expect("an addressable coordinate"),
+                row.tile_id,
+                "({z}, {x}, {y}) is the row that disagrees with go-pmtiles"
+            );
+            pinned += 1;
+        }
+    }
+
+    assert_eq!(
+        compared,
+        coords.len(),
+        "every planned coordinate must have been compared"
+    );
+    assert!(
+        pinned >= 8,
+        "the pin has to bite: at least eight of the compared coordinates must \
+         be ones go-pmtiles named, got {pinned}"
+    );
+
+    // The three describe the same pyramid too, which is what a caller reaches
+    // for before it asks for a tile.
+    let from_disk = pmt.describe().expect("the archive describes itself");
+    let over_the_wire = remote.describe().expect("the transport describes it too");
+    assert_eq!(from_disk, over_the_wire);
+    assert_eq!(over_the_wire, fs.describe().expect("the plan describes the tree"));
 }
