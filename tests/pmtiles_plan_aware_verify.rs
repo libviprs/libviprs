@@ -454,7 +454,8 @@ fn a_damaged_archive_is_refused_as_damaged_rather_than_as_a_missing_tile() {
 
     // The control: every tile still reads, so nothing but the structural walk
     // can refuse this one.
-    let reader = PmTilesPyramidReader::try_open(&lying).expect("the miscounted archive still opens");
+    let reader =
+        PmTilesPyramidReader::try_open(&lying).expect("the miscounted archive still opens");
     for coord in plan.tile_coords() {
         assert!(
             reader.tile(coord).expect("the tile reads").is_some(),
