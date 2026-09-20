@@ -550,7 +550,13 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// `Cargo.toml`, `tools/Dockerfile.ci`, `README.md`, `publish.yml` and a
 /// sibling test through one `std::fs::read_to_string` helper, so all three are
 /// `annotated fs-detected` and none of them is a judgement call.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 390;
+///
+/// #1118 moves it 390 to 391, and the one is
+/// `a_wrong_plan_reads_a_real_tile_from_the_wrong_coordinate` in
+/// `tests/pyramid_migrate.rs`, which generates a real tree into a
+/// `tempfile::tempdir()` and then reads two of its tiles back with
+/// `std::fs::read`.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 391;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
