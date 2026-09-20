@@ -1157,6 +1157,34 @@ and not under `Fixed`: this file is the only place they can be caught.
 
 ### Added
 
+- **`ResumeMode::Verify` against a PMTiles archive** (issue #1122), through a
+  new sink capability rather than a storage enum or a downcast.
+  `TileSink::open_pyramid_reader` answers `Some(reader)` for a sink that can
+  open what it wrote, and `verify::pyramid_verify` checks the pyramid through
+  `PyramidReader` instead of stat-ing one file per coordinate under a
+  checkpoint root. The method is defaulted to forward through
+  `TileSink::inner_sink`, so a wrapper sink gets it free and an external sink
+  keeps compiling; `FsSink` answers `None` and a tree verify still goes to
+  `raster_verify`, which re-renders from the source and compares bytes.
+
+  `PyramidReader` grows `self_check` and `addressed_tiles`, and
+  `PyramidReadError` grows `StructuralDefects`. `addressed_tiles` is the check
+  nothing had before, in either backend: a pyramid that addresses MORE tiles
+  than the plan resolves every coordinate it is asked about and is still not
+  the pyramid that plan produced, and no per-coordinate sweep can see it.
+
+  `PmTilesSink` therefore stops refusing `ResumeMode::Verify` at `build()`.
+  `ResumeMode::Resume` is still refused by name and the reason has not
+  changed: the writer's staging is not reconstructible from a checkpoint, so
+  a resumed run would publish an archive with every pre-crash tile silently
+  absent. `PmTilesSink::checkpoint_root` is still `None`, because a Verify
+  reads the archive and needs no root.
+
+  One behaviour change to know about: a Verify run over an archive now builds
+  a sink, so it takes the advisory run lock and creates `<archive>.job` for
+  the life of the run, where before it was refused before anything was
+  created. The sidecar is removed with the sink that took it.
+
 - **`libviprs::pmtiles::reader::MAX_CACHED_LEAVES` and
   `MAX_CACHED_LEAF_ENTRIES`** (issue #993), the two public constants the
   PMTiles reader's leaf cache is bounded by: how many decoded leaf directories
