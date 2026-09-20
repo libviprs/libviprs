@@ -32,9 +32,15 @@
 //! - **`pdfium`** — enables [`render_page_pdfium`], [`render_page_pdfium_budgeted`],
 //!   and [`PdfiumStripSource`] for full vector PDF rendering via the pdfium library.
 //! - **`pdfium-static`** — implies `pdfium` and statically links libpdfium.
-//! - **`object-store-sink`** — gates the [`sink_object_store`] module
-//!   ([`ObjectStoreSink`]) against a user-injected [`ObjectStore`] backend. The
-//!   former name **`s3`** is retained as a deprecated alias
+//! - **`object-store-sink`** — gates both halves of the injected-backend
+//!   seam. Writing: the [`sink_object_store`] module ([`ObjectStoreSink`])
+//!   against a user-injected [`ObjectStore`] backend. Reading: that same
+//!   trait's `get_range` and `size` methods,
+//!   [`ObjectStoreRangeReader`](pmtiles::ObjectStoreRangeReader) in
+//!   [`pmtiles::range`], and
+//!   [`PmTilesPyramidReader::try_from_object_store`](pyramid_reader::PmTilesPyramidReader::try_from_object_store).
+//!   Neither half ships a transport; both take the caller's. The former name
+//!   **`s3`** is retained as a deprecated alias
 //!   (`s3 = ["object-store-sink"]`) that enables the same module; prefer
 //!   `object-store-sink`, as the `s3` alias will be removed in a future release.
 //! - **`tracing`** — emits structured spans and events via the `tracing` crate.
