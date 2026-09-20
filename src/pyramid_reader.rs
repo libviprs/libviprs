@@ -5,8 +5,12 @@
 //! #990, in one PMTiles archive. What it has not had is one way to ask "give
 //! me the tile at `z/x/y`" that does not care which of those it was. Anything
 //! that wanted to read a pyramid back had to know how it was stored, which is
-//! why the verify path is a directory walk and why nothing but a viewer ever
-//! opened an archive.
+//! why the verify path was a directory walk and why nothing but a viewer ever
+//! opened an archive. Since #1122 it is not the only verify path: a sink that
+//! can open its own output hands one of these back from
+//! [`TileSink::open_pyramid_reader`](crate::sink::TileSink::open_pyramid_reader)
+//! and [`pyramid_verify`](crate::verify::pyramid_verify) checks the pyramid
+//! through the trait instead. `raster_verify` still owns the tree.
 //!
 //! [`PyramidReader`] is that one way in. Two implementations ship with it:
 //! [`DirectoryPyramidReader`] over a `{z}/{x}/{y}.{ext}` tree, and
@@ -56,6 +60,23 @@ pub enum PyramidReadError {
     /// constructor opens.
     #[error("{path} is not {expected}")]
     NotAPyramid { path: PathBuf, expected: String },
+    /// [`PyramidReader::self_check`] walked the storage and found it damaged.
+    ///
+    /// Distinct from every other variant on purpose. An `Io` or a `PmTiles`
+    /// error says the reader could not find out; this one says it did find
+    /// out, and the answer is that the pyramid is not sound. A caller that
+    /// collapsed the two would report a corrupt archive and an unreadable
+    /// disk the same way.
+    ///
+    /// The payload is the finding list rather than the first symptom, because
+    /// a structural walk that stops at the first problem describes one thing
+    /// wrong with a file that may have six.
+    #[error(
+        "the pyramid is structurally damaged ({} finding(s)); the first is: {}",
+        .findings.len(),
+        .findings.first().map(String::as_str).unwrap_or("(none recorded)")
+    )]
+    StructuralDefects { findings: Vec<String> },
 }
 
 // ---------------------------------------------------------------------------
@@ -119,6 +140,51 @@ pub struct PyramidDescription {
 pub trait PyramidReader: Send + Sync {
     /// What the pyramid is: levels, tile size, layout, encoding.
     fn describe(&self) -> Result<PyramidDescription, PyramidReadError>;
+
+    /// Check the storage's own structure, with no plan to check it against.
+    ///
+    /// This is the half of a verify that has nothing to do with what was
+    /// asked for: whether the thing on disk is internally consistent, whether
+    /// every offset it carries lands inside itself, whether its own counts add
+    /// up. A backend with nothing to check answers `Ok(())`, which is the
+    /// default, and a loose-file tree genuinely has nothing: a directory of
+    /// files has no index to disagree with itself.
+    ///
+    /// The contract that makes `Ok(())` meaningful is the one
+    /// [`validate::Report::is_valid`](crate::pmtiles::validate::Report::is_valid)
+    /// rests on: **anything that stops the walk early must also report a
+    /// defect**. Without it a storage that made the walk give up quietly would
+    /// answer `Ok(())`, which is worse than answering with the defect, because
+    /// the checks a walk only reaches at the end never ran.
+    fn self_check(&self) -> Result<(), PyramidReadError> {
+        Ok(())
+    }
+
+    /// How many distinct coordinates the pyramid holds a tile for.
+    ///
+    /// Recounted from the storage, never read out of a header it also wrote:
+    /// a header that lies about its own count is exactly the defect worth
+    /// catching, and a count taken from it agrees with itself whatever it
+    /// says.
+    ///
+    /// This is what makes a plan-aware verify possible in the direction a
+    /// per-coordinate sweep cannot see. A sweep only asks about coordinates
+    /// the plan names, so a pyramid holding *more* than the plan resolves
+    /// every question it is asked and is still not the pyramid that plan
+    /// produced. Comparing this against `plan.tile_coords().count()` is the
+    /// only check that notices.
+    ///
+    /// # Errors
+    ///
+    /// The default is [`PyramidReadError::NoDescription`], not `0` and not an
+    /// `Option`. A backend that cannot count has to say so loudly, because
+    /// the failure mode of a quiet "unknown" is a verify that silently drops
+    /// its only both-directions check and stays green.
+    fn addressed_tiles(&self) -> Result<u64, PyramidReadError> {
+        Err(PyramidReadError::NoDescription(
+            "this pyramid cannot count the coordinates it addresses".to_string(),
+        ))
+    }
 
     /// The stored bytes of one tile, or `None` when the pyramid has no tile
     /// there.
@@ -271,6 +337,32 @@ impl PmTilesPyramidReader {
         &self.reader
     }
 
+    /// Walk the archive and hand back the report, refusing a damaged one.
+    ///
+    /// Both [`PyramidReader::self_check`] and
+    /// [`PyramidReader::addressed_tiles`] go through here, so a caller that
+    /// wants the count of a broken archive cannot get one: a count taken from
+    /// a walk that raised findings is a count of however far the walk got.
+    ///
+    /// A verify therefore pays this walk twice. That is deliberate and it is
+    /// cheap: it reads the header and the directories and no tile payloads,
+    /// while the coordinate sweep that follows reads every tile in the
+    /// archive. The alternative is caching a report against a file that can
+    /// change underneath it, and a stale structural verdict is a worse thing
+    /// to own than a second directory walk.
+    fn structural_report(&self) -> Result<crate::pmtiles::validate::Report, PyramidReadError> {
+        let report = crate::pmtiles::validate::validate(
+            self.reader.source(),
+            &crate::pmtiles::validate::ValidationLimits::default(),
+        )?;
+        if report.is_valid() {
+            return Ok(report);
+        }
+        Err(PyramidReadError::StructuralDefects {
+            findings: report.findings.iter().map(ToString::to_string).collect(),
+        })
+    }
+
     /// What the archive says libviprs recorded about the run that produced it,
     /// when it was libviprs that produced it.
     fn generation(&self) -> Option<crate::manifest::GenerationSettings> {
@@ -285,6 +377,33 @@ impl PmTilesPyramidReader {
 }
 
 impl PyramidReader for PmTilesPyramidReader {
+    /// Walk the archive the way [`validate`](crate::pmtiles::validate) does
+    /// and refuse it if the walk found anything.
+    ///
+    /// Read through [`Report::is_valid`](crate::pmtiles::validate::Report::is_valid)
+    /// rather than through a severity filter or a hand-rolled early exit, and
+    /// that is the whole point: the walk's invariant is that anything stopping
+    /// it early also raises a finding, so "no findings" is the only phrasing
+    /// that a truncated walk cannot satisfy. A check that skipped straight to
+    /// the counts, or that ignored findings it decided were cosmetic, would
+    /// report clean for a file that made the walk give up before it got to
+    /// them.
+    fn self_check(&self) -> Result<(), PyramidReadError> {
+        self.structural_report().map(|_| ())
+    }
+
+    /// The run lengths summed, recomputed by the same walk.
+    ///
+    /// The header carries an `addressed_tiles_count` and it is not used here.
+    /// It is a number the writer put in the file, so an archive whose header
+    /// miscounts its own tiles would agree with itself perfectly; the walk
+    /// counts what the directories actually cover, and the disagreement
+    /// between the two is itself one of the findings above.
+    fn addressed_tiles(&self) -> Result<u64, PyramidReadError> {
+        self.structural_report()
+            .map(|report| report.addressed_tiles)
+    }
+
     fn describe(&self) -> Result<PyramidDescription, PyramidReadError> {
         let header = self.reader.header();
         let generation = self.generation();
@@ -386,5 +505,31 @@ mod tests {
             row: 0,
         };
         assert_eq!(reader.tile(impossible).expect("out of range"), None);
+    }
+
+    /// A backend that cannot count the coordinates it addresses says so,
+    /// rather than answering zero or `None`.
+    ///
+    /// The default matters more than it looks. `addressed_tiles` is the only
+    /// check that catches a pyramid holding more than the plan asked for, and
+    /// a quiet "unknown" would let a verify drop that check and stay green for
+    /// every reader that never implemented it. The directory reader is the one
+    /// in-tree backend sitting on the default, so it is the one that pins it.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_reader_that_cannot_count_its_tiles_refuses_rather_than_guessing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let reader = DirectoryPyramidReader::try_open(dir.path(), plan(), TileFormat::Png)
+            .expect("an empty directory is still a directory");
+
+        // The control: the same reader answers the questions it can answer, so
+        // the refusal below is about the count and not about the reader.
+        assert!(reader.describe().is_ok(), "it can still describe itself");
+        assert!(reader.self_check().is_ok(), "a tree has no index to damage");
+
+        match reader.addressed_tiles() {
+            Err(PyramidReadError::NoDescription(_)) => {}
+            other => panic!("a reader that cannot count must say so, got {other:?}"),
+        }
     }
 }
