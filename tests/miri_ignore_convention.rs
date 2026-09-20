@@ -352,7 +352,12 @@ const ANCHOR_FILES: &[&str] = &[
 /// now, on purpose: an exact number in the workflow made it a file every
 /// unrelated pull request had to edit, which is the reasoning written up in
 /// `tests/miri_invocation_parity.rs`.
-const EXPECTED_SRC_ANNOTATIONS: usize = 245;
+///
+/// #1122 moves it 245 to 246, and the one is
+/// `a_reader_that_cannot_count_its_tiles_refuses_rather_than_guessing` in
+/// `src/pyramid_reader.rs`, which opens a `tempfile::tempdir()` as a pyramid
+/// to pin what a reader with no tile count answers.
+const EXPECTED_SRC_ANNOTATIONS: usize = 246;
 /// Companion to [`EXPECTED_SRC_ANNOTATIONS`]: how many `src/` modules carry at
 /// least one annotation. #765 made it 25 by putting the first annotation in
 /// `src/analyze.rs`; `src/colour.rs` and `src/pdf.rs`, which took the other
@@ -550,7 +555,17 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// `Cargo.toml`, `tools/Dockerfile.ci`, `README.md`, `publish.yml` and a
 /// sibling test through one `std::fs::read_to_string` helper, so all three are
 /// `annotated fs-detected` and none of them is a judgement call.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 390;
+///
+/// #1122 moves it 390 to 400, and the ten are a net figure: twelve arrive and
+/// two leave. Nine are `tests/pmtiles_plan_aware_verify.rs`' whole file, each
+/// of which writes a PMTiles archive into a `tempfile::tempdir()` and then
+/// verifies it; one is the reader cell named under
+/// [`EXPECTED_SRC_ANNOTATIONS`]. The remaining two are the pair in
+/// `tests/pmtiles_sink.rs` that replace `verify_is_refused_by_name` and
+/// `a_verify_run_against_an_archive_does_not_report_success`, which is why the
+/// arrivals outnumber the move: those two are the departures, renamed rather
+/// than deleted because Verify stopped being refused.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 400;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
