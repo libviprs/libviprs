@@ -1222,6 +1222,19 @@ impl<'a> RenderDispatch<'a> {
 /// [`crate::verify`] walks rather than the generate engines, but the dispatch
 /// shape is the same — kept in one place so it cannot drift from the render
 /// dispatch's source/kind handling.
+///
+/// # The reader preflight comes first, and the incompatible-source check comes
+/// before that
+///
+/// A sink that can open its own output is verified by reading the pyramid back
+/// rather than by re-rendering it and stat-ing a tree (issue #1122), so that
+/// question is asked before `(kind, source)` is looked at: there is no render
+/// on this path, so neither the engine kind nor the source shape has anything
+/// to select. The `Monolithic` + `Strip` rejection deliberately stays at the
+/// call site above rather than moving in here beside the preflight. It is a
+/// statement about the *run* being impossible, it was there first, and a
+/// caller who asked for both an impossible pairing and a reader-backed sink
+/// should hear about the pairing.
 fn dispatch_verify(
     kind: EngineKind,
     source: EngineSource<'_>,
@@ -1230,6 +1243,14 @@ fn dispatch_verify(
     engine_cfg: &EngineConfig,
     observer: &dyn EngineObserver,
 ) -> Result<EngineResult, EngineError> {
+    // `Err` here is a sink that should have had a readable pyramid and did
+    // not, which is a verify failure with a name. `Ok(None)` is a sink that
+    // has no reader to offer, which is every sink that writes a tree, and it
+    // falls through to the walks below exactly as before.
+    if let Some(reader) = sink.open_pyramid_reader().map_err(EngineError::Sink)? {
+        return crate::verify::pyramid_verify(reader.as_ref(), plan, sink, observer);
+    }
+
     match (kind, source) {
         (EngineKind::Monolithic, EngineSource::Raster(raster)) => {
             crate::verify::raster_verify(raster, plan, sink, engine_cfg, observer)
