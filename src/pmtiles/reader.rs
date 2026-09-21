@@ -663,6 +663,27 @@ impl<R: RangeReader> Reader<R> {
     }
 
     fn load_metadata(&self) -> Result<Metadata, PmTilesError> {
+        Metadata::try_from_json(&self.metadata_json()?)
+    }
+
+    /// The metadata section decompressed, before anything tries to make sense
+    /// of it.
+    ///
+    /// Exists because [`Metadata`] parses the whole object or none of it, and
+    /// "none of it" is a state a reader still has to say something useful
+    /// about. A single unknown `format` variant written by a later libviprs
+    /// fails the parse at the outermost object, taking `name`, `description`,
+    /// `attribution` and the whole `extra` map down with it, and the only way
+    /// to tell that archive apart from a foreign one is to look at the bytes
+    /// for a `vnd.libviprs` key. That is what
+    /// [`PmTilesPyramidReader::describe`](crate::pyramid_reader::PmTilesPyramidReader)
+    /// does with this (issue #1123).
+    ///
+    /// Not cached, unlike [`Reader::metadata`]. The only caller is the failure
+    /// path, which by definition has nothing to cache, and caching raw bytes
+    /// beside a parsed object would mean two representations of one section
+    /// that can disagree.
+    pub(crate) fn metadata_json(&self) -> Result<Vec<u8>, PmTilesError> {
         let stored = usize::try_from(self.header.metadata_length).unwrap_or(usize::MAX);
         if stored > MAX_METADATA_BYTES {
             return Err(PmTilesError::DecompressionLimit {
@@ -672,11 +693,9 @@ impl<R: RangeReader> Reader<R> {
         let raw = self
             .source
             .read_range(self.header.metadata_offset, stored)?;
-        let json = self
-            .header
+        self.header
             .internal_compression
-            .decompress(&raw, MAX_METADATA_BYTES)?;
-        Metadata::try_from_json(&json)
+            .decompress(&raw, MAX_METADATA_BYTES)
     }
 }
 

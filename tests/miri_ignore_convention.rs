@@ -586,7 +586,18 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// been a guess: a net delta and three independent lanes are precisely the
 /// shape where a double count hides, and "the arithmetic happened to agree" is
 /// something you can only say afterwards.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 401;
+///
+/// #1123 moves it 401 to 408, and the seven are the whole of
+/// `tests/webp_tile_format.rs` bar its two pure-computation cells. Each of the
+/// seven either generates a pyramid into a `tempfile::tempdir()` or writes a
+/// PMTiles archive there and reads it back, so all seven are
+/// `annotated fs-detected` and none of them is a judgement call.
+///
+/// 408 is the number the detector printed with this constant still at 401, not
+/// 401 plus seven. Same discipline as the paragraph above, and cheap to keep:
+/// the assertion names the figure it measured, so copying it out is strictly
+/// less work than adding up.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 408;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {

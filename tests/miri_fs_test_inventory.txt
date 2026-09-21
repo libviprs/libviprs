@@ -466,6 +466,13 @@ annotated   fs-detected  tests/uhdr_ported_surface.rs::v2y_8_matches_the_pinned_
 annotated   fs-detected  tests/unsafe_inventory.rs::only_the_named_files_carry_the_crates_own_unsafe
 annotated   fs-detected  tests/webp_ported_surface.rs::encode_and_save_round_trip_exactly
 annotated   fs-detected  tests/webp_ported_surface.rs::the_shared_dispatchers_carry_webp
+annotated   fs-detected  tests/webp_tile_format.rs::a_foreign_archive_with_unparseable_metadata_still_describes
+annotated   fs-detected  tests/webp_tile_format.rs::a_foreign_webp_archive_reports_its_format
+annotated   fs-detected  tests/webp_tile_format.rs::a_pmtiles_webp_archive_round_trips_pixel_exact
+annotated   fs-detected  tests/webp_tile_format.rs::a_webp_tree_verifies_through_a_format_blind_sink_monolithic
+annotated   fs-detected  tests/webp_tile_format.rs::a_webp_tree_verifies_through_a_format_blind_sink_streaming
+annotated   fs-detected  tests/webp_tile_format.rs::a_webp_tree_with_a_hole_still_fails_through_a_format_blind_sink
+annotated   fs-detected  tests/webp_tile_format.rs::an_archive_from_a_newer_libviprs_is_named_rather_than_blanked
 annotated   fs-detected  tests/workspace_layout.rs::fuzz_crate_is_a_member_of_the_root_workspace
 annotated   fs-detected  tests/workspace_layout.rs::workspace_lockfile_resolves_pdfium_render_from_the_registry
 annotated   not-detected src/analyze.rs::a_missing_img_is_an_io_error_and_the_header_is_priced_before_it_is_opened

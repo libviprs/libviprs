@@ -386,4 +386,60 @@ mod tests {
         // The positive control: the smallest thing that is an object parses.
         assert!(Metadata::try_from_json(b"{}").is_ok());
     }
+    /// The same fixture with a WebP encoding, pinned separately (issue #1123).
+    ///
+    /// This is an addition rather than an edit, and the reason is the trap
+    /// #1119 walked into: `saturated()` above encodes `Jpeg { quality: 83 }`,
+    /// and adding a variant to `TileFormat` does not change how `Jpeg`
+    /// serialises. So the pin everybody believes is watching the wire format
+    /// stayed green through the whole of this change and would have stayed
+    /// green if `Webp` had serialised as `{"kind":"Webp"}`, or as
+    /// `{"kind":"webp","quality":0}`, or had not serialised at all.
+    ///
+    /// Only the `format` key differs from the pin above, so the two together
+    /// say the variant changed that one field and nothing else.
+    fn saturated_webp() -> Metadata {
+        let mut meta = saturated();
+        let vnd = meta
+            .vnd_libviprs
+            .as_mut()
+            .expect("the saturated fixture carries the namespace");
+        let generation = vnd
+            .generation
+            .as_mut()
+            .expect("the saturated fixture carries generation settings");
+        generation.format = TileFormat::Webp;
+        meta
+    }
+
+    #[test]
+    fn the_webp_wire_shape_is_pinned_too() {
+        let json = String::from_utf8(saturated_webp().to_json().unwrap()).unwrap();
+        assert!(
+            json.contains(r#""format":{"kind":"webp"}"#),
+            "webp must be a bare tag with no quality beside it, got: {json}"
+        );
+        // Said negatively as well, because `contains` on the line above would
+        // also pass for `{"kind":"webp","quality":0}` if serde ever emitted
+        // one: the substring is a prefix of it.
+        assert!(
+            !json.contains(r#""kind":"webp","quality""#),
+            "TileFormat::Webp carries no quality field; the encoder is \
+             lossless and has no knob for one to reach"
+        );
+
+        assert_eq!(
+            Metadata::try_from_json(json.as_bytes()).unwrap(),
+            saturated_webp(),
+            "and it parses back to what it came from"
+        );
+
+        // The two pins differ in exactly one key. Anything else moving means
+        // the variant changed more than the encoding.
+        let jpeg = String::from_utf8(saturated().to_json().unwrap()).unwrap();
+        assert_eq!(
+            jpeg.replace(r#""format":{"kind":"jpeg","quality":83}"#, "FORMAT"),
+            json.replace(r#""format":{"kind":"webp"}"#, "FORMAT"),
+        );
+    }
 }

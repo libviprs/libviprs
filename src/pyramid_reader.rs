@@ -101,6 +101,45 @@ pub enum PyramidReadError {
     /// backend carries no metadata should not also catch the second.
     #[error("this pyramid cannot count the tiles it addresses: {0}")]
     NotCountable(String),
+    /// The archive carries a `vnd.libviprs` namespace this build cannot parse.
+    ///
+    /// # Why this variant exists rather than a quiet `None` (issue #1123)
+    ///
+    /// [`Metadata`](crate::pmtiles::Metadata) parses the whole object or none
+    /// of it, and an unknown `format` variant written by a later libviprs
+    /// fails it at the outermost object. `describe()` used to swallow that
+    /// with `.ok()?` and answer `tile_size: None, layout: None, format: None`
+    /// for an archive that records all three.
+    ///
+    /// The quiet version is worse than it sounds, and not because information
+    /// is lost. `format: None` is *already* the legitimate answer for a
+    /// foreign go-pmtiles archive that carries no libviprs namespace, so the
+    /// two cases were indistinguishable, and they want opposite reactions:
+    /// one is "this file was made by another tool, read it as best you can",
+    /// the other is "this file was made by libviprs and your libviprs is too
+    /// old for it, upgrade". Only the second has an action attached, which is
+    /// why this error names the version that wrote the archive.
+    ///
+    /// Two honest caveats, both from the issue. This cannot fix 0.5.x, which
+    /// will do the silent downgrade forever, so the payoff is at the *next*
+    /// variant addition rather than at this one. And making an unparseable
+    /// namespace not sink the rest of the `Metadata` object (so `name` and
+    /// `extra` survive) is a real improvement and a separate decision, not
+    /// bundled here.
+    #[error(
+        "this archive was written by libviprs {libviprs_version} and this build \
+         ({}) cannot parse what it recorded: {source}",
+        env!("CARGO_PKG_VERSION")
+    )]
+    MetadataFromANewerLibviprs {
+        /// The `libviprs_version` string the archive records, lifted out of
+        /// the raw JSON because the typed parse is the thing that failed.
+        libviprs_version: String,
+        /// The parse failure itself, typed rather than rendered, so a caller
+        /// can still see which key serde gave up on.
+        #[source]
+        source: crate::pmtiles::PmTilesError,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -514,6 +553,50 @@ impl<R: crate::pmtiles::RangeReader> PmTilesPyramidReader<R> {
             .generation
             .clone()
     }
+
+    /// Decide whether a failed metadata parse is this build being out of date.
+    ///
+    /// `Ok(())` means it is not: either the bytes are unreadable too, or they
+    /// carry no `vnd.libviprs` key, and in both cases the archive is somebody
+    /// else's and `None` is the honest description. `Err` means the archive
+    /// says libviprs wrote it, so the failure is a version gap and the caller
+    /// should say so with the version attached.
+    ///
+    /// Reading the section a second time is the cost. It is paid only on the
+    /// failure path (`Reader::metadata` caches its successes and nothing else
+    /// calls this), and the alternative is caching two representations of one
+    /// section that can disagree.
+    ///
+    /// The raw scan is a `serde_json::Value` lookup rather than a typed parse
+    /// on purpose: a typed parse is the thing that just failed, and the only
+    /// question left is whether one key is present and what string sits under
+    /// it. A `vnd.libviprs` that is not an object, or that carries no
+    /// `libviprs_version`, still counts as ours: the key is the claim, and an
+    /// unnamed version becomes `"(unrecorded)"` rather than sending the caller
+    /// back to the indistinguishable `None`.
+    fn version_gap(
+        &self,
+        parse_failure: crate::pmtiles::PmTilesError,
+    ) -> Result<(), PyramidReadError> {
+        let Ok(bytes) = self.reader.metadata_json() else {
+            return Ok(());
+        };
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            return Ok(());
+        };
+        let Some(vnd) = value.get(crate::pmtiles::metadata::LIBVIPRS_METADATA_KEY) else {
+            return Ok(());
+        };
+        let libviprs_version = vnd
+            .get("libviprs_version")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("(unrecorded)")
+            .to_string();
+        Err(PyramidReadError::MetadataFromANewerLibviprs {
+            libviprs_version,
+            source: parse_failure,
+        })
+    }
 }
 
 impl<R: crate::pmtiles::RangeReader> PyramidReader for PmTilesPyramidReader<R> {
@@ -544,8 +627,27 @@ impl<R: crate::pmtiles::RangeReader> PyramidReader for PmTilesPyramidReader<R> {
             .map(|report| report.addressed_tiles)
     }
 
+    /// What the archive says it is.
+    ///
+    /// # An archive from a newer libviprs is named, not blanked (issue #1123)
+    ///
+    /// Every `Option` here can legitimately be `None`, because a foreign
+    /// archive records none of it. That is exactly what made the old
+    /// behaviour dangerous: when a metadata object failed to parse, this
+    /// returned the same all-`None` description a go-pmtiles archive gets, so
+    /// "made by another tool" and "made by libviprs and I am too old" looked
+    /// identical and only one of them has an action attached.
+    ///
+    /// So a parse failure is now interrogated rather than swallowed. If the
+    /// raw bytes carry a `vnd.libviprs` key the archive is ours and this
+    /// refuses with [`PyramidReadError::MetadataFromANewerLibviprs`], naming
+    /// the version that wrote it. If they do not, `None` stays `None` and
+    /// every foreign archive reads exactly as it did before.
     fn describe(&self) -> Result<PyramidDescription, PyramidReadError> {
         let header = self.reader.header();
+        if let Err(parse_failure) = self.reader.metadata() {
+            self.version_gap(parse_failure)?;
+        }
         let generation = self.generation();
         Ok(PyramidDescription {
             min_level: u32::from(header.min_zoom),
@@ -575,12 +677,24 @@ impl<R: crate::pmtiles::RangeReader> PyramidReader for PmTilesPyramidReader<R> {
     /// than a quality nobody measured; ask
     /// [`Reader::tile_format`](crate::pmtiles::Reader::tile_format) for the
     /// `TileType`, which is what the archive actually records.
+    ///
+    /// The fallback answers for the parameterless formats and only those. PNG
+    /// has always been one; WebP joined it in issue #1123, and for the same
+    /// reason rather than a weaker one: [`TileFormat::Webp`] carries no field
+    /// that the header's `TileType` fails to determine, so an archive stamped
+    /// `0x04` by any tool at all *is* a WebP pyramid and saying so invents
+    /// nothing. JPEG is the odd one out here, not WebP.
+    ///
+    /// This arm is one of the five sites issue #1123 was written about. It has
+    /// a catch-all, so adding a variant to `TileFormat` did not break it and a
+    /// WebP archive would have gone on reporting `format: None` indefinitely.
     fn tile_format(&self) -> Option<TileFormat> {
         if let Some(generation) = self.generation() {
             return Some(generation.format);
         }
         match self.reader.tile_format() {
             crate::pmtiles::TileType::Png => Some(TileFormat::Png),
+            crate::pmtiles::TileType::Webp => Some(TileFormat::Webp),
             _ => None,
         }
     }
