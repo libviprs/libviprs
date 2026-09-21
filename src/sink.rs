@@ -118,15 +118,29 @@ pub enum SinkError {
     /// the run was configured with, and says so rather than half-supporting
     /// it.
     ///
-    /// [`PmTilesSink`](crate::sink_pmtiles::PmTilesSink) is the case:
-    /// `Verify` reads a pyramid back by stat-ing one file per coordinate and
-    /// `Resume` needs a writer's staging to be reconstructible from a
-    /// checkpoint, and a single-file archive offers neither. Refusing by name
-    /// is the correct implementation there, not a gap: the alternative is a
-    /// Verify that reports every tile missing and a Resume that publishes an
-    /// archive with the pre-crash tiles silently absent.
+    /// [`PmTilesSink`](crate::sink_pmtiles::PmTilesSink) is the case, and
+    /// since #1122 it is the case for `Resume` alone: a resume needs the
+    /// writer's staging to be reconstructible from a checkpoint and a
+    /// single-file archive's staging is not, so a resumed run would publish an
+    /// archive with the pre-crash tiles silently absent. Refusing by name is
+    /// the correct implementation there, not a gap.
+    ///
+    /// `Verify` used to be refused beside it, because the only verify the
+    /// engine had stat-ed one file per coordinate. It now reads the pyramid
+    /// back through [`TileSink::open_pyramid_reader`], so the refusal was not
+    /// relaxed: the thing it was about stopped being true.
     #[error("{mode:?} is not a resume mode this sink can honour")]
     UnsupportedResumeMode { mode: crate::resume::ResumeMode },
+    /// A sink was asked to open its own output for reading and the pyramid
+    /// underneath refused.
+    ///
+    /// Typed rather than stringified so the `source()` chain still carries the
+    /// [`PyramidReadError`](crate::pyramid_reader::PyramidReadError) that says
+    /// what was wrong, which is the difference between "the archive is
+    /// structurally damaged" and "the archive is not there" reaching a caller
+    /// as two distinguishable things rather than as two sentences.
+    #[error("pyramid read: {0}")]
+    PyramidRead(#[from] crate::pyramid_reader::PyramidReadError),
     /// Another live run holds the advisory lock on this sink's output.
     ///
     /// Carries the [`ResumeError`](crate::resume::ResumeError) verbatim, so
@@ -236,7 +250,8 @@ pub trait TileSink: Send + Sync {
     /// Every engine-bookkeeping method below (`record_engine_config`,
     /// `sink_retry_count`, `sink_skipped_due_to_failure`, `note_sink_skipped`,
     /// `checkpoint_root`, `init_level_count`, `content_format`,
-    /// `applies_retry_policy`) has a default that forwards through this hook.
+    /// `open_pyramid_reader`, `applies_retry_policy`) has a default that
+    /// forwards through this hook.
     /// A wrapper therefore only has to override `inner_sink` — and any state it
     /// genuinely owns (e.g. a [`RetryingSink`]'s own retry counter) — instead
     /// of forwarding every bookkeeping method by hand. That removes the
@@ -406,6 +421,51 @@ pub trait TileSink: Send + Sync {
             None => Ok(()),
         }
     }
+
+    /// Engine hook (issue #1122): open this sink's own output for reading,
+    /// when it can.
+    ///
+    /// `ResumeMode::Verify` re-checks a finished pyramid against the plan that
+    /// produced it, and until #1122 the only way it knew how to do that was
+    /// [`crate::engine::raster_verify`], which stats
+    /// `plan.tile_path(coord)` under a checkpoint root. That is a loose-file
+    /// tree walk, and a sink that does not write loose files has no seam to
+    /// enter it through: pointed at a PMTiles archive it reports the first
+    /// coordinate missing and calls the archive corrupt.
+    ///
+    /// A sink that answers `Some` here is saying "I can hand you back what I
+    /// wrote", and [`crate::verify::pyramid_verify`] checks the pyramid
+    /// through the [`PyramidReader`](crate::pyramid_reader::PyramidReader)
+    /// instead of through the tree. `None` means the tree walk, which is the
+    /// default and what every sink did before.
+    ///
+    /// # Why this is a capability and not a storage enum or a downcast
+    ///
+    /// The two obvious alternatives both break. Keying on
+    /// [`PyramidStorage`](crate::storage::PyramidStorage) does not work
+    /// because it is a CLI and planning enum that never reaches
+    /// [`EngineConfig`](crate::engine::EngineConfig), so the engine cannot see
+    /// it. Downcasting to the concrete sink type does not work because it
+    /// fails for every wrapper: a retrying sink, a tee, a recording sink in a
+    /// test. A defaulted method that forwards through
+    /// [`TileSink::inner_sink`] costs a wrapper nothing and costs an external
+    /// sink nothing, since neither has to know the method exists.
+    ///
+    /// # Errors
+    ///
+    /// `Err` is for a sink that **should** have a readable pyramid and does
+    /// not: an archive that is missing, unopenable or not an archive. That is
+    /// a verify failure, and it is emphatically not `Ok(None)`, which would
+    /// mean "I have no reader to offer" and would send the run off to walk a
+    /// directory tree that is not there either.
+    fn open_pyramid_reader(
+        &self,
+    ) -> Result<Option<Box<dyn crate::pyramid_reader::PyramidReader>>, SinkError> {
+        match self.inner_sink() {
+            Some(inner) => inner.open_pyramid_reader(),
+            None => Ok(None),
+        }
+    }
 }
 
 /// Generate a transparent [`TileSink`] forwarding impl for a wrapper type
@@ -468,6 +528,11 @@ macro_rules! forward_tile_sink {
             }
             fn seed_completed_tile(&self, tile: &Tile) -> Result<(), SinkError> {
                 (**self).seed_completed_tile(tile)
+            }
+            fn open_pyramid_reader(
+                &self,
+            ) -> Result<Option<Box<dyn crate::pyramid_reader::PyramidReader>>, SinkError> {
+                (**self).open_pyramid_reader()
             }
         }
     };
@@ -1392,6 +1457,31 @@ impl TileSink for FsSink {
 
     fn checkpoint_root(&self) -> Option<&Path> {
         Some(&self.base_dir)
+    }
+
+    /// No reader, on purpose (issue #1122).
+    ///
+    /// [`DirectoryPyramidReader`](crate::pyramid_reader::DirectoryPyramidReader)
+    /// exists and would open this sink's own output, so answering `Some` here
+    /// compiles and reads as the tidier symmetry. It would also silently move
+    /// every `Verify` run over a tree off
+    /// [`raster_verify`](crate::engine::raster_verify) and onto the reader
+    /// path, and the two do not check the same things. `raster_verify`
+    /// re-renders every level from the source and compares the bytes, honours
+    /// the manifest's checksum table, and knows what a one-byte blank-tile
+    /// marker and a `_shared/` dedupe reference mean. A reader-driven sweep
+    /// knows none of that; it is what a single-file archive can offer, not an
+    /// upgrade on what a tree already has.
+    ///
+    /// So the reader path is a sibling of the directory verify rather than a
+    /// replacement for it, and this `Ok(None)` is where that decision is
+    /// enforced. It is the same value the trait default produces for a
+    /// terminal sink; it is spelled out because the default would look like
+    /// nobody had considered it.
+    fn open_pyramid_reader(
+        &self,
+    ) -> Result<Option<Box<dyn crate::pyramid_reader::PyramidReader>>, SinkError> {
+        Ok(None)
     }
 
     fn arm_durability_tracking(&self) {

@@ -227,6 +227,7 @@ annotated   fs-detected  src/pmtiles/writer.rs::the_merge_opens_one_file_however
 annotated   fs-detected  src/pmtiles/writer.rs::the_payload_table_carries_every_offset_and_length
 annotated   fs-detected  src/pmtiles/writer.rs::two_writers_in_one_scratch_directory_get_distinct_prefixes
 annotated   fs-detected  src/pyramid_reader.rs::a_missing_tile_and_an_impossible_coordinate_are_both_absent
+annotated   fs-detected  src/pyramid_reader.rs::a_reader_that_cannot_count_its_tiles_refuses_rather_than_guessing
 annotated   fs-detected  src/pyramid_reader.rs::opening_a_path_that_is_not_a_directory_is_refused
 annotated   fs-detected  src/radiance.rs::save_radiance_writes_a_file_decode_radiance_reads_back
 annotated   fs-detected  src/radiance.rs::the_fuzz_corpus_decodes_or_fails_exactly_as_named
@@ -382,6 +383,15 @@ annotated   fs-detected  tests/pmtiles_bounded_memory.rs::the_finalize_peak_stay
 annotated   fs-detected  tests/pmtiles_format.rs::file_range_reader_returns_exactly_the_bytes_asked_for
 annotated   fs-detected  tests/pmtiles_format.rs::range_reader_is_object_safe
 annotated   fs-detected  tests/pmtiles_lock_probe.rs::the_concurrent_tail_is_attributed
+annotated   fs-detected  tests/pmtiles_plan_aware_verify.rs::a_damaged_archive_is_refused_as_damaged_rather_than_as_a_missing_tile
+annotated   fs-detected  tests/pmtiles_plan_aware_verify.rs::a_freshly_written_archive_verifies_and_the_sweep_resolved_every_coordinate
+annotated   fs-detected  tests/pmtiles_plan_aware_verify.rs::a_verify_run_leaves_the_archive_and_its_directory_exactly_as_it_found_them
+annotated   fs-detected  tests/pmtiles_plan_aware_verify.rs::an_archive_collapsed_into_runs_still_resolves_every_coordinate
+annotated   fs-detected  tests/pmtiles_plan_aware_verify.rs::an_archive_generated_at_another_tile_size_is_refused
+annotated   fs-detected  tests/pmtiles_plan_aware_verify.rs::an_archive_short_of_the_plan_is_refused_and_names_the_missing_coordinate
+annotated   fs-detected  tests/pmtiles_plan_aware_verify.rs::an_archive_verify_emits_the_same_events_as_a_tree_verify
+annotated   fs-detected  tests/pmtiles_plan_aware_verify.rs::an_archive_wider_than_the_plan_is_refused_although_every_coordinate_resolves
+annotated   fs-detected  tests/pmtiles_plan_aware_verify.rs::resume_against_an_archive_is_still_refused
 annotated   fs-detected  tests/pmtiles_pyramid_reader.rs::a_coordinate_outside_the_pyramid_is_absent_from_both
 annotated   fs-detected  tests/pmtiles_pyramid_reader.rs::both_backends_describe_the_same_pyramid
 annotated   fs-detected  tests/pmtiles_pyramid_reader.rs::both_backends_read_through_one_trait_object
@@ -394,7 +404,7 @@ annotated   fs-detected  tests/pmtiles_reader.rs::the_metadata_of_a_foreign_arch
 annotated   fs-detected  tests/pmtiles_release_readiness.rs::the_benchmark_doc_names_tests_that_exist
 annotated   fs-detected  tests/pmtiles_sink.rs::a_layout_that_is_not_addressed_by_zxy_is_refused
 annotated   fs-detected  tests/pmtiles_sink.rs::a_second_sink_on_one_archive_is_refused
-annotated   fs-detected  tests/pmtiles_sink.rs::a_verify_run_against_an_archive_does_not_report_success
+annotated   fs-detected  tests/pmtiles_sink.rs::a_verify_run_reports_on_the_archive_in_both_directions
 annotated   fs-detected  tests/pmtiles_sink.rs::an_engine_run_collapses_its_identical_tiles
 annotated   fs-detected  tests/pmtiles_sink.rs::an_engine_run_produces_an_archive_holding_every_planned_tile
 annotated   fs-detected  tests/pmtiles_sink.rs::blank_tiles_are_stored_as_real_tiles_rather_than_skipped_or_marked
@@ -413,7 +423,7 @@ annotated   fs-detected  tests/pmtiles_sink.rs::the_directory_reader_resolves_a_
 annotated   fs-detected  tests/pmtiles_sink.rs::the_directory_reader_returns_what_the_run_wrote_and_none_elsewhere
 annotated   fs-detected  tests/pmtiles_sink.rs::the_engine_config_reaches_the_archive_metadata
 annotated   fs-detected  tests/pmtiles_sink.rs::the_sink_exposes_no_checkpoint_root
-annotated   fs-detected  tests/pmtiles_sink.rs::verify_is_refused_by_name
+annotated   fs-detected  tests/pmtiles_sink.rs::verify_builds_where_resume_does_not
 annotated   fs-detected  tests/pmtiles_sink.rs::writing_after_finish_is_refused
 annotated   fs-detected  tests/pmtiles_writer.rs::a_finalize_that_cannot_publish_leaves_no_partial_archive
 annotated   fs-detected  tests/pmtiles_writer.rs::a_run_of_identical_adjacent_tiles_is_one_entry

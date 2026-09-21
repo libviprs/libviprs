@@ -766,22 +766,46 @@ fn resume_is_refused_by_name() {
     );
 }
 
-/// `ResumeMode::Verify` is refused by name at build time.
+/// `ResumeMode::Verify` builds and `ResumeMode::Resume` still does not
+/// (issue #1122).
+///
+/// Both halves are asserted here rather than in two cells, because the gate is
+/// one `matches!` over the mode and the failure mode worth guarding against is
+/// somebody widening it. A verify-only cell stays green for a gate that lets
+/// everything through, and the sibling Resume cell would be the only thing
+/// that noticed, which is exactly the kind of coupling that gets lost in a
+/// rebase. One test, both directions, one `matches!`.
 #[test]
 #[cfg_attr(miri, ignore)]
-fn verify_is_refused_by_name() {
+fn verify_builds_where_resume_does_not() {
     let dir = tempfile::tempdir().expect("tempdir");
     let plan = plan_for(256, 256, 256, Layout::Xyz);
 
-    let built = PmTilesSink::builder(dir.path().join("v.pmtiles"))
-        .plan(plan)
+    let verify = PmTilesSink::builder(dir.path().join("v.pmtiles"))
+        .plan(plan.clone())
         .resume_mode(ResumeMode::Verify)
+        .build()
+        .expect("Verify reads the archive through PyramidReader, so it builds");
+    assert!(
+        verify.job_dir().is_dir(),
+        "a Verify sink takes the advisory run lock like any other, so two jobs \
+         aimed at one archive still cannot overlap"
+    );
+    drop(verify);
+
+    let resumed = PmTilesSink::builder(dir.path().join("r2.pmtiles"))
+        .plan(plan)
+        .resume_mode(ResumeMode::Resume)
         .build();
-    match built {
+    match resumed {
         Err(SinkError::UnsupportedResumeMode {
-            mode: ResumeMode::Verify,
+            mode: ResumeMode::Resume,
         }) => {}
-        other => panic!("Verify must be refused by name, got {other:?}"),
+        other => panic!(
+            "Resume needs the writer's staging to be reconstructible from a \
+             checkpoint and it is not, so it must still be refused by name, got \
+             {other:?}"
+        ),
     }
 }
 
@@ -819,34 +843,86 @@ fn seeding_a_completed_tile_is_refused_rather_than_accepted() {
     }
 }
 
-/// A `Verify` run against a PMTiles sink fails instead of reporting a green
-/// audit of a directory tree that does not exist.
+/// A `Verify` run answers about the archive, and answers both ways
+/// (issue #1122).
+///
+/// This cell used to assert `EngineError::VerifyRequiresOnDiskSink`, and the
+/// reason it named the variant instead of calling `is_err()` still applies
+/// with the refusal gone. A verify that is half-wired reports the first
+/// coordinate missing on every archive, and `is_err()` is green for it. What
+/// tells a real verify from that one is not the failure, it is the pairing: a
+/// sound archive has to come back `Ok` and a short one has to come back with a
+/// named coordinate, and no half-wired implementation does both. So both are
+/// asserted here, in one cell, over archives that differ in exactly one way.
+///
+/// The fuller matrix (the archive that is wider than the plan, the damaged
+/// one, the one generated at another tile size, the read-only guarantee and
+/// the event transcript) lives in `tests/pmtiles_plan_aware_verify.rs`.
 #[test]
 #[cfg_attr(miri, ignore)]
-fn a_verify_run_against_an_archive_does_not_report_success() {
+fn a_verify_run_reports_on_the_archive_in_both_directions() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let plan = plan_for(256, 256, 256, Layout::Xyz);
+    let plan = plan_for(512, 512, 256, Layout::Xyz);
+    let src = gradient(512, 512);
+
     let out = dir.path().join("verify.pmtiles");
     let sink = PmTilesSink::builder(&out)
         .plan(plan.clone())
         .build()
         .expect("the sink builds");
+    EngineBuilder::new(&src, plan.clone(), sink)
+        .with_engine(libviprs::EngineKind::Monolithic)
+        .run()
+        .expect("the archive run succeeds");
 
-    let result = EngineBuilder::new(&gradient(256, 256), plan, sink)
+    let verifier = PmTilesSink::builder(&out)
+        .plan(plan.clone())
+        .resume_mode(ResumeMode::Verify)
+        .build()
+        .expect("a Verify-mode sink builds");
+    let result = EngineBuilder::new(&src, plan.clone(), verifier)
         .with_engine(libviprs::EngineKind::Monolithic)
         .with_resume(ResumePolicy::verify())
-        .run();
-    match result {
-        Err(libviprs::EngineError::VerifyRequiresOnDiskSink) => {}
-        // Naming the variant is what makes this a guard. `is_err()` alone stays
-        // green for a sink that hands Verify a directory to walk and gets
-        // "missing tile for coord" back on the first coordinate, which is the
-        // half-supported shape this is here to rule out.
-        other => panic!(
-            "Verify walks a loose-file tree, so it must refuse a single-file \
-             archive outright, got {other:?}"
-        ),
-    }
+        .run()
+        .expect("a sound archive verifies against the plan that wrote it");
+    assert_eq!(
+        result.tiles_produced, 0,
+        "Verify writes nothing, so it produced no tiles"
+    );
+
+    // The other half. The same plan, over an archive written from a source
+    // that is half as tall, so the top level is short by a row of tiles.
+    let short = dir.path().join("short.pmtiles");
+    let narrow = plan_for(512, 256, 256, Layout::Xyz);
+    let sink = PmTilesSink::builder(&short)
+        .plan(narrow.clone())
+        .build()
+        .expect("the sink builds");
+    EngineBuilder::new(&gradient(512, 256), narrow, sink)
+        .with_engine(libviprs::EngineKind::Monolithic)
+        .run()
+        .expect("the short archive run succeeds");
+
+    let verifier = PmTilesSink::builder(&short)
+        .plan(plan.clone())
+        .resume_mode(ResumeMode::Verify)
+        .build()
+        .expect("a Verify-mode sink builds");
+    let err = EngineBuilder::new(&src, plan, verifier)
+        .with_engine(libviprs::EngineKind::Monolithic)
+        .with_resume(ResumePolicy::verify())
+        .run()
+        .expect_err("an archive short of the plan cannot verify");
+    let missing = TileCoord {
+        level: 9,
+        col: 0,
+        row: 1,
+    };
+    assert!(
+        err.to_string().contains(&format!("{missing:?}")),
+        "the refusal must name the coordinate it could not resolve \
+         ({missing:?}), got: {err}"
+    );
 }
 
 // ---------------------------------------------------------------------------
