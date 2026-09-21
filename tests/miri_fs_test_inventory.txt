@@ -386,6 +386,7 @@ annotated   fs-detected  tests/pmtiles_pyramid_reader.rs::a_coordinate_outside_t
 annotated   fs-detected  tests/pmtiles_pyramid_reader.rs::both_backends_describe_the_same_pyramid
 annotated   fs-detected  tests/pmtiles_pyramid_reader.rs::both_backends_read_through_one_trait_object
 annotated   fs-detected  tests/pmtiles_pyramid_reader.rs::fs_and_pmtiles_return_the_same_tiles
+annotated   fs-detected  tests/pmtiles_pyramid_reader.rs::fs_pmtiles_and_object_store_return_the_same_tiles
 annotated   fs-detected  tests/pmtiles_reader.rs::a_metadata_bomb_is_refused_at_the_ceiling_rather_than_inflated
 annotated   fs-detected  tests/pmtiles_reader.rs::metadata_is_read_lazily_and_only_once
 annotated   fs-detected  tests/pmtiles_reader.rs::the_libviprs_namespace_round_trips_through_an_archive
@@ -504,6 +505,18 @@ annotated   not-detected tests/pmtiles_format.rs::the_oracle_tile_id_vectors_are
 annotated   not-detected tests/pmtiles_format.rs::the_rows_go_pmtiles_masks_are_refused_by_name
 annotated   not-detected tests/pmtiles_format.rs::the_structural_oracle_rows_hold
 annotated   not-detected tests/pmtiles_format.rs::the_twelve_convention_discriminators_from_the_oracle_hold
+annotated   not-detected tests/pmtiles_object_store_range.rs::a_backend_that_ignores_the_range_is_refused_rather_than_read_from_the_front
+annotated   not-detected tests/pmtiles_object_store_range.rs::a_backend_with_no_size_opens_the_archive_and_serves_tiles
+annotated   not-detected tests/pmtiles_object_store_range.rs::a_boxed_and_an_arced_range_reader_can_open_an_archive
+annotated   not-detected tests/pmtiles_object_store_range.rs::a_transient_size_failure_stops_the_open_rather_than_reading_as_unknown
+annotated   not-detected tests/pmtiles_object_store_range.rs::a_truncated_body_is_refused_rather_than_handed_back_short
+annotated   not-detected tests/pmtiles_object_store_range.rs::a_zero_length_range_is_answered_without_touching_the_backend
+annotated   not-detected tests/pmtiles_object_store_range.rs::an_object_store_failure_keeps_its_typed_sink_error_in_the_source_chain
+annotated   not-detected tests/pmtiles_object_store_range.rs::from_reader_and_reader_work_for_a_non_file_backend
+annotated   not-detected tests/pmtiles_object_store_range.rs::opening_an_archive_is_one_size_and_two_ranges_at_the_header_s_own_offsets
+annotated   not-detected tests/pmtiles_object_store_range.rs::the_bridge_reports_the_store_and_the_key_it_was_built_with
+annotated   not-detected tests/pmtiles_object_store_range.rs::the_pyramid_reader_opens_over_an_injected_store
+annotated   not-detected tests/pmtiles_object_store_range.rs::what_a_missing_size_costs_on_an_archive_that_is_actually_broken
 annotated   not-detected tests/pmtiles_pyramid_reader.rs::the_coordinates_both_backends_use_are_the_oracle_s_coordinates
 annotated   not-detected tests/pmtiles_reader.rs::a_coordinate_outside_its_own_zoom_grid_is_refused_where_go_pmtiles_masks_it
 annotated   not-detected tests/pmtiles_reader.rs::a_coordinate_the_archive_does_not_hold_is_absent_rather_than_the_previous_tile

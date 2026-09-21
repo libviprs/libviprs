@@ -218,10 +218,12 @@ type LeafKey = (u64, u32);
 /// A PMTiles v3 archive opened for random access.
 ///
 /// Generic over its transport so an HTTP or S3 backend drops in without
-/// touching anything here: implement the three methods of [`RangeReader`] and
-/// this type works unchanged. `Reader` is `Send + Sync` whenever its source
-/// is, which the trait requires, so one reader can serve the engine's worker
-/// threads.
+/// touching anything here: implement [`RangeReader::read_range`], which is the
+/// only method [`RangeReader`] requires, and this type works unchanged.
+/// [`RangeReader::size`] is defaulted to `Ok(None)` and answering it is what
+/// buys the section bounds checks in [`Reader::try_new`]. `Reader` is
+/// `Send + Sync` whenever its source is, which the trait requires, so one
+/// reader can serve the engine's worker threads.
 ///
 /// # Examples
 ///

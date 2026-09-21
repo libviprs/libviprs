@@ -12,6 +12,12 @@
 //! [`DirectoryPyramidReader`] over a `{z}/{x}/{y}.{ext}` tree, and
 //! [`PmTilesPyramidReader`] over a single archive.
 //!
+//! Since #1121 the archive half no longer means "a file on this disk".
+//! [`PmTilesPyramidReader`] carries its transport as a defaulted type
+//! parameter, so it still opens a path with nothing spelled out at the call
+//! site, and it also opens an object in an injected store through
+//! [`try_from_object_store`](PmTilesPyramidReader::try_from_object_store).
+//!
 //! # An absent tile is not an error
 //!
 //! [`PyramidReader::tile`] answers `Ok(None)` for a coordinate the pyramid
@@ -239,12 +245,30 @@ impl PyramidReader for DirectoryPyramidReader {
 /// [`tile_coord_to_zxy`](crate::sink_pmtiles::tile_coord_to_zxy), the same
 /// function [`PmTilesSink`](crate::sink_pmtiles::PmTilesSink) writes through,
 /// so the two cannot drift apart on where a tile lives.
+///
+/// # Why the type parameter is defaulted
+///
+/// `R` is whatever the archive's bytes come from, and it defaults to
+/// [`FileRangeReader`](crate::pmtiles::FileRangeReader) so that
+/// `PmTilesPyramidReader` keeps meaning exactly what it meant before #1121.
+/// Every existing call site spells the type with no parameter and still
+/// compiles, and [`try_open`](Self::try_open) still hands back the local-file
+/// instantiation.
+///
+/// This mirrors [`Reader<R>`](crate::pmtiles::Reader) and `Reader::try_open`
+/// one level up, and it is deliberately not `Reader<Box<dyn RangeReader>>`.
+/// That shape would change the public signatures of
+/// [`from_reader`](Self::from_reader) and [`reader`](Self::reader), which is a
+/// breaking change for nothing, and `Box<dyn RangeReader>` is not `Debug`, so
+/// it would silently drop `Debug` from a public type. Anyone who does want the
+/// boxed shape can still have it: `PmTilesPyramidReader<Box<dyn RangeReader>>`
+/// works, because `Box<R>` implements the trait.
 #[derive(Debug)]
-pub struct PmTilesPyramidReader {
-    reader: crate::pmtiles::Reader<crate::pmtiles::FileRangeReader>,
+pub struct PmTilesPyramidReader<R: crate::pmtiles::RangeReader = crate::pmtiles::FileRangeReader> {
+    reader: crate::pmtiles::Reader<R>,
 }
 
-impl PmTilesPyramidReader {
+impl PmTilesPyramidReader<crate::pmtiles::FileRangeReader> {
     /// Open the archive at `path`.
     ///
     /// Reads the header and the root directory and nothing else; a tile is
@@ -259,15 +283,51 @@ impl PmTilesPyramidReader {
             reader: crate::pmtiles::Reader::try_open(path)?,
         })
     }
+}
 
+#[cfg(feature = "object-store-sink")]
+#[cfg_attr(docsrs, doc(cfg(feature = "object-store-sink")))]
+impl PmTilesPyramidReader<crate::pmtiles::ObjectStoreRangeReader> {
+    /// Open the archive stored at `key` in an injected object store.
+    ///
+    /// The counterpart of
+    /// [`ObjectStoreSink`](crate::sink_object_store::ObjectStoreSink) on the
+    /// way back out. libviprs ships no HTTP or S3 client and #1119 records
+    /// that as a permanent decision, so the store is the caller's: anything
+    /// that can answer
+    /// [`ObjectStore::get_range`](crate::sink_object_store::ObjectStore::get_range)
+    /// serves an archive here.
+    ///
+    /// Two requests happen at open, the header and the root, plus one
+    /// [`size`](crate::sink_object_store::ObjectStore::size). A store that
+    /// inherits the defaulted refusal for `size` still opens; what it gives up
+    /// is the reader's section bounds checks.
+    ///
+    /// # Errors
+    ///
+    /// [`PyramidReadError::PmTiles`] when the object is not a readable v3
+    /// archive or the store refused a range.
+    pub fn try_from_object_store(
+        store: std::sync::Arc<dyn crate::sink_object_store::ObjectStore>,
+        key: impl Into<String>,
+    ) -> Result<Self, PyramidReadError> {
+        Ok(Self {
+            reader: crate::pmtiles::Reader::try_new(crate::pmtiles::ObjectStoreRangeReader::new(
+                store, key,
+            ))?,
+        })
+    }
+}
+
+impl<R: crate::pmtiles::RangeReader> PmTilesPyramidReader<R> {
     /// Wrap a reader the caller already opened.
-    pub fn from_reader(reader: crate::pmtiles::Reader<crate::pmtiles::FileRangeReader>) -> Self {
+    pub fn from_reader(reader: crate::pmtiles::Reader<R>) -> Self {
         Self { reader }
     }
 
     /// The archive reader underneath, for the questions this trait does not
     /// ask: the raw header, the root entries, the bounding box.
-    pub fn reader(&self) -> &crate::pmtiles::Reader<crate::pmtiles::FileRangeReader> {
+    pub fn reader(&self) -> &crate::pmtiles::Reader<R> {
         &self.reader
     }
 
@@ -284,7 +344,7 @@ impl PmTilesPyramidReader {
     }
 }
 
-impl PyramidReader for PmTilesPyramidReader {
+impl<R: crate::pmtiles::RangeReader> PyramidReader for PmTilesPyramidReader<R> {
     fn describe(&self) -> Result<PyramidDescription, PyramidReadError> {
         let header = self.reader.header();
         let generation = self.generation();

@@ -550,7 +550,16 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// `Cargo.toml`, `tools/Dockerfile.ci`, `README.md`, `publish.yml` and a
 /// sibling test through one `std::fs::read_to_string` helper, so all three are
 /// `annotated fs-detected` and none of them is a judgement call.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 390;
+///
+/// #1121 moves it 390 to 391, and the one is
+/// `tests/pmtiles_pyramid_reader.rs::fs_pmtiles_and_object_store_return_the_same_tiles`,
+/// which reads the archive it just generated back off disk with
+/// `std::fs::read` so it can serve the same bytes through an injected object
+/// store. The same change adds twelve `annotated not-detected` rows in
+/// `tests/pmtiles_object_store_range.rs`, and those do not move this count
+/// because they reach the committed goldens through the shared oracle helper,
+/// which is a file the detector does not follow into.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 391;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
