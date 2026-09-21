@@ -171,7 +171,8 @@ against `[features]`.
 0.5.0 is the largest breaking release this crate has shipped, grouped into
 five stories plus a handful of independent items in the `Unreleased` block's
 own preamble in [CHANGELOG.md](CHANGELOG.md). This section covers the storage
-default flip and five specific renames and removals. For the rest, colour and
+default flip, the new `TileFormat::Webp` variant, and five specific renames and
+removals. For the rest, colour and
 rounding changes that
 move output bytes without touching a signature, the options-struct and `.v`
 container group, and the group where the raster's tag decides instead of its
@@ -308,6 +309,49 @@ so code that globs `{z}/{x}/{y}.png` off an `FsSink` run keeps working as long
 as it keeps asking for `PyramidStorage::Directory`. What will break is code
 that assumed the directory was the *only* thing a run could produce, and the
 fix for that is to name the storage rather than to infer it from the path.
+
+## `TileFormat` gains a `Webp` variant, so exhaustive matches stop compiling
+
+This one is a real break for a 0.4.0 caller and it is the easiest to fix
+(issue #1123). `TileFormat` is not `#[non_exhaustive]`, so a `match` on it
+outside the crate has to cover every variant, and there is now a fourth:
+
+```rust
+match format {
+    TileFormat::Png => ...,
+    TileFormat::Jpeg { quality } => ...,
+    TileFormat::Raw => ...,
+    TileFormat::Webp => ...,   // add this arm
+}
+```
+
+That is the entire migration. Nothing existing changed meaning, nothing moved,
+and a build that does not match on `TileFormat` is untouched.
+
+The variant was added this way on purpose rather than behind
+`#[non_exhaustive]`. Adding the attribute first would have forced every
+downstream match to grow a catch-all, and a catch-all is exactly what let five
+sites *inside* this crate keep compiling while quietly doing the wrong thing
+with a format they had never heard of. The compile errors are the feature.
+
+**`Webp` carries no quality.** The encoder behind it
+(`Raster::encode_webp`) is lossless and has no quality knob to point a number
+at, so `Webp { quality }` would be an argument thrown away, and a semver time
+bomb the day a lossy encoder lands. If you want a knob, the place it will
+appear is `webp::Compression`, which is `#[non_exhaustive]` for that reason.
+
+Reading side, one behaviour changes without a signature moving:
+`PmTilesPyramidReader::describe()` used to answer `format: None` for a WebP
+archive and now answers `Some(TileFormat::Webp)`, because the archive's tile
+type determines the variant completely. JPEG is still `None` for a foreign
+archive, since its quality lives only in the `vnd.libviprs` namespace.
+
+The same method also gained a way to fail. If an archive's metadata cannot be
+parsed **and** it carries a `vnd.libviprs` key, `describe()` now returns
+`PyramidReadError::MetadataFromANewerLibviprs` naming the libviprs version that
+wrote it, instead of quietly answering all-`None`. An archive with no
+`vnd.libviprs` key still describes itself exactly as before, so nothing a
+foreign go-pmtiles file does changes.
 
 ## `PixelFormat` gains signed and 32-bit carriers
 
