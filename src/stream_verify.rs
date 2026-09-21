@@ -1017,4 +1017,30 @@ mod tests {
         bad.extra_rows = 1;
         assert_strip_layout_rejected(bad, "rows");
     }
+    /// The streaming twin of `engine`'s cell of the same name (issue #1123).
+    ///
+    /// Two copies of one function, so a fix applied to one of them leaves the
+    /// other answering a transposed coordinate. They share the bug and not a
+    /// line, which is why they get two tests and not one.
+    #[test]
+    fn a_webp_manifest_key_resolves_to_the_right_coord() {
+        let plan = crate::planner::PyramidPlanner::new(512, 512, 256, 0, Layout::Google)
+            .unwrap()
+            .plan();
+
+        let coord = plan
+            .tile_coords()
+            .find(|c| c.col != c.row)
+            .expect("a Google plan over 512x512 has an off-diagonal tile");
+        let rel = plan.tile_path(coord, "webp").expect("the coord is in plan");
+
+        assert_eq!(
+            coord_for_manifest_rel(&plan, &rel),
+            coord,
+            "a .webp key resolved to the wrong tile in the streaming path"
+        );
+
+        let png = plan.tile_path(coord, "png").expect("the coord is in plan");
+        assert_eq!(coord_for_manifest_rel(&plan, &png), coord);
+    }
 }
