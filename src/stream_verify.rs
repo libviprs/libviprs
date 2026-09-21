@@ -34,7 +34,17 @@ use crate::streaming::{StripSource, obtain_canvas_strip};
 /// the format *is* known, [`active_candidate_exts`] narrows the probe to the
 /// active format so Verify does not validate a stale sibling file (issue #139).
 /// This matches the behaviour of `engine::raster_verify`.
-const CANDIDATE_EXTS: [&str; 4] = ["raw", "png", "jpeg", "jpg"];
+///
+/// Derived from [`TileFormat`](crate::sink::TileFormat) rather than written
+/// out, since issue #1123. It used to be `["raw", "png", "jpeg", "jpg"]`, one
+/// of four hand-written copies of the same list, and adding a `Webp` variant
+/// broke none of them: a WebP tree verified through a format-blind sink
+/// matched nothing here and was reported as a pyramid with no tiles in it. The
+/// list is the same one in the same order with `webp` appended, so nothing
+/// about an existing tree's probe changes.
+fn candidate_exts() -> Vec<&'static str> {
+    crate::sink::TileFormat::candidate_extensions()
+}
 
 /// A [`StripSource`](crate::streaming::StripSource) (or the canvas-embedding
 /// helper it is routed through) returned a strip whose layout does not match
@@ -483,9 +493,8 @@ pub fn verify_from_strip_source(
 /// (issue #139).
 fn active_candidate_exts(sink: &dyn TileSink) -> Vec<&'static str> {
     match sink.content_format() {
-        Some(crate::sink::TileFormat::Jpeg { .. }) => vec!["jpeg", "jpg"],
-        Some(fmt) => vec![fmt.extension()],
-        None => CANDIDATE_EXTS.to_vec(),
+        Some(fmt) => fmt.extensions().to_vec(),
+        None => candidate_exts(),
     }
 }
 
@@ -522,8 +531,9 @@ fn find_tile_on_disk(
 /// #139).
 fn coord_for_manifest_rel(plan: &PyramidPlan, rel: &str) -> TileCoord {
     let normalized = rel.replace('\\', "/");
+    let exts = candidate_exts();
     for coord in plan.tile_coords() {
-        for ext in CANDIDATE_EXTS {
+        for ext in &exts {
             if plan.tile_path(coord, ext).is_some_and(|p| p == normalized) {
                 return coord;
             }
@@ -788,7 +798,7 @@ mod tests {
             .tile_coords()
             .next()
             .expect("plan has at least one tile");
-        for ext in &CANDIDATE_EXTS {
+        for ext in candidate_exts() {
             if let Some(rel) = plan.tile_path(victim, ext) {
                 let abs = out.join(&rel);
                 let _ = std::fs::remove_file(abs);

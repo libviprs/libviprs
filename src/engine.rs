@@ -1163,8 +1163,15 @@ fn parse_tile_rel_path(rel: &str) -> Option<TileCoord> {
 /// produce; if that also fails we surface `TileCoord(0, 0, 0)` (issue #139).
 fn coord_for_manifest_rel(plan: &PyramidPlan, rel: &str) -> TileCoord {
     let normalized = rel.replace('\\', "/");
+    // Derived from `TileFormat` rather than written out (issue #1123). These
+    // four strings used to be a literal here, and a `.webp` key matched none
+    // of them, so the plan scan fell through to `parse_tile_rel_path` and a
+    // Google tree got its col and row swapped. That is the #139 bug arriving
+    // again through a new extension, which is why the list now comes from the
+    // enum.
+    let exts = crate::sink::TileFormat::candidate_extensions();
     for coord in plan.tile_coords() {
-        for ext in ["raw", "png", "jpeg", "jpg"] {
+        for ext in &exts {
             if plan.tile_path(coord, ext).is_some_and(|p| p == normalized) {
                 return coord;
             }
@@ -1264,10 +1271,15 @@ pub fn raster_verify(
     // reports it through `content_format`; when the format is unknown (a
     // transparent wrapper returns `None`) we fall back to probing every known
     // extension as before (issue #139).
+    //
+    // Both halves come from `TileFormat` since issue #1123. The JPEG special
+    // case (`vec!["jpeg", "jpg"]`) and the fallback list were spelled out here
+    // and again in `crate::stream_verify`, so a new variant changed neither
+    // and a WebP tree verified through a format-blind sink reported every tile
+    // missing.
     let candidate_exts: Vec<&'static str> = match sink.content_format() {
-        Some(crate::sink::TileFormat::Jpeg { .. }) => vec!["jpeg", "jpg"],
-        Some(fmt) => vec![fmt.extension()],
-        None => vec!["raw", "png", "jpeg", "jpg"],
+        Some(fmt) => fmt.extensions().to_vec(),
+        None => crate::sink::TileFormat::candidate_extensions(),
     };
 
     for coord in plan.tile_coords() {
