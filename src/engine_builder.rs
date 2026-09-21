@@ -1248,7 +1248,12 @@ fn dispatch_verify(
     // has no reader to offer, which is every sink that writes a tree, and it
     // falls through to the walks below exactly as before.
     if let Some(reader) = sink.open_pyramid_reader().map_err(EngineError::Sink)? {
-        return crate::verify::pyramid_verify(reader.as_ref(), plan, sink, observer);
+        return crate::verify::pyramid_verify(
+            reader.as_ref(),
+            plan,
+            sink.content_format(),
+            observer,
+        );
     }
 
     match (kind, source) {

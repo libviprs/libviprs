@@ -25,7 +25,7 @@ use crate::engine::{EngineError, EngineResult, StageDurations};
 use crate::observe::{EngineEvent, EngineObserver};
 use crate::planner::{PyramidPlan, TileCoord};
 use crate::pyramid_reader::{PyramidReadError, PyramidReader};
-use crate::sink::{SinkError, TileSink};
+use crate::sink::{SinkError, TileFormat};
 
 pub use crate::engine::raster_verify;
 pub use crate::stream_verify::verify_from_strip_source;
@@ -52,7 +52,7 @@ fn unreadable(error: PyramidReadError) -> EngineError {
 /// [`raster_verify`] resolves a checkpoint root and stats
 /// `root.join(plan.tile_path(coord, ext))` for every planned coordinate, which
 /// a single-file archive has no seam to enter; the engine asks the sink for a
-/// [`PyramidReader`] first ([`TileSink::open_pyramid_reader`]) and comes here
+/// [`PyramidReader`] first ([`crate::sink::TileSink::open_pyramid_reader`]) and comes here
 /// when it gets one. It is a sibling of the directory walk and not a
 /// replacement for it: `raster_verify` re-renders from the source and compares
 /// bytes, which is more than a reader can offer and is what keeps the tree's
@@ -108,7 +108,7 @@ fn unreadable(error: PyramidReadError) -> EngineError {
 pub fn pyramid_verify(
     reader: &dyn PyramidReader,
     plan: &PyramidPlan,
-    sink: &dyn TileSink,
+    configured_format: Option<TileFormat>,
     observer: &dyn EngineObserver,
 ) -> Result<EngineResult, EngineError> {
     let started = Instant::now();
@@ -120,11 +120,12 @@ pub fn pyramid_verify(
     reader.self_check().map_err(unreadable)?;
 
     // Check 2. What the pyramid says it is, against what the plan asked for.
-    describe_matches_the_plan(reader, plan, sink)?;
+    describe_matches_the_plan(reader, plan, configured_format)?;
 
     // Check 3. The sweep, top level first, which is the order `raster_verify`
     // walks in and therefore the order an observer already expects.
     let mut probed: u64 = 0;
+    let mut bytes_read: u64 = 0;
     for level_idx in (0..plan.levels.len()).rev() {
         let level = &plan.levels[level_idx];
         observer.on_event(EngineEvent::LevelStarted {
@@ -135,7 +136,7 @@ pub fn pyramid_verify(
         });
         for row in 0..level.rows {
             for col in 0..level.cols {
-                let coord = TileCoord::new(level_idx as u32, col, row);
+                let coord = TileCoord::new(level.level, col, row);
                 let bytes = reader
                     .tile(coord)
                     .map_err(unreadable)?
@@ -151,6 +152,7 @@ pub fn pyramid_verify(
                     )));
                 }
                 probed += 1;
+                bytes_read += bytes.len() as u64;
                 observer.on_event(EngineEvent::tile_completed(coord));
             }
         }
@@ -160,18 +162,25 @@ pub fn pyramid_verify(
         });
     }
 
-    // Check 4. The counts, in both directions and from two independent
-    // derivations: `probed` is what the loop above resolved and `planned` is
-    // what the plan's own iterator yields, so a sweep that walked a different
-    // set of coordinates than the plan describes is caught here rather than
-    // reported as a clean run.
-    let planned = plan.tile_coords().count() as u64;
-    if probed != planned {
-        return Err(refused(format!(
-            "Verify: the sweep resolved {probed} coordinates and the plan has \
-             {planned}; the walk and the plan disagree about which tiles exist"
-        )));
-    }
+    // Check 4. The counts, and only the ones that can fail.
+    //
+    // There used to be a `probed != planned` check here, described as "two
+    // independent derivations". It was neither independent nor able to fail:
+    // `probed` counts one increment per cell of `plan.levels`, and `planned`
+    // was `plan.tile_coords().count()`, which sums the same rows times columns
+    // over the same vector. No input makes them differ, so the branch was dead
+    // while reading as the thing that catches a sweep walking the wrong
+    // coordinates. A count could not have caught that anyway: counts are blind
+    // to permutations, which is the same argument the migration module makes
+    // about tile-id sets.
+    //
+    // What replaces it is structural rather than arithmetic. The sweep now
+    // builds its coordinate from `level.level`, the identical field
+    // `plan.tile_coords()` reads, so the two cannot name different tiles. And
+    // the check below compares against a number that comes out of the
+    // ARCHIVE rather than out of the plan, which is what independent was
+    // supposed to mean.
+    let planned = plan.total_tile_count();
     if probed == 0 {
         return Err(refused(
             "Verify: nothing was checked. A verify over an empty coordinate set \
@@ -203,7 +212,7 @@ pub fn pyramid_verify(
         tiles_skipped: 0,
         levels_processed: plan.levels.len() as u32,
         peak_memory_bytes: 0,
-        bytes_read: 0,
+        bytes_read,
         bytes_written: 0,
         retry_count: 0,
         queue_pressure_peak: 0,
@@ -221,13 +230,13 @@ pub fn pyramid_verify(
 /// report a clean verify for a foreign pyramid nobody's plan produced, which
 /// is the loudest possible disagreement and the one a caller most wants
 /// named. The encoding is the one exception, because
-/// [`TileSink::content_format`] is legitimately `None` for a sink that does
+/// the caller's configured format is legitimately `None` for a sink that does
 /// not commit to a format, and there is then nothing to compare against
 /// rather than something being withheld.
 fn describe_matches_the_plan(
     reader: &dyn PyramidReader,
     plan: &PyramidPlan,
-    sink: &dyn TileSink,
+    configured_format: Option<TileFormat>,
 ) -> Result<(), EngineError> {
     let described = reader.describe().map_err(unreadable)?;
 
@@ -287,7 +296,7 @@ fn describe_matches_the_plan(
         }
     }
 
-    match (described.format, sink.content_format()) {
+    match (described.format, configured_format) {
         (_, None) => {}
         (Some(stored), Some(configured)) if stored == configured => {}
         (Some(stored), Some(configured)) => {
@@ -313,7 +322,7 @@ mod tests {
     use crate::observe::NoopObserver;
     use crate::planner::{Layout, PyramidPlanner};
     use crate::pyramid_reader::PyramidDescription;
-    use crate::sink::{Tile, TileFormat};
+    use crate::sink::{Tile, TileSink};
 
     /// A pyramid that answers whatever the test wants it to.
     ///
@@ -385,7 +394,7 @@ mod tests {
     }
 
     fn verify(reader: &FakePyramid, plan: &PyramidPlan) -> Result<EngineResult, EngineError> {
-        pyramid_verify(reader, plan, &PngSink, &NoopObserver)
+        pyramid_verify(reader, plan, PngSink.content_format(), &NoopObserver)
     }
 
     /// A tile stored with no bytes is `Some(vec![])`, and it is not a tile.

@@ -384,9 +384,9 @@ fn src_dir() -> PathBuf {
 /// Every `src/**/*.rs` file, named relative to `src/`.
 ///
 /// Recursive, because `read_dir` alone stops at the top level and a codec that
-/// moved into a subdirectory would leave this reading nothing about it. There
-/// are no subdirectories under `src/` today, which is exactly why a
-/// non-recursive walk would look correct.
+/// moved into a subdirectory would leave this reading nothing about it.
+/// `src/pmtiles/` and `src/cad/` are both subdirectories, which is what the
+/// recursion is for.
 fn rust_sources() -> Vec<(String, String)> {
     fn walk(dir: &Path, prefix: &str, out: &mut Vec<(String, String)>) {
         let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)

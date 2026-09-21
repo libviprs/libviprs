@@ -32,9 +32,15 @@
 //! - **`pdfium`** — enables [`render_page_pdfium`], [`render_page_pdfium_budgeted`],
 //!   and [`PdfiumStripSource`] for full vector PDF rendering via the pdfium library.
 //! - **`pdfium-static`** — implies `pdfium` and statically links libpdfium.
-//! - **`object-store-sink`** — gates the [`sink_object_store`] module
-//!   ([`ObjectStoreSink`]) against a user-injected [`ObjectStore`] backend. The
-//!   former name **`s3`** is retained as a deprecated alias
+//! - **`object-store-sink`** — gates both halves of the injected-backend
+//!   seam. Writing: the [`sink_object_store`] module ([`ObjectStoreSink`])
+//!   against a user-injected [`ObjectStore`] backend. Reading: that same
+//!   trait's `get_range` and `size` methods,
+//!   [`ObjectStoreRangeReader`](pmtiles::ObjectStoreRangeReader) in
+//!   [`pmtiles::range`], and
+//!   [`PmTilesPyramidReader::try_from_object_store`](pyramid_reader::PmTilesPyramidReader::try_from_object_store).
+//!   Neither half ships a transport; both take the caller's. The former name
+//!   **`s3`** is retained as a deprecated alias
 //!   (`s3 = ["object-store-sink"]`) that enables the same module; prefer
 //!   `object-store-sink`, as the `s3` alias will be removed in a future release.
 //! - **`tracing`** — emits structured spans and events via the `tracing` crate.
@@ -125,6 +131,7 @@ pub mod analyze;
 pub mod arithmetic;
 pub mod avif;
 pub mod bands;
+pub mod cad;
 pub mod cancel;
 pub mod checksum;
 pub mod codec;
@@ -207,6 +214,12 @@ pub mod webp;
 // flood callers with implementation detail.
 pub use arithmetic::{ArithmeticError, Comparand};
 pub use bands::BandError;
+// The decoder contract and the primitive IR (issue #1029). Types and entry
+// points only: the eight primitive structs stay behind `libviprs::cad::`
+// because `Line`, `Text` and `Arc` are names a crate root has no business
+// claiming — `draw::DrawOp::Line` and `std::sync::Arc` are both one glob
+// import away.
+pub use cad::{CadDecoder, CadDrawing, CadError, CadSource, CadView, DecodeReport, PrimitiveSink};
 pub use cancel::CancelToken;
 pub use checksum::{ChecksumMode, VerifyError, VerifyReport};
 pub use codec::{DecodeError, EncodeError, JpegSubsample, TiffCompression};

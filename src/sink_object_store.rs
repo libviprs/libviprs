@@ -88,6 +88,71 @@ pub trait ObjectStore: Send + Sync {
                 .into(),
         ))
     }
+
+    /// Read exactly `len` bytes of the object at `key`, starting at `offset`.
+    ///
+    /// This is the read half of the transport seam (issue #1121). A PMTiles
+    /// archive is read entirely through ranged fetches, so this is the one
+    /// method a backend has to implement to be handed to
+    /// [`ObjectStoreRangeReader`](crate::pmtiles::ObjectStoreRangeReader) and
+    /// have an archive open over it, with no other change anywhere. Overriding
+    /// [`ObjectStore::size`] as well is optional, and what it buys is the
+    /// reader's section bounds checks.
+    ///
+    /// **Defaulted to a loud refusal**, the same shape [`ObjectStore::list`]
+    /// uses and for the same reason: a write-only backend should say it cannot
+    /// read rather than invent an answer.
+    ///
+    /// **Returning more or fewer bytes than `len` is a contract violation**,
+    /// and the bridge checks it rather than trusting it. Both directions are
+    /// real: a server that ignores `Range` answers 200 with the whole object,
+    /// and a connection that drops mid-body answers short. Implementations
+    /// should still refuse a range that runs past the end of the object rather
+    /// than clamping it, because a clamped range is a short read wearing a
+    /// success.
+    fn get_range(&self, key: &str, offset: u64, len: usize) -> Result<Vec<u8>, SinkError> {
+        let _ = (key, offset, len);
+        Err(SinkError::Unsupported(
+            "get_range: this ObjectStore backend does not implement a ranged \
+             READ (ObjectStore::get_range is defaulted to refuse). A \
+             read-capable backend overrides it; write-only backends inherit \
+             this loud failure."
+                .into(),
+        ))
+    }
+
+    /// The total size of the object at `key`, when the backend knows it
+    /// cheaply.
+    ///
+    /// A reader uses it to bounds-check a header's claimed section offsets
+    /// against the real object before believing any of them.
+    ///
+    /// **Defaulted to a refusal, deliberately not to `Ok(None)`.** That is the
+    /// one choice in this module worth reading twice. `None` is a *legal*
+    /// answer from [`RangeReader::size`](crate::pmtiles::RangeReader::size),
+    /// because a streaming transport genuinely may not know, and it disables
+    /// the four `SectionOutOfBounds` checks in `Reader::try_new`. So a default
+    /// of `Ok(None)` would hand every backend that never thought about `size`
+    /// a reader with those checks quietly switched off, and nothing anywhere
+    /// would report a problem. A refusal makes a backend say out loud that it
+    /// has not implemented the HEAD, and the bridge is what decides that a
+    /// refusal (and *only* a refusal, never a transient failure) means
+    /// "unknown".
+    ///
+    /// A backend that can answer returns `Ok(Some(bytes))`. `Ok(None)` is for
+    /// a backend that implemented this, asked, and genuinely got no answer.
+    fn size(&self, key: &str) -> Result<Option<u64>, SinkError> {
+        let _ = key;
+        Err(SinkError::Unsupported(
+            "size: this ObjectStore backend does not implement a HEAD \
+             (ObjectStore::size is defaulted to refuse). A read-capable \
+             backend overrides it; write-only backends inherit this loud \
+             failure. Do not default this to Ok(None): None is a legal \
+             RangeReader answer and it costs the reader its section bounds \
+             checks."
+                .into(),
+        ))
+    }
 }
 
 // ---------------------------------------------------------------------------
