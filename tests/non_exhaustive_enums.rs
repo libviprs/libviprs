@@ -11,11 +11,12 @@
 //! a pure compile-time check; if any of the enums below regresses to exhaustive
 //! this test crate fails to build.
 
+use libviprs::cad::{Primitive, PrimitiveKind, Severity, ViewKind};
 use libviprs::{
-    Align, AvifError, BandError, ColourError, Combine, DrawError, EngineEvent, ExrError, FitsError,
-    GifError, Intent, Interpretation, JoinDirection, Jp2kError, JxlError, Layout, ManifestError,
-    MetadataValue, Pcs, PdfError, PixelFormat, PlannerError, Precision, PyramidStorage,
-    RadianceError, RasterError, ResumeError, SourceError, VerifyError,
+    Align, AvifError, BandError, CadError, CadSource, ColourError, Combine, DrawError, EngineEvent,
+    ExrError, FitsError, GifError, Intent, Interpretation, JoinDirection, Jp2kError, JxlError,
+    Layout, ManifestError, MetadataValue, Pcs, PdfError, PixelFormat, PlannerError, Precision,
+    PyramidStorage, RadianceError, RasterError, ResumeError, SourceError, VerifyError,
 };
 
 #[deny(unreachable_patterns)]
@@ -477,6 +478,14 @@ fn non_exhaustive_checks_compile() {
     assert_intent_non_exhaustive(&Intent::Perceptual);
     assert_pcs_non_exhaustive(&Pcs::Lab);
     assert_metadata_value_non_exhaustive(&MetadataValue::Int(1));
+    assert_cad_error_non_exhaustive(&CadError::TextEmpty);
+    assert_cad_source_non_exhaustive(&CadSource::Bytes(b"AC1032"));
+    assert_view_kind_non_exhaustive(&ViewKind::Model);
+    assert_severity_non_exhaustive(&Severity::Warning);
+    assert_primitive_kind_non_exhaustive(&PrimitiveKind::Line);
+    assert_primitive_non_exhaustive(&Primitive::Line(
+        libviprs::cad::Line::new([0.0; 3], [1.0, 0.0, 0.0]).expect("a finite line"),
+    ));
 }
 
 #[deny(unreachable_patterns)]
@@ -521,6 +530,106 @@ fn assert_align_non_exhaustive(v: &Align) {
         Align::Low => {}
         Align::Centre => {}
         Align::High => {}
+        _ => {}
+    }
+}
+
+/// The CAD decoder contract's error, which is the one a provider's every
+/// refusal arrives through (issue #1029). It grows a variant every time the
+/// IR learns to refuse something, which is exactly the shape #946 recorded as
+/// the defect when `AvifError` was the one public error enum missing from
+/// this file.
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_cad_error_non_exhaustive(v: &CadError) {
+    match v {
+        CadError::NonFinite { .. } => {}
+        CadError::NonPositive { .. } => {}
+        CadError::ZeroLengthVector { .. } => {}
+        CadError::EmptySweep { .. } => {}
+        CadError::TooFewVertices { .. } => {}
+        CadError::CountMismatch { .. } => {}
+        CadError::SplineDegree { .. } => {}
+        CadError::SplineControlCount { .. } => {}
+        CadError::SplineKnotCount { .. } => {}
+        CadError::KnotsDecrease { .. } => {}
+        CadError::TextEscapeNotDecoded { .. } => {}
+        CadError::TextEmpty => {}
+        CadError::NoSuchView { .. } => {}
+        CadError::UnrecognisedSource { .. } => {}
+        CadError::Io(_) => {}
+        CadError::Provider { .. } => {}
+        CadError::Sink(_) => {}
+        _ => {}
+    }
+}
+
+/// A drawing arrives as a path or as bytes today. A provider that can stream
+/// one, or take an already-parsed handle, is a third variant and not a major
+/// version.
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_cad_source_non_exhaustive(v: &CadSource<'_>) {
+    match v {
+        CadSource::Path(_) => {}
+        CadSource::Bytes(_) => {}
+        _ => {}
+    }
+}
+
+/// Model space and the layouts, plus the arm that keeps a kind a later build
+/// names representable.
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_view_kind_non_exhaustive(v: &ViewKind) {
+    match v {
+        ViewKind::Model => {}
+        ViewKind::Layout => {}
+        ViewKind::Unknown => {}
+        _ => {}
+    }
+}
+
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_severity_non_exhaustive(v: &Severity) {
+    match v {
+        Severity::Warning => {}
+        Severity::Error => {}
+        _ => {}
+    }
+}
+
+/// The eight shapes the IR carries. A ninth is a change to this crate rather
+/// than to any file format, and it must not break a consumer's match.
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_primitive_kind_non_exhaustive(v: &PrimitiveKind) {
+    match v {
+        PrimitiveKind::Line => {}
+        PrimitiveKind::Polyline => {}
+        PrimitiveKind::Arc => {}
+        PrimitiveKind::Circle => {}
+        PrimitiveKind::Ellipse => {}
+        PrimitiveKind::Spline => {}
+        PrimitiveKind::Polygon => {}
+        PrimitiveKind::Text => {}
+        _ => {}
+    }
+}
+
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_primitive_non_exhaustive(v: &Primitive) {
+    match v {
+        Primitive::Line(_) => {}
+        Primitive::Polyline(_) => {}
+        Primitive::Arc(_) => {}
+        Primitive::Circle(_) => {}
+        Primitive::Ellipse(_) => {}
+        Primitive::Spline(_) => {}
+        Primitive::Polygon(_) => {}
+        Primitive::Text(_) => {}
         _ => {}
     }
 }

@@ -269,6 +269,7 @@ from here for exactly one commit.
 | `textio` | The libvips `matrix` and `csv` text codecs, plus the binary Netpbm containers |
 | `frames` | The page model for multi-frame images: how a raster's rows divide into pages |
 | `foreign_stubs` | Typed stubs for the genuinely external formats this build does not link (HEIF/AVIF encode, ImageMagick, DeepZoom buffers) |
+| `cad` | The `CadDecoder` contract and the primitive IR (lines, arcs, splines, text) a CAD drawing decodes into, with curves kept as curves and a structured `DecodeReport` |
 
 ### Image operations
 
