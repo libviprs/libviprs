@@ -4397,4 +4397,42 @@ mod tests {
             );
         }
     }
+    /// A `.webp` manifest key resolves to the coordinate that wrote it
+    /// (issue #1123, re-opening #139).
+    ///
+    /// The extension list inside `coord_for_manifest_rel` is one of the five
+    /// sites a new `TileFormat` variant does not break. Miss it and the plan
+    /// scan never matches a `.webp` key, so the structural fallback answers
+    /// instead, and the fallback is layout-blind: it reads
+    /// `{level}/{a}/{b}` as `{level}/{col}/{row}` while a Google tree stores
+    /// `{level}/{row}/{col}`. The wrong answer is a real coordinate with its
+    /// col and row swapped, which is exactly what #139 was filed about, so
+    /// this asserts *which* coordinate comes back rather than that one does.
+    #[test]
+    fn a_webp_manifest_key_resolves_to_the_right_coord() {
+        let plan = PyramidPlanner::new(512, 512, 256, 0, Layout::Google)
+            .unwrap()
+            .plan();
+
+        // A coordinate whose col and row differ, so a transposition is
+        // visible. A square grid full of (n, n) cells could not fail.
+        let coord = plan
+            .tile_coords()
+            .find(|c| c.col != c.row)
+            .expect("a Google plan over 512x512 has an off-diagonal tile");
+        let rel = plan.tile_path(coord, "webp").expect("the coord is in plan");
+
+        assert_eq!(
+            coord_for_manifest_rel(&plan, &rel),
+            coord,
+            "a .webp key resolved to the wrong tile; the transposed answer is \
+             what the layout-blind fallback gives when the plan scan misses"
+        );
+
+        // The control: the same key under an extension the list already knew
+        // has always resolved correctly, so a failure above is about webp and
+        // not about the scan itself.
+        let png = plan.tile_path(coord, "png").expect("the coord is in plan");
+        assert_eq!(coord_for_manifest_rel(&plan, &png), coord);
+    }
 }
