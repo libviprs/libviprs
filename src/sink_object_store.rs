@@ -342,6 +342,10 @@ fn encode_tile(raster: &Raster, format: TileFormat) -> Result<Vec<u8>, SinkError
         TileFormat::Raw => Ok(raster.data().to_vec()),
         TileFormat::Png => encode_png(raster),
         TileFormat::Jpeg { quality } => encode_jpeg_local(raster, quality),
+        // Shared with `FsSink` rather than copied, unlike the JPEG wrapper
+        // above: there is no `image`-crate encoder to wrap here, so the one
+        // in `crate::sink` is the only implementation.
+        TileFormat::Webp => crate::sink::encode_webp(raster),
     }
 }
 

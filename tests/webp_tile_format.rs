@@ -48,8 +48,9 @@ use libviprs::pmtiles::{Compression, LibviprsMetadata, Metadata, TileType, Write
 use libviprs::pyramid_reader::{PmTilesPyramidReader, PyramidReadError, PyramidReader};
 use libviprs::sink::{SinkError, Tile, TileFormat, TileSink};
 use libviprs::sink_pmtiles::PmTilesSink;
-use libviprs::streaming::RasterStripSource;
+use libviprs::source::DecodeLimits;
 use libviprs::stream_verify::verify_from_strip_source;
+use libviprs::streaming::RasterStripSource;
 use libviprs::{EngineBuilder, FsSink, PixelFormat, Raster};
 
 // ---------------------------------------------------------------------------
@@ -132,7 +133,10 @@ fn the_probe_set_is_derived_from_the_enum() {
     // Every variant contributes its own spellings, and JPEG contributes two
     // because a tile written by another tool can be `.jpg`.
     assert_eq!(TileFormat::Webp.extensions(), &["webp"]);
-    assert_eq!(TileFormat::Jpeg { quality: 80 }.extensions(), &["jpeg", "jpg"]);
+    assert_eq!(
+        TileFormat::Jpeg { quality: 80 }.extensions(),
+        &["jpeg", "jpg"]
+    );
 
     let probe = TileFormat::candidate_extensions();
     assert_eq!(
@@ -189,14 +193,8 @@ fn a_webp_tree_verifies_through_a_format_blind_sink_streaming() {
     );
 
     let strip = RasterStripSource::new(&src);
-    let res = verify_from_strip_source(
-        &strip,
-        &p,
-        &blind,
-        &EngineConfig::default(),
-        &NoopObserver,
-    )
-    .expect("a webp tree verifies through a format-blind sink");
+    let res = verify_from_strip_source(&strip, &p, &blind, &EngineConfig::default(), &NoopObserver)
+        .expect("a webp tree verifies through a format-blind sink");
     assert_eq!(res.tiles_produced, 0, "verify must not write tiles");
     assert_eq!(res.levels_processed, p.levels.len() as u32);
 }
@@ -242,14 +240,8 @@ fn a_webp_tree_with_a_hole_still_fails_through_a_format_blind_sink() {
 
     let blind = FormatBlind(FsSink::new(&root, p.clone()).with_format(TileFormat::Webp));
     let strip = RasterStripSource::new(&src);
-    verify_from_strip_source(
-        &strip,
-        &p,
-        &blind,
-        &EngineConfig::default(),
-        &NoopObserver,
-    )
-    .expect_err("a missing webp tile must not verify");
+    verify_from_strip_source(&strip, &p, &blind, &EngineConfig::default(), &NoopObserver)
+        .expect_err("a missing webp tile must not verify");
 }
 
 // ---------------------------------------------------------------------------
@@ -324,7 +316,8 @@ fn a_pmtiles_webp_archive_round_trips_pixel_exact() {
             .tile(coord)
             .expect("reading a planned tile is not an error")
             .unwrap_or_else(|| panic!("the archive is missing {coord:?}"));
-        let decoded = libviprs::decode_webp(&stored).expect("the stored bytes are webp");
+        let decoded = libviprs::decode_webp(&stored, DecodeLimits::default())
+            .expect("the stored bytes are webp");
 
         let rel = p
             .tile_path(coord, "raw")
@@ -469,8 +462,7 @@ fn a_foreign_archive_with_unparseable_metadata_still_describes() {
     let archive = dir.path().join("foreign-broken.pmtiles");
 
     let mut meta = Metadata::default();
-    meta.extra
-        .insert("type".to_string(), serde_json::json!(5));
+    meta.extra.insert("type".to_string(), serde_json::json!(5));
     write_foreign_archive(&archive, TileType::Png, meta);
 
     let reader = PmTilesPyramidReader::try_open(&archive).expect("the archive reopens");
@@ -506,7 +498,8 @@ fn a_foreign_archive_with_unparseable_metadata_still_describes() {
 /// `Repr` arm would break without the build noticing.
 #[test]
 fn the_manifest_wire_shape_for_webp_parses_back() {
-    let wire = r#"{"tile_size":256,"overlap":0,"layout":"xyz","format":{"kind":"webp"},"#.to_string()
+    let wire = r#"{"tile_size":256,"overlap":0,"layout":"xyz","format":{"kind":"webp"},"#
+        .to_string()
         + r#""concurrency":4,"background_rgb":[0,0,0],"blank_strategy":{"kind":"emit"}}"#;
     let settings: GenerationSettings =
         serde_json::from_str(&wire).expect("the webp wire shape parses");

@@ -14,7 +14,7 @@
 //!
 //! - `Layout`: `"deep_zoom"`, `"xyz"`, `"google"` (snake_case only).
 //! - `TileFormat`: `{"kind": "png"}`, `{"kind": "jpeg", "quality": N}`,
-//!   `{"kind": "raw"}`.
+//!   `{"kind": "raw"}`, `{"kind": "webp"}`.
 //! - `PixelFormat`: `"gray8"`, `"gray16"`, `"rgb8"`, `"rgba8"`, `"rgb16"`,
 //!   `"rgba16"`, `"rgbaf32"`; the multiband and float compute
 //!   intermediates as `"multi8:N"`, `"multi16:N"`, `"floatf32:N"`.
@@ -25,6 +25,18 @@
 //! delete these adapters once the upstream types derive serde.
 //!
 //! Forward compatibility is preserved by NOT using `#[serde(deny_unknown_fields)]`.
+//!
+//! That covers unknown *fields* and it does not cover unknown *variants*, and
+//! the difference is where issue #1123's forward-compatibility decision came
+//! from. A `{"kind": "avif"}` written by a later libviprs is an unknown
+//! variant of `Repr`, and serde has no lenient spelling for that: the arm does
+//! not exist, so the whole enclosing object fails to parse. There is no
+//! `LIBVIPRS_META_VERSION` check anywhere that would catch it first, because
+//! nothing gates on that constant at all; serde's unknown-variant error *is*
+//! the version gate, and it fires at the outermost object rather than at the
+//! field that caused it. See
+//! [`PmTilesPyramidReader::describe`](crate::pyramid_reader::PmTilesPyramidReader)
+//! for what a reader does with that, which is the other half of the decision.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -186,8 +198,16 @@ mod tile_format_serde {
     #[serde(tag = "kind", rename_all = "lowercase")]
     enum Repr {
         Png,
-        Jpeg { quality: u8 },
+        Jpeg {
+            quality: u8,
+        },
         Raw,
+        /// `{"kind":"webp"}`, with no second key (issue #1123).
+        ///
+        /// A `quality` beside it would be a field the encoder throws away;
+        /// see [`TileFormat::Webp`] for why it is unrepresentable rather than
+        /// merely undocumented.
+        Webp,
     }
 
     pub fn serialize<S: Serializer>(v: &TileFormat, s: S) -> Result<S::Ok, S::Error> {
@@ -195,6 +215,7 @@ mod tile_format_serde {
             TileFormat::Png => Repr::Png,
             TileFormat::Jpeg { quality } => Repr::Jpeg { quality },
             TileFormat::Raw => Repr::Raw,
+            TileFormat::Webp => Repr::Webp,
         };
         r.serialize(s)
     }
@@ -205,6 +226,7 @@ mod tile_format_serde {
             Repr::Png => TileFormat::Png,
             Repr::Jpeg { quality } => TileFormat::Jpeg { quality },
             Repr::Raw => TileFormat::Raw,
+            Repr::Webp => TileFormat::Webp,
         })
     }
 }
