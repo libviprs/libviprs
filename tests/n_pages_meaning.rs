@@ -159,8 +159,8 @@ fn test_module_cut(text: &str) -> Option<usize> {
 ///
 /// Recursive, because `read_dir` alone stops at the top level and a loader
 /// that moved into a subdirectory would leave the guard reading nothing at all
-/// about it. There are no subdirectories under `src/` today, which is exactly
-/// why the old non-recursive walk looked correct.
+/// about it. `src/pmtiles/` and `src/cad/` are both subdirectories, which is
+/// what the recursion is for.
 fn rust_sources() -> Vec<(String, PathBuf)> {
     fn walk(dir: &Path, prefix: &str, out: &mut Vec<(String, PathBuf)>) {
         let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
