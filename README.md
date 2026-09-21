@@ -230,7 +230,7 @@ from here for exactly one commit.
 | `streaming_mapreduce` | Parallel strip engine and `MapReduceConfig` |
 | `sink` | Tile output (filesystem, memory, slow sink for testing) |
 | `sink_packfile` | `PackfileSink` writing tiles into a tar/zip archive (gated by `packfile`) |
-| `sink_object_store` | `ObjectStoreSink` for user-injected object storage backends (gated by `object-store-sink`; the deprecated `s3` alias also enables it) |
+| `sink_object_store` | The `ObjectStore` trait and `ObjectStoreSink`, for user-injected object storage backends on both the write and the read side (gated by `object-store-sink`; the deprecated `s3` alias also enables it) |
 | `storage` | `PyramidStorage`: which storage a pyramid lands in, the output path that choice resolves to, and the layouts each one holds |
 | `pmtiles` | PMTiles v3 archive format: 127-byte header, Hilbert TileIDs, directories, metadata, ranged reads, and a streaming bounded-memory `Writer` |
 | `sink_pmtiles` | `PmTilesSink` writing a whole pyramid into one PMTiles v3 archive |
@@ -310,7 +310,7 @@ from here for exactly one commit.
 |---|---|---|
 | `pdfium` | off | Enables `render_page_pdfium()`, `render_page_pdfium_budgeted()`, and `PdfiumStripSource` for vector PDF rendering. Requires libpdfium at runtime. |
 | `pdfium-static` | off | Implies `pdfium` and links libpdfium statically via `pdfium-render/static`. |
-| `object-store-sink` | off | Enables the `sink_object_store` module (`ObjectStoreSink` against a user-injected `ObjectStore`). Ships no built-in S3 transport — a backend must be injected. |
+| `object-store-sink` | off | Enables the `sink_object_store` module (`ObjectStoreSink` against a user-injected `ObjectStore`) and the read side of the same trait: `ObjectStore::get_range`, `ObjectStore::size`, `pmtiles::ObjectStoreRangeReader` and `PmTilesPyramidReader::try_from_object_store`. Ships no built-in S3 or HTTP transport, so a backend must be injected. |
 | `s3` | off | **Deprecated alias** for `object-store-sink`, retained so consumers pinned to the old feature name keep building. Prefer `object-store-sink`; the `s3` alias will be removed in a future release. |
 | `tracing` | off | Emits structured `tracing` spans and events from the engine pipeline. |
 | `packfile` | off | Enables `PackfileSink` for writing tiles into a tar or zip archive. |

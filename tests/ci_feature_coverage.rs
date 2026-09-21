@@ -148,8 +148,13 @@ const EXPECTED: &[(&str, Coverage)] = &[
             true,
             false,
             true,
-            "gates src/sink_object_store.rs and its unit tests (issue #382); \
-             adds no crate without a rust-version",
+            "gates both halves of the injected-backend seam and their tests: \
+             src/sink_object_store.rs on the write side (issue #382), and on \
+             the read side ObjectStore::get_range / ObjectStore::size, \
+             ObjectStoreRangeReader in src/pmtiles/range.rs, \
+             PmTilesPyramidReader::try_from_object_store and \
+             tests/pmtiles_object_store_range.rs (issue #1121); adds no crate \
+             without a rust-version",
         ),
     ),
     (

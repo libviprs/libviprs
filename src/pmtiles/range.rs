@@ -6,9 +6,13 @@
 //! makes a 40 GB archive on an object store behave like a local one.
 //!
 //! [`RangeReader`] is the single seam that makes that true for any transport.
-//! This issue ships the local one, [`FileRangeReader`]; an HTTP or S3 backend
-//! is another implementation of the same three-method trait and needs no
-//! change to the reader or the writer above it.
+//! Two implementations live here: the local one, [`FileRangeReader`], and
+//! [`ObjectStoreRangeReader`], which bridges the trait onto the injected
+//! [`ObjectStore`](crate::sink_object_store::ObjectStore) the write side
+//! already takes. An HTTP or S3 backend is neither of those. It is
+//! [`RangeReader::read_range`] written by somebody else, plus
+//! [`RangeReader::size`] if their transport can cheaply answer it, and it
+//! needs no change to the reader or the writer above it.
 //!
 //! # Object-safe, on purpose
 //!
@@ -19,6 +23,16 @@
 //! command line cannot reach it. There is a test whose only job is to coerce
 //! one, because object safety is the kind of property that a single
 //! innocent-looking method signature quietly removes.
+//!
+//! Object safety is only half of what a runtime-chosen backend needs, though,
+//! and the other half was missing until #1121. `Reader<R>` takes `R` by value
+//! under an `R: RangeReader` bound, so a trait object has to satisfy that
+//! bound *through its wrapper*, and `Box<dyn RangeReader>` did not implement
+//! the trait at all. Nothing noticed, because the coercion test only ever
+//! called `read_range` **through** the box and method auto-deref resolves that
+//! either way. So [`RangeReader`] is now implemented for `Box<R>` and
+//! `Arc<R>`, for `R: ?Sized`, which is what makes `Reader<Box<dyn
+//! RangeReader>>` a thing you can write.
 //!
 //! # Positional reads, not seek-then-read
 //!
@@ -70,6 +84,47 @@ pub trait RangeReader: Send + Sync {
     /// false refusal.
     fn size(&self) -> io::Result<Option<u64>> {
         Ok(None)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pointer wrappers
+// ---------------------------------------------------------------------------
+
+/// A boxed reader is a reader.
+///
+/// `?Sized` is the whole point: without it this covers `Box<FileRangeReader>`,
+/// which nobody has ever wanted, and not `Box<dyn RangeReader>`, which is the
+/// only shape a CLI choosing a backend from a URI scheme can produce.
+///
+/// This is a permanent coherence commitment. Nobody outside this crate can
+/// ever write their own `impl RangeReader for Box<TheirType>`, because the
+/// blanket impl here already covers it. That is the right trade for a trait
+/// whose reason to exist is being usable behind a pointer, and it is the same
+/// bargain `std` makes for `Read`, `Write` and `Iterator`.
+impl<R: RangeReader + ?Sized> RangeReader for Box<R> {
+    fn read_range(&self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+        (**self).read_range(offset, len)
+    }
+
+    fn size(&self) -> io::Result<Option<u64>> {
+        (**self).size()
+    }
+}
+
+/// An `Arc`'d reader is a reader, for the same reasons as [`Box<R>`].
+///
+/// Worth having separately because the engine shares one reader across its
+/// workers, and sharing is what `Arc` is for: an `Arc<dyn RangeReader>` can go
+/// into a `Reader` and still be held elsewhere, where a `Box` has to be given
+/// away.
+impl<R: RangeReader + ?Sized> RangeReader for std::sync::Arc<R> {
+    fn read_range(&self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+        (**self).read_range(offset, len)
+    }
+
+    fn size(&self) -> io::Result<Option<u64>> {
+        (**self).size()
     }
 }
 
@@ -192,6 +247,206 @@ impl FileRangeReader {
         let mut file = &self.file;
         file.seek(SeekFrom::Start(offset))?;
         file.read_exact(buf)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ObjectStoreRangeReader — the transport seam (issue #1121)
+// ---------------------------------------------------------------------------
+
+/// A [`RangeReader`] over one object in an injected
+/// [`ObjectStore`](crate::sink_object_store::ObjectStore).
+///
+/// The write side of this crate has taken an injected backend since #382, and
+/// this is its counterpart: hand it a store and a key and a PMTiles archive
+/// opens over whatever that store talks to. libviprs still ships no HTTP or S3
+/// client and #1119 records that as a permanent decision, so the transport is
+/// the caller's and the trait is the product.
+///
+/// # The two lines that carry this type
+///
+/// Everything else here is forwarding. These two are not, and both exist
+/// because a real transport fails in ways no in-tree test double can:
+///
+/// * **[`read_range`](RangeReader::read_range) checks the length it got.** A
+///   server that ignores `Range` answers 200 with the whole object, and
+///   without this check the reader takes the first 127 bytes of a 40 GB body,
+///   decodes a perfectly valid header out of them and goes on to inflate
+///   whatever happens to sit at the root offset. Nothing errors. The same one
+///   line catches the other direction, a connection that drops mid-body and
+///   returns a directory page that stops in the middle of a column.
+/// * **[`size`](RangeReader::size) maps only
+///   [`SinkError::Unsupported`](crate::sink::SinkError::Unsupported) to
+///   `Ok(None)`.** `None` means "this backend cannot cheaply say", which is
+///   legal and which costs the reader the four `SectionOutOfBounds` checks in
+///   [`Reader::try_new`](crate::pmtiles::Reader::try_new). A transient failure
+///   is not that. Written as `.ok().flatten()` it would be, and the archive
+///   would still open, still serve tiles, and quietly have lost its bounds
+///   checks.
+///
+/// # Examples
+///
+/// ```
+/// use std::sync::Arc;
+///
+/// use libviprs::pmtiles::{ObjectStoreRangeReader, RangeReader};
+/// use libviprs::sink::SinkError;
+/// use libviprs::sink_object_store::ObjectStore;
+///
+/// /// A backend that happens to hold its bytes in memory. A real one puts
+/// /// the same two methods on the wire.
+/// struct InMemory(Vec<u8>);
+///
+/// impl ObjectStore for InMemory {
+///     fn put(&self, _key: &str, _bytes: &[u8]) -> Result<(), SinkError> {
+///         Err(SinkError::Unsupported("read-only".into()))
+///     }
+///     fn get_range(&self, _key: &str, offset: u64, len: usize) -> Result<Vec<u8>, SinkError> {
+///         let start = offset as usize;
+///         Ok(self.0[start..start + len].to_vec())
+///     }
+///     fn size(&self, _key: &str) -> Result<Option<u64>, SinkError> {
+///         Ok(Some(self.0.len() as u64))
+///     }
+/// }
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let store = Arc::new(InMemory(b"PMTiles and then some".to_vec()));
+/// let reader = ObjectStoreRangeReader::new(store, "tiles/drawing.pmtiles");
+///
+/// assert_eq!(reader.read_range(0, 7)?, b"PMTiles".to_vec());
+/// assert_eq!(reader.size()?, Some(21));
+/// # Ok(())
+/// # }
+/// ```
+#[cfg(feature = "object-store-sink")]
+#[cfg_attr(docsrs, doc(cfg(feature = "object-store-sink")))]
+pub struct ObjectStoreRangeReader {
+    store: std::sync::Arc<dyn crate::sink_object_store::ObjectStore>,
+    key: String,
+}
+
+#[cfg(feature = "object-store-sink")]
+impl std::fmt::Debug for ObjectStoreRangeReader {
+    /// Hand-written because `Arc<dyn ObjectStore>` is not `Debug` and the
+    /// trait is not going to grow it: a backend is somebody else's type and
+    /// requiring `Debug` of it would be this crate choosing their derives. The
+    /// key is the half worth printing anyway, and it is what a
+    /// `Reader { source: .. }` dump needs to be useful.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ObjectStoreRangeReader")
+            .field("key", &self.key)
+            .field("store", &"<dyn ObjectStore>")
+            .finish()
+    }
+}
+
+#[cfg(feature = "object-store-sink")]
+impl ObjectStoreRangeReader {
+    /// Point a reader at one object in a store.
+    ///
+    /// Not `try_new`: nothing is contacted here. The first request is the
+    /// header read the reader above it makes, which is also where a wrong key
+    /// or an unreachable endpoint shows up.
+    pub fn new(
+        store: std::sync::Arc<dyn crate::sink_object_store::ObjectStore>,
+        key: impl Into<String>,
+    ) -> Self {
+        Self {
+            store,
+            key: key.into(),
+        }
+    }
+
+    /// The backend underneath, for a caller that wants to reach it again.
+    pub fn store(&self) -> &std::sync::Arc<dyn crate::sink_object_store::ObjectStore> {
+        &self.store
+    }
+
+    /// The key every request carries, verbatim.
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+}
+
+/// A backend failure on its way through [`RangeReader`].
+///
+/// It exists so the concrete [`SinkError`](crate::sink::SinkError) survives
+/// into the `source()` chain. `io::Error`'s own `source()` delegates to the
+/// custom payload's source rather than handing back the payload, so wrapping
+/// the `SinkError` directly would put it one layer out of reach of a
+/// chain walk. `tests/error_source_typing.rs` is the file that made "a typed
+/// error must not be laundered into a string" a rule here.
+#[cfg(feature = "object-store-sink")]
+#[derive(Debug, thiserror::Error)]
+#[error("object store: {0}")]
+struct ObjectStoreFailure(#[source] crate::sink::SinkError);
+
+#[cfg(feature = "object-store-sink")]
+impl ObjectStoreFailure {
+    /// Turn a backend failure into the `io::Error` the trait returns, keeping
+    /// the `ErrorKind` when the backend had one.
+    ///
+    /// The kind matters to a caller that retries: a `ConnectionReset` is worth
+    /// another attempt and an `Unsupported` never is, and flattening both to
+    /// `Other` would throw that away at the one boundary where it is known.
+    fn into_io(error: crate::sink::SinkError) -> io::Error {
+        let kind = match &error {
+            crate::sink::SinkError::Io(inner) => inner.kind(),
+            crate::sink::SinkError::Unsupported(_) => io::ErrorKind::Unsupported,
+            _ => io::ErrorKind::Other,
+        };
+        io::Error::new(kind, Self(error))
+    }
+}
+
+#[cfg(feature = "object-store-sink")]
+impl RangeReader for ObjectStoreRangeReader {
+    fn read_range(&self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+        // A zero-length range is the empty answer and never a request. The
+        // reader asks for one whenever a section is empty, and a round trip
+        // for nothing is still a round trip.
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+
+        let got = self
+            .store
+            .get_range(&self.key, offset, len)
+            .map_err(ObjectStoreFailure::into_io)?;
+
+        // The line the whole type is for. Read the doc comment above before
+        // deleting it: a body that is too long is a 200 where a 206 was asked
+        // for, and the first 127 bytes of it decode to a valid header.
+        if got.len() != len {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "a ranged read of {len} bytes at offset {offset} from {} came back \
+                     {} bytes long. A backend must answer exactly the range it was \
+                     asked for: a longer body is a 200 where a 206 was asked for, and \
+                     a shorter one is a truncated read",
+                    self.key,
+                    got.len()
+                ),
+            ));
+        }
+
+        Ok(got)
+    }
+
+    fn size(&self) -> io::Result<Option<u64>> {
+        match self.store.size(&self.key) {
+            Ok(size) => Ok(size),
+            // The ONLY failure that reads as "unknown". A backend that has not
+            // implemented a HEAD is a legitimate streaming transport and the
+            // reader copes with it by skipping the section bounds checks.
+            Err(crate::sink::SinkError::Unsupported(_)) => Ok(None),
+            // Everything else is a failure and stays one. A 503 is not the
+            // same statement as "I cannot tell you", and treating it as one
+            // buys a weaker reader in exchange for an error nobody sees.
+            Err(other) => Err(ObjectStoreFailure::into_io(other)),
+        }
     }
 }
 

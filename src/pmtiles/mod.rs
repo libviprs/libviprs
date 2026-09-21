@@ -116,6 +116,9 @@ pub mod writer;
 pub use directory::Entry;
 pub use header::{Compression, Header, TileType};
 pub use metadata::{LibviprsMetadata, Metadata};
+#[cfg(feature = "object-store-sink")]
+#[cfg_attr(docsrs, doc(cfg(feature = "object-store-sink")))]
+pub use range::ObjectStoreRangeReader;
 pub use range::{FileRangeReader, RangeReader};
 pub use reader::Reader;
 pub use tileid::{tileid_to_zxy, zxy_to_tileid};

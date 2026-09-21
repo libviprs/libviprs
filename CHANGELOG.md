@@ -1157,6 +1157,23 @@ and not under `Fixed`: this file is the only place they can be caught.
 
 ### Added
 
+- **The PMTiles read-side transport seam** (issue #1121), behind the existing
+  `object-store-sink` feature and adding no dependency. `ObjectStore` gains
+  two defaulted methods, `get_range` and `size`, so the trait the write side
+  already injects now answers reads too; `libviprs::pmtiles::ObjectStoreRangeReader`
+  bridges it onto `RangeReader`; and `PmTilesPyramidReader` takes its transport
+  as a defaulted type parameter with a new `try_from_object_store`
+  constructor. `RangeReader` is also implemented for `Box<R>` and `Arc<R>`,
+  which is what lets a runtime-chosen backend go into `Reader<R>` at all.
+
+  Nothing existing moves. `ObjectStore`'s new methods are defaulted, and
+  `PmTilesPyramidReader` still means `PmTilesPyramidReader<FileRangeReader>`,
+  so every call site of `try_open`, `from_reader` and `reader()` compiles
+  untouched.
+
+  Still no HTTP or S3 client in this crate, and issue #1119 records that as a
+  permanent decision rather than a gap: the transport belongs to the consumer
+  that already has one, and `read_range` is the only method it has to write.
 - **The `CadDecoder` contract and the CAD primitive IR** (issue #1029). A new
   always-compiled `libviprs::cad` module carrying `CadDecoder`, `CadDrawing`,
   `CadSource`, `CadView`, `PrimitiveSink` and `DecodeReport`, and the eight
@@ -1199,6 +1216,7 @@ and not under `Fixed`: this file is the only place they can be caught.
   This is the contract only. Nothing in the crate reads a DWG yet: the
   ACadSharp provider, the MVT encoder, the tiler and the viewer land
   separately, and the provider is the part that gets a Cargo feature.
+
 
 - **`libviprs::pmtiles::reader::MAX_CACHED_LEAVES` and
   `MAX_CACHED_LEAF_ENTRIES`** (issue #993), the two public constants the
