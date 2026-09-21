@@ -556,6 +556,14 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// sibling test through one `std::fs::read_to_string` helper, so all three are
 /// `annotated fs-detected` and none of them is a judgement call.
 ///
+/// #1121 moves it 390 to 391, and the one is
+/// `tests/pmtiles_pyramid_reader.rs::fs_pmtiles_and_object_store_return_the_same_tiles`,
+/// which reads the archive it just generated back off disk with
+/// `std::fs::read` so it can serve the same bytes through an injected object
+/// store. The same change adds twelve `annotated not-detected` rows in
+/// `tests/pmtiles_object_store_range.rs`, and those do not move this count
+/// because they reach the committed goldens through the shared oracle helper,
+/// which is a file the detector does not follow into.
 /// #1122 moves it 390 to 400, and the ten are a net figure: twelve arrive and
 /// two leave. Nine are `tests/pmtiles_plan_aware_verify.rs`' whole file, each
 /// of which writes a PMTiles archive into a `tempfile::tempdir()` and then
@@ -565,7 +573,20 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// `a_verify_run_against_an_archive_does_not_report_success`, which is why the
 /// arrivals outnumber the move: those two are the departures, renamed rather
 /// than deleted because Verify stopped being refused.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 400;
+///
+/// Composing #1121 and #1122 takes it to 401. Their deltas are +1 and a NET
+/// +10 (twelve arrive, two leave), and they do sum here because each lane's
+/// arrivals are a disjoint set. I am writing that as a measurement rather than
+/// as arithmetic: 401 is the count the detector reported with this constant
+/// held at the 390 baseline, not the number I got by adding the deltas up.
+///
+/// It is worth saying why that distinction earned its keep twice. An earlier
+/// composition of three lanes measured 413, and 413 minus lane B's +12 is
+/// exactly 401, so the subtraction would have been right. It would also have
+/// been a guess: a net delta and three independent lanes are precisely the
+/// shape where a double count hides, and "the arithmetic happened to agree" is
+/// something you can only say afterwards.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 401;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {

@@ -1,0 +1,93 @@
+name: EPIC
+description: A multi-issue campaign that adds or reworks a feature.
+title: "[EPIC] "
+labels: ["epic"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        An epic owns four deliverables that no single PR can own, because they land in
+        four different repositories. The checklist below is the short form. The reasons
+        behind each item, and the trap each one has actually hit, are in
+        [`EPIC_CHECKLIST.md`](https://github.com/libviprs/libviprs-org/blob/main/EPIC_CHECKLIST.md)
+        in libviprs-org. Read it before filing, not before closing.
+
+  - type: textarea
+    id: goal
+    attributes:
+      label: The product goal
+      description: One paragraph. What somebody can do after this that they cannot do now.
+    validations:
+      required: true
+
+  - type: textarea
+    id: why-now
+    attributes:
+      label: Why now
+      description: >
+        What makes this the right time, and which existing work it builds on. Link the
+        epics and pins it depends on so the dependency direction is on the record.
+    validations:
+      required: true
+
+  - type: textarea
+    id: phases
+    attributes:
+      label: Phases and sub-issues
+      description: >
+        At most 2 phases, and at most 5 issues per phase, so 10 is the ceiling. Decide
+        the split before filing rather than after. If the work will not fit, consolidate
+        related packages into one issue and say what you folded in, carrying every
+        acceptance criterion across. Work that genuinely cannot fit is two epics, so say
+        so rather than quietly adding a phase.
+      placeholder: |
+        Phase 1
+        - [ ] <letter>1.1 ...
+        - [ ] <letter>1.2 ...
+
+        Phase 2
+        - [ ] <letter>2.1 ...
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: deliverables
+    attributes:
+      label: The four deliverables
+      description: >
+        Every one of these, or the epic is not done. A feature that has landed in
+        libviprs and carries none of them is code rather than a shipped feature. Tick
+        these against EPIC_CHECKLIST.md, because the box is one line and the reason it
+        exists is not.
+      options:
+        - label: End-to-end tests in libviprs-tests, with fixtures committed beside them (unit tests in the library crate are not this)
+          required: false
+        - label: Benchmarks captured, both the regression against the previous libviprs release and a comparison against a library offering the same feature, preferably a C one
+          required: false
+        - label: CLI commands in libviprs-cli, so the feature is reachable without writing Rust
+          required: false
+        - label: Documentation on libviprs.org, covering the feature and its CLI reference
+          required: false
+
+  - type: textarea
+    id: not-doing
+    attributes:
+      label: What this epic is not
+      description: >
+        The scope you are deliberately leaving out, so nobody re-litigates it halfway
+        through. A permanent refusal belongs here with its reason.
+    validations:
+      required: false
+
+  - type: markdown
+    attributes:
+      value: |
+        ### Before you close it
+
+        - **Zero open issues.** Code landing is not the issue resolving. An epic with an
+          open sub-issue is an open epic, whatever has merged.
+        - **Compose before merge.** Put every open branch on one scratch branch and run
+          the full gate before merging any of them. EPIC F caught two PRs that could not
+          complete each other, each correct alone.
+        - **Never point a closing keyword at this issue**, or it closes the first time
+          any sub-issue lands.

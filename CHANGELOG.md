@@ -1157,6 +1157,66 @@ and not under `Fixed`: this file is the only place they can be caught.
 
 ### Added
 
+- **The `CadDecoder` contract and the CAD primitive IR** (issue #1029). A new
+  always-compiled `libviprs::cad` module carrying `CadDecoder`, `CadDrawing`,
+  `CadSource`, `CadView`, `PrimitiveSink` and `DecodeReport`, and the eight
+  primitives a drawing decodes into: `Line`, `Polyline`, `Arc`, `Circle`,
+  `Ellipse`, `Spline`, `Polygon` and `Text`. No new dependency, and no new
+  Cargo feature: the module is arithmetic, `Vec` and `thiserror`, all of which
+  were already here.
+
+  Curves stay curves. An `Arc` is a centre, a radius and two angles, a
+  `Spline` is a degree, a knot vector and control points, and a `Polyline`
+  carries its bulges verbatim. Tessellation needs a deviation budget and the
+  budget depends on tile zoom, so a decoder that tessellated would bake in a
+  tolerance it is not in a position to choose. Coordinates are 3D for the same
+  reason: projecting to a plane is also a choice, and it belongs downstream.
+
+  Every primitive has private fields and a validating constructor, so a
+  malformed entity becomes a typed `CadError` its provider reports as a
+  `Diagnostic` rather than geometry the tiler trusts. A `NaN` coordinate, a
+  zero-length normal, a non-positive radius, an arc that sweeps nothing, a
+  knot vector too short for its control points and a polyline of one vertex
+  are all refused by name, with the value quoted.
+
+  `DecodeReport` is structured from the start: bounded retained diagnostics
+  with a dropped count so a hostile drawing cannot exhaust memory through the
+  reporting channel, per-kind primitive counts so fidelity loss is measurable,
+  and an `is_complete` that starts `false` — "the loop ended" and "the loop
+  ended for a good reason" look identical from outside, so a truncated decode
+  cannot pass itself off as a short drawing.
+
+  `Text` carries a contract rather than a convention, because two independent
+  readers of the same drawings disagreed about what the text said and both
+  disagreements were silent. One returned `\U+220545,6` where the other
+  returned `∅45,6`; one returned `""` for a multiline attribute whose text the
+  file carried all along. So a primitive's text is the decoded, user-visible
+  string: `Text::new` refuses a string carrying an undecoded `\U+XXXX` (MIF)
+  or `\M+NXXXX` (CIF) transport escape, and refuses the empty string, and the
+  provider files `DiagnosticCode::TEXT_ESCAPE_NOT_DECODED` or
+  `TEXT_NOT_RECOVERED` instead. Both defects are unrepresentable in the IR.
+
+  This is the contract only. Nothing in the crate reads a DWG yet: the
+  ACadSharp provider, the MVT encoder, the tiler and the viewer land
+  separately, and the provider is the part that gets a Cargo feature.
+- **The PMTiles read-side transport seam** (issue #1121), behind the existing
+  `object-store-sink` feature and adding no dependency. `ObjectStore` gains
+  two defaulted methods, `get_range` and `size`, so the trait the write side
+  already injects now answers reads too; `libviprs::pmtiles::ObjectStoreRangeReader`
+  bridges it onto `RangeReader`; and `PmTilesPyramidReader` takes its transport
+  as a defaulted type parameter with a new `try_from_object_store`
+  constructor. `RangeReader` is also implemented for `Box<R>` and `Arc<R>`,
+  which is what lets a runtime-chosen backend go into `Reader<R>` at all.
+
+  Nothing existing moves. `ObjectStore`'s new methods are defaulted, and
+  `PmTilesPyramidReader` still means `PmTilesPyramidReader<FileRangeReader>`,
+  so every call site of `try_open`, `from_reader` and `reader()` compiles
+  untouched.
+
+  Still no HTTP or S3 client in this crate, and issue #1119 records that as a
+  permanent decision rather than a gap: the transport belongs to the consumer
+  that already has one, and `read_range` is the only method it has to write.
+
 - **`ResumeMode::Verify` against a PMTiles archive** (issue #1122), through a
   new sink capability rather than a storage enum or a downcast.
   `TileSink::open_pyramid_reader` answers `Some(reader)` for a sink that can
@@ -1184,6 +1244,7 @@ and not under `Fixed`: this file is the only place they can be caught.
   a sink, so it takes the advisory run lock and creates `<archive>.job` for
   the life of the run, where before it was refused before anything was
   created. The sidecar is removed with the sink that took it.
+
 
 - **`libviprs::pmtiles::reader::MAX_CACHED_LEAVES` and
   `MAX_CACHED_LEAF_ENTRIES`** (issue #993), the two public constants the

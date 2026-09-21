@@ -16,6 +16,12 @@
 //! [`DirectoryPyramidReader`] over a `{z}/{x}/{y}.{ext}` tree, and
 //! [`PmTilesPyramidReader`] over a single archive.
 //!
+//! Since #1121 the archive half no longer means "a file on this disk".
+//! [`PmTilesPyramidReader`] carries its transport as a defaulted type
+//! parameter, so it still opens a path with nothing spelled out at the call
+//! site, and it also opens an object in an injected store through
+//! [`try_from_object_store`](PmTilesPyramidReader::try_from_object_store).
+//!
 //! # An absent tile is not an error
 //!
 //! [`PyramidReader::tile`] answers `Ok(None)` for a coordinate the pyramid
@@ -74,9 +80,27 @@ pub enum PyramidReadError {
     #[error(
         "the pyramid is structurally damaged ({} finding(s)); the first is: {}",
         .findings.len(),
-        .findings.first().map(String::as_str).unwrap_or("(none recorded)")
+        .findings.first().map(ToString::to_string).unwrap_or_else(|| "(none recorded)".to_string())
     )]
-    StructuralDefects { findings: Vec<String> },
+    StructuralDefects {
+        /// The findings themselves, typed rather than rendered.
+        ///
+        /// These used to be `Vec<String>`. `tests/error_source_typing.rs` is
+        /// the file that made "a typed error must not be laundered into a
+        /// string" a rule here, and rendering a public enum into display text
+        /// broke it: a caller who wants to treat a truncated archive
+        /// differently from an entry pointing outside its section was left
+        /// substring-matching English.
+        findings: Vec<crate::pmtiles::validate::Finding>,
+    },
+    /// The backend cannot count the tiles it addresses.
+    ///
+    /// Separate from [`PyramidReadError::NoDescription`] on purpose. That one
+    /// means "I cannot say what this pyramid is"; this one means "I know what
+    /// it is and I cannot count it". A caller matching the first to decide a
+    /// backend carries no metadata should not also catch the second.
+    #[error("this pyramid cannot count the tiles it addresses: {0}")]
+    NotCountable(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -104,6 +128,56 @@ pub struct PyramidDescription {
     pub layout: Option<Layout>,
     /// The encoding the stored bytes are in, when the backend commits to one.
     pub format: Option<TileFormat>,
+}
+
+impl PyramidDescription {
+    /// A description of a pyramid spanning `min_level..=max_level`, with
+    /// nothing else recorded yet.
+    ///
+    /// This exists because the struct is `#[non_exhaustive]` and the trait
+    /// that returns it is public. Without a constructor, a downstream
+    /// implementor of [`PyramidReader`] had exactly one legal body for
+    /// `describe()`, which was to return an error, so the extension point was
+    /// public in name only. The crate's own suite demonstrated the asymmetry
+    /// in both directions at once: in-crate code built one with a struct
+    /// literal (`#[non_exhaustive]` does not apply inside the defining crate)
+    /// while a test compiling as an external crate could only refuse.
+    ///
+    /// The two levels are arguments rather than defaults because there is no
+    /// honest "unknown" for them. The three `Option` fields default to `None`,
+    /// which is the honest unknown, and each has a `with_*` setter, matching
+    /// the `default()` plus `with_*` convention `tests/non_exhaustive_options.rs`
+    /// already holds every public options struct to.
+    pub fn new(min_level: u32, max_level: u32) -> Self {
+        Self {
+            min_level,
+            max_level,
+            tile_size: None,
+            layout: None,
+            format: None,
+        }
+    }
+
+    /// Record the tile edge in pixels.
+    #[must_use]
+    pub fn with_tile_size(mut self, tile_size: u32) -> Self {
+        self.tile_size = Some(tile_size);
+        self
+    }
+
+    /// Record the layout the tiles were placed with.
+    #[must_use]
+    pub fn with_layout(mut self, layout: Layout) -> Self {
+        self.layout = Some(layout);
+        self
+    }
+
+    /// Record the encoding the stored bytes are in.
+    #[must_use]
+    pub fn with_format(mut self, format: TileFormat) -> Self {
+        self.format = Some(format);
+        self
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -181,7 +255,7 @@ pub trait PyramidReader: Send + Sync {
     /// the failure mode of a quiet "unknown" is a verify that silently drops
     /// its only both-directions check and stays green.
     fn addressed_tiles(&self) -> Result<u64, PyramidReadError> {
-        Err(PyramidReadError::NoDescription(
+        Err(PyramidReadError::NotCountable(
             "this pyramid cannot count the coordinates it addresses".to_string(),
         ))
     }
@@ -305,12 +379,30 @@ impl PyramidReader for DirectoryPyramidReader {
 /// [`tile_coord_to_zxy`](crate::sink_pmtiles::tile_coord_to_zxy), the same
 /// function [`PmTilesSink`](crate::sink_pmtiles::PmTilesSink) writes through,
 /// so the two cannot drift apart on where a tile lives.
+///
+/// # Why the type parameter is defaulted
+///
+/// `R` is whatever the archive's bytes come from, and it defaults to
+/// [`FileRangeReader`](crate::pmtiles::FileRangeReader) so that
+/// `PmTilesPyramidReader` keeps meaning exactly what it meant before #1121.
+/// Every existing call site spells the type with no parameter and still
+/// compiles, and [`try_open`](Self::try_open) still hands back the local-file
+/// instantiation.
+///
+/// This mirrors [`Reader<R>`](crate::pmtiles::Reader) and `Reader::try_open`
+/// one level up, and it is deliberately not `Reader<Box<dyn RangeReader>>`.
+/// That shape would change the public signatures of
+/// [`from_reader`](Self::from_reader) and [`reader`](Self::reader), which is a
+/// breaking change for nothing, and `Box<dyn RangeReader>` is not `Debug`, so
+/// it would silently drop `Debug` from a public type. Anyone who does want the
+/// boxed shape can still have it: `PmTilesPyramidReader<Box<dyn RangeReader>>`
+/// works, because `Box<R>` implements the trait.
 #[derive(Debug)]
-pub struct PmTilesPyramidReader {
-    reader: crate::pmtiles::Reader<crate::pmtiles::FileRangeReader>,
+pub struct PmTilesPyramidReader<R: crate::pmtiles::RangeReader = crate::pmtiles::FileRangeReader> {
+    reader: crate::pmtiles::Reader<R>,
 }
 
-impl PmTilesPyramidReader {
+impl PmTilesPyramidReader<crate::pmtiles::FileRangeReader> {
     /// Open the archive at `path`.
     ///
     /// Reads the header and the root directory and nothing else; a tile is
@@ -325,15 +417,51 @@ impl PmTilesPyramidReader {
             reader: crate::pmtiles::Reader::try_open(path)?,
         })
     }
+}
 
+#[cfg(feature = "object-store-sink")]
+#[cfg_attr(docsrs, doc(cfg(feature = "object-store-sink")))]
+impl PmTilesPyramidReader<crate::pmtiles::ObjectStoreRangeReader> {
+    /// Open the archive stored at `key` in an injected object store.
+    ///
+    /// The counterpart of
+    /// [`ObjectStoreSink`](crate::sink_object_store::ObjectStoreSink) on the
+    /// way back out. libviprs ships no HTTP or S3 client and #1119 records
+    /// that as a permanent decision, so the store is the caller's: anything
+    /// that can answer
+    /// [`ObjectStore::get_range`](crate::sink_object_store::ObjectStore::get_range)
+    /// serves an archive here.
+    ///
+    /// Two requests happen at open, the header and the root, plus one
+    /// [`size`](crate::sink_object_store::ObjectStore::size). A store that
+    /// inherits the defaulted refusal for `size` still opens; what it gives up
+    /// is the reader's section bounds checks.
+    ///
+    /// # Errors
+    ///
+    /// [`PyramidReadError::PmTiles`] when the object is not a readable v3
+    /// archive or the store refused a range.
+    pub fn try_from_object_store(
+        store: std::sync::Arc<dyn crate::sink_object_store::ObjectStore>,
+        key: impl Into<String>,
+    ) -> Result<Self, PyramidReadError> {
+        Ok(Self {
+            reader: crate::pmtiles::Reader::try_new(crate::pmtiles::ObjectStoreRangeReader::new(
+                store, key,
+            ))?,
+        })
+    }
+}
+
+impl<R: crate::pmtiles::RangeReader> PmTilesPyramidReader<R> {
     /// Wrap a reader the caller already opened.
-    pub fn from_reader(reader: crate::pmtiles::Reader<crate::pmtiles::FileRangeReader>) -> Self {
+    pub fn from_reader(reader: crate::pmtiles::Reader<R>) -> Self {
         Self { reader }
     }
 
     /// The archive reader underneath, for the questions this trait does not
     /// ask: the raw header, the root entries, the bounding box.
-    pub fn reader(&self) -> &crate::pmtiles::Reader<crate::pmtiles::FileRangeReader> {
+    pub fn reader(&self) -> &crate::pmtiles::Reader<R> {
         &self.reader
     }
 
@@ -350,6 +478,18 @@ impl PmTilesPyramidReader {
     /// archive. The alternative is caching a report against a file that can
     /// change underneath it, and a stale structural verdict is a worse thing
     /// to own than a second directory walk.
+    ///
+    /// Be honest about what that costs, though, because "cheap" was doing too
+    /// much work in the sentence above. A single `pyramid_verify` calls this
+    /// twice, once through `self_check` and once through `addressed_tiles`,
+    /// ten lines apart, under a run lock that already guarantees the archive
+    /// cannot change between them. On a local file that is two directory
+    /// traversals and nobody notices. Over an injected transport it is two
+    /// full sets of round trips, and above roughly 262144 tiles the leaf cache
+    /// (64 pages) evicts between them, so the second walk refetches what the
+    /// first one read. Accepting the double walk is a deliberate trade against
+    /// a stale cache, not a claim that it is free, and the shape that removes
+    /// the choice entirely is one method returning both answers.
     fn structural_report(&self) -> Result<crate::pmtiles::validate::Report, PyramidReadError> {
         let report = crate::pmtiles::validate::validate(
             self.reader.source(),
@@ -359,7 +499,7 @@ impl PmTilesPyramidReader {
             return Ok(report);
         }
         Err(PyramidReadError::StructuralDefects {
-            findings: report.findings.iter().map(ToString::to_string).collect(),
+            findings: report.findings.clone(),
         })
     }
 
@@ -376,7 +516,7 @@ impl PmTilesPyramidReader {
     }
 }
 
-impl PyramidReader for PmTilesPyramidReader {
+impl<R: crate::pmtiles::RangeReader> PyramidReader for PmTilesPyramidReader<R> {
     /// Walk the archive the way [`validate`](crate::pmtiles::validate) does
     /// and refuse it if the walk found anything.
     ///
@@ -528,8 +668,24 @@ mod tests {
         assert!(reader.self_check().is_ok(), "a tree has no index to damage");
 
         match reader.addressed_tiles() {
-            Err(PyramidReadError::NoDescription(_)) => {}
+            Err(PyramidReadError::NotCountable(_)) => {}
             other => panic!("a reader that cannot count must say so, got {other:?}"),
         }
+
+        // And it must say so in its OWN words. This used to match
+        // `NoDescription`, which is the variant for "I cannot say what this
+        // pyramid is". Asserting it here made the test pass while pinning the
+        // wrong fact: a caller matching `NoDescription` to decide a backend
+        // carries no metadata would also have caught every backend that simply
+        // cannot count, and the two want opposite handling. The control above
+        // is what makes the distinction visible, because this reader describes
+        // itself perfectly well.
+        assert!(
+            !matches!(
+                reader.addressed_tiles(),
+                Err(PyramidReadError::NoDescription(_))
+            ),
+            "the count refusal must not borrow the variant that means \"I cannot describe myself\""
+        );
     }
 }
