@@ -55,6 +55,23 @@ pub enum SinkError {
         #[source]
         source: image::ImageError,
     },
+    /// A tile encoder that is not the `image` crate refused the raster.
+    ///
+    /// [`SinkError::Encode`] carries an `image::ImageError` and cannot hold
+    /// anything else, so the codecs this crate ports itself need their own
+    /// variant rather than a stringified copy. WebP is the first
+    /// ([`TileFormat::Webp`], issue #1123): `Raster::encode_webp` reports
+    /// through [`crate::codec::EncodeError`], and the reason it refuses (a
+    /// 16-bit tile, a multiband intermediate, an axis over the format's
+    /// 16383-pixel ceiling) survives into the `source()` chain where a caller
+    /// can match on it instead of substring-matching English.
+    #[error("encoding tile to {format} failed: {source}")]
+    EncodeCodec {
+        /// The target format, e.g. `"webp"`.
+        format: &'static str,
+        #[source]
+        source: crate::codec::EncodeError,
+    },
     /// Used for all catch-all string errors that haven't yet been promoted to
     /// a typed variant. New code should prefer the typed variants below.
     #[error("sink error: {0}")]
@@ -755,15 +772,112 @@ pub enum TileFormat {
     /// Raw pixel bytes (no encoding). Fastest, useful for pipelines that
     /// encode later or for testing.
     Raw,
+    /// Lossless WebP-encoded tiles (issue #1123).
+    ///
+    /// # No quality field, and that is the design rather than an omission
+    ///
+    /// `Webp { quality }` would read as symmetry with [`TileFormat::Jpeg`]
+    /// and it would be a lie. The encoder underneath is
+    /// [`Raster::encode_webp`](crate::Raster::encode_webp), whose
+    /// [`webp::Compression`](crate::webp::Compression) is `#[non_exhaustive]`
+    /// with the single variant `Lossless`: there is no lossy path in
+    /// `image-webp` 0.2.4 to point a number at. An argument the encoder
+    /// throws away inverts the contract (ask for quality 10, get a lossless
+    /// file possibly larger than the PNG you started from) and it is a semver
+    /// time bomb, because the day a lossy encoder lands every existing
+    /// `Webp { quality: 10 }` would silently start emitting small lossy files
+    /// in a patch release. When that encoder exists it joins
+    /// `webp::Compression` as a variant, not this enum as a field.
+    ///
+    /// Worth saying out loud that a test cannot catch this one. A cell that
+    /// encodes a tile, decodes it and compares pixels passes for every value
+    /// a `quality` field could hold, because the encoder ignores all of them
+    /// identically. Making the field unrepresentable is the only thing that
+    /// does the work, so the module doc in [`crate::webp`] and this paragraph
+    /// are the record of why it is absent.
+    Webp,
 }
 
 impl TileFormat {
+    /// The extension a tile of this format is written under.
     pub fn extension(&self) -> &'static str {
         match self {
             Self::Png => "png",
             Self::Jpeg { .. } => "jpeg",
             Self::Raw => "raw",
+            Self::Webp => "webp",
         }
+    }
+
+    /// Every extension a tile of this format can legitimately be found under,
+    /// in probe order.
+    ///
+    /// Almost always the single answer [`TileFormat::extension`] gives. JPEG
+    /// is the exception, because `.jpg` is as common on disk as `.jpeg` and a
+    /// tree libviprs did not write may use either.
+    ///
+    /// This is the function that made the five silent sites of issue #1123 go
+    /// away. Before it, three call sites each carried
+    /// `Some(TileFormat::Jpeg { .. }) => vec!["jpeg", "jpg"], Some(fmt) =>
+    /// vec![fmt.extension()]` inline, and two more carried the fallback list
+    /// as four literal strings. Adding `Webp` broke none of them, which is
+    /// precisely the failure mode: a WebP tree verified through a sink that
+    /// does not pin its format found no tiles at all and reported the pyramid
+    /// missing.
+    ///
+    /// The `match` is exhaustive on purpose. A variant added to `TileFormat`
+    /// stops the build here, at the one place that owns the answer, instead of
+    /// compiling into five probe lists that quietly skip the new format.
+    pub fn extensions(&self) -> &'static [&'static str] {
+        match self {
+            Self::Png => &["png"],
+            Self::Jpeg { .. } => &["jpeg", "jpg"],
+            Self::Raw => &["raw"],
+            Self::Webp => &["webp"],
+        }
+    }
+
+    /// Every format this build knows, in the order a blind probe should try
+    /// them.
+    ///
+    /// The order is the one the hand-written copies used (`raw`, `png`,
+    /// `jpeg`/`jpg`) with `webp` appended, so the probe behaviour for a tree
+    /// written before this change is byte-for-byte what it was.
+    ///
+    /// Be honest about the guarantee: Rust has no stable way to enumerate an
+    /// enum's variants (`std::mem::variant_count` is unstable and a derive
+    /// macro is a dependency this crate will not take for one array), so the
+    /// compiler does not force a new variant into this list. What it does
+    /// force is a visit to this file, because [`TileFormat::extensions`] three
+    /// lines above is an exhaustive match that will not compile without the
+    /// new arm. That is a much smaller gap than five copies in four modules,
+    /// and `tests/webp_tile_format.rs` asserts the union property over
+    /// whatever is in here.
+    pub const ALL: &'static [TileFormat] = &[
+        TileFormat::Raw,
+        TileFormat::Png,
+        // The quality is arbitrary: `extensions` matches `Jpeg { .. }` and
+        // nothing here reads the number.
+        TileFormat::Jpeg { quality: 0 },
+        TileFormat::Webp,
+    ];
+
+    /// The fallback probe set: every extension every known format can be
+    /// stored under.
+    ///
+    /// Used when a sink does not commit to a format, which is the default for
+    /// every transparent wrapper because [`TileSink::content_format`] returns
+    /// `None` unless a sink overrides it. Probing every extension and taking
+    /// the first hit is how a stale sibling file from a previous run in a
+    /// different format gets validated (issue #139), so a sink that *can* say
+    /// what it writes should, and this list is the last resort rather than the
+    /// normal path.
+    pub fn candidate_extensions() -> Vec<&'static str> {
+        let mut out = Vec::new();
+        for fmt in Self::ALL {
+            out.extend_from_slice(fmt.extensions());
+        }
+        out
     }
 }
 
@@ -1292,6 +1406,7 @@ impl FsSink {
             TileFormat::Raw => Ok(raster.data().to_vec()),
             TileFormat::Png => encode_png(raster),
             TileFormat::Jpeg { quality } => encode_jpeg(raster, quality),
+            TileFormat::Webp => encode_webp(raster),
         }
     }
 
@@ -2458,6 +2573,34 @@ pub fn encode_png(raster: &Raster) -> Result<Vec<u8>, SinkError> {
         source: e,
     })?;
     Ok(buf)
+}
+
+/// Encodes a [`Raster`] as lossless WebP bytes and returns them.
+///
+/// The one tile encoder in this module that is not an `image`-crate call.
+/// WebP goes through [`Raster::encode_webp`](crate::Raster::encode_webp),
+/// which is this crate's own port over `image-webp`, so its refusals arrive as
+/// a [`crate::codec::EncodeError`] rather than an `image::ImageError` and they
+/// are carried as that type rather than flattened into a sentence
+/// (`tests/error_source_typing.rs` is the file that made that a rule here).
+///
+/// # What it refuses that PNG accepts
+///
+/// PNG and JPEG reach every pixel format [`color_type_for_format`] maps.
+/// `encode_webp` takes `Gray8`, `Rgb8` and `Rgba8` and nothing else, because
+/// those are the only three WebP has a spelling for, and greyscale is not
+/// really one of them: the format stores no mono, so `Gray8` goes in as an
+/// encoder hint and reads back as three equal bands, which is what
+/// `vips webpsave` does with a `b-w` image too. A 16-bit tile that writes fine
+/// as PNG is therefore a typed refusal here, which is the honest answer rather
+/// than a silent narrowing.
+pub(crate) fn encode_webp(raster: &Raster) -> Result<Vec<u8>, SinkError> {
+    raster
+        .encode_webp(crate::webp::SaveOptions::default())
+        .map_err(|source| SinkError::EncodeCodec {
+            format: "webp",
+            source,
+        })
 }
 
 // Crate-visible so extension-dispatched save (`crate::imageio`) reuses the

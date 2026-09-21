@@ -42,8 +42,9 @@ budget becoming a real peak ceiling for jp2k, gif and avif (#944),
 `AvifError` becoming `#[non_exhaustive]` (#946), the
 `ConversionError::FloatUnsupported` rename (#730), `compass`'s `times` range
 (#547), `arrayjoin`'s `across` clamp (#577), `decode_tiff_page`'s page index
-(#566), `GifError::BadPageNumber` (#845) and `csv_save`/`matrix_save` matching
-`csvsave`/`matrixsave` (#958).
+(#566), `GifError::BadPageNumber` (#845), `csv_save`/`matrix_save` matching
+`csvsave`/`matrixsave` (#958) and `TileFormat` gaining a `Webp` variant
+(#1123).
 
 The crate version moves to 0.5.0 in this window, and no single entry below is
 why. The manifest still read 0.4.0 while this block had already collected four
@@ -57,6 +58,53 @@ they live in the file format rather than in the API, which is why they are here
 and not under `Fixed`: this file is the only place they can be caught.
 
 ### Breaking
+
+- **`TileFormat` has a fourth variant, `Webp`** (issue #1123). `TileFormat` is
+  not `#[non_exhaustive]`, so every exhaustive `match` on it outside this crate
+  stops compiling until it grows an arm. That is the whole reason the variant
+  was added this way rather than behind the attribute: the forced compile
+  errors are the feature. The note further down this section about the twelve
+  older exhaustive enums calls `TileFormat` a "genuinely closed set"; it was
+  not, and this is the correction.
+
+  `Raster::encode_webp` and `TileType::Webp` have both existed for a while and
+  were never joined up, so `--format webp` was a documentation claim with an
+  encoder behind it and no way to reach it. Lossless WebP is a real win on this
+  crate's own inputs (scans, drawings, black-on-white CAD output), which is why
+  it is worth a break.
+
+  **No quality field, and that is deliberate.** `webp::Compression` is
+  `#[non_exhaustive]` with the single variant `Lossless`, so `Webp { quality }`
+  would be an argument the encoder throws away: ask for 10, get a lossless file
+  possibly larger than the PNG you started from. It would also be a semver time
+  bomb, because the day a lossy encoder lands every existing
+  `Webp { quality: 10 }` starts emitting small lossy files in a patch release.
+  A lossy mode joins `webp::Compression` as a variant instead.
+
+  Two things ride along that are not breaking but are the point of the change.
+  The probe list of tile extensions that Verify falls back to when a sink does
+  not pin its format is now derived from `TileFormat` rather than written out
+  in four places, so a WebP tree verified through a transparent wrapper finds
+  its tiles instead of reporting the pyramid entirely absent, and a `.webp`
+  manifest key resolves to the right `TileCoord` instead of a col/row-transposed
+  one. And `PmTilesPyramidReader::describe` stops answering all-`None` for an
+  archive written by a **newer** libviprs: when the metadata fails to parse and
+  the raw bytes carry a `vnd.libviprs` key, it refuses with the new
+  `PyramidReadError::MetadataFromANewerLibviprs` naming the version that wrote
+  the file. With no such key, `None` stays `None`, so every foreign go-pmtiles
+  archive reads exactly as it did. That distinction is the point: `format: None`
+  was already the right answer for a foreign archive, so "made by another tool"
+  and "made by libviprs and yours is too old" were indistinguishable and they
+  want opposite reactions.
+
+  It cannot help anyone on 0.5.x, who will get the silent downgrade forever.
+  The payoff is at the next variant addition.
+
+  `LIBVIPRS_META_VERSION` does **not** move, and the reason is vacuous rather
+  than reassuring: nothing anywhere gates on it. It is written into every
+  archive and read back by three test assertions that check it equals itself.
+  The real version gate is serde's unknown-variant error, which fails the whole
+  `Metadata` object rather than the one field that caused it.
 
 - **`AvifError` is `#[non_exhaustive]`** (issue #946). It was the only public
   error enum in the crate without the attribute, and

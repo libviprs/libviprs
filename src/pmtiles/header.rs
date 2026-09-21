@@ -170,18 +170,24 @@ impl TileType {
 
     /// The tile type that carries a libviprs [`TileFormat`].
     ///
-    /// `Png` and `Jpeg` map straight across. [`TileFormat::Raw`] has no
-    /// PMTiles type and never will: a PMTiles tile is a self-describing image
-    /// blob that a viewer hands to a decoder, and raw pixel bytes carry
+    /// `Png`, `Jpeg` and `Webp` map straight across. [`TileFormat::Raw`] has
+    /// no PMTiles type and never will: a PMTiles tile is a self-describing
+    /// image blob that a viewer hands to a decoder, and raw pixel bytes carry
     /// neither their dimensions nor their pixel format.
     ///
-    /// [`TileType::Webp`] has no `TileFormat` to come from today. The WebP
-    /// encoder in this crate is `Raster::encode_webp`, which is not wired into
-    /// `TileFormat`, so the mapping is one-way until it is.
+    /// WebP was one-way until issue #1123. `TileType::Webp` has always read
+    /// fine and `TileType::extension` has always answered `"webp"`, but
+    /// `Raster::encode_webp` was not wired into `TileFormat`, so there was no
+    /// `TileFormat` for this function to come *from*. Wiring the variant in is
+    /// the whole of what closed it; nothing about the mapping itself changed.
+    ///
+    /// [`TileType::Avif`] and [`TileType::Mlt`] are where WebP was: readable,
+    /// with no encoder behind them in this build.
     pub fn try_from_tile_format(format: TileFormat) -> Result<Self, PmTilesError> {
         match format {
             TileFormat::Png => Ok(Self::Png),
             TileFormat::Jpeg { .. } => Ok(Self::Jpeg),
+            TileFormat::Webp => Ok(Self::Webp),
             TileFormat::Raw => Err(PmTilesError::UnsupportedTileFormat { format }),
         }
     }
