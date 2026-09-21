@@ -1157,23 +1157,6 @@ and not under `Fixed`: this file is the only place they can be caught.
 
 ### Added
 
-- **The PMTiles read-side transport seam** (issue #1121), behind the existing
-  `object-store-sink` feature and adding no dependency. `ObjectStore` gains
-  two defaulted methods, `get_range` and `size`, so the trait the write side
-  already injects now answers reads too; `libviprs::pmtiles::ObjectStoreRangeReader`
-  bridges it onto `RangeReader`; and `PmTilesPyramidReader` takes its transport
-  as a defaulted type parameter with a new `try_from_object_store`
-  constructor. `RangeReader` is also implemented for `Box<R>` and `Arc<R>`,
-  which is what lets a runtime-chosen backend go into `Reader<R>` at all.
-
-  Nothing existing moves. `ObjectStore`'s new methods are defaulted, and
-  `PmTilesPyramidReader` still means `PmTilesPyramidReader<FileRangeReader>`,
-  so every call site of `try_open`, `from_reader` and `reader()` compiles
-  untouched.
-
-  Still no HTTP or S3 client in this crate, and issue #1119 records that as a
-  permanent decision rather than a gap: the transport belongs to the consumer
-  that already has one, and `read_range` is the only method it has to write.
 - **The `CadDecoder` contract and the CAD primitive IR** (issue #1029). A new
   always-compiled `libviprs::cad` module carrying `CadDecoder`, `CadDrawing`,
   `CadSource`, `CadView`, `PrimitiveSink` and `DecodeReport`, and the eight
@@ -1216,6 +1199,51 @@ and not under `Fixed`: this file is the only place they can be caught.
   This is the contract only. Nothing in the crate reads a DWG yet: the
   ACadSharp provider, the MVT encoder, the tiler and the viewer land
   separately, and the provider is the part that gets a Cargo feature.
+- **The PMTiles read-side transport seam** (issue #1121), behind the existing
+  `object-store-sink` feature and adding no dependency. `ObjectStore` gains
+  two defaulted methods, `get_range` and `size`, so the trait the write side
+  already injects now answers reads too; `libviprs::pmtiles::ObjectStoreRangeReader`
+  bridges it onto `RangeReader`; and `PmTilesPyramidReader` takes its transport
+  as a defaulted type parameter with a new `try_from_object_store`
+  constructor. `RangeReader` is also implemented for `Box<R>` and `Arc<R>`,
+  which is what lets a runtime-chosen backend go into `Reader<R>` at all.
+
+  Nothing existing moves. `ObjectStore`'s new methods are defaulted, and
+  `PmTilesPyramidReader` still means `PmTilesPyramidReader<FileRangeReader>`,
+  so every call site of `try_open`, `from_reader` and `reader()` compiles
+  untouched.
+
+  Still no HTTP or S3 client in this crate, and issue #1119 records that as a
+  permanent decision rather than a gap: the transport belongs to the consumer
+  that already has one, and `read_range` is the only method it has to write.
+
+- **`ResumeMode::Verify` against a PMTiles archive** (issue #1122), through a
+  new sink capability rather than a storage enum or a downcast.
+  `TileSink::open_pyramid_reader` answers `Some(reader)` for a sink that can
+  open what it wrote, and `verify::pyramid_verify` checks the pyramid through
+  `PyramidReader` instead of stat-ing one file per coordinate under a
+  checkpoint root. The method is defaulted to forward through
+  `TileSink::inner_sink`, so a wrapper sink gets it free and an external sink
+  keeps compiling; `FsSink` answers `None` and a tree verify still goes to
+  `raster_verify`, which re-renders from the source and compares bytes.
+
+  `PyramidReader` grows `self_check` and `addressed_tiles`, and
+  `PyramidReadError` grows `StructuralDefects`. `addressed_tiles` is the check
+  nothing had before, in either backend: a pyramid that addresses MORE tiles
+  than the plan resolves every coordinate it is asked about and is still not
+  the pyramid that plan produced, and no per-coordinate sweep can see it.
+
+  `PmTilesSink` therefore stops refusing `ResumeMode::Verify` at `build()`.
+  `ResumeMode::Resume` is still refused by name and the reason has not
+  changed: the writer's staging is not reconstructible from a checkpoint, so
+  a resumed run would publish an archive with every pre-crash tile silently
+  absent. `PmTilesSink::checkpoint_root` is still `None`, because a Verify
+  reads the archive and needs no root.
+
+  One behaviour change to know about: a Verify run over an archive now builds
+  a sink, so it takes the advisory run lock and creates `<archive>.job` for
+  the life of the run, where before it was refused before anything was
+  created. The sidecar is removed with the sink that took it.
 
 
 - **`libviprs::pmtiles::reader::MAX_CACHED_LEAVES` and
