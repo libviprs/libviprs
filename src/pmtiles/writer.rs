@@ -231,6 +231,21 @@ const ENTRY_RECORD_BYTES: usize = 8 + 8 + 4 + 4;
 /// Copy buffer for moving staged payloads and leaf bytes into the archive.
 const COPY_BUFFER_BYTES: usize = 64 * 1024;
 
+/// Ways per set in the dedupe window.
+///
+/// Eight, which is one 64-byte cache line's worth of the hashes the lookup
+/// compares and the width at which set-associative caches stop gaining much.
+/// Public because the size of the window is a contract a caller can reason
+/// about: a budget buys a whole number of sets of this many payloads, and the
+/// smallest window there is holds exactly this many.
+pub const DEDUPE_WINDOW_WAYS: usize = 8;
+
+/// How much memory the dedupe window spends when the caller says nothing.
+///
+/// Placeholder until #1137 gives it a window to size, which is also where the
+/// reasoning for the number belongs.
+const DEFAULT_DEDUPE_MEMORY_BYTES: usize = 8 * 1024 * 1024;
+
 /// "This payload has not been placed in the data region yet."
 ///
 /// A sentinel rather than an `Option<u64>` because the `Option` would double
@@ -242,6 +257,124 @@ const UNPLACED: u64 = u64::MAX;
 
 /// Disambiguates the scratch prefix of two writers sharing one directory.
 static SCRATCH_SEQ: AtomicU64 = AtomicU64::new(0);
+
+// ---------------------------------------------------------------------------
+// Probes
+// ---------------------------------------------------------------------------
+
+/// What one `finish` really did, counted, so the tests below can assert on it
+/// instead of on the source.
+///
+/// Three of the claims in EPIC #1135 are about work rather than about output:
+/// how many durability barriers a `finish` issues, whether the payload copy
+/// seeks per payload, and whether the leaf loop rebuilds every leaf once per
+/// doubling. None of them changes a byte of the archive, so nothing that reads
+/// the archive can tell whether they hold, and a test that reads the source
+/// instead is a test of the source.
+///
+/// The counters are **thread-local**, because `cargo test` runs this binary's
+/// tests in parallel threads of one process and a global counter would be
+/// measuring whichever other writer happened to be finishing at the same
+/// moment. A writer never leaves the thread that drives it, so a thread-local
+/// is exact and needs no lock.
+///
+/// Everything here compiles to nothing outside `cfg(test)`.
+mod probe {
+    #[cfg(test)]
+    use std::cell::Cell;
+
+    #[cfg(test)]
+    thread_local! {
+        /// Durability barriers issued on this thread.
+        static SYNCS: Cell<usize> = const { Cell::new(0) };
+        /// Seeks of the staged payload file during the archive write.
+        static STAGED_SEEKS: Cell<usize> = const { Cell::new(0) };
+        /// Positioned reads of the staged payload file during the archive
+        /// write. Reads through the merge's own handle are not counted: they
+        /// are a different file and a different question.
+        static STAGED_READS: Cell<usize> = const { Cell::new(0) };
+        /// Times the leaf loop built the whole leaf section.
+        static LEAF_ATTEMPTS: Cell<usize> = const { Cell::new(0) };
+        /// Entries per leaf the loop settled on.
+        static LEAF_ENTRIES_USED: Cell<usize> = const { Cell::new(0) };
+    }
+
+    pub(super) fn sync() {
+        #[cfg(test)]
+        SYNCS.with(|c| c.set(c.get() + 1));
+    }
+
+    pub(super) fn staged_seek() {
+        #[cfg(test)]
+        STAGED_SEEKS.with(|c| c.set(c.get() + 1));
+    }
+
+    // No caller until the positioned-read copy in #1142 lands, and the test
+    // that counts it is red until then. That is the point of it.
+    #[expect(dead_code, reason = "the copy that calls it is issue #1142")]
+    pub(super) fn staged_read() {
+        #[cfg(test)]
+        STAGED_READS.with(|c| c.set(c.get() + 1));
+    }
+
+    pub(super) fn leaf_attempt() {
+        #[cfg(test)]
+        LEAF_ATTEMPTS.with(|c| c.set(c.get() + 1));
+    }
+
+    pub(super) fn leaf_entries_used(entries: usize) {
+        #[cfg(test)]
+        LEAF_ENTRIES_USED.with(|c| c.set(entries));
+        #[cfg(not(test))]
+        let _ = entries;
+    }
+
+    #[cfg(test)]
+    pub(super) fn reset() {
+        SYNCS.with(|c| c.set(0));
+        STAGED_SEEKS.with(|c| c.set(0));
+        STAGED_READS.with(|c| c.set(0));
+        LEAF_ATTEMPTS.with(|c| c.set(0));
+        LEAF_ENTRIES_USED.with(|c| c.set(0));
+    }
+
+    #[cfg(test)]
+    pub(super) fn syncs() -> usize {
+        SYNCS.with(Cell::get)
+    }
+
+    #[cfg(test)]
+    pub(super) fn staged_seeks() -> usize {
+        STAGED_SEEKS.with(Cell::get)
+    }
+
+    #[cfg(test)]
+    pub(super) fn staged_reads() -> usize {
+        STAGED_READS.with(Cell::get)
+    }
+
+    #[cfg(test)]
+    pub(super) fn leaf_attempts() -> usize {
+        LEAF_ATTEMPTS.with(Cell::get)
+    }
+
+    #[cfg(test)]
+    pub(super) fn leaf_entries() -> usize {
+        LEAF_ENTRIES_USED.with(Cell::get)
+    }
+}
+
+/// `sync_data`, counted.
+fn sync_data(file: &File) -> std::io::Result<()> {
+    probe::sync();
+    file.sync_data()
+}
+
+/// `sync_all`, counted. This is the one before the rename.
+fn sync_all(file: &File) -> std::io::Result<()> {
+    probe::sync();
+    file.sync_all()
+}
 
 // ---------------------------------------------------------------------------
 // content_hash
@@ -322,6 +455,14 @@ pub struct WriterOptions {
     /// that only an unreachable constant can exercise is a claim nothing
     /// checks.
     pub sort_buffer_records: usize,
+    /// How much memory the writer may spend remembering which payloads it has
+    /// already staged.
+    ///
+    /// Not honoured yet: this is the budget the fixed-capacity dedupe window
+    /// spends, and the window itself is issue #1137. The field is here first
+    /// because the tests that prove both edges of that window have to be able
+    /// to ask for a window small enough to have edges.
+    pub dedupe_memory_bytes: usize,
 }
 
 impl Default for WriterOptions {
@@ -336,6 +477,7 @@ impl Default for WriterOptions {
             center_zoom: None,
             leaf_entries: DEFAULT_LEAF_ENTRIES,
             sort_buffer_records: SORT_RUN_RECORDS,
+            dedupe_memory_bytes: DEFAULT_DEDUPE_MEMORY_BYTES,
         }
     }
 }
@@ -394,6 +536,12 @@ impl WriterOptions {
     /// spilled.
     pub fn with_sort_buffer_records(mut self, records: usize) -> Self {
         self.sort_buffer_records = records;
+        self
+    }
+
+    /// Set how much memory the dedupe window may spend.
+    pub fn with_dedupe_memory_bytes(mut self, bytes: usize) -> Self {
+        self.dedupe_memory_bytes = bytes;
         self
     }
 }
@@ -482,7 +630,7 @@ impl Staging {
         match self {
             Self::Real(w) => {
                 w.flush()?;
-                w.get_ref().sync_data()
+                sync_data(w.get_ref())
             }
             #[cfg(test)]
             Self::FailsAfter(w) => w.sync(),
@@ -492,7 +640,7 @@ impl Staging {
     /// Push everything through to the device and close.
     fn finish(self) -> std::io::Result<()> {
         match self {
-            Self::Real(w) => w.into_inner().map_err(|e| e.into_error())?.sync_data(),
+            Self::Real(w) => sync_data(&w.into_inner().map_err(|e| e.into_error())?),
             #[cfg(test)]
             Self::FailsAfter(w) => w.finish(),
         }
@@ -1081,7 +1229,7 @@ impl<W: Write + Seek> Writer<W> {
             out.write_all(&encode_entry(&done))?;
             entry_count += 1;
         }
-        out.into_inner().map_err(|e| e.into_error())?.sync_data()?;
+        sync_data(&out.into_inner().map_err(|e| e.into_error())?)?;
 
         Ok(Plan {
             entries_path,
@@ -1132,7 +1280,7 @@ impl<W: Write + Seek> Writer<W> {
                 folded.push(Run { start: at, count });
                 at += count * SPILL_RECORD_BYTES as u64;
             }
-            out.into_inner().map_err(|e| e.into_error())?.sync_data()?;
+            sync_data(&out.into_inner().map_err(|e| e.into_error())?)?;
             path = out_path;
             runs = folded;
             pass += 1;
@@ -1172,6 +1320,7 @@ impl<W: Write + Seek> Writer<W> {
         self.scratch.push(leaf_path.clone());
         let mut leaf_entries = self.options.leaf_entries.max(1);
         loop {
+            probe::leaf_attempt();
             let mut leaf_file = BufWriter::new(File::create(&leaf_path)?);
             let mut pointers: Vec<Entry> = Vec::new();
             let mut leaf_offset: u64 = 0;
@@ -1209,16 +1358,14 @@ impl<W: Write + Seek> Writer<W> {
                 leaf_file.write_all(&body)?;
                 leaf_offset += body.len() as u64;
             }
-            leaf_file
-                .into_inner()
-                .map_err(|e| e.into_error())?
-                .sync_data()?;
+            sync_data(&leaf_file.into_inner().map_err(|e| e.into_error())?)?;
 
             let root = self
                 .options
                 .internal_compression
                 .compress(&serialize_entries(&pointers)?)?;
             if root.len() <= ROOT_BUDGET {
+                probe::leaf_entries_used(leaf_entries);
                 return Ok((
                     root,
                     Some(Leaves {
@@ -1361,6 +1508,7 @@ impl<W: Write + Seek> Writer<W> {
             let at = payload as usize;
             let start = payload_starts[at];
             let length = payload_starts[at + 1] - start;
+            probe::staged_seek();
             staged_data.seek(SeekFrom::Start(start))?;
             copy_exactly(&mut staged_data, out, length, &mut buffer)?;
         }
@@ -1377,7 +1525,7 @@ impl<W: Write + Seek> Writer<W> {
                 // renamed file is not left empty or short by a power loss
                 // between the rename and the writeback.
                 file.flush()?;
-                file.sync_all()?;
+                sync_all(&file)?;
                 // Close before the rename: some filesystems refuse to rename
                 // over an open handle.
                 drop(file);
@@ -1657,7 +1805,7 @@ mod tests {
         }
 
         pub(super) fn finish(self) -> std::io::Result<()> {
-            self.into.sync_data()
+            sync_data(&self.into)
         }
 
         /// The durability barrier, honoured here too.
@@ -1666,7 +1814,7 @@ mod tests {
         /// the wrong reason: the bytes the assertion reads would not have
         /// reached the file it reads them from.
         pub(super) fn sync(&mut self) -> std::io::Result<()> {
-            self.into.sync_data()
+            sync_data(&self.into)
         }
     }
 
@@ -2220,6 +2368,185 @@ mod tests {
             *w.payload_starts.last().unwrap(),
             expected_offset,
             "the sentinel is the staged length and there is no second copy of it"
+        );
+    }
+
+    /// A `finish` issues exactly one durability barrier.
+    ///
+    /// Every other `sync_data` in `finish` is on a scratch file that `Drop`
+    /// deletes and that no resume path ever reads back: `PmTilesSink` refuses
+    /// resume outright, `checkpoint_root` returns `None` and
+    /// `seed_completed_tile` errors. So the durability was bought and never
+    /// spent, and against a cell whose whole job is a few dozen PNG encodes,
+    /// four or five `fsync`s is a real share of the wall time (issue #1141).
+    ///
+    /// The one that stays is the `sync_all` in `publish`, before the rename,
+    /// which is the only one with anything to protect: it is what stops a
+    /// power loss between the rename and the writeback leaving a complete
+    /// archive's name on an empty or short file.
+    ///
+    /// The profile is deliberately awkward. One record a run means 300 runs
+    /// and a merge fold; one entry a leaf means the leaf loop runs. Both of
+    /// those used to sync.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn one_finish_issues_exactly_one_durability_barrier() {
+        let dir = temp_dir();
+        let destination = dir.path().join("barriers.pmtiles");
+        let mut w = Writer::create(
+            &destination,
+            WriterOptions::default()
+                .with_sort_buffer_records(1)
+                .with_leaf_entries(1),
+        )
+        .unwrap();
+        for id in 21u64..=320 {
+            let (z, x, y) = crate::pmtiles::tileid_to_zxy(id).unwrap();
+            let payload = format!("tile number {id}, distinct from every other").into_bytes();
+            w.add_tile(z, x, y, &payload, content_hash(&payload))
+                .unwrap();
+        }
+        assert!(
+            w.spilled_run_count() > MAX_MERGE_FANIN,
+            "this profile is supposed to reach the merge fold"
+        );
+
+        probe::reset();
+        w.finish().expect("the archive finishes");
+
+        assert_eq!(
+            probe::syncs(),
+            1,
+            "a finish should issue one durability barrier, the sync_all before the rename"
+        );
+        assert!(destination.exists());
+    }
+
+    /// `sync_pending` still syncs, because that one was asked for.
+    ///
+    /// The control on the test above. A writer that simply stopped syncing
+    /// anything would pass it, and would quietly drop the barrier a
+    /// checkpointed engine run explicitly calls for.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn the_barrier_a_caller_asks_for_is_still_issued() {
+        let dir = temp_dir();
+        let mut sink = std::io::Cursor::new(Vec::new());
+        let mut w = Writer::try_new(&mut sink, dir.path(), WriterOptions::default()).unwrap();
+        let payload = b"one tile".as_slice();
+        w.add_tile(3, 0, 0, payload, content_hash(payload)).unwrap();
+
+        probe::reset();
+        w.sync_pending().expect("the barrier lands");
+        assert_eq!(
+            probe::syncs(),
+            2,
+            "sync_pending syncs the staged payloads and the index log"
+        );
+    }
+
+    /// The payload copy reads each blob where it lies instead of seeking to
+    /// it.
+    ///
+    /// `write_archive` used to `seek` a `BufReader` and then read. `BufReader`
+    /// discards its buffer on a seek by documented contract, so every payload
+    /// cost an `lseek`, a thrown-away readahead and a fresh read: three
+    /// syscalls a payload, ten million times on a ten-million-payload archive.
+    /// The positioned-read helper the merge already runs on does it in one
+    /// (issue #1142).
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn the_payload_copy_reads_each_payload_where_it_lies_rather_than_seeking_to_it() {
+        const PAYLOADS: usize = 64;
+        let dir = temp_dir();
+        let mut sink = std::io::Cursor::new(Vec::new());
+        let mut w = Writer::try_new(&mut sink, dir.path(), WriterOptions::default()).unwrap();
+        for index in 0..PAYLOADS as u64 {
+            let (z, x, y) = crate::pmtiles::tileid_to_zxy(21 + index).unwrap();
+            let payload = format!("payload {index}").into_bytes();
+            w.add_tile(z, x, y, &payload, content_hash(&payload))
+                .unwrap();
+        }
+
+        probe::reset();
+        w.finish().expect("the archive finishes");
+
+        assert_eq!(
+            probe::staged_seeks(),
+            0,
+            "the copy should not move a shared cursor at all"
+        );
+        assert_eq!(
+            probe::staged_reads(),
+            PAYLOADS,
+            "one positioned read a payload, and these payloads are far under the copy buffer"
+        );
+    }
+
+    /// The leaf loop does not rebuild every leaf once per doubling.
+    ///
+    /// `build_directories` starts at the configured leaf size and doubles
+    /// until the root fits, re-gzipping every leaf on every attempt. The size
+    /// it settles on says how many attempts a pure doubling loop needs, so the
+    /// assertion is against that number rather than against a constant, and
+    /// the control below refuses a fixture that does not force enough
+    /// doublings to be able to tell the two apart (issue #1142).
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn the_leaf_loop_does_not_rebuild_every_leaf_once_per_doubling() {
+        const ENTRIES: u64 = 40_000;
+        let dir = temp_dir();
+        let mut sink = std::io::Cursor::new(Vec::new());
+        let mut w = Writer::try_new(
+            &mut sink,
+            dir.path(),
+            WriterOptions::default().with_leaf_entries(1),
+        )
+        .unwrap();
+
+        // Widely spaced ids, so the root's tile-id column carries real
+        // entropy. This is the whole difficulty of building a fixture that
+        // forces doublings: a root of leaf pointers has an all-zero run-length
+        // column, an offset column that is all zeros because the leaves are
+        // contiguous, and a length column of compressed leaf sizes that barely
+        // move, so gzip takes the lot to well under a byte a pointer. Measured
+        // on contiguous ids, twenty thousand pointers fit the 16257-byte root
+        // budget with room to spare. Four-byte deltas are what make a pointer
+        // cost something.
+        let mut id = 21u64;
+        let mut rng = 0x243f_6a88_85a3_08d3u64;
+        for _ in 0..ENTRIES {
+            rng = rng
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let (z, x, y) = crate::pmtiles::tileid_to_zxy(id).unwrap();
+            let size = 32 + (rng >> 33) as usize % 96;
+            let mut payload = vec![0u8; size];
+            payload[..8].copy_from_slice(&id.to_le_bytes());
+            w.add_tile(z, x, y, &payload, content_hash(&payload))
+                .unwrap();
+            id += 1 + (rng >> 38);
+        }
+
+        probe::reset();
+        w.finish().expect("the archive finishes");
+
+        let attempts = probe::leaf_attempts();
+        let settled = probe::leaf_entries();
+        assert!(settled >= 1, "the leaf loop never reported a size");
+        // A pure doubling loop from 1 reaches `settled` in this many attempts,
+        // counting the first.
+        let doublings = settled.trailing_zeros() as usize + 1;
+        println!("leaf loop: {attempts} attempts, settled on {settled} entries a leaf");
+        assert!(
+            doublings >= 4,
+            "this fixture settled on {settled} entries a leaf, which is only {doublings} \
+             doublings away from the start, so it cannot tell a doubling loop from anything else"
+        );
+        assert!(
+            attempts < doublings,
+            "the leaf section was built {attempts} times to settle on {settled} entries a \
+             leaf, which is what plain doubling costs"
         );
     }
 
