@@ -304,3 +304,150 @@ fn a_verify_walks_the_archive_once() {
          the structural check and the addressed count"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The cheap probe is for a local file, not for a reported size (review of
+// #1147)
+// ---------------------------------------------------------------------------
+
+/// A transport that answers the index and refuses the tile data.
+///
+/// This is not a contrived shape. It is an archive on object storage whose
+/// `Content-Length` is final and whose tile-data range 206s short or 500s: a
+/// half-completed multipart upload, an evicted CDN part, a truncated restore.
+/// The header, the root and the leaves all sit before `tile_data_offset` and
+/// come back perfectly, so every structural check passes and the size is
+/// known.
+struct IndexOnly {
+    bytes: Vec<u8>,
+    tile_data: std::ops::Range<u64>,
+}
+
+impl IndexOnly {
+    fn new(bytes: Vec<u8>) -> Self {
+        let header = libviprs::pmtiles::Header::try_decode(
+            &bytes[..libviprs::pmtiles::header::HEADER_BYTES],
+        )
+        .expect("the sink wrote a v3 header");
+        let start = header.tile_data_offset;
+        Self {
+            bytes,
+            tile_data: start..start + header.tile_data_length,
+        }
+    }
+}
+
+impl RangeReader for IndexOnly {
+    fn read_range(&self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+        if self.tile_data.contains(&offset) {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "the tile data range is not there",
+            ));
+        }
+        let start = usize::try_from(offset)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "offset past usize"))?;
+        let end = start
+            .checked_add(len)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "range overflows"))?;
+        if end > self.bytes.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "the range reaches past the archive",
+            ));
+        }
+        Ok(self.bytes[start..end].to_vec())
+    }
+
+    /// Final, and truthful about the object as a whole. That is the point: the
+    /// size is not the thing in doubt.
+    fn size(&self) -> io::Result<Option<u64>> {
+        Ok(Some(self.bytes.len() as u64))
+    }
+}
+
+/// An archive whose tile data cannot be fetched does not verify, even though
+/// its index is intact and its size is known.
+///
+/// The review of #1147 found that taking the cheap probe on
+/// `archive_size().is_some()` makes the payload read unreachable for PMTiles,
+/// because a reader that cannot report a size raises `ArchiveSizeUnknown` and
+/// the structural walk refuses it. So the run read nothing from the tile-data
+/// section precisely where that section is remote, and an archive whose bytes
+/// are gone came back `Ok` with `bytes_read: 0`, which is byte for byte what a
+/// run that did nothing looks like.
+///
+/// What justifies skipping the payload is the bytes being on a local
+/// filesystem, where an in-bounds read of an open file is a read that
+/// succeeds. A size reported over a transport is the server's claim about the
+/// object, not a promise about any particular range.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn an_archive_whose_tile_data_cannot_be_fetched_does_not_verify() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let plan = plan_for(512, 512, 256);
+    let archive = dir.path().join("half-served.pmtiles");
+    write_archive(&archive, &plan, &gradient(512, 512));
+    let bytes = std::fs::read(&archive).expect("read the archive back");
+
+    // The control: served whole, the same archive verifies. So the refusal
+    // below is about the tile data being unreachable rather than about the
+    // archive or the plan.
+    let whole = Reader::try_new(Counting::new(bytes.clone())).expect("the archive opens");
+    pyramid_verify(
+        &PmTilesPyramidReader::from_reader(whole),
+        &plan,
+        Some(TileFormat::Png),
+        &NoopObserver,
+    )
+    .expect("served whole, this archive verifies");
+
+    let reader = Reader::try_new(IndexOnly::new(bytes)).expect("the index alone opens the archive");
+    let pyramid = PmTilesPyramidReader::from_reader(reader);
+
+    // The control on the fixture: the structural walk passes, so nothing but
+    // the sweep can refuse this archive.
+    pyramid
+        .structural_summary()
+        .expect("the index is intact, so the structural walk is clean");
+
+    let result = pyramid_verify(&pyramid, &plan, Some(TileFormat::Png), &NoopObserver);
+    let err = result.err().unwrap_or_else(|| {
+        panic!(
+            "an archive whose every tile payload is unfetchable verified clean; \
+             a run that reads no tile data cannot tell that from an archive \
+             that is all there"
+        )
+    });
+    assert!(
+        !err.to_string().is_empty(),
+        "the refusal has to say something"
+    );
+}
+
+/// A local file still takes the cheap probe, which is the whole point of
+/// #1130.
+///
+/// The negative control for the cell above. Narrowing the condition to a local
+/// file must not quietly put every verify back on the expensive path, because
+/// the local file was never the expensive one and the ranged transport is
+/// where the saving was claimed.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_local_file_still_reads_lengths_rather_than_payloads() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let plan = plan_for(512, 512, 256);
+    let archive = dir.path().join("local.pmtiles");
+    write_archive(&archive, &plan, &gradient(512, 512));
+
+    let pyramid = PmTilesPyramidReader::try_open(&archive).expect("the archive opens");
+    let result = pyramid_verify(&pyramid, &plan, Some(TileFormat::Png), &NoopObserver)
+        .expect("a good archive on disk verifies");
+
+    assert_eq!(
+        result.tile_evidence,
+        Some(TileEvidence::LengthsFromTheIndex),
+        "a local file is exactly the case the cheap probe is justified for"
+    );
+    assert_eq!(result.bytes_read, 0, "and it read no payload to do it");
+}

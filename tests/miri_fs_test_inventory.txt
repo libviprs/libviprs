@@ -428,8 +428,10 @@ annotated   fs-detected  tests/pmtiles_sink.rs::the_engine_config_reaches_the_ar
 annotated   fs-detected  tests/pmtiles_sink.rs::the_sink_exposes_no_checkpoint_root
 annotated   fs-detected  tests/pmtiles_sink.rs::verify_builds_where_resume_does_not
 annotated   fs-detected  tests/pmtiles_sink.rs::writing_after_finish_is_refused
+annotated   fs-detected  tests/pmtiles_verify_reads_the_index.rs::a_local_file_still_reads_lengths_rather_than_payloads
 annotated   fs-detected  tests/pmtiles_verify_reads_the_index.rs::a_verify_over_a_sized_transport_fetches_no_tile_payload
 annotated   fs-detected  tests/pmtiles_verify_reads_the_index.rs::a_verify_walks_the_archive_once
+annotated   fs-detected  tests/pmtiles_verify_reads_the_index.rs::an_archive_whose_tile_data_cannot_be_fetched_does_not_verify
 annotated   fs-detected  tests/pmtiles_verify_reads_the_index.rs::payload_reads_are_visible_to_the_classifier
 annotated   fs-detected  tests/pmtiles_writer.rs::a_finalize_that_cannot_publish_leaves_no_partial_archive
 annotated   fs-detected  tests/pmtiles_writer.rs::a_run_of_identical_adjacent_tiles_is_one_entry
