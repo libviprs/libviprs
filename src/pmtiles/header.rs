@@ -301,6 +301,24 @@ impl Compression {
     /// [`Compression::None`] is the identity. Everything except `Gzip` is a
     /// typed refusal, `Unknown` included: a writer that does not know what it
     /// compressed with has produced an archive nothing can read.
+    ///
+    /// # Why the level is `best()` and stays there
+    ///
+    /// Issue #1142 asked whether it could drop to the default level 6, on the
+    /// evidence that the golden fixtures' roots compress to the same length
+    /// either way. Measured at a full 16383-entry root, in
+    /// `what_the_gzip_level_costs_at_the_root_budget`, they mostly do: three
+    /// of four realistic root shapes come out the same length and a root of
+    /// dedupe back references comes out 20 bytes smaller at level 6.
+    ///
+    /// It stays at `best()` because go-pmtiles compresses its directories at
+    /// `gzip.BestCompression`, and this crate matches go-pmtiles deliberately
+    /// so that an archive built here from a tile set has the same shape and
+    /// the same bytes as one the reference builds from it. Moving the level
+    /// changes `root_length` for some inputs and shifts every section offset
+    /// after it, in exchange for directory compression time that is a small
+    /// share of a finalize. The test above is where that trade gets re-read if
+    /// anyone wants to make it.
     pub fn compress(self, bytes: &[u8]) -> Result<Vec<u8>, PmTilesError> {
         match self {
             Self::None => Ok(bytes.to_vec()),
