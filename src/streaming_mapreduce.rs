@@ -94,7 +94,7 @@ impl Default for MapReduceConfig {
 }
 
 impl MapReduceConfig {
-    fn engine_config(&self) -> EngineConfig {
+    pub(crate) fn engine_config(&self) -> EngineConfig {
         EngineConfig {
             concurrency: self.tile_concurrency,
             buffer_size: self.buffer_size,
@@ -495,6 +495,11 @@ pub(crate) fn generate_pyramid_mapreduce(
     let format = source.format();
     let bpp = format.bytes_per_pixel();
     let engine_cfg = config.engine_config();
+
+    // Before any tile reaches the sink, for the reason in `streaming.rs`:
+    // a sink that reads the config per tile used to get the standalone
+    // default on every engine but the monolithic one (issue #1133).
+    sink.record_engine_config(&engine_cfg);
 
     // Pre-flight (parity with the sequential engine, `streaming.rs`): the
     // worst-case strip is one minimum aligned unit (2 × tile_size rows) at

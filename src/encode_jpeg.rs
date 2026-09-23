@@ -65,11 +65,30 @@
 //!
 //! Building the Huffman tables from the image means counting the symbols
 //! before writing any of them, and this counts them by running the transform
-//! twice rather than by keeping the coefficients. Keeping them is faster and
-//! costs three bytes a pixel, which is 300 MB on a 10000x10000 image and about
-//! the same again as the raster; running the transform again costs time that
+//! twice rather than by keeping the coefficients. Keeping them costs
+//! `size_of::<i32>()` per coefficient in the shape this encoder produces them,
+//! which is **6 bytes a pixel at 4:2:0 and 12 at 4:4:4**: 600 MB and 1.2 GB
+//! respectively on a 10000x10000 image, against 300 MB for the raster itself.
+//! Three bytes a pixel is libjpeg's figure and not this one, because libjpeg
+//! keeps a `JCOEF` as an `i16`; quoting its best case as the general one would
+//! be understating the thing the decision turns on. Running the transform
+//! again costs time that
 //! scales with the same image and no memory at all. For a crate whose whole
 //! shape is "do not hold the image twice", that is the right way round.
+//!
+//! One qualification, because the argument above is about this file and the
+//! caller in front of it does not keep to it. `crate::sink::flatten_alpha`
+//! builds a whole `Rgb8` raster while the `Rgba8` original is still live, so
+//! an RGBA input peaks at seven bytes a pixel before a single coefficient
+//! exists. On the tile path that is one 256x256 tile at a time and it never
+//! bites; on `Raster::encode_jpeg` over a whole image it does, and on the
+//! render path that produces `Rgba8` in the first place it is 488 MB against
+//! 279 MB for a 9932x7020 page. It buys the crate's own port of
+//! `vips_flatten` instead of a second copy of the compositing arithmetic,
+//! which is why it is there. Compositing inside `Pixels::sample` would cost
+//! one multiply-add per channel and no allocation, and that is the change to
+//! make if the whole-image route ever matters; the two-pass trade below is
+//! about this encoder's own footprint and not about that copy.
 //!
 //! The price is measured, not guessed. On a 256x256 line-art tile at quality
 //! 85, release build, this machine: 0.93 ms against `image`'s 0.50 ms at
@@ -263,7 +282,7 @@ pub(crate) fn encode(
     // Pass two: the same walk, now that there are tables to write it with.
     let tables: Vec<HuffTable> = (0..plan.huff_tables())
         .map(|t| HuffTable::optimal(&counts[t]))
-        .collect();
+        .collect::<Result<_, _>>()?;
 
     let mut out = Vec::with_capacity(data.len() / 4 + 1024);
     plan.write_headers(&mut out, &tables);
@@ -274,6 +293,17 @@ pub(crate) fn encode(
         let base = plan.comps[comp].huff * 2;
         prev_dc[comp] = block_symbols(block, prev_dc[comp], |is_ac, symbol, extra, len| {
             let (size, code) = tables[base + usize::from(is_ac)].codes[symbol as usize];
+            // Every symbol pass two writes was counted in pass one, so every
+            // one of them has a code. A zero length here would mean the two
+            // walks disagreed, and `BitWriter::write` would answer by writing
+            // nothing at all, which is a stream that decodes into noise from
+            // that point rather than an error. The check is here and not in
+            // the writer because the second call below legitimately passes a
+            // width of zero, for a ZRL or an end-of-block.
+            debug_assert!(
+                size > 0,
+                "symbol {symbol:#04x} (ac={is_ac}) reached the scan with no code"
+            );
             bits.write(code, size);
             bits.write(extra, len);
         });
@@ -683,8 +713,9 @@ fn quantize(block: &[f32; 64], divisors: &[f32; 64], out: &mut [i32; 64]) {
     for ((slot, &c), &d) in out.iter_mut().zip(block.iter()).zip(divisors.iter()) {
         #[expect(
             clippy::cast_possible_truncation,
-            reason = "an 8-bit sample block cannot produce a coefficient past \
-                      +/-1024 before the divisor, so the product is far inside i32"
+            reason = "the AAN output is the DCT times 8*AAN[u]*AAN[v] and reaches \
+                      about +/-15800 on an 8-bit block, which the divisor brings \
+                      back under +/-1024; either way the product is far inside i32"
         )]
         let rounded = (c * d).round() as i32;
         *slot = rounded;
@@ -711,6 +742,21 @@ fn magnitude(v: i32) -> (u8, u16) {
     if size == 0 {
         return (0, 0);
     }
+    // `size` is bounded here, before it is used as a shift distance, rather
+    // than downstream where the `u16::try_from` below reads as if it were the
+    // guard. It is not: the shift happens first, and a `size` past 31 would be
+    // undefined behaviour in C and a panic here before anything checked it.
+    //
+    // It cannot happen, and that is measured rather than assumed. The 2D
+    // transform is orthogonal as `divisors_for` normalises it, so no
+    // coefficient of an 8-bit block exceeds 1024 in magnitude and the largest
+    // DC difference is about 2040. At quality 100, where every divisor clamps
+    // to 1, that is a category of 11. The assertion is here because the bound
+    // is worth stating at the point it is relied on.
+    debug_assert!(
+        size <= 16,
+        "a magnitude category of {size} would shift past the accumulator"
+    );
     let mask = (1u32 << size) - 1;
     #[expect(
         clippy::cast_sign_loss,
@@ -780,7 +826,7 @@ impl HuffTable {
     /// than sixteen bits back under the limit, because the format has no way
     /// to spell one. The fold costs a fraction of a bit on the rarest symbols
     /// and cannot happen at all on an image this crate would tile.
-    fn optimal(freq: &[u32; 256]) -> Self {
+    fn optimal(freq: &[u32; 256]) -> Result<Self, EncodeError> {
         let mut f = [0u32; 257];
         f[..256].copy_from_slice(freq);
         // A table with no symbols at all cannot be written, and a component
@@ -834,7 +880,21 @@ impl HuffTable {
         let mut counts = [0u32; 33];
         for &size in &codesize {
             if size > 0 {
-                counts[(size as usize).min(32)] += 1;
+                // libjpeg's `MAX_CLEN`, and it `ERREXIT`s here rather than
+                // folding the length in. So does this: clamping would silently
+                // build a table that codes some symbol at a length the
+                // distribution did not ask for, and the file would still
+                // decode, which is the shape of defect that does not get
+                // found. It takes a Fibonacci-like 2.1 million symbols in one
+                // table to reach 32 bits, so a tile cannot get here and a
+                // whole-image encode would have to be adversarial.
+                if size > 32 {
+                    return Err(EncodeError::encode(format!(
+                        "a Huffman code of {size} bits is past the 32 the \
+                         format's length-limiting can fold back under 16"
+                    )));
+                }
+                counts[size as usize] += 1;
             }
         }
         for len in (17..=32).rev() {
@@ -886,11 +946,11 @@ impl HuffTable {
         }
         values.truncate(next);
 
-        Self {
+        Ok(Self {
             bits,
             values,
             codes,
-        }
+        })
     }
 }
 
@@ -1068,21 +1128,13 @@ mod tests {
                     0
                 };
             }
-            let table = HuffTable::optimal(&freq);
+            let table = HuffTable::optimal(&freq).expect("a 256-symbol table is under MAX_CLEN");
 
             let total: u32 = table.bits[1..].iter().map(|&b| u32::from(b)).sum();
             assert_eq!(
                 total as usize,
                 table.values.len(),
                 "case {case}: the length counts and the symbol list disagree"
-            );
-
-            // Kraft equality, which is what says the code is complete and has
-            // no dead prefixes, less the one code the sentinel holds.
-            let kraft: u64 = (1..=16).map(|l| u64::from(table.bits[l]) << (16 - l)).sum();
-            assert!(
-                kraft <= 65536,
-                "case {case}: the code is over-full ({kraft} against 65536)"
             );
 
             let mut longest = 0;
@@ -1097,6 +1149,24 @@ mod tests {
                     largest_at_longest = largest_at_longest.max(u32::from(code));
                 }
             }
+            // Kraft *equality*, which is the thing that says the code is
+            // complete and leaves no dead prefixes. The assertion used to be
+            // `kraft <= 65536` under a comment claiming equality, and an
+            // under-full code passes that: a fold or a `values` ordering slip
+            // that dropped symbols would leave prefixes nothing decodes to and
+            // still read as fine. The exact figure is the whole space less the
+            // one code the sentinel holds, and the sentinel's code is the
+            // all-ones one at `longest`, so it is worth `1 << (16 - longest)`.
+            let kraft: u64 = (1..=16).map(|l| u64::from(table.bits[l]) << (16 - l)).sum();
+            let reserved = 1u64 << (16 - longest);
+            assert_eq!(
+                kraft,
+                65536 - reserved,
+                "case {case}: the code spans {kraft} of 65536 and a complete one \
+                 less the sentinel's {longest}-bit code spans {}",
+                65536 - reserved
+            );
+
             let all_ones = (1u32 << longest) - 1;
             assert!(
                 largest_at_longest < all_ones,

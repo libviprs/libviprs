@@ -137,6 +137,12 @@ pub(crate) fn generate_pyramid_mapreduce_hot_cache(
     observer: &dyn EngineObserver,
     executor: &dyn WorkExecutor,
 ) -> Result<EngineResult, EngineError> {
+    // The inner run below records the config onto the hot cache, not onto the
+    // real sink, so this one needs it in its own right. Without it a sink that
+    // reads the config per tile answers from the standalone default on the
+    // flush path (issue #1133).
+    sink.record_engine_config(&config.engine_config());
+
     // Phase 1: render the whole pyramid into the hot cache. The inner run's
     // `Finished` is withheld; it is re-emitted after the flush below.
     let cache = HotCacheSink::new();

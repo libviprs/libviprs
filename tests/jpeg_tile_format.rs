@@ -46,7 +46,7 @@ use std::path::{Path, PathBuf};
 use libviprs::planner::{Layout, PyramidPlan, PyramidPlanner, TileCoord};
 use libviprs::sink::{Tile, TileFormat, TileSink};
 use libviprs::source::decode_bytes;
-use libviprs::{EngineBuilder, FsSink, JpegSubsample, PixelFormat, Raster};
+use libviprs::{EngineBuilder, EngineKind, FsSink, JpegSubsample, PixelFormat, Raster};
 
 // ---------------------------------------------------------------------------
 // Reading a JPEG's own account of itself
@@ -215,6 +215,28 @@ fn rgb_drawing(w: u32, h: u32) -> Raster {
     Raster::new(w, h, PixelFormat::Rgb8, data).expect("an rgb raster is well formed")
 }
 
+/// Luma RMSE and worst single-pixel luma error between two RGB buffers.
+///
+/// Luma rather than per-band because 4:2:0 throws away three quarters of the
+/// chroma samples on purpose, so a per-band bound would either have to be
+/// loose enough to hide a real defect or fail on the subsampling itself. The
+/// worst-pixel figure is the one that can see a handful of corrupt blocks,
+/// because an average over a whole tile cannot.
+fn luma_error(want: &[u8], got: &[u8]) -> (f64, f64) {
+    let luma =
+        |px: &[u8]| 0.299 * f64::from(px[0]) + 0.587 * f64::from(px[1]) + 0.114 * f64::from(px[2]);
+    let mut worst = 0f64;
+    let mut sum = 0f64;
+    let mut n = 0f64;
+    for (a, b) in want.as_chunks::<3>().0.iter().zip(got.as_chunks::<3>().0) {
+        let d = (luma(a) - luma(b)).abs();
+        worst = worst.max(d);
+        sum += d * d;
+        n += 1.0;
+    }
+    ((sum / n).sqrt(), worst)
+}
+
 fn plan_for(w: u32, h: u32, tile: u32) -> PyramidPlan {
     PyramidPlanner::new(w, h, tile, 0, Layout::DeepZoom)
         .expect("a square plan is valid")
@@ -338,6 +360,67 @@ fn transparent_pixels_take_the_engine_background() {
     }
 }
 
+/// The background reaches the flattening on **every** engine, not just the one
+/// a small in-memory fixture happens to select.
+///
+/// `transparent_pixels_take_the_engine_background` above drives a 256x256
+/// `Raster` with no memory budget, so `EngineKind::Auto` resolves to
+/// `Monolithic` and the cell can only ever exercise that engine. That is the
+/// shape of a probe set that lands on fixed points: it passes, and it is
+/// incapable of failing for the reason anybody cares about.
+///
+/// The reason anybody cares is that `--render` on a large PDF is a strip
+/// source, `resolve_engine_kind` sends every strip source to `Streaming`, and
+/// the CLI picks Streaming or MapReduce whenever a memory budget is set. That
+/// is precisely the input issue #1133 was filed about, so the headline case
+/// was the one running down the path this cell exists to cover.
+#[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+fn every_engine_flattens_onto_the_configured_background() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let plan = plan_for(256, 256, 256);
+    let background = [206, 17, 38];
+
+    for kind in [
+        EngineKind::Monolithic,
+        EngineKind::Streaming,
+        EngineKind::MapReduce,
+    ] {
+        let root = dir.path().join(format!("{kind:?}"));
+        let sink = FsSink::new(&root, plan.clone()).with_format(TileFormat::Jpeg { quality: 85 });
+        let src = rgba_with_a_hole(256, 256);
+        EngineBuilder::new(&src, plan.clone(), sink)
+            .with_engine(kind)
+            .with_background_rgb(background)
+            .run()
+            .unwrap_or_else(|e| panic!("{kind:?} generates a jpeg pyramid: {e}"));
+
+        let rel = plan
+            .tile_path(TileCoord::new(full_res(&plan), 0, 0), "jpeg")
+            .expect("the coord is inside the plan");
+        let bytes = std::fs::read(root.join(rel))
+            .unwrap_or_else(|e| panic!("{kind:?} wrote the full-resolution tile: {e}"));
+        let decoded = decode_bytes(&bytes).expect("the tile decodes");
+        let off = ((128 * 256 + 128) * 3) as usize;
+        let px = [
+            decoded.data()[off],
+            decoded.data()[off + 1],
+            decoded.data()[off + 2],
+        ];
+        for band in 0..3 {
+            let delta = i32::from(px[band]) - i32::from(background[band]);
+            assert!(
+                delta.abs() <= 8,
+                "{kind:?}: the transparent square reads {px:?} against a \
+                 configured background of {background:?}. White here means the \
+                 engine never handed the sink its config, so the flattening \
+                 used the standalone default while the padding in the same \
+                 tile used the real one"
+            );
+        }
+    }
+}
+
 /// The control for the fixtures above: the render path really does still hand
 /// the sink RGBA.
 ///
@@ -403,12 +486,26 @@ fn a_tile_at_the_default_quality_subsamples_chroma() {
 fn a_tile_at_quality_90_keeps_full_chroma() {
     let dir = tempfile::tempdir().expect("a temp dir");
     let plan = plan_for(256, 256, 256);
-    let bytes = tile_bytes(dir.path(), &plan, rgb_drawing(256, 256), 90);
+    let src = rgb_drawing(256, 256);
+    let bytes = tile_bytes(dir.path(), &plan, src.clone(), 90);
 
     assert_eq!(
         sampling_factors(&bytes),
         vec![(1, 1, 1), (2, 1, 1), (3, 1, 1)],
         "quality 90 is where Auto stops subsampling, so this one is 4:4:4"
+    );
+
+    // The 4:4:4 path had no pixel check at all, only a sampling factor and a
+    // decode, which between them are true of any decodable file that declares
+    // the right header. Full chroma at quality 90 should be *closer* to the
+    // source than the 4:2:0 default is, so the bounds here are tighter than
+    // the ones the subsampled cells carry rather than the same.
+    let decoded = decode_bytes(&bytes).expect("the tile decodes");
+    let (rmse, worst) = luma_error(src.data(), decoded.data());
+    assert!(rmse < 4.0, "4:4:4 luma RMSE is {rmse:.2} at quality 90");
+    assert!(
+        worst < 60.0,
+        "4:4:4 moved one pixel by {worst} at quality 90"
     );
 }
 
@@ -505,25 +602,43 @@ fn the_huffman_tables_are_built_from_the_tile() {
 // Controls: what must not move
 // ---------------------------------------------------------------------------
 
-/// Every emitted tile is a JPEG this crate's own decoder reads back at the
-/// planned size.
+/// Every emitted tile is the shape and the picture its lossless sibling is.
 ///
-/// The cheapest way to make the two cells above pass is to emit something that
-/// declares 4:2:0 and is not decodable, so this runs the whole grid back
-/// through `decode_bytes`.
+/// The reference is a PNG tree generated from the same source and the same
+/// plan, not the JPEG file's own SOF0 header. Comparing a decoded size against
+/// the header it was read out of is an identity that holds for any file that
+/// decodes at all, which is what this cell asserted before: it said "a JPEG is
+/// self-consistent" under a name that claimed it matched the plan.
+///
+/// `plan.tile_rect(coord)` is not the referent either, and I checked rather
+/// than assumed. It reports the content window, 1x1 at the top of this
+/// pyramid, while the engine pads every tile out to `tile_size` for every
+/// format: the PNG sibling is 128x128 at that same coord. So the honest
+/// comparison is against the format that was already right.
+///
+/// The fixture is 300x220 at a tile size of 128, which leaves a right-hand
+/// column 44 px of content wide and a bottom row 92 px tall. Those edge tiles
+/// are the only exercise `Pixels::fill_block`'s edge clamping gets, and
+/// because PNG is lossless this cell compares their **pixels** and not just
+/// their dimensions. A short scan, a mis-clamped edge or a wrong MCU layout
+/// shows up here as ink in the wrong place rather than as a decode error.
 #[test]
 #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
-fn every_tile_decodes_at_its_planned_size() {
+fn every_tile_matches_its_lossless_sibling() {
     let dir = tempfile::tempdir().expect("a temp dir");
     let plan = plan_for(300, 220, 128);
-    let root = jpeg_tree(
-        &dir.path().join("grid"),
-        &plan,
-        &rgb_drawing(300, 220),
-        [255, 255, 255],
-    );
+    let src = rgb_drawing(300, 220);
+
+    let jpeg_root = jpeg_tree(&dir.path().join("grid"), &plan, &src, [255, 255, 255]);
+    let png_root = dir.path().join("png");
+    let png_sink = FsSink::new(&png_root, plan.clone()).with_format(TileFormat::Png);
+    EngineBuilder::new(&src, plan.clone(), png_sink)
+        .run()
+        .expect("a png pyramid generates");
 
     let mut seen = 0;
+    let mut worst_seen = 0f64;
+    let mut worst_rmse = 0f64;
     for (level, lp) in plan.levels.iter().enumerate() {
         for row in 0..lp.rows {
             for col in 0..lp.cols {
@@ -532,22 +647,47 @@ fn every_tile_decodes_at_its_planned_size() {
                     col,
                     row,
                 );
-                let rel = plan
+                let rel_jpeg = plan
                     .tile_path(coord, "jpeg")
                     .expect("the coord is inside the plan");
-                let bytes = std::fs::read(root.join(&rel)).expect("the tile is on disk");
-                let decoded =
-                    decode_bytes(&bytes).unwrap_or_else(|e| panic!("{rel} does not decode: {e}"));
+                let rel_png = plan
+                    .tile_path(coord, "png")
+                    .expect("the coord is inside the plan");
+                let bytes = std::fs::read(jpeg_root.join(&rel_jpeg)).expect("the tile is on disk");
+                let got = decode_bytes(&bytes)
+                    .unwrap_or_else(|e| panic!("{rel_jpeg} does not decode: {e}"));
+                let want = decode_bytes(&std::fs::read(png_root.join(&rel_png)).expect("png tile"))
+                    .expect("the png sibling decodes");
+
                 assert_eq!(
-                    (decoded.width(), decoded.height()),
-                    frame_size(&bytes),
-                    "{rel} decodes to a different size than its own header declares"
+                    (got.width(), got.height()),
+                    (want.width(), want.height()),
+                    "{rel_jpeg} is {}x{} and its lossless sibling is {}x{}",
+                    got.width(),
+                    got.height(),
+                    want.width(),
+                    want.height()
+                );
+
+                let (rmse, worst) = luma_error(want.data(), got.data());
+                worst_rmse = worst_rmse.max(rmse);
+                worst_seen = worst_seen.max(worst);
+                assert!(
+                    rmse < 6.0,
+                    "{rel_jpeg}: luma RMSE {rmse:.2} against the lossless tile"
+                );
+                assert!(
+                    worst < 70.0,
+                    "{rel_jpeg}: one pixel is {worst} off the lossless tile, which \
+                     is a block reconstructed from something other than what was \
+                     encoded rather than a quantization error"
                 );
                 seen += 1;
             }
         }
     }
     assert!(seen > 10, "the walk only found {seen} tiles");
+    println!("{seen} tiles, worst luma RMSE {worst_rmse:.2}, worst pixel {worst_seen}");
 }
 
 /// Only the Ultra HDR lane still builds an `image` JPEG encoder.
@@ -621,6 +761,7 @@ fn a_greyscale_tile_is_one_component() {
     for (i, v) in data.iter_mut().enumerate() {
         *v = (i % 251) as u8;
     }
+    let source = data.clone();
     let grey = Raster::new(256, 256, PixelFormat::Gray8, data).expect("a grey raster");
     let bytes = tile_bytes(dir.path(), &plan, grey, 85);
 
@@ -631,6 +772,22 @@ fn a_greyscale_tile_is_one_component() {
     );
     let decoded = decode_bytes(&bytes).expect("a greyscale tile decodes");
     assert_eq!((decoded.width(), decoded.height()), (256, 256));
+    assert_eq!(decoded.format(), PixelFormat::Gray8);
+
+    // And the pixels, because a component count and a successful decode are
+    // both true of a tile full of noise. One component means no chroma to
+    // subsample, so the only thing between this and the source is the
+    // quantizer, and the bound is tight enough to say so.
+    let mut worst = 0f64;
+    let mut sum = 0f64;
+    for (a, b) in source.iter().zip(decoded.data()) {
+        let d = (f64::from(*a) - f64::from(*b)).abs();
+        worst = worst.max(d);
+        sum += d * d;
+    }
+    let rmse = (sum / (256.0 * 256.0)).sqrt();
+    assert!(rmse < 6.0, "greyscale RMSE is {rmse:.2}");
+    assert!(worst < 70.0, "one greyscale pixel moved by {worst}");
 }
 
 /// The subsampled tile is still the picture it was handed.

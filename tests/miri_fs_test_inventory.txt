@@ -329,7 +329,8 @@ annotated   fs-detected  tests/jpeg_tile_format.rs::a_greyscale_tile_is_one_comp
 annotated   fs-detected  tests/jpeg_tile_format.rs::a_tile_at_quality_90_keeps_full_chroma
 annotated   fs-detected  tests/jpeg_tile_format.rs::a_tile_at_the_default_quality_subsamples_chroma
 annotated   fs-detected  tests/jpeg_tile_format.rs::an_rgba_source_tiles_as_jpeg
-annotated   fs-detected  tests/jpeg_tile_format.rs::every_tile_decodes_at_its_planned_size
+annotated   fs-detected  tests/jpeg_tile_format.rs::every_engine_flattens_onto_the_configured_background
+annotated   fs-detected  tests/jpeg_tile_format.rs::every_tile_matches_its_lossless_sibling
 annotated   fs-detected  tests/jpeg_tile_format.rs::only_the_ultra_hdr_lane_builds_an_image_jpeg_encoder
 annotated   fs-detected  tests/jpeg_tile_format.rs::subsampling_does_not_move_the_ink
 annotated   fs-detected  tests/jpeg_tile_format.rs::the_blank_tile_floor_falls

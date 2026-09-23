@@ -905,6 +905,15 @@ pub(crate) fn generate_pyramid_streaming(
     config: &StreamingConfig,
     observer: &dyn EngineObserver,
 ) -> Result<EngineResult, EngineError> {
+    // Hand the sink the run's configuration before any tile reaches it. Only
+    // the monolithic engine used to do this, so a sink that reads the config
+    // to answer a per-tile question got the standalone default here instead,
+    // and on this engine that is the wrong answer in the same tile as the
+    // right one: the padding around an edge tile comes from
+    // `config.engine.background_rgb` and the alpha flattening in
+    // `sink::encode_jpeg` fell back to white (issue #1133).
+    sink.record_engine_config(&config.engine);
+
     let format = source.format();
     let bpp = format.bytes_per_pixel();
 
