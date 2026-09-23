@@ -36,7 +36,8 @@
 //! final-offset lookup went with issue #1138, which put the staged offset in
 //! the index record itself: the record is the same 20 bytes on disk either
 //! way, and an offset answers both questions the two tables were keeping the
-//! answers to. The write order is the last of them.
+//! answers to. The write order was the last of them and it spills now, twelve
+//! bytes a record, read back once while the archive is written.
 //!
 //! A pyramid of mostly blank tiles has very few distinct payloads, which is
 //! the case this design exists for. A photograph is the case the table is for.
@@ -98,9 +99,9 @@
 //! external merge, which reads every run through **one** file descriptor with
 //! a capped fan-in rather than holding one open file per run.
 //!
-//! **Not** bounded by the tile count but bounded by the number of *distinct
-//! payloads*: the write order, and nothing else. The dedupe window and the
-//! repeat table are bounded by neither, because the caller sizes them. See the
+//! **Not** bounded by the tile count and not bounded by the payload count
+//! either, because the caller sizes them: the dedupe window and the repeat
+//! table. Nothing else in this writer grows with either number. See the
 //! numbers at the top of this page.
 //!
 //! # A failed write is never published
@@ -223,6 +224,9 @@ const MERGE_CURSOR_RECORDS: usize = 256;
 
 /// One spilled directory entry: `tile_id`, final offset, length, run length.
 const ENTRY_RECORD_BYTES: usize = 8 + 8 + 4 + 4;
+
+/// One spilled write-order record: staged offset, length.
+const ORDER_RECORD_BYTES: usize = 8 + 4;
 
 /// Copy buffer for moving staged payloads and leaf bytes into the archive.
 const COPY_BUFFER_BYTES: usize = 64 * 1024;
@@ -970,7 +974,7 @@ pub struct Writer<W: Write + Seek> {
     /// Fixed capacity: see [`DedupeWindow`]. It used to be a
     /// `HashMap<[u8; 32], u64>` of every payload ever seen, which is the
     /// allocation issue #1137 removed.
-    window: DedupeWindow,
+    window: Option<DedupeWindow>,
     /// Staged offsets that more than one tile points at, so finalization can
     /// tell a payload it has placed already from one it has not.
     repeats: RepeatTable,
@@ -1082,7 +1086,7 @@ impl<W: Write + Seek> Writer<W> {
             staged: Some(Staging::Real(BufWriter::new(staged))),
             log: Some(Staging::Real(BufWriter::new(log))),
             log_len: 0,
-            window: DedupeWindow::with_sets(sets),
+            window: Some(DedupeWindow::with_sets(sets)),
             repeats: RepeatTable::with_sets(sets),
             staged_len: 0,
             staged_payloads: 0,
@@ -1135,7 +1139,12 @@ impl<W: Write + Seek> Writer<W> {
             value: bytes.len() as u64,
         })?;
 
-        let data_offset = match self.window.get(&content_hash) {
+        let staged = self
+            .window
+            .as_mut()
+            .expect("a live writer has its dedupe window")
+            .get(&content_hash);
+        let data_offset = match staged {
             Some((offset, stored)) => {
                 if stored != length {
                     return Err(PmTilesError::ContentHashMismatch { length, stored });
@@ -1165,7 +1174,10 @@ impl<W: Write + Seek> Writer<W> {
                 let end = self.latch("staging a payload", end)?;
                 self.staged_len = end;
                 self.staged_payloads += 1;
-                self.window.insert(content_hash, offset, length);
+                self.window
+                    .as_mut()
+                    .expect("a live writer has its dedupe window")
+                    .insert(content_hash, offset, length);
                 offset
             }
         };
@@ -1341,6 +1353,13 @@ impl<W: Write + Seek> Writer<W> {
         // which makes it exactly the kind of code that rots unnoticed.
         self.flush_run()?;
 
+        // The window has no reader left. `add_tile` is the only thing that
+        // ever looked at it, so from here it is the budget the caller gave us
+        // sitting resident through the whole of finalize for nothing, which is
+        // exactly where the old writer took its peak. The repeat table stays:
+        // placement reads it.
+        self.window = None;
+
         // Both scratch files are done being written. Flush them through their
         // buffers and close the handles before anything reads them back.
         if let Some(staged) = self.staged.take() {
@@ -1370,8 +1389,11 @@ struct Plan {
     entries_path: PathBuf,
     entry_count: u64,
     addressed_tiles: u64,
-    /// The payloads the archive writes, in the order it writes them.
-    order: Vec<Placement>,
+    /// Path of the spilled write order.
+    order_path: PathBuf,
+    /// How many payloads the data region carries, which is how many records
+    /// that file holds.
+    contents_count: u64,
     tile_data_length: u64,
 }
 
@@ -1380,10 +1402,32 @@ struct Plan {
 /// A staged offset and a length, which is everything: the bytes are at that
 /// offset in the staging file and there are that many of them. This used to
 /// be an index into a table the writer had to keep beside it.
+///
+/// They go to disk rather than into a `Vec`. The `Vec` was the fourth table
+/// scaling with distinct payloads and the module doc named only three of them,
+/// so at ten million payloads it was 80 MB nobody had counted (issue #1139).
+/// Twelve bytes a record, written in placement order by [`Writer::plan_entries`]
+/// and read back once, sequentially, by [`Writer::write_archive`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Placement {
     data_offset: u64,
     length: u32,
+}
+
+impl Placement {
+    fn encode(&self) -> [u8; ORDER_RECORD_BYTES] {
+        let mut out = [0u8; ORDER_RECORD_BYTES];
+        out[0..8].copy_from_slice(&self.data_offset.to_le_bytes());
+        out[8..12].copy_from_slice(&self.length.to_le_bytes());
+        out
+    }
+
+    fn decode(bytes: &[u8; ORDER_RECORD_BYTES]) -> Self {
+        Self {
+            data_offset: u64::from_le_bytes(bytes[0..8].try_into().expect("8 bytes")),
+            length: u32::from_le_bytes(bytes[8..12].try_into().expect("4 bytes")),
+        }
+    }
 }
 
 /// The leaf section, when there is one.
@@ -1403,7 +1447,10 @@ impl<W: Write + Seek> Writer<W> {
         self.scratch.push(entries_path.clone());
         let mut out = BufWriter::new(File::create(&entries_path)?);
 
-        let mut order: Vec<Placement> = Vec::new();
+        let order_path = suffixed(&self.base, ".ord");
+        self.scratch.push(order_path.clone());
+        let mut order = BufWriter::new(File::create(&order_path)?);
+        let mut contents_count: u64 = 0;
         let mut next_offset: u64 = 0;
 
         let mut entry_count: u64 = 0;
@@ -1439,10 +1486,14 @@ impl<W: Write + Seek> Writer<W> {
                     if let Some(slot) = marked {
                         *slot = offset;
                     }
-                    order.push(Placement {
-                        data_offset: record.data_offset,
-                        length: record.length,
-                    });
+                    order.write_all(
+                        &Placement {
+                            data_offset: record.data_offset,
+                            length: record.length,
+                        }
+                        .encode(),
+                    )?;
+                    contents_count += 1;
                     offset
                 }
             };
@@ -1484,12 +1535,14 @@ impl<W: Write + Seek> Writer<W> {
             entry_count += 1;
         }
         sync_data(&out.into_inner().map_err(|e| e.into_error())?)?;
+        order.into_inner().map_err(|e| e.into_error())?;
 
         Ok(Plan {
             entries_path,
             entry_count,
             addressed_tiles: addressed,
-            order,
+            order_path,
+            contents_count,
             tile_data_length: next_offset,
         })
     }
@@ -1691,7 +1744,7 @@ impl<W: Write + Seek> Writer<W> {
             tile_data_length: plan.tile_data_length,
             addressed_tiles_count: plan.addressed_tiles,
             tile_entries_count: plan.entry_count,
-            tile_contents_count: plan.order.len() as u64,
+            tile_contents_count: plan.contents_count,
             // Earned, not claimed: the data region below is written in tile id
             // order, so the first tile entry is at offset 0 and every later
             // offset is either contiguous with the previous blob's end or a
@@ -1750,7 +1803,8 @@ impl<W: Write + Seek> Writer<W> {
             let mut leaf_file = BufReader::new(File::open(&leaves.path)?);
             copy_exactly(&mut leaf_file, out, leaves.length, &mut buffer)?;
         }
-        for placement in &plan.order {
+        let mut order = OrderReader::open(&plan.order_path)?;
+        while let Some(placement) = order.next_placement()? {
             probe::staged_seek();
             staged_data.seek(SeekFrom::Start(placement.data_offset))?;
             copy_exactly(
@@ -1991,6 +2045,28 @@ impl SortedSpill {
     }
 }
 
+/// The spilled write order, read back in order.
+struct OrderReader {
+    reader: BufReader<File>,
+}
+
+impl OrderReader {
+    fn open(path: &Path) -> Result<Self, PmTilesError> {
+        Ok(Self {
+            reader: BufReader::new(File::open(path)?),
+        })
+    }
+
+    fn next_placement(&mut self) -> Result<Option<Placement>, PmTilesError> {
+        let mut bytes = [0u8; ORDER_RECORD_BYTES];
+        match self.reader.read_exact(&mut bytes) {
+            Ok(()) => Ok(Some(Placement::decode(&bytes))),
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+}
+
 /// The spilled entry list, read back in order.
 struct EntryReader {
     reader: BufReader<File>,
@@ -2194,6 +2270,16 @@ mod tests {
         };
         assert_eq!(Spill::decode(&record.encode()), record);
         assert_eq!(record.encode().len(), SPILL_RECORD_BYTES);
+    }
+
+    #[test]
+    fn an_order_record_round_trips_through_its_twelve_bytes() {
+        let placement = Placement {
+            data_offset: 1 << 40,
+            length: u32::MAX,
+        };
+        assert_eq!(Placement::decode(&placement.encode()), placement);
+        assert_eq!(placement.encode().len(), ORDER_RECORD_BYTES);
     }
 
     #[test]
@@ -2680,7 +2766,10 @@ mod tests {
         let mut expected_offset = 0u64;
         for payload in &payloads {
             assert_eq!(
-                w.window.get(&content_hash(payload)),
+                w.window
+                    .as_mut()
+                    .expect("the window is live before finish")
+                    .get(&content_hash(payload)),
                 Some((expected_offset, payload.len() as u32)),
                 "the window should know where this payload is and how long it is"
             );
