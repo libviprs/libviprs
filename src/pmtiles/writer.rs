@@ -8,39 +8,44 @@
 //!
 //! Peak memory does not grow with the number of **tiles**: the per-tile index
 //! is spilled to an append-only log on disk and externally sorted at finalize,
-//! and the directories are built one leaf at a time. It does grow with the
-//! number of **distinct payloads**, linearly, and that is the number that
-//! matters for this crate's main job. Tiling a large photograph produces
+//! and the directories are built one leaf at a time. It does not grow with the
+//! number of **distinct payloads** either, and that half is new. It used to,
+//! linearly, which mattered because tiling a large photograph produces
 //! essentially no duplicate tiles, so "distinct payloads" and "tiles" are the
-//! same figure and the two sentences above describe the same allocation.
+//! same figure for this crate's main job.
 //!
-//! This paragraph used to be sixty lines further down and phrased as a
-//! qualification. It belongs here with the numbers attached. Peak RSS of one
-//! process per row, every payload distinct, measured rather than reasoned
-//! about:
+//! Peak RSS of one process per row, every payload distinct, measured by
+//! `one_rss_row` in `tests/pmtiles_bounded_memory.rs` rather than remembered.
+//! The right-hand column is what this page used to quote, from the writer
+//! before EPIC #1135:
 //!
-//! | distinct payloads | peak RSS |
-//! |---|---|
-//! | 500,000 | 79.0 MB |
-//! | 1,000,000 | 155.4 MB |
-//! | 2,000,000 | 288.5 MB |
-//! | 4,000,000 | 563.2 MB |
-//! | 10,000,000 | **1,083.8 MB** |
+//! | distinct payloads | peak RSS | before the epic |
+//! |---|---|---|
+//! | 500,000 | 22.8 MB | 79.0 MB |
+//! | 1,000,000 | 34.9 MB | 155.4 MB |
+//! | 2,000,000 | 35.8 MB | 288.5 MB |
+//! | 4,000,000 | 35.9 MB | 563.2 MB |
+//! | 10,000,000 | **36.0 MB** | 1,083.8 MB |
 //!
-//! So a ten-million-tile photograph costs about a gigabyte, and the sort
-//! buffer, which is the part that genuinely does not grow, is 24 MB of it.
-//! Two percent. Do not read the sort buffer as this writer's memory ceiling.
+//! So a ten-million-tile photograph costs 36 MB rather than about a gigabyte,
+//! and the figure stops moving once the sort buffer has filled, at a million.
+//! Most of what is left **is** the sort buffer, 24 MB of `Vec` at the default
+//! `sort_buffer_records`, and the dedupe window is 8 MB of the rest. Both are
+//! numbers the caller sets.
 //!
-//! Most of the rest was the content-hash table, and issue #1137 replaced it
-//! with a fixed-capacity window the caller sizes. The payload table and the
-//! final-offset lookup went with issue #1138, which put the staged offset in
-//! the index record itself: the record is the same 20 bytes on disk either
-//! way, and an offset answers both questions the two tables were keeping the
-//! answers to. The write order was the last of them and it spills now, twelve
-//! bytes a record, read back once while the archive is written.
+//! Four tables used to scale with the payload count and this page named three
+//! of them. The content-hash table went in issue #1137, replaced by a
+//! fixed-capacity window the caller sizes. The payload table and the
+//! final-offset lookup went in issue #1138, which put the staged offset in the
+//! index record itself: the record is the same 20 bytes on disk either way,
+//! and an offset answers both questions those two were keeping the answers to.
+//! The write order was the fourth, the one the doc never mentioned, and it
+//! spills now at twelve bytes a record, read back once while the archive is
+//! written.
 //!
 //! A pyramid of mostly blank tiles has very few distinct payloads, which is
-//! the case this design exists for. A photograph is the case the table is for.
+//! the case this design exists for. A photograph is the case the window's
+//! budget is chosen for.
 //!
 //! The lifecycle is [`PackfileSink`](crate::sink_packfile::PackfileSink)'s:
 //! open once, feed it, finish once. The atomicity is
@@ -55,20 +60,35 @@
 //! a **byte-identical archive**. Those cannot both hold: arrival order means
 //! the bytes depend on arrival order.
 //!
-//! The tiebreaker is structural rather than a matter of taste. The root
-//! directory has to fit inside the first 16384 bytes of the archive, so its
-//! compressed size decides whether the entries spill into leaves, and that is
-//! not known until every entry has been sorted. The header, the root, the
-//! metadata and the leaf section therefore cannot be sized until the last tile
-//! has arrived, which means **the staged payloads get copied at finalize
-//! whatever layout is chosen**. Given the copy is happening anyway, doing it
-//! in tile id order costs one extra pass over the staged data and buys three
-//! things: a deterministic archive, an honest `clustered = true`, and a reader
-//! whose sequential scan of a zoom level is a sequential scan of the file.
+//! This page used to say the tiebreaker was structural: that the root's size
+//! is unknown until every entry is sorted, so the sections cannot be laid out
+//! until the last tile has arrived, so **the staged payloads get copied at
+//! finalize whatever layout is chosen**. That argument is wrong and it is
+//! worth saying why, because it made a real choice look like a fact of the
+//! format.
+//!
+//! v3 fixes the position of one thing, the 127-byte header, and requires the
+//! root directory to live inside the first 16384 bytes. Every other section
+//! may be relocated arbitrarily. And a tile entry's offset is relative to the
+//! start of the **tile data section**, not to the file, so a payload's offset
+//! is final the moment it is staged: nothing that happens to the sections
+//! around it can move it. A writer that reserved the first 16384 bytes,
+//! appended payloads straight into the destination behind them and wrote the
+//! directories after the tile data would copy nothing at all. That is a real
+//! layout and this writer does not offer it yet.
+//!
+//! What such a writer cannot offer is the two things issue #989 also asks
+//! for. Arrival order means the bytes depend on arrival order, so two shuffled
+//! insertion orders stop producing a byte-identical archive, and `clustered`
+//! stops being true, which `pmtiles extract` requires of its input. Tile id
+//! order buys a deterministic archive, an honest `clustered = true`, and a
+//! reader whose sequential scan of a zoom level is a sequential scan of the
+//! file.
 //!
 //! So this writer stages payloads in arrival order, sorts at finalize, and
 //! writes the data region in tile id order. `clustered` is `true` and it is
-//! true.
+//! true. The copy is what that costs, and it is a price rather than an
+//! inevitability.
 //!
 //! # Dedupe is the archive's, not the engine's
 //!
@@ -91,18 +111,31 @@
 //! at ids that are **not** consecutive stay separate entries pointing at the
 //! same offset. Both are ordinary PMTiles and a reader has to handle each.
 //!
+//! It reaches as far as the window and no further. The writer remembers the
+//! last [`WriterOptions::dedupe_memory_bytes`] worth of payloads, so two
+//! identical payloads further apart than that are stored twice. A photograph
+//! has no duplicates to miss and a blank tile recurs constantly so it never
+//! leaves the window, which is why the default is a number nobody has to think
+//! about; a pyramid with many distinct payloads that also repeat at long range
+//! is the case that pays, and the option is there for it.
+//!
 //! # What is bounded and what is not
 //!
 //! Bounded, and independent of the tile count: the per-tile index (spilled,
 //! sorted in fixed-size runs), the entry list (spilled, streamed into leaves),
-//! the leaf section (spilled), the payload copy (one blob at a time), and the
-//! external merge, which reads every run through **one** file descriptor with
-//! a capped fan-in rather than holding one open file per run.
+//! the leaf section (spilled), the write order (spilled), the payload copy
+//! (one blob at a time), and the external merge, which reads every run through
+//! **one** file descriptor with a capped fan-in rather than holding one open
+//! file per run.
 //!
-//! **Not** bounded by the tile count and not bounded by the payload count
-//! either, because the caller sizes them: the dedupe window and the repeat
-//! table. Nothing else in this writer grows with either number. See the
-//! numbers at the top of this page.
+//! Bounded, and independent of the payload count: the dedupe window and the
+//! repeat table, which are a fixed capacity the caller sizes with
+//! [`WriterOptions::dedupe_memory_bytes`].
+//!
+//! Nothing here grows with either number. The two figures that move are the
+//! two the caller chose, and `bound_for` in `tests/pmtiles_bounded_memory.rs`
+//! is that sentence written as arithmetic, with a test that fails when it
+//! stops being true.
 //!
 //! # A failed write is never published
 //!

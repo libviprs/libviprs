@@ -599,6 +599,99 @@ fn the_finalize_peak_stays_under_the_stated_bound_at_two_million_payloads() {
 }
 
 // ---------------------------------------------------------------------------
+// The table in the writer's module doc
+// ---------------------------------------------------------------------------
+
+/// Peak resident set size, from `/proc/self/status`, or `None` where that file
+/// is not where the number lives.
+///
+/// `VmHWM` is the kernel's own high-water mark for the process, which is the
+/// figure the writer's module doc quotes and is not the same thing as the live
+/// heap the counting allocator above reports. Both are worth having: the
+/// allocator number is what a bound can be asserted against, and this one is
+/// what somebody watching `top` during a ten-million-tile run actually sees.
+fn peak_rss_bytes() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("VmHWM:") {
+            let kb: u64 = rest.trim().trim_end_matches(" kB").trim().parse().ok()?;
+            return Some(kb * 1024);
+        }
+    }
+    None
+}
+
+/// One row of the RSS table in `src/pmtiles/writer.rs`'s module doc.
+///
+/// The doc used to carry five numbers rising from 79.0 MB at 500,000 distinct
+/// payloads to 1,083.8 MB at ten million, with no harness behind them and no
+/// way to take the measurement again. This is the harness. It writes with
+/// `WriterOptions::default()`, because the table is about what a caller gets
+/// without asking for anything, and it prints the live-heap peak beside the
+/// RSS so the two can be compared.
+///
+/// **One process per row.** The allocator never gives pages back to the
+/// kernel, so a second row in the same process reports the first row's peak
+/// again. `LIBVIPRS_RSS_PAYLOADS` names the row:
+///
+/// ```text
+/// for n in 500000 1000000 2000000 4000000 10000000; do
+///   LIBVIPRS_RSS_PAYLOADS=$n cargo test --release \
+///     --test pmtiles_bounded_memory -- --ignored --nocapture one_rss_row
+/// done
+/// ```
+#[test]
+#[ignore = "one process per row; set LIBVIPRS_RSS_PAYLOADS and run with --ignored"]
+#[cfg_attr(miri, ignore)]
+fn one_rss_row() {
+    const PAYLOAD_BYTES: usize = 64;
+    let payloads: u64 = std::env::var("LIBVIPRS_RSS_PAYLOADS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(500_000);
+
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let zoom: u8 = (9..=14)
+        .find(|z| (1u64 << z) * (1u64 << z) >= payloads)
+        .unwrap_or_else(|| panic!("no zoom up to 14 addresses {payloads} tiles"));
+    let side: u64 = 1 << zoom;
+
+    // One buffer, rewritten per tile, so the harness's own footprint is a
+    // constant and what moves between rows is the writer.
+    let mut payload = vec![0u8; PAYLOAD_BYTES];
+
+    let (_guard, baseline) = start_measuring();
+    let mut writer = Writer::try_new(
+        Discard::default(),
+        scratch.path(),
+        WriterOptions::default().with_tile_type(TileType::Png),
+    )
+    .expect("the writer opens");
+    for index in 0..payloads {
+        payload[..8].copy_from_slice(&index.to_le_bytes());
+        let hash = content_hash(&payload);
+        let x = (index % side) as u32;
+        let y = (index / side) as u32;
+        writer
+            .add_tile(zoom, x, y, &payload, hash)
+            .expect("every tile is inside the grid");
+    }
+    let finished = writer.finish().expect("the archive finishes");
+    let heap_peak = peak_over(baseline);
+
+    assert_eq!(finished.header.addressed_tiles_count, payloads);
+    assert_eq!(finished.header.tile_contents_count, payloads);
+
+    let rss = peak_rss_bytes()
+        .expect("peak RSS comes from /proc/self/status, so a row has to be measured on Linux");
+    println!(
+        "rss row: distinct_payloads={payloads} peak_rss_bytes={rss} peak_rss_mb={:.1} \
+         heap_peak_bytes={heap_peak}",
+        rss as f64 / 1_000_000.0
+    );
+}
+
+// ---------------------------------------------------------------------------
 // The opt-in profile
 // ---------------------------------------------------------------------------
 
