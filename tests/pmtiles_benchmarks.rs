@@ -2003,6 +2003,51 @@ fn the_envelope_says_which_host_produced_the_numbers() {
 /// harness answers holes. It never skips: a skipped test is the same colour as
 /// a passing one, and this is the field whose whole job is to say "nobody can
 /// reproduce this".
+/// git answering one half of the attestation and not the other publishes holes.
+///
+/// A repository with no commits is the cheap, local reproduction of a shape
+/// that otherwise only shows up in a container: `status --porcelain` exits 0
+/// with empty output while `rev-parse HEAD` fails on the unborn HEAD, so the
+/// pair comes back as "clean, at no commit". That is exactly what
+/// `the_envelope_says_which_host_produced_the_numbers` refuses as half an
+/// attestation, and until this test the only way to reach it was to run the
+/// suite over a linked worktree bind-mounted into a container, which is where
+/// I found it and is not where anyone looks.
+///
+/// A clean flag attached to no commit is worse than a hole, because a hole says
+/// nobody can reproduce this and a `false` says the tree was pristine.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_repository_with_no_commits_publishes_holes_rather_than_half_an_attestation() {
+    let dir = tempfile::tempdir().expect("a scratch directory");
+    let repo = dir.path();
+
+    if !bench::git_is_available() {
+        assert_eq!(
+            bench::commit_and_dirty(repo),
+            (None, None),
+            "with no git to ask, the provenance must publish holes"
+        );
+        return;
+    }
+
+    bench::git_in(repo, &["init", "--quiet"]).expect("git init should succeed");
+    assert!(
+        bench::git_in(repo, &["status", "--porcelain"]).is_some(),
+        "the premise of this test is that status still answers on an unborn HEAD"
+    );
+    assert!(
+        bench::git_in(repo, &["rev-parse", "--short", "HEAD"]).is_none(),
+        "and that rev-parse does not"
+    );
+
+    assert_eq!(
+        bench::commit_and_dirty(repo),
+        (None, None),
+        "half an answer from git has to publish holes rather than a clean flag at no commit"
+    );
+}
+
 #[test]
 #[cfg_attr(miri, ignore)]
 fn a_repository_with_a_commit_is_read_back() {
