@@ -602,7 +602,12 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// into a `tempfile::tempdir()`, migrates it into an archive beside it and
 /// reads the archive back with `std::fs::read`, so all twelve are
 /// `annotated fs-detected` and none of them is a judgement call.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 420;
+/// Folding the attestation fix into #1118's branch moves it 420 to 421, and the
+/// one is `tests/pmtiles_benchmarks.rs`'
+/// `a_repository_with_no_commits_publishes_holes_rather_than_half_an_attestation`,
+/// which `git init`s a `tempfile::tempdir()` to reach an unborn HEAD. It is
+/// `annotated fs-detected` like its neighbour and is not a judgement call.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 421;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
