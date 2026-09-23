@@ -55,6 +55,23 @@ pub enum SinkError {
         #[source]
         source: image::ImageError,
     },
+    /// A tile encoder that is not the `image` crate refused the raster.
+    ///
+    /// [`SinkError::Encode`] carries an `image::ImageError` and cannot hold
+    /// anything else, so the codecs this crate ports itself need their own
+    /// variant rather than a stringified copy. WebP is the first
+    /// ([`TileFormat::Webp`], issue #1123): `Raster::encode_webp` reports
+    /// through [`crate::codec::EncodeError`], and the reason it refuses (a
+    /// 16-bit tile, a multiband intermediate, an axis over the format's
+    /// 16383-pixel ceiling) survives into the `source()` chain where a caller
+    /// can match on it instead of substring-matching English.
+    #[error("encoding tile to {format} failed: {source}")]
+    EncodeCodec {
+        /// The target format, e.g. `"webp"`.
+        format: &'static str,
+        #[source]
+        source: crate::codec::EncodeError,
+    },
     /// Used for all catch-all string errors that haven't yet been promoted to
     /// a typed variant. New code should prefer the typed variants below.
     #[error("sink error: {0}")]
@@ -118,15 +135,29 @@ pub enum SinkError {
     /// the run was configured with, and says so rather than half-supporting
     /// it.
     ///
-    /// [`PmTilesSink`](crate::sink_pmtiles::PmTilesSink) is the case:
-    /// `Verify` reads a pyramid back by stat-ing one file per coordinate and
-    /// `Resume` needs a writer's staging to be reconstructible from a
-    /// checkpoint, and a single-file archive offers neither. Refusing by name
-    /// is the correct implementation there, not a gap: the alternative is a
-    /// Verify that reports every tile missing and a Resume that publishes an
-    /// archive with the pre-crash tiles silently absent.
+    /// [`PmTilesSink`](crate::sink_pmtiles::PmTilesSink) is the case, and
+    /// since #1122 it is the case for `Resume` alone: a resume needs the
+    /// writer's staging to be reconstructible from a checkpoint and a
+    /// single-file archive's staging is not, so a resumed run would publish an
+    /// archive with the pre-crash tiles silently absent. Refusing by name is
+    /// the correct implementation there, not a gap.
+    ///
+    /// `Verify` used to be refused beside it, because the only verify the
+    /// engine had stat-ed one file per coordinate. It now reads the pyramid
+    /// back through [`TileSink::open_pyramid_reader`], so the refusal was not
+    /// relaxed: the thing it was about stopped being true.
     #[error("{mode:?} is not a resume mode this sink can honour")]
     UnsupportedResumeMode { mode: crate::resume::ResumeMode },
+    /// A sink was asked to open its own output for reading and the pyramid
+    /// underneath refused.
+    ///
+    /// Typed rather than stringified so the `source()` chain still carries the
+    /// [`PyramidReadError`](crate::pyramid_reader::PyramidReadError) that says
+    /// what was wrong, which is the difference between "the archive is
+    /// structurally damaged" and "the archive is not there" reaching a caller
+    /// as two distinguishable things rather than as two sentences.
+    #[error("pyramid read: {0}")]
+    PyramidRead(#[from] crate::pyramid_reader::PyramidReadError),
     /// Another live run holds the advisory lock on this sink's output.
     ///
     /// Carries the [`ResumeError`](crate::resume::ResumeError) verbatim, so
@@ -236,7 +267,8 @@ pub trait TileSink: Send + Sync {
     /// Every engine-bookkeeping method below (`record_engine_config`,
     /// `sink_retry_count`, `sink_skipped_due_to_failure`, `note_sink_skipped`,
     /// `checkpoint_root`, `init_level_count`, `content_format`,
-    /// `applies_retry_policy`) has a default that forwards through this hook.
+    /// `open_pyramid_reader`, `applies_retry_policy`) has a default that
+    /// forwards through this hook.
     /// A wrapper therefore only has to override `inner_sink` — and any state it
     /// genuinely owns (e.g. a [`RetryingSink`]'s own retry counter) — instead
     /// of forwarding every bookkeeping method by hand. That removes the
@@ -406,6 +438,51 @@ pub trait TileSink: Send + Sync {
             None => Ok(()),
         }
     }
+
+    /// Engine hook (issue #1122): open this sink's own output for reading,
+    /// when it can.
+    ///
+    /// `ResumeMode::Verify` re-checks a finished pyramid against the plan that
+    /// produced it, and until #1122 the only way it knew how to do that was
+    /// [`crate::engine::raster_verify`], which stats
+    /// `plan.tile_path(coord)` under a checkpoint root. That is a loose-file
+    /// tree walk, and a sink that does not write loose files has no seam to
+    /// enter it through: pointed at a PMTiles archive it reports the first
+    /// coordinate missing and calls the archive corrupt.
+    ///
+    /// A sink that answers `Some` here is saying "I can hand you back what I
+    /// wrote", and [`crate::verify::pyramid_verify`] checks the pyramid
+    /// through the [`PyramidReader`](crate::pyramid_reader::PyramidReader)
+    /// instead of through the tree. `None` means the tree walk, which is the
+    /// default and what every sink did before.
+    ///
+    /// # Why this is a capability and not a storage enum or a downcast
+    ///
+    /// The two obvious alternatives both break. Keying on
+    /// [`PyramidStorage`](crate::storage::PyramidStorage) does not work
+    /// because it is a CLI and planning enum that never reaches
+    /// [`EngineConfig`](crate::engine::EngineConfig), so the engine cannot see
+    /// it. Downcasting to the concrete sink type does not work because it
+    /// fails for every wrapper: a retrying sink, a tee, a recording sink in a
+    /// test. A defaulted method that forwards through
+    /// [`TileSink::inner_sink`] costs a wrapper nothing and costs an external
+    /// sink nothing, since neither has to know the method exists.
+    ///
+    /// # Errors
+    ///
+    /// `Err` is for a sink that **should** have a readable pyramid and does
+    /// not: an archive that is missing, unopenable or not an archive. That is
+    /// a verify failure, and it is emphatically not `Ok(None)`, which would
+    /// mean "I have no reader to offer" and would send the run off to walk a
+    /// directory tree that is not there either.
+    fn open_pyramid_reader(
+        &self,
+    ) -> Result<Option<Box<dyn crate::pyramid_reader::PyramidReader>>, SinkError> {
+        match self.inner_sink() {
+            Some(inner) => inner.open_pyramid_reader(),
+            None => Ok(None),
+        }
+    }
 }
 
 /// Generate a transparent [`TileSink`] forwarding impl for a wrapper type
@@ -468,6 +545,11 @@ macro_rules! forward_tile_sink {
             }
             fn seed_completed_tile(&self, tile: &Tile) -> Result<(), SinkError> {
                 (**self).seed_completed_tile(tile)
+            }
+            fn open_pyramid_reader(
+                &self,
+            ) -> Result<Option<Box<dyn crate::pyramid_reader::PyramidReader>>, SinkError> {
+                (**self).open_pyramid_reader()
             }
         }
     };
@@ -690,15 +772,112 @@ pub enum TileFormat {
     /// Raw pixel bytes (no encoding). Fastest, useful for pipelines that
     /// encode later or for testing.
     Raw,
+    /// Lossless WebP-encoded tiles (issue #1123).
+    ///
+    /// # No quality field, and that is the design rather than an omission
+    ///
+    /// `Webp { quality }` would read as symmetry with [`TileFormat::Jpeg`]
+    /// and it would be a lie. The encoder underneath is
+    /// [`Raster::encode_webp`](crate::Raster::encode_webp), whose
+    /// [`webp::Compression`](crate::webp::Compression) is `#[non_exhaustive]`
+    /// with the single variant `Lossless`: there is no lossy path in
+    /// `image-webp` 0.2.4 to point a number at. An argument the encoder
+    /// throws away inverts the contract (ask for quality 10, get a lossless
+    /// file possibly larger than the PNG you started from) and it is a semver
+    /// time bomb, because the day a lossy encoder lands every existing
+    /// `Webp { quality: 10 }` would silently start emitting small lossy files
+    /// in a patch release. When that encoder exists it joins
+    /// `webp::Compression` as a variant, not this enum as a field.
+    ///
+    /// Worth saying out loud that a test cannot catch this one. A cell that
+    /// encodes a tile, decodes it and compares pixels passes for every value
+    /// a `quality` field could hold, because the encoder ignores all of them
+    /// identically. Making the field unrepresentable is the only thing that
+    /// does the work, so the module doc in [`crate::webp`] and this paragraph
+    /// are the record of why it is absent.
+    Webp,
 }
 
 impl TileFormat {
+    /// The extension a tile of this format is written under.
     pub fn extension(&self) -> &'static str {
         match self {
             Self::Png => "png",
             Self::Jpeg { .. } => "jpeg",
             Self::Raw => "raw",
+            Self::Webp => "webp",
         }
+    }
+
+    /// Every extension a tile of this format can legitimately be found under,
+    /// in probe order.
+    ///
+    /// Almost always the single answer [`TileFormat::extension`] gives. JPEG
+    /// is the exception, because `.jpg` is as common on disk as `.jpeg` and a
+    /// tree libviprs did not write may use either.
+    ///
+    /// This is the function that made the five silent sites of issue #1123 go
+    /// away. Before it, three call sites each carried
+    /// `Some(TileFormat::Jpeg { .. }) => vec!["jpeg", "jpg"], Some(fmt) =>
+    /// vec![fmt.extension()]` inline, and two more carried the fallback list
+    /// as four literal strings. Adding `Webp` broke none of them, which is
+    /// precisely the failure mode: a WebP tree verified through a sink that
+    /// does not pin its format found no tiles at all and reported the pyramid
+    /// missing.
+    ///
+    /// The `match` is exhaustive on purpose. A variant added to `TileFormat`
+    /// stops the build here, at the one place that owns the answer, instead of
+    /// compiling into five probe lists that quietly skip the new format.
+    pub fn extensions(&self) -> &'static [&'static str] {
+        match self {
+            Self::Png => &["png"],
+            Self::Jpeg { .. } => &["jpeg", "jpg"],
+            Self::Raw => &["raw"],
+            Self::Webp => &["webp"],
+        }
+    }
+
+    /// Every format this build knows, in the order a blind probe should try
+    /// them.
+    ///
+    /// The order is the one the hand-written copies used (`raw`, `png`,
+    /// `jpeg`/`jpg`) with `webp` appended, so the probe behaviour for a tree
+    /// written before this change is byte-for-byte what it was.
+    ///
+    /// Be honest about the guarantee: Rust has no stable way to enumerate an
+    /// enum's variants (`std::mem::variant_count` is unstable and a derive
+    /// macro is a dependency this crate will not take for one array), so the
+    /// compiler does not force a new variant into this list. What it does
+    /// force is a visit to this file, because [`TileFormat::extensions`] three
+    /// lines above is an exhaustive match that will not compile without the
+    /// new arm. That is a much smaller gap than five copies in four modules,
+    /// and `tests/webp_tile_format.rs` asserts the union property over
+    /// whatever is in here.
+    pub const ALL: &'static [TileFormat] = &[
+        TileFormat::Raw,
+        TileFormat::Png,
+        // The quality is arbitrary: `extensions` matches `Jpeg { .. }` and
+        // nothing here reads the number.
+        TileFormat::Jpeg { quality: 0 },
+        TileFormat::Webp,
+    ];
+
+    /// The fallback probe set: every extension every known format can be
+    /// stored under.
+    ///
+    /// Used when a sink does not commit to a format, which is the default for
+    /// every transparent wrapper because [`TileSink::content_format`] returns
+    /// `None` unless a sink overrides it. Probing every extension and taking
+    /// the first hit is how a stale sibling file from a previous run in a
+    /// different format gets validated (issue #139), so a sink that *can* say
+    /// what it writes should, and this list is the last resort rather than the
+    /// normal path.
+    pub fn candidate_extensions() -> Vec<&'static str> {
+        let mut out = Vec::new();
+        for fmt in Self::ALL {
+            out.extend_from_slice(fmt.extensions());
+        }
+        out
     }
 }
 
@@ -1227,6 +1406,7 @@ impl FsSink {
             TileFormat::Raw => Ok(raster.data().to_vec()),
             TileFormat::Png => encode_png(raster),
             TileFormat::Jpeg { quality } => encode_jpeg(raster, quality),
+            TileFormat::Webp => encode_webp(raster),
         }
     }
 
@@ -1392,6 +1572,31 @@ impl TileSink for FsSink {
 
     fn checkpoint_root(&self) -> Option<&Path> {
         Some(&self.base_dir)
+    }
+
+    /// No reader, on purpose (issue #1122).
+    ///
+    /// [`DirectoryPyramidReader`](crate::pyramid_reader::DirectoryPyramidReader)
+    /// exists and would open this sink's own output, so answering `Some` here
+    /// compiles and reads as the tidier symmetry. It would also silently move
+    /// every `Verify` run over a tree off
+    /// [`raster_verify`](crate::engine::raster_verify) and onto the reader
+    /// path, and the two do not check the same things. `raster_verify`
+    /// re-renders every level from the source and compares the bytes, honours
+    /// the manifest's checksum table, and knows what a one-byte blank-tile
+    /// marker and a `_shared/` dedupe reference mean. A reader-driven sweep
+    /// knows none of that; it is what a single-file archive can offer, not an
+    /// upgrade on what a tree already has.
+    ///
+    /// So the reader path is a sibling of the directory verify rather than a
+    /// replacement for it, and this `Ok(None)` is where that decision is
+    /// enforced. It is the same value the trait default produces for a
+    /// terminal sink; it is spelled out because the default would look like
+    /// nobody had considered it.
+    fn open_pyramid_reader(
+        &self,
+    ) -> Result<Option<Box<dyn crate::pyramid_reader::PyramidReader>>, SinkError> {
+        Ok(None)
     }
 
     fn arm_durability_tracking(&self) {
@@ -2368,6 +2573,34 @@ pub fn encode_png(raster: &Raster) -> Result<Vec<u8>, SinkError> {
         source: e,
     })?;
     Ok(buf)
+}
+
+/// Encodes a [`Raster`] as lossless WebP bytes and returns them.
+///
+/// The one tile encoder in this module that is not an `image`-crate call.
+/// WebP goes through [`Raster::encode_webp`](crate::Raster::encode_webp),
+/// which is this crate's own port over `image-webp`, so its refusals arrive as
+/// a [`crate::codec::EncodeError`] rather than an `image::ImageError` and they
+/// are carried as that type rather than flattened into a sentence
+/// (`tests/error_source_typing.rs` is the file that made that a rule here).
+///
+/// # What it refuses that PNG accepts
+///
+/// PNG and JPEG reach every pixel format [`color_type_for_format`] maps.
+/// `encode_webp` takes `Gray8`, `Rgb8` and `Rgba8` and nothing else, because
+/// those are the only three WebP has a spelling for, and greyscale is not
+/// really one of them: the format stores no mono, so `Gray8` goes in as an
+/// encoder hint and reads back as three equal bands, which is what
+/// `vips webpsave` does with a `b-w` image too. A 16-bit tile that writes fine
+/// as PNG is therefore a typed refusal here, which is the honest answer rather
+/// than a silent narrowing.
+pub(crate) fn encode_webp(raster: &Raster) -> Result<Vec<u8>, SinkError> {
+    raster
+        .encode_webp(crate::webp::SaveOptions::default())
+        .map_err(|source| SinkError::EncodeCodec {
+            format: "webp",
+            source,
+        })
 }
 
 // Crate-visible so extension-dispatched save (`crate::imageio`) reuses the

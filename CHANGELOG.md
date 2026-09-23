@@ -42,8 +42,9 @@ budget becoming a real peak ceiling for jp2k, gif and avif (#944),
 `AvifError` becoming `#[non_exhaustive]` (#946), the
 `ConversionError::FloatUnsupported` rename (#730), `compass`'s `times` range
 (#547), `arrayjoin`'s `across` clamp (#577), `decode_tiff_page`'s page index
-(#566), `GifError::BadPageNumber` (#845) and `csv_save`/`matrix_save` matching
-`csvsave`/`matrixsave` (#958).
+(#566), `GifError::BadPageNumber` (#845), `csv_save`/`matrix_save` matching
+`csvsave`/`matrixsave` (#958) and `TileFormat` gaining a `Webp` variant
+(#1123).
 
 The crate version moves to 0.5.0 in this window, and no single entry below is
 why. The manifest still read 0.4.0 while this block had already collected four
@@ -57,6 +58,53 @@ they live in the file format rather than in the API, which is why they are here
 and not under `Fixed`: this file is the only place they can be caught.
 
 ### Breaking
+
+- **`TileFormat` has a fourth variant, `Webp`** (issue #1123). `TileFormat` is
+  not `#[non_exhaustive]`, so every exhaustive `match` on it outside this crate
+  stops compiling until it grows an arm. That is the whole reason the variant
+  was added this way rather than behind the attribute: the forced compile
+  errors are the feature. The note further down this section about the twelve
+  older exhaustive enums calls `TileFormat` a "genuinely closed set"; it was
+  not, and this is the correction.
+
+  `Raster::encode_webp` and `TileType::Webp` have both existed for a while and
+  were never joined up, so `--format webp` was a documentation claim with an
+  encoder behind it and no way to reach it. Lossless WebP is a real win on this
+  crate's own inputs (scans, drawings, black-on-white CAD output), which is why
+  it is worth a break.
+
+  **No quality field, and that is deliberate.** `webp::Compression` is
+  `#[non_exhaustive]` with the single variant `Lossless`, so `Webp { quality }`
+  would be an argument the encoder throws away: ask for 10, get a lossless file
+  possibly larger than the PNG you started from. It would also be a semver time
+  bomb, because the day a lossy encoder lands every existing
+  `Webp { quality: 10 }` starts emitting small lossy files in a patch release.
+  A lossy mode joins `webp::Compression` as a variant instead.
+
+  Two things ride along that are not breaking but are the point of the change.
+  The probe list of tile extensions that Verify falls back to when a sink does
+  not pin its format is now derived from `TileFormat` rather than written out
+  in four places, so a WebP tree verified through a transparent wrapper finds
+  its tiles instead of reporting the pyramid entirely absent, and a `.webp`
+  manifest key resolves to the right `TileCoord` instead of a col/row-transposed
+  one. And `PmTilesPyramidReader::describe` stops answering all-`None` for an
+  archive written by a **newer** libviprs: when the metadata fails to parse and
+  the raw bytes carry a `vnd.libviprs` key, it refuses with the new
+  `PyramidReadError::MetadataFromANewerLibviprs` naming the version that wrote
+  the file. With no such key, `None` stays `None`, so every foreign go-pmtiles
+  archive reads exactly as it did. That distinction is the point: `format: None`
+  was already the right answer for a foreign archive, so "made by another tool"
+  and "made by libviprs and yours is too old" were indistinguishable and they
+  want opposite reactions.
+
+  It cannot help anyone on 0.5.x, who will get the silent downgrade forever.
+  The payoff is at the next variant addition.
+
+  `LIBVIPRS_META_VERSION` does **not** move, and the reason is vacuous rather
+  than reassuring: nothing anywhere gates on it. It is written into every
+  archive and read back by three test assertions that check it equals itself.
+  The real version gate is serde's unknown-variant error, which fails the whole
+  `Metadata` object rather than the one field that caused it.
 
 - **`AvifError` is `#[non_exhaustive]`** (issue #946). It was the only public
   error enum in the crate without the attribute, and
@@ -1157,6 +1205,93 @@ and not under `Fixed`: this file is the only place they can be caught.
 
 ### Added
 
+- **The `CadDecoder` contract and the CAD primitive IR** (issue #1029). A new
+  always-compiled `libviprs::cad` module carrying `CadDecoder`, `CadDrawing`,
+  `CadSource`, `CadView`, `PrimitiveSink` and `DecodeReport`, and the eight
+  primitives a drawing decodes into: `Line`, `Polyline`, `Arc`, `Circle`,
+  `Ellipse`, `Spline`, `Polygon` and `Text`. No new dependency, and no new
+  Cargo feature: the module is arithmetic, `Vec` and `thiserror`, all of which
+  were already here.
+
+  Curves stay curves. An `Arc` is a centre, a radius and two angles, a
+  `Spline` is a degree, a knot vector and control points, and a `Polyline`
+  carries its bulges verbatim. Tessellation needs a deviation budget and the
+  budget depends on tile zoom, so a decoder that tessellated would bake in a
+  tolerance it is not in a position to choose. Coordinates are 3D for the same
+  reason: projecting to a plane is also a choice, and it belongs downstream.
+
+  Every primitive has private fields and a validating constructor, so a
+  malformed entity becomes a typed `CadError` its provider reports as a
+  `Diagnostic` rather than geometry the tiler trusts. A `NaN` coordinate, a
+  zero-length normal, a non-positive radius, an arc that sweeps nothing, a
+  knot vector too short for its control points and a polyline of one vertex
+  are all refused by name, with the value quoted.
+
+  `DecodeReport` is structured from the start: bounded retained diagnostics
+  with a dropped count so a hostile drawing cannot exhaust memory through the
+  reporting channel, per-kind primitive counts so fidelity loss is measurable,
+  and an `is_complete` that starts `false` — "the loop ended" and "the loop
+  ended for a good reason" look identical from outside, so a truncated decode
+  cannot pass itself off as a short drawing.
+
+  `Text` carries a contract rather than a convention, because two independent
+  readers of the same drawings disagreed about what the text said and both
+  disagreements were silent. One returned `\U+220545,6` where the other
+  returned `∅45,6`; one returned `""` for a multiline attribute whose text the
+  file carried all along. So a primitive's text is the decoded, user-visible
+  string: `Text::new` refuses a string carrying an undecoded `\U+XXXX` (MIF)
+  or `\M+NXXXX` (CIF) transport escape, and refuses the empty string, and the
+  provider files `DiagnosticCode::TEXT_ESCAPE_NOT_DECODED` or
+  `TEXT_NOT_RECOVERED` instead. Both defects are unrepresentable in the IR.
+
+  This is the contract only. Nothing in the crate reads a DWG yet: the
+  ACadSharp provider, the MVT encoder, the tiler and the viewer land
+  separately, and the provider is the part that gets a Cargo feature.
+- **The PMTiles read-side transport seam** (issue #1121), behind the existing
+  `object-store-sink` feature and adding no dependency. `ObjectStore` gains
+  two defaulted methods, `get_range` and `size`, so the trait the write side
+  already injects now answers reads too; `libviprs::pmtiles::ObjectStoreRangeReader`
+  bridges it onto `RangeReader`; and `PmTilesPyramidReader` takes its transport
+  as a defaulted type parameter with a new `try_from_object_store`
+  constructor. `RangeReader` is also implemented for `Box<R>` and `Arc<R>`,
+  which is what lets a runtime-chosen backend go into `Reader<R>` at all.
+
+  Nothing existing moves. `ObjectStore`'s new methods are defaulted, and
+  `PmTilesPyramidReader` still means `PmTilesPyramidReader<FileRangeReader>`,
+  so every call site of `try_open`, `from_reader` and `reader()` compiles
+  untouched.
+
+  Still no HTTP or S3 client in this crate, and issue #1119 records that as a
+  permanent decision rather than a gap: the transport belongs to the consumer
+  that already has one, and `read_range` is the only method it has to write.
+
+- **`ResumeMode::Verify` against a PMTiles archive** (issue #1122), through a
+  new sink capability rather than a storage enum or a downcast.
+  `TileSink::open_pyramid_reader` answers `Some(reader)` for a sink that can
+  open what it wrote, and `verify::pyramid_verify` checks the pyramid through
+  `PyramidReader` instead of stat-ing one file per coordinate under a
+  checkpoint root. The method is defaulted to forward through
+  `TileSink::inner_sink`, so a wrapper sink gets it free and an external sink
+  keeps compiling; `FsSink` answers `None` and a tree verify still goes to
+  `raster_verify`, which re-renders from the source and compares bytes.
+
+  `PyramidReader` grows `self_check` and `addressed_tiles`, and
+  `PyramidReadError` grows `StructuralDefects`. `addressed_tiles` is the check
+  nothing had before, in either backend: a pyramid that addresses MORE tiles
+  than the plan resolves every coordinate it is asked about and is still not
+  the pyramid that plan produced, and no per-coordinate sweep can see it.
+
+  `PmTilesSink` therefore stops refusing `ResumeMode::Verify` at `build()`.
+  `ResumeMode::Resume` is still refused by name and the reason has not
+  changed: the writer's staging is not reconstructible from a checkpoint, so
+  a resumed run would publish an archive with every pre-crash tile silently
+  absent. `PmTilesSink::checkpoint_root` is still `None`, because a Verify
+  reads the archive and needs no root.
+
+  One behaviour change to know about: a Verify run over an archive now builds
+  a sink, so it takes the advisory run lock and creates `<archive>.job` for
+  the life of the run, where before it was refused before anything was
+  created. The sidecar is removed with the sink that took it.
 - **`libviprs::pyramid_migrate`** (issue #1118), which turns a pyramid that
   already exists as a `{z}/{x}/{y}` tree into a PMTiles archive without going
   back to the source image. `migrate_to_pmtiles` takes any `PyramidReader`, a

@@ -1163,8 +1163,15 @@ fn parse_tile_rel_path(rel: &str) -> Option<TileCoord> {
 /// produce; if that also fails we surface `TileCoord(0, 0, 0)` (issue #139).
 fn coord_for_manifest_rel(plan: &PyramidPlan, rel: &str) -> TileCoord {
     let normalized = rel.replace('\\', "/");
+    // Derived from `TileFormat` rather than written out (issue #1123). These
+    // four strings used to be a literal here, and a `.webp` key matched none
+    // of them, so the plan scan fell through to `parse_tile_rel_path` and a
+    // Google tree got its col and row swapped. That is the #139 bug arriving
+    // again through a new extension, which is why the list now comes from the
+    // enum.
+    let exts = crate::sink::TileFormat::candidate_extensions();
     for coord in plan.tile_coords() {
-        for ext in ["raw", "png", "jpeg", "jpg"] {
+        for ext in &exts {
             if plan.tile_path(coord, ext).is_some_and(|p| p == normalized) {
                 return coord;
             }
@@ -1264,10 +1271,15 @@ pub fn raster_verify(
     // reports it through `content_format`; when the format is unknown (a
     // transparent wrapper returns `None`) we fall back to probing every known
     // extension as before (issue #139).
+    //
+    // Both halves come from `TileFormat` since issue #1123. The JPEG special
+    // case (`vec!["jpeg", "jpg"]`) and the fallback list were spelled out here
+    // and again in `crate::stream_verify`, so a new variant changed neither
+    // and a WebP tree verified through a format-blind sink reported every tile
+    // missing.
     let candidate_exts: Vec<&'static str> = match sink.content_format() {
-        Some(crate::sink::TileFormat::Jpeg { .. }) => vec!["jpeg", "jpg"],
-        Some(fmt) => vec![fmt.extension()],
-        None => vec!["raw", "png", "jpeg", "jpg"],
+        Some(fmt) => fmt.extensions().to_vec(),
+        None => crate::sink::TileFormat::candidate_extensions(),
     };
 
     for coord in plan.tile_coords() {
@@ -4396,5 +4408,43 @@ mod tests {
                 "pass {pass}: every tile must still be produced under the tighter buffer",
             );
         }
+    }
+    /// A `.webp` manifest key resolves to the coordinate that wrote it
+    /// (issue #1123, re-opening #139).
+    ///
+    /// The extension list inside `coord_for_manifest_rel` is one of the five
+    /// sites a new `TileFormat` variant does not break. Miss it and the plan
+    /// scan never matches a `.webp` key, so the structural fallback answers
+    /// instead, and the fallback is layout-blind: it reads
+    /// `{level}/{a}/{b}` as `{level}/{col}/{row}` while a Google tree stores
+    /// `{level}/{row}/{col}`. The wrong answer is a real coordinate with its
+    /// col and row swapped, which is exactly what #139 was filed about, so
+    /// this asserts *which* coordinate comes back rather than that one does.
+    #[test]
+    fn a_webp_manifest_key_resolves_to_the_right_coord() {
+        let plan = PyramidPlanner::new(512, 512, 256, 0, Layout::Google)
+            .unwrap()
+            .plan();
+
+        // A coordinate whose col and row differ, so a transposition is
+        // visible. A square grid full of (n, n) cells could not fail.
+        let coord = plan
+            .tile_coords()
+            .find(|c| c.col != c.row)
+            .expect("a Google plan over 512x512 has an off-diagonal tile");
+        let rel = plan.tile_path(coord, "webp").expect("the coord is in plan");
+
+        assert_eq!(
+            coord_for_manifest_rel(&plan, &rel),
+            coord,
+            "a .webp key resolved to the wrong tile; the transposed answer is \
+             what the layout-blind fallback gives when the plan scan misses"
+        );
+
+        // The control: the same key under an extension the list already knew
+        // has always resolved correctly, so a failure above is about webp and
+        // not about the scan itself.
+        let png = plan.tile_path(coord, "png").expect("the coord is in plan");
+        assert_eq!(coord_for_manifest_rel(&plan, &png), coord);
     }
 }
