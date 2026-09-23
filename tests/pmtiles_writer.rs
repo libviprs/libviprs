@@ -1220,6 +1220,110 @@ fn two_shuffled_insertion_orders_produce_a_byte_identical_archive() {
     assert_ne!(ids_one, ids_two, "the two shuffles produced the same order");
 }
 
+/// And it stops being byte-identical the moment the window cannot hold the
+/// tile set.
+///
+/// The test above runs `dupes-z0z3` at the default window, which tracks
+/// 129,056 payloads against a fixture holding 63. Three orders of magnitude of
+/// slack means it is green now and stays green whatever happens to the
+/// property, which makes it a poor guard for a property that just became
+/// conditional. This is the other half: whether two identical payloads share
+/// one blob is a function of how far apart they **arrived**, so at a window
+/// too small to hold the set, two orders of the same tiles produce different
+/// archives.
+///
+/// That is the contract issue #1137 changed, stated as an executable fact
+/// rather than as a caveat in prose. A caller who needs the archive to be a
+/// pure function of its tile set sizes
+/// `WriterOptions::dedupe_memory_bytes` past the payload count, and the test
+/// above is what that buys them.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn two_orders_stop_agreeing_once_the_window_cannot_hold_the_tile_set() {
+    let dir = scratch();
+    let ocean = b"the same forty-two bytes, over and over ok".to_vec();
+    let filler = |n: usize| format!("filler number {n:04}, distinct from every other").into_bytes();
+
+    // Three tiles carrying one payload, far enough apart in ascending id order
+    // that a window of one set cannot keep it, and close enough together in
+    // the other order that it never leaves.
+    let mut tiles: Vec<(u64, Vec<u8>)> = Vec::new();
+    let mut id = 21u64;
+    let push = |tiles: &mut Vec<(u64, Vec<u8>)>, id: &mut u64, bytes: Vec<u8>| {
+        tiles.push((*id, bytes));
+        *id += 1;
+    };
+    push(&mut tiles, &mut id, ocean.clone());
+    for n in 0..DEDUPE_WINDOW_WAYS - 2 {
+        push(&mut tiles, &mut id, filler(n));
+    }
+    push(&mut tiles, &mut id, ocean.clone());
+    for n in 0..DEDUPE_WINDOW_WAYS {
+        push(&mut tiles, &mut id, filler(100 + n));
+    }
+    push(&mut tiles, &mut id, ocean.clone());
+
+    let write = |order: &[(u64, Vec<u8>)], name: &str| -> (Vec<u8>, Header) {
+        let out = dir.path().join(name);
+        let mut w = Writer::create(
+            &out,
+            WriterOptions::default()
+                .with_tile_type(TileType::Png)
+                .with_dedupe_memory_bytes(0),
+        )
+        .expect("a writer opens");
+        for (tile_id, payload) in order {
+            let (z, x, y) = libviprs::pmtiles::tileid_to_zxy(*tile_id).unwrap();
+            w.add_tile(z, x, y, payload, content_hash(payload)).unwrap();
+        }
+        let done = w.finish().expect("the archive finalises");
+        (
+            std::fs::read(&out).expect("the archive is on disk"),
+            done.header,
+        )
+    };
+
+    // Ascending, which is the order that walks the shared payload out of the
+    // window between its second and third tile.
+    let (ascending, ascending_header) = write(&tiles, "ascending.pmtiles");
+
+    // The same tiles, with the three that share a payload fed together, so the
+    // window never loses it.
+    let mut grouped: Vec<(u64, Vec<u8>)> = tiles
+        .iter()
+        .filter(|(_, bytes)| *bytes == ocean)
+        .cloned()
+        .collect();
+    grouped.extend(tiles.iter().filter(|(_, bytes)| *bytes != ocean).cloned());
+    let (regrouped, regrouped_header) = write(&grouped, "regrouped.pmtiles");
+
+    // The positive control on the fixture: both runs really did take the same
+    // tiles, so what follows is about the window and not about the input.
+    let mut one: Vec<u64> = tiles.iter().map(|(id, _)| *id).collect();
+    let mut two: Vec<u64> = grouped.iter().map(|(id, _)| *id).collect();
+    assert_ne!(one, two, "the two orders are the same order");
+    one.sort_unstable();
+    two.sort_unstable();
+    assert_eq!(one, two, "the two orders are not the same tile set");
+    assert_eq!(
+        ascending_header.addressed_tiles_count,
+        regrouped_header.addressed_tiles_count
+    );
+
+    // Three ocean tiles: ascending catches one duplicate, regrouped catches
+    // both.
+    assert_eq!(
+        ascending_header.tile_contents_count,
+        regrouped_header.tile_contents_count + 1,
+        "the two orders should disagree by exactly the duplicate the window lost"
+    );
+    assert_ne!(
+        ascending, regrouped,
+        "the archive is still a pure function of its tile set at a window that cannot hold it, \
+         so the contract issue #1137 changed did not change"
+    );
+}
+
 /// `clustered` is set honestly, and the two things it promises hold.
 ///
 /// The spec's definition is operational: offsets are contiguous with the
