@@ -52,7 +52,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use libviprs::pmtiles::directory::{deserialize_entries, serialize_entries};
-use libviprs::pmtiles::writer::{Writer, WriterOptions, content_hash};
+use libviprs::pmtiles::writer::{DEDUPE_WINDOW_WAYS, Writer, WriterOptions, content_hash};
 use libviprs::pmtiles::{Compression, Entry, Header, Metadata, PmTilesError, TileType};
 
 // ---------------------------------------------------------------------------
@@ -747,9 +747,22 @@ fn non_adjacent_duplicates_share_one_payload_without_sharing_an_entry() {
 /// and "duplicate tiles produce exactly one stored payload" would hold only
 /// for callers who had turned dedupe on. The archive's payload table is a
 /// property of the archive, not of the engine's blank-tile policy.
+///
+/// # "within the window" is doing real work in that name
+///
+/// This test used to be called
+/// `identical_payloads_are_stored_once_whatever_the_engine_dedupe_strategy_is`
+/// and it read as unconditional, because the writer kept a hash of every
+/// payload it had ever seen and the promise really was unconditional. Issue
+/// #1137 replaced that with a fixed-capacity window, so two identical payloads
+/// far enough apart are now stored twice, and the name had to say so before
+/// the behaviour changed under it. What is unconditional is the part this test
+/// is actually about: dedupe happens with `DedupeStrategy::None` and without
+/// the caller asking. How far it reaches is
+/// [`both_edges_of_the_dedupe_window_are_where_the_window_says_they_are`].
 #[test]
 #[cfg_attr(miri, ignore)]
-fn identical_payloads_are_stored_once_whatever_the_engine_dedupe_strategy_is() {
+fn identical_payloads_within_the_window_are_stored_once_whatever_the_engine_dedupe_strategy_is() {
     let dir = scratch();
     let out = dir.path().join("dupes.pmtiles");
     let ocean = b"the same forty-two bytes, over and over ok".to_vec();
@@ -811,6 +824,116 @@ fn identical_payloads_are_stored_once_whatever_the_engine_dedupe_strategy_is() {
     // collapsed into one run and this test would be about runs alone.
     assert_eq!(mine.entries[0].offset, mine.entries[2].offset);
     assert!(mine.entries[2].tile_id > mine.entries[0].tile_id + 1);
+}
+
+/// Both edges of the dedupe window, in one archive: a duplicate inside it
+/// shares an offset and one beyond it gets its own.
+///
+/// This is the trade issue #1137 makes and it is the one thing about this
+/// writer that got weaker rather than stronger. The content-hash table was
+/// exact at any distance and cost 48 bytes for every distinct payload for the
+/// whole run, which at ten million payloads was the largest allocation in the
+/// process and the whole of the remaining unbounded growth. The window is a
+/// fixed-capacity 8-way set-associative table with LRU inside the set, so a
+/// hit is still exact and a miss stages a payload an identical one may already
+/// have staged long ago.
+///
+/// The two cases that matter are untouched. A photograph has no duplicates to
+/// miss. A blank or solid-colour tile recurs constantly, so it never leaves
+/// the window. What pays is a pyramid with many distinct payloads repeating at
+/// long range.
+///
+/// The budget here is zero, which buys the smallest window there is: one set
+/// of [`DEDUPE_WINDOW_WAYS`] ways, which is a plain LRU of that many payloads
+/// and needs no assumption about which set a hash lands in. So the eviction
+/// below is arithmetic rather than a probability.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn both_edges_of_the_dedupe_window_are_where_the_window_says_they_are() {
+    let dir = scratch();
+    let out = dir.path().join("window.pmtiles");
+    let ocean = b"the same forty-two bytes, over and over ok".to_vec();
+    let filler = |n: usize| format!("filler number {n:04}, distinct from every other").into_bytes();
+
+    let mut w = Writer::create(
+        &out,
+        WriterOptions::default()
+            .with_tile_type(TileType::Png)
+            .with_dedupe_memory_bytes(0),
+    )
+    .expect("a writer opens");
+
+    // Ids ascend with arrival, so the layout the archive ends up in is the
+    // order the window saw.
+    let mut id = 21u64;
+    let add = |w: &mut Writer<std::fs::File>, id: &mut u64, payload: &[u8]| {
+        let (z, x, y) = libviprs::pmtiles::tileid_to_zxy(*id).unwrap();
+        w.add_tile(z, x, y, payload, content_hash(payload)).unwrap();
+        let used = *id;
+        *id += 1;
+        used
+    };
+
+    let first = add(&mut w, &mut id, &ocean);
+    // Two short of filling the window, so the ocean tile is still in it.
+    for n in 0..DEDUPE_WINDOW_WAYS - 2 {
+        add(&mut w, &mut id, &filler(n));
+    }
+    let inside = add(&mut w, &mut id, &ocean);
+    // A full window's worth of distinct payloads after that. The reference
+    // above made the ocean tile the most recent, so it takes exactly this many
+    // to walk it back out of the set.
+    for n in 0..DEDUPE_WINDOW_WAYS {
+        add(&mut w, &mut id, &filler(100 + n));
+    }
+    let beyond = add(&mut w, &mut id, &ocean);
+
+    let done = w.finish().unwrap();
+    let bytes = std::fs::read(&out).unwrap();
+    let mine = parse_ours(&bytes);
+    let offset_of = |tile_id: u64| {
+        mine.entries
+            .iter()
+            .find(|e| e.tile_id == tile_id)
+            .unwrap_or_else(|| panic!("tile {tile_id} is missing from the archive"))
+            .offset
+    };
+
+    // Inside the window: one blob, two entries pointing at it.
+    assert_eq!(
+        offset_of(inside),
+        offset_of(first),
+        "a duplicate inside the window should share the first one's blob"
+    );
+    // Beyond it: its own blob.
+    assert_ne!(
+        offset_of(beyond),
+        offset_of(first),
+        "a duplicate past the window should have been stored again"
+    );
+
+    // And the second copy really is the same bytes, so what changed is where
+    // they are and not what they are.
+    let at = |offset: u64| {
+        section(
+            &bytes,
+            mine.header.tile_data_offset + offset,
+            ocean.len() as u64,
+        )
+        .to_vec()
+    };
+    assert_eq!(at(offset_of(beyond)), ocean);
+    assert_eq!(at(offset_of(first)), ocean);
+
+    // Counted from the other side: one tile, one blob, except the one the
+    // window caught.
+    let tiles = 3 + 2 * DEDUPE_WINDOW_WAYS as u64 - 2;
+    assert_eq!(done.header.addressed_tiles_count, tiles);
+    assert_eq!(
+        done.header.tile_contents_count,
+        tiles - 1,
+        "exactly one of the three ocean tiles should have been deduplicated"
+    );
 }
 
 /// A run of identical adjacent tiles is one entry with `run_length = N`, and
