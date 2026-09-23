@@ -616,7 +616,14 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// picture. All five write an archive to disk, so none of them is a judgement
 /// call, and the figure below is what the detector printed rather than what I
 /// got by adding five to the line above.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 426;
+///
+/// The review of #1147 moves it 426 to 428 for the pair that pins the cheap
+/// probe to a local file: one serves a real archive through a transport that
+/// answers the index and refuses the tile data, and one is the negative
+/// control that a file on disk still takes the cheap probe. Both write an
+/// archive into a `tempfile::tempdir()`, and 428 is again what the detector
+/// printed with this constant still at 426.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 428;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
