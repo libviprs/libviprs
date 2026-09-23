@@ -167,6 +167,33 @@ pub struct PyramidDescription {
     pub layout: Option<Layout>,
     /// The encoding the stored bytes are in, when the backend commits to one.
     pub format: Option<TileFormat>,
+    /// Width in pixels of the source the pyramid was generated from, when the
+    /// backend records it.
+    ///
+    /// # Why a level range is not this (issue #1130)
+    ///
+    /// A pyramid's level range is fixed by the longest side rounded up to a
+    /// power of two, and its grid at every level is the level's size divided
+    /// by the tile size and rounded up. Both of those throw information away,
+    /// so a 4000-pixel source and a 4096-pixel one produce the same thirteen
+    /// levels, the same grid at each of them and the same 349 coordinates.
+    /// Every check a verify had passed on an archive of a different picture,
+    /// and the number that tells the two apart was sitting in the archive's
+    /// own metadata the whole time.
+    pub source_width: Option<u32>,
+    /// Height in pixels of the source the pyramid was generated from, when the
+    /// backend records it. See [`source_width`](Self::source_width).
+    pub source_height: Option<u32>,
+    /// Overlap in pixels between neighbouring tiles, when the backend records
+    /// it.
+    ///
+    /// Also from #1130, and the sharper half of it. Overlap does not reach the
+    /// grid at all: `tile_grid` only divides by the tile size, so planning a
+    /// source at overlap 1 and at overlap 0 produces byte-identical `levels`
+    /// vectors. What it changes is `tile_rect`, which is to say every single
+    /// tile's pixels. Two archives that disagree about it are entirely
+    /// different pyramids that no count can tell apart.
+    pub overlap: Option<u32>,
 }
 
 impl PyramidDescription {
@@ -183,9 +210,9 @@ impl PyramidDescription {
     /// while a test compiling as an external crate could only refuse.
     ///
     /// The two levels are arguments rather than defaults because there is no
-    /// honest "unknown" for them. The three `Option` fields default to `None`,
-    /// which is the honest unknown, and each has a `with_*` setter, matching
-    /// the `default()` plus `with_*` convention `tests/non_exhaustive_options.rs`
+    /// honest "unknown" for them. Every other field defaults to `None`, which
+    /// is the honest unknown, and each has a `with_*` setter, matching the
+    /// `default()` plus `with_*` convention `tests/non_exhaustive_options.rs`
     /// already holds every public options struct to.
     pub fn new(min_level: u32, max_level: u32) -> Self {
         Self {
@@ -194,6 +221,9 @@ impl PyramidDescription {
             tile_size: None,
             layout: None,
             format: None,
+            source_width: None,
+            source_height: None,
+            overlap: None,
         }
     }
 
@@ -216,6 +246,99 @@ impl PyramidDescription {
     pub fn with_format(mut self, format: TileFormat) -> Self {
         self.format = Some(format);
         self
+    }
+
+    /// Record the source's pixel dimensions.
+    ///
+    /// The two travel together because they are useless apart: a pyramid that
+    /// knew its source was 4096 wide and had no idea how tall it was could
+    /// still be checked in one direction, and a caller would have to reason
+    /// about which half of the answer it got. Both or neither.
+    #[must_use]
+    pub fn with_source_size(mut self, width: u32, height: u32) -> Self {
+        self.source_width = Some(width);
+        self.source_height = Some(height);
+        self
+    }
+
+    /// Record the overlap in pixels between neighbouring tiles.
+    #[must_use]
+    pub fn with_overlap(mut self, overlap: u32) -> Self {
+        self.overlap = Some(overlap);
+        self
+    }
+}
+
+// ---------------------------------------------------------------------------
+// StructuralSummary
+// ---------------------------------------------------------------------------
+
+/// What one walk of a pyramid's own structure found.
+///
+/// This exists because a verify used to ask two questions that are answered by
+/// the same walk, [`PyramidReader::self_check`] and
+/// [`PyramidReader::addressed_tiles`], and paid for the walk twice (issue
+/// #1130). On a local file nobody notices; over an injected transport it is
+/// two full sets of round trips, and past roughly 262144 tiles the reader's
+/// leaf cache evicts between them so the second walk refetches what the first
+/// one read.
+///
+/// So the walk is one method now and these are its answers. The two views are
+/// still there, defaulted on top of this, so a backend implementing either of
+/// them keeps working and a backend implementing this gets both for free.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct StructuralSummary {
+    /// How many distinct coordinates the storage addresses, or `None` for a
+    /// backend that cannot count them.
+    ///
+    /// `None` rather than `0`, because a backend that cannot count and a
+    /// pyramid with nothing in it want opposite reactions and the second one
+    /// is a defect.
+    pub addressed_tiles: Option<u64>,
+    /// Whether the walk checked every offset it read against a size the
+    /// storage actually reported.
+    ///
+    /// This is the guarantee a length cannot give and a payload read can: that
+    /// the bytes an index entry points at are inside the object and therefore
+    /// reachable. A walk that had the size proved it for every entry at once,
+    /// which is what lets a verify take a tile's length instead of its
+    /// payload. A walk that did not, or a backend with no structure to walk at
+    /// all, leaves `false` here and the verify reads the bytes.
+    ///
+    /// Defaulting to `false` is the conservative direction on purpose: a
+    /// backend that says nothing keeps the behaviour it had.
+    pub offsets_bounded: bool,
+}
+
+impl StructuralSummary {
+    /// A summary of a walk that counted nothing and bounded nothing, which is
+    /// the honest starting point for a backend with no structure to check.
+    pub fn new() -> Self {
+        Self {
+            addressed_tiles: None,
+            offsets_bounded: false,
+        }
+    }
+
+    /// Record how many coordinates the storage addresses.
+    #[must_use]
+    pub fn with_addressed_tiles(mut self, addressed_tiles: u64) -> Self {
+        self.addressed_tiles = Some(addressed_tiles);
+        self
+    }
+
+    /// Record whether the walk bounded every offset against a reported size.
+    #[must_use]
+    pub fn with_offsets_bounded(mut self, offsets_bounded: bool) -> Self {
+        self.offsets_bounded = offsets_bounded;
+        self
+    }
+}
+
+impl Default for StructuralSummary {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -254,23 +377,43 @@ pub trait PyramidReader: Send + Sync {
     /// What the pyramid is: levels, tile size, layout, encoding.
     fn describe(&self) -> Result<PyramidDescription, PyramidReadError>;
 
-    /// Check the storage's own structure, with no plan to check it against.
+    /// Walk the storage's own structure once and report what the walk found.
     ///
     /// This is the half of a verify that has nothing to do with what was
     /// asked for: whether the thing on disk is internally consistent, whether
     /// every offset it carries lands inside itself, whether its own counts add
-    /// up. A backend with nothing to check answers `Ok(())`, which is the
-    /// default, and a loose-file tree genuinely has nothing: a directory of
-    /// files has no index to disagree with itself.
+    /// up. A backend with nothing to check answers
+    /// [`StructuralSummary::new`], which is the default, and a loose-file tree
+    /// genuinely has nothing: a directory of files has no index to disagree
+    /// with itself.
     ///
-    /// The contract that makes `Ok(())` meaningful is the one
+    /// The contract that makes a clean summary meaningful is the one
     /// [`validate::Report::is_valid`](crate::pmtiles::validate::Report::is_valid)
     /// rests on: **anything that stops the walk early must also report a
     /// defect**. Without it a storage that made the walk give up quietly would
-    /// answer `Ok(())`, which is worse than answering with the defect, because
+    /// answer clean, which is worse than answering with the defect, because
     /// the checks a walk only reaches at the end never ran.
+    ///
+    /// # Implement this one, not the two below
+    ///
+    /// [`self_check`](Self::self_check) and
+    /// [`addressed_tiles`](Self::addressed_tiles) are defaulted views over
+    /// this, because they were two questions about one walk and a verify was
+    /// asking both (issue #1130). A backend that overrides them individually
+    /// still works exactly as it did, which is why they are still overridable
+    /// at all; a backend that overrides this pays for one walk instead of two.
+    fn structural_summary(&self) -> Result<StructuralSummary, PyramidReadError> {
+        Ok(StructuralSummary::new())
+    }
+
+    /// Check the storage's own structure, with no plan to check it against.
+    ///
+    /// A view over [`structural_summary`](Self::structural_summary): the walk
+    /// refuses a damaged storage by returning `Err`, so reaching a summary at
+    /// all is the check passing, and the summary's contents are somebody
+    /// else's question.
     fn self_check(&self) -> Result<(), PyramidReadError> {
-        Ok(())
+        self.structural_summary().map(|_| ())
     }
 
     /// How many distinct coordinates the pyramid holds a tile for.
@@ -289,14 +432,17 @@ pub trait PyramidReader: Send + Sync {
     ///
     /// # Errors
     ///
-    /// The default is [`PyramidReadError::NoDescription`], not `0` and not an
-    /// `Option`. A backend that cannot count has to say so loudly, because
-    /// the failure mode of a quiet "unknown" is a verify that silently drops
-    /// its only both-directions check and stays green.
+    /// [`PyramidReadError::NotCountable`], not `0` and not an `Option`. A
+    /// backend that cannot count has to say so loudly, because the failure
+    /// mode of a quiet "unknown" is a verify that silently drops its only
+    /// both-directions check and stays green. That is what the `None` in
+    /// [`StructuralSummary::addressed_tiles`] becomes here.
     fn addressed_tiles(&self) -> Result<u64, PyramidReadError> {
-        Err(PyramidReadError::NotCountable(
-            "this pyramid cannot count the coordinates it addresses".to_string(),
-        ))
+        self.structural_summary()?.addressed_tiles.ok_or_else(|| {
+            PyramidReadError::NotCountable(
+                "this pyramid cannot count the coordinates it addresses".to_string(),
+            )
+        })
     }
 
     /// The stored bytes of one tile, or `None` when the pyramid has no tile
@@ -306,6 +452,28 @@ pub trait PyramidReader: Send + Sync {
     /// in this crate means the encoded image, not decoded pixels. An absent
     /// tile is `Ok(None)`, never an error.
     fn tile(&self, coord: TileCoord) -> Result<Option<Vec<u8>>, PyramidReadError>;
+
+    /// How many bytes the pyramid stores for one tile, or `None` when it has
+    /// no tile there.
+    ///
+    /// The same answer [`tile`](Self::tile) would give for
+    /// `.map(|bytes| bytes.len())`, which is exactly what the default does, so
+    /// no backend breaks by not implementing this. A backend whose index
+    /// already carries the length overrides it and stops reading the payload:
+    /// that is the difference between reading an index and reading an archive,
+    /// and over a ranged transport it is the difference between a directory
+    /// walk and one round trip per tile (issue #1130).
+    ///
+    /// # What this proves, and what it does not
+    ///
+    /// Present, and how many bytes. **Not** that the bytes are readable. That
+    /// last one is the only thing a payload read adds, and whether it is worth
+    /// the archive is what [`StructuralSummary::offsets_bounded`] answers: a
+    /// walk that bounds-checked every entry against a reported size has
+    /// already established reachability for all of them at once.
+    fn tile_len(&self, coord: TileCoord) -> Result<Option<u64>, PyramidReadError> {
+        Ok(self.tile(coord)?.map(|bytes| bytes.len() as u64))
+    }
 
     /// The encoding the stored bytes are in, when the backend commits to one.
     fn tile_format(&self) -> Option<TileFormat> {
@@ -386,6 +554,9 @@ impl PyramidReader for DirectoryPyramidReader {
             tile_size: Some(self.plan.tile_size),
             layout: Some(self.plan.layout),
             format: Some(self.format),
+            source_width: Some(self.plan.image_width),
+            source_height: Some(self.plan.image_height),
+            overlap: Some(self.plan.overlap),
         })
     }
 
@@ -397,6 +568,30 @@ impl PyramidReader for DirectoryPyramidReader {
         };
         match std::fs::read(self.base_dir.join(relative)) {
             Ok(bytes) => Ok(Some(bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(PyramidReadError::Io(e)),
+        }
+    }
+
+    /// The file's size, taken from its metadata rather than from its bytes.
+    ///
+    /// A tree has no index, so this is the closest thing to one it has: the
+    /// directory entry already knows how long the file is and reading it
+    /// learns nothing else. An absent file is `Ok(None)` on the same terms
+    /// [`PyramidReader::tile`] uses, and so is a coordinate the
+    /// plan's grid does not contain.
+    ///
+    /// Note what this does **not** do for a verify: a tree reports no
+    /// [`StructuralSummary::offsets_bounded`], because it has no walk to bound
+    /// anything with, so `pyramid_verify` still reads the payloads here. That
+    /// is deliberate. A length off `stat` says the file exists and how large
+    /// it is; it does not say the bytes come back.
+    fn tile_len(&self, coord: TileCoord) -> Result<Option<u64>, PyramidReadError> {
+        let Some(relative) = self.plan.tile_path(coord, self.format.extension()) else {
+            return Ok(None);
+        };
+        match std::fs::metadata(self.base_dir.join(relative)) {
+            Ok(metadata) => Ok(Some(metadata.len())),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(PyramidReadError::Io(e)),
         }
@@ -506,29 +701,26 @@ impl<R: crate::pmtiles::RangeReader> PmTilesPyramidReader<R> {
 
     /// Walk the archive and hand back the report, refusing a damaged one.
     ///
-    /// Both [`PyramidReader::self_check`] and
-    /// [`PyramidReader::addressed_tiles`] go through here, so a caller that
-    /// wants the count of a broken archive cannot get one: a count taken from
-    /// a walk that raised findings is a count of however far the walk got.
+    /// [`PyramidReader::structural_summary`] goes through here, so a caller
+    /// that wants the count of a broken archive cannot get one: a count taken
+    /// from a walk that raised findings is a count of however far the walk
+    /// got.
     ///
-    /// A verify therefore pays this walk twice. That is deliberate and it is
-    /// cheap: it reads the header and the directories and no tile payloads,
-    /// while the coordinate sweep that follows reads every tile in the
-    /// archive. The alternative is caching a report against a file that can
-    /// change underneath it, and a stale structural verdict is a worse thing
-    /// to own than a second directory walk.
+    /// Nothing is cached across calls, and that part of the old argument still
+    /// holds: the alternative is a structural verdict about a file that can
+    /// change underneath it, and a stale verdict is a worse thing to own than
+    /// a repeated directory walk.
     ///
-    /// Be honest about what that costs, though, because "cheap" was doing too
-    /// much work in the sentence above. A single `pyramid_verify` calls this
-    /// twice, once through `self_check` and once through `addressed_tiles`,
-    /// ten lines apart, under a run lock that already guarantees the archive
-    /// cannot change between them. On a local file that is two directory
-    /// traversals and nobody notices. Over an injected transport it is two
-    /// full sets of round trips, and above roughly 262144 tiles the leaf cache
-    /// (64 pages) evicts between them, so the second walk refetches what the
-    /// first one read. Accepting the double walk is a deliberate trade against
-    /// a stale cache, not a claim that it is free, and the shape that removes
-    /// the choice entirely is one method returning both answers.
+    /// What used to be here was a defence of calling this **twice inside one
+    /// verify**, once through `self_check` and once through
+    /// `addressed_tiles`, ten lines apart, under a run lock that already
+    /// guarantees the archive cannot change between them. That was never an
+    /// argument about caching. On a local file it is two directory traversals
+    /// and nobody notices; over an injected transport it is two full sets of
+    /// round trips, and above roughly 262144 tiles the leaf cache (64 pages)
+    /// evicts between them so the second walk refetches what the first one
+    /// read. One method returning both answers removes the choice, which is
+    /// what `structural_summary` is (issue #1130).
     fn structural_report(&self) -> Result<crate::pmtiles::validate::Report, PyramidReadError> {
         let report = crate::pmtiles::validate::validate(
             self.reader.source(),
@@ -551,6 +743,22 @@ impl<R: crate::pmtiles::RangeReader> PmTilesPyramidReader<R> {
             .vnd_libviprs
             .as_ref()?
             .generation
+            .clone()
+    }
+
+    /// What the archive says about the raster it was generated from.
+    ///
+    /// `None` for a foreign archive, and also for one libviprs assembled from
+    /// loose tiles rather than generated from a source, which is the case
+    /// [`LibviprsMetadata::source`](crate::pmtiles::LibviprsMetadata::source)
+    /// documents.
+    fn source(&self) -> Option<crate::manifest::SourceMetadata> {
+        self.reader
+            .metadata()
+            .ok()?
+            .vnd_libviprs
+            .as_ref()?
+            .source
             .clone()
     }
 
@@ -600,8 +808,9 @@ impl<R: crate::pmtiles::RangeReader> PmTilesPyramidReader<R> {
 }
 
 impl<R: crate::pmtiles::RangeReader> PyramidReader for PmTilesPyramidReader<R> {
-    /// Walk the archive the way [`validate`](crate::pmtiles::validate) does
-    /// and refuse it if the walk found anything.
+    /// Walk the archive the way [`validate`](crate::pmtiles::validate) does,
+    /// refuse it if the walk found anything, and keep both of the numbers a
+    /// verify is going to want.
     ///
     /// Read through [`Report::is_valid`](crate::pmtiles::validate::Report::is_valid)
     /// rather than through a severity filter or a hand-rolled early exit, and
@@ -611,20 +820,35 @@ impl<R: crate::pmtiles::RangeReader> PyramidReader for PmTilesPyramidReader<R> {
     /// the counts, or that ignored findings it decided were cosmetic, would
     /// report clean for a file that made the walk give up before it got to
     /// them.
-    fn self_check(&self) -> Result<(), PyramidReadError> {
-        self.structural_report().map(|_| ())
-    }
-
-    /// The run lengths summed, recomputed by the same walk.
     ///
-    /// The header carries an `addressed_tiles_count` and it is not used here.
-    /// It is a number the writer put in the file, so an archive whose header
-    /// miscounts its own tiles would agree with itself perfectly; the walk
-    /// counts what the directories actually cover, and the disagreement
-    /// between the two is itself one of the findings above.
-    fn addressed_tiles(&self) -> Result<u64, PyramidReadError> {
-        self.structural_report()
-            .map(|report| report.addressed_tiles)
+    /// The count is the run lengths summed, recomputed by this walk. The
+    /// header carries an `addressed_tiles_count` and it is not used: it is a
+    /// number the writer put in the file, so an archive whose header miscounts
+    /// its own tiles would agree with itself perfectly, and the disagreement
+    /// between the header's count and what the directories actually cover is
+    /// itself one of the findings above.
+    ///
+    /// `offsets_bounded` comes from the reader's own
+    /// [`archive_size`](crate::pmtiles::Reader::archive_size), which is what
+    /// the walk bounds every section and every entry against. It is `Some` for
+    /// a file and for any transport that answers
+    /// [`RangeReader::size`](crate::pmtiles::RangeReader::size).
+    ///
+    /// Which makes it `true` for every archive that gets this far today, and
+    /// that is worth saying rather than leaving as an implication. A backend
+    /// that answers `None` produces a
+    /// [`Finding::ArchiveSizeUnknown`](crate::pmtiles::validate::Finding::ArchiveSizeUnknown),
+    /// and `structural_report` refuses any report carrying a finding, so the
+    /// archive never reaches a summary at all. Reading the size here rather
+    /// than hard-coding `true` is deliberate: it keeps the flag a statement
+    /// about what this walk actually checked, so if that finding is ever
+    /// downgraded the conditional in `pyramid_verify` is already correct
+    /// instead of quietly wrong.
+    fn structural_summary(&self) -> Result<StructuralSummary, PyramidReadError> {
+        let report = self.structural_report()?;
+        Ok(StructuralSummary::new()
+            .with_addressed_tiles(report.addressed_tiles)
+            .with_offsets_bounded(self.reader.archive_size().is_some()))
     }
 
     /// What the archive says it is.
@@ -649,12 +873,16 @@ impl<R: crate::pmtiles::RangeReader> PyramidReader for PmTilesPyramidReader<R> {
             self.version_gap(parse_failure)?;
         }
         let generation = self.generation();
+        let source = self.source();
         Ok(PyramidDescription {
             min_level: u32::from(header.min_zoom),
             max_level: u32::from(header.max_zoom),
             tile_size: generation.as_ref().map(|g| g.tile_size),
             layout: generation.as_ref().map(|g| g.layout),
             format: self.tile_format(),
+            source_width: source.as_ref().map(|s| s.width),
+            source_height: source.as_ref().map(|s| s.height),
+            overlap: generation.as_ref().map(|g| g.overlap),
         })
     }
 
@@ -667,6 +895,22 @@ impl<R: crate::pmtiles::RangeReader> PyramidReader for PmTilesPyramidReader<R> {
             return Ok(None);
         };
         Ok(self.reader.get_tile(z, x, y)?)
+    }
+
+    /// The stored length out of the directory entry, with no payload read.
+    ///
+    /// Answers `None` for a coordinate PMTiles cannot address on the same
+    /// terms [`PyramidReader::tile`] does, so the two agree about
+    /// which coordinates this pyramid has and disagree only about how much
+    /// they cost.
+    fn tile_len(&self, coord: TileCoord) -> Result<Option<u64>, PyramidReadError> {
+        let Ok((z, x, y)) = crate::sink_pmtiles::tile_coord_to_zxy(coord) else {
+            return Ok(None);
+        };
+        Ok(self
+            .reader
+            .tile_span(z, x, y)?
+            .map(|(_offset, length)| u64::from(length)))
     }
 
     /// The encoding the stored bytes are in.

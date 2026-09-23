@@ -390,6 +390,9 @@ mod tests {
             tile_size: Some(plan.tile_size),
             layout: Some(plan.layout),
             format: Some(TileFormat::Png),
+            source_width: Some(plan.image_width),
+            source_height: Some(plan.image_height),
+            overlap: Some(plan.overlap),
         }
     }
 
