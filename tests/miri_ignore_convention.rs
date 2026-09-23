@@ -607,7 +607,16 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// `a_repository_with_no_commits_publishes_holes_rather_than_half_an_attestation`,
 /// which `git init`s a `tempfile::tempdir()` to reach an unborn HEAD. It is
 /// `annotated fs-detected` like its neighbour and is not a judgement call.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 421;
+///
+/// #1130 moves it again for the five filesystem cells the verify findings add:
+/// three are the whole of `tests/pmtiles_verify_reads_the_index.rs`, which
+/// writes a real archive into a `tempfile::tempdir()` and reads it back
+/// through a counting transport, and two are the pair
+/// `tests/pmtiles_plan_aware_verify.rs` grows for the archive of a different
+/// picture. All five write an archive to disk, so none of them is a judgement
+/// call, and the figure below is what the detector printed rather than what I
+/// got by adding five to the line above.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 426;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
