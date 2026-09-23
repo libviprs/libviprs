@@ -623,7 +623,12 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// control that a file on disk still takes the cheap probe. Both write an
 /// archive into a `tempfile::tempdir()`, and 428 is again what the detector
 /// printed with this constant still at 426.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 428;
+///
+/// Then 428 to 429 for the ranged sibling of the cheap-probe cell, which
+/// verifies the same archive through a transport that reports a size and is
+/// not a local file and asserts that every payload is read. 429 is the number
+/// the detector printed with this constant still at 428.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 429;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {

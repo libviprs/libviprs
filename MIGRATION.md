@@ -388,9 +388,44 @@ so there is nothing to check this plan against
 
 The reasoning is the same one that already applied to the tile size: a pyramid
 that will not say how it was made cannot be checked against a plan, and
-"cannot be checked" is a refusal rather than a pass. If you need the old
-behaviour for a specific file, verify it against a plan built from what the
-archive actually records rather than asking verify to skip the comparison.
+"cannot be checked" is a refusal rather than a pass.
+
+**There is no workaround, and an earlier draft of this section offered one that
+cannot be followed.** It said to verify against a plan built from what the
+archive records. The archives this refuses are exactly the ones that record
+nothing, so there is nothing to build a plan from. Two routes that do work:
+regenerate the archive with this version, which writes the namespace; or check
+it structurally instead of against a plan, with
+`PmTilesPyramidReader::structural_summary`, which walks the archive's own
+consistency and asks nothing about a plan.
+
+## `bytes_read` is 0 for a PMTiles verify of a local archive
+
+Not a break in the API and visible in the numbers, so it is here rather than in
+the changelog alone. A verify that takes each tile's stored length out of the
+index did not read the payloads, so it reports none. Reporting the summed
+lengths would be the same dishonesty the change exists to remove: a run saying
+it read an archive it did not read.
+
+Read `EngineResult::tile_evidence` to tell the two apart.
+`TileEvidence::LengthsFromTheIndex` is the length path and comes with
+`bytes_read: 0`; `TileEvidence::PayloadsRead` means every byte came off the
+storage and `bytes_read` is their total. A verify over a remote archive is
+always the second.
+
+## `PyramidReader::self_check` is deprecated
+
+Only for implementors of the trait, and it still compiles.
+
+`pyramid_verify` asks `PyramidReader::structural_summary` directly now, so
+nothing calls `self_check` and an override of it is dead code that the compiler
+is happy with. If you put a structural walk there, move it to
+`structural_summary`, which answers the same check and the addressed count from
+one walk.
+
+Do not make `structural_summary` delegate back to `self_check` to keep an
+override alive. `self_check`'s default already calls `structural_summary`, so
+the pair recurses until the stack runs out.
 
 One thing this does **not** fix, worth knowing because it looks like it
 should. `tile_coord_to_zxy` ignores `layout`, so an `Xyz` archive and a

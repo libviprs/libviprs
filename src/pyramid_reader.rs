@@ -66,7 +66,7 @@ pub enum PyramidReadError {
     /// constructor opens.
     #[error("{path} is not {expected}")]
     NotAPyramid { path: PathBuf, expected: String },
-    /// [`PyramidReader::self_check`] walked the storage and found it damaged.
+    /// A structural walk of the storage found it damaged.
     ///
     /// Distinct from every other variant on purpose. An `Io` or a `PmTiles`
     /// error says the reader could not find out; this one says it did find
@@ -276,7 +276,7 @@ impl PyramidDescription {
 /// What one walk of a pyramid's own structure found.
 ///
 /// This exists because a verify used to ask two questions that are answered by
-/// the same walk, [`PyramidReader::self_check`] and
+/// the same walk, `PyramidReader::self_check` and
 /// [`PyramidReader::addressed_tiles`], and paid for the walk twice (issue
 /// #1130). On a local file nobody notices; over an injected transport it is
 /// two full sets of round trips, and past roughly 262144 tiles the reader's
@@ -396,12 +396,14 @@ pub trait PyramidReader: Send + Sync {
     ///
     /// # Implement this one, not the two below
     ///
-    /// [`self_check`](Self::self_check) and
-    /// [`addressed_tiles`](Self::addressed_tiles) are defaulted views over
-    /// this, because they were two questions about one walk and a verify was
-    /// asking both (issue #1130). A backend that overrides them individually
-    /// still works exactly as it did, which is why they are still overridable
-    /// at all; a backend that overrides this pays for one walk instead of two.
+    /// `self_check` and [`addressed_tiles`](Self::addressed_tiles) are
+    /// defaulted views over this, because they were two questions about one
+    /// walk and a verify was asking both (issue #1130). A backend that
+    /// overrides `addressed_tiles` still works exactly as it did.
+    ///
+    /// `self_check` is the one to watch, and it is deprecated for it: nothing
+    /// calls it now, so an override of it is dead code that still compiles.
+    /// Put the walk here instead.
     fn structural_summary(&self) -> Result<StructuralSummary, PyramidReadError> {
         Ok(StructuralSummary::new())
     }
@@ -412,6 +414,25 @@ pub trait PyramidReader: Send + Sync {
     /// refuses a damaged storage by returning `Err`, so reaching a summary at
     /// all is the check passing, and the summary's contents are somebody
     /// else's question.
+    ///
+    /// # Nothing calls this any more (review of #1147)
+    ///
+    /// `pyramid_verify` asks for the summary directly, so an override of this
+    /// method is now dead code that still compiles. That is the quiet half of
+    /// the change and the reason for the attribute: a backend that put its
+    /// structural walk here kept building and stopped being walked, with
+    /// nothing to notice it.
+    ///
+    /// Move the walk to [`structural_summary`](Self::structural_summary),
+    /// which is the same check plus the count. **Do not** make
+    /// `structural_summary` delegate here to keep an override alive: this
+    /// method's default already calls it, so the pair recurses until the stack
+    /// runs out.
+    #[deprecated(
+        since = "0.5.0",
+        note = "nothing calls this; implement `PyramidReader::structural_summary` instead, \
+                which answers the same check and the addressed count from one walk"
+    )]
     fn self_check(&self) -> Result<(), PyramidReadError> {
         self.structural_summary().map(|_| ())
     }
@@ -828,27 +849,46 @@ impl<R: crate::pmtiles::RangeReader> PyramidReader for PmTilesPyramidReader<R> {
     /// between the header's count and what the directories actually cover is
     /// itself one of the findings above.
     ///
-    /// `offsets_bounded` comes from the reader's own
-    /// [`archive_size`](crate::pmtiles::Reader::archive_size), which is what
-    /// the walk bounds every section and every entry against. It is `Some` for
-    /// a file and for any transport that answers
-    /// [`RangeReader::size`](crate::pmtiles::RangeReader::size).
+    /// `offsets_bounded` needs two things, and the second one is the whole
+    /// correction the review of #1147 asked for.
     ///
-    /// Which makes it `true` for every archive that gets this far today, and
-    /// that is worth saying rather than leaving as an implication. A backend
-    /// that answers `None` produces a
-    /// [`Finding::ArchiveSizeUnknown`](crate::pmtiles::validate::Finding::ArchiveSizeUnknown),
+    /// The first is that the walk had a size to bound against, from the
+    /// reader's own [`archive_size`](crate::pmtiles::Reader::archive_size).
+    /// The second is that the bytes are on a local filesystem, from
+    /// [`RangeReader::is_local_file`](crate::pmtiles::RangeReader::is_local_file).
+    ///
+    /// Asking only the first was wrong, and wrong in the direction that
+    /// matters. A reader that cannot report a size raises
+    /// [`Finding::ArchiveSizeUnknown`](crate::pmtiles::validate::Finding::ArchiveSizeUnknown)
     /// and `structural_report` refuses any report carrying a finding, so the
-    /// archive never reaches a summary at all. Reading the size here rather
-    /// than hard-coding `true` is deliberate: it keeps the flag a statement
-    /// about what this walk actually checked, so if that finding is ever
-    /// downgraded the conditional in `pyramid_verify` is already correct
-    /// instead of quietly wrong.
+    /// size question is already answered `Some` by the time anything reaches
+    /// here. The flag was therefore `true` for every PMTiles archive, the
+    /// payload read was unreachable, and the run skipped the tile data exactly
+    /// where the tile data was remote, while the loose-file backend on a local
+    /// disk went on reading every byte.
+    ///
+    /// What the bounds check establishes is that an entry's offset lands
+    /// inside the object. It composes
+    /// `entry.offset + entry.length <= tile_data_length` with
+    /// `tile_data_offset + tile_data_length <= archive_size`, and every term
+    /// in that comes out of the header or the directories. Over a transport
+    /// the archive size is the server's claim about the object as a whole, so
+    /// the conclusion is an inference from that claim rather than a fact about
+    /// any particular range, and a range can fail on its own: a half-completed
+    /// multipart, an evicted CDN part, a truncated restore. On a local file
+    /// there is nothing to infer, because the length came from `metadata()` on
+    /// a handle that is still open and an in-bounds read of it succeeds.
+    ///
+    /// So the cheap probe keeps the case #1130 was filed about, which is a
+    /// local archive of tens of thousands of tiles, and gives up the case it
+    /// was never entitled to.
     fn structural_summary(&self) -> Result<StructuralSummary, PyramidReadError> {
         let report = self.structural_report()?;
         Ok(StructuralSummary::new()
             .with_addressed_tiles(report.addressed_tiles)
-            .with_offsets_bounded(self.reader.archive_size().is_some()))
+            .with_offsets_bounded(
+                self.reader.archive_size().is_some() && self.reader.source().is_local_file(),
+            ))
     }
 
     /// What the archive says it is.
@@ -1023,7 +1063,10 @@ mod tests {
         // The control: the same reader answers the questions it can answer, so
         // the refusal below is about the count and not about the reader.
         assert!(reader.describe().is_ok(), "it can still describe itself");
-        assert!(reader.self_check().is_ok(), "a tree has no index to damage");
+        assert!(
+            reader.structural_summary().is_ok(),
+            "a tree has no index to damage"
+        );
 
         match reader.addressed_tiles() {
             Err(PyramidReadError::NotCountable(_)) => {}

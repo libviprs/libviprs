@@ -510,11 +510,20 @@ pub struct EngineResult {
     /// reachable or that the structural walk bounded every entry that points
     /// at them, and those are different claims a caller may care about.
     ///
-    /// `None` is every other run. A generation run produced the tiles rather
-    /// than checking them, and `raster_verify` and `verify_from_strip_source`
-    /// re-render from the source and compare bytes, which proves something
-    /// stronger than either variant here describes. Naming one of them for
-    /// those two would be a downgrade rather than a report.
+    /// `None` is every other run: a generation run, which produced the tiles
+    /// rather than checking them, and the two tree verifies.
+    ///
+    /// `None` for `raster_verify` and `verify_from_strip_source` is **not** a
+    /// claim that they prove more (review of #1147). Their byte comparison
+    /// runs only where the extension is `raw`; for a `png`, `jpeg` or `webp`
+    /// tree they stat the file and stop, because an encoded tile cannot be
+    /// re-encoded bit-identically from fresh pixels. So on the formats anyone
+    /// actually ships they prove **less** than
+    /// [`TileEvidence::PayloadsRead`](crate::verify::TileEvidence::PayloadsRead),
+    /// which at least reads every byte back.
+    /// They are `None` because this enum describes a per-tile probe of stored
+    /// bytes and a re-render is a different kind of check, not because they
+    /// rank above it.
     pub tile_evidence: Option<crate::verify::TileEvidence>,
 }
 

@@ -85,6 +85,35 @@ pub trait RangeReader: Send + Sync {
     fn size(&self) -> io::Result<Option<u64>> {
         Ok(None)
     }
+
+    /// Whether every byte this reader serves is already on a local filesystem.
+    ///
+    /// The default is `false`, which is the conservative answer, and a backend
+    /// only overrides it when an in-bounds read is a read that succeeds.
+    ///
+    /// # Why this is not [`RangeReader::size`] (review of #1147)
+    ///
+    /// Because a size and a range are different promises. A caller that has
+    /// bounds-checked an offset against a reported size knows the offset is
+    /// inside the object; it does not know the bytes there can be fetched.
+    /// Over a transport those come apart, and not exotically: an archive on
+    /// object storage whose `Content-Length` is final and whose tile-data
+    /// range 206s short or 500s is a half-completed multipart upload, an
+    /// evicted CDN part or a truncated restore.
+    ///
+    /// That distinction decides whether a verify may take a tile's stored
+    /// length instead of its payload.
+    /// [`pyramid_verify`](crate::verify::pyramid_verify) reads it through
+    /// [`StructuralSummary::offsets_bounded`](crate::pyramid_reader::StructuralSummary::offsets_bounded),
+    /// and it used to ask `size()` instead. That made the payload read
+    /// unreachable for PMTiles, because a reader that cannot report a size
+    /// raises
+    /// [`Finding::ArchiveSizeUnknown`](crate::pmtiles::validate::Finding::ArchiveSizeUnknown)
+    /// and the structural walk refuses it, so the run read nothing from the
+    /// tile-data section precisely where that section was remote.
+    fn is_local_file(&self) -> bool {
+        false
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -110,6 +139,10 @@ impl<R: RangeReader + ?Sized> RangeReader for Box<R> {
     fn size(&self) -> io::Result<Option<u64>> {
         (**self).size()
     }
+
+    fn is_local_file(&self) -> bool {
+        (**self).is_local_file()
+    }
 }
 
 /// An `Arc`'d reader is a reader, for the same reasons as [`Box<R>`].
@@ -125,6 +158,10 @@ impl<R: RangeReader + ?Sized> RangeReader for std::sync::Arc<R> {
 
     fn size(&self) -> io::Result<Option<u64>> {
         (**self).size()
+    }
+
+    fn is_local_file(&self) -> bool {
+        (**self).is_local_file()
     }
 }
 
@@ -221,6 +258,18 @@ impl RangeReader for FileRangeReader {
 
     fn size(&self) -> io::Result<Option<u64>> {
         Ok(Some(self.len))
+    }
+
+    /// Yes, and this is the only implementation in the crate that says so.
+    ///
+    /// The length came from `metadata()` on a handle that is still open, and
+    /// `read_range` bounds every request against it before touching the file,
+    /// so a range this reader accepts is a range it can serve. That is the
+    /// property a verify leans on when it takes a tile's stored length instead
+    /// of its payload, and it is a property of the filesystem rather than of
+    /// anyone's claim about the object.
+    fn is_local_file(&self) -> bool {
+        true
     }
 }
 

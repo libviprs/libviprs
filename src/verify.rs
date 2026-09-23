@@ -117,9 +117,9 @@ pub enum TileEvidence {
 ///   and it is the check an implementation drops first, because the sweep
 ///   passes without it: a 256-pixel tile at `0/0/0` is a perfectly readable
 ///   tile whatever the plan meant by a tile;
-/// * **the structural self-check** ([`PyramidReader::self_check`]), run before
-///   the sweep and read through the storage's own "no findings" verdict, so
-///   that a walk which gave up early cannot report clean;
+/// * **the structural walk** ([`PyramidReader::structural_summary`]), run
+///   before the sweep and read through the storage's own "no findings"
+///   verdict, so that a walk which gave up early cannot report clean;
 /// * **the addressed-tile count against the plan's**, which is the only check
 ///   that sees case 3, and it is an equality rather than a `>=` on purpose.
 ///   The short direction is normally reported by the sweep, which can name the
@@ -155,7 +155,8 @@ pub enum TileEvidence {
 /// `addressed_tiles` were two questions about one walk, asked ten lines apart
 /// under a run lock that guarantees the archive cannot change between them, so
 /// this asks [`PyramidReader::structural_summary`] once and reads both answers
-/// off it.
+/// off it. `self_check` is deprecated as a result: nothing calls it, and an
+/// override of it would be a walk that silently stopped running.
 ///
 /// # Errors
 ///
@@ -346,6 +347,25 @@ pub fn pyramid_verify(
 /// Both are refused for `None` the way the tile size is, and for the same
 /// reason: a pyramid that will not say cannot be checked, and "cannot be
 /// checked" is a refusal rather than a pass.
+///
+/// # What this check is worth per backend
+///
+/// Everything here compares the reader's `describe()` against the plan, so it
+/// is only as independent as the two sources are.
+/// [`DirectoryPyramidReader::describe`](crate::pyramid_reader::DirectoryPyramidReader)
+/// fills all five fields out of the plan it was opened with, so for a
+/// loose-file tree this compares a plan with itself and cannot fail. That is
+/// not a defect to fix here, it is what a directory of tiles can say about
+/// itself: a tree carries no metadata, and the reader is handed the plan
+/// precisely because nothing in the tree records one. The check bites on an
+/// archive, which records its own generation settings independently of
+/// whatever plan is checking it.
+///
+/// The arms are ordered cheapest-claim-first rather than by history, so an
+/// archive carrying no `vnd.libviprs` namespace at all now gets refused for
+/// its source size where it used to be refused for its tile size. Both are
+/// true of it and the operator-facing string changed, which is worth knowing
+/// if anything matches on that text.
 fn describe_matches_the_plan(
     reader: &dyn PyramidReader,
     plan: &PyramidPlan,
