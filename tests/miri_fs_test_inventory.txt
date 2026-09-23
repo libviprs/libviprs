@@ -215,12 +215,14 @@ annotated   fs-detected  src/pmtiles/range.rs::one_reader_serves_several_threads
 annotated   fs-detected  src/pmtiles/range.rs::the_bound_is_on_offset_plus_length_not_on_length_alone
 annotated   fs-detected  src/pmtiles/range.rs::the_out_of_range_refusal_names_the_range_and_the_file
 annotated   fs-detected  src/pmtiles/validate.rs::the_leaf_storm_seed_is_bounded_work_at_default_limits
+annotated   fs-detected  src/pmtiles/writer.rs::a_finish_syncs_only_the_files_something_reads_back
 annotated   fs-detected  src/pmtiles/writer.rs::a_partial_write_latches_and_finish_refuses_to_publish
 annotated   fs-detected  src/pmtiles/writer.rs::a_partial_write_to_the_index_log_latches_too
+annotated   fs-detected  src/pmtiles/writer.rs::a_payload_larger_than_the_copy_buffer_is_read_in_several_pieces
+annotated   fs-detected  src/pmtiles/writer.rs::a_payload_the_repeat_table_forgot_is_stored_twice_and_reads_back_right
 annotated   fs-detected  src/pmtiles/writer.rs::a_refusal_before_the_write_leaves_the_writer_usable
 annotated   fs-detected  src/pmtiles/writer.rs::a_run_list_wider_than_the_fan_in_is_merged_in_passes
 annotated   fs-detected  src/pmtiles/writer.rs::a_writer_that_spilled_several_runs_still_sorts
-annotated   fs-detected  src/pmtiles/writer.rs::one_finish_issues_exactly_one_durability_barrier
 annotated   fs-detected  src/pmtiles/writer.rs::one_merge_pass_refuses_more_runs_than_its_fan_in
 annotated   fs-detected  src/pmtiles/writer.rs::the_barrier_a_caller_asks_for_is_still_issued
 annotated   fs-detected  src/pmtiles/writer.rs::the_external_merge_handles_one_run_and_no_runs
@@ -383,6 +385,7 @@ annotated   fs-detected  tests/pmtiles_benchmarks.rs::the_brink_cells_root_stops
 annotated   fs-detected  tests/pmtiles_benchmarks.rs::the_cold_split_accounts_for_the_whole_combined_row
 annotated   fs-detected  tests/pmtiles_bounded_memory.rs::an_archive_past_four_gibibytes_finalizes_in_bounded_memory
 annotated   fs-detected  tests/pmtiles_bounded_memory.rs::one_rss_row
+annotated   fs-detected  tests/pmtiles_bounded_memory.rs::shrinking_the_sort_buffer_past_the_crossover_costs_more_than_it_saves
 annotated   fs-detected  tests/pmtiles_bounded_memory.rs::the_add_phase_footprint_does_not_grow_with_the_distinct_payload_count
 annotated   fs-detected  tests/pmtiles_bounded_memory.rs::the_finalize_growth_does_not_follow_the_distinct_payload_count
 annotated   fs-detected  tests/pmtiles_bounded_memory.rs::the_finalize_peak_does_not_move_when_the_tile_count_quadruples
@@ -456,6 +459,7 @@ annotated   fs-detected  tests/pmtiles_writer.rs::the_root_directory_fits_the_si
 annotated   fs-detected  tests/pmtiles_writer.rs::the_root_directory_is_byte_identical_to_the_one_go_pmtiles_wrote
 annotated   fs-detected  tests/pmtiles_writer.rs::the_three_counts_are_filled_in_and_consistent
 annotated   fs-detected  tests/pmtiles_writer.rs::the_writer_works_over_any_write_and_seek_sink
+annotated   fs-detected  tests/pmtiles_writer.rs::two_orders_stop_agreeing_once_the_window_cannot_hold_the_tile_set
 annotated   fs-detected  tests/pmtiles_writer.rs::two_shuffled_insertion_orders_produce_a_byte_identical_archive
 annotated   fs-detected  tests/pyramid_migrate.rs::a_layout_pmtiles_cannot_address_is_refused_by_name
 annotated   fs-detected  tests/pyramid_migrate.rs::a_reader_that_will_not_say_what_its_tiles_are_is_refused_rather_than_guessed
@@ -504,6 +508,7 @@ annotated   not-detected src/colour.rs::icc_typed_errors
 annotated   not-detected src/pdf.rs::password_and_dpi_extract_return_a_clean_typed_error
 annotated   not-detected src/pdf.rs::pdf_info_with_password_passes_through_open_error
 annotated   not-detected src/pmtiles/range.rs::opening_something_that_is_not_there_is_a_typed_error
+annotated   not-detected src/pmtiles/writer.rs::widening_settles_where_a_doubling_loop_settles
 annotated   not-detected src/source.rs::decode_file_not_found
 annotated   not-detected tests/case_only_path_collisions.rs::no_two_tracked_paths_differ_only_in_case
 annotated   not-detected tests/changelog_release_claims.rs::every_release_claim_in_the_changelog_is_true_of_the_tags

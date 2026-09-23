@@ -310,6 +310,67 @@ as it keeps asking for `PyramidStorage::Directory`. What will break is code
 that assumed the directory was the *only* thing a run could produce, and the
 fix for that is to name the storage rather than to infer it from the path.
 
+## The PMTiles writer deduplicates within a window now
+
+The writer stored every distinct payload exactly once however far apart two
+identical tiles arrived. From 0.5.0 it remembers a fixed number of them, so
+**two identical payloads further apart than the window are stored twice**. This
+comes out of [EPIC M](https://github.com/libviprs/libviprs/issues/1135), which
+made the writer's memory independent of the payload count.
+
+Most callers can skip the rest of this section. A photograph has no duplicate
+tiles to miss, and a pyramid of mostly blank tiles has a handful of payloads
+that recur constantly, so they never leave the window. What the window costs is
+a pyramid with more distinct payloads than it holds *and* duplicates that
+repeat at long range.
+
+### One rename
+
+```rust
+// 0.4.0
+let n = writer.distinct_payload_count();
+
+// 0.5.0
+let n = writer.staged_payload_count();
+```
+
+Same number in every case the window catches every duplicate, and the new name
+is the honest one: it counts payloads staged, and two identical payloads the
+window forgot between are two of them.
+
+### Getting exact deduplication back
+
+Size the window past the number of distinct payloads you expect. It costs 65
+bytes a payload, across the window itself and the repeat table beside it:
+
+```rust
+use libviprs::pmtiles::writer::{Writer, WriterOptions};
+use libviprs::pmtiles::TileType;
+
+// The default, 8 MiB, which tracks 129,056 payloads.
+let options = WriterOptions::default().with_tile_type(TileType::Png);
+
+// Exact for a pyramid of up to about two million distinct payloads.
+let options = options.with_dedupe_memory_bytes(2_000_000 * 65);
+```
+
+`with_dedupe_memory_bytes(0)` does not turn the window off. It buys the
+smallest one there is, a single set of 8 payloads, because a writer with no
+window would store every duplicate twice and nobody wants that as a setting.
+
+### If you depend on a byte-identical archive
+
+Two different insertion orders of the same tiles produced byte-identical
+archives, and that still holds **whenever the window holds every distinct
+payload**. Once it evicts, whether two identical payloads share a blob depends
+on how far apart they arrived, so the archive is no longer a pure function of
+the tile set alone.
+
+If you compare archive bytes across runs, or publish a checksum, or otherwise
+need a reproducible build, size the window as above and the property comes
+back. Nothing else about the layout moved: the data region is still written in
+tile id order, `clustered` is still `true`, and a reader sees no difference.
+
 ## `TileFormat` gains a `Webp` variant, so exhaustive matches stop compiling
 
 This one is a real break for a 0.4.0 caller and it is the easiest to fix

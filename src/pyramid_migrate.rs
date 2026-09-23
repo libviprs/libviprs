@@ -285,8 +285,13 @@ pub struct MigrateReport {
     /// legitimately has holes, so this is a count and not an error, but a run
     /// where it equals `coords_visited` migrated an empty tree.
     pub tiles_absent: u64,
-    /// Distinct payloads stored, after the writer's content-hash dedupe. Below
+    /// Payloads stored, after the writer's content-hash dedupe. Below
     /// `tiles_written` by exactly what the dedupe saved.
+    ///
+    /// "Distinct" as far as the writer's dedupe window reaches, which is what
+    /// [`WriterOptions::dedupe_memory_bytes`](crate::pmtiles::writer::WriterOptions)
+    /// sizes: two identical payloads further apart than that are stored twice
+    /// and counted twice here.
     pub distinct_payloads: u64,
     /// Sorted runs spilled to the index log before finalising.
     ///
@@ -396,7 +401,7 @@ pub fn migrate_to_pmtiles(
 
     // Read off the writer before `finish` consumes it. Both are cheap and
     // neither is recoverable afterwards.
-    let distinct_payloads = writer.distinct_payload_count() as u64;
+    let distinct_payloads = writer.staged_payload_count() as u64;
     let spilled_run_count = writer.spilled_run_count();
     writer.finish()?;
 
