@@ -45,10 +45,19 @@
 //! | 512x256 | 256 | 0..=9  | 11 |
 //! | 256x256 | 256 | 0..=8  | 9  |
 //! | 256x256 | 512 | 0..=8  | 9  |
+//! | 1024x1024 | 256 | 0..=10 | 29 |
+//! | 1000x1000 | 256 | 0..=10 | 29 |
 //!
 //! The first two share a level range, a tile size, a layout and an encoding
-//! and differ only in how many tiles they address. The last two share
-//! everything including the tile count and differ only in tile size.
+//! and differ only in how many tiles they address. The next two share
+//! everything including the tile count and differ only in tile size. The last
+//! two are the pair issue #1130 is about and they share *everything a sweep
+//! can see*: the same level range, the same grid at every level, the same 29
+//! coordinates, and a different picture behind them.
+//!
+//! The sixth pair is not in the table because it is not a size pair at all:
+//! overlap 0 and overlap 1 over one source produce byte-identical `levels`
+//! vectors, because `tile_grid` only divides by `tile_size`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -154,6 +163,18 @@ fn resolved(observer: &CollectingObserver) -> usize {
         .iter()
         .filter(|e| matches!(e, EngineEvent::TileCompleted { .. }))
         .count()
+}
+
+/// Every level's index and tile grid, which is what a per-coordinate sweep can
+/// see about a plan.
+///
+/// Two plans with the same grid name the same coordinates, so a pair that
+/// agrees here is a pair the sweep cannot tell apart.
+fn grid(plan: &PyramidPlan) -> Vec<(u32, u32, u32)> {
+    plan.levels
+        .iter()
+        .map(|level| (level.level, level.cols, level.rows))
+        .collect()
 }
 
 /// The event stream with everything that cannot be compared across two runs
@@ -523,6 +544,155 @@ fn an_archive_generated_at_another_tile_size_is_refused() {
         message.contains("256") && message.contains("512"),
         "the refusal must name both tile sizes, got: {message}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The archive of a different picture (issue #1130)
+// ---------------------------------------------------------------------------
+
+/// An archive generated from a 1024-pixel source is refused against a
+/// 1000-pixel plan, although every other check passes.
+///
+/// This is the issue's Scenario A, scaled down by four from its 4000/4096
+/// pair so the fixture is a 3 MiB raster rather than a 50 MiB one. The
+/// property is the same and the controls below pin it: `compute_levels` gives
+/// both sources eleven levels and `tile_grid` gives identical `(cols, rows)`
+/// at every one of them, so the two plans have exactly the same 29
+/// coordinates. The level range agrees, the tile size agrees, the layout and
+/// the encoding agree, the sweep resolves everything and `addressed_tiles`
+/// equals `planned`.
+///
+/// So every check this verify has passes on an archive of a different picture.
+/// The archive records `source.width = 1024`, the plan says 1000, and nothing
+/// compares them.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn an_archive_generated_from_another_source_size_is_refused() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let written = plan_for(1024, 1024, 256);
+    let asked = plan_for(1000, 1000, 256);
+
+    // The controls on the pair. If any of these stops holding, the refusal
+    // below could be coming from the level check, the grid or the count, and
+    // this cell would no longer be about the source size at all.
+    assert_eq!(
+        (written.levels.len(), written.tile_coords().count()),
+        (asked.levels.len(), asked.tile_coords().count()),
+        "the pair has to agree about levels and counts"
+    );
+    assert_eq!(
+        grid(&written),
+        grid(&asked),
+        "the pair has to agree about every level's grid, or the sweep catches \
+         it and this cell is about the sweep"
+    );
+    assert_eq!(
+        (written.tile_size, written.layout, written.overlap),
+        (asked.tile_size, asked.layout, asked.overlap),
+        "the pair differs in the source size and in nothing else"
+    );
+
+    let archive = dir.path().join("othersource.pmtiles");
+    write_archive(&archive, &written, &gradient(1024, 1024));
+
+    // The control on the archive: against the plan that wrote it, it verifies
+    // and the sweep resolves every coordinate. So the refusal below is about
+    // the plan it is checked against rather than about the file.
+    let (control, observer) = verify_archive(&archive, &written, &gradient(1024, 1024));
+    control.expect("the archive verifies against its own plan");
+    assert_eq!(
+        resolved(&observer),
+        written.tile_coords().count(),
+        "the control sweep resolved {} of {} coordinates",
+        resolved(&observer),
+        written.tile_coords().count()
+    );
+
+    let (result, _observer) = verify_archive(&archive, &asked, &gradient(1000, 1000));
+    let message = result
+        .expect_err("an archive of a different picture cannot verify")
+        .to_string();
+    assert!(
+        message.contains("1024") && message.contains("1000"),
+        "the refusal must name both source sizes, got: {message}"
+    );
+}
+
+/// An archive generated at overlap 0 is refused against an overlap-1 plan, and
+/// the other way round.
+///
+/// This is the issue's Scenario B. `tile_grid` only divides by `tile_size`, so
+/// `PyramidPlanner::new(w, h, 256, 1, Xyz)` and `(w, h, 256, 0, Xyz)` produce
+/// byte-identical `levels` vectors. Overlap changes `tile_rect`, so every
+/// tile's pixels differ while the grid does not, and every check passes in
+/// both directions.
+///
+/// Both directions are here because a check written as `plan.overlap >=
+/// described.overlap`, or one that reads 0 as "not recorded", passes one of
+/// them and fails the other.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn an_archive_generated_at_another_overlap_is_refused_in_both_directions() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let flush = PyramidPlanner::new(512, 512, 256, 0, Layout::Xyz)
+        .expect("an Xyz plan at overlap 0 is valid")
+        .plan();
+    let overlapping = PyramidPlanner::new(512, 512, 256, 1, Layout::Xyz)
+        .expect("an Xyz plan at overlap 1 is valid")
+        .plan();
+
+    assert_eq!(
+        flush.levels, overlapping.levels,
+        "the pair has to agree level for level, or this cell is about the grid"
+    );
+    assert_ne!(
+        flush.overlap, overlapping.overlap,
+        "the pair differs in the overlap and in nothing else"
+    );
+
+    for (written, asked, name) in [
+        (&flush, &overlapping, "flush.pmtiles"),
+        (&overlapping, &flush, "overlapping.pmtiles"),
+    ] {
+        let archive = dir.path().join(name);
+        write_archive(&archive, written, &gradient(512, 512));
+
+        // The control: against its own plan this archive verifies, so the
+        // refusal below is about the overlap rather than about the file.
+        let (control, _observer) = verify_archive(&archive, written, &gradient(512, 512));
+        control.unwrap_or_else(|err| {
+            panic!(
+                "the archive written at overlap {} does not verify against its \
+                 own plan, so this cell is no longer about the overlap: {err:?}",
+                written.overlap
+            )
+        });
+
+        let (result, _observer) = verify_archive(&archive, asked, &gradient(512, 512));
+        let message = result
+            .err()
+            .unwrap_or_else(|| {
+                panic!(
+                    "an archive generated at overlap {} verified against a plan \
+                     asking for overlap {}; every tile in it covers a different \
+                     rectangle of the source",
+                    written.overlap, asked.overlap
+                )
+            })
+            .to_string();
+        assert!(
+            message.contains("overlap"),
+            "the refusal must say what disagreed, got: {message}"
+        );
+        assert!(
+            message.contains(&written.overlap.to_string())
+                && message.contains(&asked.overlap.to_string()),
+            "the refusal must name both overlaps ({} in the archive, {} in the \
+             plan), got: {message}",
+            written.overlap,
+            asked.overlap
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
