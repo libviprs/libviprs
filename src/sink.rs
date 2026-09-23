@@ -2676,6 +2676,16 @@ pub(crate) fn background_from(config: &Mutex<Option<crate::engine::EngineConfig>
 /// `background` is the engine's `background_rgb` wherever a sink captured one,
 /// which makes a transparent pixel land on the same colour the padding around
 /// an edge tile already uses.
+///
+/// # Why `Auto` rather than a knob on `TileFormat`
+///
+/// [`TileFormat::Jpeg`] carries a quality and nothing else. A subsampling
+/// field would be a second forced exhaustive-match break one release after
+/// `Webp` added the first, for a choice [`JpegSubsample::Auto`] already makes
+/// correctly at both ends: 4:2:0 below quality 90 and 4:4:4 at or above it,
+/// which is libvips' `VIPS_FOREIGN_SUBSAMPLE_AUTO`. Somebody who wants full
+/// chroma in a tile asks for quality 90, which is the quality they would be
+/// asking for anyway (issue #1132).
 pub(crate) fn encode_jpeg(
     raster: &Raster,
     quality: u8,
@@ -2685,22 +2695,19 @@ pub(crate) fn encode_jpeg(
         SinkError::EncodeMsg(format!("flattening a tile's alpha for JPEG failed: {e}"))
     })?;
     let raster = flattened.as_ref().unwrap_or(raster);
-    let mut buf = Vec::new();
-    let encoder =
-        image::codecs::jpeg::JpegEncoder::new_with_quality(std::io::Cursor::new(&mut buf), quality);
     let ct = color_type_for_format(raster.format())?;
-    image::ImageEncoder::write_image(
-        encoder,
+    crate::encode_jpeg::encode(
         raster.data(),
         raster.width(),
         raster.height(),
-        ct.into(),
+        ct,
+        quality,
+        crate::codec::JpegSubsample::Auto,
     )
-    .map_err(|e| SinkError::Encode {
-        format: "jpeg".to_string(),
-        source: e,
-    })?;
-    Ok(buf)
+    .map_err(|source| SinkError::EncodeCodec {
+        format: "jpeg",
+        source,
+    })
 }
 
 // ---------------------------------------------------------------------------

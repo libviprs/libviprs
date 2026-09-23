@@ -550,6 +550,66 @@ fn every_tile_decodes_at_its_planned_size() {
     assert!(seen > 10, "the walk only found {seen} tiles");
 }
 
+/// Only the Ultra HDR lane still builds an `image` JPEG encoder.
+///
+/// Four call sites used to construct one: `FsSink`'s, the packfile sink's own
+/// copy, the object-store sink's own copy, and the raster route in
+/// `src/encode.rs`. They are one function now and it is this crate's own
+/// encoder, which is what makes the subsampling and the tables reachable at
+/// all.
+///
+/// A fifth copy is not hypothetical. The packfile one drifted while nobody was
+/// looking: it reported its failures as `png: {e}`, and the doc comment above
+/// it still argued for a duplication that the comment inside it explained had
+/// already been undone. This is the guard that makes the next one fail here
+/// rather than in a year.
+///
+/// Two files keep one, and the scan names both rather than filtering by what
+/// looks like test code. `src/uhdr.rs` is the real exception: its base image
+/// and gain map are two JPEGs inside an ISO container with hand-computed MPF
+/// offsets, checked against a libuhdr capture, so moving them is a
+/// measurement against that oracle rather than a call-site change.
+/// `src/source.rs` builds one in a `#[cfg(test)]` helper to make a JPEG for
+/// its own decode cells, which is a fixture and not a route.
+#[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+fn only_the_ultra_hdr_lane_builds_an_image_jpeg_encoder() {
+    fn walk(dir: &Path, out: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).expect("src/ is readable") {
+            let path = entry.expect("a readable entry").path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                let body = std::fs::read_to_string(&path).expect("a source file is readable");
+                if body.contains("jpeg::JpegEncoder") {
+                    out.push(
+                        path.file_name()
+                            .expect("a file has a name")
+                            .to_string_lossy()
+                            .into_owned(),
+                    );
+                }
+            }
+        }
+    }
+
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut found = Vec::new();
+    walk(&src, &mut found);
+    found.sort();
+    assert_eq!(
+        found,
+        ["source.rs", "uhdr.rs"],
+        "these files construct an `image` JPEG encoder. Every tile and raster \
+         route goes through `crate::encode_jpeg` instead, which is the only \
+         encoder here that can be told what to subsample and which tables to \
+         use (issues #1132, #1133). A third name on this list is either a new \
+         fixture helper, which is fine and belongs in the doc above, or a \
+         fifth copy of the encoder, which is the thing this cell exists to \
+         stop"
+    );
+}
+
 /// A greyscale tile still encodes, as one component with no chroma to
 /// subsample.
 #[test]
@@ -578,6 +638,15 @@ fn a_greyscale_tile_is_one_component() {
 /// 4:2:0 throws away three quarters of the chroma samples, so the guard that
 /// matters is luma: the ink stays where it was and the paper stays pale. A
 /// fix that moved bytes by degrading the tile would land here.
+///
+/// **Both bounds are tight on purpose.** The measured figures on this fixture
+/// are an RMSE of 2.9 and a worst pixel of 19, and the first version of this
+/// cell allowed 12 and 160. That slack is what let a real defect through: a
+/// bit-writer bug dropped the last symbol of the scan, so the final one or two
+/// blocks of every tile decoded as noise, and two bad blocks in 1536 move the
+/// RMSE by less than a tenth of the old bound. The worst-pixel bound is the
+/// one that can see a handful of corrupt blocks at all, because it does not
+/// average them away.
 #[test]
 #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn subsampling_does_not_move_the_ink() {
@@ -605,13 +674,13 @@ fn subsampling_does_not_move_the_ink() {
     }
     let rmse = (sum / (256.0 * 256.0)).sqrt();
     assert!(
-        rmse < 12.0,
+        rmse < 5.0,
         "luma RMSE is {rmse:.2} over the whole tile, which is not lossy coding \
          of line art at quality 85 any more"
     );
     assert!(
-        worst < 160.0,
-        "one pixel moved by {worst}, so something structural is wrong rather \
-         than a quantization error"
+        worst < 40.0,
+        "one pixel moved by {worst}, so a block is being reconstructed from \
+         something other than what was encoded rather than merely quantized"
     );
 }
