@@ -1205,6 +1205,30 @@ and not under `Fixed`: this file is the only place they can be caught.
 
 ### Added
 
+- **A pyramid reader can be asked for a tile's length, and for its structure
+  once** (issue #1130). Three additions to
+  `libviprs::pyramid_reader`, all defaulted so no existing backend has to move:
+  `PyramidReader::tile_len`, whose default is the length of what `tile`
+  returns; `PyramidReader::structural_summary`, returning the new
+  `StructuralSummary`; and three fields on `PyramidDescription`,
+  `source_width`, `source_height` and `overlap`, reachable through
+  `with_source_size` and `with_overlap`.
+
+  `self_check` and `addressed_tiles` are defaulted views over
+  `structural_summary` now. They were two questions about one walk and a
+  verify was asking both, so an archive verify ran `validate::validate` twice,
+  ten lines apart, under a run lock that guarantees the archive cannot change
+  between them. Overriding either of them still works; overriding the summary
+  pays for one walk.
+
+  `PmTilesPyramidReader` implements `tile_len` through the new
+  `pmtiles::Reader::tile_span`, a thin wrapper over the directory walk
+  `get_tile` already does, and `DirectoryPyramidReader` implements it with
+  `fs::metadata`. `EngineResult` gains `tile_evidence`, which is
+  `Some(TileEvidence::LengthsFromTheIndex)` or
+  `Some(TileEvidence::PayloadsRead)` for a `pyramid_verify` run and `None` for
+  everything else.
+
 - **The `CadDecoder` contract and the CAD primitive IR** (issue #1029). A new
   always-compiled `libviprs::cad` module carrying `CadDecoder`, `CadDrawing`,
   `CadSource`, `CadView`, `PrimitiveSink` and `DecodeReport`, and the eight
@@ -3346,6 +3370,46 @@ and not under `Fixed`: this file is the only place they can be caught.
   new variant is additive.
 
 ### Changed
+
+- **An archive verify reads the index instead of the archive, and checks two
+  numbers it used to drop** (issue #1130). Three findings from the four-expert
+  review of #1124 and #1125, all in `pyramid_verify`.
+
+  **It no longer reads every tile to learn every tile's length.** The sweep
+  used to call `tile(coord)` for each planned coordinate and use the result
+  only for `bytes.is_empty()`, so verifying a 21851-tile pyramid pulled the
+  whole archive off storage to learn 21851 numbers the directories were
+  already carrying. Over the ranged transport #1121 opened that is one round
+  trip per tile, serially: about seven minutes of wall clock at a 20ms round
+  trip, to check that no payload is zero bytes.
+
+  It takes the length instead, **but only when the structural walk earned
+  it**. Reading a payload proves one thing a length cannot, that the bytes at
+  that offset are reachable, and that is redundant only when the walk
+  bounds-checked every entry against a size the storage actually reported. A
+  backend that could not say how large it is, and a backend with no structural
+  walk at all, still get every payload read. Which one a run got is reported as
+  `EngineResult::tile_evidence`, and a length-only run reports `bytes_read: 0`,
+  because it did not read any.
+
+  **It walks the archive's directories once** rather than twice, through the
+  new `PyramidReader::structural_summary`.
+
+  **And it refuses an archive of a different picture.** `PyramidDescription`
+  dropped `vnd.libviprs.source.width` / `.height` and
+  `vnd.libviprs.generation.overlap`, and `describe_matches_the_plan` therefore
+  could not tell a 4000-pixel plan from a 4096-pixel archive: the level range
+  and the grid both round, so both plan thirteen levels with identical grids
+  and the same 349 coordinates, and every check passed. Overlap is worse,
+  because it does not reach the grid at all: planning at overlap 1 and at
+  overlap 0 gives byte-identical `levels` vectors while moving every tile's
+  rectangle. Both are compared now, and a pyramid that does not record them is
+  refused the way one that does not record its tile size already was.
+
+  The refusal is the part worth checking before upgrading: an archive with no
+  `vnd.libviprs.source` object, which is what an archive assembled from loose
+  tiles rather than generated from a raster carries, verified before and does
+  not now. [MIGRATION.md](MIGRATION.md) has the shape of it.
 
 - **The PMTiles benchmark export is schema 2, and it now measures the peak of
   the cold-open ramp instead of extrapolating it** (issue #1021). A cold open

@@ -5,8 +5,8 @@ flips `FsSink::new` to a 2-arg constructor plus a `with_format` builder. This
 guide covers the call sites you are most likely to update.
 
 **This file also covers 0.4.0 to 0.5.0, further down.** That section covers the
-new `PyramidStorage` type and the PMTiles archive behind it, plus five specific
-renames and removals: the signed and 32-bit `PixelFormat` carriers, the collapsed
+new `PyramidStorage` type and the PMTiles archive behind it, the two extra
+comparisons an archive verify makes, plus five specific renames and removals: the signed and 32-bit `PixelFormat` carriers, the collapsed
 allocation refusals, `GifError::BadPageNumber`,
 `ConvolutionError::TimesOutOfRange`, and `ConversionError::UnsupportedSampleKind`.
 The rest of that release, the colour and rounding changes that move output
@@ -352,6 +352,50 @@ parsed **and** it carries a `vnd.libviprs` key, `describe()` now returns
 wrote it, instead of quietly answering all-`None`. An archive with no
 `vnd.libviprs` key still describes itself exactly as before, so nothing a
 foreign go-pmtiles file does changes.
+
+## An archive verify checks the source size and the overlap
+
+Nothing stops compiling here. What changes is which archives
+`ResumeMode::Verify` accepts, and it is strictly fewer (issue #1130).
+
+A `pyramid_verify` run now compares two more things from the archive's
+`vnd.libviprs` metadata against the plan in front of it: the source raster's
+pixel dimensions, and the overlap the run was planned with. Both were in the
+file all along and both were dropped on the way out.
+
+They are worth the break because nothing else in that verify can see them. A
+pyramid's level range is its longest side rounded up to a power of two, and
+each level's grid is that level's size divided by the tile size and rounded up,
+so a 4000x4000 source and a 4096x4096 one at tile 256 plan thirteen identical
+levels, identical grids, and exactly the same 349 coordinates. Every check
+passed on an archive generated from a different picture. Overlap does not touch
+the grid at all, so two plans that disagree about it are byte-identical in
+`levels` and have no tile's pixels in common.
+
+**If your archives were written by this crate's `PmTilesSink`, nothing to do.**
+The sink has always recorded both, from `plan.image_width` / `plan.image_height`
+and `plan.overlap`, so a verify against the plan that wrote the archive passes
+exactly as before.
+
+**If an archive carries no `vnd.libviprs.source` object, the verify now
+refuses it.** That is an archive assembled from tiles rather than generated
+from a raster, and the refusal names what is missing:
+
+```text
+Verify: the pyramid does not record the source size it was generated from,
+so there is nothing to check this plan against
+```
+
+The reasoning is the same one that already applied to the tile size: a pyramid
+that will not say how it was made cannot be checked against a plan, and
+"cannot be checked" is a refusal rather than a pass. If you need the old
+behaviour for a specific file, verify it against a plan built from what the
+archive actually records rather than asking verify to skip the comparison.
+
+One thing this does **not** fix, worth knowing because it looks like it
+should. `tile_coord_to_zxy` ignores `layout`, so an `Xyz` archive and a
+`Google` archive of one source are byte-identical apart from a string in the
+metadata. The layout check compares that annotation, not the tiles.
 
 ## `PixelFormat` gains signed and 32-bit carriers
 
