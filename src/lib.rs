@@ -351,7 +351,7 @@ pub use pyramid_migrate::{
 };
 pub use pyramid_reader::{
     DirectoryPyramidReader, PmTilesPyramidReader, PyramidDescription, PyramidReadError,
-    PyramidReader,
+    PyramidReader, StructuralSummary,
 };
 pub use raster::{Raster, RasterError, RegionView};
 pub use resample::{
