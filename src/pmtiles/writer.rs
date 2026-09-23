@@ -172,7 +172,7 @@
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, BufWriter, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -340,8 +340,6 @@ mod probe {
     thread_local! {
         /// Durability barriers issued on this thread.
         static SYNCS: Cell<usize> = const { Cell::new(0) };
-        /// Seeks of the staged payload file during the archive write.
-        static STAGED_SEEKS: Cell<usize> = const { Cell::new(0) };
         /// Positioned reads of the staged payload file during the archive
         /// write. Reads through the merge's own handle are not counted: they
         /// are a different file and a different question.
@@ -357,14 +355,6 @@ mod probe {
         SYNCS.with(|c| c.set(c.get() + 1));
     }
 
-    pub(super) fn staged_seek() {
-        #[cfg(test)]
-        STAGED_SEEKS.with(|c| c.set(c.get() + 1));
-    }
-
-    // No caller until the positioned-read copy in #1142 lands, and the test
-    // that counts it is red until then. That is the point of it.
-    #[expect(dead_code, reason = "the copy that calls it is issue #1142")]
     pub(super) fn staged_read() {
         #[cfg(test)]
         STAGED_READS.with(|c| c.set(c.get() + 1));
@@ -385,7 +375,6 @@ mod probe {
     #[cfg(test)]
     pub(super) fn reset() {
         SYNCS.with(|c| c.set(0));
-        STAGED_SEEKS.with(|c| c.set(0));
         STAGED_READS.with(|c| c.set(0));
         LEAF_ATTEMPTS.with(|c| c.set(0));
         LEAF_ENTRIES_USED.with(|c| c.set(0));
@@ -394,11 +383,6 @@ mod probe {
     #[cfg(test)]
     pub(super) fn syncs() -> usize {
         SYNCS.with(Cell::get)
-    }
-
-    #[cfg(test)]
-    pub(super) fn staged_seeks() -> usize {
-        STAGED_SEEKS.with(Cell::get)
     }
 
     #[cfg(test)]
@@ -1643,9 +1627,12 @@ impl<W: Write + Seek> Writer<W> {
     /// The spec says a sophisticated writer "might need several attempts to
     /// optimize this", which is the loop below: build the leaves at one size,
     /// see whether the resulting root fits, and widen the leaves if it does
-    /// not. Starting at 4096 entries and doubling is what go-pmtiles does, and
-    /// matching it means an archive built here from a given tile set has the
-    /// same shape as one the reference builds from it.
+    /// not. Starting at 4096 entries and widening by powers of two is what
+    /// go-pmtiles does, and matching it means an archive built here from a
+    /// given tile set has the same shape as one the reference builds from it.
+    /// The reference doubles every time; [`widen_leaves`] takes the same steps
+    /// and can take several at once, never past the width a doubling loop
+    /// would have stopped at.
     fn build_directories(
         &mut self,
         plan: &Plan,
@@ -1726,15 +1713,13 @@ impl<W: Write + Seek> Writer<W> {
             if pointers.len() <= 1 {
                 // One leaf holding everything and a root of one pointer that
                 // still does not fit means the budget cannot be met at any
-                // leaf size, so doubling again would spin forever.
+                // leaf size, so widening again would spin forever.
                 return Err(PmTilesError::RootDirectoryOverBudget {
                     length: root.len(),
                     budget: ROOT_BUDGET,
                 });
             }
-            leaf_entries = leaf_entries.checked_mul(2).ok_or(PmTilesError::Overflow {
-                what: "a leaf size",
-            })?;
+            leaf_entries = widen_leaves(leaf_entries, root.len())?;
         }
     }
 
@@ -1832,7 +1817,6 @@ impl<W: Write + Seek> Writer<W> {
             self.sink = Some(Sink::Staged(File::create(&staged_archive)?));
         }
         let staged_data = File::open(suffixed(&self.base, ".data"))?;
-        let mut staged_data = BufReader::new(staged_data);
         let mut buffer = vec![0u8; COPY_BUFFER_BYTES];
 
         let sink = self.sink.as_mut().expect("a sink exists by now");
@@ -1847,10 +1831,9 @@ impl<W: Write + Seek> Writer<W> {
         }
         let mut order = OrderReader::open(&plan.order_path)?;
         while let Some(placement) = order.next_placement()? {
-            probe::staged_seek();
-            staged_data.seek(SeekFrom::Start(placement.data_offset))?;
-            copy_exactly(
-                &mut staged_data,
+            copy_exactly_at(
+                &staged_data,
+                placement.data_offset,
                 out,
                 u64::from(placement.length),
                 &mut buffer,
@@ -1915,6 +1898,54 @@ impl<W: Write + Seek> Drop for Writer<W> {
 // Spilled record I/O
 // ---------------------------------------------------------------------------
 
+/// How wide to make the leaves after an attempt whose root came out `root_len`
+/// bytes, against a budget it did not fit.
+///
+/// The loop used to double, which means a root eight times over budget is
+/// rebuilt four times, re-gzipping every leaf on each pass, to reach a size
+/// the first attempt already had the evidence for (issue #1142).
+///
+/// # Why this is not computed from the entry count
+///
+/// The obvious version of this reads the entry count and picks a starting
+/// width from a floor on what a root pointer costs. There is no such floor
+/// worth having. A root of leaf pointers has an all-zero run-length column, an
+/// offset column that is all zeros because the leaves are contiguous, and a
+/// length column of compressed leaf sizes that barely move, so gzip takes the
+/// lot to well under a byte a pointer: measured while building a fixture for
+/// `the_leaf_loop_does_not_rebuild_every_leaf_once_per_doubling`, twenty
+/// thousand pointers of contiguous ids fit the 16257-byte budget with room to
+/// spare. Any blind floor above that overshoots, and overshooting changes the
+/// width the archive settles on, which changes the archive. The go-pmtiles
+/// goldens are pinned to that width.
+///
+/// # Why this one cannot overshoot
+///
+/// It only spends evidence the attempt just produced. Write `b(L)` for the
+/// compressed bytes a root pointer costs at width `L` and `E` for the entry
+/// count, so a root is about `b(L) * E / L` bytes. This jumps to `L * 2^k`
+/// with `2^k` at most `root_len / ROOT_BUDGET`, so the new width is at most
+/// `b(L) * E / ROOT_BUDGET`. The smallest width that fits, `L_f`, satisfies
+/// `b(L_f) * E / L_f <= ROOT_BUDGET`, so `L_f >= b(L_f) * E / ROOT_BUDGET`.
+/// The jump therefore lands at or below `L_f` whenever `b(L) <= b(L_f)`, which
+/// is to say whenever a pointer does not get *cheaper* as the leaves get
+/// wider. It does not: wider leaves mean larger tile-id deltas and larger
+/// offsets in the root, so a pointer costs more, not less.
+///
+/// And the floor is a doubling, so this always makes progress.
+fn widen_leaves(leaf_entries: usize, root_len: usize) -> Result<usize, PmTilesError> {
+    let over = (root_len / ROOT_BUDGET).max(1);
+    let steps = (usize::BITS - 1 - over.leading_zeros()).max(1);
+    let factor = 1usize.checked_shl(steps).ok_or(PmTilesError::Overflow {
+        what: "a leaf size",
+    })?;
+    leaf_entries
+        .checked_mul(factor)
+        .ok_or(PmTilesError::Overflow {
+            what: "a leaf size",
+        })
+}
+
 fn suffixed(base: &Path, suffix: &str) -> PathBuf {
     let mut s = base.as_os_str().to_owned();
     s.push(suffix);
@@ -1957,6 +1988,38 @@ fn copy_exactly<R: Read>(
     Ok(())
 }
 
+/// Copy exactly `length` bytes from `at`, without touching a shared cursor.
+///
+/// The payload copy used to `seek` a `BufReader` and then read. `BufReader`
+/// discards its buffer on a seek by documented contract, so every payload cost
+/// an `lseek`, a readahead thrown away and a fresh read: three syscalls a
+/// payload, and the copy runs once per payload in the archive. This is one
+/// `pread` per buffer's worth, which for any tile under 64 KiB is one syscall
+/// (issue #1142).
+///
+/// Refuses a short source the same way [`copy_exactly`] does, because
+/// [`read_exact_at`] is exact: a staging file that came up short would
+/// otherwise write a shorter section than the header promised.
+fn copy_exactly_at(
+    from: &File,
+    at: u64,
+    to: &mut dyn Write,
+    length: u64,
+    buffer: &mut [u8],
+) -> Result<(), PmTilesError> {
+    let mut left = length;
+    let mut at = at;
+    while left > 0 {
+        let want = usize::try_from(left.min(buffer.len() as u64)).expect("bounded by the buffer");
+        probe::staged_read();
+        read_exact_at(from, &mut buffer[..want], at)?;
+        to.write_all(&buffer[..want])?;
+        at += want as u64;
+        left -= want as u64;
+    }
+    Ok(())
+}
+
 /// Read exactly `buf.len()` bytes from `at`, without touching a shared cursor.
 ///
 /// This is what lets the whole merge run on one open file. On Unix it is one
@@ -1971,7 +2034,7 @@ fn read_exact_at(file: &File, buf: &mut [u8], at: u64) -> std::io::Result<()> {
 #[cfg(not(unix))]
 fn read_exact_at(file: &File, buf: &mut [u8], at: u64) -> std::io::Result<()> {
     let mut file = file;
-    file.seek(SeekFrom::Start(at))?;
+    file.seek(std::io::SeekFrom::Start(at))?;
     file.read_exact(buf)
 }
 
@@ -2909,6 +2972,12 @@ mod tests {
     /// syscalls a payload, ten million times on a ten-million-payload archive.
     /// The positioned-read helper the merge already runs on does it in one
     /// (issue #1142).
+    ///
+    /// There is no seek count to assert on any more, and that is the stronger
+    /// statement: the copy holds a `&File` and reads through `read_exact_at`,
+    /// so there is no shared cursor in the picture for anything to move. The
+    /// counter that measured it read 64 for these 64 payloads before the
+    /// change.
     #[test]
     #[cfg_attr(miri, ignore)]
     fn the_payload_copy_reads_each_payload_where_it_lies_rather_than_seeking_to_it() {
@@ -2926,11 +2995,6 @@ mod tests {
         probe::reset();
         w.finish().expect("the archive finishes");
 
-        assert_eq!(
-            probe::staged_seeks(),
-            0,
-            "the copy should not move a shared cursor at all"
-        );
         assert_eq!(
             probe::staged_reads(),
             PAYLOADS,

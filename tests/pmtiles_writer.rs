@@ -975,6 +975,213 @@ fn a_run_of_identical_adjacent_tiles_is_one_entry() {
     );
 }
 
+/// What the gzip level costs at the size the root budget is about.
+///
+/// Issue #1142 suggests dropping `Compression::compress` from
+/// `flate2::Compression::best()` to the default level 6, on the evidence that
+/// re-gzipping the golden fixtures' roots at both levels gives identical
+/// lengths. Those roots hold 63, 85 and a few hundred entries, and four small
+/// fixtures agreeing is not the same thing as the level being free. The only
+/// place the level can change anything is a root near the 16257-byte budget,
+/// because a directory that fits at one level and not at the other spills into
+/// leaves, which changes the archive's shape, its header, every offset in it
+/// and what a reader pays to open it.
+///
+/// # What it measured, and what I did about it
+///
+/// At a full 16383-entry root, flat tiles, leaf pointers and sparse ids all
+/// come out byte-for-byte the same length at both levels, and a root of
+/// dedupe back references comes out 20 bytes *smaller* at level 6, 71,476
+/// against 71,496. At the budget, level 6 fits one more entry than level 9 on
+/// leaf pointers (8740 against 8739) and one more on back references (3872
+/// against 3871), and the same count on the other two.
+///
+/// So the claim holds in the direction it was made: level 6 never produced a
+/// larger root here, and the fixtures were not lying, they were just small.
+/// **The default stays at `best()` anyway**, for a reason the issue does not
+/// weigh. This writer matches go-pmtiles deliberately, at the 4096-entry leaf
+/// start and the 16384-entry root cutoff, and go-pmtiles compresses its
+/// directories at `gzip.BestCompression`. Matching that is part of why a
+/// golden archive is a usable target. Moving our level changes `root_length`
+/// for some inputs, which shifts every section offset after it, in exchange
+/// for some directory compression time that is a small share of a finalize.
+/// That is a bad trade for the one property these tests are built on.
+///
+/// This is a measurement rather than a reproduction. It is here so the
+/// decision has something behind it that can be taken again, and so that a
+/// future change making the levels agree completely shows up as a failure
+/// rather than as nothing.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn what_the_gzip_level_costs_at_the_root_budget() {
+    // `ROOT_CEILING - HEADER_BYTES`, restated because it is private to the
+    // writer and this test is about the number rather than about the writer.
+    const ROOT_BUDGET: usize = 16384 - 127;
+
+    /// A little deterministic noise, so the columns carry the entropy a real
+    /// directory's do without dragging in a dependency.
+    fn next(state: &mut u64) -> u64 {
+        *state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        *state >> 33
+    }
+
+    /// Tiles in a flat root: consecutive ids, contiguous blobs of the size
+    /// encoded imagery comes out at.
+    fn flat(count: u64) -> Vec<Entry> {
+        let mut rng = 0x243f_6a88_85a3_08d3u64;
+        let mut offset = 0u64;
+        (0..count)
+            .map(|index| {
+                let length = 2048 + (next(&mut rng) % 16384) as u32;
+                let entry = Entry {
+                    tile_id: index,
+                    offset,
+                    length,
+                    run_length: 1,
+                };
+                offset += u64::from(length);
+                entry
+            })
+            .collect()
+    }
+
+    /// A root of leaf pointers: `run_length` zero, ids a leaf apart, lengths
+    /// the size a compressed leaf comes out at.
+    fn leaf_pointers(count: u64) -> Vec<Entry> {
+        let mut rng = 0x9e37_79b9_7f4a_7c15u64;
+        let mut offset = 0u64;
+        (0..count)
+            .map(|index| {
+                let length = 1000 + (next(&mut rng) % 6000) as u32;
+                let entry = Entry {
+                    tile_id: index * 4096,
+                    offset,
+                    length,
+                    run_length: 0,
+                };
+                offset += u64::from(length);
+                entry
+            })
+            .collect()
+    }
+
+    /// A root with back references, which is what dedupe produces and what
+    /// puts real values in the offset column instead of the contiguous
+    /// shorthand.
+    fn back_references(count: u64) -> Vec<Entry> {
+        let mut rng = 0xdead_beef_1234_5678u64;
+        let mut offset = 0u64;
+        let mut seen: Vec<(u64, u32)> = Vec::new();
+        (0..count)
+            .map(|index| {
+                let reuse = !seen.is_empty() && next(&mut rng) % 5 < 2;
+                let (at, length) = if reuse {
+                    seen[(next(&mut rng) as usize) % seen.len()]
+                } else {
+                    let length = 2048 + (next(&mut rng) % 16384) as u32;
+                    let at = offset;
+                    offset += u64::from(length);
+                    seen.push((at, length));
+                    (at, length)
+                };
+                Entry {
+                    tile_id: index,
+                    offset: at,
+                    length,
+                    run_length: 1,
+                }
+            })
+            .collect()
+    }
+
+    /// A sparse pyramid, where the tile-id column carries multi-byte deltas.
+    fn with_gaps(count: u64) -> Vec<Entry> {
+        let mut rng = 0x0123_4567_89ab_cdefu64;
+        let mut offset = 0u64;
+        let mut tile_id = 0u64;
+        (0..count)
+            .map(|_| {
+                tile_id += 1 + next(&mut rng) % (1 << 20);
+                let length = 2048 + (next(&mut rng) % 16384) as u32;
+                let entry = Entry {
+                    tile_id,
+                    offset,
+                    length,
+                    run_length: 1,
+                };
+                offset += u64::from(length);
+                entry
+            })
+            .collect()
+    }
+
+    let gzip = |bytes: &[u8], level: u32| -> Vec<u8> {
+        use std::io::Write;
+        let mut encoder =
+            flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::new(level));
+        encoder.write_all(bytes).expect("gzip takes the bytes");
+        encoder.finish().expect("gzip finishes")
+    };
+
+    // The largest root of this shape that fits the budget at this level.
+    let fits = |build: &dyn Fn(u64) -> Vec<Entry>, level: u32| -> u64 {
+        let mut count = 0u64;
+        let mut step = 8192u64;
+        while step > 0 {
+            let plain = serialize_entries(&build(count + step)).expect("entries serialise");
+            if gzip(&plain, level).len() <= ROOT_BUDGET {
+                count += step;
+            } else {
+                step /= 2;
+            }
+        }
+        count
+    };
+
+    /// A named way of building a root of `n` entries.
+    type Shape<'a> = (&'a str, &'a dyn Fn(u64) -> Vec<Entry>);
+
+    let shapes: [Shape; 4] = [
+        ("flat tiles", &flat),
+        ("leaf pointers", &leaf_pointers),
+        ("back references", &back_references),
+        ("sparse ids", &with_gaps),
+    ];
+
+    // The full root first: one under the 16384-entry cutoff this writer shares
+    // with go-pmtiles, which is the largest root it will ever try to build.
+    let mut lengths_differ = false;
+    for (name, build) in &shapes {
+        let plain = serialize_entries(&build(16_383)).expect("16383 entries serialise");
+        let best = gzip(&plain, 9).len();
+        let default = gzip(&plain, 6).len();
+        lengths_differ |= best != default;
+        println!(
+            "16383-entry root, {name}: {} raw, {best} at level 9, {default} at level 6",
+            plain.len()
+        );
+    }
+
+    let mut budget_differs = false;
+    for (name, build) in &shapes {
+        let at_best = fits(*build, 9);
+        let at_default = fits(*build, 6);
+        budget_differs |= at_best != at_default;
+        println!(
+            "entries fitting the root budget, {name}: {at_best} at level 9, {at_default} at level 6"
+        );
+    }
+
+    assert!(
+        lengths_differ || budget_differs,
+        "level 6 and level 9 agreed on every shape and every size measured here, so the level \
+         really would be free and the only thing keeping `Compression::compress` on best() \
+         would be matching go-pmtiles"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Determinism, clustering, and the header's honesty
 // ---------------------------------------------------------------------------
