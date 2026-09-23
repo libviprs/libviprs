@@ -180,6 +180,7 @@ pub mod pixel;
 pub mod planner;
 pub mod pmtiles;
 pub(crate) mod poison;
+pub mod pyramid_migrate;
 pub mod pyramid_reader;
 pub mod radiance;
 pub mod raster;
@@ -345,6 +346,9 @@ pub use mat::{MatError, decode_mat};
 // caller who already knows the format actually wants. The buffer-pair and
 // filename-resolving halves stay behind `libviprs::analyze::` (issue #764).
 pub use analyze::{AnalyzeError, decode_analyze_file};
+pub use pyramid_migrate::{
+    MigrateError, MigrateOptions, MigrateReport, migrate_directory_to_pmtiles, migrate_to_pmtiles,
+};
 pub use pyramid_reader::{
     DirectoryPyramidReader, PmTilesPyramidReader, PyramidDescription, PyramidReadError,
     PyramidReader,
