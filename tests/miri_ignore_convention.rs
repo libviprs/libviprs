@@ -609,18 +609,19 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// `annotated fs-detected` like its neighbour and is not a judgement call.
 ///
 ///
-/// #1133 and #1132 move it 421 to 431, and the ten are all of
+/// #1133 and #1132 move it 421 to 432, and the eleven are all of
 /// `tests/jpeg_tile_format.rs` bar the one cell that encodes a raster in
-/// memory and never goes near a path. Nine of the ten either generate a
+/// memory and never goes near a path. Nine of the eleven either generate a
 /// pyramid into a `tempfile::tempdir()` or write one tile there and read it
-/// back; the tenth reads `src/pdf.rs` to check that the render path still
-/// produces the pixel format the other nine stand on. All ten are
+/// back; the other two read `src/` to check two things the first nine stand
+/// on, that the render path still produces `Rgba8` and that nothing but the
+/// Ultra HDR lane still builds an `image` JPEG encoder. All eleven are
 /// `annotated fs-detected` and none of them is a judgement call.
 ///
-/// 431 is what the detector printed with this constant still at 421,
-/// same as the paragraphs above. The rebase onto #1126 is why the figures in
-/// this paragraph are not the ones the branch was written against.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 431;
+/// 432 is what the detector printed with this constant still at 421,
+/// same as the paragraphs above. The rebase onto #1126 is why these figures
+/// are not the ones this branch was written against.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 432;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {

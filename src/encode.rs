@@ -8,12 +8,17 @@
 //! encoders split into two groups by what the pure-Rust build can actually
 //! emit:
 //!
-//! * **Real, backed by `image` 0.25:** [`Raster::encode_jpeg`],
-//!   [`Raster::encode_jpeg_options`], [`Raster::save_jpeg`],
-//!   [`Raster::jpegsave_buffer`], [`Raster::encode_png`], [`Raster::save_png`].
+//! * **Real, backed by `image` 0.25:** [`Raster::encode_png`],
+//!   [`Raster::save_png`].
 //! * **Real, hand-rolled here on `flate2`** because `image`'s PNG encoder
 //!   exposes neither knob: [`Raster::encode_png_interlaced`] (Adam7) and
 //!   [`Raster::encode_png_palette`] (median-cut quantized indexed PNG).
+//! * **Real, hand-rolled in `crate::encode_jpeg`** for the same reason one
+//!   format further on: [`Raster::encode_jpeg`],
+//!   [`Raster::encode_jpeg_options`], [`Raster::save_jpeg`] and
+//!   [`Raster::jpegsave_buffer`]. `image`'s JPEG encoder fixes its sampling
+//!   factors and its Huffman tables and exposes neither, so the subsample
+//!   mode below had nothing to reach (issue #1132).
 //! * **Typed [`EncodeError::Unsupported`] stubs**, because this build has no
 //!   accessible encoder for them: [`Raster::jpegsave_buffer_restart`]
 //!   (`"jpeg-restart"`: `image`'s JPEG encoder writes no restart markers).
@@ -23,16 +28,18 @@
 //! format lanes each own exactly one file instead of all four rewriting this
 //! header and the adjacent stub bodies (issue #563).
 //!
-//! ## Subsampling caveat
+//! ## Subsampling
 //!
-//! `image` 0.25's JPEG encoder fixes its chroma sampling factors and offers no
-//! public subsample control, so [`Raster::encode_jpeg_options`] accepts the
-//! [`JpegSubsample`] argument for signature and contract compatibility but
-//! currently ignores it: the quality is applied for real, while every subsample
-//! mode selects the same encoder configuration. The argument keeps the call
-//! site and the libvips `subsample_mode` mapping resolving today; when a
-//! subsample-capable encoder lands the mode will drive the sampling factors
-//! without a signature change.
+//! [`Raster::encode_jpeg_options`] applies the [`JpegSubsample`] it is handed,
+//! and [`JpegSubsample::Auto`] resolves the way libvips' `subsample_mode=auto`
+//! does: 4:2:0 below quality 90 and 4:4:4 at or above.
+//!
+//! It did not until issue #1132. `image` 0.25's encoder fixes the sampling
+//! factors in its constructor with no public control, so the argument was
+//! accepted for signature compatibility and dropped in the body, and every
+//! JPEG this crate wrote was 4:4:4 whatever the caller asked for. The mode
+//! drives the frame header now, which is where it is visible to anything that
+//! reads the file back.
 
 use crate::codec::{EncodeError, JpegSubsample};
 use crate::imageio::SaveError;
@@ -59,11 +66,11 @@ impl Raster {
         self.encode_jpeg_options(quality, JpegSubsample::Auto)
     }
 
-    /// Encode the raster as JPEG bytes at the given quality, with a requested
-    /// chroma [`JpegSubsample`] mode.
+    /// Encode the raster as JPEG bytes at the given quality, with a chroma
+    /// [`JpegSubsample`] mode.
     ///
-    /// The quality is applied for real; the subsample mode is accepted but
-    /// currently ignored (see the [module docs](crate::encode)).
+    /// Both are applied. [`JpegSubsample::Auto`] picks 4:2:0 below quality 90
+    /// and 4:4:4 at or above, which is libvips' `subsample_mode=auto`.
     ///
     /// # Alpha
     ///
@@ -83,28 +90,18 @@ impl Raster {
         quality: u8,
         subsample: JpegSubsample,
     ) -> Result<Vec<u8>, EncodeError> {
-        // Accepted for the libvips `subsample_mode` contract; `image` 0.25 has
-        // no public knob to vary the sampling factors, so the mode is ignored
-        // and every mode selects the same encoder configuration.
-        let _ = subsample;
         let flattened = crate::sink::flatten_alpha(self, crate::sink::DEFAULT_BACKGROUND_RGB)
             .map_err(EncodeError::encode)?;
         let raster = flattened.as_ref().unwrap_or(self);
-        let mut buf = Vec::new();
-        let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(
-            std::io::Cursor::new(&mut buf),
-            quality.clamp(1, 100),
-        );
         let ct = color_type_for_format(raster.format())?;
-        image::ImageEncoder::write_image(
-            encoder,
+        crate::encode_jpeg::encode(
             raster.data(),
             raster.width(),
             raster.height(),
-            ct.into(),
+            ct,
+            quality.clamp(1, 100),
+            subsample,
         )
-        .map_err(EncodeError::encode)?;
-        Ok(buf)
     }
 
     /// Encode JPEG bytes at `quality`, mapping a libvips `subsample_mode`
