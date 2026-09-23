@@ -1,8 +1,9 @@
 //! The streaming, bounded-memory PMTiles v3 writer.
 //!
-//! [`Writer`] takes tiles in **any order**, stores each distinct payload
-//! exactly once, and assembles a spec-correct archive at [`Writer::finish`]
-//! with a staged temp file, an `fsync` and an atomic rename.
+//! [`Writer`] takes tiles in **any order**, stores each distinct payload it
+//! still remembers exactly once, and assembles a spec-correct archive at
+//! [`Writer::finish`] with a staged temp file, one `fsync` and an atomic
+//! rename.
 //!
 //! # What the memory actually is
 //!
@@ -924,10 +925,18 @@ impl Staging {
         }
     }
 
-    /// Push everything through to the device and close.
+    /// Flush everything through the buffer and close.
+    ///
+    /// It used to `sync_data` as well, and that was durability bought and
+    /// never spent: this is a scratch file that `Drop` deletes, and no resume
+    /// path ever reads one back. `PmTilesSink` refuses resume outright, its
+    /// `checkpoint_root` returns `None` and its `seed_completed_tile` errors,
+    /// so there is no reader for these bytes after a crash and nothing an
+    /// `fsync` here would protect (issue #1141). The barrier a caller asks for
+    /// is [`Staging::sync`] and it still syncs.
     fn finish(self) -> std::io::Result<()> {
         match self {
-            Self::Real(w) => sync_data(&w.into_inner().map_err(|e| e.into_error())?),
+            Self::Real(w) => w.into_inner().map_err(|e| e.into_error()).map(|_| ()),
             #[cfg(test)]
             Self::FailsAfter(w) => w.finish(),
         }
@@ -1567,7 +1576,7 @@ impl<W: Write + Seek> Writer<W> {
             out.write_all(&encode_entry(&done))?;
             entry_count += 1;
         }
-        sync_data(&out.into_inner().map_err(|e| e.into_error())?)?;
+        out.into_inner().map_err(|e| e.into_error())?;
         order.into_inner().map_err(|e| e.into_error())?;
 
         Ok(Plan {
@@ -1620,7 +1629,7 @@ impl<W: Write + Seek> Writer<W> {
                 folded.push(Run { start: at, count });
                 at += count * SPILL_RECORD_BYTES as u64;
             }
-            sync_data(&out.into_inner().map_err(|e| e.into_error())?)?;
+            out.into_inner().map_err(|e| e.into_error())?;
             path = out_path;
             runs = folded;
             pass += 1;
@@ -1698,7 +1707,7 @@ impl<W: Write + Seek> Writer<W> {
                 leaf_file.write_all(&body)?;
                 leaf_offset += body.len() as u64;
             }
-            sync_data(&leaf_file.into_inner().map_err(|e| e.into_error())?)?;
+            leaf_file.into_inner().map_err(|e| e.into_error())?;
 
             let root = self
                 .options
@@ -2161,8 +2170,14 @@ mod tests {
             }
         }
 
+        /// No barrier, matching [`Staging::finish`].
+        ///
+        /// The bytes are still readable by the assertions that follow, because
+        /// this stand-in writes straight into the real file with no `BufWriter`
+        /// in the way.
         pub(super) fn finish(self) -> std::io::Result<()> {
-            sync_data(&self.into)
+            drop(self.into);
+            Ok(())
         }
 
         /// The durability barrier, honoured here too.
