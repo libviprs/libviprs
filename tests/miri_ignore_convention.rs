@@ -597,7 +597,17 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// 401 plus seven. Same discipline as the paragraph above, and cheap to keep:
 /// the assertion names the figure it measured, so copying it out is strictly
 /// less work than adding up.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 408;
+/// #1118 moves it 390 to 402, and the twelve are the whole of
+/// `tests/pyramid_migrate.rs`. Every one of them writes a tree of loose tiles
+/// into a `tempfile::tempdir()`, migrates it into an archive beside it and
+/// reads the archive back with `std::fs::read`, so all twelve are
+/// `annotated fs-detected` and none of them is a judgement call.
+/// Folding the attestation fix into #1118's branch moves it 420 to 421, and the
+/// one is `tests/pmtiles_benchmarks.rs`'
+/// `a_repository_with_no_commits_publishes_holes_rather_than_half_an_attestation`,
+/// which `git init`s a `tempfile::tempdir()` to reach an unborn HEAD. It is
+/// `annotated fs-detected` like its neighbour and is not a judgement call.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 421;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {

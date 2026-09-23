@@ -887,10 +887,24 @@ fn push_indented_opt_u64(out: &mut String, indent: usize, key: &str, value: Opti
 /// built, and prove the reading works without depending on how this checkout
 /// happens to be mounted.
 pub fn commit_and_dirty(dir: &Path) -> (Option<String>, Option<bool>) {
-    (
+    // Both halves or neither. git can answer one and not the other, and the
+    // two cases I know of are a repository with an unborn HEAD and a linked
+    // worktree bind-mounted into a container, where `.git` is a file pointing
+    // outside the mount. In both, `status --porcelain` exits 0 with empty
+    // output while `rev-parse HEAD` fails, so returning them independently
+    // publishes "clean, at no commit".
+    //
+    // That is worse than a hole rather than merely different: a hole says
+    // nobody can reproduce this run, and a `dirty: false` says the tree was
+    // pristine. `the_envelope_says_which_host_produced_the_numbers` refuses
+    // the pair downstream, and it is better refused at the source.
+    match (
         git_in(dir, &["rev-parse", "--short", "HEAD"]),
         git_in(dir, &["status", "--porcelain"]).map(|out| !out.is_empty()),
-    )
+    ) {
+        (Some(commit), Some(dirty)) => (Some(commit), Some(dirty)),
+        _ => (None, None),
+    }
 }
 
 /// Run one git command in `dir`, or answer `None`.
