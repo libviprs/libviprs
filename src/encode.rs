@@ -65,9 +65,19 @@ impl Raster {
     /// The quality is applied for real; the subsample mode is accepted but
     /// currently ignored (see the [module docs](crate::encode)).
     ///
+    /// # Alpha
+    ///
+    /// An `Rgba8` raster is flattened onto white first, because JPEG has no
+    /// alpha channel to put it in. That is `vips jpegsave`'s own behaviour:
+    /// `vips_foreign_save` flattens against its `background` property for
+    /// every format whose `saveable` set excludes alpha, and white is the
+    /// default. The tile path passes the engine's configured background
+    /// instead of white (issue #1133).
+    ///
     /// # Errors
     ///
-    /// [`EncodeError::Encode`] if the `image` encoder rejects the raster.
+    /// [`EncodeError::Encode`] if the `image` encoder rejects the raster, or
+    /// if flattening the alpha fails.
     pub fn encode_jpeg_options(
         &self,
         quality: u8,
@@ -77,17 +87,20 @@ impl Raster {
         // no public knob to vary the sampling factors, so the mode is ignored
         // and every mode selects the same encoder configuration.
         let _ = subsample;
+        let flattened = crate::sink::flatten_alpha(self, crate::sink::DEFAULT_BACKGROUND_RGB)
+            .map_err(EncodeError::encode)?;
+        let raster = flattened.as_ref().unwrap_or(self);
         let mut buf = Vec::new();
         let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(
             std::io::Cursor::new(&mut buf),
             quality.clamp(1, 100),
         );
-        let ct = color_type_for_format(self.format())?;
+        let ct = color_type_for_format(raster.format())?;
         image::ImageEncoder::write_image(
             encoder,
-            self.data(),
-            self.width(),
-            self.height(),
+            raster.data(),
+            raster.width(),
+            raster.height(),
             ct.into(),
         )
         .map_err(EncodeError::encode)?;

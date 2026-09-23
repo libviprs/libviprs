@@ -177,6 +177,17 @@ pub enum SinkError {
 /// for placeholder detection patterns.
 pub const BLANK_TILE_MARKER: u8 = 0x00;
 
+/// What a tile format with no alpha channel flattens transparent pixels onto
+/// when nothing told the sink otherwise.
+///
+/// The same white [`EngineConfig::default`](crate::engine::EngineConfig)
+/// picks, and the same default `vips_foreign_save` gives its `background`
+/// property. A sink built directly, with no engine behind it, has no other
+/// source for the answer, and
+/// `the_standalone_background_is_the_engine_default` holds the two together
+/// so they cannot drift into writing one tile two ways.
+pub(crate) const DEFAULT_BACKGROUND_RGB: [u8; 3] = [255, 255, 255];
+
 /// A produced tile, ready for output.
 ///
 /// Represents a single tile in the pyramid after rasterisation. The engine
@@ -1401,11 +1412,24 @@ impl FsSink {
         Some(self.base_dir.join(rel))
     }
 
+    /// The background a JPEG tile's transparent pixels land on.
+    ///
+    /// The engine records its [`EngineConfig`](crate::engine::EngineConfig)
+    /// here before the tile loop starts, so this is the same `background_rgb`
+    /// that already fills the padding around an edge tile. A sink driven
+    /// directly gets [`DEFAULT_BACKGROUND_RGB`], which is the value the engine
+    /// would have recorded anyway.
+    fn background_rgb(&self) -> [u8; 3] {
+        self.lock_leaf(&self.engine_config)
+            .as_ref()
+            .map_or(DEFAULT_BACKGROUND_RGB, |c| c.background_rgb)
+    }
+
     fn encode_tile(&self, raster: &Raster) -> Result<Vec<u8>, SinkError> {
         match self.format {
             TileFormat::Raw => Ok(raster.data().to_vec()),
             TileFormat::Png => encode_png(raster),
-            TileFormat::Jpeg { quality } => encode_jpeg(raster, quality),
+            TileFormat::Jpeg { quality } => encode_jpeg(raster, quality, self.background_rgb()),
             TileFormat::Webp => encode_webp(raster),
         }
     }
@@ -2603,9 +2627,64 @@ pub(crate) fn encode_webp(raster: &Raster) -> Result<Vec<u8>, SinkError> {
         })
 }
 
-// Crate-visible so extension-dispatched save (`crate::imageio`) reuses the
-// sink's JPEG encode path.
-pub(crate) fn encode_jpeg(raster: &Raster, quality: u8) -> Result<Vec<u8>, SinkError> {
+/// Flatten an alpha channel onto `background`, for a format that has nowhere
+/// to put one.
+///
+/// `Ok(None)` means the raster has no alpha to flatten and can go to the
+/// encoder as it stands.
+///
+/// This is `vips_flatten`, reached through this crate's own port of it
+/// ([`Raster::try_flatten`]), and it is what every vips saver whose format
+/// cannot carry alpha applies on the way out, against its `background`
+/// property. Issue #1133 is what the alternative looks like:
+/// `render_page_pdfium` produces `Rgba8` and JPEG has no RGBA colour type, so
+/// `--render --format jpeg` refused the only pixels the renderer makes, while
+/// `--format png` and `--format webp` tiled the same input.
+///
+/// `Rgba8` and nothing else, on purpose. `Rgba16` is the other carrier with
+/// an alpha band, and flattening it would only change which refusal a JPEG
+/// caller gets after doing the work, because there is no 16-bit JPEG sample
+/// type either.
+pub(crate) fn flatten_alpha(
+    raster: &Raster,
+    background: [u8; 3],
+) -> Result<Option<Raster>, crate::conversion::ConversionError> {
+    if raster.format() != crate::pixel::PixelFormat::Rgba8 {
+        return Ok(None);
+    }
+    let bg = background.map(f64::from);
+    raster.try_flatten(Some(&bg)).map(Some)
+}
+
+/// The background a sink flattens onto, read from whatever
+/// [`TileSink::record_engine_config`] left behind.
+///
+/// Every sink that encodes a tile needs this and the engine hands it to all of
+/// them, so the answer lives here rather than four times over. A sink nobody
+/// ran an engine against gets [`DEFAULT_BACKGROUND_RGB`].
+pub(crate) fn background_from(config: &Mutex<Option<crate::engine::EngineConfig>>) -> [u8; 3] {
+    crate::poison::recover(config)
+        .as_ref()
+        .map_or(DEFAULT_BACKGROUND_RGB, |c| c.background_rgb)
+}
+
+/// Encode a [`Raster`] as JPEG, flattening any alpha onto `background` first.
+///
+/// Crate-visible so extension-dispatched save (`crate::imageio`) reuses the
+/// sink's JPEG encode path.
+///
+/// `background` is the engine's `background_rgb` wherever a sink captured one,
+/// which makes a transparent pixel land on the same colour the padding around
+/// an edge tile already uses.
+pub(crate) fn encode_jpeg(
+    raster: &Raster,
+    quality: u8,
+    background: [u8; 3],
+) -> Result<Vec<u8>, SinkError> {
+    let flattened = flatten_alpha(raster, background).map_err(|e| {
+        SinkError::EncodeMsg(format!("flattening a tile's alpha for JPEG failed: {e}"))
+    })?;
+    let raster = flattened.as_ref().unwrap_or(raster);
     let mut buf = Vec::new();
     let encoder =
         image::codecs::jpeg::JpegEncoder::new_with_quality(std::io::Cursor::new(&mut buf), quality);
@@ -3254,13 +3333,70 @@ mod tests {
      * block writes via FsSink and reads the file back from disk to verify
      * the same marker (skipped under Miri).
      */
+    /// The standalone background is the engine's own default, measured here
+    /// rather than copied into a comment.
+    ///
+    /// A sink built directly has no engine to ask, so it answers
+    /// [`DEFAULT_BACKGROUND_RGB`]. If that ever stops being the colour the
+    /// engine would have recorded, the same RGBA tile comes out two colours
+    /// depending on which route wrote it, and nothing else in the tree would
+    /// say so.
+    #[test]
+    fn the_standalone_background_is_the_engine_default() {
+        assert_eq!(
+            DEFAULT_BACKGROUND_RGB,
+            crate::engine::EngineConfig::default().background_rgb
+        );
+    }
+
+    /// Issue #1133: an `Rgba8` tile encodes as JPEG, and its transparent
+    /// pixels come out the colour the caller asked for rather than refused.
+    ///
+    /// The fixture is opaque black under the transparent half, so dropping
+    /// the alpha byte and flattening onto the background are two different
+    /// answers here and only one of them is this one.
+    #[test]
+    fn a_jpeg_tile_flattens_its_alpha_onto_the_background() {
+        let mut data = vec![0u8; 16 * 16 * 4];
+        for (i, px) in data.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            *px = [0, 0, 0, if i % 16 < 8 { 255 } else { 0 }];
+        }
+        let raster = Raster::new(16, 16, PixelFormat::Rgba8, data).unwrap();
+
+        let refused = encode_jpeg(&raster, 90, DEFAULT_BACKGROUND_RGB);
+        assert!(
+            refused.is_ok(),
+            "an RGBA tile still cannot be encoded as JPEG: {:?}",
+            refused.err()
+        );
+
+        let flat = flatten_alpha(&raster, [206, 17, 38])
+            .unwrap()
+            .expect("an Rgba8 raster has alpha to flatten");
+        assert_eq!(flat.format(), PixelFormat::Rgb8);
+        assert_eq!(&flat.data()[..3], &[0, 0, 0], "the opaque half is black");
+        let clear = (8 * 3) as usize;
+        assert_eq!(
+            &flat.data()[clear..clear + 3],
+            &[206, 17, 38],
+            "the transparent half is the background"
+        );
+
+        assert!(
+            flatten_alpha(&Raster::zeroed(4, 4, PixelFormat::Rgb8).unwrap(), [1, 2, 3])
+                .unwrap()
+                .is_none(),
+            "a raster with no alpha has nothing to flatten"
+        );
+    }
+
     #[test]
     #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn fs_sink_encodes_jpeg() {
         let raster = Raster::zeroed(8, 8, PixelFormat::Rgb8).unwrap();
 
         // Miri-safe: verify JPEG encoding produces valid SOI marker in memory
-        let bytes = encode_jpeg(&raster, 85).unwrap();
+        let bytes = encode_jpeg(&raster, 85, DEFAULT_BACKGROUND_RGB).unwrap();
         assert_eq!(&bytes[..2], &[0xFF, 0xD8]);
 
         #[cfg(not(miri))]
@@ -3373,7 +3509,7 @@ mod tests {
     #[test]
     fn encode_jpeg_rgb8() {
         let raster = Raster::zeroed(4, 4, PixelFormat::Rgb8).unwrap();
-        let bytes = encode_jpeg(&raster, 90).unwrap();
+        let bytes = encode_jpeg(&raster, 90, DEFAULT_BACKGROUND_RGB).unwrap();
         assert_eq!(&bytes[..2], &[0xFF, 0xD8]);
     }
 
@@ -3396,7 +3532,7 @@ mod tests {
                 }
                 other => panic!("expected EncodeMsg for float PNG, got {other:?}"),
             }
-            match encode_jpeg(raster, 90) {
+            match encode_jpeg(raster, 90, DEFAULT_BACKGROUND_RGB) {
                 Err(SinkError::EncodeMsg(msg)) => {
                     assert!(msg.contains("float raster"), "unexpected message: {msg}")
                 }
