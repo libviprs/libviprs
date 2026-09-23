@@ -25,7 +25,7 @@ Takes blueprint PDFs and images, extracts raster data, optionally geo-references
 - **Tile pyramid generation** — three engines (Monolithic, Streaming, MapReduce) routed through `EngineBuilder` / `EngineKind` (`Auto` by default), with backpressure and configurable tile size and overlap (see [`--parallel`](https://libviprs.org/cli/#flag-parallel))
 - **Layout formats** — DeepZoom (`.dzi` + directory tree), XYZ (`z/x/y`), and Google Maps (`z/y/x`, power-of-2 grids)
 - **Centre support** — centre image within the tile grid with even background padding on all sides
-- **Tile encoding** — PNG, JPEG (configurable quality), or raw pixel output
+- **Tile encoding** — PNG, JPEG (configurable quality; 4:2:0 chroma below quality 90), lossless WebP, or raw pixel output
 - **Blank tile optimization** — configurable `BlankTileStrategy` to either emit full tiles or write 1-byte placeholders (`BLANK_TILE_MARKER`) for uniform-color regions, reducing disk usage for sparse images
 - **Edge tile background** — configurable background color (`background_rgb`) for padding partial tiles at image edges (defaults to white)
 - **Geo-referencing** — affine transform mapping pixel coordinates to geographic coordinates, GCP support ([`--geo-reference`](https://libviprs.org/cli/#flag-geo-reference))
@@ -200,9 +200,9 @@ left to race the first.
   fit: their level index is a tier rather than a zoom, so those three stay on
   the directory tree. `PyramidStorage::accepts_layout` says which is which in
   code rather than in a sentence.
-- **Tiles are PNG or JPEG.** The spec has a tile type for each and none for
-  raw pixel bytes, so `TileFormat::Raw` has nowhere to go in an archive. Write
-  raw tiles to a directory.
+- **Tiles are PNG, JPEG or WebP.** The spec has a tile type for each and none
+  for raw pixel bytes, so `TileFormat::Raw` has nowhere to go in an archive.
+  Write raw tiles to a directory.
 
 Reading an archive back is the `pmtiles` module: the 127-byte v3 header, the
 Hilbert tile ids, the directory model and the ranged-read abstraction a reader
