@@ -500,6 +500,22 @@ pub struct EngineResult {
     /// Number of tiles that failed terminally and were skipped under
     /// `FailurePolicy::RetryThenSkip`.
     pub skipped_due_to_failure: u64,
+    /// What a verify's per-tile probe established, or `None` for a run that
+    /// did not probe stored tiles one at a time (issue #1130).
+    ///
+    /// Only [`pyramid_verify`](crate::verify::pyramid_verify) fills this in,
+    /// because it is the only run whose per-tile check has a choice to make:
+    /// the payload, or the length the index already carries. Which one it took
+    /// decides whether a green run established that every tile's bytes are
+    /// reachable or that the structural walk bounded every entry that points
+    /// at them, and those are different claims a caller may care about.
+    ///
+    /// `None` is every other run. A generation run produced the tiles rather
+    /// than checking them, and `raster_verify` and `verify_from_strip_source`
+    /// re-render from the source and compare bytes, which proves something
+    /// stronger than either variant here describes. Naming one of them for
+    /// those two would be a downgrade rather than a report.
+    pub tile_evidence: Option<crate::verify::TileEvidence>,
 }
 
 /// Generates a tile pyramid with an [`EngineObserver`] for progress events.
@@ -772,6 +788,8 @@ fn run_pyramid(
         duration: started.elapsed(),
         stage_durations,
         skipped_due_to_failure,
+        // A generation run produced these tiles rather than probing them.
+        tile_evidence: None,
     })
 }
 
@@ -1508,6 +1526,9 @@ pub fn raster_verify(
         duration: started.elapsed(),
         stage_durations: StageDurations::default(),
         skipped_due_to_failure: 0,
+        // `raster_verify` re-rendered from the source and compared bytes,
+        // which is a stronger claim than either `TileEvidence` variant makes.
+        tile_evidence: None,
     })
 }
 

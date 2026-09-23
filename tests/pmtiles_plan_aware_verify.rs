@@ -165,6 +165,36 @@ fn resolved(observer: &CollectingObserver) -> usize {
         .count()
 }
 
+/// `plan` with its recorded source size rewritten, keeping every level exactly
+/// as the planner produced it.
+///
+/// This exists because of #1130, and it is worth spelling out rather than
+/// reading as a shortcut. A verify now compares the archive's recorded source
+/// size against the plan's, and that comparison runs before the sweep, so the
+/// two cells below stopped being about the sweep and the count: an archive
+/// written from a 512x256 source and checked against a 512x512 plan is refused
+/// for being a pyramid of a different picture, which is true, is the root
+/// cause, and is not what those cells are named for.
+///
+/// The two properties cannot be separated through the planner at all. A
+/// level's grid is that level's size divided by the tile size, and the level
+/// sizes come from the source size, so **any** pair of plans with different
+/// grids has different source sizes by construction. Isolating the sweep
+/// therefore means making one plan disagree with itself, deliberately: its
+/// `levels` are the grid the sweep walks, and its recorded source size is the
+/// one the description check compares. No planner emits this and none should;
+/// it exists so that exactly one check is the one that can fail.
+///
+/// The raster handed to the run has to match the relabelled size too, because
+/// `EngineBuilder` refuses a plan whose dimensions disagree with its source
+/// before any verify starts.
+fn relabelled(plan: &PyramidPlan, width: u32, height: u32) -> PyramidPlan {
+    let mut plan = plan.clone();
+    plan.image_width = width;
+    plan.image_height = height;
+    plan
+}
+
 /// Every level's index and tile grid, which is what a per-coordinate sweep can
 /// see about a plan.
 ///
@@ -318,21 +348,22 @@ fn an_archive_collapsed_into_runs_still_resolves_every_coordinate() {
 /// says which coordinate.
 ///
 /// The archive is written from a 512x256 source and verified against the
-/// 512x512 plan, so the two agree about the level range, the tile size, the
-/// layout and the encoding, and disagree only about the top level's grid.
-/// The source is a gradient so that every entry has `run_length == 1`: in this
-/// pair the absence is a real absence, and the case a run could paper over is
-/// the sibling cell below, where no per-coordinate sweep can help at all.
+/// 512x512 plan [`relabelled`] to that same source size, so the two agree
+/// about the level range, the tile size, the overlap, the layout, the encoding
+/// and the source, and disagree only about the top level's grid. The source is
+/// a gradient so that every entry has `run_length == 1`: in this pair the
+/// absence is a real absence, and the case a run could paper over is the
+/// sibling cell below, where no per-coordinate sweep can help at all.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn an_archive_short_of_the_plan_is_refused_and_names_the_missing_coordinate() {
     let dir = tempfile::tempdir().expect("tempdir");
     let narrow = plan_for(512, 256, 256);
-    let wide = plan_for(512, 512, 256);
+    let wide = relabelled(&plan_for(512, 512, 256), 512, 256);
     let archive = dir.path().join("short.pmtiles");
     write_archive(&archive, &narrow, &gradient(512, 256));
 
-    let (result, _observer) = verify_archive(&archive, &wide, &gradient(512, 512));
+    let (result, _observer) = verify_archive(&archive, &wide, &gradient(512, 256));
     let err = result.expect_err("an archive short of the plan cannot verify");
     let message = err.to_string();
 
@@ -373,12 +404,16 @@ fn an_archive_short_of_the_plan_is_refused_and_names_the_missing_coordinate() {
 /// invisible to it. The first assertion below is the positive control that
 /// makes the refusal meaningful, because it proves the sweep would have gone
 /// green.
+///
+/// The narrow plan is [`relabelled`] to the wide source's size so that the
+/// count is the only thing left to disagree about, for the reason that helper
+/// spells out.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn an_archive_wider_than_the_plan_is_refused_although_every_coordinate_resolves() {
     let dir = tempfile::tempdir().expect("tempdir");
     let wide = plan_for(512, 512, 256);
-    let narrow = plan_for(512, 256, 256);
+    let narrow = relabelled(&plan_for(512, 256, 256), 512, 512);
     let archive = dir.path().join("wide.pmtiles");
     write_archive(&archive, &wide, &gradient(512, 512));
 
@@ -402,7 +437,7 @@ fn an_archive_wider_than_the_plan_is_refused_although_every_coordinate_resolves(
         "the control itself probed every coordinate"
     );
 
-    let (result, _observer) = verify_archive(&archive, &narrow, &gradient(512, 256));
+    let (result, _observer) = verify_archive(&archive, &narrow, &gradient(512, 512));
     let err = result.expect_err("an archive holding tiles the plan does not name cannot verify");
     let message = err.to_string();
     assert!(

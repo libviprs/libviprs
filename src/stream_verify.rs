@@ -473,6 +473,10 @@ pub fn verify_from_strip_source(
         duration: started.elapsed(),
         stage_durations: StageDurations::default(),
         skipped_due_to_failure: 0,
+        // A strip verify re-rendered from the source and compared
+        // bytes, which is not one of the two per-tile probes
+        // `TileEvidence` describes.
+        tile_evidence: None,
     })
 }
 

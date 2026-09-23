@@ -45,6 +45,38 @@ fn unreadable(error: PyramidReadError) -> EngineError {
     EngineError::Sink(SinkError::PyramidRead(error))
 }
 
+/// What a [`pyramid_verify`] run's per-tile probe actually established
+/// (issue #1130).
+///
+/// The sweep asks two things of every coordinate the plan names: that the
+/// pyramid holds a tile there, and that what it holds is not zero bytes. Both
+/// answers are in the storage's index, and reading the payload as well proves
+/// exactly one more thing, that the bytes at that offset come back.
+///
+/// That extra thing is worth the whole archive sometimes and not others, so
+/// the run picks and then says which it picked. This enum is that sentence. It
+/// is here rather than left implicit because a verify that read every byte and
+/// a verify that read none of them both return `Ok`, and a caller deciding how
+/// much to trust a green run needs to know which one it got.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TileEvidence {
+    /// Every tile's stored bytes came off the storage, so they are reachable
+    /// as well as present and non-empty.
+    ///
+    /// This is what a run gets when the structural walk could not bound the
+    /// index's offsets against a size the storage reported, and when the
+    /// backend has no structural walk at all, which is the loose-file tree.
+    PayloadsRead,
+    /// Only each tile's stored length was taken, out of an index the
+    /// structural walk had already bounds-checked against a reported size.
+    ///
+    /// Reachability is not given up here, it is established once for every
+    /// entry at once instead of one payload at a time. What the run gives up
+    /// is `bytes_read`, which is `0`, because it did not read any.
+    LengthsFromTheIndex,
+}
+
 /// Verify a finished pyramid against the plan that produced it, by reading it
 /// back (issue #1122).
 ///
@@ -100,6 +132,31 @@ fn unreadable(error: PyramidReadError) -> EngineError {
 /// decoding the whole pyramid, and the four above already refuse every pyramid
 /// that could otherwise pass.
 ///
+/// # What the sweep reads, and what that buys (issue #1130)
+///
+/// The sweep used to call [`PyramidReader::tile`] for every planned
+/// coordinate and use the result only for `bytes.is_empty()`, then drop the
+/// `Vec`. Verifying a 21851-tile pyramid therefore read the whole archive off
+/// storage to learn 21851 numbers the index was already carrying, and over the
+/// ranged transport #1121 opened that is one round trip per tile, serially.
+///
+/// So it takes [`PyramidReader::tile_len`] instead, but only when the
+/// storage's own walk earned it. Reading a payload does prove one thing a
+/// length cannot, that the bytes at that offset are reachable, and that is
+/// redundant only when the structural walk bounds-checked every entry against
+/// a size the storage actually reported. It is **not** redundant when the
+/// backend could not say how large it is, which is the streaming case, nor for
+/// a backend with no structure to walk at all.
+/// [`StructuralSummary`](crate::pyramid_reader::StructuralSummary) carries that
+/// answer and the run reports which guarantee it got as
+/// [`EngineResult::tile_evidence`].
+///
+/// The structural walk itself happens once. `self_check` and
+/// `addressed_tiles` were two questions about one walk, asked ten lines apart
+/// under a run lock that guarantees the archive cannot change between them, so
+/// this asks [`PyramidReader::structural_summary`] once and reads both answers
+/// off it.
+///
 /// # Errors
 ///
 /// [`EngineError::Sink`] wrapping [`SinkError::PyramidRead`] when the reader
@@ -117,10 +174,22 @@ pub fn pyramid_verify(
     // same storage: a sweep over a pyramid whose index does not add up
     // produces confident per-coordinate answers out of a structure that is
     // already known to be wrong.
-    reader.self_check().map_err(unreadable)?;
+    //
+    // This is the only structural walk in the function. The addressed count at
+    // the bottom comes off the same summary rather than out of a second one.
+    let structure = reader.structural_summary().map_err(unreadable)?;
 
     // Check 2. What the pyramid says it is, against what the plan asked for.
     describe_matches_the_plan(reader, plan, configured_format)?;
+
+    // Which probe the sweep uses, decided once for the run rather than per
+    // tile, because it is a property of the walk that already happened and not
+    // of any coordinate.
+    let evidence = if structure.offsets_bounded {
+        TileEvidence::LengthsFromTheIndex
+    } else {
+        TileEvidence::PayloadsRead
+    };
 
     // Check 3. The sweep, top level first, which is the order `raster_verify`
     // walks in and therefore the order an observer already expects.
@@ -137,22 +206,36 @@ pub fn pyramid_verify(
         for row in 0..level.rows {
             for col in 0..level.cols {
                 let coord = TileCoord::new(level.level, col, row);
-                let bytes = reader
-                    .tile(coord)
-                    .map_err(unreadable)?
+                let stored = match evidence {
+                    TileEvidence::LengthsFromTheIndex => {
+                        reader.tile_len(coord).map_err(unreadable)?
+                    }
+                    TileEvidence::PayloadsRead => {
+                        let length = reader
+                            .tile(coord)
+                            .map_err(unreadable)?
+                            .map(|bytes| bytes.len() as u64);
+                        // Counted here rather than below because this is the
+                        // only arm that reads a byte. A run that took lengths
+                        // off the index reports `bytes_read: 0`, which is the
+                        // truth: it did not read any.
+                        bytes_read += length.unwrap_or(0);
+                        length
+                    }
+                };
+                let length = stored
                     .ok_or_else(|| refused(format!("Verify: missing tile for coord {coord:?}")))?;
                 // Not a decode, and not trying to be one. It is the single
                 // payload length that cannot be an image in any encoding this
                 // crate writes, and it is exactly what `is_some()` waves
                 // through.
-                if bytes.is_empty() {
+                if length == 0 {
                     return Err(refused(format!(
                         "Verify: the tile at {coord:?} is stored with no bytes at all, \
                          which is not an encoded tile in any format"
                     )));
                 }
                 probed += 1;
-                bytes_read += bytes.len() as u64;
                 observer.on_event(EngineEvent::tile_completed(coord));
             }
         }
@@ -193,7 +276,16 @@ pub fn pyramid_verify(
     // And the direction the sweep is blind to. A pyramid addressing MORE than
     // the plan answered every question it was asked and is still not the
     // pyramid this plan produced.
-    let addressed = reader.addressed_tiles().map_err(unreadable)?;
+    //
+    // Off the summary when the walk counted, and asked directly when it did
+    // not. That second arm is not a fallback for a backend that cannot count:
+    // it is the backend that counts without walking, which is every reader
+    // written before #1130, and treating its `None` here as "cannot count"
+    // would drop this check for a reader that answers it perfectly well.
+    let addressed = match structure.addressed_tiles {
+        Some(addressed) => addressed,
+        None => reader.addressed_tiles().map_err(unreadable)?,
+    };
     if addressed != planned {
         return Err(refused(format!(
             "Verify: the pyramid addresses {addressed} tiles and the plan has \
@@ -219,6 +311,7 @@ pub fn pyramid_verify(
         duration: started.elapsed(),
         stage_durations: StageDurations::default(),
         skipped_due_to_failure: 0,
+        tile_evidence: Some(evidence),
     })
 }
 
@@ -233,6 +326,26 @@ pub fn pyramid_verify(
 /// the caller's configured format is legitimately `None` for a sink that does
 /// not commit to a format, and there is then nothing to compare against
 /// rather than something being withheld.
+///
+/// # The source size and the overlap, which nothing else can see (issue #1130)
+///
+/// The level range and the grid both round: a pyramid's levels are fixed by
+/// its longest side rounded up to a power of two, and each level's grid is its
+/// size divided by the tile size and rounded up. So a 4000-pixel source and a
+/// 4096-pixel one plan thirteen identical levels with identical grids and the
+/// same 349 coordinates, and every check in this function passed on an archive
+/// generated from a different picture.
+///
+/// The overlap is worse, because it does not reach the grid at all.
+/// `tile_grid` divides by the tile size and nothing else, so planning at
+/// overlap 1 and at overlap 0 produces byte-identical `levels` vectors while
+/// `tile_rect` moves every tile's rectangle. Two pyramids that disagree about
+/// it share every number a sweep or a count can compare and have no pixel in
+/// common.
+///
+/// Both are refused for `None` the way the tile size is, and for the same
+/// reason: a pyramid that will not say cannot be checked, and "cannot be
+/// checked" is a refusal rather than a pass.
 fn describe_matches_the_plan(
     reader: &dyn PyramidReader,
     plan: &PyramidPlan,
@@ -260,6 +373,25 @@ fn describe_matches_the_plan(
         )));
     }
 
+    match (described.source_width, described.source_height) {
+        (Some(width), Some(height)) if (width, height) == (plan.image_width, plan.image_height) => {
+        }
+        (Some(width), Some(height)) => {
+            return Err(refused(format!(
+                "Verify: the pyramid was generated from a {width}x{height} source \
+                 and the plan is for {}x{}",
+                plan.image_width, plan.image_height
+            )));
+        }
+        _ => {
+            return Err(refused(
+                "Verify: the pyramid does not record the source size it was \
+                 generated from, so there is nothing to check this plan against"
+                    .to_string(),
+            ));
+        }
+    }
+
     match described.tile_size {
         Some(size) if size == plan.tile_size => {}
         Some(size) => {
@@ -273,6 +405,24 @@ fn describe_matches_the_plan(
             return Err(refused(
                 "Verify: the pyramid does not record the tile size it was \
                  generated at, so there is nothing to check this plan against"
+                    .to_string(),
+            ));
+        }
+    }
+
+    match described.overlap {
+        Some(overlap) if overlap == plan.overlap => {}
+        Some(overlap) => {
+            return Err(refused(format!(
+                "Verify: the pyramid was generated with an overlap of {overlap} \
+                 pixels and the plan asks for {}",
+                plan.overlap
+            )));
+        }
+        None => {
+            return Err(refused(
+                "Verify: the pyramid does not record the overlap it was \
+                 generated with, so there is nothing to check this plan against"
                     .to_string(),
             ));
         }
@@ -318,13 +468,16 @@ fn describe_matches_the_plan(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
     use crate::observe::NoopObserver;
     use crate::planner::{Layout, PyramidPlanner};
-    use crate::pyramid_reader::PyramidDescription;
+    use crate::pyramid_reader::{PyramidDescription, StructuralSummary};
     use crate::sink::{Tile, TileSink};
 
-    /// A pyramid that answers whatever the test wants it to.
+    /// A pyramid that answers whatever the test wants it to, and remembers
+    /// which of the two probes it was asked for.
     ///
     /// Three of the branches in [`pyramid_verify`] cannot be reached with an
     /// archive this crate is able to write: our own PMTiles writer refuses a
@@ -333,6 +486,12 @@ mod tests {
     /// not hypothetical (a foreign archive is exactly that, and our validator
     /// does not flag a zero-length entry), and a double is the honest way to
     /// reach the branches without hand-assembling a hostile file.
+    ///
+    /// Since #1130 it also stands in for the two shapes a backend can take:
+    /// one that answers the whole structural walk at once, and one that only
+    /// knows how to count. `tile_len` here is deliberately **not** the trait's
+    /// default body, because the default reaches `tile` and would count both
+    /// probes as one.
     struct FakePyramid {
         description: PyramidDescription,
         /// What `tile` answers for every coordinate.
@@ -340,6 +499,47 @@ mod tests {
         /// What `addressed_tiles` answers, or `None` for a reader that cannot
         /// count.
         addressed: Option<u64>,
+        /// What `structural_summary` answers, or `None` to sit on the trait's
+        /// default, which is the shape of every backend written before #1130.
+        summary: Option<StructuralSummary>,
+        payload_reads: AtomicUsize,
+        length_reads: AtomicUsize,
+        counts: AtomicUsize,
+    }
+
+    impl FakePyramid {
+        fn new(
+            description: PyramidDescription,
+            stored: Option<Vec<u8>>,
+            addressed: Option<u64>,
+        ) -> Self {
+            Self {
+                description,
+                stored,
+                addressed,
+                summary: None,
+                payload_reads: AtomicUsize::new(0),
+                length_reads: AtomicUsize::new(0),
+                counts: AtomicUsize::new(0),
+            }
+        }
+
+        fn with_summary(mut self, summary: StructuralSummary) -> Self {
+            self.summary = Some(summary);
+            self
+        }
+
+        fn payload_reads(&self) -> usize {
+            self.payload_reads.load(Ordering::SeqCst)
+        }
+
+        fn length_reads(&self) -> usize {
+            self.length_reads.load(Ordering::SeqCst)
+        }
+
+        fn counts(&self) -> usize {
+            self.counts.load(Ordering::SeqCst)
+        }
     }
 
     impl PyramidReader for FakePyramid {
@@ -348,10 +548,24 @@ mod tests {
         }
 
         fn tile(&self, _coord: TileCoord) -> Result<Option<Vec<u8>>, PyramidReadError> {
+            self.payload_reads.fetch_add(1, Ordering::SeqCst);
             Ok(self.stored.clone())
         }
 
+        fn tile_len(&self, _coord: TileCoord) -> Result<Option<u64>, PyramidReadError> {
+            self.length_reads.fetch_add(1, Ordering::SeqCst);
+            Ok(self.stored.as_ref().map(|bytes| bytes.len() as u64))
+        }
+
+        fn structural_summary(&self) -> Result<StructuralSummary, PyramidReadError> {
+            match &self.summary {
+                Some(summary) => Ok(summary.clone()),
+                None => Ok(StructuralSummary::new()),
+            }
+        }
+
         fn addressed_tiles(&self) -> Result<u64, PyramidReadError> {
+            self.counts.fetch_add(1, Ordering::SeqCst);
             match self.addressed {
                 Some(count) => Ok(count),
                 None => Err(PyramidReadError::NoDescription(
@@ -412,18 +626,14 @@ mod tests {
         let plan = plan();
         let planned = plan.tile_coords().count() as u64;
 
-        let sound = FakePyramid {
-            description: description(&plan),
-            stored: Some(vec![0x89, b'P', b'N', b'G']),
-            addressed: Some(planned),
-        };
+        let sound = FakePyramid::new(
+            description(&plan),
+            Some(vec![0x89, b'P', b'N', b'G']),
+            Some(planned),
+        );
         verify(&sound, &plan).expect("the control verifies");
 
-        let hollow = FakePyramid {
-            description: description(&plan),
-            stored: Some(Vec::new()),
-            addressed: Some(planned),
-        };
+        let hollow = FakePyramid::new(description(&plan), Some(Vec::new()), Some(planned));
         let message = verify(&hollow, &plan)
             .expect_err("a zero-length payload is not a tile")
             .to_string();
@@ -444,11 +654,7 @@ mod tests {
     #[test]
     fn a_reader_that_cannot_count_its_tiles_cannot_verify() {
         let plan = plan();
-        let uncountable = FakePyramid {
-            description: description(&plan),
-            stored: Some(vec![1, 2, 3]),
-            addressed: None,
-        };
+        let uncountable = FakePyramid::new(description(&plan), Some(vec![1, 2, 3]), None);
         match verify(&uncountable, &plan) {
             Err(EngineError::Sink(SinkError::PyramidRead(PyramidReadError::NoDescription(_)))) => {}
             other => panic!("a verify with no count is not a verify, got {other:?}"),
@@ -461,23 +667,46 @@ mod tests {
     /// Reading as tolerant here would mean reporting a clean verify for a
     /// pyramid nobody's plan produced, which is the loudest possible
     /// disagreement and the one a caller most wants named.
+    ///
+    /// Three fields, one per thing a pyramid can decline to say about itself,
+    /// because each is checked in its own arm and a cell carrying only the
+    /// first proves nothing about the other two. The source size and the
+    /// overlap arrived with #1130, and they are the two that nothing else in
+    /// this function can see: the level range and the grid both round, so a
+    /// 4000-pixel source and a 4096-pixel one are indistinguishable, and
+    /// overlap does not reach the grid at all.
     #[test]
     fn a_pyramid_that_cannot_say_how_it_was_generated_is_refused() {
         let plan = plan();
-        let mut description = description(&plan);
-        description.tile_size = None;
-        let anonymous = FakePyramid {
-            description,
-            stored: Some(vec![1, 2, 3]),
-            addressed: Some(plan.tile_coords().count() as u64),
-        };
-        let message = verify(&anonymous, &plan)
-            .expect_err("a pyramid with no generation record cannot be checked")
-            .to_string();
-        assert!(
-            message.contains("tile size"),
-            "the refusal must name what the pyramid could not say, got: {message}"
-        );
+        let planned = plan.tile_coords().count() as u64;
+
+        for (withhold, expected) in [
+            (
+                Box::new(|d: &mut PyramidDescription| d.tile_size = None)
+                    as Box<dyn Fn(&mut PyramidDescription)>,
+                "tile size",
+            ),
+            (
+                Box::new(|d: &mut PyramidDescription| d.source_width = None),
+                "source size",
+            ),
+            (
+                Box::new(|d: &mut PyramidDescription| d.overlap = None),
+                "overlap",
+            ),
+        ] {
+            let mut description = description(&plan);
+            withhold(&mut description);
+            let anonymous = FakePyramid::new(description, Some(vec![1, 2, 3]), Some(planned));
+            let message = verify(&anonymous, &plan)
+                .expect_err("a pyramid with no generation record cannot be checked")
+                .to_string();
+            assert!(
+                message.contains(expected),
+                "the refusal must name what the pyramid could not say \
+                 ({expected}), got: {message}"
+            );
+        }
     }
 
     /// The count check is an equality, and the direction nothing else catches
@@ -486,17 +715,109 @@ mod tests {
     fn a_pyramid_addressing_more_than_the_plan_is_refused() {
         let plan = plan();
         let planned = plan.tile_coords().count() as u64;
-        let wide = FakePyramid {
-            description: description(&plan),
-            stored: Some(vec![1, 2, 3]),
-            addressed: Some(planned + 1),
-        };
+        let wide = FakePyramid::new(description(&plan), Some(vec![1, 2, 3]), Some(planned + 1));
         let message = verify(&wide, &plan)
             .expect_err("a pyramid wider than the plan cannot verify")
             .to_string();
         assert!(
             message.contains(&(planned + 1).to_string()) && message.contains(&planned.to_string()),
             "the refusal must name both counts, got: {message}"
+        );
+    }
+
+    /// A walk that bounded every offset it read makes the sweep take lengths,
+    /// and the run says which guarantee that leaves it with.
+    ///
+    /// The three assertions after the first are the ones that matter. No
+    /// payload was fetched, every coordinate was still probed, and the count
+    /// came off the summary rather than out of a second walk.
+    #[test]
+    fn a_bounded_walk_makes_the_sweep_read_lengths_rather_than_payloads() {
+        let plan = plan();
+        let planned = plan.tile_coords().count();
+        let bounded = FakePyramid::new(description(&plan), Some(vec![1, 2, 3]), None).with_summary(
+            StructuralSummary::new()
+                .with_addressed_tiles(planned as u64)
+                .with_offsets_bounded(true),
+        );
+
+        let result = verify(&bounded, &plan).expect("a sound pyramid verifies");
+
+        assert_eq!(
+            bounded.payload_reads(),
+            0,
+            "the sweep read {} payloads to learn {planned} lengths the index \
+             already carries",
+            bounded.payload_reads()
+        );
+        assert_eq!(
+            bounded.length_reads(),
+            planned,
+            "the positive control: a sweep that probed nothing would also have \
+             read no payloads"
+        );
+        assert_eq!(
+            bounded.counts(),
+            0,
+            "the summary carried the count, so asking for it again is the \
+             second walk this change removed"
+        );
+        assert_eq!(
+            result.tile_evidence,
+            Some(TileEvidence::LengthsFromTheIndex)
+        );
+        assert_eq!(
+            result.bytes_read, 0,
+            "a run that read no payload must not report bytes it did not read"
+        );
+    }
+
+    /// A walk that bounded nothing keeps reading payloads.
+    ///
+    /// This one is green before #1130 as well as after, and that is what it is
+    /// for: it is the arm that must **not** move. A length says a tile is
+    /// there and how large it is; only a payload read says the bytes come
+    /// back, and nothing has established that for a backend whose walk had no
+    /// size to check against. The cells that were red are in
+    /// `tests/pmtiles_verify_reads_the_index.rs`.
+    ///
+    /// It doubles as the check that a backend which only knows how to count
+    /// still gets counted: this double sits on the default summary, so the
+    /// count has to be asked for directly, exactly once.
+    #[test]
+    fn an_unbounded_walk_keeps_reading_payloads() {
+        let plan = plan();
+        let planned = plan.tile_coords().count();
+        let unbounded = FakePyramid::new(
+            description(&plan),
+            Some(vec![1, 2, 3]),
+            Some(planned as u64),
+        );
+
+        let result = verify(&unbounded, &plan).expect("a sound pyramid verifies");
+
+        assert_eq!(
+            unbounded.payload_reads(),
+            planned,
+            "every coordinate's bytes have to be read when nothing else has \
+             proved they are reachable"
+        );
+        assert_eq!(
+            unbounded.length_reads(),
+            0,
+            "and the cheap probe must not be used behind a walk that earned \
+             nothing"
+        );
+        assert_eq!(
+            unbounded.counts(),
+            1,
+            "the count was asked for directly, once"
+        );
+        assert_eq!(result.tile_evidence, Some(TileEvidence::PayloadsRead));
+        assert_eq!(
+            result.bytes_read,
+            planned as u64 * 3,
+            "the payload path reports what it read"
         );
     }
 }
