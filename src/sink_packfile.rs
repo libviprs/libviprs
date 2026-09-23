@@ -234,6 +234,7 @@ impl PackfileSink {
             TileFormat::Raw => Ok(raster.data().to_vec()),
             TileFormat::Png => encode_png(raster),
             TileFormat::Jpeg { quality } => encode_jpeg(raster, quality),
+            TileFormat::Webp => crate::sink::encode_webp(raster),
         }
     }
 

@@ -352,7 +352,12 @@ const ANCHOR_FILES: &[&str] = &[
 /// now, on purpose: an exact number in the workflow made it a file every
 /// unrelated pull request had to edit, which is the reasoning written up in
 /// `tests/miri_invocation_parity.rs`.
-const EXPECTED_SRC_ANNOTATIONS: usize = 245;
+///
+/// #1122 moves it 245 to 246, and the one is
+/// `a_reader_that_cannot_count_its_tiles_refuses_rather_than_guessing` in
+/// `src/pyramid_reader.rs`, which opens a `tempfile::tempdir()` as a pyramid
+/// to pin what a reader with no tile count answers.
+const EXPECTED_SRC_ANNOTATIONS: usize = 246;
 /// Companion to [`EXPECTED_SRC_ANNOTATIONS`]: how many `src/` modules carry at
 /// least one annotation. #765 made it 25 by putting the first annotation in
 /// `src/analyze.rs`; `src/colour.rs` and `src/pdf.rs`, which took the other
@@ -551,12 +556,53 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// sibling test through one `std::fs::read_to_string` helper, so all three are
 /// `annotated fs-detected` and none of them is a judgement call.
 ///
+/// #1121 moves it 390 to 391, and the one is
+/// `tests/pmtiles_pyramid_reader.rs::fs_pmtiles_and_object_store_return_the_same_tiles`,
+/// which reads the archive it just generated back off disk with
+/// `std::fs::read` so it can serve the same bytes through an injected object
+/// store. The same change adds twelve `annotated not-detected` rows in
+/// `tests/pmtiles_object_store_range.rs`, and those do not move this count
+/// because they reach the committed goldens through the shared oracle helper,
+/// which is a file the detector does not follow into.
+/// #1122 moves it 390 to 400, and the ten are a net figure: twelve arrive and
+/// two leave. Nine are `tests/pmtiles_plan_aware_verify.rs`' whole file, each
+/// of which writes a PMTiles archive into a `tempfile::tempdir()` and then
+/// verifies it; one is the reader cell named under
+/// [`EXPECTED_SRC_ANNOTATIONS`]. The remaining two are the pair in
+/// `tests/pmtiles_sink.rs` that replace `verify_is_refused_by_name` and
+/// `a_verify_run_against_an_archive_does_not_report_success`, which is why the
+/// arrivals outnumber the move: those two are the departures, renamed rather
+/// than deleted because Verify stopped being refused.
+///
+/// Composing #1121 and #1122 takes it to 401. Their deltas are +1 and a NET
+/// +10 (twelve arrive, two leave), and they do sum here because each lane's
+/// arrivals are a disjoint set. I am writing that as a measurement rather than
+/// as arithmetic: 401 is the count the detector reported with this constant
+/// held at the 390 baseline, not the number I got by adding the deltas up.
+///
+/// It is worth saying why that distinction earned its keep twice. An earlier
+/// composition of three lanes measured 413, and 413 minus lane B's +12 is
+/// exactly 401, so the subtraction would have been right. It would also have
+/// been a guess: a net delta and three independent lanes are precisely the
+/// shape where a double count hides, and "the arithmetic happened to agree" is
+/// something you can only say afterwards.
+///
+/// #1123 moves it 401 to 408, and the seven are the whole of
+/// `tests/webp_tile_format.rs` bar its two pure-computation cells. Each of the
+/// seven either generates a pyramid into a `tempfile::tempdir()` or writes a
+/// PMTiles archive there and reads it back, so all seven are
+/// `annotated fs-detected` and none of them is a judgement call.
+///
+/// 408 is the number the detector printed with this constant still at 401, not
+/// 401 plus seven. Same discipline as the paragraph above, and cheap to keep:
+/// the assertion names the figure it measured, so copying it out is strictly
+/// less work than adding up.
 /// #1118 moves it 390 to 402, and the twelve are the whole of
 /// `tests/pyramid_migrate.rs`. Every one of them writes a tree of loose tiles
 /// into a `tempfile::tempdir()`, migrates it into an archive beside it and
 /// reads the archive back with `std::fs::read`, so all twelve are
 /// `annotated fs-detected` and none of them is a judgement call.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 402;
+const EXPECTED_FS_TOUCHING_TESTS: usize = 420;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {

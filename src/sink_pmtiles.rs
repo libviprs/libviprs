@@ -57,8 +57,12 @@
 //!   `Layout::Google` are; DeepZoom, Zoomify and IIIF are not, and an archive
 //!   built from one of those is addressable but renders nonsense in anything
 //!   that opens it.
-//! * **`ResumeMode::Resume` and `ResumeMode::Verify`.** See
-//!   [`PmTilesSinkBuilder::resume_mode`].
+//! * **`ResumeMode::Resume`.** The writer's staging is not reconstructible
+//!   from a checkpoint, so a resumed run would publish an archive with every
+//!   pre-crash tile silently absent. `ResumeMode::Verify` was refused beside
+//!   it until #1122 and is not any more: the engine asks this sink for a
+//!   reader over its own archive and checks the pyramid through that instead
+//!   of walking a directory tree. See [`PmTilesSinkBuilder::resume_mode`].
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -290,6 +294,7 @@ impl PmTilesSink {
         match self.tile_format {
             TileFormat::Png => encode_png(&tile.raster),
             TileFormat::Jpeg { quality } => encode_jpeg(&tile.raster, quality),
+            TileFormat::Webp => crate::sink::encode_webp(&tile.raster),
             // Refused at `build`, so reaching here would mean a sink was
             // constructed past its own gate.
             TileFormat::Raw => Err(SinkError::PmTiles(PmTilesError::UnsupportedTileFormat {
@@ -442,26 +447,40 @@ impl PmTilesSinkBuilder {
     /// Declare the run's resume mode, so an unsupported one is refused before
     /// anything is created.
     ///
-    /// Only [`ResumeMode::Overwrite`] builds.
+    /// [`ResumeMode::Overwrite`] and [`ResumeMode::Verify`] build.
+    /// [`ResumeMode::Resume`] does not.
     ///
-    /// **`Verify`** is dispatched into `raster_verify`, which resolves a
-    /// checkpoint root and then stats `root.join(plan.tile_path(coord, ext))`
-    /// for every planned coordinate. That is a loose-file tree walk, and there
-    /// is no seam in it a single-file backend can enter: pointed at an
-    /// archive it would report the first coordinate missing and call the
-    /// archive corrupt. **`Resume`** has that problem and a worse one, that
-    /// the writer's staging is not reconstructible from a checkpoint, so a
-    /// resumed run would publish an archive with every pre-crash tile silently
-    /// absent.
+    /// **`Verify`** used to be refused here too, and the reason it no longer
+    /// is says what changed rather than that somebody relaxed a rule. Verify
+    /// was dispatched into `raster_verify`, which resolves a checkpoint root
+    /// and then stats `root.join(plan.tile_path(coord, ext))` for every
+    /// planned coordinate: a loose-file tree walk with no seam a single-file
+    /// backend can enter, which pointed at an archive would report the first
+    /// coordinate missing and call the archive corrupt. Since #1122 the engine
+    /// asks the sink for a reader first
+    /// ([`TileSink::open_pyramid_reader`]), and this sink hands back a
+    /// [`PmTilesPyramidReader`](crate::pyramid_reader::PmTilesPyramidReader)
+    /// over the published archive, so the verify checks the archive instead of
+    /// a tree that was never written.
     ///
-    /// Both are therefore refused by name rather than half-supported. This is
-    /// a refusal of the second kind: the format has no representation for what
-    /// was asked, so a typed refusal is the correct implementation rather than
-    /// a gap to be filled later. Rerun with `Overwrite`.
+    /// A Verify run therefore takes the advisory run lock and creates
+    /// [`PmTilesSink::job_dir`] like any other, which is new. It is also
+    /// correct: two jobs aimed at one archive must not overlap whether or not
+    /// either of them intends to write.
     ///
-    /// The refusal is also enforced where the engine can reach it, not only
-    /// here: [`TileSink::seed_completed_tile`] is the hook a resume calls for
-    /// each coordinate it is about to skip, and this sink refuses there too.
+    /// **`Resume`** is a different matter and stays refused. The writer's
+    /// staging is not reconstructible from a checkpoint (the content-hash
+    /// table, the payload starts and the run boundaries live in memory only),
+    /// so a resumed run would publish an archive with every pre-crash tile
+    /// silently absent. That is a refusal of the second kind: the format has
+    /// no representation for what was asked, so a typed refusal is the correct
+    /// implementation rather than a gap to be filled later. Rerun with
+    /// `Overwrite`.
+    ///
+    /// The Resume refusal is also enforced where the engine can reach it, not
+    /// only here: [`TileSink::seed_completed_tile`] is the hook a resume calls
+    /// for each coordinate it is about to skip, and this sink refuses there
+    /// too.
     pub fn resume_mode(mut self, mode: ResumeMode) -> Self {
         self.resume_mode = mode;
         self
@@ -473,7 +492,7 @@ impl PmTilesSinkBuilder {
     ///
     /// * [`SinkError::MissingField`] when [`PmTilesSinkBuilder::plan`] was
     ///   never called.
-    /// * [`SinkError::UnsupportedResumeMode`] for `Resume` or `Verify`.
+    /// * [`SinkError::UnsupportedResumeMode`] for `Resume`.
     /// * [`SinkError::Unsupported`] for a layout that is not addressed by
     ///   `(z, x, y)`.
     /// * [`SinkError::PmTiles`] for [`TileFormat::Raw`], which PMTiles has no
@@ -484,10 +503,25 @@ impl PmTilesSinkBuilder {
             .plan
             .ok_or(SinkError::MissingField("PmTilesSinkBuilder::plan"))?;
 
-        if !matches!(self.resume_mode, ResumeMode::Overwrite) {
-            return Err(SinkError::UnsupportedResumeMode {
-                mode: self.resume_mode,
-            });
+        // Resume, and only Resume (issue #1122). Verify used to be refused
+        // here beside it, because the only verify the engine had walked a
+        // directory tree; it now reads the archive back through
+        // `TileSink::open_pyramid_reader` below, so there is nothing left for
+        // this gate to protect it from.
+        //
+        // Written as an exhaustive match rather than the shorter
+        // `matches!(mode, Resume)`. The two behave identically today and
+        // differ the day somebody adds a fourth mode: the match makes that a
+        // compile error right here, so the decision gets made, while a
+        // `matches!` would wave the new mode through with a refusal written
+        // about Resume standing in for one nobody wrote.
+        match self.resume_mode {
+            ResumeMode::Overwrite | ResumeMode::Verify => {}
+            ResumeMode::Resume => {
+                return Err(SinkError::UnsupportedResumeMode {
+                    mode: self.resume_mode,
+                });
+            }
         }
         if !layout_is_zxy(plan.layout) {
             return Err(SinkError::Unsupported(format!(
@@ -532,7 +566,7 @@ impl PmTilesSinkBuilder {
 // TileSink
 // ---------------------------------------------------------------------------
 
-// Eight of the trait's methods are deliberately left at their defaults, which
+// Seven of the trait's methods are deliberately left at their defaults, which
 // for a terminal sink bottom out at a no-op, `0`, `false` or `None`:
 // `inner_sink` (this sink wraps nothing), `sink_retry_count`,
 // `sink_skipped_due_to_failure`, `note_sink_skipped` and `applies_retry_policy`
@@ -631,6 +665,38 @@ impl TileSink for PmTilesSink {
     /// other's staging whether or not a resume policy was configured.
     fn checkpoint_root(&self) -> Option<&Path> {
         None
+    }
+
+    /// Open the published archive for reading (issue #1122).
+    ///
+    /// This is how `ResumeMode::Verify` reaches a single-file backend at all.
+    /// The engine asks every sink this before it falls back to the directory
+    /// walk, so a verify against an archive checks the archive rather than
+    /// stat-ing a tree nobody wrote.
+    ///
+    /// # It is emphatically not the checkpoint root
+    ///
+    /// Wiring verify makes [`TileSink::checkpoint_root`] look like the natural
+    /// place to hand the engine a path, and the doc above it explains why that
+    /// would be wrong: whatever a sink returns there is fed to
+    /// [`wipe_directory`](crate::engine) on every `Overwrite` run. Verify
+    /// reads the archive; it needs no root, and this method is what makes that
+    /// true rather than merely asserted.
+    ///
+    /// # Errors
+    ///
+    /// [`SinkError::PyramidRead`] when the archive is absent or is not a
+    /// readable v3 archive. `Err`, not `Ok(None)`: a missing archive is a
+    /// verify failure with a name, while `Ok(None)` would mean "I have no
+    /// reader to offer" and would send the run off to walk a directory tree
+    /// that is not there either, which is the "missing tile for coord 0/0/0"
+    /// answer this whole path exists to stop giving.
+    fn open_pyramid_reader(
+        &self,
+    ) -> Result<Option<Box<dyn crate::pyramid_reader::PyramidReader>>, SinkError> {
+        let reader = crate::pyramid_reader::PmTilesPyramidReader::try_open(&self.out_path)
+            .map_err(SinkError::PyramidRead)?;
+        Ok(Some(Box::new(reader)))
     }
 
     /// Make every accepted tile durable.
