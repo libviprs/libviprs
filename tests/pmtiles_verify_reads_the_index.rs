@@ -39,7 +39,7 @@ use libviprs::pmtiles::{RangeReader, Reader};
 use libviprs::pyramid_reader::{PmTilesPyramidReader, PyramidReader};
 use libviprs::sink::TileFormat;
 use libviprs::sink_pmtiles::PmTilesSink;
-use libviprs::verify::pyramid_verify;
+use libviprs::verify::{TileEvidence, pyramid_verify};
 use libviprs::{EngineBuilder, EngineKind, PixelFormat, Raster};
 
 // ---------------------------------------------------------------------------
@@ -262,6 +262,13 @@ fn a_verify_over_a_sized_transport_fetches_no_tile_payload() {
         "the run reports {} bytes read and it read none, which is the same \
          claim the fetch above disproves",
         result.bytes_read
+    );
+    // And it says which guarantee that leaves it with, rather than leaving a
+    // caller to infer it from a zero.
+    assert_eq!(
+        result.tile_evidence,
+        Some(TileEvidence::LengthsFromTheIndex),
+        "a run that took lengths has to report that it took lengths"
     );
 }
 

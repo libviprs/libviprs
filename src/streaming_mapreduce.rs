@@ -831,6 +831,8 @@ pub(crate) fn generate_pyramid_mapreduce(
         duration: std::time::Duration::ZERO,
         stage_durations: crate::engine::StageDurations::default(),
         skipped_due_to_failure: sink.sink_skipped_due_to_failure(),
+        // A generation run produced these tiles rather than probing them.
+        tile_evidence: None,
     })
 }
 
