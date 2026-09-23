@@ -607,7 +607,20 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// `a_repository_with_no_commits_publishes_holes_rather_than_half_an_attestation`,
 /// which `git init`s a `tempfile::tempdir()` to reach an unborn HEAD. It is
 /// `annotated fs-detected` like its neighbour and is not a judgement call.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 421;
+///
+///
+/// #1133 and #1132 move it 421 to 431, and the ten are all of
+/// `tests/jpeg_tile_format.rs` bar the one cell that encodes a raster in
+/// memory and never goes near a path. Nine of the ten either generate a
+/// pyramid into a `tempfile::tempdir()` or write one tile there and read it
+/// back; the tenth reads `src/pdf.rs` to check that the render path still
+/// produces the pixel format the other nine stand on. All ten are
+/// `annotated fs-detected` and none of them is a judgement call.
+///
+/// 431 is what the detector printed with this constant still at 421,
+/// same as the paragraphs above. The rebase onto #1126 is why the figures in
+/// this paragraph are not the ones the branch was written against.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 431;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {

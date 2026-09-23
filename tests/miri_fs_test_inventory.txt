@@ -325,6 +325,16 @@ annotated   fs-detected  tests/io_ported_surface.rs::ported_keep_icc_call_site
 annotated   fs-detected  tests/io_ported_surface.rs::ported_keep_none_call_site
 annotated   fs-detected  tests/io_ported_surface.rs::ported_test_vips_call_site
 annotated   fs-detected  tests/io_ported_surface.rs::save_accepts_path_ref
+annotated   fs-detected  tests/jpeg_tile_format.rs::a_greyscale_tile_is_one_component
+annotated   fs-detected  tests/jpeg_tile_format.rs::a_tile_at_quality_90_keeps_full_chroma
+annotated   fs-detected  tests/jpeg_tile_format.rs::a_tile_at_the_default_quality_subsamples_chroma
+annotated   fs-detected  tests/jpeg_tile_format.rs::an_rgba_source_tiles_as_jpeg
+annotated   fs-detected  tests/jpeg_tile_format.rs::every_tile_decodes_at_its_planned_size
+annotated   fs-detected  tests/jpeg_tile_format.rs::subsampling_does_not_move_the_ink
+annotated   fs-detected  tests/jpeg_tile_format.rs::the_blank_tile_floor_falls
+annotated   fs-detected  tests/jpeg_tile_format.rs::the_huffman_tables_are_built_from_the_tile
+annotated   fs-detected  tests/jpeg_tile_format.rs::the_render_path_still_hands_the_sink_rgba
+annotated   fs-detected  tests/jpeg_tile_format.rs::transparent_pixels_take_the_engine_background
 annotated   fs-detected  tests/jxl_ported_surface.rs::encode_and_save_round_trip_exactly
 annotated   fs-detected  tests/jxl_ported_surface.rs::the_shared_dispatchers_carry_jxl
 annotated   fs-detected  tests/jxl_ported_surface.rs::without_the_feature_the_surface_is_unchanged_and_typed
