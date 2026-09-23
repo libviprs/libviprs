@@ -32,15 +32,11 @@
 //! Two percent. Do not read the sort buffer as this writer's memory ceiling.
 //!
 //! Most of the rest was the content-hash table, and issue #1137 replaced it
-//! with a fixed-capacity window the caller sizes. The other
-//! three tables are as small as they can be made: the payload table is one
-//! `u64` a payload plus a sentinel, and an offset and a length both come out
-//! of it by subtraction; the final-offset lookup is a `Vec` indexed by a dense
-//! payload index rather than a `HashMap` keyed on a staged offset; and the
-//! write order is a `Vec<u64>` of those indices. Those three together took the
-//! ten-million figure from 1,236.4 MB, and they took the peak off the finalize
-//! and back onto ingestion, where the hash table is: the two numbers above and
-//! below `finish` are now the same.
+//! with a fixed-capacity window the caller sizes. The payload table and the
+//! final-offset lookup went with issue #1138, which put the staged offset in
+//! the index record itself: the record is the same 20 bytes on disk either
+//! way, and an offset answers both questions the two tables were keeping the
+//! answers to. The write order is the last of them.
 //!
 //! A pyramid of mostly blank tiles has very few distinct payloads, which is
 //! the case this design exists for. A photograph is the case the table is for.
@@ -103,9 +99,9 @@
 //! a capped fan-in rather than holding one open file per run.
 //!
 //! **Not** bounded by the tile count but bounded by the number of *distinct
-//! payloads*: the payload table and the final-offset lookup. The dedupe window
-//! is bounded by neither, because the caller sizes it. See the numbers at the
-//! top of this page.
+//! payloads*: the write order, and nothing else. The dedupe window and the
+//! repeat table are bounded by neither, because the caller sizes them. See the
+//! numbers at the top of this page.
 //!
 //! # A failed write is never published
 //!
@@ -205,7 +201,7 @@ pub(crate) const DEFAULT_LEAF_ENTRIES: usize = 4096;
 /// count costs merge passes rather than a failure.
 const SORT_RUN_RECORDS: usize = 1 << 20;
 
-/// One spilled index record: `tile_id`, payload index, length.
+/// One spilled index record: `tile_id`, staged offset, length.
 const SPILL_RECORD_BYTES: usize = 8 + 8 + 4;
 
 /// How many runs one merge pass will read at once.
@@ -408,14 +404,14 @@ fn sync_all(file: &File) -> std::io::Result<()> {
 #[derive(Clone, Copy)]
 struct WindowSlot {
     hash: [u8; 32],
-    payload: u64,
+    data_offset: u64,
     length: u32,
 }
 
 impl WindowSlot {
     const EMPTY: Self = Self {
         hash: [0; 32],
-        payload: 0,
+        data_offset: 0,
         length: 0,
     };
 
@@ -491,7 +487,8 @@ impl DedupeWindow {
         ((u128::from(key) * self.sets as u128) >> 64) as usize
     }
 
-    /// The payload this hash was last staged as, if the window still holds it.
+    /// Where this hash was last staged, and how long it is, if the window
+    /// still holds it.
     fn get(&mut self, hash: &[u8; 32]) -> Option<(u64, u32)> {
         let set = self.set_of(hash);
         let base = set * DEDUPE_WINDOW_WAYS;
@@ -499,7 +496,7 @@ impl DedupeWindow {
             let slot = self.slots[base + way];
             if !slot.is_empty() && slot.hash == *hash {
                 self.recency[set] = touch(self.recency[set], way);
-                return Some((slot.payload, slot.length));
+                return Some((slot.data_offset, slot.length));
             }
         }
         None
@@ -507,7 +504,7 @@ impl DedupeWindow {
 
     /// Remember a payload, evicting the set's least recently used entry if
     /// every way is taken.
-    fn insert(&mut self, hash: [u8; 32], payload: u64, length: u32) {
+    fn insert(&mut self, hash: [u8; 32], data_offset: u64, length: u32) {
         let set = self.set_of(&hash);
         let base = set * DEDUPE_WINDOW_WAYS;
         let way = (0..DEDUPE_WINDOW_WAYS)
@@ -515,7 +512,7 @@ impl DedupeWindow {
             .unwrap_or_else(|| least_recent(self.recency[set]));
         self.slots[base + way] = WindowSlot {
             hash,
-            payload,
+            data_offset,
             length,
         };
         self.recency[set] = touch(self.recency[set], way);
@@ -531,9 +528,6 @@ impl DedupeWindow {
 #[derive(Clone, Copy)]
 struct RepeatSlot {
     staged: u64,
-    // Written here and read by the placement pass in #1138, which is the
-    // issue this table exists for.
-    #[expect(dead_code, reason = "the placement pass that reads it is issue #1138")]
     placed: u64,
 }
 
@@ -603,6 +597,22 @@ impl RepeatTable {
             placed: UNPLACED,
         };
         self.recency[set] = touch(self.recency[set], way);
+    }
+
+    /// Where a marked offset was placed in the data region, as a slot to read
+    /// or fill in. [`UNPLACED`] means it is marked but has not been reached
+    /// yet; `None` means nothing ever marked it, so exactly one tile points at
+    /// it and it cannot have been placed.
+    ///
+    /// It inserts nothing and evicts nothing, which is the property
+    /// finalization needs: the table is whatever the add phase left, so
+    /// `finish` allocates not one byte per payload, and it cannot lose a
+    /// placement it has already made.
+    fn placement(&mut self, staged: u64) -> Option<&mut u64> {
+        let set = self.set_of(staged);
+        let base = set * DEDUPE_WINDOW_WAYS;
+        let way = (0..DEDUPE_WINDOW_WAYS).find(|way| self.slots[base + way].staged == staged)?;
+        Some(&mut self.slots[base + way].placed)
     }
 }
 
@@ -887,19 +897,24 @@ impl Staging {
     }
 }
 
-/// One record in the append-only index log: which tile, and which distinct
-/// payload it points at.
+/// One record in the append-only index log: which tile, where its payload is
+/// staged, and how long it is.
 ///
-/// `payload` is a dense index into [`Writer::payload_starts`], assigned in
-/// arrival order at `add_tile` time, and not a staged byte offset. That is
-/// what lets the sorting pass resolve a payload's final offset through a
-/// `Vec` rather than a `HashMap<u64, u64>` keyed on the staged offset, which
-/// at ten million distinct payloads was the second largest allocation in the
-/// writer.
+/// `data_offset` used to be a dense payload index, which meant the writer had
+/// to keep a `payload_starts: Vec<u64>` to turn that index back into an offset
+/// and a length, and a `final_offsets: Vec<u64>` to translate it again at
+/// placement. Both of those grew one entry per distinct payload. The offset is
+/// the same eight bytes as the index, so the record is the same 20 on disk and
+/// the same 24 in memory, and the two vectors are simply gone (issue #1138).
+///
+/// It also makes placement cheaper rather than dearer. A record whose offset
+/// is absent from [`RepeatTable`] is referenced exactly once, so it cannot
+/// already have been placed: assign the next offset and move on, with no
+/// lookup at all. That is every tile of a photograph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct Spill {
     tile_id: u64,
-    payload: u64,
+    data_offset: u64,
     length: u32,
 }
 
@@ -907,7 +922,7 @@ impl Spill {
     fn encode(&self) -> [u8; SPILL_RECORD_BYTES] {
         let mut out = [0u8; SPILL_RECORD_BYTES];
         out[0..8].copy_from_slice(&self.tile_id.to_le_bytes());
-        out[8..16].copy_from_slice(&self.payload.to_le_bytes());
+        out[8..16].copy_from_slice(&self.data_offset.to_le_bytes());
         out[16..20].copy_from_slice(&self.length.to_le_bytes());
         out
     }
@@ -915,7 +930,7 @@ impl Spill {
     fn decode(bytes: &[u8; SPILL_RECORD_BYTES]) -> Self {
         Self {
             tile_id: u64::from_le_bytes(bytes[0..8].try_into().expect("8 bytes")),
-            payload: u64::from_le_bytes(bytes[8..16].try_into().expect("8 bytes")),
+            data_offset: u64::from_le_bytes(bytes[8..16].try_into().expect("8 bytes")),
             length: u32::from_le_bytes(bytes[16..20].try_into().expect("4 bytes")),
         }
     }
@@ -959,11 +974,11 @@ pub struct Writer<W: Write + Seek> {
     /// Staged offsets that more than one tile points at, so finalization can
     /// tell a payload it has placed already from one it has not.
     repeats: RepeatTable,
-    /// Where each distinct payload starts in the staging file, in index order,
-    /// **plus a sentinel** equal to the staged length. So payload `i` occupies
-    /// `payload_starts[i]..payload_starts[i + 1]` and there is exactly one
-    /// record of where a payload is and how long it is.
-    payload_starts: Vec<u64>,
+    /// How many bytes of payload are staged, which is where the next one
+    /// goes.
+    staged_len: u64,
+    /// How many payloads have been staged.
+    staged_payloads: u64,
     /// Records not yet written to a run.
     sort_buffer: Vec<Spill>,
     /// Runs already written to the log.
@@ -984,8 +999,8 @@ impl<W: Write + Seek> std::fmt::Debug for Writer<W> {
             .field("base", &self.base)
             .field("destination", &self.destination)
             .field("tiles", &self.tile_count)
-            .field("staged_payloads", &self.payload_count())
-            .field("staged_bytes", &self.staged_len())
+            .field("staged_payloads", &self.staged_payloads)
+            .field("staged_bytes", &self.staged_len)
             .field("failed", &self.failed)
             .finish_non_exhaustive()
     }
@@ -1069,10 +1084,8 @@ impl<W: Write + Seek> Writer<W> {
             log_len: 0,
             window: DedupeWindow::with_sets(sets),
             repeats: RepeatTable::with_sets(sets),
-            // The sentinel, which is what makes `payload_starts` self
-            // describing: an empty table still says the staging file is zero
-            // bytes long.
-            payload_starts: vec![0],
+            staged_len: 0,
+            staged_payloads: 0,
             sort_buffer: Vec::new(),
             runs: Vec::new(),
             failed: None,
@@ -1122,8 +1135,8 @@ impl<W: Write + Seek> Writer<W> {
             value: bytes.len() as u64,
         })?;
 
-        let payload = match self.window.get(&content_hash) {
-            Some((index, stored)) => {
+        let data_offset = match self.window.get(&content_hash) {
+            Some((offset, stored)) => {
                 if stored != length {
                     return Err(PmTilesError::ContentHashMismatch { length, stored });
                 }
@@ -1131,12 +1144,11 @@ impl<W: Write + Seek> Writer<W> {
                 // will have to recognise it the second time it reaches it.
                 // Nothing is marked for a payload only one tile ever names,
                 // which is every tile of a photograph.
-                self.repeats.mark(self.payload_starts[index as usize]);
-                index
+                self.repeats.mark(offset);
+                offset
             }
             None => {
-                let index = self.payload_count();
-                let offset = self.staged_len();
+                let offset = self.staged_len;
                 // Everything from here down can leave bytes behind, so it is
                 // latched.
                 let written = self
@@ -1151,16 +1163,17 @@ impl<W: Write + Seek> Writer<W> {
                         what: "the staged payload region",
                     });
                 let end = self.latch("staging a payload", end)?;
-                self.payload_starts.push(end);
-                self.window.insert(content_hash, index, length);
-                index
+                self.staged_len = end;
+                self.staged_payloads += 1;
+                self.window.insert(content_hash, offset, length);
+                offset
             }
         };
 
         // `flush_run` latches its own write, so this is only a `?`.
         self.push_spill(Spill {
             tile_id,
-            payload,
+            data_offset,
             length,
         })?;
 
@@ -1191,21 +1204,6 @@ impl<W: Write + Seek> Writer<W> {
         }
     }
 
-    /// How many bytes of payload are staged. The sentinel at the end of
-    /// `payload_starts` is that number, so there is no second copy of it to
-    /// drift.
-    fn staged_len(&self) -> u64 {
-        *self
-            .payload_starts
-            .last()
-            .expect("the payload table always carries its sentinel")
-    }
-
-    /// How many distinct payloads are staged, as the index the next one gets.
-    fn payload_count(&self) -> u64 {
-        (self.payload_starts.len() - 1) as u64
-    }
-
     /// How many tiles have been added so far. Runs are not collapsed until
     /// [`finish`](Writer::finish), so this counts addressed tiles.
     pub fn tile_count(&self) -> u64 {
@@ -1220,7 +1218,7 @@ impl<W: Write + Seek> Writer<W> {
     /// [`WriterOptions::dedupe_memory_bytes`]) and the reason this is no
     /// longer called a count of *distinct* payloads.
     pub fn distinct_payload_count(&self) -> usize {
-        self.payload_count() as usize
+        self.staged_payloads as usize
     }
 
     /// How many sorted runs have been spilled to the index log so far.
@@ -1372,11 +1370,20 @@ struct Plan {
     entries_path: PathBuf,
     entry_count: u64,
     addressed_tiles: u64,
-    /// Distinct payloads, in the order they are written into the archive, as
-    /// indices into [`Writer::payload_starts`]. One `u64` each rather than the
-    /// `(u64, u32)` pair this used to hold, which padded to 16 bytes.
-    order: Vec<u64>,
+    /// The payloads the archive writes, in the order it writes them.
+    order: Vec<Placement>,
     tile_data_length: u64,
+}
+
+/// One payload the data region carries, as the archive write needs it.
+///
+/// A staged offset and a length, which is everything: the bytes are at that
+/// offset in the staging file and there are that many of them. This used to
+/// be an index into a table the writer had to keep beside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Placement {
+    data_offset: u64,
+    length: u32,
 }
 
 /// The leaf section, when there is one.
@@ -1396,14 +1403,7 @@ impl<W: Write + Seek> Writer<W> {
         self.scratch.push(entries_path.clone());
         let mut out = BufWriter::new(File::create(&entries_path)?);
 
-        // Final offsets, indexed by the dense payload index rather than looked
-        // up by staged offset. This used to be a `HashMap<u64, u64>`, which at
-        // ten million distinct payloads is 285 MB of hash table against 80 MB
-        // of `Vec`, and it cost a hash lookup in the one pass that sees every
-        // tile.
-        let payload_count = self.payload_count() as usize;
-        let mut final_offsets: Vec<u64> = vec![UNPLACED; payload_count];
-        let mut order: Vec<u64> = Vec::with_capacity(payload_count);
+        let mut order: Vec<Placement> = Vec::new();
         let mut next_offset: u64 = 0;
 
         let mut entry_count: u64 = 0;
@@ -1421,24 +1421,30 @@ impl<W: Write + Seek> Writer<W> {
             }
             previous_id = Some(record.tile_id);
 
-            let slot = usize::try_from(record.payload).map_err(|_| PmTilesError::Overflow {
-                what: "a payload index",
-            })?;
-            let placed = *final_offsets.get(slot).ok_or(PmTilesError::Overflow {
-                what: "a payload index",
-            })?;
-            let offset = if placed == UNPLACED {
-                let offset = next_offset;
-                next_offset = next_offset.checked_add(u64::from(record.length)).ok_or(
-                    PmTilesError::Overflow {
-                        what: "the tile data section",
-                    },
-                )?;
-                final_offsets[slot] = offset;
-                order.push(record.payload);
-                offset
-            } else {
-                placed
+            // Where this payload goes. A staged offset the repeat table has
+            // never heard of is referenced exactly once, so it cannot have
+            // been placed already and there is nothing to look up and nothing
+            // to remember: take the next offset and move on. That is every
+            // tile of a photograph, and it is why finalization no longer
+            // allocates anything per payload.
+            let offset = match self.repeats.placement(record.data_offset) {
+                Some(slot) if *slot != UNPLACED => *slot,
+                marked => {
+                    let offset = next_offset;
+                    next_offset = next_offset.checked_add(u64::from(record.length)).ok_or(
+                        PmTilesError::Overflow {
+                            what: "the tile data section",
+                        },
+                    )?;
+                    if let Some(slot) = marked {
+                        *slot = offset;
+                    }
+                    order.push(Placement {
+                        data_offset: record.data_offset,
+                        length: record.length,
+                    });
+                    offset
+                }
             };
 
             addressed += 1;
@@ -1734,15 +1740,7 @@ impl<W: Write + Seek> Writer<W> {
         let mut staged_data = BufReader::new(staged_data);
         let mut buffer = vec![0u8; COPY_BUFFER_BYTES];
 
-        // Destructured rather than reached through `self`, because the copy
-        // loop below reads the payload table while the sink is borrowed
-        // mutably, and those are two different fields.
-        let Self {
-            sink,
-            payload_starts,
-            ..
-        } = self;
-        let sink = sink.as_mut().expect("a sink exists by now");
+        let sink = self.sink.as_mut().expect("a sink exists by now");
         let out = sink.as_write();
 
         out.write_all(&header.encode())?;
@@ -1752,13 +1750,15 @@ impl<W: Write + Seek> Writer<W> {
             let mut leaf_file = BufReader::new(File::open(&leaves.path)?);
             copy_exactly(&mut leaf_file, out, leaves.length, &mut buffer)?;
         }
-        for &payload in &plan.order {
-            let at = payload as usize;
-            let start = payload_starts[at];
-            let length = payload_starts[at + 1] - start;
+        for placement in &plan.order {
             probe::staged_seek();
-            staged_data.seek(SeekFrom::Start(start))?;
-            copy_exactly(&mut staged_data, out, length, &mut buffer)?;
+            staged_data.seek(SeekFrom::Start(placement.data_offset))?;
+            copy_exactly(
+                &mut staged_data,
+                out,
+                u64::from(placement.length),
+                &mut buffer,
+            )?;
         }
         out.flush()?;
         Ok(())
@@ -2189,7 +2189,7 @@ mod tests {
     fn a_spill_record_round_trips_through_its_twenty_bytes() {
         let record = Spill {
             tile_id: u64::MAX - 3,
-            payload: 1 << 40,
+            data_offset: 1 << 40,
             length: u32::MAX,
         };
         assert_eq!(Spill::decode(&record.encode()), record);
@@ -2225,7 +2225,7 @@ mod tests {
                 file.write_all(
                     &Spill {
                         tile_id: *id,
-                        payload: *id * 10,
+                        data_offset: *id * 10,
                         length: 1,
                     }
                     .encode(),
@@ -2329,12 +2329,12 @@ mod tests {
         // recorded on the far side of them.
         let staged_path = suffixed(&w.base, ".data");
         let on_disk = std::fs::metadata(&staged_path).unwrap().len();
-        assert_eq!(w.staged_len(), 4096, "only the first payload is accounted");
+        assert_eq!(w.staged_len, 4096, "only the first payload is accounted");
         assert!(
-            on_disk > w.staged_len(),
+            on_disk > w.staged_len,
             "the staging file is {on_disk} bytes and the writer accounts for {}, so no \
              partial write happened and this test is not testing anything",
-            w.staged_len()
+            w.staged_len
         );
 
         // The retry is refused rather than appended after the orphan.
@@ -2493,7 +2493,7 @@ mod tests {
                 file.write_all(
                     &Spill {
                         tile_id: run + step * MAX_MERGE_FANIN as u64,
-                        payload: run,
+                        data_offset: run,
                         length: 1,
                     }
                     .encode(),
@@ -2556,7 +2556,7 @@ mod tests {
             file.write_all(
                 &Spill {
                     tile_id: id,
-                    payload: id,
+                    data_offset: id,
                     length: 1,
                 }
                 .encode(),
@@ -2652,10 +2652,16 @@ mod tests {
         );
     }
 
-    /// The payload table answers both questions the staged-offset map used to.
+    /// The window answers both questions the payload table used to.
+    ///
+    /// `payload_starts` was a `Vec<u64>` of where every payload began, plus a
+    /// sentinel, so an offset and a length both came out of it by
+    /// subtraction. It grew one entry per payload for the whole run. The
+    /// window carries both numbers for the payloads it still remembers, and
+    /// the staged length is a counter.
     #[test]
     #[cfg_attr(miri, ignore)]
-    fn the_payload_table_carries_every_offset_and_length() {
+    fn the_window_carries_every_offset_and_length() {
         let dir = temp_dir();
         let mut sink = std::io::Cursor::new(Vec::new());
         let mut w = Writer::try_new(&mut sink, dir.path(), WriterOptions::default()).unwrap();
@@ -2665,27 +2671,22 @@ mod tests {
             w.add_tile(3, index as u32, 0, payload, content_hash(payload))
                 .unwrap();
         }
-        // A duplicate, which must not extend the table.
+        // A duplicate, which must not stage a second payload.
         w.add_tile(3, 6, 0, &payloads[2], content_hash(&payloads[2]))
             .unwrap();
 
-        assert_eq!(w.payload_count(), 5);
+        assert_eq!(w.staged_payloads, 5);
         assert_eq!(w.distinct_payload_count(), 5);
         let mut expected_offset = 0u64;
-        for (index, payload) in payloads.iter().enumerate() {
+        for payload in &payloads {
             assert_eq!(
-                w.payload_starts[index + 1] - w.payload_starts[index],
-                payload.len() as u64
+                w.window.get(&content_hash(payload)),
+                Some((expected_offset, payload.len() as u32)),
+                "the window should know where this payload is and how long it is"
             );
-            assert_eq!(w.payload_starts[index], expected_offset);
             expected_offset += payload.len() as u64;
         }
-        assert_eq!(w.staged_len(), expected_offset);
-        assert_eq!(
-            *w.payload_starts.last().unwrap(),
-            expected_offset,
-            "the sentinel is the staged length and there is no second copy of it"
-        );
+        assert_eq!(w.staged_len, expected_offset);
     }
 
     /// A `finish` issues exactly one durability barrier.

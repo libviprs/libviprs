@@ -301,17 +301,17 @@ struct Measured {
 /// one run-length entry. A pyramid of identical tiles is one entry and no leaf
 /// directories at any size, which would make every number here a measurement
 /// of nothing.
+///
+/// They are generated per tile into one reusable buffer rather than built into
+/// a `Vec` up front. Up front, the harness's own table is 104 bytes a distinct
+/// payload, which is nothing at 257 and 208 MB at two million, and it is live
+/// while *other* tests in this binary are measuring: the counter is
+/// process-wide, `cargo test` runs these in parallel threads, and that table
+/// is allocated before `start_measuring` takes the lock. Adding a two-million
+/// cell to this file made three unrelated tests fail with peaks that had
+/// nothing to do with the writer.
 fn measure_write(tiles: u64, distinct: u64, sort_buffer_records: usize) -> Measured {
     let scratch = tempfile::tempdir().expect("a scratch directory");
-
-    let payloads: Vec<(Vec<u8>, [u8; 32])> = (0..distinct)
-        .map(|i| {
-            let mut bytes = vec![0u8; 64];
-            bytes[..8].copy_from_slice(&i.to_le_bytes());
-            let hash = content_hash(&bytes);
-            (bytes, hash)
-        })
-        .collect();
 
     // The smallest zoom whose grid addresses `tiles`, so one zoom holds the
     // whole profile and the tile ids stay contiguous. z=9 is a 512x512 grid
@@ -331,12 +331,14 @@ fn measure_write(tiles: u64, distinct: u64, sort_buffer_records: usize) -> Measu
 
     let mut writer =
         Writer::try_new(Discard::default(), scratch.path(), options).expect("the writer opens");
+    let mut bytes = vec![0u8; 64];
     for index in 0..tiles {
         let x = (index % side) as u32;
         let y = (index / side) as u32;
-        let (bytes, hash) = &payloads[(index % distinct) as usize];
+        bytes[..8].copy_from_slice(&(index % distinct).to_le_bytes());
+        let hash = content_hash(&bytes);
         writer
-            .add_tile(zoom, x, y, bytes, *hash)
+            .add_tile(zoom, x, y, &bytes, hash)
             .expect("every tile is inside the grid");
     }
     let before_finalize = live_over(baseline);
