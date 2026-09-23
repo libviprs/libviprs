@@ -31,9 +31,8 @@
 //! buffer, which is the part that genuinely does not grow, is 24 MB of it.
 //! Two percent. Do not read the sort buffer as this writer's memory ceiling.
 //!
-//! Most of the rest is the content-hash table, which is inherent to storing
-//! each payload once and is the same bound
-//! [`DedupeIndex`](crate::dedupe::DedupeIndex) already carries. The other
+//! Most of the rest was the content-hash table, and issue #1137 replaced it
+//! with a fixed-capacity window the caller sizes. The other
 //! three tables are as small as they can be made: the payload table is one
 //! `u64` a payload plus a sentinel, and an offset and a length both come out
 //! of it by subtraction; the final-offset lookup is a `Vec` indexed by a dense
@@ -104,8 +103,9 @@
 //! a capped fan-in rather than holding one open file per run.
 //!
 //! **Not** bounded by the tile count but bounded by the number of *distinct
-//! payloads*: the content hash table, the payload table, and the final-offset
-//! lookup. See the numbers at the top of this page.
+//! payloads*: the payload table and the final-offset lookup. The dedupe window
+//! is bounded by neither, because the caller sizes it. See the numbers at the
+//! top of this page.
 //!
 //! # A failed write is never published
 //!
@@ -139,7 +139,7 @@
 //! ```
 
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::BinaryHeap;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -240,10 +240,29 @@ const COPY_BUFFER_BYTES: usize = 64 * 1024;
 /// smallest window there is holds exactly this many.
 pub const DEDUPE_WINDOW_WAYS: usize = 8;
 
+/// What one tracked payload costs, across the window and the repeat table.
+///
+/// A [`WindowSlot`] is 48 bytes, a [`RepeatSlot`] is 16, and each table spends
+/// four bytes of recency order on every set of [`DEDUPE_WINDOW_WAYS`], which
+/// is one more byte a payload between them.
+/// `the_dedupe_budget_buys_what_it_says_it_buys` holds this against
+/// `size_of`, so it cannot drift from the types it describes.
+const DEDUPE_BYTES_PER_PAYLOAD: usize = 65;
+
 /// How much memory the dedupe window spends when the caller says nothing.
 ///
-/// Placeholder until #1137 gives it a window to size, which is also where the
-/// reasoning for the number belongs.
+/// Eight mebibytes, which tracks 129056 payloads. The number is a judgement
+/// about which jobs the window should still be exact for rather than an
+/// arithmetic result, so here is the judgement. A photograph has no duplicate
+/// tiles at all, so any window is the right size for it. A pyramid of mostly
+/// blank tiles has a handful of distinct payloads that recur constantly, so
+/// they never leave a window of any size. What this number decides is the case
+/// in between, a pyramid with more than 129056 distinct payloads that also
+/// repeat at long range, and eight mebibytes is a tenth of the sort buffer's
+/// default and small enough that no caller has to think about it.
+///
+/// A caller who knows their input repeats at long range raises it, and pays
+/// what they raise it by.
 const DEFAULT_DEDUPE_MEMORY_BYTES: usize = 8 * 1024 * 1024;
 
 /// "This payload has not been placed in the data region yet."
@@ -374,6 +393,227 @@ fn sync_data(file: &File) -> std::io::Result<()> {
 fn sync_all(file: &File) -> std::io::Result<()> {
     probe::sync();
     file.sync_all()
+}
+
+// ---------------------------------------------------------------------------
+// The dedupe window
+// ---------------------------------------------------------------------------
+
+/// One payload the window still remembers.
+///
+/// `length` doubles as the occupancy flag: [`Writer::add_tile`] refuses an
+/// empty payload, twice, because the spec forbids one, so no live entry can
+/// ever wear a zero here and the alternative is a byte of padding in a 48-byte
+/// slot that is already exactly six words.
+#[derive(Clone, Copy)]
+struct WindowSlot {
+    hash: [u8; 32],
+    payload: u64,
+    length: u32,
+}
+
+impl WindowSlot {
+    const EMPTY: Self = Self {
+        hash: [0; 32],
+        payload: 0,
+        length: 0,
+    };
+
+    fn is_empty(&self) -> bool {
+        self.length == 0
+    }
+}
+
+/// A set's ways, most recently used first, one nibble each.
+///
+/// Eight ways of three bits would fit in 24 bits, but nibbles make the shift
+/// arithmetic a shift by four and the whole thing fits a `u32` either way.
+/// `0x7654_3210` is the identity, so an untouched set evicts way 7 first and
+/// fills from the top down, which is why [`DedupeWindow::insert`] can take the
+/// eviction candidate and the first free slot from the same end.
+const RECENCY_IDENTITY: u32 = 0x7654_3210;
+
+/// Move `way` to the front of `order`, leaving the rest in their relative
+/// positions.
+fn touch(order: u32, way: usize) -> u32 {
+    let way = way as u32;
+    let mut out = way;
+    let mut shift = 4;
+    for slot in 0..DEDUPE_WINDOW_WAYS {
+        let other = (order >> (4 * slot)) & 0xF;
+        if other != way {
+            out |= other << shift;
+            shift += 4;
+        }
+    }
+    out
+}
+
+/// The way `order` says has gone longest without a hit.
+fn least_recent(order: u32) -> usize {
+    ((order >> (4 * (DEDUPE_WINDOW_WAYS - 1))) & 0xF) as usize
+}
+
+/// The payloads this writer can still deduplicate against.
+///
+/// Fixed capacity, [`DEDUPE_WINDOW_WAYS`]-way set associative, LRU inside the
+/// set. It replaced a `HashMap<[u8; 32], u64>` holding every payload the
+/// writer had ever seen, which was the whole of its remaining unbounded growth
+/// and, at ten million distinct payloads, the largest single allocation in the
+/// process (issue #1137).
+///
+/// What that costs is exactness at long range: two identical payloads far
+/// enough apart are stored twice now. What it buys, besides the bound, is
+/// speed. There is no rehash and no doubling transient, and a lookup touches
+/// one cache line instead of chasing a table of hundreds of megabytes.
+struct DedupeWindow {
+    slots: Box<[WindowSlot]>,
+    recency: Box<[u32]>,
+    sets: usize,
+}
+
+impl DedupeWindow {
+    fn with_sets(sets: usize) -> Self {
+        Self {
+            slots: vec![WindowSlot::EMPTY; sets * DEDUPE_WINDOW_WAYS].into_boxed_slice(),
+            recency: vec![RECENCY_IDENTITY; sets].into_boxed_slice(),
+            sets,
+        }
+    }
+
+    /// Which set a hash lands in.
+    ///
+    /// Multiply-shift rather than a mask, so the set count is whatever the
+    /// budget bought instead of the largest power of two under it. Half a
+    /// window is a real cost and this is two instructions.
+    fn set_of(&self, hash: &[u8; 32]) -> usize {
+        let key = u64::from_le_bytes(hash[..8].try_into().expect("8 bytes"));
+        ((u128::from(key) * self.sets as u128) >> 64) as usize
+    }
+
+    /// The payload this hash was last staged as, if the window still holds it.
+    fn get(&mut self, hash: &[u8; 32]) -> Option<(u64, u32)> {
+        let set = self.set_of(hash);
+        let base = set * DEDUPE_WINDOW_WAYS;
+        for way in 0..DEDUPE_WINDOW_WAYS {
+            let slot = self.slots[base + way];
+            if !slot.is_empty() && slot.hash == *hash {
+                self.recency[set] = touch(self.recency[set], way);
+                return Some((slot.payload, slot.length));
+            }
+        }
+        None
+    }
+
+    /// Remember a payload, evicting the set's least recently used entry if
+    /// every way is taken.
+    fn insert(&mut self, hash: [u8; 32], payload: u64, length: u32) {
+        let set = self.set_of(&hash);
+        let base = set * DEDUPE_WINDOW_WAYS;
+        let way = (0..DEDUPE_WINDOW_WAYS)
+            .find(|way| self.slots[base + way].is_empty())
+            .unwrap_or_else(|| least_recent(self.recency[set]));
+        self.slots[base + way] = WindowSlot {
+            hash,
+            payload,
+            length,
+        };
+        self.recency[set] = touch(self.recency[set], way);
+    }
+}
+
+/// One staged offset a second tile has already pointed at.
+///
+/// `staged` is the key and [`NO_STAGED_OFFSET`] marks the slot empty: a real
+/// staged offset cannot be `u64::MAX`, because the payload at it would have to
+/// end past the end of a `u64` and the `checked_add` in
+/// [`Writer::add_tile`] refuses that before the offset is ever stored.
+#[derive(Clone, Copy)]
+struct RepeatSlot {
+    staged: u64,
+    // Written here and read by the placement pass in #1138, which is the
+    // issue this table exists for.
+    #[expect(dead_code, reason = "the placement pass that reads it is issue #1138")]
+    placed: u64,
+}
+
+/// "No payload is staged here."
+const NO_STAGED_OFFSET: u64 = u64::MAX;
+
+/// The staged offsets that more than one tile points at.
+///
+/// Finalization needs to know, for a payload it is about to place, whether it
+/// has placed that payload already. Asking that of every payload means a table
+/// with an entry per payload, which is the growth this epic exists to remove.
+/// So `add_tile` marks an offset here the moment a second tile points at it,
+/// and finalization only has to look the marked ones up: a record whose offset
+/// is absent was referenced exactly once, so it cannot already have been
+/// placed (issue #1137, consumed by #1138).
+///
+/// It is capped like the window, and for the same reason. An offset that falls
+/// out of it is stored twice rather than shared, which is the same trade the
+/// window makes and produces the same ordinary archive.
+struct RepeatTable {
+    slots: Box<[RepeatSlot]>,
+    recency: Box<[u32]>,
+    sets: usize,
+}
+
+impl RepeatTable {
+    fn with_sets(sets: usize) -> Self {
+        Self {
+            slots: vec![
+                RepeatSlot {
+                    staged: NO_STAGED_OFFSET,
+                    placed: UNPLACED,
+                };
+                sets * DEDUPE_WINDOW_WAYS
+            ]
+            .into_boxed_slice(),
+            recency: vec![RECENCY_IDENTITY; sets].into_boxed_slice(),
+            sets,
+        }
+    }
+
+    /// Which set an offset lands in.
+    ///
+    /// Staged offsets are dense and ascending, so they are their own worst
+    /// hash: the low bits repeat with the payload size. The multiply spreads
+    /// them before the reduction does its work.
+    fn set_of(&self, staged: u64) -> usize {
+        let key = staged.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        ((u128::from(key) * self.sets as u128) >> 64) as usize
+    }
+
+    /// Record that more than one tile points at this offset.
+    fn mark(&mut self, staged: u64) {
+        let set = self.set_of(staged);
+        let base = set * DEDUPE_WINDOW_WAYS;
+        for way in 0..DEDUPE_WINDOW_WAYS {
+            if self.slots[base + way].staged == staged {
+                self.recency[set] = touch(self.recency[set], way);
+                return;
+            }
+        }
+        let way = (0..DEDUPE_WINDOW_WAYS)
+            .find(|way| self.slots[base + way].staged == NO_STAGED_OFFSET)
+            .unwrap_or_else(|| least_recent(self.recency[set]));
+        self.slots[base + way] = RepeatSlot {
+            staged,
+            placed: UNPLACED,
+        };
+        self.recency[set] = touch(self.recency[set], way);
+    }
+}
+
+/// How many sets a deduplication budget buys.
+///
+/// At least one, whatever the budget. A window of no ways would store every
+/// duplicate twice, which is a writer nobody asked for, and the floor makes
+/// `with_dedupe_memory_bytes(0)` mean "the smallest window there is" rather
+/// than "no window".
+fn dedupe_sets(budget: usize) -> usize {
+    (budget / (DEDUPE_WINDOW_WAYS * DEDUPE_BYTES_PER_PAYLOAD)).max(1)
 }
 
 // ---------------------------------------------------------------------------
@@ -710,12 +950,15 @@ pub struct Writer<W: Write + Seek> {
     log: Option<Staging>,
     log_len: u64,
 
-    /// Distinct payloads: content hash to a dense index.
+    /// The payloads this writer can still deduplicate against.
     ///
-    /// The value used to be `(staged offset, length)`, which is 16 bytes and
-    /// pads the whole entry to 48. An index is 8, and both of the numbers it
-    /// replaced are one subtraction away in `payload_starts`.
-    payloads: HashMap<[u8; 32], u64>,
+    /// Fixed capacity: see [`DedupeWindow`]. It used to be a
+    /// `HashMap<[u8; 32], u64>` of every payload ever seen, which is the
+    /// allocation issue #1137 removed.
+    window: DedupeWindow,
+    /// Staged offsets that more than one tile points at, so finalization can
+    /// tell a payload it has placed already from one it has not.
+    repeats: RepeatTable,
     /// Where each distinct payload starts in the staging file, in index order,
     /// **plus a sentinel** equal to the staged length. So payload `i` occupies
     /// `payload_starts[i]..payload_starts[i + 1]` and there is exactly one
@@ -741,7 +984,7 @@ impl<W: Write + Seek> std::fmt::Debug for Writer<W> {
             .field("base", &self.base)
             .field("destination", &self.destination)
             .field("tiles", &self.tile_count)
-            .field("distinct_payloads", &self.payloads.len())
+            .field("staged_payloads", &self.payload_count())
             .field("staged_bytes", &self.staged_len())
             .field("failed", &self.failed)
             .finish_non_exhaustive()
@@ -810,6 +1053,7 @@ impl<W: Write + Seek> Writer<W> {
 
     /// Open the two scratch files every flavour needs.
     fn open_scratch(base: PathBuf, options: WriterOptions) -> Result<Self, PmTilesError> {
+        let sets = dedupe_sets(options.dedupe_memory_bytes);
         let data_path = suffixed(&base, ".data");
         let log_path = suffixed(&base, ".idx");
         let staged = File::create(&data_path)?;
@@ -823,7 +1067,8 @@ impl<W: Write + Seek> Writer<W> {
             staged: Some(Staging::Real(BufWriter::new(staged))),
             log: Some(Staging::Real(BufWriter::new(log))),
             log_len: 0,
-            payloads: HashMap::new(),
+            window: DedupeWindow::with_sets(sets),
+            repeats: RepeatTable::with_sets(sets),
             // The sentinel, which is what makes `payload_starts` self
             // describing: an empty table still says the staging file is zero
             // bytes long.
@@ -877,12 +1122,16 @@ impl<W: Write + Seek> Writer<W> {
             value: bytes.len() as u64,
         })?;
 
-        let payload = match self.payloads.get(&content_hash).copied() {
-            Some(index) => {
-                let stored = self.payload_length(index);
+        let payload = match self.window.get(&content_hash) {
+            Some((index, stored)) => {
                 if stored != length {
                     return Err(PmTilesError::ContentHashMismatch { length, stored });
                 }
+                // A second tile is pointing at this payload, so finalization
+                // will have to recognise it the second time it reaches it.
+                // Nothing is marked for a payload only one tile ever names,
+                // which is every tile of a photograph.
+                self.repeats.mark(self.payload_starts[index as usize]);
                 index
             }
             None => {
@@ -903,7 +1152,7 @@ impl<W: Write + Seek> Writer<W> {
                     });
                 let end = self.latch("staging a payload", end)?;
                 self.payload_starts.push(end);
-                self.payloads.insert(content_hash, index);
+                self.window.insert(content_hash, index, length);
                 index
             }
         };
@@ -957,22 +1206,21 @@ impl<W: Write + Seek> Writer<W> {
         (self.payload_starts.len() - 1) as u64
     }
 
-    /// The staged length of one distinct payload.
-    fn payload_length(&self, index: u64) -> u32 {
-        let at = index as usize;
-        let span = self.payload_starts[at + 1] - self.payload_starts[at];
-        u32::try_from(span).expect("a payload length came in as a u32 and has not changed")
-    }
-
     /// How many tiles have been added so far. Runs are not collapsed until
     /// [`finish`](Writer::finish), so this counts addressed tiles.
     pub fn tile_count(&self) -> u64 {
         self.tile_count
     }
 
-    /// How many distinct payloads are staged so far.
+    /// How many payloads are staged so far.
+    ///
+    /// One per distinct payload the dedupe window caught. Two identical
+    /// payloads far enough apart that the window forgot the first are two
+    /// payloads here, which is the trade the window makes (see
+    /// [`WriterOptions::dedupe_memory_bytes`]) and the reason this is no
+    /// longer called a count of *distinct* payloads.
     pub fn distinct_payload_count(&self) -> usize {
-        self.payloads.len()
+        self.payload_count() as usize
     }
 
     /// How many sorted runs have been spilled to the index log so far.
@@ -1871,6 +2119,72 @@ mod tests {
             .count()
     }
 
+    /// The per-payload figure the budget is divided by is the one the types
+    /// really cost.
+    ///
+    /// `DEDUPE_BYTES_PER_PAYLOAD` is a constant a caller's budget is divided
+    /// by, so a slot that grew a field would quietly hand out a window bigger
+    /// than the budget asked for. Nothing else in the writer would notice.
+    #[test]
+    fn the_dedupe_budget_buys_what_it_says_it_buys() {
+        let per_payload = std::mem::size_of::<WindowSlot>()
+            + std::mem::size_of::<RepeatSlot>()
+            // Two recency words a set, spread over the set's ways.
+            + 2 * std::mem::size_of::<u32>() / DEDUPE_WINDOW_WAYS;
+        assert_eq!(
+            per_payload, DEDUPE_BYTES_PER_PAYLOAD,
+            "the slots cost {per_payload} bytes a payload and the budget is divided by \
+             {DEDUPE_BYTES_PER_PAYLOAD}"
+        );
+
+        // And the division lands where it should, at the two ends that matter.
+        assert_eq!(dedupe_sets(0), 1, "the smallest window is still a window");
+        assert_eq!(
+            dedupe_sets(DEDUPE_BYTES_PER_PAYLOAD * DEDUPE_WINDOW_WAYS * 100),
+            100
+        );
+        let sets = dedupe_sets(DEFAULT_DEDUPE_MEMORY_BYTES);
+        let spent = sets * DEDUPE_WINDOW_WAYS * DEDUPE_BYTES_PER_PAYLOAD;
+        assert!(
+            spent <= DEFAULT_DEDUPE_MEMORY_BYTES,
+            "the default window spends {spent} against a budget of {DEFAULT_DEDUPE_MEMORY_BYTES}"
+        );
+    }
+
+    /// The window evicts the way that has gone longest without a hit, and a
+    /// hit is what makes a way recent.
+    ///
+    /// Driven directly rather than through an archive, because the archive
+    /// test can only see the two ends of this and the thing in the middle,
+    /// that a *hit* renews an entry rather than only an insert, is what makes
+    /// a blank tile survive a window it does not fit in.
+    #[test]
+    fn a_hit_renews_an_entry_and_the_oldest_way_is_the_one_that_goes() {
+        let hash = |n: u8| [n; 32];
+        let mut window = DedupeWindow::with_sets(1);
+        for n in 0..DEDUPE_WINDOW_WAYS as u8 {
+            window.insert(hash(n), u64::from(n), 1);
+        }
+        // Way 0 is the oldest, so renew it and fill the set once more. What
+        // goes is way 1, which is now the oldest.
+        assert_eq!(window.get(&hash(0)), Some((0, 1)));
+        window.insert(hash(100), 100, 1);
+        assert_eq!(
+            window.get(&hash(0)),
+            Some((0, 1)),
+            "a hit should have renewed the oldest entry"
+        );
+        assert_eq!(
+            window.get(&hash(1)),
+            None,
+            "the entry that had gone longest without a hit should be the one evicted"
+        );
+        // And everything else is still there, so the eviction took one.
+        for n in 2..DEDUPE_WINDOW_WAYS as u8 {
+            assert_eq!(window.get(&hash(n)), Some((u64::from(n), 1)), "way {n}");
+        }
+    }
+
     #[test]
     fn a_spill_record_round_trips_through_its_twenty_bytes() {
         let record = Spill {
@@ -2359,7 +2673,10 @@ mod tests {
         assert_eq!(w.distinct_payload_count(), 5);
         let mut expected_offset = 0u64;
         for (index, payload) in payloads.iter().enumerate() {
-            assert_eq!(w.payload_length(index as u64), payload.len() as u32);
+            assert_eq!(
+                w.payload_starts[index + 1] - w.payload_starts[index],
+                payload.len() as u64
+            );
             assert_eq!(w.payload_starts[index], expected_offset);
             expected_offset += payload.len() as u64;
         }
