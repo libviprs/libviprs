@@ -51,6 +51,16 @@
 //! what makes the round-trip cells in this file worth something: they are read
 //! back by a decoder that shares no code with the encoder under test.
 //!
+//! Worth knowing what that decoder will not tell you, though. `zune-jpeg`
+//! fills past the end of a truncated entropy segment and hands back an image;
+//! libjpeg says `Corrupt JPEG data: premature end of data segment` about the
+//! same file. A defect that cost this encoder its last symbol per scan was
+//! green through every round trip here and was found by running the output
+//! through `djpeg` while comparing sizes against the vips oracle. So the round
+//! trips are worth something, and they are not the whole check: output from a
+//! change to this file wants a pass through something stricter, and `vips` and
+//! `djpeg` are both on the machine this crate is developed on.
+//!
 //! # Two passes, and what they cost
 //!
 //! Building the Huffman tables from the image means counting the symbols
@@ -1345,6 +1355,35 @@ mod tests {
         // Same one bit, spelled with every bit above it set as well.
         wide.write(u16::MAX, 1);
         assert_eq!(clean.finish(), wide.finish());
+    }
+
+    /// Both ends of the quality range, in every mode.
+    ///
+    /// Quality 1 clamps every quantization entry to the 255 an 8-bit DQT can
+    /// spell, and quality 100 puts every one of them at 1, so the two ends
+    /// exercise the clamps in [`scaled_qtable`] from opposite directions and
+    /// produce the two extremes of coefficient magnitude. A 1x1 image is the
+    /// degenerate case on top of that: one real pixel and 63 replicated ones.
+    #[test]
+    fn both_ends_of_the_quality_range_round_trip() {
+        let src = drawing(64, 64);
+        for q in [1u8, 2, 10, 50, 99, 100] {
+            for mode in [JpegSubsample::Auto, JpegSubsample::Off, JpegSubsample::On] {
+                let bytes = encode(&src, 64, 64, image::ColorType::Rgb8, q, mode)
+                    .unwrap_or_else(|e| panic!("q{q} {mode:?} encodes: {e}"));
+                assert_eq!(decode(&bytes).dimensions(), (64, 64), "q{q} {mode:?}");
+            }
+            let one = encode(
+                &[7, 8, 9],
+                1,
+                1,
+                image::ColorType::Rgb8,
+                q,
+                JpegSubsample::Auto,
+            )
+            .unwrap_or_else(|e| panic!("a 1x1 raster at q{q} encodes: {e}"));
+            assert_eq!(decode(&one).dimensions(), (1, 1), "q{q} 1x1");
+        }
     }
 
     /// The refusals: the colour types `image_color_type` maps that JPEG has no
