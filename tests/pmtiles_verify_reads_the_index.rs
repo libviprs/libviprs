@@ -62,13 +62,43 @@ struct Request {
 struct Counting {
     bytes: Vec<u8>,
     requests: Mutex<Vec<Request>>,
+    /// What this reader answers for
+    /// [`RangeReader::is_local_file`](libviprs::pmtiles::RangeReader::is_local_file),
+    /// which is what decides whether a verify may take a tile's stored length
+    /// instead of its payload.
+    ///
+    /// Both answers are needed here and neither can be measured any other way.
+    /// A real `FileRangeReader` cannot count its own reads, so the local path
+    /// would have no cost measurement at all, and a real ranged transport is
+    /// not something this suite can stand up. So this double claims to be one
+    /// or the other and records what was asked for either way.
+    ///
+    /// A stand-in that lies about the one property under test is worth a
+    /// control, and it has one:
+    /// [`a_local_file_still_reads_lengths_rather_than_payloads`] runs the same
+    /// verify over a genuine file on disk and asserts the same outcome, so the
+    /// claim here is pinned against the real thing rather than only against
+    /// itself.
+    local: bool,
 }
 
 impl Counting {
+    /// A stand-in for an archive on a local filesystem.
     fn new(bytes: Vec<u8>) -> Self {
         Self {
             bytes,
             requests: Mutex::new(Vec::new()),
+            local: true,
+        }
+    }
+
+    /// A stand-in for an archive behind a ranged transport: same bytes, same
+    /// final size, and no filesystem underneath.
+    fn ranged(bytes: Vec<u8>) -> Self {
+        Self {
+            bytes,
+            requests: Mutex::new(Vec::new()),
+            local: false,
         }
     }
 
@@ -111,6 +141,10 @@ impl RangeReader for Counting {
 
     fn size(&self) -> io::Result<Option<u64>> {
         Ok(Some(self.bytes.len() as u64))
+    }
+
+    fn is_local_file(&self) -> bool {
+        self.local
     }
 }
 
@@ -233,16 +267,22 @@ fn payload_reads_are_visible_to_the_classifier() {
 // Finding 1: a verify reads lengths, not payloads
 // ---------------------------------------------------------------------------
 
-/// A verify over an archive whose transport reports a size fetches no tile
-/// payload at all.
+/// A verify over a local archive fetches no tile payload at all.
 ///
 /// The sweep needs two things per coordinate: that the archive holds one, and
-/// that what it holds is not zero bytes. The directory entry carries both, and
-/// `validate` has already bounds-checked every entry against the archive's
-/// real size, so the payload read proves nothing the walk did not.
+/// that what it holds is not zero bytes. The directory entry carries both, so
+/// on a local file, where an in-bounds read of an open handle is a read that
+/// succeeds, the payload read proves nothing the walk did not.
+///
+/// This cell used to be named for a transport that reports a size, and the
+/// review of #1147 refuted that premise rather than this measurement. A
+/// reported size says an offset is inside the object; it does not say the
+/// bytes there can be fetched, and the sibling cell below is the archive where
+/// those come apart. The saving is real and it is the local case, which is
+/// what #1130 was filed about.
 #[test]
 #[cfg_attr(miri, ignore)]
-fn a_verify_over_a_sized_transport_fetches_no_tile_payload() {
+fn a_verify_over_a_local_archive_fetches_no_tile_payload() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (plan, pyramid) = served(dir.path());
 
@@ -269,6 +309,54 @@ fn a_verify_over_a_sized_transport_fetches_no_tile_payload() {
         result.tile_evidence,
         Some(TileEvidence::LengthsFromTheIndex),
         "a run that took lengths has to report that it took lengths"
+    );
+}
+
+/// A verify over a ranged transport reads every payload, even though the
+/// transport reports a size.
+///
+/// The correction from the review of #1147, measured on the same seam as its
+/// sibling above so the two are directly comparable: identical archive,
+/// identical plan, identical counting, and the single difference is whether
+/// the bytes are claimed to be on a local filesystem.
+///
+/// What the bounds check gives is that an entry's offset lands inside the
+/// object, composed out of the header's own numbers. Over a transport the
+/// archive size is the server's claim about the object as a whole, so that
+/// conclusion is an inference from the claim rather than a fact about any one
+/// range, and a range can fail on its own.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_verify_over_a_ranged_transport_reads_every_payload() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let plan = plan_for(512, 512, 256);
+    let archive = dir.path().join("ranged.pmtiles");
+    write_archive(&archive, &plan, &gradient(512, 512));
+    let bytes = std::fs::read(&archive).expect("read the archive back");
+
+    let reader = Reader::try_new(Counting::ranged(bytes)).expect("the archive opens");
+    reader.source().forget();
+    let pyramid = PmTilesPyramidReader::from_reader(reader);
+
+    let result = pyramid_verify(&pyramid, &plan, Some(TileFormat::Png), &NoopObserver)
+        .expect("a good archive verifies whichever way its bytes arrive");
+
+    let fetched = payload_bytes(&pyramid);
+    assert!(
+        fetched > 0,
+        "the verify read nothing out of the tile-data section, so an archive \
+         whose payloads are gone would look identical to this one"
+    );
+    assert_eq!(
+        result.bytes_read, fetched,
+        "the run reports {} bytes read and fetched {fetched} from the \
+         tile-data section; those are the same bytes and have to agree",
+        result.bytes_read
+    );
+    assert_eq!(
+        result.tile_evidence,
+        Some(TileEvidence::PayloadsRead),
+        "a run that read every payload has to report that it did"
     );
 }
 

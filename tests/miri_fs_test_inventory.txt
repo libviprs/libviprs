@@ -429,7 +429,8 @@ annotated   fs-detected  tests/pmtiles_sink.rs::the_sink_exposes_no_checkpoint_r
 annotated   fs-detected  tests/pmtiles_sink.rs::verify_builds_where_resume_does_not
 annotated   fs-detected  tests/pmtiles_sink.rs::writing_after_finish_is_refused
 annotated   fs-detected  tests/pmtiles_verify_reads_the_index.rs::a_local_file_still_reads_lengths_rather_than_payloads
-annotated   fs-detected  tests/pmtiles_verify_reads_the_index.rs::a_verify_over_a_sized_transport_fetches_no_tile_payload
+annotated   fs-detected  tests/pmtiles_verify_reads_the_index.rs::a_verify_over_a_local_archive_fetches_no_tile_payload
+annotated   fs-detected  tests/pmtiles_verify_reads_the_index.rs::a_verify_over_a_ranged_transport_reads_every_payload
 annotated   fs-detected  tests/pmtiles_verify_reads_the_index.rs::a_verify_walks_the_archive_once
 annotated   fs-detected  tests/pmtiles_verify_reads_the_index.rs::an_archive_whose_tile_data_cannot_be_fetched_does_not_verify
 annotated   fs-detected  tests/pmtiles_verify_reads_the_index.rs::payload_reads_are_visible_to_the_classifier
