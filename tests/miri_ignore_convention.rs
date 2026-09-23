@@ -357,7 +357,11 @@ const ANCHOR_FILES: &[&str] = &[
 /// `a_reader_that_cannot_count_its_tiles_refuses_rather_than_guessing` in
 /// `src/pyramid_reader.rs`, which opens a `tempfile::tempdir()` as a pyramid
 /// to pin what a reader with no tile count answers.
-const EXPECTED_SRC_ANNOTATIONS: usize = 246;
+///
+/// EPIC #1135 moves it 246 to 250: four new tests in `src/pmtiles/writer.rs`
+/// that each drive a whole `finish` to count what it does, and one that was
+/// renamed with the table it is about.
+const EXPECTED_SRC_ANNOTATIONS: usize = 250;
 /// Companion to [`EXPECTED_SRC_ANNOTATIONS`]: how many `src/` modules carry at
 /// least one annotation. #765 made it 25 by putting the first annotation in
 /// `src/analyze.rs`; `src/colour.rs` and `src/pdf.rs`, which took the other
@@ -607,7 +611,15 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// `a_repository_with_no_commits_publishes_holes_rather_than_half_an_attestation`,
 /// which `git init`s a `tempfile::tempdir()` to reach an unborn HEAD. It is
 /// `annotated fs-detected` like its neighbour and is not a judgement call.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 421;
+///
+/// EPIC #1135 moves it again, and the additions are nine: four in
+/// `src/pmtiles/writer.rs` that each drive a whole `finish` to count what it
+/// does, the dedupe window's two edges, three bounded-memory cells and the
+/// peak-RSS harness. Two of the twelve inventory rows it adds are renames of
+/// two it removes, and one touches nothing. The number below came from the
+/// detector rather than from that arithmetic, which is the discipline the
+/// paragraphs above ask for and the reason it is right.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 430;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
