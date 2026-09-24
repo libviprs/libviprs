@@ -86,8 +86,9 @@
 //! is final the moment it is staged: nothing that happens to the sections
 //! around it can move it. A writer that reserved the first 16384 bytes,
 //! appended payloads straight into the destination behind them and wrote the
-//! directories after the tile data would copy nothing at all. That is a real
-//! layout and this writer does not offer it yet.
+//! directories after the tile data would copy nothing at all. That is
+//! [`Layout::Arrival`], and it is what this writer does when it is asked for
+//! it (issue #1143).
 //!
 //! What such a writer cannot offer is the two things issue #989 also asks
 //! for. Arrival order means the bytes depend on arrival order, so two shuffled
@@ -118,10 +119,33 @@
 //! `two_orders_stop_agreeing_once_the_window_cannot_hold_the_tile_set` pins
 //! its failure where neither does.
 //!
-//! So this writer stages payloads in arrival order, sorts at finalize, and
-//! writes the data region in tile id order. `clustered` is `true` and it is
-//! true. The copy is what that costs, and it is a price rather than an
-//! inevitability.
+//! So the default, [`Layout::TileId`], stages payloads in arrival order, sorts
+//! at finalize, and writes the data region in tile id order. `clustered` is
+//! `true` and it is true. The copy is what that costs, and the whole point of
+//! this section is that it is a price rather than an inevitability.
+//!
+//! # What arrival order actually costs, and what it saves
+//!
+//! [`Layout::Arrival`] opens the destination at the first
+//! [`add_tile`](Writer::add_tile), reserves 16384 bytes for the header and the
+//! root, and appends payloads from there. At finalize the metadata and the
+//! leaf section are appended **after** the tile data and the reserved prefix
+//! is backfilled. Three things follow, and they are the reasons to pick it:
+//!
+//! * There is no `.data` file. A run's scratch is the index log and the
+//!   finalize-time spills, which is the index alone rather than the index plus
+//!   a second copy of the archive, so the ENOSPC case below stops needing
+//!   twice the output's size in free space.
+//! * Every tile byte is written once and read never.
+//!   `an_arrival_layout_writes_every_tile_byte_once_and_reads_none_back`
+//!   measures both halves, with the default layout beside it as the control.
+//! * The prefix is reserved with a seek, so the padding between the root's end
+//!   and the ceiling is a hole rather than 16 KB of I/O.
+//!
+//! And two things stop being true, which is why it is not the default.
+//! `clustered` is `false`, and `pmtiles extract` requires clustered input. And
+//! the bytes depend on the arrival order, so the byte-identity property below
+//! goes: it is a statement about tile id order, not about this writer.
 //!
 //! # Dedupe is the archive's, not the engine's
 //!
@@ -156,10 +180,11 @@
 //!
 //! Bounded, and independent of the tile count: the per-tile index (spilled,
 //! sorted in fixed-size runs), the entry list (spilled, streamed into leaves),
-//! the leaf section (spilled), the write order (spilled), the payload copy
-//! (one blob at a time), and the external merge, which reads every run through
-//! **one** file descriptor with a capped fan-in rather than holding one open
-//! file per run.
+//! the leaf section (spilled), the write order (spilled, and absent entirely
+//! under [`Layout::Arrival`]), the payload copy (one blob at a time, and not
+//! made at all under [`Layout::Arrival`]), and the external merge, which reads
+//! every run through **one** file descriptor with a capped fan-in rather than
+//! holding one open file per run.
 //!
 //! Bounded, and independent of the payload count: the dedupe window and the
 //! repeat table, which are a fixed capacity the caller sizes with
@@ -193,8 +218,12 @@
 //! by the same amount. That is a structurally valid archive full of the wrong
 //! tile bytes, and under a retrying sink with
 //! [`FailurePolicy::RetryThenSkip`](crate::sink::FailurePolicy) the run reports
-//! success while producing it. ENOSPC is the realistic trigger, because this
-//! writer needs roughly twice the archive's size in scratch.
+//! success while producing it. ENOSPC is the realistic trigger, because under
+//! [`Layout::TileId`] this writer needs roughly twice the archive's size in
+//! scratch. Under [`Layout::Arrival`] the orphan bytes land in the destination
+//! rather than in a staging file, and the latch does the same job there: the
+//! run refuses to finish, so the partial archive keeps its temporary name and
+//! is removed rather than published.
 //!
 //! # Examples
 //!
@@ -1042,6 +1071,43 @@ impl<W: Write + Seek> Sink<W> {
             Self::Staged(f) => f,
         }
     }
+
+    fn as_seek(&mut self) -> &mut dyn Seek {
+        match self {
+            Self::Foreign(w) => w,
+            Self::Staged(f) => f,
+        }
+    }
+
+    /// Move the cursor. `Layout::Arrival` is the only caller: it reserves a
+    /// prefix before the first payload and backfills it at the end, and both
+    /// halves are a seek.
+    fn seek(&mut self, to: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.as_seek().seek(to)
+    }
+
+    /// Where the cursor is, which for a foreign sink is where the archive
+    /// starts rather than where the file does.
+    fn position(&mut self) -> std::io::Result<u64> {
+        self.as_seek().seek(std::io::SeekFrom::Current(0))
+    }
+
+    /// Push what has been appended through to the device.
+    ///
+    /// [`Staging::sync`] is this same barrier on the other layout's scratch
+    /// file, and under [`Layout::Arrival`] the destination is holding tile
+    /// bytes that nothing else has a copy of, so it needs one too. A foreign
+    /// sink gets a `flush` and no more: `Write + Seek` cannot express `fsync`
+    /// and whatever is underneath it belongs to the caller.
+    fn sync(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Foreign(w) => w.flush(),
+            Self::Staged(f) => {
+                f.flush()?;
+                sync_data(f)
+            }
+        }
+    }
 }
 
 /// Where payloads are staged, and where the index log is appended.
@@ -1198,8 +1264,22 @@ pub struct Writer<W: Write + Seek> {
     /// Staged offsets that more than one tile points at, so finalization can
     /// tell a payload it has placed already from one it has not.
     repeats: RepeatTable,
+    /// Where the archive's first byte sits in the sink, once
+    /// [`Layout::Arrival`] has opened it. `None` under [`Layout::TileId`],
+    /// which does not touch the sink until finalize, and `None` before the
+    /// first tile.
+    ///
+    /// Captured rather than assumed to be zero, because
+    /// [`Writer::try_new`] promises every header offset is relative to the
+    /// sink's own position and a caller may be embedding the archive in
+    /// something larger.
+    archive_start: Option<u64>,
     /// How many bytes of payload are staged, which is where the next one
     /// goes.
+    ///
+    /// Under [`Layout::Arrival`] "staged" means "already in the archive", and
+    /// this is the offset inside the tile data section, which is what an entry
+    /// carries.
     staged_len: u64,
     /// How many payloads have been staged.
     staged_payloads: u64,
@@ -1223,6 +1303,7 @@ impl<W: Write + Seek> std::fmt::Debug for Writer<W> {
             .field("base", &self.base)
             .field("destination", &self.destination)
             .field("tiles", &self.tile_count)
+            .field("layout", &self.options.layout)
             .field("staged_payloads", &self.staged_payloads)
             .field("staged_bytes", &self.staged_len)
             .field("failed", &self.failed)
@@ -1293,17 +1374,31 @@ impl<W: Write + Seek> Writer<W> {
     /// Open the two scratch files every flavour needs.
     fn open_scratch(base: PathBuf, options: WriterOptions) -> Result<Self, PmTilesError> {
         let sets = dedupe_sets(options.dedupe_memory_bytes);
-        let data_path = suffixed(&base, ".data");
         let log_path = suffixed(&base, ".idx");
-        let staged = File::create(&data_path)?;
         let log = File::create(&log_path)?;
+        // Arrival order appends into the destination, so it has no staging
+        // file to create, none to clean up and none to read back. That file is
+        // the whole of the scratch this epic is spending on the layout: the
+        // index log stays either way.
+        let mut scratch = Vec::with_capacity(2);
+        let staged = match options.layout {
+            Layout::TileId => {
+                let data_path = suffixed(&base, ".data");
+                let file = File::create(&data_path)?;
+                scratch.push(data_path);
+                Some(Staging::Real(BufWriter::new(file)))
+            }
+            Layout::Arrival => None,
+        };
+        scratch.push(log_path);
         Ok(Self {
             sink: None,
             options,
-            scratch: vec![data_path, log_path],
+            scratch,
             base,
             destination: None,
-            staged: Some(Staging::Real(BufWriter::new(staged))),
+            archive_start: None,
+            staged,
             log: Some(Staging::Real(BufWriter::new(log))),
             log_len: 0,
             window: Some(DedupeWindow::with_sets(sets)),
@@ -1380,11 +1475,7 @@ impl<W: Write + Seek> Writer<W> {
                 let offset = self.staged_len;
                 // Everything from here down can leave bytes behind, so it is
                 // latched.
-                let written = self
-                    .staged
-                    .as_mut()
-                    .expect("a live writer has its staging file")
-                    .write_all(bytes);
+                let written = self.stage_payload(bytes);
                 self.latch("staging a payload", written)?;
                 let end = offset
                     .checked_add(u64::from(length))
@@ -1413,6 +1504,58 @@ impl<W: Write + Seek> Writer<W> {
         self.min_zoom = self.min_zoom.min(z);
         self.max_zoom = self.max_zoom.max(z);
         Ok(())
+    }
+
+    /// Put one payload where this layout keeps payloads.
+    ///
+    /// [`Layout::TileId`] writes it into the staging file and copies it into
+    /// the archive at finalize. [`Layout::Arrival`] appends it into the
+    /// archive itself, behind the prefix [`Self::arrival_sink`] reserved, and
+    /// never reads it again.
+    fn stage_payload(&mut self, bytes: &[u8]) -> Result<(), PmTilesError> {
+        match self.options.layout {
+            Layout::TileId => self
+                .staged
+                .as_mut()
+                .expect("a live writer has its staging file")
+                .write_all(bytes)?,
+            Layout::Arrival => self.arrival_sink()?.as_write().write_all(bytes)?,
+        }
+        Ok(())
+    }
+
+    /// The destination an arrival-order writer appends into, opened and
+    /// reserved the first time a payload needs it.
+    ///
+    /// Opening it here rather than at `create` keeps the promise the staged
+    /// flavour already makes: a run that adds no tiles leaves nothing behind
+    /// wearing an archive's name. Opening it at the *first tile* rather than
+    /// at finalize is the whole point of the layout.
+    ///
+    /// The reservation is a seek and not 16384 zero bytes. The gap between the
+    /// root's end and the ceiling is then a hole rather than I/O, and no byte
+    /// of the archive is written twice, which is the property
+    /// `an_arrival_layout_writes_every_tile_byte_once_and_reads_none_back`
+    /// measures. Everything after the prefix is written before the file ends,
+    /// so the hole is interior and reads back as zeros.
+    fn arrival_sink(&mut self) -> Result<&mut Sink<W>, PmTilesError> {
+        if self.archive_start.is_none() {
+            if self.sink.is_none() {
+                let staged_archive = self.base.clone();
+                self.scratch.push(staged_archive.clone());
+                self.sink = Some(Sink::Staged(File::create(&staged_archive)?));
+            }
+            let sink = self.sink.as_mut().expect("a sink exists by now");
+            let start = sink.position()?;
+            let reserved = start
+                .checked_add(ROOT_CEILING)
+                .ok_or(PmTilesError::Overflow {
+                    what: "the reserved prefix",
+                })?;
+            sink.seek(std::io::SeekFrom::Start(reserved))?;
+            self.archive_start = Some(start);
+        }
+        Ok(self.sink.as_mut().expect("a sink exists by now"))
     }
 
     /// Record that a step failed after it could have written something.
@@ -1488,6 +1631,15 @@ impl<W: Write + Seek> Writer<W> {
         self.flush_run()?;
         if let Some(staged) = self.staged.as_mut() {
             staged.sync()?;
+        }
+        // Under `Layout::Arrival` the accepted payloads are in the
+        // destination and nowhere else, so the barrier has to land there
+        // instead. Under `Layout::TileId` the sink is not open yet and there
+        // is nothing in it to make durable.
+        if self.options.layout == Layout::Arrival
+            && let Some(sink) = self.sink.as_mut()
+        {
+            sink.sync()?;
         }
         if let Some(log) = self.log.as_mut() {
             log.sync()?;
@@ -1611,8 +1763,11 @@ struct Plan {
     entries_path: PathBuf,
     entry_count: u64,
     addressed_tiles: u64,
-    /// Path of the spilled write order.
-    order_path: PathBuf,
+    /// Path of the spilled write order, for a layout that has one.
+    ///
+    /// `None` under [`Layout::Arrival`], where the payloads are already in the
+    /// archive and there is no order to replay.
+    order_path: Option<PathBuf>,
     /// How many payloads the data region carries, which is how many records
     /// that file holds.
     contents_count: u64,
@@ -1664,14 +1819,34 @@ impl<W: Write + Seek> Writer<W> {
     ///
     /// This is the one pass that sees every tile, and it holds at most one
     /// entry plus the payload maps while doing it.
+    ///
+    /// # Arrival order has no offsets to assign
+    ///
+    /// Half of what this does only exists to answer "where does this payload
+    /// go", and under [`Layout::Arrival`] the record already knows: issue
+    /// #1138 put the staged offset in it, and a staged offset under that
+    /// layout **is** the offset inside the tile data section, because the
+    /// payload was appended at exactly that point of the section. So there is
+    /// no `next_offset` to advance, no write order to spill and no
+    /// [`RepeatTable`] lookup, and the two totals come from the add phase's
+    /// own counters rather than from this pass.
     fn plan_entries(&mut self) -> Result<Plan, PmTilesError> {
         let entries_path = suffixed(&self.base, ".ent");
         self.scratch.push(entries_path.clone());
         let mut out = BufWriter::new(File::create(&entries_path)?);
 
-        let order_path = suffixed(&self.base, ".ord");
-        self.scratch.push(order_path.clone());
-        let mut order = BufWriter::new(File::create(&order_path)?);
+        let arrival = self.options.layout == Layout::Arrival;
+        let order_path = if arrival {
+            None
+        } else {
+            let path = suffixed(&self.base, ".ord");
+            self.scratch.push(path.clone());
+            Some(path)
+        };
+        let mut order = match &order_path {
+            Some(path) => Some(BufWriter::new(File::create(path)?)),
+            None => None,
+        };
         let mut contents_count: u64 = 0;
         let mut next_offset: u64 = 0;
 
@@ -1696,27 +1871,34 @@ impl<W: Write + Seek> Writer<W> {
             // to remember: take the next offset and move on. That is every
             // tile of a photograph, and it is why finalization no longer
             // allocates anything per payload.
-            let offset = match self.repeats.placement(record.data_offset) {
-                Some(slot) if *slot != UNPLACED => *slot,
-                marked => {
-                    let offset = next_offset;
-                    next_offset = next_offset.checked_add(u64::from(record.length)).ok_or(
-                        PmTilesError::Overflow {
-                            what: "the tile data section",
-                        },
-                    )?;
-                    if let Some(slot) = marked {
-                        *slot = offset;
-                    }
-                    order.write_all(
-                        &Placement {
-                            data_offset: record.data_offset,
-                            length: record.length,
+            let offset = if arrival {
+                record.data_offset
+            } else {
+                match self.repeats.placement(record.data_offset) {
+                    Some(slot) if *slot != UNPLACED => *slot,
+                    marked => {
+                        let offset = next_offset;
+                        next_offset = next_offset.checked_add(u64::from(record.length)).ok_or(
+                            PmTilesError::Overflow {
+                                what: "the tile data section",
+                            },
+                        )?;
+                        if let Some(slot) = marked {
+                            *slot = offset;
                         }
-                        .encode(),
-                    )?;
-                    contents_count += 1;
-                    offset
+                        order
+                            .as_mut()
+                            .expect("tile id order spills a write order")
+                            .write_all(
+                                &Placement {
+                                    data_offset: record.data_offset,
+                                    length: record.length,
+                                }
+                                .encode(),
+                            )?;
+                        contents_count += 1;
+                        offset
+                    }
                 }
             };
 
@@ -1757,7 +1939,19 @@ impl<W: Write + Seek> Writer<W> {
             entry_count += 1;
         }
         out.into_inner().map_err(|e| e.into_error())?;
-        order.into_inner().map_err(|e| e.into_error())?;
+        if let Some(order) = order {
+            order.into_inner().map_err(|e| e.into_error())?;
+        }
+
+        // Arrival order's two totals were settled by the add phase. Every
+        // staged payload is referenced by at least the tile that staged it, so
+        // the payload count is the content count, and the bytes appended are
+        // the section's length.
+        let (contents_count, tile_data_length) = if arrival {
+            (self.staged_payloads, self.staged_len)
+        } else {
+            (contents_count, next_offset)
+        };
 
         Ok(Plan {
             entries_path,
@@ -1765,7 +1959,7 @@ impl<W: Write + Seek> Writer<W> {
             addressed_tiles: addressed,
             order_path,
             contents_count,
-            tile_data_length: next_offset,
+            tile_data_length,
         })
     }
 
@@ -1938,18 +2132,47 @@ impl<W: Write + Seek> Writer<W> {
                 budget: ROOT_BUDGET,
             });
         }
-        let metadata_offset = root_offset + root_length;
         let metadata_length = metadata.len() as u64;
-        let leaf_directories_offset = metadata_offset + metadata_length;
         let leaf_directories_length = leaves.as_ref().map(|l| l.length).unwrap_or(0);
-        // When there are no leaves this lands exactly on the tile data, which
-        // is what go-pmtiles writes and what makes the *length* the flag
-        // rather than the offset.
-        let tile_data_offset = leaf_directories_offset
-            .checked_add(leaf_directories_length)
-            .ok_or(PmTilesError::Overflow {
-                what: "the tile data offset",
-            })?;
+        let (tile_data_offset, metadata_offset, leaf_directories_offset) = match self.options.layout
+        {
+            Layout::TileId => {
+                let metadata_offset = root_offset + root_length;
+                let leaf_directories_offset = metadata_offset + metadata_length;
+                // When there are no leaves this lands exactly on the tile
+                // data, which is what go-pmtiles writes and what makes the
+                // *length* the flag rather than the offset.
+                let tile_data_offset = leaf_directories_offset
+                    .checked_add(leaf_directories_length)
+                    .ok_or(PmTilesError::Overflow {
+                        what: "the tile data offset",
+                    })?;
+                (tile_data_offset, metadata_offset, leaf_directories_offset)
+            }
+            Layout::Arrival => {
+                // The prefix was reserved before the first payload landed, so
+                // the tile data starts at the ceiling whatever the root turned
+                // out to cost, and the two sections that are not the root
+                // follow the tile data instead of preceding it. The bytes
+                // between the root's end and the ceiling are padding, which
+                // v3 allows: it fixes the header's position and requires the
+                // root inside the first 16384 bytes, and says nothing about
+                // what else may sit there.
+                let metadata_offset =
+                    ROOT_CEILING
+                        .checked_add(plan.tile_data_length)
+                        .ok_or(PmTilesError::Overflow {
+                            what: "the metadata offset",
+                        })?;
+                let leaf_directories_offset =
+                    metadata_offset
+                        .checked_add(metadata_length)
+                        .ok_or(PmTilesError::Overflow {
+                            what: "the leaf directories offset",
+                        })?;
+                (ROOT_CEILING, metadata_offset, leaf_directories_offset)
+            }
+        };
 
         let [west, south, east, north] = self.options.bounds_degrees;
         let center_zoom = self
@@ -1972,24 +2195,30 @@ impl<W: Write + Seek> Writer<W> {
             addressed_tiles_count: plan.addressed_tiles,
             tile_entries_count: plan.entry_count,
             tile_contents_count: plan.contents_count,
-            // A literal, and true by construction rather than measured.
-            // `plan_entries` assigns offsets walking the entries in tile id
-            // order, taking `next_offset` for a payload it has not placed and
-            // an earlier offset for one it has, so the first tile entry is at
-            // offset 0 and every later offset is either contiguous with the
-            // previous blob's end or a back reference to a deduplicated one.
-            // That is the spec's definition of clustered, and this layout
-            // cannot violate it: there is no path through that loop which
-            // assigns anything else.
+            // Read off the layout, and true by construction rather than
+            // measured, in both directions.
             //
-            // It has to become a computed value before `Layout::Arrival`
-            // (#1143) exists, because arrival order can make it false, and a
-            // header claiming `clustered` over a data region that is not tells
-            // a reader it may skip work it cannot skip. Computing it is #1144.
+            // Under `Layout::TileId`, `plan_entries` assigns offsets walking
+            // the entries in tile id order, taking `next_offset` for a payload
+            // it has not placed and an earlier offset for one it has, so the
+            // first tile entry is at offset 0 and every later offset is either
+            // contiguous with the previous blob's end or a back reference to a
+            // deduplicated one. That is the spec's definition of clustered and
+            // there is no path through that loop which assigns anything else.
             // `clustered_is_true_and_the_layout_backs_it_up` checks the claim
-            // against the bytes in the meantime, which is what stops this
-            // literal from being merely asserted.
-            clustered: true,
+            // against the bytes.
+            //
+            // Under `Layout::Arrival` the data region is in arrival order, so
+            // the entry with the lowest tile id is wherever it happened to
+            // arrive and the claim is not available. `false` is the safe
+            // direction: a reader told an archive is not clustered does work it
+            // could have skipped, where one told it is skips work it cannot.
+            //
+            // This is not yet the *computed* value #1144 asks for. An arrival
+            // run whose tiles happened to arrive in tile id order is clustered
+            // and this still says it is not, which costs a reader nothing and
+            // is what #1144 is for.
+            clustered: self.options.layout == Layout::TileId,
             internal_compression: self.options.internal_compression,
             tile_compression: self.options.tile_compression,
             tile_type: self.options.tile_type,
@@ -2012,8 +2241,69 @@ impl<W: Write + Seek> Writer<W> {
         Ok(header)
     }
 
-    /// Write the five sections, in the order the spec lists them.
+    /// Put the five sections where [`Self::assemble_header`] said they go.
     fn write_archive(
+        &mut self,
+        header: &Header,
+        root: &[u8],
+        metadata: &[u8],
+        leaves: &Option<Leaves>,
+        plan: &Plan,
+    ) -> Result<(), PmTilesError> {
+        match self.options.layout {
+            Layout::TileId => self.write_archive_tile_id(header, root, metadata, leaves, plan),
+            Layout::Arrival => self.write_archive_arrival(header, root, metadata, leaves),
+        }
+    }
+
+    /// Finish an archive whose tile data is already in place.
+    ///
+    /// Two appends and one backfill, and not one payload byte moves. The
+    /// metadata and the leaf section go after the tile data, where nothing has
+    /// been written yet, and then the header and the root go into the prefix
+    /// [`Self::arrival_sink`] reserved before the first payload landed.
+    ///
+    /// Both writes are positioned rather than continuing from wherever the
+    /// last payload left the cursor. A foreign sink belongs to the caller and
+    /// the caller may have moved it, and a cursor that is one byte out here
+    /// writes the metadata over the tail of the tile data, which is a
+    /// structurally perfect archive with a corrupt last tile.
+    fn write_archive_arrival(
+        &mut self,
+        header: &Header,
+        root: &[u8],
+        metadata: &[u8],
+        leaves: &Option<Leaves>,
+    ) -> Result<(), PmTilesError> {
+        let start = self
+            .archive_start
+            .expect("an arrival writer opened its destination at the first tile");
+        let mut buffer = vec![0u8; COPY_BUFFER_BYTES];
+        let sink = self
+            .sink
+            .as_mut()
+            .expect("an arrival writer opened its destination at the first tile");
+
+        sink.seek(std::io::SeekFrom::Start(start + header.metadata_offset))?;
+        let out = sink.as_write();
+        out.write_all(metadata)?;
+        if let Some(leaves) = leaves {
+            let mut leaf_file = BufReader::new(File::open(&leaves.path)?);
+            copy_exactly(&mut leaf_file, out, leaves.length, &mut buffer)?;
+        }
+        out.flush()?;
+
+        sink.seek(std::io::SeekFrom::Start(start))?;
+        let out = sink.as_write();
+        out.write_all(&header.encode())?;
+        out.write_all(root)?;
+        out.flush()?;
+        Ok(())
+    }
+
+    /// Write the five sections, in the order the spec lists them, copying each
+    /// payload out of the staging file as it goes.
+    fn write_archive_tile_id(
         &mut self,
         header: &Header,
         root: &[u8],
@@ -2042,7 +2332,11 @@ impl<W: Write + Seek> Writer<W> {
             let mut leaf_file = BufReader::new(File::open(&leaves.path)?);
             copy_exactly(&mut leaf_file, out, leaves.length, &mut buffer)?;
         }
-        let mut order = OrderReader::open(&plan.order_path)?;
+        let mut order = OrderReader::open(
+            plan.order_path
+                .as_ref()
+                .expect("tile id order spills a write order"),
+        )?;
         while let Some(placement) = order.next_placement()? {
             copy_exactly_at(
                 &staged_data,
