@@ -88,7 +88,7 @@ pub enum EngineError {
         reason: &'static str,
     },
     /// The sink asked for an
-    /// [`EmissionOrder`](crate::sink::EmissionOrder) the selected engine
+    /// [`EmissionOrder`] the selected engine
     /// cannot produce (issue #1145).
     ///
     /// Only the monolithic engine walks the plan in tile id order. The
