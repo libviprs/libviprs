@@ -2072,9 +2072,20 @@ fn an_arrival_archive_puts_the_tile_data_before_the_metadata_and_the_leaves() {
             "{label}: the archive is not the size go-pmtiles computes for a \
              padded one"
         );
+        // This seed shuffles, and #1144 turned the flag into a measurement
+        // rather than a constant, so the `false` below has to be earned now.
+        // The walk over the archive's own entries is what says it was: before
+        // #1144 this assertion held for every arrival archive ever written and
+        // could not have caught anything.
+        let walk = clustering_of(&parse_ours(&bytes).entries);
+        assert!(
+            walk.is_err(),
+            "{label}: this seed did not break the tile id ordering, so the \
+             assertion below cannot tell the two verdicts apart: {walk:?}"
+        );
         assert!(
             !h.clustered,
-            "{label}: arrival order cannot claim clustering"
+            "{label}: the archive claims clustering its own entries deny"
         );
 
         assert_eq!(
@@ -2197,13 +2208,27 @@ fn capture_an_arrival_archive_for_the_go_pmtiles_oracle() {
     for name in ["dupes-z0z3.pmtiles", "leaves-z0z7.pmtiles"] {
         let label = name.trim_end_matches(".pmtiles");
         let g = parse_golden(name);
-        for (suffix, layout) in [("arrival", Layout::Arrival), ("tileid", Layout::TileId)] {
+        // Three archives rather than two since #1144. `arrival-inorder` is the
+        // one the reference has never been shown before: an archive laid out
+        // in arrival order whose header claims `clustered`, which is the claim
+        // `pmtiles extract` acts on and `verify` checks against the entries.
+        for (suffix, layout, shuffle) in [
+            ("arrival", Layout::Arrival, true),
+            ("arrival-inorder", Layout::Arrival, false),
+            ("tileid", Layout::TileId, true),
+        ] {
             let out = dir.join(format!("{label}-{suffix}.pmtiles"));
             let options = WriterOptions::default()
                 .with_tile_type(g.header.tile_type)
                 .with_tile_compression(g.header.tile_compression)
                 .with_layout(layout);
-            write_shuffled(&g, &out, 0x5eed_1143, options);
+            if shuffle {
+                write_shuffled(&g, &out, 0x5eed_1143, options);
+            } else {
+                let order: Vec<(u64, &[u8])> =
+                    g.tiles.iter().map(|(id, p)| (*id, p.as_slice())).collect();
+                write_in_this_order(&out, &order, options);
+            }
             let bytes = std::fs::read(&out).expect("the archive is on disk");
             let h = Header::try_decode(&bytes[..127]).expect("our header decodes");
             println!(
@@ -2267,4 +2292,476 @@ fn a_dropped_arrival_run_takes_its_partial_archive_with_it() {
         after.is_empty(),
         "a dropped arrival writer left {after:?} behind"
     );
+}
+
+// ---------------------------------------------------------------------------
+// clustered, earned rather than bought (issue #1144)
+// ---------------------------------------------------------------------------
+
+/// What a walk of an archive's own entries found about the way its data
+/// section is laid out.
+///
+/// The two counts are shape controls. A cell asserting `clustered` over a tile
+/// set that turned out to hold no duplicates has not covered the
+/// back-reference permission at all, and a count is what says so out loud
+/// rather than leaving it to be assumed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Clustering {
+    /// Entries that started exactly where the blobs before them ended.
+    contiguous: usize,
+    /// Entries that pointed back inside them, which is what dedupe produces.
+    back_references: usize,
+}
+
+/// The spec's operational definition of `clustered`, applied to the bytes.
+///
+/// Walking the entries in tile id order, each blob either starts exactly where
+/// the blobs before it ended or lies wholly inside them. Anything else leaves
+/// a stretch of the data section the walk stepped over, and a reader told the
+/// archive is clustered is precisely the reader that will not go back for it.
+///
+/// This is not the writer's code path. It reads the decoded directory, so a
+/// writer that computed the flag out of its own bookkeeping and got it wrong
+/// is caught here. What it does share with the writer is one reading of the
+/// spec, and go-pmtiles settles that half: `verify` refuses an archive whose
+/// header claims clustering its entries do not back up, with "out-of-order
+/// entry %v in clustered archive".
+fn clustering_of(entries: &[Entry]) -> Result<Clustering, String> {
+    let mut laid_down = 0u64;
+    let mut found = Clustering {
+        contiguous: 0,
+        back_references: 0,
+    };
+    for entry in entries {
+        let end = entry.offset.saturating_add(u64::from(entry.length));
+        if entry.offset == laid_down {
+            laid_down = end;
+            found.contiguous += 1;
+        } else if end <= laid_down {
+            found.back_references += 1;
+        } else {
+            return Err(format!(
+                "the entry for tile {} is at offset {} for {} bytes, which is \
+                 neither contiguous with the {laid_down} bytes laid down \
+                 before it nor a back reference inside them",
+                entry.tile_id, entry.offset, entry.length
+            ));
+        }
+    }
+    Ok(found)
+}
+
+/// Three payloads at three lengths, so an offset in the directory says which
+/// blob it is without anyone having to go and read the bytes.
+const BLOB_A: &[u8] = b"aaaa";
+const BLOB_B: &[u8] = b"bbbbbb";
+const BLOB_C: &[u8] = b"cc";
+
+/// Six tiles carrying every shape that decides clustering.
+///
+/// * Tiles 1 and 2 are consecutive ids on one blob, so in tile id order they
+///   fold into a single entry with `run_length` 2 spanning both.
+/// * Tile 4 is deliberately absent, so tiles 3 and 5 are neighbours in the
+///   directory without being consecutive ids. They carry the same blob, so
+///   their two entries hold the **same** offset: an offset that repeats rather
+///   than descends, which a back-reference test spelled `offset < previous`
+///   refuses and nothing else in this fixture would catch.
+/// * Tile 6 repeats tile 0's blob with two other blobs written in between, so
+///   its entry is a real descent in the offset column.
+fn clustering_tiles() -> Vec<(u64, &'static [u8])> {
+    vec![
+        (0, BLOB_A),
+        (1, BLOB_B),
+        (2, BLOB_B),
+        (3, BLOB_C),
+        (5, BLOB_C),
+        (6, BLOB_A),
+    ]
+}
+
+/// What the synthetic tile sets below are written with: a tile type, because
+/// `Unknown` is a legal value the reference tool then has nothing to say
+/// about, and the layout under test.
+fn synthetic_options(layout: Layout) -> WriterOptions {
+    WriterOptions::default()
+        .with_tile_type(TileType::Png)
+        .with_layout(layout)
+}
+
+/// Feed exactly this arrival order into a writer and hand back what it
+/// published, parsed.
+fn write_in_this_order(out: &Path, order: &[(u64, &[u8])], options: WriterOptions) -> Golden {
+    let mut writer = Writer::create(out, options).expect("a writer opens");
+    for (tile_id, payload) in order {
+        let (z, x, y) = libviprs::pmtiles::tileid_to_zxy(*tile_id).unwrap();
+        writer
+            .add_tile(z, x, y, payload, content_hash(payload))
+            .expect("a tile is accepted");
+    }
+    writer.finish().expect("the archive finalises");
+    parse_ours(&std::fs::read(out).expect("the archive is on disk"))
+}
+
+/// Every ordering of `items`, which for the six tiles above is 720 of them.
+fn permutations<T: Clone>(items: &[T]) -> Vec<Vec<T>> {
+    if items.len() <= 1 {
+        return vec![items.to_vec()];
+    }
+    let mut out = Vec::new();
+    for i in 0..items.len() {
+        let mut rest = items.to_vec();
+        let head = rest.remove(i);
+        for mut tail in permutations(&rest) {
+            tail.insert(0, head.clone());
+            out.push(tail);
+        }
+    }
+    out
+}
+
+/// The tile ids of an arrival order, for a failure message that can be read.
+fn ids_of(order: &[(u64, &[u8])]) -> Vec<u64> {
+    order.iter().map(|(id, _)| *id).collect()
+}
+
+/// An arrival run whose tiles happened to arrive in tile id order earns
+/// `clustered`, and the archive backs the claim up.
+///
+/// This is #1144 in one cell. Before it the flag was read off the layout, so
+/// this archive said `false` while being every bit as clustered as the tile id
+/// one beside it, and `pmtiles extract` refused an input it could have taken.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn an_arrival_run_in_tile_id_order_earns_clustered() {
+    let dir = scratch();
+    let g = parse_golden("dupes-z0z3.pmtiles");
+    let out = dir.path().join("in-order-arrival.pmtiles");
+
+    assert!(
+        g.tiles.windows(2).all(|w| w[0].0 < w[1].0),
+        "the golden's tiles come out of the parse ascending, which is what \
+         makes feeding them straight in an in-order arrival run"
+    );
+    let mut writer = Writer::create(&out, arrival_options(&g)).expect("a writer opens");
+    for (tile_id, payload) in &g.tiles {
+        let (z, x, y) = libviprs::pmtiles::tileid_to_zxy(*tile_id).unwrap();
+        writer
+            .add_tile(z, x, y, payload, content_hash(payload))
+            .expect("a tile is accepted");
+    }
+    writer.finish().expect("the archive finalises");
+
+    let ours = parse_ours(&std::fs::read(&out).expect("the archive is on disk"));
+    assert_eq!(
+        ours.header.tile_data_offset, 16384,
+        "this is not the arrival layout, so nothing below is about it"
+    );
+    let walk = clustering_of(&ours.entries).expect("the data section is laid out clustered");
+    assert!(
+        walk.back_references > 0,
+        "dupes-z0z3 stopped producing duplicates, so this cell no longer \
+         covers the permission a back reference uses: {walk:?}"
+    );
+    assert!(
+        ours.header.clustered,
+        "the tiles arrived in tile id order and the data section is laid out \
+         clustered ({walk:?}), so the archive has no business telling a reader \
+         otherwise"
+    );
+}
+
+/// Across every arrival order of one tile set, the flag says what the archive
+/// says.
+///
+/// The cells around this one each pin a shape by name. This one is the reason
+/// to believe there is not a seventh shape nobody thought of: 720 orders, each
+/// laying the data region out differently, every one of them checked against a
+/// walk of its own directory rather than against an expectation written here.
+///
+/// The direction that matters is a `true` the walk denies. A spurious `false`
+/// costs a reader work it could have skipped; a spurious `true` tells
+/// go-pmtiles it may skip work it cannot, and `pmtiles extract` believes it.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn the_clustered_flag_agrees_with_the_archive_for_every_arrival_order() {
+    let dir = scratch();
+    let mut earned = 0usize;
+    let mut refused = 0usize;
+
+    for (n, order) in permutations(&clustering_tiles()).into_iter().enumerate() {
+        let out = dir.path().join(format!("perm-{n}.pmtiles"));
+        let ours = write_in_this_order(&out, &order, synthetic_options(Layout::Arrival));
+        let ids = ids_of(&order);
+        match (clustering_of(&ours.entries), ours.header.clustered) {
+            (Ok(_), true) => earned += 1,
+            (Err(_), false) => refused += 1,
+            (Ok(found), false) => panic!(
+                "arrival order {ids:?} laid the data section out clustered \
+                 ({found:?}) and the archive says it did not"
+            ),
+            (Err(why), true) => panic!(
+                "arrival order {ids:?} claims clustering its own entries deny: \
+                 {why}"
+            ),
+        }
+    }
+
+    assert!(
+        earned > 0 && refused > 0,
+        "this tile set produced {earned} clustered and {refused} unclustered \
+         archives, so one of the two verdicts was never exercised and the \
+         agreement above came for free"
+    );
+}
+
+/// A dedupe back reference to a lesser offset is legal and does not cost an
+/// arrival run its clustering.
+///
+/// The spec grants two permissions, not one, and a tracker that only checked
+/// the offset column never goes backwards would refuse this archive its flag.
+/// Tile 6 carries tile 0's blob with two other blobs written in between, so
+/// its entry points at offset 0 from a position where the blobs laid down
+/// already run past it.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_dedupe_back_reference_does_not_cost_an_arrival_run_its_clustering() {
+    let dir = scratch();
+    let out = dir.path().join("back-reference.pmtiles");
+    let ours = write_in_this_order(&out, &clustering_tiles(), synthetic_options(Layout::Arrival));
+
+    let last = *ours.entries.last().expect("the archive has entries");
+    assert_eq!(last.tile_id, 6, "the fixture's last entry moved");
+    let in_front = ours.entries[..ours.entries.len() - 1]
+        .iter()
+        .map(|e| e.offset)
+        .max()
+        .expect("there is something in front of it");
+    assert!(
+        last.offset < in_front,
+        "tile 6's entry is at offset {} with {in_front} in front of it, so \
+         this fixture no longer holds a descent in the offset column and the \
+         assertion below is about nothing",
+        last.offset
+    );
+
+    let walk = clustering_of(&ours.entries).expect("the data section is laid out clustered");
+    assert!(
+        ours.header.clustered,
+        "a back reference to a lesser offset is the spec's second permission \
+         rather than a break in the ordering ({walk:?})"
+    );
+}
+
+/// Two entries carrying one offset are a back reference too, not a descent.
+///
+/// Tile 4 is absent from the fixture, so tiles 3 and 5 are neighbours in the
+/// directory without being consecutive ids: they cannot fold into a run, and
+/// they carry the same blob, so the offset column repeats rather than moving.
+/// A back-reference test spelled `offset < previous` refuses exactly this one
+/// and nothing else.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn two_entries_at_one_offset_are_not_a_descent() {
+    let dir = scratch();
+    let out = dir.path().join("repeated-offset.pmtiles");
+    let ours = write_in_this_order(&out, &clustering_tiles(), synthetic_options(Layout::Arrival));
+
+    let at = |tile_id: u64| {
+        ours.entries
+            .iter()
+            .position(|e| e.tile_id == tile_id)
+            .unwrap_or_else(|| panic!("tile {tile_id} has an entry of its own"))
+    };
+    let (three, five) = (at(3), at(5));
+    assert_eq!(five, three + 1, "tiles 3 and 5 are no longer neighbours");
+    assert_eq!(
+        ours.entries[three].offset, ours.entries[five].offset,
+        "tiles 3 and 5 stopped sharing a blob, so the offset column no longer \
+         repeats here and this cell covers nothing"
+    );
+    assert_eq!(
+        (ours.entries[three].run_length, ours.entries[five].run_length),
+        (1, 1),
+        "the two folded into runs, which is the shape the cell below this one \
+         is for"
+    );
+
+    let walk = clustering_of(&ours.entries).expect("the data section is laid out clustered");
+    assert!(
+        ours.header.clustered,
+        "an offset that repeats is a back reference into bytes already laid \
+         down, not a step backwards ({walk:?})"
+    );
+}
+
+/// A run of identical adjacent tiles is one entry over many tile ids, and it
+/// clusters.
+///
+/// Four consecutive ids on one blob collapse into a single entry with
+/// `run_length` 4, so the directory has three entries for six tiles and the
+/// walk sees one offset standing for four tile ids.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_run_of_identical_adjacent_tiles_still_clusters_under_arrival() {
+    let dir = scratch();
+    let out = dir.path().join("run-arrival.pmtiles");
+    let tiles: Vec<(u64, &[u8])> = vec![
+        (0, BLOB_A),
+        (1, BLOB_B),
+        (2, BLOB_B),
+        (3, BLOB_B),
+        (4, BLOB_B),
+        (5, BLOB_C),
+    ];
+    let ours = write_in_this_order(&out, &tiles, synthetic_options(Layout::Arrival));
+
+    assert_eq!(
+        ours.entries.len(),
+        3,
+        "six tiles did not fold into three entries, so there is no run here"
+    );
+    assert_eq!(
+        (ours.entries[1].tile_id, ours.entries[1].run_length),
+        (1, 4),
+        "the middle entry is not the four-tile run this cell is about"
+    );
+
+    let walk = clustering_of(&ours.entries).expect("the data section is laid out clustered");
+    assert!(
+        ours.header.clustered,
+        "a run is one blob covering four tile ids, not four steps through the \
+         data section ({walk:?})"
+    );
+}
+
+/// A run whose own tiles arrived backwards still clusters, because the blob
+/// was placed once and the placement is what the flag is about.
+///
+/// The arrival sequence here descends four times and the archive is clustered
+/// anyway: tiles 4, 3, 2 and 1 share one blob, so only the first of them
+/// places anything. A tracker that watched the arrival sequence for descents
+/// rather than the placements would call this unclustered, which is the safe
+/// direction and still wrong.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_run_whose_tiles_arrived_backwards_still_clusters() {
+    let dir = scratch();
+    let out = dir.path().join("run-backwards.pmtiles");
+    let order: Vec<(u64, &[u8])> = vec![
+        (0, BLOB_A),
+        (4, BLOB_B),
+        (3, BLOB_B),
+        (2, BLOB_B),
+        (1, BLOB_B),
+        (5, BLOB_C),
+    ];
+    let descents = order.windows(2).filter(|w| w[1].0 < w[0].0).count();
+    assert_eq!(
+        descents, 3,
+        "this arrival order no longer goes backwards, so it cannot tell a \
+         placement tracker apart from an arrival one"
+    );
+
+    let ours = write_in_this_order(&out, &order, synthetic_options(Layout::Arrival));
+    let walk = clustering_of(&ours.entries).expect("the data section is laid out clustered");
+    assert!(
+        ours.header.clustered,
+        "the three descents in the arrival order all landed on a blob that was \
+         already placed, so nothing about the data section moved ({walk:?})"
+    );
+}
+
+/// Exactly one descent, at the very last tile, still clears the flag.
+///
+/// The pair is the point. Two runs over the same eight tiles differing only in
+/// where tile 0 arrives, and the flag has to come out differently. Every
+/// payload is distinct on purpose: a last tile that deduplicated into a blob
+/// already placed would be a back reference, and the archive would genuinely
+/// still be clustered.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn one_descent_at_the_last_tile_clears_clustered() {
+    let dir = scratch();
+    let payloads: Vec<Vec<u8>> = (0..8u64)
+        .map(|i| format!("tile {i} carries its own bytes").into_bytes())
+        .collect();
+    let ascending: Vec<(u64, &[u8])> = (0..8u64)
+        .map(|i| (i, payloads[i as usize].as_slice()))
+        .collect();
+    let mut moved = ascending.clone();
+    let first = moved.remove(0);
+    moved.push(first);
+
+    let descents = |order: &[(u64, &[u8])]| order.windows(2).filter(|w| w[1].0 < w[0].0).count();
+    assert_eq!(descents(&ascending), 0, "the control is not in order");
+    assert_eq!(
+        descents(&moved),
+        1,
+        "moving tile 0 to the end has to leave exactly one descent, or this \
+         cell is not about the boundary it names"
+    );
+    assert_eq!(
+        moved.last().expect("the order is not empty").0,
+        0,
+        "the one descent is not at the last arrival"
+    );
+
+    let control = write_in_this_order(
+        &dir.path().join("ascending.pmtiles"),
+        &ascending,
+        synthetic_options(Layout::Arrival),
+    );
+    let broken = write_in_this_order(
+        &dir.path().join("moved.pmtiles"),
+        &moved,
+        synthetic_options(Layout::Arrival),
+    );
+
+    let walk = clustering_of(&control.entries).expect("the in-order run lays out clustered");
+    assert_eq!(
+        walk.back_references, 0,
+        "the payloads stopped being distinct, so the moved tile below could \
+         deduplicate into place and the run would still be clustered: {walk:?}"
+    );
+    assert!(control.header.clustered, "the in-order control lost its flag");
+
+    let why = clustering_of(&broken.entries)
+        .expect_err("one tile arriving last has to break the ordering");
+    assert!(
+        !broken.header.clustered,
+        "the archive claims clustering its own entries deny: {why}"
+    );
+    assert_eq!(
+        control.entries.len(),
+        broken.entries.len(),
+        "the two runs no longer carry the same tiles"
+    );
+}
+
+/// `Layout::TileId` earns the flag whatever order its tiles arrived in, which
+/// is a check on the tracker rather than on the archive.
+///
+/// That layout assigns offsets walking the entries in tile id order, taking
+/// the next free one for a blob it has not placed and an earlier one for a
+/// blob it has, so there is no path through it that lays out an unclustered
+/// data region. Before #1144 the flag was read off the layout and this could
+/// not have failed. It can now, and the way it fails is a tracker fed the
+/// staged offset a payload arrived at instead of the offset it was placed at.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn layout_tile_id_earns_clustered_whatever_the_arrival_order() {
+    let dir = scratch();
+    for (n, order) in permutations(&clustering_tiles()).into_iter().enumerate() {
+        let out = dir.path().join(format!("tileid-perm-{n}.pmtiles"));
+        let ours = write_in_this_order(&out, &order, synthetic_options(Layout::TileId));
+        let ids = ids_of(&order);
+        let walk = clustering_of(&ours.entries).unwrap_or_else(|why| {
+            panic!("tile id order laid out an unclustered data region from arrival order {ids:?}: {why}")
+        });
+        assert!(
+            ours.header.clustered,
+            "tile id order did not claim the clustering it produced from \
+             arrival order {ids:?} ({walk:?})"
+        );
+    }
 }
