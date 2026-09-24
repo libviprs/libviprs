@@ -1321,6 +1321,21 @@ and not under `Fixed`: this file is the only place they can be caught.
 
 ### Added
 
+- **The tile-codec numbers, re-measured against the encoder that shipped**
+  (issue #1134). `docs/tile-codec-benchmarks.md` is the procedure behind the
+  JPEG, PNG and lossless WebP figures for a vector CAD sheet: one `viprs
+  pyramid` run per cell over `blueprint.pdf` at 150 dpi, reporting tile bytes,
+  deduped bytes, distinct payloads, archive size, allocated blocks and
+  filesystem entries, with PSNR and an ink-mask IoU against the lossless tree
+  beside it. `scripts/tile-fidelity.py` is the analysis half.
+
+  It exists because #1132 replaced the JPEG encoder the day after the run
+  behind #1134 was taken, so half of that record describes code that is no
+  longer in the tree. The document says which cells that took out, and it
+  carries the control that says the two runs saw the same pixels: this run's
+  tiles through libjpeg at #1134's four knob settings reproduce its four
+  totals to the byte.
+
 - **The PMTiles writer can append straight into the destination** (EPIC #1135,
   issue #1143). `WriterOptions::layout` and `WriterOptions::with_layout` take
   the new `pmtiles::Layout`, which is `TileId` by default and changes nothing
