@@ -2536,7 +2536,11 @@ fn the_clustered_flag_agrees_with_the_archive_for_every_arrival_order() {
 fn a_dedupe_back_reference_does_not_cost_an_arrival_run_its_clustering() {
     let dir = scratch();
     let out = dir.path().join("back-reference.pmtiles");
-    let ours = write_in_this_order(&out, &clustering_tiles(), synthetic_options(Layout::Arrival));
+    let ours = write_in_this_order(
+        &out,
+        &clustering_tiles(),
+        synthetic_options(Layout::Arrival),
+    );
 
     let last = *ours.entries.last().expect("the archive has entries");
     assert_eq!(last.tile_id, 6, "the fixture's last entry moved");
@@ -2573,7 +2577,11 @@ fn a_dedupe_back_reference_does_not_cost_an_arrival_run_its_clustering() {
 fn two_entries_at_one_offset_are_not_a_descent() {
     let dir = scratch();
     let out = dir.path().join("repeated-offset.pmtiles");
-    let ours = write_in_this_order(&out, &clustering_tiles(), synthetic_options(Layout::Arrival));
+    let ours = write_in_this_order(
+        &out,
+        &clustering_tiles(),
+        synthetic_options(Layout::Arrival),
+    );
 
     let at = |tile_id: u64| {
         ours.entries
@@ -2589,7 +2597,10 @@ fn two_entries_at_one_offset_are_not_a_descent() {
          repeats here and this cell covers nothing"
     );
     assert_eq!(
-        (ours.entries[three].run_length, ours.entries[five].run_length),
+        (
+            ours.entries[three].run_length,
+            ours.entries[five].run_length
+        ),
         (1, 1),
         "the two folded into runs, which is the shape the cell below this one \
          is for"
@@ -2732,7 +2743,10 @@ fn one_descent_at_the_last_tile_clears_clustered() {
         "the payloads stopped being distinct, so the moved tile below could \
          deduplicate into place and the run would still be clustered: {walk:?}"
     );
-    assert!(control.header.clustered, "the in-order control lost its flag");
+    assert!(
+        control.header.clustered,
+        "the in-order control lost its flag"
+    );
 
     let why = clustering_of(&broken.entries)
         .expect_err("one tile arriving last has to break the ordering");
