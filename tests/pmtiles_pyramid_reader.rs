@@ -131,6 +131,22 @@ fn fs_and_pmtiles_return_the_same_tiles() {
             "{coord:?} decodes to different geometry"
         );
         assert_eq!(a.data(), b.data(), "{coord:?} decodes to different pixels");
+
+        // And both backends answer the cheap question with the same number
+        // they answered the expensive one with (issue #1130). A `tile_len`
+        // that disagreed with its own `tile` would send a verify looking at a
+        // length that belongs to another tile, which is the one way this
+        // method can be worse than no method.
+        assert_eq!(
+            pmt.tile_len(*coord).expect("the archive answers a length"),
+            Some(from_archive.len() as u64),
+            "{coord:?}: the archive's length disagrees with its own payload"
+        );
+        assert_eq!(
+            fs.tile_len(*coord).expect("the tree answers a length"),
+            Some(from_tree.len() as u64),
+            "{coord:?}: the tree's length disagrees with its own payload"
+        );
         compared += 1;
     }
     assert_eq!(
@@ -260,6 +276,12 @@ fn both_backends_describe_the_same_pyramid() {
     assert_eq!(from_archive.tile_size, Some(256));
     assert_eq!(from_archive.layout, Some(Layout::Xyz));
     assert_eq!(from_archive.format, Some(TileFormat::Png));
+    // The three #1130 added, pinned against the source rather than against the
+    // other backend, because two backends reading the same wrong number agree
+    // perfectly.
+    assert_eq!(from_archive.source_width, Some(1024));
+    assert_eq!(from_archive.source_height, Some(768));
+    assert_eq!(from_archive.overlap, Some(0));
     assert_eq!(
         from_archive.max_level,
         plan.levels

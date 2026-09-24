@@ -351,7 +351,7 @@ pub use pyramid_migrate::{
 };
 pub use pyramid_reader::{
     DirectoryPyramidReader, PmTilesPyramidReader, PyramidDescription, PyramidReadError,
-    PyramidReader,
+    PyramidReader, StructuralSummary,
 };
 pub use raster::{Raster, RasterError, RegionView};
 pub use resample::{
@@ -389,6 +389,11 @@ pub use streaming_mapreduce::{
     LocalWorkExecutor, MapReduceConfig, StripWorkUnit, WorkContext, WorkExecutor,
 };
 pub use svg::{SvgOptions, decode_svg, decode_svg_with_limits};
+// `TileEvidence` is re-exported at the root because it is the type of a field
+// on `EngineResult`, which is re-exported here: a caller reading a result
+// should not have to reach into a second module to name what it says. The
+// verify entry points stay behind `libviprs::verify::`.
+pub use verify::TileEvidence;
 // `decode_webp` is re-exported for the reason `decode_radiance` is: it is
 // the format-specific decode entry point a caller reaches for when they
 // already know the bytes are WebP. `decode_webp_with` travels beside it the
