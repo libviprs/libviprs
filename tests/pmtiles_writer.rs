@@ -2382,10 +2382,19 @@ fn clustering_tiles() -> Vec<(u64, &'static [u8])> {
 /// What the synthetic tile sets below are written with: a tile type, because
 /// `Unknown` is a legal value the reference tool then has nothing to say
 /// about, and the layout under test.
+///
+/// The dedupe budget is not decoration. The two sweeps below write 1440
+/// archives between them, and at the 8 MiB default each one allocates and
+/// zeroes an eight-megabyte window to put three payloads in. That alone was
+/// 219 of the 248 seconds this file took, against 29 before the sweeps
+/// existed. 64 KiB still buys about a thousand payload slots, which is three
+/// orders of magnitude more than any fixture here needs, so nothing evicts and
+/// the archives are the ones the default budget produced.
 fn synthetic_options(layout: Layout) -> WriterOptions {
     WriterOptions::default()
         .with_tile_type(TileType::Png)
         .with_layout(layout)
+        .with_dedupe_memory_bytes(64 * 1024)
 }
 
 /// Feed exactly this arrival order into a writer and hand back what it
