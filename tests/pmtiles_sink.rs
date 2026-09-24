@@ -1613,17 +1613,39 @@ fn an_ordered_arrival_run_stores_what_the_tile_id_layout_would_have() {
 
 /// An ordered arrival run earns `clustered`.
 ///
-/// This is the one cell #1145 cannot turn green on its own. `clustered` is
-/// read off the layout today, `true` for `Layout::TileId` and `false` for
+/// This is the cell #1145 could not turn green on its own. `clustered` used to
+/// be read off the layout, `true` for `Layout::TileId` and `false` for
 /// `Layout::Arrival` whatever the tiles did, so an arrival archive whose data
-/// region genuinely is in tile id order still reports `false`. #1144 makes the
-/// flag measured at ingest instead of assumed from the layout, and this cell
-/// is what says ordered emission was worth doing once it lands.
+/// region genuinely was in tile id order still reported `false`. #1144 made
+/// the flag measured while the entries are placed, and this cell is what says
+/// ordered emission was worth doing.
 ///
-/// It asserts the decoded field and the byte, because the two are a pair: the
-/// field is what a reader of this crate sees and byte 96 is what `pmtiles
-/// extract` reads, and a header that decoded `true` from a byte that said
-/// something else would be a bug nobody would look for.
+/// It asserts the decoded field and the byte together, because they are a
+/// pair: the field is what a reader of this crate sees, the byte is what
+/// anything outside it sees, and a header that decoded `true` from a byte
+/// saying otherwise would be a bug nobody would look for.
+///
+/// # Which go-pmtiles command actually reads this flag, and which do not
+///
+/// Worth writing down, because the obvious oracle is the wrong one. `pmtiles
+/// verify` does **not** check the `clustered` claim at all: #1144's lane
+/// forced byte 96 to 1 on a shuffled archive and `verify` still exited 0. A
+/// cell that leaned on `verify` to say the flag is honest would be leaning on
+/// a check that does not exist. `pmtiles extract` did not discriminate either
+/// on the fixture it was tried against.
+///
+/// The command that does read it is `pmtiles makesync`, and it separates the
+/// three cases: an honest in-order arrival archive exits 0 and writes a
+/// syncfile, an honest `false` exits 1 with "archive must be clustered for
+/// makesync", and a lying archive exits 2 with a panic inside
+/// `pmtiles.IterateEntries`.
+///
+/// No live go-pmtiles run is wired into this repository, which commits
+/// captured vectors instead (see `tests/common/pmtiles_oracle.rs`), so this
+/// cell asserts the crate's own header and says out loud what it is not: it
+/// is not go-pmtiles agreeing. Putting `makesync` behind an `#[ignore]`d
+/// capture tool, the way #1143 did for `verify`, is the thing that would make
+/// it that, and it is the obvious next step rather than this issue's.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn an_ordered_arrival_run_earns_the_clustered_flag() {
@@ -1643,10 +1665,43 @@ fn an_ordered_arrival_run_earns_the_clustered_flag() {
     );
 
     // `header.rs` serialises `clustered` at offset 96. The raw byte is
-    // asserted beside the decoded field because that byte is what the
-    // reference tools read.
+    // asserted beside the decoded field because that byte is what anything
+    // outside this crate reads.
     let bytes = std::fs::read(&archive).expect("the archive is readable");
     assert_eq!(bytes[96], 1, "byte 96 is the clustered flag");
+
+    // The control, and the cell is worth very little without it. Everything
+    // above passes for a writer that reports `clustered` unconditionally,
+    // which is precisely what this one did before #1144, so the claim is not
+    // "the flag is true" but "the flag is true *because the run was ordered*".
+    //
+    // The unordered run is at a concurrency of one on purpose. Arrival order
+    // under several workers is a race, and a race can land in tile id order,
+    // which would make this control flaky in the direction that hides a
+    // regression. One worker on the default cascade emits the top level
+    // first and the overview level last, so the lowest tile id sits at the
+    // far end of the data region and the answer is `false` every time.
+    let unordered_dir = tempfile::tempdir().expect("tempdir");
+    let unordered = run_with_layout(
+        &src,
+        &plan,
+        unordered_dir.path(),
+        ArchiveLayout::Arrival,
+        false,
+        1,
+    );
+    let unordered_header = walk(&unordered).header;
+    assert_eq!(
+        unordered_header.addressed_tiles_count, header.addressed_tiles_count,
+        "the two runs have to cover the same tiles for the comparison to mean anything"
+    );
+    assert!(
+        !unordered_header.clustered,
+        "an unordered arrival run is not in tile id order, so the flag must be false; \
+         a `true` here means the flag is not measuring anything"
+    );
+    let unordered_bytes = std::fs::read(&unordered).expect("the archive is readable");
+    assert_eq!(unordered_bytes[96], 0, "byte 96 follows the decoded field");
 }
 
 /// Two ordered runs over one source produce the same archive.
