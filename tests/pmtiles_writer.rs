@@ -2187,6 +2187,7 @@ fn round_trips_in_arrival_order(name: &str, dir: &Path) {
 /// metadata, and differ only in where the sections sit.
 #[test]
 #[ignore = "a capture tool for the go-pmtiles oracle, not a gate"]
+#[cfg_attr(miri, ignore)] // writes archives to the filesystem, which Miri isolation blocks
 fn capture_an_arrival_archive_for_the_go_pmtiles_oracle() {
     let dir = std::env::var("LIBVIPRS_ARRIVAL_CAPTURE_DIR")
         .map(PathBuf::from)
