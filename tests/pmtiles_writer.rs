@@ -2146,3 +2146,60 @@ fn round_trips_in_arrival_order(name: &str, dir: &Path) {
         report.findings
     );
 }
+
+/// Write arrival-order archives out where `go-pmtiles` can be pointed at them.
+///
+/// Not a gate, and `#[ignore]`d so it is never one. The gate for #1143 is the
+/// three cells above plus `pmtiles verify`, and this is the part of that last
+/// one that has to happen inside this crate: the reference tool cannot build an
+/// arrival-order archive, so something has to hand it one.
+///
+/// It is here rather than in a script because the tiles come from the pinned
+/// goldens and the writer is this crate's, so a capture living anywhere else
+/// would need its own copy of both. `LIBVIPRS_ARRIVAL_CAPTURE_DIR` says where
+/// the archives go; without it they go to the system temp directory and are
+/// named on stdout.
+///
+/// ```text
+/// LIBVIPRS_ARRIVAL_CAPTURE_DIR=/work/out \
+///   cargo test --test pmtiles_writer -- --ignored --nocapture capture_an_arrival
+/// ```
+///
+/// Each golden is written twice, once each way, because a `pmtiles show` of
+/// the arrival archive means little without the tile id one beside it: the two
+/// have to report the same tile count, the same zoom range and the same
+/// metadata, and differ only in where the sections sit.
+#[test]
+#[ignore = "a capture tool for the go-pmtiles oracle, not a gate"]
+fn capture_an_arrival_archive_for_the_go_pmtiles_oracle() {
+    let dir = std::env::var("LIBVIPRS_ARRIVAL_CAPTURE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| std::env::temp_dir());
+    std::fs::create_dir_all(&dir).expect("the capture directory is writable");
+
+    for name in ["dupes-z0z3.pmtiles", "leaves-z0z7.pmtiles"] {
+        let label = name.trim_end_matches(".pmtiles");
+        let g = parse_golden(name);
+        for (suffix, layout) in [("arrival", Layout::Arrival), ("tileid", Layout::TileId)] {
+            let out = dir.join(format!("{label}-{suffix}.pmtiles"));
+            let options = WriterOptions::default()
+                .with_tile_type(g.header.tile_type)
+                .with_tile_compression(g.header.tile_compression)
+                .with_layout(layout);
+            write_shuffled(&g, &out, 0x5eed_1143, options);
+            let bytes = std::fs::read(&out).expect("the archive is on disk");
+            let h = Header::try_decode(&bytes[..127]).expect("our header decodes");
+            println!(
+                "{} {} bytes, tile data at {} for {}, metadata at {}, leaves at {} for {}, clustered {}",
+                out.display(),
+                bytes.len(),
+                h.tile_data_offset,
+                h.tile_data_length,
+                h.metadata_offset,
+                h.leaf_directories_offset,
+                h.leaf_directories_length,
+                h.clustered,
+            );
+        }
+    }
+}
