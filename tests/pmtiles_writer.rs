@@ -2132,7 +2132,7 @@ fn an_arrival_archive_round_trips_every_tile_and_its_blobs_are_in_arrival_order(
     )
     .expect("the validator runs");
     assert!(
-        report.is_clean(),
+        report.is_valid(),
         "the validator found {:?}",
         report.findings
     );
