@@ -90,13 +90,12 @@
 //! [`Layout::Arrival`], and it is what this writer does when it is asked for
 //! it (issue #1143).
 //!
-//! What such a writer cannot offer is the two things issue #989 also asks
+//! What such a writer cannot offer is the other thing issue #989 also asks
 //! for. Arrival order means the bytes depend on arrival order, so two shuffled
-//! insertion orders stop producing a byte-identical archive, and `clustered`
-//! stops being true, which `pmtiles extract` requires of its input. Tile id
-//! order buys an honest `clustered = true`, a reader whose sequential scan of
-//! a zoom level is a sequential scan of the file, and a deterministic archive
-//! **as far as the dedupe window reaches**.
+//! insertion orders stop producing a byte-identical archive. Tile id order
+//! keeps that, and buys a reader whose sequential scan of a zoom level is a
+//! sequential scan of the file, and a deterministic archive **as far as the
+//! dedupe window reaches**.
 //!
 //! That last qualification is new and it is a real one. Tile id order decides
 //! where a payload goes; it does not decide *which* payloads there are. The
@@ -118,6 +117,14 @@
 //! property where both hold everything, and
 //! `two_orders_stop_agreeing_once_the_window_cannot_hold_the_tile_set` pins
 //! its failure where neither does.
+//!
+//! `clustered` used to be on that list of things tile id order buys and is not
+//! any more. It is measured rather than bought (issue #1144): the pass that
+//! settles every payload's offset watches them go by, and the header reports
+//! what it saw. So an arrival run whose tiles happened to arrive in tile id
+//! order claims the flag honestly, and one whose tiles did not says so. Tile
+//! id order still always earns it, which is a check on the tracker rather
+//! than on the archive.
 //!
 //! So the default, [`Layout::TileId`], stages payloads in arrival order, sorts
 //! at finalize, and writes the data region in tile id order. `clustered` is
@@ -142,10 +149,13 @@
 //! * The prefix is reserved with a seek, so the padding between the root's end
 //!   and the ceiling is a hole rather than 16 KB of I/O.
 //!
-//! And two things stop being true, which is why it is not the default.
-//! `clustered` is `false`, and `pmtiles extract` requires clustered input. And
-//! the bytes depend on the arrival order, so the byte-identity property below
+//! And one thing stops being true, which is why it is not the default. The
+//! bytes depend on the arrival order, so the byte-identity property below
 //! goes: it is a statement about tile id order, not about this writer.
+//! `clustered` is not the second one. It is whatever the arrival order earned,
+//! so a caller feeding tiles in tile id order gets an archive `pmtiles
+//! extract` will take, and one feeding them in any other order gets an honest
+//! `false`.
 //!
 //! # Dedupe is the archive's, not the engine's
 //!
@@ -787,9 +797,10 @@ pub enum Layout {
     /// Sort at finalize and write the data region in tile id order.
     ///
     /// The default, and what every archive this crate has ever written looks
-    /// like. It buys an honest `clustered = true`, a sequential scan of a zoom
-    /// level that is a sequential scan of the file, and an archive that is a
-    /// pure function of the tile set as far as the dedupe window reaches.
+    /// like. It earns `clustered` whatever order the tiles arrived in, and
+    /// buys a sequential scan of a zoom level that is a sequential scan of the
+    /// file and an archive that is a pure function of the tile set as far as
+    /// the dedupe window reaches.
     ///
     /// It costs a copy. Payloads are staged in arrival order in a scratch file
     /// and moved into the archive at finalize, so the run needs roughly twice
@@ -805,10 +816,13 @@ pub enum Layout {
     /// staging file, every tile byte is written once and read never, and the
     /// scratch a run needs drops to the index alone.
     ///
-    /// It costs the two things tile id order buys. The bytes depend on the
-    /// arrival order, so two shuffled insertion orders stop producing the same
-    /// archive, and `clustered` is `false`, which `pmtiles extract` refuses as
-    /// input.
+    /// It costs determinism: the bytes depend on the arrival order, so two
+    /// shuffled insertion orders stop producing the same archive.
+    ///
+    /// It does not cost `clustered`. That flag is measured rather than
+    /// declared (issue #1144), so tiles fed in tile id order earn it here too
+    /// and `pmtiles extract` takes the result; tiles fed in any other order
+    /// report `false`, honestly.
     Arrival,
 }
 
@@ -1807,6 +1821,9 @@ struct Plan {
     /// that file holds.
     contents_count: u64,
     tile_data_length: u64,
+    /// Whether the data section came out ordered by tile id, which is the
+    /// claim the header's `clustered` flag makes.
+    clustered: bool,
 }
 
 /// One payload the data region carries, as the archive write needs it.
@@ -1890,6 +1907,32 @@ impl<W: Write + Seek> Writer<W> {
         let mut open: Option<Entry> = None;
         let mut previous_id: Option<u64> = None;
 
+        // Whether the data section is coming out ordered by tile id, earned as
+        // the records go past rather than read off the layout (issue #1144).
+        //
+        // The spec's definition is operational and it fits in one `u64`.
+        // Walking the entries in tile id order, a blob either starts exactly
+        // where the blobs before it ended, or lies wholly inside them, which
+        // is what a deduplicated back reference looks like. `laid_down` is
+        // where they end, so anything starting past it has left a stretch of
+        // the section that a sequential reader would step over.
+        //
+        // Here rather than at ingest because here is where a payload's offset
+        // is settled. Under `Layout::Arrival` the record arrives carrying it;
+        // under `Layout::TileId` this loop is what assigns it. One tracker
+        // covers both, and the tile id layout comes out `true` through the
+        // ordinary path rather than through a special case, which is what the
+        // issue means by the flag being a check on the tracker there.
+        //
+        // The dangerous direction is `true`. This is header byte 96,
+        // go-pmtiles reads it and `pmtiles extract` acts on it, so a wrong
+        // `true` tells a reader it may skip work it cannot and the corruption
+        // surfaces a long way from here. A wrong `false` costs a reader work
+        // it could have skipped, which is what this said for every arrival
+        // archive before #1144.
+        let mut clustered = true;
+        let mut laid_down: u64 = 0;
+
         let (log_path, runs) = self.reduce_runs()?;
         let mut source = SortedSpill::open(&log_path, &runs)?;
         while let Some(record) = source.next_record()? {
@@ -1936,6 +1979,17 @@ impl<W: Write + Seek> Writer<W> {
                     }
                 }
             };
+
+            // Contiguous with the blobs laid down so far, a back reference
+            // inside them, or a gap. Only the third is a break, and it is
+            // sticky: an archive that stopped being clustered does not start
+            // again.
+            let end = offset.saturating_add(u64::from(record.length));
+            if offset == laid_down {
+                laid_down = end;
+            } else if end > laid_down {
+                clustered = false;
+            }
 
             addressed += 1;
             match open.as_mut() {
@@ -1995,6 +2049,7 @@ impl<W: Write + Seek> Writer<W> {
             order_path,
             contents_count,
             tile_data_length,
+            clustered,
         })
     }
 
@@ -2246,30 +2301,25 @@ impl<W: Write + Seek> Writer<W> {
             addressed_tiles_count: plan.addressed_tiles,
             tile_entries_count: plan.entry_count,
             tile_contents_count: plan.contents_count,
-            // Read off the layout, and true by construction rather than
-            // measured, in both directions.
+            // Measured by `plan_entries` as it settled the offsets, not
+            // read off the layout (issue #1144).
             //
-            // Under `Layout::TileId`, `plan_entries` assigns offsets walking
-            // the entries in tile id order, taking `next_offset` for a payload
-            // it has not placed and an earlier offset for one it has, so the
-            // first tile entry is at offset 0 and every later offset is either
-            // contiguous with the previous blob's end or a back reference to a
-            // deduplicated one. That is the spec's definition of clustered and
-            // there is no path through that loop which assigns anything else.
+            // `Layout::TileId` still always comes out `true`, and that is a
+            // check on the tracker rather than on the archive: that pass takes
+            // the next free offset for a blob it has not placed and an earlier
+            // one for a blob it has, and there is no third thing it can do, so
+            // a `false` here would mean the tracker is wrong.
+            // `Layout::Arrival` comes out `true` when the tiles happened to
+            // arrive in tile id order and `false` when they did not, which is
+            // the whole of what #1144 changed: it used to say `false` for an
+            // arrival archive that was clustered, and `pmtiles extract`
+            // refused an input it could have taken.
+            //
             // `clustered_is_true_and_the_layout_backs_it_up` checks the claim
-            // against the bytes.
-            //
-            // Under `Layout::Arrival` the data region is in arrival order, so
-            // the entry with the lowest tile id is wherever it happened to
-            // arrive and the claim is not available. `false` is the safe
-            // direction: a reader told an archive is not clustered does work it
-            // could have skipped, where one told it is skips work it cannot.
-            //
-            // This is not yet the *computed* value #1144 asks for. An arrival
-            // run whose tiles happened to arrive in tile id order is clustered
-            // and this still says it is not, which costs a reader nothing and
-            // is what #1144 is for.
-            clustered: self.options.layout == Layout::TileId,
+            // against the bytes on the default layout, and
+            // `the_clustered_flag_agrees_with_the_archive_for_every_arrival_order`
+            // does it across all 720 arrival orders of one tile set.
+            clustered: plan.clustered,
             internal_compression: self.options.internal_compression,
             tile_compression: self.options.tile_compression,
             tile_type: self.options.tile_type,
