@@ -692,26 +692,22 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// `tempfile::tempdir()`, all eight are annotated, and none is a judgement
 /// call.
 ///
-/// #1145 moves it 469 to 473, and **four** is not three, which is the whole
-/// reason this figure is read off the detector rather than reasoned about.
-///
-/// Three of the four are this issue's own: the ordered-emission cells in
-/// `tests/pmtiles_sink.rs` that build an archive, namely the comparison
-/// against the tile id layout, the `clustered` claim, and the two runs that
-/// have to agree. Each reads the finished file with `std::fs::read`. Its other
-/// cells drive a recording sink that writes nothing, so they touch no
-/// filesystem and do not move this figure; they carry the annotation anyway,
-/// because a 1024 source through the whole engine is not something to hand
-/// Miri.
-///
-/// The fourth is `jpeg_tile_format.rs::a_coloured_tile_at_the_default_quality_keeps_full_chroma`,
-/// and it belongs to nobody's change here. #1153 added it while this constant
-/// still read 461 on its branch, #1144 moved the constant to 469 on a line
-/// that did not carry it, and the two only meet on `main`. Each branch was
+/// #1156 moves it 469 to 470, and the one is
+/// `jpeg_tile_format.rs::a_coloured_tile_at_the_default_quality_keeps_full_chroma`.
+/// It belonged to nobody's change: #1153 added it while this constant still
+/// read 461 on its branch, #1144 moved the constant to 469 on a line that did
+/// not carry that test, and the two only met on `main`. Each branch was
 /// self-consistent and the composition was not, which is the shared-count
-/// hazard exactly: a lane cannot see a counter another lane is also moving.
-/// Recording its row here is what makes the merged tree describe itself, and
-/// it means `main` is red on this gate until something carries the fix.
+/// hazard exactly: a lane cannot see a counter another lane is also moving, so
+/// the first lane to merge afterwards inherits a red gate it did not cause.
+///
+/// #1145 moves it 470 to 473, and the three are the ordered-emission cells in
+/// `tests/pmtiles_sink.rs` that build an archive: the comparison against the
+/// tile id layout, the `clustered` claim, and the two runs that have to agree.
+/// Each reads the finished file with `std::fs::read`. Its other cells drive a
+/// recording sink that writes nothing, so they touch no filesystem and do not
+/// move this figure; they carry the annotation anyway, because a 1024 source
+/// through the whole engine is not something to hand Miri.
 const EXPECTED_FS_TOUCHING_TESTS: usize = 473;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
