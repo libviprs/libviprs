@@ -2,13 +2,17 @@
 //! (issue #993).
 //!
 //! `src/pmtiles/writer.rs` claims a streaming writer whose live memory is
-//! "bounded, and independent of the tile count", with one stated exception:
-//! the content-hash table, the payload table and the final-offset lookup all
-//! scale with the number of **distinct payloads**. Until this file, nothing
-//! measured either half of that sentence, and the half that is an exception is
-//! exactly the half a benchmark is most likely to hide, because a synthetic
-//! pyramid of identical tiles has one distinct payload however many tiles it
-//! has.
+//! "bounded, and independent of the tile count". It used to claim that with
+//! one stated exception, the tables that scale with the number of **distinct
+//! payloads**, and EPIC #1135 removed the exception: the dedupe window has a
+//! fixed capacity the caller sizes, the index record carries its own staged
+//! offset, and the write order is spilled. Nothing the writer holds grows with
+//! the payload count any more.
+//!
+//! Until this file, nothing measured either half of that sentence, and the
+//! half that was an exception is exactly the half a benchmark is most likely
+//! to hide, because a synthetic pyramid of identical tiles has one distinct
+//! payload however many tiles it has.
 //!
 //! # What is measured, and with what
 //!
@@ -41,6 +45,15 @@
 //! * [`the_finalize_peak_stays_under_the_stated_bound`] checks the absolute
 //!   number against a formula, so the two relative tests cannot both pass on a
 //!   writer that is bounded at a gigabyte.
+//! * [`the_add_phase_footprint_does_not_grow_with_the_distinct_payload_count`]
+//!   and [`the_finalize_growth_does_not_follow_the_distinct_payload_count`]
+//!   are the pair issue #1140 exists for. The formula in [`bound_for`] used to
+//!   carry a `PAYLOAD_TABLE_BYTES * distinct_payloads` term, which is to say
+//!   the bound scaled with the exact quantity it was written to bound, so the
+//!   test certified the growth instead of catching it and
+//!   `the_finalize_peak_stays_under_the_stated_bound` passed throughout. These
+//!   two multiply the distinct payloads by sixteen and hold everything else
+//!   still.
 //!
 //! Every one of them also asserts the header the writer produced, because a
 //! run that silently dropped tiles would beat all three bounds.
@@ -173,12 +186,40 @@ const SPILL_BYTES_IN_MEMORY: u64 = 24;
 /// buffer that filled to `n` records may hold capacity for up to `2n`.
 const SORT_BUFFER_SLACK: u64 = 2;
 
-/// What one distinct payload costs across the three tables the writer's module
-/// documentation names as scaling with distinct payloads: the content-hash map
-/// (a 32-byte key and an 8-byte value, plus `hashbrown`'s control byte and its
-/// load factor), the `payload_starts` vector, and the final-offset `order`
-/// vector. Measured at 72 bytes; carried at 128 for headroom.
-const PAYLOAD_TABLE_BYTES: u64 = 128;
+/// What one spilled run costs in the writer's run table: a `Run` is two
+/// `u64`s.
+///
+/// This term is the one the review found missing. The writer records one of
+/// these every time the sort buffer fills, and the table lives until `finish`,
+/// so it grows as `tiles / sort_buffer_records`. It was hiding in this file's
+/// own output the whole time:
+/// `the_finalize_peak_does_not_move_when_the_tile_count_quadruples` printed a
+/// difference of 960 bytes between 65,536 and 262,144 tiles at a 4096-record
+/// buffer, and 960 is exactly the 60 extra runs times 16 bytes. The test
+/// called it slack and passed.
+const RUN_BYTES: u64 = 16;
+
+/// What one leaf pointer costs while a root is being built: an `Entry` is two
+/// `u64`s and two `u32`s.
+///
+/// `build_directories` holds one per leaf for the length of an attempt, so it
+/// grows as `entries / leaf_entries`. Bounded here by the tile count, since an
+/// entry list is never longer than the tiles that produced it.
+const ENTRY_BYTES: u64 = 24;
+
+/// The writer's default leaf width, which every cell here leaves alone.
+/// `DEFAULT_LEAF_ENTRIES` is `pub(crate)`, so it is restated rather than
+/// imported, the same way `SPILL_BYTES_IN_MEMORY` restates the record size.
+const LEAF_ENTRIES: u64 = 4096;
+
+/// The deduplication budget every measurement here hands the writer.
+///
+/// It is passed explicitly rather than left at the default because it is the
+/// one allocation in the writer that a caller sizes, and a bound that quoted
+/// the default would move whenever the default did. Small on purpose: the
+/// point of these tests is what the writer does per payload, and a budget
+/// large enough to hide that would hide it.
+const DEDUPE_BUDGET_BYTES: usize = 1024 * 1024;
 
 /// Everything that is neither the sort buffer nor a payload table: the merge's
 /// capped fan-in of buffered readers, one leaf directory's worth of entries
@@ -194,9 +235,29 @@ const PAYLOAD_TABLE_BYTES: u64 = 128;
 /// the whole entry list would slip under it.
 const FIXED_OVERHEAD_BYTES: u64 = 4 * 1024 * 1024;
 
-fn bound_for(sort_buffer_records: usize, distinct_payloads: u64) -> u64 {
+/// The writer's whole memory bound: the sort buffer the caller asked for, the
+/// dedupe budget the caller asked for, and a constant.
+///
+/// There is **no term in the number of distinct payloads**, which is the
+/// entire point of issue #1140. The term that used to be here,
+/// `PAYLOAD_TABLE_BYTES * distinct_payloads`, made the bound scale with the
+/// quantity it exists to bound, so the assertion could not fail for the one
+/// thing it was written about. Anything this writer spends per payload now
+/// shows up as a failure rather than as a wider ceiling.
+///
+/// There *are* two terms in the tile count, and they were missing until the
+/// review found them. The run table grows as `tiles / sort_buffer_records` and
+/// the leaf pointer list as `entries / leaf_entries`, so both shrink as the
+/// option beneath them grows. That is the opposite of the sort buffer, and it
+/// is why `sort_buffer_records` has a crossover rather than a direction: past
+/// `sqrt(2 * tiles / 3)` the run table costs more than the buffer saves.
+/// Naming both here is what lets a cell that lowers the buffer fail honestly
+/// instead of passing on a ceiling nobody checked.
+fn bound_for(tiles: u64, sort_buffer_records: usize, dedupe_memory_bytes: usize) -> u64 {
     SORT_BUFFER_SLACK * SPILL_BYTES_IN_MEMORY * sort_buffer_records as u64
-        + PAYLOAD_TABLE_BYTES * distinct_payloads
+        + SORT_BUFFER_SLACK * RUN_BYTES * tiles.div_ceil(sort_buffer_records.max(1) as u64)
+        + ENTRY_BYTES * tiles.div_ceil(LEAF_ENTRIES)
+        + dedupe_memory_bytes as u64
         + FIXED_OVERHEAD_BYTES
 }
 
@@ -262,6 +323,10 @@ struct Measured {
     /// so it is what finalize itself added on top of what the add phase left
     /// resident.
     finalize_growth: u64,
+    /// Live heap the add phase left resident at the instant `finish` was
+    /// called. This is the half the dedupe window and the payload table live
+    /// in, and it is invisible in `finalize_growth`, which subtracts it.
+    add_phase_live: u64,
     header: Header,
 }
 
@@ -273,42 +338,44 @@ struct Measured {
 /// one run-length entry. A pyramid of identical tiles is one entry and no leaf
 /// directories at any size, which would make every number here a measurement
 /// of nothing.
+///
+/// They are generated per tile into one reusable buffer rather than built into
+/// a `Vec` up front. Up front, the harness's own table is 104 bytes a distinct
+/// payload, which is nothing at 257 and 208 MB at two million, and it is live
+/// while *other* tests in this binary are measuring: the counter is
+/// process-wide, `cargo test` runs these in parallel threads, and that table
+/// is allocated before `start_measuring` takes the lock. Adding a two-million
+/// cell to this file made three unrelated tests fail with peaks that had
+/// nothing to do with the writer.
 fn measure_write(tiles: u64, distinct: u64, sort_buffer_records: usize) -> Measured {
     let scratch = tempfile::tempdir().expect("a scratch directory");
 
-    let payloads: Vec<(Vec<u8>, [u8; 32])> = (0..distinct)
-        .map(|i| {
-            let mut bytes = vec![0u8; 64];
-            bytes[..8].copy_from_slice(&i.to_le_bytes());
-            let hash = content_hash(&bytes);
-            (bytes, hash)
-        })
-        .collect();
-
-    // z=9 is a 512x512 grid, so it addresses 262144 tiles: enough for every
-    // profile here, and one zoom keeps the tile ids contiguous.
-    let zoom: u8 = 9;
+    // The smallest zoom whose grid addresses `tiles`, so one zoom holds the
+    // whole profile and the tile ids stay contiguous. z=9 is a 512x512 grid
+    // and covers 262144, which is every cheap profile here; the two-million
+    // cell lands on z=11.
+    let zoom: u8 = (9..=14)
+        .find(|z| (1u64 << z) * (1u64 << z) >= tiles)
+        .unwrap_or_else(|| panic!("no zoom up to 14 addresses {tiles} tiles"));
     let side: u64 = 1 << zoom;
-    assert!(
-        tiles <= side * side,
-        "z={zoom} addresses {} tiles, fewer than the {tiles} asked for",
-        side * side
-    );
 
     let options = WriterOptions::default()
         .with_tile_type(TileType::Png)
-        .with_sort_buffer_records(sort_buffer_records);
+        .with_sort_buffer_records(sort_buffer_records)
+        .with_dedupe_memory_bytes(DEDUPE_BUDGET_BYTES);
 
     let (_guard, baseline) = start_measuring();
 
     let mut writer =
         Writer::try_new(Discard::default(), scratch.path(), options).expect("the writer opens");
+    let mut bytes = vec![0u8; 64];
     for index in 0..tiles {
         let x = (index % side) as u32;
         let y = (index / side) as u32;
-        let (bytes, hash) = &payloads[(index % distinct) as usize];
+        bytes[..8].copy_from_slice(&(index % distinct).to_le_bytes());
+        let hash = content_hash(&bytes);
         writer
-            .add_tile(zoom, x, y, bytes, *hash)
+            .add_tile(zoom, x, y, &bytes, hash)
             .expect("every tile is inside the grid");
     }
     let before_finalize = live_over(baseline);
@@ -318,6 +385,7 @@ fn measure_write(tiles: u64, distinct: u64, sort_buffer_records: usize) -> Measu
     Measured {
         peak,
         finalize_growth: peak.saturating_sub(before_finalize),
+        add_phase_live: before_finalize,
         header: finished.header,
     }
 }
@@ -421,6 +489,63 @@ fn the_finalize_peak_grows_with_the_sort_buffer_it_was_given() {
     );
 }
 
+/// Shrinking the sort buffer past the crossover makes the writer use *more*
+/// memory, not less.
+///
+/// The control on the new run-table term, and on the paragraph in
+/// `WriterOptions::sort_buffer_records` that the review made me write. The
+/// buffer is 24 bytes a record and the run table is 16 bytes per spilled run,
+/// so the sort costs about `24 * S + 16 * tiles / S` and is smallest at
+/// `S = sqrt(2 * tiles / 3)`. At the 262,144 tiles below that is about 418
+/// records. Both cells here sit on the same side of nothing: 512 is just above
+/// it and 32 is well below, so the second one pays about six times as much for
+/// a buffer an eighth the size.
+///
+/// Without this, `bound_for` could carry a run-table term that no cell ever
+/// exercises, which is the same defect the epic exists to fix one level up.
+/// `the_finalize_peak_grows_with_the_sort_buffer_it_was_given` only pushes the
+/// buffer upward, where the run table shrinks out of the way.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn shrinking_the_sort_buffer_past_the_crossover_costs_more_than_it_saves() {
+    const TILES: u64 = 262_144;
+    const DISTINCT: u64 = 3;
+    // Just above sqrt(2 * 262144 / 3), which is about 418.
+    const NEAR_THE_MINIMUM: usize = 512;
+    // Well below it, where the run table is the whole cost.
+    const FAR_BELOW: usize = 32;
+
+    let sensible = measure_write(TILES, DISTINCT, NEAR_THE_MINIMUM);
+    let too_small = measure_write(TILES, DISTINCT, FAR_BELOW);
+
+    assert_really_wrote(&sensible, TILES, DISTINCT);
+    assert_really_wrote(&too_small, TILES, DISTINCT);
+    println!(
+        "sort-buffer crossover: {NEAR_THE_MINIMUM} records peak={}, {FAR_BELOW} records peak={},          delta={}",
+        sensible.peak,
+        too_small.peak,
+        too_small.peak.saturating_sub(sensible.peak)
+    );
+
+    assert!(
+        too_small.peak > sensible.peak,
+        "a buffer of {FAR_BELOW} records peaked at {} bytes and one of {NEAR_THE_MINIMUM} at {},          so shrinking the buffer did not cost anything and the run table is not where the          review said it is",
+        too_small.peak,
+        sensible.peak
+    );
+
+    // And both are still inside the stated bound, which is the point of
+    // writing the term down rather than widening the ceiling.
+    for (records, measured) in [(NEAR_THE_MINIMUM, &sensible), (FAR_BELOW, &too_small)] {
+        let bound = bound_for(TILES, records, DEDUPE_BUDGET_BYTES);
+        assert!(
+            measured.peak <= bound,
+            "{records} sort-buffer records peaked at {} bytes over a bound of {bound}",
+            measured.peak
+        );
+    }
+}
+
 /// The absolute peak, against the formula the module documents.
 #[test]
 #[cfg_attr(miri, ignore)]
@@ -432,7 +557,7 @@ fn the_finalize_peak_stays_under_the_stated_bound() {
     let measured = measure_write(TILES, DISTINCT, RECORDS);
     assert_really_wrote(&measured, TILES, DISTINCT);
 
-    let bound = bound_for(RECORDS, DISTINCT);
+    let bound = bound_for(TILES, RECORDS, DEDUPE_BUDGET_BYTES);
     println!(
         "absolute bound: peak={} finalize=+{} bound={bound} ({RECORDS} records, {DISTINCT} distinct)",
         measured.peak, measured.finalize_growth
@@ -447,6 +572,228 @@ fn the_finalize_peak_stays_under_the_stated_bound() {
         measured.finalize_growth <= bound,
         "finalize alone added {} bytes on top of the add phase, over a bound of {bound}",
         measured.finalize_growth
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The two that issue #1140 exists for
+// ---------------------------------------------------------------------------
+
+/// Sixteen times the distinct payloads, same tiles, same everything else: what
+/// the add phase leaves resident must not follow the payload count.
+///
+/// This is the half the old bound hid. The writer held a
+/// `HashMap<[u8; 32], u64>` of every payload it had ever seen plus a
+/// `payload_starts: Vec<u64>` beside it, both of them growing one entry per
+/// distinct payload for the whole run, and the formula in `bound_for` carried
+/// a term for exactly that. So the number went up, the ceiling went up with
+/// it, and the assertion held.
+///
+/// Sixteen rather than four, because at four a real per-payload cost can still
+/// hide under the constants.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn the_add_phase_footprint_does_not_grow_with_the_distinct_payload_count() {
+    const RECORDS: usize = 4_096;
+    const FEW: u64 = 16_384;
+    const MANY: u64 = 262_144;
+
+    let few = measure_write(FEW, FEW, RECORDS);
+    let many = measure_write(MANY, MANY, RECORDS);
+
+    assert_really_wrote(&few, FEW, FEW);
+    assert_really_wrote(&many, MANY, MANY);
+    println!(
+        "add-phase footprint: {FEW} distinct live={}, {MANY} distinct live={}, delta={}",
+        few.add_phase_live,
+        many.add_phase_live,
+        many.add_phase_live.saturating_sub(few.add_phase_live)
+    );
+
+    // 256 KiB of slack against a difference that was 20 MB before this epic:
+    // the hash table alone was about 48 bytes an entry at `hashbrown`'s load
+    // factor, so 246 thousand more payloads bought about 11 MB of it, and
+    // `payload_starts` another 2 MB on top.
+    let slack = 256 * 1024;
+    assert!(
+        many.add_phase_live <= few.add_phase_live + slack,
+        "the add phase followed the payload count: {FEW} distinct payloads left {} bytes \
+         resident and {MANY} left {} bytes",
+        few.add_phase_live,
+        many.add_phase_live
+    );
+}
+
+/// The same sixteenfold step, measured on what finalize allocates on top.
+///
+/// `plan_entries` used to allocate a `final_offsets: Vec<u64>` and an
+/// `order: Vec<u64>`, both one entry per distinct payload, *inside* `finish`
+/// and on top of everything the add phase was still holding. Nothing in
+/// `finish` reads the dedupe window, so that was three per-payload tables live
+/// at once at the moment the writer is supposed to be at its cheapest.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn the_finalize_growth_does_not_follow_the_distinct_payload_count() {
+    const RECORDS: usize = 4_096;
+    const FEW: u64 = 16_384;
+    const MANY: u64 = 262_144;
+
+    let few = measure_write(FEW, FEW, RECORDS);
+    let many = measure_write(MANY, MANY, RECORDS);
+
+    assert_really_wrote(&few, FEW, FEW);
+    assert_really_wrote(&many, MANY, MANY);
+    println!(
+        "finalize growth: {FEW} distinct +{}, {MANY} distinct +{}, delta={}",
+        few.finalize_growth,
+        many.finalize_growth,
+        many.finalize_growth.saturating_sub(few.finalize_growth)
+    );
+
+    let slack = 256 * 1024;
+    assert!(
+        many.finalize_growth <= few.finalize_growth + slack,
+        "finalize followed the payload count: {FEW} distinct payloads added {} bytes and \
+         {MANY} added {} bytes",
+        few.finalize_growth,
+        many.finalize_growth
+    );
+}
+
+/// The absolute bound again, at two million distinct payloads.
+///
+/// `the_finalize_peak_stays_under_the_stated_bound` runs at 257 distinct
+/// payloads, which is small enough that a per-payload cost of a hundred bytes
+/// is 25 KB and disappears under `FIXED_OVERHEAD_BYTES`. Two million is the
+/// count issue #1140 names, and at the old cost it is about 200 MB against a
+/// bound of 4.4 MB.
+///
+/// `#[ignore]` because it stages roughly 240 MB through the scratch directory
+/// in a debug build with a counting allocator, and CI runs this binary once
+/// per feature job. Run it with
+/// `cargo test --test pmtiles_bounded_memory -- --ignored --nocapture`, the
+/// same way the 4 GiB profile below runs.
+///
+/// Nothing is lost by making it opt-in.
+/// [`the_add_phase_footprint_does_not_grow_with_the_distinct_payload_count`]
+/// and [`the_finalize_growth_does_not_follow_the_distinct_payload_count`] both
+/// multiply the payload count by sixteen on every run and both fail for any
+/// per-payload cost the writer grows back. This cell exists for the absolute
+/// number at the count issue #1140 names, and the number it printed is
+/// 1,212,460 bytes against a bound of 5,439,488, which is also the figure at
+/// 257 distinct payloads.
+#[test]
+#[ignore = "stages roughly 240 MB of scratch; run with --ignored"]
+#[cfg_attr(miri, ignore)]
+fn the_finalize_peak_stays_under_the_stated_bound_at_two_million_payloads() {
+    const TILES: u64 = 2_000_000;
+    const RECORDS: usize = 4_096;
+
+    let measured = measure_write(TILES, TILES, RECORDS);
+    assert_really_wrote(&measured, TILES, TILES);
+
+    let bound = bound_for(TILES, RECORDS, DEDUPE_BUDGET_BYTES);
+    println!(
+        "two million distinct payloads: peak={} finalize=+{} add-phase={} bound={bound}",
+        measured.peak, measured.finalize_growth, measured.add_phase_live
+    );
+    assert!(
+        measured.peak <= bound,
+        "peak {} bytes over a bound of {bound} bytes at {TILES} distinct payloads",
+        measured.peak
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The table in the writer's module doc
+// ---------------------------------------------------------------------------
+
+/// Peak resident set size, from `/proc/self/status`, or `None` where that file
+/// is not where the number lives.
+///
+/// `VmHWM` is the kernel's own high-water mark for the process, which is the
+/// figure the writer's module doc quotes and is not the same thing as the live
+/// heap the counting allocator above reports. Both are worth having: the
+/// allocator number is what a bound can be asserted against, and this one is
+/// what somebody watching `top` during a ten-million-tile run actually sees.
+fn peak_rss_bytes() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("VmHWM:") {
+            let kb: u64 = rest.trim().trim_end_matches(" kB").trim().parse().ok()?;
+            return Some(kb * 1024);
+        }
+    }
+    None
+}
+
+/// One row of the RSS table in `src/pmtiles/writer.rs`'s module doc.
+///
+/// The doc used to carry five numbers rising from 79.0 MB at 500,000 distinct
+/// payloads to 1,083.8 MB at ten million, with no harness behind them and no
+/// way to take the measurement again. This is the harness. It writes with
+/// `WriterOptions::default()`, because the table is about what a caller gets
+/// without asking for anything, and it prints the live-heap peak beside the
+/// RSS so the two can be compared.
+///
+/// **One process per row.** The allocator never gives pages back to the
+/// kernel, so a second row in the same process reports the first row's peak
+/// again. `LIBVIPRS_RSS_PAYLOADS` names the row:
+///
+/// ```text
+/// for n in 500000 1000000 2000000 4000000 10000000; do
+///   LIBVIPRS_RSS_PAYLOADS=$n cargo test --release \
+///     --test pmtiles_bounded_memory -- --ignored --nocapture one_rss_row
+/// done
+/// ```
+#[test]
+#[ignore = "one process per row; set LIBVIPRS_RSS_PAYLOADS and run with --ignored"]
+#[cfg_attr(miri, ignore)]
+fn one_rss_row() {
+    const PAYLOAD_BYTES: usize = 64;
+    let payloads: u64 = std::env::var("LIBVIPRS_RSS_PAYLOADS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(500_000);
+
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let zoom: u8 = (9..=14)
+        .find(|z| (1u64 << z) * (1u64 << z) >= payloads)
+        .unwrap_or_else(|| panic!("no zoom up to 14 addresses {payloads} tiles"));
+    let side: u64 = 1 << zoom;
+
+    // One buffer, rewritten per tile, so the harness's own footprint is a
+    // constant and what moves between rows is the writer.
+    let mut payload = vec![0u8; PAYLOAD_BYTES];
+
+    let (_guard, baseline) = start_measuring();
+    let mut writer = Writer::try_new(
+        Discard::default(),
+        scratch.path(),
+        WriterOptions::default().with_tile_type(TileType::Png),
+    )
+    .expect("the writer opens");
+    for index in 0..payloads {
+        payload[..8].copy_from_slice(&index.to_le_bytes());
+        let hash = content_hash(&payload);
+        let x = (index % side) as u32;
+        let y = (index / side) as u32;
+        writer
+            .add_tile(zoom, x, y, &payload, hash)
+            .expect("every tile is inside the grid");
+    }
+    let finished = writer.finish().expect("the archive finishes");
+    let heap_peak = peak_over(baseline);
+
+    assert_eq!(finished.header.addressed_tiles_count, payloads);
+    assert_eq!(finished.header.tile_contents_count, payloads);
+
+    let rss = peak_rss_bytes()
+        .expect("peak RSS comes from /proc/self/status, so a row has to be measured on Linux");
+    println!(
+        "rss row: distinct_payloads={payloads} peak_rss_bytes={rss} peak_rss_mb={:.1} \
+         heap_peak_bytes={heap_peak}",
+        rss as f64 / 1_000_000.0
     );
 }
 
@@ -477,7 +824,8 @@ fn an_archive_past_four_gibibytes_finalizes_in_bounded_memory() {
     let scratch = tempfile::tempdir().expect("a scratch directory");
     let options = WriterOptions::default()
         .with_tile_type(TileType::Png)
-        .with_sort_buffer_records(RECORDS);
+        .with_sort_buffer_records(RECORDS)
+        .with_dedupe_memory_bytes(DEDUPE_BUDGET_BYTES);
 
     // One 16 MiB buffer, rewritten in place per tile, so the test's own
     // footprint is a constant and the measurement is of the writer.
@@ -527,7 +875,7 @@ fn an_archive_past_four_gibibytes_finalizes_in_bounded_memory() {
     // Measured at 410368 bytes against this bound of 4425728, which is the
     // same order of headroom `FIXED_OVERHEAD_BYTES` carries everywhere else
     // and eleven times tighter than the 136 this test used to allow.
-    let bound = bound_for(RECORDS, PAYLOADS);
+    let bound = bound_for(PAYLOADS, RECORDS, DEDUPE_BUDGET_BYTES);
     assert!(
         peak <= bound,
         "a 4.25 GiB archive peaked at {peak} bytes, over a bound of {bound}"
