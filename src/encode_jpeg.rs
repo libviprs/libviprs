@@ -1636,6 +1636,82 @@ mod tests {
         );
     }
 
+    /// What the gate costs, against the encode it gates.
+    ///
+    /// `#[ignore]`d because it is a clock, and this crate's convention for a
+    /// clock is a cell nobody's CI has to schedule:
+    ///
+    /// ```text
+    /// cargo test --release --lib the_chroma_scan_costs -- --ignored --nocapture
+    /// ```
+    ///
+    /// Four fixtures, because the scan has three regimes and they are far
+    /// apart. Monochrome takes the constant-chroma shortcut on every block and
+    /// never multiplies. Coloured linework is past the limit within the first
+    /// rows and stops there. The worst case is neither: chroma everywhere, so
+    /// the shortcut never fires, and all of it under the step, so there is
+    /// nothing to stop early on. Every cell is timed against the same image
+    /// encoded with `On`, which is the same encode without the scan, and the
+    /// two are interleaved in one process so a busy box moves both.
+    #[test]
+    #[ignore]
+    fn the_chroma_scan_costs() {
+        use std::time::Instant;
+
+        // Chroma everywhere and all of it below CHROMA_STEP: no shortcut, no
+        // early exit, the whole image walked with the arithmetic on.
+        let mut worst = vec![0u8; 256 * 256 * 3];
+        for (i, px) in worst.chunks_exact_mut(3).enumerate() {
+            let g = 120u8;
+            px[0] = g.wrapping_add((i % 5) as u8);
+            px[1] = g;
+            px[2] = g.wrapping_add((i % 3) as u8);
+        }
+        let mut traced = mono_drawing(256, 256);
+        for i in 0..8 {
+            let off = (i * 4099) % (256 * 256) * 3;
+            traced[off] = 210;
+            traced[off + 1] = 40;
+            traced[off + 2] = 40;
+        }
+
+        const ROUNDS: u32 = 40;
+        for (label, src) in [
+            ("monochrome (shortcut every block)", mono_drawing(256, 256)),
+            ("coloured linework (early exit)", drawing(256, 256)),
+            ("a trace of colour (full scan, shortcut)", traced),
+            ("worst case (full scan, arithmetic)", worst),
+        ] {
+            let mut with = std::time::Duration::ZERO;
+            let mut without = std::time::Duration::ZERO;
+            for _ in 0..ROUNDS {
+                let t = Instant::now();
+                let a = encode(&src, 256, 256, image::ColorType::Rgb8, 85, JpegSubsample::On)
+                    .expect("encodes");
+                without += t.elapsed();
+                let t = Instant::now();
+                let b = encode(&src, 256, 256, image::ColorType::Rgb8, 85, JpegSubsample::Auto)
+                    .expect("encodes");
+                with += t.elapsed();
+                std::hint::black_box((a.len(), b.len()));
+            }
+            let (with, without) = (with / ROUNDS, without / ROUNDS);
+            println!(
+                "{label}: {:.3} ms with the gate, {:.3} ms without, {:+.1}%",
+                with.as_secs_f64() * 1e3,
+                without.as_secs_f64() * 1e3,
+                (with.as_secs_f64() / without.as_secs_f64() - 1.0) * 100.0
+            );
+            // Loose on purpose. The number worth reading is the one printed
+            // above; this only fails if the scan has stopped being a scan.
+            assert!(
+                with < without * 2,
+                "{label}: the gate doubled the encode, which is not a linear \
+                 pass over the pixels any more"
+            );
+        }
+    }
+
     /// The monochrome path keeps the win the whole of #1132 rests on.
     ///
     /// A chroma gate that turned 4:2:0 off everywhere would quietly hand back
