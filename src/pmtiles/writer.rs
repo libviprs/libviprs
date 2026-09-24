@@ -1,50 +1,63 @@
 //! The streaming, bounded-memory PMTiles v3 writer.
 //!
-//! [`Writer`] takes tiles in **any order**, stores each distinct payload
-//! exactly once, and assembles a spec-correct archive at [`Writer::finish`]
-//! with a staged temp file, an `fsync` and an atomic rename.
+//! [`Writer`] takes tiles in **any order**, stores each distinct payload it
+//! still remembers exactly once, and assembles a spec-correct archive at
+//! [`Writer::finish`] with a staged temp file, an `fsync` and an atomic
+//! rename.
 //!
 //! # What the memory actually is
 //!
 //! Peak memory does not grow with the number of **tiles**: the per-tile index
 //! is spilled to an append-only log on disk and externally sorted at finalize,
-//! and the directories are built one leaf at a time. It does grow with the
-//! number of **distinct payloads**, linearly, and that is the number that
-//! matters for this crate's main job. Tiling a large photograph produces
+//! and the directories are built one leaf at a time. It does not grow with the
+//! number of **distinct payloads** either, and that half is new. It used to,
+//! linearly, which mattered because tiling a large photograph produces
 //! essentially no duplicate tiles, so "distinct payloads" and "tiles" are the
-//! same figure and the two sentences above describe the same allocation.
+//! same figure for this crate's main job.
 //!
-//! This paragraph used to be sixty lines further down and phrased as a
-//! qualification. It belongs here with the numbers attached. Peak RSS of one
-//! process per row, every payload distinct, measured rather than reasoned
-//! about:
+//! Peak RSS of one process per row, every payload distinct, measured by
+//! `one_rss_row` in `tests/pmtiles_bounded_memory.rs` rather than remembered.
+//! Every row is `WriterOptions::default()`, so a 1 Mi-record sort buffer and
+//! an 8 MiB dedupe budget; the options are what the figures are a function of,
+//! and the build profile is not, which is why they are named here and the
+//! profile is not. The right-hand column is what this page used to quote, from
+//! the writer before EPIC #1135:
 //!
-//! | distinct payloads | peak RSS |
-//! |---|---|
-//! | 500,000 | 79.0 MB |
-//! | 1,000,000 | 155.4 MB |
-//! | 2,000,000 | 288.5 MB |
-//! | 4,000,000 | 563.2 MB |
-//! | 10,000,000 | **1,083.8 MB** |
+//! | distinct payloads | peak RSS | before the epic |
+//! |---|---|---|
+//! | 500,000 | 22.8 MB | 79.0 MB |
+//! | 1,000,000 | 34.9 MB | 155.4 MB |
+//! | 2,000,000 | 35.8 MB | 288.5 MB |
+//! | 4,000,000 | 35.9 MB | 563.2 MB |
+//! | 10,000,000 | **36.0 MB** | 1,083.8 MB |
 //!
-//! So a ten-million-tile photograph costs about a gigabyte, and the sort
-//! buffer, which is the part that genuinely does not grow, is 24 MB of it.
-//! Two percent. Do not read the sort buffer as this writer's memory ceiling.
+//! So a ten-million-tile photograph costs 36 MB rather than about a gigabyte,
+//! and the figure stops moving once the sort buffer has filled, at a million.
+//! Most of what is left **is** the sort buffer, 24 MB of `Vec` at the default
+//! `sort_buffer_records`, and the dedupe window is 8 MB of the rest. Both are
+//! numbers the caller sets.
 //!
-//! Most of the rest is the content-hash table, which is inherent to storing
-//! each payload once and is the same bound
-//! [`DedupeIndex`](crate::dedupe::DedupeIndex) already carries. The other
-//! three tables are as small as they can be made: the payload table is one
-//! `u64` a payload plus a sentinel, and an offset and a length both come out
-//! of it by subtraction; the final-offset lookup is a `Vec` indexed by a dense
-//! payload index rather than a `HashMap` keyed on a staged offset; and the
-//! write order is a `Vec<u64>` of those indices. Those three together took the
-//! ten-million figure from 1,236.4 MB, and they took the peak off the finalize
-//! and back onto ingestion, where the hash table is: the two numbers above and
-//! below `finish` are now the same.
+//! The live-heap figures quoted elsewhere for this epic, 274,850,044 bytes
+//! before it and 1,212,460 after at two million distinct payloads, come from a
+//! different set of options: `measure_write` in the same file, at 4096
+//! sort-buffer records and a 1 MiB dedupe budget, which is deliberately small
+//! so that what the writer spends per payload is not hidden under what the
+//! caller asked for. Comparing a row here against one of those compares two
+//! different configurations, not two different builds.
+//!
+//! Four tables used to scale with the payload count and this page named three
+//! of them. The content-hash table went in issue #1137, replaced by a
+//! fixed-capacity window the caller sizes. The payload table and the
+//! final-offset lookup went in issue #1138, which put the staged offset in the
+//! index record itself: the record is the same 20 bytes on disk either way,
+//! and an offset answers both questions those two were keeping the answers to.
+//! The write order was the fourth, the one the doc never mentioned, and it
+//! spills now at twelve bytes a record, read back once while the archive is
+//! written.
 //!
 //! A pyramid of mostly blank tiles has very few distinct payloads, which is
-//! the case this design exists for. A photograph is the case the table is for.
+//! the case this design exists for. A photograph is the case the window's
+//! budget is chosen for.
 //!
 //! The lifecycle is [`PackfileSink`](crate::sink_packfile::PackfileSink)'s:
 //! open once, feed it, finish once. The atomicity is
@@ -59,20 +72,56 @@
 //! a **byte-identical archive**. Those cannot both hold: arrival order means
 //! the bytes depend on arrival order.
 //!
-//! The tiebreaker is structural rather than a matter of taste. The root
-//! directory has to fit inside the first 16384 bytes of the archive, so its
-//! compressed size decides whether the entries spill into leaves, and that is
-//! not known until every entry has been sorted. The header, the root, the
-//! metadata and the leaf section therefore cannot be sized until the last tile
-//! has arrived, which means **the staged payloads get copied at finalize
-//! whatever layout is chosen**. Given the copy is happening anyway, doing it
-//! in tile id order costs one extra pass over the staged data and buys three
-//! things: a deterministic archive, an honest `clustered = true`, and a reader
-//! whose sequential scan of a zoom level is a sequential scan of the file.
+//! This page used to say the tiebreaker was structural: that the root's size
+//! is unknown until every entry is sorted, so the sections cannot be laid out
+//! until the last tile has arrived, so **the staged payloads get copied at
+//! finalize whatever layout is chosen**. That argument is wrong and it is
+//! worth saying why, because it made a real choice look like a fact of the
+//! format.
+//!
+//! v3 fixes the position of one thing, the 127-byte header, and requires the
+//! root directory to live inside the first 16384 bytes. Every other section
+//! may be relocated arbitrarily. And a tile entry's offset is relative to the
+//! start of the **tile data section**, not to the file, so a payload's offset
+//! is final the moment it is staged: nothing that happens to the sections
+//! around it can move it. A writer that reserved the first 16384 bytes,
+//! appended payloads straight into the destination behind them and wrote the
+//! directories after the tile data would copy nothing at all. That is a real
+//! layout and this writer does not offer it yet.
+//!
+//! What such a writer cannot offer is the two things issue #989 also asks
+//! for. Arrival order means the bytes depend on arrival order, so two shuffled
+//! insertion orders stop producing a byte-identical archive, and `clustered`
+//! stops being true, which `pmtiles extract` requires of its input. Tile id
+//! order buys an honest `clustered = true`, a reader whose sequential scan of
+//! a zoom level is a sequential scan of the file, and a deterministic archive
+//! **as far as the dedupe window reaches**.
+//!
+//! That last qualification is new and it is a real one. Tile id order decides
+//! where a payload goes; it does not decide *which* payloads there are. The
+//! window does, and it is keyed on recency, so whether two identical tiles
+//! share one blob depends on how far apart they **arrived**. Feed the same
+//! tile set in two orders with a window too small to hold it and the two
+//! archives differ, in the blob count, in `tile_data_length` and therefore in
+//! almost every byte.
+//!
+//! There are **two** such channels and the second is easy to miss.
+//! The repeat table evicts on recency too, so even a window large enough to
+//! catch every duplicate does not settle the question: which repeated offsets
+//! are still marked when finalization reaches them depends on the order the
+//! marks arrived in, and an offset that fell out is placed twice. Byte
+//! identity across two arrival orders therefore needs **both** tables to hold
+//! the whole job, which is one budget covering both and is what
+//! [`WriterOptions::dedupe_memory_bytes`] buys at 65 bytes a payload.
+//! `two_shuffled_insertion_orders_produce_a_byte_identical_archive` pins the
+//! property where both hold everything, and
+//! `two_orders_stop_agreeing_once_the_window_cannot_hold_the_tile_set` pins
+//! its failure where neither does.
 //!
 //! So this writer stages payloads in arrival order, sorts at finalize, and
 //! writes the data region in tile id order. `clustered` is `true` and it is
-//! true.
+//! true. The copy is what that costs, and it is a price rather than an
+//! inevitability.
 //!
 //! # Dedupe is the archive's, not the engine's
 //!
@@ -95,17 +144,43 @@
 //! at ids that are **not** consecutive stay separate entries pointing at the
 //! same offset. Both are ordinary PMTiles and a reader has to handle each.
 //!
+//! It reaches as far as the window and no further. The writer remembers the
+//! last [`WriterOptions::dedupe_memory_bytes`] worth of payloads, so two
+//! identical payloads further apart than that are stored twice. A photograph
+//! has no duplicates to miss and a blank tile recurs constantly so it never
+//! leaves the window, which is why the default is a number nobody has to think
+//! about; a pyramid with many distinct payloads that also repeat at long range
+//! is the case that pays, and the option is there for it.
+//!
 //! # What is bounded and what is not
 //!
 //! Bounded, and independent of the tile count: the per-tile index (spilled,
 //! sorted in fixed-size runs), the entry list (spilled, streamed into leaves),
-//! the leaf section (spilled), the payload copy (one blob at a time), and the
-//! external merge, which reads every run through **one** file descriptor with
-//! a capped fan-in rather than holding one open file per run.
+//! the leaf section (spilled), the write order (spilled), the payload copy
+//! (one blob at a time), and the external merge, which reads every run through
+//! **one** file descriptor with a capped fan-in rather than holding one open
+//! file per run.
 //!
-//! **Not** bounded by the tile count but bounded by the number of *distinct
-//! payloads*: the content hash table, the payload table, and the final-offset
-//! lookup. See the numbers at the top of this page.
+//! Bounded, and independent of the payload count: the dedupe window and the
+//! repeat table, which are a fixed capacity the caller sizes with
+//! [`WriterOptions::dedupe_memory_bytes`].
+//!
+//! **Two things still grow with the tile count**, and this page claimed
+//! otherwise until the review caught it. The run table is one 16-byte record
+//! per spilled run, so it grows as `tiles / sort_buffer_records`, and the
+//! pointer list the leaf builder holds is one 24-byte [`Entry`] per leaf, so it
+//! grows as `entries / leaf_entries`. Both
+//! are divided by an option rather than free, which is why they stayed
+//! invisible: at the default million-record buffer a billion tiles cost about
+//! 15 KB of run table. The trap is the other direction. Lowering
+//! `sort_buffer_records` to bound memory shrinks the buffer and grows the run
+//! table, and past
+//! `sort_buffer_records = sqrt(2 * tiles / 3)` the second one wins.
+//! [`WriterOptions::sort_buffer_records`] has the arithmetic.
+//!
+//! So the figures that move are the ones the caller chose, and `bound_for` in
+//! `tests/pmtiles_bounded_memory.rs` is that sentence written out, with a term
+//! for each and a test that fails when any of them stops being true.
 //!
 //! # A failed write is never published
 //!
@@ -139,9 +214,9 @@
 //! ```
 
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::BinaryHeap;
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, BufWriter, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -205,7 +280,7 @@ pub(crate) const DEFAULT_LEAF_ENTRIES: usize = 4096;
 /// count costs merge passes rather than a failure.
 const SORT_RUN_RECORDS: usize = 1 << 20;
 
-/// One spilled index record: `tile_id`, payload index, length.
+/// One spilled index record: `tile_id`, staged offset, length.
 const SPILL_RECORD_BYTES: usize = 8 + 8 + 4;
 
 /// How many runs one merge pass will read at once.
@@ -228,8 +303,45 @@ const MERGE_CURSOR_RECORDS: usize = 256;
 /// One spilled directory entry: `tile_id`, final offset, length, run length.
 const ENTRY_RECORD_BYTES: usize = 8 + 8 + 4 + 4;
 
+/// One spilled write-order record: staged offset, length.
+const ORDER_RECORD_BYTES: usize = 8 + 4;
+
 /// Copy buffer for moving staged payloads and leaf bytes into the archive.
 const COPY_BUFFER_BYTES: usize = 64 * 1024;
+
+/// Ways per set in the dedupe window.
+///
+/// Eight, which is one 64-byte cache line's worth of the hashes the lookup
+/// compares and the width at which set-associative caches stop gaining much.
+/// Public because the size of the window is a contract a caller can reason
+/// about: a budget buys a whole number of sets of this many payloads, and the
+/// smallest window there is holds exactly this many.
+pub const DEDUPE_WINDOW_WAYS: usize = 8;
+
+/// What one tracked payload costs, across the window and the repeat table.
+///
+/// A [`WindowSlot`] is 48 bytes, a [`RepeatSlot`] is 16, and each table spends
+/// four bytes of recency order on every set of [`DEDUPE_WINDOW_WAYS`], which
+/// is one more byte a payload between them.
+/// `the_dedupe_budget_buys_what_it_says_it_buys` holds this against
+/// `size_of`, so it cannot drift from the types it describes.
+const DEDUPE_BYTES_PER_PAYLOAD: usize = 65;
+
+/// How much memory the dedupe window spends when the caller says nothing.
+///
+/// Eight mebibytes, which tracks 129056 payloads. The number is a judgement
+/// about which jobs the window should still be exact for rather than an
+/// arithmetic result, so here is the judgement. A photograph has no duplicate
+/// tiles at all, so any window is the right size for it. A pyramid of mostly
+/// blank tiles has a handful of distinct payloads that recur constantly, so
+/// they never leave a window of any size. What this number decides is the case
+/// in between, a pyramid with more than 129056 distinct payloads that also
+/// repeat at long range, and eight mebibytes is a tenth of the sort buffer's
+/// default and small enough that no caller has to think about it.
+///
+/// A caller who knows their input repeats at long range raises it, and pays
+/// what they raise it by.
+const DEFAULT_DEDUPE_MEMORY_BYTES: usize = 8 * 1024 * 1024;
 
 /// "This payload has not been placed in the data region yet."
 ///
@@ -242,6 +354,365 @@ const UNPLACED: u64 = u64::MAX;
 
 /// Disambiguates the scratch prefix of two writers sharing one directory.
 static SCRATCH_SEQ: AtomicU64 = AtomicU64::new(0);
+
+// ---------------------------------------------------------------------------
+// Probes
+// ---------------------------------------------------------------------------
+
+/// What one `finish` really did, counted, so the tests below can assert on it
+/// instead of on the source.
+///
+/// Three of the claims in EPIC #1135 are about work rather than about output:
+/// how many durability barriers a `finish` issues, whether the payload copy
+/// seeks per payload, and whether the leaf loop rebuilds every leaf once per
+/// doubling. None of them changes a byte of the archive, so nothing that reads
+/// the archive can tell whether they hold, and a test that reads the source
+/// instead is a test of the source.
+///
+/// The counters are **thread-local**, because `cargo test` runs this binary's
+/// tests in parallel threads of one process and a global counter would be
+/// measuring whichever other writer happened to be finishing at the same
+/// moment. A writer never leaves the thread that drives it, so a thread-local
+/// is exact and needs no lock.
+///
+/// Everything here compiles to nothing outside `cfg(test)`.
+mod probe {
+    #[cfg(test)]
+    use std::cell::Cell;
+
+    #[cfg(test)]
+    thread_local! {
+        /// Durability barriers issued on this thread.
+        static SYNCS: Cell<usize> = const { Cell::new(0) };
+        /// Positioned reads of the staged payload file during the archive
+        /// write. Reads through the merge's own handle are not counted: they
+        /// are a different file and a different question.
+        static STAGED_READS: Cell<usize> = const { Cell::new(0) };
+        /// Times the leaf loop built the whole leaf section.
+        static LEAF_ATTEMPTS: Cell<usize> = const { Cell::new(0) };
+        /// Entries per leaf the loop settled on.
+        static LEAF_ENTRIES_USED: Cell<usize> = const { Cell::new(0) };
+    }
+
+    pub(super) fn sync() {
+        #[cfg(test)]
+        SYNCS.with(|c| c.set(c.get() + 1));
+    }
+
+    pub(super) fn staged_read() {
+        #[cfg(test)]
+        STAGED_READS.with(|c| c.set(c.get() + 1));
+    }
+
+    pub(super) fn leaf_attempt() {
+        #[cfg(test)]
+        LEAF_ATTEMPTS.with(|c| c.set(c.get() + 1));
+    }
+
+    pub(super) fn leaf_entries_used(entries: usize) {
+        #[cfg(test)]
+        LEAF_ENTRIES_USED.with(|c| c.set(entries));
+        #[cfg(not(test))]
+        let _ = entries;
+    }
+
+    #[cfg(test)]
+    pub(super) fn reset() {
+        SYNCS.with(|c| c.set(0));
+        STAGED_READS.with(|c| c.set(0));
+        LEAF_ATTEMPTS.with(|c| c.set(0));
+        LEAF_ENTRIES_USED.with(|c| c.set(0));
+    }
+
+    #[cfg(test)]
+    pub(super) fn syncs() -> usize {
+        SYNCS.with(Cell::get)
+    }
+
+    #[cfg(test)]
+    pub(super) fn staged_reads() -> usize {
+        STAGED_READS.with(Cell::get)
+    }
+
+    #[cfg(test)]
+    pub(super) fn leaf_attempts() -> usize {
+        LEAF_ATTEMPTS.with(Cell::get)
+    }
+
+    #[cfg(test)]
+    pub(super) fn leaf_entries() -> usize {
+        LEAF_ENTRIES_USED.with(Cell::get)
+    }
+}
+
+/// `sync_data`, counted.
+fn sync_data(file: &File) -> std::io::Result<()> {
+    probe::sync();
+    file.sync_data()
+}
+
+/// `sync_all`, counted. This is the one before the rename.
+fn sync_all(file: &File) -> std::io::Result<()> {
+    probe::sync();
+    file.sync_all()
+}
+
+// ---------------------------------------------------------------------------
+// The dedupe window
+// ---------------------------------------------------------------------------
+
+/// One payload the window still remembers.
+///
+/// `length` doubles as the occupancy flag: [`Writer::add_tile`] refuses an
+/// empty payload, twice, because the spec forbids one, so no live entry can
+/// ever wear a zero here and the alternative is a byte of padding in a 48-byte
+/// slot that is already exactly six words.
+#[derive(Clone, Copy)]
+struct WindowSlot {
+    hash: [u8; 32],
+    data_offset: u64,
+    length: u32,
+}
+
+impl WindowSlot {
+    const EMPTY: Self = Self {
+        hash: [0; 32],
+        data_offset: 0,
+        length: 0,
+    };
+
+    fn is_empty(&self) -> bool {
+        self.length == 0
+    }
+}
+
+/// A set's ways, most recently used first, one nibble each.
+///
+/// Eight ways of three bits would fit in 24 bits, but nibbles make the shift
+/// arithmetic a shift by four and the whole thing fits a `u32` either way.
+/// `0x7654_3210` is the identity, so an untouched set evicts way 7 first and
+/// fills from the top down, which is why [`DedupeWindow::insert`] can take the
+/// eviction candidate and the first free slot from the same end.
+const RECENCY_IDENTITY: u32 = 0x7654_3210;
+
+/// Move `way` to the front of `order`, leaving the rest in their relative
+/// positions.
+fn touch(order: u32, way: usize) -> u32 {
+    let way = way as u32;
+    let mut out = way;
+    let mut shift = 4;
+    for slot in 0..DEDUPE_WINDOW_WAYS {
+        let other = (order >> (4 * slot)) & 0xF;
+        if other != way {
+            out |= other << shift;
+            shift += 4;
+        }
+    }
+    out
+}
+
+/// The way `order` says has gone longest without a hit.
+fn least_recent(order: u32) -> usize {
+    ((order >> (4 * (DEDUPE_WINDOW_WAYS - 1))) & 0xF) as usize
+}
+
+/// The payloads this writer can still deduplicate against.
+///
+/// Fixed capacity, [`DEDUPE_WINDOW_WAYS`]-way set associative, LRU inside the
+/// set. It replaced a `HashMap<[u8; 32], u64>` holding every payload the
+/// writer had ever seen, which was the whole of its remaining unbounded growth
+/// and, at ten million distinct payloads, the largest single allocation in the
+/// process (issue #1137).
+///
+/// What that costs is exactness at long range: two identical payloads far
+/// enough apart are stored twice now. What it buys, besides the bound, is
+/// speed. There is no rehash and no doubling transient, and a lookup touches
+/// one cache line instead of chasing a table of hundreds of megabytes.
+///
+/// # It also made issue #1129's acceptance test unreachable
+///
+/// Worth recording here rather than discovering it there. #1129 wants a
+/// crashed run reconstructed from the scratch files it left behind, and names
+/// byte-identity with an uninterrupted run over the same tiles as the only
+/// sufficient test of the reconstruction.
+///
+/// That test cannot be written against this window. A window **hit** stages
+/// nothing: it writes one index record and touches a recency order in memory.
+/// So a hit leaves no trace on disk of *where in the arrival sequence* it
+/// happened, and the recency order is the thing that decides which payloads a
+/// later miss evicts. A reconstruction reading `.idx` and `.data` can recover
+/// every payload and every tile, and it cannot recover the LRU state, so it
+/// cannot reproduce which duplicates a continued run would have caught. The
+/// archives agree on every tile and can differ in blob count and in every
+/// offset after the first divergence.
+///
+/// Sizing the window past the payload count removes the divergence, because a
+/// window that never evicts has no state worth reconstructing. That is a
+/// condition on the test rather than a fix, and it is #1129's to make. Nothing
+/// is built for it here.
+struct DedupeWindow {
+    slots: Box<[WindowSlot]>,
+    recency: Box<[u32]>,
+    sets: usize,
+}
+
+impl DedupeWindow {
+    fn with_sets(sets: usize) -> Self {
+        Self {
+            slots: vec![WindowSlot::EMPTY; sets * DEDUPE_WINDOW_WAYS].into_boxed_slice(),
+            recency: vec![RECENCY_IDENTITY; sets].into_boxed_slice(),
+            sets,
+        }
+    }
+
+    /// Which set a hash lands in.
+    ///
+    /// Multiply-shift rather than a mask, so the set count is whatever the
+    /// budget bought instead of the largest power of two under it. Half a
+    /// window is a real cost and this is two instructions.
+    fn set_of(&self, hash: &[u8; 32]) -> usize {
+        let key = u64::from_le_bytes(hash[..8].try_into().expect("8 bytes"));
+        ((u128::from(key) * self.sets as u128) >> 64) as usize
+    }
+
+    /// Where this hash was last staged, and how long it is, if the window
+    /// still holds it.
+    fn get(&mut self, hash: &[u8; 32]) -> Option<(u64, u32)> {
+        let set = self.set_of(hash);
+        let base = set * DEDUPE_WINDOW_WAYS;
+        for way in 0..DEDUPE_WINDOW_WAYS {
+            let slot = self.slots[base + way];
+            if !slot.is_empty() && slot.hash == *hash {
+                self.recency[set] = touch(self.recency[set], way);
+                return Some((slot.data_offset, slot.length));
+            }
+        }
+        None
+    }
+
+    /// Remember a payload, evicting the set's least recently used entry if
+    /// every way is taken.
+    fn insert(&mut self, hash: [u8; 32], data_offset: u64, length: u32) {
+        let set = self.set_of(&hash);
+        let base = set * DEDUPE_WINDOW_WAYS;
+        let way = (0..DEDUPE_WINDOW_WAYS)
+            .find(|way| self.slots[base + way].is_empty())
+            .unwrap_or_else(|| least_recent(self.recency[set]));
+        self.slots[base + way] = WindowSlot {
+            hash,
+            data_offset,
+            length,
+        };
+        self.recency[set] = touch(self.recency[set], way);
+    }
+}
+
+/// One staged offset a second tile has already pointed at.
+///
+/// `staged` is the key and [`NO_STAGED_OFFSET`] marks the slot empty: a real
+/// staged offset cannot be `u64::MAX`, because the payload at it would have to
+/// end past the end of a `u64` and the `checked_add` in
+/// [`Writer::add_tile`] refuses that before the offset is ever stored.
+#[derive(Clone, Copy)]
+struct RepeatSlot {
+    staged: u64,
+    placed: u64,
+}
+
+/// "No payload is staged here."
+const NO_STAGED_OFFSET: u64 = u64::MAX;
+
+/// The staged offsets that more than one tile points at.
+///
+/// Finalization needs to know, for a payload it is about to place, whether it
+/// has placed that payload already. Asking that of every payload means a table
+/// with an entry per payload, which is the growth this epic exists to remove.
+/// So `add_tile` marks an offset here the moment a second tile points at it,
+/// and finalization only has to look the marked ones up: a record whose offset
+/// is absent was referenced exactly once, so it cannot already have been
+/// placed (issue #1137, consumed by #1138).
+///
+/// It is capped like the window, and for the same reason. An offset that falls
+/// out of it is stored twice rather than shared, which is the same trade the
+/// window makes and produces the same ordinary archive.
+struct RepeatTable {
+    slots: Box<[RepeatSlot]>,
+    recency: Box<[u32]>,
+    sets: usize,
+}
+
+impl RepeatTable {
+    fn with_sets(sets: usize) -> Self {
+        Self {
+            slots: vec![
+                RepeatSlot {
+                    staged: NO_STAGED_OFFSET,
+                    placed: UNPLACED,
+                };
+                sets * DEDUPE_WINDOW_WAYS
+            ]
+            .into_boxed_slice(),
+            recency: vec![RECENCY_IDENTITY; sets].into_boxed_slice(),
+            sets,
+        }
+    }
+
+    /// Which set an offset lands in.
+    ///
+    /// Staged offsets are dense and ascending, so they are their own worst
+    /// hash: the low bits repeat with the payload size. The multiply spreads
+    /// them before the reduction does its work.
+    fn set_of(&self, staged: u64) -> usize {
+        let key = staged.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        ((u128::from(key) * self.sets as u128) >> 64) as usize
+    }
+
+    /// Record that more than one tile points at this offset.
+    fn mark(&mut self, staged: u64) {
+        let set = self.set_of(staged);
+        let base = set * DEDUPE_WINDOW_WAYS;
+        for way in 0..DEDUPE_WINDOW_WAYS {
+            if self.slots[base + way].staged == staged {
+                self.recency[set] = touch(self.recency[set], way);
+                return;
+            }
+        }
+        let way = (0..DEDUPE_WINDOW_WAYS)
+            .find(|way| self.slots[base + way].staged == NO_STAGED_OFFSET)
+            .unwrap_or_else(|| least_recent(self.recency[set]));
+        self.slots[base + way] = RepeatSlot {
+            staged,
+            placed: UNPLACED,
+        };
+        self.recency[set] = touch(self.recency[set], way);
+    }
+
+    /// Where a marked offset was placed in the data region, as a slot to read
+    /// or fill in. [`UNPLACED`] means it is marked but has not been reached
+    /// yet; `None` means nothing ever marked it, so exactly one tile points at
+    /// it and it cannot have been placed.
+    ///
+    /// It inserts nothing and evicts nothing, which is the property
+    /// finalization needs: the table is whatever the add phase left, so
+    /// `finish` allocates not one byte per payload, and it cannot lose a
+    /// placement it has already made.
+    fn placement(&mut self, staged: u64) -> Option<&mut u64> {
+        let set = self.set_of(staged);
+        let base = set * DEDUPE_WINDOW_WAYS;
+        let way = (0..DEDUPE_WINDOW_WAYS).find(|way| self.slots[base + way].staged == staged)?;
+        Some(&mut self.slots[base + way].placed)
+    }
+}
+
+/// How many sets a deduplication budget buys.
+///
+/// At least one, whatever the budget. A window of no ways would store every
+/// duplicate twice, which is a writer nobody asked for, and the floor makes
+/// `with_dedupe_memory_bytes(0)` mean "the smallest window there is" rather
+/// than "no window".
+fn dedupe_sets(budget: usize) -> usize {
+    (budget / (DEDUPE_WINDOW_WAYS * DEDUPE_BYTES_PER_PAYLOAD)).max(1)
+}
 
 // ---------------------------------------------------------------------------
 // content_hash
@@ -316,12 +787,73 @@ pub struct WriterOptions {
     /// How many index records are sorted in memory before a sorted run is
     /// written out to the log.
     ///
-    /// This is the writer's memory ceiling for the sort, at 20 bytes a record,
-    /// and it is an option rather than a constant so a test can reach the
+    /// It is an option rather than a constant so a test can reach the
     /// external merge without writing a million tiles. A bounded-memory claim
     /// that only an unreachable constant can exercise is a claim nothing
     /// checks.
+    ///
+    /// # Lowering it past the crossover raises the writer's memory
+    ///
+    /// This used to say it was "the writer's memory ceiling for the sort",
+    /// which is the half of the truth that points the wrong way. The buffer is
+    /// 24 bytes a record, so lowering this shrinks it. Every time it fills,
+    /// the writer appends a sorted run to the index log and records a 16-byte
+    /// record describing it, and that table lives until `finish`. So the sort
+    /// costs roughly
+    ///
+    /// ```text
+    /// 24 * sort_buffer_records  +  16 * tiles / sort_buffer_records
+    /// ```
+    ///
+    /// which is smallest at `sort_buffer_records = sqrt(2 * tiles / 3)` and
+    /// rises on both sides of it. Below the crossover the run table dominates,
+    /// so a caller lowering this to bound memory gets more of it, not less. At
+    /// a billion tiles the crossover is about 25,800 records and costs about
+    /// 1.2 MB; at `sort_buffer_records = 1000` the buffer is 24 KB and the run
+    /// table is 16 MB, a thousand times larger than the thing being tuned.
+    ///
+    /// The default is a million records, which is 24 MB of buffer against
+    /// about 15 KB of run table at a billion tiles, so nothing on the default
+    /// path is near the crossover. `bound_for` in
+    /// `tests/pmtiles_bounded_memory.rs` carries both terms.
     pub sort_buffer_records: usize,
+    /// How much memory the writer may spend remembering which payloads it has
+    /// already staged, and so how far apart two identical tiles can be and
+    /// still share one blob.
+    ///
+    /// The writer keeps a fixed-capacity window of the payloads it has seen
+    /// most recently, plus a table of the staged offsets more than one tile
+    /// points at. Together they cost **65 bytes per payload tracked**, so this
+    /// budget divided by 65 is roughly how many distinct payloads the writer
+    /// can deduplicate against at once. The default is 8 MiB, which is 129,056
+    /// of them.
+    ///
+    /// # What it costs to get this wrong
+    ///
+    /// **Two identical payloads further apart than the window are stored
+    /// twice.** The archive is still correct and still reads identically; it
+    /// is larger, and it stops being a pure function of the tile set, because
+    /// whether the two share a blob now depends on how far apart they
+    /// *arrived*. If you compare archive bytes across runs or publish a
+    /// checksum, set this past the number of distinct payloads you expect and
+    /// the property comes back.
+    ///
+    /// The two cases that dominate need no thought. A photograph has no
+    /// duplicate tiles to miss, so any window is the right size. A pyramid of
+    /// mostly blank tiles has a handful of payloads that recur constantly, so
+    /// they never leave a window of any size. What pays is a pyramid with more
+    /// distinct payloads than the window holds *and* duplicates that repeat at
+    /// long range.
+    ///
+    /// # Zero is the smallest window, not no window
+    ///
+    /// A budget too small for one set still buys one set of
+    /// [`DEDUPE_WINDOW_WAYS`] payloads. A writer with no window at all would
+    /// store every duplicate twice, including the blank tile that makes up
+    /// most of a sparse pyramid, and nobody wants that as a setting. The floor
+    /// is also what lets a test ask for a window small enough to have
+    /// observable edges.
+    pub dedupe_memory_bytes: usize,
 }
 
 impl Default for WriterOptions {
@@ -336,6 +868,7 @@ impl Default for WriterOptions {
             center_zoom: None,
             leaf_entries: DEFAULT_LEAF_ENTRIES,
             sort_buffer_records: SORT_RUN_RECORDS,
+            dedupe_memory_bytes: DEFAULT_DEDUPE_MEMORY_BYTES,
         }
     }
 }
@@ -394,6 +927,12 @@ impl WriterOptions {
     /// spilled.
     pub fn with_sort_buffer_records(mut self, records: usize) -> Self {
         self.sort_buffer_records = records;
+        self
+    }
+
+    /// Set how much memory the dedupe window may spend.
+    pub fn with_dedupe_memory_bytes(mut self, bytes: usize) -> Self {
+        self.dedupe_memory_bytes = bytes;
         self
     }
 }
@@ -482,7 +1021,7 @@ impl Staging {
         match self {
             Self::Real(w) => {
                 w.flush()?;
-                w.get_ref().sync_data()
+                sync_data(w.get_ref())
             }
             #[cfg(test)]
             Self::FailsAfter(w) => w.sync(),
@@ -490,28 +1029,56 @@ impl Staging {
     }
 
     /// Push everything through to the device and close.
+    ///
+    /// This one syncs and it is not about durability, which is why issue
+    /// #1141 nearly took it out with the three inside finalize. It is the only
+    /// place a **deferred write error** on the staged payloads or the index
+    /// log can surface.
+    ///
+    /// `BufWriter::into_inner` promises the bytes reached the kernel and
+    /// nothing beyond that, and Rust throws away what `close()` returns. So
+    /// without this, a writeback failure after the last `write_all` returned
+    /// is never reported to anybody: `write_archive` reads the same path back
+    /// with `read_exact_at` moments later, and on NFS or CIFS, or on a Linux
+    /// kernel that dropped an uptodate page after a writeback error, that read
+    /// hands back stale or zeroed blocks **with no error at all**. The writer
+    /// then publishes a structurally perfect archive full of the wrong tile
+    /// bytes, which is exactly the outcome the latch in
+    /// [`Writer::add_tile`] exists to prevent, reached from the other side of
+    /// the same file.
+    ///
+    /// The three that #1141 did remove are the ones with no such job: `.ent`,
+    /// `.mrg0`/`.mrg1` and `.leaf` are created and consumed inside one
+    /// `finish_inner`, by code that reads them back through a handle it opened
+    /// itself in the same call, so a deferred error there surfaces as a short
+    /// read the copy already refuses.
     fn finish(self) -> std::io::Result<()> {
         match self {
-            Self::Real(w) => w.into_inner().map_err(|e| e.into_error())?.sync_data(),
+            Self::Real(w) => sync_data(&w.into_inner().map_err(|e| e.into_error())?),
             #[cfg(test)]
             Self::FailsAfter(w) => w.finish(),
         }
     }
 }
 
-/// One record in the append-only index log: which tile, and which distinct
-/// payload it points at.
+/// One record in the append-only index log: which tile, where its payload is
+/// staged, and how long it is.
 ///
-/// `payload` is a dense index into [`Writer::payload_starts`], assigned in
-/// arrival order at `add_tile` time, and not a staged byte offset. That is
-/// what lets the sorting pass resolve a payload's final offset through a
-/// `Vec` rather than a `HashMap<u64, u64>` keyed on the staged offset, which
-/// at ten million distinct payloads was the second largest allocation in the
-/// writer.
+/// `data_offset` used to be a dense payload index, which meant the writer had
+/// to keep a `payload_starts: Vec<u64>` to turn that index back into an offset
+/// and a length, and a `final_offsets: Vec<u64>` to translate it again at
+/// placement. Both of those grew one entry per distinct payload. The offset is
+/// the same eight bytes as the index, so the record is the same 20 on disk and
+/// the same 24 in memory, and the two vectors are simply gone (issue #1138).
+///
+/// It also makes placement cheaper rather than dearer. A record whose offset
+/// is absent from [`RepeatTable`] is referenced exactly once, so it cannot
+/// already have been placed: assign the next offset and move on, with no
+/// lookup at all. That is every tile of a photograph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct Spill {
     tile_id: u64,
-    payload: u64,
+    data_offset: u64,
     length: u32,
 }
 
@@ -519,7 +1086,7 @@ impl Spill {
     fn encode(&self) -> [u8; SPILL_RECORD_BYTES] {
         let mut out = [0u8; SPILL_RECORD_BYTES];
         out[0..8].copy_from_slice(&self.tile_id.to_le_bytes());
-        out[8..16].copy_from_slice(&self.payload.to_le_bytes());
+        out[8..16].copy_from_slice(&self.data_offset.to_le_bytes());
         out[16..20].copy_from_slice(&self.length.to_le_bytes());
         out
     }
@@ -527,7 +1094,7 @@ impl Spill {
     fn decode(bytes: &[u8; SPILL_RECORD_BYTES]) -> Self {
         Self {
             tile_id: u64::from_le_bytes(bytes[0..8].try_into().expect("8 bytes")),
-            payload: u64::from_le_bytes(bytes[8..16].try_into().expect("8 bytes")),
+            data_offset: u64::from_le_bytes(bytes[8..16].try_into().expect("8 bytes")),
             length: u32::from_le_bytes(bytes[16..20].try_into().expect("4 bytes")),
         }
     }
@@ -562,17 +1129,20 @@ pub struct Writer<W: Write + Seek> {
     log: Option<Staging>,
     log_len: u64,
 
-    /// Distinct payloads: content hash to a dense index.
+    /// The payloads this writer can still deduplicate against.
     ///
-    /// The value used to be `(staged offset, length)`, which is 16 bytes and
-    /// pads the whole entry to 48. An index is 8, and both of the numbers it
-    /// replaced are one subtraction away in `payload_starts`.
-    payloads: HashMap<[u8; 32], u64>,
-    /// Where each distinct payload starts in the staging file, in index order,
-    /// **plus a sentinel** equal to the staged length. So payload `i` occupies
-    /// `payload_starts[i]..payload_starts[i + 1]` and there is exactly one
-    /// record of where a payload is and how long it is.
-    payload_starts: Vec<u64>,
+    /// Fixed capacity: see [`DedupeWindow`]. It used to be a
+    /// `HashMap<[u8; 32], u64>` of every payload ever seen, which is the
+    /// allocation issue #1137 removed.
+    window: Option<DedupeWindow>,
+    /// Staged offsets that more than one tile points at, so finalization can
+    /// tell a payload it has placed already from one it has not.
+    repeats: RepeatTable,
+    /// How many bytes of payload are staged, which is where the next one
+    /// goes.
+    staged_len: u64,
+    /// How many payloads have been staged.
+    staged_payloads: u64,
     /// Records not yet written to a run.
     sort_buffer: Vec<Spill>,
     /// Runs already written to the log.
@@ -593,8 +1163,8 @@ impl<W: Write + Seek> std::fmt::Debug for Writer<W> {
             .field("base", &self.base)
             .field("destination", &self.destination)
             .field("tiles", &self.tile_count)
-            .field("distinct_payloads", &self.payloads.len())
-            .field("staged_bytes", &self.staged_len())
+            .field("staged_payloads", &self.staged_payloads)
+            .field("staged_bytes", &self.staged_len)
             .field("failed", &self.failed)
             .finish_non_exhaustive()
     }
@@ -662,6 +1232,7 @@ impl<W: Write + Seek> Writer<W> {
 
     /// Open the two scratch files every flavour needs.
     fn open_scratch(base: PathBuf, options: WriterOptions) -> Result<Self, PmTilesError> {
+        let sets = dedupe_sets(options.dedupe_memory_bytes);
         let data_path = suffixed(&base, ".data");
         let log_path = suffixed(&base, ".idx");
         let staged = File::create(&data_path)?;
@@ -675,11 +1246,10 @@ impl<W: Write + Seek> Writer<W> {
             staged: Some(Staging::Real(BufWriter::new(staged))),
             log: Some(Staging::Real(BufWriter::new(log))),
             log_len: 0,
-            payloads: HashMap::new(),
-            // The sentinel, which is what makes `payload_starts` self
-            // describing: an empty table still says the staging file is zero
-            // bytes long.
-            payload_starts: vec![0],
+            window: Some(DedupeWindow::with_sets(sets)),
+            repeats: RepeatTable::with_sets(sets),
+            staged_len: 0,
+            staged_payloads: 0,
             sort_buffer: Vec::new(),
             runs: Vec::new(),
             failed: None,
@@ -729,17 +1299,25 @@ impl<W: Write + Seek> Writer<W> {
             value: bytes.len() as u64,
         })?;
 
-        let payload = match self.payloads.get(&content_hash).copied() {
-            Some(index) => {
-                let stored = self.payload_length(index);
+        let staged = self
+            .window
+            .as_mut()
+            .expect("a live writer has its dedupe window")
+            .get(&content_hash);
+        let data_offset = match staged {
+            Some((offset, stored)) => {
                 if stored != length {
                     return Err(PmTilesError::ContentHashMismatch { length, stored });
                 }
-                index
+                // A second tile is pointing at this payload, so finalization
+                // will have to recognise it the second time it reaches it.
+                // Nothing is marked for a payload only one tile ever names,
+                // which is every tile of a photograph.
+                self.repeats.mark(offset);
+                offset
             }
             None => {
-                let index = self.payload_count();
-                let offset = self.staged_len();
+                let offset = self.staged_len;
                 // Everything from here down can leave bytes behind, so it is
                 // latched.
                 let written = self
@@ -754,16 +1332,20 @@ impl<W: Write + Seek> Writer<W> {
                         what: "the staged payload region",
                     });
                 let end = self.latch("staging a payload", end)?;
-                self.payload_starts.push(end);
-                self.payloads.insert(content_hash, index);
-                index
+                self.staged_len = end;
+                self.staged_payloads += 1;
+                self.window
+                    .as_mut()
+                    .expect("a live writer has its dedupe window")
+                    .insert(content_hash, offset, length);
+                offset
             }
         };
 
         // `flush_run` latches its own write, so this is only a `?`.
         self.push_spill(Spill {
             tile_id,
-            payload,
+            data_offset,
             length,
         })?;
 
@@ -794,37 +1376,23 @@ impl<W: Write + Seek> Writer<W> {
         }
     }
 
-    /// How many bytes of payload are staged. The sentinel at the end of
-    /// `payload_starts` is that number, so there is no second copy of it to
-    /// drift.
-    fn staged_len(&self) -> u64 {
-        *self
-            .payload_starts
-            .last()
-            .expect("the payload table always carries its sentinel")
-    }
-
-    /// How many distinct payloads are staged, as the index the next one gets.
-    fn payload_count(&self) -> u64 {
-        (self.payload_starts.len() - 1) as u64
-    }
-
-    /// The staged length of one distinct payload.
-    fn payload_length(&self, index: u64) -> u32 {
-        let at = index as usize;
-        let span = self.payload_starts[at + 1] - self.payload_starts[at];
-        u32::try_from(span).expect("a payload length came in as a u32 and has not changed")
-    }
-
     /// How many tiles have been added so far. Runs are not collapsed until
     /// [`finish`](Writer::finish), so this counts addressed tiles.
     pub fn tile_count(&self) -> u64 {
         self.tile_count
     }
 
-    /// How many distinct payloads are staged so far.
-    pub fn distinct_payload_count(&self) -> usize {
-        self.payloads.len()
+    /// How many payloads are staged so far, which is the **distinct** count
+    /// only as far as the dedupe window reaches.
+    ///
+    /// Two identical payloads far enough apart that the window forgot the
+    /// first are two payloads here. That is the trade
+    /// [`WriterOptions::dedupe_memory_bytes`] makes, and it is why this is not
+    /// called `distinct_payload_count` any more: the old name asserted the
+    /// property that stopped being unconditional, and a name that has to be
+    /// retracted in its own doc is a name nobody reads to the end of.
+    pub fn staged_payload_count(&self) -> usize {
+        self.staged_payloads as usize
     }
 
     /// How many sorted runs have been spilled to the index log so far.
@@ -947,6 +1515,13 @@ impl<W: Write + Seek> Writer<W> {
         // which makes it exactly the kind of code that rots unnoticed.
         self.flush_run()?;
 
+        // The window has no reader left. `add_tile` is the only thing that
+        // ever looked at it, so from here it is the budget the caller gave us
+        // sitting resident through the whole of finalize for nothing, which is
+        // exactly where the old writer took its peak. The repeat table stays:
+        // placement reads it.
+        self.window = None;
+
         // Both scratch files are done being written. Flush them through their
         // buffers and close the handles before anything reads them back.
         if let Some(staged) = self.staged.take() {
@@ -976,11 +1551,45 @@ struct Plan {
     entries_path: PathBuf,
     entry_count: u64,
     addressed_tiles: u64,
-    /// Distinct payloads, in the order they are written into the archive, as
-    /// indices into [`Writer::payload_starts`]. One `u64` each rather than the
-    /// `(u64, u32)` pair this used to hold, which padded to 16 bytes.
-    order: Vec<u64>,
+    /// Path of the spilled write order.
+    order_path: PathBuf,
+    /// How many payloads the data region carries, which is how many records
+    /// that file holds.
+    contents_count: u64,
     tile_data_length: u64,
+}
+
+/// One payload the data region carries, as the archive write needs it.
+///
+/// A staged offset and a length, which is everything: the bytes are at that
+/// offset in the staging file and there are that many of them. This used to
+/// be an index into a table the writer had to keep beside it.
+///
+/// They go to disk rather than into a `Vec`. The `Vec` was the fourth table
+/// scaling with distinct payloads and the module doc named only three of them,
+/// so at ten million payloads it was 80 MB nobody had counted (issue #1139).
+/// Twelve bytes a record, written in placement order by [`Writer::plan_entries`]
+/// and read back once, sequentially, by [`Writer::write_archive`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Placement {
+    data_offset: u64,
+    length: u32,
+}
+
+impl Placement {
+    fn encode(&self) -> [u8; ORDER_RECORD_BYTES] {
+        let mut out = [0u8; ORDER_RECORD_BYTES];
+        out[0..8].copy_from_slice(&self.data_offset.to_le_bytes());
+        out[8..12].copy_from_slice(&self.length.to_le_bytes());
+        out
+    }
+
+    fn decode(bytes: &[u8; ORDER_RECORD_BYTES]) -> Self {
+        Self {
+            data_offset: u64::from_le_bytes(bytes[0..8].try_into().expect("8 bytes")),
+            length: u32::from_le_bytes(bytes[8..12].try_into().expect("4 bytes")),
+        }
+    }
 }
 
 /// The leaf section, when there is one.
@@ -1000,14 +1609,10 @@ impl<W: Write + Seek> Writer<W> {
         self.scratch.push(entries_path.clone());
         let mut out = BufWriter::new(File::create(&entries_path)?);
 
-        // Final offsets, indexed by the dense payload index rather than looked
-        // up by staged offset. This used to be a `HashMap<u64, u64>`, which at
-        // ten million distinct payloads is 285 MB of hash table against 80 MB
-        // of `Vec`, and it cost a hash lookup in the one pass that sees every
-        // tile.
-        let payload_count = self.payload_count() as usize;
-        let mut final_offsets: Vec<u64> = vec![UNPLACED; payload_count];
-        let mut order: Vec<u64> = Vec::with_capacity(payload_count);
+        let order_path = suffixed(&self.base, ".ord");
+        self.scratch.push(order_path.clone());
+        let mut order = BufWriter::new(File::create(&order_path)?);
+        let mut contents_count: u64 = 0;
         let mut next_offset: u64 = 0;
 
         let mut entry_count: u64 = 0;
@@ -1025,24 +1630,34 @@ impl<W: Write + Seek> Writer<W> {
             }
             previous_id = Some(record.tile_id);
 
-            let slot = usize::try_from(record.payload).map_err(|_| PmTilesError::Overflow {
-                what: "a payload index",
-            })?;
-            let placed = *final_offsets.get(slot).ok_or(PmTilesError::Overflow {
-                what: "a payload index",
-            })?;
-            let offset = if placed == UNPLACED {
-                let offset = next_offset;
-                next_offset = next_offset.checked_add(u64::from(record.length)).ok_or(
-                    PmTilesError::Overflow {
-                        what: "the tile data section",
-                    },
-                )?;
-                final_offsets[slot] = offset;
-                order.push(record.payload);
-                offset
-            } else {
-                placed
+            // Where this payload goes. A staged offset the repeat table has
+            // never heard of is referenced exactly once, so it cannot have
+            // been placed already and there is nothing to look up and nothing
+            // to remember: take the next offset and move on. That is every
+            // tile of a photograph, and it is why finalization no longer
+            // allocates anything per payload.
+            let offset = match self.repeats.placement(record.data_offset) {
+                Some(slot) if *slot != UNPLACED => *slot,
+                marked => {
+                    let offset = next_offset;
+                    next_offset = next_offset.checked_add(u64::from(record.length)).ok_or(
+                        PmTilesError::Overflow {
+                            what: "the tile data section",
+                        },
+                    )?;
+                    if let Some(slot) = marked {
+                        *slot = offset;
+                    }
+                    order.write_all(
+                        &Placement {
+                            data_offset: record.data_offset,
+                            length: record.length,
+                        }
+                        .encode(),
+                    )?;
+                    contents_count += 1;
+                    offset
+                }
             };
 
             addressed += 1;
@@ -1081,13 +1696,15 @@ impl<W: Write + Seek> Writer<W> {
             out.write_all(&encode_entry(&done))?;
             entry_count += 1;
         }
-        out.into_inner().map_err(|e| e.into_error())?.sync_data()?;
+        out.into_inner().map_err(|e| e.into_error())?;
+        order.into_inner().map_err(|e| e.into_error())?;
 
         Ok(Plan {
             entries_path,
             entry_count,
             addressed_tiles: addressed,
-            order,
+            order_path,
+            contents_count,
             tile_data_length: next_offset,
         })
     }
@@ -1105,7 +1722,11 @@ impl<W: Write + Seek> Writer<W> {
     /// they are created.
     fn reduce_runs(&mut self) -> Result<(PathBuf, Vec<Run>), PmTilesError> {
         let mut path = suffixed(&self.base, ".idx");
-        let mut runs = self.runs.clone();
+        // Taken rather than cloned. Nothing reads `self.runs` after this, and
+        // the clone doubled the one table in this writer that grows with the
+        // tile count, at the moment the writer is supposed to be at its
+        // cheapest.
+        let mut runs = std::mem::take(&mut self.runs);
         let mut pass = 0usize;
         while runs.len() > MAX_MERGE_FANIN {
             let out_path = suffixed(
@@ -1132,7 +1753,7 @@ impl<W: Write + Seek> Writer<W> {
                 folded.push(Run { start: at, count });
                 at += count * SPILL_RECORD_BYTES as u64;
             }
-            out.into_inner().map_err(|e| e.into_error())?.sync_data()?;
+            out.into_inner().map_err(|e| e.into_error())?;
             path = out_path;
             runs = folded;
             pass += 1;
@@ -1146,9 +1767,12 @@ impl<W: Write + Seek> Writer<W> {
     /// The spec says a sophisticated writer "might need several attempts to
     /// optimize this", which is the loop below: build the leaves at one size,
     /// see whether the resulting root fits, and widen the leaves if it does
-    /// not. Starting at 4096 entries and doubling is what go-pmtiles does, and
-    /// matching it means an archive built here from a given tile set has the
-    /// same shape as one the reference builds from it.
+    /// not. Starting at 4096 entries and widening by powers of two is what
+    /// go-pmtiles does, and matching it means an archive built here from a
+    /// given tile set has the same shape as one the reference builds from it.
+    /// The reference doubles every time; [`widen_leaves`] takes the same steps
+    /// and can take several at once, never past the width a doubling loop
+    /// would have stopped at.
     fn build_directories(
         &mut self,
         plan: &Plan,
@@ -1172,6 +1796,7 @@ impl<W: Write + Seek> Writer<W> {
         self.scratch.push(leaf_path.clone());
         let mut leaf_entries = self.options.leaf_entries.max(1);
         loop {
+            probe::leaf_attempt();
             let mut leaf_file = BufWriter::new(File::create(&leaf_path)?);
             let mut pointers: Vec<Entry> = Vec::new();
             let mut leaf_offset: u64 = 0;
@@ -1209,16 +1834,14 @@ impl<W: Write + Seek> Writer<W> {
                 leaf_file.write_all(&body)?;
                 leaf_offset += body.len() as u64;
             }
-            leaf_file
-                .into_inner()
-                .map_err(|e| e.into_error())?
-                .sync_data()?;
+            leaf_file.into_inner().map_err(|e| e.into_error())?;
 
             let root = self
                 .options
                 .internal_compression
                 .compress(&serialize_entries(&pointers)?)?;
             if root.len() <= ROOT_BUDGET {
+                probe::leaf_entries_used(leaf_entries);
                 return Ok((
                     root,
                     Some(Leaves {
@@ -1230,15 +1853,13 @@ impl<W: Write + Seek> Writer<W> {
             if pointers.len() <= 1 {
                 // One leaf holding everything and a root of one pointer that
                 // still does not fit means the budget cannot be met at any
-                // leaf size, so doubling again would spin forever.
+                // leaf size, so widening again would spin forever.
                 return Err(PmTilesError::RootDirectoryOverBudget {
                     length: root.len(),
                     budget: ROOT_BUDGET,
                 });
             }
-            leaf_entries = leaf_entries.checked_mul(2).ok_or(PmTilesError::Overflow {
-                what: "a leaf size",
-            })?;
+            leaf_entries = widen_leaves(leaf_entries, root.len())?;
         }
     }
 
@@ -1290,11 +1911,24 @@ impl<W: Write + Seek> Writer<W> {
             tile_data_length: plan.tile_data_length,
             addressed_tiles_count: plan.addressed_tiles,
             tile_entries_count: plan.entry_count,
-            tile_contents_count: plan.order.len() as u64,
-            // Earned, not claimed: the data region below is written in tile id
-            // order, so the first tile entry is at offset 0 and every later
-            // offset is either contiguous with the previous blob's end or a
-            // back reference to a deduplicated one.
+            tile_contents_count: plan.contents_count,
+            // A literal, and true by construction rather than measured.
+            // `plan_entries` assigns offsets walking the entries in tile id
+            // order, taking `next_offset` for a payload it has not placed and
+            // an earlier offset for one it has, so the first tile entry is at
+            // offset 0 and every later offset is either contiguous with the
+            // previous blob's end or a back reference to a deduplicated one.
+            // That is the spec's definition of clustered, and this layout
+            // cannot violate it: there is no path through that loop which
+            // assigns anything else.
+            //
+            // It has to become a computed value before `Layout::Arrival`
+            // (#1143) exists, because arrival order can make it false, and a
+            // header claiming `clustered` over a data region that is not tells
+            // a reader it may skip work it cannot skip. Computing it is #1144.
+            // `clustered_is_true_and_the_layout_backs_it_up` checks the claim
+            // against the bytes in the meantime, which is what stops this
+            // literal from being merely asserted.
             clustered: true,
             internal_compression: self.options.internal_compression,
             tile_compression: self.options.tile_compression,
@@ -1336,18 +1970,9 @@ impl<W: Write + Seek> Writer<W> {
             self.sink = Some(Sink::Staged(File::create(&staged_archive)?));
         }
         let staged_data = File::open(suffixed(&self.base, ".data"))?;
-        let mut staged_data = BufReader::new(staged_data);
         let mut buffer = vec![0u8; COPY_BUFFER_BYTES];
 
-        // Destructured rather than reached through `self`, because the copy
-        // loop below reads the payload table while the sink is borrowed
-        // mutably, and those are two different fields.
-        let Self {
-            sink,
-            payload_starts,
-            ..
-        } = self;
-        let sink = sink.as_mut().expect("a sink exists by now");
+        let sink = self.sink.as_mut().expect("a sink exists by now");
         let out = sink.as_write();
 
         out.write_all(&header.encode())?;
@@ -1357,12 +1982,15 @@ impl<W: Write + Seek> Writer<W> {
             let mut leaf_file = BufReader::new(File::open(&leaves.path)?);
             copy_exactly(&mut leaf_file, out, leaves.length, &mut buffer)?;
         }
-        for &payload in &plan.order {
-            let at = payload as usize;
-            let start = payload_starts[at];
-            let length = payload_starts[at + 1] - start;
-            staged_data.seek(SeekFrom::Start(start))?;
-            copy_exactly(&mut staged_data, out, length, &mut buffer)?;
+        let mut order = OrderReader::open(&plan.order_path)?;
+        while let Some(placement) = order.next_placement()? {
+            copy_exactly_at(
+                &staged_data,
+                placement.data_offset,
+                out,
+                u64::from(placement.length),
+                &mut buffer,
+            )?;
         }
         out.flush()?;
         Ok(())
@@ -1377,7 +2005,7 @@ impl<W: Write + Seek> Writer<W> {
                 // renamed file is not left empty or short by a power loss
                 // between the rename and the writeback.
                 file.flush()?;
-                file.sync_all()?;
+                sync_all(&file)?;
                 // Close before the rename: some filesystems refuse to rename
                 // over an open handle.
                 drop(file);
@@ -1423,6 +2051,54 @@ impl<W: Write + Seek> Drop for Writer<W> {
 // Spilled record I/O
 // ---------------------------------------------------------------------------
 
+/// How wide to make the leaves after an attempt whose root came out `root_len`
+/// bytes, against a budget it did not fit.
+///
+/// The loop used to double, which means a root eight times over budget is
+/// rebuilt four times, re-gzipping every leaf on each pass, to reach a size
+/// the first attempt already had the evidence for (issue #1142).
+///
+/// # Why this is not computed from the entry count
+///
+/// The obvious version of this reads the entry count and picks a starting
+/// width from a floor on what a root pointer costs. There is no such floor
+/// worth having. A root of leaf pointers has an all-zero run-length column, an
+/// offset column that is all zeros because the leaves are contiguous, and a
+/// length column of compressed leaf sizes that barely move, so gzip takes the
+/// lot to well under a byte a pointer: measured while building a fixture for
+/// `the_leaf_loop_does_not_rebuild_every_leaf_once_per_doubling`, twenty
+/// thousand pointers of contiguous ids fit the 16257-byte budget with room to
+/// spare. Any blind floor above that overshoots, and overshooting changes the
+/// width the archive settles on, which changes the archive. The go-pmtiles
+/// goldens are pinned to that width.
+///
+/// # Why this one cannot overshoot
+///
+/// It only spends evidence the attempt just produced. Write `b(L)` for the
+/// compressed bytes a root pointer costs at width `L` and `E` for the entry
+/// count, so a root is about `b(L) * E / L` bytes. This jumps to `L * 2^k`
+/// with `2^k` at most `root_len / ROOT_BUDGET`, so the new width is at most
+/// `b(L) * E / ROOT_BUDGET`. The smallest width that fits, `L_f`, satisfies
+/// `b(L_f) * E / L_f <= ROOT_BUDGET`, so `L_f >= b(L_f) * E / ROOT_BUDGET`.
+/// The jump therefore lands at or below `L_f` whenever `b(L) <= b(L_f)`, which
+/// is to say whenever a pointer does not get *cheaper* as the leaves get
+/// wider. It does not: wider leaves mean larger tile-id deltas and larger
+/// offsets in the root, so a pointer costs more, not less.
+///
+/// And the floor is a doubling, so this always makes progress.
+fn widen_leaves(leaf_entries: usize, root_len: usize) -> Result<usize, PmTilesError> {
+    let over = (root_len / ROOT_BUDGET).max(1);
+    let steps = (usize::BITS - 1 - over.leading_zeros()).max(1);
+    let factor = 1usize.checked_shl(steps).ok_or(PmTilesError::Overflow {
+        what: "a leaf size",
+    })?;
+    leaf_entries
+        .checked_mul(factor)
+        .ok_or(PmTilesError::Overflow {
+            what: "a leaf size",
+        })
+}
+
 fn suffixed(base: &Path, suffix: &str) -> PathBuf {
     let mut s = base.as_os_str().to_owned();
     s.push(suffix);
@@ -1465,6 +2141,38 @@ fn copy_exactly<R: Read>(
     Ok(())
 }
 
+/// Copy exactly `length` bytes from `at`, without touching a shared cursor.
+///
+/// The payload copy used to `seek` a `BufReader` and then read. `BufReader`
+/// discards its buffer on a seek by documented contract, so every payload cost
+/// an `lseek`, a readahead thrown away and a fresh read: three syscalls a
+/// payload, and the copy runs once per payload in the archive. This is one
+/// `pread` per buffer's worth, which for any tile under 64 KiB is one syscall
+/// (issue #1142).
+///
+/// Refuses a short source the same way [`copy_exactly`] does, because
+/// [`read_exact_at`] is exact: a staging file that came up short would
+/// otherwise write a shorter section than the header promised.
+fn copy_exactly_at(
+    from: &File,
+    at: u64,
+    to: &mut dyn Write,
+    length: u64,
+    buffer: &mut [u8],
+) -> Result<(), PmTilesError> {
+    let mut left = length;
+    let mut at = at;
+    while left > 0 {
+        let want = usize::try_from(left.min(buffer.len() as u64)).expect("bounded by the buffer");
+        probe::staged_read();
+        read_exact_at(from, &mut buffer[..want], at)?;
+        to.write_all(&buffer[..want])?;
+        at += want as u64;
+        left -= want as u64;
+    }
+    Ok(())
+}
+
 /// Read exactly `buf.len()` bytes from `at`, without touching a shared cursor.
 ///
 /// This is what lets the whole merge run on one open file. On Unix it is one
@@ -1479,7 +2187,7 @@ fn read_exact_at(file: &File, buf: &mut [u8], at: u64) -> std::io::Result<()> {
 #[cfg(not(unix))]
 fn read_exact_at(file: &File, buf: &mut [u8], at: u64) -> std::io::Result<()> {
     let mut file = file;
-    file.seek(SeekFrom::Start(at))?;
+    file.seek(std::io::SeekFrom::Start(at))?;
     file.read_exact(buf)
 }
 
@@ -1595,6 +2303,28 @@ impl SortedSpill {
     }
 }
 
+/// The spilled write order, read back in order.
+struct OrderReader {
+    reader: BufReader<File>,
+}
+
+impl OrderReader {
+    fn open(path: &Path) -> Result<Self, PmTilesError> {
+        Ok(Self {
+            reader: BufReader::new(File::open(path)?),
+        })
+    }
+
+    fn next_placement(&mut self) -> Result<Option<Placement>, PmTilesError> {
+        let mut bytes = [0u8; ORDER_RECORD_BYTES];
+        match self.reader.read_exact(&mut bytes) {
+            Ok(()) => Ok(Some(Placement::decode(&bytes))),
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+}
+
 /// The spilled entry list, read back in order.
 struct EntryReader {
     reader: BufReader<File>,
@@ -1656,8 +2386,9 @@ mod tests {
             }
         }
 
+        /// The barrier, matching [`Staging::finish`].
         pub(super) fn finish(self) -> std::io::Result<()> {
-            self.into.sync_data()
+            sync_data(&self.into)
         }
 
         /// The durability barrier, honoured here too.
@@ -1666,7 +2397,7 @@ mod tests {
         /// the wrong reason: the bytes the assertion reads would not have
         /// reached the file it reads them from.
         pub(super) fn sync(&mut self) -> std::io::Result<()> {
-            self.into.sync_data()
+            sync_data(&self.into)
         }
     }
 
@@ -1723,15 +2454,91 @@ mod tests {
             .count()
     }
 
+    /// The per-payload figure the budget is divided by is the one the types
+    /// really cost.
+    ///
+    /// `DEDUPE_BYTES_PER_PAYLOAD` is a constant a caller's budget is divided
+    /// by, so a slot that grew a field would quietly hand out a window bigger
+    /// than the budget asked for. Nothing else in the writer would notice.
+    #[test]
+    fn the_dedupe_budget_buys_what_it_says_it_buys() {
+        let per_payload = std::mem::size_of::<WindowSlot>()
+            + std::mem::size_of::<RepeatSlot>()
+            // Two recency words a set, spread over the set's ways.
+            + 2 * std::mem::size_of::<u32>() / DEDUPE_WINDOW_WAYS;
+        assert_eq!(
+            per_payload, DEDUPE_BYTES_PER_PAYLOAD,
+            "the slots cost {per_payload} bytes a payload and the budget is divided by \
+             {DEDUPE_BYTES_PER_PAYLOAD}"
+        );
+
+        // And the division lands where it should, at the two ends that matter.
+        assert_eq!(dedupe_sets(0), 1, "the smallest window is still a window");
+        assert_eq!(
+            dedupe_sets(DEDUPE_BYTES_PER_PAYLOAD * DEDUPE_WINDOW_WAYS * 100),
+            100
+        );
+        let sets = dedupe_sets(DEFAULT_DEDUPE_MEMORY_BYTES);
+        let spent = sets * DEDUPE_WINDOW_WAYS * DEDUPE_BYTES_PER_PAYLOAD;
+        assert!(
+            spent <= DEFAULT_DEDUPE_MEMORY_BYTES,
+            "the default window spends {spent} against a budget of {DEFAULT_DEDUPE_MEMORY_BYTES}"
+        );
+    }
+
+    /// The window evicts the way that has gone longest without a hit, and a
+    /// hit is what makes a way recent.
+    ///
+    /// Driven directly rather than through an archive, because the archive
+    /// test can only see the two ends of this and the thing in the middle,
+    /// that a *hit* renews an entry rather than only an insert, is what makes
+    /// a blank tile survive a window it does not fit in.
+    #[test]
+    fn a_hit_renews_an_entry_and_the_oldest_way_is_the_one_that_goes() {
+        let hash = |n: u8| [n; 32];
+        let mut window = DedupeWindow::with_sets(1);
+        for n in 0..DEDUPE_WINDOW_WAYS as u8 {
+            window.insert(hash(n), u64::from(n), 1);
+        }
+        // Way 0 is the oldest, so renew it and fill the set once more. What
+        // goes is way 1, which is now the oldest.
+        assert_eq!(window.get(&hash(0)), Some((0, 1)));
+        window.insert(hash(100), 100, 1);
+        assert_eq!(
+            window.get(&hash(0)),
+            Some((0, 1)),
+            "a hit should have renewed the oldest entry"
+        );
+        assert_eq!(
+            window.get(&hash(1)),
+            None,
+            "the entry that had gone longest without a hit should be the one evicted"
+        );
+        // And everything else is still there, so the eviction took one.
+        for n in 2..DEDUPE_WINDOW_WAYS as u8 {
+            assert_eq!(window.get(&hash(n)), Some((u64::from(n), 1)), "way {n}");
+        }
+    }
+
     #[test]
     fn a_spill_record_round_trips_through_its_twenty_bytes() {
         let record = Spill {
             tile_id: u64::MAX - 3,
-            payload: 1 << 40,
+            data_offset: 1 << 40,
             length: u32::MAX,
         };
         assert_eq!(Spill::decode(&record.encode()), record);
         assert_eq!(record.encode().len(), SPILL_RECORD_BYTES);
+    }
+
+    #[test]
+    fn an_order_record_round_trips_through_its_twelve_bytes() {
+        let placement = Placement {
+            data_offset: 1 << 40,
+            length: u32::MAX,
+        };
+        assert_eq!(Placement::decode(&placement.encode()), placement);
+        assert_eq!(placement.encode().len(), ORDER_RECORD_BYTES);
     }
 
     #[test]
@@ -1763,7 +2570,7 @@ mod tests {
                 file.write_all(
                     &Spill {
                         tile_id: *id,
-                        payload: *id * 10,
+                        data_offset: *id * 10,
                         length: 1,
                     }
                     .encode(),
@@ -1867,12 +2674,12 @@ mod tests {
         // recorded on the far side of them.
         let staged_path = suffixed(&w.base, ".data");
         let on_disk = std::fs::metadata(&staged_path).unwrap().len();
-        assert_eq!(w.staged_len(), 4096, "only the first payload is accounted");
+        assert_eq!(w.staged_len, 4096, "only the first payload is accounted");
         assert!(
-            on_disk > w.staged_len(),
+            on_disk > w.staged_len,
             "the staging file is {on_disk} bytes and the writer accounts for {}, so no \
              partial write happened and this test is not testing anything",
-            w.staged_len()
+            w.staged_len
         );
 
         // The retry is refused rather than appended after the orphan.
@@ -2031,7 +2838,7 @@ mod tests {
                 file.write_all(
                     &Spill {
                         tile_id: run + step * MAX_MERGE_FANIN as u64,
-                        payload: run,
+                        data_offset: run,
                         length: 1,
                     }
                     .encode(),
@@ -2094,7 +2901,7 @@ mod tests {
             file.write_all(
                 &Spill {
                     tile_id: id,
-                    payload: id,
+                    data_offset: id,
                     length: 1,
                 }
                 .encode(),
@@ -2190,10 +2997,16 @@ mod tests {
         );
     }
 
-    /// The payload table answers both questions the staged-offset map used to.
+    /// The window answers both questions the payload table used to.
+    ///
+    /// `payload_starts` was a `Vec<u64>` of where every payload began, plus a
+    /// sentinel, so an offset and a length both came out of it by
+    /// subtraction. It grew one entry per payload for the whole run. The
+    /// window carries both numbers for the payloads it still remembers, and
+    /// the staged length is a counter.
     #[test]
     #[cfg_attr(miri, ignore)]
-    fn the_payload_table_carries_every_offset_and_length() {
+    fn the_window_carries_every_offset_and_length() {
         let dir = temp_dir();
         let mut sink = std::io::Cursor::new(Vec::new());
         let mut w = Writer::try_new(&mut sink, dir.path(), WriterOptions::default()).unwrap();
@@ -2203,23 +3016,505 @@ mod tests {
             w.add_tile(3, index as u32, 0, payload, content_hash(payload))
                 .unwrap();
         }
-        // A duplicate, which must not extend the table.
+        // A duplicate, which must not stage a second payload.
         w.add_tile(3, 6, 0, &payloads[2], content_hash(&payloads[2]))
             .unwrap();
 
-        assert_eq!(w.payload_count(), 5);
-        assert_eq!(w.distinct_payload_count(), 5);
+        assert_eq!(w.staged_payloads, 5);
+        assert_eq!(w.staged_payload_count(), 5);
         let mut expected_offset = 0u64;
-        for (index, payload) in payloads.iter().enumerate() {
-            assert_eq!(w.payload_length(index as u64), payload.len() as u32);
-            assert_eq!(w.payload_starts[index], expected_offset);
+        for payload in &payloads {
+            assert_eq!(
+                w.window
+                    .as_mut()
+                    .expect("the window is live before finish")
+                    .get(&content_hash(payload)),
+                Some((expected_offset, payload.len() as u32)),
+                "the window should know where this payload is and how long it is"
+            );
             expected_offset += payload.len() as u64;
         }
-        assert_eq!(w.staged_len(), expected_offset);
+        assert_eq!(w.staged_len, expected_offset);
+    }
+
+    /// A `finish` syncs the three files that have a reader, and none of the
+    /// ones that do not.
+    ///
+    /// It used to issue five, and issue #1141 is about the two that were
+    /// bought and never spent. The distinction is **who reads the file back**,
+    /// and it took a second look to get right, so it is written down here
+    /// rather than left to the diff.
+    ///
+    /// The three that stay:
+    ///
+    /// * `.data` and `.idx`, the staged payloads and the index log, synced as
+    ///   [`Staging::finish`] closes them. Not for durability. It is the only
+    ///   place a deferred write error on either file can surface, and
+    ///   `write_archive` reads `.data` straight back with `read_exact_at`, so
+    ///   without it a writeback failure can come back as stale or zeroed
+    ///   blocks with no error and publish an archive full of the wrong tile
+    ///   bytes. [`Staging::finish`] has the long version.
+    /// * The `sync_all` in [`Writer::publish`], before the rename, which stops
+    ///   a power loss between the rename and the writeback leaving a complete
+    ///   archive's name on an empty or short file.
+    ///
+    /// The two that went, plus the per-fold and per-attempt ones behind them:
+    /// `.ent`, `.mrg0`/`.mrg1` and `.leaf` are created and consumed inside one
+    /// `finish_inner`, read back through a handle it opens itself in the same
+    /// call, so a deferred error on those surfaces as a short read that
+    /// [`copy_exactly`] and [`EntryReader`] already refuse. Against a cell
+    /// whose whole job is a few dozen PNG encodes, those were a real share of
+    /// the wall time.
+    ///
+    /// What is *not* an argument for removing any of them is that `Drop`
+    /// deletes these files. `Drop` does not run on the crash an `fsync` is
+    /// for. That reasoning was in this doc and it was wrong.
+    ///
+    /// The profile is deliberately awkward. One record a run means 300 runs
+    /// and a merge fold; one entry a leaf means the leaf loop runs. Both of
+    /// those used to sync and neither does now.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_finish_syncs_only_the_files_something_reads_back() {
+        let dir = temp_dir();
+        let destination = dir.path().join("barriers.pmtiles");
+        let mut w = Writer::create(
+            &destination,
+            WriterOptions::default()
+                .with_sort_buffer_records(1)
+                .with_leaf_entries(1),
+        )
+        .unwrap();
+        for id in 21u64..=320 {
+            let (z, x, y) = crate::pmtiles::tileid_to_zxy(id).unwrap();
+            let payload = format!("tile number {id}, distinct from every other").into_bytes();
+            w.add_tile(z, x, y, &payload, content_hash(&payload))
+                .unwrap();
+        }
+        assert!(
+            w.spilled_run_count() > MAX_MERGE_FANIN,
+            "this profile is supposed to reach the merge fold"
+        );
+
+        probe::reset();
+        w.finish().expect("the archive finishes");
+
         assert_eq!(
-            *w.payload_starts.last().unwrap(),
-            expected_offset,
-            "the sentinel is the staged length and there is no second copy of it"
+            probe::syncs(),
+            3,
+            "a finish should sync the staged payloads, the index log and the archive before \
+             the rename, and nothing else, however many folds and leaf attempts it ran"
+        );
+        assert!(destination.exists());
+    }
+
+    /// `sync_pending` still syncs, because that one was asked for.
+    ///
+    /// The control on the test above. A writer that simply stopped syncing
+    /// anything would pass it, and would quietly drop the barrier a
+    /// checkpointed engine run explicitly calls for.
+    ///
+    /// # It is not the barrier a `PmTilesSink` run gets
+    ///
+    /// Worth being exact about, because I said otherwise once.
+    /// [`TileSink::sync_pending`](crate::sink::TileSink::sync_pending) reaches
+    /// this writer only through `CheckpointState::flush`, and the engine
+    /// builds no checkpoint state unless it resolves a checkpoint root.
+    /// [`PmTilesSink::checkpoint_root`](crate::sink_pmtiles::PmTilesSink)
+    /// returns `None` on purpose, so an ordinary archive run never calls this
+    /// at all and the barriers it gets are the three in the test above. A
+    /// caller who sets `EngineConfig::checkpoint_root` by hand gets this one
+    /// as well.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn the_barrier_a_caller_asks_for_is_still_issued() {
+        let dir = temp_dir();
+        let mut sink = std::io::Cursor::new(Vec::new());
+        let mut w = Writer::try_new(&mut sink, dir.path(), WriterOptions::default()).unwrap();
+        let payload = b"one tile".as_slice();
+        w.add_tile(3, 0, 0, payload, content_hash(payload)).unwrap();
+
+        probe::reset();
+        w.sync_pending().expect("the barrier lands");
+        assert_eq!(
+            probe::syncs(),
+            2,
+            "sync_pending syncs the staged payloads and the index log"
+        );
+    }
+
+    /// The payload copy reads each blob where it lies instead of seeking to
+    /// it.
+    ///
+    /// `write_archive` used to `seek` a `BufReader` and then read. `BufReader`
+    /// discards its buffer on a seek by documented contract, so every payload
+    /// cost an `lseek`, a thrown-away readahead and a fresh read: three
+    /// syscalls a payload, ten million times on a ten-million-payload archive.
+    /// The positioned-read helper the merge already runs on does it in one
+    /// (issue #1142).
+    ///
+    /// There is no seek count to assert on any more, and that is the stronger
+    /// statement: the copy holds a `&File` and reads through `read_exact_at`,
+    /// so there is no shared cursor in the picture for anything to move. The
+    /// counter that measured it read 64 for these 64 payloads before the
+    /// change.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn the_payload_copy_reads_each_payload_where_it_lies_rather_than_seeking_to_it() {
+        const PAYLOADS: usize = 64;
+        let dir = temp_dir();
+        let mut sink = std::io::Cursor::new(Vec::new());
+        let mut w = Writer::try_new(&mut sink, dir.path(), WriterOptions::default()).unwrap();
+        for index in 0..PAYLOADS as u64 {
+            let (z, x, y) = crate::pmtiles::tileid_to_zxy(21 + index).unwrap();
+            let payload = format!("payload {index}").into_bytes();
+            w.add_tile(z, x, y, &payload, content_hash(&payload))
+                .unwrap();
+        }
+
+        probe::reset();
+        w.finish().expect("the archive finishes");
+
+        assert_eq!(
+            probe::staged_reads(),
+            PAYLOADS,
+            "one positioned read a payload, and these payloads are far under the copy buffer"
+        );
+    }
+
+    /// A payload the repeat table forgot is stored twice, and the archive is
+    /// still right.
+    ///
+    /// The window is not the only capped table. `RepeatTable` records the
+    /// staged offsets a second tile points at, so placement can tell a payload
+    /// it has placed already from one it has not, and it evicts too. An offset
+    /// that falls out of it reads to placement as "referenced exactly once",
+    /// so each of its records takes a fresh offset and the same bytes land in
+    /// the data region more than once.
+    ///
+    /// That is a bigger archive and nothing worse, which is why it is checked
+    /// rather than prevented. It needed a test of its own because nothing else
+    /// in this file reaches it: the archive-level window test runs at a budget
+    /// of one set and marks exactly one offset, so its repeat table never
+    /// evicts. Nine payloads each referenced twice is the smallest thing that
+    /// makes it, one mark past the eight ways a single set holds.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_payload_the_repeat_table_forgot_is_stored_twice_and_reads_back_right() {
+        const PAYLOADS: u64 = DEDUPE_WINDOW_WAYS as u64 + 1;
+        let body =
+            |n: u64| format!("payload {n:03}, forty-eight bytes of it or thereabouts").into_bytes();
+
+        let write = |budget: usize| -> (Header, Vec<u8>, std::path::PathBuf, tempfile::TempDir) {
+            let dir = temp_dir();
+            let out = dir.path().join("repeats.pmtiles");
+            let mut w = Writer::create(
+                &out,
+                WriterOptions::default().with_dedupe_memory_bytes(budget),
+            )
+            .unwrap();
+            // Each payload's two tiles arrive together, so the second is a
+            // window hit and marks the offset. The two ids are far apart, so
+            // the entries cannot collapse into a run and hide the question.
+            for n in 0..PAYLOADS {
+                for id in [21 + n, 21 + PAYLOADS + n] {
+                    let (z, x, y) = crate::pmtiles::tileid_to_zxy(id).unwrap();
+                    w.add_tile(z, x, y, &body(n), content_hash(&body(n)))
+                        .unwrap();
+                }
+            }
+            let staged = w.staged_payload_count();
+            let done = w.finish().unwrap();
+            assert_eq!(
+                staged as u64, PAYLOADS,
+                "every payload should be staged exactly once whatever the repeat table did"
+            );
+            let bytes = std::fs::read(&out).unwrap();
+            (done.header, bytes, out, dir)
+        };
+
+        // A budget of one set: nine marks against eight ways, so one goes.
+        let (header, bytes, _, _dir) = write(0);
+        assert_eq!(header.addressed_tiles_count, 2 * PAYLOADS);
+        assert_eq!(
+            header.tile_contents_count,
+            PAYLOADS + 1,
+            "one payload should have been written twice, because the repeat table forgot it"
+        );
+
+        // And every tile still reads back as the bytes it was given, which is
+        // the whole claim: the archive is bigger and not wrong.
+        let root = crate::pmtiles::directory::deserialize_entries(
+            &header
+                .internal_compression
+                .decompress(
+                    &bytes[header.root_offset as usize
+                        ..(header.root_offset + header.root_length) as usize],
+                    1 << 20,
+                )
+                .expect("the root decompresses"),
+        )
+        .expect("the root parses");
+        let mut checked = 0usize;
+        for entry in &root {
+            for k in 0..u64::from(entry.run_length) {
+                let want = body((entry.tile_id + k - 21) % PAYLOADS);
+                let at = (header.tile_data_offset + entry.offset) as usize;
+                assert_eq!(
+                    &bytes[at..at + entry.length as usize],
+                    &want[..],
+                    "tile {} resolved to the wrong bytes",
+                    entry.tile_id + k
+                );
+                checked += 1;
+            }
+        }
+        assert_eq!(checked as u64, 2 * PAYLOADS, "the sweep missed a tile");
+
+        // The positive control: with room for every mark, the duplicate is
+        // caught and there are exactly as many blobs as payloads.
+        let (roomy, _, _, _dir) = write(1 << 20);
+        assert_eq!(
+            roomy.tile_contents_count, PAYLOADS,
+            "a repeat table with room should catch every duplicate, so the cell above is about \
+             eviction and not about something else"
+        );
+    }
+
+    /// A payload larger than the copy buffer is copied in several reads.
+    ///
+    /// `copy_exactly_at` loops, and nothing else in this file has a tile over
+    /// 64 KiB, so the loop ran exactly once everywhere and the multi-read
+    /// branch was never executed. A copy that dropped the `at += want` would
+    /// have written the first 64 KiB of a tile four times over and no test
+    /// would have noticed.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_payload_larger_than_the_copy_buffer_is_read_in_several_pieces() {
+        const BIG: usize = COPY_BUFFER_BYTES * 3 + 977;
+        let dir = temp_dir();
+        let out = dir.path().join("big.pmtiles");
+        let mut w = Writer::create(&out, WriterOptions::default()).unwrap();
+
+        // Bytes that differ everywhere, so a copy that repeated a buffer or
+        // read from the wrong offset produces different output rather than
+        // plausible output.
+        let big: Vec<u8> = (0..BIG).map(|i| (i.wrapping_mul(31) >> 3) as u8).collect();
+        let small = b"a second tile, comfortably inside one buffer".to_vec();
+        w.add_tile(3, 0, 0, &big, content_hash(&big)).unwrap();
+        w.add_tile(3, 1, 0, &small, content_hash(&small)).unwrap();
+
+        probe::reset();
+        let done = w.finish().expect("the archive finishes");
+
+        assert_eq!(
+            probe::staged_reads(),
+            BIG.div_ceil(COPY_BUFFER_BYTES) + 1,
+            "the big payload should take one read per buffer's worth and the small one just one"
+        );
+        assert!(
+            probe::staged_reads() > 2,
+            "this fixture is supposed to make the copy loop go round more than once"
+        );
+
+        let bytes = std::fs::read(&out).unwrap();
+        let at = done.header.tile_data_offset as usize;
+        assert_eq!(
+            &bytes[at..at + BIG],
+            &big[..],
+            "the big tile came out wrong"
+        );
+        assert_eq!(
+            &bytes[at + BIG..at + BIG + small.len()],
+            &small[..],
+            "the tile after the big one came out wrong"
+        );
+    }
+
+    /// `widen_leaves` settles on the same leaf size a plain doubling loop
+    /// reaches.
+    ///
+    /// This is the assertion `the_leaf_loop_does_not_rebuild_every_leaf_once_per_doubling`
+    /// cannot make. Counting attempts says the fast loop is faster; it says
+    /// nothing about where the two loops **land**, and landing somewhere else
+    /// is the failure that matters, because the leaf width decides the
+    /// archive's shape and the go-pmtiles goldens are pinned to it. The only
+    /// leaf-bearing golden produces six pointers at the default 4096 and never
+    /// reaches this code at all.
+    ///
+    /// So both loops run over the same entry list here, against the real
+    /// compressed root size rather than a model of it, and have to agree. The
+    /// doubling loop is the four lines the reference implementation uses.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn widening_settles_where_a_doubling_loop_settles() {
+        /// The compressed root a leaf width produces, computed the way
+        /// `build_directories` computes it: chunk the entries, compress each
+        /// chunk to learn what a pointer's length is, then compress the
+        /// pointer list.
+        fn root_len(entries: &[Entry], width: usize) -> usize {
+            let mut pointers: Vec<Entry> = Vec::new();
+            let mut offset = 0u64;
+            for chunk in entries.chunks(width) {
+                let body = Compression::Gzip
+                    .compress(&serialize_entries(chunk).expect("a leaf serialises"))
+                    .expect("a leaf compresses");
+                pointers.push(Entry {
+                    tile_id: chunk[0].tile_id,
+                    offset,
+                    length: body.len() as u32,
+                    run_length: 0,
+                });
+                offset += body.len() as u64;
+            }
+            Compression::Gzip
+                .compress(&serialize_entries(&pointers).expect("the root serialises"))
+                .expect("the root compresses")
+                .len()
+        }
+
+        /// Entries with a tile-id column that costs something, which is what
+        /// stops a root of pointers compressing to nothing.
+        fn entries(count: u64, gap_shift: u32) -> Vec<Entry> {
+            let mut rng = 0x243f_6a88_85a3_08d3u64;
+            let mut tile_id = 21u64;
+            let mut offset = 0u64;
+            (0..count)
+                .map(|_| {
+                    rng = rng
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    let length = 32 + ((rng >> 33) % 96) as u32;
+                    let entry = Entry {
+                        tile_id,
+                        offset,
+                        length,
+                        run_length: 1,
+                    };
+                    tile_id += 1 + (rng >> gap_shift);
+                    offset += u64::from(length);
+                    entry
+                })
+                .collect()
+        }
+
+        let mut widened_any = false;
+        for (count, gap_shift, base) in
+            [(40_000u64, 38u32, 1usize), (25_000, 38, 1), (40_000, 38, 2)]
+        {
+            let list = entries(count, gap_shift);
+
+            // What go-pmtiles does, and what this loop did before #1142.
+            let mut doubling = base;
+            let mut doublings = 1usize;
+            while root_len(&list, doubling) > ROOT_BUDGET {
+                doubling *= 2;
+                doublings += 1;
+            }
+
+            // What it does now.
+            let mut widened = base;
+            let mut attempts = 1usize;
+            loop {
+                let len = root_len(&list, widened);
+                if len <= ROOT_BUDGET {
+                    break;
+                }
+                widened = widen_leaves(widened, len).expect("a leaf size widens");
+                attempts += 1;
+            }
+
+            assert_eq!(
+                widened, doubling,
+                "{count} entries from a base of {base}: widening settled on {widened} entries a \
+                 leaf and doubling on {doubling}, so the archive's shape depends on which loop \
+                 ran"
+            );
+            assert!(
+                attempts <= doublings,
+                "{count} entries from a base of {base}: widening took {attempts} attempts and \
+                 doubling {doublings}"
+            );
+            if doublings > 2 {
+                widened_any = true;
+                assert!(
+                    attempts < doublings,
+                    "{count} entries from a base of {base}: {doublings} doublings and widening \
+                     saved none of them"
+                );
+            }
+        }
+        assert!(
+            widened_any,
+            "no case in this sweep needed more than one doubling, so nothing here could tell \
+             the two loops apart"
+        );
+    }
+
+    /// The leaf loop does not rebuild every leaf once per doubling.
+    ///
+    /// `build_directories` starts at the configured leaf size and doubles
+    /// until the root fits, re-gzipping every leaf on every attempt. The size
+    /// it settles on says how many attempts a pure doubling loop needs, so the
+    /// assertion is against that number rather than against a constant, and
+    /// the control below refuses a fixture that does not force enough
+    /// doublings to be able to tell the two apart (issue #1142).
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn the_leaf_loop_does_not_rebuild_every_leaf_once_per_doubling() {
+        const ENTRIES: u64 = 40_000;
+        let dir = temp_dir();
+        let mut sink = std::io::Cursor::new(Vec::new());
+        let mut w = Writer::try_new(
+            &mut sink,
+            dir.path(),
+            WriterOptions::default().with_leaf_entries(1),
+        )
+        .unwrap();
+
+        // Widely spaced ids, so the root's tile-id column carries real
+        // entropy. This is the whole difficulty of building a fixture that
+        // forces doublings: a root of leaf pointers has an all-zero run-length
+        // column, an offset column that is all zeros because the leaves are
+        // contiguous, and a length column of compressed leaf sizes that barely
+        // move, so gzip takes the lot to well under a byte a pointer. Measured
+        // on contiguous ids, twenty thousand pointers fit the 16257-byte root
+        // budget with room to spare. Four-byte deltas are what make a pointer
+        // cost something.
+        let mut id = 21u64;
+        let mut rng = 0x243f_6a88_85a3_08d3u64;
+        for _ in 0..ENTRIES {
+            rng = rng
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let (z, x, y) = crate::pmtiles::tileid_to_zxy(id).unwrap();
+            let size = 32 + (rng >> 33) as usize % 96;
+            let mut payload = vec![0u8; size];
+            payload[..8].copy_from_slice(&id.to_le_bytes());
+            w.add_tile(z, x, y, &payload, content_hash(&payload))
+                .unwrap();
+            id += 1 + (rng >> 38);
+        }
+
+        probe::reset();
+        w.finish().expect("the archive finishes");
+
+        let attempts = probe::leaf_attempts();
+        let settled = probe::leaf_entries();
+        assert!(settled >= 1, "the leaf loop never reported a size");
+        // A pure doubling loop from 1 reaches `settled` in this many attempts,
+        // counting the first.
+        let doublings = settled.trailing_zeros() as usize + 1;
+        println!("leaf loop: {attempts} attempts, settled on {settled} entries a leaf");
+        assert!(
+            doublings >= 4,
+            "this fixture settled on {settled} entries a leaf, which is only {doublings} \
+             doublings away from the start, so it cannot tell a doubling loop from anything else"
+        );
+        assert!(
+            attempts < doublings,
+            "the leaf section was built {attempts} times to settle on {settled} entries a \
+             leaf, which is what plain doubling costs"
         );
     }
 

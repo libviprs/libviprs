@@ -16,7 +16,8 @@ use libviprs::{
     Align, AvifError, BandError, CadError, CadSource, ColourError, Combine, DrawError, EngineEvent,
     ExrError, FitsError, GifError, Intent, Interpretation, JoinDirection, Jp2kError, JxlError,
     Layout, ManifestError, MetadataValue, Pcs, PdfError, PixelFormat, PlannerError, Precision,
-    PyramidStorage, RadianceError, RasterError, ResumeError, SourceError, VerifyError,
+    PyramidStorage, RadianceError, RasterError, ResumeError, SourceError, TileEvidence,
+    VerifyError,
 };
 
 #[deny(unreachable_patterns)]
@@ -614,6 +615,20 @@ fn assert_primitive_kind_non_exhaustive(v: &PrimitiveKind) {
         PrimitiveKind::Spline => {}
         PrimitiveKind::Polygon => {}
         PrimitiveKind::Text => {}
+        _ => {}
+    }
+}
+
+/// `TileEvidence` names what a verify's per-tile probe proved, and a third
+/// answer is entirely plausible: a re-render-and-compare verify establishes
+/// more than either variant here, and it is `None` today only because nothing
+/// has taught `raster_verify` to say so.
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_tile_evidence_non_exhaustive(v: &TileEvidence) {
+    match v {
+        TileEvidence::PayloadsRead => {}
+        TileEvidence::LengthsFromTheIndex => {}
         _ => {}
     }
 }

@@ -357,7 +357,13 @@ const ANCHOR_FILES: &[&str] = &[
 /// `a_reader_that_cannot_count_its_tiles_refuses_rather_than_guessing` in
 /// `src/pyramid_reader.rs`, which opens a `tempfile::tempdir()` as a pyramid
 /// to pin what a reader with no tile count answers.
-const EXPECTED_SRC_ANNOTATIONS: usize = 246;
+///
+/// EPIC #1135 moves it 246 to 253: four tests in `src/pmtiles/writer.rs` that
+/// each drive a whole `finish` to count what it does, one renamed with the
+/// table it is about, and three the review asked for, covering the repeat
+/// table's own eviction, a payload larger than the copy buffer and the leaf
+/// width the widening loop settles on.
+const EXPECTED_SRC_ANNOTATIONS: usize = 253;
 /// Companion to [`EXPECTED_SRC_ANNOTATIONS`]: how many `src/` modules carry at
 /// least one annotation. #765 made it 25 by putting the first annotation in
 /// `src/analyze.rs`; `src/colour.rs` and `src/pdf.rs`, which took the other
@@ -608,6 +614,43 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// which `git init`s a `tempfile::tempdir()` to reach an unborn HEAD. It is
 /// `annotated fs-detected` like its neighbour and is not a judgement call.
 ///
+/// #1130 moves it again for the five filesystem cells the verify findings add:
+/// three are the whole of `tests/pmtiles_verify_reads_the_index.rs`, which
+/// writes a real archive into a `tempfile::tempdir()` and reads it back
+/// through a counting transport, and two are the pair
+/// `tests/pmtiles_plan_aware_verify.rs` grows for the archive of a different
+/// picture. All five write an archive to disk, so none of them is a judgement
+/// call, and the figure below is what the detector printed rather than what I
+/// got by adding five to the line above.
+///
+/// The review of #1147 moves it 426 to 428 for the pair that pins the cheap
+/// probe to a local file: one serves a real archive through a transport that
+/// answers the index and refuses the tile data, and one is the negative
+/// control that a file on disk still takes the cheap probe. Both write an
+/// archive into a `tempfile::tempdir()`, and 428 is again what the detector
+/// printed with this constant still at 426.
+///
+/// Then 428 to 429 for the ranged sibling of the cheap-probe cell, which
+/// verifies the same archive through a transport that reports a size and is
+/// not a local file and asserts that every payload is read. 429 is the number
+/// the detector printed with this constant still at 428.
+///
+/// EPIC #1135 moves it again, to 434. The tests it adds that reach the
+/// filesystem are the writer cells that drive a whole `finish` to count what
+/// it does, the dedupe window's two edges, the two orders that stop agreeing
+/// once the window cannot hold the tile set, the repeat table's own eviction,
+/// a payload larger than the copy buffer, three bounded-memory cells and the
+/// peak-RSS harness, less the renames among them. One more is annotated and
+/// touches nothing, because it gzips a full root about thirty times and Miri
+/// would be there all week.
+///
+/// The number came from the detector rather than from that list, which is the
+/// discipline the paragraphs above ask for and the reason it is right: the
+/// list has been off by one twice while the detector has not.
+///
+/// #1146 landed first and took main to 434. Held at that figure, the
+/// detector reported the number below on the merged tree.
+///
 ///
 /// #1133 and #1132 move it 421 to 433, and the twelve are all of
 /// `tests/jpeg_tile_format.rs` bar the one cell that encodes a raster in
@@ -622,7 +665,10 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// is what it printed at 421 before that. The rebase onto #1126 is why these
 /// figures are not the ones this branch was written against, and the review
 /// that added a cell to every engine is why the last one moved again.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 433;
+///
+/// #1146 and #1147 landed first and took main to 442. Held at that figure,
+/// the detector reported the number below on the merged tree.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 454;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {

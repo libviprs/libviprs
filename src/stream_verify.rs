@@ -99,10 +99,13 @@ fn strip_layout_error(reason: String) -> EngineError {
 /// * `raw` — byte-exact comparison against the regenerated tile. Any
 ///   mismatch (truncation, flipped byte, padding drift) is reported as
 ///   [`EngineError::ChecksumMismatch`].
-/// * `png` / `jpeg` / `jpg` — existence check only. Encoded tiles cannot be
-///   re-encoded bit-identically from fresh pixel data (encoder-state
-///   nondeterminism), so deeper verification is deferred to the
-///   manifest-checksum branch.
+/// * `png` / `jpeg` / `jpg` / `webp` — existence check only. Encoded tiles
+///   cannot be re-encoded bit-identically from fresh pixel data
+///   (encoder-state nondeterminism), so deeper verification is deferred to the
+///   manifest-checksum branch. `webp` was missing from this list from #1123,
+///   when `TileFormat` gained the variant, until the review of #1147; it
+///   always took this branch, so the list was short rather than the behaviour
+///   wrong.
 ///
 /// # Manifest checksums
 ///
@@ -473,6 +476,10 @@ pub fn verify_from_strip_source(
         duration: started.elapsed(),
         stage_durations: StageDurations::default(),
         skipped_due_to_failure: 0,
+        // A strip verify re-rendered from the source and compared
+        // bytes, which is not one of the two per-tile probes
+        // `TileEvidence` describes.
+        tile_evidence: None,
     })
 }
 
