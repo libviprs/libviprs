@@ -1445,14 +1445,69 @@ fn ordered_emission_hands_the_sink_every_tile_in_ascending_tile_id_order() {
     );
 }
 
-/// An ordered run in arrival layout produces the archive the reordering pass
-/// would have produced.
+/// Every entry of an archive, root first and leaves followed, in the order the
+/// directories list them.
+fn entries(path: &Path) -> Vec<Entry> {
+    let bytes = std::fs::read(path).expect("the archive is readable");
+    let header = Header::try_decode(&bytes[..HEADER_BYTES]).expect("the sink wrote a v3 header");
+    let root = section(&bytes, &header, header.root_offset, header.root_length);
+    let mut out = Vec::new();
+    for entry in deserialize_entries(&root).expect("the root directory parses") {
+        if entry.is_leaf() {
+            let leaf = section(
+                &bytes,
+                &header,
+                header.leaf_directories_offset + entry.offset,
+                u64::from(entry.length),
+            );
+            out.extend(deserialize_entries(&leaf).expect("a leaf directory parses"));
+        } else {
+            out.push(entry);
+        }
+    }
+    out
+}
+
+/// The raw tile data region of an archive.
+fn tile_data(path: &Path) -> Vec<u8> {
+    let bytes = std::fs::read(path).expect("the archive is readable");
+    let header = Header::try_decode(&bytes[..HEADER_BYTES]).expect("the sink wrote a v3 header");
+    let start = usize::try_from(header.tile_data_offset).expect("a unit-scale archive fits");
+    let length = usize::try_from(header.tile_data_length).expect("a unit-scale archive fits");
+    bytes[start..start + length].to_vec()
+}
+
+/// An ordered run in arrival layout stores the bytes the reordering pass would
+/// have stored, in the order it would have stored them.
 ///
-/// This is #1145's own acceptance bar, written the way the issue words it: a
-/// whole-file comparison against the same tiles written through
-/// `Layout::TileId`. The failure report names the first differing offset and
-/// the count, because "the files differ" is not a measurement and the point of
-/// the cell is which bytes move.
+/// # The issue asked for whole-file identity and the two layouts cannot have it
+///
+/// #1145's "done when" is an archive byte-identical to the same tiles through
+/// `Layout::TileId`, and that is unreachable by construction rather than by
+/// anything ordered emission does or does not do. The two layouts put the
+/// sections in different places, which is what `Layout` means:
+///
+/// * `TileId` writes header, root, metadata, leaves, tile data, so the tile
+///   data starts wherever the three sections before it ended.
+/// * `Arrival` reserves the first 16384 bytes for the header and the root
+///   before the first payload lands, appends the tile data from there, and
+///   writes the metadata and the leaves after it. `writer.rs` has the reason
+///   the reservation is exactly 16384: go-pmtiles' `Verify` accepts two
+///   archive sizes and the padded one is the only padded size it recognises.
+///
+/// Measured on this fixture before the ordered walk existed, and again after:
+/// 2063063 bytes against 2046919, differing first at offset 16, which is the
+/// header's `metadata_offset`. The 16144 the arrival archive is larger by is
+/// exactly `16384 - 127 - root_length`, the hole between the root's end and
+/// the reserved ceiling, and the assertion at the bottom of this cell pins
+/// that arithmetic so the claim is a measurement rather than a paragraph.
+///
+/// So this cell asserts the strongest thing that is available and is the thing
+/// the bar was after: every byte that is *content* is identical. The tile data
+/// region byte for byte, every directory entry with its offset and run length,
+/// the metadata, and every header field that is not one of the three section
+/// offsets or the `clustered` flag. What is left over is the framing, and the
+/// framing is the layout.
 ///
 /// The dedupe window is what makes the comparison fair. Which payloads an
 /// archive stores depends on how far apart two identical tiles *arrived*, so
@@ -1462,7 +1517,7 @@ fn ordered_emission_hands_the_sink_every_tile_in_ascending_tile_id_order() {
 /// window rather than a failure about the layout.
 #[test]
 #[cfg_attr(miri, ignore)]
-fn an_ordered_arrival_run_is_byte_identical_to_the_tile_id_layout() {
+fn an_ordered_arrival_run_stores_what_the_tile_id_layout_would_have() {
     let plan = ordered_plan();
     let src = gradient(1024, 1024);
 
@@ -1487,30 +1542,93 @@ fn an_ordered_arrival_run_is_byte_identical_to_the_tile_id_layout() {
 
     let a = walk(&ordered);
     let b = walk(&sorted);
+    assert!(
+        a.header.addressed_tiles_count > 16,
+        "the positive control: two empty archives agree about everything"
+    );
     assert_eq!(
         a.header.tile_contents_count, b.header.tile_contents_count,
         "the window held the whole job in both runs, or this comparison is about the window"
     );
-    assert!(
-        a.header.addressed_tiles_count > 16,
-        "the positive control: two empty archives are byte-identical and prove nothing"
+
+    assert_eq!(
+        tile_data(&ordered),
+        tile_data(&sorted),
+        "the data region an ordered arrival run writes must be the one the sort produces"
+    );
+    assert_eq!(
+        entries(&ordered),
+        entries(&sorted),
+        "every entry must land at the same offset with the same run length"
+    );
+    assert_eq!(
+        walk_metadata(&ordered),
+        walk_metadata(&sorted),
+        "the two archives must carry the same metadata object"
     );
 
-    let left = std::fs::read(&ordered).expect("the ordered archive is readable");
-    let right = std::fs::read(&sorted).expect("the sorted archive is readable");
-    let differing: Vec<usize> = (0..left.len().min(right.len()))
-        .filter(|&i| left[i] != right[i])
-        .collect();
+    // Every header field but the three section offsets and `clustered`, which
+    // is the whole of what the layout is allowed to move.
+    let mut expected = b.header;
+    expected.tile_data_offset = a.header.tile_data_offset;
+    expected.metadata_offset = a.header.metadata_offset;
+    expected.leaf_directories_offset = a.header.leaf_directories_offset;
+    expected.clustered = a.header.clustered;
     assert_eq!(
-        (left.len(), differing.len()),
-        (right.len(), 0),
-        "an ordered arrival archive must be the sorted one byte for byte; \
-         sizes {} and {}, {} of the shared prefix differ, first at {:?}",
-        left.len(),
-        right.len(),
-        differing.len(),
-        differing.first()
+        a.header, expected,
+        "an ordered arrival archive must differ from the sorted one only in where its \
+         sections sit"
     );
+
+    // And the sizes differ by the reserved hole, exactly. This is the
+    // arithmetic behind the paragraph above, pinned.
+    let ordered_len = std::fs::metadata(&ordered).expect("the archive exists").len();
+    let sorted_len = std::fs::metadata(&sorted).expect("the archive exists").len();
+    assert_eq!(a.header.tile_data_offset, 16384, "the reserved ceiling");
+    assert_eq!(
+        ordered_len - sorted_len,
+        16384 - HEADER_BYTES as u64 - a.header.root_length,
+        "the arrival archive is larger by the hole between the root's end and the ceiling, \
+         and by nothing else"
+    );
+}
+
+/// An ordered arrival run earns `clustered`.
+///
+/// This is the one cell #1145 cannot turn green on its own. `clustered` is
+/// read off the layout today, `true` for `Layout::TileId` and `false` for
+/// `Layout::Arrival` whatever the tiles did, so an arrival archive whose data
+/// region genuinely is in tile id order still reports `false`. #1144 makes the
+/// flag measured at ingest instead of assumed from the layout, and this cell
+/// is what says ordered emission was worth doing once it lands.
+///
+/// It asserts the decoded field and the byte, because the two are a pair: the
+/// field is what a reader of this crate sees and byte 96 is what `pmtiles
+/// extract` reads, and a header that decoded `true` from a byte that said
+/// something else would be a bug nobody would look for.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn an_ordered_arrival_run_earns_the_clustered_flag() {
+    let plan = ordered_plan();
+    let src = gradient(1024, 1024);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let archive = run_with_layout(&src, &plan, dir.path(), ArchiveLayout::Arrival, true, 4);
+
+    let header = walk(&archive).header;
+    assert!(
+        header.addressed_tiles_count > 16,
+        "the positive control: an empty archive has no order to be in"
+    );
+    assert!(
+        header.clustered,
+        "an ordered arrival run puts the data region in tile id order, so the flag is true"
+    );
+
+    // `header.rs` serialises `clustered` at offset 96. The raw byte is
+    // asserted beside the decoded field because that byte is what the
+    // reference tools read.
+    let bytes = std::fs::read(&archive).expect("the archive is readable");
+    assert_eq!(bytes[96], 1, "byte 96 is the clustered flag");
 }
 
 /// Two ordered runs over one source produce the same archive.
