@@ -59,6 +59,57 @@ and not under `Fixed`: this file is the only place they can be caught.
 
 ### Breaking
 
+- **An archive verify reads the index instead of the archive, and checks two
+  numbers it used to drop** (issue #1130). Three findings from the four-expert
+  review of #1124 and #1125, all in `pyramid_verify`.
+
+  **It no longer reads every tile to learn every tile's length.** The sweep
+  used to call `tile(coord)` for each planned coordinate and use the result
+  only for `bytes.is_empty()`, so verifying a 21851-tile pyramid pulled the
+  whole archive off storage to learn 21851 numbers the directories were
+  already carrying. Over the ranged transport #1121 opened that is one round
+  trip per tile, serially: about seven minutes of wall clock at a 20ms round
+  trip, to check that no payload is zero bytes.
+
+  It takes the length instead, **but only when the structural walk earned
+  it**. Reading a payload proves one thing a length cannot, that the bytes at
+  that offset are reachable, and that is redundant only when the walk
+  bounds-checked every entry against a size the storage actually reported. A
+  backend that could not say how large it is, and a backend with no structural
+  walk at all, still get every payload read. Which one a run got is reported as
+  `EngineResult::tile_evidence`, and a length-only run reports `bytes_read: 0`,
+  because it did not read any.
+
+  **It walks the archive's directories once** rather than twice, through the
+  new `PyramidReader::structural_summary`.
+
+  **And it refuses an archive of a different picture.** `PyramidDescription`
+  dropped `vnd.libviprs.source.width` / `.height` and
+  `vnd.libviprs.generation.overlap`, and `describe_matches_the_plan` therefore
+  could not tell a 4000-pixel plan from a 4096-pixel archive: the level range
+  and the grid both round, so both plan thirteen levels with identical grids
+  and the same 349 coordinates, and every check passed. Overlap is worse,
+  because it does not reach the grid at all: planning at overlap 1 and at
+  overlap 0 gives byte-identical `levels` vectors while moving every tile's
+  rectangle. Both are compared now, and a pyramid that does not record them is
+  refused the way one that does not record its tile size already was.
+
+  The refusal is the part worth checking before upgrading: an archive with no
+  `vnd.libviprs.source` object, which is what an archive assembled from loose
+  tiles rather than generated from a raster carries, verified before and does
+  not now. [MIGRATION.md](MIGRATION.md) has the shape of it.
+
+  **The cheap probe is taken for a local file only**, not for any backend that
+  reports a size. The two are not the same promise: a bounds check against a
+  reported size says an offset is inside the object, and over a transport that
+  is an inference from the server's claim rather than a fact about any one
+  range. So a verify of a remote archive still reads every payload, which is
+  also the only thing that catches an archive whose index is intact and whose
+  tile data is gone. `PyramidReader::self_check` is deprecated with it: nothing
+  calls it now, and an override of it is a structural walk that silently
+  stopped running.
+
+
 - **`TileFormat` has a fourth variant, `Webp`** (issue #1123). `TileFormat` is
   not `#[non_exhaustive]`, so every exhaustive `match` on it outside this crate
   stops compiling until it grows an arm. That is the whole reason the variant
@@ -1203,7 +1254,96 @@ and not under `Fixed`: this file is the only place they can be caught.
   writing band 0 in commas, which this closes rather than renaming away
   from. `.csv` and `.mat` are also save routes now; see the Added entry.
 
+- **The PMTiles writer deduplicates within a window, not at any distance**
+  (EPIC #1135, issues #1137, #1138, #1139, #1140, #1141, #1142). `Writer`
+  stored every distinct payload exactly once however far apart two identical
+  tiles arrived, because it kept a `HashMap<[u8; 32], u64>` of every payload it
+  had ever seen. That table was the writer's memory: ten million distinct
+  payloads cost about a gigabyte of peak RSS, and the table alone was the
+  largest single allocation in the process. It is a fixed-capacity 8-way
+  set-associative window now, LRU inside the set, sized by the new
+  `WriterOptions::dedupe_memory_bytes` (8 MiB by default, which tracks 129,056
+  payloads).
+
+  **Two identical payloads further apart than the window are stored twice.**
+  That is the break, and it has three consequences worth naming separately.
+
+  **Archive size can grow.** A pyramid whose distinct payloads repeat at long
+  range now writes some of them more than once, so the same tile set can
+  produce a larger `.pmtiles` file than 0.4.0 wrote. The two cases that
+  dominate are unaffected: a photograph has no duplicate tiles to miss, and a
+  blank or solid-colour tile recurs constantly so it never leaves the window.
+  Raise `dedupe_memory_bytes` past the number of distinct payloads to get the
+  old behaviour exactly, at 65 bytes a payload.
+
+  **The archive stops being a pure function of the tile set once either table
+  evicts.** Whether two identical payloads share a blob depends on how far
+  apart they *arrived*, so two different insertion orders of the same tiles can
+  now produce different bytes. There are two tables that decide it and both are
+  keyed on recency: the window, and the smaller repeat table that records which
+  staged offsets a second tile pointed at. So a window large enough to catch
+  every duplicate is not on its own enough, because an offset that falls out of
+  the repeat table is placed twice as well. One budget covers both, at 65 bytes
+  a payload, and byte-identity across shuffled insertion orders holds whenever
+  it covers the whole job. That is the condition a **reproducible** or
+  deterministic build has to meet deliberately rather than inherit. The data
+  region is still laid out in tile id order and `clustered` is still true, so
+  nothing about a reader changes.
+
+  **`Writer::distinct_payload_count` is `Writer::staged_payload_count`.** The
+  old name asserted the property that just stopped being unconditional. It
+  counts payloads staged, which is the distinct count only when the window
+  caught every duplicate.
+
+  What the trade buys is a writer whose memory does not grow with the payload
+  count at all. Measured on a counting allocator at two million distinct
+  payloads, with a 4096-record sort buffer and a 1 MiB dedupe budget, peak live
+  heap went from 274,850,044 bytes to 1,212,460, and that second figure is the
+  same at 257 distinct payloads. Peak RSS at ten million distinct payloads is
+  36.0 MB, at `WriterOptions::default()`, against the 1,083.8 MB this crate's
+  own writer documentation used to quote. The two figures come from different
+  options rather than different builds, and the build profile moves neither
+  materially. Both harnesses ship beside the tests (`one_rss_row` and the cells
+  around it in `tests/pmtiles_bounded_memory.rs`), so both tables can be taken
+  again rather than believed.
+
+  Two things in the writer do still grow with the **tile** count, and the
+  review found them while checking that claim. The run table is 16 bytes per
+  spilled run, so it grows as `tiles / sort_buffer_records`, and the leaf
+  pointer list is 24 bytes per leaf. Both shrink as the option beneath them
+  grows, which is the opposite of the sort buffer and makes
+  `sort_buffer_records` a crossover rather than a direction: the sort costs
+  about `24 * S + 16 * tiles / S`, smallest at `S = sqrt(2 * tiles / 3)`, and
+  **lowering it past that point raises the writer's memory**. Measured at
+  262,144 tiles, a 32-record buffer peaks 172,800 bytes higher than a
+  512-record one. The field's rustdoc called itself "the writer's memory
+  ceiling for the sort" and now carries the arithmetic instead.
+
 ### Added
+
+- **A pyramid reader can be asked for a tile's length, and for its structure
+  once** (issue #1130). Three additions to
+  `libviprs::pyramid_reader`, all defaulted so no existing backend has to move:
+  `PyramidReader::tile_len`, whose default is the length of what `tile`
+  returns; `PyramidReader::structural_summary`, returning the new
+  `StructuralSummary`; and three fields on `PyramidDescription`,
+  `source_width`, `source_height` and `overlap`, reachable through
+  `with_source_size` and `with_overlap`.
+
+  `self_check` and `addressed_tiles` are defaulted views over
+  `structural_summary` now. They were two questions about one walk and a
+  verify was asking both, so an archive verify ran `validate::validate` twice,
+  ten lines apart, under a run lock that guarantees the archive cannot change
+  between them. Overriding either of them still works; overriding the summary
+  pays for one walk.
+
+  `PmTilesPyramidReader` implements `tile_len` through the new
+  `pmtiles::Reader::tile_span`, a thin wrapper over the directory walk
+  `get_tile` already does, and `DirectoryPyramidReader` implements it with
+  `fs::metadata`. `EngineResult` gains `tile_evidence`, which is
+  `Some(TileEvidence::LengthsFromTheIndex)` or
+  `Some(TileEvidence::PayloadsRead)` for a `pyramid_verify` run and `None` for
+  everything else.
 
 - **The `CadDecoder` contract and the CAD primitive IR** (issue #1029). A new
   always-compiled `libviprs::cad` module carrying `CadDecoder`, `CadDrawing`,
@@ -4517,6 +4657,40 @@ and not under `Fixed`: this file is the only place they can be caught.
   because it arrives as a linker bus error and a git "cannot create directory";
   the README says up front that the whole job list keeps an artifact set per
   feature permutation per toolchain on the cargo volume.
+
+- **A PMTiles `finish` stops fsyncing the scratch files nothing reads back,
+  copies payloads through `pread` and stops rebuilding every leaf per
+  doubling** (issues #1141, #1142). `finish` used to sync five times: closing
+  the staged payloads and the index log, the spilled entry list, once per merge
+  fold and once per leaf-size attempt, before the one that matters. Three of
+  those went. `.ent`, `.mrg0`/`.mrg1` and `.leaf` are created and consumed
+  inside a single `finish_inner`, read back through a handle it opened itself
+  in the same call, so a deferred write error on them surfaces as a short read
+  the copy already refuses.
+
+  The two on the staged payloads and the index log stay, and the reason is not
+  durability. They are the only place a deferred write error on either file can
+  surface at all: `BufWriter::into_inner` promises the bytes reached the kernel
+  and nothing more, Rust discards what `close()` returns, and `write_archive`
+  reads the staged payloads straight back, so without them a writeback failure
+  can come back as stale or zeroed blocks with no error and publish an archive
+  full of the wrong tile bytes. The `sync_all` before the rename stays too, so
+  a `finish` syncs three times rather than five.
+
+  The payload copy used to `seek` a `BufReader` and read, and `BufReader`
+  discards its buffer on a seek by documented contract, so every payload cost
+  an `lseek`, a readahead thrown away and a fresh read. It runs on positioned
+  reads now, one `pread` per 64 KiB, so one syscall for any tile under that.
+  The leaf loop used to start at the configured leaf size and double until the
+  root fit, re-gzipping every leaf on every attempt; it now jumps by the
+  largest power of two no bigger than how far over budget the root came out,
+  with a doubling as the floor, and lands on the same width a doubling loop
+  reaches.
+
+  None of this changes a byte of any archive. The go-pmtiles goldens are still
+  byte-identical and the directory compression level is still
+  `flate2::Compression::best()`, which I measured at a full 16383-entry root
+  over four realistic root shapes before leaving it alone.
 
 ### Fixed
 

@@ -500,6 +500,31 @@ pub struct EngineResult {
     /// Number of tiles that failed terminally and were skipped under
     /// `FailurePolicy::RetryThenSkip`.
     pub skipped_due_to_failure: u64,
+    /// What a verify's per-tile probe established, or `None` for a run that
+    /// did not probe stored tiles one at a time (issue #1130).
+    ///
+    /// Only [`pyramid_verify`](crate::verify::pyramid_verify) fills this in,
+    /// because it is the only run whose per-tile check has a choice to make:
+    /// the payload, or the length the index already carries. Which one it took
+    /// decides whether a green run established that every tile's bytes are
+    /// reachable or that the structural walk bounded every entry that points
+    /// at them, and those are different claims a caller may care about.
+    ///
+    /// `None` is every other run: a generation run, which produced the tiles
+    /// rather than checking them, and the two tree verifies.
+    ///
+    /// `None` for `raster_verify` and `verify_from_strip_source` is **not** a
+    /// claim that they prove more (review of #1147). Their byte comparison
+    /// runs only where the extension is `raw`; for a `png`, `jpeg` or `webp`
+    /// tree they stat the file and stop, because an encoded tile cannot be
+    /// re-encoded bit-identically from fresh pixels. So on the formats anyone
+    /// actually ships they prove **less** than
+    /// [`TileEvidence::PayloadsRead`](crate::verify::TileEvidence::PayloadsRead),
+    /// which at least reads every byte back.
+    /// They are `None` because this enum describes a per-tile probe of stored
+    /// bytes and a re-render is a different kind of check, not because they
+    /// rank above it.
+    pub tile_evidence: Option<crate::verify::TileEvidence>,
 }
 
 /// Generates a tile pyramid with an [`EngineObserver`] for progress events.
@@ -772,6 +797,8 @@ fn run_pyramid(
         duration: started.elapsed(),
         stage_durations,
         skipped_due_to_failure,
+        // A generation run produced these tiles rather than probing them.
+        tile_evidence: None,
     })
 }
 
@@ -1508,6 +1535,9 @@ pub fn raster_verify(
         duration: started.elapsed(),
         stage_durations: StageDurations::default(),
         skipped_due_to_failure: 0,
+        // `raster_verify` re-rendered from the source and compared bytes,
+        // which is a stronger claim than either `TileEvidence` variant makes.
+        tile_evidence: None,
     })
 }
 

@@ -892,6 +892,16 @@ fn a_verify_run_reports_on_the_archive_in_both_directions() {
 
     // The other half. The same plan, over an archive written from a source
     // that is half as tall, so the top level is short by a row of tiles.
+    //
+    // The plan the short archive is checked against carries the 512x512 grid
+    // and the archive's own 512x256 source size, and it has to. Since #1130 a
+    // verify compares the recorded source size before it sweeps, so the pair
+    // as it stood was refused for being a pyramid of a different picture,
+    // which is true and is the root cause, and left this cell unable to fail
+    // for the reason it is named for. The two cannot be separated through the
+    // planner: a level's grid comes from the source size, so any pair with
+    // different grids has different sizes. The sibling helper in
+    // `tests/pmtiles_plan_aware_verify.rs` spells the whole argument out.
     let short = dir.path().join("short.pmtiles");
     let narrow = plan_for(512, 256, 256, Layout::Xyz);
     let sink = PmTilesSink::builder(&short)
@@ -903,12 +913,15 @@ fn a_verify_run_reports_on_the_archive_in_both_directions() {
         .run()
         .expect("the short archive run succeeds");
 
+    let mut relabelled = plan.clone();
+    relabelled.image_width = 512;
+    relabelled.image_height = 256;
     let verifier = PmTilesSink::builder(&short)
-        .plan(plan.clone())
+        .plan(relabelled.clone())
         .resume_mode(ResumeMode::Verify)
         .build()
         .expect("a Verify-mode sink builds");
-    let err = EngineBuilder::new(&src, plan, verifier)
+    let err = EngineBuilder::new(&gradient(512, 256), relabelled, verifier)
         .with_engine(libviprs::EngineKind::Monolithic)
         .with_resume(ResumePolicy::verify())
         .run()

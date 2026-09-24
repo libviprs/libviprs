@@ -446,13 +446,44 @@ impl<R: RangeReader> Reader<R> {
     /// Walks the directories exactly as [`Reader::get_tile`] does and stops
     /// before fetching the payload, so asking this and then asking for the
     /// tile costs one extra directory walk and never an extra tile read.
+    /// [`Reader::tile_span`] is the same walk with the entry's numbers kept
+    /// rather than thrown away.
     ///
     /// An out-of-grid coordinate is an error rather than `false`: "this tile
     /// does not exist" and "that is not a tile" are different answers and only
     /// one of them is about the archive.
     pub fn tile_exists(&self, z: u8, x: u32, y: u32) -> Result<bool, PmTilesError> {
+        Ok(self.tile_span(z, x, y)?.is_some())
+    }
+
+    /// Where one tile's bytes sit and how many of them there are, without
+    /// fetching any of them.
+    ///
+    /// The directory walk [`Reader::get_tile`] does already produces both
+    /// numbers, because an entry carries its payload's offset and its stored
+    /// length, so a caller that only needs to know how large a tile is pays
+    /// the walk and no payload read at all. That is the whole difference
+    /// between reading an index and reading an archive: checking a
+    /// 21851-tile pyramid through `get_tile` pulls every byte off the
+    /// transport to learn 21851 numbers the directories were already carrying.
+    ///
+    /// The offset is absolute, so it goes straight into
+    /// [`RangeReader::read_range`],
+    /// and `Ok(None)` means the archive does not hold the tile on exactly the
+    /// terms [`Reader::get_tile`] uses: a pyramid may have holes, and a
+    /// coordinate outside the id space is an error rather than an absence.
+    ///
+    /// # What a span does not prove
+    ///
+    /// That the bytes at that offset are reachable. A length comes out of a
+    /// directory entry and an entry can point anywhere the header's sections
+    /// allow, so the thing that makes the cheap answer safe to lean on is
+    /// [`validate`](crate::pmtiles::validate) having bounds-checked every
+    /// entry against the archive's real size, which it can only do when the
+    /// backend reported one.
+    pub fn tile_span(&self, z: u8, x: u32, y: u32) -> Result<Option<(u64, u32)>, PmTilesError> {
         let tile_id = zxy_to_tileid(z, x, y)?;
-        Ok(self.locate(tile_id)?.is_some())
+        self.locate(tile_id)
     }
 
     /// Fetch one tile.

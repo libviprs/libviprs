@@ -1,0 +1,541 @@
+//! What a verify over a PMTiles archive costs, counted off the transport
+//! (issue #1130).
+//!
+//! `pyramid_verify` is correct and it is expensive in two ways that no
+//! round-trip test can see, because both are invisible in the answer and only
+//! show up in what was fetched.
+//!
+//! * **It reads every tile to learn every tile's length.** The sweep calls
+//!   `reader.tile(coord)` for every planned coordinate and uses the result
+//!   only for `bytes.is_empty()`, then drops the `Vec`. A PMTiles directory
+//!   entry already carries the length, so verifying a 21851-tile pyramid pulls
+//!   the whole archive off storage to learn 21851 numbers that cost no extra
+//!   bytes. Over the transport seam #1121 opened that is one ranged GET per
+//!   tile, serially.
+//! * **It walks the directories twice.** `self_check` at the top and
+//!   `addressed_tiles` at the bottom both run a full `validate::validate`, ten
+//!   lines apart, under a run lock that guarantees the archive cannot change
+//!   between them.
+//!
+//! So this file counts requests rather than checking answers. The archive is a
+//! real one, written by the sink through the engine, and it is served back
+//! through a [`RangeReader`] that remembers every range it was asked for.
+//!
+//! # The classifier needs a positive control
+//!
+//! "No bytes were fetched from the tile-data section" is satisfied by a run
+//! that fetched nothing at all, and by a classifier that looks in the wrong
+//! place. Both would be green for the wrong reason, so
+//! [`payload_reads_are_visible_to_the_classifier`] fetches tiles deliberately
+//! and asserts the same classifier counts them.
+
+use std::io;
+use std::path::Path;
+use std::sync::Mutex;
+
+use libviprs::observe::NoopObserver;
+use libviprs::planner::{Layout, PyramidPlan, PyramidPlanner};
+use libviprs::pmtiles::{RangeReader, Reader};
+use libviprs::pyramid_reader::{PmTilesPyramidReader, PyramidReader};
+use libviprs::sink::TileFormat;
+use libviprs::sink_pmtiles::PmTilesSink;
+use libviprs::verify::{TileEvidence, pyramid_verify};
+use libviprs::{EngineBuilder, EngineKind, PixelFormat, Raster};
+
+// ---------------------------------------------------------------------------
+// The counting transport
+// ---------------------------------------------------------------------------
+
+/// One range the reader asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Request {
+    offset: u64,
+    len: usize,
+}
+
+/// The archive's bytes, served whole and remembered range by range.
+///
+/// Serving from memory rather than from the file is deliberate: what is being
+/// measured is what the reader *asked* for, and a request that a page cache
+/// would have made free is still a request the transport in #1121 would have
+/// paid a round trip for.
+struct Counting {
+    bytes: Vec<u8>,
+    requests: Mutex<Vec<Request>>,
+    /// What this reader answers for
+    /// [`RangeReader::is_local_file`](libviprs::pmtiles::RangeReader::is_local_file),
+    /// which is what decides whether a verify may take a tile's stored length
+    /// instead of its payload.
+    ///
+    /// Both answers are needed here and neither can be measured any other way.
+    /// A real `FileRangeReader` cannot count its own reads, so the local path
+    /// would have no cost measurement at all, and a real ranged transport is
+    /// not something this suite can stand up. So this double claims to be one
+    /// or the other and records what was asked for either way.
+    ///
+    /// A stand-in that lies about the one property under test is worth a
+    /// control, and it has one:
+    /// [`a_local_file_still_reads_lengths_rather_than_payloads`] runs the same
+    /// verify over a genuine file on disk and asserts the same outcome, so the
+    /// claim here is pinned against the real thing rather than only against
+    /// itself.
+    local: bool,
+}
+
+impl Counting {
+    /// A stand-in for an archive on a local filesystem.
+    fn new(bytes: Vec<u8>) -> Self {
+        Self {
+            bytes,
+            requests: Mutex::new(Vec::new()),
+            local: true,
+        }
+    }
+
+    /// A stand-in for an archive behind a ranged transport: same bytes, same
+    /// final size, and no filesystem underneath.
+    fn ranged(bytes: Vec<u8>) -> Self {
+        Self {
+            bytes,
+            requests: Mutex::new(Vec::new()),
+            local: false,
+        }
+    }
+
+    /// Drop everything recorded so far, so a measurement starts at the seam it
+    /// is about rather than at the reader's open.
+    fn forget(&self) {
+        self.requests
+            .lock()
+            .expect("the log is not poisoned")
+            .clear();
+    }
+
+    fn requests(&self) -> Vec<Request> {
+        self.requests
+            .lock()
+            .expect("the log is not poisoned")
+            .clone()
+    }
+}
+
+impl RangeReader for Counting {
+    fn read_range(&self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+        self.requests
+            .lock()
+            .expect("the log is not poisoned")
+            .push(Request { offset, len });
+        let start = usize::try_from(offset)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "offset past usize"))?;
+        let end = start
+            .checked_add(len)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "range overflows"))?;
+        if end > self.bytes.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "the range reaches past the archive",
+            ));
+        }
+        Ok(self.bytes[start..end].to_vec())
+    }
+
+    fn size(&self) -> io::Result<Option<u64>> {
+        Ok(Some(self.bytes.len() as u64))
+    }
+
+    fn is_local_file(&self) -> bool {
+        self.local
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fixtures
+// ---------------------------------------------------------------------------
+
+/// A raster where no two tiles come out the same, so every entry has
+/// `run_length == 1` and the archive holds one payload per coordinate.
+fn gradient(w: u32, h: u32) -> Raster {
+    let mut data = vec![0u8; w as usize * h as usize * 3];
+    for y in 0..h {
+        for x in 0..w {
+            let off = (y as usize * w as usize + x as usize) * 3;
+            data[off] = (x % 251) as u8;
+            data[off + 1] = (y % 241) as u8;
+            data[off + 2] = ((x * 7 + y * 13) % 239) as u8;
+        }
+    }
+    Raster::new(w, h, PixelFormat::Rgb8, data).expect("a gradient raster is well formed")
+}
+
+fn plan_for(w: u32, h: u32, tile: u32) -> PyramidPlan {
+    PyramidPlanner::new(w, h, tile, 0, Layout::Xyz)
+        .expect("an Xyz plan over a positive source is valid")
+        .plan()
+}
+
+/// Write `src` into a published archive at `path` and release the sink.
+fn write_archive(path: &Path, plan: &PyramidPlan, src: &Raster) {
+    let sink = PmTilesSink::builder(path)
+        .plan(plan.clone())
+        .build()
+        .expect("the archive sink builds for an Overwrite run");
+    EngineBuilder::new(src, plan.clone(), sink)
+        .with_engine(EngineKind::Monolithic)
+        .run()
+        .expect("the archive run succeeds");
+    assert!(path.is_file(), "the run published {}", path.display());
+}
+
+/// An archive written from a 512x512 gradient, served through a counting
+/// transport with the open-time requests already forgotten.
+fn served(dir: &Path) -> (PyramidPlan, PmTilesPyramidReader<Counting>) {
+    let plan = plan_for(512, 512, 256);
+    let archive = dir.join("counted.pmtiles");
+    write_archive(&archive, &plan, &gradient(512, 512));
+
+    let bytes = std::fs::read(&archive).expect("read the archive back");
+    let reader = Reader::try_new(Counting::new(bytes)).expect("the archive opens");
+    reader.source().forget();
+    (plan, PmTilesPyramidReader::from_reader(reader))
+}
+
+/// Bytes fetched from inside the tile-data section, which is the only region
+/// tile payloads live in.
+fn payload_bytes(pyramid: &PmTilesPyramidReader<Counting>) -> u64 {
+    let header = pyramid.reader().header();
+    let start = header.tile_data_offset;
+    let end = start + header.tile_data_length;
+    pyramid
+        .reader()
+        .source()
+        .requests()
+        .iter()
+        .filter(|request| request.offset >= start && request.offset < end)
+        .map(|request| request.len as u64)
+        .sum()
+}
+
+/// How many times the 127-byte header at offset 0 was fetched.
+///
+/// One structural walk begins with exactly one of these, so counting them
+/// counts walks.
+fn header_fetches(pyramid: &PmTilesPyramidReader<Counting>) -> usize {
+    pyramid
+        .reader()
+        .source()
+        .requests()
+        .iter()
+        .filter(|request| request.offset == 0)
+        .count()
+}
+
+// ---------------------------------------------------------------------------
+// The control on the classifier
+// ---------------------------------------------------------------------------
+
+/// Fetching tiles on purpose is visible to [`payload_bytes`].
+///
+/// Without this, "the verify fetched no payload bytes" is equally satisfied by
+/// a classifier pointed at the wrong section, and the cell below it would be
+/// green for an implementation that never changed.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn payload_reads_are_visible_to_the_classifier() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (plan, pyramid) = served(dir.path());
+
+    let mut fetched = 0u64;
+    for coord in plan.tile_coords() {
+        let bytes = pyramid
+            .tile(coord)
+            .expect("reading a tile from a sound archive")
+            .unwrap_or_else(|| panic!("{coord:?} is missing from the archive"));
+        fetched += bytes.len() as u64;
+    }
+
+    assert!(fetched > 0, "the archive stores no bytes at all");
+    assert_eq!(
+        payload_bytes(&pyramid),
+        fetched,
+        "the classifier saw {} payload bytes and the tiles were {fetched} bytes, \
+         so it is not looking at the tile-data section",
+        payload_bytes(&pyramid)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Finding 1: a verify reads lengths, not payloads
+// ---------------------------------------------------------------------------
+
+/// A verify over a local archive fetches no tile payload at all.
+///
+/// The sweep needs two things per coordinate: that the archive holds one, and
+/// that what it holds is not zero bytes. The directory entry carries both, so
+/// on a local file, where an in-bounds read of an open handle is a read that
+/// succeeds, the payload read proves nothing the walk did not.
+///
+/// This cell used to be named for a transport that reports a size, and the
+/// review of #1147 refuted that premise rather than this measurement. A
+/// reported size says an offset is inside the object; it does not say the
+/// bytes there can be fetched, and the sibling cell below is the archive where
+/// those come apart. The saving is real and it is the local case, which is
+/// what #1130 was filed about.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_verify_over_a_local_archive_fetches_no_tile_payload() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (plan, pyramid) = served(dir.path());
+
+    let result = pyramid_verify(&pyramid, &plan, Some(TileFormat::Png), &NoopObserver)
+        .expect("a good archive verifies against its own plan");
+
+    assert_eq!(
+        payload_bytes(&pyramid),
+        0,
+        "the verify pulled {} bytes out of the tile-data section to learn {} \
+         lengths the directory already carries",
+        payload_bytes(&pyramid),
+        plan.tile_coords().count()
+    );
+    assert_eq!(
+        result.bytes_read, 0,
+        "the run reports {} bytes read and it read none, which is the same \
+         claim the fetch above disproves",
+        result.bytes_read
+    );
+    // And it says which guarantee that leaves it with, rather than leaving a
+    // caller to infer it from a zero.
+    assert_eq!(
+        result.tile_evidence,
+        Some(TileEvidence::LengthsFromTheIndex),
+        "a run that took lengths has to report that it took lengths"
+    );
+}
+
+/// A verify over a ranged transport reads every payload, even though the
+/// transport reports a size.
+///
+/// The correction from the review of #1147, measured on the same seam as its
+/// sibling above so the two are directly comparable: identical archive,
+/// identical plan, identical counting, and the single difference is whether
+/// the bytes are claimed to be on a local filesystem.
+///
+/// What the bounds check gives is that an entry's offset lands inside the
+/// object, composed out of the header's own numbers. Over a transport the
+/// archive size is the server's claim about the object as a whole, so that
+/// conclusion is an inference from the claim rather than a fact about any one
+/// range, and a range can fail on its own.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_verify_over_a_ranged_transport_reads_every_payload() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let plan = plan_for(512, 512, 256);
+    let archive = dir.path().join("ranged.pmtiles");
+    write_archive(&archive, &plan, &gradient(512, 512));
+    let bytes = std::fs::read(&archive).expect("read the archive back");
+
+    let reader = Reader::try_new(Counting::ranged(bytes)).expect("the archive opens");
+    reader.source().forget();
+    let pyramid = PmTilesPyramidReader::from_reader(reader);
+
+    let result = pyramid_verify(&pyramid, &plan, Some(TileFormat::Png), &NoopObserver)
+        .expect("a good archive verifies whichever way its bytes arrive");
+
+    let fetched = payload_bytes(&pyramid);
+    assert!(
+        fetched > 0,
+        "the verify read nothing out of the tile-data section, so an archive \
+         whose payloads are gone would look identical to this one"
+    );
+    assert_eq!(
+        result.bytes_read, fetched,
+        "the run reports {} bytes read and fetched {fetched} from the \
+         tile-data section; those are the same bytes and have to agree",
+        result.bytes_read
+    );
+    assert_eq!(
+        result.tile_evidence,
+        Some(TileEvidence::PayloadsRead),
+        "a run that read every payload has to report that it did"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Finding 2: one structural walk, not two
+// ---------------------------------------------------------------------------
+
+/// A verify walks the archive's directories once.
+///
+/// `self_check` and `addressed_tiles` are two questions about one walk, asked
+/// ten lines apart under a run lock that guarantees the archive cannot change
+/// between them. Free on a local file; over an injected transport it is two
+/// full sets of round trips, and above roughly 262144 tiles the leaf cache
+/// evicts between them so the second walk refetches what the first one read.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_verify_walks_the_archive_once() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (plan, pyramid) = served(dir.path());
+
+    pyramid_verify(&pyramid, &plan, Some(TileFormat::Png), &NoopObserver)
+        .expect("a good archive verifies against its own plan");
+
+    let walks = header_fetches(&pyramid);
+    assert!(
+        walks > 0,
+        "the verify never read the header, so it never walked the archive at \
+         all and this cell is no longer about walking it twice"
+    );
+    assert_eq!(
+        walks, 1,
+        "the verify walked the archive {walks} times; one walk answers both \
+         the structural check and the addressed count"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The cheap probe is for a local file, not for a reported size (review of
+// #1147)
+// ---------------------------------------------------------------------------
+
+/// A transport that answers the index and refuses the tile data.
+///
+/// This is not a contrived shape. It is an archive on object storage whose
+/// `Content-Length` is final and whose tile-data range 206s short or 500s: a
+/// half-completed multipart upload, an evicted CDN part, a truncated restore.
+/// The header, the root and the leaves all sit before `tile_data_offset` and
+/// come back perfectly, so every structural check passes and the size is
+/// known.
+struct IndexOnly {
+    bytes: Vec<u8>,
+    tile_data: std::ops::Range<u64>,
+}
+
+impl IndexOnly {
+    fn new(bytes: Vec<u8>) -> Self {
+        let header = libviprs::pmtiles::Header::try_decode(
+            &bytes[..libviprs::pmtiles::header::HEADER_BYTES],
+        )
+        .expect("the sink wrote a v3 header");
+        let start = header.tile_data_offset;
+        Self {
+            bytes,
+            tile_data: start..start + header.tile_data_length,
+        }
+    }
+}
+
+impl RangeReader for IndexOnly {
+    fn read_range(&self, offset: u64, len: usize) -> io::Result<Vec<u8>> {
+        if self.tile_data.contains(&offset) {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "the tile data range is not there",
+            ));
+        }
+        let start = usize::try_from(offset)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "offset past usize"))?;
+        let end = start
+            .checked_add(len)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "range overflows"))?;
+        if end > self.bytes.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "the range reaches past the archive",
+            ));
+        }
+        Ok(self.bytes[start..end].to_vec())
+    }
+
+    /// Final, and truthful about the object as a whole. That is the point: the
+    /// size is not the thing in doubt.
+    fn size(&self) -> io::Result<Option<u64>> {
+        Ok(Some(self.bytes.len() as u64))
+    }
+}
+
+/// An archive whose tile data cannot be fetched does not verify, even though
+/// its index is intact and its size is known.
+///
+/// The review of #1147 found that taking the cheap probe on
+/// `archive_size().is_some()` makes the payload read unreachable for PMTiles,
+/// because a reader that cannot report a size raises `ArchiveSizeUnknown` and
+/// the structural walk refuses it. So the run read nothing from the tile-data
+/// section precisely where that section is remote, and an archive whose bytes
+/// are gone came back `Ok` with `bytes_read: 0`, which is byte for byte what a
+/// run that did nothing looks like.
+///
+/// What justifies skipping the payload is the bytes being on a local
+/// filesystem, where an in-bounds read of an open file is a read that
+/// succeeds. A size reported over a transport is the server's claim about the
+/// object, not a promise about any particular range.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn an_archive_whose_tile_data_cannot_be_fetched_does_not_verify() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let plan = plan_for(512, 512, 256);
+    let archive = dir.path().join("half-served.pmtiles");
+    write_archive(&archive, &plan, &gradient(512, 512));
+    let bytes = std::fs::read(&archive).expect("read the archive back");
+
+    // The control: served whole, the same archive verifies. So the refusal
+    // below is about the tile data being unreachable rather than about the
+    // archive or the plan.
+    let whole = Reader::try_new(Counting::new(bytes.clone())).expect("the archive opens");
+    pyramid_verify(
+        &PmTilesPyramidReader::from_reader(whole),
+        &plan,
+        Some(TileFormat::Png),
+        &NoopObserver,
+    )
+    .expect("served whole, this archive verifies");
+
+    let reader = Reader::try_new(IndexOnly::new(bytes)).expect("the index alone opens the archive");
+    let pyramid = PmTilesPyramidReader::from_reader(reader);
+
+    // The control on the fixture: the structural walk passes, so nothing but
+    // the sweep can refuse this archive.
+    pyramid
+        .structural_summary()
+        .expect("the index is intact, so the structural walk is clean");
+
+    let result = pyramid_verify(&pyramid, &plan, Some(TileFormat::Png), &NoopObserver);
+    let err = result.err().unwrap_or_else(|| {
+        panic!(
+            "an archive whose every tile payload is unfetchable verified clean; \
+             a run that reads no tile data cannot tell that from an archive \
+             that is all there"
+        )
+    });
+    assert!(
+        !err.to_string().is_empty(),
+        "the refusal has to say something"
+    );
+}
+
+/// A local file still takes the cheap probe, which is the whole point of
+/// #1130.
+///
+/// The negative control for the cell above. Narrowing the condition to a local
+/// file must not quietly put every verify back on the expensive path, because
+/// the local file was never the expensive one and the ranged transport is
+/// where the saving was claimed.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_local_file_still_reads_lengths_rather_than_payloads() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let plan = plan_for(512, 512, 256);
+    let archive = dir.path().join("local.pmtiles");
+    write_archive(&archive, &plan, &gradient(512, 512));
+
+    let pyramid = PmTilesPyramidReader::try_open(&archive).expect("the archive opens");
+    let result = pyramid_verify(&pyramid, &plan, Some(TileFormat::Png), &NoopObserver)
+        .expect("a good archive on disk verifies");
+
+    assert_eq!(
+        result.tile_evidence,
+        Some(TileEvidence::LengthsFromTheIndex),
+        "a local file is exactly the case the cheap probe is justified for"
+    );
+    assert_eq!(result.bytes_read, 0, "and it read no payload to do it");
+}

@@ -52,7 +52,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use libviprs::pmtiles::directory::{deserialize_entries, serialize_entries};
-use libviprs::pmtiles::writer::{Writer, WriterOptions, content_hash};
+use libviprs::pmtiles::writer::{DEDUPE_WINDOW_WAYS, Writer, WriterOptions, content_hash};
 use libviprs::pmtiles::{Compression, Entry, Header, Metadata, PmTilesError, TileType};
 
 // ---------------------------------------------------------------------------
@@ -747,9 +747,22 @@ fn non_adjacent_duplicates_share_one_payload_without_sharing_an_entry() {
 /// and "duplicate tiles produce exactly one stored payload" would hold only
 /// for callers who had turned dedupe on. The archive's payload table is a
 /// property of the archive, not of the engine's blank-tile policy.
+///
+/// # "within the window" is doing real work in that name
+///
+/// This test used to be called
+/// `identical_payloads_are_stored_once_whatever_the_engine_dedupe_strategy_is`
+/// and it read as unconditional, because the writer kept a hash of every
+/// payload it had ever seen and the promise really was unconditional. Issue
+/// #1137 replaced that with a fixed-capacity window, so two identical payloads
+/// far enough apart are now stored twice, and the name had to say so before
+/// the behaviour changed under it. What is unconditional is the part this test
+/// is actually about: dedupe happens with `DedupeStrategy::None` and without
+/// the caller asking. How far it reaches is
+/// [`both_edges_of_the_dedupe_window_are_where_the_window_says_they_are`].
 #[test]
 #[cfg_attr(miri, ignore)]
-fn identical_payloads_are_stored_once_whatever_the_engine_dedupe_strategy_is() {
+fn identical_payloads_within_the_window_are_stored_once_whatever_the_engine_dedupe_strategy_is() {
     let dir = scratch();
     let out = dir.path().join("dupes.pmtiles");
     let ocean = b"the same forty-two bytes, over and over ok".to_vec();
@@ -813,6 +826,116 @@ fn identical_payloads_are_stored_once_whatever_the_engine_dedupe_strategy_is() {
     assert!(mine.entries[2].tile_id > mine.entries[0].tile_id + 1);
 }
 
+/// Both edges of the dedupe window, in one archive: a duplicate inside it
+/// shares an offset and one beyond it gets its own.
+///
+/// This is the trade issue #1137 makes and it is the one thing about this
+/// writer that got weaker rather than stronger. The content-hash table was
+/// exact at any distance and cost 48 bytes for every distinct payload for the
+/// whole run, which at ten million payloads was the largest allocation in the
+/// process and the whole of the remaining unbounded growth. The window is a
+/// fixed-capacity 8-way set-associative table with LRU inside the set, so a
+/// hit is still exact and a miss stages a payload an identical one may already
+/// have staged long ago.
+///
+/// The two cases that matter are untouched. A photograph has no duplicates to
+/// miss. A blank or solid-colour tile recurs constantly, so it never leaves
+/// the window. What pays is a pyramid with many distinct payloads repeating at
+/// long range.
+///
+/// The budget here is zero, which buys the smallest window there is: one set
+/// of [`DEDUPE_WINDOW_WAYS`] ways, which is a plain LRU of that many payloads
+/// and needs no assumption about which set a hash lands in. So the eviction
+/// below is arithmetic rather than a probability.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn both_edges_of_the_dedupe_window_are_where_the_window_says_they_are() {
+    let dir = scratch();
+    let out = dir.path().join("window.pmtiles");
+    let ocean = b"the same forty-two bytes, over and over ok".to_vec();
+    let filler = |n: usize| format!("filler number {n:04}, distinct from every other").into_bytes();
+
+    let mut w = Writer::create(
+        &out,
+        WriterOptions::default()
+            .with_tile_type(TileType::Png)
+            .with_dedupe_memory_bytes(0),
+    )
+    .expect("a writer opens");
+
+    // Ids ascend with arrival, so the layout the archive ends up in is the
+    // order the window saw.
+    let mut id = 21u64;
+    let add = |w: &mut Writer<std::fs::File>, id: &mut u64, payload: &[u8]| {
+        let (z, x, y) = libviprs::pmtiles::tileid_to_zxy(*id).unwrap();
+        w.add_tile(z, x, y, payload, content_hash(payload)).unwrap();
+        let used = *id;
+        *id += 1;
+        used
+    };
+
+    let first = add(&mut w, &mut id, &ocean);
+    // Two short of filling the window, so the ocean tile is still in it.
+    for n in 0..DEDUPE_WINDOW_WAYS - 2 {
+        add(&mut w, &mut id, &filler(n));
+    }
+    let inside = add(&mut w, &mut id, &ocean);
+    // A full window's worth of distinct payloads after that. The reference
+    // above made the ocean tile the most recent, so it takes exactly this many
+    // to walk it back out of the set.
+    for n in 0..DEDUPE_WINDOW_WAYS {
+        add(&mut w, &mut id, &filler(100 + n));
+    }
+    let beyond = add(&mut w, &mut id, &ocean);
+
+    let done = w.finish().unwrap();
+    let bytes = std::fs::read(&out).unwrap();
+    let mine = parse_ours(&bytes);
+    let offset_of = |tile_id: u64| {
+        mine.entries
+            .iter()
+            .find(|e| e.tile_id == tile_id)
+            .unwrap_or_else(|| panic!("tile {tile_id} is missing from the archive"))
+            .offset
+    };
+
+    // Inside the window: one blob, two entries pointing at it.
+    assert_eq!(
+        offset_of(inside),
+        offset_of(first),
+        "a duplicate inside the window should share the first one's blob"
+    );
+    // Beyond it: its own blob.
+    assert_ne!(
+        offset_of(beyond),
+        offset_of(first),
+        "a duplicate past the window should have been stored again"
+    );
+
+    // And the second copy really is the same bytes, so what changed is where
+    // they are and not what they are.
+    let at = |offset: u64| {
+        section(
+            &bytes,
+            mine.header.tile_data_offset + offset,
+            ocean.len() as u64,
+        )
+        .to_vec()
+    };
+    assert_eq!(at(offset_of(beyond)), ocean);
+    assert_eq!(at(offset_of(first)), ocean);
+
+    // Counted from the other side: one tile, one blob, except the one the
+    // window caught.
+    let tiles = 3 + 2 * DEDUPE_WINDOW_WAYS as u64 - 2;
+    assert_eq!(done.header.addressed_tiles_count, tiles);
+    assert_eq!(
+        done.header.tile_contents_count,
+        tiles - 1,
+        "exactly one of the three ocean tiles should have been deduplicated"
+    );
+}
+
 /// A run of identical adjacent tiles is one entry with `run_length = N`, and
 /// the run stops where the payload changes.
 #[test]
@@ -852,6 +975,213 @@ fn a_run_of_identical_adjacent_tiles_is_one_entry() {
     );
 }
 
+/// What the gzip level costs at the size the root budget is about.
+///
+/// Issue #1142 suggests dropping `Compression::compress` from
+/// `flate2::Compression::best()` to the default level 6, on the evidence that
+/// re-gzipping the golden fixtures' roots at both levels gives identical
+/// lengths. Those roots hold 63, 85 and a few hundred entries, and four small
+/// fixtures agreeing is not the same thing as the level being free. The only
+/// place the level can change anything is a root near the 16257-byte budget,
+/// because a directory that fits at one level and not at the other spills into
+/// leaves, which changes the archive's shape, its header, every offset in it
+/// and what a reader pays to open it.
+///
+/// # What it measured, and what I did about it
+///
+/// At a full 16383-entry root, flat tiles, leaf pointers and sparse ids all
+/// come out byte-for-byte the same length at both levels, and a root of
+/// dedupe back references comes out 20 bytes *smaller* at level 6, 71,476
+/// against 71,496. At the budget, level 6 fits one more entry than level 9 on
+/// leaf pointers (8740 against 8739) and one more on back references (3872
+/// against 3871), and the same count on the other two.
+///
+/// So the claim holds in the direction it was made: level 6 never produced a
+/// larger root here, and the fixtures were not lying, they were just small.
+/// **The default stays at `best()` anyway**, for a reason the issue does not
+/// weigh. This writer matches go-pmtiles deliberately, at the 4096-entry leaf
+/// start and the 16384-entry root cutoff, and go-pmtiles compresses its
+/// directories at `gzip.BestCompression`. Matching that is part of why a
+/// golden archive is a usable target. Moving our level changes `root_length`
+/// for some inputs, which shifts every section offset after it, in exchange
+/// for some directory compression time that is a small share of a finalize.
+/// That is a bad trade for the one property these tests are built on.
+///
+/// This is a measurement rather than a reproduction. It is here so the
+/// decision has something behind it that can be taken again, and so that a
+/// future change making the levels agree completely shows up as a failure
+/// rather than as nothing.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn what_the_gzip_level_costs_at_the_root_budget() {
+    // `ROOT_CEILING - HEADER_BYTES`, restated because it is private to the
+    // writer and this test is about the number rather than about the writer.
+    const ROOT_BUDGET: usize = 16384 - 127;
+
+    /// A little deterministic noise, so the columns carry the entropy a real
+    /// directory's do without dragging in a dependency.
+    fn next(state: &mut u64) -> u64 {
+        *state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        *state >> 33
+    }
+
+    /// Tiles in a flat root: consecutive ids, contiguous blobs of the size
+    /// encoded imagery comes out at.
+    fn flat(count: u64) -> Vec<Entry> {
+        let mut rng = 0x243f_6a88_85a3_08d3u64;
+        let mut offset = 0u64;
+        (0..count)
+            .map(|index| {
+                let length = 2048 + (next(&mut rng) % 16384) as u32;
+                let entry = Entry {
+                    tile_id: index,
+                    offset,
+                    length,
+                    run_length: 1,
+                };
+                offset += u64::from(length);
+                entry
+            })
+            .collect()
+    }
+
+    /// A root of leaf pointers: `run_length` zero, ids a leaf apart, lengths
+    /// the size a compressed leaf comes out at.
+    fn leaf_pointers(count: u64) -> Vec<Entry> {
+        let mut rng = 0x9e37_79b9_7f4a_7c15u64;
+        let mut offset = 0u64;
+        (0..count)
+            .map(|index| {
+                let length = 1000 + (next(&mut rng) % 6000) as u32;
+                let entry = Entry {
+                    tile_id: index * 4096,
+                    offset,
+                    length,
+                    run_length: 0,
+                };
+                offset += u64::from(length);
+                entry
+            })
+            .collect()
+    }
+
+    /// A root with back references, which is what dedupe produces and what
+    /// puts real values in the offset column instead of the contiguous
+    /// shorthand.
+    fn back_references(count: u64) -> Vec<Entry> {
+        let mut rng = 0xdead_beef_1234_5678u64;
+        let mut offset = 0u64;
+        let mut seen: Vec<(u64, u32)> = Vec::new();
+        (0..count)
+            .map(|index| {
+                let reuse = !seen.is_empty() && next(&mut rng) % 5 < 2;
+                let (at, length) = if reuse {
+                    seen[(next(&mut rng) as usize) % seen.len()]
+                } else {
+                    let length = 2048 + (next(&mut rng) % 16384) as u32;
+                    let at = offset;
+                    offset += u64::from(length);
+                    seen.push((at, length));
+                    (at, length)
+                };
+                Entry {
+                    tile_id: index,
+                    offset: at,
+                    length,
+                    run_length: 1,
+                }
+            })
+            .collect()
+    }
+
+    /// A sparse pyramid, where the tile-id column carries multi-byte deltas.
+    fn with_gaps(count: u64) -> Vec<Entry> {
+        let mut rng = 0x0123_4567_89ab_cdefu64;
+        let mut offset = 0u64;
+        let mut tile_id = 0u64;
+        (0..count)
+            .map(|_| {
+                tile_id += 1 + next(&mut rng) % (1 << 20);
+                let length = 2048 + (next(&mut rng) % 16384) as u32;
+                let entry = Entry {
+                    tile_id,
+                    offset,
+                    length,
+                    run_length: 1,
+                };
+                offset += u64::from(length);
+                entry
+            })
+            .collect()
+    }
+
+    let gzip = |bytes: &[u8], level: u32| -> Vec<u8> {
+        use std::io::Write;
+        let mut encoder =
+            flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::new(level));
+        encoder.write_all(bytes).expect("gzip takes the bytes");
+        encoder.finish().expect("gzip finishes")
+    };
+
+    // The largest root of this shape that fits the budget at this level.
+    let fits = |build: &dyn Fn(u64) -> Vec<Entry>, level: u32| -> u64 {
+        let mut count = 0u64;
+        let mut step = 8192u64;
+        while step > 0 {
+            let plain = serialize_entries(&build(count + step)).expect("entries serialise");
+            if gzip(&plain, level).len() <= ROOT_BUDGET {
+                count += step;
+            } else {
+                step /= 2;
+            }
+        }
+        count
+    };
+
+    /// A named way of building a root of `n` entries.
+    type Shape<'a> = (&'a str, &'a dyn Fn(u64) -> Vec<Entry>);
+
+    let shapes: [Shape; 4] = [
+        ("flat tiles", &flat),
+        ("leaf pointers", &leaf_pointers),
+        ("back references", &back_references),
+        ("sparse ids", &with_gaps),
+    ];
+
+    // The full root first: one under the 16384-entry cutoff this writer shares
+    // with go-pmtiles, which is the largest root it will ever try to build.
+    let mut lengths_differ = false;
+    for (name, build) in &shapes {
+        let plain = serialize_entries(&build(16_383)).expect("16383 entries serialise");
+        let best = gzip(&plain, 9).len();
+        let default = gzip(&plain, 6).len();
+        lengths_differ |= best != default;
+        println!(
+            "16383-entry root, {name}: {} raw, {best} at level 9, {default} at level 6",
+            plain.len()
+        );
+    }
+
+    let mut budget_differs = false;
+    for (name, build) in &shapes {
+        let at_best = fits(*build, 9);
+        let at_default = fits(*build, 6);
+        budget_differs |= at_best != at_default;
+        println!(
+            "entries fitting the root budget, {name}: {at_best} at level 9, {at_default} at level 6"
+        );
+    }
+
+    assert!(
+        lengths_differ || budget_differs,
+        "level 6 and level 9 agreed on every shape and every size measured here, so the level \
+         really would be free and the only thing keeping `Compression::compress` on best() \
+         would be matching go-pmtiles"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Determinism, clustering, and the header's honesty
 // ---------------------------------------------------------------------------
@@ -888,6 +1218,110 @@ fn two_shuffled_insertion_orders_produce_a_byte_identical_archive() {
     let ids_one: Vec<u64> = one.iter().map(|(id, _)| *id).collect();
     let ids_two: Vec<u64> = two.iter().map(|(id, _)| *id).collect();
     assert_ne!(ids_one, ids_two, "the two shuffles produced the same order");
+}
+
+/// And it stops being byte-identical the moment the window cannot hold the
+/// tile set.
+///
+/// The test above runs `dupes-z0z3` at the default window, which tracks
+/// 129,056 payloads against a fixture holding 63. Three orders of magnitude of
+/// slack means it is green now and stays green whatever happens to the
+/// property, which makes it a poor guard for a property that just became
+/// conditional. This is the other half: whether two identical payloads share
+/// one blob is a function of how far apart they **arrived**, so at a window
+/// too small to hold the set, two orders of the same tiles produce different
+/// archives.
+///
+/// That is the contract issue #1137 changed, stated as an executable fact
+/// rather than as a caveat in prose. A caller who needs the archive to be a
+/// pure function of its tile set sizes
+/// `WriterOptions::dedupe_memory_bytes` past the payload count, and the test
+/// above is what that buys them.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn two_orders_stop_agreeing_once_the_window_cannot_hold_the_tile_set() {
+    let dir = scratch();
+    let ocean = b"the same forty-two bytes, over and over ok".to_vec();
+    let filler = |n: usize| format!("filler number {n:04}, distinct from every other").into_bytes();
+
+    // Three tiles carrying one payload, far enough apart in ascending id order
+    // that a window of one set cannot keep it, and close enough together in
+    // the other order that it never leaves.
+    let mut tiles: Vec<(u64, Vec<u8>)> = Vec::new();
+    let mut id = 21u64;
+    let push = |tiles: &mut Vec<(u64, Vec<u8>)>, id: &mut u64, bytes: Vec<u8>| {
+        tiles.push((*id, bytes));
+        *id += 1;
+    };
+    push(&mut tiles, &mut id, ocean.clone());
+    for n in 0..DEDUPE_WINDOW_WAYS - 2 {
+        push(&mut tiles, &mut id, filler(n));
+    }
+    push(&mut tiles, &mut id, ocean.clone());
+    for n in 0..DEDUPE_WINDOW_WAYS {
+        push(&mut tiles, &mut id, filler(100 + n));
+    }
+    push(&mut tiles, &mut id, ocean.clone());
+
+    let write = |order: &[(u64, Vec<u8>)], name: &str| -> (Vec<u8>, Header) {
+        let out = dir.path().join(name);
+        let mut w = Writer::create(
+            &out,
+            WriterOptions::default()
+                .with_tile_type(TileType::Png)
+                .with_dedupe_memory_bytes(0),
+        )
+        .expect("a writer opens");
+        for (tile_id, payload) in order {
+            let (z, x, y) = libviprs::pmtiles::tileid_to_zxy(*tile_id).unwrap();
+            w.add_tile(z, x, y, payload, content_hash(payload)).unwrap();
+        }
+        let done = w.finish().expect("the archive finalises");
+        (
+            std::fs::read(&out).expect("the archive is on disk"),
+            done.header,
+        )
+    };
+
+    // Ascending, which is the order that walks the shared payload out of the
+    // window between its second and third tile.
+    let (ascending, ascending_header) = write(&tiles, "ascending.pmtiles");
+
+    // The same tiles, with the three that share a payload fed together, so the
+    // window never loses it.
+    let mut grouped: Vec<(u64, Vec<u8>)> = tiles
+        .iter()
+        .filter(|(_, bytes)| *bytes == ocean)
+        .cloned()
+        .collect();
+    grouped.extend(tiles.iter().filter(|(_, bytes)| *bytes != ocean).cloned());
+    let (regrouped, regrouped_header) = write(&grouped, "regrouped.pmtiles");
+
+    // The positive control on the fixture: both runs really did take the same
+    // tiles, so what follows is about the window and not about the input.
+    let mut one: Vec<u64> = tiles.iter().map(|(id, _)| *id).collect();
+    let mut two: Vec<u64> = grouped.iter().map(|(id, _)| *id).collect();
+    assert_ne!(one, two, "the two orders are the same order");
+    one.sort_unstable();
+    two.sort_unstable();
+    assert_eq!(one, two, "the two orders are not the same tile set");
+    assert_eq!(
+        ascending_header.addressed_tiles_count,
+        regrouped_header.addressed_tiles_count
+    );
+
+    // Three ocean tiles: ascending catches one duplicate, regrouped catches
+    // both.
+    assert_eq!(
+        ascending_header.tile_contents_count,
+        regrouped_header.tile_contents_count + 1,
+        "the two orders should disagree by exactly the duplicate the window lost"
+    );
+    assert_ne!(
+        ascending, regrouped,
+        "the archive is still a pure function of its tile set at a window that cannot hold it, \
+         so the contract issue #1137 changed did not change"
+    );
 }
 
 /// `clustered` is set honestly, and the two things it promises hold.

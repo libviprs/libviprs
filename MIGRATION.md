@@ -5,8 +5,8 @@ flips `FsSink::new` to a 2-arg constructor plus a `with_format` builder. This
 guide covers the call sites you are most likely to update.
 
 **This file also covers 0.4.0 to 0.5.0, further down.** That section covers the
-new `PyramidStorage` type and the PMTiles archive behind it, plus five specific
-renames and removals: the signed and 32-bit `PixelFormat` carriers, the collapsed
+new `PyramidStorage` type and the PMTiles archive behind it, the two extra
+comparisons an archive verify makes, plus five specific renames and removals: the signed and 32-bit `PixelFormat` carriers, the collapsed
 allocation refusals, `GifError::BadPageNumber`,
 `ConvolutionError::TimesOutOfRange`, and `ConversionError::UnsupportedSampleKind`.
 The rest of that release, the colour and rounding changes that move output
@@ -310,6 +310,67 @@ as it keeps asking for `PyramidStorage::Directory`. What will break is code
 that assumed the directory was the *only* thing a run could produce, and the
 fix for that is to name the storage rather than to infer it from the path.
 
+## The PMTiles writer deduplicates within a window now
+
+The writer stored every distinct payload exactly once however far apart two
+identical tiles arrived. From 0.5.0 it remembers a fixed number of them, so
+**two identical payloads further apart than the window are stored twice**. This
+comes out of [EPIC M](https://github.com/libviprs/libviprs/issues/1135), which
+made the writer's memory independent of the payload count.
+
+Most callers can skip the rest of this section. A photograph has no duplicate
+tiles to miss, and a pyramid of mostly blank tiles has a handful of payloads
+that recur constantly, so they never leave the window. What the window costs is
+a pyramid with more distinct payloads than it holds *and* duplicates that
+repeat at long range.
+
+### One rename
+
+```rust
+// 0.4.0
+let n = writer.distinct_payload_count();
+
+// 0.5.0
+let n = writer.staged_payload_count();
+```
+
+Same number in every case the window catches every duplicate, and the new name
+is the honest one: it counts payloads staged, and two identical payloads the
+window forgot between are two of them.
+
+### Getting exact deduplication back
+
+Size the window past the number of distinct payloads you expect. It costs 65
+bytes a payload, across the window itself and the repeat table beside it:
+
+```rust
+use libviprs::pmtiles::writer::{Writer, WriterOptions};
+use libviprs::pmtiles::TileType;
+
+// The default, 8 MiB, which tracks 129,056 payloads.
+let options = WriterOptions::default().with_tile_type(TileType::Png);
+
+// Exact for a pyramid of up to about two million distinct payloads.
+let options = options.with_dedupe_memory_bytes(2_000_000 * 65);
+```
+
+`with_dedupe_memory_bytes(0)` does not turn the window off. It buys the
+smallest one there is, a single set of 8 payloads, because a writer with no
+window would store every duplicate twice and nobody wants that as a setting.
+
+### If you depend on a byte-identical archive
+
+Two different insertion orders of the same tiles produced byte-identical
+archives, and that still holds **whenever the window holds every distinct
+payload**. Once it evicts, whether two identical payloads share a blob depends
+on how far apart they arrived, so the archive is no longer a pure function of
+the tile set alone.
+
+If you compare archive bytes across runs, or publish a checksum, or otherwise
+need a reproducible build, size the window as above and the property comes
+back. Nothing else about the layout moved: the data region is still written in
+tile id order, `clustered` is still `true`, and a reader sees no difference.
+
 ## `TileFormat` gains a `Webp` variant, so exhaustive matches stop compiling
 
 This one is a real break for a 0.4.0 caller and it is the easiest to fix
@@ -352,6 +413,85 @@ parsed **and** it carries a `vnd.libviprs` key, `describe()` now returns
 wrote it, instead of quietly answering all-`None`. An archive with no
 `vnd.libviprs` key still describes itself exactly as before, so nothing a
 foreign go-pmtiles file does changes.
+
+## An archive verify checks the source size and the overlap
+
+Nothing stops compiling here. What changes is which archives
+`ResumeMode::Verify` accepts, and it is strictly fewer (issue #1130).
+
+A `pyramid_verify` run now compares two more things from the archive's
+`vnd.libviprs` metadata against the plan in front of it: the source raster's
+pixel dimensions, and the overlap the run was planned with. Both were in the
+file all along and both were dropped on the way out.
+
+They are worth the break because nothing else in that verify can see them. A
+pyramid's level range is its longest side rounded up to a power of two, and
+each level's grid is that level's size divided by the tile size and rounded up,
+so a 4000x4000 source and a 4096x4096 one at tile 256 plan thirteen identical
+levels, identical grids, and exactly the same 349 coordinates. Every check
+passed on an archive generated from a different picture. Overlap does not touch
+the grid at all, so two plans that disagree about it are byte-identical in
+`levels` and have no tile's pixels in common.
+
+**If your archives were written by this crate's `PmTilesSink`, nothing to do.**
+The sink has always recorded both, from `plan.image_width` / `plan.image_height`
+and `plan.overlap`, so a verify against the plan that wrote the archive passes
+exactly as before.
+
+**If an archive carries no `vnd.libviprs.source` object, the verify now
+refuses it.** That is an archive assembled from tiles rather than generated
+from a raster, and the refusal names what is missing:
+
+```text
+Verify: the pyramid does not record the source size it was generated from,
+so there is nothing to check this plan against
+```
+
+The reasoning is the same one that already applied to the tile size: a pyramid
+that will not say how it was made cannot be checked against a plan, and
+"cannot be checked" is a refusal rather than a pass.
+
+**There is no workaround, and an earlier draft of this section offered one that
+cannot be followed.** It said to verify against a plan built from what the
+archive records. The archives this refuses are exactly the ones that record
+nothing, so there is nothing to build a plan from. Two routes that do work:
+regenerate the archive with this version, which writes the namespace; or check
+it structurally instead of against a plan, with
+`PmTilesPyramidReader::structural_summary`, which walks the archive's own
+consistency and asks nothing about a plan.
+
+## `bytes_read` is 0 for a PMTiles verify of a local archive
+
+Not a break in the API and visible in the numbers, so it is here rather than in
+the changelog alone. A verify that takes each tile's stored length out of the
+index did not read the payloads, so it reports none. Reporting the summed
+lengths would be the same dishonesty the change exists to remove: a run saying
+it read an archive it did not read.
+
+Read `EngineResult::tile_evidence` to tell the two apart.
+`TileEvidence::LengthsFromTheIndex` is the length path and comes with
+`bytes_read: 0`; `TileEvidence::PayloadsRead` means every byte came off the
+storage and `bytes_read` is their total. A verify over a remote archive is
+always the second.
+
+## `PyramidReader::self_check` is deprecated
+
+Only for implementors of the trait, and it still compiles.
+
+`pyramid_verify` asks `PyramidReader::structural_summary` directly now, so
+nothing calls `self_check` and an override of it is dead code that the compiler
+is happy with. If you put a structural walk there, move it to
+`structural_summary`, which answers the same check and the addressed count from
+one walk.
+
+Do not make `structural_summary` delegate back to `self_check` to keep an
+override alive. `self_check`'s default already calls `structural_summary`, so
+the pair recurses until the stack runs out.
+
+One thing this does **not** fix, worth knowing because it looks like it
+should. `tile_coord_to_zxy` ignores `layout`, so an `Xyz` archive and a
+`Google` archive of one source are byte-identical apart from a string in the
+metadata. The layout check compares that annotation, not the tiles.
 
 ## JPEG tiles are 4:2:0 now, and their bytes move
 
