@@ -737,6 +737,53 @@ pub fn content_hash(bytes: &[u8]) -> [u8; 32] {
 }
 
 // ---------------------------------------------------------------------------
+// Layout
+// ---------------------------------------------------------------------------
+
+/// Where the tile data region sits in the archive, and what order its blobs
+/// are in.
+///
+/// v3 fixes the position of exactly one thing, the 127-byte header, and
+/// requires the root directory to live inside the first 16384 bytes. Every
+/// other section may go anywhere, and a tile entry's offset is relative to the
+/// start of the **tile data section** rather than to the file. So a payload's
+/// offset is settled the moment it is staged, and there are two honest layouts
+/// rather than one.
+///
+/// Neither is better. They trade the same thing in opposite directions and the
+/// [module docs](self) have the argument in full.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum Layout {
+    /// Sort at finalize and write the data region in tile id order.
+    ///
+    /// The default, and what every archive this crate has ever written looks
+    /// like. It buys an honest `clustered = true`, a sequential scan of a zoom
+    /// level that is a sequential scan of the file, and an archive that is a
+    /// pure function of the tile set as far as the dedupe window reaches.
+    ///
+    /// It costs a copy. Payloads are staged in arrival order in a scratch file
+    /// and moved into the archive at finalize, so the run needs roughly twice
+    /// the archive's size in scratch and writes every tile byte twice.
+    #[default]
+    TileId,
+    /// Append payloads straight into the destination as they arrive.
+    ///
+    /// The first [`add_tile`](Writer::add_tile) opens the destination, reserves
+    /// the first 16384 bytes for the header and the root, and appends from
+    /// there. Finalize adds the metadata and the leaf section **after** the
+    /// tile data, then seeks back and fills the reserved prefix in. There is no
+    /// staging file, every tile byte is written once and read never, and the
+    /// scratch a run needs drops to the index alone.
+    ///
+    /// It costs the two things tile id order buys. The bytes depend on the
+    /// arrival order, so two shuffled insertion orders stop producing the same
+    /// archive, and `clustered` is `false`, which `pmtiles extract` refuses as
+    /// input.
+    Arrival,
+}
+
+// ---------------------------------------------------------------------------
 // WriterOptions
 // ---------------------------------------------------------------------------
 
@@ -854,6 +901,12 @@ pub struct WriterOptions {
     /// is also what lets a test ask for a window small enough to have
     /// observable edges.
     pub dedupe_memory_bytes: usize,
+    /// Where the tile data region goes, and in what order.
+    ///
+    /// [`Layout::TileId`] by default, which is the layout every archive this
+    /// crate has written so far. [`Layout::Arrival`] trades determinism and
+    /// `clustered` for a run that writes every tile byte once.
+    pub layout: Layout,
 }
 
 impl Default for WriterOptions {
@@ -869,6 +922,7 @@ impl Default for WriterOptions {
             leaf_entries: DEFAULT_LEAF_ENTRIES,
             sort_buffer_records: SORT_RUN_RECORDS,
             dedupe_memory_bytes: DEFAULT_DEDUPE_MEMORY_BYTES,
+            layout: Layout::TileId,
         }
     }
 }
@@ -933,6 +987,12 @@ impl WriterOptions {
     /// Set how much memory the dedupe window may spend.
     pub fn with_dedupe_memory_bytes(mut self, bytes: usize) -> Self {
         self.dedupe_memory_bytes = bytes;
+        self
+    }
+
+    /// Set where the tile data region goes, and in what order.
+    pub fn with_layout(mut self, layout: Layout) -> Self {
+        self.layout = layout;
         self
     }
 }
@@ -3550,5 +3610,193 @@ mod tests {
         assert_eq!(done.header.addressed_tiles_count, 80);
         assert_eq!(done.header.min_zoom, 2);
         assert_eq!(done.header.max_zoom, 3);
+    }
+
+    // -----------------------------------------------------------------------
+    // Layout::Arrival (issue #1143)
+    // -----------------------------------------------------------------------
+
+    /// A `Write + Seek` sink that remembers how many times each byte position
+    /// was written to.
+    ///
+    /// The point of the count is the backfill. `Layout::Arrival` reserves a
+    /// prefix, appends payloads behind it and then seeks back to fill the
+    /// prefix in, and every mistake in that arithmetic shows up as a byte of
+    /// tile data written twice or not at all. A sink that only kept the final
+    /// bytes could not see either: the archive would read correctly right up
+    /// until the overwritten payload, and a byte written twice and a byte
+    /// written once with the same value are the same file.
+    struct CountingSink {
+        bytes: Vec<u8>,
+        writes: Vec<u32>,
+        pos: usize,
+    }
+
+    impl CountingSink {
+        /// A sink whose archive starts `preamble` bytes in.
+        ///
+        /// Not zero, deliberately. `Writer::try_new` promises every header
+        /// offset is relative to the sink's position rather than to the file,
+        /// and an arrival writer that reserved a *file* prefix instead of an
+        /// *archive* prefix passes every test that starts at zero.
+        fn starting_at(preamble: usize) -> Self {
+            Self {
+                bytes: vec![0xAB; preamble],
+                writes: vec![1; preamble],
+                pos: preamble,
+            }
+        }
+
+        /// How many times the byte at `at` was written.
+        fn writes_at(&self, at: usize) -> u32 {
+            self.writes.get(at).copied().unwrap_or(0)
+        }
+    }
+
+    impl Write for CountingSink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let end = self.pos + buf.len();
+            if self.bytes.len() < end {
+                self.bytes.resize(end, 0);
+                self.writes.resize(end, 0);
+            }
+            self.bytes[self.pos..end].copy_from_slice(buf);
+            for count in &mut self.writes[self.pos..end] {
+                *count += 1;
+            }
+            self.pos = end;
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Seek for CountingSink {
+        fn seek(&mut self, to: std::io::SeekFrom) -> std::io::Result<u64> {
+            let at = match to {
+                std::io::SeekFrom::Start(at) => at as i64,
+                std::io::SeekFrom::End(delta) => self.bytes.len() as i64 + delta,
+                std::io::SeekFrom::Current(delta) => self.pos as i64 + delta,
+            };
+            if at < 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "seek before the start of the sink",
+                ));
+            }
+            self.pos = at as usize;
+            Ok(self.pos as u64)
+        }
+    }
+
+    /// Sixty-four distinct payloads, each at its own zoom-3 tile.
+    fn distinct_tiles(count: u64) -> Vec<(u64, Vec<u8>)> {
+        (0..count)
+            .map(|n| (21 + n, format!("payload {n:04} and some bytes after it").into_bytes()))
+            .collect()
+    }
+
+    /// Under `Layout::Arrival` every tile byte is written once and read never,
+    /// and the default layout is the control that says so.
+    ///
+    /// Three things are checked and they catch different mistakes.
+    ///
+    /// The per-position write count over the tile data region is the issue's
+    /// own acceptance test and it is what catches the reservation being wrong:
+    /// a prefix too small, or a metadata section written at the wrong offset,
+    /// lands on bytes a payload already occupies and this is where that shows.
+    ///
+    /// `probe::staged_reads()` is what tells the two layouts apart. A byte
+    /// written once into the archive is true of `Layout::TileId` too, because
+    /// the second write there goes into the staging file rather than into the
+    /// sink. What is only true of arrival order is that finalize reads nothing
+    /// back, and the control below reads sixty-four times, so the zero is a
+    /// measurement rather than an absence of measurement.
+    ///
+    /// And the `.data` file is not created at all, which is the scratch the
+    /// issue is spending: a run that still opens it has not stopped paying for
+    /// it whatever its read count says.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn an_arrival_layout_writes_every_tile_byte_once_and_reads_none_back() {
+        const PREAMBLE: usize = 37;
+        let tiles = distinct_tiles(64);
+        let payload_bytes: u64 = tiles.iter().map(|(_, p)| p.len() as u64).sum();
+
+        let dir = temp_dir();
+        let mut sink = CountingSink::starting_at(PREAMBLE);
+        let mut w = Writer::try_new(
+            &mut sink,
+            dir.path(),
+            WriterOptions::default().with_layout(Layout::Arrival),
+        )
+        .unwrap();
+        for (id, payload) in &tiles {
+            let (z, x, y) = crate::pmtiles::tileid_to_zxy(*id).unwrap();
+            w.add_tile(z, x, y, payload, content_hash(payload)).unwrap();
+        }
+
+        let staged: Vec<String> = std::fs::read_dir(dir.path())
+            .expect("the scratch directory exists")
+            .map(|e| e.expect("a scratch entry").file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".data"))
+            .collect();
+        assert!(
+            staged.is_empty(),
+            "arrival order still opened a staging file: {staged:?}"
+        );
+
+        probe::reset();
+        let done = w.finish().expect("the archive finishes");
+        assert_eq!(
+            probe::staged_reads(),
+            0,
+            "arrival order read payload bytes back during finalize"
+        );
+
+        let h = done.header;
+        assert_eq!(
+            h.tile_data_length, payload_bytes,
+            "the data region is not the payloads laid end to end"
+        );
+        let start = PREAMBLE as u64 + h.tile_data_offset;
+        for at in start..start + h.tile_data_length {
+            assert_eq!(
+                sink.writes_at(at as usize),
+                1,
+                "byte {} of the tile data was written {} times",
+                at - start,
+                sink.writes_at(at as usize)
+            );
+        }
+        for at in 0..PREAMBLE {
+            assert_eq!(
+                sink.writes_at(at),
+                1,
+                "the writer wrote over byte {at} of what was in the sink before it"
+            );
+        }
+
+        // The control. Same tiles, same sink shape, the default layout, and
+        // finalize reads every payload back out of the staging file it wrote
+        // them to. Without this the zero above is indistinguishable from a
+        // probe nothing increments.
+        let control_dir = temp_dir();
+        let mut control = CountingSink::starting_at(PREAMBLE);
+        let mut w = Writer::try_new(&mut control, control_dir.path(), WriterOptions::default())
+            .unwrap();
+        for (id, payload) in &tiles {
+            let (z, x, y) = crate::pmtiles::tileid_to_zxy(*id).unwrap();
+            w.add_tile(z, x, y, payload, content_hash(payload)).unwrap();
+        }
+        probe::reset();
+        w.finish().expect("the control archive finishes");
+        assert_eq!(
+            probe::staged_reads(),
+            tiles.len(),
+            "the control did not exercise the copy, so the zero above means nothing"
+        );
     }
 }
