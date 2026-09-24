@@ -1321,6 +1321,37 @@ and not under `Fixed`: this file is the only place they can be caught.
 
 ### Added
 
+- **A sink can ask the engine for its tiles in tile id order** (EPIC #1135,
+  issue #1145). `TileSink::emission_order` answers with the new
+  `sink::EmissionOrder`, which is `Cascade` by default: levels from full
+  resolution down, row-major inside a level, which is the order every run has
+  always used and costs nothing. A sink that answers `TileId` gets the overview
+  level first, then each level below it, in Hilbert order inside a level, and
+  strictly ascending across the whole run. `PmTilesSinkBuilder::ordered_emission`
+  is the opt-in for an archive.
+
+  It exists for `Layout::Arrival`, which appends each payload into the
+  destination as it arrives, so the file's byte layout is the arrival order. An
+  ordered run therefore gets back the two things that layout gave up: the
+  archive is a pure function of the tile set rather than of the thread
+  schedule, and its data region is in tile id order, with no reordering pass,
+  no staging file and no copy.
+
+  **It costs a third more raster memory.** The levels come out of the cascade
+  in exactly the opposite order to the one tile ids run in, because each level
+  is the downscale of the level above it, so an ordered run holds every level's
+  raster at once rather than one at a time. The levels below the top sum to a
+  third of it. `MemoryTracker` is charged for all of it, so
+  `peak_memory_bytes` reports the real figure. Nothing else moves: the
+  extraction is still parallel and the tiles in flight are still bounded by
+  `EngineConfig::buffer_size`.
+
+  Two smaller differences worth knowing. `LevelStarted` and `LevelCompleted`
+  arrive smallest level first on an ordered run, because they describe the
+  emission. And a coordinate the PMTiles id space cannot address sorts last
+  rather than being reshuffled, so the sink refuses it exactly as it would
+  have.
+
 - **The PMTiles writer can append straight into the destination** (EPIC #1135,
   issue #1143). `WriterOptions::layout` and `WriterOptions::with_layout` take
   the new `pmtiles::Layout`, which is `TileId` by default and changes nothing

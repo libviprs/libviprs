@@ -684,7 +684,15 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// write that fails part way, and the durability barrier. All seven reach a
 /// `tempfile::tempdir()` or a path under one, all seven are annotated, and
 /// none is a judgement call.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 461;
+///
+/// #1145 moves it 461 to 464, and the three are the ordered-emission cells in
+/// `tests/pmtiles_sink.rs` that build an archive: the comparison against the
+/// tile id layout, the `clustered` claim, and the two runs that have to agree.
+/// Each one reads the finished file with `std::fs::read`. Its other two cells
+/// drive a recording sink that writes nothing, so they touch no filesystem and
+/// do not move this figure; they carry the annotation anyway, because a 1024
+/// source through the whole engine is not something to hand Miri.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 464;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
