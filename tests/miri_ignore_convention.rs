@@ -699,6 +699,10 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// call.
 ///
 /// Held at main's figure so the detector has to report the merged one.
+///
+
+///
+/// Held at main's figure so the detector reports the merged one.
 const EXPECTED_FS_TOUCHING_TESTS: usize = 472;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
