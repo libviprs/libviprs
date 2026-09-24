@@ -1200,18 +1200,45 @@ mod tests {
 
     /// Ink on paper: three bands, a grid and a diagonal, which is what the
     /// tile encoders actually see.
+    ///
+    /// The ink is blue, so this is the **coloured** line art of issue #1132's
+    /// table and the content issue #1134's colour control was about. Use
+    /// [`mono_drawing`] for the black-on-white case, which is the one this
+    /// crate's own corpus is made of.
     fn drawing(w: u32, h: u32) -> Vec<u8> {
+        ink_on_paper(w, h, [24, 24, 90])
+    }
+
+    /// The same linework in grey ink, which is what a CAD sheet actually is.
+    fn mono_drawing(w: u32, h: u32) -> Vec<u8> {
+        ink_on_paper(w, h, [24, 24, 24])
+    }
+
+    fn ink_on_paper(w: u32, h: u32, ink_rgb: [u8; 3]) -> Vec<u8> {
         let mut data = vec![0u8; (w * h * 3) as usize];
         for y in 0..h {
             for x in 0..w {
                 let off = ((y * w + x) * 3) as usize;
                 let ink = x % 32 == 0 || y % 32 == 0 || (x + y) % 71 == 0;
-                data[off] = if ink { 24 } else { 236 };
-                data[off + 1] = if ink { 24 } else { 236 };
-                data[off + 2] = if ink { 90 } else { 236 };
+                let px = if ink { ink_rgb } else { [236, 236, 236] };
+                data[off..off + 3].copy_from_slice(&px);
             }
         }
         data
+    }
+
+    /// The luma sampling factors SOF0 declares, read off the wire.
+    ///
+    /// `(1, 1)` is 4:4:4 and `(2, 2)` is 4:2:0. Reading the header rather than
+    /// the plan that wrote it is the point: a plan that decided one thing and
+    /// a frame that declares another is exactly the bug a test on the plan
+    /// cannot see.
+    fn luma_sampling(bytes: &[u8]) -> (u8, u8) {
+        let sof = bytes
+            .windows(2)
+            .position(|w| w == [0xFF, SOF0])
+            .expect("an SOF0 header");
+        (bytes[sof + 11] >> 4, bytes[sof + 11] & 0x0F)
     }
 
     /// Decode through `image`, which is a different implementation than the
@@ -1348,6 +1375,173 @@ mod tests {
             at_420.len(),
             at_444.len()
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // The chroma gate on `Auto` (issue #1134)
+    // -----------------------------------------------------------------------
+
+    /// Coloured linework keeps its chroma at the tile default.
+    ///
+    /// Issue #1132 shipped `Auto` as a quality check alone, so at the tile
+    /// default of 85 every tile was subsampled whatever colour was in it. Its
+    /// own table priced that on this content: 22719 bytes at 35.01 dB became
+    /// 15385 at **30.05 dB**, a 4.96 dB drop, while the black-on-white drawing
+    /// in the row above moved 0.02 dB. Issue #1134's colour control found the
+    /// same thing from the other side, 2.799 mean absolute channel error on
+    /// ink against 13.969, and said so: "Enable 4:2:0 behind a chroma check,
+    /// not unconditionally."
+    ///
+    /// The tolerance is 0.5 dB rather than zero because 4:4:4 and 4:2:0 are
+    /// two different encoders and a tile with no chroma detail still rounds
+    /// differently through them. What it rules out is the whole 4.96 dB.
+    #[test]
+    fn colour_keeps_its_chroma_at_the_tile_default() {
+        let src = drawing(256, 256);
+        let at_444 = encode(&src, 256, 256, image::ColorType::Rgb8, 85, JpegSubsample::Off)
+            .expect("coloured line art encodes");
+        let under_auto = encode(&src, 256, 256, image::ColorType::Rgb8, 85, JpegSubsample::Auto)
+            .expect("coloured line art encodes");
+
+        assert_eq!(
+            luma_sampling(&under_auto),
+            (1, 1),
+            "a coloured tile took 4:2:0 under Auto at quality 85; it declared \
+             {:?} sampling factors",
+            luma_sampling(&under_auto)
+        );
+
+        let kept = psnr(&src, decode(&at_444).as_raw());
+        let got = psnr(&src, decode(&under_auto).as_raw());
+        assert!(
+            kept - got < 0.5,
+            "Auto lost {:.2} dB of coloured ink against 4:4:4 ({got:.2} against \
+             {kept:.2}), which is the cost #1132 measured and #1134 said not to \
+             pay by default",
+            kept - got
+        );
+    }
+
+    /// The monochrome path keeps the win the whole of #1132 rests on.
+    ///
+    /// A chroma gate that turned 4:2:0 off everywhere would quietly hand back
+    /// the 1.84x measured over the corpus in `docs/tile-codec-benchmarks.md`,
+    /// and every assertion in the cell above would still be green. So this is
+    /// the other half of the pair and neither is worth much alone.
+    #[test]
+    fn monochrome_still_takes_the_subsampling_win() {
+        let src = mono_drawing(256, 256);
+        let at_444 = encode(&src, 256, 256, image::ColorType::Rgb8, 85, JpegSubsample::Off)
+            .expect("a drawing encodes");
+        let under_auto = encode(&src, 256, 256, image::ColorType::Rgb8, 85, JpegSubsample::Auto)
+            .expect("a drawing encodes");
+
+        assert_eq!(
+            luma_sampling(&under_auto),
+            (2, 2),
+            "black ink on white paper has no chroma to lose and should still \
+             be subsampled at the tile default"
+        );
+        assert!(
+            under_auto.len() < at_444.len(),
+            "4:2:0 is {} bytes and 4:4:4 is {}, which is the wrong way round",
+            under_auto.len(),
+            at_444.len()
+        );
+    }
+
+    /// Flat colour is colour with no detail, and subsampling costs it nothing.
+    ///
+    /// This is why the gate measures the chroma that subsampling would *throw
+    /// away* rather than counting coloured pixels. A title block on a solid
+    /// fill is every pixel coloured and zero chroma detail; a rule that
+    /// counted coloured pixels would send it to 4:4:4 and buy nothing with the
+    /// bytes.
+    #[test]
+    fn a_flat_colour_has_nothing_to_lose_to_subsampling() {
+        let mut src = vec![0u8; 256 * 256 * 3];
+        for px in src.chunks_exact_mut(3) {
+            px.copy_from_slice(&[38, 120, 190]);
+        }
+        let bytes = encode(&src, 256, 256, image::ColorType::Rgb8, 85, JpegSubsample::Auto)
+            .expect("a flat colour encodes");
+        assert_eq!(
+            luma_sampling(&bytes),
+            (2, 2),
+            "a uniform colour has no chroma detail for 4:2:0 to remove"
+        );
+    }
+
+    /// A trace of colour does not cost a tile its subsampling.
+    ///
+    /// The corpus behind #1134 is effectively monochrome and not exactly so:
+    /// 293 pixels out of 94.5M carry any channel spread above 10. A gate that
+    /// tripped on one stray pixel would take 4:2:0 off tiles that lose nothing
+    /// by keeping it, which is the same failure as turning it off everywhere,
+    /// only harder to see.
+    #[test]
+    fn a_trace_of_colour_keeps_the_tile_subsampled() {
+        let mut src = mono_drawing(256, 256);
+        for i in 0..8 {
+            let off = (i * 4099) % (256 * 256) * 3;
+            src[off] = 210;
+            src[off + 1] = 40;
+            src[off + 2] = 40;
+        }
+        let bytes = encode(&src, 256, 256, image::ColorType::Rgb8, 85, JpegSubsample::Auto)
+            .expect("a drawing encodes");
+        assert_eq!(
+            luma_sampling(&bytes),
+            (2, 2),
+            "eight coloured pixels in 65536 should not cost the tile its \
+             subsampling"
+        );
+    }
+
+    /// The explicit modes stay explicit.
+    ///
+    /// `On` and `Off` are a caller saying what they want, and a gate that
+    /// second-guessed either would make the enum three ways of asking for
+    /// `Auto`.
+    #[test]
+    fn the_explicit_modes_do_not_consult_the_chroma() {
+        let coloured = drawing(64, 64);
+        let mono = mono_drawing(64, 64);
+        let forced = encode(
+            &coloured,
+            64,
+            64,
+            image::ColorType::Rgb8,
+            85,
+            JpegSubsample::On,
+        )
+        .expect("encodes");
+        assert_eq!(
+            luma_sampling(&forced),
+            (2, 2),
+            "On is the caller asking for 4:2:0 on coloured content"
+        );
+        let refused = encode(&mono, 64, 64, image::ColorType::Rgb8, 85, JpegSubsample::Off)
+            .expect("encodes");
+        assert_eq!(
+            luma_sampling(&refused),
+            (1, 1),
+            "Off is the caller refusing 4:2:0 on content that could take it"
+        );
+    }
+
+    /// Quality still gates `Auto` first, and colour cannot re-enable it.
+    #[test]
+    fn quality_ninety_stays_full_chroma_whatever_the_content() {
+        for src in [mono_drawing(64, 64), drawing(64, 64)] {
+            let bytes = encode(&src, 64, 64, image::ColorType::Rgb8, 90, JpegSubsample::Auto)
+                .expect("encodes");
+            assert_eq!(
+                luma_sampling(&bytes),
+                (1, 1),
+                "quality 90 and above is 4:4:4 under Auto"
+            );
+        }
     }
 
     /// Quality still means what it meant: a lower number is a smaller file.
