@@ -75,7 +75,9 @@ use crate::planner::{Layout, PyramidPlan, TileCoord};
 use crate::pmtiles::writer::{Writer, WriterOptions};
 use crate::pmtiles::{Compression, Header, LibviprsMetadata, Metadata, PmTilesError, TileType};
 use crate::resume::{ResumeMode, RunLock};
-use crate::sink::{SinkError, Tile, TileFormat, TileSink, encode_jpeg, encode_png};
+use crate::sink::{
+    EmissionOrder, SinkError, Tile, TileFormat, TileSink, encode_jpeg, encode_png,
+};
 
 /// Suffix of the sidecar directory a sink creates beside its archive.
 ///
@@ -186,6 +188,9 @@ pub struct PmTilesSink {
     engine_config: Mutex<Option<EngineConfig>>,
     /// Used for the digest, never for the decision. See the module docs.
     dedupe: Mutex<DedupeIndex>,
+    /// What [`TileSink::emission_order`] answers. Set by
+    /// [`PmTilesSinkBuilder::ordered_emission`].
+    emission_order: EmissionOrder,
     /// The advisory lock on this archive, held for the sink's whole life.
     lock: Mutex<Option<RunLock>>,
 }
@@ -233,6 +238,7 @@ impl PmTilesSink {
             metadata: None,
             options: None,
             resume_mode: ResumeMode::Overwrite,
+            ordered_emission: false,
         }
     }
 
@@ -414,6 +420,7 @@ pub struct PmTilesSinkBuilder {
     metadata: Option<Metadata>,
     options: Option<WriterOptions>,
     resume_mode: ResumeMode,
+    ordered_emission: bool,
 }
 
 impl PmTilesSinkBuilder {
@@ -490,6 +497,40 @@ impl PmTilesSinkBuilder {
         self
     }
 
+    /// Ask the engine for its tiles in ascending tile id order (issue #1145).
+    ///
+    /// Off by default, because it is not free and most runs do not need it.
+    /// A run that turns it on gets an archive that is a pure function of the
+    /// tile set rather than of the thread schedule, and, under
+    /// [`Layout::Arrival`](crate::pmtiles::Layout), one whose data region is
+    /// in tile id order with no reordering pass, no staging file and no copy.
+    ///
+    /// # What it costs, and where
+    ///
+    /// The cost is in the engine, not here. The pyramid cascade makes each
+    /// level by downscaling the one above it, so the levels can only be
+    /// produced from the full-resolution one down, which is the exact reverse
+    /// of the order tile ids run in. An ordered run therefore holds every
+    /// level's raster at once instead of one at a time, and the levels below
+    /// the top sum to a third of it. Nothing else moves: the extraction is
+    /// still parallel and the tiles in flight are still bounded by
+    /// `EngineConfig::buffer_size`.
+    ///
+    /// # It is worth nothing under `Layout::TileId`
+    ///
+    /// The default layout sorts at finalize and writes the data region in
+    /// tile id order whatever order the tiles arrived in, so an ordered run
+    /// there pays the third and buys an archive it would have produced
+    /// anyway. It is accepted rather than refused because it is not wrong,
+    /// and because a caller comparing the two layouts wants to hold
+    /// everything else fixed. That comparison is what
+    /// `an_ordered_arrival_run_is_byte_identical_to_the_tile_id_layout` in
+    /// `tests/pmtiles_sink.rs` is.
+    pub fn ordered_emission(mut self, ordered: bool) -> Self {
+        self.ordered_emission = ordered;
+        self
+    }
+
     /// Validate the configuration, take the run lock, and return the sink.
     ///
     /// # Errors
@@ -561,6 +602,11 @@ impl PmTilesSinkBuilder {
             writer: Mutex::new(WriterState::Pending),
             engine_config: Mutex::new(None),
             dedupe: Mutex::new(DedupeIndex::new(DedupeStrategy::default())),
+            emission_order: if self.ordered_emission {
+                EmissionOrder::TileId
+            } else {
+                EmissionOrder::Cascade
+            },
             lock: Mutex::new(Some(lock)),
         })
     }
@@ -741,6 +787,15 @@ impl TileSink for PmTilesSink {
         if let Ok(mut guard) = self.dedupe.lock() {
             *guard = DedupeIndex::new(config.dedupe_strategy.unwrap_or_default());
         }
+    }
+
+    /// The order this sink wants its tiles in (issue #1145).
+    ///
+    /// [`EmissionOrder::Cascade`] unless
+    /// [`PmTilesSinkBuilder::ordered_emission`] was set, which is where the
+    /// argument for turning it on lives.
+    fn emission_order(&self) -> EmissionOrder {
+        self.emission_order
     }
 
     /// Refuse the tile a resume was about to skip.
