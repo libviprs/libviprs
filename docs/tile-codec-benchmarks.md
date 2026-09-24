@@ -1,0 +1,464 @@
+# Tile codecs on a vector CAD sheet
+
+This is the procedure behind the tile-format numbers in issue #1134, re-run
+against the encoder issues #1132 and #1133 shipped. It says what is measured,
+how to rerun it, which of #1134's cells survived that change, and what the run
+still cannot answer.
+
+#1134 is a record of a hand-driven run from 2026-09-22, filed as an issue
+rather than published, because libviprs.org's benchmarks page takes only
+entries that join an archived document at the pinned revision by run id, and
+that run had no run id: no benchmark cell anywhere in this project can express
+a tile-format claim. libviprs-bench#102 is the issue for that and it is still
+open, so this document does not make those numbers publishable. It makes them
+true again, which is a smaller and different thing.
+
+## Why anything had to be re-run
+
+#1134 measured the JPEG the crate emitted on 2026-09-22, which was this:
+
+```rust
+pub(crate) fn encode_jpeg(raster: &Raster, quality: u8) -> Result<Vec<u8>, SinkError> {
+    let mut buf = Vec::new();
+    let encoder =
+        image::codecs::jpeg::JpegEncoder::new_with_quality(std::io::Cursor::new(&mut buf), quality);
+```
+
+`image` 0.25's encoder fixes all three components at 1x1 sampling and borrows
+the Annex K Huffman tables as constants, so every tile came out 4:4:4 with
+textbook tables. That is what #1134 measured and labelled **"what we emit
+today"**, and it is what #1134 recommended replacing. #1132 replaced it. The
+tile path now reads
+
+```rust
+TileFormat::Jpeg { quality } => encode_jpeg(raster, quality, self.background_rgb()),
+```
+
+and `encode_jpeg` calls this crate's own baseline encoder with
+`JpegSubsample::Auto`, which is libvips' `VIPS_FOREIGN_SUBSAMPLE_AUTO`: 4:2:0
+below quality 90 and 4:4:4 at or above. The tile default is quality 85, so a
+tile is now 4:2:0 with Huffman tables built from the tile. That is exactly the
+cell #1134 called `420-opt` and priced at 1.85x, which is the whole reason its
+JPEG rows stopped describing this crate.
+
+#1133 matters here for a different reason. Before it, `--render --format jpeg`
+could not write one tile, because `render_page_pdfium` returns `Rgba8` and
+`image`'s JPEG encoder has no RGBA colour type. So #1134's JPEG cells could not
+have come from the same command as its PNG and WebP cells, and they did not:
+they came from a stitched raster. Every cell here comes from one command shape.
+
+## Setup
+
+| | |
+|---|---|
+| corpus | `libviprs-tests/tests/fixtures/blueprint.pdf`, sha256 `7053ee18df30d2d3c9a0088f31a8d9c6a698a192ea707d13c09a680742fac493`, 1006356 bytes, one vector AutoCAD sheet |
+| render | pdfium 8054 (`libviprs-dep` release `pdfium-8054`, linux-x64 tarball sha256 `b42d1731f07fb73edea38cbd294afe9be4bdcf8e4ed8523de51cd5d12fc8d271`) at 150 dpi to 9932x7020 `Rgba8` |
+| plan | 256x256 tiles, no overlap, **15 Deep Zoom levels, 1479 tiles**, 1092 of them at level 14 |
+| core / CLI | libviprs 0.5.0 at `41adac2a` (before the chroma gate) and `b4bf3cd7` (after it), libviprs-cli 0.4.0 at `4eacf25`, rustc 1.98.1 (48a229cea 2026-09-01), `--release` |
+| host | HIGARA, Intel Pentium Gold 8505, 6 logical cores, Linux 6.12.30+ x86_64, inside `--platform linux/amd64` containers |
+| analysis | `python:3.12-slim`, numpy 2.5.3, Pillow 12.3.0 over libjpeg-turbo (Pillow reports the 6.2 API version) |
+
+#1134's run was on the same box with the same corpus, the same pdfium and the
+same CLI revision. rustc moved from 1.97.1 to 1.98.1 between the two, which
+moves no bytes here: every byte count below is a property of the encoder's
+arithmetic, not of its codegen.
+
+### Which tree the binary came from, and how that is known
+
+Worth writing down, because the first pass of this run could not answer it.
+`tools/nas-gate.sh` gave every lane the same clone on the NAS to check its
+branch into, and four lanes were using it at once, so the tree could be any
+lane's at any moment. The CLI resolves `libviprs` through `path = "../libviprs"`
+and that path pointed into the shared clone, which means a binary built there
+compiled whatever encoder happened to be checked out, and its own build log
+could not say which. The helper provisions per-lane clones now.
+
+So every libviprs figure here was taken again from a clone nothing else
+touches, with both repositories side by side inside it so the path dependency
+resolves within the lane, at named commits rather than at a branch name. The
+numbers did not move, which is the expected outcome and not the reason for
+trusting them: the reason is that they came from a tree whose commit is
+established.
+
+The libjpeg control below was never exposed to this. It runs Pillow over the
+PNG tiles and does not link this crate at all, which is also why it is the arm
+that proves the rest: a tree holding the wrong encoder does not reproduce four
+independent totals to the byte by accident.
+
+## How to repeat it
+
+One `viprs pyramid` invocation per cell per backend, then one analysis pass.
+No harness, and no fixture that is not already in the tree.
+
+```sh
+viprs pyramid blueprint.pdf out/<cell>-dir \
+    --storage directory --layout deep-zoom \
+    --tile-size 256 --overlap 0 --dpi 150 --render \
+    --format <fmt> [--quality <q>]
+
+viprs pyramid blueprint.pdf out/<cell>.pmtiles \
+    --storage pmtiles \
+    --tile-size 256 --overlap 0 --dpi 150 --render \
+    --format <fmt> [--quality <q>]
+```
+
+with `<cell>` one of `jpeg-q75`, `jpeg-q85`, `jpeg-q95`, `png`, `webp`. Then
+
+```sh
+pip install numpy pillow
+python3 scripts/tile-fidelity.py out out/../fidelity.json
+```
+
+`--render` is what makes the JPEG cells possible at all, and it is what makes
+the two backends comparable: the same pdfium raster goes into both.
+
+Three counting rules, written down because #1134 used different ones and the
+difference is small enough to look like a measurement.
+
+**Tile bytes** are the `.jpeg` / `.png` / `.webp` files only. **Entries** count
+every file and every directory including the root, so `p.dzi` and the two
+`.libviprs-job.*` sidecars are in there: 1479 tiles, 1482 files, 17
+directories, **1499 entries** for every directory cell. **Allocated bytes** are
+`st_blocks * 512`, what the filesystem gave the file rather than what the file
+claims to be. **Deduped bytes** are one copy of each distinct payload, keyed on
+the sha256 of the file, which is what a store that deduplicates would hold and
+what makes the archive column comparable, since PMTiles dedupes by
+construction.
+
+## The control that says the two runs are comparable
+
+#1134's PNG total and this run's PNG total do not match, and that has to be
+explained before any JPEG row is read across the two documents.
+
+The control is libjpeg. The reference tiles from *this* run, encoded by libjpeg
+at the four knob settings #1134 separated, against #1134's own four numbers:
+
+| knob, quality 85 | this run | #1134 | deduped, this run | #1134 |
+|---|--:|--:|--:|--:|
+| `444-std` | 6 387 650 | 6 387 650 | 4 958 618 | 4 958 618 |
+| `444-opt` | 3 990 786 | 3 990 786 | 3 356 210 | 3 356 210 |
+| `420-std` | 5 293 159 | 5 293 159 | 4 271 696 | 4 271 696 |
+| `420-opt` | 3 460 741 | 3 460 741 | 3 028 053 | 3 028 053 |
+
+Every one of the eight agrees **to the byte**, through Pillow 12.3.0 and the
+libjpeg-turbo it bundles rather than #1134's Pillow 9.4.0 and libjpeg-turbo
+2.1.5. So the two runs are looking at the same pixels, and every JPEG
+comparison across them is exact rather than approximate.
+
+The distinct-payload counts say the same thing independently: 942 for JPEG at
+quality 75 and 85, 943 at 95, 944 for PNG and for lossless WebP, in both runs.
+And this run's lossless WebP total, 1 138 638 bytes, is #1134's lossless WebP
+total to the byte.
+
+**PNG is the one cell that differs, and the alpha is why.** The render path
+hands the sink `Rgba8`, and all 1479 reference tiles here are RGBA with an
+alpha of 255 in every sample (the analysis pass asserts that rather than
+assuming it). PNG stores that plane and pays about 12% for it; JPEG flattens it
+away before encoding and lossless WebP spends nothing on it, which is why those
+two agree across the runs and PNG does not. That last step is inferred rather
+than measured: what is measured is that the RGB behind every tile is identical,
+and that PNG is the only cell where the totals part company.
+
+## What the crate emits now
+
+Bytes, over the whole 1479-tile pyramid.
+
+| cell | tile bytes | deduped | distinct | archive | tree allocated | p50 tile | tiles under one block |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| `jpeg-q75` | 3 092 360 | 2 666 036 | 942 | 2 669 267 | 6 688 768 | 1 735 | 1327 |
+| `jpeg-q85` (the default) | **3 458 216** | 3 025 528 | 942 | 3 028 791 | 7 102 464 | 1 900 | 1239 |
+| `jpeg-q95` | 4 853 934 | 4 207 407 | 943 | 4 210 736 | 8 060 928 | 2 636 | 1074 |
+| `png` | 5 334 030 | 4 310 006 | 944 | 4 313 294 | 8 388 608 | 2 271 | 1055 |
+| `webp` (lossless) | 1 138 638 | 1 082 498 | 944 | 1 085 453 | 6 242 304 | 260 | 1441 |
+
+Against #1134's rows for the same tiles, which the control above says are the
+same tiles:
+
+| quality | #1134, `image` 0.25 | now | |
+|---|--:|--:|--:|
+| 75 | 5 953 742 | 3 092 360 | **1.93x** |
+| 85 | 6 379 215 | 3 458 216 | **1.84x** |
+| 95 | 7 492 957 | 4 853 934 | **1.54x** |
+
+Quality 95 is the interesting one, because `Auto` leaves it at 4:4:4, so its
+1.54x is the Huffman knob alone. #1134 predicted 1.60x for that from
+libjpeg-turbo and got it within 4%.
+
+**Our encoder is 2525 bytes smaller than libjpeg at matched settings**, 3 458 216
+against `420-opt`'s 3 460 741 over 1479 tiles, which is 0.07%. #1134 listed
+"that optimized Huffman behaves the same inside `image` 0.25 as inside
+libjpeg-turbo" under **Inferred**, because `image` exposed no Huffman knob to
+test it with. It is measured now, and the inference held.
+
+Three of #1134's conclusions invert on these numbers:
+
+- **JPEG is no longer the largest of the three.** It was 1.34x larger than PNG;
+  it is now 1.54x smaller than the PNG this pipeline writes, and 1.37x smaller
+  than the RGB PNG #1134 measured.
+- **Lossless WebP's lead over our JPEG halved**, from 5.60x to 3.04x. It is
+  still a lead and nothing here argues with #1134's conclusion that a lossy
+  WebP encoder is not worth buying.
+- **JPEG's block amplification got worse, not better**, from 1.43x to 2.05x,
+  because the tiles got smaller and a 1900-byte tile still occupies a 4 kB
+  block. The inode argument #1134 makes about WebP now reaches JPEG: the
+  archive holds the same payloads in 3 031 040 bytes of real disk against the
+  tree's 7 131 136, which is 2.35x.
+
+The archive checks out the same way #1134's did. Archive size minus the deduped
+payload sum is 3231 / 3263 / 3329 / 3288 / 2955 bytes for the five cells, which
+is header plus directory and nothing else, and 942 distinct payloads over 1479
+tiles is the same 36% duplicate rate. Lossless WebP's p50 tile is 260 bytes and
+97.4% of its tiles are under one block, both of which are #1134's figures
+unchanged.
+
+## Fidelity
+
+Every lossy cell against the PNG tree, which is lossless and therefore is the
+raster the sink was handed. Definitions are in `scripts/tile-fidelity.py`.
+
+The fidelity pass ran over the trees from the first set of runs rather than the
+re-taken ones, and what ties the two together is that the re-taken runs
+reproduce every byte total, every deduped total, every distinct-payload count
+and every per-level row of the first set exactly. Identical bytes are identical
+tiles, so the numbers below are about the same files either way.
+
+| cell | exact tiles | PSNR median | PSNR p10 | IoU mean | IoU median | IoU p10 |
+|---|--:|--:|--:|--:|--:|--:|
+| `jpeg-q75` | 340 | 48.15 dB | 42.61 dB | 0.97068 | 0.99718 | 0.91259 |
+| `jpeg-q85` | 340 | **51.83 dB** | 46.17 dB | 0.98541 | 0.99887 | 0.95684 |
+| `jpeg-q95` | 385 | 59.93 dB | 54.43 dB | 0.99402 | 1.0 | 0.98355 |
+| `webp` | **1479 / 1479** | n/a | n/a | 1.0 | 1.0 | 1.0 |
+
+The WebP row is the positive control libviprs-bench#102 asks every lossless
+cell for: all 1479 tiles decode to the reference exactly, so the comparison is
+walking the pyramids it thinks it is.
+
+**The new encoder is very slightly more faithful as well as much smaller.**
+#1134's PSNR medians for the old encoder were 48.12, 51.74 and 59.74 dB at the
+three qualities; these are 48.15, 51.83 and 59.93. Agreement to a fifth of a dB
+at three separate qualities is also what says the two runs compute PSNR the same
+way, which is worth having, because **the IoU columns are not comparable across
+the two documents.** #1134 describes its ink-mask metric in prose and its script
+is not in the tree, so `scripts/tile-fidelity.py` is a reconstruction from that
+prose, and it is systematically more generous: 0.98541 mean here against 0.97324
+there for what is nearly the same output. Read the IoU columns within this
+document and not against that one.
+
+By level, at the default quality. Levels 0 to 8 hold one tile each and level 14
+is the full-resolution sheet:
+
+| level | tiles | jpeg q85 | png | webp | q85 PSNR median | q85 IoU mean | q85 IoU p10 |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| 0 to 10 | 17 | 58 203 | 163 511 | 64 102 | | | |
+| 11 | 20 | 108 082 | 179 827 | 66 472 | 45.79 dB | 0.96197 | 0.91737 |
+| 12 | 70 | 298 702 | 422 004 | 126 074 | 47.32 dB | 0.96036 | 0.87500 |
+| 13 | 280 | 807 986 | 1 143 262 | 266 298 | 49.04 dB | 0.95875 | 0.89853 |
+| 14 | 1092 | 2 185 243 | 3 425 426 | 615 692 | 52.80 dB | 0.99538 | 0.98724 |
+
+This is where #1134's class table can be read again without re-running it. Its
+`jpeg-tuned` column is **2 186 342** bytes at level 14 and **1 216 002** across
+levels 11 to 13; the same levels here are 2 185 243 and 1 214 770, within 0.05%
+and 0.10%. So that column and its `today` column are now the same encoder, the
+ratios between them (1.99x at full resolution, 1.60x deeper) are gone, and
+every "vs today" figure in that issue is against a baseline that moved.
+
+The deeper levels score worse on both metrics than the full-resolution one,
+which is not a downsampling artefact: a level-13 tile is four level-14 tiles'
+worth of linework squeezed into the same 256 pixels, so its ink is a larger
+fraction of a smaller number of pixels and there is proportionally more of it
+sitting on a DCT block boundary. #1134 found the same shape from the other
+direction, in that the lossy WebP quality needed to match went up with depth.
+
+## What #1132 took out of #1134, cell by cell
+
+So nobody has to diff two documents in their head. "Superseded" means the row
+describes code that is not in the tree, not that the row was wrong when it was
+taken.
+
+| #1134 says | status |
+|---|---|
+| `jpeg-q85-libviprs`, `image 0.25 (pure Rust)`, 6 379 215 B | **superseded.** That encoder is gone; the cell is 3 458 216 B. |
+| `444-std` **(what we emit today)** | **superseded label.** At the default quality a tile is 4:2:0 with tables built from it. |
+| `444-opt` is 1.60x, "lossless rearrangement, free" | **realised**, at 1.54x measured here, and not free: the encoder transforms the tile twice and PR #1148 measured 0.93 ms against `image`'s 0.50 ms. |
+| the `jpeg-q75` / `q85` / `q95` rows of the naive table | **superseded.** All three name `image` 0.25. |
+| `jpeg q85` **ours** as the 1.00x baseline of the matched table | **superseded.** The baseline moved 1.84x, so every "vs today" ratio in that table moved with it. |
+| the `today` and `jpeg-tuned` columns of the class table | **collapsed** into one, to within 0.1% at every level. |
+| `directory --format jpeg -q 85` 6 503 887 B, `pmtiles` 4 953 402 B | **superseded**, and never a like-for-like with a rendered run. |
+| "JPEG amplifies 1.43x" | **superseded**, it is 2.05x, because the tiles got smaller. |
+| "**PNG beats JPEG q85 by 1.34x**" | **reversed.** |
+| the libviprs JPEG q75 to q100 metric-warning ladder | **superseded.** It was a ladder up the old encoder. |
+| "Three cheaper things, in order: 1. optimized Huffman (#1132), 2. fix `--render --format jpeg` (#1133)" | **both done**, in PR #1148. |
+| "Inferred: that optimized Huffman behaves the same inside `image` 0.25 as inside libjpeg-turbo" | **measured now**, and it held to 0.07%. |
+| **"4:2:0: only behind a chroma check"** | **done**, in the same change as this document. See below. |
+| every WebP and PNG number, the lossy-WebP crossover, the libwebp ladder warning, the storage-backend findings, the RSS parity, the inode argument | **untouched.** #1132 changed one encoder. |
+
+## The recommendation, and what shipping it did
+
+#1134's colour control found that 4:2:0 saves more on coloured ink and damages
+it 5x harder, that ink-mask IoU is blind to the damage, and concluded: **"Enable
+4:2:0 behind a chroma check, not unconditionally."**
+
+What #1132 shipped was a *quality* check. `subsampled` in `src/encode_jpeg.rs`
+was
+
+```rust
+JpegSubsample::Auto => quality < 90,
+```
+
+which is libvips' `VIPS_FOREIGN_SUBSAMPLE_AUTO` and defensible on its own
+terms, but it is not the rule #1134 asked for, and at the tile default of
+quality 85 it subsamples every tile whatever colour is in it. #1132's own table
+priced that against this encoder: coloured line art goes from 22719 bytes at
+35.01 dB to 15385 bytes at **30.05 dB**, a 4.96 dB drop, while the
+black-on-white drawing beside it moves 0.02 dB.
+
+`Auto` now keeps the quality rule and adds a content one. The encoder walks the
+2x2 blocks 4:2:0 would average, with the same edge clamp the downsample itself
+uses, and counts the blocks where a chroma sample sits more than eight levels
+from the four's mean in `Cb` or `Cr`. More than one block in 256 and the tile
+keeps full chroma. **That deviates from libvips below quality 90 and the doc
+comment on `subsampled` says so in those words.** Nothing at or above 90 moves,
+and the content can only ever veto subsampling, never turn it on where libvips
+would refuse it. `On` and `Off` are untouched.
+
+### Why a count and not an average
+
+Because the damage is concentrated where the colour is, and an average over the
+tile hides it. #1134 measured 13.969 mean absolute channel error **on ink**
+against 2.799, and the same sheet averages out to almost nothing once the paper
+is included, which is exactly the blindness it warned about in its own ink-mask
+metric. A gate built on a tile-wide mean would repeat that mistake in the fix.
+
+The same reasoning rules out counting coloured *pixels*. A solid fill is every
+pixel coloured and has no chroma detail at all, so subsampling costs it nothing
+and a pixel-counting rule would send it to 4:4:4 and buy nothing with the
+bytes. What the gate measures is the chroma 4:2:0 would remove.
+
+### Where the cliff is
+
+A threshold validated only on the case that exposed the bug moves the cliff
+rather than removing it, so
+`the_chroma_gate_is_nowhere_near_the_content_it_judges` reads the count each
+fixture actually produces and fails unless every one is a factor of four clear
+of the limit. On a 256x256 tile the limit is 64 blocks out of 16384:
+
+| fixture | blocks with chroma detail | against a limit of 64 |
+|---|--:|---|
+| black ink on white paper | 0 | the shortcut fires on every block |
+| a solid coloured fill | 0 | every block has constant chroma |
+| eight stray coloured pixels in 65536 | 8 | 8x under |
+| blue linework | past 64 within the first rows | 4x over at minimum, asserted |
+
+The stray-pixel row is the one that matters for this corpus, which is
+monochrome in practice and not in the strict sense: #1134 counted 293 pixels
+out of 94.5M with any channel spread above 10. A gate that tripped on one
+stray pixel would take 4:2:0 off tiles that lose nothing by keeping it, which
+is the same failure as turning it off everywhere, only harder to see.
+
+### What it costs
+
+The gate runs per tile, so this is a number somebody has to be able to read.
+`the_chroma_scan_costs` times the same image twice, once with `Auto` and once
+with **the explicit mode `Auto` resolves to on it**, so both arms encode the
+same plan and the difference is the scan and nothing else. The two are
+interleaved in one process and the statistic is the median of the per-round
+pairs rather than the mean, because on a shared box a mean carries whatever the
+other tenant did during one round. This run was at a one-minute load of 28 on
+six cores, which is why the percentages are the reading and the milliseconds
+are not.
+
+| fixture | against | with the gate | without | |
+|---|---|--:|--:|--:|
+| monochrome, shortcut on every block | `On` | 2.155 ms | 2.097 ms | **+2.8%** |
+| coloured linework, early exit | `Off` | 3.289 ms | 3.296 ms | **-0.2%** |
+| a trace of colour, full scan through the shortcut | `On` | 2.166 ms | 2.097 ms | **+3.3%** |
+| worst case, full scan with the arithmetic | `On` | 1.991 ms | 1.833 ms | **+8.6%** |
+
+Under 3% on the case this crate actually tiles, nothing measurable on a
+strongly coloured tile because it stops within the first rows, and under 9% on
+a tile constructed so neither escape can fire: chroma everywhere, and all of it
+below the step so there is nothing to stop early on. That last row is the
+ceiling and it is not a tile anybody has.
+
+The first version of this cell compared every fixture against `On` and reported
+**+54%** on coloured linework. That was not the scan. It was 4:4:4 having twice
+the blocks to transform, so the two arms were encoding different plans, and the
+number was the cost of the gate's *decision* rather than the cost of making it.
+Both are real costs and they belong in different columns: the decision's cost
+is the byte and dB trade above, and this table is only about the scan.
+
+### What it does not cost
+
+The whole size argument for #1132 rests on the monochrome path, so a gate that
+quietly turned 4:2:0 off everywhere would hand back the 1.84x and every cell
+above would still be green. The cell `monochrome_still_takes_the_subsampling_win`
+is one half of that check and the pyramid is the other:
+
+| cell | before the gate, at `41adac2a` | after it, at `b4bf3cd7` |
+|---|--:|--:|
+| `jpeg-q75` | 3 092 360 | 3 092 360 |
+| `jpeg-q85` | 3 458 216 | 3 458 216 |
+| `jpeg-q95` | 4 853 934 | 4 853 934 |
+| `png` | 5 334 030 | 5 334 030 |
+| `webp` | 1 138 638 | 1 138 638 |
+
+**Byte-identical**, on every cell, every deduped total, every distinct-payload
+count, every archive and every per-level row. The two runs are two builds of
+two commits in the same lane clone against the same corpus, and the whole
+1479-tile sheet takes exactly the path it took before, because black ink on
+white paper has no chroma to keep.
+
+That is the result for *this* content. A sheet with coloured layers would move,
+and it is supposed to.
+
+## What this run does not measure
+
+**No wall clock.** The box was running other lanes' gates throughout: up to six
+other `libviprs-ci` and `nas-driver` containers at once, with the one-minute
+load average between 6 and 64 on six logical cores. So every wall-clock number
+this run produced is a number about those gates, and none of them is published.
+It did not go quiet at any point, so waiting for it was not an option either.
+
+The one clock here is `the_chroma_scan_costs`, and it survives that only
+because it is a ratio: it encodes the same image twice, with and without the
+gate, interleaved in one process, so both arms take the same beating and what
+the cell reports is the difference between them. An absolute millisecond figure
+from this box would be worthless and none is quoted. Byte counts,
+entry counts, allocated blocks and fidelity are all independent of contention,
+and they are the only columns published here. #1134's storage timings stand on
+their own run; they were never comparable to a run like this one anyway,
+because #1133 says its JPEG rows could not have used `--render`, and its 468 MB
+peak RSS against this run's 842 MB says the same thing from the other side.
+
+**No reference codec beyond the control.** #1134's libwebp and libpng columns
+are not reproduced. They were the point when the question was "is our encoder
+the problem", and #1132 answered that by replacing the encoder. #1134's own
+note that its C-codec *timings* were a 3x harness artefact still stands; its
+size figures for those codecs are not contradicted by anything here.
+
+**No colour**, for the reason in the section above.
+
+**One sheet, one renderer, one dpi, one tile size, x86_64 only.**
+
+## Why this is a document and not a published benchmark
+
+These numbers still cannot go on libviprs.org. `ingest.mjs --check` takes only
+entries that join an archived document at the pinned revision by run id with
+four recomputed integrity digests, and nothing here has a run id, because no
+family in libviprs-bench has a tile-format dimension: `BENCH_TILE_FORMAT` and
+`BENCH_TILE_SUFFIX` are one pair of constants feeding both sides of the
+cross-engine comparison on purpose, and `tests/encoding_claim.rs` asserts that.
+libviprs-bench#102 is the issue for parameterising them. It is open, and its
+corpus requirement is unmet: it wants a real scanned drawing and a
+coloured-layer sheet, and neither is committed anywhere.
+
+So #1134 stays open, and this document is not a substitute for it. What it was
+waiting on has not moved. Two other things did: half of it had stopped
+describing the code, and a record that has stopped describing the code is worse
+than no record because it reads exactly like one that still does, and the one
+recommendation in it that nobody had acted on is acted on now.
+
+What is left there is one thing and it is the thing it was filed for. The
+coloured-layer sheet the chroma gate wants and the scanned drawing
+libviprs-bench#102 wants are the same missing corpus, so whoever sources one
+unblocks both.

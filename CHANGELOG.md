@@ -1352,6 +1352,21 @@ and not under `Fixed`: this file is the only place they can be caught.
   rather than being reshuffled, so the sink refuses it exactly as it would
   have.
 
+- **The tile-codec numbers, re-measured against the encoder that shipped**
+  (issue #1134). `docs/tile-codec-benchmarks.md` is the procedure behind the
+  JPEG, PNG and lossless WebP figures for a vector CAD sheet: one `viprs
+  pyramid` run per cell over `blueprint.pdf` at 150 dpi, reporting tile bytes,
+  deduped bytes, distinct payloads, archive size, allocated blocks and
+  filesystem entries, with PSNR and an ink-mask IoU against the lossless tree
+  beside it. `scripts/tile-fidelity.py` is the analysis half.
+
+  It exists because #1132 replaced the JPEG encoder the day after the run
+  behind #1134 was taken, so half of that record describes code that is no
+  longer in the tree. The document says which cells that took out, and it
+  carries the control that says the two runs saw the same pixels: this run's
+  tiles through libjpeg at #1134's four knob settings reproduce its four
+  totals to the byte.
+
 - **The PMTiles writer can append straight into the destination** (EPIC #1135,
   issue #1143). `WriterOptions::layout` and `WriterOptions::with_layout` take
   the new `pmtiles::Layout`, which is `TileId` by default and changes nothing
@@ -1371,16 +1386,33 @@ and not under `Fixed`: this file is the only place they can be caught.
   the moment it is written. go-pmtiles v1.31.2 `verify` accepts it: its
   `lengthFromHeaderWithPadding` branch is exactly this layout's size.
 
-  **Two things stop being true under it, which is why it is not the default.**
-  `clustered` is `false`, and `pmtiles extract` requires clustered input. And
-  the bytes depend on the arrival order, so two shuffled insertion orders of
+  **One thing stops being true under it, which is why it is not the default.**
+  The bytes depend on the arrival order, so two shuffled insertion orders of
   the same tiles no longer produce the same archive: that property is a
-  statement about tile id order.
+  statement about tile id order. `clustered` was the second one when this
+  landed and is not any more, see the entry below.
 
   It also costs file size on small archives. An arrival archive is
   `16257 - root_length` bytes larger than the tile id one, because the unused
   part of the root budget is padding. On a pyramid with a full root that is
   nothing; on an archive of a few kilobytes it roughly quadruples the file.
+
+- **`clustered` is measured rather than declared, so an arrival-order archive
+  can earn it** (issue #1144). `pmtiles::Layout::Arrival` used to report
+  `clustered = false` unconditionally, because the flag was read off the
+  layout. It is computed now, as the writer settles each payload's offset:
+  walking the entries in tile id order, a blob either starts where the blobs
+  before it ended or lies wholly inside them, which is what a deduplicated
+  back reference looks like, and anything else clears the flag.
+
+  So a caller feeding tiles in tile id order under `Layout::Arrival` now gets
+  an archive `pmtiles extract` accepts, where before it got a `false` that was
+  wrong about its own bytes. A caller feeding them in any other order still
+  gets `false`. `Layout::TileId` is unchanged and still always reports `true`,
+  which the same tracker now has to earn rather than assert.
+
+  Nothing about the archive's bytes moves except header byte 96, and only
+  under `Layout::Arrival`.
 
 - **A pyramid reader can be asked for a tile's length, and for its structure
   once** (issue #1130). Three additions to
@@ -3547,6 +3579,34 @@ and not under `Fixed`: this file is the only place they can be caught.
   new variant is additive.
 
 ### Changed
+
+- **`JpegSubsample::Auto` asks the pixels as well as the quality, so a coloured
+  tile keeps its chroma** (issue #1134). `Auto` was libvips'
+  `VIPS_FOREIGN_SUBSAMPLE_AUTO` and nothing else, 4:2:0 below quality 90 and
+  4:4:4 at or above. The tile default is quality 85, so every tile this crate
+  wrote was subsampled whatever colour was in it, and #1132's own table priced
+  that on coloured line art: 22719 bytes at 35.01 dB became 15385 at 30.05, a
+  4.96 dB drop, while the black-on-white drawing in the row above moved
+  0.02 dB.
+
+  `Auto` now keeps the quality rule and adds a content one. The encoder counts
+  the 2x2 blocks 4:2:0 would average where a chroma sample sits more than eight
+  levels from the four's mean, and keeps full chroma once more than one block
+  in 256 does. A count rather than an average, because the damage is
+  concentrated where the colour is: #1134 measured 13.969 mean absolute channel
+  error on recoloured ink against 2.799 while its own ink-mask metric stayed at
+  0.99997, which is the blindness it warned about.
+
+  **This deviates from libvips below quality 90, deliberately.** Nothing at or
+  above 90 moves and the content can only ever veto, never re-enable. `On` and
+  `Off` are untouched, so a caller who wants the old unconditional behaviour
+  asks for `On`.
+
+  Bytes move only where the colour is. Measured end to end over
+  `blueprint.pdf` at 150 dpi, 1479 tiles: the pyramid is byte-identical either
+  side of the change, because the sheet is monochrome and every tile still
+  takes 4:2:0. `docs/tile-codec-benchmarks.md` has the run and what the scan
+  costs.
 
 - **Tile JPEG is 4:2:0 with Huffman tables built from the tile, so every JPEG
   tile's bytes move** (issue #1132). `FsSink::encode_tile` called
