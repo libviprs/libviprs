@@ -1380,6 +1380,9 @@ impl<W: Write + Seek> Writer<W> {
     /// Open the two scratch files every flavour needs.
     fn open_scratch(base: PathBuf, options: WriterOptions) -> Result<Self, PmTilesError> {
         let sets = dedupe_sets(options.dedupe_memory_bytes);
+        // Read out before the struct literal below, which moves `options` into
+        // its own field before it reaches `repeats`.
+        let layout = options.layout;
         let log_path = suffixed(&base, ".idx");
         let log = File::create(&log_path)?;
         // Arrival order appends into the destination, so it has no staging
@@ -1387,7 +1390,7 @@ impl<W: Write + Seek> Writer<W> {
         // the whole of the scratch this epic is spending on the layout: the
         // index log stays either way.
         let mut scratch = Vec::with_capacity(2);
-        let staged = match options.layout {
+        let staged = match layout {
             Layout::TileId => {
                 let data_path = suffixed(&base, ".data");
                 let file = File::create(&data_path)?;
@@ -1420,7 +1423,7 @@ impl<W: Write + Seek> Writer<W> {
             // better answer and it is not this issue's: it moves what
             // `with_dedupe_memory_bytes` means, and the documented 65 bytes a
             // payload is a contract with its own test.
-            repeats: RepeatTable::with_sets(match options.layout {
+            repeats: RepeatTable::with_sets(match layout {
                 Layout::TileId => sets,
                 Layout::Arrival => 0,
             }),
