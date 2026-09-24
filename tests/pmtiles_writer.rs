@@ -2056,6 +2056,22 @@ fn an_arrival_archive_puts_the_tile_data_before_the_metadata_and_the_leaves() {
             bytes.len() as u64,
             "{label}: the archive does not end where its last section does"
         );
+
+        // go-pmtiles' own arithmetic, spelled out rather than implied by the
+        // three assertions above, because it is the constraint a future change
+        // here is most likely to break without noticing. `Verify` accepts a
+        // file whose size is either `127 + root + meta + leaf + tiles` or
+        // `16384 + meta + leaf + tiles`, and nothing else
+        // (`pmtiles/verify.go:84`, v1.31.2). The second is this layout and it
+        // is the only padded size the reference knows about, so reserving a
+        // different prefix, or aligning the tile data, or leaving a gap
+        // anywhere, is rejected by the reference and accepted by ours.
+        assert_eq!(
+            bytes.len() as u64,
+            16384 + h.metadata_length + h.leaf_directories_length + h.tile_data_length,
+            "{label}: the archive is not the size go-pmtiles computes for a \
+             padded one"
+        );
         assert!(
             !h.clustered,
             "{label}: arrival order cannot claim clustering"
