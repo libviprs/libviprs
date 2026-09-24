@@ -684,7 +684,13 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// write that fails part way, and the durability barrier. All seven reach a
 /// `tempfile::tempdir()` or a path under one, all seven are annotated, and
 /// none is a judgement call.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 461;
+///
+/// #1150 moves it 461 to 463, and the two are the resume-refusal cells in
+/// `tests/pmtiles_sink.rs`: the engine-configured resume that used to
+/// regenerate the pyramid, and the same request through the sink wrappers.
+/// Both take a `tempfile::tempdir()` and write an archive under it, both are
+/// annotated, and neither is a judgement call.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 463;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
