@@ -41,7 +41,7 @@
 //! decision: it decides which algorithm the digest is in, which is the only
 //! thing about dedupe this sink asks. The digest is the one the engine would
 //! have computed, through the same
-//! [`content_digest_for`](crate::dedupe::content_digest_for) the index uses;
+//! [`content_digest_for`] the index uses;
 //! [`Writer::add_tile`](crate::pmtiles::Writer::add_tile) takes it and never
 //! re-derives one, so a tile is hashed once however many consumers want the
 //! answer.
