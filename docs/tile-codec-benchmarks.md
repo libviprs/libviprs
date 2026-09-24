@@ -118,10 +118,10 @@ at the four knob settings #1134 separated, against #1134's own four numbers:
 | `420-std` | 5 293 159 | 5 293 159 | 4 271 696 | 4 271 696 |
 | `420-opt` | 3 460 741 | 3 460 741 | 3 028 053 | 3 028 053 |
 
-Every one of the eight agrees **to the byte**, on a different Pillow and a
-different libjpeg-turbo build from the one #1134 used. So the two runs are
-looking at the same pixels, and every JPEG comparison across them is exact
-rather than approximate.
+Every one of the eight agrees **to the byte**, through Pillow 12.3.0 and the
+libjpeg-turbo it bundles rather than #1134's Pillow 9.4.0 and libjpeg-turbo
+2.1.5. So the two runs are looking at the same pixels, and every JPEG
+comparison across them is exact rather than approximate.
 
 The distinct-payload counts say the same thing independently: 942 for JPEG at
 quality 75 and 85, 943 at 95, 944 for PNG and for lossless WebP, in both runs.
