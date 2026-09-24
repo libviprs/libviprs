@@ -293,7 +293,11 @@ impl PmTilesSink {
     fn encode(&self, tile: &Tile) -> Result<Vec<u8>, SinkError> {
         match self.tile_format {
             TileFormat::Png => encode_png(&tile.raster),
-            TileFormat::Jpeg { quality } => encode_jpeg(&tile.raster, quality),
+            TileFormat::Jpeg { quality } => encode_jpeg(
+                &tile.raster,
+                quality,
+                crate::sink::background_from(&self.engine_config),
+            ),
             TileFormat::Webp => crate::sink::encode_webp(&tile.raster),
             // Refused at `build`, so reaching here would mean a sink was
             // constructed past its own gate.

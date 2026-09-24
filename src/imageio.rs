@@ -1550,7 +1550,11 @@ impl Raster {
         Ok(match extension {
             "png" => crate::sink::encode_png(self)?,
             "jpg" | "jpeg" => {
-                let encoded = crate::sink::encode_jpeg(self, SAVE_JPEG_QUALITY)?;
+                let encoded = crate::sink::encode_jpeg(
+                    self,
+                    SAVE_JPEG_QUALITY,
+                    crate::sink::DEFAULT_BACKGROUND_RGB,
+                )?;
                 if keep_metadata {
                     let exif = match self.fields.get("exif-data") {
                         Some(MetadataValue::Blob(b)) => Some(b.as_slice()),
@@ -4839,7 +4843,7 @@ mod tests {
             .map(|i| (i % 251) as u8)
             .collect();
         let im = Raster::zeroed(4, 4, PixelFormat::Gray8).unwrap();
-        let jpeg = crate::sink::encode_jpeg(&im, 75).unwrap();
+        let jpeg = crate::sink::encode_jpeg(&im, 75, crate::sink::DEFAULT_BACKGROUND_RGB).unwrap();
         let with_icc = inject_jpeg_metadata(jpeg, None, Some(&icc));
         let (exif, got) = extract_jpeg_metadata(&with_icc);
         assert_eq!(exif, None);

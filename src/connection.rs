@@ -327,9 +327,12 @@ impl Raster {
 fn encode_for_format(raster: &Raster, format: &str) -> Result<Vec<u8>, EncodeError> {
     let key = format.trim().trim_start_matches('.').to_ascii_lowercase();
     match key.as_str() {
-        "jpeg" | "jpg" => {
-            crate::sink::encode_jpeg(raster, DEFAULT_JPEG_QUALITY).map_err(sink_err_to_encode)
-        }
+        "jpeg" | "jpg" => crate::sink::encode_jpeg(
+            raster,
+            DEFAULT_JPEG_QUALITY,
+            crate::sink::DEFAULT_BACKGROUND_RGB,
+        )
+        .map_err(sink_err_to_encode),
         "png" => crate::sink::encode_png(raster).map_err(sink_err_to_encode),
         "gif" => raster.encode_gif(crate::gif::SaveOptions::default()),
         "webp" => raster.encode_webp(crate::webp::SaveOptions::default()),

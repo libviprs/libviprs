@@ -21,7 +21,7 @@ use std::sync::Mutex;
 
 use crate::planner::{PyramidPlan, TileCoord};
 use crate::raster::Raster;
-use crate::sink::{SinkError, Tile, TileFormat, TileSink, color_type_for_format, encode_png};
+use crate::sink::{SinkError, Tile, TileFormat, TileSink, encode_png};
 
 // ---------------------------------------------------------------------------
 // PackfileFormat
@@ -79,6 +79,13 @@ pub struct PackfileSink {
     /// need exclusive access per append. The `Option` lets `finish(&self)`
     /// consume the writer without violating `&self`.
     writer: Mutex<Option<ArchiveWriter>>,
+    /// Captured by [`TileSink::record_engine_config`] before the tile loop
+    /// starts, and read for one field: the background a JPEG tile's
+    /// transparent pixels land on (issue #1133). `FsSink` and `PmTilesSink`
+    /// already kept the whole config for their manifests; this sink writes no
+    /// manifest of its own and kept nothing, which would have left a run with
+    /// `--background` honoured in the padding and ignored in the pixels.
+    engine_config: Mutex<Option<crate::engine::EngineConfig>>,
 }
 
 /// Underlying archive writer, polymorphic over the chosen format.
@@ -182,6 +189,7 @@ impl PackfileSink {
             plan,
             tile_format,
             writer: Mutex::new(Some(writer)),
+            engine_config: Mutex::new(None),
         })
     }
 
@@ -233,7 +241,11 @@ impl PackfileSink {
         match self.tile_format {
             TileFormat::Raw => Ok(raster.data().to_vec()),
             TileFormat::Png => encode_png(raster),
-            TileFormat::Jpeg { quality } => encode_jpeg(raster, quality),
+            TileFormat::Jpeg { quality } => crate::sink::encode_jpeg(
+                raster,
+                quality,
+                crate::sink::background_from(&self.engine_config),
+            ),
             TileFormat::Webp => crate::sink::encode_webp(raster),
         }
     }
@@ -414,6 +426,12 @@ impl TileSink for PackfileSink {
         Ok(())
     }
 
+    /// Keep the run's configuration for the one thing this sink reads out of
+    /// it: the background a JPEG tile's alpha is flattened onto.
+    fn record_engine_config(&self, config: &crate::engine::EngineConfig) {
+        *crate::poison::recover(&self.engine_config) = Some(config.clone());
+    }
+
     fn finish(&self) -> Result<(), SinkError> {
         let stem = self.archive_stem();
         let manifest = self.build_manifest_json();
@@ -591,34 +609,6 @@ fn append_zip<W: Write + std::io::Seek>(
 // Encoding helpers
 // ---------------------------------------------------------------------------
 
-/// Local JPEG encoder — mirrors the private one in `sink.rs`. Duplicated
-/// intentionally so the packfile sink does not need the main `sink`
-/// module's private helpers to become `pub`.
-fn encode_jpeg(raster: &Raster, quality: u8) -> Result<Vec<u8>, SinkError> {
-    // Was its own fourth copy of `sink.rs`'s mapping, kept separate so this
-    // module would not need `sink`'s private helpers to become `pub`. That
-    // rationale went away once #969 made the mapping `crate::pixel::image_
-    // color_type` and #940's review made the wrapper around it
-    // `pub(crate)`: this now calls the same one `sink.rs` and
-    // `sink_object_store.rs` do, closing the gap the review found (a live,
-    // untested fourth copy of exactly the mapping #969 set out to
-    // consolidate).
-    let ct = color_type_for_format(raster.format())?;
-
-    let mut buf = Vec::new();
-    let encoder =
-        image::codecs::jpeg::JpegEncoder::new_with_quality(std::io::Cursor::new(&mut buf), quality);
-    image::ImageEncoder::write_image(
-        encoder,
-        raster.data(),
-        raster.width(),
-        raster.height(),
-        ct.into(),
-    )
-    .map_err(|e| SinkError::EncodeMsg(format!("png: {e}")))?;
-    Ok(buf)
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -628,6 +618,11 @@ mod tests {
     use super::*;
     use crate::pixel::PixelFormat;
     use crate::planner::{Layout, PyramidPlanner};
+    // Only the cells below reach the mapping directly now that this module's
+    // copy of the JPEG wrapper is gone (issue #1133), so the import belongs
+    // here rather than at the top of the file where it reads as production
+    // code using it.
+    use crate::sink::color_type_for_format;
 
     fn make_plan(w: u32, h: u32, tile: u32) -> PyramidPlan {
         PyramidPlanner::new(w, h, tile, 0, Layout::DeepZoom)
