@@ -122,7 +122,7 @@ pub use range::ObjectStoreRangeReader;
 pub use range::{FileRangeReader, RangeReader};
 pub use reader::Reader;
 pub use tileid::{tileid_to_zxy, zxy_to_tileid};
-pub use writer::{Writer, WriterOptions};
+pub use writer::{Layout, Writer, WriterOptions};
 
 // ---------------------------------------------------------------------------
 // PmTilesError
