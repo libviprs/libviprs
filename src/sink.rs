@@ -2933,10 +2933,11 @@ mod tests {
              a shrinking trait; got {forwarding:?}"
         );
 
-        let forwarded: Vec<String> = fns_at(&block("macro_rules! forward_tile_sink"), "            ")
-            .into_iter()
-            .map(|(name, _)| name)
-            .collect();
+        let forwarded: Vec<String> =
+            fns_at(&block("macro_rules! forward_tile_sink"), "            ")
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect();
         for hook in &forwarding {
             assert!(
                 forwarded.contains(hook),
