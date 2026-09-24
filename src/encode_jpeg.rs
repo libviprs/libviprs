@@ -1575,10 +1575,24 @@ mod tests {
     #[test]
     fn what_the_gate_saves_the_coloured_tile() {
         let src = drawing(256, 256);
-        let at_420 = encode(&src, 256, 256, image::ColorType::Rgb8, 85, JpegSubsample::On)
-            .expect("coloured line art encodes");
-        let under_auto = encode(&src, 256, 256, image::ColorType::Rgb8, 85, JpegSubsample::Auto)
-            .expect("coloured line art encodes");
+        let at_420 = encode(
+            &src,
+            256,
+            256,
+            image::ColorType::Rgb8,
+            85,
+            JpegSubsample::On,
+        )
+        .expect("coloured line art encodes");
+        let under_auto = encode(
+            &src,
+            256,
+            256,
+            image::ColorType::Rgb8,
+            85,
+            JpegSubsample::Auto,
+        )
+        .expect("coloured line art encodes");
         let forced = psnr(&src, decode(&at_420).as_raw());
         let gated = psnr(&src, decode(&under_auto).as_raw());
         assert!(
@@ -1710,8 +1724,15 @@ mod tests {
             ("a trace of colour (full scan, shortcut)", traced),
             ("worst case (full scan, arithmetic)", worst),
         ] {
-            let gated = encode(&src, 256, 256, image::ColorType::Rgb8, 85, JpegSubsample::Auto)
-                .expect("encodes");
+            let gated = encode(
+                &src,
+                256,
+                256,
+                image::ColorType::Rgb8,
+                85,
+                JpegSubsample::Auto,
+            )
+            .expect("encodes");
             // The explicit mode that produces the plan `Auto` chose, so the
             // control is the same encode without the scan in front of it.
             let same_plan = if luma_sampling(&gated) == (2, 2) {
@@ -1722,14 +1743,25 @@ mod tests {
             let (mut with, mut without) = (Vec::new(), Vec::new());
             for _ in 0..ROUNDS {
                 let t = Instant::now();
-                let a = encode(&src, 256, 256, image::ColorType::Rgb8, 85, same_plan)
-                    .expect("encodes");
+                let a =
+                    encode(&src, 256, 256, image::ColorType::Rgb8, 85, same_plan).expect("encodes");
                 without.push(t.elapsed());
                 let t = Instant::now();
-                let b = encode(&src, 256, 256, image::ColorType::Rgb8, 85, JpegSubsample::Auto)
-                    .expect("encodes");
+                let b = encode(
+                    &src,
+                    256,
+                    256,
+                    image::ColorType::Rgb8,
+                    85,
+                    JpegSubsample::Auto,
+                )
+                .expect("encodes");
                 with.push(t.elapsed());
-                assert_eq!(a.len(), b.len(), "{label}: the two arms encoded differently");
+                assert_eq!(
+                    a.len(),
+                    b.len(),
+                    "{label}: the two arms encoded differently"
+                );
                 std::hint::black_box((a.len(), b.len()));
             }
             let (with, without) = (median(with), median(without));
@@ -1759,10 +1791,24 @@ mod tests {
     #[test]
     fn monochrome_still_takes_the_subsampling_win() {
         let src = mono_drawing(256, 256);
-        let at_444 = encode(&src, 256, 256, image::ColorType::Rgb8, 85, JpegSubsample::Off)
-            .expect("a drawing encodes");
-        let under_auto = encode(&src, 256, 256, image::ColorType::Rgb8, 85, JpegSubsample::Auto)
-            .expect("a drawing encodes");
+        let at_444 = encode(
+            &src,
+            256,
+            256,
+            image::ColorType::Rgb8,
+            85,
+            JpegSubsample::Off,
+        )
+        .expect("a drawing encodes");
+        let under_auto = encode(
+            &src,
+            256,
+            256,
+            image::ColorType::Rgb8,
+            85,
+            JpegSubsample::Auto,
+        )
+        .expect("a drawing encodes");
 
         assert_eq!(
             luma_sampling(&under_auto),
@@ -1791,8 +1837,15 @@ mod tests {
         for px in src.chunks_exact_mut(3) {
             px.copy_from_slice(&[38, 120, 190]);
         }
-        let bytes = encode(&src, 256, 256, image::ColorType::Rgb8, 85, JpegSubsample::Auto)
-            .expect("a flat colour encodes");
+        let bytes = encode(
+            &src,
+            256,
+            256,
+            image::ColorType::Rgb8,
+            85,
+            JpegSubsample::Auto,
+        )
+        .expect("a flat colour encodes");
         assert_eq!(
             luma_sampling(&bytes),
             (2, 2),
@@ -1816,8 +1869,15 @@ mod tests {
             src[off + 1] = 40;
             src[off + 2] = 40;
         }
-        let bytes = encode(&src, 256, 256, image::ColorType::Rgb8, 85, JpegSubsample::Auto)
-            .expect("a drawing encodes");
+        let bytes = encode(
+            &src,
+            256,
+            256,
+            image::ColorType::Rgb8,
+            85,
+            JpegSubsample::Auto,
+        )
+        .expect("a drawing encodes");
         assert_eq!(
             luma_sampling(&bytes),
             (2, 2),
@@ -1849,8 +1909,15 @@ mod tests {
             (2, 2),
             "On is the caller asking for 4:2:0 on coloured content"
         );
-        let refused = encode(&mono, 64, 64, image::ColorType::Rgb8, 85, JpegSubsample::Off)
-            .expect("encodes");
+        let refused = encode(
+            &mono,
+            64,
+            64,
+            image::ColorType::Rgb8,
+            85,
+            JpegSubsample::Off,
+        )
+        .expect("encodes");
         assert_eq!(
             luma_sampling(&refused),
             (1, 1),
@@ -1862,8 +1929,15 @@ mod tests {
     #[test]
     fn quality_ninety_stays_full_chroma_whatever_the_content() {
         for src in [mono_drawing(64, 64), drawing(64, 64)] {
-            let bytes = encode(&src, 64, 64, image::ColorType::Rgb8, 90, JpegSubsample::Auto)
-                .expect("encodes");
+            let bytes = encode(
+                &src,
+                64,
+                64,
+                image::ColorType::Rgb8,
+                90,
+                JpegSubsample::Auto,
+            )
+            .expect("encodes");
             assert_eq!(
                 luma_sampling(&bytes),
                 (1, 1),
