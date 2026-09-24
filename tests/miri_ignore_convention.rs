@@ -698,11 +698,10 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// `tempfile::tempdir()`, all eight are annotated, and none is a judgement
 /// call.
 ///
-/// Held at main's figure so the detector has to report the merged one.
-///
-
-///
-/// Held at main's figure so the detector reports the merged one.
+/// Merged twice against a moving main. Each time the constant was held at
+/// main's figure so the detector had to report the merged one rather than
+/// agree with a guess, and the last run printed 472: main's 470 plus this
+/// branch's two cells.
 const EXPECTED_FS_TOUCHING_TESTS: usize = 472;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
