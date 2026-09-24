@@ -85,9 +85,7 @@ use crate::planner::{Layout, PyramidPlan, TileCoord};
 use crate::pmtiles::writer::{Writer, WriterOptions};
 use crate::pmtiles::{Compression, Header, LibviprsMetadata, Metadata, PmTilesError, TileType};
 use crate::resume::{ResumeMode, RunLock};
-use crate::sink::{
-    EmissionOrder, SinkError, Tile, TileFormat, TileSink, encode_jpeg, encode_png,
-};
+use crate::sink::{EmissionOrder, SinkError, Tile, TileFormat, TileSink, encode_jpeg, encode_png};
 
 /// Suffix of the sidecar directory a sink creates beside its archive.
 ///

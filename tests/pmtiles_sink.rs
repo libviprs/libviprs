@@ -41,6 +41,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use libviprs::engine::EngineError;
 use libviprs::engine::{BlankTileStrategy, EngineConfig};
 use libviprs::planner::{Layout, PyramidPlan, PyramidPlanner, TileCoord};
 use libviprs::pmtiles::directory::deserialize_entries;
@@ -53,7 +54,6 @@ use libviprs::pyramid_reader::{DirectoryPyramidReader, PyramidReader};
 use libviprs::resume::{ResumeMode, ResumePolicy};
 use libviprs::sink::{EmissionOrder, SinkError, Tile, TileFormat, TileSink};
 use libviprs::sink_pmtiles::{PmTilesSink, tile_coord_to_zxy};
-use libviprs::engine::EngineError;
 use libviprs::{EngineBuilder, EngineKind, FsSink, PixelFormat, Raster};
 
 #[path = "common/pmtiles_oracle.rs"]
@@ -1342,7 +1342,9 @@ fn planned_tile_ids(plan: &PyramidPlan) -> BTreeSet<u64> {
         for row in 0..level.rows {
             for col in 0..level.cols {
                 let z = u8::try_from(level.level).expect("a unit-scale plan stays under zoom 32");
-                ids.insert(zxy_to_tileid(z, col, row).expect("a planned coordinate is addressable"));
+                ids.insert(
+                    zxy_to_tileid(z, col, row).expect("a planned coordinate is addressable"),
+                );
             }
         }
     }
@@ -1594,8 +1596,12 @@ fn an_ordered_arrival_run_stores_what_the_tile_id_layout_would_have() {
 
     // And the sizes differ by the reserved hole, exactly. This is the
     // arithmetic behind the paragraph above, pinned.
-    let ordered_len = std::fs::metadata(&ordered).expect("the archive exists").len();
-    let sorted_len = std::fs::metadata(&sorted).expect("the archive exists").len();
+    let ordered_len = std::fs::metadata(&ordered)
+        .expect("the archive exists")
+        .len();
+    let sorted_len = std::fs::metadata(&sorted)
+        .expect("the archive exists")
+        .len();
     assert_eq!(a.header.tile_data_offset, 16384, "the reserved ceiling");
     assert_eq!(
         ordered_len - sorted_len,
@@ -1730,7 +1736,9 @@ fn an_ordered_sink_on_an_engine_that_cannot_walk_the_plan_is_refused() {
             assert_eq!(kind, EngineKind::Streaming);
             assert_eq!(order, EmissionOrder::TileId);
         }
-        other => panic!("an order no engine but the monolithic one can walk must be refused by name, got {other:?}"),
+        other => panic!(
+            "an order no engine but the monolithic one can walk must be refused by name, got {other:?}"
+        ),
     }
     assert!(
         ordered.tile_ids().is_empty(),
