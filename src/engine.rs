@@ -726,79 +726,80 @@ fn run_pyramid(
             tiles_skipped += skipped;
         }
         EmissionOrder::Cascade => {
-    // Process from top level (full res) down to level 0 (1×1). The walk
-    // skeleton (descending levels, one tile-op step between adjacent levels,
-    // top level never stepped) lives in `level_walk::walk_levels_down`,
-    // shared with the verify walks and the streaming engines' monolithic
-    // flush. This site parameterizes it with the timed, memory-tracked
-    // downscale and live tile emission.
-    let current = crate::level_walk::walk_levels_down::<EngineError, _, _, _, _>(
-        current,
-        plan.levels.len(),
-        // Enter: cooperative cancellation at the level boundary (before
-        // committing to a potentially expensive downscale + tile emission),
-        // then LevelStarted. The tracing span rides in the returned guard so
-        // it covers the step and emit phases exactly as before.
-        |level_idx| {
-            config.check_cancelled()?;
-            let level = &plan.levels[level_idx];
-            #[cfg(feature = "tracing")]
-            let level_span = tracing::info_span!(
-                target: "libviprs",
-                "level",
-                level_index = level.level
-            )
-            .entered();
-
-            observer.on_event(EngineEvent::LevelStarted {
-                level: level.level,
-                width: level.width,
-                height: level.height,
-                tile_count: level.tile_count(),
-            });
-            #[cfg(feature = "tracing")]
-            return Ok(level_span);
-            #[cfg(not(feature = "tracing"))]
-            Ok(())
-        },
-        // Step: the tile operation. Uses downscale_half (2x2 box filter) to
-        // match libvips's region-shrink=mean algorithm. Each level is
-        // ceil(prev/2).
-        |_, prev| {
-            let old_bytes = prev.data().len() as u64;
-            let resize_start = Instant::now();
-            let next = resize::downscale_half(&prev)?;
-            stage_resize.fetch_add(resize_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
-            let new_bytes = next.data().len() as u64;
-            // Track: freed old level, allocated new
-            tracker.dealloc(old_bytes);
-            tracker.alloc(new_bytes);
-            Ok(next)
-        },
-        // Emit: extract and emit tiles for this level.
-        |level_idx, current| {
-            let (level_tiles, level_skipped) = extract_and_emit_level(
+            // Process from top level (full res) down to level 0 (1×1). The walk
+            // skeleton (descending levels, one tile-op step between adjacent levels,
+            // top level never stepped) lives in `level_walk::walk_levels_down`,
+            // shared with the verify walks and the streaming engines' monolithic
+            // flush. This site parameterizes it with the timed, memory-tracked
+            // downscale and live tile emission.
+            let current = crate::level_walk::walk_levels_down::<EngineError, _, _, _, _>(
                 current,
-                plan,
-                level_idx as u32,
-                sink,
-                config,
-                observer,
-                &ctx,
+                plan.levels.len(),
+                // Enter: cooperative cancellation at the level boundary (before
+                // committing to a potentially expensive downscale + tile emission),
+                // then LevelStarted. The tracing span rides in the returned guard so
+                // it covers the step and emit phases exactly as before.
+                |level_idx| {
+                    config.check_cancelled()?;
+                    let level = &plan.levels[level_idx];
+                    #[cfg(feature = "tracing")]
+                    let level_span = tracing::info_span!(
+                        target: "libviprs",
+                        "level",
+                        level_index = level.level
+                    )
+                    .entered();
+
+                    observer.on_event(EngineEvent::LevelStarted {
+                        level: level.level,
+                        width: level.width,
+                        height: level.height,
+                        tile_count: level.tile_count(),
+                    });
+                    #[cfg(feature = "tracing")]
+                    return Ok(level_span);
+                    #[cfg(not(feature = "tracing"))]
+                    Ok(())
+                },
+                // Step: the tile operation. Uses downscale_half (2x2 box filter) to
+                // match libvips's region-shrink=mean algorithm. Each level is
+                // ceil(prev/2).
+                |_, prev| {
+                    let old_bytes = prev.data().len() as u64;
+                    let resize_start = Instant::now();
+                    let next = resize::downscale_half(&prev)?;
+                    stage_resize
+                        .fetch_add(resize_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                    let new_bytes = next.data().len() as u64;
+                    // Track: freed old level, allocated new
+                    tracker.dealloc(old_bytes);
+                    tracker.alloc(new_bytes);
+                    Ok(next)
+                },
+                // Emit: extract and emit tiles for this level.
+                |level_idx, current| {
+                    let (level_tiles, level_skipped) = extract_and_emit_level(
+                        current,
+                        plan,
+                        level_idx as u32,
+                        sink,
+                        config,
+                        observer,
+                        &ctx,
+                    )?;
+                    tiles_produced += level_tiles;
+                    tiles_skipped += level_skipped;
+
+                    observer.on_event(EngineEvent::LevelCompleted {
+                        level: plan.levels[level_idx].level,
+                        tiles_produced: level_tiles,
+                    });
+                    Ok(())
+                },
             )?;
-            tiles_produced += level_tiles;
-            tiles_skipped += level_skipped;
 
-            observer.on_event(EngineEvent::LevelCompleted {
-                level: plan.levels[level_idx].level,
-                tiles_produced: level_tiles,
-            });
-            Ok(())
-        },
-    )?;
-
-    // Free last raster from tracking
-    tracker.dealloc(current.data().len() as u64);
+            // Free last raster from tracking
+            tracker.dealloc(current.data().len() as u64);
         }
     }
 
@@ -1921,7 +1922,7 @@ fn run_levels_tile_id_order(
     // Phase two: emit ascending, freeing each level as it goes.
     let mut tiles_produced = 0u64;
     let mut tiles_skipped = 0u64;
-    for level_idx in 0..levels {
+    for (level_idx, slot) in rasters.iter_mut().enumerate() {
         config.check_cancelled()?;
         let level = &plan.levels[level_idx];
         #[cfg(feature = "tracing")]
@@ -1938,7 +1939,7 @@ fn run_levels_tile_id_order(
             tile_count: level.tile_count(),
         });
 
-        let raster = rasters[level_idx]
+        let raster = slot
             .take()
             .expect("the cascade fills every level exactly once");
         let (level_tiles, level_skipped) = extract_and_emit_level_ordered(
