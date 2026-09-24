@@ -53,7 +53,8 @@ use libviprs::pyramid_reader::{DirectoryPyramidReader, PyramidReader};
 use libviprs::resume::{ResumeMode, ResumePolicy};
 use libviprs::sink::{EmissionOrder, SinkError, Tile, TileFormat, TileSink};
 use libviprs::sink_pmtiles::{PmTilesSink, tile_coord_to_zxy};
-use libviprs::{EngineBuilder, FsSink, PixelFormat, Raster};
+use libviprs::engine::EngineError;
+use libviprs::{EngineBuilder, EngineKind, FsSink, PixelFormat, Raster};
 
 #[path = "common/pmtiles_oracle.rs"]
 mod oracle;
@@ -1693,6 +1694,58 @@ fn two_ordered_arrival_runs_produce_the_same_archive() {
     assert_eq!(
         differing, 0,
         "two ordered runs must produce one archive, {differing} bytes differ"
+    );
+}
+
+/// A sink that asks for tile id order on an engine that cannot walk one is
+/// refused by name.
+///
+/// Only the monolithic engine walks the plan. The streaming and MapReduce
+/// engines render the source a strip at a time and emit whatever tiles a strip
+/// completes, so tile id order is not something they could produce without
+/// holding the whole pyramid, which is the thing they exist to avoid.
+///
+/// The interesting half is that this must be a refusal rather than a
+/// downgrade. A sink asks for an order when its output depends on it, so an
+/// archive in `Layout::Arrival` quietly given the cascade would be published
+/// with bytes that depend on the thread schedule while its caller believed the
+/// opposite. That is the one failure ordered emission exists to remove, and
+/// getting it back through the engine selection would be worse than never
+/// having the mode.
+///
+/// The control underneath is the same engine with the default order, which
+/// runs. Without it this cell would pass for a build that refused the
+/// streaming engine for any sink at all.
+#[test]
+fn an_ordered_sink_on_an_engine_that_cannot_walk_the_plan_is_refused() {
+    let plan = plan_for(512, 512, 256, Layout::Xyz);
+    let src = gradient(512, 512);
+
+    let ordered = Arc::new(OrderProbe::new(EmissionOrder::TileId));
+    let refused = EngineBuilder::new(&src, plan.clone(), Arc::clone(&ordered))
+        .with_engine(EngineKind::Streaming)
+        .run();
+    match refused {
+        Err(EngineError::UnsupportedEmissionOrder { kind, order }) => {
+            assert_eq!(kind, EngineKind::Streaming);
+            assert_eq!(order, EmissionOrder::TileId);
+        }
+        other => panic!("an order no engine but the monolithic one can walk must be refused by name, got {other:?}"),
+    }
+    assert!(
+        ordered.tile_ids().is_empty(),
+        "a refused run must not have written a tile first"
+    );
+
+    // The control: the same engine takes the same sink on the default order.
+    let cascade = Arc::new(OrderProbe::new(EmissionOrder::Cascade));
+    EngineBuilder::new(&src, plan, Arc::clone(&cascade))
+        .with_engine(EngineKind::Streaming)
+        .run()
+        .expect("the streaming engine runs an ordinary sink");
+    assert!(
+        !cascade.tile_ids().is_empty(),
+        "the control has to have emitted something to be a control"
     );
 }
 
