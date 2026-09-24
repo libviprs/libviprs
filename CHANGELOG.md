@@ -1340,16 +1340,33 @@ and not under `Fixed`: this file is the only place they can be caught.
   the moment it is written. go-pmtiles v1.31.2 `verify` accepts it: its
   `lengthFromHeaderWithPadding` branch is exactly this layout's size.
 
-  **Two things stop being true under it, which is why it is not the default.**
-  `clustered` is `false`, and `pmtiles extract` requires clustered input. And
-  the bytes depend on the arrival order, so two shuffled insertion orders of
+  **One thing stops being true under it, which is why it is not the default.**
+  The bytes depend on the arrival order, so two shuffled insertion orders of
   the same tiles no longer produce the same archive: that property is a
-  statement about tile id order.
+  statement about tile id order. `clustered` was the second one when this
+  landed and is not any more, see the entry below.
 
   It also costs file size on small archives. An arrival archive is
   `16257 - root_length` bytes larger than the tile id one, because the unused
   part of the root budget is padding. On a pyramid with a full root that is
   nothing; on an archive of a few kilobytes it roughly quadruples the file.
+
+- **`clustered` is measured rather than declared, so an arrival-order archive
+  can earn it** (issue #1144). `pmtiles::Layout::Arrival` used to report
+  `clustered = false` unconditionally, because the flag was read off the
+  layout. It is computed now, as the writer settles each payload's offset:
+  walking the entries in tile id order, a blob either starts where the blobs
+  before it ended or lies wholly inside them, which is what a deduplicated
+  back reference looks like, and anything else clears the flag.
+
+  So a caller feeding tiles in tile id order under `Layout::Arrival` now gets
+  an archive `pmtiles extract` accepts, where before it got a `false` that was
+  wrong about its own bytes. A caller feeding them in any other order still
+  gets `false`. `Layout::TileId` is unchanged and still always reports `true`,
+  which the same tracker now has to earn rather than assert.
+
+  Nothing about the archive's bytes moves except header byte 96, and only
+  under `Layout::Arrival`.
 
 - **A pyramid reader can be asked for a tile's length, and for its structure
   once** (issue #1130). Three additions to
