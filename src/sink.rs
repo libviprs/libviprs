@@ -326,9 +326,16 @@ pub trait TileSink: Send + Sync {
     ///
     /// Every engine-bookkeeping method below (`record_engine_config`,
     /// `sink_retry_count`, `sink_skipped_due_to_failure`, `note_sink_skipped`,
-    /// `checkpoint_root`, `init_level_count`, `content_format`,
-    /// `open_pyramid_reader`, `applies_retry_policy`) has a default that
-    /// forwards through this hook.
+    /// `checkpoint_root`, `arm_durability_tracking`, `sync_pending`,
+    /// `init_level_count`, `content_format`, `applies_retry_policy`,
+    /// `check_resume_mode`, `seed_completed_tile`, `open_pyramid_reader`,
+    /// `emission_order`) has a default that forwards through this hook. The
+    /// list is the whole set, in declaration order: it had drifted three short
+    /// of the trait it describes, which is the same shape as the trap the
+    /// paragraph below is about. It is no longer only prose:
+    /// `no_forwarding_hook_is_left_out_of_the_macro_or_the_list` reads this
+    /// list and the trait and holds the one to the other, because a sentence
+    /// saying "the whole set" is exactly what drifted.
     /// A wrapper therefore only has to override `inner_sink` — and any state it
     /// genuinely owns (e.g. a [`RetryingSink`]'s own retry counter) — instead
     /// of forwarding every bookkeeping method by hand. That removes the
@@ -468,6 +475,53 @@ pub trait TileSink: Send + Sync {
     fn applies_retry_policy(&self) -> bool {
         self.inner_sink()
             .is_some_and(|inner| inner.applies_retry_policy())
+    }
+
+    /// Engine hook (issue #1150, split out of #1129): refuse a resume mode
+    /// this sink cannot honour, before the run touches anything.
+    ///
+    /// [`EngineBuilder::with_resume`](crate::EngineBuilder::with_resume) tells
+    /// the **engine** which mode to run, and before this hook existed the sink
+    /// only heard about it if the caller also said it a second time on the
+    /// sink's own builder. So a sink that refuses a mode refused it exactly
+    /// when the refusal was not needed, and the run it existed to stop went
+    /// ahead: [`PmTilesSink`](crate::sink_pmtiles::PmTilesSink) cannot resume
+    /// and answers `None` to [`TileSink::checkpoint_root`] because it has
+    /// nowhere to keep a checkpoint, so a `Resume` run resolved no checkpoint,
+    /// skipped nothing, never reached [`TileSink::seed_completed_tile`] either,
+    /// re-rendered every tile and reported success. A job asked to pick up
+    /// where it left off started again from zero and looked like it had had
+    /// nothing left to do.
+    ///
+    /// The engine asks this once, before the verify dispatch and before any
+    /// lock or directory work, so a refusal costs nothing and leaves nothing
+    /// behind. `Ok(())` means "I can honour that mode", which is the default
+    /// and what every sink did before.
+    ///
+    /// # Why it takes the mode rather than answering a `supports_resume` flag
+    ///
+    /// There are three modes and a sink can have a different answer for each.
+    /// `PmTilesSink` is that sink: it honours `Overwrite`, honours `Verify`
+    /// since #1122 because it reads the archive back through
+    /// [`TileSink::open_pyramid_reader`], and refuses `Resume` alone. A boolean
+    /// cannot say that, and a fourth mode arriving would have to guess which
+    /// side of it to fall on rather than being made to decide.
+    ///
+    /// The default forwards to [`TileSink::inner_sink`], bottoming out at `Ok`
+    /// for terminal sinks, so a wrapper carries its inner sink's answer and an
+    /// external sink never has to know the method exists.
+    ///
+    /// # Errors
+    ///
+    /// [`SinkError::UnsupportedResumeMode`] for a mode this sink cannot
+    /// honour. The engine hands it back as
+    /// [`EngineError::Sink`](crate::EngineError::Sink), so a caller gets the
+    /// sink's own typed refusal rather than a sentence about one.
+    fn check_resume_mode(&self, mode: crate::resume::ResumeMode) -> Result<(), SinkError> {
+        match self.inner_sink() {
+            Some(inner) => inner.check_resume_mode(mode),
+            None => Ok(()),
+        }
     }
 
     /// Engine hook (issue #272): rebuild the sink-side manifest / dedupe /
@@ -620,6 +674,9 @@ macro_rules! forward_tile_sink {
             }
             fn applies_retry_policy(&self) -> bool {
                 (**self).applies_retry_policy()
+            }
+            fn check_resume_mode(&self, mode: crate::resume::ResumeMode) -> Result<(), SinkError> {
+                (**self).check_resume_mode(mode)
             }
             fn seed_completed_tile(&self, tile: &Tile) -> Result<(), SinkError> {
                 (**self).seed_completed_tile(tile)
@@ -2789,6 +2846,123 @@ mod tests {
     use super::*;
     use crate::pixel::PixelFormat;
     use crate::planner::{Layout, PyramidPlanner};
+
+    /// Split a block into one `(name, code)` pair per `fn` declared at
+    /// `indent`, with comment lines already gone so a doc comment written for
+    /// the *next* method cannot be read as part of this one's body.
+    fn fns_at(block: &str, indent: &str) -> Vec<(String, String)> {
+        let head = format!("{indent}fn ");
+        let mut out: Vec<(String, String)> = Vec::new();
+        for line in block.lines() {
+            if let Some(rest) = line.strip_prefix(&head) {
+                let name = rest
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                out.push((name, String::new()));
+            } else if let Some((_, body)) = out.last_mut() {
+                body.push_str(line);
+                body.push('\n');
+            }
+        }
+        out
+    }
+
+    /// No hook that forwards through `inner_sink` is left out of
+    /// `forward_tile_sink!`, or out of the list that claims to name them all.
+    ///
+    /// [`TileSink::inner_sink`] removes the silent-data-loss trap for a
+    /// wrapper, but it moves the trap rather than deleting it. A hook added to
+    /// the trait with a forwarding default has to be repeated in the macro
+    /// body, and one that is not falls back to the trait default for every
+    /// wrapped sink. That default is the answer a *terminal* sink gives, so a
+    /// forgotten forward is silent: the wrapped sink reports whatever a sink
+    /// with nothing inside it would, and every cell that hands the engine a
+    /// bare sink stays green.
+    ///
+    /// #1129 and #1145 each added one hook here, in the same week, on the same
+    /// trait, and each was right on its own branch. That is the shape this
+    /// cell is about. It is not a hook written wrongly, it is two hooks that
+    /// compose into a macro forwarding one of them, which no cell written
+    /// about either hook alone can see.
+    ///
+    /// The doc list is held to the same set because it says out loud that it
+    /// is "the whole set, in declaration order". Prose making that claim is
+    /// precisely what drifted three short before #1129 repaired it by hand,
+    /// and repairing it by hand is not a guard against it happening again.
+    #[test]
+    fn no_forwarding_hook_is_left_out_of_the_macro_or_the_list() {
+        const SRC: &str = include_str!("sink.rs");
+
+        // The code view: comments stripped, so a method's body is its body.
+        let code: String = SRC
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            code.len() > 40_000,
+            "the positive control: every assertion below is vacuous if the \
+             include picked up a truncated file ({} bytes of code)",
+            code.len()
+        );
+
+        let block = |from: &str| -> String {
+            let start = code.find(from).unwrap_or_else(|| panic!("{from} is gone"));
+            // Everything in this file's trait and macro bodies is indented, so
+            // the first `}` in the first column is the end of the block.
+            let end = code[start..]
+                .find("\n}\n")
+                .unwrap_or_else(|| panic!("{from} has no closing brace"));
+            code[start..start + end].to_string()
+        };
+
+        // A hook "forwards" when its default body reaches `inner_sink()`.
+        // `inner_sink` itself does not, and neither do `write_tile` (no
+        // default at all) or `finish`, which is why none of the three is in
+        // the list this cell checks.
+        let forwarding: Vec<String> = fns_at(&block("pub trait TileSink"), "    ")
+            .into_iter()
+            .filter(|(_, body)| body.contains("inner_sink()"))
+            .map(|(name, _)| name)
+            .collect();
+        assert!(
+            forwarding.len() >= 14,
+            "the positive control: the trait had fourteen forwarding hooks when this \
+             was written and a parser that finds fewer has stopped parsing, not found \
+             a shrinking trait; got {forwarding:?}"
+        );
+
+        let forwarded: Vec<String> = fns_at(&block("macro_rules! forward_tile_sink"), "            ")
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        for hook in &forwarding {
+            assert!(
+                forwarded.contains(hook),
+                "`{hook}` forwards through `inner_sink` but `forward_tile_sink!` does not \
+                 repeat it, so every wrapped sink silently answers the terminal default"
+            );
+        }
+
+        // The doc list, read out of the uncommented source because it *is* a
+        // comment. Names arrive backticked, so the odd splits are the names.
+        let opens = "Every engine-bookkeeping method below";
+        let closes = "default that forwards through this hook";
+        let from = SRC.find(opens).expect("the forwarded-method list is gone");
+        let to = SRC[from..].find(closes).expect("the list has no end") + from;
+        let listed: Vec<String> = SRC[from..to]
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .map(str::to_string)
+            .collect();
+        assert_eq!(
+            listed, forwarding,
+            "the list says it is the whole set in declaration order, so it has to be \
+             both: same names, same order"
+        );
+    }
 
     fn make_tile(level: u32, col: u32, row: u32) -> Tile {
         Tile {

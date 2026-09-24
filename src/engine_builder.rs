@@ -827,6 +827,23 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
                 });
             }
 
+            // Issue #1150: ask the sink whether it can honour this mode at
+            // all, before the verify dispatch, before any lock, and before
+            // anything touches the output.
+            //
+            // A sink that refuses a mode used to find out too late to matter.
+            // Its refusals are reachable two ways and neither one fires for
+            // the caller who just configures the engine: through the sink's
+            // own builder, which only knows the mode if the caller says it
+            // twice, and through `seed_completed_tile`, which needs a resume to
+            // have skipped a coordinate, which needs a checkpoint, which a sink
+            // with no checkpoint root never has. Both stayed quiet and the run
+            // regenerated from scratch the pyramid it was asked to resume,
+            // reporting success. `check_resume_mode` is the end the engine
+            // reaches by itself, so the refusal no longer depends on the caller
+            // repeating themselves.
+            sink.check_resume_mode(policy.mode())?;
+
             // Verify: read-only, no skip set, no checkpoint. Routed by engine
             // kind to the matching verify helper through the single
             // `dispatch_verify` site (issue #290).

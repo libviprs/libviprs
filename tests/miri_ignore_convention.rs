@@ -685,6 +685,12 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// `tempfile::tempdir()` or a path under one, all seven are annotated, and
 /// none is a judgement call.
 ///
+/// #1150 moves it 461 to 463, and the two are the resume-refusal cells in
+/// `tests/pmtiles_sink.rs`: the engine-configured resume that used to
+/// regenerate the pyramid, and the same request through the sink wrappers.
+/// Both take a `tempfile::tempdir()` and write an archive under it, both are
+/// annotated, and neither is a judgement call.
+///
 /// #1144 moves it 461 to 469, and the eight are the cells for `clustered`
 /// being earned rather than read off the layout, all in
 /// `tests/pmtiles_writer.rs`. Six write one archive each and two sweep every
@@ -701,14 +707,20 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// hazard exactly: a lane cannot see a counter another lane is also moving, so
 /// the first lane to merge afterwards inherits a red gate it did not cause.
 ///
-/// #1145 moves it 470 to 473, and the three are the ordered-emission cells in
+/// #1145 adds three, and they are the ordered-emission cells in
 /// `tests/pmtiles_sink.rs` that build an archive: the comparison against the
 /// tile id layout, the `clustered` claim, and the two runs that have to agree.
 /// Each reads the finished file with `std::fs::read`. Its other cells drive a
 /// recording sink that writes nothing, so they touch no filesystem and do not
 /// move this figure; they carry the annotation anyway, because a 1024 source
 /// through the whole engine is not something to hand Miri.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 473;
+///
+/// Merged against a main that had moved to 472 with #1129's two resume cells.
+/// Held at that 472 rather than at 472 plus my three, so the detector had to
+/// report the merged figure instead of agreeing with my arithmetic, and it
+/// printed the number below. That is the same discipline the #1156 paragraph
+/// above exists because nobody followed.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 472;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
