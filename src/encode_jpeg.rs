@@ -268,9 +268,8 @@ fn chroma_detail_blocks(px: &Pixels, stop_after: usize) -> usize {
             let cb: [i32; 4] = std::array::from_fn(|k| CB_FROM_UV.0 * u[k] + CB_FROM_UV.1 * v[k]);
             let cr: [i32; 4] = std::array::from_fn(|k| CR_FROM_UV.0 * u[k] + CR_FROM_UV.1 * v[k]);
             let (sum_cb, sum_cr) = (cb.iter().sum::<i32>(), cr.iter().sum::<i32>());
-            let detailed = (0..4).any(|k| {
-                (4 * cb[k] - sum_cb).abs() > limit || (4 * cr[k] - sum_cr).abs() > limit
-            });
+            let detailed = (0..4)
+                .any(|k| (4 * cb[k] - sum_cb).abs() > limit || (4 * cr[k] - sum_cr).abs() > limit);
             if detailed {
                 found += 1;
                 if found > stop_after {
@@ -1526,10 +1525,24 @@ mod tests {
     #[test]
     fn colour_keeps_its_chroma_at_the_tile_default() {
         let src = drawing(256, 256);
-        let at_444 = encode(&src, 256, 256, image::ColorType::Rgb8, 85, JpegSubsample::Off)
-            .expect("coloured line art encodes");
-        let under_auto = encode(&src, 256, 256, image::ColorType::Rgb8, 85, JpegSubsample::Auto)
-            .expect("coloured line art encodes");
+        let at_444 = encode(
+            &src,
+            256,
+            256,
+            image::ColorType::Rgb8,
+            85,
+            JpegSubsample::Off,
+        )
+        .expect("coloured line art encodes");
+        let under_auto = encode(
+            &src,
+            256,
+            256,
+            image::ColorType::Rgb8,
+            85,
+            JpegSubsample::Auto,
+        )
+        .expect("coloured line art encodes");
 
         assert_eq!(
             luma_sampling(&under_auto),
