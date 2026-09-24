@@ -211,6 +211,55 @@ pub struct Tile {
     pub blank: bool,
 }
 
+/// The order in which the engine hands a sink the tiles of a run.
+///
+/// A sink answers this through [`TileSink::emission_order`] and the engine
+/// obeys it. The default is what every run has always done and costs nothing;
+/// the other value is a request, and the price of it is on the variant.
+///
+/// # Why a sink gets to ask at all
+///
+/// Almost no sink cares. [`TileSink`]'s contract above says every write is an
+/// independent placement keyed on [`Tile::coord`], and the in-tree sinks all
+/// honour that, so for them the order is an implementation detail of the
+/// engine and always has been.
+///
+/// A single-file archive written straight through is the exception, and it is
+/// not a sink breaking the contract. A PMTiles archive in
+/// [`Layout::Arrival`](crate::pmtiles::Layout) appends each payload into the
+/// destination as it arrives, so the file's byte layout *is* the arrival
+/// order. The tiles it holds are still the same tiles placed by coordinate;
+/// what changes with the order is where in the file they sit, whether the
+/// archive's `clustered` flag can honestly be true, and whether two runs over
+/// one source produce the same bytes. Asking for an order is how such a sink
+/// gets those three back without a reordering pass (issue #1145).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum EmissionOrder {
+    /// Levels from full resolution down to the overview, row-major within a
+    /// level, and interleaved arbitrarily across the workers of a level.
+    ///
+    /// The default, and the order the pyramid cascade produces for free: each
+    /// level's raster is the downscale of the one above it, so the levels can
+    /// only be *made* in this order, and the tiles of a level go out as the
+    /// workers finish them.
+    #[default]
+    Cascade,
+    /// Ascending PMTiles tile id: the overview level first, then each level
+    /// below it, and Hilbert order within a level.
+    ///
+    /// Strictly ascending and fully deterministic, so a sink whose output
+    /// depends on the order gets the same bytes out of every run.
+    ///
+    /// It costs a third more raster memory. The levels come out of the
+    /// cascade in exactly the opposite order to this one, so a run that emits
+    /// ascending holds every level's raster at once rather than one at a time,
+    /// and the levels below the top sum to a third of it. It costs nothing in
+    /// tiles held: the emission is still parallel and still bounded by
+    /// [`EngineConfig::buffer_size`](crate::engine::EngineConfig::buffer_size).
+    TileId,
+}
+
 /// Trait for receiving tiles produced by the engine.
 ///
 /// Implementations handle where tiles go — filesystem, object store, memory, etc.
@@ -494,6 +543,24 @@ pub trait TileSink: Send + Sync {
             None => Ok(None),
         }
     }
+
+    /// Engine hook (issue #1145): the order this sink wants its tiles in.
+    ///
+    /// [`EmissionOrder::Cascade`] by default, which is what every run did
+    /// before this hook existed and what the pyramid cascade produces for
+    /// free. A sink whose output depends on the order of the calls answers
+    /// [`EmissionOrder::TileId`] and the engine walks the plan that way
+    /// instead.
+    ///
+    /// The engine reads this once, before the first tile, so a sink cannot
+    /// change its mind mid-run. The default forwards through
+    /// [`TileSink::inner_sink`], which is what makes the answer survive the
+    /// wrappers a run is assembled from: a resume filter and a retry loop both
+    /// sit between the engine and the sink that asked.
+    fn emission_order(&self) -> EmissionOrder {
+        self.inner_sink()
+            .map_or(EmissionOrder::default(), |inner| inner.emission_order())
+    }
 }
 
 /// Generate a transparent [`TileSink`] forwarding impl for a wrapper type
@@ -561,6 +628,9 @@ macro_rules! forward_tile_sink {
                 &self,
             ) -> Result<Option<Box<dyn crate::pyramid_reader::PyramidReader>>, SinkError> {
                 (**self).open_pyramid_reader()
+            }
+            fn emission_order(&self) -> EmissionOrder {
+                (**self).emission_order()
             }
         }
     };

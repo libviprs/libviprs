@@ -39,16 +39,19 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use libviprs::engine::{BlankTileStrategy, EngineConfig};
 use libviprs::planner::{Layout, PyramidPlan, PyramidPlanner, TileCoord};
 use libviprs::pmtiles::directory::deserialize_entries;
 use libviprs::pmtiles::header::HEADER_BYTES;
 use libviprs::pmtiles::tileid::zxy_to_tileid;
-use libviprs::pmtiles::{Compression, Entry, Header, Metadata, TileType};
+use libviprs::pmtiles::{
+    Compression, Entry, Header, Layout as ArchiveLayout, Metadata, TileType, WriterOptions,
+};
 use libviprs::pyramid_reader::{DirectoryPyramidReader, PyramidReader};
 use libviprs::resume::{ResumeMode, ResumePolicy};
-use libviprs::sink::{SinkError, Tile, TileFormat, TileSink};
+use libviprs::sink::{EmissionOrder, SinkError, Tile, TileFormat, TileSink};
 use libviprs::sink_pmtiles::{PmTilesSink, tile_coord_to_zxy};
 use libviprs::{EngineBuilder, FsSink, PixelFormat, Raster};
 
@@ -1267,4 +1270,340 @@ fn the_directory_reader_describes_the_pyramid() {
             .expect("a plan has levels")
     );
     assert_eq!(reader.tile_format(), Some(TileFormat::Png));
+}
+
+// ---------------------------------------------------------------------------
+// Ordered emission (issue #1145)
+// ---------------------------------------------------------------------------
+
+/// A sink that records the coordinates it is handed, in the order it is
+/// handed them, and asks the engine for a particular order.
+///
+/// It writes nothing. The whole point is the sequence, and a sink that also
+/// produced an archive would let a passing cell be explained by the archive
+/// instead of by the calls.
+struct OrderProbe {
+    order: EmissionOrder,
+    seen: Mutex<Vec<TileCoord>>,
+}
+
+impl OrderProbe {
+    fn new(order: EmissionOrder) -> Self {
+        Self {
+            order,
+            seen: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// The tile ids of the coordinates it was handed, in call order.
+    fn tile_ids(&self) -> Vec<u64> {
+        self.seen
+            .lock()
+            .expect("the probe's mutex is never poisoned")
+            .iter()
+            .map(|c| {
+                let z = u8::try_from(c.level).expect("a unit-scale plan stays under zoom 32");
+                zxy_to_tileid(z, c.col, c.row).expect("a planned coordinate is addressable")
+            })
+            .collect()
+    }
+}
+
+impl TileSink for OrderProbe {
+    fn write_tile(&self, tile: &Tile) -> Result<(), SinkError> {
+        self.seen
+            .lock()
+            .expect("the probe's mutex is never poisoned")
+            .push(tile.coord);
+        Ok(())
+    }
+
+    fn emission_order(&self) -> EmissionOrder {
+        self.order
+    }
+}
+
+/// Every coordinate the plan holds, as a tile id.
+fn planned_tile_ids(plan: &PyramidPlan) -> BTreeSet<u64> {
+    let mut ids = BTreeSet::new();
+    for level in &plan.levels {
+        for row in 0..level.rows {
+            for col in 0..level.cols {
+                let z = u8::try_from(level.level).expect("a unit-scale plan stays under zoom 32");
+                ids.insert(zxy_to_tileid(z, col, row).expect("a planned coordinate is addressable"));
+            }
+        }
+    }
+    ids
+}
+
+/// Run one pyramid into an archive with the layout and emission order named,
+/// under a fixed file name so two runs differ in nothing but what is asked
+/// for here.
+///
+/// The file **stem** is load-bearing and is why this helper exists rather than
+/// two calls to `run_into_archive`. `PmTilesSink` fills the archive's
+/// `metadata.name` from it when the caller supplies none, so two archives
+/// written to differently named files carry different metadata and cannot be
+/// compared byte for byte however identical their tiles are.
+fn run_with_layout(
+    src: &Raster,
+    plan: &PyramidPlan,
+    dir: &Path,
+    layout: ArchiveLayout,
+    ordered: bool,
+    concurrency: usize,
+) -> PathBuf {
+    let out = dir.join("pyramid.pmtiles");
+    let sink = PmTilesSink::builder(&out)
+        .plan(plan.clone())
+        .writer_options(WriterOptions::default().with_layout(layout))
+        .ordered_emission(ordered)
+        .build()
+        .expect("a PNG XYZ sink builds");
+    EngineBuilder::new(src, plan.clone(), sink)
+        .with_concurrency(concurrency)
+        .run()
+        .expect("a unit-scale run into a PMTiles archive succeeds");
+    out
+}
+
+/// A plan with a level whose grid is wide enough for Hilbert order and
+/// row-major order to disagree.
+///
+/// 1024 at a 256 tile is a 4x4 top level, and the Hilbert curve over a 4x4
+/// grid visits `(1, 0)` fifteenth and `(3, 0)` sixth. A 2x2 top level would
+/// not do: the Hilbert order of a 2x2 grid is `(0,0) (0,1) (1,1) (1,0)`, and
+/// the assertions below would still pass for a walk that merely reversed the
+/// levels.
+fn ordered_plan() -> PyramidPlan {
+    plan_for(1024, 1024, 256, Layout::Xyz)
+}
+
+/// A sink that asks for tile id order is handed every planned tile exactly
+/// once, in strictly ascending tile id order.
+///
+/// Ascending tile id is two claims at once and the fixture is chosen so that
+/// both bite. The levels have to come out smallest-first, which is the
+/// opposite of the order the cascade makes them in, and within a level the
+/// tiles have to come out in Hilbert order, which is not the row-major order
+/// the engine walks. A pyramid whose every level were a single tile would
+/// pass the second claim by accident.
+///
+/// The control at the bottom is the same run with the default order, and it
+/// is what says this cell can fail. It asserts the default is *not* ascending
+/// rather than asserting some particular interleaving, because the default
+/// order inside a level is whatever the workers finished in.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn ordered_emission_hands_the_sink_every_tile_in_ascending_tile_id_order() {
+    let plan = ordered_plan();
+    let src = gradient(1024, 1024);
+    let expected = planned_tile_ids(&plan);
+    assert!(
+        expected.len() > 16,
+        "the positive control: a fixture with one level per tile could not tell the orders apart, \
+         got {} tiles",
+        expected.len()
+    );
+
+    let probe = Arc::new(OrderProbe::new(EmissionOrder::TileId));
+    EngineBuilder::new(&src, plan.clone(), Arc::clone(&probe))
+        .with_concurrency(4)
+        .run()
+        .expect("a run into a recording sink succeeds");
+
+    let seen = probe.tile_ids();
+    assert_eq!(
+        seen.len(),
+        expected.len(),
+        "an ordered run must still hand over every planned tile exactly once"
+    );
+    assert_eq!(
+        seen.iter().copied().collect::<BTreeSet<_>>(),
+        expected,
+        "an ordered run must hand over the same set of tiles as the plan holds"
+    );
+    for pair in seen.windows(2) {
+        assert!(
+            pair[0] < pair[1],
+            "tile ids must ascend, got {} then {} in {seen:?}",
+            pair[0],
+            pair[1]
+        );
+    }
+
+    let control = Arc::new(OrderProbe::new(EmissionOrder::Cascade));
+    EngineBuilder::new(&src, plan, Arc::clone(&control))
+        .with_concurrency(4)
+        .run()
+        .expect("a run into a recording sink succeeds");
+    let control_seen = control.tile_ids();
+    assert!(
+        control_seen.windows(2).any(|p| p[0] > p[1]),
+        "the control: the default order is not ascending, so this cell can fail"
+    );
+}
+
+/// An ordered run in arrival layout produces the archive the reordering pass
+/// would have produced.
+///
+/// This is #1145's own acceptance bar, written the way the issue words it: a
+/// whole-file comparison against the same tiles written through
+/// `Layout::TileId`. The failure report names the first differing offset and
+/// the count, because "the files differ" is not a measurement and the point of
+/// the cell is which bytes move.
+///
+/// The dedupe window is what makes the comparison fair. Which payloads an
+/// archive stores depends on how far apart two identical tiles *arrived*, so
+/// two different arrival orders are only comparable while the window holds the
+/// whole job. It does here by a wide margin, and `tile_contents_count` is
+/// asserted equal first so a run where it did not is a failure about the
+/// window rather than a failure about the layout.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn an_ordered_arrival_run_is_byte_identical_to_the_tile_id_layout() {
+    let plan = ordered_plan();
+    let src = gradient(1024, 1024);
+
+    let ordered_dir = tempfile::tempdir().expect("tempdir");
+    let sorted_dir = tempfile::tempdir().expect("tempdir");
+    let ordered = run_with_layout(
+        &src,
+        &plan,
+        ordered_dir.path(),
+        ArchiveLayout::Arrival,
+        true,
+        4,
+    );
+    let sorted = run_with_layout(
+        &src,
+        &plan,
+        sorted_dir.path(),
+        ArchiveLayout::TileId,
+        false,
+        4,
+    );
+
+    let a = walk(&ordered);
+    let b = walk(&sorted);
+    assert_eq!(
+        a.header.tile_contents_count, b.header.tile_contents_count,
+        "the window held the whole job in both runs, or this comparison is about the window"
+    );
+    assert!(
+        a.header.addressed_tiles_count > 16,
+        "the positive control: two empty archives are byte-identical and prove nothing"
+    );
+
+    let left = std::fs::read(&ordered).expect("the ordered archive is readable");
+    let right = std::fs::read(&sorted).expect("the sorted archive is readable");
+    let differing: Vec<usize> = (0..left.len().min(right.len()))
+        .filter(|&i| left[i] != right[i])
+        .collect();
+    assert_eq!(
+        (left.len(), differing.len()),
+        (right.len(), 0),
+        "an ordered arrival archive must be the sorted one byte for byte; \
+         sizes {} and {}, {} of the shared prefix differ, first at {:?}",
+        left.len(),
+        right.len(),
+        differing.len(),
+        differing.first()
+    );
+}
+
+/// Two ordered runs over one source produce the same archive.
+///
+/// Arrival order puts the payloads in the file in the order they turn up, so
+/// without an emission order this is a statement about the thread schedule and
+/// is false. It is the half of #1145 that does not need the `clustered` flag,
+/// and it is what "deterministic" means for a caller who wants to compare two
+/// builds of the same drawing.
+///
+/// Both runs are at a concurrency of four against a level of sixteen tiles, so
+/// the workers genuinely race; a single-threaded pair would be identical
+/// whatever the emission order did.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn two_ordered_arrival_runs_produce_the_same_archive() {
+    let plan = ordered_plan();
+    let src = gradient(1024, 1024);
+
+    let first_dir = tempfile::tempdir().expect("tempdir");
+    let second_dir = tempfile::tempdir().expect("tempdir");
+    let first = run_with_layout(
+        &src,
+        &plan,
+        first_dir.path(),
+        ArchiveLayout::Arrival,
+        true,
+        4,
+    );
+    let second = run_with_layout(
+        &src,
+        &plan,
+        second_dir.path(),
+        ArchiveLayout::Arrival,
+        true,
+        4,
+    );
+
+    let left = std::fs::read(&first).expect("the first archive is readable");
+    let right = std::fs::read(&second).expect("the second archive is readable");
+    assert!(
+        left.len() > 16384,
+        "the positive control: an archive of nothing would match itself"
+    );
+    assert_eq!(
+        left.len(),
+        right.len(),
+        "two ordered runs must produce archives of one size"
+    );
+    let differing = (0..left.len()).filter(|&i| left[i] != right[i]).count();
+    assert_eq!(
+        differing, 0,
+        "two ordered runs must produce one archive, {differing} bytes differ"
+    );
+}
+
+/// An ordered run holds no more tiles in flight than an unordered one.
+///
+/// This is a guard rather than a reproduction, and it is worth saying which.
+/// It passes before the ordered walk exists, because an ordered run is an
+/// ordinary run then. What it is here to catch is the obvious way to build
+/// one: extract in parallel and reorder at the consumer with a buffer keyed on
+/// position. A consumer that drains the channel into such a buffer has taken
+/// the backpressure off the workers, so one slow tile lets every other worker
+/// run to the end of the level and the buffer holds the level. The peak below
+/// would then be the level's tile count rather than the queue's capacity.
+///
+/// The bound is `buffer_size` for the queue plus one tile in each worker's
+/// hand. Rounding gets its own slack: a run that splits the queue's capacity
+/// across the workers cannot always divide it evenly.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn ordered_emission_keeps_no_more_tiles_in_flight_than_the_queue_allows() {
+    let plan = ordered_plan();
+    let src = gradient(1024, 1024);
+    let concurrency = 4;
+    let buffer_size = 4;
+
+    let probe = Arc::new(OrderProbe::new(EmissionOrder::TileId));
+    let result = EngineBuilder::new(&src, plan, Arc::clone(&probe))
+        .with_concurrency(concurrency)
+        .with_buffer_size(buffer_size)
+        .run()
+        .expect("a run into a recording sink succeeds");
+
+    let ceiling = buffer_size + 2 * concurrency;
+    assert!(
+        (result.queue_pressure_peak as usize) <= ceiling,
+        "an ordered run must stay inside the queue's capacity, peaked at {} against {ceiling}",
+        result.queue_pressure_peak
+    );
+    assert!(
+        probe.tile_ids().len() > 16,
+        "the positive control: a run that emitted nothing holds nothing"
+    );
 }
