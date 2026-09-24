@@ -1321,6 +1321,21 @@ and not under `Fixed`: this file is the only place they can be caught.
 
 ### Added
 
+- **The tile-codec numbers, re-measured against the encoder that shipped**
+  (issue #1134). `docs/tile-codec-benchmarks.md` is the procedure behind the
+  JPEG, PNG and lossless WebP figures for a vector CAD sheet: one `viprs
+  pyramid` run per cell over `blueprint.pdf` at 150 dpi, reporting tile bytes,
+  deduped bytes, distinct payloads, archive size, allocated blocks and
+  filesystem entries, with PSNR and an ink-mask IoU against the lossless tree
+  beside it. `scripts/tile-fidelity.py` is the analysis half.
+
+  It exists because #1132 replaced the JPEG encoder the day after the run
+  behind #1134 was taken, so half of that record describes code that is no
+  longer in the tree. The document says which cells that took out, and it
+  carries the control that says the two runs saw the same pixels: this run's
+  tiles through libjpeg at #1134's four knob settings reproduce its four
+  totals to the byte.
+
 - **The PMTiles writer can append straight into the destination** (EPIC #1135,
   issue #1143). `WriterOptions::layout` and `WriterOptions::with_layout` take
   the new `pmtiles::Layout`, which is `TileId` by default and changes nothing
@@ -3533,6 +3548,34 @@ and not under `Fixed`: this file is the only place they can be caught.
   new variant is additive.
 
 ### Changed
+
+- **`JpegSubsample::Auto` asks the pixels as well as the quality, so a coloured
+  tile keeps its chroma** (issue #1134). `Auto` was libvips'
+  `VIPS_FOREIGN_SUBSAMPLE_AUTO` and nothing else, 4:2:0 below quality 90 and
+  4:4:4 at or above. The tile default is quality 85, so every tile this crate
+  wrote was subsampled whatever colour was in it, and #1132's own table priced
+  that on coloured line art: 22719 bytes at 35.01 dB became 15385 at 30.05, a
+  4.96 dB drop, while the black-on-white drawing in the row above moved
+  0.02 dB.
+
+  `Auto` now keeps the quality rule and adds a content one. The encoder counts
+  the 2x2 blocks 4:2:0 would average where a chroma sample sits more than eight
+  levels from the four's mean, and keeps full chroma once more than one block
+  in 256 does. A count rather than an average, because the damage is
+  concentrated where the colour is: #1134 measured 13.969 mean absolute channel
+  error on recoloured ink against 2.799 while its own ink-mask metric stayed at
+  0.99997, which is the blindness it warned about.
+
+  **This deviates from libvips below quality 90, deliberately.** Nothing at or
+  above 90 moves and the content can only ever veto, never re-enable. `On` and
+  `Off` are untouched, so a caller who wants the old unconditional behaviour
+  asks for `On`.
+
+  Bytes move only where the colour is. Measured end to end over
+  `blueprint.pdf` at 150 dpi, 1479 tiles: the pyramid is byte-identical either
+  side of the change, because the sheet is monochrome and every tile still
+  takes 4:2:0. `docs/tile-codec-benchmarks.md` has the run and what the scan
+  costs.
 
 - **Tile JPEG is 4:2:0 with Huffman tables built from the tile, so every JPEG
   tile's bytes move** (issue #1132). `FsSink::encode_tile` called
