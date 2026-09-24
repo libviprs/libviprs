@@ -614,6 +614,27 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// which `git init`s a `tempfile::tempdir()` to reach an unborn HEAD. It is
 /// `annotated fs-detected` like its neighbour and is not a judgement call.
 ///
+/// #1130 moves it again for the five filesystem cells the verify findings add:
+/// three are the whole of `tests/pmtiles_verify_reads_the_index.rs`, which
+/// writes a real archive into a `tempfile::tempdir()` and reads it back
+/// through a counting transport, and two are the pair
+/// `tests/pmtiles_plan_aware_verify.rs` grows for the archive of a different
+/// picture. All five write an archive to disk, so none of them is a judgement
+/// call, and the figure below is what the detector printed rather than what I
+/// got by adding five to the line above.
+///
+/// The review of #1147 moves it 426 to 428 for the pair that pins the cheap
+/// probe to a local file: one serves a real archive through a transport that
+/// answers the index and refuses the tile data, and one is the negative
+/// control that a file on disk still takes the cheap probe. Both write an
+/// archive into a `tempfile::tempdir()`, and 428 is again what the detector
+/// printed with this constant still at 426.
+///
+/// Then 428 to 429 for the ranged sibling of the cheap-probe cell, which
+/// verifies the same archive through a transport that reports a size and is
+/// not a local file and asserts that every payload is read. 429 is the number
+/// the detector printed with this constant still at 428.
+///
 /// EPIC #1135 moves it again, to 434. The tests it adds that reach the
 /// filesystem are the writer cells that drive a whole `finish` to count what
 /// it does, the dedupe window's two edges, the two orders that stop agreeing
@@ -626,7 +647,10 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// The number came from the detector rather than from that list, which is the
 /// discipline the paragraphs above ask for and the reason it is right: the
 /// list has been off by one twice while the detector has not.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 434;
+///
+/// #1146 landed first and took main to 434. Held at that figure, the
+/// detector reported the number below on the merged tree.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 442;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {

@@ -886,25 +886,43 @@ fn push_indented_opt_u64(out: &mut String, indent: usize, key: &str, value: Opti
 /// `a_repository_with_a_commit_is_read_back` can point it at a repository it
 /// built, and prove the reading works without depending on how this checkout
 /// happens to be mounted.
+///
+/// # Both answers or neither
+///
+/// The two questions are asked separately and answered together, because half
+/// of this pair is worse than none of it: a `dirty: false` next to a missing
+/// commit reads as a clean tree somebody could reproduce, and there is nothing
+/// to reproduce it from. A hole says nobody can reproduce this run, which is
+/// the honest claim.
+///
+/// That is not a hypothetical, and it turned up three separate times in one
+/// day. `libviprs-tests/tools/run-tests.sh` stages a small repository into the
+/// build context so `git ls-files` works, and what it writes is an index, a
+/// config and a `HEAD` pointing at a branch with no commit behind it. The
+/// linked worktree above is the other shape. Git answers both asymmetrically,
+/// measured in the CI image:
+///
+/// ```text
+/// git rev-parse --short HEAD   exit 128
+/// git status --porcelain       exit 0
+/// ```
+///
+/// So the pair came back `(None, Some(false))`, which is exactly the half
+/// attestation `the_envelope_says_which_host_produced_the_numbers` refuses,
+/// and that cell failed the pre-push gate from every worktree rather than for
+/// anything in the tree it was gating.
+///
+/// The short-circuit below is deliberate over asking both and discarding: when
+/// the commit is already unreadable there is nothing the second question can
+/// change, so it is not worth a process.
 pub fn commit_and_dirty(dir: &Path) -> (Option<String>, Option<bool>) {
-    // Both halves or neither. git can answer one and not the other, and the
-    // two cases I know of are a repository with an unborn HEAD and a linked
-    // worktree bind-mounted into a container, where `.git` is a file pointing
-    // outside the mount. In both, `status --porcelain` exits 0 with empty
-    // output while `rev-parse HEAD` fails, so returning them independently
-    // publishes "clean, at no commit".
-    //
-    // That is worse than a hole rather than merely different: a hole says
-    // nobody can reproduce this run, and a `dirty: false` says the tree was
-    // pristine. `the_envelope_says_which_host_produced_the_numbers` refuses
-    // the pair downstream, and it is better refused at the source.
-    match (
-        git_in(dir, &["rev-parse", "--short", "HEAD"]),
-        git_in(dir, &["status", "--porcelain"]).map(|out| !out.is_empty()),
-    ) {
-        (Some(commit), Some(dirty)) => (Some(commit), Some(dirty)),
-        _ => (None, None),
-    }
+    let Some(commit) = git_in(dir, &["rev-parse", "--short", "HEAD"]) else {
+        return (None, None);
+    };
+    let Some(status) = git_in(dir, &["status", "--porcelain"]) else {
+        return (None, None);
+    };
+    (Some(commit), Some(!status.is_empty()))
 }
 
 /// Run one git command in `dir`, or answer `None`.
