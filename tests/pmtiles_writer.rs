@@ -2011,21 +2011,20 @@ fn tile_id_offsets(order: &[(u64, Vec<u8>)]) -> BTreeMap<u64, u64> {
 /// so the sections in front of the tile data can be a reservation rather than
 /// a thing that has to be written first.
 ///
-/// Both halves of the fixture matter. `dupes-z0z3` at the default leaf width
-/// is a root-only archive, and the same tiles at two entries a leaf force a
-/// real leaf section, which is the section that moves furthest.
+/// Both fixtures matter. `dupes-z0z3` is 85 tiles and fits the root, and
+/// `leaves-z0z7` is 21845 and does not, so it has a real leaf section: the
+/// section that moves furthest here, from in front of the tile data to behind
+/// it. A root-only fixture on its own would never place one.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn an_arrival_archive_puts_the_tile_data_before_the_metadata_and_the_leaves() {
     let dir = scratch();
-    let g = parse_golden("dupes-z0z3.pmtiles");
 
-    for (label, options) in [
-        ("root only", arrival_options(&g)),
-        ("with leaves", arrival_options(&g).with_leaf_entries(2)),
-    ] {
-        let out = dir.path().join(format!("arrival-{}.pmtiles", label.replace(' ', "-")));
-        write_shuffled(&g, &out, 0x5eed_1143, options);
+    for (name, expect_leaves) in [("dupes-z0z3.pmtiles", false), ("leaves-z0z7.pmtiles", true)] {
+        let label = name.trim_end_matches(".pmtiles");
+        let g = parse_golden(name);
+        let out = dir.path().join(format!("arrival-{label}.pmtiles"));
+        write_shuffled(&g, &out, 0x5eed_1143, arrival_options(&g));
         let bytes = std::fs::read(&out).expect("the archive is on disk");
         let h = Header::try_decode(&bytes[..127]).expect("our header decodes");
 
@@ -2062,11 +2061,10 @@ fn an_arrival_archive_puts_the_tile_data_before_the_metadata_and_the_leaves() {
             "{label}: arrival order cannot claim clustering"
         );
 
-        let leaf_bearing = h.leaf_directories_length > 0;
         assert_eq!(
-            leaf_bearing,
-            label == "with leaves",
-            "{label}: the fixture did not produce the leaf structure it exists for"
+            h.leaf_directories_length > 0,
+            expect_leaves,
+            "{label}: the fixture did not produce the leaf structure it was picked for"
         );
     }
 }
@@ -2085,23 +2083,30 @@ fn an_arrival_archive_puts_the_tile_data_before_the_metadata_and_the_leaves() {
 #[cfg_attr(miri, ignore)]
 fn an_arrival_archive_round_trips_every_tile_and_its_blobs_are_in_arrival_order() {
     let dir = scratch();
-    let g = parse_golden("dupes-z0z3.pmtiles");
-    let out = dir.path().join("arrival-roundtrip.pmtiles");
+    for name in ["dupes-z0z3.pmtiles", "leaves-z0z7.pmtiles"] {
+        round_trips_in_arrival_order(name, dir.path());
+    }
+}
+
+/// One fixture's worth of [`an_arrival_archive_round_trips_every_tile_and_its_blobs_are_in_arrival_order`].
+fn round_trips_in_arrival_order(name: &str, dir: &Path) {
+    let g = parse_golden(name);
+    let out = dir.join(format!("arrival-roundtrip-{name}"));
     let order = write_shuffled(&g, &out, 0x5eed_1144, arrival_options(&g));
 
     let (expected, total) = arrival_offsets(&order);
     let by_tile_id = tile_id_offsets(&order);
     assert!(
         expected != by_tile_id,
-        "this seed put the tiles in tile id order, so the two layouts predict \
-         the same offsets and nothing below can tell them apart"
+        "{name}: this seed put the tiles in tile id order, so the two layouts \
+         predict the same offsets and nothing below can tell them apart"
     );
 
     let reader = libviprs::pmtiles::Reader::try_open(&out).expect("the archive opens");
     assert_eq!(
         reader.header().tile_data_length,
         total,
-        "the data region is not the distinct payloads laid end to end"
+        "{name}: the data region is not the distinct payloads laid end to end"
     );
 
     for (tile_id, payload) in &g.tiles {
@@ -2110,18 +2115,22 @@ fn an_arrival_archive_round_trips_every_tile_and_its_blobs_are_in_arrival_order(
         assert_eq!(
             got.as_deref(),
             Some(payload.as_slice()),
-            "tile {tile_id} did not come back as it went in"
+            "{name}: tile {tile_id} did not come back as it went in"
         );
         let (at, length) = reader
             .tile_span(z, x, y)
             .expect("a span resolves")
             .expect("the tile is present");
-        assert_eq!(length as usize, payload.len(), "tile {tile_id} changed length");
+        assert_eq!(
+            length as usize,
+            payload.len(),
+            "{name}: tile {tile_id} changed length"
+        );
         assert_eq!(
             at,
             reader.header().tile_data_offset + expected[tile_id],
-            "tile {tile_id} is at {at}, which is where tile id order would put \
-             it rather than where it arrived",
+            "{name}: tile {tile_id} is at {at}, which is where tile id order \
+             would put it rather than where it arrived",
         );
     }
 
@@ -2133,7 +2142,7 @@ fn an_arrival_archive_round_trips_every_tile_and_its_blobs_are_in_arrival_order(
     .expect("the validator runs");
     assert!(
         report.is_valid(),
-        "the validator found {:?}",
+        "{name}: the validator found {:?}",
         report.findings
     );
 }
