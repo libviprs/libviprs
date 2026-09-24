@@ -499,16 +499,28 @@ Nothing stops compiling. This is a change in what comes out.
 
 A JPEG tile used to be 4:4:4 with the standard Annex K Huffman tables, because
 the tile path handed the encoder a quality and nothing else (issue #1132). It
-is 4:2:0 with tables built from the tile now, and `JpegSubsample::Auto` is what
-makes that choice: 4:2:0 below quality 90 and 4:4:4 at or above, which is
-libvips' `subsample_mode=auto`. Ask for quality 90 or more and you get full
-chroma back.
+is 4:2:0 with tables built from the tile now on the content that can take it,
+and `JpegSubsample::Auto` is what makes that choice.
+
+`Auto` asks two questions (issue #1134). **Quality first**, which is libvips'
+`subsample_mode=auto`: at quality 90 or above there is no subsampling at all,
+so asking for 90 gets you full chroma whatever the picture is. **Then the
+content**, which libvips does not do: below quality 90 the encoder counts the
+2x2 blocks where subsampling would move a chroma sample by more than eight
+levels, and keeps full chroma once more than one block in 256 is like that. So
+a drawing subsamples and a coloured sheet does not, without anyone choosing per
+file.
 
 On a 256x256 tile at the default quality of 85, measured here: a blank tile
 falls from 2419 to 668 bytes, a black-on-white drawing from 17729 to 14313 at
 the same 38.9 dB, and a photograph from 11826 to 10125 at the same 36.7 dB.
-Coloured line art is the one case that pays for the subsampling rather than
-only banking it, and quality 90 is the answer there.
+Coloured line art was the one case that paid for the subsampling rather than
+only banking it, 35.01 dB down to 30.05, and it is the case the content check
+now keeps at 4:4:4 on its own.
+
+Over a whole 1479-tile vector CAD sheet the content check changes nothing: the
+pyramid is byte-identical either side of it, because black ink on white paper
+has no chroma to keep. `docs/tile-codec-benchmarks.md` has that run.
 
 What it means for you:
 
@@ -524,7 +536,9 @@ What it means for you:
 - **`Raster::encode_jpeg_options` and `jpegsave_buffer` honour the subsample
   mode** they have always accepted. A caller passing `JpegSubsample::Off` was
   getting 4:4:4 by accident and still gets it; a caller passing `On` was
-  getting 4:4:4 and now gets what it asked for.
+  getting 4:4:4 and now gets what it asked for. **Neither consults the
+  content**, so `On` is how you ask for unconditional 4:2:0 and it stays
+  unconditional.
 - **Encoding is about 1.9x slower per tile**, because the tables are built from
   the tile and that means transforming it twice. Decoding is untouched.
 
