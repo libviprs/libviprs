@@ -41,7 +41,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use libviprs::engine::EngineError;
 use libviprs::engine::{BlankTileStrategy, EngineConfig};
 use libviprs::planner::{Layout, PyramidPlan, PyramidPlanner, TileCoord};
 use libviprs::pmtiles::directory::deserialize_entries;
@@ -54,7 +53,7 @@ use libviprs::pyramid_reader::{DirectoryPyramidReader, PyramidReader};
 use libviprs::resume::{ResumeMode, ResumePolicy};
 use libviprs::sink::{EmissionOrder, SinkError, Tile, TileFormat, TileSink};
 use libviprs::sink_pmtiles::{PmTilesSink, tile_coord_to_zxy};
-use libviprs::{EngineBuilder, EngineKind, FsSink, PixelFormat, Raster};
+use libviprs::{EngineBuilder, EngineError, EngineKind, FsSink, PixelFormat, Raster};
 
 #[path = "common/pmtiles_oracle.rs"]
 mod oracle;
@@ -813,6 +812,127 @@ fn verify_builds_where_resume_does_not() {
     }
 }
 
+/// A resume run through the engine is refused, rather than quietly turning
+/// into a full regeneration (issue #1129).
+///
+/// This is the shape every caller actually writes, and the CLI with it. The
+/// mode is told to the **engine**, so the sink is built by the plain
+/// constructor and takes the builder's `Overwrite` default, which means the
+/// build-time gate in [`verify_builds_where_resume_does_not`] never fires. The
+/// rest used to follow quietly: `checkpoint_root()` is `None` on purpose, so
+/// the engine resolves no checkpoint root, the completed set comes back empty,
+/// nothing is skipped, [`TileSink::seed_completed_tile`] is never reached
+/// either, and the run re-renders every tile and reports success. Somebody who
+/// asked to resume a multi-hour job got a full re-render that is
+/// indistinguishable from a resume with nothing left to do.
+///
+/// Two assertions, because the refusal on its own is not evidence of anything.
+///
+/// * **Nothing is published.** A gate that returned the error after the run
+///   had already written the archive would satisfy `expect_err` and would have
+///   fixed nothing, since the expensive half is the re-render, not the return
+///   value. The archive path has to be untouched.
+/// * **`Overwrite` still runs.** A gate that refuses every mode passes the
+///   refusal assertion by itself, and the only thing that tells it from a
+///   correct one is the same sink, built the same way, still writing an
+///   archive for a mode this sink can honour.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn an_engine_resume_is_refused_rather_than_silently_regenerating() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let plan = plan_for(512, 512, 256, Layout::Xyz);
+    let src = gradient(512, 512);
+
+    let refused = dir.path().join("refused.pmtiles");
+    let sink = PmTilesSink::try_new(&refused, plan.clone(), TileFormat::Png)
+        .expect("the plain constructor builds, exactly as a caller writes it");
+    let err = EngineBuilder::new(&src, plan.clone(), &sink)
+        .with_resume(ResumePolicy::resume())
+        .run()
+        .expect_err("a PMTiles run cannot resume, so asking it to must say so");
+    match err {
+        EngineError::Sink(SinkError::UnsupportedResumeMode {
+            mode: ResumeMode::Resume,
+        }) => {}
+        other => panic!("the engine must surface the sink's own typed refusal, got {other:?}"),
+    }
+    assert!(
+        !refused.exists(),
+        "a refused resume must not publish an archive: the cost this refusal \
+         exists to stop is the silent re-render, not the return value"
+    );
+    drop(sink);
+
+    // The control. Same constructor, same engine, a mode this sink honours.
+    let written = dir.path().join("written.pmtiles");
+    let sink = PmTilesSink::try_new(&written, plan.clone(), TileFormat::Png)
+        .expect("the plain constructor builds");
+    EngineBuilder::new(&src, plan.clone(), &sink)
+        .with_resume(ResumePolicy::overwrite())
+        .run()
+        .expect("Overwrite is a mode this sink can honour, and still runs");
+    assert!(
+        written.exists(),
+        "the refusal is about Resume alone, so Overwrite must still publish"
+    );
+}
+
+/// The refusal survives every wrapper the engine can be handed (issue #1129).
+///
+/// `EngineBuilder::new` takes the sink by value, so a caller keeping ownership
+/// passes `&sink`, a caller unifying match arms passes `Box<dyn TileSink>` and
+/// a caller reading the sink back afterwards passes `Arc`. All three are
+/// generated from `forward_tile_sink!`, whose own doc says a method added to
+/// [`TileSink`] has to be forwarded in the macro body, and a hook left out
+/// there falls through to the trait default. The default for this one is "I
+/// can honour it", so a forgotten forward restores the silent regeneration for
+/// exactly the callers who wrap, with every direct-sink cell still green.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn the_resume_refusal_survives_the_sink_wrappers() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let plan = plan_for(256, 256, 256, Layout::Xyz);
+    let src = gradient(256, 256);
+
+    let boxed_at = dir.path().join("boxed.pmtiles");
+    let boxed: Box<dyn TileSink> = Box::new(
+        PmTilesSink::try_new(&boxed_at, plan.clone(), TileFormat::Png).expect("the sink builds"),
+    );
+    let err = EngineBuilder::new(&src, plan.clone(), boxed)
+        .with_resume(ResumePolicy::resume())
+        .run()
+        .expect_err("a boxed PMTiles sink refuses a resume too");
+    assert!(
+        matches!(
+            err,
+            EngineError::Sink(SinkError::UnsupportedResumeMode {
+                mode: ResumeMode::Resume
+            })
+        ),
+        "Box<dyn TileSink> must forward the refusal, got {err:?}"
+    );
+    assert!(!boxed_at.exists(), "and publish nothing");
+
+    let shared_at = dir.path().join("shared.pmtiles");
+    let shared = std::sync::Arc::new(
+        PmTilesSink::try_new(&shared_at, plan.clone(), TileFormat::Png).expect("the sink builds"),
+    );
+    let err = EngineBuilder::new(&src, plan.clone(), std::sync::Arc::clone(&shared))
+        .with_resume(ResumePolicy::resume())
+        .run()
+        .expect_err("a shared PMTiles sink refuses a resume too");
+    assert!(
+        matches!(
+            err,
+            EngineError::Sink(SinkError::UnsupportedResumeMode {
+                mode: ResumeMode::Resume
+            })
+        ),
+        "Arc<T> must forward the refusal, got {err:?}"
+    );
+    assert!(!shared_at.exists(), "and publish nothing");
+}
+
 /// A resume that would actually drop a tile is refused at the tile, not
 /// silently honoured.
 ///
@@ -1456,6 +1576,97 @@ fn ordered_emission_hands_the_sink_every_tile_in_ascending_tile_id_order() {
     assert!(
         control_seen.windows(2).any(|p| p[0] > p[1]),
         "the control: the default order is not ascending, so this cell can fail"
+    );
+}
+
+/// The requested order survives every wrapper the engine can be handed
+/// (issue #1145, the same trap as #1129's resume refusal).
+///
+/// `EngineBuilder::new` takes the sink by value, so a caller who keeps
+/// ownership passes `&sink`, a caller unifying match arms passes
+/// `Box<dyn TileSink>`, and a caller who reads the sink back afterwards passes
+/// `Arc`. All three come out of `forward_tile_sink!`, and a hook the macro
+/// body forgets falls through to the trait default. The default here is
+/// `Cascade`, which is what every sink asked for before this issue, so a
+/// forgotten forward does not fail: the run goes ahead in the old order, the
+/// archive comes out unclustered and non-deterministic, and it reports
+/// success. Every cell that hands the engine a bare sink stays green.
+///
+/// `Arc` is the one form already exercised, by
+/// [`ordered_emission_hands_the_sink_every_tile_in_ascending_tile_id_order`],
+/// so this covers the other two. The `Box` here wraps an `Arc` rather than the
+/// probe itself, because `Box<dyn TileSink>` consumes what it holds and the
+/// point of a probe is reading it back; that stacks the two impls, which is
+/// the shape a real caller who boxes a shared sink ends up with anyway.
+///
+/// `no_forwarding_hook_is_left_out_of_the_macro_or_the_list` in `src/sink.rs`
+/// is the structural half of this and covers every hook at once. This half is
+/// here because a macro line that forwards to the wrong method would satisfy
+/// that one and still break the run.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn the_requested_order_survives_the_sink_wrappers() {
+    let plan = ordered_plan();
+    let src = gradient(1024, 1024);
+    let expected = planned_tile_ids(&plan);
+
+    // `&T`.
+    let borrowed = OrderProbe::new(EmissionOrder::TileId);
+    EngineBuilder::new(&src, plan.clone(), &borrowed)
+        .with_concurrency(4)
+        .run()
+        .expect("a run into a borrowed recording sink succeeds");
+    let seen = borrowed.tile_ids();
+    assert_eq!(
+        seen.iter().copied().collect::<BTreeSet<_>>(),
+        expected,
+        "the borrowed sink must still be handed every planned tile"
+    );
+    for pair in seen.windows(2) {
+        assert!(
+            pair[0] < pair[1],
+            "`&T` must forward the requested order, got {} then {} in {seen:?}",
+            pair[0],
+            pair[1]
+        );
+    }
+
+    // `Box<dyn TileSink>`, over an `Arc` so the probe is still readable.
+    let shared = Arc::new(OrderProbe::new(EmissionOrder::TileId));
+    let boxed: Box<dyn TileSink> = Box::new(Arc::clone(&shared));
+    EngineBuilder::new(&src, plan.clone(), boxed)
+        .with_concurrency(4)
+        .run()
+        .expect("a run into a boxed recording sink succeeds");
+    let seen = shared.tile_ids();
+    assert_eq!(
+        seen.iter().copied().collect::<BTreeSet<_>>(),
+        expected,
+        "the boxed sink must still be handed every planned tile"
+    );
+    for pair in seen.windows(2) {
+        assert!(
+            pair[0] < pair[1],
+            "`Box<dyn TileSink>` must forward the requested order, got {} then {} in {seen:?}",
+            pair[0],
+            pair[1]
+        );
+    }
+
+    // The control, through the same wrapper. Without it everything above also
+    // passes for an engine that walks in tile id order unconditionally, which
+    // would mean the wrappers were never asked anything.
+    let control = Arc::new(OrderProbe::new(EmissionOrder::Cascade));
+    let boxed_control: Box<dyn TileSink> = Box::new(Arc::clone(&control));
+    EngineBuilder::new(&src, plan, boxed_control)
+        .with_concurrency(4)
+        .run()
+        .expect("a run into a boxed recording sink succeeds");
+    let control_seen = control.tile_ids();
+    assert!(
+        control_seen.windows(2).any(|p| p[0] > p[1]),
+        "the control: a wrapped sink that asks for `Cascade` must get `Cascade`, so a \
+         wrapper carrying the order is what the assertions above measure"
     );
 }
 
