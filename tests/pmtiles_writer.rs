@@ -2219,3 +2219,51 @@ fn capture_an_arrival_archive_for_the_go_pmtiles_oracle() {
         }
     }
 }
+
+/// A dropped arrival run leaves no archive, and the tile bytes it had already
+/// written go with it.
+///
+/// `dropping_a_writer_without_finishing_cleans_up_after_itself` says this for
+/// the default layout, where what is on disk mid-run is a `.data` file that
+/// was never going to be published. Arrival order changes what is at stake:
+/// the thing holding the payloads **is** the archive, opened at the first
+/// tile, so an abandoned run has a partial PMTiles file sitting there. It has
+/// to keep its temporary name until `finish` renames it and it has to be
+/// removed on the way out, and the positive control in the middle is what
+/// stops this passing for a writer that opened nothing at all.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_dropped_arrival_run_takes_its_partial_archive_with_it() {
+    let dir = scratch();
+    let out = dir.path().join("abandoned-arrival.pmtiles");
+    {
+        let mut w = Writer::create(
+            &out,
+            WriterOptions::default()
+                .with_tile_type(TileType::Png)
+                .with_layout(Layout::Arrival),
+        )
+        .unwrap();
+        w.add_tile(0, 0, 0, b"tile", content_hash(b"tile")).unwrap();
+
+        let staged = dir.path().join("abandoned-arrival.pmtiles.tmp");
+        let size = std::fs::metadata(&staged)
+            .expect("the destination is open and holding the payload")
+            .len();
+        assert_eq!(
+            size,
+            16384 + 4,
+            "the reserved prefix plus the one four-byte payload is what should \
+             be on disk mid-run"
+        );
+        assert!(!out.exists(), "the final path appeared before finish()");
+    }
+    let after: Vec<String> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+        .collect();
+    assert!(
+        after.is_empty(),
+        "a dropped arrival writer left {after:?} behind"
+    );
+}

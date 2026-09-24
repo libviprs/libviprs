@@ -1321,6 +1321,36 @@ and not under `Fixed`: this file is the only place they can be caught.
 
 ### Added
 
+- **The PMTiles writer can append straight into the destination** (EPIC #1135,
+  issue #1143). `WriterOptions::layout` and `WriterOptions::with_layout` take
+  the new `pmtiles::Layout`, which is `TileId` by default and changes nothing
+  for anyone who does not ask for the other one.
+
+  `Layout::Arrival` opens the destination at the first `add_tile`, reserves the
+  first 16384 bytes for the header and the root, and appends tile bytes from
+  there. At finalize the metadata and the leaf section go **after** the tile
+  data and the reserved prefix is filled in. So there is no `.data` staging
+  file, every tile byte is written once and read never, and a run's scratch
+  drops from a second copy of the tile data plus the index to the index alone.
+
+  This is legal because v3 fixes the position of one thing, the 127-byte
+  header, and requires the root inside the first 16384 bytes. Everything else
+  may be relocated, and a tile entry's offset is relative to the start of the
+  tile data section rather than to the file, so a payload's offset is settled
+  the moment it is written. go-pmtiles v1.31.2 `verify` accepts it: its
+  `lengthFromHeaderWithPadding` branch is exactly this layout's size.
+
+  **Two things stop being true under it, which is why it is not the default.**
+  `clustered` is `false`, and `pmtiles extract` requires clustered input. And
+  the bytes depend on the arrival order, so two shuffled insertion orders of
+  the same tiles no longer produce the same archive: that property is a
+  statement about tile id order.
+
+  It also costs file size on small archives. An arrival archive is
+  `16257 - root_length` bytes larger than the tile id one, because the unused
+  part of the root budget is padding. On a pyramid with a full root that is
+  nothing; on an archive of a few kilobytes it roughly quadruples the file.
+
 - **A pyramid reader can be asked for a tile's length, and for its structure
   once** (issue #1130). Three additions to
   `libviprs::pyramid_reader`, all defaulted so no existing backend has to move:
