@@ -691,7 +691,7 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// arrival order of a six-tile set, one under each layout. All eight reach a
 /// `tempfile::tempdir()`, all eight are annotated, and none is a judgement
 /// call.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 469;
+const EXPECTED_FS_TOUCHING_TESTS: usize = 470;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
