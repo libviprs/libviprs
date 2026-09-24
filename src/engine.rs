@@ -87,6 +87,26 @@ pub enum EngineError {
         kind: crate::EngineKind,
         reason: &'static str,
     },
+    /// The sink asked for an
+    /// [`EmissionOrder`](crate::sink::EmissionOrder) the selected engine
+    /// cannot produce (issue #1145).
+    ///
+    /// Only the monolithic engine walks the plan in tile id order. The
+    /// streaming and MapReduce engines render the source a strip at a time and
+    /// emit whatever tiles a strip completes, which is neither tile id order
+    /// nor a walk they could reorder without holding the whole pyramid.
+    ///
+    /// This is a typed refusal rather than a silent downgrade because a sink
+    /// asks for an order when its output depends on it. A `PmTilesSink` in
+    /// [`Layout::Arrival`](crate::pmtiles::Layout) that asked and was quietly
+    /// given the cascade would publish an archive whose bytes depend on the
+    /// thread schedule while its caller believed the opposite, which is the
+    /// one failure the order exists to remove.
+    #[error("engine kind {kind:?} cannot emit tiles in {order:?} order")]
+    UnsupportedEmissionOrder {
+        kind: crate::EngineKind,
+        order: crate::sink::EmissionOrder,
+    },
     /// The supplied [`PyramidPlan`] describes an image
     /// whose dimensions do not match the source raster it was paired with.
     /// The engine validates this at entry so a mismatch surfaces as a typed

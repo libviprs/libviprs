@@ -58,7 +58,7 @@ use crate::planner::PyramidPlan;
 use crate::raster::Raster;
 use crate::resume::{ResumeMode, ResumePolicy};
 use crate::retry::{FailurePolicy, RetryPolicy, RetryingSink};
-use crate::sink::TileSink;
+use crate::sink::{EmissionOrder, TileSink};
 use crate::streaming::{
     BudgetPolicy, RasterStripSource, StreamingConfig, StripSource, generate_pyramid_streaming,
 };
@@ -730,6 +730,35 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
         };
 
         let kind = resolve_engine_kind(engine_kind, &source, &plan, memory_budget_bytes);
+
+        // A sink that asked for an emission order only the monolithic engine
+        // can produce is refused here, before anything touches the output
+        // (issue #1145). The streaming and MapReduce engines render a strip at
+        // a time and emit whatever tiles a strip completes, so they cannot
+        // walk the plan in tile id order without holding the whole pyramid,
+        // which is the thing they exist to avoid.
+        //
+        // Refusing rather than downgrading, because a sink asks for an order
+        // when its output depends on it: a `PmTilesSink` in `Layout::Arrival`
+        // quietly given the cascade would publish an archive whose bytes
+        // depend on the thread schedule while its caller believed otherwise.
+        // The check reads the outermost sink, so it sees through the retry
+        // wrapper and the resume filter the same way every other sink hook
+        // does.
+        //
+        // A Verify run is exempt, and the exemption is the rule rather than a
+        // hole in it: verify reads a finished pyramid and writes no tile, so
+        // there is no emission for an order to be wrong about, and refusing it
+        // would break a perfectly good check over an archive whose sink
+        // happens to be configured the way the run that wrote it was.
+        let verifying = resume
+            .as_ref()
+            .is_some_and(|policy| matches!(policy.mode(), ResumeMode::Verify));
+        let order = engine_sink.emission_order();
+        if !verifying && order != EmissionOrder::Cascade && !matches!(kind, EngineKind::Monolithic)
+        {
+            return Err(EngineError::UnsupportedEmissionOrder { kind, order });
+        }
 
         // Validate the plan against the source before any engine driver runs.
         // Both the monolithic and streaming paths trust `plan.image_width/height`
