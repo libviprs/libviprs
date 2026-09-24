@@ -3487,6 +3487,69 @@ and not under `Fixed`: this file is the only place they can be caught.
 
 ### Changed
 
+- **Tile JPEG is 4:2:0 with Huffman tables built from the tile, so every JPEG
+  tile's bytes move** (issue #1132). `FsSink::encode_tile` called
+  `encode_jpeg(raster, quality)` and nothing else, so a tile took the encoder's
+  default: 4:4:4 chroma with the standard Annex K Huffman tables. Nobody chose
+  either. `JpegSubsample` has been in `src/codec.rs` since the encode lane
+  landed, `Raster::encode_jpeg_options` took one, and the body dropped it with
+  a comment saying `image` 0.25 gave it nowhere to go.
+
+  It gave it nowhere to go. `image`'s JPEG encoder fixes all three components
+  at 1x1 sampling inside `new_with_quality` and borrows the Annex K tables as
+  constants, and neither has a setter, so threading the mode through the tile
+  path would have moved no bytes at all. The baseline encoder is this crate's
+  own now (`src/encode_jpeg.rs`): RGB to YCbCr, box downsample, the AAN float
+  DCT, libjpeg's quality curve over the Annex K quantization tables, and
+  Huffman tables built from the image with libjpeg's `jpeg_gen_optimal_table`.
+  That is the call the PNG lane already made twice, since
+  `Raster::encode_png_interlaced` and `Raster::encode_png_palette` are
+  hand-rolled on `flate2` because `image`'s PNG encoder exposes neither knob.
+  No new dependency, and decoding is untouched.
+
+  Measured here on 256x256 tiles at quality 85, against the same tile as
+  shipped:
+
+  | tile | as shipped | tables only | tables and 4:2:0 |
+  |---|---|---|---|
+  | blank white | 2419 B | 1052 B | 668 B |
+  | black-on-white drawing | 17729 B at 38.88 dB | 14709 B | 14313 B at 38.86 dB |
+  | coloured line art | 22719 B at 35.01 dB | 19803 B | 15385 B at 30.05 dB |
+  | smooth photograph | 11826 B at 36.64 dB | 10882 B | 10125 B at 36.68 dB |
+
+  The drawing rows are this crate's own domain and the subsampling is nearly
+  free on them, because black ink on white paper has no chroma to throw away.
+  Coloured line art is where 4:2:0 costs something real, and libvips at the
+  same setting agrees within 0.04 dB, so that cost is the format's rather than
+  this encoder's. Quality 90 and above stays 4:4:4, which is the escape hatch.
+
+  Against `vips jpegsave` 8.18.6 at the same quality and subsampling, decoded
+  through the same decoder: the blank tile is 668 B against 1823 B, or 840 B
+  with `--optimize-coding`; the black-on-white drawing is 14313 B at 38.86 dB
+  against 17205 B at 38.87 dB, or 14506 B at 38.87 dB optimized. Smaller at
+  matched fidelity, and libjpeg reads every file this encoder writes.
+
+  It is slower: 0.93 ms against `image`'s 0.50 ms for a 256x256 tile in
+  release, because building the tables from the image means transforming it
+  twice. The alternative is holding three bytes a pixel of coefficients, which
+  is 300 MB on a 10000x10000 image, and this crate's whole shape is not holding
+  the image twice.
+
+  **This moves output bytes.** Every JPEG tile differs from one 0.4.0 wrote,
+  `_shared/blank_<hash>.jpeg` dedupe filenames move with them because the stem
+  is a digest of the payload, per-tile checksums in a freshly generated
+  manifest differ from an old manifest's, and anything diffing a regenerated
+  pyramid against a stored one sees every JPEG tile change. Nothing structural
+  moves: the same tiles at the same paths with the same dimensions. `viprs
+  verify` over an existing tree is unaffected, because it does not byte-compare
+  an encoded tile against a fresh encode; it checks the tile is there and, with
+  a manifest attached, that it still hashes to what the manifest recorded.
+
+  `Raster::encode_jpeg_options` honours its `JpegSubsample` now, and
+  `jpegsave_buffer`'s libvips `subsample_mode` string reaches the sampling
+  factors through it, so both move output bytes for a caller who was passing a
+  mode and getting 4:4:4 regardless.
+
 - **The PMTiles benchmark export is schema 2, and it now measures the peak of
   the cold-open ramp instead of extrapolating it** (issue #1021). A cold open
   of a PMTiles archive costs what its root directory costs to decode, and the
@@ -4630,6 +4693,46 @@ and not under `Fixed`: this file is the only place they can be caught.
   over four realistic root shapes before leaving it alone.
 
 ### Fixed
+
+- **`--render --format jpeg` refused the only pixels the renderer makes**
+  (issue #1133). `render_page_pdfium` returns an `Rgba8` raster from both the
+  full-page and the strip path, and `image`'s JPEG encoder has no RGBA colour
+  type, so `viprs pyramid drawing.pdf out --render --format jpeg` died with
+  `encoding tile to "jpeg" failed: ... does not support the color type Rgba8`
+  before it wrote a tile. `--format png` and `--format webp` tiled the same
+  input because both encode RGBA, which left the one lossy format this crate
+  ships as the one that could not tile a rendered vector PDF.
+
+  The alpha is flattened onto the engine's `background_rgb` now, through
+  `Raster::try_flatten`, this crate's port of `vips_flatten`. That is what vips
+  does with the same input: `vips_foreign_save` flattens against its
+  `background` property for every format whose `saveable` set excludes alpha,
+  and white is the default a sink with no engine behind it uses. JPEG has no
+  alpha channel and never will, so the alternative was a typed refusal naming a
+  constraint that no flag, quality or colour space can satisfy.
+
+  `PackfileSink` and `ObjectStoreSink` capture the engine's configuration now,
+  for this one field. Without it a run with `--background` would have honoured
+  the colour in the padding around an edge tile and ignored it in the pixels of
+  that same tile.
+
+  `Raster::encode_jpeg` and the `.jpg` / `.jpeg` route through `Raster::save`
+  flatten too, onto white, so an `Rgba8` raster saves as JPEG instead of
+  erroring.
+
+- **The JPEG encoder dropped the last symbol of every scan that did not end on
+  a byte boundary** (found while closing issue #1132). The bit writer's pad ORs
+  its value in at the field its width describes, and it was handed `0x7F`
+  whatever width it needed, so the leftover ones landed above that field and
+  overwrote the bits already there. The last one or two blocks of a tile then
+  decoded as noise: 106 codes of error on a tile whose next-worst pixel was 13.
+
+  libjpeg says `Corrupt JPEG data: premature end of data segment` about those
+  files and `image`'s decoder says nothing at all, which is why this was found
+  against `vips` and not by a round trip. The bit writer masks its input now,
+  and `the_pad_cannot_overwrite_the_last_symbol` in `src/encode_jpeg.rs` pins
+  the shape. It never reached a release: the encoder it is in arrives in this
+  one.
 
 - **A warm PMTiles reader answered what a cold one refused** (issue #993). The
   leaf cache matched on a leaf's offset and nothing else, while what a leaf

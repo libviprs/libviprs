@@ -650,7 +650,25 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 ///
 /// #1146 landed first and took main to 434. Held at that figure, the
 /// detector reported the number below on the merged tree.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 442;
+///
+///
+/// #1133 and #1132 move it 421 to 433, and the twelve are all of
+/// `tests/jpeg_tile_format.rs` bar the one cell that encodes a raster in
+/// memory and never goes near a path. Ten of the twelve either generate a
+/// pyramid into a `tempfile::tempdir()` or write tiles there and read them
+/// back; the other two read `src/` to check two things the first ten stand
+/// on, that the render path still produces `Rgba8` and that nothing but the
+/// Ultra HDR lane still builds an `image` JPEG encoder. All twelve are
+/// `annotated fs-detected` and none of them is a judgement call.
+///
+/// 433 is what the detector printed with this constant still at 432, and 432
+/// is what it printed at 421 before that. The rebase onto #1126 is why these
+/// figures are not the ones this branch was written against, and the review
+/// that added a cell to every engine is why the last one moved again.
+///
+/// #1146 and #1147 landed first and took main to 442. Held at that figure,
+/// the detector reported the number below on the merged tree.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 454;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {

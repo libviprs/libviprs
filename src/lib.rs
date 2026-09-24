@@ -144,6 +144,7 @@ pub mod create;
 pub mod dedupe;
 pub mod draw;
 pub mod encode;
+pub(crate) mod encode_jpeg;
 pub mod encode_tiff;
 pub mod engine;
 pub mod engine_builder;

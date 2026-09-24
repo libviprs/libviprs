@@ -45,12 +45,13 @@
 //! # }
 //! ```
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::planner::{PyramidPlan, TileCoord};
 use crate::raster::Raster;
 use crate::sink::{
-    BLANK_TILE_MARKER, SinkError, Tile, TileFormat, TileSink, color_type_for_format, encode_png,
+    BLANK_TILE_MARKER, SinkError, Tile, TileFormat, TileSink, background_from, encode_jpeg,
+    encode_png,
 };
 
 // ---------------------------------------------------------------------------
@@ -318,33 +319,22 @@ fn google_key(prefix: &str, image_name: &str, z: u32, x: u32, y: u32, ext: &str)
 // Local encoding helpers
 // ---------------------------------------------------------------------------
 
-fn encode_jpeg_local(raster: &Raster, quality: u8) -> Result<Vec<u8>, SinkError> {
-    let mut buf = Vec::new();
-    let encoder =
-        image::codecs::jpeg::JpegEncoder::new_with_quality(std::io::Cursor::new(&mut buf), quality);
-    let ct = color_type_for_format(raster.format())?;
-    image::ImageEncoder::write_image(
-        encoder,
-        raster.data(),
-        raster.width(),
-        raster.height(),
-        ct.into(),
-    )
-    .map_err(|e| SinkError::Encode {
-        format: "jpeg".into(),
-        source: e,
-    })?;
-    Ok(buf)
-}
-
-fn encode_tile(raster: &Raster, format: TileFormat) -> Result<Vec<u8>, SinkError> {
+/// Encode one tile, flattening any alpha onto `background` for the formats
+/// that cannot carry it.
+///
+/// Every arm is `crate::sink`'s own encoder now. The JPEG one used to be a
+/// local copy of the same `image`-crate wrapper, kept so this module would not
+/// need `sink`'s helpers to be `pub(crate)`; they are, and the copy went out
+/// of step the moment `sink`'s grew the alpha flattening of issue #1133.
+fn encode_tile(
+    raster: &Raster,
+    format: TileFormat,
+    background: [u8; 3],
+) -> Result<Vec<u8>, SinkError> {
     match format {
         TileFormat::Raw => Ok(raster.data().to_vec()),
         TileFormat::Png => encode_png(raster),
-        TileFormat::Jpeg { quality } => encode_jpeg_local(raster, quality),
-        // Shared with `FsSink` rather than copied, unlike the JPEG wrapper
-        // above: there is no `image`-crate encoder to wrap here, so the one
-        // in `crate::sink` is the only implementation.
+        TileFormat::Jpeg { quality } => encode_jpeg(raster, quality, background),
         TileFormat::Webp => crate::sink::encode_webp(raster),
     }
 }
@@ -375,6 +365,13 @@ pub struct ObjectStoreSink {
     cfg: ObjectStoreConfig,
     plan: PyramidPlan,
     format: TileFormat,
+    /// Captured by [`TileSink::record_engine_config`] before the tile loop
+    /// starts, and read for one field: the background a JPEG tile's
+    /// transparent pixels land on (issue #1133). This sink uploads tiles and
+    /// keeps no manifest, so it had nowhere to read `background_rgb` from and
+    /// a run with `--background` would have honoured it in the padding and
+    /// ignored it in the pixels.
+    engine_config: Mutex<Option<crate::engine::EngineConfig>>,
 }
 
 impl std::fmt::Debug for ObjectStoreSink {
@@ -413,7 +410,12 @@ impl ObjectStoreSink {
                     .into(),
             ));
         }
-        Ok(Self { cfg, plan, format })
+        Ok(Self {
+            cfg,
+            plan,
+            format,
+            engine_config: Mutex::new(None),
+        })
     }
 
     /// Enumerate the object keys stored under this sink's key prefix.
@@ -502,7 +504,11 @@ impl TileSink for ObjectStoreSink {
         let payload: Vec<u8> = if tile.blank {
             vec![BLANK_TILE_MARKER]
         } else {
-            encode_tile(&tile.raster, self.format)?
+            encode_tile(
+                &tile.raster,
+                self.format,
+                background_from(&self.engine_config),
+            )?
         };
 
         // The multipart threshold is observed by the real S3 backend; for the
@@ -519,6 +525,12 @@ impl TileSink for ObjectStoreSink {
         store.put(&key, &payload)
     }
 
+    /// Keep the run's configuration for the one thing this sink reads out of
+    /// it: the background a JPEG tile's alpha is flattened onto.
+    fn record_engine_config(&self, config: &crate::engine::EngineConfig) {
+        *crate::poison::recover(&self.engine_config) = Some(config.clone());
+    }
+
     fn finish(&self) -> Result<(), SinkError> {
         // No DZI/manifest upload wired up in this build; the integration agent
         // can extend this to mirror FsSink::finish if desired.
@@ -533,7 +545,10 @@ impl TileSink for ObjectStoreSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Only the refusal cells below reach the mapping directly now that this
+    // module's copy of the JPEG wrapper is gone (issue #1133).
     use crate::pixel::PixelFormat;
+    use crate::sink::color_type_for_format;
 
     #[test]
     fn deep_zoom_key_with_prefix() {
