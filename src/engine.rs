@@ -13,7 +13,7 @@ use crate::raster::{Raster, RasterError};
 use crate::resize;
 use crate::resume::{JobCheckpoint, JobMetadata, ResumeError, SCHEMA_VERSION, compute_plan_hash};
 use crate::retry::FailurePolicy;
-use crate::sink::{SinkError, Tile, TileSink};
+use crate::sink::{EmissionOrder, SinkError, Tile, TileSink};
 
 /// Errors that can occur during pyramid generation.
 ///
@@ -86,6 +86,26 @@ pub enum EngineError {
     IncompatibleSource {
         kind: crate::EngineKind,
         reason: &'static str,
+    },
+    /// The sink asked for an
+    /// [`EmissionOrder`] the selected engine
+    /// cannot produce (issue #1145).
+    ///
+    /// Only the monolithic engine walks the plan in tile id order. The
+    /// streaming and MapReduce engines render the source a strip at a time and
+    /// emit whatever tiles a strip completes, which is neither tile id order
+    /// nor a walk they could reorder without holding the whole pyramid.
+    ///
+    /// This is a typed refusal rather than a silent downgrade because a sink
+    /// asks for an order when its output depends on it. A `PmTilesSink` in
+    /// [`Layout::Arrival`](crate::pmtiles::Layout) that asked and was quietly
+    /// given the cascade would publish an archive whose bytes depend on the
+    /// thread schedule while its caller believed the opposite, which is the
+    /// one failure the order exists to remove.
+    #[error("engine kind {kind:?} cannot emit tiles in {order:?} order")]
+    UnsupportedEmissionOrder {
+        kind: crate::EngineKind,
+        order: crate::sink::EmissionOrder,
     },
     /// The supplied [`PyramidPlan`] describes an image
     /// whose dimensions do not match the source raster it was paired with.
@@ -681,79 +701,107 @@ fn run_pyramid(
         stage_sink: &stage_sink,
     };
 
-    // Process from top level (full res) down to level 0 (1×1). The walk
-    // skeleton (descending levels, one tile-op step between adjacent levels,
-    // top level never stepped) lives in `level_walk::walk_levels_down`,
-    // shared with the verify walks and the streaming engines' monolithic
-    // flush. This site parameterizes it with the timed, memory-tracked
-    // downscale and live tile emission.
-    let current = crate::level_walk::walk_levels_down::<EngineError, _, _, _, _>(
-        current,
-        plan.levels.len(),
-        // Enter: cooperative cancellation at the level boundary (before
-        // committing to a potentially expensive downscale + tile emission),
-        // then LevelStarted. The tracing span rides in the returned guard so
-        // it covers the step and emit phases exactly as before.
-        |level_idx| {
-            config.check_cancelled()?;
-            let level = &plan.levels[level_idx];
-            #[cfg(feature = "tracing")]
-            let level_span = tracing::info_span!(
-                target: "libviprs",
-                "level",
-                level_index = level.level
-            )
-            .entered();
-
-            observer.on_event(EngineEvent::LevelStarted {
-                level: level.level,
-                width: level.width,
-                height: level.height,
-                tile_count: level.tile_count(),
-            });
-            #[cfg(feature = "tracing")]
-            return Ok(level_span);
-            #[cfg(not(feature = "tracing"))]
-            Ok(())
-        },
-        // Step: the tile operation. Uses downscale_half (2x2 box filter) to
-        // match libvips's region-shrink=mean algorithm. Each level is
-        // ceil(prev/2).
-        |_, prev| {
-            let old_bytes = prev.data().len() as u64;
-            let resize_start = Instant::now();
-            let next = resize::downscale_half(&prev)?;
-            stage_resize.fetch_add(resize_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
-            let new_bytes = next.data().len() as u64;
-            // Track: freed old level, allocated new
-            tracker.dealloc(old_bytes);
-            tracker.alloc(new_bytes);
-            Ok(next)
-        },
-        // Emit: extract and emit tiles for this level.
-        |level_idx, current| {
-            let (level_tiles, level_skipped) = extract_and_emit_level(
+    // Which walk, and it is the sink that decides (issue #1145).
+    //
+    // `EmissionOrder::TileId` is a different walk rather than a different sort
+    // inside this one, because the two disagree about the *levels*: tile ids
+    // ascend from the overview down to full resolution, and the cascade can
+    // only make the levels in the other direction, since each one is the
+    // downscale of the one above it. An exhaustive match rather than an `if`,
+    // so a third order is a compile error here instead of silently taking the
+    // cascade.
+    match sink.emission_order() {
+        EmissionOrder::TileId => {
+            let (produced, skipped) = run_levels_tile_id_order(
                 current,
                 plan,
-                level_idx as u32,
                 sink,
                 config,
                 observer,
                 &ctx,
+                &tracker,
+                &stage_resize,
             )?;
-            tiles_produced += level_tiles;
-            tiles_skipped += level_skipped;
+            tiles_produced += produced;
+            tiles_skipped += skipped;
+        }
+        EmissionOrder::Cascade => {
+            // Process from top level (full res) down to level 0 (1×1). The walk
+            // skeleton (descending levels, one tile-op step between adjacent levels,
+            // top level never stepped) lives in `level_walk::walk_levels_down`,
+            // shared with the verify walks and the streaming engines' monolithic
+            // flush. This site parameterizes it with the timed, memory-tracked
+            // downscale and live tile emission.
+            let current = crate::level_walk::walk_levels_down::<EngineError, _, _, _, _>(
+                current,
+                plan.levels.len(),
+                // Enter: cooperative cancellation at the level boundary (before
+                // committing to a potentially expensive downscale + tile emission),
+                // then LevelStarted. The tracing span rides in the returned guard so
+                // it covers the step and emit phases exactly as before.
+                |level_idx| {
+                    config.check_cancelled()?;
+                    let level = &plan.levels[level_idx];
+                    #[cfg(feature = "tracing")]
+                    let level_span = tracing::info_span!(
+                        target: "libviprs",
+                        "level",
+                        level_index = level.level
+                    )
+                    .entered();
 
-            observer.on_event(EngineEvent::LevelCompleted {
-                level: plan.levels[level_idx].level,
-                tiles_produced: level_tiles,
-            });
-            Ok(())
-        },
-    )?;
+                    observer.on_event(EngineEvent::LevelStarted {
+                        level: level.level,
+                        width: level.width,
+                        height: level.height,
+                        tile_count: level.tile_count(),
+                    });
+                    #[cfg(feature = "tracing")]
+                    return Ok(level_span);
+                    #[cfg(not(feature = "tracing"))]
+                    Ok(())
+                },
+                // Step: the tile operation. Uses downscale_half (2x2 box filter) to
+                // match libvips's region-shrink=mean algorithm. Each level is
+                // ceil(prev/2).
+                |_, prev| {
+                    let old_bytes = prev.data().len() as u64;
+                    let resize_start = Instant::now();
+                    let next = resize::downscale_half(&prev)?;
+                    stage_resize
+                        .fetch_add(resize_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+                    let new_bytes = next.data().len() as u64;
+                    // Track: freed old level, allocated new
+                    tracker.dealloc(old_bytes);
+                    tracker.alloc(new_bytes);
+                    Ok(next)
+                },
+                // Emit: extract and emit tiles for this level.
+                |level_idx, current| {
+                    let (level_tiles, level_skipped) = extract_and_emit_level(
+                        current,
+                        plan,
+                        level_idx as u32,
+                        sink,
+                        config,
+                        observer,
+                        &ctx,
+                    )?;
+                    tiles_produced += level_tiles;
+                    tiles_skipped += level_skipped;
 
-    // Free last raster from tracking
-    tracker.dealloc(current.data().len() as u64);
+                    observer.on_event(EngineEvent::LevelCompleted {
+                        level: plan.levels[level_idx].level,
+                        tiles_produced: level_tiles,
+                    });
+                    Ok(())
+                },
+            )?;
+
+            // Free last raster from tracking
+            tracker.dealloc(current.data().len() as u64);
+        }
+    }
 
     let sink_finish_start = Instant::now();
     match sink.finish() {
@@ -1794,6 +1842,295 @@ fn extract_and_emit_level(
     }
 }
 
+/// Run every level in ascending tile id order, for a sink that asked for it
+/// (issue #1145).
+///
+/// # Two phases, because the cascade runs the other way
+///
+/// Each level's raster is the half-downscale of the level above it, so the
+/// only order they can be *produced* in is full resolution first. Tile ids run
+/// the other way: the overview level is id 0 and full resolution is last. So
+/// an ordered run makes the levels in the cascade's order and emits them in
+/// the reverse of it, which means holding them.
+///
+/// # What holding them costs, exactly
+///
+/// A third of the full-resolution raster, once. Each level is a quarter of the
+/// one above it, so the levels below the top sum to `1/4 + 1/16 + ... = 1/3`
+/// of it, and the top level's raster is the one the cascade was holding
+/// anyway. The peak is at the hand-over between the two phases and falls from
+/// there, because phase two frees each level as it finishes with it and the
+/// smallest go first. [`MemoryTracker`] is charged for all of it, so
+/// `EngineResult::peak_memory_bytes` reports the real figure rather than the
+/// unordered one.
+///
+/// That is the whole price. The tiles in flight are unchanged, the downscales
+/// are the same downscales, and nothing is written twice or read back.
+///
+/// # The level events arrive ascending too
+///
+/// [`EngineEvent::LevelStarted`] and [`EngineEvent::LevelCompleted`] are
+/// emitted from phase two, so an observer on an ordered run sees the overview
+/// level first. That is a real difference from every other run in this crate
+/// and it is the honest one: the events describe the emission, which is what a
+/// progress bar is counting, and phase one emits no tiles at all.
+#[allow(clippy::too_many_arguments)]
+fn run_levels_tile_id_order(
+    top: Raster,
+    plan: &PyramidPlan,
+    sink: &dyn TileSink,
+    config: &EngineConfig,
+    observer: &dyn EngineObserver,
+    ctx: &EmitContext,
+    tracker: &MemoryTracker,
+    stage_resize: &AtomicU64,
+) -> Result<(u64, u64), EngineError> {
+    let levels = plan.levels.len();
+    if levels == 0 {
+        tracker.dealloc(top.data().len() as u64);
+        return Ok((0, 0));
+    }
+
+    // Phase one: the cascade, through the same shared walk every other site
+    // uses, with the emit hook doing nothing. The rasters are kept instead of
+    // freed, which is the one thing this walk does that the others do not, and
+    // it happens in `step` because that is where ownership of the level above
+    // passes through.
+    let mut rasters: Vec<Option<Raster>> = (0..levels).map(|_| None).collect();
+    let last = crate::level_walk::walk_levels_down::<EngineError, _, _, _, _>(
+        top,
+        levels,
+        |_| {
+            config.check_cancelled()?;
+            Ok(())
+        },
+        |level_idx, prev| {
+            let resize_start = Instant::now();
+            let next = resize::downscale_half(&prev)?;
+            stage_resize.fetch_add(resize_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            tracker.alloc(next.data().len() as u64);
+            // `prev` is the level above this one, which an ordered run emits
+            // after it. The cascade's own walk frees it here; this one keeps
+            // it, and phase two is what frees it.
+            rasters[level_idx + 1] = Some(prev);
+            Ok(next)
+        },
+        |_, _| Ok(()),
+    )?;
+    rasters[0] = Some(last);
+
+    // Phase two: emit ascending, freeing each level as it goes.
+    let mut tiles_produced = 0u64;
+    let mut tiles_skipped = 0u64;
+    for (level_idx, slot) in rasters.iter_mut().enumerate() {
+        config.check_cancelled()?;
+        let level = &plan.levels[level_idx];
+        #[cfg(feature = "tracing")]
+        let _level_span = tracing::info_span!(
+            target: "libviprs",
+            "level",
+            level_index = level.level
+        )
+        .entered();
+        observer.on_event(EngineEvent::LevelStarted {
+            level: level.level,
+            width: level.width,
+            height: level.height,
+            tile_count: level.tile_count(),
+        });
+
+        let raster = slot
+            .take()
+            .expect("the cascade fills every level exactly once");
+        let (level_tiles, level_skipped) = extract_and_emit_level_ordered(
+            &raster,
+            plan,
+            level_idx as u32,
+            sink,
+            config,
+            observer,
+            ctx,
+        )?;
+        tiles_produced += level_tiles;
+        tiles_skipped += level_skipped;
+
+        let freed = raster.data().len() as u64;
+        drop(raster);
+        tracker.dealloc(freed);
+
+        observer.on_event(EngineEvent::LevelCompleted {
+            level: level.level,
+            tiles_produced: level_tiles,
+        });
+    }
+    Ok((tiles_produced, tiles_skipped))
+}
+
+/// The PMTiles tile id a coordinate sorts under for
+/// [`EmissionOrder::TileId`].
+///
+/// Tile ids are the only total order on a pyramid's coordinates that anything
+/// outside this crate agrees with, which is why the emission order is defined
+/// in terms of them rather than in terms of a walk. They are Hilbert-indexed
+/// inside a zoom level and the zoom levels stack in ascending order, so this
+/// is a plain `u64` comparison and not a tuple.
+///
+/// `u64::MAX` for a coordinate the id space cannot address, of which there are
+/// two kinds: a level above 31, and a column or row outside its level's `2^z`
+/// grid. Neither is silently reordered into something addressable. They sort
+/// last as a group and keep their row-major order among themselves, because
+/// the sort is stable, so the sink sees them in the order it would have seen
+/// them anyway and answers with whatever refusal it would have answered with.
+/// A sink that asked for tile id order and then cannot address a coordinate is
+/// a misconfiguration, and the honest place for it to surface is that sink's
+/// own error rather than a silent reshuffle here.
+fn tile_id_order_key(coord: TileCoord) -> u64 {
+    u8::try_from(coord.level)
+        .ok()
+        .and_then(|z| crate::pmtiles::zxy_to_tileid(z, coord.col, coord.row).ok())
+        .unwrap_or(u64::MAX)
+}
+
+/// Extract and emit one level's tiles in ascending tile id order (issue
+/// #1145).
+///
+/// The parallel counterpart of [`extract_and_emit_parallel`] for a sink that
+/// answered [`EmissionOrder::TileId`]. It extracts on the same worker pool and
+/// writes through the same consumer, and the only thing it does differently is
+/// guarantee the order of the writes.
+///
+/// # Why a queue per worker, rather than one queue and a reorder buffer
+///
+/// The obvious build is the shared queue this path's sibling uses plus a map
+/// from position to tile at the consumer, emitting whenever the next position
+/// turns up. That build is unbounded, and it is worth writing down why because
+/// it looks bounded.
+///
+/// Backpressure in the sibling comes from the consumer *not* taking a tile
+/// until it has dealt with the last one. A reordering consumer deals with
+/// every tile immediately by filing it, so the queue never stays full, so no
+/// worker ever blocks. One slow tile then lets every other worker run to the
+/// end of the level while the consumer holds everything that arrived after the
+/// one it is waiting for. The buffer is the level, and the level is the thing
+/// this engine sizes its memory against.
+///
+/// Striping the coordinates over one queue per worker removes the buffer
+/// instead of bounding it. Worker `w` takes coordinates `w`, `w + c`,
+/// `w + 2c`, ..., so the consumer can read position `i` from worker `i % c`
+/// and the queues deliver in order by construction. A worker that races ahead
+/// fills its own queue and blocks, which is the backpressure back, and a
+/// worker that falls behind stalls the consumer, which is what ordered
+/// emission means. `ordered_emission_keeps_no_more_tiles_in_flight_than_the_queue_allows`
+/// in `tests/pmtiles_sink.rs` is the measurement.
+///
+/// The queues are sized to share [`EngineConfig::buffer_size`] between them
+/// rather than each taking it, so an ordered run holds what an unordered one
+/// holds and not `concurrency` times as much.
+fn extract_and_emit_level_ordered(
+    raster: &Raster,
+    plan: &PyramidPlan,
+    level: u32,
+    sink: &dyn TileSink,
+    config: &EngineConfig,
+    observer: &dyn EngineObserver,
+    ctx: &EmitContext,
+) -> Result<(u64, u64), EngineError> {
+    let level_plan = &plan.levels[level as usize];
+    let mut coords: Vec<TileCoord> = (0..level_plan.rows)
+        .flat_map(|row| (0..level_plan.cols).map(move |col| TileCoord::new(level, col, row)))
+        .collect();
+    if coords.is_empty() {
+        return Ok((0, 0));
+    }
+    // Stable, so the unaddressable coordinates `tile_id_order_key` folds onto
+    // one key keep the order they were enumerated in.
+    coords.sort_by_key(|coord| tile_id_order_key(*coord));
+
+    let blank_strategy = config.blank_tile_strategy;
+    let dedupe_strategy = config.dedupe_strategy;
+    let concurrency = config.concurrency.max(1).min(coords.len());
+    // `div_ceil` rather than a plain divide: at a buffer smaller than the
+    // worker count every queue still gets one slot, because a queue of zero is
+    // a rendezvous and would serialise the extraction against the sink.
+    let per_worker = config.buffer_size.div_ceil(concurrency).max(1);
+
+    let mut senders = Vec::with_capacity(concurrency);
+    let mut receivers = Vec::with_capacity(concurrency);
+    for _ in 0..concurrency {
+        let (tx, rx) = crate::sync_queue::bounded::<Result<Tile, EngineError>>(per_worker);
+        senders.push(tx);
+        receivers.push(rx);
+    }
+
+    let in_flight = Arc::new(AtomicU32::new(0));
+    let stage_extract: &AtomicU64 = ctx.stage_extract;
+    let queue_peak: &AtomicU32 = ctx.queue_pressure_peak;
+    let coords = &coords;
+
+    std::thread::scope(|s| {
+        for (worker, tx) in senders.into_iter().enumerate() {
+            let in_flight = Arc::clone(&in_flight);
+            let bg = config.background_rgb;
+            s.spawn(move || {
+                for coord in coords.iter().skip(worker).step_by(concurrency).copied() {
+                    if config.check_cancelled().is_err() {
+                        break;
+                    }
+                    let extract_start = Instant::now();
+                    let result = catch_worker_panic(|| {
+                        extract_tile(raster, plan, coord, bg)
+                            .map(|tile_raster| {
+                                let blank =
+                                    blank_for_output(&tile_raster, blank_strategy, dedupe_strategy);
+                                Tile {
+                                    coord,
+                                    raster: tile_raster,
+                                    blank,
+                                }
+                            })
+                            .map_err(EngineError::from)
+                    });
+                    stage_extract
+                        .fetch_add(extract_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+
+                    let cur = in_flight.fetch_add(1, Ordering::Relaxed) + 1;
+                    let _ = queue_peak.fetch_max(cur, Ordering::Relaxed);
+
+                    if tx.send(result).is_err() {
+                        in_flight.fetch_sub(1, Ordering::Relaxed);
+                        break; // Consumer dropped
+                    }
+                }
+            });
+        }
+
+        let mut count = 0u64;
+        let mut skipped = 0u64;
+        // Position `i` belongs to worker `i % concurrency` by construction, so
+        // this walks the coordinates in the order they were sorted into and
+        // never has to ask which worker produced what.
+        for index in 0..coords.len() {
+            config.check_cancelled()?;
+            let Some(result) = receivers[index % concurrency].recv() else {
+                // The only way a queue ends early is a worker that wound down
+                // without sending, which is the cancellation path above seen
+                // from the other side. Breaking rather than blocking forever
+                // is what lets the level loop above reach its own
+                // cancellation check and end the run as `Cancelled`. This is
+                // the sibling path's behaviour too: its consumer loop ends
+                // when the producers stop, and the level boundary is where a
+                // cancelled run gets its name.
+                break;
+            };
+            in_flight.fetch_sub(1, Ordering::Relaxed);
+            let consumed = consume_one_tile(result?, sink, config, observer, ctx)?;
+            count += u64::from(consumed.counted);
+            skipped += u64::from(consumed.skipped);
+        }
+        Ok((count, skipped))
+    })
+}
+
 /// Return `true` when the current [`BlankTileStrategy`] wants this tile to be
 /// written as a placeholder.
 pub(crate) fn is_blank_for_strategy(raster: &Raster, strategy: BlankTileStrategy) -> bool {
@@ -1993,73 +2330,112 @@ fn extract_and_emit_parallel(
             // Cancelled. Producers observe the same token and wind down; the
             // scope join then reaps them.
             config.check_cancelled()?;
-            let tile = result?;
-            let coord = tile.coord;
-            // skip_blanks (issue libviprs-tests#87): mirror the single-threaded
-            // path — a uniform tile is dropped here, before the sink write, so
-            // the output holds strictly fewer files. The in_flight gauge was
-            // already decremented above, so the queue accounting stays balanced.
-            // The worker still extracted and enqueued this tile; only the sink
-            // write is elided (the test drives the monolithic single-threaded
-            // path, and keeping the skip at the write decision point matches it
-            // exactly and keeps `tiles_skipped` consistent across both paths).
-            if config.skip_blanks && is_blank_tile(&tile.raster) {
-                skipped += 1;
-                continue;
-            }
-            if tile.blank {
-                skipped += 1;
-            }
-            let tile_bytes = tile.raster.data().len() as u64;
-            // Per-tile tracing span (issue libviprs-tests#83): one
-            // `libviprs::tile` span per tile write attempt, carrying its
-            // coordinates, nested under the active `libviprs::level` span. It
-            // is entered *before* `sink.write_tile`, so a write that exhausts
-            // `RetryThenSkip` still emits its span. The consumer runs on the
-            // same thread the level span was entered on, so the nesting holds
-            // even though extraction happened on a worker thread.
-            #[cfg(feature = "tracing")]
-            let _tile_span = tracing::info_span!(
-                target: "libviprs",
-                "tile",
-                x = coord.col,
-                y = coord.row,
-                level = coord.level,
-            )
-            .entered();
-            let sink_start = Instant::now();
-            match sink.write_tile(&tile) {
-                Ok(()) => {
-                    ctx.stage_sink
-                        .fetch_add(sink_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
-                    ctx.bytes_written.fetch_add(tile_bytes, Ordering::Relaxed);
-                }
-                Err(e) => {
-                    ctx.stage_sink
-                        .fetch_add(sink_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
-                    // A write that failed because its retry backoff was
-                    // interrupted by a cancellation must surface as Cancelled,
-                    // not be swallowed by RetryThenSkip or reported as a plain
-                    // sink error.
-                    config.check_cancelled()?;
-                    match &config.failure_policy {
-                        FailurePolicy::RetryThenSkip(_) => {
-                            sink.note_sink_skipped();
-                            // A tile that exhausted RetryThenSkip produced no
-                            // output; report it as TileFailed, never as
-                            // TileCompleted, so observers that pair completions
-                            // with sink writes stay consistent.
-                            observer.on_event(EngineEvent::tile_failed(coord, e.to_string()));
-                            continue;
-                        }
-                        _ => return Err(promote_sink_error(e)),
-                    }
-                }
-            }
-            observer.on_event(EngineEvent::tile_completed(coord));
-            count += 1;
+            let consumed = consume_one_tile(result?, sink, config, observer, ctx)?;
+            count += u64::from(consumed.counted);
+            skipped += u64::from(consumed.skipped);
         }
         Ok((count, skipped))
+    })
+}
+
+/// What one tile did to the run's two counters.
+///
+/// Two booleans rather than three variants because a blank tile is both: it is
+/// written like any other and it is also reported as skipped, which is what
+/// `tiles_skipped` has always meant for a placeholder policy. A tile dropped by
+/// `skip_blanks` is skipped and not counted, and one that exhausted
+/// `RetryThenSkip` is neither.
+struct Consumed {
+    counted: bool,
+    skipped: bool,
+}
+
+/// Hand one extracted tile to the sink, with the blank policy, the tracing
+/// span, the stage timers and the failure policy around it.
+///
+/// This is the body both parallel consumers share. It was inline in
+/// `extract_and_emit_parallel` until the ordered walk needed the same fifty
+/// lines (issue #1145), and a second transcription of a decision tree that
+/// chooses between counting a tile, skipping it, reporting it failed and
+/// aborting the run is exactly the drift the engine cannot afford: the two
+/// copies would diverge on the blank-and-counted case first, because it is the
+/// one that looks like a mistake.
+fn consume_one_tile(
+    tile: Tile,
+    sink: &dyn TileSink,
+    config: &EngineConfig,
+    observer: &dyn EngineObserver,
+    ctx: &EmitContext,
+) -> Result<Consumed, EngineError> {
+    let coord = tile.coord;
+    // skip_blanks (issue libviprs-tests#87): mirror the single-threaded
+    // path — a uniform tile is dropped here, before the sink write, so
+    // the output holds strictly fewer files. The in_flight gauge was
+    // already decremented by the caller, so the queue accounting stays
+    // balanced. The worker still extracted and enqueued this tile; only the
+    // sink write is elided (the test drives the monolithic single-threaded
+    // path, and keeping the skip at the write decision point matches it
+    // exactly and keeps `tiles_skipped` consistent across both paths).
+    if config.skip_blanks && is_blank_tile(&tile.raster) {
+        return Ok(Consumed {
+            counted: false,
+            skipped: true,
+        });
+    }
+    let blank = tile.blank;
+    let tile_bytes = tile.raster.data().len() as u64;
+    // Per-tile tracing span (issue libviprs-tests#83): one
+    // `libviprs::tile` span per tile write attempt, carrying its
+    // coordinates, nested under the active `libviprs::level` span. It
+    // is entered *before* `sink.write_tile`, so a write that exhausts
+    // `RetryThenSkip` still emits its span. The consumer runs on the
+    // same thread the level span was entered on, so the nesting holds
+    // even though extraction happened on a worker thread.
+    #[cfg(feature = "tracing")]
+    let _tile_span = tracing::info_span!(
+        target: "libviprs",
+        "tile",
+        x = coord.col,
+        y = coord.row,
+        level = coord.level,
+    )
+    .entered();
+    let sink_start = Instant::now();
+    match sink.write_tile(&tile) {
+        Ok(()) => {
+            ctx.stage_sink
+                .fetch_add(sink_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            ctx.bytes_written.fetch_add(tile_bytes, Ordering::Relaxed);
+        }
+        Err(e) => {
+            ctx.stage_sink
+                .fetch_add(sink_start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            // A write that failed because its retry backoff was
+            // interrupted by a cancellation must surface as Cancelled,
+            // not be swallowed by RetryThenSkip or reported as a plain
+            // sink error.
+            config.check_cancelled()?;
+            match &config.failure_policy {
+                FailurePolicy::RetryThenSkip(_) => {
+                    sink.note_sink_skipped();
+                    // A tile that exhausted RetryThenSkip produced no
+                    // output; report it as TileFailed, never as
+                    // TileCompleted, so observers that pair completions
+                    // with sink writes stay consistent.
+                    observer.on_event(EngineEvent::tile_failed(coord, e.to_string()));
+                    return Ok(Consumed {
+                        counted: false,
+                        skipped: blank,
+                    });
+                }
+                _ => return Err(promote_sink_error(e)),
+            }
+        }
+    }
+    observer.on_event(EngineEvent::tile_completed(coord));
+    Ok(Consumed {
+        counted: true,
+        skipped: blank,
     })
 }
 

@@ -698,11 +698,35 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// `tempfile::tempdir()`, all eight are annotated, and none is a judgement
 /// call.
 ///
-/// Merged twice against a moving main. Each time the constant was held at
-/// main's figure so the detector had to report the merged one rather than
-/// agree with a guess, and the last run printed 472: main's 470 plus this
-/// branch's two cells.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 472;
+/// #1156 moves it 469 to 470, and the one is
+/// `jpeg_tile_format.rs::a_coloured_tile_at_the_default_quality_keeps_full_chroma`.
+/// It belonged to nobody's change: #1153 added it while this constant still
+/// read 461 on its branch, #1144 moved the constant to 469 on a line that did
+/// not carry that test, and the two only met on `main`. Each branch was
+/// self-consistent and the composition was not, which is the shared-count
+/// hazard exactly: a lane cannot see a counter another lane is also moving, so
+/// the first lane to merge afterwards inherits a red gate it did not cause.
+///
+/// #1145 adds three, and they are the ordered-emission cells in
+/// `tests/pmtiles_sink.rs` that build an archive: the comparison against the
+/// tile id layout, the `clustered` claim, and the two runs that have to agree.
+/// Each reads the finished file with `std::fs::read`. Its other cells drive a
+/// recording sink that writes nothing, so they touch no filesystem and do not
+/// move this figure; they carry the annotation anyway, because a 1024 source
+/// through the whole engine is not something to hand Miri.
+///
+/// Merged against a main that had moved to 472 with #1129's two resume cells.
+/// Held at that 472 rather than at 472 plus my three, so the detector had to
+/// report the merged figure instead of agreeing with my arithmetic. It said
+/// "the detector found 475 filesystem-touching tests, not 472", and 475 is
+/// what is below. That it agrees with the arithmetic is the point: the
+/// arithmetic was not what was trusted. The #1156 paragraph above is what
+/// happens when it is.
+///
+/// The wrapper-forwarding cell this merge added does not appear here. It
+/// drives a recording sink that writes nothing, so it is `not-detected`, and
+/// it moves the inventory by a row without moving this figure.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 475;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {

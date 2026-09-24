@@ -211,6 +211,55 @@ pub struct Tile {
     pub blank: bool,
 }
 
+/// The order in which the engine hands a sink the tiles of a run.
+///
+/// A sink answers this through [`TileSink::emission_order`] and the engine
+/// obeys it. The default is what every run has always done and costs nothing;
+/// the other value is a request, and the price of it is on the variant.
+///
+/// # Why a sink gets to ask at all
+///
+/// Almost no sink cares. [`TileSink`]'s contract above says every write is an
+/// independent placement keyed on [`Tile::coord`], and the in-tree sinks all
+/// honour that, so for them the order is an implementation detail of the
+/// engine and always has been.
+///
+/// A single-file archive written straight through is the exception, and it is
+/// not a sink breaking the contract. A PMTiles archive in
+/// [`Layout::Arrival`](crate::pmtiles::Layout) appends each payload into the
+/// destination as it arrives, so the file's byte layout *is* the arrival
+/// order. The tiles it holds are still the same tiles placed by coordinate;
+/// what changes with the order is where in the file they sit, whether the
+/// archive's `clustered` flag can honestly be true, and whether two runs over
+/// one source produce the same bytes. Asking for an order is how such a sink
+/// gets those three back without a reordering pass (issue #1145).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum EmissionOrder {
+    /// Levels from full resolution down to the overview, row-major within a
+    /// level, and interleaved arbitrarily across the workers of a level.
+    ///
+    /// The default, and the order the pyramid cascade produces for free: each
+    /// level's raster is the downscale of the one above it, so the levels can
+    /// only be *made* in this order, and the tiles of a level go out as the
+    /// workers finish them.
+    #[default]
+    Cascade,
+    /// Ascending PMTiles tile id: the overview level first, then each level
+    /// below it, and Hilbert order within a level.
+    ///
+    /// Strictly ascending and fully deterministic, so a sink whose output
+    /// depends on the order gets the same bytes out of every run.
+    ///
+    /// It costs a third more raster memory. The levels come out of the
+    /// cascade in exactly the opposite order to this one, so a run that emits
+    /// ascending holds every level's raster at once rather than one at a time,
+    /// and the levels below the top sum to a third of it. It costs nothing in
+    /// tiles held: the emission is still parallel and still bounded by
+    /// [`EngineConfig::buffer_size`](crate::engine::EngineConfig::buffer_size).
+    TileId,
+}
+
 /// Trait for receiving tiles produced by the engine.
 ///
 /// Implementations handle where tiles go — filesystem, object store, memory, etc.
@@ -279,10 +328,14 @@ pub trait TileSink: Send + Sync {
     /// `sink_retry_count`, `sink_skipped_due_to_failure`, `note_sink_skipped`,
     /// `checkpoint_root`, `arm_durability_tracking`, `sync_pending`,
     /// `init_level_count`, `content_format`, `applies_retry_policy`,
-    /// `check_resume_mode`, `seed_completed_tile`, `open_pyramid_reader`) has a
-    /// default that forwards through this hook. The list is the whole set, in
-    /// declaration order: it had drifted three short of the trait it describes,
-    /// which is the same shape as the trap the paragraph below is about.
+    /// `check_resume_mode`, `seed_completed_tile`, `open_pyramid_reader`,
+    /// `emission_order`) has a default that forwards through this hook. The
+    /// list is the whole set, in declaration order: it had drifted three short
+    /// of the trait it describes, which is the same shape as the trap the
+    /// paragraph below is about. It is no longer only prose:
+    /// `no_forwarding_hook_is_left_out_of_the_macro_or_the_list` reads this
+    /// list and the trait and holds the one to the other, because a sentence
+    /// saying "the whole set" is exactly what drifted.
     /// A wrapper therefore only has to override `inner_sink` — and any state it
     /// genuinely owns (e.g. a [`RetryingSink`]'s own retry counter) — instead
     /// of forwarding every bookkeeping method by hand. That removes the
@@ -544,6 +597,24 @@ pub trait TileSink: Send + Sync {
             None => Ok(None),
         }
     }
+
+    /// Engine hook (issue #1145): the order this sink wants its tiles in.
+    ///
+    /// [`EmissionOrder::Cascade`] by default, which is what every run did
+    /// before this hook existed and what the pyramid cascade produces for
+    /// free. A sink whose output depends on the order of the calls answers
+    /// [`EmissionOrder::TileId`] and the engine walks the plan that way
+    /// instead.
+    ///
+    /// The engine reads this once, before the first tile, so a sink cannot
+    /// change its mind mid-run. The default forwards through
+    /// [`TileSink::inner_sink`], which is what makes the answer survive the
+    /// wrappers a run is assembled from: a resume filter and a retry loop both
+    /// sit between the engine and the sink that asked.
+    fn emission_order(&self) -> EmissionOrder {
+        self.inner_sink()
+            .map_or(EmissionOrder::default(), |inner| inner.emission_order())
+    }
 }
 
 /// Generate a transparent [`TileSink`] forwarding impl for a wrapper type
@@ -614,6 +685,9 @@ macro_rules! forward_tile_sink {
                 &self,
             ) -> Result<Option<Box<dyn crate::pyramid_reader::PyramidReader>>, SinkError> {
                 (**self).open_pyramid_reader()
+            }
+            fn emission_order(&self) -> EmissionOrder {
+                (**self).emission_order()
             }
         }
     };
@@ -1786,7 +1860,7 @@ impl FsSink {
     }
 
     /// Digest algorithm used to name `_shared/blank_<hex>.<ext>` files. Mirrors
-    /// `DedupeIndex::effective_algo`: the blank/none strategies always name
+    /// what `dedupe::content_digest_for` picks: the blank/none strategies name
     /// shared blobs by their Blake3 digest; `All` honours the caller's choice.
     /// Kept in-sink so a shared blob can be revalidated against the digest
     /// embedded in its own filename without reaching into the index.
@@ -2772,6 +2846,124 @@ mod tests {
     use super::*;
     use crate::pixel::PixelFormat;
     use crate::planner::{Layout, PyramidPlanner};
+
+    /// Split a block into one `(name, code)` pair per `fn` declared at
+    /// `indent`, with comment lines already gone so a doc comment written for
+    /// the *next* method cannot be read as part of this one's body.
+    fn fns_at(block: &str, indent: &str) -> Vec<(String, String)> {
+        let head = format!("{indent}fn ");
+        let mut out: Vec<(String, String)> = Vec::new();
+        for line in block.lines() {
+            if let Some(rest) = line.strip_prefix(&head) {
+                let name = rest
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                out.push((name, String::new()));
+            } else if let Some((_, body)) = out.last_mut() {
+                body.push_str(line);
+                body.push('\n');
+            }
+        }
+        out
+    }
+
+    /// No hook that forwards through `inner_sink` is left out of
+    /// `forward_tile_sink!`, or out of the list that claims to name them all.
+    ///
+    /// [`TileSink::inner_sink`] removes the silent-data-loss trap for a
+    /// wrapper, but it moves the trap rather than deleting it. A hook added to
+    /// the trait with a forwarding default has to be repeated in the macro
+    /// body, and one that is not falls back to the trait default for every
+    /// wrapped sink. That default is the answer a *terminal* sink gives, so a
+    /// forgotten forward is silent: the wrapped sink reports whatever a sink
+    /// with nothing inside it would, and every cell that hands the engine a
+    /// bare sink stays green.
+    ///
+    /// #1129 and #1145 each added one hook here, in the same week, on the same
+    /// trait, and each was right on its own branch. That is the shape this
+    /// cell is about. It is not a hook written wrongly, it is two hooks that
+    /// compose into a macro forwarding one of them, which no cell written
+    /// about either hook alone can see.
+    ///
+    /// The doc list is held to the same set because it says out loud that it
+    /// is "the whole set, in declaration order". Prose making that claim is
+    /// precisely what drifted three short before #1129 repaired it by hand,
+    /// and repairing it by hand is not a guard against it happening again.
+    #[test]
+    fn no_forwarding_hook_is_left_out_of_the_macro_or_the_list() {
+        const SRC: &str = include_str!("sink.rs");
+
+        // The code view: comments stripped, so a method's body is its body.
+        let code: String = SRC
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            code.len() > 40_000,
+            "the positive control: every assertion below is vacuous if the \
+             include picked up a truncated file ({} bytes of code)",
+            code.len()
+        );
+
+        let block = |from: &str| -> String {
+            let start = code.find(from).unwrap_or_else(|| panic!("{from} is gone"));
+            // Everything in this file's trait and macro bodies is indented, so
+            // the first `}` in the first column is the end of the block.
+            let end = code[start..]
+                .find("\n}\n")
+                .unwrap_or_else(|| panic!("{from} has no closing brace"));
+            code[start..start + end].to_string()
+        };
+
+        // A hook "forwards" when its default body reaches `inner_sink()`.
+        // `inner_sink` itself does not, and neither do `write_tile` (no
+        // default at all) or `finish`, which is why none of the three is in
+        // the list this cell checks.
+        let forwarding: Vec<String> = fns_at(&block("pub trait TileSink"), "    ")
+            .into_iter()
+            .filter(|(_, body)| body.contains("inner_sink()"))
+            .map(|(name, _)| name)
+            .collect();
+        assert!(
+            forwarding.len() >= 14,
+            "the positive control: the trait had fourteen forwarding hooks when this \
+             was written and a parser that finds fewer has stopped parsing, not found \
+             a shrinking trait; got {forwarding:?}"
+        );
+
+        let forwarded: Vec<String> =
+            fns_at(&block("macro_rules! forward_tile_sink"), "            ")
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect();
+        for hook in &forwarding {
+            assert!(
+                forwarded.contains(hook),
+                "`{hook}` forwards through `inner_sink` but `forward_tile_sink!` does not \
+                 repeat it, so every wrapped sink silently answers the terminal default"
+            );
+        }
+
+        // The doc list, read out of the uncommented source because it *is* a
+        // comment. Names arrive backticked, so the odd splits are the names.
+        let opens = "Every engine-bookkeeping method below";
+        let closes = "default that forwards through this hook";
+        let from = SRC.find(opens).expect("the forwarded-method list is gone");
+        let to = SRC[from..].find(closes).expect("the list has no end") + from;
+        let listed: Vec<String> = SRC[from..to]
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .map(str::to_string)
+            .collect();
+        assert_eq!(
+            listed, forwarding,
+            "the list says it is the whole set in declaration order, so it has to be \
+             both: same names, same order"
+        );
+    }
 
     fn make_tile(level: u32, col: u32, row: u32) -> Tile {
         Tile {

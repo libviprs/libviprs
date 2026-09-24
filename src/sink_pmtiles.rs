@@ -37,11 +37,21 @@
 //! tiles cost one payload" would only be true for callers who had opted in.
 //!
 //! So the payload table is keyed on the content digest unconditionally, and
-//! [`DedupeIndex`] is used for the digest rather than for the decision. The
-//! digest is the one the engine has already computed;
+//! the run's strategy is consulted for the digest rather than for the
+//! decision: it decides which algorithm the digest is in, which is the only
+//! thing about dedupe this sink asks. The digest is the one the engine would
+//! have computed, through the same
+//! [`content_digest_for`] the index uses;
 //! [`Writer::add_tile`](crate::pmtiles::Writer::add_tile) takes it and never
 //! re-derives one, so a tile is hashed once however many consumers want the
 //! answer.
+//!
+//! The strategy is held rather than a
+//! [`DedupeIndex`](crate::dedupe::DedupeIndex) for a reason worth stating: an
+//! index guards its two maps with a mutex, and a sink that reached through one
+//! for a hash held that mutex across blake3 over a whole tile payload. The
+//! strategy is `Copy`, so it is copied out and the hash runs with nothing
+//! locked (issue #1145).
 //!
 //! # What this sink refuses, and why refusing is the implementation
 //!
@@ -68,14 +78,14 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use crate::dedupe::{DedupeIndex, DedupeStrategy};
+use crate::dedupe::{DedupeStrategy, content_digest_for};
 use crate::engine::EngineConfig;
 use crate::pixel::PixelFormat;
 use crate::planner::{Layout, PyramidPlan, TileCoord};
 use crate::pmtiles::writer::{Writer, WriterOptions};
 use crate::pmtiles::{Compression, Header, LibviprsMetadata, Metadata, PmTilesError, TileType};
 use crate::resume::{ResumeMode, RunLock};
-use crate::sink::{SinkError, Tile, TileFormat, TileSink, encode_jpeg, encode_png};
+use crate::sink::{EmissionOrder, SinkError, Tile, TileFormat, TileSink, encode_jpeg, encode_png};
 
 /// Suffix of the sidecar directory a sink creates beside its archive.
 ///
@@ -184,8 +194,16 @@ pub struct PmTilesSink {
     /// Captured by [`TileSink::record_engine_config`], spent when the writer
     /// opens.
     engine_config: Mutex<Option<EngineConfig>>,
-    /// Used for the digest, never for the decision. See the module docs.
-    dedupe: Mutex<DedupeIndex>,
+    /// The run's dedupe strategy, which decides the digest algorithm.
+    ///
+    /// Used for the digest, never for the decision. See the module docs. It is
+    /// the strategy rather than a [`DedupeIndex`](crate::dedupe::DedupeIndex)
+    /// because the digest is all this sink ever wanted, and an index would put
+    /// its own mutex between `write_tile` and the hash (issue #1145).
+    dedupe_strategy: Mutex<DedupeStrategy>,
+    /// What [`TileSink::emission_order`] answers. Set by
+    /// [`PmTilesSinkBuilder::ordered_emission`].
+    emission_order: EmissionOrder,
     /// The advisory lock on this archive, held for the sink's whole life.
     lock: Mutex<Option<RunLock>>,
 }
@@ -233,6 +251,7 @@ impl PmTilesSink {
             metadata: None,
             options: None,
             resume_mode: ResumeMode::Overwrite,
+            ordered_emission: false,
         }
     }
 
@@ -414,6 +433,7 @@ pub struct PmTilesSinkBuilder {
     metadata: Option<Metadata>,
     options: Option<WriterOptions>,
     resume_mode: ResumeMode,
+    ordered_emission: bool,
 }
 
 impl PmTilesSinkBuilder {
@@ -496,6 +516,40 @@ impl PmTilesSinkBuilder {
         self
     }
 
+    /// Ask the engine for its tiles in ascending tile id order (issue #1145).
+    ///
+    /// Off by default, because it is not free and most runs do not need it.
+    /// A run that turns it on gets an archive that is a pure function of the
+    /// tile set rather than of the thread schedule, and, under
+    /// [`Layout::Arrival`](crate::pmtiles::Layout), one whose data region is
+    /// in tile id order with no reordering pass, no staging file and no copy.
+    ///
+    /// # What it costs, and where
+    ///
+    /// The cost is in the engine, not here. The pyramid cascade makes each
+    /// level by downscaling the one above it, so the levels can only be
+    /// produced from the full-resolution one down, which is the exact reverse
+    /// of the order tile ids run in. An ordered run therefore holds every
+    /// level's raster at once instead of one at a time, and the levels below
+    /// the top sum to a third of it. Nothing else moves: the extraction is
+    /// still parallel and the tiles in flight are still bounded by
+    /// `EngineConfig::buffer_size`.
+    ///
+    /// # It is worth nothing under `Layout::TileId`
+    ///
+    /// The default layout sorts at finalize and writes the data region in
+    /// tile id order whatever order the tiles arrived in, so an ordered run
+    /// there pays the third and buys an archive it would have produced
+    /// anyway. It is accepted rather than refused because it is not wrong,
+    /// and because a caller comparing the two layouts wants to hold
+    /// everything else fixed. That comparison is what
+    /// `an_ordered_arrival_run_is_byte_identical_to_the_tile_id_layout` in
+    /// `tests/pmtiles_sink.rs` is.
+    pub fn ordered_emission(mut self, ordered: bool) -> Self {
+        self.ordered_emission = ordered;
+        self
+    }
+
     /// Validate the configuration, take the run lock, and return the sink.
     ///
     /// # Errors
@@ -566,7 +620,12 @@ impl PmTilesSinkBuilder {
             options,
             writer: Mutex::new(WriterState::Pending),
             engine_config: Mutex::new(None),
-            dedupe: Mutex::new(DedupeIndex::new(DedupeStrategy::default())),
+            dedupe_strategy: Mutex::new(DedupeStrategy::default()),
+            emission_order: if self.ordered_emission {
+                EmissionOrder::TileId
+            } else {
+                EmissionOrder::Cascade
+            },
             lock: Mutex::new(Some(lock)),
         })
     }
@@ -606,13 +665,19 @@ impl TileSink for PmTilesSink {
         // is the size win the marker exists for and a better one.
         let bytes = self.encode(tile)?;
 
-        let digest = {
-            let index = self
-                .dedupe
+        // The guard is dropped before the hash runs, deliberately. The
+        // strategy is all the digest needs and it is `Copy`, so holding a
+        // mutex across blake3 over a whole tile payload buys nothing and
+        // serialises every concurrent `write_tile` on this sink behind one
+        // hash at a time (issue #1145).
+        let strategy = {
+            let guard = self
+                .dedupe_strategy
                 .lock()
                 .map_err(|e| SinkError::Other(format!("pmtiles dedupe mutex poisoned: {e}")))?;
-            index.content_digest(&bytes).1
+            *guard
         };
+        let digest = content_digest_for(strategy, &bytes).1;
 
         self.with_writer(tile.raster.format(), |writer| {
             writer.add_tile(z, x, y, &bytes, digest)
@@ -739,13 +804,12 @@ impl TileSink for PmTilesSink {
         if let Ok(mut guard) = self.engine_config.lock() {
             *guard = Some(config.clone());
         }
-        // The dedupe index is only ever asked for a digest, and the algorithm
-        // it uses depends on the strategy, so it is rebuilt to match the run
-        // rather than left on the default. Keying the payload table on a
-        // digest from one algorithm while the rest of the run uses another
-        // would not be wrong, but it would mean hashing twice.
-        if let Ok(mut guard) = self.dedupe.lock() {
-            *guard = DedupeIndex::new(config.dedupe_strategy.unwrap_or_default());
+        // The digest algorithm depends on the strategy, so the sink takes the
+        // run's rather than staying on the default. Keying the payload table
+        // on a digest from one algorithm while the rest of the run uses
+        // another would not be wrong, but it would mean hashing twice.
+        if let Ok(mut guard) = self.dedupe_strategy.lock() {
+            *guard = config.dedupe_strategy.unwrap_or_default();
         }
     }
 
@@ -787,6 +851,15 @@ impl TileSink for PmTilesSink {
         Err(SinkError::UnsupportedResumeMode {
             mode: ResumeMode::Resume,
         })
+    }
+
+    /// The order this sink wants its tiles in (issue #1145).
+    ///
+    /// [`EmissionOrder::Cascade`] unless
+    /// [`PmTilesSinkBuilder::ordered_emission`] was set, which is where the
+    /// argument for turning it on lives.
+    fn emission_order(&self) -> EmissionOrder {
+        self.emission_order
     }
 }
 

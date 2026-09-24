@@ -369,6 +369,8 @@ annotated   fs-detected  tests/pmtiles_sink.rs::a_verify_run_reports_on_the_arch
 annotated   fs-detected  tests/pmtiles_sink.rs::an_engine_resume_is_refused_rather_than_silently_regenerating
 annotated   fs-detected  tests/pmtiles_sink.rs::an_engine_run_collapses_its_identical_tiles
 annotated   fs-detected  tests/pmtiles_sink.rs::an_engine_run_produces_an_archive_holding_every_planned_tile
+annotated   fs-detected  tests/pmtiles_sink.rs::an_ordered_arrival_run_earns_the_clustered_flag
+annotated   fs-detected  tests/pmtiles_sink.rs::an_ordered_arrival_run_stores_what_the_tile_id_layout_would_have
 annotated   fs-detected  tests/pmtiles_sink.rs::blank_tiles_are_stored_as_real_tiles_rather_than_skipped_or_marked
 annotated   fs-detected  tests/pmtiles_sink.rs::content_format_is_the_configured_format
 annotated   fs-detected  tests/pmtiles_sink.rs::duplicate_tiles_collapse_to_one_payload_on_the_default_strategy
@@ -386,6 +388,7 @@ annotated   fs-detected  tests/pmtiles_sink.rs::the_directory_reader_returns_wha
 annotated   fs-detected  tests/pmtiles_sink.rs::the_engine_config_reaches_the_archive_metadata
 annotated   fs-detected  tests/pmtiles_sink.rs::the_resume_refusal_survives_the_sink_wrappers
 annotated   fs-detected  tests/pmtiles_sink.rs::the_sink_exposes_no_checkpoint_root
+annotated   fs-detected  tests/pmtiles_sink.rs::two_ordered_arrival_runs_produce_the_same_archive
 annotated   fs-detected  tests/pmtiles_sink.rs::verify_builds_where_resume_does_not
 annotated   fs-detected  tests/pmtiles_sink.rs::writing_after_finish_is_refused
 annotated   fs-detected  tests/pmtiles_verify_reads_the_index.rs::a_local_file_still_reads_lengths_rather_than_payloads
@@ -553,7 +556,10 @@ annotated   not-detected tests/pmtiles_reader.rs::the_leaf_path_runs_and_every_e
 annotated   not-detected tests/pmtiles_reader.rs::the_root_directory_is_the_entry_list_go_pmtiles_decoded
 annotated   not-detected tests/pmtiles_reader.rs::the_vector_files_are_the_ones_the_oracle_produced_and_they_parse_to_the_rows_they_claim
 annotated   not-detected tests/pmtiles_reader.rs::tile_exists_answers_without_reading_the_payload
+annotated   not-detected tests/pmtiles_sink.rs::ordered_emission_hands_the_sink_every_tile_in_ascending_tile_id_order
+annotated   not-detected tests/pmtiles_sink.rs::ordered_emission_keeps_no_more_tiles_in_flight_than_the_queue_allows
 annotated   not-detected tests/pmtiles_sink.rs::the_coordinate_mapping_matches_the_oracle_tile_ids
+annotated   not-detected tests/pmtiles_sink.rs::the_requested_order_survives_the_sink_wrappers
 annotated   not-detected tests/pmtiles_validator.rs::a_directory_that_does_not_decompress_is_a_finding_and_not_a_crash
 annotated   not-detected tests/pmtiles_validator.rs::a_header_count_that_disagrees_with_the_directories_is_flagged
 annotated   not-detected tests/pmtiles_validator.rs::a_leaf_pointer_outside_the_leaf_section_is_flagged
