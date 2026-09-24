@@ -674,7 +674,17 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 ///
 /// #1146 and #1147 landed first and took main to 442. Held at that figure,
 /// the detector reported the number below on the merged tree.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 454;
+///
+/// #1143 moves it 454 to 461, and the seven are the `Layout::Arrival` cells.
+/// Four are in `tests/pmtiles_writer.rs`: the layout of the sections, the
+/// round trip through this crate's reader, the dropped run that has to take
+/// its partial archive with it, and the `#[ignore]`d capture tool that hands
+/// go-pmtiles an arrival archive to verify. Three are in
+/// `src/pmtiles/writer.rs`: the counting sink, the latch over a destination
+/// write that fails part way, and the durability barrier. All seven reach a
+/// `tempfile::tempdir()` or a path under one, all seven are annotated, and
+/// none is a judgement call.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 461;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
