@@ -183,17 +183,141 @@ const MAX_AXIS: u32 = 65535;
 // Entry point
 // ---------------------------------------------------------------------------
 
-/// Whether a quality and a mode ask for 4:2:0.
+/// `Cb - 128` and `Cr - 128` as exact linear functions of `R - G` and `B - G`,
+/// in units of one sample scaled by this much.
 ///
-/// [`JpegSubsample::Auto`] is libvips' `VIPS_FOREIGN_SUBSAMPLE_AUTO`: 4:2:0
-/// below quality 90 and 4:4:4 at or above. The tile default is quality 85, so
-/// `Auto` is what selects 4:2:0 for a tile without anybody having to pass a
-/// mode down through `TileFormat`.
-fn subsampled(quality: u8, subsample: JpegSubsample) -> bool {
+/// Both rows of the JFIF matrix have coefficients summing to zero, which is
+/// what lets the green channel drop out: `Cb - 128 = -0.168736(R-G) +
+/// 0.5(B-G)` and `Cr - 128 = 0.5(R-G) - 0.081312(B-G)`. Working in those two
+/// differences keeps [`chroma_detail_blocks`] in integers and gives its
+/// constant-chroma shortcut something it can compare with no arithmetic at
+/// all, which is the case that has to stay cheap.
+const CHROMA_SCALE: i32 = 4096;
+/// `(R-G, B-G)` coefficients for `Cb`, scaled by [`CHROMA_SCALE`].
+const CB_FROM_UV: (i32, i32) = (-691, 2048);
+/// `(R-G, B-G)` coefficients for `Cr`, scaled by [`CHROMA_SCALE`].
+const CR_FROM_UV: (i32, i32) = (2048, -333);
+
+/// How far a chroma sample has to sit from its 2x2 block's mean, in samples
+/// out of 255, before the block counts as carrying detail 4:2:0 would remove.
+///
+/// This is a threshold I picked and not one derived from anything, so what
+/// makes it defensible is distance rather than provenance: the cells in this
+/// file measure where the real content actually lands, and the nearest case on
+/// either side is many times away from it. See
+/// [`the_chroma_gate_is_nowhere_near_the_content_it_judges`].
+const CHROMA_STEP: i32 = 8;
+
+/// One block in this many may carry that much chroma detail before `Auto`
+/// stops subsampling.
+///
+/// A count rather than an average, because the damage is concentrated where
+/// the colour is and an average over the tile hides it. Issue #1134 measured
+/// 13.969 mean absolute channel error **on ink** against 2.799, and the same
+/// sheet reads as monochrome if you average over the paper as well, which is
+/// the blindness it warned about in its own ink-mask metric.
+const COLOURED_BLOCK_RATIO: usize = 256;
+
+/// How many of this image's 2x2 chroma blocks carry detail 4:2:0 would remove.
+///
+/// A block is the four source pixels one chroma sample is box-averaged from
+/// under 4:2:0, edges clamped exactly as [`Pixels::sample`] clamps them, so
+/// this measures the averaging the encoder is about to perform rather than an
+/// approximation of it. It counts the block when any of the four samples sits
+/// more than [`CHROMA_STEP`] from the four's mean in `Cb` or `Cr`.
+///
+/// Counting stops once the answer is past `stop_after`, which is what keeps
+/// the cost off the hot path: a strongly coloured image is past it within the
+/// first rows. Pass [`usize::MAX`] for the true count.
+///
+/// The constant-chroma shortcut is the other half of that. Four pixels with
+/// the same `(R-G, B-G)` have the same chroma whatever it is, so the block
+/// cannot lose any, and a monochrome image takes that branch on every block
+/// for two subtractions and six comparisons a block and no multiplies at all.
+/// Flat colour takes it too, which is the case a rule that counted coloured
+/// pixels would get wrong: a solid fill is every pixel coloured and nothing
+/// for subsampling to remove.
+fn chroma_detail_blocks(px: &Pixels, stop_after: usize) -> usize {
+    debug_assert_eq!(px.channels, 3, "chroma detail needs three channels");
+    // Compared against `4 * sample - sum`, which is four times the deviation
+    // from the mean, so the threshold is scaled by four as well. Keeping the
+    // sum rather than the mean is what avoids a division per block.
+    let limit = 4 * CHROMA_STEP * CHROMA_SCALE;
+    let mut found = 0usize;
+    for by in (0..px.height).step_by(2) {
+        for bx in (0..px.width).step_by(2) {
+            let mut u = [0i32; 4];
+            let mut v = [0i32; 4];
+            for k in 0..4 {
+                let x = (bx + (k & 1)).min(px.width - 1);
+                let y = (by + (k >> 1)).min(px.height - 1);
+                let off = (y * px.width + x) * px.channels;
+                let g = i32::from(px.data[off + 1]);
+                u[k] = i32::from(px.data[off]) - g;
+                v[k] = i32::from(px.data[off + 2]) - g;
+            }
+            let constant = u[1] == u[0]
+                && u[2] == u[0]
+                && u[3] == u[0]
+                && v[1] == v[0]
+                && v[2] == v[0]
+                && v[3] == v[0];
+            if constant {
+                continue;
+            }
+            let cb: [i32; 4] = std::array::from_fn(|k| CB_FROM_UV.0 * u[k] + CB_FROM_UV.1 * v[k]);
+            let cr: [i32; 4] = std::array::from_fn(|k| CR_FROM_UV.0 * u[k] + CR_FROM_UV.1 * v[k]);
+            let (sum_cb, sum_cr) = (cb.iter().sum::<i32>(), cr.iter().sum::<i32>());
+            let detailed = (0..4).any(|k| {
+                (4 * cb[k] - sum_cb).abs() > limit || (4 * cr[k] - sum_cr).abs() > limit
+            });
+            if detailed {
+                found += 1;
+                if found > stop_after {
+                    return found;
+                }
+            }
+        }
+    }
+    found
+}
+
+/// Whether a quality, a mode and the pixels themselves ask for 4:2:0.
+///
+/// [`JpegSubsample::Auto`] was libvips' `VIPS_FOREIGN_SUBSAMPLE_AUTO` and
+/// nothing else: 4:2:0 below quality 90 and 4:4:4 at or above. **It is not any
+/// more, and the deviation is deliberate.** The quality rule still gates it,
+/// so nothing above quality 90 changes and nothing here re-enables
+/// subsampling that libvips would refuse; below 90 the content now gets a
+/// veto that libvips does not give it.
+///
+/// The reason is measured. The tile default is quality 85, so under the
+/// libvips rule alone every tile this crate writes was subsampled whatever
+/// colour was in it, and issue #1132's own table priced that on coloured line
+/// art: 22719 bytes at 35.01 dB became 15385 at 30.05, a 4.96 dB drop, while
+/// the black-on-white drawing in the row above moved 0.02 dB. Issue #1134's
+/// colour control found the same asymmetry from the other side, 13.969 mean
+/// absolute channel error on recoloured ink against 2.799, noted that its own
+/// ink-mask metric stayed at 0.99997 through the damage, and concluded:
+/// "Enable 4:2:0 behind a chroma check, not unconditionally."
+///
+/// What the deviation costs is the scan in [`chroma_detail_blocks`], and what
+/// it keeps is everything the size argument rests on: black ink on white paper
+/// has no chroma to lose, takes the constant-chroma shortcut on every block,
+/// and still subsamples. `docs/tile-codec-benchmarks.md` has the figure that
+/// matters, which is that the 1.84x over a real 1479-tile sheet survives it.
+fn subsampled(px: &Pixels, quality: u8, subsample: JpegSubsample) -> bool {
     match subsample {
         JpegSubsample::Off => false,
         JpegSubsample::On => true,
-        JpegSubsample::Auto => quality < 90,
+        JpegSubsample::Auto => {
+            if quality >= 90 {
+                return false;
+            }
+            let blocks = px.width.div_ceil(2) * px.height.div_ceil(2);
+            let allowed = blocks / COLOURED_BLOCK_RATIO;
+            chroma_detail_blocks(px, allowed) <= allowed
+        }
     }
 }
 
@@ -261,13 +385,17 @@ pub(crate) fn encode(
         )));
     }
 
-    let plan = Plan::new(w, h, channels, quality, subsample);
     let px = Pixels {
         data,
         width: w,
         height: h,
         channels,
     };
+    // Greyscale has no chroma planes to subsample, so it never pays for the
+    // scan; asking `subsampled` first would walk every pixel of a one-channel
+    // image to answer a question its plan has already answered.
+    let subsample_chroma = channels == 3 && subsampled(&px, quality, subsample);
+    let plan = Plan::new(w, h, channels, quality, subsample_chroma);
 
     // Pass one: what does this image actually emit?
     let mut counts = [[0u32; 256]; 4];
@@ -357,10 +485,10 @@ impl Plan {
         height: usize,
         channels: usize,
         quality: u8,
-        subsample: JpegSubsample,
+        subsample_chroma: bool,
     ) -> Self {
         let grey = channels == 1;
-        let (h, v) = if !grey && subsampled(quality, subsample) {
+        let (h, v) = if !grey && subsample_chroma {
             (2, 2)
         } else {
             (1, 1)
@@ -1419,6 +1547,92 @@ mod tests {
              {kept:.2}), which is the cost #1132 measured and #1134 said not to \
              pay by default",
             kept - got
+        );
+    }
+
+    /// What the gate is worth, in dB, kept as a measurement rather than a
+    /// memory of one.
+    ///
+    /// `On` is exactly what `Auto` did at this quality before the gate, so the
+    /// old behaviour is still reachable and the cost of it can stay pinned in
+    /// the suite instead of living in a commit message. #1132's table put it at
+    /// 4.96 dB on this content and #1148's review round measured the same
+    /// thing; the floor here is 3 dB so the cell is about the size of the
+    /// effect rather than about the third decimal of a fixture.
+    #[test]
+    fn what_the_gate_saves_the_coloured_tile() {
+        let src = drawing(256, 256);
+        let at_420 = encode(&src, 256, 256, image::ColorType::Rgb8, 85, JpegSubsample::On)
+            .expect("coloured line art encodes");
+        let under_auto = encode(&src, 256, 256, image::ColorType::Rgb8, 85, JpegSubsample::Auto)
+            .expect("coloured line art encodes");
+        let forced = psnr(&src, decode(&at_420).as_raw());
+        let gated = psnr(&src, decode(&under_auto).as_raw());
+        assert!(
+            gated - forced > 3.0,
+            "the gate bought {:.2} dB on coloured ink ({gated:.2} against \
+             {forced:.2} at forced 4:2:0), and #1132 measured 4.96",
+            gated - forced
+        );
+        assert!(
+            under_auto.len() > at_420.len(),
+            "keeping the chroma should cost bytes; 4:4:4 is {} and 4:2:0 is {}",
+            under_auto.len(),
+            at_420.len()
+        );
+    }
+
+    /// The gate's constants, against the content they judge.
+    ///
+    /// A threshold validated only on the case that exposed the bug moves the
+    /// cliff rather than removing it, so this reads the count each fixture
+    /// actually produces and fails unless every one of them is a factor of
+    /// four clear of the limit. The numbers go in the failure messages so a
+    /// run says where the cliff is rather than only whether it was crossed.
+    #[test]
+    fn the_chroma_gate_is_nowhere_near_the_content_it_judges() {
+        let blocks = 128 * 128;
+        let allowed = blocks / COLOURED_BLOCK_RATIO;
+        let count = |src: &[u8]| {
+            chroma_detail_blocks(
+                &Pixels {
+                    data: src,
+                    width: 256,
+                    height: 256,
+                    channels: 3,
+                },
+                usize::MAX,
+            )
+        };
+
+        let mono = count(&mono_drawing(256, 256));
+        assert_eq!(mono, 0, "black ink on white paper has no chroma at all");
+
+        let mut flat = vec![0u8; 256 * 256 * 3];
+        for px in flat.chunks_exact_mut(3) {
+            px.copy_from_slice(&[38, 120, 190]);
+        }
+        assert_eq!(count(&flat), 0, "a solid fill has no chroma detail");
+
+        let mut traced = mono_drawing(256, 256);
+        for i in 0..8 {
+            let off = (i * 4099) % (256 * 256) * 3;
+            traced[off] = 210;
+            traced[off + 1] = 40;
+            traced[off + 2] = 40;
+        }
+        let trace = count(&traced);
+        assert!(
+            trace * 4 <= allowed,
+            "eight stray coloured pixels give {trace} blocks against a limit \
+             of {allowed}, which is not four times clear of it"
+        );
+
+        let coloured = count(&drawing(256, 256));
+        assert!(
+            coloured >= allowed * 4,
+            "coloured linework gives {coloured} blocks against a limit of \
+             {allowed}, which is not four times past it"
         );
     }
 
