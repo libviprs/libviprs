@@ -202,6 +202,55 @@ struct SeenEntry {
     shared_path: PathBuf,
 }
 
+/// The digest algorithm a [`DedupeStrategy`] hashes content with.
+///
+/// [`Blanks`](DedupeStrategy::Blanks) and [`None`](DedupeStrategy::None)
+/// always use Blake3 (fast, unkeyed); [`All`](DedupeStrategy::All) honours the
+/// caller-chosen algorithm.
+fn effective_algo(strategy: DedupeStrategy) -> ChecksumAlgo {
+    match strategy {
+        DedupeStrategy::None | DedupeStrategy::Blanks => ChecksumAlgo::Blake3,
+        DedupeStrategy::All { algo } => algo,
+    }
+}
+
+/// The raw content digest `strategy` keys `bytes` on, and the algorithm that
+/// produced it.
+///
+/// [`DedupeIndex::content_digest`] is this, reached through an index. The free
+/// form exists because a caller that only wants the digest does not need the
+/// index and should not have to hold it: [`DedupeIndex`] guards its two maps
+/// with a mutex, and a caller reaching through it for a hash ends up holding
+/// that mutex across a hash of an arbitrarily large payload for no reason
+/// (issue #1145). The strategy is [`Copy`], so such a caller copies it out and
+/// hashes with nothing locked.
+///
+/// The algorithm comes back alongside the digest for the same reason it does
+/// on the method: it is not fixed, and a consumer keying a map on the digest
+/// alone would merge two hash spaces the day the strategy changed under it.
+///
+/// Keeping raw bytes avoids the per-tile `String` allocation
+/// [`ChecksumAlgo::hash`](crate::manifest::ChecksumAlgo) would incur.
+pub fn content_digest_for(strategy: DedupeStrategy, bytes: &[u8]) -> (ChecksumAlgo, [u8; 32]) {
+    let algo = effective_algo(strategy);
+    let digest = match algo {
+        ChecksumAlgo::Blake3 => {
+            let h = blake3::hash(bytes);
+            *h.as_bytes()
+        }
+        ChecksumAlgo::Sha256 => {
+            use sha2::Digest;
+            let mut hasher = sha2::Sha256::new();
+            hasher.update(bytes);
+            let out = hasher.finalize();
+            let mut buf = [0u8; 32];
+            buf.copy_from_slice(&out);
+            buf
+        }
+    };
+    (algo, digest)
+}
+
 /// In-memory mapping from content-hash to shared-key. One instance per
 /// generation run; not persisted across restarts (resume-mode sinks rebuild
 /// the index by walking `_shared/`).
@@ -255,7 +304,7 @@ impl DedupeIndex {
     /// alone would merge two different hash spaces if the strategy ever
     /// changed under it.
     pub fn content_digest(&self, bytes: &[u8]) -> (ChecksumAlgo, [u8; 32]) {
-        self.hash_content_raw(bytes)
+        content_digest_for(self.strategy, bytes)
     }
 
     /// Returns the strategy this index was built for.
@@ -263,39 +312,12 @@ impl DedupeIndex {
         self.strategy
     }
 
-    /// Algorithm used to produce the raw digest for `hash_content_raw`.
-    /// [`DedupeStrategy::Blanks`] and [`DedupeStrategy::None`] always hash
-    /// with Blake3 (fast, unkeyed); [`DedupeStrategy::All`] honours the
-    /// caller-chosen algorithm.
-    fn effective_algo(&self) -> ChecksumAlgo {
-        match self.strategy {
-            DedupeStrategy::None | DedupeStrategy::Blanks => ChecksumAlgo::Blake3,
-            DedupeStrategy::All { algo } => algo,
-        }
-    }
-
     /// Compute the content hash using the algorithm dictated by `strategy`,
     /// returning the raw 32-byte digest alongside the algorithm that
-    /// produced it. Keeping raw bytes avoids the per-tile `String`
-    /// allocation that `ChecksumAlgo::hash` would incur.
+    /// produced it. [`content_digest_for`] is where that happens; this is the
+    /// name the index's own call sites use.
     fn hash_content_raw(&self, bytes: &[u8]) -> (ChecksumAlgo, [u8; 32]) {
-        let algo = self.effective_algo();
-        let digest = match algo {
-            ChecksumAlgo::Blake3 => {
-                let h = blake3::hash(bytes);
-                *h.as_bytes()
-            }
-            ChecksumAlgo::Sha256 => {
-                use sha2::Digest;
-                let mut hasher = sha2::Sha256::new();
-                hasher.update(bytes);
-                let out = hasher.finalize();
-                let mut buf = [0u8; 32];
-                buf.copy_from_slice(&out);
-                buf
-            }
-        };
-        (algo, digest)
+        content_digest_for(self.strategy, bytes)
     }
 
     /// Record a tile whose byte contents are `bytes` at the planned path
@@ -608,6 +630,58 @@ fn absolutize(p: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The free digest and the index's method are one implementation.
+    ///
+    /// #1145 moved the hashing out of [`DedupeIndex`] so a caller that only
+    /// wants a digest does not have to hold the index's mutex across it, and
+    /// the thing that could go wrong with that move is two implementations
+    /// that agree until a strategy is added to one of them. So the method is
+    /// asserted to be the function, for every strategy the enum has and both
+    /// algorithms `All` can carry.
+    ///
+    /// The algorithms are asserted to differ first. Without that the whole
+    /// cell would pass for a `content_digest_for` that ignored its strategy
+    /// and always hashed with Blake3, which is the mistake the split makes
+    /// possible.
+    #[test]
+    fn the_free_digest_is_the_index_digest_for_every_strategy() {
+        let bytes = b"a tile payload that is long enough to be worth hashing";
+        let strategies = [
+            DedupeStrategy::None,
+            DedupeStrategy::Blanks,
+            DedupeStrategy::All {
+                algo: ChecksumAlgo::Blake3,
+            },
+            DedupeStrategy::All {
+                algo: ChecksumAlgo::Sha256,
+            },
+        ];
+        for strategy in strategies {
+            let index = DedupeIndex::new(strategy);
+            assert_eq!(
+                content_digest_for(strategy, bytes),
+                index.content_digest(bytes),
+                "the free digest and {strategy:?}'s index must agree"
+            );
+        }
+
+        // The control: the strategy really does decide, so a function that
+        // ignored it could not pass the loop above.
+        let blake3 = content_digest_for(DedupeStrategy::None, bytes);
+        let sha256 = content_digest_for(
+            DedupeStrategy::All {
+                algo: ChecksumAlgo::Sha256,
+            },
+            bytes,
+        );
+        assert_eq!(blake3.0, ChecksumAlgo::Blake3);
+        assert_eq!(sha256.0, ChecksumAlgo::Sha256);
+        assert_ne!(
+            blake3.1, sha256.1,
+            "two algorithms must not produce one digest"
+        );
+    }
 
     #[test]
     fn default_strategy_is_none() {

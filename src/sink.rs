@@ -1803,7 +1803,7 @@ impl FsSink {
     }
 
     /// Digest algorithm used to name `_shared/blank_<hex>.<ext>` files. Mirrors
-    /// `DedupeIndex::effective_algo`: the blank/none strategies always name
+    /// what `dedupe::content_digest_for` picks: the blank/none strategies name
     /// shared blobs by their Blake3 digest; `All` honours the caller's choice.
     /// Kept in-sink so a shared blob can be revalidated against the digest
     /// embedded in its own filename without reaching into the index.
