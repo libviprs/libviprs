@@ -363,7 +363,13 @@ const ANCHOR_FILES: &[&str] = &[
 /// table it is about, and three the review asked for, covering the repeat
 /// table's own eviction, a payload larger than the copy buffer and the leaf
 /// width the widening loop settles on.
-const EXPECTED_SRC_ANNOTATIONS: usize = 253;
+///
+/// #1143 moves it 253 to 256, and all three are in `src/pmtiles/writer.rs`,
+/// covering `Layout::Arrival`: the counting sink that shows every tile byte
+/// written once, the latch over a destination write that fails part way, and
+/// the durability barrier now landing on the destination rather than on a
+/// staging file that no longer exists.
+const EXPECTED_SRC_ANNOTATIONS: usize = 256;
 /// Companion to [`EXPECTED_SRC_ANNOTATIONS`]: how many `src/` modules carry at
 /// least one annotation. #765 made it 25 by putting the first annotation in
 /// `src/analyze.rs`; `src/colour.rs` and `src/pdf.rs`, which took the other

@@ -2166,63 +2166,61 @@ impl<W: Write + Seek> Writer<W> {
         }
         let metadata_length = metadata.len() as u64;
         let leaf_directories_length = leaves.as_ref().map(|l| l.length).unwrap_or(0);
-        let (tile_data_offset, metadata_offset, leaf_directories_offset) = match self.options.layout
-        {
-            Layout::TileId => {
-                let metadata_offset = root_offset + root_length;
-                let leaf_directories_offset = metadata_offset + metadata_length;
-                // When there are no leaves this lands exactly on the tile
-                // data, which is what go-pmtiles writes and what makes the
-                // *length* the flag rather than the offset.
-                let tile_data_offset = leaf_directories_offset
-                    .checked_add(leaf_directories_length)
-                    .ok_or(PmTilesError::Overflow {
-                        what: "the tile data offset",
-                    })?;
-                (tile_data_offset, metadata_offset, leaf_directories_offset)
-            }
-            Layout::Arrival => {
-                // The prefix was reserved before the first payload landed, so
-                // the tile data starts at the ceiling whatever the root turned
-                // out to cost, and the two sections that are not the root
-                // follow the tile data instead of preceding it. The bytes
-                // between the root's end and the ceiling are padding, which
-                // v3 allows: it fixes the header's position and requires the
-                // root inside the first 16384 bytes, and says nothing about
-                // what else may sit there.
-                //
-                // `ROOT_CEILING` here is not a choice among several that would
-                // work, and this is the one place that is worth knowing.
-                // go-pmtiles' `Verify` computes two acceptable archive sizes
-                // and requires the file to be exactly one of them
-                // (`pmtiles/verify.go:84`, v1.31.2):
-                //
-                //     lengthFromHeader            = 127   + root + meta + leaf + tiles
-                //     lengthFromHeaderWithPadding = 16384 +        meta + leaf + tiles
-                //
-                // The second branch is this layout, and it is the only padded
-                // size the reference recognises. Reserving more, or aligning
-                // the tile data to anything else, or leaving a gap anywhere
-                // else in the archive, fails `pmtiles verify` with "total
-                // length of archive ... does not match header". This crate's
-                // own validator would not notice: `validate.rs` checks each
-                // section against the end of the file and never checks the
-                // sections against each other.
-                let metadata_offset =
-                    ROOT_CEILING
-                        .checked_add(plan.tile_data_length)
+        let (tile_data_offset, metadata_offset, leaf_directories_offset) =
+            match self.options.layout {
+                Layout::TileId => {
+                    let metadata_offset = root_offset + root_length;
+                    let leaf_directories_offset = metadata_offset + metadata_length;
+                    // When there are no leaves this lands exactly on the tile
+                    // data, which is what go-pmtiles writes and what makes the
+                    // *length* the flag rather than the offset.
+                    let tile_data_offset = leaf_directories_offset
+                        .checked_add(leaf_directories_length)
                         .ok_or(PmTilesError::Overflow {
-                            what: "the metadata offset",
+                            what: "the tile data offset",
                         })?;
-                let leaf_directories_offset =
-                    metadata_offset
+                    (tile_data_offset, metadata_offset, leaf_directories_offset)
+                }
+                Layout::Arrival => {
+                    // The prefix was reserved before the first payload landed, so
+                    // the tile data starts at the ceiling whatever the root turned
+                    // out to cost, and the two sections that are not the root
+                    // follow the tile data instead of preceding it. The bytes
+                    // between the root's end and the ceiling are padding, which
+                    // v3 allows: it fixes the header's position and requires the
+                    // root inside the first 16384 bytes, and says nothing about
+                    // what else may sit there.
+                    //
+                    // `ROOT_CEILING` here is not a choice among several that would
+                    // work, and this is the one place that is worth knowing.
+                    // go-pmtiles' `Verify` computes two acceptable archive sizes
+                    // and requires the file to be exactly one of them
+                    // (`pmtiles/verify.go:84`, v1.31.2):
+                    //
+                    //     lengthFromHeader            = 127   + root + meta + leaf + tiles
+                    //     lengthFromHeaderWithPadding = 16384 +        meta + leaf + tiles
+                    //
+                    // The second branch is this layout, and it is the only padded
+                    // size the reference recognises. Reserving more, or aligning
+                    // the tile data to anything else, or leaving a gap anywhere
+                    // else in the archive, fails `pmtiles verify` with "total
+                    // length of archive ... does not match header". This crate's
+                    // own validator would not notice: `validate.rs` checks each
+                    // section against the end of the file and never checks the
+                    // sections against each other.
+                    let metadata_offset = ROOT_CEILING.checked_add(plan.tile_data_length).ok_or(
+                        PmTilesError::Overflow {
+                            what: "the metadata offset",
+                        },
+                    )?;
+                    let leaf_directories_offset = metadata_offset
                         .checked_add(metadata_length)
                         .ok_or(PmTilesError::Overflow {
                             what: "the leaf directories offset",
                         })?;
-                (ROOT_CEILING, metadata_offset, leaf_directories_offset)
-            }
-        };
+                    (ROOT_CEILING, metadata_offset, leaf_directories_offset)
+                }
+            };
 
         let [west, south, east, north] = self.options.bounds_degrees;
         let center_zoom = self
@@ -4038,7 +4036,12 @@ mod tests {
     /// Sixty-four distinct payloads, each at its own zoom-3 tile.
     fn distinct_tiles(count: u64) -> Vec<(u64, Vec<u8>)> {
         (0..count)
-            .map(|n| (21 + n, format!("payload {n:04} and some bytes after it").into_bytes()))
+            .map(|n| {
+                (
+                    21 + n,
+                    format!("payload {n:04} and some bytes after it").into_bytes(),
+                )
+            })
             .collect()
     }
 
@@ -4084,7 +4087,12 @@ mod tests {
 
         let staged: Vec<String> = std::fs::read_dir(dir.path())
             .expect("the scratch directory exists")
-            .map(|e| e.expect("a scratch entry").file_name().to_string_lossy().into_owned())
+            .map(|e| {
+                e.expect("a scratch entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
             .filter(|name| name.ends_with(".data"))
             .collect();
         assert!(
@@ -4129,8 +4137,8 @@ mod tests {
         // probe nothing increments.
         let control_dir = temp_dir();
         let mut control = CountingSink::starting_at(PREAMBLE);
-        let mut w = Writer::try_new(&mut control, control_dir.path(), WriterOptions::default())
-            .unwrap();
+        let mut w =
+            Writer::try_new(&mut control, control_dir.path(), WriterOptions::default()).unwrap();
         for (id, payload) in &tiles {
             let (z, x, y) = crate::pmtiles::tileid_to_zxy(*id).unwrap();
             w.add_tile(z, x, y, payload, content_hash(payload)).unwrap();
@@ -4200,8 +4208,13 @@ mod tests {
         // Distinct, and the same length. Identical payloads would be window
         // hits that stage nothing, so the budget would never be reached and
         // this would test an empty writer.
-        let payload = |id: u64| format!("payload {id:03} padded out to forty bytes!!!").into_bytes();
-        assert_eq!(payload(21).len(), 40, "the budget arithmetic below assumes 40");
+        let payload =
+            |id: u64| format!("payload {id:03} padded out to forty bytes!!!").into_bytes();
+        assert_eq!(
+            payload(21).len(),
+            40,
+            "the budget arithmetic below assumes 40"
+        );
         let mut sink = FailingSink {
             inner: std::io::Cursor::new(Vec::new()),
             budget: 100,
@@ -4224,7 +4237,10 @@ mod tests {
             }
         }
         let (id, error) = failed_at.expect("a 100-byte budget cannot hold four 40-byte payloads");
-        assert_eq!(id, 23, "the budget should have run out on the third payload");
+        assert_eq!(
+            id, 23,
+            "the budget should have run out on the third payload"
+        );
         assert!(
             matches!(error, PmTilesError::Io(_)),
             "the write failure should surface as itself: {error:?}"
@@ -4268,11 +4284,8 @@ mod tests {
     fn the_arrival_barrier_lands_on_the_destination_rather_than_on_nothing() {
         let dir = temp_dir();
         let out = dir.path().join("barrier.pmtiles");
-        let mut w = Writer::create(
-            &out,
-            WriterOptions::default().with_layout(Layout::Arrival),
-        )
-        .unwrap();
+        let mut w =
+            Writer::create(&out, WriterOptions::default().with_layout(Layout::Arrival)).unwrap();
         let payload = b"one tile".as_slice();
         w.add_tile(3, 0, 0, payload, content_hash(payload)).unwrap();
 
