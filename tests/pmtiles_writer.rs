@@ -52,7 +52,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use libviprs::pmtiles::directory::{deserialize_entries, serialize_entries};
-use libviprs::pmtiles::writer::{DEDUPE_WINDOW_WAYS, Writer, WriterOptions, content_hash};
+use libviprs::pmtiles::writer::{DEDUPE_WINDOW_WAYS, Layout, Writer, WriterOptions, content_hash};
 use libviprs::pmtiles::{Compression, Entry, Header, Metadata, PmTilesError, TileType};
 
 // ---------------------------------------------------------------------------
@@ -1930,5 +1930,341 @@ fn the_bounds_the_writer_is_given_are_the_bounds_the_archive_carries() {
         header.min_zoom,
         header.max_zoom,
         header.center_zoom
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Layout::Arrival (issue #1143)
+// ---------------------------------------------------------------------------
+
+/// The options an arrival-order rewrite of `g` uses.
+fn arrival_options(g: &Golden) -> WriterOptions {
+    WriterOptions::default()
+        .with_tile_type(g.header.tile_type)
+        .with_tile_compression(g.header.tile_compression)
+        .with_layout(Layout::Arrival)
+}
+
+/// Feed a golden's own tiles into a writer at `out`, shuffled by `seed`, and
+/// hand back the order they went in.
+///
+/// The order is the return value because under [`Layout::Arrival`] it is what
+/// decides the data region, so a test that cannot see it cannot check the
+/// layout it is asking for.
+fn write_shuffled(
+    g: &Golden,
+    out: &Path,
+    seed: u64,
+    options: WriterOptions,
+) -> Vec<(u64, Vec<u8>)> {
+    let mut tiles: Vec<(u64, Vec<u8>)> = g.tiles.clone();
+    shuffled(&mut tiles, seed);
+    let mut writer = Writer::create(out, options).expect("a writer opens");
+    for (tile_id, payload) in &tiles {
+        let (z, x, y) = libviprs::pmtiles::tileid_to_zxy(*tile_id).unwrap();
+        writer
+            .add_tile(z, x, y, payload, content_hash(payload))
+            .expect("a tile is accepted");
+    }
+    writer.finish().expect("the archive finalises");
+    tiles
+}
+
+/// Where each distinct payload lands in the data region if payloads are placed
+/// the first time they **arrive**, and the total that makes.
+///
+/// Keyed on the payload bytes, which is what the writer's window is keyed on
+/// once the window is large enough to hold the whole tile set. Every fixture
+/// here is, by three orders of magnitude, so the two agree.
+fn arrival_offsets(order: &[(u64, Vec<u8>)]) -> (BTreeMap<u64, u64>, u64) {
+    let mut placed: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
+    let mut per_tile: BTreeMap<u64, u64> = BTreeMap::new();
+    let mut next = 0u64;
+    for (tile_id, payload) in order {
+        let offset = *placed.entry(payload.clone()).or_insert_with(|| {
+            let at = next;
+            next += payload.len() as u64;
+            at
+        });
+        per_tile.insert(*tile_id, offset);
+    }
+    (per_tile, next)
+}
+
+/// The same thing in tile id order, which is what the default layout produces.
+///
+/// Only ever used as a fixed-point check. A shuffle that happened to agree
+/// with tile id order would make the arrival assertions pass against either
+/// layout, and a test that cannot tell the two apart is not testing the one it
+/// names.
+fn tile_id_offsets(order: &[(u64, Vec<u8>)]) -> BTreeMap<u64, u64> {
+    let mut sorted: Vec<(u64, Vec<u8>)> = order.to_vec();
+    sorted.sort_by_key(|(id, _)| *id);
+    arrival_offsets(&sorted).0
+}
+
+/// An arrival-order archive puts the tile data straight after the reserved
+/// prefix, and the metadata and the leaves after the tile data.
+///
+/// This is the layout the whole issue is about. v3 fixes the header's position
+/// and requires the root inside the first 16384 bytes; it fixes nothing else,
+/// so the sections in front of the tile data can be a reservation rather than
+/// a thing that has to be written first.
+///
+/// Both fixtures matter. `dupes-z0z3` is 85 tiles and fits the root, and
+/// `leaves-z0z7` is 21845 and does not, so it has a real leaf section: the
+/// section that moves furthest here, from in front of the tile data to behind
+/// it. A root-only fixture on its own would never place one.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn an_arrival_archive_puts_the_tile_data_before_the_metadata_and_the_leaves() {
+    let dir = scratch();
+
+    for (name, expect_leaves) in [("dupes-z0z3.pmtiles", false), ("leaves-z0z7.pmtiles", true)] {
+        let label = name.trim_end_matches(".pmtiles");
+        let g = parse_golden(name);
+        let out = dir.path().join(format!("arrival-{label}.pmtiles"));
+        write_shuffled(&g, &out, 0x5eed_1143, arrival_options(&g));
+        let bytes = std::fs::read(&out).expect("the archive is on disk");
+        let h = Header::try_decode(&bytes[..127]).expect("our header decodes");
+
+        assert_eq!(h.root_offset, 127, "{label}: the root follows the header");
+        assert!(
+            h.root_offset + h.root_length <= 16384,
+            "{label}: the root runs to {}, past the 16384 the spec allows it",
+            h.root_offset + h.root_length
+        );
+        assert_eq!(
+            h.tile_data_offset, 16384,
+            "{label}: the tile data starts at {} rather than at the reserved \
+             prefix's end, so the payloads were placed after the directories \
+             and had to be copied there",
+            h.tile_data_offset
+        );
+        assert_eq!(
+            h.metadata_offset,
+            h.tile_data_offset + h.tile_data_length,
+            "{label}: the metadata is not immediately after the tile data"
+        );
+        assert_eq!(
+            h.leaf_directories_offset,
+            h.metadata_offset + h.metadata_length,
+            "{label}: the leaf section is not immediately after the metadata"
+        );
+        assert_eq!(
+            h.leaf_directories_offset + h.leaf_directories_length,
+            bytes.len() as u64,
+            "{label}: the archive does not end where its last section does"
+        );
+
+        // go-pmtiles' own arithmetic, spelled out rather than implied by the
+        // three assertions above, because it is the constraint a future change
+        // here is most likely to break without noticing. `Verify` accepts a
+        // file whose size is either `127 + root + meta + leaf + tiles` or
+        // `16384 + meta + leaf + tiles`, and nothing else
+        // (`pmtiles/verify.go:84`, v1.31.2). The second is this layout and it
+        // is the only padded size the reference knows about, so reserving a
+        // different prefix, or aligning the tile data, or leaving a gap
+        // anywhere, is rejected by the reference and accepted by ours.
+        assert_eq!(
+            bytes.len() as u64,
+            16384 + h.metadata_length + h.leaf_directories_length + h.tile_data_length,
+            "{label}: the archive is not the size go-pmtiles computes for a \
+             padded one"
+        );
+        assert!(
+            !h.clustered,
+            "{label}: arrival order cannot claim clustering"
+        );
+
+        assert_eq!(
+            h.leaf_directories_length > 0,
+            expect_leaves,
+            "{label}: the fixture did not produce the leaf structure it was picked for"
+        );
+    }
+}
+
+/// Every tile in an arrival-order archive comes back through this crate's own
+/// reader, and the blobs are where arrival order says they are.
+///
+/// The second half is what stops the first from being free. A round trip
+/// through our reader passes over an archive in **either** layout, so on its
+/// own it would say nothing about which one was written. Pinning each entry's
+/// offset to the position the insertion order predicts is what makes it a test
+/// of `Layout::Arrival` rather than of the writer in general, and
+/// [`tile_id_offsets`] is the control that says the two predictions differ for
+/// this fixture and this seed.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn an_arrival_archive_round_trips_every_tile_and_its_blobs_are_in_arrival_order() {
+    let dir = scratch();
+    for name in ["dupes-z0z3.pmtiles", "leaves-z0z7.pmtiles"] {
+        round_trips_in_arrival_order(name, dir.path());
+    }
+}
+
+/// One fixture's worth of [`an_arrival_archive_round_trips_every_tile_and_its_blobs_are_in_arrival_order`].
+fn round_trips_in_arrival_order(name: &str, dir: &Path) {
+    let g = parse_golden(name);
+    let out = dir.join(format!("arrival-roundtrip-{name}"));
+    let order = write_shuffled(&g, &out, 0x5eed_1144, arrival_options(&g));
+
+    let (expected, total) = arrival_offsets(&order);
+    let by_tile_id = tile_id_offsets(&order);
+    assert!(
+        expected != by_tile_id,
+        "{name}: this seed put the tiles in tile id order, so the two layouts \
+         predict the same offsets and nothing below can tell them apart"
+    );
+
+    let reader = libviprs::pmtiles::Reader::try_open(&out).expect("the archive opens");
+    assert_eq!(
+        reader.header().tile_data_length,
+        total,
+        "{name}: the data region is not the distinct payloads laid end to end"
+    );
+
+    for (tile_id, payload) in &g.tiles {
+        let (z, x, y) = libviprs::pmtiles::tileid_to_zxy(*tile_id).unwrap();
+        let got = reader.get_tile(z, x, y).expect("a read succeeds");
+        assert_eq!(
+            got.as_deref(),
+            Some(payload.as_slice()),
+            "{name}: tile {tile_id} did not come back as it went in"
+        );
+        let (at, length) = reader
+            .tile_span(z, x, y)
+            .expect("a span resolves")
+            .expect("the tile is present");
+        assert_eq!(
+            length as usize,
+            payload.len(),
+            "{name}: tile {tile_id} changed length"
+        );
+        assert_eq!(
+            at,
+            reader.header().tile_data_offset + expected[tile_id],
+            "{name}: tile {tile_id} is at {at}, which is where tile id order \
+             would put it rather than where it arrived",
+        );
+    }
+
+    let bytes = std::fs::read(&out).expect("the archive is on disk");
+    let report = libviprs::pmtiles::validate::validate_bytes(
+        &bytes,
+        &libviprs::pmtiles::validate::ValidationLimits::default(),
+    )
+    .expect("the validator runs");
+    assert!(
+        report.is_valid(),
+        "{name}: the validator found {:?}",
+        report.findings
+    );
+}
+
+/// Write arrival-order archives out where `go-pmtiles` can be pointed at them.
+///
+/// Not a gate, and `#[ignore]`d so it is never one. The gate for #1143 is the
+/// three cells above plus `pmtiles verify`, and this is the part of that last
+/// one that has to happen inside this crate: the reference tool cannot build an
+/// arrival-order archive, so something has to hand it one.
+///
+/// It is here rather than in a script because the tiles come from the pinned
+/// goldens and the writer is this crate's, so a capture living anywhere else
+/// would need its own copy of both. `LIBVIPRS_ARRIVAL_CAPTURE_DIR` says where
+/// the archives go; without it they go to the system temp directory and are
+/// named on stdout.
+///
+/// ```text
+/// LIBVIPRS_ARRIVAL_CAPTURE_DIR=/work/out \
+///   cargo test --test pmtiles_writer -- --ignored --nocapture capture_an_arrival
+/// ```
+///
+/// Each golden is written twice, once each way, because a `pmtiles show` of
+/// the arrival archive means little without the tile id one beside it: the two
+/// have to report the same tile count, the same zoom range and the same
+/// metadata, and differ only in where the sections sit.
+#[test]
+#[ignore = "a capture tool for the go-pmtiles oracle, not a gate"]
+#[cfg_attr(miri, ignore)] // writes archives to the filesystem, which Miri isolation blocks
+fn capture_an_arrival_archive_for_the_go_pmtiles_oracle() {
+    let dir = std::env::var("LIBVIPRS_ARRIVAL_CAPTURE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| std::env::temp_dir());
+    std::fs::create_dir_all(&dir).expect("the capture directory is writable");
+
+    for name in ["dupes-z0z3.pmtiles", "leaves-z0z7.pmtiles"] {
+        let label = name.trim_end_matches(".pmtiles");
+        let g = parse_golden(name);
+        for (suffix, layout) in [("arrival", Layout::Arrival), ("tileid", Layout::TileId)] {
+            let out = dir.join(format!("{label}-{suffix}.pmtiles"));
+            let options = WriterOptions::default()
+                .with_tile_type(g.header.tile_type)
+                .with_tile_compression(g.header.tile_compression)
+                .with_layout(layout);
+            write_shuffled(&g, &out, 0x5eed_1143, options);
+            let bytes = std::fs::read(&out).expect("the archive is on disk");
+            let h = Header::try_decode(&bytes[..127]).expect("our header decodes");
+            println!(
+                "{} {} bytes, tile data at {} for {}, metadata at {}, leaves at {} for {}, clustered {}",
+                out.display(),
+                bytes.len(),
+                h.tile_data_offset,
+                h.tile_data_length,
+                h.metadata_offset,
+                h.leaf_directories_offset,
+                h.leaf_directories_length,
+                h.clustered,
+            );
+        }
+    }
+}
+
+/// A dropped arrival run leaves no archive, and the tile bytes it had already
+/// written go with it.
+///
+/// `dropping_a_writer_without_finishing_cleans_up_after_itself` says this for
+/// the default layout, where what is on disk mid-run is a `.data` file that
+/// was never going to be published. Arrival order changes what is at stake:
+/// the thing holding the payloads **is** the archive, opened at the first
+/// tile, so an abandoned run has a partial PMTiles file sitting there. It has
+/// to keep its temporary name until `finish` renames it and it has to be
+/// removed on the way out, and the positive control in the middle is what
+/// stops this passing for a writer that opened nothing at all.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_dropped_arrival_run_takes_its_partial_archive_with_it() {
+    let dir = scratch();
+    let out = dir.path().join("abandoned-arrival.pmtiles");
+    {
+        let mut w = Writer::create(
+            &out,
+            WriterOptions::default()
+                .with_tile_type(TileType::Png)
+                .with_layout(Layout::Arrival),
+        )
+        .unwrap();
+        w.add_tile(0, 0, 0, b"tile", content_hash(b"tile")).unwrap();
+
+        let staged = dir.path().join("abandoned-arrival.pmtiles.tmp");
+        let size = std::fs::metadata(&staged)
+            .expect("the destination is open and holding the payload")
+            .len();
+        assert_eq!(
+            size,
+            16384 + 4,
+            "the reserved prefix plus the one four-byte payload is what should \
+             be on disk mid-run"
+        );
+        assert!(!out.exists(), "the final path appeared before finish()");
+    }
+    let after: Vec<String> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+        .collect();
+    assert!(
+        after.is_empty(),
+        "a dropped arrival writer left {after:?} behind"
     );
 }
