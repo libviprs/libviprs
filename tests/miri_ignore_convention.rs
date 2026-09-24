@@ -685,13 +685,24 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// `tempfile::tempdir()` or a path under one, all seven are annotated, and
 /// none is a judgement call.
 ///
+/// #1150 moves it 461 to 463, and the two are the resume-refusal cells in
+/// `tests/pmtiles_sink.rs`: the engine-configured resume that used to
+/// regenerate the pyramid, and the same request through the sink wrappers.
+/// Both take a `tempfile::tempdir()` and write an archive under it, both are
+/// annotated, and neither is a judgement call.
+///
 /// #1144 moves it 461 to 469, and the eight are the cells for `clustered`
 /// being earned rather than read off the layout, all in
 /// `tests/pmtiles_writer.rs`. Six write one archive each and two sweep every
 /// arrival order of a six-tile set, one under each layout. All eight reach a
 /// `tempfile::tempdir()`, all eight are annotated, and none is a judgement
 /// call.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 470;
+///
+/// Merged twice against a moving main. Each time the constant was held at
+/// main's figure so the detector had to report the merged one rather than
+/// agree with a guess, and the last run printed 472: main's 470 plus this
+/// branch's two cells.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 472;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {

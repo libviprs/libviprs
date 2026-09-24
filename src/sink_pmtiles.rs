@@ -481,10 +481,16 @@ impl PmTilesSinkBuilder {
     /// implementation rather than a gap to be filled later. Rerun with
     /// `Overwrite`.
     ///
-    /// The Resume refusal is also enforced where the engine can reach it, not
-    /// only here: [`TileSink::seed_completed_tile`] is the hook a resume calls
-    /// for each coordinate it is about to skip, and this sink refuses there
-    /// too.
+    /// The Resume refusal is also enforced where the engine can reach it,
+    /// which matters because this gate needs the caller to tell the sink what
+    /// they already told the engine, and most callers have no reason to.
+    /// [`TileSink::check_resume_mode`] is the end that fires for everybody:
+    /// the engine asks it before the run, with the mode it was configured
+    /// with. [`TileSink::seed_completed_tile`] is the hook a resume calls for
+    /// each coordinate it is about to skip, and this sink refuses there too,
+    /// which is the end that catches a caller who pointed an explicit
+    /// [`EngineConfig::checkpoint_root`](crate::engine::EngineConfig) at a
+    /// checkpoint that has tiles in it.
     pub fn resume_mode(mut self, mode: ResumeMode) -> Self {
         self.resume_mode = mode;
         self
@@ -740,6 +746,30 @@ impl TileSink for PmTilesSink {
         // would not be wrong, but it would mean hashing twice.
         if let Ok(mut guard) = self.dedupe.lock() {
             *guard = DedupeIndex::new(config.dedupe_strategy.unwrap_or_default());
+        }
+    }
+
+    /// Refuse a `Resume` run before it starts (issue #1150).
+    ///
+    /// The other two ends of this refusal only fire once somebody has already
+    /// told the sink what they told the engine.
+    /// [`PmTilesSinkBuilder::resume_mode`] wants the mode on the sink's own
+    /// builder, which the common caller has no reason to set because they
+    /// configured the engine; [`TileSink::seed_completed_tile`] wants a
+    /// completed coordinate to skip, which wants a checkpoint, which wants a
+    /// checkpoint root this sink deliberately does not have. So
+    /// `PmTilesSink::try_new` plus `with_resume(ResumePolicy::resume())` fell
+    /// between the two and re-rendered the whole pyramid while reporting
+    /// success. This is the end the engine reaches on its own, with no help
+    /// from the caller.
+    ///
+    /// Written as an exhaustive match for the same reason the builder's gate
+    /// is: a fourth mode has to be decided here rather than waved through by a
+    /// `matches!` that was written about `Resume`.
+    fn check_resume_mode(&self, mode: ResumeMode) -> Result<(), SinkError> {
+        match mode {
+            ResumeMode::Overwrite | ResumeMode::Verify => Ok(()),
+            ResumeMode::Resume => Err(SinkError::UnsupportedResumeMode { mode }),
         }
     }
 
