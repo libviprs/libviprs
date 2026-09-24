@@ -2158,6 +2158,24 @@ impl<W: Write + Seek> Writer<W> {
                 // v3 allows: it fixes the header's position and requires the
                 // root inside the first 16384 bytes, and says nothing about
                 // what else may sit there.
+                //
+                // `ROOT_CEILING` here is not a choice among several that would
+                // work, and this is the one place that is worth knowing.
+                // go-pmtiles' `Verify` computes two acceptable archive sizes
+                // and requires the file to be exactly one of them
+                // (`pmtiles/verify.go:84`, v1.31.2):
+                //
+                //     lengthFromHeader            = 127   + root + meta + leaf + tiles
+                //     lengthFromHeaderWithPadding = 16384 +        meta + leaf + tiles
+                //
+                // The second branch is this layout, and it is the only padded
+                // size the reference recognises. Reserving more, or aligning
+                // the tile data to anything else, or leaving a gap anywhere
+                // else in the archive, fails `pmtiles verify` with "total
+                // length of archive ... does not match header". This crate's
+                // own validator would not notice: `validate.rs` checks each
+                // section against the end of the file and never checks the
+                // sections against each other.
                 let metadata_offset =
                     ROOT_CEILING
                         .checked_add(plan.tile_data_length)
