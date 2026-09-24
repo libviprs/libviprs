@@ -54,7 +54,7 @@ they came from a stitched raster. Every cell here comes from one command shape.
 | corpus | `libviprs-tests/tests/fixtures/blueprint.pdf`, sha256 `7053ee18df30d2d3c9a0088f31a8d9c6a698a192ea707d13c09a680742fac493`, 1006356 bytes, one vector AutoCAD sheet |
 | render | pdfium 8054 (`libviprs-dep` release `pdfium-8054`, linux-x64 tarball sha256 `b42d1731f07fb73edea38cbd294afe9be4bdcf8e4ed8523de51cd5d12fc8d271`) at 150 dpi to 9932x7020 `Rgba8` |
 | plan | 256x256 tiles, no overlap, **15 Deep Zoom levels, 1479 tiles**, 1092 of them at level 14 |
-| core / CLI | libviprs 0.5.0 at `365d6d19`, libviprs-cli 0.4.0 at `4eacf25`, rustc 1.98.1 (48a229cea 2026-09-01), `--release` |
+| core / CLI | libviprs 0.5.0 at `41adac2a` (before the chroma gate) and `b4bf3cd7` (after it), libviprs-cli 0.4.0 at `4eacf25`, rustc 1.98.1 (48a229cea 2026-09-01), `--release` |
 | host | HIGARA, Intel Pentium Gold 8505, 6 logical cores, Linux 6.12.30+ x86_64, inside `--platform linux/amd64` containers |
 | analysis | `python:3.12-slim`, numpy 2.5.3, Pillow 12.3.0 over libjpeg-turbo (Pillow reports the 6.2 API version) |
 
@@ -216,6 +216,12 @@ unchanged.
 Every lossy cell against the PNG tree, which is lossless and therefore is the
 raster the sink was handed. Definitions are in `scripts/tile-fidelity.py`.
 
+The fidelity pass ran over the trees from the first set of runs rather than the
+re-taken ones, and what ties the two together is that the re-taken runs
+reproduce every byte total, every deduped total, every distinct-payload count
+and every per-level row of the first set exactly. Identical bytes are identical
+tiles, so the numbers below are about the same files either way.
+
 | cell | exact tiles | PSNR median | PSNR p10 | IoU mean | IoU median | IoU p10 |
 |---|--:|--:|--:|--:|--:|--:|
 | `jpeg-q75` | 340 | 48.15 dB | 42.61 dB | 0.97068 | 0.99718 | 0.91259 |
@@ -351,11 +357,59 @@ is the same failure as turning it off everywhere, only harder to see.
 
 ### What it costs
 
-<!--COST-->
+The gate runs per tile, so this is a number somebody has to be able to read.
+`the_chroma_scan_costs` times the same image twice, once with `Auto` and once
+with **the explicit mode `Auto` resolves to on it**, so both arms encode the
+same plan and the difference is the scan and nothing else. The two are
+interleaved in one process and the statistic is the median of the per-round
+pairs rather than the mean, because on a shared box a mean carries whatever the
+other tenant did during one round. This run was at a one-minute load of 28 on
+six cores, which is why the percentages are the reading and the milliseconds
+are not.
+
+| fixture | against | with the gate | without | |
+|---|---|--:|--:|--:|
+| monochrome, shortcut on every block | `On` | 2.155 ms | 2.097 ms | **+2.8%** |
+| coloured linework, early exit | `Off` | 3.289 ms | 3.296 ms | **-0.2%** |
+| a trace of colour, full scan through the shortcut | `On` | 2.166 ms | 2.097 ms | **+3.3%** |
+| worst case, full scan with the arithmetic | `On` | 1.991 ms | 1.833 ms | **+8.6%** |
+
+Under 3% on the case this crate actually tiles, nothing measurable on a
+strongly coloured tile because it stops within the first rows, and under 9% on
+a tile constructed so neither escape can fire: chroma everywhere, and all of it
+below the step so there is nothing to stop early on. That last row is the
+ceiling and it is not a tile anybody has.
+
+The first version of this cell compared every fixture against `On` and reported
+**+54%** on coloured linework. That was not the scan. It was 4:4:4 having twice
+the blocks to transform, so the two arms were encoding different plans, and the
+number was the cost of the gate's *decision* rather than the cost of making it.
+Both are real costs and they belong in different columns: the decision's cost
+is the byte and dB trade above, and this table is only about the scan.
 
 ### What it does not cost
 
-<!--IDENTITY-->
+The whole size argument for #1132 rests on the monochrome path, so a gate that
+quietly turned 4:2:0 off everywhere would hand back the 1.84x and every cell
+above would still be green. The cell `monochrome_still_takes_the_subsampling_win`
+is one half of that check and the pyramid is the other:
+
+| cell | before the gate, at `41adac2a` | after it, at `b4bf3cd7` |
+|---|--:|--:|
+| `jpeg-q75` | 3 092 360 | 3 092 360 |
+| `jpeg-q85` | 3 458 216 | 3 458 216 |
+| `jpeg-q95` | 4 853 934 | 4 853 934 |
+| `png` | 5 334 030 | 5 334 030 |
+| `webp` | 1 138 638 | 1 138 638 |
+
+**Byte-identical**, on every cell, every deduped total, every distinct-payload
+count, every archive and every per-level row. The two runs are two builds of
+two commits in the same lane clone against the same corpus, and the whole
+1479-tile sheet takes exactly the path it took before, because black ink on
+white paper has no chroma to keep.
+
+That is the result for *this* content. A sheet with coloured layers would move,
+and it is supposed to.
 
 ## What this run does not measure
 
@@ -399,6 +453,12 @@ corpus requirement is unmet: it wants a real scanned drawing and a
 coloured-layer sheet, and neither is committed anywhere.
 
 So #1134 stays open, and this document is not a substitute for it. What it was
-waiting on has not moved. What changed is that half of it had stopped
+waiting on has not moved. Two other things did: half of it had stopped
 describing the code, and a record that has stopped describing the code is worse
-than no record, because it reads exactly like one that still does.
+than no record because it reads exactly like one that still does, and the one
+recommendation in it that nobody had acted on is acted on now.
+
+What is left there is one thing and it is the thing it was filed for. The
+coloured-layer sheet the chroma gate wants and the scanned drawing
+libviprs-bench#102 wants are the same missing corpus, so whoever sources one
+unblocks both.
