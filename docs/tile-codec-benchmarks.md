@@ -63,6 +63,28 @@ same CLI revision. rustc moved from 1.97.1 to 1.98.1 between the two, which
 moves no bytes here: every byte count below is a property of the encoder's
 arithmetic, not of its codegen.
 
+### Which tree the binary came from, and how that is known
+
+Worth writing down, because the first pass of this run could not answer it.
+`tools/nas-gate.sh` gave every lane the same clone on the NAS to check its
+branch into, and four lanes were using it at once, so the tree could be any
+lane's at any moment. The CLI resolves `libviprs` through `path = "../libviprs"`
+and that path pointed into the shared clone, which means a binary built there
+compiled whatever encoder happened to be checked out, and its own build log
+could not say which. The helper provisions per-lane clones now.
+
+So every libviprs figure here was taken again from a clone nothing else
+touches, with both repositories side by side inside it so the path dependency
+resolves within the lane, at named commits rather than at a branch name. The
+numbers did not move, which is the expected outcome and not the reason for
+trusting them: the reason is that they came from a tree whose commit is
+established.
+
+The libjpeg control below was never exposed to this. It runs Pillow over the
+PNG tiles and does not link this crate at all, which is also why it is the arm
+that proves the rest: a tree holding the wrong encoder does not reproduce four
+independent totals to the byte by accident.
+
 ## How to repeat it
 
 One `viprs pyramid` invocation per cell per backend, then one analysis pass.
@@ -261,41 +283,93 @@ taken.
 | the libviprs JPEG q75 to q100 metric-warning ladder | **superseded.** It was a ladder up the old encoder. |
 | "Three cheaper things, in order: 1. optimized Huffman (#1132), 2. fix `--render --format jpeg` (#1133)" | **both done**, in PR #1148. |
 | "Inferred: that optimized Huffman behaves the same inside `image` 0.25 as inside libjpeg-turbo" | **measured now**, and it held to 0.07%. |
-| **"4:2:0: only behind a chroma check"** | **not done, and still live.** See below. |
+| **"4:2:0: only behind a chroma check"** | **done**, in the same change as this document. See below. |
 | every WebP and PNG number, the lossy-WebP crossover, the libwebp ladder warning, the storage-backend findings, the RSS parity, the inode argument | **untouched.** #1132 changed one encoder. |
 
-## The recommendation that did not ship as written
+## The recommendation, and what shipping it did
 
 #1134's colour control found that 4:2:0 saves more on coloured ink and damages
 it 5x harder, that ink-mask IoU is blind to the damage, and concluded: **"Enable
 4:2:0 behind a chroma check, not unconditionally."**
 
-What shipped is a *quality* check. `subsampled` in `src/encode_jpeg.rs` is
+What #1132 shipped was a *quality* check. `subsampled` in `src/encode_jpeg.rs`
+was
 
 ```rust
 JpegSubsample::Auto => quality < 90,
 ```
 
-which is libvips' rule and defensible on its own terms, but it is not the rule
-#1134 asked for, and at the tile default of quality 85 it subsamples every tile
-whatever colour is in it. PR #1148 measured the cost against our own encoder
-rather than against libjpeg-turbo, and it is the cost #1134 predicted: coloured
-line art goes from 22719 bytes at 35.01 dB to 15385 bytes at **30.05 dB**, a
-4.96 dB drop, while the black-on-white drawing beside it moves 0.02 dB.
+which is libvips' `VIPS_FOREIGN_SUBSAMPLE_AUTO` and defensible on its own
+terms, but it is not the rule #1134 asked for, and at the tile default of
+quality 85 it subsamples every tile whatever colour is in it. #1132's own table
+priced that against this encoder: coloured line art goes from 22719 bytes at
+35.01 dB to 15385 bytes at **30.05 dB**, a 4.96 dB drop, while the
+black-on-white drawing beside it moves 0.02 dB.
 
-Nothing in this document can settle it, because this corpus has no colour in it
-to lose: #1134 counted 293 pixels out of 94.5M with any channel spread above
-10. It is the one open recommendation out of that issue and it needs the
-coloured-layer sheet libviprs-bench#102 also wants.
+`Auto` now keeps the quality rule and adds a content one. The encoder walks the
+2x2 blocks 4:2:0 would average, with the same edge clamp the downsample itself
+uses, and counts the blocks where a chroma sample sits more than eight levels
+from the four's mean in `Cb` or `Cr`. More than one block in 256 and the tile
+keeps full chroma. **That deviates from libvips below quality 90 and the doc
+comment on `subsampled` says so in those words.** Nothing at or above 90 moves,
+and the content can only ever veto subsampling, never turn it on where libvips
+would refuse it. `On` and `Off` are untouched.
+
+### Why a count and not an average
+
+Because the damage is concentrated where the colour is, and an average over the
+tile hides it. #1134 measured 13.969 mean absolute channel error **on ink**
+against 2.799, and the same sheet averages out to almost nothing once the paper
+is included, which is exactly the blindness it warned about in its own ink-mask
+metric. A gate built on a tile-wide mean would repeat that mistake in the fix.
+
+The same reasoning rules out counting coloured *pixels*. A solid fill is every
+pixel coloured and has no chroma detail at all, so subsampling costs it nothing
+and a pixel-counting rule would send it to 4:4:4 and buy nothing with the
+bytes. What the gate measures is the chroma 4:2:0 would remove.
+
+### Where the cliff is
+
+A threshold validated only on the case that exposed the bug moves the cliff
+rather than removing it, so
+`the_chroma_gate_is_nowhere_near_the_content_it_judges` reads the count each
+fixture actually produces and fails unless every one is a factor of four clear
+of the limit. On a 256x256 tile the limit is 64 blocks out of 16384:
+
+| fixture | blocks with chroma detail | against a limit of 64 |
+|---|--:|---|
+| black ink on white paper | 0 | the shortcut fires on every block |
+| a solid coloured fill | 0 | every block has constant chroma |
+| eight stray coloured pixels in 65536 | 8 | 8x under |
+| blue linework | past 64 within the first rows | 4x over at minimum, asserted |
+
+The stray-pixel row is the one that matters for this corpus, which is
+monochrome in practice and not in the strict sense: #1134 counted 293 pixels
+out of 94.5M with any channel spread above 10. A gate that tripped on one
+stray pixel would take 4:2:0 off tiles that lose nothing by keeping it, which
+is the same failure as turning it off everywhere, only harder to see.
+
+### What it costs
+
+<!--COST-->
+
+### What it does not cost
+
+<!--IDENTITY-->
 
 ## What this run does not measure
 
-**No wall clock.** The box was running another lane's gate throughout: up to
-six other `libviprs-ci` and `nas-driver` containers at once, with the
-one-minute load average between 6 and 63 on six logical cores. So every
-wall-clock number this run produced is a number about that gate, and none of
-them is published. It did not go quiet at any point during the run, so waiting
-for it was not an option either. Byte counts,
+**No wall clock.** The box was running other lanes' gates throughout: up to six
+other `libviprs-ci` and `nas-driver` containers at once, with the one-minute
+load average between 6 and 64 on six logical cores. So every wall-clock number
+this run produced is a number about those gates, and none of them is published.
+It did not go quiet at any point, so waiting for it was not an option either.
+
+The one clock here is `the_chroma_scan_costs`, and it survives that only
+because it is a ratio: it encodes the same image twice, with and without the
+gate, interleaved in one process, so both arms take the same beating and what
+the cell reports is the difference between them. An absolute millisecond figure
+from this box would be worthless and none is quoted. Byte counts,
 entry counts, allocated blocks and fidelity are all independent of contention,
 and they are the only columns published here. #1134's storage timings stand on
 their own run; they were never comparable to a run like this one anyway,

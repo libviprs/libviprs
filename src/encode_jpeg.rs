@@ -1645,18 +1645,29 @@ mod tests {
     /// cargo test --release --lib the_chroma_scan_costs -- --ignored --nocapture
     /// ```
     ///
+    /// **Each fixture is compared against the explicit mode `Auto` resolves
+    /// to on it**, so the two arms encode the same plan and the difference is
+    /// the scan and nothing else. The first version of this cell compared
+    /// everything against `On` and reported 54% on coloured linework, which
+    /// was not the scan at all: it was 4:4:4 having twice the blocks to
+    /// transform, which is the cost of the decision rather than the cost of
+    /// making it.
+    ///
     /// Four fixtures, because the scan has three regimes and they are far
     /// apart. Monochrome takes the constant-chroma shortcut on every block and
     /// never multiplies. Coloured linework is past the limit within the first
     /// rows and stops there. The worst case is neither: chroma everywhere, so
     /// the shortcut never fires, and all of it under the step, so there is
-    /// nothing to stop early on. Every cell is timed against the same image
-    /// encoded with `On`, which is the same encode without the scan, and the
-    /// two are interleaved in one process so a busy box moves both.
+    /// nothing to stop early on.
+    ///
+    /// The two arms are interleaved in one process and the statistic is the
+    /// median of the per-round pairs, not the mean, because the box this runs
+    /// on is shared and a mean carries whatever the other tenant did during
+    /// one round.
     #[test]
     #[ignore]
     fn the_chroma_scan_costs() {
-        use std::time::Instant;
+        use std::time::{Duration, Instant};
 
         // Chroma everywhere and all of it below CHROMA_STEP: no shortcut, no
         // early exit, the whole image walked with the arithmetic on.
@@ -1675,29 +1686,43 @@ mod tests {
             traced[off + 2] = 40;
         }
 
-        const ROUNDS: u32 = 40;
+        const ROUNDS: usize = 200;
+        let median = |mut v: Vec<Duration>| {
+            v.sort_unstable();
+            v[v.len() / 2]
+        };
         for (label, src) in [
             ("monochrome (shortcut every block)", mono_drawing(256, 256)),
             ("coloured linework (early exit)", drawing(256, 256)),
             ("a trace of colour (full scan, shortcut)", traced),
             ("worst case (full scan, arithmetic)", worst),
         ] {
-            let mut with = std::time::Duration::ZERO;
-            let mut without = std::time::Duration::ZERO;
+            let gated = encode(&src, 256, 256, image::ColorType::Rgb8, 85, JpegSubsample::Auto)
+                .expect("encodes");
+            // The explicit mode that produces the plan `Auto` chose, so the
+            // control is the same encode without the scan in front of it.
+            let same_plan = if luma_sampling(&gated) == (2, 2) {
+                JpegSubsample::On
+            } else {
+                JpegSubsample::Off
+            };
+            let (mut with, mut without) = (Vec::new(), Vec::new());
             for _ in 0..ROUNDS {
                 let t = Instant::now();
-                let a = encode(&src, 256, 256, image::ColorType::Rgb8, 85, JpegSubsample::On)
+                let a = encode(&src, 256, 256, image::ColorType::Rgb8, 85, same_plan)
                     .expect("encodes");
-                without += t.elapsed();
+                without.push(t.elapsed());
                 let t = Instant::now();
                 let b = encode(&src, 256, 256, image::ColorType::Rgb8, 85, JpegSubsample::Auto)
                     .expect("encodes");
-                with += t.elapsed();
+                with.push(t.elapsed());
+                assert_eq!(a.len(), b.len(), "{label}: the two arms encoded differently");
                 std::hint::black_box((a.len(), b.len()));
             }
-            let (with, without) = (with / ROUNDS, without / ROUNDS);
+            let (with, without) = (median(with), median(without));
             println!(
-                "{label}: {:.3} ms with the gate, {:.3} ms without, {:+.1}%",
+                "{label}, against {same_plan:?}: {:.3} ms with the gate, \
+                 {:.3} ms without, {:+.1}%",
                 with.as_secs_f64() * 1e3,
                 without.as_secs_f64() * 1e3,
                 (with.as_secs_f64() / without.as_secs_f64() - 1.0) * 100.0

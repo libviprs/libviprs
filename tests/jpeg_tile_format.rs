@@ -168,16 +168,30 @@ fn huffman_tables(jpeg: &[u8]) -> Vec<u8> {
 /// paper because that is what a drawing looks like and because a uniform
 /// raster would let a blank-tile strategy write a one-byte marker instead of
 /// an encoded tile.
+///
+/// **The ink is blue**, which used to be incidental and is not any more: since
+/// issue #1134 `JpegSubsample::Auto` asks the content as well as the quality,
+/// so this fixture is the *coloured* case and [`mono_rendered_rgba`] is the
+/// one that still subsamples. A cell about subsampling wants the second; a
+/// cell about alpha or about tile geometry can have either.
 fn rendered_rgba(w: u32, h: u32) -> Raster {
+    ink_on_paper(w, h, [24, 24, 90])
+}
+
+/// The same drawing in grey ink, which is what a CAD sheet actually is and
+/// what the corpus behind #1134 is made of.
+fn mono_rendered_rgba(w: u32, h: u32) -> Raster {
+    ink_on_paper(w, h, [24, 24, 24])
+}
+
+fn ink_on_paper(w: u32, h: u32, ink_rgb: [u8; 3]) -> Raster {
     let mut data = vec![0u8; (w * h * 4) as usize];
     for y in 0..h {
         for x in 0..w {
             let off = ((y * w + x) * 4) as usize;
             let ink = x % 32 == 0 || y % 32 == 0 || (x + y) % 71 == 0;
-            let v = if ink { 24 } else { 236 };
-            data[off] = v;
-            data[off + 1] = v;
-            data[off + 2] = if ink { 90 } else { 236 };
+            let px = if ink { ink_rgb } else { [236, 236, 236] };
+            data[off..off + 3].copy_from_slice(&px);
             data[off + 3] = 255;
         }
     }
@@ -207,7 +221,16 @@ fn rgba_with_a_hole(w: u32, h: u32) -> Raster {
 /// Three-band ink on paper, no alpha: the control that says these cells fail
 /// on the alpha rather than on anything else about the fixture.
 fn rgb_drawing(w: u32, h: u32) -> Raster {
-    let rgba = rendered_rgba(w, h);
+    drop_alpha(rendered_rgba(w, h), w, h)
+}
+
+/// [`mono_rendered_rgba`] with the alpha dropped: the fixture for every cell
+/// about subsampling, because it is the one `Auto` still subsamples.
+fn mono_rgb_drawing(w: u32, h: u32) -> Raster {
+    drop_alpha(mono_rendered_rgba(w, h), w, h)
+}
+
+fn drop_alpha(rgba: Raster, w: u32, h: u32) -> Raster {
     let mut data = Vec::with_capacity((w * h * 3) as usize);
     for px in rgba.data().as_chunks::<4>().0 {
         data.extend_from_slice(&px[..3]);
@@ -462,20 +485,46 @@ fn the_render_path_still_hands_the_sink_rgba() {
 /// The tile path reaches a subsampling decision instead of taking the
 /// encoder's default.
 ///
-/// `JpegSubsample::Auto` is libvips' `VIPS_FOREIGN_SUBSAMPLE_AUTO`: 4:2:0
-/// below quality 90 and 4:4:4 at or above it. The tile default is quality 85,
-/// so this is the mode that default selects.
+/// `JpegSubsample::Auto` started as libvips' `VIPS_FOREIGN_SUBSAMPLE_AUTO`,
+/// 4:2:0 below quality 90 and 4:4:4 at or above it, and since issue #1134 it
+/// asks the content too. The tile default is quality 85 and a CAD sheet is
+/// black ink on white paper, so that default still selects 4:2:0 here, which
+/// is the whole of #1132's size argument.
+///
+/// The fixture is the **monochrome** one on purpose. It used to be the blue
+/// one, and with the content gate in place that cell would have been asserting
+/// 4:2:0 on the one input the gate exists to keep away from it.
 #[test]
 #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn a_tile_at_the_default_quality_subsamples_chroma() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let plan = plan_for(256, 256, 256);
+    let bytes = tile_bytes(dir.path(), &plan, mono_rgb_drawing(256, 256), 85);
+
+    assert_eq!(
+        sampling_factors(&bytes),
+        vec![(1, 2, 2), (2, 1, 1), (3, 1, 1)],
+        "a quality-85 tile of black ink on white paper is 4:2:0: luma 2x2 \
+         against chroma 1x1"
+    );
+}
+
+/// And a coloured tile at the same quality keeps its chroma, through the sink.
+///
+/// The encoder's own cells cover the decision; this one covers the path, since
+/// `FsSink::encode_tile` is what passes `Auto` down and a gate the tile path
+/// never reaches is the exact shape of the bug #1132 was filed about.
+#[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+fn a_coloured_tile_at_the_default_quality_keeps_full_chroma() {
     let dir = tempfile::tempdir().expect("a temp dir");
     let plan = plan_for(256, 256, 256);
     let bytes = tile_bytes(dir.path(), &plan, rgb_drawing(256, 256), 85);
 
     assert_eq!(
         sampling_factors(&bytes),
-        vec![(1, 2, 2), (2, 1, 1), (3, 1, 1)],
-        "a quality-85 tile is 4:2:0: luma 2x2 against chroma 1x1"
+        vec![(1, 1, 1), (2, 1, 1), (3, 1, 1)],
+        "blue linework at quality 85 should keep full chroma (issue #1134)"
     );
 }
 
@@ -486,7 +535,10 @@ fn a_tile_at_the_default_quality_subsamples_chroma() {
 fn a_tile_at_quality_90_keeps_full_chroma() {
     let dir = tempfile::tempdir().expect("a temp dir");
     let plan = plan_for(256, 256, 256);
-    let src = rgb_drawing(256, 256);
+    // Monochrome, so the only thing that can be keeping the chroma here is the
+    // quality. On the coloured fixture this cell would pass for two reasons
+    // and tell them apart for neither.
+    let src = mono_rgb_drawing(256, 256);
     let bytes = tile_bytes(dir.path(), &plan, src.clone(), 90);
 
     assert_eq!(
@@ -809,7 +861,9 @@ fn a_greyscale_tile_is_one_component() {
 fn subsampling_does_not_move_the_ink() {
     let dir = tempfile::tempdir().expect("a temp dir");
     let plan = plan_for(256, 256, 256);
-    let src = rgb_drawing(256, 256);
+    // Monochrome, because since #1134 the coloured fixture is not subsampled
+    // and a cell with this name would have stopped covering what it says.
+    let src = mono_rgb_drawing(256, 256);
     let bytes = tile_bytes(dir.path(), &plan, src.clone(), 85);
     let decoded = decode_bytes(&bytes).expect("the tile decodes");
 
