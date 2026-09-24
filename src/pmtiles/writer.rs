@@ -904,6 +904,12 @@ pub struct WriterOptions {
     /// can deduplicate against at once. The default is 8 MiB, which is 129,056
     /// of them.
     ///
+    /// Under [`Layout::Arrival`] the second table is not built, because
+    /// nothing ever asks it anything, so the same budget buys the same window
+    /// and spends about a quarter less of it. The number of payloads this
+    /// deduplicates against does not move, which is why the arithmetic above
+    /// is stated once for both.
+    ///
     /// # What it costs to get this wrong
     ///
     /// **Two identical payloads further apart than the window are stored
@@ -1089,7 +1095,7 @@ impl<W: Write + Seek> Sink<W> {
     /// Where the cursor is, which for a foreign sink is where the archive
     /// starts rather than where the file does.
     fn position(&mut self) -> std::io::Result<u64> {
-        self.as_seek().seek(std::io::SeekFrom::Current(0))
+        self.as_seek().stream_position()
     }
 
     /// Push what has been appended through to the device.
@@ -1402,7 +1408,22 @@ impl<W: Write + Seek> Writer<W> {
             log: Some(Staging::Real(BufWriter::new(log))),
             log_len: 0,
             window: Some(DedupeWindow::with_sets(sets)),
-            repeats: RepeatTable::with_sets(sets),
+            // Under `Layout::Arrival` a payload's staged offset is already its
+            // final one, so nothing ever asks where a payload was placed and
+            // the table has no reader. It is 16.5 of the 65 bytes a tracked
+            // payload costs (`DEDUPE_BYTES_PER_PAYLOAD`), so building it with
+            // no sets hands about a quarter of the caller's budget back,
+            // 2.1 MB of the 8 MiB default, and the window is unchanged, so the
+            // archive is the same either way.
+            //
+            // Spending that quarter on a wider window instead would be the
+            // better answer and it is not this issue's: it moves what
+            // `with_dedupe_memory_bytes` means, and the documented 65 bytes a
+            // payload is a contract with its own test.
+            repeats: RepeatTable::with_sets(match options.layout {
+                Layout::TileId => sets,
+                Layout::Arrival => 0,
+            }),
             staged_len: 0,
             staged_payloads: 0,
             sort_buffer: Vec::new(),
@@ -1468,7 +1489,18 @@ impl<W: Write + Seek> Writer<W> {
                 // will have to recognise it the second time it reaches it.
                 // Nothing is marked for a payload only one tile ever names,
                 // which is every tile of a photograph.
-                self.repeats.mark(offset);
+                //
+                // Arrival order places nothing, so it never has to recognise
+                // anything, and its table is built with no sets at all. This
+                // guard is what keeps that safe, and it is not on trust: an
+                // arrival run that reached `mark` would index an empty slice
+                // and panic, and both fixtures in
+                // `an_arrival_archive_round_trips_every_tile_and_its_blobs_are_in_arrival_order`
+                // are full of duplicates, so every one of them comes through
+                // this arm.
+                if self.options.layout == Layout::TileId {
+                    self.repeats.mark(offset);
+                }
                 offset
             }
             None => {
@@ -4109,6 +4141,147 @@ mod tests {
             probe::staged_reads(),
             tiles.len(),
             "the control did not exercise the copy, so the zero above means nothing"
+        );
+    }
+
+    /// A sink that accepts `budget` bytes and then reports the disk full.
+    ///
+    /// The partial acceptance is the point, the same way it is for
+    /// [`FailAfter`]: a `write_all` that crosses the budget leaves bytes in
+    /// the sink and returns an error, which is the shape the latch exists for.
+    struct FailingSink {
+        inner: std::io::Cursor<Vec<u8>>,
+        budget: usize,
+        written: usize,
+    }
+
+    impl Write for FailingSink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if self.written >= self.budget {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::StorageFull,
+                    "no space left on device",
+                ));
+            }
+            let take = buf.len().min(self.budget - self.written);
+            let n = self.inner.write(&buf[..take])?;
+            self.written += n;
+            Ok(n)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.inner.flush()
+        }
+    }
+
+    impl Seek for FailingSink {
+        fn seek(&mut self, to: std::io::SeekFrom) -> std::io::Result<u64> {
+            self.inner.seek(to)
+        }
+    }
+
+    /// A write that fails part way into an arrival destination latches, and
+    /// `finish` refuses from there.
+    ///
+    /// The latch has always covered the staging file. Arrival order moves the
+    /// payload write from that file to the destination, and the failure it
+    /// guards against gets worse rather than better in the move: the orphan
+    /// bytes are now inside the archive, and the next accepted payload records
+    /// an offset past them, so every later entry points at the wrong bytes.
+    /// Under a retrying sink that is a *successful* run producing a
+    /// structurally perfect archive full of the wrong tiles.
+    ///
+    /// The budget is in payload bytes only. Reserving the prefix is a seek and
+    /// writes nothing, so it does not spend any of it.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn a_failed_write_into_an_arrival_destination_latches_and_refuses_to_publish() {
+        let dir = temp_dir();
+        // Distinct, and the same length. Identical payloads would be window
+        // hits that stage nothing, so the budget would never be reached and
+        // this would test an empty writer.
+        let payload = |id: u64| format!("payload {id:03} padded out to forty bytes!!!").into_bytes();
+        assert_eq!(payload(21).len(), 40, "the budget arithmetic below assumes 40");
+        let mut sink = FailingSink {
+            inner: std::io::Cursor::new(Vec::new()),
+            budget: 100,
+            written: 0,
+        };
+        let mut w = Writer::try_new(
+            &mut sink,
+            dir.path(),
+            WriterOptions::default().with_layout(Layout::Arrival),
+        )
+        .unwrap();
+
+        let mut failed_at = None;
+        for id in 21u64..=24 {
+            let (z, x, y) = crate::pmtiles::tileid_to_zxy(id).unwrap();
+            let bytes = payload(id);
+            if let Err(error) = w.add_tile(z, x, y, &bytes, content_hash(&bytes)) {
+                failed_at = Some((id, error));
+                break;
+            }
+        }
+        let (id, error) = failed_at.expect("a 100-byte budget cannot hold four 40-byte payloads");
+        assert_eq!(id, 23, "the budget should have run out on the third payload");
+        assert!(
+            matches!(error, PmTilesError::Io(_)),
+            "the write failure should surface as itself: {error:?}"
+        );
+
+        // Latched, so every later call refuses too, and the refusal names the
+        // step rather than the symptom.
+        let (z, x, y) = crate::pmtiles::tileid_to_zxy(30).unwrap();
+        let bytes = payload(30);
+        assert!(matches!(
+            w.add_tile(z, x, y, &bytes, content_hash(&bytes)),
+            Err(PmTilesError::WriterFailed {
+                during: "staging a payload"
+            })
+        ));
+        assert!(matches!(
+            w.finish(),
+            Err(PmTilesError::WriterFailed {
+                during: "staging a payload"
+            })
+        ));
+    }
+
+    /// `sync_pending` under `Layout::Arrival` lands on the destination, which
+    /// is where the accepted payloads are.
+    ///
+    /// The barrier promises that every `add_tile` that has returned has its
+    /// payload and its index record on stable storage. Arrival order moves the
+    /// payloads out of the staging file and into the archive, so a
+    /// `sync_pending` that still only knew about the staging file would keep
+    /// returning success while syncing nothing but the index.
+    ///
+    /// Two is the number that says so. Under the default layout it is the
+    /// staging file and the log; here it is the destination and the log, and a
+    /// version of this writer without the destination barrier reports one.
+    /// `Writer::create` rather than `try_new`, because a foreign sink can only
+    /// be flushed: `Write + Seek` cannot express `fsync` and the thing
+    /// underneath it is the caller's.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn the_arrival_barrier_lands_on_the_destination_rather_than_on_nothing() {
+        let dir = temp_dir();
+        let out = dir.path().join("barrier.pmtiles");
+        let mut w = Writer::create(
+            &out,
+            WriterOptions::default().with_layout(Layout::Arrival),
+        )
+        .unwrap();
+        let payload = b"one tile".as_slice();
+        w.add_tile(3, 0, 0, payload, content_hash(payload)).unwrap();
+
+        probe::reset();
+        w.sync_pending().expect("the barrier lands");
+        assert_eq!(
+            probe::syncs(),
+            2,
+            "sync_pending should sync the destination and the index log"
         );
     }
 }
