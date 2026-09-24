@@ -1636,7 +1636,8 @@ mod tests {
         assert_eq!(mono, 0, "black ink on white paper has no chroma at all");
 
         let mut flat = vec![0u8; 256 * 256 * 3];
-        for px in flat.chunks_exact_mut(3) {
+        let (flat_px, _) = flat.as_chunks_mut::<3>();
+        for px in flat_px {
             px.copy_from_slice(&[38, 120, 190]);
         }
         assert_eq!(count(&flat), 0, "a solid fill has no chroma detail");
@@ -1699,7 +1700,8 @@ mod tests {
         // Chroma everywhere and all of it below CHROMA_STEP: no shortcut, no
         // early exit, the whole image walked with the arithmetic on.
         let mut worst = vec![0u8; 256 * 256 * 3];
-        for (i, px) in worst.chunks_exact_mut(3).enumerate() {
+        let (worst_px, _) = worst.as_chunks_mut::<3>();
+        for (i, px) in worst_px.iter_mut().enumerate() {
             let g = 120u8;
             px[0] = g.wrapping_add((i % 5) as u8);
             px[1] = g;
@@ -1834,7 +1836,8 @@ mod tests {
     #[test]
     fn a_flat_colour_has_nothing_to_lose_to_subsampling() {
         let mut src = vec![0u8; 256 * 256 * 3];
-        for px in src.chunks_exact_mut(3) {
+        let (src_px, _) = src.as_chunks_mut::<3>();
+        for px in src_px {
             px.copy_from_slice(&[38, 120, 190]);
         }
         let bytes = encode(
