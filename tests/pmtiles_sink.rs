@@ -1086,7 +1086,8 @@ fn writing_after_finish_is_refused() {
 // The one hashing call site
 // ---------------------------------------------------------------------------
 
-/// The tile path hashes each tile exactly once, through `DedupeIndex`.
+/// The tile path hashes each tile exactly once, through the crate's own
+/// digest.
 ///
 /// #990 says the engine's digest must be passed into the writer rather than
 /// recomputed, and #989's `add_tile` takes the digest as a parameter precisely
@@ -1094,6 +1095,11 @@ fn writing_after_finish_is_refused() {
 /// hashing call site inside the sink, so this reads the module and asserts
 /// there is exactly one, with a positive control that the read found the file
 /// it thinks it did.
+///
+/// The call it looks for is `dedupe::content_digest_for`, which is where the
+/// hashing lives since #1145 took the `DedupeIndex` mutex off the write path.
+/// `DedupeIndex::content_digest` delegates to it, so this is the same one
+/// place it always was under a different name.
 #[test]
 fn the_sink_hashes_a_tile_in_exactly_one_place() {
     let source = include_str!("../src/sink_pmtiles.rs");
@@ -1110,10 +1116,15 @@ fn the_sink_hashes_a_tile_in_exactly_one_place() {
         .collect();
     let code = code.join("\n");
 
-    let digests = code.matches("content_digest(").count();
+    let digests = code.matches("content_digest_for(").count();
     assert_eq!(
         digests, 1,
-        "the sink takes its digest from DedupeIndex in exactly one place"
+        "the sink derives its digest in exactly one place"
+    );
+    assert!(
+        !code.contains("DedupeIndex"),
+        "the sink holds the run's strategy, not an index, so the hash runs with \
+         nothing locked"
     );
     for forbidden in ["blake3", "content_hash(", "hash_content"] {
         assert!(
