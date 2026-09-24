@@ -277,9 +277,12 @@ pub trait TileSink: Send + Sync {
     ///
     /// Every engine-bookkeeping method below (`record_engine_config`,
     /// `sink_retry_count`, `sink_skipped_due_to_failure`, `note_sink_skipped`,
-    /// `checkpoint_root`, `init_level_count`, `content_format`,
-    /// `open_pyramid_reader`, `applies_retry_policy`) has a default that
-    /// forwards through this hook.
+    /// `checkpoint_root`, `arm_durability_tracking`, `sync_pending`,
+    /// `init_level_count`, `content_format`, `applies_retry_policy`,
+    /// `check_resume_mode`, `seed_completed_tile`, `open_pyramid_reader`) has a
+    /// default that forwards through this hook. The list is the whole set, in
+    /// declaration order: it had drifted three short of the trait it describes,
+    /// which is the same shape as the trap the paragraph below is about.
     /// A wrapper therefore only has to override `inner_sink` — and any state it
     /// genuinely owns (e.g. a [`RetryingSink`]'s own retry counter) — instead
     /// of forwarding every bookkeeping method by hand. That removes the
@@ -421,6 +424,53 @@ pub trait TileSink: Send + Sync {
             .is_some_and(|inner| inner.applies_retry_policy())
     }
 
+    /// Engine hook (issue #1150, split out of #1129): refuse a resume mode
+    /// this sink cannot honour, before the run touches anything.
+    ///
+    /// [`EngineBuilder::with_resume`](crate::EngineBuilder::with_resume) tells
+    /// the **engine** which mode to run, and before this hook existed the sink
+    /// only heard about it if the caller also said it a second time on the
+    /// sink's own builder. So a sink that refuses a mode refused it exactly
+    /// when the refusal was not needed, and the run it existed to stop went
+    /// ahead: [`PmTilesSink`](crate::sink_pmtiles::PmTilesSink) cannot resume
+    /// and answers `None` to [`TileSink::checkpoint_root`] because it has
+    /// nowhere to keep a checkpoint, so a `Resume` run resolved no checkpoint,
+    /// skipped nothing, never reached [`TileSink::seed_completed_tile`] either,
+    /// re-rendered every tile and reported success. A job asked to pick up
+    /// where it left off started again from zero and looked like it had had
+    /// nothing left to do.
+    ///
+    /// The engine asks this once, before the verify dispatch and before any
+    /// lock or directory work, so a refusal costs nothing and leaves nothing
+    /// behind. `Ok(())` means "I can honour that mode", which is the default
+    /// and what every sink did before.
+    ///
+    /// # Why it takes the mode rather than answering a `supports_resume` flag
+    ///
+    /// There are three modes and a sink can have a different answer for each.
+    /// `PmTilesSink` is that sink: it honours `Overwrite`, honours `Verify`
+    /// since #1122 because it reads the archive back through
+    /// [`TileSink::open_pyramid_reader`], and refuses `Resume` alone. A boolean
+    /// cannot say that, and a fourth mode arriving would have to guess which
+    /// side of it to fall on rather than being made to decide.
+    ///
+    /// The default forwards to [`TileSink::inner_sink`], bottoming out at `Ok`
+    /// for terminal sinks, so a wrapper carries its inner sink's answer and an
+    /// external sink never has to know the method exists.
+    ///
+    /// # Errors
+    ///
+    /// [`SinkError::UnsupportedResumeMode`] for a mode this sink cannot
+    /// honour. The engine hands it back as
+    /// [`EngineError::Sink`](crate::EngineError::Sink), so a caller gets the
+    /// sink's own typed refusal rather than a sentence about one.
+    fn check_resume_mode(&self, mode: crate::resume::ResumeMode) -> Result<(), SinkError> {
+        match self.inner_sink() {
+            Some(inner) => inner.check_resume_mode(mode),
+            None => Ok(()),
+        }
+    }
+
     /// Engine hook (issue #272): rebuild the sink-side manifest / dedupe /
     /// checksum state a *pre-crash* tile contributes, WITHOUT advancing the
     /// resume checkpoint.
@@ -553,6 +603,9 @@ macro_rules! forward_tile_sink {
             }
             fn applies_retry_policy(&self) -> bool {
                 (**self).applies_retry_policy()
+            }
+            fn check_resume_mode(&self, mode: crate::resume::ResumeMode) -> Result<(), SinkError> {
+                (**self).check_resume_mode(mode)
             }
             fn seed_completed_tile(&self, tile: &Tile) -> Result<(), SinkError> {
                 (**self).seed_completed_tile(tile)

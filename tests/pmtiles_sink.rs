@@ -50,7 +50,7 @@ use libviprs::pyramid_reader::{DirectoryPyramidReader, PyramidReader};
 use libviprs::resume::{ResumeMode, ResumePolicy};
 use libviprs::sink::{SinkError, Tile, TileFormat, TileSink};
 use libviprs::sink_pmtiles::{PmTilesSink, tile_coord_to_zxy};
-use libviprs::{EngineBuilder, FsSink, PixelFormat, Raster};
+use libviprs::{EngineBuilder, EngineError, FsSink, PixelFormat, Raster};
 
 #[path = "common/pmtiles_oracle.rs"]
 mod oracle;
@@ -807,6 +807,127 @@ fn verify_builds_where_resume_does_not() {
              {other:?}"
         ),
     }
+}
+
+/// A resume run through the engine is refused, rather than quietly turning
+/// into a full regeneration (issue #1129).
+///
+/// This is the shape every caller actually writes, and the CLI with it. The
+/// mode is told to the **engine**, so the sink is built by the plain
+/// constructor and takes the builder's `Overwrite` default, which means the
+/// build-time gate in [`verify_builds_where_resume_does_not`] never fires. The
+/// rest used to follow quietly: `checkpoint_root()` is `None` on purpose, so
+/// the engine resolves no checkpoint root, the completed set comes back empty,
+/// nothing is skipped, [`TileSink::seed_completed_tile`] is never reached
+/// either, and the run re-renders every tile and reports success. Somebody who
+/// asked to resume a multi-hour job got a full re-render that is
+/// indistinguishable from a resume with nothing left to do.
+///
+/// Two assertions, because the refusal on its own is not evidence of anything.
+///
+/// * **Nothing is published.** A gate that returned the error after the run
+///   had already written the archive would satisfy `expect_err` and would have
+///   fixed nothing, since the expensive half is the re-render, not the return
+///   value. The archive path has to be untouched.
+/// * **`Overwrite` still runs.** A gate that refuses every mode passes the
+///   refusal assertion by itself, and the only thing that tells it from a
+///   correct one is the same sink, built the same way, still writing an
+///   archive for a mode this sink can honour.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn an_engine_resume_is_refused_rather_than_silently_regenerating() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let plan = plan_for(512, 512, 256, Layout::Xyz);
+    let src = gradient(512, 512);
+
+    let refused = dir.path().join("refused.pmtiles");
+    let sink = PmTilesSink::try_new(&refused, plan.clone(), TileFormat::Png)
+        .expect("the plain constructor builds, exactly as a caller writes it");
+    let err = EngineBuilder::new(&src, plan.clone(), &sink)
+        .with_resume(ResumePolicy::resume())
+        .run()
+        .expect_err("a PMTiles run cannot resume, so asking it to must say so");
+    match err {
+        EngineError::Sink(SinkError::UnsupportedResumeMode {
+            mode: ResumeMode::Resume,
+        }) => {}
+        other => panic!("the engine must surface the sink's own typed refusal, got {other:?}"),
+    }
+    assert!(
+        !refused.exists(),
+        "a refused resume must not publish an archive: the cost this refusal \
+         exists to stop is the silent re-render, not the return value"
+    );
+    drop(sink);
+
+    // The control. Same constructor, same engine, a mode this sink honours.
+    let written = dir.path().join("written.pmtiles");
+    let sink = PmTilesSink::try_new(&written, plan.clone(), TileFormat::Png)
+        .expect("the plain constructor builds");
+    EngineBuilder::new(&src, plan.clone(), &sink)
+        .with_resume(ResumePolicy::overwrite())
+        .run()
+        .expect("Overwrite is a mode this sink can honour, and still runs");
+    assert!(
+        written.exists(),
+        "the refusal is about Resume alone, so Overwrite must still publish"
+    );
+}
+
+/// The refusal survives every wrapper the engine can be handed (issue #1129).
+///
+/// `EngineBuilder::new` takes the sink by value, so a caller keeping ownership
+/// passes `&sink`, a caller unifying match arms passes `Box<dyn TileSink>` and
+/// a caller reading the sink back afterwards passes `Arc`. All three are
+/// generated from `forward_tile_sink!`, whose own doc says a method added to
+/// [`TileSink`] has to be forwarded in the macro body, and a hook left out
+/// there falls through to the trait default. The default for this one is "I
+/// can honour it", so a forgotten forward restores the silent regeneration for
+/// exactly the callers who wrap, with every direct-sink cell still green.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn the_resume_refusal_survives_the_sink_wrappers() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let plan = plan_for(256, 256, 256, Layout::Xyz);
+    let src = gradient(256, 256);
+
+    let boxed_at = dir.path().join("boxed.pmtiles");
+    let boxed: Box<dyn TileSink> = Box::new(
+        PmTilesSink::try_new(&boxed_at, plan.clone(), TileFormat::Png).expect("the sink builds"),
+    );
+    let err = EngineBuilder::new(&src, plan.clone(), boxed)
+        .with_resume(ResumePolicy::resume())
+        .run()
+        .expect_err("a boxed PMTiles sink refuses a resume too");
+    assert!(
+        matches!(
+            err,
+            EngineError::Sink(SinkError::UnsupportedResumeMode {
+                mode: ResumeMode::Resume
+            })
+        ),
+        "Box<dyn TileSink> must forward the refusal, got {err:?}"
+    );
+    assert!(!boxed_at.exists(), "and publish nothing");
+
+    let shared_at = dir.path().join("shared.pmtiles");
+    let shared = std::sync::Arc::new(
+        PmTilesSink::try_new(&shared_at, plan.clone(), TileFormat::Png).expect("the sink builds"),
+    );
+    let err = EngineBuilder::new(&src, plan.clone(), std::sync::Arc::clone(&shared))
+        .with_resume(ResumePolicy::resume())
+        .run()
+        .expect_err("a shared PMTiles sink refuses a resume too");
+    assert!(
+        matches!(
+            err,
+            EngineError::Sink(SinkError::UnsupportedResumeMode {
+                mode: ResumeMode::Resume
+            })
+        ),
+        "Arc<T> must forward the refusal, got {err:?}"
+    );
+    assert!(!shared_at.exists(), "and publish nothing");
 }
 
 /// A resume that would actually drop a tile is refused at the tile, not

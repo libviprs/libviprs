@@ -1335,6 +1335,15 @@ and not under `Fixed`: this file is the only place they can be caught.
   carries the control that says the two runs saw the same pixels: this run's
   tiles through libjpeg at #1134's four knob settings reproduce its four
   totals to the byte.
+- **`TileSink::check_resume_mode`** (issue #1150). A defaulted hook the engine
+  asks once, before the run and before anything touches the output, with the
+  `ResumeMode` it was configured with. A sink that cannot honour a mode refuses
+  it there, and the engine surfaces the refusal as `EngineError::Sink`. It
+  takes the mode rather than answering a `supports_resume` flag because a sink
+  can have a different answer per mode: `PmTilesSink` honours `Overwrite` and
+  `Verify` and refuses `Resume` alone. The default answers `Ok` and forwards
+  through `TileSink::inner_sink`, so an existing sink behaves exactly as it
+  did and an external one never has to know the method exists.
 
 - **The PMTiles writer can append straight into the destination** (EPIC #1135,
   issue #1143). `WriterOptions::layout` and `WriterOptions::with_layout` take
@@ -4783,6 +4792,25 @@ and not under `Fixed`: this file is the only place they can be caught.
   over four realistic root shapes before leaving it alone.
 
 ### Fixed
+
+- **A PMTiles run asked to resume rebuilt the whole pyramid and reported
+  success** (issue #1150). `PmTilesSink` cannot resume, and said so in two
+  places that the ordinary caller reached neither of:
+  `PmTilesSinkBuilder::resume_mode` needs the mode on the *sink's* builder,
+  while `EngineBuilder::with_resume` puts it on the *engine*, and
+  `TileSink::seed_completed_tile` needs a resume to have skipped a coordinate,
+  which needs a checkpoint, which needs the checkpoint root this sink
+  deliberately does not have. So `PmTilesSink::try_new` plus
+  `with_resume(ResumePolicy::resume())` resolved no checkpoint, got an empty
+  completed set, skipped nothing, re-rendered every tile and returned `Ok`.
+  Somebody resuming a multi-hour job paid for the whole job again and got an
+  answer that looked like a resume with nothing left to do. `viprs pyramid
+  --resume` over a `.pmtiles` output was exactly that caller.
+
+  The engine asks `TileSink::check_resume_mode` before the run now, so the
+  refusal reaches every caller of every sink without anyone having to repeat
+  the mode. `Overwrite` and `Verify` are unaffected, on this sink and on every
+  other.
 
 - **`--render --format jpeg` refused the only pixels the renderer makes**
   (issue #1133). `render_page_pdfium` returns an `Rgba8` raster from both the
