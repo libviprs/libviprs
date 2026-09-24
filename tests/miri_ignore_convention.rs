@@ -717,10 +717,16 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 ///
 /// Merged against a main that had moved to 472 with #1129's two resume cells.
 /// Held at that 472 rather than at 472 plus my three, so the detector had to
-/// report the merged figure instead of agreeing with my arithmetic, and it
-/// printed the number below. That is the same discipline the #1156 paragraph
-/// above exists because nobody followed.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 472;
+/// report the merged figure instead of agreeing with my arithmetic. It said
+/// "the detector found 475 filesystem-touching tests, not 472", and 475 is
+/// what is below. That it agrees with the arithmetic is the point: the
+/// arithmetic was not what was trusted. The #1156 paragraph above is what
+/// happens when it is.
+///
+/// The wrapper-forwarding cell this merge added does not appear here. It
+/// drives a recording sink that writes nothing, so it is `not-detected`, and
+/// it moves the inventory by a row without moving this figure.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 475;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
