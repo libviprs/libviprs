@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::io::Cursor;
+use std::io::{Cursor, Read, Seek};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 
@@ -271,9 +271,448 @@ pub enum SourceError {
         max_coord: u32,
     },
     /// A malformed or unsupported native `.v` file (bad magic, truncated
-    /// header or pixel data, unsupported coding/band format).
+    /// header or pixel data, unsupported coding/band format, or a metadata
+    /// trailer that opens with `{` and is not valid JSON, which is a
+    /// corrupt legacy libviprs trailer rather than a foreign one; see the
+    /// [`crate::imageio`] container contract).
     #[error("vips .v file error: {0}")]
     VipsFormat(String),
+    /// A malformed Radiance `.hdr` file. libviprs decodes Radiance itself
+    /// rather than through the `image` crate (see [`crate::radiance`]), so
+    /// its failures arrive as the codec's own typed
+    /// [`RadianceError`](crate::radiance::RadianceError) rather than as an
+    /// opaque string.
+    #[error(transparent)]
+    Radiance(#[from] crate::radiance::RadianceError),
+    /// A malformed or unsupported OpenEXR file, raised by
+    /// [`crate::exr::decode_exr`]. libviprs decodes EXR through the `exr`
+    /// crate rather than through the `image` facade (see [`crate::exr`]),
+    /// so the failure arrives as a typed
+    /// [`ExrError`](crate::exr::ExrError) rather than as an
+    /// [`image::ImageError`].
+    #[error(transparent)]
+    Exr(#[from] crate::exr::ExrError),
+    /// A malformed GIF. libviprs decodes GIF through the `gif` crate rather
+    /// than the `image` facade (see [`crate::gif`]), because the facade
+    /// hard-codes RGBA output and hides the transparent index, so its
+    /// failures arrive as the codec's own typed
+    /// [`GifError`](crate::gif::GifError) rather than as an opaque string.
+    #[error(transparent)]
+    Gif(#[from] crate::gif::GifError),
+    /// A malformed or unreachable FITS file. libviprs decodes FITS itself
+    /// rather than through any crate (see [`crate::fits`]), so its failures
+    /// arrive as the codec's own typed
+    /// [`FitsError`](crate::fits::FitsError) rather than as an opaque
+    /// string. That matters more here than elsewhere, because a FITS file
+    /// can be perfectly well formed and still carry a sample type this
+    /// build has no pixel format for; the variant says which.
+    #[error(transparent)]
+    Fits(#[from] crate::fits::FitsError),
+    /// A malformed or unreadable Ultra HDR container, raised by
+    /// [`crate::uhdr::decode_uhdr`]. Ultra HDR is a gain-map JPEG pair
+    /// rather than a codec, so libviprs parses the container itself over
+    /// the `image` crate's JPEG decoder (see [`crate::uhdr`]) and its
+    /// failures arrive as the module's own typed
+    /// [`UhdrError`](crate::uhdr::UhdrError). That matters here more than
+    /// most: "these bytes are a perfectly good JPEG that is not Ultra HDR"
+    /// and "this gain map is corrupt" are different answers, and only a
+    /// typed variant tells them apart without matching on a message.
+    #[error(transparent)]
+    Uhdr(#[from] crate::uhdr::UhdrError),
+    /// A malformed or unsupported JPEG XL file, raised by
+    /// [`crate::jxl::decode_jxl`]. libviprs decodes JPEG XL through
+    /// `jxl-oxide` rather than through the `image` facade, which has no
+    /// JPEG XL variant at all (see [`crate::jxl`]), so its failures arrive
+    /// as the codec's own typed [`JxlError`](crate::jxl::JxlError) rather
+    /// than as an `image::ImageError` carrying a hand-spelled format hint.
+    ///
+    /// The variant is declared whether or not the **`jxl`** feature is on,
+    /// so `SourceError` has the same shape in both builds. Without the
+    /// feature the only [`JxlError`](crate::jxl::JxlError) it can carry is
+    /// [`FeatureNotEnabled`](crate::jxl::JxlError::FeatureNotEnabled),
+    /// which is how a caller tells "this build has no JPEG XL" from "these
+    /// bytes are not JPEG XL" without reading a message (issue #634).
+    #[error(transparent)]
+    Jxl(#[from] crate::jxl::JxlError),
+    /// A malformed or unreachable NIfTI file. libviprs decodes NIfTI
+    /// itself rather than through any crate (see [`crate::nifti`]), so its
+    /// failures arrive as the codec's own typed
+    /// [`NiftiError`](crate::nifti::NiftiError) rather than as an opaque
+    /// string. As with FITS, that matters here because a NIfTI file can be
+    /// perfectly well formed and still declare a sample type this build has
+    /// no pixel format for; the variant says which.
+    #[error(transparent)]
+    Nifti(#[from] crate::nifti::NiftiError),
+    /// An AVIF could not be read; see [`crate::avif::AvifError`].
+    #[error(transparent)]
+    Avif(#[from] crate::avif::AvifError),
+    /// A malformed or unsupported JPEG 2000 file. libviprs decodes JPEG 2000
+    /// through `hayro-jpeg2000` and reads the box structure and the `SIZ` /
+    /// `COD` markers itself, so a refusal arrives as the codec's own typed
+    /// [`Jp2kError`](crate::jp2k::Jp2kError) rather than as an opaque string.
+    ///
+    /// Declared whether or not the **`jp2k`** feature is on. Without the
+    /// feature the only [`Jp2kError`](crate::jp2k::Jp2kError) it can carry is
+    /// [`FeatureNotEnabled`](crate::jp2k::Jp2kError::FeatureNotEnabled), so a
+    /// caller's `match` has the same arms in either build (issue #634).
+    #[error(transparent)]
+    Jp2k(#[from] crate::jp2k::Jp2kError),
+    /// A malformed or unsupported MATLAB level 5 file. libviprs decodes MAT
+    /// itself rather than through `matio` (see [`crate::mat`]), so its
+    /// failures arrive as the codec's own typed
+    /// [`MatError`](crate::mat::MatError) rather than as an opaque string.
+    /// As with FITS and NIfTI, that matters here because a `.mat` can be
+    /// perfectly well formed and still hold a class this build has no pixel
+    /// format for; the variant says which, and names the issue that would
+    /// add it.
+    #[error(transparent)]
+    Mat(#[from] crate::mat::MatError),
+    /// A malformed or unsupported Analyze `.hdr` / `.img` pair, raised by
+    /// [`crate::analyze`]. It is the one container in this crate that is
+    /// inherently two files, so its errors include one no other format has:
+    /// `PixelsAreInASiblingFile`, which is what [`decode_bytes`] reports for
+    /// a `.hdr` handed to it on its own (issue #764).
+    #[error(transparent)]
+    Analyze(#[from] crate::analyze::AnalyzeError),
+    /// An SVG document `usvg` refused to parse, raised by
+    /// [`crate::svg::decode_svg`]. Carries the underlying message rather
+    /// than the foreign error type so `SourceError` does not leak a
+    /// feature-gated dependency into its public shape.
+    #[error("SVG parse error: {message}")]
+    SvgParse {
+        /// The `usvg` parse failure, rendered through its `Display`.
+        message: String,
+    },
+    /// An SVG buffer larger than the input ceiling with
+    /// [`crate::svg::SvgOptions::unlimited`] left false. Distinct from the
+    /// output-geometry ceilings: this bounds the *document* before it is
+    /// parsed, where [`CoordLimitExceeded`](SourceError::CoordLimitExceeded)
+    /// and [`DimensionLimitExceeded`](SourceError::DimensionLimitExceeded)
+    /// bound the raster it renders to.
+    #[error(
+        "SVG input is {bytes} bytes, over the {max_bytes}-byte ceiling; \
+         set SvgOptions::unlimited to lift it"
+    )]
+    SvgInputTooLarge {
+        /// The length of the buffer that was offered.
+        bytes: usize,
+        /// The ceiling in force, [`crate::svg::MAX_INPUT_BYTES`].
+        max_bytes: usize,
+    },
+    /// An SVG whose scaled geometry rounded to zero on at least one axis,
+    /// mirroring the `zero-sized image` bail-out in libvips
+    /// `svgload.c:588`. Reported instead of constructing a zero-dimension
+    /// [`Raster`], which [`crate::raster::RasterError::ZeroDimension`]
+    /// would refuse anyway with less context about why.
+    #[error("SVG renders to a zero-sized image ({width}x{height} after scaling)")]
+    SvgZeroSize {
+        /// The rounded output width, in pixels.
+        width: u32,
+        /// The rounded output height, in pixels.
+        height: u32,
+    },
+    /// A single buffer a decoder is about to reserve would be larger than
+    /// [`DecodeLimits::max_alloc_bytes`]. Raised before the allocation
+    /// happens, from the size the file *declares*, so a decompression bomb
+    /// is refused rather than served. Distinct from
+    /// [`DimensionLimitExceeded`](SourceError::DimensionLimitExceeded),
+    /// which counts pixels and so cannot see the band count or the sample
+    /// depth: a 1-gigapixel `max_pixels` still permits a 4 GiB `Rgba8`
+    /// frame. Raised for the whole-file read every memory-decoded container
+    /// needs, with `what = "image file body"` (issue #629), and by the TIFF
+    /// page readers for both their own file body and the pixel buffer a
+    /// page decodes into.
+    ///
+    /// This is the shape **every decoder that prices a frame itself** uses.
+    /// GIF, FITS, OpenEXR, Radiance and JPEG XL each used to report an
+    /// `AllocLimitExceeded` of their own, five variants re-tagging a refusal
+    /// computed by the same shared arithmetic; they were collapsed onto this
+    /// one in issue #686, and [`geometry`](DeclaredGeometry) is what carries
+    /// the width, height and band count they used to carry individually.
+    ///
+    /// It is still not the only shape the budget can refuse a file in, and
+    /// the remainder is a real distinction rather than a leftover. JPEG,
+    /// PNG, single-image TIFF and WebP are refused by the `image` crate's own
+    /// budget from inside its decoder, and arrive as [`SourceError::Decode`]
+    /// carrying an `image` `LimitError`; there is no libviprs price behind
+    /// them and no declared geometry to report. JPEG XL can also trip
+    /// `jxl-oxide`'s internal allocation tracker, which reports
+    /// [`JxlError::DecoderAllocLimitExceeded`](crate::jxl::JxlError::DecoderAllocLimitExceeded)
+    /// because it is a different ceiling biting on a buffer whose size the
+    /// decoder does not report out.
+    ///
+    /// Use [`SourceError::is_alloc_limit`] to catch all three in one call
+    /// rather than matching them.
+    #[error(
+        "{what}{} needs {needed_bytes} bytes, over the {max_alloc_bytes}-byte \
+         allocation ceiling; raise DecodeLimits::max_alloc_bytes",
+        ShowGeometry(*geometry)
+    )]
+    AllocLimitExceeded {
+        /// What the allocation was for, e.g. `"TIFF file body"` or
+        /// `"GIF canvas"`.
+        ///
+        /// A human-readable label for the message, **not** part of the
+        /// compatibility promise: the wording may change in any release and
+        /// new decoders add new labels. Branch on
+        /// [`geometry`](DeclaredGeometry) or on the variant, never on this
+        /// string.
+        what: &'static str,
+        /// The declared geometry the price was computed from, where the
+        /// refusal priced an image. `None` where it priced a byte count with
+        /// no image behind it, which is the whole-file read: a file's length
+        /// on disk says nothing about what geometry it declares inside.
+        geometry: Option<DeclaredGeometry>,
+        /// The number of bytes that single buffer would have taken.
+        needed_bytes: u64,
+        /// The ceiling in force, [`DecodeLimits::max_alloc_bytes`].
+        max_alloc_bytes: u64,
+    },
+    /// A multi-page file whose page chain runs past
+    /// [`DecodeLimits::max_pages`]. The TIFF IFD chain is a linked list with
+    /// no count in the header, so the only way to know how long it is, is to
+    /// walk it; this variant is what stops that walk turning into unbounded
+    /// work on a hostile file.
+    #[error("image declares more than {max_pages} pages; raise DecodeLimits::max_pages")]
+    PageLimitExceeded {
+        /// The ceiling in force, [`DecodeLimits::max_pages`]. The real page
+        /// count is deliberately not reported: the walk stops at the ceiling
+        /// rather than running to the end of the chain to count it, which is
+        /// the whole point of the ceiling.
+        max_pages: u32,
+    },
+    /// A `page` / `n` request naming pages the file does not have.
+    ///
+    /// Distinct from [`PageLimitExceeded`](SourceError::PageLimitExceeded),
+    /// which is the configured ceiling rather than the file's own count: this
+    /// one says the file is shorter than the request, and no knob makes it
+    /// longer. Raised by the WebP and JPEG XL loaders before anything is
+    /// decoded.
+    ///
+    /// libvips draws the line in the same place and says so less: measured on
+    /// 8.18.6, `vips copy 'anim4.webp[page=5]'` and `[page=2,n=5]` on a
+    /// four-page file both fail with `webp: bad page number`, and `[n=0]`
+    /// does too. It does **not** clamp `page + n` to the end of the file.
+    ///
+    /// All three multi-page loaders report it. GIF had a
+    /// `GifError::BadPageNumber` of its own carrying the same three numbers
+    /// under different names, which is why the fields are shaped the way they
+    /// are: the second was written against the first field for field so that
+    /// folding them would be a deletion rather than a redesign, and #845 was
+    /// that deletion.
+    #[error("{format}: bad page number; page {page} count {n} on a {pages}-page file")]
+    PageOutOfRange {
+        /// The container, for the message: `"gif"`, `"webp"` or `"jxl"`,
+        /// which are exactly the three loaders that call
+        /// `resolve_page_range` (crate-private, so it is named rather than
+        /// linked). This said `("webp", "jxl")` for as long as
+        /// GIF had a `BadPageNumber` of its own, and stayed saying it after
+        /// #845 folded that variant in here, so the doc named two of the three
+        /// containers a caller can actually see (issue #950). The
+        /// `every_multi_page_loader_that_refuses_a_page_is_named_in_the_doc`
+        /// cell holds the list against the call sites now.
+        format: &'static str,
+        /// The first page asked for, counting from zero.
+        page: u32,
+        /// How many pages were asked for, `-1` for every remaining page.
+        n: i32,
+        /// How many pages the file actually holds.
+        pages: u32,
+    },
+}
+
+impl SourceError {
+    /// Whether this is the decode allocation budget refusing the file.
+    ///
+    /// Answers in one call what issue #686 found took seven match arms. The
+    /// budget can bite in three places and they are genuinely different
+    /// checks, so they stay three variants and this is the predicate over
+    /// them:
+    ///
+    /// * [`SourceError::AllocLimitExceeded`], every decoder that prices a
+    ///   buffer against [`DecodeLimits::max_alloc_bytes`] itself;
+    /// * [`SourceError::Decode`] carrying an `image` `LimitError` of kind
+    ///   `InsufficientMemory`, which is the same ceiling spent inside the
+    ///   `image` crate's own decoder for JPEG, PNG and single-image TIFF;
+    /// * [`JxlError::DecoderAllocLimitExceeded`](crate::jxl::JxlError::DecoderAllocLimitExceeded),
+    ///   `jxl-oxide`'s internal allocation tracker refusing a buffer whose
+    ///   size it does not report out.
+    ///
+    /// The second bullet named WebP as a fourth until issue #782. It has not
+    /// been one since #686: WebP is decoded by libviprs rather than by the
+    /// `image` crate, it prices its own frame, and it reports the first bullet
+    /// with the geometry attached. The list is pinned to the tables in
+    /// `tests/decode_alloc_refusal_shape.rs` now, so it cannot drift off them
+    /// again.
+    ///
+    /// Raising `max_alloc_bytes` is the response to all three, which is what
+    /// makes one predicate the right shape rather than a convenience over
+    /// unrelated things. It is the *whole* test: a shape that is not fixed by
+    /// raising that one knob is not this.
+    ///
+    /// So it does **not** cover [`SourceError::DimensionLimitExceeded`] or
+    /// [`SourceError::PageLimitExceeded`], which are different ceilings with
+    /// different remedies, and it does not cover
+    /// `SourceError::Raster(RasterError::ByteBudgetExceeded)` either. That
+    /// last one is worth naming because it *looks* like this: it says "needs N
+    /// bytes, exceeding the M-byte allocation budget" and
+    /// [`Raster::ppm_load`](crate::raster::Raster::ppm_load),
+    /// `csv_load` and `matrix_load` all return it through this same enum. But
+    /// the budget it names is
+    /// [`DEFAULT_MAX_ALLOC_BYTES`](crate::raster::DEFAULT_MAX_ALLOC_BYTES),
+    /// the raster **construction** ceiling, not
+    /// [`DecodeLimits::max_alloc_bytes`], and raising the decode limit does
+    /// nothing about it. There is a negative control on it.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use libviprs::SourceError;
+    /// fn is_too_big(err: &SourceError) -> bool {
+    ///     err.is_alloc_limit()
+    /// }
+    /// ```
+    #[must_use]
+    pub fn is_alloc_limit(&self) -> bool {
+        match self {
+            SourceError::AllocLimitExceeded { .. } => true,
+            SourceError::Decode(image::ImageError::Limits(e)) => {
+                matches!(e.kind(), image::error::LimitErrorKind::InsufficientMemory)
+            }
+            // Deliberately NOT `#[cfg(feature = "jxl")]`. `JxlError` and this
+            // variant are declared unconditionally so that "a caller's `match`
+            // has the same arms in either build" (issue #634), and gating the
+            // arm broke that promise for the predicate: the identical value
+            // answered `false` without the feature and `true` with it. Features
+            // are additive, so one crate in a workspace turning `jxl` on would
+            // silently change another crate's error handling.
+            SourceError::Jxl(crate::jxl::JxlError::DecoderAllocLimitExceeded { .. }) => true,
+            _ => false,
+        }
+    }
+}
+
+/// Writes `" WxHxB"` for a geometry and nothing at all for `None`.
+///
+/// The point is the "nothing at all". `SourceError::AllocLimitExceeded`'s
+/// message is built by `thiserror` in a `Display` impl, and the obvious
+/// spelling there is a `format!` producing a `String`. That puts a heap
+/// allocation on the path that formats an **allocation-refusal** error, which
+/// is exactly where the host is least likely to serve one, and cuts against
+/// the abort-freedom work in #627, #672 and #685. This writes straight into
+/// the formatter instead.
+struct ShowGeometry(Option<DeclaredGeometry>);
+
+impl std::fmt::Display for ShowGeometry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            Some(g) => write!(f, " {}x{}x{}", g.width, g.height, g.bands),
+            None => Ok(()),
+        }
+    }
+}
+
+/// Resolve a multi-page loader's `page` / `n` request against the number of
+/// pages the file actually holds, returning the zero-based half-open range of
+/// pages to load.
+///
+/// `n` is a page count, `-1` meaning every page from `page` to the end. The
+/// sentinel is kept rather than replaced by an `Option` because that is the
+/// shape libvips's argument has, and because `crate::gif::LoadOptions` landed
+/// with the same field: three sibling loaders spelling one libvips argument
+/// two ways is worse than carrying its sentinel.
+///
+/// Every rule here was measured against `/opt/homebrew/bin/vips` 8.18.6 on a
+/// four-page animation, and vips refuses each of them rather than clamping:
+///
+/// | request | vips | here |
+/// |---|---|---|
+/// | `page=3` | 4x3, the last page | `3..4` |
+/// | `page=4` | `bad page number` | `PageOutOfRange` |
+/// | `page=1, n=-1` | 4x9, three pages | `1..4` |
+/// | `page=2, n=5` | `bad page number` | `PageOutOfRange` |
+/// | `n=0` | `bad page number` | `PageOutOfRange` |
+/// | `n=-2` | refused by GObject before the loader | `PageOutOfRange` |
+///
+/// Shared rather than written once per codec because the multi-page loaders
+/// take the same two arguments and have to answer them the same way; a loader
+/// that clamped where its neighbour refused would be a difference no caller
+/// could see coming. All three call it, GIF included since #845, where
+/// `LoadOptions::window` used to be a second copy of this with an error
+/// variant of its own.
+pub(crate) fn resolve_page_range(
+    format: &'static str,
+    page: u32,
+    n: i32,
+    pages: u32,
+) -> Result<std::ops::Range<u32>, SourceError> {
+    let bad = || SourceError::PageOutOfRange {
+        format,
+        page,
+        n,
+        pages,
+    };
+    if page >= pages {
+        return Err(bad());
+    }
+    let count = match n {
+        // `page < pages` is settled above, so this cannot underflow.
+        -1 => pages - page,
+        n => u32::try_from(n).map_err(|_| bad())?,
+    };
+    // `checked_add` rather than a saturating one: an `i32::MAX` count would
+    // otherwise wrap `page + count` back under `pages` and turn a refusal
+    // into an accepted range.
+    let end = page.checked_add(count).ok_or_else(bad)?;
+    if count == 0 || end > pages {
+        return Err(bad());
+    }
+    Ok(page..end)
+}
+
+/// The geometry a decoder priced a frame from, reported by
+/// [`SourceError::AllocLimitExceeded`].
+///
+/// Every declared-geometry decoder prices its frame as
+/// `width * height * bands * sample_bytes`, and these are the first three of
+/// those four. The sample size is not reported separately because the price
+/// already carries it and the three fields here are what a caller can compare
+/// against what they expected the file to hold.
+///
+/// The band count is the one the *header declares*, which is not always the
+/// band count of the raster a successful decode would have produced. OpenEXR
+/// is the case that shows it: the decoder builds a full-resolution buffer for
+/// every channel the header declares, so a file declaring sixteen channels and
+/// selecting four is priced at sixteen and reports sixteen, while a successful
+/// decode of it hands back four bands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DeclaredGeometry {
+    /// Declared width in pixels.
+    pub width: u32,
+    /// Declared height in pixels.
+    pub height: u32,
+    /// Declared band count.
+    pub bands: u32,
+}
+
+impl DeclaredGeometry {
+    /// Build a geometry.
+    ///
+    /// The struct is `#[non_exhaustive]` so that a fourth field can be added
+    /// without breaking a caller who reads the three, and that is exactly what
+    /// stops a caller building one with a struct literal. Without this they
+    /// could construct the degenerate `geometry: None` form of
+    /// [`SourceError::AllocLimitExceeded`] and never the interesting one,
+    /// which would make the variant untestable from outside the crate.
+    #[must_use]
+    pub const fn new(width: u32, height: u32, bands: u32) -> Self {
+        Self {
+            width,
+            height,
+            bands,
+        }
+    }
 }
 
 /// Resource limits applied to a single image decode.
@@ -290,21 +729,40 @@ pub enum SourceError {
 ///
 /// # Which decoder enforces which field
 ///
-/// The two decode paths — the `image`-crate raster path (PNG/JPEG/TIFF)
-/// and the native `.v` reader — bound untrusted geometry with different
-/// mechanisms, so not every field is consulted by both:
+/// The decode paths bound untrusted geometry with different mechanisms, so
+/// not every field is consulted by all of them. The `image`-crate raster
+/// path covers PNG and JPEG; TIFF reaches it too through
+/// [`decode_file`]/[`decode_bytes`], but the page-aware TIFF readers
+/// ([`crate::tiff_page_count`], [`crate::decode_tiff_page`] and their
+/// `_with_limits` twins) go straight to the `tiff` crate and enforce the
+/// ceilings themselves.
 ///
-/// | Field | `image` raster path | native `.v` reader |
-/// |---|---|---|
-/// | [`max_coord`](Self::max_coord) | ✅ before allocation | ✅ before allocation |
-/// | [`max_pixels`](Self::max_pixels) | ✅ before allocation (in [`decode_reader`], re-verified in `build_raster`) | ✅ before allocation |
-/// | [`max_width`](Self::max_width) / [`max_height`](Self::max_height) | ✅ via [`image::Limits`] (see below) | — (bounded instead by `max_coord`) |
-/// | [`max_alloc_bytes`](Self::max_alloc_bytes) | ✅ via [`image::Limits`] | — (`.v` is an uncompressed body sized by its header, gated by `max_coord`/`max_pixels`) |
+/// | Field | `image` raster path | native `.v` reader | TIFF page readers |
+/// |---|---|---|---|
+/// | [`max_coord`](Self::max_coord) | ✅ before allocation | ✅ before allocation | ✅ before allocation |
+/// | [`max_pixels`](Self::max_pixels) | ✅ before allocation (in the shared `decode_reader` path, re-verified in `build_raster`) | ✅ before allocation | ✅ before allocation |
+/// | [`max_width`](Self::max_width) / [`max_height`](Self::max_height) | ✅ via [`image::Limits`] (see below) | — (bounded instead by `max_coord`) | — (bounded instead by `max_coord`) |
+/// | [`max_alloc_bytes`](Self::max_alloc_bytes) | ✅ via [`image::Limits`], plus the whole-file read for a memory-decoded container | ✅ on the whole-file read, and on the pixel body itself, priced from the declared header geometry (issue #710) | ✅ on the file body, the pixel buffer, and the `tiff` decoder's own buffers |
+/// | [`max_pages`](Self::max_pages) | — (single-page entry points) | — (`.v` is single-page) | ✅ bounds the IFD walk |
 ///
 /// The single-axis [`max_coord`](Self::max_coord) and total
-/// [`max_pixels`](Self::max_pixels) ceilings are the two universally
-/// honoured knobs; `max_width`/`max_height`/`max_alloc_bytes` shape only
-/// the `image`-crate decoders they are pushed into.
+/// [`max_pixels`](Self::max_pixels) ceilings are the universally honoured
+/// knobs; `max_width`/`max_height` shape only the `image`-crate decoders
+/// they are pushed into.
+///
+/// The format decoders libviprs owns outright take the same
+/// [`DecodeLimits`] and apply `max_coord`, `max_pixels` and
+/// `max_alloc_bytes` in that order before reserving a frame:
+/// [`crate::gif::decode_gif`], [`crate::webp::decode_webp`], the native `.v`
+/// reader, and the TIFF page readers. [`max_alloc_bytes`](Self::max_alloc_bytes) is the one that
+/// catches a frame `max_pixels` waves through, since a pixel count sees
+/// neither the band count nor the sample depth.
+///
+/// Raising [`max_alloc_bytes`](Self::max_alloc_bytes) above 256 MiB does
+/// **not** raise the effective ceiling on the TIFF page readers: the `tiff`
+/// crate's own `decoding_buffer_size` default is 256 MiB and libviprs only
+/// ever tightens it, never loosens it, so the effective bound there is the
+/// smaller of the two.
 ///
 /// Note the [`max_width`](Self::max_width) / [`max_height`](Self::max_height)
 /// ceilings and [`max_coord`](Self::max_coord) surface *different* errors on
@@ -312,7 +770,8 @@ pub enum SourceError {
 /// rejected inside the `image` crate via [`image::Limits`], so it arrives as
 /// [`SourceError::Decode`] wrapping [`image::ImageError::Limits`] — **not**
 /// [`SourceError::CoordLimitExceeded`], which is reserved for the
-/// `max_coord` check applied by [`decode_reader`] / the `.v` reader. Because
+/// `max_coord` check applied by the shared `decode_reader` path and the `.v`
+/// reader. Because
 /// the default `max_width` / `max_height` (65,535) sit far below the default
 /// `max_coord` (10,000,000), a raster dimension between those bounds trips
 /// the `image::Limits` path first; `CoordLimitExceeded` is what you see once
@@ -341,7 +800,7 @@ pub struct DecodeLimits {
     /// per decode on the declared header geometry — before any pixel
     /// allocation — by **every** decoder: the native `.v` reader and the
     /// `image`-crate raster path (PNG/JPEG/TIFF) alike, both routing
-    /// through [`DecodeLimits::check_coord`] and returning
+    /// through one shared `check_coord` helper on this struct and returning
     /// [`SourceError::CoordLimitExceeded`] on an over-ceiling axis. This is
     /// the sole coordinate-ceiling knob: it replaced an earlier
     /// process-global whose races under concurrent jobs made the ceiling
@@ -350,7 +809,41 @@ pub struct DecodeLimits {
     /// Maximum total pixel count (`width * height`).
     pub max_pixels: u64,
     /// Maximum number of bytes the decoder may allocate at one time.
+    ///
+    /// **At one time**, not per buffer, and the difference is the whole of
+    /// issues #892 and #944. Several decoders hold more than one image-sized
+    /// buffer at once, and some of those belong to the crate doing the
+    /// decoding rather than to libviprs: `image-webp` keeps a canvas and a
+    /// per-frame plane, `hayro-jpeg2000` keeps `f32` component data and
+    /// per-tile coefficients, `rav1d` keeps the YCbCr frame, and the GIF
+    /// loader holds a roll, a canvas and a disposal snapshot together. Each
+    /// of those decoders prices the sum, so a caller sizing a cgroup or
+    /// container limit from this number is sizing it from the peak. Four
+    /// used to price one buffer of the several and were measured decoding at
+    /// up to 6.45x what they said they needed.
+    ///
+    /// The consequence is that these decoders refuse files they used to
+    /// accept, at a budget between the raster and the peak. That is the
+    /// correct trade: a ceiling that is sometimes generous still bounds the
+    /// process, and one that is sometimes short bounds nothing.
     pub max_alloc_bytes: u64,
+    /// Maximum number of pages (frames, IFDs) a multi-page file may declare
+    /// before it is refused, default `100_000`. A TIFF's IFD chain is a
+    /// linked list with no count anywhere in the header, so reporting
+    /// `n-pages` means walking it; this bounds that walk. Enforced by the
+    /// TIFF page readers ([`crate::tiff_page_count`],
+    /// [`crate::decode_tiff_page`]) as
+    /// [`SourceError::PageLimitExceeded`], raised as soon as the walk
+    /// reaches the ceiling rather than after counting to the end.
+    ///
+    /// The default is the ceiling libvips puts on both the page index and
+    /// the page count on every multi-page loader it has
+    /// (`VIPS_ARG_INT(class, "page", 20, ..., 0, 100000, 0)` in
+    /// `tiffload.c:195-200` at `fe420cf3a`, and `-1, 100000, 1` for `n`).
+    /// Measured against 8.18.4: `vips tiffload x.tif o.v --page 100001` and
+    /// `--n 100001` are both refused by GObject before the loader runs, so a
+    /// chain longer than this is past anything vips will address in one go.
+    pub max_pages: u32,
 }
 
 impl Default for DecodeLimits {
@@ -369,6 +862,9 @@ impl Default for DecodeLimits {
             max_pixels: 1u64 << 30,
             // Mirrors the `image` crate default allocation budget.
             max_alloc_bytes: 512 * 1024 * 1024,
+            // The libvips `page` / `n` property ceiling on every multi-page
+            // loader; see the field doc.
+            max_pages: 100_000,
         }
     }
 }
@@ -412,6 +908,14 @@ impl DecodeLimits {
     #[must_use]
     pub fn with_max_alloc_bytes(mut self, max_alloc_bytes: u64) -> Self {
         self.max_alloc_bytes = max_alloc_bytes;
+        self
+    }
+
+    /// Set the maximum number of pages a multi-page file may declare,
+    /// returning the updated limits.
+    #[must_use]
+    pub fn with_max_pages(mut self, max_pages: u32) -> Self {
+        self.max_pages = max_pages;
         self
     }
 
@@ -459,6 +963,165 @@ impl DecodeLimits {
         }
         Ok(())
     }
+
+    /// Answer whether a single buffer of `needed_bytes` is over
+    /// [`max_alloc_bytes`](DecodeLimits::max_alloc_bytes), with no error
+    /// attached.
+    ///
+    /// The arithmetic half of [`check_alloc`](Self::check_alloc), split out
+    /// because five of the seven callers of the budget throw the
+    /// `SourceError` away and report a per-format variant of their own, so
+    /// the `what` label they had to pass was built at every call and never
+    /// observable by anyone.
+    ///
+    /// `u64::MAX` is refused whatever the budget says, and that arm is the
+    /// point of this function rather than a detail of it.
+    /// [`decode_alloc_bytes`](crate::raster::decode_alloc_bytes) saturates
+    /// there, so `u64::MAX` is the answer "this product did not fit a
+    /// `u64`" rather than a price. Compared with `>` alone it clears the
+    /// one budget a caller is most likely to set, since
+    /// [`with_max_alloc_bytes(u64::MAX)`](Self::with_max_alloc_bytes) is
+    /// the idiomatic spelling of "no limit", and the decoder then goes on
+    /// to size a buffer from a number that was never the real one. Refusing
+    /// it costs nothing real either way: 16 exbibytes is not an allocation
+    /// any target can serve, so a geometry that priced there exactly is
+    /// just as unservable as one that saturated.
+    pub(crate) fn exceeds_alloc_budget(self, needed_bytes: u64) -> bool {
+        needed_bytes > self.max_alloc_bytes || needed_bytes == u64::MAX
+    }
+
+    /// Enforce [`max_alloc_bytes`](DecodeLimits::max_alloc_bytes) on a
+    /// single buffer a decoder is about to reserve, named by `what`, where
+    /// the size is a byte count with no image behind it.
+    ///
+    /// That is the whole-file read: a file's length on disk says nothing
+    /// about the geometry it declares inside, so the refusal carries no
+    /// geometry. A decoder pricing a frame from a declared width, height and
+    /// band count calls [`check_image_alloc`](Self::check_image_alloc)
+    /// instead, which is the same ceiling reported with those three attached.
+    ///
+    /// `check_pixels` cannot stand in for either: it counts pixels and so
+    /// sees neither the band count nor the sample depth, and the default
+    /// 1-gigapixel ceiling still permits a 4 GiB `Rgba8` frame.
+    /// Crate-visible so the format decoders that do their own reads (the
+    /// TIFF page readers) apply the published budget rather than falling
+    /// back to [`crate::raster::Raster::new`]'s much looser one.
+    pub(crate) fn check_alloc(
+        self,
+        what: &'static str,
+        needed_bytes: u64,
+    ) -> Result<(), SourceError> {
+        if self.exceeds_alloc_budget(needed_bytes) {
+            return Err(SourceError::AllocLimitExceeded {
+                what,
+                geometry: None,
+                needed_bytes,
+                max_alloc_bytes: self.max_alloc_bytes,
+            });
+        }
+        Ok(())
+    }
+
+    /// Price a frame from the geometry a header declares and enforce
+    /// [`max_alloc_bytes`](DecodeLimits::max_alloc_bytes) on it, reporting
+    /// the geometry alongside the price.
+    ///
+    /// One call where every declared-geometry decoder used to spell out
+    /// [`decode_alloc_bytes`](crate::raster::decode_alloc_bytes), then
+    /// [`exceeds_alloc_budget`](Self::exceeds_alloc_budget), then a variant
+    /// of its own. #632 put the price and the comparison behind one
+    /// implementation each; this puts the reporting behind one too, which is
+    /// what stops the five drifting apart again (issue #686).
+    ///
+    /// `bands` and `sample_bytes` are separate arguments rather than one
+    /// bytes-per-pixel product because the message says the band count, and
+    /// because `decode_alloc_bytes` widens each multiplicand to `u64` before
+    /// multiplying and saturates rather than wrapping. Handing it a product
+    /// a caller already narrowed would give that up.
+    ///
+    /// They are `u64` for the same reason. Every saturation in this area goes
+    /// **up**, to `u64::MAX`, which `exceeds_alloc_budget` treats as a sentinel
+    /// refusal, so a caller who lifts every ceiling still gets refused rather
+    /// than served a wrapped price. Narrowing a band count on the way in would
+    /// saturate the price *down* instead, which is the one direction that
+    /// turns a refusal into a decode. Only the geometry the refusal
+    /// **reports** narrows to `u32`, and it saturates there because
+    /// [`DeclaredGeometry`] holds a `u32`; a count that large understates in
+    /// the message and cannot change the verdict, because the price it came
+    /// from has already saturated.
+    ///
+    /// Returns the price on success, since several callers size a buffer
+    /// from the same number straight afterwards.
+    pub(crate) fn check_image_alloc(
+        self,
+        what: &'static str,
+        width: u32,
+        height: u32,
+        bands: u64,
+        sample_bytes: u64,
+    ) -> Result<u64, SourceError> {
+        let needed_bytes = crate::raster::decode_alloc_bytes(width, height, bands, sample_bytes);
+        if self.exceeds_alloc_budget(needed_bytes) {
+            return Err(SourceError::AllocLimitExceeded {
+                what,
+                geometry: Some(DeclaredGeometry {
+                    width,
+                    height,
+                    bands: u32::try_from(bands).unwrap_or(u32::MAX),
+                }),
+                needed_bytes,
+                max_alloc_bytes: self.max_alloc_bytes,
+            });
+        }
+        Ok(needed_bytes)
+    }
+
+    /// The same ceiling, for a decoder that holds buffers of its own beside
+    /// the frame it prices.
+    ///
+    /// [`max_alloc_bytes`](DecodeLimits::max_alloc_bytes) is documented as a
+    /// ceiling on **peak** memory, so pricing only the raster libviprs fills
+    /// is not a ceiling at all once the decode keeps planes alongside it. #892
+    /// found that for WebP, which prices `size + working_set` by hand; #944
+    /// found the same shape in three more decoders and this is where the
+    /// hand-rolled version stops being copied. `working_set` is every other
+    /// byte live at the peak, so `raster + working_set` is what the refusal
+    /// reports and what a caller should size a container limit from.
+    ///
+    /// The **return** is the raster alone, because that is the buffer the
+    /// caller is about to allocate; the working set belongs to somebody else
+    /// and the caller has no `Vec` to size from it.
+    ///
+    /// `geometry` stays the frame's, which is deliberate and is WebP's
+    /// precedent: the reported width, height and band count are what the
+    /// price started from, and the number beside them is larger because the
+    /// decode is larger. A refusal naming a geometry whose product *is* the
+    /// price would have to invent one.
+    pub(crate) fn check_image_alloc_with_working_set(
+        self,
+        what: &'static str,
+        width: u32,
+        height: u32,
+        bands: u64,
+        sample_bytes: u64,
+        working_set: u64,
+    ) -> Result<u64, SourceError> {
+        let raster = crate::raster::decode_alloc_bytes(width, height, bands, sample_bytes);
+        let needed_bytes = raster.saturating_add(working_set);
+        if self.exceeds_alloc_budget(needed_bytes) {
+            return Err(SourceError::AllocLimitExceeded {
+                what,
+                geometry: Some(DeclaredGeometry {
+                    width,
+                    height,
+                    bands: u32::try_from(bands).unwrap_or(u32::MAX),
+                }),
+                needed_bytes,
+                max_alloc_bytes: self.max_alloc_bytes,
+            });
+        }
+        Ok(raster)
+    }
 }
 
 /// Map `image` crate color types to our canonical pixel format.
@@ -479,11 +1142,18 @@ fn color_type_to_format(ct: image::ColorType) -> Result<PixelFormat, SourceError
 
 /// Decode an image file into a canonical [`Raster`].
 ///
-/// Reads the file at `path`, auto-detects the format (JPEG, PNG, TIFF),
-/// and decodes it into an in-memory [`Raster`] with a canonical
-/// [`PixelFormat`]. Palette and gray+alpha images are promoted to
-/// RGB/RGBA so that downstream code only needs to handle a small set of
-/// uniform formats.
+/// Reads the file at `path`, auto-detects the format, and decodes it into
+/// an in-memory [`Raster`] with a canonical [`PixelFormat`]. Palette and
+/// gray+alpha images are promoted to RGB/RGBA so that downstream code only
+/// needs to handle a small set of uniform formats.
+///
+/// The format is identified from the file's leading magic bytes and never
+/// from its extension, so this returns exactly what [`decode_bytes`] returns
+/// for the same bytes, and a misnamed file still decodes correctly. libvips
+/// resolves a loader the same way. Native `.v`, JPEG, PNG, TIFF, GIF,
+/// WebP, JPEG XL, Radiance, FITS and OpenEXR are recognised directly; anything
+/// else falls
+/// back to the `image` crate's own content guess.
 ///
 /// # Example usage
 ///
@@ -495,7 +1165,8 @@ fn color_type_to_format(ct: image::ColorType) -> Result<PixelFormat, SourceError
 /// entry point) and [`viprs info`](https://libviprs.org/cli/#info).
 ///
 /// The decode is served through a process-global, bounded-LRU load cache
-/// (see [`LoadCache`]): the first load of a path is decoded from disk and
+/// (mirroring libvips' bounded, LRU-evicted operation cache): the first load
+/// of a path is decoded from disk and
 /// cached, and every later call returns that cached raster even if the
 /// file has since changed on disk. Use [`decode_file_with_options`] with
 /// `revalidate = true` to force a re-read, or [`Raster::invalidate`] to
@@ -514,7 +1185,7 @@ pub fn decode_file(path: &Path) -> Result<Raster, SourceError> {
 /// since changed on disk. With `revalidate = true` the cache lookup is
 /// skipped, the file is re-read and decoded fresh, and the cache entry for
 /// `path` is refreshed so subsequent plain [`decode_file`] calls see the
-/// new image. See [`LoadCache`] for the caching contract and its
+/// new image. See [`decode_file`] for the caching contract and its
 /// libvips-binding rationale.
 ///
 /// # Errors
@@ -559,7 +1230,7 @@ impl Raster {
     /// memory) has nothing cached under a path, so this is a no-op for it.
     /// The recorded filename is canonicalized to the same identity the load
     /// keyed off, so invalidation reliably drops the entry even when this
-    /// raster's filename spells the path differently. See [`LoadCache`] for
+    /// raster's filename spells the path differently. See [`decode_file`] for
     /// the caching contract.
     pub fn invalidate(&mut self) {
         if let Some(MetadataValue::Str(filename)) = self.fields.get("filename") {
@@ -610,6 +1281,917 @@ pub fn decode_file_with_shrink(path: &Path, shrink: u32) -> Result<Raster, Sourc
         .map_err(|e| SourceError::Io(std::io::Error::other(e.to_string())))
 }
 
+// ---------------------------------------------------------------------------
+// Format sniffing and routing
+// ---------------------------------------------------------------------------
+
+/// Number of leading bytes read to identify a container.
+///
+/// Sized for the whole format wave rather than for the magics libviprs
+/// reads today: WebP's `RIFF????WEBP` needs 12 (bytes 4..8 are a chunk
+/// length and carry no signature) and Radiance's `#?RADIANCE` needs 10. It
+/// is also exactly how many bytes `image`'s own `with_guessed_format` reads,
+/// so the fallback in [`reader_for`] never sees more of a file than
+/// [`sniff`] did.
+const SNIFF_HEAD_LEN: usize = 348;
+
+/// The ISOBMFF signature box that opens a boxed JPEG XL file: a 12-byte box
+/// whose type is `JXL ` and whose payload is the `\r\n\x87\n` line-ending
+/// check (ISO/IEC 18181-2, and the first arm of libjxl's
+/// `JxlSignatureCheck`).
+const JXL_CONTAINER_MAGIC: &[u8] = b"\x00\x00\x00\x0cJXL \x0d\x0a\x87\x0a";
+
+/// The bare JPEG XL codestream's magic and the other arm of
+/// `JxlSignatureCheck` (`jxlload.c:213-221`).
+///
+/// Two bytes is as short as any signature in the table gets, and JPEG XL is
+/// the only container in it with two unrelated magics: a table that knew
+/// only one of them would silently drop half the format.
+const JXL_CODESTREAM_MAGIC: &[u8] = b"\xff\x0a";
+
+/// One signature in the sniff table, as data rather than as a hand-written
+/// byte test.
+///
+/// Three shapes cover every container libviprs routes, and there is more
+/// than one because a magic is not always a leading prefix: WebP's is split
+/// either side of a file-specific chunk length, and Radiance's is a whole
+/// first *line*. Modelling that as data is what lets [`sniff`] be driven
+/// from the route table, instead of from a second hand-ordered chain that
+/// has to be kept in step with it (issue #633).
+#[derive(Clone, Copy, Debug)]
+enum Magic {
+    /// The head opens with exactly these bytes.
+    Prefix(&'static [u8]),
+    /// The head opens with `prefix` and carries `tag` at byte `tag_at`; the
+    /// bytes between the two are file-specific and are ignored. WebP's
+    /// `RIFF????WEBP` is the only one, because bytes 4..8 are the RIFF chunk
+    /// length and carry no signature.
+    Split {
+        /// The bytes at offset 0.
+        prefix: &'static [u8],
+        /// Where `tag` starts.
+        tag_at: usize,
+        /// The bytes at `tag_at`.
+        tag: &'static [u8],
+    },
+    /// The head carries `bytes` at offset `at`, with **no constraint at
+    /// offset 0**. AVIF's `ftypavif` is the only one: bytes 0..4 are the
+    /// `ftyp` box's own size, which is file-specific and carries no
+    /// signature, so this cannot be a `Prefix` and cannot be a `Split`
+    /// either (a `Split` still pins its prefix at offset 0).
+    At {
+        /// Where `bytes` starts.
+        at: usize,
+        /// The signature bytes at `at`.
+        bytes: &'static [u8],
+    },
+    /// The head's whole first line is exactly these bytes, CR- or
+    /// LF-terminated. Radiance's `#?RADIANCE` is the only one:
+    /// `vips__rad_israd` (`radiance.c:568-577`) reads the first line and
+    /// compares it in full, so the near-miss `#?RGBE` is not Radiance and
+    /// neither is `#?RADIANCEX`.
+    Line(&'static [u8]),
+    /// The buffer opens with `prefix` **and** satisfies `confirm`, a
+    /// predicate over as much of it as [`sniff`] was handed.
+    ///
+    /// Every other arm here decides a container from its leading bytes.
+    /// This one exists because Ultra HDR cannot be decided that way by
+    /// anyone: a UHDR file is a JPEG, byte for byte, until the gain map
+    /// that follows the base image's `EOI`. libvips has the same problem
+    /// and solves it the same way, with `uhdrload`'s `is_a` mapping the
+    /// whole file rather than sniffing a header.
+    ///
+    /// Two consequences, and both are load bearing. A structural row
+    /// **cannot** be matched from the `SNIFF_HEAD_LEN` bytes the file entry
+    /// point reads, so it must be declared before the row that shadows it
+    /// and it is reached from disk only through that row's whole-file read
+    /// and the re-sniff in [`decode_bytes_with_limits`]. And `confirm` runs
+    /// on every buffer that clears `prefix`, so it must allocate nothing;
+    /// [`crate::uhdr::is_uhdr`] walks markers without a `Vec` for exactly
+    /// this reason.
+    Structural {
+        /// The leading bytes every candidate shares, tested first so
+        /// `confirm` never runs on a buffer that cannot match.
+        prefix: &'static [u8],
+        /// The deep test.
+        confirm: fn(&[u8]) -> bool,
+        /// A buffer this row accepts, so the route-table tests can probe it
+        /// without a hand-kept table of sample bytes -- which is the thing
+        /// [`Route`] retired (issue #633).
+        ///
+        /// Read only by [`Magic::shortest_head`], which is `cfg(test)`, so
+        /// the field is genuinely dead in a release build. Kept on the row
+        /// anyway rather than moved into the test module: a probe kept
+        /// beside the tests is a second hand-maintained table, which is the
+        /// failure mode this shape exists to remove.
+        #[cfg_attr(
+            not(test),
+            expect(dead_code, reason = "read only by the cfg(test) shortest_head")
+        )]
+        sample: fn() -> Vec<u8>,
+    },
+}
+
+impl Magic {
+    /// Whether `head` carries this signature.
+    ///
+    /// A head too short to decide the signature is not a match: [`sniff`] is
+    /// handed only the bytes a source actually yielded, and a 12-byte magic
+    /// answered from 11 bytes would be a guess.
+    fn matches(self, head: &[u8]) -> bool {
+        match self {
+            Self::Prefix(magic) => {
+                // `[].starts_with(&[])` is true, so an empty prefix matches
+                // every buffer and would shadow every row declared after it.
+                debug_assert!(!magic.is_empty(), "an empty Prefix matches every buffer");
+                head.starts_with(magic)
+            }
+            Self::Split {
+                prefix,
+                tag_at,
+                tag,
+            } => {
+                // Nothing else constrains these two to sit apart, and a row
+                // where they overlap is quietly self-consistent rather than
+                // rejected: `shortest_head` lays the prefix down and then
+                // writes the tag over the end of it, and `matches` accepts
+                // the result it just built. The row would be wrong and every
+                // test that probes it with its own head would still pass.
+                debug_assert!(!tag.is_empty(), "an empty Split tag constrains nothing");
+                debug_assert!(
+                    prefix.len() <= tag_at,
+                    "a Split prefix that runs into its own tag is self-consistent and wrong"
+                );
+                head.len() >= tag_at + tag.len()
+                    && head.starts_with(prefix)
+                    && head[tag_at..tag_at + tag.len()] == *tag
+            }
+            Self::At { at, bytes } => {
+                debug_assert!(!bytes.is_empty(), "an empty At constrains nothing");
+                head.len() >= at + bytes.len() && head[at..at + bytes.len()] == *bytes
+            }
+            Self::Line(magic) => {
+                debug_assert!(
+                    !magic.is_empty(),
+                    "an empty Line magic matches every terminated head"
+                );
+                head.len() > magic.len()
+                    && head.starts_with(magic)
+                    && matches!(head[magic.len()], b'\n' | b'\r')
+            }
+            Self::Structural {
+                prefix, confirm, ..
+            } => {
+                debug_assert!(
+                    !prefix.is_empty(),
+                    "an empty Structural prefix runs confirm on everything"
+                );
+                head.starts_with(prefix) && confirm(head)
+            }
+        }
+    }
+
+    /// The shortest head this signature accepts.
+    ///
+    /// Lives beside [`Self::matches`] so the two cannot drift, and exists so
+    /// the route-table tests can build a probe per row. They must not get
+    /// one from a second table of sample bytes, because a second table kept
+    /// in step by hand is exactly what this shape is retiring.
+    #[cfg(test)]
+    fn shortest_head(self) -> Vec<u8> {
+        match self {
+            Self::Prefix(magic) => magic.to_vec(),
+            Self::Split {
+                prefix,
+                tag_at,
+                tag,
+            } => {
+                let mut head = vec![0u8; tag_at + tag.len()];
+                head[..prefix.len()].copy_from_slice(prefix);
+                head[tag_at..].copy_from_slice(tag);
+                head
+            }
+            Self::At { at, bytes } => {
+                let mut head = vec![0u8; at + bytes.len()];
+                head[at..].copy_from_slice(bytes);
+                head
+            }
+            Self::Line(magic) => [magic, b"\n"].concat(),
+            Self::Structural { sample, .. } => sample(),
+        }
+    }
+}
+
+/// Where a sniffed container's bytes go to become pixels.
+///
+/// The difference between the first two arms is a memory profile rather
+/// than a decoder: [`decode_file_with_limits`] streams a `Streamed` row past
+/// the `image` facade and reads a `Buffered` or a `Native` one whole. That
+/// read goes through [`read_file_bounded`], so a container joining either of
+/// the latter two gets [`DecodeLimits::max_alloc_bytes`] applied to the file
+/// length before a byte of it is read. It used to be a plain `std::fs::read`,
+/// which meant every ceiling was checked after the whole file was already
+/// resident (issue #629).
+#[derive(Clone, Copy, Debug)]
+enum Decoder {
+    /// The `image` facade, over the streaming reader. Nothing else in the
+    /// crate has to know the container exists.
+    Streamed(image::ImageFormat),
+    /// The `image` facade, but over the whole file in memory, because
+    /// libviprs makes a second pass over the same bytes afterwards. JPEG is
+    /// the only one: the metadata pass rescans the APP1/APP2 segments for
+    /// EXIF and ICC after the pixel decode.
+    Buffered(image::ImageFormat),
+    /// A libviprs codec, over the whole file in memory. Every one of these
+    /// parses the container itself and needs the bytes addressable end to
+    /// end; the per-format reason is on the row.
+    Native(fn(&[u8], DecodeLimits) -> Result<Raster, SourceError>),
+    /// A libviprs codec over a **pair** of files, reached from the path of
+    /// the half that carries the signature. Analyze is the only one, and
+    /// issue #764 is where the decision to add this kind rather than work
+    /// around it is argued: a `.hdr` has a geometry and no pixels and an
+    /// `.img` has pixels and no geometry, so neither half is decodable on
+    /// its own and `Native`'s one-buffer signature cannot express it.
+    ///
+    /// Two function pointers rather than one, so both entry points stay
+    /// table-driven. [`decode_file_with_limits`] calls `from_path` with the
+    /// path it sniffed; [`decode_bytes_with_limits`], which has no path,
+    /// calls `from_bytes` with the signature-carrying half alone, and that
+    /// function's job is to say so by name. Neither is a hand-written
+    /// `if sniffed == Some(..)`, which is the shape issue #633 retired.
+    Paired {
+        /// Decode from the path of the sniffed half, resolving its sibling.
+        from_path: fn(&Path, DecodeLimits) -> Result<Raster, SourceError>,
+        /// What a buffer decode of that half alone reports.
+        from_bytes: fn(&[u8], DecodeLimits) -> Result<Raster, SourceError>,
+    },
+}
+
+/// One row of the route table: everything routing knows about a container.
+///
+/// This is the single place the routing data for a container lives. Four
+/// sites used to carry it between them: its magic in `sniff`, its memory
+/// profile in `decodes_from_memory`, its decoder in `image_format`, and its
+/// arm in the dispatch chain at the top of [`decode_bytes_with_limits`]. Two
+/// of those, the magic and the memory profile, compiled clean and tested
+/// clean when they were missed, which is how one wave of three parallel
+/// format lanes managed to drop a different one each (issue #633).
+///
+/// It is not the only edit adding a format takes. The variant itself, one
+/// arm in [`SniffedFormat::next`] and the two lengths on
+/// [`SniffedFormat::ALL`] are still hand-written. The difference is that
+/// `cargo build` now insists on every one of them, where two of the six used
+/// to be silent.
+#[derive(Clone, Copy, Debug)]
+struct Route {
+    /// The signatures [`sniff`] accepts for this container; any one of them
+    /// matching is a match. More than one wherever a format has more than
+    /// one container form: both `.v` byte orders, both TIFF byte orders,
+    /// both GIF versions, and JPEG XL's bare codestream beside its ISOBMFF
+    /// box.
+    magics: &'static [Magic],
+    /// Which decoder gets the bytes, and over what.
+    decoder: Decoder,
+}
+
+/// A container libviprs identifies from the leading magic bytes of a file
+/// or buffer.
+///
+/// Only containers this build can actually reach a decoder for are listed;
+/// an unrecognised one is `None` from [`sniff`] and falls through to
+/// `image`'s own content guess.
+///
+/// Declaration order is the order [`sniff`] tries the signatures in, which
+/// is how libvips orders its loaders' `is_a` calls in
+/// `vips_foreign_find_load` (`foreign.c`). No two signatures in the table
+/// overlap today, so the order is not load-bearing; it is pinned anyway by
+/// `every_container_is_reachable_from_its_own_magic`, which reports the
+/// wrong variant the moment one row starts shadowing another.
+///
+/// Growing this list takes four edits, and `cargo build` insists on all
+/// four: the variant here, its row in [`Self::route`] saying what the
+/// container is, one arm of bookkeeping in [`Self::next`], and the two
+/// lengths on [`Self::ALL`]. Everything else about the container is read off
+/// the row. The count is not the point, the enforcement is: none of the four
+/// can be missed quietly, where the magic and the memory profile used to be
+/// (issue #633).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SniffedFormat {
+    /// Native libvips `.v`, either byte order.
+    Vips,
+    /// Ultra HDR: a base JPEG, a gain-map JPEG after it, and the MPF and
+    /// ISO 21496-1 markers that tie them together. Declared **before**
+    /// [`Self::Jpeg`] because it shares JPEG's magic bytes and
+    /// [`sniff`] takes the first match, which is how libvips orders
+    /// `uhdrload` (priority 100) against `jpegload` (priority 50).
+    Uhdr,
+    /// JPEG (JFIF/EXIF), `FF D8 FF`.
+    Jpeg,
+    /// PNG, `89 P N G 0D 0A 1A 0A`.
+    Png,
+    /// TIFF, little-endian `II*\0` or big-endian `MM\0*`.
+    Tiff,
+    /// GIF, `GIF87a` or `GIF89a`.
+    Gif,
+    /// WebP, `RIFF` + a 4-byte length + `WEBP`.
+    WebP,
+    /// JPEG XL, in either of its two containers: the bare codestream,
+    /// `FF 0A`, or the ISOBMFF signature box.
+    Jxl,
+    /// Radiance HDR, the first line `#?RADIANCE`.
+    Radiance,
+    /// FITS, the first card's `SIMPLE  =` keyword and fixed-format marker.
+    Fits,
+    /// OpenEXR, `76 2F 31 01`.
+    OpenExr,
+    /// NIfTI, in either version and either byte order: a `sizeof_hdr` of
+    /// 348 or 540 at offset 0, plus the version's own magic, at 344 for
+    /// NIfTI-1 and at 4 for NIfTI-2.
+    Nifti,
+    /// AVIF, the `ftyp` box type at offset 4 followed by the major brand
+    /// `avif`. Still images only, and deliberately not the other nine
+    /// brands libheif's magic list accepts; see [`crate::avif`].
+    Avif,
+    /// JPEG 2000, in either of its two containers: the RFC 3745 JP2
+    /// signature box, or the bare codestream's `SOC` + `SIZ` pair.
+    Jp2k,
+    /// MATLAB level 5, either byte order: `MATLAB 5.0` at offset 0 plus the
+    /// version word and endian indicator at 124.
+    Mat,
+    /// Binary and ASCII Netpbm, from the two-byte magic: `P1`, `P2` and `P3`
+    /// for the ASCII forms, `P4`, `P5` and `P6` for the binary ones.
+    ///
+    /// **Exactly the six [`crate::textio::decode_netpbm`] decodes.** `P1` and
+    /// `P4` are the bitmap forms and they joined the set in #919, which is
+    /// why this doc says six where #910 left it saying four. `PF` is the
+    /// float PFM and `P7` is PAM; neither has a decoder here, so neither is
+    /// claimed. Claiming a magic with nothing behind it would put a row in
+    /// [`Self::ALL`] that cannot decode and break
+    /// `every_container_is_reachable_from_its_own_magic`, so the sniffed set
+    /// is the decodable set in both directions.
+    ///
+    /// Two bytes and no more, which is as loose as `ppmload`'s own `is_a`:
+    /// measured on 8.18.6, a file opening `P5xyzzy` is accepted as `ppmload`
+    /// and then fails with `bad image dimensions`. A sniffer stricter than the
+    /// reference makes files vips reads unreachable, which is a parity gap
+    /// dressed as prudence, so the refusal goes where vips puts it, in the
+    /// loader, where re-tokenising the header gives it a type.
+    Netpbm,
+    /// Analyze 7.5, from the `.hdr` half of the pair: a big-endian 348 in
+    /// the four `sizeof_hdr` bytes at offset 0.
+    ///
+    /// **Declared last on purpose.** `analyzeload` is registered at priority
+    /// -50, the lowest of any loader in the build, because its `is_a` opens
+    /// and fully parses a second file. This signature is four bytes and
+    /// carries no format name, so it is the widest in the table and it has
+    /// to be tried after everything narrower.
+    Analyze,
+}
+
+impl SniffedFormat {
+    /// The variant after `self` in declaration order, or `None` at the end
+    /// of the enum.
+    ///
+    /// This exists only to build [`Self::ALL`], and it is written as an
+    /// exhaustive `match` on purpose: adding a variant stops the crate
+    /// compiling here, which is the link a hand-maintained list of variants
+    /// does not have. `Jxl` escaped exactly that way between #628 and #659.
+    /// The route-table test asserted "only these read the whole file" over
+    /// a list of its own, `Jxl` was missing from that list *and* from the
+    /// expected answer, so the arithmetic stayed consistent and two
+    /// invariants held for the wrong reason.
+    const fn next(self) -> Option<Self> {
+        match self {
+            Self::Vips => Some(Self::Uhdr),
+            Self::Uhdr => Some(Self::Jpeg),
+            Self::Jpeg => Some(Self::Png),
+            Self::Png => Some(Self::Tiff),
+            Self::Tiff => Some(Self::Gif),
+            Self::Gif => Some(Self::WebP),
+            Self::WebP => Some(Self::Jxl),
+            Self::Jxl => Some(Self::Radiance),
+            Self::Radiance => Some(Self::Fits),
+            Self::Fits => Some(Self::OpenExr),
+            Self::OpenExr => Some(Self::Nifti),
+            Self::Nifti => Some(Self::Avif),
+            Self::Avif => Some(Self::Jp2k),
+            Self::Jp2k => Some(Self::Mat),
+            Self::Mat => Some(Self::Netpbm),
+            Self::Netpbm => Some(Self::Analyze),
+            Self::Analyze => None,
+        }
+    }
+
+    /// Every variant, in declaration order.
+    ///
+    /// Walked out of [`Self::next`] rather than written out, so the length
+    /// and the contents both come from the enum. A variant added without
+    /// growing the length fails this `const` block at compile time, and one
+    /// added without touching [`Self::next`] fails that `match` first.
+    ///
+    /// [`sniff`] walks it, so both of those land on `cargo build` rather
+    /// than only on `cargo test`. It used to be test-only, which meant the
+    /// library itself compiled happily with a variant nothing could reach.
+    pub(crate) const ALL: [Self; 17] = {
+        let mut all = [Self::Vips; 17];
+        let mut i = 1;
+        while i < all.len() {
+            all[i] = match all[i - 1].next() {
+                Some(format) => format,
+                None => panic!("SniffedFormat::ALL is longer than the enum"),
+            };
+            i += 1;
+        }
+        assert!(
+            all[all.len() - 1].next().is_none(),
+            "SniffedFormat::ALL is shorter than the enum"
+        );
+        all
+    };
+
+    /// This container's row in the route table.
+    ///
+    /// The whole of the routing seam is here, in one exhaustive `match`, so
+    /// a variant that reaches a decoder is a variant [`sniff`] can find and
+    /// [`decode_bytes_with_limits`] can dispatch, by construction rather
+    /// than by three lists agreeing. Adding a container without a row is a
+    /// compile error; adding a row with the wrong magic is a test failure.
+    /// Neither used to be true (issue #633).
+    const fn route(self) -> Route {
+        match self {
+            // `crate::imageio::decode_vips_bytes` parses the libvips header
+            // and the metadata trailer itself and needs the buffer
+            // addressable end to end, so `.v` never streams.
+            Self::Vips => Route {
+                magics: &[
+                    Magic::Prefix(&crate::imageio::VIPS_MAGIC_LE),
+                    Magic::Prefix(&crate::imageio::VIPS_MAGIC_BE),
+                ],
+                decoder: Decoder::Native(crate::imageio::decode_vips_bytes),
+            },
+            // The one facade row that is read whole rather than streamed:
+            // the metadata pass rescans the APP1/APP2 segments for EXIF and
+            // ICC over the same bytes after the pixel decode.
+            Self::Jpeg => Route {
+                magics: &[Magic::Prefix(b"\xff\xd8\xff")],
+                decoder: Decoder::Buffered(image::ImageFormat::Jpeg),
+            },
+            Self::Png => Route {
+                magics: &[Magic::Prefix(b"\x89PNG\r\n\x1a\n")],
+                decoder: Decoder::Streamed(image::ImageFormat::Png),
+            },
+            Self::Tiff => Route {
+                magics: &[Magic::Prefix(b"II*\x00"), Magic::Prefix(b"MM\x00*")],
+                decoder: Decoder::Streamed(image::ImageFormat::Tiff),
+            },
+            // `image`'s GIF route is reachable but not usable for parity:
+            // `GifDecoder::color_type()` is hard-coded to `Rgba8`, where
+            // `vips gifload` emits three bands unless some frame declares a
+            // transparent index, and the facade surfaces none of the fields
+            // `gifload` attaches. [`crate::gif`] drives the `gif` crate
+            // directly instead (issue #570), and reads the file whole: it
+            // has to scan every frame's metadata before it can size the
+            // output — the band count depends on whether *any* frame
+            // declares transparency — and then rewind to decode frame 0.
+            // vips does exactly the same thing and pays exactly the same
+            // price, `vips_foreign_load_nsgif_header` opening with
+            // `vips_source_map(gif->source, &size)`.
+            Self::Gif => Route {
+                magics: &[Magic::Prefix(b"GIF87a"), Magic::Prefix(b"GIF89a")],
+                decoder: Decoder::Native(crate::gif::decode_gif),
+            },
+            // The `image` facade's WebP decoder reports neither the frame
+            // count nor the XMP chunk, and [`crate::webp`] needs both, so
+            // that module drives `image-webp` directly (issue #567). It
+            // reads the file whole because it takes the `ICCP`, `EXIF` and
+            // `XMP ` chunks out of the RIFF directory as well as the frame,
+            // and the frame is rarely the last chunk in the file.
+            Self::WebP => Route {
+                magics: &[Magic::Split {
+                    prefix: b"RIFF",
+                    tag_at: 8,
+                    tag: b"WEBP",
+                }],
+                decoder: Decoder::Native(crate::webp::decode_webp),
+            },
+            // `image` 0.25 has no JPEG XL decoder at all, so this row was
+            // never anything but a native one; [`crate::jxl`] drives
+            // `jxl-oxide` directly (issue #619). It feeds the decoder in two
+            // phases so the declared header geometry can be checked against
+            // [`DecodeLimits`] before the frame data is fed in at all, which
+            // needs the whole buffer addressable up front.
+            //
+            // The row stays live without the `jxl` feature, on purpose:
+            // `decode_jxl` then reports "this build has no JPEG XL", where
+            // falling through to [`reader_for`] would report "these bytes
+            // are not an image", which is a different and wrong answer.
+            Self::Jxl => Route {
+                magics: &[
+                    Magic::Prefix(JXL_CODESTREAM_MAGIC),
+                    Magic::Prefix(JXL_CONTAINER_MAGIC),
+                ],
+                decoder: Decoder::Native(crate::jxl::decode_jxl),
+            },
+            // `image`'s Radiance route is behind its `hdr` feature, which
+            // this build deliberately leaves off: the crate decodes RGBE as
+            // `mantissa * 2^(e-136)` where vips uses the half-bit-centred
+            // `(mantissa + 0.5) * 2^(e-136)`, a 100% error at mantissa 0.
+            // [`crate::radiance`] hand-rolls the codec instead, and walks
+            // the header lines and the run-length-encoded body over one
+            // addressable buffer.
+            Self::Radiance => Route {
+                magics: &[Magic::Line(crate::radiance::MAGIC)],
+                decoder: Decoder::Native(crate::radiance::decode_radiance),
+            },
+            // `image` has no FITS route at all, and no FITS crate models the
+            // vips-side behaviour libviprs needs (the vertical flip, the
+            // `fits-N` records, cfitsio's equivalent-type table), so
+            // [`crate::fits`] hand-rolls the codec (issue #505). It reads
+            // the file whole because it may walk past one or more header
+            // units before it finds the one carrying the image, and the
+            // sample array is band-planar and stored bottom row first, so
+            // the decode reads it in an order no strip reader would.
+            //
+            // FITS also has no signature to speak of: the standard fixes the
+            // primary header's first card as `SIMPLE` with a logical value,
+            // so the keyword field and the fixed-format `= ` in columns 9
+            // and 10 are the only bytes every file shares. vips does not
+            // sniff at all here, it hands the file to `fits_open_diskfile`
+            // (`fits.c:526-548`).
+            Self::Fits => Route {
+                magics: &[Magic::Prefix(crate::fits::MAGIC)],
+                decoder: Decoder::Native(crate::fits::decode_fits),
+            },
+            // `image`'s EXR route is behind its `exr` feature, which is
+            // exactly `dep:exr`, so naming the crate directly costs nothing
+            // extra (issue #504). The reason to name it is that the facade
+            // flattens every file to one of its fixed colour types, where an
+            // EXR is an arbitrary set of named channels and [`crate::exr`]
+            // needs the names, the per-channel sample types and the data
+            // window. It reads the file whole because it parses the header
+            // twice, once to price the declared data window against the
+            // decode budget and once to decode, and the second pass has to
+            // start from the beginning of the same bytes.
+            Self::OpenExr => Route {
+                magics: &[Magic::Prefix(&crate::exr::MAGIC)],
+                decoder: Decoder::Native(crate::exr::decode_exr),
+            },
+            // The only structural row in the table, and the only one that
+            // shares another row's magic bytes. Both come from the format:
+            // an Ultra HDR file *is* a JPEG until the gain map after the
+            // base image's `EOI`, so no leading-byte pattern can separate
+            // the two and `is_uhdr` has to walk the markers. See
+            // [`Magic::Structural`] for how the file entry point still
+            // reaches it, and [`crate::uhdr`] for the gate itself.
+            //
+            // Native because the container is two JPEGs plus metadata that
+            // neither the `image` facade nor any crate models, and it needs
+            // the bytes addressable end to end: the gain map is found by
+            // walking from the base's `EOI`, which is at the far end of the
+            // file from the header.
+            Self::Uhdr => Route {
+                magics: &[Magic::Structural {
+                    prefix: b"\xff\xd8\xff",
+                    confirm: crate::uhdr::is_uhdr,
+                    sample: crate::uhdr::smallest_container,
+                }],
+                decoder: Decoder::Native(crate::uhdr::decode_uhdr),
+            },
+            // `image` has no NIfTI route, and neither has the pinned vips:
+            // that build reports `NIfTI load/save with libnifti: false` and
+            // registers no `niftiload`, which is why [`crate::nifti`] is
+            // measured against `nifti_clib` instead (issue #510). It reads
+            // the file whole because the header declares a volume and the
+            // voxels start at a `vox_offset` the header names, so the
+            // decode seeks inside the same bytes it sniffed.
+            //
+            // Six signatures, because the format has six spellings of its
+            // own front: two versions, two byte orders and, on NIfTI-1, the
+            // paired `ni1` form as well as the single-file `n+1`. The
+            // paired rows are here on purpose, for the same reason the
+            // `Jxl` row stays live without the `jxl` feature: a `.hdr` from
+            // a pair reaching `decode_nifti` gets "the voxels are in a
+            // sibling .img", where falling through to [`reader_for`] would
+            // say "these bytes are not an image", which is a different and
+            // wrong answer. The NIfTI-2 pair needs no separate byte-order
+            // row because its sentinel and magic are adjacent and the magic
+            // is never swapped.
+            Self::Nifti => Route {
+                magics: &[
+                    Magic::Split {
+                        prefix: crate::nifti::SIZEOF_HDR_1_LE,
+                        tag_at: crate::nifti::MAGIC_1_AT,
+                        tag: crate::nifti::MAGIC_1_SINGLE,
+                    },
+                    Magic::Split {
+                        prefix: crate::nifti::SIZEOF_HDR_1_BE,
+                        tag_at: crate::nifti::MAGIC_1_AT,
+                        tag: crate::nifti::MAGIC_1_SINGLE,
+                    },
+                    Magic::Split {
+                        prefix: crate::nifti::SIZEOF_HDR_1_LE,
+                        tag_at: crate::nifti::MAGIC_1_AT,
+                        tag: crate::nifti::MAGIC_1_PAIR,
+                    },
+                    Magic::Split {
+                        prefix: crate::nifti::SIZEOF_HDR_1_BE,
+                        tag_at: crate::nifti::MAGIC_1_AT,
+                        tag: crate::nifti::MAGIC_1_PAIR,
+                    },
+                    Magic::Split {
+                        prefix: crate::nifti::SIZEOF_HDR_2_LE,
+                        tag_at: crate::nifti::MAGIC_2_AT,
+                        tag: crate::nifti::MAGIC_2_SINGLE,
+                    },
+                    Magic::Split {
+                        prefix: crate::nifti::SIZEOF_HDR_2_BE,
+                        tag_at: crate::nifti::MAGIC_2_AT,
+                        tag: crate::nifti::MAGIC_2_SINGLE,
+                    },
+                    Magic::Split {
+                        prefix: crate::nifti::SIZEOF_HDR_2_LE,
+                        tag_at: crate::nifti::MAGIC_2_AT,
+                        tag: crate::nifti::MAGIC_2_PAIR,
+                    },
+                    Magic::Split {
+                        prefix: crate::nifti::SIZEOF_HDR_2_BE,
+                        tag_at: crate::nifti::MAGIC_2_AT,
+                        tag: crate::nifti::MAGIC_2_PAIR,
+                    },
+                ],
+                decoder: Decoder::Native(crate::nifti::decode_nifti),
+            },
+            // `image` has no AVIF route this build can use: its `avif`
+            // feature is encode-only (`ravif`), and its `avif-native`
+            // decode feature is `dav1d-sys`, a C library that has to be
+            // installed on the machine, which CONTRIBUTING.md clause 2
+            // excludes outright. [`crate::avif`] hand-rolls the ISOBMFF
+            // walk and drives the pure-Rust `rav1d` behind the `avif`
+            // feature. It reads the file whole because the container's
+            // `iloc` addresses payload bytes by absolute file offset, so
+            // the item extents are only reachable with the whole file
+            // resident.
+            Self::Avif => Route {
+                magics: &[Magic::At {
+                    at: 4,
+                    bytes: crate::avif::MAGIC_AT_4,
+                }],
+                decoder: Decoder::Native(crate::avif::decode_avif),
+            },
+            // `image` has no JPEG 2000 route at all, so this row was never
+            // anything but a native one; [`crate::jp2k`] drives
+            // `hayro-jpeg2000` directly (issue #501). It reads the file whole
+            // because it makes two passes over the same bytes: one that walks
+            // the JP2 boxes and the `SIZ` / `COD` markers for the sign bit,
+            // the subsampling factors, the tile geometry and the raw ICC
+            // payload, and one that decodes.
+            //
+            // The row stays live without the `jp2k` feature, on purpose, for
+            // the reason the JPEG XL row does: `decode_jp2k` then reports
+            // "this build has no JPEG 2000", where falling through to
+            // [`reader_for`] would report "these bytes are not an image".
+            Self::Jp2k => Route {
+                magics: &[
+                    Magic::Prefix(crate::jp2k::JP2_SIGNATURE),
+                    Magic::Prefix(crate::jp2k::CODESTREAM_SIGNATURE),
+                ],
+                decoder: Decoder::Native(crate::jp2k::decode_jp2k),
+            },
+            // `image` has no MATLAB route, and neither has any Rust crate
+            // that models `matio`'s behaviour, so [`crate::mat`] hand-rolls
+            // the container (issue #510). It reads the file whole because
+            // the element stream is a linked walk from byte 128 and the
+            // chosen variable can be anywhere in it, and because a
+            // `miCOMPRESSED` element has to be inflated out of the same
+            // bytes.
+            //
+            // Two signatures, one per byte order, and between them they are
+            // the whole of the shipped 8.18.6 sniff predicate: the 128-byte
+            // length floor falls out of the tag offset, and the version
+            // word and the endian indicator are one four-byte constant
+            // because the version is `0x0100` read whichever way the
+            // indicator declares. That is deliberately *not* the ten-byte
+            // prefix test the reference C source does: the dylib that
+            // shipped changed under the capture and validates 128 bytes
+            // (issue #650), and a port written from the source would claim
+            // files 8.18.6 refuses.
+            Self::Mat => Route {
+                magics: &[
+                    Magic::Split {
+                        prefix: crate::mat::MAGIC_PREFIX,
+                        tag_at: crate::mat::VERSION_INDICATOR_AT,
+                        tag: crate::mat::VERSION_INDICATOR_LE,
+                    },
+                    Magic::Split {
+                        prefix: crate::mat::MAGIC_PREFIX,
+                        tag_at: crate::mat::VERSION_INDICATOR_AT,
+                        tag: crate::mat::VERSION_INDICATOR_BE,
+                    },
+                ],
+                decoder: Decoder::Native(crate::mat::decode_mat),
+            },
+            // The one paired row, and the one container whose sniff is
+            // deliberately **wider** than the reference's own `is_a`.
+            // `vips__isanalyze` opens the `.hdr` and validates its length,
+            // its `sizeof_hdr` field, its rank and its datatype, which is
+            // why `analyzeload` is priority -50; a content sniff can only
+            // reach the second of those four. So this claims a strictly
+            // larger set and then refuses the difference **by name**, where
+            // vips lets it fall through to `magickload`. Since libviprs has
+            // no `magickload`, the set of files that actually *load* is the
+            // same on both sides, which `crate::analyze`'s
+            // `every_measured_fixture_loads_exactly_where_vips_loads_it`
+            // holds rather than asserts (issue #764).
+            //
+            // One signature, because there is only one: `sizeof_hdr` is the
+            // first field and it is big-endian 348 in every Analyze header
+            // ever written. There is no byte-order flag in the format, so
+            // this four-byte prefix is the byte-order check as well.
+            // `image`'s Netpbm route is behind its `pnm` feature, which is
+            // `pnm = []`, an empty feature with no dependency behind it, so
+            // turning it on would cost nothing in the lock file. It is off
+            // anyway, because [`crate::textio`] decodes `P1`, `P2`, `P3`,
+            // `P4`, `P5` and `P6` itself, and the only thing the facade would
+            // still add is the float `PF`, which `encode_ppm` does not write
+            // either. A free-looking feature that buys decode paths with no
+            // matching encode paths is still a widening of what this crate
+            // claims (issues #910, #919).
+            //
+            // Read whole rather than streamed because the ASCII forms are
+            // tokenised with a cursor over the buffer and the binary body is
+            // checked to be wholly present before anything is reserved.
+            Self::Netpbm => Route {
+                magics: &[
+                    Magic::Prefix(b"P1"),
+                    Magic::Prefix(b"P2"),
+                    Magic::Prefix(b"P3"),
+                    Magic::Prefix(b"P4"),
+                    Magic::Prefix(b"P5"),
+                    Magic::Prefix(b"P6"),
+                ],
+                decoder: Decoder::Native(crate::textio::decode_netpbm),
+            },
+            Self::Analyze => Route {
+                magics: &[Magic::Prefix(crate::analyze::SIZEOF_HDR_BE)],
+                decoder: Decoder::Paired {
+                    from_path: crate::analyze::decode_analyze_file,
+                    from_bytes: crate::analyze::decode_analyze_header,
+                },
+            },
+        }
+    }
+
+    /// Whether [`decode_file_with_limits`] has to read the whole file into
+    /// memory rather than streaming it.
+    ///
+    /// Read off the row rather than kept as a second list of variants, so
+    /// widening the table cannot quietly turn a streaming decode into a
+    /// whole-file read, and a container that needs the whole file cannot
+    /// quietly be left streaming. The latter is the one that used to be
+    /// invisible: it decoded fine through [`decode_bytes_with_limits`] and
+    /// failed only from a path (issue #633).
+    const fn decodes_from_memory(self) -> bool {
+        !matches!(self.route().decoder, Decoder::Streamed(_))
+    }
+
+    /// The `image` decoder for this container, or `None` for the ones
+    /// libviprs decodes itself.
+    ///
+    /// The mapping is an identity on purpose: one sniffed container in, one
+    /// decoder out, no per-format options. Save-side options live in the
+    /// per-format modules ([`crate::webp`], [`crate::gif`], [`crate::jxl`]);
+    /// nothing about how a file is decoded should ever need to be configured
+    /// here.
+    const fn image_format(self) -> Option<image::ImageFormat> {
+        match self.route().decoder {
+            Decoder::Streamed(format) | Decoder::Buffered(format) => Some(format),
+            Decoder::Native(_) | Decoder::Paired { .. } => None,
+        }
+    }
+}
+
+/// Identify a container from its leading bytes.
+///
+/// This is the one detector both decode entry points consult. libvips does
+/// the same thing in `vips_foreign_find_load` (`foreign.c`), asking each
+/// loader's `is_a` in priority order and never trusting the filename. The
+/// order here is [`SniffedFormat::ALL`], the enum's declaration order, and
+/// the signatures come off each container's own row in the route table, so
+/// a container that can reach a decoder is a container this can find
+/// (issue #633).
+///
+/// `head` may be shorter than [`SNIFF_HEAD_LEN`]; a buffer too short for a
+/// given magic simply does not match it. For the containers `image` also
+/// knows, the byte patterns are the same ones it keeps in its `MAGIC_BYTES`
+/// table (`io/free_functions.rs`), so this sniff and the fallback guess in
+/// [`reader_for`] cannot disagree about the same file.
+pub(crate) fn sniff(head: &[u8]) -> Option<SniffedFormat> {
+    SniffedFormat::ALL.into_iter().find(|format| {
+        format
+            .route()
+            .magics
+            .iter()
+            .any(|magic| magic.matches(head))
+    })
+}
+
+/// Read up to [`SNIFF_HEAD_LEN`] leading bytes, returning the buffer and how
+/// many bytes were actually filled.
+///
+/// A source shorter than the head is not an error: [`sniff`] is given only
+/// the filled prefix and matches nothing it cannot see.
+fn read_head<R: std::io::Read>(mut source: R) -> std::io::Result<([u8; SNIFF_HEAD_LEN], usize)> {
+    let mut head = [0u8; SNIFF_HEAD_LEN];
+    let mut filled = 0;
+    while filled < head.len() {
+        let n = source.read(&mut head[filled..])?;
+        if n == 0 {
+            break;
+        }
+        filled += n;
+    }
+    Ok((head, filled))
+}
+
+/// Read the whole of `path` into memory, refusing a file whose length is
+/// past [`DecodeLimits::max_alloc_bytes`].
+///
+/// This is the crate's one bounded whole-file read. Some decoders genuinely
+/// need the bytes addressable end to end rather than streamed (see
+/// [`SniffedFormat::decodes_from_memory`], and the TIFF page readers, which
+/// patch the multiband photometric tag before the decoder ever sees it), and
+/// `std::fs::read` is the wrong way to get them: it sizes the buffer from the
+/// file and then grows it infallibly, so every ceiling in [`DecodeLimits`] is
+/// consulted after the allocation has already happened, and on a constrained
+/// host the failure is an abort rather than a returned error (issue #629).
+///
+/// The declared length is checked first, so an oversized file costs one
+/// `stat` rather than a full read, and the read itself is capped as well so a
+/// file that grows between the two cannot slip past. `what` names the buffer
+/// in the error, because a caller reading
+/// [`SourceError::AllocLimitExceeded`] needs to know whether it was the file
+/// or a pixel buffer that blew the budget.
+///
+/// # Errors
+///
+/// * [`SourceError::Io`] if the file cannot be opened, stat'd or read.
+/// * [`SourceError::AllocLimitExceeded`] if the file is longer than
+///   [`DecodeLimits::max_alloc_bytes`], which is the same variant the
+///   declared-geometry checks raise, so a caller does not have to tell "too
+///   big by header" from "too big by file length".
+pub(crate) fn read_file_bounded(
+    path: &Path,
+    limits: DecodeLimits,
+    what: &'static str,
+) -> Result<Vec<u8>, SourceError> {
+    let file = std::fs::File::open(path)?;
+    let declared = file.metadata()?.len();
+    limits.check_alloc(what, declared)?;
+
+    let cap = limits.max_alloc_bytes;
+    let mut bytes = Vec::with_capacity(usize::try_from(declared).unwrap_or(0));
+    let mut reader = std::io::BufReader::new(&file).take(cap.saturating_add(1));
+    reader.read_to_end(&mut bytes)?;
+    let read = bytes.len() as u64;
+    if read > cap {
+        return Err(SourceError::AllocLimitExceeded {
+            what,
+            geometry: None,
+            needed_bytes: read,
+            max_alloc_bytes: cap,
+        });
+    }
+    Ok(bytes)
+}
+
+/// Configure an [`ImageReader`] over an already-opened source for a sniffed
+/// container.
+///
+/// This is the single place either entry point turns bytes into a reader
+/// that knows its format. A container [`sniff`] recognised has its format
+/// set directly; anything else falls through to `image`'s own content guess
+/// over the same leading bytes. Either way the answer comes from the
+/// content.
+///
+/// The path extension is deliberately never consulted. `ImageReader::open`
+/// resolves the format from the extension alone and never reads the file,
+/// which is exactly why the file and in-memory entry points used to give
+/// two different answers for one run of bytes (issue #563). Taking an
+/// already-opened reader instead of a path makes that mistake unavailable.
+fn reader_for<R: std::io::BufRead + std::io::Seek>(
+    inner: R,
+    sniffed: Option<SniffedFormat>,
+) -> Result<ImageReader<R>, SourceError> {
+    let mut reader = ImageReader::new(inner);
+    match sniffed.and_then(SniffedFormat::image_format) {
+        Some(format) => {
+            reader.set_format(format);
+            Ok(reader)
+        }
+        None => Ok(reader.with_guessed_format()?),
+    }
+}
+
 /// Decode an image file into a [`Raster`] under explicit [`DecodeLimits`].
 ///
 /// Identical to [`decode_file`] but lets the caller supply the
@@ -618,33 +2200,54 @@ pub fn decode_file_with_shrink(path: &Path, shrink: u32) -> Result<Raster, Sourc
 /// allocated, and the `width * height` ceiling is checked before the
 /// [`Raster`] is constructed.
 ///
+/// PNG and TIFF stream, and never hold more than the decoder asks for. Every
+/// other container libviprs recognises is read into memory whole, through a
+/// single bounded read, so [`DecodeLimits::max_alloc_bytes`] bounds the read
+/// itself rather than only what the decoder does with the bytes afterwards.
+/// That is native `.v`, Ultra HDR, JPEG, GIF, WebP, JPEG XL, Radiance HDR,
+/// FITS, OpenEXR, NIfTI, AVIF, JPEG 2000, MATLAB, Netpbm and Analyze: each one
+/// either parses its own container end to end or makes a second pass over the
+/// same bytes for metadata. Analyze is read whole twice over, because it is
+/// two files.
+///
+/// A file in a container libviprs does not recognise is streamed and guessed
+/// by the `image` facade. The two lists above are checked against the routing
+/// table by `every_row_carries_the_decoder_kind_its_container_needs`, so this
+/// paragraph cannot drift away from what the code does.
+///
 /// # Errors
 ///
 /// As [`decode_file`], plus [`SourceError::DimensionLimitExceeded`] when
-/// the decoded `width * height` exceeds the supplied budget.
+/// the decoded `width * height` exceeds the supplied budget, and
+/// [`SourceError::AllocLimitExceeded`] when a memory-decoded container's
+/// file is longer than [`DecodeLimits::max_alloc_bytes`].
 pub fn decode_file_with_limits(path: &Path, limits: DecodeLimits) -> Result<Raster, SourceError> {
-    // Sniff the leading magic: native .v files and JPEGs take the
-    // in-memory path (the .v decoder parses the libvips header itself,
-    // and the JPEG path scans APP1/APP2 segments for EXIF/ICC metadata
-    // after pixel decode). Every other format keeps the original
-    // streaming reader so its memory profile is unchanged.
-    let mut head = [0u8; 4];
-    {
-        use std::io::Read;
-        let mut file = std::fs::File::open(path)?;
-        let mut filled = 0;
-        while filled < head.len() {
-            let n = file.read(&mut head[filled..])?;
-            if n == 0 {
-                break;
-            }
-            filled += n;
-        }
+    // Identify the container from its leading magic, never from the path
+    // extension: `decode_bytes_with_limits` has no filename to consult, so
+    // any filename-derived answer here is one the two entry points cannot
+    // both give (issue #563).
+    let mut file = std::fs::File::open(path)?;
+    let (head, filled) = read_head(&mut file)?;
+    let sniffed = sniff(&head[..filled]);
+    // The paired row goes first, because it is the only one that needs the
+    // path rather than the bytes: `decode_bytes_with_limits` below would
+    // reach its `from_bytes` half instead and report "the pixels are in a
+    // sibling file", which is the right answer to a different question
+    // (issue #764).
+    if let Some(Decoder::Paired { from_path, .. }) = sniffed.map(|format| format.route().decoder) {
+        let mut raster = from_path(path, limits)?;
+        raster
+            .fields
+            .set("filename", path.display().to_string().into());
+        return Ok(raster);
     }
-    let mut raster = if crate::imageio::is_vips_bytes(&head) || head[..3] == [0xFF, 0xD8, 0xFF] {
-        decode_bytes_with_limits(&std::fs::read(path)?, limits)?
+    let mut raster = if sniffed.is_some_and(SniffedFormat::decodes_from_memory) {
+        decode_bytes_with_limits(&read_file_bounded(path, limits, "image file body")?, limits)?
     } else {
-        decode_reader(ImageReader::open(path)?, limits)?
+        // Rewind past the sniff and keep reading from the same handle, so
+        // every streaming format's memory profile is unchanged.
+        file.seek(std::io::SeekFrom::Start(0))?;
+        decode_reader(reader_for(std::io::BufReader::new(file), sniffed)?, limits)?
     };
     // Record the source path, like the libvips header's filename slot.
     raster
@@ -680,10 +2283,21 @@ pub fn decode_bytes(bytes: &[u8]) -> Result<Raster, SourceError> {
 /// before any pixel data is allocated, and the `width * height` ceiling
 /// is checked before the [`Raster`] is constructed.
 pub fn decode_bytes_with_limits(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
-    if crate::imageio::is_vips_bytes(bytes) {
-        return crate::imageio::decode_vips_bytes(bytes, limits);
+    let sniffed = sniff(bytes);
+    // The containers libviprs decodes itself go straight to their own codec.
+    // The arm is read off the route table rather than written out as a chain
+    // of `if sniffed == Some(..)` tests, so the edit that declares a
+    // container is the edit that dispatches it (issue #633).
+    match sniffed.map(|format| format.route().decoder) {
+        Some(Decoder::Native(decode)) => return decode(bytes, limits),
+        // A paired container has no second buffer here, so its row's
+        // `from_bytes` half is what answers. Reached through the table
+        // rather than through a variant test, so the edit that declares a
+        // paired container is the edit that dispatches it (issue #633).
+        Some(Decoder::Paired { from_bytes, .. }) => return from_bytes(bytes, limits),
+        _ => {}
     }
-    let reader = ImageReader::new(Cursor::new(bytes)).with_guessed_format()?;
+    let reader = reader_for(Cursor::new(bytes), sniffed)?;
     let is_jpeg = reader.format() == Some(image::ImageFormat::Jpeg);
     let mut raster = decode_reader(reader, limits)?;
     if is_jpeg {
@@ -793,9 +2407,7 @@ fn pack_bytes(img: image::DynamicImage, color: image::ColorType) -> Vec<u8> {
 fn la16_to_rgba16_bytes(samples: &[u16]) -> Vec<u8> {
     // 2 input samples per pixel → 4 output channels × 2 bytes.
     let mut bytes = Vec::with_capacity(samples.len() * 4);
-    for pair in samples.chunks_exact(2) {
-        let luma = pair[0];
-        let alpha = pair[1];
+    for &[luma, alpha] in samples.as_chunks::<2>().0 {
         bytes.extend_from_slice(&luma.to_ne_bytes());
         bytes.extend_from_slice(&luma.to_ne_bytes());
         bytes.extend_from_slice(&luma.to_ne_bytes());
@@ -865,6 +2477,18 @@ mod tests {
         buf
     }
 
+    /// Compact one-line rendering of a decode outcome: the raster's shape on
+    /// success, the error message on failure. Keeps the assertion message
+    /// readable where a `{:?}` of the raster would dump the whole pixel
+    /// buffer. Shared by the two tests that compare the file entry point
+    /// against the byte entry point.
+    fn outcome(result: &Result<Raster, SourceError>) -> String {
+        match result {
+            Ok(im) => format!("Ok({}x{} {:?})", im.width(), im.height(), im.format()),
+            Err(e) => format!("Err({e})"),
+        }
+    }
+
     /// `DecodeLimits` is `#[non_exhaustive]`, so external callers customise
     /// it through the `with_*` builder setters rather than a struct literal.
     /// Each setter overrides exactly its own field and leaves the rest at
@@ -921,6 +2545,56 @@ mod tests {
         assert!(only_coord.check_coord(0, 0).is_ok());
     }
 
+    /**
+     * Tests that the shared decode price's saturation sentinel is refused
+     * by every budget including `u64::MAX`, the one a caller sets to mean
+     * "no limit" (issue #632).
+     * Works by pricing a geometry whose product does not fit a `u64`, so
+     * `decode_alloc_bytes` saturates, and offering it to both halves of
+     * the budget check under the largest budget that can be expressed at
+     * all. Saturating is only a refusal if something refuses the sentinel,
+     * and a plain `needed > max` does not.
+     * Input: `decode_alloc_bytes(u32::MAX, u32::MAX, u64::MAX, 1)` against
+     * `max_alloc_bytes = u64::MAX` -> Output: refused, carrying
+     * `needed_bytes = u64::MAX`, while `u64::MAX - 1` at the same budget
+     * is accepted.
+     */
+    #[test]
+    fn the_saturated_price_is_refused_even_by_a_u64_max_budget() {
+        let no_limit = DecodeLimits::default().with_max_alloc_bytes(u64::MAX);
+        let saturated = crate::raster::decode_alloc_bytes(u32::MAX, u32::MAX, u64::MAX, 1);
+        assert_eq!(saturated, u64::MAX);
+
+        assert!(no_limit.exceeds_alloc_budget(saturated));
+        assert!(matches!(
+            no_limit.check_alloc("saturated price", saturated),
+            Err(SourceError::AllocLimitExceeded {
+                what: "saturated price",
+                geometry: None,
+                needed_bytes: u64::MAX,
+                max_alloc_bytes: u64::MAX,
+            })
+        ));
+
+        // The arm costs exactly one value, and that value is 16 EiB: one
+        // byte below the sentinel is a price like any other and the
+        // "no limit" budget still clears it.
+        assert!(!no_limit.exceeds_alloc_budget(u64::MAX - 1));
+        assert!(
+            no_limit
+                .check_alloc("one below the sentinel", u64::MAX - 1)
+                .is_ok()
+        );
+
+        // And the ordinary boundary is unmoved: `needed == budget` is
+        // accepted, one byte more is not.
+        let tight = DecodeLimits::default().with_max_alloc_bytes(4096);
+        assert!(!tight.exceeds_alloc_budget(4096));
+        assert!(tight.check_alloc("exactly the budget", 4096).is_ok());
+        assert!(tight.exceeds_alloc_budget(4097));
+        assert!(tight.check_alloc("one over the budget", 4097).is_err());
+    }
+
     /// Encode a `w x h` La16 (gray + alpha) PNG in memory, returning the
     /// encoded bytes alongside the `(luma, alpha)` samples that were
     /// written so callers can verify the decoded RGBA16 layout.
@@ -943,6 +2617,34 @@ mod tests {
             .write_to(&mut Cursor::new(&mut out), ImageFormat::Png)
             .unwrap();
         (out, expected)
+    }
+
+    /// Encode a `w x h` RGB image as GIF, so the sniff table's GIF arm and
+    /// the `image` `gif` feature are both exercised on real bytes.
+    fn create_test_gif(w: u32, h: u32) -> Vec<u8> {
+        encode_via_image(w, h, image::ImageFormat::Gif)
+    }
+
+    /// Encode a `w x h` RGB image as WebP. This is the fixture the widened
+    /// sniff head exists for: the `RIFF????WEBP` magic is 12 bytes with a
+    /// file-specific length in the middle, so the old 4-byte head could not
+    /// have identified it.
+    fn create_test_webp(w: u32, h: u32) -> Vec<u8> {
+        encode_via_image(w, h, image::ImageFormat::WebP)
+    }
+
+    /// Shared body of the GIF and WebP fixtures: a deterministic RGB ramp
+    /// written out in `format`.
+    fn encode_via_image(w: u32, h: u32, format: image::ImageFormat) -> Vec<u8> {
+        let mut buf: image::RgbImage = image::ImageBuffer::new(w, h);
+        for (x, y, px) in buf.enumerate_pixels_mut() {
+            *px = image::Rgb([(x * 20) as u8, (y * 30) as u8, 90]);
+        }
+        let mut out = Vec::new();
+        image::DynamicImage::ImageRgb8(buf)
+            .write_to(&mut Cursor::new(&mut out), format)
+            .unwrap();
+        out
     }
 
     fn create_test_jpeg(w: u32, h: u32) -> Vec<u8> {
@@ -1117,6 +2819,7 @@ mod tests {
      * filesystem round-trip (skipped under Miri).
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn decode_file_from_disk() {
         let png = create_test_png(8, 8);
 
@@ -1233,6 +2936,1208 @@ mod tests {
         assert_eq!(from_file.format(), from_bytes.format());
         assert_eq!(from_file.format(), PixelFormat::Rgba16);
         assert_eq!(from_file.data(), from_bytes.data());
+    }
+
+    /**
+     * Guards the shared format sniff: `decode_file_with_limits` and
+     * `decode_bytes_with_limits` must identify a container from the same
+     * evidence, so a filename can never change what a given run of bytes
+     * decodes to. Works by writing six buffers to disk under names that
+     * disagree with their content — a PNG called `.jpg`, a JPEG called
+     * `.png`, a PNG with no extension at all, and native `.v`, GIF, and
+     * WebP bytes all called `.png` — then decoding each through both entry
+     * points and
+     * comparing every case before reporting, so one broken route does not
+     * hide the others. Before the shared sniff the file entry point
+     * resolved the format from the path extension (`ImageReader::open`)
+     * while the byte entry point resolved it from the content
+     * (`with_guessed_format`), so the same bytes decoded two different ways
+     * depending on which entry point the caller reached for (issue #563).
+     * The WebP case is also the one that needs the widened sniff head: its
+     * `RIFF????WEBP` magic is 12 bytes with a file-specific length in the
+     * middle, so four bytes could never have identified it.
+     * Input: six mislabelled PNG/JPEG/`.v`/GIF/WebP files → Output: both
+     * entry points return equal dimensions, pixel format, and pixel bytes.
+     */
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn content_beats_extension_in_both_entry_points() {
+        let png = create_test_png(9, 7);
+        let jpeg = create_test_jpeg(9, 7);
+        let gif = create_test_gif(9, 7);
+        let webp = create_test_webp(9, 7);
+        let vips = decode_bytes(&png).unwrap().encode_vips().unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut disagreements: Vec<String> = Vec::new();
+        // Each case is (file name, bytes): the name is picked to disagree
+        // with the magic, so extension-based routing cannot get it right.
+        for (name, bytes) in [
+            ("png_bytes_named.jpg", &png),
+            ("jpeg_bytes_named.png", &jpeg),
+            ("png_bytes_with_no_extension", &png),
+            ("vips_bytes_named.png", &vips),
+            ("gif_bytes_named.png", &gif),
+            ("webp_bytes_named.png", &webp),
+        ] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, bytes).unwrap();
+
+            let from_bytes = decode_bytes_with_limits(bytes, DecodeLimits::default());
+            let from_file = decode_file_with_limits(&path, DecodeLimits::default());
+
+            match (&from_file, &from_bytes) {
+                (Ok(f), Ok(b)) => {
+                    if (f.width(), f.height(), f.format()) != (b.width(), b.height(), b.format())
+                        || f.data() != b.data()
+                    {
+                        disagreements.push(format!(
+                            "{name}: decode_file_with_limits {} vs decode_bytes_with_limits {} \
+                             (pixel bytes equal: {})",
+                            outcome(&from_file),
+                            outcome(&from_bytes),
+                            f.data() == b.data()
+                        ));
+                    }
+                }
+                _ => disagreements.push(format!(
+                    "{name}: decode_file_with_limits {} vs decode_bytes_with_limits {}",
+                    outcome(&from_file),
+                    outcome(&from_bytes)
+                )),
+            }
+        }
+
+        assert!(
+            disagreements.is_empty(),
+            "the file and byte entry points disagree on {} of 6 inputs:\n  {}",
+            disagreements.len(),
+            disagreements.join("\n  ")
+        );
+    }
+
+    /**
+     * Pins the reachability half of the route table: every container in it
+     * can actually be found by `sniff`, from the signatures its own row
+     * declares, inside the `SNIFF_HEAD_LEN` bytes a file entry point ever
+     * reads. Works by building the shortest head each `Magic` accepts and
+     * running that back through `sniff`, for every signature of every
+     * variant of `SniffedFormat::ALL`.
+     * This is the check the old shape did not have, and it is one of the two
+     * silent sites in issue #633: a container whose magic never made it into
+     * the sniff chain compiled clean, tested clean and was simply never
+     * detected. Three ways of getting a row wrong land here — a row with no
+     * signature at all, a signature `sniff` cannot match, and a signature
+     * some earlier row shadows, which comes back as the wrong variant rather
+     * than as `None`. The probes come off the rows themselves, because a
+     * hand-kept table of sample bytes is the thing being retired.
+     * Input: every `Magic` of every `SniffedFormat` -> Output: `sniff`
+     * returns that variant, from no more than `SNIFF_HEAD_LEN` bytes.
+     */
+    #[test]
+    fn every_container_is_reachable_from_its_own_magic() {
+        for format in SniffedFormat::ALL {
+            let magics = format.route().magics;
+            assert!(
+                !magics.is_empty(),
+                "{format:?} declares no magic, so nothing can ever sniff it"
+            );
+            for magic in magics {
+                let head = magic.shortest_head();
+                assert!(
+                    !head.is_empty(),
+                    "{format:?} declares {magic:?}, which no buffer can fail to match, \
+                     so it would shadow every row declared after it"
+                );
+                assert_eq!(
+                    sniff(&head),
+                    Some(format),
+                    "{magic:?} does not sniff back to {format:?}"
+                );
+                if matches!(magic, Magic::Structural { .. }) {
+                    // A structural row is by definition not decidable from
+                    // the head, so the claim above cannot be made about it
+                    // -- and the replacement claim is the sharper one. It
+                    // must NOT match on the head, because the row it
+                    // shadows (JPEG, for Ultra HDR) has to keep every
+                    // ordinary file of that container; and the file entry
+                    // point reaches it anyway, through that row's
+                    // whole-file read and the re-sniff in
+                    // `decode_bytes_with_limits`, which
+                    // `both_entry_points_agree_on_every_container_in_the_route_table`
+                    // proves over this same probe.
+                    let head_only = &head[..head.len().min(SNIFF_HEAD_LEN)];
+                    assert_ne!(
+                        sniff(head_only),
+                        Some(format),
+                        "{format:?} matched {magic:?} from {SNIFF_HEAD_LEN} head bytes, so it \
+                         would steal every file of the container it shadows"
+                    );
+                    assert!(
+                        head.len() > SNIFF_HEAD_LEN,
+                        "{format:?} decides {magic:?} inside {SNIFF_HEAD_LEN} bytes, so it does \
+                         not need to be a structural row at all"
+                    );
+                } else {
+                    assert!(
+                        head.len() <= SNIFF_HEAD_LEN,
+                        "{format:?} needs {} bytes to decide {magic:?}, more than the \
+                         {SNIFF_HEAD_LEN} a file entry point reads, so it is unreachable from \
+                         disk",
+                        head.len()
+                    );
+                }
+            }
+        }
+    }
+
+    /**
+     * Pins the memory-profile half of the route table, end to end: for every
+     * container in it, the file entry point and the byte entry point give
+     * the same answer for the same bytes. The file one branches on
+     * `decodes_from_memory` — read the whole file and hand it to
+     * `decode_bytes_with_limits`, or stream it past the `image` facade — so
+     * a row whose profile is wrong shows up here as two answers for one
+     * input. That is the other silent site in issue #633: a container whose
+     * decoder parses the container itself but whose row said "stream me"
+     * reached its own codec through `decode_bytes` and reached `image`'s
+     * "these bytes are not an image" through `decode_file`, and only the
+     * second of the two was wrong.
+     * The inputs are the magic heads themselves, so every container in the
+     * table is covered rather than the five that happen to have an encoder
+     * in this crate to build a fixture with. They are all far too short to
+     * decode, which is the point: what is being compared is the refusal.
+     * The one row this cannot be said about is a `Decoder::Paired` one,
+     * because for a pair the two entry points deliberately read *different*
+     * bytes: the file one resolves the sibling from the path and the buffer
+     * one has only the signature-carrying half. So a paired row gets the
+     * sharper replacement claim instead, in the arm below: the file entry
+     * point has to go looking for the sibling (an I/O error naming it) and
+     * the buffer one has to reach the container's own codec rather than the
+     * `image` facade's "these bytes are not an image". `crate::analyze`'s
+     * `decode_file_reaches_the_pair_from_the_hdr` is what covers the
+     * successful half, with a real pair on disk.
+     * Input: the shortest head of every magic of every variant -> Output:
+     * `decode_file_with_limits` and `decode_bytes_with_limits` report the
+     * same outcome for each, except a paired row, which reports the two
+     * halves of its own split.
+     */
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn both_entry_points_agree_on_every_container_in_the_route_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut disagreements: Vec<String> = Vec::new();
+        let mut probes = 0;
+        let mut paired = 0;
+        for format in SniffedFormat::ALL {
+            for (i, magic) in format.route().magics.iter().enumerate() {
+                let head = magic.shortest_head();
+                let path = dir.path().join(format!("{format:?}-{i}"));
+                std::fs::write(&path, &head).unwrap();
+                probes += 1;
+
+                let from_file = decode_file_with_limits(&path, DecodeLimits::default());
+                let from_bytes = decode_bytes_with_limits(&head, DecodeLimits::default());
+                if matches!(format.route().decoder, Decoder::Paired { .. }) {
+                    paired += 1;
+                    assert!(
+                        matches!(from_file, Err(SourceError::Io(_))),
+                        "{format:?} is a paired row, so the file entry point has to go \
+                         looking for the sibling this probe does not have: {}",
+                        outcome(&from_file)
+                    );
+                    assert!(
+                        matches!(from_bytes, Err(ref e) if !matches!(e, SourceError::Decode(_))),
+                        "{format:?} is a paired row, so the buffer entry point has to reach \
+                         its own codec rather than the image facade: {}",
+                        outcome(&from_bytes)
+                    );
+                    continue;
+                }
+                if outcome(&from_file) != outcome(&from_bytes) {
+                    disagreements.push(format!(
+                        "{format:?} {magic:?}: decode_file_with_limits {} vs \
+                         decode_bytes_with_limits {}",
+                        outcome(&from_file),
+                        outcome(&from_bytes)
+                    ));
+                }
+            }
+        }
+        assert!(
+            disagreements.is_empty(),
+            "the file and byte entry points disagree on {} of {probes} containers:\n  {}",
+            disagreements.len(),
+            disagreements.join("\n  ")
+        );
+        // And the paired arm above ran, rather than the loop quietly having
+        // no paired row left to exercise it (issue #764).
+        assert_eq!(
+            paired, 1,
+            "exactly one row is paired, and its own claim above is what covers it"
+        );
+    }
+
+    /**
+     * Pins the sniff table itself: every magic libviprs routes on maps to
+     * exactly one container, and nothing else does. Works by running each
+     * known magic (both TIFF byte orders, both GIF versions, both `.v`
+     * byte orders) plus a set of near-misses through `sniff` and comparing
+     * against the expected variant. The WebP case is the one that needs
+     * more than four leading bytes: its signature is split either side of
+     * a file-specific chunk length, which is why the head is
+     * `SNIFF_HEAD_LEN` and not the four bytes it used to be (issue #563).
+     * Input: one buffer per magic plus five non-matches -> Output: the
+     * expected `Option<SniffedFormat>` for each.
+     */
+    #[test]
+    fn sniff_maps_each_magic_to_one_container() {
+        // NIfTI is the one container whose signature does not fit in a
+        // hand-written literal: NIfTI-1 puts its magic at byte 344, so a
+        // probe is 348 bytes long. These come out of the oracle capture
+        // rather than being spelled out, which also means they are real
+        // files rather than my idea of one (issue #510).
+        const NIFTI_1_LE: &[u8] = include_bytes!(concat!(
+            "../oracle-captures/foreign-nifti/fixtures/",
+            "dt2_uint8.nii"
+        ));
+        const NIFTI_1_BE: &[u8] = include_bytes!(concat!(
+            "../oracle-captures/foreign-nifti/fixtures/",
+            "endian_nifti1_int16_be.nii"
+        ));
+        const NIFTI_2_LE: &[u8] = include_bytes!(concat!(
+            "../oracle-captures/foreign-nifti/fixtures/",
+            "ver_n2_single.nii"
+        ));
+        const NIFTI_2_BE: &[u8] = include_bytes!(concat!(
+            "../oracle-captures/foreign-nifti/fixtures/",
+            "endian_nifti2_int16_be.nii"
+        ));
+        const NIFTI_1_PAIR: &[u8] = include_bytes!(concat!(
+            "../oracle-captures/foreign-nifti/fixtures/",
+            "pair_n1.hdr"
+        ));
+        const NIFTI_2_PAIR: &[u8] = include_bytes!(concat!(
+            "../oracle-captures/foreign-nifti/fixtures/",
+            "pair_n2.hdr"
+        ));
+        // A 348-byte header with the right sentinel and an all-zero magic.
+        // The reference reads it as the Analyze 7.5 dialect and decides the
+        // container from the filename, which is not something a content
+        // sniff can do, so libviprs does not claim it.
+        const NIFTI_ANALYZE_DIALECT: &[u8] = include_bytes!(concat!(
+            "../oracle-captures/foreign-nifti/fixtures/",
+            "magic_zero_analyze.nii"
+        ));
+        // Owned, because the Ultra HDR probe is a real container this build
+        // writes rather than a byte-string literal: the row's signature is
+        // structural, so there is no literal to write.
+        let uhdr = crate::uhdr::smallest_container();
+        // MAT is the other container whose signature is too long to spell
+        // out: the version word and the endian indicator sit at byte 124.
+        // These come out of the oracle capture for the same reason the
+        // NIfTI ones do, and the eight near-misses below are the whole
+        // point of the row, because the shipped 8.18.6 sniff refuses every
+        // one of them while the reference C source accepts four (issue
+        // #650).
+        macro_rules! mat_fixture {
+            ($name:literal) => {
+                include_bytes!(concat!("../oracle-captures/foreign-mat/fixtures/", $name))
+            };
+        }
+        const MAT_LE: &[u8] = mat_fixture!("base_2x3_uint8.mat");
+        const MAT_BE: &[u8] = mat_fixture!("endian_big.mat");
+        const MAT_FREE_TEXT: &[u8] = mat_fixture!("prefix_only.mat");
+        const MAT_HEADER_ONLY: &[u8] = mat_fixture!("header_only.mat");
+        const MAT_51: &[u8] = mat_fixture!("magic_MATLAB_51.mat");
+        const MAT_LOWERCASE: &[u8] = mat_fixture!("magic_lowercase_50.mat");
+        const MAT_UNDERSCORE: &[u8] = mat_fixture!("magic_underscore_50.mat");
+        const MAT_BAD_VERSION: &[u8] = mat_fixture!("magic_only.mat");
+        const MAT_BAD_INDICATOR: &[u8] = mat_fixture!("endian_bogus.mat");
+        const MAT_NINE_BYTES: &[u8] = mat_fixture!("nine_bytes.mat");
+        const MAT_LEVEL_4: &[u8] = mat_fixture!("level4.mat");
+        const MAT_LEVEL_73: &[u8] = mat_fixture!("level73_hdf5.mat");
+        // Analyze's signature is four bytes, and it is the widest row in
+        // the table: `sizeof_hdr` is the first field of the `.hdr` and it
+        // is big-endian 348 in every Analyze header ever written. The
+        // near-misses matter more here than anywhere else, because a row
+        // this wide declared in the wrong place would steal files from
+        // every container after it, which is why it is declared last.
+        macro_rules! analyze_fixture {
+            ($name:literal) => {
+                include_bytes!(concat!(
+                    "../oracle-captures/foreign-analyze/fixtures/",
+                    $name
+                ))
+            };
+        }
+        const ANALYZE_HDR: &[u8] = analyze_fixture!("base_2d_uchar.hdr");
+        const ANALYZE_IMG: &[u8] = analyze_fixture!("base_2d_uchar.img");
+        const ANALYZE_BAD_RANK: &[u8] = analyze_fixture!("rank8.hdr");
+        const ANALYZE_BAD_SIZEOF: &[u8] = analyze_fixture!("sizeof_hdr_200.hdr");
+        const ANALYZE_LE: &[u8] = analyze_fixture!("le_header.hdr");
+        let cases: [(&str, &[u8], Option<SniffedFormat>); 80] = [
+            (
+                "vips le",
+                &[0xb6, 0xa6, 0xf2, 0x08],
+                Some(SniffedFormat::Vips),
+            ),
+            (
+                "vips be",
+                &[0x08, 0xf2, 0xa6, 0xb6],
+                Some(SniffedFormat::Vips),
+            ),
+            (
+                "jpeg jfif",
+                &[0xFF, 0xD8, 0xFF, 0xE0],
+                Some(SniffedFormat::Jpeg),
+            ),
+            (
+                "jpeg exif",
+                &[0xFF, 0xD8, 0xFF, 0xE1],
+                Some(SniffedFormat::Jpeg),
+            ),
+            ("png", b"\x89PNG\r\n\x1a\n", Some(SniffedFormat::Png)),
+            ("tiff le", b"II*\x00", Some(SniffedFormat::Tiff)),
+            ("tiff be", b"MM\x00*", Some(SniffedFormat::Tiff)),
+            ("gif87a", b"GIF87a", Some(SniffedFormat::Gif)),
+            ("gif89a", b"GIF89a", Some(SniffedFormat::Gif)),
+            // Bytes 4..8 are the RIFF chunk length and are deliberately
+            // arbitrary here: the sniff must ignore them entirely.
+            (
+                "webp",
+                b"RIFF\x2a\x13\x00\x00WEBPVP8 ",
+                Some(SniffedFormat::WebP),
+            ),
+            ("riff but not webp", b"RIFF\x00\x00\x00\x00WAVEfmt ", None),
+            // JPEG XL is the only format here with two unrelated magics.
+            // The bare codestream is two bytes, which is as short as any
+            // signature in the table gets, and the boxed form is the
+            // 12-byte ISOBMFF signature box.
+            (
+                "jxl codestream",
+                b"\xff\x0a\x10\x30\x10\x09\x08\x00",
+                Some(SniffedFormat::Jxl),
+            ),
+            (
+                "jxl container",
+                b"\x00\x00\x00\x0cJXL \x0d\x0a\x87\x0aftyp",
+                Some(SniffedFormat::Jxl),
+            ),
+            // A JPEG starts `FF D8`, one byte away from the codestream
+            // magic, so the near-miss has to stay a JPEG.
+            (
+                "jpeg is not jxl",
+                b"\xff\xd8\xff\xdb",
+                Some(SniffedFormat::Jpeg),
+            ),
+            // The container magic decided from 11 bytes would be a guess.
+            (
+                "jxl container truncated",
+                b"\x00\x00\x00\x0cJXL \x0d\x0a\x87",
+                None,
+            ),
+            // An ISOBMFF file that is not JPEG XL: same box length, wrong
+            // box type.
+            (
+                "isobmff but not jxl",
+                b"\x00\x00\x00\x0cftypisom\x00\x00\x02\x00",
+                None,
+            ),
+            // Truncated one byte short of the `WEBP` tag: a 12-byte magic
+            // cannot be decided from 11 bytes.
+            ("webp truncated", b"RIFF\x00\x00\x00\x00WEB", None),
+            // Radiance's magic is a whole line, not a prefix, so the two
+            // near-misses below must not match: `vips__rad_israd` compares
+            // the first line to `#?RADIANCE` in full.
+            (
+                "radiance",
+                b"#?RADIANCE\nFORMAT=",
+                Some(SniffedFormat::Radiance),
+            ),
+            (
+                "radiance dos",
+                b"#?RADIANCE\r\nFORMAT=",
+                Some(SniffedFormat::Radiance),
+            ),
+            ("radiance rgbe", b"#?RGBE\nFORMAT=", None),
+            ("radiance longer first line", b"#?RADIANCEX\n", None),
+            ("radiance with no newline", b"#?RADIANCE", None),
+            // OpenEXR is a plain four-byte prefix, the same four bytes
+            // `vips__openexr_isexr` reads (`openexr2vips.c:105-115`). The
+            // two near-misses below share three of them.
+            (
+                "openexr",
+                b"\x76\x2f\x31\x01\x02\x00\x00\x00",
+                Some(SniffedFormat::OpenExr),
+            ),
+            ("openexr wrong version byte", b"\x76\x2f\x31\x02", None),
+            ("openexr truncated", b"\x76\x2f\x31", None),
+            // FITS is a fixed-width prefix: the keyword field, the `=` in
+            // column 9 and the space after it. `SIMPLE=T` is a legal FITS
+            // value written in free format, but no conforming file opens
+            // that way, and cfitsio refuses it too.
+            (
+                "fits",
+                b"SIMPLE  =                    T",
+                Some(SniffedFormat::Fits),
+            ),
+            // AVIF's signature sits at offset 4 with nothing pinned at 0,
+            // because bytes 0..4 are the `ftyp` box's own size. The three
+            // near-misses below are the ones that matter: HEIC and the
+            // image-sequence brand are deliberately not claimed, and a box
+            // whose type is `JXL ` rather than `ftyp` is JPEG XL even though
+            // it shares AVIF's shape.
+            (
+                "avif",
+                b"\x00\x00\x00\x20ftypavif\x00\x00\x00\x00",
+                Some(SniffedFormat::Avif),
+            ),
+            (
+                "avif with a 12-byte ftyp box",
+                b"\x00\x00\x00\x0cftypavif\x00\x00\x00\x00",
+                Some(SniffedFormat::Avif),
+            ),
+            ("heic is not avif", b"\x00\x00\x00\x20ftypheic", None),
+            ("avis is not avif", b"\x00\x00\x00\x20ftypavis", None),
+            ("ftyp with no brand", b"\x00\x00\x00\x20ftyp", None),
+            ("fits free format", b"SIMPLE=T", None),
+            ("fits without the keyword padding", b"SIMPLE = T", None),
+            ("fits truncated", b"SIMPLE  ", None),
+            // NIfTI has six spellings of its own front: two versions, two
+            // byte orders, and on each version a single-file and a paired
+            // magic. All six route to the same container, and the paired
+            // ones on purpose: `decode_nifti` then says "the voxels are in
+            // a sibling .img" rather than leaving the file to report "these
+            // bytes are not an image".
+            ("nifti-1 single le", NIFTI_1_LE, Some(SniffedFormat::Nifti)),
+            ("nifti-1 single be", NIFTI_1_BE, Some(SniffedFormat::Nifti)),
+            ("nifti-2 single le", NIFTI_2_LE, Some(SniffedFormat::Nifti)),
+            ("nifti-2 single be", NIFTI_2_BE, Some(SniffedFormat::Nifti)),
+            (
+                "nifti-1 pair header",
+                NIFTI_1_PAIR,
+                Some(SniffedFormat::Nifti),
+            ),
+            (
+                "nifti-2 pair header",
+                NIFTI_2_PAIR,
+                Some(SniffedFormat::Nifti),
+            ),
+            // The sentinel alone is not enough: this file has a valid
+            // 348-byte sizeof_hdr and no NIfTI magic at all.
+            (
+                "nifti sentinel without a magic",
+                NIFTI_ANALYZE_DIALECT,
+                None,
+            ),
+            // One byte short of the magic, so a 348-byte signature cannot
+            // be decided.
+            ("nifti-1 truncated to 347", &NIFTI_1_LE[..347], None),
+            // JPEG 2000 is the second container here with two unrelated
+            // magics: the RFC 3745 signature box and the bare codestream's
+            // `SOC` + `SIZ` pair, which `jp2ksave` never writes and
+            // `jp2kload` still reads.
+            (
+                "jp2 signature box",
+                b"\x00\x00\x00\x0cjP  \r\n\x87\nftypjp2 ",
+                Some(SniffedFormat::Jp2k),
+            ),
+            (
+                "jp2k bare codestream",
+                b"\xff\x4f\xff\x51\x00\x2f\x00\x00",
+                Some(SniffedFormat::Jp2k),
+            ),
+            // The signature box decided from 11 bytes would be a guess, and
+            // its first four bytes are the same box length JPEG XL's
+            // signature box carries, so a sniff that stopped at the length
+            // would answer the wrong container.
+            (
+                "jp2 signature truncated",
+                b"\x00\x00\x00\x0cjP  \r\n\x87",
+                None,
+            ),
+            // `SOC` alone is not the pair: a codestream opens `FF 4F FF 51`
+            // and `FF 4F` followed by anything else is not JPEG 2000.
+            ("soc without siz", b"\xff\x4f\xff\x52\x00\x00", None),
+            // And the JPEG XL signature box, which shares the first four
+            // bytes, must still be JPEG XL rather than JPEG 2000.
+            (
+                "jxl box is not jp2",
+                b"\x00\x00\x00\x0cJXL \x0d\x0a\x87\x0a",
+                Some(SniffedFormat::Jxl),
+            ),
+            // MATLAB level 5, both byte orders. The free-text and
+            // header-only rows are the two that pin how *little* the sniff
+            // reads: bytes 10..124 are not looked at, and a bare 128-byte
+            // header with no variables in it still routes here, where the
+            // decode then reports `no matrix variables` rather than
+            // "these bytes are not an image".
+            ("mat le", MAT_LE, Some(SniffedFormat::Mat)),
+            ("mat be", MAT_BE, Some(SniffedFormat::Mat)),
+            (
+                "mat free text after the prefix",
+                MAT_FREE_TEXT,
+                Some(SniffedFormat::Mat),
+            ),
+            (
+                "mat header with no variables",
+                MAT_HEADER_ONLY,
+                Some(SniffedFormat::Mat),
+            ),
+            // The eight near-misses. The first three differ from `mat le`
+            // only in the ten-byte prefix and the next two only in bytes
+            // 124..128, and the first three are files a direct
+            // `vips matload` loads: the sniff and `Mat_Open` disagree, and
+            // libviprs follows the sniff.
+            ("mat MATLAB 5.1", MAT_51, None),
+            ("mat lowercase matlab 5.0", MAT_LOWERCASE, None),
+            ("mat MATLAB_5.0", MAT_UNDERSCORE, None),
+            ("mat version 0xffff", MAT_BAD_VERSION, None),
+            ("mat indicator XY", MAT_BAD_INDICATOR, None),
+            ("mat nine bytes", MAT_NINE_BYTES, None),
+            ("mat level 4", MAT_LEVEL_4, None),
+            ("mat level 7.3", MAT_LEVEL_73, None),
+            // One byte short of the 128 the shipped sniff insists on.
+            ("mat truncated to 127", &MAT_LE[..127], None),
+            // Analyze, from the `.hdr` half only. The `rank8` row is the
+            // deliberate width: `vips__isanalyze` refuses it and this
+            // claims it, and `crate::analyze` then refuses it by name.
+            ("analyze hdr", ANALYZE_HDR, Some(SniffedFormat::Analyze)),
+            (
+                "analyze hdr with a rank vips refuses",
+                ANALYZE_BAD_RANK,
+                Some(SniffedFormat::Analyze),
+            ),
+            // A raw pixel array has no signature at all, which is the one
+            // place libviprs cannot follow `analyzeload`'s entry point.
+            ("analyze img", ANALYZE_IMG, None),
+            ("analyze sizeof_hdr 200", ANALYZE_BAD_SIZEOF, None),
+            // The byte-order check, as a sniff: a little-endian 348 is
+            // `5c 01 00 00` and does not match.
+            ("analyze little-endian header", ANALYZE_LE, None),
+            // The near-miss that matters most, because it is one byte away:
+            // an ICO file opens `00 00 01 00`.
+            ("ico is not analyze", b"\x00\x00\x01\x00\x01\x00 \x20", None),
+            // Netpbm's six magics, one per form, plus the near-misses that
+            // matter. `P1` and `P4` are the bitmap forms; #910 left them
+            // unclaimed because nothing here decoded them and #919 wired the
+            // decoder, so they are claimed now. `PF` is the float PFM and
+            // `P7` is PAM: still nothing behind either, so still unclaimed,
+            // because a row in `ALL` that cannot decode would break
+            // `every_container_is_reachable_from_its_own_magic`.
+            (
+                "netpbm p2 ascii grey",
+                b"P2\n2 2\n255\n0 1 2 3\n",
+                Some(SniffedFormat::Netpbm),
+            ),
+            (
+                "netpbm p3 ascii rgb",
+                b"P3\n1 1\n255\n0 1 2\n",
+                Some(SniffedFormat::Netpbm),
+            ),
+            (
+                "netpbm p5 binary grey",
+                b"P5\n2 2\n255\n\x00\x40\x80\xff",
+                Some(SniffedFormat::Netpbm),
+            ),
+            (
+                "netpbm p6 binary rgb",
+                b"P6\n1 1\n255\n\x00\x40\x80",
+                Some(SniffedFormat::Netpbm),
+            ),
+            // As loose as `ppmload`'s own `is_a`, measured: 8.18.6 accepts a
+            // file opening `P5xyzzy` as `ppmload` and then fails it with
+            // `bad image dimensions`. Refusing it here instead would make
+            // files vips reads unreachable, so the refusal stays in the
+            // loader where vips keeps its own.
+            (
+                "netpbm p5 with a junk header",
+                b"P5xyzzy not netpbm",
+                Some(SniffedFormat::Netpbm),
+            ),
+            (
+                "netpbm p1 ascii bitmap",
+                b"P1\n2 2\n0 1 1 0\n",
+                Some(SniffedFormat::Netpbm),
+            ),
+            (
+                "netpbm p4 binary bitmap",
+                b"P4\n2 2\n\x40\x80",
+                Some(SniffedFormat::Netpbm),
+            ),
+            ("netpbm pf float, unclaimed", b"PF\n2 2\n-1.0\n", None),
+            ("netpbm p7 pam, unclaimed", b"P7\nWIDTH 2\n", None),
+            ("plain text", b"not an image at all", None),
+            ("empty", b"", None),
+            ("one byte of png", b"\x89", None),
+            // Both directions of the one row that shares another row's
+            // magic bytes. A whole Ultra HDR container is Uhdr; its first
+            // SNIFF_HEAD_LEN bytes -- which is all the file entry point
+            // ever sniffs -- are indistinguishable from any JPEG and must
+            // stay Jpeg, or every ordinary JPEG on disk would route to the
+            // Ultra HDR decoder.
+            ("ultra hdr", &uhdr, Some(SniffedFormat::Uhdr)),
+            (
+                "ultra hdr, head only",
+                &uhdr[..SNIFF_HEAD_LEN],
+                Some(SniffedFormat::Jpeg),
+            ),
+        ];
+        for (name, head, expected) in cases {
+            assert_eq!(sniff(head), expected, "sniff disagreed on {name}");
+        }
+        // The case list above is hand-written, which makes it exactly the
+        // kind of list issue #633 is about, so it has to prove it names every
+        // container rather than only the ones whoever last touched it
+        // remembered. The near-misses are what the route table cannot check
+        // for itself and are why the list is still worth keeping.
+        for format in SniffedFormat::ALL {
+            assert!(
+                cases
+                    .iter()
+                    .any(|(_, _, expected)| *expected == Some(format)),
+                "{format:?} has no case in the sniff table above"
+            );
+        }
+    }
+
+    /**
+     * Tests that adding a container reddens the allocation-refusal tables in
+     * `tests/decode_alloc_refusal_shape.rs`, which are hand-written and carry
+     * a universal claim ("this is the shape every decoder that prices a frame
+     * itself uses") that nothing otherwise ties to the set of containers.
+     *
+     * `SniffedFormat::ALL` is built by an exhaustive `match`, so a new variant
+     * stops the crate compiling *there* rather than here. What this adds is
+     * the link to the other file: without it, Batch D can add JP2K, AVIF,
+     * UHDR and the rest and those tables silently stay one short each time.
+     * Every new decoder either prices its own frame, which needs a
+     * `priced_by_libviprs` row, or wraps a crate that refuses internally the
+     * way `jxl-oxide` does, which needs an `is_alloc_limit` arm and nothing
+     * else will say so.
+     * Input: `SniffedFormat::ALL.len()` -> Output: 17, which is what the two
+     * tables plus the one documented exclusion account for.
+     */
+    #[test]
+    fn adding_a_container_reddens_the_alloc_refusal_tables() {
+        assert_eq!(
+            SniffedFormat::ALL.len(),
+            17,
+            "a container was added or removed. tests/decode_alloc_refusal_shape.rs \
+             enumerates every container the decode allocation budget can refuse, in \
+             two hand-written tables. Add a row there, or an is_alloc_limit arm if the \
+             wrapped crate refuses internally the way jxl-oxide does, then update this \
+             count. Today the 17 are: 13 self-priced (gif, radiance, fits, openexr, \
+             jxl, webp which joined them in #686, uhdr which joined them in #508 and \
+             prices two images rather than one, .v which joined them in #710, nifti \
+             and mat which joined them in #510, avif which joined them in #605, and \
+             jp2k which joined them in #501), 3 refused inside the image crate \
+             (jpeg, png, tiff), and analyze, whose decode takes two buffers so it \
+             cannot be a row in a table driven by decode_bytes (issue #764)"
+        );
+    }
+
+    /**
+     * Pins the two contracts the route table cannot check for itself, both
+     * of which are judgement calls rather than derivations. First, the
+     * mapping into the `image` facade is an identity: one container in, one
+     * decoder out, never two containers collapsed onto one decoder. Second,
+     * exactly one facade row is read whole rather than streamed, and it is
+     * JPEG, because the metadata pass rescans the APP1/APP2 segments over
+     * the same bytes after the pixel decode. Marking another facade row
+     * `Buffered` would cost every caller the whole file for a second pass
+     * that does not exist, and nothing else in the crate would notice.
+     * The set of variants comes from `SniffedFormat::ALL`, which is built
+     * from an exhaustive `match`, not from a list kept here. A list kept
+     * here is how `Jxl` escaped between #628 and #659: it was missing from
+     * the list *and* from the expected answer, so the arithmetic stayed
+     * consistent and both invariants held over nine variants of ten. The two
+     * lists this test used to keep are gone with it — "which containers
+     * libviprs decodes itself" and "which read the whole file" are both read
+     * off the rows now (issue #633).
+     * Input: every `SniffedFormat` variant -> Output: a distinct `image`
+     * format for every facade row, and `Buffered` for exactly `Jpeg`.
+     */
+    #[test]
+    fn route_table_is_identity_and_only_jpeg_rereads_the_facade_bytes() {
+        let mut mapped: Vec<image::ImageFormat> = SniffedFormat::ALL
+            .into_iter()
+            .filter_map(SniffedFormat::image_format)
+            .collect();
+        let facade_rows = mapped.len();
+        assert!(
+            facade_rows > 0,
+            "the image facade decodes something, or reader_for is dead code"
+        );
+        mapped.sort_by_key(|format| format!("{format:?}"));
+        mapped.dedup();
+        assert_eq!(
+            mapped.len(),
+            facade_rows,
+            "the route table must be an identity mapping, not many-to-one"
+        );
+
+        let buffered: Vec<SniffedFormat> = SniffedFormat::ALL
+            .into_iter()
+            .filter(|format| matches!(format.route().decoder, Decoder::Buffered(_)))
+            .collect();
+        assert_eq!(
+            buffered,
+            vec![SniffedFormat::Jpeg],
+            "only JPEG rereads bytes the image facade has already decoded"
+        );
+    }
+
+    /**
+     * Restates, by hand and per variant, which kind of decoder each
+     * container's row has to name. Deliberately redundant with the table: the
+     * table is where the answer lives, and this is a second opinion about
+     * what the answer ought to be, kept for the same reason the near-miss
+     * list in `sniff_maps_each_magic_to_one_container` is kept.
+     *
+     * Collapsing the old sites into one row makes a MISSING row a build
+     * error, but it leaves a WRONG row consistent with itself. Changing
+     * WebP's row from the libviprs codec to
+     * `Decoder::Streamed(ImageFormat::WebP)` bypasses `crate::webp`, drops
+     * the ICCP/EXIF/XMP handling issue #567 exists for, and turns a bounded
+     * whole-file read into a stream, and every other test in this module
+     * still passes. The full suite does catch it, in `webp::tests`, and it
+     * catches the same mutation on every other row too, so nothing merges
+     * silently. But the red lands three modules from the edit that caused it,
+     * and someone changing the table and running `cargo test source::` sees
+     * green. This puts the red beside the table.
+     *
+     * What it does not cover is worth naming, because the discriminant is
+     * only half of a row: pointing FITS at `crate::exr::decode_exr` leaves
+     * this green, both being `Native`. That one is caught by
+     * `fits_reaches_its_codec_from_both_entry_points`, and every native row
+     * has an equivalent somewhere that decodes a real file through both entry
+     * points. This is the cheap local guard, not the oracle.
+     *
+     * The inner `match` is exhaustive, so a new variant fails to compile here
+     * rather than quietly going unasserted.
+     * Input: every `SniffedFormat` variant -> Output: the decoder kind its
+     * row carries, the memory profile derived from it, and the streaming list
+     * the public docs promise.
+     */
+    #[test]
+    fn every_row_carries_the_decoder_kind_its_container_needs() {
+        #[derive(Debug, PartialEq, Eq, Clone, Copy)]
+        enum Kind {
+            /// A libviprs codec, over the whole file.
+            Native,
+            /// A libviprs codec, over a pair of files reached from a path.
+            Paired,
+            /// The `image` facade, over the whole file.
+            Buffered,
+            /// The `image` facade, streamed.
+            Streamed,
+        }
+
+        // Written out rather than read off `route()`; see the doc above.
+        fn wanted(format: SniffedFormat) -> Kind {
+            match format {
+                // libviprs parses the `.v` header and metadata trailer itself.
+                SniffedFormat::Vips => Kind::Native,
+                // The facade decodes it, then the metadata pass rescans the
+                // same bytes for the APP1/APP2 segments.
+                SniffedFormat::Jpeg => Kind::Buffered,
+                SniffedFormat::Png => Kind::Streamed,
+                SniffedFormat::Tiff => Kind::Streamed,
+                // `crate::gif` drives the `gif` crate directly (issue #570).
+                SniffedFormat::Gif => Kind::Native,
+                // `crate::webp` drives `image-webp` directly (issue #567).
+                SniffedFormat::WebP => Kind::Native,
+                // `image` 0.25 has no JPEG XL decoder at all (issue #619).
+                SniffedFormat::Jxl => Kind::Native,
+                // `image`'s RGBE maths is not vips' (issue #506).
+                SniffedFormat::Radiance => Kind::Native,
+                // `image` has no FITS route at all (issue #505).
+                SniffedFormat::Fits => Kind::Native,
+                // The facade flattens the channel set `crate::exr` needs
+                // (issue #504).
+                SniffedFormat::OpenExr => Kind::Native,
+                // Two concatenated JPEGs plus MPF and ISO 21496-1 metadata.
+                // No crate models the container, and the gain map is found
+                // by walking from the base image's `EOI` (issue #508).
+                SniffedFormat::Uhdr => Kind::Native,
+                // Neither `image` nor the pinned vips has a NIfTI route at
+                // all (issue #510).
+                SniffedFormat::Nifti => Kind::Native,
+                // Native because the container's `iloc` addresses payload
+                // bytes by absolute file offset, so the whole file has to be
+                // resident before an item's extents can be gathered.
+                SniffedFormat::Avif => Kind::Native,
+                // `image` has no JPEG 2000 route at all (issue #501).
+                SniffedFormat::Jp2k => Kind::Native,
+                // `image` has no MATLAB route, and the container is a tagged
+                // element stream with zlib inside it (issue #510).
+                SniffedFormat::Mat => Kind::Native,
+                // `image`'s `pnm` route is off and `crate::textio` decodes
+                // `P1`/`P2`/`P3`/`P4`/`P5`/`P6` itself, since #77 for the
+                // four grey and colour forms and since #919 for the two
+                // bitmap ones, so the facade would add only the float `PF`
+                // this crate cannot write either (issues #910, #919).
+                SniffedFormat::Netpbm => Kind::Native,
+                // Analyze is a `.hdr` plus an `.img`, and one buffer cannot
+                // carry both (issue #764).
+                SniffedFormat::Analyze => Kind::Paired,
+            }
+        }
+
+        for format in SniffedFormat::ALL {
+            let carried = match format.route().decoder {
+                Decoder::Native(_) => Kind::Native,
+                Decoder::Paired { .. } => Kind::Paired,
+                Decoder::Buffered(_) => Kind::Buffered,
+                Decoder::Streamed(_) => Kind::Streamed,
+            };
+            assert_eq!(
+                carried,
+                wanted(format),
+                "{format:?}'s row names a {carried:?} decoder where the container needs a \
+                 {:?} one. That is a behaviour change rather than a refactor: it swaps \
+                 which codec sees the bytes, and whether the file is read whole",
+                wanted(format)
+            );
+            assert_eq!(
+                format.decodes_from_memory(),
+                wanted(format) != Kind::Streamed,
+                "{format:?}'s memory profile does not follow from its decoder kind"
+            );
+        }
+
+        // The concrete list `decode_file_with_limits`' public doc gives a
+        // caller sizing `max_alloc_bytes`. It is prose, so nothing else would
+        // notice it drifting away from the table.
+        let streaming: Vec<SniffedFormat> = SniffedFormat::ALL
+            .into_iter()
+            .filter(|format| !format.decodes_from_memory())
+            .collect();
+        assert_eq!(
+            streaming,
+            vec![SniffedFormat::Png, SniffedFormat::Tiff],
+            "decode_file_with_limits' doc tells callers PNG and TIFF are the only \
+             containers that stream; move the doc and this list together"
+        );
+
+        // The same doc paragraph names the other half by hand, and only the
+        // streaming half above had a check behind it. The NIfTI row (#510)
+        // went in with that sentence left saying eight containers, the
+        // suite stayed green, and the prose was wrong for a whole PR.
+        let whole_file: Vec<SniffedFormat> = SniffedFormat::ALL
+            .into_iter()
+            .filter(|format| format.decodes_from_memory())
+            .collect();
+        assert_eq!(
+            whole_file,
+            vec![
+                SniffedFormat::Vips,
+                SniffedFormat::Uhdr,
+                SniffedFormat::Jpeg,
+                SniffedFormat::Gif,
+                SniffedFormat::WebP,
+                SniffedFormat::Jxl,
+                SniffedFormat::Radiance,
+                SniffedFormat::Fits,
+                SniffedFormat::OpenExr,
+                SniffedFormat::Nifti,
+                SniffedFormat::Avif,
+                SniffedFormat::Jp2k,
+                SniffedFormat::Mat,
+                SniffedFormat::Netpbm,
+                SniffedFormat::Analyze,
+            ],
+            "decode_file_with_limits' doc names every container it reads whole, in \
+             this order; move the doc and this list together"
+        );
+    }
+
+    /**
+     * Verifies that a FITS file reaches the hand-rolled codec through both
+     * public decode entry points, and that neither consults the file name
+     * to get there. Works by writing one `.fits` under a misleading `.png`
+     * extension and decoding it from the path and from the bytes.
+     * Input: a 4x1 BITPIX 8 file named `misnamed.png` -> Output: the same
+     * `Gray8` raster from `decode_file` and `decode_bytes`, right way up.
+     */
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn fits_reaches_its_codec_from_both_entry_points() {
+        let raster = Raster::new(4, 1, PixelFormat::Gray8, vec![3, 1, 4, 1]).unwrap();
+        let file = raster.encode_fits().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("misnamed.png");
+        std::fs::write(&path, &file).unwrap();
+
+        let from_path = decode_file_with_limits(&path, DecodeLimits::default()).unwrap();
+        let from_bytes = decode_bytes(&file).unwrap();
+        for decoded in [&from_path, &from_bytes] {
+            assert_eq!((decoded.width(), decoded.height()), (4, 1));
+            assert_eq!(decoded.format(), PixelFormat::Gray8);
+            assert_eq!(decoded.data(), &[3, 1, 4, 1]);
+        }
+    }
+
+    /// Write `bytes` to `path` and then grow the file to `apparent` bytes.
+    ///
+    /// The tail is a hole rather than written zeros, so a file that claims
+    /// megabytes costs one block on disk. That asymmetry is the whole shape
+    /// of issue #629: the file is cheap to make and expensive to serve, and
+    /// nothing in the header hints at how big the read will be.
+    fn write_sparse(path: &Path, bytes: &[u8], apparent: u64) {
+        std::fs::write(path, bytes).unwrap();
+        let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        file.set_len(apparent).unwrap();
+        assert_eq!(std::fs::metadata(path).unwrap().len(), apparent);
+    }
+
+    /**
+     * Verifies that `decode_file_with_limits` bounds the whole-file read it
+     * does for the containers that decode from memory, so an oversized file
+     * costs one `stat` instead of a full read. Before issue #629 the read
+     * ran first and every ceiling in `DecodeLimits` was consulted after it
+     * had already finished, so a 3 GiB sparse FITS declaring a 4x3 image
+     * decoded successfully at 3 GiB resident.
+     * Works by writing one real FITS file and one that is byte-identical
+     * except for a sparse tail, then decoding both under a ceiling that sits
+     * between the two lengths. The small one has to decode, otherwise the
+     * bound is refusing on something other than the file size.
+     * Input: a 4x3 Gray8 FITS and the same file grown to 4 MiB, both under
+     * max_alloc_bytes = 65536 -> Output: the Gray8 raster from the first and
+     * `AllocLimitExceeded { what: "image file body" }` from the second.
+     */
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn decode_file_bounds_the_whole_file_read() {
+        let raster = Raster::new(4, 3, PixelFormat::Gray8, vec![7u8; 12]).unwrap();
+        let file = raster.encode_fits().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+
+        let honest = dir.path().join("honest.fits");
+        std::fs::write(&honest, &file).unwrap();
+        let real_len = std::fs::metadata(&honest).unwrap().len();
+
+        let apparent = 4 * 1024 * 1024;
+        let sparse = dir.path().join("sparse.fits");
+        write_sparse(&sparse, &file, apparent);
+
+        let limits = DecodeLimits::default().with_max_alloc_bytes(65_536);
+        assert!(
+            real_len < 65_536,
+            "the honest file must sit under the ceiling, got {real_len}"
+        );
+
+        let ok = decode_file_with_limits(&honest, limits).unwrap();
+        assert_eq!((ok.width(), ok.height()), (4, 3));
+        assert_eq!(ok.data(), &[7u8; 12]);
+
+        match decode_file_with_limits(&sparse, limits) {
+            Err(SourceError::AllocLimitExceeded {
+                what,
+                geometry,
+                needed_bytes,
+                max_alloc_bytes,
+            }) => {
+                assert_eq!(what, "image file body");
+                assert_eq!(
+                    geometry, None,
+                    "a file length is not a geometry, so the refusal must not invent one"
+                );
+                assert_eq!(needed_bytes, apparent);
+                assert_eq!(max_alloc_bytes, 65_536);
+            }
+            other => panic!("expected the file body to be refused, got {other:?}"),
+        }
+    }
+
+    /**
+     * Verifies that the file-body ceiling is inclusive, so a file of exactly
+     * `max_alloc_bytes` still decodes and one byte less of budget refuses it.
+     * A bound that is safe but off by one is a bound that rejects files the
+     * caller explicitly paid for, and this epic has found several.
+     * Works by measuring the encoded file rather than assuming its length,
+     * then running the decode at exactly that budget and at one byte under.
+     * The refusal has to name the file body, otherwise it is the pixel
+     * buffer's own check firing and the boundary is untested.
+     * Input: a 4x3 Gray8 FITS of `n` bytes at max_alloc_bytes = n, then
+     * n - 1 -> Output: the Gray8 raster, then
+     * `AllocLimitExceeded { needed_bytes: n }`.
+     */
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn the_file_body_ceiling_is_inclusive() {
+        let raster = Raster::new(4, 3, PixelFormat::Gray8, vec![7u8; 12]).unwrap();
+        let file = raster.encode_fits().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("exact.fits");
+        std::fs::write(&path, &file).unwrap();
+        let n = std::fs::metadata(&path).unwrap().len();
+
+        let exact = DecodeLimits::default().with_max_alloc_bytes(n);
+        let decoded = decode_file_with_limits(&path, exact).unwrap();
+        assert_eq!(decoded.data(), &[7u8; 12]);
+
+        let one_short = DecodeLimits::default().with_max_alloc_bytes(n - 1);
+        assert!(
+            matches!(
+                decode_file_with_limits(&path, one_short),
+                Err(SourceError::AllocLimitExceeded {
+                    what: "image file body",
+                    geometry: None,
+                    needed_bytes,
+                    max_alloc_bytes,
+                }) if needed_bytes == n && max_alloc_bytes == n - 1
+            ),
+            "one byte under the file length must refuse the body"
+        );
+    }
+
+    /**
+     * Verifies that the post-read half of the file-body ceiling refuses a
+     * source that yields more bytes than its `stat` declared. The
+     * stat-first check is the cheap one and it is the one the other two
+     * tests pin, but it is only as good as `metadata().len()`, and there
+     * are ordinary sources where that number is a lie: a FIFO reports 0,
+     * a `/proc` file reports 0, and a regular file can grow between the
+     * stat and the read. Without the post-read check the `take(cap + 1)`
+     * still bounds the memory, so nothing aborts, but the caller gets a
+     * silently truncated buffer handed to the decoder as though it were a
+     * whole file and the refusal comes back as "not a recognisable image"
+     * instead of "over the ceiling". That is a worse failure than the one
+     * issue #629 set out to fix.
+     * Works by reading a FIFO, which stats as 0 bytes so the declared-length
+     * check cannot fire, while a writer thread feeds it four times the
+     * ceiling. `needed_bytes` has to be exactly `cap + 1`, which is all the
+     * capped read ever sees, so this cannot be confused with the stat-first
+     * refusal that `decode_file_bounds_the_whole_file_read` pins at the
+     * apparent length.
+     * Input: a FIFO fed 16384 bytes at max_alloc_bytes = 4096 -> Output:
+     * `AllocLimitExceeded { what: "image file body", needed_bytes: 4097,
+     * max_alloc_bytes: 4096 }`.
+     */
+    #[test]
+    #[cfg(unix)]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn the_file_body_ceiling_refuses_a_source_that_outruns_its_stat() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("body.fifo");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo(1) is POSIX and must be on PATH");
+        assert!(made.success(), "mkfifo failed for {}", fifo.display());
+        assert_eq!(
+            std::fs::metadata(&fifo).unwrap().len(),
+            0,
+            "a FIFO must stat as empty, otherwise the declared-length check \
+             fires and this test is pinning the wrong half"
+        );
+
+        let cap = 4096u64;
+        let fed = usize::try_from(cap).unwrap() * 4;
+        let writer = {
+            let fifo = fifo.clone();
+            std::thread::spawn(move || {
+                use std::io::Write;
+                let mut sink = std::fs::OpenOptions::new().write(true).open(&fifo).unwrap();
+                // The reader stops at cap + 1 bytes and closes, so the tail
+                // of this write is expected to come back as a broken pipe.
+                // That is the refusal working, not a failure.
+                let _ = sink.write_all(&vec![0x5Au8; fed]);
+            })
+        };
+
+        let limits = DecodeLimits::default().with_max_alloc_bytes(cap);
+        let refused = read_file_bounded(&fifo, limits, "image file body");
+        writer.join().unwrap();
+
+        match refused {
+            Err(SourceError::AllocLimitExceeded {
+                what,
+                geometry,
+                needed_bytes,
+                max_alloc_bytes,
+            }) => {
+                assert_eq!(what, "image file body");
+                assert_eq!(geometry, None, "a file length is not a geometry");
+                assert_eq!(
+                    needed_bytes,
+                    cap + 1,
+                    "the capped read never sees more than one byte past the \
+                     ceiling, so anything else means the stat-first check fired"
+                );
+                assert_eq!(max_alloc_bytes, cap);
+            }
+            other => panic!(
+                "a source that outruns its stat must be refused, not truncated \
+                 and handed to the decoder, got {other:?}"
+            ),
+        }
+    }
+
+    /**
+     * Verifies that the new ceiling reaches only the containers that decode
+     * from memory, and that the streaming decoders still never see the whole
+     * file. Those paths already read no more than they need, so bounding
+     * them by file length would refuse files that cost nothing to decode.
+     * Works by growing a PNG with a sparse tail well past the ceiling. PNG
+     * stops at `IEND`, so the tail is never read, and a decode that succeeds
+     * under a ceiling far below the apparent length is proof the streaming
+     * path is untouched.
+     * Input: a 16x16 RGB PNG grown to 4 MiB, max_alloc_bytes = 65536 ->
+     * Output: the 16x16 raster, decoded.
+     */
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn the_file_body_ceiling_leaves_the_streaming_path_alone() {
+        let png = create_test_png(16, 16);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("trailing.png");
+        write_sparse(&path, &png, 4 * 1024 * 1024);
+
+        let limits = DecodeLimits::default().with_max_alloc_bytes(65_536);
+        let decoded = decode_file_with_limits(&path, limits).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (16, 16));
+    }
+
+    /**
+     * Verifies that a Radiance file reaches the hand-rolled codec through
+     * both public decode entry points, and that neither consults the file
+     * name to get there. Works by writing one `.hdr` under a misleading
+     * `.png` extension and decoding it from the path and from the bytes.
+     * Input: a 6x1 Radiance file named `misnamed.png` -> Output: the same
+     * `FloatF32(3)` raster from `decode_file` and `decode_bytes`, with the
+     * first pixel at the half-bit value vips prints.
+     */
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn radiance_reaches_its_codec_from_both_entry_points() {
+        let mut file = Vec::new();
+        file.extend_from_slice(b"#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y 1 +X 6\n");
+        for i in 0..6u8 {
+            file.extend_from_slice(&[255, 128, 64, 128 + i]);
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("misnamed.png");
+        std::fs::write(&path, &file).unwrap();
+
+        let from_path = decode_file_with_limits(&path, DecodeLimits::default()).unwrap();
+        let from_bytes = decode_bytes(&file).unwrap();
+        for raster in [&from_path, &from_bytes] {
+            assert_eq!((raster.width(), raster.height()), (6, 1));
+            assert_eq!(raster.format().channels(), 3);
+            assert!(raster.format().is_float());
+        }
+        assert_eq!(from_path.data(), from_bytes.data());
+
+        let first = from_bytes.getpoint(0, 0);
+        assert!(
+            (first[0] - 0.998046875).abs() < 1e-9,
+            "the half-bit decode constant, got {}",
+            first[0]
+        );
     }
 
     /**
@@ -1546,6 +4451,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn decode_file_sequential_matches_decode_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("seq.v");
@@ -1560,6 +4466,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn decode_file_with_shrink_reduces_dimensions() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("shrink.v");
@@ -1582,5 +4489,109 @@ mod tests {
                 shrunk.height()
             );
         }
+    }
+
+    /**
+     * Tests that the shared page-range resolver answers a `page` / `n`
+     * request the way vips 8.18.6 answers it, refusing rather than clamping.
+     * Works by sweeping the requests measured against a four-page animation
+     * with the binary and asserting the range or the refusal.
+     * Input: `(page, n)` over `pages = 4` -> Output: `page..end`, or
+     * `SourceError::PageOutOfRange` for every request vips calls a bad page
+     * number.
+     */
+    #[test]
+    fn the_page_range_matches_what_vips_accepts_and_refuses() {
+        // Measured with `/opt/homebrew/bin/vips` 8.18.6 on a four-frame
+        // animation: `vipsheader 'roll4.webp[page=1,n=-1]'` reports 4x9,
+        // which is three 4x3 pages, and `[page=2,n=5]` fails with
+        // `webp: bad page number` rather than loading the two that exist.
+        type Request = (u32, i32);
+        let accepted: [(Request, std::ops::Range<u32>); 6] = [
+            ((0, 1), 0..1),
+            ((0, -1), 0..4),
+            ((1, -1), 1..4),
+            ((3, 1), 3..4),
+            ((3, -1), 3..4),
+            ((1, 2), 1..3),
+        ];
+        for ((page, n), expected) in accepted {
+            assert_eq!(
+                resolve_page_range("webp", page, n, 4).expect("vips loads this one"),
+                expected,
+                "page={page} n={n}"
+            );
+        }
+
+        let refused: [Request; 6] = [(4, 1), (5, 1), (4, -1), (2, 5), (0, 0), (0, -2)];
+        for (page, n) in refused {
+            let err = resolve_page_range("webp", page, n, 4)
+                .expect_err("vips calls this a bad page number");
+            assert!(
+                matches!(err, SourceError::PageOutOfRange { pages: 4, .. }),
+                "page={page} n={n} must be a typed page refusal, got {err:?}"
+            );
+            let message = err.to_string();
+            assert!(
+                message.contains("bad page number") && message.contains("4-page file"),
+                "the refusal must name the case and the count, got {message}"
+            );
+        }
+    }
+
+    /**
+     * Tests that a `page` past the end cannot wrap the "every page" arm into
+     * a huge range. Works by asking for every page from an index past the
+     * last one, where `pages - page` would underflow.
+     * Input: `page = 9`, `n = -1`, `pages = 4` -> Output: a refusal carrying
+     * the request back, not a range and not a panic.
+     */
+    #[test]
+    fn all_pages_from_past_the_end_is_refused_before_the_subtraction() {
+        let err = resolve_page_range("jxl", 9, -1, 4).expect_err("page 9 does not exist");
+        assert!(
+            matches!(
+                err,
+                SourceError::PageOutOfRange {
+                    format: "jxl",
+                    page: 9,
+                    n: -1,
+                    pages: 4
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    /**
+     * Tests that a count large enough to overflow the addition is refused
+     * rather than wrapping into an accepted range. Works by asking for
+     * `i32::MAX` pages from a page near the top of the `u32` range, on a
+     * file long enough that the `page >= pages` guard does not fire first,
+     * which is the only way to reach the addition at all.
+     * Input: `page = u32::MAX - 1`, `n = i32::MAX`, `pages = u32::MAX` ->
+     * Output: a refusal, where a wrapping addition computes `2_147_483_645`
+     * and calls that a legal window.
+     */
+    #[test]
+    fn a_count_that_overflows_the_end_is_refused() {
+        let page = u32::MAX - 1;
+        let err = resolve_page_range("webp", page, i32::MAX, u32::MAX)
+            .expect_err("the file does not hold that many pages");
+        assert!(
+            matches!(err, SourceError::PageOutOfRange { .. }),
+            "got {err:?}"
+        );
+        // The number a wrapping addition would compute, spelled out so the
+        // reason this input separates the two is visible: it is smaller than
+        // `page`, so the `end > pages` arm never fires on it.
+        assert_eq!(page.wrapping_add(i32::MAX as u32), 2_147_483_645);
+
+        // And the ordinary in-range shape of the same request still refuses,
+        // through the `end > pages` arm rather than the overflow one.
+        assert!(matches!(
+            resolve_page_range("webp", 2, i32::MAX, 4),
+            Err(SourceError::PageOutOfRange { pages: 4, .. })
+        ));
     }
 }

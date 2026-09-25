@@ -18,7 +18,7 @@
 //! 2. **Tile-level (within each strip)** — scoped-thread tile extraction
 //!    with bounded-channel backpressure, same pattern as the monolithic engine.
 //! 3. **Sequential reduce (propagation)** — half-strips feed into
-//!    [`propagate_down`](crate::streaming::propagate_down) in order, since
+//!    the crate-internal `propagate_down` reduce step in order, since
 //!    the pairing dependency requires sequential processing.
 //!
 //! ## Entry points
@@ -94,7 +94,7 @@ impl Default for MapReduceConfig {
 }
 
 impl MapReduceConfig {
-    fn engine_config(&self) -> EngineConfig {
+    pub(crate) fn engine_config(&self) -> EngineConfig {
         EngineConfig {
             concurrency: self.tile_concurrency,
             buffer_size: self.buffer_size,
@@ -444,10 +444,10 @@ fn emit_strip_tiles_parallel(
                 // matches the monolithic and streaming engines (issue #134). A
                 // write whose retry backoff was interrupted by a cancellation
                 // must surface as Cancelled, not be swallowed by RetryThenSkip.
-                if let Some(token) = &config.cancel {
-                    if token.is_cancelled() {
-                        return Err(EngineError::Cancelled);
-                    }
+                if let Some(token) = &config.cancel
+                    && token.is_cancelled()
+                {
+                    return Err(EngineError::Cancelled);
                 }
                 match &config.failure_policy {
                     crate::retry::FailurePolicy::RetryThenSkip(_) => {
@@ -495,6 +495,11 @@ pub(crate) fn generate_pyramid_mapreduce(
     let format = source.format();
     let bpp = format.bytes_per_pixel();
     let engine_cfg = config.engine_config();
+
+    // Before any tile reaches the sink, for the reason in `streaming.rs`:
+    // a sink that reads the config per tile used to get the standalone
+    // default on every engine but the monolithic one (issue #1133).
+    sink.record_engine_config(&engine_cfg);
 
     // Pre-flight (parity with the sequential engine, `streaming.rs`): the
     // worst-case strip is one minimum aligned unit (2 × tile_size rows) at
@@ -831,6 +836,8 @@ pub(crate) fn generate_pyramid_mapreduce(
         duration: std::time::Duration::ZERO,
         stage_durations: crate::engine::StageDurations::default(),
         skipped_due_to_failure: sink.sink_skipped_due_to_failure(),
+        // A generation run produced these tiles rather than probing them.
+        tile_evidence: None,
     })
 }
 

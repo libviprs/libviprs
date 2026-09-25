@@ -79,6 +79,13 @@ pub struct PackfileSink {
     /// need exclusive access per append. The `Option` lets `finish(&self)`
     /// consume the writer without violating `&self`.
     writer: Mutex<Option<ArchiveWriter>>,
+    /// Captured by [`TileSink::record_engine_config`] before the tile loop
+    /// starts, and read for one field: the background a JPEG tile's
+    /// transparent pixels land on (issue #1133). `FsSink` and `PmTilesSink`
+    /// already kept the whole config for their manifests; this sink writes no
+    /// manifest of its own and kept nothing, which would have left a run with
+    /// `--background` honoured in the padding and ignored in the pixels.
+    engine_config: Mutex<Option<crate::engine::EngineConfig>>,
 }
 
 /// Underlying archive writer, polymorphic over the chosen format.
@@ -114,12 +121,23 @@ impl PackfileSink {
     /// and [`PackfileSinkBuilder::tile_format`] (default:
     /// [`TileFormat::Png`]), then [`PackfileSinkBuilder::build`]:
     ///
-    /// ```ignore
-    /// PackfileSink::builder("out.zip")
+    /// ```
+    /// use libviprs::planner::{Layout, PyramidPlanner};
+    /// use libviprs::sink::TileFormat;
+    /// use libviprs::sink_packfile::{PackfileFormat, PackfileSink};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let plan = PyramidPlanner::new(1024, 768, 256, 0, Layout::DeepZoom)?.plan();
+    /// let dir = tempfile::tempdir()?;
+    ///
+    /// let sink = PackfileSink::builder(dir.path().join("out.zip"))
     ///     .plan(plan)
     ///     .format(PackfileFormat::Zip)
     ///     .tile_format(TileFormat::Jpeg { quality: 85 })
     ///     .build()?;
+    /// # let _ = sink;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn builder(path: impl Into<PathBuf>) -> PackfileSinkBuilder {
         PackfileSinkBuilder {
@@ -144,10 +162,10 @@ impl PackfileSink {
     ) -> Result<Self, SinkError> {
         let out_path = path.into();
 
-        if let Some(parent) = out_path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)?;
-            }
+        if let Some(parent) = out_path.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)?;
         }
 
         let file = File::create(&out_path)?;
@@ -171,6 +189,7 @@ impl PackfileSink {
             plan,
             tile_format,
             writer: Mutex::new(Some(writer)),
+            engine_config: Mutex::new(None),
         })
     }
 
@@ -222,7 +241,12 @@ impl PackfileSink {
         match self.tile_format {
             TileFormat::Raw => Ok(raster.data().to_vec()),
             TileFormat::Png => encode_png(raster),
-            TileFormat::Jpeg { quality } => encode_jpeg(raster, quality),
+            TileFormat::Jpeg { quality } => crate::sink::encode_jpeg(
+                raster,
+                quality,
+                crate::sink::background_from(&self.engine_config),
+            ),
+            TileFormat::Webp => crate::sink::encode_webp(raster),
         }
     }
 
@@ -306,8 +330,18 @@ impl PackfileSink {
 /// [`PackfileFormat::Tar`] and [`TileFormat::Png`] respectively so the
 /// minimum-viable call is:
 ///
-/// ```ignore
-/// PackfileSink::builder("out.tar").plan(plan).build()?;
+/// ```
+/// use libviprs::planner::{Layout, PyramidPlanner};
+/// use libviprs::sink_packfile::PackfileSink;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let plan = PyramidPlanner::new(1024, 768, 256, 0, Layout::DeepZoom)?.plan();
+/// let dir = tempfile::tempdir()?;
+///
+/// let sink = PackfileSink::builder(dir.path().join("out.tar")).plan(plan).build()?;
+/// # let _ = sink;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct PackfileSinkBuilder {
@@ -390,6 +424,12 @@ impl TileSink for PackfileSink {
         self.append_bytes(&stem_path, &encoded)?;
 
         Ok(())
+    }
+
+    /// Keep the run's configuration for the one thing this sink reads out of
+    /// it: the background a JPEG tile's alpha is flattened onto.
+    fn record_engine_config(&self, config: &crate::engine::EngineConfig) {
+        *crate::poison::recover(&self.engine_config) = Some(config.clone());
     }
 
     fn finish(&self) -> Result<(), SinkError> {
@@ -569,52 +609,6 @@ fn append_zip<W: Write + std::io::Seek>(
 // Encoding helpers
 // ---------------------------------------------------------------------------
 
-/// Local JPEG encoder — mirrors the private one in `sink.rs`. Duplicated
-/// intentionally so the packfile sink does not need the main `sink`
-/// module's private helpers to become `pub`.
-fn encode_jpeg(raster: &Raster, quality: u8) -> Result<Vec<u8>, SinkError> {
-    use crate::pixel::PixelFormat;
-
-    let ct = match raster.format() {
-        PixelFormat::Gray8 => image::ColorType::L8,
-        PixelFormat::Gray16 => image::ColorType::L16,
-        PixelFormat::Rgb8 => image::ColorType::Rgb8,
-        PixelFormat::Rgba8 => image::ColorType::Rgba8,
-        PixelFormat::Rgb16 => image::ColorType::Rgb16,
-        PixelFormat::Rgba16 => image::ColorType::Rgba16,
-        // Multiband intermediates (from the band ops in `crate::bands`) have
-        // no image-crate colour type; reduce or extract to 1/3/4 bands first.
-        PixelFormat::Multi8(_) | PixelFormat::Multi16(_) => {
-            return Err(SinkError::EncodeMsg(format!(
-                "multiband raster ({} bands) cannot be encoded as an image tile",
-                raster.format().channels()
-            )));
-        }
-        // Float compute intermediates have no PNG/JPEG representation;
-        // cast to an unsigned 8/16-bit format before encoding tiles.
-        PixelFormat::RgbaF32 | PixelFormat::FloatF32(_) => {
-            return Err(SinkError::EncodeMsg(format!(
-                "float raster ({:?}) cannot be encoded as an image tile; \
-                 cast to an unsigned 8/16-bit format first",
-                raster.format()
-            )));
-        }
-    };
-
-    let mut buf = Vec::new();
-    let encoder =
-        image::codecs::jpeg::JpegEncoder::new_with_quality(std::io::Cursor::new(&mut buf), quality);
-    image::ImageEncoder::write_image(
-        encoder,
-        raster.data(),
-        raster.width(),
-        raster.height(),
-        ct.into(),
-    )
-    .map_err(|e| SinkError::EncodeMsg(format!("png: {e}")))?;
-    Ok(buf)
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -624,6 +618,11 @@ mod tests {
     use super::*;
     use crate::pixel::PixelFormat;
     use crate::planner::{Layout, PyramidPlanner};
+    // Only the cells below reach the mapping directly now that this module's
+    // copy of the JPEG wrapper is gone (issue #1133), so the import belongs
+    // here rather than at the top of the file where it reads as production
+    // code using it.
+    use crate::sink::color_type_for_format;
 
     fn make_plan(w: u32, h: u32, tile: u32) -> PyramidPlan {
         PyramidPlanner::new(w, h, tile, 0, Layout::DeepZoom)
@@ -823,5 +822,32 @@ mod tests {
             names.iter().any(|n| n == "pyramid.dzi"),
             "zip must contain the DeepZoom manifest `pyramid.dzi`, got: {names:?}"
         );
+    }
+
+    /// `encode_jpeg` had no direct test of the uint/float refusal before
+    /// issue #940's batch-1 review: it carried its own fourth copy of the
+    /// mapping `sink.rs` and `sink_object_store.rs` already had direct tests
+    /// for (`the_tile_sinks_refuse_the_uint_carrier_by_name`,
+    /// `the_object_store_sink_refuses_the_uint_carrier_by_name`), so a
+    /// mutation landing only in this module's copy had nothing to catch it.
+    /// Mirrors those two now that this module calls the same
+    /// [`crate::sink::color_type_for_format`] they do.
+    #[test]
+    fn the_packfile_sink_refuses_the_uint_carrier_by_name() {
+        let n = |v: u16| core::num::NonZeroU16::new(v).unwrap();
+        let u = PixelFormat::Uint32(n(1));
+        let msg = color_type_for_format(u)
+            .expect_err("a uint raster is not an image tile")
+            .to_string();
+        assert!(
+            msg.contains("32-bit unsigned") && msg.contains("Uint32"),
+            "the refusal does not name the carrier: {msg}"
+        );
+        let f = PixelFormat::FloatF32(n(1));
+        let fmsg = color_type_for_format(f)
+            .expect_err("a float raster is not an image tile")
+            .to_string();
+        assert!(fmsg.contains("float"), "{fmsg}");
+        assert_ne!(msg, fmsg);
     }
 }

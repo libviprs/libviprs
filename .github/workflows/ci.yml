@@ -1,10 +1,97 @@
 name: CI
 
+# The only CI for this repository (issue #585).
+#
+# Some history, because the trigger block below reads as over-specified without
+# it. #528 moved CI onto a self-hosted Gitea Actions runner that reported results
+# back here as a `gitea/ci` commit status. That last hop never once worked, so
+# pull requests carried no build signal for about a month (#530). #538 restored
+# this file as a GitHub-side fallback. #585 drops Gitea altogether, so this is
+# now the whole gate: `.gitea/workflows/` and the mirror-relay workflow are gone,
+# and the `GH_STATUS_TOKEN` reporting steps that used to bookend the Gitea jobs
+# went with them.
+
 on:
+  # Branch pushes are what actually carries CI here. This is the fix for the
+  # trigger gap in #585, so it is worth spelling out why `pull_request` alone was
+  # not enough.
+  #
+  # GitHub will not start a `pull_request` run while the pull request has a merge
+  # conflict. Such a run builds `refs/pull/N/merge`, and that ref cannot be
+  # created while the merge fails, so the event is simply dropped: no run, no
+  # queued run, no failure, nothing to notice. Every lane in epic #520 appends to
+  # `## [Unreleased]` in CHANGELOG.md, so a branch starts conflicting with `main`
+  # the moment any other lane merges. That is the normal state here, not the
+  # exception.
+  #
+  # Measured over 2026-08-25, after ci.yml landed on `main`: of the branch pushes
+  # that reached a branch with an open PR, every push whose branch merged cleanly
+  # into `main` produced a run, and the only two that produced no run at all were
+  # the two whose branch conflicted with `main` on CHANGELOG.md (PR #557 at
+  # 10:38:53Z, PR #576 at 10:53:47Z). #576 then needed a manual dispatch before
+  # anyone was willing to merge it. Draft state, concurrency and cancellation were
+  # all ruled out: those same branches got runs while still drafts, and cancelled
+  # runs show up in the run list as cancelled rather than as nothing.
+  #
+  # To re-check this later: the run list for this workflow gives the runs, and
+  # `git merge-tree --write-tree <main-at-that-time> <pushed-sha>` replays the
+  # merge GitHub could not make. The two that produced nothing were
+  # 64d200927c90 and 9e092027d203, both conflicting on CHANGELOG.md.
+  #
+  # A `push` run builds the branch head. It needs no merge commit, so it is
+  # unaffected by whether the PR currently merges.
   push:
-    branches: [main]
+    branches: ['**']
+
+  # `synchronize` is deliberately absent. A push to a branch in this repository is
+  # already covered above, and adding `synchronize` would run the whole suite
+  # twice for every one of those pushes. What is left here are the pull-request
+  # transitions that no push accompanies.
+  #
+  # This is also the only trigger that covers a pull request opened from a fork,
+  # where no push ever reaches this repository. A fork PR gets CI when it is
+  # opened, reopened or marked ready for review, but not on its later pushes. The
+  # repository has no forks today; if that changes, add `synchronize` back and
+  # guard the jobs so in-repo branches do not run twice.
   pull_request:
-    branches: [main]
+    types: [opened, reopened, ready_for_review]
+
+  workflow_dispatch:
+
+# Only `push` runs supersede each other. That is narrower than it looks and the
+# reasoning took two wrong turns to get right, so it is written out.
+#
+# A cancelled check run lands on the same head sha as the successful ones and
+# GraphQL reports `isRequired: true` on it. What decides the merge is not that
+# flag: branch protection evaluates the **latest** check run per context name,
+# so a cancelled run blocks only when nothing later reran that same name.
+#
+# Measured rather than assumed. Opening a PR as a draft and marking it ready
+# three seconds later produced three runs on one sha. The `opened` run was
+# cancelled at :34; the `push` and `ready_for_review` runs finished at :55 and
+# :58 with the same job names. Result: every cancelled row `isRequired: true`,
+# `statusCheckRollup.state` FAILURE, and `mergeStateStatus` CLEAN. The rollup
+# aggregates every run; protection reads the last one per name. That gap is
+# what makes a cancelled row look fatal when it is not, and what makes it
+# genuinely fatal when it is.
+#
+# It is genuinely fatal when the run that did the cancelling does not produce a
+# check run of the same name, so the cancelled row stays latest. A job rename
+# in flight does exactly that, and it blocked three PRs in `libviprs` whose
+# bodies blamed the rename itself.
+#
+# Two earlier explanations of this in the org were wrong. The first called a
+# cancelled check cosmetic; it is not. The second said keying the group on
+# `github.event_name` fixes it; it does not, because `opened` and
+# `ready_for_review` are both `pull_request` and still share a group. So the
+# key keeps the event, and cancellation is limited to `push`, where a
+# superseding run always reruns the same names. `pull_request` runs are rare
+# here (no `synchronize`), so letting them all finish costs almost nothing.
+#
+# `main` is excluded: that run is the record of what actually landed.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: ${{ github.event_name == 'push' && (github.head_ref || github.ref_name) != 'main' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -27,26 +114,119 @@ jobs:
       # feature-gated, so it is invisible to the default clippy/test jobs above.
       # Lint it explicitly so regressions in the sink are caught (issue #382).
       - run: cargo clippy --all-targets --features object-store-sink -- -D warnings -W clippy::incompatible_msrv -W deprecated
+      # Same for the SVG rasteriser: `svg` is non-default because it costs 29
+      # crates, so the default clippy job never sees `src/svg.rs` at all
+      # (issue #502).
+      - run: cargo clippy --all-targets --features svg -- -D warnings -W clippy::incompatible_msrv -W deprecated
+      # And for JPEG XL: `jxl` is non-default because it costs 21 crates, one
+      # of which is `tracing`, so the default clippy job compiles neither
+      # `src/jxl.rs`'s real bodies nor its unit tests (issue #500).
+      - run: cargo clippy --all-targets --features jxl -- -D warnings -W clippy::incompatible_msrv -W deprecated
+      # And for JPEG 2000: `jp2k` is non-default on compile time rather than on
+      # crate count (it is +2 lock entries, the cheapest codec feature here), so
+      # the default clippy job compiles `src/jp2k.rs` with every real body
+      # cfg'd out (issue #772).
+      - run: cargo clippy --all-targets --features jp2k -- -D warnings -W clippy::incompatible_msrv -W deprecated
+      # The remaining four features gate code that no job named until #816.
+      # `avif` is the worst of them: the real decode bodies in `src/avif.rs` are
+      # `#[cfg(feature = "avif")]`, so nothing here type-checked them at all,
+      # and the ten oracle-comparison tests are `ignore`d without it.
+      - run: cargo clippy --all-targets --features avif -- -D warnings -W clippy::incompatible_msrv -W deprecated
+      # `packfile` is how the hole was proved rather than argued: the first run
+      # of this line on `main` was **red**, on a real `collapsible_if` in
+      # `src/sink_packfile.rs` that had been sitting there unlinted.
+      - run: cargo clippy --all-targets --features packfile -- -D warnings -W clippy::incompatible_msrv -W deprecated
+      - run: cargo clippy --all-targets --features serde -- -D warnings -W clippy::incompatible_msrv -W deprecated
+      - run: cargo clippy --all-targets --features tracing -- -D warnings -W clippy::incompatible_msrv -W deprecated
       # `s3` is a deprecated alias for `object-store-sink`, retained for consumers
       # that pinned the old feature name. Nothing else in CI exercises it, so a
       # broken alias would go unnoticed; build it explicitly so it keeps resolving.
       - run: cargo build --features s3
 
   msrv:
-    name: MSRV (1.85)
+    name: MSRV
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.85
+      - uses: dtolnay/rust-toolchain@1.97
       - uses: Swatinem/rust-cache@v2
+      # The number below is written out three times in this repository and
+      # nothing compared the copies, so they drifted: the README badge said
+      # 1.97 while the Requirements line further down the same file still said
+      # 1.85, a version the crate cannot build on (#608). `cargo check` cannot
+      # catch that, because checking with a newer toolchain than you declare is
+      # not an error, and neither is a stale sentence in a README. Same guard as
+      # libviprs-cli grew in its own bump (libviprs-cli#44), minus the
+      # cross-repo comparison: `rust-version` here IS the source of truth that
+      # the CLI and the site check themselves against.
+      #
+      # It was four copies until #1011, because this job was called
+      # `MSRV (1.97)` and the guard compared that too. A job name is the one
+      # copy a pull request cannot fix: branch protection matches a required
+      # check by its exact name, so the bump that renames the job stops the old
+      # required context from ever being produced again and every open PR sits
+      # blocked until somebody edits the protection list by hand. The version
+      # is asserted and printed below instead, and the last clause is what
+      # keeps it from creeping back into the name.
+      - name: Every MSRV claim agrees
+        run: |
+          declared=$(grep -m1 -E '^rust-version *= *"' Cargo.toml | sed -E 's/.*"([^"]*)".*/\1/' | cut -d. -f1,2)
+          pinned=$(rustc --version | sed -E 's/^rustc ([0-9]+\.[0-9]+).*/\1/')
+          advertised=$(grep -oE 'rust-[0-9]+\.[0-9]+%2B|Rust [0-9]+\.[0-9]+\+' README.md \
+            | grep -oE '[0-9]+\.[0-9]+' | sort -u | paste -sd/ -)
+          # Anchored to a `name:` line, and not fussy about how the version is
+          # written. Unanchored it matches a comment quoting the bad form, so
+          # the guard reddens on its own explanation; the acadsharp-rs copy hit
+          # exactly that the first time it ran. And `MSRV \([0-9.]+\)` alone
+          # misses `name: "MSRV (1.98)"` and `name: MSRV 1.98`, both of which
+          # are ordinary things to write. Any digit after MSRV on a name line
+          # is the thing being refused.
+          named=$(grep -oE '^[[:space:]]*name:[[:space:]]*"?MSRV[^"]*[0-9]' .github/workflows/*.yml || true)
+          echo "declared (Cargo.toml): $declared"
+          echo "pinned (this job):     $pinned"
+          echo "advertised (README):   $advertised"
+          rc=0
+          [ -n "$advertised" ] || { echo "::error::no Rust version found in README.md, so this guard has nothing to compare"; rc=1; }
+          [ "$declared" = "$pinned" ] || { echo "::error::this job installs $pinned but Cargo.toml declares rust-version $declared"; rc=1; }
+          [ "$declared" = "$advertised" ] || { echo "::error::README advertises Rust $advertised+ but Cargo.toml declares $declared"; rc=1; }
+          [ -z "$named" ] || { echo "::error::the MSRV job name carries a version again ($named). Branch protection matches a required check by its exact name, so the next bump would strand every open PR on a context no run produces; keep the number here and out of the name (#1011)"; rc=1; }
+          exit $rc
       - run: cargo check --all-targets
       - run: cargo check --all-targets --features pdfium
+      # The `jxl` tree is the one dependency family in the crate with no
+      # `rust-version` anywhere in it, so the MSRV-aware resolver cannot keep
+      # it honest and a patch release is free to raise the real floor with
+      # nothing to declare it. `Cargo.lock` is not committed, so this job
+      # resolves fresh on every push and a family-wide bump goes red here
+      # within a day. Without the explicit feature the JXL crates are not in
+      # the graph at all and this job would never look at them; see the `jxl`
+      # comment in Cargo.toml, which cites this line.
+      - run: cargo check --all-targets --features jxl
+      # The same question, asked of every other feature that pulls in a crate
+      # declaring no `rust-version`, because those are exactly the ones the
+      # MSRV-aware resolver cannot see. Measured on the current lock: `avif`
+      # adds 9 such crates, `svg` adds 12, `packfile` adds 5 and `jp2k` adds 1
+      # (`openjpeg2-pure-rs` 0.1.1). `serde`, `tracing` and
+      # `object-store-sink` add none, which is why they are not here (issues
+      # #772, #816).
+      - run: cargo check --all-targets --features jp2k
+      - run: cargo check --all-targets --features avif
+      - run: cargo check --all-targets --features svg
+      - run: cargo check --all-targets --features packfile
 
   docs:
-    name: Docs (deny broken intra-doc links)
+    name: Docs (deny broken, private and redundant intra-doc links)
     runs-on: ubuntu-latest
     env:
-      RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links
+      # `private_intra_doc_links` is warn-by-default, so public documentation
+      # could point at a `pub(crate)` item, rustdoc would drop the link and
+      # render it as inert bracketed text on docs.rs, and this job stayed green
+      # (issue #697). `redundant_explicit_links` is warn-by-default too, and 13
+      # of them were the whole of the remaining output, which is a floor that
+      # hides the next real warning (issue #795). With both denied the build is
+      # silent, so anything printed here is new. `tests/doc_link_gate.rs` keeps
+      # this line and the `Makefile` mirror of it saying the same thing.
+      RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links -D rustdoc::private_intra_doc_links -D rustdoc::redundant_explicit_links
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -59,7 +239,15 @@ jobs:
     name: Test
     runs-on: ubuntu-latest
     steps:
+      # Full history, because `tests/changelog_release_claims.rs` answers the
+      # CHANGELOG's "has never been in a release" claims with `git grep` over
+      # every tag, and the default shallow checkout brings down no tags at all.
+      # Without this the guard fails loudly, which is deliberate: a tagless
+      # clone would otherwise satisfy every such claim by finding nothing, and
+      # that is the vacuous pass the guard exists to avoid (issue #947).
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test
@@ -67,6 +255,35 @@ jobs:
       # bare `cargo test` never compiles or runs them. Exercise the feature so
       # the sink's tests and doctests actually execute in CI (issue #382).
       - run: cargo test --features object-store-sink
+      # The SVG module and its unit tests are behind the non-default `svg`
+      # feature, and the `<image xlink:href>` lockdown tests in
+      # tests/path_traversal.rs are gated on it too. Bare `cargo test` runs
+      # none of them, and the lockdown is a security regression test, so it
+      # needs to actually execute (issue #502).
+      - run: cargo test --features svg
+      # Same for JPEG XL. Bare `cargo test` compiles `src/jxl.rs` with every
+      # real body cfg'd out, so the oracle pins, the fuzz-corpus sweep and the
+      # `tests/jxl_ported_surface.rs` round trips all run zero assertions
+      # against the codec unless the feature is named (issue #500).
+      - run: cargo test --features jxl
+      # Same for JPEG 2000: bare `cargo test` compiles `src/jp2k.rs` with every
+      # real body cfg'd out, so the oracle pins, the fuzz-corpus sweep and
+      # `tests/jp2k_ported_surface.rs` run zero assertions against the codec
+      # unless the feature is named (issue #772). Measured: 24 tests.
+      - run: cargo test --features jp2k
+      # And the four that nothing named until #816, with what each one is
+      # worth, measured by diffing the test list against a default run:
+      #   avif      10 tests that are `ignore`d without it, and they are the
+      #             oracle comparisons: bit-exactness, lossy 4:4:4, chroma
+      #             siting, alpha, deep samples, the decode ceilings
+      #   packfile   8 tests
+      #   serde      6 tests (all of tests/serde_wire.rs, which is
+      #             `#![cfg(feature = "serde")]` and had never run)
+      #   tracing    5 tests
+      - run: cargo test --features avif
+      - run: cargo test --features packfile
+      - run: cargo test --features serde
+      - run: cargo test --features tracing
 
   integration-test:
     name: Integration Tests (libviprs-tests)
@@ -77,15 +294,87 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: libviprs
-      - name: Clone libviprs-tests (matching branch or main)
+      # Take the same-named libviprs-tests branch when it is this change's
+      # counterpart, and `main` when the name is just a leftover.
+      #
+      # This org keeps every branch it has ever pushed: `delete_branch_on_merge`
+      # is off on all seven repos, and on 2026-09-12 this repo alone had 377
+      # non-default remote branches with 271 of them already merged. So a new
+      # branch reusing an old name in either repo used to get built against a
+      # sibling frozen at whatever that old branch was, and it has happened: a
+      # merged-but-undeleted same-named libviprs-tests branch failed this job
+      # with what read as a dependency conflict (#1013), and this job is a
+      # required check now.
+      #
+      # The test is "does libviprs-tests' main already contain every commit on
+      # it", not "is it ahead of main". Ahead-of-main sounds stricter and is
+      # wrong here: main moves constantly, so a counterpart branch cut this
+      # morning has diverged by the afternoon, and rejecting it would silently
+      # build against main, which is green and wrong rather than red and
+      # confusing. Measured 2026-09-12, excluding `main` itself: 21 names live
+      # in both repos, of which 9 are `behind`, 12 have diverged and none is
+      # `ahead`. This catches the first group. The second cannot be told from a
+      # live counterpart by the git graph, and retiring those is the owner's
+      # branch cleanup rather than something this step can do.
+      #
+      # Treat those numbers as a dated observation rather than a fact about the
+      # repo: both branch lists move, and the split is only stable enough to say
+      # that the diverged group is the larger one. An earlier version of this
+      # comment said 11 and 11, which was already wrong when it was written.
+      #
+      # `--depth 1` had to go, because one commit cannot answer an ancestry
+      # question. `--filter=blob:none --no-checkout` brings down the commit
+      # graph and no file content; the checkout at the end fetches blobs for
+      # the one tree it materialises.
+      #
+      # Keep the `${{ }}` expression and the literal `libviprs-tests.git` in
+      # this `run:` text. tools/local-ci.py recognises this step by exactly
+      # those two strings and substitutes the mounted sibling checkout for the
+      # clone; move the URL into an `env:` block and `make ci` would start
+      # cloning over the mount instead.
+      - name: Clone libviprs-tests (its counterpart branch, or main)
         run: |
           BRANCH="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME}}"
-          git clone --depth 1 --branch "$BRANCH" https://github.com/${{ github.repository_owner }}/libviprs-tests.git libviprs-tests 2>/dev/null \
-            || git clone --depth 1 https://github.com/${{ github.repository_owner }}/libviprs-tests.git libviprs-tests
+          git clone --quiet --filter=blob:none --no-checkout \
+            https://github.com/${{ github.repository_owner }}/libviprs-tests.git libviprs-tests
+          take=origin/main
+          if ! git -C libviprs-tests rev-parse --verify --quiet "origin/$BRANCH" >/dev/null; then
+            echo "libviprs-tests has no branch called '$BRANCH', so this job builds against its main."
+          elif git -C libviprs-tests merge-base --is-ancestor "origin/$BRANCH" origin/main; then
+            echo "libviprs-tests has a branch called '$BRANCH' and its main already contains every commit on it."
+            echo "That is a leftover name, not this change's counterpart, so this job builds against main (#1013)."
+          else
+            take="origin/$BRANCH"
+            echo "libviprs-tests' '$BRANCH' carries commits its main does not, so it is this change's counterpart."
+          fi
+          echo "==> libviprs-tests at $take ($(git -C libviprs-tests rev-parse --short "$take"))"
+          git -C libviprs-tests checkout --quiet --detach "$take"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: libviprs-tests
+      # Every ported_* cell in libviprs-tests is behind
+      # `#![cfg(feature = "ported_tests")]`, so under the plain `cargo test`
+      # below they compile to nothing and report `running 0 tests`. That made
+      # this job blind to exactly the thing its name promises: a core API
+      # change that breaks a ported call site went green. #591 changed
+      # `decode_svg` from `Option<f64>` to `SvgOptions` and this job said
+      # nothing; #576 moved the `encode_webp` and `encode_gif` signatures and
+      # that was caught only because someone went looking (issue #594).
+      #
+      # `--no-run` is the whole point. Compiling the cells is what catches a
+      # signature break, and running them needs the libvips reference fixtures
+      # that this runner does not have. It runs before the suite because it is
+      # the cheap half, so a break in the ported surface shows up as the first
+      # failure in the log rather than after a full test run.
+      #
+      # Note this checks the cells against libviprs at *this* ref, which is not
+      # what libviprs-tests' own CI does: that builds them against the core
+      # pinned in its COUNTERPART_REV. The two together are what covers the
+      # gap, and neither one alone does.
+      - name: Compile the feature-gated ported cells
+        working-directory: libviprs-tests
+        run: cargo test --features ported_tests --no-run
       - name: Run integration tests
         working-directory: libviprs-tests
         run: cargo test

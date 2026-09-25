@@ -11,10 +11,159 @@
 //! a pure compile-time check; if any of the enums below regresses to exhaustive
 //! this test crate fails to build.
 
+use libviprs::cad::{Primitive, PrimitiveKind, Severity, ViewKind};
 use libviprs::{
-    BandError, Combine, DrawError, EngineEvent, Layout, ManifestError, PdfError, PixelFormat,
-    PlannerError, Precision, RasterError, ResumeError, SourceError, VerifyError,
+    Align, AvifError, BandError, CadError, CadSource, ColourError, Combine, DrawError, EngineEvent,
+    ExrError, FitsError, GifError, Intent, Interpretation, JoinDirection, Jp2kError, JxlError,
+    Layout, ManifestError, MetadataValue, Pcs, PdfError, PixelFormat, PlannerError, Precision,
+    PyramidStorage, RadianceError, RasterError, ResumeError, SourceError, TileEvidence,
+    VerifyError,
 };
+
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_gif_error_non_exhaustive(v: &GifError) {
+    match v {
+        GifError::Decode { .. } => {}
+        GifError::NoFrames => {}
+        GifError::Raster(_) => {}
+        _ => {}
+    }
+}
+
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_exr_error_non_exhaustive(v: &ExrError) {
+    match v {
+        ExrError::BadMagic { .. } => {}
+        ExrError::Decode { .. } => {}
+        ExrError::DeepData => {}
+        ExrError::UnsupportedSampleType { .. } => {}
+        ExrError::SubsampledChannel { .. } => {}
+        ExrError::NoChannels => {}
+        ExrError::DimensionOutOfBounds { .. } => {}
+        ExrError::TooManyChannels { .. } => {}
+        ExrError::PartMismatch { .. } => {}
+        ExrError::ChannelSizeMismatch { .. } => {}
+        ExrError::Raster(_) => {}
+        _ => {}
+    }
+}
+
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_fits_error_non_exhaustive(v: &FitsError) {
+    match v {
+        FitsError::BadMagic { .. } => {}
+        FitsError::TruncatedHeader { .. } => {}
+        FitsError::HeaderTooLong { .. } => {}
+        FitsError::NoImageUnit { .. } => {}
+        FitsError::BadHeaderCard { .. } => {}
+        FitsError::BadAxisCount { .. } => {}
+        FitsError::HighDimensionNotEmpty { .. } => {}
+        FitsError::DimensionOutOfBounds { .. } => {}
+        FitsError::TruncatedData { .. } => {}
+        FitsError::UnsupportedBitpix { .. } => {}
+        FitsError::UnsupportedCarrier { .. } => {}
+        FitsError::UnsupportedScaling { .. } => {}
+        FitsError::Raster(_) => {}
+        _ => {}
+    }
+}
+
+/// `JxlError` is declared whether or not the `jxl` feature is on, and so is
+/// every variant, so this list is the same in both builds. This test crate
+/// builds with default features, which do not include `jxl`; if a variant
+/// ever picks up a `#[cfg(feature = "jxl")]` this stops compiling, which is
+/// the same guard `pdf_error_pdfium_variant_is_feature_independent` gives
+/// `PdfError::Pdfium` (issue #634).
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_jxl_error_non_exhaustive(v: &JxlError) {
+    match v {
+        JxlError::FeatureNotEnabled => {}
+        JxlError::Decode { .. } => {}
+        JxlError::Truncated { .. } => {}
+        JxlError::CmykNotSupported { .. } => {}
+        JxlError::UnsupportedChannelCount { .. } => {}
+        JxlError::ChannelCountMismatch { .. } => {}
+        JxlError::DecoderAllocLimitExceeded { .. } => {}
+        JxlError::Raster(_) => {}
+        _ => {}
+    }
+}
+
+/// `AvifError` was the one public error enum in the tree without the
+/// attribute, and this file, which exists to hold exactly that rule, did not
+/// mention it (issue #946). It is re-exported unconditionally from the crate
+/// root, so it is public API in a build with the `avif` feature and in a
+/// build without one, and its own `UnsupportedColour` doc says only two of
+/// the matrix encodings are measured, which is a promise that it will grow.
+///
+/// Listed here the same way as the seventy-three siblings, so the next
+/// variant is additive rather than breaking.
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_avif_error_non_exhaustive(v: &AvifError) {
+    match v {
+        AvifError::FeatureNotEnabled => {}
+        AvifError::Container(_) => {}
+        AvifError::UnsupportedCodec { .. } => {}
+        AvifError::UnsupportedColour { .. } => {}
+        AvifError::Decode { .. } => {}
+        AvifError::Raster(_) => {}
+        _ => {}
+    }
+}
+
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_jp2k_error_non_exhaustive(v: &Jp2kError) {
+    match v {
+        Jp2kError::FeatureNotEnabled => {}
+        Jp2kError::Decode { .. } => {}
+        Jp2kError::Container { .. } => {}
+        Jp2kError::MixedComponentSignedness { .. } => {}
+        Jp2kError::SignedInverseYcc { .. } => {}
+        Jp2kError::PrecisionNotSupported { .. } => {}
+        Jp2kError::PrecisionWiderThanDeclared { .. } => {}
+        Jp2kError::UnsupportedBandCount { .. } => {}
+        Jp2kError::BandCountMismatch { .. } => {}
+        Jp2kError::ComponentGeometryMismatch { .. } => {}
+        Jp2kError::Raster(_) => {}
+        _ => {}
+    }
+}
+
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_jp2k_compression_non_exhaustive(v: &libviprs::jp2k::Compression) {
+    match v {
+        libviprs::jp2k::Compression::Lossless => {}
+        libviprs::jp2k::Compression::Lossy { .. } => {}
+        _ => {}
+    }
+}
+
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_radiance_error_non_exhaustive(v: &RadianceError) {
+    match v {
+        RadianceError::BadMagic { .. } => {}
+        RadianceError::TruncatedHeader { .. } => {}
+        RadianceError::BadResolution { .. } => {}
+        RadianceError::DimensionOutOfBounds { .. } => {}
+        RadianceError::ScanlineLengthMismatch { .. } => {}
+        RadianceError::ScanlineOverrun { .. } => {}
+        RadianceError::RunawayRepeat { .. } => {}
+        RadianceError::RepeatWithoutPixel { .. } => {}
+        RadianceError::TruncatedScanline { .. } => {}
+        RadianceError::HeaderLineTooLong { .. } => {}
+        RadianceError::BadHeaderLine { .. } => {}
+        RadianceError::Raster(_) => {}
+        _ => {}
+    }
+}
 
 #[deny(unreachable_patterns)]
 #[allow(dead_code)]
@@ -48,6 +197,16 @@ fn assert_pixel_format_non_exhaustive(v: &PixelFormat) {
         PixelFormat::Rgba16 => {}
         PixelFormat::RgbaF32 => {}
         PixelFormat::FloatF32(_) => {}
+        _ => {}
+    }
+}
+
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_pyramid_storage_non_exhaustive(v: &PyramidStorage) {
+    match v {
+        PyramidStorage::PmTiles => {}
+        PyramidStorage::Directory => {}
         _ => {}
     }
 }
@@ -187,6 +346,112 @@ fn assert_verify_error_non_exhaustive(v: &VerifyError) {
     }
 }
 
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_interpretation_non_exhaustive(v: &Interpretation) {
+    match v {
+        Interpretation::Multiband => {}
+        Interpretation::Bw => {}
+        Interpretation::Histogram => {}
+        Interpretation::Xyz => {}
+        Interpretation::Lab => {}
+        Interpretation::Cmyk => {}
+        Interpretation::Labq => {}
+        Interpretation::Rgb => {}
+        Interpretation::Cmc => {}
+        Interpretation::Lch => {}
+        Interpretation::Labs => {}
+        Interpretation::Srgb => {}
+        Interpretation::Yxy => {}
+        Interpretation::Fourier => {}
+        Interpretation::Rgb16 => {}
+        Interpretation::Grey16 => {}
+        Interpretation::Matrix => {}
+        Interpretation::ScRgb => {}
+        Interpretation::Hsv => {}
+        Interpretation::OkLab => {}
+        Interpretation::OkLch => {}
+        _ => {}
+    }
+}
+
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_colour_error_non_exhaustive(v: &ColourError) {
+    match v {
+        ColourError::UnknownColourspace { .. } => {}
+        ColourError::UnsupportedColourspace { .. } => {}
+        ColourError::TooFewBands { .. } => {}
+        ColourError::DimensionMismatch { .. } => {}
+        ColourError::NoProfile => {}
+        ColourError::ProfileRead { .. } => {}
+        ColourError::InvalidProfile { .. } => {}
+        ColourError::UnsupportedDeviceSpace { .. } => {}
+        ColourError::UnsupportedDepth { .. } => {}
+        ColourError::IccTransform { .. } => {}
+        ColourError::Raster(_) => {}
+        _ => {}
+    }
+}
+
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_intent_non_exhaustive(v: &Intent) {
+    match v {
+        Intent::Perceptual => {}
+        Intent::Relative => {}
+        Intent::Saturation => {}
+        Intent::Absolute => {}
+        _ => {}
+    }
+}
+
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_pcs_non_exhaustive(v: &Pcs) {
+    match v {
+        Pcs::Lab => {}
+        Pcs::Xyz => {}
+        _ => {}
+    }
+}
+
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+// `Compression` has exactly one variant today, so clippy reads the match as an
+// equality check and suggests an `if`. The match is the point: an `if` would
+// not fail to compile the day the enum regresses to exhaustive.
+#[allow(clippy::single_match)]
+fn assert_webp_compression_non_exhaustive(v: &libviprs::webp::Compression) {
+    match v {
+        libviprs::webp::Compression::Lossless => {}
+        _ => {}
+    }
+}
+
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+// Same shape and the same reason as the WebP one above: JPEG XL's only
+// pure-Rust encoder is lossless-only, so `Lossy { distance }` is the variant
+// this enum exists to leave room for.
+#[allow(clippy::single_match)]
+fn assert_jxl_compression_non_exhaustive(v: &libviprs::jxl::Compression) {
+    match v {
+        libviprs::jxl::Compression::Lossless => {}
+        _ => {}
+    }
+}
+
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_webp_keep_non_exhaustive(v: &libviprs::webp::Keep) {
+    match v {
+        libviprs::webp::Keep::All => {}
+        libviprs::webp::Keep::None => {}
+        _ => {}
+    }
+}
+
 /// `PdfError::Pdfium` must be constructible without the `pdfium` feature enabled
 /// (this test crate builds with default features). If the variant is
 /// `#[cfg(feature = "pdfium")]`-gated, this fails to compile.
@@ -201,5 +466,185 @@ fn pdf_error_pdfium_variant_is_feature_independent() {
 #[test]
 fn non_exhaustive_checks_compile() {
     assert_layout_non_exhaustive(&Layout::DeepZoom);
+    assert_pyramid_storage_non_exhaustive(&PyramidStorage::default());
+    assert_webp_compression_non_exhaustive(&libviprs::webp::Compression::Lossless);
+    assert_webp_keep_non_exhaustive(&libviprs::webp::Keep::All);
+    assert_jxl_compression_non_exhaustive(&libviprs::jxl::Compression::Lossless);
+    assert_jxl_error_non_exhaustive(&JxlError::FeatureNotEnabled);
+    assert_jp2k_compression_non_exhaustive(&libviprs::jp2k::Compression::Lossless);
+    assert_jp2k_error_non_exhaustive(&Jp2kError::FeatureNotEnabled);
+    assert_avif_error_non_exhaustive(&AvifError::FeatureNotEnabled);
     assert_pixel_format_non_exhaustive(&PixelFormat::Gray8);
+    assert_interpretation_non_exhaustive(&Interpretation::OkLch);
+    assert_intent_non_exhaustive(&Intent::Perceptual);
+    assert_pcs_non_exhaustive(&Pcs::Lab);
+    assert_metadata_value_non_exhaustive(&MetadataValue::Int(1));
+    assert_cad_error_non_exhaustive(&CadError::TextEmpty);
+    assert_cad_source_non_exhaustive(&CadSource::Bytes(b"AC1032"));
+    assert_view_kind_non_exhaustive(&ViewKind::Model);
+    assert_severity_non_exhaustive(&Severity::Warning);
+    assert_primitive_kind_non_exhaustive(&PrimitiveKind::Line);
+    assert_primitive_non_exhaustive(&Primitive::Line(
+        libviprs::cad::Line::new([0.0; 3], [1.0, 0.0, 0.0]).expect("a finite line"),
+    ));
+}
+
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_join_direction_non_exhaustive(v: &JoinDirection) {
+    match v {
+        JoinDirection::Horizontal => {}
+        JoinDirection::Vertical => {}
+        _ => {}
+    }
+}
+
+/// `MetadataValue` grows with the vips GType set it covers, and two variants
+/// have come through the door #609 held open: `VipsArrayInt` landed as
+/// `IntArray` in #787 and `VipsArrayDouble` as `DoubleArray` in #852. A `.v`
+/// trailer still carries `gboolean` fields this crate only forwards
+/// opaquely. Marking the enum before the first of those landed cost a `_ =>`
+/// arm here; marking it after would have cost a major version (issue #609).
+///
+/// The named arms are not decoration. Without them the `_ =>` below would
+/// swallow each new variant and this file would keep compiling whatever the
+/// enum grew, which is the shape of guard that passes while it stops
+/// guarding.
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_metadata_value_non_exhaustive(v: &MetadataValue) {
+    match v {
+        MetadataValue::Int(_) => {}
+        MetadataValue::Double(_) => {}
+        MetadataValue::Str(_) => {}
+        MetadataValue::Blob(_) => {}
+        MetadataValue::IntArray(_) => {}
+        MetadataValue::DoubleArray(_) => {}
+        _ => {}
+    }
+}
+
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_align_non_exhaustive(v: &Align) {
+    match v {
+        Align::Low => {}
+        Align::Centre => {}
+        Align::High => {}
+        _ => {}
+    }
+}
+
+/// The CAD decoder contract's error, which is the one a provider's every
+/// refusal arrives through (issue #1029). It grows a variant every time the
+/// IR learns to refuse something, which is exactly the shape #946 recorded as
+/// the defect when `AvifError` was the one public error enum missing from
+/// this file.
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_cad_error_non_exhaustive(v: &CadError) {
+    match v {
+        CadError::NonFinite { .. } => {}
+        CadError::NonPositive { .. } => {}
+        CadError::ZeroLengthVector { .. } => {}
+        CadError::EmptySweep { .. } => {}
+        CadError::TooFewVertices { .. } => {}
+        CadError::CountMismatch { .. } => {}
+        CadError::SplineDegree { .. } => {}
+        CadError::SplineControlCount { .. } => {}
+        CadError::SplineKnotCount { .. } => {}
+        CadError::KnotsDecrease { .. } => {}
+        CadError::TextEscapeNotDecoded { .. } => {}
+        CadError::TextEmpty => {}
+        CadError::NoSuchView { .. } => {}
+        CadError::UnrecognisedSource { .. } => {}
+        CadError::Io(_) => {}
+        CadError::Provider { .. } => {}
+        CadError::Sink(_) => {}
+        _ => {}
+    }
+}
+
+/// A drawing arrives as a path or as bytes today. A provider that can stream
+/// one, or take an already-parsed handle, is a third variant and not a major
+/// version.
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_cad_source_non_exhaustive(v: &CadSource<'_>) {
+    match v {
+        CadSource::Path(_) => {}
+        CadSource::Bytes(_) => {}
+        _ => {}
+    }
+}
+
+/// Model space and the layouts, plus the arm that keeps a kind a later build
+/// names representable.
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_view_kind_non_exhaustive(v: &ViewKind) {
+    match v {
+        ViewKind::Model => {}
+        ViewKind::Layout => {}
+        ViewKind::Unknown => {}
+        _ => {}
+    }
+}
+
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_severity_non_exhaustive(v: &Severity) {
+    match v {
+        Severity::Warning => {}
+        Severity::Error => {}
+        _ => {}
+    }
+}
+
+/// The eight shapes the IR carries. A ninth is a change to this crate rather
+/// than to any file format, and it must not break a consumer's match.
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_primitive_kind_non_exhaustive(v: &PrimitiveKind) {
+    match v {
+        PrimitiveKind::Line => {}
+        PrimitiveKind::Polyline => {}
+        PrimitiveKind::Arc => {}
+        PrimitiveKind::Circle => {}
+        PrimitiveKind::Ellipse => {}
+        PrimitiveKind::Spline => {}
+        PrimitiveKind::Polygon => {}
+        PrimitiveKind::Text => {}
+        _ => {}
+    }
+}
+
+/// `TileEvidence` names what a verify's per-tile probe proved, and a third
+/// answer is entirely plausible: a re-render-and-compare verify establishes
+/// more than either variant here, and it is `None` today only because nothing
+/// has taught `raster_verify` to say so.
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_tile_evidence_non_exhaustive(v: &TileEvidence) {
+    match v {
+        TileEvidence::PayloadsRead => {}
+        TileEvidence::LengthsFromTheIndex => {}
+        _ => {}
+    }
+}
+
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_primitive_non_exhaustive(v: &Primitive) {
+    match v {
+        Primitive::Line(_) => {}
+        Primitive::Polyline(_) => {}
+        Primitive::Arc(_) => {}
+        Primitive::Circle(_) => {}
+        Primitive::Ellipse(_) => {}
+        Primitive::Spline(_) => {}
+        Primitive::Polygon(_) => {}
+        Primitive::Text(_) => {}
+        _ => {}
+    }
 }

@@ -36,6 +36,7 @@ fn sample_like() -> Raster {
 
 /// The ported `test_keep_icc` body: save keeps the ICC profile.
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn ported_keep_icc_call_site() {
     let im = sample_like();
     let profile = im.get_field("icc-profile-data");
@@ -55,6 +56,7 @@ fn ported_keep_icc_call_site() {
 
 /// The ported `test_keep_none` body: save_stripped drops ICC and EXIF.
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn ported_keep_none_call_site() {
     let im = sample_like();
 
@@ -76,6 +78,7 @@ fn ported_keep_none_call_site() {
 /// The ported `test_keep_custom_profile` body: attach a profile, save,
 /// reload, and match the `MetadataValue::Blob` pattern on the field.
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn ported_keep_custom_profile_call_site() {
     let mut im = sample_like();
     let srgb_icc = vec![7u8; 480];
@@ -102,6 +105,7 @@ fn ported_keep_custom_profile_call_site() {
 /// EXIF and pixels (`Path::join` produces the `&PathBuf` argument shape
 /// the ported tests pass to `save`).
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn ported_test_vips_call_site() {
     let im = sample_like();
     let dir = tempfile::tempdir().unwrap();
@@ -130,6 +134,7 @@ fn ported_test_vips_call_site() {
 /// to the foreign batch, so the round-trip here goes through `.v`, which
 /// carries every attached field.
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn ported_exif_field_call_sites() {
     let mut im = sample_like();
     im.set_field("exif-ifd2-UserComment", "Hello UserComment".into());
@@ -275,6 +280,7 @@ fn ported_max_coord_call_sites() {
 /// `Raster::save` accepts a `&Path` directly, the other argument shape
 /// the ported tests use.
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
 fn save_accepts_path_ref() {
     let dir = tempfile::tempdir().unwrap();
     let owned = dir.path().join("as_path.png");

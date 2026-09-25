@@ -96,7 +96,7 @@
 
 use thiserror::Error;
 
-use crate::pixel::PixelFormat;
+use crate::pixel::{PixelFormat, SampleKind};
 use crate::raster::Raster;
 
 /// An in-place raster drawing operation.
@@ -131,7 +131,7 @@ pub enum DrawError {
     ///
     /// Ink is painted verbatim as one whole pixel, so it must be exactly
     /// [`PixelFormat::bytes_per_pixel`](crate::pixel::PixelFormat::bytes_per_pixel)
-    /// bytes (`channels * bytes_per_channel`) for the target raster. A shorter
+    /// bytes (`channels * the sample width`) for the target raster. A shorter
     /// ink would silently cycle and a longer one truncate, corrupting channels
     /// — for example a 3-byte RGB ink on an `Rgba8` raster paints the alpha
     /// band from the red byte — so a mismatch is rejected instead of drawing
@@ -609,18 +609,22 @@ impl DrawOp for Mask<'_> {
     fn apply(&self, raster: &mut Raster) {
         assert_ink_pixel_width(raster, self.ink);
         let mfmt = self.mask.format();
-        if mfmt.channels() != 1 || mfmt.bytes_per_channel() != 1 {
+        // A one-band `uchar` mask, asked as a kind. `!= 1` on a width put
+        // every kind that is not one byte in the same bucket, so it would
+        // have accepted an `i8` mask as `u8` under the carrier of issue #516
+        // (issue #607).
+        if mfmt.channels() != 1 || mfmt.kind() != SampleKind::U8 {
             return;
         }
         let fmt = raster.format();
         let bpp = fmt.bytes_per_pixel();
-        let bpc = fmt.bytes_per_channel();
+        let kind = fmt.kind();
         let channels = fmt.channels();
         let Some(ink_px) = ink_pixel(self.ink, bpp) else {
             return;
         };
         let ink_vals: Vec<u32> = (0..channels)
-            .map(|c| channel_at(&ink_px, 0, c, bpc))
+            .map(|c| channel_at(&ink_px, 0, c, kind))
             .collect();
         let w = raster.width() as i64;
         let h = raster.height() as i64;
@@ -644,11 +648,11 @@ impl DrawOp for Mask<'_> {
                 }
                 let off = ty as usize * stride + tx as usize * bpp;
                 for (c, &ink_c) in ink_vals.iter().enumerate() {
-                    let old = channel_at(data, off, c, bpc);
+                    let old = channel_at(data, off, c, kind);
                     // Weighted average of two in-range values stays in range,
                     // and the u32 product cannot overflow (65535 * 255 max).
                     let v = (ink_c * m + old * (255 - m)) / 255;
-                    set_channel_at(data, off, c, bpc, v);
+                    set_channel_at(data, off, c, kind, v);
                 }
             }
         }
@@ -715,7 +719,7 @@ impl DrawOp for Smudge {
         let sh = (sy1 - sy0 + 1) as usize;
         let fmt = raster.format();
         let channels = fmt.channels();
-        let bpc = fmt.bytes_per_channel();
+        let kind = fmt.kind();
         let bpp = fmt.bytes_per_pixel();
         let stride = raster.stride();
         let mut snap = vec![0f64; sw * sh * channels];
@@ -726,12 +730,15 @@ impl DrawOp for Smudge {
                     let off = (sy0 as usize + row) * stride + (sx0 as usize + col) * bpp;
                     for c in 0..channels {
                         snap[(row * sw + col) * channels + c] =
-                            channel_at(data, off, c, bpc) as f64;
+                            f64::from(channel_at(data, off, c, kind));
                     }
                 }
             }
         }
-        let max = if bpc == 1 { 255.0 } else { 65535.0 };
+        // The saturation ceiling belongs to the sample kind. `else 65535`
+        // was the answer for every width that was not one, which is a
+        // sixteenth of a four-byte integer kind's range (issue #607).
+        let max = f64::from(kind.max_value().unwrap_or(u32::MAX));
         let data = raster.data_mut();
         for y in ry0..=ry1 {
             for x in rx0..=rx1 {
@@ -753,7 +760,7 @@ impl DrawOp for Smudge {
                         }
                     }
                     let v = (sum / n as f64).round().clamp(0.0, max) as u32;
-                    set_channel_at(data, off, c, bpc, v);
+                    set_channel_at(data, off, c, kind, v);
                 }
             }
         }
@@ -765,7 +772,7 @@ impl DrawOp for Smudge {
 /// The overlay's pixels replace the target's (libvips "set" mode) with the
 /// overlay's top-left corner at `(x, y)`. Off-canvas rows and columns clip
 /// away, so the overlay may straddle any edge. The overlay must share the
-/// target's [`PixelFormat`](crate::pixel::PixelFormat); pasting a mismatched
+/// target's [`PixelFormat`]; pasting a mismatched
 /// format is a documented no-op (libvips would cast the sub-image, a
 /// conversion this seam deliberately leaves to the caller).
 #[derive(Debug, Clone)]
@@ -829,36 +836,51 @@ fn ink_pixel(ink: &[u8], bpp: usize) -> Option<Vec<u8>> {
 /// Unsigned depths only: the panic arm keeps the sample-level draw ops,
 /// which predate the float formats, from misreading float bytes as `u16`
 /// pairs. (`put_pixel` and the raw-ink paths copy whole `bpp`-sized pixels
-/// and handle float fine.)
-fn channel_at(data: &[u8], off: usize, c: usize, bpc: usize) -> u32 {
-    match bpc {
-        1 => data[off + c] as u32,
-        2 => {
+/// and handle float fine.) It takes a [`SampleKind`] rather than a byte
+/// width, so the refusal covers the signed and 32-bit carriers of issues
+/// #516 and #517 as well, which a width cannot separate from the two arms
+/// above (issue #607).
+fn channel_at(data: &[u8], off: usize, c: usize, kind: SampleKind) -> u32 {
+    match kind {
+        SampleKind::U8 => u32::from(data[off + c]),
+        SampleKind::U16 => {
             let b = off + c * 2;
-            u16::from_ne_bytes([data[b], data[b + 1]]) as u32
+            u32::from(u16::from_ne_bytes([data[b], data[b + 1]]))
         }
-        _ => panic!(
-            "this draw operation does not support float rasters yet; \
+        // Total, so a carrier added to `PixelFormat` has to decide here
+        // rather than falling into whatever the `_` arm meant. The panic
+        // reaches the same kind it always did (float), plus the signed and
+        // 32-bit ones, which a width could not tell apart from the two arms
+        // above and from `f32` respectively (issue #607).
+        SampleKind::I8 | SampleKind::I16 | SampleKind::U32 | SampleKind::I32 | SampleKind::F32 => {
+            panic!(
+                "this draw operation does not support {kind:?} rasters yet; \
              cast to an unsigned 8/16-bit format first"
-        ),
+            )
+        }
     }
 }
 
 /// Write channel `c` of the pixel at byte offset `off`, saturating to the
 /// channel's range. Unsigned depths only; see [`channel_at`].
-fn set_channel_at(data: &mut [u8], off: usize, c: usize, bpc: usize, v: u32) {
-    match bpc {
-        1 => data[off + c] = v.min(255) as u8,
-        2 => {
+fn set_channel_at(data: &mut [u8], off: usize, c: usize, kind: SampleKind, v: u32) {
+    match kind {
+        SampleKind::U8 => data[off + c] = v.min(255) as u8,
+        SampleKind::U16 => {
             let b = off + c * 2;
             let bytes = (v.min(65535) as u16).to_ne_bytes();
             data[b] = bytes[0];
             data[b + 1] = bytes[1];
         }
-        _ => panic!(
-            "this draw operation does not support float rasters yet; \
+        // The write side of [`channel_at`]'s refusal, and the worse half: a
+        // four-byte kind written through the two-byte arm stores at half the
+        // stride and walks every second sample (issue #607).
+        SampleKind::I8 | SampleKind::I16 | SampleKind::U32 | SampleKind::I32 | SampleKind::F32 => {
+            panic!(
+                "this draw operation does not support {kind:?} rasters yet; \
              cast to an unsigned 8/16-bit format first"
-        ),
+            )
+        }
     }
 }
 
@@ -1875,15 +1897,93 @@ mod tests {
         }
     }
 
-    /// A mask that is not single-band 8-bit is a documented no-op.
+    /**
+     * Tests that a mask which is not single-band `uchar` is a documented
+     * no-op, with masks that would visibly blend if the guard were dropped.
+     * The mutation sweep for #748 deleted the sample-kind half of that guard
+     * and **nothing reddened**, because this test used `Raster::zeroed`
+     * masks: an all-zero mask blends zero weight, so "refused" and "accepted
+     * with weight 0" produce the same black target and the assertion was
+     * vacuous (issue #915). Both masks are saturated now, so accepting
+     * either one writes the ink.
+     * `Gray16` is the case the kind test is really for: with the guard gone
+     * its samples are walked as bytes, at half the stride, and the low byte
+     * of each 16-bit value becomes the weight.
+     * Input: a saturated `Rgb8` mask and a saturated `Gray16` mask ->
+     * Output: the target is untouched by both.
+     */
     #[test]
     fn draw_mask_requires_single_band_8bit_mask() {
-        let rgb_mask = Raster::zeroed(4, 4, PixelFormat::Rgb8).unwrap();
-        let gray16_mask = Raster::zeroed(4, 4, PixelFormat::Gray16).unwrap();
+        let rgb_mask = Raster::new(4, 4, PixelFormat::Rgb8, vec![255u8; 4 * 4 * 3]).unwrap();
+        let gray16_mask = Raster::new(4, 4, PixelFormat::Gray16, vec![255u8; 4 * 4 * 2]).unwrap();
+
+        // Positive control: a single-band uchar mask of the same value does
+        // blend, so the two assertions below are about the mask's format and
+        // not about a mask that could never have done anything.
+        let mut blended = black(4, 4);
+        blended.draw_mask(
+            &[200],
+            &Raster::new(4, 4, PixelFormat::Gray8, vec![255u8; 16]).unwrap(),
+            0,
+            0,
+        );
+        assert!(
+            blended.data().iter().any(|&b| b != 0),
+            "positive control failed: a saturated uchar mask must blend"
+        );
+
         let mut im = black(4, 4);
         im.draw_mask(&[200], &rgb_mask, 0, 0);
+        assert!(
+            im.data().iter().all(|&b| b == 0),
+            "a three-band mask must be refused"
+        );
         im.draw_mask(&[200], &gray16_mask, 0, 0);
-        assert!(im.data().iter().all(|&b| b == 0));
+        assert!(
+            im.data().iter().all(|&b| b == 0),
+            "a 16-bit mask must be refused, not walked as bytes"
+        );
+    }
+
+    /**
+     * Tests that `draw_smudge` clips its box average against the sample
+     * kind's own ceiling rather than against a constant.
+     * The mutation sweep for #748 replaced that ceiling with a flat `255.0`
+     * and **nothing reddened** (issue #915), because the module's only
+     * 16-bit smudge exercise never averages above 255, so the two constants
+     * agree everywhere it looks. Before #867 the line read
+     * `if bpc == 1 { 255 } else { 65535 }`, which is a sixteenth of a
+     * four-byte integer kind's range; the replacement reads the kind and had
+     * nothing holding it.
+     * Works on a `Gray16` raster filled well above 255, so the smudged
+     * average is a 16-bit value and a 255 ceiling would flatten it.
+     * Input: a uniform `Gray16` field of 40000 -> Output: the smudged pixels
+     * are still 40000, not 255.
+     */
+    #[test]
+    fn draw_smudge_clips_against_the_sample_kind_ceiling() {
+        const V: u16 = 40_000;
+        let data: Vec<u8> = std::iter::repeat_n(V.to_ne_bytes(), 6 * 6)
+            .flatten()
+            .collect();
+        let mut im = Raster::new(6, 6, PixelFormat::Gray16, data).unwrap();
+        im.draw_smudge(1, 1, 4, 4);
+
+        let out = im.data();
+        for (i, chunk) in out.as_chunks::<2>().0.iter().enumerate() {
+            assert_eq!(
+                u16::from_ne_bytes(*chunk),
+                V,
+                "sample {i} was clipped below its kind's ceiling"
+            );
+        }
+
+        // Positive control: the ceiling is genuinely above 255 here, so a
+        // constant-255 clip would have been visible rather than a no-op.
+        assert!(
+            u32::from(V) > 255,
+            "the fixture must sit above the 8-bit ceiling to separate the two"
+        );
     }
 
     /// Multi-band targets blend every channel against the same mask value.

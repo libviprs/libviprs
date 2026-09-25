@@ -1,0 +1,11 @@
+# capture.py regenerates every fixture and every intermediate from the vips
+# binary alone, so the whole tree here is reproducible with
+# `python3 capture.py` and no Rust toolchain.
+#
+# fixtures/ IS pinned: analyzeload is load-only, so a port has no way to
+# produce these inputs for itself and needs them checked in. They are 82
+# tiny files, about 16K in total.
+#
+# outputs/ holds the intermediate `.v` files every direct `vips analyzeload`
+# call writes, and is pure scratch.
+outputs/

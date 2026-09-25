@@ -1,0 +1,9 @@
+# capture.py regenerates everything below from the PNM inputs, the reference
+# suite's sample.jpg and the vips binary, so only the inputs, the generated
+# masks, capture.py, commands.sh and oracle.json are pinned.
+#
+# fixtures/outputs/ holds both arms of every dual-path record plus the
+# rawsave dumps the sample comparison needs, which is tens of megabytes.
+fixtures/*.v
+fixtures/*.raw
+fixtures/outputs/

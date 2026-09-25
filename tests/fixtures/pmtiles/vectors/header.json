@@ -1,0 +1,221 @@
+{
+  "archives": {
+    "distinct-z0z7.pmtiles": {
+      "cli_pmtiles_show": "pmtiles spec version: 3\ntile type: png\nbounds: (long: -180.000000, lat: -85.051129) (long: 180.000000, lat: 85.051129)\nmin zoom: 1\nmax zoom: 7\ncenter: (long: 0.000000, lat: 0.000000)\ncenter zoom: 3\naddressed tiles count: 19858\ntile entries count: 19847\ntile contents count: 19843\nclustered: true\ninternal compression: gzip\ntile compression: none\ndescription libviprs EPIC F discrimination fixture: distinct self-describing payloads, holes, leaf directories\nformat png\nname libviprs-fable-distinct\ntype baselayer\nversion 1\n",
+      "decoded_by_pmtiles_DeserializeHeader": {
+        "addressed_tiles_count": 19858,
+        "center_lat_e7": 0,
+        "center_lon_e7": 0,
+        "center_zoom": 3,
+        "clustered": true,
+        "internal_compression": 2,
+        "leaf_directory_length": 7605,
+        "leaf_directory_offset": 343,
+        "max_lat_e7": 850511287,
+        "max_lon_e7": 1800000000,
+        "max_zoom": 7,
+        "metadata_length": 166,
+        "metadata_offset": 177,
+        "min_lat_e7": -850511287,
+        "min_lon_e7": -1800000000,
+        "min_zoom": 1,
+        "root_length": 50,
+        "root_offset": 127,
+        "spec_version": 3,
+        "tile_compression": 1,
+        "tile_contents_count": 19843,
+        "tile_data_length": 238166,
+        "tile_data_offset": 7948,
+        "tile_entries_count": 19847,
+        "tile_type": 2
+      },
+      "golden": "distinct-z0z7.pmtiles",
+      "golden_sha256": "a32dce77a93a304dbd27b80d72160b29455446931b477b5b1b7a84155ecd2dd5",
+      "golden_size": 246114,
+      "header_bytes_hex": "504d54696c6573037f000000000000003200000000000000b100000000000000a6000000000000005701000000000000b51d0000000000000c1f00000000000056a2030000000000924d000000000000874d000000000000834d000000000000010201020107002eb694493a4ecd00d2496bb7c5b132030000000000000000",
+      "header_length": 127
+    },
+    "dupes-z0z3.pmtiles": {
+      "cli_pmtiles_show": "pmtiles spec version: 3\ntile type: png\nbounds: (long: -180.000000, lat: -85.051129) (long: 180.000000, lat: 85.051129)\nmin zoom: 0\nmax zoom: 3\ncenter: (long: 0.000000, lat: 0.000000)\ncenter zoom: 2\naddressed tiles count: 85\ntile entries count: 67\ntile contents count: 63\nclustered: true\ninternal compression: gzip\ntile compression: none\ntype baselayer\nversion 1\ndescription libviprs EPIC F oracle golden, deliberate duplicate tiles\nformat png\nmaxzoom 3\nminzoom 0\nname libviprs-oracle-dupes\n",
+      "cli_pmtiles_show_header_json": {
+        "bounds": [
+          -180,
+          -85.0511287,
+          180,
+          85.0511287
+        ],
+        "center": [
+          0,
+          0,
+          2
+        ],
+        "maxzoom": 3,
+        "minzoom": 0,
+        "tile_compression": "none",
+        "tile_type": "png"
+      },
+      "cli_pmtiles_verify_exit_code": 0,
+      "cli_pmtiles_verify_output": "2026/09/11 18:03:56 verify.go:169: Completed verify in 435.292\u00b5s.\n",
+      "decoded_by_pmtiles_DeserializeHeader": {
+        "addressed_tiles_count": 85,
+        "center_lat_e7": 0,
+        "center_lon_e7": 0,
+        "center_zoom": 2,
+        "clustered": true,
+        "internal_compression": 2,
+        "leaf_directory_length": 0,
+        "leaf_directory_offset": 345,
+        "max_lat_e7": 850511287,
+        "max_lon_e7": 1800000000,
+        "max_zoom": 3,
+        "metadata_length": 159,
+        "metadata_offset": 186,
+        "min_lat_e7": -850511287,
+        "min_lon_e7": -1800000000,
+        "min_zoom": 0,
+        "root_length": 59,
+        "root_offset": 127,
+        "spec_version": 3,
+        "tile_compression": 1,
+        "tile_contents_count": 63,
+        "tile_data_length": 4662,
+        "tile_data_offset": 345,
+        "tile_entries_count": 67,
+        "tile_type": 2
+      },
+      "golden": "dupes-z0z3.pmtiles",
+      "golden_sha256": "bfc9db4c6ce6a04194e02b3d4815814adb05209f1aaba8591e4e1332f6e56a27",
+      "golden_size": 5007,
+      "header_bytes_hex": "504d54696c6573037f000000000000003b00000000000000ba000000000000009f000000000000005901000000000000000000000000000059010000000000003612000000000000550000000000000043000000000000003f00000000000000010201020003002eb694493a4ecd00d2496bb7c5b132020000000000000000",
+      "header_length": 127
+    },
+    "leaves-z0z7.pmtiles": {
+      "cli_pmtiles_show": "pmtiles spec version: 3\ntile type: png\nbounds: (long: -180.000000, lat: -85.051129) (long: 180.000000, lat: 85.051129)\nmin zoom: 0\nmax zoom: 7\ncenter: (long: 0.000000, lat: 0.000000)\ncenter zoom: 3\naddressed tiles count: 21845\ntile entries count: 21844\ntile contents count: 2\nclustered: true\ninternal compression: gzip\ntile compression: none\nformat png\nmaxzoom 7\nminzoom 0\nname libviprs-oracle-leaves\ntype baselayer\nversion 1\ndescription libviprs EPIC F oracle golden, entry count forces leaf directories\n",
+      "cli_pmtiles_show_header_json": {
+        "bounds": [
+          -180,
+          -85.0511287,
+          180,
+          85.0511287
+        ],
+        "center": [
+          0,
+          0,
+          3
+        ],
+        "maxzoom": 7,
+        "minzoom": 0,
+        "tile_compression": "none",
+        "tile_type": "png"
+      },
+      "cli_pmtiles_verify_exit_code": 0,
+      "cli_pmtiles_verify_output": "2026/09/11 18:03:57 verify.go:169: Completed verify in 1.555792ms.\n",
+      "decoded_by_pmtiles_DeserializeHeader": {
+        "addressed_tiles_count": 21845,
+        "center_lat_e7": 0,
+        "center_lon_e7": 0,
+        "center_zoom": 3,
+        "clustered": true,
+        "internal_compression": 2,
+        "leaf_directory_length": 391,
+        "leaf_directory_offset": 334,
+        "max_lat_e7": 850511287,
+        "max_lon_e7": 1800000000,
+        "max_zoom": 7,
+        "metadata_length": 165,
+        "metadata_offset": 169,
+        "min_lat_e7": -850511287,
+        "min_lon_e7": -1800000000,
+        "min_zoom": 0,
+        "root_length": 42,
+        "root_offset": 127,
+        "spec_version": 3,
+        "tile_compression": 1,
+        "tile_contents_count": 2,
+        "tile_data_length": 144,
+        "tile_data_offset": 725,
+        "tile_entries_count": 21844,
+        "tile_type": 2
+      },
+      "golden": "leaves-z0z7.pmtiles",
+      "golden_sha256": "fe5c9636be61abc60046d7f13837f8a3efb20ce3c38303644dac0cbec8248b8d",
+      "golden_size": 869,
+      "header_bytes_hex": "504d54696c6573037f000000000000002a00000000000000a900000000000000a5000000000000004e010000000000008701000000000000d5020000000000009000000000000000555500000000000054550000000000000200000000000000010201020007002eb694493a4ecd00d2496bb7c5b132030000000000000000",
+      "header_length": 127
+    },
+    "raster-z0z2.pmtiles": {
+      "cli_pmtiles_show": "pmtiles spec version: 3\ntile type: png\nbounds: (long: -180.000000, lat: -85.051129) (long: 180.000000, lat: 85.051129)\nmin zoom: 0\nmax zoom: 2\ncenter: (long: 0.000000, lat: 0.000000)\ncenter zoom: 1\naddressed tiles count: 21\ntile entries count: 21\ntile contents count: 21\nclustered: true\ninternal compression: gzip\ntile compression: none\ndescription libviprs EPIC F oracle golden, distinct 8x8 PNG per tile\nformat png\nmaxzoom 2\nminzoom 0\nname libviprs-oracle-raster\ntype baselayer\nversion 1\n",
+      "cli_pmtiles_show_header_json": {
+        "bounds": [
+          -180,
+          -85.0511287,
+          180,
+          85.0511287
+        ],
+        "center": [
+          0,
+          0,
+          1
+        ],
+        "maxzoom": 2,
+        "minzoom": 0,
+        "tile_compression": "none",
+        "tile_type": "png"
+      },
+      "cli_pmtiles_verify_exit_code": 0,
+      "cli_pmtiles_verify_output": "2026/09/11 18:03:56 verify.go:169: Completed verify in 367.333\u00b5s.\n",
+      "decoded_by_pmtiles_DeserializeHeader": {
+        "addressed_tiles_count": 21,
+        "center_lat_e7": 0,
+        "center_lon_e7": 0,
+        "center_zoom": 1,
+        "clustered": true,
+        "internal_compression": 2,
+        "leaf_directory_length": 0,
+        "leaf_directory_offset": 324,
+        "max_lat_e7": 850511287,
+        "max_lon_e7": 1800000000,
+        "max_zoom": 2,
+        "metadata_length": 162,
+        "metadata_offset": 162,
+        "min_lat_e7": -850511287,
+        "min_lon_e7": -1800000000,
+        "min_zoom": 0,
+        "root_length": 35,
+        "root_offset": 127,
+        "spec_version": 3,
+        "tile_compression": 1,
+        "tile_contents_count": 21,
+        "tile_data_length": 1554,
+        "tile_data_offset": 324,
+        "tile_entries_count": 21,
+        "tile_type": 2
+      },
+      "golden": "raster-z0z2.pmtiles",
+      "golden_sha256": "e2ed5e64f3c29efa3ec3b679ec5f1b06569c1b234c6eea762fb9f02fc23e9c12",
+      "golden_size": 1878,
+      "header_bytes_hex": "504d54696c6573037f000000000000002300000000000000a200000000000000a2000000000000004401000000000000000000000000000044010000000000001206000000000000150000000000000015000000000000001500000000000000010201020002002eb694493a4ecd00d2496bb7c5b132010000000000000000",
+      "header_length": 127
+    }
+  },
+  "how_each_number_was_obtained": {
+    "cli_pmtiles_show": "verbatim stdout of `pmtiles show --quiet <archive>`",
+    "cli_pmtiles_show_header_json": "verbatim stdout of `pmtiles show --quiet --header-json <archive>`",
+    "cli_pmtiles_verify_output": "verbatim output of `pmtiles verify <archive>`, which exited 0",
+    "decoded_by_pmtiles_DeserializeHeader": "pmtiles.DeserializeHeader(raw[0:127]), every field of the returned HeaderV3 struct",
+    "header_bytes_hex": "the first 127 bytes of the archive, read verbatim",
+    "internal_compression / tile_compression": "the numeric Compression enum: 0 unknown, 1 none, 2 gzip, 3 brotli, 4 zstd",
+    "tile_type": "the numeric TileType enum: 0 unknown, 1 mvt, 2 png, 3 jpeg, 4 webp, 5 avif, 6 mlt"
+  },
+  "primary": "raster-z0z2.pmtiles",
+  "produced_by": {
+    "cli_version_line": "pmtiles 1.31.2, commit a3e4951ea6a0477b784c27c1dcbfd9c130878c5a, built at 2026-07-22T18:59:03Z",
+    "linux_amd64_tarball_sha256": "3ed7dbf4ec2e6dfe5e25b6f70d1ffc932729f93c86db353bf514dd71010a312f",
+    "linux_arm64_tarball_sha256": "f8bd47e7ea866863489cad588fbaf2f31f42e5821f7a03f009b3769f05801cb1",
+    "release_tag": "v1.31.2",
+    "see": "../PROVENANCE.md",
+    "source_commit": "a3e4951ea6a0477b784c27c1dcbfd9c130878c5a",
+    "tool": "go-pmtiles"
+  },
+  "what_this_is": "The 127-byte PMTiles v3 header of each golden as raw hex, together with the field-by-field decoding the reference implementation gives for those same bytes. Both halves are here on purpose: the bytes, and what go-pmtiles says they mean."
+}

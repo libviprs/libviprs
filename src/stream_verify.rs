@@ -3,7 +3,7 @@
 //! This module mirrors the byte-exact verify path in
 //! [`crate::engine::run_verify`](crate::engine) without requiring the full
 //! source raster to live in memory up front. The caller supplies a
-//! [`StripSource`](crate::streaming::StripSource); the verify walker pulls
+//! [`StripSource`]; the verify walker pulls
 //! the top pyramid level strip-by-strip, assembles it into a
 //! `canvas_width × canvas_height` raster, and then replays the monolithic
 //! engine's level-by-level downscale / tile-extract / tile-compare loop.
@@ -34,7 +34,17 @@ use crate::streaming::{StripSource, obtain_canvas_strip};
 /// the format *is* known, [`active_candidate_exts`] narrows the probe to the
 /// active format so Verify does not validate a stale sibling file (issue #139).
 /// This matches the behaviour of `engine::raster_verify`.
-const CANDIDATE_EXTS: [&str; 4] = ["raw", "png", "jpeg", "jpg"];
+///
+/// Derived from [`TileFormat`](crate::sink::TileFormat) rather than written
+/// out, since issue #1123. It used to be `["raw", "png", "jpeg", "jpg"]`, one
+/// of four hand-written copies of the same list, and adding a `Webp` variant
+/// broke none of them: a WebP tree verified through a format-blind sink
+/// matched nothing here and was reported as a pyramid with no tiles in it. The
+/// list is the same one in the same order with `webp` appended, so nothing
+/// about an existing tree's probe changes.
+fn candidate_exts() -> Vec<&'static str> {
+    crate::sink::TileFormat::candidate_extensions()
+}
 
 /// A [`StripSource`](crate::streaming::StripSource) (or the canvas-embedding
 /// helper it is routed through) returned a strip whose layout does not match
@@ -89,10 +99,13 @@ fn strip_layout_error(reason: String) -> EngineError {
 /// * `raw` — byte-exact comparison against the regenerated tile. Any
 ///   mismatch (truncation, flipped byte, padding drift) is reported as
 ///   [`EngineError::ChecksumMismatch`].
-/// * `png` / `jpeg` / `jpg` — existence check only. Encoded tiles cannot be
-///   re-encoded bit-identically from fresh pixel data (encoder-state
-///   nondeterminism), so deeper verification is deferred to the
-///   manifest-checksum branch.
+/// * `png` / `jpeg` / `jpg` / `webp` — existence check only. Encoded tiles
+///   cannot be re-encoded bit-identically from fresh pixel data
+///   (encoder-state nondeterminism), so deeper verification is deferred to the
+///   manifest-checksum branch. `webp` was missing from this list from #1123,
+///   when `TileFormat` gained the variant, until the review of #1147; it
+///   always took this branch, so the list was short rather than the behaviour
+///   wrong.
 ///
 /// # Manifest checksums
 ///
@@ -150,13 +163,13 @@ pub fn verify_from_strip_source(
     // plan. Mirrors the Monolithic raster_verify path so verify errors on
     // plan divergence surface structurally instead of as per-tile byte
     // mismatches.
-    if let Some(meta) = crate::resume::JobCheckpoint::load(root)? {
-        if let Err(current) = crate::resume::verify_checkpoint_contract(&meta, plan, config, sink) {
-            return Err(EngineError::PlanHashMismatch {
-                expected: current,
-                actual: meta.plan_hash,
-            });
-        }
+    if let Some(meta) = crate::resume::JobCheckpoint::load(root)?
+        && let Err(current) = crate::resume::verify_checkpoint_contract(&meta, plan, config, sink)
+    {
+        return Err(EngineError::PlanHashMismatch {
+            expected: current,
+            actual: meta.plan_hash,
+        });
     }
 
     // ------------------------------------------------------------------
@@ -182,63 +195,62 @@ pub fn verify_from_strip_source(
     // present and records per-tile checksums, re-hash the on-disk bytes
     // and fail on the first mismatch.
     // ------------------------------------------------------------------
-    if let Some(manifest) = read_manifest(root) {
-        if let Some(checksums) = manifest.get("checksums") {
-            let algo_str = checksums.get("algo").and_then(|v| v.as_str());
-            let per_tile = checksums.get("per_tile").and_then(|v| v.as_object());
-            if let (Some(algo_str), Some(per_tile)) = (algo_str, per_tile) {
-                // Route through the single shared parser. An unknown / future
-                // / typo'd algorithm is a hard verification failure here, not
-                // something to silently skip — otherwise a manifest stamped
-                // with a bogus algo would pass with zero digests checked
-                // (issue #95).
-                let algo = crate::manifest::ChecksumAlgo::from_manifest_str(algo_str).ok_or_else(
-                    || {
-                        EngineError::Sink(SinkError::Other(format!(
-                            "Verify: unknown checksum algorithm {algo_str:?} in manifest"
-                        )))
-                    },
-                )?;
-                {
-                    // A recorded tile that is gone from disk is a verification
-                    // failure, not something to skip — unless it is a
-                    // manifest-referenced blank whose content lives in
-                    // `_shared/` (issue #93).
-                    let blank_refs = manifest.get("blank_references").and_then(|v| v.as_object());
-                    for (rel, expected) in per_tile {
-                        let Some(expected_s) = expected.as_str() else {
-                            continue;
-                        };
-                        // Reject traversal / absolute / prefixed manifest keys
-                        // before any filesystem access, and stream the tile
-                        // through the hasher to cap memory (see #79).
-                        let abs = match crate::checksum::safe_manifest_join(root, rel) {
-                            Some(p) => p,
-                            None => {
-                                return Err(EngineError::Sink(SinkError::Other(format!(
-                                    "Verify: manifest tile path escapes checkpoint root: {rel}"
-                                ))));
-                            }
-                        };
-                        let got = match crate::checksum::hash_file(&abs, algo) {
-                            Ok(g) => g,
-                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                                if blank_refs.is_some_and(|m| m.contains_key(rel)) {
-                                    continue;
-                                }
-                                return Err(EngineError::Sink(SinkError::MissingTile {
-                                    tile_rel_path: rel.clone(),
-                                }));
-                            }
-                            Err(e) => return Err(EngineError::Sink(SinkError::Io(e))),
-                        };
-                        if !got.eq_ignore_ascii_case(expected_s) {
-                            return Err(EngineError::ChecksumMismatch {
-                                tile: coord_for_manifest_rel(plan, rel),
-                                expected: expected_s.to_string(),
-                                got,
-                            });
+    if let Some(manifest) = read_manifest(root)
+        && let Some(checksums) = manifest.get("checksums")
+    {
+        let algo_str = checksums.get("algo").and_then(|v| v.as_str());
+        let per_tile = checksums.get("per_tile").and_then(|v| v.as_object());
+        if let (Some(algo_str), Some(per_tile)) = (algo_str, per_tile) {
+            // Route through the single shared parser. An unknown / future
+            // / typo'd algorithm is a hard verification failure here, not
+            // something to silently skip — otherwise a manifest stamped
+            // with a bogus algo would pass with zero digests checked
+            // (issue #95).
+            let algo =
+                crate::manifest::ChecksumAlgo::from_manifest_str(algo_str).ok_or_else(|| {
+                    EngineError::Sink(SinkError::Other(format!(
+                        "Verify: unknown checksum algorithm {algo_str:?} in manifest"
+                    )))
+                })?;
+            {
+                // A recorded tile that is gone from disk is a verification
+                // failure, not something to skip — unless it is a
+                // manifest-referenced blank whose content lives in
+                // `_shared/` (issue #93).
+                let blank_refs = manifest.get("blank_references").and_then(|v| v.as_object());
+                for (rel, expected) in per_tile {
+                    let Some(expected_s) = expected.as_str() else {
+                        continue;
+                    };
+                    // Reject traversal / absolute / prefixed manifest keys
+                    // before any filesystem access, and stream the tile
+                    // through the hasher to cap memory (see #79).
+                    let abs = match crate::checksum::safe_manifest_join(root, rel) {
+                        Some(p) => p,
+                        None => {
+                            return Err(EngineError::Sink(SinkError::Other(format!(
+                                "Verify: manifest tile path escapes checkpoint root: {rel}"
+                            ))));
                         }
+                    };
+                    let got = match crate::checksum::hash_file(&abs, algo) {
+                        Ok(g) => g,
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                            if blank_refs.is_some_and(|m| m.contains_key(rel)) {
+                                continue;
+                            }
+                            return Err(EngineError::Sink(SinkError::MissingTile {
+                                tile_rel_path: rel.clone(),
+                            }));
+                        }
+                        Err(e) => return Err(EngineError::Sink(SinkError::Io(e))),
+                    };
+                    if !got.eq_ignore_ascii_case(expected_s) {
+                        return Err(EngineError::ChecksumMismatch {
+                            tile: coord_for_manifest_rel(plan, rel),
+                            expected: expected_s.to_string(),
+                            got,
+                        });
                     }
                 }
             }
@@ -464,6 +476,10 @@ pub fn verify_from_strip_source(
         duration: started.elapsed(),
         stage_durations: StageDurations::default(),
         skipped_due_to_failure: 0,
+        // A strip verify re-rendered from the source and compared
+        // bytes, which is not one of the two per-tile probes
+        // `TileEvidence` describes.
+        tile_evidence: None,
     })
 }
 
@@ -484,9 +500,8 @@ pub fn verify_from_strip_source(
 /// (issue #139).
 fn active_candidate_exts(sink: &dyn TileSink) -> Vec<&'static str> {
     match sink.content_format() {
-        Some(crate::sink::TileFormat::Jpeg { .. }) => vec!["jpeg", "jpg"],
-        Some(fmt) => vec![fmt.extension()],
-        None => CANDIDATE_EXTS.to_vec(),
+        Some(fmt) => fmt.extensions().to_vec(),
+        None => candidate_exts(),
     }
 }
 
@@ -523,8 +538,9 @@ fn find_tile_on_disk(
 /// #139).
 fn coord_for_manifest_rel(plan: &PyramidPlan, rel: &str) -> TileCoord {
     let normalized = rel.replace('\\', "/");
+    let exts = candidate_exts();
     for coord in plan.tile_coords() {
-        for ext in CANDIDATE_EXTS {
+        for ext in &exts {
             if plan.tile_path(coord, ext).is_some_and(|p| p == normalized) {
                 return coord;
             }
@@ -584,10 +600,10 @@ fn read_manifest(root: &std::path::Path) -> Option<serde_json::Value> {
         let mut name = stem.to_os_string();
         name.push(".manifest.json");
         let sibling = parent.join(name);
-        if let Ok(bytes) = std::fs::read(&sibling) {
-            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-                return Some(v);
-            }
+        if let Ok(bytes) = std::fs::read(&sibling)
+            && let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes)
+        {
+            return Some(v);
         }
     }
     let inside = root.join("manifest.json");
@@ -789,7 +805,7 @@ mod tests {
             .tile_coords()
             .next()
             .expect("plan has at least one tile");
-        for ext in &CANDIDATE_EXTS {
+        for ext in candidate_exts() {
             if let Some(rel) = plan.tile_path(victim, ext) {
                 let abs = out.join(&rel);
                 let _ = std::fs::remove_file(abs);
@@ -834,13 +850,13 @@ mod tests {
         'outer: for coord in plan.tile_coords() {
             if let Some(rel) = plan.tile_path(coord, "raw") {
                 let abs = out.join(&rel);
-                if let Ok(mut bytes) = std::fs::read(&abs) {
-                    if !bytes.is_empty() {
-                        bytes[0] ^= 0xFF;
-                        std::fs::write(&abs, &bytes).unwrap();
-                        corrupted = Some(coord);
-                        break 'outer;
-                    }
+                if let Ok(mut bytes) = std::fs::read(&abs)
+                    && !bytes.is_empty()
+                {
+                    bytes[0] ^= 0xFF;
+                    std::fs::write(&abs, &bytes).unwrap();
+                    corrupted = Some(coord);
+                    break 'outer;
                 }
             }
         }
@@ -1017,5 +1033,31 @@ mod tests {
         let mut bad = MalformedStripSource::new(256, 256);
         bad.extra_rows = 1;
         assert_strip_layout_rejected(bad, "rows");
+    }
+    /// The streaming twin of `engine`'s cell of the same name (issue #1123).
+    ///
+    /// Two copies of one function, so a fix applied to one of them leaves the
+    /// other answering a transposed coordinate. They share the bug and not a
+    /// line, which is why they get two tests and not one.
+    #[test]
+    fn a_webp_manifest_key_resolves_to_the_right_coord() {
+        let plan = crate::planner::PyramidPlanner::new(512, 512, 256, 0, Layout::Google)
+            .unwrap()
+            .plan();
+
+        let coord = plan
+            .tile_coords()
+            .find(|c| c.col != c.row)
+            .expect("a Google plan over 512x512 has an off-diagonal tile");
+        let rel = plan.tile_path(coord, "webp").expect("the coord is in plan");
+
+        assert_eq!(
+            coord_for_manifest_rel(&plan, &rel),
+            coord,
+            "a .webp key resolved to the wrong tile in the streaming path"
+        );
+
+        let png = plan.tile_path(coord, "png").expect("the coord is in plan");
+        assert_eq!(coord_for_manifest_rel(&plan, &png), coord);
     }
 }

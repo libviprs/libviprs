@@ -33,7 +33,7 @@
 //! | [`Raster::hist_match`] | `vips_hist_match` | histogram-specification LUT |
 //! | [`Raster::hist_plot`] | `vips_hist_plot` | bar-graph image of a histogram |
 //! | [`Raster::hist_entropy`] | `vips_hist_entropy` | Shannon entropy, `f64` bits |
-//! | [`Raster::hist_ismonotonic`] | `vips_hist_ismonotonic` | `bool` |
+//! | [`Raster::hist_ismonotonic`] | `vips_hist_ismonotonic` (diverges, see the method) | `bool` |
 //! | [`Raster::maplut`] | `vips_maplut` | image mapped through a LUT |
 //! | [`Raster::case`] | `vips_case` | index image mapped to scalar cases |
 //! | [`Raster::percent`] | `vips_percent` | percentile threshold, `f64` |
@@ -47,14 +47,31 @@
 //!   return [`HistogramError::NotAHistogram`] otherwise. Element order is
 //!   identical for both orientations (row-major data with interleaved
 //!   bands), and outputs preserve the input's orientation.
-//! * **Count depth.** libvips stores counts in 32-bit unsigned samples;
-//!   [`PixelFormat`] has no depth wider than 16 bits, so every op that
-//!   produces counts or sums writes 16-bit samples and saturates at
-//!   `65535`. This is the documented contract until a wider sample depth
-//!   lands. Operations that consume pixel-value distributions internally
-//!   ([`Raster::hist_equal`], [`Raster::hist_local`], [`Raster::percent`])
-//!   compute full-precision `u64` histograms directly from the image and
-//!   are exact regardless of image size.
+//! * **Count depth.** Counts and sums go out on
+//!   [`PixelFormat::Uint32`], the libvips `UINT` carrier, so a count is a
+//!   count: a 300x300 image reports 90000 rather than the 65535 it
+//!   reported while the widest unsigned depth here was 16 bits (issues
+//!   #517, #532). Operations that consume pixel-value distributions
+//!   internally ([`Raster::hist_equal`], [`Raster::hist_local`],
+//!   [`Raster::percent`]) compute full-precision `u64` histograms directly
+//!   from the image and were always exact.
+//!
+//!   What libvips emits is not one format, measured on 8.18.6 (issue
+//!   #759), and two rows are still out of reach:
+//!
+//!   | op | vips output format | here |
+//!   |---|---|---|
+//!   | `hist_find`, `hist_find_ndim` | `UINT`, whatever the input | `Uint32` |
+//!   | `hist_cum` | `UINT` / `INT` / `FLOAT` / `DOUBLE`, following the input | `Uint32` |
+//!   | `hist_find_indexed` | `DOUBLE`, whatever the input and either `combine` | 16-bit, issue #887 |
+//!
+//!   `hist_cum` on a **signed** input wants `INT` and needs the carriers
+//!   of issue #516; `hist_find_indexed` wants `DOUBLE` and is issue #887,
+//!   which is a float decision rather than a `Uint32` one. Reading the
+//!   libvips source will mislead you on `hist_find`: for a
+//!   `VipsStatisticClass` the per-op `format_table` is an **input cast**
+//!   table (`statistic.c`), not the output format, which is set separately
+//!   to `UINT` in `hist_find.c`.
 //! * **Bins.** 8-bit images histogram into 256 bins, 16-bit images into
 //!   65536 bins, indexed by the raw sample value.
 //! * **Bands.** `hist_find`, `hist_cum`, `hist_norm`, `hist_equal`,
@@ -71,7 +88,7 @@
 //! variants aside, `invertlut`, `buildlut`, `tonelut`, and the Hough
 //! transforms) belong to later batches.
 
-use crate::pixel::PixelFormat;
+use crate::pixel::{PixelFormat, SampleKind};
 use crate::raster::{Raster, RasterError};
 use thiserror::Error;
 
@@ -86,6 +103,17 @@ pub enum HistogramError {
     /// An operation requires a one-band image.
     #[error("{op} requires a one-band image, got {bands} bands")]
     OneBandOnly { op: &'static str, bands: usize },
+    /// `maplut` was given a lookup table longer than libvips accepts.
+    ///
+    /// `vips maplut` answers "histograms must have not have more than
+    /// 65536 elements" and exits non-zero, measured on
+    /// `/opt/homebrew/bin/vips` 8.18.6 with a 70000-element table
+    /// (issue #894). The bound is also what makes the index read's fold
+    /// provably harmless: the site clamps with `.min(n_lut - 1)`, and for
+    /// any `n_lut <= 65536` that clamp subsumes the fold at 65535
+    /// entirely.
+    #[error("maplut LUT has {len} elements; libvips accepts at most {max}")]
+    LutTooLong { len: usize, max: usize },
     /// Two rasters that must share pixel dimensions do not.
     #[error("dimension mismatch: {expected_w}x{expected_h} vs {got_w}x{got_h}")]
     DimensionMismatch {
@@ -143,57 +171,224 @@ fn expect_hist<T>(op: &str, r: Result<T, HistogramError>) -> T {
 // Sample-level helpers
 // ---------------------------------------------------------------------------
 
-/// Read the flat `i`-th sample as `u32` (native byte order for 16-bit,
-/// matching [`crate::raster_ops`]). Unsigned depths only: the panic arm
-/// keeps the histogram ops, which predate the float formats, from
-/// misreading float bytes as `u16` pairs.
+/// The longest lookup table `maplut` accepts, matching libvips.
+///
+/// `vips maplut` refuses anything longer with "histograms must have not
+/// have more than 65536 elements", measured on 8.18.6 (issue #894).
+const MAX_LUT_LEN: usize = 65536;
+
+/// Read the flat `i`-th sample as a `u32` **bin index** (native byte order
+/// for the multi-byte kinds, matching [`crate::raster_ops`]). Integer kinds
+/// only: the [`SampleKind::F32`] arm panics rather than misreading float
+/// bytes as `u16` pairs, which is what the histogram ops did before the
+/// float formats existed.
+///
+/// This is the read a `VipsStatisticClass` op performs *after* its input
+/// cast, which is why the signed and 32-bit arms fold rather than widen: a
+/// negative sample indexes bin zero and a sample past 65535 indexes the
+/// last bin of the 16-bit table. Both are measured, not read out of the C,
+/// and the measurements are on [`SampleKind::hist_bins`].
+///
+/// **Not** the read for a histogram's own counts. It used to be both, and
+/// the folding that is right here is wrong there: a count of 90000 is a
+/// count of 90000 and not a count of 65535. [`read_value`] is that read.
+/// The two only agreed while no carrier could hold a count past 65535, and
+/// merging them again would make every widened counter saturate on the way
+/// back in, silently (issues #532, #888).
+///
+/// The match is over the kind and has no wildcard, so a carrier added to
+/// [`SampleKind`] is a compile error here instead of a silent misread
+/// (issue #607).
 #[inline]
-fn read_flat(data: &[u8], bpc: usize, i: usize) -> u32 {
-    match bpc {
-        1 => data[i] as u32,
-        2 => u16::from_ne_bytes([data[i * 2], data[i * 2 + 1]]) as u32,
-        _ => panic!(
+fn read_bin(data: &[u8], kind: SampleKind, i: usize) -> u32 {
+    match kind {
+        SampleKind::U8 => data[i] as u32,
+        SampleKind::U16 => u16::from_ne_bytes([data[i * 2], data[i * 2 + 1]]) as u32,
+        // A signed sample is folded through the unsigned kind of the same
+        // width, saturating, so every negative sample indexes bin zero.
+        // That is what libvips does and it is observable rather than read
+        // out of the C: on 8.18.6 a `char` image of `[-128, -1, 0, 127]`
+        // histograms to `bin 0 = 3`, `bin 127 = 1`. It is the
+        // `VipsStatisticClass` input cast, not a signed bin table.
+        SampleKind::I8 => (data[i] as i8).max(0) as u32,
+        SampleKind::I16 => i16::from_ne_bytes([data[i * 2], data[i * 2 + 1]]).max(0) as u32,
+        // The 32-bit kinds have no value-indexed table of their own
+        // (`SampleKind::hist_bins` is `None` for both) and libvips casts
+        // them into `ushort` before counting, measured: a `uint` image
+        // whose largest sample is 70000 gives a 65536-wide histogram.
+        SampleKind::U32 => u32::from_ne_bytes([
+            data[i * 4],
+            data[i * 4 + 1],
+            data[i * 4 + 2],
+            data[i * 4 + 3],
+        ])
+        .min(u32::from(u16::MAX)),
+        SampleKind::I32 => i32::from_ne_bytes([
+            data[i * 4],
+            data[i * 4 + 1],
+            data[i * 4 + 2],
+            data[i * 4 + 3],
+        ])
+        .clamp(0, i32::from(i16::MAX) * 2 + 1) as u32,
+        SampleKind::F32 => panic!(
             "the histogram operations do not support float rasters yet; \
              cast to an unsigned 8/16-bit format first"
         ),
     }
 }
 
-/// Write the flat `i`-th sample, saturating into the depth.
-/// Unsigned depths only; see [`read_flat`].
+/// Read the flat `i`-th sample as the **value** it is, with no folding
+/// (native byte order, integer kinds only).
+///
+/// The counterpart of [`read_bin`], and the reason the two exist
+/// separately. Every op here that reads a histogram's own counts wants
+/// this one: `hist_cum`, `hist_norm`, `hist_match`, `hist_ismonotonic`,
+/// `hist_entropy`, `hist_plot`, `maplut`'s LUT entry, and
+/// `hist_find_indexed`'s value image. A count of 90000 read through
+/// [`read_bin`] comes back 65535, which is correct for a bin index and
+/// nonsense for a count.
+///
+/// Reachable as soon as anything carries a count past 65535, which is the
+/// unsigned 32-bit carrier of issue #517 and then the widened counters of
+/// issue #532. Measured against `/opt/homebrew/bin/vips` 8.18.6, which
+/// gets this right: `vips hist_entropy` on a `uint` histogram holding
+/// `[100000, 300000]` answers **0.811278**, the entropy of a 1:3 split,
+/// and folding both counts into 65535 would answer 1.0.
+///
+/// Negative samples clamp at zero rather than sign-extending, because
+/// every caller is reading a count or a LUT entry and neither is negative.
+/// No `PixelFormat` carries a signed kind yet (issue #516), so that arm is
+/// unreachable today and is spelled out rather than left to a wildcard.
 #[inline]
-fn write_flat(data: &mut [u8], bpc: usize, i: usize, v: u32) {
-    match bpc {
-        1 => data[i] = v.min(255) as u8,
-        2 => {
+fn read_value(data: &[u8], kind: SampleKind, i: usize) -> u32 {
+    match kind {
+        SampleKind::U8 => u32::from(data[i]),
+        SampleKind::U16 => u32::from(u16::from_ne_bytes([data[i * 2], data[i * 2 + 1]])),
+        SampleKind::U32 => u32::from_ne_bytes([
+            data[i * 4],
+            data[i * 4 + 1],
+            data[i * 4 + 2],
+            data[i * 4 + 3],
+        ]),
+        SampleKind::I8 => (data[i] as i8).max(0) as u32,
+        SampleKind::I16 => i16::from_ne_bytes([data[i * 2], data[i * 2 + 1]]).max(0) as u32,
+        SampleKind::I32 => i32::from_ne_bytes([
+            data[i * 4],
+            data[i * 4 + 1],
+            data[i * 4 + 2],
+            data[i * 4 + 3],
+        ])
+        .max(0) as u32,
+        SampleKind::F32 => panic!(
+            "the histogram operations do not support float rasters yet; \
+             cast to an unsigned 8/16-bit format first"
+        ),
+    }
+}
+
+/// Write the flat `i`-th sample, saturating into the kind's ceiling.
+/// Unsigned kinds only; see [`read_bin`], including on why the match has
+/// no wildcard arm.
+#[inline]
+fn write_flat(data: &mut [u8], kind: SampleKind, i: usize, v: u32) {
+    match kind {
+        SampleKind::U8 => data[i] = v.min(255) as u8,
+        SampleKind::U16 => {
             let b = (v.min(65535) as u16).to_ne_bytes();
             data[i * 2] = b[0];
             data[i * 2 + 1] = b[1];
         }
-        _ => panic!(
+        // Counts are non-negative, so only the ceiling can bind and the
+        // signed kinds saturate at their positive end. Sourced from
+        // `SampleKind::max_value` rather than re-spelling 127 / 32767 /
+        // 2147483647 here.
+        SampleKind::I8 => data[i] = v.min(0x7F) as u8,
+        SampleKind::I16 => {
+            let b = (v.min(0x7FFF) as u16).to_ne_bytes();
+            data[i * 2] = b[0];
+            data[i * 2 + 1] = b[1];
+        }
+        SampleKind::U32 => data[i * 4..i * 4 + 4].copy_from_slice(&v.to_ne_bytes()),
+        SampleKind::I32 => {
+            data[i * 4..i * 4 + 4].copy_from_slice(&v.min(0x7FFF_FFFF).to_ne_bytes());
+        }
+        SampleKind::F32 => panic!(
             "the histogram operations do not support float rasters yet; \
              cast to an unsigned 8/16-bit format first"
         ),
     }
 }
 
-/// Number of histogram bins for an unsigned sample depth: 256 or 65536.
-/// Unsigned depths only; see [`read_flat`].
+/// Number of histogram bins for an integer sample kind: 256 or 65536.
+///
+/// Reads [`SampleKind::hist_bins`] where the kind has a table of its own,
+/// so a carrier added to [`SampleKind`] gets its bin count there rather
+/// than here. The 32-bit kinds have no table of their own and libvips does
+/// not build one: it casts the input into `ushort` first, measured on
+/// 8.18.6, so the table stays 65536 wide and [`read_flat`] performs the
+/// matching saturation. `F32` keeps the "no float rasters yet" panic.
 #[inline]
-fn bins_for(bpc: usize) -> usize {
-    match bpc {
-        1 => 256,
-        2 => 65536,
-        _ => panic!(
+fn bins_for(kind: SampleKind) -> usize {
+    match kind {
+        SampleKind::U8 | SampleKind::I8 | SampleKind::U16 | SampleKind::I16 => kind
+            .hist_bins()
+            .expect("the 8- and 16-bit kinds have a bin table"),
+        SampleKind::U32 | SampleKind::I32 => {
+            SampleKind::U16.hist_bins().expect("U16 has a bin table")
+        }
+        SampleKind::F32 => panic!(
             "the histogram operations do not support float rasters yet; \
              cast to an unsigned 8/16-bit format first"
         ),
     }
 }
 
-/// The canonical format for a band count and byte depth, or a typed error.
-fn format_for(bands: usize, bpc: usize) -> Result<PixelFormat, HistogramError> {
-    PixelFormat::with_channels(bands, bpc).ok_or(HistogramError::TooManyBands { bands })
+/// The width libvips gives a histogram of `kind` whose largest bin index
+/// is `max_bin`.
+///
+/// `uchar` is the only format with a fixed table: it is 256 wide even for
+/// an image whose largest sample is 3. Every other format is sized to the
+/// data, `max_bin + 1`, with [`bins_for`] as the ceiling rather than the
+/// answer.
+///
+/// Measured on `/opt/homebrew/bin/vips` 8.18.6, `vips hist_find` widths:
+/// `ushort` `[0]` gives 1, `[0, 1000]` gives 1001, `[4096, 4096, 9]` gives
+/// 4097 and `[0, 1000, 65535]` gives 65536, while `uchar` `[3, 0]` and
+/// `uchar` `[255, 0]` both give 256.
+///
+/// The signed one-byte kind joins `U8`, because a `char` image histograms
+/// 256 wide: the `VipsStatisticClass` input cast has already turned it into
+/// a `uchar` by the time the table is sized. The 32-bit kinds join the
+/// data-sized group for the matching reason, since the same cast turns them
+/// into `ushort`.
+///
+/// There is no cap on `max_bin + 1` here, and there was one until mutation
+/// testing showed nothing could reach it. [`read_flat`] already folds every
+/// sample into the bin table, so `max_bin` cannot exceed
+/// `bins_for(kind) - 1` and a `.min(bins_for(kind))` is a no-op on every
+/// input that can be constructed. The invariant belongs in a test rather
+/// than in a branch no test can enter, and
+/// `read_flat_folds_a_32_bit_sample_into_the_16_bit_bin_table` asserts it
+/// for every kind that carries a sample.
+///
+/// This is deliberately *not* [`bins_for`], which answers a different
+/// question and must keep answering it: `hist_find_ndim` uses it as the
+/// value **range** it scales samples by, and measurement says that range is
+/// the depth's and not the data's. A `ushort` `[0, 5, 10]` and a `uchar`
+/// `[0, 5, 10]` both put all three samples in bin 0 at `--bins 10`.
+#[inline]
+fn hist_width(kind: SampleKind, max_bin: u32) -> usize {
+    match kind {
+        SampleKind::U8 | SampleKind::I8 => bins_for(kind),
+        SampleKind::U16 | SampleKind::I16 | SampleKind::U32 | SampleKind::I32 | SampleKind::F32 => {
+            max_bin as usize + 1
+        }
+    }
+}
+
+/// The canonical format for a band count and sample kind, or a typed error.
+fn format_for(bands: usize, kind: SampleKind) -> Result<PixelFormat, HistogramError> {
+    PixelFormat::with_kind(bands, kind).ok_or(HistogramError::TooManyBands { bands })
 }
 
 /// The element count of a histogram-shaped raster (`N`x1 or 1x`N`), or a
@@ -210,26 +405,92 @@ fn hist_len(r: &Raster) -> Result<usize, HistogramError> {
 }
 
 /// Full-precision per-band value histograms of an image.
+///
+/// Every band's table is the same width, taken from the largest bin index
+/// anywhere in the image, which is what libvips does: a two-band `ushort`
+/// image whose bands max at 10 and 5000 histograms 5001 wide over both
+/// bands. See [`hist_width`].
 fn per_band_hist(r: &Raster) -> Vec<Vec<u64>> {
     let fmt = r.format();
     let bands = fmt.channels();
-    let bpc = fmt.bytes_per_channel();
-    let bins = bins_for(bpc);
+    let kind = fmt.kind();
     let n = r.width() as usize * r.height() as usize;
     let data = r.data();
+    let bins = hist_width(kind, max_bin(data, kind, n * bands));
     let mut hists = vec![vec![0u64; bins]; bands];
     for i in 0..n {
         for (b, hist) in hists.iter_mut().enumerate() {
-            hist[read_flat(data, bpc, i * bands + b) as usize] += 1;
+            hist[read_bin(data, kind, i * bands + b) as usize] += 1;
         }
     }
     hists
 }
 
-/// Saturate a `u64` count into a 16-bit sample value.
+/// The largest bin index over the first `count` flat samples of `data`.
+///
+/// Zero for an empty run, which gives a one-element histogram rather than
+/// an empty one; libvips does the same for an all-zero image, measured: a
+/// `ushort` `[0]` histograms 1 wide.
 #[inline]
-fn sat16(v: u64) -> u32 {
-    v.min(u16::MAX as u64) as u32
+fn max_bin(data: &[u8], kind: SampleKind, count: usize) -> u32 {
+    (0..count)
+        .map(|i| read_bin(data, kind, i))
+        .max()
+        .unwrap_or(0)
+}
+
+/// Row count for a [`Raster::hist_plot`] bar graph of `values`.
+///
+/// `uchar` is the only format libvips gives a fixed plot height, and that
+/// is measured rather than inferred from the width: on 8.18.6 a histogram
+/// of `[0, 5]` plots 256 rows high as `uchar` and 5 rows high as `char`,
+/// `ushort`, `short`, `uint` or `int`. So the signed one-byte kind belongs
+/// with the data-driven group even though it shares `U8`'s width, which is
+/// exactly the distinction [`SampleKind`] exists to carry.
+///
+/// A separate function rather than a `match` inside `try_hist_plot` so the
+/// grouping can be asserted for the kinds no `PixelFormat` produces, since
+/// there is no raster to hand the op.
+///
+/// # The height rule, measured
+///
+/// `vips hist_plot` on 8.18.6, `ushort` input: `[0, 1]` plots 1 row,
+/// `[1, 1]` plots 1, `[0, 0, 0]` plots 1, `[0, 5]` plots 5, `[3, 9]` plots
+/// 9, `[100, 200]` plots 200 and `[65535, 0]` plots 65535. So the height is
+/// the largest count, floored at one, and **not** `max + 1`, which is what
+/// this returned before issue #802.
+///
+/// The `[3, 9]` row is the one that shows the floor is a literal zero
+/// rather than the smallest count: 9 rows, not 6. The full libvips rule is
+/// `max - min(0, min)`, and the second term only fires on a histogram
+/// holding a negative count (a `char` `[-5, -1]` plots 4 rows). Every
+/// carrier this crate has is unsigned and [`read_flat`] folds a negative
+/// sample into bin zero besides, so `values` cannot contain one and the
+/// term is left out rather than written as dead arithmetic. The signed
+/// carriers of issue #516 are where it starts to matter.
+#[inline]
+fn plot_height(kind: SampleKind, values: &[u32]) -> usize {
+    match kind {
+        SampleKind::U8 => 256,
+        SampleKind::U16
+        | SampleKind::I8
+        | SampleKind::I16
+        | SampleKind::U32
+        | SampleKind::I32
+        | SampleKind::F32 => values.iter().copied().max().unwrap_or(0).max(1) as usize,
+    }
+}
+
+/// Saturate a `u64` count into a 32-bit sample value.
+///
+/// The counters go out on [`PixelFormat::Uint32`] now (issue #532), so the
+/// ceiling is `u32::MAX` rather than `u16::MAX`. Reaching it needs an image
+/// of more than 4,294,967,295 pixels in one bin, which the crate's decode
+/// allocation budget refuses long before, so this is a floor under the
+/// arithmetic rather than a behaviour anyone can observe.
+#[inline]
+fn sat32(v: u64) -> u32 {
+    v.min(u64::from(u32::MAX)) as u32
 }
 
 impl Raster {
@@ -240,11 +501,14 @@ impl Raster {
     /// Compute the per-band value histogram, like `vips_hist_find` with the
     /// default `band` of -1.
     ///
-    /// The result is a 256x1 (8-bit input) or 65536x1 (16-bit input) image
+    /// The result is a `bins`x1 image, 256 wide for an 8-bit input and
+    /// `max + 1` wide (capped at 65536) for a 16-bit one, where `max` is
+    /// the largest sample anywhere in the image; see `hist_width` for the
+    /// libvips sweep behind that (issue #803). The result is an image
     /// with the input's band count: sample `(v, 0)` of band `b` is the
     /// number of band-`b` samples equal to `v`. Counts are written as
-    /// 16-bit samples and saturate at `65535` (see the module notes on
-    /// count depth).
+    /// 32-bit unsigned samples, so the 300x300 image of issue #532 reports
+    /// 90000 rather than 65535 (see the module notes on count depth).
     ///
     /// # Errors
     ///
@@ -252,14 +516,14 @@ impl Raster {
     /// allocation budget (only possible for extreme band counts).
     pub fn try_hist_find(&self) -> Result<Raster, HistogramError> {
         let bands = self.format().channels();
-        let bins = bins_for(self.format().bytes_per_channel());
         let hists = per_band_hist(self);
-        let out_fmt = format_for(bands, 2)?;
+        let bins = hists.first().map_or(1, Vec::len);
+        let out_fmt = format_for(bands, SampleKind::U32)?;
         let mut out = Raster::zeroed(bins as u32, 1, out_fmt)?;
         let buf = out.data_mut();
         for (b, hist) in hists.iter().enumerate() {
             for (v, &n) in hist.iter().enumerate() {
-                write_flat(buf, 2, v * bands + b, sat16(n));
+                write_flat(buf, SampleKind::U32, v * bands + b, sat32(n));
             }
         }
         Ok(out)
@@ -279,7 +543,10 @@ impl Raster {
     /// Compute the value histogram of one band, like `vips_hist_find` with
     /// an explicit `band`.
     ///
-    /// The result is a one-band 256x1 or 65536x1 image; see
+    /// The result is a one-band image sized by **this band's** largest
+    /// sample, not the image's: on a 16-bit image whose band 0 maxes at 10
+    /// and band 1 at 5000, `hist_find_band(0)` is 11 wide and
+    /// `hist_find_band(1)` is 5001, matching libvips (issue #803). See
     /// [`Raster::try_hist_find`] for the count semantics.
     ///
     /// # Errors
@@ -290,18 +557,24 @@ impl Raster {
         if band as usize >= bands {
             return Err(HistogramError::InvalidBand { band, bands });
         }
-        let bpc = self.format().bytes_per_channel();
-        let bins = bins_for(bpc);
+        let kind = self.format().kind();
         let n = self.width() as usize * self.height() as usize;
         let data = self.data();
+        // This band's own maximum, not the image's: `vips hist_find --band 0`
+        // on a two-band image whose bands max at 10 and 5000 gives 11.
+        let widest = (0..n)
+            .map(|i| read_bin(data, kind, i * bands + band as usize))
+            .max()
+            .unwrap_or(0);
+        let bins = hist_width(kind, widest);
         let mut hist = vec![0u64; bins];
         for i in 0..n {
-            hist[read_flat(data, bpc, i * bands + band as usize) as usize] += 1;
+            hist[read_bin(data, kind, i * bands + band as usize) as usize] += 1;
         }
-        let mut out = Raster::zeroed(bins as u32, 1, PixelFormat::Gray16)?;
+        let mut out = Raster::zeroed(bins as u32, 1, format_for(1, SampleKind::U32)?)?;
         let buf = out.data_mut();
         for (v, &count) in hist.iter().enumerate() {
-            write_flat(buf, 2, v, sat16(count));
+            write_flat(buf, SampleKind::U32, v, sat32(count));
         }
         Ok(out)
     }
@@ -321,10 +594,19 @@ impl Raster {
     /// `vips_hist_find_indexed` with the default `sum` combine.
     ///
     /// For every pixel, the sample values of `self` are added to the output
-    /// element selected by the corresponding `index` pixel. The result has
-    /// one element per possible index value (256x1 for an 8-bit index,
-    /// 65536x1 for 16-bit) and the input's band count. Sums are written as
-    /// 16-bit samples and saturate at `65535`.
+    /// element selected by the corresponding `index` pixel. The result is
+    /// sized from the **index** image the same way [`Raster::try_hist_find`]
+    /// is sized from its input, 256 elements for an 8-bit index and
+    /// `max + 1` for a 16-bit one, and carries the input's band count.
+    ///
+    /// Sums go out on [`PixelFormat::FloatF32`]. vips emits **DOUBLE**
+    /// here whatever the value image's carrier is, measured on 8.18.6 for
+    /// `uchar`, `ushort`, `uint` and `float` alike, and this crate has no
+    /// `f64` carrier, so the nearest kind is the float one (issue #887).
+    /// Sums are exact to 2^24 and lose at most half a spacing above it,
+    /// where vips's `DOUBLE` is exact to 2^53. `Uint32` would have been
+    /// exact further, to 4294967295, and then **overflowed** on a
+    /// 10000x10000 `uchar` image whose sums reach 25.5e9.
     ///
     /// # Errors
     ///
@@ -348,24 +630,39 @@ impl Raster {
             });
         }
         let bands = self.format().channels();
-        let bpc = self.format().bytes_per_channel();
-        let idx_bpc = index.format().bytes_per_channel();
-        let bins = bins_for(idx_bpc);
+        let kind = self.format().kind();
+        let idx_kind = index.format().kind();
         let n = self.width() as usize * self.height() as usize;
         let data = self.data();
         let idx_data = index.data();
-        let mut sums = vec![0u64; bins * bands];
+        // Sized from the index image, which is the one being binned.
+        let bins = hist_width(idx_kind, max_bin(idx_data, idx_kind, n));
+        // `f64` sums on a float output, which is the carrier vips uses:
+        // `vips hist_find_indexed` emits **DOUBLE** whatever the value
+        // image's carrier is, measured on 8.18.6 for `uchar`, `ushort`,
+        // `uint` and `float` alike. This crate has no `f64` carrier, so the
+        // nearest *kind* is `FloatF32` rather than the nearest width
+        // (issue #887): `Uint32` would be exact to 4294967295 and overflow
+        // on a 10000x10000 `uchar` image, whose sums reach 25.5e9, which is
+        // an image size libvips exists to handle. `f32` never overflows and
+        // its error is relative: sums stay exact to 2^24 and lose at most
+        // half a spacing above it.
+        //
+        // The read is the numeric one rather than `read_value`, so a float
+        // value image works at all: it used to panic on the kind.
+        let mut sums = vec![0f64; bins * bands];
         for i in 0..n {
-            let slot = read_flat(idx_data, idx_bpc, i) as usize;
+            let slot = read_bin(idx_data, idx_kind, i) as usize;
             for b in 0..bands {
-                sums[slot * bands + b] += read_flat(data, bpc, i * bands + b) as u64;
+                let off = (i * bands + b) * kind.bytes();
+                sums[slot * bands + b] += crate::pixel::read_sample_f64(data, kind, off);
             }
         }
-        let out_fmt = format_for(bands, 2)?;
+        let out_fmt = format_for(bands, SampleKind::F32)?;
         let mut out = Raster::zeroed(bins as u32, 1, out_fmt)?;
         let buf = out.data_mut();
         for (i, &s) in sums.iter().enumerate() {
-            write_flat(buf, 2, i, sat16(s));
+            crate::pixel::write_sample_f64(buf, SampleKind::F32, i * 4, s);
         }
         Ok(out)
     }
@@ -389,8 +686,8 @@ impl Raster {
     /// selects the column, band 1 (when present) the row, and band 2 (when
     /// present) the output band. A sample value `v` falls in bin
     /// `v * bins / range` where `range` is 256 or 65536 by depth. `bins`
-    /// defaults to 10, matching libvips. Counts are written as 16-bit
-    /// samples and saturate at `65535`.
+    /// defaults to 10, matching libvips. Counts are written as 32-bit
+    /// unsigned samples (issue #532).
     ///
     /// The output is `bins` wide, `bins` high when the input has two or
     /// more bands (1 otherwise), and has `bins` bands when the input has
@@ -409,8 +706,8 @@ impl Raster {
         if bands > 3 {
             return Err(HistogramError::TooManyDimensions { bands });
         }
-        let bpc = self.format().bytes_per_channel();
-        let range = bins_for(bpc) as u64;
+        let kind = self.format().kind();
+        let range = bins_for(kind) as u64;
         let bins = bins.unwrap_or(10);
         if bins == 0 || bins as u64 > range {
             return Err(HistogramError::InvalidBins {
@@ -421,7 +718,7 @@ impl Raster {
         let out_w = bins;
         let out_h = if bands >= 2 { bins } else { 1 };
         let out_bands = if bands >= 3 { bins as usize } else { 1 };
-        let out_fmt = format_for(out_bands, 2)?;
+        let out_fmt = format_for(out_bands, SampleKind::U32)?;
         let mut out = Raster::zeroed(out_w, out_h, out_fmt)?;
         let buf = out.data_mut();
 
@@ -429,21 +726,21 @@ impl Raster {
         let data = self.data();
         let bin_of = |v: u32| -> usize { (v as u64 * bins as u64 / range) as usize };
         for i in 0..n {
-            let bx = bin_of(read_flat(data, bpc, i * bands));
+            let bx = bin_of(read_bin(data, kind, i * bands));
             let by = if bands >= 2 {
-                bin_of(read_flat(data, bpc, i * bands + 1))
+                bin_of(read_bin(data, kind, i * bands + 1))
             } else {
                 0
             };
             let bz = if bands >= 3 {
-                bin_of(read_flat(data, bpc, i * bands + 2))
+                bin_of(read_bin(data, kind, i * bands + 2))
             } else {
                 0
             };
             let cell = (by * out_w as usize + bx) * out_bands + bz;
-            let cur = read_flat(buf, 2, cell);
-            if cur < u16::MAX as u32 {
-                write_flat(buf, 2, cell, cur + 1);
+            let cur = read_value(buf, SampleKind::U32, cell);
+            if cur < u32::MAX {
+                write_flat(buf, SampleKind::U32, cell, cur + 1);
             }
         }
         Ok(out)
@@ -466,9 +763,11 @@ impl Raster {
 
     /// Compute the cumulative histogram, like `vips_hist_cum`.
     ///
-    /// Each band is replaced by its running sum along the histogram.
-    /// 8-bit input is promoted to 16-bit output (libvips promotes to
-    /// 32-bit); sums saturate at `65535`.
+    /// Each band is replaced by its running sum along the histogram, on a
+    /// 32-bit unsigned output whatever the input carrier, which is what
+    /// libvips does for every unsigned input (issue #532). A **signed**
+    /// input wants `INT` there and needs issue #516's carriers, so that
+    /// row is still a deviation.
     ///
     /// # Errors
     ///
@@ -477,16 +776,16 @@ impl Raster {
     pub fn try_hist_cum(&self) -> Result<Raster, HistogramError> {
         let n = hist_len(self)?;
         let bands = self.format().channels();
-        let bpc = self.format().bytes_per_channel();
-        let out_fmt = format_for(bands, 2)?;
+        let kind = self.format().kind();
+        let out_fmt = format_for(bands, SampleKind::U32)?;
         let mut out = Raster::zeroed(self.width(), self.height(), out_fmt)?;
         let buf = out.data_mut();
         let data = self.data();
         for b in 0..bands {
             let mut sum = 0u64;
             for i in 0..n {
-                sum += read_flat(data, bpc, i * bands + b) as u64;
-                write_flat(buf, 2, i * bands + b, sat16(sum));
+                sum += read_value(data, kind, i * bands + b) as u64;
+                write_flat(buf, SampleKind::U32, i * bands + b, sat32(sum));
             }
         }
         Ok(out)
@@ -519,24 +818,28 @@ impl Raster {
     pub fn try_hist_norm(&self) -> Result<Raster, HistogramError> {
         let n = hist_len(self)?;
         let bands = self.format().channels();
-        let bpc = self.format().bytes_per_channel();
-        let out_bpc = if n <= 256 { 1 } else { 2 };
-        let out_fmt = format_for(bands, out_bpc)?;
+        let kind = self.format().kind();
+        let out_kind = if n <= 256 {
+            SampleKind::U8
+        } else {
+            SampleKind::U16
+        };
+        let out_fmt = format_for(bands, out_kind)?;
         let mut out = Raster::zeroed(self.width(), self.height(), out_fmt)?;
         let buf = out.data_mut();
         let data = self.data();
         for b in 0..bands {
             let mut max = 0u32;
             for i in 0..n {
-                max = max.max(read_flat(data, bpc, i * bands + b));
+                max = max.max(read_value(data, kind, i * bands + b));
             }
             if max == 0 {
                 continue;
             }
             let scale = (n - 1) as f64 / max as f64;
             for i in 0..n {
-                let v = read_flat(data, bpc, i * bands + b) as f64;
-                write_flat(buf, out_bpc, i * bands + b, (v * scale).round() as u32);
+                let v = read_value(data, kind, i * bands + b) as f64;
+                write_flat(buf, out_kind, i * bands + b, (v * scale).round() as u32);
             }
         }
         Ok(out)
@@ -581,10 +884,14 @@ impl Raster {
                 got: ref_bands,
             });
         }
-        let bpc = self.format().bytes_per_channel();
-        let ref_bpc = reference.format().bytes_per_channel();
-        let out_bpc = if n_ref <= 256 { 1 } else { 2 };
-        let out_fmt = format_for(bands, out_bpc)?;
+        let kind = self.format().kind();
+        let ref_bpc = reference.format().kind();
+        let out_kind = if n_ref <= 256 {
+            SampleKind::U8
+        } else {
+            SampleKind::U16
+        };
+        let out_fmt = format_for(bands, out_kind)?;
         let mut out = Raster::zeroed(self.width(), self.height(), out_fmt)?;
         let buf = out.data_mut();
         let data = self.data();
@@ -594,14 +901,14 @@ impl Raster {
             let mut in_cum = vec![0f64; n_in];
             let mut sum = 0u64;
             for (i, c) in in_cum.iter_mut().enumerate() {
-                sum += read_flat(data, bpc, i * bands + b) as u64;
+                sum += read_value(data, kind, i * bands + b) as u64;
                 *c = sum as f64;
             }
             let in_total = sum;
             let mut ref_cum = vec![0f64; n_ref];
             let mut sum = 0u64;
             for (i, c) in ref_cum.iter_mut().enumerate() {
-                sum += read_flat(ref_data, ref_bpc, i * bands + b) as u64;
+                sum += read_value(ref_data, ref_bpc, i * bands + b) as u64;
                 *c = sum as f64;
             }
             let ref_total = sum;
@@ -614,7 +921,7 @@ impl Raster {
                 while j < n_ref - 1 && ref_cum[j] / (ref_total as f64) < target {
                     j += 1;
                 }
-                write_flat(buf, out_bpc, i * bands + b, j as u32);
+                write_flat(buf, out_kind, i * bands + b, j as u32);
             }
         }
         Ok(out)
@@ -634,10 +941,16 @@ impl Raster {
     /// Plot a one-band histogram as a bar graph, like `vips_hist_plot`.
     ///
     /// The output is `N` columns wide for an `N`-element histogram. 8-bit
-    /// histograms plot 256 rows high; other depths plot `max + 1` rows
-    /// high, matching libvips. The result is a `Gray8` image: in column
-    /// `x`, the bottom `hist[x]` pixels are `255` and the rest `0`, so the
-    /// graph reads with its origin at the bottom left.
+    /// histograms plot 256 rows high whatever the counts are; every other
+    /// depth plots as many rows as the largest count, floored at one. Both
+    /// halves are measured against libvips 8.18.6 rather than asserted, and
+    /// the sweep is recorded on the private `plot_height` helper. Note that
+    /// the second half used to say `max + 1`, and used to say that matched
+    /// libvips (issue #802).
+    ///
+    /// The result is a `Gray8` image: in column `x`, the bottom `hist[x]`
+    /// pixels are `255` and the rest `0`, so the graph reads with its
+    /// origin at the bottom left.
     ///
     /// # Errors
     ///
@@ -654,14 +967,15 @@ impl Raster {
                 bands,
             });
         }
-        let bpc = self.format().bytes_per_channel();
+        let kind = self.format().kind();
         let data = self.data();
-        let values: Vec<u32> = (0..n).map(|i| read_flat(data, bpc, i)).collect();
-        let height = if bpc == 1 {
-            256
-        } else {
-            values.iter().copied().max().unwrap_or(0) as usize + 1
-        };
+        let values: Vec<u32> = (0..n).map(|i| read_value(data, kind, i)).collect();
+        // Total over the kind rather than "8-bit or not", so a carrier
+        // added to `SampleKind` has to state its plot height here instead
+        // of inheriting the 16-bit branch (issue #607). `F32` is
+        // unreachable in practice: `read_value` above panics on it for any
+        // non-empty histogram, and `hist_len` rejects the empty shape.
+        let height = plot_height(kind, &values);
         let mut out = Raster::zeroed(n as u32, height as u32, PixelFormat::Gray8)?;
         let buf = out.data_mut();
         for (x, &v) in values.iter().enumerate() {
@@ -697,19 +1011,19 @@ impl Raster {
     pub fn try_hist_entropy(&self) -> Result<f64, HistogramError> {
         let n = hist_len(self)?;
         let bands = self.format().channels();
-        let bpc = self.format().bytes_per_channel();
+        let kind = self.format().kind();
         let data = self.data();
         let count = n * bands;
         let mut total = 0u64;
         for i in 0..count {
-            total += read_flat(data, bpc, i) as u64;
+            total += read_value(data, kind, i) as u64;
         }
         if total == 0 {
             return Ok(0.0);
         }
         let mut entropy = 0.0;
         for i in 0..count {
-            let v = read_flat(data, bpc, i);
+            let v = read_value(data, kind, i);
             if v > 0 {
                 let p = v as f64 / total as f64;
                 entropy -= p * p.log2();
@@ -729,12 +1043,37 @@ impl Raster {
         expect_hist("hist_entropy", self.try_hist_entropy())
     }
 
-    /// Whether a histogram is monotonically non-decreasing, like
-    /// `vips_hist_ismonotonic`.
+    /// Whether a histogram is monotonically non-decreasing, the question
+    /// `vips_hist_ismonotonic` answers.
     ///
     /// Returns `true` only if every band is non-decreasing along the
     /// histogram. A LUT must be monotonic to preserve value ordering when
     /// applied with [`Raster::maplut`].
+    ///
+    /// # Divergence from libvips
+    ///
+    /// **This does not match `vips_hist_ismonotonic` on a `uint` histogram,
+    /// on purpose.** Measured on `/opt/homebrew/bin/vips` 8.18.6:
+    ///
+    /// | histogram | `vips hist_ismonotonic` | here |
+    /// |---|---|---|
+    /// | `[70000, 65000]` | **TRUE** | `false` |
+    /// | `[400000, 300000, 200000, 100000]` | **TRUE** | `false` |
+    /// | `[100000, 100000, 100000, 99999]` | FALSE | `false` |
+    ///
+    /// So vips calls two strictly decreasing sequences monotonic while
+    /// catching a decrease of one in the third. I tested and refuted both
+    /// candidate explanations: "it folds the counts into `ushort`" predicts
+    /// FALSE for the first row, and "the convolution output wraps unsigned"
+    /// predicts TRUE for the third. Matching an oracle that contradicts
+    /// itself is not parity, so this answers the question rather than the
+    /// oracle. The numbers are here rather than only in
+    /// `a_count_comparison_sees_counts_above_65535`'s doc block, which
+    /// rustdoc does not render (issues #888, #952).
+    ///
+    /// The unsigned 8- and 16-bit carriers agree with vips throughout; the
+    /// divergence needs counts above 65535, which is what `hist_find` emits
+    /// once an image is larger than 65535 pixels (issue #532).
     ///
     /// # Errors
     ///
@@ -743,12 +1082,12 @@ impl Raster {
     pub fn try_hist_ismonotonic(&self) -> Result<bool, HistogramError> {
         let n = hist_len(self)?;
         let bands = self.format().channels();
-        let bpc = self.format().bytes_per_channel();
+        let kind = self.format().kind();
         let data = self.data();
         for b in 0..bands {
             let mut prev = 0u32;
             for i in 0..n {
-                let v = read_flat(data, bpc, i * bands + b);
+                let v = read_value(data, kind, i * bands + b);
                 if v < prev {
                     return Ok(false);
                 }
@@ -781,13 +1120,22 @@ impl Raster {
     /// the composition `hist_find`, `hist_cum`, `hist_norm`, `maplut`
     /// performs, computed here with full-precision `u64` counts so image
     /// size never saturates. The output keeps the input's size and format.
-    /// A constant band maps to the depth maximum (its cumulative
-    /// distribution jumps straight to 1).
+    ///
+    /// `bins` is the width `hist_find` would give, so it follows the data
+    /// for a 16-bit image and is a fixed 256 for an 8-bit one; taking it
+    /// from the depth instead made this stop being the composition it
+    /// documents itself as (issue #823). The visible consequence is at the
+    /// constant image: a constant 8-bit band maps to `255`, and a constant
+    /// 16-bit band maps to **itself**, because a table one value wide
+    /// normalises that value's single cumulative entry back to it. Both
+    /// are measured against libvips 8.18.6.
     pub fn hist_equal(&self) -> Raster {
         let fmt = self.format();
         let bands = fmt.channels();
-        let bpc = fmt.bytes_per_channel();
-        let bins = bins_for(bpc);
+        let kind = fmt.kind();
+        let data_all = self.data();
+        let n_all = self.width() as usize * self.height() as usize * bands;
+        let bins = hist_width(kind, max_bin(data_all, kind, n_all));
         let n = self.width() as usize * self.height() as usize;
         let data = self.data();
         let mut out = vec![0u8; data.len()];
@@ -799,7 +1147,7 @@ impl Raster {
         for b in 0..bands {
             let mut hist = vec![0u64; bins];
             for i in 0..n {
-                hist[read_flat(data, bpc, i * bands + b) as usize] += 1;
+                hist[read_bin(data, kind, i * bands + b) as usize] += 1;
             }
             let mut lut = vec![0u32; bins];
             let mut cum = 0u64;
@@ -808,8 +1156,8 @@ impl Raster {
                 *l = (cum as f64 * scale).round() as u32;
             }
             for i in 0..n {
-                let v = read_flat(data, bpc, i * bands + b) as usize;
-                write_flat(&mut out, bpc, i * bands + b, lut[v]);
+                let v = read_bin(data, kind, i * bands + b) as usize;
+                write_flat(&mut out, kind, i * bands + b, lut[v]);
             }
         }
         Raster::new(self.width(), self.height(), fmt, out)
@@ -855,8 +1203,8 @@ impl Raster {
         }
         let fmt = self.format();
         let bands = fmt.channels();
-        let bpc = fmt.bytes_per_channel();
-        let bins = bins_for(bpc);
+        let kind = fmt.kind();
+        let bins = bins_for(kind);
         let iw = self.width() as i64;
         let ih = self.height() as i64;
         let ww = width as i64;
@@ -870,7 +1218,7 @@ impl Raster {
         let sample = |x: i64, y: i64, b: usize| -> usize {
             let cx = x.clamp(0, iw - 1) as usize;
             let cy = y.clamp(0, ih - 1) as usize;
-            read_flat(data, bpc, (cy * iw as usize + cx) * bands + b) as usize
+            read_bin(data, kind, (cy * iw as usize + cx) * bands + b) as usize
         };
         let limit = slope * area / bins as f64;
 
@@ -912,7 +1260,7 @@ impl Raster {
                     let mapped = (cdf * range / area).round().clamp(0.0, range) as u32;
                     write_flat(
                         &mut out,
-                        bpc,
+                        kind,
                         (y as usize * iw as usize + x as usize) * bands + b,
                         mapped,
                     );
@@ -950,11 +1298,21 @@ impl Raster {
     /// # Errors
     ///
     /// Returns [`HistogramError::NotAHistogram`] if `lut` is not
-    /// histogram-shaped, [`HistogramError::LutBandMismatch`] if neither
+    /// histogram-shaped, [`HistogramError::LutTooLong`] if it has more
+    /// than 65536 elements, [`HistogramError::LutBandMismatch`] if neither
     /// band-combination rule applies, or [`HistogramError::Raster`] if the
     /// result exceeds the allocation budget.
     pub fn try_maplut(&self, lut: &Raster) -> Result<Raster, HistogramError> {
         let n_lut = hist_len(lut)?;
+        // libvips refuses a longer table, and so does this: see
+        // `HistogramError::LutTooLong` for the measurement and for why the
+        // bound is load-bearing rather than cosmetic (issue #894).
+        if n_lut > MAX_LUT_LEN {
+            return Err(HistogramError::LutTooLong {
+                len: n_lut,
+                max: MAX_LUT_LEN,
+            });
+        }
         let image_bands = self.format().channels();
         let lut_bands = lut.format().channels();
         let out_bands = if image_bands == 1 {
@@ -967,8 +1325,8 @@ impl Raster {
                 lut: lut_bands,
             });
         };
-        let bpc = self.format().bytes_per_channel();
-        let lut_bpc = lut.format().bytes_per_channel();
+        let kind = self.format().kind();
+        let lut_bpc = lut.format().kind();
         let out_fmt = format_for(out_bands, lut_bpc)?;
         let mut out = Raster::zeroed(self.width(), self.height(), out_fmt)?;
         let buf = out.data_mut();
@@ -979,8 +1337,8 @@ impl Raster {
             for c in 0..out_bands {
                 let src_band = if image_bands == 1 { 0 } else { c };
                 let lut_band = if lut_bands == 1 { 0 } else { c };
-                let v = read_flat(data, bpc, i * image_bands + src_band) as usize;
-                let entry = read_flat(lut_data, lut_bpc, v.min(n_lut - 1) * lut_bands + lut_band);
+                let v = read_bin(data, kind, i * image_bands + src_band) as usize;
+                let entry = read_value(lut_data, lut_bpc, v.min(n_lut - 1) * lut_bands + lut_band);
                 write_flat(buf, lut_bpc, i * out_bands + c, entry);
             }
         }
@@ -1025,22 +1383,22 @@ impl Raster {
                 }
             })
             .collect();
-        let out_bpc = if values.iter().all(|&v| v <= 255) {
-            1
+        let out_kind = if values.iter().all(|&v| v <= 255) {
+            SampleKind::U8
         } else {
-            2
+            SampleKind::U16
         };
         let fmt = self.format();
         let bands = fmt.channels();
-        let bpc = fmt.bytes_per_channel();
-        let out_fmt = format_for(bands, out_bpc)?;
+        let kind = fmt.kind();
+        let out_fmt = format_for(bands, out_kind)?;
         let mut out = Raster::zeroed(self.width(), self.height(), out_fmt)?;
         let buf = out.data_mut();
         let data = self.data();
         let count = self.width() as usize * self.height() as usize * bands;
         for i in 0..count {
-            let idx = (read_flat(data, bpc, i) as usize).min(values.len() - 1);
-            write_flat(buf, out_bpc, i, values[idx]);
+            let idx = (read_bin(data, kind, i) as usize).min(values.len() - 1);
+            write_flat(buf, out_kind, i, values[idx]);
         }
         Ok(out)
     }
@@ -1077,13 +1435,13 @@ impl Raster {
         }
         let fmt = self.format();
         let bands = fmt.channels();
-        let bpc = fmt.bytes_per_channel();
-        let bins = bins_for(bpc);
+        let kind = fmt.kind();
+        let bins = bins_for(kind);
         let count = self.width() as usize * self.height() as usize * bands;
         let data = self.data();
         let mut hist = vec![0u64; bins];
         for i in 0..count {
-            hist[read_flat(data, bpc, i) as usize] += 1;
+            hist[read_bin(data, kind, i) as usize] += 1;
         }
         let target = percent / 100.0 * count as f64;
         let mut cum = 0u64;
@@ -1112,8 +1470,348 @@ impl Raster {
 mod tests {
     use super::*;
 
+    /// The native-endian bit pattern of `bits`, at the width `kind` stores.
+    ///
+    /// Keyed on the kind rather than on the byte width. The two sites this
+    /// replaced both wrote `match kind.bytes() { 1 => .., _ => u16 pair }`,
+    /// which reads a four-byte carrier as two bytes and says nothing about
+    /// it: a width is `f32`, `u32` and `i32` at once (issues #607, #942).
+    fn bit_pattern(kind: SampleKind, bits: u32) -> Vec<u8> {
+        match kind {
+            SampleKind::U8 | SampleKind::I8 => vec![bits as u8],
+            SampleKind::U16 | SampleKind::I16 => (bits as u16).to_ne_bytes().to_vec(),
+            SampleKind::U32 | SampleKind::I32 | SampleKind::F32 => bits.to_ne_bytes().to_vec(),
+        }
+    }
+
+    /**
+     * Tests that this module dispatches on sample kind and never on byte
+     * width, by asserting that neither the byte-width accessor on
+     * [`PixelFormat`] nor its width-keyed constructor survives in
+     * `src/histogram.rs`.
+     * Works by scanning the module's own source, compiled in with
+     * `include_str!`, for the accessor's name; the needle is spelled in two
+     * halves so this assertion is not itself a hit. A byte width is not a
+     * sample kind: four bytes is `f32` today and would be `u32` under issue
+     * #517, so a `match` keyed on the width silently takes a wrong arm for
+     * any carrier added later instead of failing to compile (issue #607).
+     * Input: `src/histogram.rs` -> Output: zero occurrences.
+     */
+    #[test]
+    fn histogram_does_not_dispatch_on_byte_width() {
+        const SRC: &str = include_str!("histogram.rs");
+        // Both spellings of a byte-width dispatch: reading the width off a
+        // format, and handing one back to the width-keyed constructor.
+        let needles = [
+            concat!("bytes_per_", "channel"),
+            concat!("with_", "channels"),
+        ];
+        // Positive control: the same scan over the same string finds a token
+        // that is present, so the zero below is a real zero and not the
+        // vacuous pass an empty read would give.
+        assert!(
+            SRC.contains(concat!("fn read_", "flat")),
+            "positive control failed: the scan cannot see this module's source"
+        );
+        for needle in needles {
+            assert_eq!(
+                SRC.matches(needle).count(),
+                0,
+                "{needle} is back in src/histogram.rs; dispatch on PixelFormat::kind() \
+                 and PixelFormat::with_kind() instead"
+            );
+        }
+    }
+
     fn gray(w: u32, h: u32, data: Vec<u8>) -> Raster {
         Raster::new(w, h, PixelFormat::Gray8, data).unwrap()
+    }
+
+    /**
+     * Tests the carrier every counting histogram op writes, so the module
+     * doc's claims about count depth have a check behind them and a wider
+     * carrier lands as a red test at each op that must change.
+     * Works by asserting the output `PixelFormat` of `hist_find`,
+     * `hist_find_band`, `hist_find_indexed`, `hist_find_ndim` and
+     * `hist_cum` on an 8-bit input, covering both the per-band and the
+     * pooled shapes.
+     * Measured on vips 8.18.6: `hist_find`, `hist_find_ndim` and
+     * `hist_cum` (on an unsigned input) emit `VIPS_FORMAT_UINT`, while
+     * `hist_find_indexed` emits `DOUBLE` for every input format and either
+     * `combine` mode, which the module doc used to sweep into "32-bit
+     * unsigned" (issue #759).
+     * Input: a 4x4 Gray8 image -> Output: `Uint32` from four of the five,
+     * and `FloatF32` from `hist_find_indexed`, which is issue #887 and a
+     * different carrier family for a measured reason.
+     */
+    #[test]
+    fn counting_ops_carry_32_bit_samples() {
+        let im = gray(4, 4, (0u8..16).collect());
+        assert_eq!(im.hist_find().format(), uint_fmt(1));
+        assert_eq!(im.hist_find_band(0).format(), uint_fmt(1));
+        assert_eq!(im.hist_find_ndim(Some(4)).format(), uint_fmt(1));
+        assert_eq!(im.hist_find().hist_cum().format(), uint_fmt(1));
+        // `hist_find_indexed` is in a different carrier family and not a
+        // wider integer: vips emits **DOUBLE** there whatever the value
+        // image's carrier is, and `FloatF32` is the nearest kind this crate
+        // has (issue #887).
+        assert_eq!(
+            im.hist_find_indexed(&im).format(),
+            PixelFormat::FloatF32(core::num::NonZeroU16::new(1).unwrap())
+        );
+    }
+
+    /**
+     * Tests that `write_flat` saturates into the kind rather than
+     * truncating, which is the contract its callers that do not pre-clamp
+     * rely on.
+     * Works by writing an over-ceiling value at each unsigned kind and
+     * reading it back through `read_flat`. Mutation found this one too:
+     * every op-level caller reaching `write_flat` today either goes
+     * through `sat32` or is bounded by an index, so dropping this clamp
+     * left all 60 histogram tests green even though a truncating write
+     * would turn 65536 into 0.
+     * Input: 300 at U8 and 70000 at U16 -> Output: 255 and 65535.
+     */
+    #[test]
+    fn write_flat_saturates_into_the_kind() {
+        let mut one = [0u8; 1];
+        write_flat(&mut one, SampleKind::U8, 0, 300);
+        assert_eq!(read_bin(&one, SampleKind::U8, 0), 255);
+
+        let mut two = [0u8; 2];
+        write_flat(&mut two, SampleKind::U16, 0, 70_000);
+        assert_eq!(read_bin(&two, SampleKind::U16, 0), 65_535);
+
+        // A value inside the kind is written through unchanged, so the
+        // saturations above are a clamp and not a constant.
+        write_flat(&mut one, SampleKind::U8, 0, 7);
+        assert_eq!(read_bin(&one, SampleKind::U8, 0), 7);
+        write_flat(&mut two, SampleKind::U16, 0, 4_242);
+        assert_eq!(read_bin(&two, SampleKind::U16, 0), 4_242);
+    }
+
+    /**
+     * Tests that the bin-index read folds a negative sample the way libvips
+     * does, which is what the signed carriers of issue #516 will meet the
+     * moment `hist_find` sees one.
+     * Works by reading each stored bit pattern back as a bin index and
+     * comparing against the measured libvips answer, with an in-range
+     * positive value alongside so a clamp that answered zero for
+     * everything cannot pass.
+     * Measured on `/opt/homebrew/bin/vips` 8.18.6: a one-band `char` image
+     * holding `[-128, -1, 0, 127]` histograms to a 256-wide result with
+     * `bin 0 = 3` and `bin 127 = 1`, so every negative sample lands in bin
+     * zero. That is the `VipsStatisticClass` input cast at work (the
+     * per-op `format_table` casts `CHAR` to `UCHAR`, saturating), not a
+     * signed bin table.
+     * Input: I8 bit patterns 0x80, 0xFF, 0x00, 0x7F -> bins 0, 0, 0, 127.
+     */
+    #[test]
+    fn read_flat_folds_a_negative_sample_into_bin_zero() {
+        for (kind, bits, bin) in [
+            (SampleKind::I8, 0x80u32, 0u32),
+            (SampleKind::I8, 0xFF, 0),
+            (SampleKind::I8, 0x00, 0),
+            (SampleKind::I8, 0x7F, 127),
+            (SampleKind::I16, 0x8000, 0),
+            (SampleKind::I16, 0xFFFF, 0),
+            (SampleKind::I16, 0x7FFF, 32_767),
+        ] {
+            let buf = bit_pattern(kind, bits);
+            assert_eq!(
+                read_bin(&buf, kind, 0),
+                bin,
+                "{kind:?} read {bits:#x} into the wrong bin"
+            );
+        }
+    }
+
+    /**
+     * Tests that the count write saturates into every sample kind's
+     * ceiling, including the four kinds no `PixelFormat` carries yet.
+     * Works by writing one value over the ceiling and one inside it per
+     * kind and reading both back, so the clamp cannot pass as a constant.
+     * Input: 300 into I8 -> 127; 5e9 into U32 -> 4294967295; 5e9 into I32
+     * -> 2147483647.
+     */
+    #[test]
+    fn write_flat_saturates_into_every_integer_kind() {
+        // The stored bit pattern, read back without going through
+        // `read_flat`, which folds a 32-bit sample into the 16-bit bin
+        // table and so cannot see a count above 65535.
+        fn stored(buf: &[u8]) -> u32 {
+            match buf.len() {
+                1 => u32::from(buf[0]),
+                2 => u32::from(u16::from_ne_bytes([buf[0], buf[1]])),
+                _ => u32::from_ne_bytes([buf[0], buf[1], buf[2], buf[3]]),
+            }
+        }
+        for kind in [
+            SampleKind::U8,
+            SampleKind::I8,
+            SampleKind::U16,
+            SampleKind::I16,
+            SampleKind::U32,
+            SampleKind::I32,
+        ] {
+            let ceiling = kind.max_value().expect("an integer kind has a ceiling");
+            let mut buf = vec![0u8; kind.bytes()];
+            write_flat(&mut buf, kind, 0, u32::MAX);
+            assert_eq!(
+                stored(&buf),
+                ceiling,
+                "{kind:?} did not saturate at its ceiling"
+            );
+            write_flat(&mut buf, kind, 0, 5);
+            assert_eq!(
+                stored(&buf),
+                5,
+                "{kind:?} did not write an in-range count through"
+            );
+        }
+        // The control on `stored` itself: on the two carried unsigned
+        // kinds it agrees with `read_flat`, so it is reading the same
+        // bytes the module does.
+        let mut two = vec![0u8; 2];
+        write_flat(&mut two, SampleKind::U16, 0, 4_242);
+        assert_eq!(stored(&two), read_bin(&two, SampleKind::U16, 0));
+    }
+
+    /**
+     * Tests that the bin-index read performs the same input cast a
+     * `VipsStatisticClass` op performs, folding a 32-bit sample into the
+     * 16-bit bin table rather than indexing past its end.
+     * Works by storing samples either side of 65535 and asserting the
+     * index, with an in-range value alongside so the fold cannot pass as a
+     * constant, and by asserting the index never reaches `bins_for`.
+     * Measured on `/opt/homebrew/bin/vips` 8.18.6: a `uint` image whose
+     * largest sample is 70000 gives a **65536**-wide histogram, so the
+     * sample was saturated into `ushort` before it was counted.
+     * Input: U32 70000 -> 65535; U32 1000 -> 1000; I32 -7 -> 0.
+     */
+    /**
+     * Tests that the fixed 256-row plot height belongs to `U8` alone and
+     * not to every one-byte kind, which is the one claim in this change
+     * that a raster cannot reach, since no `PixelFormat` carries `I8`.
+     * Works by calling the height rule directly for every kind on the same
+     * values, with a control that the data-driven group does answer from
+     * the data.
+     * Measured on `/opt/homebrew/bin/vips` 8.18.6: a histogram of
+     * `[0, 5]` plots 256 rows high as `uchar` and 5 rows high as `char`,
+     * `ushort`, `short`, `uint` and `int`.
+     * Input: ([0, 5], U8) -> 256; ([0, 5], I8) -> 6 (libviprs's own
+     * `max + 1`, see #802).
+     */
+    #[test]
+    fn only_the_unsigned_byte_kind_plots_a_fixed_height() {
+        let values = [0u32, 5];
+        assert_eq!(plot_height(SampleKind::U8, &values), 256);
+        for kind in [
+            SampleKind::I8,
+            SampleKind::U16,
+            SampleKind::I16,
+            SampleKind::U32,
+            SampleKind::I32,
+            SampleKind::F32,
+        ] {
+            assert_eq!(
+                plot_height(kind, &values),
+                5,
+                "{kind:?} did not take its plot height from the data"
+            );
+        }
+        // Control: the data-driven answer really does follow the data, so
+        // the 5 above is not a second constant. An all-zero histogram
+        // still gets one row, measured: a `ushort` `[0, 0, 0]` plots 1.
+        assert_eq!(plot_height(SampleKind::I8, &[0, 40]), 40);
+        assert_eq!(plot_height(SampleKind::I8, &[0, 0, 0]), 1);
+        assert_eq!(plot_height(SampleKind::I8, &[]), 1);
+    }
+
+    #[test]
+    fn read_flat_folds_a_32_bit_sample_into_the_16_bit_bin_table() {
+        for (kind, stored, index) in [
+            (SampleKind::U32, 70_000i64, 65_535u32),
+            (SampleKind::U32, 1_000, 1_000),
+            (SampleKind::U32, i64::from(u32::MAX), 65_535),
+            (SampleKind::I32, -7, 0),
+            (SampleKind::I32, 1_000, 1_000),
+            (SampleKind::I32, i64::from(i32::MAX), 65_535),
+        ] {
+            let mut buf = vec![0u8; 4];
+            buf.copy_from_slice(&(stored as i32).to_ne_bytes());
+            let got = read_bin(&buf, kind, 0);
+            assert_eq!(got, index, "{kind:?} folded {stored} into the wrong bin");
+            assert!(
+                (got as usize) < bins_for(kind),
+                "{kind:?} indexed past the {} bins it declares",
+                bins_for(kind)
+            );
+        }
+        // The invariant `hist_width` leans on, stated for every kind that
+        // carries a sample: a bin index is inside the kind's own table, so
+        // a histogram sized `max + 1` can never be wider than `bins_for`
+        // and the cap that used to be in `hist_width` was unreachable.
+        for (kind, bits) in [
+            (SampleKind::U8, 0xFFu32),
+            (SampleKind::I8, 0xFF),
+            (SampleKind::U16, 0xFFFF),
+            (SampleKind::I16, 0xFFFF),
+        ] {
+            let buf = bit_pattern(kind, bits);
+            let got = read_bin(&buf, kind, 0) as usize;
+            assert!(got < bins_for(kind), "{kind:?} indexed past its table");
+            assert!(
+                hist_width(kind, u32::try_from(got).unwrap()) <= bins_for(kind),
+                "{kind:?} sizes a histogram wider than its table"
+            );
+        }
+    }
+
+    /**
+     * Tests `sat32` at the narrowing it owns, which the whole-op tests
+     * cannot reach.
+     * Works by calling it directly with counts either side of the 32-bit
+     * ceiling and at the top of `u64`. This was `sat16` and the argument
+     * for it is unchanged by the widening: it guards the `u64` to `u32`
+     * narrowing, which now needs a count above 1.8e19 to cross and which
+     * no image this crate will allocate can reach through an op. Calling
+     * it directly costs nothing, and a bare `as u32` there would wrap
+     * rather than saturate.
+     * Input: 0, u32::MAX, u32::MAX + 1, u64::MAX -> Output: 0,
+     * 4294967295, 4294967295, 4294967295.
+     */
+    #[test]
+    fn sat32_clamps_across_the_u64_narrowing() {
+        assert_eq!(sat32(0), 0);
+        assert_eq!(sat32(65_536), 65_536, "the old 16-bit ceiling is not one");
+        assert_eq!(sat32(u64::from(u32::MAX)), u32::MAX);
+        assert_eq!(sat32(u64::from(u32::MAX) + 1), u32::MAX);
+        assert_eq!(sat32(u64::MAX), u32::MAX);
+    }
+
+    /**
+     * Tests that `hist_find` carries a bin count past 65535 instead of
+     * saturating there, which is the whole of issue #532 and the reason
+     * issue #517's carrier exists.
+     * Works by histogramming a 256x256 single-valued image, whose one
+     * populated bin holds 65536 samples, exactly one past the old ceiling.
+     * That is the smallest square image that overflows it, and it is 64
+     * KiB. This test used to assert 65535 and named the shortfall as a
+     * deviation (issue #759); the number it asserts now is the count.
+     * The bins either side stay at zero, so the count is a real one and
+     * not every bin reading full.
+     * Input: 256x256 all-7 -> Output: bin 7 is 65536, not 65535.
+     */
+    #[test]
+    fn hist_find_carries_a_count_past_the_16_bit_ceiling() {
+        let im = gray(256, 256, vec![7u8; 256 * 256]);
+        let h = im.hist_find();
+        assert_eq!(h.format(), uint_fmt(1));
+        assert_eq!(h.getpoint(7, 0), vec![65536.0]);
+        assert_eq!(h.getpoint(6, 0), vec![0.0]);
+        assert_eq!(h.getpoint(8, 0), vec![0.0]);
     }
 
     fn gray16(w: u32, h: u32, vals: &[u16]) -> Raster {
@@ -1156,7 +1854,7 @@ mod tests {
         let hist = im.hist_find();
         assert_eq!(hist.width(), 256);
         assert_eq!(hist.height(), 1);
-        assert_eq!(hist.format(), PixelFormat::Gray16);
+        assert_eq!(hist.format(), uint_fmt(1));
         assert_eq!(hist.getpoint(0, 0), vec![5000.0]);
         assert_eq!(hist.getpoint(10, 0), vec![5000.0]);
         assert_eq!(hist.getpoint(5, 0), vec![0.0]);
@@ -1172,31 +1870,105 @@ mod tests {
         let im = Raster::new(50, 40, PixelFormat::Rgb8, data).unwrap();
         let hist = im.hist_find();
         assert_eq!(hist.width(), 256);
-        assert_eq!(hist.format(), PixelFormat::Rgb16);
+        assert_eq!(hist.format(), uint_fmt(3));
         assert_eq!(hist.getpoint(1, 0), vec![2000.0, 0.0, 0.0]);
         assert_eq!(hist.getpoint(2, 0), vec![0.0, 2000.0, 0.0]);
         assert_eq!(hist.getpoint(3, 0), vec![0.0, 0.0, 2000.0]);
     }
 
-    /// 16-bit input histograms into 65536 bins, indexed by raw value.
+    /**
+     * Tests that a 16-bit histogram is as wide as the data needs and not
+     * as wide as the depth allows (issue #803).
+     * Works by histogramming the values libvips was measured on and
+     * asserting the width and every populated bin, so a width that is
+     * right by accident still fails on where the counts landed.
+     * Measured on `/opt/homebrew/bin/vips` 8.18.6: `vips hist_find` of a
+     * `ushort` `[4096, 4096, 9]` gives width **4097**. This test asserted
+     * 65536 before, which is the depth's ceiling rather than the answer.
+     * Input: `[4096, 4096, 9]` -> 4097x1, bin 4096 = 2, bin 9 = 1.
+     */
     #[test]
     fn hist_find_16bit_width() {
         let im = gray16(3, 1, &[4096, 4096, 9]);
         let hist = im.hist_find();
-        assert_eq!(hist.width(), 65536);
+        assert_eq!(hist.width(), 4097);
         assert_eq!(hist.height(), 1);
         assert_eq!(hist.getpoint(4096, 0), vec![2.0]);
         assert_eq!(hist.getpoint(9, 0), vec![1.0]);
         assert_eq!(hist.getpoint(0, 0), vec![0.0]);
     }
 
-    /// Counts saturate at 65535 rather than wrapping: 90000 zero-valued
-    /// pixels report 65535.
+    /**
+     * Tests the 16-bit histogram width across the measured sweep, and that
+     * the 8-bit width stays fixed at 256 whatever the data holds.
+     * Works by histogramming each case and comparing the width, with the
+     * 8-bit rows alongside so the two rules cannot collapse into one.
+     * Measured on `/opt/homebrew/bin/vips` 8.18.6, `ushort` input:
+     * `[0]` -> 1, `[0, 1000]` -> 1001, `[4096, 4096, 9]` -> 4097,
+     * `[0, 1000, 65535]` -> 65536. A `uchar` `[3, 0]` gives 256 and a
+     * `uchar` `[255, 0]` gives 256.
+     */
     #[test]
-    fn hist_find_saturates_at_u16_max() {
+    fn hist_find_width_follows_the_data_at_16_bit_only() {
+        for (vals, width) in [
+            (vec![0u16], 1u32),
+            (vec![0, 1000], 1001),
+            (vec![4096, 4096, 9], 4097),
+            (vec![0, 1000, 65535], 65536),
+        ] {
+            let n = u32::try_from(vals.len()).unwrap();
+            assert_eq!(
+                gray16(n, 1, &vals).hist_find().width(),
+                width,
+                "16-bit histogram of {vals:?} came out the wrong width"
+            );
+        }
+        for vals in [vec![3u8, 0], vec![255, 0]] {
+            let n = u32::try_from(vals.len()).unwrap();
+            assert_eq!(gray(n, 1, vals).hist_find().width(), 256);
+        }
+    }
+
+    /**
+     * Tests that the width follows the band actually being histogrammed,
+     * which the whole-image sweep cannot separate from the global maximum.
+     * Works by building a two-band 16-bit image whose bands have very
+     * different maxima and asserting all three widths, so a `hist_find_band`
+     * that quietly used the global max would fail on band 0.
+     * Measured on `/opt/homebrew/bin/vips` 8.18.6 for a `ushort` image with
+     * band 0 maxing at 10 and band 1 at 5000: `vips hist_find` gives 5001
+     * over two bands, `--band 0` gives 11 and `--band 1` gives 5001.
+     * Input: bands `[10, 0]` and `[5000, 0]` -> 5001, 11, 5001.
+     */
+    #[test]
+    fn hist_find_band_width_follows_its_own_band() {
+        let vals: [u16; 4] = [10, 5000, 0, 0];
+        let data: Vec<u8> = vals.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        let im = Raster::new(
+            2,
+            1,
+            PixelFormat::with_kind(2, SampleKind::U16).unwrap(),
+            data,
+        )
+        .unwrap();
+        assert_eq!(im.hist_find().width(), 5001);
+        assert_eq!(im.hist_find_band(0).width(), 11);
+        assert_eq!(im.hist_find_band(1).width(), 5001);
+        // The counts still land where they should, so the narrower widths
+        // are a size and not a truncation.
+        assert_eq!(im.hist_find_band(0).getpoint(10, 0), vec![1.0]);
+        assert_eq!(im.hist_find_band(1).getpoint(5000, 0), vec![1.0]);
+    }
+
+    /// The image issue #532 opens with: a 300x300 raster is 90000 pixels,
+    /// and the count is 90000. `vips hist_find` on the same image reports
+    /// 90000 too, measured on 8.18.6; this used to report 65535.
+    #[test]
+    fn hist_find_counts_all_90000_pixels_of_a_300_square() {
         let im = Raster::zeroed(300, 300, PixelFormat::Gray8).unwrap();
         let hist = im.hist_find();
-        assert_eq!(hist.getpoint(0, 0), vec![65535.0]);
+        assert_eq!(hist.format(), uint_fmt(1));
+        assert_eq!(hist.getpoint(0, 0), vec![90000.0]);
     }
 
     // ---- hist_find_band ----
@@ -1208,7 +1980,7 @@ mod tests {
         let data: Vec<u8> = std::iter::repeat_n([1u8, 2, 3], 100).flatten().collect();
         let im = Raster::new(10, 10, PixelFormat::Rgb8, data).unwrap();
         let hist = im.hist_find_band(1);
-        assert_eq!(hist.format(), PixelFormat::Gray16);
+        assert_eq!(hist.format(), uint_fmt(1));
         assert_eq!(hist.getpoint(2, 0), vec![100.0]);
         assert_eq!(hist.getpoint(1, 0), vec![0.0]);
 
@@ -1234,15 +2006,30 @@ mod tests {
         assert_eq!(hist.getpoint(2, 0), vec![0.0]);
     }
 
-    /// A 16-bit index image widens the output to 65536 elements, and a
-    /// multiband input keeps one sum per band.
+    /**
+     * Tests that a 16-bit index sizes the indexed histogram to the largest
+     * index present rather than to the depth's ceiling, and that a
+     * multiband input still keeps one sum per band (issue #803).
+     * Works by indexing with a 16-bit image whose largest value is 300 and
+     * asserting the width alongside both bands' sums.
+     * Measured on `/opt/homebrew/bin/vips` 8.18.6: `vips hist_find_indexed`
+     * with a `ushort` index maxing at 10 gives width 11, and with a `uchar`
+     * index gives 256.
+     * Input: index max 300 -> 301 elements, two bands.
+     */
     #[test]
     fn hist_find_indexed_16bit_index_and_bands() {
         let data: Vec<u8> = std::iter::repeat_n([4u8, 6], 6).flatten().collect();
-        let im = Raster::new(3, 2, PixelFormat::with_channels(2, 1).unwrap(), data).unwrap();
+        let im = Raster::new(
+            3,
+            2,
+            PixelFormat::with_kind(2, SampleKind::U8).unwrap(),
+            data,
+        )
+        .unwrap();
         let index = gray16(3, 2, &[300, 300, 300, 0, 0, 0]);
         let hist = im.hist_find_indexed(&index);
-        assert_eq!(hist.width(), 65536);
+        assert_eq!(hist.width(), 301);
         assert_eq!(hist.format().channels(), 2);
         assert_eq!(hist.getpoint(300, 0), vec![12.0, 18.0]);
         assert_eq!(hist.getpoint(0, 0), vec![12.0, 18.0]);
@@ -1289,7 +2076,7 @@ mod tests {
         let hist = im.hist_find_ndim(Some(1));
         assert_eq!(hist.width(), 1);
         assert_eq!(hist.height(), 1);
-        assert_eq!(hist.format(), PixelFormat::Gray16);
+        assert_eq!(hist.format(), uint_fmt(1));
         assert_eq!(hist.getpoint(0, 0), vec![10000.0]);
     }
 
@@ -1300,15 +2087,21 @@ mod tests {
         let im = gray(2, 1, vec![255, 0]);
         let hist = im.hist_find_ndim(None);
         assert_eq!((hist.width(), hist.height()), (10, 1));
-        assert_eq!(hist.format(), PixelFormat::Gray16);
+        assert_eq!(hist.format(), uint_fmt(1));
         assert_eq!(hist.getpoint(9, 0), vec![1.0]);
         assert_eq!(hist.getpoint(0, 0), vec![1.0]);
 
         let data = vec![0u8, 255, 255, 0];
-        let im = Raster::new(2, 1, PixelFormat::with_channels(2, 1).unwrap(), data).unwrap();
+        let im = Raster::new(
+            2,
+            1,
+            PixelFormat::with_kind(2, SampleKind::U8).unwrap(),
+            data,
+        )
+        .unwrap();
         let hist = im.hist_find_ndim(None);
         assert_eq!((hist.width(), hist.height()), (10, 10));
-        assert_eq!(hist.format(), PixelFormat::Gray16);
+        assert_eq!(hist.format(), uint_fmt(1));
         // Pixel [0, 255] -> column 0, row 9; pixel [255, 0] -> column 9, row 0.
         assert_eq!(hist.getpoint(0, 9), vec![1.0]);
         assert_eq!(hist.getpoint(9, 0), vec![1.0]);
@@ -1332,7 +2125,7 @@ mod tests {
             })
         ));
 
-        let im = Raster::zeroed(2, 2, PixelFormat::with_channels(5, 1).unwrap()).unwrap();
+        let im = Raster::zeroed(2, 2, PixelFormat::with_kind(5, SampleKind::U8).unwrap()).unwrap();
         assert!(matches!(
             im.try_hist_find_ndim(None),
             Err(HistogramError::TooManyDimensions { bands: 5 })
@@ -1348,7 +2141,7 @@ mod tests {
         let im = Raster::identity();
         let total = im.avg() * 256.0;
         let cum = im.hist_cum();
-        assert_eq!(cum.format(), PixelFormat::Gray16);
+        assert_eq!(cum.format(), uint_fmt(1));
         assert_eq!((cum.width(), cum.height()), (256, 1));
         let px = cum.getpoint(255, 0);
         assert!(
@@ -1362,7 +2155,13 @@ mod tests {
     #[test]
     fn hist_cum_per_band_and_vertical() {
         let data = vec![1u8, 10, 2, 20, 3, 30];
-        let im = Raster::new(1, 3, PixelFormat::with_channels(2, 1).unwrap(), data).unwrap();
+        let im = Raster::new(
+            1,
+            3,
+            PixelFormat::with_kind(2, SampleKind::U8).unwrap(),
+            data,
+        )
+        .unwrap();
         let cum = im.hist_cum();
         assert_eq!((cum.width(), cum.height()), (1, 3));
         assert_eq!(cum.getpoint(0, 0), vec![1.0, 10.0]);
@@ -1372,11 +2171,12 @@ mod tests {
 
     /// 16-bit cumulative sums saturate at 65535 rather than wrapping.
     #[test]
-    fn hist_cum_saturates() {
+    fn hist_cum_carries_a_running_sum_past_the_16_bit_ceiling() {
         let cum = gray16(3, 1, &[60000, 60000, 60000]).hist_cum();
+        assert_eq!(cum.format(), uint_fmt(1));
         assert_eq!(cum.getpoint(0, 0), vec![60000.0]);
-        assert_eq!(cum.getpoint(1, 0), vec![65535.0]);
-        assert_eq!(cum.getpoint(2, 0), vec![65535.0]);
+        assert_eq!(cum.getpoint(1, 0), vec![120000.0]);
+        assert_eq!(cum.getpoint(2, 0), vec![180000.0]);
     }
 
     /// hist_cum rejects a 2D image with a typed error.
@@ -1409,7 +2209,13 @@ mod tests {
     #[test]
     fn hist_norm_scales_bands_independently() {
         let data = vec![0u8, 0, 5, 0, 10, 0];
-        let im = Raster::new(3, 1, PixelFormat::with_channels(2, 1).unwrap(), data).unwrap();
+        let im = Raster::new(
+            3,
+            1,
+            PixelFormat::with_kind(2, SampleKind::U8).unwrap(),
+            data,
+        )
+        .unwrap();
         let normed = im.hist_norm();
         assert_eq!(normed.getpoint(0, 0), vec![0.0, 0.0]);
         assert_eq!(normed.getpoint(1, 0), vec![1.0, 0.0]);
@@ -1457,6 +2263,49 @@ mod tests {
         );
     }
 
+    /**
+     * Tests the whole `hist_equal` chain against libvips, which is the
+     * end-to-end control on the histogram width: the chain is
+     * `maplut(hist_norm(hist_cum(hist_find)))` and `hist_equal` fuses it,
+     * so it has to be sized by the same rule `hist_find` is (issue #823).
+     * Works by equalising each case libvips was measured on and comparing
+     * every output sample, with the 8-bit cases alongside as the control
+     * that the fixed-256 path is untouched.
+     * Measured on `/opt/homebrew/bin/vips` 8.18.6:
+     * `uchar [7, 7, 7] -> [255, 255, 255]`,
+     * `ushort [7, 7, 7] -> [7, 7, 7]`,
+     * `ushort [4096, 4096, 9] -> [4096, 4096, 1365]`,
+     * `uchar [0, 128, 255] -> [85, 170, 255]`,
+     * `ushort [0, 1000, 65535] -> [21845, 43690, 65535]`.
+     * The two constant rows are the pair that matters: a constant 8-bit
+     * band equalises to 255 and a constant 16-bit band equalises to
+     * **itself**, because the table is only as wide as the value present.
+     */
+    #[test]
+    fn hist_equal_matches_vips() {
+        for (vals, want) in [
+            (vec![7u16, 7, 7], vec![7.0, 7.0, 7.0]),
+            (vec![4096, 4096, 9], vec![4096.0, 4096.0, 1365.0]),
+            (vec![0, 1000, 65535], vec![21845.0, 43690.0, 65535.0]),
+        ] {
+            let n = u32::try_from(vals.len()).unwrap();
+            let eq = gray16(n, 1, &vals).hist_equal();
+            assert_eq!(eq.format(), PixelFormat::Gray16);
+            let got: Vec<f64> = (0..n).map(|x| eq.getpoint(x, 0)[0]).collect();
+            assert_eq!(got, want, "16-bit hist_equal of {vals:?}");
+        }
+        for (vals, want) in [
+            (vec![7u8, 7, 7], vec![255.0, 255.0, 255.0]),
+            (vec![0, 128, 255], vec![85.0, 170.0, 255.0]),
+        ] {
+            let n = u32::try_from(vals.len()).unwrap();
+            let eq = gray(n, 1, vals.clone()).hist_equal();
+            assert_eq!(eq.format(), PixelFormat::Gray8);
+            let got: Vec<f64> = (0..n).map(|x| eq.getpoint(x, 0)[0]).collect();
+            assert_eq!(got, want, "8-bit hist_equal of {vals:?}");
+        }
+    }
+
     /// hist_equal maps each band with its own LUT: a band that is already
     /// full-range keeps its extremes while a narrow band spreads.
     #[test]
@@ -1466,7 +2315,13 @@ mod tests {
             data.push(v); // band 0: full ramp
             data.push(100 + (v % 10)); // band 1: narrow
         }
-        let im = Raster::new(256, 1, PixelFormat::with_channels(2, 1).unwrap(), data).unwrap();
+        let im = Raster::new(
+            256,
+            1,
+            PixelFormat::with_kind(2, SampleKind::U8).unwrap(),
+            data,
+        )
+        .unwrap();
         let eq = im.hist_equal();
         let band1 = eq.extract_band(1);
         assert!(
@@ -1505,7 +2360,13 @@ mod tests {
     #[test]
     fn hist_ismonotonic_per_band() {
         let data = vec![0u8, 9, 1, 8, 2, 7];
-        let im = Raster::new(3, 1, PixelFormat::with_channels(2, 1).unwrap(), data).unwrap();
+        let im = Raster::new(
+            3,
+            1,
+            PixelFormat::with_kind(2, SampleKind::U8).unwrap(),
+            data,
+        )
+        .unwrap();
         assert!(!im.hist_ismonotonic());
     }
 
@@ -1699,25 +2560,75 @@ mod tests {
         assert_eq!(plot.format(), PixelFormat::Gray8);
     }
 
-    /// Bars grow from the bottom: column x is white for the bottom hist[x]
-    /// rows and black above, and a 16-bit histogram plots max + 1 high.
+    /**
+     * Tests the bar geometry and the plot height of a 16-bit histogram
+     * against libvips rather than against libviprs's own previous answer
+     * (issue #802).
+     * Works by plotting the same three counts libvips was measured on and
+     * asserting every pixel of the result, so a height that is right by
+     * accident still fails on where the bars start.
+     * Measured on `/opt/homebrew/bin/vips` 8.18.6: `vips hist_plot` of a
+     * `ushort` `[2, 0, 3]` gives a 3x**3** image whose rows are
+     * `[0, 0, 255]`, `[255, 0, 255]`, `[255, 0, 255]`. This test asserted
+     * 3x4 before, which was libviprs's `max + 1`.
+     * Input: `[2, 0, 3]` -> 3x3, bars growing from the bottom.
+     */
     #[test]
     fn hist_plot_bar_geometry() {
         let plot = gray16(3, 1, &[2, 0, 3]).hist_plot();
-        assert_eq!((plot.width(), plot.height()), (3, 4));
+        assert_eq!((plot.width(), plot.height()), (3, 3));
         assert_eq!(plot.format(), PixelFormat::Gray8);
-        // Column 0: two white pixels at the bottom.
+        // Column 0: two white pixels at the bottom of three rows.
         assert_eq!(plot.getpoint(0, 0), vec![0.0]);
-        assert_eq!(plot.getpoint(0, 1), vec![0.0]);
+        assert_eq!(plot.getpoint(0, 1), vec![255.0]);
         assert_eq!(plot.getpoint(0, 2), vec![255.0]);
-        assert_eq!(plot.getpoint(0, 3), vec![255.0]);
         // Column 1: empty.
-        for y in 0..4 {
+        for y in 0..3 {
             assert_eq!(plot.getpoint(1, y), vec![0.0]);
         }
-        // Column 2: three white pixels.
-        assert_eq!(plot.getpoint(2, 0), vec![0.0]);
-        assert_eq!(plot.getpoint(2, 1), vec![255.0]);
+        // Column 2: the full height.
+        for y in 0..3 {
+            assert_eq!(plot.getpoint(2, y), vec![255.0]);
+        }
+    }
+
+    /**
+     * Tests the plot height of a non-8-bit histogram against the libvips
+     * sweep, which is `max` and not `max + 1` (issue #802).
+     * Works by plotting each measured case through the op and comparing
+     * the height, with the 8-bit fixed height asserted alongside so the
+     * change cannot have collapsed the two rules into one.
+     * Measured on `/opt/homebrew/bin/vips` 8.18.6, `ushort` input:
+     * `[0, 1]` -> 1, `[1, 1]` -> 1, `[0, 0, 0]` -> 1, `[0, 5]` -> 5,
+     * `[3, 9]` -> 9, `[100, 200]` -> 200, `[65535, 0]` -> 65535. A `uchar`
+     * `[0, 5]` and a `uchar` `[255, 0]` both give 256.
+     */
+    #[test]
+    fn hist_plot_height_is_the_largest_count() {
+        for (counts, height) in [
+            (vec![0u16, 1], 1u32),
+            (vec![1, 1], 1),
+            (vec![0, 0, 0], 1),
+            (vec![0, 5], 5),
+            (vec![3, 9], 9),
+            (vec![100, 200], 200),
+            (vec![65535, 0], 65535),
+        ] {
+            let n = u32::try_from(counts.len()).unwrap();
+            let plot = gray16(n, 1, &counts).hist_plot();
+            assert_eq!(
+                plot.height(),
+                height,
+                "16-bit histogram {counts:?} plotted the wrong height"
+            );
+            assert_eq!(plot.width(), n);
+        }
+        // The 8-bit height stays fixed at 256 whatever the counts are,
+        // which is the half of the old claim that did hold.
+        for counts in [vec![0u8, 5], vec![255, 0]] {
+            let n = u32::try_from(counts.len()).unwrap();
+            assert_eq!(gray(n, 1, counts).hist_plot().height(), 256);
+        }
     }
 
     /// hist_plot rejects multiband histograms and non-histogram shapes.
@@ -1755,7 +2666,13 @@ mod tests {
     #[test]
     fn hist_entropy_pools_bands() {
         let data = vec![1u8, 0, 0, 1];
-        let im = Raster::new(2, 1, PixelFormat::with_channels(2, 1).unwrap(), data).unwrap();
+        let im = Raster::new(
+            2,
+            1,
+            PixelFormat::with_kind(2, SampleKind::U8).unwrap(),
+            data,
+        )
+        .unwrap();
         assert!((im.hist_entropy() - 1.0).abs() < 1e-12);
     }
 
@@ -1820,7 +2737,7 @@ mod tests {
         assert_eq!(rgb.maplut(&lut1).getpoint(0, 0), vec![1.0, 2.0, 3.0]);
         assert_eq!(rgb.maplut(&lut3).getpoint(0, 0), vec![1.0, 4.0, 252.0]);
 
-        let two = Raster::zeroed(1, 1, PixelFormat::with_channels(2, 1).unwrap()).unwrap();
+        let two = Raster::zeroed(1, 1, PixelFormat::with_kind(2, SampleKind::U8).unwrap()).unwrap();
         assert!(matches!(
             two.try_maplut(&lut3),
             Err(HistogramError::LutBandMismatch { image: 2, lut: 3 })
@@ -1983,8 +2900,409 @@ mod tests {
     #[test]
     #[should_panic(expected = "do not support float rasters")]
     fn histogram_float_panics() {
-        let f1 = PixelFormat::with_channels(1, 4).unwrap();
+        let f1 = PixelFormat::with_kind(1, SampleKind::F32).unwrap();
         let im = Raster::zeroed(2, 2, f1).unwrap();
         let _ = im.hist_find();
+    }
+
+    // ------------------------------------------------------------------
+    // the bin read and the value read are different questions (#888)
+    // ------------------------------------------------------------------
+
+    /// The `Uint32` format the counting ops emit (issue #532).
+    fn uint_fmt(bands: u16) -> PixelFormat {
+        PixelFormat::Uint32(core::num::NonZeroU16::new(bands).unwrap())
+    }
+
+    /// A one-band `Uint32` histogram from counts.
+    fn uint_hist(counts: &[u32]) -> Raster {
+        let data: Vec<u8> = counts.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        let fmt = PixelFormat::Uint32(core::num::NonZeroU16::new(1).unwrap());
+        Raster::new(counts.len() as u32, 1, fmt, data).unwrap()
+    }
+
+    /**
+     * Tests that the bin read folds a 32-bit sample into the 16-bit table
+     * and the value read does not, which is the whole of issue #888: one
+     * function answered both questions and only one of the answers was
+     * right.
+     * Works by reading the same bytes through both, for a sample that is
+     * above 65535 and one that is below it. The below case is the control:
+     * the two readers must agree there, or the split would be about
+     * something other than the fold.
+     * Input: a `U32` sample of 90000 -> bin 65535, value 90000; a `U32`
+     * sample of 1234 -> bin 1234, value 1234.
+     */
+    #[test]
+    fn the_bin_read_folds_and_the_value_read_does_not() {
+        let big = 90_000u32.to_ne_bytes();
+        assert_eq!(read_bin(&big, SampleKind::U32, 0), 65535);
+        assert_eq!(read_value(&big, SampleKind::U32, 0), 90_000);
+
+        // Control: below the fold the two readers agree, so the difference
+        // above it is the fold and not a stride or an endianness bug.
+        let small = 1234u32.to_ne_bytes();
+        assert_eq!(read_bin(&small, SampleKind::U32, 0), 1234);
+        assert_eq!(read_value(&small, SampleKind::U32, 0), 1234);
+
+        // And they agree on every carrier that cannot reach the fold.
+        assert_eq!(read_bin(&[200], SampleKind::U8, 0), 200);
+        assert_eq!(read_value(&[200], SampleKind::U8, 0), 200);
+        let u16b = 40_000u16.to_ne_bytes();
+        assert_eq!(read_bin(&u16b, SampleKind::U16, 0), 40_000);
+        assert_eq!(read_value(&u16b, SampleKind::U16, 0), 40_000);
+    }
+
+    /**
+     * Tests that an op reading a histogram's own counts sees them whole,
+     * end to end, rather than folded at 65535.
+     * Works through `hist_entropy`, which is the clean vehicle here: it
+     * returns an `f64` computed from the counts, so nothing downstream can
+     * mask a folded read the way a 16-bit output would. Pinned to
+     * `/opt/homebrew/bin/vips` 8.18.6, where `vips hist_entropy` on a
+     * `uint` histogram holding `[100000, 300000]` answers **0.811278**.
+     * That number is independently checkable rather than merely copied: it
+     * is the entropy of a 1:3 split,
+     * `0.25*log2(4) + 0.75*log2(4/3)` = 0.8113, and the `[1, 3]` control
+     * below has the same distribution and must give the same answer.
+     * Folding both counts into 65535 makes the split 1:1 and the answer
+     * 1.0, which is what this catches.
+     * Input: Uint32 [100000, 300000] -> 0.811278; Gray16 [1, 3] -> the
+     * same; Uint32 [65535, 65535] -> 1.0.
+     */
+    #[test]
+    fn an_op_reading_counts_sees_them_above_65535() {
+        let entropy = uint_hist(&[100_000, 300_000]).try_hist_entropy().unwrap();
+        assert!(
+            (entropy - 0.811_278).abs() < 1e-5,
+            "hist_entropy on a uint histogram of [100000, 300000] gave {entropy}, \
+             vips gives 0.811278; 1.0 means the counts were folded at 65535"
+        );
+
+        // Control: the same distribution at counts no fold can touch.
+        let small = Raster::new(
+            2,
+            1,
+            PixelFormat::Gray16,
+            [1u16, 3].iter().flat_map(|v| v.to_ne_bytes()).collect(),
+        )
+        .unwrap();
+        let small_entropy = small.try_hist_entropy().unwrap();
+        assert!(
+            (small_entropy - entropy).abs() < 1e-9,
+            "the same 1:3 split gave {small_entropy} at small counts and {entropy} at large"
+        );
+
+        // And the value the folded read would have produced, so the
+        // assertion above is not passing because every input gives 0.81.
+        let even = uint_hist(&[65535, 65535]).try_hist_entropy().unwrap();
+        assert!(
+            (even - 1.0).abs() < 1e-9,
+            "an even split must be 1 bit, got {even}"
+        );
+    }
+
+    /**
+     * Tests that `hist_find_indexed` sums onto the float carrier vips uses,
+     * and pins exactly what that costs (issue #887).
+     * Works on three fixtures chosen so each one can only pass for the
+     * right reason. The small pair is the vips oracle: values
+     * `[10, 20, 30, 40]` under index `[0, 1, 0, 1]` give bins 40 and 60 on
+     * 8.18.6, and `f32` holds both exactly. The second is **2^24 + 1**,
+     * the first integer `f32` cannot represent, so the sum comes back one
+     * low and the assertion cannot pass by accident: a round number at that
+     * magnitude would land on a representable value and pass against a
+     * 16-bit write-back too. The third is the argument for the carrier
+     * choice made into a test: a sum of 8000000001 that a `Uint32` output
+     * could not hold at all, which `f32` holds to a relative error of
+     * 1.25e-10.
+     * Input/Output: (10,20,30,40) by (0,1,0,1) -> 40 and 60; 16777216 + 1
+     * -> **16777216**, not 16777217; 4000000000 + 4000000001 ->
+     * **8000000000**, where `u32::MAX` is 4294967295.
+     */
+    #[test]
+    fn hist_find_indexed_sums_onto_the_float_carrier() {
+        let n1 = core::num::NonZeroU16::new(1).unwrap();
+        let at = |r: &Raster, i: usize| {
+            let d = r.data();
+            f32::from_ne_bytes([d[i * 4], d[i * 4 + 1], d[i * 4 + 2], d[i * 4 + 3]])
+        };
+
+        // The vips oracle, at sums `f32` holds exactly.
+        let values = Raster::new(4, 1, PixelFormat::Gray8, vec![10, 20, 30, 40]).unwrap();
+        let index = Raster::new(4, 1, PixelFormat::Gray8, vec![0, 1, 0, 1]).unwrap();
+        let out = values.try_hist_find_indexed(&index).unwrap();
+        assert_eq!(out.format(), PixelFormat::FloatF32(n1));
+        assert_eq!(at(&out, 0), 40.0);
+        assert_eq!(at(&out, 1), 60.0);
+
+        // 2^24 + 1, the first integer `f32` misses. The sum is 16777217 and
+        // the answer is 16777216, off by exactly one, so this fails against
+        // any carrier that is exact here and against any that saturates.
+        let big = uint_hist(&[16_777_216, 1]);
+        let flat = Raster::new(2, 1, PixelFormat::Gray8, vec![0, 0]).unwrap();
+        let out = big.try_hist_find_indexed(&flat).unwrap();
+        assert_eq!(
+            at(&out, 0),
+            16_777_216.0,
+            "2^24 + 1 is the first integer f32 cannot represent"
+        );
+        // The control that says the loss starts exactly there: 2^24 + 2 is
+        // representable and comes back whole.
+        let even = uint_hist(&[16_777_216, 2]);
+        assert_eq!(
+            even.try_hist_find_indexed(&flat)
+                .map(|r| at(&r, 0))
+                .unwrap(),
+            16_777_218.0
+        );
+
+        // And the sum a `Uint32` output could not have held. This is the
+        // whole argument for choosing the float carrier over the wider
+        // integer one: `u32` stops at 4294967295 and a 10000x10000 `uchar`
+        // image sums to 25.5e9, which is an image size libvips exists to
+        // handle.
+        let over = uint_hist(&[4_000_000_000, 4_000_000_001]);
+        let out = over.try_hist_find_indexed(&flat).unwrap();
+        assert!(
+            u64::from(u32::MAX) < 8_000_000_001,
+            "the control: this sum really is past what a u32 output holds"
+        );
+        assert_eq!(at(&out, 0), 8_000_000_000.0);
+    }
+
+    /**
+     * Tests the three functions that read *both* a bin index and a value,
+     * a few lines apart, which are the sites a sweep is most likely to
+     * convert wrongly: `maplut` reads an index into the LUT and then an
+     * entry out of it, `hist_find_indexed` reads a slot from the index
+     * image and a value from the value image, and `hist_entropy` reads a
+     * bin in its counting pass and counts in its entropy pass.
+     * Works by giving each one an input where the two reads want different
+     * answers: a LUT whose entries are above 65535 and whose indexes are
+     * not, and a value image whose samples are above 65535 under an index
+     * image whose slots are small.
+     * Input: maplut over a `Uint32` LUT holding 90000 -> 90000, not 65535;
+     * hist_find_indexed with a `uint` index sample of 90000 -> a 65536-bin
+     * result, the slot still folded.
+     */
+    #[test]
+    fn the_both_sides_sites_read_each_half_the_right_way() {
+        let n1 = core::num::NonZeroU16::new(1).unwrap();
+        let u32fmt = PixelFormat::Uint32(n1);
+
+        // maplut: the index is a small `Gray8` sample, the entry is a
+        // `Uint32` count above the fold.
+        let image = Raster::new(2, 1, PixelFormat::Gray8, vec![0, 1]).unwrap();
+        let lut = uint_hist(&[90_000, 7]);
+        let mapped = image.try_maplut(&lut).unwrap();
+        assert_eq!(mapped.format(), u32fmt);
+        let d = mapped.data();
+        assert_eq!(
+            u32::from_ne_bytes([d[0], d[1], d[2], d[3]]),
+            90_000,
+            "the LUT entry came back folded, so the entry read is the bin read"
+        );
+        assert_eq!(u32::from_ne_bytes([d[4], d[5], d[6], d[7]]), 7);
+
+        // hist_find_indexed reads a slot from the index image and a value
+        // from the value image, and both halves are assertable now that
+        // issue #887 has moved its output to `FloatF32`. While that output
+        // was 16 bits the value half was **NO TEST REDDENS**: a folded read
+        // and an unfolded one both came back 65535.
+        //
+        // The slot half must keep folding: a `uint`
+        // index sample of 90000 has to bin at 65535, so the histogram comes
+        // out 65536 wide rather than 90001 wide.
+        let values = Raster::new(2, 1, PixelFormat::Gray8, vec![10, 20]).unwrap();
+        let index = uint_hist(&[90_000, 0]);
+        let summed = values.try_hist_find_indexed(&index).unwrap();
+        assert_eq!(
+            summed.width(),
+            65536,
+            "the slot read stopped folding, so a 32-bit index would size a \
+             90001-bin table"
+        );
+        let at = |r: &Raster, i: usize| {
+            let d = r.data();
+            f32::from_ne_bytes([d[i * 4], d[i * 4 + 1], d[i * 4 + 2], d[i * 4 + 3]])
+        };
+        assert_eq!(at(&summed, 0), 20.0, "bin 0 holds the second pixel");
+        assert_eq!(
+            at(&summed, 65535),
+            10.0,
+            "the folded slot put the first pixel in the last bin"
+        );
+
+        // And the value half, which was untestable while the output was
+        // 16 bits: a `Uint32` value above the fold has to arrive whole.
+        let big_values = uint_hist(&[90_000, 7]);
+        let flat_index = Raster::new(2, 1, PixelFormat::Gray8, vec![0, 0]).unwrap();
+        let summed = big_values.try_hist_find_indexed(&flat_index).unwrap();
+        assert_eq!(
+            at(&summed, 0),
+            90_007.0,
+            "the value read folded, so the sum came back 65542"
+        );
+    }
+
+    /**
+     * Tests that an op whose whole answer is a comparison between counts
+     * sees them unfolded, which is the second vehicle for issue #888 and
+     * the one where the answer is a single bit rather than a number.
+     * Works through `hist_ismonotonic` on a `Uint32` histogram whose two
+     * counts straddle 65535: unfolded it is `[70000, 66000]` and strictly
+     * decreasing, folded it is `[65535, 65535]` and non-decreasing, so the
+     * fold flips the answer outright. The `Gray16` control is the same
+     * shape at counts no fold can reach.
+     * Input: Uint32 [70000, 66000] -> false; Uint32 [66000, 70000] ->
+     * true; Gray16 [700, 660] -> false.
+     *
+     * Deliberately **not** pinned to vips here, and that is the finding
+     * rather than a gap: on 8.18.6 `vips hist_ismonotonic` on a `uint`
+     * histogram answers TRUE for `[70000, 65000]`, TRUE for
+     * `[400000, 300000, 200000, 100000]` and FALSE for
+     * `[100000, 100000, 100000, 99999]`, so it calls two strictly
+     * decreasing sequences monotonic while catching a decrease of one. I
+     * tested and refuted "it folds into ushort" (that predicts FALSE for
+     * the first) and "the convolution output wraps unsigned" (that
+     * predicts TRUE for the third). Matching an oracle that contradicts
+     * itself is not parity, so this asserts the correct answer.
+     */
+    #[test]
+    fn a_count_comparison_sees_counts_above_65535() {
+        assert!(
+            !uint_hist(&[70_000, 66_000]).try_hist_ismonotonic().unwrap(),
+            "a strictly decreasing histogram is not monotonic; folding both \
+             counts into 65535 makes it look flat"
+        );
+        assert!(uint_hist(&[66_000, 70_000]).try_hist_ismonotonic().unwrap());
+
+        // Control: the same shape at counts the fold cannot reach, so the
+        // assertion above is about the fold and not about the op.
+        let small = |a: u16, b: u16| {
+            Raster::new(
+                2,
+                1,
+                PixelFormat::Gray16,
+                [a, b].iter().flat_map(|v| v.to_ne_bytes()).collect(),
+            )
+            .unwrap()
+        };
+        assert!(!small(700, 660).try_hist_ismonotonic().unwrap());
+        assert!(small(660, 700).try_hist_ismonotonic().unwrap());
+    }
+
+    /**
+     * Tests that `hist_plot`'s height comes from the count it was given
+     * rather than from a folded one, the third vehicle for issue #888.
+     * Works by plotting a `Uint32` histogram whose largest count is far
+     * above 65535 and asserting the row count, which is the plot's whole
+     * geometry: a folded read would cap it at 65535. Pinned to
+     * `/opt/homebrew/bin/vips` 8.18.6, where `vips hist_plot` on a `uint`
+     * histogram of `[100000, 300000]` gives a **300000**-row image, and
+     * `[1, 3]` gives 3.
+     * Input: Uint32 [100, 300] -> 300 rows (the cheap control); Uint32
+     * [100000, 300000] -> 300000 rows.
+     */
+    #[test]
+    fn hist_plot_takes_its_height_from_the_unfolded_count() {
+        // Control first, at a size a fold cannot touch, so a failure below
+        // is about the fold rather than about the height rule.
+        let small = uint_hist(&[100, 300]).try_hist_plot().unwrap();
+        assert_eq!(small.height(), 300);
+        assert_eq!(small.width(), 2);
+
+        let big = uint_hist(&[100_000, 300_000]).try_hist_plot().unwrap();
+        assert_eq!(
+            big.height(),
+            300_000,
+            "the plot height folded at 65535; vips gives 300000 rows here"
+        );
+    }
+
+    /**
+     * Tests that `maplut` refuses a lookup table longer than libvips
+     * accepts (issue #894), and that the bound is what makes the index
+     * read's fold provably harmless rather than accidentally harmless.
+     * Works by handing it a 65537-element table and asserting the typed
+     * refusal, with a 65536-element one as the control that the bound is
+     * inclusive and not off by one.
+     * Input: a 65537-element LUT -> Err(LutTooLong); a 65536-element one ->
+     * Ok. Measured: `vips maplut` with a 70000-element table answers
+     * "histograms must have not have more than 65536 elements".
+     */
+    #[test]
+    fn maplut_refuses_a_lut_longer_than_vips_accepts() {
+        let image = Raster::new(1, 1, PixelFormat::Gray8, vec![0]).unwrap();
+        let lut = |n: u32| Raster::zeroed(n, 1, PixelFormat::Gray8).unwrap();
+        assert!(matches!(
+            image.try_maplut(&lut(65_537)),
+            Err(HistogramError::LutTooLong {
+                len: 65_537,
+                max: 65_536
+            })
+        ));
+        // Control: the bound is inclusive, so the largest legal table is
+        // still accepted and the refusal is not simply "any large LUT".
+        assert!(image.try_maplut(&lut(65_536)).is_ok());
+        assert!(image.try_maplut(&lut(256)).is_ok());
+    }
+    /**
+     * Tests that the counting ops write their counts into the unsigned
+     * 32-bit carrier and stop saturating at 65535, which is issue #532 and
+     * the reason issue #517's carrier exists.
+     * Works on the exact image the issue opens with, a 300x300 single-band
+     * `uchar` raster of one value, which is 90000 pixels and so already
+     * past a 16-bit counter. Every expected number is measured on
+     * `/opt/homebrew/bin/vips` 8.18.6 rather than derived: `vips hist_find`
+     * gives a UINT histogram 256 wide with bin 200 = 90000, `vips hist_cum`
+     * gives UINT with max 90000, and `vips hist_find_ndim --bins 10` gives
+     * UINT with max 90000.
+     * The 4x4 control below is the one that says the change is about the
+     * ceiling and not about the arithmetic: at 16 pixels both the old and
+     * the new code count 16, so a test that only used it would pass either
+     * way.
+     * Input: 300x300 uchar of 200 -> hist_find bin 200 = 90000, not 65535.
+     */
+    #[test]
+    fn the_counting_ops_carry_counts_past_65535() {
+        let n1 = core::num::NonZeroU16::new(1).unwrap();
+        let u32fmt = PixelFormat::Uint32(n1);
+        let big = Raster::new(300, 300, PixelFormat::Gray8, vec![200u8; 90_000]).unwrap();
+
+        let hist = big.try_hist_find().unwrap();
+        assert_eq!(
+            hist.format(),
+            u32fmt,
+            "hist_find still writes 16-bit counts"
+        );
+        assert_eq!(hist.width(), 256);
+        let d = hist.data();
+        let at =
+            |i: usize| u32::from_ne_bytes([d[i * 4], d[i * 4 + 1], d[i * 4 + 2], d[i * 4 + 3]]);
+        assert_eq!(at(200), 90_000, "the count saturated; vips gives 90000");
+        assert_eq!(at(199), 0);
+
+        let cum = hist.try_hist_cum().unwrap();
+        assert_eq!(cum.format(), u32fmt);
+        let c = cum.data();
+        let cat =
+            |i: usize| u32::from_ne_bytes([c[i * 4], c[i * 4 + 1], c[i * 4 + 2], c[i * 4 + 3]]);
+        assert_eq!(cat(255), 90_000, "the running sum saturated");
+
+        let ndim = big.try_hist_find_ndim(Some(10)).unwrap();
+        assert_eq!(ndim.format(), u32fmt);
+
+        // Control: at 16 pixels nothing saturates either way, so this row
+        // pins the arithmetic while the rows above pin the ceiling.
+        let small = Raster::new(4, 4, PixelFormat::Gray8, vec![200u8; 16]).unwrap();
+        let sh = small.try_hist_find().unwrap();
+        assert_eq!(sh.format(), u32fmt);
+        let s = sh.data();
+        assert_eq!(
+            u32::from_ne_bytes([s[200 * 4], s[200 * 4 + 1], s[200 * 4 + 2], s[200 * 4 + 3]]),
+            16
+        );
     }
 }

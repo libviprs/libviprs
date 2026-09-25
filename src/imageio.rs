@@ -18,28 +18,209 @@
 //! |---|---|---|
 //! | `.png` | [`crate::sink::encode_png`] | none yet (iCCP embedding is an open gap) |
 //! | `.jpg` / `.jpeg` | the sink JPEG encoder at quality 75 | `icc-profile-data` (APP2), `exif-data` (APP1, raw blob) |
+//! | `.gif` | [`Raster::encode_gif`] at the vips defaults | none: what a GIF carries (palette, `loop`, `delay`) is structural, not EXIF-class |
+//! | `.webp` | [`Raster::encode_webp`], lossless | `icc-profile-data` (`ICCP`), `exif-data` (`EXIF`), `xmp-data` (`XMP `) |
+//! | `.tif` / `.tiff` | the pure-Rust TIFF encoder behind [`Raster::save_tiff`], at `tiffsave`'s default of uncompressed strips | none yet: this build writes the colour tags and the strips, and unlike the rows below it that is a gap rather than the container's doing |
+//! | `.jxl` (needs the `jxl` feature) | [`Raster::encode_jxl`], lossless | none: the encoder writes a bare codestream with no box container |
+//! | `.jp2` / `.j2k` / `.jpt` / `.j2c` / `.jpc` (needs the `jp2k` feature) | [`Raster::encode_jp2k`] at the `jp2ksave` defaults | none: `jp2ksave.c` has no code for ICC, EXIF or XMP |
+//! | `.ppm` (3-band) / `.pgm` (1-band) | [`Raster::encode_ppm`], the container the suffix names | none: a binary Netpbm file is a three-line header and the body |
+//! | `.csv` | [`Raster::csv_save`], TAB-separated, mono-converted (issue #958) | none: a text grid has nowhere to put one |
+//! | `.mat` | [`Raster::matrix_save`], mono-converted (issue #958); does not decode back through [`crate::decode_file`] (`.mat` is also MATLAB's suffix on the way in, content-sniffed, and this crate has no text-matrix sniffing to disambiguate) | none, same reason as `.csv` |
+//! | `.hdr` | [`Raster::encode_radiance`] at the `radsave` defaults, on a 3-band `f32` raster only | none EXIF-class: the `rad-` header records are format records and `SaveOptions::default` already takes them off the raster |
+//! | `.fits` / `.fit` / `.fts` | [`Raster::encode_fits`] | the `fits-` header records, minus the cards cfitsio regenerates |
 //! | `.v` / `.vips` | [`Raster::encode_vips`] | header geometry plus every attached field |
 //!
-//! Formats libviprs cannot encode yet (WebP, TIFF-with-metadata, ...)
+//! Formats libviprs cannot encode yet (HEIF/AVIF, BigTIFF, tiled TIFF, ...)
 //! return [`SaveError::UnsupportedExtension`]; they arrive with the
-//! foreign-format batch. Structured EXIF tag writing (`exif-ifd0-*`
-//! fields into the TIFF directory of a JPEG APP1 segment) is also
-//! deferred to the foreign batch: those fields round-trip through `.v`
-//! and travel on the raster, but JPEG save only re-embeds the raw
-//! `exif-data` blob captured at decode time.
+//! foreign-format batch. `.jxl` and the five JPEG 2000 suffixes join them
+//! when the crate is built without their non-default feature, and the
+//! refusal follows the build: it names the extensions this binary actually
+//! has an encoder behind rather than a fixed list, so no cfg can advertise
+//! another's.
+//!
+//! The JPEG 2000 row is the one place in that table where the suffix does
+//! **not** pick the codec. `jp2ksave` registers five and writes the same JP2
+//! container for every one of them, measured on 8.18.6: `vips copy` over
+//! `.jp2`, `.j2k`, `.jpt`, `.j2c` and `.jpc` produces five files with one
+//! SHA-256 between them, and `.jp2000` is refused as an unknown format. So
+//! all five are rows, and the suffix only decides whether the file is written
+//! at all.
+//!
+//! **Ultra HDR is not in that table and is not missing from it.** `uhdrsave`
+//! registers no file suffix at all (measured on 8.18.6: an empty suffix list
+//! in `vips -l`, and `vips copy base.v out.uhdr` refused as an unknown
+//! format), and the four suffixes `uhdrload` claims on the way in at priority
+//! 100 all route to `jpegsave` on the way out. So there is no extension for
+//! this route to key on. Ultra HDR is written by name, through
+//! [`Raster::encode_to_buffer`] with `"uhdr"` or through
+//! [`Raster::encode_uhdr`] (issue #809).
+//!
+//! Structured EXIF tag writing (`exif-ifd0-*` fields into the TIFF
+//! directory of a JPEG APP1 segment) is also deferred to the foreign
+//! batch: those fields round-trip through `.v` and travel on the raster,
+//! but JPEG save only re-embeds the raw `exif-data` blob captured at
+//! decode time.
 //!
 //! # The `.v` container
 //!
 //! `encode_vips` writes the libvips native header (64 bytes: magic,
 //! geometry, band format, coding, interpretation, resolution, offsets)
-//! followed by the raw pixel data in the file's byte order, then a JSON
-//! trailer with the orientation tag and the attached metadata fields.
-//! libvips itself stores an XML trailer there; both readers treat an
-//! unparseable trailer as absent, so pixels and header survive either
-//! way. The reader accepts both byte orders (swapping 16-bit and float
-//! samples as needed), rejects band formats other than uchar, ushort,
-//! and float, and enforces the [`DecodeLimits::max_coord`] dimension
-//! ceiling on untrusted header geometry.
+//! followed by the raw pixel data in the file's byte order, then the
+//! metadata trailer libvips reads: the same small XML document real vips
+//! writes, `<root>` with a `<header>` and a `<meta>` block of
+//! `<field type="..." name="...">value</field>` elements
+//! (`libvips/iofuncs/vips.c:846-890` at `v8.18.0-95-gfe420cf3a`). The reader
+//! accepts both byte orders (swapping 16-bit and float samples as needed),
+//! rejects band formats other than uchar, ushort, and float, and enforces
+//! the [`DecodeLimits::max_coord`] dimension ceiling on untrusted header
+//! geometry.
+//!
+//! The trailer is written only when it would carry something: a raster with
+//! the upright orientation and no attached fields writes the header and the
+//! pixels and stops (issue #546). An empty trailer is not free, because the
+//! slot is not optional to libvips once a byte is in it.
+//!
+//! The five [`MetadataValue`] variants map one to one onto five of the GTypes
+//! vips round-trips through its `VIPS_TYPE_SAVE_STRING` transforms
+//! (`libvips/iofuncs/type.c:424-800`):
+//!
+//! | [`MetadataValue`] | `type=` | text |
+//! |---|---|---|
+//! | [`Int`](MetadataValue::Int) | `gint` | decimal |
+//! | [`Double`](MetadataValue::Double) | `gdouble` | shortest round-tripping decimal |
+//! | [`Str`](MetadataValue::Str) | `VipsRefString` | the string |
+//! | [`Blob`](MetadataValue::Blob) | `VipsBlob` | standard base64, padded, unwrapped |
+//! | [`IntArray`](MetadataValue::IntArray) | `VipsArrayInt` | decimals, each followed by one space |
+//! | [`DoubleArray`](MetadataValue::DoubleArray) | `VipsArrayDouble` | doubles, each followed by one space |
+//!
+//! The array spelling has a **trailing space**, which is not decoration.
+//! Measured on the pinned vips 8.18.6, `vips copy 'anim3.webp[n=-1]' out.v`
+//! writes `<field type="VipsArrayInt" name="delay">100 100 100 </field>`,
+//! one space per element including the last, because `vips_array_int`'s save
+//! transform appends a separator after every value rather than between them.
+//! The reader is looser than the writer on purpose, and so is vips's: a
+//! trailer carrying `40 60 80`, `40 60 80 ` or `  40   60   80  ` reads back
+//! as the same three elements in both libraries, and an element list that is
+//! empty is an empty array rather than a missing field.
+//!
+//! Two things about that carrier that are libviprs's own answer rather than
+//! vips's, both measured on 8.18.6:
+//!
+//! * **an element that is not a number keeps the whole field opaque.** vips
+//!   hands back an *empty* array for `40 x 80` (`vipsheader -f delay` prints
+//!   nothing and a `vips copy` writes the field back out empty), silently
+//!   losing the two elements that did parse. libviprs carries the text
+//!   through untouched instead, which is the same rule every other GType in
+//!   this table follows when its text will not parse;
+//! * **an element outside `gint` does not survive a trip through vips.**
+//!   [`MetadataValue::Int`] is an `i64` and so are these elements, but vips's
+//!   `gint` is 32 bits and wraps: a trailer carrying `3000000000` reads back
+//!   as `-1294967296`, and `9223372036854775807 -9223372036854775808` reads
+//!   back as `-1 0`. libviprs round-trips all of them through its own reader.
+//!   The element type is signed and 64-bit anyway, because the value has to
+//!   survive a hostile `.v` rather than only a well-formed one.
+//!
+//! The orientation tag rides in `<meta>` as an ordinary
+//! `<field type="gint" name="orientation">`, which is where libvips keeps it
+//! and where the reader has always looked for it.
+//!
+//! Two places where this deliberately does *not* copy vips byte for byte:
+//!
+//! * **non-ASCII text survives.** `vips_target_write_amp`
+//!   (`libvips/iofuncs/target.c:821`) tests `*p < 32` on a plain `char`,
+//!   which is signed on this target, so every byte of a multi-byte UTF-8
+//!   sequence is treated as a control character and replaced by the
+//!   Unicode control picture at `0x2400 + *p`. Measured on vips 8.18.4:
+//!   `vips copy` over a `.v` carrying `café ☃ 日本` rewrites it as
+//!   `caf&#x23c3;&#x23a9; &#x23e2;&#x2398;&#x2383; …`, irreversibly. This
+//!   writer escapes only what XML actually needs, so vips reads libviprs's
+//!   UTF-8 back correctly (verified with `vipsheader -a`) even though vips
+//!   cannot rewrite its own;
+//! * **a field name containing `"` is escaped as `&quot;`,** where
+//!   `target_write_quotes` (`vips.c:790-804`) writes a backslash and leaves
+//!   the attribute unterminated for its own expat parser.
+//!
+//! A C0 control character inside a string field does *not* survive, in
+//! either direction: XML 1.0 cannot represent one at all, so the only
+//! spelling vips's parser accepts is the substitution above, and reading it
+//! back yields the control picture rather than the control character.
+//! Binary belongs in a [`Blob`](MetadataValue::Blob), which is base64 and
+//! exact. A carriage return is the exception and is written as `&#x000d;`,
+//! because a literal one would be folded into a newline by XML end-of-line
+//! normalisation.
+//!
+//! ## Trailer compatibility across versions
+//!
+//! The trailer is read field by field rather than as one `serde` value, so
+//! a `.v` written by a newer libviprs costs an older one only the fields it
+//! genuinely cannot represent (issue #565). One unknown [`MetadataValue`]
+//! variant used to fail the whole parse and take every other field on the
+//! image with it, silently, which made a new variant a data-loss break that
+//! `cargo semver-checks` could not see. The rules the format holds to:
+//!
+//! * a field whose `type` is not one of the five above is carried opaquely
+//!   as that type name plus its character data exactly as it sat on disk:
+//!   invisible to [`Raster::get_field`] and [`Raster::get_fields`], because
+//!   this build cannot say what it means, but written back out byte for
+//!   byte, so an old build that opens a new file and re-saves it does not
+//!   strip what it could not read. Setting or removing a field of the same
+//!   name supersedes it, so stripping still strips. vips itself keeps
+//!   reading such a field, because the carrier *is* its own encoding: a
+//!   `background` array goes out as `VipsArrayDouble` and `vipsheader -a`
+//!   prints it, exactly as `delay` did until #787 gave it a variant;
+//! * a `type` name libvips does not know is skipped by vips silently, with
+//!   no warning and no error (measured on 8.18.4), which is what makes the
+//!   carrier safe to write;
+//! * an element this build expects and does not find falls back to the
+//!   default (`orientation` to 1);
+//! * a trailer that is not XML is treated as absent, as libvips treats a
+//!   trailer that is not XML. libviprs is not the only writer of that slot,
+//!   so silence there is the honest answer.
+//!
+//! ### The legacy JSON trailer
+//!
+//! libviprs 0.4.0 and earlier wrote their own JSON trailer,
+//! `{"orientation":N,"fields":{"entries":[[name,value],...]}}` with values
+//! in [`MetadataValue`]'s externally tagged form. The reader still accepts
+//! it, entry by entry and with the same opaque carry, so every `.v` already
+//! written keeps its metadata. A trailer that opens with `{` and is not
+//! valid JSON claimed to be that format and is genuinely unrecoverable, so
+//! the reader reports it rather than swallowing it.
+//!
+//! The writer no longer produces it, with one exception. A value carried
+//! opaquely out of a JSON trailer has **no XML spelling**, and cannot get
+//! one: the two formats encode the same value differently
+//! (`{"DoubleArray":[1.5,2.5]}` against `type="VipsArrayDouble">1.5 2.5 `),
+//! so translating between them means interpreting the value, which is the
+//! one thing a carried value is defined not to allow. Rather than drop it, a
+//! raster still carrying such a value keeps the JSON trailer. That costs
+//! the vips warning on exactly the files that were already unreadable to
+//! vips, and it loses nothing.
+//!
+//! Naming a variant releases the files that only needed *it*: a legacy
+//! trailer whose one unnameable value was a `{"IntArray":[...]}` delay is
+//! read as a value now rather than carried, so the rewrite comes back out as
+//! the XML vips reads. That is the whole payoff of #787 on the disk side, and
+//! it is why the JSON fallback is keyed on what is still carried rather than
+//! on where the file came from.
+//!
+//! The consequence of writing XML, stated plainly: libviprs 0.4.0 reads a
+//! `.v` written now for its pixels, its geometry and its orientation, and
+//! not for its attached fields, because its reader takes the trailer as
+//! metadata only when the first non-whitespace byte is `{`. No byte
+//! sequence can be both that and the XML vips requires, so full interop
+//! with vips and full field recovery on 0.4.0 cannot both hold. New reads
+//! old completely; old reads new down to the orientation.
+//!
+//! The interpretation word holds libvips' own `VipsInterpretation` codes,
+//! which since libvips 8.18 include `30` and `31` for OkLab and OkLch
+//! (`libvips/include/vips/image.h:115-116`); a `.v` libviprs writes now
+//! carries the same tag real vips writes. Files libviprs wrote before this
+//! release carry the private codes `1000` / `1001` it used while libvips
+//! had none, and still read back tagged, because the reader keeps those two
+//! as permanently reserved read-only aliases. Nothing writes them any more,
+//! so the incompatibility only runs the other way: a `.v` written now reads
+//! as `Multiband` on libviprs 0.4.0 and earlier.
 //!
 //! # Metadata fields
 //!
@@ -81,13 +262,14 @@
 //! field mapping. There is no third process-global regime: the coordinate
 //! ceiling lives solely on `DecodeLimits`.
 
+use std::borrow::Cow;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::conversion::Interpretation;
-use crate::pixel::PixelFormat;
+use crate::pixel::{PixelFormat, SampleKind};
 use crate::raster::Raster;
 use crate::sink::SinkError;
 use crate::source::{DecodeLimits, SourceError};
@@ -104,7 +286,24 @@ use crate::source::{DecodeLimits, SourceError};
 /// accessors mirror pyvips-style coercing reads: they panic with a
 /// descriptive message when the variant does not match, in line with the
 /// panicking convenience layer of the operation modules.
+///
+/// # Growing
+///
+/// `#[non_exhaustive]`, because five is not the number of types a vips
+/// metadata field can have (issue #609). `VipsArrayDouble` and `gboolean`
+/// are both still live in a `.v` trailer this crate only forwards opaquely.
+/// Marking the enum before the first of those variants landed cost
+/// downstream a `_ =>` arm on an exhaustive `match`; marking it after would
+/// have cost a major version instead, and `cargo semver-checks` would have
+/// been right to demand one. [`IntArray`](MetadataValue::IntArray) is the
+/// first variant to arrive through that door (issue #787).
+///
+/// Only matching is affected. Every variant stays constructible from
+/// outside, so `MetadataValue::Int(3)` and the `From` impls are unchanged,
+/// and the `as_*` accessors are the reading path that never needed a match
+/// anyway.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum MetadataValue {
     /// A signed integer field (`width`, `orientation`, counts, flags).
     Int(i64),
@@ -114,6 +313,30 @@ pub enum MetadataValue {
     Str(String),
     /// A binary field (`icc-profile-data`, `exif-data`).
     Blob(Vec<u8>),
+    /// An ordered list of signed integers (vips `VipsArrayInt`): the
+    /// per-frame `delay` of every animated format, and the shape every
+    /// animated loader in this crate needs to attach one at all (issue
+    /// #787).
+    ///
+    /// The elements are `i64` like [`Int`](MetadataValue::Int), not `u32`,
+    /// so a hostile `.v` round-trips instead of being silently clamped.
+    /// vips's own `gint` is 32 bits and wraps: see the
+    /// [module docs](crate::imageio) for what that costs a value this crate
+    /// hands back to vips.
+    IntArray(Vec<i64>),
+    /// An ordered list of doubles (vips `VipsArrayDouble`): GIF's
+    /// `background`, and the second of the two array types the
+    /// `#[non_exhaustive]` note above was written for (issue #852).
+    ///
+    /// Separate from [`IntArray`](MetadataValue::IntArray) rather than folded
+    /// into it, because vips writes the two as different GTypes and a reader
+    /// asking for one does not accept the other. `background` holds three
+    /// colour-table bytes widened to doubles, so its values are always
+    /// integral and it would have fitted an int array numerically; a field of
+    /// the wrong type is one this crate's own readers ignore, which is the
+    /// rule #830 wrote for `loop` and `delay` on save, so it would have been
+    /// a field nobody reads.
+    DoubleArray(Vec<f64>),
 }
 
 impl MetadataValue {
@@ -185,16 +408,61 @@ impl MetadataValue {
         }
     }
 
+    /// The value as a slice of ints.
+    ///
+    /// Borrowed rather than cloned, like [`MetadataValue::as_blob`], because
+    /// a `delay` array is read once per frame and there is no reason to copy
+    /// it each time.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the value is not [`MetadataValue::IntArray`]. A scalar
+    /// [`MetadataValue::Int`] does *not* coerce to a one-element array: vips
+    /// writes `gint` and `VipsArrayInt` as different types and `gifsave`
+    /// reads only the array, so treating one as the other would invent a
+    /// per-frame delay out of a `gif-delay` that is the first frame's alone.
+    #[track_caller]
+    pub fn as_int_array(&self) -> &[i64] {
+        match self {
+            Self::IntArray(v) => v,
+            other => panic!("metadata value is {}, not an int array", other.kind()),
+        }
+    }
+
+    /// The value as a slice of doubles, borrowed rather than copied.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the value is not [`MetadataValue::DoubleArray`]. An
+    /// [`IntArray`](MetadataValue::IntArray) does **not** coerce, and neither
+    /// does a scalar [`Double`](MetadataValue::Double), for the same reason
+    /// [`MetadataValue::as_int_array`] refuses an [`Int`](MetadataValue::Int):
+    /// vips writes them as different GTypes and a reader asking for one does
+    /// not accept the other.
+    #[track_caller]
+    pub fn as_double_array(&self) -> &[f64] {
+        match self {
+            Self::DoubleArray(v) => v,
+            other => panic!("metadata value is {}, not a double array", other.kind()),
+        }
+    }
+
     /// The type code returned by [`Raster::get_typeof`] for this value:
-    /// 1 int, 2 double, 3 string, 4 blob. These are libviprs codes (the
-    /// C library returns GObject `GType` numbers); the ported call sites
-    /// only distinguish zero (absent) from non-zero (present).
+    /// 1 int, 2 double, 3 string, 4 blob, 5 int array, 6 double array. These
+    /// are libviprs
+    /// codes (the C library returns GObject `GType` numbers); the ported call
+    /// sites only distinguish zero (absent) from non-zero (present).
+    ///
+    /// Zero is not a code here, it is [`Raster::get_typeof`]'s answer for a
+    /// field that is not there, so every variant has to have one of its own.
     pub fn type_code(&self) -> u64 {
         match self {
             Self::Int(_) => 1,
             Self::Double(_) => 2,
             Self::Str(_) => 3,
             Self::Blob(_) => 4,
+            Self::IntArray(_) => 5,
+            Self::DoubleArray(_) => 6,
         }
     }
 
@@ -205,19 +473,24 @@ impl MetadataValue {
     ///   cell, for example the 564-byte ICC profile of `sample.jpg` read
     ///   through magick).
     /// * [`MetadataValue::Str`]: the number of UTF-8 bytes in the string.
+    /// * [`MetadataValue::IntArray`]: the number of elements, which is the
+    ///   frame count for a `delay`.
     /// * [`MetadataValue::Int`] / [`MetadataValue::Double`]: `1`, a scalar
     ///   is a single-element field.
     pub fn len(&self) -> usize {
         match self {
             Self::Blob(b) => b.len(),
             Self::Str(s) => s.len(),
+            Self::IntArray(v) => v.len(),
+            Self::DoubleArray(v) => v.len(),
             Self::Int(_) | Self::Double(_) => 1,
         }
     }
 
     /// Whether this value has zero length; see [`MetadataValue::len`]. A
     /// scalar [`MetadataValue::Int`] or [`MetadataValue::Double`] is never
-    /// empty (its length is `1`).
+    /// empty (its length is `1`); a [`MetadataValue::IntArray`] with no
+    /// elements is, and that is a value vips writes rather than an error.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -229,6 +502,8 @@ impl MetadataValue {
             Self::Double(_) => "a double",
             Self::Str(_) => "a string",
             Self::Blob(_) => "a blob",
+            Self::IntArray(_) => "an int array",
+            Self::DoubleArray(_) => "a double array",
         }
     }
 }
@@ -273,13 +548,69 @@ impl From<&[u8]> for MetadataValue {
         Self::Blob(b.to_vec())
     }
 }
+impl From<Vec<i64>> for MetadataValue {
+    fn from(v: Vec<i64>) -> Self {
+        Self::IntArray(v)
+    }
+}
+impl From<&[i64]> for MetadataValue {
+    fn from(v: &[i64]) -> Self {
+        Self::IntArray(v.to_vec())
+    }
+}
+impl From<Vec<f64>> for MetadataValue {
+    fn from(v: Vec<f64>) -> Self {
+        Self::DoubleArray(v)
+    }
+}
+impl From<&[f64]> for MetadataValue {
+    fn from(v: &[f64]) -> Self {
+        Self::DoubleArray(v.to_vec())
+    }
+}
 
 /// The attached (non-header) metadata fields carried by a [`Raster`]:
 /// an insertion-ordered name/value list, so [`Raster::get_fields`]
 /// reports attachments in the order they were set, like libvips.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct MetadataFields {
     entries: Vec<(String, MetadataValue)>,
+    /// Fields read from a `.v` trailer that this build cannot interpret,
+    /// kept in the trailer form they arrived in (issue #565).
+    ///
+    /// They stay out of the field API on purpose: this build can say that
+    /// the field was there, not what it means, and a wrong answer is worse
+    /// than none. Carrying them is what stops a rewrite by an older build
+    /// from stripping what a newer one wrote.
+    unknown: Vec<(String, CarriedValue)>,
+}
+
+/// A `.v` trailer value this build cannot name, kept exactly as it was
+/// written so it can go back out unchanged (issue #565).
+///
+/// The form matters, because the two trailer formats spell the same value
+/// differently and converting between them would mean interpreting it. See
+/// the [module docs](crate::imageio) for what that costs.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(untagged)]
+enum CarriedValue {
+    /// From a libvips XML trailer: the `type` attribute and the element's
+    /// character data as it sat on disk, escapes and all.
+    ///
+    /// The JSON spelling is only reachable on a raster that also carries a
+    /// [`CarriedValue::Json`] value, which needs one trailer to hold both.
+    /// No `MetadataValue` matches this shape, so any libviprs build carries
+    /// it on rather than reading it as something it is not.
+    Xml {
+        /// The GType name from the `type` attribute, e.g. `VipsArrayInt`.
+        #[serde(rename = "vips-xml-type")]
+        gtype: String,
+        /// The character data between the tags, still XML-escaped.
+        #[serde(rename = "vips-xml-text")]
+        text: String,
+    },
+    /// From the legacy libviprs JSON trailer: the value exactly as it parsed.
+    Json(serde_json::Value),
 }
 
 impl MetadataFields {
@@ -289,8 +620,10 @@ impl MetadataFields {
             .find_map(|(n, v)| (n == name).then_some(v))
     }
 
-    /// Upsert keeping first-set order.
+    /// Upsert keeping first-set order. A value the caller can name
+    /// supersedes an uninterpretable one carried under the same name.
     pub(crate) fn set(&mut self, name: &str, value: MetadataValue) {
+        self.unknown.retain(|(n, _)| n != name);
         if let Some(slot) = self
             .entries
             .iter_mut()
@@ -302,13 +635,93 @@ impl MetadataFields {
         }
     }
 
+    /// Remove a field under either carrier, so removing a name that arrived
+    /// uninterpretable really removes it rather than leaving it to reappear
+    /// on the next save. The uninterpretable carrier has no
+    /// [`MetadataValue`] to hand back, so removing one reads as absent.
     pub(crate) fn remove(&mut self, name: &str) -> Option<MetadataValue> {
+        self.unknown.retain(|(n, _)| n != name);
         let idx = self.entries.iter().position(|(n, _)| n == name)?;
         Some(self.entries.remove(idx).1)
     }
 
+    /// Whether a name is carried at all, under either carrier.
+    fn contains(&self, name: &str) -> bool {
+        self.entries.iter().any(|(n, _)| n == name) || self.unknown.iter().any(|(n, _)| n == name)
+    }
+
+    /// Take `other`'s fields for every name this map does not already carry,
+    /// in `other`'s own order, leaving this map's values alone.
+    ///
+    /// This is the multi-input rule, measured on vips 8.18.6: `insert`,
+    /// `join`, `arrayjoin` and `bandjoin` put the union of both inputs'
+    /// attachments on the output and let the *first* input win a name they
+    /// share, while the header block comes from the first input alone. A
+    /// profile that only the second input carries reaches the output; a
+    /// `lane-711` both carry keeps the first one's value (#718).
+    ///
+    /// Uninterpretable `.v` trailer values merge on the same terms, so a name
+    /// this build cannot read still travels rather than being dropped because
+    /// the reader could not name it (#565). A name held under one carrier here
+    /// blocks the other carrier's copy from `other`, which is the same
+    /// "one value per name" invariant [`MetadataFields::set`] keeps.
+    pub(crate) fn merge_under(&mut self, other: &Self) {
+        for (name, value) in &other.entries {
+            if !self.contains(name) {
+                self.entries.push((name.clone(), value.clone()));
+            }
+        }
+        for (name, value) in &other.unknown {
+            if !self.contains(name) {
+                self.unknown.push((name.clone(), value.clone()));
+            }
+        }
+    }
+
+    /// Record a field this build cannot interpret; see
+    /// [`MetadataFields::unknown`].
+    fn set_unknown(&mut self, name: &str, value: CarriedValue) {
+        self.entries.retain(|(n, _)| n != name);
+        if let Some(slot) = self
+            .unknown
+            .iter_mut()
+            .find_map(|(n, v)| (n == name).then_some(v))
+        {
+            *slot = value;
+        } else {
+            self.unknown.push((name.to_string(), value));
+        }
+    }
+
     pub(crate) fn names(&self) -> impl Iterator<Item = &str> {
         self.entries.iter().map(|(n, _)| n.as_str())
+    }
+
+    /// Whether the raster carries no attached field at all, interpretable
+    /// or not. A `.v` trailer with nothing in it is worse than no trailer
+    /// (issue #546), so the writer asks this before writing one.
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty() && self.unknown.is_empty()
+    }
+
+    /// The interpretable fields, in the order they were set.
+    fn known(&self) -> impl Iterator<Item = (&str, &MetadataValue)> {
+        self.entries.iter().map(|(n, v)| (n.as_str(), v))
+    }
+
+    /// The fields carried opaquely; see [`MetadataFields::unknown`].
+    fn unknown_fields(&self) -> impl Iterator<Item = (&str, &CarriedValue)> {
+        self.unknown.iter().map(|(n, v)| (n.as_str(), v))
+    }
+
+    /// Whether anything here can only be written as the legacy JSON
+    /// trailer. See the [module docs](crate::imageio): a value carried out
+    /// of a JSON trailer has no XML spelling, so the writer keeps the old
+    /// format for that file rather than dropping it.
+    fn needs_legacy_json_trailer(&self) -> bool {
+        self.unknown
+            .iter()
+            .any(|(_, v)| matches!(v, CarriedValue::Json(_)))
     }
 }
 
@@ -401,9 +814,10 @@ fn interpretation_from_nickname(s: &str) -> Option<Interpretation> {
 }
 
 /// The libvips `VipsInterpretation` enum value for the `.v` header
-/// `Type` word. `OkLab` / `OkLch` have no libvips code; they use
-/// libviprs extension codes above the libvips range and round-trip
-/// through libviprs-written files only.
+/// `Type` word, as declared in `libvips/include/vips/image.h:96-117`
+/// (8.18.4). `OkLab` and `OkLch` are `VIPS_INTERPRETATION_OKLAB` = 30
+/// and `VIPS_INTERPRETATION_OKLCH` = 31 (`image.h:115-116`), so a `.v`
+/// libviprs writes carries the same tag real vips writes.
 fn interpretation_code(i: Interpretation) -> i32 {
     match i {
         Interpretation::Multiband => 0,
@@ -425,13 +839,111 @@ fn interpretation_code(i: Interpretation) -> i32 {
         Interpretation::Matrix => 27,
         Interpretation::ScRgb => 28,
         Interpretation::Hsv => 29,
-        Interpretation::OkLab => 1000,
-        Interpretation::OkLch => 1001,
+        Interpretation::OkLab => 30,
+        Interpretation::OkLch => 31,
     }
 }
 
-/// Inverse of [`interpretation_code`]; unknown codes read as `None` and
-/// the raster falls back to format inference, like an untagged image.
+/// The `.v` header `Type` word back to an [`Interpretation`]: a *left*
+/// inverse of [`interpretation_code`] (every code that function writes reads
+/// back as the variant it came from), widened by the two read-only legacy
+/// aliases `1000` / `1001`, which land on `OkLab` / `OkLch` alongside the
+/// libvips codes `30` / `31`. So it is not a bijection, and it is not the
+/// other direction of the round trip for those four codes. Unknown codes
+/// read as `None` and the raster falls back to format inference, like an
+/// untagged image.
+/// The `VipsBandFormat` code a sample kind is written as in a `.v` header's
+/// `BandFmt` word (offset 20), and the nickname `vipsheader` prints for it.
+///
+/// This exists because the encoder used to derive that word from a byte
+/// width, through a `match bpc { 1 => 0, 2 => 2, _ => 6 }` whose trailing arm
+/// wrote **float** for every four-byte kind. A byte width does not name a
+/// sample kind, and here the wrong answer is not confined to one op: it goes
+/// into a file, and the next run reads it back as float (issue #841). The
+/// match below has no wildcard, so a kind added to [`SampleKind`] is a
+/// compile error here rather than another silently mistagged file.
+///
+/// # The measured table
+///
+/// Taken from `/opt/homebrew/bin/vips` 8.18.6, not read off the libvips
+/// headers:
+///
+/// ```text
+/// vips black base.v 4 3 --bands 1
+/// vips cast base.v fmt_<f>.v <f>          # for each of the ten formats
+/// ```
+///
+/// then reading the little-endian `i32` at header offset 20 out of each
+/// file, with the nickname from `vipsheader -a`'s `format:` line:
+///
+/// | vips format | Bbits | `BandFmt` | [`SampleKind`] |
+/// |---|---|---|---|
+/// | `uchar` | 8 | 0 | `U8` |
+/// | `char` | 8 | 1 | `I8` |
+/// | `ushort` | 16 | 2 | `U16` |
+/// | `short` | 16 | 3 | `I16` |
+/// | `uint` | 32 | 4 | `U32` |
+/// | `int` | 32 | 5 | `I32` |
+/// | `float` | 32 | 6 | `F32` |
+/// | `complex` | 64 | 7 | none |
+/// | `double` | 64 | 8 | none |
+/// | `dpcomplex` | 128 | 9 | none |
+///
+/// The three codes libviprs already wrote (0, 2 and 6) keep the values they
+/// had, so every `.v` this crate has ever written still reads back as the
+/// format it was written with. That is not a nicety: breaking `.v` would
+/// silently retype files nobody can re-derive.
+fn band_format_code(kind: SampleKind) -> i32 {
+    match kind {
+        SampleKind::U8 => 0,
+        SampleKind::I8 => 1,
+        SampleKind::U16 => 2,
+        SampleKind::I16 => 3,
+        SampleKind::U32 => 4,
+        SampleKind::I32 => 5,
+        SampleKind::F32 => 6,
+    }
+}
+
+/// The `vipsheader` nickname for a sample kind, which is what
+/// `get_field("format")` answers and what a refusal names.
+///
+/// The same table [`band_format_code`] measured, read in its other column.
+/// This used to be a third width-keyed match, with the same `_ => "float"`
+/// arm, so `header format` reported `float` for any four-byte kind.
+fn band_format_nickname(kind: SampleKind) -> &'static str {
+    match kind {
+        SampleKind::U8 => "uchar",
+        SampleKind::I8 => "char",
+        SampleKind::U16 => "ushort",
+        SampleKind::I16 => "short",
+        SampleKind::U32 => "uint",
+        SampleKind::I32 => "int",
+        SampleKind::F32 => "float",
+    }
+}
+
+/// The inverse of [`band_format_code`]: the sample kind a `.v` header's
+/// `BandFmt` word names, or `None` for a code with no libviprs sample kind.
+///
+/// `None` covers the three 64-bit-and-wider formats libvips has and libviprs
+/// does not (`complex` 7, `double` 8, `dpcomplex` 9) and every value that is
+/// not a `VipsBandFormat` at all. Both are corrupt-or-unsupported rather than
+/// a guess, which matters because this is the half `fuzz_decode` reaches from
+/// untrusted bytes.
+fn band_format_kind(code: i32) -> Option<SampleKind> {
+    Some(match code {
+        0 => SampleKind::U8,
+        1 => SampleKind::I8,
+        2 => SampleKind::U16,
+        3 => SampleKind::I16,
+        4 => SampleKind::U32,
+        5 => SampleKind::I32,
+        6 => SampleKind::F32,
+        _ => return None,
+    })
+}
+
 fn interpretation_from_code(code: i32) -> Option<Interpretation> {
     Some(match code {
         0 => Interpretation::Multiband,
@@ -453,8 +965,45 @@ fn interpretation_from_code(code: i32) -> Option<Interpretation> {
         27 => Interpretation::Matrix,
         28 => Interpretation::ScRgb,
         29 => Interpretation::Hsv,
+        30 => Interpretation::OkLab,
+        31 => Interpretation::OkLch,
+        // Read-only legacy aliases: before libvips 8.18 assigned 30 / 31,
+        // libviprs wrote these private codes above the libvips range. Files
+        // it already wrote keep loading; nothing emits them any more. They
+        // are reserved permanently and must never be reused for anything
+        // else: the only thing retiring them would achieve is to silently
+        // re-break every `.v` libviprs has already written.
         1000 => Interpretation::OkLab,
         1001 => Interpretation::OkLch,
+        _ => return None,
+    })
+}
+
+/// How many samples a colour takes in the space an ICC profile describes, read
+/// from bytes 16..20 of the profile header (issue #720).
+///
+/// `None` for a blob too short to hold the field or carrying a signature this
+/// build does not know. Those are **kept** by the caller: dropping an
+/// attachment because the parser could not reach a verdict is worse than
+/// keeping one that may not apply, and it is the same call this module makes
+/// for `.v` trailer values it cannot interpret (#565). It also stops the rule
+/// silently eating a profile in a colour space a later libviprs learns about.
+///
+/// The signatures are the ICC.1 data colour spaces, grouped by channel count.
+/// Only the count matters here, so the 2-channel and 5-to-15-channel `xCLR`
+/// spaces resolve to their own counts rather than being listed one by one.
+pub(crate) fn profile_space_bands(profile: &[u8]) -> Option<usize> {
+    let sig: &[u8; 4] = profile.get(16..20)?.try_into().ok()?;
+    Some(match sig {
+        b"GRAY" => 1,
+        b"CMY " | b"RGB " | b"XYZ " | b"Lab " | b"Luv " | b"YCbr" | b"Yxy " | b"HSV " | b"HLS "
+        | b"3CLR" => 3,
+        b"CMYK" | b"4CLR" => 4,
+        b"2CLR" => 2,
+        b"5CLR" => 5,
+        b"6CLR" => 6,
+        b"7CLR" => 7,
+        b"8CLR" => 8,
         _ => return None,
     })
 }
@@ -473,14 +1022,7 @@ impl Raster {
             "width" => MetadataValue::Int(i64::from(self.width())),
             "height" => MetadataValue::Int(i64::from(self.height())),
             "bands" => MetadataValue::Int(self.format().channels() as i64),
-            "format" => MetadataValue::Str(
-                match self.format().bytes_per_channel() {
-                    1 => "uchar",
-                    2 => "ushort",
-                    _ => "float",
-                }
-                .to_string(),
-            ),
+            "format" => MetadataValue::Str(band_format_nickname(self.format().kind()).to_string()),
             "coding" => MetadataValue::Str("none".to_string()),
             "interpretation" => {
                 MetadataValue::Str(interpretation_nickname(self.interpretation()).to_string())
@@ -501,17 +1043,18 @@ impl Raster {
 
     /// Read a metadata field as an `i32` (libvips `vips_image_get_int`).
     ///
-    /// Resolves `name` through [`Raster::get_field`] and returns the value
-    /// when it is an integer that fits in an `i32` (for example the built-in
-    /// `width`/`height`/`bands` header fields, or an attached field such as
-    /// `bits-per-sample`, `tile-width`, or `page-height` set by a loader).
-    /// Returns `None` for an absent field, a non-integer value, or an integer
-    /// outside the `i32` range.
+    /// Answers the same names [`Raster::get_field`] does and returns the
+    /// value when it is an integer that fits in an `i32` (for example the
+    /// built-in `width`/`height`/`bands` header fields, or an attached field
+    /// such as `bits-per-sample`, `tile-width`, or `page-height` set by a
+    /// loader). Returns `None` for an absent field, a non-integer value, or
+    /// an integer outside the `i32` range.
+    ///
+    /// It borrows the stored value rather than cloning one out, so reading an
+    /// int costs nothing even when the name happens to hold a large
+    /// [`MetadataValue::Blob`] (issue #635).
     pub fn get_int(&self, name: &str) -> Option<i32> {
-        match self.get_field(name)? {
-            MetadataValue::Int(value) => i32::try_from(value).ok(),
-            _ => None,
-        }
+        i32::try_from(self.field_i64(name)?).ok()
     }
 
     /// Fallible form of [`Raster::set_field`].
@@ -647,18 +1190,198 @@ impl Raster {
         i32::from(self.orientation())
     }
 
-    /// The number of pages this raster represents (libvips `n-pages`),
-    /// defaulting to `1` for a single-page image.
+    /// The number of pages the **original file** holds (libvips `n-pages`),
+    /// defaulting to `1`.
     ///
-    /// Reads the attached `n-pages` field that the multi-page loaders set
-    /// (animated GIF/WebP, multi-page TIFF/PDF). A single-page raster has no
-    /// such field and reports `1`, matching the oracle (`n-pages = 1` for
-    /// `sample.jpg`, `5` / `4` / `3` / `35` for the animated fixtures).
+    /// A port of `vips_image_get_n_pages` (`iofuncs/header.c:917-928`),
+    /// sanity check included. The key has one meaning across this crate and
+    /// it is the one vips gives it: **how many pages the file this raster
+    /// was decoded from contains**, where a page is something a loader's
+    /// zero-based `page` argument can select. It is a count and not an
+    /// index, so the sweep over every page is
+    /// `for page in 0..raster.get_n_pages()` and the last page is
+    /// `get_n_pages() - 1` (issue #566).
+    ///
+    /// It is *not* how many pages were loaded into this raster. Every loader
+    /// here reads page 0, so a raster reporting `3` still holds one page of
+    /// pixels, exactly as a default `vips` load does.
+    ///
+    /// # Which loaders attach it
+    ///
+    /// Four do, and each was measured against `vipsheader -a` on the same
+    /// file under vips 8.18.6:
+    ///
+    /// | loader | what it counts | the vips writer it ports |
+    /// |---|---|---|
+    /// | [`crate::gif`] | frames in the GIF | `nsgifload.c:281` |
+    /// | [`decode_tiff_page`](crate::decode_tiff_page) | IFDs in the chain | `tiff2vips.c:1879` |
+    /// | [`crate::webp`] | frames in the original animation | `webp2vips.c:508` |
+    /// | [`crate::jxl`] | frames in the original | `jxlload.c:747` |
+    ///
+    /// GIF and TIFF attach it to every load, a one-frame GIF and a
+    /// single-page TIFF included, where it reads `1`. WebP attaches it only
+    /// when the container is animated, and JPEG XL only when there is more
+    /// than one frame, so a still of either carries no such field at all.
+    /// That split is vips's rather than an inconsistency to tidy away:
+    /// `vipsheader -a` reports `n-pages: 1` for a still GIF and a one-page
+    /// TIFF, and no `n-pages` at all for a still WebP or a single-frame
+    /// JPEG XL. Both shapes read back as `1` here, so a caller never has to
+    /// know which one it is holding.
+    ///
+    /// # What stays off this key
+    ///
+    /// A count belongs here only if a page index can select it. Anything
+    /// else gets a name that says what it is (issue #635):
+    ///
+    /// * [`crate::exr`] reports its multi-part count as `exr-parts`. An EXR
+    ///   part is a layer, `openexrload` attaches no `n-pages` to an EXR, and
+    ///   [`crate::decode_exr`] takes no part index, so `0..get_n_pages()`
+    ///   would be a sweep over something unreachable (issue #626).
+    /// * The PDF readers attach nothing. vips's `pdfload` does attach it
+    ///   (measured: `n-pages: 3` for a three-page document, `1` for a
+    ///   one-page one), but its `page` argument is zero-based where this
+    ///   crate's PDF page numbers are one-based on purpose, so a caller
+    ///   sweeping `0..get_n_pages()` would be off by one. The document's
+    ///   count is [`crate::PdfInfo::page_count`].
+    ///
+    /// vips's own `jp2kload` is the case not to copy: it puts the JPEG 2000
+    /// *resolution* count under this key (`jp2kload.c:586`), so `page` there
+    /// picks a shrink level rather than a frame.
+    ///
+    /// # The sanity check
+    ///
+    /// vips reports a single page unless the field is an int strictly
+    /// between 1 and 10000, and so does this. Measured against
+    /// `vips_image_get_n_pages` on 8.18.6: `9999` comes back as `9999`,
+    /// `10000` and `65536` come back as `1`, and a string-typed field comes
+    /// back as `1` whatever it spells, because `vips_image_get_int` will not
+    /// coerce one. The stored value is untouched either way and stays
+    /// readable through [`Raster::get_field`], and a TIFF's real chain
+    /// length is [`tiff_page_count`](crate::tiff_page_count) regardless of
+    /// what this reports. Reading costs no allocation whatever type is
+    /// sitting under the name.
     pub fn get_n_pages(&self) -> u32 {
-        match self.get_field("n-pages") {
-            Some(MetadataValue::Int(n)) => u32::try_from(n).ok().filter(|&n| n > 0).unwrap_or(1),
-            Some(MetadataValue::Str(s)) => s.parse::<u32>().ok().filter(|&n| n > 0).unwrap_or(1),
+        // `iofuncs/header.c:921-926`: the field has to be an int and it has
+        // to sit strictly between 1 and this ceiling, or vips calls the
+        // value crazy and reports a single page.
+        const CEILING: i64 = 10_000;
+        match self.field_i64("n-pages") {
+            Some(n) if (2..CEILING).contains(&n) => u32::try_from(n).unwrap_or(1),
             _ => 1,
+        }
+    }
+
+    /// Attach `n-pages`: the one place in the crate that names the key
+    /// (issue #635).
+    ///
+    /// `count` is how many pages the **file** holds, where a page is
+    /// something a loader's zero-based `page` argument can select. That is
+    /// the whole of the contract [`Raster::get_n_pages`] documents, and
+    /// routing every writer through one function is what stops a fifth
+    /// meaning arriving under the same name: a count no page index can reach
+    /// gets a key of its own instead, the way the OpenEXR part count became
+    /// `exr-parts` (issue #626).
+    ///
+    /// `tests/n_pages_meaning.rs` asserts that the literal key appears in
+    /// exactly one source file, so a new writer either comes through here or
+    /// fails that guard.
+    pub(crate) fn set_n_pages(&mut self, count: u32) {
+        self.fields
+            .set("n-pages", MetadataValue::Int(i64::from(count)));
+    }
+
+    /// The integer under `name`, borrowed rather than materialised.
+    ///
+    /// [`Raster::get_field`] hands back an **owned** [`MetadataValue`], so
+    /// every reader that goes through it deep-copies whatever sits under the
+    /// name before looking at it. For a [`MetadataValue::Blob`] that copy is
+    /// bounded only by the file that wrote it: any name can hold any type
+    /// ([`Raster::try_set_field`] stores what it is given outside the
+    /// built-ins) and a `.v` trailer restores arbitrary named fields with
+    /// arbitrary types from an untrusted file (issue #565). Reading a `u32`
+    /// out of `n-pages` should not depend on what else got stored there, so
+    /// the readers borrow through here instead (issue #635).
+    ///
+    /// The built-in header fields answer exactly as [`Raster::get_field`]
+    /// would: the six int-valued ones report their value out of the header,
+    /// the string and double ones report `None` because they are not ints
+    /// there either, and `filename` goes to the field list because that is
+    /// where `get_field` reads it from.
+    fn field_i64(&self, name: &str) -> Option<i64> {
+        match name {
+            "width" => Some(i64::from(self.width())),
+            "height" => Some(i64::from(self.height())),
+            "bands" => Some(self.format().channels() as i64),
+            "xoffset" => Some(i64::from(self.xoffset())),
+            "yoffset" => Some(i64::from(self.yoffset())),
+            "orientation" => Some(i64::from(self.orientation())),
+            "format" | "coding" | "interpretation" | "xres" | "yres" => None,
+            // `filename` is the one built-in [`Raster::get_field`] answers
+            // out of the field list rather than the header, so it takes the
+            // same route here and reports an int if that is what is stored.
+            other => match self.fields.get(other) {
+                Some(&MetadataValue::Int(n)) => Some(n),
+                _ => None,
+            },
+        }
+    }
+
+    /// The int array under `name`, borrowed rather than materialised; the
+    /// array twin of `field_i64`, which does the same job for a scalar int.
+    ///
+    /// Every built-in header field is a scalar or a string, so none of them
+    /// answers here. `filename` still routes to the attached-field list,
+    /// because that is where [`Raster::get_field`] reads it from and the two
+    /// have to agree on every readable name.
+    fn field_int_array(&self, name: &str) -> Option<&[i64]> {
+        match name {
+            "width" | "height" | "bands" | "format" | "coding" | "interpretation" | "xoffset"
+            | "yoffset" | "xres" | "yres" | "orientation" => None,
+            other => match self.fields.get(other) {
+                Some(MetadataValue::IntArray(v)) => Some(v.as_slice()),
+                _ => None,
+            },
+        }
+    }
+
+    /// Read a metadata field as a slice of ints (libvips
+    /// `vips_image_get_array_int`).
+    ///
+    /// Answers the same names [`Raster::get_field`] does and returns the
+    /// elements when the value is a [`MetadataValue::IntArray`] — the
+    /// per-frame `delay` of an animated format, and nothing else in this
+    /// crate today. Returns `None` for an absent field or a value of any
+    /// other type, including a scalar [`MetadataValue::Int`], which vips
+    /// does not treat as a one-element array either.
+    ///
+    /// It borrows the stored value rather than cloning one out, so reading a
+    /// delay costs nothing even when the name happens to hold a large
+    /// [`MetadataValue::Blob`] instead (issue #635). Any name can hold any
+    /// type — [`Raster::try_set_field`] stores what it is given, and a `.v`
+    /// trailer restores arbitrary named fields with arbitrary types from an
+    /// untrusted file (#565) — so going through [`Raster::get_field`] would
+    /// deep-copy that blob before discovering it is not an array.
+    pub fn get_int_array(&self, name: &str) -> Option<&[i64]> {
+        self.field_int_array(name)
+    }
+
+    /// Read a metadata field as a slice of doubles (libvips
+    /// `vips_image_get_array_double`).
+    ///
+    /// The double-array twin of [`Raster::get_int_array`], with the same
+    /// rules: it answers the names [`Raster::get_field`] answers, borrows
+    /// rather than cloning, and returns `None` for an absent field or a value
+    /// of any other type, a [`MetadataValue::IntArray`] and a scalar
+    /// [`MetadataValue::Double`] included. GIF's `background` is the field
+    /// this exists for (issue #852).
+    pub fn get_double_array(&self, name: &str) -> Option<&[f64]> {
+        match name {
+            "width" | "height" | "bands" | "format" | "coding" | "interpretation" | "xoffset"
+            | "yoffset" | "xres" | "yres" | "orientation" => None,
+            other => match self.fields.get(other) {
+                Some(MetadataValue::DoubleArray(v)) => Some(v.as_slice()),
+                _ => None,
+            },
         }
     }
 
@@ -689,6 +1412,20 @@ impl Raster {
             .set("icc-profile-data", MetadataValue::Blob(profile.to_vec()));
     }
 
+    /// Drop the attached ICC profile, the way libvips'
+    /// `vips_image_remove(VIPS_META_ICC_NAME)` does. Removing an absent
+    /// profile is a no-op.
+    ///
+    /// Crate-private because a caller already has the same reach through
+    /// `set_typeof("icc-profile-data", 0)`; this exists so the ops that must
+    /// do it can say what they mean. The ops in question are the inverse
+    /// Fourier transforms: measured on vips 8.18.6 they retag the output
+    /// `b-w`, and a three-channel profile does not survive that retag (#717,
+    /// and the general rule is #720).
+    pub(crate) fn remove_icc_profile(&mut self) {
+        let _ = self.fields.remove("icc-profile-data");
+    }
+
     /// The attached ICC profile, if any: the `icc-profile-data` blob set
     /// by [`Raster::set_icc_profile`] or captured from a decoded JPEG.
     pub fn icc_profile(&self) -> Option<&[u8]> {
@@ -710,10 +1447,45 @@ impl Raster {
 pub enum SaveError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("unsupported save extension {extension:?}; libviprs encodes png, jpg/jpeg, and v/vips")]
+    #[error(
+        "unsupported save extension {extension:?}; libviprs encodes {}",
+        saveable_extensions()
+    )]
     UnsupportedExtension { extension: String },
     #[error("encode error: {0}")]
     Encode(#[from] SinkError),
+}
+
+/// The extensions [`Raster::save`] has an encoder behind, in the order the
+/// [module table](crate::imageio) lists them.
+///
+/// It is a function rather than a literal inside the `#[error]` string
+/// because `.jxl` and the five JPEG 2000 suffixes are only live arms when
+/// their non-default feature is on. A fixed list would either promise an
+/// encoder to a build that has none, or hide one from a build that has it,
+/// and the message is the only thing a caller who guessed an extension ever
+/// sees. The `save_error_lists_exactly_the_wired_extensions` test walks this
+/// string back through [`Raster::save`], so a new arm that forgets to update
+/// it fails rather than drifting.
+///
+/// Two optional features means four builds, so the list is assembled rather
+/// than written out four times: a fifth format would make it eight literals,
+/// and the third of the four is the one nobody would ever run.
+fn saveable_extensions() -> &'static str {
+    match (cfg!(feature = "jxl"), cfg!(feature = "jp2k")) {
+        (true, true) => {
+            "png, jpg/jpeg, gif, webp, tif/tiff, jxl, jp2/j2k/jpt/j2c/jpc, hdr, ppm/pgm, csv, mat, fits/fit/fts, and v/vips"
+        }
+        (true, false) => {
+            "png, jpg/jpeg, gif, webp, tif/tiff, jxl, hdr, ppm/pgm, csv, mat, fits/fit/fts, and v/vips"
+        }
+        (false, true) => {
+            "png, jpg/jpeg, gif, webp, tif/tiff, jp2/j2k/jpt/j2c/jpc, hdr, ppm/pgm, csv, mat, fits/fit/fts, and v/vips"
+        }
+        (false, false) => {
+            "png, jpg/jpeg, gif, webp, tif/tiff, hdr, ppm/pgm, csv, mat, fits/fit/fts, and v/vips"
+        }
+    }
 }
 
 /// JPEG quality used by extension-dispatched [`Raster::save`], matching
@@ -728,9 +1500,13 @@ impl Raster {
     ///
     /// # Errors
     ///
-    /// [`SaveError::UnsupportedExtension`] for extensions libviprs
-    /// cannot encode, [`SaveError::Encode`] if the encoder rejects the
-    /// pixel format, or [`SaveError::Io`] on write failure.
+    /// [`SaveError::UnsupportedExtension`] for extensions this build
+    /// cannot encode, which is everything outside the
+    /// [module table](crate::imageio) plus `.jxl` when the crate is built
+    /// without the `jxl` feature; the message enumerates the extensions
+    /// that are live in this build rather than a fixed set.
+    /// [`SaveError::Encode`] if the encoder rejects the pixel format, or
+    /// [`SaveError::Io`] on write failure.
     pub fn save(&self, path: &Path) -> Result<(), SaveError> {
         self.save_impl(path, true)
     }
@@ -750,10 +1526,35 @@ impl Raster {
             .extension()
             .map(|e| e.to_string_lossy().to_ascii_lowercase())
             .unwrap_or_default();
-        let bytes = match extension.as_str() {
+        let bytes = self.encode_for_extension(&extension, keep_metadata)?;
+        std::fs::write(path, bytes)?;
+        Ok(())
+    }
+
+    /// The extension route itself: pick the encoder from an already
+    /// lowercased extension and produce the bytes, without writing them.
+    ///
+    /// Split out of [`Raster::save_impl`] so the dispatch table can be
+    /// asserted without touching the filesystem. That is not tidiness: every
+    /// test that reaches this route through [`Raster::save`] has to carry
+    /// `#[cfg_attr(miri, ignore)]` and a row in
+    /// `tests/miri_fs_test_inventory.txt`, because Miri aborts the whole run
+    /// on the first filesystem call it refuses (#652). A route test does not
+    /// need a file on disk to say which extensions have an encoder behind
+    /// them, so it should not create one.
+    fn encode_for_extension(
+        &self,
+        extension: &str,
+        keep_metadata: bool,
+    ) -> Result<Vec<u8>, SaveError> {
+        Ok(match extension {
             "png" => crate::sink::encode_png(self)?,
             "jpg" | "jpeg" => {
-                let encoded = crate::sink::encode_jpeg(self, SAVE_JPEG_QUALITY)?;
+                let encoded = crate::sink::encode_jpeg(
+                    self,
+                    SAVE_JPEG_QUALITY,
+                    crate::sink::DEFAULT_BACKGROUND_RGB,
+                )?;
                 if keep_metadata {
                     let exif = match self.fields.get("exif-data") {
                         Some(MetadataValue::Blob(b)) => Some(b.as_slice()),
@@ -764,11 +1565,152 @@ impl Raster {
                     encoded
                 }
             }
+            // GIF carries no EXIF or ICC through libviprs' encoder, so
+            // `keep_metadata` has nothing to act on: the container holds a
+            // palette, a loop count and per-frame delays, all of which are
+            // structural rather than EXIF-class (`vips gifsave --keep none`
+            // does not drop `delay` either). WebP is the other way round and
+            // takes the flag.
+            "gif" => self
+                .encode_gif(crate::gif::SaveOptions::default())
+                .map_err(|e| match e {
+                    crate::codec::EncodeError::Io(io) => SaveError::Io(io),
+                    other => SaveError::Encode(SinkError::EncodeMsg(other.to_string())),
+                })?,
+            "webp" => crate::webp::encode_webp_for_save(self, keep_metadata)?,
+            // Both suffixes `tiffsave` registers and no more, measured on
+            // 8.18.6: its `vips -l` line reads `nocache (.tif, .tiff)`, and
+            // `.btf`, `.tf8`, `.bigtiff` and `.tfx` are each refused with
+            // "is not a known file format". One arm rather than two rows
+            // because the suffix does not pick anything here, the way it does
+            // for Netpbm: `.tif` and `.tiff` name the same container.
+            //
+            // Ungated: the TIFF encoder is the pure-Rust `tiff` crate this
+            // build already requires for decoding, so it costs no feature.
+            //
+            // `keep_metadata` has nothing to act on, and unlike GIF, FITS,
+            // JPEG 2000, Radiance and Netpbm that is a **gap** rather than a
+            // property of the container. TIFF has somewhere to put an ICC
+            // profile and `tiffsave` uses it; this build's encoder writes the
+            // colour tags and the strips and stops.
+            // `the_tiff_row_has_nothing_for_the_strip_flag_to_drop` pins the
+            // equality, so the day the encoder learns to embed one it goes
+            // red rather than the flag silently doing nothing.
+            "tif" | "tiff" => crate::encode_tiff::encode_tiff_for_save(self)?,
+            // JPEG XL takes no `keep_metadata` because `zune-jpegxl` writes
+            // a bare codestream with no box container, so there is nowhere
+            // to put an ICC profile, an EXIF block or an XMP packet and
+            // nothing for the flag to drop. `vips jxlsave --keep none`
+            // writes the same form; `--keep all` has no encoder behind it
+            // here. See `crate::jxl` for the whole argument.
+            //
+            // Gated, so that without the `jxl` feature `.jxl` falls through
+            // to `UnsupportedExtension` like any other extension with no
+            // encoder, and `saveable_extensions()` above stops naming it.
+            #[cfg(feature = "jxl")]
+            "jxl" => crate::jxl::encode_jxl_for_save(self)?,
+            // All five suffixes `jp2ksave` registers, and they are one arm
+            // rather than five because vips writes the **same bytes** for all
+            // of them: measured on 8.18.6, `vips copy base.v out.EXT` over
+            // `jp2`, `j2k`, `jpt`, `j2c` and `jpc` produces five files with
+            // one SHA-256 between them. So unlike every other row here, the
+            // suffix does not pick the codec, it only gets past the sniffing
+            // chain; `jp2ksave.c` hard-codes `OPJ_CODEC_JP2`.
+            //
+            // `keep_metadata` has nothing to act on, like GIF and FITS above:
+            // `jp2ksave.c` has no code for an ICC profile, an EXIF block or an
+            // XMP packet, so a stripped save and a kept one write the same
+            // bytes. Asserted, not assumed.
+            //
+            // Gated, so that without the `jp2k` feature these five fall
+            // through to `UnsupportedExtension` like any other extension with
+            // no encoder, and `saveable_extensions()` stops naming them.
+            #[cfg(feature = "jp2k")]
+            "jp2" | "j2k" | "jpt" | "j2c" | "jpc" => crate::jp2k::encode_jp2k_for_save(self)?,
+            // The one suffix `radsave` registers, measured on 8.18.6: its
+            // entry in `vips -l` reads `nocache (.hdr)`, and `.rad`, `.rgbe`
+            // and `.pic` are each refused with "is not a known file format".
+            // `.pic` is worth naming because #506's own title says
+            // `.hdr/.pic`; that is a load spelling elsewhere and not a suffix
+            // vips saves under.
+            //
+            // Ungated, because Radiance costs no feature: #589 wrote the
+            // matched `float2rad` encode in this crate.
+            //
+            // `keep_metadata` has nothing to act on, like GIF, FITS and JPEG
+            // 2000 above: a Radiance header carries `EXPOSURE`, `COLORCORR`,
+            // `PIXASPECT` and the primaries, which are format records rather
+            // than an ICC profile or an EXIF block. Asserted, not assumed.
+            //
+            // Unlike every other row here it has an input contract, 3-band
+            // `f32`, and it propagates the refusal rather than casting.
+            // `radsave` declares `mono rgb` and vips casts whatever it is
+            // handed; no row in this table converts, and this one is not going
+            // to be the first.
+            "hdr" => crate::radiance::encode_radiance_for_save(self)?,
+            // Two of the five suffixes `ppmsave` registers, and the only two
+            // this build has a container for: measured on 8.18.6, `.ppm`
+            // writes a `P6` and `.pgm` a `P5` whatever they are handed, while
+            // `.pbm` writes a `P4` and `.pfm` a `PF`, neither of which
+            // `encode_ppm` produces. `.pnm` is absent because **vips** refuses
+            // it: it demands a `multiband` interpretation and was refused for
+            // `srgb`, `b-w` and an explicitly-`multiband` image alike.
+            //
+            // The suffix names the container here, which no other row in this
+            // table does, so `encode_netpbm` refuses a band count the suffix
+            // does not mean rather than converting to fit it.
+            //
+            // `keep_metadata` has nothing to act on: a binary Netpbm file is a
+            // three-line ASCII header and the raster body, with nowhere for a
+            // profile, an EXIF block or an XMP packet to live.
+            "ppm" | "pgm" => self.encode_netpbm(extension).map_err(|e| match e {
+                crate::codec::EncodeError::Io(io) => SaveError::Io(io),
+                other => SaveError::Encode(SinkError::EncodeMsg(other.to_string())),
+            })?,
+            // `csvsave`'s one registered suffix, measured on 8.18.6: its
+            // `vips -l` line reads `nocache (.csv), priority=0, mono`. Both
+            // that entry and `matrixsave` below refuse a multi-band raster
+            // whose interpretation has no colourspace route (issue #958),
+            // rather than guessing one.
+            //
+            // `keep_metadata` has nothing to act on: a text grid has nowhere
+            // to put an ICC profile, an EXIF block or an XMP packet.
+            "csv" => self.csv_save().map_err(|e| match e {
+                crate::codec::EncodeError::Io(io) => SaveError::Io(io),
+                other => SaveError::Encode(SinkError::EncodeMsg(other.to_string())),
+            })?,
+            // `matrixsave`'s one registered suffix, measured the same way:
+            // `nocache (.mat), priority=0, mono`. `.mat` is also MATLAB's
+            // suffix on the way in (`SniffedFormat::Mat`, content-sniffed),
+            // and this crate has no text-matrix sniffing to disambiguate the
+            // way vips' own `is_a` does, so a `.mat` this writes does not
+            // decode back through `decode_file`/`decode_bytes`; pinned by
+            // `matrix_saved_bytes_do_not_decode_back_through_the_sniffer` in
+            // `tests/save_route_coverage.rs` (issue #958), the same
+            // asymmetry-pin shape `.ppm` carried before #910.
+            //
+            // `keep_metadata` has nothing to act on, same as `csv` above.
+            "mat" => self.matrix_save().map_err(|e| match e {
+                crate::codec::EncodeError::Io(io) => SaveError::Io(io),
+                other => SaveError::Encode(SinkError::EncodeMsg(other.to_string())),
+            })?,
+            // All three suffixes vips registers (`vips__fits_suffs`,
+            // `fits.c:125`). `keep_metadata` has nothing to act on: the
+            // records a FITS header carries are the geometry cfitsio
+            // regenerates anyway, and vips filters them out on the way
+            // back (`fits.c:596-613`), so a stripped save and a kept one
+            // write the same bytes.
+            "fits" | "fit" | "fts" => self.encode_fits().map_err(|e| match e {
+                crate::codec::EncodeError::Io(io) => SaveError::Io(io),
+                other => SaveError::Encode(SinkError::EncodeMsg(other.to_string())),
+            })?,
             "v" | "vips" => self.encode_vips_impl(keep_metadata),
-            _ => return Err(SaveError::UnsupportedExtension { extension }),
-        };
-        std::fs::write(path, bytes)?;
-        Ok(())
+            _ => {
+                return Err(SaveError::UnsupportedExtension {
+                    extension: extension.to_owned(),
+                });
+            }
+        })
     }
 
     /// Encode as native `.v` bytes (libvips `vipssave_buffer`): the
@@ -784,7 +1726,7 @@ impl Raster {
     }
 
     fn encode_vips_impl(&self, keep_metadata: bool) -> Vec<u8> {
-        let bpc = self.format().bytes_per_channel();
+        let kind = self.format().kind();
         let mut out = Vec::with_capacity(VIPS_HEADER_LEN + self.data().len());
         out.extend_from_slice(&VIPS_MAGIC_NATIVE);
         fn push_i32(out: &mut Vec<u8>, v: i32) {
@@ -793,14 +1735,12 @@ impl Raster {
         push_i32(&mut out, self.width() as i32);
         push_i32(&mut out, self.height() as i32);
         push_i32(&mut out, self.format().channels() as i32);
-        push_i32(&mut out, 8 * bpc as i32); // deprecated Bbits
-        // BandFmt (VipsBandFormat codes): 0 = uchar, 2 = ushort, 6 = float.
-        let band_fmt = match bpc {
-            1 => 0,
-            2 => 2,
-            _ => 6,
-        };
-        push_i32(&mut out, band_fmt);
+        // Bbits is the sample width in bits, which is what vips writes: 8 for
+        // the one-byte formats, 16 for the two-byte ones and 32 for every
+        // four-byte one. Deprecated, and derived rather than tabulated,
+        // because unlike `BandFmt` it genuinely is a width.
+        push_i32(&mut out, 8 * kind.bytes() as i32); // deprecated Bbits
+        push_i32(&mut out, band_format_code(kind));
         push_i32(&mut out, 0); // Coding: none
         push_i32(&mut out, interpretation_code(self.interpretation()));
         out.extend_from_slice(&(self.xres() as f32).to_ne_bytes());
@@ -812,16 +1752,109 @@ impl Raster {
         push_i32(&mut out, self.yoffset());
         out.resize(VIPS_HEADER_LEN, 0); // reserved tail of the header
         out.extend_from_slice(self.data());
-        if keep_metadata {
-            let trailer = VTrailer {
-                orientation: self.orientation(),
-                fields: self.fields.clone(),
-            };
-            if let Ok(json) = serde_json::to_vec(&trailer) {
-                out.extend_from_slice(&json);
+        if keep_metadata && self.has_v_trailer_content() {
+            if self.fields.needs_legacy_json_trailer() {
+                self.append_legacy_json_trailer(&mut out);
+            } else {
+                self.append_vips_xml_trailer(&mut out);
             }
         }
         out
+    }
+
+    /// Append the metadata trailer libvips reads: `<root>`, a `<header>`
+    /// holding the (empty) history string, and a `<meta>` block of one
+    /// `<field>` per attached value plus the orientation tag.
+    ///
+    /// Mirrors `build_xml` (`libvips/iofuncs/vips.c:846-890` at
+    /// `v8.18.0-95-gfe420cf3a`) element for element, including the two-space
+    /// indent and the trailing newline, so a `.v` libviprs writes and a `.v`
+    /// vips writes for the same metadata differ only where this
+    /// deliberately fixes vips's escaping. See the
+    /// [module docs](crate::imageio) for the type mapping and for the two
+    /// divergences.
+    ///
+    /// The `<header>` block has to be there even though nothing reads it
+    /// back: vips's parser flips out of history mode on `<meta>`
+    /// (`vips.c:606-610`), and a document with a `<header>` and no `<meta>`
+    /// would leave every field looking like history.
+    fn append_vips_xml_trailer(&self, out: &mut Vec<u8>) {
+        let mut xml = String::new();
+        xml.push_str("<?xml version=\"1.0\"?>\n");
+        xml.push_str("<root xmlns=\"");
+        xml.push_str(VIPS_XML_NAMESPACE);
+        xml.push_str("\">\n  <header>\n    <field type=\"");
+        xml.push_str(GTYPE_STRING);
+        xml.push_str("\" name=\"Hist\"></field>\n  </header>\n  <meta>\n");
+        for (name, value) in self.fields.known() {
+            // The orientation tag is written from the header below. An
+            // attached field of that name can only come from a hand-made
+            // trailer, is shadowed by the header everywhere it is read, and
+            // would put two `orientation` elements in one `<meta>` block.
+            if name == "orientation" {
+                continue;
+            }
+            let (gtype, text) = xml_field_of(value);
+            push_xml_field(&mut xml, gtype, name, &text, XmlText::Escape);
+        }
+        for (name, carried) in self.fields.unknown_fields() {
+            // `needs_legacy_json_trailer` is false here, so every carried
+            // value is an XML one and goes back exactly as it arrived.
+            if let CarriedValue::Xml { gtype, text } = carried {
+                push_xml_field(&mut xml, gtype, name, text, XmlText::Verbatim);
+            }
+        }
+        push_xml_field(
+            &mut xml,
+            GTYPE_INT,
+            "orientation",
+            &self.orientation().to_string(),
+            XmlText::Escape,
+        );
+        xml.push_str("  </meta>\n</root>\n");
+        out.extend_from_slice(xml.as_bytes());
+    }
+
+    /// Append the trailer libviprs 0.4.0 wrote, byte for byte.
+    ///
+    /// Only reached for a raster carrying a value that has no XML spelling;
+    /// see the [module docs](crate::imageio). Keeping the exact bytes is the
+    /// point, because the whole reason to take this path is that some other
+    /// build has to be able to read the value back.
+    fn append_legacy_json_trailer(&self, out: &mut Vec<u8>) {
+        let trailer = VTrailer {
+            orientation: self.orientation(),
+            fields: VFields {
+                entries: self
+                    .fields
+                    .known()
+                    .map(|(name, v)| (name, VFieldValue::Known(v)))
+                    .chain(
+                        self.fields
+                            .unknown_fields()
+                            .map(|(name, v)| (name, VFieldValue::Carried(v))),
+                    )
+                    .collect(),
+            },
+        };
+        if let Ok(json) = serde_json::to_vec(&trailer) {
+            out.extend_from_slice(&json);
+        }
+    }
+
+    /// Whether a `.v` trailer would carry anything: an orientation other
+    /// than the upright default, or at least one attached field (readable
+    /// or carried opaquely).
+    ///
+    /// An empty trailer is not free. libvips parses that slot as XML, so the
+    /// 41 bytes of `{"orientation":1,"fields":{"entries":[]}}` that every
+    /// plain [`Raster::save`] used to append made `vipsheader -a` print
+    /// `VIPS-WARNING **: error reading vips image metadata: VipsImage: XML
+    /// parse error` and throw the whole metadata block away. A file with no
+    /// trailer at all reads silently (measured on vips 8.18.4, issue #546),
+    /// so writing nothing is strictly better than writing nothing useful.
+    fn has_v_trailer_content(&self) -> bool {
+        self.orientation() != 1 || !self.fields.is_empty()
     }
 }
 
@@ -833,9 +1866,15 @@ impl Raster {
 const VIPS_HEADER_LEN: usize = 64;
 
 /// First four file bytes of a big-endian (SPARC-order) `.v` file.
-const VIPS_MAGIC_BE: [u8; 4] = [0x08, 0xf2, 0xa6, 0xb6];
+///
+/// `pub(crate)` for the same reason [`crate::exr::MAGIC`],
+/// [`crate::fits::MAGIC`] and [`crate::radiance::MAGIC`] are: the container's
+/// signature belongs to the module that owns the container, and the route
+/// table in [`crate::source`] reads it from here rather than keeping a
+/// second copy.
+pub(crate) const VIPS_MAGIC_BE: [u8; 4] = [0x08, 0xf2, 0xa6, 0xb6];
 /// First four file bytes of a little-endian (Intel-order) `.v` file.
-const VIPS_MAGIC_LE: [u8; 4] = [0xb6, 0xa6, 0xf2, 0x08];
+pub(crate) const VIPS_MAGIC_LE: [u8; 4] = [0xb6, 0xa6, 0xf2, 0x08];
 
 /// The magic this build writes: native byte order, as libvips does.
 #[cfg(target_endian = "little")]
@@ -843,24 +1882,530 @@ const VIPS_MAGIC_NATIVE: [u8; 4] = VIPS_MAGIC_LE;
 #[cfg(target_endian = "big")]
 const VIPS_MAGIC_NATIVE: [u8; 4] = VIPS_MAGIC_BE;
 
-/// The JSON trailer libviprs writes after the pixel data: the
-/// orientation tag plus the attached fields. libvips stores XML here;
-/// both readers ignore a trailer they cannot parse.
-#[derive(Serialize, Deserialize)]
-struct VTrailer {
+// --- the libvips XML metadata trailer ---------------------------------------
+
+/// The XML namespace real libvips stamps on a `.v` metadata trailer
+/// (`NAMESPACE_URI` at `libvips/iofuncs/vips.c:124`, joined with the writing
+/// version by `build_xml` at `vips.c:857-860`, `v8.18.0-95-gfe420cf3a`).
+///
+/// The version suffix names the release whose trailer layout this writes and
+/// was measured against, not the writer: vips's parser only checks that the
+/// namespace starts with `.../vips` and ignores the rest
+/// (`parser_element_start_handler`, `vips.c:614-621`), so a wrong version
+/// here would be silent rather than loud, and a right one is worth more as
+/// documentation than as a gate.
+const VIPS_XML_NAMESPACE: &str = "http://www.vips.ecs.soton.ac.uk/vips/8.18.4";
+
+/// GType name for [`MetadataValue::Int`] (`g_type_name(G_TYPE_INT)`).
+const GTYPE_INT: &str = "gint";
+/// GType name for [`MetadataValue::Double`].
+const GTYPE_DOUBLE: &str = "gdouble";
+/// GType name for [`MetadataValue::Str`] (vips's refcounted string).
+const GTYPE_STRING: &str = "VipsRefString";
+/// GType name for [`MetadataValue::Blob`], carried as base64
+/// (`transform_blob_save_string`, `libvips/iofuncs/type.c:745-758`).
+const GTYPE_BLOB: &str = "VipsBlob";
+/// GType name for [`MetadataValue::IntArray`], carried as space-separated
+/// decimals with a trailing separator (`transform_array_int_save_string`,
+/// `libvips/iofuncs/type.c`). Measured on the pinned 8.18.6: a three-frame
+/// animation's `delay` goes out as `100 100 100 `.
+const GTYPE_ARRAY_INT: &str = "VipsArrayInt";
+/// GType name for [`MetadataValue::DoubleArray`], carried the same way
+/// `VipsArrayInt` is: space-separated, with a trailing separator. Measured on
+/// the pinned 8.18.6, a GIF's `background` goes out as `71 112 76 `.
+const GTYPE_ARRAY_DOUBLE: &str = "VipsArrayDouble";
+
+/// The `type` attribute and character data for one [`MetadataValue`]; see
+/// the type table in the [module docs](crate::imageio).
+///
+/// The double goes out in Rust's shortest round-tripping form rather than
+/// vips's `g_ascii_dtostr` `%.17g` (`type.c:438-446`), because the two agree
+/// on every value that matters and the short one is what survives a
+/// `f64 -> text -> f64` trip here. `g_ascii_strtod` reads it either way:
+/// measured on 8.18.4, a `gdouble` field written `1e300` reads back as
+/// `1e+300`.
+fn xml_field_of(value: &MetadataValue) -> (&'static str, Cow<'_, str>) {
+    match value {
+        MetadataValue::Int(i) => (GTYPE_INT, Cow::Owned(i.to_string())),
+        MetadataValue::Double(d) => (GTYPE_DOUBLE, Cow::Owned(format!("{d:?}"))),
+        MetadataValue::Str(s) => (GTYPE_STRING, Cow::Borrowed(s.as_str())),
+        MetadataValue::Blob(b) => (GTYPE_BLOB, Cow::Owned(base64_encode(b))),
+        MetadataValue::IntArray(v) => (GTYPE_ARRAY_INT, Cow::Owned(int_array_text(v))),
+        MetadataValue::DoubleArray(v) => (GTYPE_ARRAY_DOUBLE, Cow::Owned(double_array_text(v))),
+    }
+}
+
+/// The character data vips writes for a `VipsArrayInt`: every element
+/// followed by one space, the last one included.
+///
+/// The trailing separator is not a stray. Measured on the pinned 8.18.6,
+/// `vips copy 'anim3.webp[n=-1]' out.v` writes
+/// `<field type="VipsArrayInt" name="delay">100 100 100 </field>`, because
+/// vips's save transform appends after each value rather than joining
+/// between them. Nothing in this crate's own round trip can see the
+/// difference, since [`parse_int_array_text`] ignores the trailing
+/// whitespace either way, which is exactly why it is pinned as bytes.
+fn int_array_text(values: &[i64]) -> String {
+    let mut out = String::new();
+    for v in values {
+        out.push_str(&v.to_string());
+        out.push(' ');
+    }
+    out
+}
+
+/// The character data vips writes for a `VipsArrayDouble`: every element
+/// followed by one space, the last one included, the same shape
+/// [`int_array_text`] writes.
+///
+/// The elements go out in Rust's shortest round-tripping form, which is the
+/// choice [`xml_field_of`] already made for a scalar
+/// [`MetadataValue::Double`], so the two conventions inside one trailer agree
+/// with each other. vips uses `%.17g` and the two differ on the values you
+/// would expect: measured on 8.18.6 by hand-writing a trailer and rewriting
+/// it, `0.5`, `-1.25` and `3.0000000000000004` come back unchanged, `71.0`
+/// goes out of vips as `71` where this writes `71.0`, and `1e300` goes out of
+/// vips as `1.0000000000000001e+300` where this writes `1e300`. Every one of
+/// those parses back to the same `f64` through `g_ascii_strtod` and through
+/// Rust, so the difference is spelling rather than value, and matching vips
+/// here would mean making the scalar path inconsistent with it or changing
+/// how every existing `gdouble` field is written.
+fn double_array_text(values: &[f64]) -> String {
+    let mut out = String::new();
+    for v in values {
+        out.push_str(&format!("{v:?}"));
+        out.push(' ');
+    }
+    out
+}
+
+/// Parse the character data of a `VipsArrayDouble` field.
+///
+/// Whitespace-separated, and all or nothing, for the reasons
+/// [`parse_int_array_text`] gives. vips writes an integral element with no
+/// decimal point (`71`, not `71.0`) and an exponent as `1.0000000000000001e+300`,
+/// both of which Rust's `f64` parser reads, which is what makes a trailer
+/// vips wrote readable here.
+fn parse_double_array_text(text: &str) -> Option<Vec<f64>> {
+    text.split_whitespace()
+        .map(|t| t.parse::<f64>().ok())
+        .collect()
+}
+
+/// Parse the character data of a `VipsArrayInt` field.
+///
+/// Whitespace-separated decimals, and **all or nothing**: an element that
+/// will not parse as an `i64` gives `None`, so the caller carries the whole
+/// field opaquely rather than handing back the elements that happened to
+/// work. That is the same rule `gint`, `gdouble` and `VipsBlob` already
+/// follow in [`read_vips_xml_trailer`], and it is a deliberate divergence
+/// from vips, which hands back an **empty** array for `40 x 80` and loses
+/// the two elements that parsed (measured on 8.18.6: `vipsheader -f delay`
+/// prints nothing and `vips copy` writes the field back out empty).
+///
+/// An empty element list is an empty array, not a refusal: vips writes and
+/// reads that, so a `.v` carrying one has to survive a rewrite here.
+///
+/// The elements are `i64` where vips's `gint` is 32 bits. vips wraps rather
+/// than refusing (measured: `3000000000` reads back as `-1294967296`), so a
+/// narrower carrier here would lose data on a file libviprs did not write
+/// and could not warn about.
+fn parse_int_array_text(text: &str) -> Option<Vec<i64>> {
+    text.split_whitespace()
+        .map(|t| t.parse::<i64>().ok())
+        .collect()
+}
+
+/// Whether [`push_xml_field`] escapes the text it is given or writes it out
+/// as-is.
+#[derive(Clone, Copy)]
+enum XmlText {
+    /// A value this build produced: escape it.
+    Escape,
+    /// Character data read off disk and carried opaquely: it is already
+    /// escaped, and re-escaping it would double every `&`.
+    Verbatim,
+}
+
+/// Append one `    <field type="..." name="...">text</field>` line, indented
+/// and newline-terminated exactly as `build_xml_meta` writes it
+/// (`libvips/iofuncs/vips.c:803-844`).
+fn push_xml_field(out: &mut String, gtype: &str, name: &str, text: &str, mode: XmlText) {
+    out.push_str("    <field type=\"");
+    push_xml_attr(out, gtype);
+    out.push_str("\" name=\"");
+    push_xml_attr(out, name);
+    out.push_str("\">");
+    match mode {
+        XmlText::Escape => push_xml_text(out, text),
+        XmlText::Verbatim => out.push_str(text),
+    }
+    out.push_str("</field>\n");
+}
+
+/// Escape `s` as XML character data.
+///
+/// `&`, `<` and `>` become entities. A C0 control character other than tab
+/// and newline is replaced by its Unicode control picture at `0x2400 + c`,
+/// which is what vips does (`vips_target_write_amp`,
+/// `libvips/iofuncs/target.c:821-845`) and the only thing an XML 1.0 parser
+/// will take, since a numeric reference to a control character is not a
+/// legal `Char`. That substitution does not reverse, so a control character
+/// in a string field does not survive the round trip in either library.
+///
+/// A carriage return goes out as `&#x000d;` rather than literally, because a
+/// literal one is folded into a newline by end-of-line normalisation
+/// (XML 1.0 section 2.11) while the reference is not.
+///
+/// Unlike vips, bytes above 0x7f are left alone. vips tests `*p < 32` on a
+/// signed `char`, so it mangles every multi-byte UTF-8 sequence it writes;
+/// see the [module docs](crate::imageio).
+fn push_xml_text(out: &mut String, s: &str) {
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '\r' => out.push_str("&#x000d;"),
+            '\n' | '\t' => out.push(c),
+            c if (c as u32) < 0x20 => push_control_picture(out, c),
+            c => out.push(c),
+        }
+    }
+}
+
+/// Escape `s` as an XML attribute value: [`push_xml_text`] plus the quote,
+/// and with the three whitespace characters written as references because an
+/// XML parser normalises literal ones to spaces (XML 1.0 section 3.3.3).
+fn push_xml_attr(out: &mut String, s: &str) {
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\n' => out.push_str("&#x000a;"),
+            '\r' => out.push_str("&#x000d;"),
+            '\t' => out.push_str("&#x0009;"),
+            c if (c as u32) < 0x20 => push_control_picture(out, c),
+            c => out.push(c),
+        }
+    }
+}
+
+/// The `&#x24xx;` substitution for a C0 control character; see
+/// [`push_xml_text`].
+fn push_control_picture(out: &mut String, c: char) {
+    use std::fmt::Write as _;
+    // Infallible: writing into a String cannot fail.
+    let _ = write!(out, "&#x{:04x};", 0x2400 + c as u32);
+}
+
+/// Resolve XML entity and character references in `s`.
+///
+/// Anything it does not recognise is left standing, which keeps a stray `&`
+/// in a foreign trailer from eating the rest of the value.
+fn unescape_xml(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(amp) = rest.find('&') {
+        out.push_str(&rest[..amp]);
+        let tail = &rest[amp..];
+        let Some(semi) = tail.find(';') else {
+            out.push_str(tail);
+            return out;
+        };
+        match decode_xml_entity(&tail[1..semi]) {
+            Some(c) => out.push(c),
+            None => out.push_str(&tail[..=semi]),
+        }
+        rest = &tail[semi + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// One entity body (between `&` and `;`) as a character, or `None` when it
+/// is not one of the five predefined entities or a numeric reference.
+fn decode_xml_entity(body: &str) -> Option<char> {
+    match body {
+        "amp" => Some('&'),
+        "lt" => Some('<'),
+        "gt" => Some('>'),
+        "quot" => Some('"'),
+        "apos" => Some('\''),
+        _ => {
+            let digits = body.strip_prefix('#')?;
+            let code = match digits.strip_prefix(['x', 'X']) {
+                Some(hex) => u32::from_str_radix(hex, 16).ok()?,
+                None => digits.parse::<u32>().ok()?,
+            };
+            char::from_u32(code)
+        }
+    }
+}
+
+/// The slice of a `.v` XML trailer that holds the metadata fields.
+///
+/// Normally the inside of `<meta>`, which is where `build_xml` puts them.
+/// A trailer with no `<meta>` element falls back to everything after
+/// `</header>`, so the history block cannot be mistaken for metadata, and a
+/// bare fragment with neither is scanned whole.
+fn vips_xml_meta_region(text: &str) -> &str {
+    if let Some(open) = text.find("<meta>").or_else(|| text.find("<meta ")) {
+        let after = &text[open..];
+        let Some(gt) = after.find('>') else {
+            return "";
+        };
+        let inner = &after[gt + 1..];
+        let end = inner.find("</meta>").unwrap_or(inner.len());
+        &inner[..end]
+    } else if let Some(idx) = text.find("</header>") {
+        &text[idx + "</header>".len()..]
+    } else {
+        text
+    }
+}
+
+/// One `<field>` element of a `.v` XML trailer.
+struct VipsXmlField<'a> {
+    /// The `type` attribute: a GType name such as `gint`.
+    gtype: &'a str,
+    /// The `name` attribute, still escaped.
+    name: &'a str,
+    /// The character data between the tags, still escaped.
+    text: &'a str,
+}
+
+/// Scanner over the `<field>` elements of a `.v` XML trailer.
+///
+/// Deliberately not a general XML parser. The trailer is one small document
+/// with a shape libvips writes deterministically, this build has to read it
+/// without taking on an XML dependency, and a scanner that skips what it
+/// does not understand degrades the way the rest of the trailer path does:
+/// a field it cannot make sense of costs that field and nothing else.
+///
+/// A field missing either attribute is skipped rather than guessed at: vips
+/// writes both on every element, and a field with no type cannot be
+/// interpreted *or* carried faithfully.
+struct VipsXmlFields<'a> {
+    rest: &'a str,
+}
+
+impl<'a> VipsXmlFields<'a> {
+    fn new(text: &'a str) -> Self {
+        Self { rest: text }
+    }
+}
+
+impl<'a> Iterator for VipsXmlFields<'a> {
+    type Item = VipsXmlField<'a>;
+
+    fn next(&mut self) -> Option<VipsXmlField<'a>> {
+        loop {
+            let start = self.rest.find("<field")?;
+            let after = &self.rest[start + "<field".len()..];
+            // `<fieldset>` is not a `<field>`.
+            if !after.starts_with([' ', '\t', '\r', '\n', '>', '/']) {
+                self.rest = after;
+                continue;
+            }
+            let Some(close) = after.find('>') else {
+                self.rest = "";
+                return None;
+            };
+            let attrs = &after[..close];
+            let body = &after[close + 1..];
+            let (text, rest) = if attrs.ends_with('/') {
+                ("", body)
+            } else if let Some(i) = body.find("</field>") {
+                (&body[..i], &body[i + "</field>".len()..])
+            } else {
+                self.rest = "";
+                return None;
+            };
+            self.rest = rest;
+            let attrs = attrs.strip_suffix('/').unwrap_or(attrs);
+            let mut gtype = None;
+            let mut name = None;
+            let pairs = XmlAttrs { rest: attrs };
+            for (key, value) in pairs {
+                match key {
+                    "type" => gtype = Some(value),
+                    "name" => name = Some(value),
+                    _ => {}
+                }
+            }
+            let (Some(gtype), Some(name)) = (gtype, name) else {
+                continue;
+            };
+            return Some(VipsXmlField { gtype, name, text });
+        }
+    }
+}
+
+/// Scanner over the `name="value"` pairs of one start tag.
+///
+/// Pair by pair rather than by searching for `name=`, so an attribute value
+/// that happens to contain another attribute's name cannot be picked up as
+/// that attribute.
+struct XmlAttrs<'a> {
+    rest: &'a str,
+}
+
+impl<'a> Iterator for XmlAttrs<'a> {
+    type Item = (&'a str, &'a str);
+
+    fn next(&mut self) -> Option<(&'a str, &'a str)> {
+        let rest = self.rest.trim_start();
+        let eq = rest.find('=')?;
+        let key = rest[..eq].trim_end();
+        let after = rest[eq + 1..].trim_start();
+        let quote = after.chars().next()?;
+        if quote != '"' && quote != '\'' {
+            self.rest = "";
+            return None;
+        }
+        let body = &after[quote.len_utf8()..];
+        let end = body.find(quote)?;
+        self.rest = &body[end + quote.len_utf8()..];
+        Some((key, &body[..end]))
+    }
+}
+
+/// The standard base64 alphabet (RFC 4648), which is what `g_base64_encode`
+/// uses for a `VipsBlob` save string.
+const BASE64_ALPHABET: &[u8; 64] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/// Encode `data` as padded, unwrapped base64, matching `g_base64_encode`
+/// (which never breaks lines) as used by `transform_blob_save_string`.
+fn base64_encode(data: &[u8]) -> String {
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b1 = u32::from(chunk[0]);
+        let b2 = u32::from(chunk.get(1).copied().unwrap_or(0));
+        let b3 = u32::from(chunk.get(2).copied().unwrap_or(0));
+        let n = (b1 << 16) | (b2 << 8) | b3;
+        out.push(BASE64_ALPHABET[(n >> 18) as usize & 63] as char);
+        out.push(BASE64_ALPHABET[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 {
+            BASE64_ALPHABET[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            BASE64_ALPHABET[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// Decode padded base64, tolerating whitespace, or `None` when `text` is not
+/// base64 at all.
+///
+/// `None` is not a failure the caller reports: a `VipsBlob` field whose text
+/// will not decode is carried opaquely instead, so a value this build cannot
+/// read is still a value it does not destroy.
+fn base64_decode(text: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(text.len() / 4 * 3);
+    let mut acc: u32 = 0;
+    let mut bits: u32 = 0;
+    let mut padding = 0usize;
+    for byte in text.bytes() {
+        if byte.is_ascii_whitespace() {
+            continue;
+        }
+        if byte == b'=' {
+            padding += 1;
+            continue;
+        }
+        if padding > 0 {
+            return None; // data after the padding
+        }
+        acc = (acc << 6) | base64_value(byte)?;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    // A well-formed group leaves 0, 2 or 4 spare bits, and they are zero.
+    if padding > 2 || bits >= 6 || acc & ((1 << bits) - 1) != 0 {
+        return None;
+    }
+    Some(out)
+}
+
+/// One base64 digit's value, or `None` when the byte is not one.
+fn base64_value(byte: u8) -> Option<u32> {
+    Some(match byte {
+        b'A'..=b'Z' => u32::from(byte - b'A'),
+        b'a'..=b'z' => u32::from(byte - b'a') + 26,
+        b'0'..=b'9' => u32::from(byte - b'0') + 52,
+        b'+' => 62,
+        b'/' => 63,
+        _ => return None,
+    })
+}
+
+/// The trailer libviprs 0.4.0 and earlier wrote after the pixel data: the
+/// orientation tag plus the attached fields, as JSON.
+///
+/// The writer produces this only for a raster carrying a value that has no
+/// XML spelling; everything else gets the libvips XML trailer now (issue
+/// #546). The shape stays frozen at what 0.4.0 wrote,
+/// `{"orientation":N,"fields":{"entries":[[name,value],...]}}` with values
+/// in [`MetadataValue`]'s externally tagged form, because the only reason to
+/// take this path is that some other build has to read the value back.
+///
+/// Write-only. Reading goes through [`read_json_trailer`], which walks the
+/// JSON entry by entry rather than deserialising into this shape, because
+/// one `serde` value for the whole trailer is exactly what made a single
+/// unreadable field cost the image every other one (issue #565).
+#[derive(Serialize)]
+struct VTrailer<'a> {
     orientation: u8,
-    fields: MetadataFields,
+    fields: VFields<'a>,
 }
 
-/// Whether `bytes` begin with a `.v` magic (either byte order).
-pub(crate) fn is_vips_bytes(bytes: &[u8]) -> bool {
-    bytes.len() >= 4 && (bytes[..4] == VIPS_MAGIC_LE || bytes[..4] == VIPS_MAGIC_BE)
+/// The attached fields as they sit in a [`VTrailer`].
+#[derive(Serialize)]
+struct VFields<'a> {
+    entries: Vec<(&'a str, VFieldValue<'a>)>,
 }
 
-/// Decode a native `.v` file (both byte orders). Enforces the caller's
-/// [`DecodeLimits`] — the [`max_coord`](DecodeLimits::max_coord)
-/// single-axis ceiling and the pixel budget — on the untrusted header
-/// geometry before allocating.
+/// One trailer value on its way out to disk.
+///
+/// `untagged` means each arm serialises as its own contents and adds
+/// nothing, so a [`MetadataValue`] keeps its externally tagged form and an
+/// opaque value goes back exactly as it arrived.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum VFieldValue<'a> {
+    /// A value this build understands, e.g. `{"Int":3}`.
+    Known(&'a MetadataValue),
+    /// A value a newer build wrote, echoed back as it arrived.
+    Carried(&'a CarriedValue),
+}
+
+/// Decode a native `.v` file (both byte orders). Enforces all three of the
+/// caller's [`DecodeLimits`] geometry ceilings on the untrusted header before
+/// anything is allocated: the [`max_coord`](DecodeLimits::max_coord)
+/// single-axis ceiling, the [`max_pixels`](DecodeLimits::max_pixels) count,
+/// and the [`max_alloc_bytes`](DecodeLimits::max_alloc_bytes) budget on the
+/// pixel body.
+///
+/// The third arrived last, as issue #710. `.v` was never a decompression-bomb
+/// vector, because the body has to be physically present before it is copied,
+/// so the allocation was already bounded by the input length. What was missing
+/// was the contract: a caller who set `max_alloc_bytes` did not get it here,
+/// and the two decode entry points disagreed about the same run of bytes,
+/// since [`crate::source::decode_file_with_limits`] spends the budget on the
+/// bounded whole-file read and [`crate::source::decode_bytes_with_limits`] has
+/// no file to spend it on.
 pub(crate) fn decode_vips_bytes(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
     if bytes.len() < VIPS_HEADER_LEN {
         return Err(SourceError::VipsFormat(format!(
@@ -898,17 +2443,25 @@ pub(crate) fn decode_vips_bytes(bytes: &[u8], limits: DecodeLimits) -> Result<Ra
             "unsupported .v coding {coding}; only uncoded images are supported"
         )));
     }
-    let bpc = match band_fmt {
-        0 => 1, // uchar
-        2 => 2, // ushort
-        6 => 4, // float
-        other => {
-            return Err(SourceError::VipsFormat(format!(
-                "unsupported .v band format {other}; only uchar, ushort, and float \
-                 are supported"
-            )));
-        }
+    let Some(kind) = band_format_kind(band_fmt) else {
+        return Err(SourceError::VipsFormat(format!(
+            "unsupported .v band format {band_fmt}; libviprs reads the six \
+             integer and float formats, not complex, double or dpcomplex"
+        )));
     };
+    // A sample kind with no carrier and a band count with no format are two
+    // different refusals, and saying which one it is here is the difference
+    // between "this build cannot carry a uint image yet" and "your file is
+    // corrupt". `with_kind` answers `None` to both, so probe the kind alone
+    // at one band first.
+    if PixelFormat::with_kind(1, kind).is_none() {
+        return Err(SourceError::VipsFormat(format!(
+            "unsupported .v band format {band_fmt} ({}); no libviprs pixel \
+             format carries that sample kind yet",
+            band_format_nickname(kind)
+        )));
+    }
+    let bpc = kind.bytes();
     if width <= 0 || height <= 0 || bands <= 0 {
         return Err(SourceError::VipsFormat(format!(
             "bad .v geometry {width}x{height} with {bands} bands"
@@ -917,12 +2470,29 @@ pub(crate) fn decode_vips_bytes(bytes: &[u8], limits: DecodeLimits) -> Result<Ra
     let (width, height) = (width as u32, height as u32);
     limits.check_coord(width, height)?;
     limits.check_pixels(width, height)?;
-    let format = PixelFormat::with_channels(bands as usize, bpc)
+    let format = PixelFormat::with_kind(bands as usize, kind)
         .ok_or_else(|| SourceError::VipsFormat(format!("unrepresentable .v band count {bands}")))?;
 
-    let data_len = width as usize * height as usize * format.bytes_per_pixel();
-    let end = VIPS_HEADER_LEN
-        .checked_add(data_len)
+    // And the allocation budget, which neither ceiling above implies: a pixel
+    // count sees neither the band count nor the sample depth, so the default
+    // 1-gigapixel `max_pixels` still waves a 4 GiB `Rgba8` body through. This
+    // reader consulted it nowhere at all until issue #710, so it was the one
+    // container out of ten where setting `max_alloc_bytes` bought nothing.
+    //
+    // It sits after the format lookup rather than before, for two reasons. A
+    // band count with no `PixelFormat` keeps coming back as the format error
+    // it always was rather than as an allocation refusal. And the price is
+    // then provably the product the copy below is sized from: `with_kind`
+    // returns a format whose band count is its argument and whose sample
+    // width is `kind.bytes()`, and `bytes_per_pixel` is their product, so
+    // `bands * bpc` is `format.bytes_per_pixel()` for every representable
+    // `.v`. That is why there is one spelling of the product here now and not
+    // two.
+    let data_len =
+        limits.check_image_alloc(".v pixel buffer", width, height, bands as u64, bpc as u64)?;
+    let end = usize::try_from(data_len)
+        .ok()
+        .and_then(|len| VIPS_HEADER_LEN.checked_add(len))
         .filter(|&e| e <= bytes.len())
         .ok_or_else(|| {
             SourceError::VipsFormat(format!(
@@ -932,12 +2502,12 @@ pub(crate) fn decode_vips_bytes(bytes: &[u8], limits: DecodeLimits) -> Result<Ra
         })?;
     let mut data = bytes[VIPS_HEADER_LEN..end].to_vec();
     if swapped && bpc == 2 {
-        for pair in data.chunks_exact_mut(2) {
+        for pair in data.as_chunks_mut::<2>().0 {
             pair.swap(0, 1);
         }
     }
     if swapped && bpc == 4 {
-        for quad in data.chunks_exact_mut(4) {
+        for quad in data.as_chunks_mut::<4>().0 {
             quad.reverse();
         }
     }
@@ -948,51 +2518,135 @@ pub(crate) fn decode_vips_bytes(bytes: &[u8], limits: DecodeLimits) -> Result<Ra
     raster.meta.xoffset = xoffset;
     raster.meta.yoffset = yoffset;
     raster.meta.interpretation = interpretation_from_code(type_code);
-    // Trailer: libviprs JSON carries the orientation tag and every attached
-    // field. A `.v` written by real libvips instead carries an XML metadata
-    // block here; we still recover the orientation tag from it so `autorot`
-    // has the same cross-oracle vips does (the remaining XML fields are not
-    // parsed yet). Anything we cannot read is treated as absent.
+    // Trailer: the XML block libvips writes and libviprs now writes too,
+    // carrying the orientation tag and every attached field. A `.v` from
+    // libviprs 0.4.0 or earlier carries the old JSON trailer there instead
+    // and is still read. Anything else is treated as absent, as libvips
+    // treats a trailer that is not XML.
     if end < bytes.len() {
         let trailer = &bytes[end..];
-        if let Ok(parsed) = serde_json::from_slice::<VTrailer>(trailer) {
-            raster.meta.orientation = parsed.orientation;
-            raster.fields = parsed.fields;
-        } else if let Some(orientation) = parse_vips_xml_orientation(trailer) {
-            raster.meta.orientation = orientation;
+        if is_json_trailer(trailer) {
+            let json: serde_json::Value = serde_json::from_slice(trailer).map_err(|err| {
+                SourceError::VipsFormat(format!("corrupt .v metadata trailer: {err}"))
+            })?;
+            read_json_trailer(&json, &mut raster);
+        } else {
+            read_vips_xml_trailer(trailer, &mut raster);
         }
     }
     Ok(raster)
 }
 
-/// Recover the EXIF-style orientation tag from a real-libvips `.v` XML
-/// metadata trailer.
+/// Whether `trailer` claims to be the legacy libviprs JSON trailer: its
+/// first non-whitespace byte is `{`.
 ///
-/// libvips serialises image metadata as an XML block after the pixel data,
-/// storing the orientation as `<field type="gint" name="orientation">N</field>`.
-/// This extracts that integer (1-8) so a `.v` file vips itself wrote decodes
-/// with the correct orientation for [`Raster::autorot`]; the distinct
-/// lowercase `name="orientation"` is not shared by the `exif-ifd0-Orientation`
-/// string field. The anchor requires the field element to close immediately
-/// (`name="orientation">`), matching vips's deterministic
-/// `<field type="gint" name="orientation">` serialization, so a longer
-/// field name (e.g. a hypothetical `name="orientation-foo"`) cannot
-/// false-match. Returns `None` when the trailer is not valid UTF-8, carries
-/// no such field, or the value is out of the 1-8 range.
+/// This is what picks the reader, and it is also what lets a broken JSON
+/// trailer be reported where a broken XML one cannot be. Only libviprs ever
+/// wrote JSON into that slot, so a `{` that will not parse is corruption
+/// with a known author (issue #565). The XML slot is shared with libvips and
+/// with anything else that writes a `.v`, so silence is the honest answer
+/// there.
 ///
-/// Only the orientation is recovered from a real-libvips XML trailer; the
-/// remaining fields (exif-data, icc-profile-data, resolution, n-pages, …) are
-/// not parsed — see issue #487. Core's own JSON trailer preserves them, so
-/// this partial affects only round-tripping a `.v` that vips itself wrote.
-fn parse_vips_xml_orientation(trailer: &[u8]) -> Option<u8> {
-    let text = std::str::from_utf8(trailer).ok()?;
-    let anchor = text.find(r#"name="orientation">"#)?;
-    let after = &text[anchor..];
-    let open = after.find('>')?;
-    let rest = &after[open + 1..];
-    let close = rest.find('<')?;
-    let value: u16 = rest[..close].trim().parse().ok()?;
-    (1..=8).contains(&value).then_some(value as u8)
+/// It is also the reason libviprs 0.4.0 cannot read the fields out of a `.v`
+/// written now: no byte sequence starts with `{` and is the XML libvips
+/// requires. See the [module docs](crate::imageio).
+fn is_json_trailer(trailer: &[u8]) -> bool {
+    trailer
+        .iter()
+        .find(|b| !b.is_ascii_whitespace())
+        .is_some_and(|&b| b == b'{')
+}
+
+/// Apply a legacy libviprs JSON trailer to `raster`, one entry at a time.
+///
+/// Total on purpose. Every part of the trailer is optional and every entry
+/// is read on its own, so a `.v` written by a newer libviprs costs this
+/// build only the entries it genuinely cannot represent and never the ones
+/// it can (issue #565). An entry whose value matches no [`MetadataValue`]
+/// variant is carried opaquely rather than dropped, so re-saving the image
+/// here does not strip what the newer build wrote.
+fn read_json_trailer(json: &serde_json::Value, raster: &mut Raster) {
+    if let Some(orientation) = json
+        .get("orientation")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|n| u8::try_from(n).ok())
+    {
+        raster.meta.orientation = orientation;
+    }
+    let Some(entries) = json
+        .get("fields")
+        .and_then(|fields| fields.get("entries"))
+        .and_then(serde_json::Value::as_array)
+    else {
+        return;
+    };
+    for entry in entries {
+        let Some([name, value]) = entry.as_array().map(Vec::as_slice) else {
+            continue;
+        };
+        let Some(name) = name.as_str() else {
+            continue;
+        };
+        match serde_json::from_value::<MetadataValue>(value.clone()) {
+            Ok(known) => raster.fields.set(name, known),
+            Err(_) => raster
+                .fields
+                .set_unknown(name, CarriedValue::Json(value.clone())),
+        }
+    }
+}
+
+/// Apply a libvips XML metadata trailer to `raster`, one `<field>` at a time.
+///
+/// Total on purpose, like [`read_json_trailer`]: every element is read on its
+/// own, so a field this build cannot represent costs that field and nothing
+/// else. A field whose `type` is not one of the four GTypes
+/// [`MetadataValue`] covers, or whose text will not parse as the type it
+/// claims, is carried opaquely and written back byte for byte rather than
+/// dropped (issue #565).
+///
+/// `orientation` is a header value here, not an attached field, so it is
+/// taken out of the stream: writing it back is the writer's job, and letting
+/// it through as well would put two of it in the next file. Out of the 1-8
+/// range it falls back to the upright default, which is how `vips autorot`
+/// treats a tag it cannot use.
+fn read_vips_xml_trailer(trailer: &[u8], raster: &mut Raster) {
+    let Ok(text) = std::str::from_utf8(trailer) else {
+        return;
+    };
+    for field in VipsXmlFields::new(vips_xml_meta_region(text)) {
+        let name = unescape_xml(field.name);
+        let gtype = unescape_xml(field.gtype);
+        let value = unescape_xml(field.text);
+        if name == "orientation" {
+            if gtype == GTYPE_INT
+                && let Ok(tag) = value.trim().parse::<u16>()
+                && (1..=8).contains(&tag)
+            {
+                raster.meta.orientation = tag as u8;
+            }
+            continue;
+        }
+        let known = match gtype.as_str() {
+            GTYPE_INT => value.trim().parse::<i64>().ok().map(MetadataValue::Int),
+            GTYPE_DOUBLE => value.trim().parse::<f64>().ok().map(MetadataValue::Double),
+            GTYPE_STRING => Some(MetadataValue::Str(value)),
+            GTYPE_BLOB => base64_decode(value.trim()).map(MetadataValue::Blob),
+            GTYPE_ARRAY_INT => parse_int_array_text(&value).map(MetadataValue::IntArray),
+            GTYPE_ARRAY_DOUBLE => parse_double_array_text(&value).map(MetadataValue::DoubleArray),
+            _ => None,
+        };
+        match known {
+            Some(known) => raster.fields.set(&name, known),
+            None => raster.fields.set_unknown(
+                &name,
+                CarriedValue::Xml {
+                    gtype,
+                    text: field.text.to_string(),
+                },
+            ),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1254,6 +2908,511 @@ mod tests {
     use super::*;
     use crate::source::{decode_bytes, decode_file};
 
+    /**
+     * Tests that this module dispatches on sample kind and never on byte
+     * width, by asserting that neither the byte-width accessor on
+     * [`PixelFormat`] nor its width-keyed constructor survives in
+     * `src/imageio.rs`.
+     * Works by scanning the module's own source, compiled in with
+     * `include_str!`, for the accessor's name; the needle is spelled in two
+     * halves so this assertion is not itself a hit. This module is the one
+     * where a width standing in for a kind reaches a **file**: the `.v`
+     * `BandFmt` word was written from a byte width, so a four-byte integer
+     * raster was tagged `float` on disk and read back as float on a later
+     * run, and `fuzz_decode` reaches the read half of the same word from
+     * untrusted bytes (issues #841, #607).
+     * Input: `src/imageio.rs` -> Output: zero occurrences.
+     */
+    #[test]
+    fn imageio_does_not_dispatch_on_byte_width() {
+        const SRC: &str = include_str!("imageio.rs");
+        let needles = [
+            concat!("bytes_per_", "channel"),
+            concat!("with_", "channels"),
+        ];
+        // Positive control: the same scan over the same string finds a token
+        // that is present, so the zero below is a real zero and not the
+        // vacuous pass an empty read would give.
+        assert!(
+            SRC.contains(concat!("fn ", "encode_vips_impl")),
+            "positive control failed: the scan cannot see this module's source"
+        );
+        assert!(
+            SRC.contains(concat!("fn band_format_", "code")),
+            "the .v BandFmt word must come from a SampleKind table, not from \
+             a byte width"
+        );
+        for needle in needles {
+            assert_eq!(
+                SRC.matches(needle).count(),
+                0,
+                "{needle} is back in src/imageio.rs; dispatch on \
+                 PixelFormat::kind() and PixelFormat::with_kind() instead"
+            );
+        }
+    }
+
+    /**
+     * Tests that the `.v` reader names the sample format it is refusing, for
+     * the four `VipsBandFormat` codes libvips writes that no libviprs
+     * [`PixelFormat`] carries yet: 1 `char`, 3 `short`, 4 `uint`, 5 `int`.
+     * A reader that only knows 0, 2 and 6 cannot tell "this is a real vips
+     * file this build has no carrier for" from "these bytes are not a band
+     * format at all", and those two want different answers from a caller.
+     * Works by patching the `BandFmt` word of a real encoded fixture and
+     * asserting the error text carries the vips nickname for that code.
+     * Input: a 2x2 RGB `.v` retagged 1 / 3 / 4 / 5 -> Output: a format error
+     * naming char / short / uint / int.
+     */
+    #[test]
+    fn the_v_reader_names_the_sample_format_it_cannot_carry() {
+        // Measured with `/opt/homebrew/bin/vips` 8.18.6, not read off the
+        // libvips headers: `vips cast base.v out.v <format>` for each format,
+        // then the `i32` at header offset 20 of each file.
+        // **This list is empty now, and that is the point.** Every
+        // `BandFmt` code libvips writes has a carrier: #517 gave `uint`
+        // one and #516 gave `char`, `short` and `int` theirs, so there is
+        // no sample kind left for this arm to refuse. The refusal path
+        // still exists, for a code libvips does not write at all, and the
+        // sweep below is what proves the reader still reaches it.
+        //
+        // The seven that decode are pinned by
+        // `every_band_format_code_round_trips_through_its_carrier`.
+        for code in [7i32, 8, 9, 42, -1] {
+            let mut bytes = rgb_2x2().encode_vips_impl(false);
+            bytes[20..24].copy_from_slice(&code.to_ne_bytes());
+            let err = decode_vips_bytes(&bytes, DecodeLimits::default())
+                .expect_err("BandFmt {code} is not a libvips band format");
+            let SourceError::VipsFormat(msg) = &err else {
+                panic!("an unknown band format is a format error: {err:?}");
+            };
+            assert!(
+                msg.contains(&code.to_string()),
+                "refusing BandFmt {code} must name the code, got {msg:?}"
+            );
+        }
+
+        // Positive control: the same probe on a code this build carries
+        // decodes rather than refusing, so the refusals above are about the
+        // code being unknown and not about the patched fixture.
+        let ok = rgb_2x2().encode_vips_impl(false);
+        assert_eq!(
+            i32::from_ne_bytes(ok[20..24].try_into().unwrap()),
+            0,
+            "an 8-bit fixture is BandFmt 0 (uchar)"
+        );
+        assert!(decode_vips_bytes(&ok, DecodeLimits::default()).is_ok());
+    }
+
+    /**
+     * Tests that the `.v` `BandFmt` table is the one vips writes, for every
+     * [`SampleKind`], and that it is a bijection with the codes it uses.
+     * Works by pinning each kind's code and nickname against the measured
+     * table and round-tripping every code back through [`band_format_kind`],
+     * plus the three formats libvips has and libviprs has no kind for.
+     * Measured on `/opt/homebrew/bin/vips` 8.18.6 with `vips cast` into each
+     * of the ten formats and the `i32` at header offset 20 read back out of
+     * each file; nicknames from `vipsheader -a`'s `format:` line.
+     * Input: all seven kinds and codes 7 / 8 / 9 / 42 -> Output: the measured
+     * codes, seven distinct values, and `None` for the four.
+     */
+    #[test]
+    fn the_band_format_table_is_the_one_vips_writes() {
+        let measured = [
+            (SampleKind::U8, 0, "uchar"),
+            (SampleKind::I8, 1, "char"),
+            (SampleKind::U16, 2, "ushort"),
+            (SampleKind::I16, 3, "short"),
+            (SampleKind::U32, 4, "uint"),
+            (SampleKind::I32, 5, "int"),
+            (SampleKind::F32, 6, "float"),
+        ];
+        for (kind, code, nickname) in measured {
+            assert_eq!(band_format_code(kind), code, "{kind:?} BandFmt code");
+            assert_eq!(band_format_nickname(kind), nickname, "{kind:?} nickname");
+            assert_eq!(
+                band_format_kind(code),
+                Some(kind),
+                "BandFmt {code} must read back as {kind:?}"
+            );
+        }
+
+        let codes: Vec<i32> = measured
+            .iter()
+            .map(|&(k, ..)| band_format_code(k))
+            .collect();
+        let mut sorted = codes.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            codes.len(),
+            "two sample kinds must never share a BandFmt code, or a file \
+             written as one reads back as the other"
+        );
+
+        // complex (7), double (8) and dpcomplex (9) are real vips formats
+        // with no libviprs sample kind, and 42 is not a VipsBandFormat at
+        // all. Both are refusals rather than a guess, which is what the
+        // fuzz_decode-reachable half of this needs.
+        for code in [7, 8, 9, 42, -1] {
+            assert_eq!(band_format_kind(code), None, "BandFmt {code}");
+        }
+    }
+
+    /**
+     * Tests that a four-byte sample kind is not written as `float` just
+     * because it is four bytes wide, which is the bug issue #841 is about:
+     * the encoder derived `BandFmt` from the byte width through a
+     * `_ => 6` arm, so `uint` and `int` rasters would both have gone into
+     * files tagged `float` and come back out as float on the next run.
+     * Works by asserting the float code and the float nickname belong to
+     * `F32` alone across every kind, and that the three four-byte kinds get
+     * three different codes despite sharing a width.
+     * Input: all seven kinds -> Output: code 6 and "float" only for `F32`;
+     * `U32` / `I32` / `F32` map to 4 / 5 / 6.
+     */
+    #[test]
+    fn a_four_byte_integer_kind_is_not_written_as_float() {
+        const ALL: [SampleKind; 7] = [
+            SampleKind::U8,
+            SampleKind::I8,
+            SampleKind::U16,
+            SampleKind::I16,
+            SampleKind::U32,
+            SampleKind::I32,
+            SampleKind::F32,
+        ];
+        for kind in ALL {
+            assert_eq!(
+                band_format_code(kind) == band_format_code(SampleKind::F32),
+                kind.is_float(),
+                "{kind:?} shares the float BandFmt code"
+            );
+            assert_eq!(
+                band_format_nickname(kind) == "float",
+                kind.is_float(),
+                "{kind:?} reports the float nickname"
+            );
+        }
+
+        // The three kinds a byte width cannot tell apart. All three are four
+        // bytes; all three take a different word in the file.
+        let four_byte = [SampleKind::U32, SampleKind::I32, SampleKind::F32];
+        for kind in four_byte {
+            assert_eq!(kind.bytes(), 4, "{kind:?} is a four-byte kind");
+        }
+        assert_eq!(
+            four_byte.map(band_format_code),
+            [4, 5, 6],
+            "the three four-byte kinds take three different BandFmt words"
+        );
+    }
+
+    /// The 64-byte header vips 8.18.6 wrote for a 2x2 three-band image, one
+    /// per sample format:
+    ///
+    /// ```text
+    /// vips black b2.v 2 2 --bands 3
+    /// vips cast b2.v h_<f>.v <f>
+    /// ```
+    ///
+    /// The four files differ in exactly two words, `Bbits` at offset 16 and
+    /// `BandFmt` at offset 20, and are byte-identical everywhere else, which
+    /// is why one array plus a pair of patches is the whole fixture. vips
+    /// writes the header in the machine's own byte order; these are the
+    /// little-endian bytes, so on a big-endian host this also exercises the
+    /// decoder's swap path.
+    const VIPS_UCHAR_HEADER: [u8; VIPS_HEADER_LEN] = [
+        0xb6, 0xa6, 0xf2, 0x08, // magic (little-endian)
+        0x02, 0x00, 0x00, 0x00, // Xsize 2
+        0x02, 0x00, 0x00, 0x00, // Ysize 2
+        0x03, 0x00, 0x00, 0x00, // Bands 3
+        0x08, 0x00, 0x00, 0x00, // Bbits 8
+        0x00, 0x00, 0x00, 0x00, // BandFmt 0 (uchar)
+        0x00, 0x00, 0x00, 0x00, // Coding 0 (none)
+        0x00, 0x00, 0x00, 0x00, // Type 0 (multiband)
+        0x00, 0x00, 0x80, 0x3f, // Xres 1.0
+        0x00, 0x00, 0x80, 0x3f, // Yres 1.0
+        0x00, 0x00, 0x00, 0x00, // Length (deprecated)
+        0x00, 0x00, 0x00, 0x00, // Compression + Level (deprecated)
+        0x00, 0x00, 0x00, 0x00, // Xoffset 0
+        0x00, 0x00, 0x00, 0x00, // Yoffset 0
+        0x00, 0x00, 0x00, 0x00, // reserved
+        0x00, 0x00, 0x00, 0x00, // reserved
+    ];
+
+    /// Where `Bbits` and `BandFmt` sit in a `.v` header.
+    const BBITS_OFFSET: usize = 16;
+    const BAND_FMT_OFFSET: usize = 20;
+
+    /// A vips-written header at `bits` / `code`, followed by a zeroed body of
+    /// the size that header promises.
+    fn vips_header_at(bits: i32, code: i32, sample_bytes: usize) -> Vec<u8> {
+        let mut bytes = VIPS_UCHAR_HEADER.to_vec();
+        bytes[BBITS_OFFSET..BBITS_OFFSET + 4].copy_from_slice(&bits.to_le_bytes());
+        bytes[BAND_FMT_OFFSET..BAND_FMT_OFFSET + 4].copy_from_slice(&code.to_le_bytes());
+        bytes.resize(VIPS_HEADER_LEN + 2 * 2 * 3 * sample_bytes, 0);
+        bytes
+    }
+
+    /**
+     * Tests that the three `BandFmt` words libviprs has always written keep
+     * their meaning, in both directions, so no `.v` this crate has already
+     * written changes what it decodes to.
+     * Works by decoding the byte-for-byte headers vips 8.18.6 wrote for
+     * `uchar` / `ushort` / `float`, re-encoding each result, and asserting
+     * the `Bbits` and `BandFmt` words that come back out are the same ones
+     * that went in. The `uint` header is included as the fourth case: it must
+     * be recognised as `uint` and refused by name, not misread as one of the
+     * three.
+     * Input: four vips-written 2x2x3 headers -> Output: the three carried
+     * kinds round-trip their wire words; `uint` is a named refusal.
+     */
+    #[test]
+    fn the_legacy_v_band_format_words_still_mean_what_they_meant() {
+        let legacy = [
+            (8i32, 0i32, 1usize, PixelFormat::Rgb8),
+            (16, 2, 2, PixelFormat::Rgb16),
+            (
+                32,
+                6,
+                4,
+                PixelFormat::with_kind(3, SampleKind::F32).unwrap(),
+            ),
+        ];
+        for (bits, code, sample_bytes, expect) in legacy {
+            let bytes = vips_header_at(bits, code, sample_bytes);
+            let back = decode_vips_bytes(&bytes, DecodeLimits::default())
+                .unwrap_or_else(|e| panic!("vips BandFmt {code} must decode: {e:?}"));
+            assert_eq!(
+                back.format(),
+                expect,
+                "BandFmt {code} decodes to {expect:?}"
+            );
+            assert_eq!((back.width(), back.height()), (2, 2));
+
+            let re = back.encode_vips_impl(false);
+            assert_eq!(
+                i32::from_ne_bytes(re[BBITS_OFFSET..BBITS_OFFSET + 4].try_into().unwrap()),
+                bits,
+                "re-encoding BandFmt {code} must write Bbits {bits} back"
+            );
+            assert_eq!(
+                i32::from_ne_bytes(re[BAND_FMT_OFFSET..BAND_FMT_OFFSET + 4].try_into().unwrap()),
+                code,
+                "re-encoding must write BandFmt {code} back; changing this \
+                 word silently retypes every .v libviprs has written"
+            );
+        }
+
+        // The fourth file vips wrote. Bbits 32 is the same word the float
+        // header carries, which is exactly why a width cannot decide this:
+        // only BandFmt separates them.
+        let uint = vips_header_at(32, 4, 4);
+        assert_eq!(
+            uint[BBITS_OFFSET..BBITS_OFFSET + 4],
+            vips_header_at(32, 6, 4)[BBITS_OFFSET..BBITS_OFFSET + 4],
+            "uint and float share Bbits 32"
+        );
+        // And it decodes, since issue #517 gave `uint` a carrier. This
+        // assertion used to be a refusal: #841 built this arm with nothing
+        // that could reach it, because no `PixelFormat` produced the kind,
+        // and #517 is what made it reachable. So the pair of them turn a
+        // "we would refuse this" into the round trip the wire tag is for.
+        let back = decode_vips_bytes(&uint, DecodeLimits::default())
+            .expect("BandFmt 4 carries uint since issue #517");
+        assert_eq!(
+            back.format(),
+            PixelFormat::with_kind(3, SampleKind::U32).unwrap(),
+            "BandFmt 4 must decode to the uint carrier, not to the float one \
+             it shares Bbits 32 with"
+        );
+        let re = back.encode_vips_impl(false);
+        assert_eq!(
+            i32::from_ne_bytes(re[BAND_FMT_OFFSET..BAND_FMT_OFFSET + 4].try_into().unwrap()),
+            4,
+            "re-encoding a uint raster must write BandFmt 4 back, not float's 6"
+        );
+        assert_eq!(
+            i32::from_ne_bytes(re[BBITS_OFFSET..BBITS_OFFSET + 4].try_into().unwrap()),
+            32
+        );
+    }
+
+    /**
+     * Tests that **every** libvips `BandFmt` code round-trips through the
+     * carrier it names, which is the flat statement the two tests above
+     * could only make one code at a time.
+     * Works by encoding a raster of each of the seven sample kinds,
+     * asserting the header word libvips writes for it, decoding, and
+     * comparing the format back. The codes are the measured ones: 0
+     * uchar, 1 char, 2 ushort, 3 short, 4 uint, 5 int, 6 float. The
+     * `Bbits` column is what makes this worth doing as a sweep rather than
+     * per kind: three codes share 32 and two share 8, so a reader keyed on
+     * the width would pass four of the seven and fail three.
+     * Input: one 2x2 raster per kind -> Output: its own code, its own
+     * Bbits, and itself back.
+     */
+    #[test]
+    fn every_band_format_code_round_trips_through_its_carrier() {
+        // (kind, BandFmt code, Bbits), all measured with `vips cast` and
+        // then reading the i32 at header offset 20.
+        let cases = [
+            (SampleKind::U8, 0i32, 8i32),
+            (SampleKind::I8, 1, 8),
+            (SampleKind::U16, 2, 16),
+            (SampleKind::I16, 3, 16),
+            (SampleKind::U32, 4, 32),
+            (SampleKind::I32, 5, 32),
+            (SampleKind::F32, 6, 32),
+        ];
+        for (kind, code, bits) in cases {
+            let fmt = PixelFormat::with_kind(3, kind)
+                .expect("every sample kind has a carrier since issues #516 and #517");
+            let im = Raster::zeroed(2, 2, fmt).unwrap();
+            let bytes = im.encode_vips_impl(false);
+            assert_eq!(
+                i32::from_ne_bytes(
+                    bytes[BAND_FMT_OFFSET..BAND_FMT_OFFSET + 4]
+                        .try_into()
+                        .unwrap()
+                ),
+                code,
+                "{kind:?} must write BandFmt {code}"
+            );
+            assert_eq!(
+                i32::from_ne_bytes(bytes[BBITS_OFFSET..BBITS_OFFSET + 4].try_into().unwrap()),
+                bits,
+                "{kind:?} must write Bbits {bits}"
+            );
+            let back = decode_vips_bytes(&bytes, DecodeLimits::default())
+                .unwrap_or_else(|e| panic!("BandFmt {code} must decode: {e:?}"));
+            assert_eq!(
+                back.format(),
+                fmt,
+                "BandFmt {code} decoded to the wrong carrier"
+            );
+        }
+
+        // The control that says the width cannot decide this: codes 4, 5
+        // and 6 all carry Bbits 32 and are three different carriers, and
+        // codes 0 and 1 both carry Bbits 8.
+        let bits_of = |kind| {
+            let fmt = PixelFormat::with_kind(3, kind).unwrap();
+            let b = Raster::zeroed(2, 2, fmt).unwrap().encode_vips_impl(false);
+            i32::from_ne_bytes(b[BBITS_OFFSET..BBITS_OFFSET + 4].try_into().unwrap())
+        };
+        assert_eq!(bits_of(SampleKind::U32), 32);
+        assert_eq!(bits_of(SampleKind::I32), 32);
+        assert_eq!(bits_of(SampleKind::F32), 32);
+        assert_eq!(bits_of(SampleKind::U8), 8);
+        assert_eq!(bits_of(SampleKind::I8), 8);
+    }
+
+    /**
+     * Tests that a `uint` raster survives a `.v` round trip, which is the
+     * proof issue #841 could not write and issue #517 makes possible.
+     * Works by encoding a `Uint32` raster with distinct samples, asserting
+     * the two header words a byte width cannot separate (`BandFmt` 4 and
+     * Bbits 32, where float carries 6 and the same 32), then decoding and
+     * comparing the format and every byte. A file is the one place a wrong
+     * carrier tag outlives the process, so this is the assertion that
+     * matters most of the ones in this stack.
+     * Input: a 2x2 `Uint32(3)` raster holding values above 65535 ->
+     * Output: BandFmt 4, Bbits 32, and the same raster back.
+     */
+    #[test]
+    fn a_uint_v_file_round_trips_through_the_carrier() {
+        let fmt = PixelFormat::with_kind(3, SampleKind::U32).unwrap();
+        // Values above 65535, so a carrier that narrowed on the way through
+        // would lose them rather than merely retag them.
+        let samples: Vec<u32> = (0..12).map(|i| 90_000 + i * 7).collect();
+        let data: Vec<u8> = samples.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        let im = Raster::new(2, 2, fmt, data.clone()).unwrap();
+
+        let bytes = im.encode_vips_impl(false);
+        assert_eq!(
+            i32::from_ne_bytes(
+                bytes[BAND_FMT_OFFSET..BAND_FMT_OFFSET + 4]
+                    .try_into()
+                    .unwrap()
+            ),
+            4,
+            "a uint raster must write BandFmt 4; 6 is float and shares Bbits 32"
+        );
+        assert_eq!(
+            i32::from_ne_bytes(bytes[BBITS_OFFSET..BBITS_OFFSET + 4].try_into().unwrap()),
+            32
+        );
+
+        let back = decode_vips_bytes(&bytes, DecodeLimits::default())
+            .expect("a uint .v file must read back");
+        assert_eq!(back.format(), fmt);
+        assert_eq!((back.width(), back.height()), (2, 2));
+        assert_eq!(
+            back.data(),
+            &data[..],
+            "the samples changed on the way back"
+        );
+
+        // Control: the float carrier of the same width writes a different
+        // word and reads back as itself, so the two are told apart by the
+        // tag and not by the width they share.
+        let ffmt = PixelFormat::with_kind(3, SampleKind::F32).unwrap();
+        let fbytes = Raster::zeroed(2, 2, ffmt).unwrap().encode_vips_impl(false);
+        assert_eq!(
+            i32::from_ne_bytes(
+                fbytes[BAND_FMT_OFFSET..BAND_FMT_OFFSET + 4]
+                    .try_into()
+                    .unwrap()
+            ),
+            6
+        );
+        assert_eq!(
+            i32::from_ne_bytes(fbytes[BBITS_OFFSET..BBITS_OFFSET + 4].try_into().unwrap()),
+            32,
+            "uint and float share Bbits, which is why BandFmt is load-bearing"
+        );
+        assert_eq!(
+            decode_vips_bytes(&fbytes, DecodeLimits::default())
+                .unwrap()
+                .format(),
+            ffmt
+        );
+    }
+
+    /**
+     * Tests that `get_field("format")` answers the sample kind's vips
+     * nickname rather than a name picked from a byte width, for every format
+     * a [`PixelFormat`] can hold today.
+     * Works by asking each carrier for the field and comparing against the
+     * [`band_format_nickname`] table, which is the same table the wire tag
+     * comes from, so the header word and the reported field cannot disagree.
+     * Input: `Gray8`, `Gray16`, `RgbaF32` -> Output: uchar, ushort, float.
+     */
+    #[test]
+    fn get_field_format_names_the_sample_kind() {
+        let cases = [
+            (PixelFormat::Gray8, "uchar"),
+            (PixelFormat::Gray16, "ushort"),
+            (PixelFormat::RgbaF32, "float"),
+        ];
+        for (format, nickname) in cases {
+            let im = Raster::zeroed(2, 2, format).unwrap();
+            assert_eq!(
+                im.get_field("format").unwrap().as_str(),
+                nickname,
+                "{format:?} reports its sample kind"
+            );
+            assert_eq!(
+                band_format_nickname(format.kind()),
+                nickname,
+                "the field and the wire tag read the same table"
+            );
+        }
+    }
+
     #[test]
     fn metadata_value_len_reports_blob_and_string_bytes() {
         // The foreign magickload cell asserts `icc.len() == 564` on the ICC
@@ -1302,6 +3461,55 @@ mod tests {
         let mut im0 = Raster::black(4, 4);
         im0.set_field("n-pages", MetadataValue::Int(0));
         assert_eq!(im0.get_n_pages(), 1);
+    }
+
+    #[test]
+    fn get_n_pages_ports_the_whole_vips_sanity_check() {
+        // `vips_image_get_n_pages` (`iofuncs/header.c:917-928`) reports a
+        // single page unless the field is an int strictly between 1 and
+        // 10000. Measured rather than transcribed: a C program linking
+        // libvips 8.18.6 set each of these on a fresh image and printed what
+        // the accessor gave back (issue #635).
+        for (stored, expected) in [
+            (-5i64, 1u32),
+            (0, 1),
+            (1, 1),
+            (2, 2),
+            (9_999, 9_999),
+            (10_000, 1),
+            (10_001, 1),
+            (65_536, 1),
+            (2_000_000_000, 1),
+        ] {
+            let mut im = Raster::black(1, 1);
+            im.set_field("n-pages", MetadataValue::Int(stored));
+            assert_eq!(im.get_n_pages(), expected, "stored n-pages = {stored}");
+        }
+
+        // vips reads the field with `vips_image_get_int`, which will not
+        // coerce a string, so a `gchararray` "3" reports 1 there too. This
+        // crate's own `get_int` refuses the same way, and the raw value
+        // stays readable through `get_field`.
+        let mut str_field = Raster::black(1, 1);
+        str_field.set_field("n-pages", MetadataValue::Str("3".to_string()));
+        assert_eq!(str_field.get_n_pages(), 1);
+        assert_eq!(str_field.get_int("n-pages"), None);
+        assert_eq!(str_field.get_field("n-pages").unwrap().as_str(), "3");
+    }
+
+    /// An 8x6 RGB raster, the smallest shape the JPEG 2000 tests in
+    /// [`crate::jp2k`] use. `rgb_2x2` is too small for the encoder's
+    /// resolution-count rule (`floor(log2(min(w, h))) - 5`), so the save-route
+    /// tests take their own.
+    #[allow(dead_code)]
+    fn jp2k_sized() -> Raster {
+        Raster::new(
+            8,
+            6,
+            PixelFormat::Rgb8,
+            (0..8u32 * 6 * 3).map(|i| (i % 251) as u8).collect(),
+        )
+        .unwrap()
     }
 
     fn rgb_2x2() -> Raster {
@@ -1510,6 +3718,45 @@ mod tests {
         assert_eq!(im.get_int("huge"), None);
     }
 
+    /**
+     * Tests that `get_int` answers exactly what resolving through
+     * `get_field` answers, on every readable name. It used to *be* that
+     * resolution and now borrows through `field_i64` instead, so this is
+     * what pins the refactor: the built-in header fields, the ones that are
+     * strings or doubles there, `filename` (the one built-in `get_field`
+     * reads out of the field list rather than the header), attached ints,
+     * an attached blob, an attached string and a name that is not set at
+     * all. Works by asking both accessors for every name `get_fields`
+     * reports and comparing them (issue #635).
+     */
+    #[test]
+    fn get_int_agrees_with_get_field_on_every_readable_name() {
+        let mut im = rgb_2x2();
+        im.set_field("orientation", MetadataValue::Int(6));
+        im.set_field("xoffset", MetadataValue::Int(-4));
+        im.set_field("yres", MetadataValue::Double(1.5));
+        im.set_field("filename", MetadataValue::Int(11));
+        im.set_field("bits-per-sample", MetadataValue::Int(8));
+        im.set_field("icc-profile-data", MetadataValue::Blob(vec![1, 2, 3]));
+        im.set_field("note", MetadataValue::Str("hello".to_string()));
+        im.set_field("huge", MetadataValue::Int(i64::from(i32::MAX) + 1));
+
+        let names = im.get_fields();
+        assert!(names.len() > 12, "the sweep has to reach the attachments");
+        for name in names {
+            let through_get_field = match im.get_field(&name) {
+                Some(MetadataValue::Int(v)) => i32::try_from(v).ok(),
+                _ => None,
+            };
+            assert_eq!(
+                im.get_int(&name),
+                through_get_field,
+                "get_int and get_field disagree on {name}"
+            );
+        }
+        assert_eq!(im.get_int("no-such-field"), None);
+    }
+
     // -- save / .v ----------------------------------------------------------
 
     /**
@@ -1533,7 +3780,7 @@ mod tests {
         im.set_icc_profile(&[5, 5, 5]);
 
         let bytes = im.encode_vips().unwrap();
-        assert!(is_vips_bytes(&bytes));
+        assert_eq!(bytes[..4], VIPS_MAGIC_NATIVE);
         let back = decode_bytes(&bytes).unwrap();
         assert_eq!(back.width(), 2);
         assert_eq!(back.height(), 2);
@@ -1602,7 +3849,7 @@ mod tests {
      */
     #[test]
     fn vips_float_roundtrip_and_foreign_endian() {
-        let f1 = PixelFormat::with_channels(1, 4).unwrap();
+        let f1 = PixelFormat::with_kind(1, SampleKind::F32).unwrap();
         let im = Raster::from_f32_samples(2, 1, f1, &[0.5, -3.25]).unwrap();
         let bytes = im.encode_vips().unwrap();
         // Header words: Bbits (offset 16) is 32, BandFmt (offset 20) is 6.
@@ -1646,6 +3893,7 @@ mod tests {
      * pixels and header geometry.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn save_v_and_stripped() {
         let dir = tempfile::tempdir().unwrap();
         let mut im = rgb_2x2();
@@ -1668,10 +3916,858 @@ mod tests {
     }
 
     /**
+     * Tests that `.webp` is a live row in the extension route and that
+     * the lossless encoder behind it round-trips: the file written by
+     * `save` decodes back to the same pixels, and `save_stripped` drops
+     * the metadata chunks the plain `save` embeds. Works by attaching an
+     * ICC blob, saving both ways, and reading each file back.
+     * Input: 2x2 Rgb8 with `icc-profile-data` -> Output: identical
+     * pixels from both files, the profile present after `save` and
+     * absent after `save_stripped`.
+     */
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn save_webp_round_trips_losslessly_and_honours_strip() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut im = rgb_2x2();
+        im.fields
+            .set("icc-profile-data", MetadataValue::Blob(vec![1, 2, 3, 4]));
+
+        let kept = dir.path().join("kept.webp");
+        im.save(&kept).unwrap();
+        let back = decode_file(&kept).unwrap();
+        assert_eq!(back.data(), im.data(), "the WebP encoder is lossless");
+        assert_eq!(back.icc_profile(), Some(&[1u8, 2, 3, 4][..]));
+
+        let stripped = dir.path().join("stripped.webp");
+        im.save_stripped(&stripped).unwrap();
+        let bare = decode_file(&stripped).unwrap();
+        assert_eq!(bare.data(), im.data());
+        assert_eq!(bare.icc_profile(), None);
+    }
+
+    /**
+     * Tests that `.jxl` is a live row in the extension route, that the
+     * lossless encoder behind it round-trips, and that `save_stripped`
+     * makes no difference here: the encoder writes a bare codestream with
+     * no box container, so there is nothing for the strip flag to drop and
+     * both files are byte-identical. That is the one place the `.jxl` row
+     * differs from the `.webp` one above, and it is worth pinning rather
+     * than leaving as an accident. Works by attaching an ICC blob, saving
+     * both ways, and reading each file back.
+     * Input: 2x2 Rgb8 with `icc-profile-data` -> Output: identical pixels
+     * from both files, identical bytes on disk, and the profile absent
+     * from both because nothing carried it.
+     */
+    #[test]
+    #[cfg(feature = "jxl")]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn save_jxl_round_trips_losslessly_and_carries_no_metadata_either_way() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut im = rgb_2x2();
+        im.fields
+            .set("icc-profile-data", MetadataValue::Blob(vec![1, 2, 3, 4]));
+
+        let kept = dir.path().join("kept.jxl");
+        im.save(&kept).unwrap();
+        let back = decode_file(&kept).unwrap();
+        assert_eq!(back.data(), im.data(), "the JPEG XL encoder is lossless");
+
+        let stripped = dir.path().join("stripped.jxl");
+        im.save_stripped(&stripped).unwrap();
+        assert_eq!(
+            std::fs::read(&kept).unwrap(),
+            std::fs::read(&stripped).unwrap(),
+            "there is no box container to strip, so both writes are the same bytes"
+        );
+        // The profile the raster carried is not in either file; what comes
+        // back is the one `jxlload` synthesises for the colour encoding,
+        // which is never the four bytes attached above.
+        assert_ne!(back.icc_profile(), Some(&[1u8, 2, 3, 4][..]));
+    }
+
+    /// Every suffix `jp2ksave` registers is a live row in the extension route,
+    /// and all of them write the **same** JP2 container (issue #770).
+    ///
+    /// This is the one row in the table where the suffix does not pick the
+    /// codec, and that is measured rather than read out of `jp2ksave.c`. On
+    /// the pinned vips 8.18.6:
+    ///
+    /// ```text
+    /// vips black base.v 8 6 --bands 3
+    /// for ext in jp2 j2k jpt j2c jpc; do vips copy base.v out.$ext; done
+    /// ```
+    ///
+    /// writes five files with one SHA-256 between them
+    /// (`fbe9f8f7fbe8d044...`), while `out.jp2000` and `out.xyz` are refused
+    /// with "is not a known file format". So five rows, one encoder, and the
+    /// refusal still has to work: the negative half is the positive control
+    /// for the positive half, since a route that accepted everything would
+    /// pass the first assertion on its own.
+    ///
+    /// Goes through `encode_for_extension` rather than [`Raster::save`] so it
+    /// needs no tempdir, no `#[cfg_attr(miri, ignore)]` and no row in
+    /// `tests/miri_fs_test_inventory.txt`.
+    #[test]
+    #[cfg(feature = "jp2k")]
+    fn every_suffix_jp2ksave_registers_is_a_row_and_they_all_write_one_container() {
+        let im = jp2k_sized();
+        let direct = im
+            .encode_jp2k(crate::jp2k::SaveOptions::default())
+            .expect("the encoder takes an 8x6 RGB raster");
+
+        for extension in ["jp2", "j2k", "jpt", "j2c", "jpc"] {
+            let bytes = im
+                .encode_for_extension(extension, true)
+                .unwrap_or_else(|e| panic!(".{extension} must be a live row, got {e}"));
+            assert_eq!(
+                bytes, direct,
+                ".{extension} must write the same JP2 container as encode_jp2k"
+            );
+        }
+
+        // vips refuses these two, so the route has to as well, or "every
+        // suffix is a row" would just mean "every string is a row".
+        for extension in ["jp2000", "xyz"] {
+            assert!(
+                matches!(
+                    im.encode_for_extension(extension, true),
+                    Err(SaveError::UnsupportedExtension { .. })
+                ),
+                ".{extension} is not a format vips knows either"
+            );
+        }
+    }
+
+    /// The JPEG 2000 row takes no `keep_metadata`, because there is nothing
+    /// for it to drop (issue #770).
+    ///
+    /// `jp2ksave.c` has no code for an ICC profile, an EXIF block or an XMP
+    /// packet, so a stripped save and a kept one write the same bytes. Same
+    /// shape as the `.jxl` row, and worth pinning rather than leaving as an
+    /// accident: the day the encoder learns to embed a profile, this says so.
+    ///
+    /// The control is `.webp` in the same assertion, which is the row that
+    /// genuinely does carry metadata and genuinely does differ under the flag.
+    #[test]
+    #[cfg(feature = "jp2k")]
+    fn the_jp2k_row_has_nothing_for_the_strip_flag_to_drop() {
+        let mut im = jp2k_sized();
+        im.set_icc_profile(&[1, 2, 3, 4]);
+        im.fields
+            .set("exif-data", MetadataValue::Blob(vec![9, 8, 7]));
+
+        let kept = im.encode_for_extension("jp2", true).unwrap();
+        assert_eq!(
+            kept,
+            im.encode_for_extension("jp2", false).unwrap(),
+            "jp2ksave writes no metadata, so the strip flag cannot change the bytes"
+        );
+        assert_ne!(
+            im.encode_for_extension("webp", true).unwrap(),
+            im.encode_for_extension("webp", false).unwrap(),
+            "positive control: the WebP row does carry metadata and does differ"
+        );
+
+        // Identical bytes on their own would also be what a row that stripped
+        // *both* ways produces, so the second half says which way it went: the
+        // profile is not in the file at all, under either flag. Read back
+        // through the decoder rather than by scanning for the four bytes,
+        // because a JP2 could legitimately contain them by accident.
+        let back = crate::jp2k::decode_jp2k(&kept, DecodeLimits::default())
+            .expect("the container this row writes must read back");
+        assert_eq!(
+            back.icc_profile(),
+            None,
+            "jp2ksave writes no colr box for an attached profile, so nothing \
+             carries it and there is nothing for the flag to drop"
+        );
+        assert_eq!(back.get_field("exif-data"), None);
+        // And the pixels did survive, so "no metadata" is not "no file".
+        assert_eq!(back.width(), 8);
+        assert_eq!(back.height(), 6);
+    }
+
+    /// Without the `jp2k` feature the five suffixes fall through to
+    /// `UnsupportedExtension` like any other extension with no encoder, and
+    /// the refusal message stops naming them (issue #770).
+    ///
+    /// The failure this guards against is not "the save fails": it is the save
+    /// failing with a *JPEG 2000* error, which would tell a caller the format
+    /// is broken when the truth is that this build has no encoder for it.
+    #[test]
+    #[cfg(not(feature = "jp2k"))]
+    fn without_the_jp2k_feature_the_five_suffixes_are_plain_unsupported_extensions() {
+        let im = jp2k_sized();
+        for extension in ["jp2", "j2k", "jpt", "j2c", "jpc"] {
+            let err = im.encode_for_extension(extension, true).unwrap_err();
+            assert!(
+                matches!(&err, SaveError::UnsupportedExtension { extension: e } if e == extension),
+                ".{extension} must read as an unsupported extension, got {err}"
+            );
+            assert!(
+                !saveable_extensions().contains(extension),
+                "the refusal must not advertise .{extension}: {}",
+                saveable_extensions()
+            );
+        }
+        // Positive control: a row that *is* live in every build.
+        assert!(im.encode_for_extension("png", true).is_ok());
+    }
+
+    /// A 3-band `f32` linear-light ramp reaching past the SDR ceiling: the
+    /// input contract [`crate::uhdr::encode_uhdr`] computes a gain map from,
+    /// and the one raster on which "the extension route did not write Ultra
+    /// HDR" is a claim with anything behind it.
+    fn scrgb_ramp(w: u32, h: u32) -> Raster {
+        let mut px: Vec<f32> = Vec::with_capacity((w * h * 3) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let t = f64::from(x) / f64::from(w - 1);
+                let s = f64::from(y) / f64::from(h - 1);
+                px.push((0.02 + 6.0 * t * s) as f32);
+                px.push((0.5 * (1.0 - t) + 3.0 * s) as f32);
+                px.push((1.5 * t + 0.25) as f32);
+            }
+        }
+        Raster::new(
+            w,
+            h,
+            PixelFormat::FloatF32(std::num::NonZeroU16::new(3).unwrap()),
+            px.into_iter().flat_map(f32::to_ne_bytes).collect(),
+        )
+        .unwrap()
+    }
+
+    /**
+     * Tests that **no** extension selects the Ultra HDR writer, which is the
+     * measured answer rather than a gap (issue #809).
+     *
+     * Every other row in this table exists because vips registers the suffix.
+     * `uhdrsave` registers none: on the pinned 8.18.6, `vips -l` reports
+     * `VipsForeignSaveUhdrFile (uhdrsave), save image in UltraHDR format,
+     * nocache (), priority=0` with an empty suffix list, and
+     * `vips copy base.v out.uhdr` is refused with `"out.uhdr" is not a known
+     * file format`. So this table has nothing to add, and the format is
+     * reached by name through `Raster::encode_to_buffer("uhdr")` and
+     * [`Raster::encode_uhdr`] instead.
+     *
+     * The half that is worth a check is the collision. `uhdrload` **does**
+     * claim `.jpg`, `.jpeg`, `.jpe` and `.jfif` on the way in, at priority
+     * 100 against `jpegload`'s 50, so the obvious way to "fix" this issue
+     * later is to make `.jpg` route to Ultra HDR when the raster happens to
+     * suit it. vips does not: `vips copy base.v out.jpg` writes 803 bytes
+     * that `vips uhdrload` then refuses with `not an UltraHDR image`. This
+     * pins the same answer here, on the one raster where the two routes could
+     * possibly disagree.
+     *
+     * `is_uhdr` on the container `encode_uhdr` writes is the positive control.
+     * Without it, every assertion below is "this predicate said no", which a
+     * predicate that always says no also satisfies.
+     */
+    #[test]
+    fn no_extension_selects_the_ultra_hdr_writer_because_vips_registers_none() {
+        let hdr = scrgb_ramp(16, 16);
+
+        // The control: this raster genuinely does have an Ultra HDR encoding,
+        // and the gate genuinely does recognise it.
+        let container = hdr
+            .encode_uhdr(crate::uhdr::SaveOptions::default().quality)
+            .expect("a 3-band f32 raster encodes");
+        assert!(
+            crate::uhdr::is_uhdr(&container),
+            "positive control: the gate has to say yes to something"
+        );
+
+        // `.uhdr` is not a row, and the refusal does not advertise one.
+        let err = hdr.encode_for_extension("uhdr", true).unwrap_err();
+        assert!(
+            matches!(&err, SaveError::UnsupportedExtension { extension } if extension == "uhdr"),
+            "vips refuses the same suffix, so this must too, got {err}"
+        );
+        assert!(
+            !saveable_extensions().contains("uhdr"),
+            "the refusal must not advertise .uhdr: {}",
+            saveable_extensions()
+        );
+
+        // And the four suffixes `uhdrload` claims on the way in stay plain
+        // JPEG on the way out: either this build has no row for them, or the
+        // row writes something the Ultra HDR gate does not recognise.
+        for extension in ["jpg", "jpeg", "jpe", "jfif"] {
+            match hdr.encode_for_extension(extension, true) {
+                Ok(bytes) => assert!(
+                    !crate::uhdr::is_uhdr(&bytes),
+                    ".{extension} must not select the Ultra HDR writer: vips routes it to \
+                     jpegsave and `vips uhdrload` refuses the result"
+                ),
+                Err(SaveError::UnsupportedExtension { .. } | SaveError::Encode(_)) => {}
+                Err(other) => panic!(".{extension} answered with {other}"),
+            }
+        }
+    }
+
+    /// A 2x2 3-band `f32` raster, which is the input contract
+    /// [`Raster::encode_radiance`] holds: Radiance carries three float bands
+    /// and nothing else has an RGBE spelling.
+    fn float_rgb_2x2() -> Raster {
+        Raster::new(
+            2,
+            2,
+            PixelFormat::FloatF32(std::num::NonZeroU16::new(3).unwrap()),
+            [
+                0.1f32, 0.2, 0.4, 1.5, 0.0, 3.0, 0.5, 0.5, 0.5, 2.0, 1.0, 0.25,
+            ]
+            .into_iter()
+            .flat_map(f32::to_ne_bytes)
+            .collect(),
+        )
+        .unwrap()
+    }
+
+    /**
+     * Tests that `.hdr` is a live row in the extension route and writes a
+     * Radiance file (issue #880).
+     *
+     * One suffix and only one, measured on the pinned vips 8.18.6:
+     *
+     * ```text
+     * VipsForeignSaveRadFile (radsave), save image to Radiance file,
+     *   nocache (.hdr), priority=0, mono rgb
+     * ```
+     *
+     * ```text
+     * $ vips copy base.v r.hdr && vipsheader r.hdr
+     * r.hdr: 8x6, rad, radload
+     * $ for e in rad rgbe pic; do vips copy base.v x.$e; done
+     * VipsForeignSave: "x.rad" is not a known file format          (three times)
+     * ```
+     *
+     * The three near misses are the positive control: a route that took any
+     * string would pass the first assertion on its own. `.pic` is in there
+     * because #506's own title says `.hdr/.pic`, and `radsave` does not
+     * register it.
+     *
+     * The bytes are compared against [`Raster::encode_radiance`] at the
+     * defaults and their magic checked, so "wrote a file" means a Radiance
+     * file.
+     */
+    #[test]
+    fn hdr_is_the_one_suffix_radsave_registers_and_it_writes_radiance() {
+        let im = float_rgb_2x2();
+        let direct = im
+            .encode_radiance(crate::radiance::SaveOptions::default())
+            .expect("a 3-band f32 raster encodes");
+        assert!(
+            direct.starts_with(b"#?RADIANCE"),
+            "positive control: the encoder writes the Radiance magic"
+        );
+
+        let bytes = im
+            .encode_for_extension("hdr", true)
+            .expect(".hdr must be a live row");
+        assert_eq!(
+            bytes, direct,
+            ".hdr must write the same file as encode_radiance at the defaults"
+        );
+        assert!(saveable_extensions().contains("hdr"));
+
+        for extension in ["rad", "rgbe", "pic"] {
+            assert!(
+                matches!(
+                    im.encode_for_extension(extension, true),
+                    Err(SaveError::UnsupportedExtension { .. })
+                ),
+                "radsave does not register .{extension} either"
+            );
+            assert!(!saveable_extensions().contains(extension));
+        }
+    }
+
+    /**
+     * Tests that the `.hdr` row refuses a raster it cannot write rather than
+     * converting one, and says which it is (issue #880).
+     *
+     * `radsave` declares `mono rgb` and vips casts whatever it is handed:
+     * `vips copy base.v r2.hdr` on a 3-band **uchar** raster writes a Radiance
+     * file. `Raster::encode_radiance` refuses instead, and this row propagates
+     * that rather than growing a cast, because no other row in this table
+     * converts and this one should not be the first. The deviation is
+     * `encode_radiance`'s and predates this row; what is new is that the
+     * extension route now inherits it, so it is asserted here.
+     *
+     * The refusal must not read as `UnsupportedExtension`. That would tell a
+     * caller this build has no Radiance encoder, which is false since #589,
+     * and would send them looking in the wrong place.
+     */
+    #[test]
+    fn the_hdr_row_refuses_a_raster_it_cannot_write_without_pretending_it_has_no_encoder() {
+        let err = rgb_2x2().encode_for_extension("hdr", true).unwrap_err();
+        assert!(
+            !matches!(err, SaveError::UnsupportedExtension { .. }),
+            "this build has a Radiance encoder; the raster is what is wrong, got {err}"
+        );
+        assert!(
+            err.to_string().contains("RGBE") || err.to_string().contains("float"),
+            "the refusal must name what is wrong with the raster, got {err}"
+        );
+        // Positive control: the same raster on a row with no input contract.
+        assert!(rgb_2x2().encode_for_extension("png", true).is_ok());
+    }
+
+    /**
+     * Tests that the `.hdr` row has nothing for the strip flag to drop
+     * (issue #880).
+     *
+     * A Radiance header carries `EXPOSURE`, `COLORCORR`, `PIXASPECT` and the
+     * primaries, which vips surfaces as `rad-expos`, `rad-colcor-*`,
+     * `rad-aspect` and `rad-prims-*` (measured with `vipsheader -a` on a file
+     * 8.18.6 wrote). Those are format records the way FITS's cards are, not an
+     * ICC profile or an EXIF block, so a stripped save and a kept one write the
+     * same bytes and a `keep_metadata` parameter here would be a promise with
+     * nothing behind it. Same call as the `.fits` and `.jp2` rows.
+     *
+     * `.webp` in the same assertion is the control: that row does carry
+     * EXIF-class metadata and does differ under the flag, so "the two agree" is
+     * a fact about this row and not about the harness.
+     */
+    #[test]
+    fn the_hdr_row_has_nothing_for_the_strip_flag_to_drop() {
+        let mut im = float_rgb_2x2();
+        im.set_icc_profile(&[1, 2, 3, 4]);
+        im.fields
+            .set("exif-data", MetadataValue::Blob(vec![9, 8, 7]));
+
+        assert_eq!(
+            im.encode_for_extension("hdr", true).unwrap(),
+            im.encode_for_extension("hdr", false).unwrap(),
+            "a Radiance header holds format records, so the strip flag has nothing to drop"
+        );
+
+        let mut rgb = rgb_2x2();
+        rgb.set_icc_profile(&[1, 2, 3, 4]);
+        assert_ne!(
+            rgb.encode_for_extension("webp", true).unwrap(),
+            rgb.encode_for_extension("webp", false).unwrap(),
+            "positive control: the WebP row does carry metadata and does differ"
+        );
+    }
+
+    /// A 2x2 single-band `Gray8` raster, which is what `.pgm` means.
+    fn gray_2x2() -> Raster {
+        Raster::new(2, 2, PixelFormat::Gray8, vec![0u8, 64, 128, 255]).unwrap()
+    }
+
+    /**
+     * Tests that `.ppm` and `.pgm` are rows and that the other three suffixes
+     * `ppmsave` registers are not (issue #882).
+     *
+     * This is the one format where a suffix picks a **container** rather than
+     * only a codec, and it is measured rather than reasoned. On the pinned
+     * vips 8.18.6, `ppmsave` registers `.pbm`, `.pgm`, `.ppm`, `.pfm` and
+     * `.pnm`, and each writes something different from the same input:
+     *
+     * ```text
+     * $ vips black base.v 8 6 --bands 3          # 3-band uchar srgb
+     * $ vips black g.v    8 6 --bands 1          # 1-band uchar b-w
+     * ```
+     *
+     * | suffix | from the 3-band | from the 1-band |
+     * |---|---|---|
+     * | `.ppm` | `P6`, 197 bytes | `P6`, 197 bytes, coerced up to sRGB |
+     * | `.pgm` | `P5`, 101 bytes, coerced down to mono | `P5`, 101 bytes |
+     * | `.pbm` | `P4`, 55 bytes | `P4`, 55 bytes |
+     * | `.pfm` | `PF`, 628 bytes | `Pf`, 244 bytes |
+     * | `.pnm` | refused | refused |
+     *
+     * `Raster::encode_ppm` writes `P5` and `P6` and nothing else, so `.pbm`
+     * and `.pfm` have no encoder behind them and are not rows. `.pnm` is not a
+     * row either, and that one is vips's own answer: it demands a `multiband`
+     * interpretation and refuses every input I handed it, `srgb`, `b-w` **and**
+     * an image explicitly copied to `multiband`, all three with
+     * `vips_colourspace: no known route from '...' to 'multiband'`.
+     *
+     * That keeps this table what it has always been, a strict **subset** of
+     * what vips registers: every row here is a row vips has, and the gap is
+     * always in the safe direction.
+     */
+    #[test]
+    fn ppm_and_pgm_are_the_two_netpbm_containers_this_build_writes() {
+        let rgb = rgb_2x2();
+        let gray = gray_2x2();
+
+        let p6 = rgb
+            .encode_for_extension("ppm", true)
+            .expect(".ppm is a row");
+        assert_eq!(p6, rgb.encode_ppm().unwrap());
+        assert!(p6.starts_with(b"P6"), "`.ppm` is the colour container");
+
+        let p5 = gray
+            .encode_for_extension("pgm", true)
+            .expect(".pgm is a row");
+        assert_eq!(p5, gray.encode_ppm().unwrap());
+        assert!(p5.starts_with(b"P5"), "`.pgm` is the greyscale container");
+
+        assert!(saveable_extensions().contains("ppm"));
+        assert!(saveable_extensions().contains("pgm"));
+
+        // The three `ppmsave` registers that this build cannot write.
+        for extension in ["pbm", "pfm", "pnm"] {
+            assert!(
+                matches!(
+                    rgb.encode_for_extension(extension, true),
+                    Err(SaveError::UnsupportedExtension { .. })
+                ),
+                ".{extension} has no encoder behind it and must not be a row"
+            );
+            assert!(!saveable_extensions().contains(extension));
+        }
+    }
+
+    /**
+     * Tests that each Netpbm row refuses the band count its suffix does not
+     * mean, rather than writing the other container under the wrong name
+     * (issue #882).
+     *
+     * `Raster::encode_ppm` picks its magic from the **band count**: `P5` for
+     * one, `P6` for three. `ppmsave` picks it from the **suffix** and converts
+     * the colourspace to suit. Where the two disagree, this refuses, for the
+     * reason the `.hdr` row refuses (#880): no row in this table converts, and
+     * these are not going to be the first. Without the check the routes would
+     * write a `P5` body into a file called `.ppm`, which is the one outcome
+     * neither vips nor Netpbm would recognise as correct.
+     *
+     * The refusal must not read as `UnsupportedExtension`: this build has a
+     * Netpbm encoder, and the raster is what does not fit.
+     */
+    #[test]
+    fn each_netpbm_row_refuses_the_band_count_its_suffix_does_not_mean() {
+        for (extension, wrong) in [("ppm", gray_2x2()), ("pgm", rgb_2x2())] {
+            let err = wrong.encode_for_extension(extension, true).unwrap_err();
+            assert!(
+                !matches!(err, SaveError::UnsupportedExtension { .. }),
+                ".{extension} has an encoder; the band count is what is wrong, got {err}"
+            );
+            assert!(
+                err.to_string().contains("band"),
+                "the refusal must say what is wrong with the raster, got {err}"
+            );
+        }
+        // Positive control: each row does write its own band count.
+        assert!(rgb_2x2().encode_for_extension("ppm", true).is_ok());
+        assert!(gray_2x2().encode_for_extension("pgm", true).is_ok());
+    }
+
+    /**
+     * Tests that the Netpbm rows have nothing for the strip flag to drop
+     * (issue #882).
+     *
+     * A binary Netpbm file is a three-line ASCII header and the raster body.
+     * There is no ICC profile, no EXIF block and no XMP packet anywhere in the
+     * format, so a stripped save and a kept one write the same bytes. Same
+     * call as the `.gif`, `.fits`, `.jp2` and `.hdr` rows, and `.webp` beside
+     * it as the control that does differ under the flag.
+     */
+    #[test]
+    fn the_netpbm_rows_have_nothing_for_the_strip_flag_to_drop() {
+        let mut im = rgb_2x2();
+        im.set_icc_profile(&[1, 2, 3, 4]);
+        im.fields
+            .set("exif-data", MetadataValue::Blob(vec![9, 8, 7]));
+
+        assert_eq!(
+            im.encode_for_extension("ppm", true).unwrap(),
+            im.encode_for_extension("ppm", false).unwrap(),
+            "Netpbm carries no metadata, so the strip flag has nothing to drop"
+        );
+        assert_ne!(
+            im.encode_for_extension("webp", true).unwrap(),
+            im.encode_for_extension("webp", false).unwrap(),
+            "positive control: the WebP row does carry metadata and does differ"
+        );
+    }
+
+    /**
+     * Tests that the extension route reaches the TIFF writer that has been
+     * sitting in `src/encode_tiff.rs` the whole time (issue #948).
+     *
+     * `Raster::save_tiff` landed with the TIFF lane, with round-trip tests
+     * behind it, and neither save route ever grew a row. So `save("out.tif")`
+     * answered `UnsupportedExtension` from a crate that writes TIFF. That is
+     * the fourth time a writer has been wired to nothing (#770 jp2k, #809
+     * uhdr, #880 radiance, #882 netpbm), and `tests/save_route_coverage.rs`
+     * is what makes a fifth red rather than quiet.
+     *
+     * Both suffixes and only those two, measured on the pinned vips 8.18.6:
+     * `tiffsave`'s `vips -l` line reads `VipsForeignSaveTiffFile (tiffsave),
+     * save image to tiff file, nocache (.tif, .tiff), priority=0`, and
+     * `vips copy t.v out.EXT` over `.btf`, `.tf8`, `.bigtiff` and `.tfx` is
+     * refused with "is not a known file format" every time. Those four are
+     * the nearest misses and they are the control in
+     * `save_error_lists_exactly_the_wired_extensions`.
+     *
+     * The row writes uncompressed strips because that is `tiffsave`'s own
+     * default, measured rather than assumed: `vips tiffsave t.v d.tif` and
+     * `vips tiffsave t.v d2.tif --compression none` write byte-identical
+     * 240-byte files (SHA-256 `24b95890dda8c56f...`) while `--compression
+     * deflate` writes a different 254. Same call as the JPEG row taking
+     * `jpegsave`'s quality of 75 and the Ultra HDR row taking `uhdrsave`'s.
+     * `Raster::tiff_save` keeps Deflate for the reason its own doc gives;
+     * all three modes are lossless, so what differs is the size, which is
+     * why the assertion below is a round trip and not a byte comparison
+     * against either.
+     */
+    #[test]
+    fn the_extension_route_reaches_the_tiff_writer() {
+        let subject = rgb_2x2();
+
+        assert!(
+            saveable_extensions().contains("tif/tiff"),
+            "the refusal message must name the TIFF row: {}",
+            saveable_extensions()
+        );
+
+        let mut written = Vec::new();
+        for extension in ["tif", "tiff"] {
+            let bytes = subject
+                .encode_for_extension(extension, true)
+                .unwrap_or_else(|e| panic!(".{extension} must be a live row, got {e}"));
+            assert_eq!(
+                crate::source::sniff(&bytes),
+                Some(crate::source::SniffedFormat::Tiff),
+                ".{extension} must write something the sniffer calls a TIFF"
+            );
+            let back = Raster::tiff_load(&bytes)
+                .unwrap_or_else(|e| panic!(".{extension} must read back, got {e}"));
+            assert_eq!((back.width(), back.height()), (2, 2));
+            assert_eq!(
+                back.data(),
+                subject.data(),
+                ".{extension} must round-trip its pixels"
+            );
+            assert_eq!(back.format(), subject.format());
+            written.push(bytes);
+        }
+        assert_eq!(
+            written[0], written[1],
+            "both suffixes name one container, the way the five JPEG 2000 ones do"
+        );
+
+        // And the shared decoder reads it back, which is more than the Netpbm
+        // rows could say until #910.
+        let back = crate::decode_bytes(&written[0]).expect("a TIFF this crate writes decodes");
+        assert_eq!(back.data(), subject.data());
+    }
+
+    /**
+     * Tests that the TIFF row has nothing for the strip flag to drop
+     * (issue #948).
+     *
+     * This build's TIFF encoder writes the colour tags and the strips and
+     * nothing else: `encode_to_vec` hands the `tiff` crate a colour type and
+     * a pixel buffer and never touches an ICC profile, an EXIF block or an
+     * XMP packet. So a stripped save and a kept one write the same bytes,
+     * the same call the `.gif`, `.fits`, `.jp2`, `.hdr` and Netpbm rows make,
+     * with `.webp` beside it as the control that does differ.
+     *
+     * Unlike those five this one is a **gap** rather than a property of the
+     * container: TIFF has somewhere to put a profile and `tiffsave` uses it.
+     * The equality is pinned here on purpose, so the day the encoder learns
+     * to embed one this cell goes red and says so rather than the flag
+     * silently doing nothing.
+     */
+    #[test]
+    fn the_tiff_row_has_nothing_for_the_strip_flag_to_drop() {
+        let mut im = rgb_2x2();
+        im.set_icc_profile(&[1, 2, 3, 4]);
+        im.fields
+            .set("exif-data", MetadataValue::Blob(vec![9, 8, 7]));
+
+        assert_eq!(
+            im.encode_for_extension("tif", true).unwrap(),
+            im.encode_for_extension("tif", false).unwrap(),
+            "this build's TIFF encoder embeds no metadata, so the flag has nothing to drop"
+        );
+        assert_ne!(
+            im.encode_for_extension("webp", true).unwrap(),
+            im.encode_for_extension("webp", false).unwrap(),
+            "positive control: the WebP row does carry metadata and does differ"
+        );
+    }
+
+    /**
+     * Tests that a `.ppm` this crate writes reads back through the shared
+     * decode entry points (issue #910).
+     *
+     * This cell is the flip of the one #882 landed. That one asserted the
+     * opposite, that `sniff` was `None` and `decode_bytes` refused, and said
+     * in its own doc that the day #910 landed it would be the thing to go red
+     * and be updated. This is that update, renamed with it: the old name is a
+     * false sentence now, and a check whose name outlives the fact it pins is
+     * how a suite starts lying.
+     *
+     * Netpbm was the only save row whose output this crate could not read
+     * back. `sniff` had no variant for it, so `decode_file_with_limits` fell
+     * through to `image`'s `with_guessed_format`, which recognised the
+     * container and refused it for want of the `pnm` feature.
+     *
+     * Both containers, because the two rows write different magics and a
+     * round trip through one says nothing about the other. `.png` stays
+     * beside them as the control it was before.
+     */
+    #[test]
+    fn a_netpbm_this_crate_writes_reads_back_through_the_shared_decoder() {
+        for (extension, subject) in [("ppm", rgb_2x2()), ("pgm", gray_2x2())] {
+            let written = subject
+                .encode_for_extension(extension, true)
+                .unwrap_or_else(|e| panic!(".{extension} is a row, got {e}"));
+
+            assert!(
+                crate::source::sniff(&written).is_some(),
+                ".{extension} must be a sniffed container now (issue #910)"
+            );
+            let back = crate::decode_bytes(&written)
+                .unwrap_or_else(|e| panic!(".{extension} must decode back, got {e}"));
+            assert_eq!((back.width(), back.height()), (2, 2));
+            assert_eq!(
+                back.data(),
+                subject.data(),
+                ".{extension} must round-trip its pixels"
+            );
+            assert_eq!(back.format(), subject.format());
+        }
+
+        // The control it has always had: a row that already round-tripped.
+        let png = rgb_2x2().encode_for_extension("png", true).unwrap();
+        assert!(crate::source::sniff(&png).is_some());
+        assert!(crate::decode_bytes(&png).is_ok());
+    }
+
+    /**
+     * Tests that the `UnsupportedExtension` message names exactly the
+     * extensions this build has an encoder behind, so the string and the
+     * match arms cannot drift apart. They already did once: the `.jxl` arm
+     * landed while the message still read "libviprs encodes png, jpg/jpeg,
+     * gif, webp, and v/vips", so `save("x.avif")` told the caller JPEG XL
+     * was unsupported at the moment it became supported. The same thing was
+     * about to happen to the five JPEG 2000 suffixes (#770), which is why
+     * they are swept here by feature rather than named in one build.
+     * `jp2000` sits in the unlisted set because vips refuses that suffix too,
+     * measured, so it is the nearest miss to a live row. `.tif` used to sit
+     * beside it and moved to the live side with #948; the four that replaced
+     * it, `btf`, `tf8`, `bigtiff` and `tfx`, are the TIFF spellings vips
+     * itself answers "is not a known file format" to, measured on 8.18.6. Works by parsing
+     * the extension list back out of a rendered message, saving under every
+     * name it holds, and then checking a name it does not hold is refused.
+     * Input: the message from `save("out.avif")` -> Output: every listed
+     * extension writes a file, `jxl` is listed exactly when the feature is
+     * on, and the unlisted extensions come back as
+     * `SaveError::UnsupportedExtension`.
+     */
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn save_error_lists_exactly_the_wired_extensions() {
+        let dir = tempfile::tempdir().unwrap();
+        let im = rgb_2x2();
+
+        let message = im
+            .save(&dir.path().join("out.avif"))
+            .unwrap_err()
+            .to_string();
+        let listed = message
+            .split_once("libviprs encodes ")
+            .expect("the refusal names the encodable set")
+            .1;
+        // "png, jpg/jpeg, gif, webp, and v/vips" -> the individual
+        // extensions, with the prose comma-and and the `/` alternatives
+        // taken apart.
+        let extensions: Vec<&str> = listed
+            .split(", ")
+            .map(|part| part.trim_start_matches("and "))
+            .flat_map(|part| part.split('/'))
+            .collect();
+        assert_eq!(
+            extensions.contains(&"jxl"),
+            cfg!(feature = "jxl"),
+            "the message follows the feature: {message}"
+        );
+        for suffix in ["jp2", "j2k", "jpt", "j2c", "jpc"] {
+            assert_eq!(
+                extensions.contains(&suffix),
+                cfg!(feature = "jp2k"),
+                "the message follows the feature for .{suffix}: {message}"
+            );
+        }
+        // `.hdr` is ungated, so it is in the message in every build. Without
+        // this the list can lose a row and only the sweep below notices, and
+        // the sweep derives itself *from* the message, so a row that vanishes
+        // from both simply stops being tested (issue #880).
+        assert!(
+            extensions.contains(&"hdr"),
+            "the Radiance row is ungated and must always be listed: {message}"
+        );
+        // Same argument for TIFF, which costs no feature either: the `tiff`
+        // crate is already required for decoding (issue #948).
+        for suffix in ["tif", "tiff"] {
+            assert!(
+                extensions.contains(&suffix),
+                "the TIFF row is ungated and must always list .{suffix}: {message}"
+            );
+        }
+
+        for extension in &extensions {
+            let path = dir.path().join(format!("listed.{extension}"));
+            // `.hdr` is the one row with an input contract: `encode_radiance`
+            // takes 3-band `f32` and refuses anything else rather than casting
+            // the way `radsave` does. So the sweep hands each row a raster it
+            // can write, or it would be asserting the contract and not the
+            // list (issue #880).
+            let subject = match *extension {
+                // The rows with an input contract: `.hdr` takes 3-band `f32`
+                // and `.pgm` takes one band, and both refuse rather than
+                // convert (issues #880, #882). The sweep hands each row a
+                // raster it can write, or it would be asserting the contract
+                // and calling it the list.
+                "hdr" => float_rgb_2x2(),
+                "pgm" => gray_2x2(),
+                _ => im.clone(),
+            };
+            subject
+                .save(&path)
+                .unwrap_or_else(|e| panic!("save(.{extension}) is a live arm, got {e}"));
+            assert!(path.exists(), ".{extension} wrote a file");
+        }
+
+        // The other direction, so the list cannot go stale by growing
+        // either: an extension it does not name has no arm behind it.
+        let mut unlisted = vec!["avif", "heic", "btf", "tf8", "bigtiff", "tfx", "jp2000"];
+        if !cfg!(feature = "jxl") {
+            unlisted.push("jxl");
+        }
+        if !cfg!(feature = "jp2k") {
+            unlisted.extend(["jp2", "j2k", "jpt", "j2c", "jpc"]);
+        }
+        for extension in unlisted {
+            assert!(
+                !extensions.contains(&extension),
+                ".{extension} is not in {listed:?}"
+            );
+            let err = im
+                .save(&dir.path().join(format!("unlisted.{extension}")))
+                .unwrap_err();
+            assert!(
+                matches!(err, SaveError::UnsupportedExtension { .. }),
+                "{err}"
+            );
+        }
+    }
+
+    /**
      * Tests save dispatch to PNG: the file decodes back to the same
      * pixels (PNG is lossless), and unknown extensions error.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn save_png_and_unknown_extension() {
         let dir = tempfile::tempdir().unwrap();
         let im = rgb_2x2();
@@ -1681,11 +4777,6 @@ mod tests {
         assert_eq!(back.width(), 2);
         assert_eq!(back.data(), im.data());
 
-        let err = im.save(&dir.path().join("out.webp")).unwrap_err();
-        assert!(
-            matches!(err, SaveError::UnsupportedExtension { .. }),
-            "{err}"
-        );
         let err = im.save(&dir.path().join("noextension")).unwrap_err();
         assert!(
             matches!(err, SaveError::UnsupportedExtension { .. }),
@@ -1700,6 +4791,7 @@ mod tests {
      * segment scan.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn save_jpeg_keeps_and_strips_metadata() {
         let dir = tempfile::tempdir().unwrap();
         let mut im = Raster::zeroed(8, 8, PixelFormat::Rgb8).unwrap();
@@ -1729,6 +4821,7 @@ mod tests {
      * header's filename slot.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn decode_file_sets_filename() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("named.v");
@@ -1750,7 +4843,7 @@ mod tests {
             .map(|i| (i % 251) as u8)
             .collect();
         let im = Raster::zeroed(4, 4, PixelFormat::Gray8).unwrap();
-        let jpeg = crate::sink::encode_jpeg(&im, 75).unwrap();
+        let jpeg = crate::sink::encode_jpeg(&im, 75, crate::sink::DEFAULT_BACKGROUND_RGB).unwrap();
         let with_icc = inject_jpeg_metadata(jpeg, None, Some(&icc));
         let (exif, got) = extract_jpeg_metadata(&with_icc);
         assert_eq!(exif, None);
@@ -1853,33 +4946,1627 @@ mod tests {
         assert_eq!(rot.orientation(), 1);
     }
 
-    /// Unit-covers the XML orientation extractor: it finds the lowercase
-    /// `orientation` gint field, ignores the distinct `exif-ifd0-Orientation`
-    /// string field, and rejects malformed / out-of-range values.
+    /// Unit-covers the XML trailer reader on the shapes that used to be the
+    /// orientation extractor's whole job: it finds the lowercase
+    /// `orientation` gint field, ignores the distinct
+    /// `exif-ifd0-Orientation` string field, and leaves the upright default
+    /// standing for a value that is out of range, not a number, or on a
+    /// field with no type at all.
     #[test]
-    fn parse_vips_xml_orientation_cases() {
-        let good = b"<field type=\"gint\" name=\"orientation\">8</field>";
-        assert_eq!(parse_vips_xml_orientation(good), Some(8));
-        // The exif string field alone must not be mistaken for the tag.
-        let exif_only =
-            b"<field type=\"VipsRefString\" name=\"exif-ifd0-Orientation\">1 (Top-left)</field>";
-        assert_eq!(parse_vips_xml_orientation(exif_only), None);
-        // Out of range and non-numeric are rejected.
+    fn vips_xml_trailer_orientation_cases() {
+        fn orientation_of(fragment: &[u8]) -> u8 {
+            let mut im = rgb_2x2();
+            read_vips_xml_trailer(fragment, &mut im);
+            im.orientation()
+        }
+
         assert_eq!(
-            parse_vips_xml_orientation(b"<field name=\"orientation\">9</field>"),
-            None
+            orientation_of(b"<field type=\"gint\" name=\"orientation\">8</field>"),
+            8
+        );
+        for fragment in [
+            // The exif string field alone must not be mistaken for the tag.
+            &b"<field type=\"VipsRefString\" name=\"exif-ifd0-Orientation\">1 (Top-left)</field>"[..],
+            // Out of range, not a number, no type to read it as, and a
+            // longer name that merely starts with "orientation".
+            b"<field type=\"gint\" name=\"orientation\">9</field>",
+            b"<field type=\"gint\" name=\"orientation\">x</field>",
+            b"<field name=\"orientation\">6</field>",
+            b"<field type=\"gint\" name=\"orientation-foo\">6</field>",
+            b"no field here",
+        ] {
+            assert_eq!(
+                orientation_of(fragment),
+                1,
+                "fragment: {}",
+                String::from_utf8_lossy(fragment)
+            );
+        }
+    }
+
+    // -- .v trailer: nothing to say, nothing written (issue #546) ------------
+
+    /// A raster with no attached fields and the upright orientation has
+    /// nothing to put in the trailer, so nothing is written there.
+    ///
+    /// The 41 bytes it used to write, `{"orientation":1,"fields":{"entries":
+    /// []}}`, are the whole of issue #546 for the common case: libvips parses
+    /// that slot as XML, so every plain `save()` made `vipsheader -a` print
+    /// `VIPS-WARNING **: error reading vips image metadata: VipsImage: XML
+    /// parse error` and drop the metadata block. Measured on vips 8.18.4: the
+    /// same file with the trailer truncated off reads silently.
+    #[test]
+    fn v_trailer_is_absent_when_there_is_nothing_to_say() {
+        let im = Raster::zeroed(4, 4, PixelFormat::Rgb8).unwrap();
+        let bytes = im.encode_vips().unwrap();
+        assert_eq!(
+            bytes.len(),
+            VIPS_HEADER_LEN + im.data().len(),
+            "a raster with no metadata must write header + pixels and stop, got \
+             {} trailer bytes: {:?}",
+            bytes.len() - VIPS_HEADER_LEN - im.data().len(),
+            String::from_utf8_lossy(&bytes[VIPS_HEADER_LEN + im.data().len()..])
+        );
+        // And it still reads back as the same image.
+        let back = decode_bytes(&bytes).unwrap();
+        assert_eq!(back.data(), im.data());
+        assert_eq!(back.orientation(), 1);
+        assert_eq!(
+            back.get_fields(),
+            im.get_fields(),
+            "no attached field may appear out of a trailer that was never written"
+        );
+    }
+
+    /// The other side of the same rule: anything the trailer would actually
+    /// carry brings it back. A non-default orientation, an attached field,
+    /// and a value carried opaquely from a newer build each count on their
+    /// own, because each of them is metadata that would otherwise be lost.
+    #[test]
+    fn v_trailer_is_written_whenever_it_carries_something() {
+        let plain = Raster::zeroed(2, 2, PixelFormat::Rgb8).unwrap();
+        let body_len = VIPS_HEADER_LEN + plain.data().len();
+
+        let rotated = plain.copy().orientation(6).build();
+        let bytes = rotated.encode_vips().unwrap();
+        assert!(
+            bytes.len() > body_len,
+            "a non-default orientation must still be written"
+        );
+        assert_eq!(decode_bytes(&bytes).unwrap().orientation(), 6);
+
+        let mut noted = plain.clone();
+        noted.set_field("note", "hello".into());
+        let bytes = noted.encode_vips().unwrap();
+        assert!(
+            bytes.len() > body_len,
+            "an attached field must still be written"
         );
         assert_eq!(
-            parse_vips_xml_orientation(b"<field name=\"orientation\">x</field>"),
-            None
+            decode_bytes(&bytes)
+                .unwrap()
+                .get_field("note")
+                .unwrap()
+                .as_str(),
+            "hello"
         );
-        assert_eq!(parse_vips_xml_orientation(b"no field here"), None);
-        // A longer field name that merely starts with "orientation" must not
-        // false-match: the anchor requires the closing quote + '>'.
+
+        // A value this build cannot interpret is metadata too: it is the only
+        // thing left on this raster once the four readable fields are removed
+        // and the orientation is back to upright, and it must still be
+        // written (issue #565).
+        let mut carried = decode_bytes(&file_from_a_newer_build()).unwrap();
+        for name in ["note", "n-pages", "delay", "xres-hint", "icc-profile-data"] {
+            carried.set_typeof(name, 0);
+        }
+        let carried = carried.copy().orientation(1).build();
+        assert!(
+            carried.encode_vips().unwrap().len() > VIPS_HEADER_LEN + carried.data().len(),
+            "a value carried opaquely from a newer build must still be written"
+        );
+    }
+
+    // -- .v trailer forward compatibility (issue #565) -----------------------
+
+    /// A `MetadataValue` as a *newer* libviprs writes it: the five variants
+    /// this build has, plus one it does not. The whole point of the #565 lane
+    /// is that adding a variant must not cost an older reader the rest of its
+    /// metadata, so the future writer is modelled here instead of shipped.
+    ///
+    /// The unknown one rotates as variants land. `IntArray` held the role
+    /// until #787 shipped it, `DoubleArray` until #852 did, and both are
+    /// **positive controls** now: the same file exercises variants this build
+    /// reads and one it does not, and the reader has to tell them apart. The
+    /// unknown one is `Bool`, which is not invented either, since `gboolean`
+    /// is live in a `.v` trailer today and is the next type in the queue.
+    ///
+    /// The derive carries no serde attributes, exactly like [`MetadataValue`],
+    /// so the bytes it produces are the bytes a future build would produce.
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    enum FutureMetadataValue {
+        Int(i64),
+        Double(f64),
+        Str(String),
+        Blob(Vec<u8>),
+        IntArray(Vec<i64>),
+        DoubleArray(Vec<f64>),
+        /// The variant this build has never heard of.
+        Bool(bool),
+    }
+
+    /// The attached-field list as a newer libviprs writes it.
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct FutureFields {
+        entries: Vec<(String, FutureMetadataValue)>,
+    }
+
+    /// The `.v` trailer as a newer libviprs writes it.
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct FutureTrailer {
+        orientation: u8,
+        fields: FutureFields,
+    }
+
+    /// The trailer reader as libviprs shipped it *before* this change:
+    /// `serde_json::from_slice` straight onto a struct holding the plain
+    /// externally tagged [`MetadataValue`]. Keeping it verbatim makes "an
+    /// already-released build can still read what we write" an executed
+    /// assertion rather than a claim about bytes.
+    #[derive(Debug, PartialEq, Deserialize)]
+    struct ReleasedTrailer {
+        orientation: u8,
+        fields: ReleasedFields,
+    }
+
+    /// The released reader's field list; see [`ReleasedTrailer`].
+    #[derive(Debug, PartialEq, Deserialize)]
+    struct ReleasedFields {
+        entries: Vec<(String, MetadataValue)>,
+    }
+
+    /// The trailer libviprs 0.4 wrote, captured byte for byte from the
+    /// released encoder for a 2x2 RGB raster carrying one field of each
+    /// variant and orientation 6. Frozen here so the reader is pinned
+    /// against the shipped format and not against whatever the current
+    /// writer happens to emit.
+    const RELEASED_TRAILER: &[u8] = br#"{"orientation":6,"fields":{"entries":[["note",{"Str":"hello"}],["n-pages",{"Int":3}],["xres-hint",{"Double":1.5}],["icc-profile-data",{"Blob":[5,5,5]}]]}}"#;
+
+    /// Header and pixels for a 2x2 RGB raster with no trailer, so a test can
+    /// staple an arbitrary trailer onto a real `.v` body.
+    fn v_body() -> Vec<u8> {
+        Raster::new(2, 2, PixelFormat::Rgb8, vec![7u8; 12])
+            .unwrap()
+            .encode_vips_impl(false)
+    }
+
+    /// libviprs 0.4.0's trailer reader, verbatim: try the JSON trailer as one
+    /// `serde` value, and on failure fall back to scratching the orientation
+    /// tag out of an XML block. Reproduced rather than described so
+    /// "what an already-released build gets out of a file written now" is an
+    /// executed assertion.
+    fn released_reader(trailer: &[u8]) -> (Option<u8>, Vec<(String, MetadataValue)>) {
+        match serde_json::from_slice::<ReleasedTrailer>(trailer) {
+            Ok(parsed) => (Some(parsed.orientation), parsed.fields.entries),
+            Err(_) => (released_xml_orientation(trailer), Vec::new()),
+        }
+    }
+
+    /// libviprs 0.4.0's `parse_vips_xml_orientation`, verbatim; see
+    /// [`released_reader`].
+    fn released_xml_orientation(trailer: &[u8]) -> Option<u8> {
+        let text = std::str::from_utf8(trailer).ok()?;
+        let anchor = text.find(r#"name="orientation">"#)?;
+        let after = &text[anchor..];
+        let open = after.find('>')?;
+        let rest = &after[open + 1..];
+        let close = rest.find('<')?;
+        let value: u16 = rest[..close].trim().parse().ok()?;
+        (1..=8).contains(&value).then_some(value as u8)
+    }
+
+    /// The `(name, type, text)` of every `<field>` in the trailer of a `.v`
+    /// encoded from a 2x2 RGB raster, in file order.
+    fn trailer_fields(bytes: &[u8]) -> Vec<(String, String, String)> {
+        let trailer =
+            std::str::from_utf8(&bytes[v_body().len()..]).expect("the trailer must be UTF-8");
+        VipsXmlFields::new(vips_xml_meta_region(trailer))
+            .map(|f| {
+                (
+                    unescape_xml(f.name),
+                    unescape_xml(f.gtype),
+                    f.text.to_string(),
+                )
+            })
+            .collect()
+    }
+
+    /// The metadata trailer of a `.v` written by the real thing, captured
+    /// byte for byte from vips 8.18.4 (`/opt/homebrew/bin/vips`) with
+    ///
+    /// ```text
+    /// vips black plain.v 2 2 --bands 1
+    /// ```
+    ///
+    /// The EXIF blob is vips's own doing: `vips_foreign_save_build` runs
+    /// `vips__exif_update` on every save, so a file that started with no
+    /// metadata still ends up with one, which makes this a fair sample of
+    /// what the reader meets in the wild. Frozen here so the reader is pinned
+    /// against a file libviprs did not write.
+    const VIPS_8184_TRAILER: &str = r#"<?xml version="1.0"?>
+<root xmlns="http://www.vips.ecs.soton.ac.uk/vips/8.18.4">
+  <header>
+    <field type="VipsRefString" name="Hist"></field>
+  </header>
+  <meta>
+    <field type="VipsBlob" name="exif-data">RXhpZgAASUkqAAgAAAAGABIBAwABAAAAAQAAABoBBQABAAAAVgAAABsBBQABAAAAXgAAACgBAwABAAAAAgAAABMCAwABAAAAAQAAAGmHBAABAAAAZgAAAAAAAAA4YwAA6AMAADhjAADoAwAABgAAkAcABAAAADAyMTABkQcABAAAAAECAwAAoAcABAAAADAxMDABoAMAAQAAAP//AAACoAQAAQAAAAIAAAADoAQAAQAAAAIAAAAAAAAA</field>
+    <field type="VipsRefString" name="resolution-unit">in</field>
+    <field type="VipsRefString" name="exif-ifd0-Orientation">1 (Top-left, Short, 1 components, 2 bytes)</field>
+    <field type="VipsRefString" name="exif-ifd0-XResolution">25400/1000 (25.400, Rational, 1 components, 8 bytes)</field>
+    <field type="VipsRefString" name="exif-ifd0-YResolution">25400/1000 (25.400, Rational, 1 components, 8 bytes)</field>
+    <field type="VipsRefString" name="exif-ifd0-ResolutionUnit">2 (Inch, Short, 1 components, 2 bytes)</field>
+    <field type="VipsRefString" name="exif-ifd0-YCbCrPositioning">1 (Centred, Short, 1 components, 2 bytes)</field>
+    <field type="VipsRefString" name="exif-ifd2-ExifVersion">Exif Version 2.1 (Exif Version 2.1, Undefined, 4 components, 4 bytes)</field>
+    <field type="VipsRefString" name="exif-ifd2-ComponentsConfiguration">Y Cb Cr - (Y Cb Cr -, Undefined, 4 components, 4 bytes)</field>
+    <field type="VipsRefString" name="exif-ifd2-FlashpixVersion">FlashPix Version 1.0 (FlashPix Version 1.0, Undefined, 4 components, 4 bytes)</field>
+    <field type="VipsRefString" name="exif-ifd2-ColorSpace">65535 (Uncalibrated, Short, 1 components, 2 bytes)</field>
+    <field type="VipsRefString" name="exif-ifd2-PixelXDimension">2 (2, Long, 1 components, 4 bytes)</field>
+    <field type="VipsRefString" name="exif-ifd2-PixelYDimension">2 (2, Long, 1 components, 4 bytes)</field>
+    <field type="gint" name="orientation">1</field>
+  </meta>
+</root>
+"#;
+
+    /// A `.v` file as a newer libviprs would write it: a real header and real
+    /// pixels, followed by a trailer carrying one field of every variant this
+    /// build knows plus a `background` array it does not.
+    fn file_from_a_newer_build() -> Vec<u8> {
+        let mut bytes = v_body();
+        let trailer = FutureTrailer {
+            orientation: 6,
+            fields: FutureFields {
+                entries: vec![
+                    ("note".to_string(), FutureMetadataValue::Str("hello".into())),
+                    ("n-pages".to_string(), FutureMetadataValue::Int(3)),
+                    (
+                        "delay".to_string(),
+                        FutureMetadataValue::IntArray(vec![40, 40, 90]),
+                    ),
+                    (
+                        "background".to_string(),
+                        FutureMetadataValue::DoubleArray(vec![1.5, 2.5]),
+                    ),
+                    ("some-flag".to_string(), FutureMetadataValue::Bool(true)),
+                    ("xres-hint".to_string(), FutureMetadataValue::Double(1.5)),
+                    (
+                        "icc-profile-data".to_string(),
+                        FutureMetadataValue::Blob(vec![5, 5, 5]),
+                    ),
+                ],
+            },
+        };
+        bytes.extend_from_slice(&serde_json::to_vec(&trailer).unwrap());
+        bytes
+    }
+
+    /// A `.v` written by a build that has a `MetadataValue` variant this one
+    /// does not must still hand back every field this build *does* understand
+    /// (issue #565). The old behaviour was that one unknown variant failed the
+    /// whole `serde_json::from_slice`, so the ICC profile, the EXIF blob and
+    /// the orientation tag all vanished with no error at all.
+    ///
+    /// The unknown field itself reads as absent: it is carried, not
+    /// interpretable, so it stays out of the field API. The `delay` array
+    /// beside it is the positive control, because #787 gave that one a
+    /// variant: the two travel in the same trailer, in the same encoding
+    /// family, and the reader has to hand one back and carry the other.
+    #[test]
+    fn v_trailer_from_a_newer_build_keeps_the_fields_this_build_understands() {
+        let back = decode_bytes(&file_from_a_newer_build()).unwrap();
+
+        assert_eq!(back.orientation(), 6, "orientation must survive");
+        assert_eq!(back.get_field("note").unwrap().as_str(), "hello");
+        assert_eq!(back.get_field("n-pages"), Some(MetadataValue::Int(3)));
+        assert_eq!(back.get_n_pages(), 3);
         assert_eq!(
-            parse_vips_xml_orientation(b"<field name=\"orientation-foo\">6</field>"),
-            None
+            back.get_field("xres-hint"),
+            Some(MetadataValue::Double(1.5))
         );
+        assert_eq!(back.icc_profile(), Some(&[5u8, 5, 5][..]));
+        // Pixels and geometry are untouched by any of this.
+        assert_eq!(back.data(), &[7u8; 12]);
+
+        // The array variant that landed reads back as a value (issue #787).
+        assert_eq!(
+            back.get_field("delay"),
+            Some(MetadataValue::IntArray(vec![40, 40, 90]))
+        );
+        assert_eq!(back.get_int_array("delay"), Some(&[40i64, 40, 90][..]));
+        assert_eq!(back.get_typeof("delay"), 5);
+        assert!(back.get_fields().iter().any(|n| n == "delay"));
+
+        // The second array this build now names, which #852 landed.
+        assert_eq!(
+            back.get_double_array("background"),
+            Some(&[1.5f64, 2.5][..])
+        );
+        assert_eq!(back.get_typeof("background"), 6);
+
+        // The variant this build cannot represent reads as absent rather than
+        // as a wrong value.
+        assert_eq!(back.get_field("some-flag"), None);
+        assert_eq!(back.get_typeof("some-flag"), 0);
+        assert!(
+            !back.get_fields().iter().any(|n| n == "some-flag"),
+            "an uninterpretable field must not be advertised as readable"
+        );
+    }
+
+    /// Preserving an unknown field only matters if it survives being written
+    /// back out: an old build that opens a new file and re-saves it must not
+    /// quietly strip the field it could not read, which would be the same
+    /// data loss one step later.
+    #[test]
+    fn v_trailer_unknown_field_survives_a_rewrite_by_this_build() {
+        let back = decode_bytes(&file_from_a_newer_build()).unwrap();
+        let rewritten = back.encode_vips().unwrap();
+
+        // Read the rewritten file with the *newer* build's reader.
+        let trailer: FutureTrailer =
+            serde_json::from_slice(&rewritten[v_body().len()..]).expect("newer build can re-read");
+        assert_eq!(trailer.orientation, 6);
+        let background = trailer
+            .fields
+            .entries
+            .iter()
+            .find(|(n, _)| n == "some-flag")
+            .map(|(_, v)| v);
+        assert_eq!(
+            background,
+            Some(&FutureMetadataValue::Bool(true)),
+            "the unknown field must round-trip untouched"
+        );
+        // And the fields this build does understand are still there too,
+        // including the two arrays it now reads rather than carries (#787,
+        // #852).
+        assert_eq!(trailer.fields.entries.len(), 7);
+        assert!(trailer.fields.entries.iter().any(
+            |(n, v)| n == "icc-profile-data" && *v == FutureMetadataValue::Blob(vec![5, 5, 5])
+        ));
+        assert!(
+            trailer
+                .fields
+                .entries
+                .iter()
+                .any(|(n, v)| n == "delay" && *v == FutureMetadataValue::IntArray(vec![40, 40, 90])),
+            "the named array must survive the rewrite as a value, not as a carrier"
+        );
+    }
+
+    /// Issue #718. The multi-input field union covers the **uninterpretable**
+    /// carrier as well as the named one, in both directions.
+    ///
+    /// The named half is pinned in `tests/metadata_carry.rs`. This half is here
+    /// because [`MetadataFields::unknown`] is only reachable from inside this
+    /// module, through a trailer written by a build this one cannot fully read
+    /// (#565), and without it `merge_under` could drop the opaque carrier and
+    /// stay green: a field a newer build wrote would survive a load and a
+    /// re-save, and then vanish the moment someone inserted the raster into
+    /// another one.
+    #[test]
+    fn the_multi_input_field_merge_carries_an_uninterpretable_field_too() {
+        let sub = decode_bytes(&file_from_a_newer_build()).unwrap();
+        let mut main = Raster::new(2, 2, PixelFormat::Rgb8, vec![1u8; 12]).unwrap();
+        main.set_field("main-only", MetadataValue::Str("from-main".into()));
+        main.set_field("note", MetadataValue::Str("from-main".into()));
+
+        let out = main.try_insert(&sub, 0, 0, true, None).unwrap();
+
+        // The header block is `main`'s alone, so `sub`'s orientation 6 does
+        // not reach the output.
+        assert_eq!(out.orientation(), 1, "the header block is main's");
+        // The named half of the union: main wins the shared name, both sides'
+        // own fields arrive.
+        assert_eq!(out.get_field("note").unwrap().as_str(), "from-main");
+        assert_eq!(out.get_field("main-only").unwrap().as_str(), "from-main");
+        assert_eq!(out.get_field("n-pages"), Some(MetadataValue::Int(3)));
+        assert_eq!(out.icc_profile(), Some(&[5u8, 5, 5][..]));
+
+        // And the opaque one, which reads as absent through the field API and
+        // is only visible on the way back out.
+        assert_eq!(
+            out.get_field("some-flag"),
+            None,
+            "an uninterpretable field stays out of the field API"
+        );
+        let rewritten = out.encode_vips().unwrap();
+        let trailer: FutureTrailer = serde_json::from_slice(&rewritten[v_body().len()..])
+            .expect("a carried opaque value keeps the file on the JSON trailer");
+        let background = trailer
+            .fields
+            .entries
+            .iter()
+            .find(|(n, _)| n == "background")
+            .map(|(_, v)| v);
+        assert_eq!(
+            background,
+            Some(&FutureMetadataValue::DoubleArray(vec![1.5, 2.5])),
+            "sub's uninterpretable field must reach the output"
+        );
+
+        // The other direction: a name `main` holds *only* under the opaque
+        // carrier still blocks `sub`'s interpretable value, so the output
+        // never ends up holding one name under both carriers.
+        let main = decode_bytes(&file_from_a_newer_build()).unwrap();
+        let mut sub = Raster::new(2, 2, PixelFormat::Rgb8, vec![1u8; 12]).unwrap();
+        sub.set_field("some-flag", MetadataValue::Int(9));
+        let out = main.try_insert(&sub, 0, 0, true, None).unwrap();
+        assert_eq!(
+            out.get_field("some-flag"),
+            None,
+            "main's opaque value wins the shared name"
+        );
+    }
+
+    /// A field the caller sets by hand supersedes an unknown field of the same
+    /// name, and removing it removes it for good. Otherwise a stripped raster
+    /// would leak the old opaque value back into the file.
+    ///
+    /// Naming the value is also what releases the file from the legacy JSON
+    /// trailer: with nothing left that only JSON can hold, the rewrite comes
+    /// back out as the XML vips reads.
+    #[test]
+    fn setting_or_removing_a_field_supersedes_the_unknown_one() {
+        let mut back = decode_bytes(&file_from_a_newer_build()).unwrap();
+        back.set_field("some-flag", MetadataValue::Int(4));
+        let fields = trailer_fields(&back.encode_vips().unwrap());
+        let hits: Vec<_> = fields.iter().filter(|(n, _, _)| n == "some-flag").collect();
+        assert_eq!(hits.len(), 1, "the field must not be written twice");
+        assert_eq!(hits[0].1, GTYPE_INT);
+        assert_eq!(hits[0].2, "4");
+        assert_eq!(
+            fields.len(),
+            8,
+            "overwriting one field must not disturb the other six, or the \
+             orientation tag: {fields:?}"
+        );
+
+        let mut back = decode_bytes(&file_from_a_newer_build()).unwrap();
+        back.set_typeof("some-flag", 0);
+        let fields = trailer_fields(&back.encode_vips().unwrap());
+        assert!(
+            !fields.iter().any(|(n, _, _)| n == "some-flag"),
+            "a removed field must not come back from the opaque carrier"
+        );
+        assert_eq!(
+            fields.len(),
+            7,
+            "removing one field must not remove the other six: {fields:?}"
+        );
+    }
+
+    /// The other direction: what this build writes still has to reach a build
+    /// that shipped before this change. It cannot reach it whole, and that is
+    /// the price of the fix rather than an accident, so it is pinned here.
+    ///
+    /// The released reader is reproduced verbatim as [`released_reader`], so
+    /// this runs it rather than asserting about it. It takes the pixels, the
+    /// geometry and the orientation off a `.v` written now, and not the
+    /// attached fields, because it only reads a trailer whose first
+    /// non-whitespace byte is `{` and no byte sequence is both that and the
+    /// XML libvips requires. Nothing errors, which is the part that matters:
+    /// an old build opening a new file is not a failure, it is a partial read.
+    #[test]
+    fn v_trailer_written_now_reads_as_far_as_the_released_build_can_read_it() {
+        let mut im = Raster::new(2, 2, PixelFormat::Rgb8, vec![7u8; 12])
+            .unwrap()
+            .copy()
+            .orientation(6)
+            .build();
+        im.set_field("note", "hello".into());
+        im.set_field("n-pages", MetadataValue::Int(3));
+        im.set_field("xres-hint", MetadataValue::Double(1.5));
+        im.set_icc_profile(&[5, 5, 5]);
+
+        let bytes = im.encode_vips().unwrap();
+        let (orientation, fields) = released_reader(&bytes[v_body().len()..]);
+        assert_eq!(
+            orientation,
+            Some(6),
+            "the released build must still get the orientation tag"
+        );
+        assert!(
+            fields.is_empty(),
+            "the released build reads no attached fields out of an XML trailer, \
+             and pretending otherwise would hide the cost: {fields:?}"
+        );
+
+        // The same file read here is whole, so the loss runs one way only.
+        let back = decode_bytes(&bytes).unwrap();
+        assert_eq!(back.orientation(), 6);
+        assert_eq!(back.get_field("note").unwrap().as_str(), "hello");
+        assert_eq!(back.get_field("n-pages"), Some(MetadataValue::Int(3)));
+        assert_eq!(
+            back.get_field("xres-hint"),
+            Some(MetadataValue::Double(1.5))
+        );
+        assert_eq!(back.icc_profile(), Some(&[5u8, 5, 5][..]));
+    }
+
+    /// And a file the released build wrote still reads here, checked against
+    /// the frozen bytes rather than against a fresh encode.
+    #[test]
+    fn v_trailer_written_by_the_released_build_still_reads() {
+        let mut bytes = v_body();
+        bytes.extend_from_slice(RELEASED_TRAILER);
+        let back = decode_bytes(&bytes).unwrap();
+        assert_eq!(back.orientation(), 6);
+        assert_eq!(back.get_field("note").unwrap().as_str(), "hello");
+        assert_eq!(back.get_field("n-pages"), Some(MetadataValue::Int(3)));
+        assert_eq!(
+            back.get_field("xres-hint"),
+            Some(MetadataValue::Double(1.5))
+        );
+        assert_eq!(back.icc_profile(), Some(&[5u8, 5, 5][..]));
+    }
+
+    /// The reader must survive more than a new variant: a newer trailer may
+    /// carry keys this build has never seen, drop keys it expects, or hold an
+    /// entry shaped in some way it cannot use. None of that may cost the
+    /// entries that *are* readable.
+    #[test]
+    fn v_trailer_tolerates_shapes_a_newer_build_might_write() {
+        let mut bytes = v_body();
+        bytes.extend_from_slice(
+            br#"{"fields":{"entries":[["note",{"Str":"hi"}],["broken"],[7,{"Int":1}],
+                 ["n-pages",{"Int":2}]],"grouping":"page"},"trailer-version":9}"#,
+        );
+        let back = decode_bytes(&bytes).unwrap();
+        assert_eq!(back.get_field("note").unwrap().as_str(), "hi");
+        assert_eq!(back.get_field("n-pages"), Some(MetadataValue::Int(2)));
+        // No orientation key: the upright default, not a dropped trailer.
+        assert_eq!(back.orientation(), 1);
+    }
+
+    /// A trailer that opens with `{` claims to be a libviprs JSON trailer, so
+    /// one that is not valid JSON is corruption rather than a foreign format,
+    /// and the metadata is genuinely unrecoverable. That is reported instead
+    /// of swallowed. Nothing else changes: a trailer that never claimed to be
+    /// ours is still ignored, pixels and header intact.
+    #[test]
+    fn v_trailer_that_claims_to_be_ours_but_is_corrupt_is_reported() {
+        let mut bytes = v_body();
+        bytes.extend_from_slice(br#"{"orientation":6,"fields":{"entr"#);
+        let err = decode_bytes(&bytes).unwrap_err();
+        assert!(
+            matches!(&err, SourceError::VipsFormat(m) if m.contains("trailer")),
+            "expected a reported trailer failure, got {err}"
+        );
+
+        // A foreign or junk trailer is not ours to complain about.
+        for foreign in [
+            &b"<?xml version=\"1.0\"?><root/>"[..],
+            &[0u8; 8][..],
+            b"junk",
+        ] {
+            let mut bytes = v_body();
+            bytes.extend_from_slice(foreign);
+            let back = decode_bytes(&bytes).unwrap();
+            assert_eq!(back.data(), &[7u8; 12]);
+            assert_eq!(back.get_field("note"), None);
+        }
+    }
+
+    // -- .v trailer: the XML libvips reads (issue #546) -----------------------
+
+    /// The trailer written for a raster carrying one field of every variant,
+    /// frozen byte for byte.
+    ///
+    /// This is the wire format, so it is pinned against a literal rather than
+    /// against the reader, which would agree with the writer no matter what
+    /// either of them did. The shape is `build_xml`'s
+    /// (`libvips/iofuncs/vips.c:846-890` at `v8.18.0-95-gfe420cf3a`) down to
+    /// the four-space field indent, and the fields come out in the order they
+    /// were set with the orientation tag last.
+    #[test]
+    fn v_trailer_is_the_xml_libvips_reads() {
+        let mut im = Raster::new(2, 2, PixelFormat::Rgb8, vec![7u8; 12])
+            .unwrap()
+            .copy()
+            .orientation(6)
+            .build();
+        im.set_field("note", "hello".into());
+        im.set_field("n-pages", MetadataValue::Int(3));
+        im.set_field("xres-hint", MetadataValue::Double(1.5));
+        im.set_icc_profile(&[5, 5, 5]);
+
+        let bytes = im.encode_vips().unwrap();
+        let trailer = std::str::from_utf8(&bytes[v_body().len()..]).unwrap();
+        assert_eq!(
+            trailer,
+            "<?xml version=\"1.0\"?>\n\
+             <root xmlns=\"http://www.vips.ecs.soton.ac.uk/vips/8.18.4\">\n\
+             \x20 <header>\n\
+             \x20   <field type=\"VipsRefString\" name=\"Hist\"></field>\n\
+             \x20 </header>\n\
+             \x20 <meta>\n\
+             \x20   <field type=\"VipsRefString\" name=\"note\">hello</field>\n\
+             \x20   <field type=\"gint\" name=\"n-pages\">3</field>\n\
+             \x20   <field type=\"gdouble\" name=\"xres-hint\">1.5</field>\n\
+             \x20   <field type=\"VipsBlob\" name=\"icc-profile-data\">BQUF</field>\n\
+             \x20   <field type=\"gint\" name=\"orientation\">6</field>\n\
+             \x20 </meta>\n\
+             </root>\n"
+        );
+    }
+
+    /// Every [`MetadataValue`] variant survives the XML round trip, including
+    /// the awkward numbers: a negative and a 64-bit integer, a double that
+    /// has no short decimal, one that needs an exponent, a negative zero, a
+    /// blob holding all 256 byte values, and an int array with a negative
+    /// element, a 64-bit one and no elements at all.
+    ///
+    /// The doubles are compared exactly on purpose. A tolerance would pass on
+    /// a writer that threw away digits, and throwing away digits is the whole
+    /// failure mode a text encoding of a float has.
+    ///
+    /// The variant list here is hand-maintained, and it is the one place that
+    /// matters. `xml_field_of`, `type_code` and `len` all match on the enum,
+    /// so the compiler makes a sixth variant impossible to forget in those
+    /// three; the **reader** has a `_ => None` fallthrough and would carry a
+    /// new variant opaquely for ever without a word. This test is what
+    /// notices.
+    #[test]
+    fn v_trailer_xml_round_trips_every_metadata_variant() {
+        let mut im = rgb_2x2().copy().orientation(8).build();
+        im.set_field("neg", MetadataValue::Int(-42));
+        im.set_field("big", MetadataValue::Int(i64::from(i32::MAX) + 1));
+        im.set_field("tenth", MetadataValue::Double(0.1));
+        im.set_field("huge", MetadataValue::Double(1e300));
+        im.set_field("negzero", MetadataValue::Double(-0.0));
+        im.set_field("text", MetadataValue::Str("café ☃ 日本".to_string()));
+        im.set_field(
+            "bytes",
+            MetadataValue::Blob((0..=255u8).collect::<Vec<_>>()),
+        );
+        im.set_field("delay", MetadataValue::IntArray(vec![40, -5, i64::MAX]));
+        im.set_field("no-delay", MetadataValue::IntArray(Vec::new()));
+
+        let back = decode_bytes(&im.encode_vips().unwrap()).unwrap();
+        assert_eq!(back.orientation(), 8);
+        assert_eq!(back.get_field("neg"), Some(MetadataValue::Int(-42)));
+        assert_eq!(
+            back.get_field("big"),
+            Some(MetadataValue::Int(i64::from(i32::MAX) + 1))
+        );
+        assert_eq!(back.get_field("tenth"), Some(MetadataValue::Double(0.1)));
+        assert_eq!(back.get_field("huge"), Some(MetadataValue::Double(1e300)));
+        assert!(
+            back.get_field("negzero")
+                .is_some_and(|v| v.as_f64().is_sign_negative() && v.as_f64() == 0.0),
+            "a negative zero must not come back positive"
+        );
+        assert_eq!(back.get_field("text").unwrap().as_str(), "café ☃ 日本");
+        assert_eq!(
+            back.get_field("bytes").unwrap().as_blob(),
+            (0..=255u8).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            back.get_field("delay"),
+            Some(MetadataValue::IntArray(vec![40, -5, i64::MAX]))
+        );
+        assert_eq!(
+            back.get_field("no-delay"),
+            Some(MetadataValue::IntArray(Vec::new())),
+            "an empty array is a value, not a dropped field"
+        );
+        // The blob went out as base64 rather than as anything binary.
+        let bytes = im.encode_vips().unwrap();
+        let trailer = std::str::from_utf8(&bytes[v_body().len()..]).unwrap();
+        assert!(
+            trailer.contains("<field type=\"VipsBlob\" name=\"bytes\">AAECAwQFBgcICQ"),
+            "got: {trailer}"
+        );
+    }
+
+    /// A `.v` real vips wrote reads whole now, not just down to its
+    /// orientation tag. [`VIPS_8184_TRAILER`] is the capture; the body under
+    /// it is this build's, because the body is not what is being tested.
+    ///
+    /// The `Hist` field in the `<header>` block must *not* arrive as an
+    /// attached field: it is vips's command history, it lives outside
+    /// `<meta>`, and letting it through would invent a field on every vips
+    /// file libviprs opens.
+    #[test]
+    fn v_trailer_reads_a_file_real_vips_wrote() {
+        let body = Raster::zeroed(2, 2, PixelFormat::Gray8).unwrap();
+        let mut bytes = body.encode_vips().unwrap();
+        assert_eq!(
+            bytes.len(),
+            VIPS_HEADER_LEN + 4,
+            "the body carries no trailer"
+        );
+        bytes.extend_from_slice(VIPS_8184_TRAILER.as_bytes());
+
+        let back = decode_bytes(&bytes).unwrap();
+        assert_eq!(back.orientation(), 1);
+        assert_eq!(back.get_field("resolution-unit").unwrap().as_str(), "in");
+        assert_eq!(
+            back.get_field("exif-ifd0-XResolution").unwrap().as_str(),
+            "25400/1000 (25.400, Rational, 1 components, 8 bytes)"
+        );
+        let exif = back.get_field("exif-data").unwrap();
+        assert_eq!(exif.len(), 186, "the base64 blob must decode to its bytes");
+        assert_eq!(&exif.as_blob()[..6], b"Exif\0\0");
+        assert_eq!(
+            back.get_typeof("Hist"),
+            0,
+            "the history block is not metadata"
+        );
+        assert_eq!(
+            back.get_fields().len() - BUILTIN_FIELDS.len(),
+            13,
+            "every <meta> field but the orientation tag, and nothing else: {:?}",
+            back.get_fields()
+        );
+
+        // And it survives a rewrite here: this is the round trip the `.v`
+        // container exists for.
+        let again = decode_bytes(&back.encode_vips().unwrap()).unwrap();
+        assert_eq!(again.get_field("exif-data"), back.get_field("exif-data"));
+        assert_eq!(again.get_fields(), back.get_fields());
+    }
+
+    /// XML metacharacters in a field name and in a value survive, and
+    /// non-ASCII text is written as itself rather than mangled.
+    ///
+    /// vips gets the second one wrong in its own writer: `*p < 32` on a
+    /// signed `char` (`libvips/iofuncs/target.c:821`) catches every
+    /// continuation byte, so `vips copy` over a `.v` carrying `café ☃ 日本`
+    /// rewrites it as `caf&#x23c3;&#x23a9; …` (measured on 8.18.4). Reading
+    /// it is fine, which is why writing real UTF-8 is the right call.
+    #[test]
+    fn v_trailer_xml_escaping_round_trips() {
+        let mut im = rgb_2x2();
+        im.set_field("a\"b&c<d>e", "x < y & z > w \"q\" 'r'".into());
+        im.set_field("tabbed", "one\ttwo\nthree".into());
+        im.set_field("unicode", "café ☃ 日本".into());
+
+        let bytes = im.encode_vips().unwrap();
+        let trailer = std::str::from_utf8(&bytes[v_body().len()..]).unwrap();
+        assert!(
+            trailer.contains("name=\"a&quot;b&amp;c&lt;d&gt;e\""),
+            "the name must be escaped for an attribute: {trailer}"
+        );
+        assert!(
+            trailer.contains(">x &lt; y &amp; z &gt; w \"q\" 'r'<"),
+            "character data escapes the three that matter and nothing else: {trailer}"
+        );
+        assert!(
+            trailer.contains(">café ☃ 日本<"),
+            "UTF-8 goes out as itself: {trailer}"
+        );
+
+        let back = decode_bytes(&bytes).unwrap();
+        assert_eq!(
+            back.get_field("a\"b&c<d>e").unwrap().as_str(),
+            "x < y & z > w \"q\" 'r'"
+        );
+        assert_eq!(
+            back.get_field("tabbed").unwrap().as_str(),
+            "one\ttwo\nthree"
+        );
+        assert_eq!(back.get_field("unicode").unwrap().as_str(), "café ☃ 日本");
+    }
+
+    /// The XML form of a carried unknown value: a `type` this build does not
+    /// know keeps its type name and its character data, byte for byte, and
+    /// goes back out that way (issue #565).
+    ///
+    /// This is where the XML trailer beats the JSON one it replaces. The
+    /// carrier *is* vips's own encoding, so the value is not merely preserved
+    /// for the build that wrote it: vips reads it too. Measured on 8.18.6,
+    /// `vipsheader -f background` on a file with this exact element prints
+    /// `1.5 2.5`, and a `type` name libvips does not know is skipped
+    /// with no warning at all, which is what makes the carrier safe to write.
+    ///
+    /// `delay` and `background` sit in the same trailer as the positive
+    /// controls: #787 gave `VipsArrayInt` a variant and #852 gave
+    /// `VipsArrayDouble` one, so those two have to come back as *values*
+    /// while `gboolean` and the invented type are still carried. Without them
+    /// the test would pass on a reader that carried everything, which is what
+    /// it did before.
+    #[test]
+    fn v_trailer_unknown_xml_type_is_carried_verbatim() {
+        let body = rgb_2x2();
+        let mut bytes = body.encode_vips_impl(false);
+        bytes.extend_from_slice(
+            b"<?xml version=\"1.0\"?>\n\
+              <root xmlns=\"http://www.vips.ecs.soton.ac.uk/vips/8.18.4\">\n  <meta>\n\
+              \x20   <field type=\"VipsRefString\" name=\"note\">hi</field>\n\
+              \x20   <field type=\"VipsArrayInt\" name=\"delay\">40 40 90</field>\n\
+              \x20   <field type=\"VipsArrayDouble\" name=\"background\">1.5 2.5 </field>\n\
+              \x20   <field type=\"gboolean\" name=\"some-flag\">TRUE</field>\n\
+              \x20   <field type=\"nosuchtype\" name=\"mystery\">a &amp; b</field>\n\
+              \x20   <field type=\"gint\" name=\"orientation\">6</field>\n\
+              \x20 </meta>\n</root>\n",
+        );
+
+        let back = decode_bytes(&bytes).unwrap();
+        // Readable things stay readable.
+        assert_eq!(back.get_field("note").unwrap().as_str(), "hi");
+        assert_eq!(back.orientation(), 6);
+        // The two arrays this build now names come back as values.
+        assert_eq!(back.get_int_array("delay"), Some(&[40i64, 40, 90][..]));
+        assert_eq!(
+            back.get_double_array("background"),
+            Some(&[1.5f64, 2.5][..])
+        );
+        // The two it still cannot name read as absent rather than as a
+        // wrong value.
+        for name in ["some-flag", "mystery"] {
+            assert_eq!(back.get_field(name), None);
+            assert_eq!(back.get_typeof(name), 0);
+            assert!(!back.get_fields().iter().any(|n| n == name));
+        }
+
+        // The carried ones go back out unchanged, escapes included; the named
+        // one goes back out in this writer's spelling, which is vips's own,
+        // trailing separator and all.
+        let rewritten = back.encode_vips().unwrap();
+        let trailer = std::str::from_utf8(&rewritten[v_body().len()..]).unwrap();
+        assert!(
+            trailer.contains("<field type=\"VipsArrayInt\" name=\"delay\">40 40 90 </field>"),
+            "got: {trailer}"
+        );
+        assert!(
+            trailer
+                .contains("<field type=\"VipsArrayDouble\" name=\"background\">1.5 2.5 </field>"),
+            "got: {trailer}"
+        );
+        assert!(
+            trailer.contains("<field type=\"gboolean\" name=\"some-flag\">TRUE</field>"),
+            "got: {trailer}"
+        );
+        assert!(
+            trailer.contains("<field type=\"nosuchtype\" name=\"mystery\">a &amp; b</field>"),
+            "the character data must not be re-escaped into `a &amp;amp; b`: {trailer}"
+        );
+        // Still XML, so vips still reads the rest of the file.
+        assert!(!is_json_trailer(&rewritten[v_body().len()..]));
+    }
+
+    // -- the VipsArrayInt variant (issue #787) -------------------------------
+
+    /// A 2x2 RGB `.v` carrying `meta` as its whole `<meta>` block, so a test
+    /// can hand the reader an arbitrary field element.
+    fn v_with_meta(meta: &str) -> Vec<u8> {
+        let mut bytes = rgb_2x2().encode_vips_impl(false);
+        bytes.extend_from_slice(
+            format!(
+                "<?xml version=\"1.0\"?>\n<root xmlns=\"{VIPS_XML_NAMESPACE}\">\n  <meta>\n\
+                 {meta}\n  </meta>\n</root>\n"
+            )
+            .as_bytes(),
+        );
+        bytes
+    }
+
+    /// The `<field>` element the writer produces for an int array is the one
+    /// vips produces, **trailing separator included**.
+    ///
+    /// Measured on the pinned vips 8.18.6:
+    ///
+    /// ```text
+    /// vips copy 'oracle-captures/foreign-webp/fixtures/anim3.webp[n=-1]' out.v
+    /// ```
+    ///
+    /// puts `<field type="VipsArrayInt" name="delay">100 100 100 </field>` in
+    /// the trailer: one space after every element, not between them. Getting
+    /// that wrong is invisible to any round trip through this crate's own
+    /// reader, which is exactly why it is pinned as bytes here.
+    #[test]
+    fn an_int_array_goes_out_in_the_spelling_vips_writes() {
+        let mut im = rgb_2x2();
+        im.set_field("delay", MetadataValue::IntArray(vec![40, 60, 80, 100]));
+        let bytes = im.encode_vips().unwrap();
+        let trailer = std::str::from_utf8(&bytes[v_body().len()..]).unwrap();
+        assert!(
+            trailer.contains("<field type=\"VipsArrayInt\" name=\"delay\">40 60 80 100 </field>"),
+            "got: {trailer}"
+        );
+
+        // An empty array is a legal value with no elements, and vips writes
+        // exactly that: measured, a trailer holding `<field ...></field>`
+        // round-trips through `vips copy` unchanged.
+        let mut im = rgb_2x2();
+        im.set_field("delay", MetadataValue::IntArray(Vec::new()));
+        let bytes = im.encode_vips().unwrap();
+        let trailer = std::str::from_utf8(&bytes[v_body().len()..]).unwrap();
+        assert!(
+            trailer.contains("<field type=\"VipsArrayInt\" name=\"delay\"></field>"),
+            "got: {trailer}"
+        );
+
+        // A single element still gets its separator, which is the case a
+        // "join with spaces" implementation gets wrong and a four-element
+        // check cannot see. `vipsheader -f delay` on a one-frame array prints
+        // `40 ` on 8.18.6.
+        let mut im = rgb_2x2();
+        im.set_field("delay", MetadataValue::IntArray(vec![40]));
+        let bytes = im.encode_vips().unwrap();
+        let trailer = std::str::from_utf8(&bytes[v_body().len()..]).unwrap();
+        assert!(
+            trailer.contains("<field type=\"VipsArrayInt\" name=\"delay\">40 </field>"),
+            "got: {trailer}"
+        );
+    }
+
+    /// An int array survives `encode_vips` and `decode_bytes` as a value,
+    /// reads back through both accessors, and reports type code 5.
+    ///
+    /// The negative and out-of-`gint` elements are the reason the element type
+    /// is `i64`. vips's own `gint` is 32 bits and wraps rather than refusing:
+    /// measured on 8.18.6, a trailer carrying `3000000000` reads back through
+    /// `vipsheader -f delay` as `-1294967296`, and
+    /// `9223372036854775807 -9223372036854775808` as `-1 0`. A `u32` element
+    /// would make libviprs lose the sign as well, on a file it did not write.
+    #[test]
+    fn an_int_array_round_trips_through_the_v_trailer() {
+        let mut im = rgb_2x2();
+        let delays = vec![40i64, -5, 3_000_000_000, i64::MIN, i64::MAX];
+        im.set_field("delay", MetadataValue::IntArray(delays.clone()));
+        let back = decode_bytes(&im.encode_vips().unwrap()).unwrap();
+
+        assert_eq!(
+            back.get_field("delay"),
+            Some(MetadataValue::IntArray(delays.clone()))
+        );
+        assert_eq!(back.get_int_array("delay"), Some(delays.as_slice()));
+        assert_eq!(back.get_typeof("delay"), 5);
+        assert!(back.get_fields().iter().any(|n| n == "delay"));
+        // The trailer is the XML vips reads, not the legacy JSON fallback:
+        // the value has a spelling now, so nothing forces the old format.
+        assert!(!is_json_trailer(
+            &im.encode_vips().unwrap()[v_body().len()..]
+        ));
+    }
+
+    /// The reader takes every spelling vips takes.
+    ///
+    /// Measured on 8.18.6 by editing the `delay` element of a real `.v` and
+    /// reading it back with `vipsheader -f delay`: `40 60 80`, `40 60 80 ` and
+    /// `  40   60   80  ` all print `40 60 80 `, and an element list that is
+    /// empty prints nothing rather than dropping the field. Writing one
+    /// spelling and accepting only that one would refuse files vips wrote.
+    #[test]
+    fn the_int_array_reader_takes_every_spelling_vips_takes() {
+        for text in ["40 60 80", "40 60 80 ", "  40   60   80  ", "40\t60\n80"] {
+            let bytes = v_with_meta(&format!(
+                "    <field type=\"VipsArrayInt\" name=\"delay\">{text}</field>"
+            ));
+            let back = decode_bytes(&bytes).unwrap();
+            assert_eq!(
+                back.get_int_array("delay"),
+                Some(&[40i64, 60, 80][..]),
+                "spelling {text:?} must read as three elements"
+            );
+        }
+
+        let bytes = v_with_meta("    <field type=\"VipsArrayInt\" name=\"delay\"></field>");
+        let back = decode_bytes(&bytes).unwrap();
+        assert_eq!(
+            back.get_int_array("delay"),
+            Some(&[][..]),
+            "an empty element list is an empty array, not a missing field"
+        );
+        assert_eq!(back.get_typeof("delay"), 5);
+    }
+
+    /// An element that is not a number keeps the **whole** field opaque, the
+    /// same rule every other GType in the trailer follows when its text will
+    /// not parse.
+    ///
+    /// This is a deliberate divergence and it is measured. vips hands back an
+    /// *empty* array for `40 x 80`: on 8.18.6 `vipsheader -f delay` prints
+    /// nothing and `vips copy` writes the field back out as
+    /// `<field type="VipsArrayInt" name="delay"></field>`, so the two
+    /// elements that did parse are gone from the file. Carrying the text
+    /// through loses nothing and lets a build that understands it read it.
+    ///
+    /// The positive control is the same trailer with the element fixed: it
+    /// has to come back as a value, or "carried" would just mean "the reader
+    /// never worked".
+    #[test]
+    fn an_int_array_element_that_is_not_a_number_keeps_the_whole_field_opaque() {
+        for text in ["40 x 80", "40 60 80.5", "40 99999999999999999999", "40 -"] {
+            let bytes = v_with_meta(&format!(
+                "    <field type=\"VipsArrayInt\" name=\"delay\">{text}</field>"
+            ));
+            let back = decode_bytes(&bytes).unwrap();
+            assert_eq!(
+                back.get_field("delay"),
+                None,
+                "{text:?} must not be read as a partial array"
+            );
+            assert_eq!(back.get_typeof("delay"), 0);
+            // And it goes back out byte for byte, so a build that can read it
+            // still can.
+            let rewritten = back.encode_vips().unwrap();
+            let trailer = std::str::from_utf8(&rewritten[v_body().len()..]).unwrap();
+            assert!(
+                trailer.contains(&format!("name=\"delay\">{text}</field>")),
+                "got: {trailer}"
+            );
+        }
+
+        // Positive control: fix the element and the same route reads a value.
+        let bytes = v_with_meta("    <field type=\"VipsArrayInt\" name=\"delay\">40 60 80</field>");
+        let back = decode_bytes(&bytes).unwrap();
+        assert_eq!(back.get_int_array("delay"), Some(&[40i64, 60, 80][..]));
+    }
+
+    /// The array variant answers [`MetadataValue::type_code`],
+    /// [`MetadataValue::len`] and the panic-message kind for itself, rather
+    /// than borrowing a scalar's answers.
+    #[test]
+    fn the_array_variant_reports_its_own_type_code_and_element_count() {
+        let three = MetadataValue::IntArray(vec![40, 60, 80]);
+        assert_eq!(three.type_code(), 5, "a fifth type needs a fifth code");
+        assert_eq!(three.len(), 3, "len is the element count, not 1");
+        assert!(!three.is_empty());
+        assert_eq!(three.as_int_array(), &[40, 60, 80]);
+
+        let empty = MetadataValue::IntArray(Vec::new());
+        assert_eq!(empty.len(), 0);
+        assert!(empty.is_empty(), "an empty array is empty, unlike a scalar");
+        assert_eq!(empty.type_code(), 5);
+
+        // No code collides: five variants, five codes.
+        let codes: Vec<u64> = [
+            MetadataValue::Int(1),
+            MetadataValue::Double(1.0),
+            MetadataValue::Str(String::new()),
+            MetadataValue::Blob(Vec::new()),
+            MetadataValue::IntArray(Vec::new()),
+        ]
+        .iter()
+        .map(MetadataValue::type_code)
+        .collect();
+        assert_eq!(codes, vec![1, 2, 3, 4, 5]);
+
+        // The kind name reaches the panic messages and the WrongType error.
+        assert_eq!(
+            std::panic::catch_unwind(|| MetadataValue::IntArray(vec![1]).as_i64())
+                .unwrap_err()
+                .downcast_ref::<String>()
+                .cloned(),
+            Some("metadata value is an int array, not an int".to_string())
+        );
+        let err = rgb_2x2()
+            .try_set_field("xoffset", MetadataValue::IntArray(vec![1]))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("an int array"),
+            "the error has to name the kind it got: {err}"
+        );
+
+        // And a scalar is not a one-element array, in either direction.
+        assert!(
+            std::panic::catch_unwind(|| MetadataValue::Int(40).as_int_array()).is_err(),
+            "an Int must not coerce to a one-element array"
+        );
+    }
+
+    /// `get_int_array` answers exactly what resolving through `get_field`
+    /// answers, on every readable name, and borrows rather than cloning
+    /// (issue #635).
+    ///
+    /// Same shape as `get_int_agrees_with_get_field_on_every_readable_name`,
+    /// and for the same reason: any name can hold any type, so the accessor
+    /// that skips the clone has to give the same answer on the built-in
+    /// header fields, on `filename` (the one built-in read out of the field
+    /// list), on an attached blob sitting under an array's name, and on a
+    /// name that is not set at all.
+    #[test]
+    fn get_int_array_agrees_with_get_field_on_every_readable_name() {
+        let mut im = rgb_2x2();
+        im.set_field("orientation", MetadataValue::Int(6));
+        im.set_field("yres", MetadataValue::Double(1.5));
+        im.set_field("filename", MetadataValue::IntArray(vec![11, 12]));
+        im.set_field("delay", MetadataValue::IntArray(vec![40, 60, 80]));
+        im.set_field("empty-delay", MetadataValue::IntArray(Vec::new()));
+        im.set_field("icc-profile-data", MetadataValue::Blob(vec![1, 2, 3]));
+        im.set_field("note", MetadataValue::Str("hello".to_string()));
+        im.set_field("bits-per-sample", MetadataValue::Int(8));
+
+        let names = im.get_fields();
+        assert!(names.len() > 12, "the sweep has to reach the attachments");
+        for name in names {
+            let through_get_field = match im.get_field(&name) {
+                Some(MetadataValue::IntArray(v)) => Some(v),
+                _ => None,
+            };
+            assert_eq!(
+                im.get_int_array(&name).map(<[i64]>::to_vec),
+                through_get_field,
+                "get_int_array and get_field disagree on {name}"
+            );
+        }
+        assert_eq!(im.get_int_array("no-such-field"), None);
+        // The #635 case: a blob under an array's name reads as absent here
+        // rather than being deep-copied out first.
+        assert_eq!(im.get_int_array("icc-profile-data"), None);
+        // And a scalar int under the name is not an array.
+        assert_eq!(im.get_int_array("bits-per-sample"), None);
+
+        // The borrow really is a borrow: the slice points into the raster.
+        let slice = im.get_int_array("delay").unwrap();
+        let stored = match im.get_field("delay") {
+            Some(MetadataValue::IntArray(v)) => v,
+            other => panic!("expected an array, got {other:?}"),
+        };
+        assert_eq!(slice, stored.as_slice());
+    }
+
+    /// A legacy JSON trailer whose only unnameable value was an array is read
+    /// as a value now, and the rewrite comes back out as the XML vips reads.
+    ///
+    /// This is the disk-side payoff of #787 and the thing the JSON fallback
+    /// was always meant to do: it is keyed on what is *still* carried, not on
+    /// where the file came from, so naming a variant releases every file that
+    /// only needed that one. The positive control is the same trailer with a
+    /// variant this build still cannot name, which must keep the old format.
+    #[test]
+    fn a_legacy_json_array_is_read_and_releases_the_file_from_the_json_trailer() {
+        let mut bytes = v_body();
+        bytes.extend_from_slice(
+            br#"{"orientation":6,"fields":{"entries":[["note",{"Str":"hi"}],["delay",{"IntArray":[40,40,90]}]]}}"#,
+        );
+        let back = decode_bytes(&bytes).unwrap();
+        assert_eq!(back.get_int_array("delay"), Some(&[40i64, 40, 90][..]));
+        assert_eq!(back.get_field("note").unwrap().as_str(), "hi");
+
+        let rewritten = back.encode_vips().unwrap();
+        assert!(
+            !is_json_trailer(&rewritten[v_body().len()..]),
+            "with the array named, nothing holds the file on the legacy format"
+        );
+        let trailer = std::str::from_utf8(&rewritten[v_body().len()..]).unwrap();
+        assert!(
+            trailer.contains("<field type=\"VipsArrayInt\" name=\"delay\">40 40 90 </field>"),
+            "got: {trailer}"
+        );
+
+        // Positive control: a value this build still cannot name keeps it.
+        let mut bytes = v_body();
+        bytes.extend_from_slice(
+            br#"{"orientation":6,"fields":{"entries":[["some-flag",{"Bool":true}]]}}"#,
+        );
+        let back = decode_bytes(&bytes).unwrap();
+        assert_eq!(back.get_field("some-flag"), None);
+        assert!(
+            is_json_trailer(&back.encode_vips().unwrap()[v_body().len()..]),
+            "a JSON-only carried value still keeps the JSON trailer"
+        );
+    }
+
+    /// A `VipsArrayDouble` is all or nothing, like every other typed field.
+    ///
+    /// An element that will not parse leaves the whole field carried opaquely
+    /// rather than handing back the elements that happened to work, which is
+    /// the rule `gint`, `gdouble`, `VipsBlob` and `VipsArrayInt` already
+    /// follow. It is a deliberate divergence from vips, which hands back an
+    /// **empty** array and loses the elements that parsed.
+    ///
+    /// The good array in the same trailer is the positive control: without it
+    /// a reader that carried every double array would pass.
+    ///
+    /// Input: one parseable `VipsArrayDouble` and one with a word in it ->
+    /// Output: the first read as a value, the second carried and absent from
+    /// the field API, and both back out unchanged.
+    #[test]
+    fn a_double_array_with_an_unparseable_element_is_carried_not_truncated() {
+        let body = rgb_2x2();
+        let mut bytes = body.encode_vips_impl(false);
+        bytes.extend_from_slice(
+            b"<?xml version=\"1.0\"?>\n\
+              <root xmlns=\"http://www.vips.ecs.soton.ac.uk/vips/8.18.4\">\n  <meta>\n\
+              \x20   <field type=\"VipsArrayDouble\" name=\"good\">1.5 2.5 </field>\n\
+              \x20   <field type=\"VipsArrayDouble\" name=\"ragged\">1.5 nope 2.5 </field>\n\
+              \x20 </meta>\n</root>\n",
+        );
+        let back = decode_bytes(&bytes).unwrap();
+        assert_eq!(back.get_double_array("good"), Some(&[1.5f64, 2.5][..]));
+        assert_eq!(
+            back.get_field("ragged"),
+            None,
+            "an element that will not parse must not leave a truncated array"
+        );
+        assert_eq!(back.get_typeof("ragged"), 0);
+
+        let rewritten = back.encode_vips().unwrap();
+        let trailer = std::str::from_utf8(&rewritten[v_body().len()..]).unwrap();
+        assert!(
+            trailer
+                .contains("<field type=\"VipsArrayDouble\" name=\"ragged\">1.5 nope 2.5 </field>"),
+            "the carried one goes back out unchanged: {trailer}"
+        );
+    }
+
+    /// The two array types do not coerce into each other, in either
+    /// direction, and neither scalar coerces into its array.
+    ///
+    /// vips writes `VipsArrayInt` and `VipsArrayDouble` as different GTypes
+    /// and a reader asking for one does not accept the other, which is the
+    /// whole argument for `DoubleArray` being its own variant rather than
+    /// GIF's `background` riding in an `IntArray` (issue #852). Every arm is
+    /// asserted in both directions, because a reader that answered both from
+    /// one variant would pass a test that only looked one way.
+    ///
+    /// Input: an int array, a double array, and the two scalars ->
+    /// Output: each readable only through its own accessor.
+    #[test]
+    fn an_int_array_and_a_double_array_do_not_coerce_into_each_other() {
+        let mut im = rgb_2x2();
+        im.set_field("ints", MetadataValue::IntArray(vec![1, 2]));
+        im.set_field("doubles", MetadataValue::DoubleArray(vec![1.5, 2.5]));
+        im.set_field("scalar-int", MetadataValue::Int(1));
+        im.set_field("scalar-double", MetadataValue::Double(1.5));
+
+        assert_eq!(im.get_int_array("ints"), Some(&[1i64, 2][..]));
+        assert_eq!(im.get_double_array("doubles"), Some(&[1.5f64, 2.5][..]));
+
+        assert_eq!(
+            im.get_double_array("ints"),
+            None,
+            "an int array is not a double array"
+        );
+        assert_eq!(
+            im.get_int_array("doubles"),
+            None,
+            "and a double array is not an int array"
+        );
+        assert_eq!(im.get_double_array("scalar-double"), None);
+        assert_eq!(im.get_int_array("scalar-int"), None);
+        assert_eq!(im.get_double_array("absent"), None);
+
+        // The type codes are what `get_typeof` hands a ported call site, and
+        // they have to differ for the same reason.
+        assert_eq!(im.get_typeof("ints"), 5);
+        assert_eq!(im.get_typeof("doubles"), 6);
+    }
+
+    /// A value carried out of a *legacy JSON* trailer has no XML spelling, so
+    /// the file keeps the JSON trailer rather than losing it.
+    ///
+    /// Translating it would mean interpreting it: the two formats encode the
+    /// same value differently (`{"DoubleArray":[1.5,2.5]}` against
+    /// `type="VipsArrayDouble">1.5 2.5 `), and a build that cannot name the
+    /// variant cannot convert between the encodings. Dropping it would be the
+    /// #565 data loss one step later, so the writer stays on the old format
+    /// for exactly the files that need it, and flips to XML the moment
+    /// nothing needs it any more.
+    #[test]
+    fn v_trailer_keeps_the_json_form_for_a_value_with_no_xml_spelling() {
+        let carried = decode_bytes(&file_from_a_newer_build()).unwrap();
+        let rewritten = carried.encode_vips().unwrap();
+        assert!(
+            is_json_trailer(&rewritten[v_body().len()..]),
+            "a JSON-only carried value keeps the JSON trailer"
+        );
+        // Which is the only format that can still hold it: everything comes
+        // back, twice over, and the released reader gets nothing at all,
+        // because an unknown value fails its whole-trailer parse. That is the
+        // #565 bug it shipped with, not something this change added.
+        let twice =
+            decode_bytes(&decode_bytes(&rewritten).unwrap().encode_vips().unwrap()).unwrap();
+        assert_eq!(twice.get_field("note").unwrap().as_str(), "hello");
+        assert_eq!(twice.icc_profile(), Some(&[5u8, 5, 5][..]));
+        assert_eq!(
+            released_reader(&rewritten[v_body().len()..]),
+            (None, vec![])
+        );
+
+        // Drop the value that forced it and the format flips.
+        let mut named = decode_bytes(&file_from_a_newer_build()).unwrap();
+        named.set_typeof("some-flag", 0);
+        let rewritten = named.encode_vips().unwrap();
+        assert!(
+            !is_json_trailer(&rewritten[v_body().len()..]),
+            "with nothing JSON-only left, the trailer must be the XML vips reads"
+        );
+        assert_eq!(
+            decode_bytes(&rewritten).unwrap().icc_profile(),
+            Some(&[5u8, 5, 5][..])
+        );
+    }
+
+    /// The base64 codec used for a `VipsBlob` field: the RFC 4648 section 10
+    /// vectors, which is the specification `g_base64_encode` implements, plus
+    /// an all-bytes round trip and the rejections that send a malformed field
+    /// to the opaque carrier instead of to a wrong value.
+    #[test]
+    fn base64_matches_the_reference_vectors() {
+        for (plain, encoded) in [
+            ("", ""),
+            ("f", "Zg=="),
+            ("fo", "Zm8="),
+            ("foo", "Zm9v"),
+            ("foob", "Zm9vYg=="),
+            ("fooba", "Zm9vYmE="),
+            ("foobar", "Zm9vYmFy"),
+        ] {
+            assert_eq!(base64_encode(plain.as_bytes()), encoded);
+            assert_eq!(
+                base64_decode(encoded).as_deref(),
+                Some(plain.as_bytes()),
+                "decoding {encoded:?}"
+            );
+        }
+
+        let all: Vec<u8> = (0..=255u8).collect();
+        assert_eq!(base64_decode(&base64_encode(&all)), Some(all));
+        // Whitespace and a missing pad are tolerated, the way
+        // `g_base64_decode` tolerates them; junk is not.
+        assert_eq!(base64_decode(" Zm9v \n"), Some(b"foo".to_vec()));
+        assert_eq!(base64_decode("Zg"), Some(b"f".to_vec()));
+        for bad in [
+            "Zm9*",       // not in the alphabet
+            "Zm==9v",     // data after the padding
+            "Zm9vYg====", // more padding than a group can hold
+            "Zh==",       // trailing bits that are not zero
+        ] {
+            assert_eq!(base64_decode(bad), None, "must reject {bad:?}");
+        }
+    }
+
+    /// Pins every [`Interpretation`] to its `VipsInterpretation` code and
+    /// nickname, so the mapping cannot drift from
+    /// `libvips/include/vips/image.h:96-117` (8.18.4) when a variant lands.
+    ///
+    /// The table here is the `vips_tag` match, which is exhaustive on
+    /// purpose: a new variant does not compile until it is handed both a code
+    /// and a nickname right there, and every assertion below is driven off
+    /// what it returns rather than off a second copy. `VARIANTS` only supplies
+    /// the iteration order; the sweep at the end pins its contents from the
+    /// other side, so a variant left out of it is caught as soon as the reader
+    /// learns the code. The real guarantee that no variant ships untagged is
+    /// still that the production `interpretation_code` and
+    /// `interpretation_nickname` have no `_` arm.
+    #[test]
+    fn interpretation_code_table_matches_vips() {
+        // The `VipsInterpretation` code and libvips nickname every variant
+        // must carry, straight off `image.h`. Exhaustive: adding a variant
+        // to `Interpretation` breaks this match until both are filled in.
+        fn vips_tag(i: Interpretation) -> (i32, &'static str) {
+            match i {
+                Interpretation::Multiband => (0, "multiband"),
+                Interpretation::Bw => (1, "b-w"),
+                Interpretation::Histogram => (10, "histogram"),
+                Interpretation::Xyz => (12, "xyz"),
+                Interpretation::Lab => (13, "lab"),
+                Interpretation::Cmyk => (15, "cmyk"),
+                Interpretation::Labq => (16, "labq"),
+                Interpretation::Rgb => (17, "rgb"),
+                Interpretation::Cmc => (18, "cmc"),
+                Interpretation::Lch => (19, "lch"),
+                Interpretation::Labs => (21, "labs"),
+                Interpretation::Srgb => (22, "srgb"),
+                Interpretation::Yxy => (23, "yxy"),
+                Interpretation::Fourier => (24, "fourier"),
+                Interpretation::Rgb16 => (25, "rgb16"),
+                Interpretation::Grey16 => (26, "grey16"),
+                Interpretation::Matrix => (27, "matrix"),
+                Interpretation::ScRgb => (28, "scrgb"),
+                Interpretation::Hsv => (29, "hsv"),
+                Interpretation::OkLab => (30, "oklab"),
+                Interpretation::OkLch => (31, "oklch"),
+            }
+        }
+
+        const VARIANTS: [Interpretation; 21] = [
+            Interpretation::Multiband,
+            Interpretation::Bw,
+            Interpretation::Histogram,
+            Interpretation::Xyz,
+            Interpretation::Lab,
+            Interpretation::Cmyk,
+            Interpretation::Labq,
+            Interpretation::Rgb,
+            Interpretation::Cmc,
+            Interpretation::Lch,
+            Interpretation::Labs,
+            Interpretation::Srgb,
+            Interpretation::Yxy,
+            Interpretation::Fourier,
+            Interpretation::Rgb16,
+            Interpretation::Grey16,
+            Interpretation::Matrix,
+            Interpretation::ScRgb,
+            Interpretation::Hsv,
+            Interpretation::OkLab,
+            Interpretation::OkLch,
+        ];
+
+        for interp in VARIANTS {
+            let (code, nickname) = vips_tag(interp);
+            assert_eq!(
+                interpretation_code(interp),
+                code,
+                "{nickname} must write VipsInterpretation {code}"
+            );
+            assert_eq!(
+                interpretation_from_code(code),
+                Some(interp),
+                "VipsInterpretation {code} must read back as {nickname}"
+            );
+            assert_eq!(interpretation_nickname(interp), nickname);
+            assert_eq!(interpretation_from_nickname(nickname), Some(interp));
+        }
+
+        // Nothing in the language binds `VARIANTS`' length to the enum, so
+        // pin it against the reader instead: every code the reader accepts
+        // has to be one this test drives, and every code it rejects has to
+        // be one this test does not. That covers VIPS_INTERPRETATION_ERROR
+        // (-1), which vips does emit, the codes libvips leaves unassigned
+        // inside its range (2, 11, 14, 20), and everything past
+        // VIPS_INTERPRETATION_LAST (32). The read-only legacy aliases 1000 /
+        // 1001 sit outside this range on purpose and are pinned by
+        // `legacy_private_oklab_codes_read_but_are_not_written`.
+        for code in -1..=64 {
+            let driven = VARIANTS.iter().any(|&v| vips_tag(v).0 == code);
+            assert_eq!(
+                interpretation_from_code(code).is_some(),
+                driven,
+                "VipsInterpretation {code}: the reader and this table disagree"
+            );
+        }
+    }
+
+    /// A `.v` written by real vips tags OkLab/OkLch with `Type = 30` / `31`
+    /// (`VIPS_INTERPRETATION_OKLAB` / `_OKLCH`,
+    /// `libvips/include/vips/image.h:115-116`), so libviprs has to read those
+    /// files back as [`Interpretation::OkLab`] / [`Interpretation::OkLch`]
+    /// instead of falling through to format inference and reporting
+    /// `Multiband`.
+    ///
+    /// The fixture is the byte-for-byte 64-byte header vips 8.18.4 wrote for
+    ///
+    /// ```text
+    /// vips black t.v 4 4 --bands 3
+    /// vips colourspace t.v ok.v oklab      # and again for oklch
+    /// ```
+    ///
+    /// followed by that file's 4x4x3 float pixels (all zero, it is black), so
+    /// nothing binary is checked in. vips writes the header in the machine's
+    /// own byte order; these are the little-endian bytes, which on a
+    /// big-endian host also exercises the decoder's swap path.
+    #[test]
+    fn vips_written_oklab_and_oklch_read_back_tagged() {
+        #[rustfmt::skip]
+        const VIPS_OKLAB_HEADER: [u8; VIPS_HEADER_LEN] = [
+            0xb6, 0xa6, 0xf2, 0x08, // magic (little-endian)
+            0x04, 0x00, 0x00, 0x00, // Xsize 4
+            0x04, 0x00, 0x00, 0x00, // Ysize 4
+            0x03, 0x00, 0x00, 0x00, // Bands 3
+            0x20, 0x00, 0x00, 0x00, // Bbits 32
+            0x06, 0x00, 0x00, 0x00, // BandFmt 6 (float)
+            0x00, 0x00, 0x00, 0x00, // Coding 0 (none)
+            0x1e, 0x00, 0x00, 0x00, // Type 30 (VIPS_INTERPRETATION_OKLAB)
+            0x00, 0x00, 0x80, 0x3f, // Xres 1.0
+            0x00, 0x00, 0x80, 0x3f, // Yres 1.0
+            0x00, 0x00, 0x00, 0x00, // Length (deprecated)
+            0x00, 0x00, 0x00, 0x00, // Compression + Level (deprecated)
+            0x00, 0x00, 0x00, 0x00, // Xoffset 0
+            0x00, 0x00, 0x00, 0x00, // Yoffset 0
+            0x00, 0x00, 0x00, 0x00, // reserved
+            0x00, 0x00, 0x00, 0x00, // reserved
+        ];
+        // The oklch file vips wrote differs from the oklab one in exactly one
+        // byte: the Type word at offset 28, 30 -> 31.
+        const TYPE_OFFSET: usize = 28;
+
+        for (code, expected) in [(30u8, Interpretation::OkLab), (31, Interpretation::OkLch)] {
+            let mut bytes = VIPS_OKLAB_HEADER.to_vec();
+            bytes[TYPE_OFFSET] = code;
+            // 4x4 pixels, 3 float bands, all zero: `vips black` output.
+            bytes.resize(VIPS_HEADER_LEN + 4 * 4 * 3 * 4, 0);
+
+            let back = decode_bytes(&bytes).unwrap();
+            assert_eq!(
+                back.interpretation(),
+                expected,
+                "Type {code} must tag {expected:?}"
+            );
+            assert_eq!(
+                back.get_field("interpretation").unwrap().as_str(),
+                interpretation_nickname(expected)
+            );
+            assert_eq!((back.width(), back.height()), (4, 4));
+            assert_eq!(
+                back.format(),
+                PixelFormat::with_kind(3, SampleKind::F32).unwrap()
+            );
+        }
+    }
+
+    /// libviprs used to write private codes 1000 / 1001 for OkLab / OkLch,
+    /// before libvips 8.18 assigned them 30 / 31. The private codes stay
+    /// readable so `.v` files libviprs already wrote keep loading, but the
+    /// encoder must never emit them again.
+    #[test]
+    fn legacy_private_oklab_codes_read_but_are_not_written() {
+        // The header `Type` word, the same offset the vips fixture patches.
+        const TYPE_OFFSET: usize = 28;
+
+        assert_eq!(interpretation_from_code(1000), Some(Interpretation::OkLab));
+        assert_eq!(interpretation_from_code(1001), Some(Interpretation::OkLch));
+
+        for (interp, code) in [(Interpretation::OkLab, 30i32), (Interpretation::OkLch, 31)] {
+            let im = Raster::black(2, 2).copy().interpretation(interp).build();
+            let bytes = im.encode_vips().unwrap();
+            let written =
+                i32::from_ne_bytes(bytes[TYPE_OFFSET..TYPE_OFFSET + 4].try_into().unwrap());
+            assert_eq!(written, code, "encode_vips must write the libvips code");
+            // And it round-trips through our own reader.
+            assert_eq!(decode_bytes(&bytes).unwrap().interpretation(), interp);
+        }
+
+        // A legacy libviprs file (private code in the Type word) still loads.
+        let mut legacy = Raster::black(2, 2)
+            .copy()
+            .interpretation(Interpretation::OkLab)
+            .build()
+            .encode_vips()
+            .unwrap();
+        legacy[TYPE_OFFSET..TYPE_OFFSET + 4].copy_from_slice(&1000i32.to_ne_bytes());
+        assert_eq!(
+            decode_bytes(&legacy).unwrap().interpretation(),
+            Interpretation::OkLab
+        );
+
+        // The one above is written in the host's byte order, which is the
+        // easy half. A migrating file is a fixed byte pattern on somebody
+        // else's disk, and 1000 / 1001 have a low byte of 0xe8 / 0xe9, so
+        // unlike the codes 30 / 31 they do not survive a byte-order swap by
+        // accident. This is the explicit little-endian header, laid out like
+        // the vips fixture above, which puts the decoder's swap path under
+        // test on a big-endian host.
+        #[rustfmt::skip]
+        const LEGACY_LE_HEADER: [u8; VIPS_HEADER_LEN] = [
+            0xb6, 0xa6, 0xf2, 0x08, // magic (little-endian)
+            0x02, 0x00, 0x00, 0x00, // Xsize 2
+            0x02, 0x00, 0x00, 0x00, // Ysize 2
+            0x03, 0x00, 0x00, 0x00, // Bands 3
+            0x20, 0x00, 0x00, 0x00, // Bbits 32
+            0x06, 0x00, 0x00, 0x00, // BandFmt 6 (float)
+            0x00, 0x00, 0x00, 0x00, // Coding 0 (none)
+            0xe8, 0x03, 0x00, 0x00, // Type 1000 (legacy libviprs OkLab)
+            0x00, 0x00, 0x80, 0x3f, // Xres 1.0
+            0x00, 0x00, 0x80, 0x3f, // Yres 1.0
+            0x00, 0x00, 0x00, 0x00, // Length (deprecated)
+            0x00, 0x00, 0x00, 0x00, // Compression + Level (deprecated)
+            0x00, 0x00, 0x00, 0x00, // Xoffset 0
+            0x00, 0x00, 0x00, 0x00, // Yoffset 0
+            0x00, 0x00, 0x00, 0x00, // reserved
+            0x00, 0x00, 0x00, 0x00, // reserved
+        ];
+
+        for (legacy_code, expected) in [
+            (1000i32, Interpretation::OkLab),
+            (1001, Interpretation::OkLch),
+        ] {
+            let mut bytes = LEGACY_LE_HEADER.to_vec();
+            bytes[TYPE_OFFSET..TYPE_OFFSET + 4].copy_from_slice(&legacy_code.to_le_bytes());
+            // 2x2 pixels, 3 float bands, all zero.
+            bytes.resize(VIPS_HEADER_LEN + 2 * 2 * 3 * 4, 0);
+
+            assert_eq!(
+                decode_bytes(&bytes).unwrap().interpretation(),
+                expected,
+                "little-endian legacy Type {legacy_code} must still read as {expected:?}"
+            );
+        }
     }
 
     // -- free functions -----------------------------------------------------

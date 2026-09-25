@@ -43,22 +43,49 @@
 //!
 //! # Intended use
 //!
-//! ```ignore
-//! use libviprs::resume::{JobCheckpoint, JobMetadata, PlanContract, compute_plan_hash};
+//! [`JobMetadata`] is `#[non_exhaustive]`, so a struct literal does not
+//! compile outside this crate at all (E0639). This example built one for as
+//! long as it carried `ignore`, which meant the snippet the module recommends
+//! was one nobody could run and the compiler was never asked (issue #950).
+//! [`JobMetadata::new`] is the constructor; the fields it does not take are
+//! public and assignable afterwards.
 //!
-//! let contract = PlanContract::from_engine(&config, &sink);
-//! let hash = compute_plan_hash(&plan, &contract);
-//! let meta = JobMetadata {
-//!     schema_version: "1".to_string(),
-//!     plan_hash: hash,
-//!     completed_tiles: Vec::new(),
-//!     levels_completed: Vec::new(),
-//!     started_at: now_rfc3339(),
-//!     last_checkpoint_at: now_rfc3339(),
-//!     content_format: contract.format,
-//! };
-//! JobCheckpoint::save(output_dir, &meta)?;
 //! ```
+//! use libviprs::dedupe::DedupeStrategy;
+//! use libviprs::engine::BlankTileStrategy;
+//! use libviprs::planner::{Layout, PyramidPlanner};
+//! use libviprs::resume::{JobCheckpoint, JobMetadata, PlanContract, compute_plan_hash};
+//! use libviprs::sink::TileFormat;
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let plan = PyramidPlanner::new(4096, 3072, 256, 0, Layout::DeepZoom)?.plan();
+//! let contract = PlanContract {
+//!     format: Some(TileFormat::Png),
+//!     background_rgb: [255, 255, 255],
+//!     blank_strategy: BlankTileStrategy::Emit,
+//!     dedupe: DedupeStrategy::None,
+//!     source_digest: None,
+//! };
+//!
+//! let mut meta = JobMetadata::new(
+//!     compute_plan_hash(&plan, &contract),
+//!     "2026-08-29T00:00:00Z".to_string(),
+//! );
+//! meta.content_format = contract.format;
+//!
+//! let dir = tempfile::tempdir()?;
+//! JobCheckpoint::save(dir.path(), &meta)?;
+//!
+//! let resumed = JobCheckpoint::load(dir.path())?.expect("just written");
+//! assert_eq!(resumed.plan_hash, meta.plan_hash);
+//! assert_eq!(resumed.content_format, Some(TileFormat::Png));
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! A run driven by [`crate::engine`] builds the contract with
+//! [`PlanContract::from_engine`] instead, so the value derived at
+//! checkpoint-write time and the value derived at the resume gate agree.
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -292,9 +319,10 @@ pub struct JobMetadata {
     /// Coordinates of every tile that has been successfully written and
     /// flushed since the job started.
     ///
-    /// Uses the [`tile_coord_vec_serde`] adapter because [`TileCoord`] in
+    /// Serialised through a local adapter, because [`TileCoord`] in
     /// `crate::planner` does not itself implement [`Serialize`] /
-    /// [`Deserialize`].
+    /// [`Deserialize`]; each coord goes on the wire as a small
+    /// `{ level, col, row }` object.
     #[serde(with = "tile_coord_vec_serde")]
     pub completed_tiles: Vec<TileCoord>,
     /// Level indices that have been fully completed (every tile in the level
@@ -442,8 +470,8 @@ pub(super) mod tile_coord_vec_serde {
 /// that makes it unsafe to resume.
 ///
 /// A checkpoint whose `plan_hash` disagrees with the current plan is *not*
-/// reported here: that divergence is detected at the resume gate
-/// ([`verify_checkpoint_contract`]) and surfaced to callers as
+/// reported here: that divergence is detected at the resume gate and surfaced
+/// to callers as
 /// [`crate::engine::EngineError::PlanHashMismatch`], which carries the
 /// additional format-change context a fixed-field checkpoint error could not.
 ///
@@ -673,7 +701,10 @@ fn read_segment_log(path: &Path) -> Result<Vec<TileCoord>, ResumeError> {
     };
     let frames = bytes.len() / SEGMENT_RECORD_LEN;
     let mut coords = Vec::with_capacity(frames);
-    for chunk in bytes.chunks_exact(SEGMENT_RECORD_LEN) {
+    // Only the complete frames: `as_chunks` hands back any torn trailing
+    // partial record as the `.1` remainder, which is exactly what this
+    // replay drops.
+    for chunk in bytes.as_chunks::<SEGMENT_RECORD_LEN>().0 {
         let level = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         let col = u32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]);
         let row = u32::from_le_bytes([chunk[8], chunk[9], chunk[10], chunk[11]]);
@@ -814,10 +845,10 @@ fn tmp_path_for(final_path: &Path) -> PathBuf {
 /// process-wide counter) means two writers targeting the same destination
 /// never stage into or clobber each other's temp file.
 pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
     }
     let tmp = tmp_path_for(path);
     // Scope the handle so it is closed before the rename — some filesystems
@@ -1073,9 +1104,9 @@ impl FromIterator<TileCoord> for CompletedTileSet {
 /// geometry so that resuming a checkpoint whose contract differs is rejected
 /// with [`crate::engine::EngineError::PlanHashMismatch`] instead of silently
 /// mixing two incompatible outputs on disk. The [`format`](Self::format) is
-/// *not* hashed — it is compared separately by [`verify_checkpoint_contract`]
-/// so a transparent sink wrapper that cannot report the format does not break
-/// a legitimate resume.
+/// *not* hashed; it is compared separately at the resume gate, so a
+/// transparent sink wrapper that cannot report the format does not break a
+/// legitimate resume.
 ///
 /// Build one with [`PlanContract::from_engine`] so that the value derived at
 /// checkpoint-write time and the value derived at the resume gate agree for
@@ -1084,9 +1115,8 @@ impl FromIterator<TileCoord> for CompletedTileSet {
 pub struct PlanContract<'a> {
     /// Tile encoding the sink commits to, when it has one. `None` for sinks
     /// that do not pin a single on-disk format. Recorded in the checkpoint
-    /// (see [`JobMetadata::content_format`]) and compared by
-    /// [`verify_checkpoint_contract`], but deliberately excluded from
-    /// [`compute_plan_hash`].
+    /// (see [`JobMetadata::content_format`]) and compared at the resume gate,
+    /// but deliberately excluded from [`compute_plan_hash`].
     pub format: Option<TileFormat>,
     /// Background RGB used to pad edge tiles.
     pub background_rgb: [u8; 3],
@@ -1144,8 +1174,8 @@ impl<'a> PlanContract<'a> {
 /// [`crate::sink::TileSink::content_format`]. Baking the format into this
 /// hash would then flip a bit purely because a wrapper was added or removed,
 /// spuriously rejecting a valid checkpoint. A genuine format change is caught
-/// separately by [`verify_checkpoint_contract`], which compares the format
-/// recorded in the checkpoint against the live sink's.
+/// separately at the resume gate, which compares the format recorded in the
+/// checkpoint against the live sink's.
 pub fn compute_plan_hash(plan: &PyramidPlan, contract: &PlanContract<'_>) -> String {
     // Domain separator — ties this hash to a specific canonicalisation so
     // the same bytes cannot accidentally match some other hash contract.
@@ -1248,12 +1278,12 @@ pub(crate) fn verify_checkpoint_contract(
     // live sink pin a concrete — and different — encoding. Either side being
     // `None` means "format unknown", which we treat as compatible rather than
     // rejecting a valid resume behind a transparent wrapper.
-    if let (Some(recorded), Some(current)) = (meta.content_format, live.format) {
-        if recorded != current {
-            return Err(format!(
-                "{expected} (tile format changed from {recorded:?} to {current:?})"
-            ));
-        }
+    if let (Some(recorded), Some(current)) = (meta.content_format, live.format)
+        && recorded != current
+    {
+        return Err(format!(
+            "{expected} (tile format changed from {recorded:?} to {current:?})"
+        ));
     }
 
     Ok(())

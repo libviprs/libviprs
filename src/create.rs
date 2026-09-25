@@ -101,8 +101,8 @@ use std::num::NonZeroU16;
 use ab_glyph::{Font, FontRef, Glyph, PxScale, ScaleFont, point as ab_point};
 use thiserror::Error;
 
-use crate::conversion::Interpretation;
-use crate::pixel::PixelFormat;
+use crate::conversion::{Interpretation, RasterMeta};
+use crate::pixel::{PixelFormat, SampleKind};
 use crate::raster::{Raster, RasterError};
 
 /// Typed error for the create/generator surface.
@@ -173,16 +173,26 @@ fn float1() -> PixelFormat {
     PixelFormat::FloatF32(NonZeroU16::new(1).expect("1 is non-zero"))
 }
 
-/// Append `v` as one native-endian sample of `bpc` bytes: a C-style cast
-/// into the 8- or 16-bit unsigned range, or an `f32` for the 4-byte float
-/// depth. These are exactly the depths [`PixelFormat::with_channels`]
-/// accepts, so `bpc` is always 1, 2, or 4. Rust's saturating float-to-int
-/// cast reproduces libvips' clip-then-truncate `vips_cast` behaviour.
-fn push_constant_sample(out: &mut Vec<u8>, bpc: usize, v: f64) {
-    match bpc {
-        1 => out.push(v as u8),
-        2 => out.extend_from_slice(&(v as u16).to_ne_bytes()),
-        _ => out.extend_from_slice(&(v as f32).to_ne_bytes()),
+/// Append `v` as one native-endian sample of `kind`: a C-style cast into
+/// the kind's range, or an `f32` for the float kind. Rust's saturating
+/// float-to-int cast reproduces libvips' clip-then-truncate `vips_cast`
+/// behaviour, and it saturates at each kind's own bounds including a signed
+/// kind's negative floor.
+///
+/// Keyed on [`SampleKind`] and not on a byte width, because the width
+/// spelling this replaces wrote an `f32` for every width that was not 1 or
+/// 2, so a 32-bit integer carrier's constant would have been stored as the
+/// float bit pattern of its own value (issue #607). The match has no
+/// wildcard, so a kind added to that enum is a compile error here.
+fn push_constant_sample(out: &mut Vec<u8>, kind: SampleKind, v: f64) {
+    match kind {
+        SampleKind::U8 => out.push(v as u8),
+        SampleKind::I8 => out.push(v as i8 as u8),
+        SampleKind::U16 => out.extend_from_slice(&(v as u16).to_ne_bytes()),
+        SampleKind::I16 => out.extend_from_slice(&(v as i16).to_ne_bytes()),
+        SampleKind::U32 => out.extend_from_slice(&(v as u32).to_ne_bytes()),
+        SampleKind::I32 => out.extend_from_slice(&(v as i32).to_ne_bytes()),
+        SampleKind::F32 => out.extend_from_slice(&(v as f32).to_ne_bytes()),
     }
 }
 
@@ -268,7 +278,7 @@ impl Raster {
     pub fn try_black_bands(width: u32, height: u32, bands: u32) -> Result<Raster, CreateError> {
         let format = usize::try_from(bands)
             .ok()
-            .and_then(|b| PixelFormat::with_channels(b, 1))
+            .and_then(|b| PixelFormat::with_kind(b, SampleKind::U8))
             .ok_or(CreateError::InvalidBandCount { op: "black", bands })?;
         Ok(Raster::zeroed(width, height, format)?)
     }
@@ -308,32 +318,50 @@ impl Raster {
     pub fn try_new_from_image(&self, value: &[f64]) -> Result<Raster, CreateError> {
         let bands = value.len();
         // libvips `vips_image_new_from_image` keeps the source `BandFmt`
-        // (sample depth) and only changes the band count to `value.len()`.
-        let bpc = self.format().bytes_per_channel();
-        let format = PixelFormat::with_channels(bands, bpc).ok_or_else(|| {
-            CreateError::InvalidBandCount {
+        // and only changes the band count to `value.len()`. Carried as a
+        // kind and not as a width: the width-keyed constructor answers
+        // "float" for four bytes whoever asks, so a 32-bit integer source
+        // would have been retagged float on the way through (issue #607).
+        let kind = self.format().kind();
+        let format =
+            PixelFormat::with_kind(bands, kind).ok_or_else(|| CreateError::InvalidBandCount {
                 op: "new_from_image",
                 bands: u32::try_from(bands).unwrap_or(u32::MAX),
-            }
-        })?;
+            })?;
         // One pixel's native-endian sample bytes, then replicated across
         // every pixel so `avg()` equals the mean of `value`.
-        let mut pixel = Vec::with_capacity(bands * bpc);
+        let mut pixel = Vec::with_capacity(bands * kind.bytes());
         for &v in value {
-            push_constant_sample(&mut pixel, bpc, v);
+            push_constant_sample(&mut pixel, kind, v);
         }
         let mut out = Raster::zeroed(self.width(), self.height(), format)?;
         for chunk in out.data_mut().chunks_exact_mut(pixel.len()) {
             chunk.copy_from_slice(&pixel);
         }
-        // Carry the source geometry/interpretation block only (libvips
-        // copies the header geometry). The attached fields stay empty from
-        // `Raster::zeroed`, so ICC/EXIF/filename are intentionally not
-        // inherited. Pin the resolved interpretation so it survives the
-        // band-count change even when the source left it inferred from the
-        // format.
-        out.meta = self.meta;
-        out.meta.interpretation = Some(self.interpretation());
+        // Carry the source geometry/interpretation block only, and not
+        // through `Raster::carry_meta_from`, because this is the one op in the
+        // crate that carries the header block *without* the fields. That is
+        // measured rather than assumed: `vips_image_new_from_image` has no CLI,
+        // so I called it against the pinned 8.18.6 through `ctypes` on
+        // `libvips.42.dylib`, and from a source tagged
+        // `scrgb / xres 5 / yres 7 / xoffset 11 / yoffset 13 / orientation 6`
+        // with an attached string and a 3144-byte profile, the result reports
+        // scRGB, 5, 7, 11, 13 and **no** attached field, **no** profile and
+        // `orientation` back at 1.
+        //
+        // The orientation is why this is not just "the fields stay empty from
+        // `Raster::zeroed`": vips holds orientation as an attached field and
+        // drops it with the rest, where libviprs keeps it in `RasterMeta` and
+        // so used to carry it here (#717). Reset it to the default rather than
+        // inherit it, or a constant image the size of the source arrives
+        // claiming the source's rotation and a later `autorot` acts on it.
+        out.meta = RasterMeta {
+            orientation: RasterMeta::default().orientation,
+            ..self.meta
+        };
+        // Pin the resolved interpretation so it survives the band-count change
+        // even when the source left it inferred from the format.
+        out.set_interpretation(Some(self.interpretation()));
         Ok(out)
     }
 
@@ -954,16 +982,18 @@ impl Raster {
                 height: 1,
             })
         })?;
-        let format = PixelFormat::with_channels(bands, 4).ok_or(CreateError::InvalidBandCount {
-            op: "buildlut",
-            bands: bands as u32,
-        })?;
+        let format = PixelFormat::with_kind(bands, SampleKind::F32).ok_or(
+            CreateError::InvalidBandCount {
+                op: "buildlut",
+                bands: bands as u32,
+            },
+        )?;
         let mut data = Vec::with_capacity(buf.len() * 4);
         for v in &buf {
             data.extend_from_slice(&(*v as f32).to_ne_bytes());
         }
         let mut out = Raster::new(width, 1, format, data)?;
-        out.meta.interpretation = Some(Interpretation::Histogram);
+        out.set_interpretation(Some(Interpretation::Histogram));
         Ok(out)
     }
 
@@ -1035,7 +1065,7 @@ impl Raster {
             data.extend_from_slice(&v.to_ne_bytes());
         }
         let mut out = Raster::new((IN_MAX + 1) as u32, 1, PixelFormat::Gray16, data)?;
-        out.meta.interpretation = Some(Interpretation::Histogram);
+        out.set_interpretation(Some(Interpretation::Histogram));
         Ok(out)
     }
 
@@ -1076,7 +1106,7 @@ impl Raster {
             }
         }
         let mut out = Raster::new(width, height, float1(), data)?;
-        out.meta.interpretation = Some(Interpretation::Matrix);
+        out.set_interpretation(Some(Interpretation::Matrix));
         Ok(out)
     }
 
@@ -1128,7 +1158,7 @@ fn mask_image(
         }
     })?;
     if !uchar {
-        out.meta.interpretation = Some(Interpretation::Fourier);
+        out.set_interpretation(Some(Interpretation::Fourier));
     }
     Ok(out)
 }
@@ -1803,7 +1833,7 @@ impl Raster {
                 }
             }
         })?;
-        out.meta.interpretation = Some(Interpretation::Bw);
+        out.set_interpretation(Some(Interpretation::Bw));
         Ok(out)
     }
 
@@ -1847,7 +1877,7 @@ impl Raster {
 /// The bundled default face for [`Raster::text`]: Bitstream Vera Sans
 /// (licence in `fonts/VERA-COPYRIGHT.TXT`; free redistribution bundled
 /// with software).
-static VERA_TTF: &[u8] = include_bytes!("../fonts/Vera.ttf");
+pub(crate) static VERA_TTF: &[u8] = include_bytes!("../fonts/Vera.ttf");
 
 /// libvips' default text size in points (`vips_text` default font
 /// "sans 12").
@@ -2826,5 +2856,71 @@ mod tests {
                 bands: 0
             })
         ));
+    }
+
+    /**
+     * Tests that this module dispatches on sample kind and never on byte
+     * width, by asserting that neither the byte-width accessor on
+     * [`PixelFormat`] nor its width-keyed constructor survives in
+     * `src/create.rs`.
+     * Works by scanning the module's own source, compiled in with
+     * `include_str!`, for the accessor's name; the needle is spelled in two
+     * halves so this assertion is not itself a hit. A byte width is not a
+     * sample kind: four bytes is `f32` today and would be `u32` under issue
+     * #517, so the sites this replaced would store a 32-bit integer constant as the float bit pattern of its own value (issue #607).
+     * Input: `src/create.rs` -> Output: zero occurrences.
+     */
+    #[test]
+    fn create_does_not_dispatch_on_byte_width() {
+        const SRC: &str = include_str!("create.rs");
+        let needles = [
+            concat!("bytes_per_", "channel"),
+            concat!("with_", "channels"),
+        ];
+        // Positive control: the same scan over the same string finds a token
+        // that is present, so the zero below is a real zero and not the
+        // vacuous pass an empty read would give.
+        assert!(
+            SRC.contains(concat!("fn ", "push_constant_sample")),
+            "positive control failed: the scan cannot see this module's source"
+        );
+        for needle in needles {
+            assert_eq!(
+                SRC.matches(needle).count(),
+                0,
+                "{needle} is back in src/create.rs; dispatch on \
+                 PixelFormat::kind() and PixelFormat::with_kind() instead"
+            );
+        }
+    }
+
+    /**
+     * Tests that `new_from_image` keeps the source's sample kind and writes
+     * the constant at that kind's width, which the byte-width spelling got
+     * right only because four bytes happened to mean float.
+     * Works by building the constant from a `Gray16` source and reading the
+     * samples back as `u16`, with a value above `u8::MAX` so a truncating
+     * write cannot pass.
+     * Input: Gray16 source, `[4096.0, 300.0]` -> Output: a two-band 16-bit
+     * raster holding 4096 and 300 in every pixel.
+     */
+    #[test]
+    fn new_from_image_writes_the_source_kind_at_its_own_width() {
+        let src = Raster::zeroed(2, 2, PixelFormat::Gray16).expect("gray16 source");
+        let out = src
+            .try_new_from_image(&[4096.0, 300.0])
+            .expect("two bands is representable");
+        assert_eq!(
+            out.format(),
+            PixelFormat::with_kind(2, SampleKind::U16).unwrap()
+        );
+        let got: Vec<u16> = out
+            .data()
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_ne_bytes(*c))
+            .collect();
+        assert_eq!(got, vec![4096, 300, 4096, 300, 4096, 300, 4096, 300]);
     }
 }

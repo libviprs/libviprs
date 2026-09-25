@@ -14,7 +14,7 @@
 //! setup is reproduced with direct `Raster` construction and the arithmetic
 //! expressions are kept literal.
 
-use libviprs::{PixelFormat, Raster};
+use libviprs::{Interpretation, PixelFormat, Raster};
 
 /// The ported `make_test_mono`: a 100x100 Gray8 band-reject ring image.
 fn make_test_mono() -> Raster {
@@ -516,6 +516,54 @@ fn ported_surface_premultiply() {
     assert!((px_unpre[3] - alpha).abs() < 1.0);
 }
 
+/// The alpha pair is callable on a float raster from outside the crate and
+/// answers rather than unwinding (issue #631). It used to panic from inside
+/// the fallible form, so this pins the `try_` contract at the crate boundary
+/// where a caller with an OpenEXR or FITS load actually stands.
+///
+/// The two numbers are vips 8.18.6 on `(100, 100, 100, 0.5)`: `0.19607845`
+/// against the default `max_alpha` of 255, and `50` once the raster is tagged
+/// scRGB, which is what an RGB OpenEXR load carries.
+#[test]
+fn ported_surface_premultiply_accepts_float_rasters() {
+    let mut data = Vec::new();
+    for v in [100.0f32, 100.0, 100.0, 0.5] {
+        data.extend_from_slice(&v.to_ne_bytes());
+    }
+    let im = Raster::new(1, 1, PixelFormat::RgbaF32, data).unwrap();
+
+    let pre = im
+        .try_premultiply()
+        .expect("try_premultiply must not fail on a float raster");
+    assert_eq!(pre.format(), PixelFormat::RgbaF32);
+    let got = pre.getpoint(0, 0)[0] as f32;
+    assert_eq!(
+        got.to_bits(),
+        0.196_078_45f32.to_bits(),
+        "premultiply: got {got:?}, want vips' 0.19607845"
+    );
+
+    let unpre = im
+        .try_unpremultiply()
+        .expect("try_unpremultiply must not fail on a float raster");
+    let got = unpre.getpoint(0, 0)[0] as f32;
+    assert_eq!(
+        got.to_bits(),
+        51_000.0f32.to_bits(),
+        "unpremultiply: got {got:?}, want vips' 51000"
+    );
+
+    // The float `max_alpha` follows the interpretation tag, so the same
+    // pixel tagged scRGB divides by 1.0 instead of by 255.
+    let scrgb = im.copy().interpretation(Interpretation::ScRgb).build();
+    let got = scrgb.try_premultiply().unwrap().getpoint(0, 0)[0] as f32;
+    assert_eq!(
+        got.to_bits(),
+        50.0f32.to_bits(),
+        "scRGB premultiply: got {got:?}, want vips' 50"
+    );
+}
+
 /// The ported `test_stdif` call site (`ported_histogram.rs`): stdif(10, 10)
 /// keeps dimensions and moves the mean toward 128 (synthetic input instead
 /// of the sample.jpg fixture).
@@ -848,4 +896,38 @@ fn ported_surface_hough_circle() {
         (r as f64 - 40.0).abs() < 2.0,
         "Radius should be ~40, got {r}"
     );
+}
+
+/// The 2-image `remainder` call site (`a % b`), the image-image companion
+/// to the `rem_const` site `ported_surface_mul_div_pow_mod` pins. Both the
+/// panicking and the fallible form are part of the contract.
+///
+/// The sample point is deliberately (5, 5) and not the centre: `make_test_mono`
+/// is a radial gradient that is flat `0` inside `r <= 0.5`, so a centre sample
+/// asserts `0 % 7 == 0` and an all-zero stub of the right shape passes. (5, 5)
+/// sits in the non-zero annulus, and the `assert_ne!` below keeps it there if
+/// the fixture ever moves.
+#[test]
+fn ported_surface_remainder() {
+    let mono = make_test_mono();
+    let divisor = Raster::new(100, 100, PixelFormat::Gray8, vec![7u8; 100 * 100]).unwrap();
+
+    let result = mono.remainder(&divisor);
+    assert_eq!(result.format(), PixelFormat::Gray8);
+    let px_m = mono.getpoint(5, 5);
+    assert_ne!(
+        px_m[0], 0.0,
+        "(5,5) must be in the non-zero annulus for this assertion to discriminate"
+    );
+    let px_r = result.getpoint(5, 5);
+    assert_eq!(
+        px_r[0],
+        (px_m[0] as u32 % 7) as f64,
+        "remainder at (5,5) should be {} % 7, got {}",
+        px_m[0],
+        px_r[0]
+    );
+
+    let fallible = mono.try_remainder(&divisor).expect("same size, same bands");
+    assert_eq!(fallible.data(), result.data());
 }

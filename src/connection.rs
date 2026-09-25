@@ -205,12 +205,19 @@ pub fn decode_source<R: Read>(source: &mut Source<R>) -> Result<Raster, DecodeEr
     crate::source::decode_bytes(&bytes)
 }
 
-/// Encode a raster into a target in the named format.
+/// Encode a raster into a target in the named format, then write the encoded
+/// bytes to it.
 ///
-/// Dispatches `"jpeg"` / `"jpg"` / `"png"` to the sink encoders and
-/// `"v"` / `"vips"` to the native `.v` encoder, then writes the encoded bytes
-/// to the target. A leading `.` and letter case are ignored, so `"PNG"` and
-/// `".png"` both select PNG.
+/// The dispatch is [`Raster::encode_to_buffer`]'s, and **that** doc carries the
+/// list of format names, deliberately in one place. This one used to keep its
+/// own copy, which named five of the seventeen spellings the dispatch had by
+/// the time anyone measured it, because it was written when five was the whole
+/// of it and nothing connected the two afterwards. So a caller reading here
+/// concluded WebP was unsupported years after it was wired. The list is not
+/// repeated below, and a check refuses to let it come back (issue #881).
+///
+/// A leading `.` and letter case are ignored, so `PNG` and `.png` both select
+/// PNG.
 ///
 /// # Errors
 ///
@@ -230,9 +237,78 @@ pub fn encode_to_target<W: Write>(
 impl Raster {
     /// Encode this raster into a freshly allocated buffer in the named format.
     ///
-    /// Uses the same dispatch as [`encode_to_target`]: `"jpeg"` / `"jpg"` /
-    /// `"png"` and `"v"` / `"vips"` are wired; any other format returns
-    /// [`EncodeError::Unsupported`].
+    /// Uses the same dispatch as [`encode_to_target`]: `"jpeg"` / `"jpg"`,
+    /// `"png"`, `"gif"`, `"webp"`, `"tif"` / `"tiff"`, `"jxl"`,
+    /// `"jp2k"` / `"jp2"` / `"j2k"` / `"jpt"` / `"j2c"` / `"jpc"`, `"uhdr"`,
+    /// `"hdr"`, `"ppm"` / `"pgm"`, `"csv"`, `"mat"`, `"fits"` / `"fit"` / `"fts"`
+    /// and `"v"` / `"vips"` are wired; any other format returns
+    /// [`EncodeError::Unsupported`]. `"webp"` encodes losslessly at
+    /// [`crate::webp::SaveOptions::default`], keeping any attached metadata,
+    /// `"gif"` at [`crate::gif::SaveOptions::default`], and `"jxl"` losslessly at
+    /// [`crate::jxl::SaveOptions::default`], which carries no metadata
+    /// because the encoder writes no box container;
+    /// [`Raster::encode_webp`], [`Raster::encode_gif`] and
+    /// [`Raster::encode_jxl`] take the options explicitly.
+    ///
+    /// `"jxl"` needs the non-default `jxl` feature to produce bytes, and the
+    /// six JPEG 2000 spellings need `jp2k`. They stay live rows without it and
+    /// report [`EncodeError::Unsupported`] carrying `"jxl"` or `"jp2k"`, which
+    /// is the same variant an unrecognised format name gets, so the dispatch
+    /// has one answer for "this build cannot write that" however the caller
+    /// arrived at it.
+    ///
+    /// All six JPEG 2000 spellings write the **same** JP2 container. That is
+    /// not a shortcut: `jp2ksave` hard-codes `OPJ_CODEC_JP2` and, measured on
+    /// 8.18.6, writes byte-identical files under all five suffixes it
+    /// registers.
+    ///
+    /// `"uhdr"` is Ultra HDR (gain-map JPEG, libvips `uhdrsave`) at that
+    /// saver's default quality of 75, and it is the **only** route to the
+    /// writer that takes a format name: `uhdrsave` registers no file suffix
+    /// at all, so [`Raster::save`] has no row for it. Unlike the rows above
+    /// it has an input contract, a 3-band `f32` raster holding linear-light
+    /// scRGB, and a raster that does not meet it is refused with
+    /// [`EncodeError::InvalidParameter`] naming the raster rather than
+    /// [`EncodeError::Unsupported`] naming the format: this build can write
+    /// Ultra HDR, and what is wrong is the input.
+    ///
+    /// `"tif"` and `"tiff"` are the two spellings `tiffsave` registers, and
+    /// they write one container between them: uncompressed strips, which is
+    /// that saver's own default measured on 8.18.6. Unlike
+    /// [`Raster::tiff_save`], which is infallible and answers a raster it
+    /// cannot encode with an empty buffer, this row keeps the typed refusal.
+    ///
+    /// `"hdr"` is Radiance RGBE (libvips `radsave`), and it has the same shape:
+    /// a 3-band `f32` raster only, refused rather than cast, where `radsave`
+    /// declares `mono rgb` and casts whatever it is handed.
+    ///
+    /// `"ppm"` and `"pgm"` are the two binary Netpbm containers this build
+    /// writes, and they are the one place a **name** picks the container
+    /// rather than the codec: `"ppm"` is `P6` and takes three bands, `"pgm"`
+    /// is `P5` and takes one, and each refuses the other's band count rather
+    /// than converting. The other three suffixes `ppmsave` registers are not
+    /// rows: `.pbm` is a `P4` and `.pfm` a `PF`, neither of which this build
+    /// encodes, and `.pnm` is one vips itself refuses.
+    ///
+    /// Those three are written as suffixes and not as quoted format names on
+    /// purpose. A quoted name in this block is a value a caller may pass, and
+    /// `the_format_dispatch_and_the_list_a_caller_is_given_cannot_drift_apart`
+    /// reads them as exactly that.
+    ///
+    /// `"csv"` and `"mat"` are `csvsave` and `matrixsave`'s one registered
+    /// suffix apiece (measured on 8.18.6: `nocache (.csv)` and `nocache
+    /// (.mat)`, both `priority=0, mono`). Both convert a raster with more
+    /// than one band to mono first, the same way both saves declaring the
+    /// `mono` flag do in libvips itself, and both refuse (typed
+    /// [`EncodeError::Encode`]) a multi-band raster whose interpretation has
+    /// no colourspace route rather than guessing one; `"csv"` also writes
+    /// TAB rather than a comma, matching `csvsave` despite the format's name
+    /// (issue #958, and see `src/textio.rs` for the conversion and the
+    /// measurement it is pinned against). `"mat"` carries a known asymmetry:
+    /// vips also registers `.mat` for the MATLAB binary loader and
+    /// disambiguates on the way in by content-sniffing, and this crate's
+    /// sniffer has no text-matrix row, so bytes this writes for `"mat"` do
+    /// not decode back through [`crate::decode_bytes`]/[`crate::decode_file`].
     ///
     /// # Errors
     ///
@@ -251,10 +327,87 @@ impl Raster {
 fn encode_for_format(raster: &Raster, format: &str) -> Result<Vec<u8>, EncodeError> {
     let key = format.trim().trim_start_matches('.').to_ascii_lowercase();
     match key.as_str() {
-        "jpeg" | "jpg" => {
-            crate::sink::encode_jpeg(raster, DEFAULT_JPEG_QUALITY).map_err(sink_err_to_encode)
-        }
+        "jpeg" | "jpg" => crate::sink::encode_jpeg(
+            raster,
+            DEFAULT_JPEG_QUALITY,
+            crate::sink::DEFAULT_BACKGROUND_RGB,
+        )
+        .map_err(sink_err_to_encode),
         "png" => crate::sink::encode_png(raster).map_err(sink_err_to_encode),
+        "gif" => raster.encode_gif(crate::gif::SaveOptions::default()),
+        "webp" => raster.encode_webp(crate::webp::SaveOptions::default()),
+        // Both suffixes `tiffsave` registers, on one arm because neither
+        // picks anything: measured on 8.18.6 its `vips -l` line reads
+        // `nocache (.tif, .tiff)`, and `.btf`, `.tf8`, `.bigtiff` and `.tfx`
+        // are each refused as an unknown format. Ungated, because the `tiff`
+        // crate is already required for decoding.
+        //
+        // Uncompressed strips, which is `tiffsave`'s measured default rather
+        // than a guess: the plain call and `--compression none` write
+        // byte-identical files and `--compression deflate` does not
+        // (issue #948).
+        "tif" | "tiff" => {
+            crate::encode_tiff::encode_tiff_for_save(raster).map_err(save_err_to_encode)
+        }
+        "jxl" => raster.encode_jxl(crate::jxl::SaveOptions::default()),
+        // Every spelling `jp2ksave` answers to, on one arm, because vips
+        // writes the same JP2 container for all five suffixes: measured on
+        // 8.18.6, `vips copy base.v out.EXT` over `jp2`, `j2k`, `jpt`, `j2c`
+        // and `jpc` gives five files with one SHA-256 between them. `"jp2k"`
+        // is here too because that is the saver's name and what a caller who
+        // read `vips -l` would type; `jp2ksave` itself does not answer to it
+        // as a suffix, and neither does anything else, so it costs nothing.
+        //
+        // Not gated, like `"jxl"` above and unlike the extension route:
+        // without the feature `encode_jp2k` already reports
+        // `EncodeError::Unsupported { format: "jp2k" }`, which is the same
+        // variant an unrecognised name gets, so the row stays live and typed
+        // rather than disappearing.
+        "jp2k" | "jp2" | "j2k" | "jpt" | "j2c" | "jpc" => {
+            raster.encode_jp2k(crate::jp2k::SaveOptions::default())
+        }
+        // `uhdrsave`'s nickname, and the only name it has: measured on 8.18.6,
+        // `vips -l` gives `VipsForeignSaveUhdrFile (uhdrsave), save image in
+        // UltraHDR format, nocache (), priority=0`, an **empty** suffix list,
+        // and `vips copy base.v out.uhdr` is refused as an unknown format. So
+        // one spelling here and no row at all in the extension table, which is
+        // the reverse of the JPEG 2000 arm above.
+        //
+        // Not gated because there is nothing to gate: #508 wrote the container
+        // out of the JPEG codec the crate already required, so Ultra HDR costs
+        // no feature and no dependency.
+        //
+        // The default quality is `uhdrsave`'s own 75, through
+        // `uhdr::SaveOptions::default`, the same way the rows above take their
+        // codec's defaults. A caller who wants another quality or another
+        // gain-map scale factor calls `Raster::encode_uhdr` or
+        // `Raster::encode_uhdr_gainmap_scale`, which is where those knobs live.
+        "uhdr" => raster.encode_uhdr(crate::uhdr::SaveOptions::default().quality),
+        // The saver's own suffix, and the only one it registers (measured:
+        // `radsave`'s `vips -l` entry reads `nocache (.hdr)`, and `.rad`,
+        // `.rgbe` and `.pic` are all refused). Ungated; #589 wrote the encoder
+        // in this crate. Like `"uhdr"` above and unlike everything else here it
+        // has an input contract, 3-band `f32`, and it propagates the refusal
+        // rather than casting.
+        "hdr" => raster.encode_radiance(crate::radiance::SaveOptions::default()),
+        // The two Netpbm containers this build writes, of the five `ppmsave`
+        // registers. The name picks the container, so the row refuses a band
+        // count that names the other one rather than converting.
+        "ppm" | "pgm" => raster.encode_netpbm(&key),
+        // `csvsave`'s and `matrixsave`'s one registered suffix apiece,
+        // measured on 8.18.6 (`vips -l`: `nocache (.csv), priority=0, mono`
+        // and `nocache (.mat), priority=0, mono`). Both refuse a multi-band
+        // raster whose interpretation has no colourspace route, rather than
+        // guessing one the way `vips_image_write` does; see `src/textio.rs`
+        // for the mono conversion and `imageio.rs::encode_for_extension` for
+        // the `.mat` decode-back asymmetry these two rows share with that
+        // route (issue #958).
+        "csv" => raster.csv_save(),
+        "mat" => raster.matrix_save(),
+        // The three suffixes vips registers for FITS (`vips__fits_suffs`,
+        // `fits.c:125`). `fitssave` takes no options, so there is nothing
+        // to default here.
+        "fits" | "fit" | "fts" => raster.encode_fits(),
         "v" | "vips" => raster.encode_vips().map_err(save_err_to_encode),
         _ => Err(EncodeError::unsupported(format.to_owned())),
     }
@@ -311,6 +464,506 @@ mod tests {
             .map(|(x, y)| u64::from(x.abs_diff(*y)))
             .sum();
         total as f64 / a.len() as f64
+    }
+
+    /// `"webp"` is a live row in the shared format dispatch, and the
+    /// bytes it returns are the same ones `Raster::encode_webp` writes
+    /// at the default options, so the connection lane and the codec
+    /// module cannot drift apart.
+    #[test]
+    fn encode_for_format_routes_webp_to_the_lossless_encoder() {
+        let raster = sample_raster();
+        let via_dispatch = raster.encode_to_buffer("webp").unwrap();
+        let direct = raster
+            .encode_webp(crate::webp::SaveOptions::default())
+            .unwrap();
+        assert_eq!(via_dispatch, direct);
+        assert_eq!(&via_dispatch[..4], b"RIFF");
+        assert_eq!(&via_dispatch[8..12], b"WEBP");
+        let back = crate::decode_bytes(&via_dispatch).unwrap();
+        assert_eq!(back.data(), raster.data());
+    }
+
+    /// `"jxl"` is a live row in the shared format dispatch, and the
+    /// bytes it returns are the same ones `Raster::encode_jxl` writes at
+    /// the default options, so the connection lane and the codec module
+    /// cannot drift apart. The leading `FF 0A` is the bare-codestream
+    /// magic, which is what the encoder writes and what
+    /// `vips jxlsave --keep none` writes too.
+    #[test]
+    #[cfg(feature = "jxl")]
+    fn encode_for_format_routes_jxl_to_the_lossless_encoder() {
+        let raster = sample_raster();
+        let via_dispatch = raster.encode_to_buffer("jxl").unwrap();
+        let direct = raster
+            .encode_jxl(crate::jxl::SaveOptions::default())
+            .unwrap();
+        assert_eq!(via_dispatch, direct);
+        assert_eq!(&via_dispatch[..2], b"\xff\x0a");
+        let back = crate::decode_bytes(&via_dispatch).unwrap();
+        assert_eq!(back.data(), raster.data());
+    }
+
+    /// All six JPEG 2000 spellings are live rows in the shared format
+    /// dispatch and every one produces the same JP2 container (issue #770).
+    ///
+    /// Measured on the pinned vips 8.18.6 rather than read out of the C:
+    /// `vips copy base.v out.EXT` over `jp2`, `j2k`, `jpt`, `j2c` and `jpc`
+    /// writes five files with one SHA-256 between them, and `out.jp2000` is
+    /// refused as an unknown format. `"jp2k"` is here as well because that is
+    /// the saver's name, which is what a caller reading `vips -l` would type,
+    /// and it is the spelling #770 names.
+    ///
+    /// The normalisation the dispatch already does is exercised too, since a
+    /// six-way arm is exactly where a leading dot or a capital would get lost.
+    #[test]
+    #[cfg(feature = "jp2k")]
+    fn encode_for_format_routes_every_jpeg_2000_spelling_to_one_container() {
+        let raster = Raster::new(
+            8,
+            6,
+            PixelFormat::Rgb8,
+            (0..8u32 * 6 * 3).map(|i| (i % 251) as u8).collect(),
+        )
+        .unwrap();
+        let direct = raster
+            .encode_jp2k(crate::jp2k::SaveOptions::default())
+            .expect("the encoder takes an 8x6 RGB raster");
+
+        for spelling in ["jp2k", "jp2", "j2k", "jpt", "j2c", "jpc", ".JP2", " Jp2k "] {
+            let bytes = raster
+                .encode_to_buffer(spelling)
+                .unwrap_or_else(|e| panic!("{spelling:?} must be a live row, got {e}"));
+            assert_eq!(
+                bytes, direct,
+                "{spelling:?} must write the same container as encode_jp2k"
+            );
+        }
+
+        // The positive control for the sweep above: a name vips does not know
+        // either still has to come back typed rather than routed anywhere.
+        assert!(matches!(
+            raster.encode_to_buffer("jp2000"),
+            Err(EncodeError::Unsupported { .. })
+        ));
+    }
+
+    /// Without the `jp2k` feature the six rows are still there and still
+    /// typed: `Unsupported` carrying `"jp2k"`, which is the same variant an
+    /// unrecognised name gets (issue #770).
+    ///
+    /// #770 says the row "must be `#[cfg(feature = "jp2k")]` on both sides".
+    /// On this side that is wrong, and measurably so: `encode_jp2k` without
+    /// the feature already returns exactly this, so gating the arm would take
+    /// a live row out of the dispatch for no gain. The `.jxl` row above is
+    /// ungated for the same reason. The extension route is the side that does
+    /// need the cfg, because `saveable_extensions()` must not advertise an
+    /// encoder this build has not got.
+    #[test]
+    #[cfg(not(feature = "jp2k"))]
+    fn encode_for_format_refuses_every_jpeg_2000_spelling_by_name_without_the_feature() {
+        let raster = Raster::new(8, 6, PixelFormat::Rgb8, vec![0u8; 8 * 6 * 3]).unwrap();
+        for spelling in ["jp2k", "jp2", "j2k", "jpt", "j2c", "jpc"] {
+            let err = raster.encode_to_buffer(spelling).unwrap_err();
+            assert!(
+                matches!(err, EncodeError::Unsupported { ref format } if format == "jp2k"),
+                "{spelling:?} must report the codec name it has no encoder for, got {err}"
+            );
+        }
+    }
+
+    /// Every format spelling `encode_for_format` has an arm for, read out of
+    /// this module's own source.
+    ///
+    /// Only arm *heads* are scanned, so a quoted name inside an arm body or a
+    /// comment (there are several: `"jp2k"` appears in three of them) is not
+    /// mistaken for a row.
+    fn wired_format_arms(src: &str) -> Vec<&str> {
+        let start = src
+            .find("fn encode_for_format(")
+            .expect("the dispatch lives in this file");
+        let body = &src[start..];
+        let end = body
+            .find("\n}\n")
+            .expect("the function closes at column zero");
+        let mut names = Vec::new();
+        for line in body[..end].lines() {
+            let Some((head, _)) = line.split_once("=>") else {
+                continue;
+            };
+            if !head.trim_start().starts_with('"') {
+                continue;
+            }
+            for piece in head.split('|') {
+                let piece = piece.trim();
+                if let Some(inner) = piece.strip_prefix('"').and_then(|p| p.strip_suffix('"')) {
+                    names.push(inner);
+                }
+            }
+        }
+        names
+    }
+
+    /// Every ``​`"name"`​`` in the doc block immediately above `marker`.
+    ///
+    /// The quoted-literal spelling is what it looks for, because that is how
+    /// the list is written: those are the exact argument values a caller
+    /// passes. Prose naming a format without quoting an argument (\"both
+    /// select PNG\") is not a list and is not matched.
+    ///
+    /// Used twice: once on [`Raster::encode_to_buffer`], which is the one place
+    /// the format list is written down for a caller, and once on
+    /// `encode_to_target`, which must name **none**, because a second copy of
+    /// the list is what drifted (issue #881).
+    fn documented_format_names<'a>(src: &'a str, marker: &str) -> Vec<&'a str> {
+        let at = src
+            .find(marker)
+            .unwrap_or_else(|| panic!("{marker} lives in this file"));
+        let mut names = Vec::new();
+        for line in src[..at].lines().rev() {
+            let line = line.trim_start();
+            if !line.starts_with("///") {
+                break;
+            }
+            let mut rest = line;
+            while let Some(i) = rest.find("`\"") {
+                rest = &rest[i + 2..];
+                let Some(j) = rest.find("\"`") else { break };
+                names.push(&rest[..j]);
+                rest = &rest[j + 2..];
+            }
+        }
+        names
+    }
+
+    /**
+     * Tests that the format list a caller is given and the arms the dispatch
+     * actually has name exactly the same set (issue #881).
+     *
+     * The extension route has had this since the `.jxl` arm landed while the
+     * refusal message still read "png, jpg/jpeg, gif, webp, and v/vips", so
+     * `save("x.avif")` told the caller JPEG XL was unsupported at the moment it
+     * became supported. `saveable_extensions()` is a function rather than a
+     * literal for that reason and
+     * `save_error_lists_exactly_the_wired_extensions` walks it back through
+     * `Raster::save`.
+     *
+     * The format route had nothing, and it drifted the same way and further:
+     * `encode_to_target`'s doc named five of the eighteen spellings the
+     * dispatch had, having been written when five was the whole of it, and
+     * three format lanes went past it without noticing. That is the reason
+     * #770, #809 and #880 could each go unnoticed as long as they did, so the
+     * fix is a check rather than an edit.
+     *
+     * Set equality, so it is red in both directions: an arm added without the
+     * doc moving, and a doc naming something with no arm behind it. The
+     * `encode_to_target` copy is gone and its doc now points here, so there is
+     * one list.
+     *
+     * The length assertion is the positive control. Both halves are source
+     * scans, and two scans that have stopped finding anything agree perfectly.
+     */
+    #[test]
+    fn the_format_dispatch_and_the_list_a_caller_is_given_cannot_drift_apart() {
+        const SRC: &str = include_str!("connection.rs");
+
+        let mut wired = wired_format_arms(SRC);
+        wired.sort_unstable();
+        wired.dedup();
+        let mut documented = documented_format_names(SRC, "    pub fn encode_to_buffer");
+        documented.sort_unstable();
+        documented.dedup();
+
+        assert!(
+            wired.len() >= 15,
+            "the arm scan found only {wired:?}, so it has stopped reading the dispatch"
+        );
+        assert_eq!(
+            wired, documented,
+            "the dispatch has arms for {wired:?} and the doc on `encode_to_buffer` names \
+             {documented:?}; a caller only ever sees the second"
+        );
+
+        // And there is exactly one list. `encode_to_target` kept a second copy
+        // and that copy is what drifted: measured on `origin/main` before this
+        // PR, the dispatch had 17 arms, `encode_to_buffer`'s doc named all 17,
+        // and `encode_to_target`'s named five. Its doc points here now and
+        // names none, so re-growing a list there is red rather than merely
+        // unfortunate. Two checked copies would be worse than one, because the
+        // check would then keep them agreeing rather than keeping there being
+        // one.
+        let second = documented_format_names(SRC, "pub fn encode_to_target<W: Write>");
+        assert!(
+            second.is_empty(),
+            "`encode_to_target` has grown its own format list again, naming {second:?}; \
+             it should defer to `Raster::encode_to_buffer` (issue #881)"
+        );
+    }
+
+    /// `"tif"` and `"tiff"` are live rows in the shared format dispatch and
+    /// both reach the TIFF writer (issue #948).
+    ///
+    /// Two spellings and only two, measured on the pinned vips 8.18.6:
+    /// `tiffsave` registers `(.tif, .tiff)` and `vips copy t.v out.EXT` over
+    /// `.btf`, `.tf8`, `.bigtiff` and `.tfx` is refused with "is not a known
+    /// file format" every time. Those four are the positive control here: a
+    /// dispatch that accepted every string would pass the first half of this
+    /// on its own.
+    ///
+    /// The bytes are put back through [`Raster::tiff_load`] rather than
+    /// compared against a second encoder, so "reaches the writer" means a
+    /// container that reads back with the same pixels and not merely that
+    /// some bytes came back.
+    #[test]
+    fn encode_for_format_routes_tif_and_tiff_to_the_tiff_writer() {
+        let subject = Raster::new(8, 6, PixelFormat::Rgb8, {
+            let mut v = Vec::with_capacity(8 * 6 * 3);
+            for i in 0..8u32 * 6 * 3 {
+                v.push((i * 7 % 251) as u8);
+            }
+            v
+        })
+        .unwrap();
+
+        let mut seen: Vec<Vec<u8>> = Vec::new();
+        for spelling in ["tif", "tiff", "TIFF", ".tif", " Tiff "] {
+            let bytes = subject
+                .encode_to_buffer(spelling)
+                .unwrap_or_else(|e| panic!("{spelling:?} must be a live row, got {e}"));
+            assert_eq!(
+                crate::source::sniff(&bytes),
+                Some(crate::source::SniffedFormat::Tiff),
+                "{spelling:?} must write something the sniffer calls a TIFF"
+            );
+            let back = Raster::tiff_load(&bytes)
+                .unwrap_or_else(|e| panic!("{spelling:?} must read back, got {e}"));
+            assert_eq!(
+                back.data(),
+                subject.data(),
+                "{spelling:?} must round-trip its pixels"
+            );
+            assert_eq!(back.format(), subject.format());
+            seen.push(bytes);
+        }
+        assert!(
+            seen.windows(2).all(|w| w[0] == w[1]),
+            "every spelling names one container"
+        );
+
+        // The four nearest misses, all of which vips refuses too.
+        for miss in ["btf", "tf8", "bigtiff", "tfx"] {
+            assert!(
+                matches!(
+                    subject.encode_to_buffer(miss),
+                    Err(EncodeError::Unsupported { .. })
+                ),
+                "{miss:?} is not a name vips knows either"
+            );
+        }
+    }
+
+    /// A 3-band `f32` linear-light ramp reaching past the SDR ceiling, which
+    /// is the input contract [`crate::uhdr::encode_uhdr`] computes a gain map
+    /// from. Same shape as the fixture in `foreign_stubs.rs`.
+    fn scrgb_ramp(w: u32, h: u32) -> Raster {
+        let mut px: Vec<f32> = Vec::with_capacity((w * h * 3) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let t = f64::from(x) / f64::from(w - 1);
+                let s = f64::from(y) / f64::from(h - 1);
+                px.push((0.02 + 6.0 * t * s) as f32);
+                px.push((0.5 * (1.0 - t) + 3.0 * s) as f32);
+                px.push((1.5 * t + 0.25) as f32);
+            }
+        }
+        Raster::new(
+            w,
+            h,
+            PixelFormat::FloatF32(std::num::NonZeroU16::new(3).unwrap()),
+            px.into_iter().flat_map(f32::to_ne_bytes).collect(),
+        )
+        .unwrap()
+    }
+
+    /// `"uhdr"` is a live row in the shared format dispatch and it reaches the
+    /// Ultra HDR writer (issue #809).
+    ///
+    /// One spelling, not six like JPEG 2000, and that is measured rather than
+    /// chosen: on the pinned vips 8.18.6, `vips -l` reports
+    /// `VipsForeignSaveUhdrFile (uhdrsave), save image in UltraHDR format,
+    /// nocache (), priority=0` with an **empty** suffix list, so `uhdrsave`'s
+    /// nickname is the only name there is. `"ultrahdr"` is the nearest miss
+    /// and is the positive control below: a dispatch that accepted every
+    /// string would pass the first half of this on its own.
+    ///
+    /// The bytes are compared against [`Raster::encode_uhdr`] at the default
+    /// quality and then put through the crate's own two-stage Ultra HDR gate,
+    /// so "reaches the writer" means a real container and not merely "some
+    /// bytes came back".
+    #[test]
+    fn encode_for_format_routes_uhdr_to_the_ultra_hdr_writer() {
+        let raster = scrgb_ramp(16, 16);
+        let direct = raster
+            .encode_uhdr(crate::uhdr::SaveOptions::default().quality)
+            .expect("a 3-band f32 raster encodes");
+
+        for spelling in ["uhdr", "UHDR", ".uhdr", " Uhdr "] {
+            let bytes = raster
+                .encode_to_buffer(spelling)
+                .unwrap_or_else(|e| panic!("{spelling:?} must be a live row, got {e}"));
+            assert_eq!(
+                bytes, direct,
+                "{spelling:?} must write the same container as encode_uhdr at the default quality"
+            );
+            assert!(
+                crate::uhdr::is_uhdr(&bytes),
+                "{spelling:?} must produce something that satisfies the Ultra HDR gate"
+            );
+        }
+
+        // vips has no `ultrahdr` anything, so neither has this.
+        for miss in ["ultrahdr", "uhdr2", "gainmap"] {
+            assert!(
+                matches!(
+                    raster.encode_to_buffer(miss),
+                    Err(EncodeError::Unsupported { .. })
+                ),
+                "{miss:?} is not a name vips knows either"
+            );
+        }
+    }
+
+    /// `"ppm"` and `"pgm"` are live rows in the shared format dispatch and each
+    /// reaches its own Netpbm container (issue #882).
+    ///
+    /// Two spellings out of the five `ppmsave` registers, because the other
+    /// three name containers this build cannot write (`P4`, `PF`) or one vips
+    /// itself refuses (`.pnm`, which demands a `multiband` interpretation and
+    /// was refused for `srgb`, `b-w` and an explicitly-`multiband` image
+    /// alike). The three are the positive control here.
+    #[test]
+    fn encode_for_format_routes_ppm_and_pgm_to_their_own_containers() {
+        let rgb = Raster::new(8, 6, PixelFormat::Rgb8, vec![128u8; 8 * 6 * 3]).unwrap();
+        let gray = Raster::new(8, 6, PixelFormat::Gray8, vec![128u8; 8 * 6]).unwrap();
+
+        for spelling in ["ppm", "PPM", ".ppm", " Ppm "] {
+            let bytes = rgb
+                .encode_to_buffer(spelling)
+                .unwrap_or_else(|e| panic!("{spelling:?} must be a live row, got {e}"));
+            assert_eq!(bytes, rgb.encode_ppm().unwrap());
+            assert!(bytes.starts_with(b"P6"));
+        }
+        let bytes = gray.encode_to_buffer("pgm").expect("pgm is a live row");
+        assert_eq!(bytes, gray.encode_ppm().unwrap());
+        assert!(bytes.starts_with(b"P5"));
+
+        // The band count has to match the container the spelling names.
+        assert!(matches!(
+            gray.encode_to_buffer("ppm"),
+            Err(EncodeError::InvalidParameter(_))
+        ));
+        assert!(matches!(
+            rgb.encode_to_buffer("pgm"),
+            Err(EncodeError::InvalidParameter(_))
+        ));
+
+        for miss in ["pbm", "pfm", "pnm", "netpbm"] {
+            assert!(
+                matches!(
+                    rgb.encode_to_buffer(miss),
+                    Err(EncodeError::Unsupported { .. })
+                ),
+                "{miss:?} names a container this build cannot write"
+            );
+        }
+    }
+
+    /// `"hdr"` is a live row in the shared format dispatch and it reaches the
+    /// Radiance writer (issue #880).
+    ///
+    /// One spelling, measured: `radsave`'s entry in `vips -l` on the pinned
+    /// 8.18.6 reads `nocache (.hdr)`, and `vips copy base.v x.rad`, `x.rgbe`
+    /// and `x.pic` are each refused with "is not a known file format". Those
+    /// three are the positive control below. `.pic` is in there because #506's
+    /// own title says `.hdr/.pic`; it is a load spelling elsewhere and not one
+    /// `radsave` registers.
+    ///
+    /// The bytes are compared against [`Raster::encode_radiance`] at the
+    /// defaults and their magic checked, so "reaches the writer" means a
+    /// Radiance file and not merely some bytes.
+    #[test]
+    fn encode_for_format_routes_hdr_to_the_radiance_writer() {
+        let raster = scrgb_ramp(8, 6);
+        let direct = raster
+            .encode_radiance(crate::radiance::SaveOptions::default())
+            .expect("a 3-band f32 raster encodes");
+        assert!(direct.starts_with(b"#?RADIANCE"));
+
+        for spelling in ["hdr", "HDR", ".hdr", " Hdr "] {
+            let bytes = raster
+                .encode_to_buffer(spelling)
+                .unwrap_or_else(|e| panic!("{spelling:?} must be a live row, got {e}"));
+            assert_eq!(bytes, direct, "{spelling:?} must write the same file");
+        }
+
+        for miss in ["rad", "rgbe", "pic", "radiance"] {
+            assert!(
+                matches!(
+                    raster.encode_to_buffer(miss),
+                    Err(EncodeError::Unsupported { .. })
+                ),
+                "{miss:?} is not a name radsave answers to either"
+            );
+        }
+    }
+
+    /// The `"uhdr"` row answers a raster it cannot write with
+    /// [`EncodeError::InvalidParameter`] naming the input, not with
+    /// [`EncodeError::Unsupported`] naming the format (issue #809).
+    ///
+    /// The two are different answers and the difference is the whole value of
+    /// the row being live. `Unsupported` says "this build cannot write Ultra
+    /// HDR", which is false: it can, and #508 and #757 are why. What is wrong
+    /// is the raster, and a caller can act on that by casting to 3-band `f32`
+    /// scRGB.
+    ///
+    /// Contrast the `"jxl"` and JPEG 2000 rows above, where `Unsupported` is
+    /// exactly right because the feature really is off.
+    #[test]
+    fn the_uhdr_row_refuses_the_wrong_raster_by_naming_the_raster() {
+        let rgb = Raster::new(8, 6, PixelFormat::Rgb8, vec![128u8; 8 * 6 * 3]).unwrap();
+        let err = rgb.encode_to_buffer("uhdr").unwrap_err();
+        assert!(
+            matches!(err, EncodeError::InvalidParameter(_)),
+            "expected InvalidParameter naming the raster, got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("Rgb8"),
+            "the refusal must name what it got, given {err}"
+        );
+        // Positive control: the same raster through a row this build has no
+        // encoder for still reports `Unsupported`, so the two answers are
+        // genuinely distinguishable here and not just one variant everywhere.
+        assert!(matches!(
+            rgb.encode_to_buffer("heic"),
+            Err(EncodeError::Unsupported { .. })
+        ));
+    }
+
+    /// Without the `jxl` feature the row is still there and still typed:
+    /// it reports `Unsupported` carrying the name the caller asked for,
+    /// which is what the dispatch promises for any format this build has
+    /// no encoder behind. Pinned so the row cannot quietly become a
+    /// fall-through to the catch-all arm, which would lose the name.
+    #[test]
+    #[cfg(not(feature = "jxl"))]
+    fn encode_for_format_refuses_jxl_by_name_without_the_feature() {
+        let raster = sample_raster();
+        let err = raster.encode_to_buffer("jxl").unwrap_err();
+        assert!(
+            matches!(err, EncodeError::Unsupported { ref format } if format == "jxl"),
+            "{err:?}"
+        );
     }
 
     /// Oracle `stdin-load-pixel-parity-jpeg`: the same JPEG bytes decode
@@ -397,11 +1050,16 @@ mod tests {
 
     /// An unwired format returns the typed [`EncodeError::Unsupported`], not a
     /// panic, through both the buffer and the target entry points.
+    ///
+    /// This asked for `"tiff"` until #948 wired that row, at which point it
+    /// went red and said so, which is what a check is for. `"bigtiff"` takes
+    /// its place because vips refuses it too, measured on 8.18.6: `vips copy
+    /// t.v o.bigtiff` reports "is not a known file format".
     #[test]
     fn unsupported_format_returns_typed_error() {
         let raster = sample_raster();
 
-        let buf_err = raster.encode_to_buffer("tiff").unwrap_err();
+        let buf_err = raster.encode_to_buffer("bigtiff").unwrap_err();
         assert!(
             matches!(buf_err, EncodeError::Unsupported { .. }),
             "expected Unsupported, got {buf_err:?}"
@@ -470,6 +1128,7 @@ mod tests {
     /// the file back yields exactly [`Raster::encode_to_buffer`]'s bytes and
     /// decodes to the original raster.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn file_target_writes_and_reads_back_identical_bytes() {
         let raster = sample_raster();
         let expected = raster.encode_to_buffer("png").unwrap();
@@ -500,6 +1159,7 @@ mod tests {
 
     /// `from_file` records the path; `new` leaves the filename unset.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn source_filename_reflects_construction() {
         let bytes = sample_raster().encode_to_buffer("png").unwrap();
         let source = Source::new(&bytes[..]);

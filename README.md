@@ -7,7 +7,7 @@
 <p align="center">
   <a href="https://github.com/libviprs/libviprs/actions/workflows/ci.yml"><img src="https://github.com/libviprs/libviprs/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://github.com/libviprs/libviprs/actions/workflows/merge-gate.yml"><img src="https://github.com/libviprs/libviprs/actions/workflows/merge-gate.yml/badge.svg" alt="Merge Gate"></a>
-  <img src="https://img.shields.io/badge/rust-1.85%2B-orange?logo=rust" alt="Rust 1.85+">
+  <img src="https://img.shields.io/badge/rust-1.97%2B-orange?logo=rust" alt="Rust 1.97+">
   <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License">
 </p>
 
@@ -21,16 +21,16 @@ Takes blueprint PDFs and images, extracts raster data, optionally geo-references
 
 - **PDF extraction** — extract embedded raster images from scanned blueprint PDFs via lopdf (pure Rust, no C dependencies)
 - **PDF rendering** — render vector PDFs (AutoCAD exports, text, paths) via PDFium, with optional [memory-budgeted rendering](https://libviprs.org/cli/#flag-memory-budget) (optional `pdfium` feature)
-- **Image decoding** — JPEG, PNG, TIFF via the `image` crate
+- **Image decoding** — 17 containers, each identified from its own magic bytes rather than the file extension: `.v` (native libvips), Ultra HDR, JPEG, PNG, TIFF, GIF, WebP, JPEG XL, Radiance, FITS, OpenEXR, NIfTI, AVIF, JPEG 2000, MATLAB, Netpbm and Analyze. SVG rasterises too, behind the `svg` feature, and is the one that cannot be sniffed. Most of these are decoders in this crate; the `image` crate carries JPEG and PNG
 - **Tile pyramid generation** — three engines (Monolithic, Streaming, MapReduce) routed through `EngineBuilder` / `EngineKind` (`Auto` by default), with backpressure and configurable tile size and overlap (see [`--parallel`](https://libviprs.org/cli/#flag-parallel))
 - **Layout formats** — DeepZoom (`.dzi` + directory tree), XYZ (`z/x/y`), and Google Maps (`z/y/x`, power-of-2 grids)
 - **Centre support** — centre image within the tile grid with even background padding on all sides
-- **Tile encoding** — PNG, JPEG (configurable quality), or raw pixel output
+- **Tile encoding** — PNG, JPEG (configurable quality; 4:2:0 chroma below quality 90), lossless WebP, or raw pixel output
 - **Blank tile optimization** — configurable `BlankTileStrategy` to either emit full tiles or write 1-byte placeholders (`BLANK_TILE_MARKER`) for uniform-color regions, reducing disk usage for sparse images
 - **Edge tile background** — configurable background color (`background_rgb`) for padding partial tiles at image edges (defaults to white)
 - **Geo-referencing** — affine transform mapping pixel coordinates to geographic coordinates, GCP support ([`--geo-reference`](https://libviprs.org/cli/#flag-geo-reference))
 - **Restart-safe runs** — checkpoint and [resume](https://libviprs.org/cli/#flag-resume) interrupted jobs, with content-addressed [tile dedupe](https://libviprs.org/cli/#flag-dedupe) and per-tile [checksums](https://libviprs.org/cli/#flag-checksums)
-- **Sinks** — filesystem, [packfile](https://libviprs.org/cli/#flag-packfile) (tar/zip), and [S3-compatible](https://libviprs.org/cli/#flag-s3) object stores
+- **Sinks** — a single PMTiles v3 archive (the default, see [Storage formats](#storage-formats)), a filesystem tree, a [packfile](https://libviprs.org/cli/#flag-packfile) (tar/zip), or an [S3-compatible](https://libviprs.org/cli/#flag-s3) object store
 - **Observability** — progress events, per-level callbacks, peak memory tracking, optional structured [tracing](https://libviprs.org/cli/#flag-tracing)
 
 ## Usage
@@ -110,14 +110,118 @@ println!(
 
 > See [interactive example](https://libviprs.org/cli/#cli-generator) — tick flags on the CLI docs page to generate a tailored version of this snippet.
 
+## Storage formats
+
+A pyramid can land in **one PMTiles v3 archive** as of 0.5.0, or in the tree of
+loose files under `{z}/{x}/{y}` this crate has always written. Nothing flipped
+underneath you: `EngineBuilder` writes the sink you hand it, the same as it
+always has. What is new is that the choice has a name, and that asking it what
+to use gets an answer: `PyramidStorage::default()` is `PyramidStorage::PmTiles`.
+
+The reason is arithmetic. A pyramid is around 20k tiles and a fleet is around
+100k pyramids, so the tree costs about 2 billion files: inodes you run out of,
+backups that never finish, and an object-store bill made mostly of request
+count. An archive is one file that still answers "give me tile `(z, x, y)`" in
+a couple of ranged reads, because its index rides along inside it.
+
+`PyramidStorage` is the one place that choice is made, so nothing downstream
+has to reinvent it:
+
+<!-- storage-example -->
+```rust
+use libviprs::{Layout, PyramidStorage};
+use std::path::Path;
+
+// Nothing said otherwise, so the pyramid lands in one indexed archive.
+let storage = PyramidStorage::default();
+assert_eq!(storage, PyramidStorage::PmTiles);
+assert_eq!(storage.output_path("city"), Path::new("city.pmtiles"));
+
+// An archive addresses a tile by (z, x, y), so those are the layouts it takes.
+assert!(storage.accepts_layout(Layout::Xyz));
+assert!(storage.accepts_layout(Layout::Google));
+assert!(!storage.accepts_layout(Layout::DeepZoom));
+
+// The tree of loose files is still one value away, and it takes all five.
+let storage = PyramidStorage::Directory;
+assert_eq!(storage.output_path("city"), Path::new("city"));
+assert_eq!(storage.extension(), None);
+assert!(storage.accepts_layout(Layout::DeepZoom));
+```
+
+### Where the output lands
+
+| You ask for | `PmTiles` writes | `Directory` writes |
+|---|---|---|
+| `city` | `city.pmtiles` | `city/` |
+| `city.pmtiles` | `city.pmtiles` | `city.pmtiles/` |
+| `tiles.v2` | `tiles.v2.pmtiles` | `tiles.v2/` |
+
+The extension is appended, never substituted. `PathBuf::set_extension` replaces
+everything after the last dot, so it would turn `tiles.v2` into
+`tiles.pmtiles` and lose the `v2`. A base that already ends in `.pmtiles` is
+handed back untouched, compared without case, because on macOS and Windows
+`city.PMTILES` and `city.PMTILES.pmtiles` are two names for one file. If you
+want `city.tif` to become `city.pmtiles`, pass the stem rather than the whole
+name.
+
+### Picking a sink
+
+A default is a default, not a rewrite. `EngineBuilder::new(source, plan, sink)`
+still writes whatever sink you hand it, so every Rust caller that compiles
+today compiles unchanged and keeps producing exactly what it produced before.
+What moved is the answer to "and if I do not say?".
+
+| Storage | Sink to build |
+|---|---|
+| PMTiles archive | `PmTilesSink::builder(&out).plan(plan).build()?`, with `out` from `PyramidStorage::PmTiles.output_path(base)` |
+| Directory tree | `FsSink::new(base, plan)`, exactly as before |
+| Packfile, object store | `PackfileSink` and `ObjectStoreSink`, both unchanged and unaffected |
+
+### An archive appears whole or it does not appear
+
+The writer stages into `<path>.tmp` and its siblings, flushes with `sync_all`
+and renames into place, so nothing exists at `<path>` until the run finishes.
+An interrupted run leaves its staging files beside the destination, which is
+evidence that it was working, and never a short `.pmtiles` wearing the name a
+complete one would.
+
+One destination has one writer. Two runs aimed at the same archive would share
+those staging names, so the second sink is refused when it is built rather than
+left to race the first.
+
+### Two things an archive constrains
+
+- **The layout has to address `(z, x, y)`.** An archive keys a tile on a
+  single `u64` derived from `(z, x, y)`, so `Layout::Xyz` and `Layout::Google`
+  both fit. Google differs from XYZ in the order it spells a path on disk
+  (`z/y/x` against `z/x/y`) and not in what it addresses, so there is no
+  coordinate migration in either direction. DeepZoom, Zoomify and IIIF do not
+  fit: their level index is a tier rather than a zoom, so those three stay on
+  the directory tree. `PyramidStorage::accepts_layout` says which is which in
+  code rather than in a sentence.
+- **Tiles are PNG, JPEG or WebP.** The spec has a tile type for each and none
+  for raw pixel bytes, so `TileFormat::Raw` has nowhere to go in an archive.
+  Write raw tiles to a directory.
+
+Reading an archive back is the `pmtiles` module: the 127-byte v3 header, the
+Hilbert tile ids, the directory model and the ranged-read abstraction a reader
+fetches bytes through.
+
 ## Modules
+
+Every public module, in four groups. `tests/crate_doc_matches_the_crate.rs`
+holds this list against `pub mod` in `src/lib.rs`, so a new module is missing
+from here for exactly one commit.
+
+### Pipeline
 
 | Module | Description |
 |---|---|
-| `source` | Image decoding (JPEG, PNG, TIFF) into canonical `Raster` |
+| `source` | Content sniffing and decode into a canonical `Raster` (see the decode list above) |
 | `pdf` | PDF parsing (lopdf) and optional rendering (PDFium), including budgeted render |
 | `raster` | Pixel buffer, region views, format normalization |
-| `pixel` | Pixel format definitions (Gray8, RGB8, RGBA8, 16-bit variants) |
+| `pixel` | Pixel format definitions: the 14 `PixelFormat` carriers listed below |
 | `planner` | Tile math, level computation, layout generation |
 | `resize` | Downscaling for pyramid levels |
 | `engine` | Monolithic in-memory tile extraction with backpressure, blank tile detection |
@@ -126,7 +230,12 @@ println!(
 | `streaming_mapreduce` | Parallel strip engine and `MapReduceConfig` |
 | `sink` | Tile output (filesystem, memory, slow sink for testing) |
 | `sink_packfile` | `PackfileSink` writing tiles into a tar/zip archive (gated by `packfile`) |
-| `sink_object_store` | `ObjectStoreSink` for user-injected object storage backends (gated by `object-store-sink`; the deprecated `s3` alias also enables it) |
+| `sink_object_store` | The `ObjectStore` trait and `ObjectStoreSink`, for user-injected object storage backends on both the write and the read side (gated by `object-store-sink`; the deprecated `s3` alias also enables it) |
+| `storage` | `PyramidStorage`: which storage a pyramid lands in, the output path that choice resolves to, and the layouts each one holds |
+| `pmtiles` | PMTiles v3 archive format: 127-byte header, Hilbert TileIDs, directories, metadata, ranged reads, and a streaming bounded-memory `Writer` |
+| `sink_pmtiles` | `PmTilesSink` writing a whole pyramid into one PMTiles v3 archive |
+| `pyramid_reader` | `PyramidReader` and its directory and PMTiles implementations, for reading a generated pyramid back whatever it was stored in |
+| `pyramid_migrate` | Converting a pyramid that already exists into a PMTiles archive, without going back to the source image |
 | `resume` | Job checkpoints and resume policy for restart-safe runs |
 | `retry` | Failure / retry policy and `RetryingSink` wrapper |
 | `dedupe` | Content-addressed tile deduplication |
@@ -136,20 +245,86 @@ println!(
 | `geo` | Affine geo-transform, GCP solving, bounding box computation |
 | `observe` | Progress events, lifecycle observers, memory tracking |
 
+### Formats and containers
+
+| Module | Description |
+|---|---|
+| `codec` | The shared error taxonomy (`DecodeError`, `EncodeError`) and format-option enums every codec below uses |
+| `connection` | Streaming IO connections: `Source`, `Target`, and the format-name save route `encode_to_buffer` / `encode_to_target` |
+| `imageio` | `Raster::save`'s extension route, the metadata field system, and the native `.v` container |
+| `encode` | The JPEG and PNG encoders behind `Raster::encode_jpeg`, `Raster::encode_png` and the `jpegsave_buffer` family |
+| `encode_tiff` | TIFF load and save, including multi-page reads and the `.tif` / `.tiff` save route |
+| `gif` | GIF still-image load and save, and the `gifsave` option surface |
+| `webp` | WebP load and lossless save, still and animated |
+| `jxl` | JPEG XL load and lossless save (gated by `jxl`) |
+| `jp2k` | JPEG 2000 load and save (gated by `jp2k`) |
+| `avif` | AVIF still-image load, an AV1 keyframe in an ISOBMFF container (gated by `avif`) |
+| `svg` | SVG rasterisation to an RGBA raster (gated by `svg`) |
+| `uhdr` | Ultra HDR: the gain-map JPEG libvips reads with `uhdrload` and writes with `uhdrsave` |
+| `radiance` | Radiance HDR load and save: RGBE bytes in, three-band float out |
+| `exr` | OpenEXR load: scene-linear samples in, float bands out |
+| `fits` | FITS load and save, 80-column ASCII header and all |
+| `mat` | MATLAB level 5 load |
+| `nifti` | NIfTI load: a fixed-size header in, a raw voxel array out |
+| `analyze` | Analyze 7.5 load, from the `.hdr` half of the `.hdr` + `.img` pair |
+| `textio` | The libvips `matrix` and `csv` text codecs, plus the binary Netpbm containers |
+| `frames` | The page model for multi-frame images: how a raster's rows divide into pages |
+| `foreign_stubs` | Typed stubs for the genuinely external formats this build does not link (HEIF/AVIF encode, ImageMagick, DeepZoom buffers) |
+| `cad` | The `CadDecoder` contract and the primitive IR (lines, arcs, splines, text) a CAD drawing decodes into, with curves kept as curves and a structured `DecodeReport` |
+
+### Image operations
+
+| Module | Description |
+|---|---|
+| `arithmetic` | Arithmetic and whole-image statistics, ported from libvips |
+| `bands` | Band (channel) operations |
+| `colour` | Colour-space conversion and ICC transforms |
+| `composite` | Alpha compositing (`vips_composite2`) |
+| `conversion` | Conversion, orientation, and the colour-adjacent operations |
+| `convolution` | Convolution and correlation |
+| `create` | Image generators (the libvips `create` family) |
+| `draw` | In-place raster drawing |
+| `extract` | Extract, crop, and geometry placement |
+| `freqfilt` | Frequency-domain filters |
+| `histogram` | Histogram operations |
+| `matrix` | Matrix-image and LUT-inversion operations |
+| `morphology` | Morphological operations |
+| `mosaicing` | Mosaicing operations |
+| `resample` | Resampling: resize, reduce, shrink, affine, thumbnail |
+
+### Support
+
+| Module | Description |
+|---|---|
+| `cancel` | Cooperative cancellation for long-running generation |
+| `error` | Crate-level umbrella error over the per-module operation errors |
+| `extensions` | Typed extension map for pipeline-level context |
+| `verify` | Verify-mode entry points |
+
+### Pixel formats
+
+`PixelFormat` has 14 carriers, and the signed and 32-bit ones are this release's headline break rather than a footnote: `Gray8`, `Gray16`, `Rgb8`, `Rgba8`, `Rgb16`, `Rgba16`, `RgbaF32`, `Multi8`, `Multi16`, `FloatF32`, `Uint32`, `Int8`, `Int16` and `Int32`.
+
 ## Features
 
 | Feature | Default | Description |
 |---|---|---|
 | `pdfium` | off | Enables `render_page_pdfium()`, `render_page_pdfium_budgeted()`, and `PdfiumStripSource` for vector PDF rendering. Requires libpdfium at runtime. |
 | `pdfium-static` | off | Implies `pdfium` and links libpdfium statically via `pdfium-render/static`. |
-| `object-store-sink` | off | Enables the `sink_object_store` module (`ObjectStoreSink` against a user-injected `ObjectStore`). Ships no built-in S3 transport — a backend must be injected. |
+| `object-store-sink` | off | Enables the `sink_object_store` module (`ObjectStoreSink` against a user-injected `ObjectStore`) and the read side of the same trait: `ObjectStore::get_range`, `ObjectStore::size`, `pmtiles::ObjectStoreRangeReader` and `PmTilesPyramidReader::try_from_object_store`. Ships no built-in S3 or HTTP transport, so a backend must be injected. |
 | `s3` | off | **Deprecated alias** for `object-store-sink`, retained so consumers pinned to the old feature name keep building. Prefer `object-store-sink`; the `s3` alias will be removed in a future release. |
 | `tracing` | off | Emits structured `tracing` spans and events from the engine pipeline. |
 | `packfile` | off | Enables `PackfileSink` for writing tiles into a tar or zip archive. |
+| `svg` | off | Enables the SVG rasteriser behind `decode_svg`. Costs 29 crates (`resvg` and its tree), which is why it is opt-in; without it `decode_svg` returns a typed `Unsupported`. |
+| `jxl` | off | Enables the JPEG XL loader and lossless encoder: `decode_jxl`, `Raster::encode_jxl`, `Raster::save_jxl`, the `.jxl` row in `Raster::save` and in `encode_to_buffer`. Costs 21 crates (`jxl-oxide`, `zune-jpegxl` and their trees, including `tracing`), which is why it is opt-in; without it every entry point still exists and returns a typed refusal. |
+| `jp2k` | off | Enables the JPEG 2000 loader and encoder: `decode_jp2k`, `Raster::encode_jp2k`, `Raster::save_jp2k`, and the `.jp2` / `.j2k` rows in the content sniffer. Costs **2 crates** (`hayro-jpeg2000` and `openjpeg2-pure-rs`, neither of which has a dependency of its own), so what it buys back is compile time rather than crate count; without it every entry point still exists and returns a typed refusal. |
+| `avif` | off | Enables the AV1 decode inside `decode_avif` (still images only). Costs 16 crates (`rav1d` and its runtime tree); without it the entry point still parses the container, checks the codec and applies all three decode limits, and refuses the decode itself. |
+| `serde` | off | Adds public `Serialize` / `Deserialize` derives to the wire and config types (`PyramidPlan`, `EngineConfig`, `TileCoord`, `Layout`, ...) so an out-of-process caller can rebuild a job from JSON. Adds no dependencies. |
+| `test-util` | off | Exposes the crate's test-only sink doubles (`SlowSink`) to dependent crates, chiefly the external `libviprs-tests` suite. Adds no dependencies. |
 
 ## Requirements
 
-- Rust 1.85+ (edition 2024)
+- Rust 1.97+ (edition 2024)
 - libpdfium shared library (only if using the `pdfium` feature)
 
 ### PDFium setup
@@ -159,17 +334,33 @@ The `pdfium` feature requires `libpdfium.so` at runtime. Pre-compiled binaries b
 ```bash
 # x86_64
 curl -L -o pdfium.tgz \
-  https://github.com/libviprs/libviprs-dep/releases/download/pdfium-7881/pdfium-linux-x64.tgz
+  https://github.com/libviprs/libviprs-dep/releases/download/pdfium-8054/pdfium-linux-x64.tgz
 
 # arm64
 curl -L -o pdfium.tgz \
-  https://github.com/libviprs/libviprs-dep/releases/download/pdfium-7881/pdfium-linux-arm64.tgz
+  https://github.com/libviprs/libviprs-dep/releases/download/pdfium-8054/pdfium-linux-arm64.tgz
 
 # Extract and install
 tar xzf pdfium.tgz
 sudo cp pdfium-linux-*/lib/libpdfium.so /usr/local/lib/
 sudo ldconfig
 ```
+
+`pdfium-8054` is what CI installs and what `libviprs-tests` pins, so these
+instructions reproduce what the suite runs. One caveat worth knowing rather than
+discovering: the crate requests `pdfium-render`'s `pdfium_7881` feature, which
+selects the bindgen set, so the bindings and the library are a version apart.
+`pdfium-render 0.9.4` offers no newer ABI (`pdfium_latest = ["pdfium_7881"]`), so
+there is nothing to move to yet.
+
+That gap is measured rather than tolerated on trust. The 8054 library exports a
+strict superset of 7881's symbols, so every binding resolves, and the only
+declaration that differs between the two builds' public headers is
+`FPDF_LIBRARY_CONFIG`, which gained two trailing fields that PDFium reads only
+at config versions 6 and 7 while `pdfium-render` sets version 2.
+`tests/pdfium_abi_and_binary_pins.rs` records the pair and fails if either half
+moves, so the next person to bump one has to redo that comparison rather than
+inherit this paragraph.
 
 See the [libviprs-dep pdfium README](https://github.com/libviprs/libviprs-dep/tree/main/pdfium) for building PDFium from source or finding other versions.
 
@@ -180,37 +371,88 @@ See the [libviprs-dep pdfium README](https://github.com/libviprs/libviprs-dep/tr
 | [libviprs-cli](../libviprs-cli) | Command-line interface (`viprs` binary) |
 | [libviprs-tests](../libviprs-tests) | Integration tests and fixtures, including end-to-end PDF-to-pyramid tests for `blueprint.pdf` and `blueprint-mix.pdf` |
 
+## Contributing
+
+[CONTRIBUTING.md](CONTRIBUTING.md) has the dependency rule: what this crate will
+and will not take on, why `build.rs`, `links =` and a `-sys` suffix are none of
+them the thing that decides it, and where the two carve-outs (`packfile` and
+`pdfium`) sit. Read it before adding a dependency.
+
+Two of its three clauses are mechanical, and `tests/dependency_policy.rs` checks
+those two against the graph cargo actually resolves, on every `cargo test`: a
+dependency that goes looking for a library on the build machine, or that
+compiles native source that did not come down with it, turns the suite red
+rather than getting caught in review. The third clause, no linking a
+third-party library somebody has to install first, has no mechanical check and
+cannot have one, because nothing in a manifest tells a crate that needs an
+installed library apart from one that does not. That one is applied by hand,
+with the checklist in CONTRIBUTING.md.
+
 ## CI
 
-GitHub Actions runs two workflows:
+GitHub Actions runs two workflows, eight jobs between them:
 
-**CI** (every push and PR) — `.github/workflows/ci.yml`:
-- `cargo fmt --check` — formatting
-- `cargo clippy -D warnings` — lint (default + `pdfium` feature)
-- `cargo test` — unit tests
+**CI**, on every branch push and on pull requests that no push accompanies (`.github/workflows/ci.yml`):
+- `Check & Lint`: `cargo fmt --check`, then `cargo clippy -D warnings` once per feature. That is the default build plus `pdfium`, `object-store-sink`, `tracing`, `avif`, `svg`, `jxl`, `packfile`, `serde` and `jp2k`, because code behind any other `cfg` used to be linted by nothing, and a `cargo build --features s3` for the deprecated alias
+- `MSRV`: `cargo check` on the pinned toolchain, once per feature family that declares no `rust-version` of its own, plus a guard that the three written-out MSRV claims still agree. The version stays out of the job name on purpose: branch protection matches a required check by its exact name, so a bump that renamed the job would leave every open PR waiting on a context no run produces (#1011)
+- `Docs (deny broken, private and redundant intra-doc links)`: `cargo doc --no-deps --all-features`, with each of those three denied
+- `Test`: `cargo test`, once per feature that gates code, because a feature nobody names compiles its bodies out and runs zero assertions
+- `Integration Tests (libviprs-tests)`: compiles the sibling repo's ported cells against this crate, then runs its suite
 
-**Merge Gate** (PRs targeting `release`, required to merge) — `.github/workflows/merge-gate.yml`:
-- `cargo +nightly miri test` — undefined behavior detection
-- Loom concurrency tests
+**Merge Gate** (`.github/workflows/merge-gate.yml`):
+- `Loom` and `pdfium-render source audit (#149)`, on every branch push and on pull requests into `main` or `release`
+- `Miri`, at the release boundary only, because a whole-suite invocation still does not finish
 
 ### Running CI locally
 
-A `Makefile` mirrors the full CI pipeline. Run everything with:
+`make ci` is the gate. It hands both workflow files to `tools/local-ci.py`,
+which reads the job list out of them and runs it in an x86_64 Linux container.
+There is deliberately no second copy of the commands anywhere: add a step to a
+workflow and it runs locally next time.
 
 ```sh
 make ci
 ```
 
-Or run individual checks:
+The container gets its tree from git rather than from a bind mount of your
+working directory, and on macOS that is the difference between a gate and a
+rumour. A Docker Desktop bind mount off an APFS host is case-insensitive and it
+carries untracked files, so a bind-mounted run happily resolves a fixture that
+was committed under a different case, or one that was never committed at all.
+`main` was red for about 55 hours on exactly that while every local run said
+PASS.
+
+What goes in is the working tree's **tracked** content, so your uncommitted
+edits are still checked and your untracked files are not, and the run lists
+what it left out before it starts.
+
+Narrower runs, and a faster loop:
+
+```sh
+tools/local-ci.py --fast                       # Check & Lint, MSRV and Docs only
+tools/local-ci.py Check Docs                   # jobs matching a filter
+tools/local-ci.py --workflow merge-gate.yml    # Loom and the pdfium audit
+tools/local-ci.py --worktree                   # bind-mount the tree: fast, and NOT the gate
+```
+
+The `make` targets below run one job's commands on this machine instead of in
+the container. They are for iterating, not for deciding that something is ready
+to push: each covers part of one job, on this host's architecture and
+filesystem.
 
 ```sh
 make fmt      # check formatting
-make clippy   # clippy (default + pdfium features)
-make test     # unit tests
+make clippy   # clippy over the default build and each of the nine features CI lints
+make test     # bare `cargo test`, which is the Test job's first cell of nine
+make doc      # the Docs job
 make miri     # miri (requires nightly + miri component)
-make loom     # loom concurrency tests
+make loom     # `loom_tests`, which is the Loom job's first invocation of two
 ```
 
-> **Prerequisites:** `make miri` requires the nightly toolchain with the miri component.
-> Install with: `rustup toolchain install nightly --component miri`
+> **Prerequisites:** `make ci` needs Docker running and PyYAML (`pip3 install pyyaml`).
+> Budget disk for it: the whole job list compiles ten clippy feature permutations,
+> nine test ones and seven more under the 1.97 toolchain, and each gets its own
+> artifact set on the `libviprs-ci-cargo` volume rather than replacing the last.
+> `make miri` requires a nightly toolchain with the miri component, at or above this
+> crate's MSRV; the `Makefile` pins a dated one and explains why.
 

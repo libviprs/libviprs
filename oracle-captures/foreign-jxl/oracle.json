@@ -1,0 +1,1694 @@
+{
+  "meta": {
+    "area": "foreign-jxl",
+    "issues": [
+      619,
+      620,
+      621,
+      622
+    ],
+    "vips_version": "vips-8.18.4",
+    "vips_binary": "/opt/homebrew/bin/vips",
+    "libjxl": "JXL load/save with libjxl: true (dynamic module: true)",
+    "captured_by": "oracle-captures/foreign-jxl/capture.py",
+    "reference_c": "libvips v8.18.4 for the file and line numbers quoted in src/jxl.rs; the binary every number here came out of is the Homebrew 8.18.4 build and is a different artefact",
+    "decoder_under_test": "jxl-oxide 0.12.6",
+    "encoder_under_test": "zune-jpegxl 0.5.2"
+  },
+  "notes": [
+    "A one-band image stays one band through jxlsave/jxlload, where webpsave promotes it to three. JPEG XL stores greyscale and WebP does not."
+  ],
+  "records": {
+    "ll_rgb": {
+      "what": "`vips jxlsave --lossless --keep none` on a 4x3 3-band uchar ramp, then every pixel read back. The round trip is the identity.",
+      "fixture": "fixtures/ll_rgb.jxl",
+      "sha256": "a51f6b55a448535b9b1b39f086899dcefaa4e63f692c7be892a25baa8341eda2",
+      "bytes": 71,
+      "boxes": null,
+      "header": "/Users/rom/workspace/libviprs/.epic520/_wt/500-jxl/oracle-captures/foreign-jxl/fixtures/ll_rgb.jxl: 4x3 uchar, 3 bands, srgb, jxlload\nwidth: 4\nheight: 3\nbands: 3\nformat: uchar\ncoding: none\ninterpretation: srgb\nxoffset: 0\nyoffset: 0\nxres: 1\nyres: 1\nfilename: /Users/rom/workspace/libviprs/.epic520/_wt/500-jxl/oracle-captures/foreign-jxl/fixtures/ll_rgb.jxl\nvips-loader: jxlload\nicc-profile-data: 504 bytes of binary data\norientation: 1\nbits-per-sample: 8",
+      "source_getpoint": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          61,
+          97,
+          29
+        ],
+        [
+          122,
+          194,
+          58
+        ],
+        [
+          183,
+          35,
+          87
+        ],
+        [
+          13,
+          151,
+          211
+        ],
+        [
+          74,
+          248,
+          240
+        ],
+        [
+          135,
+          89,
+          13
+        ],
+        [
+          196,
+          186,
+          42
+        ],
+        [
+          26,
+          46,
+          166
+        ],
+        [
+          87,
+          143,
+          195
+        ],
+        [
+          148,
+          240,
+          224
+        ],
+        [
+          209,
+          81,
+          253
+        ]
+      ],
+      "getpoint": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          61,
+          97,
+          29
+        ],
+        [
+          122,
+          194,
+          58
+        ],
+        [
+          183,
+          35,
+          87
+        ],
+        [
+          13,
+          151,
+          211
+        ],
+        [
+          74,
+          248,
+          240
+        ],
+        [
+          135,
+          89,
+          13
+        ],
+        [
+          196,
+          186,
+          42
+        ],
+        [
+          26,
+          46,
+          166
+        ],
+        [
+          87,
+          143,
+          195
+        ],
+        [
+          148,
+          240,
+          224
+        ],
+        [
+          209,
+          81,
+          253
+        ]
+      ],
+      "identity": true
+    },
+    "ll_rgba": {
+      "what": "`vips jxlsave --lossless --keep none` on a 4x3 4-band uchar ramp, then every pixel read back. The round trip is the identity.",
+      "fixture": "fixtures/ll_rgba.jxl",
+      "sha256": "c4b4717abdaf2f185a2ffb72e538ded894939fedf550ff6ac9dfe98cff2dddd0",
+      "bytes": 91,
+      "boxes": null,
+      "header": "/Users/rom/workspace/libviprs/.epic520/_wt/500-jxl/oracle-captures/foreign-jxl/fixtures/ll_rgba.jxl: 4x3 uchar, 4 bands, srgb, jxlload\nwidth: 4\nheight: 3\nbands: 4\nformat: uchar\ncoding: none\ninterpretation: srgb\nxoffset: 0\nyoffset: 0\nxres: 1\nyres: 1\nfilename: /Users/rom/workspace/libviprs/.epic520/_wt/500-jxl/oracle-captures/foreign-jxl/fixtures/ll_rgba.jxl\nvips-loader: jxlload\nicc-profile-data: 504 bytes of binary data\norientation: 1\nbits-per-sample: 8",
+      "source_getpoint": [
+        [
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          61,
+          97,
+          29,
+          85
+        ],
+        [
+          122,
+          194,
+          58,
+          170
+        ],
+        [
+          183,
+          35,
+          87,
+          255
+        ],
+        [
+          13,
+          151,
+          211,
+          40
+        ],
+        [
+          74,
+          248,
+          240,
+          125
+        ],
+        [
+          135,
+          89,
+          13,
+          210
+        ],
+        [
+          196,
+          186,
+          42,
+          39
+        ],
+        [
+          26,
+          46,
+          166,
+          80
+        ],
+        [
+          87,
+          143,
+          195,
+          165
+        ],
+        [
+          148,
+          240,
+          224,
+          250
+        ],
+        [
+          209,
+          81,
+          253,
+          79
+        ]
+      ],
+      "getpoint": [
+        [
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          61,
+          97,
+          29,
+          85
+        ],
+        [
+          122,
+          194,
+          58,
+          170
+        ],
+        [
+          183,
+          35,
+          87,
+          255
+        ],
+        [
+          13,
+          151,
+          211,
+          40
+        ],
+        [
+          74,
+          248,
+          240,
+          125
+        ],
+        [
+          135,
+          89,
+          13,
+          210
+        ],
+        [
+          196,
+          186,
+          42,
+          39
+        ],
+        [
+          26,
+          46,
+          166,
+          80
+        ],
+        [
+          87,
+          143,
+          195,
+          165
+        ],
+        [
+          148,
+          240,
+          224,
+          250
+        ],
+        [
+          209,
+          81,
+          253,
+          79
+        ]
+      ],
+      "identity": true
+    },
+    "ll_grey": {
+      "what": "`vips jxlsave --lossless --keep none` on a 4x3 1-band uchar ramp, then every pixel read back. The round trip is the identity.",
+      "fixture": "fixtures/ll_grey.jxl",
+      "sha256": "8b5ac6da843b853244ded6919b2614ca86d7f5ebacc449dc7a611495e29e0e0c",
+      "bytes": 34,
+      "boxes": null,
+      "header": "/Users/rom/workspace/libviprs/.epic520/_wt/500-jxl/oracle-captures/foreign-jxl/fixtures/ll_grey.jxl: 4x3 uchar, 1 band, b-w, jxlload\nwidth: 4\nheight: 3\nbands: 1\nformat: uchar\ncoding: none\ninterpretation: b-w\nxoffset: 0\nyoffset: 0\nxres: 1\nyres: 1\nfilename: /Users/rom/workspace/libviprs/.epic520/_wt/500-jxl/oracle-captures/foreign-jxl/fixtures/ll_grey.jxl\nvips-loader: jxlload\nicc-profile-data: 328 bytes of binary data\norientation: 1\nbits-per-sample: 8",
+      "source_getpoint": [
+        [
+          0
+        ],
+        [
+          61
+        ],
+        [
+          122
+        ],
+        [
+          183
+        ],
+        [
+          13
+        ],
+        [
+          74
+        ],
+        [
+          135
+        ],
+        [
+          196
+        ],
+        [
+          26
+        ],
+        [
+          87
+        ],
+        [
+          148
+        ],
+        [
+          209
+        ]
+      ],
+      "getpoint": [
+        [
+          0
+        ],
+        [
+          61
+        ],
+        [
+          122
+        ],
+        [
+          183
+        ],
+        [
+          13
+        ],
+        [
+          74
+        ],
+        [
+          135
+        ],
+        [
+          196
+        ],
+        [
+          26
+        ],
+        [
+          87
+        ],
+        [
+          148
+        ],
+        [
+          209
+        ]
+      ],
+      "identity": true
+    },
+    "ll_rgb16": {
+      "what": "`vips jxlsave --lossless --keep none` on a 4x3 3-band ushort ramp, then every pixel read back. The round trip is the identity.",
+      "fixture": "fixtures/ll_rgb16.jxl",
+      "sha256": "cf890eda485af88991bb866c0b5c38a027a7a5cb6c8eea06c18bcb92171de992",
+      "bytes": 138,
+      "boxes": [
+        [
+          "JXL ",
+          4
+        ],
+        [
+          "ftyp",
+          12
+        ],
+        [
+          "jxll",
+          1
+        ],
+        [
+          "jxlc",
+          89
+        ]
+      ],
+      "header": "/Users/rom/workspace/libviprs/.epic520/_wt/500-jxl/oracle-captures/foreign-jxl/fixtures/ll_rgb16.jxl: 4x3 ushort, 3 bands, rgb16, jxlload\nwidth: 4\nheight: 3\nbands: 3\nformat: ushort\ncoding: none\ninterpretation: rgb16\nxoffset: 0\nyoffset: 0\nxres: 1\nyres: 1\nfilename: /Users/rom/workspace/libviprs/.epic520/_wt/500-jxl/oracle-captures/foreign-jxl/fixtures/ll_rgb16.jxl\nvips-loader: jxlload\nicc-profile-data: 504 bytes of binary data\norientation: 1\nbits-per-sample: 16",
+      "source_getpoint": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          1013,
+          4099,
+          7919
+        ],
+        [
+          2026,
+          8198,
+          15838
+        ],
+        [
+          3039,
+          12297,
+          23757
+        ],
+        [
+          3039,
+          12297,
+          23757
+        ],
+        [
+          4052,
+          16396,
+          31676
+        ],
+        [
+          5065,
+          20495,
+          39595
+        ],
+        [
+          6078,
+          24594,
+          47514
+        ],
+        [
+          6078,
+          24594,
+          47514
+        ],
+        [
+          7091,
+          28693,
+          55433
+        ],
+        [
+          8104,
+          32792,
+          63352
+        ],
+        [
+          9117,
+          36891,
+          5735
+        ]
+      ],
+      "getpoint": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          1013,
+          4099,
+          7919
+        ],
+        [
+          2026,
+          8198,
+          15838
+        ],
+        [
+          3039,
+          12297,
+          23757
+        ],
+        [
+          3039,
+          12297,
+          23757
+        ],
+        [
+          4052,
+          16396,
+          31676
+        ],
+        [
+          5065,
+          20495,
+          39595
+        ],
+        [
+          6078,
+          24594,
+          47514
+        ],
+        [
+          6078,
+          24594,
+          47514
+        ],
+        [
+          7091,
+          28693,
+          55433
+        ],
+        [
+          8104,
+          32792,
+          63352
+        ],
+        [
+          9117,
+          36891,
+          5735
+        ]
+      ],
+      "identity": true
+    },
+    "ll_f32": {
+      "what": "`vips jxlsave --lossless --keep none` on a 4x3 3-band float ramp, then every pixel read back. The round trip is the identity.",
+      "fixture": "fixtures/ll_f32.jxl",
+      "sha256": "2c21070d82f4901f30b917fa017ed7727aa37ff3e77d6cb5722886e8c0a71cfc",
+      "bytes": 192,
+      "boxes": [
+        [
+          "JXL ",
+          4
+        ],
+        [
+          "ftyp",
+          12
+        ],
+        [
+          "jxll",
+          1
+        ],
+        [
+          "jxlc",
+          143
+        ]
+      ],
+      "header": "/Users/rom/workspace/libviprs/.epic520/_wt/500-jxl/oracle-captures/foreign-jxl/fixtures/ll_f32.jxl: 4x3 float, 3 bands, scrgb, jxlload\nwidth: 4\nheight: 3\nbands: 3\nformat: float\ncoding: none\ninterpretation: scrgb\nxoffset: 0\nyoffset: 0\nxres: 1\nyres: 1\nfilename: /Users/rom/workspace/libviprs/.epic520/_wt/500-jxl/oracle-captures/foreign-jxl/fixtures/ll_f32.jxl\nvips-loader: jxlload\nicc-profile-data: 536 bytes of binary data\norientation: 1\nbits-per-sample: 32",
+      "source_getpoint": [
+        [
+          0.0,
+          0.03125,
+          0.0625
+        ],
+        [
+          0.25,
+          0.28125,
+          0.3125
+        ],
+        [
+          0.5,
+          0.53125,
+          0.5625
+        ],
+        [
+          0.75,
+          0.78125,
+          0.8125
+        ],
+        [
+          0.0625,
+          0.09375,
+          0.125
+        ],
+        [
+          0.3125,
+          0.34375,
+          0.375
+        ],
+        [
+          0.5625,
+          0.59375,
+          0.625
+        ],
+        [
+          0.8125,
+          0.84375,
+          0.875
+        ],
+        [
+          0.125,
+          0.15625,
+          0.1875
+        ],
+        [
+          0.375,
+          0.40625,
+          0.4375
+        ],
+        [
+          0.625,
+          0.65625,
+          0.6875
+        ],
+        [
+          0.875,
+          0.90625,
+          0.9375
+        ]
+      ],
+      "getpoint": [
+        [
+          0.0,
+          0.03125,
+          0.0625
+        ],
+        [
+          0.25,
+          0.28125,
+          0.3125
+        ],
+        [
+          0.5,
+          0.53125,
+          0.5625
+        ],
+        [
+          0.75,
+          0.78125,
+          0.8125
+        ],
+        [
+          0.0625,
+          0.09375,
+          0.125
+        ],
+        [
+          0.3125,
+          0.34375,
+          0.375
+        ],
+        [
+          0.5625,
+          0.59375,
+          0.625
+        ],
+        [
+          0.8125,
+          0.84375,
+          0.875
+        ],
+        [
+          0.125,
+          0.15625,
+          0.1875
+        ],
+        [
+          0.375,
+          0.40625,
+          0.4375
+        ],
+        [
+          0.625,
+          0.65625,
+          0.6875
+        ],
+        [
+          0.875,
+          0.90625,
+          0.9375
+        ]
+      ],
+      "identity": true
+    },
+    "lossy_rgb": {
+      "what": "`vips jxlsave` at the default distance on the same 4x3 ramp: the VarDCT float path, which libviprs decodes but cannot write. The pixels differ from the source because the encode was lossy.",
+      "fixture": "fixtures/lossy_rgb.jxl",
+      "sha256": "345e7a3ce1715748ad3c5fee6704f9c5b32ff2e451299b44d2daa36727b10bbf",
+      "bytes": 103,
+      "boxes": null,
+      "header": "/Users/rom/workspace/libviprs/.epic520/_wt/500-jxl/oracle-captures/foreign-jxl/fixtures/lossy_rgb.jxl: 4x3 uchar, 3 bands, srgb, jxlload\nwidth: 4\nheight: 3\nbands: 3\nformat: uchar\ncoding: none\ninterpretation: srgb\nxoffset: 0\nyoffset: 0\nxres: 1\nyres: 1\nfilename: /Users/rom/workspace/libviprs/.epic520/_wt/500-jxl/oracle-captures/foreign-jxl/fixtures/lossy_rgb.jxl\nvips-loader: jxlload\nicc-profile-data: 504 bytes of binary data\norientation: 1\nbits-per-sample: 8",
+      "getpoint": [
+        [
+          0,
+          0,
+          45
+        ],
+        [
+          80,
+          94,
+          23
+        ],
+        [
+          141,
+          196,
+          0
+        ],
+        [
+          172,
+          70,
+          0
+        ],
+        [
+          0,
+          149,
+          217
+        ],
+        [
+          150,
+          247,
+          206
+        ],
+        [
+          122,
+          97,
+          93
+        ],
+        [
+          213,
+          178,
+          0
+        ],
+        [
+          0,
+          51,
+          192
+        ],
+        [
+          51,
+          138,
+          208
+        ],
+        [
+          147,
+          239,
+          238
+        ],
+        [
+          221,
+          82,
+          208
+        ]
+      ],
+      "source_getpoint": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          61,
+          97,
+          29
+        ],
+        [
+          122,
+          194,
+          58
+        ],
+        [
+          183,
+          35,
+          87
+        ],
+        [
+          13,
+          151,
+          211
+        ],
+        [
+          74,
+          248,
+          240
+        ],
+        [
+          135,
+          89,
+          13
+        ],
+        [
+          196,
+          186,
+          42
+        ],
+        [
+          26,
+          46,
+          166
+        ],
+        [
+          87,
+          143,
+          195
+        ],
+        [
+          148,
+          240,
+          224
+        ],
+        [
+          209,
+          81,
+          253
+        ]
+      ]
+    },
+    "anim3": {
+      "what": "`vips jxlsave --page-height 3` on a 4x9 toilet roll: three 4x3 frames whose frame 0 is the `ll_rgb` image. A DEFAULT load reads 4x3 and reports `n-pages: 3`; `[n=-1]` reads the roll.",
+      "fixture": "fixtures/anim3.jxl",
+      "sha256": "78287311c22ce0e85b696e18dac5db447f0d05a3f92bf11542e719c0d64b3755",
+      "bytes": 237,
+      "boxes": null,
+      "header_default": "/Users/rom/workspace/libviprs/.epic520/_wt/500-jxl/oracle-captures/foreign-jxl/fixtures/anim3.jxl: 4x3 uchar, 3 bands, srgb, jxlload\nwidth: 4\nheight: 3\nbands: 3\nformat: uchar\ncoding: none\ninterpretation: srgb\nxoffset: 0\nyoffset: 0\nxres: 1\nyres: 1\nfilename: /Users/rom/workspace/libviprs/.epic520/_wt/500-jxl/oracle-captures/foreign-jxl/fixtures/anim3.jxl\nvips-loader: jxlload\nn-pages: 3\nicc-profile-data: 504 bytes of binary data\norientation: 1\nbits-per-sample: 8",
+      "header_n_all": "/Users/rom/workspace/libviprs/.epic520/_wt/500-jxl/oracle-captures/foreign-jxl/fixtures/anim3.jxl: 4x9 uchar, 3 bands, srgb, jxlload\nwidth: 4\nheight: 9\nbands: 3\nformat: uchar\ncoding: none\ninterpretation: srgb\nxoffset: 0\nyoffset: 0\nxres: 1\nyres: 1\nfilename: /Users/rom/workspace/libviprs/.epic520/_wt/500-jxl/oracle-captures/foreign-jxl/fixtures/anim3.jxl\nvips-loader: jxlload\nn-pages: 3\npage-height: 3\nicc-profile-data: 504 bytes of binary data\norientation: 1\nbits-per-sample: 8",
+      "getpoint_default": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          61,
+          97,
+          29
+        ],
+        [
+          122,
+          194,
+          58
+        ],
+        [
+          183,
+          35,
+          87
+        ],
+        [
+          13,
+          151,
+          211
+        ],
+        [
+          74,
+          248,
+          240
+        ],
+        [
+          135,
+          89,
+          13
+        ],
+        [
+          196,
+          186,
+          42
+        ],
+        [
+          26,
+          46,
+          166
+        ],
+        [
+          87,
+          143,
+          195
+        ],
+        [
+          148,
+          240,
+          224
+        ],
+        [
+          209,
+          81,
+          253
+        ]
+      ],
+      "source_getpoint": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          61,
+          97,
+          29
+        ],
+        [
+          122,
+          194,
+          58
+        ],
+        [
+          183,
+          35,
+          87
+        ],
+        [
+          13,
+          151,
+          211
+        ],
+        [
+          74,
+          248,
+          240
+        ],
+        [
+          135,
+          89,
+          13
+        ],
+        [
+          196,
+          186,
+          42
+        ],
+        [
+          26,
+          46,
+          166
+        ],
+        [
+          87,
+          143,
+          195
+        ],
+        [
+          148,
+          240,
+          224
+        ],
+        [
+          209,
+          81,
+          253
+        ],
+        [
+          39,
+          197,
+          121
+        ],
+        [
+          100,
+          38,
+          150
+        ],
+        [
+          161,
+          135,
+          179
+        ],
+        [
+          222,
+          232,
+          208
+        ],
+        [
+          52,
+          92,
+          76
+        ],
+        [
+          113,
+          189,
+          105
+        ],
+        [
+          174,
+          30,
+          134
+        ],
+        [
+          235,
+          127,
+          163
+        ],
+        [
+          65,
+          243,
+          31
+        ],
+        [
+          126,
+          84,
+          60
+        ],
+        [
+          187,
+          181,
+          89
+        ],
+        [
+          248,
+          22,
+          118
+        ],
+        [
+          78,
+          138,
+          242
+        ],
+        [
+          139,
+          235,
+          15
+        ],
+        [
+          200,
+          76,
+          44
+        ],
+        [
+          5,
+          173,
+          73
+        ],
+        [
+          91,
+          33,
+          197
+        ],
+        [
+          152,
+          130,
+          226
+        ],
+        [
+          213,
+          227,
+          255
+        ],
+        [
+          18,
+          68,
+          28
+        ],
+        [
+          104,
+          184,
+          152
+        ],
+        [
+          165,
+          25,
+          181
+        ],
+        [
+          226,
+          122,
+          210
+        ],
+        [
+          31,
+          219,
+          239
+        ]
+      ]
+    },
+    "meta": {
+      "what": "A JPEG with EXIF re-saved as lossless JPEG XL with `--keep all`. libjxl writes the EXIF into a Brotli-compressed `brob` box, and jxlload reads back the SAME blob the JPEG loader attached, byte for byte.",
+      "fixture": "fixtures/meta.jxl",
+      "sha256": "cc9db32ae345b0d36f06b04d65d79756e0ad951e8b3d6a403a92aa315f5189a9",
+      "bytes": 251,
+      "boxes": [
+        [
+          "JXL ",
+          4
+        ],
+        [
+          "ftyp",
+          12
+        ],
+        [
+          "jxlp",
+          10
+        ],
+        [
+          "brob",
+          115
+        ],
+        [
+          "jxlp",
+          70
+        ]
+      ],
+      "header": "/Users/rom/workspace/libviprs/.epic520/_wt/500-jxl/oracle-captures/foreign-jxl/fixtures/meta.jxl: 4x3 uchar, 3 bands, srgb, jxlload\nwidth: 4\nheight: 3\nbands: 3\nformat: uchar\ncoding: none\ninterpretation: srgb\nxoffset: 0\nyoffset: 0\nxres: 1\nyres: 1\nfilename: /Users/rom/workspace/libviprs/.epic520/_wt/500-jxl/oracle-captures/foreign-jxl/fixtures/meta.jxl\nvips-loader: jxlload\nicc-profile-data: 504 bytes of binary data\nexif-data: 186 bytes of binary data\nresolution-unit: in\nexif-ifd0-Orientation: 1 (Top-left, Short, 1 components, 2 bytes)\nexif-ifd0-XResolution: 25400/1000 (25.400, Rational, 1 components, 8 bytes)\nexif-ifd0-YResolution: 25400/1000 (25.400, Rational, 1 components, 8 bytes)\nexif-ifd0-ResolutionUnit: 2 (Inch, Short, 1 components, 2 bytes)\nexif-ifd0-YCbCrPositioning: 1 (Centred, Short, 1 components, 2 bytes)\nexif-ifd2-ExifVersion: Exif Version 2.1 (Exif Version 2.1, Undefined, 4 components, 4 bytes)\nexif-ifd2-ComponentsConfiguration: Y Cb Cr - (Y Cb Cr -, Undefined, 4 components, 4 bytes)\nexif-ifd2-FlashpixVersion: FlashPix Version 1.0 (FlashPix Version 1.0, Undefined, 4 components, 4 bytes)\nexif-ifd2-ColorSpace: 65535 (Uncalibrated, Short, 1 components, 2 bytes)\nexif-ifd2-PixelXDimension: 4 (4, Long, 1 components, 4 bytes)\nexif-ifd2-PixelYDimension: 3 (3, Long, 1 components, 4 bytes)\norientation: 1\nbits-per-sample: 8",
+      "exif_data_b64": "RXhpZgAASUkqAAgAAAAGABIBAwABAAAAAQAAABoBBQABAAAAVgAAABsBBQABAAAAXgAAACgBAwABAAAAAgAAABMCAwABAAAAAQAAAGmHBAABAAAAZgAAAAAAAAA4YwAA6AMAADhjAADoAwAABgAAkAcABAAAADAyMTABkQcABAAAAAECAwAAoAcABAAAADAxMDABoAMAAQAAAP//AAACoAQAAQAAAAQAAAADoAQAAQAAAAMAAAAAAAAA",
+      "jpeg_exif_data_b64": "RXhpZgAASUkqAAgAAAAGABIBAwABAAAAAQAAABoBBQABAAAAVgAAABsBBQABAAAAXgAAACgBAwABAAAAAgAAABMCAwABAAAAAQAAAGmHBAABAAAAZgAAAAAAAAA4YwAA6AMAADhjAADoAwAABgAAkAcABAAAADAyMTABkQcABAAAAAECAwAAoAcABAAAADAxMDABoAMAAQAAAP//AAACoAQAAQAAAAQAAAADoAQAAQAAAAMAAAAAAAAA",
+      "exif_survives_the_transcode": true,
+      "getpoint": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          61,
+          96,
+          28
+        ],
+        [
+          122,
+          194,
+          58
+        ],
+        [
+          182,
+          34,
+          86
+        ],
+        [
+          13,
+          152,
+          211
+        ],
+        [
+          74,
+          248,
+          239
+        ],
+        [
+          135,
+          89,
+          12
+        ],
+        [
+          197,
+          187,
+          40
+        ],
+        [
+          25,
+          46,
+          165
+        ],
+        [
+          87,
+          143,
+          194
+        ],
+        [
+          148,
+          240,
+          225
+        ],
+        [
+          208,
+          80,
+          251
+        ]
+      ]
+    },
+    "meta_off0": {
+      "what": "A hand-built container with an `Exif` box at tiff_header_offset 0 and an `xml ` box. vips reports exif-data as `Exif\\0\\0` glued onto the TIFF block (16 bytes for a 10-byte block) and xmp-data as the `xml ` payload verbatim.",
+      "fixture": "fixtures/meta_off0.jxl",
+      "sha256": "18e94faef04388a6a0b62523d0371e15c8c626338ef1da275b75d0123a8b58af",
+      "bytes": 178,
+      "boxes": [
+        [
+          "JXL ",
+          4
+        ],
+        [
+          "ftyp",
+          12
+        ],
+        [
+          "Exif",
+          14
+        ],
+        [
+          "xml ",
+          37
+        ],
+        [
+          "jxlc",
+          71
+        ]
+      ],
+      "header": "/Users/rom/workspace/libviprs/.epic520/_wt/500-jxl/oracle-captures/foreign-jxl/fixtures/meta_off0.jxl: 4x3 uchar, 3 bands, srgb, jxlload\nwidth: 4\nheight: 3\nbands: 3\nformat: uchar\ncoding: none\ninterpretation: srgb\nxoffset: 0\nyoffset: 0\nxres: 1\nyres: 1\nfilename: /Users/rom/workspace/libviprs/.epic520/_wt/500-jxl/oracle-captures/foreign-jxl/fixtures/meta_off0.jxl\nvips-loader: jxlload\nicc-profile-data: 504 bytes of binary data\nexif-data: 16 bytes of binary data\nexif-ifd0-XResolution: 25400/1000 (25.400, Rational, 1 components, 8 bytes)\nexif-ifd0-YResolution: 25400/1000 (25.400, Rational, 1 components, 8 bytes)\nexif-ifd0-ResolutionUnit: 2 (Inch, Short, 1 components, 2 bytes)\nexif-ifd2-ExifVersion: Exif Version 2.1 (Exif Version 2.1, Undefined, 4 components, 4 bytes)\nexif-ifd2-FlashpixVersion: FlashPix Version 1.0 (FlashPix Version 1.0, Undefined, 4 components, 4 bytes)\nexif-ifd2-ColorSpace: 65535 (Uncalibrated, Short, 1 components, 2 bytes)\nxmp-data: 37 bytes of binary data\norientation: 1\nbits-per-sample: 8",
+      "exif_data_b64": "RXhpZgAASUkqAAgAAAAAAA==",
+      "getpoint": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          61,
+          97,
+          29
+        ],
+        [
+          122,
+          194,
+          58
+        ],
+        [
+          183,
+          35,
+          87
+        ],
+        [
+          13,
+          151,
+          211
+        ],
+        [
+          74,
+          248,
+          240
+        ],
+        [
+          135,
+          89,
+          13
+        ],
+        [
+          196,
+          186,
+          42
+        ],
+        [
+          26,
+          46,
+          166
+        ],
+        [
+          87,
+          143,
+          195
+        ],
+        [
+          148,
+          240,
+          224
+        ],
+        [
+          209,
+          81,
+          253
+        ]
+      ],
+      "xmp_data_b64": "PHg6eG1wbWV0YSB4bWxuczp4PSJhZG9iZTpuczptZXRhLyIvPg=="
+    },
+    "meta_off6": {
+      "what": "The same TIFF block behind a tiff_header_offset of 6, with six bytes of padding in front of it. vips reports the IDENTICAL 16-byte blob, so the offset really is skipped rather than ignored.",
+      "fixture": "fixtures/meta_off6.jxl",
+      "sha256": "500ebe3e719217081db5ae209e37a651d382cbb4729ad57f06874b36b4a2cf2e",
+      "bytes": 139,
+      "boxes": [
+        [
+          "JXL ",
+          4
+        ],
+        [
+          "ftyp",
+          12
+        ],
+        [
+          "Exif",
+          20
+        ],
+        [
+          "jxlc",
+          71
+        ]
+      ],
+      "header": "/Users/rom/workspace/libviprs/.epic520/_wt/500-jxl/oracle-captures/foreign-jxl/fixtures/meta_off6.jxl: 4x3 uchar, 3 bands, srgb, jxlload\nwidth: 4\nheight: 3\nbands: 3\nformat: uchar\ncoding: none\ninterpretation: srgb\nxoffset: 0\nyoffset: 0\nxres: 1\nyres: 1\nfilename: /Users/rom/workspace/libviprs/.epic520/_wt/500-jxl/oracle-captures/foreign-jxl/fixtures/meta_off6.jxl\nvips-loader: jxlload\nicc-profile-data: 504 bytes of binary data\nexif-data: 16 bytes of binary data\nexif-ifd0-XResolution: 25400/1000 (25.400, Rational, 1 components, 8 bytes)\nexif-ifd0-YResolution: 25400/1000 (25.400, Rational, 1 components, 8 bytes)\nexif-ifd0-ResolutionUnit: 2 (Inch, Short, 1 components, 2 bytes)\nexif-ifd2-ExifVersion: Exif Version 2.1 (Exif Version 2.1, Undefined, 4 components, 4 bytes)\nexif-ifd2-FlashpixVersion: FlashPix Version 1.0 (FlashPix Version 1.0, Undefined, 4 components, 4 bytes)\nexif-ifd2-ColorSpace: 65535 (Uncalibrated, Short, 1 components, 2 bytes)\norientation: 1\nbits-per-sample: 8",
+      "exif_data_b64": "RXhpZgAASUkqAAgAAAAAAA==",
+      "getpoint": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          61,
+          97,
+          29
+        ],
+        [
+          122,
+          194,
+          58
+        ],
+        [
+          183,
+          35,
+          87
+        ],
+        [
+          13,
+          151,
+          211
+        ],
+        [
+          74,
+          248,
+          240
+        ],
+        [
+          135,
+          89,
+          13
+        ],
+        [
+          196,
+          186,
+          42
+        ],
+        [
+          26,
+          46,
+          166
+        ],
+        [
+          87,
+          143,
+          195
+        ],
+        [
+          148,
+          240,
+          224
+        ],
+        [
+          209,
+          81,
+          253
+        ]
+      ]
+    },
+    "meta_badoffset": {
+      "what": "An `Exif` box whose tiff_header_offset runs past the payload. `jxlload.c:646-649` warns `invalid data in EXIF box` and FAILS THE LOAD; the pixels are never reached. libviprs deliberately diverges: it drops the blob and keeps the image.",
+      "fixture": "fixtures/meta_badoffset.jxl",
+      "sha256": "906100a90d047c2ecedd8bdb3ca132340605cf7db6273e20893dc4841062204e",
+      "bytes": 133,
+      "boxes": [
+        [
+          "JXL ",
+          4
+        ],
+        [
+          "ftyp",
+          12
+        ],
+        [
+          "Exif",
+          14
+        ],
+        [
+          "jxlc",
+          71
+        ]
+      ],
+      "vips_exit_code": 1,
+      "vips_stdout": "",
+      "vips_stderr": "(vipsheader:23646): VIPS-WARNING **: 18:17:05.095: invalid data in EXIF box\nvipsheader:"
+    },
+    "meta_prefixed": {
+      "what": "A nonconforming `Exif` box whose payload already carries the `Exif\\0\\0` prefix instead of a 4-byte offset. `jxlload.c:635-637` special-cases it and attaches it verbatim. jxl-oxide reads the first four bytes as the offset regardless, so libviprs drops this blob where vips keeps it.",
+      "fixture": "outputs/meta_prefixed.jxl (not pinned; no test embeds it)",
+      "sha256": "c2679290c37bdfc865e256e65e6bab379b664d2cee1f07b1410575b047a38723",
+      "bytes": 135,
+      "exif_data_b64": "RXhpZgAASUkqAAgAAAAAAA=="
+    },
+    "minimum_dimensions": {
+      "what": "`vips jxlsave` accepts every geometry down to 1x1. `zune-jpegxl`'s `encoder.rs:1059-1064` refuses width <= 1 or height <= 1 outright, so libviprs has a floor vips does not and it is 2 pixels on each axis.",
+      "vips": {
+        "1x1": {
+          "vips_exit_code": 0,
+          "bytes": 18,
+          "header": "/Users/rom/workspace/libviprs/.epic520/_wt/500-jxl/oracle-captures/foreign-jxl/outputs/tiny_1x1.jxl: 1x1 uchar, 3 bands, srgb, jxlload"
+        },
+        "2x1": {
+          "vips_exit_code": 0,
+          "bytes": 28,
+          "header": "/Users/rom/workspace/libviprs/.epic520/_wt/500-jxl/oracle-captures/foreign-jxl/outputs/tiny_2x1.jxl: 2x1 uchar, 3 bands, srgb, jxlload"
+        },
+        "1x2": {
+          "vips_exit_code": 0,
+          "bytes": 31,
+          "header": "/Users/rom/workspace/libviprs/.epic520/_wt/500-jxl/oracle-captures/foreign-jxl/outputs/tiny_1x2.jxl: 1x2 uchar, 3 bands, srgb, jxlload"
+        },
+        "2x2": {
+          "vips_exit_code": 0,
+          "bytes": 36,
+          "header": "/Users/rom/workspace/libviprs/.epic520/_wt/500-jxl/oracle-captures/foreign-jxl/outputs/tiny_2x2.jxl: 2x2 uchar, 3 bands, srgb, jxlload"
+        },
+        "4x1": {
+          "vips_exit_code": 0,
+          "bytes": 40,
+          "header": "/Users/rom/workspace/libviprs/.epic520/_wt/500-jxl/oracle-captures/foreign-jxl/outputs/tiny_4x1.jxl: 4x1 uchar, 3 bands, srgb, jxlload"
+        }
+      },
+      "zune_jpegxl_floor": {
+        "width": 2,
+        "height": 2
+      }
+    },
+    "viprs_rgb": {
+      "what": "`viprs_rgb.jxl` written by `Raster::encode_jxl`, read by vips. The point of the record is that vips accepts the file at all, and reads the same pixels back.",
+      "fixture": "outputs/viprs_rgb.jxl",
+      "sha256": "0e7860e64d2f52464238a95815a9384b327ee01026f1b0b94e7ac4b082b96ee2",
+      "bytes": 221,
+      "boxes": null,
+      "header": "/Users/rom/workspace/libviprs/.epic520/_wt/500-jxl/oracle-captures/foreign-jxl/outputs/viprs_rgb.jxl: 4x3 uchar, 3 bands, srgb, jxlload\nwidth: 4\nheight: 3\nbands: 3\nformat: uchar\ncoding: none\ninterpretation: srgb\nxoffset: 0\nyoffset: 0\nxres: 1\nyres: 1\nfilename: /Users/rom/workspace/libviprs/.epic520/_wt/500-jxl/oracle-captures/foreign-jxl/outputs/viprs_rgb.jxl\nvips-loader: jxlload\nicc-profile-data: 504 bytes of binary data\norientation: 1\nbits-per-sample: 8",
+      "getpoint": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          61,
+          97,
+          29
+        ],
+        [
+          122,
+          194,
+          58
+        ],
+        [
+          183,
+          35,
+          87
+        ],
+        [
+          13,
+          151,
+          211
+        ],
+        [
+          74,
+          248,
+          240
+        ],
+        [
+          135,
+          89,
+          13
+        ],
+        [
+          196,
+          186,
+          42
+        ],
+        [
+          26,
+          46,
+          166
+        ],
+        [
+          87,
+          143,
+          195
+        ],
+        [
+          148,
+          240,
+          224
+        ],
+        [
+          209,
+          81,
+          253
+        ]
+      ]
+    },
+    "viprs_rgba": {
+      "what": "`viprs_rgba.jxl` written by `Raster::encode_jxl`, read by vips. The point of the record is that vips accepts the file at all, and reads the same pixels back.",
+      "fixture": "outputs/viprs_rgba.jxl",
+      "sha256": "d38b327fe06e329408cf7f099d8ee7f01243cb535fe86d116fac4509b7bd4777",
+      "bytes": 236,
+      "boxes": null,
+      "header": "/Users/rom/workspace/libviprs/.epic520/_wt/500-jxl/oracle-captures/foreign-jxl/outputs/viprs_rgba.jxl: 4x3 uchar, 4 bands, srgb, jxlload\nwidth: 4\nheight: 3\nbands: 4\nformat: uchar\ncoding: none\ninterpretation: srgb\nxoffset: 0\nyoffset: 0\nxres: 1\nyres: 1\nfilename: /Users/rom/workspace/libviprs/.epic520/_wt/500-jxl/oracle-captures/foreign-jxl/outputs/viprs_rgba.jxl\nvips-loader: jxlload\nicc-profile-data: 504 bytes of binary data\norientation: 1\nbits-per-sample: 8",
+      "getpoint": [
+        [
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          61,
+          97,
+          29,
+          85
+        ],
+        [
+          122,
+          194,
+          58,
+          170
+        ],
+        [
+          183,
+          35,
+          87,
+          255
+        ],
+        [
+          13,
+          151,
+          211,
+          40
+        ],
+        [
+          74,
+          248,
+          240,
+          125
+        ],
+        [
+          135,
+          89,
+          13,
+          210
+        ],
+        [
+          196,
+          186,
+          42,
+          39
+        ],
+        [
+          26,
+          46,
+          166,
+          80
+        ],
+        [
+          87,
+          143,
+          195,
+          165
+        ],
+        [
+          148,
+          240,
+          224,
+          250
+        ],
+        [
+          209,
+          81,
+          253,
+          79
+        ]
+      ]
+    },
+    "viprs_grey": {
+      "what": "`viprs_grey.jxl` written by `Raster::encode_jxl`, read by vips. The point of the record is that vips accepts the file at all, and reads the same pixels back.",
+      "fixture": "outputs/viprs_grey.jxl",
+      "sha256": "53840ed3293515c9b45bb803304e53fb6d334e5fb45526d3bc87996523925004",
+      "bytes": 186,
+      "boxes": null,
+      "header": "/Users/rom/workspace/libviprs/.epic520/_wt/500-jxl/oracle-captures/foreign-jxl/outputs/viprs_grey.jxl: 4x3 uchar, 1 band, b-w, jxlload\nwidth: 4\nheight: 3\nbands: 1\nformat: uchar\ncoding: none\ninterpretation: b-w\nxoffset: 0\nyoffset: 0\nxres: 1\nyres: 1\nfilename: /Users/rom/workspace/libviprs/.epic520/_wt/500-jxl/oracle-captures/foreign-jxl/outputs/viprs_grey.jxl\nvips-loader: jxlload\nicc-profile-data: 328 bytes of binary data\norientation: 1\nbits-per-sample: 8",
+      "getpoint": [
+        [
+          0
+        ],
+        [
+          61
+        ],
+        [
+          122
+        ],
+        [
+          183
+        ],
+        [
+          13
+        ],
+        [
+          74
+        ],
+        [
+          135
+        ],
+        [
+          196
+        ],
+        [
+          26
+        ],
+        [
+          87
+        ],
+        [
+          148
+        ],
+        [
+          209
+        ]
+      ]
+    },
+    "viprs_rgb16": {
+      "what": "`viprs_rgb16.jxl` written by `Raster::encode_jxl`, read by vips. The point of the record is that vips accepts the file at all, and reads the same pixels back.",
+      "fixture": "outputs/viprs_rgb16.jxl",
+      "sha256": "528b66cbd59aefcbfb2ab8823a93ace66e0c650d41ea756071e44c06b0e2a6b4",
+      "bytes": 267,
+      "boxes": null,
+      "header": "/Users/rom/workspace/libviprs/.epic520/_wt/500-jxl/oracle-captures/foreign-jxl/outputs/viprs_rgb16.jxl: 4x3 ushort, 3 bands, rgb16, jxlload\nwidth: 4\nheight: 3\nbands: 3\nformat: ushort\ncoding: none\ninterpretation: rgb16\nxoffset: 0\nyoffset: 0\nxres: 1\nyres: 1\nfilename: /Users/rom/workspace/libviprs/.epic520/_wt/500-jxl/oracle-captures/foreign-jxl/outputs/viprs_rgb16.jxl\nvips-loader: jxlload\nicc-profile-data: 504 bytes of binary data\norientation: 1\nbits-per-sample: 16",
+      "getpoint": [
+        [
+          0,
+          0,
+          0
+        ],
+        [
+          1013,
+          4099,
+          7919
+        ],
+        [
+          2026,
+          8198,
+          15838
+        ],
+        [
+          3039,
+          12297,
+          23757
+        ],
+        [
+          3039,
+          12297,
+          23757
+        ],
+        [
+          4052,
+          16396,
+          31676
+        ],
+        [
+          5065,
+          20495,
+          39595
+        ],
+        [
+          6078,
+          24594,
+          47514
+        ],
+        [
+          6078,
+          24594,
+          47514
+        ],
+        [
+          7091,
+          28693,
+          55433
+        ],
+        [
+          8104,
+          32792,
+          63352
+        ],
+        [
+          9117,
+          36891,
+          5735
+        ]
+      ]
+    }
+  }
+}

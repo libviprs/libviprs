@@ -14,7 +14,7 @@
 //!
 //! - `Layout`: `"deep_zoom"`, `"xyz"`, `"google"` (snake_case only).
 //! - `TileFormat`: `{"kind": "png"}`, `{"kind": "jpeg", "quality": N}`,
-//!   `{"kind": "raw"}`.
+//!   `{"kind": "raw"}`, `{"kind": "webp"}`.
 //! - `PixelFormat`: `"gray8"`, `"gray16"`, `"rgb8"`, `"rgba8"`, `"rgb16"`,
 //!   `"rgba16"`, `"rgbaf32"`; the multiband and float compute
 //!   intermediates as `"multi8:N"`, `"multi16:N"`, `"floatf32:N"`.
@@ -25,6 +25,18 @@
 //! delete these adapters once the upstream types derive serde.
 //!
 //! Forward compatibility is preserved by NOT using `#[serde(deny_unknown_fields)]`.
+//!
+//! That covers unknown *fields* and it does not cover unknown *variants*, and
+//! the difference is where issue #1123's forward-compatibility decision came
+//! from. A `{"kind": "avif"}` written by a later libviprs is an unknown
+//! variant of `Repr`, and serde has no lenient spelling for that: the arm does
+//! not exist, so the whole enclosing object fails to parse. There is no
+//! `LIBVIPRS_META_VERSION` check anywhere that would catch it first, because
+//! nothing gates on that constant at all; serde's unknown-variant error *is*
+//! the version gate, and it fires at the outermost object rather than at the
+//! field that caused it. See
+//! [`PmTilesPyramidReader::describe`](crate::pyramid_reader::PmTilesPyramidReader)
+//! for what a reader does with that, which is the other half of the decision.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -186,8 +198,16 @@ mod tile_format_serde {
     #[serde(tag = "kind", rename_all = "lowercase")]
     enum Repr {
         Png,
-        Jpeg { quality: u8 },
+        Jpeg {
+            quality: u8,
+        },
         Raw,
+        /// `{"kind":"webp"}`, with no second key (issue #1123).
+        ///
+        /// A `quality` beside it would be a field the encoder throws away;
+        /// see [`TileFormat::Webp`] for why it is unrepresentable rather than
+        /// merely undocumented.
+        Webp,
     }
 
     pub fn serialize<S: Serializer>(v: &TileFormat, s: S) -> Result<S::Ok, S::Error> {
@@ -195,6 +215,7 @@ mod tile_format_serde {
             TileFormat::Png => Repr::Png,
             TileFormat::Jpeg { quality } => Repr::Jpeg { quality },
             TileFormat::Raw => Repr::Raw,
+            TileFormat::Webp => Repr::Webp,
         };
         r.serialize(s)
     }
@@ -205,6 +226,7 @@ mod tile_format_serde {
             Repr::Png => TileFormat::Png,
             Repr::Jpeg { quality } => TileFormat::Jpeg { quality },
             Repr::Raw => TileFormat::Raw,
+            Repr::Webp => TileFormat::Webp,
         })
     }
 }
@@ -269,7 +291,13 @@ mod pixel_format_serde {
         // and float compute intermediates (never produced by the pyramid
         // pipeline, but the serializer must be total) round-trip as
         // "multi8:N"/"multi16:N"/"floatf32:N".
-        let name = match v {
+        //
+        // Canonicalised first, so one pixel layout has one tag. The tuple
+        // variants are public, so `FloatF32(4)` is constructible and used to
+        // write "floatf32:4", which the reader below turns back into
+        // `RgbaF32` -- a persisted value that did not equal the one written
+        // (issue #531). The reader still accepts those older tags.
+        let name = match v.canonical() {
             PixelFormat::Gray8 => "gray8".to_string(),
             PixelFormat::Gray16 => "gray16".to_string(),
             PixelFormat::Rgb8 => "rgb8".to_string(),
@@ -280,6 +308,10 @@ mod pixel_format_serde {
             PixelFormat::Multi8(n) => format!("multi8:{n}"),
             PixelFormat::Multi16(n) => format!("multi16:{n}"),
             PixelFormat::FloatF32(n) => format!("floatf32:{n}"),
+            PixelFormat::Uint32(n) => format!("uint32:{n}"),
+            PixelFormat::Int8(n) => format!("int8:{n}"),
+            PixelFormat::Int16(n) => format!("int16:{n}"),
+            PixelFormat::Int32(n) => format!("int32:{n}"),
         };
         s.serialize_str(&name)
     }
@@ -295,6 +327,40 @@ mod pixel_format_serde {
             "rgb16" => Ok(PixelFormat::Rgb16),
             "rgba16" => Ok(PixelFormat::Rgba16),
             "rgbaf32" => Ok(PixelFormat::RgbaF32),
+            // The uint carrier has no named spelling and no width-keyed
+            // one either: `with_channels(n, 4)` answers the float carrier,
+            // so this tag has to build the format through the kind (issues
+            // #517, #607). Read before the width-keyed tail below so a
+            // "uint32:N" tag can never fall into the four-byte float arm.
+            // The four kind-tagged carriers, read before the width-keyed
+            // tail below so none of them can fall into an arm keyed on a
+            // byte depth: `int8:N` and `multi8:N` share a width, as do
+            // `int16:N` / `multi16:N` and `uint32:N` / `int32:N` /
+            // `floatf32:N` (issues #516, #517, #607).
+            other
+                if other.starts_with("uint32:")
+                    || other.starts_with("int8:")
+                    || other.starts_with("int16:")
+                    || other.starts_with("int32:") =>
+            {
+                use crate::pixel::SampleKind;
+                let (prefix, kind) = if let Some(r) = other.strip_prefix("uint32:") {
+                    (r, SampleKind::U32)
+                } else if let Some(r) = other.strip_prefix("int8:") {
+                    (r, SampleKind::I8)
+                } else if let Some(r) = other.strip_prefix("int16:") {
+                    (r, SampleKind::I16)
+                } else {
+                    (
+                        other
+                            .strip_prefix("int32:")
+                            .expect("the guard above matched one of the four prefixes"),
+                        SampleKind::I32,
+                    )
+                };
+                let n: usize = prefix.parse().map_err(|_| unknown())?;
+                PixelFormat::with_kind(n, kind).ok_or_else(unknown)
+            }
             other => {
                 let (depth, bands) = other
                     .strip_prefix("multi8:")
@@ -558,9 +624,10 @@ impl Manifest {
     /// Serialize and write this manifest to `path`, creating parent
     /// directories as needed.
     ///
-    /// The write is atomic (staged `.tmp` sibling + rename via
-    /// [`crate::resume::atomic_write`]) so a crash mid-write cannot leave a
-    /// torn manifest, and the two on-disk copies cannot diverge (issue #124).
+    /// The write is atomic: the JSON is staged into a uniquely named `.tmp`
+    /// sibling, flushed, and renamed over `path`, so a crash mid-write cannot
+    /// leave a torn manifest and the two on-disk copies cannot diverge
+    /// (issue #124).
     pub fn write_to(&self, path: &Path) -> Result<(), ManifestError> {
         let json = self.to_json_string()?;
         crate::resume::atomic_write(path, json.as_bytes())?;
@@ -598,7 +665,7 @@ impl Manifest {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```
 /// use libviprs::manifest::{ManifestBuilder, ChecksumAlgo};
 /// let builder = ManifestBuilder::new()
 ///     .with_checksums(ChecksumAlgo::Blake3)
@@ -925,6 +992,7 @@ mod tests {
     /// (RED); after it the atomic rename replaces the file cleanly (GREEN).
     #[test]
     #[cfg(unix)]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn write_to_atomically_replaces_a_read_only_manifest() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -955,5 +1023,176 @@ mod tests {
             leftovers.is_empty(),
             "no staging temp file may linger after a successful write: {leftovers:?}"
         );
+    }
+
+    /// A pixel layout has one canonical spelling, so it must reach the
+    /// persisted manifest as one tag. The tuple variants are public, so
+    /// `FloatF32(4)` is constructible and names exactly what `RgbaF32`
+    /// names; before issue #531 the serializer wrote `"floatf32:4"` for it
+    /// and the reader canonicalized that back to `RgbaF32`, so what came off
+    /// disk was not what went on to it. The check is on the tag rather than
+    /// on the round trip because the round trip cannot see this: it already
+    /// lands on the canonical value either way.
+    #[test]
+    fn pixel_format_serde_writes_only_canonical_tags() {
+        let nz = |n: u16| core::num::NonZeroU16::new(n).expect("the table holds no zeroes");
+        for (alias, tag) in [
+            (PixelFormat::Multi8(nz(1)), "\"gray8\""),
+            (PixelFormat::Multi8(nz(3)), "\"rgb8\""),
+            (PixelFormat::Multi8(nz(4)), "\"rgba8\""),
+            (PixelFormat::Multi16(nz(1)), "\"gray16\""),
+            (PixelFormat::Multi16(nz(3)), "\"rgb16\""),
+            (PixelFormat::Multi16(nz(4)), "\"rgba16\""),
+            (PixelFormat::FloatF32(nz(4)), "\"rgbaf32\""),
+        ] {
+            let mut v1 = sample_manifest();
+            v1.source.pixel_format = alias;
+            let m = v1.into_manifest();
+            let s = m.to_json_string().unwrap();
+            assert!(s.contains(tag), "{alias:?} must persist as {tag}, got {s}");
+        }
+    }
+
+    /// `sink.rs` fills `source.pixel_format` from `tile.raster.format()`, and
+    /// a raster's format is canonical however the caller spelled it, so the
+    /// persisted manifest round-trips by identity. Without that, a manifest
+    /// built from an aliased raster parsed back into a manifest that was not
+    /// equal to it (issue #531).
+    #[test]
+    fn a_raster_derived_pixel_format_round_trips_by_identity() {
+        use crate::raster::Raster;
+
+        let alias = PixelFormat::FloatF32(core::num::NonZeroU16::new(4).expect("4 is non-zero"));
+        let raster = Raster::new(1, 1, alias, vec![0u8; 16]).unwrap();
+
+        let mut v1 = sample_manifest();
+        v1.source.pixel_format = raster.format();
+        let m = v1.into_manifest();
+        let s = m.to_json_string().unwrap();
+        let parsed: Manifest = serde_json::from_str(&s).unwrap();
+        assert_eq!(
+            parsed, m,
+            "a manifest built from a raster must survive its own wire format: {s}"
+        );
+    }
+
+    /// Manifests already on disk can carry a non-canonical tag, because
+    /// older builds wrote one. The reader must keep accepting those and keep
+    /// canonicalizing them, so fixing the writer cannot orphan a checkpoint
+    /// that was written before the fix.
+    #[test]
+    fn legacy_non_canonical_tags_still_load() {
+        for (tag, want) in [
+            ("multi8:1", PixelFormat::Gray8),
+            ("multi8:3", PixelFormat::Rgb8),
+            ("multi8:4", PixelFormat::Rgba8),
+            ("multi16:1", PixelFormat::Gray16),
+            ("multi16:3", PixelFormat::Rgb16),
+            ("multi16:4", PixelFormat::Rgba16),
+            ("floatf32:4", PixelFormat::RgbaF32),
+            (
+                "multi8:7",
+                PixelFormat::Multi8(core::num::NonZeroU16::new(7).unwrap()),
+            ),
+            (
+                "floatf32:3",
+                PixelFormat::FloatF32(core::num::NonZeroU16::new(3).unwrap()),
+            ),
+        ] {
+            let m = sample_manifest().into_manifest();
+            let mut v: serde_json::Value =
+                serde_json::from_str(&m.to_json_string().unwrap()).unwrap();
+            v["source"]["pixel_format"] = serde_json::Value::String(tag.to_string());
+            let bumped = serde_json::to_string(&v).unwrap();
+            let parsed: Manifest = serde_json::from_str(&bumped).unwrap();
+            assert_eq!(
+                parsed.as_v1().source.pixel_format,
+                want,
+                "the legacy tag {tag} must still load"
+            );
+        }
+    }
+
+    /**
+     * Tests that all four kind-tagged carriers round-trip through the
+     * manifest wire tag, and that their tags are read before the
+     * width-keyed tail so none can fall into an arm keyed on a byte depth
+     * (issues #516, #517).
+     * Works by serialising each carrier at four band counts, asserting the
+     * exact tag string, and reading it back. The controls at the end are
+     * the point: `int8` and `multi8` share a byte width, as do `int16` and
+     * `multi16`, and `uint32`, `int32` and `floatf32` are a three-way tie
+     * at four bytes, so a width-keyed serializer cannot tell six of these
+     * apart and this shows all six with distinct tags.
+     * Input: Int16(3) -> "int16:3" -> Int16(3), and so on for the four.
+     */
+    #[test]
+    fn every_kind_tagged_carrier_round_trips_through_the_manifest_tag() {
+        let n = |v: u16| core::num::NonZeroU16::new(v).unwrap();
+        // The four carriers with no named spelling and no width-keyed one,
+        // each with the exact tag it must write. Driven off a table rather
+        // than written per carrier, because mutation caught this list
+        // holding only `Uint32` after issue #516 added three more:
+        // tagging `Int16` as `int8` left it green.
+        /// One kind-tagged carrier: its constructor and the tag it writes.
+        /// Aliased because the tuple is a `clippy::type_complexity` hit
+        /// inline, and the alias is the fix rather than an `allow`.
+        type Carrier = (fn(core::num::NonZeroU16) -> PixelFormat, &'static str);
+        let carriers: [Carrier; 4] = [
+            (PixelFormat::Uint32, "uint32"),
+            (PixelFormat::Int8, "int8"),
+            (PixelFormat::Int16, "int16"),
+            (PixelFormat::Int32, "int32"),
+        ];
+        for (make, tag) in carriers {
+            for bands in [1u16, 3, 4, 7] {
+                let fmt = make(n(bands));
+                let json = serde_json::to_string(&SourceMetadata {
+                    width: 4,
+                    height: 4,
+                    pixel_format: fmt,
+                    bytes_hash: None,
+                })
+                .unwrap();
+                assert!(
+                    json.contains(&format!("\"{tag}:{bands}\"")),
+                    "the tag for {fmt:?} is not {tag}:{bands} in {json}"
+                );
+                let back: SourceMetadata = serde_json::from_str(&json).unwrap();
+                assert_eq!(back.pixel_format, fmt);
+            }
+        }
+        // The three carriers that share a byte width with another and must
+        // still get their own tag, which is what a width-keyed serializer
+        // cannot do: 1 byte, 2 bytes, and the three-way tie at 4.
+        let tag_of = |fmt: PixelFormat| {
+            serde_json::to_string(&SourceMetadata {
+                width: 4,
+                height: 4,
+                pixel_format: fmt,
+                bytes_hash: None,
+            })
+            .unwrap()
+        };
+        assert!(tag_of(PixelFormat::Int8(n(3))).contains("\"int8:3\""));
+        assert!(tag_of(PixelFormat::Multi8(n(3))).contains("\"rgb8\""));
+        assert!(tag_of(PixelFormat::Int16(n(3))).contains("\"int16:3\""));
+        assert!(tag_of(PixelFormat::Int32(n(3))).contains("\"int32:3\""));
+        assert!(tag_of(PixelFormat::Uint32(n(3))).contains("\"uint32:3\""));
+        assert!(tag_of(PixelFormat::FloatF32(n(3))).contains("\"floatf32:3\""));
+        // Control: the float carrier of the same width keeps its own tag
+        // and reads back as itself, so the two four-byte carriers are not
+        // one tag with two names.
+        let f = PixelFormat::FloatF32(n(3));
+        let json = serde_json::to_string(&SourceMetadata {
+            width: 4,
+            height: 4,
+            pixel_format: f,
+            bytes_hash: None,
+        })
+        .unwrap();
+        assert!(json.contains("\"floatf32:3\""));
+        let back: SourceMetadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.pixel_format, f);
     }
 }

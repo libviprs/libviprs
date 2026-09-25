@@ -1061,7 +1061,7 @@ fn cmyk_to_rgb_raster(cmyk_data: &[u8], width: u32, height: u32) -> Result<Raste
         return Err(PdfError::Decode("CMYK data too short".to_string()));
     }
     let mut rgb = Vec::with_capacity(rgb_len);
-    for chunk in cmyk_data[..cmyk_len].chunks_exact(4) {
+    for chunk in cmyk_data[..cmyk_len].as_chunks::<4>().0 {
         let c = chunk[0] as f32 / 255.0;
         let m = chunk[1] as f32 / 255.0;
         let y = chunk[2] as f32 / 255.0;
@@ -1092,16 +1092,16 @@ fn get_page_dimensions(doc: &lopdf::Document, page_id: lopdf::ObjectId) -> (f64,
     };
 
     // Try MediaBox, falling back through parent pages
-    if let Some(media_box) = resolve_array_entry(doc, dict, b"MediaBox") {
-        if media_box.len() >= 4 {
-            let x0 = obj_to_f64(&media_box[0]).unwrap_or(0.0);
-            let y0 = obj_to_f64(&media_box[1]).unwrap_or(0.0);
-            let x1 = obj_to_f64(&media_box[2]).unwrap_or(0.0);
-            let y1 = obj_to_f64(&media_box[3]).unwrap_or(0.0);
-            let w = (x1 - x0).abs();
-            let h = (y1 - y0).abs();
-            return apply_rotate_to_dims(w, h, resolve_rotate(doc, page_id));
-        }
+    if let Some(media_box) = resolve_array_entry(doc, dict, b"MediaBox")
+        && media_box.len() >= 4
+    {
+        let x0 = obj_to_f64(&media_box[0]).unwrap_or(0.0);
+        let y0 = obj_to_f64(&media_box[1]).unwrap_or(0.0);
+        let x1 = obj_to_f64(&media_box[2]).unwrap_or(0.0);
+        let y1 = obj_to_f64(&media_box[3]).unwrap_or(0.0);
+        let w = (x1 - x0).abs();
+        let h = (y1 - y0).abs();
+        return apply_rotate_to_dims(w, h, resolve_rotate(doc, page_id));
     }
 
     (0.0, 0.0)
@@ -1140,12 +1140,11 @@ fn resolve_rotate(doc: &lopdf::Document, page_id: lopdf::ObjectId) -> i64 {
         let Ok(dict) = obj.as_dict() else {
             return 0;
         };
-        if let Ok(rotate_obj) = dict.get(b"Rotate") {
-            if let Ok(resolved) = resolve_object(doc, rotate_obj) {
-                if let Some(v) = obj_to_f64(resolved) {
-                    return v as i64;
-                }
-            }
+        if let Ok(rotate_obj) = dict.get(b"Rotate")
+            && let Ok(resolved) = resolve_object(doc, rotate_obj)
+            && let Some(v) = obj_to_f64(resolved)
+        {
+            return v as i64;
         }
         // `/Parent` is an indirect reference to the parent Pages node.
         // Pull the object id straight from the Reference — don't call
@@ -1171,8 +1170,9 @@ fn resolve_rotate(doc: &lopdf::Document, page_id: lopdf::ObjectId) -> i64 {
 /// without a `/Rotate` entry, missing values, and self-referential
 /// parent chains all resolve to [`PageRotation::Zero`].
 ///
-/// This is the path-based companion of the private [`resolve_rotate`]
-/// helper. Callers driving pdfium's matrix render path need the page's
+/// This is the path-based companion of the crate-internal `resolve_rotate`
+/// helper, which answers the same question for an already-open `lopdf`
+/// document. Callers driving pdfium's matrix render path need the page's
 /// intrinsic `/Rotate` to compose the right device transform —
 /// `FPDF_RenderPageBitmapWithMatrix` does not auto-apply it the way the
 /// form-data render path does.
@@ -1283,7 +1283,7 @@ fn obj_to_f64(obj: &lopdf::Object) -> Option<f64> {
 /// safety at the libviprs boundary.
 ///
 /// pdfium itself is not thread-safe at the C library level. The
-/// `pdfium-render` `sync` feature wraps every FPDF call in a global
+/// `pdfium-render` `thread_safe` feature wraps every FPDF call in a global
 /// mutex, but **only** in the per-call locking fork that libviprs
 /// declares as a direct git dependency. Consumers that build libviprs
 /// from git or a path inherit that edge, but the crates.io-published
@@ -1634,61 +1634,29 @@ fn render_page_pdfium_with_background(
     render_at_size_with_background(&pdf_page, width, height, background)
 }
 
-/// Compose the device matrix that maps pre-rotation page coordinates
-/// (PDF's bottom-left origin, y-up, units = points) into bitmap pixel
-/// coordinates (pdfium's top-left origin, y-down, units = pixels) for
-/// a strip starting at `y_offset` (in display pixels) of a page rendered
-/// at `scale = dpi / 72.0`.
+/// Compose the device matrix passed to `FPDF_RenderPageBitmapWithMatrix`
+/// for a strip starting at `y_offset` (display pixels down the page),
+/// rendered at `scale = dpi / 72.0`.
 ///
-/// `display_w_pt` and `display_h_pt` are the **post-/Rotate** page
-/// dimensions in points, which is what `pdfium-render`'s
-/// `PdfPage::width()/height()` already returns. The function swaps to
-/// pre-rotation dimensions internally so callers don't have to.
+/// The caller matrix is **not** where rotation is applied. pdfium's matrix
+/// render path composes this matrix on top of the page's own display matrix,
+/// which already applies the page's intrinsic `/Rotate`, flips y-up PDF
+/// points to y-down device pixels, and maps into the destination rect. So
+/// by the time this matrix runs, the page is already in **device space**:
+/// top-left origin, y-down, correctly rotated, `1 pt · scale = 1 px`.
 ///
-/// The caller supplies the bitmap as `(display_w_px, strip_h_px)` —
-/// a strip-sized output canvas — and pdfium fills only the rows
-/// `[0, strip_h_px)` because the matrix translates the requested
-/// page strip into those rows.
+/// A strip therefore needs only a uniform `scale` and a downward translation
+/// of `-y_offset`, so display rows `[y_offset, y_offset + strip_h)` land at
+/// the top of the strip-sized bitmap. Rotation and the y-flip are pdfium's
+/// job. Baking a per-`/Rotate` rotation in here (as this function used to)
+/// double-applies the rotation and transposes/clips rotated pages — see the
+/// `rotation_libvips_pdfium_parity` regression test in libviprs-tests.
 ///
-/// # Per-rotation matrices
-///
-/// | `/Rotate` | `[a, b, c, d, e, f]`                                        |
-/// |-----------|-------------------------------------------------------------|
-/// | 0         | `[s,  0,  0, -s, 0,             s·page_h_pt − y_off]`       |
-/// | 90        | `[0,  s,  s,  0, 0,             −y_off]`                    |
-/// | 180       | `[−s, 0,  0,  s, s·page_w_pt,   −y_off]`                    |
-/// | 270       | `[0, −s, −s,  0, s·page_h_pt,   s·page_w_pt − y_off]`       |
-///
-/// `s = scale`. `page_w_pt / page_h_pt` are the **pre-rotation** page
-/// dimensions (display dims swapped for `/Rotate 90/270`). Derivation:
-/// for each rotation, compose page→display map (rotation + y-flip from
-/// y-up to y-down) and translate by `-y_offset`.
-///
-/// Infallible because the typed [`PageRotation`] enum makes invalid
-/// rotation values unrepresentable. Errors that previously came from
-/// this function (unsupported `/Rotate`) now surface at the parsing
-/// boundary in [`PageRotation::try_from_degrees`].
+/// Returns `[a, b, c, d, e, f] = [scale, 0, 0, scale, 0, -y_offset]`.
 #[cfg(feature = "pdfium")]
 #[must_use]
-pub(crate) fn strip_matrix(
-    rotation: PageRotation,
-    scale: f32,
-    display_w_pt: f32,
-    display_h_pt: f32,
-    y_offset: u32,
-) -> [f32; 6] {
-    let (page_w_pt, page_h_pt) = match rotation {
-        PageRotation::Zero | PageRotation::Half => (display_w_pt, display_h_pt),
-        PageRotation::Quarter | PageRotation::ThreeQuarter => (display_h_pt, display_w_pt),
-    };
-    let s = scale;
-    let y_off = y_offset as f32;
-    match rotation {
-        PageRotation::Zero => [s, 0.0, 0.0, -s, 0.0, s * page_h_pt - y_off],
-        PageRotation::Quarter => [0.0, s, s, 0.0, 0.0, -y_off],
-        PageRotation::Half => [-s, 0.0, 0.0, s, s * page_w_pt, -y_off],
-        PageRotation::ThreeQuarter => [0.0, -s, -s, 0.0, s * page_h_pt, s * page_w_pt - y_off],
-    }
+pub(crate) fn strip_matrix(scale: f32, y_offset: u32) -> [f32; 6] {
+    [scale, 0.0, 0.0, scale, 0.0, -(y_offset as f32)]
 }
 
 /// Render a single horizontal strip of a PDF page directly via pdfium's
@@ -1696,40 +1664,28 @@ pub(crate) fn strip_matrix(
 ///
 /// `y_offset` and `strip_height` are in display-oriented pixel coordinates
 /// (top-left origin, y-down) — the same coordinate system the engine and
-/// `StripSource` callers already speak. `rotation` is the page's intrinsic
-/// `/Rotate` (call [`page_rotate`] to obtain it once per source).
+/// `StripSource` callers already speak.
 ///
 /// # Coordinate composition
 ///
-/// `FPDF_RenderPageBitmapWithMatrix` does not auto-apply the page's
-/// `/Rotate`; only the form-data render path does. We compose the
-/// per-rotation device matrix manually so the rendered strip lands at
-/// rows `[0, strip_height)` of the output bitmap. For each `/Rotate`
-/// value, the matrix maps pre-rotation page coordinates (y-up, origin
-/// bottom-left, units = points) into bitmap pixel coordinates (y-down,
-/// origin top-left, units = pixels):
-///
-/// | `/Rotate` | `[a, b, c, d, e, f]`                                        |
-/// |-----------|-------------------------------------------------------------|
-/// | 0         | `[s,  0,  0, -s, 0,             s·page_h_pt − y_off]`       |
-/// | 90        | `[0,  s,  s,  0, 0,             −y_off]`                    |
-/// | 180       | `[−s, 0,  0,  s, s·page_w_pt,   −y_off]`                    |
-/// | 270       | `[0, −s, −s,  0, s·page_h_pt,   s·page_w_pt − y_off]`       |
-///
-/// `s = dpi / 72`. `page_w_pt` / `page_h_pt` are pre-rotation page
-/// dimensions in points (swapped from `pdf_page.width()/height()` for
-/// `/Rotate 90/270`, since pdfium-render's getters return display-oriented
-/// dims — see comment at `pdf.rs:376-379`). The full per-rotation
-/// derivation lives in libviprs#70 and is pinned by the rotation cross-
-/// product test
-/// (`libviprs-tests/tests/pdfium_streaming_rotation_matrix.rs`).
+/// `FPDF_RenderPageBitmapWithMatrix` composes the caller matrix on top of
+/// the page's own display matrix, which already applies the page's intrinsic
+/// `/Rotate`, flips y-up PDF points to y-down device pixels, and scales into
+/// the destination rect. The caller matrix therefore operates in device
+/// space, so a strip needs only a uniform scale plus a `-y_offset`
+/// translation to bring display rows `[y_offset, y_offset + strip_height)` to
+/// rows `[0, strip_height)` of the output bitmap. Rotation is pdfium's job,
+/// not ours — see [`strip_matrix`]. Page dimensions come from
+/// `pdf_page.width()/height()`, which already return display-oriented
+/// (post-`/Rotate`) values, so no dimension swap is needed here. The rendered
+/// pixels are pinned against libvips output for every `/Rotate` value by
+/// libviprs-tests' `rotation_libvips_pdfium_parity` test.
 ///
 /// # Errors
 ///
 /// - [`PdfError::PageOutOfRange`] — `page == 0` or `page > total_pages`.
 /// - [`PdfError::Pdfium`] — pdfium load / page get / matrix-validity /
-///   render error, including unsupported `/Rotate` values not in
-///   `{0, 90, 180, 270}`.
+///   render error.
 ///
 /// Render a single horizontal strip from an **already-loaded** [`PdfPage`].
 ///
@@ -1741,16 +1697,15 @@ pub(crate) fn strip_matrix(
 ///
 /// FPDF calls underneath this function are serialised by
 /// `pdfium-render`'s `ThreadSafePdfiumBindings` (active via the
-/// `sync` feature plus the direct git dependency on the per-call
+/// `thread_safe` feature plus the direct git dependency on the per-call
 /// locking fork in `libviprs/Cargo.toml`).
 ///
-/// `dpi`, `rotation`, `y_offset`, `strip_height` semantics match the
-/// matrix derivation documented at [`strip_matrix`].
+/// `dpi`, `y_offset`, `strip_height` semantics match the device matrix
+/// documented at [`strip_matrix`].
 #[cfg(feature = "pdfium")]
 pub(crate) fn render_page_strip_with_page(
     pdf_page: &pdfium_render::prelude::PdfPage<'_>,
     dpi: u32,
-    rotation: PageRotation,
     y_offset: u32,
     strip_height: u32,
 ) -> Result<Raster, PdfError> {
@@ -1769,13 +1724,23 @@ pub(crate) fn render_page_strip_with_page(
     // past the page, return a zero raster of the requested height to
     // keep the StripSource contract.
     let strip_h = strip_height.min(display_h_px.saturating_sub(y_offset));
+    // Same span guard the full-page paths apply, and for a sharper reason here.
+    // `pdfium-render` 0.9.4 still computes a bitmap's buffer length as
+    // `stride * height` in `c_int` (`src/bindings.rs`), so a raster whose span
+    // passes `i32::MAX` wraps there and is handed to `slice::from_raw_parts`.
+    // pdfium's own size arithmetic is unsigned, so it will happily create the
+    // bitmap first. A 28800x21600 sheet, which is 48x36 inches at 600 dpi and
+    // squarely in this crate's domain, spans 2_488_320_000 bytes and lands
+    // inside that window. The full-page paths already refuse it; this one is
+    // the only render path that did not, and its width is unbounded.
+    pdfium_bitmap_span(display_w_px, strip_h)?;
     if strip_h == 0 {
         let data = alloc_zeroed_rgba(display_w_px, strip_height)?;
         return Raster::new(display_w_px, strip_height, PixelFormat::Rgba8, data)
             .map_err(PdfError::from);
     }
 
-    let [a, b, c, d, e, f] = strip_matrix(rotation, scale, display_w_pt, display_h_pt, y_offset);
+    let [a, b, c, d, e, f] = strip_matrix(scale, y_offset);
     let matrix = PdfMatrix::new(a, b, c, d, e, f);
 
     let config = PdfRenderConfig::new()
@@ -1900,6 +1865,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn pdf_info_with_password_reports_encrypted_as_unsupported() {
         // A genuinely encrypted document (one carrying an /Encrypt dictionary)
         // opened with a non-empty password reports the typed
@@ -1914,6 +1880,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // hands a real path to an entry point that opens it
     fn pdf_info_with_password_passes_through_open_error() {
         // A missing/unreadable file must surface its real open error, not the
         // password-protected message, even when a password is supplied.
@@ -1929,6 +1896,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn pdf_info_with_password_ignores_password_on_unencrypted_doc() {
         // A normal, readable document is not mislabelled as password-protected
         // just because a password was supplied.
@@ -1938,6 +1906,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // hands a real path to an entry point that opens it
     fn password_and_dpi_extract_return_a_clean_typed_error() {
         let bogus = Path::new("/nonexistent/secret.pdf");
         // A missing file surfaces its real error folded into the decode error,
@@ -1951,6 +1920,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn extract_page_image_with_password_reports_encrypted_as_unsupported() {
         // An encrypted document opened with a password folds to the typed
         // password-protected capability error.
@@ -1981,6 +1951,7 @@ mod tests {
     /// the function reports an unsupported-capability decode error instead.
     #[cfg(feature = "pdfium")]
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn extract_page_image_with_background_applies_clear_colour() {
         // A 100x100pt page whose sole content is a 10x10pt black square in the
         // bottom-left corner. Every other region is unpainted, so pdfium's
@@ -2079,6 +2050,7 @@ mod tests {
     /// loudly with a typed invalid-input decode error (see #87).
     #[cfg(feature = "pdfium")]
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn extract_page_image_with_background_rejects_over_length_slice() {
         let (doc, _page_id) = build_rotated_doc([0.0, 0.0, 100.0, 100.0], None, None);
         let (_dir, path) = save_doc(doc);
@@ -2125,6 +2097,7 @@ mod tests {
     /// feature both entry points report an unsupported-capability decode error.
     #[cfg(feature = "pdfium")]
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn typed_background_matches_slice_form() {
         let (doc, _page_id) = build_rotated_doc([0.0, 0.0, 100.0, 100.0], None, None);
         let (_dir, path) = save_doc(doc);
@@ -2820,227 +2793,40 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // strip_matrix — pure-Rust unit tests for the per-rotation device matrix.
-    //
-    // These tests verify that the matrix coefficients map page-space corners
-    // to the expected bitmap-pixel positions, without going through pdfium.
-    // Each rotation is verified independently so a sign error or axis swap
-    // surfaces as a single failed test, not a confusing region-mean drift.
-    //
-    // Apply-the-matrix helper: PDF matrices are [a, b, c, d, e, f] applied
-    // as `(x', y') = (a*x + c*y + e, b*x + d*y + f)`. We replicate that
-    // here rather than reaching for a 2D linear-algebra crate, since the
-    // arithmetic is two multiplies and two adds per coordinate.
-    // -----------------------------------------------------------------------
-    //
-    // Test cases cover: page corners (BL/BR/TR/TL), strip y_offset = 0
-    // (full page), strip y_offset > 0 (offset strip), and `scale != 1`.
-    // -----------------------------------------------------------------------
-    #[cfg(feature = "pdfium")]
-    fn apply(matrix: [f32; 6], x: f32, y: f32) -> (f32, f32) {
-        let [a, b, c, d, e, f] = matrix;
-        (a * x + c * y + e, b * x + d * y + f)
-    }
+    // strip_matrix — the device-space matrix handed to pdfium's matrix
+    // render path. pdfium's own display matrix already applies the page's
+    // /Rotate and the y-up -> y-down flip (see the strip_matrix doc comment),
+    // so this matrix is a pure scale + downward strip translation, and is
+    // completely rotation-independent. These unit tests pin that formula;
+    // the end-to-end proof that the rendered pixels match libvips for every
+    // /Rotate value lives in libviprs-tests' rotation_libvips_pdfium_parity
+    // test, which renders the canonical fixtures through pdfium and compares
+    // against committed libvips+pdfium golden images.
 
-    /// Comparison helper that absorbs f32 rounding (PdfMatrix is f32).
-    #[cfg(feature = "pdfium")]
-    fn approx_eq(actual: (f32, f32), expected: (f32, f32), label: &str) {
-        let dx = (actual.0 - expected.0).abs();
-        let dy = (actual.1 - expected.1).abs();
-        assert!(
-            dx < 1e-3 && dy < 1e-3,
-            "{label}: expected ({:.4}, {:.4}), got ({:.4}, {:.4})",
-            expected.0,
-            expected.1,
-            actual.0,
-            actual.1
-        );
-    }
-
-    /// /Rotate 0, scale 1, full-page render (y_offset = 0).
-    /// page (0, 0) maps to bitmap (0, page_h) — bottom-left of bitmap.
-    /// page (W, H) maps to bitmap (W, 0) — top-right of bitmap.
+    /// Full page (`y_offset = 0`), unit scale: the identity, since pdfium's
+    /// own display matrix supplies the rotation, the y-flip, and the fit.
     #[cfg(feature = "pdfium")]
     #[test]
-    fn strip_matrix_rotate_0_full_page_corners() {
-        let m = strip_matrix(PageRotation::Zero, 1.0, 100.0, 200.0, 0);
-        // Page BL (0, 0) → display BL = bitmap (0, page_h_px) = (0, 200).
-        approx_eq(apply(m, 0.0, 0.0), (0.0, 200.0), "/Rotate 0 BL");
-        // Page TL (0, H) → display TL = bitmap (0, 0).
-        approx_eq(apply(m, 0.0, 200.0), (0.0, 0.0), "/Rotate 0 TL");
-        // Page TR (W, H) → display TR = bitmap (W, 0) = (100, 0).
-        approx_eq(apply(m, 100.0, 200.0), (100.0, 0.0), "/Rotate 0 TR");
-        // Page BR (W, 0) → display BR = bitmap (W, H) = (100, 200).
-        approx_eq(apply(m, 100.0, 0.0), (100.0, 200.0), "/Rotate 0 BR");
+    fn strip_matrix_full_page_is_scale_only() {
+        assert_eq!(strip_matrix(1.0, 0), [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
     }
 
-    /// /Rotate 0, scale 1, strip y_offset = 50.
-    /// page TL (0, H) — which would be bitmap (0, 0) at full page — should
-    /// move to bitmap (0, -50) (above the strip-sized bitmap).
-    /// page (0, H-50) should land at bitmap (0, 0) (the new top of strip).
+    /// `scale` multiplies only the two diagonal terms; the off-diagonal
+    /// terms stay zero, so no rotation or shear is ever introduced here.
     #[cfg(feature = "pdfium")]
     #[test]
-    fn strip_matrix_rotate_0_strip_offset() {
-        let m = strip_matrix(PageRotation::Zero, 1.0, 100.0, 200.0, 50);
-        approx_eq(apply(m, 0.0, 200.0), (0.0, -50.0), "/Rotate 0 strip TL");
-        approx_eq(apply(m, 0.0, 150.0), (0.0, 0.0), "/Rotate 0 strip y=50 row");
-        approx_eq(
-            apply(m, 100.0, 150.0),
-            (100.0, 0.0),
-            "/Rotate 0 strip TR-of-strip",
-        );
+    fn strip_matrix_scale_only_touches_the_diagonal() {
+        assert_eq!(strip_matrix(2.5, 0), [2.5, 0.0, 0.0, 2.5, 0.0, 0.0]);
     }
 
-    /// /Rotate 0, scale 2 — the bitmap is 2x bigger; corners scale linearly.
+    /// `y_offset` is a pure downward translation in the `f` term, bringing
+    /// display row `y_offset` to the top of the strip bitmap, independent of
+    /// scale and of every other coefficient.
     #[cfg(feature = "pdfium")]
     #[test]
-    fn strip_matrix_rotate_0_scaled() {
-        let m = strip_matrix(PageRotation::Zero, 2.0, 100.0, 200.0, 0);
-        approx_eq(apply(m, 0.0, 0.0), (0.0, 400.0), "/Rotate 0 scale=2 BL");
-        approx_eq(apply(m, 100.0, 200.0), (200.0, 0.0), "/Rotate 0 scale=2 TR");
-    }
-
-    /// /Rotate 90, scale 1, full page. Display orientation: landscape
-    /// (display_w_pt = page_h_pt = 200, display_h_pt = page_w_pt = 100).
-    /// Page BL (0, 0) → display top-left = bitmap (0, 0).
-    /// Page TR (page_w_pt, page_h_pt) = (100, 200) → display bottom-right.
-    #[cfg(feature = "pdfium")]
-    #[test]
-    fn strip_matrix_rotate_90_full_page_corners() {
-        // Caller passes display dims; for /Rotate 90 portrait original
-        // (page_w_pt=100, page_h_pt=200), display is landscape:
-        // display_w_pt = page_h_pt = 200, display_h_pt = page_w_pt = 100.
-        let m = strip_matrix(PageRotation::Quarter, 1.0, 200.0, 100.0, 0);
-        // Page BL (0, 0) → display top-left = bitmap (0, 0).
-        approx_eq(
-            apply(m, 0.0, 0.0),
-            (0.0, 0.0),
-            "/Rotate 90 page-BL → display-TL",
-        );
-        // Page TL (0, page_h_pt=200) → display top-right = bitmap (200, 0).
-        approx_eq(
-            apply(m, 0.0, 200.0),
-            (200.0, 0.0),
-            "/Rotate 90 page-TL → display-TR",
-        );
-        // Page TR (page_w=100, page_h=200) → display bottom-right = (200, 100).
-        approx_eq(
-            apply(m, 100.0, 200.0),
-            (200.0, 100.0),
-            "/Rotate 90 page-TR → display-BR",
-        );
-        // Page BR (100, 0) → display bottom-left = (0, 100).
-        approx_eq(
-            apply(m, 100.0, 0.0),
-            (0.0, 100.0),
-            "/Rotate 90 page-BR → display-BL",
-        );
-    }
-
-    /// /Rotate 180, scale 1, full page. Display orientation: same as
-    /// page orientation (rotation is a half-turn). Page BL → display
-    /// top-right; page TR → display bottom-left.
-    #[cfg(feature = "pdfium")]
-    #[test]
-    fn strip_matrix_rotate_180_full_page_corners() {
-        // Display dims = page dims for /Rotate 180.
-        let m = strip_matrix(PageRotation::Half, 1.0, 100.0, 200.0, 0);
-        // Page BL (0, 0) → display top-right = bitmap (W=100, 0).
-        approx_eq(
-            apply(m, 0.0, 0.0),
-            (100.0, 0.0),
-            "/Rotate 180 page-BL → display-TR",
-        );
-        // Page TR (100, 200) → display bottom-left = bitmap (0, H=200).
-        approx_eq(
-            apply(m, 100.0, 200.0),
-            (0.0, 200.0),
-            "/Rotate 180 page-TR → display-BL",
-        );
-        // Page BR (100, 0) → display top-left = bitmap (0, 0).
-        approx_eq(
-            apply(m, 100.0, 0.0),
-            (0.0, 0.0),
-            "/Rotate 180 page-BR → display-TL",
-        );
-        // Page TL (0, 200) → display bottom-right = bitmap (100, 200).
-        approx_eq(
-            apply(m, 0.0, 200.0),
-            (100.0, 200.0),
-            "/Rotate 180 page-TL → display-BR",
-        );
-    }
-
-    /// /Rotate 270, scale 1, full page. Display orientation: landscape
-    /// (display_w_pt = page_h_pt, display_h_pt = page_w_pt).
-    /// Page BL (0, 0) → display bottom-right.
-    /// Page TR → display top-left.
-    #[cfg(feature = "pdfium")]
-    #[test]
-    fn strip_matrix_rotate_270_full_page_corners() {
-        // Caller passes display dims; for /Rotate 270 portrait (W=100, H=200),
-        // display is landscape: display_w_pt=200, display_h_pt=100.
-        let m = strip_matrix(PageRotation::ThreeQuarter, 1.0, 200.0, 100.0, 0);
-        // Page BL (0, 0) → display bottom-right = bitmap (display_w_pt=200, display_h_pt=100).
-        approx_eq(
-            apply(m, 0.0, 0.0),
-            (200.0, 100.0),
-            "/Rotate 270 page-BL → display-BR",
-        );
-        // Page TR (page_w=100, page_h=200) → display top-left = (0, 0).
-        approx_eq(
-            apply(m, 100.0, 200.0),
-            (0.0, 0.0),
-            "/Rotate 270 page-TR → display-TL",
-        );
-        // Page BR (100, 0) → display top-right = (200, 0).
-        approx_eq(
-            apply(m, 100.0, 0.0),
-            (200.0, 0.0),
-            "/Rotate 270 page-BR → display-TR",
-        );
-        // Page TL (0, 200) → display bottom-left = (0, 100).
-        approx_eq(
-            apply(m, 0.0, 200.0),
-            (0.0, 100.0),
-            "/Rotate 270 page-TL → display-BL",
-        );
-    }
-
-    /// Strip y_offset translates the result by -y_offset for every rotation,
-    /// without changing the rotation algebra. This invariant is what lets
-    /// the engine's "render strip K, then strip K+1" loop work.
-    #[cfg(feature = "pdfium")]
-    #[test]
-    fn strip_matrix_y_offset_pure_translation_all_rotations() {
-        // For each rotation, computing `apply(matrix(rot, ..., y_off=0), x, y)`
-        // and `apply(matrix(rot, ..., y_off=K), x, y)` must produce results
-        // that differ only by `(0, -K)` in bitmap coords.
-        for &rot in &[
-            PageRotation::Zero,
-            PageRotation::Quarter,
-            PageRotation::Half,
-            PageRotation::ThreeQuarter,
-        ] {
-            // Use display dims that fit each rotation. For /Rotate 0/180,
-            // display = (W=100, H=200). For 90/270, display = (W=200, H=100).
-            let (dw, dh): (f32, f32) = match rot {
-                PageRotation::Zero | PageRotation::Half => (100.0, 200.0),
-                PageRotation::Quarter | PageRotation::ThreeQuarter => (200.0, 100.0),
-            };
-            let m_no_off = strip_matrix(rot, 1.0, dw, dh, 0);
-            let m_with_off = strip_matrix(rot, 1.0, dw, dh, 50);
-            // Pick an arbitrary page point inside any of the four rotation's
-            // bounding boxes (use the smaller of dimensions).
-            let (test_x, test_y) = (10.0_f32, 10.0_f32);
-            let p0 = apply(m_no_off, test_x, test_y);
-            let p1 = apply(m_with_off, test_x, test_y);
-            approx_eq(
-                (p1.0 - p0.0, p1.1 - p0.1),
-                (0.0, -50.0),
-                &format!("/Rotate {rot:?} y_offset translation invariant"),
-            );
-        }
+    fn strip_matrix_y_offset_is_pure_translation() {
+        assert_eq!(strip_matrix(1.0, 50), [1.0, 0.0, 0.0, 1.0, 0.0, -50.0]);
+        assert_eq!(strip_matrix(3.0, 120), [3.0, 0.0, 0.0, 3.0, 0.0, -120.0]);
     }
 
     /// `PageRotation::try_from_degrees` rejects non-multiples of 90 with

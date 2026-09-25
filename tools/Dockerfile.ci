@@ -1,0 +1,93 @@
+# ---------------------------------------------------------------------------
+# tools/Dockerfile.ci — the image `tools/local-ci.py` runs the CI job list in.
+#
+# This exists so a local gate and CI cannot disagree about the environment.
+# It is deliberately NOT a build image: no sources are copied in. `local-ci.py`
+# bind-mounts the working tree (and the libviprs-tests sibling) at run time, so
+# one build serves every branch and the container never holds a stale copy.
+#
+# Toolchains match what `.github/workflows/ci.yml` asks for via
+# `dtolnay/rust-toolchain@<spec>`: stable for Check & Lint, Docs, Test and the
+# integration job, and 1.97 for the MSRV job. Nightly is here for
+# `merge-gate.yml`'s Miri job, which is the other workflow worth running
+# locally. If ci.yml starts asking for a toolchain this image does not carry,
+# `local-ci.py` fails loudly rather than silently substituting one.
+#
+# Architecture: `local-ci.py` pins `--platform linux/amd64` so this matches
+# GitHub's `ubuntu-latest`, which means Docker emulates it on Apple Silicon.
+# That is deliberate. The differences worth catching here are
+# architecture-sensitive: `f32::mul_add` lowers to a libm `fmaf` call on
+# baseline x86-64 and to a single `fmadd` on aarch64 (issue #581), so a native
+# arm64 gate would not see the x86 cost at all.
+#
+# `--native` runs on the host architecture instead. Use it for the
+# fallible-allocation tests, which ask for an allocation Rosetta cannot reserve
+# and so SIGTRAP under emulation rather than failing cleanly. `local-ci.py`
+# recognises that message and says so rather than reporting a phantom failure.
+#
+# `TARGETARCH` still selects the pdfium build, so both platforms work.
+# ---------------------------------------------------------------------------
+
+FROM debian:bookworm-slim AS pdfium
+RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
+# The same pinned, checksum-verified libviprs-dep release the suite that gates
+# this crate consumes. Keep PDFIUM_RELEASE and the two digests in lockstep with
+# libviprs-tests' `.github/workflows/ci.yml` (`PDFIUM_RELEASE` / `PDFIUM_SHA256`
+# in its `test-pdfium` job) and its `Dockerfile`.
+#
+# It said "in lockstep with ci.yml" until #1012, and this repo's `ci.yml` pins
+# no pdfium at all: the pdfium tests run through the tests repo, so this image
+# is the only place this repository names a pdfium build. The comment therefore
+# pointed at the one file that could not have told anyone the pin was stale,
+# and it was: libviprs-tests moved to 8054 in libviprs-tests#208 and this sat
+# on 7881. A pdfium-dependent difference between the two, a rendering change or
+# a dropped symbol, passes `make ci` and fails on GitHub, or the reverse.
+#
+# Nothing enforces the lockstep, and that is a decision rather than an
+# oversight. The obvious guard is a test here that reads
+# `../libviprs-tests/Dockerfile` and compares, but the sibling is absent in the
+# normal layout: `local-ci.py` already treats a missing sibling as ordinary and
+# reports SKIP on the integration job, and an agent worktree has no sibling
+# beside it at all. A guard that hard-fails without the sibling would be red in
+# the common case and a guard that skips is no guard, so for now the two files
+# above are named here and checked by hand at bump time (#1012).
+ARG PDFIUM_RELEASE=pdfium-8054
+ARG TARGETARCH
+RUN case "${TARGETARCH}" in \
+        amd64) PDFIUM_ARCH="linux-x64";   PDFIUM_SHA256="b42d1731f07fb73edea38cbd294afe9be4bdcf8e4ed8523de51cd5d12fc8d271" ;; \
+        arm64) PDFIUM_ARCH="linux-arm64"; PDFIUM_SHA256="3e1fe6e6ea1a53b1f801a071be256240513c1cad17b8d27fd80330da8f8c3640" ;; \
+        *)     echo "Unsupported arch: ${TARGETARCH}" && exit 1 ;; \
+    esac && \
+    curl -fsSL -o /tmp/pdfium.tgz \
+        "https://github.com/libviprs/libviprs-dep/releases/download/${PDFIUM_RELEASE}/pdfium-${PDFIUM_ARCH}.tgz" && \
+    echo "${PDFIUM_SHA256}  /tmp/pdfium.tgz" | sha256sum -c - && \
+    mkdir -p /opt/pdfium && \
+    tar xzf /tmp/pdfium.tgz -C /opt/pdfium --strip-components=1 && \
+    rm /tmp/pdfium.tgz
+
+FROM rust:latest
+# `shellcheck` is here because `ubuntu-latest` ships it and this image did not,
+# which is the one thing this file exists to prevent. The integration job runs
+# `shellcheck tools/*.sh tools/hooks/pre-push` from libviprs-tests' own CI, and
+# its hook-installer test drives the pre-commit hook with every command stubbed
+# to succeed. `shellcheck` was not among the stubs because on a real runner it
+# does not need to be, so the test failed here and passed there, which is a
+# mirror that lies rather than a mirror that is strict.
+RUN apt-get update && apt-get install -y ca-certificates git shellcheck && rm -rf /var/lib/apt/lists/*
+COPY --from=pdfium /opt/pdfium/lib/libpdfium.so /usr/local/lib/libpdfium.so
+RUN ldconfig
+
+# The toolchains ci.yml names, plus nightly + miri for merge-gate.yml.
+# Name the toolchain on every component add. A bare `rustup component add`
+# targets whatever is default AT THAT MOMENT, which after installing nightly
+# is nightly, so stable silently ended up with no clippy and no rustfmt and
+# `cargo fmt --check` failed with "not installed for the toolchain 'stable'".
+RUN rustup component add clippy rustfmt --toolchain stable \
+ && rustup toolchain install 1.97 --component clippy,rustfmt \
+ && rustup toolchain install nightly --component miri,clippy,rustfmt \
+ && rustup default stable
+
+# Cargo state lives on a named volume mounted here, so repeat runs are warm.
+ENV CARGO_HOME=/cargo
+ENV CARGO_TERM_COLOR=always
+WORKDIR /src/libviprs

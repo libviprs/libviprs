@@ -4,7 +4,7 @@
 //! deprecated `s3` alias also enables it). It introduces an
 //! injectable [`ObjectStore`] trait so tests can swap in in-memory backends,
 //! plus a concrete [`ObjectStoreSink`] that conforms to the crate's
-//! [`TileSink`](crate::sink::TileSink) contract.
+//! [`TileSink`] contract.
 //!
 //! The real wire-level S3 client path is intentionally minimal in this
 //! implementation: the Phase 3 TDD suite exclusively uses test doubles via
@@ -14,20 +14,45 @@
 //! Retry behaviour is **not** built into [`ObjectStoreSink`]. Callers who want
 //! automatic retries compose one externally:
 //!
-//! ```ignore
-//! use libviprs::retry::{FailurePolicy, RetryPolicy, RetryingSink};
+//! ```
+//! use std::sync::Arc;
+//!
+//! use libviprs::planner::{Layout, PyramidPlanner};
+//! use libviprs::retry::{RetryPolicy, RetryingSink};
+//! use libviprs::sink::{SinkError, TileFormat};
+//! use libviprs::sink_object_store::{ObjectStore, ObjectStoreConfig, ObjectStoreSink};
+//!
+//! /// The injected backend the sink needs. A real client puts bytes on the
+//! /// wire; this one drops them, which is all the example needs.
+//! struct NullStore;
+//! impl ObjectStore for NullStore {
+//!     fn put(&self, _key: &str, _bytes: &[u8]) -> Result<(), SinkError> {
+//!         Ok(())
+//!     }
+//! }
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let plan = PyramidPlanner::new(1024, 768, 256, 0, Layout::DeepZoom)?.plan();
+//! let cfg = ObjectStoreConfig::s3("https://example.invalid", "tiles")
+//!     .with_object_store(Arc::new(NullStore));
+//!
 //! let sink = RetryingSink::new(
-//!     ObjectStoreSink::new(cfg, plan, fmt)?,
+//!     ObjectStoreSink::new(cfg, plan, TileFormat::Png)?,
 //!     RetryPolicy::default(),
 //! );
+//! # let _ = sink;
+//! # Ok(())
+//! # }
 //! ```
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use crate::pixel::PixelFormat;
 use crate::planner::{PyramidPlan, TileCoord};
 use crate::raster::Raster;
-use crate::sink::{BLANK_TILE_MARKER, SinkError, Tile, TileFormat, TileSink, encode_png};
+use crate::sink::{
+    BLANK_TILE_MARKER, SinkError, Tile, TileFormat, TileSink, background_from, encode_jpeg,
+    encode_png,
+};
 
 // ---------------------------------------------------------------------------
 // ObjectStore trait — injection point used by test doubles.
@@ -61,6 +86,71 @@ pub trait ObjectStore: Send + Sync {
              operation (ObjectStore::list is defaulted to refuse). A \
              listing-capable backend overrides it; write-only backends inherit \
              this loud failure. Do not treat this as an empty object set."
+                .into(),
+        ))
+    }
+
+    /// Read exactly `len` bytes of the object at `key`, starting at `offset`.
+    ///
+    /// This is the read half of the transport seam (issue #1121). A PMTiles
+    /// archive is read entirely through ranged fetches, so this is the one
+    /// method a backend has to implement to be handed to
+    /// [`ObjectStoreRangeReader`](crate::pmtiles::ObjectStoreRangeReader) and
+    /// have an archive open over it, with no other change anywhere. Overriding
+    /// [`ObjectStore::size`] as well is optional, and what it buys is the
+    /// reader's section bounds checks.
+    ///
+    /// **Defaulted to a loud refusal**, the same shape [`ObjectStore::list`]
+    /// uses and for the same reason: a write-only backend should say it cannot
+    /// read rather than invent an answer.
+    ///
+    /// **Returning more or fewer bytes than `len` is a contract violation**,
+    /// and the bridge checks it rather than trusting it. Both directions are
+    /// real: a server that ignores `Range` answers 200 with the whole object,
+    /// and a connection that drops mid-body answers short. Implementations
+    /// should still refuse a range that runs past the end of the object rather
+    /// than clamping it, because a clamped range is a short read wearing a
+    /// success.
+    fn get_range(&self, key: &str, offset: u64, len: usize) -> Result<Vec<u8>, SinkError> {
+        let _ = (key, offset, len);
+        Err(SinkError::Unsupported(
+            "get_range: this ObjectStore backend does not implement a ranged \
+             READ (ObjectStore::get_range is defaulted to refuse). A \
+             read-capable backend overrides it; write-only backends inherit \
+             this loud failure."
+                .into(),
+        ))
+    }
+
+    /// The total size of the object at `key`, when the backend knows it
+    /// cheaply.
+    ///
+    /// A reader uses it to bounds-check a header's claimed section offsets
+    /// against the real object before believing any of them.
+    ///
+    /// **Defaulted to a refusal, deliberately not to `Ok(None)`.** That is the
+    /// one choice in this module worth reading twice. `None` is a *legal*
+    /// answer from [`RangeReader::size`](crate::pmtiles::RangeReader::size),
+    /// because a streaming transport genuinely may not know, and it disables
+    /// the four `SectionOutOfBounds` checks in `Reader::try_new`. So a default
+    /// of `Ok(None)` would hand every backend that never thought about `size`
+    /// a reader with those checks quietly switched off, and nothing anywhere
+    /// would report a problem. A refusal makes a backend say out loud that it
+    /// has not implemented the HEAD, and the bridge is what decides that a
+    /// refusal (and *only* a refusal, never a transient failure) means
+    /// "unknown".
+    ///
+    /// A backend that can answer returns `Ok(Some(bytes))`. `Ok(None)` is for
+    /// a backend that implemented this, asked, and genuinely got no answer.
+    fn size(&self, key: &str) -> Result<Option<u64>, SinkError> {
+        let _ = key;
+        Err(SinkError::Unsupported(
+            "size: this ObjectStore backend does not implement a HEAD \
+             (ObjectStore::size is defaulted to refuse). A read-capable \
+             backend overrides it; write-only backends inherit this loud \
+             failure. Do not default this to Ok(None): None is a legal \
+             RangeReader answer and it costs the reader its section bounds \
+             checks."
                 .into(),
         ))
     }
@@ -229,53 +319,23 @@ fn google_key(prefix: &str, image_name: &str, z: u32, x: u32, y: u32, ext: &str)
 // Local encoding helpers
 // ---------------------------------------------------------------------------
 
-fn color_type_for_format(fmt: PixelFormat) -> Result<image::ColorType, SinkError> {
-    match fmt {
-        PixelFormat::Gray8 => Ok(image::ColorType::L8),
-        PixelFormat::Gray16 => Ok(image::ColorType::L16),
-        PixelFormat::Rgb8 => Ok(image::ColorType::Rgb8),
-        PixelFormat::Rgba8 => Ok(image::ColorType::Rgba8),
-        PixelFormat::Rgb16 => Ok(image::ColorType::Rgb16),
-        PixelFormat::Rgba16 => Ok(image::ColorType::Rgba16),
-        // Multiband intermediates (from the band ops in `crate::bands`) have
-        // no image-crate colour type; reduce or extract to 1/3/4 bands first.
-        PixelFormat::Multi8(_) | PixelFormat::Multi16(_) => Err(SinkError::EncodeMsg(format!(
-            "multiband raster ({} bands) cannot be encoded as an image tile",
-            fmt.channels()
-        ))),
-        // Float compute intermediates have no PNG/JPEG representation;
-        // cast to an unsigned 8/16-bit format before encoding tiles.
-        PixelFormat::RgbaF32 | PixelFormat::FloatF32(_) => Err(SinkError::EncodeMsg(format!(
-            "float raster ({fmt:?}) cannot be encoded as an image tile; \
-             cast to an unsigned 8/16-bit format first"
-        ))),
-    }
-}
-
-fn encode_jpeg_local(raster: &Raster, quality: u8) -> Result<Vec<u8>, SinkError> {
-    let mut buf = Vec::new();
-    let encoder =
-        image::codecs::jpeg::JpegEncoder::new_with_quality(std::io::Cursor::new(&mut buf), quality);
-    let ct = color_type_for_format(raster.format())?;
-    image::ImageEncoder::write_image(
-        encoder,
-        raster.data(),
-        raster.width(),
-        raster.height(),
-        ct.into(),
-    )
-    .map_err(|e| SinkError::Encode {
-        format: "jpeg".into(),
-        source: e,
-    })?;
-    Ok(buf)
-}
-
-fn encode_tile(raster: &Raster, format: TileFormat) -> Result<Vec<u8>, SinkError> {
+/// Encode one tile, flattening any alpha onto `background` for the formats
+/// that cannot carry it.
+///
+/// Every arm is `crate::sink`'s own encoder now. The JPEG one used to be a
+/// local copy of the same `image`-crate wrapper, kept so this module would not
+/// need `sink`'s helpers to be `pub(crate)`; they are, and the copy went out
+/// of step the moment `sink`'s grew the alpha flattening of issue #1133.
+fn encode_tile(
+    raster: &Raster,
+    format: TileFormat,
+    background: [u8; 3],
+) -> Result<Vec<u8>, SinkError> {
     match format {
         TileFormat::Raw => Ok(raster.data().to_vec()),
         TileFormat::Png => encode_png(raster),
-        TileFormat::Jpeg { quality } => encode_jpeg_local(raster, quality),
+        TileFormat::Jpeg { quality } => encode_jpeg(raster, quality, background),
+        TileFormat::Webp => crate::sink::encode_webp(raster),
     }
 }
 
@@ -305,6 +365,13 @@ pub struct ObjectStoreSink {
     cfg: ObjectStoreConfig,
     plan: PyramidPlan,
     format: TileFormat,
+    /// Captured by [`TileSink::record_engine_config`] before the tile loop
+    /// starts, and read for one field: the background a JPEG tile's
+    /// transparent pixels land on (issue #1133). This sink uploads tiles and
+    /// keeps no manifest, so it had nowhere to read `background_rgb` from and
+    /// a run with `--background` would have honoured it in the padding and
+    /// ignored it in the pixels.
+    engine_config: Mutex<Option<crate::engine::EngineConfig>>,
 }
 
 impl std::fmt::Debug for ObjectStoreSink {
@@ -343,7 +410,12 @@ impl ObjectStoreSink {
                     .into(),
             ));
         }
-        Ok(Self { cfg, plan, format })
+        Ok(Self {
+            cfg,
+            plan,
+            format,
+            engine_config: Mutex::new(None),
+        })
     }
 
     /// Enumerate the object keys stored under this sink's key prefix.
@@ -432,7 +504,11 @@ impl TileSink for ObjectStoreSink {
         let payload: Vec<u8> = if tile.blank {
             vec![BLANK_TILE_MARKER]
         } else {
-            encode_tile(&tile.raster, self.format)?
+            encode_tile(
+                &tile.raster,
+                self.format,
+                background_from(&self.engine_config),
+            )?
         };
 
         // The multipart threshold is observed by the real S3 backend; for the
@@ -449,6 +525,12 @@ impl TileSink for ObjectStoreSink {
         store.put(&key, &payload)
     }
 
+    /// Keep the run's configuration for the one thing this sink reads out of
+    /// it: the background a JPEG tile's alpha is flattened onto.
+    fn record_engine_config(&self, config: &crate::engine::EngineConfig) {
+        *crate::poison::recover(&self.engine_config) = Some(config.clone());
+    }
+
     fn finish(&self) -> Result<(), SinkError> {
         // No DZI/manifest upload wired up in this build; the integration agent
         // can extend this to mirror FsSink::finish if desired.
@@ -463,6 +545,10 @@ impl TileSink for ObjectStoreSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Only the refusal cells below reach the mapping directly now that this
+    // module's copy of the JPEG wrapper is gone (issue #1133).
+    use crate::pixel::PixelFormat;
+    use crate::sink::color_type_for_format;
 
     #[test]
     fn deep_zoom_key_with_prefix() {
@@ -698,5 +784,33 @@ mod tests {
             msg.contains("list_objects") && msg.contains("LIST"),
             "default list error must name the operation and the missing transport: {msg}"
         );
+    }
+
+    /// This module had no direct test of the uint/float refusal before
+    /// issue #969: `encode.rs` and `sink.rs` each had one
+    /// (`the_encoders_refuse_the_uint_carrier_by_name`,
+    /// `the_tile_sinks_refuse_the_uint_carrier_by_name`), and this module had
+    /// none, so a mutation landing only here had nothing to catch it. Mirrors
+    /// those two so all three routes onto
+    /// [`crate::pixel::image_color_type`] are directly covered, even though
+    /// this module now calls [`crate::sink::color_type_for_format`] directly
+    /// rather than keeping its own copy of the wrapper (issue #940).
+    #[test]
+    fn the_object_store_sink_refuses_the_uint_carrier_by_name() {
+        let n = |v: u16| core::num::NonZeroU16::new(v).unwrap();
+        let u = PixelFormat::Uint32(n(1));
+        let msg = color_type_for_format(u)
+            .expect_err("a uint raster is not an image tile")
+            .to_string();
+        assert!(
+            msg.contains("32-bit unsigned") && msg.contains("Uint32"),
+            "the refusal does not name the carrier: {msg}"
+        );
+        let f = PixelFormat::FloatF32(n(1));
+        let fmsg = color_type_for_format(f)
+            .expect_err("a float raster is not an image tile")
+            .to_string();
+        assert!(fmsg.contains("float"), "{fmsg}");
+        assert_ne!(msg, fmsg);
     }
 }

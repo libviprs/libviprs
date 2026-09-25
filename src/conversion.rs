@@ -31,10 +31,42 @@
 //! | [`Raster::falsecolour`] | `vips_falsecolour` | band 0 mapped through the PET false-colour LUT |
 //! | [`Raster::addalpha`] | `vips_addalpha` | one opaque alpha band appended |
 //! | [`Raster::arrayjoin`] | `vips_arrayjoin` | images tiled into a grid |
+//! | [`Raster::join`] | `vips_join` | two images joined left-right or top-bottom |
 //! | [`Raster::grey`] | `vips_grey` | horizontal grey ramp |
 //! | [`Raster::identity`] | `vips_identity` | 256x1 identity LUT |
 //! | [`Raster::identity_ushort`] | `vips_identity` (`ushort: true`) | 65536x1 identity LUT |
 //! | [`Raster::switch`] | `vips_switch` | index image of the first true condition |
+//!
+//! # Join
+//!
+//! [`Raster::join`] is a literal transcription of `conversion/join.c`,
+//! which has no pixel loop of its own: it is [`Raster::insert`] plus an
+//! optional crop.
+//!
+//! * The placement ladder is `join.c:109-156`. A horizontal join puts the
+//!   second image at `x = in1.width + shim`; a vertical one at
+//!   `y = in1.height + shim`. On the other axis [`Align::Low`] gives `0`,
+//!   [`Align::High`] gives `in1 - in2`, and [`Align::Centre`] gives
+//!   `in1 / 2 - in2 / 2` — **two separate truncating integer divisions**,
+//!   exactly as the C writes it. That is not the same as
+//!   `(in1 - in2) / 2`: for `in1 = 4, in2 = 3` the C form gives `1` and
+//!   the combined form gives `0`. Under `High` and `Centre` the offset
+//!   goes negative when the second image is the larger one.
+//! * The insert at `join.c:158-162` always runs with `expand` **true**,
+//!   whatever the caller asked for, so no input pixel is ever lost at
+//!   this stage and `background` fills whatever neither image covers.
+//! * The caller's `expand` only selects the crop at `join.c:164-207`. A
+//!   horizontal join crops to `(0, max(0, y) - y, t.width,
+//!   min(in1.height, in2.height))` and a vertical one to
+//!   `(max(0, x) - x, 0, min(in1.width, in2.width), t.height)`; the
+//!   `max(0, ...)` origin is what recovers the rows or columns the
+//!   negative offset pushed off the top or the left. The crop is skipped
+//!   when the rectangle is already the whole image, as in the C.
+//!
+//! Band and format unification comes free: `join.c` does none itself and
+//! leans on `vips_insert`'s `formatalike` + `bandalike`, so composing on
+//! [`Raster::try_insert`] inherits the crate's equivalent (widest depth,
+//! largest band count, a one-band input replicated).
 //!
 //! # Metadata
 //!
@@ -51,12 +83,26 @@
 //! so on).
 //!
 //! The operations in this module carry the metadata of their (first) input
-//! through to the result, with two exceptions: [`Raster::autorot`] resets
-//! the orientation tag to `1` after applying it, and
-//! [`Raster::falsecolour`] stamps its RGB result as
-//! [`Interpretation::Srgb`]. Operations in the earlier batches
-//! ([`crate::bands`], [`crate::arithmetic`], [`crate::extract`]) predate the
-//! metadata block and return default metadata.
+//! through to the result, and so does every other module now (issues #717,
+//! #719 and #727 closed the gaps this paragraph used to describe in
+//! [`crate::bands`], [`crate::convolution`] and [`crate::extract`]).
+//!
+//! Four fields are stamped rather than carried, and each is measured against
+//! the pinned vips rather than reasoned about:
+//!
+//! * [`Raster::autorot`] resets the orientation tag to `1` after applying it.
+//! * [`Raster::falsecolour`] stamps its RGB result as
+//!   [`Interpretation::Srgb`].
+//! * The **origin offset** is stamped by every operation that repositions the
+//!   image (issue #721): [`Raster::fliphor`] to `(width, 0)`,
+//!   [`Raster::flipver`] to `(0, height)`, [`Raster::rot`] to the edge the
+//!   input's origin lands on, and [`Raster::wrap`] to `(w - w/2, h - h/2)`.
+//!   [`Raster::rot45`] and [`Raster::grid`] carry it, and so does everything
+//!   else here. [`Raster::autorot`] inherits whichever transform it finishes
+//!   on, except at orientation 4, where vips composes a rotation and a flip
+//!   and stamps the flip's.
+//! * `extract_area` and `crop` stamp `(-left, -top)` (issue #690), and the
+//!   convolving operations stamp their mask's centre (issue #721).
 //!
 //! The decode paths do not read EXIF yet, so a freshly decoded JPEG always
 //! carries orientation `1` and [`Raster::autorot`] is the identity for it,
@@ -84,8 +130,10 @@
 //! * **`rot45` / `Angle45`.** The 45-degree family has odd-square diagonal
 //!   semantics of its own and ships with a later geometry batch.
 
+use crate::arithmetic::interpretation_max_alpha;
 use crate::bands::BandError;
-use crate::pixel::PixelFormat;
+use crate::extract::ExtractError;
+use crate::pixel::{PixelFormat, SampleKind, read_sample_f64, write_f32_sample, write_sample_f64};
 use crate::raster::{Raster, RasterError};
 use core::num::NonZeroU16;
 use thiserror::Error;
@@ -139,19 +187,105 @@ pub enum ConversionError {
     /// odd squares.
     #[error("rot45 requires an odd-sided square image, got {width}x{height}")]
     NotOddSquare { width: u32, height: u32 },
-    /// The result dimensions would overflow `u32`.
+    /// An align name handed to `Align::from_str` is not one of the
+    /// libvips `VipsAlign` nicknames.
+    #[error("unknown align {name:?}, expected low, centre, or high")]
+    UnknownAlign {
+        /// The name that was not recognised.
+        name: String,
+    },
+    /// The result dimensions would overflow `u32`. `arrayjoin` reports the
+    /// grid it was asked to build. [`Raster::join`] does not use this
+    /// variant: its canvas is sized inside the delegated
+    /// [`Raster::try_insert`], so an oversized canvas arrives as
+    /// [`ConversionError::Extract`] wrapping
+    /// [`crate::extract::ExtractError::SizeOverflow`], and an offset that
+    /// will not fit the placement is
+    /// [`ConversionError::PlacementOffsetOverflow`]. A caller that wants
+    /// every "this is too big" outcome from `join` has to match both.
     #[error("result size {width}x{height} exceeds u32::MAX")]
     SizeOverflow { width: u64, height: u64 },
-    /// The operation needs a float sample capability it does not have
-    /// yet. No conversion operation returns this since the float
-    /// [`PixelFormat`] variants landed; the variant is retained for API
-    /// stability and for later batches that grow float surface
-    /// incrementally.
-    #[error("{op} requires a float sample format it does not support yet")]
-    FloatFormatUnsupported { op: &'static str },
+    /// A `shim` above the maximum libvips accepts, from either
+    /// [`Raster::join`] or [`Raster::arrayjoin`]. Both declare the property
+    /// as `VIPS_ARG_INT(class, "shim", 5, ..., 0, 1000000, 0)`, so GObject
+    /// refuses `--shim 1000001` before either operation runs at all.
+    /// Widening the argument to `u32` here carried the lower bound into the
+    /// type but not the upper one, so the upper bound is checked instead:
+    /// without it a single argument asks for a canvas of several gigabytes
+    /// out of two tiny inputs.
+    #[error("shim must be at most {max}, got {shim}")]
+    ShimTooLarge {
+        /// The `shim` that was asked for.
+        shim: u32,
+        /// The largest `shim` libvips accepts, `1000000`.
+        max: u32,
+    },
+    /// An explicit `across` outside the range libvips declares on
+    /// [`Raster::arrayjoin`]'s property,
+    /// `VIPS_ARG_INT(class, "across", 4, ..., 1, 1000000, 1)`. GObject
+    /// refuses `--across 0` and `--across 1000001` before the operation is
+    /// built at all, so neither reaches a grid layout in vips and neither
+    /// does here. `across` used to be clamped into `1..=n` instead, which
+    /// silently accepted both. The default (`None`, meaning one row of every
+    /// image) is not checked against this range: vips assigns it directly to
+    /// the struct field and bypasses its own property check the same way.
+    #[error("across must be between {min} and {max}, got {across}")]
+    AcrossOutOfRange {
+        /// The `across` that was asked for.
+        across: u32,
+        /// The smallest `across` libvips accepts, `1`.
+        min: u32,
+        /// The largest `across` libvips accepts, `1000000`.
+        max: u32,
+    },
+    /// The offset [`Raster::join`] computed for the second image does not
+    /// fit the signed 32-bit range images are placed at (`join.c` does
+    /// this arithmetic in `int`, and [`Raster::try_insert`] takes `i32`
+    /// coordinates). With `shim` bounded by
+    /// [`ConversionError::ShimTooLarge`] only a large input *dimension*
+    /// reaches this, either directly (`w1 + shim` past `i32::MAX`) or
+    /// through a negative offset under [`Align::Centre`] / [`Align::High`],
+    /// where the second image reaching left of or above the first makes
+    /// the offset negative. Some offsets rejected here name a canvas that
+    /// would have fitted `u32` and the allocation budget; lifting that
+    /// needs the placement widened to `i64` end to end, which is its own
+    /// change.
+    #[error("join placement offset ({x}, {y}) does not fit i32")]
+    PlacementOffsetOverflow {
+        /// Horizontal offset of the second image from the first image's
+        /// origin, in pixels. Negative when the second image reaches left
+        /// of it.
+        x: i64,
+        /// Vertical offset of the second image from the first image's
+        /// origin, in pixels. Negative when the second image reaches above
+        /// it.
+        y: i64,
+    },
+    /// The operation was handed a float raster it cannot read yet.
+    /// [`Raster::try_gamma`], [`Raster::try_falsecolour`] and
+    /// [`Raster::try_msb`] return this: all three index a 256-entry table
+    /// by the sample, which a float sample does not do.
+    ///
+    /// [`Raster::try_join`] and [`Raster::try_arrayjoin`] returned it until
+    /// issue #945, and that was a parity regression rather than an
+    /// implementation, because vips runs both on a `float` raster and
+    /// answers FLOAT. Float input was never exotic here: every
+    /// `colourspace` result for Lab, Lch, OkLab, OkLCh, XYZ, scRGB and Yxy
+    /// is a float raster, so `im.colourspace(Lab)` is already one. Mirrors
+    /// [`crate::arithmetic::ArithmeticError::FloatUnsupported`].
+    #[error("{op} does not support float rasters yet; cast to an unsigned 8/16-bit format first")]
+    FloatUnsupported {
+        /// The operation that was asked for.
+        op: &'static str,
+    },
     /// A delegated band operation failed.
     #[error(transparent)]
     Band(#[from] BandError),
+    /// A delegated extract or placement operation failed. [`Raster::join`]
+    /// is `insert` plus an optional `extract_area`, so its band-count,
+    /// background, and size errors arrive through here.
+    #[error(transparent)]
+    Extract(#[from] ExtractError),
     /// Constructing the result raster failed (allocation budget, size
     /// overflow).
     #[error(transparent)]
@@ -168,53 +302,215 @@ fn expect_conv<T>(op: &str, r: Result<T, ConversionError>) -> T {
     }
 }
 
-/// Read the flat `i`-th unsigned sample of a buffer with the given
-/// bytes-per-channel (native byte order for 16-bit, matching
-/// [`crate::raster_ops`]). Unsigned depths only: float callers use
-/// [`read_f32_flat`], and the panic arm keeps unsigned-only operations
-/// from misreading float bytes as `u16` pairs.
+/// Read the flat `i`-th sample of a buffer as a signed integer, with the
+/// given sample kind (native byte order, matching [`crate::raster_ops`]).
+///
+/// `i64` and total over [`SampleKind`], which is issue #909 on this side:
+/// the `u32` this used to return could not hold a negative, so `gamma`,
+/// `falsecolour`, `msb`, `arrayjoin` and `join` refused the three signed
+/// carriers of issue #516 even though vips runs all five on them.
+/// Measured on `/opt/homebrew/bin/vips` 8.18.6 against a `char` raster:
+/// `gamma` and `join` answer CHAR, `falsecolour` and `msb` answer UCHAR.
+/// The shape is [`crate::convolution`]'s `put_sample`, total since #748.
+///
+/// Keyed on the kind rather than on a byte width, so the four-byte kinds
+/// stay three different reads (issues #517, #607). The signed kinds
+/// sign-extend, so this is the numeric read; `F32` truncates toward zero
+/// the way `vips_cast` does, and is reachable only from a direct call,
+/// because every op here still refuses a float raster for the reason it
+/// always has.
 #[inline]
-fn read_flat(data: &[u8], bpc: usize, i: usize) -> u32 {
-    match bpc {
-        1 => data[i] as u32,
-        2 => u16::from_ne_bytes([data[2 * i], data[2 * i + 1]]) as u32,
-        _ => panic!(
-            "this operation does not support float rasters yet; \
-             cast to an unsigned 8/16-bit format first"
-        ),
+fn read_flat(data: &[u8], kind: SampleKind, i: usize) -> i64 {
+    match kind {
+        SampleKind::U8 => i64::from(data[i]),
+        SampleKind::I8 => i64::from(data[i] as i8),
+        SampleKind::U16 => i64::from(u16::from_ne_bytes([data[2 * i], data[2 * i + 1]])),
+        SampleKind::I16 => i64::from(i16::from_ne_bytes([data[2 * i], data[2 * i + 1]])),
+        SampleKind::U32 => i64::from(u32::from_ne_bytes([
+            data[4 * i],
+            data[4 * i + 1],
+            data[4 * i + 2],
+            data[4 * i + 3],
+        ])),
+        SampleKind::I32 => i64::from(i32::from_ne_bytes([
+            data[4 * i],
+            data[4 * i + 1],
+            data[4 * i + 2],
+            data[4 * i + 3],
+        ])),
+        SampleKind::F32 => f32::from_ne_bytes([
+            data[4 * i],
+            data[4 * i + 1],
+            data[4 * i + 2],
+            data[4 * i + 3],
+        ]) as i64,
     }
 }
 
-/// Write the flat `i`-th unsigned sample. `v` must already fit the depth.
-/// Unsigned depths only; see [`read_flat`].
+/// Store the flat `i`-th sample. `v` must already fit the kind.
+///
+/// A store and not a cast, the contract [`crate::convolution`]'s
+/// `put_sample` carries: `gamma` has already clamped through the curve and
+/// the copying ops write back a sample read at the same kind, so nothing
+/// arriving here is out of range and the narrow cannot clip.
+/// Total over [`SampleKind`]; see [`read_flat`].
 #[inline]
-fn write_flat(data: &mut [u8], bpc: usize, i: usize, v: u32) {
-    match bpc {
-        1 => data[i] = v as u8,
-        2 => {
+fn write_flat(data: &mut [u8], kind: SampleKind, i: usize, v: i64) {
+    match kind {
+        SampleKind::U8 => data[i] = v as u8,
+        SampleKind::I8 => data[i] = v as i8 as u8,
+        SampleKind::U16 => {
             let b = (v as u16).to_ne_bytes();
-            data[2 * i] = b[0];
-            data[2 * i + 1] = b[1];
+            data[2 * i..2 * i + 2].copy_from_slice(&b);
         }
-        _ => panic!(
-            "this operation does not support float rasters yet; \
-             cast to an unsigned 8/16-bit format first"
-        ),
+        SampleKind::I16 => {
+            let b = (v as i16).to_ne_bytes();
+            data[2 * i..2 * i + 2].copy_from_slice(&b);
+        }
+        SampleKind::U32 => {
+            data[4 * i..4 * i + 4].copy_from_slice(&(v as u32).to_ne_bytes());
+        }
+        SampleKind::I32 => {
+            data[4 * i..4 * i + 4].copy_from_slice(&(v as i32).to_ne_bytes());
+        }
+        SampleKind::F32 => {
+            data[4 * i..4 * i + 4].copy_from_slice(&(v as f32).to_ne_bytes());
+        }
     }
 }
 
-/// Read the flat `i`-th sample of a float buffer (native byte order).
+/// Read the flat `i`-th sample as `f64`: the widened read `arrayjoin` and
+/// `join` carry a float raster through (issue #945).
+///
+/// Delegates straight to [`read_sample_f64`] rather than re-matching on
+/// [`SampleKind`] (issue #969): that function already reads every kind as
+/// `f64` losslessly, `u32::MAX` and `i32::MIN` included, and three modules
+/// re-matching the same six-arm dispatch is exactly the pattern that
+/// produced #607's silent misread in the first place. [`read_flat`] stays,
+/// for the callers that want the integer-only reader.
 #[inline]
-fn read_f32_flat(data: &[u8], i: usize) -> f32 {
-    let b = 4 * i;
-    f32::from_ne_bytes([data[b], data[b + 1], data[b + 2], data[b + 3]])
+fn read_flat_v(data: &[u8], kind: SampleKind, i: usize) -> f64 {
+    read_sample_f64(data, kind, i * kind.bytes())
 }
 
-/// Write the flat `i`-th sample of a float buffer (native byte order).
+/// Store the flat `i`-th sample from an `f64`: [`write_flat`] widened, the
+/// other half of [`read_flat_v`].
+///
+/// The integer kinds keep [`write_flat`]'s narrow exactly, so this stays a
+/// **store** and not a cast: every caller copies a sample it read at the
+/// same kind, or one promoted into a kind that holds it. The `F32` arm
+/// calls the same [`write_f32_sample`] `extract::write_v` and
+/// `bands::write_flat_v` do (issue #969).
 #[inline]
-fn write_f32_flat(data: &mut [u8], i: usize, v: f32) {
-    let b = 4 * i;
-    data[b..b + 4].copy_from_slice(&v.to_ne_bytes());
+fn write_flat_v(data: &mut [u8], kind: SampleKind, i: usize, v: f64) {
+    match kind {
+        SampleKind::U8
+        | SampleKind::I8
+        | SampleKind::U16
+        | SampleKind::I16
+        | SampleKind::U32
+        | SampleKind::I32 => write_flat(data, kind, i, v as i64),
+        SampleKind::F32 => write_f32_sample(data, i * kind.bytes(), v),
+    }
+}
+
+/// Whether the flat `i`-th sample of a condition raster selects its
+/// branch, for [`Raster::try_ifthenelse`] and [`Raster::try_switch`].
+///
+/// `vips_ifthenelse` and `vips_switch` cast the condition to `uchar`
+/// before testing it, and `vips_cast` clips at both ends and truncates
+/// toward zero, so a negative sample is **false** and a fraction below one
+/// is false as well. Measured on `/opt/homebrew/bin/vips` 8.18.6:
+///
+/// | condition | `vips switch` | `vips ifthenelse 10 20` |
+/// |---|---|---|
+/// | `char` `[-50, 0, 1, -1, 127]` | `[1, 1, 0, 1, 0]` | `[20, 20, 10, 20, 10]` |
+/// | `float` `[0, 0.5, 1, -0.5]` | `[1, 1, 0, 1]` | - |
+///
+/// (`switch` with one condition answers 0 where it matched and 1 where
+/// nothing did, so a 1 is a false condition.)
+///
+/// Both callers used to read the **storage** word instead, which is a
+/// different question. `read_sample_u32` on a `char` -50 answers 206, the
+/// byte pattern, so `ifthenelse` took the then-branch where vips takes the
+/// else-branch; and on an `f32` 0.5 it answers 0x3F000000, so every
+/// non-zero float was true including the ones vips truncates away. Two
+/// carriers, two wrong answers, and the reason is one substitution: a
+/// truthiness test is numeric.
+#[inline]
+fn condition_is_true(data: &[u8], kind: SampleKind, i: usize) -> bool {
+    // Clipped into `uchar`, not merely compared against zero: the clip is
+    // what makes a negative sample false, and `read_flat` has already
+    // truncated a float toward zero.
+    read_flat(data, kind, i).clamp(0, 255) != 0
+}
+
+/// Refuse a sample kind the integer-only sample paths in this module
+/// cannot read, as a typed error rather than as a panic out of a
+/// `Result`-returning method (the shape issue #694 landed).
+///
+/// Float is the only refusal left, and `gamma`, `falsecolour` and `msb`
+/// are the only callers: all three index a 256-entry table by the sample.
+/// The three signed carriers of issue #516 came through here between #516
+/// and #909, which was a parity regression rather than an implementation:
+/// vips runs `gamma`, `falsecolour`, `msb`, `arrayjoin` and `join` on a
+/// `char` raster. Issue #945 found the same thing one carrier further on
+/// for `arrayjoin` and `join`, which now carry a float raster and no
+/// longer call this.
+///
+/// That left `ConversionError`'s own `UnsupportedSampleKind` variant with
+/// no construction site anywhere in the crate, so issue #931 removed it. A
+/// caller of a `conversion` op still meets that refusal where it is still
+/// real, through [`ConversionError::Band`] and
+/// [`ConversionError::Extract`], because `bands` and `extract` both keep
+/// their own. `SampleKind` is `#[non_exhaustive]` and this `match` is
+/// exhaustive over it, so an eighth kind is a compile error here and
+/// whoever adds one decides what it answers.
+fn reject_unreadable_kind(op: &'static str, r: &Raster) -> Result<(), ConversionError> {
+    let kind = r.format().kind();
+    match kind {
+        SampleKind::U8
+        | SampleKind::U16
+        | SampleKind::U32
+        | SampleKind::I8
+        | SampleKind::I16
+        | SampleKind::I32 => Ok(()),
+        SampleKind::F32 => Err(ConversionError::FloatUnsupported { op }),
+    }
+}
+
+/// One `vips_cast` sample from a float carrier down to an unsigned one.
+///
+/// `vips_cast` semantics (`conversion/cast.c:566-568`): clip to the
+/// target range, then TRUNCATE. C clips in the source type via
+/// `VIPS_CLIP_UCHAR` / `VIPS_CLIP_USHORT` and then assigns to the narrow
+/// integer, and that implicit conversion truncates rather than rounds.
+/// The C doc comment spells it out: "Floats are truncated (not rounded).
+/// Out of range values are clipped."
+///
+/// `trunc`, NOT `floor`. The two are indistinguishable today, because
+/// every carrier here is unsigned and a negative sample clips to 0 before
+/// the rounding mode can show. C's `(int)` cast truncates toward zero, so
+/// `trunc` is the one that stays right when a signed carrier lands
+/// (#516). Do not simplify it to `floor`.
+///
+/// `NaN` pins to 0 explicitly: `trunc` leaves `NaN` alone and `clamp`
+/// passes it straight through, so without this branch it would reach the
+/// cast and land on 0 by accident rather than by rule.
+///
+/// It lives out here as a scalar rather than inline in
+/// [`Raster::try_cast`] because the fused edge detectors narrow their
+/// magnitude to uchar one sample at a time instead of building a float
+/// raster to hand to `vips_cast` (issue #562). Sharing the one spelling
+/// is what stops the two from drifting apart.
+#[inline]
+pub(crate) fn cast_float_sample(v: f64, out_bpc: usize) -> u32 {
+    let max = if out_bpc == 1 { 255.0 } else { 65535.0 };
+    if v.is_nan() {
+        0
+    } else {
+        v.clamp(0.0, max).trunc() as u32
+    }
 }
 
 /// The libvips colour interpretation tags (`VipsInterpretation`).
@@ -225,8 +521,10 @@ fn write_f32_flat(data: &mut [u8], i: usize, v: f32) {
 /// not validate that the band count matches the tag, exactly as in libvips
 /// where `copy` accepts any interpretation.
 ///
-/// The perceptual `OkLab` / `OkLch` tags used by the ported colour suite
-/// are included alongside the classic libvips set.
+/// The perceptual `OkLab` and `OkLch` tags are libvips' own
+/// `VIPS_INTERPRETATION_OKLAB` and `VIPS_INTERPRETATION_OKLCH`, assigned by
+/// libvips 8.18 (`libvips/include/vips/image.h:115-116`), so a raster
+/// tagged with either writes the same `.v` header code real vips writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Interpretation {
@@ -283,15 +581,39 @@ impl Interpretation {
     /// [`Interpretation::Srgb`] (libvips' guess for non-ushort colour),
     /// and the multiband and float intermediates as
     /// [`Interpretation::Multiband`].
+    ///
+    /// Read off [`PixelFormat::canonical`], so both spellings of a layout
+    /// get the same answer: `FloatF32(4)` reads as sRGB exactly as
+    /// `RgbaF32` does (issue #531).
+    /// How many samples a colour in this space takes: the band count the tag
+    /// implies, whatever the raster actually holds.
+    ///
+    /// This is the number an ICC profile has to agree with to describe the
+    /// space (issue #720), and the same one `crate::colour` reads to size a
+    /// conversion. It is the tag's band count and not the image's on purpose:
+    /// `vips bandmean` takes a three-band `scrgb` raster to one band, leaves
+    /// the tag alone, and keeps a three-channel profile.
+    pub(crate) fn space_bands(self) -> usize {
+        match self {
+            Self::Cmyk => 4,
+            Self::Bw | Self::Grey16 => 1,
+            _ => 3,
+        }
+    }
+
     pub fn for_format(format: PixelFormat) -> Self {
-        match format {
+        match format.canonical() {
             PixelFormat::Gray8 => Self::Bw,
             PixelFormat::Gray16 => Self::Grey16,
             PixelFormat::Rgb8 | PixelFormat::Rgba8 | PixelFormat::RgbaF32 => Self::Srgb,
             PixelFormat::Rgb16 | PixelFormat::Rgba16 => Self::Rgb16,
-            PixelFormat::Multi8(_) | PixelFormat::Multi16(_) | PixelFormat::FloatF32(_) => {
-                Self::Multiband
-            }
+            PixelFormat::Multi8(_)
+            | PixelFormat::Multi16(_)
+            | PixelFormat::FloatF32(_)
+            | PixelFormat::Uint32(_)
+            | PixelFormat::Int8(_)
+            | PixelFormat::Int16(_)
+            | PixelFormat::Int32(_) => Self::Multiband,
         }
     }
 }
@@ -354,6 +676,60 @@ impl Angle45 {
             Self::D270 => 6,
             Self::D315 => 7,
         }
+    }
+}
+
+/// The axis [`Raster::join`] joins a pair of images along (libvips
+/// `VipsDirection`).
+///
+/// This is deliberately not the crate-root `Direction` of
+/// [`crate::morphology`], which names an erosion/dilation axis, nor
+/// [`crate::mosaicing::MergeDirection`], which names a feathered
+/// tie-point merge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum JoinDirection {
+    /// Left-right: the second image goes to the right of the first.
+    Horizontal,
+    /// Top-bottom: the second image goes below the first.
+    Vertical,
+}
+
+/// Which edge the two images of a [`Raster::join`] line up on (libvips
+/// `VipsAlign`).
+///
+/// [`str::parse`] accepts the libvips nicknames (`"low"`, `"centre"`,
+/// `"high"`), plus the `"center"` spelling, mirroring the `&str` surface
+/// [`crate::extract::CompassDirection`] carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Align {
+    /// Line up on the low coordinate edge: the top for a horizontal
+    /// join, the left for a vertical one. The libvips default.
+    Low,
+    /// Line up on the centre of the shared axis.
+    Centre,
+    /// Line up on the high coordinate edge: the bottom for a horizontal
+    /// join, the right for a vertical one.
+    High,
+}
+
+impl std::str::FromStr for Align {
+    type Err = ConversionError;
+
+    /// Parse a libvips `VipsAlign` nickname: `"low"`, `"centre"`, or
+    /// `"high"`. `"center"` is accepted as a spelling of `"centre"`.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "low" => Self::Low,
+            "centre" | "center" => Self::Centre,
+            "high" => Self::High,
+            other => {
+                return Err(ConversionError::UnknownAlign {
+                    name: other.to_string(),
+                });
+            }
+        })
     }
 }
 
@@ -444,7 +820,14 @@ impl RasterCopyBuilder<'_> {
     /// source, with this builder's metadata.
     pub fn build(self) -> Raster {
         let mut out = self.src.clone();
+        let interpretation = self.meta.interpretation;
         out.meta = self.meta;
+        // The public retag surface, and the one the rule was measured on
+        // (`vips copy in.v out.v --interpretation b-w` removes a three-channel
+        // profile). Re-stamping through the setter is what applies it; the
+        // assignment above cannot, because it is a whole-block copy that does
+        // not know which field changed (#720).
+        out.set_interpretation(interpretation);
         out
     }
 }
@@ -453,23 +836,24 @@ impl RasterCopyBuilder<'_> {
 /// same format. `map` receives output coordinates and returns the source
 /// coordinates whose whole pixel (all bands) is copied. Metadata is
 /// carried over from `src`.
-/// Read a flat `bpc`-byte sample as `u32` (native byte order), for the
-/// 1-, 2-, and 4-byte sample depths.
-fn read_sample_u32(bytes: &[u8], bpc: usize) -> u32 {
-    match bpc {
-        1 => bytes[0] as u32,
-        2 => u16::from_ne_bytes([bytes[0], bytes[1]]) as u32,
-        _ => u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
-    }
-}
-
-/// Write `v` as a flat `bpc`-byte sample (native byte order), for the 1- and
-/// 2-byte integer depths; wider depths take the low bytes.
-fn write_sample_u32(bytes: &mut [u8], bpc: usize, v: u32) {
-    match bpc {
-        1 => bytes[0] = v as u8,
-        2 => bytes[..2].copy_from_slice(&(v as u16).to_ne_bytes()),
-        _ => bytes[..4].copy_from_slice(&v.to_ne_bytes()),
+/// Read one sample as the `u32` its storage bits are (native byte order).
+///
+/// The **storage** read, as distinct from the numeric one
+/// [`read_sample_f64`](crate::pixel) gives: it is what both callers want,
+/// which are `msb` (a bit-level op, and one that refuses a float raster
+/// the way vips does, issue #860) and `ifthenelse` (a non-zero test).
+/// Keyed on the kind rather than on a byte width so the unsigned 32-bit
+/// carrier is read as itself (issue #517), and the float arm is spelled
+/// out rather than reached through a wildcard, because reading `f32` bits
+/// as a `u32` is a deliberate bit-pattern read here and was a defect at
+/// the third caller, `flatten`, until issue #859 moved it off.
+fn read_sample_u32(bytes: &[u8], kind: SampleKind) -> u32 {
+    match kind {
+        SampleKind::U8 | SampleKind::I8 => u32::from(bytes[0]),
+        SampleKind::U16 | SampleKind::I16 => u32::from(u16::from_ne_bytes([bytes[0], bytes[1]])),
+        SampleKind::U32 | SampleKind::I32 | SampleKind::F32 => {
+            u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+        }
     }
 }
 
@@ -526,8 +910,97 @@ fn remap(
             odata[oo..oo + bpp].copy_from_slice(&sdata[so..so + bpp]);
         }
     }
-    out.meta = src.meta;
+    out.carry_meta_from(src);
     Ok(out)
+}
+
+/// One edge of the image as an origin offset, saturating rather than wrapping.
+///
+/// The stamped offsets in this module are all a dimension or a dimension
+/// difference, and a `u32` dimension above `i32::MAX` is representable here
+/// where vips holds every dimension and both offsets in an `int`. A bare
+/// `as i32` would wrap a 3-gigapixel-wide image's offset to a negative one,
+/// so it saturates instead. That mirrors `extract`'s `negated_origin`, which
+/// saturates at `i32::MIN` for the same reason (#690). A raster that wide fits
+/// the construction budget at one byte per pixel, so the branch is reachable
+/// rather than theoretical, and like `negated_origin` it is asserted by
+/// reasoning: there is no test here that allocates 2 GiB to prove it.
+fn origin(v: u32) -> i32 {
+    i32::try_from(v).unwrap_or(i32::MAX)
+}
+
+/// The largest `shim` [`Raster::join`] and [`Raster::arrayjoin`] accept,
+/// matching the libvips property bound both operations declare:
+/// `VIPS_ARG_INT(class, "shim", 5, ..., 0, 1000000, 0)` in `join.c` and the
+/// same range in `arrayjoin.c`. GObject refuses anything above it before
+/// either operation is even built, and the binary agrees:
+/// `vips join --shim 1000001` and `vips arrayjoin --shim 1000001` both fail
+/// with the same CRITICAL.
+const SHIM_MAX: u32 = 1_000_000;
+
+/// The range [`Raster::arrayjoin`] accepts for an explicit `across`,
+/// matching the libvips property bound `arrayjoin.c:400-406` declares at
+/// `fe420cf3a`: `VIPS_ARG_INT(class, "across", 4, ..., 1, 1000000, 1)`.
+/// GObject refuses anything outside it before the operation is built, so
+/// `vips arrayjoin "a.v b.v" z.v --across 0` and `--across 1000001` both
+/// fail with a CRITICAL rather than producing a grid. The default (all the
+/// images in one row) is not range checked, because vips assigns it
+/// straight to the struct field in `vips_arrayjoin_build`
+/// (`arrayjoin.c:250-251`) and so bypasses the property check the same way.
+const ACROSS_MIN: u32 = 1;
+/// Upper end of the [`ACROSS_MIN`] range.
+const ACROSS_MAX: u32 = 1_000_000;
+
+/// Where the second image sits relative to the first, in pixels from the
+/// first image's origin (`join.c:109-156`).
+///
+/// Every input is widened to `i64` first, so nothing here can wrap: the
+/// dimensions come from `u32` and `shim` is bounded by [`SHIM_MAX`],
+/// which puts every intermediate under 2^33. The result is then range
+/// checked against the `i32` placement [`Raster::try_insert`] takes and
+/// libvips itself computes in.
+///
+/// [`Align::Centre`] is two separate truncating integer divisions,
+/// `in1 / 2 - in2 / 2`, NOT `(in1 - in2) / 2`: for 4 and 3 the C form gives
+/// 1 where the combined form gives 0. Under `Centre` and [`Align::High`]
+/// the offset goes negative when the second image is the larger one.
+///
+/// Split out of [`Raster::try_join`] so the range check is testable without
+/// building the multi-gigabyte input the real call would need to reach it.
+///
+/// # Errors
+///
+/// [`ConversionError::PlacementOffsetOverflow`] if the offset falls
+/// outside `i32`.
+fn join_placement(
+    (w1, h1): (i64, i64),
+    (w2, h2): (i64, i64),
+    direction: JoinDirection,
+    align: Align,
+    shim: i64,
+) -> Result<(i32, i32), ConversionError> {
+    let (x, y) = match direction {
+        JoinDirection::Horizontal => {
+            let y = match align {
+                Align::Low => 0,
+                Align::Centre => h1 / 2 - h2 / 2,
+                Align::High => h1 - h2,
+            };
+            (w1 + shim, y)
+        }
+        JoinDirection::Vertical => {
+            let x = match align {
+                Align::Low => 0,
+                Align::Centre => w1 / 2 - w2 / 2,
+                Align::High => w1 - w2,
+            };
+            (x, h1 + shim)
+        }
+    };
+    let (Ok(ix), Ok(iy)) = (i32::try_from(x), i32::try_from(y)) else {
+        return Err(ConversionError::PlacementOffsetOverflow { x, y });
+    };
+    Ok((ix, iy))
 }
 
 impl Raster {
@@ -553,6 +1026,37 @@ impl Raster {
         self.meta
             .interpretation
             .unwrap_or_else(|| Interpretation::for_format(self.format()))
+    }
+
+    /// Stamp the colour interpretation, dropping an attached ICC profile that
+    /// cannot describe the new space (issue #720).
+    ///
+    /// `None` means "infer from the pixel format", which is what an operation
+    /// that has left the source's space without arriving in a nameable one
+    /// says; the profile check runs against the tag that inference resolves
+    /// to, because that is the tag every reader will see.
+    ///
+    /// **Every stamp goes through here.** The check cannot live in
+    /// [`Raster::carry_meta_from`], which is where it first looks like it
+    /// belongs: six of the eight stamping sites carry *before* they retag, so
+    /// at carry time the output still holds the source's tag and the check
+    /// could never fire, and `Raster::copy().interpretation(..)` never calls
+    /// the carry at all. Putting it on the stamp instead is the same answer
+    /// #717 gave to the same shape of problem: one method, every site routed,
+    /// so "did this retag revalidate the profile" has one answer.
+    ///
+    /// Measured on vips 8.18.6 across three real profiles and twenty targets;
+    /// see `tests/icc_retag.rs` for the table.
+    pub(crate) fn set_interpretation(&mut self, tag: Option<Interpretation>) {
+        self.meta.interpretation = tag;
+        let bands = self.interpretation().space_bands();
+        let stale = self
+            .icc_profile()
+            .and_then(crate::imageio::profile_space_bands)
+            .is_some_and(|profile_bands| profile_bands != bands);
+        if stale {
+            self.remove_icc_profile();
+        }
     }
 
     /// Horizontal resolution in pixels per millimetre (default `1.0`).
@@ -605,17 +1109,35 @@ impl Raster {
     ///
     /// Changes the sample format without changing the band count.
     /// Widening (8 to 16 bit) preserves sample values numerically (a `200`
-    /// stays `200`); narrowing (16 to 8 bit) clips values above `255`,
-    /// matching the default (non-shifting) behaviour of `vips_cast`.
+    /// stays `200`); narrowing (16 to 8 bit) clips values above `255`.
     /// Casting to a float format stores the exact sample value as an
     /// `f32` (a `200` becomes `200.0`, never rescaled); casting a float
-    /// raster to an unsigned format rounds to the nearest integer and
-    /// clips to the target range (`0..=255` or `0..=65535`), with `NaN`
-    /// clipping to `0`. Casting to the current depth retags the format
-    /// and copies the pixels. Metadata is carried over.
+    /// raster to an unsigned format clips to the target range (`0..=255`
+    /// or `0..=65535`) and then **truncates toward zero**, so `1.7`
+    /// becomes `1` and `2.5` becomes `2`. `NaN` pins to `0`. Casting to
+    /// the current depth retags the format and copies the pixels.
+    /// Metadata is carried over.
     ///
-    /// The signed (`char`/`short`/`int`) and `double`/complex targets of
-    /// `vips_cast` remain unrepresentable in [`PixelFormat`].
+    /// Truncating is what `vips_cast` does: "Floats are truncated (not
+    /// rounded). Out of range values are clipped" (`cast.c:566-567`).
+    /// libviprs rounded to nearest before this, so a float-to-integer
+    /// cast could land one above the value vips gives (issue #561).
+    ///
+    /// Parity with `vips_cast` reaches only as far as [`PixelFormat`]
+    /// does. The signed (`char`/`short`/`int`), `double`, and complex
+    /// targets have no representation here, so a cast to one of those is
+    /// not expressible rather than wrong; and the `shift` option, which
+    /// rescales instead of clipping when the depth changes, is not
+    /// implemented, so this is always the non-shifting behaviour.
+    ///
+    /// [`PixelFormat::Uint32`] is a cast target and a cast source (issue
+    /// #517), and it is the one place this deliberately diverges from
+    /// `vips_cast`. libvips narrows a `uint` sample through a signed
+    /// `int`, so on 8.18.6 a `uint` raster holding 2147483647 casts to
+    /// `uchar` 255 while one holding 2147483648 casts to **0**, with the
+    /// boundary exactly at `INT_MAX`. This clips at the target's ceiling
+    /// throughout, so both answer 255. See
+    /// [`write_sample_f64`](crate::pixel) for the measured table.
     ///
     /// # Errors
     ///
@@ -632,46 +1154,27 @@ impl Raster {
                 to_bands: format.channels(),
             });
         }
-        let in_bpc = from.bytes_per_channel();
-        let out_bpc = format.bytes_per_channel();
+        let (in_kind, out_kind) = (from.kind(), format.kind());
+        let (in_bpc, out_bpc) = (in_kind.bytes(), out_kind.bytes());
         let mut out = Raster::zeroed(self.width(), self.height(), format)?;
         let samples = self.width() as usize * self.height() as usize * from.channels();
         let sdata = self.data();
         let odata = out.data_mut();
-        if !from.is_float() && !format.is_float() {
-            // Unsigned to unsigned: the integer path, byte-identical to the
-            // pre-float behaviour.
-            for i in 0..samples {
-                let v = read_flat(sdata, in_bpc, i);
-                let v = if out_bpc == 1 { v.min(255) } else { v };
-                write_flat(odata, out_bpc, i, v);
-            }
-        } else {
-            // A float endpoint: go through f64, which holds every u8/u16
-            // and f32 sample exactly.
-            for i in 0..samples {
-                let v: f64 = if from.is_float() {
-                    read_f32_flat(sdata, i) as f64
-                } else {
-                    read_flat(sdata, in_bpc, i) as f64
-                };
-                if format.is_float() {
-                    write_f32_flat(odata, i, v as f32);
-                } else {
-                    // vips_cast semantics: round to nearest, clip to the
-                    // target range. NaN pins to 0 explicitly (min/max would
-                    // pass it through to the non-NaN bound instead).
-                    let max = if out_bpc == 1 { 255.0 } else { 65535.0 };
-                    let v = if v.is_nan() {
-                        0
-                    } else {
-                        v.round().clamp(0.0, max) as u32
-                    };
-                    write_flat(odata, out_bpc, i, v);
-                }
-            }
+        // One loop through `f64`, which holds every `u8`, `u16`, `u32`,
+        // `i32` and `f32` sample exactly, so it is lossless for every pair
+        // of carriers rather than only for the ones with a float endpoint.
+        // This used to fork on `is_float()` and read the integer side at a
+        // byte width, which answers "float" for any four-byte carrier and
+        // would have read a `uint` sample of 1 as 1.4e-45 (issues #517,
+        // #607). The clipping and truncation live in `write_sample_f64`,
+        // where they are stated once per kind against the kind's own range
+        // instead of as a `clamp(0, max)` that is only right for three of
+        // the seven.
+        for i in 0..samples {
+            let v = read_sample_f64(sdata, in_kind, i * in_bpc);
+            write_sample_f64(odata, out_kind, i * out_bpc, v);
         }
-        out.meta = self.meta;
+        out.carry_meta_from(self);
         Ok(out)
     }
 
@@ -698,7 +1201,14 @@ impl Raster {
     /// [`ConversionError::Raster`] on allocation failure.
     pub fn try_fliphor(&self) -> Result<Raster, ConversionError> {
         let w = self.width();
-        remap(self, w, self.height(), |x, y| (w - 1 - x, y))
+        let mut out = remap(self, w, self.height(), |x, y| (w - 1 - x, y))?;
+        // The input's origin ends up at `x = width` in the output, and vips
+        // stamps that rather than carrying the source's offsets: measured
+        // `(5, 0)`, `(7, 0)` and `(8, 0)` at 5x6, 7x3 and 8x8 from a source at
+        // 11 / 13, and the same numbers from one at 0 / 0 (#721).
+        out.meta.xoffset = origin(w);
+        out.meta.yoffset = 0;
+        Ok(out)
     }
 
     /// Mirror left-right (libvips `vips_flip` with
@@ -720,7 +1230,12 @@ impl Raster {
     /// [`ConversionError::Raster`] on allocation failure.
     pub fn try_flipver(&self) -> Result<Raster, ConversionError> {
         let h = self.height();
-        remap(self, self.width(), h, |x, y| (x, h - 1 - y))
+        let mut out = remap(self, self.width(), h, |x, y| (x, h - 1 - y))?;
+        // Mirror of `try_fliphor`: `(0, height)`, measured `(0, 6)`, `(0, 3)`
+        // and `(0, 8)` at the three shapes (#721).
+        out.meta.xoffset = 0;
+        out.meta.yoffset = origin(h);
+        Ok(out)
     }
 
     /// Mirror top-bottom (libvips `vips_flip` with
@@ -747,12 +1262,25 @@ impl Raster {
     pub fn try_rot(&self, angle: Angle) -> Result<Raster, ConversionError> {
         let w = self.width();
         let h = self.height();
-        match angle {
-            Angle::D0 => Ok(self.clone()),
-            Angle::D90 => remap(self, h, w, |x, y| (y, h - 1 - x)),
-            Angle::D180 => remap(self, w, h, |x, y| (w - 1 - x, h - 1 - y)),
-            Angle::D270 => remap(self, h, w, |x, y| (w - 1 - y, x)),
-        }
+        // Each turn puts the input's origin on a different edge of the output
+        // and vips stamps where, rather than carrying the source's offsets.
+        // Measured at 5x6, 7x3 and 8x8 from a source at 11 / 13, and the same
+        // from one at 0 / 0 (#721). `D0` is a copy and carries, which is also
+        // what vips does.
+        let (mut out, offset) = match angle {
+            Angle::D0 => return Ok(self.clone()),
+            // Output is `h` wide, so this is `(out width, 0)`.
+            Angle::D90 => (remap(self, h, w, |x, y| (y, h - 1 - x))?, (origin(h), 0)),
+            Angle::D180 => (
+                remap(self, w, h, |x, y| (w - 1 - x, h - 1 - y))?,
+                (origin(w), origin(h)),
+            ),
+            // Output is `w` tall, so this is `(0, out height)`.
+            Angle::D270 => (remap(self, h, w, |x, y| (w - 1 - y, x))?, (0, origin(w))),
+        };
+        out.meta.xoffset = offset.0;
+        out.meta.yoffset = offset.1;
+        Ok(out)
     }
 
     /// Rotate by a right-angle [`Angle`] (libvips `vips_rot`). `D90` is a
@@ -776,7 +1304,7 @@ impl Raster {
     /// square, or [`ConversionError::Raster`] on allocation failure.
     pub fn try_rot45(&self, angle: Angle45) -> Result<Raster, ConversionError> {
         let size = self.width();
-        if self.height() != size || size % 2 == 0 {
+        if self.height() != size || size.is_multiple_of(2) {
             return Err(ConversionError::NotOddSquare {
                 width: self.width(),
                 height: self.height(),
@@ -852,13 +1380,37 @@ impl Raster {
     ///
     /// # Errors
     ///
-    /// [`ConversionError::Band`] if `band` is out of range, or
+    /// [`ConversionError::Band`] if `band` is out of range,
+    /// [`ConversionError::FloatUnsupported`] for a float raster, which is
+    /// the refusal `vips msb` gives ("image must be integer"), or
     /// [`ConversionError::Raster`] on allocation failure.
     pub fn try_msb(&self, band: Option<u32>) -> Result<Raster, ConversionError> {
+        // `vips msb` on a float image answers "msb: image must be
+        // integer", measured on `/opt/homebrew/bin/vips` 8.18.6. Without
+        // this the `f32`'s exponent and sign get shifted into the output
+        // byte and the call looks like it worked (issue #860). Through
+        // `reject_unreadable_kind` rather than `is_float`, so the refusal
+        // is stated per kind and float keeps the variant it has always had.
+        reject_unreadable_kind("msb", self)?;
         let fmt = self.format();
-        let bpc = fmt.bytes_per_channel();
+        let kind = fmt.kind();
+        let bpc = kind.bytes();
         let bands = fmt.channels();
         let shift = ((bpc - 1) * 8) as u32;
+        // `VIPS_MSB_SIGNED` offsets a signed sample by half the carrier's
+        // range before the shift, `(v + 2^(bits-1)) >> (bits - 8)`, so the
+        // output stays the unsigned 0..255 byte an `msb` result is. On the
+        // stored word that offset is exactly a flip of the sign bit, which
+        // is why the unsigned storage read is still the right one to take
+        // here: `-1` as `char` is `0xFF`, `0xFF ^ 0x80` is `0x7F`, and vips
+        // answers **127**. Measured on 8.18.6, `char` `[-1, 0, 1, 127]`
+        // gives `[127, 128, 129, 255]` and `short` gives
+        // `[127, 128, 128, 128]`, both UCHAR (issue #909).
+        let sign_bit = if kind.is_signed() {
+            1u32 << (bpc * 8 - 1)
+        } else {
+            0
+        };
         let (src_bands, out_bands): (Vec<usize>, usize) = match band {
             None => ((0..bands).collect(), bands),
             Some(b) => {
@@ -885,7 +1437,7 @@ impl Raster {
             for x in 0..w as usize {
                 for (oi, &sb) in src_bands.iter().enumerate() {
                     let so = y * sstride + (x * bands + sb) * bpc;
-                    let sample = read_sample_u32(&src[so..so + bpc], bpc);
+                    let sample = read_sample_u32(&src[so..so + bpc], kind) ^ sign_bit;
                     let oo = y * ostride + x * out_bands + oi;
                     odata[oo] = (sample >> shift) as u8;
                 }
@@ -970,7 +1522,8 @@ impl Raster {
     /// or [`ConversionError::Raster`] on allocation failure.
     pub fn try_flatten(&self, background: Option<&[f64]>) -> Result<Raster, ConversionError> {
         let fmt = self.format();
-        let bpc = fmt.bytes_per_channel();
+        let kind = fmt.kind();
+        let bpc = kind.bytes();
         let in_bands = fmt.channels();
         if in_bands < 2 {
             return Err(ConversionError::BandCountMismatch {
@@ -990,9 +1543,22 @@ impl Raster {
                 });
             }
         };
-        let out_fmt = PixelFormat::with_channels(out_bands, bpc)
-            .expect("a format exists for a band count already carried by this raster");
-        let max = ((1u64 << (bpc * 8)) - 1) as f64;
+        // Through the kind, not the width: `with_channels(out_bands, 4)`
+        // answers the float carrier, so flattening a `Uint32` raster would
+        // hand back a `FloatF32` tagged raster full of `u32` bytes (issues
+        // #517, #607).
+        let out_fmt = PixelFormat::with_kind(out_bands, kind)
+            .expect("a format exists for a band count and kind already carried by this raster");
+        // The alpha denominator is a property of the **interpretation**,
+        // not of the byte width, and the two only agree on `uchar` and on
+        // a 16-bit raster tagged `grey16` / `rgb16`. Measured on
+        // `/opt/homebrew/bin/vips` 8.18.6 with alpha 128: a `ushort`
+        // raster tagged `b-w` holding 65535 flattens to **32896**, which
+        // is `65535 * 128 / 255`, and the width rule answered 128; a
+        // `uint` raster at 90000 flattens to 45176 and the width rule
+        // answered 0. Same source `white_ink` and `addalpha` read (issues
+        // #667, #859).
+        let max_alpha = interpretation_max_alpha(self.interpretation());
         let w = self.width();
         let h = self.height();
         let src = self.data();
@@ -1003,14 +1569,20 @@ impl Raster {
         for y in 0..h as usize {
             for x in 0..w as usize {
                 let apos = y * sstride + (x * in_bands + (in_bands - 1)) * bpc;
-                let alpha = read_sample_u32(&src[apos..apos + bpc], bpc) as f64;
+                // The numeric read, not the storage one: a float sample
+                // used to arrive here as its own bit pattern reinterpreted
+                // as a `u32`, so the blend was computed on nonsense
+                // (issue #859).
+                let alpha = read_sample_f64(src, kind, apos);
                 for (b, &bgb) in bg.iter().enumerate() {
                     let so = y * sstride + (x * in_bands + b) * bpc;
-                    let s = read_sample_u32(&src[so..so + bpc], bpc) as f64;
-                    let val = s * alpha / max + bgb * (max - alpha) / max;
-                    let v = val.round().clamp(0.0, max) as u64;
+                    let s = read_sample_f64(src, kind, so);
+                    let val = s * alpha / max_alpha + bgb * (max_alpha - alpha) / max_alpha;
                     let oo = y * ostride + (x * out_bands + b) * bpc;
-                    write_sample_u32(&mut odata[oo..oo + bpc], bpc, v as u32);
+                    // `write_sample_f64` clips into the carrier's own range
+                    // and truncates toward zero, which is the `vips_cast`
+                    // the C performs on the way out of `flatten`.
+                    write_sample_f64(odata, kind, oo, val);
                 }
             }
         }
@@ -1080,12 +1652,12 @@ impl Raster {
         let out_fmt = if then.format() == otherwise.format() {
             then.format()
         } else {
-            let bpc = then
-                .format()
-                .bytes_per_channel()
-                .max(otherwise.format().bytes_per_channel());
-            PixelFormat::with_channels(bands, bpc)
-                .expect("band count comes from a valid input format")
+            // `SampleKind::promote` rather than the wider byte width: a
+            // width cannot order the carriers, and four bytes answers
+            // float for a `uint` branch (issues #517, #607).
+            let kind = then.format().kind().promote(otherwise.format().kind());
+            PixelFormat::with_kind(bands, kind)
+                .expect("band count and kind come from valid input formats")
         };
         let then_cast;
         let then = if then.format() == out_fmt {
@@ -1101,7 +1673,8 @@ impl Raster {
             otherwise_cast = otherwise.try_cast(out_fmt)?;
             &otherwise_cast
         };
-        let cbpc = self.format().bytes_per_channel();
+        let ckind = self.format().kind();
+        let cbpc = ckind.bytes();
         let cdata = self.data();
         let cstride = self.stride();
         let mut out = Raster::zeroed(w, h, out_fmt)?;
@@ -1117,7 +1690,7 @@ impl Raster {
                 for b in 0..bands {
                     let cb = if cond_bands == 1 { 0 } else { b };
                     let co = y * cstride + (x * cond_bands + cb) * cbpc;
-                    let take_then = read_sample_u32(&cdata[co..co + cbpc], cbpc) != 0;
+                    let take_then = condition_is_true(cdata, ckind, co / cbpc);
                     let sample_stride = if take_then { tstride } else { ostride_o };
                     let sample_data = if take_then { tdata } else { odata_o };
                     let so = y * sample_stride + (x * bands + b) * bpc;
@@ -1134,7 +1707,13 @@ impl Raster {
     fn transpose(&self) -> Result<Raster, ConversionError> {
         let w = self.width();
         let h = self.height();
-        remap(self, h, w, |x, y| (y, x))
+        let mut out = remap(self, h, w, |x, y| (y, x))?;
+        // Only reachable through `autorot`, so the measurement is
+        // `vips autorot` on an orientation-5 source: `(6, 0)`, `(3, 0)` and
+        // `(4, 0)` at 5x6, 7x3 and 9x4, which is `(out width, 0)` (#721).
+        out.meta.xoffset = origin(h);
+        out.meta.yoffset = 0;
+        Ok(out)
     }
 
     /// Flip along the bottom-left to top-right diagonal (EXIF
@@ -1142,7 +1721,12 @@ impl Raster {
     fn transverse(&self) -> Result<Raster, ConversionError> {
         let w = self.width();
         let h = self.height();
-        remap(self, h, w, |x, y| (w - 1 - y, h - 1 - x))
+        let mut out = remap(self, h, w, |x, y| (w - 1 - y, h - 1 - x))?;
+        // Same numbers as `transpose`, measured the same way on an
+        // orientation-7 source (#721).
+        out.meta.xoffset = origin(h);
+        out.meta.yoffset = 0;
+        Ok(out)
     }
 
     /// Fallible form of [`Raster::autorot`].
@@ -1154,7 +1738,19 @@ impl Raster {
         let mut out = match self.meta.orientation {
             2 => self.try_fliphor()?,
             3 => self.try_rot(Angle::D180)?,
-            4 => self.try_flipver()?,
+            4 => {
+                // The one orientation composition gets wrong. `vips_autorot`
+                // reaches 4 as a 180-degree rotation followed by a horizontal
+                // flip and stamps the flip's `(width, 0)`; a single vertical
+                // flip is the same pixels but stamps `(0, height)`. Measured
+                // `(5, 0)`, `(7, 0)` and `(9, 0)` at 5x6, 7x3 and 9x4, so the
+                // offset is corrected here rather than paying for a second
+                // pass over the image to make the composition match (#721).
+                let mut f = self.try_flipver()?;
+                f.meta.xoffset = origin(self.width());
+                f.meta.yoffset = 0;
+                f
+            }
             5 => self.transpose()?,
             6 => self.try_rot(Angle::D90)?,
             7 => self.transverse()?,
@@ -1194,7 +1790,16 @@ impl Raster {
         let h = self.height();
         let dx = w / 2;
         let dy = h / 2;
-        remap(self, w, h, |x, y| ((x + dx) % w, (y + dy) % h))
+        let mut out = remap(self, w, h, |x, y| ((x + dx) % w, (y + dy) % h))?;
+        // The shift moves the input's origin to `(w - dx, h - dy)` and vips
+        // stamps that: measured `(3, 3)`, `(4, 2)` and `(4, 4)` at 5x6, 7x3
+        // and 8x8. `vips wrap --x 1 --y 2` gives `(4, 4)`, `(6, 1)` and
+        // `(7, 6)` on the same three, which is the same expression with the
+        // caller's shift, so the rule is the shift rather than the halving
+        // (#721). This surface only exposes the centring default.
+        out.meta.xoffset = origin(w - dx);
+        out.meta.yoffset = origin(h - dy);
+        Ok(out)
     }
 
     /// Toroidally shift the image so the pixel at the centre
@@ -1228,9 +1833,12 @@ impl Raster {
             return Err(ConversionError::InvalidGammaExponent { exponent });
         }
         let power = 1.0 / exponent;
-        let bpc = self.format().bytes_per_channel();
-        let mx = if bpc == 1 { 255u32 } else { 65535u32 };
-        let mxf = mx as f64;
+        let kind = self.format().kind();
+        reject_unreadable_kind("gamma", self)?;
+        let (lo, hi) = kind
+            .range()
+            .expect("an integer kind has a range; float is refused above");
+        let mxf = hi as f64;
         // Match vips_gamma bit-for-bit (gamma.c): the curve is built as an
         // identity LUT put through `vips_pow_const1(power)` then
         // `vips_linear1(mx / pow(mx, power), 0)`, then cast back to the
@@ -1252,20 +1860,44 @@ impl Raster {
         // (0 divergences).
         let scale = (mxf / mxf.powf(power)) as f32;
         let mxf32 = mxf as f32;
-        let lut: Vec<u32> = (0..=mx)
-            .map(|i| {
-                let powered = (i as f64).powf(power) as f32;
-                (scale * powered).clamp(0.0, mxf32) as u32
-            })
-            .collect();
+        // `mx` is the carrier's **positive** ceiling on a signed kind too,
+        // which is what makes `char` 100 answer 71: `(100/127)^2.4 * 127`
+        // truncated, measured on 8.18.6. A negative sample falls out of the
+        // same arithmetic rather than out of a branch: `powf` of a negative
+        // base at a fractional exponent is `NaN`, `clamp` passes `NaN`
+        // through, and Rust's float-to-integer cast maps it to zero, which
+        // is the 0 vips answers for `char` -1 and -100 (issue #909).
+        let curve = |v: i64| -> i64 {
+            let powered = (v as f64).powf(power) as f32;
+            (scale * powered).clamp(0.0, mxf32) as i64
+        };
+        // The LUT is indexed by the sample value, so it is the right shape
+        // exactly where a value-indexed table is, which is the question
+        // `hist_bins` already answers. On the 32-bit carrier it is not: a
+        // 2^32-entry table is 16 GiB, so those samples go through the same
+        // curve one at a time. The arithmetic is identical either way, and
+        // the answer matches vips including where vips is degenerate.
+        // Measured on 8.18.6: `vips gamma` on a `uint` raster answers 0 for
+        // every input, because `mx / pow(mx, 2.4)` at mx = 4294967295
+        // underflows the f32 coefficient, and 100 and 90000 both come back
+        // 0. This reproduces that rather than inventing a nicer curve.
+        // Indexed from the range floor, not from zero: on a signed carrier
+        // the table has to cover `-128..=127`, and a `0..=hi` table indexed
+        // by the raw sample would read off the end of it.
+        let lut: Option<Vec<i64>> = kind.hist_bins().map(|_| (lo..=hi).map(curve).collect());
         let mut out = Raster::zeroed(self.width(), self.height(), self.format())?;
         let samples = self.width() as usize * self.height() as usize * self.format().channels();
         let sdata = self.data();
         let odata = out.data_mut();
         for i in 0..samples {
-            write_flat(odata, bpc, i, lut[read_flat(sdata, bpc, i) as usize]);
+            let v = read_flat(sdata, kind, i);
+            let mapped = match &lut {
+                Some(table) => table[(v - lo) as usize],
+                None => curve(v),
+            };
+            write_flat(odata, kind, i, mapped);
         }
-        out.meta = self.meta;
+        out.carry_meta_from(self);
         Ok(out)
     }
 
@@ -1295,17 +1927,24 @@ impl Raster {
     /// [`ConversionError::Raster`] on allocation failure.
     pub fn try_falsecolour(&self) -> Result<Raster, ConversionError> {
         let channels = self.format().channels();
-        let bpc = self.format().bytes_per_channel();
+        reject_unreadable_kind("falsecolour", self)?;
+        let kind = self.format().kind();
         let mut out = Raster::zeroed(self.width(), self.height(), PixelFormat::Rgb8)?;
         let pixels = self.width() as usize * self.height() as usize;
         let sdata = self.data();
         let odata = out.data_mut();
         for p in 0..pixels {
-            let v = read_flat(sdata, bpc, p * channels).min(255) as usize;
+            // `vips_falsecolour` casts to uchar before the lookup and
+            // `vips_cast` clips at both ends, so a negative sample reads
+            // the bottom entry. Measured on 8.18.6: `char` -100 gives the
+            // same (12, 0, 25) as 0, and 100 gives (0, 154, 184).
+            let v = read_flat(sdata, kind, p * channels).clamp(0, 255) as usize;
             odata[p * 3..p * 3 + 3].copy_from_slice(&FALSECOLOUR_PET[v]);
         }
-        out.meta = self.meta;
-        out.meta.interpretation = Some(Interpretation::Srgb);
+        out.carry_meta_from(self);
+        // `vips falsecolour` retags the output sRGB whatever the input said,
+        // so the stamp goes on after the carry rather than before it.
+        out.set_interpretation(Some(Interpretation::Srgb));
         Ok(out)
     }
 
@@ -1336,21 +1975,30 @@ impl Raster {
     /// [`ConversionError::Band`] if the result would exceed the supported
     /// band count, or [`ConversionError::Raster`] on allocation failure.
     pub fn try_addalpha(&self) -> Result<Raster, ConversionError> {
-        let max = if self.format().bytes_per_channel() == 1 {
-            255.0
-        } else {
-            65535.0
-        };
+        // The ink is a property of the **interpretation**, not of the byte
+        // width, and the two only agree because a `Gray16` raster is
+        // normally tagged `Grey16`. Measured on vips 8.18.6: a `ushort`
+        // raster tagged `b-w` gets alpha **255**, one tagged `grey16` or
+        // `rgb16` gets 65535, and a `uint` raster tagged `b-w` gets 255
+        // where the width rule would have said 65535. Same reading
+        // `white_ink` takes for the same reason (issues #667, #861).
+        let max = interpretation_max_alpha(self.interpretation());
         let mut out = self.try_bandjoin_const(max)?;
-        out.meta = self.meta;
+        out.carry_meta_from(self);
         Ok(out)
     }
 
-    /// Append one fully-opaque alpha band: `255` for 8-bit formats,
-    /// `65535` for 16-bit (libvips `vips_addalpha`). `Rgb8` becomes
-    /// `Rgba8`; a mono input gains a second band and becomes a `Multi8` /
-    /// `Multi16` intermediate. Panicking form of
-    /// [`Raster::try_addalpha`].
+    /// Append one fully-opaque alpha band, `255` unless the tag says
+    /// otherwise (libvips `vips_addalpha`). `Rgb8` becomes `Rgba8`; a mono
+    /// input gains a second band and becomes a `Multi8` / `Multi16`
+    /// intermediate. The ink comes from the interpretation's max alpha, so
+    /// `Grey16` and `Rgb16` ink 65535 and `ScRgb` inks 1. Panicking form
+    /// of [`Raster::try_addalpha`].
+    ///
+    /// (Prose rather than an intra-doc link, because
+    /// `arithmetic::interpretation_max_alpha` is `pub(crate)` and this
+    /// method is public, which `-D rustdoc::private_intra_doc_links`
+    /// refuses.)
     ///
     /// # Panics
     ///
@@ -1369,6 +2017,10 @@ impl Raster {
     /// # Errors
     ///
     /// [`ConversionError::EmptyInput`] for an empty list,
+    /// [`ConversionError::ShimTooLarge`] for a `shim` above `1000000`, the
+    /// bound libvips declares on the property,
+    /// [`ConversionError::AcrossOutOfRange`] for an explicit `across`
+    /// outside the `1..=1000000` bound libvips declares on its property,
     /// [`ConversionError::BandCountMismatch`] if band counts differ and
     /// the smaller is not 1, [`ConversionError::SizeOverflow`] if the
     /// grid exceeds `u32` dimensions, or [`ConversionError::Raster`] on
@@ -1382,19 +2034,44 @@ impl Raster {
             return Err(ConversionError::EmptyInput { op: "arrayjoin" });
         }
         let n = u32::try_from(images.len()).unwrap_or(u32::MAX);
-        let across = across.unwrap_or(n).clamp(1, n);
+        // vips does not clamp `across` to the image count: it lays out a grid
+        // that many cells wide and leaves the trailing cells background
+        // (`arrayjoin.c:255-268`). It refuses an out-of-range value at the
+        // GObject property boundary instead; see `ACROSS_MIN`.
+        if let Some(across) = across
+            && !(ACROSS_MIN..=ACROSS_MAX).contains(&across)
+        {
+            return Err(ConversionError::AcrossOutOfRange {
+                across,
+                min: ACROSS_MIN,
+                max: ACROSS_MAX,
+            });
+        }
+        let across = across.unwrap_or(n);
         let down = n.div_ceil(across);
         let shim = shim.unwrap_or(0);
+        // `arrayjoin` declares the same 0..=1000000 property range `join`
+        // does, so the same bound applies; see `SHIM_MAX`.
+        if shim > SHIM_MAX {
+            return Err(ConversionError::ShimTooLarge {
+                shim,
+                max: SHIM_MAX,
+            });
+        }
 
         let bands = images
             .iter()
             .map(|i| i.format().channels())
             .max()
             .expect("images is non-empty");
-        let bpc = images
+        // The common carrier, through `SampleKind::promote` rather than
+        // through the widest byte width: a width cannot order the kinds,
+        // and `with_channels(bands, 4)` answers float for a `uint` input
+        // (issues #517, #607).
+        let kind = images
             .iter()
-            .map(|i| i.format().bytes_per_channel())
-            .max()
+            .map(|i| i.format().kind())
+            .reduce(SampleKind::promote)
             .expect("images is non-empty");
         for img in images {
             let c = img.format().channels();
@@ -1425,8 +2102,8 @@ impl Raster {
             });
         };
 
-        let fmt = PixelFormat::with_channels(bands, bpc)
-            .expect("band count comes from valid input formats");
+        let fmt = PixelFormat::with_kind(bands, kind)
+            .expect("band count and kind both come from valid input formats");
         let mut out = Raster::zeroed(out_w, out_h, fmt)?;
         let odata = out.data_mut();
         for (k, img) in images.iter().enumerate() {
@@ -1435,7 +2112,7 @@ impl Raster {
             let ox = col as usize * (cell_w as usize + shim as usize);
             let oy = row as usize * (cell_h as usize + shim as usize);
             let ichannels = img.format().channels();
-            let ibpc = img.format().bytes_per_channel();
+            let ikind = img.format().kind();
             let idata = img.data();
             let iw = img.width() as usize;
             for y in 0..img.height() as usize {
@@ -1444,28 +2121,54 @@ impl Raster {
                     let oi = ((oy + y) * out_w as usize + ox + x) * bands;
                     for b in 0..bands {
                         let sb = if ichannels == 1 { 0 } else { b };
-                        write_flat(odata, bpc, oi + b, read_flat(idata, ibpc, si + sb));
+                        write_flat_v(odata, kind, oi + b, read_flat_v(idata, ikind, si + sb));
                     }
                 }
             }
         }
-        out.meta = images[0].meta;
+        out.carry_meta_from(images[0]);
+        // Measured on vips 8.18.6 (issue #718): the header block comes from
+        // the first input alone and the attached fields are the union of all
+        // of them, first input winning a name they share. So the carry takes
+        // images[0] wholesale and the rest merge under it, which puts a
+        // profile only a later cell carries onto the grid.
+        for img in &images[1..] {
+            out.merge_fields_from(img);
+        }
+        // Same re-stamp as `join`: `bandalike` can give the grid more bands
+        // than images[0] has, and images[0]'s interpretation then describes
+        // an image that no longer exists. `space_bands(Bw) == 1`, so a
+        // grid left tagged `b-w` reads downstream as grey plus passthrough
+        // extras. Drop the tag and let the getter infer from the format. A
+        // depth-only promotion keeps the tag, matching vips.
+        if out.bands() != images[0].bands() {
+            out.set_interpretation(None);
+        }
         Ok(out)
     }
 
     /// Tile a list of images into a grid (libvips `vips_arrayjoin`).
     ///
     /// `across` is the number of images per row (default: all of them in
-    /// one row, clamped to `1..=n` as in libvips); `shim` is the gap in
-    /// pixels between cells (default 0). Every cell is the size of the
+    /// one row); `shim` is the gap in pixels between cells (default 0,
+    /// maximum `1000000` as in libvips). `across` is **not** clamped to the
+    /// number of images: a value larger than the list lays out that many
+    /// cells wide and leaves the trailing ones background, so two images
+    /// with `across = 5` give a 5-cell row, not a 2-cell one. An explicit
+    /// `across` outside `1..=1000000` is refused
+    /// ([`ConversionError::AcrossOutOfRange`]), which is the range libvips
+    /// declares on the property. Every cell is the size of the
     /// largest input; smaller images sit at the top-left of their cell and
     /// the remainder (and any trailing empty cells and shim gaps) is
     /// filled with black, libvips' default background. Band counts are
     /// aligned like libvips `bandalike` (a one-band image is replicated up
-    /// to the widest count) and depths promote numerically to the widest
-    /// input. The result carries the metadata of the first image.
-    /// Panicking form of [`Raster::try_arrayjoin`], matching the
-    /// ported-test call surface.
+    /// to the widest count) and depths promote through
+    /// [`SampleKind::promote`], so a float cell makes the grid float. The
+    /// result carries the metadata of the first image, except that a band
+    /// promotion drops the interpretation so it is inferred from the result
+    /// format instead of describing the first image's narrower band count.
+    /// Panicking form of [`Raster::try_arrayjoin`], matching the ported-test
+    /// call surface.
     ///
     /// # Panics
     ///
@@ -1473,6 +2176,160 @@ impl Raster {
     #[track_caller]
     pub fn arrayjoin(images: &[&Raster], across: Option<u32>, shim: Option<u32>) -> Raster {
         expect_conv("arrayjoin", Self::try_arrayjoin(images, across, shim))
+    }
+
+    // ------------------------------------------------------------------
+    // join
+    // ------------------------------------------------------------------
+
+    /// Fallible form of [`Raster::join`].
+    ///
+    /// # Errors
+    ///
+    /// Checked here, before anything is placed or allocated:
+    ///
+    /// * [`ConversionError::ShimTooLarge`] for a `shim` above `1000000`,
+    ///   the bound libvips declares on the property.
+    /// * [`ConversionError::PlacementOffsetOverflow`] if the offset the
+    ///   second image would sit at falls outside `i32`, the range libvips
+    ///   places images in.
+    ///
+    /// Delegated to [`Raster::try_insert`], arriving as
+    /// [`ConversionError::Extract`]:
+    ///
+    /// * [`crate::extract::ExtractError::BandCountMismatch`] when the band
+    ///   counts differ and neither is 1.
+    /// * [`crate::extract::ExtractError::BackgroundLengthMismatch`] for a
+    ///   background vector whose length is neither 1 nor the result band
+    ///   count.
+    /// * [`crate::extract::ExtractError::SizeOverflow`] if the joined
+    ///   canvas would not fit `u32` dimensions.
+    /// * [`crate::extract::ExtractError::Raster`] on allocation failure,
+    ///   including [`crate::raster::RasterError::ByteBudgetExceeded`] for a
+    ///   canvas that fits `u32` but not the allocation budget. Note this is
+    ///   nested inside [`ConversionError::Extract`]; `try_join` never
+    ///   constructs [`ConversionError::Raster`] itself.
+    ///
+    /// Delegated to [`Raster::try_extract_area`] for the `expand`-false
+    /// crop, also arriving as [`ConversionError::Extract`]:
+    ///
+    /// * [`crate::extract::ExtractError::EmptyArea`] if the crop would be
+    ///   zero-sized, and
+    ///   [`crate::extract::ExtractError::AreaOutOfBounds`] if it would
+    ///   leave the canvas. Neither is reachable through `join` as the
+    ///   placement is computed today; they are listed because the crop can
+    ///   raise them and a `#[non_exhaustive]` match should expect them.
+    ///
+    /// Every carrier goes through, float included (issue #945). Neither
+    /// delegate refuses one any more, so the guard that used to sit here to
+    /// keep the refusal in this signature's own error type went with them.
+    /// Float input was never exotic: `space_depth` maps Lab, Lch, OkLab,
+    /// OkLCh, XYZ, scRGB and Yxy all to `F32`, so
+    /// `im.colourspace(Lab).join(..)` arrives here as float.
+    pub fn try_join(
+        &self,
+        other: &Raster,
+        direction: JoinDirection,
+        expand: bool,
+        shim: Option<u32>,
+        background: Option<&[f64]>,
+        align: Option<Align>,
+    ) -> Result<Raster, ConversionError> {
+        let align = align.unwrap_or(Align::Low);
+        let shim = shim.unwrap_or(0);
+        // libvips carries this bound in the property declaration, so
+        // `vips join --shim 1000001` never reaches the operation. Widening
+        // to `u32` kept the lower bound and dropped the upper one, and
+        // without it one argument buys a multi-gigabyte canvas out of two
+        // 3x2 inputs, each raster staying under the per-raster budget.
+        if shim > SHIM_MAX {
+            return Err(ConversionError::ShimTooLarge {
+                shim,
+                max: SHIM_MAX,
+            });
+        }
+        let shim = i64::from(shim);
+        let (w1, h1) = (i64::from(self.width()), i64::from(self.height()));
+        let (w2, h2) = (i64::from(other.width()), i64::from(other.height()));
+
+        let (ix, iy) = join_placement((w1, h1), (w2, h2), direction, align, shim)?;
+        let (x, y) = (i64::from(ix), i64::from(iy));
+
+        // join.c:158-162: the insert ALWAYS expands, whatever the caller
+        // asked for, so nothing is lost before the crop below decides.
+        let joined = self.try_insert(other, ix, iy, true, background)?;
+
+        // join.c:164-207: the caller's `expand` only selects this crop.
+        let mut out = if expand {
+            joined
+        } else {
+            let (jw, jh) = (i64::from(joined.width()), i64::from(joined.height()));
+            let (left, top, width, height) = match direction {
+                JoinDirection::Horizontal => (0, y.max(0) - y, jw, h1.min(h2)),
+                JoinDirection::Vertical => (x.max(0) - x, 0, w1.min(w2), jh),
+            };
+            if left != 0 || top != 0 || width != jw || height != jh {
+                joined.try_extract_area(left as u32, top as u32, width as u32, height as u32)?
+            } else {
+                joined
+            }
+        };
+        out.carry_meta_from(self);
+        // Same union as `insert`, which is what `join` is built on: measured
+        // on vips 8.18.6 the header block is in1's alone and the attached
+        // fields are both inputs', in1 winning a shared name (issue #718).
+        out.merge_fields_from(other);
+        // libvips `bandalike` promotes a one-band input up to the other's
+        // band count, so the result can have more bands than in1 has. in1's
+        // interpretation then describes an image that no longer exists:
+        // `vips join` of 1-band `b-w` with 3-band `srgb` reports `3 bands,
+        // srgb`, and keeping `b-w` here is not cosmetic, since
+        // `space_bands(Bw) == 1` makes a later `colourspace` read two of the
+        // three bands as passthrough extras and hand back 5 bands of
+        // garbage. Drop the tag so the getter infers one from the format
+        // instead, the same re-stamp `composite2` does for the same reason.
+        // A depth-only promotion is left alone on purpose: vips keeps `b-w`
+        // when joining `b-w` uchar with `grey16`, so the trigger is
+        // specifically the band count changing.
+        if out.bands() != self.bands() {
+            out.set_interpretation(None);
+        }
+        Ok(out)
+    }
+
+    /// Join this image and `other` left-right or top-bottom (libvips
+    /// `vips_join`).
+    ///
+    /// `shim` is the gap in pixels between the two (default 0, maximum
+    /// `1000000` as in libvips) and `align` says which edge they line up on
+    /// (default [`Align::Low`]). With `expand` false the result is cropped
+    /// back to the smaller of the two along the shared axis, which is
+    /// libvips' default; with `expand` true it is the bounding box of both,
+    /// and `background` (black when `None`) fills whatever neither image
+    /// covers, including the shim gap. Band counts and depths unify exactly
+    /// as [`Raster::insert`] does. The result carries this image's
+    /// metadata, except that a band promotion drops the interpretation so
+    /// it is inferred from the result format rather than describing this
+    /// image's narrower band count. Float rasters are not supported yet on
+    /// either side.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`ConversionError`]; see [`Raster::try_join`].
+    #[track_caller]
+    pub fn join(
+        &self,
+        other: &Raster,
+        direction: JoinDirection,
+        expand: bool,
+        shim: Option<u32>,
+        background: Option<&[f64]>,
+        align: Option<Align>,
+    ) -> Raster {
+        expect_conv(
+            "join",
+            self.try_join(other, direction, expand, shim, background, align),
+        )
     }
 
     // ------------------------------------------------------------------
@@ -1599,7 +2456,7 @@ impl Raster {
         for (p, px) in odata.iter_mut().enumerate() {
             let mut v = no_match;
             for (i, c) in conditions.iter().enumerate() {
-                if read_flat(c.data(), c.format().bytes_per_channel(), p) != 0 {
+                if condition_is_true(c.data(), c.format().kind(), p) {
                     v = i as u8;
                     break;
                 }
@@ -1890,9 +2747,56 @@ const FALSECOLOUR_PET: [[u8; 3]; 256] = [
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pixel::ALL_KINDS;
+    use core::num::NonZeroU16;
+
+    /// A one-band `Int8` raster from signed sample values.
+    fn int8(w: u32, h: u32, vals: &[i8]) -> Raster {
+        let data: Vec<u8> = vals.iter().map(|v| *v as u8).collect();
+        let fmt = PixelFormat::Int8(NonZeroU16::new(1).unwrap());
+        Raster::new(w, h, fmt, data).unwrap()
+    }
+
+    /// A one-band `Int16` raster from signed sample values.
+    fn int16(w: u32, h: u32, vals: &[i16]) -> Raster {
+        let data: Vec<u8> = vals.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        let fmt = PixelFormat::Int16(NonZeroU16::new(1).unwrap());
+        Raster::new(w, h, fmt, data).unwrap()
+    }
+
+    /// A one-band `Int32` raster from signed sample values.
+    fn int32(w: u32, h: u32, vals: &[i32]) -> Raster {
+        let data: Vec<u8> = vals.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        let fmt = PixelFormat::Int32(NonZeroU16::new(1).unwrap());
+        Raster::new(w, h, fmt, data).unwrap()
+    }
+
+    /// Every sample of an `Int8` raster, read back signed.
+    fn i8s(r: &Raster) -> Vec<i8> {
+        r.data().iter().map(|b| *b as i8).collect()
+    }
 
     fn gray8(w: u32, h: u32, data: Vec<u8>) -> Raster {
         Raster::new(w, h, PixelFormat::Gray8, data).unwrap()
+    }
+
+    /// A one-band `Uint32` raster from sample values.
+    fn uint32(w: u32, h: u32, vals: &[u32]) -> Raster {
+        let data: Vec<u8> = vals.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        let fmt = PixelFormat::Uint32(NonZeroU16::new(1).unwrap());
+        Raster::new(w, h, fmt, data).unwrap()
+    }
+
+    /// Read the flat `i`-th `u32` sample of a raster.
+    fn u32_at(r: &Raster, i: usize) -> u32 {
+        let d = r.data();
+        u32::from_ne_bytes([d[i * 4], d[i * 4 + 1], d[i * 4 + 2], d[i * 4 + 3]])
+    }
+
+    /// Read the flat `i`-th `u16` sample of a raster.
+    fn u16_at(r: &Raster, i: usize) -> u16 {
+        let d = r.data();
+        u16::from_ne_bytes([d[i * 2], d[i * 2 + 1]])
     }
 
     fn gray16(w: u32, h: u32, vals: &[u16]) -> Raster {
@@ -2027,26 +2931,31 @@ mod tests {
     }
 
     /**
-     * Tests float -> u8 casting: round to nearest, clip to 0..=255, and
-     * NaN pins to 0 (not to a clip bound).
-     * Input: [-1.5, 0.4, 0.5, 254.6, 300.0, NaN] -> [0, 0, 1, 255, 255, 0].
+     * Tests float -> u8 casting: truncate toward zero, clip to 0..=255,
+     * and NaN pins to 0 (not to a clip bound). The `0.5` sample is the
+     * one that moved when the rounding mode was corrected to match
+     * `vips_cast` (issue #561): it used to answer 1.
+     * Input: [-1.5, 0.4, 0.5, 254.6, 300.0, NaN] -> [0, 0, 0, 254, 255, 0].
      */
     #[test]
-    fn cast_float_to_u8_rounds_and_clips() {
+    fn cast_float_to_u8_truncates_and_clips() {
         let f1 = PixelFormat::with_channels(1, 4).unwrap();
         let im =
             Raster::from_f32_samples(6, 1, f1, &[-1.5, 0.4, 0.5, 254.6, 300.0, f32::NAN]).unwrap();
         let out = im.cast(PixelFormat::Gray8);
         assert_eq!(out.format(), PixelFormat::Gray8);
-        assert_eq!(out.data(), &[0, 0, 1, 255, 255, 0]);
+        assert_eq!(out.data(), &[0, 0, 0, 254, 255, 0]);
     }
 
     /**
-     * Tests float -> u16 casting: round to nearest and clip to 0..=65535.
-     * Input: [-3.0, 0.5, 65534.6, 70000.0] -> [0, 1, 65535, 65535].
+     * Tests float -> u16 casting: truncate toward zero and clip to
+     * 0..=65535. The `0.5` and `65534.6` samples are the ones that moved
+     * with the rounding-mode correction (issue #561); they used to answer
+     * 1 and 65535.
+     * Input: [-3.0, 0.5, 65534.6, 70000.0] -> [0, 0, 65534, 65535].
      */
     #[test]
-    fn cast_float_to_u16_rounds_and_clips() {
+    fn cast_float_to_u16_truncates_and_clips() {
         let f1 = PixelFormat::with_channels(1, 4).unwrap();
         let im = Raster::from_f32_samples(4, 1, f1, &[-3.0, 0.5, 65534.6, 70000.0]).unwrap();
         let out = im.cast(PixelFormat::Gray16);
@@ -2058,7 +2967,109 @@ mod tests {
                 .chain(out.getpoint(2, 0))
                 .chain(out.getpoint(3, 0))
                 .collect::<Vec<_>>(),
-            vec![0.0, 1.0, 65535.0, 65535.0]
+            vec![0.0, 0.0, 65534.0, 65535.0]
+        );
+    }
+
+    /**
+     * Tests the vips 8.18.4 oracle rows for float -> uchar: `vips cast`
+     * TRUNCATES the fraction away, it does not round to nearest
+     * (`cast.c:566-567`, "Floats are truncated (not rounded)").
+     * Works by pinning the four values measured against the binary with
+     * `vips csvload p.csv p.v && vips cast p.v pu.v uchar`, none of which
+     * sit near a clip bound, so the rounding mode is the only thing they
+     * can disagree on (issue #561).
+     * Input: [1.7, 2.5, 3.999, 254.6] -> [1, 2, 3, 254], never
+     * [2, 3, 4, 255].
+     */
+    #[test]
+    fn cast_float_to_u8_truncates_vips_oracle_rows() {
+        let f1 = PixelFormat::with_channels(1, 4).unwrap();
+        let im = Raster::from_f32_samples(4, 1, f1, &[1.7, 2.5, 3.999, 254.6]).unwrap();
+        let out = im.cast(PixelFormat::Gray8);
+        assert_eq!(out.format(), PixelFormat::Gray8);
+        assert_eq!(
+            out.data(),
+            &[1, 2, 3, 254],
+            "vips cast truncates float samples; rounding would give [2, 3, 4, 255]"
+        );
+    }
+
+    /**
+     * Tests that the same truncation holds on the wider unsigned target,
+     * where a value can be fractional without being anywhere near the
+     * clip. Works by casting to Gray16 the `300.9` row measured as `300`
+     * by `vips cast p.v ps.v ushort` — the same input that clips to 255 on
+     * uchar, so this separates the rounding mode from the clip (issue
+     * #561).
+     * Input: [300.9, 65534.6, 1.5] -> [300, 65534, 1].
+     */
+    #[test]
+    fn cast_float_to_u16_truncates_in_range() {
+        let f1 = PixelFormat::with_channels(1, 4).unwrap();
+        let im = Raster::from_f32_samples(3, 1, f1, &[300.9, 65534.6, 1.5]).unwrap();
+        let out = im.cast(PixelFormat::Gray16);
+        assert_eq!(out.format(), PixelFormat::Gray16);
+        assert_eq!(
+            (0..3).flat_map(|x| out.getpoint(x, 0)).collect::<Vec<_>>(),
+            vec![300.0, 65534.0, 1.0],
+            "vips cast truncates on ushort too; rounding would give [301, 65535, 2]"
+        );
+    }
+
+    /**
+     * Tests that the clip bounds did NOT move when the rounding mode did
+     * (issue #561): clipping was already correct against vips, so the
+     * truncation fix must leave it alone.
+     * Works by pinning the below-range and above-range rows measured on
+     * the binary for both unsigned targets.
+     * Input: uchar [-0.5, -3.7, 300.9] -> [0, 0, 255];
+     * ushort [-3.0, 65535.5, 70000.0] -> [0, 65535, 65535].
+     */
+    #[test]
+    fn cast_float_clipping_unchanged_by_truncation() {
+        let f1 = PixelFormat::with_channels(1, 4).unwrap();
+        let u8_in = Raster::from_f32_samples(3, 1, f1, &[-0.5, -3.7, 300.9]).unwrap();
+        assert_eq!(
+            u8_in.cast(PixelFormat::Gray8).data(),
+            &[0, 0, 255],
+            "out-of-range uchar samples still clip to the format bounds"
+        );
+
+        let u16_in = Raster::from_f32_samples(3, 1, f1, &[-3.0, 65535.5, 70000.0]).unwrap();
+        let out = u16_in.cast(PixelFormat::Gray16);
+        assert_eq!(
+            (0..3).flat_map(|x| out.getpoint(x, 0)).collect::<Vec<_>>(),
+            vec![0.0, 65535.0, 65535.0],
+            "out-of-range ushort samples still clip to the format bounds"
+        );
+    }
+
+    /**
+     * Tests that the NaN -> 0 pin survived the rounding-mode change
+     * (issue #561). NaN already matched vips, and it needs its own branch
+     * either way: `f64::trunc` of NaN is NaN and `f64::clamp` passes NaN
+     * straight through to the cast, so nothing in the arithmetic puts it
+     * at 0 on its own.
+     * Works by casting a NaN sample to both unsigned targets. Measured on
+     * the binary as `vips math a.v nan.v asin` over `2` (csvload cannot
+     * parse the literal `nan`), then `vips cast nan.v out.v uchar` -> 0.
+     * Input: [NaN, 1.7] -> uchar [0, 1] and ushort [0, 1].
+     */
+    #[test]
+    fn cast_float_nan_still_pins_to_zero() {
+        let f1 = PixelFormat::with_channels(1, 4).unwrap();
+        let im = Raster::from_f32_samples(2, 1, f1, &[f32::NAN, 1.7]).unwrap();
+        assert_eq!(
+            im.cast(PixelFormat::Gray8).data(),
+            &[0, 1],
+            "NaN pins to 0 rather than falling out of the clamp"
+        );
+        let wide = im.cast(PixelFormat::Gray16);
+        assert_eq!(
+            (0..2).flat_map(|x| wide.getpoint(x, 0)).collect::<Vec<_>>(),
+            vec![0.0, 1.0],
+            "NaN pins to 0 on the wide target too"
         );
     }
 
@@ -2964,16 +3975,120 @@ mod tests {
     }
 
     /**
-     * Tests that across is clamped to 1..=n like libvips VIPS_CLIP.
-     * Input: Some(0) behaves as 1 (stack), Some(99) as n (row).
+     * Tests that `across` is NOT clamped to the image count: a value larger
+     * than the list lays out that many cells wide and leaves the trailing
+     * ones background, which is what `arrayjoin.c:255-268` does at
+     * `fe420cf3a` (`down` is `ROUND_UP(n, across) / across` and the output
+     * width is `hspacing * across + shim * (across - 1)`, neither of them
+     * capped at `n`). libviprs used to clamp into `1..=n`, so every
+     * `across > n` collapsed to one full row.
+     * Works by sweeping the whole `across` range vips was measured over on
+     * the two inputs whose sizes differ, so the cell-size rule (the cell is
+     * the largest input on each axis, here 3x3 out of a 3x2 and a 2x3) is
+     * exercised at the same time as the layout.
+     * Input: 3x2 and 2x3 gray8. Measured with vips 8.18.4 as
+     * `vips black a.v 3 2; vips black b.v 2 3;
+     * vips arrayjoin "a.v b.v" o.v --across N`:
+     * 1 -> 3x6, 2 -> 6x3, 3 -> 9x3, 4 -> 12x3, 5 -> 15x3, 7 -> 21x3,
+     * 10 -> 30x3.
      */
     #[test]
-    fn arrayjoin_across_clamped() {
+    fn arrayjoin_across_is_not_clamped_to_the_image_count() {
+        let a = gray8(3, 2, vec![0; 6]);
+        let b = gray8(2, 3, vec![0; 6]);
+        for (across, want) in [
+            (1u32, (3u32, 6u32)),
+            (2, (6, 3)),
+            (3, (9, 3)),
+            (4, (12, 3)),
+            (5, (15, 3)),
+            (7, (21, 3)),
+            (10, (30, 3)),
+        ] {
+            let out = Raster::arrayjoin(&[&a, &b], Some(across), None);
+            assert_eq!(
+                (out.width(), out.height()),
+                want,
+                "across = {across} should give {want:?}"
+            );
+        }
+    }
+
+    /**
+     * Tests that the trailing cells an over-wide `across` opens up are
+     * background rather than a wrapped repeat of the inputs, the pixel
+     * complement of the geometry sweep above.
+     * Works by giving the two 1x1 inputs distinct values so a wrap would be
+     * visible, then reading every cell of the row back.
+     * Input: 1x1 [5] and 1x1 [9], across 3. Measured as
+     * `vips arrayjoin "p1.v p2.v" t3.v --across 3` -> 3x1 reading 5, 9, 0.
+     */
+    #[test]
+    fn arrayjoin_across_past_the_end_leaves_background_cells() {
+        let a = gray8(1, 1, vec![5]);
+        let b = gray8(1, 1, vec![9]);
+        let out = Raster::arrayjoin(&[&a, &b], Some(3), None);
+        assert_eq!((out.width(), out.height()), (3, 1));
+        assert_eq!(out.data(), &[5, 9, 0]);
+    }
+
+    /**
+     * Tests that `shim` still spaces the empty trailing cells, so the shim
+     * count follows `across` and not the image count. `arrayjoin.c:259-260`
+     * sizes the output as `hspacing * across + shim * (across - 1)`, which
+     * is 3 * 4 + 2 * 3 = 18 here; the old clamp would have made it 6 + 2.
+     * Input: the 3x2 / 2x3 pair, across 4, shim 2. Measured as
+     * `vips arrayjoin "a.v b.v" s4.v --across 4 --shim 2` -> 18x3.
+     */
+    #[test]
+    fn arrayjoin_shim_spaces_the_trailing_cells_too() {
+        let a = gray8(3, 2, vec![0; 6]);
+        let b = gray8(2, 3, vec![0; 6]);
+        let out = Raster::arrayjoin(&[&a, &b], Some(4), Some(2));
+        assert_eq!((out.width(), out.height()), (18, 3));
+    }
+
+    /**
+     * Tests the libvips bound on `arrayjoin`'s `across`, the
+     * `VIPS_ARG_INT(class, "across", 4, ..., 1, 1000000, 1)` range
+     * `arrayjoin.c:400-406` declares at `fe420cf3a`. Both ends are refused
+     * by GObject before the operation is built, measured on the 3x2 / 2x3
+     * pair: `--across 0` and `--across 1000001` each fail with
+     * `value "N" of type 'gint' is invalid or out of range for property
+     * 'across'`. libviprs used to clamp both silently, 0 into a vertical
+     * stack and anything large into one row.
+     * Works by asserting the typed variant with its field values, then
+     * checking the default is still accepted for a list longer than the
+     * range would allow if it were checked, the way vips assigns
+     * `join->across = n` past its own property check.
+     * Input: two 1x1 images with across 0, 1000001, and u32::MAX.
+     */
+    #[test]
+    fn try_arrayjoin_across_outside_the_vips_property_range_is_rejected() {
         let a = gray8(1, 1, vec![1]);
         let b = gray8(1, 1, vec![2]);
-        let stacked = Raster::arrayjoin(&[&a, &b], Some(0), None);
-        assert_eq!((stacked.width(), stacked.height()), (1, 2));
-        let row = Raster::arrayjoin(&[&a, &b], Some(99), None);
+        assert!(matches!(
+            Raster::try_arrayjoin(&[&a, &b], Some(0), None),
+            Err(ConversionError::AcrossOutOfRange {
+                across: 0,
+                min: 1,
+                max: 1_000_000
+            })
+        ));
+        assert!(matches!(
+            Raster::try_arrayjoin(&[&a, &b], Some(1_000_001), None),
+            Err(ConversionError::AcrossOutOfRange {
+                across: 1_000_001,
+                ..
+            })
+        ));
+        assert!(matches!(
+            Raster::try_arrayjoin(&[&a, &b], Some(u32::MAX), None),
+            Err(ConversionError::AcrossOutOfRange { .. })
+        ));
+        // The bound applies to an explicit value only; the default is still
+        // whatever the list length is.
+        let row = Raster::arrayjoin(&[&a, &b], None, None);
         assert_eq!((row.width(), row.height()), (2, 1));
     }
 
@@ -2985,6 +4100,725 @@ mod tests {
         let a = gray8(1, 1, vec![1]).copy().xres(11.0).build();
         let b = gray8(1, 1, vec![2]);
         assert_eq!(Raster::arrayjoin(&[&a, &b], None, None).xres(), 11.0);
+    }
+
+    /**
+     * Tests that a band-promoting grid does not keep the first image's
+     * interpretation, which no longer describes the band count.
+     * `vips arrayjoin "gbw.v csrgb.v" out.v` reports `6x3 uchar, 3 bands,
+     * srgb`; keeping `b-w` here matters because `space_bands(Bw) == 1`, so
+     * a later colourspace conversion reads two of the three bands as
+     * passthrough extras.
+     * Works by tagging the mono input explicitly, the way a decoder tags
+     * one, then reading the tag back off the grid.
+     * Input: Gray8 1x1 tagged `Bw` + Rgb8 1x1 -> Rgb8 grid tagged `Srgb`.
+     */
+    #[test]
+    fn arrayjoin_band_promotion_drops_the_first_images_tag() {
+        let mono = gray8(1, 1, vec![1])
+            .copy()
+            .interpretation(Interpretation::Bw)
+            .build();
+        let colour = rgb8(1, 1, vec![10, 20, 30]);
+        let out = Raster::arrayjoin(&[&mono, &colour], None, None);
+        assert_eq!(out.format(), PixelFormat::Rgb8);
+        assert_eq!(out.interpretation(), Interpretation::Srgb);
+    }
+
+    /**
+     * Tests that a **mixed** float and integer grid promotes to float and
+     * keeps both cells' samples, which is the case a same-carrier fixture
+     * cannot reach.
+     * This replaces `try_arrayjoin_float_input_is_a_typed_error_not_a_panic`,
+     * which asserted the refusal and said in its own doc that vips handles
+     * this and the crate did not; issue #945 is that sentence acted on.
+     * Measured on `/opt/homebrew/bin/vips` 8.18.6:
+     * `vips arrayjoin "rf.v pu.v" out.v` over a 2x2 `float` `[0,1,2,3]` and
+     * a 1x1 `uchar` `7` answers a **4x2 float** grid holding
+     * `[0, 1, 7, 0 / 2, 3, 0, 0]`, and with the operands the other way
+     * round `[7, 0, 0, 1 / 0, 0, 2, 3]`. The cell is the size of the
+     * largest input and the short cell's remainder is background, which is
+     * why the 7 sits alone in a 2x2 cell.
+     * Works by driving both operand orders, because the promotion is a
+     * `reduce` over the list and an implementation taking the first
+     * image's kind passes the first order and fails the second.
+     * Input: FloatF32 2x2 beside a Gray8 1x1 -> Output: the measured grids.
+     */
+    #[test]
+    fn arrayjoin_promotes_a_mixed_float_and_integer_grid_issue_945() {
+        let ramp = float1(2, 2, &[0.0, 1.0, 2.0, 3.0]);
+        let plain = gray8(1, 1, vec![7]);
+        for (list, want) in [
+            (
+                [&ramp, &plain],
+                vec![0.0f32, 1.0, 7.0, 0.0, 2.0, 3.0, 0.0, 0.0],
+            ),
+            (
+                [&plain, &ramp],
+                vec![7.0f32, 0.0, 0.0, 1.0, 0.0, 0.0, 2.0, 3.0],
+            ),
+        ] {
+            let out = Raster::try_arrayjoin(&list, None, None).unwrap();
+            assert_eq!((out.width(), out.height()), (4, 2));
+            assert!(out.format().is_float(), "got {:?}", out.format());
+            assert_eq!(f32s(&out), want);
+        }
+    }
+
+    /**
+     * Tests the libvips bound on `arrayjoin`'s `shim`, the same
+     * `VIPS_ARG_INT(class, "shim", 5, ..., 0, 1000000, 0)` range `join`
+     * declares: `vips arrayjoin "a.v c.v" out.v --shim 1000001` fails with
+     * the same GObject CRITICAL. Both sides of the bound are pinned, the
+     * accepting one against the measured `vips arrayjoin "t1.v t1.v" out.v
+     * --shim 1000000` result of `1000002x1`.
+     * Input: two 1x1 images, shim 1000001 then 1000000.
+     */
+    #[test]
+    fn try_arrayjoin_shim_above_the_vips_maximum_is_rejected() {
+        let a = gray8(1, 1, vec![1]);
+        let b = gray8(1, 1, vec![2]);
+        assert!(matches!(
+            Raster::try_arrayjoin(&[&a, &b], None, Some(1_000_001)),
+            Err(ConversionError::ShimTooLarge {
+                shim: 1_000_001,
+                max: 1_000_000
+            })
+        ));
+        assert!(matches!(
+            Raster::try_arrayjoin(&[&a, &b], None, Some(u32::MAX)),
+            Err(ConversionError::ShimTooLarge { .. })
+        ));
+        let out = Raster::arrayjoin(&[&a, &b], None, Some(1_000_000));
+        assert_eq!((out.width(), out.height()), (1_000_002, 1));
+    }
+
+    /**
+     * Tests that a depth-only promotion keeps the tag, the complement of
+     * the band-promotion case. `vips arrayjoin "gbw.v g16.v" out.v` reports
+     * `ushort, 1 band, b-w`, so the re-stamp must key off the band count
+     * and nothing else.
+     * Input: Gray8 1x1 tagged `Bw` + Gray16 1x1 -> Gray16 grid still `Bw`.
+     */
+    #[test]
+    fn arrayjoin_depth_promotion_keeps_the_first_images_tag() {
+        let mono = gray8(1, 1, vec![1])
+            .copy()
+            .interpretation(Interpretation::Bw)
+            .build();
+        let wide = gray16(1, 1, &[300]);
+        let out = Raster::arrayjoin(&[&mono, &wide], None, None);
+        assert_eq!(out.format(), PixelFormat::Gray16);
+        assert_eq!(out.interpretation(), Interpretation::Bw);
+    }
+    // ------------------------------------------------------------------
+    // join
+    // ------------------------------------------------------------------
+
+    /// The oracle fixture pair: `a` is 3x2, `c` is 2x3, both Gray8.
+    fn join_a() -> Raster {
+        gray8(3, 2, vec![1, 2, 3, 4, 5, 6])
+    }
+
+    fn join_c() -> Raster {
+        gray8(2, 3, vec![10, 20, 30, 40, 50, 60])
+    }
+
+    /**
+     * Tests the default horizontal join: the second image sits to the
+     * right of the first and the result is cropped back to the shorter
+     * height, exactly as `vips join a c out horizontal`.
+     * Works by joining the 3x2 / 2x3 oracle pair with align low and
+     * expand off, then comparing the whole buffer.
+     * Input: a(3x2) + c(2x3) -> 5x2, height = min(2, 3).
+     */
+    #[test]
+    fn join_horizontal_low_crops_to_shorter() {
+        let out = join_a().join(
+            &join_c(),
+            JoinDirection::Horizontal,
+            false,
+            None,
+            None,
+            None,
+        );
+        assert_eq!((out.width(), out.height()), (5, 2));
+        assert_eq!(out.data(), &[1, 2, 3, 10, 20, 4, 5, 6, 30, 40]);
+    }
+
+    /**
+     * Tests that `expand` keeps every input pixel and fills the gap with
+     * the background.
+     * Input: a(3x2) + c(2x3), horizontal, expand -> 5x3 with a black
+     * bottom-left corner.
+     */
+    #[test]
+    fn join_horizontal_low_expand_keeps_all_pixels() {
+        let out = join_a().join(&join_c(), JoinDirection::Horizontal, true, None, None, None);
+        assert_eq!((out.width(), out.height()), (5, 3));
+        assert_eq!(
+            out.data(),
+            &[1, 2, 3, 10, 20, 4, 5, 6, 30, 40, 0, 0, 0, 50, 60]
+        );
+    }
+
+    /**
+     * Tests the HIGH alignment on a taller second image, which puts the
+     * insert origin at a negative y. The expanded form grows upward and
+     * the cropped form starts at `max(0, y) - y`, i.e. row 1.
+     * Input: a(3x2) + c(2x3), horizontal, align high.
+     */
+    #[test]
+    fn join_horizontal_high_negative_y() {
+        let expanded = join_a().join(
+            &join_c(),
+            JoinDirection::Horizontal,
+            true,
+            None,
+            None,
+            Some(Align::High),
+        );
+        assert_eq!((expanded.width(), expanded.height()), (5, 3));
+        assert_eq!(
+            expanded.data(),
+            &[0, 0, 0, 10, 20, 1, 2, 3, 30, 40, 4, 5, 6, 50, 60]
+        );
+
+        let cropped = join_a().join(
+            &join_c(),
+            JoinDirection::Horizontal,
+            false,
+            None,
+            None,
+            Some(Align::High),
+        );
+        assert_eq!((cropped.width(), cropped.height()), (5, 2));
+        assert_eq!(cropped.data(), &[1, 2, 3, 30, 40, 4, 5, 6, 50, 60]);
+    }
+
+    /**
+     * Tests the vertical direction, both expand settings: the second
+     * image goes below the first and the crop takes the narrower width.
+     * Input: a(3x2) + c(2x3) vertical -> 2x5 cropped, 3x5 expanded.
+     */
+    #[test]
+    fn join_vertical_low() {
+        let cropped = join_a().join(&join_c(), JoinDirection::Vertical, false, None, None, None);
+        assert_eq!((cropped.width(), cropped.height()), (2, 5));
+        assert_eq!(cropped.data(), &[1, 2, 4, 5, 10, 20, 30, 40, 50, 60]);
+
+        let expanded = join_a().join(&join_c(), JoinDirection::Vertical, true, None, None, None);
+        assert_eq!((expanded.width(), expanded.height()), (3, 5));
+        assert_eq!(
+            expanded.data(),
+            &[1, 2, 3, 4, 5, 6, 10, 20, 0, 30, 40, 0, 50, 60, 0]
+        );
+    }
+
+    /**
+     * Tests the vertical HIGH alignment with a wider second image, the
+     * negative-x twin of the horizontal case: the expanded canvas grows
+     * leftward and the crop starts at column `max(0, x) - x` = 1.
+     * Input: 4x2 + 5x2 vertical, align high.
+     */
+    #[test]
+    fn join_vertical_high_negative_x() {
+        let f = gray8(4, 2, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+        let g = gray8(5, 2, vec![11, 12, 13, 14, 15, 16, 17, 18, 19, 20]);
+
+        let expanded = f.join(
+            &g,
+            JoinDirection::Vertical,
+            true,
+            None,
+            None,
+            Some(Align::High),
+        );
+        assert_eq!((expanded.width(), expanded.height()), (5, 4));
+        assert_eq!(
+            expanded.data(),
+            &[
+                0, 1, 2, 3, 4, 0, 5, 6, 7, 8, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20
+            ]
+        );
+
+        let cropped = f.join(
+            &g,
+            JoinDirection::Vertical,
+            false,
+            None,
+            None,
+            Some(Align::High),
+        );
+        assert_eq!((cropped.width(), cropped.height()), (4, 4));
+        assert_eq!(
+            cropped.data(),
+            &[1, 2, 3, 4, 5, 6, 7, 8, 12, 13, 14, 15, 17, 18, 19, 20]
+        );
+    }
+
+    /**
+     * Tests the CENTRE ladder on the vertical axis, where the two
+     * truncating divisions happen to agree with the combined form:
+     * 4/2 - 5/2 = 2 - 2 = 0.
+     * Input: 4x2 + 5x2 vertical, align centre.
+     */
+    #[test]
+    fn join_vertical_centre() {
+        let f = gray8(4, 2, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+        let g = gray8(5, 2, vec![11, 12, 13, 14, 15, 16, 17, 18, 19, 20]);
+
+        let expanded = f.join(
+            &g,
+            JoinDirection::Vertical,
+            true,
+            None,
+            None,
+            Some(Align::Centre),
+        );
+        assert_eq!((expanded.width(), expanded.height()), (5, 4));
+        assert_eq!(
+            expanded.data(),
+            &[
+                1, 2, 3, 4, 0, 5, 6, 7, 8, 0, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20
+            ]
+        );
+
+        let cropped = f.join(
+            &g,
+            JoinDirection::Vertical,
+            false,
+            None,
+            None,
+            Some(Align::Centre),
+        );
+        assert_eq!((cropped.width(), cropped.height()), (4, 4));
+        assert_eq!(
+            cropped.data(),
+            &[1, 2, 3, 4, 5, 6, 7, 8, 11, 12, 13, 14, 16, 17, 18, 19]
+        );
+    }
+
+    /**
+     * Tests that CENTRE is TWO separate truncating integer divisions
+     * (`in1.h / 2 - in2.h / 2`), not the combined `(in1.h - in2.h) / 2`.
+     * For 4 and 3 the C form gives `2 - 1 = 1` where the combined form
+     * gives `0`, so the second image starts one row down and the top
+     * right corner stays background.
+     * Input: 2x4 + 2x3 horizontal, align centre -> 4x4 expanded.
+     */
+    #[test]
+    fn join_centre_uses_two_truncating_divisions() {
+        let d = gray8(2, 4, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+        let out = d.join(
+            &join_c(),
+            JoinDirection::Horizontal,
+            true,
+            None,
+            None,
+            Some(Align::Centre),
+        );
+        assert_eq!((out.width(), out.height()), (4, 4));
+        // Row 0 is `1 2 | background background`: with the combined
+        // `(4 - 3) / 2 = 0` form it would read `1 2 10 20`.
+        assert_eq!(
+            out.data(),
+            &[1, 2, 0, 0, 3, 4, 10, 20, 5, 6, 30, 40, 7, 8, 50, 60]
+        );
+
+        let cropped = d.join(
+            &join_c(),
+            JoinDirection::Horizontal,
+            false,
+            None,
+            None,
+            Some(Align::Centre),
+        );
+        assert_eq!((cropped.width(), cropped.height()), (4, 3));
+        assert_eq!(cropped.data(), &[1, 2, 0, 0, 3, 4, 10, 20, 5, 6, 30, 40]);
+    }
+
+    /**
+     * Tests CENTRE with a taller second image, which drives y negative
+     * (2/2 - 5/2 = 1 - 2 = -1) and exercises the `max(0, y) - y` crop
+     * origin on the centre arm.
+     * Input: 3x2 + 2x5 horizontal, align centre.
+     */
+    #[test]
+    fn join_centre_negative_y() {
+        let e = gray8(2, 5, vec![11, 12, 13, 14, 15, 16, 17, 18, 19, 20]);
+
+        let expanded = join_a().join(
+            &e,
+            JoinDirection::Horizontal,
+            true,
+            None,
+            None,
+            Some(Align::Centre),
+        );
+        assert_eq!((expanded.width(), expanded.height()), (5, 5));
+        assert_eq!(
+            expanded.data(),
+            &[
+                0, 0, 0, 11, 12, 1, 2, 3, 13, 14, 4, 5, 6, 15, 16, 0, 0, 0, 17, 18, 0, 0, 0, 19, 20
+            ]
+        );
+
+        let cropped = join_a().join(
+            &e,
+            JoinDirection::Horizontal,
+            false,
+            None,
+            None,
+            Some(Align::Centre),
+        );
+        assert_eq!((cropped.width(), cropped.height()), (5, 2));
+        assert_eq!(cropped.data(), &[1, 2, 3, 13, 14, 4, 5, 6, 15, 16]);
+    }
+
+    /**
+     * Tests that `shim` opens a gap of that many pixels between the two
+     * images and that the gap takes the background colour, not black,
+     * when one is given.
+     * Input: a(3x2) + c(2x3) horizontal, shim 2 -> 7 wide; expanded with
+     * background 128 and cropped with the default black.
+     */
+    #[test]
+    fn join_shim_gap_takes_background() {
+        let bg = [128.0];
+        let expanded = join_a().join(
+            &join_c(),
+            JoinDirection::Horizontal,
+            true,
+            Some(2),
+            Some(&bg),
+            None,
+        );
+        assert_eq!((expanded.width(), expanded.height()), (7, 3));
+        assert_eq!(
+            expanded.data(),
+            &[
+                1, 2, 3, 128, 128, 10, 20, 4, 5, 6, 128, 128, 30, 40, 128, 128, 128, 128, 128, 50,
+                60
+            ]
+        );
+
+        let cropped = join_a().join(
+            &join_c(),
+            JoinDirection::Horizontal,
+            false,
+            Some(2),
+            None,
+            None,
+        );
+        assert_eq!((cropped.width(), cropped.height()), (7, 2));
+        assert_eq!(
+            cropped.data(),
+            &[1, 2, 3, 0, 0, 10, 20, 4, 5, 6, 0, 0, 30, 40]
+        );
+    }
+
+    /**
+     * Tests a non-black background on the vertical arm: the shim row and
+     * the column the narrower second image does not cover both take it.
+     * Input: a(3x2) + c(2x3) vertical, shim 1, background 200 -> 3x6.
+     */
+    #[test]
+    fn join_vertical_background_fills_uncovered() {
+        let bg = [200.0];
+        let out = join_a().join(
+            &join_c(),
+            JoinDirection::Vertical,
+            true,
+            Some(1),
+            Some(&bg),
+            None,
+        );
+        assert_eq!((out.width(), out.height()), (3, 6));
+        assert_eq!(
+            out.data(),
+            &[
+                1, 2, 3, 4, 5, 6, 200, 200, 200, 10, 20, 200, 30, 40, 200, 50, 60, 200
+            ]
+        );
+    }
+
+    /**
+     * Tests that band alignment comes through from `insert`: a one-band
+     * image joined with a three-band one gives three bands, the mono
+     * samples replicated, and a three-value background is used per band.
+     * Also tests that the promotion does not carry the first image's
+     * interpretation onto a band count it no longer describes: `vips join
+     * gbw.v csrgb.v out.v horizontal` reports `5x2 uchar, 3 bands, srgb`,
+     * not `b-w`. The first image is tagged explicitly, the way a decoder
+     * tags one, since an untagged Gray8 already infers `Bw` and would not
+     * discriminate.
+     * Input: Gray8 3x2 tagged `Bw` + Rgb8 2x3 horizontal, expand,
+     * background [1,2,3].
+     */
+    #[test]
+    fn join_band_promotion_mono_and_colour() {
+        let colour = rgb8(
+            2,
+            3,
+            vec![
+                10, 11, 12, 20, 21, 22, 30, 31, 32, 40, 41, 42, 50, 51, 52, 60, 61, 62,
+            ],
+        );
+        let bg = [1.0, 2.0, 3.0];
+        let mono = join_a().copy().interpretation(Interpretation::Bw).build();
+        assert_eq!(mono.interpretation(), Interpretation::Bw);
+        let out = mono.join(
+            &colour,
+            JoinDirection::Horizontal,
+            true,
+            None,
+            Some(&bg),
+            None,
+        );
+        assert_eq!(out.format(), PixelFormat::Rgb8);
+        assert_eq!((out.width(), out.height()), (5, 3));
+        assert_eq!(out.getpoint(0, 0), vec![1.0, 1.0, 1.0]);
+        assert_eq!(out.getpoint(3, 0), vec![10.0, 11.0, 12.0]);
+        assert_eq!(out.getpoint(0, 2), vec![1.0, 2.0, 3.0]);
+        assert_eq!(out.getpoint(4, 2), vec![60.0, 61.0, 62.0]);
+        assert_eq!(out.interpretation(), Interpretation::Srgb);
+    }
+
+    /**
+     * Tests depth promotion: an 8-bit image joined with a 16-bit one
+     * gives 16-bit samples with the numbers unchanged, and keeps the first
+     * image's interpretation. `vips join` of a `b-w` uchar with a `grey16`
+     * reports `b-w`, so a depth-only promotion must NOT trigger the
+     * re-stamp that a band promotion does: the trigger is the band count
+     * changing, nothing else.
+     * Input: Gray8 3x2 tagged `Bw` + Gray16 2x3 horizontal, expand ->
+     * Gray16 5x3 still tagged `Bw`.
+     */
+    #[test]
+    fn join_depth_promotion_8_and_16_bit() {
+        let wide = gray16(2, 3, &[10, 20, 30, 40, 50, 60]);
+        let base = join_a().copy().interpretation(Interpretation::Bw).build();
+        let out = base.join(&wide, JoinDirection::Horizontal, true, None, None, None);
+        assert_eq!(out.format(), PixelFormat::Gray16);
+        assert_eq!((out.width(), out.height()), (5, 3));
+        assert_eq!(out.getpoint(0, 0), vec![1.0]);
+        assert_eq!(out.getpoint(4, 2), vec![60.0]);
+        assert_eq!(out.getpoint(0, 2), vec![0.0]);
+        assert_eq!(out.interpretation(), Interpretation::Bw);
+    }
+
+    /**
+     * Tests that the delegated `insert` band-count error surfaces as the
+     * typed `ConversionError::Extract` wrapper: 2 bands against 3, with
+     * neither being 1, is what libvips `bandalike` rejects too.
+     */
+    #[test]
+    fn try_join_band_count_mismatch() {
+        let two = Raster::zeroed(1, 1, PixelFormat::with_channels(2, 1).unwrap()).unwrap();
+        let three = Raster::zeroed(1, 1, PixelFormat::Rgb8).unwrap();
+        assert!(matches!(
+            two.try_join(&three, JoinDirection::Horizontal, false, None, None, None),
+            Err(ConversionError::Extract(ExtractError::BandCountMismatch {
+                main: 2,
+                sub: 3
+            }))
+        ));
+    }
+
+    /**
+     * Tests that the join carries the first image's metadata, matching
+     * the arrayjoin convention and libvips, which copies in1's fields.
+     */
+    #[test]
+    fn join_meta_from_first() {
+        let a = join_a().copy().xres(11.0).build();
+        let out = a.join(
+            &join_c(),
+            JoinDirection::Horizontal,
+            false,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(out.xres(), 11.0);
+    }
+
+    /**
+     * Tests that a **mixed** float and integer join promotes to float and
+     * keeps both operands' samples.
+     * This replaces `try_join_float_input_is_a_typed_error_not_a_panic`,
+     * which asserted the refusal; issue #945 retires it, because float
+     * input was never exotic here (`space_depth` maps Lab, Lch, OkLab,
+     * OkLCh, XYZ, scRGB and Yxy all to `F32`, so
+     * `im.colourspace(Lab).join(..)` is a float join).
+     * Measured on `/opt/homebrew/bin/vips` 8.18.6:
+     * `vips join rf.v qu.v out.v horizontal` over a 2x2 `float` `[0,1,2,3]`
+     * and a 3x2 `uchar` `[10,20,30,40,50,60]` answers a **5x2 float** image
+     * holding `[0, 1, 10, 20, 30 / 2, 3, 40, 50, 60]`.
+     * Works by driving both operand orders, since the promotion has to be
+     * symmetric and the placement is not.
+     * Input: FloatF32 2x2 on either side of a Gray8 3x2 -> Output: the
+     * measured rows.
+     */
+    #[test]
+    fn join_promotes_a_mixed_float_and_integer_pair_issue_945() {
+        let ramp = float1(2, 2, &[0.0, 1.0, 2.0, 3.0]);
+        let plain = gray8(3, 2, vec![10, 20, 30, 40, 50, 60]);
+        let out = ramp
+            .try_join(&plain, JoinDirection::Horizontal, false, None, None, None)
+            .unwrap();
+        assert_eq!((out.width(), out.height()), (5, 2));
+        assert!(out.format().is_float(), "got {:?}", out.format());
+        assert_eq!(
+            f32s(&out),
+            vec![0.0f32, 1.0, 10.0, 20.0, 30.0, 2.0, 3.0, 40.0, 50.0, 60.0]
+        );
+
+        // The other operand order, which places the integer image first and
+        // still has to answer float.
+        let flipped = plain
+            .try_join(&ramp, JoinDirection::Horizontal, false, None, None, None)
+            .unwrap();
+        assert!(flipped.format().is_float(), "got {:?}", flipped.format());
+        assert_eq!(
+            f32s(&flipped),
+            vec![10.0f32, 20.0, 30.0, 0.0, 1.0, 40.0, 50.0, 60.0, 2.0, 3.0]
+        );
+    }
+
+    /**
+     * Tests the libvips bound on `shim`. `join.c` declares the property as
+     * `VIPS_ARG_INT(class, "shim", 5, ..., 0, 1000000, 0)`, and the binary
+     * refuses `vips join a.v c.v out.v horizontal --shim 1000001` at the
+     * property boundary. Without the check one argument buys a
+     * multi-gigabyte canvas out of two tiny inputs, each raster still under
+     * the per-raster allocation budget so the budget never fires.
+     * Works by asserting the typed error one past the bound, which costs no
+     * allocation at all.
+     * Input: 3x2 + 2x3, shim 1000001.
+     */
+    #[test]
+    fn try_join_shim_above_the_vips_maximum_is_rejected() {
+        assert!(matches!(
+            join_a().try_join(
+                &join_c(),
+                JoinDirection::Horizontal,
+                false,
+                Some(1_000_001),
+                None,
+                None,
+            ),
+            Err(ConversionError::ShimTooLarge {
+                shim: 1_000_001,
+                max: 1_000_000
+            })
+        ));
+        // And well past it, where the old code allocated 6.44 GB.
+        assert!(matches!(
+            join_a().try_join(
+                &join_c(),
+                JoinDirection::Horizontal,
+                false,
+                Some(2_147_483_644),
+                None,
+                None,
+            ),
+            Err(ConversionError::ShimTooLarge { .. })
+        ));
+    }
+
+    /**
+     * Tests that the bound is inclusive, so the check is off by nothing:
+     * `vips join a.v c.v out.v horizontal --shim 1000000` succeeds and
+     * reports `1000005x2 uchar`.
+     * Input: 3x2 + 2x3, shim 1000000 -> 1000005x2.
+     */
+    #[test]
+    fn join_shim_at_the_vips_maximum_is_accepted() {
+        let out = join_a().join(
+            &join_c(),
+            JoinDirection::Horizontal,
+            false,
+            Some(1_000_000),
+            None,
+            None,
+        );
+        assert_eq!((out.width(), out.height()), (1_000_005, 2));
+    }
+
+    /**
+     * Tests the placement range check and what it reports. `join.c` does
+     * its offset arithmetic in `int` and `insert` takes `i32`, so an offset
+     * outside that range cannot be placed. The error names the offset that
+     * did not fit, not a result size: the old message reported
+     * `result size 2147483650x3 exceeds u32::MAX` for a value comfortably
+     * under `u32::MAX`, which was simply false.
+     * Tested on the placement helper rather than through `try_join`,
+     * because reaching it through the real call needs a 3 GB input now that
+     * `shim` is bounded; the helper is what `try_join` calls, unchanged.
+     * Input: 1x1 joined vertically with 3000000000x1 on align high, where
+     * `x = 1 - 3e9` falls below `i32::MIN` even though the canvas would fit
+     * `u32` and the allocation budget.
+     */
+    #[test]
+    fn join_placement_offset_outside_i32_is_typed_and_honest() {
+        assert!(matches!(
+            join_placement(
+                (1, 1),
+                (3_000_000_000, 1),
+                JoinDirection::Vertical,
+                Align::High,
+                0,
+            ),
+            Err(ConversionError::PlacementOffsetOverflow {
+                x: -2_999_999_999,
+                y: 1
+            })
+        ));
+        // Above i32::MAX as well, from a wide first image plus a shim.
+        assert!(matches!(
+            join_placement(
+                (4_000_000_000, 1),
+                (1, 1),
+                JoinDirection::Horizontal,
+                Align::Low,
+                1_000_000,
+            ),
+            Err(ConversionError::PlacementOffsetOverflow {
+                x: 4_001_000_000,
+                y: 0
+            })
+        ));
+        // The message names the offset, and nothing else.
+        let e = join_placement(
+            (1, 1),
+            (3_000_000_000, 1),
+            JoinDirection::Vertical,
+            Align::High,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            e.to_string(),
+            "join placement offset (-2999999999, 1) does not fit i32"
+        );
+    }
+
+    /**
+     * Tests the libvips align nicknames and the typed error for an
+     * unknown one.
+     */
+    #[test]
+    fn align_from_str_nicknames() {
+        assert_eq!("low".parse::<Align>().unwrap(), Align::Low);
+        assert_eq!("centre".parse::<Align>().unwrap(), Align::Centre);
+        assert_eq!("center".parse::<Align>().unwrap(), Align::Centre);
+        assert_eq!("high".parse::<Align>().unwrap(), Align::High);
+        assert!(matches!(
+            "middle".parse::<Align>(),
+            Err(ConversionError::UnknownAlign { .. })
+        ));
     }
 
     // ------------------------------------------------------------------
@@ -3191,5 +5025,705 @@ mod tests {
             Raster::try_switch(&many),
             Err(ConversionError::TooManyConditions { .. })
         ));
+    }
+
+    /**
+     * Tests that Interpretation::for_format reads the pixel layout and not
+     * the spelling of it. PixelFormat's tuple variants are public, so
+     * FloatF32(4) and RgbaF32 name one layout; for_format used to call the
+     * first Multiband and the second Srgb, which is the documented answer
+     * for four-band float (issue #531).
+     * Works by walking every layout that has both spellings and asserting
+     * the two land on the same interpretation.
+     * Input: FloatF32(4) vs RgbaF32 -> Srgb for both; Multi8(1) vs Gray8 ->
+     * Bw for both; Multi16(4) vs Rgba16 -> Rgb16 for both.
+     */
+    #[test]
+    fn for_format_reads_the_layout_not_the_spelling() {
+        let nz = |n: u16| core::num::NonZeroU16::new(n).expect("the table holds no zeroes");
+        for (alias, named) in [
+            (PixelFormat::Multi8(nz(1)), PixelFormat::Gray8),
+            (PixelFormat::Multi8(nz(3)), PixelFormat::Rgb8),
+            (PixelFormat::Multi8(nz(4)), PixelFormat::Rgba8),
+            (PixelFormat::Multi16(nz(1)), PixelFormat::Gray16),
+            (PixelFormat::Multi16(nz(3)), PixelFormat::Rgb16),
+            (PixelFormat::Multi16(nz(4)), PixelFormat::Rgba16),
+            (PixelFormat::FloatF32(nz(4)), PixelFormat::RgbaF32),
+        ] {
+            assert_eq!(
+                Interpretation::for_format(alias),
+                Interpretation::for_format(named),
+                "for_format({alias:?}) must match for_format({named:?})"
+            );
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // the unsigned 32-bit carrier (issue #517)
+    // ------------------------------------------------------------------
+
+    /**
+     * Tests that `cast` reaches the unsigned 32-bit carrier in both
+     * directions and keeps a value no 16-bit carrier can hold, which is the
+     * whole point of adding it (issues #517, #532).
+     * Works by casting a `Gray16` raster up to `Uint32` and back, and by
+     * narrowing a `uint` sample of 70000 to both smaller carriers. The
+     * narrowing pair is pinned to `/opt/homebrew/bin/vips` 8.18.6: `vips
+     * cast` on a `uint` raster holding 70000 answers `uchar` 255 and
+     * `ushort` 65535. 90000 is the count a 300x300 image produces, the
+     * number issue #532 opens with.
+     * Input: u16 40000 -> uint 40000 -> u16 40000; uint 90000 -> u16
+     * 65535 and u8 255.
+     */
+    #[test]
+    fn cast_carries_the_uint_carrier_both_ways() {
+        let u32fmt = PixelFormat::Uint32(NonZeroU16::new(1).unwrap());
+        let up = gray16(1, 1, &[40000]).try_cast(u32fmt).unwrap();
+        assert_eq!(up.format(), u32fmt);
+        assert_eq!(u32_at(&up, 0), 40000);
+        let back = up.try_cast(PixelFormat::Gray16).unwrap();
+        assert_eq!(back.format(), PixelFormat::Gray16);
+        assert_eq!(u16_at(&back, 0), 40000);
+
+        // The value that does not survive a 16-bit carrier, and the one
+        // that does not survive an 8-bit one. Both pinned to vips 8.18.6.
+        let big = uint32(1, 1, &[90_000]);
+        assert_eq!(u32_at(&big, 0), 90_000);
+        assert_eq!(
+            u16_at(&big.try_cast(PixelFormat::Gray16).unwrap(), 0),
+            65535
+        );
+        assert_eq!(big.try_cast(PixelFormat::Gray8).unwrap().data()[0], 255);
+
+        // Widening from 8 bits keeps the number rather than rescaling it,
+        // the same rule the 8-to-16 cast follows.
+        let from8 = gray8(1, 1, vec![200]).try_cast(u32fmt).unwrap();
+        assert_eq!(u32_at(&from8, 0), 200);
+
+        // And the whole `u32` range round-trips through the carrier.
+        let extreme = uint32(1, 1, &[u32::MAX]);
+        assert_eq!(u32_at(&extreme.try_cast(u32fmt).unwrap(), 0), u32::MAX);
+    }
+
+    /**
+     * Tests that `flatten` scales the alpha by the interpretation's
+     * `max_alpha` rather than by the byte width (issue #859), and that a
+     * float raster is blended as numbers rather than as the bit patterns
+     * the storage reader handed back.
+     * Works by flattening the same alpha of 128 over three carriers and
+     * comparing against `/opt/homebrew/bin/vips` 8.18.6, plus one
+     * background case, since the background is scaled by the same
+     * denominator and so moves with it. The `uchar` row is the control
+     * where the two rules agree, so a change that simply moved everything
+     * would fail there.
+     * Input/Output, all measured: uchar (200, 128) -> 100; ushort b-w
+     * (65535, 128) -> 32896; float (200.5, 128) -> 100.643; scRGB float
+     * (0.5, 0.5) -> 0.25; uchar (200, 128) with background 10 -> 105;
+     * uint (90000, 128) -> 45176; uchar (201, 128) -> 100 and
+     * (51, 128) -> 25, the truncation.
+     */
+    #[test]
+    fn flatten_scales_alpha_by_the_interpretation_not_the_width() {
+        let n = |v: u16| NonZeroU16::new(v).unwrap();
+        // uchar, 2 bands: the row where the two rules agree, so it is the
+        // control that the change did not simply move everything.
+        let u8two = Raster::new(1, 1, PixelFormat::Multi8(n(2)), vec![200, 128]).unwrap();
+        assert_eq!(u8two.try_flatten(None).unwrap().data()[0], 100);
+        assert_eq!(
+            u8two.try_flatten(Some(&[10.0])).unwrap().data()[0],
+            105,
+            "the background is scaled by the same denominator"
+        );
+
+        // ushort tagged b-w: `65535 * 128 / 255`, not `65535 * 128 / 65535`.
+        let u16two = Raster::new(
+            1,
+            1,
+            PixelFormat::Multi16(n(2)),
+            [65535u16, 128]
+                .iter()
+                .flat_map(|v| v.to_ne_bytes())
+                .collect(),
+        )
+        .unwrap();
+        assert_eq!(u16_at(&u16two.try_flatten(None).unwrap(), 0), 32896);
+
+        // The uint carrier, where the width rule answered 0.
+        let utwo = Raster::new(
+            1,
+            1,
+            PixelFormat::Uint32(n(2)),
+            [90_000u32, 128]
+                .iter()
+                .flat_map(|v| v.to_ne_bytes())
+                .collect(),
+        )
+        .unwrap();
+        let flat = utwo.try_flatten(None).unwrap();
+        assert_eq!(flat.format(), PixelFormat::Uint32(n(1)));
+        assert_eq!(u32_at(&flat, 0), 45176);
+
+        // A float raster, which used to have its `f32` bits read as a
+        // `u32` and blended as an integer.
+        let ftwo = Raster::new(
+            1,
+            1,
+            PixelFormat::FloatF32(n(2)),
+            [200.5f32, 128.0]
+                .iter()
+                .flat_map(|v| v.to_ne_bytes())
+                .collect(),
+        )
+        .unwrap();
+        let ff = ftwo.try_flatten(None).unwrap();
+        assert_eq!(ff.format(), PixelFormat::FloatF32(n(1)));
+        let got = f32::from_ne_bytes([ff.data()[0], ff.data()[1], ff.data()[2], ff.data()[3]]);
+        assert!(
+            (f64::from(got) - 100.643_135).abs() < 1e-4,
+            "float flatten gave {got}, vips gives 100.643135"
+        );
+
+        // The interpretation is what is read, not the width, so a tag with
+        // its own ceiling moves the answer on the same bytes: `scRGB` has
+        // `max_alpha` 1, and `vips flatten` on a two-band scRGB raster
+        // holding (0.5, 0.5) answers **0.25**, which is `0.5 * 0.5 / 1`.
+        let mut sc = Raster::new(
+            1,
+            1,
+            PixelFormat::FloatF32(n(2)),
+            [0.5f32, 0.5].iter().flat_map(|v| v.to_ne_bytes()).collect(),
+        )
+        .unwrap();
+        sc.set_interpretation(Some(Interpretation::ScRgb));
+        let sf = sc.try_flatten(None).unwrap();
+        let d = sf.data();
+        assert_eq!(f32::from_ne_bytes([d[0], d[1], d[2], d[3]]), 0.25);
+
+        // And the integer store truncates rather than rounding, which is
+        // the `vips_cast` on the way out. Measured with alpha 128: band 0
+        // of 201 gives `201 * 128 / 255` = 100.894, and `vips flatten`
+        // answers **100**. Round-half-up answers 101.
+        let odd = Raster::new(1, 1, PixelFormat::Multi8(n(2)), vec![201, 128]).unwrap();
+        assert_eq!(odd.try_flatten(None).unwrap().data()[0], 100);
+        let odd = Raster::new(1, 1, PixelFormat::Multi8(n(2)), vec![51, 128]).unwrap();
+        assert_eq!(odd.try_flatten(None).unwrap().data()[0], 25);
+    }
+
+    /**
+     * Tests that `addalpha` inks from the interpretation, which is where
+     * vips takes it from, rather than from the byte width (issue #861).
+     * Works by adding alpha across the tags, with the `Gray16` row as the
+     * control that the 16-bit answer did not move: it is tagged `Grey16`
+     * and so still inks 65535, while a 16-bit raster tagged `Multiband`
+     * inks 255. All four pinned to vips 8.18.6, where a `ushort` raster
+     * tagged `b-w` gets alpha 255 and one tagged `grey16` gets 65535.
+     * Input/Output: Gray8 -> 255, Gray16 -> 65535, Multi16(2) -> 255,
+     * Uint32(1) -> 255.
+     */
+    #[test]
+    fn addalpha_inks_from_the_interpretation() {
+        let n = |v: u16| NonZeroU16::new(v).unwrap();
+        let a8 = gray8(1, 1, vec![200]).try_addalpha().unwrap();
+        assert_eq!(a8.data()[1], 255);
+
+        let a16 = gray16(1, 1, &[40000]).try_addalpha().unwrap();
+        assert_eq!(
+            u16_at(&a16, 1),
+            65535,
+            "a Grey16-tagged raster still inks 65535"
+        );
+
+        let multi = Raster::new(
+            1,
+            1,
+            PixelFormat::Multi16(n(2)),
+            [40000u16, 40000]
+                .iter()
+                .flat_map(|v| v.to_ne_bytes())
+                .collect(),
+        )
+        .unwrap();
+        assert_eq!(
+            u16_at(&multi.try_addalpha().unwrap(), 2),
+            255,
+            "a Multiband-tagged 16-bit raster inks 255, as vips does"
+        );
+
+        let au = uint32(1, 1, &[90_000]).try_addalpha().unwrap();
+        assert_eq!(au.format(), PixelFormat::Uint32(n(2)));
+        assert_eq!(u32_at(&au, 1), 255);
+
+        // The float carrier would ink 255 too, and there is no assertion
+        // for it here because `bandjoin_const` refuses a float raster in
+        // `crate::bands` before the ink is used, so the row is not
+        // reachable to measure.
+    }
+
+    /**
+     * Tests that `msb` refuses a float raster the way vips does, and reads
+     * the top byte of the uint carrier correctly (issue #860).
+     * Works by asserting the typed refusal for float and the measured byte
+     * for `uint`, with an 8-bit and a 16-bit control so the refusal cannot
+     * be passing because `msb` refuses everything.
+     * Input: float -> Err(FloatUnsupported); uint 90000 (0x00015F90) -> 0,
+     * which is what `vips msb` gives; Gray16 0xABCD -> 0xAB.
+     */
+    #[test]
+    fn msb_refuses_float_and_reads_the_uint_top_byte() {
+        let n = |v: u16| NonZeroU16::new(v).unwrap();
+        let f = Raster::new(
+            1,
+            1,
+            PixelFormat::FloatF32(n(1)),
+            1.5f32.to_ne_bytes().to_vec(),
+        )
+        .unwrap();
+        assert!(matches!(
+            f.try_msb(None),
+            Err(ConversionError::FloatUnsupported { op: "msb" })
+        ));
+        // Controls: the integer carriers still work, so the refusal above
+        // is about the kind and not about `msb` being broken.
+        assert_eq!(uint32(1, 1, &[90_000]).try_msb(None).unwrap().data()[0], 0);
+        assert_eq!(
+            uint32(1, 1, &[0xAB00_0000]).try_msb(None).unwrap().data()[0],
+            0xAB
+        );
+        assert_eq!(
+            gray16(1, 1, &[0xABCD]).try_msb(None).unwrap().data()[0],
+            0xAB
+        );
+        assert_eq!(gray8(1, 1, vec![200]).try_msb(None).unwrap().data()[0], 200);
+    }
+
+    /**
+     * Tests that `gamma` carries the uint carrier through the same curve
+     * rather than building a 2^32-entry lookup table, and that the answer
+     * is the one vips gives.
+     * Works by running the default exponent over a `uint` raster and
+     * asserting 0, which is what `vips gamma` answers for *every* `uint`
+     * input on 8.18.6 because `mx / pow(mx, 2.4)` underflows the f32
+     * coefficient at mx = 4294967295. The 8-bit control is the positive
+     * one: the same call on 100 gives 26, so a blanket zero would fail.
+     * Input: uint 100 and 90000 -> 0; uchar 100 -> 26.
+     */
+    #[test]
+    fn gamma_on_the_uint_carrier_reproduces_the_vips_underflow() {
+        assert_eq!(u32_at(&uint32(1, 1, &[100]).try_gamma(None).unwrap(), 0), 0);
+        assert_eq!(
+            u32_at(&uint32(1, 1, &[90_000]).try_gamma(None).unwrap(), 0),
+            0
+        );
+        // Positive control, measured the same way: `vips gamma` on a
+        // `uchar` raster holding 100 answers 26.
+        assert_eq!(
+            gray8(1, 1, vec![100]).try_gamma(None).unwrap().data()[0],
+            26
+        );
+    }
+
+    /**
+     * Tests that `falsecolour` clamps a uint sample into the 256-entry PET
+     * table instead of indexing past it.
+     * Works by mapping a `uint` sample far above 255 and comparing against
+     * the measured vips answer, with an in-range control so the clamp is
+     * not the only thing exercised.
+     * Input: uint 90000 -> (174, 0, 0), which is `vips falsecolour`'s
+     * answer and `FALSECOLOUR_PET[255]`; uint 0 -> the table's first row.
+     */
+    #[test]
+    fn falsecolour_clamps_the_uint_carrier_into_the_pet_table() {
+        let hot = uint32(1, 1, &[90_000]).try_falsecolour().unwrap();
+        assert_eq!(hot.format(), PixelFormat::Rgb8);
+        assert_eq!(&hot.data()[0..3], &[174, 0, 0]);
+        let cold = uint32(1, 1, &[0]).try_falsecolour().unwrap();
+        assert_eq!(&cold.data()[0..3], &FALSECOLOUR_PET[0]);
+    }
+
+    /**
+     * Tests that the two-input ops pick their output carrier through
+     * `SampleKind::promote` rather than through the wider byte width,
+     * which answers the float carrier at four bytes (issues #517, #607).
+     * Works by joining and selecting across mixed carriers and asserting
+     * the output format, with the mixed 8/16 pair as the control that the
+     * existing promotion is unchanged.
+     * Input: arrayjoin(uint, uint) -> Uint32; arrayjoin(u8, uint) ->
+     * Uint32; ifthenelse(u8 branches with a uint condition) -> Rgb8-ish
+     * u8; ifthenelse(u8, uint) -> Uint32.
+     */
+    #[test]
+    fn two_input_ops_promote_through_the_kind() {
+        let n = |v: u16| NonZeroU16::new(v).unwrap();
+        let u = uint32(1, 1, &[90_000]);
+        let g8 = gray8(1, 1, vec![200]);
+        let g16 = gray16(1, 1, &[40000]);
+
+        let joined = Raster::try_arrayjoin(&[&u, &u], None, None).unwrap();
+        assert_eq!(joined.format(), PixelFormat::Uint32(n(1)));
+        let mixed = Raster::try_arrayjoin(&[&g8, &u], None, None).unwrap();
+        assert_eq!(
+            mixed.format(),
+            PixelFormat::Uint32(n(1)),
+            "the width rule would have answered the float carrier here"
+        );
+        // Control: the promotion that existed before is untouched.
+        let old = Raster::try_arrayjoin(&[&g8, &g16], None, None).unwrap();
+        assert_eq!(old.format(), PixelFormat::Gray16);
+
+        let cond = gray8(1, 1, vec![1]);
+        let sel = cond.try_ifthenelse(&g8, &u).unwrap();
+        assert_eq!(sel.format(), PixelFormat::Uint32(n(1)));
+        let sel_old = cond.try_ifthenelse(&g8, &g16).unwrap();
+        assert_eq!(sel_old.format(), PixelFormat::Gray16);
+    }
+
+    /**
+     * Tests that the ops in this module which cannot read a sample kind
+     * refuse it as a typed error instead of panicking out of a `Result`,
+     * the shape issue #694 landed.
+     * Works by handing a float raster to each guarded op, and by asserting
+     * that the same ops accept the uint carrier, so the guard is about the
+     * kind and not a blanket refusal of anything unusual. `arrayjoin` left
+     * the guarded set in issue #945 and stays here as the control that the
+     * two remaining refusals are individual rather than module-wide.
+     * Input: float -> Err(FloatUnsupported { op }); uint -> Ok.
+     */
+    #[test]
+    fn the_unsigned_only_ops_refuse_a_kind_they_cannot_read() {
+        let n = |v: u16| NonZeroU16::new(v).unwrap();
+        let f = Raster::new(
+            1,
+            1,
+            PixelFormat::FloatF32(n(1)),
+            1.5f32.to_ne_bytes().to_vec(),
+        )
+        .unwrap();
+        assert!(matches!(
+            f.try_gamma(None),
+            Err(ConversionError::FloatUnsupported { op: "gamma" })
+        ));
+        assert!(matches!(
+            f.try_falsecolour(),
+            Err(ConversionError::FloatUnsupported { op: "falsecolour" })
+        ));
+        // Positive control: the uint carrier goes through both of them, so
+        // these are refusals of a kind and not of a stride.
+        let u = uint32(1, 1, &[90_000]);
+        assert!(u.try_gamma(None).is_ok());
+        assert!(u.try_falsecolour().is_ok());
+        // And `arrayjoin` is no longer in the refusing set at all: #945
+        // carried the float raster through it, so it stands here as the
+        // control that the two above are individual refusals rather than a
+        // module-wide one.
+        assert!(Raster::try_arrayjoin(&[&f, &f], None, None).is_ok());
+        assert!(Raster::try_arrayjoin(&[&u, &u], None, None).is_ok());
+    }
+
+    /**
+     * Tests that this module's sample reader and writer round-trip every
+     * sample kind at its own stride and its own signedness, including the
+     * `F32` arm no op here can reach because they all still refuse a float
+     * raster.
+     * Works by sweeping [`ALL_KINDS`] rather than a hand-written list, and
+     * by writing at sample index 1 of a two-sample buffer so a wrong
+     * stride overwrites index 0 and is caught by the untouched-neighbour
+     * assertion as well as by the value.
+     * Input: each kind's `range()` endpoints and 0 -> Output: the same
+     * numbers back, index 0 still zero.
+     */
+    #[test]
+    fn read_flat_and_write_flat_round_trip_every_kind_at_its_own_stride() {
+        for kind in ALL_KINDS {
+            let bytes = kind.bytes();
+            let cases: [i64; 3] = match kind.range() {
+                Some((lo, hi)) => [lo, 0, hi],
+                None => [-128, 0, 127],
+            };
+            for v in cases {
+                let mut buf = vec![0u8; bytes * 2];
+                write_flat(&mut buf, kind, 1, v);
+                assert_eq!(
+                    read_flat(&buf, kind, 1),
+                    v,
+                    "{kind:?} did not round-trip {v}"
+                );
+                assert!(
+                    buf[..bytes].iter().all(|&b| b == 0),
+                    "{kind:?} wrote outside sample 1, so its stride is wrong"
+                );
+            }
+        }
+        // The width collisions, stated directly: `-1` is the same byte in
+        // both one-byte kinds and a different number, and four bytes is a
+        // three-way tie.
+        let mut b8 = vec![0u8; 1];
+        write_flat(&mut b8, SampleKind::I8, 0, -1);
+        assert_eq!(read_flat(&b8, SampleKind::U8, 0), 255);
+        assert_eq!(read_flat(&b8, SampleKind::I8, 0), -1);
+        let mut b32 = vec![0u8; 4];
+        write_flat(&mut b32, SampleKind::I32, 0, -1);
+        assert_eq!(read_flat(&b32, SampleKind::U32, 0), 4_294_967_295);
+        assert_eq!(read_flat(&b32, SampleKind::I32, 0), -1);
+    }
+
+    /**
+     * Tests that `msb` offsets a signed sample by half the carrier's range
+     * before the shift, which is what keeps its output the unsigned
+     * `0..=255` byte an `msb` result is.
+     * `VIPS_MSB_SIGNED` computes `(v + 2^(bits-1)) >> (bits - 8)`, and on
+     * the stored word that offset is a flip of the sign bit. Measured on
+     * `/opt/homebrew/bin/vips` 8.18.6 with `[-1, 0, 1, 127]`: `char`
+     * answers `[127, 128, 129, 255]`, `short` and `int` both answer
+     * `[127, 128, 128, 128]`, and every one of them comes back UCHAR.
+     * Works by asserting all three carriers, with a `uchar` input as the
+     * control that the unsigned path is the identity and so the offset is
+     * not being applied to everything.
+     * Input: `[-1, 0, 1, 127]` at each signed carrier -> Output: the
+     * measured bytes.
+     */
+    #[test]
+    fn msb_offsets_a_signed_sample_by_half_the_carrier_range() {
+        let c = int8(4, 1, &[-1, 0, 1, 127]).try_msb(None).unwrap();
+        assert_eq!(c.format(), PixelFormat::Gray8);
+        assert_eq!(c.data(), &[127, 128, 129, 255]);
+
+        let s = int16(4, 1, &[-1, 0, 1, 127]).try_msb(None).unwrap();
+        assert_eq!(s.format(), PixelFormat::Gray8);
+        assert_eq!(s.data(), &[127, 128, 128, 128]);
+
+        let i = int32(4, 1, &[-1, 0, 1, 127]).try_msb(None).unwrap();
+        assert_eq!(i.format(), PixelFormat::Gray8);
+        assert_eq!(i.data(), &[127, 128, 128, 128]);
+
+        // Control: on an unsigned one-byte carrier `msb` is the identity,
+        // so the sign-bit flip is not being applied unconditionally.
+        let u = gray8(4, 1, vec![0, 1, 128, 255]).try_msb(None).unwrap();
+        assert_eq!(u.data(), &[0, 1, 128, 255]);
+    }
+
+    /**
+     * Tests that `gamma` uses the carrier's **positive** ceiling as `mx`
+     * and answers 0 for every negative sample, and that the value-indexed
+     * LUT is keyed from the range floor rather than from zero.
+     * The LUT is the part that would fail loudly: a `0..=hi` table indexed
+     * by a raw `char` sample reads far past its end. Measured on
+     * `/opt/homebrew/bin/vips` 8.18.6, `vips gamma` on a `char` raster
+     * holding `[-128, -100, -1, 0, 1, 50, 100, 127]` answers
+     * `[0, 0, 0, 0, 0, 13, 71, 127]`, and on `short` and `int` the whole
+     * row is 0 because `mx / pow(mx, 2.4)` underflows the `f32`
+     * coefficient at those ceilings, the same degeneracy the `uint`
+     * carrier already reproduces.
+     * Works by asserting the measured `char` row, which contains both a
+     * saturating end (127 -> 127) and two interior values, plus the two
+     * wider carriers, plus a `Gray8` control that the unsigned curve is
+     * untouched.
+     * Input: the eight `char` samples above -> Output: the measured row.
+     */
+    #[test]
+    fn gamma_uses_the_positive_ceiling_and_zeroes_a_negative_sample() {
+        let g = int8(8, 1, &[-128, -100, -1, 0, 1, 50, 100, 127])
+            .try_gamma(None)
+            .unwrap();
+        assert_eq!(g.format(), int8(1, 1, &[0]).format());
+        assert_eq!(i8s(&g), vec![0, 0, 0, 0, 0, 13, 71, 127]);
+
+        let s = int16(4, 1, &[-1, 0, 1, 127]).try_gamma(None).unwrap();
+        assert_eq!(s.data(), vec![0u8; 8]);
+        let i = int32(4, 1, &[-1, 0, 1, 127]).try_gamma(None).unwrap();
+        assert_eq!(i.data(), vec![0u8; 16]);
+
+        // Control: the unsigned byte curve is what it always was, so the
+        // range-keyed LUT did not move the answers it already had.
+        let u = gray8(3, 1, vec![0, 100, 255]).try_gamma(None).unwrap();
+        assert_eq!(u.data()[0], 0);
+        assert_eq!(u.data()[2], 255);
+        assert!(u.data()[1] > 0 && u.data()[1] < 100);
+    }
+
+    /**
+     * Tests that `falsecolour` clips a negative sample into the bottom LUT
+     * entry rather than indexing with it, and stamps sRGB.
+     * `vips_falsecolour` casts its input to uchar before the lookup and
+     * `vips_cast` clips at both ends. Measured on
+     * `/opt/homebrew/bin/vips` 8.18.6, a `char` raster of
+     * `[-100, -1, 0, 100]` comes back 3-band UCHAR srgb with -100, -1 and
+     * 0 all mapping to **(12, 0, 25)** and 100 to **(0, 154, 184)**.
+     * Works by asserting those two entries, where the second is the
+     * control that the clip is a clip and not a blanket zero: an
+     * implementation that clamped everything to the bottom would pass the
+     * first three cells.
+     * Input: `char` `[-100, -1, 0, 100]` -> Output: the measured pixels.
+     */
+    #[test]
+    fn falsecolour_clips_a_negative_sample_to_the_bottom_entry() {
+        let f = int8(4, 1, &[-100, -1, 0, 100]).try_falsecolour().unwrap();
+        assert_eq!(f.format(), PixelFormat::Rgb8);
+        assert_eq!(f.interpretation(), Interpretation::Srgb);
+        assert_eq!(&f.data()[0..3], &[12, 0, 25]);
+        assert_eq!(&f.data()[3..6], &[12, 0, 25]);
+        assert_eq!(&f.data()[6..9], &[12, 0, 25]);
+        assert_eq!(&f.data()[9..12], &[0, 154, 184]);
+    }
+
+    /**
+     * Tests that the copying ops in this module carry the signed carriers'
+     * samples unchanged, and that the one refusal left is float.
+     * Measured on `/opt/homebrew/bin/vips` 8.18.6: `vips join` and
+     * `vips arrayjoin` on two `char` rasters both answer CHAR with every
+     * sample copied.
+     * Works by joining a `char` column with a second one and reading the
+     * samples back, with a float raster as the control that the copy is
+     * total over the carriers rather than passing because the signed rows
+     * happen to be the only ones tried.
+     * Input: two `char` columns -> Output: the samples side by side.
+     */
+    #[test]
+    fn join_and_arrayjoin_carry_the_signed_carriers() {
+        let a = int8(1, 4, &[-100, -1, 0, 100]);
+        let b = int8(1, 4, &[-101, 2, -1, 101]);
+        let j = a
+            .try_join(&b, JoinDirection::Horizontal, false, None, None, None)
+            .unwrap();
+        assert_eq!(i8s(&j), vec![-100, -101, -1, 2, 0, -1, 100, 101]);
+        let g = Raster::try_arrayjoin(&[&a, &b], None, None).unwrap();
+        assert_eq!(i8s(&g), vec![-100, -101, -1, 2, 0, -1, 100, 101]);
+
+        // Control: the float carrier goes through too, since #945, so the
+        // signed rows above are not passing because everything is accepted.
+        let f = float1(1, 1, &[1.5]);
+        let fj = Raster::try_arrayjoin(&[&f, &f], None, None).unwrap();
+        assert_eq!(f32s(&fj), vec![1.5, 1.5]);
+    }
+
+    /// A one-band `FloatF32` raster from `f32` sample values.
+    fn float1(w: u32, h: u32, vals: &[f32]) -> Raster {
+        let data: Vec<u8> = vals.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        let fmt = PixelFormat::FloatF32(NonZeroU16::new(1).unwrap());
+        Raster::new(w, h, fmt, data).unwrap()
+    }
+
+    /// Every sample of a float raster, read back as `f32`.
+    fn f32s(r: &Raster) -> Vec<f32> {
+        r.data()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| f32::from_ne_bytes(*c))
+            .collect()
+    }
+
+    /**
+     * Tests that `join` and `arrayjoin` carry a float raster and answer
+     * with the samples vips produces, rather than refusing it.
+     * Both refusals were posture 1, a parity regression, and the same
+     * shape issue #909 closed for the signed carriers: the sample copy
+     * could not hold the value, so the op refused, and the refusal
+     * outlived the reason for it.
+     * Measured on `/opt/homebrew/bin/vips` 8.18.6 over two 3x1 `float`
+     * rasters `[1.5, -0.25, 3.75]` and `[10.5, -2.75, 0.125]`:
+     * `vips join a.v b.v out.v horizontal` answers **FLOAT** and the six
+     * samples side by side, `vips arrayjoin "a.v b.v" out.v --across 2`
+     * the same row, and `--across 1` the same six as two rows of three.
+     * Works by driving both ops on the pair and reading the samples back,
+     * with a `char` pair beside them as the control that the integer
+     * dialect is untouched, and with the fractional samples as the cells
+     * a truncating copy cannot pass.
+     * Input: two `FloatF32(1)` rows -> Output: the measured grids.
+     */
+    #[test]
+    fn join_and_arrayjoin_carry_a_float_raster_issue_945() {
+        let a = float1(3, 1, &[1.5, -0.25, 3.75]);
+        let b = float1(3, 1, &[10.5, -2.75, 0.125]);
+        let want = vec![1.5f32, -0.25, 3.75, 10.5, -2.75, 0.125];
+
+        let j = a
+            .try_join(&b, JoinDirection::Horizontal, false, None, None, None)
+            .unwrap();
+        assert_eq!(
+            j.format(),
+            PixelFormat::FloatF32(NonZeroU16::new(1).unwrap())
+        );
+        assert_eq!(j.width(), 6);
+        assert_eq!(f32s(&j), want);
+
+        let across2 = Raster::try_arrayjoin(&[&a, &b], Some(2), None).unwrap();
+        assert_eq!(across2.width(), 6);
+        assert_eq!(across2.height(), 1);
+        assert_eq!(f32s(&across2), want);
+
+        let across1 = Raster::try_arrayjoin(&[&a, &b], Some(1), None).unwrap();
+        assert_eq!((across1.width(), across1.height()), (3, 2));
+        assert_eq!(f32s(&across1), want);
+
+        // Control: the integer dialect is untouched.
+        let ia = int8(3, 1, &[-100, -1, 100]);
+        let ib = int8(3, 1, &[-101, 2, 101]);
+        let ij = ia
+            .try_join(&ib, JoinDirection::Horizontal, false, None, None, None)
+            .unwrap();
+        assert_eq!(i8s(&ij), vec![-100, -1, 100, -101, 2, 101]);
+    }
+
+    /**
+     * Tests that `ifthenelse` and `switch` read their condition
+     * **numerically** and cast it into `uchar` before testing it, so a
+     * negative sample is false and a fraction below one is false.
+     * Both read the storage word instead, which is a different question
+     * and gave two different wrong answers. Measured on
+     * `/opt/homebrew/bin/vips` 8.18.6 with the branches 10 and 20:
+     *
+     * | condition | `vips switch` | `vips ifthenelse` |
+     * |---|---|---|
+     * | `char` `[-50, 0, 1, -1, 127]` | `[1, 1, 0, 1, 0]` | `[20, 20, 10, 20, 10]` |
+     * | `float` `[0, 0.5, 1, -0.5, 300.7]` | `[1, 1, 0, 1, 0]` | `[20, 20, 10, 20, 10]` |
+     *
+     * A one-condition `switch` answers 0 where it matched and 1 where
+     * nothing did, so a 1 is a false condition and the two rows agree.
+     * Works by driving both ops on both carriers, which is what separates
+     * the two bugs: the storage read made `char` -50 true because its byte
+     * is 206, and `f32` 0.5 true because its bit pattern is 0x3F000000, so
+     * a fixture with only one of the two carriers would have looked like a
+     * signedness bug or like a float bug rather than both.
+     * The `127` and `300.7` cells are the positive control that the clip
+     * is a clip: an implementation answering false for everything passes
+     * the first four cells of every row.
+     * Input: the conditions above -> Output: the measured rows.
+     */
+    #[test]
+    fn a_condition_is_read_numerically_and_cast_into_uchar() {
+        let then = gray8(5, 1, vec![10; 5]);
+        let els = gray8(5, 1, vec![20; 5]);
+
+        let c8 = int8(5, 1, &[-50, 0, 1, -1, 127]);
+        assert_eq!(
+            c8.try_ifthenelse(&then, &els).unwrap().data(),
+            &[20, 20, 10, 20, 10]
+        );
+        assert_eq!(Raster::try_switch(&[&c8]).unwrap().data(), &[1, 1, 0, 1, 0]);
+
+        let bytes: Vec<u8> = [0.0f32, 0.5, 1.0, -0.5, 300.7]
+            .iter()
+            .flat_map(|v| v.to_ne_bytes())
+            .collect();
+        let cf = Raster::new(
+            5,
+            1,
+            PixelFormat::FloatF32(NonZeroU16::new(1).unwrap()),
+            bytes,
+        )
+        .unwrap();
+        assert_eq!(
+            cf.try_ifthenelse(&then, &els).unwrap().data(),
+            &[20, 20, 10, 20, 10]
+        );
+        assert_eq!(Raster::try_switch(&[&cf]).unwrap().data(), &[1, 1, 0, 1, 0]);
+
+        // Control: the unsigned carriers are untouched, including the
+        // 32-bit one whose samples are far above the `uchar` ceiling and
+        // must still be true rather than clipped to zero.
+        let u8c = gray8(3, 1, vec![0, 1, 255]);
+        assert_eq!(Raster::try_switch(&[&u8c]).unwrap().data(), &[1, 0, 0]);
+        let u32c = uint32(2, 1, &[0, 90_000]);
+        assert_eq!(Raster::try_switch(&[&u32c]).unwrap().data(), &[1, 0]);
     }
 }

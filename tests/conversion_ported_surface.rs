@@ -15,7 +15,7 @@
 //! operation from a later batch, the setup is reproduced with direct
 //! `Raster` construction and the conversion expressions are kept literal.
 
-use libviprs::{Angle, Interpretation, PixelFormat, Raster};
+use libviprs::{Align, Angle, ConversionError, Interpretation, JoinDirection, PixelFormat, Raster};
 
 /// The ported `make_test_mono`: a 100x100 Gray8 band-reject ring image.
 fn make_test_mono() -> Raster {
@@ -305,6 +305,25 @@ fn ported_arrayjoin_call_sites() {
     let im = Raster::arrayjoin(&[&mono, &colour], Some(1), None);
     assert_eq!(im.width(), colour.width());
     assert_eq!(im.height(), mono.height() + colour.height());
+
+    // The guard `join` carries too, matchable from outside the crate.
+    assert!(matches!(
+        Raster::try_arrayjoin(&[&mono, &colour], None, Some(1_000_001)),
+        Err(ConversionError::ShimTooLarge {
+            shim: 1_000_001,
+            max: 1_000_000
+        })
+    ));
+    // A float cell used to be refused here, which was a parity regression:
+    // `vips arrayjoin` runs on a `float` raster and answers FLOAT. Issue
+    // #945 carries it, so the grid promotes and the float samples arrive
+    // unchanged at the origin.
+    let ramp = Raster::grey(4, 4, false);
+    assert!(ramp.format().is_float());
+    let mixed = Raster::try_arrayjoin(&[&ramp, &mono], None, None).unwrap();
+    assert!(mixed.format().is_float(), "got {:?}", mixed.format());
+    assert_eq!(mixed.getpoint(0, 0), ramp.getpoint(0, 0));
+    assert_eq!(mixed.getpoint(3, 0), ramp.getpoint(3, 0));
 }
 
 /// The ported `test_grey` body (`ported_create.rs`), both halves: the
@@ -366,4 +385,107 @@ fn ported_switch_call_sites() {
     let never_b = x.equal_const(2000.0);
     let index = Raster::switch(&[&never_a, &never_b]);
     assert!((index.avg() - 2.0).abs() < 0.001);
+}
+
+/// The `join` call surface: both directions, every [`Align`] variant, the
+/// `expand` flag, the `Option` shim / background / align arguments, the
+/// nickname `FromStr`, and the fallible twin. The measured vips 8.18.4
+/// sizes for the 3x2 / 2x3 oracle pair are pinned here too.
+#[test]
+fn ported_join_call_sites() {
+    let a = Raster::new(3, 2, PixelFormat::Gray8, vec![1, 2, 3, 4, 5, 6]).unwrap();
+    let c = Raster::new(2, 3, PixelFormat::Gray8, vec![10, 20, 30, 40, 50, 60]).unwrap();
+
+    let im = a.join(&c, JoinDirection::Horizontal, false, None, None, None);
+    assert_eq!((im.width(), im.height()), (5, 2));
+
+    let im = a.join(&c, JoinDirection::Horizontal, true, None, None, None);
+    assert_eq!((im.width(), im.height()), (5, 3));
+
+    let im = a.join(
+        &c,
+        JoinDirection::Horizontal,
+        true,
+        Some(2),
+        None,
+        Some(Align::Centre),
+    );
+    assert_eq!((im.width(), im.height()), (7, 3));
+
+    let background = [255.0];
+    let im = a.join(
+        &c,
+        JoinDirection::Vertical,
+        true,
+        Some(1),
+        Some(&background),
+        Some(Align::High),
+    );
+    assert_eq!((im.width(), im.height()), (3, 6));
+
+    let align: Align = "centre".parse().unwrap();
+    assert_eq!(align, Align::Centre);
+    assert!("sideways".parse::<Align>().is_err());
+
+    let im = a
+        .try_join(
+            &c,
+            JoinDirection::Vertical,
+            false,
+            None,
+            None,
+            Some(Align::Low),
+        )
+        .unwrap();
+    assert_eq!((im.width(), im.height()), (2, 5));
+
+    // The guard a caller outside the crate has to be able to name and
+    // match: the libvips shim bound.
+    assert!(matches!(
+        a.try_join(
+            &c,
+            JoinDirection::Horizontal,
+            false,
+            Some(1_000_001),
+            None,
+            None
+        ),
+        Err(ConversionError::ShimTooLarge {
+            shim: 1_000_001,
+            max: 1_000_000
+        })
+    ));
+    // Float input used to be refused here, and it reaches this through any
+    // `colourspace` result rather than as an exotic case. `vips join` runs
+    // on a `float` raster and answers FLOAT, so issue #945 carries it: the
+    // pair promotes and the float operand's samples arrive unchanged.
+    let ramp = Raster::grey(4, 4, false);
+    assert!(ramp.format().is_float());
+    let joined = ramp
+        .try_join(&c, JoinDirection::Horizontal, false, None, None, None)
+        .unwrap();
+    assert!(joined.format().is_float(), "got {:?}", joined.format());
+    assert_eq!(joined.getpoint(0, 0), ramp.getpoint(0, 0));
+    assert_eq!(joined.getpoint(3, 0), ramp.getpoint(3, 0));
+}
+
+/// The interpretation a band-promoting join and arrayjoin report, pinned
+/// from outside the crate: `vips join` of a 1-band `b-w` with a 3-band
+/// `srgb` reports `srgb`, and so does `vips arrayjoin` of the same pair.
+/// A tag naming a band count the result no longer has is read wrong
+/// downstream, since `space_bands(Bw) == 1`.
+#[test]
+fn ported_join_band_promotion_interpretation() {
+    let mono = Raster::new(1, 1, PixelFormat::Gray8, vec![7])
+        .unwrap()
+        .copy()
+        .interpretation(Interpretation::Bw)
+        .build();
+    let colour = Raster::new(1, 1, PixelFormat::Rgb8, vec![10, 20, 30]).unwrap();
+
+    let im = mono.join(&colour, JoinDirection::Horizontal, true, None, None, None);
+    assert_eq!(im.interpretation(), Interpretation::Srgb);
+
+    let im = Raster::arrayjoin(&[&mono, &colour], None, None);
+    assert_eq!(im.interpretation(), Interpretation::Srgb);
 }

@@ -1,0 +1,31 @@
+fix(arithmetic): premultiply and unpremultiply on float carriers (closes #631)
+
+`try_premultiply` and `try_unpremultiply` fell into `depth_max`'s "the
+arithmetic operations do not support float rasters yet" panic when they were
+handed a float raster, from inside the fallible form, which is the one thing a
+`try_` method is not allowed to do. It was always reachable, but OpenEXR (#626)
+and FITS (#625) hand back float pixel data straight out of an untrusted file,
+so a caller who loads an EXR and calls a premultiply helper now gets there on
+ordinary input.
+
+I implemented the float carriers rather than refusing them. Nothing was left to
+guess at: libvips defines both ops on FLOAT and this build runs them,
+`unpremultiply_factor` already carried the dead zone and the alpha clip from
+#611, and the resize path has been doing the same arithmetic internally since
+#604.
+
+Two things I measured rather than transcribed. `max_alpha` comes from the
+raster's `Interpretation` and not the sample depth, the way
+`vips_interpretation_max_alpha` supplies it, so an scRGB raster (what an RGB
+OpenEXR load is tagged) divides by 1.0 where an untagged one divides by 255 and
+an Rgb16-tagged one by 65535. And the float arm runs in `f32`, not `f64`: the C
+macros land the multiplier in a `float` before the colour multiply, so the
+result rounds twice, and the single-rounded f64 form misses vips by about an
+ulp on ordinary values. The two-rounding model is bit-exact against the binary
+on all 16384 samples of a 64x64 four-band sweep, for both max_alpha 255 and
+1.0.
+
+The unsigned carriers are untouched: still f64, still rounded and saturated
+into the input depth, still against `depth_max`. Routing them through the
+interpretation as well would have moved an untagged Multi16 raster from 65535
+to 255, and that is a separate question.

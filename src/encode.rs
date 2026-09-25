@@ -8,32 +8,38 @@
 //! encoders split into two groups by what the pure-Rust build can actually
 //! emit:
 //!
-//! * **Real, backed by `image` 0.25:** [`Raster::encode_jpeg`],
-//!   [`Raster::encode_jpeg_options`], [`Raster::save_jpeg`],
-//!   [`Raster::jpegsave_buffer`], [`Raster::encode_png`], [`Raster::save_png`].
+//! * **Real, backed by `image` 0.25:** [`Raster::encode_png`],
+//!   [`Raster::save_png`].
 //! * **Real, hand-rolled here on `flate2`** because `image`'s PNG encoder
 //!   exposes neither knob: [`Raster::encode_png_interlaced`] (Adam7) and
 //!   [`Raster::encode_png_palette`] (median-cut quantized indexed PNG).
+//! * **Real, hand-rolled in `crate::encode_jpeg`** for the same reason one
+//!   format further on: [`Raster::encode_jpeg`],
+//!   [`Raster::encode_jpeg_options`], [`Raster::save_jpeg`] and
+//!   [`Raster::jpegsave_buffer`]. `image`'s JPEG encoder fixes its sampling
+//!   factors and its Huffman tables and exposes neither, so the subsample
+//!   mode below had nothing to reach (issue #1132).
 //! * **Typed [`EncodeError::Unsupported`] stubs**, because this build has no
-//!   accessible encoder for them and the format needs capabilities the crate
-//!   cannot reach from this lane: [`Raster::jpegsave_buffer_restart`]
-//!   (`"jpeg-restart"`: `image`'s JPEG encoder writes no restart markers),
-//!   [`Raster::encode_webp`] (`"webp"`: no mature pure-Rust WebP encoder), and
-//!   [`Raster::encode_gif`] / [`Raster::encode_gif_interlaced`] /
-//!   [`Raster::encode_gif_dither`] (`"gif"`: the `image` dependency is built
-//!   without the `gif` feature, and GIF save additionally needs the multi-page
-//!   animation and palette-dither support the ported cell exercises).
+//!   accessible encoder for them: [`Raster::jpegsave_buffer_restart`]
+//!   (`"jpeg-restart"`: `image`'s JPEG encoder writes no restart markers).
 //!
-//! ## Subsampling caveat
+//! WebP and GIF used to keep their stubs here too. They now live in
+//! [`crate::webp`] and [`crate::gif`], one file per format, so the four
+//! format lanes each own exactly one file instead of all four rewriting this
+//! header and the adjacent stub bodies (issue #563).
 //!
-//! `image` 0.25's JPEG encoder fixes its chroma sampling factors and offers no
-//! public subsample control, so [`Raster::encode_jpeg_options`] accepts the
-//! [`JpegSubsample`] argument for signature and contract compatibility but
-//! currently ignores it: the quality is applied for real, while every subsample
-//! mode selects the same encoder configuration. The argument keeps the call
-//! site and the libvips `subsample_mode` mapping resolving today; when a
-//! subsample-capable encoder lands the mode will drive the sampling factors
-//! without a signature change.
+//! ## Subsampling
+//!
+//! [`Raster::encode_jpeg_options`] applies the [`JpegSubsample`] it is handed,
+//! and [`JpegSubsample::Auto`] resolves the way libvips' `subsample_mode=auto`
+//! does: 4:2:0 below quality 90 and 4:4:4 at or above.
+//!
+//! It did not until issue #1132. `image` 0.25's encoder fixes the sampling
+//! factors in its constructor with no public control, so the argument was
+//! accepted for signature compatibility and dropped in the body, and every
+//! JPEG this crate wrote was 4:4:4 whatever the caller asked for. The mode
+//! drives the frame header now, which is where it is visible to anything that
+//! reads the file back.
 
 use crate::codec::{EncodeError, JpegSubsample};
 use crate::imageio::SaveError;
@@ -60,39 +66,42 @@ impl Raster {
         self.encode_jpeg_options(quality, JpegSubsample::Auto)
     }
 
-    /// Encode the raster as JPEG bytes at the given quality, with a requested
-    /// chroma [`JpegSubsample`] mode.
+    /// Encode the raster as JPEG bytes at the given quality, with a chroma
+    /// [`JpegSubsample`] mode.
     ///
-    /// The quality is applied for real; the subsample mode is accepted but
-    /// currently ignored (see the [module docs](crate::encode)).
+    /// Both are applied. [`JpegSubsample::Auto`] picks 4:2:0 below quality 90
+    /// and 4:4:4 at or above, which is libvips' `subsample_mode=auto`.
+    ///
+    /// # Alpha
+    ///
+    /// An `Rgba8` raster is flattened onto white first, because JPEG has no
+    /// alpha channel to put it in. That is `vips jpegsave`'s own behaviour:
+    /// `vips_foreign_save` flattens against its `background` property for
+    /// every format whose `saveable` set excludes alpha, and white is the
+    /// default. The tile path passes the engine's configured background
+    /// instead of white (issue #1133).
     ///
     /// # Errors
     ///
-    /// [`EncodeError::Encode`] if the `image` encoder rejects the raster.
+    /// [`EncodeError::Encode`] if the `image` encoder rejects the raster, or
+    /// if flattening the alpha fails.
     pub fn encode_jpeg_options(
         &self,
         quality: u8,
         subsample: JpegSubsample,
     ) -> Result<Vec<u8>, EncodeError> {
-        // Accepted for the libvips `subsample_mode` contract; `image` 0.25 has
-        // no public knob to vary the sampling factors, so the mode is ignored
-        // and every mode selects the same encoder configuration.
-        let _ = subsample;
-        let mut buf = Vec::new();
-        let encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(
-            std::io::Cursor::new(&mut buf),
+        let flattened = crate::sink::flatten_alpha(self, crate::sink::DEFAULT_BACKGROUND_RGB)
+            .map_err(EncodeError::encode)?;
+        let raster = flattened.as_ref().unwrap_or(self);
+        let ct = color_type_for_format(raster.format())?;
+        crate::encode_jpeg::encode(
+            raster.data(),
+            raster.width(),
+            raster.height(),
+            ct,
             quality.clamp(1, 100),
-        );
-        let ct = image_color_type(self.format())?;
-        image::ImageEncoder::write_image(
-            encoder,
-            self.data(),
-            self.width(),
-            self.height(),
-            ct.into(),
+            subsample,
         )
-        .map_err(EncodeError::encode)?;
-        Ok(buf)
     }
 
     /// Encode JPEG bytes at `quality`, mapping a libvips `subsample_mode`
@@ -158,7 +167,7 @@ impl Raster {
             CompressionType::Level(compression.min(9)),
             FilterType::Adaptive,
         );
-        let ct = image_color_type(self.format())?;
+        let ct = color_type_for_format(self.format())?;
         image::ImageEncoder::write_image(
             encoder,
             self.data(),
@@ -291,57 +300,6 @@ impl Raster {
 }
 
 // ---------------------------------------------------------------------------
-// Formats with no accessible pure-Rust encoder in this build
-// ---------------------------------------------------------------------------
-
-impl Raster {
-    /// libvips `webpsave_buffer`.
-    ///
-    /// # Errors
-    ///
-    /// Always [`EncodeError::Unsupported`] with format `"webp"`: there is no
-    /// mature pure-Rust WebP encoder and the `image` dependency is built
-    /// without WebP support.
-    pub fn encode_webp(&self, quality: u8) -> Result<Vec<u8>, EncodeError> {
-        let _ = quality;
-        Err(EncodeError::unsupported("webp"))
-    }
-
-    /// libvips `gifsave_buffer`.
-    ///
-    /// # Errors
-    ///
-    /// Always [`EncodeError::Unsupported`] with format `"gif"`: the `image`
-    /// dependency is built without the `gif` feature (unreachable from this
-    /// lane), and GIF save additionally needs the multi-page animation and
-    /// palette handling the ported cell exercises.
-    pub fn encode_gif(&self) -> Result<Vec<u8>, EncodeError> {
-        Err(EncodeError::unsupported("gif"))
-    }
-
-    /// libvips `gifsave_buffer` with interlacing.
-    ///
-    /// # Errors
-    ///
-    /// Always [`EncodeError::Unsupported`] with format `"gif"`; see
-    /// [`Raster::encode_gif`].
-    pub fn encode_gif_interlaced(&self) -> Result<Vec<u8>, EncodeError> {
-        Err(EncodeError::unsupported("gif"))
-    }
-
-    /// libvips `gifsave_buffer` with a dither level (0.0-1.0).
-    ///
-    /// # Errors
-    ///
-    /// Always [`EncodeError::Unsupported`] with format `"gif"`; see
-    /// [`Raster::encode_gif`].
-    pub fn encode_gif_dither(&self, dither: f64) -> Result<Vec<u8>, EncodeError> {
-        let _ = dither;
-        Err(EncodeError::unsupported("gif"))
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -369,26 +327,64 @@ fn parse_subsample_mode(mode: Option<&str>) -> JpegSubsample {
 }
 
 /// The `image` colour type for a [`PixelFormat`], or an [`EncodeError`] for the
-/// compute-intermediate formats (multiband / float) that have none.
-fn image_color_type(fmt: PixelFormat) -> Result<image::ColorType, EncodeError> {
-    Ok(match fmt {
-        PixelFormat::Gray8 => image::ColorType::L8,
-        PixelFormat::Gray16 => image::ColorType::L16,
-        PixelFormat::Rgb8 => image::ColorType::Rgb8,
-        PixelFormat::Rgba8 => image::ColorType::Rgba8,
-        PixelFormat::Rgb16 => image::ColorType::Rgb16,
-        PixelFormat::Rgba16 => image::ColorType::Rgba16,
-        PixelFormat::Multi8(_) | PixelFormat::Multi16(_) => {
-            return Err(EncodeError::encode(format!(
-                "multiband raster ({} bands) has no image colour type; reduce to 1/3/4 bands first",
-                fmt.channels()
-            )));
-        }
-        PixelFormat::RgbaF32 | PixelFormat::FloatF32(_) => {
-            return Err(EncodeError::encode(format!(
-                "float raster ({fmt:?}) has no 8/16-bit image colour type; cast first"
-            )));
-        }
+/// compute-intermediate formats (multiband / float / 32-bit) that have none.
+///
+/// The mapping itself lives once, in [`crate::pixel::image_color_type`]
+/// (issue #969); this wraps its [`ColorTypeRefusal`](crate::pixel::ColorTypeRefusal)
+/// in this module's own error type and wording.
+///
+/// # The oracle, which is a stronger case than the dependency
+///
+/// "The `image` crate's widest integer colour type is 16-bit" is true, and it
+/// is the weaker half of why these are refused. PNG the format has no 32-bit
+/// or float sample type either, and vips does not have one answer for what to
+/// do about that: it has several, and they disagree. Measured on
+/// `/opt/homebrew/bin/vips` 8.18.6 over a 2x1 raster:
+///
+/// | route | `uint [3000000000, 100]` | `float [1.5, -0.25]` |
+/// |---|---|---|
+/// | `vips pngsave`, `b-w` tag | `[0, 100]` | `[1, 0]` |
+/// | `vips pngsave`, `multiband` tag | `[0, 0]` | `[0, 0]` |
+/// | `vips cast` to `uchar` | `[0, 100]` | `[1, 0]` |
+/// | `vips dzsave`, full-resolution tile | `0` | `1` |
+/// | `vips dzsave`, overview tile | `255` | `0` |
+///
+/// Three routes, and inside one of them the **interpretation tag** moves the
+/// answer: the same `uint` raster saves as `[0, 100]` tagged `b-w` and
+/// `[0, 0]` tagged `multiband`. Not one route answers the data. The 255 in
+/// the overview row is the shrink: averaging 3000000000 with 100 and clipping
+/// gives white, on a raster whose full-resolution tile is black.
+///
+/// That is posture 3 with a posture-4 garnish, and it makes the refusal
+/// **more faithful** than merely necessary: there is no answer here to be
+/// faithful to, so returning one would be inventing it (issues #517, #952).
+/// [`crate::sink_object_store`]'s tile encoder refuses the same carriers for
+/// the same reason.
+fn color_type_for_format(fmt: PixelFormat) -> Result<image::ColorType, EncodeError> {
+    use crate::pixel::ColorTypeRefusal;
+    crate::pixel::image_color_type(fmt).map_err(|refusal| {
+        EncodeError::encode(match refusal {
+            ColorTypeRefusal::Multiband(bands) => format!(
+                "multiband raster ({bands} bands) has no image colour type; reduce to 1/3/4 bands first"
+            ),
+            ColorTypeRefusal::Float => {
+                format!("float raster ({fmt:?}) has no 8/16-bit image colour type; cast first")
+            }
+            // The `image` crate's widest integer colour type is 16-bit, so a
+            // `uint` raster is refused for the same reason a float one is
+            // rather than being narrowed behind the caller's back (issue #517).
+            ColorTypeRefusal::Uint32 => format!(
+                "32-bit unsigned raster ({fmt:?}) has no 8/16-bit image colour type; cast first"
+            ),
+            // The `image` crate has no signed colour type at any width, so the
+            // signed carriers of issue #516 are refused whatever their size.
+            // Not a width question: `Int8` is one byte and still has no L8 to
+            // map to, because L8 is unsigned.
+            ColorTypeRefusal::Signed => format!(
+                "signed raster ({fmt:?}) has no image colour type, which are all unsigned; \
+                 cast to an unsigned 8/16-bit format first"
+            ),
+        })
     })
 }
 
@@ -497,21 +493,40 @@ fn png_crc32(bytes: &[u8]) -> u32 {
 fn quantize(pixels: &[[u8; 4]], max: usize) -> (Vec<[u8; 4]>, Vec<u8>) {
     use std::collections::HashMap;
 
+    let palette = quantize_palette(pixels, max);
+    let mut cache: HashMap<[u8; 4], u8> = HashMap::new();
+    let indices = pixels
+        .iter()
+        .map(|&p| *cache.entry(p).or_insert_with(|| nearest(&palette, p)))
+        .collect();
+    (palette, indices)
+}
+
+/// The palette half of [`quantize`]: median-cut over the distinct colours in
+/// `pixels`, weighted by how often each occurs, capped at `max` entries.
+///
+/// Split out so [`crate::gif`] can take the palette without also paying for a
+/// nearest-colour index pass it is about to redo with error diffusion.
+///
+/// The distinct colours are **sorted** before the split loop. They arrive from
+/// a `HashMap`, whose iteration order the default `RandomState` reseeds per
+/// process, so without the sort both the box seeding and the fits-in-`max`
+/// fast path produce a palette in a different order on every run. That made
+/// [`Raster::encode_png_palette`] emit different bytes for identical input,
+/// which is the one thing a content-addressed store (see
+/// [`crate::dedupe`]) cannot tolerate.
+pub(crate) fn quantize_palette(pixels: &[[u8; 4]], max: usize) -> Vec<[u8; 4]> {
+    use std::collections::HashMap;
+
     let mut counts: HashMap<[u8; 4], u32> = HashMap::new();
     for &p in pixels {
         *counts.entry(p).or_insert(0) += 1;
     }
-    let uniques: Vec<([u8; 4], u32)> = counts.into_iter().collect();
+    let mut uniques: Vec<([u8; 4], u32)> = counts.into_iter().collect();
+    uniques.sort_unstable_by_key(|&(c, _)| c);
 
     if uniques.len() <= max {
-        let palette: Vec<[u8; 4]> = uniques.iter().map(|&(c, _)| c).collect();
-        let index_of: HashMap<[u8; 4], u8> = palette
-            .iter()
-            .enumerate()
-            .map(|(i, &c)| (c, i as u8))
-            .collect();
-        let indices = pixels.iter().map(|p| index_of[p]).collect();
-        return (palette, indices);
+        return uniques.iter().map(|&(c, _)| c).collect();
     }
 
     let mut boxes: Vec<Vec<([u8; 4], u32)>> = vec![uniques];
@@ -550,13 +565,7 @@ fn quantize(pixels: &[[u8; 4]], max: usize) -> (Vec<[u8; 4]>, Vec<u8>) {
         boxes.push(right);
     }
 
-    let palette: Vec<[u8; 4]> = boxes.iter().map(|b| box_average(b)).collect();
-    let mut cache: HashMap<[u8; 4], u8> = HashMap::new();
-    let indices = pixels
-        .iter()
-        .map(|&p| *cache.entry(p).or_insert_with(|| nearest(&palette, p)))
-        .collect();
-    (palette, indices)
+    boxes.iter().map(|b| box_average(b)).collect()
 }
 
 /// The count-weighted average colour of a median-cut box.
@@ -579,7 +588,7 @@ fn box_average(b: &[([u8; 4], u32)]) -> [u8; 4] {
 }
 
 /// The index of the palette entry nearest `c` in squared-Euclidean RGBA space.
-fn nearest(palette: &[[u8; 4]], c: [u8; 4]) -> u8 {
+pub(crate) fn nearest(palette: &[[u8; 4]], c: [u8; 4]) -> u8 {
     let mut best_i = 0usize;
     let mut best_d = i64::MAX;
     for (i, &q) in palette.iter().enumerate() {
@@ -749,11 +758,7 @@ mod tests {
         let im2 = decode_bytes(&buf).unwrap();
         assert_eq!(im2.width(), im.width());
         assert_eq!(im2.height(), im.height());
-        let colours: HashSet<[u8; 3]> = im2
-            .data()
-            .chunks_exact(3)
-            .map(|c| [c[0], c[1], c[2]])
-            .collect();
+        let colours: HashSet<[u8; 3]> = im2.data().as_chunks::<3>().0.iter().copied().collect();
         assert!(
             colours.len() <= 16,
             "quantized palette had {} colours",
@@ -853,30 +858,7 @@ mod tests {
     }
 
     #[test]
-    fn encode_webp_is_unsupported() {
-        let im = rgb8(8, 8, |_, _| [1, 2, 3]);
-        match im.encode_webp(80) {
-            Err(EncodeError::Unsupported { format }) => assert_eq!(format, "webp"),
-            other => panic!("expected Unsupported(webp), got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn encode_gif_family_is_unsupported() {
-        let im = rgb8(8, 8, |_, _| [1, 2, 3]);
-        for res in [
-            im.encode_gif(),
-            im.encode_gif_interlaced(),
-            im.encode_gif_dither(0.5),
-        ] {
-            match res {
-                Err(EncodeError::Unsupported { format }) => assert_eq!(format, "gif"),
-                other => panic!("expected Unsupported(gif), got {other:?}"),
-            }
-        }
-    }
-
-    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn save_jpeg_and_png_write_decodable_files() {
         let im = rgb8(20, 12, |x, y| [(x * 10) as u8, (y * 12) as u8, 77]);
         let dir = tempfile::tempdir().unwrap();
@@ -891,5 +873,62 @@ mod tests {
         im.save_png(&png, 6).unwrap();
         let from_png = crate::source::decode_file(&png).unwrap();
         assert_eq!(from_png.data(), im.data());
+    }
+
+    /**
+     * Tests that the 8/16-bit container encoders refuse the unsigned
+     * 32-bit carrier with a typed error naming it, rather than narrowing
+     * it behind the caller's back or reading it as float.
+     * Works by encoding a `Uint32` raster to PNG and asserting the error
+     * text names the carrier, with the float refusal beside it as the
+     * control that the two carriers get distinct messages even though they
+     * share a byte width.
+     * Input: Uint32(1) -> Err naming "32-bit unsigned"; FloatF32(1) -> Err
+     * naming "float"; Int8 / Int16 / Int32 -> Err saying the colour types
+     * are all unsigned, at every width.
+     */
+    #[test]
+    fn the_encoders_refuse_the_uint_carrier_by_name() {
+        let n = |v: u16| core::num::NonZeroU16::new(v).unwrap();
+        let u = Raster::zeroed(2, 2, PixelFormat::Uint32(n(1))).unwrap();
+        let err = u
+            .encode_png(6)
+            .expect_err("a uint raster has no PNG colour type");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("32-bit unsigned") && msg.contains("Uint32"),
+            "the refusal does not name the carrier: {msg}"
+        );
+        // Control: the float carrier of the same width gets its own
+        // message, so a caller can tell which one they handed over.
+        let f = Raster::zeroed(2, 2, PixelFormat::FloatF32(n(1))).unwrap();
+        let fmsg = f
+            .encode_png(6)
+            .expect_err("a float raster has no PNG colour type")
+            .to_string();
+        assert!(fmsg.contains("float"), "{fmsg}");
+        assert_ne!(msg, fmsg);
+
+        // The three signed carriers, refused at **every** width, which is
+        // the part a width-keyed reading gets wrong: `Int8` is one byte and
+        // there is still no signed `L8`, because every `image` colour type
+        // is unsigned. Unlike the refusals issue #909 tracks, this one is
+        // the correct implementation rather than an interim: there is
+        // nothing in the `image` crate to be faithful to.
+        for fmt in [
+            PixelFormat::Int8(n(1)),
+            PixelFormat::Int16(n(1)),
+            PixelFormat::Int32(n(1)),
+        ] {
+            let m = Raster::zeroed(2, 2, fmt)
+                .unwrap()
+                .encode_png(6)
+                .expect_err("a signed raster has no image colour type")
+                .to_string();
+            assert!(
+                m.contains("signed") && m.contains("unsigned"),
+                "the refusal for {fmt:?} must say the colour types are all unsigned: {m}"
+            );
+        }
     }
 }

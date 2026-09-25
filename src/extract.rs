@@ -39,11 +39,29 @@
 //!   fill new pixels with black (all-zero samples) unless an extend mode or
 //!   background vector says otherwise. Background constants are truncated
 //!   toward zero (matching libvips' `double`->integer cast) and clamped to
-//!   the sample depth (`0..=255` or `0..=65535`).
+//!   the sample depth (`0..=255` or `0..=65535`). [`Extend::White`] is the
+//!   one fill that does **not** come from the depth: its ink is a property of
+//!   the [`Interpretation`] and of the mechanism vips paints it with, so it
+//!   reads the tag rather than the depth ceiling (issue #667), and the variant
+//!   doc on [`Extend::White`] carries the measured table, float column
+//!   included: `embed` and `gravity` carry a float raster since issue #945,
+//!   and its border comes out at the interpretation maximum as a number
+//!   rather than as the repeated ink byte an integer carrier gets. On a
+//!   float carrier the background constant is carried whole rather than
+//!   truncated, which is the other half of the same rule.
 //!   A background vector must have one entry (replicated across bands) or
 //!   exactly one entry per band.
 //! * **Clipping.** `embed` and `insert` accept placements partly or wholly
 //!   outside the canvas and clip, exactly as libvips does.
+//! * **Metadata.** Every operation carries its input's interpretation,
+//!   resolution, orientation and attached fields onto its result (issue #690).
+//!   The origin offset is the one field they disagree on: `extract_area` and
+//!   `crop` stamp it to `(-left, -top)` and discard the source's, matching
+//!   `vips_extract_area`, where the placement and tiling ops leave the
+//!   source's alone. `insert` is a two-input op and takes two rules (issue
+//!   #718): the header block comes from `main` alone, and the attached fields
+//!   are the union of `main`'s and `sub`'s with `main` winning a name they
+//!   share.
 //!
 //! # Smartcrop
 //!
@@ -67,7 +85,9 @@
 //! attention coordinates match the real fixtures (`sample.jpg`: 199, 234).
 //! The strategy is deterministic.
 
-use crate::pixel::PixelFormat;
+use crate::arithmetic::interpretation_max_alpha;
+use crate::conversion::Interpretation;
+use crate::pixel::{PixelFormat, SampleKind, read_sample_f64, write_f32_sample};
 use crate::raster::{Raster, RasterError};
 use crate::resample::{ReduceKernel, ResizeOptions};
 use thiserror::Error;
@@ -90,6 +110,49 @@ pub enum ExtractError {
     /// A requested width or height is zero.
     #[error("area width and height must be greater than zero")]
     EmptyArea,
+    /// An extract operation that reads and writes individual samples was
+    /// given a float raster.
+    ///
+    /// **Only `smartcrop`'s `Entropy` and `Attention` strategies raise this
+    /// now.** Both build a value-indexed table over the sample values, and a
+    /// float sample does not index one; cast to an unsigned format first.
+    ///
+    /// `embed`, `gravity` and `insert` raised it until issue #945, and that
+    /// refusal was a parity regression: vips runs all three on a `float`
+    /// raster and answers FLOAT. They used to **panic** out of a `Result`
+    /// signature instead (issue #694), which is the shape
+    /// [`ArithmeticError`] already fixed for `recomb` and `stdif` in #631;
+    /// #694 mirrored it, and #945 then asked which posture the refusal was.
+    ///
+    /// The rest of this module has always taken a float raster unchanged,
+    /// because it copies whole pixels byte-wise rather than reading samples:
+    /// `extract_area`, `crop`, `replicate`, `zoom`, `subsample`, and
+    /// `smartcrop`'s four pure-geometry strategies (`Centre`, `Low`, `High`,
+    /// `All`).
+    ///
+    /// [`ArithmeticError`]: crate::arithmetic::ArithmeticError::FloatUnsupported
+    #[error("{op} does not support float rasters yet; cast to an unsigned 8/16-bit format first")]
+    FloatUnsupported {
+        /// The operation that refused, e.g. `"embed"`.
+        op: &'static str,
+    },
+    /// The raster carries a sample kind this operation has no
+    /// implementation for.
+    ///
+    /// The sibling of [`ExtractError::FloatUnsupported`] for the carriers
+    /// that are not float, and like it, only `smartcrop`'s entropy and
+    /// attention strategies raise it: they refuse `Uint32` and `Int32` as
+    /// well as float, because all three build a value-indexed table and
+    /// 2^32 bins is not a table. `embed`, `gravity` and `insert` carry
+    /// every carrier there is (issues #517, #909, #945). Mirrors
+    /// [`crate::mosaicing::MosaicError::UnsupportedSampleKind`].
+    #[error("{op} does not support {kind:?} samples yet")]
+    UnsupportedSampleKind {
+        /// The operation that refused.
+        op: &'static str,
+        /// The sample kind it cannot read.
+        kind: SampleKind,
+    },
     /// A zoom, subsample, or replicate factor is zero.
     #[error("factor must be greater than zero")]
     ZeroFactor,
@@ -137,7 +200,73 @@ pub enum Extend {
     /// Reflect the image at its edges (the edge pixel is duplicated, so a
     /// row `0 1 2` extends as `... 1 0 | 0 1 2 | 2 1 0 ...`).
     Mirror,
-    /// Fill with white (the depth maximum in every band).
+    /// Fill with white, which libvips takes from the image's
+    /// [`Interpretation`] and never from its depth. `vips_embed` inks the
+    /// border with `(int) vips_interpretation_max_alpha(in->Type)`
+    /// (`libvips/conversion/embed.c:280`): 65535 for
+    /// [`Interpretation::Rgb16`] / [`Interpretation::Grey16`], 1.0 for
+    /// [`Interpretation::ScRgb`], 255 for everything else.
+    ///
+    /// What reaches the pixels then depends on how `vips_region_paint`
+    /// (`libvips/iofuncs/region.c:909`) writes that `int`. A float carrier
+    /// gets it per band as a float (`FILL_LINE(float, ...)`, `region.c:936`),
+    /// so an scRGB float border is `1.0` and an RGB16 one `65535.0`. An
+    /// integer carrier gets `memset((char *) q, value, wd)` (`region.c:922`),
+    /// which keeps only the **low byte** of the ink and repeats that byte
+    /// across every byte of the sample. On the ordinary tags that is
+    /// invisible, since `0xff` memset over a `u16` is 65535 again, which is
+    /// why a depth-derived ceiling served this long. On scRGB it is very
+    /// visible: the ink is 1, so a `u8` raster tagged scRGB fills with 1 and a
+    /// `u16` one with `0x0101` = **257**. That is the paint mechanism showing
+    /// through rather than any kind of white, and it is ported as it stands,
+    /// because 257 is what a comparison against the oracle has to expect and
+    /// the other reading of the intent (clamp the ink into the carrier's
+    /// range, giving 1) is not whiter, it is black.
+    ///
+    /// Measured on vips 8.18.6, `vips embed in.v out.v 1 1 10 10 --extend
+    /// white`, reading the corner:
+    ///
+    /// ```text
+    /// carrier  multiband  srgb   rgb16  grey16  scrgb
+    /// uchar    255        255    255    255     1
+    /// ushort   65535      65535  65535  65535   257
+    /// float    255        255    65535  65535   1
+    /// ```
+    ///
+    /// # Which operations that table describes
+    ///
+    /// [`Extend`] is shared, and the ink does not land the same way at both
+    /// ends of it.
+    ///
+    /// [`Raster::embed`] and [`Raster::gravity`] paint it straight into the
+    /// output, so the table above is exactly what they give, float row
+    /// included. They refused a float carrier between issues #694 and #945,
+    /// and before #694 they panicked out of a `Result` signature, which this
+    /// doc's float row made easy to walk into. Both are gone: the float row
+    /// is now reachable through the op the table describes.
+    ///
+    /// The resamplers that read this mode for taps landing outside the input
+    /// ([`Raster::affine`] and the interpolating forms in [`crate::resample`])
+    /// match the table only on a raster **without** an alpha band. Once alpha
+    /// is present, vips' border comes out at the plain interpretation maximum
+    /// instead (255 for sRGB, 1 for scRGB) and libviprs keeps the values
+    /// above.
+    ///
+    /// **The reason is not the paint order**, which is what #692 was filed
+    /// believing and what its closing measurement refuted.
+    /// `vips_affine_build` embeds *before* it premultiplies (`affine.c:529`
+    /// then `:551`), so the ink is memset into the raster's own domain either
+    /// way and the byte `memset` runs exactly as it does for a bare
+    /// `vips_embed`. What moves the value afterwards is that the premultiply
+    /// and un-premultiply pair does **not** cancel on a border pixel:
+    /// `vips_premultiply` builds its multiplier from a **clipped** alpha and
+    /// `vips_unpremultiply` builds its reciprocal from the **raw** one, so a
+    /// pixel holding the same ink `E` in every band comes back
+    /// `clip(E, 0, M)` against the interpretation's ceiling `M`. libviprs
+    /// runs the same arithmetic against the depth's ceiling, where the white
+    /// ink never exceeds it, so the clip is the identity.
+    /// [`crate::resample`] carries the 11-cell measurement and the reason not
+    /// to follow.
     White,
     /// Fill with the background colour passed alongside the extend mode
     /// (black when the background is `None`).
@@ -238,50 +367,282 @@ pub enum SmartcropInteresting {
 // Sample-level helpers
 // ---------------------------------------------------------------------------
 
-/// Read the flat `i`-th sample as `u32` (native byte order for 16-bit,
-/// matching [`crate::raster_ops`]). Unsigned depths only: the panic arm
-/// keeps the sample-level extract ops, which predate the float formats,
-/// from misreading float bytes as `u16` pairs. (The pure byte-copy paths
-/// like `extract_area` are depth-agnostic and handle float fine.)
+/// Read the flat `i`-th sample as `i64` (native byte order, matching
+/// [`crate::raster_ops`]).
+///
+/// `i64` and total over [`SampleKind`], which is issue #909 on this side:
+/// the `u32` this used to return could not hold a negative, so `embed`,
+/// `gravity` and `insert` refused the three signed carriers of issue #516
+/// even though `vips embed --extend white` and `vips insert` both accept a
+/// `char` raster and answer CHAR, measured on `/opt/homebrew/bin/vips`
+/// 8.18.6. The shape is [`crate::convolution`]'s `put_sample`, total
+/// since #748.
+///
+/// Keyed on the kind rather than on a byte width, so the three four-byte
+/// kinds stay three different reads (issues #517, #607). The signed kinds
+/// sign-extend, so this is the numeric read; `F32` truncates toward zero
+/// the way `vips_cast` does, and is reachable only from a direct call
+/// because these ops still refuse a float raster. (The pure byte-copy
+/// paths like `extract_area` are depth-agnostic and handle every carrier
+/// fine.)
 #[inline]
-fn read_s(data: &[u8], bpc: usize, i: usize) -> u32 {
-    match bpc {
-        1 => data[i] as u32,
-        2 => u16::from_ne_bytes([data[2 * i], data[2 * i + 1]]) as u32,
-        _ => panic!(
-            "this extract operation does not support float rasters yet; \
-             cast to an unsigned 8/16-bit format first"
-        ),
+fn read_s(data: &[u8], kind: SampleKind, i: usize) -> i64 {
+    match kind {
+        SampleKind::U8 => i64::from(data[i]),
+        SampleKind::I8 => i64::from(data[i] as i8),
+        SampleKind::U16 => i64::from(u16::from_ne_bytes([data[2 * i], data[2 * i + 1]])),
+        SampleKind::I16 => i64::from(i16::from_ne_bytes([data[2 * i], data[2 * i + 1]])),
+        SampleKind::U32 => i64::from(u32::from_ne_bytes([
+            data[4 * i],
+            data[4 * i + 1],
+            data[4 * i + 2],
+            data[4 * i + 3],
+        ])),
+        SampleKind::I32 => i64::from(i32::from_ne_bytes([
+            data[4 * i],
+            data[4 * i + 1],
+            data[4 * i + 2],
+            data[4 * i + 3],
+        ])),
+        SampleKind::F32 => f32::from_ne_bytes([
+            data[4 * i],
+            data[4 * i + 1],
+            data[4 * i + 2],
+            data[4 * i + 3],
+        ]) as i64,
     }
 }
 
-/// Write the flat `i`-th sample. `v` must already fit the depth.
-/// Unsigned depths only; see [`read_s`].
+/// Store the flat `i`-th sample. `v` must already fit the kind.
+///
+/// A store and not a cast, the contract [`crate::convolution`]'s
+/// `put_sample` carries: every caller copies a sample read at the same
+/// kind or writes an ink [`resolve_ink`] has already clipped into the
+/// carrier's range. The one deliberate narrow is [`Extend::White`], whose
+/// ink is a **byte pattern** rather than a number: `white_ink` answers 255
+/// for a one-byte carrier whatever its signedness, and `255 as i8` is the
+/// `-1` vips fills a `char` border with.
+/// Total over [`SampleKind`]; see [`read_s`].
 #[inline]
-fn write_s(data: &mut [u8], bpc: usize, i: usize, v: u32) {
-    match bpc {
-        1 => data[i] = v as u8,
-        2 => {
+fn write_s(data: &mut [u8], kind: SampleKind, i: usize, v: i64) {
+    match kind {
+        SampleKind::U8 => data[i] = v as u8,
+        SampleKind::I8 => data[i] = v as i8 as u8,
+        SampleKind::U16 => {
             let b = (v as u16).to_ne_bytes();
-            data[2 * i] = b[0];
-            data[2 * i + 1] = b[1];
+            data[2 * i..2 * i + 2].copy_from_slice(&b);
         }
-        _ => panic!(
-            "this extract operation does not support float rasters yet; \
-             cast to an unsigned 8/16-bit format first"
-        ),
+        SampleKind::I16 => {
+            let b = (v as i16).to_ne_bytes();
+            data[2 * i..2 * i + 2].copy_from_slice(&b);
+        }
+        SampleKind::U32 => data[4 * i..4 * i + 4].copy_from_slice(&(v as u32).to_ne_bytes()),
+        SampleKind::I32 => data[4 * i..4 * i + 4].copy_from_slice(&(v as i32).to_ne_bytes()),
+        SampleKind::F32 => data[4 * i..4 * i + 4].copy_from_slice(&(v as f32).to_ne_bytes()),
     }
 }
 
-/// Truncate (toward zero) and clamp an `f64` background constant into
-/// `0..=max`, matching the C `double`->integer cast libvips performs when
-/// it casts a background colour to the image format.
+/// Read the flat `i`-th sample as `f64`: the widened read `embed` and
+/// `insert` carry a float raster through (issue #945).
+///
+/// This is #909's move made a second time, one carrier family further on.
+/// [`read_s`] is total over [`SampleKind`], so `embed` and `insert` compiled
+/// on a float raster the whole time; what they could not do was carry the
+/// fraction, because the pipeline between the read and the store was an
+/// `i64`. Measured on `/opt/homebrew/bin/vips` 8.18.6, `vips embed` on a
+/// 3x1 `float` raster holding `[1.5, -0.25, 3.75]` answers FLOAT with those
+/// three samples intact, so truncating them was a parity regression rather
+/// than an implementation.
+///
+/// Delegates straight to [`crate::pixel::read_sample_f64`] rather than
+/// re-matching on [`SampleKind`] (issue #969): that function already reads
+/// every kind as `f64` losslessly, `u32::MAX` and `i32::MIN` included, and
+/// three modules re-matching the same six-arm dispatch is exactly the
+/// pattern that produced #607's silent misread in the first place.
 #[inline]
-fn ink_value(v: f64, max: u32) -> u32 {
-    if v.is_nan() {
-        0
-    } else {
-        v.trunc().clamp(0.0, max as f64) as u32
+fn read_v(data: &[u8], kind: SampleKind, i: usize) -> f64 {
+    read_sample_f64(data, kind, i * kind.bytes())
+}
+
+/// Store the flat `i`-th sample from an `f64`: [`write_s`] widened, the
+/// other half of [`read_v`].
+///
+/// The integer kinds keep [`write_s`]'s narrow exactly, which is the part
+/// that has to survive: it is a **store** and not a cast, and
+/// [`Extend::White`] depends on the difference. `white_ink` answers 255 for
+/// a one-byte carrier of either signedness because the ink is a byte
+/// pattern, and `255 as i8` is the `-1` vips fills a `char` border with. A
+/// clipping store would answer 127 there, which is not the measured ink and
+/// not white either.
+///
+/// So the `f64` narrows to `i64` first and then goes through the same
+/// store, rather than through [`crate::pixel::write_sample_f64`], whose
+/// clip-and-truncate is right for a cast and wrong for this. The `F32` arm
+/// is the one part that agrees with `write_sample_f64`, and calls the same
+/// [`crate::pixel::write_f32_sample`] `bands::write_flat_v` and
+/// `conversion::write_flat_v` do (issue #969).
+#[inline]
+fn write_v(data: &mut [u8], kind: SampleKind, i: usize, v: f64) {
+    match kind {
+        SampleKind::U8
+        | SampleKind::I8
+        | SampleKind::U16
+        | SampleKind::I16
+        | SampleKind::U32
+        | SampleKind::I32 => write_s(data, kind, i, v as i64),
+        SampleKind::F32 => write_f32_sample(data, i * kind.bytes(), v),
+    }
+}
+
+/// The sample [`Extend::White`] paints: `vips_embed`'s interpretation-derived
+/// ink, laid down by whichever paint mechanism the carrier selects.
+///
+/// `vips_embed` inks a white border with
+/// `(int) vips_interpretation_max_alpha(in->Type)`
+/// (`libvips/conversion/embed.c:280`), which is 65535 for RGB16 / GREY16, 1.0
+/// for scRGB and 255 for everything else (`libvips/iofuncs/header.c:195`). So
+/// the **interpretation** picks the ink and the depth never does... but what
+/// reaches the pixels also depends on how `vips_region_paint`
+/// (`libvips/iofuncs/region.c:909`) writes that `int`:
+///
+/// * a float carrier gets it per band as a float (`FILL_LINE(float, ...)`,
+///   `region.c:936`), so an scRGB float border is `1.0` and an RGB16 one
+///   `65535.0`; while
+/// * an integer carrier gets `memset((char *) q, value, wd)` (`region.c:922`),
+///   which keeps only the **low byte** of the ink and repeats that byte across
+///   every byte of the sample.
+///
+/// The memset is invisible on the ordinary tags, which is why a depth-derived
+/// ceiling has served this long: 255 is `0xff`, and `0xff` memset over a `u16`
+/// is 65535, the depth maximum again. It is very visible on scRGB, where the
+/// ink is 1 and a `u16` sample comes back `0x0101` = **257**. That is not
+/// white in any sense, it is the paint mechanism showing through, and it is
+/// ported rather than rounded off: 257 is what a comparison against the oracle
+/// has to expect, and the alternative reading of the intent (clamp the ink into
+/// the carrier's range, giving 1) is not any whiter, it is black.
+///
+/// Measured on vips 8.18.6, `vips embed in.v out.v 1 1 10 10 --extend white`
+/// on a 4-band raster, reading the corner:
+///
+/// ```text
+/// carrier  multiband  srgb   rgb16  grey16  scrgb
+/// uchar    255        255    255    255     1
+/// ushort   65535      65535  65535  65535   257
+/// float    255        255    65535  65535   1
+/// ```
+///
+/// `vips affine --extend white` gives the same values **on a raster without an
+/// alpha band**, because it builds its resampling border with `vips_embed`
+/// (`affine.c:534`); that is [`crate::resample`]'s side of the same ink. It
+/// stops giving them once the raster carries alpha, and **the reason is not
+/// the paint order**. This doc said it was, and #692's own closing
+/// measurement refuted that: `vips_affine_build` embeds before it
+/// premultiplies on every path (`affine.c:529` then `:551`), so the ink is
+/// memset into the raster's own domain either way and the memset above runs
+/// exactly as it does for a bare `vips_embed`.
+///
+/// What moves the value is that the premultiply / un-premultiply pair does
+/// **not** cancel on a border pixel. `vips_premultiply` builds its multiplier
+/// from a **clipped** alpha, `nalpha = clip(a, 0, M) / M`, while
+/// `vips_unpremultiply` builds its reciprocal from the **raw** one,
+/// `factor = M / a`, deliberately ("we want over and undershoots on alpha and
+/// RGB to cancel", `unpremultiply.c:78`). Every band of a border pixel holds
+/// the same ink `E`, so the round trip is `E * clip(E, 0, M) / M * M / E`,
+/// which is `clip(E, 0, M)`: the ink comes back clipped to the
+/// **interpretation's** ceiling. libviprs runs the same arithmetic against its
+/// own ceiling, the depth's on an unsigned carrier (issue #664), and the white
+/// ink never exceeds that, so `clip(E, 0, D)` is `E`.
+///
+/// #745 corrected this on the resample side and left this one stating the
+/// refuted story while pointing at an issue that had closed; #952 is that.
+/// [`crate::resample`] carries the 11-cell measurement, and
+/// `the_white_ink_mechanism_reads_the_same_in_extract_and_in_resample` in
+/// `tests/vips_claims.rs` is what stops the two accounts drifting apart
+/// again.
+//
+// This is `pub(crate)`, so nothing public may link it: rustdoc renders a
+// `[white_ink]` from a public doc as literal brackets with no anchor. The two
+// public docs that used to do that, the module doc above and `Extend::White`,
+// inline what a caller needs instead. Nothing in CI stops that coming back yet.
+// `rustdoc::private_intra_doc_links` is warn-by-default and the doc gate denies
+// only `broken_intra_doc_links`, and denying the other one is not a one-line
+// change, because 33 sites across 13 files elsewhere in the tree trip it too.
+// Issue #697 carries the gate and the sweep together; it is deliberately not
+// here, since a doc-only conflict across those 13 files is the worst kind to
+// resolve while the lanes holding them are still open.
+#[inline]
+pub(crate) fn white_ink(format: PixelFormat, interpretation: Interpretation) -> f64 {
+    let ink = interpretation_max_alpha(interpretation);
+    // `memset` takes the ink as an `int` and converts it to `unsigned char`,
+    // so only the low byte survives, and it lands in every byte of the sample.
+    let byte = u32::from(ink as i32 as u8);
+    // Matched on the carrier rather than counted out over `bytes_per_channel()`,
+    // so that adding a format is a compile error here rather than a silent ink
+    // nobody checked against the oracle (the lever issue #633 landed). The
+    // numeric fan-out this replaces answered for every depth, including ones
+    // that do not exist: right by luck at 4 bytes, since vips measures `int` +
+    // scRGB as `0x01010101`, and wrong at 8, where the `u32` shift drops the
+    // high half. Neither would have failed to build.
+    match format {
+        // `FILL_LINE(float, ...)` writes the ink as a number, so a float
+        // carrier keeps it whole.
+        PixelFormat::RgbaF32 | PixelFormat::FloatF32(_) => ink,
+        PixelFormat::Gray8 | PixelFormat::Rgb8 | PixelFormat::Rgba8 | PixelFormat::Multi8(_) => {
+            f64::from(byte)
+        }
+        PixelFormat::Gray16
+        | PixelFormat::Rgb16
+        | PixelFormat::Rgba16
+        | PixelFormat::Multi16(_) => f64::from((byte << 8) | byte),
+        // `memset` fills every byte of the sample, so a four-byte integer
+        // carrier gets the ink byte replicated four times. Measured:
+        // `vips embed --extend white` on a one-band `uint` raster fills
+        // 4294967295 (`0xFFFFFFFF`) and on an `int` one fills -1, the same
+        // bytes read signed. The comment above about `int` + scRGB
+        // measuring `0x01010101` is the low-ink end of the same rule.
+        PixelFormat::Uint32(_) | PixelFormat::Int32(_) => {
+            f64::from((byte << 24) | (byte << 16) | (byte << 8) | byte)
+        }
+        // The signed carriers replicate the same byte their unsigned twins
+        // of the same width do, and the sign appears at the **store**
+        // rather than here, because `memset` fills bytes and does not know
+        // the type. Measured: `vips embed --extend white` fills -1 on
+        // `char`, `short` and `int` alike, which is 0xFF, 0xFFFF and
+        // 0xFFFFFFFF read signed, the same three patterns `uchar`,
+        // `ushort` and `uint` fill as 255, 65535 and 4294967295
+        // (issue #516).
+        PixelFormat::Int8(_) => f64::from(byte),
+        PixelFormat::Int16(_) => f64::from((byte << 8) | byte),
+    }
+}
+
+/// Truncate (toward zero) and clamp an `f64` background constant into the
+/// carrier's own range, matching the C `double`->integer cast libvips
+/// performs when it casts a background colour to the image format, or carry
+/// it whole where the carrier has no range (a float one).
+///
+/// The floor is the range's, not a literal `0.0`: that is the third hazard
+/// class issue #909 names, and it is observable. Measured on
+/// `/opt/homebrew/bin/vips` 8.18.6, `vips embed --extend background` on a
+/// `char` raster fills **-50** for `--background -50`, **-128** for -200
+/// and **127** for 200, so it clips at both ends and a `clamp(0.0, max)`
+/// would have turned every negative background into black.
+#[inline]
+fn ink_value(v: f64, range: Option<(i64, i64)>) -> f64 {
+    match range {
+        Some((lo, hi)) => {
+            if v.is_nan() {
+                0.0
+            } else {
+                v.trunc().clamp(lo as f64, hi as f64)
+            }
+        }
+        // A float carrier has no range to clip into and no integer to
+        // truncate to, so the constant is carried as it is. Measured on
+        // `/opt/homebrew/bin/vips` 8.18.6: `vips embed --extend background
+        // --background -0.5` on a `float` raster fills **-0.5**, where the
+        // `char` twin fills 0 (issue #945).
+        None => v,
     }
 }
 
@@ -291,13 +652,13 @@ fn ink_value(v: f64, max: u32) -> u32 {
 /// full-length vector is used per band; any other length is a typed error.
 fn resolve_ink(
     bands: usize,
-    max: u32,
+    range: Option<(i64, i64)>,
     background: Option<&[f64]>,
-) -> Result<Vec<u32>, ExtractError> {
+) -> Result<Vec<f64>, ExtractError> {
     match background {
-        None => Ok(vec![0; bands]),
-        Some(bg) if bg.len() == 1 => Ok(vec![ink_value(bg[0], max); bands]),
-        Some(bg) if bg.len() == bands => Ok(bg.iter().map(|&v| ink_value(v, max)).collect()),
+        None => Ok(vec![0.0; bands]),
+        Some(bg) if bg.len() == 1 => Ok(vec![ink_value(bg[0], range); bands]),
+        Some(bg) if bg.len() == bands => Ok(bg.iter().map(|&v| ink_value(v, range)).collect()),
         Some(bg) => Err(ExtractError::BackgroundLengthMismatch {
             expected: bands,
             got: bg.len(),
@@ -318,11 +679,11 @@ fn reflect(i: i64, n: i64) -> i64 {
 /// promotion is numeric.
 fn blit(dst: &mut Raster, src: &Raster, dx: i64, dy: i64) {
     let dbands = dst.format().channels();
-    let dbpc = dst.format().bytes_per_channel();
+    let dkind = dst.format().kind();
     let (dw, dh) = (dst.width() as i64, dst.height() as i64);
     let dstride = dst.width() as usize;
     let sbands = src.format().channels();
-    let sbpc = src.format().bytes_per_channel();
+    let skind = src.format().kind();
     let sstride = src.width() as usize;
     let sdata = src.data();
     let ddata = dst.data_mut();
@@ -340,7 +701,7 @@ fn blit(dst: &mut Raster, src: &Raster, dx: i64, dy: i64) {
             let di = (oy as usize * dstride + ox as usize) * dbands;
             for c in 0..dbands {
                 let sc = if sbands == 1 { 0 } else { c };
-                write_s(ddata, dbpc, di + c, read_s(sdata, sbpc, si + sc));
+                write_v(ddata, dkind, di + c, read_v(sdata, skind, si + sc));
             }
         }
     }
@@ -348,20 +709,123 @@ fn blit(dst: &mut Raster, src: &Raster, dx: i64, dy: i64) {
 
 /// Fill every pixel of `dst` with the per-band `ink` samples. Used to lay
 /// down the `insert` background before the inputs are blitted on top.
-fn fill_ink(dst: &mut Raster, ink: &[u32]) {
+fn fill_ink(dst: &mut Raster, ink: &[f64]) {
     let bands = dst.format().channels();
-    let bpc = dst.format().bytes_per_channel();
+    let kind = dst.format().kind();
     let count = dst.width() as usize * dst.height() as usize;
     let data = dst.data_mut();
     for p in 0..count {
         let di = p * bands;
         for (c, &v) in ink.iter().enumerate() {
-            write_s(data, bpc, di + c, v);
+            write_v(data, kind, di + c, v);
         }
     }
 }
 
+/// `-v` as an `i32` for the crop-origin stamp, exact wherever `-v` fits an
+/// `i32` and saturating at `i32::MIN` beyond it.
+///
+/// vips holds every dimension and both offsets in an `int`, so the question
+/// does not arise there; here a `left` above `i32::MAX` is representable and
+/// a bare `-(left as i32)` would wrap it back to a *positive* offset. A
+/// raster that wide fits the 8 GiB construction budget at one byte per pixel,
+/// so the branch is reachable rather than theoretical.
+///
+/// The obvious spelling, `-(v.min(i32::MAX as u32) as i32)`, is wrong at
+/// exactly one input. It saturates at `i32::MIN + 1`, so `left = 2147483648`
+/// comes back as `-2147483647` when `-2147483648` is both the right answer
+/// and representable. Negating through `i64` and narrowing is exact
+/// everywhere it can be, and the unit test below sweeps the four inputs
+/// around the boundary. Proving `extract_area` *reaches* this needs a 2 GiB
+/// raster; proving the arithmetic needs nothing at all, which is why the
+/// first commit's "asserted only by reasoning" was the wrong call.
+#[inline]
+fn negated_origin(v: u32) -> i32 {
+    i32::try_from(-i64::from(v)).unwrap_or(i32::MIN)
+}
+
+/// Refuse a float raster for an operation that cannot read one.
+///
+/// **Only `smartcrop`'s two analysing strategies are left**, through
+/// [`reject_untabulated_kind`]. `embed`, `gravity` and `insert` went through
+/// here until issue #945 widened the sample pipeline to `f64` ([`read_v`] /
+/// [`write_v`]), and that refusal was a parity regression rather than an
+/// implementation, the same thing #909 found one carrier family earlier:
+/// measured on `/opt/homebrew/bin/vips` 8.18.6, `vips embed`, `vips gravity`
+/// and `vips insert` all run on a `float` raster and answer FLOAT with the
+/// fractions intact. Issue #694 turned the panics into typed errors, which
+/// was an improvement; what it did not ask was which posture the refusal is.
+///
+/// The predicate is the kind rather than [`PixelFormat::is_float`], so it
+/// covers **both** spellings of a float layout, `RgbaF32` and `FloatF32(n)`.
+/// This crate has two on purpose (#531), and a guard that is right for one
+/// and wrong for the other is invisible to a suite that only builds one of
+/// them; the tests build both.
+///
+/// The split in this module is not about the operation, it is about how the
+/// operation moves pixels. `extract_area`, `crop`, `replicate`, `zoom` and
+/// `subsample` copy whole pixels byte-wise, so the sample depth never comes
+/// up. `embed`, `gravity` and `insert` read and write individual samples,
+/// and now do it through an `f64`. `smartcrop`'s entropy and attention
+/// strategies build a *value-indexed table*, which is a different question
+/// again and the one this still answers.
+#[inline]
+fn reject_unreadable_kind(op: &'static str, r: &Raster) -> Result<(), ExtractError> {
+    let kind = r.format().kind();
+    match kind {
+        SampleKind::U8
+        | SampleKind::U16
+        | SampleKind::U32
+        | SampleKind::I8
+        | SampleKind::I16
+        | SampleKind::I32 => Ok(()),
+        SampleKind::F32 => Err(ExtractError::FloatUnsupported { op }),
+    }
+}
+
+/// The stricter guard, for the two smartcrop strategies that build a
+/// value-indexed table.
+///
+/// The only caller of [`reject_unreadable_kind`] left, since #945.
+///
+/// `region_entropy` allocates one bin per sample value and `rgb_planes`
+/// divides by a fixed 8- or 16-bit scale, so those two need a kind whose
+/// values a table can be indexed by. That question is
+/// [`SampleKind::hist_bins`], and it answers `None` for the 32-bit kinds
+/// for the same reason it answers `None` for float: 2^32 bins is not a
+/// table. Without this the `uint` carrier would index a 65536-entry
+/// histogram with a sample of 90000 and panic out of a `Result`.
+///
+/// The signed one- and two-byte carriers pass, because
+/// [`SampleKind::hist_bins`] answers by width and both scorers clip a
+/// negative sample the way vips does rather than indexing with it. That is
+/// measured rather than assumed: on `/opt/homebrew/bin/vips` 8.18.6,
+/// `vips smartcrop` picks the **same** 16x16 crop from a `char` raster as
+/// from its clipped `uchar` twin, on a fixture whose only texture once
+/// negatives fold to zero sits in the positive half, under both
+/// `--interesting entropy` and `--interesting attention`. Scored on the
+/// raw signed values the noisy negative half would have won.
+fn reject_untabulated_kind(op: &'static str, r: &Raster) -> Result<(), ExtractError> {
+    reject_unreadable_kind(op, r)?;
+    let kind = r.format().kind();
+    if kind.hist_bins().is_none() {
+        return Err(ExtractError::UnsupportedSampleKind { op, kind });
+    }
+    Ok(())
+}
+
 /// Unwrap an extract-op result for the panicking ported-test surface.
+///
+/// [`ExtractError`] variants here do not name the failing op, so the panic
+/// prefixes `"<op>: "` for context.
+///
+/// There used to be a second arm, emitting [`ExtractError::FloatUnsupported`]
+/// verbatim because it embeds the op in its own `Display` and prefixing it as
+/// well doubled the name (issue #339, mirrored here by #694). None of this
+/// function's callers can raise that variant since issue #945 carried the
+/// float raster through `embed`, `gravity` and `insert`, so the arm went with
+/// the refusal rather than staying as a branch nothing can reach.
+/// [`expect_smartcrop`] keeps it, because `smartcrop` still refuses.
 #[inline]
 #[track_caller]
 fn expect_extract(op: &str, r: Result<Raster, ExtractError>) -> Raster {
@@ -372,11 +836,18 @@ fn expect_extract(op: &str, r: Result<Raster, ExtractError>) -> Raster {
 }
 
 /// Unwrap a smartcrop result for the panicking ported-test surface.
+///
+/// [`ExtractError::FloatUnsupported`] embeds the op in its own `Display`, so
+/// prefixing it here as well doubles the name (`"smartcrop: smartcrop does
+/// not support float rasters yet ..."`), which is issue #339's defect.
+/// That one variant is emitted verbatim; every other variant keeps the
+/// prefix.
 #[inline]
 #[track_caller]
 fn expect_smartcrop(r: Result<(Raster, i32, i32), ExtractError>) -> (Raster, i32, i32) {
     match r {
         Ok(v) => v,
+        Err(e @ ExtractError::FloatUnsupported { .. }) => panic!("{e}"),
         Err(e) => panic!("smartcrop: {e}"),
     }
 }
@@ -415,7 +886,22 @@ impl Raster {
                 image_h: self.height(),
             });
         }
-        Ok(self.extract(left, top, width, height)?)
+        // The carry is `Raster::extract`'s now (#740), so this no longer does
+        // it: one physical crop, one carry. Measured on vips 8.18.6:
+        // `extract_area`, `crop`, `embed`, `gravity`, `replicate`, `zoom`,
+        // `subsample` and `smartcrop` all hand the header block and the
+        // attachments straight on, including through the ops that rescale the
+        // pixel grid (`zoom` by 2x3 on `xres=5 yres=7` reports 5 and 7 back,
+        // not 10 and 21). Issue #690.
+        let mut out = self.extract(left, top, width, height)?;
+        // `vips_extract_area` writes `Xoffset = -left` / `Yoffset = -top` and
+        // throws the source's away (`conversion.c`, `vips_extract_area_build`),
+        // where the placement and tiling ops leave the source's alone. It is
+        // the only field of the header block that is not a verbatim carry, and
+        // `smartcrop` inherits the rule by going through here.
+        out.meta.xoffset = negated_origin(left);
+        out.meta.yoffset = negated_origin(top);
+        Ok(out)
     }
 
     /// Panicking form of [`Raster::try_extract_area`], matching the
@@ -457,6 +943,12 @@ impl Raster {
     /// Returns [`ExtractError::EmptyArea`] if `width` or `height` is zero,
     /// or [`ExtractError::BackgroundLengthMismatch`] for a bad background
     /// vector.
+    ///
+    /// Every carrier goes through, float included (issue #945). On a float
+    /// raster the background is carried whole rather than truncated into an
+    /// integer, matching vips: measured on `/opt/homebrew/bin/vips` 8.18.6,
+    /// `--background -0.5` fills **-0.5** on a `float` raster and 0 on its
+    /// `char` twin.
     pub fn try_embed(
         &self,
         x: i32,
@@ -493,6 +985,11 @@ impl Raster {
 
     /// Shared embed kernel with an `i64` origin so `gravity` cannot
     /// overflow the public `i32` surface on extreme canvas sizes.
+    ///
+    /// Total over [`SampleKind`] since issue #945: the samples move through
+    /// [`read_v`] / [`write_v`], so there is no carrier for a caller to
+    /// reject first and the `debug_assert` that used to hold that contract
+    /// is gone with it.
     fn embed_impl(
         &self,
         x: i64,
@@ -507,12 +1004,19 @@ impl Raster {
         }
         let fmt = self.format();
         let bands = fmt.channels();
-        let bpc = fmt.bytes_per_channel();
-        let max = if bpc == 1 { 255u32 } else { 65535u32 };
-        let ink: Vec<u32> = match extend {
-            Extend::White => vec![max; bands],
-            Extend::Background => resolve_ink(bands, max, background)?,
-            _ => vec![0; bands],
+        let kind = fmt.kind();
+        let bpc = kind.bytes();
+        let range = kind.range();
+        let ink: Vec<f64> = match extend {
+            // The white ink comes from the interpretation, never from the
+            // range; see [`white_ink`]. It is a byte pattern rather than a
+            // number, so it is *not* clipped: `white_ink` answers 255 for a
+            // one-byte carrier of either signedness and `write_v` narrows
+            // that to the `-1` vips fills a `char` border with, while a
+            // float carrier keeps the ink as a number.
+            Extend::White => vec![white_ink(fmt, self.interpretation()); bands],
+            Extend::Background => resolve_ink(bands, range, background)?,
+            _ => vec![0.0; bands],
         };
         let (w, h) = (self.width() as i64, self.height() as i64);
         let sstride = self.width() as usize;
@@ -536,18 +1040,20 @@ impl Raster {
                     Some((sx, sy)) => {
                         let si = (sy as usize * sstride + sx as usize) * bands;
                         for c in 0..bands {
-                            write_s(&mut out, bpc, di + c, read_s(data, bpc, si + c));
+                            write_v(&mut out, kind, di + c, read_v(data, kind, si + c));
                         }
                     }
                     None => {
                         for (c, &v) in ink.iter().enumerate() {
-                            write_s(&mut out, bpc, di + c, v);
+                            write_v(&mut out, kind, di + c, v);
                         }
                     }
                 }
             }
         }
-        Ok(Raster::new(width, height, fmt, out)?)
+        let mut out = Raster::new(width, height, fmt, out)?;
+        out.carry_meta_from(self);
+        Ok(out)
     }
 
     /// Place the image at a compass position inside a `width` x `height`
@@ -561,7 +1067,8 @@ impl Raster {
     ///
     /// Returns [`ExtractError::EmptyArea`] if `width` or `height` is zero,
     /// or [`ExtractError::BackgroundLengthMismatch`] for a bad background
-    /// vector.
+    /// vector. Every carrier goes through, float included, exactly as in
+    /// [`Raster::try_embed`], which this delegates to (issue #945).
     pub fn try_gravity(
         &self,
         direction: CompassDirection,
@@ -753,7 +1260,9 @@ impl Raster {
                 out.extend_from_slice(&data[si..si + bpp]);
             }
         }
-        Ok(Raster::new(ow as u32, oh as u32, self.format(), out)?)
+        let mut out = Raster::new(ow as u32, oh as u32, self.format(), out)?;
+        out.carry_meta_from(self);
+        Ok(out)
     }
 
     /// Insert `sub` over `self` with its top-left corner at `(x, y)`
@@ -778,9 +1287,14 @@ impl Raster {
     ///
     /// Returns [`ExtractError::BandCountMismatch`] for incompatible band
     /// counts, [`ExtractError::BackgroundLengthMismatch`] for a background
-    /// vector whose length is neither 1 nor the band count, or
-    /// [`ExtractError::SizeOverflow`] if the expanded canvas would not fit
-    /// `u32` dimensions.
+    /// vector whose length is neither 1 nor the band count,
+    /// or [`ExtractError::SizeOverflow`] if the expanded canvas would not
+    /// fit `u32` dimensions.
+    ///
+    /// Every carrier goes through, float included (issue #945). The result
+    /// takes the promotion of the two input kinds, so a float `sub` under an
+    /// integer `main` gives a float canvas, which is what `vips insert`
+    /// answers for the same pair.
     pub fn try_insert(
         &self,
         sub: &Raster,
@@ -795,16 +1309,18 @@ impl Raster {
             return Err(ExtractError::BandCountMismatch { main: mb, sub: sb });
         }
         let bands = mb.max(sb);
-        let bpc = self
-            .format()
-            .bytes_per_channel()
-            .max(sub.format().bytes_per_channel());
-        let max = if bpc == 1 { 255u32 } else { 65535u32 };
+        // Through `SampleKind::promote`, not the wider byte width: a width
+        // cannot order the carriers, and four bytes answers float for a
+        // `uint` input (issues #517, #607).
+        let kind = self.format().kind().promote(sub.format().kind());
+        // `None` for a float carrier, which is what tells `resolve_ink` to
+        // carry the background whole rather than truncate it (issue #945).
+        let range = kind.range();
         // Resolve the fill up front so a bad background vector errors even
         // when `expand` leaves no visible gap.
-        let ink = resolve_ink(bands, max, background)?;
-        let fmt = PixelFormat::with_channels(bands, bpc)
-            .expect("band count is bounded by the two input formats");
+        let ink = resolve_ink(bands, range, background)?;
+        let fmt = PixelFormat::with_kind(bands, kind)
+            .expect("band count is bounded by the two input formats, and the kind is carried");
         let (ox, oy, ow, oh) = if expand {
             let left = 0i64.min(x as i64);
             let top = 0i64.min(y as i64);
@@ -824,11 +1340,23 @@ impl Raster {
         // Pre-fill with the background so uncovered pixels keep it; `blit`
         // then overwrites the pixels the two inputs actually cover. A black
         // (all-zero) ink is already the zeroed state, so skip the fill.
-        if ink.iter().any(|&v| v != 0) {
+        // Compared through the bit pattern rather than against `0.0`,
+        // because a float carrier can be asked for -0.0 and that is a
+        // different sample from the +0.0 the buffer starts at.
+        if ink.iter().any(|&v| v.to_bits() != 0) {
             fill_ink(&mut out, &ink);
         }
         blit(&mut out, self, -ox, -oy);
         blit(&mut out, sub, x as i64 - ox, y as i64 - oy);
+        // Two rules, both measured on vips 8.18.6 (issue #718). The header
+        // block comes from `main` alone: an scRGB `sub` under an sRGB `main`
+        // reports sRGB, and the resolution, the offsets and the orientation
+        // are all `main`'s. The attached fields are the union of both, with
+        // `main` winning a name they share, so a profile only `sub` carries
+        // still reaches the output. I ran it both ways round rather than
+        // reading one cell.
+        out.carry_meta_from(self);
+        out.merge_fields_from(sub);
         Ok(out)
     }
 
@@ -862,6 +1390,12 @@ impl Raster {
     /// Returns [`ExtractError::EmptyArea`] if `width` or `height` is zero,
     /// or [`ExtractError::AreaOutOfBounds`] if the crop is larger than the
     /// image (libvips "bad extract area").
+    ///
+    /// [`SmartcropInteresting::Entropy`] and
+    /// [`SmartcropInteresting::Attention`] also return
+    /// [`ExtractError::FloatUnsupported`] on a float raster, because they read
+    /// samples; the four pure-geometry strategies take one unchanged (issue
+    /// #694).
     pub fn try_smartcrop(
         &self,
         width: u32,
@@ -886,6 +1420,17 @@ impl Raster {
             SmartcropInteresting::All => (self.width(), self.height()),
             _ => (width, height),
         };
+        // Only the two strategies that read samples. The other four are pure
+        // geometry and take a float raster unchanged, so a guard at this entry
+        // point would break four working strategies to fix two (issue #694).
+        // Ahead of the premultiply below, so a refused call does not pay for a
+        // whole-image copy first.
+        if matches!(
+            interesting,
+            SmartcropInteresting::Entropy | SmartcropInteresting::Attention
+        ) {
+            reject_untabulated_kind("smartcrop", self)?;
+        }
         // libvips premultiplies before the strategy switch whenever an
         // alpha band is present; `has_alpha` guarantees the two bands
         // `premultiply` needs, so the panicking form cannot fire.
@@ -969,8 +1514,10 @@ impl Raster {
 /// `vips_smartcrop_score` computes via `hist_find` + `hist_entropy`.
 fn region_entropy(im: &Raster, x: i64, y: i64, w: i64, h: i64) -> f64 {
     let bands = im.format().channels();
-    let bpc = im.format().bytes_per_channel();
-    let bins = if bpc == 1 { 256 } else { 65536 };
+    let kind = im.format().kind();
+    let bins = kind
+        .hist_bins()
+        .expect("reject_untabulated_kind refuses a kind with no bin count");
     let mut hist = vec![0u64; bins];
     let stride = im.width() as usize;
     let data = im.data();
@@ -978,7 +1525,13 @@ fn region_entropy(im: &Raster, x: i64, y: i64, w: i64, h: i64) -> f64 {
         for xx in x..x + w {
             let base = (yy as usize * stride + xx as usize) * bands;
             for c in 0..bands {
-                hist[read_s(data, bpc, base + c) as usize] += 1;
+                // `vips_hist_find` clips a sample into the bin table rather
+                // than indexing with it, so every negative lands in bin
+                // zero. Measured on 8.18.6: a `char` image holding
+                // `[-100, -1, 0, 100]` histograms to `bin 0 = 3` and
+                // `bin 100 = 1` (issue #909).
+                let bin = read_s(data, kind, base + c).clamp(0, bins as i64 - 1);
+                hist[bin as usize] += 1;
             }
         }
     }
@@ -1058,15 +1611,28 @@ fn transpose(src: &[f64], w: usize, h: usize) -> Vec<f64> {
 /// analysis input being already premultiplied.
 fn rgb_planes(im: &Raster) -> [Vec<f64>; 3] {
     let bands = im.format().channels();
-    let bpc = im.format().bytes_per_channel();
-    let scale = if bpc == 1 { 1.0 } else { 257.0 };
+    let kind = im.format().kind();
+    // The 8-bit scale, taken from the kind's own table size rather than from a
+    // byte width: 255/255 for the one-byte kinds and 65535/255 = 257 for the
+    // two-byte ones, which is exactly what the width rule answered. A width
+    // cannot separate the three four-byte kinds, and this never has to,
+    // because `hist_bins` is `None` precisely where `reject_untabulated_kind`
+    // has already refused the call (issues #607, #942).
+    let bins = kind
+        .hist_bins()
+        .expect("smartcrop refuses a kind with no bin table before the analysis image is read");
+    let scale = (bins - 1) as f64 / 255.0;
     let (w, h) = (im.width() as usize, im.height() as usize);
     let data = im.data();
     let mut planes: [Vec<f64>; 3] = [vec![0.0; w * h], vec![0.0; w * h], vec![0.0; w * h]];
     for i in 0..w * h {
         for (c, plane) in planes.iter_mut().enumerate() {
             let sc = if bands >= 3 { c } else { 0 };
-            plane[i] = read_s(data, bpc, i * bands + sc) as f64 / scale;
+            // Clipped at zero, the bottom half of the `vips_cast` to
+            // uchar the attention path scores through. The unsigned
+            // carriers cannot reach the clamp, so this is the signed
+            // carriers' arm and nothing else (issue #909).
+            plane[i] = read_s(data, kind, i * bands + sc).max(0) as f64 / scale;
         }
     }
     planes
@@ -1168,10 +1734,40 @@ fn attention_crop(im: &Raster, cw: u32, ch: u32) -> (u32, u32, i32, i32) {
     let sigma =
         (((cw as f64 * hscale).powi(2) + (ch as f64 * vscale).powi(2)).sqrt() / 10.0).max(1.0);
 
+    // Drop the alpha band before the shrink, because libviprs' `resize`
+    // premultiplies where `vips_resize` does not (issue #603).
+    //
+    // `vips_smartcrop_build` premultiplies once into float and hands the
+    // result to `vips_resize`, which explicitly does NOT premultiply ("This
+    // operation does not premultiply alpha. If your image has an alpha
+    // channel, you should use premultiply on it first", `resize.c`). So in
+    // vips the analysis image is still premultiplied when the argmax is taken,
+    // and every transparent pixel is still at colour 0. libviprs' `resize`
+    // brackets its own premultiply / un-premultiply pair around the resample
+    // instead (a deliberate divergence, core #458), so handing it the
+    // already-premultiplied analysis image un-premultiplies it on the way out
+    // and the colour hiding behind transparent pixels comes back as bright
+    // garbage, which then dominates the edge and skin scores.
+    //
+    // vips drops the alpha band immediately after the resize anyway
+    // (`vips_colourspace` to XYZ, then `extract_band(0, "n", 3)`), and a
+    // resample that does not premultiply is per-band independent, so dropping
+    // it *before* the resize is exactly equivalent to what vips computes and
+    // leaves libviprs' bracket with nothing to do. `has_alpha` is only ever
+    // the four-band formats, so the band range always fits and the panicking
+    // form cannot fire.
+    let analysis_storage;
+    let analysis: &Raster = if im.format().has_alpha() {
+        analysis_storage = im.extract_bands(0, im.format().channels() as u32 - 1);
+        &analysis_storage
+    } else {
+        im
+    };
+
     // Shrink to the attention working size with the default lanczos3
     // `vips_resize`, matching libvips exactly. A box filter here shifts the
     // energy argmax, and thus the crop, off the libvips position.
-    let small = im.resize_with(
+    let small = analysis.resize_with(
         hscale,
         ResizeOptions {
             vscale: Some(vscale),
@@ -1238,6 +1834,20 @@ fn attention_crop(im: &Raster, cw: u32, ch: u32) -> (u32, u32, i32, i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::imageio::MetadataValue;
+    use crate::pixel::ALL_KINDS;
+
+    /// A one-band `Int8` raster from signed sample values.
+    fn int8(w: u32, h: u32, vals: &[i8]) -> Raster {
+        let data: Vec<u8> = vals.iter().map(|v| *v as u8).collect();
+        let fmt = PixelFormat::Int8(core::num::NonZeroU16::new(1).unwrap());
+        Raster::new(w, h, fmt, data).unwrap()
+    }
+
+    /// Every sample of an `Int8` raster, read back signed.
+    fn i8s(r: &Raster) -> Vec<i8> {
+        r.data().iter().map(|b| *b as i8).collect()
+    }
 
     /// A width x height Gray8 raster from a byte vector.
     fn gray(w: u32, h: u32, data: Vec<u8>) -> Raster {
@@ -1263,6 +1873,15 @@ mod tests {
     /// A 4x4 Gray8 ramp 0..16, row-major.
     fn ramp4() -> Raster {
         gray(4, 4, (0..16).collect())
+    }
+
+    /// `im` carrying an explicit interpretation, or left untagged so
+    /// [`Interpretation::for_format`] answers for it.
+    fn tagged(im: Raster, tag: Option<Interpretation>) -> Raster {
+        match tag {
+            Some(t) => im.copy().interpretation(t).build(),
+            None => im,
+        }
     }
 
     // -- extract_area / crop ------------------------------------------------
@@ -1345,16 +1964,95 @@ mod tests {
         assert_eq!(out.getpoint(3, 3), vec![9.0, 9.0, 9.0]);
     }
 
+    /// Issue #667, the whole measured table in one place, including the float
+    /// column [`Raster::embed`] itself cannot reach (`read_s` panics on a
+    /// float carrier, so float embed is unimplemented rather than wrong) and
+    /// the `uchar` + RGB16 cell, whose `255` is the `memset` keeping the low
+    /// byte of `65535`. That cell is only visible here: the sample writers
+    /// downstream truncate (`write_s`) or clamp (`SampleLayout::write`, over
+    /// in [`crate::resample`]) a 65535 into an 8-bit sample and land on 255 by
+    /// their own route, so an ink that skipped the truncation would paint the
+    /// same pixel anyway.
+    ///
+    /// The `grey16` column is here for the same reason. Its float cell is
+    /// 65535 where the depth rule this PR replaces gave 255, and it is the
+    /// other cell that moved without anybody having to tag a raster `Rgb16`,
+    /// so leaving it unasserted would let the whole `Grey16` arm regress
+    /// silently.
+    ///
+    /// Measured on vips 8.18.6, `vips embed in.v out.v 1 1 10 10 --extend
+    /// white`, reading the corner.
     #[test]
-    fn embed_white_fills_with_depth_max() {
-        let im = gray(1, 1, vec![7]);
-        let out = im.embed(1, 1, 3, 3, Extend::White, None);
-        assert_eq!(out.getpoint(0, 0), vec![255.0]);
-        assert_eq!(out.getpoint(1, 1), vec![7.0]);
+    fn white_ink_reproduces_the_measured_embed_table() {
+        use Interpretation as I;
+        let float3 = PixelFormat::FloatF32(core::num::NonZeroU16::new(3).unwrap());
+        // (carrier, multiband, srgb, rgb16, grey16, scrgb)
+        #[rustfmt::skip]
+        let cases = [
+            (PixelFormat::Rgb8,    255.0,   255.0,   255.0,   255.0,     1.0),
+            (PixelFormat::Rgb16, 65535.0, 65535.0, 65535.0, 65535.0,   257.0),
+            (float3,               255.0,   255.0, 65535.0, 65535.0,     1.0),
+        ];
+        for (fmt, multiband, srgb, rgb16, grey16, scrgb) in cases {
+            for (tag, want) in [
+                (I::Multiband, multiband),
+                (I::Srgb, srgb),
+                (I::Rgb16, rgb16),
+                (I::Grey16, grey16),
+                (I::ScRgb, scrgb),
+            ] {
+                assert_eq!(white_ink(fmt, tag), want, "{fmt:?} tagged {tag:?}");
+            }
+        }
+    }
 
-        let im16 = gray16(1, 1, &[7]);
-        let out16 = im16.embed(1, 1, 3, 3, Extend::White, None);
-        assert_eq!(out16.getpoint(0, 0), vec![65535.0]);
+    /// Issue #667. `Extend::White` inks from the **interpretation**, and the
+    /// depth only ever shows through the `memset` that paints an integer
+    /// carrier; see [`white_ink`].
+    ///
+    /// Measured on vips 8.18.6, `vips embed in.v out.v 1 1 10 10 --extend
+    /// white` reading the corner. The 8- and 16-bit columns are the two this
+    /// module can carry; the float column is [`crate::resample`]'s, since
+    /// [`read_s`] still refuses a float raster here:
+    ///
+    /// ```text
+    /// carrier  multiband  srgb   rgb16  grey16  scrgb
+    /// uchar    255        255    255    255     1
+    /// ushort   65535      65535  65535  65535   257
+    /// float    255        255    65535  65535   1
+    /// ```
+    ///
+    /// The untagged rows are the regression pins: `Gray8` resolves to
+    /// [`Interpretation::Bw`] and `Gray16` to [`Interpretation::Grey16`], and
+    /// both land on the depth maximum the old ink happened to give.
+    #[test]
+    fn embed_white_inks_the_interpretation_through_the_paint_memset() {
+        use Interpretation as I;
+        // (tag, uchar corner, ushort corner)
+        let cases = [
+            (None, 255.0, 65535.0),
+            (Some(I::Multiband), 255.0, 65535.0),
+            (Some(I::Srgb), 255.0, 65535.0),
+            (Some(I::Rgb16), 255.0, 65535.0),
+            (Some(I::Grey16), 255.0, 65535.0),
+            (Some(I::ScRgb), 1.0, 257.0),
+        ];
+        for (tag, want8, want16) in cases {
+            let out = tagged(gray(1, 1, vec![7]), tag).embed(1, 1, 3, 3, Extend::White, None);
+            assert_eq!(
+                out.getpoint(0, 0),
+                vec![want8],
+                "8-bit carrier, tag {tag:?}"
+            );
+            assert_eq!(out.getpoint(1, 1), vec![7.0], "the image itself is copied");
+
+            let out16 = tagged(gray16(1, 1, &[7]), tag).embed(1, 1, 3, 3, Extend::White, None);
+            assert_eq!(
+                out16.getpoint(0, 0),
+                vec![want16],
+                "16-bit carrier, tag {tag:?}"
+            );
+        }
     }
 
     #[test]
@@ -1956,6 +2654,77 @@ mod tests {
         assert!(ax < 32, "attention_x {ax} should point at the opaque block");
     }
 
+    /// Regression for #603: the attention analysis must stay in premultiplied
+    /// space all the way to the argmax, the way it does in vips.
+    ///
+    /// A 128x128 image split on the diagonal: a saturated skin-tone triangle
+    /// that is fully opaque, and a bright grey remainder that is fully
+    /// transparent. vips premultiplies once and then resizes *without*
+    /// un-premultiplying, so the transparent side is colour 0 by the time it is
+    /// scored, its luma fails the `Y > 5` mask, and the argmax has to land on
+    /// an opaque pixel. libviprs' `resize` premultiplies on its own, so before
+    /// the fix its bracket un-premultiplied the analysis image on the way out;
+    /// the lanczos ringing along the boundary came back divided by a near-zero
+    /// alpha, lit up a wide band on the transparent side, and the argmax landed
+    /// there.
+    ///
+    /// The assertion is the mechanism rather than the exact coordinate. This
+    /// fixture is symmetric about the diagonal, so the two ends of the ridge
+    /// score almost equally and the winner between them is a near tie — pinning
+    /// which end wins would pin a coincidence. What is not a tie is which
+    /// *side* of the transparency boundary wins, and that flips cleanly with
+    /// the bug. For the record, the oracle agrees with the fixed code on the
+    /// coordinate as well:
+    ///
+    /// ```text
+    /// vips smartcrop diag.png o.png 32 32 --interesting attention \
+    ///   --attention-x --attention-y   ->  100 then 0
+    /// ```
+    ///
+    /// and it stays 100/0 through `--premultiplied` on a pre-premultiplied
+    /// copy. Every threshold from 100 to 120 puts vips on the opaque side and
+    /// the pre-fix code on the transparent side.
+    #[test]
+    fn smartcrop_attention_cannot_land_on_a_transparent_pixel() {
+        const SPLIT: usize = 110;
+        let (w, h) = (128usize, 128usize);
+        let mut data = vec![0u8; w * h * 4];
+        for y in 0..h {
+            for x in 0..w {
+                let i = (y * w + x) * 4;
+                let px: [u8; 4] = if x + y < SPLIT {
+                    [215, 150, 120, 255]
+                } else {
+                    [181, 184, 193, 0]
+                };
+                data[i..i + 4].copy_from_slice(&px);
+            }
+        }
+        let im = rgba(w as u32, h as u32, data);
+
+        let (_, ax, ay) = im.smartcrop_with_coords(32, 32, SmartcropInteresting::Attention);
+        assert!(
+            (ax as usize) + (ay as usize) < SPLIT,
+            "attention ({ax}, {ay}) landed on a fully transparent pixel: the \
+             analysis image was un-premultiplied on the way out of resize (#603)"
+        );
+
+        // Same through the `premultiplied = true` door, which skips the
+        // smartcrop-level premultiply because the caller already did it. The
+        // resize must not undo it there either.
+        let (_, pax, pay) = im.premultiply().smartcrop_with_coords_premultiplied(
+            32,
+            32,
+            SmartcropInteresting::Attention,
+            true,
+        );
+        assert!(
+            (pax as usize) + (pay as usize) < SPLIT,
+            "attention ({pax}, {pay}) landed on a fully transparent pixel \
+             through the premultiplied door (#603)"
+        );
+    }
+
     #[test]
     fn smartcrop_premultiplied_flag_skips_the_internal_premultiply() {
         // Fully opaque image: premultiplying is the identity, so both
@@ -2025,5 +2794,1112 @@ mod tests {
             "sideways".parse::<CompassDirection>(),
             Err(ExtractError::UnknownDirection { .. })
         ));
+    }
+    // -- crop-origin arithmetic (issue #690) ----------------------------------------------
+
+    /// The offset stamp is exact wherever `-v` fits an `i32`, and saturates
+    /// only past that.
+    ///
+    /// `negated_origin` is a private function of a `u32`, so this costs
+    /// nothing, where proving `extract_area` reaches the far end of the range
+    /// needs a 2 GiB raster. #690 shipped the saturation "asserted only by
+    /// reasoning" on the strength of that second cost, and the reasoning was
+    /// wrong by one: `-(v.min(i32::MAX as u32) as i32)` saturates at
+    /// `i32::MIN + 1`, so `2147483648` came back as `-2147483647` when
+    /// `-2147483648` is representable and correct.
+    #[test]
+    fn the_crop_origin_stamp_is_exact_until_it_cannot_be() {
+        assert_eq!(negated_origin(0), 0);
+        assert_eq!(negated_origin(1), -1);
+        assert_eq!(negated_origin(i32::MAX as u32), -2_147_483_647);
+        // The cell the old spelling got wrong. `-2147483648` is `i32::MIN`,
+        // it fits, and it is the true answer.
+        assert_eq!(negated_origin(2_147_483_648), i32::MIN);
+        // And the first input whose negation genuinely does not fit.
+        assert_eq!(negated_origin(2_147_483_649), i32::MIN);
+        assert_eq!(negated_origin(u32::MAX), i32::MIN);
+    }
+
+    // -- float refusal (issue #694) -------------------------------------------------------
+
+    /// A float raster of `bands` bands filled with a ramp, the carrier an EXR,
+    /// FITS or `.v` decode hands back, spelled `FloatF32(n)`.
+    fn floatf(bands: u16, w: u32, h: u32) -> Raster {
+        let n = (w * h) as usize * bands as usize;
+        let data: Vec<u8> = (0..n).flat_map(|v| (v as f32).to_ne_bytes()).collect();
+        let fmt = PixelFormat::FloatF32(std::num::NonZeroU16::new(bands).expect("bands"));
+        Raster::new(w, h, fmt, data).expect("float fixture")
+    }
+
+    /// The same four-band float layout spelled `RgbaF32`, which is what
+    /// [`PixelFormat::canonical`] produces and what a decoded RGBA EXR hands
+    /// back.
+    ///
+    /// This crate has two spellings of every float layout on purpose (#531),
+    /// so a predicate that is right for one and wrong for the other is the
+    /// interesting way to get `reject_float` wrong, and it is invisible to a
+    /// suite that only ever builds `FloatF32(n)`. Narrowing the guard to
+    /// `matches!(fmt, PixelFormat::FloatF32(_))` leaves the whole library
+    /// suite green and puts `RgbaF32` back to panicking out of a `Result`.
+    fn rgbaf32(w: u32, h: u32) -> Raster {
+        let n = (w * h) as usize * 4;
+        let data: Vec<u8> = (0..n).flat_map(|v| (v as f32).to_ne_bytes()).collect();
+        Raster::new(w, h, PixelFormat::RgbaF32, data).expect("rgbaf32 fixture")
+    }
+
+    /// Issues #694 and #945. Every sample-reading entry point here takes a
+    /// float raster and answers a float raster.
+    ///
+    /// This replaces `the_sample_reading_ops_refuse_a_float_raster_instead_of_panicking`,
+    /// which asserted the typed refusal #694 shipped. That refusal was the
+    /// right thing against the panic it replaced and the wrong thing against
+    /// vips, which runs every one of these on a `float` raster and answers
+    /// FLOAT, so it is retired the way #909's was: **replaced by value
+    /// assertions rather than deleted as though it had been wrong.**
+    ///
+    /// The case list is #694's, unchanged, because it is what makes the sweep
+    /// worth having. Every `Extend` mode is here rather than just `White`,
+    /// because the sample copy and the ink are different code: a fix that only
+    /// taught the inking path about float would leave five of six modes
+    /// answering the wrong samples. Both float spellings are here for the
+    /// same reason (#531), and both sides of `insert`, since the result takes
+    /// the promotion of the two kinds.
+    #[test]
+    fn the_sample_reading_ops_carry_a_float_raster_issue_945() {
+        let im = floatf(3, 8, 8);
+        let sub = floatf(3, 2, 2);
+        let bg = [1.0f64, 2.0, 3.0];
+        let cases: Vec<(&str, Result<Raster, ExtractError>)> = vec![
+            (
+                "embed black",
+                im.try_embed(1, 1, 12, 12, Extend::Black, None),
+            ),
+            (
+                "embed white",
+                im.try_embed(1, 1, 12, 12, Extend::White, None),
+            ),
+            ("embed copy", im.try_embed(1, 1, 12, 12, Extend::Copy, None)),
+            (
+                "embed repeat",
+                im.try_embed(1, 1, 12, 12, Extend::Repeat, None),
+            ),
+            (
+                "embed mirror",
+                im.try_embed(1, 1, 12, 12, Extend::Mirror, None),
+            ),
+            (
+                "embed background",
+                im.try_embed(1, 1, 12, 12, Extend::Background, Some(&bg)),
+            ),
+            (
+                "gravity",
+                im.try_gravity(CompassDirection::Centre, 12, 12, Extend::Black, None),
+            ),
+            ("insert", im.try_insert(&sub, 1, 1, false, None)),
+            ("insert expand", im.try_insert(&sub, 1, 1, true, None)),
+            // Either input is enough on its own. The result takes the wider of
+            // the two depths, so a float `sub` under an unsigned `main`
+            // reaches the same sample copy, and a guard that only looked at
+            // `self` would leave it panicking. I found this by mutating the
+            // `sub` guard away and watching this test stay green, so it is
+            // here rather than in the "nice to have" pile.
+            (
+                "insert float sub",
+                rgb(8, 8, vec![1u8; 8 * 8 * 3]).try_insert(&sub, 1, 1, false, None),
+            ),
+            (
+                "insert float sub expanding",
+                rgb(8, 8, vec![1u8; 8 * 8 * 3]).try_insert(&sub, -1, -1, true, None),
+            ),
+            (
+                "insert float main",
+                im.try_insert(&rgb(2, 2, vec![1u8; 12]), 1, 1, false, None),
+            ),
+            // The other spelling of the same layout. See `rgbaf32`.
+            (
+                "embed rgbaf32",
+                rgbaf32(8, 8).try_embed(1, 1, 12, 12, Extend::White, None),
+            ),
+            (
+                "gravity rgbaf32",
+                rgbaf32(8, 8).try_gravity(CompassDirection::Centre, 12, 12, Extend::Black, None),
+            ),
+            (
+                "insert rgbaf32",
+                rgbaf32(8, 8).try_insert(&rgbaf32(2, 2), 1, 1, false, None),
+            ),
+        ];
+        for (name, got) in cases {
+            let out = got.unwrap_or_else(|e| panic!("{name} must carry a float raster: {e}"));
+            assert!(
+                out.format().is_float(),
+                "{name} must answer a float raster, got {:?}",
+                out.format()
+            );
+        }
+    }
+
+    /// Issue #694. `smartcrop` splits on the strategy, and a caller cannot see
+    /// that from the signature.
+    ///
+    /// `Centre`, `Low`, `High` and `All` are pure geometry, so they take a
+    /// float raster today and must keep taking it. `Entropy` pools a histogram
+    /// and `Attention` builds saliency maps, and both read samples, so both
+    /// panic. Measured, not assumed: I ran all six.
+    ///
+    /// The four that work are asserted as well as the two that do not, because
+    /// a fix that rejected float at the `try_smartcrop` entry point would make
+    /// this test's first half green by breaking four working strategies, and
+    /// nothing else in the suite would notice.
+    #[test]
+    fn smartcrop_refuses_float_only_on_the_strategies_that_read_samples() {
+        let im = floatf(3, 8, 8);
+        for interesting in [
+            SmartcropInteresting::Entropy,
+            SmartcropInteresting::Attention,
+        ] {
+            let got = im.try_smartcrop(4, 4, interesting, false);
+            assert!(
+                matches!(got, Err(ExtractError::FloatUnsupported { .. })),
+                "smartcrop {interesting:?} reads samples, so it must refuse a float raster"
+            );
+        }
+        for interesting in [
+            SmartcropInteresting::Centre,
+            SmartcropInteresting::Low,
+            SmartcropInteresting::High,
+            SmartcropInteresting::All,
+        ] {
+            let (out, _, _) = im
+                .try_smartcrop(4, 4, interesting, false)
+                .unwrap_or_else(|e| panic!("smartcrop {interesting:?} is pure geometry: {e}"));
+            assert_eq!(out.format(), im.format(), "smartcrop {interesting:?}");
+        }
+
+        // And on the alpha carrier, which is the only way to reach the
+        // `premultiply()` branch above the strategy switch. A three-band
+        // fixture never takes it, so "the four pure-geometry strategies take a
+        // float raster unchanged" was untested for the case that actually has
+        // a premultiply in front of it.
+        let alpha = rgbaf32(8, 8);
+        for premultiplied in [false, true] {
+            let (out, _, _) = alpha
+                .try_smartcrop(4, 4, SmartcropInteresting::Centre, premultiplied)
+                .unwrap_or_else(|e| panic!("smartcrop centre on RgbaF32 ({premultiplied}): {e}"));
+            assert_eq!(out.format(), PixelFormat::RgbaF32);
+        }
+        for interesting in [
+            SmartcropInteresting::Entropy,
+            SmartcropInteresting::Attention,
+        ] {
+            assert!(
+                matches!(
+                    alpha.try_smartcrop(4, 4, interesting, false),
+                    Err(ExtractError::FloatUnsupported { .. })
+                ),
+                "smartcrop {interesting:?} on RgbaF32"
+            );
+        }
+    }
+
+    /// Issues #694 and #945. The kernel itself is total over the carriers,
+    /// which is what retires the `debug_assert` that used to stand in for a
+    /// guard at its two callers.
+    ///
+    /// This replaces `embed_impl_asserts_its_callers_rejected_float_first`.
+    /// That assert was the right thing while `embed_impl` could not read a
+    /// float sample: it held a contract the callers had to keep, and #700's
+    /// argument was that a sentence in a doc is not a guard. The contract is
+    /// gone rather than unheld, so the cell that replaces it drives the
+    /// kernel directly on the carrier the assert used to refuse.
+    ///
+    /// Called on `embed_impl` and not on `try_embed`, deliberately: a third
+    /// caller added tomorrow reaches this kernel, and this says what it gets.
+    #[test]
+    fn embed_impl_carries_a_float_raster_issue_945() {
+        let im = float1(3, 1, &[1.5, -0.25, 3.75]);
+        let out = im
+            .embed_impl(1, 0, 5, 1, Extend::Black, None)
+            .expect("the kernel takes every carrier");
+        assert_eq!(f32s(&out), vec![0.0, 1.5, -0.25, 3.75, 0.0]);
+    }
+
+    /// Issue #694 against #339. The panicking forms do not double the op name.
+    ///
+    /// `expect_smartcrop` emits `FloatUnsupported` verbatim because that
+    /// variant embeds the op in its own `Display`, and prefixing it too gave
+    /// `"smartcrop: smartcrop does not support float rasters yet"`.
+    /// `arithmetic.rs` fixed exactly this for its own `FloatUnsupported` and
+    /// named #339 while doing it; #694 mirrored the error shape and not the
+    /// wrapper, so the defect arrived here with it.
+    ///
+    /// `smartcrop` is the only op left that can raise that variant, since
+    /// #945 carried the float raster through `embed`, `gravity` and `insert`.
+    /// So the other three rows are now the **inverse** control: they take a
+    /// variant that does *not* name itself (`EmptyArea`) and prove the prefix
+    /// is still applied, which is what stops "never prefix anything" passing
+    /// this test.
+    #[test]
+    fn the_panicking_forms_do_not_say_the_op_twice() {
+        let text_of = |call: Box<dyn FnOnce()>| -> String {
+            let msg = std::panic::catch_unwind(std::panic::AssertUnwindSafe(call))
+                .expect_err("must panic");
+            msg.downcast_ref::<String>()
+                .cloned()
+                .or_else(|| msg.downcast_ref::<&str>().map(ToString::to_string))
+                .expect("panic payload is a string")
+        };
+
+        // The self-naming variant, emitted verbatim.
+        let text = text_of(Box::new(move || {
+            floatf(3, 8, 8).smartcrop(4, 4, SmartcropInteresting::Entropy);
+        }));
+        assert_eq!(
+            text.matches("smartcrop does not support float").count()
+                + text.matches("smartcrop: ").count(),
+            1,
+            "the op name must appear once, got {text:?}"
+        );
+
+        // The control: a variant that names nothing still gets the prefix, on
+        // every panicking form that used to be in the list above.
+        for (op, call) in [
+            (
+                "embed",
+                Box::new(move || {
+                    floatf(3, 8, 8).embed(1, 1, 0, 0, Extend::Black, None);
+                }) as Box<dyn FnOnce()>,
+            ),
+            (
+                "gravity",
+                Box::new(move || {
+                    floatf(3, 8, 8).gravity(CompassDirection::Centre, 0, 0);
+                }),
+            ),
+            (
+                "insert",
+                Box::new(move || {
+                    floatf(3, 8, 8).insert(&floatf(2, 2, 2), 1, 1, false);
+                }),
+            ),
+        ] {
+            let text = text_of(call);
+            assert!(
+                text.starts_with(&format!("{op}: ")),
+                "a variant that does not name itself must keep the prefix, got {text:?}"
+            );
+        }
+    }
+
+    /// Issue #694. The refusal names the operation, so a caller reading the
+    /// message knows which call to change.
+    ///
+    /// The old panic said "this extract operation", which is the whole problem
+    /// in miniature: it reached the caller as a process-visible panic out of a
+    /// `Result` signature, and it did not even say which operation.
+    ///
+    /// `smartcrop` is the only op here that still refuses a carrier, since
+    /// #945, so both of its refusing strategies are swept and both refusal
+    /// variants with them: `FloatUnsupported` on a float raster and
+    /// `UnsupportedSampleKind` on a `uint` one, because a value-indexed table
+    /// is the wrong shape for either.
+    #[test]
+    fn the_float_refusal_names_the_operation() {
+        let n = |v: u16| core::num::NonZeroU16::new(v).unwrap();
+        let f = floatf(3, 8, 8);
+        let u = Raster::zeroed(8, 8, PixelFormat::Uint32(n(3))).expect("uint fixture");
+        for interesting in [
+            SmartcropInteresting::Entropy,
+            SmartcropInteresting::Attention,
+        ] {
+            let e = f
+                .try_smartcrop(4, 4, interesting, false)
+                .expect_err("must refuse a float raster");
+            assert!(
+                matches!(&e, ExtractError::FloatUnsupported { op } if *op == "smartcrop"),
+                "expected the refusal to name smartcrop, got {e:?}"
+            );
+            assert!(
+                e.to_string().contains("smartcrop"),
+                "the message a caller prints must name the op: {e}"
+            );
+
+            let e = u
+                .try_smartcrop(4, 4, interesting, false)
+                .expect_err("must refuse a uint raster");
+            assert!(
+                matches!(
+                    &e,
+                    ExtractError::UnsupportedSampleKind {
+                        op: "smartcrop",
+                        kind: SampleKind::U32
+                    }
+                ),
+                "expected the refusal to name smartcrop, got {e:?}"
+            );
+        }
+    }
+
+    /// Issue #694. The unsigned carriers are untouched, which is the control
+    /// that stops the refusal being written too wide.
+    ///
+    /// A guard that rejected by anything other than "is this float" would take
+    /// these with it, and every one of them is an op the rest of this module's
+    /// tests already exercise on 8-bit.
+    #[test]
+    fn the_unsigned_carriers_still_go_through_every_op() {
+        let im16 =
+            Raster::new(8, 8, PixelFormat::Rgb16, vec![3u8; 8 * 8 * 3 * 2]).expect("rgb16 fixture");
+        let sub16 =
+            Raster::new(2, 2, PixelFormat::Rgb16, vec![9u8; 2 * 2 * 3 * 2]).expect("sub fixture");
+        assert!(im16.try_embed(1, 1, 12, 12, Extend::White, None).is_ok());
+        assert!(
+            im16.try_gravity(CompassDirection::Centre, 12, 12, Extend::Black, None)
+                .is_ok()
+        );
+        assert!(im16.try_insert(&sub16, 1, 1, false, None).is_ok());
+        assert!(
+            im16.try_smartcrop(4, 4, SmartcropInteresting::Entropy, false)
+                .is_ok()
+        );
+        assert!(
+            im16.try_smartcrop(4, 4, SmartcropInteresting::Attention, false)
+                .is_ok()
+        );
+    }
+
+    // -- metadata (issue #690) -----------------------------------------------------------
+
+    /// An 8x8 `Rgb8` ramp carrying every field [`crate::conversion::RasterMeta`]
+    /// holds, plus an attached one, matching the raster the oracle tables in
+    /// this section were measured on.
+    fn tagged_source() -> Raster {
+        let mut im = rgb(8, 8, (0..8u32 * 8 * 3).map(|v| v as u8).collect())
+            .copy()
+            .interpretation(Interpretation::ScRgb)
+            .xres(5.0)
+            .yres(7.0)
+            .xoffset(11)
+            .yoffset(13)
+            .orientation(6)
+            .build();
+        im.set_field("lane-690", MetadataValue::Str("carried".to_string()));
+        im
+    }
+
+    /// The seven operations issue #690 names, run on `im` with the arguments
+    /// the oracle ran, plus `smartcrop` to pin that it inherits whatever
+    /// `extract_area` decides.
+    ///
+    /// [`Raster::try_insert`] is deliberately absent. It drops the metadata
+    /// the same way, but its rule is a two-input one and a different shape:
+    /// measured on vips 8.18.6, the header block comes from `main` alone
+    /// (`vips insert` of an scRGB main with a Lab sub reports scRGB, and the
+    /// main's resolution, offset and orientation), while the attached fields
+    /// are the union of both with `main` winning a name they share. Carrying
+    /// that union needs a merge on `MetadataFields`, which lives in
+    /// `imageio`, so it is a separate change rather than a line folded in
+    /// here.
+    fn extract_op_results(im: &Raster) -> Vec<(&'static str, Raster)> {
+        vec![
+            ("extract_area", im.extract_area(1, 1, 4, 4)),
+            ("crop", im.crop(1, 1, 4, 4)),
+            ("embed", im.embed(1, 1, 12, 12, Extend::White, None)),
+            ("gravity", im.gravity(CompassDirection::Centre, 12, 12)),
+            ("replicate", im.replicate(2, 3)),
+            ("zoom", im.zoom(2, 3)),
+            ("subsample", im.subsample(2, 4)),
+            (
+                "smartcrop",
+                im.smartcrop(4, 4, SmartcropInteresting::Centre),
+            ),
+        ]
+    }
+
+    /// Issue #690. The interpretation survives every extract operation:
+    /// none of them changes what a sample means.
+    ///
+    /// `ScRgb` on an `Rgb8` carrier is the tag that can actually fail here.
+    /// An untagged `Rgb8` infers [`Interpretation::Srgb`], so a result that
+    /// dropped the tag reads back as `Srgb` rather than as anything obviously
+    /// empty, and the first assertion pins that the two differ so the loop
+    /// below cannot pass by agreeing with the inference.
+    ///
+    /// Measured on vips 8.18.6 against an 8x8 uchar 3-band
+    /// `--interpretation scrgb`: all eight report
+    /// `VIPS_INTERPRETATION_scRGB`. The tag is not an scRGB special case
+    /// either, `grey16`, `b-w`, `lab`, `cmyk`, `rgb16`, `hsv` and `oklab`
+    /// all come back through `extract_area` and `embed` unchanged.
+    #[test]
+    fn every_extract_op_carries_the_interpretation() {
+        let im = tagged_source();
+        assert_eq!(
+            Interpretation::for_format(im.format()),
+            Interpretation::Srgb,
+            "the tag under test has to differ from the inferred one"
+        );
+        for (name, out) in extract_op_results(&im) {
+            assert_eq!(out.interpretation(), Interpretation::ScRgb, "{name}");
+        }
+    }
+
+    /// Issue #690. Resolution and orientation ride along too.
+    ///
+    /// `zoom` and `subsample` are the two the issue asked to measure rather
+    /// than assume, since they rescale the pixel grid: vips does **not**
+    /// rescale the resolution with it. `vips zoom` by 2x3 on `xres=5 yres=7`
+    /// reports 5 and 7 back, not 10 and 21, and `vips subsample` by 2x4
+    /// reports the same 5 and 7 rather than 2.5 and 1.75. So the carry is
+    /// verbatim on all seven and no per-op scaling rule is needed.
+    ///
+    /// A `.v` container stores the resolution as `float`, so `vipsheader -f
+    /// yres` prints `6.9999606...` for the 7 that went in. The seven ops
+    /// each report exactly what their input reported, which is the part
+    /// under test; the rounding is the container's, not theirs.
+    ///
+    /// The defaults are `1.0`, `1.0` and `1`, so every value asserted here
+    /// differs from what a freshly built raster would report.
+    #[test]
+    fn every_extract_op_carries_the_resolution_and_orientation() {
+        let im = tagged_source();
+        for (name, out) in extract_op_results(&im) {
+            assert_eq!(out.xres(), 5.0, "{name} xres");
+            assert_eq!(out.yres(), 7.0, "{name} yres");
+            assert_eq!(out.orientation(), 6, "{name} orientation");
+        }
+    }
+
+    /// Issue #690. The attached fields survive as well, which is the half a
+    /// bare `out.meta = self.meta` leaves behind.
+    ///
+    /// Measured on vips 8.18.6 with a `VipsRefString` field written into the
+    /// source's extension block (`vipsedit --setext`): every one of the
+    /// eight reports it back.
+    ///
+    /// The ICC blob is here because it is the attachment a caller notices
+    /// losing, and because it exercises the other `MetadataValue` arm. That
+    /// half was measured on a real profile rather than a hand-written one:
+    /// `vips icc_transform in.v out.v "sRGB Profile.icc"` attaches 3144 bytes
+    /// of `icc-profile-data`, and all eight hand the same 3144 bytes on.
+    ///
+    /// This used to say a hand-written `VipsBlob` in an extension block does
+    /// not survive being written back out. **That does not reproduce on
+    /// 8.18.6**: a 48-byte blob written with `vipsedit --setext` comes back
+    /// through `copy`, `gamma`, `fwfft` and the rest unchanged (#717 uses one
+    /// as a control precisely because it does). A real profile is still the
+    /// better carrier here, because it is the attachment the issue is about
+    /// and the only one `icc_transform` will produce; it was never the only
+    /// one that works.
+    #[test]
+    fn every_extract_op_carries_the_attached_fields() {
+        let mut im = tagged_source();
+        im.set_field("icc-profile-data", MetadataValue::Blob(vec![1, 2, 3]));
+        for (name, out) in extract_op_results(&im) {
+            assert_eq!(
+                out.get_field("lane-690"),
+                Some(MetadataValue::Str("carried".to_string())),
+                "{name} attached string"
+            );
+            assert_eq!(
+                out.get_field("icc-profile-data"),
+                Some(MetadataValue::Blob(vec![1, 2, 3])),
+                "{name} attached blob"
+            );
+        }
+    }
+
+    /// Issue #690. The origin offset is the one field the seven do not agree
+    /// on, so it is the one a wholesale carry would get wrong.
+    ///
+    /// `vips_extract_area` sets `Xoffset = -left` and `Yoffset = -top` and
+    /// discards the source's, while the placement and tiling ops leave the
+    /// source's alone. Measured on vips 8.18.6 from a source at
+    /// `xoffset=11 yoffset=13`, sweeping `left` over 0/1/3/4 against `top`
+    /// over 0/2/5: `extract_area` reports `-left` / `-top` in all twelve
+    /// cells. `vips embed` over `x` in 0/2/-2 against `y` in 0/3/-3 reports
+    /// 11 / 13 in all nine, and `replicate 2 3`, `zoom 2 3` and
+    /// `subsample 2 4` report 11 / 13 as well.
+    ///
+    /// `smartcrop` inherits the rule because it is `extract_area`
+    /// underneath: `--interesting centre` on 8x8 to 4x4 gives -2 / -2,
+    /// `low` gives 0 / 0 and `high` gives -4 / -4, which is `-left` / `-top`
+    /// for the three crops those strategies pick.
+    #[test]
+    fn crop_stamps_the_offset_where_the_others_carry_it() {
+        let im = tagged_source();
+        assert_eq!((im.xoffset(), im.yoffset()), (11, 13), "source offset");
+        for left in [0u32, 1, 3, 4] {
+            for top in [0u32, 2, 5] {
+                let want = (-(left as i32), -(top as i32));
+                let area = im.extract_area(left, top, 4, 3);
+                assert_eq!(
+                    (area.xoffset(), area.yoffset()),
+                    want,
+                    "extract_area {left},{top}"
+                );
+                let cropped = im.crop(left, top, 4, 3);
+                assert_eq!(
+                    (cropped.xoffset(), cropped.yoffset()),
+                    want,
+                    "crop {left},{top}"
+                );
+            }
+        }
+        for (name, want, out) in [
+            (
+                "smartcrop centre",
+                (-2, -2),
+                im.smartcrop(4, 4, SmartcropInteresting::Centre),
+            ),
+            (
+                "smartcrop low",
+                (0, 0),
+                im.smartcrop(4, 4, SmartcropInteresting::Low),
+            ),
+            (
+                "smartcrop high",
+                (-4, -4),
+                im.smartcrop(4, 4, SmartcropInteresting::High),
+            ),
+        ] {
+            assert_eq!((out.xoffset(), out.yoffset()), want, "{name}");
+        }
+        for (name, out) in [
+            ("embed", im.embed(1, 1, 12, 12, Extend::White, None)),
+            (
+                "embed negative",
+                im.embed(-2, -3, 12, 12, Extend::Black, None),
+            ),
+            ("gravity", im.gravity(CompassDirection::Centre, 12, 12)),
+            ("replicate", im.replicate(2, 3)),
+            ("zoom", im.zoom(2, 3)),
+            ("subsample", im.subsample(2, 4)),
+        ] {
+            assert_eq!((out.xoffset(), out.yoffset()), (11, 13), "{name}");
+        }
+    }
+
+    /// Issue #690 against #667. [`Extend::White`] inks from the
+    /// interpretation, so an embed that hands back an untagged result inks
+    /// *differently the second time round*: the tag that chose the ink is
+    /// gone, `Rgb8` infers [`Interpretation::Srgb`], and the border lands on
+    /// 255 instead of 1.
+    ///
+    /// This is the pixel-level consequence of the tag carry, so it is
+    /// asserted separately from the header tests above rather than folded
+    /// into them.
+    ///
+    /// Measured on vips 8.18.6:
+    ///
+    /// ```text
+    /// vips copy sevens.v sc.v --interpretation scrgb
+    /// vips embed sc.v e1.v 1 1 8 8 --extend white     -> corner 1 1 1, scrgb
+    /// vips embed e1.v e2.v 1 1 12 12 --extend white   -> corner 1 1 1, scrgb
+    /// vips crop sc.v c1.v 1 1 2 2                     -> scrgb
+    /// vips embed c1.v c2.v 1 1 6 6 --extend white     -> corner 1 1 1
+    /// ```
+    ///
+    /// The sRGB control is the other half of it: the same source tagged
+    /// `--interpretation srgb` paints 255 on both passes, so the assertion
+    /// below is reading the tag rather than a constant either way.
+    #[test]
+    fn embed_white_inks_the_same_on_a_second_pass() {
+        let scrgb = rgb(4, 4, vec![7; 48])
+            .copy()
+            .interpretation(Interpretation::ScRgb)
+            .build();
+        let once = scrgb.embed(1, 1, 8, 8, Extend::White, None);
+        assert_eq!(once.getpoint(0, 0), vec![1.0, 1.0, 1.0], "first embed");
+        let twice = once.embed(1, 1, 12, 12, Extend::White, None);
+        assert_eq!(twice.getpoint(0, 0), vec![1.0, 1.0, 1.0], "second embed");
+        let after_crop = scrgb
+            .crop(1, 1, 2, 2)
+            .embed(1, 1, 6, 6, Extend::White, None);
+        assert_eq!(after_crop.getpoint(0, 0), vec![1.0, 1.0, 1.0], "after crop");
+
+        let srgb = rgb(4, 4, vec![7; 48])
+            .copy()
+            .interpretation(Interpretation::Srgb)
+            .build();
+        let white = srgb.embed(1, 1, 8, 8, Extend::White, None);
+        assert_eq!(white.getpoint(0, 0), vec![255.0, 255.0, 255.0], "srgb once");
+        let white2 = white.embed(1, 1, 12, 12, Extend::White, None);
+        assert_eq!(
+            white2.getpoint(0, 0),
+            vec![255.0, 255.0, 255.0],
+            "srgb twice"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // the unsigned 32-bit carrier (issue #517)
+    // ------------------------------------------------------------------
+
+    /// A one-band `Uint32` raster from sample values.
+    fn uint32(w: u32, h: u32, vals: &[u32]) -> Raster {
+        let data: Vec<u8> = vals.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        let fmt = PixelFormat::Uint32(core::num::NonZeroU16::new(1).unwrap());
+        Raster::new(w, h, fmt, data).unwrap()
+    }
+
+    fn u32_at(r: &Raster, i: usize) -> u32 {
+        let d = r.data();
+        u32::from_ne_bytes([d[i * 4], d[i * 4 + 1], d[i * 4 + 2], d[i * 4 + 3]])
+    }
+
+    /**
+     * Tests the `Extend::White` ink for every carrier, including the three
+     * signed ones, which no op-level test can reach while `embed` refuses
+     * them (issue #909).
+     * Works by calling [`white_ink`] directly under the `b-w` tag, whose
+     * `max_alpha` is 255, so the ink byte is 0xFF and the answer is that
+     * byte replicated across the sample width. Measured on
+     * `/opt/homebrew/bin/vips` 8.18.6: `vips embed --extend white` fills
+     * 255 on `uchar`, 65535 on `ushort`, 4294967295 on `uint`, and **-1**
+     * on `char`, `short` and `int` alike, which are the same three
+     * patterns read signed. The signedness appears at the store and not
+     * here, because `memset` fills bytes and does not know the type.
+     * Input: each carrier under `b-w` -> Output: 255, 65535, 4294967295 by
+     * width, whatever the signedness.
+     */
+    #[test]
+    fn white_ink_replicates_the_ink_byte_across_every_carrier() {
+        let n = |v: u16| core::num::NonZeroU16::new(v).unwrap();
+        let bw = Interpretation::Bw;
+        // (format, the value the bytes hold, read unsigned)
+        let cases = [
+            (PixelFormat::Gray8, 255.0),
+            (PixelFormat::Int8(n(1)), 255.0),
+            (PixelFormat::Gray16, 65535.0),
+            (PixelFormat::Int16(n(1)), 65535.0),
+            (PixelFormat::Uint32(n(1)), 4_294_967_295.0),
+            (PixelFormat::Int32(n(1)), 4_294_967_295.0),
+        ];
+        for (fmt, want) in cases {
+            assert_eq!(
+                white_ink(fmt, bw),
+                want,
+                "{fmt:?} inks the wrong pattern; vips fills the same bytes for a \
+                 signed carrier as for its unsigned twin of the same width"
+            );
+        }
+        // The pairs that share a width and must agree, which is what a
+        // per-width arm gets right by luck and a per-carrier arm has to
+        // state: one byte, two bytes, four bytes.
+        assert_eq!(
+            white_ink(PixelFormat::Int8(n(1)), bw),
+            white_ink(PixelFormat::Gray8, bw)
+        );
+        assert_eq!(
+            white_ink(PixelFormat::Int16(n(1)), bw),
+            white_ink(PixelFormat::Gray16, bw)
+        );
+        assert_eq!(
+            white_ink(PixelFormat::Int32(n(1)), bw),
+            white_ink(PixelFormat::Uint32(n(1)), bw)
+        );
+        // And the control that the widths really differ, so the three
+        // equalities above are not all comparing the same number.
+        assert_ne!(
+            white_ink(PixelFormat::Gray8, bw),
+            white_ink(PixelFormat::Gray16, bw)
+        );
+    }
+
+    /**
+     * Tests that the sample-level extract ops carry the three signed
+     * carriers, with the samples vips produces.
+     * This replaces `embed_refuses_the_signed_carriers_for_now_issue_909`,
+     * which asserted the typed refusal #516 shipped and said in its own
+     * doc that it should be **replaced by value assertions rather than
+     * deleted as though it had been wrong**. It was not wrong: the
+     * refusal was the right interim while `read_s` returned a `u32` that
+     * could not hold a negative, and it was a parity regression the whole
+     * time, which is what issue #909 closes.
+     * Measured on `/opt/homebrew/bin/vips` 8.18.6 on a 2x2 `char` raster
+     * holding `[-100, -1, 0, 100]`, embedded at (1, 1) in a 4x4 canvas:
+     * `--extend white` fills **-1** (the all-bits-set byte a `memset`
+     * lays down, read signed), `--extend black` fills 0, and
+     * `--extend background` clips the constant into the carrier at both
+     * ends, filling -50 for `--background -50`, **-128** for -200 and
+     * **127** for 200. `vips insert` copies the sub-image's samples
+     * unchanged.
+     * Works by asserting each of those fills and the copied samples, with
+     * `Uint32` as the control that the copy still discriminates by kind
+     * and a float raster as the control that the byte-pattern ink is a
+     * property of the integer carriers: #945 carried float through these
+     * ops too, and its white border is 255 rather than -1.
+     * Input: `Int8` `[-100, -1, 0, 100]` -> Output: the measured canvases.
+     */
+    #[test]
+    fn the_extract_ops_carry_the_signed_carriers() {
+        let n = |v: u16| core::num::NonZeroU16::new(v).unwrap();
+        let one = int8(2, 2, &[-100, -1, 0, 100]);
+
+        let white = one.try_embed(1, 1, 4, 4, Extend::White, None).unwrap();
+        assert_eq!(white.format(), PixelFormat::Int8(n(1)));
+        #[rustfmt::skip]
+        assert_eq!(i8s(&white), vec![
+            -1,   -1, -1, -1,
+            -1, -100, -1, -1,
+            -1,    0, 100, -1,
+            -1,   -1, -1, -1,
+        ]);
+
+        let black = one.try_embed(1, 1, 4, 4, Extend::Black, None).unwrap();
+        #[rustfmt::skip]
+        assert_eq!(i8s(&black), vec![
+            0,    0,   0, 0,
+            0, -100,  -1, 0,
+            0,    0, 100, 0,
+            0,    0,   0, 0,
+        ]);
+
+        // The background clips at **both** ends, which a `clamp(0, max)`
+        // floor gets wrong for every negative constant.
+        for (bg, want) in [(-50.0, -50i8), (-200.0, -128), (200.0, 127)] {
+            let r = one
+                .try_embed(1, 1, 4, 4, Extend::Background, Some(&[bg]))
+                .unwrap();
+            assert_eq!(
+                i8s(&r)[0],
+                want,
+                "background {bg} must clip into the carrier, not into 0..=max"
+            );
+        }
+
+        // insert copies the sub-image's samples, negatives included.
+        let sub = int8(2, 2, &[-101, 2, -1, 101]);
+        let inserted = one.try_insert(&sub, 0, 0, false, None).unwrap();
+        assert_eq!(i8s(&inserted), vec![-101, 2, -1, 101]);
+
+        // gravity is embed under another name, so the same ink rule holds.
+        let grav = one
+            .try_gravity(CompassDirection::Centre, 4, 4, Extend::White, None)
+            .unwrap();
+        assert_eq!(i8s(&grav)[0], -1);
+
+        // Control: the unsigned 32-bit carrier of issue #517 still goes
+        // through, so this is a refusal of a kind and not of a stride.
+        assert!(
+            Raster::zeroed(1, 1, PixelFormat::Uint32(n(1)))
+                .unwrap()
+                .try_embed(1, 1, 3, 3, Extend::White, None)
+                .is_ok()
+        );
+        // Control: the float carrier goes through too, since #945, and it
+        // keeps the ink as a *number* where the `char` row above keeps it as
+        // a byte pattern. That is the pair the two paths are told apart by.
+        let f = Raster::new(
+            1,
+            1,
+            PixelFormat::FloatF32(n(1)),
+            1.5f32.to_ne_bytes().to_vec(),
+        )
+        .unwrap();
+        let fw = f.try_embed(1, 1, 3, 3, Extend::White, None).unwrap();
+        assert_eq!(f32s(&fw)[0], 255.0);
+        assert_eq!(f32s(&fw)[4], 1.5);
+    }
+
+    /// A one-band `FloatF32` raster from `f32` sample values.
+    fn float1(w: u32, h: u32, vals: &[f32]) -> Raster {
+        let data: Vec<u8> = vals.iter().flat_map(|v| v.to_ne_bytes()).collect();
+        let fmt = PixelFormat::FloatF32(core::num::NonZeroU16::new(1).unwrap());
+        Raster::new(w, h, fmt, data).unwrap()
+    }
+
+    /// Every sample of a float raster, read back as `f32`.
+    fn f32s(r: &Raster) -> Vec<f32> {
+        r.data()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| f32::from_ne_bytes(*c))
+            .collect()
+    }
+
+    /**
+     * Tests that `embed`, `gravity` and `insert` carry a float raster and
+     * answer with the samples vips produces, rather than refusing it.
+     * The refusal was posture 1, a parity regression, and the same shape
+     * issue #909 closed one carrier family earlier: `read_s` could not
+     * hold the value, so the op refused, and the refusal outlived the
+     * reason for it.
+     * Measured on `/opt/homebrew/bin/vips` 8.18.6 over a 3x1 `float`
+     * raster holding `[1.5, -0.25, 3.75]`, cast from a `csvload` double:
+     * `vips embed a.v out.v 1 0 5 1` answers **FLOAT** and fills the
+     * border with 0 for `--extend black`, **255** for `--extend white`
+     * and **-0.5** for `--extend background --background -0.5`, that last
+     * one *unrounded*, which is what separates a float ink from the
+     * integer one. `vips gravity a.v out.v centre 5 1` gives the same
+     * canvas as the centred embed. `vips insert a.v b.v out.v 1 0` over
+     * `b = [10.5, -2.75, 0.125]` answers `[1.5, 10.5, -2.75]`, and
+     * `--expand --background -0.5` at x=4 answers the seven samples
+     * below.
+     * Works by asserting each of those canvases sample by sample, with
+     * the fractional background as the cell a truncating store cannot
+     * pass and the `Int8` white ink beside it as the control that the
+     * integer dialect is untouched.
+     * Input: `FloatF32(1)` `[1.5, -0.25, 3.75]` -> Output: the measured
+     * canvases, at `FloatF32(1)`.
+     */
+    #[test]
+    fn the_extract_ops_carry_a_float_raster_issue_945() {
+        let n = |v: u16| core::num::NonZeroU16::new(v).unwrap();
+        let a = float1(3, 1, &[1.5, -0.25, 3.75]);
+        let b = float1(3, 1, &[10.5, -2.75, 0.125]);
+
+        let black = a.try_embed(1, 0, 5, 1, Extend::Black, None).unwrap();
+        assert_eq!(black.format(), PixelFormat::FloatF32(n(1)));
+        assert_eq!(f32s(&black), vec![0.0, 1.5, -0.25, 3.75, 0.0]);
+
+        let white = a.try_embed(1, 0, 5, 1, Extend::White, None).unwrap();
+        assert_eq!(f32s(&white), vec![255.0, 1.5, -0.25, 3.75, 255.0]);
+
+        // The cell a truncating store cannot pass: vips fills -0.5, not 0.
+        let bg = a
+            .try_embed(1, 0, 5, 1, Extend::Background, Some(&[-0.5]))
+            .unwrap();
+        assert_eq!(f32s(&bg), vec![-0.5, 1.5, -0.25, 3.75, -0.5]);
+
+        // gravity is embed under another name, and vips centres the 3-wide
+        // image in a 5-wide canvas at the same offset.
+        let grav = a
+            .try_gravity(CompassDirection::Centre, 5, 1, Extend::Black, None)
+            .unwrap();
+        assert_eq!(f32s(&grav), vec![0.0, 1.5, -0.25, 3.75, 0.0]);
+
+        let ins = a.try_insert(&b, 1, 0, false, None).unwrap();
+        assert_eq!(ins.format(), PixelFormat::FloatF32(n(1)));
+        assert_eq!(f32s(&ins), vec![1.5, 10.5, -2.75]);
+
+        let expanded = a.try_insert(&b, 4, 0, true, Some(&[-0.5])).unwrap();
+        assert_eq!(expanded.width(), 7);
+        assert_eq!(
+            f32s(&expanded),
+            vec![1.5, -0.25, 3.75, -0.5, 10.5, -2.75, 0.125]
+        );
+
+        // Control: the integer dialect is untouched, so the `char` white
+        // ink is still the -1 a `memset` lays down rather than a clipped
+        // 127.
+        let one = int8(2, 2, &[-100, -1, 0, 100]);
+        let iwhite = one.try_embed(1, 1, 4, 4, Extend::White, None).unwrap();
+        assert_eq!(i8s(&iwhite)[0], -1);
+        // Control: an integer background is still truncated toward zero,
+        // so the float pass-through above is a property of the carrier and
+        // not a dropped rounding step.
+        let ibg = one
+            .try_embed(1, 1, 4, 4, Extend::Background, Some(&[-0.5]))
+            .unwrap();
+        assert_eq!(i8s(&ibg)[0], 0);
+    }
+
+    /**
+     * Tests that this module's sample reader and writer round-trip every
+     * sample kind at its own stride and its own signedness.
+     * It exists because **no op-level test can catch a read-side
+     * signedness bug here**: `embed` and `insert` read a sample and write
+     * it back at the same kind, so reading `char` -100 as 156 and storing
+     * `156 as i8` gives -100 again and the canvas is identical. Mutating
+     * `read_s`'s `I8` arm to an unsigned read left all 74 tests in this
+     * module green, a real NO TEST REDDENS, and the round trip is what
+     * cancelled it. This cell does not cancel: `write_s` stores the two's
+     * complement and the read has to give the number back, so an unsigned
+     * read answers 255 where -1 was written.
+     * Works by sweeping [`ALL_KINDS`] rather than a hand-written list, and
+     * by writing at sample index 1 of a two-sample buffer so a wrong
+     * stride overwrites index 0 and is caught by the neighbour assertion.
+     * Input: each kind's `range()` endpoints and 0 -> Output: the same
+     * numbers back, index 0 still zero.
+     */
+    #[test]
+    fn read_s_and_write_s_round_trip_every_kind_at_its_own_stride() {
+        for kind in ALL_KINDS {
+            let bytes = kind.bytes();
+            let cases: [i64; 3] = match kind.range() {
+                Some((lo, hi)) => [lo, 0, hi],
+                None => [-128, 0, 127],
+            };
+            for v in cases {
+                let mut buf = vec![0u8; bytes * 2];
+                write_s(&mut buf, kind, 1, v);
+                assert_eq!(read_s(&buf, kind, 1), v, "{kind:?} did not round-trip {v}");
+                assert!(
+                    buf[..bytes].iter().all(|&b| b == 0),
+                    "{kind:?} wrote outside sample 1, so its stride is wrong"
+                );
+            }
+        }
+        // The width collisions, stated directly. `-1` is the same byte in
+        // both one-byte kinds and a different number, which is the exact
+        // substitution the round trip through an op cannot see.
+        let mut b8 = vec![0u8; 1];
+        write_s(&mut b8, SampleKind::I8, 0, -1);
+        assert_eq!(b8[0], 0xFF);
+        assert_eq!(read_s(&b8, SampleKind::U8, 0), 255);
+        assert_eq!(read_s(&b8, SampleKind::I8, 0), -1);
+        let mut b32 = vec![0u8; 4];
+        write_s(&mut b32, SampleKind::I32, 0, -1);
+        assert_eq!(read_s(&b32, SampleKind::U32, 0), 4_294_967_295);
+        assert_eq!(read_s(&b32, SampleKind::I32, 0), -1);
+    }
+
+    /**
+     * Tests that the background ink clips into each carrier's own range at
+     * both ends, and is carried whole where there is no range, driven
+     * directly rather than through an op so the arms no op can reach are
+     * held by something.
+     * Works by sweeping [`ALL_KINDS`] and pushing one constant past each
+     * end of every integer kind's range, with `NaN` beside them because
+     * `clamp` passes `NaN` through and the explicit zero arm is what stops
+     * it landing on a carrier value by accident. `F32` is not skipped: it
+     * is the arm issue #945 added and the one `vips embed --extend
+     * background --background -0.5` measures at **-0.5** on a `float`
+     * raster against 0 on its `char` twin.
+     * Input: -300, 1e12, -1.9 and `NaN` at every kind -> Output: that
+     * kind's `range()` endpoints, or the number itself at `F32`.
+     */
+    #[test]
+    fn ink_value_clips_into_every_carrier_at_both_ends() {
+        for kind in ALL_KINDS {
+            let range = kind.range();
+            let Some((lo, hi)) = range else {
+                // The float arm: no range, no truncation, so every one of
+                // these constants comes back untouched.
+                assert_eq!(ink_value(-300.0, range), -300.0, "{kind:?} floor");
+                assert_eq!(ink_value(1e12, range), 1e12, "{kind:?} ceiling");
+                assert_eq!(ink_value(-1.9, range), -1.9, "{kind:?} fraction");
+                assert_eq!(ink_value(-0.5, range), -0.5, "{kind:?} measured cell");
+                assert!(ink_value(f64::NAN, range).is_nan(), "{kind:?} NaN");
+                continue;
+            };
+            assert_eq!(
+                ink_value(-300.0, range),
+                (-300i64).max(lo) as f64,
+                "{kind:?} floor"
+            );
+            assert_eq!(
+                ink_value(1e12, range),
+                1_000_000_000_000i64.min(hi) as f64,
+                "{kind:?} ceiling"
+            );
+            assert_eq!(ink_value(f64::NAN, range), 0.0, "{kind:?} NaN");
+            // Truncation toward zero, not flooring: the two differ only on
+            // a negative fraction, which is exactly what a signed carrier
+            // adds. `vips_cast` truncates.
+            assert_eq!(
+                ink_value(-1.9, range),
+                if lo < 0 { -1.0 } else { 0.0 },
+                "{kind:?}"
+            );
+        }
+        // The pair a per-width rule would collide, stated directly.
+        assert_eq!(ink_value(-50.0, Some((-128, 127))), -50.0);
+        assert_eq!(ink_value(-50.0, Some((0, 255))), 0.0);
+    }
+
+    /**
+     * Tests that `embed` carries the unsigned 32-bit carrier: it copies
+     * the source samples at the right stride and inks the border with the
+     * carrier's own white.
+     * Works by embedding a 1x1 `uint` raster in the middle of a 3x3 canvas
+     * with `Extend::White` and reading both a source sample and a border
+     * one, so a read at half stride moves the first and a wrong ink moves
+     * the second. Both pinned to `/opt/homebrew/bin/vips` 8.18.6, where
+     * `vips embed --extend white` on a `uint` raster fills **4294967295**
+     * and an `int` one fills -1, the same bytes read signed.
+     * Input: uint 90000 embedded at (1, 1) in 3x3 -> centre 90000, border
+     * 4294967295.
+     */
+    #[test]
+    fn embed_carries_the_uint_carrier_and_its_white_ink() {
+        let src = uint32(1, 1, &[90_000]);
+        let out = src
+            .try_embed(1, 1, 3, 3, Extend::White, None)
+            .expect("embed carries the uint carrier");
+        assert_eq!(out.format(), src.format());
+        assert_eq!(
+            u32_at(&out, 4),
+            90_000,
+            "the source sample moved or was misread"
+        );
+        assert_eq!(
+            u32_at(&out, 0),
+            4_294_967_295,
+            "the white ink is not the carrier's"
+        );
+        // Controls: the same call on the carriers that already worked.
+        let g8 = gray(1, 1, vec![200]);
+        let o8 = g8.try_embed(1, 1, 3, 3, Extend::White, None).unwrap();
+        assert_eq!(o8.data()[4], 200);
+        assert_eq!(o8.data()[0], 255);
+        let g16 = gray16(1, 1, &[40000]);
+        let o16 = g16.try_embed(1, 1, 3, 3, Extend::White, None).unwrap();
+        assert_eq!(u16::from_ne_bytes([o16.data()[8], o16.data()[9]]), 40000);
+    }
+
+    /**
+     * Tests that `insert` picks the output carrier through
+     * `SampleKind::promote` rather than through the wider byte width,
+     * which answers the float carrier at four bytes (issues #517, #607).
+     * Works by inserting an 8-bit raster into a `uint` one and asserting
+     * both the format and a sample, with the 8-into-16 pair as the control
+     * that the existing promotion did not move.
+     * Input: insert(uint, u8) -> Uint32 carrying 90000; insert(u16, u8) ->
+     * Gray16.
+     */
+    #[test]
+    fn insert_promotes_through_the_kind() {
+        let n = |v: u16| core::num::NonZeroU16::new(v).unwrap();
+        let main = uint32(2, 1, &[90_000, 90_000]);
+        let sub = gray(1, 1, vec![7]);
+        let out = main.try_insert(&sub, 0, 0, false, None).unwrap();
+        assert_eq!(out.format(), PixelFormat::Uint32(n(1)));
+        assert_eq!(u32_at(&out, 1), 90_000);
+        assert_eq!(u32_at(&out, 0), 7);
+        // Control: the promotion that existed before is untouched.
+        let out16 = gray16(2, 1, &[40000, 40000])
+            .try_insert(&sub, 0, 0, false, None)
+            .unwrap();
+        assert_eq!(out16.format(), PixelFormat::Gray16);
+    }
+
+    /**
+     * Tests that the two smartcrop strategies which build a value-indexed
+     * table refuse the 32-bit carrier as a typed error rather than
+     * panicking on an out-of-range histogram index.
+     * Works by asking for both strategies on a `uint` raster whose samples
+     * are far above 65536, with the pure-geometry strategies as the
+     * control that smartcrop itself still works on that carrier.
+     * Input: Entropy / Attention on uint -> Err(UnsupportedSampleKind);
+     * Centre on uint -> Ok.
+     */
+    #[test]
+    fn smartcrop_refuses_the_uint_carrier_where_it_needs_a_table() {
+        let r = uint32(4, 4, &[90_000; 16]);
+        for interesting in [
+            SmartcropInteresting::Entropy,
+            SmartcropInteresting::Attention,
+        ] {
+            let got = r.try_smartcrop(2, 2, interesting, false);
+            assert!(
+                matches!(
+                    got,
+                    Err(ExtractError::UnsupportedSampleKind {
+                        op: "smartcrop",
+                        kind: SampleKind::U32
+                    })
+                ),
+                "{interesting:?} on a uint raster gave {got:?}"
+            );
+        }
+        // Control: the geometry strategies are depth-agnostic and still
+        // carry the same raster, so the refusal is about the table.
+        assert!(
+            r.try_smartcrop(2, 2, SmartcropInteresting::Centre, false)
+                .is_ok()
+        );
     }
 }

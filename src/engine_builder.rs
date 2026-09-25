@@ -14,7 +14,7 @@
 //! 1. The [`EngineKind`] set via [`EngineBuilder::with_engine`]
 //!    (default: [`EngineKind::Auto`]).
 //! 2. Whether the source is an in-memory [`Raster`] or a
-//!    [`StripSource`](crate::streaming::StripSource).
+//!    [`StripSource`].
 //!
 //! [`EngineKind::Monolithic`] refuses to run against a strip source and
 //! surfaces [`EngineError::IncompatibleSource`] instead of silently pulling
@@ -58,7 +58,7 @@ use crate::planner::PyramidPlan;
 use crate::raster::Raster;
 use crate::resume::{ResumeMode, ResumePolicy};
 use crate::retry::{FailurePolicy, RetryPolicy, RetryingSink};
-use crate::sink::TileSink;
+use crate::sink::{EmissionOrder, TileSink};
 use crate::streaming::{
     BudgetPolicy, RasterStripSource, StreamingConfig, StripSource, generate_pyramid_streaming,
 };
@@ -299,7 +299,7 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
     /// Composes the observers through a [`FanOutObserver`](crate::FanOutObserver),
     /// so delivery is synchronous, on the thread that produced the event,
     /// exactly as with a single observer; the extension hatch
-    /// ([`EngineObserver::on_extensions`](crate::EngineObserver::on_extensions))
+    /// ([`EngineObserver::on_extensions`])
     /// is forwarded to each of them too. Like every observer setter, this
     /// fills the builder's one observer slot: it replaces anything a prior
     /// [`with_observer`](Self::with_observer) /
@@ -328,7 +328,7 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
     /// [`EngineKind::MapReduceHotCache`] (the engines with a MAP phase);
     /// the monolithic and sequential streaming engines have no strip-dispatch
     /// seam and ignore it. Defaults to
-    /// [`LocalWorkExecutor`](crate::streaming_mapreduce::LocalWorkExecutor),
+    /// [`LocalWorkExecutor`],
     /// which preserves the engine's historical behaviour exactly. See
     /// [`WorkExecutor`] for the dispatch-order and byte-parity contract a
     /// custom executor must uphold.
@@ -408,10 +408,10 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
             if config.checkpoint_every != 0 {
                 policy = policy.with_checkpoint_every(config.checkpoint_every);
             }
-            if policy.checkpoint_root().is_none() {
-                if let Some(root) = config.checkpoint_root {
-                    policy = policy.with_checkpoint_root(root);
-                }
+            if policy.checkpoint_root().is_none()
+                && let Some(root) = config.checkpoint_root
+            {
+                policy = policy.with_checkpoint_root(root);
             }
             self.resume = Some(policy);
         }
@@ -536,7 +536,7 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
     /// without a semver bump. On [`run`](EngineBuilder::run) /
     /// [`run_collect`](EngineBuilder::run_collect) the full map is delivered to
     /// the attached observer via
-    /// [`EngineObserver::on_extensions`](crate::observe::EngineObserver::on_extensions)
+    /// [`EngineObserver::on_extensions`]
     /// once, before any tile is emitted, so a custom observer can read the
     /// values it needs for the run.
     pub fn with_extension<T: Send + Sync + 'static>(mut self, value: T) -> Self {
@@ -731,6 +731,35 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
 
         let kind = resolve_engine_kind(engine_kind, &source, &plan, memory_budget_bytes);
 
+        // A sink that asked for an emission order only the monolithic engine
+        // can produce is refused here, before anything touches the output
+        // (issue #1145). The streaming and MapReduce engines render a strip at
+        // a time and emit whatever tiles a strip completes, so they cannot
+        // walk the plan in tile id order without holding the whole pyramid,
+        // which is the thing they exist to avoid.
+        //
+        // Refusing rather than downgrading, because a sink asks for an order
+        // when its output depends on it: a `PmTilesSink` in `Layout::Arrival`
+        // quietly given the cascade would publish an archive whose bytes
+        // depend on the thread schedule while its caller believed otherwise.
+        // The check reads the outermost sink, so it sees through the retry
+        // wrapper and the resume filter the same way every other sink hook
+        // does.
+        //
+        // A Verify run is exempt, and the exemption is the rule rather than a
+        // hole in it: verify reads a finished pyramid and writes no tile, so
+        // there is no emission for an order to be wrong about, and refusing it
+        // would break a perfectly good check over an archive whose sink
+        // happens to be configured the way the run that wrote it was.
+        let verifying = resume
+            .as_ref()
+            .is_some_and(|policy| matches!(policy.mode(), ResumeMode::Verify));
+        let order = engine_sink.emission_order();
+        if !verifying && order != EmissionOrder::Cascade && !matches!(kind, EngineKind::Monolithic)
+        {
+            return Err(EngineError::UnsupportedEmissionOrder { kind, order });
+        }
+
         // Validate the plan against the source before any engine driver runs.
         // Both the monolithic and streaming paths trust `plan.image_width/height`
         // and `plan.levels` (canvas embedding, tile extraction, `levels.len() - 1`).
@@ -798,6 +827,23 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
                 });
             }
 
+            // Issue #1150: ask the sink whether it can honour this mode at
+            // all, before the verify dispatch, before any lock, and before
+            // anything touches the output.
+            //
+            // A sink that refuses a mode used to find out too late to matter.
+            // Its refusals are reachable two ways and neither one fires for
+            // the caller who just configures the engine: through the sink's
+            // own builder, which only knows the mode if the caller says it
+            // twice, and through `seed_completed_tile`, which needs a resume to
+            // have skipped a coordinate, which needs a checkpoint, which a sink
+            // with no checkpoint root never has. Both stayed quiet and the run
+            // regenerated from scratch the pyramid it was asked to resume,
+            // reporting success. `check_resume_mode` is the end the engine
+            // reaches by itself, so the refusal no longer depends on the caller
+            // repeating themselves.
+            sink.check_resume_mode(policy.mode())?;
+
             // Verify: read-only, no skip set, no checkpoint. Routed by engine
             // kind to the matching verify helper through the single
             // `dispatch_verify` site (issue #290).
@@ -829,24 +875,17 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
             // it found it: no tile output, and no bookkeeping either. This
             // preflight reads the same atomically-renamed checkpoint file the
             // locked check reads, so it never sees a torn header.
-            if matches!(policy.mode(), ResumeMode::Resume) {
-                if let Some(root) = crate::engine::resolve_checkpoint_root(&engine_cfg, &sink) {
-                    if let Some(meta) = crate::resume::JobCheckpoint::load(&root)
-                        .map_err(EngineError::ResumeFailed)?
-                    {
-                        if let Err(current) = crate::resume::verify_checkpoint_contract(
-                            &meta,
-                            &plan,
-                            &engine_cfg,
-                            &sink,
-                        ) {
-                            return Err(EngineError::PlanHashMismatch {
-                                expected: current,
-                                actual: meta.plan_hash,
-                            });
-                        }
-                    }
-                }
+            if matches!(policy.mode(), ResumeMode::Resume)
+                && let Some(root) = crate::engine::resolve_checkpoint_root(&engine_cfg, &sink)
+                && let Some(meta) =
+                    crate::resume::JobCheckpoint::load(&root).map_err(EngineError::ResumeFailed)?
+                && let Err(current) =
+                    crate::resume::verify_checkpoint_contract(&meta, &plan, &engine_cfg, &sink)
+            {
+                return Err(EngineError::PlanHashMismatch {
+                    expected: current,
+                    actual: meta.plan_hash,
+                });
             }
 
             // Overwrite / Resume: take the advisory run lock(s) BEFORE any work
@@ -1229,6 +1268,19 @@ impl<'a> RenderDispatch<'a> {
 /// [`crate::verify`] walks rather than the generate engines, but the dispatch
 /// shape is the same — kept in one place so it cannot drift from the render
 /// dispatch's source/kind handling.
+///
+/// # The reader preflight comes first, and the incompatible-source check comes
+/// before that
+///
+/// A sink that can open its own output is verified by reading the pyramid back
+/// rather than by re-rendering it and stat-ing a tree (issue #1122), so that
+/// question is asked before `(kind, source)` is looked at: there is no render
+/// on this path, so neither the engine kind nor the source shape has anything
+/// to select. The `Monolithic` + `Strip` rejection deliberately stays at the
+/// call site above rather than moving in here beside the preflight. It is a
+/// statement about the *run* being impossible, it was there first, and a
+/// caller who asked for both an impossible pairing and a reader-backed sink
+/// should hear about the pairing.
 fn dispatch_verify(
     kind: EngineKind,
     source: EngineSource<'_>,
@@ -1237,6 +1289,19 @@ fn dispatch_verify(
     engine_cfg: &EngineConfig,
     observer: &dyn EngineObserver,
 ) -> Result<EngineResult, EngineError> {
+    // `Err` here is a sink that should have had a readable pyramid and did
+    // not, which is a verify failure with a name. `Ok(None)` is a sink that
+    // has no reader to offer, which is every sink that writes a tree, and it
+    // falls through to the walks below exactly as before.
+    if let Some(reader) = sink.open_pyramid_reader().map_err(EngineError::Sink)? {
+        return crate::verify::pyramid_verify(
+            reader.as_ref(),
+            plan,
+            sink.content_format(),
+            observer,
+        );
+    }
+
     match (kind, source) {
         (EngineKind::Monolithic, EngineSource::Raster(raster)) => {
             crate::verify::raster_verify(raster, plan, sink, engine_cfg, observer)
@@ -1865,6 +1930,7 @@ mod checkpoint_durability_tests {
     // here guarantees no periodic flush fired, isolating the error-path
     // flush as the only way the two completed tiles can reach disk.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn interrupted_resume_run_persists_completed_tiles() {
         let dir = tempfile::tempdir().unwrap();
         let source = solid_source();
@@ -1942,6 +2008,7 @@ mod checkpoint_durability_tests {
     // completed tiles, and the count must be bounded to within one cadence
     // interval of the crash point.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn config_checkpoint_every_bounds_resume_rework() {
         let dir = tempfile::tempdir().unwrap();
         // 32x32 @ 4px tiles => top level 8x8 = 64 tiles, plus coarser levels;
@@ -2113,6 +2180,7 @@ mod checkpoint_durability_tests {
     /// never set it), so `recorder.files` was zero. GREEN after: the builder
     /// arms durability tracking and the checkpoint barrier fsyncs every tile.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn resume_run_has_single_checkpoint_writer() {
         use crate::sink::{FsSink, TileFormat};
         use std::sync::Arc;
@@ -2662,6 +2730,7 @@ mod live_resume_bookkeeping_tests {
     /// and subtracts the skipped tiles' bytes, so `levels_completed` is
     /// complete and a no-op resume reports `bytes_written == 0`.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn resume_advances_levels_and_excludes_skipped_bytes() {
         let out = tempfile::tempdir().unwrap();
         let cp = tempfile::tempdir().unwrap();
@@ -2869,6 +2938,7 @@ mod resume_dedupe_checksum_seeding_tests {
     /// resumed must reproduce the same `blank_references` map, checksum table
     /// and 1-byte-placeholder layout as a clean single-run reference.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn crash_resume_dedupe_checksum_reproduces_uninterrupted_manifest() {
         let src = blank_heavy_source();
         let plan = blank_plan();
@@ -2942,6 +3012,7 @@ mod resume_dedupe_checksum_seeding_tests {
     /// Resume + sink-level dedupe on a fresh directory now runs (the #450
     /// stopgap is gone).
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn resume_plus_sink_dedupe_now_runs() {
         let out = tempfile::tempdir().unwrap();
         let source = solid_source();
@@ -2963,6 +3034,7 @@ mod resume_dedupe_checksum_seeding_tests {
 
     /// Resume + engine-level dedupe (`EngineBuilder::with_dedupe`) now runs.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn resume_plus_engine_dedupe_now_runs() {
         let out = tempfile::tempdir().unwrap();
         let source = solid_source();
@@ -2984,6 +3056,7 @@ mod resume_dedupe_checksum_seeding_tests {
 
     /// Resume + per-tile checksums now runs.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn resume_plus_checksum_now_runs() {
         let out = tempfile::tempdir().unwrap();
         let source = solid_source();
@@ -3007,6 +3080,7 @@ mod resume_dedupe_checksum_seeding_tests {
     /// Resume with NEITHER dedupe nor checksums stays supported and keeps
     /// short-circuiting skipped tiles (no seeding work).
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn resume_without_dedupe_or_checksum_still_runs() {
         let out = tempfile::tempdir().unwrap();
         let source = solid_source();
@@ -3027,6 +3101,7 @@ mod resume_dedupe_checksum_seeding_tests {
 
     /// A NON-resume run (Overwrite) with dedupe is unaffected.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn non_resume_dedupe_still_runs() {
         let out = tempfile::tempdir().unwrap();
         let source = solid_source();
@@ -3050,6 +3125,7 @@ mod resume_dedupe_checksum_seeding_tests {
     /// Verify mode (read-only) with dedupe is unaffected. Seeds a pyramid first
     /// so Verify has something to audit.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn verify_dedupe_still_runs() {
         let out = tempfile::tempdir().unwrap();
         let source = solid_source();
@@ -3118,6 +3194,7 @@ mod run_lock_wiring_tests {
     // `prepare_resume_state`, fails fast with `ResumeError::Locked`, and the
     // sentinel survives because the guarded wipe never executes.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn overwrite_is_refused_while_the_output_dir_is_locked() {
         let out = tempfile::tempdir().unwrap();
         let source = solid_source();
@@ -3167,6 +3244,7 @@ mod run_lock_wiring_tests {
     // for the next run. A successful Overwrite takes and drops the lock; a fresh
     // `RunLock::acquire` on the same directory afterwards must therefore succeed.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn run_releases_the_lock_when_it_finishes() {
         let out = tempfile::tempdir().unwrap();
         let source = solid_source();
@@ -3200,6 +3278,7 @@ mod run_lock_wiring_tests {
     // would have locked the free `out/` dir and proceeded (RED); post-fix it
     // collides on `cp/` and fails fast (GREEN).
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn run_locks_the_checkpoint_dir_not_the_sink_dir_when_they_differ() {
         let out = tempfile::tempdir().unwrap();
         let cp = tempfile::tempdir().unwrap();
@@ -3274,6 +3353,7 @@ mod run_lock_wiring_tests {
     // destroyed the sentinel. Post-fix (GREEN): the run also locks `out/`,
     // collides, and fails fast before any wipe.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn overwrite_is_refused_while_the_sink_dir_is_locked_with_distinct_checkpoint_root() {
         let out = tempfile::tempdir().unwrap();
         let cp = tempfile::tempdir().unwrap();
@@ -3335,6 +3415,7 @@ mod run_lock_wiring_tests {
     // closed — and together with the direction-one test above proves mutual
     // exclusion across the two dirs in BOTH directions.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn overwrite_is_refused_while_the_checkpoint_dir_is_locked_with_distinct_sink_dir() {
         let out = tempfile::tempdir().unwrap();
         let cp = tempfile::tempdir().unwrap();
@@ -3402,6 +3483,7 @@ mod run_lock_wiring_tests {
     // canonical-key dedup collapses the aliases to a single lock and the run
     // completes.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn distinct_spelling_of_the_sink_dir_as_checkpoint_root_does_not_self_lock() {
         let out = tempfile::tempdir().unwrap();
         let source = solid_source();
@@ -3533,6 +3615,7 @@ mod resume_side_effect_tests {
     // log. The plan-hash gate therefore runs before the run lock (whose
     // acquisition creates `.libviprs-job.lock`) and before any engine work.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn refused_plan_hash_mismatch_leaves_the_directory_untouched() {
         let out = tempfile::tempdir().unwrap();
         let source = gradient_source(64, 64);
@@ -3628,6 +3711,7 @@ mod resume_side_effect_tests {
     // resume bookkeeping) may differ; everything else, including the absence
     // of stray lock or temp files, is compared byte for byte.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn crash_and_resume_at_concurrency_four_matches_a_clean_run_byte_for_byte() {
         let source = gradient_source(96, 64);
         let plan = PyramidPlanner::new(96, 64, 32, 0, Layout::DeepZoom)
@@ -3722,6 +3806,7 @@ mod resume_wrapper_forwarding_tests {
     // commits to JPEG. Overriding `inner_sink()` closes that silent gap for
     // every bookkeeping hook at once, not just the ones remembered by hand.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn resume_aware_sink_forwards_content_format() {
         let dir = tempfile::tempdir().unwrap();
         let plan = PyramidPlanner::new(4, 4, 2, 0, Layout::DeepZoom)
@@ -3743,6 +3828,7 @@ mod resume_wrapper_forwarding_tests {
     // the inner sink's format through the single `inner_sink()` hook rather
     // than through a per-method forward that a future edit could drop.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn resume_aware_sink_forwards_checkpoint_root() {
         let dir = tempfile::tempdir().unwrap();
         let plan = PyramidPlanner::new(4, 4, 2, 0, Layout::DeepZoom)
@@ -3825,6 +3911,7 @@ mod checkpoint_root_public_optin_tests {
     /// redundant: the wrapper genuinely hides the on-disk root from the
     /// engine.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn verify_through_opaque_wrapper_requires_and_honors_explicit_root() {
         let out = tempfile::tempdir().unwrap();
         let source = solid_source();
@@ -3858,6 +3945,7 @@ mod checkpoint_root_public_optin_tests {
     /// threads it into an attached policy that carries no root of its own.
     /// This is the exact field the issue proposed retiring.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn engine_config_checkpoint_root_drives_verify_through_opaque_wrapper() {
         let out = tempfile::tempdir().unwrap();
         let source = solid_source();
@@ -3881,6 +3969,7 @@ mod checkpoint_root_public_optin_tests {
     /// explicit root even though the wrapper hides the sink's directory,
     /// and a second run over the same root must skip every recorded tile.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn resume_through_opaque_wrapper_uses_explicit_root() {
         let out = tempfile::tempdir().unwrap();
         let cp = tempfile::tempdir().unwrap();

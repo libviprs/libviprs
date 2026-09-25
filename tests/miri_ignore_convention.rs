@@ -1,0 +1,2420 @@
+//! Enforces the `#[cfg_attr(miri, ignore)]` convention that keeps
+//! `cargo +nightly miri test` runnable (issue #652).
+//!
+//! `merge-gate.yml` runs Miri as the only check this repository has on
+//! undefined behaviour. Miri runs the interpreted program under an isolation
+//! layer that refuses real syscalls, and it *aborts the whole run* on the first
+//! unsupported operation rather than failing that one test. So a single new
+//! test that reaches for `tempfile::tempdir()` takes the entire gate down, and
+//! it reports as "Miri failed", which reads like undefined behaviour rather
+//! than like a missing annotation.
+//!
+//! The convention that avoids this is a `#[cfg_attr(miri, ignore)]` on every
+//! test that touches the filesystem. Nothing enforced it, so it broke:
+//! `checksum::tests::hash_file_matches_in_memory_hash_for_both_algos` arrived
+//! without one and disarmed the gate.
+//!
+//! # What this guard does
+//!
+//! It walks `src/` and `tests/` from the repo root, recursively, parses every
+//! `#[test]` function out of every `.rs` file it finds, classifies each one as
+//! filesystem-touching or not, and compares the result against
+//! `tests/miri_fs_test_inventory.txt`. The comparison is an exact set equality
+//! in both directions, so all four interesting edits fail the build:
+//!
+//! * a new filesystem-touching test appears and is not in the inventory;
+//! * an existing annotation is deleted, flipping a recorded `annotated` entry
+//!   to `unannotated`;
+//! * an annotation is added, which is fine but must be recorded so the ledger
+//!   keeps meaning what it says;
+//! * a test in the inventory is deleted or renamed.
+//!
+//! Nothing here can be satisfied by editing a single grep pattern: the file set
+//! comes from a directory walk, not from a hand-written list, and the parse
+//! asserts its own shape per file (see [`scan_source`]) so a construct the
+//! scanner does not understand fails loudly instead of silently shrinking the
+//! window it looks at.
+//!
+//! # What the detector can see, and what it cannot
+//!
+//! It matches the substrings in [`FS_MARKERS`] against the body of each test,
+//! with comments and string, byte-string and character literals masked out, so
+//! a doc comment or an error message that merely mentions `std::fs` does not
+//! count.
+//!
+//! It is a *syntactic* check on one function body, which means it cannot see:
+//!
+//! * filesystem access reached through a helper in **production** code, or in
+//!   another file. Since #781 the detector follows a call into a helper that is
+//!   test scaffolding, one file deep and to a fixed point, so
+//!   `stream_verify`'s three malformed-strip tests are seen through
+//!   `assert_strip_layout_rejected` now, and since #833 the helper can be a
+//!   `#[cfg(test)]` free `fn` rather than only one inside a `#[cfg(test)] mod`.
+//!   It deliberately does not follow calls into the library:
+//!   `source::tests::decode_file_not_found` goes through `decode_file`, which
+//!   opens the path itself, and stays `not-detected`, because a production
+//!   function that *can* open a path is not evidence that this caller hands it
+//!   one. [`reaching_fns`] has the measurement behind that choice, and the
+//!   section below has the six tests it costs.
+//! * filesystem access inside a library entry point that takes a `Path`. Any
+//!   `foo(path)` that opens `path` internally reads as pure to this scanner.
+//! * a filesystem call spelled through an alias (`use std::fs as f;`), from a
+//!   `macro_rules!` body, from a closure held in a `static`, or through a crate
+//!   this list does not name. Those three are the same shapes the process
+//!   detector misses, they share the parser, and
+//!   [`the_filesystem_detector_s_blind_spots_are_still_blind`] pins each one.
+//! * anything outside `src/` and `tests/`, which means the `fuzz/` member (a
+//!   separate crate that `cargo miri test` on this package does not build) and
+//!   the `build.rs`-less root manifest.
+//!
+//! The `not-detected` rows are what keeps those blind spots from being silent:
+//! a test the detector cannot classify still gets pinned the moment somebody
+//! annotates it, so the annotation cannot later be deleted unnoticed.
+//!
+//! # Both classes are refusals now, and the filesystem one keeps its rows
+//!
+//! Everything above was written as a ledger, back when `merge-gate.yml` ran
+//! Miri with `-Zmiri-disable-isolation`: a filesystem call came back rather
+//! than aborting, so an `unannotated fs-detected` test could stand. **#711
+//! removed that flag**, and under isolation such a test ends the run with
+//! `unsupported operation: \`open\` not available when isolation is enabled`.
+//! Measured on `800c699`, plain `main`,
+//! `cargo miri test --test workspace_layout` died on
+//! `fuzz_crate_is_a_member_of_the_root_workspace` before running anything.
+//!
+//! #739 annotated 134 of the 138 rows that made that fatal, so
+//! [`no_filesystem_touching_test_runs_under_miri_outside_the_named_exceptions`]
+//! is an assertion now rather than a count of known debt. The four that are
+//! left are in `src/resample.rs`, which had four open pull requests against it
+//! while the sweep ran; they are named in [`UNANNOTATED_FS_EXCEPTIONS`] and
+//! tracked by issue #756.
+//!
+//! The rows stay, and the set-equality check with them, because they catch a
+//! different edit: an annotation being *deleted*, and an annotation being added
+//! to a test the detector cannot see through (the `not-detected` rows). An
+//! assertion that every filesystem test is annotated is green when somebody
+//! annotates a pure test by mistake; the inventory is what makes that a new
+//! `annotated not-detected` row and a red build.
+//!
+//! # Six tests reach the filesystem through the library, and are measured
+//!
+//! Issue #765 said the ledger cannot see a test that reaches the filesystem
+//! through a helper, and counted 21 of `src/exr.rs`'s 22 tests and all 24 of
+//! `src/nifti.rs` as that shape. That was true when it was filed and #781
+//! closed it: the follower sees every one of those through `fixture()`, and
+//! `src/exr.rs`'s twenty-second test is the one that really is pure.
+//!
+//! What is left is the narrower shape the follower refuses on purpose, a test
+//! handing a real `Path` to a library entry point that opens it. **Six**, and
+//! that number is a measurement rather than a scan. I built every test binary,
+//! ran each one single threaded with `--include-ignored --nocapture --test-threads=1`
+//! under a `DYLD_INSERT_LIBRARIES` interposer on `open`, `openat`, `opendir`,
+//! `stat`, `lstat`, `access`, `mkdir`, `unlink`, `rename`, `symlink`, `link`,
+//! `rmdir`, `readlink` and `chmod`, and printed each path to stdout, which
+//! libtest brackets with its own `test NAME ...` and `ok` in that mode, so every
+//! syscall is attributed to the test that made it. 2143 tests ran, 264 touched
+//! the filesystem, and six of those 264 were in neither the inventory nor the
+//! annotated set:
+//!
+//! | test | what it opens |
+//! |---|---|
+//! | `analyze::a_pair_loads_from_either_name_and_from_the_bare_stem` | the committed `.hdr`/`.img` pair |
+//! | `analyze::decode_file_reaches_the_pair_from_the_hdr` | the same pair |
+//! | `analyze::a_missing_img_is_an_io_error_and_the_header_is_priced_before_it_is_opened` | `no_img.hdr`, then the sibling that is not there |
+//! | `colour::icc_typed_errors` | `/nonexistent/profile.icc` |
+//! | `pdf::pdf_info_with_password_passes_through_open_error` | `/nonexistent/secret.pdf` |
+//! | `pdf::password_and_dpi_extract_return_a_clean_typed_error` | the same |
+//!
+//! The last three are the sharp half. They pass a path that does not exist and
+//! assert on the error, which reads like a test that never reaches disk, and
+//! the `open` still happens: Miri refuses the syscall before the kernel gets to
+//! answer `NotFound`, so the run ends there rather than in the assertion. That
+//! is the same shape as `source::tests::decode_file_not_found`, which has
+//! carried the annotation since long before any of this and is the reason the
+//! shape is named in the list above at all.
+//!
+//! The three Analyze ones are the other half, and they cannot be written any
+//! other way: `decode_analyze_file` is a two-file entry point that resolves the
+//! `.img` from the `.hdr`'s path, so there is no buffer form of it to test. Its
+//! sibling `src/mat.rs` adds none, because all 27 of its tests take
+//! `include_bytes!`.
+//!
+//! Two limits on that number, both worth saying out loud. It covers the default
+//! feature set, which is what `cargo miri test` builds, so a test behind `avif`
+//! or `jxl` is out of scope here even though the scanner still reads it. And an
+//! interposer sees a syscall, not an intention, so it cannot find a test that
+//! would touch the filesystem on another machine; the scanner is what covers
+//! that direction.
+//!
+//! # Spawning a process, which was a refusal first
+//!
+//! `std::process` was different in kind before that change and is merely
+//! *worse* after it. Miri supports process spawning on no target and under no
+//! flag, so no `MIRIFLAGS` setting has ever made a spawning test survivable,
+//! where the filesystem class was survivable until last week. Measured on
+//! `120acb6`, `cargo +nightly miri test --test dependency_policy` died on
+//! `every_links_key_is_on_the_allowlist` before running anything else in the
+//! tree (issue #714).
+//!
+//! So [`no_process_spawning_test_can_run_under_miri`] is an outright assertion,
+//! not a row: every test that reaches `std::process` must carry
+//! `#[cfg_attr(miri, ignore)]`, full stop. There is no "record it as
+//! unannotated and say why in the review" arm, because there is no
+//! configuration in which such a test runs.
+//!
+//! # Following a helper, once, for the process case
+//!
+//! The filesystem detector reads one function body and stops, which is why the
+//! `not-detected` rows exist. That is not good enough here, because none of the
+//! eleven tests #714 found spells `Command::new` in its own body: they call
+//! `cells()`, which calls `graphs()`, which spawns cargo. A body scan sees all
+//! eleven as pure.
+//!
+//! [`process_spawning_fns`] closes that by resolving calls inside the file. It
+//! parses every `fn` in the file, marks the ones whose body matches
+//! [`PROCESS_MARKERS`], and then repeats to a fixed point, marking any function
+//! whose body names an already-marked one. Two hops is what the real tree
+//! needs; the loop takes any depth.
+//!
+//! Where it can, it over-approximates on purpose. A call is matched as the
+//! *name*, on identifier boundaries, not as `name(`: `graphs()` reaches cargo
+//! through `CELLS.iter().map(resolve)`, where the callee never sits next to a
+//! paren at all, and insisting on one is how my first attempt at this missed
+//! four of the ten tests #714 lists. The cost is that a method spelled the same
+//! as a spawning free function counts, and so does a name that is merely
+//! mentioned. Over-approximating costs an unnecessary annotation on a test Miri
+//! could have run. Under-approximating costs the whole gate.
+//!
+//! # Where it under-approximates, which is the half that matters
+//!
+//! It would be comfortable to leave the paragraph above as the whole story. It
+//! is not. Four shapes reach `std::process` without this seeing them, none of
+//! them present in the tree today, all of them things somebody could write
+//! tomorrow:
+//!
+//! * **An aliased import.** `use std::process::Command as Cmd;` then
+//!   `Cmd::new(..)`. The `use` is at module scope rather than inside any `fn`,
+//!   so [`fn_bodies`] never reads it and neither spelling matches
+//!   [`PROCESS_MARKERS`]. Closing this needs the scan to resolve imports, which
+//!   is a different kind of program from the one this file is.
+//! * **A spawn inside a `macro_rules!` body.** Not an `fn`, so it is not in the
+//!   map, and the expansion this file never sees is where the call appears.
+//! * **A closure held in a `static` or a `const`.** Same reason: the body is
+//!   not under an `fn` header, so nothing indexes it.
+//! * **A helper in another file.** [`process_spawning_fns`] runs per file, so a
+//!   spawning helper in a shared `tests/common/mod.rs` is invisible to every
+//!   test that calls it. This is the one most likely to arrive by accident,
+//!   because a shared test helper is an ordinary thing to write.
+//!
+//! [`EXPECTED_PROCESS_SPAWNING_TESTS`] is what stops that list growing in
+//! silence. It pins how many tests the detector finds, so a change that makes
+//! it stop seeing a whole class shows up as a count that moved, rather than as
+//! an empty offender list that still reads as a pass.
+
+use std::collections::BTreeSet;
+use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
+
+/// The recorded state of the tree. Compiled in with `include_str!` rather than
+/// read at runtime so the ledger and the binary asserting against it cannot
+/// drift apart, and so editing it forces a rebuild.
+const INVENTORY: &str = include_str!("miri_fs_test_inventory.txt");
+
+/// Directories under the repo root whose `.rs` files `cargo miri test` compiles
+/// and runs. Walked recursively; this is a list of *roots*, not of files.
+const SCANNED_DIRS: [&str; 2] = ["src", "tests"];
+
+/// Substrings that mean "the body of this test reaches the real filesystem".
+///
+/// Derived from what the 48 pre-existing annotated tests actually call:
+/// `tempfile::tempdir` (97 uses), `std::fs::write` (34), `std::fs::read` (9),
+/// `symlink` (8), `std::fs::create_dir_all` (7), `std::fs::read_dir` (6),
+/// `std::fs::metadata` (5), then a tail of `remove_file`, `OpenOptions`,
+/// `canonicalize`, `create_dir` and `File::open`. The `fs::` entries are
+/// spelled with the item name attached so a local `mod fs` or an unrelated
+/// `fs::Config` does not match.
+const FS_MARKERS: &[&str] = &[
+    // Temporary files and directories.
+    "tempfile::",
+    "TempDir",
+    "NamedTempFile",
+    // The whole of `std::fs`, however it is reached.
+    "std::fs::",
+    "fs::canonicalize(",
+    "fs::copy(",
+    "fs::create_dir(",
+    "fs::create_dir_all(",
+    "fs::exists(",
+    "fs::hard_link(",
+    "fs::metadata(",
+    "fs::read(",
+    "fs::read_dir(",
+    "fs::read_link(",
+    "fs::read_to_string(",
+    "fs::remove_dir(",
+    "fs::remove_dir_all(",
+    "fs::remove_file(",
+    "fs::rename(",
+    "fs::set_permissions(",
+    "fs::symlink_metadata(",
+    "fs::write(",
+    "fs::File",
+    "fs::OpenOptions",
+    // Handles and directory iteration.
+    "File::open(",
+    "File::create(",
+    "File::create_new(",
+    "OpenOptions::new(",
+    "read_dir(",
+    // Links, which are platform-specific and so are not spelled `std::fs::`.
+    "symlink(",
+    "symlink_file(",
+    "symlink_dir(",
+    "hard_link(",
+    "std::os::unix::fs::",
+    "std::os::windows::fs::",
+    // `Path` methods that stat the path even though they read like accessors.
+    ".canonicalize()",
+    ".exists()",
+    // `Path::try_exists` is the fallible twin of `.exists()` and stats just the
+    // same. It was missing, and an unannotated `#[test]` calling it left all
+    // fourteen tests in this file green while ending the whole Miri run on its
+    // first syscall (issue #949).
+    ".try_exists()",
+    ".is_file()",
+    ".is_dir()",
+    // Matched today only because `symlink(` above is a substring of it, which
+    // is not a property worth leaning on.
+    ".is_symlink()",
+    ".metadata()",
+    ".read_dir()",
+    ".symlink_metadata()",
+    // The third constructor on `File`, beside `open` and `create` above: the
+    // `OpenOptions` builder reached through `File`. The bare spelling needs
+    // its own entry for the same reason those two do, since `use std::fs::File`
+    // sits at module scope where `fn_bodies` never reads it.
+    "File::options(",
+];
+
+/// Substrings that mean "this function reaches `std::process`".
+///
+/// Short, because there is only one way to start a process from std and every
+/// spelling of it goes through `Command`. `Command::new(` catches the
+/// `use std::process::Command;` form and `process::Command` catches the
+/// qualified one; the bare `.spawn(` / `.output(` / `.status(` methods are
+/// deliberately absent, since those names collide with plenty of innocent APIs
+/// and the constructor is unavoidable.
+const PROCESS_MARKERS: &[&str] = &["Command::new(", "process::Command"];
+
+/// Attribute forms of `#[test]` this scanner does not understand. Finding one
+/// means the parse below would skip a real test, so it is a hard failure with
+/// an instruction rather than a silent gap.
+const UNSUPPORTED_TEST_ATTRS: &[&str] = &["::test]", "#[test(", "#[test_case"];
+
+/// Floors that catch a scanner pointed at nothing, or at one file, instead of
+/// letting it report a clean tree. Deliberately far below the real numbers
+/// (97 files, 1834 tests at the time of writing) so ordinary churn never trips
+/// them.
+const MIN_FILES: usize = 50;
+/// Companion floor to [`MIN_FILES`], on parsed `#[test]` functions.
+const MIN_TESTS: usize = 1000;
+
+/// Files that must turn up in the walk. Not the scan set (that is the walk
+/// itself) — a canary that the walk reached both roots and is reading real
+/// source rather than an empty or wrongly-rooted directory.
+const ANCHOR_FILES: &[&str] = &[
+    "src/lib.rs",
+    "src/checksum.rs",
+    "src/engine.rs",
+    "tests/non_exhaustive_enums.rs",
+    "tests/workspace_layout.rs",
+];
+
+/// Annotated tests under `src/`, pinned so a bulk change in either direction is
+/// a deliberate edit here rather than a number that quietly drifts.
+///
+/// It went from 53 to 157 in one change, #739's sweep, and from 157 to 209 in
+/// the next, #781's: the first annotated 104 filesystem tests across thirteen
+/// more `src/` modules because #711 turned Miri's isolation on and made every
+/// one of them fatal to the whole run, and the second annotated everything the
+/// detector could not see until it followed a call into a test helper, which
+/// included the whole of `src/nifti.rs` once that module reached `main` while
+/// this was in flight.
+///
+/// It went from 213 to 219 in #765's, which is a different kind of change from
+/// the two above: those swept a class the detector could see, this one adds the
+/// six tests it *cannot*, measured at runtime rather than found by reading. See
+/// the "Six tests reach the filesystem through the library" section of the
+/// module docs for the method and for why none of the six has a marker in it.
+///
+/// `merge-gate.yml` used to quote a count here ("48 annotations across seven
+/// modules", true at `f62a56a` and stale for months afterwards). It quotes none
+/// now, on purpose: an exact number in the workflow made it a file every
+/// unrelated pull request had to edit, which is the reasoning written up in
+/// `tests/miri_invocation_parity.rs`.
+///
+/// #1122 moves it 245 to 246, and the one is
+/// `a_reader_that_cannot_count_its_tiles_refuses_rather_than_guessing` in
+/// `src/pyramid_reader.rs`, which opens a `tempfile::tempdir()` as a pyramid
+/// to pin what a reader with no tile count answers.
+///
+/// EPIC #1135 moves it 246 to 253: four tests in `src/pmtiles/writer.rs` that
+/// each drive a whole `finish` to count what it does, one renamed with the
+/// table it is about, and three the review asked for, covering the repeat
+/// table's own eviction, a payload larger than the copy buffer and the leaf
+/// width the widening loop settles on.
+///
+/// #1143 moves it 253 to 256, and all three are in `src/pmtiles/writer.rs`,
+/// covering `Layout::Arrival`: the counting sink that shows every tile byte
+/// written once, the latch over a destination write that fails part way, and
+/// the durability barrier now landing on the destination rather than on a
+/// staging file that no longer exists.
+const EXPECTED_SRC_ANNOTATIONS: usize = 256;
+/// Companion to [`EXPECTED_SRC_ANNOTATIONS`]: how many `src/` modules carry at
+/// least one annotation. #765 made it 25 by putting the first annotation in
+/// `src/analyze.rs`; `src/colour.rs` and `src/pdf.rs`, which took the other
+/// three, were already in the set.
+const EXPECTED_SRC_MODULES: usize = 30;
+
+/// How many tests in the tree reach `std::process`.
+///
+/// The positive control for [`no_process_spawning_test_can_run_under_miri`],
+/// which on its own asserts that a set is empty and is therefore green both
+/// when every spawning test is annotated and when the detector has quietly
+/// stopped finding any. That is not hypothetical: matching a callee as `name(`
+/// instead of as an identifier took this from 10 to 7 while every assertion
+/// stayed green, and reading a `;` inside `[u8; 32]` as a bodyless declaration
+/// dropped 116 functions out of the call graph the same way.
+///
+/// Nineteen today: six in `tests/dependency_policy.rs`, three in
+/// `tests/pdfium_source_audit.rs` and two in `tests/workspace_layout.rs`. Ten
+/// of those eleven are what #714 is about; the eleventh is the sha2 version
+/// ceiling #731 added, which spawns nothing at run time and is counted anyway,
+/// because this detector reads the call graph rather than the process table and
+/// cannot see that `graphs()` memoizes its `cargo tree` calls across the whole
+/// binary. Then six in `tests/icc_lut_alloc.rs`, which spawn a child on purpose
+/// to watch it abort (#693); one in `src/source.rs` that shells out to `mkfifo`
+/// and was already annotated, for the filesystem reason, before any of this;
+/// and one in `tests/oracle_capture_pins.rs` that runs `git ls-files`, which is
+/// the one #701 brought in.
+///
+/// The population is wider than the ten that needed fixing, and deliberately
+/// so. Pinning only the ten would go green again the moment the detector lost
+/// the other seven, which is the failure this constant exists to catch. It
+/// caught my own miscount the first time I ran it: I wrote eleven, having
+/// forgotten the six that arrived with #693 in the commit underneath this one.
+///
+/// It then caught a second one, which is the better advertisement: #701 added
+/// `no_compiled_python_is_tracked_under_oracle_captures`, which shells out to
+/// `git ls-files`, and both PRs were green on their own branches. The count
+/// only moved when they landed together, and it is what took this count to
+/// eighteen, for exactly that reason. This is a count that two file-disjoint
+/// changes can both be right about and still break, so move it in the same
+/// change that moves the population.
+///
+/// Twenty-one since #977, which added
+/// `no_two_tracked_paths_differ_only_in_case`, and twenty-two since #979,
+/// which added `every_embedded_fixture_is_committed_under_the_name_the_source_uses`.
+/// Both run `git ls-files`, for the same underlying reason as the #701 row
+/// above: the index is the only place that can answer a question the working
+/// tree cannot.
+///
+/// Thirty-five since #994, and that jump of thirteen is one file:
+/// `tests/local_ci_invocation.rs` asks `tools/local-ci.py` what it would hand
+/// Docker, so thirteen of its fifteen tests run `python3`. A grep over the
+/// Python would pass on a `--platform` that is built and then dropped, which
+/// is the whole reason those tests shell out rather than read the source, so
+/// the spawn is not incidental to them. The detector sees all thirteen through
+/// the file-local `run`, `run_raw`, `daemon_platform` and
+/// `interpreter_platform` helpers as well as directly, which is the two-hop
+/// shape [`process_spawning_fns`] exists for. The other two drive that file's
+/// own `parse` on a string literal and spawn nothing, so they carry no
+/// annotation and the detector is right to leave them out.
+///
+/// Thirty-seven since #993, and the one is
+/// `tests/pmtiles_benchmarks.rs::pmtiles_versus_directory`. It re-executes its
+/// own test binary once per benchmark cell, because peak RSS is a high-water
+/// mark the kernel never lowers and two storage backends measured in one
+/// process hand the second one the first one's peak. The child,
+/// `benchmark_cell`, spawns nothing itself and so is not in this set; it is in
+/// the filesystem one.
+const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 37;
+
+/// The filesystem-touching tests still allowed to run under Miri, and so still
+/// allowed to end the whole run on their first syscall.
+///
+/// Empty is the target state and an empty list is a legal one: the assertion in
+/// [`no_filesystem_touching_test_runs_under_miri_outside_the_named_exceptions`]
+/// reads this as an exception list, not as a floor. What it replaced was a
+/// floor, `assert!(unannotated_fs > 0)`, and that is the difference #739 turned
+/// on: the old form demanded the debt still exist and would have gone red on
+/// the change that cleared it.
+///
+/// It is empty, and it got there the way the shape predicts. #739 left four
+/// names in it, all in `src/resample.rs`, because that file was held by the
+/// lane resolving #692, #704, #705, #732, #733 and #736 with four pull requests
+/// open against it. Those merged, #756 annotated the four, and emptying this
+/// cost nothing else: the assertion reads the list rather than depending on it,
+/// so no arm of the guard had to change. That is the whole difference between
+/// an exception list and the floor it replaced.
+///
+/// Keep it empty. A name added here is a test that can end the entire Miri
+/// session on its first syscall, so it wants a reason that survives review and
+/// an issue to carry it, which is what #756 was.
+const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
+
+/// How many tests in the tree the filesystem detector finds, annotated or not.
+///
+/// The positive control for
+/// [`no_filesystem_touching_test_runs_under_miri_outside_the_named_exceptions`],
+/// which is otherwise an assertion that a set is empty, and a detector that has
+/// stopped recognising filesystem calls produces an empty set too. That is a
+/// one-character edit away: [`FS_MARKERS`] is a substring list, and deleting
+/// one entry from it moves this number while leaving the offender list empty
+/// and the check green. Measured, not reasoned: three such deletions are in
+/// #739's and #781's mutation tables, one per marker that is the sole match for
+/// any test in the tree.
+///
+/// #949 moved it 280 to 282 on the branch it was measured on, and the
+/// arithmetic was worth keeping because the change that moved it also
+/// *added* three markers. Three tests arrived
+/// (`test_util_is_only_ever_gated_alongside_cfg_test` walks `src/` now instead
+/// of reading one file, and both `the_walk_descends_into_subdirectories`
+/// guards read a directory) and one left
+/// (`the_crates_own_unsafe_stays_out_of_a_default_build` moved to
+/// `include_str!` and touches nothing any more). The three new markers,
+/// `.try_exists()`, `.is_symlink()` and `File::options(`, moved this by
+/// **zero**: nothing in the tree reaches the filesystem through those
+/// spellings today, which is exactly why an unannotated test using one was
+/// invisible.
+///
+/// This value is re-derived from the detector on every compose rather than
+/// added by hand, because a hand-added delta is exactly the shared-count
+/// hazard this constant already is (issue #971). #963 left a literal `0`
+/// placeholder here for whoever composed the batch it was part of to fill
+/// in, and it merged into `main` unfilled, which held this test red from
+/// `e82e03a8` through five more merges until someone re-ran the detector.
+/// #971 (PR #972) re-derived it as 287, measured at the tip of #955 and
+/// #962 landing on top of #963.
+///
+/// #968 moved it 287 to 285, in the other direction from every earlier entry
+/// in this history: it shares `sample_kind_spine.rs` and `unsafe_inventory.rs`'s
+/// masking lexer and file walker into `tests/common/scan.rs`, and this
+/// detector's own [`reaching_fns`] only follows a call graph within one file.
+/// Both copies of `the_walk_descends_into_subdirectories` still carry
+/// `#[cfg_attr(miri, ignore)]`, so nothing new runs under Miri, but the
+/// detector can no longer see either one touching the filesystem through
+/// `scan::rs_files_under`, so they moved from `annotated fs-detected` to
+/// `annotated not-detected` in `tests/miri_fs_test_inventory.txt`, which is
+/// exactly the state [`TestFn::is_tracked`]'s own doc comment describes for a
+/// helper-reached case the detector cannot see.
+///
+/// #958 moved it 285 to 286: `csv_and_mat_route_through_both_dispatches_to_the_same_bytes`
+/// in `tests/save_route_coverage.rs` saves `.csv` and `.mat` files to a
+/// `tempfile::tempdir()` and reads them back, so it is both annotated and
+/// fs-detected, the ordinary case, and its row is in
+/// `tests/miri_fs_test_inventory.txt` beside the rest of that file's.
+///
+/// #982 moved it 287 to 288:
+/// `the_workflow_directory_holds_only_files_this_guard_has_classified` in
+/// `tests/local_gate_is_the_job_list.rs` reads `.github/workflows/` so that a
+/// new workflow file cannot appear outside the two lists that file classifies.
+/// It has to be a directory listing rather than an `include_str!` of a name it
+/// already knows, because the thing it is looking for is the file nobody told
+/// it about. Annotated and fs-detected, the ordinary case.
+///
+/// #994 moved it 288 to 289, and one test is the whole of it.
+/// `the_host_architecture_comes_from_the_daemon_and_degrades_rather_than_refusing`
+/// writes three fake `docker` scripts into a `tempfile::tempdir()` and puts
+/// each first on `PATH` in turn, because `tools/local-ci.py` now takes the
+/// host architecture from the daemon rather than from `platform.machine()`
+/// and on this host both sources say the same thing, so nothing that merely
+/// compares the tool's answer against the host can fail. Twelve more tests in
+/// that file spawn python3 and touch nothing, which is why they are
+/// `annotated not-detected` rows, and the last two spawn nothing at all.
+///
+/// #993 moved it 373 to 382, and the nine are the PMTiles benchmark and
+/// bounded-memory suites: four in `tests/pmtiles_benchmarks.rs`, four in
+/// `tests/pmtiles_bounded_memory.rs` and the one in
+/// `tests/pmtiles_release_readiness.rs` that checks the benchmark document
+/// names test files that exist. Every one of them writes a pyramid, an archive
+/// or a writer's scratch directory into a `tempfile::tempdir()`, so all nine
+/// are `annotated fs-detected` and none of them is a judgement call.
+/// `tests/pmtiles_index_only_reads.rs` arrived in the same change and adds
+/// none, because it fabricates its archive in memory and never opens a file.
+///
+/// The review pass on #993 moved it 382 to 383, and the one is
+/// `an_unmeasurable_pyramid_publishes_no_entry_count`, which stats a path that
+/// does not exist and then writes a real file into a `tempfile::tempdir()` as
+/// the positive control that the first half measured an absence rather than a
+/// broken walker.
+///
+/// #1021 moved it 383 to 387, and the four are the two measurement lanes
+/// landing together. Three come from the cold-open ramp work in
+/// `tests/pmtiles_benchmarks.rs`: `a_repository_with_a_commit_is_read_back`,
+/// `the_brink_cells_root_stops_just_under_the_writers_cutoff` and
+/// `the_cold_split_accounts_for_the_whole_combined_row`, each of which writes a
+/// pyramid, an archive or a git repository into a `tempfile::tempdir()`. The
+/// fourth is `the_concurrent_tail_is_attributed` in
+/// `tests/pmtiles_lock_probe.rs`, which generates two pyramids into a directory
+/// the caller names and writes its measurements back out beside them. The same
+/// change adds two `annotated not-detected` rows,
+/// `the_envelope_says_which_host_produced_the_numbers` and
+/// `the_exported_json_carries_every_field_the_site_reads`, and those do not
+/// move this count because the detector does not see them touch the filesystem.
+/// #1017 moves it 387 to 390, and the three are
+/// `tests/pdfium_abi_and_binary_pins.rs`' whole file. Each reads pins out of
+/// `Cargo.toml`, `tools/Dockerfile.ci`, `README.md`, `publish.yml` and a
+/// sibling test through one `std::fs::read_to_string` helper, so all three are
+/// `annotated fs-detected` and none of them is a judgement call.
+///
+/// #1121 moves it 390 to 391, and the one is
+/// `tests/pmtiles_pyramid_reader.rs::fs_pmtiles_and_object_store_return_the_same_tiles`,
+/// which reads the archive it just generated back off disk with
+/// `std::fs::read` so it can serve the same bytes through an injected object
+/// store. The same change adds twelve `annotated not-detected` rows in
+/// `tests/pmtiles_object_store_range.rs`, and those do not move this count
+/// because they reach the committed goldens through the shared oracle helper,
+/// which is a file the detector does not follow into.
+/// #1122 moves it 390 to 400, and the ten are a net figure: twelve arrive and
+/// two leave. Nine are `tests/pmtiles_plan_aware_verify.rs`' whole file, each
+/// of which writes a PMTiles archive into a `tempfile::tempdir()` and then
+/// verifies it; one is the reader cell named under
+/// [`EXPECTED_SRC_ANNOTATIONS`]. The remaining two are the pair in
+/// `tests/pmtiles_sink.rs` that replace `verify_is_refused_by_name` and
+/// `a_verify_run_against_an_archive_does_not_report_success`, which is why the
+/// arrivals outnumber the move: those two are the departures, renamed rather
+/// than deleted because Verify stopped being refused.
+///
+/// Composing #1121 and #1122 takes it to 401. Their deltas are +1 and a NET
+/// +10 (twelve arrive, two leave), and they do sum here because each lane's
+/// arrivals are a disjoint set. I am writing that as a measurement rather than
+/// as arithmetic: 401 is the count the detector reported with this constant
+/// held at the 390 baseline, not the number I got by adding the deltas up.
+///
+/// It is worth saying why that distinction earned its keep twice. An earlier
+/// composition of three lanes measured 413, and 413 minus lane B's +12 is
+/// exactly 401, so the subtraction would have been right. It would also have
+/// been a guess: a net delta and three independent lanes are precisely the
+/// shape where a double count hides, and "the arithmetic happened to agree" is
+/// something you can only say afterwards.
+///
+/// #1123 moves it 401 to 408, and the seven are the whole of
+/// `tests/webp_tile_format.rs` bar its two pure-computation cells. Each of the
+/// seven either generates a pyramid into a `tempfile::tempdir()` or writes a
+/// PMTiles archive there and reads it back, so all seven are
+/// `annotated fs-detected` and none of them is a judgement call.
+///
+/// 408 is the number the detector printed with this constant still at 401, not
+/// 401 plus seven. Same discipline as the paragraph above, and cheap to keep:
+/// the assertion names the figure it measured, so copying it out is strictly
+/// less work than adding up.
+/// #1118 moves it 390 to 402, and the twelve are the whole of
+/// `tests/pyramid_migrate.rs`. Every one of them writes a tree of loose tiles
+/// into a `tempfile::tempdir()`, migrates it into an archive beside it and
+/// reads the archive back with `std::fs::read`, so all twelve are
+/// `annotated fs-detected` and none of them is a judgement call.
+/// Folding the attestation fix into #1118's branch moves it 420 to 421, and the
+/// one is `tests/pmtiles_benchmarks.rs`'
+/// `a_repository_with_no_commits_publishes_holes_rather_than_half_an_attestation`,
+/// which `git init`s a `tempfile::tempdir()` to reach an unborn HEAD. It is
+/// `annotated fs-detected` like its neighbour and is not a judgement call.
+///
+/// #1130 moves it again for the five filesystem cells the verify findings add:
+/// three are the whole of `tests/pmtiles_verify_reads_the_index.rs`, which
+/// writes a real archive into a `tempfile::tempdir()` and reads it back
+/// through a counting transport, and two are the pair
+/// `tests/pmtiles_plan_aware_verify.rs` grows for the archive of a different
+/// picture. All five write an archive to disk, so none of them is a judgement
+/// call, and the figure below is what the detector printed rather than what I
+/// got by adding five to the line above.
+///
+/// The review of #1147 moves it 426 to 428 for the pair that pins the cheap
+/// probe to a local file: one serves a real archive through a transport that
+/// answers the index and refuses the tile data, and one is the negative
+/// control that a file on disk still takes the cheap probe. Both write an
+/// archive into a `tempfile::tempdir()`, and 428 is again what the detector
+/// printed with this constant still at 426.
+///
+/// Then 428 to 429 for the ranged sibling of the cheap-probe cell, which
+/// verifies the same archive through a transport that reports a size and is
+/// not a local file and asserts that every payload is read. 429 is the number
+/// the detector printed with this constant still at 428.
+///
+/// EPIC #1135 moves it again, to 434. The tests it adds that reach the
+/// filesystem are the writer cells that drive a whole `finish` to count what
+/// it does, the dedupe window's two edges, the two orders that stop agreeing
+/// once the window cannot hold the tile set, the repeat table's own eviction,
+/// a payload larger than the copy buffer, three bounded-memory cells and the
+/// peak-RSS harness, less the renames among them. One more is annotated and
+/// touches nothing, because it gzips a full root about thirty times and Miri
+/// would be there all week.
+///
+/// The number came from the detector rather than from that list, which is the
+/// discipline the paragraphs above ask for and the reason it is right: the
+/// list has been off by one twice while the detector has not.
+///
+/// #1146 landed first and took main to 434. Held at that figure, the
+/// detector reported the number below on the merged tree.
+///
+///
+/// #1133 and #1132 move it 421 to 433, and the twelve are all of
+/// `tests/jpeg_tile_format.rs` bar the one cell that encodes a raster in
+/// memory and never goes near a path. Ten of the twelve either generate a
+/// pyramid into a `tempfile::tempdir()` or write tiles there and read them
+/// back; the other two read `src/` to check two things the first ten stand
+/// on, that the render path still produces `Rgba8` and that nothing but the
+/// Ultra HDR lane still builds an `image` JPEG encoder. All twelve are
+/// `annotated fs-detected` and none of them is a judgement call.
+///
+/// 433 is what the detector printed with this constant still at 432, and 432
+/// is what it printed at 421 before that. The rebase onto #1126 is why these
+/// figures are not the ones this branch was written against, and the review
+/// that added a cell to every engine is why the last one moved again.
+///
+/// #1146 and #1147 landed first and took main to 442. Held at that figure,
+/// the detector reported the number below on the merged tree.
+///
+/// #1143 moves it 454 to 461, and the seven are the `Layout::Arrival` cells.
+/// Four are in `tests/pmtiles_writer.rs`: the layout of the sections, the
+/// round trip through this crate's reader, the dropped run that has to take
+/// its partial archive with it, and the `#[ignore]`d capture tool that hands
+/// go-pmtiles an arrival archive to verify. Three are in
+/// `src/pmtiles/writer.rs`: the counting sink, the latch over a destination
+/// write that fails part way, and the durability barrier. All seven reach a
+/// `tempfile::tempdir()` or a path under one, all seven are annotated, and
+/// none is a judgement call.
+///
+/// #1150 moves it 461 to 463, and the two are the resume-refusal cells in
+/// `tests/pmtiles_sink.rs`: the engine-configured resume that used to
+/// regenerate the pyramid, and the same request through the sink wrappers.
+/// Both take a `tempfile::tempdir()` and write an archive under it, both are
+/// annotated, and neither is a judgement call.
+///
+/// #1144 moves it 461 to 469, and the eight are the cells for `clustered`
+/// being earned rather than read off the layout, all in
+/// `tests/pmtiles_writer.rs`. Six write one archive each and two sweep every
+/// arrival order of a six-tile set, one under each layout. All eight reach a
+/// `tempfile::tempdir()`, all eight are annotated, and none is a judgement
+/// call.
+///
+/// #1156 moves it 469 to 470, and the one is
+/// `jpeg_tile_format.rs::a_coloured_tile_at_the_default_quality_keeps_full_chroma`.
+/// It belonged to nobody's change: #1153 added it while this constant still
+/// read 461 on its branch, #1144 moved the constant to 469 on a line that did
+/// not carry that test, and the two only met on `main`. Each branch was
+/// self-consistent and the composition was not, which is the shared-count
+/// hazard exactly: a lane cannot see a counter another lane is also moving, so
+/// the first lane to merge afterwards inherits a red gate it did not cause.
+///
+/// #1145 adds three, and they are the ordered-emission cells in
+/// `tests/pmtiles_sink.rs` that build an archive: the comparison against the
+/// tile id layout, the `clustered` claim, and the two runs that have to agree.
+/// Each reads the finished file with `std::fs::read`. Its other cells drive a
+/// recording sink that writes nothing, so they touch no filesystem and do not
+/// move this figure; they carry the annotation anyway, because a 1024 source
+/// through the whole engine is not something to hand Miri.
+///
+/// Merged against a main that had moved to 472 with #1129's two resume cells.
+/// Held at that 472 rather than at 472 plus my three, so the detector had to
+/// report the merged figure instead of agreeing with my arithmetic. It said
+/// "the detector found 475 filesystem-touching tests, not 472", and 475 is
+/// what is below. That it agrees with the arithmetic is the point: the
+/// arithmetic was not what was trusted. The #1156 paragraph above is what
+/// happens when it is.
+///
+/// The wrapper-forwarding cell this merge added does not appear here. It
+/// drives a recording sink that writes nothing, so it is `not-detected`, and
+/// it moves the inventory by a row without moving this figure.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 475;
+
+/// Repo root (the directory holding the root `Cargo.toml`).
+fn repo_root() -> &'static Path {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+}
+
+/// One parsed `#[test]` function.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct TestFn {
+    /// Repo-relative path with `/` separators.
+    file: String,
+    /// The function name.
+    name: String,
+    /// Whether the attribute block carries `#[cfg_attr(miri, ignore)]`.
+    annotated: bool,
+    /// Whether the body matched [`FS_MARKERS`].
+    touches_fs: bool,
+    /// Whether the body matched [`PROCESS_MARKERS`], or called something in
+    /// the same file that (transitively) does. See [`process_spawning_fns`].
+    spawns_process: bool,
+}
+
+impl TestFn {
+    /// The canonical inventory line. Annotation state is part of the key on
+    /// purpose: flipping it shows up as one removal plus one addition rather
+    /// than as a silent no-op.
+    fn ledger_line(&self) -> String {
+        let ann = if self.annotated {
+            "annotated"
+        } else {
+            "unannotated"
+        };
+        let det = if self.touches_fs {
+            "fs-detected"
+        } else {
+            "not-detected"
+        };
+        let (file, name) = (&self.file, &self.name);
+        format!("{ann:<11} {det:<12} {file}::{name}")
+    }
+
+    /// Whether this test belongs in the inventory at all: either the detector
+    /// classified it as filesystem-touching, or somebody annotated it (which
+    /// pins the helper-reached cases the detector cannot see).
+    fn is_tracked(&self) -> bool {
+        self.touches_fs || self.annotated
+    }
+}
+
+/// Replace comments and string, byte-string, raw-string and character literals
+/// with spaces, preserving newlines and character count so line numbers still
+/// line up with the original.
+///
+/// Everything downstream (brace matching, attribute recognition, marker
+/// matching) runs on the masked text, which is why a `//` comment naming
+/// `std::fs::write` does not make a pure test look like a filesystem test, and
+/// why a `{` inside a string literal cannot desynchronise the body scan.
+fn mask_literals_and_comments(src: &str) -> String {
+    let c: Vec<char> = src.chars().collect();
+    let n = c.len();
+    let mut out = String::with_capacity(src.len());
+    let mut i = 0usize;
+    // Whether the previously emitted character can end an identifier, which is
+    // how `br"x"` (a raw byte string) is told apart from `abr"x"` (which cannot
+    // occur) and, more usefully, from an identifier ending in `r` or `b`.
+    let mut prev_ident = false;
+
+    // Blank out `[from, to)` as spaces, keeping newlines.
+    fn blank(out: &mut String, c: &[char], from: usize, to: usize) {
+        for &ch in &c[from..to] {
+            out.push(if ch == '\n' { '\n' } else { ' ' });
+        }
+    }
+
+    // Walk a normal (non-raw) quoted literal starting at the opening delimiter
+    // `quote`, returning the index one past the closing delimiter.
+    fn end_of_quoted(c: &[char], start: usize, quote: char) -> usize {
+        let n = c.len();
+        let mut j = start + 1;
+        while j < n {
+            if c[j] == '\\' {
+                j += 2;
+                continue;
+            }
+            if c[j] == quote {
+                return j + 1;
+            }
+            j += 1;
+        }
+        n
+    }
+
+    while i < n {
+        let ch = c[i];
+
+        if ch == '/' && i + 1 < n && c[i + 1] == '/' {
+            let mut j = i;
+            while j < n && c[j] != '\n' {
+                j += 1;
+            }
+            blank(&mut out, &c, i, j);
+            i = j;
+            prev_ident = false;
+            continue;
+        }
+
+        if ch == '/' && i + 1 < n && c[i + 1] == '*' {
+            let mut depth = 0usize;
+            let mut j = i;
+            while j < n {
+                if c[j] == '/' && j + 1 < n && c[j + 1] == '*' {
+                    depth += 1;
+                    j += 2;
+                    continue;
+                }
+                if c[j] == '*' && j + 1 < n && c[j + 1] == '/' {
+                    depth -= 1;
+                    j += 2;
+                    if depth == 0 {
+                        break;
+                    }
+                    continue;
+                }
+                j += 1;
+            }
+            blank(&mut out, &c, i, j);
+            i = j;
+            prev_ident = false;
+            continue;
+        }
+
+        // `r"…"`, `r#"…"#`, `b"…"`, `br#"…"#`, `b'x'`.
+        if !prev_ident && (ch == 'r' || ch == 'b') {
+            let mut j = i;
+            if c[j] == 'b' {
+                j += 1;
+            }
+            let raw = j < n && c[j] == 'r';
+            if raw {
+                j += 1;
+                let hash_start = j;
+                while j < n && c[j] == '#' {
+                    j += 1;
+                }
+                if j < n && c[j] == '"' {
+                    let hashes = j - hash_start;
+                    let mut k = j + 1;
+                    let mut end = n;
+                    while k < n {
+                        if c[k] == '"' && c[k + 1..].iter().take(hashes).all(|&h| h == '#') {
+                            end = (k + 1 + hashes).min(n);
+                            break;
+                        }
+                        k += 1;
+                    }
+                    blank(&mut out, &c, i, end);
+                    i = end;
+                    prev_ident = false;
+                    continue;
+                }
+            } else if j > i && j < n && (c[j] == '"' || c[j] == '\'') {
+                let end = end_of_quoted(&c, j, c[j]);
+                blank(&mut out, &c, i, end);
+                i = end;
+                prev_ident = false;
+                continue;
+            }
+        }
+
+        if ch == '"' {
+            let end = end_of_quoted(&c, i, '"');
+            blank(&mut out, &c, i, end);
+            i = end;
+            prev_ident = false;
+            continue;
+        }
+
+        // A `'` is either a character literal or a lifetime. `'a` is a
+        // lifetime; `'a'` and `'\n'` are literals. Getting this wrong would eat
+        // the rest of the file, which the balanced-brace assertion would catch,
+        // but it is cheap to get right.
+        if ch == '\'' {
+            let is_char_literal = (i + 1 < n && c[i + 1] == '\\')
+                || (i + 2 < n && c[i + 2] == '\'')
+                || (i + 1 < n && c[i + 1] == '\'');
+            if is_char_literal {
+                let end = end_of_quoted(&c, i, '\'');
+                blank(&mut out, &c, i, end);
+                i = end;
+                prev_ident = false;
+                continue;
+            }
+        }
+
+        out.push(ch);
+        prev_ident = ch.is_alphanumeric() || ch == '_';
+        i += 1;
+    }
+
+    out
+}
+
+/// Strip the modifiers that may sit between an attribute block and `fn`, and
+/// return the function name. `None` means the line is not a function header,
+/// which the caller turns into a hard failure.
+fn function_name(header: &str) -> Option<String> {
+    let mut rest = header.trim();
+    loop {
+        let stripped = [
+            "pub(crate) ",
+            "pub(super) ",
+            "pub ",
+            "async ",
+            "unsafe ",
+            "const ",
+        ]
+        .iter()
+        .find_map(|kw| rest.strip_prefix(kw));
+        match stripped {
+            Some(s) => rest = s.trim_start(),
+            None => break,
+        }
+    }
+    let rest = rest.strip_prefix("fn ")?.trim_start();
+    let name: String = rest
+        .chars()
+        .take_while(|ch| ch.is_alphanumeric() || *ch == '_')
+        .collect();
+    if name.is_empty() { None } else { Some(name) }
+}
+
+/// Every `fn` in a masked file, by name, with its body.
+///
+/// A second, looser pass than the one [`scan_source`] runs: it takes any line
+/// [`function_name`] can read a name off, not only the ones under `#[test]`, so
+/// the helpers a test calls are in the map too. A signature that ends in `;`
+/// before it opens a brace is a trait declaration with no body and is skipped,
+/// which matters because consuming forward from one would swallow the next
+/// function whole.
+///
+/// Names collide (two `mod`s can each define `helper`), and the map keeps the
+/// last. That is fine for what it feeds: the caller only asks whether *some*
+/// function of that name spawns, and the answer it wants on a collision is the
+/// conservative one.
+fn fn_bodies(masked: &str) -> Vec<(String, usize, String)> {
+    let lines: Vec<&str> = masked.lines().collect();
+    let mut out: Vec<(String, usize, String)> = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        let Some(name) = function_name(line) else {
+            continue;
+        };
+        let mut body = String::new();
+        let mut depth = 0i64;
+        // Square brackets and parens seen in the *signature*, before the body
+        // opens. A `;` inside one belongs to an array type or a const-generic
+        // default, not to the end of a declaration: `fn f() -> [u8; 32]` and
+        // `where T: Into<[u8; 4]>` both carry one, and treating those as
+        // bodyless dropped 116 real functions from the map across this tree.
+        // Angle brackets need no counting of their own, because a `;` only
+        // reaches the type level inside an array or a tuple and both of those
+        // bring a bracket or a paren with them.
+        let mut nesting = 0i64;
+        let mut opened = false;
+        let mut declaration = false;
+        for line in &lines[i..] {
+            for ch in line.chars() {
+                match ch {
+                    '{' => {
+                        depth += 1;
+                        opened = true;
+                    }
+                    '}' => depth -= 1,
+                    '[' | '(' if !opened => nesting += 1,
+                    ']' | ')' if !opened => nesting -= 1,
+                    ';' if !opened && nesting == 0 => declaration = true,
+                    _ => {}
+                }
+            }
+            body.push_str(line);
+            body.push('\n');
+            if declaration || (opened && depth == 0) {
+                break;
+            }
+        }
+        if !declaration {
+            out.push((name, i, body));
+        }
+    }
+    out
+}
+
+/// Whether `ident` appears in `body` as a whole identifier rather than as part
+/// of a longer one, so a spawning `run` is not matched by `rerun` or `run_id`.
+fn mentions_ident(body: &str, ident: &str) -> bool {
+    let bytes = body.as_bytes();
+    let word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    body.match_indices(ident).any(|(at, _)| {
+        let before = at == 0 || !word(bytes[at - 1]);
+        let end = at + ident.len();
+        let after = end == bytes.len() || !word(bytes[end]);
+        before && after
+    })
+}
+
+/// The names of every function in `masked` that reaches `std::process`, either
+/// directly or through another function in the same file.
+///
+/// The fixed point is what makes this useful rather than decorative: the eleven
+/// tests issue #714 found call `cells()`, which calls `graphs()`, which calls
+/// `Command::new(cargo())`. One hop would still see them all as pure.
+fn process_spawning_fns(masked: &str) -> BTreeSet<String> {
+    reaching_fns(masked, PROCESS_MARKERS, &|_| true)
+}
+
+/// The line ranges of every `#[cfg(test)]` item in `masked`, as inclusive
+/// `(first, last)` line indices.
+///
+/// Used to answer "is this function test scaffolding" in a `src/` file. An
+/// integration test under `tests/` is all scaffolding, so it has no ranges and
+/// the predicate that uses this returns true for the whole file.
+///
+/// It takes any item under the attribute, not only a `mod`. That is issue #833: `#[cfg(test)]` on a free `fn` is an ordinary thing to write and
+/// this tree has thirteen of them, in `src/arithmetic.rs`, `src/colour.rs`
+/// (five), `src/convolution.rs`, `src/freqfilt.rs`, `src/raster.rs` (two),
+/// `src/sink.rs` (two) and `src/source.rs`. While this only matched a `mod`,
+/// every one of them was outside the scope predicate, so a fixture reader
+/// written as one would have been invisible to the follower no matter how
+/// plainly it called `std::fs::read`. None of the thirteen touches the
+/// filesystem today, which is why widening this moved no count.
+///
+/// An item that closes with a `;` before it opens a brace (`mod tests;`, a
+/// `use`) is one line long. The `;` is only terminal at bracket depth zero,
+/// because `fn f() -> [u8; 32] {` carries one inside its signature and reading
+/// that as the end of the item is the same mistake [`fn_bodies`] documents.
+fn cfg_test_item_ranges(masked: &str) -> Vec<(usize, usize)> {
+    let lines: Vec<&str> = masked.lines().collect();
+    let mut out = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        if line.trim() != "#[cfg(test)]" {
+            continue;
+        }
+        let mut j = i + 1;
+        while j < lines.len() && lines[j].trim().starts_with("#[") {
+            j += 1;
+        }
+        if j >= lines.len() {
+            continue;
+        }
+        let mut depth = 0i64;
+        let mut nesting = 0i64;
+        let mut opened = false;
+        let mut ended = false;
+        let mut k = j;
+        while k < lines.len() {
+            for ch in lines[k].chars() {
+                match ch {
+                    '{' => {
+                        depth += 1;
+                        opened = true;
+                    }
+                    '}' => depth -= 1,
+                    '[' | '(' if !opened => nesting += 1,
+                    ']' | ')' if !opened => nesting -= 1,
+                    ';' if !opened && nesting == 0 => ended = true,
+                    _ => {}
+                }
+                if ended {
+                    break;
+                }
+            }
+            if ended || (opened && depth == 0) {
+                break;
+            }
+            k += 1;
+        }
+        out.push((j, k.min(lines.len().saturating_sub(1))));
+    }
+    out
+}
+
+/// The names of every function in `masked` whose body matches `markers`, or
+/// which reaches one that does through another function in the same file that
+/// `in_scope` accepts.
+///
+/// The fixed point is what makes this useful rather than decorative: the eleven
+/// tests issue #714 found call `cells()`, which calls `graphs()`, which calls
+/// `Command::new(cargo())`. One hop would still see them all as pure.
+///
+/// `in_scope` is what stops the filesystem arm annotating the crate. Process
+/// spawning takes every function, because the only things that spawn here are
+/// test helpers and an unnecessary annotation costs one test. Filesystem access
+/// does not: `src/colour.rs` reads an ICC profile off disk inside the *library*,
+/// so following calls through production code marks all 23 colour tests that
+/// call the loader, whether or not any of them passes it a path. Measured, on
+/// the tree this landed against: 85 tests over eleven files with every function
+/// in scope, 39 over six with only test scaffolding in scope, and the 46 in the
+/// difference are almost all that one colour arm.
+fn reaching_fns(
+    masked: &str,
+    markers: &[&str],
+    in_scope: &dyn Fn(usize) -> bool,
+) -> BTreeSet<String> {
+    let bodies: Vec<(String, usize, String)> = fn_bodies(masked)
+        .into_iter()
+        .filter(|(_, at, _)| in_scope(*at))
+        .collect();
+    let mut reaching: BTreeSet<String> = bodies
+        .iter()
+        .filter(|(_, _, body)| markers.iter().any(|m| body.contains(m)))
+        .map(|(name, _, _)| name.clone())
+        .collect();
+    loop {
+        let mut grew = false;
+        for (name, _, body) in &bodies {
+            if reaching.contains(name) {
+                continue;
+            }
+            if reaching.iter().any(|callee| mentions_ident(body, callee)) {
+                reaching.insert(name.clone());
+                grew = true;
+            }
+        }
+        if !grew {
+            return reaching;
+        }
+    }
+}
+
+/// Parse every `#[test]` function out of one file.
+///
+/// The parse asserts its own shape as it goes, which is the point: the failure
+/// this guard is guarding against is a scanner that quietly stops seeing part
+/// of a file. Every one of these is a hard panic naming the file and line.
+///
+/// 1. Masking must preserve length, so line numbers mean what they say.
+/// 2. Braces must balance over the whole masked file, which is an end-to-end
+///    check that the masker handled every literal and comment in it.
+/// 3. Every `#[test]` must be followed by attributes and then a `fn` header.
+/// 4. Every parsed body must open and close before end of file.
+/// 5. The number of functions parsed must equal a naive count of `#[test]`
+///    lines, so nothing was skipped.
+/// 6. The number of tests carrying `#[cfg_attr(miri, ignore)]` must equal a
+///    naive count of `cfg_attr(miri` lines, so no annotation sits somewhere the
+///    parse does not look (above a multi-line attribute, on a `mod`, ...).
+/// 7. No `#[test]` spelling this scanner does not understand may appear.
+fn scan_source(rel: &str, src: &str) -> Vec<TestFn> {
+    let masked = mask_literals_and_comments(src);
+    assert_eq!(
+        masked.chars().count(),
+        src.chars().count(),
+        "{rel}: masking changed the character count, so line numbers no longer line up"
+    );
+
+    for bad in UNSUPPORTED_TEST_ATTRS {
+        assert!(
+            !masked.contains(bad),
+            "{rel}: found a test attribute spelled `{bad}`, which this scanner does not \
+             understand. Teach `tests/miri_ignore_convention.rs` about it rather than \
+             letting it skip the test."
+        );
+    }
+
+    let spawning = process_spawning_fns(&masked);
+    // Filesystem helpers, but only the ones that are test scaffolding: every
+    // function in an integration test, and only the `#[cfg(test)]` modules of a
+    // `src/` file. See [`reaching_fns`] for what the restriction buys.
+    let ranges = cfg_test_item_ranges(&masked);
+    let whole_file_is_test_scaffolding = rel.starts_with("tests/");
+    let fs_reaching = reaching_fns(&masked, FS_MARKERS, &|at| {
+        whole_file_is_test_scaffolding || ranges.iter().any(|(a, b)| at >= *a && at <= *b)
+    });
+    let lines: Vec<&str> = masked.lines().collect();
+    let raw: Vec<&str> = src.lines().collect();
+
+    let mut depth = 0i64;
+    for (idx, line) in lines.iter().enumerate() {
+        for ch in line.chars() {
+            match ch {
+                '{' => depth += 1,
+                '}' => depth -= 1,
+                _ => {}
+            }
+        }
+        assert!(
+            depth >= 0,
+            "{rel}:{}: brace depth went negative, so the masker mishandled a literal or \
+             comment above this line",
+            idx + 1
+        );
+    }
+    assert_eq!(
+        depth, 0,
+        "{rel}: braces do not balance over the whole file, so the masker mishandled a \
+         literal or comment somewhere in it"
+    );
+
+    let mut found = Vec::new();
+    let mut i = 0usize;
+    while i < lines.len() {
+        if lines[i].trim() != "#[test]" {
+            i += 1;
+            continue;
+        }
+
+        // The attribute block: the contiguous run of attribute lines around the
+        // `#[test]`, so the annotation is seen whether it sits above or below.
+        let mut start = i;
+        while start > 0 && lines[start - 1].trim().starts_with("#[") {
+            start -= 1;
+        }
+        let mut j = i + 1;
+        while j < lines.len() && lines[j].trim().starts_with("#[") {
+            j += 1;
+        }
+        assert!(
+            j < lines.len(),
+            "{rel}:{}: `#[test]` runs to end of file with no function after it",
+            i + 1
+        );
+        let name = function_name(lines[j]).unwrap_or_else(|| {
+            panic!(
+                "{rel}:{}: expected a `fn` header after `#[test]`, found `{}`. Either the \
+                 attribute block uses a form this scanner does not parse, or the file layout \
+                 changed; teach `tests/miri_ignore_convention.rs` about it.",
+                j + 1,
+                raw.get(j).unwrap_or(&"").trim()
+            )
+        });
+
+        let annotated = lines[start..j]
+            .iter()
+            .any(|l| l.contains("cfg_attr(miri") && l.contains("ignore"));
+
+        // The body, by brace matching over the masked text.
+        let mut body = String::new();
+        let mut body_depth = 0i64;
+        let mut opened = false;
+        let mut k = j;
+        while k < lines.len() {
+            for ch in lines[k].chars() {
+                match ch {
+                    '{' => {
+                        body_depth += 1;
+                        opened = true;
+                    }
+                    '}' => body_depth -= 1,
+                    _ => {}
+                }
+            }
+            body.push_str(lines[k]);
+            body.push('\n');
+            if opened && body_depth == 0 {
+                break;
+            }
+            k += 1;
+        }
+        assert!(
+            opened && body_depth == 0,
+            "{rel}:{}: the body of `{name}` never closed before end of file",
+            j + 1
+        );
+
+        let touches_fs = FS_MARKERS.iter().any(|m| body.contains(m)) || fs_reaching.contains(&name);
+        let spawns_process = spawning.contains(&name);
+        found.push(TestFn {
+            file: rel.to_string(),
+            name,
+            annotated,
+            touches_fs,
+            spawns_process,
+        });
+        i = k + 1;
+    }
+
+    let naive_tests = lines.iter().filter(|l| l.trim() == "#[test]").count();
+    assert_eq!(
+        naive_tests,
+        found.len(),
+        "{rel}: found {naive_tests} `#[test]` lines but parsed {} test functions, so the \
+         parse is skipping some",
+        found.len()
+    );
+
+    let naive_annotations = lines.iter().filter(|l| l.contains("cfg_attr(miri")).count();
+    let parsed_annotations = found.iter().filter(|t| t.annotated).count();
+    assert_eq!(
+        naive_annotations, parsed_annotations,
+        "{rel}: {naive_annotations} lines carry `cfg_attr(miri` but only {parsed_annotations} \
+         of them landed on a parsed test. An annotation outside a `#[test]` attribute block \
+         is invisible to this guard, so either move it or teach the guard about it."
+    );
+
+    found
+}
+
+/// Every `.rs` file under `dir`, recursively, as repo-relative `/`-separated
+/// paths. A walk, deliberately: a hand-listed set is exactly how this kind of
+/// guard stops seeing new modules.
+fn rs_files_under(dir: &Path, rel_prefix: &str, out: &mut Vec<(String, PathBuf)>) {
+    let entries =
+        std::fs::read_dir(dir).unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()));
+    let mut names: Vec<PathBuf> = entries
+        .map(|e| e.expect("cannot read a directory entry").path())
+        .collect();
+    names.sort();
+    for path in names {
+        let name = path
+            .file_name()
+            .expect("directory entry with no file name")
+            .to_str()
+            .unwrap_or_else(|| panic!("non-UTF-8 path under {}", dir.display()))
+            .to_string();
+        let rel = if rel_prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{rel_prefix}/{name}")
+        };
+        if path.is_dir() {
+            rs_files_under(&path, &rel, out);
+        } else if name.ends_with(".rs") {
+            out.push((rel, path));
+        }
+    }
+}
+
+/// Walk both roots and parse everything.
+fn scan_repo() -> Vec<TestFn> {
+    let root = repo_root();
+    let mut files: Vec<(String, PathBuf)> = Vec::new();
+    for dir in SCANNED_DIRS {
+        let path = root.join(dir);
+        assert!(
+            path.is_dir(),
+            "{} is not a directory, so the scan is rooted wrongly",
+            path.display()
+        );
+        rs_files_under(&path, dir, &mut files);
+    }
+
+    assert!(
+        files.len() >= MIN_FILES,
+        "the walk found only {} `.rs` files under {SCANNED_DIRS:?}, below the floor of \
+         {MIN_FILES}. The scan is rooted wrongly or the recursion broke; it is not that the \
+         repository shrank by half.",
+        files.len()
+    );
+    let seen: BTreeSet<&str> = files.iter().map(|(rel, _)| rel.as_str()).collect();
+    for anchor in ANCHOR_FILES {
+        assert!(
+            seen.contains(anchor),
+            "the walk did not reach `{anchor}`, so it is not seeing the real source tree"
+        );
+    }
+
+    let mut tests = Vec::new();
+    for (rel, path) in &files {
+        let src = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        tests.extend(scan_source(rel, &src));
+    }
+
+    assert!(
+        tests.len() >= MIN_TESTS,
+        "the scan parsed only {} `#[test]` functions, below the floor of {MIN_TESTS}. \
+         Something stopped the parse, it is not that the suite shrank.",
+        tests.len()
+    );
+
+    tests.sort();
+    tests
+}
+
+/// The inventory as a set of canonical lines, ignoring blanks and `#` comments.
+fn inventory() -> BTreeSet<String> {
+    INVENTORY
+        .lines()
+        .map(str::trim_end)
+        .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
+        .map(|l| {
+            let mut it = l.split_whitespace();
+            let ann = it.next().expect("inventory line with no status column");
+            let det = it.next().expect("inventory line with no detection column");
+            let path = it.next().expect("inventory line with no test path");
+            assert!(
+                it.next().is_none(),
+                "inventory line has more than three columns: `{l}`"
+            );
+            assert!(
+                ann == "annotated" || ann == "unannotated",
+                "inventory line has an unknown status `{ann}`: `{l}`"
+            );
+            assert!(
+                det == "fs-detected" || det == "not-detected",
+                "inventory line has an unknown detection column `{det}`: `{l}`"
+            );
+            format!("{ann:<11} {det:<12} {path}")
+        })
+        .collect()
+}
+
+/// The whole point: the set of filesystem-touching-or-annotated tests in the
+/// tree must be exactly the set recorded in the inventory, annotation state
+/// included.
+///
+/// This is the assertion that catches a new `tempfile::tempdir()` test arriving
+/// without `#[cfg_attr(miri, ignore)]`, and equally catches an existing
+/// annotation being deleted. Both show up as a set difference, and both name
+/// the offending test.
+#[test]
+#[cfg_attr(miri, ignore)] // reads the repository source tree, which Miri isolation blocks
+fn filesystem_touching_tests_match_the_recorded_inventory() {
+    let live: BTreeSet<String> = scan_repo()
+        .iter()
+        .filter(|t| t.is_tracked())
+        .map(TestFn::ledger_line)
+        .collect();
+    let recorded = inventory();
+
+    if live == recorded {
+        return;
+    }
+
+    let mut msg = String::new();
+    msg.push_str(
+        "\ntests/miri_fs_test_inventory.txt no longer describes the tree.\n\n\
+         Every test listed there either touches the filesystem or carries \
+         `#[cfg_attr(miri, ignore)]`. Miri aborts the whole run on the first filesystem \
+         call it refuses, so an unannotated filesystem test takes down the merge gate and \
+         reports as a Miri failure rather than as a missing annotation (issue #652).\n\n",
+    );
+
+    let added: Vec<&String> = live.difference(&recorded).collect();
+    if !added.is_empty() {
+        let _ = writeln!(
+            msg,
+            "{} test(s) in the tree are not recorded as written:",
+            added.len()
+        );
+        for line in &added {
+            let _ = writeln!(msg, "  + {line}");
+        }
+        msg.push_str(
+            "\nIf a `+ unannotated` line is new, add `#[cfg_attr(miri, ignore)]` to that \
+             test. Only record it as `unannotated` if it genuinely has to run under Miri, \
+             and say why in the review.\n\n",
+        );
+    }
+
+    let removed: Vec<&String> = recorded.difference(&live).collect();
+    if !removed.is_empty() {
+        let _ = writeln!(
+            msg,
+            "{} recorded test(s) no longer look like that:",
+            removed.len()
+        );
+        for line in &removed {
+            let _ = writeln!(msg, "  - {line}");
+        }
+        msg.push_str(
+            "\nA `- annotated` line paired with a `+ unannotated` line for the same test \
+             means somebody deleted the annotation.\n\n",
+        );
+    }
+
+    msg.push_str("Regenerated inventory body:\n");
+    for line in &live {
+        let _ = writeln!(msg, "{line}");
+    }
+
+    panic!("{msg}");
+}
+
+/// The size of the annotated set, pinned so a bulk move in either direction is
+/// a deliberate edit here rather than a number that drifts.
+///
+/// This used to end with `assert!(unannotated_fs > 0)`, guarding the claim that
+/// the inventory was a ledger of a known gap and had to keep saying how big the
+/// gap was. That assertion demanded the gap exist, so it would have gone red on
+/// the change that cleared it, and its own message said as much. The claim now
+/// lives in
+/// [`no_filesystem_touching_test_runs_under_miri_outside_the_named_exceptions`],
+/// which reads the same set and asserts the stronger, opposite thing.
+#[test]
+#[cfg_attr(miri, ignore)] // reads the repository source tree, which Miri isolation blocks
+fn the_annotated_set_stays_the_size_it_is_documented_to_be() {
+    let tests = scan_repo();
+    let annotated: Vec<&TestFn> = tests.iter().filter(|t| t.annotated).collect();
+    let src_annotated: Vec<&&TestFn> = annotated
+        .iter()
+        .filter(|t| t.file.starts_with("src/"))
+        .collect();
+    let modules: BTreeSet<&str> = src_annotated.iter().map(|t| t.file.as_str()).collect();
+
+    assert_eq!(
+        src_annotated.len(),
+        EXPECTED_SRC_ANNOTATIONS,
+        "`src/` carries {} annotated tests, not {EXPECTED_SRC_ANNOTATIONS}. Adding or \
+         removing one is fine, but move `EXPECTED_SRC_ANNOTATIONS` in the same change. \
+         `merge-gate.yml` deliberately quotes no count, so it needs no edit for this. \
+         Modules involved: {modules:?}",
+        src_annotated.len()
+    );
+    assert_eq!(
+        modules.len(),
+        EXPECTED_SRC_MODULES,
+        "expected {EXPECTED_SRC_MODULES} annotated modules under `src/`, found {modules:?}"
+    );
+}
+
+/// Every test that reaches `std::process` must be ignored under Miri. This is
+/// an assertion rather than an inventory row, and the difference is the point.
+///
+/// The filesystem rows were a ledger because `-Zmiri-disable-isolation` let an
+/// unannotated filesystem test run. Nothing has ever let a process spawn run:
+/// Miri supports it on no target and under no flag, so the first one it reaches
+/// ends the whole session with `unsupported operation: can't call foreign
+/// function \`fork\`` and reports as a Miri failure rather than as a missing
+/// annotation. Measured on `120acb6` with `nightly-2026-08-20`,
+/// `cargo miri test --test dependency_policy` died on
+/// `every_links_key_is_on_the_allowlist` having run nothing else (issue #714).
+///
+/// Since #711 turned isolation on the filesystem class aborts too, and #739
+/// annotated it, so both classes are assertions now and the asymmetry this
+/// check was built around has mostly closed. What is left of it is the reason
+/// they are still two checks: the filesystem one carries a named exception list
+/// ([`UNANNOTATED_FS_EXCEPTIONS`]), because a filesystem test that runs is fatal
+/// only under isolation and isolation is a flag somebody could argue about,
+/// while a spawning test is fatal under every flag Miri has. An exception to
+/// this one would not mean anything.
+#[test]
+#[cfg_attr(miri, ignore)] // reads the repository source tree, which Miri isolation blocks
+fn no_process_spawning_test_can_run_under_miri() {
+    let tests = scan_repo();
+    let offenders: Vec<String> = tests
+        .iter()
+        .filter(|t| t.spawns_process && !t.annotated)
+        .map(|t| format!("  {}::{}", t.file, t.name))
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "{} test(s) reach `std::process` without `#[cfg_attr(miri, ignore)]`:\n{}\n\n\
+         Any one of them ends the whole Miri run on the first `fork`, whatever \
+         `MIRIFLAGS` says, so the annotation is not optional here the way it is for \
+         the filesystem rows (issue #714). If a test genuinely must not carry it, the \
+         fix is to stop it spawning, not to widen this check.",
+        offenders.len(),
+        offenders.join("\n")
+    );
+
+    // The positive control. Everything above is an assertion that a set is
+    // empty, and a broken detector produces an empty set too.
+    let spawning: Vec<String> = tests
+        .iter()
+        .filter(|t| t.spawns_process)
+        .map(|t| format!("  {}::{}", t.file, t.name))
+        .collect();
+    assert_eq!(
+        spawning.len(),
+        EXPECTED_PROCESS_SPAWNING_TESTS,
+        "the detector found {} process-spawning tests, not \
+         {EXPECTED_PROCESS_SPAWNING_TESTS}. Adding or removing one is fine, but move \
+         the constant in the same change, because the check above is satisfied by a \
+         detector that has stopped finding anything at all. Found:\n{}",
+        spawning.len(),
+        spawning.join("\n")
+    );
+}
+
+/// Every filesystem-touching test must be ignored under Miri, bar the ones
+/// named in [`UNANNOTATED_FS_EXCEPTIONS`].
+///
+/// This is the check #739 asked for. Under isolation Miri ends the whole
+/// session on the first filesystem call it refuses, so one unannotated test is
+/// not one failing test, it is the gate reporting nothing at all. Measured on
+/// `800c699`: `cargo miri test --test workspace_layout` died on
+/// `fuzz_crate_is_a_member_of_the_root_workspace` having run nothing.
+///
+/// The exception list is checked in both directions. An entry that no longer
+/// names an unannotated filesystem test is as much a defect as a test missing
+/// from it: a stale exception is how a list like this stops describing anything
+/// and starts being decoration, and it is the failure mode that arrives by
+/// itself, when somebody annotates the test and leaves the row.
+#[test]
+#[cfg_attr(miri, ignore)] // reads the repository source tree, which Miri isolation blocks
+fn no_filesystem_touching_test_runs_under_miri_outside_the_named_exceptions() {
+    let tests = scan_repo();
+    let allowed: BTreeSet<&str> = UNANNOTATED_FS_EXCEPTIONS.iter().copied().collect();
+
+    let live: BTreeSet<String> = tests
+        .iter()
+        .filter(|t| t.touches_fs && !t.annotated)
+        .map(|t| format!("{}::{}", t.file, t.name))
+        .collect();
+
+    let offenders: Vec<&String> = live
+        .iter()
+        .filter(|k| !allowed.contains(k.as_str()))
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "{} filesystem-touching test(s) have no `#[cfg_attr(miri, ignore)]` and are not \
+         named in `UNANNOTATED_FS_EXCEPTIONS`:\n{}\n\n\
+         Miri runs with isolation on since #711, so the first one of these the run reaches \
+         ends the whole session with `unsupported operation` and the gate reports nothing \
+         at all. Add the annotation. Adding a name to the exception list instead needs a \
+         reason that survives review and an issue to carry it, because the cost is the \
+         whole gate rather than one test.",
+        offenders.len(),
+        offenders
+            .iter()
+            .map(|k| format!("  {k}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+
+    let stale: Vec<&&str> = UNANNOTATED_FS_EXCEPTIONS
+        .iter()
+        .filter(|k| !live.contains(**k))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "`UNANNOTATED_FS_EXCEPTIONS` names {} test(s) that are not unannotated \
+         filesystem-touching tests any more:\n{}\n\n\
+         Either they were annotated, in which case delete the entry and close the issue it \
+         carries, or they were renamed or deleted. An exception list nobody prunes stops \
+         describing the tree and starts excusing whatever happens to match it.",
+        stale.len(),
+        stale
+            .iter()
+            .map(|k| format!("  {k}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+
+    // The positive control. An empty offender list is what a working detector
+    // produces and also what a detector that has stopped recognising filesystem
+    // calls produces. The stale check catches some of that by accident, since
+    // an exception that stops being detected fires it, but only the four names
+    // it happens to cover. This pins the whole population.
+    let touching = tests.iter().filter(|t| t.touches_fs).count();
+    assert_eq!(
+        touching, EXPECTED_FS_TOUCHING_TESTS,
+        "the detector found {touching} filesystem-touching tests, not \
+         {EXPECTED_FS_TOUCHING_TESTS}. Adding or removing one is fine, but move the \
+         constant in the same change, because the assertion above is satisfied by a \
+         detector that has stopped recognising a filesystem call at all."
+    );
+}
+
+/// The call-following half of the process detector, pinned on its own source
+/// rather than on the tree, so it says what the classifier does instead of what
+/// the tree happens to contain.
+///
+/// The three cells are the three cases that decide whether #714 stays fixed: a
+/// direct spawn, a spawn two hops down a helper chain (which is the shape all
+/// eleven of #714's tests have), and a test that touches neither.
+#[test]
+fn the_detector_follows_a_spawn_through_helpers() {
+    let src = r#"
+fn runs_cargo() -> String {
+    let out = Command::new("cargo").output().unwrap();
+    String::from_utf8(out.stdout).unwrap()
+}
+
+fn graph() -> String {
+    runs_cargo()
+}
+
+fn passes_it_as_a_reference() -> Vec<String> {
+    [0usize].iter().map(runs_cargo_of).collect()
+}
+
+fn runs_cargo_of(_: &usize) -> String {
+    runs_cargo()
+}
+
+fn pure_helper() -> usize {
+    41 + 1
+}
+
+fn rerun_counter() -> usize {
+    7
+}
+
+mod tests {
+    #[test]
+    fn spawns_directly() {
+        let _ = Command::new("true").status();
+    }
+
+    #[test]
+    fn spawns_two_hops_down() {
+        assert!(!graph().is_empty());
+    }
+
+    #[test]
+    fn mentions_command_new_in_a_string_only() {
+        let msg = "Command::new("cargo") failed";
+        assert!(msg.contains("failed"));
+    }
+
+    #[test]
+    fn takes_the_helper_as_a_function_reference() {
+        assert!(!passes_it_as_a_reference().is_empty());
+    }
+
+    #[test]
+    fn calls_only_a_pure_helper() {
+        assert_eq!(pure_helper() + rerun_counter(), 49);
+    }
+}
+"#;
+    let found = scan_source("fixture.rs", src);
+    let by_name: Vec<(&str, bool)> = found
+        .iter()
+        .map(|t| (t.name.as_str(), t.spawns_process))
+        .collect();
+    assert_eq!(
+        by_name,
+        vec![
+            ("spawns_directly", true),
+            ("spawns_two_hops_down", true),
+            ("mentions_command_new_in_a_string_only", false),
+            ("takes_the_helper_as_a_function_reference", true),
+            ("calls_only_a_pure_helper", false),
+        ],
+        "the process detector must follow calls within the file, including one passed \
+         as a bare function reference, and must not fire on a marker that only appears \
+         inside a string literal"
+    );
+}
+
+/// The three shapes the module docs list as invisible, pinned as misses.
+///
+/// A limitation nobody can reproduce is a limitation nobody believes, and one
+/// that gets quietly fixed without the docs following is worse. Each cell here
+/// reaches `std::process` and each comes back `false`. If one ever flips, that
+/// is good news and this check is where you find out, so move it up into
+/// [`the_detector_follows_a_spawn_through_helpers`] and delete the bullet.
+///
+/// The fourth shape from that list, a helper in another file, cannot be
+/// written as a single-file fixture, which is the whole reason it is missed.
+#[test]
+fn the_documented_blind_spots_are_still_blind() {
+    let cases = [
+        (
+            "an aliased import",
+            r#"
+use std::process::Command as Cmd;
+
+fn runs() -> bool {
+    Cmd::new("true").status().is_ok()
+}
+
+mod tests {
+    #[test]
+    fn spawns_through_an_alias() {
+        assert!(runs());
+    }
+}
+"#,
+        ),
+        (
+            "a spawn inside a macro body",
+            r#"
+macro_rules! run_it {
+    () => {
+        Command::new("true").status()
+    };
+}
+
+mod tests {
+    #[test]
+    fn spawns_through_a_macro() {
+        let _ = run_it!();
+    }
+}
+"#,
+        ),
+        (
+            "a closure in a static",
+            r#"
+static RUNNER: fn() -> bool = || Command::new("true").status().is_ok();
+
+mod tests {
+    #[test]
+    fn spawns_through_a_static_closure() {
+        assert!(RUNNER());
+    }
+}
+"#,
+        ),
+    ];
+    for (what, src) in cases {
+        let found = scan_source("fixture.rs", src);
+        assert_eq!(found.len(), 1, "{what}: expected one test, got {found:?}");
+        assert!(
+            !found[0].spawns_process,
+            "{what} is now detected, which is an improvement. Move this cell into \
+             the helper-following check and drop the bullet from the module docs, \
+             so the two do not disagree."
+        );
+    }
+}
+
+/// A `;` inside the signature's brackets is a type, not the end of a
+/// declaration, and reading it as one drops the whole function from the map.
+///
+/// This is the sharp edge of the declaration skip, and it is a silent
+/// *under*-approximation, which is the direction that costs the gate. Measured
+/// across `src/` and `tests/` on the tree that introduced it, the naive `;`
+/// test dropped 133 function headers where the depth-aware one drops 17: 116
+/// real functions were invisible to the call graph. None of the 116 spawns
+/// today, so nothing was actually missed, and that is luck rather than design.
+///
+/// Both spellings below are in this tree. `-> [u8; 32]` is the shape
+/// `src/checksum.rs` uses, and a `where` clause carrying an array type is the
+/// other way a `;` reaches a signature.
+#[test]
+fn a_semicolon_inside_a_signature_type_does_not_drop_the_function() {
+    let src = r#"
+fn fingerprint() -> [u8; 32] {
+    let _ = Command::new("true").status();
+    [0u8; 32]
+}
+
+fn constrained<T>(_x: T) -> usize
+where
+    T: Into<[u8; 4]>,
+{
+    let _ = Command::new("true").status();
+    4
+}
+
+mod tests {
+    #[test]
+    fn calls_fingerprint() {
+        assert_eq!(fingerprint().len(), 32);
+    }
+
+    #[test]
+    fn calls_constrained() {
+        assert_eq!(constrained([0u8; 4]), 4);
+    }
+}
+"#;
+    let masked = mask_literals_and_comments(src);
+    let parsed: BTreeSet<String> = fn_bodies(&masked).into_iter().map(|(n, _, _)| n).collect();
+    for want in ["fingerprint", "constrained"] {
+        assert!(
+            parsed.contains(want),
+            "`{want}` must reach the fn map; its signature carries a `;` inside \
+             brackets, not a bodyless declaration. Parsed: {parsed:?}"
+        );
+    }
+    assert_eq!(
+        scan_source("fixture.rs", src)
+            .iter()
+            .map(|t| (t.name.as_str(), t.spawns_process))
+            .collect::<Vec<_>>(),
+        vec![("calls_fingerprint", true), ("calls_constrained", true)],
+        "and both callers must therefore be seen as spawning"
+    );
+}
+
+/// A trait method declaration has no body, and consuming forward from one runs
+/// into whatever comes next. That would file the *next* function's spawn under
+/// the declaration's name, and every caller of the trait method would then be
+/// flagged for a spawn it never makes.
+///
+/// The parser starts a fresh body at every `fn` header, so nothing is ever
+/// hidden by this; the cost is entirely spurious annotations. This pins that it
+/// does not happen, and it is the check that caught my first attempt at the
+/// fixture, which stayed green with the skip removed because the declaration
+/// and the function it swallowed shared a name.
+#[test]
+fn a_bodyless_declaration_does_not_borrow_the_next_function_s_spawn() {
+    let src = r#"
+trait Runner {
+    fn run(&self) -> String;
+}
+
+fn spawns() -> String {
+    let _ = Command::new("true").status();
+    String::new()
+}
+
+struct R;
+
+impl Runner for R {
+    fn run(&self) -> String {
+        String::new()
+    }
+}
+
+mod tests {
+    #[test]
+    fn calls_only_the_trait_method() {
+        assert!(R.run().is_empty());
+    }
+}
+"#;
+    let found = scan_source("fixture.rs", src);
+    assert_eq!(
+        found
+            .iter()
+            .map(|t| (t.name.as_str(), t.spawns_process))
+            .collect::<Vec<_>>(),
+        vec![("calls_only_the_trait_method", false)],
+        "the declaration above `spawns` must not take its `Command::new` with it"
+    );
+}
+
+/// The scanner has to be able to tell a real filesystem call from a mention of
+/// one, or the inventory is noise. These are self-contained: they run the
+/// detector over source text written here rather than over the tree, so they
+/// pin the classifier without depending on what any module happens to contain.
+#[test]
+fn the_detector_distinguishes_calls_from_mentions() {
+    let src = r#"
+mod tests {
+    /// Writes a tile with `std::fs::write` and checks it.
+    #[test]
+    fn mentions_fs_only_in_a_doc_comment() {
+        assert_eq!(1 + 1, 2);
+    }
+
+    #[test]
+    fn reports_a_path_in_an_error_message() {
+        let msg = "std::fs::write failed for tempfile::tempdir()";
+        assert!(msg.contains("failed"));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn really_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a"), b"x").unwrap();
+    }
+
+    #[test]
+    fn really_writes_but_forgot_the_annotation() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a"), b"x").unwrap();
+    }
+}
+"#;
+    let found = scan_source("fixture.rs", src);
+    let by_name: Vec<(&str, bool, bool)> = found
+        .iter()
+        .map(|t| (t.name.as_str(), t.touches_fs, t.annotated))
+        .collect();
+    assert_eq!(
+        by_name,
+        vec![
+            ("mentions_fs_only_in_a_doc_comment", false, false),
+            ("reports_a_path_in_an_error_message", false, false),
+            ("really_writes", true, true),
+            ("really_writes_but_forgot_the_annotation", true, false),
+        ],
+        "the detector must ignore comments and string literals and must read the \
+         annotation off the attribute block"
+    );
+}
+
+/// The spellings of std's stat surface that read like accessors.
+///
+/// `.exists()`, `.is_file()` and `.metadata()` are in [`FS_MARKERS`];
+/// `.try_exists()`, `.is_symlink()` and `File::options(` were not, and a test
+/// reaching the filesystem through one of those skipped the inventory and took
+/// the whole Miri run down as "Miri failed", which is the exact failure #652
+/// exists to prevent. Measured: an unannotated `#[test]` calling
+/// `Path::try_exists()` planted in `tests/workspace_layout.rs` left all
+/// fourteen tests in this file green (issue #949).
+///
+/// One row per spelling, run through [`scan_source`] rather than through the
+/// tree, so a marker that stops matching is a named row rather than a count
+/// that moved.
+#[test]
+fn every_spelling_of_a_stat_call_is_a_filesystem_marker() {
+    let cases: [(&str, &str); 9] = [
+        ("exists", "let _ = p.exists();"),
+        ("try_exists", "let _ = p.try_exists().unwrap();"),
+        ("is_file", "let _ = p.is_file();"),
+        ("is_dir", "let _ = p.is_dir();"),
+        // Detected today, but by accident: `symlink(` is a marker and
+        // `is_symlink()` contains it. Spelling it out is what stops that
+        // being load-bearing.
+        ("is_symlink", "let _ = p.is_symlink();"),
+        ("symlink_metadata", "let _ = p.symlink_metadata().unwrap();"),
+        ("metadata", "let _ = p.metadata().unwrap();"),
+        ("canonicalize", "let _ = p.canonicalize().unwrap();"),
+        // Bare, the way `File::open(` and `OpenOptions::new(` are already
+        // spelled here, because `use std::fs::File;` sits at module scope and
+        // `fn_bodies` never reads it.
+        (
+            "File::options",
+            "let _ = File::options().read(true).open(p).unwrap();",
+        ),
+    ];
+    let mut missed = Vec::new();
+    for (label, call) in cases {
+        let src = format!(
+            "#[test]\nfn t() {{\n    let p = std::path::Path::new(\"x\");\n    {call}\n}}\n"
+        );
+        let found = scan_source("fixture.rs", &src);
+        assert_eq!(found.len(), 1, "the fixture must parse as one test: {src}");
+        if !found[0].touches_fs {
+            missed.push(label);
+        }
+    }
+    assert!(
+        missed.is_empty(),
+        "these spellings of a stat call are not filesystem markers, so a test \
+         using one skips the inventory and ends the whole Miri run on its \
+         first syscall (issue #949): {missed:?}"
+    );
+
+    // The negative control, so "every call is a marker" is not how this passes.
+    let pure = "#[test]\nfn t() {\n    assert_eq!(1 + 1, 2);\n}\n";
+    let found = scan_source("fixture.rs", pure);
+    assert!(
+        !found[0].touches_fs,
+        "a test that touches nothing must not be detected"
+    );
+}
+
+/// The filesystem detector follows a call into a test helper, and deliberately
+/// does not follow one into the library.
+///
+/// Both halves are the point. The first is what #781 added: on the tree before
+/// it, `cargo miri test --test exr_ported_surface` died in one second on
+/// `channel_names_and_compression_are_readable_downstream`, whose own body is
+/// pure and which calls `sample()` six lines above it, and no amount of
+/// annotating the inventory reached it.
+///
+/// The second is why the follower takes a scope predicate instead of running
+/// everywhere the way the process one does. Following into production code
+/// marks every test that calls any library function that can open a path,
+/// whether or not that test hands it one, which on this tree is 46 further
+/// tests and most of `src/colour.rs`.
+///
+/// It carries no `#[cfg_attr(miri, ignore)]`, and it used to. The annotation
+/// said "reads the repository source tree", copied off one of the four
+/// siblings that call [`scan_repo`]; this one calls [`scan_source`] on two
+/// inline `&str` fixtures and reaches nothing. Measured under the syscall
+/// interposer described in the module docs: zero filesystem calls here against
+/// thousands in each of those siblings, which is the positive control. Issue
+/// #832. It is one test the Miri gate can now actually run, and one row of the
+/// ledger that stopped meaning something.
+#[test]
+fn the_filesystem_detector_follows_a_test_helper_but_not_the_library() {
+    let integration = r#"
+fn sample() -> Vec<u8> {
+    std::fs::read("fixture.exr").expect("committed fixture")
+}
+
+#[test]
+fn reads_through_the_helper() {
+    assert!(!sample().is_empty());
+}
+
+#[test]
+fn touches_nothing_at_all() {
+    assert_eq!(1 + 1, 2);
+}
+"#;
+    let scanned = scan_source("tests/fixture.rs", integration);
+    let found: Vec<(&str, bool)> = scanned
+        .iter()
+        .map(|t| (t.name.as_str(), t.touches_fs))
+        .collect();
+    assert_eq!(
+        found,
+        vec![
+            ("reads_through_the_helper", true),
+            ("touches_nothing_at_all", false)
+        ],
+        "every function in an integration test is scaffolding, so a helper that reads a \
+         file has to carry to its callers"
+    );
+
+    let module = r#"
+pub fn load_profile(path: Option<&str>) -> Vec<u8> {
+    match path {
+        Some(p) => std::fs::read(p).expect("profile"),
+        None => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn seeded_dir() -> std::path::PathBuf {
+        let d = tempfile::tempdir().expect("tempdir");
+        d.keep()
+    }
+
+    #[test]
+    fn calls_the_scaffolding_helper() {
+        assert!(seeded_dir().to_str().is_some());
+    }
+
+    #[test]
+    fn calls_the_library_with_no_path() {
+        assert!(load_profile(None).is_empty());
+    }
+}
+"#;
+    let scanned = scan_source("src/fixture.rs", module);
+    let found: Vec<(&str, bool)> = scanned
+        .iter()
+        .map(|t| (t.name.as_str(), t.touches_fs))
+        .collect();
+    assert_eq!(
+        found,
+        vec![
+            ("calls_the_scaffolding_helper", true),
+            ("calls_the_library_with_no_path", false),
+        ],
+        "in a `src/` module the follower takes helpers inside `#[cfg(test)]` and stops at \
+         the library boundary: `load_profile` can open a path, and a caller passing `None` \
+         is not evidence that it does"
+    );
+}
+
+/// The annotation is found whether it sits above or below `#[test]`, because
+/// both orders compile and both are things a contributor will write.
+#[test]
+fn the_detector_reads_the_annotation_in_either_order() {
+    let src = r#"
+mod tests {
+    #[cfg_attr(miri, ignore)]
+    #[test]
+    fn annotation_above() {
+        let _ = tempfile::tempdir();
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn annotation_below() {
+        let _ = tempfile::tempdir();
+    }
+}
+"#;
+    let found = scan_source("fixture.rs", src);
+    assert_eq!(found.len(), 2, "both tests must be parsed, got {found:?}");
+    assert!(
+        found.iter().all(|t| t.annotated && t.touches_fs),
+        "both orders must read as annotated, got {found:?}"
+    );
+}
+
+/// A body containing braces inside string and character literals must not
+/// desynchronise the scan, which is the failure that would silently shrink the
+/// window the detector looks at.
+#[test]
+fn the_body_scan_survives_braces_in_literals() {
+    let src = "
+mod tests {
+    #[test]
+    fn braces_in_literals() {
+        let a = \"{{{\";
+        let b = '}';
+        let c = r#\"} } }\"#;
+        let _ = (a, b, c);
+    }
+
+    #[test]
+    fn after_the_tricky_one() {
+        let _ = std::fs::read_dir(\".\");
+    }
+}
+";
+    let found = scan_source("fixture.rs", src);
+    assert_eq!(
+        found.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+        vec!["braces_in_literals", "after_the_tricky_one"],
+        "a literal full of braces must not swallow the tests after it"
+    );
+    assert!(!found[0].touches_fs, "literals are not filesystem calls");
+    assert!(found[1].touches_fs, "`std::fs::read_dir` is");
+}
+
+/// The three shapes the filesystem detector cannot see, pinned as misses.
+///
+/// It shares [`fn_bodies`] and [`mentions_ident`] with the process detector, so
+/// it inherits the same blind spots, and
+/// [`the_documented_blind_spots_are_still_blind`] is the process half of this.
+/// Writing them down twice is not duplication: the two detectors run different
+/// scope predicates, so "the process one misses this" is not evidence about the
+/// filesystem one, and I would rather the file say which is which than leave a
+/// reader to infer it.
+///
+/// Each cell below really reads a file and each comes back `false`. If one ever
+/// flips, that is good news and this check is where you find out, so move the
+/// cell into [`the_filesystem_detector_follows_a_test_helper_but_not_the_library`]
+/// and delete the matching bullet from the module docs.
+///
+/// The fourth shape, a helper in another file, cannot be written as a
+/// single-file fixture, which is the whole reason it is missed. The fifth, a
+/// library entry point that opens the `Path` it is handed, is deliberate rather
+/// than accidental and the module docs carry its measured cost.
+///
+/// Every case is written as a `tests/` file on purpose, where the scope
+/// predicate accepts the whole file, so the only reason the call is missed is
+/// the shape itself.
+#[test]
+fn the_filesystem_detector_s_blind_spots_are_still_blind() {
+    let cases = [
+        (
+            "an aliased import",
+            r#"
+use std::fs as f;
+
+fn slurp() -> Vec<u8> {
+    f::read("fixture.bin").expect("committed fixture")
+}
+
+#[test]
+fn reads_through_an_alias() {
+    assert!(!slurp().is_empty());
+}
+"#,
+        ),
+        (
+            "a read inside a macro body",
+            r#"
+macro_rules! slurp {
+    () => {
+        std::fs::read("fixture.bin").expect("committed fixture")
+    };
+}
+
+#[test]
+fn reads_through_a_macro() {
+    let bytes: Vec<u8> = slurp!();
+    assert!(!bytes.is_empty());
+}
+"#,
+        ),
+        (
+            "a closure in a static",
+            r#"
+static READER: fn() -> Vec<u8> = || std::fs::read("fixture.bin").expect("committed fixture");
+
+#[test]
+fn reads_through_a_static_closure() {
+    assert!(!READER().is_empty());
+}
+"#,
+        ),
+    ];
+    for (what, src) in cases {
+        let found = scan_source("tests/fixture.rs", src);
+        assert_eq!(found.len(), 1, "{what}: expected one test, got {found:?}");
+        assert!(
+            !found[0].touches_fs,
+            "{what} is now detected, which is an improvement. Move this cell into \
+             `the_filesystem_detector_follows_a_test_helper_but_not_the_library` and \
+             drop the bullet from the module docs, so the two do not disagree."
+        );
+    }
+
+    // The positive control. Every cell above asserts a `false`, and a scanner
+    // pointed at nothing returns `false` for everything. This is the same
+    // fixture shape with the helper spelled plainly, and it has to come back
+    // `true`.
+    let plain = r#"
+fn slurp() -> Vec<u8> {
+    std::fs::read("fixture.bin").expect("committed fixture")
+}
+
+#[test]
+fn reads_through_a_plain_helper() {
+    assert!(!slurp().is_empty());
+}
+"#;
+    let found = scan_source("tests/fixture.rs", plain);
+    assert_eq!(found.len(), 1, "expected one test, got {found:?}");
+    assert!(
+        found[0].touches_fs,
+        "the same fixture with the helper spelled plainly has to be detected, or the \
+         three misses above say nothing about those three shapes"
+    );
+}
+
+/// A `#[cfg(test)]` helper that is not inside a `#[cfg(test)] mod` is still
+/// test scaffolding, and the follower has to take it (issue #833).
+///
+/// [`cfg_test_item_ranges`] used to require the attribute to sit on a `mod`, so
+/// a free `fn` under it fell outside every range and
+/// [`reaching_fns`] filtered it out of the call graph entirely. Thirteen such
+/// helpers exist in `src/` today, in `src/arithmetic.rs`, `src/colour.rs`
+/// (five), `src/convolution.rs`, `src/freqfilt.rs`, `src/raster.rs` (two),
+/// `src/sink.rs` (two) and `src/source.rs`. None of them touches the
+/// filesystem, so widening the predicate moved no count in this file and no row
+/// in the inventory, and that is luck rather than design: `freqfilt`'s
+/// `test_image` builds a raster in memory and the version of it that reads a
+/// committed fixture is the ordinary next one somebody writes.
+///
+/// The second half is the library boundary, unchanged. Widening the *kind* of
+/// item the predicate accepts must not widen it to production code, or the 46
+/// spurious marks [`reaching_fns`] measured come back.
+#[test]
+fn the_filesystem_follower_takes_a_cfg_test_helper_outside_a_mod_tests() {
+    let src = r#"
+pub fn load_profile(path: Option<&str>) -> Vec<u8> {
+    match path {
+        Some(p) => std::fs::read(p).expect("profile"),
+        None => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+fn seeded_dir() -> std::path::PathBuf {
+    let d = tempfile::tempdir().expect("tempdir");
+    d.keep()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn calls_the_free_cfg_test_helper() {
+        assert!(seeded_dir().to_str().is_some());
+    }
+
+    #[test]
+    fn calls_the_library_with_no_path() {
+        assert!(load_profile(None).is_empty());
+    }
+}
+"#;
+    let scanned = scan_source("src/fixture.rs", src);
+    let found: Vec<(&str, bool)> = scanned
+        .iter()
+        .map(|t| (t.name.as_str(), t.touches_fs))
+        .collect();
+    assert_eq!(
+        found,
+        vec![
+            ("calls_the_free_cfg_test_helper", true),
+            ("calls_the_library_with_no_path", false),
+        ],
+        "a `#[cfg(test)]` free helper is scaffolding and has to carry to its callers, \
+         and the library boundary still has to hold"
+    );
+
+    // A `;` inside the item header's brackets ends a type, not the item, and
+    // reading it as the end would stop the range before the body. That does not
+    // matter for a free `fn`, whose own header line is what the scope predicate
+    // tests, and it matters for a `#[cfg(test)] impl` whose `where` clause
+    // carries an array type: the methods inside it sit past the `;`, so the
+    // naive reading puts every one of them out of scope. Measured, by taking
+    // the bracket counter out: this cell goes red and nothing else does.
+    let bracketed = r#"
+#[cfg(test)]
+impl<T> Fixtures for Corpus<T>
+where
+    T: Into<[u8; 4]>,
+{
+    fn sample(&self) -> Vec<u8> {
+        std::fs::read("fixture.bin").expect("committed fixture")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn calls_the_method_past_the_semicolon() {
+        assert!(!Corpus::<u8>::default().sample().is_empty());
+    }
+}
+"#;
+    let scanned = scan_source("src/fixture.rs", bracketed);
+    let found: Vec<(&str, bool)> = scanned
+        .iter()
+        .map(|t| (t.name.as_str(), t.touches_fs))
+        .collect();
+    assert_eq!(
+        found,
+        vec![("calls_the_method_past_the_semicolon", true)],
+        "`T: Into<[u8; 4]>` carries a `;` inside the item header, and reading that as \
+         the end of the item puts every method of the impl back out of scope"
+    );
+}

@@ -32,14 +32,46 @@
 //! - **`pdfium`** — enables [`render_page_pdfium`], [`render_page_pdfium_budgeted`],
 //!   and [`PdfiumStripSource`] for full vector PDF rendering via the pdfium library.
 //! - **`pdfium-static`** — implies `pdfium` and statically links libpdfium.
-//! - **`object-store-sink`** — gates the [`sink_object_store`] module
-//!   ([`ObjectStoreSink`]) against a user-injected [`ObjectStore`] backend. The
-//!   former name **`s3`** is retained as a deprecated alias
+//! - **`object-store-sink`** — gates both halves of the injected-backend
+//!   seam. Writing: the [`sink_object_store`] module ([`ObjectStoreSink`])
+//!   against a user-injected [`ObjectStore`] backend. Reading: that same
+//!   trait's `get_range` and `size` methods,
+//!   [`ObjectStoreRangeReader`](pmtiles::ObjectStoreRangeReader) in
+//!   [`pmtiles::range`], and
+//!   [`PmTilesPyramidReader::try_from_object_store`](pyramid_reader::PmTilesPyramidReader::try_from_object_store).
+//!   Neither half ships a transport; both take the caller's. The former name
+//!   **`s3`** is retained as a deprecated alias
 //!   (`s3 = ["object-store-sink"]`) that enables the same module; prefer
 //!   `object-store-sink`, as the `s3` alias will be removed in a future release.
 //! - **`tracing`** — emits structured spans and events via the `tracing` crate.
 //! - **`packfile`** — gates [`PackfileSink`] for writing tiles into tar or zip
 //!   archives.
+//! - **`avif`** — gates the AV1 decode inside [`decode_avif`] (still images
+//!   only). Without it the entry point still parses the container, checks the
+//!   codec and applies all three decode limits, and refuses the decode itself.
+//! - **`svg`** — gates the SVG rasteriser in [`svg`] and the real body of
+//!   [`decode_svg`].
+//! - **`jxl`** — gates the JPEG XL loader and lossless encoder: [`decode_jxl`],
+//!   [`Raster::encode_jxl`], [`Raster::save_jxl`], the `.jxl` row in
+//!   [`Raster::save`]'s extension route and the `"jxl"` row in
+//!   [`Raster::encode_to_buffer`]'s format route.
+//! - **`jp2k`** — gates the JPEG 2000 loader and encoder: [`decode_jp2k`],
+//!   [`Raster::encode_jp2k`] and [`Raster::save_jp2k`].
+//! - **`serde`** — adds public `Serialize` / `Deserialize` derives to the wire
+//!   and config types ([`PyramidPlan`], [`EngineConfig`], [`TileCoord`],
+//!   [`Layout`], and the rest) so an out-of-process caller can rebuild a job
+//!   from a JSON envelope. Adds no dependencies.
+//! - **`test-util`** — exposes the crate's test-only sink doubles to dependent
+//!   crates, chiefly the external `libviprs-tests` suite. Adds no
+//!   dependencies.
+//!
+//! The four codec features all keep their entry points: with the feature off
+//! each one still exists, still compiles and keeps its signature, and returns
+//! a typed refusal, so a consumer compiles against either build.
+//!
+//! `tests/crate_doc_matches_the_crate.rs` holds this list against
+//! `[features]` in `Cargo.toml`, because it drifted to five of twelve while
+//! being the docs.rs front page (issue #950).
 //!
 //! ## Error handling and the dual API
 //!
@@ -95,8 +127,11 @@
 //! **See also:** the [interactive CLI documentation](https://libviprs.org/cli/)
 //! bundles every public knob into runnable examples.
 
+pub mod analyze;
 pub mod arithmetic;
+pub mod avif;
 pub mod bands;
+pub mod cad;
 pub mod cancel;
 pub mod checksum;
 pub mod codec;
@@ -109,18 +144,25 @@ pub mod create;
 pub mod dedupe;
 pub mod draw;
 pub mod encode;
+pub(crate) mod encode_jpeg;
 pub mod encode_tiff;
 pub mod engine;
 pub mod engine_builder;
 pub mod error;
+pub mod exr;
 pub mod extensions;
 pub mod extract;
+pub mod fits;
 pub mod foreign_stubs;
+pub mod frames;
 pub mod freqfilt;
 pub mod geo;
+pub mod gif;
 pub(crate) mod hex;
 pub mod histogram;
 pub mod imageio;
+pub mod jp2k;
+pub mod jxl;
 pub(crate) mod level_walk;
 #[cfg(loom)]
 mod loom_checkpoint_dedupe;
@@ -128,14 +170,20 @@ mod loom_checkpoint_dedupe;
 mod loom_tests;
 pub mod manifest;
 pub(crate) mod mapreduce_hot_cache;
+pub mod mat;
 pub mod matrix;
 pub mod morphology;
 pub mod mosaicing;
+pub mod nifti;
 pub mod observe;
 pub mod pdf;
 pub mod pixel;
 pub mod planner;
+pub mod pmtiles;
 pub(crate) mod poison;
+pub mod pyramid_migrate;
+pub mod pyramid_reader;
+pub mod radiance;
 pub mod raster;
 pub(crate) mod raster_ops;
 pub mod resample;
@@ -149,13 +197,18 @@ pub mod sink_object_store;
 #[cfg(feature = "packfile")]
 #[cfg_attr(docsrs, doc(cfg(feature = "packfile")))]
 pub mod sink_packfile;
+pub mod sink_pmtiles;
 pub mod source;
+pub mod storage;
 pub mod stream_verify;
 pub mod streaming;
 pub mod streaming_mapreduce;
+pub mod svg;
 pub(crate) mod sync_queue;
 pub mod textio;
+pub mod uhdr;
 pub mod verify;
+pub mod webp;
 
 // Curated crate-root surface: types and high-level entry points only.
 // Leaf helpers, constants, and free functions stay behind their module path
@@ -163,23 +216,36 @@ pub mod verify;
 // flood callers with implementation detail.
 pub use arithmetic::{ArithmeticError, Comparand};
 pub use bands::BandError;
+// The decoder contract and the primitive IR (issue #1029). Types and entry
+// points only: the eight primitive structs stay behind `libviprs::cad::`
+// because `Line`, `Text` and `Arc` are names a crate root has no business
+// claiming — `draw::DrawOp::Line` and `std::sync::Arc` are both one glob
+// import away.
+pub use cad::{CadDecoder, CadDrawing, CadError, CadSource, CadView, DecodeReport, PrimitiveSink};
 pub use cancel::CancelToken;
 pub use checksum::{ChecksumMode, VerifyError, VerifyReport};
 pub use codec::{DecodeError, EncodeError, JpegSubsample, TiffCompression};
 pub use colour::{ColourError, Intent, Pcs};
 pub use composite::{CompositeError, CompositeMode};
 pub use connection::{Source, Target, decode_source, encode_to_target};
-pub use conversion::{Angle, Angle45, ConversionError, Interpretation, RasterCopyBuilder};
+pub use conversion::{
+    Align, Angle, Angle45, ConversionError, Interpretation, JoinDirection, RasterCopyBuilder,
+};
 pub use convolution::{Combine, ConvolutionError, Kernel, Precision};
 pub use create::{CreateError, SdfParams};
 pub use dedupe::{DedupeDecision, DedupeIndex, DedupeStrategy, LinkResult};
 pub use draw::{Circle, DrawError, DrawOp, Flood, Line, Mask, Paste, Rectangle, Smudge};
 // The TIFF free functions are re-exported at the root (not just behind the
 // module path) because the ported foreign cells call them unqualified
-// (`tiff_page_count(...)`, `decode_tiff_page(...)`). The `save_tiff` family
-// and the `tiff_save` / `tiff_load` round-trip are inherent methods on
-// `Raster` and travel with the already-exported `Raster` type.
-pub use encode_tiff::{decode_tiff_page, tiff_page_count};
+// (`tiff_page_count(...)`, `decode_tiff_page(...)`). The `_with_limits` twins
+// come with them: they are the same two entry points with the resource
+// ceilings passed in rather than defaulted, and splitting a pair across two
+// import paths would only make the bounded form the harder one to reach. The
+// `save_tiff` family and the `tiff_save` / `tiff_load` round-trip are inherent
+// methods on `Raster` and travel with the already-exported `Raster` type.
+pub use encode_tiff::{
+    decode_tiff_page, decode_tiff_page_with_limits, tiff_page_count, tiff_page_count_with_limits,
+};
 pub use engine::{
     BlankTileStrategy, EngineConfig, EngineError, EngineResult, StageDurations,
     generate_pyramid_region, is_blank_tile,
@@ -189,19 +255,28 @@ pub use error::OpError;
 pub use extract::{CompassDirection, Extend, ExtractError, SmartcropInteresting};
 // The deferred foreign-format free functions and options are re-exported at
 // the root because the ported foreign cell reaches them there
-// (`use libviprs::{magickload, decode_svg, ...}`), matching the imageio
+// (`use libviprs::{magickload, decode_openslide, ...}`), matching the imageio
 // convention above. The deferred encoders and `dzsave_buffer` are inherent
-// methods on `Raster`, so they need no re-export.
+// methods on `Raster`, so they need no re-export. `decode_svg` used to live
+// here too; it moved to `crate::svg` when the SVG lane made it real
+// (issue #502) and is re-exported from there, so the crate-root spelling is
+// unchanged.
 pub use foreign_stubs::{
-    MagickLoadOptions, decode_bytes_fail_on, decode_file_fail_on, decode_openslide, decode_svg,
-    magickload, magickload_with,
+    MagickLoadOptions, decode_bytes_fail_on, decode_file_fail_on, decode_openslide, magickload,
+    magickload_with,
 };
+pub use frames::{FrameDelay, LoopCount, PageLayout};
 pub use freqfilt::FreqfiltError;
 pub use geo::{GeoBounds, GeoCoord, GeoTransform, PixelCoord};
 pub use histogram::HistogramError;
 // The imageio free functions are re-exported at the root (not just behind
 // the module path) because the ported tests import them from the crate
 // root (`use libviprs::{tokenize, parse_thumbnail_geometry, ...}`).
+// `decode_svg` keeps its crate-root spelling because the ported foreign and
+// connection cells import it from there (`use libviprs::{decode_svg, ...}`),
+// the same reason the deferred foreign free functions are re-exported above.
+// `SvgOptions` travels with it so a caller never has to name the module path
+// just to build the argument.
 pub use imageio::{
     MetadataError, MetadataValue, SaveError, ThumbnailGeometry, parse_thumbnail_geometry, tokenize,
 };
@@ -228,6 +303,57 @@ pub use pixel::PixelFormat;
 pub use planner::{
     Layout, LevelPlan, PlannerError, PyramidPlan, PyramidPlanner, TileCoord, TileRect,
 };
+// `decode_radiance` is re-exported beside the error type because it is the
+// format-specific decode entry point a caller reaches for when they already
+// know the bytes are Radiance, exactly as `decode_tiff_page` is; the
+// content-sniffing `decode_bytes` / `decode_file` reach it too.
+pub use radiance::{RadianceError, decode_radiance};
+// `decode_gif` is re-exported beside its error type for the same reason
+// `decode_radiance` is: it is the direct entry point for a caller who
+// already knows the bytes are a GIF and does not want to go through the
+// sniff route.
+// `decode_gif_with` joins them for the animated half (issue #572): it is
+// `decode_gif` with vips's `page` and `n`, and a caller who wants every
+// frame reaches for it by name rather than by option struct.
+pub use gif::{GifError, decode_gif, decode_gif_with};
+// `decode_avif` is re-exported beside its error type for the reason
+// `decode_exr` is: it is the direct entry point for a caller who already
+// knows the bytes are an AVIF. There is no encoder half to pair it with,
+// and unlike EXR that is a scope decision rather than an upstream gap:
+// `heifsave` exists and writes HEVC, which is exactly what this cannot do.
+pub use avif::{AvifError, decode_avif};
+// `decode_exr` is re-exported beside its error type for the same reason
+// `decode_radiance` is: it is the direct entry point for a caller who
+// already knows the bytes are an OpenEXR file. There is no encoder half
+// to pair it with, because libvips has never shipped an EXR writer.
+pub use exr::{ExrError, decode_exr};
+// `decode_fits` is re-exported for the reason `decode_radiance` is: it is
+// the direct entry point for a caller who already knows the bytes are FITS.
+// The parser's own ceilings stay behind `libviprs::fits::` rather than
+// crowding the crate root with three numeric constants.
+pub use fits::{FitsError, decode_fits};
+// `decode_nifti` is re-exported for the reason `decode_fits` is: it is the
+// direct entry point for a caller who already knows the bytes are a `.nii`.
+// There is no encoder half, and there is no libvips half either: the pinned
+// build reports `NIfTI load/save with libnifti: false` (issue #510).
+pub use nifti::{NiftiError, decode_nifti};
+// `decode_mat` is re-exported for the reason `decode_nifti` is: it is the
+// direct entry point for a caller who already knows the bytes are a MATLAB
+// level 5 file. There is no encoder half, because libvips registers no
+// `matsave` (issue #510).
+pub use mat::{MatError, decode_mat};
+// `decode_analyze_file` is re-exported rather than `decode_analyze`, because
+// Analyze is a `.hdr` plus an `.img` and the path-taking half is the one a
+// caller who already knows the format actually wants. The buffer-pair and
+// filename-resolving halves stay behind `libviprs::analyze::` (issue #764).
+pub use analyze::{AnalyzeError, decode_analyze_file};
+pub use pyramid_migrate::{
+    MigrateError, MigrateOptions, MigrateReport, migrate_directory_to_pmtiles, migrate_to_pmtiles,
+};
+pub use pyramid_reader::{
+    DirectoryPyramidReader, PmTilesPyramidReader, PyramidDescription, PyramidReadError,
+    PyramidReader, StructuralSummary,
+};
 pub use raster::{Raster, RasterError, RegionView};
 pub use resample::{
     AffineOptions, Interpolator, ReduceKernel, ResampleError, ResizeOptions, ThumbnailError,
@@ -238,7 +364,8 @@ pub use resume::{
 };
 pub use retry::{FailurePolicy, RetryPolicy, RetryingSink};
 pub use sink::{
-    BLANK_TILE_MARKER, CollectedTile, FsSink, MemorySink, SinkError, Tile, TileFormat, TileSink,
+    BLANK_TILE_MARKER, CollectedTile, EmissionOrder, FsSink, MemorySink, SinkError, Tile,
+    TileFormat, TileSink,
 };
 #[cfg(feature = "object-store-sink")]
 #[cfg_attr(docsrs, doc(cfg(feature = "object-store-sink")))]
@@ -246,11 +373,13 @@ pub use sink_object_store::{ObjectStore, ObjectStoreConfig, ObjectStoreSink};
 #[cfg(feature = "packfile")]
 #[cfg_attr(docsrs, doc(cfg(feature = "packfile")))]
 pub use sink_packfile::{PackfileFormat, PackfileSink, PackfileSinkBuilder, ZipSink};
+pub use sink_pmtiles::{PmTilesSink, PmTilesSinkBuilder};
 pub use source::{
-    SourceError, clear_load_cache, decode_bytes, decode_file, decode_file_sequential,
-    decode_file_with_options, decode_file_with_shrink, generate_test_raster,
-    set_load_cache_max_bytes, set_load_cache_max_entries,
+    DeclaredGeometry, SourceError, clear_load_cache, decode_bytes, decode_file,
+    decode_file_sequential, decode_file_with_options, decode_file_with_shrink,
+    generate_test_raster, set_load_cache_max_bytes, set_load_cache_max_entries,
 };
+pub use storage::{PMTILES_EXTENSION, PyramidStorage};
 pub use streaming::{
     BudgetPolicy, RasterStripSource, StreamingConfig, StripSource, compute_strip_height,
     estimate_streaming_memory,
@@ -261,6 +390,29 @@ pub use streaming::{PdfiumRenderMode, PdfiumStripSource};
 pub use streaming_mapreduce::{
     LocalWorkExecutor, MapReduceConfig, StripWorkUnit, WorkContext, WorkExecutor,
 };
+pub use svg::{SvgOptions, decode_svg, decode_svg_with_limits};
+// `TileEvidence` is re-exported at the root because it is the type of a field
+// on `EngineResult`, which is re-exported here: a caller reading a result
+// should not have to reach into a second module to name what it says. The
+// verify entry points stay behind `libviprs::verify::`.
+pub use verify::TileEvidence;
+// `decode_webp` is re-exported for the reason `decode_radiance` is: it is
+// the format-specific decode entry point a caller reaches for when they
+// already know the bytes are WebP. `decode_webp_with` travels beside it the
+// way `decode_svg_with_limits` travels beside `decode_svg`: same entry
+// point, one more argument. The option types stay behind
+// `libviprs::webp::` so the crate root does not gain a second `SaveOptions`
+// or a second `LoadOptions`.
+pub use webp::{decode_webp, decode_webp_with};
+// `decode_jxl` is re-exported for the reason `decode_webp` and
+// `decode_radiance` are: it is the format-specific decode entry point a
+// caller reaches for when they already know the bytes are JPEG XL, and
+// `JxlError` travels beside it the way `ExrError` and `FitsError` travel
+// beside theirs, so a caller can name the type they are matching on. The
+// option types stay behind `libviprs::jxl::` so the crate root does not
+// gain a third `SaveOptions`.
+pub use jp2k::{Jp2kError, decode_jp2k};
+pub use jxl::{JxlError, decode_jxl, decode_jxl_with};
 // The text/tabular decoders are inherent associated functions on `Raster`
 // (`Raster::matrix_load`, `Raster::csv_load`, `Raster::ppm_load`), so the
 // ported connection and foreign cells reach them through the crate-root

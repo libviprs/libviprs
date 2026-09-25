@@ -270,13 +270,13 @@ enum PdfiumSourceState {
 /// keeps the cached-handle lifecycle obvious to readers. The actual
 /// FPDF synchronisation that protects `FPDF_CloseDocument` against
 /// concurrent renders lives in `pdfium-render`'s
-/// `ThreadSafePdfiumBindings` wrapper (active via the `sync` feature
+/// `ThreadSafePdfiumBindings` wrapper (active via the `thread_safe` feature
 /// plus the per-call locking fork declared as a direct git dependency
 /// in `libviprs/Cargo.toml`).
 ///
 /// Lifetime is `'static` because the document borrows from
 /// [`crate::pdf::init_pdfium`]'s `OnceLock`-backed `&'static Pdfium`.
-/// With the pdfium-render `sync` feature on, `PdfDocument<'static>` is
+/// With the pdfium-render `thread_safe` feature on, `PdfDocument<'static>` is
 /// `Send + Sync`.
 #[cfg(feature = "pdfium")]
 struct StreamingState {
@@ -286,8 +286,6 @@ struct StreamingState {
     /// 0-based page index (`c_int`) for pdfium-render's `PdfPages::get`.
     /// Stored pre-converted so the hot path doesn't re-validate `page > 0`.
     page_index: pdfium_render::prelude::PdfPageIndex,
-    /// Page's intrinsic `/Rotate`, normalised at construction.
-    rotation: crate::pdf::PageRotation,
 }
 
 #[cfg(feature = "pdfium")]
@@ -463,7 +461,7 @@ impl PdfiumStripSource {
     ///
     /// # Concurrency
     ///
-    /// pdfium itself is not thread-safe. The `pdfium-render` `sync`
+    /// pdfium itself is not thread-safe. The `pdfium-render` `thread_safe`
     /// feature, plus the direct git dependency in `libviprs/Cargo.toml`
     /// that pins the patched fork at `libviprs/pdfium-render` branch
     /// `libviprs/integration` (per-call FFI locking),
@@ -479,8 +477,7 @@ impl PdfiumStripSource {
         dpi: u32,
     ) -> Result<Self, crate::pdf::PdfError> {
         let path = path.into();
-        let rotation = crate::pdf::page_rotate(&path, page)?;
-        load_streaming_source(path, page, dpi, rotation)
+        load_streaming_source(path, page, dpi)
     }
 
     /// Open a [`PdfiumRenderMode::Streaming`] source with a worst-case
@@ -503,8 +500,7 @@ impl PdfiumStripSource {
             budget_bytes,
             policy,
         )?;
-        let rotation = crate::pdf::page_rotate(&path, page)?;
-        load_streaming_source(path, page, resolved_dpi, rotation)
+        load_streaming_source(path, page, resolved_dpi)
     }
 
     /// The DPI this source actually renders at. May differ from a constructor
@@ -554,13 +550,7 @@ impl PdfiumStripSource {
                     .pages()
                     .get(streaming.page_index)
                     .map_err(|e| crate::pdf::PdfError::Pdfium(e.to_string()))?;
-                crate::pdf::render_page_strip_with_page(
-                    &pdf_page,
-                    self.dpi,
-                    streaming.rotation,
-                    y_offset,
-                    height,
-                )
+                crate::pdf::render_page_strip_with_page(&pdf_page, self.dpi, y_offset, height)
             }
         }
     }
@@ -580,7 +570,6 @@ fn load_streaming_source(
     path: std::path::PathBuf,
     page: usize,
     dpi: u32,
-    rotation: crate::pdf::PageRotation,
 ) -> Result<PdfiumStripSource, crate::pdf::PdfError> {
     let pdfium = crate::pdf::init_pdfium()?;
     let _lock = crate::pdf::pdfium_lock();
@@ -615,7 +604,6 @@ fn load_streaming_source(
         state: PdfiumSourceState::Streaming(Box::new(StreamingState {
             document: Some(document),
             page_index,
-            rotation,
         })),
     })
 }
@@ -917,6 +905,15 @@ pub(crate) fn generate_pyramid_streaming(
     config: &StreamingConfig,
     observer: &dyn EngineObserver,
 ) -> Result<EngineResult, EngineError> {
+    // Hand the sink the run's configuration before any tile reaches it. Only
+    // the monolithic engine used to do this, so a sink that reads the config
+    // to answer a per-tile question got the standalone default here instead,
+    // and on this engine that is the wrong answer in the same tile as the
+    // right one: the padding around an edge tile comes from
+    // `config.engine.background_rgb` and the alpha flattening in
+    // `sink::encode_jpeg` fell back to white (issue #1133).
+    sink.record_engine_config(&config.engine);
+
     let format = source.format();
     let bpp = format.bytes_per_pixel();
 
@@ -1116,6 +1113,8 @@ pub(crate) fn generate_pyramid_streaming(
         duration: std::time::Duration::ZERO,
         stage_durations: crate::engine::StageDurations::default(),
         skipped_due_to_failure: sink.sink_skipped_due_to_failure(),
+        // A generation run produced these tiles rather than probing them.
+        tile_evidence: None,
     })
 }
 
@@ -2417,7 +2416,6 @@ mod tests {
         let state = StreamingState {
             document: None,
             page_index: 0,
-            rotation: crate::pdf::PageRotation::Zero,
         };
 
         let (tx, rx) = mpsc::channel::<()>();

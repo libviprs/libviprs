@@ -55,6 +55,23 @@ pub enum SinkError {
         #[source]
         source: image::ImageError,
     },
+    /// A tile encoder that is not the `image` crate refused the raster.
+    ///
+    /// [`SinkError::Encode`] carries an `image::ImageError` and cannot hold
+    /// anything else, so the codecs this crate ports itself need their own
+    /// variant rather than a stringified copy. WebP is the first
+    /// ([`TileFormat::Webp`], issue #1123): `Raster::encode_webp` reports
+    /// through [`crate::codec::EncodeError`], and the reason it refuses (a
+    /// 16-bit tile, a multiband intermediate, an axis over the format's
+    /// 16383-pixel ceiling) survives into the `source()` chain where a caller
+    /// can match on it instead of substring-matching English.
+    #[error("encoding tile to {format} failed: {source}")]
+    EncodeCodec {
+        /// The target format, e.g. `"webp"`.
+        format: &'static str,
+        #[source]
+        source: crate::codec::EncodeError,
+    },
     /// Used for all catch-all string errors that haven't yet been promoted to
     /// a typed variant. New code should prefer the typed variants below.
     #[error("sink error: {0}")]
@@ -107,6 +124,47 @@ pub enum SinkError {
     /// reported with the same variant regardless of code path (issue #140).
     #[error("checkpoint write failed: {0}")]
     Checkpoint(#[source] crate::resume::ResumeError),
+    /// A PMTiles reader or writer refused something. Typed rather than
+    /// stringified, so the `source()` chain still carries the
+    /// [`PmTilesError`](crate::pmtiles::PmTilesError) that names what was
+    /// wrong with the archive, which `tests/error_source_typing.rs` exists to
+    /// keep honest.
+    #[error("pmtiles error: {0}")]
+    PmTiles(#[source] crate::pmtiles::PmTilesError),
+    /// The sink cannot honour the [`ResumeMode`](crate::resume::ResumeMode)
+    /// the run was configured with, and says so rather than half-supporting
+    /// it.
+    ///
+    /// [`PmTilesSink`](crate::sink_pmtiles::PmTilesSink) is the case, and
+    /// since #1122 it is the case for `Resume` alone: a resume needs the
+    /// writer's staging to be reconstructible from a checkpoint and a
+    /// single-file archive's staging is not, so a resumed run would publish an
+    /// archive with the pre-crash tiles silently absent. Refusing by name is
+    /// the correct implementation there, not a gap.
+    ///
+    /// `Verify` used to be refused beside it, because the only verify the
+    /// engine had stat-ed one file per coordinate. It now reads the pyramid
+    /// back through [`TileSink::open_pyramid_reader`], so the refusal was not
+    /// relaxed: the thing it was about stopped being true.
+    #[error("{mode:?} is not a resume mode this sink can honour")]
+    UnsupportedResumeMode { mode: crate::resume::ResumeMode },
+    /// A sink was asked to open its own output for reading and the pyramid
+    /// underneath refused.
+    ///
+    /// Typed rather than stringified so the `source()` chain still carries the
+    /// [`PyramidReadError`](crate::pyramid_reader::PyramidReadError) that says
+    /// what was wrong, which is the difference between "the archive is
+    /// structurally damaged" and "the archive is not there" reaching a caller
+    /// as two distinguishable things rather than as two sentences.
+    #[error("pyramid read: {0}")]
+    PyramidRead(#[from] crate::pyramid_reader::PyramidReadError),
+    /// Another live run holds the advisory lock on this sink's output.
+    ///
+    /// Carries the [`ResumeError`](crate::resume::ResumeError) verbatim, so
+    /// the `Locked { path }` naming the lock file survives into the
+    /// `source()` chain instead of being flattened into a sentence.
+    #[error("run lock: {0}")]
+    RunLock(#[source] crate::resume::ResumeError),
 }
 
 /// Single-byte marker written in place of blank tiles when using
@@ -118,6 +176,17 @@ pub enum SinkError {
 /// See [blank_tile_strategy tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/blank_tile_strategy.rs)
 /// for placeholder detection patterns.
 pub const BLANK_TILE_MARKER: u8 = 0x00;
+
+/// What a tile format with no alpha channel flattens transparent pixels onto
+/// when nothing told the sink otherwise.
+///
+/// The same white [`EngineConfig::default`](crate::engine::EngineConfig)
+/// picks, and the same default `vips_foreign_save` gives its `background`
+/// property. A sink built directly, with no engine behind it, has no other
+/// source for the answer, and
+/// `the_standalone_background_is_the_engine_default` holds the two together
+/// so they cannot drift into writing one tile two ways.
+pub(crate) const DEFAULT_BACKGROUND_RGB: [u8; 3] = [255, 255, 255];
 
 /// A produced tile, ready for output.
 ///
@@ -140,6 +209,55 @@ pub struct Tile {
     ///
     /// See [blank_tile_strategy tests](https://github.com/libviprs/libviprs-tests/blob/main/tests/blank_tile_strategy.rs).
     pub blank: bool,
+}
+
+/// The order in which the engine hands a sink the tiles of a run.
+///
+/// A sink answers this through [`TileSink::emission_order`] and the engine
+/// obeys it. The default is what every run has always done and costs nothing;
+/// the other value is a request, and the price of it is on the variant.
+///
+/// # Why a sink gets to ask at all
+///
+/// Almost no sink cares. [`TileSink`]'s contract above says every write is an
+/// independent placement keyed on [`Tile::coord`], and the in-tree sinks all
+/// honour that, so for them the order is an implementation detail of the
+/// engine and always has been.
+///
+/// A single-file archive written straight through is the exception, and it is
+/// not a sink breaking the contract. A PMTiles archive in
+/// [`Layout::Arrival`](crate::pmtiles::Layout) appends each payload into the
+/// destination as it arrives, so the file's byte layout *is* the arrival
+/// order. The tiles it holds are still the same tiles placed by coordinate;
+/// what changes with the order is where in the file they sit, whether the
+/// archive's `clustered` flag can honestly be true, and whether two runs over
+/// one source produce the same bytes. Asking for an order is how such a sink
+/// gets those three back without a reordering pass (issue #1145).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum EmissionOrder {
+    /// Levels from full resolution down to the overview, row-major within a
+    /// level, and interleaved arbitrarily across the workers of a level.
+    ///
+    /// The default, and the order the pyramid cascade produces for free: each
+    /// level's raster is the downscale of the one above it, so the levels can
+    /// only be *made* in this order, and the tiles of a level go out as the
+    /// workers finish them.
+    #[default]
+    Cascade,
+    /// Ascending PMTiles tile id: the overview level first, then each level
+    /// below it, and Hilbert order within a level.
+    ///
+    /// Strictly ascending and fully deterministic, so a sink whose output
+    /// depends on the order gets the same bytes out of every run.
+    ///
+    /// It costs a third more raster memory. The levels come out of the
+    /// cascade in exactly the opposite order to this one, so a run that emits
+    /// ascending holds every level's raster at once rather than one at a time,
+    /// and the levels below the top sum to a third of it. It costs nothing in
+    /// tiles held: the emission is still parallel and still bounded by
+    /// [`EngineConfig::buffer_size`](crate::engine::EngineConfig::buffer_size).
+    TileId,
 }
 
 /// Trait for receiving tiles produced by the engine.
@@ -188,7 +306,7 @@ pub struct Tile {
 /// `None` for a terminal sink). An external author writing a "byte bucket"
 /// therefore implements `write_tile` alone (plus `finish` if it needs one) and
 /// never has to understand the engine's resume / checkpoint / retry internals.
-/// The wrappers ([`Box<T>`], [`&T`], [`Arc<T>`]) forward every method through a
+/// The wrappers ([`Box<T>`], `&T`, [`Arc<T>`]) forward every method through a
 /// single macro so a wrapper cannot drop one relative to its siblings.
 ///
 /// The engine hooks remain part of this one public trait for now because
@@ -208,8 +326,16 @@ pub trait TileSink: Send + Sync {
     ///
     /// Every engine-bookkeeping method below (`record_engine_config`,
     /// `sink_retry_count`, `sink_skipped_due_to_failure`, `note_sink_skipped`,
-    /// `checkpoint_root`, `init_level_count`, `content_format`,
-    /// `applies_retry_policy`) has a default that forwards through this hook.
+    /// `checkpoint_root`, `arm_durability_tracking`, `sync_pending`,
+    /// `init_level_count`, `content_format`, `applies_retry_policy`,
+    /// `check_resume_mode`, `seed_completed_tile`, `open_pyramid_reader`,
+    /// `emission_order`) has a default that forwards through this hook. The
+    /// list is the whole set, in declaration order: it had drifted three short
+    /// of the trait it describes, which is the same shape as the trap the
+    /// paragraph below is about. It is no longer only prose:
+    /// `no_forwarding_hook_is_left_out_of_the_macro_or_the_list` reads this
+    /// list and the trait and holds the one to the other, because a sentence
+    /// saying "the whole set" is exactly what drifted.
     /// A wrapper therefore only has to override `inner_sink` — and any state it
     /// genuinely owns (e.g. a [`RetryingSink`]'s own retry counter) — instead
     /// of forwarding every bookkeeping method by hand. That removes the
@@ -351,6 +477,53 @@ pub trait TileSink: Send + Sync {
             .is_some_and(|inner| inner.applies_retry_policy())
     }
 
+    /// Engine hook (issue #1150, split out of #1129): refuse a resume mode
+    /// this sink cannot honour, before the run touches anything.
+    ///
+    /// [`EngineBuilder::with_resume`](crate::EngineBuilder::with_resume) tells
+    /// the **engine** which mode to run, and before this hook existed the sink
+    /// only heard about it if the caller also said it a second time on the
+    /// sink's own builder. So a sink that refuses a mode refused it exactly
+    /// when the refusal was not needed, and the run it existed to stop went
+    /// ahead: [`PmTilesSink`](crate::sink_pmtiles::PmTilesSink) cannot resume
+    /// and answers `None` to [`TileSink::checkpoint_root`] because it has
+    /// nowhere to keep a checkpoint, so a `Resume` run resolved no checkpoint,
+    /// skipped nothing, never reached [`TileSink::seed_completed_tile`] either,
+    /// re-rendered every tile and reported success. A job asked to pick up
+    /// where it left off started again from zero and looked like it had had
+    /// nothing left to do.
+    ///
+    /// The engine asks this once, before the verify dispatch and before any
+    /// lock or directory work, so a refusal costs nothing and leaves nothing
+    /// behind. `Ok(())` means "I can honour that mode", which is the default
+    /// and what every sink did before.
+    ///
+    /// # Why it takes the mode rather than answering a `supports_resume` flag
+    ///
+    /// There are three modes and a sink can have a different answer for each.
+    /// `PmTilesSink` is that sink: it honours `Overwrite`, honours `Verify`
+    /// since #1122 because it reads the archive back through
+    /// [`TileSink::open_pyramid_reader`], and refuses `Resume` alone. A boolean
+    /// cannot say that, and a fourth mode arriving would have to guess which
+    /// side of it to fall on rather than being made to decide.
+    ///
+    /// The default forwards to [`TileSink::inner_sink`], bottoming out at `Ok`
+    /// for terminal sinks, so a wrapper carries its inner sink's answer and an
+    /// external sink never has to know the method exists.
+    ///
+    /// # Errors
+    ///
+    /// [`SinkError::UnsupportedResumeMode`] for a mode this sink cannot
+    /// honour. The engine hands it back as
+    /// [`EngineError::Sink`](crate::EngineError::Sink), so a caller gets the
+    /// sink's own typed refusal rather than a sentence about one.
+    fn check_resume_mode(&self, mode: crate::resume::ResumeMode) -> Result<(), SinkError> {
+        match self.inner_sink() {
+            Some(inner) => inner.check_resume_mode(mode),
+            None => Ok(()),
+        }
+    }
+
     /// Engine hook (issue #272): rebuild the sink-side manifest / dedupe /
     /// checksum state a *pre-crash* tile contributes, WITHOUT advancing the
     /// resume checkpoint.
@@ -378,6 +551,69 @@ pub trait TileSink: Send + Sync {
             Some(inner) => inner.seed_completed_tile(tile),
             None => Ok(()),
         }
+    }
+
+    /// Engine hook (issue #1122): open this sink's own output for reading,
+    /// when it can.
+    ///
+    /// `ResumeMode::Verify` re-checks a finished pyramid against the plan that
+    /// produced it, and until #1122 the only way it knew how to do that was
+    /// [`crate::engine::raster_verify`], which stats
+    /// `plan.tile_path(coord)` under a checkpoint root. That is a loose-file
+    /// tree walk, and a sink that does not write loose files has no seam to
+    /// enter it through: pointed at a PMTiles archive it reports the first
+    /// coordinate missing and calls the archive corrupt.
+    ///
+    /// A sink that answers `Some` here is saying "I can hand you back what I
+    /// wrote", and [`crate::verify::pyramid_verify`] checks the pyramid
+    /// through the [`PyramidReader`](crate::pyramid_reader::PyramidReader)
+    /// instead of through the tree. `None` means the tree walk, which is the
+    /// default and what every sink did before.
+    ///
+    /// # Why this is a capability and not a storage enum or a downcast
+    ///
+    /// The two obvious alternatives both break. Keying on
+    /// [`PyramidStorage`](crate::storage::PyramidStorage) does not work
+    /// because it is a CLI and planning enum that never reaches
+    /// [`EngineConfig`](crate::engine::EngineConfig), so the engine cannot see
+    /// it. Downcasting to the concrete sink type does not work because it
+    /// fails for every wrapper: a retrying sink, a tee, a recording sink in a
+    /// test. A defaulted method that forwards through
+    /// [`TileSink::inner_sink`] costs a wrapper nothing and costs an external
+    /// sink nothing, since neither has to know the method exists.
+    ///
+    /// # Errors
+    ///
+    /// `Err` is for a sink that **should** have a readable pyramid and does
+    /// not: an archive that is missing, unopenable or not an archive. That is
+    /// a verify failure, and it is emphatically not `Ok(None)`, which would
+    /// mean "I have no reader to offer" and would send the run off to walk a
+    /// directory tree that is not there either.
+    fn open_pyramid_reader(
+        &self,
+    ) -> Result<Option<Box<dyn crate::pyramid_reader::PyramidReader>>, SinkError> {
+        match self.inner_sink() {
+            Some(inner) => inner.open_pyramid_reader(),
+            None => Ok(None),
+        }
+    }
+
+    /// Engine hook (issue #1145): the order this sink wants its tiles in.
+    ///
+    /// [`EmissionOrder::Cascade`] by default, which is what every run did
+    /// before this hook existed and what the pyramid cascade produces for
+    /// free. A sink whose output depends on the order of the calls answers
+    /// [`EmissionOrder::TileId`] and the engine walks the plan that way
+    /// instead.
+    ///
+    /// The engine reads this once, before the first tile, so a sink cannot
+    /// change its mind mid-run. The default forwards through
+    /// [`TileSink::inner_sink`], which is what makes the answer survive the
+    /// wrappers a run is assembled from: a resume filter and a retry loop both
+    /// sit between the engine and the sink that asked.
+    fn emission_order(&self) -> EmissionOrder {
+        self.inner_sink()
+            .map_or(EmissionOrder::default(), |inner| inner.emission_order())
     }
 }
 
@@ -439,8 +675,19 @@ macro_rules! forward_tile_sink {
             fn applies_retry_policy(&self) -> bool {
                 (**self).applies_retry_policy()
             }
+            fn check_resume_mode(&self, mode: crate::resume::ResumeMode) -> Result<(), SinkError> {
+                (**self).check_resume_mode(mode)
+            }
             fn seed_completed_tile(&self, tile: &Tile) -> Result<(), SinkError> {
                 (**self).seed_completed_tile(tile)
+            }
+            fn open_pyramid_reader(
+                &self,
+            ) -> Result<Option<Box<dyn crate::pyramid_reader::PyramidReader>>, SinkError> {
+                (**self).open_pyramid_reader()
+            }
+            fn emission_order(&self) -> EmissionOrder {
+                (**self).emission_order()
             }
         }
     };
@@ -663,15 +910,112 @@ pub enum TileFormat {
     /// Raw pixel bytes (no encoding). Fastest, useful for pipelines that
     /// encode later or for testing.
     Raw,
+    /// Lossless WebP-encoded tiles (issue #1123).
+    ///
+    /// # No quality field, and that is the design rather than an omission
+    ///
+    /// `Webp { quality }` would read as symmetry with [`TileFormat::Jpeg`]
+    /// and it would be a lie. The encoder underneath is
+    /// [`Raster::encode_webp`](crate::Raster::encode_webp), whose
+    /// [`webp::Compression`](crate::webp::Compression) is `#[non_exhaustive]`
+    /// with the single variant `Lossless`: there is no lossy path in
+    /// `image-webp` 0.2.4 to point a number at. An argument the encoder
+    /// throws away inverts the contract (ask for quality 10, get a lossless
+    /// file possibly larger than the PNG you started from) and it is a semver
+    /// time bomb, because the day a lossy encoder lands every existing
+    /// `Webp { quality: 10 }` would silently start emitting small lossy files
+    /// in a patch release. When that encoder exists it joins
+    /// `webp::Compression` as a variant, not this enum as a field.
+    ///
+    /// Worth saying out loud that a test cannot catch this one. A cell that
+    /// encodes a tile, decodes it and compares pixels passes for every value
+    /// a `quality` field could hold, because the encoder ignores all of them
+    /// identically. Making the field unrepresentable is the only thing that
+    /// does the work, so the module doc in [`crate::webp`] and this paragraph
+    /// are the record of why it is absent.
+    Webp,
 }
 
 impl TileFormat {
+    /// The extension a tile of this format is written under.
     pub fn extension(&self) -> &'static str {
         match self {
             Self::Png => "png",
             Self::Jpeg { .. } => "jpeg",
             Self::Raw => "raw",
+            Self::Webp => "webp",
         }
+    }
+
+    /// Every extension a tile of this format can legitimately be found under,
+    /// in probe order.
+    ///
+    /// Almost always the single answer [`TileFormat::extension`] gives. JPEG
+    /// is the exception, because `.jpg` is as common on disk as `.jpeg` and a
+    /// tree libviprs did not write may use either.
+    ///
+    /// This is the function that made the five silent sites of issue #1123 go
+    /// away. Before it, three call sites each carried
+    /// `Some(TileFormat::Jpeg { .. }) => vec!["jpeg", "jpg"], Some(fmt) =>
+    /// vec![fmt.extension()]` inline, and two more carried the fallback list
+    /// as four literal strings. Adding `Webp` broke none of them, which is
+    /// precisely the failure mode: a WebP tree verified through a sink that
+    /// does not pin its format found no tiles at all and reported the pyramid
+    /// missing.
+    ///
+    /// The `match` is exhaustive on purpose. A variant added to `TileFormat`
+    /// stops the build here, at the one place that owns the answer, instead of
+    /// compiling into five probe lists that quietly skip the new format.
+    pub fn extensions(&self) -> &'static [&'static str] {
+        match self {
+            Self::Png => &["png"],
+            Self::Jpeg { .. } => &["jpeg", "jpg"],
+            Self::Raw => &["raw"],
+            Self::Webp => &["webp"],
+        }
+    }
+
+    /// Every format this build knows, in the order a blind probe should try
+    /// them.
+    ///
+    /// The order is the one the hand-written copies used (`raw`, `png`,
+    /// `jpeg`/`jpg`) with `webp` appended, so the probe behaviour for a tree
+    /// written before this change is byte-for-byte what it was.
+    ///
+    /// Be honest about the guarantee: Rust has no stable way to enumerate an
+    /// enum's variants (`std::mem::variant_count` is unstable and a derive
+    /// macro is a dependency this crate will not take for one array), so the
+    /// compiler does not force a new variant into this list. What it does
+    /// force is a visit to this file, because [`TileFormat::extensions`] three
+    /// lines above is an exhaustive match that will not compile without the
+    /// new arm. That is a much smaller gap than five copies in four modules,
+    /// and `tests/webp_tile_format.rs` asserts the union property over
+    /// whatever is in here.
+    pub const ALL: &'static [TileFormat] = &[
+        TileFormat::Raw,
+        TileFormat::Png,
+        // The quality is arbitrary: `extensions` matches `Jpeg { .. }` and
+        // nothing here reads the number.
+        TileFormat::Jpeg { quality: 0 },
+        TileFormat::Webp,
+    ];
+
+    /// The fallback probe set: every extension every known format can be
+    /// stored under.
+    ///
+    /// Used when a sink does not commit to a format, which is the default for
+    /// every transparent wrapper because [`TileSink::content_format`] returns
+    /// `None` unless a sink overrides it. Probing every extension and taking
+    /// the first hit is how a stale sibling file from a previous run in a
+    /// different format gets validated (issue #139), so a sink that *can* say
+    /// what it writes should, and this list is the last resort rather than the
+    /// normal path.
+    pub fn candidate_extensions() -> Vec<&'static str> {
+        let mut out = Vec::new();
+        for fmt in Self::ALL {
+            out.extend_from_slice(fmt.extensions());
+        }
+        out
     }
 }
 
@@ -704,9 +1048,9 @@ impl TileFormat {
 ///
 /// * `dedupe_promote` is the sole **outer** lock. It guards the whole
 ///   promote-on-2nd-hit critical section and is only ever taken at the top of
-///   [`FsSink::dedupe_write`], never while a field mutex is already held. It is
-///   *sharded by content digest* (see [`DEDUPE_PROMOTE_SHARDS`] and
-///   [`FsSink::promote_shard`]): all occurrences of a given content map to the
+///   `dedupe_write`, never while a field mutex is already held. It is
+///   *sharded by content digest* across a fixed 64 shards picked by hashing
+///   the tile content: all occurrences of a given content map to the
 ///   same shard — preserving the per-key atomicity the at-least-one-hardlink
 ///   invariant requires (issue #111) — while distinct content maps to
 ///   (usually) distinct shards, so tiles of different content no longer
@@ -729,16 +1073,15 @@ impl TileFormat {
 /// (a `OnceLock`) and `per_level_counts` (atomics) take no mutex and are
 /// irrelevant to this rule.
 ///
-/// Field mutexes are acquired through [`FsSink::lock_leaf`], which in debug
-/// builds trips a panic the instant a second leaf lock is taken while one is
-/// still held — turning an accidental nesting into an immediate, local
+/// Field mutexes are acquired through one private `lock_leaf` helper, which
+/// in debug builds trips a panic the instant a second leaf lock is taken while
+/// one is still held — turning an accidental nesting into an immediate, local
 /// failure instead of a latent deadlock (issue #112).
 ///
 /// # Sharded promote lock
 ///
-/// The `dedupe_promote` outer lock is striped across
-/// [`DEDUPE_PROMOTE_SHARDS`] shards, indexed by a hash of the tile content
-/// (see [`FsSink::promote_shard`]). All occurrences of a given content select
+/// The `dedupe_promote` outer lock is striped across 64 shards, indexed by a
+/// hash of the tile content. All occurrences of a given content select
 /// the same shard, so the per-key atomicity issue #111 relies on is preserved;
 /// distinct content selects (usually) distinct shards, so it no longer
 /// serialises on one process-wide lock (issue #296).
@@ -1019,8 +1362,16 @@ impl FsSink {
     /// [`TileFormat::Png`]; override it via [`FsSink::with_format`] when
     /// writing JPEG or Raw tiles:
     ///
-    /// ```ignore
-    /// FsSink::new(dir, plan).with_format(TileFormat::Jpeg { quality: 85 });
+    /// ```
+    /// use libviprs::planner::{Layout, PyramidPlanner};
+    /// use libviprs::sink::{FsSink, TileFormat};
+    ///
+    /// let plan = PyramidPlanner::new(1024, 768, 256, 0, Layout::DeepZoom)
+    ///     .unwrap()
+    ///     .plan();
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let sink = FsSink::new(dir.path(), plan).with_format(TileFormat::Jpeg { quality: 85 });
+    /// assert_eq!(sink.base_dir(), dir.path());
     /// ```
     pub fn new(base_dir: impl Into<PathBuf>, plan: PyramidPlan) -> Self {
         let format = TileFormat::Png;
@@ -1119,7 +1470,7 @@ impl FsSink {
         self
     }
 
-    /// Attach a [`DedupeStrategy`](crate::dedupe::DedupeStrategy) so the sink
+    /// Attach a [`DedupeStrategy`] so the sink
     /// can coalesce identical blank tiles under a shared reference.
     ///
     /// **See also:** [interactive example](https://libviprs.org/cli/#flag-dedupe-blanks)
@@ -1140,7 +1491,7 @@ impl FsSink {
     /// it (issue #122 / #273). The sink no longer publishes its own checkpoint
     /// file — the engine's [`CheckpointState`](crate::engine) is the single
     /// checkpoint authority (issue #277) — so under the documented
-    /// [`EngineBuilder::with_resume`](crate::engine::EngineBuilder::with_resume)
+    /// [`EngineBuilder::with_resume`](crate::engine_builder::EngineBuilder::with_resume)
     /// path this is armed automatically and calling it here is redundant (but
     /// harmless). Retained so existing callers keep compiling.
     ///
@@ -1156,10 +1507,19 @@ impl FsSink {
     /// defaults to [`TileFormat::Png`]). Chain with the other `with_*`
     /// methods to configure the full sink in builder style:
     ///
-    /// ```ignore
-    /// FsSink::new(dir, plan)
+    /// ```
+    /// use libviprs::dedupe::DedupeStrategy;
+    /// use libviprs::planner::{Layout, PyramidPlanner};
+    /// use libviprs::sink::{FsSink, TileFormat};
+    ///
+    /// let plan = PyramidPlanner::new(1024, 768, 256, 0, Layout::DeepZoom)
+    ///     .unwrap()
+    ///     .plan();
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let sink = FsSink::new(dir.path(), plan)
     ///     .with_format(TileFormat::Jpeg { quality: 85 })
     ///     .with_dedupe(DedupeStrategy::Blanks);
+    /// assert_eq!(sink.base_dir(), dir.path());
     /// ```
     ///
     /// **See also:** [interactive example](https://libviprs.org/cli/#flag-format)
@@ -1179,11 +1539,25 @@ impl FsSink {
         Some(self.base_dir.join(rel))
     }
 
+    /// The background a JPEG tile's transparent pixels land on.
+    ///
+    /// The engine records its [`EngineConfig`](crate::engine::EngineConfig)
+    /// here before the tile loop starts, so this is the same `background_rgb`
+    /// that already fills the padding around an edge tile. A sink driven
+    /// directly gets [`DEFAULT_BACKGROUND_RGB`], which is the value the engine
+    /// would have recorded anyway.
+    fn background_rgb(&self) -> [u8; 3] {
+        self.lock_leaf(&self.engine_config)
+            .as_ref()
+            .map_or(DEFAULT_BACKGROUND_RGB, |c| c.background_rgb)
+    }
+
     fn encode_tile(&self, raster: &Raster) -> Result<Vec<u8>, SinkError> {
         match self.format {
             TileFormat::Raw => Ok(raster.data().to_vec()),
             TileFormat::Png => encode_png(raster),
-            TileFormat::Jpeg { quality } => encode_jpeg(raster, quality),
+            TileFormat::Jpeg { quality } => encode_jpeg(raster, quality, self.background_rgb()),
+            TileFormat::Webp => encode_webp(raster),
         }
     }
 
@@ -1351,6 +1725,31 @@ impl TileSink for FsSink {
         Some(&self.base_dir)
     }
 
+    /// No reader, on purpose (issue #1122).
+    ///
+    /// [`DirectoryPyramidReader`](crate::pyramid_reader::DirectoryPyramidReader)
+    /// exists and would open this sink's own output, so answering `Some` here
+    /// compiles and reads as the tidier symmetry. It would also silently move
+    /// every `Verify` run over a tree off
+    /// [`raster_verify`](crate::engine::raster_verify) and onto the reader
+    /// path, and the two do not check the same things. `raster_verify`
+    /// re-renders every level from the source and compares the bytes, honours
+    /// the manifest's checksum table, and knows what a one-byte blank-tile
+    /// marker and a `_shared/` dedupe reference mean. A reader-driven sweep
+    /// knows none of that; it is what a single-file archive can offer, not an
+    /// upgrade on what a tree already has.
+    ///
+    /// So the reader path is a sibling of the directory verify rather than a
+    /// replacement for it, and this `Ok(None)` is where that decision is
+    /// enforced. It is the same value the trait default produces for a
+    /// terminal sink; it is spelled out because the default would look like
+    /// nobody had considered it.
+    fn open_pyramid_reader(
+        &self,
+    ) -> Result<Option<Box<dyn crate::pyramid_reader::PyramidReader>>, SinkError> {
+        Ok(None)
+    }
+
     fn arm_durability_tracking(&self) {
         self.durability_tracking.store(true, Ordering::Relaxed);
     }
@@ -1359,7 +1758,8 @@ impl TileSink for FsSink {
     /// since the last barrier so the checkpoint about to certify them never
     /// records tiles whose bytes are still only in the page cache. Drains the
     /// tracked `unsynced_tiles` set and fsyncs each path via the sink's
-    /// [`Durability`](crate::resume::Durability) backend.
+    /// injectable `Durability` backend, which issues a real `fsync` in
+    /// production and is stubbed in tests.
     fn sync_pending(&self) -> Result<(), SinkError> {
         // Take the pending set under the leaf lock, then release it before any
         // I/O so the fsyncs never run while a leaf lock is held (the
@@ -1460,7 +1860,7 @@ impl FsSink {
     }
 
     /// Digest algorithm used to name `_shared/blank_<hex>.<ext>` files. Mirrors
-    /// `DedupeIndex::effective_algo`: the blank/none strategies always name
+    /// what `dedupe::content_digest_for` picks: the blank/none strategies name
     /// shared blobs by their Blake3 digest; `All` honours the caller's choice.
     /// Kept in-sink so a shared blob can be revalidated against the digest
     /// embedded in its own filename without reaching into the index.
@@ -2231,28 +2631,65 @@ fn hash_tile_raw(bytes: &[u8], algo: crate::manifest::ChecksumAlgo) -> [u8; 32] 
 // Encoding helpers
 // ---------------------------------------------------------------------------
 
-fn color_type_for_format(fmt: crate::pixel::PixelFormat) -> Result<image::ColorType, SinkError> {
-    use crate::pixel::PixelFormat;
-    match fmt {
-        PixelFormat::Gray8 => Ok(image::ColorType::L8),
-        PixelFormat::Gray16 => Ok(image::ColorType::L16),
-        PixelFormat::Rgb8 => Ok(image::ColorType::Rgb8),
-        PixelFormat::Rgba8 => Ok(image::ColorType::Rgba8),
-        PixelFormat::Rgb16 => Ok(image::ColorType::Rgb16),
-        PixelFormat::Rgba16 => Ok(image::ColorType::Rgba16),
-        // Multiband intermediates (from the band ops in `crate::bands`) have
-        // no image-crate colour type; reduce or extract to 1/3/4 bands first.
-        PixelFormat::Multi8(_) | PixelFormat::Multi16(_) => Err(SinkError::EncodeMsg(format!(
-            "multiband raster ({} bands) cannot be encoded as an image tile",
-            fmt.channels()
-        ))),
-        // Float compute intermediates have no PNG/JPEG representation;
-        // cast to an unsigned 8/16-bit format before encoding tiles.
-        PixelFormat::RgbaF32 | PixelFormat::FloatF32(_) => Err(SinkError::EncodeMsg(format!(
-            "float raster ({fmt:?}) cannot be encoded as an image tile; \
-             cast to an unsigned 8/16-bit format first"
-        ))),
-    }
+/// The `image` colour type for a [`PixelFormat`], or a [`SinkError`] for the
+/// compute-intermediate formats that have none.
+///
+/// The mapping itself lives once, in [`crate::pixel::image_color_type`]
+/// (issue #969); this wraps its
+/// [`ColorTypeRefusal`](crate::pixel::ColorTypeRefusal) in this module's own
+/// error type and wording. The same refusal [`crate::encode`]'s
+/// `image_color_type` makes, argued the same way: its doc carries the
+/// measured oracle, showing three vips routes answer three different things
+/// for a `uint` or `float` raster and the interpretation tag moves one of
+/// them again, so there is no answer here to be faithful to (issue #952).
+///
+/// Before #969 this was the **third** independent copy of the mapping, and
+/// that triplication is what let the first draft of
+/// `the_png_integer_refusals_carry_the_oracle_not_only_the_dependency` drive
+/// the wrong one: `Raster::encode_to_buffer("png")` routes through
+/// `crate::sink::encode_png`, not through `Raster::encode_png`, so a mutation
+/// of `crate::encode`'s copy came back green. Consolidating onto one function
+/// closes that gap: a mutation of [`crate::pixel::image_color_type`] now
+/// reaches every route, this one included.
+///
+/// `pub(crate)` because [`crate::sink_object_store`] and
+/// [`crate::sink_packfile`] carried byte-identical copies of this exact
+/// wrapper (same [`SinkError`], same wording) and now call this one instead,
+/// closing the batch-1 review's finding that #969 had consolidated the
+/// mapping but left the wrapper around it tripled (issue #940).
+pub(crate) fn color_type_for_format(
+    fmt: crate::pixel::PixelFormat,
+) -> Result<image::ColorType, SinkError> {
+    use crate::pixel::ColorTypeRefusal;
+    crate::pixel::image_color_type(fmt).map_err(|refusal| {
+        SinkError::EncodeMsg(match refusal {
+            // Multiband intermediates (from the band ops in `crate::bands`)
+            // have no image-crate colour type; reduce or extract to 1/3/4
+            // bands first.
+            ColorTypeRefusal::Multiband(bands) => {
+                format!("multiband raster ({bands} bands) cannot be encoded as an image tile")
+            }
+            // Float compute intermediates have no PNG/JPEG representation;
+            // cast to an unsigned 8/16-bit format before encoding tiles.
+            ColorTypeRefusal::Float => format!(
+                "float raster ({fmt:?}) cannot be encoded as an image tile; \
+                 cast to an unsigned 8/16-bit format first"
+            ),
+            // 32-bit unsigned compute intermediates (the counting ops of
+            // issue #532) have no PNG/JPEG representation either; the widest
+            // integer colour type the `image` crate offers is 16-bit.
+            ColorTypeRefusal::Uint32 => format!(
+                "32-bit unsigned raster ({fmt:?}) cannot be encoded as an image tile; \
+                 cast to an unsigned 8/16-bit format first"
+            ),
+            // Every `image` colour type is unsigned, so this is not a width
+            // question and `Int8` is refused alongside `Int32` (issue #516).
+            ColorTypeRefusal::Signed => format!(
+                "signed raster ({fmt:?}) cannot be encoded as an image tile; \
+                 the image colour types are all unsigned, so cast first"
+            ),
+        })
+    })
 }
 
 /// Encodes a [`Raster`] as a PNG image and returns the raw PNG bytes.
@@ -2289,25 +2726,115 @@ pub fn encode_png(raster: &Raster) -> Result<Vec<u8>, SinkError> {
     Ok(buf)
 }
 
-// Crate-visible so extension-dispatched save (`crate::imageio`) reuses the
-// sink's JPEG encode path.
-pub(crate) fn encode_jpeg(raster: &Raster, quality: u8) -> Result<Vec<u8>, SinkError> {
-    let mut buf = Vec::new();
-    let encoder =
-        image::codecs::jpeg::JpegEncoder::new_with_quality(std::io::Cursor::new(&mut buf), quality);
+/// Encodes a [`Raster`] as lossless WebP bytes and returns them.
+///
+/// The one tile encoder in this module that is not an `image`-crate call.
+/// WebP goes through [`Raster::encode_webp`](crate::Raster::encode_webp),
+/// which is this crate's own port over `image-webp`, so its refusals arrive as
+/// a [`crate::codec::EncodeError`] rather than an `image::ImageError` and they
+/// are carried as that type rather than flattened into a sentence
+/// (`tests/error_source_typing.rs` is the file that made that a rule here).
+///
+/// # What it refuses that PNG accepts
+///
+/// PNG and JPEG reach every pixel format [`color_type_for_format`] maps.
+/// `encode_webp` takes `Gray8`, `Rgb8` and `Rgba8` and nothing else, because
+/// those are the only three WebP has a spelling for, and greyscale is not
+/// really one of them: the format stores no mono, so `Gray8` goes in as an
+/// encoder hint and reads back as three equal bands, which is what
+/// `vips webpsave` does with a `b-w` image too. A 16-bit tile that writes fine
+/// as PNG is therefore a typed refusal here, which is the honest answer rather
+/// than a silent narrowing.
+pub(crate) fn encode_webp(raster: &Raster) -> Result<Vec<u8>, SinkError> {
+    raster
+        .encode_webp(crate::webp::SaveOptions::default())
+        .map_err(|source| SinkError::EncodeCodec {
+            format: "webp",
+            source,
+        })
+}
+
+/// Flatten an alpha channel onto `background`, for a format that has nowhere
+/// to put one.
+///
+/// `Ok(None)` means the raster has no alpha to flatten and can go to the
+/// encoder as it stands.
+///
+/// This is `vips_flatten`, reached through this crate's own port of it
+/// ([`Raster::try_flatten`]), and it is what every vips saver whose format
+/// cannot carry alpha applies on the way out, against its `background`
+/// property. Issue #1133 is what the alternative looks like:
+/// `render_page_pdfium` produces `Rgba8` and JPEG has no RGBA colour type, so
+/// `--render --format jpeg` refused the only pixels the renderer makes, while
+/// `--format png` and `--format webp` tiled the same input.
+///
+/// `Rgba8` and nothing else, on purpose. `Rgba16` is the other carrier with
+/// an alpha band, and flattening it would only change which refusal a JPEG
+/// caller gets after doing the work, because there is no 16-bit JPEG sample
+/// type either.
+pub(crate) fn flatten_alpha(
+    raster: &Raster,
+    background: [u8; 3],
+) -> Result<Option<Raster>, crate::conversion::ConversionError> {
+    if raster.format() != crate::pixel::PixelFormat::Rgba8 {
+        return Ok(None);
+    }
+    let bg = background.map(f64::from);
+    raster.try_flatten(Some(&bg)).map(Some)
+}
+
+/// The background a sink flattens onto, read from whatever
+/// [`TileSink::record_engine_config`] left behind.
+///
+/// Every sink that encodes a tile needs this and the engine hands it to all of
+/// them, so the answer lives here rather than four times over. A sink nobody
+/// ran an engine against gets [`DEFAULT_BACKGROUND_RGB`].
+pub(crate) fn background_from(config: &Mutex<Option<crate::engine::EngineConfig>>) -> [u8; 3] {
+    crate::poison::recover(config)
+        .as_ref()
+        .map_or(DEFAULT_BACKGROUND_RGB, |c| c.background_rgb)
+}
+
+/// Encode a [`Raster`] as JPEG, flattening any alpha onto `background` first.
+///
+/// Crate-visible so extension-dispatched save (`crate::imageio`) reuses the
+/// sink's JPEG encode path.
+///
+/// `background` is the engine's `background_rgb` wherever a sink captured one,
+/// which makes a transparent pixel land on the same colour the padding around
+/// an edge tile already uses.
+///
+/// # Why `Auto` rather than a knob on `TileFormat`
+///
+/// [`TileFormat::Jpeg`] carries a quality and nothing else. A subsampling
+/// field would be a second forced exhaustive-match break one release after
+/// `Webp` added the first, for a choice [`JpegSubsample::Auto`] already makes
+/// correctly at both ends: 4:2:0 below quality 90 and 4:4:4 at or above it,
+/// which is libvips' `VIPS_FOREIGN_SUBSAMPLE_AUTO`. Somebody who wants full
+/// chroma in a tile asks for quality 90, which is the quality they would be
+/// asking for anyway (issue #1132).
+pub(crate) fn encode_jpeg(
+    raster: &Raster,
+    quality: u8,
+    background: [u8; 3],
+) -> Result<Vec<u8>, SinkError> {
+    let flattened = flatten_alpha(raster, background).map_err(|e| {
+        SinkError::EncodeMsg(format!("flattening a tile's alpha for JPEG failed: {e}"))
+    })?;
+    let raster = flattened.as_ref().unwrap_or(raster);
     let ct = color_type_for_format(raster.format())?;
-    image::ImageEncoder::write_image(
-        encoder,
+    crate::encode_jpeg::encode(
         raster.data(),
         raster.width(),
         raster.height(),
-        ct.into(),
+        ct,
+        quality,
+        crate::codec::JpegSubsample::Auto,
     )
-    .map_err(|e| SinkError::Encode {
-        format: "jpeg".to_string(),
-        source: e,
-    })?;
-    Ok(buf)
+    .map_err(|source| SinkError::EncodeCodec {
+        format: "jpeg",
+        source,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -2319,6 +2846,124 @@ mod tests {
     use super::*;
     use crate::pixel::PixelFormat;
     use crate::planner::{Layout, PyramidPlanner};
+
+    /// Split a block into one `(name, code)` pair per `fn` declared at
+    /// `indent`, with comment lines already gone so a doc comment written for
+    /// the *next* method cannot be read as part of this one's body.
+    fn fns_at(block: &str, indent: &str) -> Vec<(String, String)> {
+        let head = format!("{indent}fn ");
+        let mut out: Vec<(String, String)> = Vec::new();
+        for line in block.lines() {
+            if let Some(rest) = line.strip_prefix(&head) {
+                let name = rest
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                out.push((name, String::new()));
+            } else if let Some((_, body)) = out.last_mut() {
+                body.push_str(line);
+                body.push('\n');
+            }
+        }
+        out
+    }
+
+    /// No hook that forwards through `inner_sink` is left out of
+    /// `forward_tile_sink!`, or out of the list that claims to name them all.
+    ///
+    /// [`TileSink::inner_sink`] removes the silent-data-loss trap for a
+    /// wrapper, but it moves the trap rather than deleting it. A hook added to
+    /// the trait with a forwarding default has to be repeated in the macro
+    /// body, and one that is not falls back to the trait default for every
+    /// wrapped sink. That default is the answer a *terminal* sink gives, so a
+    /// forgotten forward is silent: the wrapped sink reports whatever a sink
+    /// with nothing inside it would, and every cell that hands the engine a
+    /// bare sink stays green.
+    ///
+    /// #1129 and #1145 each added one hook here, in the same week, on the same
+    /// trait, and each was right on its own branch. That is the shape this
+    /// cell is about. It is not a hook written wrongly, it is two hooks that
+    /// compose into a macro forwarding one of them, which no cell written
+    /// about either hook alone can see.
+    ///
+    /// The doc list is held to the same set because it says out loud that it
+    /// is "the whole set, in declaration order". Prose making that claim is
+    /// precisely what drifted three short before #1129 repaired it by hand,
+    /// and repairing it by hand is not a guard against it happening again.
+    #[test]
+    fn no_forwarding_hook_is_left_out_of_the_macro_or_the_list() {
+        const SRC: &str = include_str!("sink.rs");
+
+        // The code view: comments stripped, so a method's body is its body.
+        let code: String = SRC
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            code.len() > 40_000,
+            "the positive control: every assertion below is vacuous if the \
+             include picked up a truncated file ({} bytes of code)",
+            code.len()
+        );
+
+        let block = |from: &str| -> String {
+            let start = code.find(from).unwrap_or_else(|| panic!("{from} is gone"));
+            // Everything in this file's trait and macro bodies is indented, so
+            // the first `}` in the first column is the end of the block.
+            let end = code[start..]
+                .find("\n}\n")
+                .unwrap_or_else(|| panic!("{from} has no closing brace"));
+            code[start..start + end].to_string()
+        };
+
+        // A hook "forwards" when its default body reaches `inner_sink()`.
+        // `inner_sink` itself does not, and neither do `write_tile` (no
+        // default at all) or `finish`, which is why none of the three is in
+        // the list this cell checks.
+        let forwarding: Vec<String> = fns_at(&block("pub trait TileSink"), "    ")
+            .into_iter()
+            .filter(|(_, body)| body.contains("inner_sink()"))
+            .map(|(name, _)| name)
+            .collect();
+        assert!(
+            forwarding.len() >= 14,
+            "the positive control: the trait had fourteen forwarding hooks when this \
+             was written and a parser that finds fewer has stopped parsing, not found \
+             a shrinking trait; got {forwarding:?}"
+        );
+
+        let forwarded: Vec<String> =
+            fns_at(&block("macro_rules! forward_tile_sink"), "            ")
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect();
+        for hook in &forwarding {
+            assert!(
+                forwarded.contains(hook),
+                "`{hook}` forwards through `inner_sink` but `forward_tile_sink!` does not \
+                 repeat it, so every wrapped sink silently answers the terminal default"
+            );
+        }
+
+        // The doc list, read out of the uncommented source because it *is* a
+        // comment. Names arrive backticked, so the odd splits are the names.
+        let opens = "Every engine-bookkeeping method below";
+        let closes = "default that forwards through this hook";
+        let from = SRC.find(opens).expect("the forwarded-method list is gone");
+        let to = SRC[from..].find(closes).expect("the list has no end") + from;
+        let listed: Vec<String> = SRC[from..to]
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .map(str::to_string)
+            .collect();
+        assert_eq!(
+            listed, forwarding,
+            "the list says it is the whole set in declaration order, so it has to be \
+             both: same names, same order"
+        );
+    }
 
     fn make_tile(level: u32, col: u32, row: u32) -> Tile {
         Tile {
@@ -2358,6 +3003,7 @@ mod tests {
     /// (`m.lock().unwrap()` in `LeafGuard::new`) the next write panicked (RED);
     /// after it the guard recovers and the run continues (GREEN).
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn poisoned_fs_sink_leaf_recovers_without_cascade() {
         let planner = PyramidPlanner::new(8, 8, 256, 0, Layout::DeepZoom).unwrap();
         let plan = planner.plan();
@@ -2400,6 +3046,7 @@ mod tests {
     /// A Zoomify pyramid produces a `TileGroup0/` directory and an
     /// `ImageProperties.xml` sidecar carrying the source dimensions.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn zoomify_run_writes_tilegroup_and_image_properties() {
         let plan = PyramidPlanner::new(300, 200, 128, 0, Layout::Zoomify)
             .unwrap()
@@ -2424,6 +3071,7 @@ mod tests {
     /// An IIIF pyramid produces an `info.json` sidecar carrying the source
     /// dimensions.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn iiif_run_writes_info_json() {
         let plan = PyramidPlanner::new(512, 512, 256, 0, Layout::Iiif)
             .unwrap()
@@ -2448,6 +3096,7 @@ mod tests {
     /// DeepZoom behaviour is unchanged: a sibling `.dzi` manifest is emitted
     /// and no in-directory properties sidecar appears.
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn deepzoom_run_still_writes_sibling_dzi_only() {
         let plan = PyramidPlanner::new(300, 200, 128, 0, Layout::DeepZoom)
             .unwrap()
@@ -2673,6 +3322,7 @@ mod tests {
      * the actual filesystem round-trip (skipped under Miri).
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn fs_sink_writes_tile_to_disk() {
         let planner = PyramidPlanner::new(8, 8, 256, 0, Layout::DeepZoom).unwrap();
         let plan = planner.plan();
@@ -2720,6 +3370,7 @@ mod tests {
      * actual directory creation on disk (skipped under Miri).
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn fs_sink_creates_directory_structure() {
         let planner = PyramidPlanner::new(512, 512, 256, 0, Layout::DeepZoom).unwrap();
         let plan = planner.plan();
@@ -2767,6 +3418,7 @@ mod tests {
      * verifies the manifest is written to disk correctly (skipped under Miri).
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn fs_sink_writes_dzi_manifest() {
         let planner = PyramidPlanner::new(1024, 768, 256, 1, Layout::DeepZoom).unwrap();
         let plan = planner.plan();
@@ -2806,6 +3458,7 @@ mod tests {
      * appears on disk after finish() (skipped under Miri).
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn fs_sink_no_dzi_for_xyz() {
         let planner = PyramidPlanner::new(256, 256, 256, 0, Layout::Xyz).unwrap();
         let plan = planner.plan();
@@ -2843,6 +3496,7 @@ mod tests {
      * (skipped under Miri).
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn fs_sink_xyz_path_structure() {
         let planner = PyramidPlanner::new(512, 512, 256, 0, Layout::Xyz).unwrap();
         let plan = planner.plan();
@@ -2890,6 +3544,7 @@ mod tests {
      * the same magic bytes (skipped under Miri).
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn fs_sink_encodes_png() {
         let raster = Raster::zeroed(8, 8, PixelFormat::Rgb8).unwrap();
 
@@ -2930,12 +3585,70 @@ mod tests {
      * block writes via FsSink and reads the file back from disk to verify
      * the same marker (skipped under Miri).
      */
+    /// The standalone background is the engine's own default, measured here
+    /// rather than copied into a comment.
+    ///
+    /// A sink built directly has no engine to ask, so it answers
+    /// [`DEFAULT_BACKGROUND_RGB`]. If that ever stops being the colour the
+    /// engine would have recorded, the same RGBA tile comes out two colours
+    /// depending on which route wrote it, and nothing else in the tree would
+    /// say so.
     #[test]
+    fn the_standalone_background_is_the_engine_default() {
+        assert_eq!(
+            DEFAULT_BACKGROUND_RGB,
+            crate::engine::EngineConfig::default().background_rgb
+        );
+    }
+
+    /// Issue #1133: an `Rgba8` tile encodes as JPEG, and its transparent
+    /// pixels come out the colour the caller asked for rather than refused.
+    ///
+    /// The fixture is opaque black under the transparent half, so dropping
+    /// the alpha byte and flattening onto the background are two different
+    /// answers here and only one of them is this one.
+    #[test]
+    fn a_jpeg_tile_flattens_its_alpha_onto_the_background() {
+        let mut data = vec![0u8; 16 * 16 * 4];
+        for (i, px) in data.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            *px = [0, 0, 0, if i % 16 < 8 { 255 } else { 0 }];
+        }
+        let raster = Raster::new(16, 16, PixelFormat::Rgba8, data).unwrap();
+
+        let refused = encode_jpeg(&raster, 90, DEFAULT_BACKGROUND_RGB);
+        assert!(
+            refused.is_ok(),
+            "an RGBA tile still cannot be encoded as JPEG: {:?}",
+            refused.err()
+        );
+
+        let flat = flatten_alpha(&raster, [206, 17, 38])
+            .unwrap()
+            .expect("an Rgba8 raster has alpha to flatten");
+        assert_eq!(flat.format(), PixelFormat::Rgb8);
+        assert_eq!(&flat.data()[..3], &[0, 0, 0], "the opaque half is black");
+        let clear = (8 * 3) as usize;
+        assert_eq!(
+            &flat.data()[clear..clear + 3],
+            &[206, 17, 38],
+            "the transparent half is the background"
+        );
+
+        assert!(
+            flatten_alpha(&Raster::zeroed(4, 4, PixelFormat::Rgb8).unwrap(), [1, 2, 3])
+                .unwrap()
+                .is_none(),
+            "a raster with no alpha has nothing to flatten"
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn fs_sink_encodes_jpeg() {
         let raster = Raster::zeroed(8, 8, PixelFormat::Rgb8).unwrap();
 
         // Miri-safe: verify JPEG encoding produces valid SOI marker in memory
-        let bytes = encode_jpeg(&raster, 85).unwrap();
+        let bytes = encode_jpeg(&raster, 85, DEFAULT_BACKGROUND_RGB).unwrap();
         assert_eq!(&bytes[..2], &[0xFF, 0xD8]);
 
         #[cfg(not(miri))]
@@ -2973,6 +3686,7 @@ mod tests {
      * (skipped under Miri).
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn fs_sink_deterministic_paths() {
         let data = vec![42u8; 256 * 256 * 3];
         let raster = Raster::new(256, 256, PixelFormat::Rgb8, data).unwrap();
@@ -3047,7 +3761,7 @@ mod tests {
     #[test]
     fn encode_jpeg_rgb8() {
         let raster = Raster::zeroed(4, 4, PixelFormat::Rgb8).unwrap();
-        let bytes = encode_jpeg(&raster, 90).unwrap();
+        let bytes = encode_jpeg(&raster, 90, DEFAULT_BACKGROUND_RGB).unwrap();
         assert_eq!(&bytes[..2], &[0xFF, 0xD8]);
     }
 
@@ -3070,7 +3784,7 @@ mod tests {
                 }
                 other => panic!("expected EncodeMsg for float PNG, got {other:?}"),
             }
-            match encode_jpeg(raster, 90) {
+            match encode_jpeg(raster, 90, DEFAULT_BACKGROUND_RGB) {
                 Err(SinkError::EncodeMsg(msg)) => {
                     assert!(msg.contains("float raster"), "unexpected message: {msg}")
                 }
@@ -3094,6 +3808,7 @@ mod tests {
      */
     #[cfg(not(miri))]
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn verify_dedupe_emit_uniform_tiles_digests_match_disk() {
         use crate::checksum::ChecksumMode;
         use crate::dedupe::DedupeStrategy;
@@ -3183,6 +3898,7 @@ mod tests {
      */
     #[cfg(not(miri))]
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn resume_revalidates_corrupt_shared_blob() {
         use crate::dedupe::DedupeStrategy;
 
@@ -3262,6 +3978,7 @@ mod tests {
      */
     #[cfg(not(miri))]
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn verify_recorded_tile_deleted_from_disk_fails() {
         use crate::checksum::ChecksumMode;
         use crate::manifest::ChecksumAlgo;
@@ -3378,6 +4095,7 @@ mod tests {
      */
     #[test]
     #[cfg(not(miri))]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn sync_pending_fsyncs_every_written_tile() {
         let planner = PyramidPlanner::new(8, 8, 256, 0, Layout::DeepZoom).unwrap();
         let plan = planner.plan();
@@ -3485,6 +4203,7 @@ mod tests {
      */
     #[cfg(all(not(miri), unix))]
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn dedupe_concurrent_promote_keeps_shared_hardlink() {
         use crate::dedupe::DedupeStrategy;
         use std::os::unix::fs::MetadataExt;
@@ -3609,6 +4328,7 @@ mod tests {
     /// B proceeds concurrently (GREEN).
     #[cfg(not(miri))]
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn dedupe_distinct_content_promotes_without_serialising() {
         use std::time::Duration;
 
@@ -3663,6 +4383,7 @@ mod tests {
     /// vacuous (no locking at all).
     #[cfg(not(miri))]
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn dedupe_same_content_serialises_on_promote_shard() {
         use std::time::Duration;
 
@@ -3700,6 +4421,7 @@ mod tests {
     /// revalidation) while exactly one shared blob exists and stays valid.
     #[cfg(not(miri))]
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn dedupe_shared_blob_validated_once_per_key() {
         let (_dir, base, sink) = dedupe_sink_for_promote_tests();
 
@@ -3778,6 +4500,7 @@ mod tests {
      */
     #[cfg(not(miri))]
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn fs_sink_run_never_nests_leaf_locks() {
         use crate::checksum::ChecksumMode;
         use crate::dedupe::DedupeStrategy;
@@ -3825,6 +4548,7 @@ mod tests {
      */
     #[cfg(not(miri))]
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn dedupe_full_payload_holder_is_coordinate_minimal_regardless_of_arrival() {
         use crate::dedupe::DedupeStrategy;
 
@@ -3884,6 +4608,7 @@ mod tests {
      */
     #[cfg(not(miri))]
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn dedupe_layout_identical_across_arrival_orders() {
         use crate::dedupe::DedupeStrategy;
 
@@ -3966,6 +4691,7 @@ mod tests {
      */
     #[cfg(not(miri))]
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn dedupe_groups_retention_is_occurrence_independent() {
         let drive = |dups: u32| -> usize {
             let (_dir, base, sink) = dedupe_sink_for_promote_tests();
@@ -4000,5 +4726,34 @@ mod tests {
             "a single shared key must retain at most the coordinate-minimal \
              occurrence plus the WriteNew holder; retained {large}"
         );
+    }
+
+    /**
+     * Tests that the tile sinks refuse the unsigned 32-bit carrier with a
+     * typed error naming it, the way they already refuse the float and
+     * multiband compute intermediates.
+     * Works by asking the shared colour-type resolver for a `Uint32`
+     * raster and asserting the message, with the float carrier of the same
+     * byte width beside it so the two cannot be one message.
+     * Input: Uint32(1) -> Err naming "32-bit unsigned"; FloatF32(1) -> Err
+     * naming "float".
+     */
+    #[test]
+    fn the_tile_sinks_refuse_the_uint_carrier_by_name() {
+        let n = |v: u16| core::num::NonZeroU16::new(v).unwrap();
+        let u = crate::pixel::PixelFormat::Uint32(n(1));
+        let msg = color_type_for_format(u)
+            .expect_err("a uint raster is not an image tile")
+            .to_string();
+        assert!(
+            msg.contains("32-bit unsigned") && msg.contains("Uint32"),
+            "the refusal does not name the carrier: {msg}"
+        );
+        let f = crate::pixel::PixelFormat::FloatF32(n(1));
+        let fmsg = color_type_for_format(f)
+            .expect_err("a float raster is not an image tile")
+            .to_string();
+        assert!(fmsg.contains("float"), "{fmsg}");
+        assert_ne!(msg, fmsg);
     }
 }

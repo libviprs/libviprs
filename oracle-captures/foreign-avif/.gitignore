@@ -1,0 +1,9 @@
+# capture.py regenerates everything below from its own deterministic ramps and
+# the vips binary, so only capture.py, commands.sh, oracle.json and the .avif
+# files a port would embed verbatim are pinned.
+#
+# outputs/ holds the intermediate .v files and the probe images for records
+# that need no fixture: the bitdepth argument domain, the ftyp brand sweep,
+# the encoder sweep, the metadata that `--keep all` synthesises.
+fixtures/*.raw
+outputs/

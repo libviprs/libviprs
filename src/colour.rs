@@ -31,17 +31,50 @@
 //!
 //! # Colour-space model
 //!
-//! Conversion mirrors the libvips route table: every supported space
-//! converts to and from CIE XYZ (D65-relative, `Y` white = 100), and a
-//! conversion from space `A` to space `B` runs `A -> XYZ -> B`. All
-//! intermediate maths is `f64`; quantisation happens only where libvips
+//! Conversion is modelled on a hub: every supported space converts to and
+//! from CIE XYZ (D65-relative, `Y` white = 100), and a conversion from
+//! space `A` to space `B` runs `A -> XYZ -> B`.
+//!
+//! That is a summary of the libvips route table
+//! (`colour/colourspace.c:223-497`), not a transcription of it. libvips
+//! stores an explicit pipeline per ordered pair, and plenty of those
+//! pipelines never reach XYZ. This port takes ten of them directly, the
+//! same-family cartesian/polar pairs `Lab <-> Lch` (`:244`, `:276`) and
+//! `OkLab <-> OkLCh` (`:478`, `:494`), and the three pairs that reach the
+//! signed-16-bit coding, `Lab <-> Labs` (`:246`, `:310`),
+//! `Lch <-> Labs` (`:280`, `:312`) and `Cmc <-> Labs` (`:297`, `:313`),
+//! because on those the hub inserts a round trip that changes the answer
+//! rather than only costing time (the `direct_edge` source notes carry
+//! the measured damage). Everything else goes through the hub here,
+//! including these hub-free edges of libvips', which is where the next
+//! direct route will be wanted:
+//!
+//! * the rest of the Lab family reaches `Lch` and `Cmc` from each other
+//!   with no XYZ step: `{ LAB, CMC }` (`:245`), `{ LCH, CMC }` (`:279`),
+//!   `{ CMC, LAB }` (`:293`), `{ CMC, LCH }` (`:295`);
+//! * the 8/16-bit RGB block (`srgb`, `scrgb`, `hsv`, `b-w`, `rgb16`,
+//!   `grey16`) converts among itself with no XYZ step (`:352-441`).
+//!
+//! All intermediate maths is `f64`; quantisation happens only where libvips
 //! quantises, i.e. when a space is stored at 8 or 16 bits (`srgb`, `hsv`,
 //! `cmyk`, `b-w` at 8 bits; `rgb16`, `grey16` at 16 bits) and inside the
 //! XYZ -> HSV step, which passes through 8-bit sRGB exactly as the libvips
-//! route does. The individual conversions use the same published formulas
-//! and constants as libvips:
+//! route does. The one deliberate exception is the linear -> sRGB store,
+//! which is `f32` throughout because libvips' is (see below). The
+//! individual conversions use the same published formulas and constants
+//! as libvips:
 //!
-//! * sRGB gamma per IEC 61966-2-1 (linear below 0.04045 / 0.0031308);
+//! * sRGB gamma per IEC 61966-2-1 (linear below 0.04045 / 0.0031308), but
+//!   only the sRGB -> linear direction is EVALUATED. Going the other way,
+//!   libvips reads a precomputed integer table: `calcul_tables`
+//!   (`colour/LabQ2sRGB.c:126-146`) rounds `range` samples of the curve
+//!   to integer codes in `float`, and `vips_col_scRGB2sRGB` (`:282-353`)
+//!   interpolates linearly between two of those rounded entries and
+//!   finishes with `rintf`, which rounds halves to EVEN. That is three
+//!   quantisations, and evaluating the curve analytically instead missed
+//!   vips by a whole count on 16.6% of codes (issue #581), so the table
+//!   is ported rather than the formula. `b-w`, `grey16`, `srgb`, `rgb16`
+//!   and the sRGB step of `hsv` all read it;
 //! * the sRGB primaries matrix for scRGB <-> XYZ (4-decimal forward,
 //!   6-decimal inverse, both scaled to `Y` white = 100);
 //! * CIE Lab with the 7.787 shadow slope and D65 white
@@ -52,17 +85,25 @@
 //!   interpolation tables; the bisection used here is at least as
 //!   accurate);
 //! * `labs` as Lab scaled to the signed-16-bit code range
-//!   (`L * 32767/100`, `a`,`b * 256`). There is no signed 16-bit
+//!   (`L * 32767/100`, `a`,`b * 256`), clipped and then **truncated
+//!   toward zero**, because `colour/Lab2LabS.c:66-68` stores the clipped
+//!   double into a `signed short`. The Lab value is rounded to `f32`
+//!   first, because `Lab2LabS.c:59` reads a `float` image and every
+//!   libvips route into LabS hands it one. There is no signed 16-bit
 //!   [`PixelFormat`], so the samples are carried in a float raster whose
 //!   values match the libvips LabS codes;
 //! * Oklab / OkLCh per Ottosson's published matrices (the same constants
 //!   libvips uses);
-//! * Yxy chromaticity, HSV over 8-bit sRGB (hue circle mapped to 0..255),
-//!   and the libvips no-lcms CMYK approximation (naive ink model over
+//! * Yxy chromaticity, the HSV hue circle mapped to 0..255, and the
+//!   libvips no-lcms CMYK approximation (naive ink model over
 //!   D65-normalised XYZ);
-//! * mono (`b-w`, `grey16`) as gamma-encoded CIE linear luminance
-//!   (0.2126 R + 0.7152 G + 0.0722 B), and grey sources replicated to RGB
-//!   exactly like the libvips `BW2sRGB` route.
+//! * mono (`b-w`, `grey16`) as CIE linear luminance
+//!   (0.2126 R + 0.7152 G + 0.0722 B) taken through the same table, and
+//!   grey sources replicated to RGB exactly like the libvips `BW2sRGB`
+//!   route;
+//! * HSV over 8-bit sRGB with both the hue and the saturation code
+//!   TRUNCATED on the store, because `sRGB2HSV.c:113-117` writes them
+//!   into an `unsigned char`.
 //!
 //! Extra bands beyond the colour bands of the source space are carried
 //! through unchanged and plain-cast to the output depth (clip, no
@@ -110,6 +151,38 @@
 //! round-trips through the same profile, and export attaches the output
 //! profile it used, both mirroring libvips.
 //!
+//! # Allocation
+//!
+//! Every image-sized buffer this module reserves goes through the crate's one
+//! fallible-plane funnel, `raster::try_plane` and its `_len` and `_filled`
+//! forms, reached here through `alloc_colour_output` for a result and directly
+//! for an intermediate. All of them reserve with [`Vec::try_reserve_exact`] and
+//! report [`RasterError::AllocationFailed`], reaching the caller as
+//! [`ColourError::Raster`]. So on the colour-difference and ICC paths a host
+//! that cannot serve a buffer gets an `Err` where it used to get
+//! `handle_alloc_error` and a dead process (issues #672 and #685). The one site
+//! that is not a `Vec` this module reserves is the already-Lab export's copy of
+//! its input, which delegates to the raster module's fallible clone and is
+//! counted rather than reserved here (issue #696).
+//!
+//! That is a claim about the buffers this module owns, and it does not reach
+//! past them. On a **LUT profile** both ICC directions run the pixels through
+//! a moxcms transform, and the katana stages inside it size their intermediates
+//! from the slice they are handed and allocate them with a plain `vec![]`, so a
+//! request the host cannot serve reaches `handle_alloc_error` and ends the
+//! process. Nothing in this crate can make that allocation fallible. moxcms has
+//! the fallible spelling already, a `try_vec!` over `try_reserve_exact`
+//! returning `CmsError::OutOfMemory`, and those stages simply do not use it.
+//!
+//! What this module does instead is stop the request following the image.
+//! `xf.transform` is driven in `ICC_TRANSFORM_CHUNK_PIXELS`-pixel slices, so
+//! the largest buffer moxcms allocates on our behalf is 192 KiB whatever the
+//! image is, and an ICC transform of a 30000-square raster asks the CMS for no
+//! more memory than one of a 200-square raster does (issue #693). That is a
+//! bound, not a `Result`: refuse that 192 KiB and the process still dies, which
+//! is why `tests/icc_lut_alloc.rs` keeps a check that says so out loud. The
+//! matrix-shaper and grey-TRC routes evaluate here and never reach any of it.
+//!
 //! # Deferred
 //!
 //! * `max_value` (used by the ported ICC test alongside these ops) is
@@ -117,9 +190,23 @@
 //!   colour-difference rasters are float, so until the float arithmetic
 //!   batch lands they read through [`Raster::getpoint`] /
 //!   [`Raster::f32_samples`].
-//! * The packed `labq` coding and the `histogram` / `fourier` /
-//!   `multiband` pseudo-interpretations have no colourspace route, exactly
-//!   as in libvips: they yield [`ColourError::UnsupportedColourspace`].
+//! * The `histogram` / `fourier` / `multiband` pseudo-interpretations have
+//!   no colourspace route, exactly as in libvips: the route table carries
+//!   no `from` row for any of them (`colour/colourspace.c:223-497`), and
+//!   `vips_colourspace_issupported` (`:511-535`) calls a space unsupported
+//!   precisely when scanning those `from` fields finds nothing. They yield
+//!   [`ColourError::UnsupportedColourspace`].
+//! * The packed `labq` coding yields the same error, but that one is a
+//!   **libviprs limitation rather than libvips parity**: libvips routes
+//!   LabQ both ways against every space (`{ LAB, LABQ,
+//!   { vips_Lab2LabQ } }` at `colour/colourspace.c:243` and the whole
+//!   `LABQ` block at `:258-273`). LabQ is both an interpretation and a
+//!   coding in libvips (`VIPS_INTERPRETATION_LABQ = 16` and
+//!   `VIPS_CODING_LABQ = 2`, `include/vips/image.h:102,138`), and it is
+//!   the coding half libviprs has no home for: four `u8` carrying three
+//!   logical channels at 10:11:11 with a shared low-bits byte. There is no
+//!   coding concept here for that carrier to live in, so there is nothing
+//!   for a route to produce (issue #552 records the gap).
 //! * libvips built with lcms converts `cmyk` through an embedded generic
 //!   CMYK profile; the ported CMYK tests target the no-lcms approximation,
 //!   which is what [`Raster::colourspace`] implements. Profiled CMYK is
@@ -127,16 +214,17 @@
 
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::OnceLock;
 
 use moxcms::{
-    ColorProfile, DataColorSpace, Layout, RenderingIntent, ToneCurveEvaluator, TransformOptions,
-    Vector3d,
+    ColorProfile, DataColorSpace, Layout, RenderingIntent, ToneCurveEvaluator,
+    TransformF32Executor, TransformOptions, Vector3d,
 };
 use thiserror::Error;
 
 use crate::conversion::Interpretation;
-use crate::pixel::PixelFormat;
-use crate::raster::Raster;
+use crate::pixel::{PixelFormat, SampleKind, read_sample_f64 as read_kind_sample};
+use crate::raster::{Raster, RasterError, buffer_len, try_plane, try_plane_filled};
 
 /// Typed errors for the colour operations in [`crate::colour`].
 #[derive(Debug, Error)]
@@ -186,6 +274,27 @@ pub enum ColourError {
     /// The CMS could not build or run a transform for this profile pair.
     #[error("ICC transform failed: {detail}")]
     IccTransform { detail: String },
+    /// Building a colour operation's output raster failed.
+    ///
+    /// The variant is `#[from] RasterError`, so it carries whatever that
+    /// type says, and `#[error(transparent)]` means the caller reads
+    /// `RasterError`'s own message rather than a colour one. Two of those
+    /// are caller conditions: [`RasterError::AllocationFailed`] when the
+    /// host cannot serve an output this size, and
+    /// [`RasterError::SizeOverflow`] when the geometry implies a length no
+    /// `usize` can address. Both are answered by asking for a smaller
+    /// image, and neither is a process abort any more, which is the point
+    /// of the variant (issue #672).
+    ///
+    /// The wrap through `Raster::from_op_output` can also spell
+    /// [`RasterError::ZeroDimension`] and
+    /// [`RasterError::BufferSizeMismatch`], and those two are **libviprs
+    /// bugs rather than caller conditions**: the buffer is allocated from
+    /// the same geometry a few lines above and then validated against it,
+    /// so seeing either means the two disagreed. There is nothing for a
+    /// caller to do about them except report them.
+    #[error(transparent)]
+    Raster(#[from] RasterError),
 }
 
 // ---------------------------------------------------------------------------
@@ -326,13 +435,153 @@ fn srgb_decode(v: f64) -> f64 {
     }
 }
 
-/// sRGB opto-electrical transfer: linear 0..1 to encoded 0..1.
-fn srgb_encode(v: f64) -> f64 {
-    if v <= 0.0031308 {
-        12.92 * v
-    } else {
-        1.055 * v.powf(1.0 / 2.4) - 0.055
+/// Number of codes in the 8-bit sRGB carrier, the `range` libvips hands
+/// `calcul_tables` from `calcul_tables_8` (`colour/LabQ2sRGB.c:153`).
+const SRGB_RANGE: usize = 256;
+
+/// Number of codes in the 16-bit `rgb16` / `grey16` carrier, the `range`
+/// from `calcul_tables_16` (`colour/LabQ2sRGB.c:174`).
+const RGB16_RANGE: usize = 65536;
+
+/// Build one libvips `Y2v` table: `range` samples of the sRGB
+/// opto-electrical transfer (IEC 61966-2-1, linear below 0.0031308) taken
+/// at `i / (range - 1)`, scaled to `range - 1` and rounded to an integer,
+/// plus a duplicated final element.
+///
+/// This is `calcul_tables` (`colour/LabQ2sRGB.c:126-146`) with its `v2Y`
+/// half left out. Nothing needs the reverse table: the sRGB -> linear
+/// direction stays analytic in `f64` ([`srgb_decode`]), and the only
+/// difference that makes is an `f32` rounding of a linear value, far
+/// under a code. The forward direction is a different story, which is
+/// what [`scrgb_to_code`] is about.
+///
+/// Everything is deliberately `f32`, the transfer function and the final
+/// `round_ties_even` (C `rintf`) alike, because the C is.
+///
+/// The `mul_add` is the one detail the C source does not show. The arm64
+/// Homebrew build of 8.18.4 contracts
+/// `(1.0F + 0.055F) * powf(f, 1.0F / 2.4F) - 0.055F` into a single
+/// `fmadd`, which `otool -tvV -p _calcul_tables` on `libvips.42.dylib`
+/// prints as `fmadd s0, s0, s9, s13`. Evaluating it unfused moves 45 of
+/// the 65536 16-bit entries by a count, so the fusion is pinned here
+/// rather than left to the optimiser, which is not allowed to introduce
+/// it on its own. The 256-entry table is identical either way.
+///
+/// This site keeps the `f32::mul_add` and [`scrgb_to_code`] does not,
+/// which is not an oversight. `f32::mul_add` becomes a libm `fmaf` call
+/// wherever `fma` is missing from the baseline ISA, x86-64 included, so
+/// it is worth routing around per channel per pixel and not worth it
+/// here, where it runs `range` times behind a `OnceLock`. What is
+/// written here is the C expression fused exactly as the shipped dylib
+/// fuses it, and it should keep reading that way. Do not propagate the
+/// other site's `f64` spelling back into this one.
+///
+/// The trailing duplicate is the C's: "Copy the final element. This is
+/// used in the piecewise linear interpolator below." (`:141-144`).
+fn calcul_tables(range: usize) -> Box<[i32]> {
+    let maxval = (range - 1) as f32;
+    let mut y2v: Vec<i32> = Vec::with_capacity(range + 1);
+    for i in 0..range {
+        let f = i as f32 / maxval;
+        // The C compares the promoted `float` against a `double`
+        // literal, so the branch point is not an `f32` constant.
+        let v = if f64::from(f) <= 0.0031308 {
+            12.92_f32 * f
+        } else {
+            f.powf(1.0_f32 / 2.4_f32).mul_add(1.055, -0.055)
+        };
+        y2v.push((maxval * v).round_ties_even() as i32);
     }
+    y2v.push(y2v[range - 1]);
+    y2v.into_boxed_slice()
+}
+
+/// The `Y2v` table for `range`, built once, standing in for the libvips
+/// `VIPS_ONCE` pair (`colour/LabQ2sRGB.c:150-170`).
+fn y2v_table(range: usize) -> &'static [i32] {
+    static Y2V_8: OnceLock<Box<[i32]>> = OnceLock::new();
+    static Y2V_16: OnceLock<Box<[i32]>> = OnceLock::new();
+    debug_assert!(range == SRGB_RANGE || range == RGB16_RANGE);
+    if range == SRGB_RANGE {
+        Y2V_8.get_or_init(|| calcul_tables(SRGB_RANGE))
+    } else {
+        Y2V_16.get_or_init(|| calcul_tables(RGB16_RANGE))
+    }
+}
+
+/// Linear scRGB (0..1) -> the integer sRGB code, through the
+/// interpolated `Y2v` lookup that `vips_col_scRGB2sRGB`
+/// (`colour/LabQ2sRGB.c:282-353`) and `vips_col_scRGB2BW` (`:385-428`)
+/// share.
+///
+/// vips never evaluates the transfer function per pixel, and the
+/// difference is not academic: three quantisations stack here, all of
+/// them the C's. [`calcul_tables`] samples the curve at `range` points
+/// and rounds each one to an integer; this lookup interpolates linearly
+/// between two of those already-rounded points; and the chord is
+/// finished with `rintf`, which rounds halves to EVEN rather than away
+/// from zero. Evaluating the curve analytically in `f64` and rounding
+/// once instead moved 5434 of the 32768 neutral LabS L codes by a count
+/// (issue #581).
+///
+/// The result is ALREADY QUANTISED, so this is the code that reaches the
+/// output buffer; `write_sample` rounds an integer and changes nothing.
+///
+/// The chord is fused, the same way [`calcul_tables`] fuses its
+/// multiply-add, but it is deliberately NOT spelled as an
+/// `f32::mul_add`. `fma` is not in the x86-64 baseline, so rustc lowers
+/// `f32::mul_add` to a libm `fmaf` CALL there, and this runs once per
+/// channel per pixel on the route every `srgb`, `rgb16`, `b-w`,
+/// `grey16` and `hsv` conversion takes. Measured on rustc 1.98 at
+/// `-C opt-level=3`: for `x86_64-unknown-linux-musl` the `mul_add`
+/// spelling is `jmpq *fmaf@GOTPCREL(%rip)` and the `f64` one is
+/// `cvtss2sd` / `mulsd` / `addsd` / `cvtsd2ss`; add
+/// `-C target-feature=+fma` and the `mul_add` collapses to a single
+/// `vfmadd213ss`, which is exactly the point: the baseline does not
+/// have it. On aarch64 both stay call-free (`fmadd` against `fmul` and
+/// `fadd`), so the `f64` spelling costs an instruction or two there and
+/// saves a whole libm call on any target without a baseline `fma`.
+///
+/// The two are bit-identical rather than merely close, because the
+/// exact product-sum fits in an `f64` for every reachable input, so the
+/// one `as f32` IS the one rounding `fmaf` would do. The
+/// `f64_chord_matches_mul_add_*` tests check that rather than taking
+/// the argument on trust: two of them sample both LUTs at every
+/// structurally interesting point on each `cargo test`, and two more,
+/// `#[ignore]`d because they walk over a billion `f32` patterns apiece,
+/// sweep the whole reachable domain under
+/// `cargo test --release --lib -- --ignored f64_chord_matches_mul_add`.
+///
+/// [`calcul_tables`] keeps its `f32::mul_add`, which is why the two
+/// sites are spelled differently: it runs `range` times behind a
+/// `OnceLock`, so a libm call there costs nothing, and it is pinned
+/// against the shipped dylib's `fmadd` rather than against anything of
+/// ours. Do not unify them.
+fn scrgb_to_code(range: usize, value: f64) -> f64 {
+    // "RGB can be NaN. Throw those values out, they will break our
+    // clipping." (`LabQ2sRGB.c:301-310`, `:404-409`.) vips answers 0
+    // rather than clipping. A NaN only reaches here from a NaN XYZ, and
+    // the scRGB matrix spreads that to all three channels, so answering
+    // per channel lands where the C's per-pixel test does.
+    if value.is_nan() {
+        return 0.0;
+    }
+    let lut = y2v_table(range);
+    let maxval = (range - 1) as f32;
+    let yf = (value as f32 * maxval).clamp(0.0, maxval);
+    let yi = yf as usize;
+    let lo = lut[yi];
+    // The `+ 1` is in bounds because `calcul_tables` duplicates the last
+    // entry for exactly this read.
+    let delta = (lut[yi + 1] - lo) as f32;
+    let t = yf - yi as f32;
+    // Fused, like the `fmadd s0, s5, s0, s4` the build compiles
+    // `lut[Yi] + (lut[Yi + 1] - lut[Yi]) * (Yf - Yi)` into, but reached
+    // through `f64` instead of `f32::mul_add` so that x86-64 does not
+    // pay a libm `fmaf` call per channel per pixel. Bit-identical; see
+    // the doc above.
+    let fused = (f64::from(delta) * f64::from(t) + f64::from(lo)) as f32;
+    f64::from(fused.round_ties_even())
 }
 
 /// Linear scRGB (0..1) -> D65 XYZ (`Y` white = 100), the sRGB primaries
@@ -361,13 +610,55 @@ fn xyz_to_scrgb(xyz: [f64; 3]) -> [f64; 3] {
     ]
 }
 
-/// Hue angle of `(a, b)` in degrees, wrapped to `[0, 360)` (libvips
-/// `vips_col_ab2h`).
+/// Hue angle of `(a, b)` in degrees, wrapped to `[0, 360]` (libvips
+/// `vips_col_ab2h`, `colour/Lab2LCh.c:61-89`).
+///
+/// The explicit `a == 0.0` arm is the C ladder's own, not a shortcut:
+/// `a == 0` is true for `-0.0` in C, so vips answers 0 / 90 / 270 on the
+/// whole `a` axis, while `atan2(±0.0, -0.0)` is `±PI` and would answer
+/// 180. Measured on the binary, `oklab [0.5, -0.0, 0.0] -> oklch` is
+/// `0.5 0 0`, and `[0.5, -0.0, ±0.1]` gives 90 / 270. Off that axis the
+/// `atan2` form and the C's `atan(b / a)` plus a quadrant offset agree,
+/// which `hue_matches_vips_col_ab2h_ladder` pins rather than assumes.
+///
+/// The upper bound really is closed. For a positive `a` and a `b` small
+/// enough that `deg(atan2(b, a))` is a tiny negative, `h + 360.0` rounds
+/// to exactly `360.0`: `oklab [0.5, 0.1, -1e-30] -> oklch` gives a hue of
+/// `360` here and `360` in vips 8.18.4, which lands on the same edge
+/// through `VIPS_DEG(t + VIPS_PI * 2.0)`. Clamping to `[0, 360)` would
+/// buy a tidier range by diverging from the C, so the range is documented
+/// instead.
+///
+/// One divergence from the C is deliberate: a non-finite `(a, b)` follows
+/// IEEE `atan2` here, so `(inf, inf)` is 45 degrees, where the C's
+/// `b / a` is NaN and propagates through `atan` to the output. See
+/// [`lab_to_lch`] for the matching chroma divergence.
 fn ab_to_h(a: f64, b: f64) -> f64 {
-    let h = b.atan2(a).to_degrees();
-    if h < 0.0 { h + 360.0 } else { h }
+    if a == 0.0 {
+        // Matches `if (a == 0)` in the C, which `-0.0` also enters.
+        if b < 0.0 {
+            270.0
+        } else if b == 0.0 {
+            0.0
+        } else {
+            90.0
+        }
+    } else {
+        let h = b.atan2(a).to_degrees();
+        if h < 0.0 { h + 360.0 } else { h }
+    }
 }
 
+/// Lab-like cartesian to polar (libvips `vips_Lab2LCh_line`,
+/// `colour/Lab2LCh.c:114`, and `vips_Oklab2Oklch_line`,
+/// `colour/Oklab2Oklch.c:64`, which are the same two lines of arithmetic
+/// over `float`).
+///
+/// The chroma uses [`f64::hypot`] where the C squares and adds,
+/// `sqrtf(a * a + b * b)`. That is a deliberate divergence in this
+/// crate's favour: `a * a` overflows an `f32` to infinity once `a` passes
+/// about 1.8e19, the square root of `f32::MAX`, and `hypot` has no such
+/// intermediate to overflow.
 fn lab_to_lch(lab: [f64; 3]) -> [f64; 3] {
     [lab[0], lab[1].hypot(lab[2]), ab_to_h(lab[1], lab[2])]
 }
@@ -473,6 +764,33 @@ fn hcmc_to_h(c: f64, hcmc: f64) -> f64 {
     hcmc.rem_euclid(360.0)
 }
 
+/// LCh -> the CMC uniform space, the whole of `vips_LCh2CMC_line`
+/// (`colour/LCh2UCS.c:200-216`).
+///
+/// This is the only place the CMC encode lives, so the XYZ hub arm of
+/// [`from_xyz_into`] and the `{ LABS, CMC }` direct edge cannot drift
+/// apart.
+fn lch_to_cmc(lch: [f64; 3]) -> [f64; 3] {
+    [
+        l_to_lcmc(lch[0]),
+        c_to_ccmc(lch[1]),
+        ch_to_hcmc(lch[1], lch[2]),
+    ]
+}
+
+/// The CMC uniform space -> LCh, the whole of `vips_CMC2LCh_line`
+/// (`colour/UCS2LCh.c:238-254`), and the only place the CMC decode
+/// lives.
+///
+/// libvips inverts the three CMC functions through interpolation tables
+/// sampled every 0.1 (`UCS2LCh.c:66-135`); this module bisects the
+/// forward function instead, which is the more accurate of the two and
+/// the one divergence from the binary that survives the direct edges.
+fn cmc_to_lch(cmc: [f64; 3]) -> [f64; 3] {
+    let c = ccmc_to_c(cmc[1]);
+    [lcmc_to_l(cmc[0]), c, hcmc_to_h(c, cmc[2])]
+}
+
 // --- Oklab (Ottosson's published matrices, as used by libvips) ---
 
 fn xyz_to_oklab(xyz: [f64; 3]) -> [f64; 3] {
@@ -543,9 +861,17 @@ fn srgb8_to_hsv(rgb: [f64; 3]) -> [f64; 3] {
     let h = if delta == 0.0 {
         0.0
     } else {
-        42.5 * (secondary_diff / delta) + wrap_around_hue
+        // `secondary_diff` is a `float` and `delta` an `unsigned char`
+        // cast to one, so the RATIO is an f32 division; only the
+        // `42.5 *` promotes back to double (`sRGB2HSV.c:113-114`).
+        42.5 * f64::from(secondary_diff as f32 / delta as f32) + wrap_around_hue
     };
-    [h, delta * 255.0 / c_max, c_max]
+    // `q` is `unsigned char`, so the C TRUNCATES both codes on the store
+    // (`sRGB2HSV.c:113-117`); it does not round them. Both are
+    // non-negative here -- the hue arms pair a negative `secondary_diff`
+    // with a `wrap_around_hue` that more than covers it -- so truncating
+    // toward zero and flooring agree.
+    [h.trunc(), (delta * 255.0 / c_max).trunc(), c_max]
 }
 
 /// HSV (libvips 0..255 hue coding) -> 8-bit sRGB. Inputs are the integral
@@ -639,14 +965,44 @@ fn yxy_to_xyz(yxy: [f64; 3]) -> [f64; 3] {
 const LABS_L_SCALE: f64 = 32767.0 / 100.0;
 const LABS_AB_SCALE: f64 = 32768.0 / 128.0;
 
+/// Lab -> the LabS code triple, the whole of `vips_Lab2LabS_line`
+/// (`colour/Lab2LabS.c:64-68`) including the store.
+///
+/// The C clips in `double` with `VIPS_CLIP(0, .., SHRT_MAX)` on `L` and
+/// `VIPS_CLIP(SHRT_MIN, .., SHRT_MAX)` on `a`/`b`, then assigns the
+/// result into a `signed short`, which drops the fraction **toward
+/// zero**. That last step is the whole quantiser, so it lives here
+/// rather than at the call sites: `Lab [50, 0, 0]` scales to exactly
+/// `16383.5`, and vips 8.18.4 answers `16383`, not `16384`.
+///
+/// Truncating is not flooring. LabS is the only signed carrier this
+/// module quantises into, so the two differ on negative `a`/`b`, and the
+/// binary picks truncation: `a = +/-0.501953125` scales to `+/-128.5`
+/// and comes back `+/-128`, where flooring would give `128 / -129` and
+/// rounding `129 / -129`.
+///
+/// The input is rounded to `f32` first, which is the other half of that
+/// same line: `Lab2LabS.c:59` declares `float *restrict p`, and every
+/// libvips route ending in LabS hands it a float Lab image, so the
+/// quantiser never sees more than single precision. That is invisible
+/// under rounding and decides whole counts under truncation.
+/// `LCh [0, 1, 30]` is the case that shows it: `sin(30 deg)` is
+/// 0.49999999999999994 in `f64` and exactly 0.5 as `f32`, so `b * 256`
+/// is 127.99999999999999 or 128.0, and vips answers 128. Feeding this a
+/// value that was already an `f32` sample, which is what the `Lab` and
+/// `Labs` rasters carry, leaves it unchanged.
 fn lab_to_labs(lab: [f64; 3]) -> [f64; 3] {
+    let lab = lab.map(|v| v as f32 as f64);
     [
-        (lab[0] * LABS_L_SCALE).clamp(0.0, 32767.0),
-        (lab[1] * LABS_AB_SCALE).clamp(-32768.0, 32767.0),
-        (lab[2] * LABS_AB_SCALE).clamp(-32768.0, 32767.0),
+        (lab[0] * LABS_L_SCALE).clamp(0.0, 32767.0).trunc(),
+        (lab[1] * LABS_AB_SCALE).clamp(-32768.0, 32767.0).trunc(),
+        (lab[2] * LABS_AB_SCALE).clamp(-32768.0, 32767.0).trunc(),
     ]
 }
 
+/// LabS -> Lab, the plain division `vips_LabS2Lab_line` does
+/// (`colour/LabS2Lab.c:57-59`). No quantiser on this side: the target is
+/// float.
 fn labs_to_lab(labs: [f64; 3]) -> [f64; 3] {
     [
         labs[0] / LABS_L_SCALE,
@@ -655,62 +1011,86 @@ fn labs_to_lab(labs: [f64; 3]) -> [f64; 3] {
     ]
 }
 
-// --- Mono (gamma-encoded CIE linear luminance, libvips scRGB2BW) ---
+/// LCh -> the LabS codes, `{ LCH, LABS, { vips_LCh2Lab, vips_Lab2LabS } }`
+/// (`colourspace.c:280`).
+fn lch_to_labs(lch: [f64; 3]) -> [f64; 3] {
+    lab_to_labs(lch_to_lab(lch))
+}
 
-/// scRGB -> the normalised (0..1) gamma-encoded grey value.
-fn scrgb_to_bw(rgb: [f64; 3]) -> f64 {
-    let y = 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
-    srgb_encode(y.clamp(0.0, 1.0))
+/// LabS -> LCh, `{ LABS, LCH, { vips_LabS2Lab, vips_Lab2LCh } }`
+/// (`colourspace.c:312`).
+fn labs_to_lch(labs: [f64; 3]) -> [f64; 3] {
+    lab_to_lch(labs_to_lab(labs))
+}
+
+/// CMC -> the LabS codes, `{ CMC, LABS, { vips_CMC2LCh, vips_LCh2Lab,
+/// vips_Lab2LabS } }` (`colourspace.c:297`).
+fn cmc_to_labs(cmc: [f64; 3]) -> [f64; 3] {
+    lab_to_labs(lch_to_lab(cmc_to_lch(cmc)))
+}
+
+/// LabS -> CMC, `{ LABS, CMC, { vips_LabS2Lab, vips_Lab2LCh,
+/// vips_LCh2CMC } }` (`colourspace.c:313`).
+fn labs_to_cmc(labs: [f64; 3]) -> [f64; 3] {
+    lch_to_cmc(lab_to_lch(labs_to_lab(labs)))
+}
+
+// --- Mono (CIE linear luminance, libvips scRGB2BW) ---
+
+/// scRGB -> the CIE linear luminance `vips_col_scRGB2BW` takes before
+/// the sRGB encode (`colour/LabQ2sRGB.c:400`).
+///
+/// Nothing is clamped here on purpose: the C clips the SCALED index
+/// inside the lookup, not the luminance, so the clip belongs to
+/// [`scrgb_to_code`].
+fn scrgb_luminance(rgb: [f64; 3]) -> f64 {
+    0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
 }
 
 // ---------------------------------------------------------------------------
 // Colourspace routing
 // ---------------------------------------------------------------------------
 
-/// Storage depth of a colour space's canonical raster.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SpaceDepth {
-    U8,
-    U16,
-    F32,
+/// The ceiling a colour space's storage kind clips to, or `f64::INFINITY`
+/// for a float kind, whose meaningful range comes from the space and not
+/// from the sample.
+///
+/// [`SampleKind::max_value`] is the shared answer and this only puts it in
+/// the shape the clipping arithmetic here wants. It replaces a private
+/// `SpaceDepth` enum that was a hand-rolled duplicate of three of
+/// [`SampleKind`]'s seven variants, which is issue #607 step (a)'s second
+/// half: two enums answering "what are these bytes" drift, and this one had
+/// already lost the four kinds the carriers of #516 and #517 add.
+fn depth_ceiling(kind: SampleKind) -> f64 {
+    kind.max_value().map_or(f64::INFINITY, f64::from)
 }
 
-impl SpaceDepth {
-    fn bytes(self) -> usize {
-        match self {
-            Self::U8 => 1,
-            Self::U16 => 2,
-            Self::F32 => 4,
-        }
-    }
-
-    fn max_value(self) -> f64 {
-        match self {
-            Self::U8 => 255.0,
-            Self::U16 => 65535.0,
-            Self::F32 => f64::INFINITY,
-        }
+/// Round `v` and clip it into `kind`'s range: the libvips plain cast into an
+/// integer format. A float kind has no range to clip into, so it passes
+/// through.
+fn round_clip(v: f64, kind: SampleKind) -> f64 {
+    match kind.range() {
+        Some((lo, hi)) => v.round().clamp(lo as f64, hi as f64),
+        None => v,
     }
 }
 
 /// Number of colour bands a space occupies; bands past these are extra
 /// bands and carried through unchanged.
 fn space_bands(space: Interpretation) -> usize {
-    match space {
-        Interpretation::Cmyk => 4,
-        Interpretation::Bw | Interpretation::Grey16 => 1,
-        _ => 3,
-    }
+    // One table, in `conversion`, because #720 needs the same number to decide
+    // whether an attached ICC profile can still describe the tag.
+    space.space_bands()
 }
 
-/// Canonical storage depth of a space.
-fn space_depth(space: Interpretation) -> SpaceDepth {
+/// Canonical storage kind of a space.
+fn space_depth(space: Interpretation) -> SampleKind {
     match space {
         Interpretation::Srgb | Interpretation::Hsv | Interpretation::Cmyk | Interpretation::Bw => {
-            SpaceDepth::U8
+            SampleKind::U8
         }
-        Interpretation::Rgb16 | Interpretation::Grey16 => SpaceDepth::U16,
-        _ => SpaceDepth::F32,
+        Interpretation::Rgb16 | Interpretation::Grey16 => SampleKind::U16,
+        _ => SampleKind::F32,
     }
 }
 
@@ -746,6 +1126,108 @@ fn alias_source(space: Interpretation) -> Interpretation {
     }
 }
 
+/// The direct edge, if any, for a same-family pair libvips joins with a
+/// single transform.
+///
+/// Every other pair in the route table meets at the XYZ hub, but libvips
+/// joins each Lab-like space to its polar form with one transform and
+/// nothing else in the pipeline: `{ LAB, LCH, { vips_Lab2LCh } }`
+/// (`colour/colourspace.c:244`), `{ LCH, LAB, { vips_LCh2Lab } }`
+/// (:276), `{ OKLAB, OKLCH, { vips_Oklab2Oklch } }` (:478) and
+/// `{ OKLCH, OKLAB, { vips_Oklch2Oklab } }` (:494). It joins Lab to its
+/// signed-16-bit coding the same way: `{ LAB, LABS, { vips_Lab2LabS } }`
+/// (:246) and `{ LABS, LAB, { vips_LabS2Lab } }` (:310). And it reaches
+/// that coding from the two other Lab-family spaces without an XYZ step
+/// either, through Lab: `{ LCH, LABS, { vips_LCh2Lab, vips_Lab2LabS } }`
+/// (:280), `{ LABS, LCH, { vips_LabS2Lab, vips_Lab2LCh } }` (:312),
+/// `{ CMC, LABS, { vips_CMC2LCh, vips_LCh2Lab, vips_Lab2LabS } }` (:297)
+/// and `{ LABS, CMC, { vips_LabS2Lab, vips_Lab2LCh, vips_LCh2CMC } }`
+/// (:313). A multi-stage pipeline is still a direct edge here as long as
+/// XYZ is not one of the stages: what costs accuracy is the round trip,
+/// not the number of steps.
+///
+/// Sending any of those through the hub inserts a round trip libvips
+/// never runs, and on every one of them the two halves of that round
+/// trip fail to invert each other, so this is accuracy and not only time.
+///
+/// For Oklab the culprit is the matrix: the published inverse is an
+/// 8-decimal approximation (the `1.00000001` / `1.00000005` quirk
+/// digits), so `Oklab -> XYZ -> Oklab` pushes a neutral colour's `a` and
+/// `b` off zero by about 2e-9, and the hue read off them comes out of
+/// nowhere: 94.489 degrees for OkLab `[0.5, 0, 0]`, where vips 8.18.4
+/// returns 0.
+///
+/// For Lab the culprit is the shadow branch: `lab_f` switches at
+/// `t < 0.008856` while `lab_to_xyz` switches at `L < 8.0`, and those
+/// rounded decimal constants are not mutual inverses. Under `L = 8` the
+/// same neutral-hue garbage appears about 3e5 times larger in raw units:
+/// `Lab [5, 0, 0]` comes back from the hub as
+/// `(4.99996, 5.172e-4, -2.069e-4)`, i.e. LCh
+/// `(4.99996, C = 5.571e-4, h = 338.199)`, where vips returns `5 0 0`.
+/// The residue only reaches exactly zero somewhere above `L = 10` (which
+/// still yields a 1.4e-14 chroma carrying the same 338.199 hue), so the
+/// `L = 50` neutrals a test naturally reaches for hide it completely.
+///
+/// For LabS the same residue is what a truncating quantiser cannot
+/// survive. `lab_to_labs` drops the fraction toward zero the way
+/// `Lab2LabS.c:66` does, so a hub residue of `-1e-6` on a code that
+/// should land on a whole number costs a whole count. On a grid of Lab
+/// values with `a`/`b` at multiples of `1/256` the hub misses the direct
+/// answer on 3420 channels, always by exactly one and always at an
+/// integer code: `Lab [0, -128, 1]` is `[0, -32768, 256]` in vips and
+/// `[0, -32767, 255]` through the hub. Rounding used to absorb that,
+/// which is why the routing looked cosmetic until the quantiser was
+/// right. Coming back, `LabS [983, 256, -256]` is `[2.999969482421875,
+/// 1, -1]` in vips and `[2.99994, 1.00052, -1.00021]` through the hub.
+///
+/// The `Lch` and `Cmc` edges inherit both defects at once, because their
+/// pipelines end in the same truncating store and start from the same
+/// shadow branch. On a 700-pixel LCh sweep (`L` in
+/// {0, 1, 3, 5, 8, 10, 20, 50, 80, 100}, `C` in
+/// {0, 1, 25, 50, 100, 127, 128}, `h` in {0, 30, 45, 90, 135, 180, 225,
+/// 270, 315, 359}) the hub missed vips on 181 of the 2100 `LCh -> LabS`
+/// channels, and on a 700-pixel LabS sweep it missed on 748 of the 2100
+/// `LabS -> LCh` channels and 681 of the `LabS -> CMC` ones. All three
+/// come back exact on the direct edges. The `LabS -> LCh` and
+/// `LabS -> CMC` numbers are large because a neutral LabS code is
+/// *exactly* neutral, so vips answers `C = 0, h = 0` and the hub reads a
+/// hue off its own noise: 338.199 degrees, at every `L`.
+///
+/// Taking the edge keeps the polar pairs a pure polar swap and the LabS
+/// pair a pure scale.
+///
+/// Every entry owns its **complete** target-side production, quantiser
+/// included, because this table never reaches `from_xyz_into`. That is
+/// why the `signed short` truncation lives inside `lab_to_labs` rather
+/// than at the `Labs` arm there, and why the CMC encode lives inside
+/// `lch_to_cmc` rather than at the `Cmc` arm: a route added here cannot
+/// lose either of them.
+///
+/// Cross-family polar pairs are deliberately absent: libvips routes
+/// `{ OKLCH, LCH }` (:483) through XYZ like everything else, and so does
+/// this table by returning `None` for it.
+///
+/// What is here is still not everything libvips joins directly.
+/// `{ LAB, CMC }` (:245), `{ CMC, LAB }` (:293), `{ LCH, CMC }` (:279)
+/// and `{ CMC, LCH }` (:295) are hub-free there as well, and all four
+/// spaces are supported here, so those still pay the hub round trip; the
+/// module docs list the rest of the hub-free edges this port has not
+/// taken.
+fn direct_edge(src: Interpretation, target: Interpretation) -> Option<fn([f64; 3]) -> [f64; 3]> {
+    use Interpretation::{Cmc, Lab, Labs, Lch, OkLab, OkLch};
+    match (src, target) {
+        (Lab, Lch) | (OkLab, OkLch) => Some(lab_to_lch),
+        (Lch, Lab) | (OkLch, OkLab) => Some(lch_to_lab),
+        (Lab, Labs) => Some(lab_to_labs),
+        (Labs, Lab) => Some(labs_to_lab),
+        (Lch, Labs) => Some(lch_to_labs),
+        (Labs, Lch) => Some(labs_to_lch),
+        (Cmc, Labs) => Some(cmc_to_labs),
+        (Labs, Cmc) => Some(labs_to_cmc),
+        _ => None,
+    }
+}
+
 /// Convert one pixel's colour bands from `space` to D65 XYZ. `v` holds
 /// `space_bands(space)` samples in the space's numeric convention.
 fn to_xyz(space: Interpretation, v: &[f64]) -> [f64; 3] {
@@ -753,11 +1235,7 @@ fn to_xyz(space: Interpretation, v: &[f64]) -> [f64; 3] {
         Interpretation::Xyz => [v[0], v[1], v[2]],
         Interpretation::Lab => lab_to_xyz([v[0], v[1], v[2]], D65),
         Interpretation::Lch => lab_to_xyz(lch_to_lab([v[0], v[1], v[2]]), D65),
-        Interpretation::Cmc => {
-            let c = ccmc_to_c(v[1]);
-            let lch = [lcmc_to_l(v[0]), c, hcmc_to_h(c, v[2])];
-            lab_to_xyz(lch_to_lab(lch), D65)
-        }
+        Interpretation::Cmc => lab_to_xyz(lch_to_lab(cmc_to_lch([v[0], v[1], v[2]])), D65),
         Interpretation::Labs => lab_to_xyz(labs_to_lab([v[0], v[1], v[2]]), D65),
         Interpretation::ScRgb => scrgb_to_xyz([v[0], v[1], v[2]]),
         Interpretation::Hsv => {
@@ -786,9 +1264,17 @@ fn to_xyz(space: Interpretation, v: &[f64]) -> [f64; 3] {
 }
 
 /// Convert one pixel from D65 XYZ to `space`, writing the
-/// `space_bands(space)` output samples into the front of `out` (in the
-/// space's numeric convention, unrounded; integer spaces quantise on
-/// write).
+/// `space_bands(space)` output samples into the front of `out`, in the
+/// space's numeric convention.
+///
+/// Most arms leave the sample unrounded and let the writer quantise, but
+/// the arms whose C counterpart quantises INSIDE the transform do it
+/// here instead, so the two cannot drift: `labs` truncates into the
+/// `signed short` (`Lab2LabS.c:66-68`), `hsv` truncates into the
+/// `unsigned char` (`sRGB2HSV.c:113-117`), and `srgb`, `rgb16`, `b-w`,
+/// `grey16` and the sRGB step of `hsv` come back already rounded out of
+/// the `Y2v` lookup ([`scrgb_to_code`]). Re-rounding an integer on write
+/// changes nothing, so those arms pass through it untouched.
 ///
 /// This is the allocation-free form the per-pixel conversion loop drives:
 /// the caller supplies one scratch array (`[f64; 4]` covers every space,
@@ -800,36 +1286,38 @@ fn from_xyz_into(space: Interpretation, xyz: [f64; 3], out: &mut [f64]) {
         Interpretation::Xyz => out[..3].copy_from_slice(&xyz),
         Interpretation::Lab => out[..3].copy_from_slice(&xyz_to_lab(xyz, D65)),
         Interpretation::Lch => out[..3].copy_from_slice(&lab_to_lch(xyz_to_lab(xyz, D65))),
+        // `lch_to_cmc` carries the CMC encode, so this arm and the
+        // `{ LABS, CMC }` direct edge quantise through one function.
         Interpretation::Cmc => {
-            let lch = lab_to_lch(xyz_to_lab(xyz, D65));
-            out[0] = l_to_lcmc(lch[0]);
-            out[1] = c_to_ccmc(lch[1]);
-            out[2] = ch_to_hcmc(lch[1], lch[2]);
+            out[..3].copy_from_slice(&lch_to_cmc(lab_to_lch(xyz_to_lab(xyz, D65))));
         }
-        Interpretation::Labs => {
-            out[..3].copy_from_slice(&lab_to_labs(xyz_to_lab(xyz, D65)).map(f64::round));
-        }
+        // `lab_to_labs` carries the `signed short` truncation, so this
+        // arm and the direct edge quantise through one function.
+        Interpretation::Labs => out[..3].copy_from_slice(&lab_to_labs(xyz_to_lab(xyz, D65))),
         Interpretation::ScRgb => out[..3].copy_from_slice(&xyz_to_scrgb(xyz)),
         Interpretation::Hsv => {
-            // The libvips HSV encode goes through 8-bit sRGB.
-            let rgb = xyz_to_scrgb(xyz).map(|c| (255.0 * srgb_encode(c.clamp(0.0, 1.0))).round());
+            // The libvips HSV encode goes through 8-bit sRGB
+            // (`colourspace.c:336` and the rest of the `{ *, HSV }`
+            // block), so it sees the LUT's codes, not an analytic
+            // encode rounded afterwards.
+            let rgb = xyz_to_scrgb(xyz).map(|c| scrgb_to_code(SRGB_RANGE, c));
             out[..3].copy_from_slice(&srgb8_to_hsv(rgb));
         }
         Interpretation::Srgb => {
-            out[..3].copy_from_slice(
-                &xyz_to_scrgb(xyz).map(|c| 255.0 * srgb_encode(c.clamp(0.0, 1.0))),
-            );
+            out[..3].copy_from_slice(&xyz_to_scrgb(xyz).map(|c| scrgb_to_code(SRGB_RANGE, c)));
         }
         Interpretation::Rgb16 => {
-            out[..3].copy_from_slice(
-                &xyz_to_scrgb(xyz).map(|c| 65535.0 * srgb_encode(c.clamp(0.0, 1.0))),
-            );
+            out[..3].copy_from_slice(&xyz_to_scrgb(xyz).map(|c| scrgb_to_code(RGB16_RANGE, c)));
         }
         Interpretation::Yxy => out[..3].copy_from_slice(&xyz_to_yxy(xyz)),
         Interpretation::OkLab => out[..3].copy_from_slice(&xyz_to_oklab(xyz)),
         Interpretation::OkLch => out[..3].copy_from_slice(&lab_to_lch(xyz_to_oklab(xyz))),
-        Interpretation::Bw => out[0] = 255.0 * scrgb_to_bw(xyz_to_scrgb(xyz)),
-        Interpretation::Grey16 => out[0] = 65535.0 * scrgb_to_bw(xyz_to_scrgb(xyz)),
+        Interpretation::Bw => {
+            out[0] = scrgb_to_code(SRGB_RANGE, scrgb_luminance(xyz_to_scrgb(xyz)));
+        }
+        Interpretation::Grey16 => {
+            out[0] = scrgb_to_code(RGB16_RANGE, scrgb_luminance(xyz_to_scrgb(xyz)));
+        }
         Interpretation::Cmyk => out[..4].copy_from_slice(&xyz_to_cmyk(xyz)),
         other => unreachable!("no colourspace route for {other:?}"),
     }
@@ -842,32 +1330,44 @@ fn from_xyz_into(space: Interpretation, xyz: [f64; 3], out: &mut [f64]) {
 /// Read the flat `i`-th channel sample of `raster` as `f64` (native byte
 /// order, matching the crate convention).
 fn read_sample_f64(raster: &Raster, i: usize) -> f64 {
-    let data = raster.data();
-    match raster.format().bytes_per_channel() {
-        1 => data[i] as f64,
-        2 => u16::from_ne_bytes([data[i * 2], data[i * 2 + 1]]) as f64,
-        _ => f32::from_ne_bytes([
-            data[i * 4],
-            data[i * 4 + 1],
-            data[i * 4 + 2],
-            data[i * 4 + 3],
-        ]) as f64,
-    }
+    // The crate's one width-independent read. This used to be a fourth copy
+    // of the width-keyed `match { 1, 2, _ }`, whose trailing arm handed
+    // every colour route an `f32` for four bytes that were not one: a `u32`
+    // sample of `1` arrived here as `1.4e-45` (issue #607).
+    let kind = raster.format().kind();
+    read_kind_sample(raster.data(), kind, i * kind.bytes())
 }
 
-/// Write the flat `i`-th channel sample into `buf` at `depth`, rounding
-/// and clipping integer depths.
-fn write_sample(buf: &mut [u8], depth: SpaceDepth, i: usize, v: f64) {
-    match depth {
-        SpaceDepth::U8 => buf[i] = v.round().clamp(0.0, 255.0) as u8,
-        SpaceDepth::U16 => {
-            let bytes = (v.round().clamp(0.0, 65535.0) as u16).to_ne_bytes();
-            buf[i * 2] = bytes[0];
-            buf[i * 2 + 1] = bytes[1];
-        }
-        SpaceDepth::F32 => {
-            buf[i * 4..i * 4 + 4].copy_from_slice(&(v as f32).to_ne_bytes());
-        }
+/// Write the flat `i`-th channel sample into `buf` at `kind`, rounding
+/// and clipping the integer kinds.
+///
+/// The offset is `i * kind.bytes()` for every kind, so the stride follows the
+/// sample rather than being spelled per arm. That is the half of issue #607
+/// a byte width gets wrong in the other direction: a four-byte kind written
+/// through a two-byte arm walks every second sample.
+///
+/// # Why this is not the crate-wide writer
+///
+/// It rounds. The colourspace routes quantise a continuous value into an
+/// integer space and libvips rounds that, which is why [`round_clip`] sits in
+/// front of the store. The shared writer issue #517 adds truncates instead,
+/// because it carries `vips_cast` semantics and `cast` is the operation that
+/// truncates toward zero. Both are right for their own operation and neither
+/// is right for the other: a colour result written through a truncating store
+/// moves every sample whose fraction is at or above a half by one count. When
+/// the shared writer lands this becomes a rounding step in front of it rather
+/// than a second store.
+fn write_sample(buf: &mut [u8], kind: SampleKind, i: usize, v: f64) {
+    let off = i * kind.bytes();
+    let clipped = round_clip(v, kind) as i64;
+    match kind {
+        SampleKind::U8 => buf[off] = clipped as u8,
+        SampleKind::I8 => buf[off] = clipped as i8 as u8,
+        SampleKind::U16 => buf[off..off + 2].copy_from_slice(&(clipped as u16).to_ne_bytes()),
+        SampleKind::I16 => buf[off..off + 2].copy_from_slice(&(clipped as i16).to_ne_bytes()),
+        SampleKind::U32 => buf[off..off + 4].copy_from_slice(&(clipped as u32).to_ne_bytes()),
+        SampleKind::I32 => buf[off..off + 4].copy_from_slice(&(clipped as i32).to_ne_bytes()),
+        SampleKind::F32 => buf[off..off + 4].copy_from_slice(&(v as f32).to_ne_bytes()),
     }
 }
 
@@ -875,20 +1375,236 @@ fn write_sample(buf: &mut [u8], depth: SpaceDepth, i: usize, v: f64) {
 /// spaces shift between 8- and 16-bit storage (the libvips `shift` cast)
 /// and round-clip float storage (the libvips plain cast); float spaces
 /// take the stored value as is.
-fn normalise_sample(v: f64, storage_bpc: usize, depth: SpaceDepth) -> f64 {
-    match (depth, storage_bpc) {
-        (SpaceDepth::U8, 1) | (SpaceDepth::U16, 2) | (SpaceDepth::F32, _) => v,
-        (SpaceDepth::U8, 2) => (v / 256.0).floor(),
-        (SpaceDepth::U8, _) => v.round().clamp(0.0, 255.0),
-        (SpaceDepth::U16, 1) => v * 256.0,
-        (SpaceDepth::U16, _) => v.round().clamp(0.0, 65535.0),
+fn normalise_sample(v: f64, storage: SampleKind, depth: SampleKind) -> f64 {
+    // A float space takes the stored value as it is, whatever carried it.
+    if depth.is_float() {
+        return v;
+    }
+    match shift_bits(storage, depth) {
+        // Same unsigned width in and out: nothing to line up.
+        Some(0) => v,
+        // The libvips `shift` cast: a left or right shift by the width
+        // difference, which lines the ranges up without rescaling. 8-bit 255
+        // becomes 65280 and not 65535, which is the libvips answer.
+        Some(bits) if bits > 0 => v * f64::from(1u32 << bits),
+        Some(bits) => (v / f64::from(1u32 << -bits)).floor(),
+        // Everything else is the libvips plain cast.
+        None => round_clip(v, depth),
     }
 }
 
+/// How far the `shift` cast moves a sample between two **unsigned integer**
+/// kinds, in bits, or `None` where that cast does not apply.
+///
+/// `None` for a float on either side, and for a signed kind, whose zero is
+/// not at the bottom of its range, so lining widths up is not the same
+/// operation. Those take the plain cast instead. The match is total, so a
+/// kind added to [`SampleKind`] has to answer here rather than falling into
+/// whichever arm a `_` happened to be.
+fn shift_bits(storage: SampleKind, depth: SampleKind) -> Option<i32> {
+    fn unsigned_bits(kind: SampleKind) -> Option<i32> {
+        match kind {
+            SampleKind::U8 => Some(8),
+            SampleKind::U16 => Some(16),
+            SampleKind::U32 => Some(32),
+            SampleKind::I8 | SampleKind::I16 | SampleKind::I32 | SampleKind::F32 => None,
+        }
+    }
+    Some(unsigned_bits(depth)? - unsigned_bits(storage)?)
+}
+
 /// The canonical [`PixelFormat`] for `channels` at `depth`.
-fn format_for(channels: usize, depth: SpaceDepth) -> PixelFormat {
-    PixelFormat::with_channels(channels, depth.bytes())
-        .expect("colour op output has a valid channel count")
+fn format_for(channels: usize, depth: SampleKind) -> PixelFormat {
+    PixelFormat::with_kind(channels, depth)
+        .expect("colour op output has a valid channel count and a carried kind")
+}
+
+/// Allocate a colour operation's output byte buffer, fallibly.
+///
+/// Every colour result is one image-sized `Vec<u8>`: the
+/// [`Raster::try_colourspace`] conversion buffer that the hot loop writes
+/// samples straight into, and the [`build_raster`] quantisation buffer the
+/// colour-difference and ICC ops finish through. (The working vectors those
+/// ops fill on the way to it go through [`try_plane`], for the same
+/// reason and against the same ceiling.) Both used to be a plain
+/// `vec![0u8; ..]`, and a request the allocator cannot satisfy reaches
+/// `handle_alloc_error` and **aborts the process** — which no `?` catches, so
+/// `try_colourspace` promised a `Result` it could not keep and
+/// [`Raster::try_sharpen`] inherited the abort through its LabS round trip
+/// (issue #672). A `try_` API that aborts is worse than an infallible one,
+/// because a caller reasonably reads the `Result` as covering allocation.
+///
+/// [`try_plane_filled`] is the crate's answer: [`Vec::try_reserve_exact`]
+/// reporting [`RasterError::AllocationFailed`], and deliberately no
+/// [`DEFAULT_MAX_ALLOC_BYTES`] re-check. A colour output derives from an input
+/// raster that was budget-checked at its own construction and legitimately
+/// grows on top of that — `Srgb -> Lab` widens 8-bit bands to `f32`, a 4x — so
+/// re-imposing the budget here would reject legal large conversions (#279).
+///
+/// One cost is worth naming, because it is not free and it is not new here.
+/// [`try_plane_filled`] reserves and then fills with [`Vec::resize`], so the
+/// buffer is a `malloc` plus a full `memset` where the `vec![0u8; n]` it
+/// replaces lowered to `alloc_zeroed` and, at image sizes, took fresh zeroed
+/// pages at no write cost. The fill has no reader on either colour path: the
+/// [`Raster::try_colourspace`] loop writes every byte of the buffer and
+/// [`build_raster`] quantises into every byte of its own. It is measurable in
+/// the size class this function's own justification invokes, `rustc -O`, best
+/// of nine: 256 MiB and 1 GiB are level at 6.4 ms and 25.8 ms, and 4 GiB goes
+/// 241 ms to 325 ms, a 34% regression. `arithmetic.rs`'s `try_scratch` carries
+/// the same cost for the same reason and records it as a follow-up on #460,
+/// and so does this: std exposes no fallible zeroed `Vec` today, so the
+/// `calloc`-preserving shape (probe with [`Vec::try_reserve_exact`], drop the
+/// probe, then `vec![0u8; size]`) belongs with that issue rather than
+/// hand-rolled `unsafe` here.
+///
+/// [`DEFAULT_MAX_ALLOC_BYTES`]: crate::raster::DEFAULT_MAX_ALLOC_BYTES
+/// [`Raster::try_sharpen`]: crate::Raster::try_sharpen
+fn alloc_colour_output(
+    site: &'static str,
+    width: u32,
+    height: u32,
+    format: PixelFormat,
+) -> Result<Vec<u8>, RasterError> {
+    // One byte of `u8` per byte of the pixel, which is what `alloc_op_output`
+    // reserves and fills; going through `try_plane_filled` under this module's
+    // own label instead is what puts the output on the same funnel and the same
+    // ceiling as the intermediates, rather than on a second one that had to be
+    // kept in step by hand (issue #696).
+    try_plane_filled(site, width, height, format.bytes_per_pixel(), 0u8)
+}
+
+/// Site labels for the image-sized buffers this module reserves through
+/// [`try_plane`], [`try_plane_filled`] and [`alloc_colour_output`].
+///
+/// Every one of them is one of the working vectors a colour op fills on the way
+/// to its result, or the result itself: the colour-difference `Vec<f64>` (8
+/// bytes a sample, the largest single buffer this module asks for), the ICC
+/// device and PCS planes, the `Vec<[f64; 3]>` Lab staging on both ICC
+/// directions, and the byte buffer each op finishes through. Every one of them
+/// was a `Vec::with_capacity`, a `vec![0.0; ..]` or a `.collect()`, all of which
+/// are infallible: a request the allocator cannot satisfy reaches
+/// `handle_alloc_error` and **aborts the process**, so `try_de00` and
+/// `try_icc_import_with` promised a `Result` that did not cover the largest
+/// allocation they make (issues #672, #685).
+///
+/// The labels are what a test addresses. They replace an ordinal: the module
+/// used to keep a ceiling that refused the *Nth* over-ceiling request along a
+/// path, so a dozen checks named a site and really named a position, told apart
+/// only by the byte sizes on the path happening to be unique. Three fixtures
+/// carry an extra band for no other reason, one pair of buffers could not be
+/// separated at all, and inserting an allocation anywhere earlier re-pointed
+/// every later check at its neighbour. Naming the site removes all of it, and
+/// `#696` is where the argument is (see `CONTRIBUTING.md`).
+mod plane {
+    /// The conversion buffer [`Raster::try_colourspace`]'s hot loop writes
+    /// samples straight into.
+    pub(super) const COLOURSPACE_OUTPUT: &str = "colour.colourspace_output";
+    /// The quantisation buffer [`super::build_raster`] finishes through, which
+    /// is the colour-difference and both ICC directions' output.
+    pub(super) const BUILD_RASTER_OUTPUT: &str = "colour.build_raster_output";
+    /// The `Vec<f64>` [`super::colour_difference`] fills with one sample per
+    /// output band.
+    pub(super) const DIFFERENCE_SAMPLES: &str = "colour.difference.samples";
+
+    /// The `Vec<f32>` of device samples the CMS transform reads on import.
+    pub(super) const IMPORT_DEVICE_PLANE: &str = "colour.import.device_plane";
+    /// The `Vec<[f64; 3]>` Lab staging the matrix-shaper import arm fills.
+    pub(super) const IMPORT_LAB_STAGING: &str = "colour.import.lab_staging";
+    /// The same staging on the grey-TRC import arm, which an RGB profile never
+    /// reaches.
+    pub(super) const IMPORT_GREY_LAB_STAGING: &str = "colour.import.grey_lab_staging";
+    /// The import's own `Vec<f64>` sample buffer.
+    pub(super) const IMPORT_SAMPLES: &str = "colour.import.samples";
+    /// The PCS plane the LUT-profile import fallback hands to moxcms.
+    pub(super) const IMPORT_FALLBACK_PCS: &str = "colour.import.fallback_pcs";
+    /// The Lab result that fallback decodes the PCS into.
+    pub(super) const IMPORT_FALLBACK_LAB: &str = "colour.import.fallback_lab";
+
+    /// The copy [`Raster::try_icc_export_with`] takes of an already-Lab input.
+    ///
+    /// Read only under `cfg(test)`, unlike every other label here: the copy is
+    /// a [`Raster::try_clone`] rather than a `Vec` this module reserves, so the
+    /// label exists for the probe to address and for nothing else.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(super) const EXPORT_SOURCE_COPY: &str = "colour.export.source_copy";
+    /// The `Vec<[f64; 3]>` Lab staging the export gathers from its source.
+    pub(super) const EXPORT_LAB_STAGING: &str = "colour.export.lab_staging";
+    /// The `Vec<f32>` device plane the matrix-shaper export arm fills.
+    pub(super) const EXPORT_DEVICE_PLANE: &str = "colour.export.device_plane";
+    /// The same plane on the grey-TRC export arm.
+    pub(super) const EXPORT_GREY_DEVICE_PLANE: &str = "colour.export.grey_device_plane";
+    /// The export's own `Vec<f64>` sample buffer.
+    pub(super) const EXPORT_SAMPLES: &str = "colour.export.samples";
+    /// The PCS plane the LUT-profile export fallback stages.
+    pub(super) const EXPORT_FALLBACK_PCS: &str = "colour.export.fallback_pcs";
+    /// The device buffer that fallback hands to moxcms.
+    pub(super) const EXPORT_FALLBACK_DEVICE: &str = "colour.export.fallback_device";
+}
+
+/// Debug-only: check that a slice a colour conversion fills from and the
+/// geometry it reserves against describe the same image.
+///
+/// [`try_plane`] rests on the reservation being the fill's only
+/// allocation, and most callers get that for free by driving their loop from
+/// the same `width` x `height` they reserve against. The four ICC conversions
+/// cannot: they are handed a slice and told a geometry, and those are two
+/// independent inputs. Let them disagree and the `push` loop runs past the
+/// reservation, [`Vec`] grows through the *infallible* path, and the process
+/// dies in `handle_alloc_error` on the largest buffers in the module, while
+/// every allocation test still passes, because those starve the reserve rather
+/// than filling it.
+///
+/// A `debug_assert` rather than a returned error because all four callers are
+/// private to this file, so a mismatch is a bug here and not a condition a user
+/// can provoke. The suite runs in debug, so an edit that breaks the tie fails
+/// on the next run.
+fn debug_assert_plane_geometry(len: usize, per_pixel: usize, width: u32, height: u32) {
+    debug_assert_eq!(
+        len,
+        buffer_len(width, height, per_pixel).unwrap_or(usize::MAX),
+        "a colour conversion sized a plane from {width}x{height} at {per_pixel} \
+         elements a pixel and then filled it from a {len}-element slice; the \
+         reserve and the fill have to agree or `push` grows infallibly"
+    );
+}
+
+/// Copy a raster a colour op is about to work over, fallibly.
+///
+/// [`Raster::try_icc_export_with`] takes a copy of its input on the fast path
+/// where that input is already Lab, and `Clone::clone` copies the whole pixel
+/// buffer through an infallible allocation: on a full-resolution image that is
+/// the largest single request the export makes, and a host that cannot serve it
+/// gets `handle_alloc_error` and a dead process rather than the `Err` the
+/// signature advertises. [`Raster::try_clone`] exists for exactly this and says
+/// so in its own doc; this wrapper adds nothing but the test ceiling, so the
+/// copy is starvable alongside the other sites on the path (#685).
+///
+/// The charge sits *before* the delegation, so starving it proves the routing
+/// and says nothing about the copy itself being fallible. Nothing can starve
+/// `Raster::try_clone` at a size a test can build, so the delegation is counted
+/// instead, by `icc_export_copies_an_already_lab_input_through_the_fallible_clone`
+/// over the `cfg(test)` counter `raster.rs` keeps.
+///
+/// It is the one site on the funnel that does not reserve a `Vec` here, so it
+/// is the one that has to charge the probe by hand through
+/// [`crate::raster::charge_plane`] rather than by reserving through it. Counting
+/// it matters: the checks that count a whole path's reservations would be off by
+/// one against the path they measure if the copy were invisible to them.
+///
+/// Spelled `alloc_colour_*` rather than `try_*` to match
+/// [`alloc_colour_output`], the other wrapper this module keeps over the funnel.
+/// Both hand back one image-sized colour buffer or an [`Err`], and reading as
+/// one family is worth more here than the `try_` marker, which the return type
+/// already carries.
+fn alloc_colour_source_copy(src: &Raster) -> Result<Raster, RasterError> {
+    #[cfg(test)]
+    crate::raster::charge_plane(
+        plane::EXPORT_SOURCE_COPY,
+        src.width(),
+        src.height(),
+        src.data().len(),
+    )?;
+    src.try_clone()
 }
 
 /// Wrap an already-quantised sample byte buffer into a raster, carrying
@@ -896,35 +1612,55 @@ fn format_for(channels: usize, depth: SpaceDepth) -> PixelFormat {
 /// [`Raster::try_colourspace`] loop writes its output samples straight
 /// into `buf` (via [`write_sample`]) and finishes through here, so no
 /// intermediate full-image `Vec<f64>` staging is materialised.
+///
+/// The wrap goes through [`Raster::from_op_output`] rather than
+/// [`Raster::new`], for the reason [`alloc_colour_output`] skips the byte
+/// budget: a colour output derives from an already-budget-checked input and
+/// legitimately grows past `DEFAULT_MAX_ALLOC_BYTES` on a widening conversion,
+/// where `Raster::new` would reject it and the old `.expect` would turn that
+/// rejection into a panic out of a `try_` form (issue #279).
+///
+/// The `fields.clone()` on the last line is not fallible and copies an
+/// attached ICC profile with everything else, so every colour op that carries
+/// metadata onto its output has one bounded infallible allocation left in it.
+/// See [`profile_bytes`] for why that is ranked below the image-sized sites
+/// rather than fixed with them (#693).
 fn raster_from_bytes(
     width: u32,
     height: u32,
     channels: usize,
-    depth: SpaceDepth,
+    depth: SampleKind,
     buf: Vec<u8>,
     like: &Raster,
     tag: Interpretation,
-) -> Raster {
-    let mut out = Raster::new(width, height, format_for(channels, depth), buf)
-        .expect("colour op output is well-formed");
-    out.meta = like.meta;
-    out.meta.interpretation = Some(tag);
-    out.fields = like.fields.clone();
-    out
+) -> Result<Raster, RasterError> {
+    let mut out = Raster::from_op_output(width, height, format_for(channels, depth), buf)?;
+    out.carry_meta_from(like);
+    out.set_interpretation(Some(tag));
+    Ok(out)
 }
 
 /// Build a raster from per-channel `f64` samples at `depth`, carrying
 /// `like`'s metadata block and attached fields, tagged `tag`.
+///
+/// The byte buffer is the colour-difference and ICC arms' output, so it goes
+/// through [`alloc_colour_output`] and reports
+/// [`RasterError::AllocationFailed`] rather than aborting (issue #672).
 fn build_raster(
     width: u32,
     height: u32,
     channels: usize,
-    depth: SpaceDepth,
+    depth: SampleKind,
     samples: &[f64],
     like: &Raster,
     tag: Interpretation,
-) -> Raster {
-    let mut buf = vec![0u8; samples.len() * depth.bytes()];
+) -> Result<Raster, RasterError> {
+    let mut buf = alloc_colour_output(
+        plane::BUILD_RASTER_OUTPUT,
+        width,
+        height,
+        format_for(channels, depth),
+    )?;
     for (i, &v) in samples.iter().enumerate() {
         write_sample(&mut buf, depth, i, v);
     }
@@ -1304,60 +2040,165 @@ impl ShaperCurves {
 /// Matrix-shaper RGB and grey-TRC profiles evaluate exactly; everything
 /// else runs a moxcms float transform to its generic Lab profile and
 /// decodes the ICC-encoded PCS XYZ it delivers.
+///
+/// `width` and `height` size the output plane and `device` drives the fill, so
+/// the two have to describe the same image; see the assertion below.
 fn icc_device_to_lab(
     profile: &ColorProfile,
     device: &[f32],
     channels: usize,
     intent: Intent,
+    width: u32,
+    height: u32,
 ) -> Result<Vec<[f64; 3]>, ColourError> {
-    let pixels = device.len() / channels;
-
-    if profile.color_space == DataColorSpace::Rgb && profile.is_matrix_shaper() {
-        if let Some(lin) = ShaperCurves::linear_rgb(profile) {
-            let m = profile.colorant_matrix();
-            let mut out = Vec::with_capacity(pixels);
-            for px in device.chunks_exact(3) {
-                let v = m.mul_vector(Vector3d {
-                    v: [
-                        lin.eval(0, px[0] as f64),
-                        lin.eval(1, px[1] as f64),
-                        lin.eval(2, px[2] as f64),
-                    ],
-                });
-                out.push(xyz_to_lab(v.v, ICC_D50));
-            }
-            return Ok(out);
+    debug_assert_plane_geometry(device.len(), channels, width, height);
+    if profile.color_space == DataColorSpace::Rgb
+        && profile.is_matrix_shaper()
+        && let Some(lin) = ShaperCurves::linear_rgb(profile)
+    {
+        let m = profile.colorant_matrix();
+        let mut out = try_plane::<[f64; 3]>(plane::IMPORT_LAB_STAGING, width, height, 1)?;
+        for px in device.as_chunks::<3>().0 {
+            let v = m.mul_vector(Vector3d {
+                v: [
+                    lin.eval(0, px[0] as f64),
+                    lin.eval(1, px[1] as f64),
+                    lin.eval(2, px[2] as f64),
+                ],
+            });
+            out.push(xyz_to_lab(v.v, ICC_D50));
         }
+        return Ok(out);
     }
 
-    if profile.color_space == DataColorSpace::Gray {
-        if let Some(trc) = profile.gray_trc.as_ref() {
-            let lin = trc
-                .make_linear_evaluator()
-                .map_err(|e| ColourError::IccTransform {
-                    detail: format!("{e:?}"),
-                })?;
-            let mut out = Vec::with_capacity(pixels);
-            for px in device.chunks_exact(1) {
-                let v = lin.evaluate_value(px[0]) as f64;
-                out.push(xyz_to_lab([ICC_D50[0] * v, v, ICC_D50[2] * v], ICC_D50));
-            }
-            return Ok(out);
+    if profile.color_space == DataColorSpace::Gray
+        && let Some(trc) = profile.gray_trc.as_ref()
+    {
+        let lin = trc
+            .make_linear_evaluator()
+            .map_err(|e| ColourError::IccTransform {
+                detail: format!("{e:?}"),
+            })?;
+        let mut out = try_plane::<[f64; 3]>(plane::IMPORT_GREY_LAB_STAGING, width, height, 1)?;
+        for &px in device {
+            let v = lin.evaluate_value(px) as f64;
+            out.push(xyz_to_lab([ICC_D50[0] * v, v, ICC_D50[2] * v], ICC_D50));
         }
+        return Ok(out);
     }
 
-    icc_device_to_lab_fallback(profile, device, channels, intent)
+    icc_device_to_lab_fallback(profile, device, channels, intent, width, height)
+}
+
+/// How many pixels one `xf.transform` call is handed.
+///
+/// moxcms sizes the katana engine's intermediates from the slice it is given
+/// and allocates them with a plain `vec![0f32; n]` (0.8.1
+/// `conversions/katana/md3x3.rs:176`, `md4x3.rs:164`, `md_nx3.rs:160` and
+/// `md_pipeline.rs:90`), so a request the host cannot serve reaches
+/// `handle_alloc_error` and ends the process. That allocation is not ours and
+/// cannot be made fallible from here. The one thing this crate controls is
+/// `n`, and handing the transform a fixed number of pixels rather than the
+/// whole plane takes the request off the image size (issue #693).
+///
+/// Every katana initial stage produces three `f32` a pixel, so this caps a
+/// single CMS intermediate at 192 KiB on any image and any device space.
+/// `tests/icc_lut_alloc.rs` pins that at two geometries and then refuses it, to
+/// keep the difference between "bounded" and "fallible" on the record.
+///
+/// The value is a cache choice rather than a correctness one: 192 KiB of
+/// working set per call, against one `Vec` allocation per chunk, which is a
+/// 733-chunk transform on a 12-megapixel image. Splitting changes no sample,
+/// because every stage moxcms runs reads only the pixel it is writing
+/// (`conversions/katana/stages.rs:73`).
+///
+/// # Retuning it
+///
+/// Correctness does not depend on the value, but the checks that police it do,
+/// and saying "cache choice" without saying that is how somebody makes a
+/// strictly better choice and gets three red tests blaming an upstream crate.
+/// The window is **43 to 43690 pixels**, and each end is one number in
+/// `tests/icc_lut_alloc.rs`:
+///
+/// * below 43, the intermediate at twelve bytes a pixel stops clearing that
+///   file's 512-byte `ZEROED_LOG_FLOOR`, so the ceiling never sees the request
+///   it is aimed at. Lower the floor and the window moves down with it.
+/// * above 43690, the intermediate passes `CMS_CEILING_BYTES`, which is the
+///   512 KiB bound this module advertises. That end is a real promise rather
+///   than a test artefact, so raise the bound deliberately or not at all.
+///
+/// Nothing else is pinned to it. The equivalence check below sizes its fixture
+/// from this constant, and `LOG_CAP` in that file is diagnostic rather than
+/// load-bearing, both so a retune inside the window costs nothing.
+const ICC_TRANSFORM_CHUNK_PIXELS: usize = 16 * 1024;
+
+/// Run `xf` over a whole plane in [`ICC_TRANSFORM_CHUNK_PIXELS`] slices.
+///
+/// `src_channels` and `dst_channels` are samples per pixel on each side, which
+/// differ whenever the two profiles disagree on device space, so the two chunk
+/// iterators are stepped over pixels rather than over samples.
+///
+/// # Errors
+///
+/// [`ColourError::IccTransform`] if the two sides do not describe the same
+/// number of pixels, or if moxcms refuses a chunk.
+///
+/// The first of those is a programming error rather than a host condition, and
+/// it is checked rather than asserted on purpose. `zip` stops at the shorter
+/// side, so a mismatch would transform a prefix, leave the rest of `dst` at
+/// whatever it was reserved with, and return `Ok(())`: a wrong image with no
+/// error anywhere. A `debug_assert!` catches that in the tests and says nothing
+/// in the release build people actually run, which is the wrong way round for a
+/// failure whose whole danger is being silent.
+fn transform_in_chunks(
+    xf: &TransformF32Executor,
+    src: &[f32],
+    src_channels: usize,
+    dst: &mut [f32],
+    dst_channels: usize,
+) -> Result<(), ColourError> {
+    let (src_pixels, dst_pixels) = (src.len() / src_channels, dst.len() / dst_channels);
+    if src_pixels != dst_pixels {
+        return Err(ColourError::IccTransform {
+            detail: format!(
+                "the two sides of an ICC transform must describe the same pixels, \
+                 got {src_pixels} in ({} samples at {src_channels} a pixel) and \
+                 {dst_pixels} out ({} samples at {dst_channels} a pixel)",
+                src.len(),
+                dst.len()
+            ),
+        });
+    }
+    for (s, d) in src
+        .chunks(ICC_TRANSFORM_CHUNK_PIXELS * src_channels)
+        .zip(dst.chunks_mut(ICC_TRANSFORM_CHUNK_PIXELS * dst_channels))
+    {
+        xf.transform(s, d).map_err(|e| ColourError::IccTransform {
+            detail: format!("{e:?}"),
+        })?;
+    }
+    Ok(())
 }
 
 /// The LUT-profile import path: moxcms transform to the generic Lab
 /// profile, PCS XYZ decoded from the ICC `u1Fixed15` code scale.
+///
+/// The two buffers on either side of the transform are reserved fallibly and
+/// the transform between them is driven in [`ICC_TRANSFORM_CHUNK_PIXELS`]
+/// slices, so the buffer moxcms allocates for itself is bounded rather than
+/// image-sized. It is still not fallible: this route and its export twin are
+/// the two places in the module where memory exhaustion is a process abort
+/// rather than an `Err`, and issue #693 tracks the fix upstream, where the
+/// fallible spelling already exists and these stages just do not use it.
 fn icc_device_to_lab_fallback(
     profile: &ColorProfile,
     device: &[f32],
     channels: usize,
     intent: Intent,
+    width: u32,
+    height: u32,
 ) -> Result<Vec<[f64; 3]>, ColourError> {
-    let pixels = device.len() / channels;
+    debug_assert_plane_geometry(device.len(), channels, width, height);
     let lab_profile = ColorProfile::new_lab();
     let xf = profile
         .create_transform_f32(
@@ -1369,73 +2210,87 @@ fn icc_device_to_lab_fallback(
         .map_err(|e| ColourError::IccTransform {
             detail: format!("{e:?}"),
         })?;
-    let mut pcs = vec![0.0f32; pixels * 3];
-    xf.transform(device, &mut pcs)
-        .map_err(|e| ColourError::IccTransform {
-            detail: format!("{e:?}"),
-        })?;
-    Ok(pcs
-        .chunks_exact(3)
-        .map(|px| {
-            xyz_to_lab(
-                [
-                    px[0] as f64 * PCS_XYZ_SCALE,
-                    px[1] as f64 * PCS_XYZ_SCALE,
-                    px[2] as f64 * PCS_XYZ_SCALE,
-                ],
-                ICC_D50,
-            )
-        })
-        .collect())
+    let mut pcs = try_plane_filled::<f32>(plane::IMPORT_FALLBACK_PCS, width, height, 3, 0.0)?;
+    transform_in_chunks(xf.as_ref(), device, channels, &mut pcs, 3)?;
+    // `collect()` here sized itself from the iterator's exact length hint, so
+    // it was a second infallible image-sized allocation, just one that does not
+    // look like an allocation. Reserved and pushed instead (#685).
+    let mut out = try_plane::<[f64; 3]>(plane::IMPORT_FALLBACK_LAB, width, height, 1)?;
+    for px in pcs.as_chunks::<3>().0 {
+        out.push(xyz_to_lab(
+            [
+                px[0] as f64 * PCS_XYZ_SCALE,
+                px[1] as f64 * PCS_XYZ_SCALE,
+                px[2] as f64 * PCS_XYZ_SCALE,
+            ],
+            ICC_D50,
+        ));
+    }
+    Ok(out)
 }
 
 /// Convert D50 PCS Lab triples to normalised (0..1) device pixels.
+///
+/// `width` and `height` size the output plane and `labs` drives the fill, so
+/// the two have to describe the same image; see the assertion below.
 fn icc_lab_to_device(
     profile: &ColorProfile,
     labs: &[[f64; 3]],
     intent: Intent,
+    width: u32,
+    height: u32,
 ) -> Result<Vec<f32>, ColourError> {
-    if profile.color_space == DataColorSpace::Rgb && profile.is_matrix_shaper() {
-        if let Some(gamma) = ShaperCurves::gamma_rgb(profile) {
-            let inv = profile.colorant_matrix().inverse();
-            let mut out = Vec::with_capacity(labs.len() * 3);
-            for lab in labs {
-                let xyz = lab_to_xyz(*lab, ICC_D50);
-                let v = inv.mul_vector(Vector3d { v: xyz });
-                for (i, lin) in v.v.iter().enumerate() {
-                    out.push(gamma.eval(i, lin.clamp(0.0, 1.0)).clamp(0.0, 1.0) as f32);
-                }
+    debug_assert_plane_geometry(labs.len(), 1, width, height);
+    if profile.color_space == DataColorSpace::Rgb
+        && profile.is_matrix_shaper()
+        && let Some(gamma) = ShaperCurves::gamma_rgb(profile)
+    {
+        let inv = profile.colorant_matrix().inverse();
+        let mut out = try_plane::<f32>(plane::EXPORT_DEVICE_PLANE, width, height, 3)?;
+        for lab in labs {
+            let xyz = lab_to_xyz(*lab, ICC_D50);
+            let v = inv.mul_vector(Vector3d { v: xyz });
+            for (i, lin) in v.v.iter().enumerate() {
+                out.push(gamma.eval(i, lin.clamp(0.0, 1.0)).clamp(0.0, 1.0) as f32);
             }
-            return Ok(out);
         }
+        return Ok(out);
     }
 
-    if profile.color_space == DataColorSpace::Gray {
-        if let Some(trc) = profile.gray_trc.as_ref() {
-            let gamma = trc
-                .make_gamma_evaluator()
-                .map_err(|e| ColourError::IccTransform {
-                    detail: format!("{e:?}"),
-                })?;
-            let mut out = Vec::with_capacity(labs.len());
-            for lab in labs {
-                let y = lab_to_xyz(*lab, ICC_D50)[1];
-                out.push((gamma.evaluate_value(y.clamp(0.0, 1.0) as f32)).clamp(0.0, 1.0));
-            }
-            return Ok(out);
+    if profile.color_space == DataColorSpace::Gray
+        && let Some(trc) = profile.gray_trc.as_ref()
+    {
+        let gamma = trc
+            .make_gamma_evaluator()
+            .map_err(|e| ColourError::IccTransform {
+                detail: format!("{e:?}"),
+            })?;
+        let mut out = try_plane::<f32>(plane::EXPORT_GREY_DEVICE_PLANE, width, height, 1)?;
+        for lab in labs {
+            let y = lab_to_xyz(*lab, ICC_D50)[1];
+            out.push((gamma.evaluate_value(y.clamp(0.0, 1.0) as f32)).clamp(0.0, 1.0));
         }
+        return Ok(out);
     }
 
-    icc_lab_to_device_fallback(profile, labs, intent)
+    icc_lab_to_device_fallback(profile, labs, intent, width, height)
 }
 
 /// The LUT-profile export path: PCS XYZ re-encoded to the ICC code scale
 /// and run through a moxcms transform from the generic Lab profile.
+///
+/// Carries the same moxcms residue as [`icc_device_to_lab_fallback`]: both of
+/// this function's own buffers are fallible and the transform between them is
+/// chunked, so what moxcms allocates for itself is bounded but still not
+/// fallible (issue #693).
 fn icc_lab_to_device_fallback(
     profile: &ColorProfile,
     labs: &[[f64; 3]],
     intent: Intent,
+    width: u32,
+    height: u32,
 ) -> Result<Vec<f32>, ColourError> {
+    debug_assert_plane_geometry(labs.len(), 1, width, height);
     let channels = device_channels(profile)?;
     let lab_profile = ColorProfile::new_lab();
     let xf = lab_profile
@@ -1448,29 +2303,39 @@ fn icc_lab_to_device_fallback(
         .map_err(|e| ColourError::IccTransform {
             detail: format!("{e:?}"),
         })?;
-    let mut pcs = Vec::with_capacity(labs.len() * 3);
+    let mut pcs = try_plane::<f32>(plane::EXPORT_FALLBACK_PCS, width, height, 3)?;
     for lab in labs {
         let xyz = lab_to_xyz(*lab, ICC_D50);
         pcs.push((xyz[0] / PCS_XYZ_SCALE).clamp(0.0, 1.0) as f32);
         pcs.push((xyz[1] / PCS_XYZ_SCALE).clamp(0.0, 1.0) as f32);
         pcs.push((xyz[2] / PCS_XYZ_SCALE).clamp(0.0, 1.0) as f32);
     }
-    let mut device = vec![0.0f32; labs.len() * channels];
-    xf.transform(&pcs, &mut device)
-        .map_err(|e| ColourError::IccTransform {
-            detail: format!("{e:?}"),
-        })?;
+    let mut device =
+        try_plane_filled::<f32>(plane::EXPORT_FALLBACK_DEVICE, width, height, channels, 0.0)?;
+    transform_in_chunks(xf.as_ref(), &pcs, 3, &mut device, channels)?;
     Ok(device)
 }
 
 /// Interpretation tag for a device raster of `channels` at `depth`.
-fn device_tag(channels: usize, depth: SpaceDepth) -> Interpretation {
-    match (channels, depth) {
-        (1, SpaceDepth::U16) => Interpretation::Grey16,
-        (1, _) => Interpretation::Bw,
+fn device_tag(channels: usize, depth: SampleKind) -> Interpretation {
+    // The tag question is "is this the 16-bit device depth", and answering it
+    // with a total match means a kind added to `SampleKind` has to decide
+    // rather than inheriting whatever a `_` arm meant.
+    let sixteen = match depth {
+        SampleKind::U16 => true,
+        SampleKind::U8
+        | SampleKind::I8
+        | SampleKind::I16
+        | SampleKind::U32
+        | SampleKind::I32
+        | SampleKind::F32 => false,
+    };
+    match (channels, sixteen) {
+        (1, true) => Interpretation::Grey16,
+        (1, false) => Interpretation::Bw,
         (4, _) => Interpretation::Cmyk,
-        (_, SpaceDepth::U16) => Interpretation::Rgb16,
-        _ => Interpretation::Srgb,
+        (_, true) => Interpretation::Rgb16,
+        (_, false) => Interpretation::Srgb,
     }
 }
 
@@ -1491,30 +2356,58 @@ fn device_tag(channels: usize, depth: SpaceDepth) -> Interpretation {
 /// the sub-integer precision callers assume survives. The 8-bit integer
 /// (`/255`) and 16-bit (`/65535`) arms are unchanged and remain
 /// byte-parity with libvips.
-fn read_device_normalised(raster: &Raster, channels: usize) -> Vec<f32> {
+fn read_device_normalised(raster: &Raster, channels: usize) -> Result<Vec<f32>, RasterError> {
     let total = raster.width() as usize * raster.height() as usize;
     let all = raster.format().channels();
-    let bpc = raster.format().bytes_per_channel();
-    let mut out = Vec::with_capacity(total * channels);
+    let kind = raster.format().kind();
+    let mut out = try_plane::<f32>(
+        plane::IMPORT_DEVICE_PLANE,
+        raster.width(),
+        raster.height(),
+        channels,
+    )?;
     for p in 0..total {
         for c in 0..channels {
             let v = read_sample_f64(raster, p * all + c);
-            out.push(match bpc {
-                1 => (v / 255.0) as f32,
-                2 => (v / 65535.0) as f32,
+            // An integer raster normalises by its own ceiling, which is what
+            // the 8- and 16-bit arms always did and what a four-byte integer
+            // kind needs too: dividing a `u32` by 255 is not a device sample
+            // (issue #607). `max_value` answers `None` for exactly the float
+            // kinds, so the float arm below is reached by kind and not by a
+            // leftover width.
+            out.push(match kind.max_value() {
+                Some(max) => (v / f64::from(max)) as f32,
                 // Float device raster: preserve sub-8-bit precision for the
                 // f32 CMS transform (issue #301). Do NOT re-add `.round()`
-                // here — it collapses float input to 8-bit before the
+                // here, it collapses float input to 8-bit before the
                 // transform and regresses precision for float callers.
-                _ => (v.clamp(0.0, 255.0) / 255.0) as f32,
+                None => (v.clamp(0.0, 255.0) / 255.0) as f32,
             });
         }
     }
-    out
+    Ok(out)
 }
 
 /// The profile bytes an ICC op should use: the explicit path if given,
 /// else the raster's attached profile.
+///
+/// Both arms copy the blob infallibly, and that is deliberate rather than
+/// overlooked. [`std::fs::read`] sizes its buffer from the file and
+/// `<[u8]>::to_vec` copies the attached bytes, so a host that cannot serve
+/// either one reaches `handle_alloc_error` instead of the [`Err`] the `try_`
+/// forms advertise. [`Raster::try_icc_export_with`] makes four copies of the
+/// same blob in all: this one, the `fields.clone()` inside
+/// [`Raster::try_clone`], the one [`raster_from_bytes`] makes carrying the
+/// metadata onto the output, and `set_icc_profile` at the end.
+///
+/// They sit below the image-sized sites #685 and #689 removed because a
+/// profile is a *bounded* copy where a full-resolution plane is not: the blob
+/// an attacker can drive here comes from a decoded JPEG's APP2 chain, which
+/// `crate::imageio` caps at roughly 16 MB. Bounded is a reason to rank it
+/// last, though, not a reason to call these paths abort-free.
+/// [`Raster::try_clone`]'s first line says "of the pixel buffer" for exactly
+/// this reason, and this is the same statement seen from the colour side
+/// (#693).
 fn profile_bytes(raster: &Raster, path: Option<&Path>) -> Result<Vec<u8>, ColourError> {
     match path {
         Some(p) => std::fs::read(p).map_err(|source| ColourError::ProfileRead {
@@ -1548,8 +2441,8 @@ impl Raster {
     /// contract of the ported-test surface.
     pub fn constant(w: u32, h: u32, values: &[f64], interpretation: Interpretation) -> Raster {
         assert!(!values.is_empty(), "constant: values must not be empty");
-        let format =
-            PixelFormat::with_channels(values.len(), 4).expect("constant: band count must fit u16");
+        let format = PixelFormat::with_kind(values.len(), SampleKind::F32)
+            .expect("constant: band count must fit u16");
         let mut raster = Raster::zeroed(w, h, format).expect("constant: valid dimensions");
         let stride = values.len();
         let count = w as usize * h as usize * stride;
@@ -1560,7 +2453,7 @@ impl Raster {
                 data[i * 4..i * 4 + 4].copy_from_slice(&bytes);
             }
         }
-        raster.meta.interpretation = Some(interpretation);
+        raster.set_interpretation(Some(interpretation));
         raster
     }
 
@@ -1572,6 +2465,10 @@ impl Raster {
     /// The source space is [`Raster::interpretation`];
     /// [`Interpretation::Rgb`] sources are treated as sRGB and
     /// [`Interpretation::Matrix`] as mono, mirroring libvips.
+    ///
+    /// `Lab <-> Lch`, `OkLab <-> OkLCh` and `Lab <-> Labs` take the
+    /// direct in-place edge libvips gives them instead of the XYZ hub;
+    /// see the [module docs](crate::colour#colour-space-model).
     ///
     /// # Precision ceiling: routes through HSV are 8-bit
     ///
@@ -1588,8 +2485,11 @@ impl Raster {
     /// # Errors
     ///
     /// [`ColourError::UnsupportedColourspace`] when the source or target
-    /// has no route, and [`ColourError::TooFewBands`] when the image has
-    /// fewer bands than its space needs.
+    /// has no route, [`ColourError::TooFewBands`] when the image has
+    /// fewer bands than its space needs, and [`ColourError::Raster`] when
+    /// the output cannot be allocated. That last one arrives as a value:
+    /// the output buffer is reserved fallibly, so an over-capacity
+    /// conversion is an `Err` and never a process abort.
     pub fn try_colourspace(&self, target: Interpretation) -> Result<Raster, ColourError> {
         let src = alias_source(self.interpretation());
         if !space_supported(src) {
@@ -1618,7 +2518,7 @@ impl Raster {
         let out_channels = tgt_bands + extras;
         let src_depth = space_depth(src);
         let tgt_depth = space_depth(target);
-        let bpc = self.format().bytes_per_channel();
+        let storage = self.format().kind();
 
         let total = self.width() as usize * self.height() as usize;
         // Stream row by row straight into the output byte buffer: no
@@ -1626,16 +2526,27 @@ impl Raster {
         // (libviprs#284). `src_px` is reused across pixels for the source
         // colour bands, and `tgt_px` is a reused stack scratch wide enough
         // for every space (CMYK is the widest at four bands) that
-        // `from_xyz_into` writes into.
-        let mut buf = vec![0u8; total * out_channels * tgt_depth.bytes()];
+        // `from_xyz_into` writes into. The output buffer is the one
+        // image-sized allocation on this path, so it is reserved fallibly:
+        // `vec![]` here reached `handle_alloc_error` and aborted the process,
+        // which is the one thing a `try_` form must not do (issue #672).
+        let mut buf = alloc_colour_output(
+            plane::COLOURSPACE_OUTPUT,
+            self.width(),
+            self.height(),
+            format_for(out_channels, tgt_depth),
+        )?;
         let mut src_px = vec![0.0f64; src_bands];
         let mut tgt_px = [0.0f64; 4];
         let identity = src == target;
+        // The same-family pairs libvips joins with a single transform
+        // rather than routing through the XYZ hub; see `direct_edge`.
+        let shortcut = direct_edge(src, target);
 
         for p in 0..total {
             let in_base = p * channels;
             for (c, slot) in src_px.iter_mut().enumerate() {
-                *slot = normalise_sample(read_sample_f64(self, in_base + c), bpc, src_depth);
+                *slot = normalise_sample(read_sample_f64(self, in_base + c), storage, src_depth);
             }
             let out_base = p * out_channels;
             if identity {
@@ -1643,7 +2554,12 @@ impl Raster {
                     write_sample(&mut buf, tgt_depth, out_base + c, v);
                 }
             } else {
-                from_xyz_into(target, to_xyz(src, &src_px), &mut tgt_px);
+                match shortcut {
+                    Some(edge) => {
+                        tgt_px[..3].copy_from_slice(&edge([src_px[0], src_px[1], src_px[2]]));
+                    }
+                    None => from_xyz_into(target, to_xyz(src, &src_px), &mut tgt_px),
+                }
                 for (c, &v) in tgt_px.iter().take(tgt_bands).enumerate() {
                     write_sample(&mut buf, tgt_depth, out_base + c, v);
                 }
@@ -1651,7 +2567,7 @@ impl Raster {
             for c in src_bands..channels {
                 // Extra bands: plain cast (clip, no rescale), mirroring
                 // vips__colourspace_process_n. Clipping happens on write.
-                let v = read_sample_f64(self, in_base + c).min(tgt_depth.max_value());
+                let v = read_sample_f64(self, in_base + c).min(depth_ceiling(tgt_depth));
                 write_sample(
                     &mut buf,
                     tgt_depth,
@@ -1669,7 +2585,7 @@ impl Raster {
             buf,
             self,
             target,
-        ))
+        )?)
     }
 
     /// Convert this image to the target colour space (libvips
@@ -1713,7 +2629,12 @@ impl Raster {
         let out_channels = 1 + extras;
         let total = left.width() as usize * left.height() as usize;
 
-        let mut samples = Vec::with_capacity(total * out_channels);
+        let mut samples = try_plane::<f64>(
+            plane::DIFFERENCE_SAMPLES,
+            left.width(),
+            left.height(),
+            out_channels,
+        )?;
         for p in 0..total {
             let a = [
                 read_sample_f64(&left, p * l_ch),
@@ -1735,11 +2656,11 @@ impl Raster {
             left.width(),
             left.height(),
             out_channels,
-            SpaceDepth::F32,
+            SampleKind::F32,
             &samples,
             &left,
             Interpretation::Bw,
-        ))
+        )?)
     }
 
     /// CIE76 colour difference between two images (libvips `vips_dE76`):
@@ -1750,7 +2671,15 @@ impl Raster {
     /// # Errors
     ///
     /// The [`Raster::try_colourspace`] errors, plus
-    /// [`ColourError::DimensionMismatch`] when the images differ in size.
+    /// [`ColourError::DimensionMismatch`] when the images differ in size and
+    /// [`ColourError::Raster`] when a buffer cannot be allocated. A dE holds
+    /// three image-sized buffers at once (both Lab conversions and the `f64`
+    /// difference plane, which at 8 bytes a sample is the largest single
+    /// allocation this module makes), and each of those three is reserved
+    /// fallibly, so a host that cannot serve one of them gets an `Err` rather
+    /// than a process abort. The claim is exactly that wide: those three
+    /// buffers, on a path that stays inside this crate. It is not a promise
+    /// that the whole call is allocation-safe.
     pub fn try_de76(&self, other: &Raster) -> Result<Raster, ColourError> {
         self.colour_difference(other, de76)
     }
@@ -1776,9 +2705,13 @@ impl Raster {
     /// arms deviate from published Sharma 2005 CIEDE2000 on hue-wrap pairs
     /// (asymmetric wrap and the antipodal `|Δh'| == 180` boundary) — by at
     /// most ~4.67 units (~1.17×) across the Sharma dataset. This is an
-    /// intentional libvips parity ceiling, not a bug. See [`de00`] for the
-    /// exact geometry and numeric detail. Use [`Raster::try_de00_sharma`]
-    /// for the textbook value instead of libvips parity.
+    /// intentional libvips parity ceiling, not a bug. The two rules agree
+    /// exactly on every non-wrapping pair (`|Δh'| < 180`) and part only on
+    /// the wrap; the worst case across that dataset is Lab
+    /// `[50,2.5,0]`/`[56,-27,-3]`, 27.23 here against Sharma's 31.90. The
+    /// full geometry lives on this module's private `de00` helper. Use
+    /// [`Raster::try_de00_sharma`] for the textbook value instead of libvips
+    /// parity.
     ///
     /// # Errors
     ///
@@ -1803,9 +2736,11 @@ impl Raster {
     /// CIEDE2000 colour difference computing the **published Sharma 2005**
     /// value (both signed hue-wrap arms) rather than the libvips parity
     /// arms of [`Raster::try_de00`]. Reproduces the full published Sharma
-    /// 2005 test dataset (34 pairs) within ~5e-5; see [`de00_sharma`] for
-    /// the exact deviation from parity (asymmetric hue-wrap pairs only;
-    /// identical elsewhere).
+    /// 2005 test dataset (34 pairs) within ~5e-5. It departs from
+    /// [`Raster::try_de00`] on hue-wrap pairs only (asymmetric wrap and the
+    /// antipodal `|Δh'| == 180` boundary) and is identical elsewhere; the
+    /// deviation is spelled out on this module's private `de00_sharma`
+    /// helper.
     ///
     /// This does not match the pinned `vips dE00` oracle and is offered
     /// only for callers who want the textbook standard.
@@ -1873,7 +2808,19 @@ impl Raster {
     /// profiles, [`ColourError::TooFewBands`] when the image has fewer
     /// bands than the profile's device space, and
     /// [`ColourError::IccTransform`] when the CMS cannot build a
-    /// transform for a LUT profile.
+    /// transform for a LUT profile, and [`ColourError::Raster`] when a buffer
+    /// cannot be allocated. That last one covers every image-sized allocation
+    /// the import itself makes and not only the output: the normalised device
+    /// plane, the Lab staging the CMS fills, and the sample buffer are all
+    /// reserved fallibly, so an image too large for the host is an `Err` rather
+    /// than a process abort.
+    ///
+    /// That is where the guarantee stops. On a LUT profile the pixels also pass
+    /// through a moxcms transform, which sizes intermediates of its own from
+    /// the image and allocates them infallibly, so on that route a host that
+    /// cannot serve them still ends the process. The matrix-shaper and grey-TRC
+    /// routes evaluate in this crate and do not reach it. See the
+    /// [module docs](crate::colour#allocation) for where that sits.
     pub fn try_icc_import_with(
         &self,
         intent: Intent,
@@ -1894,8 +2841,15 @@ impl Raster {
         }
         let extras = channels - dev_ch;
 
-        let device = read_device_normalised(self, dev_ch);
-        let labs = icc_device_to_lab(&profile, &device, dev_ch, intent)?;
+        let device = read_device_normalised(self, dev_ch)?;
+        let labs = icc_device_to_lab(
+            &profile,
+            &device,
+            dev_ch,
+            intent,
+            self.width(),
+            self.height(),
+        )?;
 
         let pcs = pcs.unwrap_or(Pcs::Lab);
         let tag = match pcs {
@@ -1903,9 +2857,13 @@ impl Raster {
             Pcs::Xyz => Interpretation::Xyz,
         };
 
-        let total = self.width() as usize * self.height() as usize;
         let out_channels = 3 + extras;
-        let mut samples = Vec::with_capacity(total * out_channels);
+        let mut samples = try_plane::<f64>(
+            plane::IMPORT_SAMPLES,
+            self.width(),
+            self.height(),
+            out_channels,
+        )?;
         for (p, lab) in labs.iter().enumerate() {
             match pcs {
                 Pcs::Lab => samples.extend_from_slice(lab),
@@ -1923,11 +2881,11 @@ impl Raster {
             self.width(),
             self.height(),
             out_channels,
-            SpaceDepth::F32,
+            SampleKind::F32,
             &samples,
             self,
             tag,
-        ))
+        )?)
     }
 
     /// Panicking form of [`Raster::try_icc_import_with`], matching the
@@ -1972,7 +2930,16 @@ impl Raster {
     /// # Errors
     ///
     /// [`ColourError::UnsupportedDepth`] for depths other than 8 and 16,
-    /// plus the [`Raster::try_icc_import_with`] profile errors.
+    /// [`ColourError::Raster`] when a buffer cannot be allocated, plus the
+    /// [`Raster::try_icc_import_with`] profile errors. The allocation arm
+    /// covers the copy this takes of an already-Lab input as well as the Lab
+    /// staging, the device plane and the sample buffer, so none of those can
+    /// abort the process out of a `try_` form.
+    ///
+    /// It stops there, exactly as on [`Raster::try_icc_import_with`]: a LUT
+    /// profile hands the pixels to a moxcms transform that allocates
+    /// image-sized intermediates infallibly, so that route can still end the
+    /// process. See the [module docs](crate::colour#allocation).
     pub fn try_icc_export_with(
         &self,
         depth: u32,
@@ -1983,13 +2950,13 @@ impl Raster {
             return Err(ColourError::UnsupportedDepth { depth });
         }
         let out_depth = if depth == 16 {
-            SpaceDepth::U16
+            SampleKind::U16
         } else {
-            SpaceDepth::U8
+            SampleKind::U8
         };
 
         let source = if self.interpretation() == Interpretation::Lab {
-            self.clone()
+            alloc_colour_source_copy(self)?
         } else {
             self.try_colourspace(Interpretation::Lab)?
         };
@@ -2009,7 +2976,12 @@ impl Raster {
         let extras = channels - 3;
         let total = source.width() as usize * source.height() as usize;
 
-        let mut labs = Vec::with_capacity(total);
+        let mut labs = try_plane::<[f64; 3]>(
+            plane::EXPORT_LAB_STAGING,
+            source.width(),
+            source.height(),
+            1,
+        )?;
         for p in 0..total {
             labs.push([
                 read_sample_f64(&source, p * channels),
@@ -2017,11 +2989,16 @@ impl Raster {
                 read_sample_f64(&source, p * channels + 2),
             ]);
         }
-        let device = icc_lab_to_device(&profile, &labs, intent)?;
+        let device = icc_lab_to_device(&profile, &labs, intent, source.width(), source.height())?;
 
-        let scale = out_depth.max_value();
+        let scale = depth_ceiling(out_depth);
         let out_channels = dev_ch + extras;
-        let mut samples = Vec::with_capacity(total * out_channels);
+        let mut samples = try_plane::<f64>(
+            plane::EXPORT_SAMPLES,
+            source.width(),
+            source.height(),
+            out_channels,
+        )?;
         for p in 0..total {
             for c in 0..dev_ch {
                 samples.push(device[p * dev_ch + c] as f64 * scale);
@@ -2039,7 +3016,7 @@ impl Raster {
             &samples,
             &source,
             device_tag(dev_ch, out_depth),
-        );
+        )?;
         out.set_icc_profile(&bytes);
         Ok(out)
     }
@@ -2083,10 +3060,16 @@ impl Raster {
     /// The [`Raster::try_icc_import_with`] and
     /// [`Raster::try_icc_export_with`] errors.
     pub fn try_icc_transform(&self, output_profile: &Path) -> Result<Raster, ColourError> {
-        let depth = if self.format().bytes_per_channel() == 2 {
-            16
-        } else {
-            8
+        // The 16-bit export depth belongs to the 16-bit sample kinds, not to
+        // "two bytes wide": the question a width used to answer here is a
+        // kind question (issue #607).
+        let depth = match self.format().kind() {
+            SampleKind::U16 | SampleKind::I16 => 16,
+            SampleKind::U8
+            | SampleKind::I8
+            | SampleKind::U32
+            | SampleKind::I32
+            | SampleKind::F32 => 8,
         };
         self.try_icc_import_with(Intent::Perceptual, None, None)?
             .try_icc_export_with(depth, Intent::Perceptual, Some(output_profile))
@@ -2109,6 +3092,212 @@ impl Raster {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::raster::{counting_planes, with_plane_cap_after, with_plane_cap_at};
+
+    /**
+     * Tests that this module dispatches on sample kind and never on byte
+     * width, by asserting that neither the byte-width accessor on
+     * [`PixelFormat`] nor its width-keyed constructor survives in
+     * `src/colour.rs`.
+     * Works by scanning the module's own source, compiled in with
+     * `include_str!`, for the accessor's name; the needle is spelled in two
+     * halves so this assertion is not itself a hit. A byte width is not a
+     * sample kind: four bytes is `f32` today and would be `u32` under issue
+     * #517, so the reader this replaced handed every colour route a
+     * `1.4e-45` for a `u32` sample of `1`, and the ICC import divided it by
+     * 255 instead of by its own ceiling (issue #607).
+     * Input: `src/colour.rs` -> Output: zero occurrences.
+     */
+    /**
+     * Tests that the colour module's storage helpers answer the sample kind
+     * and not a byte width, for the four kinds no [`PixelFormat`] carries yet
+     * as well as the three it does.
+     * Works by driving `depth_ceiling`, `normalise_sample` and `format_for`
+     * with kinds directly, which is reachable today because
+     * [`SampleKind::U32`] and its siblings have been on `main` since #799
+     * even though no carrier produces them. A byte width answers `F32` for
+     * all three four-byte kinds, so the `U32` and `I32` rows below are the
+     * ones that could not be right before.
+     * Input: every [`SampleKind`] -> Output: each kind's own ceiling, and
+     * the shift cast only between the unsigned integer kinds.
+     */
+    #[test]
+    fn the_storage_helpers_answer_the_kind_and_not_the_width() {
+        // The ceiling a device sample normalises by, and the one an extra
+        // band clips to. Three four-byte kinds, three different answers.
+        assert_eq!(depth_ceiling(SampleKind::U8), 255.0);
+        assert_eq!(depth_ceiling(SampleKind::I8), 127.0);
+        assert_eq!(depth_ceiling(SampleKind::U16), 65535.0);
+        assert_eq!(depth_ceiling(SampleKind::I16), 32767.0);
+        assert_eq!(depth_ceiling(SampleKind::U32), 4_294_967_295.0);
+        assert_eq!(depth_ceiling(SampleKind::I32), 2_147_483_647.0);
+        assert_eq!(depth_ceiling(SampleKind::F32), f64::INFINITY);
+
+        // A space's canonical storage kind, which used to be a private
+        // three-variant enum of its own (issue #607 step (a)).
+        assert_eq!(space_depth(Interpretation::Srgb), SampleKind::U8);
+        assert_eq!(space_depth(Interpretation::Rgb16), SampleKind::U16);
+        assert_eq!(space_depth(Interpretation::Lab), SampleKind::F32);
+        assert_eq!(
+            format_for(3, SampleKind::U16),
+            PixelFormat::Rgb16,
+            "the output format comes from the kind"
+        );
+    }
+
+    /**
+     * Tests that `normalise_sample` shifts between two unsigned integer
+     * kinds and plain-casts everywhere else, which is the libvips rule, and
+     * that it keeps every answer it gave before for the three carried kinds.
+     * Works by pinning the five pairs the old width-keyed match could reach
+     * plus the pairs a four-byte integer kind adds. 255 shifting up to 16
+     * bits is 65280 and not 65535: a shift lines the ranges up, it does not
+     * rescale, and reading that off a width would have shifted a `u32` by 0
+     * bits instead of down by 16.
+     * Input: nine (storage, depth) pairs -> Output: the libvips answers.
+     */
+    #[test]
+    fn normalise_sample_shifts_only_between_the_unsigned_integer_kinds() {
+        use SampleKind::{F32, I16, U8, U16, U32};
+        // The five the old match could reach, unchanged.
+        assert_eq!(normalise_sample(200.0, U8, U8), 200.0);
+        assert_eq!(normalise_sample(40000.0, U16, U16), 40000.0);
+        assert_eq!(
+            normalise_sample(1.25, U8, F32),
+            1.25,
+            "a float space is as-is"
+        );
+        assert_eq!(normalise_sample(65535.0, U16, U8), 255.0);
+        assert_eq!(normalise_sample(255.0, U8, U16), 65280.0);
+        assert_eq!(
+            normalise_sample(300.7, F32, U8),
+            255.0,
+            "the plain cast clips"
+        );
+        assert_eq!(normalise_sample(-4.0, F32, U16), 0.0);
+
+        // The rows a byte width could not tell apart. `U32` is four bytes and
+        // so is `F32`, and they take opposite rules.
+        assert_eq!(normalise_sample(65535.0, U16, U32), 65535.0 * 65536.0);
+        assert_eq!(normalise_sample(4_294_967_295.0, U32, U8), 255.0);
+        assert_eq!(
+            normalise_sample(300.0, I16, U8),
+            255.0,
+            "a signed kind has no shift cast, so it takes the plain one"
+        );
+    }
+
+    /**
+     * Tests that `write_sample` stores every [`SampleKind`] as itself and at
+     * its own stride, which is the half of issue #607 a byte width gets
+     * wrong in the more damaging direction: a four-byte kind written through
+     * a two-byte arm stores the wrong type **and** walks every second
+     * sample.
+     * Works by writing one value into slot 1 of a two-slot buffer for each
+     * kind and reading it back through the shared reader, then asserting
+     * slot 0 was never touched. Slot 1 rather than slot 0 is what makes the
+     * stride visible at all: at `bytes() == 1` a dropped stride is the
+     * identity.
+     * Input: one value per kind at slot 1 -> Output: it reads back, and slot
+     * 0 is still zero.
+     */
+    #[test]
+    fn write_sample_stores_every_kind_at_its_own_stride() {
+        let cases = [
+            (SampleKind::U8, 200.0f64),
+            (SampleKind::I8, -100.0),
+            (SampleKind::U16, 40000.0),
+            (SampleKind::I16, -30000.0),
+            (SampleKind::U32, 3_000_000_000.0),
+            (SampleKind::I32, -2_000_000_000.0),
+            (SampleKind::F32, -2.5),
+        ];
+        for (kind, v) in cases {
+            let mut buf = vec![0u8; 2 * kind.bytes()];
+            write_sample(&mut buf, kind, 1, v);
+            assert_eq!(
+                read_kind_sample(&buf, kind, kind.bytes()),
+                v,
+                "{kind:?} must read back the value it was written"
+            );
+            assert!(
+                buf[..kind.bytes()].iter().all(|&b| b == 0),
+                "{kind:?} wrote outside its own slot: {buf:?}"
+            );
+        }
+    }
+
+    /**
+     * Tests that `write_sample` saturates into the sample kind's own range
+     * rather than into a range a byte width implies, and rounds rather than
+     * truncating.
+     * The ceiling is the thing a width cannot answer: `U32`, `I32` and `F32`
+     * are all four bytes and want three different limits. The rounding is
+     * what separates this store from the `vips_cast` one issue #517 adds,
+     * which truncates; libvips quantises a colourspace result with `rint`,
+     * so a truncating store here would move every sample whose fraction is
+     * at or above a half by one count.
+     * Input: values past both ends of each integer kind's range, and 200.5 /
+     * 200.4 into `U8` -> Output: the range endpoints, and 201 / 200.
+     */
+    #[test]
+    fn write_sample_saturates_into_the_kind_and_rounds_rather_than_truncating() {
+        for kind in [
+            SampleKind::U8,
+            SampleKind::I8,
+            SampleKind::U16,
+            SampleKind::I16,
+            SampleKind::U32,
+            SampleKind::I32,
+        ] {
+            let (lo, hi) = kind.range().expect("an integer kind has a range");
+            let mut buf = vec![0u8; kind.bytes()];
+            write_sample(&mut buf, kind, 0, hi as f64 * 4.0 + 1.0);
+            assert_eq!(
+                read_kind_sample(&buf, kind, 0),
+                hi as f64,
+                "{kind:?} ceiling"
+            );
+            write_sample(&mut buf, kind, 0, lo as f64 - 1.0 - hi as f64);
+            assert_eq!(read_kind_sample(&buf, kind, 0), lo as f64, "{kind:?} floor");
+        }
+
+        let mut buf = [0u8; 1];
+        write_sample(&mut buf, SampleKind::U8, 0, 200.5);
+        assert_eq!(buf[0], 201, "the colour store rounds half away from zero");
+        write_sample(&mut buf, SampleKind::U8, 0, 200.4);
+        assert_eq!(buf[0], 200, "and rounds down below a half");
+    }
+
+    #[test]
+    fn colour_does_not_dispatch_on_byte_width() {
+        const SRC: &str = include_str!("colour.rs");
+        let needles = [
+            concat!("bytes_per_", "channel"),
+            concat!("with_", "channels"),
+        ];
+        // Positive control: the same scan over the same string finds a token
+        // that is present, so the zero below is a real zero and not the
+        // vacuous pass an empty read would give.
+        assert!(
+            SRC.contains(concat!("fn ", "space_depth")),
+            "positive control failed: the scan cannot see this module's source"
+        );
+        for needle in needles {
+            assert_eq!(
+                SRC.matches(needle).count(),
+                0,
+                "{needle} is back in src/colour.rs; dispatch on \
+                 PixelFormat::kind() and PixelFormat::with_kind() instead"
+            );
+        }
+    }
+
+    /// Every site label this module owns starts with this, so one prefix counts
+    /// the module's own plane reservations and leaves `convolution.rs`'s and the
+    /// op outputs alone (issue #696).
+    const COLOUR_PLANES: &str = "colour.";
+    use crate::convolution::ConvolutionError;
 
     /// A small constant Lab fixture with one extra band, the shape the
     /// ported colour tests build.
@@ -2160,7 +3349,10 @@ mod tests {
         assert_eq!(im.getpoint(7, 7), vec![50.0, 0.0, 0.0, 42.0]);
 
         let three = Raster::constant(2, 2, &[1.5, -2.0, 3.0], Interpretation::Xyz);
-        assert_eq!(three.format(), PixelFormat::with_channels(3, 4).unwrap());
+        assert_eq!(
+            three.format(),
+            PixelFormat::with_kind(3, SampleKind::F32).unwrap()
+        );
         assert_eq!(three.getpoint(1, 1), vec![1.5, -2.0, 3.0]);
     }
 
@@ -2258,6 +3450,375 @@ mod tests {
                         "Lab->{a:?}->{b:?}->Lab drifted: got={got}, expected={exp}"
                     );
                 }
+            }
+        }
+    }
+
+    /// The `vips_col_ab2h` quadrant ladder, transcribed line for line
+    /// from libvips `colour/Lab2LCh.c:61-89`. Used as the reference the
+    /// crate's [`ab_to_h`] is pinned against.
+    fn vips_col_ab2h(a: f64, b: f64) -> f64 {
+        if a == 0.0 {
+            if b < 0.0 {
+                270.0
+            } else if b == 0.0 {
+                0.0
+            } else {
+                90.0
+            }
+        } else {
+            let t = (b / a).atan();
+            if a > 0.0 {
+                if b < 0.0 {
+                    (t + std::f64::consts::PI * 2.0).to_degrees()
+                } else {
+                    t.to_degrees()
+                }
+            } else {
+                (t + std::f64::consts::PI).to_degrees()
+            }
+        }
+    }
+
+    /**
+     * Tests sRGB white and mid-grey Lab against ABSOLUTE Oklab values
+     * captured from vips 8.18.4, not just against a round trip: a
+     * systematically wrong M1/M2 pair that still inverts cleanly would
+     * pass every `Lab -> A -> B -> Lab` test but not these.
+     * Works by converting the two fixtures and comparing every band to
+     * the capture. vips runs the conversion through XYZ D65 with Y white
+     * = 100 (colour/XYZ2Oklab.c:53-79), not through linear sRGB, so the
+     * near-zero a/b residues below are the signature of that route --
+     * they are not zero, and a linear-sRGB route would not reproduce
+     * them.
+     * Input (`vips colourspace in.v out.v oklab` + `vips getpoint`):
+     *   sRGB [255,255,255] -> [1.0000017881393433, 2.1827961518283701e-06,
+     *                          -1.1364420788595453e-04]
+     *   Lab  [50,0,0]      -> [0.56896543502807617, -5.7465244935883675e-06,
+     *                          -4.8703699576435611e-05]
+     * Tolerance is 1e-6: vips carries the whole chain in f32, libviprs in
+     * f64, and the two agree to ~1e-7 on these values.
+     */
+    #[test]
+    fn oklab_absolute_vips_pins() {
+        // Captured with:
+        //   vips black b3.v 1 1 --bands 3
+        //   vips linear b3.v w.v 0 255 --uchar
+        //   vips copy w.v wsrgb.v --interpretation srgb
+        //   vips colourspace wsrgb.v wok.v oklab && vips getpoint wok.v 0 0
+        let white = Raster::new(1, 1, PixelFormat::Rgb8, vec![255, 255, 255]).unwrap();
+        let got = white.colourspace(Interpretation::OkLab).getpoint(0, 0);
+        let expected = [
+            1.000_001_788_139_343_3,
+            2.182_796_151_828_37e-6,
+            -1.136_442_078_859_545_3e-4,
+        ];
+        for (i, (got, exp)) in got.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (got - exp).abs() < 1e-6,
+                "sRGB white -> Oklab band {i}: got={got}, vips={exp}"
+            );
+        }
+
+        // Captured with:
+        //   vips linear b3.v lab.v "0 0 0" "50 0 0"
+        //   vips copy lab.v labi.v --interpretation lab
+        //   vips colourspace labi.v labok.v oklab && vips getpoint labok.v 0 0
+        let grey = Raster::constant(1, 1, &[50.0, 0.0, 0.0], Interpretation::Lab);
+        let got = grey.colourspace(Interpretation::OkLab).getpoint(0, 0);
+        let expected = [
+            0.568_965_435_028_076_2,
+            -5.746_524_493_588_367_5e-6,
+            -4.870_369_957_643_561e-5,
+        ];
+        for (i, (got, exp)) in got.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (got - exp).abs() < 1e-6,
+                "Lab [50,0,0] -> Oklab band {i}: got={got}, vips={exp}"
+            );
+        }
+    }
+
+    /**
+     * Tests the three saturated sRGB primaries against ABSOLUTE OkLCh
+     * values captured from vips 8.18.4, pinning the hue in DEGREES and
+     * inside the [0, 360) range. Blue is the load-bearing case: its hue
+     * is 264.07 degrees, which a raw `atan2` would report as -95.93, so
+     * this pins the wrap as well as the unit. (The wrap is onto
+     * [0, 360] with a closed top, not [0, 360); these three land well
+     * inside it, so they are asserted against the open form.)
+     * Works by tagging 1x1 sRGB primaries and converting to OkLCh.
+     * Input (`vips colourspace in.v out.v oklch` + `vips getpoint`):
+     *   [255,0,0] -> [0.62792587280273438, 0.2576846182346344,  29.223178863525391]
+     *   [0,255,0] -> [0.86645191907882690, 0.29480746388435364, 142.51116943359375]
+     *   [0,0,255] -> [0.45203295350074768, 0.31329533457756042, 264.07290649414062]
+     */
+    #[test]
+    fn oklch_saturated_primaries_absolute_vips_pins() {
+        let cases: [([u8; 3], [f64; 3]); 3] = [
+            (
+                [255, 0, 0],
+                [
+                    0.627_925_872_802_734_4,
+                    0.257_684_618_234_634_4,
+                    29.223_178_863_525_39,
+                ],
+            ),
+            (
+                [0, 255, 0],
+                [
+                    0.866_451_919_078_826_9,
+                    0.294_807_463_884_353_64,
+                    142.511_169_433_593_75,
+                ],
+            ),
+            (
+                [0, 0, 255],
+                [
+                    0.452_032_953_500_747_7,
+                    0.313_295_334_577_560_4,
+                    264.072_906_494_140_6,
+                ],
+            ),
+        ];
+
+        for (rgb, expected) in cases {
+            let im = Raster::new(1, 1, PixelFormat::Rgb8, rgb.to_vec()).unwrap();
+            let lch = im.colourspace(Interpretation::OkLch);
+            assert_eq!(lch.interpretation(), Interpretation::OkLch);
+            let got = lch.getpoint(0, 0);
+
+            assert!(
+                (got[0] - expected[0]).abs() < 1e-6,
+                "sRGB {rgb:?} -> OkLCh L: got={}, vips={}",
+                got[0],
+                expected[0]
+            );
+            assert!(
+                (got[1] - expected[1]).abs() < 1e-6,
+                "sRGB {rgb:?} -> OkLCh C: got={}, vips={}",
+                got[1],
+                expected[1]
+            );
+            // Hue is in degrees, not radians, and wrapped rather than
+            // signed. These three are nowhere near the 360 boundary.
+            assert!(
+                (got[2] - expected[2]).abs() < 1e-4,
+                "sRGB {rgb:?} -> OkLCh h (degrees): got={}, vips={}",
+                got[2],
+                expected[2]
+            );
+            assert!(
+                (0.0..360.0).contains(&got[2]),
+                "sRGB {rgb:?} -> OkLCh h out of [0,360): {}",
+                got[2]
+            );
+        }
+    }
+
+    /**
+     * Tests that the crate's hue equals the `vips_col_ab2h` quadrant
+     * ladder (colour/Lab2LCh.c:61-89) rather than merely being assumed
+     * equivalent to it. The ladder has an explicit `a == 0` branch giving
+     * 270 / 0 / 90, so those cases are asserted as exact equalities, and
+     * the rest of the plane is swept against a line-for-line
+     * transcription of the C.
+     * `-0.0` is the case where the two forms genuinely disagree and so
+     * the one the sweep must carry: `a == 0` is true for `-0.0` in C, so
+     * vips takes the explicit branch, while `atan2(±0.0, -0.0)` is `±PI`
+     * and a plain atan2 answers 180. vips 8.18.4 on the binary:
+     *   oklab [0.5, -0.0,  0.0] -> oklch  0.5  0  0
+     *   oklab [0.5, -0.0,  0.1] -> oklch  0.5  0.1  90
+     *   oklab [0.5, -0.0, -0.1] -> oklch  0.5  0.1  270
+     * The upper bound of the range is closed, not open: a positive `a`
+     * with a small enough negative `b` wraps onto exactly 360.0 in both
+     * implementations.
+     * Works by comparing ab_to_h to vips_col_ab2h over a grid that
+     * covers all four quadrants, both axes, and both signed zeros.
+     */
+    #[test]
+    fn hue_matches_vips_col_ab2h_ladder() {
+        // The explicit `a == 0` branch of the C ladder, exactly.
+        assert_eq!(ab_to_h(0.0, 0.0), 0.0, "a == 0, b == 0 must be 0 degrees");
+        assert_eq!(ab_to_h(0.0, 1.0), 90.0, "a == 0, b > 0 must be 90 degrees");
+        assert_eq!(
+            ab_to_h(0.0, -1.0),
+            270.0,
+            "a == 0, b < 0 must be 270 degrees"
+        );
+        assert_eq!(ab_to_h(0.0, 128.0), 90.0);
+        assert_eq!(ab_to_h(0.0, -0.001), 270.0);
+        // `a == 0` is true for `-0.0` in C too, so the same branch runs
+        // and the answer is 0 / 90 / 270, NOT the 180 that
+        // `atan2(±0.0, -0.0) == ±PI` would give.
+        assert_eq!(
+            ab_to_h(-0.0, 0.0),
+            0.0,
+            "a == -0.0, b == 0 must be 0 degrees, not 180"
+        );
+        assert_eq!(
+            ab_to_h(-0.0, -0.0),
+            0.0,
+            "a == -0.0, b == -0.0 must be 0 degrees, not 180"
+        );
+        assert_eq!(ab_to_h(-0.0, 0.1), 90.0, "a == -0.0, b > 0 must be 90");
+        assert_eq!(ab_to_h(-0.0, -0.1), 270.0, "a == -0.0, b < 0 must be 270");
+        // And the b == 0 axis, which the ladder reaches through atan(0).
+        assert_eq!(ab_to_h(1.0, 0.0), 0.0);
+        assert_eq!(ab_to_h(-1.0, 0.0), 180.0);
+        // The wrap lands on exactly 360.0 here and in the C, so the
+        // documented range is [0, 360] and not [0, 360).
+        assert_eq!(
+            ab_to_h(0.1, -1e-30),
+            360.0,
+            "a > 0 with a tiny negative b wraps onto exactly 360"
+        );
+        assert_eq!(vips_col_ab2h(0.1, -1e-30), 360.0);
+
+        let samples = [
+            -128.0, -60.0, -25.0, -1.0, -0.1, -1e-9, -1e-30, -0.0, 0.0, 1e-30, 1e-9, 0.1, 1.0,
+            25.0, 60.0, 128.0,
+        ];
+        for &a in &samples {
+            for &b in &samples {
+                let got = ab_to_h(a, b);
+                let want = vips_col_ab2h(a, b);
+                assert!(
+                    (got - want).abs() < 1e-9,
+                    "ab_to_h({a}, {b}) = {got}, vips_col_ab2h = {want}"
+                );
+                assert!(
+                    (0.0..=360.0).contains(&got),
+                    "ab_to_h({a}, {b}) = {got} is outside [0, 360]"
+                );
+            }
+        }
+    }
+
+    /**
+     * Tests the direct same-family polar route. libvips joins OkLab and
+     * OkLCh with a single edge, `{ OKLAB, OKLCH, { vips_Oklab2Oklch } }`
+     * (colour/colourspace.c:478) and `{ OKLCH, OKLAB }` (:494), so the
+     * conversion is a pure polar/cartesian swap with nothing else in the
+     * pipeline. Routing it through the XYZ hub instead adds an
+     * Oklab2XYZ/XYZ2Oklab cube-root round trip that libvips never runs,
+     * which perturbs a neutral colour's a and b away from zero and so
+     * scrambles the hue that is read off them.
+     * Works by converting OkLab constants captured from vips 8.18.4 and
+     * comparing to the capture, then round-tripping back to OkLab.
+     * The -0.0 rows are the ones a bare atan2 gets wrong: `a == 0` is
+     * true for `-0.0` in C, so vips takes the explicit ladder branch,
+     * while `atan2(±0.0, -0.0)` is `±PI` and answers 180.
+     * Input (`vips colourspace in.v out.v oklch` + `vips getpoint`, the
+     * signed-zero rows written as raw f32 and read with `vips rawload
+     * ... --format float --interpretation oklab`):
+     *   [0.5, 0,  0   ] -> [0.5, 0,          0        ]
+     *   [0.5, 0,  0.1 ] -> [0.5, 0.1,        90       ]
+     *   [0.5, 0, -0.1 ] -> [0.5, 0.1,        270      ]
+     *   [0.7, 0.1,-0.05] -> [0.7, 0.11180340, 333.43494]
+     *   [0.5, -0.0,  0.0] -> [0.5, 0,   0  ]
+     *   [0.5, -0.0, -0.0] -> [0.5, 0,   0  ]
+     *   [0.5, -0.0,  0.1] -> [0.5, 0.1, 90 ]
+     *   [0.5, -0.0, -0.1] -> [0.5, 0.1, 270]
+     */
+    #[test]
+    fn oklab_oklch_direct_route_matches_vips() {
+        let cases: [([f64; 3], [f64; 3]); 8] = [
+            ([0.5, 0.0, 0.0], [0.5, 0.0, 0.0]),
+            ([0.5, 0.0, 0.1], [0.5, 0.100_000_001_490_116_12, 90.0]),
+            ([0.5, 0.0, -0.1], [0.5, 0.100_000_001_490_116_12, 270.0]),
+            ([0.5, -0.0, 0.0], [0.5, 0.0, 0.0]),
+            ([0.5, -0.0, -0.0], [0.5, 0.0, 0.0]),
+            ([0.5, -0.0, 0.1], [0.5, 0.100_000_001_490_116_12, 90.0]),
+            ([0.5, -0.0, -0.1], [0.5, 0.100_000_001_490_116_12, 270.0]),
+            (
+                [0.7, 0.1, -0.05],
+                [
+                    0.699_999_988_079_071,
+                    0.111_803_397_536_277_77,
+                    333.434_936_523_437_5,
+                ],
+            ),
+        ];
+
+        for (oklab, expected) in cases {
+            let src = Raster::constant(1, 1, &oklab, Interpretation::OkLab);
+            let lch = src.colourspace(Interpretation::OkLch);
+            assert_eq!(lch.interpretation(), Interpretation::OkLch);
+            let got = lch.getpoint(0, 0);
+            for (i, (got, exp)) in got.iter().zip(expected.iter()).enumerate() {
+                let tol = if i == 2 { 1e-4 } else { 1e-7 };
+                assert!(
+                    (got - exp).abs() < tol,
+                    "OkLab {oklab:?} -> OkLCh band {i}: got={got}, vips={exp}"
+                );
+            }
+
+            // The direct edge makes the loop a polar/cartesian swap, so
+            // it comes back to the f32 storage value, not to whatever a
+            // cube-root round trip through XYZ leaves behind.
+            let back = lch.colourspace(Interpretation::OkLab).getpoint(0, 0);
+            for (i, (got, exp)) in back.iter().zip(oklab.iter()).enumerate() {
+                assert!(
+                    (got - exp).abs() < 1e-7,
+                    "OkLab {oklab:?} -> OkLCh -> OkLab band {i}: got={got}, expected={exp}"
+                );
+            }
+        }
+    }
+
+    /**
+     * Tests that the same direct polar route also covers Lab <-> LCh,
+     * which libvips joins with `{ LAB, LCH, { vips_Lab2LCh } }`
+     * (colour/colourspace.c:244) and `{ LCH, LAB }` (:276).
+     * The dark neutrals are the load-bearing cases: Lab2XYZ and XYZ2Lab
+     * do NOT invert each other below L = 8, because lab_f switches at
+     * t < 0.008856 and lab_to_xyz at L < 8.0 and those rounded decimals
+     * are not mutual inverses. Routed through the hub, Lab [5, 0, 0]
+     * comes out as LCh (4.99996, C = 5.571e-4, h = 338.199) -- the same
+     * neutral-garbage-hue defect as the Oklab pair, about 3e5 times
+     * larger in raw units -- where vips returns 5 0 0. At L = 50 the hub
+     * residual is ~1e-14 and rounds away, which is exactly why an
+     * all-L=50 fixture set says nothing about this.
+     * The -0.0 case pins the `a == 0` branch of the quadrant ladder,
+     * which `-0.0` enters in C and which a bare atan2 would miss.
+     * Works by converting Lab constants captured from vips 8.18.4,
+     * including the two `a == 0` axis cases the quadrant ladder pins at
+     * exactly 90 and 270 degrees.
+     * Input (`vips colourspace in.v out.v lch` + `vips getpoint`, the
+     * input written as raw f32 and read with `vips rawload ...
+     * --format float --interpretation lab` so the signed zero survives):
+     *   [50, 0, 0]     -> [50, 0,  0        ]
+     *   [50, 0, 25]    -> [50, 25, 90       ]
+     *   [50, 0, -25]   -> [50, 25, 270      ]
+     *   [50, -30, -40] -> [50, 50, 233.13010]
+     *   [50, -0.0, 0]  -> [50, 0,  0        ]
+     *   [5,  0, 0]     -> [5,  0,  0        ]
+     *   [3,  0, 0]     -> [3,  0,  0        ]
+     */
+    #[test]
+    fn lab_lch_direct_route_matches_vips() {
+        let cases: [([f64; 3], [f64; 3]); 7] = [
+            ([50.0, 0.0, 0.0], [50.0, 0.0, 0.0]),
+            ([50.0, 0.0, 25.0], [50.0, 25.0, 90.0]),
+            ([50.0, 0.0, -25.0], [50.0, 25.0, 270.0]),
+            ([50.0, -30.0, -40.0], [50.0, 50.0, 233.130_096_435_546_88]),
+            ([50.0, -0.0, 0.0], [50.0, 0.0, 0.0]),
+            // Under L = 8 the hub route would answer
+            // (4.99996, 5.571e-4, 338.199) and (2.99997, 5.571e-4, 338.199).
+            ([5.0, 0.0, 0.0], [5.0, 0.0, 0.0]),
+            ([3.0, 0.0, 0.0], [3.0, 0.0, 0.0]),
+        ];
+
+        for (lab, expected) in cases {
+            let src = Raster::constant(1, 1, &lab, Interpretation::Lab);
+            let got = src.colourspace(Interpretation::Lch).getpoint(0, 0);
+            for (i, (got, exp)) in got.iter().zip(expected.iter()).enumerate() {
+                let tol = if i == 2 { 1e-4 } else { 1e-5 };
+                assert!(
+                    (got - exp).abs() < tol,
+                    "Lab {lab:?} -> LCh band {i}: got={got}, vips={exp}"
+                );
             }
         }
     }
@@ -2587,7 +4148,7 @@ mod tests {
         }
 
         let rgb16 = g.colourspace(Interpretation::Rgb16);
-        assert_eq!(rgb16.format().bytes_per_channel(), 2);
+        assert_eq!(rgb16.format().kind(), SampleKind::U16);
         assert_eq!(rgb16.interpretation(), Interpretation::Rgb16);
         // 188 at 8 bits is 48316 (of 65535) at 16 bits with the shared
         // curve: 65535 * encode(decode(188/255)).
@@ -2600,8 +4161,11 @@ mod tests {
     }
 
     /**
-     * Tests the LabS code scaling: Lab [50,0,0] stores as L ~16384 (of
+     * Tests the LabS code scaling: Lab [50,0,0] stores as L 16383 (of
      * 32767) with a,b at 0, matching the libvips signed-16-bit codes.
+     * 50 * 32767/100 is 16383.5, and `Lab2LabS.c:66` lands that in a
+     * `signed short`, so the half goes away rather than rounding up.
+     * Measured: `vips colourspace <lab> <out> labs` prints 16383.
      */
     #[test]
     fn labs_code_scaling() {
@@ -2609,12 +4173,221 @@ mod tests {
         assert_eq!(labs.interpretation(), Interpretation::Labs);
         let px = labs.getpoint(0, 0);
         assert!(
-            (px[0] - 16384.0).abs() < 1.0,
-            "L code should be ~16384, got {}",
+            (px[0] - 16383.0).abs() < 1e-6,
+            "L code should be 16383, got {}",
             px[0]
         );
-        assert!(px[1].abs() < 1.0 && px[2].abs() < 1.0);
+        assert!(px[1].abs() < 1e-6 && px[2].abs() < 1e-6);
         assert!((px[3] - 42.0).abs() < 1e-6, "extra band untouched");
+    }
+
+    /// One Lab pixel as a float raster, so the input words are the exact
+    /// `f32` samples `vips rawload --format float --interpretation lab`
+    /// hands `Lab2LabS.c`.
+    fn lab_px(lab: [f64; 3]) -> Raster {
+        Raster::constant(1, 1, &lab, Interpretation::Lab)
+    }
+
+    /// One LabS pixel. libviprs carries LabS in the float raster (it has
+    /// no signed-16-bit format), so the code values are exact here too.
+    fn labs_px(labs: [f64; 3]) -> Raster {
+        Raster::constant(1, 1, &labs, Interpretation::Labs)
+    }
+
+    /**
+     * Tests that Lab -> LabS truncates the scaled code toward zero
+     * rather than rounding it, which is what `Lab2LabS.c:66-68` does by
+     * assigning the clipped double into a `signed short`.
+     *
+     * Every expectation is a measurement from vips 8.18.4, taken with
+     * `vips rawload px.raw in.v 1 1 3 --format float --interpretation lab`
+     * so the input words are exact, then `vips colourspace in.v out.v
+     * labs` and `vips getpoint out.v 0 0`.
+     *
+     * The `+/-0.501953125` pair is the discriminator that matters most:
+     * it scales to exactly +/-128.5, so truncate-toward-zero gives
+     * +/-128, round-half-away gives +/-129, and floor gives 128 / -129.
+     * vips answers +/-128, so LabS truncates toward zero and does not
+     * floor -- LabS is the one signed carrier in this module, so the two
+     * are genuinely distinguishable here.
+     */
+    #[test]
+    fn labs_encode_truncates_toward_zero() {
+        let cases: [([f64; 3], [f64; 3]); 18] = [
+            // L: 50 * 327.67 = 16383.5 -> 16383, not 16384.
+            ([50.0, 0.0, 0.0], [16383.0, 0.0, 0.0]),
+            // 0.1 * 327.67 = 32.767 -> 32, not 33.
+            ([0.1, 0.0, 0.0], [32.0, 0.0, 0.0]),
+            ([1.0, 0.0, 0.0], [327.0, 0.0, 0.0]),
+            ([5.0, 0.0, 0.0], [1638.0, 0.0, 0.0]),
+            ([8.0, 0.0, 0.0], [2621.0, 0.0, 0.0]),
+            ([100.0, 0.0, 0.0], [32767.0, 0.0, 0.0]),
+            // VIPS_CLIP(0, ..., SHRT_MAX) on L: no negatives, no overflow.
+            ([200.0, 0.0, 0.0], [32767.0, 0.0, 0.0]),
+            ([-10.0, 0.0, 0.0], [0.0, 0.0, 0.0]),
+            // a/b scale by 256. 0.1 -> +/-25.6, so +/-25 either side of
+            // zero: truncation is symmetric, floor would give -26.
+            ([50.0, 0.1, -0.1], [16383.0, 25.0, -25.0]),
+            // Exact halves: +/-128.5 -> +/-128.
+            ([50.0, 0.501953125, -0.501953125], [16383.0, 128.0, -128.0]),
+            // Exact halves again, small: +/-1.5 -> +/-1.
+            ([50.0, 0.005859375, -0.005859375], [16383.0, 1.0, -1.0]),
+            ([50.0, 1.0, -1.0], [16383.0, 256.0, -256.0]),
+            ([50.0, 50.5, -50.5], [16383.0, 12928.0, -12928.0]),
+            // VIPS_CLIP(SHRT_MIN, ..., SHRT_MAX) on a/b.
+            ([50.0, 200.0, -200.0], [16383.0, 32767.0, -32768.0]),
+            ([50.0, 127.99609375, -128.0], [16383.0, 32767.0, -32768.0]),
+            // Shadow-branch L, where the XYZ hub is worst.
+            ([3.0, 1.0, -1.0], [983.0, 256.0, -256.0]),
+            ([5.0, 0.501953125, -0.501953125], [1638.0, 128.0, -128.0]),
+            ([0.0, -128.0, 1.0], [0.0, -32768.0, 256.0]),
+        ];
+
+        for (lab, want) in cases {
+            let px = lab_px(lab).colourspace(Interpretation::Labs).getpoint(0, 0);
+            for (c, &exp) in want.iter().enumerate() {
+                assert!(
+                    (px[c] - exp).abs() < 1e-6,
+                    "lab {lab:?} band {c}: vips says {exp}, got {}",
+                    px[c]
+                );
+            }
+        }
+    }
+
+    /**
+     * Tests that LabS -> Lab is the plain division `LabS2Lab.c:57-59`
+     * does, with no quantisation of its own. Values measured from vips
+     * 8.18.4 with `vips rawload px.raw in.v 1 1 3 --format short
+     * --interpretation labs` then `colourspace ... lab`.
+     *
+     * The last four cases sit under L = 8, where the XYZ hub's
+     * `lab_f`/`lab_to_xyz` branch constants stop being mutual inverses,
+     * so they only land if the direct edge is taken.
+     */
+    #[test]
+    fn labs_decode_is_the_plain_division() {
+        let cases: [([f64; 3], [f64; 3]); 10] = [
+            ([16383.0, 0.0, 0.0], [49.99847412109375, 0.0, 0.0]),
+            ([16384.0, 0.0, 0.0], [50.00152587890625, 0.0, 0.0]),
+            ([32767.0, 0.0, 0.0], [100.0, 0.0, 0.0]),
+            ([0.0, 128.0, -128.0], [0.0, 0.5, -0.5]),
+            ([0.0, -1.0, 1.0], [0.0, -0.00390625, 0.00390625]),
+            ([0.0, 32767.0, -32768.0], [0.0, 127.99609375, -128.0]),
+            (
+                [1638.0, 25.0, -25.0],
+                [4.998931884765625, 0.09765625, -0.09765625],
+            ),
+            // vips prints this one as 0.99795526266098022, which is the
+            // same f32 with a digit more than f64 needs.
+            (
+                [327.0, 1.0, -1.0],
+                [0.9979552626609802, 0.00390625, -0.00390625],
+            ),
+            ([983.0, 256.0, -256.0], [2.999969482421875, 1.0, -1.0]),
+            ([2621.0, 0.0, 0.0], [7.9989013671875, 0.0, 0.0]),
+        ];
+
+        for (labs, want) in cases {
+            let px = labs_px(labs)
+                .colourspace(Interpretation::Lab)
+                .getpoint(0, 0);
+            for (c, &exp) in want.iter().enumerate() {
+                assert!(
+                    (px[c] - exp).abs() < 1e-6,
+                    "labs {labs:?} band {c}: vips says {exp}, got {}",
+                    px[c]
+                );
+            }
+        }
+    }
+
+    /**
+     * Tests that the Lab <-> LabS edge really does skip the XYZ hub, by
+     * pinning pixels where the two routes cannot agree.
+     *
+     * Truncation and the hub do not mix. `Lab -> XYZ -> Lab` leaves a
+     * residue of a few parts in 1e6 (the `lab_f` / `lab_to_xyz` branch
+     * constants are not mutual inverses), which rounding used to absorb
+     * and truncation cannot: whenever the exact code is a whole number,
+     * a residue of -1e-6 drops it a whole count. So the direct edge is
+     * not a performance nicety once the quantiser is right, it is the
+     * only route that reproduces vips.
+     *
+     * Works by computing the hub answer here, through the same
+     * `to_xyz` / `from_xyz_into` pair the generic route uses, and
+     * asserting it misses the measured vips value that
+     * `try_colourspace` hits.
+     */
+    #[test]
+    fn labs_direct_edge_beats_the_xyz_hub() {
+        // vips: lab [0, -128, 1] -> labs [0, -32768, 256].
+        let lab = [0.0, -128.0, 1.0];
+        let direct = lab_px(lab).colourspace(Interpretation::Labs).getpoint(0, 0);
+        assert!(
+            (direct[1] + 32768.0).abs() < 1e-6 && (direct[2] - 256.0).abs() < 1e-6,
+            "direct edge should give vips's [-32768, 256], got {direct:?}"
+        );
+
+        let mut hub = [0.0f64; 4];
+        from_xyz_into(
+            Interpretation::Labs,
+            to_xyz(Interpretation::Lab, &lab),
+            &mut hub,
+        );
+        assert!(
+            (hub[1] - direct[1]).abs() > 0.5 || (hub[2] - direct[2]).abs() > 0.5,
+            "the hub is supposed to miss by a count here, but gave {hub:?}"
+        );
+
+        // The same in reverse: vips says labs [983, 256, -256] decodes to
+        // lab [2.999969482421875, 1, -1] exactly.
+        let labs = [983.0, 256.0, -256.0];
+        let back = labs_px(labs)
+            .colourspace(Interpretation::Lab)
+            .getpoint(0, 0);
+        assert!(
+            (back[1] - 1.0).abs() < 1e-6 && (back[2] + 1.0).abs() < 1e-6,
+            "direct edge should give vips's [1, -1], got {back:?}"
+        );
+        let hub_back = xyz_to_lab(to_xyz(Interpretation::Labs, &labs), D65);
+        assert!(
+            (hub_back[1] - 1.0).abs() > 1e-4,
+            "the hub is supposed to drift here, but gave {hub_back:?}"
+        );
+    }
+
+    /**
+     * Tests that the truncation is not confined to the direct edge:
+     * every other route into LabS ends in `vips_Lab2LabS` too
+     * (`colourspace.c:229` onward), so the hub arm of `from_xyz_into`
+     * has to truncate as well. Values measured from vips 8.18.4 with
+     * `vips rawload px.raw in.v 1 1 3 --format uchar --interpretation
+     * srgb` then `colourspace in.v out.v labs`.
+     */
+    #[test]
+    fn labs_hub_routes_truncate_too() {
+        let cases: [([u8; 3], [f64; 3]); 7] = [
+            ([255, 255, 255], [32767.0, 1.0, -2.0]),
+            ([0, 0, 0], [0.0, 0.0, 0.0]),
+            ([255, 0, 0], [17442.0, 20507.0, 17208.0]),
+            ([0, 255, 0], [28748.0, -22063.0, 21294.0]),
+            ([0, 0, 255], [10584.0, 20274.0, -27613.0]),
+            ([128, 128, 128], [17558.0, 0.0, -1.0]),
+            ([10, 20, 30], [1949.0, -170.0, -2083.0]),
+        ];
+
+        for (rgb, want) in cases {
+            let im = Raster::new(1, 1, PixelFormat::Rgb8, rgb.to_vec()).unwrap();
+            let px = im.colourspace(Interpretation::Labs).getpoint(0, 0);
+            for (c, &exp) in want.iter().enumerate() {
+                assert!(
+                    (px[c] - exp).abs() < 1e-6,
+                    "srgb {rgb:?} band {c}: vips says {exp}, got {}",
+                    px[c]
+                );
+            }
+        }
     }
 
     /**
@@ -2648,7 +4421,8 @@ mod tests {
      */
     #[test]
     fn colourspace_typed_errors() {
-        let two_band = Raster::zeroed(2, 2, PixelFormat::with_channels(2, 4).unwrap()).unwrap();
+        let two_band =
+            Raster::zeroed(2, 2, PixelFormat::with_kind(2, SampleKind::F32).unwrap()).unwrap();
         let tagged = two_band.copy().interpretation(Interpretation::Lab).build();
         assert!(matches!(
             tagged.try_colourspace(Interpretation::Xyz),
@@ -2660,7 +4434,8 @@ mod tests {
         ));
 
         // Untagged multiband float infers Multiband: no route.
-        let multi = Raster::zeroed(2, 2, PixelFormat::with_channels(5, 4).unwrap()).unwrap();
+        let multi =
+            Raster::zeroed(2, 2, PixelFormat::with_kind(5, SampleKind::F32).unwrap()).unwrap();
         assert!(matches!(
             multi.try_colourspace(Interpretation::Lab),
             Err(ColourError::UnsupportedColourspace { .. })
@@ -2798,7 +4573,7 @@ mod tests {
      */
     #[test]
     fn icc_import_float_preserves_subcount_precision() {
-        let fmt = PixelFormat::with_channels(3, 4).unwrap();
+        let fmt = PixelFormat::with_kind(3, SampleKind::F32).unwrap();
         assert!(fmt.is_float(), "3-band float device raster");
         // Two grey pixels that both round to the 8-bit code 119.
         let samples = [118.6f32, 118.6, 118.6, 119.4, 119.4, 119.4];
@@ -2827,7 +4602,7 @@ mod tests {
         let imported = srgb_profiled_fixture().icc_import();
 
         let exported_16 = imported.icc_export_with(16, Intent::Perceptual, None);
-        assert_eq!(exported_16.format().bytes_per_channel(), 2);
+        assert_eq!(exported_16.format().kind(), SampleKind::U16);
         assert_eq!(exported_16.interpretation(), Interpretation::Rgb16);
 
         assert!(matches!(
@@ -2878,6 +4653,7 @@ mod tests {
      * result is tagged sRGB-device, and the output profile is attached.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
     fn icc_transform_to_display_p3() {
         let dir = tempfile::tempdir().unwrap();
         let p3_bytes = ColorProfile::new_display_p3().encode().unwrap();
@@ -2902,7 +4678,30 @@ mod tests {
     /**
      * Tests grey-profile ICC support: a Gray8 image with a gamma-2.2 grey
      * profile imports through the exact grayTRC path (L ~54 for code 128)
-     * and export round-trips within 1 count.
+     * and round-trips within 1 count when the export profile is named.
+     *
+     * The export leg has to name the profile since #720. `icc_import` retags
+     * the output Lab, and a one-channel grey profile cannot describe a
+     * three-channel space, so it goes with the retag and there is nothing left
+     * for a bare `icc_export` to use. That is vips's behaviour, not a
+     * consequence of the fix:
+     *
+     * ```text
+     * vips icc_import grey.v out.v      -> lab, no icc-profile-data
+     * vips icc_import rgb.v  out.v      -> lab, icc-profile-data 3144 bytes
+     * vips icc_import cmyk.v out.v      -> lab, no icc-profile-data
+     * vips icc_export lab-from-grey.v x.v
+     *     -> VipsIcc: Unsupported raster format
+     * vips icc_export lab-from-grey.v x.v --output-profile "Generic Gray.icc"
+     *     -> 8x8 uchar, 1 band, b-w
+     * vips icc_export lab-from-rgb.v x.v -> 8x8 uchar, 3 bands, srgb
+     * ```
+     *
+     * So the RGB round trip still works off the attached profile, and the grey
+     * one never did in vips; this test used to assert it did. The migration is
+     * `icc_export_with(.., Some(path))`, the same thing vips needs, and the
+     * file-handling half of that is already covered by
+     * `icc_transform_to_display_p3`.
      */
     #[test]
     fn icc_gray_profile_roundtrip() {
@@ -2912,6 +4711,11 @@ mod tests {
 
         let imported = im.icc_import();
         assert_eq!(imported.interpretation(), Interpretation::Lab);
+        assert_eq!(
+            imported.icc_profile(),
+            None,
+            "a grey profile cannot describe Lab, so the retag drops it (#720)"
+        );
         let px = imported.getpoint(0, 0);
         assert!(
             (px[0] - 53.8).abs() < 1.0,
@@ -2920,10 +4724,17 @@ mod tests {
         );
         assert!(px[1].abs() < 0.5 && px[2].abs() < 0.5);
 
-        let exported = imported.icc_export();
-        assert_eq!(exported.interpretation(), Interpretation::Bw);
-        let diff = (exported.getpoint(0, 0)[0] - 128.0).abs();
-        assert!(diff <= 1.0, "grey round trip drifted by {diff}");
+        // And the consequence, which is the half worth pinning: with nothing
+        // attached there is no profile for the export to use, and it says so
+        // rather than inventing one. vips fails the same way and needs the
+        // same fix, an explicit output profile.
+        assert!(
+            matches!(
+                imported.try_icc_export_with(8, Intent::Perceptual, None),
+                Err(ColourError::NoProfile)
+            ),
+            "a bare export has no profile left to use"
+        );
     }
 
     /**
@@ -2943,6 +4754,7 @@ mod tests {
      * bytes, and an unreadable profile path.
      */
     #[test]
+    #[cfg_attr(miri, ignore)] // hands a real path to an entry point that opens it
     fn icc_typed_errors() {
         let bare = Raster::zeroed(1, 1, PixelFormat::Rgb8).unwrap();
         assert!(matches!(
@@ -2985,9 +4797,11 @@ mod tests {
             180.0 / 255.0,
             160.0 / 255.0,
         ];
-        let exact = icc_device_to_lab(&profile, &device, 3, Intent::Perceptual).unwrap();
+        // Two RGB pixels, so the plane geometry the allocation is priced
+        // against is 2x1.
+        let exact = icc_device_to_lab(&profile, &device, 3, Intent::Perceptual, 2, 1).unwrap();
         let fallback =
-            icc_device_to_lab_fallback(&profile, &device, 3, Intent::Perceptual).unwrap();
+            icc_device_to_lab_fallback(&profile, &device, 3, Intent::Perceptual, 2, 1).unwrap();
         for (e, f) in exact.iter().zip(fallback.iter()) {
             assert!(
                 de76(*e, *f) < 2.0,
@@ -3007,5 +4821,2086 @@ mod tests {
         let a = im.icc_import_with(Intent::Perceptual, None, None);
         let b = im.icc_import_with(Intent::Relative, None, None);
         assert_eq!(a.data(), b.data());
+    }
+
+    /// One LCh pixel as a float raster, so the input words are the exact
+    /// `f32` samples `vips rawload --format float --interpretation lch`
+    /// hands `LCh2Lab.c`.
+    fn lch_px(lch: [f64; 3]) -> Raster {
+        Raster::constant(1, 1, &lch, Interpretation::Lch)
+    }
+
+    /// One CMC pixel as a float raster, the same shape
+    /// `vips rawload --format float --interpretation cmc` produces.
+    fn cmc_px(cmc: [f64; 3]) -> Raster {
+        Raster::constant(1, 1, &cmc, Interpretation::Cmc)
+    }
+
+    /**
+     * Tests that the LabS quantiser reads a **float** Lab rather than
+     * the f64 one the rest of this module carries.
+     *
+     * `Lab2LabS.c:59` declares `float *restrict p`, and every libvips
+     * route that ends in LabS hands it a float image, so the Lab value
+     * is rounded to `f32` before the scale-and-truncate. That rounding
+     * is not cosmetic once the quantiser truncates: it decides whole
+     * counts.
+     *
+     * `LCh [0, 1, 30]` is the case that shows it. `sin(30 deg)` is
+     * 0.49999999999999994 in f64 and exactly 0.5 once stored as `f32`,
+     * so `b * 256` is either 127.99999999999999 (truncating to 127) or
+     * 128.0 (truncating to 128). vips 8.18.4 prints 128.
+     *
+     * Works by pinning the whole triple for LCh inputs whose `a`/`b`
+     * land on an f32 boundary, measured with `vips rawload px.raw in.v
+     * 1 1 3 --format float --interpretation lch`, `vips colourspace
+     * in.v out.v labs`, `vips rawsave out.v out.raw`.
+     */
+    #[test]
+    fn labs_quantiser_reads_a_float_lab() {
+        let cases: [([f64; 3], [f64; 3]); 4] = [
+            ([0.0, 1.0, 30.0], [0.0, 221.0, 128.0]),
+            ([50.0, 1.0, 30.0], [16383.0, 221.0, 128.0]),
+            ([50.0, 25.0, 30.0], [16383.0, 5542.0, 3200.0]),
+            ([20.0, 100.0, 30.0], [6553.0, 22170.0, 12800.0]),
+        ];
+
+        for (lch, want) in cases {
+            let px = lch_px(lch).colourspace(Interpretation::Labs).getpoint(0, 0);
+            for (c, &exp) in want.iter().enumerate() {
+                assert!(
+                    (px[c] - exp).abs() < 1e-6,
+                    "lch {lch:?} band {c}: vips says {exp}, got {}",
+                    px[c]
+                );
+            }
+        }
+    }
+
+    /**
+     * Tests the direct `LCh -> LabS` edge, `{ LCH, LABS,
+     * { vips_LCh2Lab, vips_Lab2LabS } }` (`colourspace.c:280`), which
+     * never touches XYZ.
+     *
+     * Every expectation is a measurement from vips 8.18.4 taken through
+     * `rawload` / `colourspace` / `rawsave`, so the input words and the
+     * output codes are both exact.
+     *
+     * The low-`L` rows are the ones the XYZ hub cannot reach: under
+     * `L = 8` the `lab_f` / `lab_to_xyz` branch constants stop being
+     * mutual inverses, and a residue of a few parts in 1e6 costs a whole
+     * count once the code lands on an integer.
+     */
+    #[test]
+    fn lch_to_labs_takes_the_direct_edge() {
+        let cases: [([f64; 3], [f64; 3]); 16] = [
+            ([50.0, 0.0, 0.0], [16383.0, 0.0, 0.0]),
+            ([50.0, 1.0, 0.0], [16383.0, 256.0, 0.0]),
+            ([50.0, 1.0, 180.0], [16383.0, -256.0, 0.0]),
+            ([50.0, 25.0, 90.0], [16383.0, 0.0, 6400.0]),
+            ([50.0, 25.0, 270.0], [16383.0, 0.0, -6400.0]),
+            ([100.0, 128.0, 0.0], [32767.0, 32767.0, 0.0]),
+            ([0.0, 128.0, 180.0], [0.0, -32768.0, 0.0]),
+            ([10.0, 25.0, 270.0], [3276.0, 0.0, -6400.0]),
+            ([20.0, 50.5, 180.0], [6553.0, -12928.0, 0.0]),
+            ([80.0, 1.0, 0.0], [26213.0, 256.0, 0.0]),
+            // Under L = 8, where the hub residue is worst.
+            ([8.0, 1.0, 180.0], [2621.0, -256.0, 0.0]),
+            ([5.0, 0.5019531, 0.0], [1638.0, 128.0, 0.0]),
+            ([4.0, 0.5, 180.0], [1310.0, -128.0, 0.0]),
+            ([3.0, 1.0, 0.0], [983.0, 256.0, 0.0]),
+            ([3.0, 1.0, 180.0], [983.0, -256.0, 0.0]),
+            ([2.0, 2.0, 180.0], [655.0, -512.0, 0.0]),
+        ];
+
+        for (lch, want) in cases {
+            let px = lch_px(lch).colourspace(Interpretation::Labs).getpoint(0, 0);
+            for (c, &exp) in want.iter().enumerate() {
+                assert!(
+                    (px[c] - exp).abs() < 1e-6,
+                    "lch {lch:?} band {c}: vips says {exp}, got {}",
+                    px[c]
+                );
+            }
+        }
+    }
+
+    /**
+     * Tests the direct `LabS -> LCh` edge, `{ LABS, LCH,
+     * { vips_LabS2Lab, vips_Lab2LCh } }` (`colourspace.c:312`).
+     *
+     * The neutral rows are the loud ones. A LabS code with `a = b = 0`
+     * is exactly neutral, so vips answers `C = 0, h = 0`, but the hub's
+     * `Lab -> XYZ -> Lab` round trip pushes `a` and `b` off zero and the
+     * hue read off them is garbage: 338.199 degrees, at every `L`.
+     *
+     * The tolerance is 1e-4 rather than the 1e-6 used for code pins,
+     * because vips prints these through `float`: `hypot(127.99609375,
+     * 128)` is 181.0165738689659 in f64 and 181.01657104492188 once
+     * rounded to f32.
+     */
+    #[test]
+    fn labs_to_lch_takes_the_direct_edge() {
+        let cases: [([f64; 3], [f64; 3]); 15] = [
+            ([0.0, 0.0, 0.0], [0.0, 0.0, 0.0]),
+            ([327.0, 0.0, 0.0], [0.9979552626609802, 0.0, 0.0]),
+            ([983.0, 0.0, 0.0], [2.999969482421875, 0.0, 0.0]),
+            ([1638.0, 0.0, 0.0], [4.998931884765625, 0.0, 0.0]),
+            ([2621.0, 0.0, 0.0], [7.9989013671875, 0.0, 0.0]),
+            ([3276.0, 0.0, 0.0], [9.99786376953125, 0.0, 0.0]),
+            ([6553.0, 0.0, 0.0], [19.998779296875, 0.0, 0.0]),
+            ([16383.0, 0.0, 0.0], [49.99847412109375, 0.0, 0.0]),
+            ([32767.0, 0.0, 0.0], [100.0, 0.0, 0.0]),
+            // The `vips_col_ab2h` quadrant ladder, one count off zero.
+            ([0.0, 1.0, 0.0], [0.0, 0.00390625, 0.0]),
+            ([0.0, -1.0, 0.0], [0.0, 0.00390625, 180.0]),
+            ([0.0, 0.0, 1.0], [0.0, 0.00390625, 90.0]),
+            ([0.0, 0.0, -1.0], [0.0, 0.00390625, 270.0]),
+            (
+                [983.0, 256.0, -256.0],
+                [2.999969482421875, 1.4142135381698608, 315.0],
+            ),
+            (
+                [32767.0, 32767.0, -32768.0],
+                [100.0, 181.01657104492188, 314.9991149902344],
+            ),
+        ];
+
+        for (labs, want) in cases {
+            let px = labs_px(labs)
+                .colourspace(Interpretation::Lch)
+                .getpoint(0, 0);
+            for (c, &exp) in want.iter().enumerate() {
+                assert!(
+                    (px[c] - exp).abs() < 1e-4,
+                    "labs {labs:?} band {c}: vips says {exp}, got {}",
+                    px[c]
+                );
+            }
+        }
+    }
+
+    /**
+     * Tests the direct `LabS -> CMC` edge, `{ LABS, CMC,
+     * { vips_LabS2Lab, vips_Lab2LCh, vips_LCh2CMC } }`
+     * (`colourspace.c:313`).
+     *
+     * Same neutral-hue story as `LabS -> LCh`: vips answers `Ccmc = 0,
+     * hcmc = 0` on the neutral axis and the hub answers 338.199 degrees.
+     *
+     * `LabS [0, 256, 0]` is the row that shows the CMC hue correction is
+     * really being applied and not skipped: `h = 0` with `C = 1` comes
+     * back as 9.931086e-05, not 0, because `ch_to_hcmc`'s `d * f` term
+     * is small but not zero there.
+     */
+    #[test]
+    fn labs_to_cmc_takes_the_direct_edge() {
+        let cases: [([f64; 3], [f64; 3]); 13] = [
+            ([0.0, 0.0, 0.0], [0.0, 0.0, 0.0]),
+            ([327.0, 0.0, 0.0], [1.740433931350708, 0.0, 0.0]),
+            ([983.0, 0.0, 0.0], [5.2319464683532715, 0.0, 0.0]),
+            ([1638.0, 0.0, 0.0], [8.71813678741455, 0.0, 0.0]),
+            ([2621.0, 0.0, 0.0], [13.95008373260498, 0.0, 0.0]),
+            ([3276.0, 0.0, 0.0], [17.4362735748291, 0.0, 0.0]),
+            ([6553.0, 0.0, 0.0], [34.2913818359375, 0.0, 0.0]),
+            ([16383.0, 0.0, 0.0], [65.7352523803711, 0.0, 0.0]),
+            ([32767.0, 0.0, 0.0], [100.00244903564453, 0.0, 0.0]),
+            (
+                [0.0, 256.0, 0.0],
+                [0.0, 1.3314666748046875, 9.931086242431775e-05],
+            ),
+            ([0.0, -1.0, 0.0], [0.0, 0.004822731018066406, 180.0]),
+            (
+                [0.0, -32768.0, 0.0],
+                [0.0, 50.649295806884766, 192.8778839111328],
+            ),
+            (
+                [16383.0, 0.0, 6400.0],
+                [65.7352523803711, 18.706565856933594, 114.02556610107422],
+            ),
+        ];
+
+        for (labs, want) in cases {
+            let px = labs_px(labs)
+                .colourspace(Interpretation::Cmc)
+                .getpoint(0, 0);
+            for (c, &exp) in want.iter().enumerate() {
+                assert!(
+                    (px[c] - exp).abs() < 1e-4,
+                    "labs {labs:?} band {c}: vips says {exp}, got {}",
+                    px[c]
+                );
+            }
+        }
+    }
+
+    /**
+     * Tests the direct `CMC -> LabS` edge, `{ CMC, LABS,
+     * { vips_CMC2LCh, vips_LCh2Lab, vips_Lab2LabS } }`
+     * (`colourspace.c:297`).
+     *
+     * The CMC inverse is the one place this module and libvips really do
+     * compute different numbers: libvips inverts `Lcmc`, `Ccmc` and
+     * `hcmc` through interpolation tables sampled every 0.1
+     * (`UCS2LCh.c:66-135`) and this module bisects the forward function.
+     * The tables are the coarser of the two, by about 6e-8 in `L`, so a
+     * CMC value whose LabS code sits a hair above a whole number cannot
+     * be matched from either side: `Lcmc = 3.4861903190612793` scales to
+     * 655.0000104 in libvips and 654.99999 here.
+     *
+     * So the pins are chosen at codes with real slack, generated by
+     * running `vips colourspace <lch> <out> cmc` on `LCh [L, 0, 0]` for
+     * an `L` whose code is not near an integer, plus two chromatic
+     * values where the tables and the bisection agree.
+     */
+    #[test]
+    fn cmc_to_labs_takes_the_direct_edge() {
+        let cases: [([f64; 3], [f64; 3]); 19] = [
+            ([0.0, 0.0, 0.0], [0.0, 0.0, 0.0]),
+            ([0.871999979019165, 0.0, 0.0], [163.0, 0.0, 0.0]),
+            ([2.615999937057495, 0.0, 0.0], [491.0, 0.0, 0.0]),
+            ([4.359999656677246, 0.0, 0.0], [819.0, 0.0, 0.0]),
+            ([6.97599983215332, 0.0, 0.0], [1310.0, 0.0, 0.0]),
+            ([10.46399974822998, 0.0, 0.0], [1966.0, 0.0, 0.0]),
+            ([13.079999923706055, 0.0, 0.0], [2457.0, 0.0, 0.0]),
+            ([15.695999145507812, 0.0, 0.0], [2949.0, 0.0, 0.0]),
+            ([20.92799949645996, 0.0, 0.0], [3932.0, 0.0, 0.0]),
+            ([26.15999984741211, 0.0, 0.0], [4915.0, 0.0, 0.0]),
+            ([34.293174743652344, 0.0, 0.0], [6553.0, 0.0, 0.0]),
+            ([46.950042724609375, 0.0, 0.0], [9830.0, 0.0, 0.0]),
+            ([65.73650360107422, 0.0, 0.0], [16383.0, 0.0, 0.0]),
+            ([80.73076629638672, 0.0, 0.0], [22936.0, 0.0, 0.0]),
+            ([93.87285614013672, 0.0, 0.0], [29490.0, 0.0, 0.0]),
+            (
+                [87.4730759, 22.4464149, 16.5072842],
+                [26213.0, 8152.0, 2492.0],
+            ),
+            (
+                [61.5259094, 16.0966263, 316.1648865],
+                [14745.0, 3342.0, -3844.0],
+            ),
+            // The two the hub cannot reach: `a` lands on a whole code,
+            // so the XYZ round trip's residue costs a count.
+            (
+                [0.0, 50.649295806884766, 192.8778839111328],
+                [0.0, -32768.0, 0.0],
+            ),
+            (
+                [0.0, 1.3314666748046875, 9.931086242431775e-05],
+                [0.0, 256.0, 0.0],
+            ),
+        ];
+
+        for (cmc, want) in cases {
+            let px = cmc_px(cmc).colourspace(Interpretation::Labs).getpoint(0, 0);
+            for (c, &exp) in want.iter().enumerate() {
+                assert!(
+                    (px[c] - exp).abs() < 1e-6,
+                    "cmc {cmc:?} band {c}: vips says {exp}, got {}",
+                    px[c]
+                );
+            }
+        }
+    }
+
+    /**
+     * Tests that adding these edges did not fork the arithmetic: where
+     * the XYZ round trip leaves no residue, the direct edge and the hub
+     * agree, and both match vips. Where it does, only the direct edge
+     * matches.
+     *
+     * This is the check #556 had to invent. `direct_edge` never reaches
+     * `from_xyz_into`, so an entry that reproduced the target-side
+     * production instead of sharing it would drift silently. The LabS
+     * truncation lives in `lab_to_labs` and the CMC encode in
+     * `lch_to_cmc` for exactly that reason, and this test is what says
+     * so out loud.
+     *
+     * Works by driving `to_xyz` / `from_xyz_into` directly for the hub
+     * answer and `try_colourspace` for the routed one, then comparing
+     * both against measured vips values.
+     */
+    #[test]
+    fn lab_family_direct_edges_agree_with_the_hub_off_the_integer_codes() {
+        // Off the integer codes and above the shadow branch, the hub's
+        // residue is far too small to move a count, so all three agree.
+        let agree: [([f64; 3], [f64; 3]); 5] = [
+            ([50.0, 1.0, 37.0], [16383.0, 204.0, 154.0]),
+            ([80.0, 33.3, 17.0], [26213.0, 8152.0, 2492.0]),
+            ([60.0, 12.7, 203.0], [19660.0, -2992.0, -1270.0]),
+            ([45.0, 19.9, 311.0], [14745.0, 3342.0, -3844.0]),
+            ([90.0, 3.3, 61.0], [29490.0, 409.0, 738.0]),
+        ];
+        for (lch, want) in agree {
+            let direct = lch_px(lch).colourspace(Interpretation::Labs).getpoint(0, 0);
+            let mut hub = [0.0f64; 4];
+            from_xyz_into(
+                Interpretation::Labs,
+                to_xyz(Interpretation::Lch, &lch),
+                &mut hub,
+            );
+            for c in 0..3 {
+                assert!(
+                    (direct[c] - want[c]).abs() < 1e-6,
+                    "lch {lch:?} band {c}: vips says {}, direct gave {}",
+                    want[c],
+                    direct[c]
+                );
+                assert!(
+                    (hub[c] - want[c]).abs() < 1e-6,
+                    "lch {lch:?} band {c}: the hub should agree here, \
+                     vips says {}, hub gave {}",
+                    want[c],
+                    hub[c]
+                );
+            }
+        }
+
+        // On an integer code under the shadow branch, only the direct
+        // edge can reach vips's answer.
+        let lch = [3.0, 1.0, 180.0];
+        let direct = lch_px(lch).colourspace(Interpretation::Labs).getpoint(0, 0);
+        assert!(
+            (direct[1] + 256.0).abs() < 1e-6,
+            "direct edge should give vips's -256, got {direct:?}"
+        );
+        let mut hub = [0.0f64; 4];
+        from_xyz_into(
+            Interpretation::Labs,
+            to_xyz(Interpretation::Lch, &lch),
+            &mut hub,
+        );
+        assert!(
+            (hub[1] - direct[1]).abs() > 0.5,
+            "the hub is supposed to miss by a count here, but gave {hub:?}"
+        );
+
+        // The same for CMC, whose encoder the hub arm shares: a neutral
+        // LabS is neutral in CMC too, and the hub invents a hue.
+        let labs = [1638.0, 0.0, 0.0];
+        let direct = labs_px(labs)
+            .colourspace(Interpretation::Cmc)
+            .getpoint(0, 0);
+        assert!(
+            direct[1].abs() < 1e-4 && direct[2].abs() < 1e-4,
+            "direct edge should give vips's neutral [0, 0], got {direct:?}"
+        );
+        let mut hub = [0.0f64; 4];
+        from_xyz_into(
+            Interpretation::Cmc,
+            to_xyz(Interpretation::Labs, &labs),
+            &mut hub,
+        );
+        assert!(
+            hub[2] > 1.0,
+            "the hub is supposed to invent a hue here, but gave {hub:?}"
+        );
+    }
+
+    /**
+     * Tests that the hub arm still owns the same CMC encoder after the
+     * direct edges were added: `srgb -> cmc` is a genuine XYZ route
+     * (`colourspace.c:395`) and its answers are unchanged.
+     *
+     * Values measured from vips 8.18.4 with `vips rawload px.raw in.v
+     * 1 1 3 --format uchar --interpretation srgb` then `vips colourspace
+     * in.v out.v cmc`. The tolerance is 1e-4 because vips stages this
+     * route through `float` images and prints `float`.
+     *
+     * Only saturated colours are pinned. White and mid-grey come out of
+     * the sRGB primaries matrix with a chroma of about 0.01, where the
+     * hue is numerically meaningless and this crate and libvips already
+     * disagree by 0.1 degrees for reasons that predate these edges.
+     */
+    #[test]
+    fn cmc_hub_route_shares_the_encoder() {
+        let cases: [([u8; 3], [f64; 3]); 4] = [
+            (
+                [255, 0, 0],
+                [68.3399887084961, 44.80427551269531, 43.62641525268555],
+            ),
+            (
+                [0, 255, 0],
+                [92.4504623413086, 48.64079666137695, 156.00975036621094],
+            ),
+            (
+                [0, 0, 255],
+                [49.44218444824219, 52.046016693115234, 311.6222839355469],
+            ),
+            (
+                [10, 20, 30],
+                [10.37486743927002, 8.466974258422852, 267.78424072265625],
+            ),
+        ];
+
+        for (rgb, want) in cases {
+            let im = Raster::new(1, 1, PixelFormat::Rgb8, rgb.to_vec()).unwrap();
+            let px = im.colourspace(Interpretation::Cmc).getpoint(0, 0);
+            for (c, &exp) in want.iter().enumerate() {
+                assert!(
+                    (px[c] - exp).abs() < 1e-4,
+                    "srgb {rgb:?} band {c}: vips says {exp}, got {}",
+                    px[c]
+                );
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // scRGB -> sRGB goes through the interpolated libvips LUT (#581)
+    // -----------------------------------------------------------------
+
+    /// One LabS pixel converted to `target`, as integer codes.
+    fn labs_to(labs_l: f64, target: Interpretation) -> Vec<f64> {
+        labs_px([labs_l, 0.0, 0.0])
+            .colourspace(target)
+            .getpoint(0, 0)
+    }
+
+    /**
+     * Tests that the linear -> sRGB encode is the libvips 256-entry
+     * integer LUT read with a piecewise-linear interpolation, not the
+     * analytic IEC 61966-2-1 curve.
+     *
+     * vips never evaluates the transfer function per pixel.
+     * `LabQ2sRGB.c:126-146` builds `Y2v[i] = rintf(255 * encode(i/255))`
+     * once, in `float`, and `vips_col_scRGB2sRGB` (`:282-353`) then
+     * interpolates between two ALREADY-ROUNDED integer entries and
+     * `rintf`s the chord. That stacks three quantisations the analytic
+     * form has none of, and it moves the answer by a whole count on
+     * 5434 of the 32768 neutral LabS L codes.
+     *
+     * Works by driving the measured `Labs -> b-w` and `Labs -> sRGB`
+     * codes at L values where the two disagree, plus controls where they
+     * agree so the test cannot pass by shifting everything.
+     *
+     * Input: `vips rawload labs.raw in.v 32768 1 3 --format short
+     * --interpretation labs`, then `vips colourspace in.v out.v b-w`
+     * (and `srgb`) and `vips rawsave out.v out.raw`, on 8.18.4.
+     */
+    #[test]
+    fn scrgb_to_srgb_reads_the_interpolated_vips_lut() {
+        // (LabS L, vips b-w, vips sRGB). The first five are codes where
+        // the analytic curve answers one LESS than vips; the last three
+        // are controls the two already agreed on.
+        let cases: [(f64, f64, f64); 8] = [
+            (134.0, 2.0, 2.0),
+            (224.0, 3.0, 3.0),
+            (313.0, 4.0, 4.0),
+            (402.0, 5.0, 5.0),
+            (20000.0, 148.0, 148.0),
+            (0.0, 0.0, 0.0),
+            (1000.0, 11.0, 11.0),
+            (32767.0, 255.0, 255.0),
+        ];
+
+        for (l, want_bw, want_srgb) in cases {
+            let bw = labs_to(l, Interpretation::Bw);
+            assert!(
+                (bw[0] - want_bw).abs() < 1e-9,
+                "labs [{l}, 0, 0] -> b-w: vips says {want_bw}, got {}",
+                bw[0]
+            );
+            let srgb = labs_to(l, Interpretation::Srgb);
+            for (c, got) in srgb.iter().enumerate().take(3) {
+                assert!(
+                    (got - want_srgb).abs() < 1e-9,
+                    "labs [{l}, 0, 0] -> srgb band {c}: vips says \
+                     {want_srgb}, got {got}"
+                );
+            }
+        }
+    }
+
+    /**
+     * Tests that the chord is finished with `rintf`, which is round half
+     * to EVEN, and not with a half-away-from-zero round.
+     *
+     * `LabQ2sRGB.c:337` / `:422` end the interpolation with `rintf(v)`,
+     * and the Homebrew arm64 8.18.4 build compiles that to `frintx`,
+     * i.e. the default round-to-nearest-ties-to-even mode. The 16-bit
+     * table is where that is observable: the chord lands on an exact
+     * `.5` for 70 of the 32768 neutral LabS L codes, and the two rules
+     * disagree on half of them.
+     *
+     * Works by pinning one tie that resolves DOWN and one that resolves
+     * UP, so neither `floor` nor `ceil` nor half-away can pass both.
+     * L = 4746 puts the chord at exactly 9404.5 and vips answers 9404
+     * (half-away would say 9405); L = 5505 puts it at exactly 10651.5
+     * and vips answers 10652.
+     *
+     * Input: as above, then `vips colourspace in.v out.v grey16`.
+     */
+    #[test]
+    fn scrgb_to_srgb_rounds_ties_to_even() {
+        for (l, want) in [(4746.0, 9404.0), (5505.0, 10652.0)] {
+            let grey = labs_to(l, Interpretation::Grey16);
+            assert!(
+                (grey[0] - want).abs() < 1e-9,
+                "labs [{l}, 0, 0] -> grey16: vips says {want}, got {}",
+                grey[0]
+            );
+        }
+    }
+
+    /**
+     * Tests that the 16-bit spaces take their own 65536-entry table
+     * rather than scaling the 8-bit one, and that the table really is
+     * sampled at 65536 points.
+     *
+     * `calcul_tables_16` (`LabQ2sRGB.c:174`) builds `vips_Y2v_16` at the
+     * full 16-bit range, so `rgb16` and `grey16` resolve detail the
+     * 8-bit table cannot: L = 491 and L = 4746 both quantise to a flat
+     * neutral in sRGB but come out with a per-channel spread at 16 bits.
+     *
+     * Input: as above, with `vips colourspace in.v out.v rgb16`.
+     */
+    #[test]
+    fn rgb16_takes_the_65536_entry_table() {
+        let cases: [(f64, [f64; 3]); 4] = [
+            (491.0, [1405.0, 1404.0, 1404.0]),
+            (4746.0, [9404.0, 9405.0, 9404.0]),
+            (6923.0, [13040.0, 13041.0, 13039.0]),
+            (20000.0, [37845.0, 37846.0, 37843.0]),
+        ];
+
+        for (l, want) in cases {
+            let px = labs_to(l, Interpretation::Rgb16);
+            for (c, &exp) in want.iter().enumerate() {
+                assert!(
+                    (px[c] - exp).abs() < 1e-9,
+                    "labs [{l}, 0, 0] -> rgb16 band {c}: vips says {exp}, \
+                     got {}",
+                    px[c]
+                );
+            }
+        }
+    }
+
+    /**
+     * Tests that the HSV arm quantises through the SAME LUT, because
+     * `{ *, HSV }` reaches HSV via `vips_scRGB2sRGB` then
+     * `vips_sRGB2HSV` (`colourspace.c:336`, `:355` onward) and so sees
+     * the LUT's 8-bit codes, not an analytic encode rounded afterwards.
+     *
+     * Works by picking L = 491, the one neutral LabS code in this set
+     * where the LUT breaks the grey: it gives sRGB [6, 5, 5], so HSV
+     * reports a real saturation of 42, while the analytic encode gives a
+     * flat [5, 5, 5] and therefore saturation 0. That makes the case
+     * discriminating on the HSV arm specifically rather than on the sRGB
+     * codes it is built from.
+     *
+     * Input: as above, with `vips colourspace in.v out.v hsv`.
+     */
+    #[test]
+    fn hsv_quantises_through_the_lut_sampled_srgb() {
+        let px = labs_to(491.0, Interpretation::Hsv);
+        let want = [0.0, 42.0, 6.0];
+        for (c, &exp) in want.iter().enumerate() {
+            assert!(
+                (px[c] - exp).abs() < 1e-9,
+                "labs [491, 0, 0] -> hsv band {c}: vips says {exp}, got {}",
+                px[c]
+            );
+        }
+    }
+
+    /**
+     * Tests that [`calcul_tables`] reproduces the libvips `Y2v` tables
+     * entry for entry, at both ranges.
+     *
+     * The table is the thing everything else in this mechanism is built
+     * on, so it is pinned directly rather than only through the codes it
+     * produces. Seven of the 16-bit entries here are ones the FUSED
+     * multiply-add decides: evaluate `1.055 * powf(f, 1/2.4) - 0.055`
+     * unfused and they each drop by a count, which is 45 of the 65536
+     * entries in total. The 256-entry table is the same either way, so
+     * the 8-bit rows pin the shape and the 16-bit rows pin the fusion.
+     *
+     * Input: the tables were read back out of vips 8.18.4 rather than
+     * recomputed. Feeding scRGB knots `i / (range - 1)` through
+     * `vips rawload knots.raw k.v <range> 1 3 --format float
+     * --interpretation scrgb` then `vips colourspace k.v out.v srgb`
+     * (and `rgb16`) makes the interpolation land on entry `i`, so the
+     * output code IS `Y2v[i]`.
+     */
+    #[test]
+    fn calcul_tables_matches_the_vips_y2v_tables() {
+        let y2v_8 = calcul_tables(SRGB_RANGE);
+        assert_eq!(y2v_8.len(), SRGB_RANGE + 1);
+        assert_eq!(&y2v_8[..10], &[0, 13, 22, 28, 34, 38, 42, 46, 50, 53]);
+        assert_eq!(&y2v_8[248..256], &[252, 252, 253, 253, 254, 254, 255, 255]);
+        // "Copy the final element" (`LabQ2sRGB.c:141-144`).
+        assert_eq!(y2v_8[SRGB_RANGE], y2v_8[SRGB_RANGE - 1]);
+
+        let y2v_16 = calcul_tables(RGB16_RANGE);
+        assert_eq!(y2v_16.len(), RGB16_RANGE + 1);
+        // (index, vips entry). Everything from 3696 to 25615 is an entry
+        // the unfused form gets one count too low.
+        let cases: [(usize, i32); 15] = [
+            (0, 0),
+            (1, 13),
+            (2, 26),
+            (3, 39),
+            (255, 3244),
+            (3696, 17261),
+            (3857, 17635),
+            (5925, 21795),
+            (8993, 26618),
+            (8998, 26625),
+            (9393, 27171),
+            (25615, 43141),
+            (64674, 65155),
+            (65534, 65535),
+            (65535, 65535),
+        ];
+        for (i, want) in cases {
+            assert_eq!(y2v_16[i], want, "Y2v_16[{i}]");
+        }
+        assert_eq!(y2v_16[RGB16_RANGE], y2v_16[RGB16_RANGE - 1]);
+    }
+
+    /**
+     * One `f32` bit pattern's worth of the [`scrgb_to_code`] chord,
+     * evaluated both ways and compared as raw bits.
+     *
+     * [`scrgb_to_code`] finishes its chord with `f64` arithmetic rather
+     * than `f32::mul_add`, because `fma` is not in the x86-64 baseline
+     * and rustc lowers `f32::mul_add` to a libm `fmaf` call there, once
+     * per channel per pixel. The two spellings agree bit for bit
+     * because the exact product-sum is representable in an `f64` for
+     * every reachable input, so the single `as f32` is the single
+     * rounding `fmaf` performs:
+     *
+     * - `lo = lut[yi]` is an integer in `0..=range - 1`, exact in both
+     *   `f32` and `f64`.
+     * - `delta = lut[yi + 1] - lut[yi]` is an integer with
+     *   `|delta| <= 65535`, exact in both.
+     * - `t = yf - yi as f32` is exact: `yf < 2^24`, so subtracting its
+     *   truncated integer part cannot lose a bit, and `t` lands in
+     *   `[0, 1)`.
+     * - For `yi >= 1`, `yf >= 1` so `ulp(yf) >= 2^-23` and `t` is a
+     *   multiple of `2^-23`. Then `delta * t` is a multiple of `2^-23`
+     *   under `2^16`, and adding the integer `lo` keeps it a multiple
+     *   of `2^-23` under `2^17`: at most 40 significand bits, inside
+     *   `f64`'s 53.
+     * - For `yi == 0`, `lo == lut[0] == 0` (the linear arm gives `v = 0`
+     *   at `i = 0`), so the sum is a bare product of two `f32`s, exact
+     *   in `f64` at 24 + 24 = 48 bits.
+     *
+     * Works by taking `bits` as a raw `f32` pattern standing in for the
+     * clamped `yf`, so the caller owns the coverage and this owns only
+     * the comparison.
+     *
+     * Input: none. Nothing here is a parity claim against vips, it is a
+     * claim about two Rust expressions, so there is no oracle to read.
+     */
+    fn check_f64_chord_at(lut: &[i32], range: usize, bits: u32) {
+        let yf = f32::from_bits(bits);
+        let yi = yf as usize;
+        let lo = lut[yi];
+        let delta = (lut[yi + 1] - lo) as f32;
+        let t = yf - yi as f32;
+        let want = delta.mul_add(t, lo as f32);
+        let got = (f64::from(delta) * f64::from(t) + f64::from(lo)) as f32;
+        assert_eq!(
+            got.to_bits(),
+            want.to_bits(),
+            "range {range}, yf bits {bits:#010x} ({yf:e}), yi {yi}, \
+             delta {delta}, lo {lo}: mul_add gives {want:e}, the f64 \
+             chord gives {got:e}"
+        );
+    }
+
+    /**
+     * The structural subset of the chord equivalence that runs on every
+     * `cargo test`, as against the exhaustive sweep in
+     * [`sweep_f64_chord_against_mul_add`], which does not.
+     *
+     * Works by checking, for one `range`:
+     *
+     * - `-0.0`, which survives the `clamp(0.0, maxval)` in
+     *   [`scrgb_to_code`] (it is neither below the low bound nor above
+     *   the high one) and so reaches the lookup;
+     * - every `f32` in `[1.0, 2.0)`, 8388608 patterns, which is where
+     *   the arithmetic is under the most pressure: `ulp(yf)` is at its
+     *   smallest of any `yi >= 1`, so `t` carries a full 23 fractional
+     *   bits, and `delta` is near its largest because the transfer
+     *   curve is steepest at the bottom of the table;
+     * - both ends of EVERY LUT cell, 64 patterns deep each way, so
+     *   `t == 0` and the largest `t` below 1 are covered at every `yi`,
+     *   including `yi == 0`, both knees of the piecewise curve, and the
+     *   `yi == range - 1` cell where the duplicated final entry makes
+     *   `delta` zero and the clamp allows only `t == 0`;
+     * - a stride of 4517 over the whole `+0.0..=maxval` bit range, so
+     *   every `f32` exponent is represented, denormals included. They
+     *   all land in `yi == 0`, which the per-cell walk only samples at
+     *   its two ends.
+     *
+     * That is a few tens of millions of patterns rather than the
+     * billion-odd the full sweep walks, and it runs in well under a
+     * second per range in a debug build.
+     *
+     * Input: none, see [`check_f64_chord_at`].
+     */
+    fn spot_check_f64_chord(range: usize) {
+        let lut = y2v_table(range);
+        let maxval = (range - 1) as f32;
+        let top = maxval.to_bits();
+
+        check_f64_chord_at(lut, range, 0x8000_0000);
+
+        for bits in 1.0_f32.to_bits()..2.0_f32.to_bits() {
+            check_f64_chord_at(lut, range, bits);
+        }
+
+        const BAND: u32 = 64;
+        for yi in 0..range {
+            let cell_lo = (yi as f32).to_bits();
+            let cell_hi = ((yi + 1) as f32).to_bits();
+            for bits in cell_lo..=(cell_lo + BAND).min(top) {
+                check_f64_chord_at(lut, range, bits);
+            }
+            for bits in cell_hi.saturating_sub(BAND)..cell_hi.min(top + 1) {
+                check_f64_chord_at(lut, range, bits);
+            }
+        }
+
+        const STRIDE: u32 = 4517;
+        let mut bits = 0;
+        while bits < top {
+            check_f64_chord_at(lut, range, bits);
+            bits += STRIDE;
+        }
+        check_f64_chord_at(lut, range, top);
+    }
+
+    /**
+     * The exhaustive sweep behind the two `#[ignore]`d
+     * `f64_chord_matches_mul_add_*` tests.
+     *
+     * Works by walking `yf` over EVERY `f32` bit pattern from `+0.0` to
+     * `maxval`, plus `-0.0`, which is a superset of what the clamp in
+     * [`scrgb_to_code`] can hand the lookup. That is 1132396546
+     * patterns at range 256 and 1199570690 at range 65536, so it is a
+     * real sweep of the index space rather than a sample of it, and it
+     * is why the two tests that call this are `#[ignore]`d rather than
+     * run on every `cargo test`. [`spot_check_f64_chord`] is what runs
+     * by default; it covers the structure but not the whole space.
+     *
+     * Input: none, see [`check_f64_chord_at`], whose doc carries the
+     * argument for why the two spellings must agree.
+     */
+    fn sweep_f64_chord_against_mul_add(range: usize) {
+        let lut = y2v_table(range);
+        let maxval = (range - 1) as f32;
+
+        let mut bits = 0x8000_0000_u32;
+        let top = maxval.to_bits();
+        loop {
+            check_f64_chord_at(lut, range, bits);
+            if bits == 0x8000_0000 {
+                bits = 0;
+            } else if bits == top {
+                break;
+            } else {
+                bits += 1;
+            }
+        }
+    }
+
+    /**
+     * Tests that the `f64` chord in [`scrgb_to_code`] is bit-identical
+     * to the `f32::mul_add` it replaced at every structurally
+     * interesting point of the 256-entry LUT.
+     *
+     * Works by [`spot_check_f64_chord`], whose doc lists exactly what
+     * that covers. The point of running it rather than only stating the
+     * argument is that the equivalence is what licenses dropping a
+     * per-pixel libm `fmaf` call on x86-64 without moving a single
+     * output code.
+     *
+     * Input: none, see the helper.
+     */
+    #[test]
+    fn f64_chord_matches_mul_add_over_the_srgb_lut_sample() {
+        spot_check_f64_chord(SRGB_RANGE);
+    }
+
+    /**
+     * Tests the same structural sample across the 65536-entry LUT.
+     *
+     * Input: none, see [`spot_check_f64_chord`].
+     */
+    #[test]
+    fn f64_chord_matches_mul_add_over_the_rgb16_lut_sample() {
+        spot_check_f64_chord(RGB16_RANGE);
+    }
+
+    /**
+     * Tests the same equivalence over EVERY `f32` the 256-entry lookup
+     * can be handed, not just the structural sample.
+     *
+     * `#[ignore]`d because it walks 1132396546 bit patterns. Measured
+     * on an M-series mac that is 10.64s in a debug build and about a
+     * second in release, and it will be worse on a target without `fma`
+     * in its baseline, where the `f32::mul_add` arm of the comparison
+     * is itself a libm call. Nothing in the default `cargo test` run
+     * covers the whole space; this is what does, and it is worth
+     * running whenever the LUT or the chord changes:
+     *
+     * ```text
+     * cargo test --release --lib -- --ignored f64_chord_matches_mul_add
+     * ```
+     *
+     * Input: none, see [`sweep_f64_chord_against_mul_add`].
+     */
+    #[test]
+    #[ignore = "walks every f32 bit pattern up to maxval; run with --ignored"]
+    fn f64_chord_matches_mul_add_over_the_whole_srgb_domain() {
+        sweep_f64_chord_against_mul_add(SRGB_RANGE);
+    }
+
+    /**
+     * Tests the same exhaustive equivalence across the whole
+     * 65536-entry LUT, 1199570690 bit patterns.
+     *
+     * Split from the 8-bit sweep so the two run on separate test
+     * threads; they have no state in common. `#[ignore]`d for the same
+     * reason, 10.30s in a debug build, and run by the same invocation
+     * as [`f64_chord_matches_mul_add_over_the_whole_srgb_domain`].
+     *
+     * Input: none, see [`sweep_f64_chord_against_mul_add`].
+     */
+    #[test]
+    #[ignore = "walks every f32 bit pattern up to maxval; run with --ignored"]
+    fn f64_chord_matches_mul_add_over_the_whole_rgb16_domain() {
+        sweep_f64_chord_against_mul_add(RGB16_RANGE);
+    }
+
+    /**
+     * Tests that sRGB -> HSV TRUNCATES the hue and saturation codes on
+     * the store, and that the hue's ratio is an `f32` division.
+     *
+     * `sRGB2HSV.c:113-117` writes both into an `unsigned char`, which
+     * drops the fraction; libviprs used to hand them out unrounded and
+     * let the writer round, which missed vips on about a third of the
+     * two bands. It stayed invisible until #581, because the analytic
+     * sRGB encode produced flat greys where the LUT produces a real
+     * spread, and a flat grey has `delta == 0` and therefore no hue or
+     * saturation to get wrong.
+     *
+     * Works by pinning one case where both codes have a fraction over a
+     * half, so rounding and truncating disagree on BOTH, and one where
+     * the hue is exactly on the boundary between the two precisions:
+     * sRGB [5, 7, 22] puts `42.5 * (-2 / 17) + 170` a hair under 165 in
+     * `f32` and a hair over it in `f64`, and vips answers 164.
+     *
+     * Input: `vips rawload px.raw in.v N 1 3 --format uchar
+     * --interpretation srgb`, then `vips colourspace in.v out.v hsv`.
+     */
+    #[test]
+    fn srgb_to_hsv_truncates_hue_and_saturation() {
+        let cases: [([u8; 3], [f64; 3]); 3] = [
+            ([5, 7, 66], [168.0, 235.0, 66.0]),
+            ([5, 7, 88], [168.0, 240.0, 88.0]),
+            ([5, 7, 22], [164.0, 197.0, 22.0]),
+        ];
+
+        for (rgb, want) in cases {
+            let im = Raster::new(1, 1, PixelFormat::Rgb8, rgb.to_vec()).unwrap();
+            let px = im.colourspace(Interpretation::Hsv).getpoint(0, 0);
+            for (c, &exp) in want.iter().enumerate() {
+                assert!(
+                    (px[c] - exp).abs() < 1e-9,
+                    "srgb {rgb:?} -> hsv band {c}: vips says {exp}, got {}",
+                    px[c]
+                );
+            }
+        }
+    }
+
+    // -- allocation --
+
+    /// A per-thread plane ceiling below every colour buffer the tests below ask
+    /// for (the smallest is 64 bytes at 8x8), so the fallible path trips
+    /// deterministically at a tiny, instantly-constructible input instead of the
+    /// multi-gigabyte one the real refusal would need (#672). Each check names
+    /// the site the ceiling applies to, so it starves that buffer and no other
+    /// (#696).
+    const OUTPUT_TEST_CAP_BYTES: u64 = 16;
+
+    /// An 8x8 sRGB fixture with no profile attached, so nothing routes through
+    /// the ICC arms.
+    fn srgb_8x8() -> Raster {
+        Raster::new(8, 8, PixelFormat::Rgb8, vec![119u8; 8 * 8 * 3]).unwrap()
+    }
+
+    /**
+     * Tests that a colour output the allocator refuses is reported as a
+     * typed error rather than reaching `handle_alloc_error` and aborting.
+     * Runs with no test ceiling in play, so the refusal is the real
+     * allocator's and the guard holds without the hook.
+     *
+     * The size matters. `2^31` square at one byte per pixel is 4 EiB, under
+     * the `isize::MAX` ceiling `Vec` checks up front, so the request reaches
+     * the allocator, is refused, and an infallible `vec![]` would abort there
+     * — the exact failure #672 is about. `u32::MAX` square is past that
+     * ceiling instead, where `vec![]` panics on "capacity overflow" before the
+     * allocator sees it; both must come back typed, so both are pinned.
+     */
+    #[test]
+    fn colour_output_allocation_reports_failure_rather_than_aborting() {
+        let refused = alloc_colour_output(
+            plane::COLOURSPACE_OUTPUT,
+            1 << 31,
+            1 << 31,
+            PixelFormat::Gray8,
+        );
+        assert!(
+            matches!(refused, Err(RasterError::AllocationFailed { .. })),
+            "expected AllocationFailed for a 4 EiB request, got {refused:?}"
+        );
+
+        let overflowing = alloc_colour_output(
+            plane::COLOURSPACE_OUTPUT,
+            u32::MAX,
+            u32::MAX,
+            PixelFormat::Gray8,
+        );
+        assert!(
+            matches!(
+                overflowing,
+                Err(RasterError::AllocationFailed { .. } | RasterError::SizeOverflow { .. })
+            ),
+            "expected AllocationFailed or SizeOverflow, got {overflowing:?}"
+        );
+    }
+
+    /**
+     * Tests that a colour *intermediate* the allocator refuses comes back as a
+     * typed error rather than reaching `handle_alloc_error` and aborting.
+     *
+     * This is the check in this file that proves `raster::try_plane` is
+     * fallible with no hook in play at all, and it is kept even though the
+     * ceiling no longer answers before `try_reserve_exact`. It used to: every
+     * site check below stayed green with the reservation reverted to an
+     * infallible `Vec::reserve_exact`, which is the whole subject of #685
+     * removed with the suite silent. The shared funnel poisons the request
+     * rather than returning early (#696), so the revert now panics out of every
+     * capped check instead, and this one still runs with no ceiling in play, so
+     * the refusal is the real allocator's.
+     *
+     * The size matters for the same reason it does one screen up. `2^28` square
+     * at one `f64` a pixel is 512 PiB, under the `isize::MAX` ceiling `Vec`
+     * checks up front, so the request reaches the allocator, is refused, and an
+     * infallible reserve would abort right there. `u32::MAX` square at three
+     * `f64` a pixel prices past `usize` instead, so it comes back
+     * `SizeOverflow` before the allocator is asked, and the `bpp` it reports is
+     * the plane's 24 bytes a pixel rather than its one element a pixel.
+     */
+    #[test]
+    fn colour_plane_allocation_reports_failure_rather_than_aborting() {
+        let refused = try_plane::<f64>(plane::DIFFERENCE_SAMPLES, 1 << 28, 1 << 28, 1);
+        assert!(
+            matches!(refused, Err(RasterError::AllocationFailed { .. })),
+            "expected AllocationFailed, got {:?}",
+            refused.map(|v: Vec<f64>| v.capacity())
+        );
+
+        let overflowing = try_plane::<[f64; 3]>(plane::IMPORT_LAB_STAGING, u32::MAX, u32::MAX, 1);
+        assert!(
+            matches!(
+                overflowing,
+                Err(RasterError::AllocationFailed { .. }
+                    | RasterError::SizeOverflow { bpp: 24, .. })
+            ),
+            "expected AllocationFailed or SizeOverflow at 24 bytes a pixel, got {:?}",
+            overflowing.map(|v: Vec<[f64; 3]>| v.capacity())
+        );
+    }
+
+    /**
+     * Tests that try_colourspace surfaces an output it cannot allocate as
+     * ColourError::Raster instead of aborting the process. The conversion
+     * buffer is the one image-sized allocation on that path and it used to
+     * be an infallible `vec![]`, so the `Result` in the signature did not
+     * cover the failure it most needed to (#672).
+     * Works by lowering the per-thread output ceiling for the one call.
+     * Input: 8x8 sRGB -> Labs (3 f32 bands, 768 bytes) under a 16-byte
+     * ceiling -> Err(Raster(AllocationFailed)).
+     */
+    #[test]
+    fn try_colourspace_reports_an_unservable_output_as_a_typed_error() {
+        let im = srgb_8x8();
+        let out = with_plane_cap_at(plane::COLOURSPACE_OUTPUT, OUTPUT_TEST_CAP_BYTES, || {
+            im.try_colourspace(Interpretation::Labs)
+        });
+        assert!(
+            matches!(
+                out,
+                Err(ColourError::Raster(RasterError::AllocationFailed {
+                    width: 8,
+                    height: 8,
+                    bytes: 768
+                }))
+            ),
+            "expected AllocationFailed for the 768-byte Labs output, got {:?}",
+            out.map(|r| (r.width(), r.height(), r.format()))
+        );
+    }
+
+    /**
+     * Tests that the panicking twin keeps panicking rather than aborting:
+     * `colourspace` has no error channel, so an output the host cannot
+     * allocate has to surface as a panic, which unwinds and can be caught,
+     * where an abort would take the process down with it (#672).
+     * Input: 8x8 sRGB -> Labs under the lowered ceiling, caught.
+     */
+    #[test]
+    fn colourspace_panics_rather_than_aborting_on_an_unservable_output() {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let caught = std::panic::catch_unwind(|| {
+            let im = srgb_8x8();
+            with_plane_cap_at(plane::COLOURSPACE_OUTPUT, OUTPUT_TEST_CAP_BYTES, || {
+                im.colourspace(Interpretation::Labs)
+            })
+        });
+        std::panic::set_hook(prev);
+        assert!(
+            caught.is_err(),
+            "an unservable colourspace output must panic (unwindable), not abort"
+        );
+    }
+
+    /**
+     * Tests the reason #672 was filed: try_sharpen opens a LabS round trip
+     * through try_colourspace, so it inherited that abort however its own
+     * signature read. An entry conversion the host cannot allocate now
+     * arrives as ConvolutionError::Colour(ColourError::Raster) at the call
+     * site. Lives here rather than in `convolution.rs` because the ceiling
+     * hook it needs is this module's.
+     *
+     * Named for the *entry* conversion deliberately. `?` returns from the
+     * first statement of try_sharpen, so nothing in the body runs and this
+     * check can say nothing about it; the exit-conversion test below is the
+     * one that gets past here. Mutation: an unconditional panic! at the
+     * `sharpened` construction leaves this test green, which is correct for
+     * what its name now claims and was not for what it used to.
+     * Input: 8x8 sRGB, sharpen(1.5, 1.0, 2.0) under a 16-byte ceiling.
+     */
+    #[test]
+    fn try_sharpen_reports_an_unservable_entry_conversion_not_an_abort() {
+        let im = srgb_8x8();
+        let out = with_plane_cap_at(plane::COLOURSPACE_OUTPUT, OUTPUT_TEST_CAP_BYTES, || {
+            im.try_sharpen(1.5, 1.0, 2.0)
+        });
+        assert!(
+            matches!(
+                out,
+                Err(ConvolutionError::Colour(ColourError::Raster(
+                    RasterError::AllocationFailed {
+                        width: 8,
+                        height: 8,
+                        bytes: 768
+                    }
+                )))
+            ),
+            "expected a typed allocation failure entering the LabS round trip, got {:?}",
+            out.map(|r| (r.width(), r.height(), r.format()))
+        );
+    }
+
+    /**
+     * Tests the closing half of the same round trip, which is the half no
+     * byte ceiling on its own can reach. try_sharpen allocates twice through
+     * colour.rs and the entry conversion is the larger of the two on every
+     * route into LabS (F32 is the widest depth in the space table), so any
+     * ceiling that refuses the exit refuses the entry first and returns
+     * before the body runs. Sparing the first refusal lets the whole body
+     * execute and starves the conversion back, which is what proves this
+     * check observes try_sharpen rather than only its first statement.
+     * Mutation: an unconditional panic! at the `sharpened` construction
+     * reddens this test, and the entry test above stays green.
+     * Input: 8x8 sRGB, sharpen(1.5, 1.0, 2.0) under a 16-byte ceiling with
+     * one refusal spared -> the 768-byte entry succeeds, the 192-byte exit
+     * back to sRGB is Err(Raster(AllocationFailed)).
+     */
+    #[test]
+    fn try_sharpen_reports_an_unservable_exit_conversion_not_an_abort() {
+        let im = srgb_8x8();
+        let out = with_plane_cap_after(plane::COLOURSPACE_OUTPUT, 1, OUTPUT_TEST_CAP_BYTES, || {
+            im.try_sharpen(1.5, 1.0, 2.0)
+        });
+        assert!(
+            matches!(
+                out,
+                Err(ConvolutionError::Colour(ColourError::Raster(
+                    RasterError::AllocationFailed {
+                        width: 8,
+                        height: 8,
+                        bytes: 192
+                    }
+                )))
+            ),
+            "expected a typed allocation failure leaving the LabS round trip, got {:?}",
+            out.map(|r| (r.width(), r.height(), r.format()))
+        );
+    }
+
+    /// An sRGB-profiled 8x8 fixture with a fourth band, so every image-sized
+    /// allocation on the ICC import path has a *different* byte size and the
+    /// per-site tests below assert on a number no neighbouring site can
+    /// produce: 768 for the device plane, 1536 for the Lab staging, 2048 for
+    /// the sample buffer, 1024 for the output. The three-band fixture makes
+    /// the first and the last both 768, which is exactly the coincidence that
+    /// lets a check pass for the wrong site.
+    fn srgb_profiled_rgba_fixture() -> Raster {
+        let mut im = Raster::new(8, 8, PixelFormat::Rgba8, vec![119u8; 8 * 8 * 4]).unwrap();
+        im.set_icc_profile(&srgb_profile_bytes());
+        im
+    }
+
+    /// The 8x8 Lab fixture with a profile attached, so `try_icc_export_with`
+    /// takes its already-Lab fast path (the copy) and finds a profile without
+    /// a path argument.
+    fn lab_profiled_fixture() -> Raster {
+        let mut im = lab_fixture();
+        im.set_icc_profile(&srgb_profile_bytes());
+        im
+    }
+
+    fn gray_profile_bytes() -> Vec<u8> {
+        ColorProfile::new_gray_with_gamma(2.2).encode().unwrap()
+    }
+
+    /// A grey-profiled 8x8 fixture with a second band, for the grey-TRC import
+    /// arm. Two bands keep the Lab staging (1536) and the sample buffer (2048)
+    /// at different sizes.
+    fn gray_profiled_fixture() -> Raster {
+        let format = PixelFormat::with_kind(2, SampleKind::U8).unwrap();
+        let mut im = Raster::new(8, 8, format, vec![128u8; 8 * 8 * 2]).unwrap();
+        im.set_icc_profile(&gray_profile_bytes());
+        im
+    }
+
+    /// A three-band Lab fixture carrying a grey profile, for the grey-TRC
+    /// export arm. No extra band, so the copy (768), the Lab staging (1536),
+    /// the device plane (256), the sample buffer (512) and the output (64) are
+    /// five distinct sizes.
+    fn lab_gray_profiled_fixture() -> Raster {
+        let mut im = Raster::constant(8, 8, &[50.0, 0.0, 0.0], Interpretation::Lab);
+        im.set_icc_profile(&gray_profile_bytes());
+        im
+    }
+
+    /// 64 mid-grey Lab triples, the input the export-side ICC helpers take.
+    fn lab_triples_8x8() -> Vec<[f64; 3]> {
+        vec![[50.0, 10.0, -10.0]; 64]
+    }
+
+    /// An RGB **LUT** profile: an A2B0 and a B2A0 over a plain lookup table,
+    /// and no TRCs, so `is_matrix_shaper()` is false and both ICC directions
+    /// dispatch past their exact arms into the CMS fallback.
+    ///
+    /// The suite carried no LUT profile until this one, which is why #689's
+    /// four fallback checks call `icc_device_to_lab_fallback` and its export
+    /// twin directly and say in as many words that they do not prove the
+    /// dispatch. The two checks at the bottom of this module are what proves
+    /// it, and this is what they drive.
+    ///
+    /// Deliberately *not* the profile `tests/icc_lut_alloc.rs` builds. That one
+    /// carries degenerate curves because it needs moxcms's katana engine
+    /// specifically; this one only needs to not be a matrix shaper, and a plain
+    /// table keeps it readable. Both are LUT profiles and both reach the
+    /// fallback; only one of them reaches the buffer #693 is about.
+    fn lut_profile_bytes() -> Vec<u8> {
+        use moxcms::ToneReprCurve;
+
+        lut_profile_bytes_with(ToneReprCurve::Lut((0..256u16).map(|i| i * 257).collect()))
+    }
+
+    /// [`lut_profile_bytes`] with the curve moxcms calls degenerate: a run of
+    /// more than twenty duplicated leading entries, which is what
+    /// `lut_hint::is_katana_required` keys on.
+    ///
+    /// A well-behaved LUT profile gets fused into a single interpolated grid
+    /// built once at transform *creation*, so it never enters the katana
+    /// engine and never makes the per-call allocation #693 is about. This is
+    /// the same profile shape `tests/icc_lut_alloc.rs` drives, here so the
+    /// chunking equivalence check covers the engine the bound is for and not
+    /// only the one it is not.
+    fn katana_lut_profile_bytes() -> Vec<u8> {
+        use moxcms::ToneReprCurve;
+
+        let mut v = vec![0u16; 40];
+        v.extend((0..216u16).map(|i| i * 300));
+        lut_profile_bytes_with(ToneReprCurve::Lut(v))
+    }
+
+    /// The shared body of the two builders above: an RGB LUT profile over
+    /// `ramp`, with a Lab PCS so moxcms cannot short-circuit the destination
+    /// analysis the way it does for an XYZ one.
+    fn lut_profile_bytes_with(ramp: moxcms::ToneReprCurve) -> Vec<u8> {
+        use moxcms::{LutMultidimensionalType, LutStore, LutWarehouse, Matrix3d, ProfileClass};
+
+        const GRID: usize = 9;
+        let code = |x: usize| ((x as f32 / (GRID - 1) as f32) * 65535.0) as u16;
+        let mut clut = Vec::with_capacity(GRID * GRID * GRID * 3);
+        for r in 0..GRID {
+            for g in 0..GRID {
+                for b in 0..GRID {
+                    clut.push(code(r));
+                    clut.push(code(g));
+                    clut.push(code(b));
+                }
+            }
+        }
+        let mab = LutWarehouse::Multidimensional(LutMultidimensionalType {
+            num_input_channels: 3,
+            num_output_channels: 3,
+            grid_points: [
+                GRID as u8, GRID as u8, GRID as u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            ],
+            clut: Some(LutStore::Store16(clut)),
+            a_curves: vec![ramp.clone(), ramp.clone(), ramp.clone()],
+            b_curves: vec![ramp.clone(), ramp.clone(), ramp],
+            m_curves: vec![],
+            matrix: Matrix3d::IDENTITY,
+            bias: Vector3d::default(),
+        });
+        // Built on top of `new_srgb` rather than written out as a literal:
+        // `ColorProfile`'s version field is private to moxcms, so the struct
+        // cannot be constructed from here, and the base supplies a white point
+        // the encoder accepts.
+        let mut p = ColorProfile::new_srgb();
+        p.profile_class = ProfileClass::DisplayDevice;
+        p.color_space = DataColorSpace::Rgb;
+        p.pcs = DataColorSpace::Lab;
+        p.red_trc = None;
+        p.green_trc = None;
+        p.blue_trc = None;
+        p.lut_a_to_b_perceptual = Some(mab.clone());
+        p.lut_a_to_b_colorimetric = Some(mab.clone());
+        p.lut_b_to_a_perceptual = Some(mab.clone());
+        p.lut_b_to_a_colorimetric = Some(mab);
+        p.encode().unwrap()
+    }
+
+    /// [`srgb_profiled_rgba_fixture`]'s shape with a LUT profile attached, so
+    /// the two differ in nothing but the engine the profile selects.
+    fn lut_profiled_rgba_fixture() -> Raster {
+        let mut im = Raster::new(8, 8, PixelFormat::Rgba8, vec![119u8; 8 * 8 * 4]).unwrap();
+        im.set_icc_profile(&lut_profile_bytes());
+        im
+    }
+
+    /// [`lab_profiled_fixture`]'s shape with a LUT profile attached, the export
+    /// twin of [`lut_profiled_rgba_fixture`].
+    fn lab_lut_profiled_fixture() -> Raster {
+        let mut im = lab_fixture();
+        im.set_icc_profile(&lut_profile_bytes());
+        im
+    }
+
+    /**
+     * Tests the second image-sized allocation in this module, the one
+     * `build_raster` makes to quantise samples into bytes. It is a distinct
+     * site from the try_colourspace conversion buffer, and `try_icc_import`
+     * is the entry point that reaches it *without* going through
+     * try_colourspace at all, so a lowered ceiling here can only be tripped
+     * by an allocation this module made.
+     *
+     * `build_raster` is the *fourth* of them on the import path, so it takes
+     * three spares to reach: the device plane, the Lab staging and the sample
+     * buffer come first (#685). Before those three were fallible this ran at
+     * spare 0 and passed, and it would still pass at spare 0 today, against
+     * `read_device_normalised`, which is also 768 bytes on a three-band
+     * fixture. That is the failure mode this whole file keeps hitting, so the
+     * fixture now has four bands and the assertion is on 1024, a size no other
+     * site on the path produces.
+     * Input: the 8x8 four-band sRGB-profiled fixture, icc_import under a
+     * 16-byte ceiling with three refusals spared -> Err(Raster(
+     * AllocationFailed)) for its 1024-byte RgbaF32 Lab output.
+     */
+    #[test]
+    fn try_icc_import_reports_an_unservable_output_as_a_typed_error() {
+        let im = srgb_profiled_rgba_fixture();
+        let out = with_plane_cap_at(plane::BUILD_RASTER_OUTPUT, OUTPUT_TEST_CAP_BYTES, || {
+            im.try_icc_import_with(Intent::Perceptual, None, None)
+        });
+        assert!(
+            matches!(
+                out,
+                Err(ColourError::Raster(RasterError::AllocationFailed {
+                    width: 8,
+                    height: 8,
+                    bytes: 1024
+                }))
+            ),
+            "expected AllocationFailed for the 1024-byte import output, got {:?}",
+            out.map(|r| (r.width(), r.height(), r.format()))
+        );
+    }
+
+    /**
+     * Tests the largest single buffer this module allocates, the `Vec<f64>`
+     * `colour_difference` fills with one sample per output band. It was a
+     * `Vec::with_capacity`, so an image the host could convert to Lab twice
+     * but not hold a difference for aborted the process out of a `try_` form
+     * (#685).
+     *
+     * Two spares is the whole point. Both operands convert to Lab first and
+     * after #678 those conversions are fallible, so a plain ceiling low enough
+     * to starve this buffer returns from the *first* `try_colourspace` and the
+     * body never runs. Sparing both conversions runs the body and starves the
+     * line under test; the 512 bytes are this buffer's and no other site on
+     * the path has that size (the conversions are 768 each, the output 256).
+     * Mutation: an unconditional panic! at the `samples` construction reddens
+     * this test and leaves every other allocation test in the module green.
+     * Input: two 8x8 sRGB fixtures, each of the four dE entry points under a
+     * 16-byte ceiling with two refusals spared -> Err(Raster(AllocationFailed
+     * { bytes: 512 })).
+     */
+    #[test]
+    fn try_de_reports_an_unservable_difference_buffer_not_an_abort() {
+        type De = fn(&Raster, &Raster) -> Result<Raster, ColourError>;
+        let ops: [(&str, De); 4] = [
+            ("try_de76", Raster::try_de76),
+            ("try_de00", Raster::try_de00),
+            ("try_de00_sharma", Raster::try_de00_sharma),
+            ("try_de_cmc", Raster::try_de_cmc),
+        ];
+        for (name, op) in ops {
+            let a = srgb_8x8();
+            let b = srgb_8x8();
+            let out = with_plane_cap_at(plane::DIFFERENCE_SAMPLES, OUTPUT_TEST_CAP_BYTES, || {
+                op(&a, &b)
+            });
+            assert!(
+                matches!(
+                    out,
+                    Err(ColourError::Raster(RasterError::AllocationFailed {
+                        width: 8,
+                        height: 8,
+                        bytes: 512
+                    }))
+                ),
+                "{name}: expected AllocationFailed for the 512-byte difference buffer, got {:?}",
+                out.map(|r| (r.width(), r.height(), r.format()))
+            );
+        }
+    }
+
+    /**
+     * Tests `read_device_normalised`, the first image-sized allocation on the
+     * ICC import path: the `Vec<f32>` of device samples the CMS transform
+     * reads. It was a `Vec::with_capacity` and is the site issue #685 names
+     * first.
+     * Works by starving the very first colour allocation the import makes, so
+     * no spares; the 768 bytes are three f32 device bands over 64 pixels.
+     * Mutation: an unconditional panic! at its `out` construction reddens this
+     * test alone.
+     */
+    #[test]
+    fn try_icc_import_reports_an_unservable_device_plane_not_an_abort() {
+        let im = srgb_profiled_rgba_fixture();
+        let out = with_plane_cap_at(plane::IMPORT_DEVICE_PLANE, OUTPUT_TEST_CAP_BYTES, || {
+            im.try_icc_import_with(Intent::Perceptual, None, None)
+        });
+        assert!(
+            matches!(
+                out,
+                Err(ColourError::Raster(RasterError::AllocationFailed {
+                    width: 8,
+                    height: 8,
+                    bytes: 768
+                }))
+            ),
+            "expected AllocationFailed for the 768-byte device plane, got {:?}",
+            out.map(|r| (r.width(), r.height(), r.format()))
+        );
+    }
+
+    /**
+     * Tests the `Vec<[f64; 3]>` Lab staging the matrix-shaper import arm
+     * fills, 24 bytes a pixel and the widest per-pixel intermediate on the
+     * path.
+     * Works by sparing the device plane so the second allocation starves; 1536
+     * bytes is 64 pixels of three f64.
+     * Mutation: an unconditional panic! at that arm's `out` construction
+     * reddens this test alone.
+     */
+    #[test]
+    fn try_icc_import_reports_an_unservable_lab_staging_not_an_abort() {
+        let im = srgb_profiled_rgba_fixture();
+        let out = with_plane_cap_at(plane::IMPORT_LAB_STAGING, OUTPUT_TEST_CAP_BYTES, || {
+            im.try_icc_import_with(Intent::Perceptual, None, None)
+        });
+        assert!(
+            matches!(
+                out,
+                Err(ColourError::Raster(RasterError::AllocationFailed {
+                    width: 8,
+                    height: 8,
+                    bytes: 1536
+                }))
+            ),
+            "expected AllocationFailed for the 1536-byte Lab staging, got {:?}",
+            out.map(|r| (r.width(), r.height(), r.format()))
+        );
+    }
+
+    /**
+     * Tests the same Lab staging on the *grey*-TRC import arm, which is a
+     * separate `Vec::with_capacity` in the same function and is not reached at
+     * all by an RGB profile.
+     * Works by importing a two-band grey-profiled fixture with the device
+     * plane spared; 1536 bytes is the same 64 pixels of three f64.
+     * Mutation: an unconditional panic! at the grey arm's `out` construction
+     * reddens this test and leaves the matrix-shaper one above green.
+     */
+    #[test]
+    fn try_icc_import_reports_an_unservable_grey_lab_staging_not_an_abort() {
+        let im = gray_profiled_fixture();
+        let out = with_plane_cap_at(
+            plane::IMPORT_GREY_LAB_STAGING,
+            OUTPUT_TEST_CAP_BYTES,
+            || im.try_icc_import_with(Intent::Perceptual, None, None),
+        );
+        assert!(
+            matches!(
+                out,
+                Err(ColourError::Raster(RasterError::AllocationFailed {
+                    width: 8,
+                    height: 8,
+                    bytes: 1536
+                }))
+            ),
+            "expected AllocationFailed for the 1536-byte grey Lab staging, got {:?}",
+            out.map(|r| (r.width(), r.height(), r.format()))
+        );
+    }
+
+    /**
+     * Tests the import's own `Vec<f64>` sample buffer, the one that carries
+     * the PCS triples plus the extra bands into `build_raster`.
+     * Works by sparing the device plane and the Lab staging; 2048 bytes is 64
+     * pixels of four f64 output bands, distinct from every neighbour.
+     * Mutation: an unconditional panic! at its `samples` construction reddens
+     * this test alone.
+     */
+    #[test]
+    fn try_icc_import_reports_an_unservable_sample_buffer_not_an_abort() {
+        let im = srgb_profiled_rgba_fixture();
+        let out = with_plane_cap_at(plane::IMPORT_SAMPLES, OUTPUT_TEST_CAP_BYTES, || {
+            im.try_icc_import_with(Intent::Perceptual, None, None)
+        });
+        assert!(
+            matches!(
+                out,
+                Err(ColourError::Raster(RasterError::AllocationFailed {
+                    width: 8,
+                    height: 8,
+                    bytes: 2048
+                }))
+            ),
+            "expected AllocationFailed for the 2048-byte import sample buffer, got {:?}",
+            out.map(|r| (r.width(), r.height(), r.format()))
+        );
+    }
+
+    /**
+     * Tests the copy `try_icc_export_with` takes of an input that is already
+     * Lab. It was a plain `self.clone()`, which copies the whole pixel buffer
+     * infallibly, so on a full-resolution image the export's *largest* request
+     * was the one allocation its `Result` could not report (#685). It is now
+     * `Raster::try_clone`, which is what that method exists for.
+     * Works by starving the first colour allocation the export makes; 1024
+     * bytes is the RgbaF32 fixture's own buffer, so the number also confirms
+     * it is the copy and not something derived from it.
+     * Mutation: an unconditional panic! at the copy reddens this test alone.
+     */
+    #[test]
+    fn try_icc_export_reports_an_unservable_source_copy_not_an_abort() {
+        let im = lab_profiled_fixture();
+        let out = with_plane_cap_at(plane::EXPORT_SOURCE_COPY, OUTPUT_TEST_CAP_BYTES, || {
+            im.try_icc_export_with(8, Intent::Perceptual, None)
+        });
+        assert!(
+            matches!(
+                out,
+                Err(ColourError::Raster(RasterError::AllocationFailed {
+                    width: 8,
+                    height: 8,
+                    bytes: 1024
+                }))
+            ),
+            "expected AllocationFailed for the 1024-byte source copy, got {:?}",
+            out.map(|r| (r.width(), r.height(), r.format()))
+        );
+    }
+
+    /**
+     * Tests that the copy above really is `Raster::try_clone` and not
+     * `Clone::clone`, which the starvation check cannot say.
+     *
+     * That check's ceiling lives in `alloc_colour_source_copy`, one line before
+     * the delegation, so it stays green with `src.try_clone()` put back to
+     * `Ok(src.clone())`, the site exactly as #685 found it. No ceiling can do
+     * better: it would have to sit inside `try_clone`, and the real allocator
+     * will not refuse a copy of a raster small enough for a test to build. So
+     * this counts the delegation instead, through the `cfg(test)` counter
+     * `raster.rs` keeps on `try_clone`.
+     * Input: the 8x8 Lab fixture exported with no ceiling in play -> Ok, and
+     * exactly one raster copied through the fallible path.
+     * Mutation: `src.try_clone()` -> `Ok(src.clone())` leaves the count at zero
+     * and reddens this test alone.
+     */
+    #[test]
+    fn icc_export_copies_an_already_lab_input_through_the_fallible_clone() {
+        let im = lab_profiled_fixture();
+        let (out, copies) = crate::raster::counting_try_clones(|| {
+            im.try_icc_export_with(8, Intent::Perceptual, None)
+        });
+        assert!(
+            out.is_ok(),
+            "the unstarved export must succeed, got {out:?}"
+        );
+        assert_eq!(
+            copies, 1,
+            "the export must copy its already-Lab input through Raster::try_clone"
+        );
+    }
+
+    /**
+     * Tests the export's `Vec<[f64; 3]>` Lab staging, gathered from the source
+     * raster before the CMS runs.
+     * Works by sparing the source copy; 1536 bytes is 64 pixels of three f64.
+     * Mutation: an unconditional panic! at its `labs` construction reddens
+     * this test alone.
+     */
+    #[test]
+    fn try_icc_export_reports_an_unservable_lab_staging_not_an_abort() {
+        let im = lab_profiled_fixture();
+        let out = with_plane_cap_at(plane::EXPORT_LAB_STAGING, OUTPUT_TEST_CAP_BYTES, || {
+            im.try_icc_export_with(8, Intent::Perceptual, None)
+        });
+        assert!(
+            matches!(
+                out,
+                Err(ColourError::Raster(RasterError::AllocationFailed {
+                    width: 8,
+                    height: 8,
+                    bytes: 1536
+                }))
+            ),
+            "expected AllocationFailed for the 1536-byte export Lab staging, got {:?}",
+            out.map(|r| (r.width(), r.height(), r.format()))
+        );
+    }
+
+    /**
+     * Tests the `Vec<f32>` device plane the matrix-shaper export arm fills.
+     * Works by sparing the source copy and the Lab staging; 768 bytes is 64
+     * pixels of three f32 device bands.
+     * Mutation: an unconditional panic! at that arm's `out` construction
+     * reddens this test alone.
+     */
+    #[test]
+    fn try_icc_export_reports_an_unservable_device_plane_not_an_abort() {
+        let im = lab_profiled_fixture();
+        let out = with_plane_cap_at(plane::EXPORT_DEVICE_PLANE, OUTPUT_TEST_CAP_BYTES, || {
+            im.try_icc_export_with(8, Intent::Perceptual, None)
+        });
+        assert!(
+            matches!(
+                out,
+                Err(ColourError::Raster(RasterError::AllocationFailed {
+                    width: 8,
+                    height: 8,
+                    bytes: 768
+                }))
+            ),
+            "expected AllocationFailed for the 768-byte export device plane, got {:?}",
+            out.map(|r| (r.width(), r.height(), r.format()))
+        );
+    }
+
+    /**
+     * Tests the same device plane on the *grey*-TRC export arm, a separate
+     * `Vec::with_capacity` an RGB profile never reaches.
+     * Works by exporting a three-band Lab fixture through a grey profile with
+     * the copy and the Lab staging spared; 256 bytes is 64 pixels of one f32
+     * ink, which no other site on that path produces.
+     * Mutation: an unconditional panic! at the grey arm's `out` construction
+     * reddens this test and leaves the matrix-shaper one above green.
+     */
+    #[test]
+    fn try_icc_export_reports_an_unservable_grey_device_plane_not_an_abort() {
+        let im = lab_gray_profiled_fixture();
+        let out = with_plane_cap_at(
+            plane::EXPORT_GREY_DEVICE_PLANE,
+            OUTPUT_TEST_CAP_BYTES,
+            || im.try_icc_export_with(8, Intent::Perceptual, None),
+        );
+        assert!(
+            matches!(
+                out,
+                Err(ColourError::Raster(RasterError::AllocationFailed {
+                    width: 8,
+                    height: 8,
+                    bytes: 256
+                }))
+            ),
+            "expected AllocationFailed for the 256-byte grey device plane, got {:?}",
+            out.map(|r| (r.width(), r.height(), r.format()))
+        );
+    }
+
+    /**
+     * Tests the export's own `Vec<f64>` sample buffer, which scales the device
+     * inks to the output depth and carries the extra bands.
+     * Works by sparing the copy, the Lab staging and the device plane; 2048
+     * bytes is 64 pixels of four f64.
+     * Mutation: an unconditional panic! at its `samples` construction reddens
+     * this test alone.
+     */
+    #[test]
+    fn try_icc_export_reports_an_unservable_sample_buffer_not_an_abort() {
+        let im = lab_profiled_fixture();
+        let out = with_plane_cap_at(plane::EXPORT_SAMPLES, OUTPUT_TEST_CAP_BYTES, || {
+            im.try_icc_export_with(8, Intent::Perceptual, None)
+        });
+        assert!(
+            matches!(
+                out,
+                Err(ColourError::Raster(RasterError::AllocationFailed {
+                    width: 8,
+                    height: 8,
+                    bytes: 2048
+                }))
+            ),
+            "expected AllocationFailed for the 2048-byte export sample buffer, got {:?}",
+            out.map(|r| (r.width(), r.height(), r.format()))
+        );
+    }
+
+    /**
+     * Tests the PCS buffer the LUT-profile import fallback hands to moxcms.
+     *
+     * The fallback is only *dispatched to* by a LUT profile, and the suite
+     * carries none, so this calls it directly with the sRGB profile exactly as
+     * `icc_fallback_encoding_pinned` above already does. That runs the real
+     * function over the real transform; what it does not prove is the dispatch,
+     * which is why the site is described as reachable with a LUT profile rather
+     * than claimed to be covered end to end.
+     * Input: 64 RGB device pixels through the fallback under a 16-byte ceiling
+     * -> Err(Raster(AllocationFailed { bytes: 768 })), 64 pixels of three f32.
+     * Mutation: an unconditional panic! at its `pcs` construction reddens this
+     * test alone.
+     */
+    #[test]
+    fn icc_import_fallback_reports_an_unservable_pcs_buffer_not_an_abort() {
+        let profile = parse_profile(&srgb_profile_bytes()).unwrap();
+        let device = vec![0.5f32; 8 * 8 * 3];
+        let out = with_plane_cap_at(plane::IMPORT_FALLBACK_PCS, OUTPUT_TEST_CAP_BYTES, || {
+            icc_device_to_lab_fallback(&profile, &device, 3, Intent::Perceptual, 8, 8)
+        });
+        assert!(
+            matches!(
+                out,
+                Err(ColourError::Raster(RasterError::AllocationFailed {
+                    width: 8,
+                    height: 8,
+                    bytes: 768
+                }))
+            ),
+            "expected AllocationFailed for the 768-byte fallback PCS buffer, got {:?}",
+            out.map(|v| v.len())
+        );
+    }
+
+    /**
+     * Tests the Lab result the LUT-profile import fallback decodes the PCS
+     * into. It was a `.collect()`, which sizes itself from the iterator's exact
+     * length hint and is every bit as infallible as the `with_capacity` next to
+     * it, just harder to see.
+     * Works by sparing the PCS buffer so the decode starves; 1536 bytes is 64
+     * pixels of three f64.
+     * Mutation: an unconditional panic! at its `out` construction reddens this
+     * test and leaves the PCS one above green.
+     */
+    #[test]
+    fn icc_import_fallback_reports_an_unservable_lab_result_not_an_abort() {
+        let profile = parse_profile(&srgb_profile_bytes()).unwrap();
+        let device = vec![0.5f32; 8 * 8 * 3];
+        let out = with_plane_cap_at(plane::IMPORT_FALLBACK_LAB, OUTPUT_TEST_CAP_BYTES, || {
+            icc_device_to_lab_fallback(&profile, &device, 3, Intent::Perceptual, 8, 8)
+        });
+        assert!(
+            matches!(
+                out,
+                Err(ColourError::Raster(RasterError::AllocationFailed {
+                    width: 8,
+                    height: 8,
+                    bytes: 1536
+                }))
+            ),
+            "expected AllocationFailed for the 1536-byte fallback Lab result, got {:?}",
+            out.map(|v| v.len())
+        );
+    }
+
+    /**
+     * Tests the PCS buffer the LUT-profile export fallback stages before it
+     * calls moxcms, called directly for the same reason as the import fallback
+     * above.
+     *
+     * This check used to be the weakest in the file and its name said so. The
+     * pair cannot be told apart by size: the PCS buffer is three f32 per pixel
+     * and the device buffer is one f32 per ink, and the only device space the
+     * suite can build a profile for is RGB, so both are 768 bytes. Under the
+     * old ordinal ceiling, reverting the PCS site to an infallible
+     * `Vec::with_capacity` handed the refusal to the device buffer at the same
+     * index for the same 768 bytes and left this green, so no mutation in the
+     * matrix reddened it. Naming the site fixes exactly that: the ceiling now
+     * applies to `colour.export.fallback_pcs` and to nothing else, so the
+     * revert leaves nothing to refuse and this check goes red (issue #696).
+     * Input: 64 Lab triples through the fallback under a 16-byte ceiling at
+     * that one site -> Err(Raster(AllocationFailed { bytes: 768 })).
+     */
+    #[test]
+    fn icc_export_fallback_reports_an_unservable_pcs_buffer_not_an_abort() {
+        let profile = parse_profile(&srgb_profile_bytes()).unwrap();
+        let labs = lab_triples_8x8();
+        let out = with_plane_cap_at(plane::EXPORT_FALLBACK_PCS, OUTPUT_TEST_CAP_BYTES, || {
+            icc_lab_to_device_fallback(&profile, &labs, Intent::Perceptual, 8, 8)
+        });
+        assert!(
+            matches!(
+                out,
+                Err(ColourError::Raster(RasterError::AllocationFailed {
+                    width: 8,
+                    height: 8,
+                    bytes: 768
+                }))
+            ),
+            "expected AllocationFailed for the 768-byte export fallback PCS buffer, got {:?}",
+            out.map(|v| v.len())
+        );
+    }
+
+    /**
+     * Tests the device buffer the LUT-profile export fallback hands to moxcms,
+     * the last of the four fallback allocations.
+     * Works by capping that one site. The PCS buffer next to it is the same 768
+     * bytes on an RGB profile, so the size cannot separate them and the label
+     * is what does.
+     * Mutation: an unconditional panic! at its `device` construction reddens
+     * this test and leaves the PCS one above green.
+     */
+    #[test]
+    fn icc_export_fallback_reports_an_unservable_device_buffer_not_an_abort() {
+        let profile = parse_profile(&srgb_profile_bytes()).unwrap();
+        let labs = lab_triples_8x8();
+        let out = with_plane_cap_at(plane::EXPORT_FALLBACK_DEVICE, OUTPUT_TEST_CAP_BYTES, || {
+            icc_lab_to_device_fallback(&profile, &labs, Intent::Perceptual, 8, 8)
+        });
+        assert!(
+            matches!(
+                out,
+                Err(ColourError::Raster(RasterError::AllocationFailed {
+                    width: 8,
+                    height: 8,
+                    bytes: 768
+                }))
+            ),
+            "expected AllocationFailed for the 768-byte export fallback device buffer, got {:?}",
+            out.map(|v| v.len())
+        );
+    }
+
+    /**
+     * Counts, rather than sizes, the export fallback's allocations: with
+     * enough spares that nothing is actually refused, exactly two over-ceiling
+     * requests reach the hook, which is the PCS buffer and the device buffer.
+     *
+     * The two are the same size, so neither of the tests above can say how many
+     * reservations the function made, only that the one they name refused. This
+     * one says the count, and a site that stops going through the funnel stops
+     * being counted, whether or not anything refuses it.
+     * Input: 64 Lab triples through the fallback with the probe counting that
+     * site prefix and refusing nothing -> Ok, and two reservations.
+     */
+    #[test]
+    fn icc_export_fallback_allocates_both_of_its_buffers_fallibly() {
+        let profile = parse_profile(&srgb_profile_bytes()).unwrap();
+        let labs = lab_triples_8x8();
+        let (out, made) = counting_planes("colour.export.fallback", || {
+            icc_lab_to_device_fallback(&profile, &labs, Intent::Perceptual, 8, 8)
+        });
+        assert!(out.is_ok(), "the unstarved run must succeed, got {out:?}");
+        assert_eq!(
+            made, 2,
+            "the export fallback must make exactly two image-sized allocations \
+             through the fallible path"
+        );
+    }
+
+    /**
+     * Tests that splitting a plane across `xf.transform` calls changes no
+     * sample, which is the whole premise of the chunking that bounds moxcms's
+     * katana intermediate (issue #693).
+     *
+     * `tests/icc_lut_alloc.rs` measures that the CMS request stopped following
+     * the image. It cannot say the pixels came out the same, because it has no
+     * un-chunked path left to compare against. This does: it builds the
+     * transform the fallback builds, runs it once over the whole plane as the
+     * reference, then runs [`transform_in_chunks`] over the same input and
+     * asserts the two buffers are bit-identical.
+     *
+     * Three cells, because the risk is in the two channel counts rather than
+     * in the split. `Rgba -> Rgb` is not a synthetic shape: `moxcms_layout(4)`
+     * is `Layout::Rgba`, so that is exactly how a CMYK import reaches moxcms,
+     * and it is the only cell where using one side's channel count for the
+     * other side's stride goes wrong.
+     *
+     * The plane is sized from [`ICC_TRANSFORM_CHUNK_PIXELS`] rather than
+     * written down, at two full chunks and a single-pixel tail. Two full ones
+     * so a run that only ever made one call cannot pass, and the sharpest tail
+     * available so a run that dropped the remainder leaves exactly one pixel
+     * wrong, which is the hardest version of that failure to notice. Writing a
+     * geometry down instead is what made an earlier version of this quietly
+     * depend on the constant's value: at a 32768-pixel chunk it stopped
+     * spanning two chunks and failed on its own precondition.
+     * Input: a ramp plane through each of a fused LUT profile, a katana LUT
+     * profile and a four-channel source layout -> chunked == whole, exactly.
+     * Mutation: `chunks` to `chunks_exact` drops the tail and reddens all
+     * three; swapping `src_channels` and `dst_channels` in either argument
+     * reddens the `Rgba -> Rgb` cell.
+     */
+    #[test]
+    fn chunking_the_cms_transform_reproduces_the_whole_plane_result() {
+        let pixels = ICC_TRANSFORM_CHUNK_PIXELS * 2 + 1;
+        let lab_profile = ColorProfile::new_lab();
+
+        for (what, bytes, src_layout, src_channels) in [
+            ("the fused LUT profile", lut_profile_bytes(), Layout::Rgb, 3),
+            (
+                "the katana LUT profile",
+                katana_lut_profile_bytes(),
+                Layout::Rgb,
+                3,
+            ),
+            (
+                "a four-channel source layout, as a CMYK import spells it",
+                lut_profile_bytes(),
+                Layout::Rgba,
+                4,
+            ),
+        ] {
+            let profile = parse_profile(&bytes).unwrap();
+            let xf = profile
+                .create_transform_f32(
+                    src_layout,
+                    &lab_profile,
+                    Layout::Rgb,
+                    transform_options(Intent::Perceptual),
+                )
+                .unwrap_or_else(|e| panic!("{what}: {e:?}"));
+            let device: Vec<f32> = (0..pixels * src_channels)
+                .map(|i| (i % 251) as f32 / 250.0)
+                .collect();
+
+            let mut whole = vec![0f32; pixels * 3];
+            xf.transform(&device, &mut whole)
+                .unwrap_or_else(|e| panic!("{what}, whole plane: {e:?}"));
+            let mut chunked = vec![0f32; pixels * 3];
+            transform_in_chunks(xf.as_ref(), &device, src_channels, &mut chunked, 3)
+                .unwrap_or_else(|e| panic!("{what}, chunked: {e:?}"));
+
+            let differing = chunked
+                .iter()
+                .zip(&whole)
+                .enumerate()
+                .filter(|(_, (a, b))| a.to_bits() != b.to_bits())
+                .map(|(i, (a, b))| (i, *a, *b))
+                .take(4)
+                .collect::<Vec<_>>();
+            assert!(
+                differing.is_empty(),
+                "{what}: chunking changed samples, first few (index, chunked, \
+                 whole) are {differing:?}"
+            );
+            assert!(
+                whole.iter().any(|v| *v != 0.0),
+                "{what}: the reference run wrote nothing, so an all-zero \
+                 chunked buffer would have matched it"
+            );
+        }
+    }
+
+    /**
+     * Tests that a plane mismatch comes back as an `Err` rather than as a
+     * quietly half-transformed buffer.
+     *
+     * `transform_in_chunks` steps two `chunks` iterators through `zip`, and
+     * `zip` stops at the shorter one. So two sides that disagree on pixel
+     * count would transform a prefix, leave the rest of `dst` holding whatever
+     * it was reserved with, and return `Ok(())`. Both callers derive both
+     * planes from one `(width, height)` so it cannot happen today, which is
+     * exactly why it needs a check rather than a `debug_assert!`: nothing in
+     * the suite would ever exercise the assert, and the release build people
+     * run would have neither.
+     * Input: a 40-sample source at 4 a pixel against a 30-sample destination
+     * at 3 a pixel, so 10 pixels against 10, accepted; then the same source
+     * against a 27-sample destination, so 10 against 9 -> `IccTransform` whose
+     * detail names both counts.
+     * Mutation: dropping the `src_pixels != dst_pixels` arm makes the second
+     * call return `Ok(())` having transformed nine pixels of ten, and reddens
+     * this and nothing else.
+     */
+    #[test]
+    fn a_mismatched_transform_plane_is_refused_rather_than_half_filled() {
+        let profile = parse_profile(&lut_profile_bytes()).unwrap();
+        let xf = profile
+            .create_transform_f32(
+                Layout::Rgba,
+                &ColorProfile::new_lab(),
+                Layout::Rgb,
+                transform_options(Intent::Perceptual),
+            )
+            .unwrap();
+        let src = vec![0.5f32; 40];
+
+        let mut matched = vec![0f32; 30];
+        assert!(
+            transform_in_chunks(xf.as_ref(), &src, 4, &mut matched, 3).is_ok(),
+            "ten pixels against ten must be accepted"
+        );
+
+        let mut short = vec![0f32; 27];
+        let err = transform_in_chunks(xf.as_ref(), &src, 4, &mut short, 3);
+        let Err(ColourError::IccTransform { detail }) = err else {
+            panic!("a nine-against-ten plane must be refused, got {err:?}");
+        };
+        assert!(
+            detail.contains("10 in") && detail.contains("9 out"),
+            "the detail must name both counts so the caller can see which side \
+             is wrong, got {detail:?}"
+        );
+        assert!(
+            short.iter().all(|v| *v == 0.0),
+            "a refused transform must not have written any of the destination"
+        );
+    }
+
+    /**
+     * Tests that a LUT profile really does dispatch past `icc_device_to_lab`'s
+     * exact arm and into the CMS fallback, which the four #689 checks above
+     * cannot say: the suite carried no LUT profile, so they call the private
+     * fallback directly and describe the site as reachable with one rather than
+     * covered by anything.
+     *
+     * Works by counting each arm's own site under both profiles, which is what
+     * the labels buy over the old spare index. That version starved spare 1 and
+     * read the byte count back: 1536 for the exact arm's `Vec<[f64; 3]>` Lab
+     * staging and 768 for the fallback's PCS plane, so the *size* named the
+     * arm, and it only worked because those two happened to differ. Counting
+     * the sites says it directly, and says both halves of it: the sRGB profile
+     * reserves the Lab staging and never the fallback PCS, and the LUT profile
+     * the other way round. The two fixtures differ in nothing but the profile.
+     * Input: the four-band 8x8 fixture imported once with each profile, with
+     * the probe counting one site prefix at a time.
+     * Mutation: `profile.is_matrix_shaper()` to `false` in the RGB arm's
+     * condition sends sRGB down the fallback too and reddens the first half;
+     * dispatching the LUT profile into the exact arm reddens the second.
+     * *Dropping* the `is_matrix_shaper()` term rather than falsifying it
+     * changes nothing, and that is worth knowing rather than assuming: the
+     * `ShaperCurves::linear_rgb` term next to it already answers `None` for a
+     * profile with no TRCs, so the arm is guarded twice over.
+     */
+    #[test]
+    fn a_lut_profile_import_dispatches_into_the_cms_fallback() {
+        let count = |im: &Raster, site: &'static str| {
+            let (out, made) = counting_planes(site, || {
+                im.try_icc_import_with(Intent::Perceptual, None, None)
+            });
+            assert!(
+                out.is_ok(),
+                "the unstarved import must succeed, got {out:?}"
+            );
+            made
+        };
+
+        let shaper = srgb_profiled_rgba_fixture();
+        assert_eq!(
+            count(&shaper, plane::IMPORT_LAB_STAGING),
+            1,
+            "an sRGB profile must take the exact arm, which stages Lab itself"
+        );
+        assert_eq!(
+            count(&shaper, "colour.import.fallback"),
+            0,
+            "and must not reach the CMS fallback at all"
+        );
+
+        let lut = lut_profiled_rgba_fixture();
+        assert_eq!(
+            count(&lut, plane::IMPORT_LAB_STAGING),
+            0,
+            "a LUT profile must not take the exact arm"
+        );
+        assert_eq!(
+            count(&lut, "colour.import.fallback"),
+            2,
+            "it must take the CMS fallback, which stages a PCS plane and a Lab result"
+        );
+    }
+
+    /**
+     * The export twin of the dispatch check above, counted rather than sized.
+     *
+     * Sizes cannot separate the two export arms: the exact arm's device plane
+     * and the fallback's PCS plane are both three f32 a pixel over an RGB
+     * profile, so both report 768. What does separate them is how many
+     * image-sized allocations the call makes at all, because the fallback
+     * stages the PCS *and* the device buffer where the exact arm writes one
+     * buffer straight out. Counting the whole module's sites is what says that,
+     * and it now includes the export's copy of its input, which is charged to
+     * the funnel by hand because it is a `Raster::try_clone` rather than a
+     * `Vec` this module reserves.
+     * Input: the 8x8 Lab fixture exported once with the sRGB profile and once
+     * with the LUT profile, with the probe counting every `colour.` site and
+     * refusing none -> five reservations against six.
+     * Mutation: `profile.is_matrix_shaper()` to `false` in the RGB arm's
+     * condition takes the sRGB count to six and reddens this test. Dropping
+     * the term instead is a no-op, for the reason the import twin records.
+     */
+    #[test]
+    fn a_lut_profile_export_dispatches_into_the_cms_fallback() {
+        let count = |im: &Raster| {
+            let (out, made) = counting_planes(COLOUR_PLANES, || {
+                im.try_icc_export_with(8, Intent::Perceptual, None)
+            });
+            assert!(
+                out.is_ok(),
+                "the unstarved export must succeed, got {out:?}"
+            );
+            made
+        };
+        assert_eq!(
+            count(&lab_profiled_fixture()),
+            5,
+            "the exact export arm makes the copy, the Lab staging, the device \
+             plane, the sample buffer and the output"
+        );
+        assert_eq!(
+            count(&lab_lut_profiled_fixture()),
+            6,
+            "the CMS fallback adds its own PCS plane on top of those five"
+        );
     }
 }

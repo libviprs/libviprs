@@ -1,7 +1,24 @@
 use crate::conversion::RasterMeta;
-use crate::imageio::MetadataFields;
-use crate::pixel::PixelFormat;
+use crate::frames::PageLayout;
+use crate::imageio::{MetadataFields, MetadataValue};
+use crate::pixel::{PixelFormat, SampleKind};
 use thiserror::Error;
+
+/// The metadata key holding the page split, named here and nowhere else.
+///
+/// Same discipline as `n-pages` (issue #635): one writer, one reader, one
+/// documented meaning, and `tests/page_model.rs` fails if a second file
+/// spells it. The reader is [`Raster::page_layout`] and the writer is
+/// [`Raster::try_set_page_height`].
+const PAGE_HEIGHT: &str = "page-height";
+
+/// The per-frame delay array, in milliseconds, which [`crate::gif`] attaches
+/// and reads. Named here for the one reason [`Raster::carry_meta_from`] gives:
+/// it describes the page split, so it cannot survive a change of shape.
+const DELAY: &str = "delay";
+
+#[cfg(test)]
+use std::cell::Cell;
 
 /// Errors that can occur when creating or slicing a [`Raster`].
 ///
@@ -66,12 +83,16 @@ pub enum RasterError {
     },
     #[error("{op} does not support float rasters yet; cast to an unsigned 8/16-bit format first")]
     FloatUnsupported { op: &'static str },
-    #[error("from_f32_samples requires a float pixel format (RgbaF32 / FloatF32), got {format:?}")]
+    #[error("a float pixel format (RgbaF32 / FloatF32) is required, got {format:?}")]
     NotFloatFormat { format: PixelFormat },
     #[error("unknown memory format {format:?}; expected \"uchar\", \"ushort\", or \"float\"")]
     UnknownMemoryFormat { format: String },
     #[error("invalid band count {bands} for memory format {format:?}")]
     InvalidMemoryBands { bands: u32, format: String },
+    #[error("page height {page_height} does not divide a {height}-row raster into whole pages")]
+    PageHeightNotADivisor { height: u32, page_height: u32 },
+    #[error("page {index} is out of bounds for a raster holding {pages} page(s)")]
+    PageOutOfBounds { index: u32, pages: u32 },
 }
 
 /// Default ceiling, in bytes, on a single raster buffer allocation sized from
@@ -79,7 +100,8 @@ pub enum RasterError {
 ///
 /// Dimensions flow unclamped from file headers (`/MediaBox`, TIFF/PNG IHDR)
 /// into buffer allocations. A crafted `50000 × 50000 × Rgba16` (~20 GB) is
-/// below the `usize`-overflow threshold [`buffer_len`] guards against, yet far
+/// below the `usize`-overflow threshold the crate-internal `buffer_len` helper
+/// guards against, yet far
 /// above host memory: an infallible `vec![0u8; size]` would call
 /// `handle_alloc_error` and abort the process (a remote DoS) with no chance to
 /// return a [`Result`]. [`Raster::new`] and [`Raster::zeroed`] reject any size
@@ -152,16 +174,17 @@ pub(crate) fn alloc_op_output(
     height: u32,
     format: PixelFormat,
 ) -> Result<Vec<u8>, RasterError> {
-    let size = buffer_len(width, height, format.bytes_per_pixel())?;
-    let mut data: Vec<u8> = Vec::new();
-    data.try_reserve_exact(size)
-        .map_err(|_| RasterError::AllocationFailed {
-            width,
-            height,
-            bytes: size,
-        })?;
-    data.resize(size, 0);
-    Ok(data)
+    // One byte of `T = u8` per byte of the pixel, so `try_plane_filled` prices
+    // and reports exactly what this function used to compute for itself: the
+    // `SizeOverflow` it raises carries `format.bytes_per_pixel()` as its `bpp`
+    // and the `AllocationFailed` carries the same byte count (issue #696).
+    try_plane_filled(
+        PLANE_OP_OUTPUT,
+        width,
+        height,
+        format.bytes_per_pixel(),
+        0u8,
+    )
 }
 
 /// Compute `width * height * bpp` as a `usize`, checking for overflow.
@@ -170,13 +193,495 @@ pub(crate) fn alloc_op_output(
 /// dimensions, then narrowed to `usize`. On 32-bit targets a product that
 /// exceeds `usize::MAX` yields [`RasterError::SizeOverflow`] rather than
 /// wrapping, so behaviour is identical on 32- and 64-bit targets.
-fn buffer_len(width: u32, height: u32, bpp: usize) -> Result<usize, RasterError> {
+///
+/// Crate-visible so the format decoders size their own output buffers with
+/// it. Clearing [`decode_alloc_bytes`]'s budget says the price fits a `u64`,
+/// which is not the same as fitting the address space: on a 32-bit target a
+/// caller who has raised `max_alloc_bytes` past 4 GiB clears the budget and
+/// then wraps a plain `usize` product two lines lower. Same defect as the
+/// price, one line down, which is why issue #632 fixed both.
+pub(crate) fn buffer_len(width: u32, height: u32, bpp: usize) -> Result<usize, RasterError> {
     let overflow = || RasterError::SizeOverflow { width, height, bpp };
     (width as u64)
         .checked_mul(height as u64)
         .and_then(|wh| wh.checked_mul(bpp as u64))
         .and_then(|bytes| usize::try_from(bytes).ok())
         .ok_or_else(overflow)
+}
+
+/// Price `width * height * bands * sample_bytes` for a decoder's allocation
+/// budget, saturating at `u64::MAX`.
+///
+/// The same product [`buffer_len`] computes, differing only in what the two do
+/// when it does not fit. `buffer_len` sizes a buffer that is about to exist, so
+/// a product it cannot represent has to be an error; this one is only ever
+/// compared against a ceiling, so it saturates and lets the comparison decide.
+/// The sweep in `the_decode_price_agrees_with_buffer_len_wherever_buffer_len_answers`
+/// is what holds the two together, rather than their being next to each other in
+/// the file.
+///
+/// `u64::MAX` is a sentinel here and not a price, and the comparison is where
+/// that is made true, not this function:
+/// [`DecodeLimits::exceeds_alloc_budget`](crate::source::DecodeLimits::exceeds_alloc_budget)
+/// refuses it whatever the ceiling says. Saturating on its own refuses nothing,
+/// because `needed > max` is false when both sides are `u64::MAX`, and
+/// `max_alloc_bytes = u64::MAX` is the idiomatic spelling of "no limit". So a
+/// saturated price under a lifted budget would otherwise be waved through and
+/// the decoder would size a buffer from a number that was never the real one.
+///
+/// A wrapping product is the failure both halves exist to avoid: `2^24 x 2^24 x
+/// 2^14` four-byte samples is exactly `2^64`, which wraps to `0`, clears every
+/// budget, and then sizes a buffer from a different number.
+///
+/// Saturation does not survive a later zero, either: `bands` or `sample_bytes`
+/// of `0` collapses an already-saturated product back to `0`, and `0` clears
+/// every budget. Nothing here can tell a declared zero from a saturated one, so
+/// a caller taking either factor from the file (a TIFF `BitsPerSample`, an
+/// OpenEXR channel list) has to refuse zero on its own account. [`Raster::new`]
+/// does refuse a zero dimension, but only after the buffer has been sized.
+///
+/// Every multiplicand widens to `u64` before it is multiplied, so the price
+/// does not depend on the target's pointer width the way a `usize` chain
+/// does. That is the same rule `buffer_len` states above, and issue #632 is
+/// the five per-format spellings of this product that had each drifted off
+/// it in their own direction.
+///
+/// `bands` and `sample_bytes` are `u64` rather than the narrower types the
+/// callers hold, because they are not all the same type: a FITS `NAXIS3` is a
+/// `u16`, an OpenEXR channel count is a `usize`, and a TIFF sample depth
+/// arrives in bits and is rounded up here by its caller.
+#[must_use]
+pub(crate) fn decode_alloc_bytes(width: u32, height: u32, bands: u64, sample_bytes: u64) -> u64 {
+    u64::from(width)
+        .saturating_mul(u64::from(height))
+        .saturating_mul(bands)
+        .saturating_mul(sample_bytes)
+}
+
+// ---------------------------------------------------------------------------
+// The fallible-plane funnel
+// ---------------------------------------------------------------------------
+
+/// Site label for the op-output buffer [`alloc_op_output`] reserves.
+///
+/// The labels are `module.what`, and the leading segment is what a probe
+/// prefix selects on: `counting_planes("colour.", ..)` counts every plane the
+/// colour module reserves and nothing else. Each module owns the labels for
+/// its own sites and spells them as a `const`, so a typo is a compile error
+/// rather than a check that quietly stops matching anything.
+pub(crate) const PLANE_OP_OUTPUT: &str = "raster.op_output";
+
+/// Site label for [`Raster::try_f32_samples`]'s widening.
+pub(crate) const PLANE_F32_SAMPLES: &str = "raster.f32_samples";
+
+/// Reserve `len` elements of `T` for a buffer that scales with an image,
+/// fallibly, and report [`RasterError::AllocationFailed`] rather than reaching
+/// `handle_alloc_error` and aborting the process.
+///
+/// This is [`alloc_op_output`]'s contract for a buffer that is not an op's
+/// output. `width` and `height` only name the raster in the error; `bytes` is
+/// the real size of the request, which for an intermediate is usually several
+/// times the raster's own byte length, so an error naming the raster would
+/// understate what failed by four or eight times.
+///
+/// The returned [`Vec`] is **empty with capacity**, in one request: callers
+/// fill it with `push`, `extend` or [`Vec::resize`], none of which reallocates
+/// while the reserved capacity holds, so the reservation is the fill's only
+/// allocation and a short reserve cannot hide behind a later growth.
+///
+/// No [`DEFAULT_MAX_ALLOC_BYTES`] re-check, for the reason [`alloc_op_output`]
+/// gives at length: a plane derives from an input raster that was already
+/// budget-checked at its own construction and legitimately grows on top of it,
+/// so re-imposing the budget here would refuse legal large work.
+///
+/// `site` is what the `cfg(test)` probe addresses, and it is a label rather
+/// than an ordinal on purpose: see [`with_plane_cap_at`].
+///
+/// This used to be three private helpers in three modules with three
+/// signatures and three separate test ceilings (issue #696).
+pub(crate) fn try_plane_len<T>(
+    site: &'static str,
+    width: u32,
+    height: u32,
+    len: usize,
+) -> Result<Vec<T>, RasterError> {
+    reserve_plane(site, width, height, len, len.saturating_mul(size_of::<T>()))
+}
+
+/// [`try_plane_len`] sized as `per_pixel` elements of `T` for every pixel of a
+/// `width` x `height` image.
+///
+/// Sizing goes through [`buffer_len`], the same `u64` multiplication
+/// [`Raster::new`] prices its buffers with, so a geometry whose element count
+/// does not fit a `usize` is [`RasterError::SizeOverflow`] on 32- and 64-bit
+/// targets alike rather than a wrapped product.
+///
+/// The `bpp` that variant carries is `per_pixel * size_of::<T>()`, which is
+/// what the plane actually costs a pixel: handing `per_pixel` straight through
+/// would report a `Vec<[f64; 3]>` plane as "1 bytes per pixel" where the figure
+/// is 24, and the variant is public through the module errors that wrap it.
+pub(crate) fn try_plane<T>(
+    site: &'static str,
+    width: u32,
+    height: u32,
+    per_pixel: usize,
+) -> Result<Vec<T>, RasterError> {
+    // Saturating because it is only ever an error payload here: a `per_pixel`
+    // big enough to overflow it fails the length check on the next line anyway.
+    let bpp = per_pixel.saturating_mul(size_of::<T>());
+    let overflow = || RasterError::SizeOverflow { width, height, bpp };
+    // One priced product, not two: the byte figure the errors carry falls out
+    // of the same multiplication that sizes the reservation.
+    let len = buffer_len(width, height, per_pixel).map_err(|_| overflow())?;
+    let bytes = len.checked_mul(size_of::<T>()).ok_or_else(overflow)?;
+    reserve_plane(site, width, height, len, bytes)
+}
+
+/// [`try_plane`], filled with `fill` to its full length, for the buffers a
+/// caller writes into by index rather than pushing to.
+///
+/// The length is computed rather than read off `capacity()`:
+/// [`Vec::try_reserve_exact`] is allowed to hand back more room than asked for,
+/// and the length is a contract with whatever writes into it, not whatever the
+/// allocator rounded up to.
+pub(crate) fn try_plane_filled<T: Clone>(
+    site: &'static str,
+    width: u32,
+    height: u32,
+    per_pixel: usize,
+    fill: T,
+) -> Result<Vec<T>, RasterError> {
+    let mut out = try_plane::<T>(site, width, height, per_pixel)?;
+    out.resize(buffer_len(width, height, per_pixel)?, fill);
+    Ok(out)
+}
+
+/// [`try_plane_len`], filled with `fill` to `len`, for a buffer whose size is
+/// an element count rather than a rate per pixel.
+///
+/// The zero-filled scratch planes in [`crate::arithmetic`] are all of this
+/// shape: an integral image is one element per *padded* pixel and a Hough vote
+/// accumulator is one per pixel per radius, so neither is priced off the
+/// driving raster's geometry the way [`try_plane_filled`] prices its caller's.
+///
+/// Fills to `len` and not to `capacity()`, for the reason [`try_plane_filled`]
+/// gives: [`Vec::try_reserve_exact`] is allowed to hand back more room than it
+/// was asked for, and the length is a contract with whatever writes into the
+/// buffer rather than whatever the allocator rounded up to.
+pub(crate) fn try_plane_len_filled<T: Clone>(
+    site: &'static str,
+    width: u32,
+    height: u32,
+    len: usize,
+    fill: T,
+) -> Result<Vec<T>, RasterError> {
+    let mut out = try_plane_len::<T>(site, width, height, len)?;
+    out.resize(len, fill);
+    Ok(out)
+}
+
+/// The one reservation every plane in the crate goes through.
+///
+/// Split out so [`try_plane_len`] and [`try_plane`] price their request their
+/// own way and still meet at a single `try_reserve_exact`, which is the whole
+/// point of the funnel: one place to instrument, and one place a mutation has
+/// to survive.
+fn reserve_plane<T>(
+    site: &'static str,
+    width: u32,
+    height: u32,
+    len: usize,
+    bytes: usize,
+) -> Result<Vec<T>, RasterError> {
+    // The label is only ever read by the `cfg(test)` probe below, so a
+    // production build carries the string in `.rodata` and nothing else.
+    #[cfg(not(test))]
+    let _ = site;
+    // Test-only: count this reservation, and over a lowered per-thread ceiling
+    // ask for one the allocator has to refuse. The ceiling deliberately does
+    // *not* return early. Returning here would answer before the reservation
+    // below ever ran, which leaves `try_reserve_exact` and an infallible
+    // `reserve_exact` indistinguishable to every test that drives it: that is
+    // #696's first bullet, and it is how #689's fourteen guards came to pass
+    // with the fallibility they were guarding reverted. Driving the real
+    // reservation instead keeps the thing under test on the path, so the
+    // revert turns every capped test red rather than leaving them green.
+    //
+    // This and the thread-local it reads compile only under `cfg(test)`, so a
+    // production reservation asks for exactly `len` and is bounded solely by
+    // the allocator, exactly as `alloc_op_output` is.
+    #[cfg(test)]
+    let len = if charge_plane_impl(site, bytes) {
+        // Past `isize::MAX` bytes, which `try_reserve_exact` refuses as a
+        // capacity overflow without troubling the allocator. A zero-sized `T`
+        // has no such length, but it also has no image-sized request to refuse:
+        // its `bytes` is zero, so it never trips a ceiling in the first place.
+        usize::MAX / size_of::<T>().max(1)
+    } else {
+        len
+    };
+    // Test-only: ask for more room than the caller wanted, which the allocator
+    // is always allowed to give and on this one never does. Zero unless a check
+    // has set it, so an ordinary run reserves exactly `len`.
+    #[cfg(test)]
+    let len = len.saturating_add(PLANE_PROBE.with(|c| c.get().over_reserve));
+    let mut out: Vec<T> = Vec::new();
+    out.try_reserve_exact(len)
+        .map_err(|_| RasterError::AllocationFailed {
+            width,
+            height,
+            bytes,
+        })?;
+    Ok(out)
+}
+
+/// Test-only: charge one image-sized allocation to the plane probe without
+/// making it here, for a site whose reservation happens somewhere the funnel
+/// cannot reach.
+///
+/// There is exactly one such site today, `colour.rs`'s copy of an
+/// already-Lab export input: the copy itself is [`Raster::try_clone`] and is
+/// fallible on its own account, but it is not a `Vec` this module reserves, so
+/// the routing is what gets counted and starved instead. A ceiling in front of
+/// a delegation proves the routing and says nothing about the copy, which is
+/// why [`counting_try_clones`] exists alongside it.
+#[cfg(test)]
+pub(crate) fn charge_plane(
+    site: &'static str,
+    width: u32,
+    height: u32,
+    bytes: usize,
+) -> Result<(), RasterError> {
+    if charge_plane_impl(site, bytes) {
+        return Err(RasterError::AllocationFailed {
+            width,
+            height,
+            bytes,
+        });
+    }
+    Ok(())
+}
+
+/// Test-only: count a reservation at `site` against the calling thread's probe
+/// and report whether the probe wants it refused.
+#[cfg(test)]
+fn charge_plane_impl(site: &'static str, bytes: usize) -> bool {
+    PLANE_PROBE.with(|cell| {
+        let mut probe = cell.get();
+        if site.starts_with(probe.count_prefix) {
+            probe.counted = probe.counted.saturating_add(1);
+        }
+        let over = bytes as u64 > probe.cap_bytes && site.starts_with(probe.cap_site);
+        let refuse = over && probe.cap_spare == 0;
+        if over && probe.cap_spare > 0 {
+            probe.cap_spare -= 1;
+        }
+        cell.set(probe);
+        refuse
+    })
+}
+
+/// Test-only: what the calling thread's plane probe is counting and starving.
+#[cfg(test)]
+#[derive(Clone, Copy)]
+struct PlaneProbe {
+    /// Reservations whose site label starts with this are counted. `""` counts
+    /// every one of them.
+    count_prefix: &'static str,
+    /// How many have been counted since the probe was armed.
+    counted: usize,
+    /// Reservations whose site label starts with this are subject to
+    /// [`PlaneProbe::cap_bytes`]. Prefer an exact label: a prefix matching
+    /// several sites brings back the ordinal reasoning the labels exist to
+    /// remove.
+    cap_site: &'static str,
+    /// Ceiling in bytes on a single reservation at a matching site. `u64::MAX`
+    /// disarms it, which is where every thread starts.
+    cap_bytes: u64,
+    /// How many matching over-ceiling reservations to wave through before the
+    /// ceiling starts refusing. Only ever needed where one site allocates
+    /// twice on a path, which is `try_sharpen`'s LabS round trip and nothing
+    /// else.
+    cap_spare: u32,
+    /// Extra capacity to reserve beyond what the caller asked for.
+    ///
+    /// [`Vec::try_reserve_exact`] is allowed to hand back more room than it was
+    /// asked for, and on this allocator at these sizes it never does, so a
+    /// length computed from the geometry and one read back off `capacity()`
+    /// agree at every size a test can build. That makes
+    /// [`try_plane_filled`]'s stated contract, that the fill length is the
+    /// geometry's, unobservable: `out.resize(out.capacity(), fill)` passes the
+    /// whole suite. This makes the allocator's licence happen on purpose so the
+    /// contract can be checked (issue #696).
+    over_reserve: usize,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Per-thread probe over every plane reservation in the crate.
+    ///
+    /// Disarmed at rest: nothing is counted under a prefix no site can match
+    /// only because `""` matches all of them and the count is then thrown away
+    /// with the probe, and `u64::MAX` refuses nothing. So an ordinary run
+    /// bounds a plane only by what the allocator will serve, exactly as
+    /// [`alloc_op_output`] does, and a test that arms the probe reaches the
+    /// fallible branch at a raster it can actually build: a plane whose
+    /// reservation genuinely exhausts the allocator is far past the
+    /// [`DEFAULT_MAX_ALLOC_BYTES`] construction budget, so the branch is
+    /// otherwise unreachable from a test (issues #460, #627, #685).
+    ///
+    /// One probe for the whole crate, which is what makes the site labels
+    /// load-bearing: the three modules used to keep three of these, so a
+    /// ceiling meant a different thing in each and a path crossing two of them
+    /// could only be starved in one at a time (issue #696).
+    static PLANE_PROBE: Cell<PlaneProbe> = const {
+        Cell::new(PlaneProbe {
+            count_prefix: "",
+            counted: 0,
+            cap_site: "",
+            cap_bytes: u64::MAX,
+            cap_spare: 0,
+            over_reserve: 0,
+        })
+    };
+}
+
+/// Test-only hook: run `f` with every plane reservation asking the allocator
+/// for `extra` elements more than the caller wanted.
+///
+/// [`Vec::try_reserve_exact`] may hand back more room than it was asked for,
+/// and [`try_plane_filled`] fills to a length computed from the geometry rather
+/// than to `capacity()` for exactly that reason. On this allocator at these
+/// sizes the two never differ, so the contract is invisible and
+/// `out.resize(out.capacity(), fill)` passes the whole suite. This makes them
+/// differ on purpose.
+#[cfg(test)]
+pub(crate) fn with_plane_over_reserve<R>(extra: usize, f: impl FnOnce() -> R) -> R {
+    let mut probe = PLANE_PROBE.with(Cell::get);
+    probe.over_reserve = extra;
+    with_plane_probe(probe, f).0
+}
+
+/// Test-only hook: run `f` with the calling thread's plane probe armed as
+/// given, returning its value alongside the number of reservations it counted,
+/// and restoring the previous probe afterwards including on unwind.
+///
+/// The probe is thread-local, so tests running in parallel do not perturb one
+/// another, and it compiles only under `cfg(test)`, so no test-support symbol
+/// ships and the crate's public surface is unchanged.
+#[cfg(test)]
+fn with_plane_probe<R>(probe: PlaneProbe, f: impl FnOnce() -> R) -> (R, usize) {
+    struct Restore(PlaneProbe);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            PLANE_PROBE.with(|c| c.set(self.0));
+        }
+    }
+    let _restore = Restore(PLANE_PROBE.with(|c| c.replace(probe)));
+    let value = f();
+    let counted = PLANE_PROBE.with(|c| c.get().counted);
+    (value, counted)
+}
+
+/// Test-only hook: run `f` and report how many plane reservations it made at
+/// sites whose label starts with `prefix`, refusing none of them.
+///
+/// This is the funnel's counting half, and it is the load-bearing one wherever
+/// two spellings of the same buffer behave identically at every size a test can
+/// build. `vec![0i32; n]` and [`try_plane_len`] differ only in what they do
+/// when the allocation fails, which for a plane a test can actually build is
+/// never, so nothing but the count tells them apart (issue #627).
+#[cfg(test)]
+pub(crate) fn counting_planes<R>(prefix: &'static str, f: impl FnOnce() -> R) -> (R, usize) {
+    with_plane_probe(
+        PlaneProbe {
+            count_prefix: prefix,
+            counted: 0,
+            cap_site: "",
+            cap_bytes: u64::MAX,
+            cap_spare: 0,
+            over_reserve: 0,
+        },
+        f,
+    )
+}
+
+/// Test-only hook: [`counting_planes`], with the reservations at `cap_site`
+/// refused above `max_bytes`.
+///
+/// Both halves at once, for the checks that want to say an operation completed
+/// under a ceiling *and* that it reserved the number of times it was supposed
+/// to. A ceiling on its own cannot say the second thing and a count on its own
+/// cannot say the first.
+#[cfg(test)]
+pub(crate) fn counting_planes_under_cap<R>(
+    prefix: &'static str,
+    cap_site: &'static str,
+    max_bytes: u64,
+    f: impl FnOnce() -> R,
+) -> (R, usize) {
+    with_plane_probe(
+        PlaneProbe {
+            count_prefix: prefix,
+            counted: 0,
+            cap_site,
+            cap_bytes: max_bytes,
+            cap_spare: 0,
+            over_reserve: 0,
+        },
+        f,
+    )
+}
+
+/// Test-only hook: run `f` with the plane reservation at `site` refused above
+/// `max_bytes`, and every other site left alone.
+///
+/// A label rather than an ordinal, which is the difference between this and
+/// what the three private ceilings did. Theirs refused the Nth over-ceiling
+/// request along a path, so a check naming a site was really naming a position,
+/// disambiguated by the byte sizes on the path happening to be unique. That is
+/// why three of the colour fixtures carry an extra band on purpose, why a pair
+/// of same-sized buffers could not be told apart at all, and why inserting a
+/// new allocation anywhere earlier silently re-pointed a dozen checks at their
+/// neighbours. Naming the site removes all of it (issue #696).
+#[cfg(test)]
+pub(crate) fn with_plane_cap_at<R>(site: &'static str, max_bytes: u64, f: impl FnOnce() -> R) -> R {
+    with_plane_cap_after(site, 0, max_bytes, f)
+}
+
+/// Test-only hook: [`with_plane_cap_at`], waving the first `spare`
+/// over-ceiling reservations **at that same site** through before the ceiling
+/// starts refusing.
+///
+/// Only one path needs it. `try_sharpen` opens and closes a LabS round trip, so
+/// `colour.colourspace_output` allocates twice on one call, and the entry
+/// conversion is the larger of the two on every route into LabS (LabS is the
+/// widest storage depth the space table has), so no ceiling exists that admits
+/// the entry and refuses the exit. Sparing the first reservation at that one
+/// site runs the whole body and starves the second.
+///
+/// The spare counts within the named site rather than across the path, which is
+/// the property the old ordinal did not have: adding an allocation somewhere
+/// else on the same path does not move it.
+#[cfg(test)]
+pub(crate) fn with_plane_cap_after<R>(
+    site: &'static str,
+    spare: u32,
+    max_bytes: u64,
+    f: impl FnOnce() -> R,
+) -> R {
+    with_plane_probe(
+        PlaneProbe {
+            count_prefix: "",
+            counted: 0,
+            cap_site: site,
+            cap_bytes: max_bytes,
+            cap_spare: spare,
+            over_reserve: 0,
+        },
+        f,
+    )
+    .0
 }
 
 /// An owned raster image buffer with known dimensions and pixel format.
@@ -231,6 +736,15 @@ impl Raster {
     /// and that neither dimension is zero. This is the primary constructor used
     /// when pixel data has already been produced by a decoder or renderer.
     ///
+    /// The format is stored in its canonical spelling. `PixelFormat`'s tuple
+    /// variants are public, so a caller can declare `FloatF32(4)` where
+    /// `RgbaF32` names the same pixel layout; both are accepted and the
+    /// raster reports the named one. That is what lets every `match` on
+    /// [`Raster::format`] and every [`PixelFormat::has_alpha`] decision
+    /// downstream of it read the layout rather than the caller's choice of
+    /// spelling (issue #531). It cannot change what validates here: the two
+    /// spellings agree on `bytes_per_pixel`.
+    ///
     /// # Errors
     ///
     /// Returns [`RasterError::ZeroDimension`] if width or height is 0, or
@@ -266,6 +780,7 @@ impl Raster {
         data: Vec<u8>,
         max_bytes: u64,
     ) -> Result<Self, RasterError> {
+        let format = format.canonical();
         if width == 0 || height == 0 {
             return Err(RasterError::ZeroDimension { width, height });
         }
@@ -322,6 +837,7 @@ impl Raster {
         format: PixelFormat,
         data: Vec<u8>,
     ) -> Result<Self, RasterError> {
+        let format = format.canonical();
         if width == 0 || height == 0 {
             return Err(RasterError::ZeroDimension { width, height });
         }
@@ -345,11 +861,159 @@ impl Raster {
         })
     }
 
+    /// A fallible [`Clone`] **of the pixel buffer**, for the operation paths
+    /// that must not abort.
+    ///
+    /// `Raster` derives `Clone` and cloning copies the whole pixel buffer,
+    /// which on a full-resolution image is the largest single allocation an
+    /// operation makes. `Clone::clone` reaches `handle_alloc_error` and
+    /// **ends the process** when that allocation fails, so a `try_` operation
+    /// that copies its input with `.clone()` is not actually fallible however
+    /// its signature reads. This reserves with [`Vec::try_reserve_exact`] and
+    /// reports [`RasterError::AllocationFailed`] instead, the same contract
+    /// [`alloc_op_output`] and [`Raster::zeroed`] already publish.
+    ///
+    /// The metadata rides along exactly as `Clone` carries it: interpretation,
+    /// resolution, orientation and every attached field. That is the reason a
+    /// copy is not spelled as `Raster::new` over a fresh buffer, which would
+    /// silently reset all of it.
+    ///
+    /// And it is where the fallibility stops. `fields.clone()` copies the
+    /// attachments through the same infallible allocation `Clone` uses, an
+    /// embedded ICC profile among them, so a host that cannot serve *that*
+    /// still aborts. A profile is a bounded copy rather than an image-sized
+    /// one, which is why it sits outside what #685 set out to remove, but it
+    /// means this method is not abort-free and the first line says "of the
+    /// pixel buffer" for that reason.
+    ///
+    /// No budget is applied. The source raster is already held in memory and
+    /// already passed whatever budget built it, so a copy of it is by
+    /// definition in budget; the fallibility here is against the allocator,
+    /// not against a declared size.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RasterError::AllocationFailed`] if the allocator cannot
+    /// satisfy a buffer the same size as this one.
+    pub(crate) fn try_clone(&self) -> Result<Self, RasterError> {
+        // Test-only: `counting_try_clones` reads this, so a caller that goes
+        // back to `Clone::clone` is visible to a test even where no ceiling can
+        // reach the copy.
+        #[cfg(test)]
+        TRY_CLONE_CALLS.with(|n| n.set(n.get() + 1));
+        let mut data: Vec<u8> = Vec::new();
+        data.try_reserve_exact(self.data.len())
+            .map_err(|_| RasterError::AllocationFailed {
+                width: self.width,
+                height: self.height,
+                bytes: self.data.len(),
+            })?;
+        data.extend_from_slice(&self.data);
+        Ok(Self {
+            width: self.width,
+            height: self.height,
+            format: self.format,
+            data,
+            meta: self.meta,
+            fields: self.fields.clone(),
+        })
+    }
+
+    /// Carry `src`'s metadata onto this raster: the header block
+    /// (interpretation, resolution, offsets, orientation) **and** the attached
+    /// fields (ICC profile, EXIF blob, anything a caller set).
+    ///
+    /// Every operation that builds its result from a fresh buffer starts from
+    /// `RasterMeta::default()` and an empty field map, so without this the
+    /// output is untagged and unattached. libvips builds its results inside
+    /// the input's pipeline and copies both halves, so this is the default
+    /// behaviour an op has to *opt out of* rather than opt in to.
+    ///
+    /// It was eighteen open-coded copies of the same two lines before #717,
+    /// eleven of which only wrote the first one and silently dropped every
+    /// attachment. Routing them through one method is what makes "did this op
+    /// carry the metadata" a question with one answer.
+    ///
+    /// # Where an op differs
+    ///
+    /// Call this first and then overwrite the one field that differs, the way
+    /// `try_extract_area` stamps `-left` / `-top` after the carry (#690) and
+    /// `try_falsecolour` stamps `Srgb`. Doing it the other way round loses the
+    /// stamp.
+    ///
+    /// This is `out.carry_meta_from(src)` and not `src.carry_meta(out) ->
+    /// Raster` on purpose: it reads in the direction the data moves, and it
+    /// works on a result a helper already built, where the returning form
+    /// forces the construction inside the carry's own argument list.
+    ///
+    /// The `fields.clone()` allocates infallibly. It is a bounded copy (an
+    /// attachment, not a plane) for the same reason [`Raster::try_clone`]
+    /// gives, and it is the same residue.
+    pub(crate) fn carry_meta_from(&mut self, src: &Raster) {
+        self.meta = src.meta;
+        self.fields = src.fields.clone();
+        // The page split is the one attachment that is a statement about the
+        // pixel buffer's own shape, so it cannot survive a change of shape
+        // (issue #564). vips carries it regardless and that is measurably
+        // wrong: `vips resize` on a four-page 4x12 roll writes a 2x6 result
+        // still claiming `page-height: 3`, and saving that produces a
+        // **two**-frame GIF whose frames are two half-height frames stacked,
+        // with no warning (measured on 8.18.6). Dropping it instead leaves a
+        // still image, which is the safe half of the two wrong answers, and
+        // it costs nothing on a still: nothing here attaches the field to one.
+        if self.height != src.height {
+            self.fields.remove(PAGE_HEIGHT);
+            // `delay` is the second field that is a statement about the page
+            // split rather than about the image, and it goes for the same
+            // reason (issue #572). It holds one entry per page, so a raster
+            // whose page count moved carries an array that no longer indexes
+            // anything: `roll.extract_page(0)` on a four-page animation
+            // produced a one-page raster still claiming four delays, and
+            // `encode_gif` then refused to save it because the two disagree.
+            // Keeping it would have been worse than refusing, since the first
+            // delay would have been written onto a page that is not the first.
+            self.fields.remove(DELAY);
+        }
+    }
+
+    /// Merge `other`'s attached fields **under** this raster's, so a name they
+    /// share keeps the value already here.
+    ///
+    /// The multi-input ops need this. Measured on vips 8.18.6, `insert`,
+    /// `join`, `arrayjoin` and `bandjoin` all take the header block from the
+    /// first input alone and the attached fields from both, first input
+    /// winning a collision (#718). So they carry from `main` and then merge
+    /// `sub` on top of that, and a profile that only `sub` has still reaches
+    /// the output.
+    pub(crate) fn merge_fields_from(&mut self, other: &Raster) {
+        // A page split describes the raster it is attached to and cannot be
+        // inherited from a second input, so it is the one name the union does
+        // not import (issue #564). vips does import it, and the result is
+        // wrong: `vips join plain.v paged.v out.v horizontal`, where only the
+        // *second* input is a four-page roll, produces an 8x12 output
+        // carrying `page-height: 3`, `n-pages: 4` and the roll's delay array,
+        // so an unpaged image silently becomes a four-frame animation
+        // (measured on 8.18.6).
+        let had_page_height = self.fields.get(PAGE_HEIGHT).is_some();
+        let had_delay = self.fields.get(DELAY).is_some();
+        self.fields.merge_under(&other.fields);
+        if !had_page_height {
+            self.fields.remove(PAGE_HEIGHT);
+        }
+        // The delay array goes with the split for the reason above: a
+        // still that joins an animation would otherwise come out carrying
+        // that animation's per-frame timings (issue #572).
+        if !had_delay {
+            self.fields.remove(DELAY);
+        }
+    }
+
     /// Create a raster filled with zeros.
     ///
     /// Allocates a buffer of the correct size and fills it with `0u8`. Useful
     /// for creating blank tiles or output buffers that will be written into
-    /// later (e.g., compositing or scaling operations).
+    /// later (e.g., compositing or scaling operations). The format is stored
+    /// in its canonical spelling, as in [`Raster::new`].
     ///
     /// # Errors
     ///
@@ -379,6 +1043,7 @@ impl Raster {
         format: PixelFormat,
         max_bytes: u64,
     ) -> Result<Self, RasterError> {
+        let format = format.canonical();
         if width == 0 || height == 0 {
             return Err(RasterError::ZeroDimension { width, height });
         }
@@ -429,8 +1094,9 @@ impl Raster {
     /// and the arithmetic on 16-bit samples use.
     ///
     /// ```
+    /// # use libviprs::pixel::SampleKind;
     /// # use libviprs::{PixelFormat, Raster};
-    /// let fmt = PixelFormat::with_channels(1, 4).unwrap(); // FloatF32(1)
+    /// let fmt = PixelFormat::with_kind(1, SampleKind::F32).unwrap(); // FloatF32(1)
     /// let im = Raster::from_f32_samples(2, 1, fmt, &[0.25, -1.5]).unwrap();
     /// assert_eq!(im.getpoint(0, 0), vec![0.25]);
     /// assert_eq!(im.getpoint(1, 0), vec![-1.5]);
@@ -481,22 +1147,72 @@ impl Raster {
         Raster::new(width, height, format, data)
     }
 
+    /// Fallible form of [`Raster::f32_samples`], which carries the contract.
+    ///
+    /// The decoded buffer is the same size as the raster's own pixel buffer, so
+    /// on a full-resolution image it is one of the largest allocations an
+    /// operation that widens through it makes. It is reserved with
+    /// [`Vec::try_reserve_exact`] and reports [`RasterError::AllocationFailed`],
+    /// so it never reaches `handle_alloc_error` and never ends the process.
+    ///
+    /// That is the whole reason this exists. `f32_samples` used to `.collect()`
+    /// here, and a `.collect()` sized from an [`ExactSizeIterator`] allocates
+    /// through `handle_alloc_error`, which **aborts**. An abort cannot be
+    /// caught by anything, so it put an unavoidable process exit on
+    /// [`Raster::try_sharpen`] and on [`Raster::try_canny`]'s float arm however
+    /// their signatures read, which is what kept those two off the abort-free
+    /// list #575 took the rest of the convolution family onto (issue #627).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RasterError::NotFloatFormat`] when the format does not store
+    /// float samples, or [`RasterError::AllocationFailed`] when the sample
+    /// buffer cannot be reserved.
+    ///
+    /// [`ExactSizeIterator`]: std::iter::ExactSizeIterator
+    pub fn try_f32_samples(&self) -> Result<Vec<f32>, RasterError> {
+        if !self.format.is_float() {
+            return Err(RasterError::NotFloatFormat {
+                format: self.format,
+            });
+        }
+        let chunks = self.data.as_chunks::<4>().0;
+        // The widening is a plane like any other, so it reserves through the
+        // one funnel rather than through a fourth copy of it with a fourth
+        // ceiling of its own (issue #696). `chunks.len()` is already the
+        // element count, so this is the length form.
+        let mut out: Vec<f32> =
+            try_plane_len(PLANE_F32_SAMPLES, self.width, self.height, chunks.len())?;
+        out.extend(chunks.iter().map(|&c| f32::from_ne_bytes(c)));
+        Ok(out)
+    }
+
     /// The pixel data as `f32` samples, for float formats.
     ///
     /// Returns the flat sample sequence (row-major, channels interleaved)
     /// decoded from the native-byte-order buffer, or `None` when the
     /// format does not store float samples. The inverse of
     /// [`Raster::from_f32_samples`].
+    ///
+    /// This is the convenience half of the pair. Reach for
+    /// [`Raster::try_f32_samples`] wherever an allocation failure should arrive
+    /// as a value rather than as a panic.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the sample buffer cannot be allocated; see
+    /// [`Raster::try_f32_samples`]. It used to **abort** the process there
+    /// instead, through the `handle_alloc_error` a `.collect()` reaches, which
+    /// is nothing a caller can catch or recover from (issue #627). `None` still
+    /// means only "the format does not store float samples", and never
+    /// "the allocation failed".
+    #[track_caller]
     pub fn f32_samples(&self) -> Option<Vec<f32>> {
-        if !self.format.is_float() {
-            return None;
+        match self.try_f32_samples() {
+            Ok(samples) => Some(samples),
+            Err(RasterError::NotFloatFormat { .. }) => None,
+            Err(e) => panic!("f32_samples: {e}"),
         }
-        Some(
-            self.data
-                .chunks_exact(4)
-                .map(|c| f32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
-                .collect(),
-        )
     }
 
     /// Bytes per row (stride). No padding -- rows are tightly packed.
@@ -544,11 +1260,24 @@ impl Raster {
         })
     }
 
-    /// Extract a sub-region as a new owned `Raster`.
+    /// Extract a sub-region as a new owned `Raster`, carrying the metadata.
     ///
     /// Copies the pixel data row-by-row into a freshly allocated buffer.
     /// Use this when you need an independent `Raster` (e.g., to encode a tile
     /// to disk) rather than a borrowed view.
+    ///
+    /// The interpretation, resolution, orientation, origin offset and every
+    /// attached field come with it, the same as
+    /// [`Raster::try_extract_area`](crate::Raster::try_extract_area), which is
+    /// built on this. The one difference is the origin: `extract_area` stamps
+    /// `(-left, -top)` to match `vips_extract_area`, where this carries the
+    /// source's (issue #740).
+    ///
+    /// Carrying an attached ICC profile costs one bounded copy per crop, which
+    /// on the tiling paths is once per tile. That is a real cost and it is
+    /// measured in `tests/extract_metadata_carry.rs`; it buys correctness on
+    /// the resampling paths, where a lost interpretation changes output bytes
+    /// on the float carriers.
     ///
     /// # Errors
     ///
@@ -570,7 +1299,23 @@ impl Raster {
         for row in view.rows() {
             out.extend_from_slice(row);
         }
-        Raster::new(w, h, self.format, out)
+        let mut cropped = Raster::new(w, h, self.format, out)?;
+        // The crate's physical crop, so it carries like everything else (#740).
+        // `Raster::extract_area` is built on this and used to be the only one
+        // of the two that carried, which mattered because `extract` is what
+        // `engine.rs` and `streaming.rs` call per tile and per strip: a float
+        // scRGB source cropped here lost its tag, and #664 makes the
+        // premultiply bracket read that tag on float carriers, so every
+        // resampled tile of a region run came out different from a whole-image
+        // one.
+        //
+        // The origin offset is carried, not stamped. `extract_area` stamps
+        // `(-left, -top)` because `vips_extract_area` does and #690 measured
+        // it; this is not that operation, vips has no method it corresponds to,
+        // and a pyramid tile is not a crop of a larger image in the sense
+        // `Xoffset` means. `extract_area` stamps on top of this carry.
+        cropped.carry_meta_from(self);
+        Ok(cropped)
     }
 
     /// Fallible form of [`Raster::new_from_memory`].
@@ -587,7 +1332,7 @@ impl Raster {
     /// no format can carry `bands` at that depth (zero or above
     /// `u16::MAX`), or any error from [`Raster::new`] (notably
     /// [`RasterError::BufferSizeMismatch`] when `data.len()` does not equal
-    /// `width * height * bands * bytes_per_channel`).
+    /// `width * height * bands * the sample width`).
     pub fn try_new_from_memory(
         data: &[u8],
         width: u32,
@@ -595,10 +1340,18 @@ impl Raster {
         bands: u32,
         format: &str,
     ) -> Result<Raster, RasterError> {
-        let bytes_per_channel = match format {
-            "uchar" => 1,
-            "ushort" => 2,
-            "float" => 4,
+        // The vips format nickname names a **sample kind**, not a byte
+        // width, and this used to go through the width. That is the same
+        // shape as the `.v` `BandFmt` tag of issue #841 one layer over: vips
+        // has `char`, `short`, `uint` and `int` nicknames too, and a width
+        // cannot tell `uint` from `float`. Naming the kind means the day a
+        // carrier lands, wiring its nickname in is one line here and
+        // `with_kind` does the rest, instead of `"uint"` mapping to 4 and
+        // arriving as a float raster (issue #607).
+        let kind = match format {
+            "uchar" => SampleKind::U8,
+            "ushort" => SampleKind::U16,
+            "float" => SampleKind::F32,
             other => {
                 return Err(RasterError::UnknownMemoryFormat {
                     format: other.to_string(),
@@ -607,7 +1360,7 @@ impl Raster {
         };
         let pixel_format = usize::try_from(bands)
             .ok()
-            .and_then(|b| PixelFormat::with_channels(b, bytes_per_channel))
+            .and_then(|b| PixelFormat::with_kind(b, kind))
             .ok_or_else(|| RasterError::InvalidMemoryBands {
                 bands,
                 format: format.to_string(),
@@ -649,6 +1402,167 @@ impl Raster {
     /// bands, fmt)` reconstructs an identical image.
     pub fn write_to_memory(&self) -> Vec<u8> {
         self.data().to_vec()
+    }
+
+    // -----------------------------------------------------------------
+    // The page model (issue #564)
+    // -----------------------------------------------------------------
+
+    /// How this raster's rows divide into pages, with libvips's sanity check
+    /// already applied (issue #564).
+    ///
+    /// A multi-frame image here is one raster whose rows are a whole number
+    /// of equal-height pages stacked top to bottom, the layout libvips calls
+    /// a toilet roll. The split is derived from the stored `page-height`
+    /// field and this raster's own height, never taken on trust: see
+    /// [`PageLayout::of`] for the rule and the measurement behind it.
+    ///
+    /// Reading it costs no allocation whatever type is sitting under the
+    /// name, for the reason [`Raster::get_n_pages`] gives.
+    pub fn page_layout(&self) -> PageLayout {
+        PageLayout::of(self.height, self.stored_page_height())
+    }
+
+    /// The height of one page in rows, a port of
+    /// `vips_image_get_page_height`.
+    ///
+    /// Total, and always a divisor of [`Raster::height`]: a raster that is
+    /// not paged reports its whole height, which is one page. That is what
+    /// vips reports too, measured on 8.18.6 across a sweep of stored values
+    /// (the table is in [`crate::frames`]).
+    pub fn get_page_height(&self) -> u32 {
+        self.page_layout().page_height()
+    }
+
+    /// How many pages this raster **holds**.
+    ///
+    /// Not to be confused with [`Raster::get_n_pages`], which is how many
+    /// pages the **file** held (issue #635). They differ whenever a loader
+    /// was asked for a subset: `vips copy 'anim3.webp[n=2]' out.v` reports
+    /// `n-pages: 3` on a raster holding two pages.
+    pub fn pages_loaded(&self) -> u32 {
+        self.page_layout().pages()
+    }
+
+    /// Declare that this raster's rows divide into pages `page_height` rows
+    /// tall.
+    ///
+    /// This is the one place in the crate that names the `page-height` key,
+    /// the way `Raster::set_n_pages` is for `n-pages` (issue #635), and
+    /// `tests/page_model.rs` holds it to that.
+    ///
+    /// Unlike vips's setter this one refuses a page height the raster cannot
+    /// hold. vips stores whatever it is given and its reader then discards a
+    /// value that does not divide the height, so a caller that sets a bad one
+    /// gets a silently unpaged image back; refusing at the setter turns that
+    /// into an error at the point the mistake was made.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RasterError::PageHeightNotADivisor`] when `page_height` is
+    /// zero, taller than the raster, or does not divide its height exactly.
+    pub fn try_set_page_height(&mut self, page_height: u32) -> Result<(), RasterError> {
+        if !PageLayout::divides(self.height, i64::from(page_height)) {
+            return Err(RasterError::PageHeightNotADivisor {
+                height: self.height,
+                page_height,
+            });
+        }
+        self.fields
+            .set(PAGE_HEIGHT, MetadataValue::Int(i64::from(page_height)));
+        Ok(())
+    }
+
+    /// Panicking form of [`Raster::try_set_page_height`].
+    ///
+    /// # Panics
+    ///
+    /// Panics when `page_height` does not divide the raster's height; see
+    /// [`Raster::try_set_page_height`].
+    #[track_caller]
+    pub fn set_page_height(&mut self, page_height: u32) {
+        match self.try_set_page_height(page_height) {
+            Ok(()) => {}
+            Err(e) => panic!("set_page_height: {e}"),
+        }
+    }
+
+    /// Forget the page split, leaving a single-page raster.
+    ///
+    /// The pixels are untouched; only the declaration goes. This is what an
+    /// operation reaches for when it has produced a buffer whose rows no
+    /// longer tile the way the source's did.
+    pub fn clear_page_height(&mut self) {
+        self.fields.remove(PAGE_HEIGHT);
+    }
+
+    /// A zero-copy view of page `index`, counting from zero.
+    ///
+    /// Zero-based to match every loader's `page` argument and the
+    /// `0..get_n_pages()` sweep [`Raster::get_n_pages`] documents (issue
+    /// #566). An unpaged raster has exactly one page, `0`, covering every
+    /// row, so this works on a still image without the caller branching.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RasterError::PageOutOfBounds`] when `index` is past the last
+    /// page this raster holds.
+    pub fn page(&self, index: u32) -> Result<RegionView<'_>, RasterError> {
+        let layout = self.page_layout();
+        let rows = layout.rows(index).ok_or(RasterError::PageOutOfBounds {
+            index,
+            pages: layout.pages(),
+        })?;
+        self.region(0, rows.start, self.width, layout.page_height())
+    }
+
+    /// Copy page `index` into a new owned single-page raster.
+    ///
+    /// The metadata comes with it exactly as [`Raster::extract`] carries it,
+    /// minus the page split: a single page is not paged, so the result
+    /// reports one page whatever the source held. `n-pages` is *not* dropped,
+    /// because it says how many pages the file had and that is still true of
+    /// the file this page came out of.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RasterError::PageOutOfBounds`] when `index` is past the last
+    /// page, or any error from [`Raster::extract`].
+    pub fn try_extract_page(&self, index: u32) -> Result<Raster, RasterError> {
+        let layout = self.page_layout();
+        let rows = layout.rows(index).ok_or(RasterError::PageOutOfBounds {
+            index,
+            pages: layout.pages(),
+        })?;
+        let mut page = self.extract(0, rows.start, self.width, layout.page_height())?;
+        page.clear_page_height();
+        Ok(page)
+    }
+
+    /// Panicking form of [`Raster::try_extract_page`].
+    ///
+    /// # Panics
+    ///
+    /// Panics on any [`RasterError`]; see [`Raster::try_extract_page`].
+    #[track_caller]
+    pub fn extract_page(&self, index: u32) -> Raster {
+        match self.try_extract_page(index) {
+            Ok(page) => page,
+            Err(e) => panic!("extract_page: {e}"),
+        }
+    }
+
+    /// The raw stored `page-height`, borrowed rather than materialised.
+    ///
+    /// Borrowed for the reason `Raster::field_i64` gives: the name is not a
+    /// built-in, so an untrusted `.v` can leave a blob under it and cloning
+    /// that out on every geometry read would be an image-sized copy behind an
+    /// accessor that returns a small integer (issue #635).
+    fn stored_page_height(&self) -> Option<i64> {
+        match self.fields.get(PAGE_HEIGHT) {
+            Some(&MetadataValue::Int(n)) => Some(n),
+            _ => None,
+        }
     }
 }
 
@@ -724,8 +1638,46 @@ impl<'a> RegionView<'a> {
 }
 
 #[cfg(test)]
+thread_local! {
+    /// Test-only: how many rasters the calling thread has copied through
+    /// [`Raster::try_clone`].
+    ///
+    /// The colour module's ICC export copies an input that is already Lab, and
+    /// that copy is one of the fourteen allocation sites #685 made fallible. It
+    /// is the only one of the fourteen no ceiling can prove: `colour.rs` puts
+    /// its ceiling in the wrapper, where it answers before `try_clone` runs,
+    /// and the real allocator will not refuse a copy of a raster small enough
+    /// for a test to have built in the first place. What is left to check is
+    /// the delegation, so this counts it. A wrapper that goes back to
+    /// `Clone::clone` leaves the count at zero.
+    static TRY_CLONE_CALLS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Test-only: run `f` and report how many [`Raster::try_clone`] copies it made
+/// on the calling thread.
+///
+/// The counter is thread-local and saved and restored around `f`, so parallel
+/// tests and nested uses do not perturb one another, matching the colour
+/// module's own ceiling hook.
+#[cfg(test)]
+pub(crate) fn counting_try_clones<R>(f: impl FnOnce() -> R) -> (R, u32) {
+    struct Restore(u32);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            TRY_CLONE_CALLS.with(|n| n.set(self.0));
+        }
+    }
+    let _restore = Restore(TRY_CLONE_CALLS.with(|n| n.replace(0)));
+    let out = f();
+    (out, TRY_CLONE_CALLS.with(std::cell::Cell::get))
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use crate::conversion::{Angle45, Interpretation};
+    use crate::convolution::{Combine, Precision};
+    use crate::imageio::MetadataValue;
 
     fn make_rgb_raster(w: u32, h: u32) -> Raster {
         let bpp = PixelFormat::Rgb8.bytes_per_pixel();
@@ -1054,6 +2006,744 @@ mod tests {
         assert!(buf.iter().all(|&b| b == 0));
     }
 
+    // -- the fallible-plane funnel ------------------------------------------
+
+    /**
+     * Tests that a reservation no allocator can serve comes back typed rather
+     * than reaching `handle_alloc_error` and aborting, and that the byte count
+     * in it is the size of the **request** rather than of the raster.
+     *
+     * That distinction is the reason [`try_plane_len`] takes a length instead
+     * of reading one off the raster: every intermediate it reserves is some
+     * multiple of the source, and an error naming the source's byte length
+     * would understate what failed by four or eight times.
+     *
+     * This runs with the probe disarmed, so the refusal is the real
+     * allocator's. It has to exist and it has to be separate from every check
+     * that drives the ceiling, for the reason #696's first bullet gives: a
+     * ceiling that answers *before* `try_reserve_exact` leaves the fallible
+     * reservation and an infallible `reserve_exact` indistinguishable, and
+     * fourteen of #689's guards passed with the fallibility they were guarding
+     * reverted. Nothing in this one is a hook.
+     *
+     * The two sizes are the two ways a `Vec` refuses. Eight bytes an element
+     * over a quarter of `usize` is under the `isize::MAX` ceiling `Vec` checks
+     * up front, so the request reaches the allocator and is refused there;
+     * `usize::MAX` elements is past that ceiling, so it comes back without the
+     * allocator being asked. Both must be typed.
+     */
+    #[test]
+    fn try_plane_len_reports_the_size_of_the_request_not_of_the_raster() {
+        assert!(matches!(
+            try_plane_len::<f64>("test.direct", 1, 1, usize::MAX / 4),
+            Err(RasterError::AllocationFailed { .. })
+        ));
+        assert!(matches!(
+            try_plane_len::<f64>("test.direct", 3, 2, usize::MAX),
+            Err(RasterError::AllocationFailed {
+                width: 3,
+                height: 2,
+                bytes: usize::MAX
+            })
+        ));
+    }
+
+    /**
+     * Tests the per-pixel form's pricing: the element count goes through
+     * [`buffer_len`], and the `bpp` an overflow carries is what the plane costs
+     * a pixel rather than how many elements it holds.
+     *
+     * `2^28` square at one `f64` a pixel is 512 PiB, under the `isize::MAX`
+     * ceiling, so the allocator is asked and refuses. `u32::MAX` square at one
+     * `[f64; 3]` a pixel prices past `usize` instead, so it is `SizeOverflow`
+     * before the allocator is reached, and the `bpp` in it has to read 24 and
+     * not 1: handing `per_pixel` straight through would report the plane as one
+     * byte a pixel, and the variant is public through the module errors that
+     * wrap it.
+     */
+    #[test]
+    fn try_plane_prices_a_plane_by_what_it_costs_a_pixel() {
+        let refused = try_plane::<f64>("test.direct", 1 << 28, 1 << 28, 1);
+        assert!(
+            matches!(refused, Err(RasterError::AllocationFailed { .. })),
+            "expected AllocationFailed, got {:?}",
+            refused.map(|v: Vec<f64>| v.capacity())
+        );
+
+        let overflowing = try_plane::<[f64; 3]>("test.direct", u32::MAX, u32::MAX, 1);
+        assert!(
+            matches!(
+                overflowing,
+                Err(RasterError::AllocationFailed { .. }
+                    | RasterError::SizeOverflow { bpp: 24, .. })
+            ),
+            "expected AllocationFailed or SizeOverflow at 24 bytes a pixel, got {:?}",
+            overflowing.map(|v: Vec<[f64; 3]>| v.capacity())
+        );
+    }
+
+    /**
+     * Tests [`try_plane_filled`]'s contract: the length it fills to is the
+     * geometry's, not whatever the allocator rounded the reservation up to.
+     *
+     * The check needs a hook because the property is otherwise unobservable.
+     * [`Vec::try_reserve_exact`] is allowed to hand back more room than asked
+     * for and on this allocator at these sizes it never does, so
+     * `out.resize(out.capacity(), fill)` behaves identically at every size a
+     * test can build. Mutated to check exactly that: with the hook off, that
+     * substitution passes all 81 allocation checks in the crate; with it on,
+     * this one goes red. The doc on `try_plane_filled` has said the length is a
+     * contract since it was `alloc_colour_plane_filled`, and nothing held it.
+     *
+     * The capacity assertion is the positive control on the hook itself: if the
+     * over-reserve did not happen, the two lengths would agree for the ordinary
+     * reason and this would prove nothing.
+     */
+    #[test]
+    fn a_filled_plane_is_as_long_as_its_geometry_and_not_as_its_capacity() {
+        const EXTRA: usize = 4096;
+        let plane = with_plane_over_reserve(EXTRA, || {
+            try_plane_filled::<u8>("test.filled", 8, 8, 3, 7u8)
+        })
+        .expect("a 192-byte plane is servable");
+
+        assert!(
+            plane.capacity() >= 192 + EXTRA,
+            "the over-reserve has to have happened, or the length check below \
+             passes for the ordinary reason and says nothing; capacity is {}",
+            plane.capacity()
+        );
+        assert_eq!(
+            plane.len(),
+            192,
+            "8x8 at three bytes a pixel is 192 elements however much room the \
+             allocator handed back"
+        );
+        assert!(
+            plane.iter().all(|&b| b == 7),
+            "and every element of that length is the fill"
+        );
+    }
+
+    /**
+     * The same contract on [`try_plane_len_filled`], which is the form the
+     * scratch planes in [`crate::arithmetic`] reserve through: it fills to the
+     * `len` it was handed, not to whatever the allocator rounded the
+     * reservation up to.
+     *
+     * A separate cell rather than an arm of the one above, because the two
+     * forms compute their length differently and the mutation pass proved the
+     * difference matters: substituting `out.resize(out.capacity(), fill)` into
+     * `try_plane_len_filled` left the whole suite green, exactly as the same
+     * substitution into `try_plane_filled` did before that cell existed
+     * (issue #696). One over-reserve knob, two contracts, two checks.
+     *
+     * The capacity assertion is the positive control on the hook, for the same
+     * reason it is there above.
+     */
+    #[test]
+    fn a_filled_plane_sized_in_elements_is_as_long_as_its_len_and_not_its_capacity() {
+        const EXTRA: usize = 4096;
+        const LEN: usize = 150;
+        let plane = with_plane_over_reserve(EXTRA, || {
+            try_plane_len_filled::<u8>("test.filled_len", 8, 8, LEN, 7u8)
+        })
+        .expect("a 150-byte plane is servable");
+
+        assert!(
+            plane.capacity() >= LEN + EXTRA,
+            "the over-reserve has to have happened, or the length check below \
+             passes for the ordinary reason and says nothing; capacity is {}",
+            plane.capacity()
+        );
+        assert_eq!(
+            plane.len(),
+            LEN,
+            "the length is the one the caller asked for, however much room the \
+             allocator handed back"
+        );
+        assert!(
+            plane.iter().all(|&b| b == 7),
+            "and every element of that length is the fill"
+        );
+    }
+
+    /**
+     * Tests that the ceiling refuses the site it names and no other, which is
+     * the whole difference between a label and the ordinal the three private
+     * ceilings kept (issue #696).
+     *
+     * Two sites of the same size, reserved in a fixed order, with the *second*
+     * one capped: the first has to go through and the second has to be refused.
+     * An ordinal cannot express that, because it only knows "the Nth
+     * over-ceiling request on this thread", which is why a dozen checks in
+     * `colour.rs` were really naming a position and leaning on the byte sizes
+     * along the path happening to be unique. The order is then reversed under
+     * the same cap, and the refusal follows the label rather than the position,
+     * which is the half a single ordering cannot show.
+     */
+    #[test]
+    fn a_plane_ceiling_follows_the_label_and_not_the_position() {
+        let reserve = |first: &'static str, second: &'static str| {
+            (
+                try_plane_len::<u8>(first, 8, 8, 1024).map(|v| v.capacity()),
+                try_plane_len::<u8>(second, 8, 8, 1024).map(|v| v.capacity()),
+            )
+        };
+
+        let (a, b) = with_plane_cap_at("test.second", 16, || reserve("test.first", "test.second"));
+        assert!(a.is_ok(), "the unnamed site must be untouched, got {a:?}");
+        assert!(
+            matches!(b, Err(RasterError::AllocationFailed { bytes: 1024, .. })),
+            "the named site must be refused, got {b:?}"
+        );
+
+        let (a, b) = with_plane_cap_at("test.second", 16, || reserve("test.second", "test.first"));
+        assert!(
+            matches!(a, Err(RasterError::AllocationFailed { bytes: 1024, .. })),
+            "the named site must be refused wherever it falls on the path, got {a:?}"
+        );
+        assert!(
+            b.is_ok(),
+            "and the unnamed one must still be untouched, got {b:?}"
+        );
+    }
+
+    /**
+     * Tests the spare, which is the one thing a label cannot express on its
+     * own: a site that allocates twice on the same path.
+     *
+     * `try_sharpen`'s LabS round trip is the only one in the crate, and no
+     * ceiling separates its two conversions, because the entry allocation is
+     * the larger on every route in. The spare counts *within* the named site,
+     * so a reservation added anywhere else on the path does not move it, which
+     * is what the old cross-path ordinal could not promise. The third site here
+     * is what says so: it reserves between the two and neither takes the
+     * refusal nor eats the spare.
+     */
+    #[test]
+    fn a_plane_spare_counts_within_its_own_site() {
+        let run = || {
+            (
+                try_plane_len::<u8>("test.twice", 8, 8, 1024).map(|v| v.capacity()),
+                try_plane_len::<u8>("test.between", 8, 8, 1024).map(|v| v.capacity()),
+                try_plane_len::<u8>("test.twice", 8, 8, 1024).map(|v| v.capacity()),
+            )
+        };
+        let (first, between, second) = with_plane_cap_after("test.twice", 1, 16, run);
+        assert!(
+            first.is_ok(),
+            "the spared reservation must go through, got {first:?}"
+        );
+        assert!(
+            between.is_ok(),
+            "a different site must neither be refused nor eat the spare, got {between:?}"
+        );
+        assert!(
+            matches!(
+                second,
+                Err(RasterError::AllocationFailed { bytes: 1024, .. })
+            ),
+            "the second reservation at the named site must be refused, got {second:?}"
+        );
+    }
+
+    /**
+     * Tests the counting half of the probe: which reservations a prefix
+     * selects, that a window counts nothing outside itself, and that the probe
+     * restores itself on the way out including on unwind.
+     *
+     * The restore is not decoration. Every check that counts a path's
+     * reservations reads this counter, and a probe that leaked out of one
+     * window would make the next test's count depend on which tests ran before
+     * it, in a suite that runs in parallel.
+     */
+    #[test]
+    fn the_plane_probe_selects_by_prefix_and_restores_itself() {
+        fn reserve() {
+            let _ = try_plane_len::<u8>("test.alpha.one", 8, 8, 64);
+            let _ = try_plane_len::<u8>("test.alpha.two", 8, 8, 64);
+            let _ = try_plane_len::<u8>("test.beta", 8, 8, 64);
+        }
+
+        assert_eq!(
+            counting_planes("test.", reserve).1,
+            3,
+            "a prefix over all three"
+        );
+        assert_eq!(
+            counting_planes("test.alpha.", reserve).1,
+            2,
+            "a narrower prefix selects the two under it"
+        );
+        assert_eq!(
+            counting_planes("test.beta", reserve).1,
+            1,
+            "and an exact label selects only itself"
+        );
+        assert_eq!(
+            counting_planes("test.gamma", reserve).1,
+            0,
+            "a label nothing matches counts nothing, which is what makes a zero \
+             elsewhere mean something"
+        );
+
+        // A window replaces the probe rather than adding to it, so a nested one
+        // takes the reservations inside it and the outer one resumes after. The
+        // inner prefix here matches nothing on purpose: if the unwind left it
+        // in place, the reservation after it would be counted by nothing and
+        // this would read zero.
+        let (_, outer) = counting_planes("test.", || {
+            let inner = std::panic::catch_unwind(|| {
+                counting_planes("test.gamma", || {
+                    let _ = try_plane_len::<u8>("test.alpha.one", 8, 8, 64);
+                    panic!("unwind out of an armed probe");
+                })
+            });
+            assert!(inner.is_err(), "the inner window must have panicked");
+            let _ = try_plane_len::<u8>("test.beta", 8, 8, 64);
+        });
+        assert_eq!(
+            outer, 1,
+            "the outer window must resume its own prefix after the inner one \
+             unwound, and count the reservation made after it"
+        );
+    }
+
+    /// One entry point and every plane reservation it makes, split by the
+    /// module the site belongs to.
+    struct Funnel {
+        /// The `pub fn` the row runs, and the arm of it where there is one.
+        op: &'static str,
+        run: fn(&Raster),
+        /// Reservations at `raster.op_output`.
+        outputs: usize,
+        /// Reservations at `raster.f32_samples`.
+        widenings: usize,
+        /// Reservations at a `convolution.` site.
+        convolution: usize,
+        /// Reservations at a `colour.` site.
+        colour: usize,
+    }
+
+    /// The 3x3 box blur the `conv` and `compass` rows run.
+    fn funnel_box3() -> crate::convolution::Kernel {
+        crate::convolution::Kernel {
+            data: vec![vec![1.0; 3]; 3],
+            scale: 9.0,
+        }
+    }
+
+    /// Measured, then written down. Nothing here is a ceiling.
+    ///
+    /// The split is what makes each number readable rather than a constant
+    /// somebody fitted. `try_sharpen` is the row the whole funnel exists for:
+    /// it crosses `colour.rs`, `convolution.rs` and `raster.rs` on one call,
+    /// and under the three private helpers no check could count all three.
+    const FUNNEL: &[Funnel] = &[
+        Funnel {
+            op: "try_conv, integer arm",
+            run: |src| drop(src.try_conv(&funnel_box3(), Precision::Integer)),
+            outputs: 1,
+            widenings: 0,
+            convolution: 1,
+            colour: 0,
+        },
+        Funnel {
+            op: "try_conv, float arm",
+            run: |src| drop(src.try_conv(&funnel_box3(), Precision::Float)),
+            outputs: 1,
+            widenings: 0,
+            convolution: 1,
+            colour: 0,
+        },
+        Funnel {
+            op: "try_sobel",
+            run: |src| drop(src.try_sobel()),
+            outputs: 1,
+            widenings: 0,
+            convolution: 1,
+            colour: 0,
+        },
+        Funnel {
+            op: "try_gaussblur, integer arm",
+            run: |src| drop(src.try_gaussblur(1.4, 0.2, Precision::Integer)),
+            outputs: 2,
+            widenings: 0,
+            convolution: 2,
+            colour: 0,
+        },
+        Funnel {
+            op: "try_compass, Max over 4 rounds",
+            run: |src| {
+                drop(src.try_compass(
+                    &funnel_box3(),
+                    4,
+                    Angle45::D45,
+                    Combine::Max,
+                    Precision::Integer,
+                ));
+            },
+            outputs: 5,
+            widenings: 4,
+            convolution: 5,
+            colour: 0,
+        },
+        Funnel {
+            op: "try_sharpen",
+            run: |src| drop(src.try_sharpen(1.5, 1.0, 2.0)),
+            outputs: 0,
+            widenings: 1,
+            convolution: 3,
+            colour: 2,
+        },
+        Funnel {
+            op: "try_canny, float arm",
+            run: |src| drop(src.try_canny(1.4, Precision::Float)),
+            outputs: 5,
+            widenings: 2,
+            convolution: 4,
+            colour: 0,
+        },
+        Funnel {
+            op: "try_canny, uchar arm",
+            run: |src| drop(src.try_canny(1.4, Precision::Integer)),
+            outputs: 5,
+            widenings: 0,
+            convolution: 4,
+            colour: 0,
+        },
+        Funnel {
+            op: "try_de00",
+            run: |src| drop(src.try_de00(src)),
+            outputs: 0,
+            widenings: 0,
+            convolution: 0,
+            colour: 4,
+        },
+        Funnel {
+            op: "try_colourspace to Labs",
+            run: |src| drop(src.try_colourspace(Interpretation::Labs)),
+            outputs: 0,
+            widenings: 0,
+            convolution: 0,
+            colour: 1,
+        },
+    ];
+
+    /**
+     * The funnel: every plane these paths reserve goes through
+     * [`try_plane_len`], and the count of them, per module, is what says so.
+     *
+     * This is #696's "what catches the next site". Each of three modules used
+     * to keep its own helper with its own ceiling, so a check could only count
+     * the sites inside the module it lived in, and a new `Vec::with_capacity`
+     * in a neighbouring module was invisible to every one of them. Three
+     * passes over `colour.rs` (#672, #678, #685) is what that cost, and
+     * `try_sharpen` is the row that shows why: one call crosses all three
+     * modules, and no check before this one could count what it did in more
+     * than one of them at a time.
+     *
+     * Exact equality, not ceilings, for the reason the convolution budget file
+     * gives at length: an upper bound is green when the instrument is broken.
+     *
+     * The per-module split is the load-bearing part. A total on its own is a
+     * magic constant and moves for any reason at all; the split says which
+     * module changed, and the total is then asserted to be the sum of the
+     * parts, so a **fifth** prefix joining the funnel is caught too rather than
+     * being quietly absorbed, and `arithmetic.` reaching one of these paths is
+     * caught that way. Its own rows are counted in `arithmetic.rs`, next to
+     * the radius ranges and window sizes they need, the same way the ICC entry
+     * points are counted in `colour.rs`.
+     *
+     * # What this counts, and what the neighbouring instrument counts
+     *
+     * A reservation, not an image-sized one. `try_compass` widens a 3x3 index
+     * raster once a round inside `rot45_kernel`, 36 bytes, and that is a
+     * reservation through the funnel like any other; the convolution row window
+     * is a few kilobytes and so is that. So these numbers are deliberately not
+     * the same as the ones in `tests/convolution_image_sized_allocations.rs`,
+     * which asks the *allocator* and charges only what is at least a byte a
+     * pixel.
+     *
+     * The two answer different halves of one question and neither is complete
+     * alone. This one cannot see a buffer that never reaches the funnel: a
+     * `Clone::clone`, a `.collect()`, a `vec![0u8; n]`. That one cannot see
+     * whether an allocation it charged was fallible. Put together, where a row
+     * here and a row there agree, every image-sized allocation on the path went
+     * through the fallible helper: `try_sharpen` is 6 in both.
+     *
+     * They cannot live in one binary, which is worth writing down because it
+     * looks like an oversight. The probe is `cfg(test)`, so it exists only in
+     * this crate's own unit-test binary; `#[global_allocator]` is scoped to the
+     * integration-test binary that installs it, and an integration test links
+     * the library built *without* `cfg(test)`. `CONTRIBUTING.md` carries the
+     * rule that there is one instrument shape; this is where the seam in it
+     * falls.
+     *
+     * The ICC entry points are counted the same way in `colour.rs`, next to the
+     * profile fixtures they need, rather than being dragged in here.
+     */
+    #[test]
+    fn every_plane_these_paths_reserve_goes_through_the_one_funnel() {
+        let src = crate::generate_test_raster(64, 64).expect("fixture raster");
+        for row in FUNNEL {
+            // Warm-up outside every window, so a one-time lazily built table
+            // cannot be charged to the first row that happens to touch it.
+            (row.run)(&src);
+
+            let count = |prefix| counting_planes(prefix, || (row.run)(&src)).1;
+            let parts = [
+                ("op outputs", count(PLANE_OP_OUTPUT), row.outputs),
+                ("f32 widenings", count(PLANE_F32_SAMPLES), row.widenings),
+                ("convolution planes", count("convolution."), row.convolution),
+                ("colour planes", count("colour."), row.colour),
+            ];
+            for (what, got, want) in parts {
+                assert_eq!(
+                    got, want,
+                    "{} reserved {got} {what} against {want}: a site was added, removed, or \
+                     routed around `raster::try_plane` (issue #696)",
+                    row.op
+                );
+            }
+            let total = count("");
+            let sum: usize = parts.iter().map(|(_, got, _)| got).sum();
+            assert_eq!(
+                total, sum,
+                "{} made {total} reservations and only {sum} of them are under one of the four \
+                 prefixes above: a module joined the funnel and no row here names it",
+                row.op
+            );
+        }
+    }
+
+    /// Every leaf site label declared in a module's `mod plane` block.
+    ///
+    /// Reads the block out of the module's own source rather than importing
+    /// the constants, which are `pub(super)` and deliberately not visible from
+    /// here. The counting prefixes the checks use (`"colour."`,
+    /// `"convolution."`, `"colour.export.fallback"`) are not in these blocks
+    /// and are not leaves, so they are correctly left out.
+    fn plane_labels(src: &str) -> Vec<&str> {
+        let start = match src.find("\nmod plane {\n") {
+            Some(i) => i,
+            None => return Vec::new(),
+        };
+        let body = &src[start..];
+        let end = body
+            .find("\n}\n")
+            .expect("`mod plane` closes at column zero");
+        body[..end]
+            .lines()
+            .filter_map(|line| line.split_once("&str = \""))
+            .filter_map(|(_, rest)| rest.split_once('"'))
+            .map(|(label, _)| label)
+            .collect()
+    }
+
+    /**
+     * Tests that no plane site label is a proper prefix of another (issue
+     * #696).
+     *
+     * The probe matches a cap site with `starts_with`, on purpose, so that
+     * `counting_planes("convolution.", ..)` can count a whole module and
+     * `counting_planes("colour.export.fallback", ..)` a whole family. The cost
+     * is that two *leaf* labels standing in a prefix relation are
+     * indistinguishable to a ceiling: capping the shorter one also refuses the
+     * longer, so a check that reads as naming one buffer starves two.
+     *
+     * That is the ordinal problem the labels exist to remove, arriving through
+     * a different door, and it is not hypothetical. `arithmetic.stdif.integral`
+     * and `arithmetic.stdif.integral_squares` were written as the first pair
+     * of them, and the mutation that routed the first integral image around
+     * the funnel entirely left the check naming it **green**, because the
+     * ceiling still landed on the second. Only the counting row caught it.
+     *
+     * The length assertion is the positive control: an empty scan would pass
+     * the comparison below for the wrong reason, and a scan that stopped
+     * finding the blocks is exactly how this check would rot.
+     */
+    #[test]
+    fn no_plane_site_label_is_a_prefix_of_another() {
+        let mut labels = vec![PLANE_OP_OUTPUT, PLANE_F32_SAMPLES];
+        for src in [
+            include_str!("arithmetic.rs"),
+            include_str!("colour.rs"),
+            include_str!("convolution.rs"),
+        ] {
+            labels.extend(plane_labels(src));
+        }
+        assert!(
+            labels.len() >= 20,
+            "the scan found only {} labels, so it has stopped reading the `mod plane` blocks \
+             rather than found them all agreeable: {labels:?}",
+            labels.len()
+        );
+
+        for a in &labels {
+            for b in &labels {
+                assert!(
+                    a == b || !b.starts_with(a),
+                    "site label {a:?} is a prefix of {b:?}, so a ceiling naming {a:?} also \
+                     refuses {b:?} and cannot tell the two buffers apart (issue #696)"
+                );
+            }
+        }
+    }
+
+    /**
+     * The positive control for the row above. Every one of those numbers is an
+     * equality on a counter, and a counter that has stopped counting reads
+     * zero, which no row would notice if the paths had also stopped allocating.
+     *
+     * So: one deliberate reservation through the funnel moves the count by
+     * exactly one, and a `vec![0u8; n]` of the same size next to it moves it by
+     * nothing. The second half is the blind spot the row's own doc names,
+     * demonstrated rather than asserted, because a limit that is only described
+     * is a limit nobody checks.
+     */
+    #[test]
+    fn the_funnel_counter_sees_a_reservation_and_not_a_bare_vec() {
+        let (_, none) = counting_planes("", || ());
+        assert_eq!(none, 0, "an empty window counts nothing");
+
+        let (_, one) = counting_planes("", || {
+            let v = try_plane_len::<u8>("test.control", 64, 64, 4096);
+            std::hint::black_box(&v);
+        });
+        assert_eq!(one, 1, "a reservation through the funnel is counted");
+
+        let (_, bypassed) = counting_planes("", || {
+            let v = vec![0u8; 4096];
+            std::hint::black_box(&v);
+        });
+        assert_eq!(
+            bypassed, 0,
+            "and a bare `vec![0u8; n]` of the same size is not, which is the limit the counting \
+             allocator in tests/convolution_image_sized_allocations.rs covers and this cannot"
+        );
+    }
+
+    /**
+     * Tests that `try_clone` is a faithful stand-in for `Clone::clone`
+     * (issue #575): the operation paths reach for it precisely because
+     * `Clone` reaches handle_alloc_error and ends the process on an
+     * image-sized allocation, so it has to carry everything `Clone` does or
+     * it is not a substitute. Reconstructing through `Raster::new` over a
+     * fresh buffer would compile and would silently drop the interpretation,
+     * the resolution and every attached field, which is exactly the failure
+     * this pins.
+     * Works by giving a raster non-default metadata on both sides (a header
+     * field through `copy()`, an attached field through `set_field`), then
+     * comparing the fallible copy against the derived one field for field.
+     * Input: a 2x2 Rgb8 with xres 42 and a "hello" field → both copies agree
+     * on pixels, geometry, format, xres and the attachment.
+     */
+    #[test]
+    fn try_clone_carries_everything_clone_does() {
+        let mut im = Raster::new(2, 2, PixelFormat::Rgb8, (0..12).collect()).unwrap();
+        im.set_field("hello", MetadataValue::Int(7));
+        let im = im.copy().xres(42.0).build();
+
+        let copy = im.try_clone().unwrap();
+        assert_eq!(copy.data(), im.data());
+        assert_eq!((copy.width(), copy.height()), (im.width(), im.height()));
+        assert_eq!(copy.format(), im.format());
+        assert!(
+            (copy.xres() - 42.0).abs() < 1e-9,
+            "xres must survive the copy, got {}",
+            copy.xres()
+        );
+        assert_eq!(copy.interpretation(), im.interpretation());
+        assert_eq!(copy.get_fields(), im.get_fields());
+        assert_eq!(copy.get_field("hello"), Some(MetadataValue::Int(7)));
+    }
+
+    /**
+     * Tests that the f32 widening is fallible (issue #627): an allocation the
+     * host cannot serve arrives as RasterError::AllocationFailed rather than
+     * reaching handle_alloc_error and aborting the process. `f32_samples` was
+     * a plain `.collect()`, which is exactly that abort, and it is the widening
+     * `try_sharpen` and `try_canny`'s float arm sit on, so a `try_` signature
+     * there was not actually fallible.
+     * Works by lowering the per-thread ceiling at that one site
+     * so the branch is reachable at a raster small enough to build; a float
+     * raster whose samples genuinely exhaust the allocator is far past the
+     * construction budget. The error names the raster and the size of the
+     * request, and the ceiling is restored when the closure returns.
+     * Input: a 4x2 FloatF32(1) raster (32 sample bytes) under a 16-byte ceiling
+     * → Err(AllocationFailed{4,2,32}); the same raster uncapped → the exact
+     * samples; an Rgb8 raster → Err(NotFloatFormat).
+     */
+    #[test]
+    fn try_f32_samples_reserves_fallibly_rather_than_aborting() {
+        let f1 = PixelFormat::with_kind(1, SampleKind::F32).unwrap();
+        let im = Raster::from_f32_samples(4, 2, f1, &[1.5, -2.0, 0.0, 7.25, 3.0, 4.0, 5.0, 6.0])
+            .unwrap();
+
+        assert!(matches!(
+            with_plane_cap_at(PLANE_F32_SAMPLES, 16, || im.try_f32_samples()),
+            Err(RasterError::AllocationFailed {
+                width: 4,
+                height: 2,
+                bytes: 32
+            })
+        ));
+        // The ceiling is per-thread and restored on the way out, so the very
+        // same raster widens normally afterwards.
+        assert_eq!(
+            im.try_f32_samples().unwrap(),
+            vec![1.5, -2.0, 0.0, 7.25, 3.0, 4.0, 5.0, 6.0]
+        );
+        // A non-float carrier is a typed error, not an empty widening.
+        let rgb = Raster::new(2, 1, PixelFormat::Rgb8, vec![0; 6]).unwrap();
+        assert!(matches!(
+            rgb.try_f32_samples(),
+            Err(RasterError::NotFloatFormat { .. })
+        ));
+    }
+
+    /**
+     * Tests that the infallible `f32_samples` panics rather than aborting when
+     * the widening cannot be allocated (issue #627), and that `None` still
+     * means only "not a float format". A panic unwinds and a caller can catch
+     * it; the `handle_alloc_error` a `.collect()` reaches cannot be caught by
+     * anything, which is why the whole convolution family went fallible in
+     * #575 and these two entry points could not follow.
+     * Works by lowering the per-thread ceiling inside `catch_unwind` and
+     * asserting the call unwound, mirroring how arithmetic's
+     * `project_oversize_scratch_panics_not_aborts` pins the same property for
+     * an op form with no error channel.
+     * Input: a 4x2 FloatF32(1) raster under a 16-byte ceiling → unwinding
+     * panic; an Rgb8 raster → None; the same float raster uncapped → Some.
+     */
+    #[test]
+    fn f32_samples_panics_rather_than_aborting_when_the_widening_fails() {
+        let f1 = PixelFormat::with_kind(1, SampleKind::F32).unwrap();
+        let im = Raster::from_f32_samples(4, 2, f1, &[1.5, -2.0, 0.0, 7.25, 3.0, 4.0, 5.0, 6.0])
+            .unwrap();
+
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let caught = std::panic::catch_unwind(|| {
+            with_plane_cap_at(PLANE_F32_SAMPLES, 16, || im.f32_samples())
+        });
+        std::panic::set_hook(prev);
+        assert!(
+            caught.is_err(),
+            "an unservable widening must panic (unwindable), not abort"
+        );
+
+        // None keeps its single meaning: the carrier is not a float one.
+        let rgb = Raster::new(2, 1, PixelFormat::Rgb8, vec![0; 6]).unwrap();
+        assert_eq!(rgb.f32_samples(), None);
+        assert_eq!(
+            im.f32_samples().unwrap(),
+            vec![1.5, -2.0, 0.0, 7.25, 3.0, 4.0, 5.0, 6.0]
+        );
+    }
+
     /**
      * Tests that the budget is configurable: a size that exceeds a caller-set
      * budget is rejected, while the same size succeeds under a budget that
@@ -1093,7 +2783,7 @@ mod tests {
         assert_eq!(again.f32_samples().unwrap(), samples.to_vec());
 
         // A zeroed float raster reads as all-0.0 samples.
-        let z = Raster::zeroed(3, 2, PixelFormat::with_channels(1, 4).unwrap()).unwrap();
+        let z = Raster::zeroed(3, 2, PixelFormat::with_kind(1, SampleKind::F32).unwrap()).unwrap();
         assert_eq!(z.f32_samples().unwrap(), vec![0.0f32; 6]);
     }
 
@@ -1110,7 +2800,7 @@ mod tests {
             Raster::from_f32_samples(1, 1, PixelFormat::Rgb8, &[0.0, 0.0, 0.0]),
             Err(RasterError::NotFloatFormat { .. })
         ));
-        let f1 = PixelFormat::with_channels(1, 4).unwrap();
+        let f1 = PixelFormat::with_kind(1, SampleKind::F32).unwrap();
         assert!(matches!(
             Raster::from_f32_samples(2, 1, f1, &[0.0, 0.0, 0.0]),
             Err(RasterError::BufferSizeMismatch {
@@ -1148,9 +2838,9 @@ mod tests {
     fn float_buffer_size_invariant() {
         for fmt in [
             PixelFormat::RgbaF32,
-            PixelFormat::with_channels(1, 4).unwrap(),
-            PixelFormat::with_channels(3, 4).unwrap(),
-            PixelFormat::with_channels(7, 4).unwrap(),
+            PixelFormat::with_kind(1, SampleKind::F32).unwrap(),
+            PixelFormat::with_kind(3, SampleKind::F32).unwrap(),
+            PixelFormat::with_kind(7, SampleKind::F32).unwrap(),
         ] {
             let r = Raster::zeroed(5, 4, fmt).unwrap();
             assert_eq!(r.data().len(), 20 * fmt.bytes_per_pixel(), "{fmt:?}");
@@ -1225,6 +2915,518 @@ mod tests {
             Raster::try_new_from_memory(&[], 1, 1, 0, "uchar"),
             Err(RasterError::InvalidMemoryBands { bands: 0, .. })
         ));
+    }
+
+    /**
+     * Tests that a raster's format is the canonical spelling of the layout,
+     * whichever spelling the caller declared. PixelFormat's tuple variants
+     * are public, so a caller (or a decoder) can hand in FloatF32(4), which
+     * names exactly what RgbaF32 names; every match on raster.format() and
+     * every has_alpha() decision downstream then depends on which spelling
+     * happened to be used (issue #531).
+     * Works by building the same one-pixel raster through all three
+     * constructors with a non-canonical format and asserting the format that
+     * comes back out is the named variant, plus the has_alpha answer that
+     * decides whether resize premultiplies.
+     * Input: FloatF32(4) -> RgbaF32 with alpha; Multi8(3) -> Rgb8.
+     */
+    #[test]
+    fn constructors_canonicalise_the_declared_format() {
+        use core::num::NonZeroU16;
+
+        let f4 = PixelFormat::FloatF32(NonZeroU16::new(4).expect("4 is non-zero"));
+        let m3 = PixelFormat::Multi8(NonZeroU16::new(3).expect("3 is non-zero"));
+
+        let from_new = Raster::new(1, 1, f4, vec![0u8; 16]).unwrap();
+        assert_eq!(
+            from_new.format(),
+            PixelFormat::RgbaF32,
+            "Raster::new must store the canonical spelling"
+        );
+        assert!(
+            from_new.format().has_alpha(),
+            "a four-band float raster has alpha whichever way it was spelled"
+        );
+
+        let zeroed = Raster::zeroed(1, 1, f4).unwrap();
+        assert_eq!(
+            zeroed.format(),
+            PixelFormat::RgbaF32,
+            "Raster::zeroed must store the canonical spelling"
+        );
+
+        let from_op = Raster::from_op_output(1, 1, m3, vec![0u8; 3]).unwrap();
+        assert_eq!(
+            from_op.format(),
+            PixelFormat::Rgb8,
+            "Raster::from_op_output must store the canonical spelling"
+        );
+
+        // The buffer-length invariant is unaffected: both spellings agree on
+        // bytes_per_pixel, so canonicalising cannot change what validates.
+        assert!(
+            Raster::new(1, 1, f4, vec![0u8; 15]).is_err(),
+            "canonicalising must not weaken the buffer-size check"
+        );
+    }
+
+    /**
+     * Tests that the decode allocation price is exact where it fits and
+     * saturates where it does not, which is the one boundary every format
+     * decoder now shares (issue #632).
+     * Works by pricing three geometries whose exact products are known: a
+     * small one, the largest product the two axes alone can reach (which is
+     * already past `u32::MAX` and so is the case a `usize` chain gets wrong
+     * on a 32-bit target), and the one geometry whose product lands exactly
+     * on 2^64, where a wrapping multiply gives `0` and clears every budget.
+     * Input: 4x3x3x2, `u32::MAX` square, and 2^24 x 2^24 x 2^14 x 4 ->
+     * Output: 72, 18446744065119617025, and `u64::MAX`.
+     */
+    #[test]
+    fn the_decode_price_is_exact_where_it_fits_and_saturates_where_it_does_not() {
+        assert_eq!(decode_alloc_bytes(4, 3, 3, 2), 72);
+
+        // Past `u32::MAX` on the axes alone, so a product computed in
+        // `usize` and narrowed would already be wrong here on a 32-bit
+        // target while this one is not.
+        assert_eq!(
+            decode_alloc_bytes(u32::MAX, u32::MAX, 1, 1),
+            18_446_744_065_119_617_025
+        );
+        assert!(decode_alloc_bytes(u32::MAX, u32::MAX, 1, 1) > u64::from(u32::MAX));
+
+        // Exactly 2^64: `0` if the multiply wraps, `u64::MAX` if it
+        // saturates. Every budget is cleared by `0`, which is why the wrap
+        // is the failure to avoid. The sentinel is not self-refusing: a
+        // `u64::MAX` budget clears `u64::MAX` under a plain `>`, which is
+        // what `DecodeLimits::exceeds_alloc_budget`'s own arm exists for
+        // and what
+        // `source::tests::the_saturated_price_is_refused_even_by_a_u64_max_budget`
+        // pins.
+        assert_eq!(decode_alloc_bytes(1 << 24, 1 << 24, 1 << 14, 4), u64::MAX);
+        // And well past it, where each of the four multiplicands is at its
+        // own ceiling.
+        assert_eq!(
+            decode_alloc_bytes(u32::MAX, u32::MAX, u64::from(u16::MAX), 4),
+            u64::MAX
+        );
+
+        // Saturating multiply is not monotone through zero, and
+        // `sample_bytes` is applied last: a zero factor after a saturated
+        // product gives `0` back, not `u64::MAX`. Pinned because the doc
+        // hands that case to the callers rather than handling it here.
+        assert_eq!(decode_alloc_bytes(u32::MAX, u32::MAX, u64::MAX, 0), 0);
+        assert_eq!(decode_alloc_bytes(u32::MAX, u32::MAX, 0, u64::MAX), 0);
+        assert_eq!(decode_alloc_bytes(0, u32::MAX, u64::MAX, u64::MAX), 0);
+    }
+
+    /**
+     * Tests that the shared price agrees with [`buffer_len`], the crate's
+     * other spelling of the same product, everywhere `buffer_len` can
+     * answer at all.
+     * Works by sweeping band counts and sample sizes through both and
+     * comparing, which is what stops the two drifting apart the way the
+     * four per-format spellings did before #632.
+     * Input: a sweep of geometries and carriers -> Output: the same byte
+     * count from both, and `u64::MAX` from the saturating one wherever
+     * `buffer_len` refuses.
+     */
+    #[test]
+    fn the_decode_price_agrees_with_buffer_len_wherever_buffer_len_answers() {
+        let agree = |w: u32, h: u32, bands: u64, sample_bytes: u64| {
+            let bpp = usize::try_from(bands * sample_bytes).unwrap();
+            assert_eq!(
+                decode_alloc_bytes(w, h, bands, sample_bytes),
+                buffer_len(w, h, bpp).unwrap() as u64,
+                "{w}x{h}x{bands} at {sample_bytes} bytes"
+            );
+        };
+        for (w, h, bands, sample_bytes) in
+            [(1u32, 1u32, 1u64, 1u64), (4, 3, 3, 2), (1024, 1024, 4, 4)]
+        {
+            agree(w, h, bands, sample_bytes);
+        }
+        // 65_535x65_535x4 is 17_179_344_900 bytes, which is past
+        // `usize::MAX` on a 32-bit target, so `buffer_len` answers
+        // `SizeOverflow` there and has nothing to agree with. The sweep is
+        // the wrong place to assert that: this test exists to hold the two
+        // spellings together, and the promise `buffer_len` makes about
+        // 32-bit targets is that it refuses rather than wraps, which the
+        // case below pins on both widths.
+        #[cfg(target_pointer_width = "64")]
+        agree(65_535, 65_535, 4, 1);
+
+        // Where `buffer_len` refuses, the price is the saturation sentinel
+        // rather than an error the budget check has no variant for. What
+        // makes the sentinel a refusal is
+        // `DecodeLimits::exceeds_alloc_budget`'s `u64::MAX` arm, not the
+        // value itself.
+        assert!(buffer_len(u32::MAX, u32::MAX, usize::MAX).is_err());
+        assert_eq!(
+            decode_alloc_bytes(u32::MAX, u32::MAX, u64::MAX, 1),
+            u64::MAX
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // The page model (issue #564)
+    // -----------------------------------------------------------------
+
+    /// A four-page 4x12 roll whose rows carry the page index in the red
+    /// channel, so a slice can be checked by reading a pixel.
+    fn four_page_roll() -> Raster {
+        let (w, h, page_height) = (4u32, 12u32, 3u32);
+        let bpp = PixelFormat::Rgb8.bytes_per_pixel();
+        let mut data = vec![0u8; w as usize * h as usize * bpp];
+        for y in 0..h {
+            for x in 0..w {
+                let offset = (y as usize * w as usize + x as usize) * bpp;
+                data[offset] = (y / page_height) as u8;
+                data[offset + 1] = y as u8;
+                data[offset + 2] = x as u8;
+            }
+        }
+        let mut roll = Raster::new(w, h, PixelFormat::Rgb8, data).unwrap();
+        roll.set_page_height(page_height);
+        roll
+    }
+
+    /// The geometry accessors read through the sanity check, so a stored
+    /// value the raster cannot hold never reaches a caller.
+    ///
+    /// Same table as `frames::tests::page_height_honours_only_a_divisor_of_the_height`,
+    /// asked of a real raster this time, because the accessor could always
+    /// have been wired to the raw field instead.
+    #[test]
+    fn the_raster_geometry_accessors_apply_the_sanity_check() {
+        for (stored, page_height, pages) in [
+            (3i64, 3u32, 4u32),
+            (5, 12, 1),
+            (0, 12, 1),
+            (-1, 12, 1),
+            (12, 12, 1),
+            (100, 12, 1),
+        ] {
+            let mut roll = make_rgb_raster(4, 12);
+            roll.set_field("page-height", MetadataValue::Int(stored));
+            assert_eq!(roll.get_page_height(), page_height, "stored {stored}");
+            assert_eq!(roll.pages_loaded(), pages, "stored {stored}");
+            assert_eq!(roll.page_layout().pages(), pages, "stored {stored}");
+        }
+
+        let still = make_rgb_raster(4, 12);
+        assert_eq!(still.get_page_height(), 12);
+        assert_eq!(still.pages_loaded(), 1);
+    }
+
+    /// A `page-height` that is not an int is ignored, and the stored value
+    /// stays readable.
+    ///
+    /// `page-height` is not a built-in, so `set_field` stores whatever type it
+    /// is handed and a `.v` trailer restores arbitrary types from an untrusted
+    /// file (issue #565). vips reads the key with `vips_image_get_int`, which
+    /// refuses to coerce a string, so a `gchararray` `"3"` leaves the image
+    /// unpaged there; this agrees. The same shape as
+    /// `get_n_pages_ignores_a_field_that_is_not_an_int` (issue #635).
+    #[test]
+    fn a_page_height_that_is_not_an_int_is_ignored() {
+        let mut roll = make_rgb_raster(4, 12);
+
+        for wrong in [
+            MetadataValue::Str("3".to_string()),
+            MetadataValue::Double(3.0),
+            MetadataValue::Blob(vec![3u8; 4]),
+        ] {
+            roll.set_field("page-height", wrong.clone());
+            assert_eq!(
+                roll.get_page_height(),
+                12,
+                "{wrong:?} is not an int, so the raster is one page"
+            );
+            assert_eq!(roll.pages_loaded(), 1);
+            assert_eq!(
+                roll.get_field("page-height"),
+                Some(wrong),
+                "the check is on the accessor, not on the stored value"
+            );
+        }
+    }
+
+    /// A page height the raster cannot hold is refused at the setter rather
+    /// than stored and silently discarded on the way back out.
+    #[test]
+    fn setting_a_page_height_that_does_not_divide_is_refused() {
+        let mut roll = make_rgb_raster(4, 12);
+
+        for bad in [0u32, 5, 7, 13, 100, u32::MAX] {
+            let err = roll
+                .try_set_page_height(bad)
+                .expect_err("{bad} does not divide 12");
+            assert!(
+                matches!(
+                    err,
+                    RasterError::PageHeightNotADivisor {
+                        height: 12,
+                        page_height,
+                    } if page_height == bad
+                ),
+                "got {err:?} for {bad}"
+            );
+            assert_eq!(
+                roll.get_page_height(),
+                12,
+                "a refused page height leaves the raster unpaged"
+            );
+        }
+
+        for good in [1u32, 2, 3, 4, 6, 12] {
+            roll.try_set_page_height(good).expect("{good} divides 12");
+            assert_eq!(roll.get_page_height(), good);
+            assert_eq!(roll.pages_loaded(), 12 / good);
+        }
+
+        roll.clear_page_height();
+        assert_eq!(roll.get_page_height(), 12);
+        assert_eq!(roll.pages_loaded(), 1);
+    }
+
+    /// The panicking twin panics on exactly what the fallible one rejects.
+    #[test]
+    #[should_panic(expected = "does not divide a 12-row raster")]
+    fn set_page_height_panics_on_a_non_divisor() {
+        make_rgb_raster(4, 12).set_page_height(5);
+    }
+
+    /// `page` views the rows the layout says, and refuses an index past the
+    /// last page.
+    #[test]
+    fn page_views_the_rows_the_layout_names() {
+        let roll = four_page_roll();
+
+        for index in 0..4u32 {
+            let view = roll.page(index).expect("page in range");
+            assert_eq!(view.width(), 4);
+            assert_eq!(view.height(), 3);
+            let top = view.pixel(0, 0).expect("the top-left pixel");
+            assert_eq!(
+                top[0],
+                index as u8,
+                "page {index} must start at row {}",
+                index * 3
+            );
+            assert_eq!(top[1], (index * 3) as u8, "and hold that absolute row");
+        }
+
+        let err = roll.page(4).expect_err("there is no fifth page");
+        assert!(
+            matches!(err, RasterError::PageOutOfBounds { index: 4, pages: 4 }),
+            "got {err:?}"
+        );
+
+        // A still image has exactly one page, so a caller sweeping pages does
+        // not have to branch on whether the image is animated.
+        let still = make_rgb_raster(4, 12);
+        assert_eq!(still.page(0).expect("the only page").height(), 12);
+        assert!(still.page(1).is_err());
+    }
+
+    /// `extract_page` copies one page out, carries the metadata, and leaves
+    /// the result unpaged while keeping `n-pages`, which is a fact about the
+    /// file rather than about these rows.
+    #[test]
+    fn extract_page_copies_one_page_and_leaves_it_unpaged() {
+        let mut roll = four_page_roll();
+        roll.set_n_pages(4);
+        roll.set_field("icc-profile-data", MetadataValue::Blob(vec![7u8; 16]));
+
+        let page = roll.try_extract_page(2).expect("page 2 is in range");
+        assert_eq!((page.width(), page.height()), (4, 3));
+        assert_eq!(page.data()[0], 2, "the third page's rows");
+        assert_eq!(page.data()[1], 6, "which start at absolute row 6");
+        assert_eq!(page.pages_loaded(), 1, "one page is not paged");
+        assert_eq!(page.get_page_height(), 3);
+        assert_eq!(
+            page.get_n_pages(),
+            4,
+            "the file still had four pages; that is what n-pages says (#635)"
+        );
+        assert_eq!(
+            page.get_field("icc-profile-data"),
+            Some(MetadataValue::Blob(vec![7u8; 16])),
+            "the attachments come with it, as Raster::extract carries them"
+        );
+
+        let err = roll
+            .try_extract_page(4)
+            .expect_err("there is no fifth page");
+        assert!(
+            matches!(err, RasterError::PageOutOfBounds { index: 4, pages: 4 }),
+            "got {err:?}"
+        );
+
+        assert_eq!(roll.extract_page(0).data()[0], 0, "the panicking twin");
+
+        // The only page of a single-page raster comes out with the field
+        // gone, not merely with a page height equal to its own height. The
+        // carry cannot do this one: the heights match, so it has nothing to
+        // react to, and only the explicit clear in `try_extract_page` removes
+        // it. Without that, a `.v` written from here would hand vips a
+        // `page-height` on a still image.
+        let mut one_page = make_rgb_raster(4, 12);
+        one_page.set_page_height(12);
+        let only = one_page.try_extract_page(0).expect("the only page");
+        assert_eq!((only.width(), only.height()), (4, 12));
+        assert_eq!(
+            only.get_field("page-height"),
+            None,
+            "an extracted page carries no page split of its own"
+        );
+    }
+
+    /// The carry drops the page split when the output is a different height,
+    /// and keeps it when the rows are untouched.
+    ///
+    /// The negative half is the point: vips carries it regardless, and
+    /// `vips resize` on this exact roll produced a 2x6 result still claiming
+    /// `page-height: 3`, which `gifsave` then wrote as a two-frame animation
+    /// (measured on 8.18.6). The positive half is the control: a
+    /// same-geometry op like `cast` or `gamma` must not lose the split.
+    #[test]
+    fn the_carry_drops_the_page_split_only_when_the_height_moves() {
+        let roll = four_page_roll();
+
+        // Same height: the split survives, along with everything else.
+        let mut same = make_rgb_raster(4, 12);
+        same.carry_meta_from(&roll);
+        assert_eq!(
+            same.get_page_height(),
+            3,
+            "a same-height op keeps the split"
+        );
+        assert_eq!(same.pages_loaded(), 4);
+
+        // A narrower raster of the same height: still four pages.
+        let mut narrower = make_rgb_raster(2, 12);
+        narrower.carry_meta_from(&roll);
+        assert_eq!(narrower.get_page_height(), 3);
+
+        // Half the height, which is what `resize 0.5` produces. vips keeps
+        // `page-height: 3` here and gets two pages; this drops it and gets a
+        // still.
+        let mut halved = make_rgb_raster(2, 6);
+        halved.carry_meta_from(&roll);
+        assert_eq!(
+            halved.get_page_height(),
+            6,
+            "a height change invalidates the split, so the result is one page"
+        );
+        assert_eq!(halved.pages_loaded(), 1);
+        assert_eq!(
+            halved.get_field("page-height"),
+            None,
+            "and the stale field is gone rather than merely ignored, so a \
+             `.v` written from here does not hand the lie to vips"
+        );
+
+        // Everything else still carries across the same height change.
+        let mut with_fields = four_page_roll();
+        with_fields.set_field("lane-564", MetadataValue::Str("carried".into()));
+        with_fields.set_n_pages(4);
+        let mut out = make_rgb_raster(4, 4);
+        out.carry_meta_from(&with_fields);
+        assert_eq!(
+            out.get_field("lane-564"),
+            Some(MetadataValue::Str("carried".into())),
+            "the drop is one name, not a reset of the carry"
+        );
+        assert_eq!(
+            out.get_n_pages(),
+            4,
+            "n-pages counts the file's pages and survives a crop"
+        );
+    }
+
+    /// `Raster::extract` goes through the carry, so a crop that straddles a
+    /// page boundary cannot hand back something still claiming to be paged.
+    #[test]
+    fn a_crop_across_a_page_boundary_is_not_paged() {
+        let roll = four_page_roll();
+
+        let straddling = roll.extract(0, 1, 4, 5).expect("in bounds");
+        assert_eq!(straddling.pages_loaded(), 1);
+        assert_eq!(straddling.get_field("page-height"), None);
+
+        let one_page = roll.extract(0, 3, 4, 3).expect("in bounds");
+        assert_eq!(one_page.pages_loaded(), 1);
+
+        // Cropping the width alone leaves the rows, and therefore the pages,
+        // exactly as they were.
+        let narrowed = roll.extract(1, 0, 2, 12).expect("in bounds");
+        assert_eq!(narrowed.pages_loaded(), 4);
+        assert_eq!(narrowed.get_page_height(), 3);
+    }
+
+    /// The multi-input union does not import a page split from the second
+    /// image, because the split describes rows this output does not have.
+    ///
+    /// Measured counter-example on 8.18.6:
+    /// `vips join plain.v paged.v out.v horizontal`, with only the *second*
+    /// input paged, produced an 8x12 output carrying `page-height: 3`,
+    /// `n-pages: 4` and the roll's delay array, so an unpaged image became a
+    /// four-frame animation. The positive control below is that every other
+    /// field still comes across.
+    #[test]
+    fn the_field_union_does_not_import_a_page_split() {
+        let mut sub = four_page_roll();
+        sub.set_field("sub-only", MetadataValue::Str("from sub".into()));
+        sub.set_field("shared", MetadataValue::Str("sub wins nothing".into()));
+
+        let mut main = make_rgb_raster(4, 12);
+        main.set_field("shared", MetadataValue::Str("main keeps this".into()));
+
+        let mut out = make_rgb_raster(8, 12);
+        out.carry_meta_from(&main);
+        out.merge_fields_from(&sub);
+
+        assert_eq!(
+            out.get_field("sub-only"),
+            Some(MetadataValue::Str("from sub".into())),
+            "positive control: the union does import the second image's fields"
+        );
+        assert_eq!(
+            out.get_field("shared"),
+            Some(MetadataValue::Str("main keeps this".into())),
+            "and the first input still wins a shared name (#718)"
+        );
+        assert_eq!(
+            out.get_field("page-height"),
+            None,
+            "but not the page split: this output's rows are not sub's rows"
+        );
+        assert_eq!(out.pages_loaded(), 1);
+
+        // The other direction: a paged first input keeps its own split
+        // through the merge.
+        let mut paged_out = make_rgb_raster(8, 12);
+        paged_out.carry_meta_from(&four_page_roll());
+        paged_out.merge_fields_from(&sub);
+        assert_eq!(paged_out.get_page_height(), 3);
+        assert_eq!(paged_out.pages_loaded(), 4);
+    }
+
+    /// The two counts are different numbers and the accessors say so.
+    ///
+    /// Measured: `vips copy 'anim3.webp[n=2]' out.v` gives a 4x6 raster
+    /// reporting `n-pages: 3` and `page-height: 3`, so the file has three
+    /// pages and the raster holds two.
+    #[test]
+    fn pages_loaded_is_not_the_files_page_count() {
+        let mut subset = make_rgb_raster(4, 6);
+        subset.set_n_pages(3);
+        subset.set_page_height(3);
+
+        assert_eq!(subset.get_n_pages(), 3, "the file holds three pages");
+        assert_eq!(subset.pages_loaded(), 2, "this raster holds two of them");
     }
 }
 
