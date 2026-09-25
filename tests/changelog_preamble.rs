@@ -577,7 +577,9 @@ fn the_notes_are_found_when_a_release_cut_empties_unreleased() {
     assert!(unbacked(cut).is_empty());
 
     // And it still fails when it should, on the cut-release shape.
-    let broken = cut.replace("(issue #10). ", "(issue #4243). ");
+    // Anchored on the entry text, because the preamble says "issue #10" too
+    // and the entry is followed by a newline rather than a space.
+    let broken = cut.replace("broke (issue #10)", "broke (issue #4243)");
     assert_ne!(broken, cut, "the mutation did not reach the document");
     assert_eq!(unbacked(&broken), BTreeSet::from([10]));
 }
