@@ -74,6 +74,45 @@ fn unreleased(changelog: &str) -> &str {
     &rest[..end]
 }
 
+/// The section carrying the release notes at the head of the changelog.
+///
+/// Normally that is `## [Unreleased]`. Immediately after a release cut it is
+/// not: the convention this repository has followed since the 0.4.0 cut leaves
+/// `## [Unreleased]` as a bare heading and files the notes under the new
+/// version directly below it.
+///
+/// This file landed in August 2026, after the 0.4.0 cut and before the 0.5.0
+/// one, so every document it had ever seen kept the notes under `Unreleased`.
+/// The positive control below reads an empty block as "the parse broke", which
+/// is right for a mistyped heading and wrong for a release, and a release was
+/// the one shape it could not observe. Cutting 0.5.0 is what surfaced it.
+///
+/// So: take `Unreleased` when it carries a `### Breaking` section, and the
+/// released section immediately below it when it does not. `unreleased` itself
+/// is left alone, because two controls pin its exact boundary behaviour.
+fn release_notes(changelog: &str) -> &str {
+    let block = unreleased(changelog);
+    if block.contains("\n### Breaking\n") {
+        return block;
+    }
+    let start = changelog
+        .find("## [Unreleased]")
+        .expect("CHANGELOG.md must have an `## [Unreleased]` block");
+    let rest = &changelog[start + "## [Unreleased]".len()..];
+    let head = rest
+        .match_indices("\n## ")
+        .next()
+        .map(|(i, _)| i + "\n## ".len())
+        .expect("a bare `## [Unreleased]` must be followed by a released section");
+    let after = &rest[head..];
+    let end = after
+        .match_indices("\n## ")
+        .next()
+        .map(|(i, _)| i)
+        .unwrap_or(after.len());
+    &after[..end]
+}
+
 /// The prose between `## [Unreleased]` and the first `###` section.
 fn preamble(unreleased: &str) -> &str {
     let end = unreleased
@@ -191,7 +230,7 @@ fn attribution(entry: &str) -> BTreeSet<u32> {
 
 /// The preamble issue numbers that no `Breaking` entry is filed under.
 fn unbacked(changelog: &str) -> BTreeSet<u32> {
-    let block = unreleased(changelog);
+    let block = release_notes(changelog);
     let named = issue_numbers(preamble(block));
     let filed: BTreeSet<u32> = breaking_entries(block)
         .iter()
@@ -208,7 +247,7 @@ fn unbacked(changelog: &str) -> BTreeSet<u32> {
 /// explanations, and this is the positive control that separates them.
 #[test]
 fn the_parse_finds_a_preamble_and_breaking_entries() {
-    let block = unreleased(CHANGELOG);
+    let block = release_notes(CHANGELOG);
 
     let named = issue_numbers(preamble(block));
     assert!(
@@ -268,7 +307,7 @@ fn every_issue_the_preamble_names_has_a_breaking_entry() {
 /// and is indistinguishable from a test that cannot fail.
 #[test]
 fn dropping_an_issue_from_an_entry_leaves_exactly_that_issue_unbacked() {
-    let block = unreleased(CHANGELOG);
+    let block = release_notes(CHANGELOG);
     let named = issue_numbers(preamble(block));
     let entries = breaking_entries(block);
 
@@ -343,7 +382,7 @@ fn a_fabricated_issue_number_in_the_preamble_is_named() {
         "this control starts from a clean document"
     );
 
-    let block = unreleased(CHANGELOG);
+    let block = release_notes(CHANGELOG);
     let pre = preamble(block);
     let grown = format!("{pre}\nA sentence naming issue #{FABRICATED}.\n");
     let mutated = CHANGELOG.replacen(pre, &grown, 1);
@@ -497,4 +536,77 @@ fn the_unreleased_block_stops_at_the_next_release() {
         .flat_map(|e| attribution(e))
         .collect();
     assert_eq!(filed, BTreeSet::from([10]), "#11 belongs to 0.4.0");
+}
+
+/// After a release cut, the notes sit below a bare `## [Unreleased]`.
+///
+/// This is the document shape this file could not observe before 0.5.0: the
+/// 0.4.0 cut predates it, and no release happened while it existed. Without a
+/// control here the fallback in `release_notes` is exercised only by the real
+/// `CHANGELOG.md`, so a regression in it would surface as a baffling failure in
+/// the positive control rather than as a failure that names the cause.
+#[test]
+fn the_notes_are_found_when_a_release_cut_empties_unreleased() {
+    let cut = "# Changelog\n\n\
+               ## [Unreleased]\n\n\
+               ## [0.5.0] - 2026-09-24\n\n\
+               Naming issue #10.\n\n\
+               ### Breaking\n\n\
+               - A thing broke (issue #10).\n\n\
+               ## [0.4.0] - 2026-07-20\n\n\
+               ### Breaking\n\n\
+               - An older break (issue #11).\n";
+
+    let block = release_notes(cut);
+    assert!(
+        block.contains("0.5.0") && !block.contains("0.4.0"),
+        "the accessor should land on the release just cut, not run past it: {block:?}"
+    );
+
+    assert_eq!(
+        issue_numbers(preamble(block)),
+        BTreeSet::from([10]),
+        "the preamble below the cut is the one that counts"
+    );
+    let filed: BTreeSet<u32> = breaking_entries(block)
+        .iter()
+        .flat_map(|e| attribution(e))
+        .collect();
+    assert_eq!(filed, BTreeSet::from([10]), "#11 belongs to 0.4.0");
+
+    assert!(unbacked(cut).is_empty());
+
+    // And it still fails when it should, on the cut-release shape.
+    let broken = cut.replace("(issue #10). ", "(issue #4243). ");
+    assert_ne!(broken, cut, "the mutation did not reach the document");
+    assert_eq!(unbacked(&broken), BTreeSet::from([10]));
+}
+
+/// A non-empty `Unreleased` still wins over the release below it.
+///
+/// The other half of the accessor, and the one that would silently stop
+/// mattering: if the fallback ever fired unconditionally, every check in this
+/// file would quietly move to the last shipped release and pass there forever
+/// while `Unreleased` rotted.
+#[test]
+fn unreleased_still_wins_while_it_carries_the_notes() {
+    let doc = "# Changelog\n\n\
+               ## [Unreleased]\n\n\
+               Naming issue #10.\n\n\
+               ### Breaking\n\n\
+               - A thing broke (issue #10).\n\n\
+               ## [0.4.0] - 2026-07-20\n\n\
+               ### Breaking\n\n\
+               - An older break (issue #11).\n";
+
+    let block = release_notes(doc);
+    assert!(
+        !block.contains("0.4.0"),
+        "the accessor fell through while `Unreleased` still had the notes"
+    );
+    let filed: BTreeSet<u32> = breaking_entries(block)
+        .iter()
+        .flat_map(|e| attribution(e))
+        .collect();
+    assert_eq!(filed, BTreeSet::from([10]));
 }

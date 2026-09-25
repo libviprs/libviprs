@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-09-24
+
 This is the largest breaking release libviprs has shipped, so every break is
 gathered in `### Breaking` below rather than spread across the other sections.
 There are four groups of them plus a handful of independent items, and most
@@ -8115,5 +8117,8 @@ common 0.2.0 call sites.
 
 Phase-3 hardening: manifest v1, sinks, resume, retry, dedupe, tracing.
 
+[0.5.0]: https://github.com/libviprs/libviprs/releases/tag/v0.5.0
+[0.4.0]: https://github.com/libviprs/libviprs/releases/tag/v0.4.0
+[0.3.1]: https://github.com/libviprs/libviprs/releases/tag/v0.3.1
 [0.3.0]: https://github.com/libviprs/libviprs/releases/tag/v0.3.0
 [0.2.0]: https://github.com/libviprs/libviprs/releases/tag/v0.2.0
