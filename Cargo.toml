@@ -442,6 +442,12 @@ rustdoc-args = ["--cfg", "docsrs"]
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)', 'cfg(pmtiles_lock_probe)'] }
 deprecated = "deny"
+# Deprecations std has announced for a later release. This is what catches a
+# call like `AtomicU64::fetch_update` on the 1.97 MSRV: std marks it
+# `#[deprecated(since = "1.99.0")]` from 1.95 on, which only fires
+# `deprecated` once a toolchain reaches 1.99, so without this the MSRV job
+# built it happily while stable refused it (#1157).
+deprecated_in_future = "deny"
 
 [lints.clippy]
 incompatible_msrv = "warn"

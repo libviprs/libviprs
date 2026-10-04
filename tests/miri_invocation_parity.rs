@@ -139,9 +139,10 @@ struct Invocation {
     env: BTreeMap<String, String>,
 }
 
-/// Split a shell command line into tokens, honouring single and double quotes so
-/// `RUSTFLAGS='-A deprecated --cfg sha2_backend="soft"'` comes back as one token
-/// with the outer quotes removed and the inner ones kept.
+/// Split a shell command line into tokens, honouring single and double quotes,
+/// so `RUSTFLAGS='-A deprecated -A deprecated_in_future --cfg sha2_backend="soft"'`
+/// comes back as one token with the outer quotes removed and the inner ones
+/// kept.
 fn shell_tokens(line: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut current = String::new();

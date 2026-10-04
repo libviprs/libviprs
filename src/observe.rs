@@ -532,22 +532,19 @@ impl MemoryTracker {
     /// with each other instead of leaving a wrapped `current` under a
     /// `u64::MAX` `peak`.
     pub fn alloc(&self, bytes: u64) {
-        // `fetch_update` retries on contention (CAS loop) so the clamp is
+        // `update` retries on contention (it's a CAS loop), so the clamp is
         // applied atomically with respect to concurrent alloc/dealloc calls,
-        // the same way `dealloc` does it.
+        // the same way `dealloc` does it. It returns the value it replaced.
         //
-        // The closure never returns `None`, so the update cannot fail and both
-        // the `Ok` and `Err` payloads are the previous value.
-        //
-        // Nightly deprecates `fetch_update` in favour of `try_update`; see the
-        // note on `dealloc` for why that is handled on the Miri job rather
-        // than with an `allow` here.
+        // This used to be `fetch_update`, which stable 1.99 deprecates in
+        // favour of `try_update` and `update`. Both of those are stable since
+        // 1.95, so they build on the 1.97 MSRV too, and `update` is the one
+        // that fits a closure that can't fail (#1157).
         let previous = self
             .current
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                Some(current.saturating_add(bytes))
-            })
-            .unwrap_or_else(|previous| previous);
+            .update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.saturating_add(bytes)
+            });
         self.peak
             .fetch_max(previous.saturating_add(bytes), Ordering::Relaxed);
     }
@@ -563,28 +560,12 @@ impl MemoryTracker {
     /// interior, so a caller can drive `current` negative; saturating keeps the
     /// counter meaningful in that case.
     pub fn dealloc(&self, bytes: u64) {
-        // `fetch_update` retries on contention (CAS loop) so the clamp is
-        // applied atomically with respect to concurrent alloc/dealloc calls.
-        //
-        // Nightly has renamed this method to `try_update` and deprecated the
-        // old name, so `cargo +nightly miri test` used to fail to compile the
-        // lib against `[lints.rust] deprecated = "deny"` and Miri did not run
-        // at all (issue #643). Renaming is not the fix: `try_update` exists on
-        // neither the 1.97 MSRV nor 1.98 stable, so it would break every
-        // toolchain except the one that currently works.
-        //
-        // There is deliberately no `#[allow(deprecated)]` here. An attribute
-        // is unconditional, so it would also disarm the deny on stable, at the
-        // one call site the deny exists to watch, for the whole statement. The
-        // suppression lives on the Miri job instead, as
-        // `RUSTFLAGS: -A deprecated` in `.github/workflows/merge-gate.yml`,
-        // which is scoped to the toolchain that actually needs it. Drop that
-        // env once `try_update` is stable and the MSRV has moved past it, then
-        // rename.
-        let _ = self
-            .current
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                Some(current.saturating_sub(bytes))
+        // `update` retries on contention, so the clamp is applied atomically
+        // with respect to concurrent alloc/dealloc calls. See `alloc` for why
+        // this isn't `fetch_update` any more.
+        self.current
+            .update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.saturating_sub(bytes)
             });
     }
 
@@ -911,7 +892,7 @@ mod tests {
      * With the old `fetch_add(bytes) + bytes` the atomic wrapped and the
      * recomputed total then overflowed, which panics in debug builds and
      * under Miri (RED, as an arithmetic overflow rather than an assertion).
-     * With the saturating `fetch_update` both `current` and `peak` clamp to
+     * With a saturating update both `current` and `peak` clamp to
      * `u64::MAX` and stay consistent with each other (GREEN).
      *
      * Input: alloc(u64::MAX - 10), alloc(100) →
