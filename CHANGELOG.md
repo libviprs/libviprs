@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **CI tests against `hayro-jpeg2000` 0.4.0 for now** (issue #1160). 0.4.1
+  came out on 2026-10-04 and decodes two of the irreversible jp2k fixtures to
+  exactly vips's bytes and lowers the decoder's peak, so the
+  irreversible-table control in `src/jp2k.rs` and the jp2k price in
+  `tests/decode_working_set.rs` went red on numbers measured against 0.4.0.
+  CI's Test job runs `cargo update -p hayro-jpeg2000 --precise 0.4.0` until
+  those are re-measured. The manifest still asks for `^0.4.0`, so nothing
+  changes for anyone depending on the crate.
+
 ### Fixed
 
 - **The crate didn't compile on stable 1.99** (issue #1157). 1.99 deprecates

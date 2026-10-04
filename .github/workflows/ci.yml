@@ -250,6 +250,14 @@ jobs:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # Hold `hayro-jpeg2000` at 0.4.0 for every cell below. The jp2k fixture
+      # table in `src/jp2k.rs` and the jp2k price in
+      # `tests/decode_working_set.rs` were measured against 0.4.0, and 0.4.1
+      # decodes two irreversible fixtures to exactly vips's bytes and lowers
+      # the peak, so both go red on it. `Cargo.lock` isn't committed, hence
+      # generating one first. The manifest stays at `^0.4.0` so consumers
+      # aren't held back; issue #1160 re-measures against 0.4.1 and drops this.
+      - run: cargo generate-lockfile && cargo update -p hayro-jpeg2000 --precise 0.4.0
       - run: cargo test
       # The object-store-sink module and its unit tests are feature-gated, so
       # bare `cargo test` never compiles or runs them. Exercise the feature so

@@ -94,6 +94,11 @@ gif = { version = "0.14", default-features = false, features = ["std"] }
 # takes the safe one and pays the speed. `image` would pull `moxcms` into
 # the decoder to colour-manage internally, and colour management here
 # belongs to `crate::colour`, not to a loader.
+#
+# CI's Test job holds this at exactly 0.4.0 with `cargo update --precise`,
+# not here. The jp2k fixture table and the decode price were measured against
+# 0.4.0, and 0.4.1 moves both; issue #1160 re-measures them and drops that
+# pin. A caret here keeps consumers free to take 0.4.x fixes meanwhile.
 hayro-jpeg2000 = { version = "0.4.0", default-features = false, features = [
     "std",
 ] }
