@@ -61,6 +61,10 @@ pub enum PdfError {
         "render dimensions {width}x{height} exceed pdfium's i32 bitmap-span limit ({span} bytes > i32::MAX)"
     )]
     RenderTooLarge { width: u32, height: u32, span: u64 },
+    #[error("PDF is password-protected: a password is needed to open it")]
+    PasswordRequired,
+    #[error("incorrect password for password-protected PDF")]
+    WrongPassword,
 }
 
 /// Default ceiling on the pixel count (`width × height`) that a single
@@ -1929,6 +1933,104 @@ mod tests {
         assert!(
             err.to_string().contains("password-protected"),
             "encrypted doc should report password-protected, got: {err}"
+        );
+    }
+
+    /// The committed AES-256 (R6) fixture: one text-only A4 page, user
+    /// password `secret`. The same file libviprs-tests carries.
+    #[cfg(feature = "pdfium")]
+    fn password_fixture() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/password.pdf")
+    }
+
+    /// The [`PdfError`] a password extract folded into its decode error, if
+    /// the fold kept it typed.
+    #[cfg(feature = "pdfium")]
+    fn folded_pdf_error(err: &crate::codec::DecodeError) -> Option<&PdfError> {
+        match err {
+            crate::source::SourceError::Io(io) => io.get_ref()?.downcast_ref::<PdfError>(),
+            _ => None,
+        }
+    }
+
+    #[cfg(feature = "pdfium")]
+    #[test]
+    #[cfg_attr(miri, ignore)] // hands a real path to an entry point that opens it
+    fn pdf_info_with_password_opens_the_aes256_fixture_with_the_right_password() {
+        let info = pdf_info_with_password(&password_fixture(), "secret")
+            .expect("the right password opens the fixture");
+        assert_eq!(info.page_count, 1);
+        assert_eq!(info.pages.len(), 1);
+        let page = &info.pages[0];
+        assert!(
+            (page.width_pts - 595.28).abs() < 0.01 && (page.height_pts - 841.89).abs() < 0.01,
+            "expected an A4 page of 595.28 x 841.89 pt, got {} x {}",
+            page.width_pts,
+            page.height_pts
+        );
+    }
+
+    #[cfg(feature = "pdfium")]
+    #[test]
+    #[cfg_attr(miri, ignore)] // hands a real path to an entry point that opens it
+    fn pdf_info_with_password_rejects_a_wrong_password() {
+        match pdf_info_with_password(&password_fixture(), "not-the-password") {
+            Err(PdfError::WrongPassword) => {}
+            other => panic!("expected WrongPassword, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "pdfium")]
+    #[test]
+    #[cfg_attr(miri, ignore)] // hands a real path to an entry point that opens it
+    fn pdf_info_with_password_requires_a_password_for_the_aes256_fixture() {
+        match pdf_info_with_password(&password_fixture(), "") {
+            Err(PdfError::PasswordRequired) => {}
+            other => panic!("expected PasswordRequired, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "pdfium")]
+    #[test]
+    #[cfg_attr(miri, ignore)] // hands a real path to an entry point that opens it
+    fn extract_page_image_with_password_renders_the_aes256_fixture() {
+        let raster = extract_page_image_with_password(&password_fixture(), 1, "secret")
+            .expect("the right password extracts the page");
+        // Rendered at the 72-DPI pdfload baseline, one pixel per point.
+        assert_eq!((raster.width(), raster.height()), (595, 841));
+        // The page is text on white, so a decrypted render has ink on it. A
+        // render of undecrypted content streams would come back blank.
+        assert!(
+            raster
+                .data()
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|px| px[..3] != [255, 255, 255]),
+            "the decrypted page rendered blank"
+        );
+    }
+
+    #[cfg(feature = "pdfium")]
+    #[test]
+    #[cfg_attr(miri, ignore)] // hands a real path to an entry point that opens it
+    fn extract_page_image_with_password_rejects_a_wrong_password() {
+        let err = extract_page_image_with_password(&password_fixture(), 1, "not-the-password")
+            .unwrap_err();
+        assert!(
+            matches!(folded_pdf_error(&err), Some(PdfError::WrongPassword)),
+            "expected a typed WrongPassword, got: {err:?}"
+        );
+    }
+
+    #[cfg(feature = "pdfium")]
+    #[test]
+    #[cfg_attr(miri, ignore)] // hands a real path to an entry point that opens it
+    fn extract_page_image_with_password_requires_a_password_for_the_aes256_fixture() {
+        let err = extract_page_image_with_password(&password_fixture(), 1, "").unwrap_err();
+        assert!(
+            matches!(folded_pdf_error(&err), Some(PdfError::PasswordRequired)),
+            "expected a typed PasswordRequired, got: {err:?}"
         );
     }
 

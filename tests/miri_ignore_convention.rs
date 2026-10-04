@@ -369,7 +369,12 @@ const ANCHOR_FILES: &[&str] = &[
 /// written once, the latch over a destination write that fails part way, and
 /// the durability barrier now landing on the destination rather than on a
 /// staging file that no longer exists.
-const EXPECTED_SRC_ANNOTATIONS: usize = 256;
+///
+/// The password work moves it 256 to 262, all six in `src/pdf.rs`: the cells
+/// that open the committed AES-256 `tests/fixtures/password.pdf` with the right
+/// password, a wrong one and none, through `pdf_info_with_password` and
+/// `extract_page_image_with_password`.
+const EXPECTED_SRC_ANNOTATIONS: usize = 262;
 /// Companion to [`EXPECTED_SRC_ANNOTATIONS`]: how many `src/` modules carry at
 /// least one annotation. #765 made it 25 by putting the first annotation in
 /// `src/analyze.rs`; `src/colour.rs` and `src/pdf.rs`, which took the other

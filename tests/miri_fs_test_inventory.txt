@@ -477,8 +477,14 @@ annotated   not-detected src/analyze.rs::a_missing_img_is_an_io_error_and_the_he
 annotated   not-detected src/analyze.rs::a_pair_loads_from_either_name_and_from_the_bare_stem
 annotated   not-detected src/analyze.rs::decode_file_reaches_the_pair_from_the_hdr
 annotated   not-detected src/colour.rs::icc_typed_errors
+annotated   not-detected src/pdf.rs::extract_page_image_with_password_rejects_a_wrong_password
+annotated   not-detected src/pdf.rs::extract_page_image_with_password_renders_the_aes256_fixture
+annotated   not-detected src/pdf.rs::extract_page_image_with_password_requires_a_password_for_the_aes256_fixture
 annotated   not-detected src/pdf.rs::password_and_dpi_extract_return_a_clean_typed_error
+annotated   not-detected src/pdf.rs::pdf_info_with_password_opens_the_aes256_fixture_with_the_right_password
 annotated   not-detected src/pdf.rs::pdf_info_with_password_passes_through_open_error
+annotated   not-detected src/pdf.rs::pdf_info_with_password_rejects_a_wrong_password
+annotated   not-detected src/pdf.rs::pdf_info_with_password_requires_a_password_for_the_aes256_fixture
 annotated   not-detected src/pmtiles/range.rs::opening_something_that_is_not_there_is_a_typed_error
 annotated   not-detected src/pmtiles/writer.rs::widening_settles_where_a_doubling_loop_settles
 annotated   not-detected src/source.rs::decode_file_not_found
