@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **CI tests against `hayro-jpeg2000` 0.4.0 for now** (issue #1160). 0.4.1
+  came out on 2026-10-04 and decodes two of the irreversible jp2k fixtures to
+  exactly vips's bytes and lowers the decoder's peak, so the
+  irreversible-table control in `src/jp2k.rs` and the jp2k price in
+  `tests/decode_working_set.rs` went red on numbers measured against 0.4.0.
+  CI's Test job runs `cargo update -p hayro-jpeg2000 --precise 0.4.0` until
+  those are re-measured. The manifest still asks for `^0.4.0`, so nothing
+  changes for anyone depending on the crate.
+
+### Fixed
+
+- **The crate didn't compile on stable 1.99** (issue #1157). 1.99 deprecates
+  `AtomicU64::fetch_update` (std renamed it `try_update`), and with
+  `[lints.rust] deprecated = "deny"` the two calls in `MemoryTracker::alloc`
+  and `MemoryTracker::dealloc` became hard errors, so anything building core
+  on current stable failed before it started, every CI job in libviprs-cli
+  and libviprs-tests included. Both now call `AtomicU64::update` with the same
+  `Relaxed` orderings and the same saturating closures. `update` and
+  `try_update` have been stable since 1.95, so this builds the same on the
+  1.97 MSRV, 1.99 and nightly. The crate also denies `deprecated_in_future`
+  now, so a call std has only marked for a later deprecation fails on the
+  MSRV too, instead of building there and breaking the day stable catches up.
+
 ## [0.5.0] — 2026-09-24
 
 This is the largest breaking release libviprs has shipped, so every break is

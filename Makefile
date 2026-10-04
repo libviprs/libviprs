@@ -106,8 +106,10 @@ MIRI_TOOLCHAIN ?= nightly-2026-08-20
 ## This is the local mirror of the `miri` job in
 ## `.github/workflows/merge-gate.yml`. The flags have to match it, and
 ## `tests/miri_invocation_parity.rs` fails if they drift. The workflow carries
-## the reasoning for each one; the short version is that `-A deprecated` is what
-## lets the crate compile under nightly at all (#643), and
+## the reasoning for each one; the short version is that `-A deprecated` and
+## `-A deprecated_in_future` keep a nightly-only deprecation from stopping the
+## crate compiling under Miri (#643, and still there after #1157 for the next
+## one), and
 ## `--cfg sha2_backend="soft"` keeps the run off sha2's aarch64 NEON path, which
 ## aborts it on a Stacked Borrows violation about 30 seconds in (#707).
 ## That abort needs `cpufeatures` 0.3.1 or newer in the resolved graph:
@@ -150,7 +152,7 @@ miri:
 		echo "error: miri is not installed for '$(MIRI_TOOLCHAIN)'. Run 'rustup component add miri --toolchain $(MIRI_TOOLCHAIN)'." >&2; \
 		exit 1; \
 	}
-	RUSTFLAGS='-A deprecated --cfg sha2_backend="soft"' cargo +$(MIRI_TOOLCHAIN) miri test --lib -- analyze:: avif:: bands:: cancel:: checksum:: codec:: composite:: dedupe:: encode_tiff:: exr:: extensions:: frames:: freqfilt:: geo:: hex:: jp2k:: jxl:: level_walk:: manifest:: mat:: nifti:: pixel:: radiance:: raster_ops:: resize:: resume:: retry:: sink:: svg:: sync_queue:: textio:: webp::
+	RUSTFLAGS='-A deprecated -A deprecated_in_future --cfg sha2_backend="soft"' cargo +$(MIRI_TOOLCHAIN) miri test --lib -- analyze:: avif:: bands:: cancel:: checksum:: codec:: composite:: dedupe:: encode_tiff:: exr:: extensions:: frames:: freqfilt:: geo:: hex:: jp2k:: jxl:: level_walk:: manifest:: mat:: nifti:: pixel:: radiance:: raster_ops:: resize:: resume:: retry:: sink:: svg:: sync_queue:: textio:: webp::
 
 ## Run Loom concurrency tests (Loom job)
 loom:

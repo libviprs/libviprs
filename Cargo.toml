@@ -94,6 +94,11 @@ gif = { version = "0.14", default-features = false, features = ["std"] }
 # takes the safe one and pays the speed. `image` would pull `moxcms` into
 # the decoder to colour-manage internally, and colour management here
 # belongs to `crate::colour`, not to a loader.
+#
+# CI's Test job holds this at exactly 0.4.0 with `cargo update --precise`,
+# not here. The jp2k fixture table and the decode price were measured against
+# 0.4.0, and 0.4.1 moves both; issue #1160 re-measures them and drops that
+# pin. A caret here keeps consumers free to take 0.4.x fixes meanwhile.
 hayro-jpeg2000 = { version = "0.4.0", default-features = false, features = [
     "std",
 ] }
@@ -442,6 +447,12 @@ rustdoc-args = ["--cfg", "docsrs"]
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)', 'cfg(pmtiles_lock_probe)'] }
 deprecated = "deny"
+# Deprecations std has announced for a later release. This is what catches a
+# call like `AtomicU64::fetch_update` on the 1.97 MSRV: std marks it
+# `#[deprecated(since = "1.99.0")]` from 1.95 on, which only fires
+# `deprecated` once a toolchain reaches 1.99, so without this the MSRV job
+# built it happily while stable refused it (#1157).
+deprecated_in_future = "deny"
 
 [lints.clippy]
 incompatible_msrv = "warn"

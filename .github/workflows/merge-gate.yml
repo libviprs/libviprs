@@ -367,15 +367,31 @@ jobs:
       # `RUSTFLAGS` carries two things, and the `Makefile` mirror carries the
       # same string.
       #
-      # `-A deprecated` is the nightly-only half of #643. Nightly std has
-      # renamed `AtomicU64::fetch_update` to `try_update` and deprecated the old
-      # name, and the crate sets `[lints.rust] deprecated = "deny"`, so the lib
-      # does not compile under nightly at all and Miri never runs. It lives here
+      # `-A deprecated` came in with #643. Nightly std renamed
+      # `AtomicU64::fetch_update` to `try_update` and deprecated the old name,
+      # and the crate sets `[lints.rust] deprecated = "deny"`, so the lib did
+      # not compile under nightly at all and Miri never ran. It lives here
       # rather than as an `#[allow(deprecated)]` in `src/observe.rs` because the
-      # attribute has no `cfg` to hang the "nightly only" claim on: it would
-      # disarm the deny on stable too, at the exact call site the deny was added
-      # to watch, for every expression inside that statement. This is scoped to
-      # the one job that needs it.
+      # attribute has no `cfg` to hang a "nightly only" claim on: it would
+      # disarm the deny on stable too, for every expression inside that
+      # statement. This is scoped to the one job that needs it.
+      #
+      # Since #1157 the crate doesn't call `fetch_update` at all. Stable 1.99
+      # deprecated it too, and `AtomicU64::update`, stable since 1.95, does the
+      # same job on every toolchain from the 1.97 MSRV up. So the flag isn't
+      # covering that call any more. It stays anyway, on purpose. This job
+      # floats on `@nightly`, the next nightly-only deprecation of anything the
+      # crate calls would stop Miri compiling again, and this workflow runs
+      # rarely enough that #643 sat unnoticed. Stable's Check & Lint still
+      # denies `deprecated`, so nothing ships through this gap: the flag only
+      # keeps the one nightly job interpreting tests while stable catches up.
+      #
+      # `-A deprecated_in_future` is the same waiver for the lint #1157 turned
+      # on. `[lints.rust] deprecated_in_future = "deny"` refuses calls std has
+      # marked for deprecation in a later release, which is what lets the MSRV
+      # job see a break like `fetch_update` before stable does. Nightly carries
+      # those markings weeks ahead of stable, so without this the deny would
+      # stop Miri first, for the same reason #643 did.
       #
       # Cargo appends `RUSTFLAGS` after the `[lints]` table's own `--deny=...`,
       # and rustc takes the last lint-level flag on the command line, so this
@@ -424,7 +440,7 @@ jobs:
       # change here and in the `Makefile`.
       - run: 'cargo +nightly miri test --lib -- analyze:: avif:: bands:: cancel:: checksum:: codec:: composite:: dedupe:: encode_tiff:: exr:: extensions:: frames:: freqfilt:: geo:: hex:: jp2k:: jxl:: level_walk:: manifest:: mat:: nifti:: pixel:: radiance:: raster_ops:: resize:: resume:: retry:: sink:: svg:: sync_queue:: textio:: webp::'
         env:
-          RUSTFLAGS: '-A deprecated --cfg sha2_backend="soft"'
+          RUSTFLAGS: '-A deprecated -A deprecated_in_future --cfg sha2_backend="soft"'
 
   loom:
     name: Loom
