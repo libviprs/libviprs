@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `pdf_info_with_password` and `extract_page_image_with_password` open an
+  encrypted PDF with its password when the `pdfium` feature is on. They used
+  to answer any non-empty password with "not available in this build". An
+  encrypted page is rendered at the 72-DPI `pdfload` baseline, since its
+  streams can't be read without decrypting. Two new `PdfError` variants say
+  what went wrong: `PasswordRequired` (encrypted, and no password given) and
+  `WrongPassword`. The pdfium render paths report a protected file with
+  `PasswordRequired` too, instead of a stringly `PdfError::Pdfium`. Builds
+  without `pdfium` behave as before.
+
 ### Changed
 
 - **CI tests against `hayro-jpeg2000` 0.4.0 for now** (issue #1160). 0.4.1
