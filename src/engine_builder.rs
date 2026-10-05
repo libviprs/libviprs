@@ -1740,6 +1740,40 @@ mod retry_wiring_tests {
         assert!(sink.written() > 0, "every tile must ultimately be written");
     }
 
+    /// Every retry the builder's retry policy makes reaches the observer as
+    /// `RetryAttempted`, numbered from 1 per tile (issue #1166).
+    ///
+    /// `RetryingSink` retried inside `write_tile` with no observer, so the
+    /// variant existed, was documented, and never went out. The sink fails
+    /// its first two writes, so the first tile is retried twice, and the
+    /// result's own `retry_count` is the number the events have to match.
+    #[test]
+    fn builder_retries_reach_the_observer_as_retry_attempted() {
+        use crate::observe::{CollectingObserver, EngineEvent};
+
+        let observer = Arc::new(CollectingObserver::new());
+        let (result, _sink) = EngineBuilder::new(&small_source(), small_plan(), FlakySink::new(2))
+            .with_retry(fast_policy(5))
+            .with_observer_arc(observer.clone())
+            .run_collect()
+            .expect("transient failures must be retried, not propagated");
+        assert_eq!(result.retry_count, 2, "the control: two retries happened");
+
+        let attempts: Vec<u32> = observer
+            .events()
+            .iter()
+            .filter_map(|e| match e {
+                EngineEvent::RetryAttempted { attempt, .. } => Some(*attempt),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            attempts,
+            vec![1, 2],
+            "each retry must be reported once, numbered from 1"
+        );
+    }
+
     // Under `RetryThenSkip`, a tile must only be skipped after its retries are
     // exhausted. With enough retry budget the transient failures are absorbed
     // and nothing is skipped. Fails on unwired code (tiles dropped on the
@@ -2814,6 +2848,69 @@ mod live_resume_bookkeeping_tests {
         assert_eq!(
             r2.bytes_written, 0,
             "tiles skipped on resume must not be counted as bytes_written"
+        );
+    }
+
+    /// A resumed run reports the tiles its checkpoint already held as
+    /// `TileSkippedOnResume`, not as `TileCompleted` (issue #1166).
+    ///
+    /// The `ResumeAwareSink` short-circuits those writes with `Ok(())`, and
+    /// the engine cannot tell that from a real write, so it used to report
+    /// every skipped tile as completed: an observer counting events saw a
+    /// fully-checkpointed resume finish every tile again and skip none. Here
+    /// the first run checkpoints everything, so the resume must report every
+    /// tile skipped and none completed.
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn a_resumed_run_reports_its_checkpointed_tiles_as_skipped() {
+        use crate::observe::{CollectingObserver, EngineEvent};
+
+        let out = tempfile::tempdir().unwrap();
+        let cp = tempfile::tempdir().unwrap();
+        let source = solid_source();
+        let plan = solid_plan();
+        let total = plan.total_tile_count();
+        let policy = || {
+            ResumePolicy::resume()
+                .with_checkpoint_root(cp.path())
+                .with_checkpoint_every(1)
+        };
+
+        EngineBuilder::new(
+            &source,
+            plan.clone(),
+            FsSink::new(out.path().to_path_buf(), plan.clone()),
+        )
+        .with_engine(EngineKind::Monolithic)
+        .with_resume(policy())
+        .run()
+        .expect("the first run checkpoints every tile");
+
+        let observer = Arc::new(CollectingObserver::new());
+        EngineBuilder::new(
+            &source,
+            plan.clone(),
+            FsSink::new(out.path().to_path_buf(), plan.clone()),
+        )
+        .with_engine(EngineKind::Monolithic)
+        .with_resume(policy())
+        .with_observer_arc(observer.clone())
+        .run()
+        .expect("the resume succeeds");
+
+        let events = observer.events();
+        let completed = events
+            .iter()
+            .filter(|e| matches!(e, EngineEvent::TileCompleted { .. }))
+            .count() as u64;
+        let skipped = events
+            .iter()
+            .filter(|e| matches!(e, EngineEvent::TileSkippedOnResume { .. }))
+            .count() as u64;
+        assert_eq!(
+            (completed, skipped),
+            (0, total),
+            "every tile of a fully-checkpointed resume is a skip, not a completion"
         );
     }
 }
