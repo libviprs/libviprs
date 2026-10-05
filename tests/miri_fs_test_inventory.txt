@@ -237,6 +237,7 @@ annotated   fs-detected  src/sink_pmtiles.rs::finishing_without_a_single_tile_pu
 annotated   fs-detected  src/sink_pmtiles.rs::the_published_header_is_available_without_reopening_the_archive
 annotated   fs-detected  src/sink_pmtiles.rs::the_archive_records_the_source_digest_from_the_engine_config
 annotated   fs-detected  src/source.rs::a_png_longer_than_the_svg_window_still_decodes_as_png
+annotated   fs-detected  src/source.rs::an_svg_is_probed_by_content_and_agrees_with_the_decode
 annotated   fs-detected  src/source.rs::both_entry_points_agree_on_every_container_in_the_route_table
 annotated   fs-detected  src/source.rs::both_entry_points_decode_an_svg_document
 annotated   fs-detected  src/source.rs::content_beats_extension_in_both_entry_points
@@ -254,6 +255,7 @@ annotated   fs-detected  src/source.rs::revalidate_bypasses_and_refreshes_cache
 annotated   fs-detected  src/source.rs::the_file_body_ceiling_is_inclusive
 annotated   fs-detected  src/source.rs::the_file_body_ceiling_leaves_the_streaming_path_alone
 annotated   fs-detected  src/source.rs::the_file_body_ceiling_refuses_a_source_that_outruns_its_stat
+annotated   fs-detected  src/source.rs::the_probe_agrees_with_the_decode_on_every_container_it_reads
 annotated   fs-detected  src/stream_verify.rs::stream_verify_accepts_a_centred_deep_zoom_pyramid
 annotated   fs-detected  src/stream_verify.rs::stream_verify_accepts_a_centred_google_pyramid
 annotated   fs-detected  src/stream_verify.rs::stream_verify_accepts_an_uncentred_padded_google_pyramid

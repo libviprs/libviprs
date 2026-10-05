@@ -277,6 +277,18 @@ pub enum SourceError {
     /// [`crate::imageio`] container contract).
     #[error("vips .v file error: {0}")]
     VipsFormat(String),
+    /// [`probe_file`] or [`probe_bytes`] recognised the container but can't
+    /// say what it holds without decoding it (issue #1173). `format` names
+    /// the container. Decode it instead; the decode entry points read every
+    /// container the probe declines.
+    #[error(
+        "{format}: the header doesn't say what the image holds without decoding it; \
+         decode it instead"
+    )]
+    ProbeUnsupported {
+        /// The container the probe recognised.
+        format: String,
+    },
     /// A malformed Radiance `.hdr` file. libviprs decodes Radiance itself
     /// rather than through the `image` crate (see [`crate::radiance`]), so
     /// its failures arrive as the codec's own typed
@@ -2354,6 +2366,287 @@ pub fn decode_bytes_with_limits(bytes: &[u8], limits: DecodeLimits) -> Result<Ra
     Ok(raster)
 }
 
+/// What an image's header declares, read without decoding its pixels.
+///
+/// Returned by [`probe_file`] and [`probe_bytes`] (issue #1173). Every field
+/// is the answer the matching decode would give: `width`, `height` and
+/// `format` are the [`Raster`]'s, so a caller can refuse a region outside the
+/// image or price a run before spending the decode.
+///
+/// `#[non_exhaustive]`, so a field can be added without breaking a caller who
+/// reads these.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ImageHeader {
+    /// Width in pixels.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+    /// Band count, which is `format.channels()`.
+    pub bands: u32,
+    /// The pixel format the decode returns, which carries the sample kind.
+    pub format: PixelFormat,
+    /// The page count, where the container declares one without decoding:
+    /// a TIFF's IFD chain, walked under
+    /// [`DecodeLimits::max_pages`]. `None` for a single-image container.
+    pub pages: Option<u32>,
+}
+
+impl ImageHeader {
+    fn single(width: u32, height: u32, format: PixelFormat) -> Self {
+        Self {
+            width,
+            height,
+            bands: u32::try_from(format.channels()).unwrap_or(u32::MAX),
+            format,
+            pages: None,
+        }
+    }
+}
+
+/// How far into a Netpbm file the probe reads looking for the end of its
+/// header. The header is four short tokens plus any `#` comments, so a header
+/// longer than this is refused rather than read without bound.
+const PROBE_TEXT_HEADER_BYTES: u64 = 64 * 1024;
+
+/// Read an image's header from a file without decoding it (issue #1173).
+///
+/// [`probe_file_with_limits`] at [`DecodeLimits::default`].
+///
+/// # Errors
+///
+/// As [`probe_file_with_limits`].
+pub fn probe_file(path: &Path) -> Result<ImageHeader, SourceError> {
+    probe_file_with_limits(path, DecodeLimits::default())
+}
+
+/// Read an image's header from a file without decoding it, under explicit
+/// [`DecodeLimits`] (issue #1173).
+///
+/// The container is identified the way [`decode_file_with_limits`] does it,
+/// from the leading bytes and never from the extension, and then only as much
+/// of the file is read as its header needs: PNG's chunks up to the first
+/// `IDAT`, JPEG's markers up to the frame header, TIFF's IFDs, the fixed
+/// 64-byte `.v` header, Netpbm's text header (up to 64 KiB), and anything the
+/// `image` facade recognises up to its own header. An SVG has no header to
+/// speak of, so it's read whole (bounded the way the decode bounds it) and
+/// parsed for its size at [`SvgOptions::default`](crate::svg::SvgOptions),
+/// but not rasterised; without the `svg` feature it's refused the way the
+/// decode refuses it.
+///
+/// The geometry is **reported, not refused**: answering "how big is it" is
+/// the point, so `max_coord`, `max_pixels` and the allocation price are left
+/// to the caller and to the decode. The limits bound what the probe itself
+/// reads and walks instead: `max_alloc_bytes` caps any buffer it fills from
+/// the file and the decoders' own header buffers, and `max_pages` caps the
+/// TIFF page walk.
+///
+/// # Errors
+///
+/// [`SourceError::ProbeUnsupported`] for a container libviprs decodes but
+/// can't describe without decoding (GIF, whose band count depends on every
+/// frame, and the containers libviprs parses itself end to end, such as
+/// WebP, JPEG XL, AVIF, JPEG 2000, OpenEXR, FITS, Radiance, NIfTI, MATLAB,
+/// Analyze and Ultra HDR), and otherwise the same errors a decode reports
+/// for a header it can't read.
+pub fn probe_file_with_limits(
+    path: &Path,
+    limits: DecodeLimits,
+) -> Result<ImageHeader, SourceError> {
+    let mut file = std::fs::File::open(path)?;
+    let (head, filled) = read_head(&mut file)?;
+    let sniffed = sniff(&head[..filled]);
+    file.seek(std::io::SeekFrom::Start(0))?;
+    match sniffed {
+        Some(SniffedFormat::Png | SniffedFormat::Tiff) => {
+            probe_facade(std::io::BufReader::new(file), sniffed, limits)
+        }
+        Some(SniffedFormat::Jpeg) => {
+            let (w, h, format) = probe_jpeg(std::io::BufReader::new(file))?;
+            Ok(ImageHeader::single(w, h, format))
+        }
+        Some(SniffedFormat::Vips) => {
+            let (w, h, format) = crate::imageio::probe_vips_bytes(&head[..filled])?;
+            Ok(ImageHeader::single(w, h, format))
+        }
+        Some(SniffedFormat::Netpbm) => {
+            let mut text = Vec::new();
+            (&mut file)
+                .take(PROBE_TEXT_HEADER_BYTES)
+                .read_to_end(&mut text)?;
+            let (w, h, format) = crate::textio::probe_netpbm(&text)?;
+            Ok(ImageHeader::single(w, h, format))
+        }
+        Some(other) => Err(SourceError::ProbeUnsupported {
+            format: format!("{other:?}"),
+        }),
+        // The same content sniff, over the same window, that the decode
+        // runs on a file no magic matched (issue #1170).
+        None => {
+            let mut window = Vec::new();
+            (&mut file)
+                .take(crate::svg::SVG_SNIFF_BYTES as u64)
+                .read_to_end(&mut window)?;
+            if crate::svg::looks_like_svg(&window) {
+                let bytes = read_file_bounded(path, limits, "image file body")?;
+                let (w, h) = crate::svg::probe_svg(&bytes)?;
+                return Ok(ImageHeader::single(w, h, PixelFormat::Rgba8));
+            }
+            file.seek(std::io::SeekFrom::Start(0))?;
+            probe_facade(std::io::BufReader::new(file), None, limits)
+        }
+    }
+}
+
+/// Read an image's header from memory without decoding it (issue #1173).
+///
+/// [`probe_bytes_with_limits`] at [`DecodeLimits::default`].
+///
+/// # Errors
+///
+/// As [`probe_file_with_limits`].
+pub fn probe_bytes(bytes: &[u8]) -> Result<ImageHeader, SourceError> {
+    probe_bytes_with_limits(bytes, DecodeLimits::default())
+}
+
+/// Read an image's header from memory without decoding it, under explicit
+/// [`DecodeLimits`] (issue #1173).
+///
+/// The same routing and the same answers as [`probe_file_with_limits`], over
+/// a buffer: it gives the same header for the same bytes.
+///
+/// # Errors
+///
+/// As [`probe_file_with_limits`].
+pub fn probe_bytes_with_limits(
+    bytes: &[u8],
+    limits: DecodeLimits,
+) -> Result<ImageHeader, SourceError> {
+    let sniffed = sniff(bytes);
+    match sniffed {
+        Some(SniffedFormat::Png | SniffedFormat::Tiff) => {
+            probe_facade(Cursor::new(bytes), sniffed, limits)
+        }
+        Some(SniffedFormat::Jpeg) => {
+            let (w, h, format) = probe_jpeg(Cursor::new(bytes))?;
+            Ok(ImageHeader::single(w, h, format))
+        }
+        Some(SniffedFormat::Vips) => {
+            let (w, h, format) = crate::imageio::probe_vips_bytes(bytes)?;
+            Ok(ImageHeader::single(w, h, format))
+        }
+        Some(SniffedFormat::Netpbm) => {
+            let window = usize::try_from(PROBE_TEXT_HEADER_BYTES).unwrap_or(usize::MAX);
+            let (w, h, format) = crate::textio::probe_netpbm(&bytes[..bytes.len().min(window)])?;
+            Ok(ImageHeader::single(w, h, format))
+        }
+        Some(other) => Err(SourceError::ProbeUnsupported {
+            format: format!("{other:?}"),
+        }),
+        None if crate::svg::looks_like_svg(bytes) => {
+            let (w, h) = crate::svg::probe_svg(bytes)?;
+            Ok(ImageHeader::single(w, h, PixelFormat::Rgba8))
+        }
+        None => probe_facade(Cursor::new(bytes), None, limits),
+    }
+}
+
+/// The header of anything the `image` facade decodes, read through its own
+/// decoder up to the point it knows the geometry and colour type, and mapped
+/// to the [`PixelFormat`] the decode would produce. A TIFF also has its page
+/// chain walked under `max_pages`.
+///
+/// The facade's width and height ceilings are lifted here on purpose, since
+/// the probe reports geometry rather than refusing it; `max_alloc_bytes`
+/// still bounds the decoders' own header buffers.
+fn probe_facade<R: std::io::BufRead + Seek>(
+    mut inner: R,
+    sniffed: Option<SniffedFormat>,
+    limits: DecodeLimits,
+) -> Result<ImageHeader, SourceError> {
+    let pages = if sniffed == Some(SniffedFormat::Tiff) {
+        let count = crate::encode_tiff::tiff_page_count_from_reader(&mut inner, limits)?;
+        inner.seek(std::io::SeekFrom::Start(0))?;
+        Some(count)
+    } else {
+        None
+    };
+    let mut reader = reader_for(inner, sniffed)?;
+    let mut image_limits = Limits::no_limits();
+    image_limits.max_alloc = Some(limits.max_alloc_bytes);
+    reader.limits(image_limits);
+    let decoder = reader.into_decoder()?;
+    let (width, height) = decoder.dimensions();
+    let format = color_type_to_format(decoder.color_type())?;
+    let mut header = ImageHeader::single(width, height, format);
+    header.pages = pages;
+    Ok(header)
+}
+
+/// A JPEG's frame header, found by walking its markers from the start and
+/// skipping each segment by its declared length, so nothing past the `SOF` is
+/// read and nothing is decoded.
+///
+/// The format is the one the `image` facade's JPEG decoder produces: one
+/// component is `Gray8`, three (YCbCr or RGB) and four (CMYK or YCCK) are
+/// converted to `Rgb8`. Every step either consumes bytes or fails at the end
+/// of the input, so the walk is bounded by the input.
+fn probe_jpeg<R: Read + Seek>(mut r: R) -> Result<(u32, u32, PixelFormat), SourceError> {
+    let bad = |msg: &str| -> SourceError {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, format!("jpeg: {msg}")).into()
+    };
+    let mut two = [0u8; 2];
+    r.read_exact(&mut two)?;
+    if two != [0xFF, 0xD8] {
+        return Err(bad("no start-of-image marker"));
+    }
+    loop {
+        let mut byte = [0u8; 1];
+        r.read_exact(&mut byte)?;
+        if byte[0] != 0xFF {
+            return Err(bad("expected a marker"));
+        }
+        // Any number of 0xFF fill bytes may precede the marker code.
+        while byte[0] == 0xFF {
+            r.read_exact(&mut byte)?;
+        }
+        let marker = byte[0];
+        match marker {
+            // Standalone markers carry no length.
+            0x01 | 0xD0..=0xD8 => continue,
+            0xD9 | 0xDA => return Err(bad("no frame header before the scan")),
+            _ => {}
+        }
+        r.read_exact(&mut two)?;
+        let len = u16::from_be_bytes(two);
+        if len < 2 {
+            return Err(bad("segment length under 2"));
+        }
+        if matches!(marker, 0xC0..=0xC3 | 0xC5..=0xC7 | 0xC9..=0xCB | 0xCD..=0xCF) {
+            let mut sof = [0u8; 6];
+            r.read_exact(&mut sof)?;
+            let precision = sof[0];
+            let height = u32::from(u16::from_be_bytes([sof[1], sof[2]]));
+            let width = u32::from(u16::from_be_bytes([sof[3], sof[4]]));
+            if precision != 8 {
+                return Err(bad(&format!(
+                    "{precision}-bit samples are not decodable here"
+                )));
+            }
+            if width == 0 || height == 0 {
+                return Err(bad("the frame header declares a zero dimension"));
+            }
+            let format = match sof[5] {
+                1 => PixelFormat::Gray8,
+                3 | 4 => PixelFormat::Rgb8,
+                n => return Err(bad(&format!("{n} components are not decodable here"))),
+            };
+            return Ok((width, height, format));
+        }
+        r.seek(std::io::SeekFrom::Current(i64::from(len) - 2))?;
+    }
+}
+
 /// Apply the shared decode budget to a configured [`ImageReader`] and
 /// finalize its output into a [`Raster`].
 ///
@@ -2604,6 +2897,116 @@ mod tests {
         }
     }
 
+    /// Encode `raster`-shaped bytes through the `image` facade's encoders, for
+    /// the probe cells (issue #1173).
+    fn probe_fixture(format: image::ImageFormat, w: u32, h: u32, ct: image::ColorType) -> Vec<u8> {
+        let n = (w * h) as usize * usize::from(ct.bytes_per_pixel());
+        let data: Vec<u8> = (0..n).map(|i| (i * 37 % 251) as u8).collect();
+        let mut out = Vec::new();
+        image::write_buffer_with_format(&mut Cursor::new(&mut out), &data, w, h, ct, format)
+            .expect("encode fixture");
+        out
+    }
+
+    /// A two-page TIFF, written straight through the `tiff` crate.
+    fn two_page_tiff() -> Vec<u8> {
+        let mut out = Vec::new();
+        {
+            let mut enc = tiff::encoder::TiffEncoder::new(Cursor::new(&mut out)).unwrap();
+            for _ in 0..2 {
+                enc.write_image::<tiff::encoder::colortype::RGB8>(5, 3, &[9u8; 5 * 3 * 3])
+                    .unwrap();
+            }
+        }
+        out
+    }
+
+    /// The probe gives the answer the decode gives, for every container it
+    /// reads, from bytes and from a file (issue #1173).
+    ///
+    /// `width`, `height`, `format` and `bands` are compared against the
+    /// decoded raster itself, so a probe that guessed a colour type the decode
+    /// doesn't produce goes red here rather than in a caller's pricing.
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn the_probe_agrees_with_the_decode_on_every_container_it_reads() {
+        use image::{ColorType, ImageFormat};
+
+        let mut v = Vec::new();
+        {
+            let r = Raster::new(4, 3, PixelFormat::Rgba16, vec![7u8; 4 * 3 * 8]).unwrap();
+            v.extend(r.encode_vips().expect(".v fixture"));
+        }
+        let cases: Vec<(&str, Vec<u8>, Option<u32>)> = vec![
+            (
+                "png rgb8",
+                probe_fixture(ImageFormat::Png, 7, 5, ColorType::Rgb8),
+                None,
+            ),
+            (
+                "png rgba8",
+                probe_fixture(ImageFormat::Png, 3, 9, ColorType::Rgba8),
+                None,
+            ),
+            (
+                "png gray16",
+                probe_fixture(ImageFormat::Png, 6, 2, ColorType::L16),
+                None,
+            ),
+            (
+                "jpeg rgb",
+                probe_fixture(ImageFormat::Jpeg, 17, 9, ColorType::Rgb8),
+                None,
+            ),
+            (
+                "jpeg gray",
+                probe_fixture(ImageFormat::Jpeg, 8, 11, ColorType::L8),
+                None,
+            ),
+            (
+                "tiff rgb8",
+                probe_fixture(ImageFormat::Tiff, 5, 4, ColorType::Rgb8),
+                Some(1),
+            ),
+            ("tiff two pages", two_page_tiff(), Some(2)),
+            (".v rgba16", v, None),
+            ("P1", b"P1\n3 2\n010101\n".to_vec(), None),
+            ("P2", b"P2\n2 2\n65535\n1 2 3 4\n".to_vec(), None),
+            (
+                "P3",
+                b"P3\n# a comment\n1 2\n255\n1 2 3 4 5 6\n".to_vec(),
+                None,
+            ),
+            ("P4", b"P4\n9 1\n\x80\x80".to_vec(), None),
+            ("P5", b"P5\n2 1\n255\n\x01\x02".to_vec(), None),
+            ("P6", b"P6\n1 1\n255\n\x01\x02\x03".to_vec(), None),
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        for (name, bytes, pages) in cases {
+            let decoded = decode_bytes(&bytes).unwrap_or_else(|e| panic!("{name}: decode: {e}"));
+            let probed = probe_bytes(&bytes).unwrap_or_else(|e| panic!("{name}: probe: {e}"));
+            assert_eq!(
+                (probed.width, probed.height, probed.format, probed.bands),
+                (
+                    decoded.width(),
+                    decoded.height(),
+                    decoded.format(),
+                    decoded.format().channels() as u32
+                ),
+                "{name}: the probe and the decode disagree"
+            );
+            assert_eq!(probed.pages, pages, "{name}: page count");
+
+            let path = dir.path().join("probe.bin");
+            std::fs::write(&path, &bytes).unwrap();
+            let from_file = probe_file(&path).unwrap_or_else(|e| panic!("{name}: probe_file: {e}"));
+            assert_eq!(
+                from_file, probed,
+                "{name}: probe_file and probe_bytes disagree"
+            );
+        }
+    }
+
     /// A raster longer than the SVG sniff window still goes to its own
     /// decoder (issue #1170): the content sniff only runs when no magic
     /// matched, so a PNG whose compressed body runs well past 4 KiB decodes as
@@ -2648,6 +3051,110 @@ mod tests {
             (r.width(), r.height(), r.format()),
             (64, 64, PixelFormat::Rgb8)
         );
+    }
+
+    /// The probe reads the header and stops: a file cut off right after its
+    /// header probes to the same answer as the whole file, where the decode
+    /// refuses it, and a hostile header declaring 60000x60000 is reported
+    /// rather than priced or allocated (issue #1173).
+    #[test]
+    fn the_probe_reads_only_the_header() {
+        use image::{ColorType, ImageFormat};
+
+        let png = probe_fixture(ImageFormat::Png, 40, 30, ColorType::Rgb8);
+        // Signature, IHDR, and the first eight bytes of the first IDAT: the
+        // header is complete and the image data is not there.
+        let idat = png
+            .windows(4)
+            .position(|w| w == b"IDAT")
+            .expect("an IDAT chunk");
+        let cut_png = &png[..idat + 4 + 8];
+        let jpeg = probe_fixture(ImageFormat::Jpeg, 40, 30, ColorType::Rgb8);
+        let sof = jpeg
+            .windows(2)
+            .position(|w| w == [0xFF, 0xC0])
+            .expect("a baseline frame header");
+        let cut_jpeg = &jpeg[..sof + 2 + 8];
+        let v = Raster::new(40, 30, PixelFormat::Gray8, vec![0u8; 1200])
+            .unwrap()
+            .encode_vips()
+            .unwrap();
+        let cut_v = &v[..64];
+
+        for (name, whole, cut) in [
+            ("png", &png[..], cut_png),
+            ("jpeg", &jpeg[..], cut_jpeg),
+            (".v", &v[..], cut_v),
+            ("P6", &b"P6\n40 30\n255\n"[..], &b"P6\n40 30\n255\n"[..]),
+        ] {
+            assert!(
+                decode_bytes(cut).is_err(),
+                "{name}: the control: the cut file doesn't decode"
+            );
+            let probed =
+                probe_bytes(cut).unwrap_or_else(|e| panic!("{name}: probe of the header: {e}"));
+            assert_eq!((probed.width, probed.height), (40, 30), "{name}");
+            let _ = whole;
+        }
+
+        let hostile = b"P6\n60000 60000\n255\n";
+        let h = probe_bytes(hostile).expect("a header is a header, whatever it declares");
+        assert_eq!(
+            (h.width, h.height, h.format, h.bands),
+            (60000, 60000, PixelFormat::Rgb8, 3)
+        );
+    }
+
+    /// An SVG is probed the way the decode routes it, by content (issues
+    /// #1170, #1173): parsed for its size at the rasteriser's default options,
+    /// not rasterised, and giving the decode's answer from bytes and from a
+    /// file.
+    #[test]
+    #[cfg(feature = "svg")]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn an_svg_is_probed_by_content_and_agrees_with_the_decode() {
+        let decoded = decode_bytes(PROLOGUE_SVG).expect("the control decodes");
+        let probed = probe_bytes(PROLOGUE_SVG).map_err(|e| e.to_string());
+        assert_eq!(
+            probed.map(|h| (h.width, h.height, h.format, h.bands, h.pages)),
+            Ok((decoded.width(), decoded.height(), decoded.format(), 4, None)),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("drawing.data");
+        std::fs::write(&path, PROLOGUE_SVG).unwrap();
+        assert_eq!(
+            probe_file(&path).map_err(|e| e.to_string()),
+            probe_bytes(PROLOGUE_SVG).map_err(|e| e.to_string()),
+        );
+    }
+
+    /// Without the `svg` feature, probing an SVG fails the way decoding one
+    /// does, naming the feature (issue #1173).
+    #[test]
+    #[cfg(not(feature = "svg"))]
+    fn an_svg_probe_without_the_feature_names_the_feature() {
+        let err = probe_bytes(PROLOGUE_SVG).expect_err("no SVG parser in this build");
+        assert!(
+            err.to_string().contains("enable the `svg` feature"),
+            "the refusal must name the feature, got: {err}"
+        );
+    }
+
+    /// A container libviprs decodes but can't describe without decoding says
+    /// so with the typed refusal rather than quietly decoding (issue #1173),
+    /// and the TIFF page walk honours `max_pages`.
+    #[test]
+    fn the_probe_declines_by_name_and_bounds_its_page_walk() {
+        let gif = probe_fixture(image::ImageFormat::Gif, 4, 4, image::ColorType::Rgba8);
+        match probe_bytes(&gif) {
+            Err(SourceError::ProbeUnsupported { format }) => assert_eq!(format, "Gif"),
+            other => panic!("a GIF's band count needs every frame, got {other:?}"),
+        }
+        match probe_bytes_with_limits(&two_page_tiff(), DecodeLimits::default().with_max_pages(1)) {
+            Err(SourceError::PageLimitExceeded { max_pages: 1 }) => {}
+            other => panic!("a two-page TIFF under max_pages 1, got {other:?}"),
+        }
+        assert!(probe_bytes(b"not an image at all").is_err());
     }
 
     fn create_test_png(w: u32, h: u32) -> Vec<u8> {
