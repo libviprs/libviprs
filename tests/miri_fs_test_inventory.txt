@@ -217,6 +217,13 @@ annotated   fs-detected  src/sink.rs::sync_pending_fsyncs_every_written_tile
 annotated   fs-detected  src/sink.rs::verify_dedupe_emit_uniform_tiles_digests_match_disk
 annotated   fs-detected  src/sink.rs::verify_recorded_tile_deleted_from_disk_fails
 annotated   fs-detected  src/sink.rs::zoomify_run_writes_tilegroup_and_image_properties
+annotated   fs-detected  src/sink_object_store.rs::directory_store_bucket_is_one_plain_name
+annotated   fs-detected  src/sink_object_store.rs::directory_store_does_not_follow_symlinks_out_of_the_root
+annotated   fs-detected  src/sink_object_store.rs::directory_store_interrupted_write_never_leaves_a_torn_object
+annotated   fs-detected  src/sink_object_store.rs::directory_store_never_lists_a_dead_writers_staging_file
+annotated   fs-detected  src/sink_object_store.rs::directory_store_refuses_keys_that_escape_the_root
+annotated   fs-detected  src/sink_object_store.rs::directory_store_round_trips_objects
+annotated   fs-detected  src/sink_object_store.rs::the_sink_round_trips_a_pyramid_through_the_directory_store
 annotated   fs-detected  src/sink_packfile.rs::archive_stem_handles_common_suffixes
 annotated   fs-detected  src/sink_packfile.rs::end_to_end_tar_smoke
 annotated   fs-detected  src/sink_packfile.rs::manifest_json_contains_structural_fields

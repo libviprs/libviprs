@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`DirectoryObjectStore`** (`object-store-sink` feature), an `ObjectStore`
+  that keeps each object as a file under a root directory, so it can stand
+  in for a bucket in tests and in builds with no network client (issue
+  #1171). It implements the whole trait (put, list, ranged read and size),
+  writes atomically through a staged file and a rename, and refuses any key
+  that isn't a plain relative path, so nothing can land outside the root.
+  `DirectoryObjectStore::for_bucket(root, bucket)` puts a bucket at
+  `root/bucket` and refuses a bucket name that isn't one plain name.
+  libviprs-cli carried its own copy of this for `--sink s3://`.
 - `pdf_info_with_password` and `extract_page_image_with_password` open an
   encrypted PDF with its password when the `pdfium` feature is on. They used
   to answer any non-empty password with "not available in this build". Two
