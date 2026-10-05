@@ -95,11 +95,13 @@ gif = { version = "0.14", default-features = false, features = ["std"] }
 # the decoder to colour-manage internally, and colour management here
 # belongs to `crate::colour`, not to a loader.
 #
-# CI's Test job holds this at exactly 0.4.0 with `cargo update --precise`,
-# not here. The jp2k fixture table and the decode price were measured against
-# 0.4.0, and 0.4.1 moves both; issue #1160 re-measures them and drops that
-# pin. A caret here keeps consumers free to take 0.4.x fixes meanwhile.
-hayro-jpeg2000 = { version = "0.4.0", default-features = false, features = [
+# The floor is 0.4.1 because the jp2k fixture pins in `src/jp2k.rs` and the
+# decode price were measured against it (issue #1160): it decodes two
+# irreversible fixtures to exactly vips's bytes and drops a per-component
+# copy from the decoder's peak, so a lock still on 0.4.0 would run tests
+# that no longer describe it. A caret, not `=`, so consumers keep taking
+# later 0.4.x fixes.
+hayro-jpeg2000 = { version = "0.4.1", default-features = false, features = [
     "std",
 ] }
 # Pure-Rust codec facade. The feature list is the crate's decodable

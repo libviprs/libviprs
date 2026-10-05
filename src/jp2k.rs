@@ -39,27 +39,27 @@
 //! `oracle-captures/foreign-jp2k/oracle.json`.
 //!
 //! * **Both carriers are read and the reversible path is exact.** Of the 22
-//!   fixtures in the decodable set, **fifteen are byte-identical** to what
+//!   fixtures in the decodable set, **seventeen are byte-identical** to what
 //!   `vips rawsave` wrote: every reversible 5/3 file, at every component
 //!   precision from 2 to 16 bits, signed and unsigned, greyscale, RGB, RGBA
-//!   and CMYK, tiled and untiled, subsampled and multi-resolution. The
-//!   reversible wavelet is integer-specified, so that is a parity port
-//!   rather than an approximation and its pins carry no tolerance at all.
-//!   Of the other seven, four are the irreversible fixtures below, two are
-//!   refused on carrier grounds (both of them 31-bit), and one is
-//!   `origin57.j2k`, whose geometry diverges and is issue #766.
-//!   `depth12s.j2k` moved into the first group when issue #905 landed the
-//!   signed carriers.
-//! * **The irreversible path needs a tolerance, and it is 4.** The 9/7
+//!   and CMYK, tiled and untiled, subsampled and multi-resolution, plus two
+//!   of the irreversible ones. The reversible wavelet is integer-specified,
+//!   so that is a parity port rather than an approximation and its pins
+//!   carry no tolerance at all. Of the other five, two are the irreversible
+//!   fixtures below, two are refused on carrier grounds (both of them
+//!   31-bit), and one is `origin57.j2k`, whose geometry diverges and is
+//!   issue #766. `depth12s.j2k` moved into the first group when issue #905
+//!   landed the signed carriers.
+//! * **The irreversible path needs a tolerance, and it is 2.** The 9/7
 //!   wavelet is float-specified, so `hayro-jpeg2000` and OpenJPEG are entitled
-//!   to disagree in the last place. Measured, they disagree by at most **4
-//!   counts** on the four lossy fixtures: `rgb_lossy_q48` at Q 48 is the worst
-//!   at 4, `chroma_sub_on` at Q 90 reaches 3, `chroma_sub_off` reaches 2 and
-//!   `chroma_tiny_sub_on` reaches 1. The pins carry exactly that and no more,
-//!   per fixture rather than as a shared slack number. Rounding rather than
-//!   truncating the reconstructed sample is what buys the difference between a
-//!   maximum of 4 and a maximum of 3 becoming 4 in more places: measured, it
-//!   is never worse and is better on two of the four.
+//!   to disagree in the last place. On `hayro-jpeg2000` 0.4.1, measured over
+//!   every pixel, `rgb_lossy_q48` at Q 48 and `chroma_tiny_sub_on` agree
+//!   exactly and pin as exact, `chroma_sub_on` at Q 90 is at most **2
+//!   counts** out and `chroma_sub_off` at most 1 (issue #1160; on 0.4.0 the
+//!   four were 4, 1, 3 and 2). The pins carry exactly what the pinned pixels
+//!   measure and no more, per fixture rather than as a shared slack number.
+//!   Rounding rather than truncating the reconstructed sample was measured
+//!   on 0.4.0 to be never worse and better on two of the four fixtures.
 //! * **Bit depth is left-justified, exactly as `jp2kload` does it.** A
 //!   precision-`N` component is shifted left by `element_bits - N`
 //!   (`vips_foreign_load_jp2k_ljust`), so a 12-bit sample of 4095 comes back
@@ -1760,16 +1760,25 @@ fn decode(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
     // dependency refuse itself, and there is nothing here to wire it into.
     //
     // Two terms, both measured with a counting global allocator in
-    // `tests/decode_working_set.rs`:
+    // `tests/decode_working_set.rs`, and re-measured against
+    // `hayro-jpeg2000` 0.4.1 (issue #1160) over 1 to 8 bands, 8 and 16 bits,
+    // 64x64 to 2048x2048, reversible and irreversible, on 512 and 128 tiles:
     //
     // * **Per image**, one `f32` sample per component for the decoded
     //   component data, and a second copy of all of them while the `cdef`
-    //   box's channel reorder clones the set. Eight bytes per band-pixel.
+    //   box's channel reorder clones the set. Eight bytes per band-pixel,
+    //   which covers a file with an alpha channel (measured at 7.0 past the
+    //   raster itself) and is about twice what one without needs (4.0 to
+    //   4.2).
     // * **Per tile**, the coefficient storage the code-block pass works in,
     //   which `build` reallocates per tile and which therefore scales with
-    //   the *tile* rather than with the image, plus its bookkeeping. Measured
-    //   at 5.8 bytes per band-tile-pixel across four geometries and two
-    //   sample depths, priced at ten.
+    //   the *tile* rather than with the image, plus its bookkeeping. On 0.4.0
+    //   this also held a copy per extra component and was priced per band;
+    //   0.4.1 dropped those copies, and it now measures 9.2 to 9.8 bytes a
+    //   tile pixel at every band count from 1 to 8. Priced at 16, once,
+    //   which also covers the fixed overheads that dominate a 64x64 file.
+    //   Across all 100 measured cases that puts the price between 1.05 and
+    //   1.80 times the peak.
     //
     // The tile term is why a 512x512 file costs proportionally more than a
     // 4096x4096 one: `jp2ksave` tiles on a 512 grid, so past that size the
@@ -1779,11 +1788,10 @@ fn decode(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
     let plane = u64::from(width).saturating_mul(u64::from(height));
     let tile_plane = u64::from(header.tile_width.clamp(1, width.max(1)))
         .saturating_mul(u64::from(header.tile_height.clamp(1, height.max(1))));
-    let working_set = u64::from(bands).saturating_mul(
-        plane
-            .saturating_mul(8)
-            .saturating_add(tile_plane.saturating_mul(10)),
-    );
+    let working_set = u64::from(bands)
+        .saturating_mul(plane)
+        .saturating_mul(8)
+        .saturating_add(tile_plane.saturating_mul(16));
     let frame_bytes = limits.check_image_alloc_with_working_set(
         "JPEG 2000 component buffers",
         width,
@@ -1990,9 +1998,9 @@ fn negated_origin(v: u32) -> i32 {
 /// on an 8-bit component), so the clamp is not defensive, it is the format.
 ///
 /// Rounding rather than truncating is measured rather than assumed: against
-/// the four lossy fixtures it is never worse than truncation and is better on
-/// two of them, taking `chroma_sub_off`'s worst disagreement with vips from 3
-/// counts to 2.
+/// the four lossy fixtures on `hayro-jpeg2000` 0.4.0 it was never worse than
+/// truncation and was better on two of them, taking `chroma_sub_off`'s worst
+/// disagreement with vips from 3 counts to 2.
 #[cfg(feature = "jp2k")]
 fn quantise(sample: f32, precision: u32) -> u32 {
     let max = (1u32 << precision) - 1;
@@ -3156,8 +3164,8 @@ mod tests {
             assert_eq!(
                 payload_digest(&raster),
                 pin.payload,
-                "{}: the decoded buffer must be the bytes vips rawsave wrote, and the \
-                 reversible wavelet leaves no room for it to be nearly right",
+                "{}: the decoded buffer must be the bytes vips rawsave wrote, and an \
+                 EXACT pin leaves no room for it to be nearly right",
                 pin.fixture
             );
             assert_eq!(
