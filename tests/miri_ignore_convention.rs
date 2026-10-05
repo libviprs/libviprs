@@ -380,7 +380,9 @@ const ANCHOR_FILES: &[&str] = &[
 /// (its stored image comes back, with and without a password), one that a PDF
 /// failure from an extract helper is a typed `SourceError::Pdf`, and two that
 /// a password with an interior NUL is `WrongPassword` rather than a panic.
-const EXPECTED_SRC_ANNOTATIONS: usize = 267;
+///
+/// #1163 moves it 267 to 271: the four `src/stream_verify.rs` cells that build centred and padded raw pyramids in a temp dir and verify them through the strip path, one with a flipped byte.
+const EXPECTED_SRC_ANNOTATIONS: usize = 271;
 /// Companion to [`EXPECTED_SRC_ANNOTATIONS`]: how many `src/` modules carry at
 /// least one annotation. #765 made it 25 by putting the first annotation in
 /// `src/analyze.rs`; `src/colour.rs` and `src/pdf.rs`, which took the other
@@ -744,7 +746,9 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// cells read committed fixtures through an entry point, so they are
 /// `not-detected` and leave this alone. The detector said 476 before this
 /// line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 476;
+///
+/// #1163 adds 4: the same four `stream_verify` cells, each writing a pyramid to a temp dir. It said 476 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 480;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {

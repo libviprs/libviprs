@@ -238,6 +238,10 @@ annotated   fs-detected  src/source.rs::revalidate_bypasses_and_refreshes_cache
 annotated   fs-detected  src/source.rs::the_file_body_ceiling_is_inclusive
 annotated   fs-detected  src/source.rs::the_file_body_ceiling_leaves_the_streaming_path_alone
 annotated   fs-detected  src/source.rs::the_file_body_ceiling_refuses_a_source_that_outruns_its_stat
+annotated   fs-detected  src/stream_verify.rs::stream_verify_accepts_a_centred_deep_zoom_pyramid
+annotated   fs-detected  src/stream_verify.rs::stream_verify_accepts_a_centred_google_pyramid
+annotated   fs-detected  src/stream_verify.rs::stream_verify_accepts_an_uncentred_padded_google_pyramid
+annotated   fs-detected  src/stream_verify.rs::stream_verify_detects_corruption_in_a_centred_pyramid
 annotated   fs-detected  src/stream_verify.rs::stream_verify_accepts_raw_placeholder_markers
 annotated   fs-detected  src/stream_verify.rs::stream_verify_detects_raw_corruption
 annotated   fs-detected  src/stream_verify.rs::stream_verify_happy_path_raw

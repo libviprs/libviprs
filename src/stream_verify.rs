@@ -267,8 +267,6 @@ pub fn verify_from_strip_source(
     // strips, which makes the concatenated buffer byte-identical to
     // `embed_in_canvas(source, plan, bg)` even when centring is active.
     // ------------------------------------------------------------------
-    let top_level_idx = plan.levels.len() - 1;
-    let top = &plan.levels[top_level_idx];
     let format = source.format();
     let bpp = format.bytes_per_pixel();
 
@@ -356,12 +354,23 @@ pub fn verify_from_strip_source(
 
     let current = canvas_raster;
 
-    // Sanity check: the assembled raster must match the top plan level's
-    // recorded dimensions, otherwise the downstream downscale chain will
-    // diverge from what the engine wrote. For every layout libviprs
-    // supports this is identity; guard it defensively.
-    debug_assert_eq!(current.width(), top.width);
-    debug_assert_eq!(current.height(), top.height);
+    // The level walk below starts from this raster and halves it, exactly
+    // as the live engines do from `embed_in_canvas`, so what it has to be is
+    // the plan's canvas. That is the top level's own size only when nothing
+    // pads it: a centred plan pads to the tile grid and a Google plan to a
+    // power-of-two square, which is why the check used to be against
+    // `top.width` / `top.height` and fired on both in every debug build
+    // (issue #1163). Checked in every profile and reported as a typed error,
+    // like the strip checks above (issue #81), so a future change to the
+    // allocation cannot hand the walk a raster of the wrong size in a
+    // release build either.
+    if (current.width(), current.height()) != (cw, ch) {
+        return Err(strip_layout_error(format!(
+            "assembled a {}x{} top-level raster for a {cw}x{ch} canvas",
+            current.width(),
+            current.height()
+        )));
+    }
 
     // ------------------------------------------------------------------
     // Phase 4: byte-exact verification, level-by-level, top to bottom.
@@ -670,6 +679,32 @@ mod tests {
         (sink, plan, src)
     }
 
+    /// Generate a raw-format pyramid for an arbitrary layout and centring,
+    /// for the cells about plans whose canvas is bigger than the image
+    /// (issue #1163).
+    fn build_raw_pyramid_on(
+        dir: &std::path::Path,
+        (w, h, tile_size): (u32, u32, u32),
+        layout: Layout,
+        centre: bool,
+    ) -> (FsSink, PyramidPlan, Raster) {
+        let src = gradient(w, h);
+        let plan = PyramidPlanner::new(w, h, tile_size, 0, layout)
+            .unwrap()
+            .with_centre(centre)
+            .plan();
+        let sink = FsSink::new(dir, plan.clone()).with_format(TileFormat::Raw);
+        crate::engine::generate_pyramid_observed(
+            &src,
+            &plan,
+            &sink,
+            &EngineConfig::default(),
+            &NoopObserver,
+        )
+        .unwrap();
+        (sink, plan, src)
+    }
+
     /// Like [`build_raw_pyramid`] but attaches a manifest with a per-tile
     /// checksum table (BLAKE3) so the manifest-checksum branch of verify is
     /// exercised. Returns the same pieces plus the pyramid output dir so the
@@ -877,6 +912,89 @@ mod tests {
                 assert_eq!(tile, corrupted, "mismatch reported on wrong tile");
             }
             other => panic!("expected ChecksumMismatch, got {other:?}"),
+        }
+    }
+
+    /// An untouched pyramid on a plan whose canvas is bigger than the image
+    /// verifies through the strip path (issue #1163).
+    ///
+    /// The assembled top-level raster is `canvas_width x canvas_height` by
+    /// construction, and that only equals the top level's recorded size when
+    /// nothing pads it. A centred DeepZoom plan pads to the tile grid and a
+    /// Google plan pads to a power-of-two square, so the old
+    /// `debug_assert_eq!(current.width(), top.width)` fired on both in every
+    /// debug build. 500x300 on a 128 grid is padded on both axes.
+    fn assert_padded_pyramid_verifies(layout: Layout, centre: bool) {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("tiles");
+        let (sink, plan, src) = build_raw_pyramid_on(&out, (500, 300, 128), layout, centre);
+        assert!(
+            (plan.canvas_width, plan.canvas_height) != (500, 300),
+            "the control: this plan really pads its canvas"
+        );
+
+        let strip_src = RasterStripSource::new(&src);
+        let res = verify_from_strip_source(
+            &strip_src,
+            &plan,
+            &sink,
+            &EngineConfig::default(),
+            &NoopObserver,
+        )
+        .unwrap_or_else(|e| panic!("{layout:?} centre={centre} must verify, got {e:?}"));
+        assert_eq!(res.levels_processed, plan.levels.len() as u32);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn stream_verify_accepts_a_centred_deep_zoom_pyramid() {
+        assert_padded_pyramid_verifies(Layout::DeepZoom, true);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn stream_verify_accepts_a_centred_google_pyramid() {
+        assert_padded_pyramid_verifies(Layout::Google, true);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn stream_verify_accepts_an_uncentred_padded_google_pyramid() {
+        assert_padded_pyramid_verifies(Layout::Google, false);
+    }
+
+    /// The other half of the centred cells: verify on a centred plan still
+    /// looks at the bytes, so a flipped byte in a tile that holds image
+    /// content is reported on that tile (issue #1163). Without this, a verify
+    /// that skipped centred plans entirely would pass the cells above.
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn stream_verify_detects_corruption_in_a_centred_pyramid() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("tiles");
+        let (sink, plan, src) = build_raw_pyramid_on(&out, (500, 300, 128), Layout::DeepZoom, true);
+
+        // The middle of the top level is image, not centring padding.
+        let top = plan.levels.last().unwrap();
+        let coord = TileCoord::new(top.level, top.cols / 2, top.rows / 2);
+        let abs = out.join(plan.tile_path(coord, "raw").unwrap());
+        let mut bytes = std::fs::read(&abs).unwrap();
+        let mid = bytes.len() / 2;
+        bytes[mid] ^= 0xFF;
+        std::fs::write(&abs, &bytes).unwrap();
+
+        let strip_src = RasterStripSource::new(&src);
+        let err = verify_from_strip_source(
+            &strip_src,
+            &plan,
+            &sink,
+            &EngineConfig::default(),
+            &NoopObserver,
+        )
+        .expect_err("a flipped byte in a centred pyramid must fail verify");
+        match err {
+            EngineError::ChecksumMismatch { tile, .. } => assert_eq!(tile, coord),
+            other => panic!("expected ChecksumMismatch on {coord:?}, got {other:?}"),
         }
     }
 
