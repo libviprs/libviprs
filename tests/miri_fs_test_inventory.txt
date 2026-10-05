@@ -206,6 +206,7 @@ annotated   fs-detected  src/sink.rs::fs_sink_no_dzi_for_xyz
 annotated   fs-detected  src/sink.rs::fs_sink_run_never_nests_leaf_locks
 annotated   fs-detected  src/sink.rs::fs_sink_writes_dzi_manifest
 annotated   fs-detected  src/sink.rs::fs_sink_manifest_records_centring_and_skip_blanks
+annotated   fs-detected  src/sink.rs::fs_sink_manifest_records_the_source_digest_when_asked
 annotated   fs-detected  src/sink.rs::fs_sink_writes_tile_to_disk
 annotated   fs-detected  src/sink.rs::fs_sink_xyz_path_structure
 annotated   fs-detected  src/sink.rs::iiif_run_writes_info_json
@@ -225,6 +226,7 @@ annotated   fs-detected  src/sink_pmtiles.rs::a_poisoned_writer_lock_is_a_typed_
 annotated   fs-detected  src/sink_pmtiles.rs::dropping_a_sink_mid_run_leaves_no_archive
 annotated   fs-detected  src/sink_pmtiles.rs::finishing_without_a_single_tile_publishes_nothing
 annotated   fs-detected  src/sink_pmtiles.rs::the_published_header_is_available_without_reopening_the_archive
+annotated   fs-detected  src/sink_pmtiles.rs::the_archive_records_the_source_digest_from_the_engine_config
 annotated   fs-detected  src/source.rs::both_entry_points_agree_on_every_container_in_the_route_table
 annotated   fs-detected  src/source.rs::content_beats_extension_in_both_entry_points
 annotated   fs-detected  src/source.rs::decode_file_and_bytes_share_finalize_path

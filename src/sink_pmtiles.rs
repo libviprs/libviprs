@@ -1064,4 +1064,66 @@ mod tests {
             (31, 0, 0)
         );
     }
+
+    /// The archive's `vnd.libviprs` source block records the run's source
+    /// digest (issue #1164).
+    ///
+    /// The sink never sees the source, so the digest is the one the run was
+    /// told about, `EngineConfig::source_content_hash`. It used to be written
+    /// as null whatever the config carried. The run without a digest is the
+    /// control.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn the_archive_records_the_source_digest_from_the_engine_config() {
+        use crate::pmtiles::header::HEADER_BYTES;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = Raster::new(512, 512, PixelFormat::Rgb8, {
+            (0..512 * 512 * 3).map(|i| (i % 251) as u8).collect()
+        })
+        .expect("a gradient raster");
+
+        let bytes_hash = |name: &str, config: crate::engine::EngineConfig| {
+            let out = dir.path().join(name);
+            let sink = PmTilesSink::builder(&out)
+                .plan(plan())
+                .build()
+                .expect("the sink builds");
+            crate::engine::generate_pyramid_observed(
+                &src,
+                &plan(),
+                &sink,
+                &config,
+                &crate::observe::NoopObserver,
+            )
+            .expect("the run succeeds");
+            let bytes = std::fs::read(&out).expect("the archive is readable");
+            let header = Header::try_decode(&bytes[..HEADER_BYTES]).expect("a v3 header");
+            let start = header.metadata_offset as usize;
+            let end = start + header.metadata_length as usize;
+            let raw = header
+                .internal_compression
+                .decompress(&bytes[start..end], 1 << 22)
+                .expect("the metadata decompresses");
+            let v: serde_json::Value = serde_json::from_slice(&raw).expect("JSON metadata");
+            v["vnd.libviprs"]["source"]["bytes_hash"]
+                .as_str()
+                .map(str::to_owned)
+        };
+
+        assert_eq!(
+            bytes_hash(
+                "hashed.pmtiles",
+                crate::engine::EngineConfig::default().with_source_content_hash("abc123"),
+            )
+            .as_deref(),
+            Some("abc123"),
+            "the archive must carry the digest the run was given"
+        );
+        assert_eq!(
+            bytes_hash("plain.pmtiles", crate::engine::EngineConfig::default()),
+            None,
+            "the control: no digest given, none recorded"
+        );
+    }
 }
