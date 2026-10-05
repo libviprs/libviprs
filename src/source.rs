@@ -2219,6 +2219,13 @@ fn reader_for<R: std::io::BufRead + std::io::Seek>(
 /// same bytes for metadata. Analyze is read whole twice over, because it is
 /// two files.
 ///
+/// SVG has no magic bytes, so a file nothing above matched gets one more
+/// look: if its first [`SVG_SNIFF_BYTES`](crate::svg::SVG_SNIFF_BYTES) pass
+/// [`looks_like_svg`](crate::svg::looks_like_svg) it's read whole the same
+/// bounded way and rasterised at [`SvgOptions::default`](crate::svg::SvgOptions)
+/// under these limits, or refused naming the `svg` feature in a build without
+/// it (issue #1170).
+///
 /// A file in a container libviprs does not recognise is streamed and guessed
 /// by the `image` facade. The two lists above are checked against the routing
 /// table by `every_row_carries_the_decoder_kind_its_container_needs`, so this
@@ -2250,7 +2257,21 @@ pub fn decode_file_with_limits(path: &Path, limits: DecodeLimits) -> Result<Rast
             .set("filename", path.display().to_string().into());
         return Ok(raster);
     }
-    let mut raster = if sniffed.is_some_and(SniffedFormat::decodes_from_memory) {
+    // SVG has no magic, so it's the one input the sniff above can't name. A
+    // file nothing matched that opens with `<` gets the same content sniff
+    // `decode_bytes_with_limits` runs, over the same window, and an SVG is
+    // read whole through the bounded read and handed to it (issue #1170).
+    // Nothing a raster sniff matches can open with `<`, so this never
+    // reroutes one, and other markup keeps streaming as it did.
+    let svg = sniffed.is_none() && {
+        file.seek(std::io::SeekFrom::Start(0))?;
+        let mut window = Vec::new();
+        (&mut file)
+            .take(crate::svg::SVG_SNIFF_BYTES as u64)
+            .read_to_end(&mut window)?;
+        crate::svg::looks_like_svg(&window)
+    };
+    let mut raster = if svg || sniffed.is_some_and(SniffedFormat::decodes_from_memory) {
         decode_bytes_with_limits(&read_file_bounded(path, limits, "image file body")?, limits)?
     } else {
         // Rewind past the sniff and keep reading from the same handle, so
@@ -2291,6 +2312,11 @@ pub fn decode_bytes(bytes: &[u8]) -> Result<Raster, SourceError> {
 /// dimension/allocation budget. The limits are configured on the decoder
 /// before any pixel data is allocated, and the `width * height` ceiling
 /// is checked before the [`Raster`] is constructed.
+///
+/// Bytes no magic matches and that pass
+/// [`looks_like_svg`](crate::svg::looks_like_svg) go to the SVG rasteriser at
+/// [`SvgOptions::default`](crate::svg::SvgOptions), the same as
+/// [`decode_file_with_limits`] does with a file (issue #1170).
 pub fn decode_bytes_with_limits(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
     let sniffed = sniff(bytes);
     // The containers libviprs decodes itself go straight to their own codec.
@@ -2304,6 +2330,17 @@ pub fn decode_bytes_with_limits(bytes: &[u8], limits: DecodeLimits) -> Result<Ra
         // rather than through a variant test, so the edit that declares a
         // paired container is the edit that dispatches it (issue #633).
         Some(Decoder::Paired { from_bytes, .. }) => return from_bytes(bytes, limits),
+        // No magic matched. SVG has none, so it's recognised by content here,
+        // decoded at the rasteriser's default options under the caller's
+        // limits, and a build without the `svg` feature gets the rasteriser's
+        // own "enable the `svg` feature" refusal (issue #1170).
+        None if crate::svg::looks_like_svg(bytes) => {
+            return crate::svg::decode_svg_with_limits(
+                bytes,
+                crate::svg::SvgOptions::default(),
+                limits,
+            );
+        }
         _ => {}
     }
     let reader = reader_for(Cursor::new(bytes), sniffed)?;
@@ -2474,6 +2511,144 @@ pub fn generate_test_raster(width: u32, height: u32) -> Result<Raster, SourceErr
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    /// A 10x6 SVG behind an XML declaration and a comment, the shape most
+    /// exported documents have (issue #1170).
+    const PROLOGUE_SVG: &[u8] = br##"<?xml version="1.0" encoding="UTF-8"?>
+<!-- exported by some tool -->
+<svg xmlns="http://www.w3.org/2000/svg" width="10" height="6"><rect width="10" height="6" fill="#ff0000"/></svg>"##;
+
+    /// Both decode entry points route an SVG document to the SVG rasteriser
+    /// when the `svg` feature is on (issue #1170).
+    ///
+    /// SVG has no magic bytes, so the sniff never matched it and it fell
+    /// through to the `image` facade as an unknown format, which is why
+    /// libviprs-cli sniffs SVG itself before calling in.
+    #[test]
+    #[cfg(feature = "svg")]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn both_entry_points_decode_an_svg_document() {
+        let r = decode_bytes_with_limits(PROLOGUE_SVG, DecodeLimits::default())
+            .expect("an SVG behind a prologue decodes from bytes");
+        assert_eq!((r.width(), r.height()), (10, 6));
+        let bare = decode_bytes_with_limits(
+            b"  <svg xmlns=\"http://www.w3.org/2000/svg\" width=\"3\" height=\"2\"/>",
+            DecodeLimits::default(),
+        )
+        .expect("a bare <svg root decodes from bytes");
+        assert_eq!((bare.width(), bare.height()), (3, 2));
+
+        let doctype = br#"<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg xmlns="http://www.w3.org/2000/svg" width="4" height="5"/>"#;
+        let r = decode_bytes_with_limits(doctype, DecodeLimits::default())
+            .expect("an SVG behind a doctype decodes from bytes");
+        assert_eq!((r.width(), r.height()), (4, 5));
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("drawing.data");
+        std::fs::write(&path, PROLOGUE_SVG).unwrap();
+        let r = decode_file_with_limits(&path, DecodeLimits::default())
+            .expect("an SVG decodes from a file whatever its extension");
+        assert_eq!((r.width(), r.height()), (10, 6));
+    }
+
+    /// The SVG route honours the caller's limits like every other container
+    /// (issue #1170): the sniffed document goes through the rasteriser under
+    /// the limits it was handed, not under its own defaults.
+    #[test]
+    #[cfg(feature = "svg")]
+    fn a_sniffed_svg_is_decoded_under_the_callers_limits() {
+        match decode_bytes_with_limits(PROLOGUE_SVG, DecodeLimits::default().with_max_coord(9)) {
+            Err(SourceError::CoordLimitExceeded {
+                width: 10,
+                height: 6,
+                max_coord: 9,
+            }) => {}
+            other => panic!("a 10x6 SVG under max_coord 9, got {}", outcome(&other)),
+        }
+    }
+
+    /// Without the `svg` feature an SVG document gets the rasteriser's own
+    /// "not available in this build" refusal, the way every feature-gated
+    /// container names what is missing, rather than an unknown-format error
+    /// (issue #1170).
+    #[test]
+    #[cfg(not(feature = "svg"))]
+    fn an_svg_document_without_the_feature_says_the_feature_is_off() {
+        let err = decode_bytes_with_limits(PROLOGUE_SVG, DecodeLimits::default())
+            .expect_err("no rasteriser in this build");
+        assert!(
+            err.to_string().contains("enable the `svg` feature"),
+            "the refusal must name the feature, got: {err}"
+        );
+    }
+
+    /// The SVG sniff is narrow: XML that is not SVG, and a text file that
+    /// only mentions `<svg` past its first line, are not taken for SVG and
+    /// keep the error they had (issue #1170).
+    #[test]
+    fn xml_that_is_not_svg_is_not_routed_to_the_rasteriser() {
+        for bytes in [
+            &b"<?xml version='1.0'?><html><body/></html>"[..],
+            &b"notes about the <svg element\n"[..],
+            &b"<?xml version='1.0'?><!-- not an <svg root --><html/>"[..],
+            &b"<svgish xmlns='urn:x'/>"[..],
+        ] {
+            let err =
+                decode_bytes_with_limits(bytes, DecodeLimits::default()).expect_err("not an image");
+            assert!(
+                !err.to_string().to_lowercase().contains("svg"),
+                "a non-SVG input must not reach the rasteriser, got: {err}"
+            );
+        }
+    }
+
+    /// A raster longer than the SVG sniff window still goes to its own
+    /// decoder (issue #1170): the content sniff only runs when no magic
+    /// matched, so a PNG whose compressed body runs well past 4 KiB decodes as
+    /// the PNG it is through both entry points, even from a file named `.svg`.
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn a_png_longer_than_the_svg_window_still_decodes_as_png() {
+        let (w, h) = (64u32, 64u32);
+        let mut state = 0x2545_f491_u32;
+        let data: Vec<u8> = (0..w * h * 3)
+            .map(|_| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (state >> 24) as u8
+            })
+            .collect();
+        let mut png = Vec::new();
+        image::ImageEncoder::write_image(
+            image::codecs::png::PngEncoder::new(Cursor::new(&mut png)),
+            &data,
+            w,
+            h,
+            image::ColorType::Rgb8.into(),
+        )
+        .unwrap();
+        assert!(
+            png.len() > 4096,
+            "the control: the PNG runs past the window"
+        );
+
+        let r = decode_bytes_with_limits(&png, DecodeLimits::default()).expect("PNG from bytes");
+        assert_eq!(
+            (r.width(), r.height(), r.format()),
+            (64, 64, PixelFormat::Rgb8)
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("picture.svg");
+        std::fs::write(&path, &png).unwrap();
+        let r = decode_file_with_limits(&path, DecodeLimits::default())
+            .expect("a PNG named .svg is still a PNG");
+        assert_eq!(
+            (r.width(), r.height(), r.format()),
+            (64, 64, PixelFormat::Rgb8)
+        );
+    }
 
     fn create_test_png(w: u32, h: u32) -> Vec<u8> {
         let mut buf = Vec::new();

@@ -389,7 +389,9 @@ const ANCHOR_FILES: &[&str] = &[
 /// `DirectoryObjectStore` in a temp dir: the round trip, the refused keys, the
 /// symlink cell, the bucket names, the interrupted write, the dead writer's
 /// staging file and a pyramid written through the sink.
-const EXPECTED_SRC_ANNOTATIONS: usize = 284;
+///
+/// #1170 moves it 284 to 286: `both_entry_points_decode_an_svg_document` and `a_png_longer_than_the_svg_window_still_decodes_as_png` in `src/source.rs`, which write an SVG and a PNG to a temp file to decode them by path.
+const EXPECTED_SRC_ANNOTATIONS: usize = 286;
 /// Companion to [`EXPECTED_SRC_ANNOTATIONS`]: how many `src/` modules carry at
 /// least one annotation. #765 made it 25 by putting the first annotation in
 /// `src/analyze.rs`; `src/colour.rs` and `src/pdf.rs`, which took the other
@@ -761,7 +763,9 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1164 adds 3: the same three cells, each writing a pyramid to a temp dir. It said 484 before this line moved.
 /// #1171 adds the same seven `src/sink_object_store.rs` cells, each with a
 /// temp dir of its own. It said 487 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 494;
+///
+/// #1170 adds 2: the same two `src/source.rs` cells. It said 494 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 496;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
