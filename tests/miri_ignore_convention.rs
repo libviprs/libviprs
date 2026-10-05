@@ -395,7 +395,8 @@ const ANCHOR_FILES: &[&str] = &[
 /// #1169 moves it 288 to 289: `manifest_locations_are_where_the_sink_writes` in `src/sink.rs`, which runs a pyramid into a temp dir and finds its manifest copies.
 ///
 /// #1173 moves it 289 to 291: `the_probe_agrees_with_the_decode_on_every_container_it_reads` and `an_svg_is_probed_by_content_and_agrees_with_the_decode` in `src/source.rs`, which write fixtures to a temp file to probe them by path.
-const EXPECTED_SRC_ANNOTATIONS: usize = 291;
+/// #1188 moves it 291 to 301, all ten in `src/pdf.rs`: the cells that `pdf_info`, `extract_page_image` and `page_rotate` refuse the AES-256 fixture without its password and still read the owner-password-only one, and the two RC4 cells over a lopdf-encrypted temp file.
+const EXPECTED_SRC_ANNOTATIONS: usize = 301;
 /// Companion to [`EXPECTED_SRC_ANNOTATIONS`]: how many `src/` modules carry at
 /// least one annotation. #765 made it 25 by putting the first annotation in
 /// `src/analyze.rs`; `src/colour.rs` and `src/pdf.rs`, which took the other
@@ -773,7 +774,10 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1169 adds 1: the same `src/sink.rs` cell. It said 498 before this line moved.
 ///
 /// #1173 adds 2: the same two `src/source.rs` cells. It said 499 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 501;
+/// #1188 adds 2: `src/pdf.rs`'s two RC4 cells, each saving a lopdf-encrypted PDF to a temp
+/// dir. The other eight read committed fixtures through an entry point and are `not-detected`.
+/// The detector agreed at 503.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 503;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {

@@ -283,9 +283,21 @@ pub struct PdfPageInfo {
 /// and the [CLI info command](https://github.com/libviprs/libviprs-cli/blob/main/src/main.rs).
 ///
 /// **See also:** [interactive example](https://libviprs.org/cli/#info)
+///
+/// # Errors
+///
+/// [`PdfError::Parse`] for a file that is missing, unreadable or not a PDF,
+/// and [`PdfError::PasswordRequired`] for one that needs a user password:
+/// open that with [`pdf_info_with_password`]. A file with only an owner
+/// password opens without one. This is [`pdf_info_with_password`] with an
+/// empty password, so its other errors apply too.
 pub fn pdf_info(path: &Path) -> Result<PdfInfo, PdfError> {
-    let doc = lopdf::Document::load(path).map_err(|e| PdfError::Parse(e.to_string()))?;
-    Ok(pdf_info_from_doc(&doc))
+    // `lopdf` reads an encrypted file's object structure without decrypting
+    // anything (only strings and streams are encrypted), so loading it and
+    // walking the page tree would answer for a file that needs a password as
+    // if it were an ordinary one (#1188). The empty password is the honest
+    // way in: it opens exactly the files libvips' `pdfload` opens without one.
+    pdf_info_with_password(path, "")
 }
 
 /// Build a [`PdfInfo`] from an already-loaded document. Shared by [`pdf_info`]
@@ -344,20 +356,28 @@ fn pdf_to_decode(err: PdfError) -> crate::codec::DecodeError {
 /// (`has_images` counts the page's top-level image objects). pdfium tries it
 /// with no password first, so a file that opens without one (owner password
 /// only) ignores `password` exactly as an unencrypted file does; only a file
-/// that needs a user password is opened with `password`. Without `pdfium`
-/// there is no decryption, so an encrypted document with a non-empty
-/// `password` reports a typed [`PdfError::UnsupportedFormat`]. A missing,
-/// unreadable, or malformed file surfaces its real IO/parse error unchanged
-/// rather than being mislabelled as password-protected.
+/// that needs a user password is opened with `password`.
+///
+/// Without `pdfium` there is no decryption, but `PdfInfo` needs none: page
+/// sizes and image references live in dictionaries, which are never
+/// encrypted. So a file that opens with the empty user password (owner
+/// password only, AES-256 included) is read as it stands and `password` is
+/// ignored, one that needs a user password and got none reports
+/// [`PdfError::PasswordRequired`], and anything else (a user password given,
+/// or an encryption scheme `lopdf` cannot check) reports a typed
+/// [`PdfError::UnsupportedFormat`]. A missing, unreadable, or malformed file
+/// surfaces its real IO/parse error unchanged rather than being mislabelled
+/// as password-protected.
 ///
 /// # Errors
 ///
-/// With `pdfium`, [`PdfError::PasswordRequired`] for a document that needs a
-/// user password and got an empty one, and [`PdfError::WrongPassword`] when
-/// the one given does not open it (a password containing a NUL byte never
-/// can, since pdfium takes it as a C string). Without `pdfium`,
-/// [`PdfError::UnsupportedFormat`] for an encrypted document opened with a
-/// non-empty password. Otherwise the same errors as [`pdf_info`].
+/// [`PdfError::Parse`] for a file that is missing, unreadable or not a PDF.
+/// [`PdfError::PasswordRequired`] for a document that needs a user password
+/// and got an empty one. With `pdfium`, [`PdfError::WrongPassword`] when the
+/// one given does not open it (a password containing a NUL byte never can,
+/// since pdfium takes it as a C string). Without `pdfium`,
+/// [`PdfError::UnsupportedFormat`] for an encrypted document it cannot read
+/// without decrypting, as above.
 pub fn pdf_info_with_password(path: &Path, password: &str) -> Result<PdfInfo, PdfError> {
     // Open first so a missing/unreadable/malformed file surfaces its real
     // IO/parse error. `lopdf` loads an encrypted document's structure without
@@ -367,13 +387,118 @@ pub fn pdf_info_with_password(path: &Path, password: &str) -> Result<PdfInfo, Pd
         #[cfg(feature = "pdfium")]
         return pdf_info_pdfium(path, password);
         #[cfg(not(feature = "pdfium"))]
-        if !password.is_empty() {
-            return Err(PdfError::UnsupportedFormat(
-                "password-protected PDF decryption is not available in this build".to_string(),
-            ));
+        match empty_user_password(&doc) {
+            EmptyUserPassword::Opens => {}
+            EmptyUserPassword::Refused if password.is_empty() => {
+                return Err(PdfError::PasswordRequired);
+            }
+            EmptyUserPassword::Refused | EmptyUserPassword::Unknown => {
+                return Err(PdfError::UnsupportedFormat(
+                    "password-protected PDF decryption is not available in this build".to_string(),
+                ));
+            }
         }
     }
     Ok(pdf_info_from_doc(&doc))
+}
+
+/// Whether an encrypted document opens with the empty user password, as far
+/// as `lopdf` can tell without decrypting anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EmptyUserPassword {
+    /// It does: the file has an owner password at most, or is not encrypted.
+    Opens,
+    /// It does not: the file needs a user password.
+    Refused,
+    /// `lopdf` cannot check this file's encryption (a security handler other
+    /// than the standard one, or a revision it does not know).
+    Unknown,
+}
+
+/// Check the empty user password against an encrypted document's standard
+/// security handler, through `lopdf`'s own password algorithms. Only the
+/// `/Encrypt` dictionary and the file `/ID` are read, so this works on a file
+/// `lopdf` could not decrypt at load.
+///
+/// `lopdf` 0.36 refuses any `/Length` outside `40..=128` before it looks at
+/// the revision, but under `/V 5` (AES-256, revisions 5 and 6) the key is
+/// always 256 bits and the spec gives `/Length` no meaning, and qpdf writes
+/// `/Length 256` there. So for `/V 5` the check runs on a copy of the
+/// dictionary without `/Length`, which is the only thing that stops `lopdf`
+/// from checking an AES-256 password at all.
+fn empty_user_password(doc: &lopdf::Document) -> EmptyUserPassword {
+    use lopdf::Object;
+    use lopdf::encryption::DecryptionError;
+
+    let Ok(encrypt) = doc.get_encrypted() else {
+        return EmptyUserPassword::Opens;
+    };
+    let is_v5 = encrypt.get(b"V").and_then(Object::as_i64).ok() == Some(5);
+    let checked = if is_v5 && encrypt.has(b"Length") {
+        let mut dict = encrypt.clone();
+        dict.remove(b"Length");
+        let mut probe = lopdf::Document::new();
+        let dict_id = probe.add_object(dict);
+        probe.trailer.set("Encrypt", Object::Reference(dict_id));
+        if let Ok(file_id) = doc.trailer.get(b"ID") {
+            probe.trailer.set("ID", file_id.clone());
+        }
+        probe.authenticate_raw_user_password(b"")
+    } else {
+        doc.authenticate_raw_user_password(b"")
+    };
+    match checked {
+        Ok(()) => EmptyUserPassword::Opens,
+        Err(lopdf::Error::Decryption(DecryptionError::IncorrectPassword)) => {
+            EmptyUserPassword::Refused
+        }
+        Err(_) => EmptyUserPassword::Unknown,
+    }
+}
+
+/// Refuse a document that needs a user password, for the entry points that
+/// take no password and read only what `lopdf` can see without decrypting
+/// (dictionaries, never streams). A file with an owner password at most
+/// passes. When `lopdf` cannot check the encryption, pdfium decides with the
+/// `pdfium` feature, and without it the answer is a typed
+/// [`PdfError::UnsupportedFormat`] rather than a guess.
+fn refuse_if_password_required(doc: &lopdf::Document, path: &Path) -> Result<(), PdfError> {
+    match empty_user_password(doc) {
+        EmptyUserPassword::Opens => Ok(()),
+        EmptyUserPassword::Refused => Err(PdfError::PasswordRequired),
+        EmptyUserPassword::Unknown => {
+            #[cfg(feature = "pdfium")]
+            {
+                let pdfium = init_pdfium()?;
+                let _lock = pdfium_lock();
+                load_pdfium_document(pdfium, path, None).map(|_| ())
+            }
+            #[cfg(not(feature = "pdfium"))]
+            {
+                let _ = path;
+                Err(PdfError::UnsupportedFormat(
+                    "this PDF's encryption cannot be checked for a password in this build"
+                        .to_string(),
+                ))
+            }
+        }
+    }
+}
+
+/// The error for reading an encrypted document's streams in a build without
+/// `pdfium`, which has no way to decrypt them: [`PdfError::PasswordRequired`]
+/// when the file needs a user password anyway, otherwise a typed
+/// [`PdfError::UnsupportedFormat`], so nothing decodes ciphertext.
+#[cfg(not(feature = "pdfium"))]
+fn encrypted_streams_unreadable(doc: &lopdf::Document) -> PdfError {
+    match empty_user_password(doc) {
+        EmptyUserPassword::Refused => PdfError::PasswordRequired,
+        EmptyUserPassword::Opens | EmptyUserPassword::Unknown => PdfError::UnsupportedFormat(
+            "decrypting an encrypted PDF's streams is not available in this build \
+             (requires the `pdfium` feature)"
+                .to_string(),
+        ),
+    }
 }
 
 /// Read [`PdfInfo`] for an encrypted document through pdfium, which does the
@@ -618,9 +743,11 @@ pub fn extract_page_image_with_background_typed(
 ///   extracted. A scan at 300 DPI therefore comes back at 72 DPI on this
 ///   route.
 ///
-/// Without `pdfium` an encrypted document with a non-empty `password` reports
-/// a typed unsupported-capability decode error. A missing, unreadable, or
-/// malformed file surfaces its real IO/parse error rather than being
+/// Without `pdfium` nothing can decrypt a stream `lopdf` could not, so an
+/// encrypted document still encrypted after load reports
+/// [`PdfError::PasswordRequired`] when it needs a user password and got none,
+/// and otherwise a typed unsupported-capability error. A missing, unreadable,
+/// or malformed file surfaces its real IO/parse error rather than being
 /// mislabelled as password-protected.
 ///
 /// # Errors
@@ -630,10 +757,13 @@ pub fn extract_page_image_with_background_typed(
 /// is [`PdfError::PasswordRequired`] for a document that needs a user password
 /// and got an empty one, and [`PdfError::WrongPassword`] when the one given
 /// does not open it (a password containing a NUL byte never can, since pdfium
-/// takes it as a C string). Without `pdfium`, an unsupported-capability
+/// takes it as a C string). Without `pdfium`, `PasswordRequired` for an empty
+/// password on a file that needs one, an unsupported-capability
 /// [`SourceError::Io`](crate::source::SourceError::Io) for an encrypted
-/// document opened with a non-empty password. Otherwise the extraction or
-/// render error, also as `SourceError::Pdf`.
+/// document opened with a non-empty password, and an
+/// [`PdfError::UnsupportedFormat`] for any other encrypted document `lopdf`
+/// could not decrypt. Otherwise the extraction or render error, also as
+/// `SourceError::Pdf`.
 pub fn extract_page_image_with_password(
     path: &Path,
     page: u32,
@@ -646,10 +776,14 @@ pub fn extract_page_image_with_password(
     if doc.is_encrypted() {
         #[cfg(feature = "pdfium")]
         return extract_encrypted_page_pdfium(path, page as usize, password).map_err(pdf_to_decode);
+        // Still encrypted after load means `lopdf` could not decrypt it, so
+        // its streams are ciphertext either way.
         #[cfg(not(feature = "pdfium"))]
-        if !password.is_empty() {
-            return Err(decode_unavailable("password-protected PDF decryption"));
-        }
+        return Err(if password.is_empty() {
+            pdf_to_decode(encrypted_streams_unreadable(&doc))
+        } else {
+            decode_unavailable("password-protected PDF decryption")
+        });
     }
     extract_page_image_from_doc(&doc, page as usize).map_err(pdf_to_decode)
 }
@@ -907,8 +1041,22 @@ pub(crate) fn pdfium_page_index(
 /// **See also:** [interactive example](https://libviprs.org/cli/#flag-page) (the
 /// `--page` flag selects which page to extract; the [full pyramid flow](https://libviprs.org/cli/#pyramid)
 /// uses this when the page has embedded images).
+///
+/// An encrypted file is read the way [`extract_page_image_with_password`]
+/// reads it with an empty password: one that needs a user password reports
+/// [`PdfError::PasswordRequired`], and one with only an owner password hands
+/// back its image through pdfium (the `pdfium` feature) when `lopdf` cannot
+/// decrypt it, or a typed [`PdfError::UnsupportedFormat`] without `pdfium`.
 pub fn extract_page_image(path: &Path, page: usize) -> Result<Raster, PdfError> {
     let doc = lopdf::Document::load(path).map_err(|e| PdfError::Parse(e.to_string()))?;
+    // Still encrypted after load means `lopdf` could not decrypt it, so its
+    // streams are ciphertext and decoding them reports nonsense (#1188).
+    if doc.is_encrypted() {
+        #[cfg(feature = "pdfium")]
+        return extract_encrypted_page_pdfium(path, page, "");
+        #[cfg(not(feature = "pdfium"))]
+        return Err(encrypted_streams_unreadable(&doc));
+    }
     extract_page_image_from_doc(&doc, page)
 }
 
@@ -1403,11 +1551,14 @@ fn resolve_rotate(doc: &lopdf::Document, page_id: lopdf::ObjectId) -> i64 {
 /// # Errors
 ///
 /// - [`PdfError::Parse`] — PDF could not be opened or parsed by `lopdf`.
+/// - [`PdfError::PasswordRequired`] — the PDF needs a user password. One
+///   with only an owner password opens without it.
 /// - [`PdfError::PageOutOfRange`] — `page == 0` or `page > total_pages`.
 /// - [`PdfError::UnsupportedRotation`] — the resolved `/Rotate` value
 ///   is not a multiple of 90 (PDF spec violation).
 pub fn page_rotate(path: &Path, page: usize) -> Result<PageRotation, PdfError> {
     let doc = lopdf::Document::load(path).map_err(|e| PdfError::Parse(e.to_string()))?;
+    refuse_if_password_required(&doc, path)?;
     let pages_map = doc.get_pages();
     let page_id = page_object_id(&pages_map, page)?;
     PageRotation::try_from_degrees(resolve_rotate(&doc, page_id))
@@ -2232,7 +2383,6 @@ mod tests {
 
     /// The committed AES-256 (R6) fixture: one text-only A4 page, user
     /// password `secret`. The same file libviprs-tests carries.
-    #[cfg(feature = "pdfium")]
     fn password_fixture() -> std::path::PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/password.pdf")
     }
@@ -2248,9 +2398,9 @@ mod tests {
     ///
     /// lopdf 0.36 cannot decrypt R6 (it fails with `InvalidKeyLength` even for
     /// the empty user password), so without pdfium nothing here can read the
-    /// image's encrypted stream, which is why the cells using it are
-    /// pdfium-only.
-    #[cfg(feature = "pdfium")]
+    /// image's encrypted stream, which is why the cells that decode it are
+    /// pdfium-only. The ones that only read dictionaries (`pdf_info`,
+    /// `page_rotate`) run in both builds.
     fn owner_password_only_fixture() -> std::path::PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/owner-password-only.pdf")
     }
@@ -2355,7 +2505,8 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "pdfium")]
+    // Both builds: without pdfium there is no decryption, but there is still
+    // an answer to "does this file need a password", and it is yes (#1188).
     #[test]
     #[cfg_attr(miri, ignore)] // hands a real path to an entry point that opens it
     fn pdf_info_with_password_requires_a_password_for_the_aes256_fixture() {
@@ -2401,7 +2552,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "pdfium")]
+    // Both builds, as for `pdf_info_with_password` above (#1188).
     #[test]
     #[cfg_attr(miri, ignore)] // hands a real path to an entry point that opens it
     fn extract_page_image_with_password_requires_a_password_for_the_aes256_fixture() {
@@ -2439,6 +2590,155 @@ mod tests {
             ),
             "expected SourceError::Pdf(WrongPassword), got: {err:?}"
         );
+    }
+
+    // #1188: the entry points that take no password must not answer for a
+    // file that needs one. lopdf reads an encrypted file's object structure
+    // happily (only strings and streams are encrypted), so without a check
+    // they used to report its pages as if it were an ordinary document.
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // hands a real path to an entry point that opens it
+    fn pdf_info_refuses_the_aes256_fixture_without_its_password() {
+        match pdf_info(&password_fixture()) {
+            Err(PdfError::PasswordRequired) => {}
+            other => panic!("expected PasswordRequired, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // hands a real path to an entry point that opens it
+    fn extract_page_image_refuses_the_aes256_fixture_without_its_password() {
+        match extract_page_image(&password_fixture(), 1) {
+            Err(PdfError::PasswordRequired) => {}
+            other => panic!("expected PasswordRequired, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // hands a real path to an entry point that opens it
+    fn page_rotate_refuses_the_aes256_fixture_without_its_password() {
+        match page_rotate(&password_fixture(), 1) {
+            Err(PdfError::PasswordRequired) => {}
+            other => panic!("expected PasswordRequired, got {other:?}"),
+        }
+    }
+
+    /// Check [`PdfInfo`] for [`owner_password_only_fixture`]: one 200 x 150 pt
+    /// page carrying an image.
+    fn assert_is_the_owner_only_fixtures_info(info: &PdfInfo) {
+        assert_eq!(info.page_count, 1);
+        assert_eq!(info.pages.len(), 1);
+        let page = &info.pages[0];
+        assert!(
+            (page.width_pts - 200.0).abs() < 0.01 && (page.height_pts - 150.0).abs() < 0.01,
+            "expected a 200 x 150 pt page, got {} x {}",
+            page.width_pts,
+            page.height_pts
+        );
+        assert!(page.has_images, "the page draws an image XObject");
+    }
+
+    // An owner password only restricts permissions, so a file with nothing
+    // else opens without one, in both builds. These held before #1188 and
+    // are here so the fix cannot get there by refusing every encrypted file.
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // hands a real path to an entry point that opens it
+    fn pdf_info_reads_an_owner_password_only_pdf() {
+        let info = pdf_info(&owner_password_only_fixture())
+            .expect("an owner-password-only file opens without a password");
+        assert_is_the_owner_only_fixtures_info(&info);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // hands a real path to an entry point that opens it
+    fn page_rotate_reads_an_owner_password_only_pdf() {
+        let rotation = page_rotate(&owner_password_only_fixture(), 1)
+            .expect("an owner-password-only file opens without a password");
+        assert_eq!(rotation, PageRotation::Zero);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // hands a real path to an entry point that opens it
+    fn pdf_info_with_password_ignores_a_password_an_owner_password_only_pdf_does_not_need() {
+        // Without pdfium this used to be "decryption is not available", even
+        // though nothing here needs decrypting: the file opens without one.
+        let info = pdf_info_with_password(&owner_password_only_fixture(), "owner-only-secret")
+            .expect("a password the file does not need is ignored");
+        assert_is_the_owner_only_fixtures_info(&info);
+    }
+
+    #[cfg(feature = "pdfium")]
+    #[test]
+    #[cfg_attr(miri, ignore)] // hands a real path to an entry point that opens it
+    fn extract_page_image_hands_back_the_stored_image_of_an_owner_password_only_pdf() {
+        // lopdf cannot decrypt the AES-256 image stream, so this has to go
+        // through pdfium the way `extract_page_image_with_password(.., "")`
+        // does, rather than decode ciphertext.
+        let raster = extract_page_image(&owner_password_only_fixture(), 1)
+            .expect("an owner-password-only file opens without a password");
+        assert_is_the_owner_only_fixtures_stored_image(&raster);
+    }
+
+    #[cfg(not(feature = "pdfium"))]
+    #[test]
+    #[cfg_attr(miri, ignore)] // hands a real path to an entry point that opens it
+    fn extract_page_image_of_an_owner_password_only_pdf_says_it_cannot_decrypt() {
+        // Without pdfium nothing can decrypt the AES-256 image stream. The
+        // answer is a typed "not in this build", not a decode of ciphertext.
+        match extract_page_image(&owner_password_only_fixture(), 1) {
+            Err(PdfError::UnsupportedFormat(msg)) => {
+                assert!(msg.contains("encrypted"), "message was {msg:?}");
+            }
+            other => panic!("expected UnsupportedFormat, got {other:?}"),
+        }
+    }
+
+    /// A 1-page PDF encrypted by lopdf with RC4 128 (V2, R3), owner password
+    /// `owner` and the given user password. lopdf can both write and read
+    /// this scheme, so it covers the revisions below AES-256.
+    fn save_rc4_pdf(user_password: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        use lopdf::{EncryptionState, EncryptionVersion, Object, Permissions};
+        let (mut doc, _page_id) = build_rotated_doc([0.0, 0.0, 120.0, 80.0], None, None);
+        let id = Object::String(
+            b"0123456789abcdef".to_vec(),
+            lopdf::StringFormat::Hexadecimal,
+        );
+        doc.trailer.set("ID", Object::Array(vec![id.clone(), id]));
+        let state = EncryptionState::try_from(EncryptionVersion::V2 {
+            document: &doc,
+            owner_password: "owner",
+            user_password,
+            key_length: 128,
+            permissions: Permissions::all(),
+        })
+        .expect("lopdf builds an RC4 encryption state");
+        doc.encrypt(&state).expect("lopdf encrypts the document");
+        save_doc(doc)
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn pdf_info_refuses_an_rc4_pdf_with_a_user_password() {
+        let (_dir, path) = save_rc4_pdf("secret");
+        match pdf_info(&path) {
+            Err(PdfError::PasswordRequired) => {}
+            other => panic!("expected PasswordRequired, got {other:?}"),
+        }
+        match page_rotate(&path, 1) {
+            Err(PdfError::PasswordRequired) => {}
+            other => panic!("expected PasswordRequired from page_rotate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn pdf_info_reads_an_rc4_pdf_with_only_an_owner_password() {
+        let (_dir, path) = save_rc4_pdf("");
+        let info = pdf_info(&path).expect("an owner-password-only file opens without a password");
+        assert_eq!(info.page_count, 1);
+        assert!((info.pages[0].width_pts - 120.0).abs() < 0.01);
     }
 
     /// Read one RGBA pixel out of a `PixelFormat::Rgba8` raster's row-major
