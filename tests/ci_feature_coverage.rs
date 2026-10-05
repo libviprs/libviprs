@@ -51,8 +51,9 @@
 //! # Why a table rather than a rule
 //!
 //! There is no honest rule that derives the right job set from the feature
-//! name. `pdfium` cannot be in the test job because it needs a native library
-//! at runtime; `s3` is an alias with no code of its own and gets a build cell
+//! name. `pdfium` needs a native library at runtime, so its test cell is only
+//! honest because the Test job downloads the pinned, sha-checked libpdfium
+//! first (issue #1172); `s3` is an alias with no code of its own and gets a build cell
 //! instead; `test-util` gates helpers rather than assertions. So each feature
 //! carries an explicit row with its reason, and the guard's real question is
 //! the one a rule cannot answer: **does `[features]` in `Cargo.toml` contain
@@ -124,10 +125,15 @@ const EXPECTED: &[(&str, Coverage)] = &[
         cov(
             true,
             true,
-            false,
-            "linted and checked, but not tested: pdfium-render needs a native \
-             PDFium library present at runtime, which the hosted runner has not \
-             got",
+            true,
+            "linted, checked and tested. pdfium-render needs a native PDFium \
+             library at runtime, which the hosted runner has not got, so the \
+             Test job downloads the pinned, sha-checked libviprs-dep build \
+             (the one tools/Dockerfile.ci and libviprs-tests install) and \
+             points PDFIUM_PATH at it before the cell runs. Until #1172 this \
+             row said `false`, and a regression in the pdfium paths, like the \
+             poisoned-mutex panic #1159 fixed, only turned up on a \
+             developer's machine",
         ),
     ),
     (
@@ -486,13 +492,18 @@ fn the_workflow_scanner_would_notice_a_missing_cell() {
         "cargo test --features definitely-not-a-feature"
     ));
     // A command that is there, but in a different job. This is the half that
-    // "named somewhere in CI" would get wrong: `pdfium` is linted and checked
-    // and deliberately not tested.
+    // "named somewhere in CI" would get wrong: `object-store-sink` is linted
+    // and deliberately not MSRV-checked, since it adds no crate without a
+    // rust-version. (This used to be `pdfium`, linted and not tested, until
+    // the Test job started installing a libpdfium in #1172.)
     assert!(job_runs(
         "check",
-        "cargo clippy --all-targets --features pdfium"
+        "cargo clippy --all-targets --features object-store-sink"
     ));
-    assert!(!job_runs("test", "cargo test --features pdfium"));
+    assert!(!job_runs(
+        "msrv",
+        "cargo check --all-targets --features object-store-sink"
+    ));
     // And the job scanner really is scoped: the MSRV job's `cargo check` lines
     // must not leak into the lint job's view.
     assert!(job_runs(
