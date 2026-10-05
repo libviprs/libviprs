@@ -396,7 +396,8 @@ const ANCHOR_FILES: &[&str] = &[
 ///
 /// #1173 moves it 289 to 291: `the_probe_agrees_with_the_decode_on_every_container_it_reads` and `an_svg_is_probed_by_content_and_agrees_with_the_decode` in `src/source.rs`, which write fixtures to a temp file to probe them by path.
 /// #1188 moves it 291 to 301, all ten in `src/pdf.rs`: the cells that `pdf_info`, `extract_page_image` and `page_rotate` refuse the AES-256 fixture without its password and still read the owner-password-only one, and the two RC4 cells over a lopdf-encrypted temp file.
-const EXPECTED_SRC_ANNOTATIONS: usize = 301;
+/// #1166 moves it 301 to 302: `a_resumed_run_reports_its_checkpointed_tiles_as_skipped` in `src/engine_builder.rs`, which checkpoints a run into a temp dir and resumes it. Its retry partner runs over an in-memory sink and needs no annotation.
+const EXPECTED_SRC_ANNOTATIONS: usize = 302;
 /// Companion to [`EXPECTED_SRC_ANNOTATIONS`]: how many `src/` modules carry at
 /// least one annotation. #765 made it 25 by putting the first annotation in
 /// `src/analyze.rs`; `src/colour.rs` and `src/pdf.rs`, which took the other
@@ -782,7 +783,8 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// dir. The other eight read committed fixtures through an entry point and are `not-detected`.
 /// The detector agreed at 503.
 /// #1181 adds 4: the cells in `tests/local_ci_docker_slot.rs`, which build a slot pool and a stub docker in a temp dir. It said 503 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 507;
+/// #1166 adds 1: the same resume cell. It said 507 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 508;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {

@@ -742,8 +742,13 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
                 if !sink.applies_retry_policy() =>
             {
                 // Share the run's cancel token with the retry loop so an
-                // in-flight backoff can be interrupted (#133).
-                Some(RetryingSink::new(&sink, p.clone()).with_cancel(engine_cfg.cancel.clone()))
+                // in-flight backoff can be interrupted (#133), and the
+                // observer so each retry is reported (#1166).
+                let r = RetryingSink::new(&sink, p.clone()).with_cancel(engine_cfg.cancel.clone());
+                Some(match &observer {
+                    Some(o) => r.with_observer(Arc::clone(o)),
+                    None => r,
+                })
             }
             _ => None,
         };
@@ -990,6 +995,18 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
             // so a transient failure is retried before the resume checkpoint
             // records the tile as complete.
             let wrapped = resume::ResumeAwareSink::new(engine_sink, &skip, cp.as_ref());
+            // The wrapper answers a skipped tile with `Ok(())`, which the
+            // engine reports as `TileCompleted`. Re-label those on the way to
+            // the caller's observer, against the same skip set the wrapper
+            // filters on, so the two cannot disagree (issue #1166).
+            let skip_observer = resume::ResumeSkipObserver {
+                inner: dispatch.observer,
+                skip: &skip,
+            };
+            let dispatch = RenderDispatch {
+                observer: &skip_observer,
+                ..dispatch
+            };
 
             // Capture the run outcome rather than propagating it with `?`
             // straight away: the checkpoint must be flushed on *both* the
@@ -1633,6 +1650,38 @@ mod resume {
         /// `content_format` by simply not listing it (issue #137).
         fn inner_sink(&self) -> Option<&dyn TileSink> {
             Some(self.inner)
+        }
+    }
+
+    /// Observer wrapper for resume runs: a `TileCompleted` for a coordinate
+    /// in the skip set goes out as `TileSkippedOnResume`, keeping its worker
+    /// and timestamp; everything else passes through unchanged (issue #1166).
+    pub(super) struct ResumeSkipObserver<'a> {
+        pub(super) inner: &'a dyn crate::observe::EngineObserver,
+        pub(super) skip: &'a HashSet<TileCoord>,
+    }
+
+    impl crate::observe::EngineObserver for ResumeSkipObserver<'_> {
+        fn on_event(&self, event: crate::observe::EngineEvent) {
+            use crate::observe::EngineEvent;
+            match event {
+                EngineEvent::TileCompleted {
+                    coord,
+                    worker_id,
+                    timestamp,
+                } if self.skip.contains(&coord) => {
+                    self.inner.on_event(EngineEvent::TileSkippedOnResume {
+                        coord,
+                        worker_id,
+                        timestamp,
+                    })
+                }
+                other => self.inner.on_event(other),
+            }
+        }
+
+        fn on_extensions(&self, extensions: &crate::extensions::Extensions) {
+            self.inner.on_extensions(extensions)
         }
     }
 
