@@ -359,12 +359,12 @@ pub const DEDUPE_WINDOW_WAYS: usize = 8;
 
 /// What one tracked payload costs, across the window and the repeat table.
 ///
-/// A [`WindowSlot`] is 48 bytes, a [`RepeatSlot`] is 16, and each table spends
+/// A window slot is 48 bytes, a repeat-table slot is 16, and each table spends
 /// four bytes of recency order on every set of [`DEDUPE_WINDOW_WAYS`], which
 /// is one more byte a payload between them.
 /// `the_dedupe_budget_buys_what_it_says_it_buys` holds this against
 /// `size_of`, so it cannot drift from the types it describes.
-const DEDUPE_BYTES_PER_PAYLOAD: usize = 65;
+pub const DEDUPE_BYTES_PER_PAYLOAD: usize = 65;
 
 /// How much memory the dedupe window spends when the caller says nothing.
 ///
@@ -977,9 +977,13 @@ impl Default for WriterOptions {
 }
 
 impl WriterOptions {
-    /// The smallest dedupe budget that is not rounded up (issue #1169).
-    /// Declared ahead of its value so the red cells compile.
-    pub const MIN_DEDUPE_MEMORY_BYTES: usize = 0;
+    /// The smallest [`dedupe_memory_bytes`](Self::dedupe_memory_bytes) the
+    /// writer takes as given: one set of [`DEDUPE_WINDOW_WAYS`] payloads at
+    /// [`DEDUPE_BYTES_PER_PAYLOAD`] each, 520 bytes. A smaller budget is
+    /// rounded up to this rather than refused, so a caller that wants to
+    /// refuse it instead (libviprs-cli does, for `--dedupe-memory-bytes`)
+    /// compares against this (issue #1169).
+    pub const MIN_DEDUPE_MEMORY_BYTES: usize = DEDUPE_WINDOW_WAYS * DEDUPE_BYTES_PER_PAYLOAD;
 
     /// Set what the tile blobs are.
     pub fn with_tile_type(mut self, tile_type: TileType) -> Self {

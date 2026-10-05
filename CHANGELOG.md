@@ -35,6 +35,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tile that's absent is accepted when its re-render is blank (the test the
   engine used to drop it) and still fails when it has content. Without the
   flag every planned tile is still required.
+- **Names and constants libviprs-cli used to copy** (issue #1169):
+  `EngineEvent::name()` gives every event a stable snake_case name, with
+  `EngineEvent::NAMES_VERSION` to version a format built on them;
+  `WriterOptions::MIN_DEDUPE_MEMORY_BYTES` is the smallest dedupe budget the
+  PMTiles writer doesn't round up (520 bytes), and `DEDUPE_BYTES_PER_PAYLOAD`
+  is public beside `DEDUPE_WINDOW_WAYS`; `Manifest::locations(dir)` and
+  `Manifest::locate(dir)` name the two files `FsSink` writes its manifest to,
+  and the sink writes through them.
 - `pdf_info_with_password` and `extract_page_image_with_password` open an
   encrypted PDF with its password when the `pdfium` feature is on. They used
   to answer any non-empty password with "not available in this build". Two

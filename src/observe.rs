@@ -293,13 +293,43 @@ impl EngineEvent {
     }
 
     /// Version of the names [`name`](Self::name) returns (issue #1169).
-    /// Declared ahead of its value so the red cells compile.
-    pub const NAMES_VERSION: u32 = 0;
+    ///
+    /// Goes up whenever an existing name changes or stops being emitted, so a
+    /// consumer that publishes these names (libviprs-cli's `--events json`
+    /// carries them) can version its own format against it. A new variant
+    /// with a new name is not a bump, the same rule the manifest's additive
+    /// fields follow: a reader that does not know the name skips the event.
+    pub const NAMES_VERSION: u32 = 1;
 
-    /// The stable name of this event (issue #1169). Declared ahead of its
-    /// table so the red cells compile.
+    /// The stable snake_case name of this event, for logs and line formats
+    /// (issue #1169).
+    ///
+    /// Spelled out per variant rather than derived from `Debug`, so renaming a
+    /// variant cannot change a name behind a consumer's back; a name changing
+    /// is a [`NAMES_VERSION`](Self::NAMES_VERSION) bump.
     pub fn name(&self) -> &'static str {
-        "unknown"
+        match self {
+            Self::SourceLoadStarted { .. } => "source_load_started",
+            Self::SourceLoaded { .. } => "source_loaded",
+            Self::PlanCreated { .. } => "plan_created",
+            Self::LevelStarted { .. } => "level_started",
+            Self::TileCompleted { .. } => "tile_completed",
+            Self::TileFailed { .. } => "tile_failed",
+            Self::TileSkippedOnResume { .. } => "tile_skipped_on_resume",
+            Self::RetryAttempted { .. } => "retry_attempted",
+            Self::LevelCompleted { .. } => "level_completed",
+            Self::StripRendered { .. } => "strip_rendered",
+            Self::BatchStarted { .. } => "batch_started",
+            Self::BatchCompleted { .. } => "batch_completed",
+            Self::StripDispatched { .. } => "strip_dispatched",
+            Self::StripExecutorDone { .. } => "strip_executor_done",
+            Self::WorkerJoined { .. } => "worker_joined",
+            Self::WorkerLeft { .. } => "worker_left",
+            Self::MemorySnapshot { .. } => "memory_snapshot",
+            Self::CheckpointFlushed { .. } => "checkpoint_flushed",
+            Self::Finished { .. } => "finished",
+            Self::PipelineComplete => "pipeline_complete",
+        }
     }
 
     /// Build a [`TileSkippedOnResume`](Self::TileSkippedOnResume) with no worker

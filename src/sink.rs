@@ -2546,15 +2546,17 @@ impl FsSink {
         // A single byte-identical copy is also dropped inside `base_dir` for
         // consumers that search relative to the tile root (e.g. stray tools
         // that only know the pyramid directory).
-        if let (Some(parent), Some(stem)) = (self.base_dir.parent(), self.base_dir.file_name()) {
-            std::fs::create_dir_all(parent)?;
-            let mut sibling_name = stem.to_os_string();
-            sibling_name.push(".manifest.json");
-            let sibling_path = parent.join(sibling_name);
+        // `Manifest::locations` names both paths, so readers that ask it find
+        // exactly what is written here (issue #1169). Sibling first, inside
+        // copy last, the order this has always written them in.
+        let mut paths = crate::manifest::Manifest::locations(&self.base_dir);
+        let inside_path = paths.remove(0);
+        for sibling_path in paths {
+            if let Some(parent) = sibling_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
             atomic_write(&sibling_path, &json)?;
         }
-
-        let inside_path = self.base_dir.join("manifest.json");
         atomic_write(&inside_path, &json)?;
 
         Ok(())
