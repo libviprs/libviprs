@@ -1498,6 +1498,91 @@ mod tests {
         assert_eq!(wide.f32_samples().expect("float"), vec![1.0, 2.0, 3.0, 4.0]);
     }
 
+    /// A small ragged CSV cannot grow into a grid past the default budget
+    /// (issue #1168).
+    ///
+    /// The first row fixes the width, and every later row used to be padded
+    /// out to it before anything checked the size, so one 65535-field first
+    /// row over a few thousand one-field rows (about 135 KB here) built a
+    /// 65535 x 2100 grid, 550 MB of `f32` padded and as much again flattened,
+    /// past the 512 MiB `DecodeLimits::default()` every other decoder stops at.
+    /// It must be refused with the typed allocation refusal before any of
+    /// that is built.
+    #[test]
+    fn csv_load_refuses_a_ragged_grid_past_the_default_budget() {
+        let mut bomb = b"0".to_vec();
+        for _ in 1..65535 {
+            bomb.extend_from_slice(b",0");
+        }
+        for _ in 1..2100 {
+            bomb.extend_from_slice(b"\n0");
+        }
+        assert!(
+            bomb.len() < 140_000,
+            "the control: the file itself is small"
+        );
+
+        match Raster::csv_load(&bomb) {
+            Err(crate::source::SourceError::AllocLimitExceeded {
+                needed_bytes,
+                max_alloc_bytes,
+                ..
+            }) => {
+                assert_eq!(needed_bytes, 65535 * 2100 * 4);
+                assert_eq!(
+                    max_alloc_bytes,
+                    crate::source::DecodeLimits::default().max_alloc_bytes
+                );
+            }
+            Err(other) => panic!("expected the typed allocation refusal, got {other:?}"),
+            Ok(r) => panic!(
+                "a {}x{} grid past the default budget loaded",
+                r.width(),
+                r.height()
+            ),
+        }
+    }
+
+    /// A matrix header's declared geometry is checked against the default
+    /// pixel ceiling before any value is parsed (issue #1168), so a header
+    /// claiming two billion cells is a limit refusal, not a parse error about
+    /// how many values followed it.
+    #[test]
+    fn matrix_load_refuses_declared_geometry_past_the_default_ceiling() {
+        match Raster::matrix_load(b"100000 20000\n1 2 3\n") {
+            Err(crate::source::SourceError::DimensionLimitExceeded {
+                width: 100000,
+                height: 20000,
+                ..
+            }) => {}
+            other => panic!("expected DimensionLimitExceeded for the header, got {other:?}"),
+        }
+    }
+
+    /// A matrix body can't hold more values than its header declared, and the
+    /// loader stops reading at the first one past it (issue #1168).
+    ///
+    /// The values used to be collected into a growing `Vec` with no bound but
+    /// the file, and the count compared with the header only at the end, so a
+    /// `2 2` header over a long body buffered every value in it before saying
+    /// the count was wrong. The refusal has to come from the fifth value, which
+    /// is what bounds the buffer by the header the limits already priced.
+    #[test]
+    fn matrix_load_stops_at_the_first_value_past_its_header() {
+        let mut body = b"2 2\n".to_vec();
+        for _ in 0..100_000 {
+            body.extend_from_slice(b"0 ");
+        }
+        match Raster::matrix_load(&body).map(|r| r.data().len()) {
+            Err(e) => assert!(
+                e.to_string()
+                    .contains("matrix: more than the 4 values a 2x2 header declares"),
+                "the refusal has to come from the fifth value, got {e}"
+            ),
+            Ok(n) => panic!("a 2x2 header over 100000 values loaded {n} bytes"),
+        }
+    }
+
     #[test]
     fn ppm_load_rejects_oversized_header_dimensions() {
         // A ~20-byte hostile binary header declares billions of pixels. The
