@@ -2232,7 +2232,6 @@ mod tests {
 
     /// The committed AES-256 (R6) fixture: one text-only A4 page, user
     /// password `secret`. The same file libviprs-tests carries.
-    #[cfg(feature = "pdfium")]
     fn password_fixture() -> std::path::PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/password.pdf")
     }
@@ -2250,7 +2249,6 @@ mod tests {
     /// the empty user password), so without pdfium nothing here can read the
     /// image's encrypted stream, which is why the cells using it are
     /// pdfium-only.
-    #[cfg(feature = "pdfium")]
     fn owner_password_only_fixture() -> std::path::PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/owner-password-only.pdf")
     }
@@ -2355,7 +2353,8 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "pdfium")]
+    // Both builds: without pdfium there is no decryption, but there is still
+    // an answer to "does this file need a password", and it is yes (#1188).
     #[test]
     #[cfg_attr(miri, ignore)] // hands a real path to an entry point that opens it
     fn pdf_info_with_password_requires_a_password_for_the_aes256_fixture() {
@@ -2401,7 +2400,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "pdfium")]
+    // Both builds, as for `pdf_info_with_password` above (#1188).
     #[test]
     #[cfg_attr(miri, ignore)] // hands a real path to an entry point that opens it
     fn extract_page_image_with_password_requires_a_password_for_the_aes256_fixture() {
@@ -2439,6 +2438,155 @@ mod tests {
             ),
             "expected SourceError::Pdf(WrongPassword), got: {err:?}"
         );
+    }
+
+    // #1188: the entry points that take no password must not answer for a
+    // file that needs one. lopdf reads an encrypted file's object structure
+    // happily (only strings and streams are encrypted), so without a check
+    // they used to report its pages as if it were an ordinary document.
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // hands a real path to an entry point that opens it
+    fn pdf_info_refuses_the_aes256_fixture_without_its_password() {
+        match pdf_info(&password_fixture()) {
+            Err(PdfError::PasswordRequired) => {}
+            other => panic!("expected PasswordRequired, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // hands a real path to an entry point that opens it
+    fn extract_page_image_refuses_the_aes256_fixture_without_its_password() {
+        match extract_page_image(&password_fixture(), 1) {
+            Err(PdfError::PasswordRequired) => {}
+            other => panic!("expected PasswordRequired, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // hands a real path to an entry point that opens it
+    fn page_rotate_refuses_the_aes256_fixture_without_its_password() {
+        match page_rotate(&password_fixture(), 1) {
+            Err(PdfError::PasswordRequired) => {}
+            other => panic!("expected PasswordRequired, got {other:?}"),
+        }
+    }
+
+    /// Check [`PdfInfo`] for [`owner_password_only_fixture`]: one 200 x 150 pt
+    /// page carrying an image.
+    fn assert_is_the_owner_only_fixtures_info(info: &PdfInfo) {
+        assert_eq!(info.page_count, 1);
+        assert_eq!(info.pages.len(), 1);
+        let page = &info.pages[0];
+        assert!(
+            (page.width_pts - 200.0).abs() < 0.01 && (page.height_pts - 150.0).abs() < 0.01,
+            "expected a 200 x 150 pt page, got {} x {}",
+            page.width_pts,
+            page.height_pts
+        );
+        assert!(page.has_images, "the page draws an image XObject");
+    }
+
+    // An owner password only restricts permissions, so a file with nothing
+    // else opens without one, in both builds. These held before #1188 and
+    // are here so the fix cannot get there by refusing every encrypted file.
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // hands a real path to an entry point that opens it
+    fn pdf_info_reads_an_owner_password_only_pdf() {
+        let info = pdf_info(&owner_password_only_fixture())
+            .expect("an owner-password-only file opens without a password");
+        assert_is_the_owner_only_fixtures_info(&info);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // hands a real path to an entry point that opens it
+    fn page_rotate_reads_an_owner_password_only_pdf() {
+        let rotation = page_rotate(&owner_password_only_fixture(), 1)
+            .expect("an owner-password-only file opens without a password");
+        assert_eq!(rotation, PageRotation::Zero);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // hands a real path to an entry point that opens it
+    fn pdf_info_with_password_ignores_a_password_an_owner_password_only_pdf_does_not_need() {
+        // Without pdfium this used to be "decryption is not available", even
+        // though nothing here needs decrypting: the file opens without one.
+        let info = pdf_info_with_password(&owner_password_only_fixture(), "owner-only-secret")
+            .expect("a password the file does not need is ignored");
+        assert_is_the_owner_only_fixtures_info(&info);
+    }
+
+    #[cfg(feature = "pdfium")]
+    #[test]
+    #[cfg_attr(miri, ignore)] // hands a real path to an entry point that opens it
+    fn extract_page_image_hands_back_the_stored_image_of_an_owner_password_only_pdf() {
+        // lopdf cannot decrypt the AES-256 image stream, so this has to go
+        // through pdfium the way `extract_page_image_with_password(.., "")`
+        // does, rather than decode ciphertext.
+        let raster = extract_page_image(&owner_password_only_fixture(), 1)
+            .expect("an owner-password-only file opens without a password");
+        assert_is_the_owner_only_fixtures_stored_image(&raster);
+    }
+
+    #[cfg(not(feature = "pdfium"))]
+    #[test]
+    #[cfg_attr(miri, ignore)] // hands a real path to an entry point that opens it
+    fn extract_page_image_of_an_owner_password_only_pdf_says_it_cannot_decrypt() {
+        // Without pdfium nothing can decrypt the AES-256 image stream. The
+        // answer is a typed "not in this build", not a decode of ciphertext.
+        match extract_page_image(&owner_password_only_fixture(), 1) {
+            Err(PdfError::UnsupportedFormat(msg)) => {
+                assert!(msg.contains("encrypted"), "message was {msg:?}");
+            }
+            other => panic!("expected UnsupportedFormat, got {other:?}"),
+        }
+    }
+
+    /// A 1-page PDF encrypted by lopdf with RC4 128 (V2, R3), owner password
+    /// `owner` and the given user password. lopdf can both write and read
+    /// this scheme, so it covers the revisions below AES-256.
+    fn save_rc4_pdf(user_password: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        use lopdf::{EncryptionState, EncryptionVersion, Object, Permissions};
+        let (mut doc, _page_id) = build_rotated_doc([0.0, 0.0, 120.0, 80.0], None, None);
+        let id = Object::String(
+            b"0123456789abcdef".to_vec(),
+            lopdf::StringFormat::Hexadecimal,
+        );
+        doc.trailer.set("ID", Object::Array(vec![id.clone(), id]));
+        let state = EncryptionState::try_from(EncryptionVersion::V2 {
+            document: &doc,
+            owner_password: "owner",
+            user_password,
+            key_length: 128,
+            permissions: Permissions::all(),
+        })
+        .expect("lopdf builds an RC4 encryption state");
+        doc.encrypt(&state).expect("lopdf encrypts the document");
+        save_doc(doc)
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn pdf_info_refuses_an_rc4_pdf_with_a_user_password() {
+        let (_dir, path) = save_rc4_pdf("secret");
+        match pdf_info(&path) {
+            Err(PdfError::PasswordRequired) => {}
+            other => panic!("expected PasswordRequired, got {other:?}"),
+        }
+        match page_rotate(&path, 1) {
+            Err(PdfError::PasswordRequired) => {}
+            other => panic!("expected PasswordRequired from page_rotate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn pdf_info_reads_an_rc4_pdf_with_only_an_owner_password() {
+        let (_dir, path) = save_rc4_pdf("");
+        let info = pdf_info(&path).expect("an owner-password-only file opens without a password");
+        assert_eq!(info.page_count, 1);
+        assert!((info.pages[0].width_pts - 120.0).abs() < 0.01);
     }
 
     /// Read one RGBA pixel out of a `PixelFormat::Rgba8` raster's row-major
