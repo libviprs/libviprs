@@ -2047,14 +2047,95 @@ mod tests {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/password.pdf")
     }
 
-    /// The [`PdfError`] a password extract folded into its decode error, if
-    /// the fold kept it typed.
+    /// The committed owner-password-only fixture: one 200 x 150 pt page whose
+    /// only content is a 64 x 48 RGB image XObject (FlateDecode, pixel
+    /// `(x, y)` = `(4x, 5y, 128)`) drawn over the whole page, encrypted
+    /// AES-256 (R6) by qpdf 11.3.0 with an empty user password and the owner
+    /// password `owner-only-secret`:
+    /// `qpdf --encrypt "" owner-only-secret 256 --print=none --modify=none --extract=n -- plain.pdf owner-password-only.pdf`.
+    /// It opens without a password, so the stored image is what extraction
+    /// should hand back, and a 72-DPI render would come back 200 x 150.
+    ///
+    /// lopdf 0.36 cannot decrypt R6 (it fails with `InvalidKeyLength` even for
+    /// the empty user password), so without pdfium nothing here can read the
+    /// image's encrypted stream, which is why the cells using it are
+    /// pdfium-only.
     #[cfg(feature = "pdfium")]
-    fn folded_pdf_error(err: &crate::codec::DecodeError) -> Option<&PdfError> {
-        match err {
-            crate::source::SourceError::Io(io) => io.get_ref()?.downcast_ref::<PdfError>(),
-            _ => None,
+    fn owner_password_only_fixture() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/owner-password-only.pdf")
+    }
+
+    /// Check an extract of [`owner_password_only_fixture`] is its stored
+    /// 64 x 48 image, pixel for pixel, rather than a render of the page.
+    #[cfg(feature = "pdfium")]
+    fn assert_is_the_owner_only_fixtures_stored_image(raster: &Raster) {
+        assert_eq!(
+            (raster.width(), raster.height()),
+            (64, 48),
+            "expected the embedded 64 x 48 image at its stored size, not a render of the page"
+        );
+        assert_eq!(raster.format(), PixelFormat::Rgb8);
+        for (x, y) in [(0u32, 0u32), (63, 0), (0, 47), (63, 47), (10, 20)] {
+            let at = ((y * 64 + x) * 3) as usize;
+            assert_eq!(
+                &raster.data()[at..at + 3],
+                &[(4 * x) as u8, (5 * y) as u8, 128],
+                "stored pixel ({x}, {y})"
+            );
         }
+    }
+
+    #[cfg(feature = "pdfium")]
+    #[test]
+    #[cfg_attr(miri, ignore)] // hands a real path to an entry point that opens it
+    fn extract_page_image_with_password_keeps_the_embedded_image_of_an_owner_password_only_pdf() {
+        // An owner password only restricts permissions: the file opens with
+        // an empty user password. So with no password the page's embedded
+        // image comes back at its stored size, as it does for an unencrypted
+        // file, not as a render of the page.
+        let raster = extract_page_image_with_password(&owner_password_only_fixture(), 1, "")
+            .expect("an owner-password-only file opens without a password");
+        assert_is_the_owner_only_fixtures_stored_image(&raster);
+    }
+
+    #[cfg(feature = "pdfium")]
+    #[test]
+    #[cfg_attr(miri, ignore)] // hands a real path to an entry point that opens it
+    fn extract_page_image_with_password_ignores_a_password_the_file_does_not_need() {
+        // A password on a file that opens without one is ignored, as it is for
+        // an unencrypted file: the stored image still comes back unrendered.
+        let raster = extract_page_image_with_password(
+            &owner_password_only_fixture(),
+            1,
+            "owner-only-secret",
+        )
+        .expect("a password the file does not need is ignored");
+        assert_is_the_owner_only_fixtures_stored_image(&raster);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn a_pdf_failure_from_an_extract_helper_is_a_typed_source_error() {
+        // The extract helpers return a decode error, and a PDF failure inside
+        // one arrives as SourceError::Pdf carrying the PdfError, so a caller
+        // can match on it. Here: a page past the end of a one-page file.
+        let (_dir, path) = save_plain_pdf();
+        let err = extract_page_image_with_password(&path, 2, "").unwrap_err();
+        assert!(
+            matches!(
+                err,
+                crate::source::SourceError::Pdf(PdfError::PageOutOfRange { page: 2, total: 1 })
+            ),
+            "expected SourceError::Pdf(PageOutOfRange), got: {err:?}"
+        );
+        // And a file that is not there is a typed parse failure, not an
+        // io::Error with the PdfError tucked inside it.
+        let err = extract_page_image_with_password(Path::new("/nonexistent/secret.pdf"), 1, "")
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::source::SourceError::Pdf(PdfError::Parse(_))),
+            "expected SourceError::Pdf(Parse), got: {err:?}"
+        );
     }
 
     #[cfg(feature = "pdfium")]
@@ -2122,8 +2203,11 @@ mod tests {
         let err = extract_page_image_with_password(&password_fixture(), 1, "not-the-password")
             .unwrap_err();
         assert!(
-            matches!(folded_pdf_error(&err), Some(PdfError::WrongPassword)),
-            "expected a typed WrongPassword, got: {err:?}"
+            matches!(
+                err,
+                crate::source::SourceError::Pdf(PdfError::WrongPassword)
+            ),
+            "expected SourceError::Pdf(WrongPassword), got: {err:?}"
         );
     }
 
@@ -2133,8 +2217,37 @@ mod tests {
     fn extract_page_image_with_password_requires_a_password_for_the_aes256_fixture() {
         let err = extract_page_image_with_password(&password_fixture(), 1, "").unwrap_err();
         assert!(
-            matches!(folded_pdf_error(&err), Some(PdfError::PasswordRequired)),
-            "expected a typed PasswordRequired, got: {err:?}"
+            matches!(
+                err,
+                crate::source::SourceError::Pdf(PdfError::PasswordRequired)
+            ),
+            "expected SourceError::Pdf(PasswordRequired), got: {err:?}"
+        );
+    }
+
+    #[cfg(feature = "pdfium")]
+    #[test]
+    #[cfg_attr(miri, ignore)] // hands a real path to an entry point that opens it
+    fn pdf_info_with_password_treats_an_interior_nul_as_a_wrong_password() {
+        // pdfium takes the password as a C string, so it cannot carry a NUL.
+        // No password with one in it can be right, and it must not panic.
+        match pdf_info_with_password(&password_fixture(), "sec\0ret") {
+            Err(PdfError::WrongPassword) => {}
+            other => panic!("expected WrongPassword, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "pdfium")]
+    #[test]
+    #[cfg_attr(miri, ignore)] // hands a real path to an entry point that opens it
+    fn extract_page_image_with_password_treats_an_interior_nul_as_a_wrong_password() {
+        let err = extract_page_image_with_password(&password_fixture(), 1, "secret\0").unwrap_err();
+        assert!(
+            matches!(
+                err,
+                crate::source::SourceError::Pdf(PdfError::WrongPassword)
+            ),
+            "expected SourceError::Pdf(WrongPassword), got: {err:?}"
         );
     }
 

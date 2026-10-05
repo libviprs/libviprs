@@ -133,6 +133,7 @@ annotated   fs-detected  src/nifti.rs::the_sentinel_and_the_magic_have_to_agree_
 annotated   fs-detected  src/nifti.rs::the_two_byte_orders_load_to_identical_memory
 annotated   fs-detected  src/nifti.rs::the_version_check_needs_348_bytes_and_not_one_fewer
 annotated   fs-detected  src/nifti.rs::vox_offset_is_truncated_down_and_floored_at_the_header
+annotated   fs-detected  src/pdf.rs::a_pdf_failure_from_an_extract_helper_is_a_typed_source_error
 annotated   fs-detected  src/pdf.rs::extract_page_image_with_background_applies_clear_colour
 annotated   fs-detected  src/pdf.rs::extract_page_image_with_background_rejects_over_length_slice
 annotated   fs-detected  src/pdf.rs::extract_page_image_with_password_reports_encrypted_as_unsupported
@@ -477,14 +478,18 @@ annotated   not-detected src/analyze.rs::a_missing_img_is_an_io_error_and_the_he
 annotated   not-detected src/analyze.rs::a_pair_loads_from_either_name_and_from_the_bare_stem
 annotated   not-detected src/analyze.rs::decode_file_reaches_the_pair_from_the_hdr
 annotated   not-detected src/colour.rs::icc_typed_errors
+annotated   not-detected src/pdf.rs::extract_page_image_with_password_ignores_a_password_the_file_does_not_need
+annotated   not-detected src/pdf.rs::extract_page_image_with_password_keeps_the_embedded_image_of_an_owner_password_only_pdf
 annotated   not-detected src/pdf.rs::extract_page_image_with_password_rejects_a_wrong_password
 annotated   not-detected src/pdf.rs::extract_page_image_with_password_renders_the_aes256_fixture
 annotated   not-detected src/pdf.rs::extract_page_image_with_password_requires_a_password_for_the_aes256_fixture
+annotated   not-detected src/pdf.rs::extract_page_image_with_password_treats_an_interior_nul_as_a_wrong_password
 annotated   not-detected src/pdf.rs::password_and_dpi_extract_return_a_clean_typed_error
 annotated   not-detected src/pdf.rs::pdf_info_with_password_opens_the_aes256_fixture_with_the_right_password
 annotated   not-detected src/pdf.rs::pdf_info_with_password_passes_through_open_error
 annotated   not-detected src/pdf.rs::pdf_info_with_password_rejects_a_wrong_password
 annotated   not-detected src/pdf.rs::pdf_info_with_password_requires_a_password_for_the_aes256_fixture
+annotated   not-detected src/pdf.rs::pdf_info_with_password_treats_an_interior_nul_as_a_wrong_password
 annotated   not-detected src/pmtiles/range.rs::opening_something_that_is_not_there_is_a_typed_error
 annotated   not-detected src/pmtiles/writer.rs::widening_settles_where_a_doubling_loop_settles
 annotated   not-detected src/source.rs::decode_file_not_found

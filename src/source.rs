@@ -374,6 +374,15 @@ pub enum SourceError {
     /// a `.hdr` handed to it on its own (issue #764).
     #[error(transparent)]
     Analyze(#[from] crate::analyze::AnalyzeError),
+    /// A PDF failure raised by the [`crate::pdf`] extract helpers whose
+    /// contracts return a decode error ([`crate::pdf::extract_page_image_dpi`],
+    /// [`crate::pdf::extract_page_image_with_password`] and the background
+    /// variants). It carries the typed [`PdfError`](crate::pdf::PdfError), so
+    /// a caller tells a wrong password from a missing one, or an
+    /// out-of-range page from a parse failure, with a `match` rather than by
+    /// reading a message.
+    #[error(transparent)]
+    Pdf(#[from] crate::pdf::PdfError),
     /// An SVG document `usvg` refused to parse, raised by
     /// [`crate::svg::decode_svg`]. Carries the underlying message rather
     /// than the foreign error type so `SourceError` does not leak a

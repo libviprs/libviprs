@@ -374,7 +374,13 @@ const ANCHOR_FILES: &[&str] = &[
 /// that open the committed AES-256 `tests/fixtures/password.pdf` with the right
 /// password, a wrong one and none, through `pdf_info_with_password` and
 /// `extract_page_image_with_password`.
-const EXPECTED_SRC_ANNOTATIONS: usize = 262;
+///
+/// Its follow-up moves it 262 to 267, again all in `src/pdf.rs`: two cells on
+/// the owner-password-only fixture `tests/fixtures/owner-password-only.pdf`
+/// (its stored image comes back, with and without a password), one that a PDF
+/// failure from an extract helper is a typed `SourceError::Pdf`, and two that
+/// a password with an interior NUL is `WrongPassword` rather than a panic.
+const EXPECTED_SRC_ANNOTATIONS: usize = 267;
 /// Companion to [`EXPECTED_SRC_ANNOTATIONS`]: how many `src/` modules carry at
 /// least one annotation. #765 made it 25 by putting the first annotation in
 /// `src/analyze.rs`; `src/colour.rs` and `src/pdf.rs`, which took the other
