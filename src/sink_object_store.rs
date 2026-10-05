@@ -163,20 +163,102 @@ pub trait ObjectStore: Send + Sync {
 /// An [`ObjectStore`] that keeps each object as a file under a root
 /// directory, so object `a/b.png` is the file `root/a/b.png`.
 ///
-/// Not implemented yet: every operation refuses.
+/// It is the transport-free stand-in for a bucket: for tests, for harnesses
+/// that want to look at what a run uploaded, and for builds with no network
+/// client (libviprs-cli's `--sink s3://` writes through one). It implements
+/// the whole trait, so [`ObjectStoreSink`] writes through it,
+/// [`ObjectStoreSink::list_objects`] lists it, and
+/// [`ObjectStoreRangeReader`](crate::pmtiles::ObjectStoreRangeReader) reads an
+/// archive back out of it.
+///
+/// ```
+/// use libviprs::sink_object_store::{DirectoryObjectStore, ObjectStore};
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// # let dir = std::env::temp_dir().join(format!("libviprs-doc-dirstore-{}", std::process::id()));
+/// // s3://tiles/run-1/... lands under <dir>/tiles/run-1/...
+/// let store = DirectoryObjectStore::for_bucket(&dir, "tiles")?;
+/// store.put("run-1/image_files/0/0_0.png", b"...")?;
+/// assert_eq!(store.list("run-1/")?, vec!["run-1/image_files/0/0_0.png"]);
+/// assert_eq!(store.size("run-1/image_files/0/0_0.png")?, Some(3));
+/// # std::fs::remove_dir_all(&dir)?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// * **Keys** are `/`-separated relative paths made only of ordinary
+///   segments. An empty key, a leading `/`, an empty segment (`a//b`, `a/`),
+///   a `.` or `..` segment, a backslash or a NUL is refused before the
+///   filesystem is touched, and so is anything the platform's own path
+///   parser would read as other than one plain name per segment (a Windows
+///   drive prefix, say). No key can name a file outside the root.
+/// * **Symlinks** under the root are not followed. A read, size or write
+///   whose path crosses one is refused, and listing skips them, so a link
+///   planted inside the root is not a way out of it.
+/// * **Writes** are atomic. Each object is staged into a uniquely named
+///   sibling, flushed, and renamed over its key, so a reader sees the old
+///   object or the new one and never a torn one. A write that fails removes
+///   its staging file, and one that a dead process left behind is not an
+///   object: it is never listed, and no key can name it.
+/// * **Listing** walks the root and returns every object key that starts
+///   with the prefix, sorted, as plain string prefix matching, the way a
+///   bucket listing does. A root that does not exist yet lists as empty.
+/// * **A missing object** is an error from [`ObjectStore::get_range`] and
+///   [`ObjectStore::size`] alike. `size` never answers `Ok(None)`, because a
+///   file's length is always known and `None` would switch off a reader's
+///   bounds checks.
+///
+/// A file and a directory cannot share a name, so `a` and `a/b` cannot both
+/// be objects here, where a real bucket would hold both. The second `put`
+/// fails rather than replacing the first.
 #[derive(Debug, Clone)]
 pub struct DirectoryObjectStore {
     root: std::path::PathBuf,
 }
 
+/// The suffix every staging file ends with. A key segment may not end with
+/// it, which is what keeps a staged half-object from ever being addressed as
+/// an object.
+const STAGING_SUFFIX: &str = ".libviprs-part";
+
+/// Distinguishes the staging files of concurrent writers in one process.
+static STAGING_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Whether `segment` is one plain path segment that names the same thing on
+/// every platform: no separators, no NUL, not `.` or `..`, and nothing the
+/// platform's path parser reads as a prefix or a root.
+fn is_plain_segment(segment: &str) -> bool {
+    if segment.is_empty() || segment.contains(['/', '\\', '\0']) {
+        return false;
+    }
+    let mut parts = std::path::Path::new(segment).components();
+    matches!(
+        (parts.next(), parts.next()),
+        (Some(std::path::Component::Normal(name)), None) if name == segment
+    )
+}
+
 impl DirectoryObjectStore {
-    /// A store whose objects live under `root`.
+    /// A store whose objects live under `root`. Nothing is created until the
+    /// first write.
     pub fn new(root: impl Into<std::path::PathBuf>) -> Self {
         Self { root: root.into() }
     }
 
     /// A store for `bucket` under `root`, so object `k` is `root/bucket/k`.
+    ///
+    /// `bucket` has to be one plain name. An empty name, `.`, `..`, anything
+    /// with a `/`, a backslash or a NUL in it, or an absolute path is refused
+    /// with [`SinkError::Other`], since each would put the bucket beside the
+    /// root or several levels into it rather than directly under it.
     pub fn for_bucket(root: impl AsRef<std::path::Path>, bucket: &str) -> Result<Self, SinkError> {
+        if !is_plain_segment(bucket) {
+            return Err(SinkError::Other(format!(
+                "{bucket:?} is not a bucket name: a bucket is one plain name, \
+                 such as \"tiles\", and the directory store refuses anything \
+                 that would not sit directly under its root"
+            )));
+        }
         Ok(Self::new(root.as_ref().join(bucket)))
     }
 
@@ -185,25 +267,180 @@ impl DirectoryObjectStore {
         &self.root
     }
 
-    #[cfg(test)]
+    /// The file that holds `key`, after refusing a key that is not a plain
+    /// relative path and a path that crosses a symlink under the root.
+    fn path_of(&self, key: &str) -> Result<std::path::PathBuf, SinkError> {
+        let plain = !key.is_empty()
+            && key
+                .split('/')
+                .all(|seg| is_plain_segment(seg) && !seg.ends_with(STAGING_SUFFIX));
+        if !plain {
+            return Err(SinkError::Other(format!(
+                "object key {key:?} is not a plain relative path; the directory \
+                 store refuses it rather than resolve it outside its root"
+            )));
+        }
+        let mut walked = self.root.clone();
+        for seg in key.split('/') {
+            walked.push(seg);
+            match std::fs::symlink_metadata(&walked) {
+                Ok(meta) if meta.file_type().is_symlink() => {
+                    return Err(SinkError::Other(format!(
+                        "object key {key:?} crosses the symlink {}; the directory \
+                         store does not follow links under its root",
+                        walked.display()
+                    )));
+                }
+                Ok(_) => {}
+                // Nothing further down exists either, so there is no link
+                // left to cross.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+                Err(e) => return Err(SinkError::Io(e)),
+            }
+        }
+        Ok(self.root.join(key))
+    }
+
+    /// The regular file that holds the existing object `key`.
+    fn existing_object(&self, key: &str) -> Result<(std::path::PathBuf, u64), SinkError> {
+        let path = self.path_of(key)?;
+        let meta = std::fs::symlink_metadata(&path)?;
+        if !meta.is_file() {
+            return Err(SinkError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("{key:?} is a directory under the store, not an object"),
+            )));
+        }
+        Ok((path, meta.len()))
+    }
+
+    /// Stage `key`'s new contents through `write`, flush them, and rename the
+    /// staging file over the key. Any failure removes the staging file and
+    /// leaves whatever object was there before untouched.
     fn put_with(
         &self,
         key: &str,
         write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
     ) -> Result<(), SinkError> {
-        let _ = (key, write);
-        Err(SinkError::Unsupported(
-            "DirectoryObjectStore is not implemented".into(),
-        ))
+        let path = self.path_of(key)?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        // Creating the directories cannot have planted a link, but a racing
+        // process could have; look again now that the path exists.
+        let path = self.path_of(key)?;
+        let seq = STAGING_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut staging = path.clone().into_os_string();
+        staging.push(format!(".{}.{seq}{STAGING_SUFFIX}", std::process::id()));
+        let staging = std::path::PathBuf::from(staging);
+
+        let staged = (|| {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&staging)?;
+            write(&mut file)?;
+            file.sync_all()
+        })();
+        if let Err(e) = staged {
+            let _ = std::fs::remove_file(&staging);
+            return Err(SinkError::Io(e));
+        }
+        if let Err(e) = std::fs::rename(&staging, &path) {
+            let _ = std::fs::remove_file(&staging);
+            return Err(SinkError::Io(e));
+        }
+        Ok(())
+    }
+
+    /// Every object key under `dir`, relative to the root and `/`-separated.
+    /// Symlinks and staging files are not objects and are skipped.
+    fn walk(&self, dir: &std::path::Path, out: &mut Vec<String>) -> Result<(), SinkError> {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(SinkError::Io(e)),
+        };
+        for entry in entries {
+            let entry = entry?;
+            // `DirEntry::file_type` does not follow links, which is what
+            // keeps a planted link from pulling outside files into a listing.
+            let kind = entry.file_type()?;
+            let path = entry.path();
+            if kind.is_dir() {
+                self.walk(&path, out)?;
+            } else if kind.is_file() {
+                let Ok(rel) = path.strip_prefix(&self.root) else {
+                    continue;
+                };
+                let mut segments = Vec::new();
+                for part in rel.components() {
+                    match part.as_os_str().to_str() {
+                        Some(seg) => segments.push(seg),
+                        // A file whose name is not UTF-8 has no key that
+                        // could name it, so it is not an object.
+                        None => break,
+                    }
+                }
+                if segments.len() != rel.components().count()
+                    || segments.last().is_some_and(|s| s.ends_with(STAGING_SUFFIX))
+                {
+                    continue;
+                }
+                out.push(segments.join("/"));
+            }
+        }
+        Ok(())
     }
 }
 
 impl ObjectStore for DirectoryObjectStore {
     fn put(&self, key: &str, bytes: &[u8]) -> Result<(), SinkError> {
-        let _ = (key, bytes);
-        Err(SinkError::Unsupported(
-            "DirectoryObjectStore is not implemented".into(),
-        ))
+        use std::io::Write;
+        self.put_with(key, |file| file.write_all(bytes))
+    }
+
+    fn list(&self, prefix: &str) -> Result<Vec<String>, SinkError> {
+        let mut keys = Vec::new();
+        self.walk(&self.root, &mut keys)?;
+        keys.retain(|k| k.starts_with(prefix));
+        keys.sort();
+        Ok(keys)
+    }
+
+    fn get_range(&self, key: &str, offset: u64, len: usize) -> Result<Vec<u8>, SinkError> {
+        use std::io::{Read, Seek, SeekFrom};
+        let (path, size) = self.existing_object(key)?;
+        let in_bounds = u64::try_from(len)
+            .ok()
+            .and_then(|len| offset.checked_add(len))
+            .is_some_and(|end| end <= size);
+        if !in_bounds {
+            return Err(SinkError::Other(format!(
+                "range {offset}+{len} of {key:?} runs past the end of the \
+                 {size}-byte object"
+            )));
+        }
+        let mut file = std::fs::File::open(&path)?;
+        file.seek(SeekFrom::Start(offset))?;
+        let mut buf = Vec::new();
+        buf.try_reserve_exact(len).map_err(|_| {
+            SinkError::Other(format!("cannot allocate a {len}-byte range of {key:?}"))
+        })?;
+        file.take(len as u64).read_to_end(&mut buf)?;
+        if buf.len() != len {
+            // The file shrank between the size check and the read.
+            return Err(SinkError::Other(format!(
+                "range {offset}+{len} of {key:?} came back {} bytes short",
+                len - buf.len()
+            )));
+        }
+        Ok(buf)
+    }
+
+    fn size(&self, key: &str) -> Result<Option<u64>, SinkError> {
+        let (_, size) = self.existing_object(key)?;
+        Ok(Some(size))
     }
 }
 
