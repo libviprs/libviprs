@@ -2219,6 +2219,13 @@ fn reader_for<R: std::io::BufRead + std::io::Seek>(
 /// same bytes for metadata. Analyze is read whole twice over, because it is
 /// two files.
 ///
+/// SVG has no magic bytes, so a file nothing above matched gets one more
+/// look: if its first [`SVG_SNIFF_BYTES`](crate::svg::SVG_SNIFF_BYTES) pass
+/// [`looks_like_svg`](crate::svg::looks_like_svg) it's read whole the same
+/// bounded way and rasterised at [`SvgOptions::default`](crate::svg::SvgOptions)
+/// under these limits, or refused naming the `svg` feature in a build without
+/// it (issue #1170).
+///
 /// A file in a container libviprs does not recognise is streamed and guessed
 /// by the `image` facade. The two lists above are checked against the routing
 /// table by `every_row_carries_the_decoder_kind_its_container_needs`, so this
@@ -2250,7 +2257,21 @@ pub fn decode_file_with_limits(path: &Path, limits: DecodeLimits) -> Result<Rast
             .set("filename", path.display().to_string().into());
         return Ok(raster);
     }
-    let mut raster = if sniffed.is_some_and(SniffedFormat::decodes_from_memory) {
+    // SVG has no magic, so it's the one input the sniff above can't name. A
+    // file nothing matched that opens with `<` gets the same content sniff
+    // `decode_bytes_with_limits` runs, over the same window, and an SVG is
+    // read whole through the bounded read and handed to it (issue #1170).
+    // Nothing a raster sniff matches can open with `<`, so this never
+    // reroutes one, and other markup keeps streaming as it did.
+    let svg = sniffed.is_none() && {
+        file.seek(std::io::SeekFrom::Start(0))?;
+        let mut window = Vec::new();
+        (&mut file)
+            .take(crate::svg::SVG_SNIFF_BYTES as u64)
+            .read_to_end(&mut window)?;
+        crate::svg::looks_like_svg(&window)
+    };
+    let mut raster = if svg || sniffed.is_some_and(SniffedFormat::decodes_from_memory) {
         decode_bytes_with_limits(&read_file_bounded(path, limits, "image file body")?, limits)?
     } else {
         // Rewind past the sniff and keep reading from the same handle, so
@@ -2291,6 +2312,11 @@ pub fn decode_bytes(bytes: &[u8]) -> Result<Raster, SourceError> {
 /// dimension/allocation budget. The limits are configured on the decoder
 /// before any pixel data is allocated, and the `width * height` ceiling
 /// is checked before the [`Raster`] is constructed.
+///
+/// Bytes no magic matches and that pass
+/// [`looks_like_svg`](crate::svg::looks_like_svg) go to the SVG rasteriser at
+/// [`SvgOptions::default`](crate::svg::SvgOptions), the same as
+/// [`decode_file_with_limits`] does with a file (issue #1170).
 pub fn decode_bytes_with_limits(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
     let sniffed = sniff(bytes);
     // The containers libviprs decodes itself go straight to their own codec.
@@ -2304,6 +2330,17 @@ pub fn decode_bytes_with_limits(bytes: &[u8], limits: DecodeLimits) -> Result<Ra
         // rather than through a variant test, so the edit that declares a
         // paired container is the edit that dispatches it (issue #633).
         Some(Decoder::Paired { from_bytes, .. }) => return from_bytes(bytes, limits),
+        // No magic matched. SVG has none, so it's recognised by content here,
+        // decoded at the rasteriser's default options under the caller's
+        // limits, and a build without the `svg` feature gets the rasteriser's
+        // own "enable the `svg` feature" refusal (issue #1170).
+        None if crate::svg::looks_like_svg(bytes) => {
+            return crate::svg::decode_svg_with_limits(
+                bytes,
+                crate::svg::SvgOptions::default(),
+                limits,
+            );
+        }
         _ => {}
     }
     let reader = reader_for(Cursor::new(bytes), sniffed)?;

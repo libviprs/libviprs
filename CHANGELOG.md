@@ -21,6 +21,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Raster::csv_load_with_limits` and `Raster::matrix_load_with_limits` take a
   caller's `DecodeLimits` (issue #1168). `csv_load` and `matrix_load` are
   those at `DecodeLimits::default()`.
+- **`decode_file_with_limits` and `decode_bytes_with_limits` decode SVG**
+  (issue #1170). SVG has no magic bytes, so it used to fall through to the
+  `image` facade as an unknown format. When no magic matches and the first
+  4 KiB hold an XML prologue (declarations, comments, a doctype) followed by
+  an `svg` root element, both entry points now hand the bytes to the SVG
+  rasteriser at its default options under the caller's limits, and a build
+  without the `svg` feature gets its "enable the `svg` feature" refusal. The
+  sniff is public as `looks_like_svg`, with its window as `SVG_SNIFF_BYTES`.
+  A gzipped `.svgz` still isn't recognised.
 - `pdf_info_with_password` and `extract_page_image_with_password` open an
   encrypted PDF with its password when the `pdfium` feature is on. They used
   to answer any non-empty password with "not available in this build". Two

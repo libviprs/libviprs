@@ -392,7 +392,7 @@ pub use streaming::{PdfiumRenderMode, PdfiumStripSource};
 pub use streaming_mapreduce::{
     LocalWorkExecutor, MapReduceConfig, StripWorkUnit, WorkContext, WorkExecutor,
 };
-pub use svg::{SvgOptions, decode_svg, decode_svg_with_limits};
+pub use svg::{SVG_SNIFF_BYTES, SvgOptions, decode_svg, decode_svg_with_limits, looks_like_svg};
 // `TileEvidence` is re-exported at the root because it is the type of a field
 // on `EngineResult`, which is re-exported here: a caller reading a result
 // should not have to reach into a second module to name what it says. The

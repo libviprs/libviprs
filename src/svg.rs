@@ -276,6 +276,94 @@ fn rasterise(
     )))
 }
 
+/// How far into an input [`looks_like_svg`] looks for the `<svg` root. An XML
+/// declaration, a doctype and a licence comment fit comfortably; a document
+/// whose root starts later than this isn't one the content sniff claims
+/// (issue #1170). libviprs-cli's own sniff used the same window.
+pub const SVG_SNIFF_BYTES: usize = 4096;
+
+/// Whether `bytes` open an SVG document, for the decode entry points' content
+/// sniff (issue #1170).
+///
+/// Within the first [`SVG_SNIFF_BYTES`]: an optional UTF-8 BOM and
+/// whitespace, then any number of XML declarations or processing
+/// instructions (`<?...?>`), comments (`<!--...-->`) and a doctype
+/// (`<!DOCTYPE ...>`, internal subset included), then a root element named
+/// `svg`, with or without a namespace prefix, followed by whitespace, `>` or
+/// `/`. Anything else answers `false`, including an `<svg` that only appears
+/// inside a comment and a root that merely starts with the letters `svg`.
+///
+/// Deliberately narrow: every raster container libviprs sniffs opens with
+/// binary magic, so none can start with `<`, and the decode entry points
+/// only ask this once no magic matched. A gzipped `.svgz` isn't recognised;
+/// the rasteriser is built without gzip support.
+///
+/// The walk only ever moves forward through a slice capped at
+/// [`SVG_SNIFF_BYTES`], so it's bounded by the window whatever the input.
+#[must_use]
+pub fn looks_like_svg(bytes: &[u8]) -> bool {
+    let head = &bytes[..bytes.len().min(SVG_SNIFF_BYTES)];
+    let mut rest = head.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(head);
+    loop {
+        rest = skip_xml_space(rest);
+        if let Some(after) = rest.strip_prefix(b"<?") {
+            match find(after, b"?>") {
+                Some(end) => rest = &after[end + 2..],
+                None => return false,
+            }
+        } else if let Some(after) = rest.strip_prefix(b"<!--") {
+            match find(after, b"-->") {
+                Some(end) => rest = &after[end + 3..],
+                None => return false,
+            }
+        } else if let Some(after) = rest.strip_prefix(b"<!") {
+            // A doctype. Its internal subset, if any, sits in `[...]` and may
+            // hold `>` of its own, so close on `]>` when a `[` comes first.
+            let close = match (find(after, b"["), find(after, b">")) {
+                (Some(open), Some(gt)) if open < gt => find(after, b"]>").map(|e| e + 2),
+                (_, Some(gt)) => Some(gt + 1),
+                _ => None,
+            };
+            match close {
+                Some(end) => rest = &after[end..],
+                None => return false,
+            }
+        } else {
+            break;
+        }
+    }
+    let Some(name) = rest.strip_prefix(b"<") else {
+        return false;
+    };
+    let end = name
+        .iter()
+        .position(|&b| b.is_ascii_whitespace() || b == b'>' || b == b'/')
+        .unwrap_or(name.len());
+    // The name has to be terminated inside the window, or it isn't known yet.
+    if end == name.len() {
+        return false;
+    }
+    let local = match name[..end].iter().rposition(|&b| b == b':') {
+        Some(colon) => &name[colon + 1..end],
+        None => &name[..end],
+    };
+    local == b"svg"
+}
+
+/// XML whitespace is exactly space, tab, CR and LF.
+fn skip_xml_space(bytes: &[u8]) -> &[u8] {
+    let n = bytes
+        .iter()
+        .position(|b| !matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
+        .unwrap_or(bytes.len());
+    &bytes[n..]
+}
+
+/// The first offset of `needle` in `haystack`.
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
 /// The family name of the bundled face, as it appears in `Vera.ttf`'s name
 /// table. Every generic CSS family is pointed at it, so a document asking
 /// for `sans-serif`, for `Helvetica`, or for nothing at all resolves to the
@@ -414,6 +502,66 @@ fn rasterise(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The content sniff the decode entry points use (issue #1170), case by
+    /// case: what it claims, what it leaves alone, and the window it stops at.
+    #[test]
+    fn looks_like_svg_claims_an_svg_root_and_nothing_else() {
+        let yes: &[&[u8]] = &[
+            b"<svg/>",
+            b"<svg xmlns='http://www.w3.org/2000/svg'/>",
+            b"\xEF\xBB\xBF  \r\n\t<svg>",
+            b"<?xml version='1.0'?>\n<svg/>",
+            b"<?xml version='1.0'?><!-- a > b --><?pi x?><svg/>",
+            b"<!DOCTYPE svg PUBLIC '-//W3C//DTD SVG 1.1//EN' 'x.dtd'><svg/>",
+            b"<!DOCTYPE svg [ <!ENTITY a 'x>y'> ]><svg/>",
+            b"<svg:svg xmlns:svg='http://www.w3.org/2000/svg'/>",
+        ];
+        for bytes in yes {
+            assert!(
+                looks_like_svg(bytes),
+                "{:?}",
+                String::from_utf8_lossy(bytes)
+            );
+        }
+        let no: &[&[u8]] = &[
+            b"",
+            b"<",
+            b"<svg",
+            b"<svgx/>",
+            b"<html><svg/></html>",
+            b"<?xml version='1.0'?><!-- <svg/> --><html/>",
+            b"<?xml version='1.0'",
+            b"<!-- never closed <svg/>",
+            b"text <svg/>",
+            b"\x89PNG\r\n\x1a\n<svg/>",
+        ];
+        for bytes in no {
+            assert!(
+                !looks_like_svg(bytes),
+                "{:?}",
+                String::from_utf8_lossy(bytes)
+            );
+        }
+
+        // The root has to be named inside the window: a comment that pushes
+        // it past the window is not claimed, and one byte shorter is.
+        let fits = SVG_SNIFF_BYTES - b"<!---->".len() - b"<svg/".len();
+        let mut at = b"<!--".to_vec();
+        at.extend(std::iter::repeat_n(b'x', fits));
+        at.extend_from_slice(b"--><svg/>");
+        assert!(
+            looks_like_svg(&at),
+            "a root named on the window's last byte"
+        );
+        let mut past = b"<!--".to_vec();
+        past.extend(std::iter::repeat_n(b'x', fits + 1));
+        past.extend_from_slice(b"--><svg/>");
+        assert!(
+            !looks_like_svg(&past),
+            "a root named one byte past the window"
+        );
+    }
 
     /// A 10x6 document with an explicit pixel size and one opaque red rect.
     const RED_10X6: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="6"><rect x="0" y="0" width="10" height="6" fill="#ff0000"/></svg>"##;
