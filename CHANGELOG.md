@@ -85,14 +85,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   password-protected file as `PdfError::PasswordRequired` instead of a
   stringly `PdfError::Pdfium`.
 
-- **CI tests against `hayro-jpeg2000` 0.4.0 for now** (issue #1160). 0.4.1
-  came out on 2026-10-04 and decodes two of the irreversible jp2k fixtures to
-  exactly vips's bytes and lowers the decoder's peak, so the
-  irreversible-table control in `src/jp2k.rs` and the jp2k price in
-  `tests/decode_working_set.rs` went red on numbers measured against 0.4.0.
-  CI's Test job runs `cargo update -p hayro-jpeg2000 --precise 0.4.0` until
-  those are re-measured. The manifest still asks for `^0.4.0`, so nothing
-  changes for anyone depending on the crate.
+- **`jp2k` now needs `hayro-jpeg2000` 0.4.1 or later, and its decode
+  price moves** (issue #1160). 0.4.1 came out on 2026-10-04, decodes two of
+  the irreversible fixtures (`rgb_lossy_q48.jp2`, `chroma_tiny_sub_on.jp2`)
+  to exactly vips's bytes, and stops holding a copy of each extra component
+  per tile. I re-measured both against it on native x86_64, so the two
+  fixtures pin as exact, the other two lossy ones pin at 0 and 1 counts, and
+  the `max_alloc_bytes` price charges the per-tile working set once per
+  tile (16 bytes a tile pixel) instead of once per band (10 a band). A
+  512x512 RGB file prices at 11272192 bytes against a measured peak of
+  6387780, where it used to price at 14942208, 2.34 times the peak. A
+  single-band file goes the other way, 6553600 rather than 4980736 at
+  512x512 (1.76 times its peak), because one band was charged 10 bytes a
+  tile pixel, which only just covers the 9.2 it measures and doesn't cover
+  the fixed overheads: a 64x64 greyscale file peaked above its old price. Across the 100 cases I measured, the price now sits
+  between 1.05 and 1.80 times the peak. The manifest floor
+  moves from `0.4.0` to `0.4.1` (still a caret), and CI's Test job no longer
+  holds the decoder at 0.4.0.
 
 ### Fixed
 

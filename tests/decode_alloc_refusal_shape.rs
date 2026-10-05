@@ -375,7 +375,10 @@ fn priced_by_libviprs() -> Vec<Row> {
     // declares, before `hayro-jpeg2000` reserves anything. Unlike the JPEG XL
     // row there is no second ceiling underneath it: the decoder takes no
     // allocation tracker, so this is the only shape a budget refusal can
-    // arrive in and 4x4 is as small as the row needs to be.
+    // arrive in and 4x4 is as small as the row needs to be. The working set
+    // is 8 bytes a band-pixel plus 16 a tile pixel, charged once per tile
+    // rather than per band since `hayro-jpeg2000` 0.4.1 (issue #1160):
+    // 3 * 16 * 8 + 16 * 16 = 640.
     if cfg!(feature = "jp2k") {
         rows.push(Row {
             format: "jp2k",
@@ -385,9 +388,9 @@ fn priced_by_libviprs() -> Vec<Row> {
             decoded: (4, 4),
             priced_geometry: (4, 4, 3),
             sample_bytes: 1,
-            working_set: 864,
+            working_set: 640,
             what: "JPEG 2000 component buffers",
-            price: 912,
+            price: 688,
         });
     }
     rows
