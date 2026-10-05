@@ -369,7 +369,18 @@ const ANCHOR_FILES: &[&str] = &[
 /// written once, the latch over a destination write that fails part way, and
 /// the durability barrier now landing on the destination rather than on a
 /// staging file that no longer exists.
-const EXPECTED_SRC_ANNOTATIONS: usize = 256;
+///
+/// The password work moves it 256 to 262, all six in `src/pdf.rs`: the cells
+/// that open the committed AES-256 `tests/fixtures/password.pdf` with the right
+/// password, a wrong one and none, through `pdf_info_with_password` and
+/// `extract_page_image_with_password`.
+///
+/// Its follow-up moves it 262 to 267, again all in `src/pdf.rs`: two cells on
+/// the owner-password-only fixture `tests/fixtures/owner-password-only.pdf`
+/// (its stored image comes back, with and without a password), one that a PDF
+/// failure from an extract helper is a typed `SourceError::Pdf`, and two that
+/// a password with an interior NUL is `WrongPassword` rather than a panic.
+const EXPECTED_SRC_ANNOTATIONS: usize = 267;
 /// Companion to [`EXPECTED_SRC_ANNOTATIONS`]: how many `src/` modules carry at
 /// least one annotation. #765 made it 25 by putting the first annotation in
 /// `src/analyze.rs`; `src/colour.rs` and `src/pdf.rs`, which took the other
@@ -726,7 +737,14 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// The wrapper-forwarding cell this merge added does not appear here. It
 /// drives a recording sink that writes nothing, so it is `not-detected`, and
 /// it moves the inventory by a row without moving this figure.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 475;
+///
+/// The password follow-up in `src/pdf.rs` adds one:
+/// `a_pdf_failure_from_an_extract_helper_is_a_typed_source_error` writes a
+/// plain PDF to a temp file to ask for a page past its end. Its other four
+/// cells read committed fixtures through an entry point, so they are
+/// `not-detected` and leave this alone. The detector said 476 before this
+/// line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 476;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {

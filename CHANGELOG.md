@@ -7,7 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `pdf_info_with_password` and `extract_page_image_with_password` open an
+  encrypted PDF with its password when the `pdfium` feature is on. They used
+  to answer any non-empty password with "not available in this build". Two
+  new `PdfError` variants say what went wrong: `PasswordRequired` (the file
+  needs a user password and got none) and `WrongPassword` (including any
+  password with a NUL byte in it, which pdfium can't take). Builds without
+  `pdfium` behave as before.
+- `SourceError::Pdf(PdfError)`. The extract helpers that return a decode
+  error (`extract_page_image_dpi`, `extract_page_image_with_password` and the
+  background variants) report a PDF failure through it, so a caller matches
+  `SourceError::Pdf(PdfError::WrongPassword)` instead of downcasting.
+
 ### Changed
+
+- **`extract_page_image_with_password` renders, rather than extracts, a page
+  of a file that needs a user password** (`pdfium` feature). Its streams
+  can't be read without decrypting, so the page comes back rendered at the
+  72-DPI `pdfload` baseline (one pixel per point: a 300-DPI A4 scan comes back
+  595 x 841, not 2480 x 3508). A file that opens without a password keeps
+  extraction: unencrypted files and owner-password-only files `lopdf` can
+  decrypt (RC4, AES-128) go through `lopdf` as before, and owner-password-only
+  AES-256 files, which `lopdf` can't decrypt and used to fail with a corrupt
+  deflate stream, now hand back their largest image object at its stored size,
+  decoded by pdfium to 8 bits per sample. A password given for a file that
+  doesn't need one is ignored there, as it is for an unencrypted file.
+- **PDF failures from the decode-error extract helpers are `SourceError::Pdf`,
+  not `SourceError::Io`.** They used to arrive as an `io::Error` carrying the
+  `PdfError`'s message, so code matching `SourceError::Io` for them needs the
+  new variant, and the message drops its `I/O error: ` prefix. The
+  "not available in this build" refusals without `pdfium` stay
+  `SourceError::Io` with `ErrorKind::Unsupported`.
+- The pdfium render paths (`render_page_pdfium` and friends) report a
+  password-protected file as `PdfError::PasswordRequired` instead of a
+  stringly `PdfError::Pdfium`.
 
 - **CI tests against `hayro-jpeg2000` 0.4.0 for now** (issue #1160). 0.4.1
   came out on 2026-10-04 and decodes two of the irreversible jp2k fixtures to
