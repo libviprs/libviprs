@@ -683,6 +683,12 @@ pub(crate) fn decode_netpbm(
         let need = count
             .checked_mul(bpc)
             .ok_or_else(|| malformed("ppm: declared dimensions overflow"))?;
+        // The axis and pixel ceilings first, on the declared geometry, the
+        // way every other native decoder applies them. This route used to
+        // price the buffer and stop there, so a file over `max_coord` or
+        // `max_pixels` decoded straight through both (issue #1167).
+        limits.check_coord(width, height)?;
+        limits.check_pixels(width, height)?;
         // Cap the declared geometry against the **caller's** budget before
         // reserving, so a ~20-byte hostile header cannot request gigabytes,
         // and so this route refuses at the same number every other container
@@ -691,6 +697,15 @@ pub(crate) fn decode_netpbm(
 
         let mut buf: Vec<u8> = Vec::new();
         if ascii {
+            // Every ASCII sample takes at least one byte of input (a `P1`
+            // sample is one character, a `P2`/`P3` one at least one digit), so
+            // a body with fewer bytes left than the header has samples can't
+            // be complete. Refuse it here rather than reserving the whole
+            // declared buffer and finding out sample by sample, which let a
+            // 20-byte header reserve anything up to the budget (issue #1167).
+            if count > data.len().saturating_sub(pos) {
+                return Err(malformed("ppm: truncated ascii pixel data"));
+            }
             // `need` is within budget; reserve fallibly so an in-budget request
             // the host still cannot honour is a typed error, not an abort.
             buf.try_reserve_exact(need)
@@ -988,6 +1003,116 @@ mod tests {
      * still using the constant would accept both and a route hard-coding any
      * other number would report that number.
      */
+    /// The Netpbm route honours `max_coord` and `max_pixels` on the declared
+    /// header geometry, not only `max_alloc_bytes` (issue #1167).
+    ///
+    /// It priced the buffer and never asked the other two ceilings, so a
+    /// file over either decoded straight through it, which is what the parked
+    /// `limits_ppm` cell in libviprs-tests pins. One under each ceiling is
+    /// refused with its own typed variant and exactly at it decodes, for a
+    /// binary `P6` and an ASCII `P1`, which take different body paths after
+    /// the header.
+    #[test]
+    fn the_netpbm_route_honours_max_coord_and_max_pixels() {
+        use crate::source::{DecodeLimits, SourceError};
+
+        let mut p6 = b"P6\n16 8\n255\n".to_vec();
+        p6.resize(p6.len() + 16 * 8 * 3, 7);
+        let mut p1 = b"P1\n16 8\n".to_vec();
+        p1.extend(std::iter::repeat_n(b'0', 16 * 8));
+
+        for (form, bytes) in [("P6", &p6), ("P1", &p1)] {
+            let d = DecodeLimits::default();
+            match decode_netpbm(bytes, d.with_max_coord(15)).map(|r| r.data().len()) {
+                Err(SourceError::CoordLimitExceeded {
+                    width: 16,
+                    height: 8,
+                    max_coord: 15,
+                }) => {}
+                other => panic!("{form}: one under max_coord must be refused, got {other:?}"),
+            }
+            match decode_netpbm(bytes, d.with_max_pixels(127)).map(|r| r.data().len()) {
+                Err(SourceError::DimensionLimitExceeded {
+                    width: 16,
+                    height: 8,
+                    max_pixels: 127,
+                }) => {}
+                other => panic!("{form}: one under max_pixels must be refused, got {other:?}"),
+            }
+            let at = d.with_max_coord(16).with_max_pixels(128);
+            let r = decode_netpbm(bytes, at)
+                .unwrap_or_else(|e| panic!("{form}: exactly at both ceilings must decode: {e}"));
+            assert_eq!((r.width(), r.height()), (16, 8));
+        }
+    }
+
+    /// A hostile Netpbm header is refused by the ceiling it breaks, on the
+    /// declared geometry, before anything is reserved (issue #1167).
+    ///
+    /// Each file is a header and a handful of body bytes. A `P6` declaring
+    /// 60000x60000 under `max_coord` 1024 has to come back as the coordinate
+    /// refusal, and an ASCII `P2` declaring 30000x30000 under `max_pixels`
+    /// 2^20 as the pixel refusal. Before the fix both fell through to the
+    /// allocation price instead, so the caller's own ceiling never fired and
+    /// the answer depended on which budget happened to be smaller.
+    #[test]
+    fn a_hostile_netpbm_header_is_refused_by_the_ceiling_it_breaks() {
+        use crate::source::{DecodeLimits, SourceError};
+
+        let mut p6 = b"P6\n60000 60000\n255\n".to_vec();
+        p6.extend_from_slice(&[0u8; 20]);
+        match decode_netpbm(&p6, DecodeLimits::default().with_max_coord(1024))
+            .map(|r| r.data().len())
+        {
+            Err(SourceError::CoordLimitExceeded {
+                width: 60000,
+                height: 60000,
+                max_coord: 1024,
+            }) => {}
+            other => panic!("a 60000-wide P6 under max_coord 1024, got {other:?}"),
+        }
+
+        let p2 = b"P2\n30000 30000\n255\n0 0 0 0\n";
+        match decode_netpbm(p2, DecodeLimits::default().with_max_pixels(1 << 20))
+            .map(|r| r.data().len())
+        {
+            Err(SourceError::DimensionLimitExceeded {
+                width: 30000,
+                height: 30000,
+                max_pixels: 1_048_576,
+            }) => {}
+            other => panic!("a 900-megapixel P2 under max_pixels 2^20, got {other:?}"),
+        }
+    }
+
+    /// An ASCII Netpbm body too short for its declared geometry is refused
+    /// before the pixel buffer is reserved (issue #1167).
+    ///
+    /// Every ASCII sample takes at least one byte of input (a `P1` sample is
+    /// one character, a `P2`/`P3` one is a digit), so a body with fewer bytes
+    /// left than the header has samples can't be complete. The binary forms
+    /// already check that their body is present before reserving; the ASCII
+    /// forms reserved the whole declared buffer first and only found out
+    /// sample by sample. Here a 20-byte header asks for 8000x8000 `Gray8`,
+    /// 64 MiB, inside every default ceiling, carrying four samples.
+    #[test]
+    fn a_short_ascii_netpbm_body_is_refused_before_the_buffer_is_reserved() {
+        use crate::source::DecodeLimits;
+
+        for (form, bytes) in [
+            ("P2", &b"P2\n8000 8000\n255\n0 0 0 0\n"[..]),
+            ("P3", &b"P3\n8000 8000\n255\n0 0 0 0\n"[..]),
+            ("P1", &b"P1\n8000 8000\n0101\n"[..]),
+        ] {
+            match decode_netpbm(bytes, DecodeLimits::default()).map(|r| r.data().len()) {
+                Err(e) if e.to_string().contains("truncated ascii pixel data") => {}
+                other => {
+                    panic!("{form}: a short ASCII body must be refused up front, got {other:?}")
+                }
+            }
+        }
+    }
+
     #[test]
     fn the_netpbm_route_refuses_at_the_callers_budget_not_at_one_of_its_own() {
         // 1024 x 1024 RGB8 is 3 MiB: comfortably inside the 512 MiB default
@@ -1388,7 +1513,13 @@ mod tests {
         // constructor's `ByteBudgetExceeded`, because this path now prices
         // against the caller's `DecodeLimits` like every other container
         // rather than against `DEFAULT_MAX_ALLOC_BYTES` (issue #910).
-        let over_budget = b"P3\n65535 65535\n255\n";
+        //
+        // 30000 x 30000 is under the default gigapixel `max_pixels`, so the
+        // allocation price is the ceiling it breaks. It used to be 65535
+        // square, which is over `max_pixels` too and so now comes back as the
+        // pixel refusal, the ceilings being checked in the documented order
+        // `max_coord`, `max_pixels`, `max_alloc_bytes` (issue #1167).
+        let over_budget = b"P3\n30000 30000\n255\n";
         let err =
             Raster::ppm_load(over_budget).expect_err("over-budget header must be a typed error");
         assert!(

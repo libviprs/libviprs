@@ -380,6 +380,12 @@ fn rasterise(
     // not lift it.
     limits.check_coord(width, height)?;
     limits.check_pixels(width, height)?;
+    // And the allocation budget, on the RGBA8 pixmap about to be allocated.
+    // `take_demultiplied` works in place and hands that same buffer to the
+    // raster, so the pixmap is the peak libviprs allocates. Without this a
+    // caller's `max_alloc_bytes` did not bound an SVG decode at all (issue
+    // #1167).
+    limits.check_image_alloc("svg pixmap", width, height, 4, 1)?;
 
     let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height).ok_or_else(|| {
         DecodeError::DimensionLimitExceeded {
@@ -732,6 +738,74 @@ mod tests {
         )
         .unwrap();
         assert_eq!((im.width(), im.height()), (10, 6));
+    }
+
+    /// The allocation budget bounds the rasterised pixmap (issue #1167).
+    ///
+    /// The rasteriser checked `max_coord` and `max_pixels` and then allocated
+    /// a `width x height x 4` pixmap without asking `max_alloc_bytes`, so a
+    /// caller's memory ceiling didn't bound an SVG decode at all. One byte
+    /// under the RGBA8 raster this document decodes to must be refused with
+    /// the typed allocation refusal, and exactly at it must decode.
+    #[test]
+    #[cfg(feature = "svg")]
+    fn the_alloc_budget_bounds_the_pixmap() {
+        let decoded = decode_svg(RED_10X6, SvgOptions::default()).expect("the control decodes");
+        let raster_bytes = decoded.data().len() as u64;
+        assert_eq!(raster_bytes, 10 * 6 * 4, "the control: a 10x6 RGBA8 raster");
+
+        let tight = DecodeLimits::default().with_max_alloc_bytes(raster_bytes - 1);
+        match decode_svg_with_limits(RED_10X6, SvgOptions::default(), tight).map(|r| r.data().len())
+        {
+            Err(DecodeError::AllocLimitExceeded {
+                max_alloc_bytes,
+                needed_bytes,
+                ..
+            }) => {
+                assert_eq!(max_alloc_bytes, raster_bytes - 1);
+                assert_eq!(needed_bytes, raster_bytes);
+            }
+            other => panic!("one byte under the raster must be refused, got {other:?}"),
+        }
+
+        let at = DecodeLimits::default().with_max_alloc_bytes(raster_bytes);
+        let r = decode_svg_with_limits(RED_10X6, SvgOptions::default(), at)
+            .expect("exactly at the raster's price must decode");
+        assert_eq!((r.width(), r.height()), (10, 6));
+    }
+
+    /// A tiny document declaring a big canvas is priced from the declared
+    /// geometry and refused before the pixmap exists (issue #1167).
+    ///
+    /// About a hundred bytes of SVG ask for a 4096x4096 RGBA8 pixmap, 64 MiB, under a
+    /// 1 MiB budget, with the axis and pixel ceilings lifted so only
+    /// `max_alloc_bytes` stands between the header and the allocation. The
+    /// refusal has to name the declared geometry and the full price, which is
+    /// only possible if it came from the header rather than from a buffer
+    /// that was already allocated.
+    #[test]
+    #[cfg(feature = "svg")]
+    fn a_tiny_document_cannot_buy_a_big_pixmap_past_the_alloc_budget() {
+        const BIG_CANVAS: &[u8] =
+            br#"<svg xmlns="http://www.w3.org/2000/svg" width="4096" height="4096"><rect width="1" height="1"/></svg>"#;
+        let limits = DecodeLimits::default()
+            .with_max_coord(u32::MAX)
+            .with_max_pixels(u64::MAX)
+            .with_max_alloc_bytes(1 << 20);
+        match decode_svg_with_limits(BIG_CANVAS, SvgOptions::default(), limits)
+            .map(|r| r.data().len())
+        {
+            Err(DecodeError::AllocLimitExceeded {
+                geometry: Some(g),
+                needed_bytes,
+                max_alloc_bytes: 1_048_576,
+                ..
+            }) => {
+                assert_eq!((g.width, g.height, g.bands), (4096, 4096, 4));
+                assert_eq!(needed_bytes, 4096 * 4096 * 4);
+            }
+            other => panic!("a 64 MiB pixmap under a 1 MiB budget must be refused, got {other:?}"),
+        }
     }
 
     /**
