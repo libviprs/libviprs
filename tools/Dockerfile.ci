@@ -35,13 +35,18 @@ RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 # libviprs-tests' `.github/workflows/ci.yml` (`PDFIUM_RELEASE` / `PDFIUM_SHA256`
 # in its `test-pdfium` job) and its `Dockerfile`.
 #
-# It said "in lockstep with ci.yml" until #1012, and this repo's `ci.yml` pins
-# no pdfium at all: the pdfium tests run through the tests repo, so this image
-# is the only place this repository names a pdfium build. The comment therefore
-# pointed at the one file that could not have told anyone the pin was stale,
-# and it was: libviprs-tests moved to 8054 in libviprs-tests#208 and this sat
-# on 7881. A pdfium-dependent difference between the two, a rendering change or
-# a dropped symbol, passes `make ci` and fails on GitHub, or the reverse.
+# It said "in lockstep with ci.yml" until #1012, when this repo's `ci.yml`
+# pinned no pdfium at all and the pdfium tests ran only through the tests repo.
+# The comment therefore pointed at the one file that could not have told anyone
+# the pin was stale, and it was: libviprs-tests moved to 8054 in
+# libviprs-tests#208 and this sat on 7881. A pdfium-dependent difference
+# between the two, a rendering change or a dropped symbol, passes `make ci` and
+# fails on GitHub, or the reverse.
+#
+# Since #1172 `ci.yml` does pin one: its Test job downloads this release for
+# the `cargo test --features pdfium` cell. That copy is in this repository, so
+# `tests/pdfium_abi_and_binary_pins.rs` checks its release and its amd64 digest
+# against the two lines below. The tests repo's copy is still checked by hand.
 #
 # Nothing enforces the lockstep, and that is a decision rather than an
 # oversight. The obvious guard is a test here that reads

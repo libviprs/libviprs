@@ -74,12 +74,14 @@
 //!
 //! # Why this reads files rather than the build
 //!
-//! Nothing in this repository's own job list loads libpdfium: `ci.yml` runs
-//! `cargo clippy --features pdfium` and `cargo check --features pdfium` and no
-//! `cargo test --features pdfium`. A runtime check would therefore not run
-//! here, and PDFium's public API exposes no version query to make one out of
-//! anyway. The pins are text, so the guard is over text, and it runs on every
-//! job that runs the test suite.
+//! Until #1172 nothing in this repository's own job list loaded libpdfium:
+//! `ci.yml` ran `cargo clippy --features pdfium` and `cargo check --features
+//! pdfium` and no `cargo test --features pdfium`. The Test job now runs that
+//! cell against a libpdfium it downloads, but PDFium's public API still
+//! exposes no version query to build a runtime check out of. The pins are
+//! text, so the guard is over text, and it runs on every job that runs the
+//! test suite. The downloaded copy is one more pin, so it is in
+//! `declared_builds`, and its digest is held to the image's.
 
 use std::path::{Path, PathBuf};
 
