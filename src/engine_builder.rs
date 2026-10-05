@@ -2793,6 +2793,81 @@ mod live_resume_bookkeeping_tests {
 }
 
 // ---------------------------------------------------------------------------
+// `source_content_hash` through `with_config` (issue #1165)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod source_content_hash_tests {
+    use super::*;
+    use crate::pixel::PixelFormat;
+    use crate::planner::{Layout, PyramidPlanner};
+    use crate::raster::Raster;
+    use crate::resume::ResumePolicy;
+    use crate::sink::FsSink;
+
+    fn source() -> Raster {
+        Raster::new(8, 8, PixelFormat::Rgb8, vec![10u8; 8 * 8 * 3]).unwrap()
+    }
+
+    fn plan() -> PyramidPlan {
+        PyramidPlanner::new(8, 8, 2, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan()
+    }
+
+    /// Run `digest`'s pyramid into `out` with a checkpoint in `cp`, as a
+    /// resume run, carrying the digest on the config handed to `with_config`.
+    fn run(out: &std::path::Path, cp: &std::path::Path, digest: &str) -> Result<(), EngineError> {
+        let sink = FsSink::new(out.to_path_buf(), plan());
+        EngineBuilder::new(&source(), plan(), sink)
+            .with_engine(EngineKind::Monolithic)
+            .with_config(EngineConfig::default().with_source_content_hash(digest))
+            .with_resume(
+                ResumePolicy::resume()
+                    .with_checkpoint_root(cp)
+                    .with_checkpoint_every(1),
+            )
+            .run()
+            .map(|_| ())
+    }
+
+    /// A checkpoint made from one source refuses a resume that names another
+    /// (issue #1165).
+    ///
+    /// `EngineConfig::with_source_content_hash` is folded into the plan hash,
+    /// and that is the only thing stopping a resume from stitching tiles of
+    /// two different images together when they happen to be the same size.
+    /// `with_config` used to drop the digest, so both runs hashed the same
+    /// plan and the second one quietly resumed.
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn a_resume_with_a_different_source_digest_is_refused() {
+        let out = tempfile::tempdir().unwrap();
+        let cp = tempfile::tempdir().unwrap();
+        run(out.path(), cp.path(), "digest-of-image-a").expect("the first run succeeds");
+
+        match run(out.path(), cp.path(), "digest-of-image-b") {
+            Err(EngineError::PlanHashMismatch { .. }) => {}
+            other => panic!(
+                "a resume naming a different source digest must be refused with \
+                 PlanHashMismatch, got {other:?}"
+            ),
+        }
+    }
+
+    /// The control for the cell above: the same digest resumes cleanly, so
+    /// the refusal is about the digest and not about resuming at all.
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn a_resume_with_the_same_source_digest_succeeds() {
+        let out = tempfile::tempdir().unwrap();
+        let cp = tempfile::tempdir().unwrap();
+        run(out.path(), cp.path(), "digest-of-image-a").expect("the first run succeeds");
+        run(out.path(), cp.path(), "digest-of-image-a").expect("the same source resumes");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Resume + dedupe/checksum seeding (issue #272 real fix)
 // ---------------------------------------------------------------------------
 

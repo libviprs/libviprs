@@ -76,6 +76,8 @@ annotated   fs-detected  src/engine_builder.rs::run_releases_the_lock_when_it_fi
 annotated   fs-detected  src/engine_builder.rs::verify_dedupe_still_runs
 annotated   fs-detected  src/engine_builder.rs::verify_through_opaque_wrapper_requires_and_honors_explicit_root
 annotated   fs-detected  src/engine_builder.rs::with_skip_blanks_writes_strictly_fewer_files_through_the_builder
+annotated   fs-detected  src/engine_builder.rs::a_resume_with_a_different_source_digest_is_refused
+annotated   fs-detected  src/engine_builder.rs::a_resume_with_the_same_source_digest_succeeds
 annotated   fs-detected  src/exr.rs::alloc_budget_is_checked_before_decoding
 annotated   fs-detected  src/exr.rs::alloc_budget_prices_every_declared_channel_not_only_the_selected_ones
 annotated   fs-detected  src/exr.rs::compression_and_part_count_are_attached
