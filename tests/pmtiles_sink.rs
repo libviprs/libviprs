@@ -190,6 +190,19 @@ fn walk_metadata(path: &Path) -> Metadata {
     Metadata::try_from_json(&raw).expect("the sink wrote parseable metadata")
 }
 
+/// The metadata object the archive stores, as raw JSON.
+fn walk_metadata_json(path: &Path) -> serde_json::Value {
+    let bytes = std::fs::read(path).expect("the archive is readable");
+    let header = Header::try_decode(&bytes[..HEADER_BYTES]).expect("the sink wrote a v3 header");
+    let raw = section(
+        &bytes,
+        &header,
+        header.metadata_offset,
+        header.metadata_length,
+    );
+    serde_json::from_slice(&raw).expect("the sink wrote JSON metadata")
+}
+
 // ---------------------------------------------------------------------------
 // Running the engine into a sink
 // ---------------------------------------------------------------------------
@@ -559,6 +572,58 @@ fn the_engine_config_reaches_the_archive_metadata() {
 
     let source = vnd.source.expect("the source block records the raster");
     assert_eq!((source.width, source.height), (512, 512));
+}
+
+/// The archive's `generation` block says whether the plan was centred and
+/// whether the run dropped its blank tiles (issue #1162).
+///
+/// A reader that rebuilds the plan from the archive needs both: without the
+/// first it lays the tiles on the uncentred grid, without the second every
+/// dropped blank reads as a missing tile. The default run is the control, so a
+/// writer stamping `true` everywhere cannot pass.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn the_archive_metadata_records_centring_and_skip_blanks() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    // 500x300 does not fill a 256 grid: centring moves the image, and the
+    // padding it adds is uniform, so skip_blanks has tiles to drop.
+    let src = gradient(500, 300);
+    let flags = |name: &str, centre: bool, skip: bool| {
+        let plan = PyramidPlanner::new(500, 300, 256, 0, Layout::Xyz)
+            .expect("the plan is valid")
+            .with_centre(centre)
+            .plan();
+        let archive = dir.path().join(name);
+        let sink = PmTilesSink::builder(&archive)
+            .plan(plan.clone())
+            .build()
+            .expect("the sink builds");
+        EngineBuilder::new(&src, plan, sink)
+            .with_skip_blanks(skip)
+            .run()
+            .expect("the run succeeds");
+        // The stored JSON itself, not the typed view of it, so this checks
+        // what any PMTiles reader finds in the archive.
+        let v = walk_metadata_json(&archive);
+        let generation = &v["vnd.libviprs"]["generation"];
+        assert!(
+            generation.is_object(),
+            "the archive carries a generation block"
+        );
+        let flag = |key: &str| generation[key].as_bool().unwrap_or(false);
+        (flag("centre"), flag("skip_blanks"))
+    };
+
+    assert_eq!(
+        flags("flagged.pmtiles", true, true),
+        (true, true),
+        "a centred skip_blanks run must say so in the archive"
+    );
+    assert_eq!(
+        flags("plain.pmtiles", false, false),
+        (false, false),
+        "the control: a plain run records neither"
+    );
 }
 
 /// The archive's zoom range is the plan's level range.

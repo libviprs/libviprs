@@ -203,6 +203,7 @@ annotated   fs-detected  src/sink.rs::fs_sink_encodes_png
 annotated   fs-detected  src/sink.rs::fs_sink_no_dzi_for_xyz
 annotated   fs-detected  src/sink.rs::fs_sink_run_never_nests_leaf_locks
 annotated   fs-detected  src/sink.rs::fs_sink_writes_dzi_manifest
+annotated   fs-detected  src/sink.rs::fs_sink_manifest_records_centring_and_skip_blanks
 annotated   fs-detected  src/sink.rs::fs_sink_writes_tile_to_disk
 annotated   fs-detected  src/sink.rs::fs_sink_xyz_path_structure
 annotated   fs-detected  src/sink.rs::iiif_run_writes_info_json
@@ -391,6 +392,7 @@ annotated   fs-detected  tests/pmtiles_sink.rs::the_directory_reader_describes_t
 annotated   fs-detected  tests/pmtiles_sink.rs::the_directory_reader_resolves_a_tile_through_the_plan_not_a_literal_path
 annotated   fs-detected  tests/pmtiles_sink.rs::the_directory_reader_returns_what_the_run_wrote_and_none_elsewhere
 annotated   fs-detected  tests/pmtiles_sink.rs::the_engine_config_reaches_the_archive_metadata
+annotated   fs-detected  tests/pmtiles_sink.rs::the_archive_metadata_records_centring_and_skip_blanks
 annotated   fs-detected  tests/pmtiles_sink.rs::the_resume_refusal_survives_the_sink_wrappers
 annotated   fs-detected  tests/pmtiles_sink.rs::the_sink_exposes_no_checkpoint_root
 annotated   fs-detected  tests/pmtiles_sink.rs::two_ordered_arrival_runs_produce_the_same_archive
