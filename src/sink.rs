@@ -2427,11 +2427,21 @@ impl FsSink {
             .get()
             .copied()
             .unwrap_or(crate::pixel::PixelFormat::Rgb8);
+        // The sink never sees the source, so the digest is one it was told:
+        // the builder's own, then the run's `source_content_hash` (issue
+        // #1164). See `ManifestBuilder::include_source_hash`.
+        let bytes_hash = match builder.as_ref() {
+            Some(b) if b.wants_source_hash() => b
+                .source_hash()
+                .map(str::to_owned)
+                .or_else(|| eng_cfg.as_ref().and_then(|c| c.source_content_hash.clone())),
+            _ => None,
+        };
         let source = SourceMetadata {
             width: self.plan.image_width,
             height: self.plan.image_height,
             pixel_format,
-            bytes_hash: None,
+            bytes_hash,
         };
 
         // -- per-level metadata --------------------------------------------
@@ -3505,6 +3515,94 @@ mod tests {
             (false, false),
             "the control: an uncentred run that emits every tile records neither"
         );
+    }
+
+    /// A manifest built with `include_source_hash(true)` records a source
+    /// digest (issue #1164).
+    ///
+    /// The sink never sees the source, so the digest it records is the one
+    /// the run was told about, `EngineConfig::source_content_hash`, which is
+    /// documented as exactly this value. The builder flag used to be stored
+    /// and never read, so `bytes_hash` came out null whatever was asked for.
+    /// The run without the flag is the control: asking is what turns it on.
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn fs_sink_manifest_records_the_source_digest_when_asked() {
+        use crate::manifest::ManifestBuilder;
+
+        let src =
+            crate::raster::Raster::new(8, 8, PixelFormat::Rgb8, vec![9u8; 8 * 8 * 3]).unwrap();
+        let plan = PyramidPlanner::new(8, 8, 4, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+        let config = crate::engine::EngineConfig::default().with_source_content_hash("abc123");
+
+        let bytes_hash = |builder: ManifestBuilder| {
+            let dir = tempfile::tempdir().unwrap();
+            let out = dir.path().join("tiles");
+            let sink = FsSink::new(&out, plan.clone())
+                .with_format(TileFormat::Raw)
+                .with_manifest(builder);
+            crate::engine::generate_pyramid_observed(
+                &src,
+                &plan,
+                &sink,
+                &config,
+                &crate::observe::NoopObserver,
+            )
+            .unwrap();
+            let mut seen = Vec::new();
+            let sibling = dir.path().join("tiles.manifest.json");
+            for path in [out.join("manifest.json"), sibling] {
+                let bytes = std::fs::read(&path).unwrap();
+                let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                seen.push(v["source"]["bytes_hash"].as_str().map(str::to_owned));
+            }
+            assert_eq!(seen[0], seen[1], "both manifest copies must agree");
+            seen.remove(0)
+        };
+
+        assert_eq!(
+            bytes_hash(ManifestBuilder::new().include_source_hash(true)).as_deref(),
+            Some("abc123"),
+            "include_source_hash(true) must record the run's source digest"
+        );
+        assert_eq!(
+            bytes_hash(ManifestBuilder::new()),
+            None,
+            "the control: without the flag the manifest records no digest"
+        );
+    }
+
+    /// A digest given to the builder is recorded verbatim and wins over the
+    /// run's `source_content_hash` (issue #1164).
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn fs_sink_manifest_prefers_the_builders_own_source_digest() {
+        use crate::manifest::{Manifest, ManifestBuilder};
+
+        let src =
+            crate::raster::Raster::new(8, 8, PixelFormat::Rgb8, vec![9u8; 8 * 8 * 3]).unwrap();
+        let plan = PyramidPlanner::new(8, 8, 4, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("tiles");
+        let sink = FsSink::new(&out, plan.clone())
+            .with_format(TileFormat::Raw)
+            .with_manifest(ManifestBuilder::new().with_source_hash("from-the-builder"));
+        crate::engine::generate_pyramid_observed(
+            &src,
+            &plan,
+            &sink,
+            &crate::engine::EngineConfig::default().with_source_content_hash("from-the-run"),
+            &crate::observe::NoopObserver,
+        )
+        .unwrap();
+        let m = Manifest::read_from(&out.join("manifest.json"))
+            .unwrap()
+            .into_v1();
+        assert_eq!(m.source.bytes_hash.as_deref(), Some("from-the-builder"));
     }
 
     /**
