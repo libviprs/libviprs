@@ -393,7 +393,9 @@ const ANCHOR_FILES: &[&str] = &[
 /// #1170 moves it 284 to 286: `both_entry_points_decode_an_svg_document` and `a_png_longer_than_the_svg_window_still_decodes_as_png` in `src/source.rs`, which write an SVG and a PNG to a temp file to decode them by path.
 /// #1174 moves it 286 to 288: two `src/stream_verify.rs` cells that build a skip_blanks pyramid in a temp dir and verify it with and without the flag.
 /// #1169 moves it 288 to 289: `manifest_locations_are_where_the_sink_writes` in `src/sink.rs`, which runs a pyramid into a temp dir and finds its manifest copies.
-const EXPECTED_SRC_ANNOTATIONS: usize = 289;
+///
+/// #1173 moves it 289 to 291: `the_probe_agrees_with_the_decode_on_every_container_it_reads` and `an_svg_is_probed_by_content_and_agrees_with_the_decode` in `src/source.rs`, which write fixtures to a temp file to probe them by path.
+const EXPECTED_SRC_ANNOTATIONS: usize = 291;
 /// Companion to [`EXPECTED_SRC_ANNOTATIONS`]: how many `src/` modules carry at
 /// least one annotation. #765 made it 25 by putting the first annotation in
 /// `src/analyze.rs`; `src/colour.rs` and `src/pdf.rs`, which took the other
@@ -769,7 +771,9 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1170 adds 2: the same two `src/source.rs` cells. It said 494 before this line moved.
 /// #1174 adds 2: the same two cells. It said 496 before this line moved.
 /// #1169 adds 1: the same `src/sink.rs` cell. It said 498 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 499;
+///
+/// #1173 adds 2: the same two `src/source.rs` cells. It said 499 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 501;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
