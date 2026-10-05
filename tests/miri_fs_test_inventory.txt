@@ -235,7 +235,9 @@ annotated   fs-detected  src/sink_pmtiles.rs::dropping_a_sink_mid_run_leaves_no_
 annotated   fs-detected  src/sink_pmtiles.rs::finishing_without_a_single_tile_publishes_nothing
 annotated   fs-detected  src/sink_pmtiles.rs::the_published_header_is_available_without_reopening_the_archive
 annotated   fs-detected  src/sink_pmtiles.rs::the_archive_records_the_source_digest_from_the_engine_config
+annotated   fs-detected  src/source.rs::a_png_longer_than_the_svg_window_still_decodes_as_png
 annotated   fs-detected  src/source.rs::both_entry_points_agree_on_every_container_in_the_route_table
+annotated   fs-detected  src/source.rs::both_entry_points_decode_an_svg_document
 annotated   fs-detected  src/source.rs::content_beats_extension_in_both_entry_points
 annotated   fs-detected  src/source.rs::decode_file_and_bytes_share_finalize_path
 annotated   fs-detected  src/source.rs::decode_file_bounds_the_whole_file_read
