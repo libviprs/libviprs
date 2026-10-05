@@ -977,6 +977,10 @@ impl Default for WriterOptions {
 }
 
 impl WriterOptions {
+    /// The smallest dedupe budget that is not rounded up (issue #1169).
+    /// Declared ahead of its value so the red cells compile.
+    pub const MIN_DEDUPE_MEMORY_BYTES: usize = 0;
+
     /// Set what the tile blobs are.
     pub fn with_tile_type(mut self, tile_type: TileType) -> Self {
         self.tile_type = tile_type;
@@ -4349,5 +4353,27 @@ mod tests {
             2,
             "sync_pending should sync the destination and the index log"
         );
+    }
+
+    /// The dedupe floor is exported and is exactly one set (issue #1169).
+    ///
+    /// libviprs-cli refuses a `--dedupe-memory-bytes` under the floor rather
+    /// than let the writer quietly round it up, and used to spell the floor
+    /// itself as `DEDUPE_WINDOW_WAYS * 65`. Held against the rounding the
+    /// writer actually does: the floor buys one set, one byte under it is
+    /// rounded up to that same set, and one byte under two floors is still
+    /// one set.
+    #[test]
+    fn the_exported_dedupe_floor_is_one_set() {
+        let min = WriterOptions::MIN_DEDUPE_MEMORY_BYTES;
+        assert_eq!(min, DEDUPE_WINDOW_WAYS * DEDUPE_BYTES_PER_PAYLOAD);
+        assert_eq!(dedupe_sets(min), 1);
+        assert_eq!(
+            dedupe_sets(min - 1),
+            1,
+            "under the floor rounds up to one set"
+        );
+        assert_eq!(dedupe_sets(2 * min - 1), 1);
+        assert_eq!(dedupe_sets(2 * min), 2);
     }
 }

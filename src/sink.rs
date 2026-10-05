@@ -3605,6 +3605,47 @@ mod tests {
         assert_eq!(m.source.bytes_hash.as_deref(), Some("from-the-builder"));
     }
 
+    /// `Manifest::locations` names exactly the two files the sink writes,
+    /// and `Manifest::locate` finds them, inside copy first (issue #1169).
+    ///
+    /// libviprs-cli hard-coded both paths in its verify and source-hash code;
+    /// these give it one place to ask. Checked against what a real run puts
+    /// on disk, so the helper cannot drift from the writer.
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn manifest_locations_are_where_the_sink_writes() {
+        use crate::manifest::{Manifest, ManifestBuilder};
+
+        let src =
+            crate::raster::Raster::new(8, 8, PixelFormat::Rgb8, vec![9u8; 8 * 8 * 3]).unwrap();
+        let plan = PyramidPlanner::new(8, 8, 4, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("tiles");
+        let sink = FsSink::new(&out, plan.clone())
+            .with_format(TileFormat::Raw)
+            .with_manifest(ManifestBuilder::new());
+        crate::EngineBuilder::new(&src, plan, sink).run().unwrap();
+
+        let inside = out.join("manifest.json");
+        let sibling = dir.path().join("tiles.manifest.json");
+        assert!(
+            inside.is_file() && sibling.is_file(),
+            "the control: both copies exist"
+        );
+        assert_eq!(
+            Manifest::locations(&out),
+            vec![inside.clone(), sibling.clone()]
+        );
+
+        assert_eq!(Manifest::locate(&out), Some(inside.clone()));
+        std::fs::remove_file(&inside).unwrap();
+        assert_eq!(Manifest::locate(&out), Some(sibling.clone()));
+        std::fs::remove_file(&sibling).unwrap();
+        assert_eq!(Manifest::locate(&out), None);
+    }
+
     /**
      * Tests that finish() does not produce a .dzi file for XYZ layouts.
      * Works by creating an XYZ sink, calling finish(), and asserting no .dzi exists.

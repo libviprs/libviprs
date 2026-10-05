@@ -292,6 +292,16 @@ impl EngineEvent {
         }
     }
 
+    /// Version of the names [`name`](Self::name) returns (issue #1169).
+    /// Declared ahead of its value so the red cells compile.
+    pub const NAMES_VERSION: u32 = 0;
+
+    /// The stable name of this event (issue #1169). Declared ahead of its
+    /// table so the red cells compile.
+    pub fn name(&self) -> &'static str {
+        "unknown"
+    }
+
     /// Build a [`TileSkippedOnResume`](Self::TileSkippedOnResume) with no worker
     /// attribution and a coordinating-thread timestamp.
     pub fn tile_skipped_on_resume(coord: TileCoord) -> Self {
@@ -691,6 +701,154 @@ mod tests {
             levels: 1,
         });
         assert_eq!(obs.event_count(), 2);
+    }
+
+    /// Every event's name, pinned (issue #1169).
+    ///
+    /// These go out as the `event` of libviprs-cli's `--events json` lines,
+    /// which is a public format, so a rename here is a format change and has
+    /// to show up as a failing cell and a `NAMES_VERSION` bump rather than as
+    /// a surprise downstream. The CLI spelled the same table by hand; these
+    /// are its names, plus `pipeline_complete`, which it printed as
+    /// `unknown`.
+    #[test]
+    fn every_event_name_is_pinned() {
+        use crate::streaming_mapreduce::StripWorkUnit;
+        let coord = TileCoord::new(1, 2, 3);
+        let spec = StripWorkUnit {
+            canvas_y: 0,
+            height: 1,
+            level: 0,
+        };
+        let w = || WorkerId("w".to_string());
+        let table: Vec<(EngineEvent, &str)> = vec![
+            (
+                EngineEvent::SourceLoadStarted {
+                    source_description: String::new(),
+                },
+                "source_load_started",
+            ),
+            (
+                EngineEvent::SourceLoaded {
+                    width: 1,
+                    height: 1,
+                    format: crate::pixel::PixelFormat::Rgb8,
+                    size_bytes: 3,
+                },
+                "source_loaded",
+            ),
+            (
+                EngineEvent::PlanCreated {
+                    levels: 1,
+                    total_tiles: 1,
+                    canvas_width: 1,
+                    canvas_height: 1,
+                },
+                "plan_created",
+            ),
+            (
+                EngineEvent::LevelStarted {
+                    level: 0,
+                    width: 1,
+                    height: 1,
+                    tile_count: 1,
+                },
+                "level_started",
+            ),
+            (EngineEvent::tile_completed(coord), "tile_completed"),
+            (
+                EngineEvent::tile_failed(coord, String::new()),
+                "tile_failed",
+            ),
+            (
+                EngineEvent::tile_skipped_on_resume(coord),
+                "tile_skipped_on_resume",
+            ),
+            (EngineEvent::retry_attempted(coord, 1), "retry_attempted"),
+            (
+                EngineEvent::LevelCompleted {
+                    level: 0,
+                    tiles_produced: 1,
+                },
+                "level_completed",
+            ),
+            (
+                EngineEvent::StripRendered {
+                    strip_index: 0,
+                    total_strips: 1,
+                },
+                "strip_rendered",
+            ),
+            (
+                EngineEvent::BatchStarted {
+                    batch_index: 0,
+                    strips_in_batch: 1,
+                    total_batches: 1,
+                },
+                "batch_started",
+            ),
+            (
+                EngineEvent::BatchCompleted {
+                    batch_index: 0,
+                    tiles_produced: 1,
+                },
+                "batch_completed",
+            ),
+            (
+                EngineEvent::StripDispatched {
+                    worker_id: Some(w()),
+                    spec,
+                },
+                "strip_dispatched",
+            ),
+            (
+                EngineEvent::StripExecutorDone {
+                    worker_id: None,
+                    spec,
+                    duration: std::time::Duration::ZERO,
+                },
+                "strip_executor_done",
+            ),
+            (
+                EngineEvent::WorkerJoined { worker_id: w() },
+                "worker_joined",
+            ),
+            (
+                EngineEvent::WorkerLeft {
+                    worker_id: w(),
+                    reason: String::new(),
+                },
+                "worker_left",
+            ),
+            (
+                EngineEvent::MemorySnapshot {
+                    worker_id: None,
+                    current_bytes: 0,
+                    peak_bytes: 0,
+                },
+                "memory_snapshot",
+            ),
+            (
+                EngineEvent::CheckpointFlushed { tiles: 1 },
+                "checkpoint_flushed",
+            ),
+            (
+                EngineEvent::Finished {
+                    total_tiles: 1,
+                    levels: 1,
+                },
+                "finished",
+            ),
+            (EngineEvent::PipelineComplete, "pipeline_complete"),
+        ];
+        for (event, want) in &table {
+            assert_eq!(event.name(), *want, "{event:?}");
+        }
+        let mut names: Vec<&str> = table.iter().map(|(e, _)| e.name()).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), table.len(), "two events share a name");
+        assert_eq!(EngineEvent::NAMES_VERSION, 1);
     }
 
     /**

@@ -668,6 +668,19 @@ impl Manifest {
         Self::from_json_slice(&bytes)
     }
 
+    /// Where an `FsSink` writes the manifest for the pyramid at `dir`
+    /// (issue #1169). Declared ahead of its body so the red cells compile.
+    pub fn locations(dir: &Path) -> Vec<std::path::PathBuf> {
+        vec![dir.join("unknown")]
+    }
+
+    /// The first of [`locations`](Self::locations) that exists (issue
+    /// #1169). Declared ahead of its body so the red cells compile.
+    pub fn locate(dir: &Path) -> Option<std::path::PathBuf> {
+        let _ = dir;
+        None
+    }
+
     /// Parse a `Manifest` from a byte slice.
     pub fn from_json_slice(bytes: &[u8]) -> Result<Self, ManifestError> {
         serde_json::from_slice(bytes).map_err(ManifestError::Json)

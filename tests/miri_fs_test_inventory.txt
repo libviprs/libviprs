@@ -208,6 +208,7 @@ annotated   fs-detected  src/sink.rs::fs_sink_writes_dzi_manifest
 annotated   fs-detected  src/sink.rs::fs_sink_manifest_records_centring_and_skip_blanks
 annotated   fs-detected  src/sink.rs::fs_sink_manifest_records_the_source_digest_when_asked
 annotated   fs-detected  src/sink.rs::fs_sink_manifest_prefers_the_builders_own_source_digest
+annotated   fs-detected  src/sink.rs::manifest_locations_are_where_the_sink_writes
 annotated   fs-detected  src/sink.rs::fs_sink_writes_tile_to_disk
 annotated   fs-detected  src/sink.rs::fs_sink_xyz_path_structure
 annotated   fs-detected  src/sink.rs::iiif_run_writes_info_json
