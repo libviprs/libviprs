@@ -737,7 +737,14 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// The wrapper-forwarding cell this merge added does not appear here. It
 /// drives a recording sink that writes nothing, so it is `not-detected`, and
 /// it moves the inventory by a row without moving this figure.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 475;
+///
+/// The password follow-up in `src/pdf.rs` adds one:
+/// `a_pdf_failure_from_an_extract_helper_is_a_typed_source_error` writes a
+/// plain PDF to a temp file to ask for a page past its end. Its other four
+/// cells read committed fixtures through an entry point, so they are
+/// `not-detected` and leave this alone. The detector said 476 before this
+/// line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 476;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {

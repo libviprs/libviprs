@@ -323,32 +323,39 @@ fn decode_unavailable(what: impl std::fmt::Display) -> crate::codec::DecodeError
 
 /// Fold a [`PdfError`] into the shared decode error, so the DPI/password
 /// extract helpers can report through the `DecodeError` their contracts name.
-/// The `PdfError` rides inside the `io::Error` rather than as its string, so a
-/// caller can `get_ref()` and downcast it to tell, say, a wrong password from
-/// a missing one. The message reads the same either way.
+/// It arrives as [`SourceError::Pdf`](crate::source::SourceError::Pdf), so a
+/// caller tells, say, a wrong password from a missing one with a `match`.
 fn pdf_to_decode(err: PdfError) -> crate::codec::DecodeError {
-    crate::source::SourceError::Io(std::io::Error::other(err))
+    crate::source::SourceError::Pdf(err)
 }
 
 /// Read [`PdfInfo`] from a password-protected PDF (libvips `pdfload` with
 /// `password`).
 ///
 /// Unencrypted documents open regardless of `password`, so this returns the
-/// same result as [`pdf_info`] for them. A document that carries an encryption
-/// dictionary (`lopdf`'s [`is_encrypted`](lopdf::Document::is_encrypted)) is
-/// opened through pdfium with `password` when the `pdfium` feature is on, and
-/// its page sizes come from pdfium (`has_images` counts the page's top-level
-/// image objects). Without `pdfium` there is no decryption, so an encrypted
-/// document with a non-empty `password` reports a typed
-/// [`PdfError::UnsupportedFormat`]. A missing, unreadable, or malformed file
-/// surfaces its real IO/parse error unchanged rather than being mislabelled as
-/// password-protected.
+/// same result as [`pdf_info`] for them. So does a document `lopdf` can
+/// decrypt with the empty user password at load (an owner-password-only file
+/// under RC4 or AES-128), since `lopdf` drops its encryption dictionary.
+///
+/// A document still carrying an encryption dictionary after that (`lopdf`'s
+/// [`is_encrypted`](lopdf::Document::is_encrypted): it needs a user password,
+/// or uses AES-256, which `lopdf` cannot decrypt) is opened through pdfium
+/// when the `pdfium` feature is on, and its page sizes come from pdfium
+/// (`has_images` counts the page's top-level image objects). pdfium tries it
+/// with no password first, so a file that opens without one (owner password
+/// only) ignores `password` exactly as an unencrypted file does; only a file
+/// that needs a user password is opened with `password`. Without `pdfium`
+/// there is no decryption, so an encrypted document with a non-empty
+/// `password` reports a typed [`PdfError::UnsupportedFormat`]. A missing,
+/// unreadable, or malformed file surfaces its real IO/parse error unchanged
+/// rather than being mislabelled as password-protected.
 ///
 /// # Errors
 ///
-/// With `pdfium`, [`PdfError::PasswordRequired`] for an encrypted document
-/// that needs a password and got an empty one, and [`PdfError::WrongPassword`]
-/// when the one given does not open it. Without `pdfium`,
+/// With `pdfium`, [`PdfError::PasswordRequired`] for a document that needs a
+/// user password and got an empty one, and [`PdfError::WrongPassword`] when
+/// the one given does not open it (a password containing a NUL byte never
+/// can, since pdfium takes it as a C string). Without `pdfium`,
 /// [`PdfError::UnsupportedFormat`] for an encrypted document opened with a
 /// non-empty password. Otherwise the same errors as [`pdf_info`].
 pub fn pdf_info_with_password(path: &Path, password: &str) -> Result<PdfInfo, PdfError> {
@@ -378,7 +385,7 @@ fn pdf_info_pdfium(path: &Path, password: &str) -> Result<PdfInfo, PdfError> {
     reject_pages_beyond_pdfium_index(path)?;
     let pdfium = init_pdfium()?;
     let _lock = pdfium_lock();
-    let document = load_pdfium_document(pdfium, path, Some(password))?;
+    let (document, _needed_password) = open_encrypted_pdfium_document(pdfium, path, password)?;
     let pages: Vec<PdfPageInfo> = document
         .pages()
         .iter()
@@ -589,39 +596,56 @@ pub fn extract_page_image_with_background_typed(
 /// Extract a page image from a password-protected PDF (libvips `pdfload` with
 /// `password`), page numbers 1-based.
 ///
-/// Unencrypted documents extract their embedded image regardless of
-/// `password`, exactly as [`extract_page_image`] does. A document that carries
-/// an encryption dictionary (`lopdf`'s
-/// [`is_encrypted`](lopdf::Document::is_encrypted)) has encrypted streams, so
-/// with the `pdfium` feature it is opened through pdfium with `password` and
-/// the page is rendered at libvips `pdfload`'s 72-DPI baseline, through the
-/// same path, lock and pixel budget as `render_page_pdfium`. Without `pdfium` an
-/// encrypted document with a non-empty `password` reports a typed
-/// unsupported-capability decode error. A missing, unreadable, or malformed
-/// file surfaces its real IO/parse error folded into the decode error rather
-/// than being mislabelled as password-protected.
+/// What comes back depends on whether the file needs a user password, not on
+/// whether it carries encryption:
+///
+/// - Unencrypted documents extract their largest embedded image at its stored
+///   size regardless of `password`, exactly as [`extract_page_image`] does.
+///   So does a document `lopdf` decrypts with the empty user password at load
+///   (an owner-password-only file under RC4 or AES-128).
+/// - A document `lopdf` cannot read (it is still
+///   [`is_encrypted`](lopdf::Document::is_encrypted) after load) goes to
+///   pdfium when the `pdfium` feature is on, which first tries it with no
+///   password. If that opens it (an owner-password-only file under AES-256,
+///   which `lopdf` cannot decrypt), the page's largest top-level image object
+///   comes back at its stored size, decoded by pdfium to 8 bits per sample
+///   (`Gray8`, `Rgb8` or `Rgba8`), and `password` is ignored as it is for an
+///   unencrypted file.
+/// - Only a document that needs a user password is opened with `password`,
+///   and its page is then **rendered** at libvips `pdfload`'s 72-DPI baseline
+///   (one pixel per point, so an A4 page is 595 x 841), through the same
+///   path, lock and pixel budget as `render_page_pdfium`, rather than
+///   extracted. A scan at 300 DPI therefore comes back at 72 DPI on this
+///   route.
+///
+/// Without `pdfium` an encrypted document with a non-empty `password` reports
+/// a typed unsupported-capability decode error. A missing, unreadable, or
+/// malformed file surfaces its real IO/parse error rather than being
+/// mislabelled as password-protected.
 ///
 /// # Errors
 ///
-/// A [`crate::codec::DecodeError`]. With `pdfium` it wraps a typed
-/// [`PdfError::PasswordRequired`] or [`PdfError::WrongPassword`] (reach it
-/// with `get_ref()` and a downcast) when the password does not open an
-/// encrypted document. Without `pdfium`, an unsupported-capability error for an
-/// encrypted document opened with a non-empty password. Otherwise the
-/// extraction or render error folded into the decode error.
+/// A [`crate::codec::DecodeError`]. A PDF failure arrives as
+/// [`SourceError::Pdf`](crate::source::SourceError::Pdf): with `pdfium` that
+/// is [`PdfError::PasswordRequired`] for a document that needs a user password
+/// and got an empty one, and [`PdfError::WrongPassword`] when the one given
+/// does not open it (a password containing a NUL byte never can, since pdfium
+/// takes it as a C string). Without `pdfium`, an unsupported-capability
+/// [`SourceError::Io`](crate::source::SourceError::Io) for an encrypted
+/// document opened with a non-empty password. Otherwise the extraction or
+/// render error, also as `SourceError::Pdf`.
 pub fn extract_page_image_with_password(
     path: &Path,
     page: u32,
     password: &str,
 ) -> Result<Raster, crate::codec::DecodeError> {
     // Open first so a missing/unreadable/malformed file surfaces its real
-    // error. Only a genuinely encrypted document takes the password path.
+    // error. Only a document lopdf cannot read takes the password path.
     let doc =
         lopdf::Document::load(path).map_err(|e| pdf_to_decode(PdfError::Parse(e.to_string())))?;
     if doc.is_encrypted() {
         #[cfg(feature = "pdfium")]
-        return render_page_pdfium_opened(path, page as usize, PASSWORD_RENDER_DPI, Some(password))
-            .map_err(pdf_to_decode);
+        return extract_encrypted_page_pdfium(path, page as usize, password).map_err(pdf_to_decode);
         #[cfg(not(feature = "pdfium"))]
         if !password.is_empty() {
             return Err(decode_unavailable("password-protected PDF decryption"));
@@ -630,11 +654,146 @@ pub fn extract_page_image_with_password(
     extract_page_image_from_doc(&doc, page as usize).map_err(pdf_to_decode)
 }
 
-/// DPI at which [`extract_page_image_with_password`] renders an encrypted
-/// page: libvips `pdfload`'s 72-DPI baseline, the same one
-/// [`extract_page_image_with_background`] uses.
+/// DPI at which [`extract_page_image_with_password`] renders a page of a
+/// document that needs a user password: libvips `pdfload`'s 72-DPI baseline,
+/// the same one [`extract_page_image_with_background`] uses.
 #[cfg(feature = "pdfium")]
 const PASSWORD_RENDER_DPI: u32 = 72;
+
+/// The pdfium half of [`extract_page_image_with_password`], for a document
+/// `lopdf` could not read. A document that opens without a password hands
+/// back its largest top-level image object at the stored size; one that needs
+/// a user password is opened with `password` and rendered at
+/// [`PASSWORD_RENDER_DPI`].
+#[cfg(feature = "pdfium")]
+fn extract_encrypted_page_pdfium(
+    path: &Path,
+    page: usize,
+    password: &str,
+) -> Result<Raster, PdfError> {
+    reject_pages_beyond_pdfium_index(path)?;
+    let pdfium = init_pdfium()?;
+    let _lock = pdfium_lock();
+    let (document, needed_password) = open_encrypted_pdfium_document(pdfium, path, password)?;
+    let pages = document.pages();
+    let index = pdfium_page_index(page, pages.len())?;
+    let pdf_page = pages
+        .get(index)
+        .map_err(|e| PdfError::Pdfium(e.to_string()))?;
+    if needed_password {
+        render_pdfium_page_at_dpi(&pdf_page, PASSWORD_RENDER_DPI)
+    } else {
+        largest_image_object_raster(&pdf_page, page)
+    }
+}
+
+/// Decode the largest top-level image object on `pdf_page` at its stored
+/// size, the pdfium counterpart of [`extract_page_image_from_doc`] for a
+/// document whose streams `lopdf` cannot decrypt. pdfium decodes the image
+/// (filters and decryption included) into an 8-bit bitmap, which this turns
+/// into a `Gray8`, `Rgb8` or `Rgba8` [`Raster`]. Image masks and the object's
+/// transform are ignored, as they are on the `lopdf` path.
+#[cfg(feature = "pdfium")]
+fn largest_image_object_raster(
+    pdf_page: &pdfium_render::prelude::PdfPage<'_>,
+    page: usize,
+) -> Result<Raster, PdfError> {
+    use pdfium_render::prelude::*;
+
+    // Each bitmap borrows its image object, so the largest one is copied out
+    // as it is found rather than kept.
+    let mut largest: Option<(u64, Raster)> = None;
+    for object in pdf_page.objects().iter() {
+        let Some(image) = object.as_image_object() else {
+            continue;
+        };
+        let bitmap = image
+            .get_raw_bitmap()
+            .map_err(|e| PdfError::Pdfium(e.to_string()))?;
+        let pixels =
+            u64::from(bitmap.width().unsigned_abs()) * u64::from(bitmap.height().unsigned_abs());
+        if largest.as_ref().is_some_and(|(best, _)| pixels <= *best) {
+            continue;
+        }
+        // pdfium has already decoded this bitmap, so the ceiling here bounds
+        // the copy made of it rather than pdfium's own allocation.
+        if pixels > DEFAULT_MAX_RENDER_PIXELS {
+            return Err(PdfError::RenderBudgetExceeded {
+                pixels,
+                budget: DEFAULT_MAX_RENDER_PIXELS,
+            });
+        }
+        let format = bitmap
+            .format()
+            .map_err(|e| PdfError::Pdfium(e.to_string()))?;
+        let raster = raster_from_pdfium_image_bitmap(
+            &bitmap.as_raw_bytes(),
+            bitmap.width(),
+            bitmap.height(),
+            format,
+        )?;
+        largest = Some((pixels, raster));
+    }
+    largest
+        .map(|(_, raster)| raster)
+        .ok_or(PdfError::NoImageOnPage { page })
+}
+
+/// Turn a decoded pdfium image bitmap (rows of `BGR`, `BGRx`, `BGRA` or gray
+/// samples, each row padded to a stride) into a tightly packed `Rgb8`,
+/// `Rgba8` or `Gray8` [`Raster`]. The stride is whatever the buffer length
+/// divides into per row, which is how pdfium-render reads it too.
+#[cfg(feature = "pdfium")]
+fn raster_from_pdfium_image_bitmap(
+    bytes: &[u8],
+    width: i32,
+    height: i32,
+    format: pdfium_render::prelude::PdfBitmapFormat,
+) -> Result<Raster, PdfError> {
+    use pdfium_render::prelude::PdfBitmapFormat;
+
+    let bad = || PdfError::Pdfium(format!("image bitmap of {width}x{height} is malformed"));
+    let w = usize::try_from(width).map_err(|_| bad())?;
+    let h = usize::try_from(height).map_err(|_| bad())?;
+    if w == 0 || h == 0 {
+        return Err(bad());
+    }
+    let (bytes_per_pixel, pixel_format) = match format {
+        PdfBitmapFormat::Gray => (1, PixelFormat::Gray8),
+        PdfBitmapFormat::BGR => (3, PixelFormat::Rgb8),
+        PdfBitmapFormat::BGRx => (4, PixelFormat::Rgb8),
+        PdfBitmapFormat::BGRA => (4, PixelFormat::Rgba8),
+    };
+    let stride = bytes.len() / h;
+    let row_bytes = w.checked_mul(bytes_per_pixel).ok_or_else(bad)?;
+    if stride < row_bytes {
+        return Err(bad());
+    }
+    let mut out = Vec::with_capacity(w * h * pixel_format.bytes_per_pixel());
+    for row in bytes.chunks_exact(stride).take(h) {
+        let row = &row[..row_bytes];
+        match format {
+            PdfBitmapFormat::Gray => out.extend_from_slice(row),
+            PdfBitmapFormat::BGR => {
+                for px in row.as_chunks::<3>().0 {
+                    out.extend_from_slice(&[px[2], px[1], px[0]]);
+                }
+            }
+            PdfBitmapFormat::BGRx => {
+                for px in row.as_chunks::<4>().0 {
+                    out.extend_from_slice(&[px[2], px[1], px[0]]);
+                }
+            }
+            PdfBitmapFormat::BGRA => {
+                for px in row.as_chunks::<4>().0 {
+                    out.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
+                }
+            }
+        }
+    }
+    let (width, height) = (width.unsigned_abs(), height.unsigned_abs());
+    Raster::new(width, height, pixel_format, out).map_err(PdfError::from)
+}
 
 /// Resolve a 1-based `page` number to its object id in the `lopdf` page map.
 ///
@@ -1638,7 +1797,18 @@ pub(crate) fn render_at_size_with_background(
 /// **See also:** [interactive example](https://libviprs.org/cli/#flag-render)
 #[cfg(feature = "pdfium")]
 pub fn render_page_pdfium(path: &Path, page: usize, dpi: u32) -> Result<Raster, PdfError> {
-    render_page_pdfium_opened(path, page, dpi, None)
+    reject_pages_beyond_pdfium_index(path)?;
+    let pdfium = init_pdfium()?;
+    let _lock = pdfium_lock();
+    let document = load_pdfium_document(pdfium, path, None)?;
+
+    let pages = document.pages();
+    let index = pdfium_page_index(page, pages.len())?;
+    let pdf_page = pages
+        .get(index)
+        .map_err(|e| PdfError::Pdfium(e.to_string()))?;
+
+    render_pdfium_page_at_dpi(&pdf_page, dpi)
 }
 
 /// Open `path` through pdfium, with `password` when one is given.
@@ -1657,6 +1827,14 @@ fn load_pdfium_document<'a>(
     use pdfium_render::prelude::{PdfiumError, PdfiumInternalError};
 
     let password = password.filter(|p| !p.is_empty());
+    // pdfium-render hands the password over as a C string with
+    // `CString::new(password).unwrap()`, so an interior NUL would panic, and
+    // the panic poisons pdfium-render's own mutex, failing every later
+    // pdfium call in the process. No password with a NUL in it can be the
+    // right one, so it is refused here instead.
+    if password.is_some_and(|p| p.contains('\0')) {
+        return Err(PdfError::WrongPassword);
+    }
     pdfium
         .load_pdf_from_file(path, password)
         .map_err(|e| match e {
@@ -1671,35 +1849,47 @@ fn load_pdfium_document<'a>(
         })
 }
 
-/// [`render_page_pdfium`] with an optional document password. Backs both it
-/// and [`extract_page_image_with_password`], so a password render shares the
-/// lock, the page-count guard and the pixel budget with a plain one.
+/// Render an already-open pdfium page at `dpi` under
+/// [`DEFAULT_MAX_RENDER_PIXELS`]. Backs [`render_page_pdfium`] and the
+/// password route of [`extract_page_image_with_password`], so a password
+/// render shares the page-count guard and the pixel budget with a plain one.
+/// The caller holds [`pdfium_lock`].
 #[cfg(feature = "pdfium")]
-fn render_page_pdfium_opened(
-    path: &Path,
-    page: usize,
+fn render_pdfium_page_at_dpi(
+    pdf_page: &pdfium_render::prelude::PdfPage<'_>,
     dpi: u32,
-    password: Option<&str>,
 ) -> Result<Raster, PdfError> {
-    reject_pages_beyond_pdfium_index(path)?;
-    let pdfium = init_pdfium()?;
-    let _lock = pdfium_lock();
-    let document = load_pdfium_document(pdfium, path, password)?;
-
-    let pages = document.pages();
-    let index = pdfium_page_index(page, pages.len())?;
-    let pdf_page = pages
-        .get(index)
-        .map_err(|e| PdfError::Pdfium(e.to_string()))?;
-
     let (width, height) = render_dims_within_budget(
         pdf_page.width().value,
         pdf_page.height().value,
         dpi,
         DEFAULT_MAX_RENDER_PIXELS,
     )?;
+    render_at_size(pdf_page, width, height)
+}
 
-    render_at_size(&pdf_page, width, height)
+/// Open a document `lopdf` could not read through pdfium, trying it with no
+/// password before `password`, and say whether it needed one.
+///
+/// A file with only an owner password opens with none, and then `password`
+/// is ignored, the way it is for an unencrypted file, so the caller can
+/// extract rather than render. A file that needs a user password reports
+/// [`PdfError::PasswordRequired`] when `password` is empty, and otherwise is
+/// opened with it ([`PdfError::WrongPassword`] if that fails). The caller
+/// holds [`pdfium_lock`].
+#[cfg(feature = "pdfium")]
+fn open_encrypted_pdfium_document<'a>(
+    pdfium: &'a pdfium_render::prelude::Pdfium,
+    path: &Path,
+    password: &str,
+) -> Result<(pdfium_render::prelude::PdfDocument<'a>, bool), PdfError> {
+    match load_pdfium_document(pdfium, path, None) {
+        Ok(document) => Ok((document, false)),
+        Err(PdfError::PasswordRequired) if !password.is_empty() => {
+            load_pdfium_document(pdfium, path, Some(password)).map(|document| (document, true))
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Render a PDF page to a raster over a solid `background` fill using pdfium.
