@@ -117,6 +117,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`pdf_info` opened an encrypted PDF without its password** (issue #1188),
+  and so did `extract_page_image` and `page_rotate`. `lopdf` reads the object
+  structure of an encrypted file happily, because only strings and streams
+  are encrypted, so a file that needs a user password came back as an
+  ordinary document. All three now refuse it with
+  `PdfError::PasswordRequired`, in every build; `pdf_info_with_password` and
+  `extract_page_image_with_password` are the way in. A file with only an
+  owner password still opens without one, AES-256 included: `pdf_info` and
+  `page_rotate` read it in every build, and `extract_page_image` hands back
+  its stored image through pdfium, or says it can't decrypt it in a build
+  without `pdfium` instead of decoding ciphertext. Without `pdfium`,
+  `pdf_info_with_password` and `extract_page_image_with_password` with an
+  empty password had the same hole and get the same answer, and
+  `pdf_info_with_password` ignores a password an owner-only file doesn't
+  need rather than calling it unsupported.
 - **`Raster::csv_load` padded a ragged grid out before checking its size**
   (issue #1168), so a ~135 KB file with one very wide first row could build a
   grid of several GB, and copy it once more to flatten it. It now works out
