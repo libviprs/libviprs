@@ -55,6 +55,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`stream_verify::verify_from_strip_source` panicked on a centred plan in
+  debug builds** (issue #1163). It asserted the assembled top-level raster was
+  the size of the top level, but that raster is the plan's canvas, which is
+  bigger whenever the plan pads it: every centred plan, and every Google plan
+  whose image isn't already a power-of-two number of tiles. It now checks the
+  canvas size instead, as a typed error in every build, and verifying those
+  pyramids works.
 - **The crate didn't compile on stable 1.99** (issue #1157). 1.99 deprecates
   `AtomicU64::fetch_update` (std renamed it `try_update`), and with
   `[lints.rust] deprecated = "deny"` the two calls in `MemoryTracker::alloc`

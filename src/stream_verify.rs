@@ -267,8 +267,6 @@ pub fn verify_from_strip_source(
     // strips, which makes the concatenated buffer byte-identical to
     // `embed_in_canvas(source, plan, bg)` even when centring is active.
     // ------------------------------------------------------------------
-    let top_level_idx = plan.levels.len() - 1;
-    let top = &plan.levels[top_level_idx];
     let format = source.format();
     let bpp = format.bytes_per_pixel();
 
@@ -356,12 +354,23 @@ pub fn verify_from_strip_source(
 
     let current = canvas_raster;
 
-    // Sanity check: the assembled raster must match the top plan level's
-    // recorded dimensions, otherwise the downstream downscale chain will
-    // diverge from what the engine wrote. For every layout libviprs
-    // supports this is identity; guard it defensively.
-    debug_assert_eq!(current.width(), top.width);
-    debug_assert_eq!(current.height(), top.height);
+    // The level walk below starts from this raster and halves it, exactly
+    // as the live engines do from `embed_in_canvas`, so what it has to be is
+    // the plan's canvas. That is the top level's own size only when nothing
+    // pads it: a centred plan pads to the tile grid and a Google plan to a
+    // power-of-two square, which is why the check used to be against
+    // `top.width` / `top.height` and fired on both in every debug build
+    // (issue #1163). Checked in every profile and reported as a typed error,
+    // like the strip checks above (issue #81), so a future change to the
+    // allocation cannot hand the walk a raster of the wrong size in a
+    // release build either.
+    if (current.width(), current.height()) != (cw, ch) {
+        return Err(strip_layout_error(format!(
+            "assembled a {}x{} top-level raster for a {cw}x{ch} canvas",
+            current.width(),
+            current.height()
+        )));
+    }
 
     // ------------------------------------------------------------------
     // Phase 4: byte-exact verification, level-by-level, top to bottom.
