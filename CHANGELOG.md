@@ -43,6 +43,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is public beside `DEDUPE_WINDOW_WAYS`; `Manifest::locations(dir)` and
   `Manifest::locate(dir)` name the two files `FsSink` writes its manifest to,
   and the sink writes through them.
+- **`probe_file` and `probe_bytes` read an image's header without decoding
+  it** (issue #1173), returning an `ImageHeader` with the width, height, band
+  count and pixel format the decode would give, and the page count where the
+  container declares one (a TIFF's IFD chain). They route the way
+  `decode_file_with_limits` does, from the leading bytes, and read only as
+  much as the header needs for PNG, JPEG, TIFF, native `.v`, Netpbm and
+  anything else the `image` facade reads. An SVG is parsed for its size and
+  not rasterised. A container that can't answer without decoding (GIF, and
+  the formats libviprs parses end to end itself) is refused with the new
+  `SourceError::ProbeUnsupported` naming it. The
+  `_with_limits` forms bound what the probe reads and walks; the geometry is
+  reported, not refused.
 - `pdf_info_with_password` and `extract_page_image_with_password` open an
   encrypted PDF with its password when the `pdfium` feature is on. They used
   to answer any non-empty password with "not available in this build". Two

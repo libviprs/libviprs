@@ -428,18 +428,14 @@ fn parse_options(dpi: f64) -> resvg::usvg::Options<'static> {
     opts
 }
 
-/// The real rasteriser.
-///
-/// Order matters: the input gate runs before the parse, the geometry is
-/// resolved and bounded before the pixmap is allocated, and the demultiply
-/// runs on the way out. Nothing allocates on the untrusted geometry until
-/// [`DecodeLimits`] has agreed to it.
+/// The input gate, the parse and the output size, which is everything the
+/// rasteriser does before it touches pixels. Shared with [`probe_svg`] so the
+/// probe and the decode can't disagree about a document's size (issue #1173).
 #[cfg(feature = "svg")]
-fn rasterise(
+fn parse_sized(
     data: &[u8],
     options: SvgOptions,
-    limits: DecodeLimits,
-) -> Result<Raster, DecodeError> {
+) -> Result<(resvg::usvg::Tree, f64, u32, u32), DecodeError> {
     if !options.unlimited && data.len() > MAX_INPUT_BYTES {
         return Err(DecodeError::SvgInputTooLarge {
             bytes: data.len(),
@@ -462,6 +458,38 @@ fn rasterise(
         // vips bails out here with "zero-sized image" (`svgload.c:588`).
         return Err(DecodeError::SvgZeroSize { width, height });
     }
+    Ok((tree, total_scale, width, height))
+}
+
+/// What an SVG document's size resolves to at [`SvgOptions::default`], for
+/// the header probe (issue #1173): parsed and sized exactly as the rasteriser
+/// does it, and nothing rasterised or allocated for pixels.
+#[cfg(feature = "svg")]
+pub(crate) fn probe_svg(data: &[u8]) -> Result<(u32, u32), DecodeError> {
+    parse_sized(data, SvgOptions::default()).map(|(_, _, width, height)| (width, height))
+}
+
+/// The `svg`-feature-off probe: the rasteriser's own refusal, so probing and
+/// decoding an SVG fail the same way in a build without the feature.
+#[cfg(not(feature = "svg"))]
+pub(crate) fn probe_svg(data: &[u8]) -> Result<(u32, u32), DecodeError> {
+    rasterise(data, SvgOptions::default(), DecodeLimits::default())
+        .map(|raster| (raster.width(), raster.height()))
+}
+
+/// The real rasteriser.
+///
+/// Order matters: the input gate runs before the parse, the geometry is
+/// resolved and bounded before the pixmap is allocated, and the demultiply
+/// runs on the way out. Nothing allocates on the untrusted geometry until
+/// [`DecodeLimits`] has agreed to it.
+#[cfg(feature = "svg")]
+fn rasterise(
+    data: &[u8],
+    options: SvgOptions,
+    limits: DecodeLimits,
+) -> Result<Raster, DecodeError> {
+    let (tree, total_scale, width, height) = parse_sized(data, options)?;
     // Bound the *scaled* geometry before anything is allocated. This is the
     // ceiling that actually matters for SVG, because the input can be tiny
     // and the output enormous, and `SvgOptions::unlimited` deliberately does

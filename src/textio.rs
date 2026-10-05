@@ -704,51 +704,17 @@ pub(crate) fn decode_netpbm(
 ) -> Result<Raster, DecodeError> {
     {
         let mut pos = 0usize;
-        let magic = next_token(data, &mut pos).ok_or_else(|| malformed("ppm: empty input"))?;
-        let (channels, ascii, bitmap) = match magic.as_slice() {
-            b"P1" => (1usize, true, true),
-            b"P2" => (1usize, true, false),
-            b"P3" => (3usize, true, false),
-            b"P4" => (1usize, false, true),
-            b"P5" => (1usize, false, false),
-            b"P6" => (3usize, false, false),
-            other => {
-                let shown = String::from_utf8_lossy(other).into_owned();
-                return Err(malformed(format!(
-                    "ppm: unrecognised magic number {shown:?}"
-                )));
-            }
-        };
-
-        let width = next_u32(data, &mut pos, "width")?;
-        let height = next_u32(data, &mut pos, "height")?;
-        // The bitmap forms carry **no `maxval` field**: a `P1`/`P4` sample is
-        // one bit, so its range is fixed and the header stops at the height.
-        // Reading one anyway would eat pixels. A `P1` that wrongly carries a
-        // `255` proves the field is not read: its first three samples are the
-        // digits `2`, `5`, `5`, so the picture is `0 0 0 255` where a reader
-        // that consumed a `maxval` would answer `255 0 0 255`.
-        let maxval = if bitmap {
-            1
-        } else {
-            next_u32(data, &mut pos, "maxval")?
-        };
-        if maxval == 0 || maxval > 65535 {
-            return Err(malformed(format!(
-                "ppm: maxval {maxval} out of range 1..=65535"
-            )));
-        }
-        // The maxval names the kind, not just a width: Netpbm's binary
-        // form is unsigned, so a one-byte maxval is `u8` and a two-byte one
-        // is `u16` (issue #607).
-        let kind = if maxval <= 255 {
-            SampleKind::U8
-        } else {
-            SampleKind::U16
-        };
+        let NetpbmHeader {
+            channels,
+            ascii,
+            bitmap,
+            width,
+            height,
+            maxval,
+            kind,
+            fmt,
+        } = read_netpbm_header(data, &mut pos)?;
         let bpc = kind.bytes();
-        let fmt = PixelFormat::with_kind(channels, kind)
-            .ok_or_else(|| malformed("ppm: unsupported channel/kind combination"))?;
 
         let count = (width as usize)
             .checked_mul(height as usize)
@@ -865,6 +831,84 @@ pub(crate) fn decode_netpbm(
 
         Ok(Raster::new(width, height, fmt, buf)?)
     }
+}
+
+/// A Netpbm header, tokenised and validated, with `pos` left on the first
+/// byte after it. Shared by [`decode_netpbm`] and [`probe_netpbm`] so the two
+/// can't disagree about what a header says (issue #1173).
+struct NetpbmHeader {
+    channels: usize,
+    ascii: bool,
+    bitmap: bool,
+    width: u32,
+    height: u32,
+    maxval: u32,
+    kind: SampleKind,
+    fmt: PixelFormat,
+}
+
+fn read_netpbm_header(data: &[u8], pos: &mut usize) -> Result<NetpbmHeader, DecodeError> {
+    let magic = next_token(data, pos).ok_or_else(|| malformed("ppm: empty input"))?;
+    let (channels, ascii, bitmap) = match magic.as_slice() {
+        b"P1" => (1usize, true, true),
+        b"P2" => (1usize, true, false),
+        b"P3" => (3usize, true, false),
+        b"P4" => (1usize, false, true),
+        b"P5" => (1usize, false, false),
+        b"P6" => (3usize, false, false),
+        other => {
+            let shown = String::from_utf8_lossy(other).into_owned();
+            return Err(malformed(format!(
+                "ppm: unrecognised magic number {shown:?}"
+            )));
+        }
+    };
+
+    let width = next_u32(data, pos, "width")?;
+    let height = next_u32(data, pos, "height")?;
+    // The bitmap forms carry **no `maxval` field**: a `P1`/`P4` sample is
+    // one bit, so its range is fixed and the header stops at the height.
+    // Reading one anyway would eat pixels. A `P1` that wrongly carries a
+    // `255` proves the field is not read: its first three samples are the
+    // digits `2`, `5`, `5`, so the picture is `0 0 0 255` where a reader
+    // that consumed a `maxval` would answer `255 0 0 255`.
+    let maxval = if bitmap {
+        1
+    } else {
+        next_u32(data, pos, "maxval")?
+    };
+    if maxval == 0 || maxval > 65535 {
+        return Err(malformed(format!(
+            "ppm: maxval {maxval} out of range 1..=65535"
+        )));
+    }
+    // The maxval names the kind, not just a width: Netpbm's binary
+    // form is unsigned, so a one-byte maxval is `u8` and a two-byte one
+    // is `u16` (issue #607).
+    let kind = if maxval <= 255 {
+        SampleKind::U8
+    } else {
+        SampleKind::U16
+    };
+    let fmt = PixelFormat::with_kind(channels, kind)
+        .ok_or_else(|| malformed("ppm: unsupported channel/kind combination"))?;
+    Ok(NetpbmHeader {
+        channels,
+        ascii,
+        bitmap,
+        width,
+        height,
+        maxval,
+        kind,
+        fmt,
+    })
+}
+
+/// What a Netpbm header declares: width, height and the pixel format the
+/// decode returns, without reading the body (issue #1173).
+pub(crate) fn probe_netpbm(data: &[u8]) -> Result<(u32, u32, PixelFormat), DecodeError> {
+    let h = read_netpbm_header(data, &mut 0)?;
+    Ok((h.width, h.height, h.fmt))
 }
 
 /// The 8-bit sample a Netpbm bitmap bit decodes to: **set is black**.
