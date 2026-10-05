@@ -69,6 +69,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whose image isn't already a power-of-two number of tiles. It now checks the
   canvas size instead, as a typed error in every build, and verifying those
   pyramids works.
+- **`EngineBuilder::with_config` dropped `EngineConfig::source_content_hash`**
+  (issue #1165), so the source digest never reached the plan hash and a resume
+  accepted a checkpoint made from a different image of the same size. The
+  builder now keeps it (fill-if-unset, like every other knob) and has its own
+  `with_source_content_hash` setter.
 - **The crate didn't compile on stable 1.99** (issue #1157). 1.99 deprecates
   `AtomicU64::fetch_update` (std renamed it `try_update`), and with
   `[lints.rust] deprecated = "deny"` the two calls in `MemoryTracker::alloc`
