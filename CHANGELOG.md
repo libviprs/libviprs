@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `DirectoryObjectStore::for_bucket(root, bucket)` puts a bucket at
   `root/bucket` and refuses a bucket name that isn't one plain name.
   libviprs-cli carried its own copy of this for `--sink s3://`.
+- `Raster::csv_load_with_limits` and `Raster::matrix_load_with_limits` take a
+  caller's `DecodeLimits` (issue #1168). `csv_load` and `matrix_load` are
+  those at `DecodeLimits::default()`.
 - `pdf_info_with_password` and `extract_page_image_with_password` open an
   encrypted PDF with its password when the `pdfium` feature is on. They used
   to answer any non-empty password with "not available in this build". Two
@@ -71,6 +74,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`Raster::csv_load` padded a ragged grid out before checking its size**
+  (issue #1168), so a ~135 KB file with one very wide first row could build a
+  grid of several GB, and copy it once more to flatten it. It now works out
+  the grid's size first, checks it against the limits, reserves one buffer
+  fallibly and fills it row by row, with the same pad-and-truncate rule.
+  `Raster::matrix_load` checks its header's geometry before parsing a value
+  and stops at the first value past the declared count, instead of buffering
+  the whole body first. **`csv_load` and `matrix_load` now refuse grids past
+  `DecodeLimits::default()`** (512 MiB of `f32` samples, a gigapixel), which
+  they used to load.
 - **`stream_verify::verify_from_strip_source` panicked on a centred plan in
   debug builds** (issue #1163). It asserted the assembled top-level raster was
   the size of the top level, but that raster is the plan's canvas, which is

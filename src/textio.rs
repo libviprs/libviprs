@@ -145,6 +145,16 @@ fn malformed(msg: impl Into<String>) -> DecodeError {
     IoError::new(ErrorKind::InvalidData, msg.into()).into()
 }
 
+/// Site labels for the image-sized buffers this module reserves through
+/// [`crate::raster::try_plane`], so a test can count or starve each one
+/// (issue #1168).
+mod plane {
+    /// The one output grid [`Raster::csv_load_with_limits`] fills.
+    pub(super) const CSV_GRID: &str = "textio.csv_grid";
+    /// The one output grid [`Raster::matrix_load_with_limits`] fills.
+    pub(super) const MATRIX_GRID: &str = "textio.matrix_grid";
+}
+
 /// The single-band float format used by the text codecs (`FloatF32(1)`).
 fn float1() -> Result<PixelFormat, DecodeError> {
     PixelFormat::with_kind(1, SampleKind::F32)
@@ -434,6 +444,31 @@ impl Raster {
     /// is missing or non-numeric, a value fails to parse, the value count does
     /// not match the declared dimensions, or the raster cannot be constructed.
     pub fn matrix_load(data: &[u8]) -> Result<Raster, DecodeError> {
+        Self::matrix_load_with_limits(data, crate::source::DecodeLimits::default())
+    }
+
+    /// [`Raster::matrix_load`] under explicit
+    /// [`DecodeLimits`](crate::source::DecodeLimits).
+    ///
+    /// The header's declared `width height` is checked against `max_coord`,
+    /// `max_pixels` and, priced as one-band `f32`, `max_alloc_bytes` before a
+    /// single value is parsed, so a header claiming billions of cells is a
+    /// limit refusal rather than a parse error about how many values followed
+    /// (issue #1168). The one output buffer is then reserved fallibly at the
+    /// header's size and filled as the values are parsed, and the first value
+    /// past the declared count is refused there and then, so nothing the body
+    /// holds can grow a buffer past what the limits agreed to.
+    ///
+    /// # Errors
+    ///
+    /// As [`Raster::matrix_load`], plus [`DecodeError::CoordLimitExceeded`],
+    /// [`DecodeError::DimensionLimitExceeded`] and
+    /// [`DecodeError::AllocLimitExceeded`] for a declared geometry past the
+    /// limits.
+    pub fn matrix_load_with_limits(
+        data: &[u8],
+        limits: crate::source::DecodeLimits,
+    ) -> Result<Raster, DecodeError> {
         let text =
             std::str::from_utf8(data).map_err(|_| malformed("matrix: input is not valid UTF-8"))?;
         let mut lines = text.lines();
@@ -449,27 +484,36 @@ impl Raster {
             .next()
             .and_then(|t| t.parse().ok())
             .ok_or_else(|| malformed("matrix: missing or non-numeric height in header"))?;
-
-        let mut values: Vec<f32> = Vec::new();
-        for line in lines {
-            for tok in line.split_whitespace() {
-                let v: f32 = tok
-                    .parse()
-                    .map_err(|_| malformed(format!("matrix: non-numeric value {tok:?}")))?;
-                values.push(v);
-            }
-        }
+        limits.check_coord(width, height)?;
+        limits.check_pixels(width, height)?;
+        limits.check_image_alloc("matrix samples", width, height, 1, 4)?;
 
         let expected = (width as usize)
             .checked_mul(height as usize)
             .ok_or_else(|| malformed("matrix: declared dimensions overflow"))?;
-        if values.len() != expected {
+        // One buffer, at the header's size, which the limits just priced.
+        let mut buf = crate::raster::try_plane::<u8>(plane::MATRIX_GRID, width, height, 4)?;
+        let mut got = 0usize;
+        for line in lines {
+            for tok in line.split_whitespace() {
+                if got == expected {
+                    return Err(malformed(format!(
+                        "matrix: more than the {expected} values a {width}x{height} header declares"
+                    )));
+                }
+                let v: f32 = tok
+                    .parse()
+                    .map_err(|_| malformed(format!("matrix: non-numeric value {tok:?}")))?;
+                buf.extend_from_slice(&v.to_ne_bytes());
+                got += 1;
+            }
+        }
+        if got != expected {
             return Err(malformed(format!(
-                "matrix: expected {expected} values for {width}x{height}, got {}",
-                values.len()
+                "matrix: expected {expected} values for {width}x{height}, got {got}"
             )));
         }
-        Ok(Raster::from_f32_samples(width, height, float1()?, &values)?)
+        Ok(Raster::new(width, height, float1()?, buf)?)
     }
 
     /// Decode a comma- or TAB-separated-values grid into a single-band float
@@ -496,39 +540,69 @@ impl Raster {
     /// data rows, contains a non-numeric field, or the raster cannot be
     /// constructed.
     pub fn csv_load(data: &[u8]) -> Result<Raster, DecodeError> {
+        Self::csv_load_with_limits(data, crate::source::DecodeLimits::default())
+    }
+
+    /// [`Raster::csv_load`] under explicit
+    /// [`DecodeLimits`](crate::source::DecodeLimits).
+    ///
+    /// The grid's size is known before any of it is built: the width is the
+    /// first non-empty row's field count and the height is the number of
+    /// non-empty rows. Both are checked against `max_coord` and `max_pixels`,
+    /// and the `width x height` one-band `f32` grid against
+    /// `max_alloc_bytes`, before the one output buffer is reserved, fallibly,
+    /// and filled row by row with the same pad-and-truncate rule. It used to
+    /// pad every row to the first row's width before checking anything, so a
+    /// ~135 KB ragged file could build a grid of several GB, and then copy it
+    /// once more to flatten it (issue #1168). The output buffer is now the
+    /// only image-sized allocation.
+    ///
+    /// # Errors
+    ///
+    /// As [`Raster::csv_load`], plus [`DecodeError::CoordLimitExceeded`],
+    /// [`DecodeError::DimensionLimitExceeded`] and
+    /// [`DecodeError::AllocLimitExceeded`] for a grid past the limits.
+    pub fn csv_load_with_limits(
+        data: &[u8],
+        limits: crate::source::DecodeLimits,
+    ) -> Result<Raster, DecodeError> {
         let text =
             std::str::from_utf8(data).map_err(|_| malformed("csv: input is not valid UTF-8"))?;
-        let mut rows: Vec<Vec<f32>> = Vec::new();
-        for line in text.lines() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            let mut row: Vec<f32> = Vec::new();
+        let rows = || text.lines().filter(|line| !line.trim().is_empty());
+
+        let first = rows()
+            .next()
+            .ok_or_else(|| malformed("csv: no data rows"))?;
+        let width = u32::try_from(first.split([',', '\t']).count())
+            .map_err(|_| malformed("csv: width too large"))?;
+        let height =
+            u32::try_from(rows().count()).map_err(|_| malformed("csv: height too large"))?;
+        limits.check_coord(width, height)?;
+        limits.check_pixels(width, height)?;
+        limits.check_image_alloc("csv samples", width, height, 1, 4)?;
+
+        let mut buf = crate::raster::try_plane::<u8>(plane::CSV_GRID, width, height, 4)?;
+        // The first row fixes the width; pad short rows with 0 and truncate
+        // long ones, so a ragged grid loads rather than erroring (libvips'
+        // default-tolerant `csvload`). Every field is still parsed, so a
+        // non-numeric one past the width is refused as it always was.
+        for line in rows() {
+            let mut n = 0u32;
             for field in line.split([',', '\t']) {
                 let t = field.trim();
                 let v: f32 = t
                     .parse()
                     .map_err(|_| malformed(format!("csv: non-numeric field {t:?}")))?;
-                row.push(v);
+                if n < width {
+                    buf.extend_from_slice(&v.to_ne_bytes());
+                    n += 1;
+                }
             }
-            rows.push(row);
+            for _ in n..width {
+                buf.extend_from_slice(&0.0f32.to_ne_bytes());
+            }
         }
-
-        let height = rows.len();
-        if height == 0 {
-            return Err(malformed("csv: no data rows"));
-        }
-        // The first row fixes the width; pad short rows with 0 and truncate
-        // long ones, so a ragged grid loads rather than erroring (libvips'
-        // default-tolerant `csvload`).
-        let width = rows[0].len();
-        for row in &mut rows {
-            row.resize(width, 0.0);
-        }
-        let width = u32::try_from(width).map_err(|_| malformed("csv: width too large"))?;
-        let height = u32::try_from(height).map_err(|_| malformed("csv: height too large"))?;
-        let values: Vec<f32> = rows.into_iter().flatten().collect();
-        Ok(Raster::from_f32_samples(width, height, float1()?, &values)?)
+        Ok(Raster::new(width, height, float1()?, buf)?)
     }
 
     /// Decode a Netpbm image (`P1`, `P2`, `P3`, `P4`, `P5`, or `P6`).
@@ -1581,6 +1655,114 @@ mod tests {
             ),
             Ok(n) => panic!("a 2x2 header over 100000 values loaded {n} bytes"),
         }
+    }
+
+    /// The `_with_limits` entry points take the caller's budget, refuse one
+    /// under it with the typed variant and load exactly at it (issue #1168).
+    #[test]
+    fn csv_and_matrix_loaders_take_the_callers_limits() {
+        use crate::source::{DecodeLimits, SourceError};
+
+        let csv = b"1,2,3\n4,5\n";
+        let at = DecodeLimits::default()
+            .with_max_pixels(6)
+            .with_max_coord(3)
+            .with_max_alloc_bytes(24);
+        let r = Raster::csv_load_with_limits(csv, at).expect("3x2 fits every ceiling exactly");
+        assert_eq!(r.f32_samples().unwrap(), vec![1.0, 2.0, 3.0, 4.0, 5.0, 0.0]);
+        assert!(matches!(
+            Raster::csv_load_with_limits(csv, DecodeLimits::default().with_max_pixels(5)),
+            Err(SourceError::DimensionLimitExceeded {
+                width: 3,
+                height: 2,
+                max_pixels: 5
+            })
+        ));
+        assert!(matches!(
+            Raster::csv_load_with_limits(csv, DecodeLimits::default().with_max_coord(2)),
+            Err(SourceError::CoordLimitExceeded {
+                width: 3,
+                height: 2,
+                max_coord: 2
+            })
+        ));
+        assert!(matches!(
+            Raster::csv_load_with_limits(csv, DecodeLimits::default().with_max_alloc_bytes(23)),
+            Err(SourceError::AllocLimitExceeded {
+                needed_bytes: 24,
+                max_alloc_bytes: 23,
+                ..
+            })
+        ));
+
+        let matrix = b"3 2\n1 2 3\n4 5 6\n";
+        let r = Raster::matrix_load_with_limits(matrix, at).expect("3x2 f32 is 24 bytes");
+        assert_eq!(r.f32_samples().unwrap(), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        assert!(matches!(
+            Raster::matrix_load_with_limits(
+                matrix,
+                DecodeLimits::default().with_max_alloc_bytes(23)
+            ),
+            Err(SourceError::AllocLimitExceeded {
+                needed_bytes: 24,
+                max_alloc_bytes: 23,
+                ..
+            })
+        ));
+        assert!(matches!(
+            Raster::matrix_load_with_limits(matrix, DecodeLimits::default().with_max_coord(2)),
+            Err(SourceError::CoordLimitExceeded { .. })
+        ));
+        assert!(matches!(
+            Raster::matrix_load_with_limits(matrix, DecodeLimits::default().with_max_pixels(5)),
+            Err(SourceError::DimensionLimitExceeded { .. })
+        ));
+    }
+
+    /// The ragged bomb is refused before its grid is reserved, and a grid
+    /// that loads reserves exactly one image-sized buffer (issue #1168).
+    ///
+    /// Counted through the plane funnel: the refusal reserves nothing under
+    /// `textio.`, and the loads reserve one plane each, which is the output
+    /// they return. Before the fix the CSV path built a `Vec` per row and a
+    /// flattened copy beside them, none of it through the funnel, and the
+    /// matrix path grew a `Vec` by the body's length.
+    #[test]
+    fn the_text_grids_reserve_one_plane_and_none_on_a_refusal() {
+        use crate::raster::counting_planes;
+        use crate::source::{DecodeLimits, SourceError};
+
+        let mut bomb = b"0".to_vec();
+        for _ in 1..65535 {
+            bomb.extend_from_slice(b",0");
+        }
+        for _ in 1..2100 {
+            bomb.extend_from_slice(b"\n0");
+        }
+        let tight = DecodeLimits::default().with_max_alloc_bytes(1 << 20);
+        let (refused, planes) =
+            counting_planes("textio.", || Raster::csv_load_with_limits(&bomb, tight));
+        assert!(
+            matches!(
+                refused,
+                Err(SourceError::AllocLimitExceeded {
+                    needed_bytes: 550_494_000,
+                    max_alloc_bytes: 1_048_576,
+                    ..
+                })
+            ),
+            "the bomb under a 1 MiB budget, got {:?}",
+            refused.map(|r| (r.width(), r.height()))
+        );
+        assert_eq!(planes, 0, "the refusal reserved {planes} grids");
+
+        let (ok, planes) = counting_planes("textio.", || Raster::csv_load(b"1,2\n3\n"));
+        assert_eq!(ok.expect("a small ragged grid loads").width(), 2);
+        assert_eq!(planes, 1, "the CSV load reserves its one output grid");
+
+        let (ok, planes) = counting_planes("textio.", || Raster::matrix_load(b"2 1\n1 2\n"));
+        assert_eq!(ok.expect("a 2x1 matrix loads").width(), 2);
+        assert_eq!(planes, 1, "the matrix load reserves its one output grid");
     }
 
     #[test]
