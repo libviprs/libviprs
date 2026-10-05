@@ -359,12 +359,12 @@ pub const DEDUPE_WINDOW_WAYS: usize = 8;
 
 /// What one tracked payload costs, across the window and the repeat table.
 ///
-/// A [`WindowSlot`] is 48 bytes, a [`RepeatSlot`] is 16, and each table spends
+/// A window slot is 48 bytes, a repeat-table slot is 16, and each table spends
 /// four bytes of recency order on every set of [`DEDUPE_WINDOW_WAYS`], which
 /// is one more byte a payload between them.
 /// `the_dedupe_budget_buys_what_it_says_it_buys` holds this against
 /// `size_of`, so it cannot drift from the types it describes.
-const DEDUPE_BYTES_PER_PAYLOAD: usize = 65;
+pub const DEDUPE_BYTES_PER_PAYLOAD: usize = 65;
 
 /// How much memory the dedupe window spends when the caller says nothing.
 ///
@@ -977,6 +977,14 @@ impl Default for WriterOptions {
 }
 
 impl WriterOptions {
+    /// The smallest [`dedupe_memory_bytes`](Self::dedupe_memory_bytes) the
+    /// writer takes as given: one set of [`DEDUPE_WINDOW_WAYS`] payloads at
+    /// [`DEDUPE_BYTES_PER_PAYLOAD`] each, 520 bytes. A smaller budget is
+    /// rounded up to this rather than refused, so a caller that wants to
+    /// refuse it instead (libviprs-cli does, for `--dedupe-memory-bytes`)
+    /// compares against this (issue #1169).
+    pub const MIN_DEDUPE_MEMORY_BYTES: usize = DEDUPE_WINDOW_WAYS * DEDUPE_BYTES_PER_PAYLOAD;
+
     /// Set what the tile blobs are.
     pub fn with_tile_type(mut self, tile_type: TileType) -> Self {
         self.tile_type = tile_type;
@@ -4349,5 +4357,27 @@ mod tests {
             2,
             "sync_pending should sync the destination and the index log"
         );
+    }
+
+    /// The dedupe floor is exported and is exactly one set (issue #1169).
+    ///
+    /// libviprs-cli refuses a `--dedupe-memory-bytes` under the floor rather
+    /// than let the writer quietly round it up, and used to spell the floor
+    /// itself as `DEDUPE_WINDOW_WAYS * 65`. Held against the rounding the
+    /// writer actually does: the floor buys one set, one byte under it is
+    /// rounded up to that same set, and one byte under two floors is still
+    /// one set.
+    #[test]
+    fn the_exported_dedupe_floor_is_one_set() {
+        let min = WriterOptions::MIN_DEDUPE_MEMORY_BYTES;
+        assert_eq!(min, DEDUPE_WINDOW_WAYS * DEDUPE_BYTES_PER_PAYLOAD);
+        assert_eq!(dedupe_sets(min), 1);
+        assert_eq!(
+            dedupe_sets(min - 1),
+            1,
+            "under the floor rounds up to one set"
+        );
+        assert_eq!(dedupe_sets(2 * min - 1), 1);
+        assert_eq!(dedupe_sets(2 * min), 2);
     }
 }

@@ -668,6 +668,28 @@ impl Manifest {
         Self::from_json_slice(&bytes)
     }
 
+    /// Where an [`FsSink`](crate::sink::FsSink) writes the manifest for the
+    /// pyramid whose tile root is `dir`, inside copy first: `dir/manifest.json`,
+    /// then the byte-identical sibling `<dir>.manifest.json` beside it. The
+    /// sibling is left out when `dir` has no parent or file name to build it
+    /// from, which is also when the sink does not write one. The sink writes
+    /// through this, so the two cannot disagree (issue #1169).
+    pub fn locations(dir: &Path) -> Vec<std::path::PathBuf> {
+        let mut out = vec![dir.join("manifest.json")];
+        if let (Some(parent), Some(name)) = (dir.parent(), dir.file_name()) {
+            let mut sibling = name.to_os_string();
+            sibling.push(".manifest.json");
+            out.push(parent.join(sibling));
+        }
+        out
+    }
+
+    /// The first of [`locations`](Self::locations) that is a file, or `None`
+    /// when the pyramid at `dir` has no manifest (issue #1169).
+    pub fn locate(dir: &Path) -> Option<std::path::PathBuf> {
+        Self::locations(dir).into_iter().find(|p| p.is_file())
+    }
+
     /// Parse a `Manifest` from a byte slice.
     pub fn from_json_slice(bytes: &[u8]) -> Result<Self, ManifestError> {
         serde_json::from_slice(bytes).map_err(ManifestError::Json)
