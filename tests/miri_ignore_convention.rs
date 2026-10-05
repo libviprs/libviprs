@@ -382,7 +382,8 @@ const ANCHOR_FILES: &[&str] = &[
 /// a password with an interior NUL is `WrongPassword` rather than a panic.
 ///
 /// #1163 moves it 267 to 271: the four `src/stream_verify.rs` cells that build centred and padded raw pyramids in a temp dir and verify them through the strip path, one with a flipped byte.
-const EXPECTED_SRC_ANNOTATIONS: usize = 271;
+/// #1162 moves it 271 to 272: `sink::tests::fs_sink_manifest_records_centring_and_skip_blanks`, which runs a centred skip_blanks pyramid into a temp dir and reads its manifest back.
+const EXPECTED_SRC_ANNOTATIONS: usize = 272;
 /// Companion to [`EXPECTED_SRC_ANNOTATIONS`]: how many `src/` modules carry at
 /// least one annotation. #765 made it 25 by putting the first annotation in
 /// `src/analyze.rs`; `src/colour.rs` and `src/pdf.rs`, which took the other
@@ -748,7 +749,8 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// line moved.
 ///
 /// #1163 adds 4: the same four `stream_verify` cells, each writing a pyramid to a temp dir. It said 476 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 480;
+/// #1162 adds 2: that `src/sink.rs` cell and `tests/pmtiles_sink.rs::the_archive_metadata_records_centring_and_skip_blanks`, which both write a pyramid to a temp dir. It said 480 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 482;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {

@@ -2417,6 +2417,8 @@ impl FsSink {
                 .as_ref()
                 .map(|c| c.blank_tile_strategy)
                 .unwrap_or(crate::engine::BlankTileStrategy::Emit),
+            centre: self.plan.centre,
+            skip_blanks: eng_cfg.as_ref().is_some_and(|c| c.skip_blanks),
         };
 
         // -- source metadata ------------------------------------------------

@@ -363,6 +363,8 @@ impl PmTilesSink {
                 .map_or(crate::engine::BlankTileStrategy::Emit, |c| {
                     c.blank_tile_strategy
                 }),
+            centre: self.plan.centre,
+            skip_blanks: config.as_ref().is_some_and(|c| c.skip_blanks),
         };
         let source = crate::manifest::SourceMetadata {
             width: self.plan.image_width,

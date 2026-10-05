@@ -20,6 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   error (`extract_page_image_dpi`, `extract_page_image_with_password` and the
   background variants) report a PDF failure through it, so a caller matches
   `SourceError::Pdf(PdfError::WrongPassword)` instead of downcasting.
+- **The manifest and the PMTiles `vnd.libviprs` metadata record `centre` and
+  `skip_blanks`** (issue #1162). Both are new `GenerationSettings` fields,
+  taken from the plan's `with_centre` and the run's `EngineConfig::skip_blanks`,
+  so anything that rebuilds the plan from a finished pyramid can lay it on
+  the right grid and tell a dropped blank from a missing tile. They're
+  additive inside schema v1: written only when `true`, read as `false` when
+  absent, so older manifests still parse and older readers skip the keys.
 
 ### Changed
 
