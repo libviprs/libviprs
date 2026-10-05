@@ -683,6 +683,12 @@ pub(crate) fn decode_netpbm(
         let need = count
             .checked_mul(bpc)
             .ok_or_else(|| malformed("ppm: declared dimensions overflow"))?;
+        // The axis and pixel ceilings first, on the declared geometry, the
+        // way every other native decoder applies them. This route used to
+        // price the buffer and stop there, so a file over `max_coord` or
+        // `max_pixels` decoded straight through both (issue #1167).
+        limits.check_coord(width, height)?;
+        limits.check_pixels(width, height)?;
         // Cap the declared geometry against the **caller's** budget before
         // reserving, so a ~20-byte hostile header cannot request gigabytes,
         // and so this route refuses at the same number every other container
@@ -691,6 +697,15 @@ pub(crate) fn decode_netpbm(
 
         let mut buf: Vec<u8> = Vec::new();
         if ascii {
+            // Every ASCII sample takes at least one byte of input (a `P1`
+            // sample is one character, a `P2`/`P3` one at least one digit), so
+            // a body with fewer bytes left than the header has samples can't
+            // be complete. Refuse it here rather than reserving the whole
+            // declared buffer and finding out sample by sample, which let a
+            // 20-byte header reserve anything up to the budget (issue #1167).
+            if count > data.len().saturating_sub(pos) {
+                return Err(malformed("ppm: truncated ascii pixel data"));
+            }
             // `need` is within budget; reserve fallibly so an in-budget request
             // the host still cannot honour is a typed error, not an abort.
             buf.try_reserve_exact(need)
@@ -1498,7 +1513,13 @@ mod tests {
         // constructor's `ByteBudgetExceeded`, because this path now prices
         // against the caller's `DecodeLimits` like every other container
         // rather than against `DEFAULT_MAX_ALLOC_BYTES` (issue #910).
-        let over_budget = b"P3\n65535 65535\n255\n";
+        //
+        // 30000 x 30000 is under the default gigapixel `max_pixels`, so the
+        // allocation price is the ceiling it breaks. It used to be 65535
+        // square, which is over `max_pixels` too and so now comes back as the
+        // pixel refusal, the ceilings being checked in the documented order
+        // `max_coord`, `max_pixels`, `max_alloc_bytes` (issue #1167).
+        let over_budget = b"P3\n30000 30000\n255\n";
         let err =
             Raster::ppm_load(over_budget).expect_err("over-budget header must be a typed error");
         assert!(

@@ -813,10 +813,16 @@ fn is_alloc_limit_catches_every_shape_the_budget_refuses_in() {
     // decode one and so answered `false` here. Issue #910 moved it onto
     // `DecodeLimits::check_image_alloc` like every other container, so it now
     // answers **true**, and the pair below is what says the move actually
-    // happened rather than being described: the same bytes, the two ceilings,
-    // opposite answers.
+    // happened rather than being described: the two ceilings, opposite
+    // answers.
+    //
+    // It's 30000 square rather than the 60000 above because Netpbm checks
+    // `max_pixels` before it prices the buffer since issue #1167, and 60000
+    // square is over the default gigapixel, so it would come back as the
+    // pixel refusal. 30000 square is under that and still 2.7 GB of RGB8,
+    // past the 512 MiB decode budget.
     let by_decode_limit =
-        Raster::ppm_load(b"P6\n60000 60000\n255\n").expect_err("60000 squared RGB8 is 10.8 GB");
+        Raster::ppm_load(b"P6\n30000 30000\n255\n").expect_err("30000 squared RGB8 is 2.7 GB");
     assert!(
         by_decode_limit.is_alloc_limit(),
         "Netpbm prices against the decode budget now, so raising \

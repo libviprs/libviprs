@@ -380,6 +380,12 @@ fn rasterise(
     // not lift it.
     limits.check_coord(width, height)?;
     limits.check_pixels(width, height)?;
+    // And the allocation budget, on the RGBA8 pixmap about to be allocated.
+    // `take_demultiplied` works in place and hands that same buffer to the
+    // raster, so the pixmap is the peak libviprs allocates. Without this a
+    // caller's `max_alloc_bytes` did not bound an SVG decode at all (issue
+    // #1167).
+    limits.check_image_alloc("svg pixmap", width, height, 4, 1)?;
 
     let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height).ok_or_else(|| {
         DecodeError::DimensionLimitExceeded {

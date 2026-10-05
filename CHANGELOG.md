@@ -82,6 +82,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `EngineConfig::source_content_hash`. The PMTiles sink records the run's
   digest in its `vnd.libviprs` source block the same way. With no digest the
   field stays null, as the docs now say.
+- **The Netpbm decoder ignored `DecodeLimits::max_coord` and `max_pixels`, and
+  the SVG rasteriser ignored `max_alloc_bytes`** (issue #1167). Netpbm now
+  checks both ceilings on the header's declared geometry before pricing the
+  buffer, and SVG prices its `width x height x 4` pixmap against the
+  allocation budget before allocating it, so both refuse with the same typed
+  errors as every other decoder. An ASCII Netpbm body with fewer bytes left
+  than its header declares samples is now refused before the pixel buffer is
+  reserved, instead of after reserving all of it.
 - **The crate didn't compile on stable 1.99** (issue #1157). 1.99 deprecates
   `AtomicU64::fetch_update` (std renamed it `try_update`), and with
   `[lints.rust] deprecated = "deny"` the two calls in `MemoryTracker::alloc`
