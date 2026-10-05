@@ -187,6 +187,33 @@ shared default now, and anything Docker would not accept as a volume name is
 refused up front.
 
 
+One Docker slot per run, from a pool shared across the machine
+--------------------------------------------------------------
+
+Ten lanes gating at once on one laptop filled Docker Desktop's whole disk, and
+from then on every hook that touched Docker died with `No space left on device`
+(libviprs/libviprs-tests#248). Nothing capped how many of these ran at once.
+
+So a run takes a slot before it asks the daemon for anything, and waits when
+there is none. The pool is the one libviprs-tests' `tools/run-tests.sh` uses,
+by the same rules, so the pre-commit hook here and the pre-push suite count
+against one cap:
+
+  * `LIBVIPRS_DOCKER_SLOT_DIR` holds the slots (default
+    `~/.cache/libviprs/docker-slots`), one `slotN/` directory each with the
+    holder's pid in it. `mkdir` is the lock, because it is atomic everywhere and
+    macOS ships no flock(1) for the shell side to use.
+  * `LIBVIPRS_DOCKER_MAX_PARALLEL` is how many there are (default 2).
+  * A slot whose holder is gone is renamed aside and taken over. The rename
+    succeeds for exactly one of the runs that noticed.
+  * `LIBVIPRS_DOCKER_SLOT` names a slot the caller already holds. A run that
+    inherits one with a live holder does not take a second, because with one
+    slot that is a deadlock, and a run exports the slot it took so whatever it
+    starts behaves the same way.
+
+`--list` and `--print-docker-argv` start nothing and take no slot.
+
+
 A job that does not run is not a job that passed
 ------------------------------------------------
 
@@ -206,7 +233,7 @@ reason the `${{ }}` rule above refuses to guess. Today that is only
 runs it here on a pinned nightly, and `tests/local_gate_is_the_job_list.rs`
 fails if a job grows an `if:` with nothing covering it.
 """
-import argparse, collections, os, platform, re, shlex, subprocess, sys
+import argparse, atexit, collections, os, platform, re, shlex, shutil, signal, subprocess, sys, time
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 WORKSPACE = os.path.abspath(os.path.join(REPO, ".."))
@@ -233,6 +260,97 @@ DOCKER_ARCH = {"x86_64": "amd64", "amd64": "amd64",
 # resolves against, so they match what ci.yml's `actions/checkout` produces.
 CHECKOUT = {"libviprs": "/src/libviprs", "libviprs-tests": "/src/libviprs-tests"}
 GITSRC = {"libviprs": "/gitsrc/libviprs", "libviprs-tests": "/gitsrc/libviprs-tests"}
+
+
+# The machine-wide Docker slot (libviprs/libviprs-tests#248); the docstring
+# section "One Docker slot per run" says why and what the rules are.
+SLOT_DIR = os.path.join(os.path.expanduser("~"), ".cache", "libviprs", "docker-slots")
+
+
+def _slot_pid(slot):
+    try:
+        with open(os.path.join(slot, "pid")) as f:
+            return int(f.read().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _try_slot(slot):
+    try:
+        os.mkdir(slot)
+    except FileExistsError:
+        return False
+    with open(os.path.join(slot, "pid"), "w") as f:
+        f.write(f"{os.getpid()}\n")
+    return True
+
+
+def caller_slot():
+    """The slot named by LIBVIPRS_DOCKER_SLOT, if its holder is alive."""
+    slot = os.environ.get("LIBVIPRS_DOCKER_SLOT")
+    if not slot:
+        return None
+    pid = _slot_pid(slot)
+    return slot if pid is not None and _alive(pid) else None
+
+
+def acquire_docker_slot():
+    """Wait for a slot in the shared pool and take it. Returns the slot, or
+    None when the caller already holds one and this run is counted there."""
+    held = caller_slot()
+    if held:
+        print(f"==> docker slot {held} (held by the caller)")
+        return None
+    root = os.environ.get("LIBVIPRS_DOCKER_SLOT_DIR") or SLOT_DIR
+    cap = os.environ.get("LIBVIPRS_DOCKER_MAX_PARALLEL", "2")
+    if not cap.isdigit() or int(cap) < 1:
+        sys.exit(f"LIBVIPRS_DOCKER_MAX_PARALLEL={cap!r} is not a positive whole number.")
+    poll = float(os.environ.get("LIBVIPRS_DOCKER_SLOT_POLL", "10"))
+    os.makedirs(root, exist_ok=True)
+    announced = False
+    while True:
+        holders = []
+        for i in range(1, int(cap) + 1):
+            slot = os.path.join(root, f"slot{i}")
+            if _try_slot(slot):
+                return slot
+            pid = _slot_pid(slot)
+            if pid is not None and not _alive(pid):
+                aside = f"{slot}.stale.{os.getpid()}"
+                try:
+                    os.rename(slot, aside)
+                except OSError:
+                    pass
+                else:
+                    shutil.rmtree(aside, ignore_errors=True)
+                    if _try_slot(slot):
+                        return slot
+            holders.append(str(pid) if pid is not None else "?")
+        if not announced:
+            print(f"==> waiting for a docker slot: all {cap} in {root} are held "
+                  f"(pids: {' '.join(holders)}). LIBVIPRS_DOCKER_MAX_PARALLEL "
+                  "raises the cap.", flush=True)
+            announced = True
+        time.sleep(poll)
+
+
+def release_docker_slot(slot):
+    if slot and _slot_pid(slot) == os.getpid():
+        try:
+            os.remove(os.path.join(slot, "pid"))
+            os.rmdir(slot)
+        except OSError:
+            pass
 
 
 def git(repo, *args, check=True):
@@ -737,6 +855,15 @@ def main():
             f"(reported by {arch_source}). --list and --print-docker-argv still "
             "work; a run cannot."
         )
+
+    # Everything from here on talks to the daemon, so this is where the slot
+    # is taken. A SIGTERM becomes an ordinary exit so the release still runs.
+    slot = acquire_docker_slot()
+    if slot:
+        atexit.register(release_docker_slot, slot)
+        signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
+        os.environ["LIBVIPRS_DOCKER_SLOT"] = slot
+        print(f"==> docker slot {slot}")
 
     if subprocess.run(["docker", "info"], capture_output=True).returncode != 0:
         return "Docker is not running."
