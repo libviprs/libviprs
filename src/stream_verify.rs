@@ -180,8 +180,13 @@ pub fn verify_from_strip_source(
     // gives fast feedback when the output directory is clearly wrong
     // (e.g. pointed at a stale run) before we spend time re-rendering.
     // ------------------------------------------------------------------
+    //
+    // A run with `skip_blanks` leaves its uniform tiles out on purpose, so
+    // under that config an absent tile is not decided here: phase 4
+    // re-renders it and accepts the absence only if the tile it would have
+    // been is blank (issue #1174).
     for coord in plan.tile_coords() {
-        if find_tile_on_disk(root, plan, coord, &active_exts).is_none() {
+        if !config.skip_blanks && find_tile_on_disk(root, plan, coord, &active_exts).is_none() {
             return Err(EngineError::Sink(SinkError::Other(format!(
                 "Verify: missing tile for coord {coord:?}"
             ))));
@@ -412,6 +417,11 @@ pub fn verify_from_strip_source(
 
                     let (abs, ext) = match find_tile_on_disk(root, plan, coord, &active_exts) {
                         Some(found) => found,
+                        // The run dropped this tile because it was uniform,
+                        // the same test the engine applied (issue #1174).
+                        None if config.skip_blanks && crate::engine::is_blank_tile(&expected) => {
+                            continue;
+                        }
                         None => {
                             return Err(EngineError::Sink(SinkError::Other(format!(
                                 "Verify: missing tile for coord {coord:?}"

@@ -30,6 +30,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   without the `svg` feature gets its "enable the `svg` feature" refusal. The
   sniff is public as `looks_like_svg`, with its window as `SVG_SNIFF_BYTES`.
   A gzipped `.svgz` still isn't recognised.
+- **`stream_verify::verify_from_strip_source` verifies a `skip_blanks`
+  pyramid** (issue #1174). With `EngineConfig::skip_blanks` set, a planned
+  tile that's absent is accepted when its re-render is blank (the test the
+  engine used to drop it) and still fails when it has content. Without the
+  flag every planned tile is still required.
 - `pdf_info_with_password` and `extract_page_image_with_password` open an
   encrypted PDF with its password when the `pdfium` feature is on. They used
   to answer any non-empty password with "not available in this build". Two
