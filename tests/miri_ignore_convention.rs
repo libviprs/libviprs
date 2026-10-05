@@ -385,12 +385,17 @@ const ANCHOR_FILES: &[&str] = &[
 /// #1162 moves it 271 to 272: `sink::tests::fs_sink_manifest_records_centring_and_skip_blanks`, which runs a centred skip_blanks pyramid into a temp dir and reads its manifest back.
 /// #1165 moves it 272 to 274: two `src/engine_builder.rs` cells that checkpoint a run into a temp dir and resume it with a different and with the same source digest.
 /// #1164 moves it 274 to 277: two `src/sink.rs` cells that read the source digest back out of both manifest copies, and one in `src/sink_pmtiles.rs` that reads it out of an archive's metadata.
-const EXPECTED_SRC_ANNOTATIONS: usize = 277;
+/// #1171 moves it 277 to 284, all seven in `src/sink_object_store.rs` over a
+/// `DirectoryObjectStore` in a temp dir: the round trip, the refused keys, the
+/// symlink cell, the bucket names, the interrupted write, the dead writer's
+/// staging file and a pyramid written through the sink.
+const EXPECTED_SRC_ANNOTATIONS: usize = 284;
 /// Companion to [`EXPECTED_SRC_ANNOTATIONS`]: how many `src/` modules carry at
 /// least one annotation. #765 made it 25 by putting the first annotation in
 /// `src/analyze.rs`; `src/colour.rs` and `src/pdf.rs`, which took the other
-/// three, were already in the set.
-const EXPECTED_SRC_MODULES: usize = 30;
+/// three, were already in the set. #1171 makes it 31 with the first
+/// annotation in `src/sink_object_store.rs`.
+const EXPECTED_SRC_MODULES: usize = 31;
 
 /// How many tests in the tree reach `std::process`.
 ///
@@ -754,7 +759,9 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1162 adds 2: that `src/sink.rs` cell and `tests/pmtiles_sink.rs::the_archive_metadata_records_centring_and_skip_blanks`, which both write a pyramid to a temp dir. It said 480 before this line moved.
 /// #1165 adds 2: the same two resume cells. It said 482 before this line moved.
 /// #1164 adds 3: the same three cells, each writing a pyramid to a temp dir. It said 484 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 487;
+/// #1171 adds the same seven `src/sink_object_store.rs` cells, each with a
+/// temp dir of its own. It said 487 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 494;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {

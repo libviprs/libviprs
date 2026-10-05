@@ -157,6 +157,57 @@ pub trait ObjectStore: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// DirectoryObjectStore
+// ---------------------------------------------------------------------------
+
+/// An [`ObjectStore`] that keeps each object as a file under a root
+/// directory, so object `a/b.png` is the file `root/a/b.png`.
+///
+/// Not implemented yet: every operation refuses.
+#[derive(Debug, Clone)]
+pub struct DirectoryObjectStore {
+    root: std::path::PathBuf,
+}
+
+impl DirectoryObjectStore {
+    /// A store whose objects live under `root`.
+    pub fn new(root: impl Into<std::path::PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+
+    /// A store for `bucket` under `root`, so object `k` is `root/bucket/k`.
+    pub fn for_bucket(root: impl AsRef<std::path::Path>, bucket: &str) -> Result<Self, SinkError> {
+        Ok(Self::new(root.as_ref().join(bucket)))
+    }
+
+    /// The directory objects are stored under.
+    pub fn root(&self) -> &std::path::Path {
+        &self.root
+    }
+
+    #[cfg(test)]
+    fn put_with(
+        &self,
+        key: &str,
+        write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
+    ) -> Result<(), SinkError> {
+        let _ = (key, write);
+        Err(SinkError::Unsupported(
+            "DirectoryObjectStore is not implemented".into(),
+        ))
+    }
+}
+
+impl ObjectStore for DirectoryObjectStore {
+    fn put(&self, key: &str, bytes: &[u8]) -> Result<(), SinkError> {
+        let _ = (key, bytes);
+        Err(SinkError::Unsupported(
+            "DirectoryObjectStore is not implemented".into(),
+        ))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ObjectStoreConfig
 // ---------------------------------------------------------------------------
 
@@ -812,5 +863,329 @@ mod tests {
             .to_string();
         assert!(fmsg.contains("float"), "{fmsg}");
         assert_ne!(msg, fmsg);
+    }
+
+    // -----------------------------------------------------------------------
+    // DirectoryObjectStore (issue #1171)
+    // -----------------------------------------------------------------------
+
+    /// Every file under `dir`, relative to it, `/`-separated and sorted. The
+    /// cells use it to check what actually landed on disk, staging files
+    /// included, without going through the store under test.
+    fn files_under(dir: &std::path::Path) -> Vec<String> {
+        fn walk(base: &std::path::Path, dir: &std::path::Path, out: &mut Vec<String>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(base, &path, out);
+                } else {
+                    let rel = path.strip_prefix(base).unwrap();
+                    let parts: Vec<String> = rel
+                        .components()
+                        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                        .collect();
+                    out.push(parts.join("/"));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(dir, dir, &mut out);
+        out.sort();
+        out
+    }
+
+    /// Put, list under a prefix, ranged read, size and overwrite all go
+    /// through the directory, with object `a/b` landing at `root/a/b`.
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn directory_store_round_trips_objects() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("bucket");
+        let store = DirectoryObjectStore::new(&root);
+        assert_eq!(store.root(), root.as_path());
+
+        store.put("run/a/0_0.png", b"hello world").expect("put");
+        store.put("run/b.png", b"xy").expect("put");
+        store.put("runner/c.png", b"z").expect("put");
+        store
+            .put("other/d.png", b"")
+            .expect("an empty object is an object");
+        assert_eq!(
+            std::fs::read(root.join("run/a/0_0.png")).unwrap(),
+            b"hello world"
+        );
+
+        // A bucket listing is a plain string prefix match, so `run` also
+        // matches `runner/`, and the keys come back sorted.
+        assert_eq!(
+            store.list("run").expect("list"),
+            vec!["run/a/0_0.png", "run/b.png", "runner/c.png"]
+        );
+        assert_eq!(
+            store.list("run/").expect("list"),
+            vec!["run/a/0_0.png", "run/b.png"]
+        );
+        assert_eq!(store.list("").expect("list everything").len(), 4);
+        assert!(store.list("nothing/").expect("list").is_empty());
+
+        assert_eq!(store.get_range("run/a/0_0.png", 6, 5).unwrap(), b"world");
+        assert_eq!(store.get_range("run/a/0_0.png", 11, 0).unwrap(), b"");
+        assert_eq!(store.size("run/a/0_0.png").unwrap(), Some(11));
+        assert_eq!(store.size("other/d.png").unwrap(), Some(0));
+
+        // A range past the end is refused, not clamped (the trait contract).
+        assert!(store.get_range("run/b.png", 1, 5).is_err());
+        // A missing object is an error, not an empty object and not "size
+        // unknown", which would switch off a reader's bounds checks.
+        assert!(store.get_range("run/missing.png", 0, 1).is_err());
+        assert!(store.size("run/missing.png").is_err());
+        // A directory is not an object.
+        assert!(store.size("run/a").is_err());
+        assert!(store.get_range("run/a", 0, 0).is_err());
+
+        store.put("run/b.png", b"replaced").expect("overwrite");
+        assert_eq!(store.get_range("run/b.png", 0, 8).unwrap(), b"replaced");
+        assert_eq!(store.size("run/b.png").unwrap(), Some(8));
+
+        // A root that does not exist yet lists as empty rather than failing,
+        // the way an empty bucket does.
+        let fresh = DirectoryObjectStore::new(dir.path().join("not-yet"));
+        assert!(fresh.list("").expect("list").is_empty());
+    }
+
+    /// A key that would leave the root, that names nothing, or that the
+    /// filesystem would read differently from a bucket is refused by every
+    /// operation before anything touches the disk.
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn directory_store_refuses_keys_that_escape_the_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("bucket");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(dir.path().join("secret"), b"outside").unwrap();
+        let store = DirectoryObjectStore::new(&root);
+        for key in [
+            "",
+            "/",
+            "..",
+            ".",
+            "../secret",
+            "a/../../secret",
+            "a/..",
+            "/etc/passwd",
+            "a//b",
+            "a/",
+            "./a",
+            "a/./b",
+            "a\\..\\..\\secret",
+            "..\\secret",
+            "a\0b",
+        ] {
+            assert!(
+                store.put(key, b"no").is_err(),
+                "put {key:?} must be refused"
+            );
+            assert!(
+                store.get_range(key, 0, 1).is_err(),
+                "get_range {key:?} must be refused"
+            );
+            assert!(store.size(key).is_err(), "size {key:?} must be refused");
+        }
+        assert_eq!(
+            std::fs::read(dir.path().join("secret")).unwrap(),
+            b"outside",
+            "the file beside the root is untouched"
+        );
+        assert!(
+            files_under(&root).is_empty(),
+            "nothing was written inside the root either: {:?}",
+            files_under(&root)
+        );
+    }
+
+    /// A symlink planted under the root does not become a way out of it:
+    /// reads, sizes and writes through it are refused and listing skips it.
+    #[cfg(unix)]
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn directory_store_does_not_follow_symlinks_out_of_the_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("bucket");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret"), b"outside").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
+        std::os::unix::fs::symlink(outside.join("secret"), root.join("file-link")).unwrap();
+
+        let store = DirectoryObjectStore::new(&root);
+        assert!(store.get_range("link/secret", 0, 1).is_err());
+        assert!(store.size("link/secret").is_err());
+        assert!(store.get_range("file-link", 0, 1).is_err());
+        assert!(store.size("file-link").is_err());
+        assert!(store.put("link/planted", b"no").is_err());
+        assert!(!outside.join("planted").exists(), "nothing landed outside");
+        assert!(
+            store.list("").expect("list").is_empty(),
+            "a symlink is not an object"
+        );
+    }
+
+    /// A bucket is one plain name under the root; anything that would put it
+    /// beside the root, or several levels down, is refused.
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn directory_store_bucket_is_one_plain_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = DirectoryObjectStore::for_bucket(dir.path(), "tiles").expect("plain name");
+        assert_eq!(store.root(), dir.path().join("tiles").as_path());
+        store.put("run/0.png", b"t").unwrap();
+        assert_eq!(
+            std::fs::read(dir.path().join("tiles/run/0.png")).unwrap(),
+            b"t"
+        );
+        assert!(DirectoryObjectStore::for_bucket(dir.path(), "my.bucket-1").is_ok());
+
+        for bucket in [
+            "", ".", "..", "a/b", "/abs", "../up", "a\\b", "x\0y", "tiles/",
+        ] {
+            assert!(
+                DirectoryObjectStore::for_bucket(dir.path(), bucket).is_err(),
+                "bucket {bucket:?} must be refused"
+            );
+        }
+    }
+
+    /// A write that dies partway leaves the previous object whole, cleans up
+    /// after itself, and never shows the half-written bytes under the key.
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn directory_store_interrupted_write_never_leaves_a_torn_object() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("bucket");
+        let store = DirectoryObjectStore::new(&root);
+        store
+            .put("run/0.png", b"the whole old object")
+            .expect("put");
+
+        let err = store
+            .put_with("run/0.png", |f| {
+                f.write_all(b"half of the new")?;
+                Err(std::io::Error::other("the writer died here"))
+            })
+            .expect_err("a failed write is an error");
+        assert!(err.to_string().contains("the writer died here"), "{err}");
+        assert_eq!(
+            store.get_range("run/0.png", 0, 20).unwrap(),
+            b"the whole old object"
+        );
+        assert_eq!(store.size("run/0.png").unwrap(), Some(20));
+        assert_eq!(
+            files_under(&root),
+            vec!["run/0.png"],
+            "the staging file went with the failed write"
+        );
+
+        // A first write that dies leaves no object at all, not an empty one.
+        assert!(
+            store
+                .put_with("run/1.png", |f| {
+                    f.write_all(b"partial")?;
+                    Err(std::io::Error::other("killed"))
+                })
+                .is_err()
+        );
+        assert!(store.size("run/1.png").is_err());
+        assert_eq!(store.list("").unwrap(), vec!["run/0.png"]);
+    }
+
+    /// What a killed process leaves behind (a staging file it never renamed)
+    /// is not an object: it is not listed, and a key cannot name one, so a
+    /// caller can never read a staged half-object back as if it were real.
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn directory_store_never_lists_a_dead_writers_staging_file() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("bucket");
+        let store = DirectoryObjectStore::new(&root);
+        store.put("run/0.png", b"old").expect("put");
+
+        // Stop a write between the staged bytes and the rename by panicking
+        // inside it, which is the nearest a test gets to the process dying
+        // there, and keep the staging file it leaves.
+        let staged = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = store.put_with("run/0.png", |f| {
+                f.write_all(b"torn")?;
+                panic!("the process died between write and rename");
+            });
+        }));
+        assert!(staged.is_err());
+        let on_disk = files_under(&root);
+        let leftover: Vec<&String> = on_disk.iter().filter(|p| *p != "run/0.png").collect();
+        assert_eq!(
+            leftover.len(),
+            1,
+            "the dead write left its staging file: {on_disk:?}"
+        );
+
+        assert_eq!(store.list("").unwrap(), vec!["run/0.png"]);
+        assert_eq!(store.get_range("run/0.png", 0, 3).unwrap(), b"old");
+        assert!(
+            store.size(leftover[0]).is_err() && store.put(leftover[0], b"x").is_err(),
+            "a staging name is not a key"
+        );
+    }
+
+    /// The sink writes a whole pyramid through the directory store, the
+    /// store holds exactly the objects the sink put, byte for byte, and the
+    /// sink's own listing reads them back.
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn the_sink_round_trips_a_pyramid_through_the_directory_store() {
+        use crate::planner::{Layout, PyramidPlanner};
+        let plan = PyramidPlanner::new(96, 64, 32, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+        let mut pixels = vec![0u8; 96 * 64 * 3];
+        for (i, p) in pixels.iter_mut().enumerate() {
+            *p = (i * 7 % 251) as u8;
+        }
+        let src = Raster::new(96, 64, PixelFormat::Rgb8, pixels).unwrap();
+
+        let run = |store: Arc<dyn ObjectStore>| {
+            let cfg = ObjectStoreConfig::s3("file://unused", "tiles")
+                .with_key_prefix("runs/1")
+                .with_object_store(store);
+            let sink = ObjectStoreSink::new(cfg, plan.clone(), TileFormat::Png).unwrap();
+            crate::EngineBuilder::new(&src, plan.clone(), &sink)
+                .run()
+                .unwrap();
+            sink
+        };
+
+        let reference = Arc::new(RecordingStore::default());
+        run(reference.clone());
+        let mut expected = reference.puts.lock().unwrap().clone();
+        expected.sort();
+        assert!(!expected.is_empty());
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DirectoryObjectStore::for_bucket(dir.path(), "tiles").unwrap());
+        let sink = run(store.clone());
+
+        let keys: Vec<String> = expected.iter().map(|(k, _)| k.clone()).collect();
+        assert_eq!(
+            sink.list_objects().expect("the sink lists through it"),
+            keys
+        );
+        for (key, bytes) in &expected {
+            let len = usize::try_from(store.size(key).unwrap().unwrap()).unwrap();
+            assert_eq!(&store.get_range(key, 0, len).unwrap(), bytes, "{key}");
+        }
     }
 }

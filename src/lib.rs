@@ -369,7 +369,9 @@ pub use sink::{
 };
 #[cfg(feature = "object-store-sink")]
 #[cfg_attr(docsrs, doc(cfg(feature = "object-store-sink")))]
-pub use sink_object_store::{ObjectStore, ObjectStoreConfig, ObjectStoreSink};
+pub use sink_object_store::{
+    DirectoryObjectStore, ObjectStore, ObjectStoreConfig, ObjectStoreSink,
+};
 #[cfg(feature = "packfile")]
 #[cfg_attr(docsrs, doc(cfg(feature = "packfile")))]
 pub use sink_packfile::{PackfileFormat, PackfileSink, PackfileSinkBuilder, ZipSink};
