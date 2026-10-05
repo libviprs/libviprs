@@ -383,7 +383,8 @@ const ANCHOR_FILES: &[&str] = &[
 ///
 /// #1163 moves it 267 to 271: the four `src/stream_verify.rs` cells that build centred and padded raw pyramids in a temp dir and verify them through the strip path, one with a flipped byte.
 /// #1162 moves it 271 to 272: `sink::tests::fs_sink_manifest_records_centring_and_skip_blanks`, which runs a centred skip_blanks pyramid into a temp dir and reads its manifest back.
-const EXPECTED_SRC_ANNOTATIONS: usize = 272;
+/// #1165 moves it 272 to 274: two `src/engine_builder.rs` cells that checkpoint a run into a temp dir and resume it with a different and with the same source digest.
+const EXPECTED_SRC_ANNOTATIONS: usize = 274;
 /// Companion to [`EXPECTED_SRC_ANNOTATIONS`]: how many `src/` modules carry at
 /// least one annotation. #765 made it 25 by putting the first annotation in
 /// `src/analyze.rs`; `src/colour.rs` and `src/pdf.rs`, which took the other
@@ -750,7 +751,8 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 ///
 /// #1163 adds 4: the same four `stream_verify` cells, each writing a pyramid to a temp dir. It said 476 before this line moved.
 /// #1162 adds 2: that `src/sink.rs` cell and `tests/pmtiles_sink.rs::the_archive_metadata_records_centring_and_skip_blanks`, which both write a pyramid to a temp dir. It said 480 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 482;
+/// #1165 adds 2: the same two resume cells. It said 482 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 484;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
