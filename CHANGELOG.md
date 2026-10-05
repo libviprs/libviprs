@@ -74,6 +74,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   accepted a checkpoint made from a different image of the same size. The
   builder now keeps it (fill-if-unset, like every other knob) and has its own
   `with_source_content_hash` setter.
+- **`ManifestBuilder::include_source_hash(true)` recorded nothing** (issue
+  #1164): the flag was stored and never read, so `SourceMetadata::bytes_hash`
+  was always null. The sink never sees the source, so it now records the
+  digest it's told about: one given with the new
+  `ManifestBuilder::with_source_hash`, else the run's
+  `EngineConfig::source_content_hash`. The PMTiles sink records the run's
+  digest in its `vnd.libviprs` source block the same way. With no digest the
+  field stays null, as the docs now say.
 - **The crate didn't compile on stable 1.99** (issue #1157). 1.99 deprecates
   `AtomicU64::fetch_update` (std renamed it `try_update`), and with
   `[lints.rust] deprecated = "deny"` the two calls in `MemoryTracker::alloc`

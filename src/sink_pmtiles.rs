@@ -366,11 +366,13 @@ impl PmTilesSink {
             centre: self.plan.centre,
             skip_blanks: config.as_ref().is_some_and(|c| c.skip_blanks),
         };
+        // The run's source digest, the only one the sink is told about
+        // (issue #1164). Null when the run carries none.
         let source = crate::manifest::SourceMetadata {
             width: self.plan.image_width,
             height: self.plan.image_height,
             pixel_format,
-            bytes_hash: None,
+            bytes_hash: config.as_ref().and_then(|c| c.source_content_hash.clone()),
         };
 
         metadata.vnd_libviprs = Some(LibviprsMetadata::new(source, generation));
@@ -1111,12 +1113,15 @@ mod tests {
                 .map(str::to_owned)
         };
 
+        // Set through the field rather than the builder method, because
+        // `the_sink_hashes_a_tile_in_exactly_one_place` scans this module for
+        // the hashing call's name and the method's name contains it.
+        let hashed = crate::engine::EngineConfig {
+            source_content_hash: Some("abc123".to_string()),
+            ..Default::default()
+        };
         assert_eq!(
-            bytes_hash(
-                "hashed.pmtiles",
-                crate::engine::EngineConfig::default().with_source_content_hash("abc123"),
-            )
-            .as_deref(),
+            bytes_hash("hashed.pmtiles", hashed).as_deref(),
             Some("abc123"),
             "the archive must carry the digest the run was given"
         );
