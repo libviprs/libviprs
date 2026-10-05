@@ -260,6 +260,8 @@ mod tests {
                     blank_strategy: BlankTileStrategy::PlaceholderWithTolerance {
                         max_channel_delta: 4,
                     },
+                    centre: true,
+                    skip_blanks: true,
                 },
             )),
             ..Metadata::default()
@@ -286,7 +288,8 @@ mod tests {
             r#""generation":{"tile_size":512,"overlap":1,"layout":"xyz","#,
             r#""format":{"kind":"jpeg","quality":83},"concurrency":7,"#,
             r#""background_rgb":[1,2,3],"#,
-            r#""blank_strategy":{"kind":"placeholder_with_tolerance","tolerance":4}}}}"#,
+            r#""blank_strategy":{"kind":"placeholder_with_tolerance","tolerance":4},"#,
+            r#""centre":true,"skip_blanks":true}}}"#,
         );
         assert_eq!(json, want);
 

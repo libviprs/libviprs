@@ -2417,6 +2417,8 @@ impl FsSink {
                 .as_ref()
                 .map(|c| c.blank_tile_strategy)
                 .unwrap_or(crate::engine::BlankTileStrategy::Emit),
+            centre: self.plan.centre,
+            skip_blanks: eng_cfg.as_ref().is_some_and(|c| c.skip_blanks),
         };
 
         // -- source metadata ------------------------------------------------
@@ -3445,6 +3447,64 @@ mod tests {
             let on_disk = std::fs::read_to_string(&dzi_path).unwrap();
             assert_eq!(on_disk, manifest);
         }
+    }
+
+    /// The manifest says whether the plan was centred and whether the run
+    /// dropped its blank tiles (issue #1162).
+    ///
+    /// Anything that rebuilds the plan from `manifest.json` (libviprs-cli's
+    /// `viprs verify` is the one that asked) gets the grid wrong without the
+    /// first and calls every dropped blank a missing tile without the second.
+    /// The uncentred, emit-everything run beside it is the control: a writer
+    /// that stamped `true` on everything would pass the first half alone.
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn fs_sink_manifest_records_centring_and_skip_blanks() {
+        use crate::manifest::ManifestBuilder;
+
+        // 500x300 does not fill a 256 grid, so centring really moves the
+        // image, and the padding it adds is uniform, so skip_blanks really
+        // drops tiles.
+        let mut data = vec![0u8; 500 * 300 * 3];
+        for i in 0..500 * 300 {
+            data[i * 3] = (i % 251) as u8;
+            data[i * 3 + 1] = (i / 500 % 241) as u8;
+            data[i * 3 + 2] = 7;
+        }
+        let src = crate::raster::Raster::new(500, 300, PixelFormat::Rgb8, data).unwrap();
+
+        let run = |centre: bool, skip: bool| {
+            let dir = tempfile::tempdir().unwrap();
+            let out = dir.path().join("tiles");
+            let plan = PyramidPlanner::new(500, 300, 256, 0, Layout::DeepZoom)
+                .unwrap()
+                .with_centre(centre)
+                .plan();
+            let sink = FsSink::new(&out, plan.clone())
+                .with_format(TileFormat::Raw)
+                .with_manifest(ManifestBuilder::new());
+            crate::EngineBuilder::new(&src, plan, sink)
+                .with_skip_blanks(skip)
+                .run()
+                .unwrap();
+            // Read as JSON rather than through `ManifestV1`, so this is a
+            // check on what a reader in another language sees on disk.
+            let bytes = std::fs::read(out.join("manifest.json")).unwrap();
+            let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            let flag = |key: &str| v["generation"][key].as_bool().unwrap_or(false);
+            (flag("centre"), flag("skip_blanks"))
+        };
+
+        assert_eq!(
+            run(true, true),
+            (true, true),
+            "a centred skip_blanks run must say so in its manifest"
+        );
+        assert_eq!(
+            run(false, false),
+            (false, false),
+            "the control: an uncentred run that emits every tile records neither"
+        );
     }
 
     /**

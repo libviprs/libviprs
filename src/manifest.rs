@@ -403,6 +403,30 @@ pub struct GenerationSettings {
     /// Blank-tile handling strategy (Emit / Placeholder).
     #[serde(with = "blank_strategy_serde")]
     pub blank_strategy: BlankTileStrategy,
+    /// Whether the plan centred the image in its tile grid
+    /// ([`PyramidPlanner::with_centre`](crate::planner::PyramidPlanner::with_centre)).
+    ///
+    /// A reader rebuilding the plan from this manifest needs it to lay the
+    /// tiles on the right grid. Additive within schema v1 (issue #1162):
+    /// written only when `true`, and read as `false` when absent, which is
+    /// what every manifest written before the field existed describes unless
+    /// its run centred.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub centre: bool,
+    /// Whether the run dropped uniform tiles instead of writing them
+    /// ([`EngineConfig::skip_blanks`](crate::engine::EngineConfig::skip_blanks)).
+    ///
+    /// When it is `true` a planned tile that is absent is a dropped blank,
+    /// not a missing tile. Additive within schema v1 (issue #1162), with the
+    /// same `false`-when-absent reading as [`centre`](Self::centre).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub skip_blanks: bool,
+}
+
+/// `skip_serializing_if` helper for the additive `bool` fields: leaving a
+/// `false` out keeps the bytes an older writer produced for the same run.
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 // ---------------------------------------------------------------------------
@@ -763,6 +787,8 @@ mod tests {
                 concurrency: 4,
                 background_rgb: [255, 255, 255],
                 blank_strategy: BlankTileStrategy::Emit,
+                centre: false,
+                skip_blanks: false,
             },
             source: SourceMetadata {
                 width: 1024,
@@ -785,6 +811,40 @@ mod tests {
             created_at: "2026-01-01T00:00:00Z".to_string(),
             blank_references: BTreeMap::new(),
         }
+    }
+
+    /// `centre` and `skip_blanks` are additive v1 fields (issue #1162): a
+    /// manifest written before they existed still parses, and reads as the
+    /// uncentred, emit-everything run every older writer described.
+    #[test]
+    fn a_manifest_without_the_plan_flags_still_parses_as_false() {
+        let mut v: serde_json::Value =
+            serde_json::from_str(&sample_manifest().to_json_string().unwrap()).unwrap();
+        let generation = v["generation"].as_object_mut().unwrap();
+        generation.remove("centre");
+        generation.remove("skip_blanks");
+        let parsed = Manifest::from_json_slice(&serde_json::to_vec(&v).unwrap())
+            .expect("a v1 manifest without the new keys must still parse")
+            .into_v1();
+        assert!(!parsed.generation.centre);
+        assert!(!parsed.generation.skip_blanks);
+    }
+
+    /// Both flags survive a round trip when set, so a reader sees what the
+    /// writer recorded rather than the defaults.
+    #[test]
+    fn the_plan_flags_round_trip_when_set() {
+        let mut m = sample_manifest();
+        m.generation.centre = true;
+        m.generation.skip_blanks = true;
+        let json = m.to_json_string().unwrap();
+        assert!(json.contains("\"centre\": true"), "{json}");
+        assert!(json.contains("\"skip_blanks\": true"), "{json}");
+        let parsed = Manifest::from_json_slice(json.as_bytes())
+            .unwrap()
+            .into_v1();
+        assert!(parsed.generation.centre);
+        assert!(parsed.generation.skip_blanks);
     }
 
     #[test]
@@ -951,6 +1011,8 @@ mod tests {
                 blank_strategy: BlankTileStrategy::PlaceholderWithTolerance {
                     max_channel_delta: 7,
                 },
+                centre: false,
+                skip_blanks: false,
             },
             source: SourceMetadata {
                 width: 10,
