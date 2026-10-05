@@ -998,6 +998,92 @@ mod tests {
         }
     }
 
+    /// Build a raw pyramid from a source with uniform regions, with
+    /// `skip_blanks` on, so some planned tiles are deliberately absent
+    /// (issue #1174). The left half is one flat colour and the right half a
+    /// gradient, so the run drops tiles and keeps tiles at every level.
+    fn build_skip_blanks_pyramid(dir: &std::path::Path) -> (FsSink, PyramidPlan, Raster) {
+        let (w, h) = (512u32, 256u32);
+        let mut src = gradient(w, h);
+        let bpp = PixelFormat::Rgb8.bytes_per_pixel();
+        let stride = w as usize * bpp;
+        for y in 0..h as usize {
+            for b in &mut src.data_mut()[y * stride..y * stride + stride / 2] {
+                *b = 40;
+            }
+        }
+        let plan = PyramidPlanner::new(w, h, 64, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+        let sink = FsSink::new(dir, plan.clone()).with_format(TileFormat::Raw);
+        crate::engine::generate_pyramid_observed(
+            &src,
+            &plan,
+            &sink,
+            &EngineConfig::default().skip_blanks(true),
+            &NoopObserver,
+        )
+        .unwrap();
+        (sink, plan, src)
+    }
+
+    /// A `skip_blanks` pyramid verifies through the strip path when verify is
+    /// told the run skipped blanks (issue #1174), and a missing tile that
+    /// the re-render says is *not* blank still fails.
+    ///
+    /// The existence pass used to demand every planned tile, so the tiles the
+    /// run dropped on purpose read as missing and no `skip_blanks` pyramid
+    /// could be verified against its source at all.
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn stream_verify_accepts_the_tiles_skip_blanks_dropped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("tiles");
+        let (sink, plan, src) = build_skip_blanks_pyramid(&out);
+        let absent = plan
+            .tile_coords()
+            .filter(|&c| !out.join(plan.tile_path(c, "raw").unwrap()).exists())
+            .count();
+        assert!(absent > 0, "the control: the run really dropped tiles");
+
+        let strip_src = RasterStripSource::new(&src);
+        let skipping = EngineConfig::default().skip_blanks(true);
+        verify_from_strip_source(&strip_src, &plan, &sink, &skipping, &NoopObserver)
+            .expect("the dropped blanks are not missing tiles");
+
+        // Delete a kept tile: its re-render has content, so this is a real
+        // missing tile whatever skip_blanks says.
+        let top = plan.levels.last().unwrap();
+        let kept = TileCoord::new(top.level, top.cols - 1, 0);
+        std::fs::remove_file(out.join(plan.tile_path(kept, "raw").unwrap())).unwrap();
+        let err = verify_from_strip_source(&strip_src, &plan, &sink, &skipping, &NoopObserver)
+            .expect_err("a missing tile with content must still fail");
+        assert!(
+            format!("{err:?}").contains("missing"),
+            "expected a missing-tile error, got {err:?}"
+        );
+    }
+
+    /// Without `skip_blanks` in the config, a pyramid with absent tiles still
+    /// fails verify, so the allowance cannot leak into a normal run (issue
+    /// #1174).
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn stream_verify_without_skip_blanks_still_demands_every_tile() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("tiles");
+        let (sink, plan, src) = build_skip_blanks_pyramid(&out);
+        let strip_src = RasterStripSource::new(&src);
+        verify_from_strip_source(
+            &strip_src,
+            &plan,
+            &sink,
+            &EngineConfig::default(),
+            &NoopObserver,
+        )
+        .expect_err("absent tiles are missing tiles when the run did not skip blanks");
+    }
+
     /// Raw-format strip Verify must recognize the 1-byte `BLANK_TILE_MARKER`
     /// that `BlankTileStrategy::Placeholder` writes, rather than
     /// byte-comparing it against the regenerated full tile (issue #94). A

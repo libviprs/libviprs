@@ -257,6 +257,8 @@ annotated   fs-detected  src/stream_verify.rs::stream_verify_accepts_a_centred_d
 annotated   fs-detected  src/stream_verify.rs::stream_verify_accepts_a_centred_google_pyramid
 annotated   fs-detected  src/stream_verify.rs::stream_verify_accepts_an_uncentred_padded_google_pyramid
 annotated   fs-detected  src/stream_verify.rs::stream_verify_detects_corruption_in_a_centred_pyramid
+annotated   fs-detected  src/stream_verify.rs::stream_verify_accepts_the_tiles_skip_blanks_dropped
+annotated   fs-detected  src/stream_verify.rs::stream_verify_without_skip_blanks_still_demands_every_tile
 annotated   fs-detected  src/stream_verify.rs::stream_verify_accepts_raw_placeholder_markers
 annotated   fs-detected  src/stream_verify.rs::stream_verify_detects_raw_corruption
 annotated   fs-detected  src/stream_verify.rs::stream_verify_happy_path_raw
