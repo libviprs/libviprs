@@ -391,7 +391,8 @@ const ANCHOR_FILES: &[&str] = &[
 /// staging file and a pyramid written through the sink.
 ///
 /// #1170 moves it 284 to 286: `both_entry_points_decode_an_svg_document` and `a_png_longer_than_the_svg_window_still_decodes_as_png` in `src/source.rs`, which write an SVG and a PNG to a temp file to decode them by path.
-const EXPECTED_SRC_ANNOTATIONS: usize = 286;
+/// #1174 moves it 286 to 288: two `src/stream_verify.rs` cells that build a skip_blanks pyramid in a temp dir and verify it with and without the flag.
+const EXPECTED_SRC_ANNOTATIONS: usize = 288;
 /// Companion to [`EXPECTED_SRC_ANNOTATIONS`]: how many `src/` modules carry at
 /// least one annotation. #765 made it 25 by putting the first annotation in
 /// `src/analyze.rs`; `src/colour.rs` and `src/pdf.rs`, which took the other
@@ -765,7 +766,8 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// temp dir of its own. It said 487 before this line moved.
 ///
 /// #1170 adds 2: the same two `src/source.rs` cells. It said 494 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 496;
+/// #1174 adds 2: the same two cells. It said 496 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 498;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
