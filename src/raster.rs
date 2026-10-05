@@ -2571,6 +2571,7 @@ mod tests {
             include_str!("arithmetic.rs"),
             include_str!("colour.rs"),
             include_str!("convolution.rs"),
+            include_str!("textio.rs"),
         ] {
             labels.extend(plane_labels(src));
         }
