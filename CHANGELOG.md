@@ -7,6 +7,200 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-10-06
+
+### Added
+
+- **`DirectoryObjectStore`** (`object-store-sink` feature), an `ObjectStore`
+  that keeps each object as a file under a root directory, so it can stand
+  in for a bucket in tests and in builds with no network client (issue
+  #1171). It implements the whole trait (put, list, ranged read and size),
+  writes atomically through a staged file and a rename, and refuses any key
+  that isn't a plain relative path, so nothing can land outside the root.
+  `DirectoryObjectStore::for_bucket(root, bucket)` puts a bucket at
+  `root/bucket` and refuses a bucket name that isn't one plain name.
+  libviprs-cli carried its own copy of this for `--sink s3://`.
+- `Raster::csv_load_with_limits` and `Raster::matrix_load_with_limits` take a
+  caller's `DecodeLimits` (issue #1168). `csv_load` and `matrix_load` are
+  those at `DecodeLimits::default()`.
+- **`decode_file_with_limits` and `decode_bytes_with_limits` decode SVG**
+  (issue #1170). SVG has no magic bytes, so it used to fall through to the
+  `image` facade as an unknown format. When no magic matches and the first
+  4 KiB hold an XML prologue (declarations, comments, a doctype) followed by
+  an `svg` root element, both entry points now hand the bytes to the SVG
+  rasteriser at its default options under the caller's limits, and a build
+  without the `svg` feature gets its "enable the `svg` feature" refusal. The
+  sniff is public as `looks_like_svg`, with its window as `SVG_SNIFF_BYTES`.
+  A gzipped `.svgz` still isn't recognised.
+- **`stream_verify::verify_from_strip_source` verifies a `skip_blanks`
+  pyramid** (issue #1174). With `EngineConfig::skip_blanks` set, a planned
+  tile that's absent is accepted when its re-render is blank (the test the
+  engine used to drop it) and still fails when it has content. Without the
+  flag every planned tile is still required.
+- **Names and constants libviprs-cli used to copy** (issue #1169):
+  `EngineEvent::name()` gives every event a stable snake_case name, with
+  `EngineEvent::NAMES_VERSION` to version a format built on them;
+  `WriterOptions::MIN_DEDUPE_MEMORY_BYTES` is the smallest dedupe budget the
+  PMTiles writer doesn't round up (520 bytes), and `DEDUPE_BYTES_PER_PAYLOAD`
+  is public beside `DEDUPE_WINDOW_WAYS`; `Manifest::locations(dir)` and
+  `Manifest::locate(dir)` name the two files `FsSink` writes its manifest to,
+  and the sink writes through them.
+- **`probe_file` and `probe_bytes` read an image's header without decoding
+  it** (issue #1173), returning an `ImageHeader` with the width, height, band
+  count and pixel format the decode would give, and the page count where the
+  container declares one (a TIFF's IFD chain). They route the way
+  `decode_file_with_limits` does, from the leading bytes, and read only as
+  much as the header needs for PNG, JPEG, TIFF, native `.v`, Netpbm and
+  anything else the `image` facade reads. An SVG is parsed for its size and
+  not rasterised. A container that can't answer without decoding (GIF, and
+  the formats libviprs parses end to end itself) is refused with the new
+  `SourceError::ProbeUnsupported` naming it. The
+  `_with_limits` forms bound what the probe reads and walks; the geometry is
+  reported, not refused.
+- `pdf_info_with_password` and `extract_page_image_with_password` open an
+  encrypted PDF with its password when the `pdfium` feature is on. They used
+  to answer any non-empty password with "not available in this build". Two
+  new `PdfError` variants say what went wrong: `PasswordRequired` (the file
+  needs a user password and got none) and `WrongPassword` (including any
+  password with a NUL byte in it, which pdfium can't take). Builds without
+  `pdfium` behave as before.
+- `SourceError::Pdf(PdfError)`. The extract helpers that return a decode
+  error (`extract_page_image_dpi`, `extract_page_image_with_password` and the
+  background variants) report a PDF failure through it, so a caller matches
+  `SourceError::Pdf(PdfError::WrongPassword)` instead of downcasting.
+- **The manifest and the PMTiles `vnd.libviprs` metadata record `centre` and
+  `skip_blanks`** (issue #1162). Both are new `GenerationSettings` fields,
+  taken from the plan's `with_centre` and the run's `EngineConfig::skip_blanks`,
+  so anything that rebuilds the plan from a finished pyramid can lay it on
+  the right grid and tell a dropped blank from a missing tile. They're
+  additive inside schema v1: written only when `true`, read as `false` when
+  absent, so older manifests still parse and older readers skip the keys.
+
+### Changed
+
+- **CI's Test job runs the `pdfium` feature's tests** (issue #1172). It used
+  to lint and check `pdfium` and never run it, because the runner has no
+  libpdfium, so a regression in the pdfium paths only showed up on a machine
+  that had one. The job now downloads the pinned `pdfium-8054` build from
+  libviprs-dep, checks it against the same sha256 `tools/Dockerfile.ci` uses,
+  and runs `cargo test --features pdfium` with `PDFIUM_PATH` pointing at it.
+  `tests/ci_feature_coverage.rs` expects the cell, and
+  `tests/pdfium_abi_and_binary_pins.rs` holds its release and digest to the
+  image's.
+- **`extract_page_image_with_password` renders, rather than extracts, a page
+  of a file that needs a user password** (`pdfium` feature). Its streams
+  can't be read without decrypting, so the page comes back rendered at the
+  72-DPI `pdfload` baseline (one pixel per point: a 300-DPI A4 scan comes back
+  595 x 841, not 2480 x 3508). A file that opens without a password keeps
+  extraction: unencrypted files and owner-password-only files `lopdf` can
+  decrypt (RC4, AES-128) go through `lopdf` as before, and owner-password-only
+  AES-256 files, which `lopdf` can't decrypt and used to fail with a corrupt
+  deflate stream, now hand back their largest image object at its stored size,
+  decoded by pdfium to 8 bits per sample. A password given for a file that
+  doesn't need one is ignored there, as it is for an unencrypted file.
+- **PDF failures from the decode-error extract helpers are `SourceError::Pdf`,
+  not `SourceError::Io`.** They used to arrive as an `io::Error` carrying the
+  `PdfError`'s message, so code matching `SourceError::Io` for them needs the
+  new variant, and the message drops its `I/O error: ` prefix. The
+  "not available in this build" refusals without `pdfium` stay
+  `SourceError::Io` with `ErrorKind::Unsupported`.
+- The pdfium render paths (`render_page_pdfium` and friends) report a
+  password-protected file as `PdfError::PasswordRequired` instead of a
+  stringly `PdfError::Pdfium`.
+
+- **`jp2k` now needs `hayro-jpeg2000` 0.4.1 or later, and its decode
+  price moves** (issue #1160). 0.4.1 came out on 2026-10-04, decodes two of
+  the irreversible fixtures (`rgb_lossy_q48.jp2`, `chroma_tiny_sub_on.jp2`)
+  to exactly vips's bytes, and stops holding a copy of each extra component
+  per tile. I re-measured both against it on native x86_64, so the two
+  fixtures pin as exact, the other two lossy ones pin at 0 and 1 counts, and
+  the `max_alloc_bytes` price charges the per-tile working set once per
+  tile (16 bytes a tile pixel) instead of once per band (10 a band). A
+  512x512 RGB file prices at 11272192 bytes against a measured peak of
+  6387780, where it used to price at 14942208, 2.34 times the peak. A
+  single-band file goes the other way, 6553600 rather than 4980736 at
+  512x512 (1.76 times its peak), because one band was charged 10 bytes a
+  tile pixel, which only just covers the 9.2 it measures and doesn't cover
+  the fixed overheads: a 64x64 greyscale file peaked above its old price. Across the 100 cases I measured, the price now sits
+  between 1.05 and 1.80 times the peak. The manifest floor
+  moves from `0.4.0` to `0.4.1` (still a caret), and CI's Test job no longer
+  holds the decoder at 0.4.0.
+
+### Fixed
+
+- **`pdf_info` opened an encrypted PDF without its password** (issue #1188),
+  and so did `extract_page_image` and `page_rotate`. `lopdf` reads the object
+  structure of an encrypted file happily, because only strings and streams
+  are encrypted, so a file that needs a user password came back as an
+  ordinary document. All three now refuse it with
+  `PdfError::PasswordRequired`, in every build; `pdf_info_with_password` and
+  `extract_page_image_with_password` are the way in. A file with only an
+  owner password still opens without one, AES-256 included: `pdf_info` and
+  `page_rotate` read it in every build, and `extract_page_image` hands back
+  its stored image through pdfium, or says it can't decrypt it in a build
+  without `pdfium` instead of decoding ciphertext. Without `pdfium`,
+  `pdf_info_with_password` and `extract_page_image_with_password` with an
+  empty password had the same hole and get the same answer, and
+  `pdf_info_with_password` ignores a password an owner-only file doesn't
+  need rather than calling it unsupported.
+- **`Raster::csv_load` padded a ragged grid out before checking its size**
+  (issue #1168), so a ~135 KB file with one very wide first row could build a
+  grid of several GB, and copy it once more to flatten it. It now works out
+  the grid's size first, checks it against the limits, reserves one buffer
+  fallibly and fills it row by row, with the same pad-and-truncate rule.
+  `Raster::matrix_load` checks its header's geometry before parsing a value
+  and stops at the first value past the declared count, instead of buffering
+  the whole body first. **`csv_load` and `matrix_load` now refuse grids past
+  `DecodeLimits::default()`** (512 MiB of `f32` samples, a gigapixel), which
+  they used to load.
+- **`stream_verify::verify_from_strip_source` panicked on a centred plan in
+  debug builds** (issue #1163). It asserted the assembled top-level raster was
+  the size of the top level, but that raster is the plan's canvas, which is
+  bigger whenever the plan pads it: every centred plan, and every Google plan
+  whose image isn't already a power-of-two number of tiles. It now checks the
+  canvas size instead, as a typed error in every build, and verifying those
+  pyramids works.
+- **`EngineBuilder::with_config` dropped `EngineConfig::source_content_hash`**
+  (issue #1165), so the source digest never reached the plan hash and a resume
+  accepted a checkpoint made from a different image of the same size. The
+  builder now keeps it (fill-if-unset, like every other knob) and has its own
+  `with_source_content_hash` setter.
+- **`ManifestBuilder::include_source_hash(true)` recorded nothing** (issue
+  #1164): the flag was stored and never read, so `SourceMetadata::bytes_hash`
+  was always null. The sink never sees the source, so it now records the
+  digest it's told about: one given with the new
+  `ManifestBuilder::with_source_hash`, else the run's
+  `EngineConfig::source_content_hash`. The PMTiles sink records the run's
+  digest in its `vnd.libviprs` source block the same way. With no digest the
+  field stays null, as the docs now say.
+- **The Netpbm decoder ignored `DecodeLimits::max_coord` and `max_pixels`, and
+  the SVG rasteriser ignored `max_alloc_bytes`** (issue #1167). Netpbm now
+  checks both ceilings on the header's declared geometry before pricing the
+  buffer, and SVG prices its `width x height x 4` pixmap against the
+  allocation budget before allocating it, so both refuse with the same typed
+  errors as every other decoder. An ASCII Netpbm body with fewer bytes left
+  than its header declares samples is now refused before the pixel buffer is
+  reserved, instead of after reserving all of it.
+- **`EngineEvent::TileSkippedOnResume` and `EngineEvent::RetryAttempted` were
+  never emitted** (issue #1166). A resumed run reported the tiles its
+  checkpoint already held as `TileCompleted`, so an observer counted them as
+  done twice; it now gets `TileSkippedOnResume` for each. `RetryingSink`
+  retried without telling anyone; it now emits `RetryAttempted { attempt }`
+  (from 1, per tile) before each retry to an observer attached with the new
+  `RetryingSink::with_observer`, and `EngineBuilder` attaches its own when it
+  wraps a sink for a retry policy.
+- **The crate didn't compile on stable 1.99** (issue #1157). 1.99 deprecates
+  `AtomicU64::fetch_update` (std renamed it `try_update`), and with
+  `[lints.rust] deprecated = "deny"` the two calls in `MemoryTracker::alloc`
+  and `MemoryTracker::dealloc` became hard errors, so anything building core
+  on current stable failed before it started, every CI job in libviprs-cli
+  and libviprs-tests included. Both now call `AtomicU64::update` with the same
+  `Relaxed` orderings and the same saturating closures. `update` and
+  `try_update` have been stable since 1.95, so this builds the same on the
+  1.97 MSRV, 1.99 and nightly. The crate also denies `deprecated_in_future`
+  now, so a call std has only marked for a later deprecation fails on the
+  MSRV too, instead of building there and breaking the day stable catches up.
+
 ## [0.5.0] — 2026-09-24
 
 This is the largest breaking release libviprs has shipped, so every break is
@@ -8117,6 +8311,7 @@ common 0.2.0 call sites.
 
 Phase-3 hardening: manifest v1, sinks, resume, retry, dedupe, tracing.
 
+[0.5.1]: https://github.com/libviprs/libviprs/releases/tag/v0.5.1
 [0.5.0]: https://github.com/libviprs/libviprs/releases/tag/v0.5.0
 [0.4.0]: https://github.com/libviprs/libviprs/releases/tag/v0.4.0
 [0.3.1]: https://github.com/libviprs/libviprs/releases/tag/v0.3.1

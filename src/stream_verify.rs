@@ -180,8 +180,13 @@ pub fn verify_from_strip_source(
     // gives fast feedback when the output directory is clearly wrong
     // (e.g. pointed at a stale run) before we spend time re-rendering.
     // ------------------------------------------------------------------
+    //
+    // A run with `skip_blanks` leaves its uniform tiles out on purpose, so
+    // under that config an absent tile is not decided here: phase 4
+    // re-renders it and accepts the absence only if the tile it would have
+    // been is blank (issue #1174).
     for coord in plan.tile_coords() {
-        if find_tile_on_disk(root, plan, coord, &active_exts).is_none() {
+        if !config.skip_blanks && find_tile_on_disk(root, plan, coord, &active_exts).is_none() {
             return Err(EngineError::Sink(SinkError::Other(format!(
                 "Verify: missing tile for coord {coord:?}"
             ))));
@@ -267,8 +272,6 @@ pub fn verify_from_strip_source(
     // strips, which makes the concatenated buffer byte-identical to
     // `embed_in_canvas(source, plan, bg)` even when centring is active.
     // ------------------------------------------------------------------
-    let top_level_idx = plan.levels.len() - 1;
-    let top = &plan.levels[top_level_idx];
     let format = source.format();
     let bpp = format.bytes_per_pixel();
 
@@ -356,12 +359,23 @@ pub fn verify_from_strip_source(
 
     let current = canvas_raster;
 
-    // Sanity check: the assembled raster must match the top plan level's
-    // recorded dimensions, otherwise the downstream downscale chain will
-    // diverge from what the engine wrote. For every layout libviprs
-    // supports this is identity; guard it defensively.
-    debug_assert_eq!(current.width(), top.width);
-    debug_assert_eq!(current.height(), top.height);
+    // The level walk below starts from this raster and halves it, exactly
+    // as the live engines do from `embed_in_canvas`, so what it has to be is
+    // the plan's canvas. That is the top level's own size only when nothing
+    // pads it: a centred plan pads to the tile grid and a Google plan to a
+    // power-of-two square, which is why the check used to be against
+    // `top.width` / `top.height` and fired on both in every debug build
+    // (issue #1163). Checked in every profile and reported as a typed error,
+    // like the strip checks above (issue #81), so a future change to the
+    // allocation cannot hand the walk a raster of the wrong size in a
+    // release build either.
+    if (current.width(), current.height()) != (cw, ch) {
+        return Err(strip_layout_error(format!(
+            "assembled a {}x{} top-level raster for a {cw}x{ch} canvas",
+            current.width(),
+            current.height()
+        )));
+    }
 
     // ------------------------------------------------------------------
     // Phase 4: byte-exact verification, level-by-level, top to bottom.
@@ -403,6 +417,11 @@ pub fn verify_from_strip_source(
 
                     let (abs, ext) = match find_tile_on_disk(root, plan, coord, &active_exts) {
                         Some(found) => found,
+                        // The run dropped this tile because it was uniform,
+                        // the same test the engine applied (issue #1174).
+                        None if config.skip_blanks && crate::engine::is_blank_tile(&expected) => {
+                            continue;
+                        }
                         None => {
                             return Err(EngineError::Sink(SinkError::Other(format!(
                                 "Verify: missing tile for coord {coord:?}"
@@ -670,6 +689,32 @@ mod tests {
         (sink, plan, src)
     }
 
+    /// Generate a raw-format pyramid for an arbitrary layout and centring,
+    /// for the cells about plans whose canvas is bigger than the image
+    /// (issue #1163).
+    fn build_raw_pyramid_on(
+        dir: &std::path::Path,
+        (w, h, tile_size): (u32, u32, u32),
+        layout: Layout,
+        centre: bool,
+    ) -> (FsSink, PyramidPlan, Raster) {
+        let src = gradient(w, h);
+        let plan = PyramidPlanner::new(w, h, tile_size, 0, layout)
+            .unwrap()
+            .with_centre(centre)
+            .plan();
+        let sink = FsSink::new(dir, plan.clone()).with_format(TileFormat::Raw);
+        crate::engine::generate_pyramid_observed(
+            &src,
+            &plan,
+            &sink,
+            &EngineConfig::default(),
+            &NoopObserver,
+        )
+        .unwrap();
+        (sink, plan, src)
+    }
+
     /// Like [`build_raw_pyramid`] but attaches a manifest with a per-tile
     /// checksum table (BLAKE3) so the manifest-checksum branch of verify is
     /// exercised. Returns the same pieces plus the pyramid output dir so the
@@ -878,6 +923,175 @@ mod tests {
             }
             other => panic!("expected ChecksumMismatch, got {other:?}"),
         }
+    }
+
+    /// An untouched pyramid on a plan whose canvas is bigger than the image
+    /// verifies through the strip path (issue #1163).
+    ///
+    /// The assembled top-level raster is `canvas_width x canvas_height` by
+    /// construction, and that only equals the top level's recorded size when
+    /// nothing pads it. A centred DeepZoom plan pads to the tile grid and a
+    /// Google plan pads to a power-of-two square, so the old
+    /// `debug_assert_eq!(current.width(), top.width)` fired on both in every
+    /// debug build. 500x300 on a 128 grid is padded on both axes.
+    fn assert_padded_pyramid_verifies(layout: Layout, centre: bool) {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("tiles");
+        let (sink, plan, src) = build_raw_pyramid_on(&out, (500, 300, 128), layout, centre);
+        assert!(
+            (plan.canvas_width, plan.canvas_height) != (500, 300),
+            "the control: this plan really pads its canvas"
+        );
+
+        let strip_src = RasterStripSource::new(&src);
+        let res = verify_from_strip_source(
+            &strip_src,
+            &plan,
+            &sink,
+            &EngineConfig::default(),
+            &NoopObserver,
+        )
+        .unwrap_or_else(|e| panic!("{layout:?} centre={centre} must verify, got {e:?}"));
+        assert_eq!(res.levels_processed, plan.levels.len() as u32);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn stream_verify_accepts_a_centred_deep_zoom_pyramid() {
+        assert_padded_pyramid_verifies(Layout::DeepZoom, true);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn stream_verify_accepts_a_centred_google_pyramid() {
+        assert_padded_pyramid_verifies(Layout::Google, true);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn stream_verify_accepts_an_uncentred_padded_google_pyramid() {
+        assert_padded_pyramid_verifies(Layout::Google, false);
+    }
+
+    /// The other half of the centred cells: verify on a centred plan still
+    /// looks at the bytes, so a flipped byte in a tile that holds image
+    /// content is reported on that tile (issue #1163). Without this, a verify
+    /// that skipped centred plans entirely would pass the cells above.
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn stream_verify_detects_corruption_in_a_centred_pyramid() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("tiles");
+        let (sink, plan, src) = build_raw_pyramid_on(&out, (500, 300, 128), Layout::DeepZoom, true);
+
+        // The middle of the top level is image, not centring padding.
+        let top = plan.levels.last().unwrap();
+        let coord = TileCoord::new(top.level, top.cols / 2, top.rows / 2);
+        let abs = out.join(plan.tile_path(coord, "raw").unwrap());
+        let mut bytes = std::fs::read(&abs).unwrap();
+        let mid = bytes.len() / 2;
+        bytes[mid] ^= 0xFF;
+        std::fs::write(&abs, &bytes).unwrap();
+
+        let strip_src = RasterStripSource::new(&src);
+        let err = verify_from_strip_source(
+            &strip_src,
+            &plan,
+            &sink,
+            &EngineConfig::default(),
+            &NoopObserver,
+        )
+        .expect_err("a flipped byte in a centred pyramid must fail verify");
+        match err {
+            EngineError::ChecksumMismatch { tile, .. } => assert_eq!(tile, coord),
+            other => panic!("expected ChecksumMismatch on {coord:?}, got {other:?}"),
+        }
+    }
+
+    /// Build a raw pyramid from a source with uniform regions, with
+    /// `skip_blanks` on, so some planned tiles are deliberately absent
+    /// (issue #1174). The left half is one flat colour and the right half a
+    /// gradient, so the run drops tiles and keeps tiles at every level.
+    fn build_skip_blanks_pyramid(dir: &std::path::Path) -> (FsSink, PyramidPlan, Raster) {
+        let (w, h) = (512u32, 256u32);
+        let mut src = gradient(w, h);
+        let bpp = PixelFormat::Rgb8.bytes_per_pixel();
+        let stride = w as usize * bpp;
+        for y in 0..h as usize {
+            for b in &mut src.data_mut()[y * stride..y * stride + stride / 2] {
+                *b = 40;
+            }
+        }
+        let plan = PyramidPlanner::new(w, h, 64, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+        let sink = FsSink::new(dir, plan.clone()).with_format(TileFormat::Raw);
+        crate::engine::generate_pyramid_observed(
+            &src,
+            &plan,
+            &sink,
+            &EngineConfig::default().skip_blanks(true),
+            &NoopObserver,
+        )
+        .unwrap();
+        (sink, plan, src)
+    }
+
+    /// A `skip_blanks` pyramid verifies through the strip path when verify is
+    /// told the run skipped blanks (issue #1174), and a missing tile that
+    /// the re-render says is *not* blank still fails.
+    ///
+    /// The existence pass used to demand every planned tile, so the tiles the
+    /// run dropped on purpose read as missing and no `skip_blanks` pyramid
+    /// could be verified against its source at all.
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn stream_verify_accepts_the_tiles_skip_blanks_dropped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("tiles");
+        let (sink, plan, src) = build_skip_blanks_pyramid(&out);
+        let absent = plan
+            .tile_coords()
+            .filter(|&c| !out.join(plan.tile_path(c, "raw").unwrap()).exists())
+            .count();
+        assert!(absent > 0, "the control: the run really dropped tiles");
+
+        let strip_src = RasterStripSource::new(&src);
+        let skipping = EngineConfig::default().skip_blanks(true);
+        verify_from_strip_source(&strip_src, &plan, &sink, &skipping, &NoopObserver)
+            .expect("the dropped blanks are not missing tiles");
+
+        // Delete a kept tile: its re-render has content, so this is a real
+        // missing tile whatever skip_blanks says.
+        let top = plan.levels.last().unwrap();
+        let kept = TileCoord::new(top.level, top.cols - 1, 0);
+        std::fs::remove_file(out.join(plan.tile_path(kept, "raw").unwrap())).unwrap();
+        let err = verify_from_strip_source(&strip_src, &plan, &sink, &skipping, &NoopObserver)
+            .expect_err("a missing tile with content must still fail");
+        assert!(
+            format!("{err:?}").contains("missing"),
+            "expected a missing-tile error, got {err:?}"
+        );
+    }
+
+    /// Without `skip_blanks` in the config, a pyramid with absent tiles still
+    /// fails verify, so the allowance cannot leak into a normal run (issue
+    /// #1174).
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn stream_verify_without_skip_blanks_still_demands_every_tile() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("tiles");
+        let (sink, plan, src) = build_skip_blanks_pyramid(&out);
+        let strip_src = RasterStripSource::new(&src);
+        verify_from_strip_source(
+            &strip_src,
+            &plan,
+            &sink,
+            &EngineConfig::default(),
+            &NoopObserver,
+        )
+        .expect_err("absent tiles are missing tiles when the run did not skip blanks");
     }
 
     /// Raw-format strip Verify must recognize the 1-byte `BLANK_TILE_MARKER`

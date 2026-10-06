@@ -74,12 +74,14 @@
 //!
 //! # Why this reads files rather than the build
 //!
-//! Nothing in this repository's own job list loads libpdfium: `ci.yml` runs
-//! `cargo clippy --features pdfium` and `cargo check --features pdfium` and no
-//! `cargo test --features pdfium`. A runtime check would therefore not run
-//! here, and PDFium's public API exposes no version query to make one out of
-//! anyway. The pins are text, so the guard is over text, and it runs on every
-//! job that runs the test suite.
+//! Until #1172 nothing in this repository's own job list loaded libpdfium:
+//! `ci.yml` ran `cargo clippy --features pdfium` and `cargo check --features
+//! pdfium` and no `cargo test --features pdfium`. The Test job now runs that
+//! cell against a libpdfium it downloads, but PDFium's public API still
+//! exposes no version query to build a runtime check out of. The pins are
+//! text, so the guard is over text, and it runs on every job that runs the
+//! test suite. The downloaded copy is one more pin, so it is in
+//! `declared_builds`, and its digest is held to the image's.
 
 use std::path::{Path, PathBuf};
 
@@ -211,8 +213,19 @@ fn declared_builds() -> Vec<(&'static str, String)> {
         "tools/Dockerfile.ci's ARG PDFIUM_RELEASE",
     );
 
+    // The Test job's pdfium cell installs its own copy (issue #1172), so that
+    // copy is a place that installs a libpdfium too.
+    let ci_yml = sole_milestone(
+        &ci_pdfium_values("PDFIUM_RELEASE").join("\n"),
+        "pdfium-",
+        ".github/workflows/ci.yml's PDFIUM_RELEASE",
+    );
+
     let readme = read("README.md");
-    let mut out = vec![("tools/Dockerfile.ci ARG PDFIUM_RELEASE", image)];
+    let mut out = vec![
+        ("tools/Dockerfile.ci ARG PDFIUM_RELEASE", image),
+        (".github/workflows/ci.yml PDFIUM_RELEASE", ci_yml),
+    ];
     let mut seen = 0usize;
     for line in readme.lines() {
         if let Some(m) = build_milestone(line) {
@@ -227,6 +240,82 @@ fn declared_builds() -> Vec<(&'static str, String)> {
          reading the install instructions it means to"
     );
     out
+}
+
+/// `ci.yml` and `tools/Dockerfile.ci`, at compile time, so the digest cell
+/// below needs no filesystem and stays runnable under Miri.
+const CI_YML: &str = include_str!("../.github/workflows/ci.yml");
+const DOCKERFILE_CI: &str = include_str!("../tools/Dockerfile.ci");
+
+/// Every value `ci.yml` gives `key` as a YAML `KEY: value` line, in order.
+fn ci_pdfium_values(key: &str) -> Vec<&'static str> {
+    let prefix = format!("{key}:");
+    CI_YML
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix(prefix.as_str()))
+        .map(str::trim)
+        .collect()
+}
+
+/// The amd64 digest `tools/Dockerfile.ci` checks its tarball against.
+fn dockerfile_amd64_digest() -> &'static str {
+    let line = DOCKERFILE_CI
+        .lines()
+        .find(|l| l.trim_start().starts_with("amd64)") && l.contains("PDFIUM_SHA256=\""))
+        .expect("tools/Dockerfile.ci has an `amd64)` arm setting PDFIUM_SHA256");
+    line.split("PDFIUM_SHA256=\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("the amd64 PDFIUM_SHA256 is a quoted string")
+}
+
+/// The Test job runs `cargo test --features pdfium` against a libpdfium it
+/// downloads, and that download has to be the very tarball the image `make ci`
+/// runs in installs, checked against the same digest, with the digest really
+/// checked and the cell really pointed at what was unpacked (issue #1172).
+///
+/// The release tag alone is not enough: a tag can be re-cut, and a job that
+/// fetched it without `sha256sum -c` would test whatever the release holds
+/// today.
+#[test]
+fn the_test_job_installs_the_pinned_libpdfium_and_checks_its_digest() {
+    let releases = ci_pdfium_values("PDFIUM_RELEASE");
+    let digests = ci_pdfium_values("PDFIUM_SHA256");
+    assert_eq!(
+        (releases.len(), digests.len()),
+        (1, 1),
+        "ci.yml should pin exactly one PDFIUM_RELEASE and one PDFIUM_SHA256 \
+         for the Test job's pdfium cell, found {releases:?} and {digests:?}"
+    );
+    let image_release = DOCKERFILE_CI
+        .lines()
+        .find_map(|l| l.trim_start().strip_prefix("ARG PDFIUM_RELEASE="))
+        .expect("tools/Dockerfile.ci declares `ARG PDFIUM_RELEASE=`")
+        .trim();
+    assert_eq!(
+        releases[0], image_release,
+        "ci.yml installs {} and tools/Dockerfile.ci installs {image_release}",
+        releases[0]
+    );
+    let digest = dockerfile_amd64_digest();
+    assert_eq!(digest.len(), 64, "positive control: {digest:?} is a sha256");
+    assert_eq!(
+        digests[0], digest,
+        "ci.yml checks the pdfium tarball against a different digest from \
+         tools/Dockerfile.ci's amd64 arm, so the two are not provably the same \
+         binary"
+    );
+    for needle in [
+        "releases/download/${PDFIUM_RELEASE}/pdfium-linux-x64.tgz",
+        "sha256sum -c",
+        "PDFIUM_PATH:",
+        "- run: cargo test --features pdfium",
+    ] {
+        assert!(
+            CI_YML.contains(needle),
+            "ci.yml's pdfium cell is missing `{needle}`"
+        );
+    }
 }
 
 /// Every place naming the requested bindgen ABI, as `(what it is, milestone)`.

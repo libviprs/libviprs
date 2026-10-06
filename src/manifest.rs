@@ -403,6 +403,30 @@ pub struct GenerationSettings {
     /// Blank-tile handling strategy (Emit / Placeholder).
     #[serde(with = "blank_strategy_serde")]
     pub blank_strategy: BlankTileStrategy,
+    /// Whether the plan centred the image in its tile grid
+    /// ([`PyramidPlanner::with_centre`](crate::planner::PyramidPlanner::with_centre)).
+    ///
+    /// A reader rebuilding the plan from this manifest needs it to lay the
+    /// tiles on the right grid. Additive within schema v1 (issue #1162):
+    /// written only when `true`, and read as `false` when absent, which is
+    /// what every manifest written before the field existed describes unless
+    /// its run centred.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub centre: bool,
+    /// Whether the run dropped uniform tiles instead of writing them
+    /// ([`EngineConfig::skip_blanks`](crate::engine::EngineConfig::skip_blanks)).
+    ///
+    /// When it is `true` a planned tile that is absent is a dropped blank,
+    /// not a missing tile. Additive within schema v1 (issue #1162), with the
+    /// same `false`-when-absent reading as [`centre`](Self::centre).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub skip_blanks: bool,
+}
+
+/// `skip_serializing_if` helper for the additive `bool` fields: leaving a
+/// `false` out keeps the bytes an older writer produced for the same run.
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 // ---------------------------------------------------------------------------
@@ -420,8 +444,12 @@ pub struct SourceMetadata {
     /// Pixel format of the source raster.
     #[serde(with = "pixel_format_serde")]
     pub pixel_format: PixelFormat,
-    /// Optional hex-encoded hash of the raw source bytes. Populated only when
-    /// the manifest builder was configured with `include_source_hash(true)`.
+    /// Optional digest of the source the pyramid was built from. Populated
+    /// only when the manifest builder was configured with
+    /// [`include_source_hash(true)`](ManifestBuilder::include_source_hash) (or
+    /// given one with [`with_source_hash`](ManifestBuilder::with_source_hash)),
+    /// and only when there is a digest to record: the sink never sees the
+    /// source itself. See [`ManifestBuilder::include_source_hash`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bytes_hash: Option<String>,
 }
@@ -640,6 +668,28 @@ impl Manifest {
         Self::from_json_slice(&bytes)
     }
 
+    /// Where an [`FsSink`](crate::sink::FsSink) writes the manifest for the
+    /// pyramid whose tile root is `dir`, inside copy first: `dir/manifest.json`,
+    /// then the byte-identical sibling `<dir>.manifest.json` beside it. The
+    /// sibling is left out when `dir` has no parent or file name to build it
+    /// from, which is also when the sink does not write one. The sink writes
+    /// through this, so the two cannot disagree (issue #1169).
+    pub fn locations(dir: &Path) -> Vec<std::path::PathBuf> {
+        let mut out = vec![dir.join("manifest.json")];
+        if let (Some(parent), Some(name)) = (dir.parent(), dir.file_name()) {
+            let mut sibling = name.to_os_string();
+            sibling.push(".manifest.json");
+            out.push(parent.join(sibling));
+        }
+        out
+    }
+
+    /// The first of [`locations`](Self::locations) that is a file, or `None`
+    /// when the pyramid at `dir` has no manifest (issue #1169).
+    pub fn locate(dir: &Path) -> Option<std::path::PathBuf> {
+        Self::locations(dir).into_iter().find(|p| p.is_file())
+    }
+
     /// Parse a `Manifest` from a byte slice.
     pub fn from_json_slice(bytes: &[u8]) -> Result<Self, ManifestError> {
         serde_json::from_slice(bytes).map_err(ManifestError::Json)
@@ -677,6 +727,7 @@ impl Manifest {
 pub struct ManifestBuilder {
     checksums: Option<ChecksumAlgo>,
     include_source_hash: bool,
+    source_hash: Option<String>,
     dedupe: Option<bool>,
     tolerance: Option<u8>,
 }
@@ -688,6 +739,7 @@ impl ManifestBuilder {
         Self {
             checksums: None,
             include_source_hash: false,
+            source_hash: None,
             dedupe: None,
             tolerance: None,
         }
@@ -699,11 +751,37 @@ impl ManifestBuilder {
         self
     }
 
-    /// When `true`, hash the raw source raster bytes and record the digest in
+    /// When `true`, record a digest of the source in
     /// [`SourceMetadata::bytes_hash`].
+    ///
+    /// The sink is handed tiles, never the source, so it has nothing to hash
+    /// itself. The digest it records is, in order: one given to this builder
+    /// with [`with_source_hash`](Self::with_source_hash), then the run's
+    /// [`EngineConfig::source_content_hash`](crate::engine::EngineConfig::source_content_hash)
+    /// (set with `with_source_content_hash` on the config or the
+    /// [`EngineBuilder`](crate::EngineBuilder)), which is the digest resume
+    /// already checks a checkpoint against. With neither, `bytes_hash` stays
+    /// null. Until issue #1164 the flag was stored and never read, so the
+    /// field was always null.
     pub fn include_source_hash(mut self, enabled: bool) -> Self {
         self.include_source_hash = enabled;
         self
+    }
+
+    /// Record `digest` as the source hash, verbatim. Turns
+    /// [`include_source_hash`](Self::include_source_hash) on, and wins over
+    /// the run's `source_content_hash`. The digest is opaque here; libviprs-cli
+    /// records the BLAKE3 of the input file's bytes as lowercase hex.
+    pub fn with_source_hash(mut self, digest: impl Into<String>) -> Self {
+        self.include_source_hash = true;
+        self.source_hash = Some(digest.into());
+        self
+    }
+
+    /// The digest given to [`with_source_hash`](Self::with_source_hash), if
+    /// any.
+    pub fn source_hash(&self) -> Option<&str> {
+        self.source_hash.as_deref()
     }
 
     /// Override the dedupe flag in the emitted sparse policy.
@@ -763,6 +841,8 @@ mod tests {
                 concurrency: 4,
                 background_rgb: [255, 255, 255],
                 blank_strategy: BlankTileStrategy::Emit,
+                centre: false,
+                skip_blanks: false,
             },
             source: SourceMetadata {
                 width: 1024,
@@ -785,6 +865,50 @@ mod tests {
             created_at: "2026-01-01T00:00:00Z".to_string(),
             blank_references: BTreeMap::new(),
         }
+    }
+
+    /// `centre` and `skip_blanks` are additive v1 fields (issue #1162): a
+    /// manifest written before they existed still parses, and reads as the
+    /// uncentred, emit-everything run every older writer described.
+    #[test]
+    fn a_manifest_without_the_plan_flags_still_parses_as_false() {
+        let mut v: serde_json::Value =
+            serde_json::from_str(&sample_manifest().to_json_string().unwrap()).unwrap();
+        let generation = v["generation"].as_object_mut().unwrap();
+        generation.remove("centre");
+        generation.remove("skip_blanks");
+        let parsed = Manifest::from_json_slice(&serde_json::to_vec(&v).unwrap())
+            .expect("a v1 manifest without the new keys must still parse")
+            .into_v1();
+        assert!(!parsed.generation.centre);
+        assert!(!parsed.generation.skip_blanks);
+    }
+
+    /// Both flags survive a round trip when set, so a reader sees what the
+    /// writer recorded rather than the defaults.
+    #[test]
+    fn the_plan_flags_round_trip_when_set() {
+        let mut m = sample_manifest();
+        m.generation.centre = true;
+        m.generation.skip_blanks = true;
+        let json = m.to_json_string().unwrap();
+        assert!(json.contains("\"centre\": true"), "{json}");
+        assert!(json.contains("\"skip_blanks\": true"), "{json}");
+        let parsed = Manifest::from_json_slice(json.as_bytes())
+            .unwrap()
+            .into_v1();
+        assert!(parsed.generation.centre);
+        assert!(parsed.generation.skip_blanks);
+    }
+
+    /// `with_source_hash` turns the flag on and keeps the digest (issue
+    /// #1164).
+    #[test]
+    fn with_source_hash_implies_include_and_keeps_the_digest() {
+        let b = ManifestBuilder::new().with_source_hash("d1");
+        assert!(b.wants_source_hash());
+        assert_eq!(b.source_hash(), Some("d1"));
+        assert_eq!(ManifestBuilder::new().source_hash(), None);
     }
 
     #[test]
@@ -951,6 +1075,8 @@ mod tests {
                 blank_strategy: BlankTileStrategy::PlaceholderWithTolerance {
                     max_channel_delta: 7,
                 },
+                centre: false,
+                skip_blanks: false,
             },
             source: SourceMetadata {
                 width: 10,

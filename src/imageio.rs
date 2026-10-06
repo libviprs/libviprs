@@ -2391,22 +2391,27 @@ enum VFieldValue<'a> {
     Carried(&'a CarriedValue),
 }
 
-/// Decode a native `.v` file (both byte orders). Enforces all three of the
-/// caller's [`DecodeLimits`] geometry ceilings on the untrusted header before
-/// anything is allocated: the [`max_coord`](DecodeLimits::max_coord)
-/// single-axis ceiling, the [`max_pixels`](DecodeLimits::max_pixels) count,
-/// and the [`max_alloc_bytes`](DecodeLimits::max_alloc_bytes) budget on the
-/// pixel body.
+/// The fixed 64-byte `.v` header, read and validated, with nothing priced
+/// and nothing allocated.
 ///
-/// The third arrived last, as issue #710. `.v` was never a decompression-bomb
-/// vector, because the body has to be physically present before it is copied,
-/// so the allocation was already bounded by the input length. What was missing
-/// was the contract: a caller who set `max_alloc_bytes` did not get it here,
-/// and the two decode entry points disagreed about the same run of bytes,
-/// since [`crate::source::decode_file_with_limits`] spends the budget on the
-/// bounded whole-file read and [`crate::source::decode_bytes_with_limits`] has
-/// no file to spend it on.
-pub(crate) fn decode_vips_bytes(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
+/// Shared by [`decode_vips_bytes`] and [`probe_vips_bytes`], so the two can't
+/// disagree about what a header says (issue #1173). Every refusal here is a
+/// statement about the header alone; the caller's limits are the decoder's
+/// business, after this.
+struct VipsHeader {
+    swapped: bool,
+    width: u32,
+    height: u32,
+    bands: i32,
+    kind: SampleKind,
+    type_code: i32,
+    xres: f32,
+    yres: f32,
+    xoffset: i32,
+    yoffset: i32,
+}
+
+fn read_vips_header(bytes: &[u8]) -> Result<VipsHeader, SourceError> {
     if bytes.len() < VIPS_HEADER_LEN {
         return Err(SourceError::VipsFormat(format!(
             "file too short for a .v header: {} bytes",
@@ -2461,13 +2466,65 @@ pub(crate) fn decode_vips_bytes(bytes: &[u8], limits: DecodeLimits) -> Result<Ra
             band_format_nickname(kind)
         )));
     }
-    let bpc = kind.bytes();
     if width <= 0 || height <= 0 || bands <= 0 {
         return Err(SourceError::VipsFormat(format!(
             "bad .v geometry {width}x{height} with {bands} bands"
         )));
     }
-    let (width, height) = (width as u32, height as u32);
+    Ok(VipsHeader {
+        swapped,
+        width: width as u32,
+        height: height as u32,
+        bands,
+        kind,
+        type_code,
+        xres,
+        yres,
+        xoffset,
+        yoffset,
+    })
+}
+
+/// What a `.v` header declares: width, height and the pixel format a decode
+/// returns, read from the fixed 64-byte header without touching the body
+/// (issue #1173).
+pub(crate) fn probe_vips_bytes(bytes: &[u8]) -> Result<(u32, u32, PixelFormat), SourceError> {
+    let h = read_vips_header(bytes)?;
+    let format = PixelFormat::with_kind(h.bands as usize, h.kind).ok_or_else(|| {
+        SourceError::VipsFormat(format!("unrepresentable .v band count {}", h.bands))
+    })?;
+    Ok((h.width, h.height, format))
+}
+
+/// Decode a native `.v` file (both byte orders). Enforces all three of the
+/// caller's [`DecodeLimits`] geometry ceilings on the untrusted header before
+/// anything is allocated: the [`max_coord`](DecodeLimits::max_coord)
+/// single-axis ceiling, the [`max_pixels`](DecodeLimits::max_pixels) count,
+/// and the [`max_alloc_bytes`](DecodeLimits::max_alloc_bytes) budget on the
+/// pixel body.
+///
+/// The third arrived last, as issue #710. `.v` was never a decompression-bomb
+/// vector, because the body has to be physically present before it is copied,
+/// so the allocation was already bounded by the input length. What was missing
+/// was the contract: a caller who set `max_alloc_bytes` did not get it here,
+/// and the two decode entry points disagreed about the same run of bytes,
+/// since [`crate::source::decode_file_with_limits`] spends the budget on the
+/// bounded whole-file read and [`crate::source::decode_bytes_with_limits`] has
+/// no file to spend it on.
+pub(crate) fn decode_vips_bytes(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceError> {
+    let VipsHeader {
+        swapped,
+        width,
+        height,
+        bands,
+        kind,
+        type_code,
+        xres,
+        yres,
+        xoffset,
+        yoffset,
+    } = read_vips_header(bytes)?;
+    let bpc = kind.bytes();
     limits.check_coord(width, height)?;
     limits.check_pixels(width, height)?;
     let format = PixelFormat::with_kind(bands as usize, kind)

@@ -2417,6 +2417,8 @@ impl FsSink {
                 .as_ref()
                 .map(|c| c.blank_tile_strategy)
                 .unwrap_or(crate::engine::BlankTileStrategy::Emit),
+            centre: self.plan.centre,
+            skip_blanks: eng_cfg.as_ref().is_some_and(|c| c.skip_blanks),
         };
 
         // -- source metadata ------------------------------------------------
@@ -2425,11 +2427,21 @@ impl FsSink {
             .get()
             .copied()
             .unwrap_or(crate::pixel::PixelFormat::Rgb8);
+        // The sink never sees the source, so the digest is one it was told:
+        // the builder's own, then the run's `source_content_hash` (issue
+        // #1164). See `ManifestBuilder::include_source_hash`.
+        let bytes_hash = match builder.as_ref() {
+            Some(b) if b.wants_source_hash() => b
+                .source_hash()
+                .map(str::to_owned)
+                .or_else(|| eng_cfg.as_ref().and_then(|c| c.source_content_hash.clone())),
+            _ => None,
+        };
         let source = SourceMetadata {
             width: self.plan.image_width,
             height: self.plan.image_height,
             pixel_format,
-            bytes_hash: None,
+            bytes_hash,
         };
 
         // -- per-level metadata --------------------------------------------
@@ -2534,15 +2546,17 @@ impl FsSink {
         // A single byte-identical copy is also dropped inside `base_dir` for
         // consumers that search relative to the tile root (e.g. stray tools
         // that only know the pyramid directory).
-        if let (Some(parent), Some(stem)) = (self.base_dir.parent(), self.base_dir.file_name()) {
-            std::fs::create_dir_all(parent)?;
-            let mut sibling_name = stem.to_os_string();
-            sibling_name.push(".manifest.json");
-            let sibling_path = parent.join(sibling_name);
+        // `Manifest::locations` names both paths, so readers that ask it find
+        // exactly what is written here (issue #1169). Sibling first, inside
+        // copy last, the order this has always written them in.
+        let mut paths = crate::manifest::Manifest::locations(&self.base_dir);
+        let inside_path = paths.remove(0);
+        for sibling_path in paths {
+            if let Some(parent) = sibling_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
             atomic_write(&sibling_path, &json)?;
         }
-
-        let inside_path = self.base_dir.join("manifest.json");
         atomic_write(&inside_path, &json)?;
 
         Ok(())
@@ -3445,6 +3459,193 @@ mod tests {
             let on_disk = std::fs::read_to_string(&dzi_path).unwrap();
             assert_eq!(on_disk, manifest);
         }
+    }
+
+    /// The manifest says whether the plan was centred and whether the run
+    /// dropped its blank tiles (issue #1162).
+    ///
+    /// Anything that rebuilds the plan from `manifest.json` (libviprs-cli's
+    /// `viprs verify` is the one that asked) gets the grid wrong without the
+    /// first and calls every dropped blank a missing tile without the second.
+    /// The uncentred, emit-everything run beside it is the control: a writer
+    /// that stamped `true` on everything would pass the first half alone.
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn fs_sink_manifest_records_centring_and_skip_blanks() {
+        use crate::manifest::ManifestBuilder;
+
+        // 500x300 does not fill a 256 grid, so centring really moves the
+        // image, and the padding it adds is uniform, so skip_blanks really
+        // drops tiles.
+        let mut data = vec![0u8; 500 * 300 * 3];
+        for i in 0..500 * 300 {
+            data[i * 3] = (i % 251) as u8;
+            data[i * 3 + 1] = (i / 500 % 241) as u8;
+            data[i * 3 + 2] = 7;
+        }
+        let src = crate::raster::Raster::new(500, 300, PixelFormat::Rgb8, data).unwrap();
+
+        let run = |centre: bool, skip: bool| {
+            let dir = tempfile::tempdir().unwrap();
+            let out = dir.path().join("tiles");
+            let plan = PyramidPlanner::new(500, 300, 256, 0, Layout::DeepZoom)
+                .unwrap()
+                .with_centre(centre)
+                .plan();
+            let sink = FsSink::new(&out, plan.clone())
+                .with_format(TileFormat::Raw)
+                .with_manifest(ManifestBuilder::new());
+            crate::EngineBuilder::new(&src, plan, sink)
+                .with_skip_blanks(skip)
+                .run()
+                .unwrap();
+            // Read as JSON rather than through `ManifestV1`, so this is a
+            // check on what a reader in another language sees on disk.
+            let bytes = std::fs::read(out.join("manifest.json")).unwrap();
+            let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            let flag = |key: &str| v["generation"][key].as_bool().unwrap_or(false);
+            (flag("centre"), flag("skip_blanks"))
+        };
+
+        assert_eq!(
+            run(true, true),
+            (true, true),
+            "a centred skip_blanks run must say so in its manifest"
+        );
+        assert_eq!(
+            run(false, false),
+            (false, false),
+            "the control: an uncentred run that emits every tile records neither"
+        );
+    }
+
+    /// A manifest built with `include_source_hash(true)` records a source
+    /// digest (issue #1164).
+    ///
+    /// The sink never sees the source, so the digest it records is the one
+    /// the run was told about, `EngineConfig::source_content_hash`, which is
+    /// documented as exactly this value. The builder flag used to be stored
+    /// and never read, so `bytes_hash` came out null whatever was asked for.
+    /// The run without the flag is the control: asking is what turns it on.
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn fs_sink_manifest_records_the_source_digest_when_asked() {
+        use crate::manifest::ManifestBuilder;
+
+        let src =
+            crate::raster::Raster::new(8, 8, PixelFormat::Rgb8, vec![9u8; 8 * 8 * 3]).unwrap();
+        let plan = PyramidPlanner::new(8, 8, 4, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+        let config = crate::engine::EngineConfig::default().with_source_content_hash("abc123");
+
+        let bytes_hash = |builder: ManifestBuilder| {
+            let dir = tempfile::tempdir().unwrap();
+            let out = dir.path().join("tiles");
+            let sink = FsSink::new(&out, plan.clone())
+                .with_format(TileFormat::Raw)
+                .with_manifest(builder);
+            crate::engine::generate_pyramid_observed(
+                &src,
+                &plan,
+                &sink,
+                &config,
+                &crate::observe::NoopObserver,
+            )
+            .unwrap();
+            let mut seen = Vec::new();
+            let sibling = dir.path().join("tiles.manifest.json");
+            for path in [out.join("manifest.json"), sibling] {
+                let bytes = std::fs::read(&path).unwrap();
+                let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                seen.push(v["source"]["bytes_hash"].as_str().map(str::to_owned));
+            }
+            assert_eq!(seen[0], seen[1], "both manifest copies must agree");
+            seen.remove(0)
+        };
+
+        assert_eq!(
+            bytes_hash(ManifestBuilder::new().include_source_hash(true)).as_deref(),
+            Some("abc123"),
+            "include_source_hash(true) must record the run's source digest"
+        );
+        assert_eq!(
+            bytes_hash(ManifestBuilder::new()),
+            None,
+            "the control: without the flag the manifest records no digest"
+        );
+    }
+
+    /// A digest given to the builder is recorded verbatim and wins over the
+    /// run's `source_content_hash` (issue #1164).
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn fs_sink_manifest_prefers_the_builders_own_source_digest() {
+        use crate::manifest::{Manifest, ManifestBuilder};
+
+        let src =
+            crate::raster::Raster::new(8, 8, PixelFormat::Rgb8, vec![9u8; 8 * 8 * 3]).unwrap();
+        let plan = PyramidPlanner::new(8, 8, 4, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("tiles");
+        let sink = FsSink::new(&out, plan.clone())
+            .with_format(TileFormat::Raw)
+            .with_manifest(ManifestBuilder::new().with_source_hash("from-the-builder"));
+        crate::engine::generate_pyramid_observed(
+            &src,
+            &plan,
+            &sink,
+            &crate::engine::EngineConfig::default().with_source_content_hash("from-the-run"),
+            &crate::observe::NoopObserver,
+        )
+        .unwrap();
+        let m = Manifest::read_from(&out.join("manifest.json"))
+            .unwrap()
+            .into_v1();
+        assert_eq!(m.source.bytes_hash.as_deref(), Some("from-the-builder"));
+    }
+
+    /// `Manifest::locations` names exactly the two files the sink writes,
+    /// and `Manifest::locate` finds them, inside copy first (issue #1169).
+    ///
+    /// libviprs-cli hard-coded both paths in its verify and source-hash code;
+    /// these give it one place to ask. Checked against what a real run puts
+    /// on disk, so the helper cannot drift from the writer.
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn manifest_locations_are_where_the_sink_writes() {
+        use crate::manifest::{Manifest, ManifestBuilder};
+
+        let src =
+            crate::raster::Raster::new(8, 8, PixelFormat::Rgb8, vec![9u8; 8 * 8 * 3]).unwrap();
+        let plan = PyramidPlanner::new(8, 8, 4, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan();
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("tiles");
+        let sink = FsSink::new(&out, plan.clone())
+            .with_format(TileFormat::Raw)
+            .with_manifest(ManifestBuilder::new());
+        crate::EngineBuilder::new(&src, plan, sink).run().unwrap();
+
+        let inside = out.join("manifest.json");
+        let sibling = dir.path().join("tiles.manifest.json");
+        assert!(
+            inside.is_file() && sibling.is_file(),
+            "the control: both copies exist"
+        );
+        assert_eq!(
+            Manifest::locations(&out),
+            vec![inside.clone(), sibling.clone()]
+        );
+
+        assert_eq!(Manifest::locate(&out), Some(inside.clone()));
+        std::fs::remove_file(&inside).unwrap();
+        assert_eq!(Manifest::locate(&out), Some(sibling.clone()));
+        std::fs::remove_file(&sibling).unwrap();
+        assert_eq!(Manifest::locate(&out), None);
     }
 
     /**

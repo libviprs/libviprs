@@ -276,6 +276,94 @@ fn rasterise(
     )))
 }
 
+/// How far into an input [`looks_like_svg`] looks for the `<svg` root. An XML
+/// declaration, a doctype and a licence comment fit comfortably; a document
+/// whose root starts later than this isn't one the content sniff claims
+/// (issue #1170). libviprs-cli's own sniff used the same window.
+pub const SVG_SNIFF_BYTES: usize = 4096;
+
+/// Whether `bytes` open an SVG document, for the decode entry points' content
+/// sniff (issue #1170).
+///
+/// Within the first [`SVG_SNIFF_BYTES`]: an optional UTF-8 BOM and
+/// whitespace, then any number of XML declarations or processing
+/// instructions (`<?...?>`), comments (`<!--...-->`) and a doctype
+/// (`<!DOCTYPE ...>`, internal subset included), then a root element named
+/// `svg`, with or without a namespace prefix, followed by whitespace, `>` or
+/// `/`. Anything else answers `false`, including an `<svg` that only appears
+/// inside a comment and a root that merely starts with the letters `svg`.
+///
+/// Deliberately narrow: every raster container libviprs sniffs opens with
+/// binary magic, so none can start with `<`, and the decode entry points
+/// only ask this once no magic matched. A gzipped `.svgz` isn't recognised;
+/// the rasteriser is built without gzip support.
+///
+/// The walk only ever moves forward through a slice capped at
+/// [`SVG_SNIFF_BYTES`], so it's bounded by the window whatever the input.
+#[must_use]
+pub fn looks_like_svg(bytes: &[u8]) -> bool {
+    let head = &bytes[..bytes.len().min(SVG_SNIFF_BYTES)];
+    let mut rest = head.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(head);
+    loop {
+        rest = skip_xml_space(rest);
+        if let Some(after) = rest.strip_prefix(b"<?") {
+            match find(after, b"?>") {
+                Some(end) => rest = &after[end + 2..],
+                None => return false,
+            }
+        } else if let Some(after) = rest.strip_prefix(b"<!--") {
+            match find(after, b"-->") {
+                Some(end) => rest = &after[end + 3..],
+                None => return false,
+            }
+        } else if let Some(after) = rest.strip_prefix(b"<!") {
+            // A doctype. Its internal subset, if any, sits in `[...]` and may
+            // hold `>` of its own, so close on `]>` when a `[` comes first.
+            let close = match (find(after, b"["), find(after, b">")) {
+                (Some(open), Some(gt)) if open < gt => find(after, b"]>").map(|e| e + 2),
+                (_, Some(gt)) => Some(gt + 1),
+                _ => None,
+            };
+            match close {
+                Some(end) => rest = &after[end..],
+                None => return false,
+            }
+        } else {
+            break;
+        }
+    }
+    let Some(name) = rest.strip_prefix(b"<") else {
+        return false;
+    };
+    let end = name
+        .iter()
+        .position(|&b| b.is_ascii_whitespace() || b == b'>' || b == b'/')
+        .unwrap_or(name.len());
+    // The name has to be terminated inside the window, or it isn't known yet.
+    if end == name.len() {
+        return false;
+    }
+    let local = match name[..end].iter().rposition(|&b| b == b':') {
+        Some(colon) => &name[colon + 1..end],
+        None => &name[..end],
+    };
+    local == b"svg"
+}
+
+/// XML whitespace is exactly space, tab, CR and LF.
+fn skip_xml_space(bytes: &[u8]) -> &[u8] {
+    let n = bytes
+        .iter()
+        .position(|b| !matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
+        .unwrap_or(bytes.len());
+    &bytes[n..]
+}
+
+/// The first offset of `needle` in `haystack`.
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
 /// The family name of the bundled face, as it appears in `Vera.ttf`'s name
 /// table. Every generic CSS family is pointed at it, so a document asking
 /// for `sans-serif`, for `Helvetica`, or for nothing at all resolves to the
@@ -340,18 +428,14 @@ fn parse_options(dpi: f64) -> resvg::usvg::Options<'static> {
     opts
 }
 
-/// The real rasteriser.
-///
-/// Order matters: the input gate runs before the parse, the geometry is
-/// resolved and bounded before the pixmap is allocated, and the demultiply
-/// runs on the way out. Nothing allocates on the untrusted geometry until
-/// [`DecodeLimits`] has agreed to it.
+/// The input gate, the parse and the output size, which is everything the
+/// rasteriser does before it touches pixels. Shared with [`probe_svg`] so the
+/// probe and the decode can't disagree about a document's size (issue #1173).
 #[cfg(feature = "svg")]
-fn rasterise(
+fn parse_sized(
     data: &[u8],
     options: SvgOptions,
-    limits: DecodeLimits,
-) -> Result<Raster, DecodeError> {
+) -> Result<(resvg::usvg::Tree, f64, u32, u32), DecodeError> {
     if !options.unlimited && data.len() > MAX_INPUT_BYTES {
         return Err(DecodeError::SvgInputTooLarge {
             bytes: data.len(),
@@ -374,12 +458,50 @@ fn rasterise(
         // vips bails out here with "zero-sized image" (`svgload.c:588`).
         return Err(DecodeError::SvgZeroSize { width, height });
     }
+    Ok((tree, total_scale, width, height))
+}
+
+/// What an SVG document's size resolves to at [`SvgOptions::default`], for
+/// the header probe (issue #1173): parsed and sized exactly as the rasteriser
+/// does it, and nothing rasterised or allocated for pixels.
+#[cfg(feature = "svg")]
+pub(crate) fn probe_svg(data: &[u8]) -> Result<(u32, u32), DecodeError> {
+    parse_sized(data, SvgOptions::default()).map(|(_, _, width, height)| (width, height))
+}
+
+/// The `svg`-feature-off probe: the rasteriser's own refusal, so probing and
+/// decoding an SVG fail the same way in a build without the feature.
+#[cfg(not(feature = "svg"))]
+pub(crate) fn probe_svg(data: &[u8]) -> Result<(u32, u32), DecodeError> {
+    rasterise(data, SvgOptions::default(), DecodeLimits::default())
+        .map(|raster| (raster.width(), raster.height()))
+}
+
+/// The real rasteriser.
+///
+/// Order matters: the input gate runs before the parse, the geometry is
+/// resolved and bounded before the pixmap is allocated, and the demultiply
+/// runs on the way out. Nothing allocates on the untrusted geometry until
+/// [`DecodeLimits`] has agreed to it.
+#[cfg(feature = "svg")]
+fn rasterise(
+    data: &[u8],
+    options: SvgOptions,
+    limits: DecodeLimits,
+) -> Result<Raster, DecodeError> {
+    let (tree, total_scale, width, height) = parse_sized(data, options)?;
     // Bound the *scaled* geometry before anything is allocated. This is the
     // ceiling that actually matters for SVG, because the input can be tiny
     // and the output enormous, and `SvgOptions::unlimited` deliberately does
     // not lift it.
     limits.check_coord(width, height)?;
     limits.check_pixels(width, height)?;
+    // And the allocation budget, on the RGBA8 pixmap about to be allocated.
+    // `take_demultiplied` works in place and hands that same buffer to the
+    // raster, so the pixmap is the peak libviprs allocates. Without this a
+    // caller's `max_alloc_bytes` did not bound an SVG decode at all (issue
+    // #1167).
+    limits.check_image_alloc("svg pixmap", width, height, 4, 1)?;
 
     let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height).ok_or_else(|| {
         DecodeError::DimensionLimitExceeded {
@@ -408,6 +530,66 @@ fn rasterise(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The content sniff the decode entry points use (issue #1170), case by
+    /// case: what it claims, what it leaves alone, and the window it stops at.
+    #[test]
+    fn looks_like_svg_claims_an_svg_root_and_nothing_else() {
+        let yes: &[&[u8]] = &[
+            b"<svg/>",
+            b"<svg xmlns='http://www.w3.org/2000/svg'/>",
+            b"\xEF\xBB\xBF  \r\n\t<svg>",
+            b"<?xml version='1.0'?>\n<svg/>",
+            b"<?xml version='1.0'?><!-- a > b --><?pi x?><svg/>",
+            b"<!DOCTYPE svg PUBLIC '-//W3C//DTD SVG 1.1//EN' 'x.dtd'><svg/>",
+            b"<!DOCTYPE svg [ <!ENTITY a 'x>y'> ]><svg/>",
+            b"<svg:svg xmlns:svg='http://www.w3.org/2000/svg'/>",
+        ];
+        for bytes in yes {
+            assert!(
+                looks_like_svg(bytes),
+                "{:?}",
+                String::from_utf8_lossy(bytes)
+            );
+        }
+        let no: &[&[u8]] = &[
+            b"",
+            b"<",
+            b"<svg",
+            b"<svgx/>",
+            b"<html><svg/></html>",
+            b"<?xml version='1.0'?><!-- <svg/> --><html/>",
+            b"<?xml version='1.0'",
+            b"<!-- never closed <svg/>",
+            b"text <svg/>",
+            b"\x89PNG\r\n\x1a\n<svg/>",
+        ];
+        for bytes in no {
+            assert!(
+                !looks_like_svg(bytes),
+                "{:?}",
+                String::from_utf8_lossy(bytes)
+            );
+        }
+
+        // The root has to be named inside the window: a comment that pushes
+        // it past the window is not claimed, and one byte shorter is.
+        let fits = SVG_SNIFF_BYTES - b"<!---->".len() - b"<svg/".len();
+        let mut at = b"<!--".to_vec();
+        at.extend(std::iter::repeat_n(b'x', fits));
+        at.extend_from_slice(b"--><svg/>");
+        assert!(
+            looks_like_svg(&at),
+            "a root named on the window's last byte"
+        );
+        let mut past = b"<!--".to_vec();
+        past.extend(std::iter::repeat_n(b'x', fits + 1));
+        past.extend_from_slice(b"--><svg/>");
+        assert!(
+            !looks_like_svg(&past),
+            "a root named one byte past the window"
+        );
+    }
 
     /// A 10x6 document with an explicit pixel size and one opaque red rect.
     const RED_10X6: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="6"><rect x="0" y="0" width="10" height="6" fill="#ff0000"/></svg>"##;
@@ -732,6 +914,74 @@ mod tests {
         )
         .unwrap();
         assert_eq!((im.width(), im.height()), (10, 6));
+    }
+
+    /// The allocation budget bounds the rasterised pixmap (issue #1167).
+    ///
+    /// The rasteriser checked `max_coord` and `max_pixels` and then allocated
+    /// a `width x height x 4` pixmap without asking `max_alloc_bytes`, so a
+    /// caller's memory ceiling didn't bound an SVG decode at all. One byte
+    /// under the RGBA8 raster this document decodes to must be refused with
+    /// the typed allocation refusal, and exactly at it must decode.
+    #[test]
+    #[cfg(feature = "svg")]
+    fn the_alloc_budget_bounds_the_pixmap() {
+        let decoded = decode_svg(RED_10X6, SvgOptions::default()).expect("the control decodes");
+        let raster_bytes = decoded.data().len() as u64;
+        assert_eq!(raster_bytes, 10 * 6 * 4, "the control: a 10x6 RGBA8 raster");
+
+        let tight = DecodeLimits::default().with_max_alloc_bytes(raster_bytes - 1);
+        match decode_svg_with_limits(RED_10X6, SvgOptions::default(), tight).map(|r| r.data().len())
+        {
+            Err(DecodeError::AllocLimitExceeded {
+                max_alloc_bytes,
+                needed_bytes,
+                ..
+            }) => {
+                assert_eq!(max_alloc_bytes, raster_bytes - 1);
+                assert_eq!(needed_bytes, raster_bytes);
+            }
+            other => panic!("one byte under the raster must be refused, got {other:?}"),
+        }
+
+        let at = DecodeLimits::default().with_max_alloc_bytes(raster_bytes);
+        let r = decode_svg_with_limits(RED_10X6, SvgOptions::default(), at)
+            .expect("exactly at the raster's price must decode");
+        assert_eq!((r.width(), r.height()), (10, 6));
+    }
+
+    /// A tiny document declaring a big canvas is priced from the declared
+    /// geometry and refused before the pixmap exists (issue #1167).
+    ///
+    /// About a hundred bytes of SVG ask for a 4096x4096 RGBA8 pixmap, 64 MiB, under a
+    /// 1 MiB budget, with the axis and pixel ceilings lifted so only
+    /// `max_alloc_bytes` stands between the header and the allocation. The
+    /// refusal has to name the declared geometry and the full price, which is
+    /// only possible if it came from the header rather than from a buffer
+    /// that was already allocated.
+    #[test]
+    #[cfg(feature = "svg")]
+    fn a_tiny_document_cannot_buy_a_big_pixmap_past_the_alloc_budget() {
+        const BIG_CANVAS: &[u8] =
+            br#"<svg xmlns="http://www.w3.org/2000/svg" width="4096" height="4096"><rect width="1" height="1"/></svg>"#;
+        let limits = DecodeLimits::default()
+            .with_max_coord(u32::MAX)
+            .with_max_pixels(u64::MAX)
+            .with_max_alloc_bytes(1 << 20);
+        match decode_svg_with_limits(BIG_CANVAS, SvgOptions::default(), limits)
+            .map(|r| r.data().len())
+        {
+            Err(DecodeError::AllocLimitExceeded {
+                geometry: Some(g),
+                needed_bytes,
+                max_alloc_bytes: 1_048_576,
+                ..
+            }) => {
+                assert_eq!((g.width, g.height, g.bands), (4096, 4096, 4));
+                assert_eq!(needed_bytes, 4096 * 4096 * 4);
+            }
+            other => panic!("a 64 MiB pixmap under a 1 MiB budget must be refused, got {other:?}"),
+        }
     }
 
     /**

@@ -305,6 +305,10 @@ pub struct RetryingSink<S: TileSink> {
     /// backoff sleeps in short slices and aborts between them, so an in-flight
     /// retry does not have to run its full schedule before the run can stop.
     cancel: Option<crate::cancel::CancelToken>,
+    /// Optional observer told about every retry as
+    /// [`EngineEvent::RetryAttempted`](crate::observe::EngineEvent::RetryAttempted)
+    /// (issue #1166).
+    observer: Option<std::sync::Arc<dyn crate::observe::EngineObserver>>,
 }
 
 impl<S: TileSink> RetryingSink<S> {
@@ -318,7 +322,22 @@ impl<S: TileSink> RetryingSink<S> {
             jitter_tick: AtomicU64::new(0),
             jitter_nonce: next_sink_nonce(),
             cancel: None,
+            observer: None,
         }
+    }
+
+    /// Report every retry to `observer` as
+    /// [`EngineEvent::RetryAttempted`](crate::observe::EngineEvent::RetryAttempted),
+    /// emitted just before the retried write, with `attempt` counting from 1
+    /// for each tile. [`EngineBuilder`](crate::EngineBuilder) attaches its own
+    /// observer when it wraps a sink for a retry policy; a sink you wrap
+    /// yourself reports retries only if you attach one here (issue #1166).
+    pub fn with_observer(
+        mut self,
+        observer: std::sync::Arc<dyn crate::observe::EngineObserver>,
+    ) -> Self {
+        self.observer = Some(observer);
+        self
     }
 
     /// Attach a [`CancelToken`](crate::cancel::CancelToken) so an in-flight
@@ -423,6 +442,12 @@ impl<S: TileSink> TileSink for RetryingSink<S> {
                         return Err(last_err);
                     }
                     self.retry_count.fetch_add(1, Ordering::Relaxed);
+                    if let Some(observer) = &self.observer {
+                        observer.on_event(crate::observe::EngineEvent::retry_attempted(
+                            tile.coord,
+                            attempt + 1,
+                        ));
+                    }
                     match self.inner.write_tile(tile) {
                         Ok(()) => return Ok(()),
                         Err(e) => last_err = e,

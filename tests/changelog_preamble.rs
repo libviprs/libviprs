@@ -98,19 +98,25 @@ fn release_notes(changelog: &str) -> &str {
     let start = changelog
         .find("## [Unreleased]")
         .expect("CHANGELOG.md must have an `## [Unreleased]` block");
-    let rest = &changelog[start + "## [Unreleased]".len()..];
-    let head = rest
-        .match_indices("\n## ")
-        .next()
-        .map(|(i, _)| i + "\n## ".len())
-        .expect("a bare `## [Unreleased]` must be followed by a released section");
-    let after = &rest[head..];
-    let end = after
-        .match_indices("\n## ")
-        .next()
-        .map(|(i, _)| i)
-        .unwrap_or(after.len());
-    &after[..end]
+    let mut rest = &changelog[start + "## [Unreleased]".len()..];
+    // Walk the released sections newest first and stop at the first one that
+    // carries a `### Breaking` section. A patch release has none, so cutting
+    // 0.5.1 on top of 0.5.0 must not move this guard onto a section that was
+    // never meant to hold the breaking notes.
+    while let Some((i, _)) = rest.match_indices("\n## ").next() {
+        let after = &rest[i + "\n## ".len()..];
+        let end = after
+            .match_indices("\n## ")
+            .next()
+            .map(|(j, _)| j)
+            .unwrap_or(after.len());
+        let section = &after[..end];
+        if section.contains("\n### Breaking\n") {
+            return section;
+        }
+        rest = after;
+    }
+    panic!("a bare `## [Unreleased]` must be followed by a released section with `### Breaking`");
 }
 
 /// The prose between `## [Unreleased]` and the first `###` section.

@@ -215,6 +215,7 @@ pub struct EngineBuilder<'a, S: TileSink> {
     skip_blanks: Option<bool>,
     failure_policy: Option<FailurePolicy>,
     dedupe: Option<DedupeStrategy>,
+    source_content_hash: Option<String>,
 
     // Resume
     resume: Option<ResumePolicy>,
@@ -243,6 +244,7 @@ impl<'a, S: TileSink> std::fmt::Debug for EngineBuilder<'a, S> {
             .field("skip_blanks", &self.skip_blanks)
             .field("failure_policy", &self.failure_policy)
             .field("dedupe", &self.dedupe)
+            .field("source_content_hash", &self.source_content_hash)
             .field("resume", &self.resume)
             .field("memory_budget_bytes", &self.memory_budget_bytes)
             .field("budget_policy", &self.budget_policy)
@@ -268,6 +270,7 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
             skip_blanks: None,
             failure_policy: None,
             dedupe: None,
+            source_content_hash: None,
             resume: None,
             cancel: None,
             memory_budget_bytes: None,
@@ -389,6 +392,13 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
         // silent loss (a hung job / a bloated output) was the reported trap.
         self.dedupe = self.dedupe.take().or(config.dedupe_strategy);
         self.cancel = self.cancel.take().or(config.cancel);
+        // The source digest is folded into the plan hash, so dropping it here
+        // let a resume pick up a checkpoint made from a different image of
+        // the same size (issue #1165). Same fill-if-unset rule as the rest.
+        self.source_content_hash = self
+            .source_content_hash
+            .take()
+            .or(config.source_content_hash);
         // Carry the checkpoint knobs into an EXPLICITLY-chosen ResumePolicy
         // only, so migrations from `generate_pyramid_resumable(.., &cfg, mode)`
         // don't silently lose the cadence / root that used to live on the
@@ -472,6 +482,16 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
     /// **See also:** [interactive example](https://libviprs.org/cli/#flag-skip-blank).
     pub fn with_blank_strategy(mut self, strategy: BlankTileStrategy) -> Self {
         self.blank_strategy = Some(strategy);
+        self
+    }
+
+    /// Record a content digest for the source, so resume refuses a
+    /// checkpoint made from a different one. The builder mirror of
+    /// [`EngineConfig::with_source_content_hash`]: the digest is opaque, is
+    /// folded into the plan hash, and is what an `FsSink` manifest records
+    /// as `SourceMetadata::bytes_hash` when it is asked for a source hash.
+    pub fn with_source_content_hash(mut self, digest: impl Into<String>) -> Self {
+        self.source_content_hash = Some(digest.into());
         self
     }
 
@@ -604,6 +624,7 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
             skip_blanks,
             failure_policy,
             dedupe,
+            source_content_hash,
             cancel,
             ..
         } = self;
@@ -626,6 +647,7 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
             skip_blanks,
             failure_policy,
             dedupe,
+            source_content_hash,
         );
         config.cancel = cancel;
 
@@ -651,6 +673,7 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
             skip_blanks,
             failure_policy,
             dedupe,
+            source_content_hash,
             resume,
             cancel,
             memory_budget_bytes,
@@ -668,6 +691,7 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
             skip_blanks,
             failure_policy,
             dedupe,
+            source_content_hash,
         );
         // Thread the cooperative-cancellation token onto the config so every
         // engine driver (and the streaming config that embeds it) polls it.
@@ -718,8 +742,13 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
                 if !sink.applies_retry_policy() =>
             {
                 // Share the run's cancel token with the retry loop so an
-                // in-flight backoff can be interrupted (#133).
-                Some(RetryingSink::new(&sink, p.clone()).with_cancel(engine_cfg.cancel.clone()))
+                // in-flight backoff can be interrupted (#133), and the
+                // observer so each retry is reported (#1166).
+                let r = RetryingSink::new(&sink, p.clone()).with_cancel(engine_cfg.cancel.clone());
+                Some(match &observer {
+                    Some(o) => r.with_observer(Arc::clone(o)),
+                    None => r,
+                })
             }
             _ => None,
         };
@@ -966,6 +995,18 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
             // so a transient failure is retried before the resume checkpoint
             // records the tile as complete.
             let wrapped = resume::ResumeAwareSink::new(engine_sink, &skip, cp.as_ref());
+            // The wrapper answers a skipped tile with `Ok(())`, which the
+            // engine reports as `TileCompleted`. Re-label those on the way to
+            // the caller's observer, against the same skip set the wrapper
+            // filters on, so the two cannot disagree (issue #1166).
+            let skip_observer = resume::ResumeSkipObserver {
+                inner: dispatch.observer,
+                skip: &skip,
+            };
+            let dispatch = RenderDispatch {
+                observer: &skip_observer,
+                ..dispatch
+            };
 
             // Capture the run outcome rather than propagating it with `?`
             // straight away: the checkpoint must be flushed on *both* the
@@ -1004,6 +1045,7 @@ fn build_engine_config(
     skip_blanks: Option<bool>,
     failure_policy: Option<FailurePolicy>,
     dedupe: Option<DedupeStrategy>,
+    source_content_hash: Option<String>,
 ) -> EngineConfig {
     let mut cfg = EngineConfig::default();
     if let Some(n) = concurrency {
@@ -1027,6 +1069,7 @@ fn build_engine_config(
     if let Some(ds) = dedupe {
         cfg = cfg.with_dedupe_strategy(ds);
     }
+    cfg.source_content_hash = source_content_hash;
     cfg
 }
 
@@ -1610,6 +1653,38 @@ mod resume {
         }
     }
 
+    /// Observer wrapper for resume runs: a `TileCompleted` for a coordinate
+    /// in the skip set goes out as `TileSkippedOnResume`, keeping its worker
+    /// and timestamp; everything else passes through unchanged (issue #1166).
+    pub(super) struct ResumeSkipObserver<'a> {
+        pub(super) inner: &'a dyn crate::observe::EngineObserver,
+        pub(super) skip: &'a HashSet<TileCoord>,
+    }
+
+    impl crate::observe::EngineObserver for ResumeSkipObserver<'_> {
+        fn on_event(&self, event: crate::observe::EngineEvent) {
+            use crate::observe::EngineEvent;
+            match event {
+                EngineEvent::TileCompleted {
+                    coord,
+                    worker_id,
+                    timestamp,
+                } if self.skip.contains(&coord) => {
+                    self.inner.on_event(EngineEvent::TileSkippedOnResume {
+                        coord,
+                        worker_id,
+                        timestamp,
+                    })
+                }
+                other => self.inner.on_event(other),
+            }
+        }
+
+        fn on_extensions(&self, extensions: &crate::extensions::Extensions) {
+            self.inner.on_extensions(extensions)
+        }
+    }
+
     // Silence "field never read" lints on the AtomicU64 placeholder if
     // future refactors drop these fields.
     #[allow(dead_code)]
@@ -1712,6 +1787,40 @@ mod retry_wiring_tests {
             "RetryThenFail must not skip any tile"
         );
         assert!(sink.written() > 0, "every tile must ultimately be written");
+    }
+
+    /// Every retry the builder's retry policy makes reaches the observer as
+    /// `RetryAttempted`, numbered from 1 per tile (issue #1166).
+    ///
+    /// `RetryingSink` retried inside `write_tile` with no observer, so the
+    /// variant existed, was documented, and never went out. The sink fails
+    /// its first two writes, so the first tile is retried twice, and the
+    /// result's own `retry_count` is the number the events have to match.
+    #[test]
+    fn builder_retries_reach_the_observer_as_retry_attempted() {
+        use crate::observe::{CollectingObserver, EngineEvent};
+
+        let observer = Arc::new(CollectingObserver::new());
+        let (result, _sink) = EngineBuilder::new(&small_source(), small_plan(), FlakySink::new(2))
+            .with_retry(fast_policy(5))
+            .with_observer_arc(observer.clone())
+            .run_collect()
+            .expect("transient failures must be retried, not propagated");
+        assert_eq!(result.retry_count, 2, "the control: two retries happened");
+
+        let attempts: Vec<u32> = observer
+            .events()
+            .iter()
+            .filter_map(|e| match e {
+                EngineEvent::RetryAttempted { attempt, .. } => Some(*attempt),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            attempts,
+            vec![1, 2],
+            "each retry must be reported once, numbered from 1"
+        );
     }
 
     // Under `RetryThenSkip`, a tile must only be skipped after its retries are
@@ -2789,6 +2898,160 @@ mod live_resume_bookkeeping_tests {
             r2.bytes_written, 0,
             "tiles skipped on resume must not be counted as bytes_written"
         );
+    }
+
+    /// A resumed run reports the tiles its checkpoint already held as
+    /// `TileSkippedOnResume`, not as `TileCompleted` (issue #1166).
+    ///
+    /// The `ResumeAwareSink` short-circuits those writes with `Ok(())`, and
+    /// the engine cannot tell that from a real write, so it used to report
+    /// every skipped tile as completed: an observer counting events saw a
+    /// fully-checkpointed resume finish every tile again and skip none. Here
+    /// the first run checkpoints everything, so the resume must report every
+    /// tile skipped and none completed.
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn a_resumed_run_reports_its_checkpointed_tiles_as_skipped() {
+        use crate::observe::{CollectingObserver, EngineEvent};
+
+        let out = tempfile::tempdir().unwrap();
+        let cp = tempfile::tempdir().unwrap();
+        let source = solid_source();
+        let plan = solid_plan();
+        let total = plan.total_tile_count();
+        let policy = || {
+            ResumePolicy::resume()
+                .with_checkpoint_root(cp.path())
+                .with_checkpoint_every(1)
+        };
+
+        EngineBuilder::new(
+            &source,
+            plan.clone(),
+            FsSink::new(out.path().to_path_buf(), plan.clone()),
+        )
+        .with_engine(EngineKind::Monolithic)
+        .with_resume(policy())
+        .run()
+        .expect("the first run checkpoints every tile");
+
+        let observer = Arc::new(CollectingObserver::new());
+        EngineBuilder::new(
+            &source,
+            plan.clone(),
+            FsSink::new(out.path().to_path_buf(), plan.clone()),
+        )
+        .with_engine(EngineKind::Monolithic)
+        .with_resume(policy())
+        .with_observer_arc(observer.clone())
+        .run()
+        .expect("the resume succeeds");
+
+        let events = observer.events();
+        let completed = events
+            .iter()
+            .filter(|e| matches!(e, EngineEvent::TileCompleted { .. }))
+            .count() as u64;
+        let skipped = events
+            .iter()
+            .filter(|e| matches!(e, EngineEvent::TileSkippedOnResume { .. }))
+            .count() as u64;
+        assert_eq!(
+            (completed, skipped),
+            (0, total),
+            "every tile of a fully-checkpointed resume is a skip, not a completion"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `source_content_hash` through `with_config` (issue #1165)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod source_content_hash_tests {
+    use super::*;
+    use crate::pixel::PixelFormat;
+    use crate::planner::{Layout, PyramidPlanner};
+    use crate::raster::Raster;
+    use crate::resume::ResumePolicy;
+    use crate::sink::FsSink;
+
+    fn source() -> Raster {
+        Raster::new(8, 8, PixelFormat::Rgb8, vec![10u8; 8 * 8 * 3]).unwrap()
+    }
+
+    fn plan() -> PyramidPlan {
+        PyramidPlanner::new(8, 8, 2, 0, Layout::DeepZoom)
+            .unwrap()
+            .plan()
+    }
+
+    /// Run `digest`'s pyramid into `out` with a checkpoint in `cp`, as a
+    /// resume run, carrying the digest on the config handed to `with_config`.
+    fn run(out: &std::path::Path, cp: &std::path::Path, digest: &str) -> Result<(), EngineError> {
+        let sink = FsSink::new(out.to_path_buf(), plan());
+        EngineBuilder::new(&source(), plan(), sink)
+            .with_engine(EngineKind::Monolithic)
+            .with_config(EngineConfig::default().with_source_content_hash(digest))
+            .with_resume(
+                ResumePolicy::resume()
+                    .with_checkpoint_root(cp)
+                    .with_checkpoint_every(1),
+            )
+            .run()
+            .map(|_| ())
+    }
+
+    /// A checkpoint made from one source refuses a resume that names another
+    /// (issue #1165).
+    ///
+    /// `EngineConfig::with_source_content_hash` is folded into the plan hash,
+    /// and that is the only thing stopping a resume from stitching tiles of
+    /// two different images together when they happen to be the same size.
+    /// `with_config` used to drop the digest, so both runs hashed the same
+    /// plan and the second one quietly resumed.
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn a_resume_with_a_different_source_digest_is_refused() {
+        let out = tempfile::tempdir().unwrap();
+        let cp = tempfile::tempdir().unwrap();
+        run(out.path(), cp.path(), "digest-of-image-a").expect("the first run succeeds");
+
+        match run(out.path(), cp.path(), "digest-of-image-b") {
+            Err(EngineError::PlanHashMismatch { .. }) => {}
+            other => panic!(
+                "a resume naming a different source digest must be refused with \
+                 PlanHashMismatch, got {other:?}"
+            ),
+        }
+    }
+
+    /// The builder's own setter carries the digest too, and an earlier
+    /// setter survives a later `with_config` whose config carries none, the
+    /// same fill-if-unset rule every other knob follows (issue #297).
+    #[test]
+    fn the_setter_survives_a_config_without_a_digest() {
+        let src = source();
+        let b = EngineBuilder::new(&src, plan(), crate::sink::MemorySink::new())
+            .with_source_content_hash("from-the-setter")
+            .with_config(EngineConfig::default());
+        assert_eq!(b.source_content_hash.as_deref(), Some("from-the-setter"));
+
+        let b = EngineBuilder::new(&src, plan(), crate::sink::MemorySink::new())
+            .with_config(EngineConfig::default().with_source_content_hash("from-the-config"));
+        assert_eq!(b.source_content_hash.as_deref(), Some("from-the-config"));
+    }
+
+    /// The control for the cell above: the same digest resumes cleanly, so
+    /// the refusal is about the digest and not about resuming at all.
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
+    fn a_resume_with_the_same_source_digest_succeeds() {
+        let out = tempfile::tempdir().unwrap();
+        let cp = tempfile::tempdir().unwrap();
+        run(out.path(), cp.path(), "digest-of-image-a").expect("the first run succeeds");
+        run(out.path(), cp.path(), "digest-of-image-a").expect("the same source resumes");
     }
 }
 

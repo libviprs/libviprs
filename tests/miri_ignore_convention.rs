@@ -369,12 +369,41 @@ const ANCHOR_FILES: &[&str] = &[
 /// written once, the latch over a destination write that fails part way, and
 /// the durability barrier now landing on the destination rather than on a
 /// staging file that no longer exists.
-const EXPECTED_SRC_ANNOTATIONS: usize = 256;
+///
+/// The password work moves it 256 to 262, all six in `src/pdf.rs`: the cells
+/// that open the committed AES-256 `tests/fixtures/password.pdf` with the right
+/// password, a wrong one and none, through `pdf_info_with_password` and
+/// `extract_page_image_with_password`.
+///
+/// Its follow-up moves it 262 to 267, again all in `src/pdf.rs`: two cells on
+/// the owner-password-only fixture `tests/fixtures/owner-password-only.pdf`
+/// (its stored image comes back, with and without a password), one that a PDF
+/// failure from an extract helper is a typed `SourceError::Pdf`, and two that
+/// a password with an interior NUL is `WrongPassword` rather than a panic.
+///
+/// #1163 moves it 267 to 271: the four `src/stream_verify.rs` cells that build centred and padded raw pyramids in a temp dir and verify them through the strip path, one with a flipped byte.
+/// #1162 moves it 271 to 272: `sink::tests::fs_sink_manifest_records_centring_and_skip_blanks`, which runs a centred skip_blanks pyramid into a temp dir and reads its manifest back.
+/// #1165 moves it 272 to 274: two `src/engine_builder.rs` cells that checkpoint a run into a temp dir and resume it with a different and with the same source digest.
+/// #1164 moves it 274 to 277: two `src/sink.rs` cells that read the source digest back out of both manifest copies, and one in `src/sink_pmtiles.rs` that reads it out of an archive's metadata.
+/// #1171 moves it 277 to 284, all seven in `src/sink_object_store.rs` over a
+/// `DirectoryObjectStore` in a temp dir: the round trip, the refused keys, the
+/// symlink cell, the bucket names, the interrupted write, the dead writer's
+/// staging file and a pyramid written through the sink.
+///
+/// #1170 moves it 284 to 286: `both_entry_points_decode_an_svg_document` and `a_png_longer_than_the_svg_window_still_decodes_as_png` in `src/source.rs`, which write an SVG and a PNG to a temp file to decode them by path.
+/// #1174 moves it 286 to 288: two `src/stream_verify.rs` cells that build a skip_blanks pyramid in a temp dir and verify it with and without the flag.
+/// #1169 moves it 288 to 289: `manifest_locations_are_where_the_sink_writes` in `src/sink.rs`, which runs a pyramid into a temp dir and finds its manifest copies.
+///
+/// #1173 moves it 289 to 291: `the_probe_agrees_with_the_decode_on_every_container_it_reads` and `an_svg_is_probed_by_content_and_agrees_with_the_decode` in `src/source.rs`, which write fixtures to a temp file to probe them by path.
+/// #1188 moves it 291 to 301, all ten in `src/pdf.rs`: the cells that `pdf_info`, `extract_page_image` and `page_rotate` refuse the AES-256 fixture without its password and still read the owner-password-only one, and the two RC4 cells over a lopdf-encrypted temp file.
+/// #1166 moves it 301 to 302: `a_resumed_run_reports_its_checkpointed_tiles_as_skipped` in `src/engine_builder.rs`, which checkpoints a run into a temp dir and resumes it. Its retry partner runs over an in-memory sink and needs no annotation.
+const EXPECTED_SRC_ANNOTATIONS: usize = 302;
 /// Companion to [`EXPECTED_SRC_ANNOTATIONS`]: how many `src/` modules carry at
 /// least one annotation. #765 made it 25 by putting the first annotation in
 /// `src/analyze.rs`; `src/colour.rs` and `src/pdf.rs`, which took the other
-/// three, were already in the set.
-const EXPECTED_SRC_MODULES: usize = 30;
+/// three, were already in the set. #1171 makes it 31 with the first
+/// annotation in `src/sink_object_store.rs`.
+const EXPECTED_SRC_MODULES: usize = 31;
 
 /// How many tests in the tree reach `std::process`.
 ///
@@ -438,7 +467,11 @@ const EXPECTED_SRC_MODULES: usize = 30;
 /// process hand the second one the first one's peak. The child,
 /// `benchmark_cell`, spawns nothing itself and so is not in this set; it is in
 /// the filesystem one.
-const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 37;
+///
+/// #1181 adds 4: the cells in `tests/local_ci_docker_slot.rs` run
+/// `tools/local-ci.py` with a stub docker on PATH to see whether it waits for
+/// a Docker slot. It said 37 before this line moved.
+const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 41;
 
 /// The filesystem-touching tests still allowed to run under Miri, and so still
 /// allowed to end the whole run on their first syscall.
@@ -726,7 +759,32 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// The wrapper-forwarding cell this merge added does not appear here. It
 /// drives a recording sink that writes nothing, so it is `not-detected`, and
 /// it moves the inventory by a row without moving this figure.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 475;
+///
+/// The password follow-up in `src/pdf.rs` adds one:
+/// `a_pdf_failure_from_an_extract_helper_is_a_typed_source_error` writes a
+/// plain PDF to a temp file to ask for a page past its end. Its other four
+/// cells read committed fixtures through an entry point, so they are
+/// `not-detected` and leave this alone. The detector said 476 before this
+/// line moved.
+///
+/// #1163 adds 4: the same four `stream_verify` cells, each writing a pyramid to a temp dir. It said 476 before this line moved.
+/// #1162 adds 2: that `src/sink.rs` cell and `tests/pmtiles_sink.rs::the_archive_metadata_records_centring_and_skip_blanks`, which both write a pyramid to a temp dir. It said 480 before this line moved.
+/// #1165 adds 2: the same two resume cells. It said 482 before this line moved.
+/// #1164 adds 3: the same three cells, each writing a pyramid to a temp dir. It said 484 before this line moved.
+/// #1171 adds the same seven `src/sink_object_store.rs` cells, each with a
+/// temp dir of its own. It said 487 before this line moved.
+///
+/// #1170 adds 2: the same two `src/source.rs` cells. It said 494 before this line moved.
+/// #1174 adds 2: the same two cells. It said 496 before this line moved.
+/// #1169 adds 1: the same `src/sink.rs` cell. It said 498 before this line moved.
+///
+/// #1173 adds 2: the same two `src/source.rs` cells. It said 499 before this line moved.
+/// #1188 adds 2: `src/pdf.rs`'s two RC4 cells, each saving a lopdf-encrypted PDF to a temp
+/// dir. The other eight read committed fixtures through an entry point and are `not-detected`.
+/// The detector agreed at 503.
+/// #1181 adds 4: the cells in `tests/local_ci_docker_slot.rs`, which build a slot pool and a stub docker in a temp dir. It said 503 before this line moved.
+/// #1166 adds 1: the same resume cell. It said 507 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 508;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {

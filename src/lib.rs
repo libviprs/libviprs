@@ -369,15 +369,18 @@ pub use sink::{
 };
 #[cfg(feature = "object-store-sink")]
 #[cfg_attr(docsrs, doc(cfg(feature = "object-store-sink")))]
-pub use sink_object_store::{ObjectStore, ObjectStoreConfig, ObjectStoreSink};
+pub use sink_object_store::{
+    DirectoryObjectStore, ObjectStore, ObjectStoreConfig, ObjectStoreSink,
+};
 #[cfg(feature = "packfile")]
 #[cfg_attr(docsrs, doc(cfg(feature = "packfile")))]
 pub use sink_packfile::{PackfileFormat, PackfileSink, PackfileSinkBuilder, ZipSink};
 pub use sink_pmtiles::{PmTilesSink, PmTilesSinkBuilder};
 pub use source::{
-    DeclaredGeometry, SourceError, clear_load_cache, decode_bytes, decode_file,
+    DeclaredGeometry, ImageHeader, SourceError, clear_load_cache, decode_bytes, decode_file,
     decode_file_sequential, decode_file_with_options, decode_file_with_shrink,
-    generate_test_raster, set_load_cache_max_bytes, set_load_cache_max_entries,
+    generate_test_raster, probe_bytes, probe_file, set_load_cache_max_bytes,
+    set_load_cache_max_entries,
 };
 pub use storage::{PMTILES_EXTENSION, PyramidStorage};
 pub use streaming::{
@@ -390,7 +393,7 @@ pub use streaming::{PdfiumRenderMode, PdfiumStripSource};
 pub use streaming_mapreduce::{
     LocalWorkExecutor, MapReduceConfig, StripWorkUnit, WorkContext, WorkExecutor,
 };
-pub use svg::{SvgOptions, decode_svg, decode_svg_with_limits};
+pub use svg::{SVG_SNIFF_BYTES, SvgOptions, decode_svg, decode_svg_with_limits, looks_like_svg};
 // `TileEvidence` is re-exported at the root because it is the type of a field
 // on `EngineResult`, which is re-exported here: a caller reading a result
 // should not have to reach into a second module to name what it says. The

@@ -363,12 +363,16 @@ impl PmTilesSink {
                 .map_or(crate::engine::BlankTileStrategy::Emit, |c| {
                     c.blank_tile_strategy
                 }),
+            centre: self.plan.centre,
+            skip_blanks: config.as_ref().is_some_and(|c| c.skip_blanks),
         };
+        // The run's source digest, the only one the sink is told about
+        // (issue #1164). Null when the run carries none.
         let source = crate::manifest::SourceMetadata {
             width: self.plan.image_width,
             height: self.plan.image_height,
             pixel_format,
-            bytes_hash: None,
+            bytes_hash: config.as_ref().and_then(|c| c.source_content_hash.clone()),
         };
 
         metadata.vnd_libviprs = Some(LibviprsMetadata::new(source, generation));
@@ -1060,6 +1064,71 @@ mod tests {
             })
             .expect("zoom 31 is addressable"),
             (31, 0, 0)
+        );
+    }
+
+    /// The archive's `vnd.libviprs` source block records the run's source
+    /// digest (issue #1164).
+    ///
+    /// The sink never sees the source, so the digest is the one the run was
+    /// told about, `EngineConfig::source_content_hash`. It used to be written
+    /// as null whatever the config carried. The run without a digest is the
+    /// control.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn the_archive_records_the_source_digest_from_the_engine_config() {
+        use crate::pmtiles::header::HEADER_BYTES;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = Raster::new(512, 512, PixelFormat::Rgb8, {
+            (0..512 * 512 * 3).map(|i| (i % 251) as u8).collect()
+        })
+        .expect("a gradient raster");
+
+        let bytes_hash = |name: &str, config: crate::engine::EngineConfig| {
+            let out = dir.path().join(name);
+            let sink = PmTilesSink::builder(&out)
+                .plan(plan())
+                .build()
+                .expect("the sink builds");
+            crate::engine::generate_pyramid_observed(
+                &src,
+                &plan(),
+                &sink,
+                &config,
+                &crate::observe::NoopObserver,
+            )
+            .expect("the run succeeds");
+            let bytes = std::fs::read(&out).expect("the archive is readable");
+            let header = Header::try_decode(&bytes[..HEADER_BYTES]).expect("a v3 header");
+            let start = header.metadata_offset as usize;
+            let end = start + header.metadata_length as usize;
+            let raw = header
+                .internal_compression
+                .decompress(&bytes[start..end], 1 << 22)
+                .expect("the metadata decompresses");
+            let v: serde_json::Value = serde_json::from_slice(&raw).expect("JSON metadata");
+            v["vnd.libviprs"]["source"]["bytes_hash"]
+                .as_str()
+                .map(str::to_owned)
+        };
+
+        // Set through the field rather than the builder method, because
+        // `the_sink_hashes_a_tile_in_exactly_one_place` scans this module for
+        // the hashing call's name and the method's name contains it.
+        let hashed = crate::engine::EngineConfig {
+            source_content_hash: Some("abc123".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            bytes_hash("hashed.pmtiles", hashed).as_deref(),
+            Some("abc123"),
+            "the archive must carry the digest the run was given"
+        );
+        assert_eq!(
+            bytes_hash("plain.pmtiles", crate::engine::EngineConfig::default()),
+            None,
+            "the control: no digest given, none recorded"
         );
     }
 }

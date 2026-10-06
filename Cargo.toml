@@ -94,7 +94,14 @@ gif = { version = "0.14", default-features = false, features = ["std"] }
 # takes the safe one and pays the speed. `image` would pull `moxcms` into
 # the decoder to colour-manage internally, and colour management here
 # belongs to `crate::colour`, not to a loader.
-hayro-jpeg2000 = { version = "0.4.0", default-features = false, features = [
+#
+# The floor is 0.4.1 because the jp2k fixture pins in `src/jp2k.rs` and the
+# decode price were measured against it (issue #1160): it decodes two
+# irreversible fixtures to exactly vips's bytes and drops a per-component
+# copy from the decoder's peak, so a lock still on 0.4.0 would run tests
+# that no longer describe it. A caret, not `=`, so consumers keep taking
+# later 0.4.x fixes.
+hayro-jpeg2000 = { version = "0.4.1", default-features = false, features = [
     "std",
 ] }
 # Pure-Rust codec facade. The feature list is the crate's decodable
@@ -419,7 +426,7 @@ zune-core = { version = "0.5.1", default-features = false }
 
 [package]
 name = "libviprs"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2024"
 authors = ["Roman Goldmann <roman@devshell.org>"]
 rust-version = "1.97"
@@ -442,6 +449,12 @@ rustdoc-args = ["--cfg", "docsrs"]
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)', 'cfg(pmtiles_lock_probe)'] }
 deprecated = "deny"
+# Deprecations std has announced for a later release. This is what catches a
+# call like `AtomicU64::fetch_update` on the 1.97 MSRV: std marks it
+# `#[deprecated(since = "1.99.0")]` from 1.95 on, which only fires
+# `deprecated` once a toolchain reaches 1.99, so without this the MSRV job
+# built it happily while stable refused it (#1157).
+deprecated_in_future = "deny"
 
 [lints.clippy]
 incompatible_msrv = "warn"

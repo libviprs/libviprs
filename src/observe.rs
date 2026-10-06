@@ -292,6 +292,46 @@ impl EngineEvent {
         }
     }
 
+    /// Version of the names [`name`](Self::name) returns (issue #1169).
+    ///
+    /// Goes up whenever an existing name changes or stops being emitted, so a
+    /// consumer that publishes these names (libviprs-cli's `--events json`
+    /// carries them) can version its own format against it. A new variant
+    /// with a new name is not a bump, the same rule the manifest's additive
+    /// fields follow: a reader that does not know the name skips the event.
+    pub const NAMES_VERSION: u32 = 1;
+
+    /// The stable snake_case name of this event, for logs and line formats
+    /// (issue #1169).
+    ///
+    /// Spelled out per variant rather than derived from `Debug`, so renaming a
+    /// variant cannot change a name behind a consumer's back; a name changing
+    /// is a [`NAMES_VERSION`](Self::NAMES_VERSION) bump.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::SourceLoadStarted { .. } => "source_load_started",
+            Self::SourceLoaded { .. } => "source_loaded",
+            Self::PlanCreated { .. } => "plan_created",
+            Self::LevelStarted { .. } => "level_started",
+            Self::TileCompleted { .. } => "tile_completed",
+            Self::TileFailed { .. } => "tile_failed",
+            Self::TileSkippedOnResume { .. } => "tile_skipped_on_resume",
+            Self::RetryAttempted { .. } => "retry_attempted",
+            Self::LevelCompleted { .. } => "level_completed",
+            Self::StripRendered { .. } => "strip_rendered",
+            Self::BatchStarted { .. } => "batch_started",
+            Self::BatchCompleted { .. } => "batch_completed",
+            Self::StripDispatched { .. } => "strip_dispatched",
+            Self::StripExecutorDone { .. } => "strip_executor_done",
+            Self::WorkerJoined { .. } => "worker_joined",
+            Self::WorkerLeft { .. } => "worker_left",
+            Self::MemorySnapshot { .. } => "memory_snapshot",
+            Self::CheckpointFlushed { .. } => "checkpoint_flushed",
+            Self::Finished { .. } => "finished",
+            Self::PipelineComplete => "pipeline_complete",
+        }
+    }
+
     /// Build a [`TileSkippedOnResume`](Self::TileSkippedOnResume) with no worker
     /// attribution and a coordinating-thread timestamp.
     pub fn tile_skipped_on_resume(coord: TileCoord) -> Self {
@@ -532,22 +572,19 @@ impl MemoryTracker {
     /// with each other instead of leaving a wrapped `current` under a
     /// `u64::MAX` `peak`.
     pub fn alloc(&self, bytes: u64) {
-        // `fetch_update` retries on contention (CAS loop) so the clamp is
+        // `update` retries on contention (it's a CAS loop), so the clamp is
         // applied atomically with respect to concurrent alloc/dealloc calls,
-        // the same way `dealloc` does it.
+        // the same way `dealloc` does it. It returns the value it replaced.
         //
-        // The closure never returns `None`, so the update cannot fail and both
-        // the `Ok` and `Err` payloads are the previous value.
-        //
-        // Nightly deprecates `fetch_update` in favour of `try_update`; see the
-        // note on `dealloc` for why that is handled on the Miri job rather
-        // than with an `allow` here.
+        // This used to be `fetch_update`, which stable 1.99 deprecates in
+        // favour of `try_update` and `update`. Both of those are stable since
+        // 1.95, so they build on the 1.97 MSRV too, and `update` is the one
+        // that fits a closure that can't fail (#1157).
         let previous = self
             .current
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                Some(current.saturating_add(bytes))
-            })
-            .unwrap_or_else(|previous| previous);
+            .update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.saturating_add(bytes)
+            });
         self.peak
             .fetch_max(previous.saturating_add(bytes), Ordering::Relaxed);
     }
@@ -563,28 +600,12 @@ impl MemoryTracker {
     /// interior, so a caller can drive `current` negative; saturating keeps the
     /// counter meaningful in that case.
     pub fn dealloc(&self, bytes: u64) {
-        // `fetch_update` retries on contention (CAS loop) so the clamp is
-        // applied atomically with respect to concurrent alloc/dealloc calls.
-        //
-        // Nightly has renamed this method to `try_update` and deprecated the
-        // old name, so `cargo +nightly miri test` used to fail to compile the
-        // lib against `[lints.rust] deprecated = "deny"` and Miri did not run
-        // at all (issue #643). Renaming is not the fix: `try_update` exists on
-        // neither the 1.97 MSRV nor 1.98 stable, so it would break every
-        // toolchain except the one that currently works.
-        //
-        // There is deliberately no `#[allow(deprecated)]` here. An attribute
-        // is unconditional, so it would also disarm the deny on stable, at the
-        // one call site the deny exists to watch, for the whole statement. The
-        // suppression lives on the Miri job instead, as
-        // `RUSTFLAGS: -A deprecated` in `.github/workflows/merge-gate.yml`,
-        // which is scoped to the toolchain that actually needs it. Drop that
-        // env once `try_update` is stable and the MSRV has moved past it, then
-        // rename.
-        let _ = self
-            .current
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                Some(current.saturating_sub(bytes))
+        // `update` retries on contention, so the clamp is applied atomically
+        // with respect to concurrent alloc/dealloc calls. See `alloc` for why
+        // this isn't `fetch_update` any more.
+        self.current
+            .update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.saturating_sub(bytes)
             });
     }
 
@@ -710,6 +731,154 @@ mod tests {
             levels: 1,
         });
         assert_eq!(obs.event_count(), 2);
+    }
+
+    /// Every event's name, pinned (issue #1169).
+    ///
+    /// These go out as the `event` of libviprs-cli's `--events json` lines,
+    /// which is a public format, so a rename here is a format change and has
+    /// to show up as a failing cell and a `NAMES_VERSION` bump rather than as
+    /// a surprise downstream. The CLI spelled the same table by hand; these
+    /// are its names, plus `pipeline_complete`, which it printed as
+    /// `unknown`.
+    #[test]
+    fn every_event_name_is_pinned() {
+        use crate::streaming_mapreduce::StripWorkUnit;
+        let coord = TileCoord::new(1, 2, 3);
+        let spec = StripWorkUnit {
+            canvas_y: 0,
+            height: 1,
+            level: 0,
+        };
+        let w = || WorkerId("w".to_string());
+        let table: Vec<(EngineEvent, &str)> = vec![
+            (
+                EngineEvent::SourceLoadStarted {
+                    source_description: String::new(),
+                },
+                "source_load_started",
+            ),
+            (
+                EngineEvent::SourceLoaded {
+                    width: 1,
+                    height: 1,
+                    format: crate::pixel::PixelFormat::Rgb8,
+                    size_bytes: 3,
+                },
+                "source_loaded",
+            ),
+            (
+                EngineEvent::PlanCreated {
+                    levels: 1,
+                    total_tiles: 1,
+                    canvas_width: 1,
+                    canvas_height: 1,
+                },
+                "plan_created",
+            ),
+            (
+                EngineEvent::LevelStarted {
+                    level: 0,
+                    width: 1,
+                    height: 1,
+                    tile_count: 1,
+                },
+                "level_started",
+            ),
+            (EngineEvent::tile_completed(coord), "tile_completed"),
+            (
+                EngineEvent::tile_failed(coord, String::new()),
+                "tile_failed",
+            ),
+            (
+                EngineEvent::tile_skipped_on_resume(coord),
+                "tile_skipped_on_resume",
+            ),
+            (EngineEvent::retry_attempted(coord, 1), "retry_attempted"),
+            (
+                EngineEvent::LevelCompleted {
+                    level: 0,
+                    tiles_produced: 1,
+                },
+                "level_completed",
+            ),
+            (
+                EngineEvent::StripRendered {
+                    strip_index: 0,
+                    total_strips: 1,
+                },
+                "strip_rendered",
+            ),
+            (
+                EngineEvent::BatchStarted {
+                    batch_index: 0,
+                    strips_in_batch: 1,
+                    total_batches: 1,
+                },
+                "batch_started",
+            ),
+            (
+                EngineEvent::BatchCompleted {
+                    batch_index: 0,
+                    tiles_produced: 1,
+                },
+                "batch_completed",
+            ),
+            (
+                EngineEvent::StripDispatched {
+                    worker_id: Some(w()),
+                    spec,
+                },
+                "strip_dispatched",
+            ),
+            (
+                EngineEvent::StripExecutorDone {
+                    worker_id: None,
+                    spec,
+                    duration: std::time::Duration::ZERO,
+                },
+                "strip_executor_done",
+            ),
+            (
+                EngineEvent::WorkerJoined { worker_id: w() },
+                "worker_joined",
+            ),
+            (
+                EngineEvent::WorkerLeft {
+                    worker_id: w(),
+                    reason: String::new(),
+                },
+                "worker_left",
+            ),
+            (
+                EngineEvent::MemorySnapshot {
+                    worker_id: None,
+                    current_bytes: 0,
+                    peak_bytes: 0,
+                },
+                "memory_snapshot",
+            ),
+            (
+                EngineEvent::CheckpointFlushed { tiles: 1 },
+                "checkpoint_flushed",
+            ),
+            (
+                EngineEvent::Finished {
+                    total_tiles: 1,
+                    levels: 1,
+                },
+                "finished",
+            ),
+            (EngineEvent::PipelineComplete, "pipeline_complete"),
+        ];
+        for (event, want) in &table {
+            assert_eq!(event.name(), *want, "{event:?}");
+        }
+        let mut names: Vec<&str> = table.iter().map(|(e, _)| e.name()).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), table.len(), "two events share a name");
+        assert_eq!(EngineEvent::NAMES_VERSION, 1);
     }
 
     /**
@@ -911,7 +1080,7 @@ mod tests {
      * With the old `fetch_add(bytes) + bytes` the atomic wrapped and the
      * recomputed total then overflowed, which panics in debug builds and
      * under Miri (RED, as an arithmetic overflow rather than an assertion).
-     * With the saturating `fetch_update` both `current` and `peak` clamp to
+     * With a saturating update both `current` and `peak` clamp to
      * `u64::MAX` and stay consistent with each other (GREEN).
      *
      * Input: alloc(u64::MAX - 10), alloc(100) →

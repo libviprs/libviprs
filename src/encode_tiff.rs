@@ -701,6 +701,16 @@ pub fn tiff_page_count_with_limits(path: &Path, limits: DecodeLimits) -> Result<
     count_images(&mut decoder, limits.max_pages)
 }
 
+/// [`tiff_page_count_with_limits`] over any seekable reader, for the header
+/// probe (issue #1173), which has bytes as often as it has a path.
+pub(crate) fn tiff_page_count_from_reader<R: Read + Seek>(
+    reader: R,
+    limits: DecodeLimits,
+) -> Result<u32, DecodeError> {
+    let mut decoder = open_decoder(reader, limits)?;
+    count_images(&mut decoder, limits.max_pages)
+}
+
 /// Walk a decoder's IFD chain and report how many images it holds, giving up
 /// with [`DecodeError::PageLimitExceeded`] once `max_pages` is reached.
 ///
