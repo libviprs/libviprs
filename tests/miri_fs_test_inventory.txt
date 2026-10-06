@@ -308,6 +308,10 @@ annotated   fs-detected  tests/jpeg_tile_format.rs::transparent_pixels_take_the_
 annotated   fs-detected  tests/jxl_ported_surface.rs::encode_and_save_round_trip_exactly
 annotated   fs-detected  tests/jxl_ported_surface.rs::the_shared_dispatchers_carry_jxl
 annotated   fs-detected  tests/jxl_ported_surface.rs::without_the_feature_the_surface_is_unchanged_and_typed
+annotated   fs-detected  tests/local_ci_docker_slot.rs::a_run_under_a_caller_holding_a_slot_does_not_queue_for_another
+annotated   fs-detected  tests/local_ci_docker_slot.rs::a_run_waits_for_a_free_docker_slot
+annotated   fs-detected  tests/local_ci_docker_slot.rs::listing_and_printing_take_no_docker_slot
+annotated   fs-detected  tests/local_ci_docker_slot.rs::the_docker_slot_comes_from_the_shared_pool_and_is_handed_down
 annotated   fs-detected  tests/local_ci_invocation.rs::the_host_architecture_comes_from_the_daemon_and_degrades_rather_than_refusing
 annotated   fs-detected  tests/local_gate_is_the_job_list.rs::the_workflow_directory_holds_only_files_this_guard_has_classified
 annotated   fs-detected  tests/miri_ignore_convention.rs::filesystem_touching_tests_match_the_recorded_inventory

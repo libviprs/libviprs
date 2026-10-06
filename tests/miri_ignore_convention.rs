@@ -466,7 +466,11 @@ const EXPECTED_SRC_MODULES: usize = 31;
 /// process hand the second one the first one's peak. The child,
 /// `benchmark_cell`, spawns nothing itself and so is not in this set; it is in
 /// the filesystem one.
-const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 37;
+///
+/// #1181 adds 4: the cells in `tests/local_ci_docker_slot.rs` run
+/// `tools/local-ci.py` with a stub docker on PATH to see whether it waits for
+/// a Docker slot. It said 37 before this line moved.
+const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 41;
 
 /// The filesystem-touching tests still allowed to run under Miri, and so still
 /// allowed to end the whole run on their first syscall.
@@ -777,7 +781,8 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1188 adds 2: `src/pdf.rs`'s two RC4 cells, each saving a lopdf-encrypted PDF to a temp
 /// dir. The other eight read committed fixtures through an entry point and are `not-detected`.
 /// The detector agreed at 503.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 503;
+/// #1181 adds 4: the cells in `tests/local_ci_docker_slot.rs`, which build a slot pool and a stub docker in a temp dir. It said 503 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 507;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
