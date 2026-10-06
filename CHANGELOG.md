@@ -76,6 +76,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **CI's Test job runs the `pdfium` feature's tests** (issue #1172). It used
+  to lint and check `pdfium` and never run it, because the runner has no
+  libpdfium, so a regression in the pdfium paths only showed up on a machine
+  that had one. The job now downloads the pinned `pdfium-8054` build from
+  libviprs-dep, checks it against the same sha256 `tools/Dockerfile.ci` uses,
+  and runs `cargo test --features pdfium` with `PDFIUM_PATH` pointing at it.
+  `tests/ci_feature_coverage.rs` expects the cell, and
+  `tests/pdfium_abi_and_binary_pins.rs` holds its release and digest to the
+  image's.
 - **`extract_page_image_with_password` renders, rather than extracts, a page
   of a file that needs a user password** (`pdfium` feature). Its streams
   can't be read without decrypting, so the page comes back rendered at the

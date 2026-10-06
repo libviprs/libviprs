@@ -284,6 +284,35 @@ jobs:
       - run: cargo test --features packfile
       - run: cargo test --features serde
       - run: cargo test --features tracing
+      # And `pdfium`, the one feature that needs something on the machine:
+      # pdfium-render binds libpdfium at runtime and the runner has none. It
+      # was linted and checked but never tested, so a regression in the pdfium
+      # paths, like the poisoned-mutex panic #1159 fixed, only turned up on a
+      # developer's machine (issue #1172).
+      #
+      # The build is the same pinned libviprs-dep release, checked against the
+      # same digest, that tools/Dockerfile.ci and libviprs-tests' pdfium job
+      # install; tests/pdfium_abi_and_binary_pins.rs holds the three together.
+      # It is unpacked under /tmp rather than the checkout, so nothing lands in
+      # the tree, and the cell binds it through PDFIUM_PATH, the variable
+      # `init_pdfium` reads, rather than an ldconfig'd system copy, so the run
+      # can only pass against this exact file. Both values are literals on
+      # purpose: tools/local-ci.py runs these steps as written and refuses any
+      # `${{ }}` expression.
+      - name: Install the pinned libpdfium
+        env:
+          PDFIUM_RELEASE: pdfium-8054
+          PDFIUM_SHA256: b42d1731f07fb73edea38cbd294afe9be4bdcf8e4ed8523de51cd5d12fc8d271
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/pdfium.tgz "https://github.com/libviprs/libviprs-dep/releases/download/${PDFIUM_RELEASE}/pdfium-linux-x64.tgz"
+          echo "${PDFIUM_SHA256}  /tmp/pdfium.tgz" | sha256sum -c -
+          mkdir -p /tmp/libviprs-pdfium
+          tar xzf /tmp/pdfium.tgz -C /tmp/libviprs-pdfium --strip-components=1
+          test -f /tmp/libviprs-pdfium/lib/libpdfium.so
+      - run: cargo test --features pdfium
+        env:
+          PDFIUM_PATH: /tmp/libviprs-pdfium/lib/libpdfium.so
 
   integration-test:
     name: Integration Tests (libviprs-tests)
