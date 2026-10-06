@@ -179,6 +179,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   errors as every other decoder. An ASCII Netpbm body with fewer bytes left
   than its header declares samples is now refused before the pixel buffer is
   reserved, instead of after reserving all of it.
+- **`EngineEvent::TileSkippedOnResume` and `EngineEvent::RetryAttempted` were
+  never emitted** (issue #1166). A resumed run reported the tiles its
+  checkpoint already held as `TileCompleted`, so an observer counted them as
+  done twice; it now gets `TileSkippedOnResume` for each. `RetryingSink`
+  retried without telling anyone; it now emits `RetryAttempted { attempt }`
+  (from 1, per tile) before each retry to an observer attached with the new
+  `RetryingSink::with_observer`, and `EngineBuilder` attaches its own when it
+  wraps a sink for a retry policy.
 - **The crate didn't compile on stable 1.99** (issue #1157). 1.99 deprecates
   `AtomicU64::fetch_update` (std renamed it `try_update`), and with
   `[lints.rust] deprecated = "deny"` the two calls in `MemoryTracker::alloc`
