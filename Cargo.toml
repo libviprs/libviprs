@@ -291,9 +291,9 @@ openjpeg2-pure = { package = "openjpeg2-pure-rs", version = "0.1.1" }
 # git-pinned dependency with a `version` fallback is two dependencies wearing
 # one name, and which one you got depended on how you consumed libviprs. Only
 # one of them was ever tested.
-pdfium-render = { version = "0.9.4", default-features = false, features = [
+pdfium-render = { git = "https://github.com/libviprs/pdfium-render", branch = "pdfium_8085", default-features = false, features = [
 	"thread_safe",
-	"pdfium_7881",
+	"pdfium_8085",
 	"image_025",
 ] }
 proptest = "1"

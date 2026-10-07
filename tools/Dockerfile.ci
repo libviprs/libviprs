@@ -56,11 +56,11 @@ RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 # beside it at all. A guard that hard-fails without the sibling would be red in
 # the common case and a guard that skips is no guard, so for now the two files
 # above are named here and checked by hand at bump time (#1012).
-ARG PDFIUM_RELEASE=pdfium-8054
+ARG PDFIUM_RELEASE=pdfium-8085
 ARG TARGETARCH
 RUN case "${TARGETARCH}" in \
-        amd64) PDFIUM_ARCH="linux-x64";   PDFIUM_SHA256="b42d1731f07fb73edea38cbd294afe9be4bdcf8e4ed8523de51cd5d12fc8d271" ;; \
-        arm64) PDFIUM_ARCH="linux-arm64"; PDFIUM_SHA256="3e1fe6e6ea1a53b1f801a071be256240513c1cad17b8d27fd80330da8f8c3640" ;; \
+        amd64) PDFIUM_ARCH="linux-x64";   PDFIUM_SHA256="ec671f549717c8c3e1642680cd834a9dbc580fb3c239bc3a426e9475166aaa63" ;; \
+        arm64) PDFIUM_ARCH="linux-arm64"; PDFIUM_SHA256="8890504356e1131b76d2eea47bdbd223140f3da5ef0574e9c616f92c50d8f1e9" ;; \
         *)     echo "Unsupported arch: ${TARGETARCH}" && exit 1 ;; \
     esac && \
     curl -fsSL -o /tmp/pdfium.tgz \

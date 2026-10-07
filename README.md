@@ -334,11 +334,11 @@ The `pdfium` feature requires `libpdfium.so` at runtime. Pre-compiled binaries b
 ```bash
 # x86_64
 curl -L -o pdfium.tgz \
-  https://github.com/libviprs/libviprs-dep/releases/download/pdfium-8054/pdfium-linux-x64.tgz
+  https://github.com/libviprs/libviprs-dep/releases/download/pdfium-8085/pdfium-linux-x64.tgz
 
 # arm64
 curl -L -o pdfium.tgz \
-  https://github.com/libviprs/libviprs-dep/releases/download/pdfium-8054/pdfium-linux-arm64.tgz
+  https://github.com/libviprs/libviprs-dep/releases/download/pdfium-8085/pdfium-linux-arm64.tgz
 
 # Extract and install
 tar xzf pdfium.tgz
@@ -346,21 +346,16 @@ sudo cp pdfium-linux-*/lib/libpdfium.so /usr/local/lib/
 sudo ldconfig
 ```
 
-`pdfium-8054` is what CI installs and what `libviprs-tests` pins, so these
-instructions reproduce what the suite runs. One caveat worth knowing rather than
-discovering: the crate requests `pdfium-render`'s `pdfium_7881` feature, which
-selects the bindgen set, so the bindings and the library are a version apart.
-`pdfium-render 0.9.4` offers no newer ABI (`pdfium_latest = ["pdfium_7881"]`), so
-there is nothing to move to yet.
+`pdfium-8085` is what CI installs, and the bindings are generated for the same
+build: this branch takes `pdfium-render` from the libviprs fork's `pdfium_8085`
+branch and requests its `pdfium_8085` feature, so the bindgen set and the
+library are one PDFium milestone and there is no declared gap to track.
+`tests/pdfium_abi_and_binary_pins.rs` fails if either half moves alone.
 
-That gap is measured rather than tolerated on trust. The 8054 library exports a
-strict superset of 7881's symbols, so every binding resolves, and the only
-declaration that differs between the two builds' public headers is
-`FPDF_LIBRARY_CONFIG`, which gained two trailing fields that PDFium reads only
-at config versions 6 and 7 while `pdfium-render` sets version 2.
-`tests/pdfium_abi_and_binary_pins.rs` records the pair and fails if either half
-moves, so the next person to bump one has to redo that comparison rather than
-inherit this paragraph.
+The catch is that crates.io's `pdfium-render 0.9.4` stops at `pdfium_7881`, so
+this branch depends on a git source and cannot be published. `main` still
+builds against the registry crate. Publishing this waits until upstream
+`pdfium-render` carries 8085 (libviprs#1197).
 
 See the [libviprs-dep pdfium README](https://github.com/libviprs/libviprs-dep/tree/main/pdfium) for building PDFium from source or finding other versions.
 
