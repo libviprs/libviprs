@@ -1832,13 +1832,25 @@ where
 }
 
 /// Bytes pdfium-render's `as_raw_bytes` will span for a decoded image bitmap
-/// of `width`x`height` at `bytes_per_pixel`, with each row padded to 4 bytes.
+/// of `width`x`height` at `bytes_per_pixel`, with each row padded to 4 bytes,
+/// or [`PdfError::RenderTooLarge`] when that span is past `i32::MAX`.
 #[cfg_attr(not(feature = "pdfium"), allow(dead_code))]
 fn image_bitmap_span(width: i32, height: i32, bytes_per_pixel: u64) -> Result<u64, PdfError> {
     let w = u64::from(width.unsigned_abs());
     let h = u64::from(height.unsigned_abs());
     let stride = (w * bytes_per_pixel).div_ceil(4) * 4;
-    Ok(stride * h)
+    let span = stride * h;
+    // pdfium-render 0.9.4 builds the slice in `FPDFBitmap_GetBuffer_as_slice`
+    // from `stride * height` as `c_int`, which wraps (release) or panics
+    // (debug) past `i32::MAX`. Refuse before calling `as_raw_bytes` (#1203).
+    if span > i32::MAX as u64 {
+        return Err(PdfError::RenderTooLarge {
+            width: width.unsigned_abs(),
+            height: height.unsigned_abs(),
+            span,
+        });
+    }
+    Ok(span)
 }
 
 /// Bytes pdfium's BGRA bitmap buffer will span for a `width`x`height` render.
