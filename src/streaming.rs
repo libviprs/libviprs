@@ -337,6 +337,7 @@ pub struct PdfiumStripSource {
     width: u32,
     height: u32,
     dpi: u32,
+    sizing: crate::pdf::PageSizing,
     state: PdfiumSourceState,
 }
 
@@ -350,6 +351,7 @@ impl std::fmt::Debug for PdfiumStripSource {
             .field("width", &self.width)
             .field("height", &self.height)
             .field("dpi", &self.dpi)
+            .field("sizing", &self.sizing)
             .field("mode", &self.mode())
             .finish_non_exhaustive()
     }
@@ -373,22 +375,7 @@ impl PdfiumStripSource {
         page: usize,
         dpi: u32,
     ) -> Result<Self, crate::pdf::PdfError> {
-        let path = path.into();
-        // Render eagerly and use the actual raster dimensions. Pdfium's
-        // `set_target_width`/`set_maximum_height` path rounds a few pixels
-        // differently than our `probe_page_dims` truncation at higher DPIs;
-        // using the cached raster's real width/height keeps
-        // `StripSource::width`/`height` in lockstep with what `render_strip`
-        // will hand back.
-        let full = crate::pdf::render_page_pdfium(&path, page, dpi)?;
-        let width = full.width();
-        let height = full.height();
-        Ok(Self {
-            width,
-            height,
-            dpi,
-            state: PdfiumSourceState::CachedFullPage { full_raster: full },
-        })
+        Self::builder(path, page, dpi).build()
     }
 
     /// Open a [`PdfiumRenderMode::CachedFullPage`] source with a worst-case
@@ -410,24 +397,9 @@ impl PdfiumStripSource {
         budget_bytes: u64,
         policy: BudgetPolicy,
     ) -> Result<Self, crate::pdf::PdfError> {
-        let path = path.into();
-        let resolved_dpi = resolve_budget_dpi(
-            &path,
-            page,
-            dpi_hint,
-            min_strip_height,
-            budget_bytes,
-            policy,
-        )?;
-        let full = crate::pdf::render_page_pdfium(&path, page, resolved_dpi)?;
-        let width = full.width();
-        let height = full.height();
-        Ok(Self {
-            width,
-            height,
-            dpi: resolved_dpi,
-            state: PdfiumSourceState::CachedFullPage { full_raster: full },
-        })
+        Self::builder(path, page, dpi_hint)
+            .budget(min_strip_height, budget_bytes, policy)
+            .build()
     }
 
     /// Open a PDF page as a [`PdfiumRenderMode::Streaming`] strip source.
@@ -476,8 +448,9 @@ impl PdfiumStripSource {
         page: usize,
         dpi: u32,
     ) -> Result<Self, crate::pdf::PdfError> {
-        let path = path.into();
-        load_streaming_source(path, page, dpi)
+        Self::builder(path, page, dpi)
+            .mode(PdfiumRenderMode::Streaming)
+            .build()
     }
 
     /// Open a [`PdfiumRenderMode::Streaming`] source with a worst-case
@@ -491,16 +464,29 @@ impl PdfiumStripSource {
         budget_bytes: u64,
         policy: BudgetPolicy,
     ) -> Result<Self, crate::pdf::PdfError> {
-        let path = path.into();
-        let resolved_dpi = resolve_budget_dpi(
-            &path,
+        Self::builder(path, page, dpi_hint)
+            .mode(PdfiumRenderMode::Streaming)
+            .budget(min_strip_height, budget_bytes, policy)
+            .build()
+    }
+
+    /// Start a builder for a source of `page` (1-based) of the PDF at `path`,
+    /// rendered at `dpi`. The defaults are what [`new`](Self::new) does:
+    /// [`PdfiumRenderMode::CachedFullPage`], [`PageSizing::Exact`](crate::pdf::PageSizing::Exact), no budget
+    /// check. The four constructors are wrappers over this.
+    pub fn builder(
+        path: impl Into<std::path::PathBuf>,
+        page: usize,
+        dpi: u32,
+    ) -> PdfiumStripSourceBuilder {
+        PdfiumStripSourceBuilder {
+            path: path.into(),
             page,
-            dpi_hint,
-            min_strip_height,
-            budget_bytes,
-            policy,
-        )?;
-        load_streaming_source(path, page, resolved_dpi)
+            dpi,
+            mode: PdfiumRenderMode::CachedFullPage,
+            sizing: crate::pdf::PageSizing::Exact,
+            budget: None,
+        }
     }
 
     /// The DPI this source actually renders at. May differ from a constructor
@@ -508,6 +494,18 @@ impl PdfiumStripSource {
     #[must_use]
     pub fn dpi(&self) -> u32 {
         self.dpi
+    }
+
+    /// The [`PageSizing`](crate::pdf::PageSizing) this source was built with.
+    ///
+    /// Under [`Exact`](crate::pdf::PageSizing::Exact) `width()`/`height()` are
+    /// the libvips size in both modes. Under
+    /// [`LegacyTruncated`](crate::pdf::PageSizing::LegacyTruncated) they are
+    /// what 0.5.x reported: the rendered raster in cached mode, and the
+    /// truncated arithmetic in streaming mode, which can be a pixel larger.
+    #[must_use]
+    pub fn sizing(&self) -> crate::pdf::PageSizing {
+        self.sizing
     }
 
     /// The render mode this source was constructed in.
@@ -550,8 +548,118 @@ impl PdfiumStripSource {
                     .pages()
                     .get(streaming.page_index)
                     .map_err(|e| crate::pdf::PdfError::Pdfium(e.to_string()))?;
-                crate::pdf::render_page_strip_with_page(&pdf_page, self.dpi, y_offset, height)
+                crate::pdf::render_page_strip_with_page(
+                    &pdf_page,
+                    self.dpi,
+                    y_offset,
+                    height,
+                    self.sizing,
+                )
             }
+        }
+    }
+}
+
+/// Builder for a [`PdfiumStripSource`], from [`PdfiumStripSource::builder`].
+///
+/// ```no_run
+/// # #[cfg(feature = "pdfium")] {
+/// use libviprs::{PageSizing, PdfiumRenderMode, PdfiumStripSource};
+///
+/// let source = PdfiumStripSource::builder("plan.pdf", 1, 300)
+///     .mode(PdfiumRenderMode::Streaming)
+///     .sizing(PageSizing::Exact)
+///     .build()?;
+/// assert_eq!(source.sizing(), PageSizing::Exact);
+/// # }
+/// # Ok::<(), libviprs::PdfError>(())
+/// ```
+#[cfg(feature = "pdfium")]
+#[derive(Debug, Clone)]
+pub struct PdfiumStripSourceBuilder {
+    path: std::path::PathBuf,
+    page: usize,
+    dpi: u32,
+    mode: PdfiumRenderMode,
+    sizing: crate::pdf::PageSizing,
+    budget: Option<(u32, u64, BudgetPolicy)>,
+}
+
+#[cfg(feature = "pdfium")]
+impl PdfiumStripSourceBuilder {
+    /// Cached full page (the default) or streaming strips.
+    #[must_use]
+    pub fn mode(mut self, mode: PdfiumRenderMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    /// How the page size in points becomes a raster size. Defaults to
+    /// [`PageSizing::Exact`](crate::pdf::PageSizing::Exact), the libvips size.
+    #[must_use]
+    pub fn sizing(mut self, sizing: crate::pdf::PageSizing) -> Self {
+        self.sizing = sizing;
+        self
+    }
+
+    /// Check the worst-case strip (`width x min_strip_height x 4` bytes)
+    /// against `budget_bytes` under `policy`; see
+    /// [`PdfiumStripSource::new_with_budget`]. The DPI given to
+    /// [`PdfiumStripSource::builder`] is then the hint.
+    #[must_use]
+    pub fn budget(
+        mut self,
+        min_strip_height: u32,
+        budget_bytes: u64,
+        policy: BudgetPolicy,
+    ) -> Self {
+        self.budget = Some((min_strip_height, budget_bytes, policy));
+        self
+    }
+
+    /// Open the source.
+    ///
+    /// # Errors
+    ///
+    /// A [`PdfError`](crate::pdf::PdfError) when the file or page cannot be
+    /// opened, the page is over the render budget, or the strip budget cannot
+    /// be met.
+    pub fn build(self) -> Result<PdfiumStripSource, crate::pdf::PdfError> {
+        let Self {
+            path,
+            page,
+            dpi,
+            mode,
+            sizing,
+            budget,
+        } = self;
+        let dpi = match budget {
+            Some((min_strip_height, budget_bytes, policy)) => resolve_budget_dpi(
+                &path,
+                page,
+                dpi,
+                min_strip_height,
+                budget_bytes,
+                policy,
+                sizing,
+            )?,
+            None => dpi,
+        };
+        match mode {
+            PdfiumRenderMode::CachedFullPage => {
+                // The cached source reports the raster it rendered, so
+                // `width()`/`height()` cannot drift from what `render_strip`
+                // hands back. Under `Exact` that raster is the libvips size.
+                let full = crate::pdf::render_page_pdfium_with(&path, page, dpi, sizing)?;
+                Ok(PdfiumStripSource {
+                    width: full.width(),
+                    height: full.height(),
+                    dpi,
+                    sizing,
+                    state: PdfiumSourceState::CachedFullPage { full_raster: full },
+                })
+            }
+            PdfiumRenderMode::Streaming => load_streaming_source(path, page, dpi, sizing),
         }
     }
 }
@@ -570,6 +678,7 @@ fn load_streaming_source(
     path: std::path::PathBuf,
     page: usize,
     dpi: u32,
+    sizing: crate::pdf::PageSizing,
 ) -> Result<PdfiumStripSource, crate::pdf::PdfError> {
     let pdfium = crate::pdf::init_pdfium()?;
     let _lock = crate::pdf::pdfium_lock();
@@ -582,9 +691,11 @@ fn load_streaming_source(
         .get(page_index)
         .map_err(|e| crate::pdf::PdfError::Pdfium(e.to_string()))?;
 
-    // Match `render_page_pdfium`'s width/height truncation byte-for-byte
-    // (the comment at pdf.rs:376-379) so cached and streaming sources report
-    // identical dimensions.
+    // The size `render_page_pdfium_with` renders for the same sizing, so
+    // cached and streaming sources report identical dimensions. Under `Exact`
+    // that is the libvips size; under `LegacyTruncated` it is the 0.5.x
+    // truncated arithmetic, which is what streaming mode always reported (the
+    // cached raster can be a pixel smaller after pdfium's aspect-fit).
     //
     // Streaming mode deliberately does *not* take the full-page pixel ceiling
     // that the cached path applies: it never materialises the whole page as a
@@ -592,15 +703,18 @@ fn load_streaming_source(
     // so a large page is handled by streaming, not rejected. The per-strip
     // allocation is bounded by `alloc_zeroed_rgba`'s checked/`try_reserve`
     // path in `render_page_strip_with_page` and `render_strip_inner`.
-    let scale = dpi as f32 / 72.0;
-    let width = (pdf_page.width().value * scale) as u32;
-    let height = (pdf_page.height().value * scale) as u32;
+    let (width, height) = sizing.render_target_dims(
+        f64::from(pdf_page.width().value),
+        f64::from(pdf_page.height().value),
+        dpi,
+    );
     drop(pdf_page);
 
     Ok(PdfiumStripSource {
         width,
         height,
         dpi,
+        sizing,
         state: PdfiumSourceState::Streaming(Box::new(StreamingState {
             document: Some(document),
             page_index,
@@ -623,12 +737,13 @@ fn resolve_budget_dpi(
     min_strip_height: u32,
     budget_bytes: u64,
     policy: BudgetPolicy,
+    sizing: crate::pdf::PageSizing,
 ) -> Result<u32, crate::pdf::PdfError> {
     let pdfium = crate::pdf::init_pdfium()?;
     let _lock = crate::pdf::pdfium_lock();
     match policy {
         BudgetPolicy::Error => {
-            let (width, _, _, _) = probe_page_dims(pdfium, path, page, dpi_hint)?;
+            let (width, _, _, _) = probe_page_dims(pdfium, path, page, dpi_hint, sizing)?;
             let strip_bytes = width as u64 * min_strip_height as u64 * 4;
             if strip_bytes > budget_bytes {
                 return Err(crate::pdf::PdfError::BudgetExceeded {
@@ -647,6 +762,7 @@ fn resolve_budget_dpi(
             min_dpi,
             min_strip_height,
             budget_bytes,
+            sizing,
         ),
     }
 }
@@ -662,6 +778,7 @@ fn probe_page_dims(
     path: &std::path::Path,
     page: usize,
     dpi: u32,
+    sizing: crate::pdf::PageSizing,
 ) -> Result<(u32, u32, f32, f32), crate::pdf::PdfError> {
     let document = pdfium
         .load_pdf_from_file(path, None)
@@ -671,15 +788,13 @@ fn probe_page_dims(
     let pdf_page = pages
         .get(page_index)
         .map_err(|e| crate::pdf::PdfError::Pdfium(e.to_string()))?;
-    let scale = dpi as f32 / 72.0;
-    // Pdfium's FPDF_GetPageWidthF/HeightF return the display dimensions —
-    // already swapped for /Rotate 90/270 — which is what the form-data
-    // baseline targets via `set_target_width`. We truncate via `as u32` to
-    // match `render_page_pdfium`'s width/height computation byte-for-byte.
+    // `FPDF_GetPageWidthF`/`HeightF` return the display dimensions, already
+    // swapped for /Rotate 90/270 and cut to the page box. Widening the `f32`
+    // to `f64` gives the same number libvips reads through `FPDF_GetPageWidth`
+    // (pdfium keeps the page size as a float either way).
     let w_pts = pdf_page.width().value;
     let h_pts = pdf_page.height().value;
-    let width = (w_pts * scale) as u32;
-    let height = (h_pts * scale) as u32;
+    let (width, height) = sizing.render_target_dims(f64::from(w_pts), f64::from(h_pts), dpi);
     Ok((width, height, w_pts, h_pts))
 }
 
@@ -690,6 +805,7 @@ fn probe_page_dims(
 /// **Caller must hold `pdfium-render`'s thread-safety lock** — this function
 /// calls [`probe_page_dims`] internally, which is not standalone-locked.
 #[cfg(feature = "pdfium")]
+#[allow(clippy::too_many_arguments)]
 fn resolve_dpi_under_budget(
     pdfium: &pdfium_render::prelude::Pdfium,
     path: &std::path::Path,
@@ -698,6 +814,7 @@ fn resolve_dpi_under_budget(
     min_dpi: u32,
     min_strip_height: u32,
     budget_bytes: u64,
+    sizing: crate::pdf::PageSizing,
 ) -> Result<u32, crate::pdf::PdfError> {
     if min_dpi == 0 {
         return Err(crate::pdf::PdfError::Pdfium(
@@ -707,7 +824,7 @@ fn resolve_dpi_under_budget(
     // Anchor: probe once at dpi_hint to get the natural width-per-DPI ratio,
     // then solve `width * min_strip_height * 4 ≤ budget` for the largest DPI
     // that fits, capped above by dpi_hint and below by min_dpi.
-    let (anchor_w, _, _, _) = probe_page_dims(pdfium, path, page, dpi_hint)?;
+    let (anchor_w, _, _, _) = probe_page_dims(pdfium, path, page, dpi_hint, sizing)?;
     if anchor_w == 0 {
         return Err(crate::pdf::PdfError::Pdfium(
             "page width is 0; cannot resolve DPI".into(),
@@ -730,7 +847,7 @@ fn resolve_dpi_under_budget(
         });
     }
     // Verify: width may round differently than the linear estimate suggests.
-    let (verified_w, _, _, _) = probe_page_dims(pdfium, path, page, resolved)?;
+    let (verified_w, _, _, _) = probe_page_dims(pdfium, path, page, resolved, sizing)?;
     let verified_strip = verified_w as u64 * min_strip_height as u64 * 4;
     if verified_strip > budget_bytes {
         // Step down by 1 DPI in case rounding pushed us just over.
@@ -742,7 +859,7 @@ fn resolve_dpi_under_budget(
                 dpi: resolved,
             });
         }
-        let (vw2, _, _, _) = probe_page_dims(pdfium, path, page, stepped)?;
+        let (vw2, _, _, _) = probe_page_dims(pdfium, path, page, stepped, sizing)?;
         let strip2 = vw2 as u64 * min_strip_height as u64 * 4;
         if strip2 > budget_bytes {
             return Err(crate::pdf::PdfError::BudgetExceeded {
