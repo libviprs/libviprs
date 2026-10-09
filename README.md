@@ -7,7 +7,7 @@
 <p align="center">
   <a href="https://github.com/libviprs/libviprs/actions/workflows/ci.yml"><img src="https://github.com/libviprs/libviprs/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://github.com/libviprs/libviprs/actions/workflows/merge-gate.yml"><img src="https://github.com/libviprs/libviprs/actions/workflows/merge-gate.yml/badge.svg" alt="Merge Gate"></a>
-  <img src="https://img.shields.io/badge/rust-1.97%2B-orange?logo=rust" alt="Rust 1.97+">
+  <img src="https://img.shields.io/badge/rust-1.99%2B-orange?logo=rust" alt="Rust 1.99+">
   <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License">
 </p>
 
@@ -324,7 +324,7 @@ from here for exactly one commit.
 
 ## Requirements
 
-- Rust 1.97+ (edition 2024)
+- Rust 1.99+ (edition 2024)
 - libpdfium shared library (only if using the `pdfium` feature)
 
 ### PDFium setup
@@ -451,7 +451,7 @@ make loom     # `loom_tests`, which is the Loom job's first invocation of two
 
 > **Prerequisites:** `make ci` needs Docker running and PyYAML (`pip3 install pyyaml`).
 > Budget disk for it: the whole job list compiles ten clippy feature permutations,
-> nine test ones and seven more under the 1.97 toolchain, and each gets its own
+> nine test ones and seven more under the 1.99 toolchain, and each gets its own
 > artifact set on the `libviprs-ci-cargo` volume rather than replacing the last.
 > `make miri` requires a nightly toolchain with the miri component, at or above this
 > crate's MSRV; the `Makefile` pins a dated one and explains why.

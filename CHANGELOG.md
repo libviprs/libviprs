@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The minimum supported Rust version is 1.99, up from 1.97** (issue #1200).
+  This is breaking for anyone building on 1.97 or 1.98, who now get cargo's
+  "requires rustc 1.99" refusal instead of a build. I've filed it here and
+  not under `### Breaking` on purpose: a `### Breaking` section in
+  `Unreleased` is what `tests/changelog_preamble.rs` reads as the release's
+  breaking list, and this one entry isn't that list. `rust-version` in
+  `Cargo.toml`, the README badge and Requirements line, `MIGRATION.md`, the
+  `msrv` job's toolchain pin in `ci.yml`, `tools/Dockerfile.ci` and the
+  Makefile all say 1.99 now. 1.99 is also the release that deprecates
+  `AtomicU64::fetch_update`, so the `deprecated` lint now covers what only
+  `deprecated_in_future` caught on 1.97. To stay on the old floor, pin
+  libviprs 0.5.x, which still builds on 1.97.
+
 ## [0.5.1] — 2026-10-06
 
 ### Added

@@ -157,7 +157,7 @@ image-webp = "0.2.4"
 # It is a floor and NOT an `=` pin, which is a decision worth the paragraph
 # because the obvious reading of the MSRV hazard says otherwise. jxl-oxide
 # declares no `rust-version`, so the MSRV-aware resolver (v3, set above)
-# cannot keep `cargo +1.97 check` honest for it: a patch release is free to
+# cannot keep `cargo +1.99 check` honest for it: a patch release is free to
 # raise the real floor with nothing to declare it. But MEASURED, none of the
 # thirteen `jxl-*` crates declares one either, and jxl-oxide requires its
 # siblings by caret, so `=0.12.6` would freeze one crate out of thirteen
@@ -168,7 +168,7 @@ image-webp = "0.2.4"
 #
 # So the hazard is real and it is carried by the gate instead: `Cargo.lock`
 # is not committed here, so CI resolves fresh on every push and runs
-# `cargo +1.97 check --all-targets --features jxl`. A family-wide MSRV bump
+# `cargo +1.99 check --all-targets --features jxl`. A family-wide MSRV bump
 # therefore shows up as a red build within a day rather than in a consumer's
 # lockfile. The feature name in that command is load-bearing, because these
 # crates are optional: without it they are not in the graph and the job would
@@ -348,7 +348,7 @@ rustfft = "6"
 # `oracle-captures/foreign-avif` are what need `bitdepth_16`.
 #
 # MSRV is fine: `rav1d` declares `rust-version = "1.79"`, well under this
-# crate's 1.97.
+# crate's 1.99.
 rav1d = { version = "1.1", default-features = false, features = [
 	"bitdepth_8",
 	"bitdepth_16",
@@ -429,7 +429,7 @@ name = "libviprs"
 version = "0.5.1"
 edition = "2024"
 authors = ["Roman Goldmann <roman@devshell.org>"]
-rust-version = "1.97"
+rust-version = "1.99"
 description = "Pure-Rust tile pyramid engine for blueprint PDFs and large rasters: monolithic, streaming, and parallel MapReduce engines behind a fluent EngineBuilder API. DeepZoom, XYZ, and Google layouts; bounded-memory rendering; resume, retry, and dedupe."
 license = "MIT"
 repository = "https://github.com/libviprs/libviprs"
@@ -450,10 +450,12 @@ rustdoc-args = ["--cfg", "docsrs"]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)', 'cfg(pmtiles_lock_probe)'] }
 deprecated = "deny"
 # Deprecations std has announced for a later release. This is what catches a
-# call like `AtomicU64::fetch_update` on the 1.97 MSRV: std marks it
-# `#[deprecated(since = "1.99.0")]` from 1.95 on, which only fires
-# `deprecated` once a toolchain reaches 1.99, so without this the MSRV job
-# built it happily while stable refused it (#1157).
+# call like `AtomicU64::fetch_update`: std marked it
+# `#[deprecated(since = "1.99.0")]` from 1.95 on, which only fired
+# `deprecated` once a toolchain reached 1.99, so back when the MSRV was 1.97
+# the MSRV job built it happily while stable refused it (#1157). The MSRV is
+# 1.99 now, so `deprecated` covers that on every toolchain we support, and
+# this still catches whatever a later release announces.
 deprecated_in_future = "deny"
 
 [lints.clippy]
@@ -547,7 +549,7 @@ svg = ["dep:resvg"]
 # The MSRV hazard written up over `jxl-oxide` below is carried by the `msrv`
 # job in `.github/workflows/ci.yml`, which is why that job names this feature
 # explicitly. Without `--features jxl` the family is not in the graph at all
-# and `cargo +1.97 check` would say nothing about it.
+# and `cargo +1.99 check` would say nothing about it.
 jxl = ["dep:jxl-oxide", "dep:jxl-grid", "dep:zune-jpegxl", "dep:zune-core"]
 packfile = ["dep:tar", "dep:zip"]
 # Gates public `Serialize` / `Deserialize` derives on the wire/config types
