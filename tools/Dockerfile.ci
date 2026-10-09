@@ -8,7 +8,7 @@
 #
 # Toolchains match what `.github/workflows/ci.yml` asks for via
 # `dtolnay/rust-toolchain@<spec>`: stable for Check & Lint, Docs, Test and the
-# integration job, and 1.97 for the MSRV job. Nightly is here for
+# integration job, and 1.99 for the MSRV job. Nightly is here for
 # `merge-gate.yml`'s Miri job, which is the other workflow worth running
 # locally. If ci.yml starts asking for a toolchain this image does not carry,
 # `local-ci.py` fails loudly rather than silently substituting one.
@@ -88,7 +88,7 @@ RUN ldconfig
 # is nightly, so stable silently ended up with no clippy and no rustfmt and
 # `cargo fmt --check` failed with "not installed for the toolchain 'stable'".
 RUN rustup component add clippy rustfmt --toolchain stable \
- && rustup toolchain install 1.97 --component clippy,rustfmt \
+ && rustup toolchain install 1.99 --component clippy,rustfmt \
  && rustup toolchain install nightly --component miri,clippy,rustfmt \
  && rustup default stable
 

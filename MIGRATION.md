@@ -156,7 +156,7 @@ all of them. `PixelFormat` is now public and re-exported at the crate root.
 | `tracing` | off | Structured spans/events |
 | `packfile` | off | `PackfileSink` (write tiles into a tar/zip), now with `PackfileSinkBuilder` |
 
-`default = []`, so no features are enabled by default. MSRV is 1.97, edition
+`default = []`, so no features are enabled by default. MSRV is 1.99, edition
 2024. That number is `rust-version` in `Cargo.toml` and
 `tests/crate_doc_matches_the_crate.rs` holds both files to it; this line named a
 floor three minor versions under the manifest's for as long as nothing checked
