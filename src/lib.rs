@@ -292,13 +292,16 @@ pub use observe::{
 };
 pub use pdf::{
     BackgroundColor, PageRotation, PageSizing, PdfError, PdfInfo, PdfPageInfo, extract_page_image,
-    extract_page_image_dpi, extract_page_image_with_background,
+    extract_page_image_dpi, extract_page_image_dpi_with, extract_page_image_with_background,
     extract_page_image_with_background_typed, extract_page_image_with_password, pdf_info,
     pdf_info_with_password,
 };
 #[cfg(feature = "pdfium")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pdfium")))]
-pub use pdf::{BudgetRenderResult, render_page_pdfium, render_page_pdfium_budgeted};
+pub use pdf::{
+    BudgetRenderResult, render_page_pdfium, render_page_pdfium_budgeted,
+    render_page_pdfium_budgeted_with, render_page_pdfium_with,
+};
 pub use pixel::PixelFormat;
 pub use planner::{
     Layout, LevelPlan, PlannerError, PyramidPlan, PyramidPlanner, TileCoord, TileRect,
@@ -389,7 +392,7 @@ pub use streaming::{
 };
 #[cfg(feature = "pdfium")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pdfium")))]
-pub use streaming::{PdfiumRenderMode, PdfiumStripSource};
+pub use streaming::{PdfiumRenderMode, PdfiumStripSource, PdfiumStripSourceBuilder};
 pub use streaming_mapreduce::{
     LocalWorkExecutor, MapReduceConfig, StripWorkUnit, WorkContext, WorkExecutor,
 };

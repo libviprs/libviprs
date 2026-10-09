@@ -353,6 +353,7 @@ annotated   fs-detected  tests/pdfium_dependency_contract.rs::thread_safe_is_req
 annotated   fs-detected  tests/pdfium_page_size_exact.rs::a_fractional_page_fills_the_bitmap_to_the_edge_in_every_route
 annotated   fs-detected  tests/pdfium_page_size_exact.rs::a_media_box_away_from_the_origin_has_the_same_size
 annotated   fs-detected  tests/pdfium_page_size_exact.rs::every_render_route_reports_the_libvips_size
+annotated   fs-detected  tests/pdfium_page_size_exact.rs::legacy_truncated_renders_the_sizes_0_5_x_rendered
 annotated   fs-detected  tests/pdfium_page_size_exact.rs::rotation_swaps_the_axes_before_the_size_is_rounded
 annotated   fs-detected  tests/pdfium_source_audit.rs::audit_gate_accepts_this_crate
 annotated   fs-detected  tests/pdfium_source_audit.rs::audit_gate_rejects_a_consumer_still_pinning_the_fork
