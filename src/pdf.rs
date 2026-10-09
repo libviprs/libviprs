@@ -860,6 +860,11 @@ fn largest_image_object_raster(
         let format = bitmap
             .format()
             .map_err(|e| PdfError::Pdfium(e.to_string()))?;
+        image_bitmap_span(
+            bitmap.width(),
+            bitmap.height(),
+            pdfium_image_bytes_per_pixel(format),
+        )?;
         let raster = raster_from_pdfium_image_bitmap(
             &bitmap.as_raw_bytes(),
             bitmap.width(),
@@ -871,6 +876,17 @@ fn largest_image_object_raster(
     largest
         .map(|(_, raster)| raster)
         .ok_or(PdfError::NoImageOnPage { page })
+}
+
+/// Bytes per pixel of a decoded pdfium image bitmap in `format`.
+#[cfg(feature = "pdfium")]
+fn pdfium_image_bytes_per_pixel(format: pdfium_render::prelude::PdfBitmapFormat) -> u64 {
+    use pdfium_render::prelude::PdfBitmapFormat;
+    match format {
+        PdfBitmapFormat::Gray => 1,
+        PdfBitmapFormat::BGR => 3,
+        PdfBitmapFormat::BGRx | PdfBitmapFormat::BGRA => 4,
+    }
 }
 
 /// Turn a decoded pdfium image bitmap (rows of `BGR`, `BGRx`, `BGRA` or gray
@@ -1813,6 +1829,16 @@ where
     let (w, h) = (rgba.width(), rgba.height());
     let data = rgba.into_raw();
     Raster::new(w, h, PixelFormat::Rgba8, data).map_err(PdfError::from)
+}
+
+/// Bytes pdfium-render's `as_raw_bytes` will span for a decoded image bitmap
+/// of `width`x`height` at `bytes_per_pixel`, with each row padded to 4 bytes.
+#[cfg_attr(not(feature = "pdfium"), allow(dead_code))]
+fn image_bitmap_span(width: i32, height: i32, bytes_per_pixel: u64) -> Result<u64, PdfError> {
+    let w = u64::from(width.unsigned_abs());
+    let h = u64::from(height.unsigned_abs());
+    let stride = (w * bytes_per_pixel).div_ceil(4) * 4;
+    Ok(stride * h)
 }
 
 /// Bytes pdfium's BGRA bitmap buffer will span for a `width`x`height` render.
@@ -3112,6 +3138,42 @@ mod tests {
      * correct span computed in a wide integer, and must reject a zero-width
      * render, rather than overflowing.
      */
+
+    // #1203: the image-extraction path hands pdfium's decoded bitmap to
+    // `as_raw_bytes`, which multiplies stride by height as `c_int`.
+    #[test]
+    fn image_bitmap_span_rejects_over_i32_max_1203() {
+        // 30000 x 20000 BGRA = 2_400_000_000 bytes > i32::MAX, yet only
+        // 600 Mpx, which is under the 2^30 pixel cap.
+        match image_bitmap_span(30000, 20000, 4) {
+            Err(PdfError::RenderTooLarge {
+                width,
+                height,
+                span,
+            }) => {
+                assert_eq!((width, height), (30000, 20000));
+                assert_eq!(span, 2_400_000_000);
+            }
+            other => panic!("expected RenderTooLarge, got {other:?}"),
+        }
+        // Largest legal pixel counts at 1 byte per pixel still fit.
+        assert!(image_bitmap_span(i32::MAX, 1, 1).is_ok());
+        // One row past the limit does not.
+        assert!(image_bitmap_span(i32::MAX, 2, 1).is_err());
+        // 3 bytes per pixel rows are padded to 4 bytes: 3 * 11 = 33 -> 36.
+        assert_eq!(image_bitmap_span(11, 2, 3).unwrap(), 72);
+        // 2^30 px of BGRA is 4 GiB, far past the limit.
+        assert!(image_bitmap_span(32768, 32768, 4).is_err());
+    }
+
+    #[test]
+    fn image_bitmap_span_boundary_1203() {
+        // 536_870_911 * 4 = 2_147_483_644 <= i32::MAX, one wide, passes.
+        assert_eq!(image_bitmap_span(536_870_911, 1, 4).unwrap(), 2_147_483_644);
+        // 536_870_912 * 4 = 2^31 > i32::MAX.
+        assert!(image_bitmap_span(536_870_912, 1, 4).is_err());
+    }
+
     #[test]
     fn pdfium_bitmap_span_no_i32_overflow() {
         // A large-but-representable render still succeeds, with the span
