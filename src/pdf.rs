@@ -90,21 +90,34 @@ pub const DEFAULT_MAX_RENDER_PIXELS: u64 = 1 << 30;
 /// Convert page dimensions in points into a render size in pixels at `dpi`,
 /// rejecting any size whose total pixel count exceeds `max_pixels`.
 ///
-/// The two dimension casts saturate (`f32 as u32`) and the product is taken
-/// in `u64`, so an adversarial `/MediaBox` can never wrap into a small value.
-/// Returns [`PdfError::RenderBudgetExceeded`] when the budget is exceeded so
-/// the caller propagates a typed error instead of proceeding to a
-/// multi-gigabyte allocation.
-#[cfg(any(feature = "pdfium", test))]
+/// The size is [`PageSizing::Exact`], the libvips one; see
+/// [`render_dims_within_budget_with`] for the policy-taking form. The
+/// dimension casts saturate and the product is taken in `u64`, so an
+/// adversarial `/MediaBox` can never wrap into a small value. Returns
+/// [`PdfError::RenderBudgetExceeded`] when the budget is exceeded so the
+/// caller propagates a typed error instead of proceeding to a multi-gigabyte
+/// allocation.
+#[cfg(test)]
 pub(crate) fn render_dims_within_budget(
-    width_pt: f32,
-    height_pt: f32,
+    width_pt: f64,
+    height_pt: f64,
     dpi: u32,
     max_pixels: u64,
 ) -> Result<(u32, u32), PdfError> {
-    let scale = dpi as f32 / 72.0;
-    let width = (width_pt * scale) as u32;
-    let height = (height_pt * scale) as u32;
+    render_dims_within_budget_with(width_pt, height_pt, dpi, PageSizing::Exact, max_pixels)
+}
+
+/// [`render_dims_within_budget`] under an explicit [`PageSizing`]. The budget
+/// is checked on the size that will be handed to the renderer.
+#[cfg(any(feature = "pdfium", test))]
+pub(crate) fn render_dims_within_budget_with(
+    width_pt: f64,
+    height_pt: f64,
+    dpi: u32,
+    sizing: PageSizing,
+    max_pixels: u64,
+) -> Result<(u32, u32), PdfError> {
+    let (width, height) = sizing.render_target_dims(width_pt, height_pt, dpi);
     let pixels = width as u64 * height as u64;
     if pixels > max_pixels {
         return Err(PdfError::RenderBudgetExceeded {
@@ -118,31 +131,62 @@ pub(crate) fn render_dims_within_budget(
 /// Choose the render DPI so the rasterized page fits within `max_pixels`,
 /// preferring `max_dpi` when the page already fits. Returns
 /// `(dpi_used, capped)`, where `capped` is true when the DPI was reduced to
-/// honor the budget.
+/// honor the budget. Sizes are [`PageSizing::Exact`].
 ///
 /// The pixel estimate is taken in `f64`: an adversarial `/MediaBox` large
 /// enough to overflow a `u64` product would otherwise wrap to a small value
 /// that slips under `max_pixels`, skipping the reduction branch and running
 /// the render at full DPI — the exact OOM the budget exists to prevent. In
 /// `f64` an overflowing product saturates toward `inf` and compares correctly.
-#[cfg(any(feature = "pdfium", test))]
+///
+/// The estimate is continuous, and the real size rounds each axis, which can
+/// land up to `W + H + 1` px over it. So the DPI picked is checked against the
+/// real size and stepped down by one while it is over budget.
+#[cfg(test)]
 pub(crate) fn budgeted_render_dpi(
     width_pts: f64,
     height_pts: f64,
     max_dpi: u32,
     max_pixels: u64,
 ) -> (u32, bool) {
+    budgeted_render_dpi_with(
+        width_pts,
+        height_pts,
+        max_dpi,
+        max_pixels,
+        PageSizing::Exact,
+    )
+}
+
+/// [`budgeted_render_dpi`] under an explicit [`PageSizing`].
+#[cfg(any(feature = "pdfium", test))]
+pub(crate) fn budgeted_render_dpi_with(
+    width_pts: f64,
+    height_pts: f64,
+    max_dpi: u32,
+    max_pixels: u64,
+    sizing: PageSizing,
+) -> (u32, bool) {
     let scale_at_max = max_dpi as f64 / 72.0;
     let pixels_at_max = (width_pts * scale_at_max) * (height_pts * scale_at_max);
 
-    if pixels_at_max <= max_pixels as f64 {
+    let (mut dpi, mut capped) = if pixels_at_max <= max_pixels as f64 {
         (max_dpi, false)
     } else {
         // scale = sqrt(max_pixels / (w_pts * h_pts)), then dpi = scale * 72
         let scale = (max_pixels as f64 / (width_pts * height_pts)).sqrt();
         let dpi = (scale * 72.0).floor() as u32;
         (dpi.max(1), true)
+    };
+    let over = |dpi: u32| {
+        let (w, h) = sizing.render_target_dims(width_pts, height_pts, dpi);
+        u64::from(w) * u64::from(h) > max_pixels
+    };
+    while dpi > 1 && over(dpi) {
+        dpi -= 1;
+        capped = true;
     }
+    (dpi, capped)
 }
 
 /// Allocate a zeroed RGBA8 buffer of `width × height` pixels using fallible
@@ -227,6 +271,102 @@ impl PageRotation {
             Self::ThreeQuarter => 270,
         }
     }
+}
+
+/// How a PDF page's size in points becomes a raster size in pixels.
+///
+/// The default, [`Exact`](Self::Exact), is the size libvips gives for the same
+/// page and DPI, so a planner, a probe and a render all report the same
+/// numbers. [`LegacyTruncated`](Self::LegacyTruncated) keeps the sizes 0.5.x
+/// produced for callers who have pyramids on disk at those sizes.
+///
+/// ```
+/// use libviprs::PageSizing;
+///
+/// // US Letter at 300 dpi.
+/// assert_eq!(PageSizing::Exact.pixel_dims(612.0, 792.0, 300), (2550, 3300));
+/// assert_eq!(PageSizing::default(), PageSizing::Exact);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
+pub enum PageSizing {
+    /// The libvips size: `rint(points * (dpi / 72.0))` per axis, computed in
+    /// `f64` with ties to even. The page is stretched into a bitmap of exactly
+    /// that size, as libvips does, so nothing is padded or cropped.
+    #[default]
+    Exact,
+    /// The 0.5.x size: the page size times `dpi as f32 / 72.0`, truncated, and
+    /// then fitted by pdfium (`set_target_width` plus `set_maximum_height`),
+    /// which rounds a second time. That leaves a raster 0 to 2 px smaller
+    /// than the page at that DPI.
+    LegacyTruncated,
+}
+
+impl PageSizing {
+    /// Pixel size of a `width_pts` x `height_pts` page at `dpi`.
+    ///
+    /// The points are the page size pdfium reports after the page box and
+    /// `/Rotate` are applied (an `f32` widened to `f64`). Under
+    /// [`Exact`](Self::Exact) this is the size libvips gives. Under
+    /// [`LegacyTruncated`](Self::LegacyTruncated) it is the size a 0.5.x
+    /// render of the page came out at, second rounding included. (0.5.x
+    /// streaming sources reported the size before that second rounding, which
+    /// is why `LegacyTruncated` keeps its own pre-fit arithmetic for them; see
+    /// [`crate::PdfiumStripSource::sizing`].)
+    ///
+    /// Results saturate at `u32::MAX` rather than wrapping.
+    #[must_use]
+    pub fn pixel_dims(self, width_pts: f64, height_pts: f64, dpi: u32) -> (u32, u32) {
+        match self {
+            Self::Exact => {
+                let scale = dpi as f64 / 72.0;
+                (
+                    (width_pts * scale).round_ties_even() as u32,
+                    (height_pts * scale).round_ties_even() as u32,
+                )
+            }
+            Self::LegacyTruncated => legacy_fitted_dims(width_pts, height_pts, dpi),
+        }
+    }
+
+    /// The size handed to the renderer, which is what the budget is checked
+    /// against: the exact size, or for `LegacyTruncated` the truncated
+    /// target pdfium then fits the page into.
+    #[cfg(any(feature = "pdfium", test))]
+    pub(crate) fn render_target_dims(
+        self,
+        width_pts: f64,
+        height_pts: f64,
+        dpi: u32,
+    ) -> (u32, u32) {
+        match self {
+            Self::Exact => self.pixel_dims(width_pts, height_pts, dpi),
+            Self::LegacyTruncated => legacy_truncated_dims(width_pts, height_pts, dpi),
+        }
+    }
+}
+
+/// The 0.5.x arithmetic: `(pts as f32 * (dpi as f32 / 72.0)) as u32`.
+pub(crate) fn legacy_truncated_dims(width_pts: f64, height_pts: f64, dpi: u32) -> (u32, u32) {
+    let scale = dpi as f32 / 72.0;
+    (
+        (width_pts as f32 * scale) as u32,
+        (height_pts as f32 * scale) as u32,
+    )
+}
+
+/// What pdfium-render's `set_target_width(w).set_maximum_height(h)` produced
+/// from the truncated target, in the same `f32` steps (`apply_to_page` in
+/// its `render_config.rs`): scale to the width, cap the height, round each
+/// axis to the nearest pixel.
+fn legacy_fitted_dims(width_pts: f64, height_pts: f64, dpi: u32) -> (u32, u32) {
+    let (target_w, target_h) = legacy_truncated_dims(width_pts, height_pts, dpi);
+    let (pw, ph) = (width_pts as f32, height_pts as f32);
+    let mut scale = target_w as f32 / pw;
+    if ph * scale > target_h as f32 {
+        scale = target_h as f32 / ph;
+    }
+    ((pw * scale).round() as u32, (ph * scale).round() as u32)
 }
 
 /// Information about a PDF document, including page count and per-page metadata.
@@ -550,6 +690,24 @@ pub fn extract_page_image_dpi(
     page: u32,
     dpi: f64,
 ) -> Result<Raster, crate::codec::DecodeError> {
+    extract_page_image_dpi_with(path, page, dpi, PageSizing::Exact)
+}
+
+/// [`extract_page_image_dpi`] under an explicit [`PageSizing`].
+///
+/// [`extract_page_image_dpi`] is this at [`PageSizing::Exact`], the size
+/// libvips `pdfload[dpi=N]` gives. Without the `pdfium` feature the policy is
+/// moot and the call reports the same typed decode error.
+///
+/// # Errors
+///
+/// As [`extract_page_image_dpi`].
+pub fn extract_page_image_dpi_with(
+    path: &Path,
+    page: u32,
+    dpi: f64,
+    sizing: PageSizing,
+) -> Result<Raster, crate::codec::DecodeError> {
     #[cfg(feature = "pdfium")]
     {
         if page == 0 {
@@ -565,11 +723,11 @@ pub fn extract_page_image_dpi(
             )));
         }
         let dpi_u32 = dpi.round() as u32;
-        render_page_pdfium(path, page as usize, dpi_u32).map_err(pdf_to_decode)
+        render_page_pdfium_with(path, page as usize, dpi_u32, sizing).map_err(pdf_to_decode)
     }
     #[cfg(not(feature = "pdfium"))]
     {
-        let _ = (path, page, dpi);
+        let _ = (path, page, dpi, sizing);
         Err(decode_unavailable(
             "PDF rendering at a specified DPI (requires the `pdfium` feature)",
         ))
@@ -665,6 +823,7 @@ pub fn extract_page_image_with_background(
             page as usize,
             DEFAULT_BACKGROUND_RENDER_DPI,
             background,
+            PageSizing::Exact,
         )
         .map_err(pdf_to_decode)
     }
@@ -815,7 +974,7 @@ fn extract_encrypted_page_pdfium(
         .get(index)
         .map_err(|e| PdfError::Pdfium(e.to_string()))?;
     if needed_password {
-        render_pdfium_page_at_dpi(&pdf_page, PASSWORD_RENDER_DPI)
+        render_pdfium_page_at_dpi(&pdf_page, PASSWORD_RENDER_DPI, PageSizing::Exact)
     } else {
         largest_image_object_raster(&pdf_page, page)
     }
@@ -1892,21 +2051,40 @@ fn pdfium_bitmap_span(width: u32, height: u32) -> Result<usize, PdfError> {
     Ok(span as usize)
 }
 
+/// The render config that puts a page into a `width` x `height` bitmap.
+///
+/// [`PageSizing::Exact`] stretches the page into exactly that bitmap
+/// (`FPDF_RenderPageBitmap(bitmap, page, 0, 0, w, h, ..)`, the call libvips
+/// makes). [`PageSizing::LegacyTruncated`] keeps the 0.5.x aspect-fit.
+#[cfg(feature = "pdfium")]
+fn sized_config(
+    sizing: PageSizing,
+    width: u32,
+    height: u32,
+) -> pdfium_render::prelude::PdfRenderConfig {
+    use pdfium_render::prelude::*;
+    match sizing {
+        PageSizing::LegacyTruncated => PdfRenderConfig::new()
+            .set_target_width(width as i32)
+            .set_maximum_height(height as i32),
+        _ => PdfRenderConfig::new().set_fixed_size(width as i32, height as i32),
+    }
+}
+
 /// Render a page at the given pixel dimensions and return a Raster.
+/// `width` and `height` are the render target from
+/// [`PageSizing::render_target_dims`].
 #[cfg(feature = "pdfium")]
 pub(crate) fn render_at_size(
     pdf_page: &pdfium_render::prelude::PdfPage<'_>,
     width: u32,
     height: u32,
+    sizing: PageSizing,
 ) -> Result<Raster, PdfError> {
-    use pdfium_render::prelude::*;
-
     // Refuse renders whose bitmap buffer would overflow pdfium's i32 span (#148).
     pdfium_bitmap_span(width, height)?;
 
-    let config = PdfRenderConfig::new()
-        .set_target_width(width as i32)
-        .set_maximum_height(height as i32);
+    let config = sized_config(sizing, width, height);
 
     let bitmap = pdf_page
         .render_with_config(&config)
@@ -1958,15 +2136,12 @@ pub(crate) fn render_at_size_with_background(
     width: u32,
     height: u32,
     background: &[f64],
+    sizing: PageSizing,
 ) -> Result<Raster, PdfError> {
-    use pdfium_render::prelude::*;
-
     // Refuse renders whose bitmap buffer would overflow pdfium's i32 span (#148).
     pdfium_bitmap_span(width, height)?;
 
-    let config = PdfRenderConfig::new()
-        .set_target_width(width as i32)
-        .set_maximum_height(height as i32)
+    let config = sized_config(sizing, width, height)
         .set_clear_color(background_to_pdf_color(background))
         .clear_before_rendering(true);
 
@@ -1986,6 +2161,22 @@ pub(crate) fn render_at_size_with_background(
 /// **See also:** [interactive example](https://libviprs.org/cli/#flag-render)
 #[cfg(feature = "pdfium")]
 pub fn render_page_pdfium(path: &Path, page: usize, dpi: u32) -> Result<Raster, PdfError> {
+    render_page_pdfium_with(path, page, dpi, PageSizing::Exact)
+}
+
+/// [`render_page_pdfium`] under an explicit [`PageSizing`].
+///
+/// [`render_page_pdfium`] is this at [`PageSizing::Exact`], the libvips size.
+/// Pass [`PageSizing::LegacyTruncated`] for the sizes 0.5.x rendered.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-render)
+#[cfg(feature = "pdfium")]
+pub fn render_page_pdfium_with(
+    path: &Path,
+    page: usize,
+    dpi: u32,
+    sizing: PageSizing,
+) -> Result<Raster, PdfError> {
     reject_pages_beyond_pdfium_index(path)?;
     let pdfium = init_pdfium()?;
     let _lock = pdfium_lock();
@@ -1997,7 +2188,7 @@ pub fn render_page_pdfium(path: &Path, page: usize, dpi: u32) -> Result<Raster, 
         .get(index)
         .map_err(|e| PdfError::Pdfium(e.to_string()))?;
 
-    render_pdfium_page_at_dpi(&pdf_page, dpi)
+    render_pdfium_page_at_dpi(&pdf_page, dpi, sizing)
 }
 
 /// Open `path` through pdfium, with `password` when one is given.
@@ -2047,14 +2238,16 @@ fn load_pdfium_document<'a>(
 fn render_pdfium_page_at_dpi(
     pdf_page: &pdfium_render::prelude::PdfPage<'_>,
     dpi: u32,
+    sizing: PageSizing,
 ) -> Result<Raster, PdfError> {
-    let (width, height) = render_dims_within_budget(
-        pdf_page.width().value,
-        pdf_page.height().value,
+    let (width, height) = render_dims_within_budget_with(
+        f64::from(pdf_page.width().value),
+        f64::from(pdf_page.height().value),
         dpi,
+        sizing,
         DEFAULT_MAX_RENDER_PIXELS,
     )?;
-    render_at_size(pdf_page, width, height)
+    render_at_size(pdf_page, width, height, sizing)
 }
 
 /// Open a document `lopdf` could not read through pdfium, trying it with no
@@ -2094,6 +2287,7 @@ fn render_page_pdfium_with_background(
     page: usize,
     dpi: u32,
     background: &[f64],
+    sizing: PageSizing,
 ) -> Result<Raster, PdfError> {
     reject_pages_beyond_pdfium_index(path)?;
     let pdfium = init_pdfium()?;
@@ -2106,19 +2300,20 @@ fn render_page_pdfium_with_background(
         .get(index)
         .map_err(|e| PdfError::Pdfium(e.to_string()))?;
 
-    let (width, height) = render_dims_within_budget(
-        pdf_page.width().value,
-        pdf_page.height().value,
+    let (width, height) = render_dims_within_budget_with(
+        f64::from(pdf_page.width().value),
+        f64::from(pdf_page.height().value),
         dpi,
+        sizing,
         DEFAULT_MAX_RENDER_PIXELS,
     )?;
 
-    render_at_size_with_background(&pdf_page, width, height, background)
+    render_at_size_with_background(&pdf_page, width, height, background, sizing)
 }
 
 /// Compose the device matrix passed to `FPDF_RenderPageBitmapWithMatrix`
 /// for a strip starting at `y_offset` (display pixels down the page),
-/// rendered at `scale = dpi / 72.0`.
+/// rendered at `dpi`.
 ///
 /// The caller matrix is **not** where rotation is applied. pdfium's matrix
 /// render path composes this matrix on top of the page's own display matrix,
@@ -2134,11 +2329,28 @@ fn render_page_pdfium_with_background(
 /// double-applies the rotation and transposes/clips rotated pages — see the
 /// `rotation_libvips_pdfium_parity` regression test in libviprs-tests.
 ///
-/// Returns `[a, b, c, d, e, f] = [scale, 0, 0, scale, 0, -y_offset]`.
+/// Returns `[a, b, c, d, e, f] = [sx, 0, 0, sy, 0, -y_offset]`. The two scales
+/// are separate because an exact page size stretches each axis by its own
+/// factor (`px / pt` rounds differently on width and height); the legacy size
+/// uses one scale for both.
 #[cfg(feature = "pdfium")]
 #[must_use]
-pub(crate) fn strip_matrix(scale: f32, y_offset: u32) -> [f32; 6] {
-    [scale, 0.0, 0.0, scale, 0.0, -(y_offset as f32)]
+pub(crate) fn strip_matrix(sx: f32, sy: f32, y_offset: u32) -> [f32; 6] {
+    [sx, 0.0, 0.0, sy, 0.0, -(y_offset as f32)]
+}
+
+/// The per-axis scales that make a strip render the same pixels as the matching
+/// rows of a full-page render of `width` x `height` px: `px / pt` on each axis.
+///
+/// The issue worried that `FPDF_RenderPageBitmapWithMatrix` truncates the page
+/// box to whole points and would leave a blank band on a page like A3
+/// (841.89 pt). Measured on pdfium 8085, the display matrix it composes with is
+/// the identity scale, so the caller scale is exactly `px / pt` and every row
+/// matches; `a_fractional_page_fills_the_bitmap_to_the_edge_in_every_route`
+/// compares every row of A3 and A2 pages, ring edges included.
+#[cfg(feature = "pdfium")]
+pub(crate) fn exact_strip_scales(w_pt: f32, h_pt: f32, width: u32, height: u32) -> (f32, f32) {
+    (width as f32 / w_pt, height as f32 / h_pt)
 }
 
 /// Render a single horizontal strip of a PDF page directly via pdfium's
@@ -2190,16 +2402,16 @@ pub(crate) fn render_page_strip_with_page(
     dpi: u32,
     y_offset: u32,
     strip_height: u32,
+    sizing: PageSizing,
 ) -> Result<Raster, PdfError> {
     use pdfium_render::prelude::*;
 
-    let scale = dpi as f32 / 72.0;
     // Display-oriented dims; pdf_page.width()/height() return post-/Rotate
-    // values per `pdf.rs:376-379`.
+    // values.
     let display_w_pt = pdf_page.width().value;
     let display_h_pt = pdf_page.height().value;
-    let display_w_px = (display_w_pt * scale) as u32;
-    let display_h_px = (display_h_pt * scale) as u32;
+    let (display_w_px, display_h_px) =
+        sizing.render_target_dims(f64::from(display_w_pt), f64::from(display_h_pt), dpi);
 
     // Mirror cached-mode clamping (streaming.rs:341-346): if the requested
     // strip extends past the page, the bitmap is shorter; if it starts
@@ -2222,7 +2434,14 @@ pub(crate) fn render_page_strip_with_page(
             .map_err(PdfError::from);
     }
 
-    let [a, b, c, d, e, f] = strip_matrix(scale, y_offset);
+    let (sx, sy) = match sizing {
+        PageSizing::LegacyTruncated => {
+            let scale = dpi as f32 / 72.0;
+            (scale, scale)
+        }
+        _ => exact_strip_scales(display_w_pt, display_h_pt, display_w_px, display_h_px),
+    };
+    let [a, b, c, d, e, f] = strip_matrix(sx, sy, y_offset);
     let matrix = PdfMatrix::new(a, b, c, d, e, f);
 
     let config = PdfRenderConfig::new()
@@ -2278,6 +2497,23 @@ pub fn render_page_pdfium_budgeted(
     max_dpi: u32,
     max_pixels: u64,
 ) -> Result<BudgetRenderResult, PdfError> {
+    render_page_pdfium_budgeted_with(path, page, max_dpi, max_pixels, PageSizing::Exact)
+}
+
+/// [`render_page_pdfium_budgeted`] under an explicit [`PageSizing`].
+///
+/// The budget is checked against the size that will be rendered, so the DPI
+/// it picks always gives a raster of at most `max_pixels`, rounding included.
+///
+/// **See also:** [interactive example](https://libviprs.org/cli/#flag-render)
+#[cfg(feature = "pdfium")]
+pub fn render_page_pdfium_budgeted_with(
+    path: &Path,
+    page: usize,
+    max_dpi: u32,
+    max_pixels: u64,
+    sizing: PageSizing,
+) -> Result<BudgetRenderResult, PdfError> {
     reject_pages_beyond_pdfium_index(path)?;
     let pdfium = init_pdfium()?;
     let _lock = pdfium_lock();
@@ -2289,17 +2525,16 @@ pub fn render_page_pdfium_budgeted(
         .get(index)
         .map_err(|e| PdfError::Pdfium(e.to_string()))?;
 
-    let width_pts = pdf_page.width().value as f64;
-    let height_pts = pdf_page.height().value as f64;
+    let width_pts = f64::from(pdf_page.width().value);
+    let height_pts = f64::from(pdf_page.height().value);
 
     // Compute the DPI that fits within the pixel budget.
-    let (dpi_used, capped) = budgeted_render_dpi(width_pts, height_pts, max_dpi, max_pixels);
+    let (dpi_used, capped) =
+        budgeted_render_dpi_with(width_pts, height_pts, max_dpi, max_pixels, sizing);
 
-    let scale = dpi_used as f32 / 72.0;
-    let width = (width_pts as f32 * scale) as u32;
-    let height = (height_pts as f32 * scale) as u32;
+    let (width, height) = sizing.render_target_dims(width_pts, height_pts, dpi_used);
 
-    let raster = render_at_size(&pdf_page, width, height)?;
+    let raster = render_at_size(&pdf_page, width, height, sizing)?;
 
     Ok(BudgetRenderResult {
         raster,
@@ -2560,8 +2795,9 @@ mod tests {
     fn extract_page_image_with_password_renders_the_aes256_fixture() {
         let raster = extract_page_image_with_password(&password_fixture(), 1, "secret")
             .expect("the right password extracts the page");
-        // Rendered at the 72-DPI pdfload baseline, one pixel per point.
-        assert_eq!((raster.width(), raster.height()), (595, 841));
+        // Rendered at the 72-DPI pdfload baseline, one pixel per point, rounded
+        // to nearest like libvips (841.89 pt is 842 px).
+        assert_eq!((raster.width(), raster.height()), (595, 842));
         // The page is text on white, so a decrypted render has ink on it. A
         // render of undecrypted content streams would come back blank.
         assert!(
@@ -3364,7 +3600,22 @@ mod tests {
         // US Letter, 612 × 792 pt at 150 DPI.
         let (w, h) =
             render_dims_within_budget(612.0, 792.0, 150, DEFAULT_MAX_RENDER_PIXELS).unwrap();
-        // Matches the production `(pts * scale) as u32` truncation byte-for-byte.
+        // The libvips size: 792 pt * 150/72 is 1650 exactly, not 1649.9999.
+        assert_eq!((w, h), (1275, 1650));
+    }
+
+    /// The 0.5.x twin of `render_dims_within_budget_accepts_normal_page`: the
+    /// render target under `LegacyTruncated` is still the `f32` truncation.
+    #[test]
+    fn render_dims_within_budget_legacy_target_is_the_truncated_size() {
+        let (w, h) = render_dims_within_budget_with(
+            612.0,
+            792.0,
+            150,
+            PageSizing::LegacyTruncated,
+            DEFAULT_MAX_RENDER_PIXELS,
+        )
+        .unwrap();
         assert_eq!((w, h), (1275, 1649));
     }
 
@@ -3401,6 +3652,192 @@ mod tests {
         let (dpi_used, capped) = budgeted_render_dpi(612.0, 792.0, 300, DEFAULT_MAX_RENDER_PIXELS);
         assert_eq!(dpi_used, 300);
         assert!(!capped, "a page within budget must not be capped");
+    }
+
+    // -----------------------------------------------------------------
+    // #1199: page size in pixels follows libvips (`rint(pts * (dpi / 72.0))`).
+    //
+    // `PageSizing::pixel_dims` is the one function every render, probe and
+    // budget site calls, so these pin it without needing pdfium.
+    // -----------------------------------------------------------------
+
+    /// Page sizes in points as pdfium reports them: the MediaBox value
+    /// narrowed to `f32` and widened back, which is what `FPDF_GetPageWidth`
+    /// hands libvips.
+    const SIZE_TABLE: &[(&str, f64, f64)] = &[
+        ("Letter", 612.0, 792.0),
+        ("Legal", 612.0, 1008.0),
+        ("Tabloid", 792.0, 1224.0),
+        ("Tabloid landscape", 1224.0, 792.0),
+        ("ARCH A", 648.0, 864.0),
+        ("ARCH B", 864.0, 1296.0),
+        ("ARCH C", 1296.0, 1728.0),
+        ("ARCH D", 1728.0, 2592.0),
+        ("ARCH E", 2592.0, 3456.0),
+        ("ANSI D", 1584.0, 2448.0),
+        ("A4", 595.276, 841.89),
+        ("A3", 841.89, 1190.551),
+        ("A2", 1190.551, 1683.78),
+        ("A1", 1683.78, 2383.937),
+        ("A0", 2383.937, 3370.394),
+    ];
+
+    fn pdfium_pts(v: f64) -> f64 {
+        v as f32 as f64
+    }
+
+    /// The libvips rule, written out independently of `PageSizing`.
+    fn libvips_dims(w_pt: f64, h_pt: f64, dpi: u32) -> (u32, u32) {
+        let scale = dpi as f64 / 72.0;
+        (
+            (w_pt * scale).round_ties_even() as u32,
+            (h_pt * scale).round_ties_even() as u32,
+        )
+    }
+
+    #[test]
+    fn page_sizing_defaults_to_exact() {
+        assert_eq!(PageSizing::default(), PageSizing::Exact);
+    }
+
+    #[test]
+    fn page_sizing_exact_matches_the_libvips_formula_for_every_size_and_dpi() {
+        for &(name, w, h) in SIZE_TABLE {
+            let (w, h) = (pdfium_pts(w), pdfium_pts(h));
+            for dpi in [72, 96, 150, 300, 600] {
+                assert_eq!(
+                    PageSizing::Exact.pixel_dims(w, h, dpi),
+                    libvips_dims(w, h, dpi),
+                    "{name} at {dpi} dpi"
+                );
+            }
+        }
+    }
+
+    /// The sizes libvips 8.14.1 (poppler build) gives at 300 dpi, quoted from
+    /// the issue rather than computed.
+    #[test]
+    fn page_sizing_exact_pins_the_measured_libvips_sizes_at_300_dpi() {
+        let pinned: &[(&str, (u32, u32))] = &[
+            ("Letter", (2550, 3300)),
+            ("Tabloid", (3300, 5100)),
+            ("ARCH D", (7200, 10800)),
+            ("ANSI D", (6600, 10200)),
+            ("A4", (2480, 3508)),
+            ("A3", (3508, 4961)),
+            ("A2", (4961, 7016)),
+            ("A1", (7016, 9933)),
+            ("A0", (9933, 14043)),
+        ];
+        for &(name, want) in pinned {
+            let &(_, w, h) = SIZE_TABLE.iter().find(|(n, _, _)| *n == name).unwrap();
+            assert_eq!(
+                PageSizing::Exact.pixel_dims(pdfium_pts(w), pdfium_pts(h), 300),
+                want,
+                "{name} at 300 dpi"
+            );
+        }
+    }
+
+    /// `rint` rounds halves to even and `f64::round` does not, so a width that
+    /// lands exactly on .5 tells the two apart: 2.5 is 2 and 3.5 is 4.
+    #[test]
+    fn page_sizing_exact_rounds_halves_to_even() {
+        assert_eq!(PageSizing::Exact.pixel_dims(2.5, 3.5, 72), (2, 4));
+        assert_eq!(PageSizing::Exact.pixel_dims(1.25, 4.75, 144), (2, 10));
+    }
+
+    /// The size `LegacyTruncated` hands the renderer is the 0.5.x arithmetic:
+    /// the page size times `dpi as f32 / 72.0`, cut off at the decimal point.
+    #[test]
+    fn page_sizing_legacy_truncated_target_is_the_f32_truncation() {
+        for &(name, w, h) in SIZE_TABLE {
+            let (w, h) = (pdfium_pts(w), pdfium_pts(h));
+            for dpi in [72, 96, 150, 300, 600] {
+                let scale = dpi as f32 / 72.0;
+                assert_eq!(
+                    PageSizing::LegacyTruncated.render_target_dims(w, h, dpi),
+                    ((w as f32 * scale) as u32, (h as f32 * scale) as u32),
+                    "{name} at {dpi} dpi"
+                );
+            }
+        }
+    }
+
+    /// What 0.5.x rendered at 300 dpi on pdfium 8085, quoted from the issue:
+    /// the truncation and then pdfium's aspect-fit, so a pixel or two short
+    /// on both axes.
+    #[test]
+    fn page_sizing_legacy_truncated_gives_the_size_0_5_x_rendered() {
+        let rendered: &[(&str, (u32, u32))] = &[
+            ("Letter", (2549, 3299)),
+            ("Tabloid", (3299, 5098)),
+            ("ARCH D", (7199, 10799)),
+            ("A3", (3507, 4959)),
+            ("A1", (7015, 9932)),
+        ];
+        for &(name, want) in rendered {
+            let &(_, w, h) = SIZE_TABLE.iter().find(|(n, _, _)| *n == name).unwrap();
+            assert_eq!(
+                PageSizing::LegacyTruncated.pixel_dims(pdfium_pts(w), pdfium_pts(h), 300),
+                want,
+                "{name} at 300 dpi"
+            );
+        }
+    }
+
+    /// The two policies must actually disagree on Letter at 300 dpi, the case
+    /// the issue opens with.
+    #[test]
+    fn page_sizing_exact_and_legacy_differ_on_letter_at_300_dpi() {
+        assert_ne!(
+            PageSizing::Exact.pixel_dims(612.0, 792.0, 300),
+            PageSizing::LegacyTruncated.pixel_dims(612.0, 792.0, 300)
+        );
+    }
+
+    /// The budget is checked on the size that will be rendered. Letter at 300
+    /// dpi is 2550x3300 = 8_415_000 px exactly but 2549x3299 = 8_409_451 px
+    /// truncated, so a budget between the two must refuse it.
+    #[test]
+    fn render_dims_within_budget_checks_the_exact_dims() {
+        let ok = render_dims_within_budget(612.0, 792.0, 300, 8_415_000).unwrap();
+        assert_eq!(ok, (2550, 3300));
+        let over = render_dims_within_budget(612.0, 792.0, 300, 8_410_000);
+        assert!(
+            matches!(over, Err(PdfError::RenderBudgetExceeded { .. })),
+            "a page that only fit because of truncation must be refused, got {over:?}"
+        );
+    }
+
+    /// Rounding up can push the exact size past a budget the continuous
+    /// estimate fits: 100.6 pt at 72 dpi is 101 px, so 101x101 = 10_201 px
+    /// against a 10_150 px budget. `budgeted_render_dpi` has to step down.
+    #[test]
+    fn budgeted_render_dpi_steps_down_when_rounding_pushes_past_the_budget() {
+        let (dpi, capped) = budgeted_render_dpi(100.6, 100.6, 72, 10_150);
+        let (w, h) = PageSizing::Exact.pixel_dims(100.6, 100.6, dpi);
+        assert!(
+            u64::from(w) * u64::from(h) <= 10_150,
+            "{w}x{h} at {dpi} dpi is over the budget"
+        );
+        assert!(capped, "the dpi had to come down, so it counts as capped");
+    }
+
+    /// Whatever dpi the budget picks, the exact size at that dpi fits it.
+    #[test]
+    fn budgeted_render_dpi_result_always_fits_under_the_exact_dims() {
+        for &(name, w, h) in SIZE_TABLE {
+            let (w, h) = (pdfium_pts(w), pdfium_pts(h));
+            for budget in [250_000u64, 1_000_000, 8_415_000, 20_000_000, 100_000_000] {
+                let (dpi, _) = budgeted_render_dpi(w, h, 600, budget);
+                let (pw, ph) = PageSizing::Exact.pixel_dims(w, h, dpi);
+                assert!(
+                    dpi == 1 || u64::from(pw) * u64::from(ph) <= budget,
+                    "{name}: {pw}x{ph} at {dpi} dpi exceeds {budget}"
+                );
+            }
+        }
     }
 
     /// The zero-strip fill (`width × height × 4`) overflows `usize` for
@@ -3691,7 +4128,7 @@ mod tests {
     #[cfg(feature = "pdfium")]
     #[test]
     fn strip_matrix_full_page_is_scale_only() {
-        assert_eq!(strip_matrix(1.0, 0), [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+        assert_eq!(strip_matrix(1.0, 1.0, 0), [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
     }
 
     /// `scale` multiplies only the two diagonal terms; the off-diagonal
@@ -3699,7 +4136,7 @@ mod tests {
     #[cfg(feature = "pdfium")]
     #[test]
     fn strip_matrix_scale_only_touches_the_diagonal() {
-        assert_eq!(strip_matrix(2.5, 0), [2.5, 0.0, 0.0, 2.5, 0.0, 0.0]);
+        assert_eq!(strip_matrix(2.5, 2.5, 0), [2.5, 0.0, 0.0, 2.5, 0.0, 0.0]);
     }
 
     /// `y_offset` is a pure downward translation in the `f` term, bringing
@@ -3708,8 +4145,11 @@ mod tests {
     #[cfg(feature = "pdfium")]
     #[test]
     fn strip_matrix_y_offset_is_pure_translation() {
-        assert_eq!(strip_matrix(1.0, 50), [1.0, 0.0, 0.0, 1.0, 0.0, -50.0]);
-        assert_eq!(strip_matrix(3.0, 120), [3.0, 0.0, 0.0, 3.0, 0.0, -120.0]);
+        assert_eq!(strip_matrix(1.0, 1.0, 50), [1.0, 0.0, 0.0, 1.0, 0.0, -50.0]);
+        assert_eq!(
+            strip_matrix(3.0, 3.0, 120),
+            [3.0, 0.0, 0.0, 3.0, 0.0, -120.0]
+        );
     }
 
     /// `PageRotation::try_from_degrees` rejects non-multiples of 90 with

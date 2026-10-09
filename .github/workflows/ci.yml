@@ -148,7 +148,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.97
+      - uses: dtolnay/rust-toolchain@1.99
       - uses: Swatinem/rust-cache@v2
       # The number below is written out three times in this repository and
       # nothing compared the copies, so they drifted: the README badge said
@@ -301,8 +301,8 @@ jobs:
       # `${{ }}` expression.
       - name: Install the pinned libpdfium
         env:
-          PDFIUM_RELEASE: pdfium-8054
-          PDFIUM_SHA256: b42d1731f07fb73edea38cbd294afe9be4bdcf8e4ed8523de51cd5d12fc8d271
+          PDFIUM_RELEASE: pdfium-8085
+          PDFIUM_SHA256: ec671f549717c8c3e1642680cd834a9dbc580fb3c239bc3a426e9475166aaa63
         run: |
           set -euo pipefail
           curl -fsSL -o /tmp/pdfium.tgz "https://github.com/libviprs/libviprs-dep/releases/download/${PDFIUM_RELEASE}/pdfium-linux-x64.tgz"

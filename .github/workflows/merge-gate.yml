@@ -378,7 +378,7 @@ jobs:
       #
       # Since #1157 the crate doesn't call `fetch_update` at all. Stable 1.99
       # deprecated it too, and `AtomicU64::update`, stable since 1.95, does the
-      # same job on every toolchain from the 1.97 MSRV up. So the flag isn't
+      # same job on every toolchain from the 1.99 MSRV up. So the flag isn't
       # covering that call any more. It stays anyway, on purpose. This job
       # floats on `@nightly`, the next nightly-only deprecation of anything the
       # crate calls would stop Miri compiling again, and this workflow runs

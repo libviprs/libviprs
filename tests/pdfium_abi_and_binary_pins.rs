@@ -4,7 +4,7 @@
 //!
 //! `Cargo.toml` asks `pdfium-render` for `pdfium_7881`, which selects a whole
 //! generated binding set. Every place that installs a libpdfium installs
-//! **8054**. Those are two different PDFium milestones and until this guard
+//! **8085**. Those are two different PDFium milestones and until this guard
 //! there was nothing in the repository that held both numbers at once, so
 //! neither could be seen to disagree with the other.
 //!
@@ -17,7 +17,7 @@
 //!
 //! # Why the numbers still differ, and why that is not a bug to fix here
 //!
-//! `pdfium-render 0.9.4` cannot bind 8054. `pdfium_7881` is the newest ABI it
+//! `pdfium-render 0.9.4` cannot bind 8085. `pdfium_7881` is the newest ABI it
 //! ships and its own `pdfium_latest` is an alias for it, so requesting
 //! anything newer is not an option that exists. Checked three ways rather than
 //! taken from the issue: the published feature list for 0.9.4 stops at
@@ -26,47 +26,50 @@
 //! newest release (published 2026-09-06, confirmed 2026-09-14). A newer wrapper
 //! is the event that makes staying here a choice nobody made. The choice is to pin every
 //! libpdfium back to 7881 or to run the gap knowingly, and the binaries moved
-//! to 8054 deliberately (libviprs-tests#208, and this repo's image in #1012).
+//! to 8085 deliberately (libviprs-tests#208, this repo's image in #1012, and #1204).
 //! So the gap is real, it is currently the correct state, and what was missing
 //! is anything that notices when either half moves.
 //!
 //! # What makes the gap safe today, measured rather than assumed
 //!
 //! Both halves were checked against the actual artefacts, on `linux/arm64`,
-//! against the two `libviprs-dep` release tarballs the pins name. The 8054
+//! against the two `libviprs-dep` release tarballs the pins name. The 8085
 //! tarball's digest was confirmed against the one `tools/Dockerfile.ci`
 //! verifies, so this is the same binary CI installs and not a lookalike:
 //!
-//! * **Symbols.** `libpdfium.so` 7881 exports 635 `FUNC` symbols and 8054
-//!   exports 643. 8054 is a strict superset: nothing 7881 exported was
-//!   removed, and eight were added (`FORM_GetTextDirection`,
-//!   `FPDFBookmark_GetColor`, `FPDFPath_GetBezierControlPoints` and five
-//!   others). Every symbol `pdfium_7881.rs` declares therefore resolves.
+//! * **Suites.** Against the `pdfium-8085` tarball (the one `Dockerfile.ci`
+//!   and `ci.yml` verify by digest), with crates.io `pdfium-render 0.9.4` and
+//!   `pdfium_7881`, every pdfium suite passed on `linux/arm64` and
+//!   `linux/amd64` (#1204): the library tests, `pdfium_page_size_exact`, the
+//!   streaming, rotation and pyramid-parity suites, and the libvips parity
+//!   suites.
 //!
-//!   Seven of the 465 declared externs resolve in *neither* binary
+//! * **Symbols.** The `FPDF_*` functions the 7881 headers declare number 463
+//!   and the 8085 headers declare 474. 8085 is a strict superset: nothing 7881
+//!   declared was removed, and the 11 added ones are functions libviprs never
+//!   calls. Every symbol `pdfium_7881.rs` declares therefore resolves.
+//!
+//!   Some of the declared externs resolve in *neither* binary
 //!   (`FPDF_RenderPageSkia`, `FPDF_BStr_*`, `FPDF_GetRecommendedV8Flags` and
 //!   the rest). They are the Skia, XFA and V8 entry points, absent from both
 //!   standard builds, and `pdfium-render` only binds them behind
 //!   `pdfium_use_skia` / `pdfium_enable_xfa` / `pdfium_enable_v8`, none of
-//!   which this crate enables. Reading that as a 7881-versus-8054 finding
-//!   would be wrong, and the 7881 control is what says so: the number is
-//!   identical on both sides, so it is a property of the build flags and not
+//!   which this crate enables. That is a property of the build flags and not
 //!   of the milestone.
 //!
-//! * **Signatures and layouts.** Both tarballs ship PDFium's own 22 public
-//!   headers, so this is a real comparison and not an inference. Exactly one
-//!   declaration differs between them, and it is a struct rather than a
-//!   function: `FPDF_LIBRARY_CONFIG` gained `m_BrotliEnabled` (version 6) and
-//!   `m_IsolatePerDocument` (version 7). Nothing the bindings declare was
-//!   removed, and no surviving function changed its parameters or return type.
+//! * **Signatures and layouts.** Both tarballs ship PDFium's own public
+//!   headers, so this is a real comparison and not an inference. Nothing the
+//!   bindings declare was removed and no surviving function changed its
+//!   parameters or return type. The struct `FPDF_LIBRARY_CONFIG` gained two
+//!   trailing fields (`m_BrotliEnabled` at version 6, `m_IsolatePerDocument` at
+//!   version 7).
 //!
-//!   A struct that grew two trailing fields is the one thing here that could
-//!   corrupt rather than fail, because the Rust side allocates the shorter
-//!   7881 layout and hands the library a pointer to it. It does not, because
-//!   PDFium reads that struct by its leading `version` field and
-//!   `pdfium-render 0.9.4` sets `version: 2` (`src/config.rs:224`). The new
-//!   fields are gated at versions 6 and 7, so an 8054 library told it is
-//!   looking at a version 2 config never reads past `m_v8EmbedderSlot`.
+//!   A struct that grew trailing fields is the one thing here that could
+//!   corrupt rather than fail, because the Rust side would allocate the
+//!   shorter 7881 layout and hand the library a pointer to it. It does not,
+//!   because libviprs never passes that struct: `init_pdfium` calls plain
+//!   `FPDF_InitLibrary`, and PDFium reads the struct by its leading `version`
+//!   field in any case, which `pdfium-render 0.9.4` sets to 2.
 //!
 //! So the gap is safe for this pair, for reasons that are specific to this
 //! pair. Both of them stop holding the moment either number moves, which is
@@ -103,7 +106,7 @@ fn read(rel: &str) -> String {
 /// Whoever moves one has to come back here, redo the symbol-and-header
 /// comparison in the module docs above, and either record the new pair or
 /// delete this because the two finally converged.
-const DECLARED_GAP: Option<(&str, &str)> = Some(("7881", "8054"));
+const DECLARED_GAP: Option<(&str, &str)> = Some(("7881", "8085"));
 
 /// The `pdfium-render = { ... }` declaration from `Cargo.toml`, flattened.
 ///
@@ -129,7 +132,7 @@ fn pdfium_render_declaration() -> String {
 ///
 /// The separator is what tells the two kinds of pin apart and it is worth
 /// stating: a bindgen feature is `pdfium_7881` with an underscore and a
-/// release tag is `pdfium-8054` with a hyphen. Neither pattern can match the
+/// release tag is `pdfium-8085` with a hyphen. Neither pattern can match the
 /// other, so a file naming both (`README.md` does) reads correctly to both.
 ///
 /// This one returns an `Option` because its caller scans `README.md` line by
@@ -412,7 +415,7 @@ fn every_place_that_names_the_bindgen_abi_names_the_same_one() {
 /// the one somebody wrote down.
 ///
 /// This is the assertion #1017 asked for. Before it there was no file holding
-/// both numbers, so "7881 bindings against an 8054 binary" was not a state
+/// both numbers, so "7881 bindings against an 8085 binary" was not a state
 /// anything could be in disagreement about.
 #[test]
 #[cfg_attr(miri, ignore)] // reads files from the tree, and Miri isolates the filesystem

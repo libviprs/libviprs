@@ -578,7 +578,7 @@ impl MemoryTracker {
         //
         // This used to be `fetch_update`, which stable 1.99 deprecates in
         // favour of `try_update` and `update`. Both of those are stable since
-        // 1.95, so they build on the 1.97 MSRV too, and `update` is the one
+        // 1.95, so they build on the 1.99 MSRV too, and `update` is the one
         // that fits a closure that can't fail (#1157).
         let previous = self
             .current
