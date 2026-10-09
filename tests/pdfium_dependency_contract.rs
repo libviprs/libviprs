@@ -37,62 +37,50 @@ fn declaration() -> String {
     rest[..end].split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// The dependency resolves from crates.io, not from a git fork.
+/// On the `pdfium_latest` branch the dependency is the fork's `pdfium_8085`
+/// branch, and nothing else.
 ///
-/// The fork existed to carry per-call locking upstream had deleted. Upstream
-/// reinstated it, and what the fork still carries over the registry crate is
-/// nothing libviprs calls: `set_auto_apply_intrinsic_rotation` is reverted out
-/// at the pinned rev, `render_window_into_bitmap` has no call site here, and
-/// both of its safety fixes are duplicated by libviprs' own guards
-/// (`pdfium_page_index`, `pdfium_bitmap_span`).
-///
-/// The reason this is a guard rather than a preference: a git source is a
-/// second dependency wearing the same name. Whoever builds from git gets the
-/// fork, whoever installs from crates.io gets the registry crate, and only one
-/// of them is ever tested. That divergence is what libviprs#149 was about and
-/// what #981 inherited.
+/// pdfium-render 0.9.4 on crates.io tops out at `pdfium_7881`, so a build whose
+/// bindings match libviprs-dep's pdfium-8085 has to come from the
+/// libviprs/pdfium-render `pdfium_8085` branch (libviprs#1197). A git source is
+/// a second dependency wearing the same name, which is why `main` forbids one,
+/// and why this branch cannot be published: `.github/workflows/publish.yml`
+/// still refuses a git source, and that refusal is the point. Publishing waits
+/// until upstream pdfium-render carries 8085.
 #[test]
 #[cfg_attr(miri, ignore)] // reads Cargo.toml, and Miri isolates the filesystem
-fn pdfium_render_comes_from_the_registry() {
+fn pdfium_render_comes_from_the_pdfium_8085_fork_branch() {
     let decl = declaration();
     assert!(
-        !decl.contains("git ="),
-        "pdfium-render is declared with a git source, so a crates.io consumer \
-         and a git consumer get different code under one name. The declaration \
-         reads: {decl}"
+        decl.contains("git = \"https://github.com/libviprs/pdfium-render\""),
+        "pdfium-render has to come from the libviprs fork on this branch: {decl}"
+    );
+    assert!(
+        decl.contains("branch = \"pdfium_8085\""),
+        "pdfium-render has to track the fork's pdfium_8085 branch: {decl}"
     );
     assert!(
         !decl.contains("rev ="),
-        "pdfium-render is pinned to a git rev: {decl}"
+        "pdfium-render is pinned to a git rev, not the branch: {decl}"
     );
 }
 
-/// The floor admits only versions whose `thread_safe` actually serialises.
+/// A git source carries no version floor, so the floor is the branch itself.
 ///
-/// This is the only thing protecting a published consumer. `^0.9` lets them
-/// resolve 0.9.0, and nothing in that range is yanked. A lockfile, a
-/// `--precise`, a vendor bundle or a sibling crate requiring `<0.9.4` all land
-/// there while the manifest says it is fine.
+/// The fork's `pdfium_8085` branch is upstream 0.9.4 plus our fixes, and its
+/// `thread_safe` serialises every method. Anything older than 0.9.4 gates a
+/// bare `unsafe impl Send + Sync` with nothing behind it, so the branch has to
+/// declare a version of 0.9.4 or later in its own manifest, which the fork's
+/// guard pins. Here we only require that the declaration names no `version`
+/// that could fall back to the registry.
 #[test]
 #[cfg_attr(miri, ignore)] // reads Cargo.toml, and Miri isolates the filesystem
-fn the_floor_excludes_every_release_with_no_serialisation() {
+fn the_declaration_has_no_registry_fallback() {
     let decl = declaration();
-    let version = decl
-        .split("version = \"")
-        .nth(1)
-        .and_then(|s| s.split('"').next())
-        .expect("a version requirement");
-    let floor = version.trim_start_matches(['^', '=', '>', ' ']);
-    let parts: Vec<u64> = floor.split('.').map(|p| p.parse().unwrap_or(0)).collect();
     assert!(
-        parts.len() >= 3,
-        "the requirement is {version:?}, which has no patch component, so it \
-         admits 0.9.0 through 0.9.3. Those ship a `thread_safe` that gates \
-         `unsafe impl Send + Sync` with nothing behind it."
-    );
-    assert!(
-        (parts[0], parts[1], parts[2]) >= (0, 9, 4),
-        "the requirement is {version:?} and the floor has to be at least 0.9.4"
+        !decl.contains("version ="),
+        "a `version` beside a git source is two dependencies under one name \
+         (#149, #981): {decl}"
     );
 }
 
@@ -118,7 +106,7 @@ fn the_libpdfium_abi_is_pinned_explicitly() {
         !decl.contains("pdfium_latest"),
         "pdfium_latest is a floating alias; name the milestone instead: {decl}"
     );
-    let named = decl.contains("pdfium_7881");
+    let named = decl.contains("pdfium_8085");
     assert!(
         named,
         "no `pdfium_XXXX` feature is named, so nothing says which libpdfium ABI \

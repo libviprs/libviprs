@@ -95,7 +95,7 @@ fn root_workspace_contains_both_crates() {
 /// tested. That split is what #149 was about and what #981 closed.
 #[test]
 #[cfg_attr(miri, ignore)] // filesystem access blocked by Miri isolation
-fn workspace_lockfile_resolves_pdfium_render_from_the_registry() {
+fn workspace_lockfile_resolves_pdfium_render_from_the_fork_pdfium_8085_branch() {
     let lock = std::fs::read_to_string(repo_root().join("Cargo.lock"))
         .expect("workspace Cargo.lock must exist at the repo root");
 
@@ -120,14 +120,11 @@ fn workspace_lockfile_resolves_pdfium_render_from_the_registry() {
     );
     let source = source_lines[0];
     assert!(
-        source.contains("registry+https://github.com/rust-lang/crates.io-index"),
-        "pdfium-render must resolve from crates.io, not from a git fork \
-         (libviprs#981): a git source does not survive `cargo publish`, so it \
-         makes the crate everyone builds different from the crate everyone \
-         installs. Got: {source}"
-    );
-    assert!(
-        !source.contains("git+"),
-        "pdfium-render resolves from a git source: {source}"
+        source.starts_with(
+            "source = \"git+https://github.com/libviprs/pdfium-render?branch=pdfium_8085#"
+        ),
+        "on the pdfium_latest branch pdfium-render must resolve from the \
+         libviprs fork's pdfium_8085 branch (libviprs#1197), because crates.io \
+         stops at pdfium_7881. Got: {source}"
     );
 }

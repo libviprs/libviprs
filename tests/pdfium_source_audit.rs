@@ -57,8 +57,8 @@ fn audit_gate_accepts_this_crate() {
         "audit gate rejected this crate.\nstdout: {stdout}\nstderr: {stderr}"
     );
     assert!(
-        stdout.contains("crates.io"),
-        "audit gate did not confirm a registry source.\nstdout: {stdout}"
+        stdout.contains("pdfium_8085"),
+        "audit gate did not confirm the fork's pdfium_8085 branch.\nstdout: {stdout}"
     );
 }
 
@@ -109,7 +109,7 @@ fn audit_gate_rejects_a_consumer_still_pinning_the_fork() {
 
 #[test]
 #[cfg_attr(miri, ignore)] // spawns a process, which Miri supports on no target (#714)
-fn patchless_downstream_consumer_resolves_the_same_crate_we_do() {
+fn patchless_downstream_consumer_resolves_the_same_fork_branch_we_do() {
     // Issue #149 part 2, inverted by #981. The question has not changed: does a
     // downstream crate that depends on libviprs with no `[patch.crates-io]` of
     // its own end up on the same `pdfium-render` libviprs itself builds? The
@@ -157,9 +157,9 @@ fn patchless_downstream_consumer_resolves_the_same_crate_we_do() {
          {stdout}\nstderr: {stderr}"
     );
     assert!(
-        stdout.contains("crates.io"),
-        "audit did not confirm a registry source for the downstream consumer, \
-         so the consumer and libviprs are on different code again.\nstdout: \
-         {stdout}"
+        stdout.contains("pdfium_8085"),
+        "audit did not confirm the fork's pdfium_8085 branch for the downstream \
+         consumer, so the consumer and libviprs are on different code again.\n\
+         stdout: {stdout}"
     );
 }

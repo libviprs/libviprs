@@ -152,7 +152,7 @@ jobs:
           fi
 
           case "$feats" in
-            *pdfium_7881*) ;;
+            *pdfium_8085*) ;;
             *) fail "no pdfium_XXXX feature is named (features: $feats). Inheriting pdfium_latest lets a wrapper patch release swap the whole bindgen ABI under a libpdfium this project pins separately, and a changed signature on a kept symbol is silent rather than a link error." ;;
           esac
           if [ "$uses_default" != "false" ]; then

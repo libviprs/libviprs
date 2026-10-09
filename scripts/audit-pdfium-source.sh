@@ -30,7 +30,8 @@
 #   scripts/audit-pdfium-source.sh [MANIFEST_DIR] [-- <extra cargo metadata args>]
 #
 # MANIFEST_DIR defaults to the current directory. Exit status:
-#   0  pdfium-render resolves from the crates.io registry (or is absent).
+#   0  pdfium-render resolves from the crates.io registry, from the fork's
+#      pdfium_8085 branch (the pdfium_latest branch only), or is absent.
 #   1  pdfium-render resolves from somewhere else, usually a git fork.
 #   2  usage / tooling error.
 
@@ -75,6 +76,14 @@ case "$source_field" in
     exit 0 ;;
   registry+*crates.io*)
     echo "audit-pdfium-source: OK — pdfium-render resolves from crates.io:"
+    echo "  $source_field"
+    exit 0 ;;
+  git+*"$FORK_HOST"*"branch=pdfium_8085"*)
+    # The pdfium_latest branch builds against the fork's pdfium_8085 branch,
+    # because crates.io's pdfium-render stops at pdfium_7881 (libviprs#1197).
+    # It is the one fork source this gate accepts, and it makes the crate
+    # unpublishable: publish.yml still refuses a git source.
+    echo "audit-pdfium-source: OK — pdfium-render resolves from the fork's pdfium_8085 branch:"
     echo "  $source_field"
     exit 0 ;;
   git+*"$FORK_HOST"*)

@@ -87,12 +87,16 @@ fn unreleased(changelog: &str) -> &str {
 /// is right for a mistyped heading and wrong for a release, and a release was
 /// the one shape it could not observe. Cutting 0.5.0 is what surfaced it.
 ///
-/// So: take `Unreleased` when it carries a `### Breaking` section, and the
-/// released section immediately below it when it does not. `unreleased` itself
+/// So: take `Unreleased` when it carries a `### Breaking` section and a
+/// preamble that names issues, and the released section immediately below it
+/// when it does not. The preamble is what makes `Unreleased` the release notes
+/// this guard is about: a first breaking entry filed between two cuts (issue
+/// #1199) has nothing to summarise yet, and the controls below read a handful
+/// of entries as "the parse broke". `unreleased` itself
 /// is left alone, because two controls pin its exact boundary behaviour.
 fn release_notes(changelog: &str) -> &str {
     let block = unreleased(changelog);
-    if block.contains("\n### Breaking\n") {
+    if block.contains("\n### Breaking\n") && !issue_numbers(preamble(block)).is_empty() {
         return block;
     }
     let start = changelog

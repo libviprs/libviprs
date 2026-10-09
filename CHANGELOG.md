@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+
+- **A PDF page rendered at a DPI is the size libvips gives, not 0 to 2 px
+  smaller** (issue #1199). The raster is now `rint(points * (dpi / 72.0))`
+  per axis, computed in `f64` with ties to even, and pdfium stretches the page
+  into a bitmap of exactly that size, the same call libvips makes. Letter at
+  300 dpi is 2550x3300 (it was 2549x3299), A3 is 3508x4961 (3507x4959), ARCH D
+  is 7200x10800 (7199x10799). Before, the size was the page times
+  `dpi as f32 / 72.0` cut off at the decimal point, which loses a pixel when
+  the product lands a hair under a whole number, and then pdfium's
+  aspect-fit rounded a second time and pulled the other axis down with it.
+  `render_page_pdfium`, `render_page_pdfium_budgeted`, `extract_page_image_dpi`
+  and all four `PdfiumStripSource` constructors change, and so do the
+  numbers `PdfiumStripSource::width()` and `height()` report, so the cached and
+  streaming modes now agree with each other and with a planner that uses the
+  same rule. The pixel budget is checked on the new size, so a page that only
+  fit because of the truncation can now come back as `RenderBudgetExceeded`,
+  and `render_page_pdfium_budgeted` steps the DPI down until the rounded size
+  fits. Strips are scaled per axis (`px / pt`), so a streamed strip is the
+  same pixels as the matching rows of a cached render.
+
+  The new `PageSizing` enum (`#[non_exhaustive]`, `Exact` by default) names
+  the rule, and `PageSizing::pixel_dims(width_pts, height_pts, dpi)` is the one
+  function every site calls. `PageSizing::LegacyTruncated` runs the old
+  pipeline as it was. The old function names delegate at `Exact`;
+  `render_page_pdfium_with`, `render_page_pdfium_budgeted_with` and
+  `extract_page_image_dpi_with` take the policy, and
+  `PdfiumStripSource::builder(..).sizing(..)` does the same for a strip source
+  (`PdfiumStripSource::sizing()` reads it back). `MIGRATION.md` has the recipe
+  for keeping the old sizes. UserUnit is still ignored, as in pdfium, libvips
+  and pdftoppm, and a fractional DPI still rounds to a whole one.
+
 ### Changed
 
 - **The minimum supported Rust version is 1.99, up from 1.97** (issue #1200).
