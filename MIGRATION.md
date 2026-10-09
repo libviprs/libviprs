@@ -156,7 +156,7 @@ all of them. `PixelFormat` is now public and re-exported at the crate root.
 | `tracing` | off | Structured spans/events |
 | `packfile` | off | `PackfileSink` (write tiles into a tar/zip), now with `PackfileSinkBuilder` |
 
-`default = []`, so no features are enabled by default. MSRV is 1.97, edition
+`default = []`, so no features are enabled by default. MSRV is 1.99, edition
 2024. That number is `rust-version` in `Cargo.toml` and
 `tests/crate_doc_matches_the_crate.rs` holds both files to it; this line named a
 floor three minor versions under the manifest's for as long as nothing checked
@@ -649,3 +649,57 @@ This is unrelated to `BandError::UnsupportedSampleKind`,
 `ExtractError::UnsupportedSampleKind`, `JxlError::UnsupportedSampleKind` and
 `MosaicError::UnsupportedSampleKind`, which live on different enums and are
 not going anywhere.
+
+# Migrating from libviprs 0.5 to the next release
+
+## A rendered PDF page is the size libvips gives
+
+A PDF page rendered at a DPI used to come out 0 to 2 px smaller than the page
+at that DPI, and by how much depended on the page size (issue #1199). Now the
+raster is `rint(points * (dpi / 72.0))` per axis, which is what libvips
+`pdfload[dpi=N]` gives, and the page is stretched into a bitmap of exactly
+that size. At 300 dpi:
+
+| Page | 0.5.x | now |
+| --- | --- | --- |
+| Letter | 2549x3299 | 2550x3300 |
+| Tabloid | 3299x5098 | 3300x5100 |
+| ARCH D | 7199x10799 | 7200x10800 |
+| A3 | 3507x4959 | 3508x4961 |
+| A1 | 7015x9932 | 7016x9933 |
+
+You only need to do something if you have output on disk at the old sizes (a
+pyramid or an archive planned from a 0.5.x raster) and you will add to it or
+re-render part of it. Everything that reads a finished tree or archive keeps
+working, because those describe their own size.
+
+To keep rendering the old sizes, pass the policy:
+
+```rust
+use libviprs::{PageSizing, PdfiumStripSource, render_page_pdfium_with};
+
+// Before: render_page_pdfium(path, 1, 300)
+let raster = render_page_pdfium_with(path, 1, 300, PageSizing::LegacyTruncated)?;
+
+// Before: PdfiumStripSource::new_streaming(path, 1, 300)
+let source = PdfiumStripSource::builder(path, 1, 300)
+    .mode(libviprs::PdfiumRenderMode::Streaming)
+    .sizing(PageSizing::LegacyTruncated)
+    .build()?;
+```
+
+`render_page_pdfium_budgeted_with` and `extract_page_image_dpi_with` take the
+same argument. `PageSizing::LegacyTruncated.pixel_dims(w_pts, h_pts, dpi)`
+gives the size 0.5.x rendered, so a planner that needs the old numbers can
+ask for them. One difference carries over from 0.5.x: a cached
+`PdfiumStripSource` reported the raster it rendered, and a streaming one
+reported the truncated size before pdfium's aspect-fit, which can be a pixel
+larger. `LegacyTruncated` keeps both.
+
+If you planned the pyramid yourself in `f64` (iasbuilt/server did), the
+`Exact` size is what you were computing, give or take the rounding, so the
+mismatch error `plan describes 3300x5100 but source is 3299x5098` goes away
+without any change on your side. `PageSizing::Exact.pixel_dims` is the
+function to plan with.
+
+`PageSizing` is `#[non_exhaustive]`, so a `match` on it needs a wildcard arm.

@@ -7,7 +7,7 @@
 <p align="center">
   <a href="https://github.com/libviprs/libviprs/actions/workflows/ci.yml"><img src="https://github.com/libviprs/libviprs/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://github.com/libviprs/libviprs/actions/workflows/merge-gate.yml"><img src="https://github.com/libviprs/libviprs/actions/workflows/merge-gate.yml/badge.svg" alt="Merge Gate"></a>
-  <img src="https://img.shields.io/badge/rust-1.97%2B-orange?logo=rust" alt="Rust 1.97+">
+  <img src="https://img.shields.io/badge/rust-1.99%2B-orange?logo=rust" alt="Rust 1.99+">
   <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License">
 </p>
 
@@ -324,7 +324,7 @@ from here for exactly one commit.
 
 ## Requirements
 
-- Rust 1.97+ (edition 2024)
+- Rust 1.99+ (edition 2024)
 - libpdfium shared library (only if using the `pdfium` feature)
 
 ### PDFium setup
@@ -334,11 +334,11 @@ The `pdfium` feature requires `libpdfium.so` at runtime. Pre-compiled binaries b
 ```bash
 # x86_64
 curl -L -o pdfium.tgz \
-  https://github.com/libviprs/libviprs-dep/releases/download/pdfium-8054/pdfium-linux-x64.tgz
+  https://github.com/libviprs/libviprs-dep/releases/download/pdfium-8085/pdfium-linux-x64.tgz
 
 # arm64
 curl -L -o pdfium.tgz \
-  https://github.com/libviprs/libviprs-dep/releases/download/pdfium-8054/pdfium-linux-arm64.tgz
+  https://github.com/libviprs/libviprs-dep/releases/download/pdfium-8085/pdfium-linux-arm64.tgz
 
 # Extract and install
 tar xzf pdfium.tgz
@@ -346,18 +346,18 @@ sudo cp pdfium-linux-*/lib/libpdfium.so /usr/local/lib/
 sudo ldconfig
 ```
 
-`pdfium-8054` is what CI installs and what `libviprs-tests` pins, so these
+`pdfium-8085` is what CI installs and what `libviprs-tests` pins, so these
 instructions reproduce what the suite runs. One caveat worth knowing rather than
 discovering: the crate requests `pdfium-render`'s `pdfium_7881` feature, which
 selects the bindgen set, so the bindings and the library are a version apart.
 `pdfium-render 0.9.4` offers no newer ABI (`pdfium_latest = ["pdfium_7881"]`), so
 there is nothing to move to yet.
 
-That gap is measured rather than tolerated on trust. The 8054 library exports a
-strict superset of 7881's symbols, so every binding resolves, and the only
-declaration that differs between the two builds' public headers is
-`FPDF_LIBRARY_CONFIG`, which gained two trailing fields that PDFium reads only
-at config versions 6 and 7 while `pdfium-render` sets version 2.
+That gap is measured rather than tolerated on trust. Every pdfium suite passes
+against the 8085 library on arm64 and x64. The 7881 to 8085 public headers add
+11 functions that libviprs never calls, and the one changed declaration is
+`FPDF_LIBRARY_CONFIG`, which gained two trailing fields that libviprs never
+passes because it initialises pdfium with plain `FPDF_InitLibrary`.
 `tests/pdfium_abi_and_binary_pins.rs` records the pair and fails if either half
 moves, so the next person to bump one has to redo that comparison rather than
 inherit this paragraph.
@@ -451,7 +451,7 @@ make loom     # `loom_tests`, which is the Loom job's first invocation of two
 
 > **Prerequisites:** `make ci` needs Docker running and PyYAML (`pip3 install pyyaml`).
 > Budget disk for it: the whole job list compiles ten clippy feature permutations,
-> nine test ones and seven more under the 1.97 toolchain, and each gets its own
+> nine test ones and seven more under the 1.99 toolchain, and each gets its own
 > artifact set on the `libviprs-ci-cargo` volume rather than replacing the last.
 > `make miri` requires a nightly toolchain with the miri component, at or above this
 > crate's MSRV; the `Makefile` pins a dated one and explains why.

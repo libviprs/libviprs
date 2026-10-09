@@ -86,7 +86,7 @@ test:
 ## The nightly `make miri` uses. It is a dated toolchain rather than the
 ## floating `nightly` on purpose, and the reason is the whole of #675's first
 ## review finding: bare `+nightly` on this machine resolves to 1.96.0-nightly
-## (2026-03-13), which is *below* the crate's 1.97 MSRV, so cargo refuses to
+## (2026-03-13), which is *below* the crate's 1.99 MSRV, so cargo refuses to
 ## build before Miri is ever reached. The workflow file used to carry a comment
 ## saying Miri "cannot run on the dev machine" for exactly that reason, and
 ## replacing that sentence with "it runs again" while leaving the recipe on
