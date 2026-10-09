@@ -229,6 +229,32 @@ impl PageRotation {
     }
 }
 
+/// How a PDF page's size in points becomes a raster size in pixels.
+///
+/// Placeholder for #1199: both variants still return the 0.5.x truncated
+/// value, so the red tests for the exact libvips rule fail on assertions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
+pub enum PageSizing {
+    /// The libvips size, `rint(points * (dpi / 72.0))` in f64.
+    #[default]
+    Exact,
+    /// The 0.5.x size: f32 truncation, then pdfium's aspect-fit.
+    LegacyTruncated,
+}
+
+impl PageSizing {
+    /// Pixel size of a `width_pts` x `height_pts` page at `dpi`.
+    #[must_use]
+    pub fn pixel_dims(self, width_pts: f64, height_pts: f64, dpi: u32) -> (u32, u32) {
+        let scale = dpi as f32 / 72.0;
+        (
+            (width_pts as f32 * scale) as u32,
+            (height_pts as f32 * scale) as u32,
+        )
+    }
+}
+
 /// Information about a PDF document, including page count and per-page metadata.
 ///
 /// Returned by [`pdf_info`]. Use this to inspect a PDF before deciding whether
@@ -3327,6 +3353,179 @@ mod tests {
         let (dpi_used, capped) = budgeted_render_dpi(612.0, 792.0, 300, DEFAULT_MAX_RENDER_PIXELS);
         assert_eq!(dpi_used, 300);
         assert!(!capped, "a page within budget must not be capped");
+    }
+
+    // -----------------------------------------------------------------
+    // #1199: page size in pixels follows libvips (`rint(pts * (dpi / 72.0))`).
+    //
+    // `PageSizing::pixel_dims` is still a placeholder that returns the 0.5.x
+    // truncated value, so everything below that asks for the exact size is red
+    // until the fix lands.
+    // -----------------------------------------------------------------
+
+    /// Page sizes in points as pdfium reports them: the MediaBox value
+    /// narrowed to `f32` and widened back, which is what `FPDF_GetPageWidth`
+    /// hands libvips.
+    const SIZE_TABLE: &[(&str, f64, f64)] = &[
+        ("Letter", 612.0, 792.0),
+        ("Legal", 612.0, 1008.0),
+        ("Tabloid", 792.0, 1224.0),
+        ("Tabloid landscape", 1224.0, 792.0),
+        ("ARCH A", 648.0, 864.0),
+        ("ARCH B", 864.0, 1296.0),
+        ("ARCH C", 1296.0, 1728.0),
+        ("ARCH D", 1728.0, 2592.0),
+        ("ARCH E", 2592.0, 3456.0),
+        ("ANSI D", 1584.0, 2448.0),
+        ("A4", 595.276, 841.89),
+        ("A3", 841.89, 1190.551),
+        ("A2", 1190.551, 1683.78),
+        ("A1", 1683.78, 2383.937),
+        ("A0", 2383.937, 3370.394),
+    ];
+
+    fn pdfium_pts(v: f64) -> f64 {
+        v as f32 as f64
+    }
+
+    /// The libvips rule, written out independently of `PageSizing`.
+    fn libvips_dims(w_pt: f64, h_pt: f64, dpi: u32) -> (u32, u32) {
+        let scale = dpi as f64 / 72.0;
+        (
+            (w_pt * scale).round_ties_even() as u32,
+            (h_pt * scale).round_ties_even() as u32,
+        )
+    }
+
+    #[test]
+    fn page_sizing_defaults_to_exact() {
+        assert_eq!(PageSizing::default(), PageSizing::Exact);
+    }
+
+    #[test]
+    fn page_sizing_exact_matches_the_libvips_formula_for_every_size_and_dpi() {
+        for &(name, w, h) in SIZE_TABLE {
+            let (w, h) = (pdfium_pts(w), pdfium_pts(h));
+            for dpi in [72, 96, 150, 300, 600] {
+                assert_eq!(
+                    PageSizing::Exact.pixel_dims(w, h, dpi),
+                    libvips_dims(w, h, dpi),
+                    "{name} at {dpi} dpi"
+                );
+            }
+        }
+    }
+
+    /// The sizes libvips 8.14.1 (poppler build) gives at 300 dpi, quoted from
+    /// the issue rather than computed.
+    #[test]
+    fn page_sizing_exact_pins_the_measured_libvips_sizes_at_300_dpi() {
+        let pinned: &[(&str, (u32, u32))] = &[
+            ("Letter", (2550, 3300)),
+            ("Tabloid", (3300, 5100)),
+            ("ARCH D", (7200, 10800)),
+            ("ANSI D", (6600, 10200)),
+            ("A4", (2480, 3508)),
+            ("A3", (3508, 4961)),
+            ("A2", (4961, 7016)),
+            ("A1", (7016, 9933)),
+            ("A0", (9933, 14043)),
+        ];
+        for &(name, want) in pinned {
+            let &(_, w, h) = SIZE_TABLE.iter().find(|(n, _, _)| *n == name).unwrap();
+            assert_eq!(
+                PageSizing::Exact.pixel_dims(pdfium_pts(w), pdfium_pts(h), 300),
+                want,
+                "{name} at 300 dpi"
+            );
+        }
+    }
+
+    /// `rint` rounds halves to even and `f64::round` does not, so a width that
+    /// lands exactly on .5 tells the two apart: 2.5 is 2 and 3.5 is 4.
+    #[test]
+    fn page_sizing_exact_rounds_halves_to_even() {
+        assert_eq!(PageSizing::Exact.pixel_dims(2.5, 3.5, 72), (2, 4));
+        assert_eq!(PageSizing::Exact.pixel_dims(1.25, 4.75, 144), (2, 10));
+    }
+
+    /// `LegacyTruncated` keeps the 0.5.x numbers: the page size times
+    /// `dpi as f32 / 72.0`, cut off at the decimal point.
+    #[test]
+    fn page_sizing_legacy_truncated_keeps_the_0_5_x_sizes() {
+        for &(name, w, h) in SIZE_TABLE {
+            let (w, h) = (pdfium_pts(w), pdfium_pts(h));
+            for dpi in [72, 96, 150, 300, 600] {
+                let scale = dpi as f32 / 72.0;
+                assert_eq!(
+                    PageSizing::LegacyTruncated.pixel_dims(w, h, dpi),
+                    ((w as f32 * scale) as u32, (h as f32 * scale) as u32),
+                    "{name} at {dpi} dpi"
+                );
+            }
+        }
+        assert_eq!(
+            PageSizing::LegacyTruncated.pixel_dims(612.0, 792.0, 300),
+            (2550, 3299)
+        );
+        assert_eq!(
+            PageSizing::LegacyTruncated.pixel_dims(612.0, 792.0, 150),
+            (1275, 1649)
+        );
+    }
+
+    /// The two policies must actually disagree on Letter at 300 dpi, the case
+    /// the issue opens with.
+    #[test]
+    fn page_sizing_exact_and_legacy_differ_on_letter_at_300_dpi() {
+        assert_ne!(
+            PageSizing::Exact.pixel_dims(612.0, 792.0, 300),
+            PageSizing::LegacyTruncated.pixel_dims(612.0, 792.0, 300)
+        );
+    }
+
+    /// The budget is checked on the size that will be rendered. Letter at 300
+    /// dpi is 2550x3300 = 8_415_000 px exactly but 2549x3299 = 8_409_451 px
+    /// truncated, so a budget between the two must refuse it.
+    #[test]
+    fn render_dims_within_budget_checks_the_exact_dims() {
+        let ok = render_dims_within_budget(612.0, 792.0, 300, 8_415_000).unwrap();
+        assert_eq!(ok, (2550, 3300));
+        let over = render_dims_within_budget(612.0, 792.0, 300, 8_410_000);
+        assert!(
+            matches!(over, Err(PdfError::RenderBudgetExceeded { .. })),
+            "a page that only fit because of truncation must be refused, got {over:?}"
+        );
+    }
+
+    /// Rounding up can push the exact size past a budget the continuous
+    /// estimate fits: 100.6 pt at 72 dpi is 101 px, so 101x101 = 10_201 px
+    /// against a 10_150 px budget. `budgeted_render_dpi` has to step down.
+    #[test]
+    fn budgeted_render_dpi_steps_down_when_rounding_pushes_past_the_budget() {
+        let (dpi, capped) = budgeted_render_dpi(100.6, 100.6, 72, 10_150);
+        let (w, h) = PageSizing::Exact.pixel_dims(100.6, 100.6, dpi);
+        assert!(
+            u64::from(w) * u64::from(h) <= 10_150,
+            "{w}x{h} at {dpi} dpi is over the budget"
+        );
+        assert!(capped, "the dpi had to come down, so it counts as capped");
+    }
+
+    /// Whatever dpi the budget picks, the exact size at that dpi fits it.
+    #[test]
+    fn budgeted_render_dpi_result_always_fits_under_the_exact_dims() {
+        for &(name, w, h) in SIZE_TABLE {
+            let (w, h) = (pdfium_pts(w), pdfium_pts(h));
+            for budget in [250_000u64, 1_000_000, 8_415_000, 20_000_000, 100_000_000] {
+                let (dpi, _) = budgeted_render_dpi(w, h, 600, budget);
+                let (pw, ph) = PageSizing::Exact.pixel_dims(w, h, dpi);
+                assert!(
+                    dpi == 1 || u64::from(pw) * u64::from(ph) <= budget,
+                    "{name}: {pw}x{ph} at {dpi} dpi exceeds {budget}"
+                );
+            }
+        }
     }
 
     /// The zero-strip fill (`width × height × 4`) overflows `usize` for

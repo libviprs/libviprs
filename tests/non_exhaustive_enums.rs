@@ -15,8 +15,8 @@ use libviprs::cad::{Primitive, PrimitiveKind, Severity, ViewKind};
 use libviprs::{
     Align, AvifError, BandError, CadError, CadSource, ColourError, Combine, DrawError, EngineEvent,
     ExrError, FitsError, GifError, Intent, Interpretation, JoinDirection, Jp2kError, JxlError,
-    Layout, ManifestError, MetadataValue, Pcs, PdfError, PixelFormat, PlannerError, Precision,
-    PyramidStorage, RadianceError, RasterError, ResumeError, SourceError, TileEvidence,
+    Layout, ManifestError, MetadataValue, PageSizing, Pcs, PdfError, PixelFormat, PlannerError,
+    Precision, PyramidStorage, RadianceError, RasterError, ResumeError, SourceError, TileEvidence,
     VerifyError,
 };
 
@@ -645,6 +645,18 @@ fn assert_primitive_non_exhaustive(v: &Primitive) {
         Primitive::Spline(_) => {}
         Primitive::Polygon(_) => {}
         Primitive::Text(_) => {}
+        _ => {}
+    }
+}
+
+/// `PageSizing` names how a page size in points becomes a raster size, and
+/// another policy (a floor or a ceiling) is plausible later (issue #1199).
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_page_sizing_non_exhaustive(v: &PageSizing) {
+    match v {
+        PageSizing::Exact => {}
+        PageSizing::LegacyTruncated => {}
         _ => {}
     }
 }

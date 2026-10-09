@@ -291,7 +291,7 @@ pub use observe::{
     CollectingObserver, EngineEvent, EngineObserver, FanOutObserver, MemoryTracker, WorkerId,
 };
 pub use pdf::{
-    BackgroundColor, PageRotation, PdfError, PdfInfo, PdfPageInfo, extract_page_image,
+    BackgroundColor, PageRotation, PageSizing, PdfError, PdfInfo, PdfPageInfo, extract_page_image,
     extract_page_image_dpi, extract_page_image_with_background,
     extract_page_image_with_background_typed, extract_page_image_with_password, pdf_info,
     pdf_info_with_password,
