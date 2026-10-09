@@ -3168,8 +3168,8 @@ mod tests {
             }
             other => panic!("expected RenderTooLarge, got {other:?}"),
         }
-        // Largest legal pixel counts at 1 byte per pixel still fit.
-        assert!(image_bitmap_span(i32::MAX, 1, 1).is_ok());
+        // The widest 1 byte per pixel row that still fits once padded to 4.
+        assert!(image_bitmap_span(i32::MAX - 3, 1, 1).is_ok());
         // One row past the limit does not.
         assert!(image_bitmap_span(i32::MAX, 2, 1).is_err());
         // 3 bytes per pixel rows are padded to 4 bytes: 3 * 11 = 33 -> 36.
