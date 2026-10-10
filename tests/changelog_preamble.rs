@@ -106,7 +106,10 @@ fn release_notes(changelog: &str) -> &str {
     // Walk the released sections newest first and stop at the first one that
     // carries a `### Breaking` section. A patch release has none, so cutting
     // 0.5.1 on top of 0.5.0 must not move this guard onto a section that was
-    // never meant to hold the breaking notes.
+    // never meant to hold the breaking notes. The same goes for a release whose
+    // only breaking entry has no preamble to check (0.6.0 has one, #1199): it is
+    // skipped by the rule `Unreleased` already follows above, so the guard stays
+    // on the newest section with a preamble that names issues.
     while let Some((i, _)) = rest.match_indices("\n## ").next() {
         let after = &rest[i + "\n## ".len()..];
         let end = after
@@ -115,7 +118,7 @@ fn release_notes(changelog: &str) -> &str {
             .map(|(j, _)| j)
             .unwrap_or(after.len());
         let section = &after[..end];
-        if section.contains("\n### Breaking\n") {
+        if section.contains("\n### Breaking\n") && !issue_numbers(preamble(section)).is_empty() {
             return section;
         }
         rest = after;
