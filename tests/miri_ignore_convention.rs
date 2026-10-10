@@ -784,7 +784,8 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// The detector agreed at 503.
 /// #1181 adds 4: the cells in `tests/local_ci_docker_slot.rs`, which build a slot pool and a stub docker in a temp dir. It said 503 before this line moved.
 /// #1166 adds 1: the same resume cell. It said 507 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 513;
+/// #1209 adds 5: `tests/pdf_info_cropbox.rs`, which writes lopdf-built PDFs to a temp dir. It said 513 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 518;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
