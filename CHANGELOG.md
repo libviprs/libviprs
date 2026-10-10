@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The Miri filesystem-test inventory lists the renamed pdfium dependency tests again (issue #1207).
+
 ## [0.6.0] — 2026-10-09
 
 ### Breaking
