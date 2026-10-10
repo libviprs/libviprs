@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-10-09
+
 ### Breaking
 
 - **A PDF page rendered at a DPI is the size libvips gives, not 0 to 2 px
@@ -8374,6 +8376,7 @@ common 0.2.0 call sites.
 
 Phase-3 hardening: manifest v1, sinks, resume, retry, dedupe, tracing.
 
+[0.6.0]: https://github.com/libviprs/libviprs/releases/tag/v0.6.0
 [0.5.1]: https://github.com/libviprs/libviprs/releases/tag/v0.5.1
 [0.5.0]: https://github.com/libviprs/libviprs/releases/tag/v0.5.0
 [0.4.0]: https://github.com/libviprs/libviprs/releases/tag/v0.4.0

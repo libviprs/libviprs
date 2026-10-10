@@ -650,7 +650,7 @@ This is unrelated to `BandError::UnsupportedSampleKind`,
 `MosaicError::UnsupportedSampleKind`, which live on different enums and are
 not going anywhere.
 
-# Migrating from libviprs 0.5 to the next release
+# Migrating from libviprs 0.5 to 0.6.0
 
 ## A rendered PDF page is the size libvips gives
 
