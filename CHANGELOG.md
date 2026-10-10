@@ -7,6 +7,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The Miri filesystem-test inventory lists the renamed pdfium dependency tests again (issue #1207).
+
+## [0.6.0] — 2026-10-09
+
+### Breaking
+
+- **A PDF page rendered at a DPI is the size libvips gives, not 0 to 2 px
+  smaller** (issue #1199). The raster is now `rint(points * (dpi / 72.0))`
+  per axis, computed in `f64` with ties to even, and pdfium stretches the page
+  into a bitmap of exactly that size, the same call libvips makes. Letter at
+  300 dpi is 2550x3300 (it was 2549x3299), A3 is 3508x4961 (3507x4959), ARCH D
+  is 7200x10800 (7199x10799). Before, the size was the page times
+  `dpi as f32 / 72.0` cut off at the decimal point, which loses a pixel when
+  the product lands a hair under a whole number, and then pdfium's
+  aspect-fit rounded a second time and pulled the other axis down with it.
+  `render_page_pdfium`, `render_page_pdfium_budgeted`, `extract_page_image_dpi`
+  and all four `PdfiumStripSource` constructors change, and so do the
+  numbers `PdfiumStripSource::width()` and `height()` report, so the cached and
+  streaming modes now agree with each other and with a planner that uses the
+  same rule. The pixel budget is checked on the new size, so a page that only
+  fit because of the truncation can now come back as `RenderBudgetExceeded`,
+  and `render_page_pdfium_budgeted` steps the DPI down until the rounded size
+  fits. Strips are scaled per axis (`px / pt`), so a streamed strip is the
+  same pixels as the matching rows of a cached render.
+
+  The new `PageSizing` enum (`#[non_exhaustive]`, `Exact` by default) names
+  the rule, and `PageSizing::pixel_dims(width_pts, height_pts, dpi)` is the one
+  function every site calls. `PageSizing::LegacyTruncated` runs the old
+  pipeline as it was. The old function names delegate at `Exact`;
+  `render_page_pdfium_with`, `render_page_pdfium_budgeted_with` and
+  `extract_page_image_dpi_with` take the policy, and
+  `PdfiumStripSource::builder(..).sizing(..)` does the same for a strip source
+  (`PdfiumStripSource::sizing()` reads it back). `MIGRATION.md` has the recipe
+  for keeping the old sizes. UserUnit is still ignored, as in pdfium, libvips
+  and pdftoppm, and a fractional DPI still rounds to a whole one.
+
+### Fixed
+
+- **Extracting an embedded image from a PDF with pdfium no longer overflows
+  on a huge bitmap** (issue #1203). `pdfium-render` 0.9.4 builds the byte
+  slice behind `PdfBitmap::as_raw_bytes()` from `stride * height` as `c_int`,
+  so a decoded image past `i32::MAX` bytes wrapped in release and panicked in
+  debug. The 2^30 pixel cap lets 4 GiB of BGRA through, so it didn't help.
+  The image path now checks `stride * height` in `u64` first and returns the
+  same `PdfError::RenderTooLarge` the render path gives.
+
+### Changed
+
+- **CI, `tools/Dockerfile.ci` and the README install libpdfium 8085** (the
+  `pdfium-8085` release of libviprs-dep, digests pinned), up from 8054. The
+  crate still requests `pdfium-render`'s `pdfium_7881` bindings, because the
+  crates.io 0.9.4 release has nothing newer. The 7881 bindings against the
+  8085 library are a declared gap in `tests/pdfium_abi_and_binary_pins.rs`,
+  with the measurements behind it (issue #1204).
+- **The minimum supported Rust version is 1.99, up from 1.97** (issue #1200).
+  This is breaking for anyone building on 1.97 or 1.98, who now get cargo's
+  "requires rustc 1.99" refusal instead of a build. I've filed it here and
+  not under `### Breaking` on purpose: a `### Breaking` section in
+  `Unreleased` is what `tests/changelog_preamble.rs` reads as the release's
+  breaking list, and this one entry isn't that list. `rust-version` in
+  `Cargo.toml`, the README badge and Requirements line, `MIGRATION.md`, the
+  `msrv` job's toolchain pin in `ci.yml`, `tools/Dockerfile.ci` and the
+  Makefile all say 1.99 now. 1.99 is also the release that deprecates
+  `AtomicU64::fetch_update`, so the `deprecated` lint now covers what only
+  `deprecated_in_future` caught on 1.97. To stay on the old floor, pin
+  libviprs 0.5.x, which still builds on 1.97.
+
 ## [0.5.1] — 2026-10-06
 
 ### Added
@@ -8311,6 +8380,7 @@ common 0.2.0 call sites.
 
 Phase-3 hardening: manifest v1, sinks, resume, retry, dedupe, tracing.
 
+[0.6.0]: https://github.com/libviprs/libviprs/releases/tag/v0.6.0
 [0.5.1]: https://github.com/libviprs/libviprs/releases/tag/v0.5.1
 [0.5.0]: https://github.com/libviprs/libviprs/releases/tag/v0.5.0
 [0.4.0]: https://github.com/libviprs/libviprs/releases/tag/v0.4.0
