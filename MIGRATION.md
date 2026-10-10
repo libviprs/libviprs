@@ -703,3 +703,20 @@ without any change on your side. `PageSizing::Exact.pixel_dims` is the
 function to plan with.
 
 `PageSizing` is `#[non_exhaustive]`, so a `match` on it needs a wildcard arm.
+
+## `pdf_info` reports the CropBox, not the MediaBox
+
+Fixed after 0.6.0 (issue #1209). `pdf_info` used to report the MediaBox of
+every page. pdfium and libvips render a page into its CropBox clipped to the
+MediaBox, so for a page with a CropBox the info size was bigger than the
+raster the render gave, and `pdf info --dpi`, `plan` and any buffer sized from
+`PdfPageInfo` were off by the margin. Now `width_pts` and `height_pts` are the
+size of the box that is rendered (CropBox within MediaBox, both inherited
+through the page tree, then `/Rotate`), so
+`PageSizing::Exact.pixel_dims(width_pts, height_pts, dpi)` is the render's
+size. A page without a CropBox reports what it did before.
+
+You only need to do something if you relied on `pdf_info` returning the full
+MediaBox of a cropped page. `/UserUnit` is still not applied, since the render
+ignores it. The MediaBox itself is no longer lost when it sits on the `/Pages`
+node: that case used to report 0x0.
