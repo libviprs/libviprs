@@ -706,7 +706,7 @@ function to plan with.
 
 ## `pdf_info` reports the CropBox, not the MediaBox
 
-Fixed after 0.6.0 (issue #1209). `pdf_info` used to report the MediaBox of
+Fixed in 0.6.1 (issue #1209). `pdf_info` used to report the MediaBox of
 every page. pdfium and libvips render a page into its CropBox clipped to the
 MediaBox, so for a page with a CropBox the info size was bigger than the
 raster the render gave, and `pdf info --dpi`, `plan` and any buffer sized from
