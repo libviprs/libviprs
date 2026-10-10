@@ -388,8 +388,14 @@ pub struct PdfInfo {
 
 /// Metadata for a single page within a PDF document.
 ///
-/// Dimensions are in PDF points (1 point = 1/72 inch). To convert to pixels
-/// at a given DPI, multiply by `dpi / 72.0`. The `has_images` flag indicates
+/// Dimensions are in PDF points (1 point = 1/72 inch), of the box the page is
+/// rendered into: the `/CropBox` clipped to the `/MediaBox` (both inherited
+/// through the page tree) when the page has one, else the `/MediaBox`, with
+/// `/Rotate` applied. That is the size pdfium and libvips render, so
+/// [`PageSizing::pixel_dims`] on it gives the raster the render produces.
+/// `/UserUnit` is not applied, because the renderers ignore it. To convert to
+/// pixels at a given DPI, use [`PageSizing::pixel_dims`] (or multiply by
+/// `dpi / 72.0`). The `has_images` flag indicates
 /// whether the page contains embedded raster images that can be extracted
 /// with [`extract_page_image`].
 ///
@@ -401,9 +407,11 @@ pub struct PdfInfo {
 #[derive(Debug, Clone)]
 pub struct PdfPageInfo {
     pub page_number: usize,
-    /// Page width in PDF points (1/72 inch).
+    /// Page width in PDF points (1/72 inch), as rendered: CropBox within
+    /// MediaBox, after `/Rotate`.
     pub width_pts: f64,
-    /// Page height in PDF points (1/72 inch).
+    /// Page height in PDF points (1/72 inch), as rendered: CropBox within
+    /// MediaBox, after `/Rotate`.
     pub height_pts: f64,
     /// Whether the page contains embedded raster images.
     pub has_images: bool,
@@ -413,6 +421,10 @@ pub struct PdfPageInfo {
 /// dimensions and image presence.
 ///
 /// Use this to inspect a PDF before extracting images or rendering pages.
+/// The page sizes are those of the rendered page (issue #1209): a page with a
+/// `/CropBox` reports the CropBox clipped to the `/MediaBox`, not the
+/// MediaBox, so `info`, a plan and the render agree (see [`PdfPageInfo`] for
+/// the rule, including why `/UserUnit` is left out).
 /// For scanned blueprints, check [`PdfPageInfo::has_images`] to decide
 /// whether to use [`extract_page_image`] (fast, embedded image extraction)
 /// or [`render_page_pdfium`] (full vector rendering).
@@ -1621,36 +1633,127 @@ fn cmyk_to_rgb_raster(cmyk_data: &[u8], width: u32, height: u32) -> Result<Raste
 
 /// Get page dimensions in points, in the *displayed* orientation.
 ///
-/// Reads `/MediaBox` and applies the effective `/Rotate` from the page
-/// dictionary (inheriting through the `/Parent` chain per PDF 1.7
-/// §7.7.3.3). For `/Rotate 90` or `270`, width and height are swapped so
-/// the returned `(w, h)` matches what viewers and the pdfium form-data
-/// render path report. `/Rotate 0` and `180` preserve the MediaBox
-/// orientation. Missing `/Rotate` behaves as `0`.
+/// This is the size of the box the page is rendered into (issue #1209), so
+/// `pdf_info`, the planner and the renderers agree: pdfium, and libvips on top
+/// of it, size a page to its `/CropBox` intersected with its `/MediaBox`, and
+/// both boxes are inheritable through the `/Parent` chain (PDF 1.7 §7.7.3.3).
+/// A page with no usable `/CropBox` is its `/MediaBox`. "Usable" is pdfium's
+/// reading: an array of exactly four numbers (a reference to one is followed)
+/// that is not empty, and that overlaps the MediaBox. The first box found
+/// walking up from the page is the one used, even if it turns out to be
+/// unusable, as in pdfium, so a broken page-level `/CropBox` does not fall
+/// through to the parent's.
+///
+/// The effective `/Rotate` is then applied (also inherited): for `/Rotate 90`
+/// or `270` width and height are swapped so the returned `(w, h)` matches
+/// what viewers and the pdfium form-data render path report. `/Rotate 0` and
+/// `180` preserve the box orientation. Missing `/Rotate` behaves as `0`.
+///
+/// `/UserUnit` is deliberately not applied: pdfium, libvips and pdftoppm
+/// ignore it when they render, so counting it here would size a page the
+/// render does not produce. The arithmetic is `f32`, as pdfium's is, so a
+/// fractional box rounds to the same pixel.
 fn get_page_dimensions(doc: &lopdf::Document, page_id: lopdf::ObjectId) -> (f64, f64) {
-    let obj = match doc.get_object(page_id) {
-        Ok(o) => o,
-        Err(_) => return (0.0, 0.0),
+    let Some(media) = inherited_page_box(doc, page_id, b"MediaBox", false) else {
+        return (0.0, 0.0);
     };
-    let dict = match obj.as_dict() {
-        Ok(d) => d,
-        Err(_) => return (0.0, 0.0),
-    };
-
-    // Try MediaBox, falling back through parent pages
-    if let Some(media_box) = resolve_array_entry(doc, dict, b"MediaBox")
-        && media_box.len() >= 4
+    let mut visible = media;
+    // A CropBox only counts when it is a real box that overlaps the MediaBox.
+    if media.w() > 0.0
+        && media.h() > 0.0
+        && let Some(crop) = inherited_page_box(doc, page_id, b"CropBox", true)
+        && let Some(clipped) = crop.intersect(&media)
     {
-        let x0 = obj_to_f64(&media_box[0]).unwrap_or(0.0);
-        let y0 = obj_to_f64(&media_box[1]).unwrap_or(0.0);
-        let x1 = obj_to_f64(&media_box[2]).unwrap_or(0.0);
-        let y1 = obj_to_f64(&media_box[3]).unwrap_or(0.0);
-        let w = (x1 - x0).abs();
-        let h = (y1 - y0).abs();
-        return apply_rotate_to_dims(w, h, resolve_rotate(doc, page_id));
+        visible = clipped;
+    }
+    apply_rotate_to_dims(
+        f64::from(visible.w()),
+        f64::from(visible.h()),
+        resolve_rotate(doc, page_id),
+    )
+}
+
+/// A page box as `[left, bottom, right, top]`, normalised so that left <= right
+/// and bottom <= top, in `f32` like pdfium's `CFX_FloatRect`.
+#[derive(Clone, Copy)]
+struct PageBox {
+    l: f32,
+    b: f32,
+    r: f32,
+    t: f32,
+}
+
+impl PageBox {
+    fn w(&self) -> f32 {
+        self.r - self.l
     }
 
-    (0.0, 0.0)
+    fn h(&self) -> f32 {
+        self.t - self.b
+    }
+
+    /// The overlap of two boxes, or `None` when `self` is empty or the two do
+    /// not overlap in area.
+    fn intersect(&self, other: &PageBox) -> Option<PageBox> {
+        if self.w() <= 0.0 || self.h() <= 0.0 {
+            return None;
+        }
+        let out = PageBox {
+            l: self.l.max(other.l),
+            b: self.b.max(other.b),
+            r: self.r.min(other.r),
+            t: self.t.min(other.t),
+        };
+        (out.l < out.r && out.b < out.t).then_some(out)
+    }
+}
+
+/// Look up `key` on a page, inheriting through the `/Parent` chain, and read it
+/// as a box. The nearest dictionary that has the key decides: a value there
+/// that is not a box gives `None` rather than reaching for an ancestor's.
+///
+/// `exact` insists on exactly four entries (pdfium's `GetRect`); without it
+/// extra trailing entries are ignored, which is how a `/MediaBox` has always
+/// been read here.
+fn inherited_page_box(
+    doc: &lopdf::Document,
+    page_id: lopdf::ObjectId,
+    key: &[u8],
+    exact: bool,
+) -> Option<PageBox> {
+    let mut current = page_id;
+    // Same defensive cap as `resolve_rotate`: an adversarial `/Parent` loop
+    // must not spin.
+    for _ in 0..64 {
+        let dict = doc.get_object(current).ok()?.as_dict().ok()?;
+        if let Some(arr) = resolve_array_entry(doc, dict, key) {
+            if arr.len() < 4 || (exact && arr.len() != 4) {
+                return None;
+            }
+            let n = |i: usize| -> f32 {
+                resolve_object(doc, &arr[i])
+                    .ok()
+                    .and_then(obj_to_f64)
+                    .unwrap_or(0.0) as f32
+            };
+            let (x0, y0, x1, y1) = (n(0), n(1), n(2), n(3));
+            return Some(PageBox {
+                l: x0.min(x1),
+                b: y0.min(y1),
+                r: x0.max(x1),
+                t: y0.max(y1),
+            });
+        }
+        if dict.has(key) {
+            // Present but not an array: it still shadows the ancestors.
+            return None;
+        }
+        current = match dict.get(b"Parent") {
+            Ok(lopdf::Object::Reference(id)) if *id != current => *id,
+            _ => return None,
+        };
+    }
+    None
 }
 
 /// Swap `(w, h)` when `rotate` is `90` or `270` (mod 360). Returns

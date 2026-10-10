@@ -7,9 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-10-09
+
 ### Fixed
 
 - The Miri filesystem-test inventory lists the renamed pdfium dependency tests again (issue #1207).
+- **`pdf_info` sizes a page by its CropBox, like the render** (issue #1209).
+  `get_page_dimensions` read the MediaBox only, so for a page with a CropBox
+  `pdf info`, `plan` and any buffer sized from `pdf_info` described a canvas
+  that `render_page_pdfium`, `viprs pdf extract --dpi` and libvips
+  `pdfload[dpi=N]` never produced (the A3 CropBox sheet is 3758x5127 at 300
+  dpi from `info` and 3508x4961 from the render). It now reports the CropBox
+  clipped to the MediaBox, both inherited through the page tree, then
+  `/Rotate`. A missing, malformed (not four numbers), empty or disjoint CropBox
+  falls back to the MediaBox, as in pdfium. The same walk fixes a MediaBox
+  inherited from the `/Pages` node, which came back as 0x0. `/UserUnit` is
+  still not applied: the render ignores it, and `info` matches the render. The
+  arithmetic is `f32`, as pdfium's is, so a fractional box rounds to the same
+  pixel. `pdf_info` on a cropped page reports a smaller size than before; see
+  `MIGRATION.md`.
 
 ## [0.6.0] — 2026-10-09
 
@@ -8380,6 +8396,7 @@ common 0.2.0 call sites.
 
 Phase-3 hardening: manifest v1, sinks, resume, retry, dedupe, tracing.
 
+[0.6.1]: https://github.com/libviprs/libviprs/releases/tag/v0.6.1
 [0.6.0]: https://github.com/libviprs/libviprs/releases/tag/v0.6.0
 [0.5.1]: https://github.com/libviprs/libviprs/releases/tag/v0.5.1
 [0.5.0]: https://github.com/libviprs/libviprs/releases/tag/v0.5.0
