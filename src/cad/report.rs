@@ -69,9 +69,11 @@ impl fmt::Display for Severity {
 ///
 /// A newtype over the number and never a closed enum. Three bands:
 ///
-/// * Below [`DiagnosticCode::CORE_RANGE_START`] are the provider-neutral codes
-///   the CAD decode contract allocates, and the constants below are the ones
-///   it has names for today.
+/// * Below [`DiagnosticCode::CORE_RANGE_START`] is the contract band: the
+///   numbering of the VIPRS specification, which the provider shares by
+///   agreement. `acadsharp-rs`'s `WarningCode` carries the same 100 to 108, so
+///   a provider's warning in that range passes through as the same code
+///   without a translation table, and that is deliberate.
 /// * From [`DiagnosticCode::CORE_RANGE_START`] to
 ///   [`DiagnosticCode::PROVIDER_RANGE_START`] are the codes libviprs itself
 ///   allocates, which is where the text contract's two live. A separate band
@@ -79,6 +81,24 @@ impl fmt::Display for Severity {
 ///   number.
 /// * From [`DiagnosticCode::PROVIDER_RANGE_START`] up, whatever read the
 ///   drawing allocates, and a consumer is entitled to know none of them.
+///
+/// # Which band a new code goes in
+///
+/// Ask who can observe the condition. If a provider can see it in the file's
+/// data on its own, and libviprs can see the same thing when it gets there
+/// first, then both layers have to file it under one number or one drawing
+/// reports the same fact twice. That is a contract code, and it is allocated
+/// by amending the specification, not by this crate alone. If only libviprs
+/// defines the condition, because it is about this crate's own IR rules or its
+/// own text contract, it is a core code.
+///
+/// [`DiagnosticCode::NON_FINITE_GEOMETRY`] is the instructive case, and it is
+/// 107 on purpose: the provider catches a non-finite record inline and files
+/// 107, and a primitive constructor catches the same value as
+/// [`CadError::NonFinite`](crate::cad::CadError::NonFinite) when the provider
+/// did not, so the two have to agree. Its siblings at 500 to 502 are the other
+/// kind: [`DiagnosticCode::PRIMITIVE_REFUSED`] is this crate's own validation
+/// rules, and the text pair and the truncation are rules only libviprs states.
 ///
 /// A closed set would break on the first real stream. Adding a code is
 /// deliberately not a breaking change, so a consumer that refused an unknown
@@ -106,6 +126,10 @@ impl DiagnosticCode {
     pub const NON_UNIFORM_BLOCK_SCALE: Self = Self(106);
     /// A geometry record whose values were not all finite, so no primitive was
     /// emitted: there is no correct number to put in its place.
+    ///
+    /// A contract code and not a core one, deliberately: the provider and a
+    /// primitive constructor both catch this, and have to file the same number.
+    /// See the rule on [`DiagnosticCode`].
     pub const NON_FINITE_GEOMETRY: Self = Self(107);
     /// This view produced no geometry at all. Read it beside what sits with
     /// it: alone it is an empty drawing, and with other diagnostics around it
@@ -148,6 +172,14 @@ impl DiagnosticCode {
     #[must_use]
     pub const fn get(self) -> u32 {
         self.0
+    }
+
+    /// Whether the decode contract allocated this code, which is to say it is
+    /// one of the specification's own numbers and not libviprs's or the
+    /// provider's.
+    #[must_use]
+    pub const fn is_contract_allocated(self) -> bool {
+        self.0 < Self::CORE_RANGE_START
     }
 
     /// Whether libviprs allocated this code rather than the decode contract or

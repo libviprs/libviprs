@@ -18,6 +18,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   original seven shipped), and none of the new names collides with an existing
   root name. The eight primitive structs stay behind `libviprs::cad::`.
 
+- **`DiagnosticCode::is_contract_allocated`, and the rule for which band a code
+  goes in** (issue #1105). `NON_FINITE_GEOMETRY` stays 107, in the
+  specification's band, because the provider and a primitive constructor catch
+  the same condition and have to file the same number. The band documentation
+  now states that rule, and says the 100 to 108 numbering is shared with the
+  provider by agreement. The `NonFinite` arm of `CadError::diagnostic_code` is
+  pinned by a test; nothing reached it before.
+
 ### Changed
 
 - **`PrimitiveKind::ALL` is a `&'static [PrimitiveKind]`** (issue #1107). It
