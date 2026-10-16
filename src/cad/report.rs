@@ -100,6 +100,10 @@ impl fmt::Display for Severity {
 /// kind: [`DiagnosticCode::PRIMITIVE_REFUSED`] is this crate's own validation
 /// rules, and the text pair and the truncation are rules only libviprs states.
 ///
+/// A provider's own codes are not in either of the first two bands.
+/// [`DiagnosticCode::provider`] allocates one in the third by construction,
+/// and [`DiagnosticCode::new`] is for a code read back off a wire.
+///
 /// A closed set would break on the first real stream. Adding a code is
 /// deliberately not a breaking change, so a consumer that refused an unknown
 /// one would start failing on files it read correctly the day before.
@@ -163,9 +167,36 @@ impl DiagnosticCode {
     pub const PROVIDER_RANGE_START: u32 = 1000;
 
     /// Wraps a raw code, including one this build has no name for.
+    ///
+    /// This is the wire round-trip constructor: it places a code exactly where
+    /// it is told, so `new(500)` *is* [`DiagnosticCode::TEXT_ESCAPE_NOT_DECODED`].
+    /// That is what reading a code back off a report needs, and it is the wrong
+    /// tool for a provider allocating its own, which should use
+    /// [`DiagnosticCode::provider`] so it cannot land on someone else's number.
     #[must_use]
     pub const fn new(raw: u32) -> Self {
         Self(raw)
+    }
+
+    /// A code the backing provider allocates, offset into the provider band so
+    /// it cannot collide with a contract or libviprs code however the provider
+    /// numbers its own.
+    ///
+    /// `provider(0)` is [`DiagnosticCode::PROVIDER_RANGE_START`]. An offset
+    /// that would run past the top of the `u32` line saturates there instead of
+    /// wrapping back into the contract band, so the result is always
+    /// [`DiagnosticCode::is_provider_allocated`].
+    ///
+    /// ```
+    /// use libviprs::cad::DiagnosticCode;
+    ///
+    /// let mine = DiagnosticCode::provider(7);
+    /// assert!(mine.is_provider_allocated());
+    /// assert_ne!(mine, DiagnosticCode::new(7));
+    /// ```
+    #[must_use]
+    pub const fn provider(offset: u32) -> Self {
+        Self(Self::PROVIDER_RANGE_START.saturating_add(offset))
     }
 
     /// The raw code.

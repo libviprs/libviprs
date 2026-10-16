@@ -18,6 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   original seven shipped), and none of the new names collides with an existing
   root name. The eight primitive structs stay behind `libviprs::cad::`.
 
+- **`DiagnosticCode::provider(offset)`** (issue #1112). Allocates a code in the
+  provider band by construction, saturating at the top of the `u32` line, so a
+  provider numbering its own codes from 1 or 100 cannot alias a contract or
+  libviprs code. `DiagnosticCode::new` stays, now documented as the wire
+  round-trip constructor.
+
 - **`DiagnosticCode::is_contract_allocated`, and the rule for which band a code
   goes in** (issue #1105). `NON_FINITE_GEOMETRY` stays 107, in the
   specification's band, because the provider and a primitive constructor catch
