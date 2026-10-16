@@ -895,6 +895,9 @@ impl Spline {
     /// [`CadError::SplineControlCount`] below `degree + 1` control points,
     /// [`CadError::SplineKnotCount`] below `controls + 1` knots,
     /// [`CadError::KnotsDecrease`] for a knot vector that turns around,
+    /// [`CadError::EmptySweep`] for one whose first and last knot are equal, so
+    /// it spans no parameter interval at all (the same refusal `Arc` and
+    /// `Ellipse` give an empty range),
     /// [`CadError::CountMismatch`] for a non-empty weight run of the wrong
     /// length, [`CadError::NonPositive`] for a weight at or below zero, and
     /// [`CadError::NonFinite`] for any non-finite number.
@@ -950,6 +953,17 @@ impl Spline {
                 });
             }
             previous = knot;
+        }
+        // `previous` is the last knot now. A first knot equal to it leaves a
+        // single-point parameter domain, which is the empty range `Arc` and
+        // `Ellipse` refuse as well. It takes no tolerance to say so; whether a
+        // narrower domain (the degree-th knot against the last) is usable is the
+        // evaluator's question.
+        if knots[0] == previous {
+            return Err(CadError::EmptySweep {
+                field: "knot vector",
+                value: previous,
+            });
         }
         for weight in weights {
             positive("spline weight", *weight)?;
