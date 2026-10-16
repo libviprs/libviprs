@@ -1941,6 +1941,93 @@ mod tests {
         );
     }
 
+    /// A polygon's bulges, normal and ring survive construction, and the lens
+    /// the type exists for is accepted: two vertices with a bulge on both
+    /// spans is a real boundary.
+    ///
+    /// The mutation this holds is `Polygon::new` discarding the caller's
+    /// bulges, which no other test noticed because everything else builds
+    /// `Polygon::straight`.
+    #[test]
+    fn a_polygon_keeps_its_bulges_and_a_lens_is_a_polygon() {
+        let ring = [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]];
+        let lens = Polygon::new(&ring, [0.0, 0.0, 1.0], &[0.5, -0.25]).unwrap();
+
+        assert_eq!(lens.bulges(), [0.5, -0.25]);
+        assert_eq!(lens.bulge(0), 0.5);
+        assert_eq!(lens.bulge(1), -0.25);
+        assert_eq!(
+            lens.bulge(2),
+            0.0,
+            "past the last span there is no bulge, and zero is how that reads"
+        );
+        assert_eq!(
+            lens.vertices().len(),
+            2,
+            "the first vertex is not repeated at the end"
+        );
+        assert_eq!(lens.vertices()[1].x(), 2.0);
+        assert_eq!(lens.normal().into_array(), [0.0, 0.0, 1.0]);
+
+        // The straight constructor is the same thing with no bulges at all.
+        let straight = Polygon::straight(&[[0.0; 3], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0]]).unwrap();
+        assert!(straight.bulges().is_empty());
+        assert_eq!(straight.bulge(0), 0.0);
+
+        // And an origin goes on after the fact.
+        let tagged = lens.with_origin(Origin::from_handle(ItemHandle::new(0x2A)));
+        assert_eq!(tagged.origin().item_handle(), Some(ItemHandle::new(0x2A)));
+    }
+
+    /// One bulge against two vertices is a count mismatch, named as such.
+    #[test]
+    fn a_polygon_with_one_bulge_for_two_vertices_is_a_count_mismatch() {
+        let ring = [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]];
+        let err =
+            Polygon::new(&ring, [0.0, 0.0, 1.0], &[0.5]).expect_err("a bulge per span or none");
+        assert!(
+            matches!(
+                err,
+                CadError::CountMismatch {
+                    field: "bulges",
+                    got: 1,
+                    expected: 2,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    /// `Vector3::length` is what makes the documented "never zero" true: the
+    /// chained `hypot` does not underflow where the squares do.
+    ///
+    /// `[1e-200; 3]` is finite and non-zero, and `x*x + y*y + z*z` is exactly
+    /// zero for it, so a consumer normalising by the squared length divides by
+    /// zero. A refactor of `length` to `(x*x + y*y + z*z).sqrt()` would read as
+    /// a simplification and pass everything else in the module.
+    #[test]
+    fn a_vector_whose_squares_underflow_still_has_a_length() {
+        let tiny = Vector3::from_array([1e-200, 1e-200, 1e-200]).expect("finite and not zero");
+        let [x, y, z] = tiny.into_array();
+        assert_eq!(
+            x * x + y * y + z * z,
+            0.0,
+            "the premise: the naive squared length underflows to zero"
+        );
+        assert!(tiny.length() > 0.0, "and the length must not");
+        assert!((tiny.length() / 1e-200 - 3f64.sqrt()).abs() < 1e-12);
+
+        let subnormal = Vector3::from_array([5e-324, 0.0, 0.0]).expect("the smallest subnormal");
+        assert_eq!(subnormal.length(), 5e-324);
+
+        assert_eq!(Vector3::Z.length(), 1.0);
+        assert_eq!(
+            Vector3::from_array([3.0, 4.0, 12.0]).unwrap().length(),
+            13.0
+        );
+    }
+
     /// An origin survives the conversion into a `Primitive`, which is the only
     /// way a diagnostic can name the entity a person has to go and look at.
     #[test]
@@ -1957,5 +2044,13 @@ mod tests {
         );
         assert!(primitive.origin().is_expanded_insert());
         assert_eq!(Origin::UNKNOWN.item_handle(), None);
+
+        // `with_handle` is the builder `from_handle` is the shorthand for, and
+        // it must keep what was already on the origin.
+        let later = Origin::UNKNOWN
+            .with_expanded_insert(true)
+            .with_handle(ItemHandle::new(0x1F));
+        assert_eq!(later.item_handle(), Some(ItemHandle::new(0x1F)));
+        assert!(later.is_expanded_insert());
     }
 }

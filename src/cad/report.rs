@@ -840,6 +840,28 @@ mod tests {
             "the code and the message are what the suffixes qualify: {rendered}"
         );
 
+        // Severity renders as its own word, for both levels. A warning is the
+        // one nothing else exercised.
+        assert!(
+            attributed
+                .to_string()
+                .contains(&Severity::Error.to_string())
+        );
+        let warned = Diagnostic::warning(DiagnosticCode::EMPTY_VIEW, "Layout1");
+        assert!(
+            warned.to_string().contains(&Severity::Warning.to_string()),
+            "{warned}"
+        );
+        assert_ne!(
+            Severity::Warning.to_string(),
+            Severity::Error.to_string(),
+            "two levels that render the same cannot be told apart in a log"
+        );
+        assert!(
+            !warned.to_string().contains(&Severity::Error.to_string()),
+            "a warning must not read as an error: {warned}"
+        );
+
         let rendered = bare.to_string();
         assert!(
             !rendered.contains("entity") && !rendered.contains(&entity.to_string()),
