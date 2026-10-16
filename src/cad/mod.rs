@@ -655,6 +655,24 @@ mod tests {
         }
     }
 
+    /// An error becomes a diagnostic under its own code, with that code's
+    /// severity and its own message, so a provider files a code and does not
+    /// choose a severity.
+    #[test]
+    fn an_error_becomes_a_diagnostic_under_its_own_code_and_severity() {
+        let refusal = CadError::NonPositive {
+            field: "radius",
+            value: -4.5,
+        };
+        let diagnostic = refusal.to_diagnostic();
+        assert_eq!(diagnostic.code(), refusal.diagnostic_code());
+        assert_eq!(
+            diagnostic.severity(),
+            refusal.diagnostic_code().default_severity()
+        );
+        assert_eq!(diagnostic.message(), refusal.to_string());
+    }
+
     /// Messages quote the value they rejected.
     ///
     /// A guard rather than a restatement: the crate's rule is that a refusal

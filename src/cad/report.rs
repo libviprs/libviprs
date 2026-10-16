@@ -995,6 +995,97 @@ mod tests {
         }
     }
 
+    /// Every named code has one severity, and it is the one the contract says.
+    ///
+    /// The control is in the table itself: both answers appear, so a function
+    /// that returned one severity for everything cannot satisfy it.
+    #[test]
+    fn every_named_code_has_a_pinned_default_severity() {
+        use Severity::{Error, Warning};
+        for (code, expected) in [
+            (DiagnosticCode::UNSUPPORTED_ENTITY, Warning),
+            (DiagnosticCode::READER_NOTIFICATION, Warning),
+            (DiagnosticCode::DIMENSION_WITHOUT_BLOCK, Warning),
+            (DiagnosticCode::HATCH_PATTERN_ONLY, Warning),
+            (DiagnosticCode::HATCH_LOOP_NOT_POLYGON, Warning),
+            (DiagnosticCode::UNRESOLVED_BLOCK, Warning),
+            (DiagnosticCode::NON_UNIFORM_BLOCK_SCALE, Warning),
+            (DiagnosticCode::NON_FINITE_GEOMETRY, Error),
+            (DiagnosticCode::EMPTY_VIEW, Warning),
+            (DiagnosticCode::TEXT_ESCAPE_NOT_DECODED, Error),
+            (DiagnosticCode::TEXT_NOT_RECOVERED, Error),
+            (DiagnosticCode::PRIMITIVE_REFUSED, Error),
+            (DiagnosticCode::DECODE_TRUNCATED, Error),
+            (DiagnosticCode::DECODE_FAILED, Error),
+        ] {
+            assert_eq!(code.default_severity(), expected, "{code}");
+        }
+    }
+
+    /// A code this build has no name for still answers, by band: libviprs's own
+    /// unknown codes are errors (a code this crate allocated and this build
+    /// cannot read is not one to wave through), and the specification's and the
+    /// provider's unknown codes are warnings, the provider's own judgement.
+    #[test]
+    fn an_unnamed_code_takes_its_default_severity_from_its_band() {
+        assert_eq!(
+            DiagnosticCode::new(142).default_severity(),
+            Severity::Warning
+        );
+        assert_eq!(DiagnosticCode::new(650).default_severity(), Severity::Error);
+        assert_eq!(
+            DiagnosticCode::provider(9).default_severity(),
+            Severity::Warning
+        );
+    }
+
+    /// A diagnostic filed from a code takes the code's severity, keeps the
+    /// message, and still takes an entity and a view.
+    #[test]
+    fn a_diagnostic_filed_from_a_code_takes_the_codes_severity() {
+        let lost = Diagnostic::from_code(DiagnosticCode::TEXT_NOT_RECOVERED, "embedded MTEXT");
+        assert_eq!(lost.severity(), Severity::Error);
+        assert_eq!(lost.code(), DiagnosticCode::TEXT_NOT_RECOVERED);
+        assert_eq!(lost.message(), "embedded MTEXT");
+
+        let empty = Diagnostic::from_code(DiagnosticCode::EMPTY_VIEW, "Layout1").with_view(2);
+        assert_eq!(empty.severity(), Severity::Warning);
+        assert_eq!(empty.view(), Some(2));
+    }
+
+    /// The same condition filed from the provider's side and from a primitive
+    /// constructor's side answers the same way, so `has_errors` does not depend
+    /// on which layer noticed the non-finite value first.
+    #[test]
+    fn the_same_code_filed_from_both_layers_reports_the_same_way() {
+        let from_the_provider =
+            Diagnostic::from_code(DiagnosticCode::NON_FINITE_GEOMETRY, "record 7C had a NaN");
+        let from_a_constructor = crate::cad::CadError::NonFinite {
+            field: "centre",
+            value: f64::NAN,
+        }
+        .to_diagnostic();
+
+        assert_eq!(from_the_provider.code(), from_a_constructor.code());
+        assert_eq!(from_the_provider.severity(), from_a_constructor.severity());
+
+        let answers: Vec<bool> = [from_the_provider, from_a_constructor]
+            .into_iter()
+            .map(|d| {
+                let mut report = DecodeReport::new();
+                report.push(d);
+                report.has_errors()
+            })
+            .collect();
+        assert_eq!(answers, [true, true]);
+
+        // The control: a warning code does not turn into an error because it
+        // went through the same door.
+        let mut report = DecodeReport::new();
+        report.push(Diagnostic::from_code(DiagnosticCode::EMPTY_VIEW, "Layout1"));
+        assert!(!report.has_errors());
+    }
+
     /// An unknown code survives and says so, rather than being refused.
     #[test]
     fn a_code_this_build_has_no_name_for_is_still_carried() {
