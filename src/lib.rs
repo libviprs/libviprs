@@ -216,12 +216,26 @@ pub mod webp;
 // flood callers with implementation detail.
 pub use arithmetic::{ArithmeticError, Comparand};
 pub use bands::BandError;
-// The decoder contract and the primitive IR (issue #1029). Types and entry
-// points only: the eight primitive structs stay behind `libviprs::cad::`
+// The decoder contract and the primitive IR (issues #1029, #1108). The rule
+// for this set is that it is closed under the signatures of its own members:
+// a name is here if a root name's method takes it, returns it or yields it,
+// because otherwise `PrimitiveSink` can be named from the root and not
+// implemented, and `DecodeReport` can be named and not read. That is why
+// `Primitive`, `PrimitiveKind`, `PrimitiveCounts`, `Diagnostic`,
+// `DiagnosticCode`, `Severity`, `ViewKind`, `Extents` and `ItemHandle` are here.
+//
+// Closed upward rather than downward on purpose: the seven original names have
+// shipped, so removing two of them would be a break, and none of the nine added
+// collides with anything at the root. What stays behind `libviprs::cad::` is the
+// eight primitive structs and their helpers (`Origin`, `Point3`, `Vector3`),
 // because `Line`, `Text` and `Arc` are names a crate root has no business
-// claiming — `draw::DrawOp::Line` and `std::sync::Arc` are both one glob
-// import away.
-pub use cad::{CadDecoder, CadDrawing, CadError, CadSource, CadView, DecodeReport, PrimitiveSink};
+// claiming: `draw::DrawOp::Line` and `std::sync::Arc` are both one glob import
+// away. `tests/cad_1108_root_set_is_closed.rs` holds the rule.
+pub use cad::{
+    CadDecoder, CadDrawing, CadError, CadSource, CadView, DecodeReport, Diagnostic, DiagnosticCode,
+    Extents, ItemHandle, Primitive, PrimitiveCounts, PrimitiveKind, PrimitiveSink, Severity,
+    ViewKind,
+};
 pub use cancel::CancelToken;
 pub use checksum::{ChecksumMode, VerifyError, VerifyReport};
 pub use codec::{DecodeError, EncodeError, JpegSubsample, TiffCompression};

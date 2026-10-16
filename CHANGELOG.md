@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The crate-root `cad` re-exports are closed under their own signatures**
+  (issue #1108). `libviprs::PrimitiveSink` could be named from the root and
+  not implemented, because `Primitive` was not exported, and `DecodeReport`
+  could be named and not read. The root now also carries `Primitive`,
+  `PrimitiveKind`, `PrimitiveCounts`, `Diagnostic`, `DiagnosticCode`,
+  `Severity`, `ViewKind`, `Extents` and `ItemHandle`. Nothing was removed (the
+  original seven shipped), and none of the new names collides with an existing
+  root name. The eight primitive structs stay behind `libviprs::cad::`.
+
 ### Changed
 
 - **`PrimitiveKind::ALL` is a `&'static [PrimitiveKind]`** (issue #1107). It
