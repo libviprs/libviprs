@@ -18,6 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   original seven shipped), and none of the new names collides with an existing
   root name. The eight primitive structs stay behind `libviprs::cad::`.
 
+- **`DiagnosticCode::DECODE_FAILED` (504), and `CadError::diagnostic_code` no
+  longer has a catch-all arm** (issue #1114). `Io`, `Provider`, `Sink`,
+  `NoSuchView` and `UnrecognisedSource` used to answer `PRIMITIVE_REFUSED`, the
+  code a release gate counts as malformed entities. They answer `DECODE_FAILED`
+  now. Every variant is spelled out, so a new `CadError` has to be given a code
+  before this crate compiles.
+
 - **`DiagnosticCode::provider(offset)`** (issue #1112). Allocates a code in the
   provider band by construction, saturating at the top of the `u32` line, so a
   provider numbering its own codes from 1 or 100 cannot alias a contract or

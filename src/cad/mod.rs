@@ -411,13 +411,23 @@ impl CadError {
         Self::Sink(source.into())
     }
 
-    /// The diagnostic code a provider files when a constructor refuses an
-    /// entity, so the refusal reaches a [`DecodeReport`] under the right code
-    /// rather than under a guess.
+    /// The diagnostic code a provider files for this error, so it reaches a
+    /// [`DecodeReport`] under the right code rather than under a guess.
     ///
-    /// The text contract's two refusals get their own codes because they are
-    /// the ones a release gate has to count separately; everything else is a
-    /// malformed entity.
+    /// Four groups, and the match spells out every variant so that a new
+    /// `CadError` is a compile error here and has to be given a code
+    /// deliberately:
+    ///
+    /// * The text contract's two refusals get their own codes because they are
+    ///   the ones a release gate has to count separately.
+    /// * A non-finite value is [`DiagnosticCode::NON_FINITE_GEOMETRY`], the
+    ///   number the provider files for the same condition.
+    /// * Every other constructor refusal is a malformed entity,
+    ///   [`DiagnosticCode::PRIMITIVE_REFUSED`].
+    /// * The five that are not a refusal of an entity at all (the view or the
+    ///   source was wrong, the read failed, the provider or the sink failed)
+    ///   are [`DiagnosticCode::DECODE_FAILED`], so a gate counting malformed
+    ///   entities is not counting a disk error.
     ///
     /// ```
     /// use libviprs::cad::{CadError, DiagnosticCode, Text};
@@ -430,6 +440,9 @@ impl CadError {
     ///
     /// let bad = CadError::NonPositive { field: "radius", value: -1.0 };
     /// assert_eq!(bad.diagnostic_code(), DiagnosticCode::PRIMITIVE_REFUSED);
+    ///
+    /// let gone = CadError::NoSuchView { index: 3, views: 1 };
+    /// assert_eq!(gone.diagnostic_code(), DiagnosticCode::DECODE_FAILED);
     /// ```
     #[must_use]
     pub const fn diagnostic_code(&self) -> DiagnosticCode {
@@ -437,7 +450,20 @@ impl CadError {
             Self::TextEscapeNotDecoded { .. } => DiagnosticCode::TEXT_ESCAPE_NOT_DECODED,
             Self::TextEmpty => DiagnosticCode::TEXT_NOT_RECOVERED,
             Self::NonFinite { .. } => DiagnosticCode::NON_FINITE_GEOMETRY,
-            _ => DiagnosticCode::PRIMITIVE_REFUSED,
+            Self::NonPositive { .. }
+            | Self::ZeroLengthVector { .. }
+            | Self::EmptySweep { .. }
+            | Self::TooFewVertices { .. }
+            | Self::CountMismatch { .. }
+            | Self::SplineDegree { .. }
+            | Self::SplineControlCount { .. }
+            | Self::SplineKnotCount { .. }
+            | Self::KnotsDecrease { .. } => DiagnosticCode::PRIMITIVE_REFUSED,
+            Self::NoSuchView { .. }
+            | Self::UnrecognisedSource { .. }
+            | Self::Io(_)
+            | Self::Provider { .. }
+            | Self::Sink(_) => DiagnosticCode::DECODE_FAILED,
         }
     }
 }
