@@ -787,7 +787,7 @@ mod tests {
         assert!(!archive.is_empty(), "zip archive must contain entries");
 
         let names: Vec<String> = (0..archive.len())
-            .map(|i| archive.by_index(i).unwrap().name().to_string())
+            .map(|i| archive.by_index(i).unwrap().name().unwrap().to_string())
             .collect();
 
         // 3. It carries DeepZoom tile entries under `<stem>_files/…` and the

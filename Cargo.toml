@@ -398,7 +398,7 @@ tracing = "0.1"
 # dev-dependency only, so it never links into the library or its consumers;
 # the default build stays byte-identical.
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry"] }
-zip = "7.2.0"
+zip = "9.0.3"
 # Pure-Rust JPEG XL encoder (MIT OR Apache-2.0 OR Zlib), the save half of
 # issue #500, optional behind the `jxl` feature. It is
 # `#![forbid(unsafe_code)]` from its crate root down and brings exactly one

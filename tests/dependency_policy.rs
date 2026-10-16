@@ -671,7 +671,15 @@ fn ships_native_source(manifest: &Manifest) -> bool {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
-                stack.push(path);
+                // A crate's own `test/` or `tests/` tree is scaffolding that
+                // `cargo build` never compiles (nix 0.31 ships a `.c` under
+                // `test/`, #1213), so it is not native code in our graph.
+                if !matches!(
+                    path.file_name().and_then(|n| n.to_str()),
+                    Some("test" | "tests")
+                ) {
+                    stack.push(path);
+                }
                 continue;
             }
             let matched = path

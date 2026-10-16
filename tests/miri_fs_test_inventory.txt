@@ -516,6 +516,11 @@ annotated   fs-detected  tests/webp_tile_format.rs::a_webp_tree_with_a_hole_stil
 annotated   fs-detected  tests/webp_tile_format.rs::an_archive_from_a_newer_libviprs_is_named_rather_than_blanked
 annotated   fs-detected  tests/workspace_layout.rs::fuzz_crate_is_a_member_of_the_root_workspace
 annotated   fs-detected  tests/workspace_layout.rs::workspace_lockfile_resolves_pdfium_render_from_the_registry
+annotated   fs-detected  tests/zip_requirement_resolves_1213.rs::a_fresh_resolve_of_this_workspace_succeeds_1213
+annotated   fs-detected  tests/zip_requirement_resolves_1213.rs::control_a_requirement_with_a_live_release_resolves_1213
+annotated   fs-detected  tests/zip_requirement_resolves_1213.rs::control_a_requirement_with_only_yanked_releases_is_refused_1213
+annotated   fs-detected  tests/zip_requirement_resolves_1213.rs::every_feature_s_dependency_set_resolves_on_its_own_1213
+annotated   fs-detected  tests/zip_requirement_resolves_1213.rs::packfile_round_trips_against_a_live_zip_release_1213
 annotated   not-detected src/analyze.rs::a_missing_img_is_an_io_error_and_the_header_is_priced_before_it_is_opened
 annotated   not-detected src/analyze.rs::a_pair_loads_from_either_name_and_from_the_bare_stem
 annotated   not-detected src/analyze.rs::decode_file_reaches_the_pair_from_the_hdr
