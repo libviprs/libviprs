@@ -37,6 +37,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   1.7e308])` as the witness and the decision handed to L1.4's precision budget
   (#1032). Nothing is clamped.
 
+- **The `!Sync` justification for `CadDrawing::decode(&self)` is corrected**
+  (issue #1110). `!Sync` rules out concurrent overlap but not a sink calling
+  back into the drawing from `primitive`, which compiles; the docs now show it
+  as a doctest and state the contract instead: a sink must not call back into
+  the drawing it is being fed by, and an implementation may hold a
+  non-re-entrant handle. No signature changed.
+
 ## [0.6.1] — 2026-10-09
 
 ### Fixed
