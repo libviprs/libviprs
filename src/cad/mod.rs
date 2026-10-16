@@ -549,6 +549,86 @@ mod tests {
         );
     }
 
+    /// The five variants that are not a constructor's refusal of an entity do
+    /// not answer the code a release gate counts as malformed entities.
+    ///
+    /// A disk error, an FFI handshake failure and a sink refusal filed as
+    /// `PRIMITIVE_REFUSED` would be counted as bad geometry. They get a code of
+    /// their own, in the core band, and all five land on the same one.
+    #[test]
+    fn a_failure_that_is_not_a_refusal_does_not_file_as_a_refused_entity() {
+        let failures = [
+            CadError::NoSuchView { index: 4, views: 2 },
+            CadError::UnrecognisedSource { decoder: "ladder" },
+            CadError::Io(std::io::Error::other("disk went away")),
+            CadError::provider("acadsharp", std::io::Error::other("handshake")),
+            CadError::sink(std::io::Error::other("full")),
+        ];
+
+        for failure in &failures {
+            let code = failure.diagnostic_code();
+            assert_ne!(
+                code,
+                DiagnosticCode::PRIMITIVE_REFUSED,
+                "{failure:?} is not a refused entity"
+            );
+            assert_eq!(code, DiagnosticCode::DECODE_FAILED, "{failure:?}");
+            assert!(code.is_core_allocated());
+        }
+    }
+
+    /// The control for the one above: every constructor refusal still answers
+    /// the generic code, so a mapping that sent everything to the new code
+    /// would not pass either.
+    #[test]
+    fn every_constructor_refusal_still_files_as_a_refused_entity() {
+        let refusals = [
+            CadError::NonPositive {
+                field: "radius",
+                value: 0.0,
+            },
+            CadError::ZeroLengthVector { field: "normal" },
+            CadError::EmptySweep {
+                field: "angle",
+                value: 1.0,
+            },
+            CadError::TooFewVertices {
+                field: "vertex",
+                got: 1,
+                need: 2,
+            },
+            CadError::CountMismatch {
+                field: "bulge",
+                got: 1,
+                expected: 2,
+                against: "vertices",
+            },
+            CadError::SplineDegree { degree: 0 },
+            CadError::SplineControlCount {
+                degree: 3,
+                need: 4,
+                got: 2,
+            },
+            CadError::SplineKnotCount {
+                got: 1,
+                controls: 4,
+                need: 8,
+            },
+            CadError::KnotsDecrease {
+                index: 1,
+                previous: 2.0,
+                found: 1.0,
+            },
+        ];
+        for refusal in &refusals {
+            assert_eq!(
+                refusal.diagnostic_code(),
+                DiagnosticCode::PRIMITIVE_REFUSED,
+                "{refusal:?}"
+            );
+        }
+    }
+
     /// Messages quote the value they rejected.
     ///
     /// A guard rather than a restatement: the crate's rule is that a refusal
