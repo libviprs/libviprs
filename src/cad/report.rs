@@ -800,6 +800,71 @@ mod tests {
         assert_eq!(backend.name(), "a code the provider allocated");
     }
 
+    /// The three predicates partition the whole `u32` line: every value
+    /// answers exactly one of contract, core and provider, at the edges as well
+    /// as in the middle.
+    #[test]
+    fn every_raw_code_is_in_exactly_one_band() {
+        for raw in [
+            0,
+            99,
+            100,
+            107,
+            108,
+            499,
+            500,
+            503,
+            504,
+            999,
+            1000,
+            u32::MAX,
+        ] {
+            let code = DiagnosticCode::new(raw);
+            let answers = [
+                code.is_contract_allocated(),
+                code.is_core_allocated(),
+                code.is_provider_allocated(),
+            ];
+            assert_eq!(
+                answers.iter().filter(|a| **a).count(),
+                1,
+                "{raw} answered {answers:?} for contract, core, provider"
+            );
+        }
+    }
+
+    /// Every named code sits in the band the rule in [`DiagnosticCode`]'s
+    /// documentation puts it in: the VIPRS specification's own numbers, shared
+    /// with the provider, are 100..=108; what only libviprs defines is 500 and up.
+    #[test]
+    fn every_named_code_is_in_the_band_its_owner_allocates_from() {
+        for code in [
+            DiagnosticCode::UNSUPPORTED_ENTITY,
+            DiagnosticCode::READER_NOTIFICATION,
+            DiagnosticCode::DIMENSION_WITHOUT_BLOCK,
+            DiagnosticCode::HATCH_PATTERN_ONLY,
+            DiagnosticCode::HATCH_LOOP_NOT_POLYGON,
+            DiagnosticCode::UNRESOLVED_BLOCK,
+            DiagnosticCode::NON_UNIFORM_BLOCK_SCALE,
+            DiagnosticCode::NON_FINITE_GEOMETRY,
+            DiagnosticCode::EMPTY_VIEW,
+        ] {
+            assert!(
+                code.is_contract_allocated(),
+                "{code} is a specification code"
+            );
+            assert!((100..=108).contains(&code.get()));
+        }
+        for code in [
+            DiagnosticCode::TEXT_ESCAPE_NOT_DECODED,
+            DiagnosticCode::TEXT_NOT_RECOVERED,
+            DiagnosticCode::PRIMITIVE_REFUSED,
+            DiagnosticCode::DECODE_TRUNCATED,
+        ] {
+            assert!(code.is_core_allocated(), "{code} is a libviprs code");
+        }
+    }
+
     /// An unknown code survives and says so, rather than being refused.
     #[test]
     fn a_code_this_build_has_no_name_for_is_still_carried() {
