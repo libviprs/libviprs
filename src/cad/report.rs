@@ -897,6 +897,60 @@ mod tests {
         }
     }
 
+    /// A provider's own code lands in the provider band by construction,
+    /// however the provider numbers its codes, so it cannot alias a contract
+    /// or a libviprs code and `is_provider_allocated` answers for it.
+    #[test]
+    fn a_provider_code_is_in_the_provider_band_by_construction() {
+        let first = DiagnosticCode::provider(0);
+        assert!(first.is_provider_allocated());
+        assert_eq!(first.get(), DiagnosticCode::PROVIDER_RANGE_START);
+
+        let named = [
+            DiagnosticCode::UNSUPPORTED_ENTITY,
+            DiagnosticCode::NON_FINITE_GEOMETRY,
+            DiagnosticCode::EMPTY_VIEW,
+            DiagnosticCode::TEXT_ESCAPE_NOT_DECODED,
+            DiagnosticCode::TEXT_NOT_RECOVERED,
+            DiagnosticCode::PRIMITIVE_REFUSED,
+            DiagnosticCode::DECODE_TRUNCATED,
+        ];
+        // A provider numbering its own codes from 0, from 1, from 100 and from
+        // 500 is the aliasing the constructor exists to prevent.
+        for offset in [0, 1, 7, 100, 107, 500, 502, 503, u32::MAX - 1, u32::MAX] {
+            let code = DiagnosticCode::provider(offset);
+            assert!(code.is_provider_allocated(), "provider({offset}) = {code}");
+            assert!(!code.is_core_allocated() && !code.is_contract_allocated());
+            assert!(!named.contains(&code), "provider({offset}) aliased {code}");
+        }
+    }
+
+    /// The edge: past the end of the line the offset saturates and stays in the
+    /// provider band, rather than wrapping round into the contract band.
+    #[test]
+    fn a_provider_offset_past_the_end_saturates_instead_of_wrapping() {
+        assert_eq!(DiagnosticCode::provider(u32::MAX).get(), u32::MAX);
+        assert!(DiagnosticCode::provider(u32::MAX).is_provider_allocated());
+        assert_eq!(
+            DiagnosticCode::provider(u32::MAX - DiagnosticCode::PROVIDER_RANGE_START).get(),
+            u32::MAX
+        );
+    }
+
+    /// `new` stays the wire round-trip: it places a code wherever it is told,
+    /// including on a contract constant, which is exactly what reading a code
+    /// back off a wire needs and what a provider allocating its own must not use.
+    #[test]
+    fn new_round_trips_a_code_that_came_off_a_wire() {
+        for code in [
+            DiagnosticCode::NON_FINITE_GEOMETRY,
+            DiagnosticCode::TEXT_NOT_RECOVERED,
+            DiagnosticCode::provider(3),
+        ] {
+            assert_eq!(DiagnosticCode::new(code.get()), code);
+        }
+    }
+
     /// An unknown code survives and says so, rather than being refused.
     #[test]
     fn a_code_this_build_has_no_name_for_is_still_carried() {
