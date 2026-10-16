@@ -18,6 +18,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   original seven shipped), and none of the new names collides with an existing
   root name. The eight primitive structs stay behind `libviprs::cad::`.
 
+- **A severity pinned to each `DiagnosticCode`** (issue #1106).
+  `DiagnosticCode::default_severity`, `Diagnostic::from_code` and
+  `CadError::to_diagnostic` let a provider file a code and get the contract's
+  severity instead of choosing one, so `DecodeReport::has_errors` answers the
+  same for the same condition whichever layer noticed it. `NON_FINITE_GEOMETRY`
+  is an error, the rest of the specification's own codes are warnings, and the
+  codes libviprs allocates are errors. `has_errors` and `errors` now say they
+  read severity, and that a gate should count codes.
+
 - **`DiagnosticCode::DECODE_FAILED` (504), and `CadError::diagnostic_code` no
   longer has a catch-all arm** (issue #1114). `Io`, `Provider`, `Sink`,
   `NoSuchView` and `UnrecognisedSource` used to answer `PRIMITIVE_REFUSED`, the

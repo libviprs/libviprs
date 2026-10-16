@@ -411,6 +411,17 @@ impl CadError {
         Self::Sink(source.into())
     }
 
+    /// This error as a diagnostic: its own code, that code's default severity,
+    /// and its message.
+    ///
+    /// The constructor-side twin of [`Diagnostic::from_code`], so a refusal that
+    /// reaches a report this way reads the same as the one the provider filed
+    /// for the same condition.
+    #[must_use]
+    pub fn to_diagnostic(&self) -> Diagnostic {
+        Diagnostic::from_code(self.diagnostic_code(), self.to_string())
+    }
+
     /// The diagnostic code a provider files for this error, so it reaches a
     /// [`DecodeReport`] under the right code rather than under a guess.
     ///
