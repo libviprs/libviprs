@@ -26,6 +26,8 @@ fn iterating_all_yields_references() {
     }
     assert_eq!(
         names,
-        ["line", "polyline", "arc", "circle", "ellipse", "spline", "polygon", "text"]
+        [
+            "line", "polyline", "arc", "circle", "ellipse", "spline", "polygon", "text"
+        ]
     );
 }

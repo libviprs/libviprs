@@ -1281,7 +1281,19 @@ pub enum PrimitiveKind {
 impl PrimitiveKind {
     /// Every kind, in the order [`PrimitiveCounts`](crate::cad::PrimitiveCounts)
     /// reports them.
-    pub const ALL: [Self; 8] = [
+    ///
+    /// A slice and not an array, on purpose. The enum is `#[non_exhaustive]`
+    /// so that a ninth shape is not a breaking change, and an `[Self; 8]` here
+    /// would put the count back in the public type, where the ninth shape
+    /// breaks anyone who annotated it or passed it to a `[T; 8]` parameter.
+    /// `for kind in PrimitiveKind::ALL` yields `&PrimitiveKind`.
+    pub const ALL: &'static [Self] = &Self::KINDS;
+
+    /// How many kinds there are, for the one fixed-size array that holds a
+    /// count per kind. Private so the number never reaches a public type.
+    pub(crate) const COUNT: usize = Self::KINDS.len();
+
+    const KINDS: [Self; 8] = [
         Self::Line,
         Self::Polyline,
         Self::Arc,
@@ -1898,8 +1910,8 @@ mod tests {
     /// shapes count as one and the report would still look plausible.
     #[test]
     fn every_primitive_kind_has_its_own_counts_slot() {
-        let mut seen = [false; PrimitiveKind::ALL.len()];
-        for kind in PrimitiveKind::ALL {
+        let mut seen = [false; PrimitiveKind::COUNT];
+        for &kind in PrimitiveKind::ALL {
             let slot = kind.index();
             assert!(
                 !seen[slot],

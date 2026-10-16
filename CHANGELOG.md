@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`PrimitiveKind::ALL` is a `&'static [PrimitiveKind]`** (issue #1107). It
+  was `[PrimitiveKind; 8]`, which put the variant count in the public type of a
+  `#[non_exhaustive]` enum, so a ninth shape would have broken anyone who
+  annotated it. `for kind in PrimitiveKind::ALL` now yields `&PrimitiveKind`
+  and `ALL.len()` still works. The `libviprs::cad` IR has no external consumer
+  yet, so this is the cheap time to change it.
+
 ## [0.6.1] — 2026-10-09
 
 ### Fixed

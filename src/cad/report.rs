@@ -301,7 +301,7 @@ impl fmt::Display for Diagnostic {
 /// visible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PrimitiveCounts {
-    counts: [u64; PrimitiveKind::ALL.len()],
+    counts: [u64; PrimitiveKind::COUNT],
 }
 
 impl PrimitiveCounts {
@@ -309,7 +309,7 @@ impl PrimitiveCounts {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            counts: [0; PrimitiveKind::ALL.len()],
+            counts: [0; PrimitiveKind::COUNT],
         }
     }
 
@@ -334,8 +334,8 @@ impl PrimitiveCounts {
     /// Every kind and its count, in [`PrimitiveKind::ALL`] order.
     pub fn iter(&self) -> impl Iterator<Item = (PrimitiveKind, u64)> + '_ {
         PrimitiveKind::ALL
-            .into_iter()
-            .map(|kind| (kind, self.get(kind)))
+            .iter()
+            .map(|&kind| (kind, self.get(kind)))
     }
 
     fn record(&mut self, kind: PrimitiveKind) {
