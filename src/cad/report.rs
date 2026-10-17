@@ -172,6 +172,24 @@ impl DiagnosticCode {
     ///
     /// [`CadError::diagnostic_code`]: crate::cad::CadError::diagnostic_code
     pub const DECODE_FAILED: Self = Self(504);
+    /// Text that asks for a font the output does not carry.
+    ///
+    /// The viewer draws every label in one font, so a drawing's own fonts are
+    /// always substituted. This is what says so, once per font, instead of
+    /// letting a drawing in `romans.shx` look as though it was drawn that way.
+    pub const FONT_SUBSTITUTED: Self = Self(505);
+    /// A character the output has no glyph for.
+    ///
+    /// The font files the viewer serves cover a fixed set of ranges. A
+    /// character outside them falls back to whatever the client has, or to
+    /// nothing, and either is a gap in the drawing that should be named.
+    pub const GLYPH_UNAVAILABLE: Self = Self(506);
+    /// Formatting in a string that the output does not honour: a height or
+    /// width change, tracking, oblique, underline, colour.
+    pub const TEXT_FORMAT_IGNORED: Self = Self(507);
+    /// A view that was asked for and is not enabled: paper space, until the
+    /// viewport transform and clipping fixtures pass.
+    pub const VIEW_NOT_ENABLED: Self = Self(508);
 
     /// The lowest code libviprs itself allocates.
     pub const CORE_RANGE_START: u32 = 500;
@@ -280,7 +298,10 @@ impl DiagnosticCode {
             | Self::HATCH_LOOP_NOT_POLYGON
             | Self::UNRESOLVED_BLOCK
             | Self::NON_UNIFORM_BLOCK_SCALE
-            | Self::EMPTY_VIEW => Severity::Warning,
+            | Self::EMPTY_VIEW
+            | Self::FONT_SUBSTITUTED
+            | Self::GLYPH_UNAVAILABLE
+            | Self::TEXT_FORMAT_IGNORED => Severity::Warning,
             other if other.is_core_allocated() => Severity::Error,
             _ => Severity::Warning,
         }
@@ -304,6 +325,10 @@ impl DiagnosticCode {
             Self::PRIMITIVE_REFUSED => "primitive refused",
             Self::DECODE_TRUNCATED => "decode truncated",
             Self::DECODE_FAILED => "decode failed",
+            Self::FONT_SUBSTITUTED => "font substituted",
+            Self::GLYPH_UNAVAILABLE => "glyph unavailable",
+            Self::TEXT_FORMAT_IGNORED => "text format ignored",
+            Self::VIEW_NOT_ENABLED => "view not enabled",
             other if other.is_provider_allocated() => "a code the provider allocated",
             _ => "a code this build has no name for",
         }
@@ -1008,6 +1033,11 @@ mod tests {
             DiagnosticCode::TEXT_NOT_RECOVERED,
             DiagnosticCode::PRIMITIVE_REFUSED,
             DiagnosticCode::DECODE_TRUNCATED,
+            DiagnosticCode::DECODE_FAILED,
+            DiagnosticCode::FONT_SUBSTITUTED,
+            DiagnosticCode::GLYPH_UNAVAILABLE,
+            DiagnosticCode::TEXT_FORMAT_IGNORED,
+            DiagnosticCode::VIEW_NOT_ENABLED,
         ] {
             assert!(code.is_core_allocated(), "{code} is a libviprs code");
         }
@@ -1089,6 +1119,10 @@ mod tests {
             (DiagnosticCode::PRIMITIVE_REFUSED, Error),
             (DiagnosticCode::DECODE_TRUNCATED, Error),
             (DiagnosticCode::DECODE_FAILED, Error),
+            (DiagnosticCode::FONT_SUBSTITUTED, Warning),
+            (DiagnosticCode::GLYPH_UNAVAILABLE, Warning),
+            (DiagnosticCode::TEXT_FORMAT_IGNORED, Warning),
+            (DiagnosticCode::VIEW_NOT_ENABLED, Error),
         ] {
             assert_eq!(code.default_severity(), expected, "{code}");
         }

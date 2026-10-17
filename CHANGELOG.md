@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **MTEXT formatting, font and glyph warnings, Model Space only, and a bound on
+  repeated blocks** (issues #1231, part of #1034). `cad::display_text` reads
+  MTEXT codes (`\P`, stacks, font and height changes) out of a string and
+  reports what it dropped. The tiler files `FONT_SUBSTITUTED`,
+  `GLYPH_UNAVAILABLE` and `TEXT_FORMAT_IGNORED` diagnostics, refuses a layout
+  view (`VIEW_NOT_ENABLED`) until paper space is enabled, and holds one decode
+  to `TilerConfig::max_primitives`. The `g13_*` DWG fixtures are committed.
+
 - **A black-on-white MapLibre style and a React reference viewer** (issue
   #1033). `vector::style::black_on_white_style` returns the one fixed style
   (white paper, black linework, black text) using only properties MapLibre GL
