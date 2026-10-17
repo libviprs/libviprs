@@ -195,6 +195,8 @@
 //! # Ok::<(), CadError>(())
 //! ```
 
+#[cfg(feature = "dwg-acadsharp")]
+pub mod acadsharp;
 mod decoder;
 mod primitive;
 mod report;

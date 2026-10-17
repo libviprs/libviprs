@@ -114,6 +114,9 @@ jobs:
       # feature-gated, so it is invisible to the default clippy/test jobs above.
       # Lint it explicitly so regressions in the sink are caught (issue #382).
       - run: cargo clippy --all-targets --features object-store-sink -- -D warnings -W clippy::incompatible_msrv -W deprecated
+      # The acadsharp-rs DWG provider (issue #1030) is behind `dwg-acadsharp`. It
+      # compiles without a native archive, so this lints the adapter everywhere.
+      - run: cargo clippy --all-targets --features dwg-acadsharp -- -D warnings -W clippy::incompatible_msrv -W deprecated
       # Same for the SVG rasteriser: `svg` is non-default because it costs 29
       # crates, so the default clippy job never sees `src/svg.rs` at all
       # (issue #502).
@@ -255,6 +258,9 @@ jobs:
       # bare `cargo test` never compiles or runs them. Exercise the feature so
       # the sink's tests and doctests actually execute in CI (issue #382).
       - run: cargo test --features object-store-sink
+      # Without an archive the native tests skip; they need the pinned libviprs-dep
+      # archive and LIBVIPRS_REQUIRE_ACADSHARP_NATIVE=1 to be a real lane (#1030).
+      - run: cargo test --features dwg-acadsharp --test cad_1030_acadsharp_decoder
       # The SVG module and its unit tests are behind the non-default `svg`
       # feature, and the `<image xlink:href>` lockdown tests in
       # tests/path_traversal.rs are gated on it too. Bare `cargo test` runs

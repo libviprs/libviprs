@@ -177,6 +177,9 @@ struct Cell {
 const RAYON: (&str, &str) = ("rayon-core", "rayon-core");
 const ZSTD: (&str, &str) = ("zstd-sys", "zstd");
 const WASM_BINDGEN: (&str, &str) = ("wasm-bindgen-shared", "wasm_bindgen");
+/// `acadsharp-rs` owns the ACadSharp NativeAOT library through `links`, and
+/// only the `dwg-acadsharp` feature reaches it.
+const ACADSHARP: (&str, &str) = ("acadsharp-rs", "acadsharp_native");
 
 /// `blake3` is a direct dependency on every target and compiles its own C, so
 /// it is in every cell's clause-3 set; `zstd-sys` joins it wherever `packfile`
@@ -277,6 +280,20 @@ const CELLS: &[Cell] = &[
         runtime_loaders: LIBLOADING,
         vendored_native: BLAKE3,
     },
+    // The DWG provider. `acadsharp-rs` declares `links` for the NativeAOT
+    // library its own build script resolves from an archive the caller names,
+    // so it is the same shape as `pdfium`: opt-in, and absent from every other
+    // cell. It takes no runtime loader and compiles no vendored C.
+    Cell {
+        label: "host / dwg-acadsharp",
+        target: HOST,
+        features: &["--features", "dwg-acadsharp"],
+        edges: "normal,build",
+        links: &[ACADSHARP, RAYON],
+        discovery: &[],
+        runtime_loaders: &[],
+        vendored_native: BLAKE3,
+    },
     // Every remaining feature at once. These are the ones whose Cargo.toml
     // comments say they add no dependencies, so the cell is the check on that.
     Cell {
@@ -294,7 +311,7 @@ const CELLS: &[Cell] = &[
         target: HOST,
         features: &["--all-features"],
         edges: "normal,build",
-        links: &[RAYON, ZSTD],
+        links: &[ACADSHARP, RAYON, ZSTD],
         discovery: &["pkg-config"],
         runtime_loaders: LIBLOADING,
         vendored_native: BLAKE3_RAV1D_ZSTD,
@@ -341,7 +358,7 @@ const CELLS: &[Cell] = &[
         target: MACOS,
         features: &["--all-features"],
         edges: "normal,build",
-        links: &[RAYON, ZSTD],
+        links: &[ACADSHARP, RAYON, ZSTD],
         discovery: &["pkg-config"],
         runtime_loaders: LIBLOADING,
         vendored_native: BLAKE3_RAV1D_ZSTD,
@@ -371,7 +388,7 @@ const CELLS: &[Cell] = &[
         target: LINUX,
         features: &["--all-features"],
         edges: "normal,build",
-        links: &[RAYON, ZSTD],
+        links: &[ACADSHARP, RAYON, ZSTD],
         discovery: &["pkg-config"],
         runtime_loaders: LIBLOADING,
         vendored_native: BLAKE3_RAV1D_ZSTD,
@@ -401,7 +418,7 @@ const CELLS: &[Cell] = &[
         target: WINDOWS,
         features: &["--all-features"],
         edges: "normal,build",
-        links: &[RAYON, ZSTD],
+        links: &[ACADSHARP, RAYON, ZSTD],
         discovery: &["pkg-config"],
         runtime_loaders: LIBLOADING,
         vendored_native: BLAKE3_RAV1D_ZSTD,
@@ -437,7 +454,7 @@ const CELLS: &[Cell] = &[
         target: WASM,
         features: &["--all-features"],
         edges: "normal,build",
-        links: &[RAYON, WASM_BINDGEN, ZSTD],
+        links: &[ACADSHARP, RAYON, WASM_BINDGEN, ZSTD],
         discovery: &["pkg-config"],
         runtime_loaders: &[],
         vendored_native: BLAKE3_RAV1D_ZSTD,
@@ -830,6 +847,16 @@ fn the_external_library_features_stay_opt_in() {
             "{} must reach pdfium-render only when the feature asks for it. It is the one \
              dependency here on a library outside the tree, so it stays behind `pdfium` / \
              `pdfium-static` (CONTRIBUTING.md).",
+            cell.label
+        );
+
+        let asked_for_dwg = cell.features.iter().any(|f| f.contains("dwg-acadsharp"))
+            || cell.features.contains(&"--all-features");
+        assert_eq!(
+            contains(graph, "acadsharp-rs"),
+            asked_for_dwg,
+            "{} must reach acadsharp-rs only under `dwg-acadsharp`. It owns a native \
+             library through `links`, so it stays opt-in (CONTRIBUTING.md).",
             cell.label
         );
 
