@@ -524,6 +524,31 @@ mod tests {
         );
     }
 
+    /// A non-finite refusal files `NON_FINITE_GEOMETRY`, which is 107, in the
+    /// contract band, on purpose: it is the same condition a provider files
+    /// under the same number when it catches the value first, so the two
+    /// layers have to agree on the code or one drawing reports two things.
+    /// Pinned here because nothing else reaches the arm.
+    #[test]
+    fn a_non_finite_refusal_files_the_contract_code_the_provider_also_files() {
+        let code = CadError::NonFinite {
+            field: "centre",
+            value: f64::INFINITY,
+        }
+        .diagnostic_code();
+
+        assert_eq!(code, DiagnosticCode::NON_FINITE_GEOMETRY);
+        assert_eq!(code.get(), 107, "the number is the specification's");
+        assert!(code.is_contract_allocated());
+        assert!(!code.is_core_allocated());
+        assert!(!code.is_provider_allocated());
+        assert_ne!(
+            code,
+            DiagnosticCode::PRIMITIVE_REFUSED,
+            "the arm must not collapse onto the generic refusal"
+        );
+    }
+
     /// Messages quote the value they rejected.
     ///
     /// A guard rather than a restatement: the crate's rule is that a refusal
