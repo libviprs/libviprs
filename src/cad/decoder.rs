@@ -22,6 +22,40 @@ use crate::cad::{CadError, DecodeReport, Primitive};
 /// `impl Read` flavour to offer. `Path` is kept as its own variant rather than
 /// read into bytes here because a provider given a path may avoid the copy
 /// entirely, and a 200 MB drawing is worth not copying.
+///
+/// # The borrow has to outlive the drawing it opened
+///
+/// [`CadDecoder::open`] ties three lifetimes into one: the decoder's borrow,
+/// the source's borrow, and the [`CadDrawing`] it returns. So whatever a
+/// `CadSource` points at (the buffer behind a `Bytes`, the `Path` itself) has to
+/// stay alive for as long as the drawing does, and a helper that reads a file
+/// into a local and opens it cannot hand the drawing back:
+///
+/// ```compile_fail,E0515
+/// use libviprs::cad::{CadDecoder, CadDrawing, CadError, CadSource};
+///
+/// fn load<'a>(decoder: &'a dyn CadDecoder) -> Result<Box<dyn CadDrawing + 'a>, CadError> {
+///     let bytes = std::fs::read("plan.dwg")?;
+///     decoder.open(CadSource::Bytes(&bytes))
+/// }
+/// ```
+///
+/// A locally built `PathBuf` fails the same way. The fix on the caller's side
+/// is to own the buffer or the path in the scope that also holds the drawing.
+///
+/// The two variants are not equally well served by this. For `Bytes` the
+/// unified lifetime is deliberate: it leaves room for a provider that parses
+/// lazily out of a memory map and keeps reading the buffer after `open`
+/// returns. For `Path` it is conservative: a path is consumed during the call
+/// by construction (a provider reads the file, or hands the path straight to
+/// its library), so nothing about the path needs to outlive `open`, and the
+/// shared lifetime asks of the caller something no provider benefits from.
+///
+/// That is a known cost and not a request to change the signature. The enum is
+/// `#[non_exhaustive]`, so an owning variant (a `PathBuf`, or owned bytes) is
+/// additive and can be added when a caller needs one. If you are about to build
+/// a self-referential holder to keep a buffer beside its drawing, that variant
+/// is the escape hatch, and it is better asked for than worked around.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum CadSource<'a> {
@@ -144,12 +178,40 @@ impl Extents {
     }
 
     /// The box's width in drawing units, never negative.
+    ///
+    /// Two finite extremes can still span infinity: the width of
+    /// `Extents::new([-1.7e308, -1.7e308, 1.7e308, 1.7e308])` is `inf`, because
+    /// `3.4e308` is past `f64::MAX`. `inf` is the correct span of that box, so
+    /// the constructor does not clamp it, and `inf` is never negative. What a
+    /// tiler does with a span it cannot represent belongs to the precision
+    /// budget of L1.4 (#1032), not to this type. Anything that divides by this
+    /// should check [`f64::is_finite`] first.
+    ///
+    /// ```
+    /// use libviprs::cad::Extents;
+    ///
+    /// let huge = Extents::new([-1.7e308, -1.7e308, 1.7e308, 1.7e308]).unwrap();
+    /// assert!(huge.width().is_infinite());
+    /// ```
     #[must_use]
     pub fn width(self) -> f64 {
         self.max_x - self.min_x
     }
 
     /// The box's height in drawing units, never negative.
+    ///
+    /// Two finite extremes can still span infinity here as well: the height of
+    /// `Extents::new([-1.7e308, -1.7e308, 1.7e308, 1.7e308])` is `inf`. As for
+    /// [`Extents::width`], that is the correct span and is not clamped, and the
+    /// decision about an unrepresentable span belongs to L1.4's precision
+    /// budget (#1032).
+    ///
+    /// ```
+    /// use libviprs::cad::Extents;
+    ///
+    /// let huge = Extents::new([-1.7e308, -1.7e308, 1.7e308, 1.7e308]).unwrap();
+    /// assert!(huge.height().is_infinite());
+    /// ```
     #[must_use]
     pub fn height(self) -> f64 {
         self.max_y - self.min_y

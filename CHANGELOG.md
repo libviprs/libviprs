@@ -27,6 +27,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `ALL.len()` still works. The `libviprs::cad` IR has no external consumer
   yet, so this is the cheap time to change it.
 
+- **`CadSource` says the borrow has to outlive the drawing** (issue #1109), with
+  the `E0515` shape a caller hits as a `compile_fail` doctest, the `Bytes` and
+  `Path` asymmetry named, and the owning variant noted as the additive escape
+  hatch. No signature changed.
+
+- **`Extents::width` and `height` document that two finite extremes can span
+  `inf`** (issue #1116), with `Extents::new([-1.7e308, -1.7e308, 1.7e308,
+  1.7e308])` as the witness and the decision handed to L1.4's precision budget
+  (#1032). Nothing is clamped.
+
 ## [0.6.1] — 2026-10-09
 
 ### Fixed
