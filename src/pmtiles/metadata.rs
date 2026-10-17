@@ -120,6 +120,74 @@ pub struct Metadata {
     pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
+/// What is wrong with the `vector_layers` entry of an MVT archive's metadata,
+/// or `None` when it is fine.
+///
+/// The spec makes `vector_layers` a MUST for a vector archive, and it is the
+/// first thing MapLibre tooling and `pmtiles show` read to learn what layers
+/// exist. It lands in [`Metadata::extra`] because the schema has no typed
+/// field for it, which is also why nothing in the tree used to enforce it.
+///
+/// A valid entry is a non-empty array of objects, each with a unique non-empty
+/// string `id`, a `fields` object whose values are strings, and, when present,
+/// integer `minzoom` and `maxzoom` in `0..=30` with `minzoom <= maxzoom`.
+#[must_use]
+pub fn vector_layers_problem(extra: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
+    use serde_json::Value;
+    let Some(layers) = extra.get("vector_layers") else {
+        return Some("the metadata has no vector_layers".into());
+    };
+    let Some(layers) = layers.as_array() else {
+        return Some("vector_layers is not an array".into());
+    };
+    if layers.is_empty() {
+        return Some("vector_layers is empty".into());
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for (i, layer) in layers.iter().enumerate() {
+        let Some(layer) = layer.as_object() else {
+            return Some(format!("vector_layers[{i}] is not an object"));
+        };
+        let Some(id) = layer
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        else {
+            return Some(format!("vector_layers[{i}] has no string id"));
+        };
+        if !seen.insert(id) {
+            return Some(format!("vector_layers repeats the id {id:?}"));
+        }
+        match layer.get("fields") {
+            Some(Value::Object(fields)) => {
+                if let Some((k, _)) = fields.iter().find(|(_, v)| !v.is_string()) {
+                    return Some(format!("vector_layers[{i}].fields.{k} is not a string"));
+                }
+            }
+            _ => return Some(format!("vector_layers[{i}] has no fields object")),
+        }
+        let zoom =
+            |key: &str| -> Result<Option<u64>, String> {
+                match layer.get(key) {
+                    None => Ok(None),
+                    Some(v) => v.as_u64().filter(|z| *z <= 30).map(Some).ok_or_else(|| {
+                        format!("vector_layers[{i}].{key} is not an integer in 0..=30")
+                    }),
+                }
+            };
+        match (zoom("minzoom"), zoom("maxzoom")) {
+            (Err(e), _) | (_, Err(e)) => return Some(e),
+            (Ok(Some(lo)), Ok(Some(hi))) if lo > hi => {
+                return Some(format!(
+                    "vector_layers[{i}] has minzoom {lo} above maxzoom {hi}"
+                ));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 impl Metadata {
     /// Parse metadata from the decompressed bytes of the metadata section.
     ///
