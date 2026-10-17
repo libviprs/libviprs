@@ -52,7 +52,8 @@ pub enum Severity {
     /// Something was not fully represented, and the decode carried on.
     Warning,
     /// Something could not be represented at all: a refused entity, a
-    /// truncated stream, text that was not recovered.
+    /// truncated stream, text that was not recovered. Which severity a code
+    /// carries is [`DiagnosticCode::default_severity`].
     Error,
 }
 
@@ -237,6 +238,54 @@ impl DiagnosticCode {
         self.0 >= Self::PROVIDER_RANGE_START
     }
 
+    /// The severity a diagnostic under this code carries when it is filed from
+    /// the code alone, so the severity is the contract's and not a choice made
+    /// again at every filing site.
+    ///
+    /// * [`DiagnosticCode::NON_FINITE_GEOMETRY`] is an error: the record was
+    ///   dropped and there is no correct number to put in its place. A provider
+    ///   that filed it as a warning and a constructor that filed it as an error
+    ///   would make [`DecodeReport::has_errors`] depend on which layer noticed.
+    /// * The rest of the specification's own codes are warnings: something was
+    ///   not fully represented and the decode carried on.
+    /// * The codes libviprs allocates are errors, and so is one this build has
+    ///   no name for in that band.
+    /// * A code this build has no name for in the provider's band, or in the
+    ///   specification's, is a warning, which is the provider's own judgement
+    ///   and the least this build can say.
+    ///
+    /// A provider that has a reason to disagree can still use
+    /// [`Diagnostic::warning`] or [`Diagnostic::error`] directly. This is what
+    /// [`Diagnostic::from_code`] uses.
+    ///
+    /// ```
+    /// use libviprs::cad::{DiagnosticCode, Severity};
+    ///
+    /// assert_eq!(DiagnosticCode::NON_FINITE_GEOMETRY.default_severity(), Severity::Error);
+    /// assert_eq!(DiagnosticCode::EMPTY_VIEW.default_severity(), Severity::Warning);
+    /// ```
+    #[must_use]
+    pub const fn default_severity(self) -> Severity {
+        match self {
+            Self::NON_FINITE_GEOMETRY
+            | Self::TEXT_ESCAPE_NOT_DECODED
+            | Self::TEXT_NOT_RECOVERED
+            | Self::PRIMITIVE_REFUSED
+            | Self::DECODE_TRUNCATED
+            | Self::DECODE_FAILED => Severity::Error,
+            Self::UNSUPPORTED_ENTITY
+            | Self::READER_NOTIFICATION
+            | Self::DIMENSION_WITHOUT_BLOCK
+            | Self::HATCH_PATTERN_ONLY
+            | Self::HATCH_LOOP_NOT_POLYGON
+            | Self::UNRESOLVED_BLOCK
+            | Self::NON_UNIFORM_BLOCK_SCALE
+            | Self::EMPTY_VIEW => Severity::Warning,
+            other if other.is_core_allocated() => Severity::Error,
+            _ => Severity::Warning,
+        }
+    }
+
     /// A name for this code, or a description of the band it falls in.
     #[must_use]
     pub const fn name(self) -> &'static str {
@@ -293,6 +342,17 @@ impl Diagnostic {
     #[must_use]
     pub fn error(code: DiagnosticCode, message: impl Into<String>) -> Self {
         Self::new(code, Severity::Error, message)
+    }
+
+    /// A diagnostic under `code`, with the severity the code carries by
+    /// default ([`DiagnosticCode::default_severity`]).
+    ///
+    /// This is the one to reach for: a provider names what happened and does
+    /// not pick how much it matters, so the same condition reads the same
+    /// whichever layer noticed it.
+    #[must_use]
+    pub fn from_code(code: DiagnosticCode, message: impl Into<String>) -> Self {
+        Self::new(code, code.default_severity(), message)
     }
 
     fn new(code: DiagnosticCode, severity: Severity, message: impl Into<String>) -> Self {
@@ -599,6 +659,11 @@ impl DecodeReport {
     }
 
     /// The retained diagnostics of [`Severity::Error`].
+    ///
+    /// This reads the severity each diagnostic was filed with, which is the
+    /// filer's choice unless it came through [`Diagnostic::from_code`]. A gate
+    /// that must not depend on that should count by [`Diagnostic::code`], which
+    /// is the part of a diagnostic that is a contract.
     pub fn errors(&self) -> impl Iterator<Item = &Diagnostic> + '_ {
         self.diagnostics
             .iter()
@@ -606,6 +671,13 @@ impl DecodeReport {
     }
 
     /// Whether any retained diagnostic is an error.
+    ///
+    /// This is a statement about severity, and severity is only pinned for a
+    /// diagnostic filed through [`Diagnostic::from_code`] or
+    /// [`CadError::to_diagnostic`](crate::cad::CadError::to_diagnostic). A
+    /// diagnostic built with [`Diagnostic::warning`] under an error code is
+    /// still a warning, so a release gate that has to answer the same for the
+    /// same drawing should branch on the codes it finds.
     ///
     /// Retained only: a report whose limit dropped its errors answers `false`,
     /// which is why [`DecodeReport::dropped_diagnostics`] has to be read
@@ -993,6 +1065,97 @@ mod tests {
         ] {
             assert_eq!(DiagnosticCode::new(code.get()), code);
         }
+    }
+
+    /// Every named code has one severity, and it is the one the contract says.
+    ///
+    /// The control is in the table itself: both answers appear, so a function
+    /// that returned one severity for everything cannot satisfy it.
+    #[test]
+    fn every_named_code_has_a_pinned_default_severity() {
+        use Severity::{Error, Warning};
+        for (code, expected) in [
+            (DiagnosticCode::UNSUPPORTED_ENTITY, Warning),
+            (DiagnosticCode::READER_NOTIFICATION, Warning),
+            (DiagnosticCode::DIMENSION_WITHOUT_BLOCK, Warning),
+            (DiagnosticCode::HATCH_PATTERN_ONLY, Warning),
+            (DiagnosticCode::HATCH_LOOP_NOT_POLYGON, Warning),
+            (DiagnosticCode::UNRESOLVED_BLOCK, Warning),
+            (DiagnosticCode::NON_UNIFORM_BLOCK_SCALE, Warning),
+            (DiagnosticCode::NON_FINITE_GEOMETRY, Error),
+            (DiagnosticCode::EMPTY_VIEW, Warning),
+            (DiagnosticCode::TEXT_ESCAPE_NOT_DECODED, Error),
+            (DiagnosticCode::TEXT_NOT_RECOVERED, Error),
+            (DiagnosticCode::PRIMITIVE_REFUSED, Error),
+            (DiagnosticCode::DECODE_TRUNCATED, Error),
+            (DiagnosticCode::DECODE_FAILED, Error),
+        ] {
+            assert_eq!(code.default_severity(), expected, "{code}");
+        }
+    }
+
+    /// A code this build has no name for still answers, by band: libviprs's own
+    /// unknown codes are errors (a code this crate allocated and this build
+    /// cannot read is not one to wave through), and the specification's and the
+    /// provider's unknown codes are warnings, the provider's own judgement.
+    #[test]
+    fn an_unnamed_code_takes_its_default_severity_from_its_band() {
+        assert_eq!(
+            DiagnosticCode::new(142).default_severity(),
+            Severity::Warning
+        );
+        assert_eq!(DiagnosticCode::new(650).default_severity(), Severity::Error);
+        assert_eq!(
+            DiagnosticCode::provider(9).default_severity(),
+            Severity::Warning
+        );
+    }
+
+    /// A diagnostic filed from a code takes the code's severity, keeps the
+    /// message, and still takes an entity and a view.
+    #[test]
+    fn a_diagnostic_filed_from_a_code_takes_the_codes_severity() {
+        let lost = Diagnostic::from_code(DiagnosticCode::TEXT_NOT_RECOVERED, "embedded MTEXT");
+        assert_eq!(lost.severity(), Severity::Error);
+        assert_eq!(lost.code(), DiagnosticCode::TEXT_NOT_RECOVERED);
+        assert_eq!(lost.message(), "embedded MTEXT");
+
+        let empty = Diagnostic::from_code(DiagnosticCode::EMPTY_VIEW, "Layout1").with_view(2);
+        assert_eq!(empty.severity(), Severity::Warning);
+        assert_eq!(empty.view(), Some(2));
+    }
+
+    /// The same condition filed from the provider's side and from a primitive
+    /// constructor's side answers the same way, so `has_errors` does not depend
+    /// on which layer noticed the non-finite value first.
+    #[test]
+    fn the_same_code_filed_from_both_layers_reports_the_same_way() {
+        let from_the_provider =
+            Diagnostic::from_code(DiagnosticCode::NON_FINITE_GEOMETRY, "record 7C had a NaN");
+        let from_a_constructor = crate::cad::CadError::NonFinite {
+            field: "centre",
+            value: f64::NAN,
+        }
+        .to_diagnostic();
+
+        assert_eq!(from_the_provider.code(), from_a_constructor.code());
+        assert_eq!(from_the_provider.severity(), from_a_constructor.severity());
+
+        let answers: Vec<bool> = [from_the_provider, from_a_constructor]
+            .into_iter()
+            .map(|d| {
+                let mut report = DecodeReport::new();
+                report.push(d);
+                report.has_errors()
+            })
+            .collect();
+        assert_eq!(answers, [true, true]);
+
+        // The control: a warning code does not turn into an error because it
+        // went through the same door.
+        let mut report = DecodeReport::new();
+        report.push(Diagnostic::from_code(DiagnosticCode::EMPTY_VIEW, "Layout1"));
+        assert!(!report.has_errors());
     }
 
     /// An unknown code survives and says so, rather than being refused.

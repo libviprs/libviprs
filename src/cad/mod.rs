@@ -411,6 +411,17 @@ impl CadError {
         Self::Sink(source.into())
     }
 
+    /// This error as a diagnostic: its own code, that code's default severity,
+    /// and its message.
+    ///
+    /// The constructor-side twin of [`Diagnostic::from_code`], so a refusal that
+    /// reaches a report this way reads the same as the one the provider filed
+    /// for the same condition.
+    #[must_use]
+    pub fn to_diagnostic(&self) -> Diagnostic {
+        Diagnostic::from_code(self.diagnostic_code(), self.to_string())
+    }
+
     /// The diagnostic code a provider files for this error, so it reaches a
     /// [`DecodeReport`] under the right code rather than under a guess.
     ///
@@ -653,6 +664,24 @@ mod tests {
                 "{refusal:?}"
             );
         }
+    }
+
+    /// An error becomes a diagnostic under its own code, with that code's
+    /// severity and its own message, so a provider files a code and does not
+    /// choose a severity.
+    #[test]
+    fn an_error_becomes_a_diagnostic_under_its_own_code_and_severity() {
+        let refusal = CadError::NonPositive {
+            field: "radius",
+            value: -4.5,
+        };
+        let diagnostic = refusal.to_diagnostic();
+        assert_eq!(diagnostic.code(), refusal.diagnostic_code());
+        assert_eq!(
+            diagnostic.severity(),
+            refusal.diagnostic_code().default_severity()
+        );
+        assert_eq!(diagnostic.message(), refusal.to_string());
     }
 
     /// Messages quote the value they rejected.
