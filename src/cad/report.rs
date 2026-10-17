@@ -100,6 +100,10 @@ impl fmt::Display for Severity {
 /// kind: [`DiagnosticCode::PRIMITIVE_REFUSED`] is this crate's own validation
 /// rules, and the text pair and the truncation are rules only libviprs states.
 ///
+/// A provider's own codes are not in either of the first two bands.
+/// [`DiagnosticCode::provider`] allocates one in the third by construction,
+/// and [`DiagnosticCode::new`] is for a code read back off a wire.
+///
 /// A closed set would break on the first real stream. Adding a code is
 /// deliberately not a breaking change, so a consumer that refused an unknown
 /// one would start failing on files it read correctly the day before.
@@ -163,9 +167,36 @@ impl DiagnosticCode {
     pub const PROVIDER_RANGE_START: u32 = 1000;
 
     /// Wraps a raw code, including one this build has no name for.
+    ///
+    /// This is the wire round-trip constructor: it places a code exactly where
+    /// it is told, so `new(500)` *is* [`DiagnosticCode::TEXT_ESCAPE_NOT_DECODED`].
+    /// That is what reading a code back off a report needs, and it is the wrong
+    /// tool for a provider allocating its own, which should use
+    /// [`DiagnosticCode::provider`] so it cannot land on someone else's number.
     #[must_use]
     pub const fn new(raw: u32) -> Self {
         Self(raw)
+    }
+
+    /// A code the backing provider allocates, offset into the provider band so
+    /// it cannot collide with a contract or libviprs code however the provider
+    /// numbers its own.
+    ///
+    /// `provider(0)` is [`DiagnosticCode::PROVIDER_RANGE_START`]. An offset
+    /// that would run past the top of the `u32` line saturates there instead of
+    /// wrapping back into the contract band, so the result is always
+    /// [`DiagnosticCode::is_provider_allocated`].
+    ///
+    /// ```
+    /// use libviprs::cad::DiagnosticCode;
+    ///
+    /// let mine = DiagnosticCode::provider(7);
+    /// assert!(mine.is_provider_allocated());
+    /// assert_ne!(mine, DiagnosticCode::new(7));
+    /// ```
+    #[must_use]
+    pub const fn provider(offset: u32) -> Self {
+        Self(Self::PROVIDER_RANGE_START.saturating_add(offset))
     }
 
     /// The raw code.
@@ -894,6 +925,60 @@ mod tests {
             DiagnosticCode::DECODE_TRUNCATED,
         ] {
             assert!(code.is_core_allocated(), "{code} is a libviprs code");
+        }
+    }
+
+    /// A provider's own code lands in the provider band by construction,
+    /// however the provider numbers its codes, so it cannot alias a contract
+    /// or a libviprs code and `is_provider_allocated` answers for it.
+    #[test]
+    fn a_provider_code_is_in_the_provider_band_by_construction() {
+        let first = DiagnosticCode::provider(0);
+        assert!(first.is_provider_allocated());
+        assert_eq!(first.get(), DiagnosticCode::PROVIDER_RANGE_START);
+
+        let named = [
+            DiagnosticCode::UNSUPPORTED_ENTITY,
+            DiagnosticCode::NON_FINITE_GEOMETRY,
+            DiagnosticCode::EMPTY_VIEW,
+            DiagnosticCode::TEXT_ESCAPE_NOT_DECODED,
+            DiagnosticCode::TEXT_NOT_RECOVERED,
+            DiagnosticCode::PRIMITIVE_REFUSED,
+            DiagnosticCode::DECODE_TRUNCATED,
+        ];
+        // A provider numbering its own codes from 0, from 1, from 100 and from
+        // 500 is the aliasing the constructor exists to prevent.
+        for offset in [0, 1, 7, 100, 107, 500, 502, 503, u32::MAX - 1, u32::MAX] {
+            let code = DiagnosticCode::provider(offset);
+            assert!(code.is_provider_allocated(), "provider({offset}) = {code}");
+            assert!(!code.is_core_allocated() && !code.is_contract_allocated());
+            assert!(!named.contains(&code), "provider({offset}) aliased {code}");
+        }
+    }
+
+    /// The edge: past the end of the line the offset saturates and stays in the
+    /// provider band, rather than wrapping round into the contract band.
+    #[test]
+    fn a_provider_offset_past_the_end_saturates_instead_of_wrapping() {
+        assert_eq!(DiagnosticCode::provider(u32::MAX).get(), u32::MAX);
+        assert!(DiagnosticCode::provider(u32::MAX).is_provider_allocated());
+        assert_eq!(
+            DiagnosticCode::provider(u32::MAX - DiagnosticCode::PROVIDER_RANGE_START).get(),
+            u32::MAX
+        );
+    }
+
+    /// `new` stays the wire round-trip: it places a code wherever it is told,
+    /// including on a contract constant, which is exactly what reading a code
+    /// back off a wire needs and what a provider allocating its own must not use.
+    #[test]
+    fn new_round_trips_a_code_that_came_off_a_wire() {
+        for code in [
+            DiagnosticCode::NON_FINITE_GEOMETRY,
+            DiagnosticCode::TEXT_NOT_RECOVERED,
+            DiagnosticCode::provider(3),
+        ] {
+            assert_eq!(DiagnosticCode::new(code.get()), code);
         }
     }
 
