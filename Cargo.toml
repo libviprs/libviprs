@@ -308,6 +308,11 @@ pdfium-render = { version = "0.9.4", default-features = false, features = [
 	"image_025",
 ] }
 proptest = "1"
+# The DWG provider (issue #1030), optional and off by default. It is a git
+# dependency because `acadsharp-rs` is not on crates.io yet, which means this
+# crate cannot be published to crates.io while the line below stands: swap it
+# for a registry version in the same change that publishes `acadsharp-rs`.
+acadsharp-rs = { git = "https://github.com/libviprs/acadsharp-rs", rev = "f23f37bd453e02e660ef655faa381c45509d8ac1", version = "0.1.0" }
 # Pure-Rust FFT (MIT OR Apache-2.0) used by the frequency-domain filter
 # operations in `src/freqfilt.rs` (`fwfft`, `invfft`, `freqmult`, `spectrum`,
 # `phasecor`). Chosen over an FFTW binding to keep the crate pure Rust; its
@@ -486,6 +491,13 @@ pdfium-static = ["pdfium", "pdfium-render/static"]
 # The name reflects that this is a generic object-store seam requiring an
 # injected backend, not a ready-to-use S3 client.
 object-store-sink = []
+# The `acadsharp-rs` DWG provider behind `cad::CadDecoder` (issue #1030). The
+# CAD-neutral core (`cad`) is not behind a feature and builds without this one;
+# this feature only adds `cad::acadsharp::AcadSharpDecoder`. It needs no .NET at
+# run time: `acadsharp-rs` links a NativeAOT archive that its own build script
+# resolves, and a build with no archive still compiles and reports `Unlinked`
+# from `AcadSharpDecoder::new` instead of failing.
+dwg-acadsharp = ["dep:acadsharp-rs"]
 # Documentation-only deprecated alias for `object-store-sink`. Cargo has no
 # mechanism to mark a feature deprecated, so enabling `s3` emits NO build-time
 # warning: consumers pinned to `features = ["s3"]` get zero automated signal
@@ -610,6 +622,7 @@ test-util = []
 jp2k = ["dep:hayro-jpeg2000", "dep:openjpeg2-pure"]
 
 [dependencies]
+acadsharp-rs = { workspace = true, optional = true }
 ab_glyph = { workspace = true }
 blake3 = { workspace = true }
 exr = { workspace = true }

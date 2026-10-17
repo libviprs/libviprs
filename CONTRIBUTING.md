@@ -254,6 +254,23 @@ stays opt-in.
 Its `bindings` feature would pull `bindgen` and run libclang over the PDFium
 headers at build time. Nothing here enables it, and nothing should.
 
+### `dwg-acadsharp` is an external native library, and it is opt-in
+
+`--features dwg-acadsharp` pulls `acadsharp-rs`, which links a NativeAOT build
+of ACadSharp. That library does not come down with the crate: `acadsharp-rs`'s
+build script resolves an archive from `ACADSHARP_NATIVE_DIR` (or the cargo
+cache) and reads nothing off the network. It declares `links =
+"acadsharp_native"`, which the `links` allowlist in `tests/dependency_policy.rs`
+names for this feature only. With no archive the build still succeeds and
+`AcadSharpDecoder::new` returns an error naming the unlinked state, so the
+feature never makes a build fail for want of a library. No .NET runtime is
+needed at run time. The CAD-neutral core, `libviprs::cad`, is not behind a
+feature and does not depend on any of this.
+
+The dependency is a git dependency while `acadsharp-rs` is unpublished, which
+means this crate cannot be published to crates.io until that line in the root
+`Cargo.toml` becomes a registry version.
+
 ### Adding a dependency
 
 Before you add one, check it against the rule. Start with the mechanical half,
