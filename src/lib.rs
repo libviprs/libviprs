@@ -207,6 +207,7 @@ pub mod svg;
 pub(crate) mod sync_queue;
 pub mod textio;
 pub mod uhdr;
+pub mod vector;
 pub mod verify;
 pub mod webp;
 

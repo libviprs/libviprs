@@ -112,7 +112,10 @@ use std::fmt;
 use std::io;
 
 use crate::pmtiles::directory::deserialize_entries;
-use crate::pmtiles::{Entry, Header, PmTilesError, RangeReader, header::HEADER_BYTES};
+use crate::pmtiles::metadata::vector_layers_problem;
+use crate::pmtiles::{
+    Entry, Header, Metadata, PmTilesError, RangeReader, TileType, header::HEADER_BYTES,
+};
 
 // ---------------------------------------------------------------------------
 // Limits
@@ -399,6 +402,15 @@ pub enum Finding {
         index: usize,
     },
 
+    /// An MVT archive whose metadata could not be read: it is past the size
+    /// this run will read, does not decompress, or is not JSON.
+    VectorMetadataUnreadable { reason: String },
+
+    /// An MVT archive whose metadata has no usable `vector_layers`. The spec
+    /// makes it a MUST for a vector archive, and it is how a client learns
+    /// which layers exist before it fetches a tile.
+    VectorLayersInvalid { reason: String },
+
     /// More leaf directories than this run will follow.
     TooManyLeafDirectories { found: usize, limit: usize },
 
@@ -537,6 +549,12 @@ impl fmt::Display for Finding {
                 "{directory} entry {index} is a leaf pointer, and the header says the leaf \
                  region is empty"
             ),
+            Self::VectorMetadataUnreadable { reason } => {
+                write!(f, "the vector archive's metadata cannot be read: {reason}")
+            }
+            Self::VectorLayersInvalid { reason } => {
+                write!(f, "the vector archive's vector_layers is invalid: {reason}")
+            }
             Self::TooManyLeafDirectories { found, limit } => write!(
                 f,
                 "the archive has at least {found} leaf directories, past the {limit} this check \
@@ -795,6 +813,10 @@ pub fn validate<R: RangeReader + ?Sized>(
         return Ok(report);
     }
 
+    if header.tile_type == TileType::Mvt {
+        check_vector_metadata(reader, &header, size, &mut report, limits)?;
+    }
+
     // The total-work budget, sized against the archive rather than picked.
     //
     // Every directory this walk reads lives in the root region or the leaf
@@ -886,6 +908,69 @@ pub fn validate<R: RangeReader + ?Sized>(
     }
 
     Ok(report)
+}
+
+/// The MUSTs a vector archive's metadata carries, which no other tile type has.
+///
+/// Reads the metadata section only for an MVT archive, so every other archive
+/// is validated exactly as it was before. The read is bounded twice: the
+/// compressed section is refused past `max_directory_bytes`, and inflation is
+/// capped at the same figure, so a metadata bomb costs a finding rather than
+/// memory.
+fn check_vector_metadata<R: RangeReader + ?Sized>(
+    reader: &R,
+    header: &Header,
+    size: Option<u64>,
+    report: &mut Report,
+    limits: &ValidationLimits,
+) -> Result<(), PmTilesError> {
+    let unreadable = |report: &mut Report, reason: String| {
+        push(report, Finding::VectorMetadataUnreadable { reason }, limits);
+    };
+    let in_bounds = header
+        .metadata_offset
+        .checked_add(header.metadata_length)
+        .is_some_and(|end| size.is_none_or(|s| end <= s));
+    if header.metadata_length == 0 || !in_bounds {
+        let reason = if header.metadata_length == 0 {
+            "the metadata section is empty".to_owned()
+        } else {
+            "the metadata section runs past the end of the archive".to_owned()
+        };
+        unreadable(report, reason);
+        return Ok(());
+    }
+    let cap = limits.max_directory_bytes;
+    let Some(len) = usize::try_from(header.metadata_length)
+        .ok()
+        .filter(|l| *l <= cap)
+    else {
+        unreadable(
+            report,
+            format!(
+                "the metadata section is {} bytes, past the {cap} this check reads",
+                header.metadata_length
+            ),
+        );
+        return Ok(());
+    };
+    let stored = reader.read_range(header.metadata_offset, len)?;
+    let json = match header.internal_compression.decompress(&stored, cap) {
+        Ok(json) => json,
+        Err(e) => {
+            unreadable(report, e.to_string());
+            return Ok(());
+        }
+    };
+    match Metadata::try_from_json(&json) {
+        Ok(metadata) => {
+            if let Some(reason) = vector_layers_problem(&metadata.extra) {
+                push(report, Finding::VectorLayersInvalid { reason }, limits);
+            }
+        }
+        Err(e) => unreadable(report, e.to_string()),
+    }
+    Ok(())
 }
 
 /// Mutable state carried through the recursion.

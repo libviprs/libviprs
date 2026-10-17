@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **An MVT encoder and a vector PMTiles writer and reader** (issue #1031).
+  `vector::mvt` writes and parses Mapbox Vector Tiles (lines, polygons with
+  holes, points, string, number and boolean properties) with the winding set
+  by the encoder and every parser count checked against the bytes that remain.
+  `vector::VectorArchiveWriter` gzips each tile itself, labels the archive MVT
+  with gzip tiles, and builds `vector_layers` from a declared schema, refusing
+  a tile that strays from it. `vector::VectorArchive` opens an archive over any
+  `RangeReader`. `pmtiles::validate` now reports an MVT archive whose metadata
+  has no valid `vector_layers`; other tile types are validated as before.
+
+- **`dwg-acadsharp`, the acadsharp-rs provider behind `CadDecoder`** (issue
+  #1030). `cad::acadsharp::AcadSharpDecoder` opens a DWG from a path or bytes,
+  lists its views and streams primitives, turning every reader warning and
+  every refused primitive into a diagnostic and ending a short stream as
+  truncated. Off by default; the CAD-neutral core builds without it.
+
 - **The crate-root `cad` re-exports are closed under their own signatures**
   (issue #1108). `libviprs::PrimitiveSink` could be named from the root and
   not implemented, because `Primitive` was not exported, and `DecodeReport`
