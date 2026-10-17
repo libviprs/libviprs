@@ -1160,44 +1160,88 @@ mod tests {
     }
 
     /// A `&mut` to a sink and a boxed sink are both sinks, so
-    /// `&mut dyn PrimitiveSink` can be passed on.
+    /// `&mut dyn PrimitiveSink` can be passed on, and each forwards all three
+    /// methods.
+    ///
+    /// `primitives` is the one a wrapper can lose without anything going red:
+    /// the default implementation is correct, just slower, so a wrapper that
+    /// dropped its override would still deliver every primitive. A sink that
+    /// batches (a feature-block writer is the stated motivation) would then
+    /// quietly degrade to one call per primitive. So the counters tell the
+    /// paths apart: a wrapper without the override leaves `batches` at 0 and
+    /// `singles` at 4.
     #[test]
     fn a_borrowed_and_a_boxed_sink_forward_every_method() {
+        fn line() -> Result<Primitive, CadError> {
+            Ok(Line::new([0.0; 3], [1.0, 0.0, 0.0])?.into())
+        }
+
         fn drive(sink: &mut dyn PrimitiveSink) -> Result<(), CadError> {
-            sink.primitive(Line::new([0.0; 3], [1.0, 0.0, 0.0])?.into())?;
+            sink.primitive(line()?)?;
+            let mut batch = vec![line()?, line()?, line()?].into_iter();
+            sink.primitives(&mut batch)?;
             sink.finish()
         }
 
-        struct Tally(Rc<RefCell<(usize, usize)>>);
+        #[derive(Default, Debug, PartialEq, Eq)]
+        struct Counts {
+            singles: usize,
+            batches: usize,
+            batched: usize,
+            finishes: usize,
+        }
+
+        struct Tally(Rc<RefCell<Counts>>);
 
         impl PrimitiveSink for Tally {
             fn primitive(&mut self, _primitive: Primitive) -> Result<(), CadError> {
-                self.0.borrow_mut().0 += 1;
+                self.0.borrow_mut().singles += 1;
+                Ok(())
+            }
+
+            fn primitives(
+                &mut self,
+                batch: &mut dyn Iterator<Item = Primitive>,
+            ) -> Result<(), CadError> {
+                let mut counts = self.0.borrow_mut();
+                counts.batches += 1;
+                counts.batched += batch.count();
                 Ok(())
             }
 
             fn finish(&mut self) -> Result<(), CadError> {
-                self.0.borrow_mut().1 += 1;
+                self.0.borrow_mut().finishes += 1;
                 Ok(())
             }
         }
 
-        let shared = Rc::new(RefCell::new((0, 0)));
+        let expected = Counts {
+            singles: 1,
+            batches: 1,
+            batched: 3,
+            finishes: 1,
+        };
 
         // Through the `&mut T` impl: `&mut &mut Tally` is what coerces.
-        let mut owned = Tally(Rc::clone(&shared));
+        let through_a_borrow = Rc::new(RefCell::new(Counts::default()));
+        let mut owned = Tally(Rc::clone(&through_a_borrow));
         let mut borrowed: &mut Tally = &mut owned;
         drive(&mut borrowed).unwrap();
+        assert_eq!(
+            *through_a_borrow.borrow(),
+            expected,
+            "`&mut T` has to forward `primitive`, `primitives` and `finish`; a \
+             dropped `primitives` override reads as batches 0 and singles 4"
+        );
 
         // And through the `Box<T>` impl.
-        let mut boxed: Box<Tally> = Box::new(Tally(Rc::clone(&shared)));
+        let through_a_box = Rc::new(RefCell::new(Counts::default()));
+        let mut boxed: Box<Tally> = Box::new(Tally(Rc::clone(&through_a_box)));
         drive(&mut boxed).unwrap();
-
         assert_eq!(
-            *shared.borrow(),
-            (2, 2),
-            "both wrappers have to forward both methods; a wrapper that \
-             dropped `finish` would leave the second number at 1"
+            *through_a_box.borrow(),
+            expected,
+            "`Box<T>` has to forward all three as well"
         );
     }
 
@@ -1223,11 +1267,18 @@ mod tests {
     /// `Model`, which would silently tile the wrong thing.
     #[test]
     fn an_unknown_view_kind_is_not_read_as_model_space() {
-        let view = CadView::new(3, 77, [0.0, 0.0, 1.0, 1.0], 0, "something later");
+        // A non-zero count, because a count asserted against a view built with
+        // zero holds against any constant. The inverted box is the one an empty
+        // view reports, and it is what separates `raw_extents` (the four numbers
+        // as given) from `extents` (the rule applied).
+        let inverted = [1e20, 1e20, -1e20, -1e20];
+        let view = CadView::new(3, 77, inverted, 4096, "something later");
         assert_eq!(view.kind(), ViewKind::Unknown);
         assert_eq!(view.raw_kind(), 77);
         assert_eq!(view.index(), 3);
         assert_eq!(view.name(), "something later");
-        assert_eq!(view.entity_count(), 0);
+        assert_eq!(view.entity_count(), 4096);
+        assert_eq!(view.raw_extents(), inverted);
+        assert_eq!(view.extents(), None);
     }
 }
