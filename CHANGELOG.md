@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A black-on-white MapLibre style and a React reference viewer** (issue
+  #1033). `vector::style::black_on_white_style` returns the one fixed style
+  (white paper, black linework, black text) using only properties MapLibre GL
+  JS, Android and iOS all implement. `web/vector-viewer/` is a React and
+  MapLibre harness that streams an archive with Range requests, with Playwright
+  specs for Range and CORS behaviour (including against RustFS), a black on
+  white pixel check, stroke crispness through every generated zoom plus two of
+  over-zoom, visual regression in both themes, and measured WCAG contrast.
+
 - **A vector tiler** (issue #1032). `vector::tiler::tile_primitives` and
   `build_archive` turn world-space primitives into MVT tiles: bounds fitted
   into a unit square with one scale on both axes, curves tessellated to a

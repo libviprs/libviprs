@@ -1,0 +1,100 @@
+/* Two themes for the chrome around the drawing. The drawing itself is always
+   black on white paper: that is the product, not a theme. Every text and
+   background pair here is measured by e2e/contrast.spec.ts in both themes. */
+:root,
+:root[data-theme='light'] {
+  color-scheme: light;
+  --bg: #ffffff;
+  --fg: #14161a;
+  --muted: #4a4f57;
+  --surface: #eef0f3;
+  --border: #6b7280;
+  --focus: #0b57d0;
+  --error-bg: #fdecec;
+  --error-fg: #7a1212;
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --bg: #101214;
+  --fg: #f2f4f7;
+  --muted: #b3b9c2;
+  --surface: #1d2024;
+  --border: #8b93a0;
+  --focus: #8ab4f8;
+  --error-bg: #3a1414;
+  --error-fg: #ffd9d9;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 16px/1.4 system-ui, sans-serif;
+}
+
+.viewer {
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  min-height: 100vh;
+  padding: 0 16px;
+  gap: 12px;
+}
+
+.viewer header,
+.viewer footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 0;
+}
+
+h1 {
+  margin: 0;
+  font-size: 1.125rem;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+button {
+  font: inherit;
+  color: var(--fg);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 12px;
+  min-height: 36px;
+  cursor: pointer;
+}
+
+button:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.map-frame {
+  border: 1px solid var(--border);
+  min-height: 420px;
+  position: relative;
+}
+
+.map {
+  position: absolute;
+  inset: 0;
+}
+
+[role='alert'] {
+  background: var(--error-bg);
+  color: var(--error-fg);
+  border: 1px solid var(--border);
+  padding: 8px 12px;
+  border-radius: 6px;
+}

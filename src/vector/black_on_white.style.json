@@ -1,0 +1,70 @@
+{
+  "version": 8,
+  "name": "libviprs black on white",
+  "metadata": {
+    "libviprs:purpose": "Black linework and text on white, for a vector PMTiles archive made by libviprs. Uses only style properties that MapLibre GL JS, MapLibre Native Android and MapLibre Native iOS all implement."
+  },
+  "sources": {
+    "drawing": {
+      "type": "vector",
+      "url": "pmtiles://REPLACED_BY_black_on_white_style"
+    }
+  },
+  "glyphs": "REPLACED_BY_black_on_white_style",
+  "layers": [
+    {
+      "id": "paper",
+      "type": "background",
+      "paint": {
+        "background-color": "#ffffff"
+      }
+    },
+    {
+      "id": "linework",
+      "type": "line",
+      "source": "drawing",
+      "source-layer": "lines",
+      "layout": {
+        "line-cap": "butt",
+        "line-join": "round"
+      },
+      "paint": {
+        "line-color": "#000000",
+        "line-opacity": 1,
+        "line-width": 1.25
+      }
+    },
+    {
+      "id": "annotations",
+      "type": "symbol",
+      "source": "drawing",
+      "source-layer": "text",
+      "layout": {
+        "symbol-placement": "point",
+        "text-field": ["get", "text"],
+        "text-font": ["Noto Sans Regular"],
+        "text-size": [
+          "interpolate",
+          ["exponential", 2],
+          ["zoom"],
+          0,
+          ["get", "h0"],
+          24,
+          ["*", ["get", "h0"], 16777216]
+        ],
+        "text-rotate": ["get", "rotation"],
+        "text-rotation-alignment": "map",
+        "text-pitch-alignment": "map",
+        "text-anchor": "bottom-left",
+        "text-allow-overlap": true,
+        "text-ignore-placement": true,
+        "text-keep-upright": false,
+        "text-padding": 0,
+        "text-max-width": 1000
+      },
+      "paint": {
+        "text-color": "#000000"
+      }
+    }
+  ]
+}

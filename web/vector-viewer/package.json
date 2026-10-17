@@ -1,0 +1,29 @@
+{
+  "name": "libviprs-vector-viewer",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Reference React integration for a libviprs vector PMTiles archive: black linework and text on white, streamed with HTTP Range requests.",
+  "scripts": {
+    "build": "tsc --noEmit && vite build",
+    "dev": "vite",
+    "test:e2e": "playwright test"
+  },
+  "dependencies": {
+    "maplibre-gl": "6.11.2",
+    "pmtiles": "4.5.0",
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.0",
+    "@types/node": "25.9.9",
+    "@types/pngjs": "6.0.5",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.1",
+    "pngjs": "7.0.0",
+    "typescript": "7.0.2",
+    "vite": "8.3.2"
+  }
+}
