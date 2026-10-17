@@ -33,6 +33,7 @@
 pub mod archive;
 pub mod clip;
 pub mod mvt;
+pub mod style;
 pub mod tessellate;
 pub mod tiler;
 
