@@ -895,6 +895,9 @@ impl Spline {
     /// [`CadError::SplineControlCount`] below `degree + 1` control points,
     /// [`CadError::SplineKnotCount`] below `controls + 1` knots,
     /// [`CadError::KnotsDecrease`] for a knot vector that turns around,
+    /// [`CadError::EmptySweep`] for one whose first and last knot are equal, so
+    /// it spans no parameter interval at all (the same refusal `Arc` and
+    /// `Ellipse` give an empty range),
     /// [`CadError::CountMismatch`] for a non-empty weight run of the wrong
     /// length, [`CadError::NonPositive`] for a weight at or below zero, and
     /// [`CadError::NonFinite`] for any non-finite number.
@@ -950,6 +953,17 @@ impl Spline {
                 });
             }
             previous = knot;
+        }
+        // `previous` is the last knot now. A first knot equal to it leaves a
+        // single-point parameter domain, which is the empty range `Arc` and
+        // `Ellipse` refuse as well. It takes no tolerance to say so; whether a
+        // narrower domain (the degree-th knot against the last) is usable is the
+        // evaluator's question.
+        if knots[0] == previous {
+            return Err(CadError::EmptySweep {
+                field: "knot vector",
+                value: previous,
+            });
         }
         for weight in weights {
             positive("spline weight", *weight)?;
@@ -1902,6 +1916,46 @@ mod tests {
             })
         ));
         assert!(Text::new([0.0; 3], f64::MIN_POSITIVE, 0.0, "A").is_ok());
+    }
+
+    /// A knot vector that spans nothing is refused, as `Arc` and `Ellipse` refuse
+    /// the same empty parameter range.
+    ///
+    /// The control is the same shapes with a knot vector that does span, so the
+    /// refusal cannot be passing against a constructor that refuses everything.
+    /// The harm downstream is not measured here (there is no evaluator yet);
+    /// what is established is the inconsistency with the other two curves.
+    #[test]
+    fn a_constant_knot_vector_is_refused_as_an_empty_sweep() {
+        let two = [[0.0; 3], [1.0, 1.0, 0.0]];
+        let three = [[0.0; 3], [1.0, 1.0, 0.0], [2.0, 0.0, 0.0]];
+
+        for refused in [
+            Spline::new(1, 0, &[7.0, 7.0, 7.0, 7.0], &two, &[]),
+            Spline::new(2, 0, &[0.0; 6], &three, &[]),
+            Spline::new(1, 0, &[-3.5, -3.5, -3.5], &two, &[]),
+        ] {
+            assert!(
+                matches!(
+                    refused,
+                    Err(CadError::EmptySweep {
+                        field: "knot vector",
+                        ..
+                    })
+                ),
+                "{refused:?}"
+            );
+        }
+        match Spline::new(1, 0, &[7.0, 7.0, 7.0, 7.0], &two, &[]) {
+            Err(CadError::EmptySweep { value, .. }) => assert_eq!(value, 7.0),
+            other => panic!("expected the empty sweep, got {other:?}"),
+        }
+
+        // Controls: the same degree and control counts, spanning knots.
+        assert!(Spline::new(1, 0, &[7.0, 7.0, 8.0, 8.0], &two, &[]).is_ok());
+        assert!(Spline::new(2, 0, &[0.0, 0.0, 0.0, 1.0, 1.0, 1.0], &three, &[]).is_ok());
+        // Repeated interior knots are legitimate and are not a constant vector.
+        assert!(Spline::new(1, 0, &[0.0, 0.0, 1.0, 1.0], &two, &[]).is_ok());
     }
 
     /// Every kind has a slot, and no two kinds share one.

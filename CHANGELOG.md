@@ -44,6 +44,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the drawing it is being fed by, and an implementation may hold a
   non-re-entrant handle. No signature changed.
 
+### Fixed
+
+- **`Spline::new` refuses a knot vector that spans nothing** (issue #1111). A
+  constant knot vector such as `[7.0; 4]` was accepted, while `Arc` and
+  `Ellipse` refused the same empty parameter range. It is now
+  `CadError::EmptySweep { field: "knot vector", .. }`.
+
 ## [0.6.1] — 2026-10-09
 
 ### Fixed
