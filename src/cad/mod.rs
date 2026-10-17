@@ -110,9 +110,12 @@
 //! handles are neither — one decode handle is single-threaded and calls on it
 //! must not overlap — and a trait that promised more than the provider can
 //! deliver would be a lie the tiler builds on. [`CadDrawing::decode`] takes
-//! `&self` rather than `&mut self`, which is safe precisely *because* the
-//! handle is not `Sync`: two threads cannot hold a shared reference to one, so
-//! there is no overlapping call to rule out.
+//! `&self` rather than `&mut self`. `!Sync` rules out *concurrent* overlap,
+//! since two threads cannot hold a shared reference to one handle, but it does
+//! not rule out *re-entrant* overlap: a sink may hold a `&dyn CadDrawing` and
+//! call back into it from `primitive`, and that compiles. So the contract
+//! forbids it instead: a sink must not call back into the drawing it is being
+//! fed by, and [`CadDrawing`] has the example and the consequences.
 //!
 //! Parallelism in this pipeline is per tile, above the decoder, over
 //! primitives that have already been collected.

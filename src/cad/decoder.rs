@@ -368,11 +368,73 @@ pub trait CadDecoder {
 /// exactly that and no more. A trait that claimed `Send + Sync` here would be
 /// a lie the tiler builds on, and the tiler cannot check it.
 ///
-/// [`CadDrawing::decode`] takes `&self` rather than `&mut self`, which is safe
-/// *because* the trait is not `Sync`: two threads cannot hold a shared
-/// reference to one handle, so there is no overlapping call to rule out, and a
-/// caller holding the drawing can still list its views while decoding is not
-/// in flight.
+/// [`CadDrawing::decode`] takes `&self` rather than `&mut self`, and `!Sync`
+/// is only half of why that is workable. It rules out *concurrent* overlap:
+/// two threads cannot hold a shared reference to one handle. It does not rule
+/// out *re-entrant* overlap on one thread, because the sink `decode` is handed
+/// is arbitrary code and may itself hold a `&dyn CadDrawing`. The example below
+/// compiles, with no `unsafe`:
+///
+/// ```
+/// use libviprs::cad::{CadDrawing, CadError, CadView, DecodeReport, Primitive, PrimitiveSink};
+///
+/// struct Drawing;
+///
+/// impl CadDrawing for Drawing {
+///     fn views(&self) -> Result<Vec<CadView>, CadError> {
+///         Ok(Vec::new())
+///     }
+///
+///     fn decode(
+///         &self,
+///         _view: u32,
+///         sink: &mut dyn PrimitiveSink,
+///         _report: &mut DecodeReport,
+///     ) -> Result<(), CadError> {
+///         sink.primitive(libviprs::cad::Line::new([0.0; 3], [1.0, 0.0, 0.0])?.into())
+///     }
+/// }
+///
+/// /// A sink holding the drawing that feeds it, and calling back into it.
+/// struct Reentrant<'a> {
+///     drawing: &'a dyn CadDrawing,
+///     depth: u32,
+///     deepest: u32,
+/// }
+///
+/// impl PrimitiveSink for Reentrant<'_> {
+///     fn primitive(&mut self, _primitive: Primitive) -> Result<(), CadError> {
+///         self.deepest = self.deepest.max(self.depth);
+///         if self.depth < 2 {
+///             let mut inner = Reentrant {
+///                 drawing: self.drawing,
+///                 depth: self.depth + 1,
+///                 deepest: 0,
+///             };
+///             self.drawing.decode(0, &mut inner, &mut DecodeReport::new())?;
+///             self.deepest = self.deepest.max(inner.deepest);
+///         }
+///         Ok(())
+///     }
+/// }
+///
+/// let drawing = Drawing;
+/// let mut sink = Reentrant { drawing: &drawing, depth: 0, deepest: 0 };
+/// drawing.decode(0, &mut sink, &mut DecodeReport::new())?;
+/// assert_eq!(sink.deepest, 2, "two levels of nesting, and nothing stopped it");
+/// # Ok::<(), CadError>(())
+/// ```
+///
+/// So the type system does not forbid it, and the contract has to. **A sink
+/// must not call back into the drawing it is being fed by**: not
+/// [`CadDrawing::decode`], and not [`CadDrawing::views`] while a decode is in
+/// flight. An implementation is entitled to hold its single, non-re-entrant
+/// provider handle behind a `RefCell` or to rely on there being no overlapping
+/// call, so a sink that breaks the rule may get a panic or a
+/// [`CadError::Provider`] back. It is never undefined behaviour (nothing here is
+/// `unsafe`), and the rule costs a sink nothing it could legitimately want:
+/// anything it needs from the drawing, it can read before or after the decode.
+/// A caller holding the drawing outside a decode can still list its views.
 ///
 /// Parallelism in this pipeline lives above the decoder, per tile, over
 /// primitives that have already been collected.
@@ -460,6 +522,13 @@ pub trait CadDrawing {
 /// Both paths are real: a streaming decoder calls `primitive` per shape, a
 /// batching one calls `primitives` per buffer refill, and neither has to know
 /// which kind of sink it has.
+///
+/// # A sink must not call back into the drawing
+///
+/// While a [`CadDrawing::decode`] is feeding a sink, that sink must not call
+/// `decode` or `views` on the same drawing. `!Sync` does not prevent it (a sink
+/// can hold a `&dyn CadDrawing`), so it is an obligation on the implementor, and
+/// [`CadDrawing`] says what a provider may do when it is broken.
 pub trait PrimitiveSink {
     /// Takes one primitive.
     ///
