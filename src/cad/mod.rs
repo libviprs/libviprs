@@ -200,6 +200,7 @@ pub mod acadsharp;
 mod decoder;
 mod primitive;
 mod report;
+mod text;
 
 pub use decoder::{
     CadDecoder, CadDrawing, CadSource, CadView, CollectSink, Extents, PrimitiveSink, ViewKind,
@@ -209,6 +210,7 @@ pub use primitive::{
     PrimitiveKind, Spline, Text, Vector3, undecoded_escape,
 };
 pub use report::{DecodeReport, Diagnostic, DiagnosticCode, PrimitiveCounts, Severity};
+pub use text::{DisplayText, display_text};
 
 use thiserror::Error;
 

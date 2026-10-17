@@ -84,12 +84,16 @@ use std::path::Path;
 use serde_json::json;
 use thiserror::Error;
 
-use crate::cad::{CadDrawing, CadError, CollectSink, DecodeReport, Primitive};
+use crate::cad::{
+    CadDrawing, CadError, DecodeReport, Diagnostic, DiagnosticCode, Primitive, PrimitiveSink,
+    ViewKind, display_text,
+};
 use crate::vector::archive::{
     FieldType, LayerSchema, VectorArchiveOptions, VectorArchiveWriter, VectorError,
 };
 use crate::vector::clip::{clip_slab, simplify};
 use crate::vector::mvt::{Feature, Geometry, Layer, Point, Tile, Value};
+use crate::vector::style::glyph_available;
 use crate::vector::tessellate;
 
 /// The metadata key the transform is stored under.
@@ -138,6 +142,11 @@ pub struct TilerConfig {
     pub max_level_points: usize,
     /// The most stored (gzipped) bytes one tile should take.
     pub max_tile_bytes: usize,
+    /// The most primitives held from one decode. A drawing of a block inserted
+    /// a million times decodes to millions of primitives, and every one is
+    /// held until the tiler has seen them all, so this is the memory bound for
+    /// repeated blocks: about 150 bytes each, so the default is under a gigabyte.
+    pub max_primitives: usize,
     /// What to do with a tile past `max_tile_bytes`.
     pub oversize: OversizePolicy,
 }
@@ -157,6 +166,7 @@ impl Default for TilerConfig {
             max_text_per_tile: 4_000,
             max_level_points: 64 << 20,
             max_tile_bytes: 500 << 10,
+            max_primitives: 5_000_000,
             oversize: OversizePolicy::Report,
         }
     }
@@ -297,9 +307,40 @@ pub enum TilerError {
         /// The budget.
         limit: usize,
     },
-    /// The decoder failed.
+    /// The decoder failed before the view was complete. The report holds what
+    /// it had said up to that point.
+    #[error("decoding failed: {error}")]
+    DecodeFailed {
+        /// The failure.
+        error: CadError,
+        /// Everything the decode reported before it stopped.
+        report: Box<DecodeReport>,
+    },
+    /// The decoder failed in a way that has no report: the view does not exist.
     #[error(transparent)]
     Decode(#[from] CadError),
+    /// The view is a layout, and paper space is not enabled.
+    ///
+    /// Model Space is the production target. A layout needs its viewports
+    /// transformed and clipped, and until those fixtures pass drawing one
+    /// would put geometry on the sheet that the viewport hides.
+    #[error(
+        "view {index} ({name:?}) is a layout; only Model Space is enabled until viewport transform and clipping fixtures pass"
+    )]
+    ViewNotEnabled {
+        /// The view's index.
+        index: u32,
+        /// Its name.
+        name: String,
+    },
+    /// The decode produced more primitives than may be held.
+    #[error(
+        "the view holds more than {limit} primitives, which is the most that may be held at once"
+    )]
+    TooManyPrimitives {
+        /// The configured limit.
+        limit: usize,
+    },
     /// The archive writer refused something.
     #[error(transparent)]
     Archive(#[from] VectorError),
@@ -454,6 +495,34 @@ pub struct TilerReport {
     pub precision_at_max_zoom: Option<PrecisionBudget>,
     /// The world the run used.
     pub world_side: f64,
+    /// Text that was nothing once its formatting was read out of it.
+    pub culled_empty_text: u64,
+    /// Fonts that text asked for, with how many strings asked. The output has
+    /// one font, so each of these was substituted.
+    pub fonts_substituted: BTreeMap<String, u64>,
+    /// Characters the served glyph files cannot draw, with how many times they
+    /// appear.
+    pub glyphs_unavailable: BTreeMap<char, u64>,
+    /// MTEXT formatting codes that were read and not honoured, by letter.
+    pub text_codes_ignored: BTreeMap<char, u64>,
+    /// One diagnostic per distinct thing worth saying (a font, a glyph, a
+    /// formatting code), up to [`TilerReport::DIAGNOSTIC_LIMIT`].
+    pub diagnostics: Vec<Diagnostic>,
+    /// Diagnostics past the limit.
+    pub dropped_diagnostics: u64,
+}
+
+impl TilerReport {
+    /// The most diagnostics kept.
+    pub const DIAGNOSTIC_LIMIT: usize = 256;
+
+    fn say(&mut self, d: Diagnostic) {
+        if self.diagnostics.len() < Self::DIAGNOSTIC_LIMIT {
+            self.diagnostics.push(d);
+        } else {
+            self.dropped_diagnostics += 1;
+        }
+    }
 }
 
 /// Where finished tiles go.
@@ -572,7 +641,9 @@ fn flatten(p: &Primitive, tol: f64) -> Flat {
             at: [t.position().x(), t.position().y()],
             height: t.height(),
             rotation: t.rotation(),
-            text: t.content().to_owned(),
+            // What a person reads: MTEXT formatting is read out of it here, once,
+            // so bounds and tiles agree on the string.
+            text: display_text(t.content()).text,
         },
     }
 }
@@ -639,9 +710,15 @@ fn primitive_bounds(p: &Primitive) -> Option<[f64; 4]> {
             rotation,
             text,
         } => {
+            if text.trim().is_empty() {
+                return None;
+            }
             // Text has no measured width here: it is estimated from the glyph
-            // count, which is enough to keep it inside the world.
-            let w = height * 0.6 * text.chars().count() as f64;
+            // count of its longest line, which is enough to keep it inside the
+            // world, and the lines stack upward from the anchor.
+            let longest = text.lines().map(|l| l.chars().count()).max().unwrap_or(0);
+            let w = height * 0.6 * longest as f64;
+            let height = height * text.lines().count().max(1) as f64;
             let (s, c) = rotation.sin_cos();
             let end = [at[0] + w * c, at[1] + w * s];
             Some([
@@ -775,6 +852,59 @@ fn emit_runs(
     Ok(())
 }
 
+/// Reads what a text primitive's formatting and characters say about fidelity
+/// and files it: fonts the output cannot honour, glyphs it cannot draw, codes
+/// it dropped. Once per distinct thing as a diagnostic, always as a count.
+fn note_text(report: &mut TilerReport, t: &crate::cad::Text) {
+    let d = display_text(t.content());
+    let handle = t.origin().item_handle();
+    let with = |diag: Diagnostic| match handle {
+        Some(h) => diag.with_entity(h),
+        None => diag,
+    };
+    for font in &d.fonts {
+        let first = !report.fonts_substituted.contains_key(font);
+        *report.fonts_substituted.entry(font.clone()).or_default() += 1;
+        if first {
+            report.say(with(Diagnostic::from_code(
+                DiagnosticCode::FONT_SUBSTITUTED,
+                format!(
+                    "text asks for the font {font:?}, which the output does not carry; every label is drawn in Noto Sans Regular"
+                ),
+            )));
+        }
+    }
+    for (code, n) in &d.ignored {
+        let first = !report.text_codes_ignored.contains_key(code);
+        *report.text_codes_ignored.entry(*code).or_default() += n;
+        if first {
+            report.say(with(Diagnostic::from_code(
+                DiagnosticCode::TEXT_FORMAT_IGNORED,
+                format!(
+                    "the MTEXT code \\{code} is read and not honoured, so that formatting is lost"
+                ),
+            )));
+        }
+    }
+    for c in d
+        .text
+        .chars()
+        .filter(|c| !c.is_whitespace() && !glyph_available(*c))
+    {
+        let first = !report.glyphs_unavailable.contains_key(&c);
+        *report.glyphs_unavailable.entry(c).or_default() += 1;
+        if first {
+            report.say(with(Diagnostic::from_code(
+                DiagnosticCode::GLYPH_UNAVAILABLE,
+                format!(
+                    "U+{:04X} has no glyph in the font files the style serves",
+                    u32::from(c)
+                ),
+            )));
+        }
+    }
+}
+
 /// Tiles `primitives` and hands every tile to `out`.
 ///
 /// # Errors
@@ -802,8 +932,17 @@ pub fn tile_primitives(
         f64::NEG_INFINITY,
     ];
     for p in primitives {
+        if let Primitive::Text(t) = p {
+            note_text(&mut report, t);
+        }
         let b = primitive_bounds(p);
         match b {
+            None if matches!(p, Primitive::Text(t) if display_text(t.content()).is_blank()) => {
+                // Formatting and nothing else: there is nothing to draw, and
+                // that is not a failure to draw it.
+                report.culled_empty_text += 1;
+                boxes.push(None);
+            }
             Some(b) if b.iter().all(|v| v.is_finite()) => {
                 all[0] = all[0].min(b[0]);
                 all[1] = all[1].min(b[1]);
@@ -1108,9 +1247,63 @@ pub fn build_archive_from_view(
     path: impl AsRef<Path>,
     name: &str,
 ) -> Result<(TilerReport, DecodeReport), TilerError> {
-    let mut sink = CollectSink::new();
+    config.validate()?;
+    let views = drawing.views()?;
+    let info = views
+        .iter()
+        .find(|v| v.index() == view)
+        .ok_or(CadError::NoSuchView {
+            index: view,
+            views: views.len() as u32,
+        })?;
+    if info.kind() != ViewKind::Model {
+        return Err(TilerError::ViewNotEnabled {
+            index: view,
+            name: info.name().to_owned(),
+        });
+    }
+    let mut sink = BoundedSink {
+        held: Vec::new(),
+        limit: config.max_primitives,
+        exceeded: false,
+    };
     let mut decode = DecodeReport::new();
-    drawing.decode(view, &mut sink, &mut decode)?;
-    let report = build_archive(sink.collected(), config, path, name)?;
+    match drawing.decode(view, &mut sink, &mut decode) {
+        Ok(()) => {}
+        Err(_) if sink.exceeded => {
+            return Err(TilerError::TooManyPrimitives {
+                limit: config.max_primitives,
+            });
+        }
+        Err(error) => {
+            return Err(TilerError::DecodeFailed {
+                error,
+                report: Box::new(decode),
+            });
+        }
+    }
+    let report = build_archive(&sink.held, config, path, name)?;
     Ok((report, decode))
+}
+
+/// Holds primitives up to a limit, then refuses, so a block inserted a million
+/// times is an error before it is an out-of-memory.
+struct BoundedSink {
+    held: Vec<Primitive>,
+    limit: usize,
+    exceeded: bool,
+}
+
+impl PrimitiveSink for BoundedSink {
+    fn primitive(&mut self, primitive: Primitive) -> Result<(), CadError> {
+        if self.held.len() >= self.limit {
+            self.exceeded = true;
+            return Err(CadError::sink(format!(
+                "more than {} primitives held",
+                self.limit
+            )));
+        }
+        self.held.push(primitive);
+        Ok(())
+    }
 }
