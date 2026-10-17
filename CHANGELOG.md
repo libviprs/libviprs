@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A vector tiler** (issue #1032). `vector::tiler::tile_primitives` and
+  `build_archive` turn world-space primitives into MVT tiles: bounds fitted
+  into a unit square with one scale on both axes, curves tessellated to a
+  deviation set per zoom, runs clipped to a buffered tile grid, simplified and
+  quantised. Every cull, cap and failure is a counter in `TilerReport`, tiles
+  past a byte budget are detected, and `TilerConfig::precision` states the
+  error budget in drawing units at any zoom. Measured error and the tested
+  maximum zoom (22) are in the `vector::tiler` documentation. Adds
+  `Ellipse::sweep`, which reduces each parameter before subtracting.
+
 - **An MVT encoder and a vector PMTiles writer and reader** (issue #1031).
   `vector::mvt` writes and parses Mapbox Vector Tiles (lines, polygons with
   holes, points, string, number and boolean properties) with the winding set

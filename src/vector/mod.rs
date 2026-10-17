@@ -31,7 +31,10 @@
 //!    [`TileFormat`](crate::sink::TileFormat) is left alone.
 
 pub mod archive;
+pub mod clip;
 pub mod mvt;
+pub mod tessellate;
+pub mod tiler;
 
 pub use archive::{
     FieldType, LayerSchema, VectorArchive, VectorArchiveOptions, VectorArchiveWriter, VectorError,
