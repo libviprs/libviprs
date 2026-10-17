@@ -180,6 +180,7 @@ pub struct VectorArchiveOptions {
     bounds_degrees: Option<[f64; 4]>,
     center_degrees: Option<(f64, f64)>,
     center_zoom: Option<u8>,
+    extra: Map<String, Json>,
 }
 
 impl VectorArchiveOptions {
@@ -194,6 +195,7 @@ impl VectorArchiveOptions {
             bounds_degrees: None,
             center_degrees: None,
             center_zoom: None,
+            extra: Map::new(),
         }
     }
 
@@ -239,6 +241,18 @@ impl VectorArchiveOptions {
         self
     }
 
+    /// Adds a top-level metadata entry beside `vector_layers`, for tooling
+    /// that has to learn something about the archive the format has no field
+    /// for. `vector_layers` itself cannot be overridden this way.
+    #[must_use]
+    pub fn with_metadata_entry(mut self, key: impl Into<String>, value: Json) -> Self {
+        let key = key.into();
+        if key != "vector_layers" {
+            self.extra.insert(key, value);
+        }
+        self
+    }
+
     fn schema_json(&self) -> Result<Vec<Json>, VectorError> {
         let layers: Vec<Json> = self.layers.iter().map(LayerSchema::to_json).collect();
         let mut extra = Map::new();
@@ -255,6 +269,7 @@ impl VectorArchiveOptions {
         metadata.name.clone_from(&self.name);
         metadata.description.clone_from(&self.description);
         metadata.attribution.clone_from(&self.attribution);
+        metadata.extra.clone_from(&self.extra);
         metadata
             .extra
             .insert("vector_layers".into(), Json::Array(layers));
@@ -374,14 +389,31 @@ impl<W: Write + Seek> VectorArchiveWriter<W> {
     /// a tile outside the schema, [`VectorError::Mvt`] for a tile the format
     /// cannot hold, and the container's own errors.
     pub fn add_tile(&mut self, z: u8, x: u32, y: u32, tile: &Tile) -> Result<bool, VectorError> {
+        Ok(self.add_tile_sized(z, x, y, tile)?.is_some())
+    }
+
+    /// As [`add_tile`](Self::add_tile), returning the number of bytes the tile
+    /// takes in the archive (gzipped), or `None` for an empty tile that was not
+    /// stored. The tiler uses it to hold tiles to a size budget.
+    ///
+    /// # Errors
+    ///
+    /// As [`add_tile`](Self::add_tile).
+    pub fn add_tile_sized(
+        &mut self,
+        z: u8,
+        x: u32,
+        y: u32,
+        tile: &Tile,
+    ) -> Result<Option<usize>, VectorError> {
         if tile.is_empty() {
-            return Ok(false);
+            return Ok(None);
         }
         self.check_against_schema(tile)?;
         let stored = gzip(&tile.encode()?)?;
         let hash = content_hash(&stored);
         self.inner.add_tile(z, x, y, &stored, hash)?;
-        Ok(true)
+        Ok(Some(stored.len()))
     }
 
     /// Adds a tile that is already serialised MVT, after parsing it to make

@@ -859,6 +859,41 @@ impl Ellipse {
     pub const fn normal(&self) -> Vector3 {
         self.normal
     }
+
+    /// The counter-clockwise parameter sweep in radians, in `(0, 2π]`.
+    ///
+    /// Each parameter is reduced before the subtraction, as
+    /// [`Arc::sweep`] does: the difference of two raw finite parameters can
+    /// overflow to infinity, and `inf.rem_euclid` is `NaN`, which a tessellator
+    /// would then take for a segment count. A full turn comes back as `2π`.
+    ///
+    /// ```
+    /// use libviprs::cad::Ellipse;
+    /// use std::f64::consts::{PI, TAU};
+    ///
+    /// let e = |a: f64, b: f64| {
+    ///     Ellipse::new([0.0; 3], [2.0, 0.0, 0.0], 0.5, a, b, [0.0, 0.0, 1.0]).unwrap()
+    /// };
+    /// assert!((e(0.0, PI).sweep() - PI).abs() < 1e-12);
+    /// assert!((e(PI, 0.0).sweep() - PI).abs() < 1e-12);
+    /// assert!((e(0.0, TAU).sweep() - TAU).abs() < 1e-12);
+    ///
+    /// // Parameters whose raw difference overflows still give a finite sweep.
+    /// let extreme = e(-1e308, 1e308).sweep();
+    /// assert!(extreme.is_finite() && extreme > 0.0 && extreme <= TAU);
+    /// assert!((extreme - 5.158531667598616).abs() < 1e-9);
+    /// ```
+    #[must_use]
+    pub fn sweep(&self) -> f64 {
+        let start = self.start_param.rem_euclid(std::f64::consts::TAU);
+        let end = self.end_param.rem_euclid(std::f64::consts::TAU);
+        let span = (end - start).rem_euclid(std::f64::consts::TAU);
+        if span == 0.0 {
+            std::f64::consts::TAU
+        } else {
+            span
+        }
+    }
 }
 
 /// Degree, knots, control points and weights, untessellated.

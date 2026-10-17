@@ -37,6 +37,7 @@ docker run --rm --platform linux/amd64 \
     ./pmtiles version
     ./pmtiles verify /out/golden.pmtiles
     ./pmtiles show /out/golden.pmtiles
+    if [ -f /out/dwg.pmtiles ]; then ./pmtiles verify /out/dwg.pmtiles && ./pmtiles show /out/dwg.pmtiles; fi
     for t in 0/0/0 1/1/0 1/0/1 2/3/3; do
       ./pmtiles tile /out/golden.pmtiles \$(echo \$t | tr / ' ') > /out/tile_\$(echo \$t | tr / _).mvt
       echo \"tile \$t resolved\"
