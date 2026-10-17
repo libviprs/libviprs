@@ -160,6 +160,17 @@ impl DiagnosticCode {
     /// [`DecodeReport::mark_truncated`] is how it is filed, and it is the
     /// difference between a short drawing and a lost one.
     pub const DECODE_TRUNCATED: Self = Self(503);
+    /// The decode could not be run, or could not continue, for a reason that
+    /// is not any entity's numbers: the source was not a drawing this decoder
+    /// reads, the view asked for does not exist, the read failed, or the
+    /// provider or the sink did.
+    ///
+    /// Kept apart from [`DiagnosticCode::PRIMITIVE_REFUSED`] so a release gate
+    /// counting malformed entities is not counting a disk error.
+    /// [`CadError::diagnostic_code`] is the mapping.
+    ///
+    /// [`CadError::diagnostic_code`]: crate::cad::CadError::diagnostic_code
+    pub const DECODE_FAILED: Self = Self(504);
 
     /// The lowest code libviprs itself allocates.
     pub const CORE_RANGE_START: u32 = 500;
@@ -243,6 +254,7 @@ impl DiagnosticCode {
             Self::TEXT_NOT_RECOVERED => "text not recovered",
             Self::PRIMITIVE_REFUSED => "primitive refused",
             Self::DECODE_TRUNCATED => "decode truncated",
+            Self::DECODE_FAILED => "decode failed",
             other if other.is_provider_allocated() => "a code the provider allocated",
             _ => "a code this build has no name for",
         }
@@ -852,6 +864,7 @@ mod tests {
             DiagnosticCode::TEXT_NOT_RECOVERED,
             DiagnosticCode::PRIMITIVE_REFUSED,
             DiagnosticCode::DECODE_TRUNCATED,
+            DiagnosticCode::DECODE_FAILED,
         ] {
             assert!(code.is_core_allocated(), "{code} is a libviprs code");
             assert!(!code.is_provider_allocated());

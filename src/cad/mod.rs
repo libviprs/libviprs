@@ -411,13 +411,23 @@ impl CadError {
         Self::Sink(source.into())
     }
 
-    /// The diagnostic code a provider files when a constructor refuses an
-    /// entity, so the refusal reaches a [`DecodeReport`] under the right code
-    /// rather than under a guess.
+    /// The diagnostic code a provider files for this error, so it reaches a
+    /// [`DecodeReport`] under the right code rather than under a guess.
     ///
-    /// The text contract's two refusals get their own codes because they are
-    /// the ones a release gate has to count separately; everything else is a
-    /// malformed entity.
+    /// Four groups, and the match spells out every variant so that a new
+    /// `CadError` is a compile error here and has to be given a code
+    /// deliberately:
+    ///
+    /// * The text contract's two refusals get their own codes because they are
+    ///   the ones a release gate has to count separately.
+    /// * A non-finite value is [`DiagnosticCode::NON_FINITE_GEOMETRY`], the
+    ///   number the provider files for the same condition.
+    /// * Every other constructor refusal is a malformed entity,
+    ///   [`DiagnosticCode::PRIMITIVE_REFUSED`].
+    /// * The five that are not a refusal of an entity at all (the view or the
+    ///   source was wrong, the read failed, the provider or the sink failed)
+    ///   are [`DiagnosticCode::DECODE_FAILED`], so a gate counting malformed
+    ///   entities is not counting a disk error.
     ///
     /// ```
     /// use libviprs::cad::{CadError, DiagnosticCode, Text};
@@ -430,6 +440,9 @@ impl CadError {
     ///
     /// let bad = CadError::NonPositive { field: "radius", value: -1.0 };
     /// assert_eq!(bad.diagnostic_code(), DiagnosticCode::PRIMITIVE_REFUSED);
+    ///
+    /// let gone = CadError::NoSuchView { index: 3, views: 1 };
+    /// assert_eq!(gone.diagnostic_code(), DiagnosticCode::DECODE_FAILED);
     /// ```
     #[must_use]
     pub const fn diagnostic_code(&self) -> DiagnosticCode {
@@ -437,7 +450,20 @@ impl CadError {
             Self::TextEscapeNotDecoded { .. } => DiagnosticCode::TEXT_ESCAPE_NOT_DECODED,
             Self::TextEmpty => DiagnosticCode::TEXT_NOT_RECOVERED,
             Self::NonFinite { .. } => DiagnosticCode::NON_FINITE_GEOMETRY,
-            _ => DiagnosticCode::PRIMITIVE_REFUSED,
+            Self::NonPositive { .. }
+            | Self::ZeroLengthVector { .. }
+            | Self::EmptySweep { .. }
+            | Self::TooFewVertices { .. }
+            | Self::CountMismatch { .. }
+            | Self::SplineDegree { .. }
+            | Self::SplineControlCount { .. }
+            | Self::SplineKnotCount { .. }
+            | Self::KnotsDecrease { .. } => DiagnosticCode::PRIMITIVE_REFUSED,
+            Self::NoSuchView { .. }
+            | Self::UnrecognisedSource { .. }
+            | Self::Io(_)
+            | Self::Provider { .. }
+            | Self::Sink(_) => DiagnosticCode::DECODE_FAILED,
         }
     }
 }
@@ -547,6 +573,86 @@ mod tests {
             DiagnosticCode::PRIMITIVE_REFUSED,
             "the arm must not collapse onto the generic refusal"
         );
+    }
+
+    /// The five variants that are not a constructor's refusal of an entity do
+    /// not answer the code a release gate counts as malformed entities.
+    ///
+    /// A disk error, an FFI handshake failure and a sink refusal filed as
+    /// `PRIMITIVE_REFUSED` would be counted as bad geometry. They get a code of
+    /// their own, in the core band, and all five land on the same one.
+    #[test]
+    fn a_failure_that_is_not_a_refusal_does_not_file_as_a_refused_entity() {
+        let failures = [
+            CadError::NoSuchView { index: 4, views: 2 },
+            CadError::UnrecognisedSource { decoder: "ladder" },
+            CadError::Io(std::io::Error::other("disk went away")),
+            CadError::provider("acadsharp", std::io::Error::other("handshake")),
+            CadError::sink(std::io::Error::other("full")),
+        ];
+
+        for failure in &failures {
+            let code = failure.diagnostic_code();
+            assert_ne!(
+                code,
+                DiagnosticCode::PRIMITIVE_REFUSED,
+                "{failure:?} is not a refused entity"
+            );
+            assert_eq!(code, DiagnosticCode::DECODE_FAILED, "{failure:?}");
+            assert!(code.is_core_allocated());
+        }
+    }
+
+    /// The control for the one above: every constructor refusal still answers
+    /// the generic code, so a mapping that sent everything to the new code
+    /// would not pass either.
+    #[test]
+    fn every_constructor_refusal_still_files_as_a_refused_entity() {
+        let refusals = [
+            CadError::NonPositive {
+                field: "radius",
+                value: 0.0,
+            },
+            CadError::ZeroLengthVector { field: "normal" },
+            CadError::EmptySweep {
+                field: "angle",
+                value: 1.0,
+            },
+            CadError::TooFewVertices {
+                field: "vertex",
+                got: 1,
+                need: 2,
+            },
+            CadError::CountMismatch {
+                field: "bulge",
+                got: 1,
+                expected: 2,
+                against: "vertices",
+            },
+            CadError::SplineDegree { degree: 0 },
+            CadError::SplineControlCount {
+                degree: 3,
+                need: 4,
+                got: 2,
+            },
+            CadError::SplineKnotCount {
+                got: 1,
+                controls: 4,
+                need: 8,
+            },
+            CadError::KnotsDecrease {
+                index: 1,
+                previous: 2.0,
+                found: 1.0,
+            },
+        ];
+        for refusal in &refusals {
+            assert_eq!(
+                refusal.diagnostic_code(),
+                DiagnosticCode::PRIMITIVE_REFUSED,
+                "{refusal:?}"
+            );
+        }
     }
 
     /// Messages quote the value they rejected.
