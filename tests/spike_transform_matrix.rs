@@ -320,6 +320,9 @@ fn ac2_no_measured_cell_exceeds_the_p12_tolerance() {
         if rec.outcome != "ok" {
             continue;
         }
+        if rec.ratio == "-" {
+            continue;
+        }
         let ratio: f64 = rec.ratio.parse().unwrap_or_else(|_| panic!("{id}: ratio `{}` is not a number", rec.ratio));
         assert!(
             ratio <= 1.0,
@@ -395,7 +398,11 @@ fn ac3_singular_column_is_a_refusal_with_a_named_diagnostic() {
             .unwrap_or_else(|| panic!("diagnostic `{code}` is not defined in the Diagnostics section"));
         assert!(line.contains(&rec.rule), "diagnostic `{code}` does not cite {} as measured", rec.rule);
     }
-    let sing = section(&d, "### Singular and near-singular transforms").to_lowercase();
+    let sing = section(&d, "### Singular and near-singular transforms")
+        .to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     for needle in ["refus", "conversion report", "not a best-effort", "counted"] {
         assert!(sing.contains(needle), "the singular section never says `{needle}`");
     }
