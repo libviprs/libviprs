@@ -42,13 +42,29 @@ fn lower(s: &str) -> String {
 
 /// (source shape, ISO construct names the row must carry, ISO_PROFILE sections it must cite)
 const MAPPING: &[(&str, &[&str], &[&str])] = &[
-    ("line", &["`trimmed_curve`", "`line`"], &["section 4", "section 8"]),
+    (
+        "line",
+        &["`trimmed_curve`", "`line`"],
+        &["section 4", "section 8"],
+    ),
     ("polyline", &["`polyline`"], &["section 5"]),
-    ("circular arc", &["`trimmed_curve`", "`circle`"], &["section 6", "section 8"]),
+    (
+        "circular arc",
+        &["`trimmed_curve`", "`circle`"],
+        &["section 6", "section 8"],
+    ),
     ("circle", &["`circle`"], &["section 6"]),
     ("ellipse", &["`ellipse`"], &["section 7"]),
-    ("b-spline", &["`b_spline_curve_with_knots`"], &["section 11"]),
-    ("nurbs", &["`rational_b_spline_curve`", "`b_spline_curve_with_knots`"], &["section 12"]),
+    (
+        "b-spline",
+        &["`b_spline_curve_with_knots`"],
+        &["section 11"],
+    ),
+    (
+        "nurbs",
+        &["`rational_b_spline_curve`", "`b_spline_curve_with_knots`"],
+        &["section 12"],
+    ),
 ];
 
 #[test]
@@ -58,13 +74,21 @@ fn ac1_each_curve_kind_names_the_pvec_semantic_type() {
     for (shape, names, sections) in MAPPING {
         let row = table
             .lines()
-            .find(|l| l.starts_with('|') && lower(l.split('|').nth(1).unwrap_or("")).trim() == *shape)
+            .find(|l| {
+                l.starts_with('|') && lower(l.split('|').nth(1).unwrap_or("")).trim() == *shape
+            })
             .unwrap_or_else(|| panic!("NG-03 has no mapping row for `{shape}`"));
         for n in *names {
-            assert!(row.contains(n), "row for `{shape}` does not name {n}: {row}");
+            assert!(
+                row.contains(n),
+                "row for `{shape}` does not name {n}: {row}"
+            );
         }
         for s in *sections {
-            assert!(row.contains(s), "row for `{shape}` does not cite ISO_PROFILE {s}: {row}");
+            assert!(
+                row.contains(s),
+                "row for `{shape}` does not cite ISO_PROFILE {s}: {row}"
+            );
         }
     }
 }
@@ -73,7 +97,10 @@ fn ac1_each_curve_kind_names_the_pvec_semantic_type() {
 fn ac1_the_mapping_cites_a_pinned_profile_revision_not_a_branch() {
     let doc = adr();
     let t = clause(&doc, "NG-03");
-    assert!(t.contains("ISO_PROFILE.md"), "NG-03 must name the profile it maps to");
+    assert!(
+        t.contains("ISO_PROFILE.md"),
+        "NG-03 must name the profile it maps to"
+    );
     assert!(
         t.contains("libviprs/pvec@e64b1a4"),
         "NG-03 must pin the PVec revision it cites, so the names cannot drift silently"
@@ -86,8 +113,14 @@ fn ac1_the_mapping_cites_a_pinned_profile_revision_not_a_branch() {
 fn ac2_thin_adapter_statement_is_present_verbatim() {
     let doc = adr();
     let stmt = "`Normalized2DGeometry` is a thin adapter over PVec's public semantic concepts and is not a second geometry library.";
-    assert!(doc.contains(stmt), "the thin-adapter statement is missing or reworded");
-    assert!(clause(&doc, "NG-01").contains(stmt), "the statement must sit in NG-01");
+    assert!(
+        doc.contains(stmt),
+        "the thin-adapter statement is missing or reworded"
+    );
+    assert!(
+        clause(&doc, "NG-01").contains(stmt),
+        "the statement must sit in NG-01"
+    );
 }
 
 #[test]
@@ -107,7 +140,10 @@ fn ac2_banned_constructs_are_listed_each_with_a_reason() {
             .lines()
             .find(|l| l.starts_with('|') && l.contains(id))
             .unwrap_or_else(|| panic!("NG-10 has no row for {id}"));
-        assert!(lower(row).contains(what), "{id} row does not name `{what}`: {row}");
+        assert!(
+            lower(row).contains(what),
+            "{id} row does not name `{what}`: {row}"
+        );
         let cells: Vec<&str> = row.split('|').map(str::trim).collect();
         // | id | construct | reason | what to do instead |
         assert!(
@@ -138,7 +174,10 @@ fn tolerance_shaped_tokens(doc: &str) -> Vec<String> {
 fn ac3_no_tolerance_literal_anywhere() {
     let doc = adr();
     let bad = tolerance_shaped_tokens(&doc);
-    assert!(bad.is_empty(), "the ADR defines numbers that look like tolerances: {bad:?}");
+    assert!(
+        bad.is_empty(),
+        "the ADR defines numbers that look like tolerances: {bad:?}"
+    );
 }
 
 #[test]
@@ -147,15 +186,23 @@ fn ac3_numeric_questions_are_answered_by_citation() {
     let t = clause(&doc, "NG-09");
     let cite = "PVec numeric policy v1, NP-";
     let n = t.matches(cite).count();
-    assert!(n >= 6, "NG-09 must answer its numeric questions by citation, found {n} citations");
+    assert!(
+        n >= 6,
+        "NG-09 must answer its numeric questions by citation, found {n} citations"
+    );
     // every NP-nn in the whole document is a real rule number (01..=20) in the citation form
     let mut rest = doc.as_str();
     let mut seen = 0;
     while let Some(i) = rest.find("NP-") {
         let tail = &rest[i + 3..];
         let digits: String = tail.chars().take_while(|c| c.is_ascii_digit()).collect();
-        let k: u32 = digits.parse().unwrap_or_else(|_| panic!("`NP-` not followed by a rule number"));
-        assert!((1..=20).contains(&k), "NP-{k} is not a rule in PVec numeric policy v1");
+        let k: u32 = digits
+            .parse()
+            .unwrap_or_else(|_| panic!("`NP-` not followed by a rule number"));
+        assert!(
+            (1..=20).contains(&k),
+            "NP-{k} is not a rule in PVec numeric policy v1"
+        );
         seen += 1;
         rest = &tail[digits.len()..];
     }
@@ -166,8 +213,18 @@ fn ac3_numeric_questions_are_answered_by_citation() {
 fn ac3_a_numeric_question_the_adapter_must_not_answer_is_routed_to_pvec() {
     let doc = adr();
     let t = lower(&clause(&doc, "NG-09"));
-    for q in ["equal", "degenerate", "closed", "singular", "periodic", "magnitude"] {
-        assert!(t.contains(q), "NG-09 does not route the `{q}` question to the policy");
+    for q in [
+        "equal",
+        "degenerate",
+        "closed",
+        "singular",
+        "periodic",
+        "magnitude",
+    ] {
+        assert!(
+            t.contains(q),
+            "NG-09 does not route the `{q}` question to the policy"
+        );
     }
 }
 
@@ -181,7 +238,10 @@ fn ac4_provenance_is_optional_component_data_and_the_record_works_without_it() {
         assert!(t.contains(needle), "NG-06 does not say `{needle}`");
     }
     let rec = clause(&doc, "NG-02");
-    assert!(rec.contains("Option<ProvenanceHandle>"), "the record must declare provenance as an Option of a handle");
+    assert!(
+        rec.contains("Option<ProvenanceHandle>"),
+        "the record must declare provenance as an Option of a handle"
+    );
     assert!(
         lower(&rec).contains("provenance absent"),
         "NG-02 must state that the record is complete with provenance absent"
@@ -196,8 +256,14 @@ fn ac5_tessellating_a_curve_in_libviprs_is_a_named_specification_violation() {
     let v = lower(&clause(&doc, "NG-V1"));
     assert!(v.contains("specification violation"));
     assert!(v.contains("tessellat"));
-    assert!(v.contains("ng-b2"), "NG-V1 must point at the prohibition it enforces");
-    assert!(v.contains("requirespvec") || v.contains("unsupported"), "NG-V1 must say what happens instead");
+    assert!(
+        v.contains("ng-b2"),
+        "NG-V1 must point at the prohibition it enforces"
+    );
+    assert!(
+        v.contains("requirespvec") || v.contains("unsupported"),
+        "NG-V1 must say what happens instead"
+    );
 }
 
 // ------------------------------------------------- scope items the issue fixes
@@ -206,12 +272,21 @@ fn ac5_tessellating_a_curve_in_libviprs_is_a_named_specification_violation() {
 fn record_has_the_five_fields_and_no_provider_type() {
     let doc = adr();
     let rec = clause(&doc, "NG-02");
-    for f in ["geometry", "source_bounds", "provenance", "fidelity", "entity"] {
+    for f in [
+        "geometry",
+        "source_bounds",
+        "provenance",
+        "fidelity",
+        "entity",
+    ] {
         assert!(rec.contains(f), "NG-02 record lacks `{f}`");
     }
     let b = lower(&clause(&doc, "NG-08"));
     assert!(b.contains("provider type") && b.contains("decoder primitive"));
-    assert!(b.contains("cad::primitive"), "NG-08 must name the decoder primitive type it keeps out");
+    assert!(
+        b.contains("cad::primitive"),
+        "NG-08 must name the decoder primitive type it keeps out"
+    );
     assert!(b.contains("public signature"));
 }
 
@@ -248,7 +323,10 @@ fn capability_gap_rule_files_against_p_and_lists_the_known_candidates() {
     assert!(t.contains("RequiresPVecCapability"));
     assert!(lower(&t).contains("file") && t.contains("libviprs/pvec"));
     for cand in ["segment", "bulge", "ellipse"] {
-        assert!(lower(&t).contains(cand), "NG-11 does not list the `{cand}` entry-point candidate");
+        assert!(
+            lower(&t).contains(cand),
+            "NG-11 does not list the `{cand}` entry-point candidate"
+        );
     }
 }
 
@@ -258,12 +336,26 @@ fn capability_gap_rule_files_against_p_and_lists_the_known_candidates() {
 fn semantic_class_and_regions_have_a_slot_outside_the_geometry_record() {
     let doc = adr();
     let t = clause(&doc, "NG-12");
-    for n in ["ElementClass", "RegionRecord", "EntityKey", "libviprs/pvec#84", "N4.9", "N6.9", "Wall", "Column", "Room", "Corridor"] {
+    for n in [
+        "ElementClass",
+        "RegionRecord",
+        "EntityKey",
+        "libviprs/pvec#84",
+        "N4.9",
+        "N6.9",
+        "Wall",
+        "Column",
+        "Room",
+        "Corridor",
+    ] {
         assert!(t.contains(n), "NG-12 does not mention {n}");
     }
     let tl = lower(&t);
     assert!(tl.contains("side table") && tl.contains("byte-identical"));
-    assert!(tl.contains("must not share"), "NG-12 must keep the class enum apart from the N3.5 classification");
+    assert!(
+        tl.contains("must not share"),
+        "NG-12 must keep the class enum apart from the N3.5 classification"
+    );
     // the geometry record itself must carry nothing of the class stream
     let rec = lower(&clause(&doc, "NG-02"));
     let code: String = rec
@@ -272,8 +364,19 @@ fn semantic_class_and_regions_have_a_slot_outside_the_geometry_record() {
         .filter(|(i, _)| i % 2 == 1)
         .map(|(_, s)| s)
         .collect();
-    for w in ["wall", "column", "room", "corridor", "region", "semantic", "element_class"] {
-        assert!(!code.contains(w), "the NG-02 record declaration mentions `{w}`; classes live beside it, not in it");
+    for w in [
+        "wall",
+        "column",
+        "room",
+        "corridor",
+        "region",
+        "semantic",
+        "element_class",
+    ] {
+        assert!(
+            !code.contains(w),
+            "the NG-02 record declaration mentions `{w}`; classes live beside it, not in it"
+        );
     }
 }
 
@@ -285,10 +388,20 @@ fn prose_hygiene() {
     assert!(!doc.contains('\u{2014}'), "no em dashes");
     assert!(!doc.contains(" -- "), "no `--` standing in for an em dash");
     let l = lower(&doc);
-    for w in ["claude", "co-authored", "generated by", "generated with", "anthropic"] {
+    for w in [
+        "claude",
+        "co-authored",
+        "generated by",
+        "generated with",
+        "anthropic",
+    ] {
         assert!(!l.contains(w), "the ADR mentions `{w}`");
     }
-    assert!(!l.contains("conforms to iso") && !l.contains("iso-compliant") && !l.contains("compliant with iso"));
+    assert!(
+        !l.contains("conforms to iso")
+            && !l.contains("iso-compliant")
+            && !l.contains("compliant with iso")
+    );
 }
 
 #[test]
