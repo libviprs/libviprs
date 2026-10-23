@@ -18,7 +18,8 @@ fn root() -> PathBuf {
 
 fn doc() -> String {
     let path = root().join("docs/spikes/view-context.md");
-    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{} is not readable: {e}", path.display()))
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("{} is not readable: {e}", path.display()))
 }
 
 /// The body of the `## heading` section, up to the next `## ` heading.
@@ -61,7 +62,10 @@ fn table(body: &str) -> Vec<Vec<String>> {
             .split('|')
             .map(|c| c.trim().to_owned())
             .collect();
-        if cells.iter().all(|c| c.chars().all(|ch| ch == '-' || ch == ':' || ch == ' ')) {
+        if cells
+            .iter()
+            .all(|c| c.chars().all(|ch| ch == '-' || ch == ':' || ch == ' '))
+        {
             seen_rule = true;
             continue;
         }
@@ -95,28 +99,35 @@ fn strip_ticks(s: &str) -> String {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn n14_every_listed_case_has_a_row_with_a_v1_behaviour() {
     let d = doc();
     let rows = table(section(&d, "Decision table"));
-    let by_case: BTreeMap<String, Vec<String>> = rows
-        .into_iter()
-        .map(|r| (strip_ticks(&r[0]), r))
-        .collect();
+    let by_case: BTreeMap<String, Vec<String>> =
+        rows.into_iter().map(|r| (strip_ticks(&r[0]), r)).collect();
     for case in CASES {
         let row = by_case
             .get(case)
             .unwrap_or_else(|| panic!("the decision table has no row for `{case}`"));
-        assert_eq!(row.len(), 5, "`{case}` row must be case | v1 behaviour | diagnostic | fixture | basis");
+        assert_eq!(
+            row.len(),
+            5,
+            "`{case}` row must be case | v1 behaviour | diagnostic | fixture | basis"
+        );
         let behaviour = strip_ticks(&row[1]);
         assert!(
             BEHAVIOURS.contains(&behaviour.as_str()),
             "`{case}`: `{behaviour}` is not one of {BEHAVIOURS:?}"
         );
-        assert!(!row[2].is_empty(), "`{case}`: the diagnostic cell is empty (write `none` if none is emitted)");
+        assert!(
+            !row[2].is_empty(),
+            "`{case}`: the diagnostic cell is empty (write `none` if none is emitted)"
+        );
     }
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn n14_no_row_reads_tbd() {
     let d = doc().to_lowercase();
     for banned in ["tbd", "to be decided", "todo", "fixme"] {
@@ -125,6 +136,7 @@ fn n14_no_row_reads_tbd() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn n14_every_row_names_a_fixture_that_is_listed_and_exists() {
     let d = doc();
     let fixtures: BTreeMap<String, Vec<String>> = table(section(&d, "Fixtures"))
@@ -133,16 +145,21 @@ fn n14_every_row_names_a_fixture_that_is_listed_and_exists() {
         .collect();
     assert!(!fixtures.is_empty(), "the Fixtures table is empty");
     for (id, row) in &fixtures {
-        assert!(row.len() >= 4, "fixture `{id}` needs id | path | origin | evidence class");
+        assert!(
+            row.len() >= 4,
+            "fixture `{id}` needs id | path | origin | evidence class"
+        );
         let path = strip_ticks(&row[1]);
         if path.starts_with("external:") {
             continue;
         }
-        assert!(root().join(&path).is_file(), "fixture `{id}`: `{path}` does not exist in this repository");
+        assert!(
+            root().join(&path).is_file(),
+            "fixture `{id}`: `{path}` does not exist in this repository"
+        );
     }
     for r in table(section(&d, "Decision table")) {
-        for name in r[3].split(',').map(strip_ticks) {
-            let name = name.trim().to_owned();
+        for name in r[3].split(',').map(|n| strip_ticks(n.trim())) {
             assert!(
                 fixtures.contains_key(&name),
                 "row `{}` names fixture `{name}`, which the Fixtures table does not list",
@@ -153,17 +170,28 @@ fn n14_every_row_names_a_fixture_that_is_listed_and_exists() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn n14_the_v1_visible_drawing_is_an_applicable_rule_with_two_worked_fixtures() {
     let d = doc();
     let rule = section(&d, "The v1 visible flattened drawing");
     for n in 1..=5 {
-        assert!(rule.contains(&format!("**V1-{n}**")), "rule clause V1-{n} is missing");
+        assert!(
+            rule.contains(&format!("**V1-{n} ")),
+            "rule clause V1-{n} is missing"
+        );
     }
-    let worked = d.lines().filter(|l| l.starts_with("### Worked example: ")).count();
-    assert!(worked >= 2, "{worked} worked example(s), the issue asks for two");
+    let worked = d
+        .lines()
+        .filter(|l| l.starts_with("### Worked example: "))
+        .count();
+    assert!(
+        worked >= 2,
+        "{worked} worked example(s), the issue asks for two"
+    );
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn n14_the_xref_decision_is_one_of_three_and_names_its_diagnostic() {
     let d = doc();
     let x = section(&d, "Xrefs");
@@ -179,7 +207,8 @@ fn n14_the_xref_decision_is_one_of_three_and_names_its_diagnostic() {
         "xref decision `{decision}` is not resolve, reject or report-as-external"
     );
     assert!(
-        x.lines().any(|l| l.starts_with("Diagnostic: ") && l.contains("UNRESOLVED_BLOCK")),
+        x.lines()
+            .any(|l| l.starts_with("Diagnostic: ") && l.contains("UNRESOLVED_BLOCK")),
         "the Xrefs section does not name the diagnostic on a `Diagnostic:` line"
     );
     assert!(
@@ -189,6 +218,7 @@ fn n14_the_xref_decision_is_one_of_three_and_names_its_diagnostic() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn n14_paper_space_is_called_in_or_out_with_viewport_evidence() {
     let d = doc();
     let p = section(&d, "Paper space");
@@ -199,26 +229,46 @@ fn n14_paper_space_is_called_in_or_out_with_viewport_evidence() {
         .trim()
         .trim_end_matches('.')
         .to_owned();
-    assert!(["in", "out"].contains(&call.as_str()), "`{call}` is not in or out");
-    assert!(p.contains("### Viewport transform evidence"), "no viewport transform evidence subsection");
+    assert!(
+        ["in", "out"].contains(&call.as_str()),
+        "`{call}` is not in or out"
+    );
+    assert!(
+        p.contains("### Viewport transform evidence"),
+        "no viewport transform evidence subsection"
+    );
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn n14_a_provider_limitation_names_the_provider_version() {
     let d = doc();
     let lim = section(&d, "Provider limitations");
-    assert!(lim.contains("ACadSharp 3.7.1"), "no ACadSharp version in Provider limitations");
-    assert!(lim.contains("3.7.1-viprs.2"), "no shim version in Provider limitations");
+    assert!(
+        lim.contains("ACadSharp 3.7.1"),
+        "no ACadSharp version in Provider limitations"
+    );
+    assert!(
+        lim.contains("3.7.1-viprs.2"),
+        "no shim version in Provider limitations"
+    );
     for case in ["layer-off", "layer-frozen", "layer-frozen-in-viewport"] {
-        assert!(lim.contains(case), "Provider limitations does not mention `{case}`");
+        assert!(
+            lim.contains(case),
+            "Provider limitations does not mention `{case}`"
+        );
     }
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn n14_the_decoder_exposure_of_layers_and_block_names_is_recorded() {
     let d = doc();
     let e = section(&d, "What the decoder exposes");
     for needle in ["layer visibility", "layer name", "block name", "#1233"] {
-        assert!(e.to_lowercase().contains(needle), "`What the decoder exposes` does not cover `{needle}`");
+        assert!(
+            e.to_lowercase().contains(needle),
+            "`What the decoder exposes` does not cover `{needle}`"
+        );
     }
 }
