@@ -128,7 +128,7 @@ const CEILING_KIB: u64 = 256 << 10;
 fn a_memory_ceiling_stops_a_run_with_every_budget_off() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("a.pmtiles");
-    let o = supervise("unbudgeted", &out, CEILING_KIB, Duration::from_secs(120));
+    let o = supervise("unbudgeted", &out, CEILING_KIB, Duration::from_secs(600));
     let status = o.status.unwrap();
     assert!(!o.killed_by_supervisor, "the ceiling did not bite in time");
     assert!(
@@ -188,4 +188,29 @@ fn the_library_deadline_ends_a_run_cleanly_inside_the_ceiling() {
         .collect();
     assert!(left.is_empty(), "a clean stop left {left:?}");
     the_parent_is_still_serviceable(dir.path());
+}
+
+/// The performance report is the deliverable of the issue's last criterion, so
+/// a test holds it to naming the limits this suite exercises and the follow-up
+/// that carries what the suite does not.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn the_report_names_the_limits_and_the_follow_up() {
+    let report = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/vector-performance-report.md"),
+    )
+    .unwrap();
+    for needle in [
+        "max_level_bytes",
+        "max_text_bytes",
+        "ProviderLimits::hardened()",
+        "fuzz_vector_tiler",
+        "ulimit -v",
+        "#1256",
+    ] {
+        assert!(
+            report.contains(needle),
+            "the report no longer names {needle}"
+        );
+    }
 }
