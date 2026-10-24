@@ -9,12 +9,12 @@
 //! from tessellating a curve itself looks for `NG-V1`; the tests below fail if
 //! that clause, or the prohibition it points at, goes missing.
 
-use std::fs;
-use std::path::PathBuf;
+/// The ADR, pulled in at compile time rather than read at runtime, so these tests make no
+/// filesystem call, run under Miri and stay off `tests/miri_fs_test_inventory.txt`.
+const ADR: &str = include_str!("../docs/adr/pvec-normalized-geometry.md");
 
 fn adr() -> String {
-    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs/adr/pvec-normalized-geometry.md");
-    fs::read_to_string(&p).unwrap_or_else(|e| panic!("cannot read {}: {e}", p.display()))
+    ADR.to_string()
 }
 
 /// The text of the clause whose heading starts with `### {id} `, up to the next
