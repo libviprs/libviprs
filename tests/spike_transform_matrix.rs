@@ -821,6 +821,13 @@ fn ac5_reflection_rows_agree_with_their_records() {
                 assert_eq!(n("frame_after"), "right", "{main}: the new frame is not right-handed");
                 assert_eq!(n("param_scale"), "-1.000000000");
                 assert!(orientation.contains("right-handed") && param.contains("minus one"));
+                // The new curve runs the same way in its own parameter, and the parameter map is
+                // reversed, so in source parameter order the traversal turns the other way.
+                let (sb, sa) = (n("sweep_before"), n("sweep_after"));
+                assert_eq!(sb, sa, "{main}: the re-expressed conic should keep its own turning");
+                assert!(flips(&sb, if sa == "ccw" { "cw" } else { "ccw" }), "{main}: no turning to flip");
+                let in_source_order = if sa == "ccw" { "cw" } else { "ccw" };
+                assert!(orientation.contains(&format!("{sb} to {in_source_order} in source order")), "{row}: row does not quote the measured turning {sb} to {in_source_order} in source order");
                 if row == "ellipse" {
                     let ax = n("semi_axes_after");
                     let v: Vec<f64> = ax.trim_matches(|c| c == '(' || c == ')').split(',').map(|x| x.parse().unwrap()).collect();
