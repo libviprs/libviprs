@@ -15,6 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bucket and a reason. No fill becomes triangles: PDF fills keep their subpath geometry, everything
   else is counted and reported. `PdfVectorPage` now carries `shading_paints` and
   `pattern_selections`. No fill component and no kept hatch boundary yet (#1308).
+- **One table from normalized geometry to PVec** (issue #1089, part of #1039).
+  `pvec::mapping::NORMALIZED_TO_PVEC` has a row per kind of normalized curve: the PVec type it
+  becomes, the conformance class it claims, the PVec capability it needs and what it is classified
+  as when that capability is missing (only `RequiresPVecCapability`, `RequiresExtension` or
+  `Unsupported`, so tessellation is unrepresentable). A new kind does not compile without a row,
+  and `docs/pvec-mapping.md` is rendered from the table and compared byte for byte by a test.
 - **The normalized geometry dump** (issue #1103, part of #1039). `pvec::dump::NormalizedDump`
   writes a line-oriented text dump of `Normalized2DGeometry` records (id, type, fidelity class,
   source-space parameters at round-trip `f64` precision, bounds, optional provenance) as each
