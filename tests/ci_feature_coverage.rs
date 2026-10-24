@@ -253,9 +253,23 @@ const EXPECTED: &[(&str, Coverage)] = &[
              src/pvec/pdf_bezier.rs, the PDF segment to PVec mapping of issue \
              #1081, and tests/pvec_pdf_bezier.rs, 15 tests, and \
              src/pvec/dump.rs, the inspection dump of issue #1103, and \
-             tests/pvec_1103_normalized_dump.rs, 11 tests; \
+             tests/pvec_1103_normalized_dump.rs, 11 tests, and \
+             src/pvec/mapping.rs, the normalized to PVec mapping table of \
+             issue #1089, and tests/pvec_1089_mapping.rs, 16 tests; \
              adds 2 crates (pvec-geometry and pvec-numeric, git \
              dependencies declaring rust-version 1.85)",
+        ),
+    ),
+    (
+        "pvec-spline",
+        cov(
+            true,
+            true,
+            true,
+            "gates src/pvec/dwg_spline.rs, exact B-spline extraction of issue \
+             #1074, and tests/pvec_dwg_spline_structural.rs, 16 tests (17 with \
+             `dwg-acadrust`); adds 1 crate (pvec-numeric, a git dependency \
+             declaring rust-version 1.85)",
         ),
     ),
     (

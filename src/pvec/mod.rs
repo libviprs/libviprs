@@ -35,10 +35,14 @@ pub mod dump;
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
 pub mod dwg_basic;
 pub mod fidelity;
+pub mod fill_policy;
 #[cfg(feature = "pvec-normalized")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
 pub mod flatten;
 pub mod limits;
+#[cfg(feature = "pvec-normalized")]
+#[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
+pub mod mapping;
 #[cfg(feature = "pvec-normalized")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
 pub mod normalized;
@@ -53,6 +57,7 @@ pub mod pdf_vector;
 pub mod provenance;
 pub mod provider;
 pub mod style;
+pub mod text_policy;
 #[cfg(feature = "pvec-normalized")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
 pub mod transform;
@@ -91,6 +96,9 @@ pub use provider::{
     FacetSource, InstancePath, InstanceStep, LayerState, LayoutId, LayoutKind, LayoutState, Point3,
     ProvenanceStub, ProviderCaps, ProviderError, RawEntity, RawGeometry, RawVertex, SourceFact,
     SourceTransform,
+};
+pub use text_policy::{
+    DwgTextCounts, PdfTextOperatorCounts, TextFontOutcome, TextReport, shx_outcome,
 };
 
 #[cfg(feature = "pvec-normalized")]

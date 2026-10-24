@@ -9,6 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The v1 text capability policy** (issue #1084, part of #1039). v1 omits text and reports the
+  counts: `pvec::text_policy` counts every PDF `Tj`, `TJ`, `'` and `"` (on `PdfVectorPage::text`,
+  forms expanded) and every DWG `TEXT` and `MTEXT`, and buckets each by font situation (not
+  embedded, subset, CID without `/ToUnicode`, missing SHX, plus embedded and unresolved). No string
+  or outline reaches geometry and no font dependency is added. The decision, with measurements on
+  26 licensed PDFs and the committed DWG probes, is in `docs/pvec-text-policy.md`.
+- **A fence around what libviprs names from PVec** (issue #1088, part of #1039).
+  `tests/pvec_api_surface.rs` scans `src/` for `pvec_*::` paths and fails on any crate root that
+  is not `pvec_geometry` or `pvec_numeric`, or any path with a container, block, index or
+  byte-layout segment, and `src/pvec/` may not define a curve evaluator, knot insertion or
+  tessellation routine (NG-10). The writer funnel `src/pvec/writer.rs` waits on PVec's `pvec`
+  facade crate (libviprs/pvec#52), which does not exist yet.
+- **Limits and malformed-input handling on the PDF vector path** (issue #1087, part of #1039).
+  `pvec::pdf_vector::PdfVectorLimits` gains `max_content_bytes` (decoded bytes across the page and
+  every form, cut off while a Flate stream inflates) and `max_segments_per_path`, and the error
+  type gains `ContentBytesExceeded`, `PathSegmentsExceeded`, `ResourceCycle` and `InvalidPageBox`,
+  each naming the limit and the observed value. Operators and `q` depth are now counted before an
+  operation list is built, so a 10 MiB stream of `q` refuses at the nesting bound without
+  allocating in proportion to the stream. Unparseable or out-of-range number literals, a `/Contents`
+  that is not a stream, a `cm` that overflows and a page box with no extent are typed errors instead
+  of a shorter page. Filters other than Flate (alone, or after ASCIIHex/ASCII85) are refused as
+  unbounded. Tests in `tests/pvec_pdf_limits.rs`, fuzz target `fuzz_pvec_pdf_vector`.
+- **The hatch and fill policy** (issue #1085, part of #1039). `docs/pvec-hatch-policy.md` records
+  what each fill construct becomes, and `pvec::fill_policy` is the same table as code plus
+  `FillReport`, which counts DWG `HATCH`/`SOLID`/`TRACE` and PDF fills, shadings and patterns with a
+  bucket and a reason. No fill becomes triangles: PDF fills keep their subpath geometry, everything
+  else is counted and reported. `PdfVectorPage` now carries `shading_paints` and
+  `pattern_selections`. No fill component and no kept hatch boundary yet (#1308).
+- **One table from normalized geometry to PVec** (issue #1089, part of #1039).
+  `pvec::mapping::NORMALIZED_TO_PVEC` has a row per kind of normalized curve: the PVec type it
+  becomes, the conformance class it claims, the PVec capability it needs and what it is classified
+  as when that capability is missing (only `RequiresPVecCapability`, `RequiresExtension` or
+  `Unsupported`, so tessellation is unrepresentable). A new kind does not compile without a row,
+  and `docs/pvec-mapping.md` is rendered from the table and compared byte for byte by a test.
 - **The normalized geometry dump** (issue #1103, part of #1039). `pvec::dump::NormalizedDump`
   writes a line-oriented text dump of `Normalized2DGeometry` records (id, type, fidelity class,
   source-space parameters at round-trip `f64` precision, bounds, optional provenance) as each

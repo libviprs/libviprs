@@ -195,6 +195,7 @@ fn hash_use_detector_flags_a_hashmap() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn no_hash_iteration_in_emit_path() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/pvec");
     let mut bad = Vec::new();
