@@ -86,10 +86,10 @@ fn fixtures() -> Vec<(SourceRow, Curve)> {
         (SourceRow::PolylineWithBulge, Curve::Composite(bulge)),
         (
             SourceRow::CircularArc,
-            Curve::Trimmed(Trimmed::new(Curve::Circle(circle.clone()), 0.3, 2.1, true).unwrap()),
+            Curve::Trimmed(Trimmed::new(Curve::Circle(circle), 0.3, 2.1, true).unwrap()),
         ),
         (SourceRow::Circle, Curve::Circle(circle)),
-        (SourceRow::Ellipse, Curve::Ellipse(ellipse.clone())),
+        (SourceRow::Ellipse, Curve::Ellipse(ellipse)),
         (
             SourceRow::EllipticalArc,
             Curve::Trimmed(Trimmed::new(Curve::Ellipse(ellipse), 0.4, 4.0, true).unwrap()),
@@ -99,7 +99,14 @@ fn fixtures() -> Vec<(SourceRow, Curve)> {
             Curve::BSpline(
                 BSpline::new(
                     3,
-                    pts(&[(0.0, 0.0), (1.0, 2.0), (2.0, -1.0), (3.0, 3.0), (4.0, 0.0), (5.0, 2.0)]),
+                    pts(&[
+                        (0.0, 0.0),
+                        (1.0, 2.0),
+                        (2.0, -1.0),
+                        (3.0, 3.0),
+                        (4.0, 0.0),
+                        (5.0, 2.0),
+                    ]),
                     vec![0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 3.0, 3.0, 3.0],
                 )
                 .unwrap(),
@@ -151,7 +158,8 @@ fn order_is_outermost_first_and_reversing_it_changes_the_matrix() {
 
     // The same two levels the other way round give a different matrix, so the test fails if the
     // order is reversed.
-    let rev = ComposedTransform::compose([(step("IN", 2), inner), (step("OUT", 1), outer)]).unwrap();
+    let rev =
+        ComposedTransform::compose([(step("IN", 2), inner), (step("OUT", 1), outer)]).unwrap();
     assert_eq!(rev.matrix(), [2.0, 0.0, 0.0, 2.0, 20.0, 0.0]);
     assert_ne!(c.matrix(), rev.matrix());
 }
@@ -161,12 +169,9 @@ fn push_inner_matches_composing_the_whole_nest() {
     let a = st([1.0, 0.0, 0.0, 1.0, 10.0, 0.0]);
     let b = st(Transform2::rotate(0.6).unwrap().matrix());
     let d = st([2.0, 0.0, 0.0, 3.0, 1.0, 1.0]);
-    let whole = ComposedTransform::compose([
-        (step("A", 1), a),
-        (step("B", 2), b),
-        (step("C", 3), d),
-    ])
-    .unwrap();
+    let whole =
+        ComposedTransform::compose([(step("A", 1), a), (step("B", 2), b), (step("C", 3), d)])
+            .unwrap();
     let stepwise = ComposedTransform::identity()
         .push_inner(step("A", 1), &a)
         .unwrap()
@@ -319,7 +324,14 @@ fn every_cell_of_the_frozen_matrix_is_pinned() {
         (SourceRow::PolylineWithBulge, [Composite; 6]),
         (
             SourceRow::CircularArc,
-            [TrimmedCircle, TrimmedCircle, TrimmedCircle, TrimmedEllipse, TrimmedCircle, TrimmedEllipse],
+            [
+                TrimmedCircle,
+                TrimmedCircle,
+                TrimmedCircle,
+                TrimmedEllipse,
+                TrimmedCircle,
+                TrimmedEllipse,
+            ],
         ),
         (
             SourceRow::Circle,
@@ -354,7 +366,10 @@ fn a_circle_under_non_uniform_scale_is_an_ellipse_never_a_circle() {
     match out.record().geometry().unwrap() {
         Curve::Ellipse(e) => {
             let (a, b) = (e.semi_axis_1(), e.semi_axis_2());
-            assert!((a.max(b) - 15.0).abs() < 1e-9 && (a.min(b) - 2.5).abs() < 1e-9, "{a} {b}");
+            assert!(
+                (a.max(b) - 15.0).abs() < 1e-9 && (a.min(b) - 2.5).abs() < 1e-9,
+                "{a} {b}"
+            );
         }
         other => panic!("expected an ellipse, got {other:?}"),
     }
@@ -365,8 +380,15 @@ fn the_bulge_composite_keeps_its_segments_and_promotes_the_arc_inside_it() {
     // E30 and E48: the arc segment becomes a trimmed ellipse, the line stays a line, and the
     // segment count is unchanged.
     let fx = fixtures();
-    let bulge = &fx.iter().find(|(r, _)| *r == SourceRow::PolylineWithBulge).unwrap().1;
-    for m in [[3.0, 0.0, 0.0, 0.5, 0.0, 0.0], [1.3, 0.4, -0.7, 0.9, 2.0, -1.0]] {
+    let bulge = &fx
+        .iter()
+        .find(|(r, _)| *r == SourceRow::PolylineWithBulge)
+        .unwrap()
+        .1;
+    for m in [
+        [3.0, 0.0, 0.0, 0.5, 0.0, 0.0],
+        [1.3, 0.4, -0.7, 0.9, 2.0, -1.0],
+    ] {
         let out = promote(&record(bulge), &one(m)).unwrap();
         let Curve::Composite(c) = out.record().geometry().unwrap() else {
             panic!("not a composite")
@@ -386,7 +408,11 @@ fn the_bulge_composite_keeps_its_segments_and_promotes_the_arc_inside_it() {
 fn a_reflection_keeps_the_end_points_and_their_order() {
     // E40: start maps to start, end to end, and the sweep flips.
     let fx = fixtures();
-    let arc = &fx.iter().find(|(r, _)| *r == SourceRow::CircularArc).unwrap().1;
+    let arc = &fx
+        .iter()
+        .find(|(r, _)| *r == SourceRow::CircularArc)
+        .unwrap()
+        .1;
     let m = [1.0, 0.0, 0.0, -1.0, 0.0, 0.0];
     let out = promote(&record(arc), &one(m)).unwrap();
     let t = Transform2::new(m).unwrap();
@@ -409,7 +435,12 @@ fn splines_keep_degree_knots_and_weights_and_only_move_their_control_points() {
     let bs = &fx.iter().find(|(r, _)| *r == SourceRow::BSpline).unwrap().1;
     let (Curve::BSpline(before), Curve::BSpline(after)) = (
         bs,
-        promote(&record(bs), &one(m)).unwrap().record().geometry().unwrap().clone(),
+        promote(&record(bs), &one(m))
+            .unwrap()
+            .record()
+            .geometry()
+            .unwrap()
+            .clone(),
     ) else {
         panic!("kind changed")
     };
@@ -418,7 +449,12 @@ fn splines_keep_degree_knots_and_weights_and_only_move_their_control_points() {
     let nu = &fx.iter().find(|(r, _)| *r == SourceRow::Nurbs).unwrap().1;
     let (Curve::RationalBSpline(before), Curve::RationalBSpline(after)) = (
         nu,
-        promote(&record(nu), &one(m)).unwrap().record().geometry().unwrap().clone(),
+        promote(&record(nu), &one(m))
+            .unwrap()
+            .record()
+            .geometry()
+            .unwrap()
+            .clone(),
     ) else {
         panic!("kind changed")
     };
@@ -443,7 +479,11 @@ fn a_conic_pushed_past_the_conditioning_bound_is_unsupported_and_other_kinds_are
                 | SourceRow::PolylineWithBulge
         );
         assert!(
-            promote(&record(&curve), &one(inside)).unwrap().record().geometry().is_some(),
+            promote(&record(&curve), &one(inside))
+                .unwrap()
+                .record()
+                .geometry()
+                .is_some(),
             "{row:?} inside"
         );
         let out = promote(&record(&curve), &one(outside)).unwrap();
@@ -471,7 +511,10 @@ fn promotion_keeps_the_provenance_handle() {
     assert_eq!(ok.record().provenance(), Some(ProvenanceHandle::new(42)));
     let ratio = Policy::V1.axis_ratio_max;
     let refused = promote(&rec, &one([1.0, 0.0, 0.0, 0.25 / ratio, 0.0, 0.0])).unwrap();
-    assert_eq!(refused.record().provenance(), Some(ProvenanceHandle::new(42)));
+    assert_eq!(
+        refused.record().provenance(),
+        Some(ProvenanceHandle::new(42))
+    );
 }
 
 #[test]
@@ -493,7 +536,10 @@ fn a_cell_that_requires_a_pvec_capability_is_classified_not_approximated() {
     let rec = record(&fx[4].1).with_provenance(ProvenanceHandle::new(1));
     let out = promote_with(&m, &rec, &one([3.0, 0.0, 0.0, 0.5, 0.0, 0.0])).unwrap();
     assert!(out.record().geometry().is_none());
-    assert_eq!(out.record().fidelity(), FidelityClass::RequiresPVecCapability);
+    assert_eq!(
+        out.record().fidelity(),
+        FidelityClass::RequiresPVecCapability
+    );
     assert_eq!(out.record().provenance(), Some(ProvenanceHandle::new(1)));
 }
 
@@ -508,11 +554,15 @@ fn circle_is_a_polyline(row: SourceRow) -> Cell {
 fn a_shape_the_cell_does_not_allow_is_a_violation_and_not_passed_on() {
     let m = PromotionMatrix::from_lookup(circle_is_a_polyline);
     let fx = fixtures();
-    let err = promote_with(&m, &record(&fx[4].1), &one([2.5, 0.0, 0.0, 2.5, 0.0, 0.0])).unwrap_err();
+    let err =
+        promote_with(&m, &record(&fx[4].1), &one([2.5, 0.0, 0.0, 2.5, 0.0, 0.0])).unwrap_err();
     assert!(
         matches!(
             err,
-            PromotionError::MatrixViolation { row: SourceRow::Circle, got: Some(Shape::Circle) }
+            PromotionError::MatrixViolation {
+                row: SourceRow::Circle,
+                got: Some(Shape::Circle)
+            }
         ),
         "{err:?}"
     );
@@ -550,7 +600,13 @@ fn the_module_has_no_numeric_literal_threshold() {
             "an exponent literal near byte {i}"
         );
     }
-    for banned in ["EPSILON", "epsilon", "tolerance", "f64::MIN_POSITIVE", "Policy::"] {
+    for banned in [
+        "EPSILON",
+        "epsilon",
+        "tolerance",
+        "f64::MIN_POSITIVE",
+        "Policy::",
+    ] {
         assert!(!code.contains(banned), "`{banned}` in the module");
     }
 }
