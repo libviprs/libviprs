@@ -6,9 +6,9 @@
 use libviprs::cad::ItemHandle;
 use libviprs::pvec::dump::{DUMP_VERSION, NormalizedDump, dump_to_string};
 use libviprs::pvec::provenance::{Provenance, ProvenanceSink, ProvenanceStore};
+use libviprs::pvec::fidelity::{Basis, Classification, ReasonCode, Tally};
 use libviprs::pvec::{
-    Basis, Classification, FidelityClass, InstancePath, Normalized2DGeometry, ProvenanceStub,
-    ReasonCode, SourceTransform, Tally,
+    FidelityClass, InstancePath, Normalized2DGeometry, ProvenanceStub, SourceTransform,
 };
 
 const SRC: &str = include_str!("../src/pvec/dump.rs");
@@ -196,7 +196,10 @@ fn the_entity_count_equals_the_fidelity_encountered_count() {
                 Classification::refused(ReasonCode::UnmappedSourceClass, "PROXY")
             }
             FidelityClass::IgnoredByPolicy => Classification::ignored_by_policy("layers", "TEXT"),
-            _ => Classification::supported(Basis::Exact, "CIRCLE"),
+            FidelityClass::SupportedEquivalent => {
+                Classification::supported(Basis::Equivalent, "ARC")
+            }
+            _ => Classification::supported(Basis::Structural, "CIRCLE"),
         };
         tally.record(&c);
     }
