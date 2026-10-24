@@ -12,7 +12,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use libviprs::pvec::{INSUNITS_TABLE, DrawingExtents, SourceSpace, SourceUnit};
+use libviprs::pvec::{DrawingExtents, INSUNITS_TABLE, SourceSpace, SourceUnit};
 
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
