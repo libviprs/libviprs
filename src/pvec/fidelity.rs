@@ -131,11 +131,14 @@ pub enum ReasonCode {
     /// The only available representation is for display, not the entity's own geometry.
     /// `Unsupported`.
     DisplayFidelityOnly,
+    /// A PDF soft mask is in force: it modulates what is painted, and PVec has no
+    /// construct for it (N5.3). `Unsupported`.
+    PdfSoftMask,
 }
 
 impl ReasonCode {
     /// Every code, in a fixed order.
-    pub const ALL: [ReasonCode; 10] = [
+    pub const ALL: [ReasonCode; 11] = [
         ReasonCode::SplineKnotsNotReported,
         ReasonCode::SplinePeriodicNotReported,
         ReasonCode::SplineWeightsNotReported,
@@ -146,6 +149,7 @@ impl ReasonCode {
         ReasonCode::SplinePolicyRefused,
         ReasonCode::UnmappedSourceClass,
         ReasonCode::DisplayFidelityOnly,
+        ReasonCode::PdfSoftMask,
     ];
 
     /// The stable machine-readable spelling.
@@ -162,6 +166,7 @@ impl ReasonCode {
             ReasonCode::SplinePolicyRefused => "spline-policy-refused",
             ReasonCode::UnmappedSourceClass => "unmapped-source-class",
             ReasonCode::DisplayFidelityOnly => "display-fidelity-only",
+            ReasonCode::PdfSoftMask => "pdf-soft-mask",
         }
     }
 
@@ -177,7 +182,8 @@ impl ReasonCode {
             | ReasonCode::SplineMalformed
             | ReasonCode::SplinePolicyRefused
             | ReasonCode::UnmappedSourceClass
-            | ReasonCode::DisplayFidelityOnly => FidelityClass::Unsupported,
+            | ReasonCode::DisplayFidelityOnly
+            | ReasonCode::PdfSoftMask => FidelityClass::Unsupported,
         }
     }
 }

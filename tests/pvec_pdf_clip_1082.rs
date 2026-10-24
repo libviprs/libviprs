@@ -72,8 +72,12 @@ fn page_of(bytes: &[u8]) -> PdfVectorPage {
 
 fn report(body: &str) -> ClipReport {
     let page = page_of(&pdf(body, None, false));
-    apply_clip_policy(&page, &ClipLimits::from(&SourceLimits::default()), &LinesOnlyBounds)
-        .unwrap()
+    apply_clip_policy(
+        &page,
+        &ClipLimits::from(&SourceLimits::default()),
+        &LinesOnlyBounds,
+    )
+    .unwrap()
 }
 
 /// The decision for the last painted entity.
@@ -110,12 +114,18 @@ fn n5_3_no_clip_is_recorded_as_no_clip() {
 fn n5_3_axis_aligned_rectangle_is_an_exact_clip_and_keeps_the_geometry() {
     let r = report(RECT);
     assert_eq!(last(&r).case, ClipCase::ExactRectangular);
-    assert_eq!(last(&r).conformance, Some(ClipConformance::GeometricallyExact));
+    assert_eq!(
+        last(&r).conformance,
+        Some(ClipConformance::GeometricallyExact)
+    );
     assert!(last(&r).classification.is_none());
     assert_eq!(r.clips.len(), 1);
     assert_eq!(
         r.clips[0].rect,
-        Some(ExactBounds { min: [0.0, 0.0], max: [100.0, 50.0] })
+        Some(ExactBounds {
+            min: [0.0, 0.0],
+            max: [100.0, 50.0]
+        })
     );
     assert_eq!(r.clips[0].rule, PdfFillRule::NonZero);
 }
@@ -129,8 +139,12 @@ fn n5_3_rectangle_drawn_with_m_l_h_is_still_rectangular() {
 #[test]
 fn n5_3_rectangle_stays_rectangular_under_page_rotation() {
     let page = page_of(&pdf(RECT, Some(90), false));
-    let r = apply_clip_policy(&page, &ClipLimits::from(&SourceLimits::default()), &LinesOnlyBounds)
-        .unwrap();
+    let r = apply_clip_policy(
+        &page,
+        &ClipLimits::from(&SourceLimits::default()),
+        &LinesOnlyBounds,
+    )
+    .unwrap();
     assert_eq!(last(&r).case, ClipCase::ExactRectangular);
 }
 
@@ -153,7 +167,10 @@ fn n5_3_general_path_is_bounded_conservative_and_never_exact() {
 
 #[test]
 fn n5_3_no_bounded_conservative_record_is_labelled_exact() {
-    for body in [TRIANGLE, "0 0 m 50 100 100 100 100 0 c h W n 10 10 5 5 re f"] {
+    for body in [
+        TRIANGLE,
+        "0 0 m 50 100 100 100 100 0 c h W n 10 10 5 5 re f",
+    ] {
         let r = report(body);
         for c in &r.clips {
             assert_ne!(c.conformance, ClipConformance::GeometricallyExact);
@@ -191,11 +208,17 @@ fn n5_3_a_curve_is_never_dropped_on_its_control_hull() {
     let r = apply_clip_policy(&page, &limits, &LinesOnlyBounds).unwrap();
     assert_ne!(last(&r).case, ClipCase::FullyClipped);
     // A source whose exact extent is inside: retained.
-    let inside = Fixed(ExactBounds { min: [10.0, 10.0], max: [90.0, 62.5] });
+    let inside = Fixed(ExactBounds {
+        min: [10.0, 10.0],
+        max: [90.0, 62.5],
+    });
     let r = apply_clip_policy(&page, &limits, &inside).unwrap();
     assert_eq!(last(&r).case, ClipCase::ExactRectangular);
     // A source whose exact extent is outside: dropped.
-    let outside = Fixed(ExactBounds { min: [110.0, 10.0], max: [190.0, 60.0] });
+    let outside = Fixed(ExactBounds {
+        min: [110.0, 10.0],
+        max: [190.0, 60.0],
+    });
     let r = apply_clip_policy(&page, &limits, &outside).unwrap();
     assert_eq!(last(&r).case, ClipCase::FullyClipped);
 }
@@ -203,8 +226,12 @@ fn n5_3_a_curve_is_never_dropped_on_its_control_hull() {
 #[test]
 fn n5_3_a_soft_mask_makes_the_entity_unsupported_with_a_report_row() {
     let page = page_of(&pdf("/GS1 gs 10 10 20 20 re f", None, true));
-    let r = apply_clip_policy(&page, &ClipLimits::from(&SourceLimits::default()), &LinesOnlyBounds)
-        .unwrap();
+    let r = apply_clip_policy(
+        &page,
+        &ClipLimits::from(&SourceLimits::default()),
+        &LinesOnlyBounds,
+    )
+    .unwrap();
     let d = last(&r);
     assert_eq!(d.case, ClipCase::Unsupported);
     let c = d.classification.as_ref().expect("a classification");
@@ -252,8 +279,12 @@ fn n5_3_the_clip_count_equals_the_recorded_decisions() {
     let page = page_of(&pdf(body, None, false));
     let in_stream = page.entities.iter().filter(|e| e.clip.is_some()).count();
     assert_eq!(in_stream, 3);
-    let r = apply_clip_policy(&page, &ClipLimits::from(&SourceLimits::default()), &LinesOnlyBounds)
-        .unwrap();
+    let r = apply_clip_policy(
+        &page,
+        &ClipLimits::from(&SourceLimits::default()),
+        &LinesOnlyBounds,
+    )
+    .unwrap();
     assert_eq!(r.clips.len(), in_stream);
     // Every clip a decision names has a record.
     let known: HashSet<u64> = r.clips.iter().map(|c| c.sequence).collect();
@@ -295,14 +326,21 @@ fn n5_3_the_winding_rule_is_recorded_and_never_flattened() {
 fn n5_3_nesting_past_the_limit_is_a_typed_error_naming_limit_and_depth() {
     let body = "q 0 0 90 90 re W n q 0 0 80 80 re W n q 0 0 70 70 re W n 1 1 2 2 re f Q Q Q";
     let page = page_of(&pdf(body, None, false));
-    let err = apply_clip_policy(&page, &ClipLimits { max_clip_depth: 2 }, &LinesOnlyBounds)
-        .unwrap_err();
+    let err =
+        apply_clip_policy(&page, &ClipLimits { max_clip_depth: 2 }, &LinesOnlyBounds).unwrap_err();
     assert_eq!(
         err,
-        ClipError::NestingExceeded { limit: 2, limit_name: "max_block_depth", observed: 3 }
+        ClipError::NestingExceeded {
+            limit: 2,
+            limit_name: "max_block_depth",
+            observed: 3
+        }
     );
     let text = err.to_string();
-    assert!(text.contains("max_block_depth=2") && text.contains("depth 3"), "{text}");
+    assert!(
+        text.contains("max_block_depth=2") && text.contains("depth 3"),
+        "{text}"
+    );
     // At the limit is fine.
     assert!(apply_clip_policy(&page, &ClipLimits { max_clip_depth: 3 }, &LinesOnlyBounds).is_ok());
 }
