@@ -117,10 +117,10 @@ impl AcadrustProvider {
         };
         let mut found: Vec<(i16, u64, String, String)> = Vec::new();
         for o in doc.objects.values() {
-            if let ObjectType::Layout(l) = o {
-                if let Some(block) = block_of(l.block_record) {
-                    found.push((l.tab_order, l.handle.value(), l.name.clone(), block));
-                }
+            if let ObjectType::Layout(l) = o
+                && let Some(block) = block_of(l.block_record)
+            {
+                found.push((l.tab_order, l.handle.value(), l.name.clone(), block));
             }
         }
         if found.is_empty() {
@@ -140,7 +140,7 @@ impl AcadrustProvider {
         }
         // The objects live in a hash map, so the order is made here, not inherited.
         let is_model = |block: &str| block.eq_ignore_ascii_case("*Model_Space");
-        found.sort_by(|a, b| (!is_model(&a.3), a.0, a.1).cmp(&(!is_model(&b.3), b.0, b.1)));
+        found.sort_by_key(|a| (!is_model(&a.3), a.0, a.1));
         found
             .into_iter()
             .enumerate()

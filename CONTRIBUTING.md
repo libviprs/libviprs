@@ -271,6 +271,19 @@ The dependency is a git dependency while `acadsharp-rs` is unpublished, which
 means this crate cannot be published to crates.io until that line in the root
 `Cargo.toml` becomes a registry version.
 
+### `dwg-acadrust` is a pinned git dependency, and it is opt-in
+
+`--features dwg-acadrust` pulls `acadrust`, libviprs' fork of a pure-Rust DWG and
+DXF reader, for the first provider behind `pvec::DwgProvider` (issue #1072). It
+declares no `links` key, has no native archive and loads nothing at run time, so
+`tests/dependency_policy.rs` has a cell for it that adds no `links` entry and no
+vendored C. It is a git dependency pinned by a full 40 digit `rev`, for the same
+reason as `acadsharp-rs` above, so it also blocks publishing to crates.io until
+that line becomes a registry version. Moving the `rev` means rerunning Gate 0
+(`docs/spikes/acadrust-gate0/run.sh`), and a test checks the table records the
+revision `Cargo.toml` names. acadrust is MPL-2.0: keep it a crate dependency on
+the fork and never copy its files into this tree.
+
 ### Adding a dependency
 
 Before you add one, check it against the rule. Start with the mechanical half,

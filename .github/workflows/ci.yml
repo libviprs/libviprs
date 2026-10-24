@@ -117,6 +117,9 @@ jobs:
       # The acadsharp-rs DWG provider (issue #1030) is behind `dwg-acadsharp`. It
       # compiles without a native archive, so this lints the adapter everywhere.
       - run: cargo clippy --all-targets --features dwg-acadsharp -- -D warnings -W clippy::incompatible_msrv -W deprecated
+      # The acadrust provider of the `pvec` DWG traits (issue #1072) is behind
+      # `dwg-acadrust`. Pure Rust, no archive, so this lints it everywhere.
+      - run: cargo clippy --all-targets --features dwg-acadrust -- -D warnings -W clippy::incompatible_msrv -W deprecated
       # Same for the SVG rasteriser: `svg` is non-default because it costs 29
       # crates, so the default clippy job never sees `src/svg.rs` at all
       # (issue #502).
@@ -261,6 +264,9 @@ jobs:
       # Without an archive the native tests skip; they need the pinned libviprs-dep
       # archive and LIBVIPRS_REQUIRE_ACADSHARP_NATIVE=1 to be a real lane (#1030).
       - run: cargo test --features dwg-acadsharp --test cad_1030_acadsharp_decoder
+      # The acadrust provider needs nothing installed, so its tests are a real lane
+      # (the two ACadSharp-written fixtures, read by acadrust; issue #1072).
+      - run: cargo test --features dwg-acadrust --test pvec_provider_acadrust
       # The SVG module and its unit tests are behind the non-default `svg`
       # feature, and the `<image xlink:href>` lockdown tests in
       # tests/path_traversal.rs are gated on it too. Bare `cargo test` runs

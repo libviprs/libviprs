@@ -156,13 +156,12 @@ fn foreign_in_item_with(item: &str, allow_reader_name: bool, locals: &[String]) 
     }
     // A path whose first segment is not ours.
     for tok in item.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == ':')) {
-        if let Some((first, _)) = tok.split_once("::") {
-            if !first.is_empty()
-                && !ALLOWED_ROOTS.contains(&first)
-                && !locals.iter().any(|l| l == first)
-            {
-                return Some(format!("path `{tok}` in `{item}`"));
-            }
+        if let Some((first, _)) = tok.split_once("::")
+            && !first.is_empty()
+            && !ALLOWED_ROOTS.contains(&first)
+            && !locals.iter().any(|l| l == first)
+        {
+            return Some(format!("path `{tok}` in `{item}`"));
         }
     }
     None
@@ -258,10 +257,10 @@ fn no_foreign_type_appears_in_any_public_signature_of_the_provider_module() {
         }
         for u in uses(&src) {
             let local = locals.iter().any(|l| u.contains(&format!("use {l}::")));
-            if let Some(why) = foreign_use(&u) {
-                if !local {
-                    failures.push(why);
-                }
+            if let Some(why) = foreign_use(&u)
+                && !local
+            {
+                failures.push(why);
             }
         }
         assert!(

@@ -64,6 +64,7 @@ const COLUMNS: [&str; 15] = [
     "model_entities",
     "entities_all_scopes",
     "unmapped",
+    "unmapped_classes",
     "reread_identical",
     "error",
 ];
@@ -196,18 +197,37 @@ fn the_document_quotes_the_table_and_agrees_with_it() {
         doc.contains("OPEN_FAILED"),
         "the document defines the failure term"
     );
+    // Column order of the document's Tier A table.
+    let doc_cols = [
+        ("version", 2),
+        ("open", 3),
+        ("layers", 4),
+        ("layouts", 5),
+        ("blocks", 6),
+        ("model_entities", 7),
+        ("entities_all_scopes", 8),
+        ("unmapped", 9),
+    ];
     for r in rows.iter().filter(|r| r.get("tier") == "A") {
-        let line = doc
+        let cells: Vec<String> = doc
             .lines()
-            .find(|l| l.contains(r.get("file")) && l.trim_start().starts_with('|'))
+            .filter(|l| l.trim_start().starts_with('|'))
+            .map(|l| {
+                l.split('|')
+                    .map(|c| c.trim().to_string())
+                    .collect::<Vec<_>>()
+            })
+            .find(|c| c.get(1).map(String::as_str) == Some(r.get("file")))
             .unwrap_or_else(|| panic!("{} is not in the document's table", r.get("file")));
-        for c in ["open", "layers", "blocks"] {
-            assert!(
-                line.contains(r.get(c)),
-                "{}: the document says something other than {} = {}\n{line}",
+        for (col, idx) in doc_cols {
+            assert_eq!(
+                cells[idx],
+                r.get(col),
+                "{}: the document says {} = {}, the table says {}",
                 r.get("file"),
-                c,
-                r.get(c)
+                col,
+                cells[idx],
+                r.get(col)
             );
         }
     }

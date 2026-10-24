@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`pvec`, the replaceable DWG provider traits, and an acadrust provider behind
+  `dwg-acadrust`** (issue #1072, part of #1039). `pvec::DwgProvider` and
+  `pvec::EntityCursor` are the seam Epic N reads a drawing through: layouts,
+  layer state, and one deterministic pass of `RawEntity` values (geometry
+  parameters as the drawing stores them, INSERTs as references, never a decoder
+  handle), each with a `ProvenanceStub` that carries handle, class name, layer
+  and an `InstancePath` of block names and insert handles. `ProviderCaps` keeps
+  "not in this drawing" apart from "this provider cannot report it". `cad::CadDecoder`
+  and `cad::Origin` are unchanged. `pvec::dwg_acadrust::AcadrustProvider` is the
+  first provider; its acadrust dependency is pinned by revision and its Gate 0
+  run over the AutoCAD-authored corpus is `docs/spikes/acadrust-gate0.md`.
+
 - **MTEXT formatting, font and glyph warnings, Model Space only, and a bound on
   repeated blocks** (issues #1231, part of #1034). `cad::display_text` reads
   MTEXT codes (`\P`, stacks, font and height changes) out of a string and
