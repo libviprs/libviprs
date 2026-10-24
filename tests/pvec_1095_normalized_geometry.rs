@@ -5,9 +5,7 @@
 //! here is that PVec's answer comes back untouched.
 #![cfg(feature = "pvec-normalized")]
 
-use libviprs::pvec::{
-    FidelityClass, Normalized2DGeometry, NormalizeError, ProvenanceHandle,
-};
+use libviprs::pvec::{FidelityClass, NormalizeError, Normalized2DGeometry, ProvenanceHandle};
 use pvec_geometry::{Curve, Curve2d};
 
 const SRC: &str = include_str!("../src/pvec/normalized.rs");
@@ -56,15 +54,21 @@ fn non_finite_coordinate_is_rejected_at_construction_with_a_typed_error() {
             .unwrap_err(),
         ];
         for e in errs {
-            assert!(e.is_non_finite(), "{bad}: expected a non-finite refusal, got {e:?}");
+            assert!(
+                e.is_non_finite(),
+                "{bad}: expected a non-finite refusal, got {e:?}"
+            );
         }
     }
 }
 
 #[test]
 fn the_refused_field_is_named() {
-    let e = Normalized2DGeometry::polyline(&[[0.0, 0.0], [f64::NAN, 1.0]], FidelityClass::SupportedExact)
-        .unwrap_err();
+    let e = Normalized2DGeometry::polyline(
+        &[[0.0, 0.0], [f64::NAN, 1.0]],
+        FidelityClass::SupportedExact,
+    )
+    .unwrap_err();
     assert!(e.is_non_finite());
     assert_eq!(e.rule(), Some("NP-01"));
 }
@@ -72,20 +76,23 @@ fn the_refused_field_is_named() {
 #[test]
 fn pvec_refusals_pass_through_with_their_rule() {
     // A zero radius is PVec's NP-07, not a check this crate makes.
-    let e = Normalized2DGeometry::circle([0.0, 0.0], [1.0, 0.0], 0.0, FidelityClass::SupportedExact)
-        .unwrap_err();
+    let e =
+        Normalized2DGeometry::circle([0.0, 0.0], [1.0, 0.0], 0.0, FidelityClass::SupportedExact)
+            .unwrap_err();
     assert!(!e.is_non_finite());
     assert_eq!(e.rule(), Some("NP-07"));
     // A zero reference direction is NP-10.
-    let e = Normalized2DGeometry::circle([0.0, 0.0], [0.0, 0.0], 1.0, FidelityClass::SupportedExact)
-        .unwrap_err();
+    let e =
+        Normalized2DGeometry::circle([0.0, 0.0], [0.0, 0.0], 1.0, FidelityClass::SupportedExact)
+            .unwrap_err();
     assert_eq!(e.rule(), Some("NP-10"));
 }
 
 #[test]
 fn a_circle_is_a_pvec_circle_with_pvecs_own_bounds() {
-    let g = Normalized2DGeometry::circle([2.0, 3.0], [1.0, 0.0], 5.0, FidelityClass::SupportedExact)
-        .unwrap();
+    let g =
+        Normalized2DGeometry::circle([2.0, 3.0], [1.0, 0.0], 5.0, FidelityClass::SupportedExact)
+            .unwrap();
     let curve = g.geometry().expect("a circle carries geometry");
     assert!(matches!(curve, Curve::Circle(_)));
     // The box is whatever PVec says for that curve, carried and not recomputed.
@@ -114,8 +121,14 @@ fn an_arc_is_a_trimmed_circle() {
 
 #[test]
 fn an_ellipse_is_a_pvec_ellipse() {
-    let g = Normalized2DGeometry::ellipse([0.0, 0.0], [1.0, 0.0], 4.0, 2.0, FidelityClass::SupportedExact)
-        .unwrap();
+    let g = Normalized2DGeometry::ellipse(
+        [0.0, 0.0],
+        [1.0, 0.0],
+        4.0,
+        2.0,
+        FidelityClass::SupportedExact,
+    )
+    .unwrap();
     assert!(matches!(g.geometry().unwrap(), Curve::Ellipse(_)));
 }
 
@@ -153,8 +166,9 @@ fn weights_present_means_rational_and_is_never_demoted() {
     let pts = [[0.0, 0.0], [1.0, 1.0], [2.0, 0.0]];
     let knots = [0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
     let w = [1.0, 0.5, 1.0];
-    let g = Normalized2DGeometry::rational_b_spline(2, &pts, &knots, &w, FidelityClass::SupportedExact)
-        .unwrap();
+    let g =
+        Normalized2DGeometry::rational_b_spline(2, &pts, &knots, &w, FidelityClass::SupportedExact)
+            .unwrap();
     match g.geometry().unwrap() {
         Curve::RationalBSpline(s) => assert_eq!(s.weights(), &w),
         other => panic!("expected a rational b-spline, got {other:?}"),
@@ -198,8 +212,9 @@ fn geometry_presence_follows_the_fidelity_class() {
 
 #[test]
 fn provenance_is_optional_and_does_not_touch_the_geometry() {
-    let bare = Normalized2DGeometry::circle([0.0, 0.0], [1.0, 0.0], 1.0, FidelityClass::SupportedExact)
-        .unwrap();
+    let bare =
+        Normalized2DGeometry::circle([0.0, 0.0], [1.0, 0.0], 1.0, FidelityClass::SupportedExact)
+            .unwrap();
     let tagged = bare.clone().with_provenance(ProvenanceHandle::new(42));
     assert_eq!(tagged.provenance().map(ProvenanceHandle::get), Some(42));
     assert!(bare.provenance().is_none());
@@ -212,22 +227,54 @@ fn provenance_is_optional_and_does_not_touch_the_geometry() {
 fn the_record_has_no_equality_of_its_own() {
     // NG-B6: a derived PartialEq over f64 fields would be bit comparison dressed as geometry.
     let code = code_only(SRC);
-    for needle in ["PartialEq for Normalized2DGeometry", "Hash for Normalized2DGeometry"] {
+    for needle in [
+        "PartialEq for Normalized2DGeometry",
+        "Hash for Normalized2DGeometry",
+    ] {
         assert!(!code.contains(needle), "{needle}");
     }
-    let before = code.split("pub struct Normalized2DGeometry").next().unwrap();
-    let derive = before.lines().rev().find(|l| l.contains("derive(")).unwrap_or("");
-    assert!(!derive.contains("PartialEq") && !derive.contains("Hash"), "{derive}");
+    let before = code
+        .split("pub struct Normalized2DGeometry")
+        .next()
+        .unwrap();
+    let derive = before
+        .lines()
+        .rev()
+        .find(|l| l.contains("derive("))
+        .unwrap_or("");
+    assert!(
+        !derive.contains("PartialEq") && !derive.contains("Hash"),
+        "{derive}"
+    );
 }
 
 #[test]
 fn the_module_declares_no_tolerance_and_no_comparison_threshold() {
     let code = code_only(SRC).to_lowercase();
     for needle in [
-        "epsilon", "tolerance", "tol_", "_tol", "abs_diff", "approx", "1e-", "1.0e-", "ulp",
-        "const ", "static ",
+        "epsilon",
+        "tolerance",
+        "tol_",
+        "_tol",
+        "abs_diff",
+        "approx",
+        "1e-",
+        "1.0e-",
+        "ulp",
     ] {
-        assert!(!code.contains(needle), "normalized.rs must not contain `{needle}`");
+        assert!(
+            !code.contains(needle),
+            "normalized.rs must not contain `{needle}`"
+        );
+    }
+    // No named numeric constant of any kind (`pub const fn` is a function, not a constant).
+    for line in code.lines().map(str::trim_start) {
+        let line = line.strip_prefix("pub ").unwrap_or(line);
+        assert!(
+            !(line.starts_with("const ") && !line.starts_with("const fn"))
+                && !line.starts_with("static "),
+            "normalized.rs must not declare a constant: {line}"
+        );
     }
 }
 
@@ -235,22 +282,54 @@ fn the_module_declares_no_tolerance_and_no_comparison_threshold() {
 fn the_module_contains_no_evaluator_tessellator_or_knot_manipulation() {
     let code = code_only(SRC);
     for needle in [
-        ".sin(", ".cos(", ".tan(", ".atan", ".sqrt(", ".powi(", ".powf(", ".hypot(", ".eval(",
-        ".derivative(", "flatten", "tessellat", "insert_knot", "remove_knot", "elevate",
-        "to_rational_b_spline", "TAU", "PI",
+        ".sin(",
+        ".cos(",
+        ".tan(",
+        ".atan",
+        ".sqrt(",
+        ".powi(",
+        ".powf(",
+        ".hypot(",
+        ".eval(",
+        ".derivative(",
+        "flatten",
+        "tessellat",
+        "insert_knot",
+        "remove_knot",
+        "elevate",
+        "to_rational_b_spline",
+        "TAU",
+        "PI",
     ] {
-        assert!(!code.contains(needle), "normalized.rs must not contain `{needle}` (NG-B1 to NG-B4)");
+        assert!(
+            !code.contains(needle),
+            "normalized.rs must not contain `{needle}` (NG-B1 to NG-B4)"
+        );
     }
 }
 
 #[test]
 fn no_provider_or_physical_format_type_appears_in_the_module() {
     for needle in [
-        "cad::", "crate::cad", "Primitive", "ProviderError", "DwgProvider", "RawEntity",
-        "RawGeometry", "acadrust", "acadsharp", "lopdf", "pvec_codec", "pvec_container",
-        "pvec_components", "pvec_entity",
+        "cad::",
+        "crate::cad",
+        "Primitive",
+        "ProviderError",
+        "DwgProvider",
+        "RawEntity",
+        "RawGeometry",
+        "acadrust",
+        "acadsharp",
+        "lopdf",
+        "pvec_codec",
+        "pvec_container",
+        "pvec_components",
+        "pvec_entity",
     ] {
-        assert!(!code_only(SRC).contains(needle), "normalized.rs must not name `{needle}` (NG-08)");
+        assert!(
+            !code_only(SRC).contains(needle),
+            "normalized.rs must not name `{needle}` (NG-08)"
+        );
     }
 }
 
@@ -261,7 +340,13 @@ fn the_module_documentation_states_the_delegation_rule() {
         .take_while(|l| l.starts_with("//!") || l.trim().is_empty())
         .collect::<Vec<_>>()
         .join("\n");
-    for needle in ["NG-01", "delegat", "pvec_geometry", "reviewable violation", "NG-B1"] {
+    for needle in [
+        "NG-01",
+        "delegat",
+        "pvec_geometry",
+        "reviewable violation",
+        "NG-B1",
+    ] {
         assert!(docs.contains(needle), "module docs must mention `{needle}`");
     }
 }
