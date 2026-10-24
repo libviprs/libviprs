@@ -484,8 +484,9 @@ annotated   fs-detected  tests/pmtiles_writer.rs::two_shuffled_insertion_orders_
 annotated   fs-detected  tests/pvec_1085_fill_policy.rs::n5_6_the_doc_has_a_row_for_every_construct_and_reason
 annotated   fs-detected  tests/pvec_1089_mapping.rs::the_doc_is_the_rendered_table_byte_for_byte
 annotated   fs-detected  tests/pvec_1102_ordering.rs::no_hash_iteration_in_emit_path
+annotated   fs-detected  tests/pvec_api_surface.rs::no_index_directory_or_straddler_type_is_defined_under_src_pvec
 annotated   fs-detected  tests/pvec_api_surface.rs::no_pvec_path_under_src_is_outside_the_allowed_surface
-annotated   fs-detected  tests/pvec_api_surface.rs::only_the_two_semantic_crates_are_named_today
+annotated   fs-detected  tests/pvec_api_surface.rs::only_the_semantic_crates_are_named_today
 annotated   fs-detected  tests/pvec_api_surface.rs::src_pvec_implements_no_curve_evaluation_knot_insertion_or_tessellation
 annotated   fs-detected  tests/pvec_api_surface.rs::the_pvec_dependencies_stay_semantic_and_optional
 annotated   fs-detected  tests/pvec_dwg_spline_structural.rs::no_code_path_turns_a_spline_into_polylines_or_arcs

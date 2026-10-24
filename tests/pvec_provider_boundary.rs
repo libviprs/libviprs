@@ -251,6 +251,7 @@ fn no_foreign_type_appears_in_any_public_signature_of_the_provider_module() {
         let is_mod = file.ends_with("mod.rs");
         if is_mod {
             locals.extend([
+                "bounds".to_string(),
                 "classify".to_string(),
                 "fidelity".to_string(),
                 "limits".to_string(),
