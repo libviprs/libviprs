@@ -418,10 +418,11 @@ fn n14_every_long_decimal_in_the_document_is_in_the_probe_output() {
             cur.push(ch);
         } else {
             let t = cur.trim_matches('.');
-            if let Some((_, frac)) = t.split_once('.') {
-                if frac.len() >= 4 && !frac.contains('.') {
-                    found.push(t.to_owned());
-                }
+            if let Some((_, frac)) = t.split_once('.')
+                && frac.len() >= 4
+                && !frac.contains('.')
+            {
+                found.push(t.to_owned());
             }
             cur.clear();
         }
