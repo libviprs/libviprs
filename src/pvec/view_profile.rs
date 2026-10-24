@@ -351,6 +351,22 @@ impl ViewProfile {
         ]
     }
 
+    /// The fields of this profile that can exclude an entity, as [`Knob::field`] spells them.
+    /// A layer rule set to `Ignore` cannot exclude, so it is not listed.
+    #[must_use]
+    pub fn exclusion_fields(&self) -> Vec<&'static str> {
+        let mut out = Vec::new();
+        if self.layers.off == LayerStateRule::Exclude {
+            out.push(Exclusion::LayerOff.field());
+        }
+        if self.layers.frozen == LayerStateRule::Exclude {
+            out.push(Exclusion::LayerFrozen.field());
+        }
+        out.push(Exclusion::DepthLimit.field());
+        out.push(Exclusion::Unresolved.field());
+        out
+    }
+
     /// Applies the profile to one drawing.
     ///
     /// The provider's entities for the selected space are walked in the provider's own order,
@@ -553,6 +569,30 @@ impl<P: DwgProvider + ?Sized> Walk<'_, P> {
 }
 
 impl Exclusion {
+    /// Every way an entity can be excluded.
+    pub const ALL: [Exclusion; 4] = [
+        Exclusion::LayerOff,
+        Exclusion::LayerFrozen,
+        Exclusion::DepthLimit,
+        Exclusion::Unresolved,
+    ];
+
+    /// The classification of an entity excluded this way: `IgnoredByPolicy` naming
+    /// [`Exclusion::field`], or `Unsupported` with `UnresolvedBlock` for an unresolved block.
+    #[must_use]
+    pub fn classification(
+        self,
+        source_class: impl Into<String>,
+    ) -> super::fidelity::Classification {
+        use super::fidelity::{Classification, ReasonCode};
+        match self {
+            Exclusion::Unresolved => {
+                Classification::refused(ReasonCode::UnresolvedBlock, source_class)
+            }
+            _ => Classification::ignored_by_policy(self.field(), source_class),
+        }
+    }
+
     /// The profile field that excluded the entity, as [`Knob::field`] spells it.
     #[must_use]
     pub fn field(self) -> &'static str {

@@ -28,8 +28,9 @@
 //! # What is not here
 //!
 //! Report rendering (N6.7), the caller-facing capability policy (N7.2) and the PVec capabilities
-//! themselves (EPIC P). `IgnoredByPolicy` takes the responsible field as a name; the view-profile
-//! API that owns those fields is N3.3, and it passes its field names in.
+//! themselves (EPIC P). `IgnoredByPolicy` takes the responsible field as a name, and the view
+//! profile (N3.3) supplies it: see `Exclusion::classification` and
+//! `Classification::ignored_by_profile`.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -155,11 +156,14 @@ pub enum ReasonCode {
     /// A PDF soft mask is in force: it modulates what is painted, and PVec has no
     /// construct for it (N5.3). `Unsupported`.
     PdfSoftMask,
+    /// An INSERT of a block the provider does not have, or an xref: nothing to descend into.
+    /// `Unsupported`, and `UNRESOLVED_BLOCK` (105) in the diagnostics.
+    UnresolvedBlock,
 }
 
 impl ReasonCode {
     /// Every code, in a fixed order.
-    pub const ALL: [ReasonCode; 19] = [
+    pub const ALL: [ReasonCode; 20] = [
         ReasonCode::SplineKnotsNotReported,
         ReasonCode::SplinePeriodicNotReported,
         ReasonCode::SplineWeightsNotReported,
@@ -179,6 +183,7 @@ impl ReasonCode {
         ReasonCode::UnmappedSourceClass,
         ReasonCode::DisplayFidelityOnly,
         ReasonCode::PdfSoftMask,
+        ReasonCode::UnresolvedBlock,
     ];
 
     /// The stable machine-readable spelling.
@@ -204,6 +209,7 @@ impl ReasonCode {
             ReasonCode::UnmappedSourceClass => "unmapped-source-class",
             ReasonCode::DisplayFidelityOnly => "display-fidelity-only",
             ReasonCode::PdfSoftMask => "pdf-soft-mask",
+            ReasonCode::UnresolvedBlock => "unresolved-block",
         }
     }
 
@@ -229,7 +235,8 @@ impl ReasonCode {
             | ReasonCode::ExtrusionNotApplied
             | ReasonCode::UnmappedSourceClass
             | ReasonCode::DisplayFidelityOnly
-            | ReasonCode::PdfSoftMask => FidelityClass::Unsupported,
+            | ReasonCode::PdfSoftMask
+            | ReasonCode::UnresolvedBlock => FidelityClass::Unsupported,
         }
     }
 }
@@ -293,6 +300,22 @@ impl Classification {
             source_class: source_class.into(),
             policy_field: Some(field.into()),
         }
+    }
+
+    /// `IgnoredByPolicy` for a field of `profile` that can exclude entities, or `None` when the
+    /// profile has no such field. Use this instead of [`Classification::ignored_by_policy`] so a
+    /// misspelt or stale field name cannot reach a report.
+    #[must_use]
+    pub fn ignored_by_profile(
+        profile: &super::view_profile::ViewProfile,
+        field: &str,
+        source_class: impl Into<String>,
+    ) -> Option<Self> {
+        let known = profile
+            .exclusion_fields()
+            .into_iter()
+            .find(|f| *f == field)?;
+        Some(Self::ignored_by_policy(known, source_class))
     }
 
     fn plain(class: FidelityClass, source_class: impl Into<String>) -> Self {
