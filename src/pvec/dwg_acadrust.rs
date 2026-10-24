@@ -33,7 +33,7 @@
 //! accepts, [`SUPPORTED_DWG_VERSIONS`] (AC1014 through AC1032), because those are the
 //! versions the corpus of `docs/spikes/acadrust-gate0.md` was run over.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::io::{Cursor, Read};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -261,7 +261,7 @@ impl DwgProvider for AcadrustProvider {
             doc: &self.doc,
             handles: record.entity_handles.iter(),
             path,
-            base_points: HashMap::new(),
+            base_points: BTreeMap::new(),
         }))
     }
 }
@@ -271,7 +271,7 @@ struct AcadrustCursor<'a> {
     handles: std::slice::Iter<'a, acr::Handle>,
     path: InstancePath,
     /// Block base points looked up so far, by block name.
-    base_points: HashMap<String, [f64; 2]>,
+    base_points: BTreeMap<String, [f64; 2]>,
 }
 
 impl EntityCursor for AcadrustCursor<'_> {
