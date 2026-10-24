@@ -28,15 +28,25 @@
 //! ([`CadSource`](crate::cad::CadSource) and [`ItemHandle`](crate::cad::ItemHandle)).
 
 pub mod classify;
+pub mod pdf_vector;
 pub mod provider;
 
 #[cfg(feature = "dwg-acadrust")]
 #[cfg_attr(docsrs, doc(cfg(feature = "dwg-acadrust")))]
 pub mod dwg_acadrust;
 
+#[cfg(feature = "pvec-spline")]
+#[cfg_attr(docsrs, doc(cfg(feature = "pvec-spline")))]
+pub mod dwg_spline;
+
 pub use classify::{
     ClassSource, Classification, ClassificationReport, ElementClass, ElementRule, ElementRules,
     RuleMatch,
+};
+pub use pdf_vector::{
+    PdfFillRule, PdfPaintIntent, PdfPathEntity, PdfPathSegment, PdfPoint, PdfProvenance,
+    PdfVectorError, PdfVectorLimits, PdfVectorPage, extract_page_paths,
+    extract_page_paths_from_bytes,
 };
 pub use provider::{
     ArrayGrid, Availability, BlockRef, DwgProvider, EntityCursor, EntityScope, Facet, FacetCap,

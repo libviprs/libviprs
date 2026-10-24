@@ -1125,7 +1125,7 @@ fn raster_from_pdfium_image_bitmap(
 /// page's object id instead of erroring. Range-checking the narrow with
 /// `u32::try_from` turns that wrap into a typed [`PdfError::PageOutOfRange`],
 /// and a legitimately-missing key maps to the same error.
-fn page_object_id(
+pub(crate) fn page_object_id(
     pages_map: &std::collections::BTreeMap<u32, lopdf::ObjectId>,
     page: usize,
 ) -> Result<lopdf::ObjectId, PdfError> {
@@ -1671,6 +1671,40 @@ fn get_page_dimensions(doc: &lopdf::Document, page_id: lopdf::ObjectId) -> (f64,
         f64::from(visible.h()),
         resolve_rotate(doc, page_id),
     )
+}
+
+/// The box a page is rendered into, as `[left, bottom, right, top]` in user
+/// space: the `/CropBox` clipped to the `/MediaBox` when the page has a usable
+/// one, else the `/MediaBox`. `None` when the page has no `/MediaBox`. This is
+/// the same box [`get_page_dimensions`] sizes, before `/Rotate`.
+pub(crate) fn page_visible_box(
+    doc: &lopdf::Document,
+    page_id: lopdf::ObjectId,
+) -> Option<[f64; 4]> {
+    let media = inherited_page_box(doc, page_id, b"MediaBox", false)?;
+    let mut visible = media;
+    if media.w() > 0.0
+        && media.h() > 0.0
+        && let Some(crop) = inherited_page_box(doc, page_id, b"CropBox", true)
+        && let Some(clipped) = crop.intersect(&media)
+    {
+        visible = clipped;
+    }
+    Some([
+        f64::from(visible.l),
+        f64::from(visible.b),
+        f64::from(visible.r),
+        f64::from(visible.t),
+    ])
+}
+
+/// The page's effective `/Rotate` as a [`PageRotation`], the same value
+/// [`page_rotate`] reports, for a document that is already loaded.
+pub(crate) fn page_rotation_of(
+    doc: &lopdf::Document,
+    page_id: lopdf::ObjectId,
+) -> Result<PageRotation, PdfError> {
+    PageRotation::try_from_degrees(resolve_rotate(doc, page_id))
 }
 
 /// A page box as `[left, bottom, right, top]`, normalised so that left <= right
