@@ -9,14 +9,15 @@
 //! second serialization of the geometry is exactly what the export is not for.
 //!
 //! Numbers print through `f64`'s shortest round-trip rendering, so every printed value reparses to
-//! the identical bits. The entity ID is the position in the order entities are pushed, an interim
-//! stand-in until N3.7's file-local IDs land (#1281).
+//! the identical bits. The entity ID is the file-local ID N3.7 assigns when the caller passes it
+//! ([`NormalizedDump::push_with_id`]), and otherwise the position in push order.
 
 use std::fmt;
 
 use pvec_geometry::{Curve, Point2};
 
 use super::normalized::Normalized2DGeometry;
+use super::ordering::EntityId;
 use super::provenance::{Provenance, ProvenanceStore};
 
 /// The format version on the dump's first line.
@@ -44,13 +45,34 @@ impl<W: fmt::Write> NormalizedDump<W> {
         Ok(NormalizedDump { out, count: 0 })
     }
 
-    /// Writes one entity, with its provenance when the caller has it, and returns its ID.
+    /// Writes one entity, with its provenance when the caller has it, and returns its ID. The ID
+    /// is the position in push order; use [`push_with_id`](Self::push_with_id) to print the
+    /// file-local ID N3.7 assigned instead.
     pub fn push(
         &mut self,
         entity: &Normalized2DGeometry,
         provenance: Option<&Provenance>,
     ) -> Result<u64, fmt::Error> {
-        let id = self.count;
+        self.write_entity(self.count, entity, provenance)
+    }
+
+    /// Like [`push`](Self::push), printing the file-local ID from `order_entities` (N3.7), so a
+    /// dump line and a conversion report line name the same entity.
+    pub fn push_with_id(
+        &mut self,
+        id: EntityId,
+        entity: &Normalized2DGeometry,
+        provenance: Option<&Provenance>,
+    ) -> Result<u64, fmt::Error> {
+        self.write_entity(id.get(), entity, provenance)
+    }
+
+    fn write_entity(
+        &mut self,
+        id: u64,
+        entity: &Normalized2DGeometry,
+        provenance: Option<&Provenance>,
+    ) -> Result<u64, fmt::Error> {
         let kind = entity.geometry().map_or("none", kind_tag);
         writeln!(self.out, "entity {id} {kind} {}", entity.fidelity().tag())?;
         self.out.write_str("  geometry ")?;

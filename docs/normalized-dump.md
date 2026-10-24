@@ -35,9 +35,10 @@ entity <id> <type> <fidelity>
 end entities=<n>
 ```
 
-- `<id>` is the entity's position in push order, starting at 0. This is interim: #1102 (N3.7)
-  has not landed, so there is no stable file-local ID to print yet. #1281 switches the dump to
-  those IDs and bumps the version line when it does.
+- `<id>` is the file-local entity ID. `NormalizedDump::push_with_id` prints the `EntityId` that
+  `order_entities` (N3.7) assigned, so a dump line and a conversion report line name the same
+  entity. `push` numbers by position in push order, from 0, for callers that have no ordering
+  step. Pick one per dump.
 - `<type>` is one of `line`, `circle`, `ellipse`, `polyline`, `trimmed`, `composite`, `bezier`,
   `bspline`, `rational-bspline`, or `none` for a record that holds no geometry
   (`RequiresPVecCapability`, `Unsupported`, `IgnoredByPolicy`).

@@ -189,7 +189,7 @@ fn every_entity_carries_type_fidelity_and_bounds() {
     for (i, (h, e)) in heads.iter().zip(&es).enumerate() {
         let parts: Vec<&str> = h.split(' ').collect();
         assert_eq!(parts.len(), 4, "{h}");
-        assert_eq!(parts[1], i.to_string(), "ids are positions, see #1281");
+        assert_eq!(parts[1], i.to_string(), "push() numbers by position");
         assert_eq!(parts[3], e.fidelity().tag());
     }
     for kind in [
@@ -202,6 +202,45 @@ fn every_entity_carries_type_fidelity_and_bounds() {
     }
     assert!(s.contains("  bounds min=("), "{s}");
     assert!(s.contains("  bounds none"), "{s}");
+}
+
+#[test]
+fn ids_can_be_the_n3_7_file_local_ids() {
+    use libviprs::pvec::{OrderingPolicy, Point3, RawEntity, RawGeometry, order_entities};
+    let pt = |x: f64| -> Point3 { [x, 0.0, 0.0] };
+    let raw = |h: u64, x: f64| RawEntity {
+        geometry: RawGeometry::Line {
+            start: pt(x),
+            end: pt(x + 1.0),
+        },
+        provenance: ProvenanceStub {
+            handle: Some(ItemHandle::new(h)),
+            class_name: "LINE".into(),
+            block_path: InstancePath::root(),
+            layer: "0".into(),
+        },
+    };
+    let ordered = order_entities(
+        "p",
+        "1",
+        &OrderingPolicy::new(),
+        vec![raw(9, 0.0), raw(3, 1.0)],
+    );
+    let g =
+        Normalized2DGeometry::polyline(&[[0.0, 0.0], [1.0, 1.0]], FidelityClass::SupportedExact)
+            .unwrap();
+    let mut d = NormalizedDump::new(String::new()).unwrap();
+    for o in &ordered.entities {
+        assert_eq!(d.push_with_id(o.id, &g, None).unwrap(), o.id.get());
+    }
+    let s = d.finish().unwrap();
+    for o in &ordered.entities {
+        assert!(
+            s.contains(&format!("entity {} polyline", o.id.get())),
+            "{s}"
+        );
+    }
+    assert!(DOC.contains("push_with_id"));
 }
 
 #[test]
@@ -319,7 +358,13 @@ fn nothing_reads_the_format_back() {
 fn the_document_describes_the_format_and_disclaims_interchange() {
     assert!(DOC.contains("not an interchange format"), "{DOC}");
     assert!(DOC.contains("no loader"), "{DOC}");
-    for key in ["entity", "bounds", "provenance", "end entities=", "#1281"] {
+    for key in [
+        "entity",
+        "bounds",
+        "provenance",
+        "end entities=",
+        "push_with_id",
+    ] {
         assert!(
             DOC.contains(key),
             "docs/normalized-dump.md does not mention {key}"
