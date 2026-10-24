@@ -289,6 +289,7 @@ fn the_scanner_sees_through_brace_groups() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn no_pvec_path_under_src_is_outside_the_allowed_surface() {
     let mut bad = Vec::new();
     let mut seen = 0usize;
@@ -314,6 +315,7 @@ fn no_pvec_path_under_src_is_outside_the_allowed_surface() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn only_the_two_semantic_crates_are_named_today() {
     let mut roots = std::collections::BTreeSet::new();
     for f in src_files() {
@@ -394,6 +396,7 @@ fn the_forbidden_responsibility_check_can_fail() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn src_pvec_implements_no_curve_evaluation_knot_insertion_or_tessellation() {
     let mut bad = Vec::new();
     let mut files = Vec::new();
@@ -417,6 +420,7 @@ fn src_pvec_implements_no_curve_evaluation_knot_insertion_or_tessellation() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn the_pvec_dependencies_stay_semantic_and_optional() {
     let manifest = fs::read_to_string(root().join("Cargo.toml")).unwrap();
     for physical in ["pvec-container", "pvec-stream", "pvec-codec"] {

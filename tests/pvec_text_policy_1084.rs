@@ -317,6 +317,7 @@ fn n5_5_a_missing_shx_font_has_its_own_bucket() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn n5_5_outcome_codes_are_stable_and_documented() {
     let doc = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),

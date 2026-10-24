@@ -121,6 +121,7 @@ jobs:
       # `dwg-acadrust`. Pure Rust, no archive, so this lints it everywhere.
       - run: cargo clippy --all-targets --features dwg-acadrust -- -D warnings -W clippy::incompatible_msrv -W deprecated
       - run: cargo clippy --all-targets --features pvec-normalized -- -D warnings -W clippy::incompatible_msrv -W deprecated
+      - run: cargo clippy --all-targets --features pvec-spline -- -D warnings -W clippy::incompatible_msrv -W deprecated
       # Same for the SVG rasteriser: `svg` is non-default because it costs 29
       # crates, so the default clippy job never sees `src/svg.rs` at all
       # (issue #502).
@@ -222,6 +223,7 @@ jobs:
       - run: cargo check --all-targets --features packfile
       - run: cargo check --all-targets --features dwg-acadrust
       - run: cargo check --all-targets --features pvec-normalized
+      - run: cargo check --all-targets --features pvec-spline
 
   docs:
     name: Docs (deny broken, private and redundant intra-doc links)
@@ -283,6 +285,8 @@ jobs:
       - run: cargo test --features dwg-acadrust
       # The PVec normalized-geometry adapter (issue #1095): pure Rust, a real lane.
       - run: cargo test --features pvec-normalized
+      # Exact B-spline extraction (issue #1074): pure Rust, a real lane.
+      - run: cargo test --features pvec-spline
       # The SVG module and its unit tests are behind the non-default `svg`
       # feature, and the `<image xlink:href>` lockdown tests in
       # tests/path_traversal.rs are gated on it too. Bare `cargo test` runs

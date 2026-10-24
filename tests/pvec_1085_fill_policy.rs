@@ -76,6 +76,7 @@ fn n5_6_no_decision_carries_area_as_triangles() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn n5_6_the_doc_has_a_row_for_every_construct_and_reason() {
     let doc = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/pvec-hatch-policy.md"),

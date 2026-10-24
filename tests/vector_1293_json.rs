@@ -149,6 +149,7 @@ fn a_report_has_exactly_these_keys() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn a_conversion_has_exactly_these_keys() {
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("out.pmtiles");
@@ -187,6 +188,7 @@ fn the_primitive_keys_are_the_documented_names_and_not_a_variant_spelling() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn an_archive_description_has_exactly_these_keys() {
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("out.pmtiles");
@@ -225,6 +227,7 @@ fn an_archive_description_has_exactly_these_keys() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn a_validation_has_exactly_these_keys() {
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("out.pmtiles");
@@ -244,6 +247,7 @@ fn a_validation_has_exactly_these_keys() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn every_document_carries_the_format_version() {
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("out.pmtiles");

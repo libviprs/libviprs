@@ -69,6 +69,10 @@
 //! - **`pvec-normalized`** — gates `pvec::normalized`, `Normalized2DGeometry`, the thin
 //!   adapter over PVec's public curve model (`pvec-geometry`, with the numeric policy
 //!   under it). Pure Rust; both PVec crates are git dependencies pinned by revision.
+//! - **`pvec-spline`** — gates `pvec::dwg_spline`, exact B-spline extraction from a
+//!   provider's `RawGeometry::Spline`, validated against PVec's numeric policy
+//!   (`pvec-numeric`). Needs no reader. Pure Rust; the PVec crate is a git dependency
+//!   pinned by revision.
 //! - **`serde`** — adds public `Serialize` / `Deserialize` derives to the wire
 //!   and config types ([`PyramidPlan`], [`EngineConfig`], [`TileCoord`],
 //!   [`Layout`], and the rest) so an out-of-process caller can rebuild a job

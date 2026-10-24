@@ -227,6 +227,7 @@ fn n3_3_1097_default_profile_prints_every_knob_with_its_n1_4_row() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn n3_3_1097_every_knob_names_a_row_of_the_n1_4_decision_table() {
     let doc = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/spikes/view-context.md"),
