@@ -43,6 +43,7 @@ fn the_note_says_what_the_claim_rests_on() {
 
 #[cfg(feature = "dwg-acadsharp")]
 #[test]
+#[cfg_attr(miri, ignore)]
 fn the_note_and_the_list_in_code_name_the_same_ends() {
     use libviprs::cad::acadsharp::{SUPPORTED_DWG_VERSIONS, is_supported_version};
     let s = versions_sentence(&doc());

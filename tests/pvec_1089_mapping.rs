@@ -107,6 +107,7 @@ fn the_row_lookup_is_an_exhaustive_match_so_a_new_variant_cannot_lack_a_row() {
 // -- the doc is rendered from the table ---------------------------------------------------------
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn the_doc_is_the_rendered_table_byte_for_byte() {
     if std::env::var_os("PVEC_MAPPING_BLESS").is_some() {
         std::fs::write(

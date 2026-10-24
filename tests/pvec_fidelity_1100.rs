@@ -209,6 +209,7 @@ fn an_unsupported_curve_is_refused_not_tessellated() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn there_is_one_enum_for_the_six_classes() {
     let mut hits = Vec::new();
     for entry in std::fs::read_dir("src/pvec").unwrap() {
