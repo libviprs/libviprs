@@ -711,3 +711,4 @@ annotated   fs-detected  tests/vector_1036_hardening.rs::a_deadline_stops_a_fail
 annotated   fs-detected  tests/vector_1036_worker.rs::a_memory_ceiling_stops_a_run_with_every_budget_off
 annotated   fs-detected  tests/vector_1036_worker.rs::a_supervisor_stops_code_that_never_looks_at_a_clock
 annotated   fs-detected  tests/vector_1036_worker.rs::the_library_deadline_ends_a_run_cleanly_inside_the_ceiling
+annotated   fs-detected  tests/vector_1036_worker.rs::the_report_names_the_limits_and_the_follow_up

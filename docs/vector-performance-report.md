@@ -169,4 +169,4 @@ names after it reaps the child. The test asserts that nothing else is left.
 What that corpus is not: every file is a mutation of something ACadSharp's own
 writer produced, so it covers the structural paths the fixtures reach. It is
 not a collection of real drawings from outside, and no sanitizer has run over
-the native library. Those are in the follow-up filed with this PR.
+the native library. Those are in the follow-up, libviprs/libviprs#1256, which stays open.
