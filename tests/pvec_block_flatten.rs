@@ -723,3 +723,82 @@ fn lineage_recording_does_not_change_the_geometry_record_size() {
 
 #[cfg(target_pointer_width = "64")]
 const PINNED_GEOMETRY_SIZE: usize = 176;
+
+// ---- #1277 (N3.6a): SourceLimits carried through the ViewProfile options path ---------------
+
+use libviprs::pvec::ViewProfile;
+
+#[test]
+fn n3_6a_1277_default_profile_carries_the_default_limits() {
+    assert_eq!(
+        ViewProfile::default_profile().limits,
+        SourceLimits::default()
+    );
+}
+
+#[test]
+fn n3_6a_1277_with_limits_sets_the_field_and_touches_nothing_else() {
+    let mut limits = SourceLimits::default();
+    limits.max_block_depth = 3;
+    let p = ViewProfile::default_profile().with_limits(limits);
+    assert_eq!(p.limits, limits);
+    let mut expected = ViewProfile::default_profile();
+    expected.limits = limits;
+    assert_eq!(p, expected);
+}
+
+#[test]
+fn n3_6a_1277_limits_are_not_a_view_knob() {
+    let mut limits = SourceLimits::default();
+    limits.max_entities = 7;
+    let a = ViewProfile::default_profile().knobs();
+    let b = ViewProfile::default_profile().with_limits(limits).knobs();
+    assert_eq!(a, b);
+}
+
+#[test]
+fn n3_6a_1277_bounds_from_a_profile_hold_its_limits() {
+    let mut limits = SourceLimits::default();
+    limits.max_expanded_instances = 99;
+    let p = ViewProfile::default_profile().with_limits(limits);
+    assert_eq!(FlattenBounds::from_profile(&p).limits, limits);
+    assert_eq!(
+        FlattenBounds::from_profile(&ViewProfile::default_profile()),
+        FlattenBounds::default()
+    );
+}
+
+#[test]
+fn n3_6a_1277_depth_override_set_on_the_profile_reaches_the_guard() {
+    let mock = amplifier(5, 1);
+    // The default profile walks this fixture fine.
+    let ok = FlattenBounds::from_profile(&ViewProfile::default_profile());
+    run(&mock, ok).unwrap();
+    let mut limits = SourceLimits::default();
+    limits.max_block_depth = 3;
+    let p = ViewProfile::default_profile().with_limits(limits);
+    let err = run(&mock, FlattenBounds::from_profile(&p)).unwrap_err();
+    let FlattenError::Limit {
+        limit,
+        observed,
+        ceiling,
+        ..
+    } = err
+    else {
+        panic!("wrong error: {err:?}");
+    };
+    assert_eq!((limit, observed, ceiling), (Limit::BlockDepth, 4, 3));
+}
+
+#[test]
+fn n3_6a_1277_entity_override_set_on_the_profile_reaches_the_guard() {
+    let mock = amplifier(5, 1);
+    let mut limits = SourceLimits::default();
+    limits.max_entities = 2;
+    let p = ViewProfile::default_profile().with_limits(limits);
+    let err = run(&mock, FlattenBounds::from_profile(&p)).unwrap_err();
+    let FlattenError::Limit { limit, ceiling, .. } = err else {
+        panic!("wrong error: {err:?}");
+    };
+    assert_eq!((limit, ceiling), (Limit::Entities, 2));
+}

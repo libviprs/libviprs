@@ -47,6 +47,8 @@ use std::fmt;
 
 use thiserror::Error;
 
+use super::limits::SourceLimits;
+
 use super::provider::{
     DwgProvider, EntityScope, InstancePath, LayerState, LayoutKind, ProviderError, RawEntity,
     RawGeometry,
@@ -140,6 +142,10 @@ pub struct ViewProfile {
     pub nested_inserts: NestedInsertPolicy,
     /// Xrefs.
     pub xrefs: XrefPolicy,
+    /// N3.6's resource ceilings for the conversion. Not a view knob (it has no N1.4 row and
+    /// is absent from [`ViewProfile::knobs`]); it rides along so a caller overrides it through
+    /// the same options value, and flattening builds its guard from it.
+    pub limits: SourceLimits,
 }
 
 /// One knob.
@@ -266,7 +272,15 @@ impl ViewProfile {
             },
             nested_inserts: NestedInsertPolicy { max_depth: 64 },
             xrefs: XrefPolicy::ReportExternal,
+            limits: SourceLimits::default(),
         }
+    }
+
+    /// This profile with `limits` as its resource ceilings.
+    #[must_use]
+    pub fn with_limits(mut self, limits: SourceLimits) -> Self {
+        self.limits = limits;
+        self
     }
 
     /// Every knob with its value and the N1.4 decision-table row it comes from.

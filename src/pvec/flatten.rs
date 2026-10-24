@@ -73,6 +73,14 @@ impl FlattenBounds {
     }
 }
 
+impl FlattenBounds {
+    /// Bounds taking their [`SourceLimits`] from `profile`, with the default per-block ceiling.
+    #[must_use]
+    pub fn from_profile(profile: &super::view_profile::ViewProfile) -> Self {
+        Self::new(profile.limits, Self::default().max_entities_per_block)
+    }
+}
+
 impl Default for FlattenBounds {
     fn default() -> Self {
         Self::new(SourceLimits::default(), 1_000_000)
