@@ -41,6 +41,9 @@ pub mod flatten;
 pub mod limits;
 #[cfg(feature = "pvec-normalized")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
+pub mod mapping;
+#[cfg(feature = "pvec-normalized")]
+#[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
 pub mod normalized;
 pub mod ordering;
 #[cfg(feature = "pvec-normalized")]
