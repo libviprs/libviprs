@@ -110,6 +110,7 @@ fn convert(bytes: &[u8], dir: &Path) {
 
 /// The child's side: every mutation of one file, in this process.
 #[test]
+#[cfg_attr(miri, ignore)]
 fn child_entry() {
     let Ok(file) = std::env::var(FILE) else {
         return;
@@ -138,6 +139,7 @@ fn native_present() -> bool {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn mutated_drawings_never_take_the_process_down() {
     if !native_present() {
         return;
@@ -205,6 +207,7 @@ fn the_hardened_limits_set_every_bound() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn the_pathological_deep_dimension_drawing_ends_inside_a_bound() {
     if !native_present() {
         return;
@@ -228,6 +231,7 @@ fn the_pathological_deep_dimension_drawing_ends_inside_a_bound() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn the_provider_limits_actually_bite() {
     if !native_present() {
         return;

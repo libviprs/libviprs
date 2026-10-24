@@ -702,3 +702,12 @@ annotated   fs-detected  tests/vector_1035_api.rs::a_truncated_archive_is_invali
 annotated   fs-detected  tests/vector_1035_api.rs::the_conversion_says_what_it_wrote
 annotated   fs-detected  tests/vector_1035_api.rs::the_library_call_and_the_function_the_command_line_drives_are_one_engine
 annotated   fs-detected  tests/vector_1035_api.rs::the_name_option_overrides_the_views_name
+annotated   fs-detected  tests/vector_1036_dwg_corpus.rs::child_entry
+annotated   fs-detected  tests/vector_1036_dwg_corpus.rs::mutated_drawings_never_take_the_process_down
+annotated   fs-detected  tests/vector_1036_dwg_corpus.rs::the_pathological_deep_dimension_drawing_ends_inside_a_bound
+annotated   fs-detected  tests/vector_1036_dwg_corpus.rs::the_provider_limits_actually_bite
+annotated   fs-detected  tests/vector_1036_hardening.rs::a_cancelled_build_leaves_nothing_behind
+annotated   fs-detected  tests/vector_1036_hardening.rs::a_deadline_stops_a_failed_build_without_a_partial_archive
+annotated   fs-detected  tests/vector_1036_worker.rs::a_memory_ceiling_stops_a_run_with_every_budget_off
+annotated   fs-detected  tests/vector_1036_worker.rs::a_supervisor_stops_code_that_never_looks_at_a_clock
+annotated   fs-detected  tests/vector_1036_worker.rs::the_library_deadline_ends_a_run_cleanly_inside_the_ceiling

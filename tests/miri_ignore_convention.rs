@@ -471,7 +471,12 @@ const EXPECTED_SRC_MODULES: usize = 31;
 /// #1181 adds 4: the cells in `tests/local_ci_docker_slot.rs` run
 /// `tools/local-ci.py` with a stub docker on PATH to see whether it waits for
 /// a Docker slot. It said 37 before this line moved.
-const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 46;
+///
+/// #1036 adds 4: the three `tests/vector_1036_worker.rs` cells, which run a
+/// conversion in a child under `ulimit -v` and a wall clock, and
+/// `tests/vector_1036_dwg_corpus.rs::mutated_drawings_never_take_the_process_down`,
+/// which decodes each mutated drawing in a child. It said 46 before this line moved.
+const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 50;
 
 /// The filesystem-touching tests still allowed to run under Miri, and so still
 /// allowed to end the whole run on their first syscall.
@@ -786,7 +791,8 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1166 adds 1: the same resume cell. It said 507 before this line moved.
 /// #1209 adds 5: `tests/pdf_info_cropbox.rs`, which writes lopdf-built PDFs to a temp dir. It said 513 before this line moved.
 /// #1242 adds 40: the `tests/vector_103x_*.rs` cells that write archives and tiles to a temp dir or read committed fixtures. It said 523 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 563;
+/// #1036 adds 9: the `tests/vector_1036_*.rs` cells that build an archive in a temp dir, spawn a child that does, or read a committed DWG fixture. It said 563 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 572;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
