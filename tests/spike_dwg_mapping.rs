@@ -560,6 +560,42 @@ fn ac5_decision_lists_exact_and_deferred_classes_with_measured_deviations() {
 }
 
 #[test]
+fn ac5_a_spline_row_that_is_not_exact_is_named_where_the_decision_calls_splines_exact() {
+    // The decision lets phase 4 implement "every SPLINE that is not periodic" as exact. A SPLINE
+    // row graded anything else that is not the periodic one has to be named there as the
+    // exception, or the decision says more than the table does.
+    let doc = doc();
+    let dec = flat(&section(&doc, "## Decision"));
+    for r in result_rows(&doc) {
+        if r.dwg_class.starts_with("SPLINE")
+            && r.result != "exact"
+            && r.result != "RequiresPVecCapability"
+        {
+            assert!(
+                dec.contains(&format!("`{}`", r.fixture)),
+                "SPLINE row {} is {}, but the decision calls every non-periodic SPLINE exact without naming it",
+                r.fixture,
+                r.result
+            );
+        }
+    }
+    // The grading rule has to cover every reason a row is `equivalent`: a row whose domain is
+    // preserved is equivalent for some other reason, and the rule must say which.
+    let grading = flat(&section(&doc, "## What I measured, and against what"));
+    let data = results();
+    for r in result_rows(&doc) {
+        let m = &data[&r.evidence];
+        if r.result == "equivalent" && m.notes.get("domain_preserved").map(String::as_str) == Some("true") {
+            assert!(
+                grading.contains("storage form"),
+                "row {} is equivalent with its domain preserved, and the grading rule only names a domain difference",
+                r.fixture
+            );
+        }
+    }
+}
+
+#[test]
 fn ac5_no_measured_row_exceeds_the_p12_tolerance() {
     for (id, m) in results() {
         if m.kind == "row" && (m.result == "exact" || m.result == "equivalent") {
