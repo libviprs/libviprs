@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Exact extraction of the basic DWG entities** (issue #1073, part of #1039).
+  `pvec::dwg_basic` (feature `pvec-normalized`) turns a `LINE`, `LWPOLYLINE`, 2D `POLYLINE`,
+  `CIRCLE`, `ARC` or `ELLIPSE` into the PVec curve that is that entity: a trimmed line, a polyline
+  (closed ones carry a copy of the first vertex), a composite of polylines and trimmed circles when
+  bulges are present, a circle, a trimmed circle and an ellipse or trimmed ellipse kept as
+  parameters. Nothing is sampled or fitted, and every construction and tolerance is PVec's. A
+  zero radius, coincident vertices, a zero axis ratio, a bad bulge, too many vertices, a 3D entity
+  or a non-+z extrusion normal comes back as a typed `BasicError` with an N3.5 classification and a
+  report row. Eight new `ReasonCode`s, and the PVec pin moves to current main.
 - **The view-profile options type** (issue #1097, part of #1039). `pvec::ViewProfile`
   makes the view context an explicit input: space (model, or a named paper layout), viewport
   clipping, the off, frozen, viewport-frozen and layer-0 rules, the nested-insert depth and the

@@ -268,10 +268,7 @@ fn a_zero_bulge_stays_a_straight_segment_between_two_arcs() {
 fn bulge_arc_001_matches_the_expected_arc() {
     // bulge-arc-001: p0 (1, 0.5), p1 (4.5, 2.25), bulge 2/5. Expected arc from the truth record:
     // centre (1.83125, 3.2125), radius 2.837011246, start 4.415023835, sweep 1.522025508, CCW.
-    let e = polyline(
-        vec![vertex(1.0, 0.5, 0.4), vertex(4.5, 2.25, 0.0)],
-        false,
-    );
+    let e = polyline(vec![vertex(1.0, 0.5, 0.4), vertex(4.5, 2.25, 0.0)], false);
     let b = extract_polyline(&e).unwrap();
     let (c, r, start, span, reversed) = single_arc(&b);
     assert!(near_pt(c, 1.83125, 3.2125), "centre {c:?}");
@@ -288,7 +285,10 @@ fn bulge_arc_neg_001_is_clockwise_with_the_centre_on_the_right() {
     let e = polyline(vec![vertex(3.0, -1.0, -0.3), vertex(0.5, 2.5, 0.0)], false);
     let b = extract_polyline(&e).unwrap();
     let (c, r, start, span, reversed) = single_arc(&b);
-    assert!(near_pt(c, 4.404_166_666_666_667, 2.645_833_333_333_333_5), "centre {c:?}");
+    assert!(
+        near_pt(c, 4.404_166_666_666_667, 2.645_833_333_333_333_5),
+        "centre {c:?}"
+    );
     assert!(near(r, 3.906_889_392_115_193_3, 4.0), "radius {r}");
     assert!(near(start, 3.178_928_550_616_880_5, TAU), "start {start}");
     assert!(near(span, 1.165_827_177_911_468_4, TAU), "span {span}");
@@ -333,7 +333,10 @@ fn flipping_the_bulge_sign_flips_the_direction_and_the_centre_side() {
     let (cn, _, _, _, rn) = single_arc(&neg);
     assert!(!rp && rn);
     assert!(near_pt(cp, 0.5, 0.5));
-    assert!(near_pt(cn, 0.5, -0.5), "the centre moves to the right of the chord");
+    assert!(
+        near_pt(cn, 0.5, -0.5),
+        "the centre moves to the right of the chord"
+    );
 }
 
 #[test]
@@ -405,10 +408,7 @@ fn a_closed_polyline_whose_last_vertex_repeats_the_first_is_coincident() {
 
 #[test]
 fn coincident_vertices_around_a_bulge_are_classified() {
-    let e = polyline(
-        vec![vertex(1.0, 1.0, 0.5), vertex(1.0, 1.0, 0.0)],
-        false,
-    );
+    let e = polyline(vec![vertex(1.0, 1.0, 0.5), vertex(1.0, 1.0, 0.0)], false);
     assert_eq!(
         extract_polyline(&e).unwrap_err(),
         BasicError::CoincidentVertices { index: 0 }
@@ -517,16 +517,25 @@ fn a_zero_radius_circle_is_classified_and_has_no_entity() {
     assert_eq!(c.reason(), Some(ReasonCode::DegenerateRadius));
     assert_eq!(c.source_class(), "CIRCLE");
     let row = err.warning("CIRCLE");
-    assert!(row.contains("CIRCLE") && row.contains("degenerate-radius"), "{row}");
+    assert!(
+        row.contains("CIRCLE") && row.contains("degenerate-radius"),
+        "{row}"
+    );
 }
 
 #[test]
 fn negative_and_non_finite_radii_are_classified() {
     for bad in [-1.0, f64::NAN, f64::INFINITY] {
         let err = extract_circle(&circle([0.0, 0.0, 0.0], bad)).unwrap_err();
-        assert!(matches!(err, BasicError::DegenerateRadius { .. }), "{err:?}");
+        assert!(
+            matches!(err, BasicError::DegenerateRadius { .. }),
+            "{err:?}"
+        );
         let err = extract_arc(&arc([0.0, 0.0, 0.0], bad, 0.0, 1.0)).unwrap_err();
-        assert!(matches!(err, BasicError::DegenerateRadius { .. }), "{err:?}");
+        assert!(
+            matches!(err, BasicError::DegenerateRadius { .. }),
+            "{err:?}"
+        );
     }
 }
 
@@ -548,7 +557,10 @@ fn arc_seam_001_keeps_the_counter_clockwise_angles() {
     // It starts at the start angle and ends at the end angle.
     let d = b.curve.domain();
     let (p0, p1) = (b.curve.eval(d.lo()).unwrap(), b.curve.eval(d.hi()).unwrap());
-    assert!(near_pt(p0, 3.0 * 5.5_f64.cos(), 3.0 * 5.5_f64.sin()), "{p0:?}");
+    assert!(
+        near_pt(p0, 3.0 * 5.5_f64.cos(), 3.0 * 5.5_f64.sin()),
+        "{p0:?}"
+    );
     assert!(near_pt(p1, 3.0 * end.cos(), 3.0 * end.sin()), "{p1:?}");
 }
 
@@ -592,14 +604,7 @@ fn no_angle_is_converted_through_degrees() {
 #[test]
 fn ellipse_001_is_an_ellipse_with_the_stored_ratio() {
     // ellipse-001: centre (2, 1), major axis along (0.96, 0.28) with semi-major 3, ratio 0.98.
-    let b = extract_ellipse(&ellipse(
-        [2.0, 1.0, 0.0],
-        [2.88, 0.84, 0.0],
-        0.98,
-        0.0,
-        TAU,
-    ))
-    .unwrap();
+    let b = extract_ellipse(&ellipse([2.0, 1.0, 0.0], [2.88, 0.84, 0.0], 0.98, 0.0, TAU)).unwrap();
     assert_eq!(b.kind, BasicKind::Ellipse);
     let Curve::Ellipse(el) = &b.curve else {
         panic!("a whole ellipse stays an ellipse, got {:?}", b.curve.kind());
@@ -616,17 +621,13 @@ fn ellipse_001_is_an_ellipse_with_the_stored_ratio() {
 #[test]
 fn elliptical_arc_001_keeps_its_parameters_not_points() {
     // elliptical-arc-001: the same ellipse from 0.3 rad (eccentric anomaly) with a sweep of 2.2.
-    let b = extract_ellipse(&ellipse(
-        [2.0, 1.0, 0.0],
-        [2.88, 0.84, 0.0],
-        0.98,
-        0.3,
-        2.5,
-    ))
-    .unwrap();
+    let b = extract_ellipse(&ellipse([2.0, 1.0, 0.0], [2.88, 0.84, 0.0], 0.98, 0.3, 2.5)).unwrap();
     assert_eq!(b.kind, BasicKind::EllipticalArc);
     let Curve::Trimmed(t) = &b.curve else {
-        panic!("an elliptical arc is a trimmed ellipse, got {:?}", b.curve.kind());
+        panic!(
+            "an elliptical arc is a trimmed ellipse, got {:?}",
+            b.curve.kind()
+        );
     };
     assert_eq!(t.basis().kind(), CurveKind::Ellipse);
     let trim = t.trim();
@@ -639,8 +640,8 @@ fn elliptical_arc_001_keeps_its_parameters_not_points() {
 
 #[test]
 fn a_zero_ratio_ellipse_is_classified() {
-    let err = extract_ellipse(&ellipse([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], 0.0, 0.0, TAU))
-        .unwrap_err();
+    let err =
+        extract_ellipse(&ellipse([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], 0.0, 0.0, TAU)).unwrap_err();
     assert_eq!(err, BasicError::DegenerateAxisRatio { ratio: 0.0 });
     let c = err.classification("ELLIPSE");
     assert_eq!(c.reason(), Some(ReasonCode::DegenerateAxisRatio));
@@ -650,8 +651,8 @@ fn a_zero_ratio_ellipse_is_classified() {
 #[test]
 fn a_non_finite_or_oversized_ratio_is_classified() {
     for bad in [f64::NAN, f64::INFINITY, -0.5, 1.5] {
-        let err = extract_ellipse(&ellipse([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], bad, 0.0, TAU))
-            .unwrap_err();
+        let err =
+            extract_ellipse(&ellipse([0.0, 0.0, 0.0], [1.0, 0.0, 0.0], bad, 0.0, TAU)).unwrap_err();
         assert!(
             matches!(err, BasicError::DegenerateAxisRatio { .. }),
             "{bad}: {err:?}"
@@ -661,8 +662,8 @@ fn a_non_finite_or_oversized_ratio_is_classified() {
 
 #[test]
 fn a_zero_major_axis_is_degenerate() {
-    let err = extract_ellipse(&ellipse([0.0, 0.0, 0.0], [0.0, 0.0, 0.0], 0.5, 0.0, TAU))
-        .unwrap_err();
+    let err =
+        extract_ellipse(&ellipse([0.0, 0.0, 0.0], [0.0, 0.0, 0.0], 0.5, 0.0, TAU)).unwrap_err();
     assert!(matches!(err, BasicError::Degenerate { .. }), "{err:?}");
     assert_eq!(
         err.classification("ELLIPSE").reason(),
@@ -675,7 +676,9 @@ fn a_zero_major_axis_is_degenerate() {
 #[test]
 fn extract_dispatches_on_the_geometry_and_refuses_the_rest() {
     assert_eq!(
-        extract(&line([0.0, 0.0, 0.0], [1.0, 0.0, 0.0])).unwrap().kind,
+        extract(&line([0.0, 0.0, 0.0], [1.0, 0.0, 0.0]))
+            .unwrap()
+            .kind,
         BasicKind::Line
     );
     assert_eq!(
@@ -736,7 +739,14 @@ fn the_module_has_no_f32_and_no_degree_conversion() {
         .filter(|l| !l.trim_start().starts_with("//"))
         .collect::<Vec<_>>()
         .join("\n");
-    for banned in ["f32", "to_degrees", "to_radians", "180.0", "360.0", "as f32"] {
+    for banned in [
+        "f32",
+        "to_degrees",
+        "to_radians",
+        "180.0",
+        "360.0",
+        "as f32",
+    ] {
         assert!(!code.contains(banned), "dwg_basic.rs contains `{banned}`");
     }
 }
