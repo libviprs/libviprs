@@ -18,6 +18,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   zero radius, coincident vertices, a zero axis ratio, a bad bulge, too many vertices, a 3D entity
   or a non-+z extrusion normal comes back as a typed `BasicError` with an N3.5 classification and a
   report row. Eight new `ReasonCode`s, and the PVec pin moves to current main.
+- **The xref and external-reference policy** (issue #1076, part of #1039). `pvec::xref` gives
+  `XrefPolicy` three named outcomes and no silent one: `ExternalDependency` (the default) omits the
+  geometry but always leaves a report row with the name, path, insert transform and layer, `Reject`
+  fails naming the xref and its resolved path, and `Resolve` clears the path for the caller to open.
+  Attachment paths are confined under a caller-supplied root before anything touches the disk
+  (`..` escapes, absolute, UNC and drive-letter paths get typed refusals), cycles are caught on the
+  resolved-path set and name every file in the chain, and nesting depth and instances count against
+  the same `SourceGuard` as blocks. Opening and flattening the attached drawing waits for N4.4 (#1283).
+
 - **The view-profile options type** (issue #1097, part of #1039). `pvec::ViewProfile`
   makes the view context an explicit input: space (model, or a named paper layout), viewport
   clipping, the off, frozen, viewport-frozen and layer-0 rules, the nested-insert depth and the
@@ -170,6 +179,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pinned by a test; nothing reached it before.
 
 ### Changed
+
+- **The vector JSON has a written-down spelling and a version** (issue #1293,
+  follow-up to #1035). `Conversion::to_json`, `ArchiveInfo::to_json` and
+  `CheckReport::to_json` carry `"v": 1` (`vector::JSON_VERSION`), the primitive
+  count keys are `PrimitiveKind::name()` and the layer field types are the
+  now-public `FieldType::name()`, neither read off a `Debug` string, and
+  `view_json` writes `"extents": null` for a view with no extent where it wrote
+  `[0,0,0,0]`. `tests/vector_1293_json.rs` pins every key.
 
 - **The `sha2` Miri backend pin is gone, and `sha2` is floored at 0.11.1**
   (issues #1248, #707, #731). sha2 0.11.1 loads its aarch64 round constants
