@@ -27,6 +27,9 @@
 //! decoder it has, and this module only reuses two of its plain value types
 //! ([`CadSource`](crate::cad::CadSource) and [`ItemHandle`](crate::cad::ItemHandle)).
 
+#[cfg(feature = "pvec-normalized")]
+#[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
+pub mod bounds;
 pub mod classify;
 #[cfg(feature = "pvec-normalized")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
@@ -73,6 +76,11 @@ pub mod dwg_acadrust;
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-spline")))]
 pub mod dwg_spline;
 
+#[cfg(feature = "pvec-normalized")]
+pub use bounds::{
+    BoundsError, BoundsMethod, BoundsReport, EntityBounds, bounds_inputs, curve_bounds,
+    pvec_entity_id,
+};
 pub use classify::{
     ClassSource, Classification, ClassificationReport, ElementClass, ElementRule, ElementRules,
     RuleMatch,
