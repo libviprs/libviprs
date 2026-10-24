@@ -1,0 +1,1355 @@
+# vcprobe and vc-acadrust-probe on MARS x86_64 
+# ACadSharp 3.7.1 (libviprs-dep patches applied), shim sources libviprs-dep 0d475bf (3.7.1-viprs.2), acadrust 0.5.5 d35691f, .NET SDK 10.0.401, JIT not NativeAOT
+
+== describe /work/out/vc_layers.dwg
+file vc_layers.dwg version AC1032
+layers 4
+  layer name=0 on=False frozen=False frozenNewVp=False locked=False plot=True xrefDep=False
+  layer name=VC_FROZEN on=True frozen=True frozenNewVp=True locked=False plot=True xrefDep=False
+  layer name=VC_OFF on=False frozen=False frozenNewVp=False locked=False plot=True xrefDep=False
+  layer name=VC_ON on=True frozen=False frozenNewVp=False locked=False plot=True xrefDep=False
+layouts 2
+  layout name=Model paper=False block=*Model_Space entities=7 ext=(25.7,19.5,0)..(231.3,175.5,0)
+  layout name=Layout1 paper=True block=*Paper_Space entities=1 ext=(25.7,19.5,0)..(231.3,175.5,0)
+    viewport handle=47 id=1 layer=0 center=(148.5,105,0) w=297 h=210 viewCenter=(0,0) viewHeight=0 viewDir=(0,0,1) twist=0 scale=0 status=0 nonRect=False off=False representsPaper=True boundary=- frozenInVp=[]
+blocks 3
+  block name=*Model_Space flags=None anonymous=False dynamic=False source=- xref=False xrefPath= entities=7 [INSERT@VC_FROZENx1 INSERT@VC_OFFx1 INSERT@VC_ONx1 LINE@0x1 LINE@VC_FROZENx1 LINE@VC_OFFx1 LINE@VC_ONx1]
+  block name=*Paper_Space flags=None anonymous=False dynamic=False source=- xref=False xrefPath= entities=1 [VIEWPORT@0x1]
+  block name=VC_BLK flags=None anonymous=False dynamic=False source=- xref=False xrefPath= entities=3 [LINE@0x1 LINE@VC_OFFx1 LINE@VC_ONx1]
+inserts
+  insert owner=*Model_Space handle=55 layer=VC_ON block=VC_BLK at=(20,0,0) scale=(1,1,1) rot=0 grid=1x1 attribs=0
+  insert owner=*Model_Space handle=56 layer=VC_OFF block=VC_BLK at=(30,0,0) scale=(1,1,1) rot=0 grid=1x1 attribs=0
+  insert owner=*Model_Space handle=57 layer=VC_FROZEN block=VC_BLK at=(40,0,0) scale=(1,1,1) rot=0 grid=1x1 attribs=0
+
+== shim /work/out/vc_layers.dwg
+view 0 name=Model kind=model items=7
+view 1 name=Layout1 kind=layout items=1
+  v0 Line handle=4B flags=0 v=[0,0,0,10,0,0]
+  v0 Line handle=4C flags=0 v=[0,2,0,10,2,0]
+  v0 Line handle=4D flags=0 v=[0,4,0,10,4,0]
+  v0 Line handle=4E flags=0 v=[0,6,0,10,6,0]
+  v0 Line handle=52 flags=1 v=[20,0,0,21,0,0]
+  v0 Line handle=53 flags=1 v=[20,1,0,21,1,0]
+  v0 Line handle=54 flags=1 v=[20,2,0,21,2,0]
+  v0 Line handle=52 flags=1 v=[30,0,0,31,0,0]
+  v0 Line handle=53 flags=1 v=[30,1,0,31,1,0]
+  v0 Line handle=54 flags=1 v=[30,2,0,31,2,0]
+  v0 Line handle=52 flags=1 v=[40,0,0,41,0,0]
+  v0 Line handle=53 flags=1 v=[40,1,0,41,1,0]
+  v0 Line handle=54 flags=1 v=[40,2,0,41,2,0]
+  v1 Warning code=100 handle=47 VIEWPORT is not a primitive this version flattens
+reader_notifications 4 per view
+
+== rule /work/out/vc_layers.dwg
+file vc_layers.dwg
+rule_visible_leaves 3
+rule_hidden_entities 6
+rule_external 0
+shim_model_space_geometry_records 13
+shim_emitted_but_hidden_by_rule 10
+shim_visible_by_rule_but_not_emitted 0
+  EMITTED-BUT-HIDDEN handle=4C rule=0 shim=1 (LINE on VC_OFF in *Model_Space)
+  EMITTED-BUT-HIDDEN handle=4D rule=0 shim=1 (LINE on VC_FROZEN in *Model_Space)
+  EMITTED-BUT-HIDDEN handle=4E rule=0 shim=1 (LINE on 0 in *Model_Space)
+  EMITTED-BUT-HIDDEN handle=52 rule=1 shim=3 (LINE on 0 in VC_BLK)
+  EMITTED-BUT-HIDDEN handle=53 rule=1 shim=3 (LINE on VC_ON in VC_BLK)
+  EMITTED-BUT-HIDDEN handle=54 rule=0 shim=3 (LINE on VC_OFF in VC_BLK)
+
+== describe /work/out/vc_nested.dwg
+file vc_nested.dwg version AC1032
+layers 2
+  layer name=0 on=True frozen=False frozenNewVp=False locked=False plot=True xrefDep=False
+  layer name=VC_ON on=True frozen=False frozenNewVp=False locked=False plot=True xrefDep=False
+layouts 2
+  layout name=Model paper=False block=*Model_Space entities=3 ext=(25.7,19.5,0)..(231.3,175.5,0)
+  layout name=Layout1 paper=True block=*Paper_Space entities=1 ext=(25.7,19.5,0)..(231.3,175.5,0)
+    viewport handle=47 id=1 layer=0 center=(148.5,105,0) w=297 h=210 viewCenter=(0,0) viewHeight=0 viewDir=(0,0,1) twist=0 scale=0 status=0 nonRect=False off=False representsPaper=True boundary=- frozenInVp=[]
+blocks 5
+  block name=*Model_Space flags=None anonymous=False dynamic=False source=- xref=False xrefPath= entities=3 [INSERT@VC_ONx3]
+  block name=*Paper_Space flags=None anonymous=False dynamic=False source=- xref=False xrefPath= entities=1 [VIEWPORT@0x1]
+  block name=VC_INNER flags=None anonymous=False dynamic=False source=- xref=False xrefPath= entities=1 [LINE@VC_ONx1]
+  block name=VC_MID flags=None anonymous=False dynamic=False source=- xref=False xrefPath= entities=2 [INSERT@VC_ONx1 LINE@VC_ONx1]
+  block name=VC_OUTER flags=None anonymous=False dynamic=False source=- xref=False xrefPath= entities=1 [INSERT@VC_ONx1]
+inserts
+  insert owner=*Model_Space handle=56 layer=VC_ON block=VC_INNER at=(10,0,0) scale=(1,1,1) rot=0 grid=1x1 attribs=0
+  insert owner=*Model_Space handle=57 layer=VC_ON block=VC_INNER at=(20,0,0) scale=(3,3,3) rot=0 grid=1x1 attribs=0
+  insert owner=*Model_Space handle=58 layer=VC_ON block=VC_OUTER at=(100,100,0) scale=(2,2,2) rot=0 grid=1x1 attribs=0
+  insert owner=VC_MID handle=51 layer=VC_ON block=VC_INNER at=(1,0,0) scale=(2,2,2) rot=1.570796 grid=1x1 attribs=0
+  insert owner=VC_OUTER handle=55 layer=VC_ON block=VC_MID at=(3,0,0) scale=(1,1,1) rot=1.570796 grid=1x1 attribs=0
+
+== shim /work/out/vc_nested.dwg
+view 0 name=Model kind=model items=3
+view 1 name=Layout1 kind=layout items=1
+  v0 Line handle=4C flags=1 v=[10,0,0,11,0,0]
+  v0 Line handle=4C flags=1 v=[20,0,0,23,0,0]
+  v0 Line handle=50 flags=1 v=[106,100,0,104,100,0]
+  v0 Line handle=4C flags=1 v=[106,102,0,102,102,0]
+  v1 Warning code=100 handle=47 VIEWPORT is not a primitive this version flattens
+reader_notifications 4 per view
+
+== rule /work/out/vc_nested.dwg
+file vc_nested.dwg
+rule_visible_leaves 4
+rule_hidden_entities 0
+rule_external 0
+shim_model_space_geometry_records 4
+shim_emitted_but_hidden_by_rule 0
+shim_visible_by_rule_but_not_emitted 0
+
+== describe /work/out/vc_paper.dwg
+file vc_paper.dwg version AC1032
+layers 3
+  layer name=0 on=True frozen=False frozenNewVp=False locked=False plot=True xrefDep=False
+  layer name=VC_ON on=True frozen=False frozenNewVp=False locked=False plot=True xrefDep=False
+  layer name=VC_VPF on=True frozen=False frozenNewVp=False locked=False plot=True xrefDep=False
+layouts 2
+  layout name=Model paper=False block=*Model_Space entities=3 ext=(25.7,19.5,0)..(231.3,175.5,0)
+  layout name=Layout1 paper=True block=*Paper_Space entities=6 ext=(25.7,19.5,0)..(231.3,175.5,0)
+    viewport handle=47 id=1 layer=0 center=(148.5,105,0) w=297 h=210 viewCenter=(0,0) viewHeight=0 viewDir=(0,0,1) twist=0 scale=0 status=0 nonRect=False off=False representsPaper=True boundary=- frozenInVp=[]
+    viewport handle=4E id=2 layer=0 center=(80,100,0) w=100 h=80 viewCenter=(50,5) viewHeight=80 viewDir=(0,0,1) twist=0 scale=1 status=0 nonRect=False off=False representsPaper=False boundary=- frozenInVp=[]
+    viewport handle=4F id=3 layer=0 center=(200,100,0) w=100 h=80 viewCenter=(50,5) viewHeight=160 viewDir=(0,0,1) twist=0.523599 scale=0.5 status=0 nonRect=False off=False representsPaper=False boundary=- frozenInVp=[VC_VPF]
+    viewport handle=51 id=4 layer=0 center=(80,30,0) w=40 h=40 viewCenter=(50,50) viewHeight=40 viewDir=(0,0,1) twist=0 scale=1 status=65536 nonRect=True off=False representsPaper=False boundary=CIRCLE frozenInVp=[]
+blocks 2
+  block name=*Model_Space flags=None anonymous=False dynamic=False source=- xref=False xrefPath= entities=3 [CIRCLE@VC_ONx1 LINE@VC_ONx1 LINE@VC_VPFx1]
+  block name=*Paper_Space flags=None anonymous=False dynamic=False source=- xref=False xrefPath= entities=6 [CIRCLE@VC_ONx1 LINE@VC_ONx1 VIEWPORT@0x4]
+inserts
+
+== shim /work/out/vc_paper.dwg
+view 0 name=Model kind=model items=3
+view 1 name=Layout1 kind=layout items=6
+  v0 Line handle=4A flags=0 v=[0,0,0,100,0,0]
+  v0 Line handle=4B flags=0 v=[0,10,0,100,10,0]
+  v0 Circle handle=4C flags=0 v=[50,50,0,20,0,0]
+  v1 Warning code=100 handle=47 VIEWPORT is not a primitive this version flattens
+  v1 Line handle=4D flags=0 v=[10,10,0,200,10,0]
+  v1 Warning code=100 handle=4E VIEWPORT is not a primitive this version flattens
+  v1 Warning code=100 handle=4F VIEWPORT is not a primitive this version flattens
+  v1 Circle handle=50 flags=0 v=[80,30,0,20,0,0]
+  v1 Warning code=100 handle=51 VIEWPORT is not a primitive this version flattens
+reader_notifications 4 per view
+
+== rule /work/out/vc_paper.dwg
+file vc_paper.dwg
+rule_visible_leaves 3
+rule_hidden_entities 0
+rule_external 0
+shim_model_space_geometry_records 3
+shim_emitted_but_hidden_by_rule 0
+shim_visible_by_rule_but_not_emitted 0
+
+== describe /work/out/vc_anonymous.dwg
+file vc_anonymous.dwg version AC1032
+layers 3
+  layer name=0 on=True frozen=False frozenNewVp=False locked=False plot=True xrefDep=False
+  layer name=A-WALL on=True frozen=False frozenNewVp=False locked=False plot=True xrefDep=False
+  layer name=S-COLS on=True frozen=False frozenNewVp=False locked=False plot=True xrefDep=False
+layouts 2
+  layout name=Model paper=False block=*Model_Space entities=2 ext=(25.7,19.5,0)..(231.3,175.5,0)
+  layout name=Layout1 paper=True block=*Paper_Space entities=1 ext=(25.7,19.5,0)..(231.3,175.5,0)
+    viewport handle=47 id=1 layer=0 center=(148.5,105,0) w=297 h=210 viewCenter=(0,0) viewHeight=0 viewDir=(0,0,1) twist=0 scale=0 status=0 nonRect=False off=False representsPaper=True boundary=- frozenInVp=[]
+blocks 4
+  block name=*Model_Space flags=None anonymous=False dynamic=False source=- xref=False xrefPath= entities=2 [INSERT@A-WALLx1 INSERT@S-COLSx1]
+  block name=*Paper_Space flags=None anonymous=False dynamic=False source=- xref=False xrefPath= entities=1 [VIEWPORT@0x1]
+  block name=*U1 flags=Anonymous anonymous=True dynamic=False source=- xref=False xrefPath= entities=1 [LINE@A-WALLx1]
+  block name=COL_400 flags=None anonymous=False dynamic=False source=- xref=False xrefPath= entities=1 [CIRCLE@S-COLSx1]
+inserts
+  insert owner=*Model_Space handle=52 layer=A-WALL block=*U1 at=(0,0,0) scale=(1,1,1) rot=0 grid=1x1 attribs=0
+  insert owner=*Model_Space handle=53 layer=S-COLS block=COL_400 at=(10,10,0) scale=(1,1,1) rot=0 grid=1x1 attribs=0
+
+== shim /work/out/vc_anonymous.dwg
+view 0 name=Model kind=model items=2
+view 1 name=Layout1 kind=layout items=1
+  v0 Line handle=4D flags=1 v=[0,0,0,5,0,0]
+  v0 Circle handle=51 flags=1 v=[10,10,0,0.2,0,0]
+  v1 Warning code=100 handle=47 VIEWPORT is not a primitive this version flattens
+reader_notifications 4 per view
+
+== rule /work/out/vc_anonymous.dwg
+file vc_anonymous.dwg
+rule_visible_leaves 2
+rule_hidden_entities 0
+rule_external 0
+shim_model_space_geometry_records 2
+shim_emitted_but_hidden_by_rule 0
+shim_visible_by_rule_but_not_emitted 0
+
+== describe /work/in/sample_AC1032.dwg
+file sample_AC1032.dwg version AC1032
+layers 19
+  layer name=0 on=True frozen=False frozenNewVp=False locked=False plot=True xrefDep=False
+  layer name=Defpoints on=True frozen=False frozenNewVp=False locked=False plot=False xrefDep=False
+  layer name=Layer1 on=True frozen=False frozenNewVp=False locked=False plot=True xrefDep=False
+  layer name=Layer2 on=True frozen=False frozenNewVp=False locked=False plot=True xrefDep=False
+  layer name=Layer_Freeze on=True frozen=True frozenNewVp=False locked=False plot=True xrefDep=False
+  layer name=Layer_Lock on=True frozen=False frozenNewVp=False locked=True plot=True xrefDep=False
+  layer name=Layer_Lt_dash on=True frozen=False frozenNewVp=False locked=False plot=True xrefDep=False
+  layer name=Layer_NoPlot on=True frozen=False frozenNewVp=False locked=False plot=False xrefDep=False
+  layer name=Layer_Off on=False frozen=False frozenNewVp=False locked=False plot=True xrefDep=False
+  layer name=Layer_color_80 on=True frozen=False frozenNewVp=False locked=False plot=True xrefDep=False
+  layer name=Layer_color_book on=True frozen=False frozenNewVp=False locked=False plot=True xrefDep=False
+  layer name=Layer_desc on=True frozen=False frozenNewVp=False locked=False plot=True xrefDep=False
+  layer name=Layer_lw_035 on=True frozen=False frozenNewVp=False locked=False plot=True xrefDep=False
+  layer name=Layer_lw_050 on=True frozen=False frozenNewVp=False locked=False plot=True xrefDep=False
+  layer name=Layer_transp_70 on=True frozen=False frozenNewVp=False locked=False plot=True xrefDep=False
+  layer name=Layer_true_color on=True frozen=False frozenNewVp=False locked=False plot=True xrefDep=False
+  layer name=Layer_vp_freeze on=True frozen=False frozenNewVp=True locked=False plot=True xrefDep=False
+  layer name=app_layer on=True frozen=False frozenNewVp=False locked=False plot=True xrefDep=False
+  layer name=color_125_33_79 on=True frozen=False frozenNewVp=False locked=False plot=True xrefDep=False
+layouts 4
+  layout name=Model paper=False block=*Model_Space entities=163 ext=(0,0,0)..(0,0,0)
+  layout name=Layout1 paper=True block=*Paper_Space0 entities=2 ext=(1.05,0.8,0)..(9.45,7.2,0)
+    viewport handle=240 id=1 layer=0 center=(7.616174,4,0) w=24.425049 h=8.993 viewCenter=(7.616174,4) viewHeight=8.993 viewDir=(0,0,1) twist=0 scale=1 status=819232 nonRect=False off=False representsPaper=True boundary=- frozenInVp=[]
+    viewport handle=245 id=2 layer=0 center=(5.25,4,0) w=8.4 h=6.4 viewCenter=(6,4.5) viewHeight=9.228705 viewDir=(0,0,1) twist=0 scale=0.693488 status=819808 nonRect=False off=False representsPaper=False boundary=- frozenInVp=[]
+  layout name=Layout2 paper=True block=*Paper_Space1 entities=2 ext=(1.05,0.8,0)..(9.45,7.2,0)
+    viewport handle=252 id=1 layer=0 center=(7.616577,4,0) w=24.429212 h=8.994532 viewCenter=(7.616577,4) viewHeight=8.994532 viewDir=(0,0,1) twist=0 scale=1 status=819232 nonRect=False off=False representsPaper=True boundary=- frozenInVp=[]
+    viewport handle=256 id=2 layer=0 center=(5.25,4,0) w=8.4 h=6.4 viewCenter=(6,4.5) viewHeight=9.228705 viewDir=(0,0,1) twist=0 scale=0.693488 status=819808 nonRect=False off=False representsPaper=False boundary=- frozenInVp=[]
+  layout name=MyLayout paper=True block=*Paper_Space entities=2 ext=(1.136,0.793333,0)..(10.223999,7.14,0)
+    viewport handle=267 id=1 layer=0 center=(7.981303,3.967192,0) w=23.757575 h=8.747244 viewCenter=(7.981303,3.967192) viewHeight=8.747244 viewDir=(0,0,1) twist=0 scale=1 status=819232 nonRect=False off=False representsPaper=True boundary=- frozenInVp=[]
+    viewport handle=26B id=2 layer=0 center=(5.68,3.966667,0) w=9.087999 h=6.346667 viewCenter=(6,4.5) viewHeight=9.108871 viewDir=(0,0,1) twist=0 scale=0.696757 status=819808 nonRect=False off=False representsPaper=False boundary=- frozenInVp=[]
+blocks 27
+  block name=*D10 flags=Anonymous anonymous=True dynamic=False source=- xref=False xrefPath= entities=6 [LINE@Layer1x2 MTEXT@Layer1x1 POINT@Defpointsx2 SOLID@Layer1x1]
+  block name=*D11 flags=Anonymous anonymous=True dynamic=False source=- xref=False xrefPath= entities=5 [LINE@Layer1x1 MTEXT@Layer1x1 POINT@Defpointsx2 SOLID@Layer1x1]
+  block name=*D14 flags=Anonymous anonymous=True dynamic=False source=- xref=False xrefPath= entities=10 [LINE@0x4 MTEXT@0x1 POINT@Defpointsx3 SOLID@0x2]
+  block name=*D22 flags=Anonymous anonymous=True dynamic=False source=- xref=False xrefPath= entities=10 [INSERT@0x2 LINE@0x4 MTEXT@0x1 POINT@Defpointsx3]
+  block name=*D23 flags=Anonymous anonymous=True dynamic=False source=- xref=False xrefPath= entities=10 [LINE@0x4 MTEXT@0x1 POINT@Defpointsx3 SOLID@0x2]
+  block name=*D3 flags=Anonymous anonymous=True dynamic=False source=- xref=False xrefPath= entities=9 [LINE@Layer1x3 MTEXT@Layer1x1 POINT@Defpointsx3 SOLID@Layer1x2]
+  block name=*D4 flags=Anonymous anonymous=True dynamic=False source=- xref=False xrefPath= entities=10 [ARC@Layer1x1 LINE@Layer1x2 MTEXT@Layer1x1 POINT@Defpointsx4 SOLID@Layer1x2]
+  block name=*D5 flags=Anonymous anonymous=True dynamic=False source=- xref=False xrefPath= entities=11 [ARC@Layer1x1 LINE@Layer1x2 MTEXT@Layer1x1 POINT@Defpointsx5 SOLID@Layer1x2]
+  block name=*D6 flags=Anonymous anonymous=True dynamic=False source=- xref=False xrefPath= entities=7 [LINE@Layer1x3 MTEXT@Layer1x1 POINT@Defpointsx3]
+  block name=*D7 flags=Anonymous anonymous=True dynamic=False source=- xref=False xrefPath= entities=7 [LINE@Layer1x3 MTEXT@Layer1x1 POINT@Defpointsx3]
+  block name=*D8 flags=Anonymous anonymous=True dynamic=False source=- xref=False xrefPath= entities=9 [INSERT@Layer1x2 LINE@Layer1x3 MTEXT@Layer1x1 POINT@Defpointsx3]
+  block name=*Model_Space flags=None anonymous=False dynamic=False source=- xref=False xrefPath= entities=163 [3DFACE@0x1 3DSOLID@0x2 ACAD_TABLE@0x1 ACAD_TABLE@Layer1x1 ARC@0x1 CIRCLE@0x6 CIRCLE@Layer2x2 DIMENSION@0x3 DIMENSION@Layer1x8 ELLIPSE@0x1 HATCH@0x8 IMAGE@0x1 INSERT@0x5 INSERT@Layer1x1 LEADER@Layer1x1 LINE@0x14 LINE@Layer2x6 LINE@Layer_Lt_dashx6 LWPOLYLINE@0x21 MESH@0x1 MESH@Layer_color_80x1 MLINE@0x1 MLINE@Layer_true_colorx2 MTEXT@0x4 MTEXT@Layer1x1 MULTILEADER@0x15 PDFUNDERLAY@0x1 POINT@0x5 POINT@Layer_Lockx1 POLYLINE@0x2 RAY@0x1 REGION@0x1 SHAPE@0x1 SOLID@0x1 SPLINE@0x2 TEXT@0x25 TEXT@Layer2x1 TEXT@Layer_color_80x1 TEXT@Layer_color_bookx1 TEXT@Layer_true_colorx1 TOLERANCE@0x3 WIPEOUT@0x1 XLINE@0x1]
+  block name=*Paper_Space flags=None anonymous=False dynamic=False source=- xref=False xrefPath= entities=2 [VIEWPORT@0x2]
+  block name=*Paper_Space0 flags=None anonymous=False dynamic=False source=- xref=False xrefPath= entities=2 [VIEWPORT@0x2]
+  block name=*Paper_Space1 flags=None anonymous=False dynamic=False source=- xref=False xrefPath= entities=2 [VIEWPORT@0x2]
+  block name=*T16 flags=Anonymous anonymous=True dynamic=False source=- xref=False xrefPath= entities=25 [INSERT@0x2 LINE@0x11 LINE@Defpointsx1 MTEXT@0x11]
+  block name=*T9 flags=Anonymous anonymous=True dynamic=False source=- xref=False xrefPath= entities=28 [LINE@Defpointsx1 LINE@Layer1x18 MTEXT@Layer1x8 SOLID@Layer1x1]
+  block name=*U18 flags=Anonymous anonymous=True dynamic=False source=my-dynamic-block xref=False xrefPath= entities=1 [CIRCLE@0x1]
+  block name=*U19 flags=Anonymous anonymous=True dynamic=False source=my-dynamic-block xref=False xrefPath= entities=1 [CIRCLE@0x1]
+  block name=*U25 flags=Anonymous anonymous=True dynamic=False source=- xref=False xrefPath= entities=3 [INSERT@0x2 MTEXT@0x1]
+  block name=MyBlock flags=None anonymous=False dynamic=False source=- xref=False xrefPath= entities=4 [ATTDEF@0x1 CIRCLE@0x1 LINE@0x2]
+  block name=_ArchTick flags=None anonymous=False dynamic=False source=- xref=False xrefPath= entities=1 [LWPOLYLINE@0x1]
+  block name=_BoxBlank flags=None anonymous=False dynamic=False source=- xref=False xrefPath= entities=5 [LINE@0x5]
+  block name=_ClosedBlank flags=None anonymous=False dynamic=False source=- xref=False xrefPath= entities=3 [LINE@0x3]
+  block name=my-dynamic-block flags=None anonymous=False dynamic=True source=- xref=False xrefPath= entities=1 [CIRCLE@0x1]
+  block name=my_block flags=None anonymous=False dynamic=False source=- xref=False xrefPath= entities=1 [CIRCLE@0x1]
+  block name=my_block_v2 flags=None anonymous=False dynamic=False source=- xref=False xrefPath= entities=5 [ATTDEF@0x4 LWPOLYLINE@0x1]
+inserts
+  insert owner=*D22 handle=C9E layer=0 block=_BoxBlank at=(313.773325,-11.724072,0) scale=(0.18,0.18,0.18) rot=3.141593 grid=1x1 attribs=0
+  insert owner=*D22 handle=C9F layer=0 block=_BoxBlank at=(348.896656,-11.724072,0) scale=(0.18,0.18,0.18) rot=0 grid=1x1 attribs=0
+  insert owner=*D8 handle=660 layer=Layer1 block=_ArchTick at=(375.886666,14.340581,0) scale=(2.5,2.5,2.5) rot=3.926991 grid=1x1 attribs=0
+  insert owner=*D8 handle=661 layer=Layer1 block=_ArchTick at=(410.084871,48.538786,0) scale=(2.5,2.5,2.5) rot=0.785398 grid=1x1 attribs=0
+  insert owner=*Model_Space handle=528 layer=Layer1 block=*T9 at=(774.865724,48.538786,0) scale=(1,1,1) rot=0 grid=1x1 attribs=0
+  insert owner=*Model_Space handle=704 layer=Layer1 block=MyBlock at=(920.679627,16.352854,0) scale=(0.363374,0.363374,0.363374) rot=0 grid=1x1 attribs=1
+  insert owner=*Model_Space handle=783 layer=0 block=my_block_v2 at=(-208.149533,8.990124,0) scale=(1.217889,1.217889,1.217889) rot=0 grid=1x1 attribs=0
+  insert owner=*Model_Space handle=79C layer=0 block=my_block_v2 at=(-3024.443818,1.950954,0) scale=(4.191133,4.191133,4.191133) rot=0 grid=1x1 attribs=3
+  insert owner=*Model_Space handle=A35 layer=0 block=*T16 at=(18.390582,-140.70433,0) scale=(1,1,1) rot=0 grid=1x1 attribs=0
+  insert owner=*Model_Space handle=ABA layer=0 block=*U18 at=(19.024808,-165.549631,0) scale=(1,1,1) rot=0 grid=1x1 attribs=0
+  insert owner=*Model_Space handle=AC5 layer=0 block=*U19 at=(23.389548,-165.549631,0) scale=(1,1,1) rot=0 grid=1x1 attribs=0
+  insert owner=*Model_Space handle=D2F layer=0 block=my_block at=(42.832624,-37.110896,0) scale=(0.03937,0.03937,0.03937) rot=0 grid=1x1 attribs=0
+  insert owner=*T16 handle=A43 layer=0 block=my_block at=(6.829841,-1.018517,0) scale=(0.005964,0.005964,0.005964) rot=0 grid=1x1 attribs=0
+  insert owner=*T16 handle=A44 layer=0 block=*U25 at=(0,0,0) scale=(1,1,1) rot=0 grid=1x1 attribs=0
+  insert owner=*U25 handle=E5D layer=0 block=my_block at=(9.329841,-1.018517,0) scale=(0.005964,0.005964,0.005964) rot=0 grid=1x1 attribs=0
+  insert owner=*U25 handle=E5E layer=0 block=my_block at=(9.996594,-1.018517,0) scale=(0.005964,0.005964,0.005964) rot=0 grid=1x1 attribs=0
+
+== shim /work/in/sample_AC1032.dwg
+view 0 name=Model kind=model items=163
+view 1 name=Layout1 kind=layout items=2
+view 2 name=Layout2 kind=layout items=2
+view 3 name=MyLayout kind=layout items=2
+  v0 Warning code=100 handle=28E POINT is not a primitive this version flattens
+  v0 Warning code=100 handle=298 POINT is not a primitive this version flattens
+  v0 Warning code=100 handle=299 POINT is not a primitive this version flattens
+  v0 Warning code=100 handle=29A POINT is not a primitive this version flattens
+  v0 Warning code=100 handle=29B POINT is not a primitive this version flattens
+  v0 Warning code=100 handle=29C POINT is not a primitive this version flattens
+  v0 Line handle=2C7 flags=0 v=[3.592534,1.477242,0,6.863547,1.477242,0]
+  v0 Line handle=2CF flags=0 v=[3.592534,2.29771,0,6.863547,2.29771,0]
+  v0 Polyline handle=2E2 flags=0 v=[0,0,1,12.140516,1.379831,0]
+  v0 Polyline handle=2E3 flags=0 v=[0,0,1,19.36563,1.797416,0]
+  v0 Polyline handle=2E4 flags=0 v=[0,0,1,28.005637,0.361305,0]
+  v0 Polyline handle=2E5 flags=0 v=[0,0,1,35.300832,5.700746,0]
+  v0 Circle handle=31F flags=0 v=[46.872478,6.672964,0,3.682481,0,0]
+  v0 Arc handle=320 flags=0 v=[56.351792,4.697602,0,3.044494,5.952333,2.81074]
+  v0 Ellipse handle=321 flags=0 v=[68.000517,4.18521,0,-5.101255,0,0]
+  v0 Polygon handle=322 flags=0 v=[0,0,-1,75.039418,8.050392,0]
+  v0 Polygon handle=343 flags=0 v=[0.258199,0.069184,-0.963611,91.431807,4.875358,-5.091689]
+  v0 Polygon handle=343 flags=0 v=[0.189015,0.189015,-0.963611,91.431807,4.875358,-5.091689]
+  v0 Polygon handle=343 flags=0 v=[0.069184,0.258199,-0.963611,91.431807,4.875358,-5.091689]
+  v0 Polygon handle=343 flags=0 v=[-0.069184,0.258199,-0.963611,91.431807,4.875358,-5.091689]
+  v0 Polygon handle=343 flags=0 v=[-0.189015,0.189015,-0.963611,91.431807,4.875358,-5.091689]
+  v0 Polygon handle=343 flags=0 v=[-0.258199,0.069184,-0.963611,91.431807,4.875358,-5.091689]
+  v0 Polygon handle=343 flags=0 v=[-0.258199,-0.069184,-0.963611,91.431807,4.875358,-5.091689]
+  v0 Polygon handle=343 flags=0 v=[-0.189015,-0.189015,-0.963611,91.431807,4.875358,-5.091689]
+  v0 Polygon handle=343 flags=0 v=[-0.069184,-0.258199,-0.963611,91.431807,4.875358,-5.091689]
+  v0 Polygon handle=343 flags=0 v=[0.069184,-0.258199,-0.963611,91.431807,4.875358,-5.091689]
+  v0 Polygon handle=343 flags=0 v=[0.189015,-0.189015,-0.963611,91.431807,4.875358,-5.091689]
+  v0 Polygon handle=343 flags=0 v=[0.258199,-0.069184,-0.963611,91.431807,4.875358,-5.091689]
+  v0 Polygon handle=343 flags=0 v=[0.694747,0.186157,-0.694747,95.250574,7.080124,-2.545844]
+  v0 Polygon handle=343 flags=0 v=[0.50859,0.50859,-0.694747,93.636573,8.694124,-2.545844]
+  v0 Polygon handle=343 flags=0 v=[0.186157,0.694747,-0.694747,91.431807,9.28489,-2.545844]
+  v0 Polygon handle=343 flags=0 v=[-0.186157,0.694747,-0.694747,89.227041,8.694124,-2.545844]
+  v0 Polygon handle=343 flags=0 v=[-0.50859,0.50859,-0.694747,87.613041,7.080124,-2.545844]
+  v0 Polygon handle=343 flags=0 v=[-0.694747,0.186157,-0.694747,87.022276,4.875358,-2.545844]
+  v0 Polygon handle=343 flags=0 v=[-0.694747,-0.186157,-0.694747,87.613041,2.670592,-2.545844]
+  v0 Polygon handle=343 flags=0 v=[-0.50859,-0.50859,-0.694747,89.227041,1.056591,-2.545844]
+  v0 Polygon handle=343 flags=0 v=[-0.186157,-0.694747,-0.694747,91.431807,0.465826,-2.545844]
+  v0 Polygon handle=343 flags=0 v=[0.186157,-0.694747,-0.694747,93.636573,1.056591,-2.545844]
+  v0 Polygon handle=343 flags=0 v=[0.50859,-0.50859,-0.694747,95.250574,2.670592,-2.545844]
+  v0 Polygon handle=343 flags=0 v=[0.694747,-0.186157,-0.694747,95.841339,4.875358,-2.545844]
+  v0 Polygon handle=343 flags=0 v=[0.935113,0.250563,-0.250563,95.841339,7.421202,0]
+  v0 Polygon handle=343 flags=0 v=[0.68455,0.68455,-0.250563,93.977652,9.28489,0]
+  v0 Polygon handle=343 flags=0 v=[0.250563,0.935113,-0.250563,91.431807,9.967047,0]
+  v0 Polygon handle=343 flags=0 v=[-0.250563,0.935113,-0.250563,88.885963,9.28489,0]
+  v0 Polygon handle=343 flags=0 v=[-0.68455,0.68455,-0.250563,87.022276,7.421202,0]
+  v0 Polygon handle=343 flags=0 v=[-0.935113,0.250563,-0.250563,86.340119,4.875358,0]
+  v0 Polygon handle=343 flags=0 v=[-0.935113,-0.250563,-0.250563,87.022276,2.329514,0]
+  v0 Polygon handle=343 flags=0 v=[-0.68455,-0.68455,-0.250563,88.885963,0.465826,0]
+  v0 Polygon handle=343 flags=0 v=[-0.250563,-0.935113,-0.250563,91.431807,-0.216331,0]
+  v0 Polygon handle=343 flags=0 v=[0.250563,-0.935113,-0.250563,93.977652,0.465826,0]
+  v0 Polygon handle=343 flags=0 v=[0.68455,-0.68455,-0.250563,95.841339,2.329514,0]
+  v0 Polygon handle=343 flags=0 v=[0.935113,-0.250563,-0.250563,96.523496,4.875358,0]
+  v0 Polygon handle=343 flags=0 v=[0.935113,0.250563,0.250563,95.250574,7.080124,2.545844]
+  v0 Polygon handle=343 flags=0 v=[0.68455,0.68455,0.250563,93.636573,8.694124,2.545844]
+  v0 Polygon handle=343 flags=0 v=[0.250563,0.935113,0.250563,91.431807,9.28489,2.545844]
+  v0 Polygon handle=343 flags=0 v=[-0.250563,0.935113,0.250563,89.227041,8.694124,2.545844]
+  v0 Polygon handle=343 flags=0 v=[-0.68455,0.68455,0.250563,87.613041,7.080124,2.545844]
+  v0 Polygon handle=343 flags=0 v=[-0.935113,0.250563,0.250563,87.022276,4.875358,2.545844]
+  v0 Polygon handle=343 flags=0 v=[-0.935113,-0.250563,0.250563,87.613041,2.670592,2.545844]
+  v0 Polygon handle=343 flags=0 v=[-0.68455,-0.68455,0.250563,89.227041,1.056591,2.545844]
+  v0 Polygon handle=343 flags=0 v=[-0.250563,-0.935113,0.250563,91.431807,0.465826,2.545844]
+  v0 Polygon handle=343 flags=0 v=[0.250563,-0.935113,0.250563,93.636573,1.056591,2.545844]
+  v0 Polygon handle=343 flags=0 v=[0.68455,-0.68455,0.250563,95.250574,2.670592,2.545844]
+  v0 Polygon handle=343 flags=0 v=[0.935113,-0.250563,0.250563,95.841339,4.875358,2.545844]
+  v0 Polygon handle=343 flags=0 v=[0.694747,0.186157,0.694747,93.636573,6.14828,4.409532]
+  v0 Polygon handle=343 flags=0 v=[0.50859,0.50859,0.694747,92.70473,7.080124,4.409532]
+  v0 Polygon handle=343 flags=0 v=[0.186157,0.694747,0.694747,91.431807,7.421202,4.409532]
+  v0 Polygon handle=343 flags=0 v=[-0.186157,0.694747,0.694747,90.158885,7.080124,4.409532]
+  v0 Polygon handle=343 flags=0 v=[-0.50859,0.50859,0.694747,89.227041,6.14828,4.409532]
+  v0 Polygon handle=343 flags=0 v=[-0.694747,0.186157,0.694747,88.885963,4.875358,4.409532]
+  v0 Polygon handle=343 flags=0 v=[-0.694747,-0.186157,0.694747,89.227041,3.602436,4.409532]
+  v0 Polygon handle=343 flags=0 v=[-0.50859,-0.50859,0.694747,90.158885,2.670592,4.409532]
+  v0 Polygon handle=343 flags=0 v=[-0.186157,-0.694747,0.694747,91.431807,2.329514,4.409532]
+  v0 Polygon handle=343 flags=0 v=[0.186157,-0.694747,0.694747,92.70473,2.670592,4.409532]
+  v0 Polygon handle=343 flags=0 v=[0.50859,-0.50859,0.694747,93.636573,3.602436,4.409532]
+  v0 Polygon handle=343 flags=0 v=[0.694747,-0.186157,0.694747,93.977652,4.875358,4.409532]
+  v0 Polygon handle=343 flags=0 v=[0.258199,0.069184,0.963611,93.977652,4.875358,4.409532]
+  v0 Polygon handle=343 flags=0 v=[0.189015,0.189015,0.963611,93.636573,6.14828,4.409532]
+  v0 Polygon handle=343 flags=0 v=[0.069184,0.258199,0.963611,92.70473,7.080124,4.409532]
+  v0 Polygon handle=343 flags=0 v=[-0.069184,0.258199,0.963611,91.431807,7.421202,4.409532]
+  v0 Polygon handle=343 flags=0 v=[-0.189015,0.189015,0.963611,90.158885,7.080124,4.409532]
+  v0 Polygon handle=343 flags=0 v=[-0.258199,0.069184,0.963611,89.227041,6.14828,4.409532]
+  v0 Polygon handle=343 flags=0 v=[-0.258199,-0.069184,0.963611,88.885963,4.875358,4.409532]
+  v0 Polygon handle=343 flags=0 v=[-0.189015,-0.189015,0.963611,89.227041,3.602436,4.409532]
+  v0 Polygon handle=343 flags=0 v=[-0.069184,-0.258199,0.963611,90.158885,2.670592,4.409532]
+  v0 Polygon handle=343 flags=0 v=[0.069184,-0.258199,0.963611,91.431807,2.329514,4.409532]
+  v0 Polygon handle=343 flags=0 v=[0.189015,-0.189015,0.963611,92.70473,2.670592,4.409532]
+  v0 Polygon handle=343 flags=0 v=[0.258199,-0.069184,0.963611,93.636573,3.602436,4.409532]
+  v0 Polyline handle=353 flags=0 v=[0,0,1,102.745762,0.085318,0]
+  v0 Polygon handle=35A flags=0 v=[0,0,1,102.745762,0.085318,0]
+  v0 Polyline handle=35B flags=0 v=[0,0,1,12.140516,7.499316,0]
+  v0 Polyline handle=36C flags=0 v=[0,0,1,102.745762,17.314131,0]
+  v0 Polygon handle=36E flags=0 v=[0,0,1,102.745762,17.314131,0]
+  v0 Polyline handle=36F flags=0 v=[0,0,1,102.745762,33.467211,0]
+  v0 Polygon handle=371 flags=0 v=[0,0,1,102.745762,33.467211,0]
+  v0 Polyline handle=372 flags=0 v=[0,0,1,102.745762,49.509655,0]
+  v0 Polygon handle=376 flags=0 v=[0,0,1,102.745762,49.509655,0]
+  v0 Polygon handle=380 flags=0 v=[0.862856,0.357407,0.357407,95.38761,21.247192,0]
+  v0 Polygon handle=380 flags=0 v=[0.377964,0.156558,0.912487,95.074467,20.934049,1.069136]
+  v0 Polygon handle=380 flags=0 v=[-0.377964,-0.156558,0.912487,94.318474,20.178056,1.511986]
+  v0 Polygon handle=380 flags=0 v=[-0.862856,-0.357407,0.357407,93.562481,19.422063,1.069136]
+  v0 Polygon handle=380 flags=0 v=[-0.862856,-0.357407,-0.357407,93.249338,19.108921,0]
+  v0 Polygon handle=380 flags=0 v=[-0.377964,-0.156558,-0.912487,93.562481,19.422063,-1.069136]
+  v0 Polygon handle=380 flags=0 v=[0.377964,0.156558,-0.912487,94.318474,20.178056,-1.511986]
+  v0 Polygon handle=380 flags=0 v=[0.862856,0.357407,-0.357407,95.074467,20.934049,-1.069136]
+  v0 Polygon handle=380 flags=0 v=[0.357407,0.862856,0.357407,91.431807,22.885739,0]
+  v0 Polygon handle=380 flags=0 v=[0.156558,0.377964,0.912487,91.431807,22.442888,1.069136]
+  v0 Polygon handle=380 flags=0 v=[-0.156558,-0.377964,0.912487,91.431807,21.373753,1.511986]
+  v0 Polygon handle=380 flags=0 v=[-0.357407,-0.862856,0.357407,91.431807,20.304617,1.069136]
+  v0 Polygon handle=380 flags=0 v=[-0.357407,-0.862856,-0.357407,91.431807,19.861767,0]
+  v0 Polygon handle=380 flags=0 v=[-0.156558,-0.377964,-0.912487,91.431807,20.304617,-1.069136]
+  v0 Polygon handle=380 flags=0 v=[0.156558,0.377964,-0.912487,91.431807,21.373753,-1.511986]
+  v0 Polygon handle=380 flags=0 v=[0.357407,0.862856,-0.357407,91.431807,22.442888,-1.069136]
+  v0 Polygon handle=380 flags=0 v=[-0.357407,0.862856,0.357407,87.476005,21.247192,0]
+  v0 Polygon handle=380 flags=0 v=[-0.156558,0.377964,0.912487,87.789148,20.934049,1.069136]
+  v0 Polygon handle=380 flags=0 v=[0.156558,-0.377964,0.912487,88.545141,20.178056,1.511986]
+  v0 Polygon handle=380 flags=0 v=[0.357407,-0.862856,0.357407,89.301134,19.422063,1.069136]
+  v0 Polygon handle=380 flags=0 v=[0.357407,-0.862856,-0.357407,89.614276,19.108921,0]
+  v0 Polygon handle=380 flags=0 v=[0.156558,-0.377964,-0.912487,89.301134,19.422063,-1.069136]
+  v0 Polygon handle=380 flags=0 v=[-0.156558,0.377964,-0.912487,88.545141,20.178056,-1.511986]
+  v0 Polygon handle=380 flags=0 v=[-0.357407,0.862856,-0.357407,87.789148,20.934049,-1.069136]
+  v0 Polygon handle=380 flags=0 v=[-0.862856,0.357407,0.357407,85.837458,17.29139,0]
+  v0 Polygon handle=380 flags=0 v=[-0.377964,0.156558,0.912487,86.280309,17.29139,1.069136]
+  v0 Polygon handle=380 flags=0 v=[0.377964,-0.156558,0.912487,87.349444,17.29139,1.511986]
+  v0 Polygon handle=380 flags=0 v=[0.862856,-0.357407,0.357407,88.41858,17.29139,1.069136]
+  v0 Polygon handle=380 flags=0 v=[0.862856,-0.357407,-0.357407,88.86143,17.29139,0]
+  v0 Polygon handle=380 flags=0 v=[0.377964,-0.156558,-0.912487,88.41858,17.29139,-1.069136]
+  v0 Polygon handle=380 flags=0 v=[-0.377964,0.156558,-0.912487,87.349444,17.29139,-1.511986]
+  v0 Polygon handle=380 flags=0 v=[-0.862856,0.357407,-0.357407,86.280309,17.29139,-1.069136]
+  v0 Polygon handle=380 flags=0 v=[-0.862856,-0.357407,0.357407,87.476005,13.335587,0]
+  v0 Polygon handle=380 flags=0 v=[-0.377964,-0.156558,0.912487,87.789148,13.64873,1.069136]
+  v0 Polygon handle=380 flags=0 v=[0.377964,0.156558,0.912487,88.545141,14.404723,1.511986]
+  v0 Polygon handle=380 flags=0 v=[0.862856,0.357407,0.357407,89.301134,15.160716,1.069136]
+  v0 Polygon handle=380 flags=0 v=[0.862856,0.357407,-0.357407,89.614276,15.473859,0]
+  v0 Polygon handle=380 flags=0 v=[0.377964,0.156558,-0.912487,89.301134,15.160716,-1.069136]
+  v0 Polygon handle=380 flags=0 v=[-0.377964,-0.156558,-0.912487,88.545141,14.404723,-1.511986]
+  v0 Polygon handle=380 flags=0 v=[-0.862856,-0.357407,-0.357407,87.789148,13.64873,-1.069136]
+  v0 Polygon handle=380 flags=0 v=[-0.357407,-0.862856,0.357407,91.431807,11.69704,0]
+  v0 Polygon handle=380 flags=0 v=[-0.156558,-0.377964,0.912487,91.431807,12.139891,1.069136]
+  v0 Polygon handle=380 flags=0 v=[0.156558,0.377964,0.912487,91.431807,13.209027,1.511986]
+  v0 Polygon handle=380 flags=0 v=[0.357407,0.862856,0.357407,91.431807,14.278162,1.069136]
+  v0 Polygon handle=380 flags=0 v=[0.357407,0.862856,-0.357407,91.431807,14.721013,0]
+  v0 Polygon handle=380 flags=0 v=[0.156558,0.377964,-0.912487,91.431807,14.278162,-1.069136]
+  v0 Polygon handle=380 flags=0 v=[-0.156558,-0.377964,-0.912487,91.431807,13.209027,-1.511986]
+  v0 Polygon handle=380 flags=0 v=[-0.357407,-0.862856,-0.357407,91.431807,12.139891,-1.069136]
+  v0 Polygon handle=380 flags=0 v=[0.357407,-0.862856,0.357407,95.38761,13.335587,0]
+  v0 Polygon handle=380 flags=0 v=[0.156558,-0.377964,0.912487,95.074467,13.64873,1.069136]
+  v0 Polygon handle=380 flags=0 v=[-0.156558,0.377964,0.912487,94.318474,14.404723,1.511986]
+  v0 Polygon handle=380 flags=0 v=[-0.357407,0.862856,0.357407,93.562481,15.160716,1.069136]
+  v0 Polygon handle=380 flags=0 v=[-0.357407,0.862856,-0.357407,93.249338,15.473859,0]
+  v0 Polygon handle=380 flags=0 v=[-0.156558,0.377964,-0.912487,93.562481,15.160716,-1.069136]
+  v0 Polygon handle=380 flags=0 v=[0.156558,-0.377964,-0.912487,94.318474,14.404723,-1.511986]
+  v0 Polygon handle=380 flags=0 v=[0.357407,-0.862856,-0.357407,95.074467,13.64873,-1.069136]
+  v0 Polygon handle=380 flags=0 v=[0.862856,-0.357407,0.357407,97.026157,17.29139,0]
+  v0 Polygon handle=380 flags=0 v=[0.377964,-0.156558,0.912487,96.583306,17.29139,1.069136]
+  v0 Polygon handle=380 flags=0 v=[-0.377964,0.156558,0.912487,95.51417,17.29139,1.511986]
+  v0 Polygon handle=380 flags=0 v=[-0.862856,0.357407,0.357407,94.445035,17.29139,1.069136]
+  v0 Polygon handle=380 flags=0 v=[-0.862856,0.357407,-0.357407,94.002184,17.29139,0]
+  v0 Polygon handle=380 flags=0 v=[-0.377964,0.156558,-0.912487,94.445035,17.29139,-1.069136]
+  v0 Polygon handle=380 flags=0 v=[0.377964,-0.156558,-0.912487,95.51417,17.29139,-1.511986]
+  v0 Polygon handle=380 flags=0 v=[0.862856,-0.357407,-0.357407,96.583306,17.29139,-1.069136]
+  v0 Warning code=109 handle=389 XLINE runs both ways from its base point forever and every record wire version 2 defines is bounded, so it is refused rather than clipped to the drawing's extents and passed off as a line
+  v0 Warning code=109 handle=38A RAY runs from its base point in one direction forever and every record wire version 2 defines is bounded, so it is refused rather than clipped to the drawing's extents and passed off as a line
+  v0 Polyline handle=38B flags=0 v=[0,0,1,137.078615,1.014578,0]
+  v0 Polyline handle=38B flags=0 v=[0,0,1,138.578615,1.014578,0]
+  v0 Polyline handle=3A5 flags=0 v=[0,0,1,132.546888,37.540635,0]
+  v0 Polyline handle=3A5 flags=0 v=[0,0,1,134.677831,37.540635,0]
+  v0 Polyline handle=3A6 flags=0 v=[0,0,1,132.546888,42.601625,0]
+  v0 Polyline handle=3A6 flags=0 v=[0,0,1,132.546888,41.003417,0]
+  v0 Text handle=3B9 flags=0 v=[147.819447,2.854975,0,1,0]
+  v0 Text handle=3BA flags=0 v=[147.819447,10.325741,0,1,0]
+  v0 Text handle=3CF flags=0 v=[147.819447,17.27873,0,1,0]
+  v0 Text handle=3D0 flags=0 v=[147.819447,24.749495,0,1,0]
+  v0 Text handle=3EC flags=0 v=[183.588928,5.226371,0,1,0]
+  v0 Text handle=3F5 flags=0 v=[183.588928,9.187556,0,1,0]
+  v0 Text handle=3F6 flags=0 v=[199.330342,15.326102,0,1,0]
+  v0 Warning code=100 handle=422 POLYFACE_MESH is not a primitive this version flattens
+  v0 Polyline handle=42B flags=0 v=[0,0,1,232.601721,0.892694,0]
+  v0 Polygon handle=432 flags=0 v=[0,0,1,235.60643,4.785764,0]
+  v0 Spline handle=433 flags=0 v=[0,0,0,0,1,1]
+  v0 Spline handle=434 flags=0
+  v0 Warning code=112 handle=44D WIPEOUT is a mask, and the Polygon record beside this one under the same handle is the boundary it masks rather than a face: it hides whatever the stream drew before it, inside that boundary. Wire version 2's record 9 has no field to say that, so this code does, and a consumer that does not know it fills the boundary like any other polygon, which still covers what is underneath
+  v0 Polygon handle=44D flags=0 v=[0,0,1,271.921129,3.988123,0]
+  v0 Warning code=114 handle=512 LEADER asks for an arrowhead at its first vertex and this version draws the vertex run only; the arrowhead is a glyph the dimension style names and it is not emitted
+  v0 Polyline handle=512 flags=0 v=[0,0,1,717.868715,2.941179,0]
+  v0 Text handle=513 flags=0 v=[741.02375,14.696812,0,1.424925,0]
+  v0 Line handle=626 flags=1 v=[329.976559,3.482445,0,319.276189,22.01603,0]
+  v0 Line handle=627 flags=1 v=[364.174764,37.68065,0,359.7331,45.373838,0]
+  v0 Line handle=628 flags=1 v=[322.066253,22.183498,0,358.193037,43.041307,0]
+  v0 Polygon handle=629 flags=1 v=[0,0,1,321.85792,22.544342,0]
+  v0 Polygon handle=62A flags=1 v=[0,0,1,357.984703,43.40215,0]
+  v0 Text handle=62B flags=1 v=[339.065951,34.454774,0,2.5,0.523599]
+  v0 Warning code=100 handle=62C POINT is not a primitive this version flattens
+  v0 Warning code=100 handle=62D POINT is not a primitive this version flattens
+  v0 Warning code=100 handle=62E POINT is not a primitive this version flattens
+  v0 Line handle=62F flags=1 v=[456.275405,8.443238,0,472.66001,2.981703,0]
+  v0 Line handle=630 flags=1 v=[444.434661,37.745723,0,447.295237,49.188028,0]
+  v0 Arc handle=631 flags=1 v=[438.583375,14.340581,0,34.669927,6.033559,1.253693]
+  v0 Polygon handle=632 flags=1 v=[0,0,1,472.578479,5.658233,0]
+  v0 Polygon handle=633 flags=1 v=[0,0,1,449.278421,46.881641,0]
+  v0 Text handle=634 flags=1 v=[470.642041,31.939054,0,2.5,-1.068763]
+  v0 Warning code=100 handle=635 POINT is not a primitive this version flattens
+  v0 Warning code=100 handle=636 POINT is not a primitive this version flattens
+  v0 Warning code=100 handle=637 POINT is not a primitive this version flattens
+  v0 Warning code=100 handle=638 POINT is not a primitive this version flattens
+  v0 Line handle=639 flags=1 v=[513.272413,8.443238,0,528.96566,3.212156,0]
+  v0 Line handle=63A flags=1 v=[501.431669,37.745723,0,504.115496,48.481032,0]
+  v0 Arc handle=63B flags=1 v=[495.580383,14.340581,0,33.941171,6.035108,1.252144]
+  v0 Polygon handle=63C flags=1 v=[0,0,1,528.882361,5.889541,0]
+  v0 Polygon handle=63D flags=1 v=[0,0,1,506.097832,46.172874,0]
+  v0 Text handle=63E flags=1 v=[527.000218,31.58837,0,2.5,-1.068763]
+  v0 Warning code=100 handle=63F POINT is not a primitive this version flattens
+  v0 Warning code=100 handle=640 POINT is not a primitive this version flattens
+  v0 Warning code=100 handle=641 POINT is not a primitive this version flattens
+  v0 Warning code=100 handle=642 POINT is not a primitive this version flattens
+  v0 Warning code=100 handle=643 POINT is not a primitive this version flattens
+  v0 Line handle=517 flags=0 v=[330.289059,2.941179,0,364.487264,37.139384,0]
+  v0 Line handle=518 flags=0 v=[381.586367,8.64088,0,415.784572,42.839085,0]
+  v0 Line handle=519 flags=0 v=[438.583375,14.340581,0,444.283076,37.139384,0]
+  v0 Line handle=51A flags=0 v=[438.583375,14.340581,0,455.682478,8.64088,0]
+  v0 Line handle=51B flags=0 v=[495.580383,14.340581,0,501.280084,37.139384,0]
+  v0 Line handle=51C flags=0 v=[495.580383,14.340581,0,512.679486,8.64088,0]
+  v0 Circle handle=51D flags=0 v=[569.676494,25.739983,0,11.399402,0,0]
+  v0 Circle handle=51E flags=0 v=[626.673502,25.739983,0,22.798803,0,0]
+  v0 Line handle=666 flags=1 v=[588.432922,44.496411,0,579.504855,35.568344,0]
+  v0 Text handle=667 flags=1 v=[583.348482,42.420551,0,2.5,0.785398]
+  v0 Line handle=668 flags=1 v=[569.676494,25.739983,0,577.737088,33.800577,0]
+  v0 Polygon handle=669 flags=1 v=[0,0,1,579.210227,35.862972,0]
+  v0 Warning code=100 handle=66A POINT is not a primitive this version flattens
+  v0 Warning code=100 handle=66B POINT is not a primitive this version flattens
+  v0 Line handle=64A flags=1 v=[621.442431,25.739983,0,646.972306,25.739983,0]
+  v0 Text handle=64B flags=1 v=[626.673502,27.908298,0,2.5,0]
+  v0 Polygon handle=64C flags=1 v=[0,0,1,646.972306,26.156649,0]
+  v0 Warning code=100 handle=64D POINT is not a primitive this version flattens
+  v0 Warning code=100 handle=64E POINT is not a primitive this version flattens
+  v0 Line handle=64F flags=1 v=[661.496707,8.64088,0,690.769613,8.64088,0]
+  v0 Line handle=650 flags=1 v=[690.769613,8.64088,0,695.769613,14.340581,0]
+  v0 Line handle=651 flags=1 v=[695.769613,14.340581,0,711.542976,14.340581,0]
+  v0 Text handle=652 flags=1 v=[706.468794,16.467969,0,2.5,0]
+  v0 Warning code=100 handle=653 POINT is not a primitive this version flattens
+  v0 Warning code=100 handle=654 POINT is not a primitive this version flattens
+  v0 Warning code=100 handle=655 POINT is not a primitive this version flattens
+  v0 Line handle=656 flags=1 v=[666.571408,3.566179,0,666.571408,32.839085,0]
+  v0 Line handle=657 flags=1 v=[666.571408,32.839085,0,677.97081,37.839085,0]
+  v0 Line handle=658 flags=1 v=[677.97081,37.839085,0,677.97081,53.846077,0]
+  v0 Text handle=659 flags=1 v=[675.843422,48.655081,0,2.5,1.570796]
+  v0 Warning code=100 handle=65A POINT is not a primitive this version flattens
+  v0 Warning code=100 handle=65B POINT is not a primitive this version flattens
+  v0 Warning code=100 handle=65C POINT is not a primitive this version flattens
+  v0 Line handle=65D flags=1 v=[381.144425,9.082822,0,374.472452,15.754795,0]
+  v0 Line handle=65E flags=1 v=[415.34263,43.281027,0,408.670657,49.953,0]
+  v0 Line handle=65F flags=1 v=[374.472452,12.926368,0,411.499085,49.953,0]
+  v0 Text handle=662 flags=1 v=[390.757369,33.668083,0,2.5,0.785398]
+  v0 Warning code=100 handle=663 POINT is not a primitive this version flattens
+  v0 Warning code=100 handle=664 POINT is not a primitive this version flattens
+  v0 Warning code=100 handle=665 POINT is not a primitive this version flattens
+  v0 Polygon handle=571 flags=1 v=[0,0,1,774.865724,21.994465,0]
+  v0 Text handle=572 flags=1 v=[826.163031,44.793268,0,4,0]
+  v0 Text handle=573 flags=1 v=[791.964826,37.872203,0,4,0]
+  v0 Text handle=574 flags=1 v=[826.163031,37.872203,0,4,0]
+  v0 Text handle=575 flags=1 v=[860.361236,37.872203,0,4,0]
+  v0 Text handle=576 flags=1 v=[826.163031,15.582302,0,4,0]
+  v0 Text handle=577 flags=1 v=[791.964826,9.13594,0,4,0]
+  v0 Text handle=578 flags=1 v=[826.163031,9.13594,0,4,0]
+  v0 Text handle=579 flags=1 v=[860.361236,9.13594,0,4,0]
+  v0 Line handle=57A flags=1 v=[774.865724,48.538786,0,877.460338,48.538786,0]
+  v0 Line handle=57B flags=1 v=[774.865724,41.047751,0,877.460338,41.047751,0]
+  v0 Line handle=57C flags=1 v=[774.865724,34.696655,0,877.460338,34.696655,0]
+  v0 Line handle=57D flags=1 v=[774.865724,28.34556,0,877.460338,28.34556,0]
+  v0 Line handle=57E flags=1 v=[774.865724,21.994465,0,877.460338,21.994465,0]
+  v0 Line handle=57F flags=1 v=[774.865724,9.170138,0,809.063929,9.170138,0]
+  v0 Line handle=580 flags=1 v=[809.063929,9.170138,0,877.460338,9.170138,0]
+  v0 Line handle=581 flags=1 v=[774.865724,2.819043,0,877.460338,2.819043,0]
+  v0 Line handle=582 flags=1 v=[774.865724,48.538786,0,774.865724,21.994465,0]
+  v0 Line handle=583 flags=1 v=[774.865724,21.994465,0,774.865724,9.170138,0]
+  v0 Line handle=584 flags=1 v=[774.865724,9.170138,0,774.865724,2.819043,0]
+  v0 Line handle=585 flags=1 v=[809.063929,41.047751,0,809.063929,21.994465,0]
+  v0 Line handle=586 flags=1 v=[809.063929,9.170138,0,809.063929,2.819043,0]
+  v0 Line handle=587 flags=1 v=[843.262134,41.047751,0,843.262134,21.994465,0]
+  v0 Line handle=588 flags=1 v=[843.262134,9.170138,0,843.262134,2.819043,0]
+  v0 Line handle=589 flags=1 v=[877.460338,48.538786,0,877.460338,21.994465,0]
+  v0 Line handle=58A flags=1 v=[877.460338,21.994465,0,877.460338,9.170138,0]
+  v0 Line handle=58B flags=1 v=[877.460338,9.170138,0,877.460338,2.819043,0]
+  v0 Line handle=58C flags=1 v=[774.865724,48.538786,0,774.865724,48.538786,0]
+  v0 Line handle=694 flags=0 v=[3.592534,3.275013,0,6.863547,3.275013,0]
+  v0 Line handle=695 flags=0 v=[3.592534,4.095481,0,6.863547,4.095481,0]
+  v0 Line handle=696 flags=0 v=[3.592534,5.160479,0,6.863547,5.160479,0]
+  v0 Line handle=697 flags=0 v=[3.592534,6.215892,0,6.863547,6.215892,0]
+  v0 Line handle=698 flags=0 v=[3.592534,-7.795317,0,6.863547,-7.795317,0]
+  v0 Line handle=699 flags=0 v=[3.592534,-6.974849,0,6.863547,-6.974849,0]
+  v0 Line handle=69A flags=0 v=[3.592534,-5.997546,0,6.863547,-5.997546,0]
+  v0 Line handle=69B flags=0 v=[3.592534,-5.177078,0,6.863547,-5.177078,0]
+  v0 Line handle=69C flags=0 v=[3.592534,-4.11208,0,6.863547,-4.11208,0]
+  v0 Line handle=69D flags=0 v=[3.592534,-3.291612,0,6.863547,-3.291612,0]
+  v0 Line handle=69F flags=0 v=[3.592534,-14.625529,0,6.863547,-14.625529,0]
+  v0 Line handle=6A0 flags=0 v=[3.592534,-13.805061,0,6.863547,-13.805061,0]
+  v0 Line handle=6A1 flags=0 v=[3.592534,-12.827758,0,6.863547,-12.827758,0]
+  v0 Line handle=6A2 flags=0 v=[3.592534,-12.00729,0,6.863547,-12.00729,0]
+  v0 Line handle=6A3 flags=0 v=[3.592534,-10.942292,0,6.863547,-10.942292,0]
+  v0 Line handle=6A4 flags=0 v=[3.592534,-10.121824,0,6.863547,-10.121824,0]
+  v0 Text handle=705 flags=0 v=[920.679627,16.352854,0,1.816868,0]
+  v0 Line handle=6F5 flags=1 v=[906.144679,1.817906,0,935.214574,30.887802,0]
+  v0 Line handle=6F6 flags=1 v=[906.144679,30.887802,0,935.214574,1.817906,0]
+  v0 Circle handle=6F7 flags=1 v=[920.679627,16.352854,0,10.901211,0,0]
+  v0 Text handle=6F8 flags=1 v=[920.679627,16.352854,0,1.816868,0]
+  v0 Text handle=756 flags=0 v=[147.589773,32.348189,0,1,0]
+  v0 Text handle=757 flags=0 v=[147.589773,39.818954,0,1,0]
+  v0 Text handle=75C flags=0 v=[147.589773,46.771944,0,1,0]
+  v0 Text handle=75D flags=0 v=[147.589773,54.242709,0,1,0]
+  v0 Text handle=779 flags=0 v=[183.588928,-1.386376,0,1,0]
+  v0 Polyline handle=782 flags=1 v=[0,0,1,963.947711,9.430154,0]
+  v0 Text handle=796 flags=1 v=[954.700244,16.277818,0,0.5,0]
+  v0 Text handle=797 flags=1 v=[959.720662,20.543441,0,0.5,0]
+  v0 Text handle=798 flags=1 v=[954.450345,11.855903,0,0.5,0]
+  v0 Text handle=799 flags=1 v=[957.433728,8.87491,0,0.5,0]
+  v0 Text handle=79D flags=0 v=[977.281484,27.03016,0,1.720654,0]
+  v0 Text handle=79F flags=0 v=[994.558291,41.709484,0,1.720654,0]
+  v0 Text handle=7A0 flags=0 v=[986.688245,1.554466,0,1.720654,0]
+  v0 Polyline handle=782 flags=1 v=[0,0,1,1009.104872,3.46523,0]
+  v0 Text handle=796 flags=1 v=[977.281484,27.03016,0,1.720654,0]
+  v0 Text handle=797 flags=1 v=[994.558291,41.709484,0,1.720654,0]
+  v0 Text handle=798 flags=1 v=[976.421501,11.812983,0,1.720654,0]
+  v0 Text handle=799 flags=1 v=[986.688245,1.554466,0,1.720654,0]
+  v0 Warning code=100 handle=7B8 MULTILEADER is not a primitive this version flattens
+  v0 Warning code=100 handle=822 TOLERANCE is not a primitive this version flattens
+  v0 Warning code=100 handle=823 TOLERANCE is not a primitive this version flattens
+  v0 Warning code=100 handle=824 TOLERANCE is not a primitive this version flattens
+  v0 Warning code=109 handle=889 SHAPE draws a glyph out of an external SHX file and carries only the placement and the name, and this decoder opens no path a drawing names, so the outline is not in this file and is not fetched
+  v0 Warning code=109 handle=8C6 IMAGE shows an external raster the drawing only names, and this decoder opens no path a drawing names, so what it displays is not in this file
+  v0 Text handle=915 flags=0 v=[21.23208,-70.79326,0,1,0]
+  v0 Text handle=916 flags=0 v=[29.871992,-67.050685,0,1,0]
+  v0 Text handle=917 flags=0 v=[35.389384,-71.999082,0,1,0]
+  v0 Text handle=918 flags=0 v=[43.114061,-67.789053,0,1,0]
+  v0 Text handle=919 flags=0 v=[51.735014,-72.544611,0,1,0]
+  v0 Text handle=91A flags=0 v=[58.417607,-68.473283,0,1,0]
+  v0 Text handle=91B flags=0 v=[66.004472,-72.707045,0,1,0]
+  v0 Text handle=91C flags=0 v=[77.360318,-68.992299,0,1,0]
+  v0 Text handle=91D flags=0 v=[83.289476,-73.409835,0,1,0]
+  v0 Text handle=91E flags=0 v=[92.534944,-68.992299,0,1,0]
+  v0 Text handle=91F flags=0 v=[101.478928,-74.614616,0,1,0]
+  v0 Text handle=920 flags=0 v=[112.453428,-68.992299,0,1,0]
+  v0 Text handle=921 flags=0 v=[118.675155,-75.214026,0,1,0]
+  v0 Polyline handle=923 flags=0 v=[0,0,1,13.653829,-55.544191,0]
+  v0 Text handle=924 flags=0 v=[14.361669,-53.455675,0,1,0]
+  v0 Polyline handle=993 flags=0 v=[0,0,1,13.653829,-113.085058,0]
+  v0 Line handle=99E flags=0 v=[18.961305,-124.774938,0,23.961305,-119.774938,0]
+  v0 Circle handle=99F flags=0 v=[30.203572,-119.966866,0,2.382842,0,0]
+  v0 Text handle=9A0 flags=0 v=[14.361669,-110.996542,0,1,0]
+  v0 Line handle=9CD flags=0 v=[35.99987,-123.039027,0,40.99987,-118.039027,0]
+  v0 Line handle=9D4 flags=1 v=[35.955676,-122.994833,0,35.027558,-122.066716,0]
+  v0 Line handle=9D5 flags=1 v=[40.955676,-117.994833,0,40.027558,-117.066716,0]
+  v0 Line handle=9D6 flags=1 v=[35.282117,-122.066716,0,37.472934,-119.875898,0]
+  v0 Line handle=9D7 flags=1 v=[40.027558,-117.321274,0,37.83674,-119.512092,0]
+  v0 Polygon handle=9D8 flags=1 v=[0,0,1,35.260903,-122.045502,0]
+  v0 Polygon handle=9D9 flags=1 v=[0,0,1,40.006345,-117.300061,0]
+  v0 Text handle=9DA flags=1 v=[37.654837,-119.693995,0,0.18,0]
+  v0 Warning code=100 handle=9DB POINT is not a primitive this version flattens
+  v0 Warning code=100 handle=9DC POINT is not a primitive this version flattens
+  v0 Warning code=100 handle=9DD POINT is not a primitive this version flattens
+  v0 Text handle=A37 flags=1 v=[24.640582,-140.930996,0,0.25,0]
+  v0 Text handle=A38 flags=1 v=[19.640582,-141.461039,0,0.18,0]
+  v0 Text handle=A39 flags=1 v=[22.140582,-141.461039,0,0.18,0]
+  v0 Text handle=A3A flags=1 v=[24.640582,-141.461039,0,0.18,0]
+  v0 Text handle=A3B flags=1 v=[19.640582,-141.824416,0,0.18,0]
+  v0 Text handle=A3C flags=1 v=[22.140582,-141.824416,0,0.18,0]
+  v0 Text handle=A3D flags=1 v=[24.640582,-141.824416,0,0.18,0]
+  v0 Text handle=A3E flags=1 v=[27.140582,-141.824416,0,0.18,0]
+  v0 Text handle=A3F flags=1 v=[29.640582,-141.824416,0,0.18,0]
+  v0 Text handle=A40 flags=1 v=[19.640582,-142.428959,0,0.18,0]
+  v0 Text handle=A41 flags=1 v=[22.140582,-142.428959,0,0.18,0]
+  v0 Circle handle=A0F flags=1 v=[26.193958,-141.461039,0,0.243377,0,0]
+  v0 Text handle=E5C flags=1 v=[29.784088,-141.217663,0,0.18,0]
+  v0 Circle handle=A0F flags=1 v=[28.693958,-141.461039,0,0.243377,0,0]
+  v0 Circle handle=A0F flags=1 v=[29.360711,-141.461039,0,0.243377,0,0]
+  v0 Line handle=A46 flags=1 v=[18.390582,-140.70433,0,30.890582,-140.70433,0]
+  v0 Line handle=A47 flags=1 v=[18.390582,-141.157663,0,30.890582,-141.157663,0]
+  v0 Line handle=A48 flags=1 v=[18.390582,-141.764416,0,30.890582,-141.764416,0]
+  v0 Line handle=A49 flags=1 v=[18.390582,-142.368959,0,30.890582,-142.368959,0]
+  v0 Line handle=A4A flags=1 v=[18.390582,-142.973502,0,30.890582,-142.973502,0]
+  v0 Line handle=A4B flags=1 v=[18.390582,-140.70433,0,18.390582,-142.973502,0]
+  v0 Line handle=A4C flags=1 v=[20.890582,-141.157663,0,20.890582,-142.973502,0]
+  v0 Line handle=A4D flags=1 v=[23.390582,-141.157663,0,23.390582,-142.973502,0]
+  v0 Line handle=A4E flags=1 v=[25.890582,-141.157663,0,25.890582,-142.973502,0]
+  v0 Line handle=A4F flags=1 v=[28.390582,-141.157663,0,28.390582,-142.973502,0]
+  v0 Line handle=A50 flags=1 v=[30.890582,-140.70433,0,30.890582,-142.973502,0]
+  v0 Line handle=A51 flags=1 v=[18.390582,-140.70433,0,18.390582,-140.70433,0]
+  v0 Polyline handle=A54 flags=0 v=[0,0,1,13.653829,-137.480597,0]
+  v0 Text handle=A55 flags=0 v=[14.361669,-135.392081,0,1,0]
+  v0 Polyline handle=A7A flags=0 v=[0,0,1,13.653829,-155.952248,0]
+  v0 Text handle=A7B flags=0 v=[14.361669,-153.863732,0,1,0]
+  v0 Circle handle=A94 flags=1 v=[19.024708,-165.549631,0,0.9999,0,0]
+  v0 Circle handle=A99 flags=1 v=[29.736907,-165.369992,0,7.3499,0,0]
+  v0 Warning code=100 handle=B1A MULTILEADER is not a primitive this version flattens
+  v0 Warning code=100 handle=B1B MULTILEADER is not a primitive this version flattens
+  v0 Warning code=100 handle=B1C MULTILEADER is not a primitive this version flattens
+  v0 Warning code=100 handle=B1D MULTILEADER is not a primitive this version flattens
+  v0 Warning code=100 handle=B1E MULTILEADER is not a primitive this version flattens
+  v0 Warning code=100 handle=B1F MULTILEADER is not a primitive this version flattens
+  v0 Warning code=100 handle=B20 MULTILEADER is not a primitive this version flattens
+  v0 Warning code=100 handle=B21 MULTILEADER is not a primitive this version flattens
+  v0 Warning code=100 handle=B22 MULTILEADER is not a primitive this version flattens
+  v0 Warning code=100 handle=B23 MULTILEADER is not a primitive this version flattens
+  v0 Warning code=100 handle=B24 MULTILEADER is not a primitive this version flattens
+  v0 Warning code=100 handle=B25 MULTILEADER is not a primitive this version flattens
+  v0 Warning code=100 handle=B26 MULTILEADER is not a primitive this version flattens
+  v0 Warning code=100 handle=B27 MULTILEADER is not a primitive this version flattens
+  v0 Polyline handle=B28 flags=0 v=[0,0,1,52.691496,-312.361608,0]
+  v0 Text handle=B29 flags=0 v=[53.399335,-310.273092,0,1,0]
+  v0 Polygon handle=BBB flags=0 v=[0,0,1,18.382606,-191.58379,0]
+  v0 Polyline handle=BBF flags=0 v=[0,0,1,14.847072,-191.58379,0]
+  v0 Polygon handle=BC0 flags=0 v=[0,0,1,19.847072,-191.58379,0]
+  v0 Polyline handle=BC1 flags=0 v=[0,0,1,19.847072,-191.58379,0]
+  v0 Polygon handle=BC2 flags=0 v=[0,0,1,28.382606,-191.58379,0]
+  v0 Polyline handle=BC3 flags=0 v=[0,0,1,24.847072,-191.58379,0]
+  v0 Polygon handle=BC4 flags=0 v=[0,0,1,33.382606,-191.58379,0]
+  v0 Polyline handle=BC5 flags=0 v=[0,0,1,29.847072,-191.58379,0]
+  v0 Polyline handle=BC6 flags=0 v=[0,0,1,10.160533,-185.190206,0]
+  v0 Text handle=BC7 flags=0 v=[10.868373,-183.10169,0,1,0]
+  v0 Line handle=C9A flags=1 v=[313.773325,-18.630711,0,313.773325,-11.544072,0]
+  v0 Line handle=C9B flags=1 v=[348.896656,-18.630711,0,348.896656,-11.544072,0]
+  v0 Line handle=C9C flags=1 v=[313.953325,-11.724072,0,330.801498,-11.724072,0]
+  v0 Line handle=C9D flags=1 v=[348.716656,-11.724072,0,331.868483,-11.724072,0]
+  v0 Text handle=CA0 flags=1 v=[331.334991,-11.724072,0,0.18,0]
+  v0 Warning code=100 handle=CA1 POINT is not a primitive this version flattens
+  v0 Warning code=100 handle=CA2 POINT is not a primitive this version flattens
+  v0 Warning code=100 handle=CA3 POINT is not a primitive this version flattens
+  v0 Line handle=CD6 flags=1 v=[313.904306,-26.709111,0,313.904306,-21.434004,0]
+  v0 Line handle=CD7 flags=1 v=[348.849638,-26.709111,0,348.849638,-21.434004,0]
+  v0 Line handle=CD8 flags=1 v=[314.084306,-21.614004,0,330.843479,-21.614004,0]
+  v0 Line handle=CD9 flags=1 v=[348.669638,-21.614004,0,331.910464,-21.614004,0]
+  v0 Polygon handle=CDA flags=1 v=[0,0,1,314.084306,-21.584004,0]
+  v0 Polygon handle=CDB flags=1 v=[0,0,1,348.669638,-21.584004,0]
+  v0 Text handle=CDC flags=1 v=[331.376972,-21.614004,0,0.18,0]
+  v0 Warning code=100 handle=CDD POINT is not a primitive this version flattens
+  v0 Warning code=100 handle=CDE POINT is not a primitive this version flattens
+  v0 Warning code=100 handle=CDF POINT is not a primitive this version flattens
+  v0 Warning code=109 handle=D07 PDFUNDERLAY shows an external PDF the drawing only names, and this decoder opens no path a drawing names, so what it displays is not in this file
+  v0 Circle handle=A0F flags=1 v=[49.259343,-35.382599,0,1.606631,0,0]
+  v0 Warning code=109 handle=D65 3DSOLID keeps its geometry as an embedded ACIS stream, which is a boundary representation rather than a tessellation and which nothing on this boundary evaluates, so there is no outline here to flatten
+  v0 Warning code=109 handle=D69 REGION keeps its geometry as an embedded ACIS stream, the same as 3DSOLID, so there is no outline here to flatten and producing one means evaluating a proprietary boundary representation
+  v0 Warning code=109 handle=D6A 3DSOLID keeps its geometry as an embedded ACIS stream, which is a boundary representation rather than a tessellation and which nothing on this boundary evaluates, so there is no outline here to flatten
+  v0 Polyline handle=D70 flags=0 v=[0,0,1,10.160533,-211.015865,0]
+  v0 Text handle=D71 flags=0 v=[10.868373,-208.927349,0,1,0]
+  v0 Polyline handle=DFC flags=0 v=[0,0,1,10.160533,-236.841524,0]
+  v0 Text handle=DFD flags=0 v=[10.868373,-234.753008,0,1,0]
+  v0 Circle handle=E00 flags=0 v=[15.269596,-241.455888,0,2.586142,0,0]
+  v0 Circle handle=E01 flags=0 v=[17.625983,-248.517347,0,4.143953,0,0]
+  v0 Circle handle=E02 flags=0 v=[26.199179,-241.956699,0,4.742908,0,0]
+  v0 Circle handle=E03 flags=0 v=[28.104337,-250.170028,0,2.989063,0,0]
+  v1 Warning code=100 handle=240 VIEWPORT is not a primitive this version flattens
+  v1 Warning code=100 handle=245 VIEWPORT is not a primitive this version flattens
+  v2 Warning code=100 handle=252 VIEWPORT is not a primitive this version flattens
+  v2 Warning code=100 handle=256 VIEWPORT is not a primitive this version flattens
+  v3 Warning code=100 handle=267 VIEWPORT is not a primitive this version flattens
+  v3 Warning code=100 handle=26B VIEWPORT is not a primitive this version flattens
+reader_notifications 31 per view
+
+== rule /work/in/sample_AC1032.dwg
+file sample_AC1032.dwg
+rule_visible_leaves 146
+rule_hidden_entities 0
+rule_external 0
+shim_model_space_geometry_records 134
+shim_emitted_but_hidden_by_rule 0
+shim_visible_by_rule_but_not_emitted 12
+  VISIBLE-BUT-NOT-EMITTED handle=4A6 rule=2 shim=0 (LWPOLYLINE on 0 in _ArchTick)
+  VISIBLE-BUT-NOT-EMITTED handle=C81 rule=2 shim=0 (LINE on 0 in _BoxBlank)
+  VISIBLE-BUT-NOT-EMITTED handle=C82 rule=2 shim=0 (LINE on 0 in _BoxBlank)
+  VISIBLE-BUT-NOT-EMITTED handle=C83 rule=2 shim=0 (LINE on 0 in _BoxBlank)
+  VISIBLE-BUT-NOT-EMITTED handle=C84 rule=2 shim=0 (LINE on 0 in _BoxBlank)
+  VISIBLE-BUT-NOT-EMITTED handle=C85 rule=2 shim=0 (LINE on 0 in _BoxBlank)
+  shim warning code=100 handle=28E POINT is not a primitive this version flattens
+  shim warning code=100 handle=298 POINT is not a primitive this version flattens
+  shim warning code=100 handle=299 POINT is not a primitive this version flattens
+  shim warning code=100 handle=29A POINT is not a primitive this version flattens
+  shim warning code=100 handle=29B POINT is not a primitive this version flattens
+  shim warning code=100 handle=29C POINT is not a primitive this version flattens
+  shim warning code=109 handle=389 XLINE runs both ways from its base point forever and every record wire version 2 defines is bounded, so it is refused rather than clipped to the drawing's extents and passed off as a line
+  shim warning code=109 handle=38A RAY runs from its base point in one direction forever and every record wire version 2 defines is bounded, so it is refused rather than clipped to the drawing's extents and passed off as a line
+  shim warning code=100 handle=422 POLYFACE_MESH is not a primitive this version flattens
+  shim warning code=112 handle=44D WIPEOUT is a mask, and the Polygon record beside this one under the same handle is the boundary it masks rather than a face: it hides whatever the stream drew before it, inside that boundary. Wire version 2's record 9 has no field to say that, so this code does, and a consumer that does not know it fills the boundary like any other polygon, which still covers what is underneath
+  shim warning code=114 handle=512 LEADER asks for an arrowhead at its first vertex and this version draws the vertex run only; the arrowhead is a glyph the dimension style names and it is not emitted
+  shim warning code=100 handle=62C POINT is not a primitive this version flattens
+  shim warning code=100 handle=62D POINT is not a primitive this version flattens
+  shim warning code=100 handle=62E POINT is not a primitive this version flattens
+  shim warning code=100 handle=635 POINT is not a primitive this version flattens
+  shim warning code=100 handle=636 POINT is not a primitive this version flattens
+  shim warning code=100 handle=637 POINT is not a primitive this version flattens
+  shim warning code=100 handle=638 POINT is not a primitive this version flattens
+  shim warning code=100 handle=63F POINT is not a primitive this version flattens
+  shim warning code=100 handle=640 POINT is not a primitive this version flattens
+  shim warning code=100 handle=641 POINT is not a primitive this version flattens
+  shim warning code=100 handle=642 POINT is not a primitive this version flattens
+  shim warning code=100 handle=643 POINT is not a primitive this version flattens
+  shim warning code=100 handle=66A POINT is not a primitive this version flattens
+  shim warning code=100 handle=66B POINT is not a primitive this version flattens
+  shim warning code=100 handle=64D POINT is not a primitive this version flattens
+  shim warning code=100 handle=64E POINT is not a primitive this version flattens
+  shim warning code=100 handle=653 POINT is not a primitive this version flattens
+  shim warning code=100 handle=654 POINT is not a primitive this version flattens
+  shim warning code=100 handle=655 POINT is not a primitive this version flattens
+  shim warning code=100 handle=65A POINT is not a primitive this version flattens
+  shim warning code=100 handle=65B POINT is not a primitive this version flattens
+  shim warning code=100 handle=65C POINT is not a primitive this version flattens
+  shim warning code=100 handle=663 POINT is not a primitive this version flattens
+  shim warning code=100 handle=664 POINT is not a primitive this version flattens
+  shim warning code=100 handle=665 POINT is not a primitive this version flattens
+  shim warning code=100 handle=7B8 MULTILEADER is not a primitive this version flattens
+  shim warning code=100 handle=822 TOLERANCE is not a primitive this version flattens
+  shim warning code=100 handle=823 TOLERANCE is not a primitive this version flattens
+  shim warning code=100 handle=824 TOLERANCE is not a primitive this version flattens
+  shim warning code=109 handle=889 SHAPE draws a glyph out of an external SHX file and carries only the placement and the name, and this decoder opens no path a drawing names, so the outline is not in this file and is not fetched
+  shim warning code=109 handle=8C6 IMAGE shows an external raster the drawing only names, and this decoder opens no path a drawing names, so what it displays is not in this file
+  shim warning code=100 handle=9DB POINT is not a primitive this version flattens
+  shim warning code=100 handle=9DC POINT is not a primitive this version flattens
+  shim warning code=100 handle=9DD POINT is not a primitive this version flattens
+  shim warning code=100 handle=B1A MULTILEADER is not a primitive this version flattens
+  shim warning code=100 handle=B1B MULTILEADER is not a primitive this version flattens
+  shim warning code=100 handle=B1C MULTILEADER is not a primitive this version flattens
+  shim warning code=100 handle=B1D MULTILEADER is not a primitive this version flattens
+  shim warning code=100 handle=B1E MULTILEADER is not a primitive this version flattens
+  shim warning code=100 handle=B1F MULTILEADER is not a primitive this version flattens
+  shim warning code=100 handle=B20 MULTILEADER is not a primitive this version flattens
+  shim warning code=100 handle=B21 MULTILEADER is not a primitive this version flattens
+  shim warning code=100 handle=B22 MULTILEADER is not a primitive this version flattens
+  shim warning code=100 handle=B23 MULTILEADER is not a primitive this version flattens
+  shim warning code=100 handle=B24 MULTILEADER is not a primitive this version flattens
+  shim warning code=100 handle=B25 MULTILEADER is not a primitive this version flattens
+  shim warning code=100 handle=B26 MULTILEADER is not a primitive this version flattens
+  shim warning code=100 handle=B27 MULTILEADER is not a primitive this version flattens
+  shim warning code=100 handle=CA1 POINT is not a primitive this version flattens
+  shim warning code=100 handle=CA2 POINT is not a primitive this version flattens
+  shim warning code=100 handle=CA3 POINT is not a primitive this version flattens
+  shim warning code=100 handle=CDD POINT is not a primitive this version flattens
+  shim warning code=100 handle=CDE POINT is not a primitive this version flattens
+  shim warning code=100 handle=CDF POINT is not a primitive this version flattens
+  shim warning code=109 handle=D07 PDFUNDERLAY shows an external PDF the drawing only names, and this decoder opens no path a drawing names, so what it displays is not in this file
+  shim warning code=109 handle=D65 3DSOLID keeps its geometry as an embedded ACIS stream, which is a boundary representation rather than a tessellation and which nothing on this boundary evaluates, so there is no outline here to flatten
+  shim warning code=109 handle=D69 REGION keeps its geometry as an embedded ACIS stream, the same as 3DSOLID, so there is no outline here to flatten and producing one means evaluating a proprietary boundary representation
+  shim warning code=109 handle=D6A 3DSOLID keeps its geometry as an embedded ACIS stream, which is a boundary representation rather than a tessellation and which nothing on this boundary evaluates, so there is no outline here to flatten
+
+== describe /work/in/BLOCKVISIBILITYPARAMETER.dwg
+file BLOCKVISIBILITYPARAMETER.dwg version AC1032
+layers 1
+  layer name=0 on=True frozen=False frozenNewVp=False locked=False plot=True xrefDep=False
+layouts 3
+  layout name=Model paper=False block=*Model_Space entities=4 ext=(0,0,0)..(0,0,0)
+  layout name=Layout1 paper=True block=*Paper_Space entities=0 ext=(0,0,0)..(0,0,0)
+  layout name=Layout2 paper=True block=*Paper_Space0 entities=0 ext=(0,0,0)..(0,0,0)
+blocks 16
+  block name=*Model_Space flags=None anonymous=False dynamic=False source=- xref=False xrefPath= entities=4 [INSERT@0x4]
+  block name=*Paper_Space flags=None anonymous=False dynamic=False source=- xref=False xrefPath= entities=0 []
+  block name=*Paper_Space0 flags=None anonymous=False dynamic=False source=- xref=False xrefPath= entities=0 []
+  block name=*U11 flags=Anonymous anonymous=True dynamic=False source=block_visibility_parameter xref=False xrefPath= entities=5 [CIRCLE@0x1 LINE@0x2 LWPOLYLINE@0x2]
+  block name=*U12 flags=Anonymous anonymous=True dynamic=False source=block_visibility_parameter xref=False xrefPath= entities=5 [CIRCLE@0x1 LINE@0x2 LWPOLYLINE@0x2]
+  block name=*U13 flags=Anonymous anonymous=True dynamic=False source=block_visibility_parameter xref=False xrefPath= entities=5 [CIRCLE@0x1 LINE@0x2 LWPOLYLINE@0x2]
+  block name=*U14 flags=Anonymous anonymous=True dynamic=False source=block_visibility_parameter xref=False xrefPath= entities=5 [CIRCLE@0x1 LINE@0x2 LWPOLYLINE@0x2]
+  block name=*U16 flags=Anonymous anonymous=True dynamic=False source=block_visibility_parameter xref=False xrefPath= entities=5 [CIRCLE@0x1 LINE@0x2 LWPOLYLINE@0x2]
+  block name=*U17 flags=Anonymous anonymous=True dynamic=False source=block_visibility_parameter xref=False xrefPath= entities=5 [CIRCLE@0x1 LINE@0x2 LWPOLYLINE@0x2]
+  block name=*U18 flags=Anonymous anonymous=True dynamic=False source=block_visibility_parameter xref=False xrefPath= entities=5 [CIRCLE@0x1 LINE@0x2 LWPOLYLINE@0x2]
+  block name=*U19 flags=Anonymous anonymous=True dynamic=False source=block_visibility_parameter xref=False xrefPath= entities=5 [CIRCLE@0x1 LINE@0x2 LWPOLYLINE@0x2]
+  block name=*U6 flags=Anonymous anonymous=True dynamic=False source=block_visibility_parameter xref=False xrefPath= entities=4 [CIRCLE@0x1 LINE@0x2 LWPOLYLINE@0x1]
+  block name=*U7 flags=Anonymous anonymous=True dynamic=False source=block_visibility_parameter xref=False xrefPath= entities=4 [CIRCLE@0x1 LINE@0x2 LWPOLYLINE@0x1]
+  block name=*U8 flags=Anonymous anonymous=True dynamic=False source=block_visibility_parameter xref=False xrefPath= entities=4 [CIRCLE@0x1 LINE@0x2 LWPOLYLINE@0x1]
+  block name=*U9 flags=Anonymous anonymous=True dynamic=False source=block_visibility_parameter xref=False xrefPath= entities=4 [CIRCLE@0x1 LINE@0x2 LWPOLYLINE@0x1]
+  block name=block_visibility_parameter flags=None anonymous=False dynamic=True source=- xref=False xrefPath= entities=5 [CIRCLE@0x1 LINE@0x2 LWPOLYLINE@0x2]
+inserts
+  insert owner=*Model_Space handle=252 layer=0 block=*U16 at=(0,0,0) scale=(0.03937,0.03937,0.03937) rot=0 grid=1x1 attribs=0
+  insert owner=*Model_Space handle=268 layer=0 block=*U18 at=(1,0,0) scale=(0.03937,0.03937,0.03937) rot=0 grid=1x1 attribs=0
+  insert owner=*Model_Space handle=284 layer=0 block=*U19 at=(0.5,0,0) scale=(0.03937,0.03937,0.03937) rot=0 grid=1x1 attribs=0
+  insert owner=*Model_Space handle=28C layer=0 block=*U17 at=(1.5,0,0) scale=(0.03937,0.03937,0.03937) rot=0 grid=1x1 attribs=0
+
+== shim /work/in/BLOCKVISIBILITYPARAMETER.dwg
+view 0 name=Model kind=model items=4
+view 1 name=Layout1 kind=layout items=0
+view 2 name=Layout2 kind=layout items=0
+  v0 Circle handle=346 flags=1 v=[0.138487,0.119329,0,0.098425,0,0]
+  v0 Line handle=347 flags=1 v=[0,0,0,0.19685,0.19685,0]
+  v0 Line handle=348 flags=1 v=[0.098425,0.098425,0,0.185355,0.001262,0]
+  v0 Polyline handle=349 flags=1 v=[0,0,1,0.087441,0.164839,0]
+  v0 Polyline handle=34A flags=1 v=[0,0,1,0.012704,0.208269,0]
+  v0 Circle handle=35C flags=1 v=[1.138487,0.119329,0,0.098425,0,0]
+  v0 Line handle=35D flags=1 v=[1,0,0,1.19685,0.19685,0]
+  v0 Line handle=35E flags=1 v=[1.098425,0.098425,0,1.185355,0.001262,0]
+  v0 Polyline handle=35F flags=1 v=[0,0,1,1.087441,0.164839,0]
+  v0 Polyline handle=360 flags=1 v=[0,0,1,1.012704,0.208269,0]
+  v0 Circle handle=367 flags=1 v=[0.638487,0.119329,0,0.098425,0,0]
+  v0 Line handle=368 flags=1 v=[0.5,0,0,0.69685,0.19685,0]
+  v0 Line handle=369 flags=1 v=[0.598425,0.098425,0,0.685355,0.001262,0]
+  v0 Polyline handle=36A flags=1 v=[0,0,1,0.587441,0.164839,0]
+  v0 Polyline handle=36B flags=1 v=[0,0,1,0.512704,0.208269,0]
+  v0 Circle handle=351 flags=1 v=[1.638487,0.119329,0,0.098425,0,0]
+  v0 Line handle=352 flags=1 v=[1.5,0,0,1.69685,0.19685,0]
+  v0 Line handle=353 flags=1 v=[1.598425,0.098425,0,1.685355,0.001262,0]
+  v0 Polyline handle=354 flags=1 v=[0,0,1,1.587441,0.164839,0]
+  v0 Polyline handle=355 flags=1 v=[0,0,1,1.512704,0.208269,0]
+reader_notifications 5 per view
+
+== rule /work/in/BLOCKVISIBILITYPARAMETER.dwg
+file BLOCKVISIBILITYPARAMETER.dwg
+rule_visible_leaves 20
+rule_hidden_entities 0
+rule_external 0
+shim_model_space_geometry_records 20
+shim_emitted_but_hidden_by_rule 0
+shim_visible_by_rule_but_not_emitted 0
+
+== describe /work/in/g13_xref.dwg
+file g13_xref.dwg version AC1032
+layers 2
+  layer name=0 on=True frozen=False frozenNewVp=False locked=False plot=True xrefDep=False
+  layer name=VIPRS_G13 on=True frozen=False frozenNewVp=False locked=False plot=True xrefDep=False
+layouts 2
+  layout name=Model paper=False block=*Model_Space entities=1 ext=(25.7,19.5,0)..(231.3,175.5,0)
+  layout name=Layout1 paper=True block=*Paper_Space entities=1 ext=(25.7,19.5,0)..(231.3,175.5,0)
+    viewport handle=47 id=1 layer=0 center=(148.5,105,0) w=297 h=210 viewCenter=(0,0) viewHeight=0 viewDir=(0,0,1) twist=0 scale=0 status=0 nonRect=False off=False representsPaper=True boundary=- frozenInVp=[]
+blocks 3
+  block name=*Model_Space flags=None anonymous=False dynamic=False source=- xref=False xrefPath= entities=1 [INSERT@VIPRS_G13x1]
+  block name=*Paper_Space flags=None anonymous=False dynamic=False source=- xref=False xrefPath= entities=1 [VIEWPORT@0x1]
+  block name=VIPRS_G13_XREF flags=XRef anonymous=False dynamic=False source=- xref=True xrefPath=../not-resolved/other.dwg entities=0 []
+inserts
+  insert owner=*Model_Space handle=4C layer=VIPRS_G13 block=VIPRS_G13_XREF at=(5,5,0) scale=(1,1,1) rot=0 grid=1x1 attribs=0
+
+== shim /work/in/g13_xref.dwg
+view 0 name=Model kind=model items=1
+view 1 name=Layout1 kind=layout items=1
+  v0 Warning code=105 handle=4C external reference ../not-resolved/other.dwg is not resolved, and this decoder never resolves one
+  v1 Warning code=100 handle=47 VIEWPORT is not a primitive this version flattens
+reader_notifications 4 per view
+
+== rule /work/in/g13_xref.dwg
+file g13_xref.dwg
+rule_visible_leaves 0
+rule_hidden_entities 0
+rule_external 1
+  external INSERT 4C -> VIPRS_G13_XREF
+shim_model_space_geometry_records 0
+shim_emitted_but_hidden_by_rule 0
+shim_visible_by_rule_but_not_emitted 0
+  shim warning code=105 handle=4C external reference ../not-resolved/other.dwg is not resolved, and this decoder never resolves one
+
+== describe, layouts and viewports only (the real model-view viewport is id>1, representsPaper=False)
+-- /work/in/AecObjects.dwg
+file AecObjects.dwg version AC1032
+layouts 2
+  layout name=Model paper=False block=*Model_Space entities=1 ext=(0,0,0)..(0,0,0)
+  layout name=Work paper=True block=*Paper_Space entities=3 ext=(-0.044724,-0.001666,-0.001526)..(826.056579,554.018262,0)
+    viewport handle=1FB id=1 layer=0 center=(413.005927,277.008298,0) w=1124.541605 h=560.602343 viewCenter=(413.005927,277.008298) viewHeight=560.602343 viewDir=(0,0,1) twist=0 scale=1 status=32800 nonRect=False off=False representsPaper=True boundary=- frozenInVp=[]
+    viewport handle=BCE id=2 layer=Defpoints center=(206.5,277,0) w=413 h=554 viewCenter=(4313.351365,19391.793797) viewHeight=90862.031481 viewDir=(-1,-1,1) twist=0 scale=0.006097 status=33568 nonRect=False off=False representsPaper=False boundary=- frozenInVp=[]
+    viewport handle=1040 id=3 layer=Defpoints center=(619.5,277,0) w=413 h=554 viewCenter=(26800,20700) viewHeight=72832.621985 viewDir=(0,0,1) twist=0 scale=0.007606 status=33568 nonRect=False off=False representsPaper=False boundary=- frozenInVp=[]
+-- /work/in/sample_AC1014.dwg
+file sample_AC1014.dwg version AC1014
+layouts 4
+  layout name=Model paper=False block=*MODEL_SPACE entities=163 ext=(0,0,0)..(0,0,0)
+  layout name=Layout1 paper=True block=*PAPER_SPACE0 entities=2 ext=(1.05,0.8,0)..(9.45,7.2,0)
+    viewport handle=240 id=1 layer=0 center=(7.616174,4,0) w=24.425049 h=8.993 viewCenter=(0,0) viewHeight=0 viewDir=(0,0,1) twist=0 scale=0 status=0 nonRect=False off=False representsPaper=True boundary=- frozenInVp=[]
+    viewport handle=245 id=2 layer=0 center=(5.25,4,0) w=8.4 h=6.4 viewCenter=(0,0) viewHeight=0 viewDir=(0,0,1) twist=0 scale=0 status=0 nonRect=False off=False representsPaper=False boundary=- frozenInVp=[]
+  layout name=Layout2 paper=True block=*PAPER_SPACE1 entities=2 ext=(1.05,0.8,0)..(9.45,7.2,0)
+    viewport handle=252 id=1 layer=0 center=(7.616577,4,0) w=24.429212 h=8.994532 viewCenter=(0,0) viewHeight=0 viewDir=(0,0,1) twist=0 scale=0 status=0 nonRect=False off=False representsPaper=True boundary=- frozenInVp=[]
+    viewport handle=256 id=2 layer=0 center=(5.25,4,0) w=8.4 h=6.4 viewCenter=(0,0) viewHeight=0 viewDir=(0,0,1) twist=0 scale=0 status=0 nonRect=False off=False representsPaper=False boundary=- frozenInVp=[]
+  layout name=MyLayout paper=True block=*PAPER_SPACE entities=2 ext=(1.136,0.793333,0)..(10.223999,7.14,0)
+    viewport handle=267 id=1 layer=0 center=(7.981303,3.967192,0) w=23.757575 h=8.747244 viewCenter=(0,0) viewHeight=0 viewDir=(0,0,1) twist=0 scale=0 status=0 nonRect=False off=False representsPaper=True boundary=- frozenInVp=[]
+    viewport handle=26B id=2 layer=0 center=(5.68,3.966667,0) w=9.087999 h=6.346667 viewCenter=(0,0) viewHeight=0 viewDir=(0,0,1) twist=0 scale=0 status=0 nonRect=False off=False representsPaper=False boundary=- frozenInVp=[]
+-- /work/in/sample_AC1015.dwg
+file sample_AC1015.dwg version AC1015
+layouts 4
+  layout name=Model paper=False block=*Model_Space entities=163 ext=(0,0,0)..(0,0,0)
+  layout name=Layout1 paper=True block=*Paper_Space0 entities=2 ext=(1.05,0.8,0)..(9.45,7.2,0)
+    viewport handle=240 id=1 layer=0 center=(7.616174,4,0) w=24.425049 h=8.993 viewCenter=(7.616174,4) viewHeight=8.993 viewDir=(0,0,1) twist=0 scale=1 status=819232 nonRect=False off=False representsPaper=True boundary=- frozenInVp=[]
+    viewport handle=245 id=2 layer=0 center=(5.25,4,0) w=8.4 h=6.4 viewCenter=(6,4.5) viewHeight=9.228705 viewDir=(0,0,1) twist=0 scale=0.693488 status=819808 nonRect=False off=False representsPaper=False boundary=- frozenInVp=[]
+  layout name=Layout2 paper=True block=*Paper_Space1 entities=2 ext=(1.05,0.8,0)..(9.45,7.2,0)
+    viewport handle=252 id=1 layer=0 center=(7.616577,4,0) w=24.429212 h=8.994532 viewCenter=(7.616577,4) viewHeight=8.994532 viewDir=(0,0,1) twist=0 scale=1 status=819232 nonRect=False off=False representsPaper=True boundary=- frozenInVp=[]
+    viewport handle=256 id=2 layer=0 center=(5.25,4,0) w=8.4 h=6.4 viewCenter=(6,4.5) viewHeight=9.228705 viewDir=(0,0,1) twist=0 scale=0.693488 status=819808 nonRect=False off=False representsPaper=False boundary=- frozenInVp=[]
+  layout name=MyLayout paper=True block=*Paper_Space entities=2 ext=(1.136,0.793333,0)..(10.223999,7.14,0)
+    viewport handle=267 id=1 layer=0 center=(7.981303,3.967192,0) w=23.757575 h=8.747244 viewCenter=(7.981303,3.967192) viewHeight=8.747244 viewDir=(0,0,1) twist=0 scale=1 status=819232 nonRect=False off=False representsPaper=True boundary=- frozenInVp=[]
+    viewport handle=26B id=2 layer=0 center=(5.68,3.966667,0) w=9.087999 h=6.346667 viewCenter=(6,4.5) viewHeight=9.108871 viewDir=(0,0,1) twist=0 scale=0.696757 status=819808 nonRect=False off=False representsPaper=False boundary=- frozenInVp=[]
+-- /work/in/sample_AC1018.dwg
+file sample_AC1018.dwg version AC1018
+layouts 4
+  layout name=Model paper=False block=*Model_Space entities=163 ext=(0,0,0)..(0,0,0)
+  layout name=Layout1 paper=True block=*Paper_Space0 entities=2 ext=(1.05,0.8,0)..(9.45,7.2,0)
+    viewport handle=240 id=1 layer=0 center=(7.616174,4,0) w=24.425049 h=8.993 viewCenter=(7.616174,4) viewHeight=8.993 viewDir=(0,0,1) twist=0 scale=1 status=819232 nonRect=False off=False representsPaper=True boundary=- frozenInVp=[]
+    viewport handle=245 id=2 layer=0 center=(5.25,4,0) w=8.4 h=6.4 viewCenter=(6,4.5) viewHeight=9.228705 viewDir=(0,0,1) twist=0 scale=0.693488 status=819808 nonRect=False off=False representsPaper=False boundary=- frozenInVp=[]
+  layout name=Layout2 paper=True block=*Paper_Space1 entities=2 ext=(1.05,0.8,0)..(9.45,7.2,0)
+    viewport handle=252 id=1 layer=0 center=(7.616577,4,0) w=24.429212 h=8.994532 viewCenter=(7.616577,4) viewHeight=8.994532 viewDir=(0,0,1) twist=0 scale=1 status=819232 nonRect=False off=False representsPaper=True boundary=- frozenInVp=[]
+    viewport handle=256 id=2 layer=0 center=(5.25,4,0) w=8.4 h=6.4 viewCenter=(6,4.5) viewHeight=9.228705 viewDir=(0,0,1) twist=0 scale=0.693488 status=819808 nonRect=False off=False representsPaper=False boundary=- frozenInVp=[]
+  layout name=MyLayout paper=True block=*Paper_Space entities=2 ext=(1.136,0.793333,0)..(10.223999,7.14,0)
+    viewport handle=267 id=1 layer=0 center=(7.981303,3.967192,0) w=23.757575 h=8.747244 viewCenter=(7.981303,3.967192) viewHeight=8.747244 viewDir=(0,0,1) twist=0 scale=1 status=819232 nonRect=False off=False representsPaper=True boundary=- frozenInVp=[]
+    viewport handle=26B id=2 layer=0 center=(5.68,3.966667,0) w=9.087999 h=6.346667 viewCenter=(6,4.5) viewHeight=9.108871 viewDir=(0,0,1) twist=0 scale=0.696757 status=819808 nonRect=False off=False representsPaper=False boundary=- frozenInVp=[]
+
+== rule, every other drawing (summary lines only)
+-- /work/in/AecObjects.dwg
+rule_visible_leaves 0
+rule_hidden_entities 0
+rule_external 0
+shim_model_space_geometry_records 0
+shim_emitted_but_hidden_by_rule 0
+shim_visible_by_rule_but_not_emitted 0
+-- /work/in/BLOCKALIGNMENTPARAMETER.dwg
+rule_visible_leaves 1
+rule_hidden_entities 0
+rule_external 0
+shim_model_space_geometry_records 1
+shim_emitted_but_hidden_by_rule 0
+shim_visible_by_rule_but_not_emitted 0
+-- /work/in/BLOCKBASEPOINTPARAMETER.dwg
+rule_visible_leaves 1
+rule_hidden_entities 0
+rule_external 0
+shim_model_space_geometry_records 1
+shim_emitted_but_hidden_by_rule 0
+shim_visible_by_rule_but_not_emitted 0
+-- /work/in/BLOCKFLIPPARAMETER.dwg
+rule_visible_leaves 4
+rule_hidden_entities 0
+rule_external 0
+shim_model_space_geometry_records 4
+shim_emitted_but_hidden_by_rule 0
+shim_visible_by_rule_but_not_emitted 0
+-- /work/in/BLOCKLINEARPARAMETER.dwg
+rule_visible_leaves 2
+rule_hidden_entities 0
+rule_external 0
+shim_model_space_geometry_records 2
+shim_emitted_but_hidden_by_rule 0
+shim_visible_by_rule_but_not_emitted 0
+-- /work/in/BLOCKLOOKUPPARAMETER.dwg
+rule_visible_leaves 12
+rule_hidden_entities 0
+rule_external 0
+shim_model_space_geometry_records 12
+shim_emitted_but_hidden_by_rule 0
+shim_visible_by_rule_but_not_emitted 0
+-- /work/in/BLOCKPOINTPARAMETER.dwg
+rule_visible_leaves 9
+rule_hidden_entities 0
+rule_external 0
+shim_model_space_geometry_records 9
+shim_emitted_but_hidden_by_rule 0
+shim_visible_by_rule_but_not_emitted 0
+-- /work/in/BLOCKPOLARPARAMETER.dwg
+rule_visible_leaves 8
+rule_hidden_entities 0
+rule_external 0
+shim_model_space_geometry_records 8
+shim_emitted_but_hidden_by_rule 0
+shim_visible_by_rule_but_not_emitted 0
+-- /work/in/BLOCKROTATIONPARAMETER.dwg
+rule_visible_leaves 16
+rule_hidden_entities 0
+rule_external 0
+shim_model_space_geometry_records 16
+shim_emitted_but_hidden_by_rule 0
+shim_visible_by_rule_but_not_emitted 0
+-- /work/in/BLOCKXYPARAMETER.dwg
+rule_visible_leaves 21
+rule_hidden_entities 0
+rule_external 0
+shim_model_space_geometry_records 21
+shim_emitted_but_hidden_by_rule 0
+shim_visible_by_rule_but_not_emitted 0
+-- /work/in/empty.dwg
+rule_visible_leaves 0
+rule_hidden_entities 0
+rule_external 0
+shim_model_space_geometry_records 0
+shim_emitted_but_hidden_by_rule 0
+shim_visible_by_rule_but_not_emitted 0
+-- /work/in/export_sample.dwg
+rule_visible_leaves 16
+rule_hidden_entities 0
+rule_external 0
+shim_model_space_geometry_records 16
+shim_emitted_but_hidden_by_rule 0
+shim_visible_by_rule_but_not_emitted 0
+-- /work/in/g13_insert.dwg
+rule_visible_leaves 2
+rule_hidden_entities 0
+rule_external 0
+shim_model_space_geometry_records 2
+shim_emitted_but_hidden_by_rule 0
+shim_visible_by_rule_but_not_emitted 0
+-- /work/in/geoloc.dwg
+rule_visible_leaves 0
+rule_hidden_entities 0
+rule_external 0
+shim_model_space_geometry_records 0
+shim_emitted_but_hidden_by_rule 0
+shim_visible_by_rule_but_not_emitted 0
+-- /work/in/sample_AC1014.dwg
+rule_visible_leaves 146
+rule_hidden_entities 0
+rule_external 0
+shim_model_space_geometry_records 134
+shim_emitted_but_hidden_by_rule 0
+shim_visible_by_rule_but_not_emitted 12
+-- /work/in/sample_AC1015.dwg
+rule_visible_leaves 146
+rule_hidden_entities 0
+rule_external 0
+shim_model_space_geometry_records 134
+shim_emitted_but_hidden_by_rule 0
+shim_visible_by_rule_but_not_emitted 12
+-- /work/in/sample_AC1018.dwg
+rule_visible_leaves 146
+rule_hidden_entities 0
+rule_external 0
+shim_model_space_geometry_records 134
+shim_emitted_but_hidden_by_rule 0
+shim_visible_by_rule_but_not_emitted 12
+-- /work/in/sample_AC1021.dwg
+rule_visible_leaves 146
+rule_hidden_entities 0
+rule_external 0
+shim_model_space_geometry_records 134
+shim_emitted_but_hidden_by_rule 0
+shim_visible_by_rule_but_not_emitted 12
+-- /work/in/sample_AC1024.dwg
+rule_visible_leaves 146
+rule_hidden_entities 0
+rule_external 0
+shim_model_space_geometry_records 134
+shim_emitted_but_hidden_by_rule 0
+shim_visible_by_rule_but_not_emitted 12
+-- /work/in/sample_AC1027.dwg
+rule_visible_leaves 146
+rule_hidden_entities 0
+rule_external 0
+shim_model_space_geometry_records 134
+shim_emitted_but_hidden_by_rule 0
+shim_visible_by_rule_but_not_emitted 12
+-- /work/in/sample_base.dwg
+rule_visible_leaves 146
+rule_hidden_entities 0
+rule_external 0
+shim_model_space_geometry_records 134
+shim_emitted_but_hidden_by_rule 0
+shim_visible_by_rule_but_not_emitted 12
+
+== acadrust /work/out/vc_layers.dwg
+layers 4
+  layer name=0 off=true frozen=false frozenNewVp=false visible=false
+  layer name=VC_ON off=false frozen=false frozenNewVp=false visible=true
+  layer name=VC_OFF off=true frozen=false frozenNewVp=false visible=false
+  layer name=VC_FROZEN off=false frozen=true frozenNewVp=true visible=false
+model_space
+  Line handle=4B layer=VC_ON layer_visible=Some(true)
+  Line handle=4C layer=VC_OFF layer_visible=Some(false)
+  Line handle=4D layer=VC_FROZEN layer_visible=Some(false)
+  Line handle=4E layer=0 layer_visible=Some(false)
+  Insert handle=55 layer=VC_ON layer_visible=Some(true) block_name=VC_BLK
+  Insert handle=56 layer=VC_OFF layer_visible=Some(false) block_name=VC_BLK
+  Insert handle=57 layer=VC_FROZEN layer_visible=Some(false) block_name=VC_BLK
+blocks
+  block name=*Model_Space anonymous=false xref=false xrefPath= entities=7
+  block name=*Paper_Space anonymous=false xref=false xrefPath= entities=1
+    viewport handle=47 id=0 center=(148.5,105) w=297 h=210 viewCenter=(0,0) viewHeight=0 twist=0 frozenInVp=0 clipBoundary=0
+  block name=VC_BLK anonymous=false xref=false xrefPath= entities=3
+
+== acadrust /work/out/vc_paper.dwg
+layers 3
+  layer name=0 off=false frozen=false frozenNewVp=false visible=true
+  layer name=VC_ON off=false frozen=false frozenNewVp=false visible=true
+  layer name=VC_VPF off=false frozen=false frozenNewVp=false visible=true
+model_space
+  Line handle=4A layer=VC_ON layer_visible=Some(true)
+  Line handle=4B layer=VC_VPF layer_visible=Some(true)
+  Circle handle=4C layer=VC_ON layer_visible=Some(true)
+blocks
+  block name=*Model_Space anonymous=false xref=false xrefPath= entities=3
+  block name=*Paper_Space anonymous=false xref=false xrefPath= entities=6
+    viewport handle=47 id=0 center=(148.5,105) w=297 h=210 viewCenter=(0,0) viewHeight=0 twist=0 frozenInVp=0 clipBoundary=0
+    viewport handle=4E id=0 center=(80,100) w=100 h=80 viewCenter=(50,5) viewHeight=80 twist=0 frozenInVp=0 clipBoundary=0
+    viewport handle=4F id=0 center=(200,100) w=100 h=80 viewCenter=(50,5) viewHeight=160 twist=0.5235987755982988 frozenInVp=1 clipBoundary=0
+    viewport handle=51 id=0 center=(80,30) w=40 h=40 viewCenter=(50,50) viewHeight=40 twist=0 frozenInVp=0 clipBoundary=50
+
+== acadrust /work/in/sample_AC1032.dwg
+layers 19
+  layer name=0 off=false frozen=false frozenNewVp=false visible=true
+  layer name=Layer1 off=false frozen=false frozenNewVp=false visible=true
+  layer name=Layer_Off off=true frozen=false frozenNewVp=false visible=false
+  layer name=Layer_Freeze off=false frozen=true frozenNewVp=false visible=false
+  layer name=Layer_Lock off=false frozen=false frozenNewVp=false visible=true
+  layer name=Layer_NoPlot off=false frozen=false frozenNewVp=false visible=true
+  layer name=Layer_color_80 off=false frozen=false frozenNewVp=false visible=true
+  layer name=Layer_Lt_dash off=false frozen=false frozenNewVp=false visible=true
+  layer name=Layer_lw_035 off=false frozen=false frozenNewVp=false visible=true
+  layer name=Layer_transp_70 off=false frozen=false frozenNewVp=false visible=true
+  layer name=Layer_vp_freeze off=false frozen=false frozenNewVp=true visible=true
+  layer name=Layer_desc off=false frozen=false frozenNewVp=false visible=true
+  layer name=Layer_true_color off=false frozen=false frozenNewVp=false visible=true
+  layer name=Layer_color_book off=false frozen=false frozenNewVp=false visible=true
+  layer name=Defpoints off=false frozen=false frozenNewVp=false visible=true
+  layer name=Layer2 off=false frozen=false frozenNewVp=false visible=true
+  layer name=Layer_lw_050 off=false frozen=false frozenNewVp=false visible=true
+  layer name=app_layer off=false frozen=false frozenNewVp=false visible=true
+  layer name=color_125_33_79 off=false frozen=false frozenNewVp=false visible=true
+model_space
+  Point handle=28E layer=0 layer_visible=Some(true)
+  Point handle=298 layer=0 layer_visible=Some(true)
+  Point handle=299 layer=Layer_Lock layer_visible=Some(true)
+  Point handle=29A layer=0 layer_visible=Some(true)
+  Point handle=29B layer=0 layer_visible=Some(true)
+  Point handle=29C layer=0 layer_visible=Some(true)
+  Line handle=2C7 layer=0 layer_visible=Some(true)
+  Line handle=2CF layer=0 layer_visible=Some(true)
+  LwPolyline handle=2E2 layer=0 layer_visible=Some(true)
+  LwPolyline handle=2E3 layer=0 layer_visible=Some(true)
+  LwPolyline handle=2E4 layer=0 layer_visible=Some(true)
+  LwPolyline handle=2E5 layer=0 layer_visible=Some(true)
+  Circle handle=31F layer=0 layer_visible=Some(true)
+  Arc handle=320 layer=0 layer_visible=Some(true)
+  Ellipse handle=321 layer=0 layer_visible=Some(true)
+  Face3D handle=322 layer=0 layer_visible=Some(true)
+  Mesh handle=343 layer=0 layer_visible=Some(true)
+  LwPolyline handle=353 layer=0 layer_visible=Some(true)
+  Hatch handle=35A layer=0 layer_visible=Some(true)
+  LwPolyline handle=35B layer=0 layer_visible=Some(true)
+  LwPolyline handle=36C layer=0 layer_visible=Some(true)
+  Hatch handle=36E layer=0 layer_visible=Some(true)
+  LwPolyline handle=36F layer=0 layer_visible=Some(true)
+  Hatch handle=371 layer=0 layer_visible=Some(true)
+  LwPolyline handle=372 layer=0 layer_visible=Some(true)
+  Hatch handle=376 layer=0 layer_visible=Some(true)
+  Mesh handle=380 layer=Layer_color_80 layer_visible=Some(true)
+  XLine handle=389 layer=0 layer_visible=Some(true)
+  Ray handle=38A layer=0 layer_visible=Some(true)
+  MLine handle=38B layer=0 layer_visible=Some(true)
+  MLine handle=3A5 layer=Layer_true_color layer_visible=Some(true)
+  MLine handle=3A6 layer=Layer_true_color layer_visible=Some(true)
+  Text handle=3B9 layer=0 layer_visible=Some(true)
+  Text handle=3BA layer=0 layer_visible=Some(true)
+  Text handle=3CF layer=0 layer_visible=Some(true)
+  Text handle=3D0 layer=0 layer_visible=Some(true)
+  MText handle=3EC layer=0 layer_visible=Some(true)
+  MText handle=3F5 layer=0 layer_visible=Some(true)
+  MText handle=3F6 layer=0 layer_visible=Some(true)
+  PolyfaceMesh handle=422 layer=0 layer_visible=Some(true)
+  Polyline3D handle=42B layer=0 layer_visible=Some(true)
+  Solid handle=432 layer=0 layer_visible=Some(true)
+  Spline handle=433 layer=0 layer_visible=Some(true)
+  Spline handle=434 layer=0 layer_visible=Some(true)
+  Wipeout handle=44D layer=0 layer_visible=Some(true)
+  Leader handle=512 layer=Layer1 layer_visible=Some(true)
+  MText handle=513 layer=Layer1 layer_visible=Some(true)
+  Dimension handle=514 layer=Layer1 layer_visible=Some(true)
+  Dimension handle=515 layer=Layer1 layer_visible=Some(true)
+  Dimension handle=516 layer=Layer1 layer_visible=Some(true)
+  Line handle=517 layer=Layer2 layer_visible=Some(true)
+  Line handle=518 layer=Layer2 layer_visible=Some(true)
+  Line handle=519 layer=Layer2 layer_visible=Some(true)
+  Line handle=51A layer=Layer2 layer_visible=Some(true)
+  Line handle=51B layer=Layer2 layer_visible=Some(true)
+  Line handle=51C layer=Layer2 layer_visible=Some(true)
+  Circle handle=51D layer=Layer2 layer_visible=Some(true)
+  Circle handle=51E layer=Layer2 layer_visible=Some(true)
+  Dimension handle=51F layer=Layer1 layer_visible=Some(true)
+  Dimension handle=522 layer=Layer1 layer_visible=Some(true)
+  Dimension handle=525 layer=Layer1 layer_visible=Some(true)
+  Dimension handle=526 layer=Layer1 layer_visible=Some(true)
+  Dimension handle=527 layer=Layer1 layer_visible=Some(true)
+  Table handle=528 layer=Layer1 layer_visible=Some(true)
+  Line handle=694 layer=0 layer_visible=Some(true)
+  Line handle=695 layer=0 layer_visible=Some(true)
+  Line handle=696 layer=0 layer_visible=Some(true)
+  Line handle=697 layer=0 layer_visible=Some(true)
+  Line handle=698 layer=0 layer_visible=Some(true)
+  Line handle=699 layer=0 layer_visible=Some(true)
+  Line handle=69A layer=0 layer_visible=Some(true)
+  Line handle=69B layer=0 layer_visible=Some(true)
+  Line handle=69C layer=0 layer_visible=Some(true)
+  Line handle=69D layer=0 layer_visible=Some(true)
+  Line handle=69F layer=Layer_Lt_dash layer_visible=Some(true)
+  Line handle=6A0 layer=Layer_Lt_dash layer_visible=Some(true)
+  Line handle=6A1 layer=Layer_Lt_dash layer_visible=Some(true)
+  Line handle=6A2 layer=Layer_Lt_dash layer_visible=Some(true)
+  Line handle=6A3 layer=Layer_Lt_dash layer_visible=Some(true)
+  Line handle=6A4 layer=Layer_Lt_dash layer_visible=Some(true)
+  Insert handle=704 layer=Layer1 layer_visible=Some(true) block_name=MyBlock
+  Text handle=756 layer=Layer2 layer_visible=Some(true)
+  Text handle=757 layer=Layer_color_80 layer_visible=Some(true)
+  Text handle=75C layer=Layer_true_color layer_visible=Some(true)
+  Text handle=75D layer=Layer_color_book layer_visible=Some(true)
+  MText handle=779 layer=0 layer_visible=Some(true)
+  Insert handle=783 layer=0 layer_visible=Some(true) block_name=my_block_v2
+  Insert handle=79C layer=0 layer_visible=Some(true) block_name=my_block_v2
+  MultiLeader handle=7B8 layer=0 layer_visible=Some(true)
+  Tolerance handle=822 layer=0 layer_visible=Some(true)
+  Tolerance handle=823 layer=0 layer_visible=Some(true)
+  Tolerance handle=824 layer=0 layer_visible=Some(true)
+  Shape handle=889 layer=0 layer_visible=Some(true)
+  RasterImage handle=8C6 layer=0 layer_visible=Some(true)
+  Text handle=915 layer=0 layer_visible=Some(true)
+  Text handle=916 layer=0 layer_visible=Some(true)
+  Text handle=917 layer=0 layer_visible=Some(true)
+  Text handle=918 layer=0 layer_visible=Some(true)
+  Text handle=919 layer=0 layer_visible=Some(true)
+  Text handle=91A layer=0 layer_visible=Some(true)
+  Text handle=91B layer=0 layer_visible=Some(true)
+  Text handle=91C layer=0 layer_visible=Some(true)
+  Text handle=91D layer=0 layer_visible=Some(true)
+  Text handle=91E layer=0 layer_visible=Some(true)
+  Text handle=91F layer=0 layer_visible=Some(true)
+  Text handle=920 layer=0 layer_visible=Some(true)
+  Text handle=921 layer=0 layer_visible=Some(true)
+  LwPolyline handle=923 layer=0 layer_visible=Some(true)
+  Text handle=924 layer=0 layer_visible=Some(true)
+  LwPolyline handle=993 layer=0 layer_visible=Some(true)
+  Line handle=99E layer=0 layer_visible=Some(true)
+  Circle handle=99F layer=0 layer_visible=Some(true)
+  Text handle=9A0 layer=0 layer_visible=Some(true)
+  Line handle=9CD layer=0 layer_visible=Some(true)
+  Dimension handle=9CE layer=0 layer_visible=Some(true)
+  Table handle=A35 layer=0 layer_visible=Some(true)
+  LwPolyline handle=A54 layer=0 layer_visible=Some(true)
+  Text handle=A55 layer=0 layer_visible=Some(true)
+  LwPolyline handle=A7A layer=0 layer_visible=Some(true)
+  Text handle=A7B layer=0 layer_visible=Some(true)
+  Insert handle=ABA layer=0 layer_visible=Some(true) block_name=*U
+  Insert handle=AC5 layer=0 layer_visible=Some(true) block_name=*U0
+  MultiLeader handle=B1A layer=0 layer_visible=Some(true)
+  MultiLeader handle=B1B layer=0 layer_visible=Some(true)
+  MultiLeader handle=B1C layer=0 layer_visible=Some(true)
+  MultiLeader handle=B1D layer=0 layer_visible=Some(true)
+  MultiLeader handle=B1E layer=0 layer_visible=Some(true)
+  MultiLeader handle=B1F layer=0 layer_visible=Some(true)
+  MultiLeader handle=B20 layer=0 layer_visible=Some(true)
+  MultiLeader handle=B21 layer=0 layer_visible=Some(true)
+  MultiLeader handle=B22 layer=0 layer_visible=Some(true)
+  MultiLeader handle=B23 layer=0 layer_visible=Some(true)
+  MultiLeader handle=B24 layer=0 layer_visible=Some(true)
+  MultiLeader handle=B25 layer=0 layer_visible=Some(true)
+  MultiLeader handle=B26 layer=0 layer_visible=Some(true)
+  MultiLeader handle=B27 layer=0 layer_visible=Some(true)
+  LwPolyline handle=B28 layer=0 layer_visible=Some(true)
+  Text handle=B29 layer=0 layer_visible=Some(true)
+  Hatch handle=BBB layer=0 layer_visible=Some(true)
+  LwPolyline handle=BBF layer=0 layer_visible=Some(true)
+  Hatch handle=BC0 layer=0 layer_visible=Some(true)
+  LwPolyline handle=BC1 layer=0 layer_visible=Some(true)
+  Hatch handle=BC2 layer=0 layer_visible=Some(true)
+  LwPolyline handle=BC3 layer=0 layer_visible=Some(true)
+  Hatch handle=BC4 layer=0 layer_visible=Some(true)
+  LwPolyline handle=BC5 layer=0 layer_visible=Some(true)
+  LwPolyline handle=BC6 layer=0 layer_visible=Some(true)
+  Text handle=BC7 layer=0 layer_visible=Some(true)
+  Dimension handle=C96 layer=0 layer_visible=Some(true)
+  Dimension handle=CA4 layer=0 layer_visible=Some(true)
+  Underlay handle=D07 layer=0 layer_visible=Some(true)
+  Insert handle=D2F layer=0 layer_visible=Some(true) block_name=my_block
+  Solid3D handle=D65 layer=0 layer_visible=Some(true)
+  Region handle=D69 layer=0 layer_visible=Some(true)
+  Solid3D handle=D6A layer=0 layer_visible=Some(true)
+  LwPolyline handle=D70 layer=0 layer_visible=Some(true)
+  Text handle=D71 layer=0 layer_visible=Some(true)
+  LwPolyline handle=DFC layer=0 layer_visible=Some(true)
+  Text handle=DFD layer=0 layer_visible=Some(true)
+  Circle handle=E00 layer=0 layer_visible=Some(true)
+  Circle handle=E01 layer=0 layer_visible=Some(true)
+  Circle handle=E02 layer=0 layer_visible=Some(true)
+  Circle handle=E03 layer=0 layer_visible=Some(true)
+blocks
+  block name=*Model_Space anonymous=false xref=false xrefPath= entities=163
+  block name=*Paper_Space0 anonymous=false xref=false xrefPath= entities=2
+    viewport handle=240 id=0 center=(7.616174164671399,3.9999998836066784) w=24.425049223442766 h=8.99299974576695 viewCenter=(7.616174164671399,3.9999998836066784) viewHeight=8.99299974576695 twist=0 frozenInVp=0 clipBoundary=0
+    viewport handle=245 id=0 center=(5.249999761581422,3.9999997615814213) w=8.399999618530275 h=6.399999618530274 viewCenter=(6,4.5) viewHeight=9.228705435763796 twist=0 frozenInVp=0 clipBoundary=0
+  block name=*Paper_Space1 anonymous=false xref=false xrefPath= entities=2
+    viewport handle=252 id=0 center=(7.616577405314336,3.9999998836066784) w=24.429211711225506 h=8.994532322067185 viewCenter=(7.616577405314336,3.9999998836066784) viewHeight=8.994532322067185 twist=0 frozenInVp=0 clipBoundary=0
+    viewport handle=256 id=0 center=(5.249999761581422,3.9999997615814213) w=8.399999618530275 h=6.399999618530274 viewCenter=(6,4.5) viewHeight=9.228705435763796 twist=0 frozenInVp=0 clipBoundary=0
+  block name=*Paper_Space anonymous=false xref=false xrefPath= entities=2
+    viewport handle=267 id=0 center=(7.981302901350616,3.967191609810657) w=23.75757518262025 h=8.74724409448819 viewCenter=(7.981302901350616,3.967191609810657) viewHeight=8.74724409448819 twist=0 frozenInVp=0 clipBoundary=0
+    viewport handle=26B id=0 center=(5.679999524214136,3.966666779180212) w=9.087999238742619 h=6.34666684668834 viewCenter=(6,4.5) viewHeight=9.108870967741936 twist=0 frozenInVp=0 clipBoundary=0
+  block name=_ArchTick anonymous=false xref=false xrefPath= entities=1
+  block name=*D anonymous=true xref=false xrefPath= entities=9
+  block name=*D0 anonymous=true xref=false xrefPath= entities=10
+  block name=*D1 anonymous=true xref=false xrefPath= entities=11
+  block name=*D2 anonymous=true xref=false xrefPath= entities=7
+  block name=*D3 anonymous=true xref=false xrefPath= entities=7
+  block name=*D4 anonymous=true xref=false xrefPath= entities=9
+  block name=*T anonymous=true xref=false xrefPath= entities=28
+  block name=*D5 anonymous=true xref=false xrefPath= entities=6
+  block name=*D6 anonymous=true xref=false xrefPath= entities=5
+  block name=MyBlock anonymous=false xref=false xrefPath= entities=4
+  block name=my_block_v2 anonymous=false xref=false xrefPath= entities=5
+  block name=*D7 anonymous=true xref=false xrefPath= entities=10
+  block name=my_block anonymous=false xref=false xrefPath= entities=1
+  block name=*T0 anonymous=true xref=false xrefPath= entities=25
+  block name=my-dynamic-block anonymous=false xref=false xrefPath= entities=1
+  block name=*U anonymous=true xref=false xrefPath= entities=1
+  block name=*U0 anonymous=true xref=false xrefPath= entities=1
+  block name=_ClosedBlank anonymous=false xref=false xrefPath= entities=3
+  block name=_BoxBlank anonymous=false xref=false xrefPath= entities=5
+  block name=*D8 anonymous=true xref=false xrefPath= entities=10
+  block name=*D9 anonymous=true xref=false xrefPath= entities=10
+  block name=*U1 anonymous=true xref=false xrefPath= entities=3
+
