@@ -476,6 +476,7 @@ annotated   fs-detected  tests/pmtiles_writer.rs::the_writer_works_over_any_writ
 annotated   fs-detected  tests/pmtiles_writer.rs::two_entries_at_one_offset_are_not_a_descent
 annotated   fs-detected  tests/pmtiles_writer.rs::two_orders_stop_agreeing_once_the_window_cannot_hold_the_tile_set
 annotated   fs-detected  tests/pmtiles_writer.rs::two_shuffled_insertion_orders_produce_a_byte_identical_archive
+annotated   fs-detected  tests/pvec_dwg_spline_structural.rs::no_code_path_turns_a_spline_into_polylines_or_arcs
 annotated   fs-detected  tests/pvec_pdf_vector.rs::n5_1_no_lopdf_type_in_any_public_signature
 annotated   fs-detected  tests/pvec_provider_acadrust.rs::open_works_from_bytes_and_from_a_path_alike
 annotated   fs-detected  tests/pvec_provider_acadrust.rs::the_fixtures_are_the_ones_n1_4_recorded_and_say_what_they_are

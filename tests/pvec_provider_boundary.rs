@@ -254,6 +254,8 @@ fn no_foreign_type_appears_in_any_public_signature_of_the_provider_module() {
                 "provider".to_string(),
                 "dwg_acadrust".to_string(),
                 "units".to_string(),
+                "pdf_vector".to_string(),
+                "dwg_spline".to_string(),
             ]);
         }
         for item in public_items(&src) {
