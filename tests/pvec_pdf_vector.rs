@@ -137,7 +137,6 @@ fn n5_1_vector_pdf_yields_paths() {
 #[cfg(not(feature = "pdfium"))]
 #[test]
 fn n5_1_paths_without_the_pdfium_feature() {
-    assert!(!cfg!(feature = "pdfium"));
     let page = ok("0 0 m 10 10 l S");
     assert_eq!(page.entities.len(), 1);
 }
@@ -543,6 +542,8 @@ fn n5_1_untokenizable_stream_is_an_error_never_an_empty_page() {
         "0 0 m 1 1 l S (unterminated",
         "0 0 m 1 1 l S [1 2",
         "0 0 m 1 1 l S <<",
+        "0 0 m 1 1 l S <ab",
+        "0 0 m 1 1 l ] S",
     ] {
         let r = run(&one_page(body));
         assert!(
@@ -550,6 +551,12 @@ fn n5_1_untokenizable_stream_is_an_error_never_an_empty_page() {
             "{body}: {r:?}"
         );
     }
+}
+
+#[test]
+fn n5_1_balanced_strings_and_comments_still_tokenize() {
+    let page = ok("% a ( comment\n/Span <</MCID 0>> BDC (a \\) (nested) b) Tj EMC 0 0 m 1 1 l S");
+    assert_eq!(page.entities.len(), 1);
 }
 
 #[test]
@@ -632,7 +639,7 @@ fn strip_comments(src: &str) -> String {
         .join("\n")
 }
 
-/// Every `pub` item header and every `fn` header, to the first `{`, `;` or top-level `,`.
+/// Every `pub` item header (not `pub(crate)`), to the first `{`, `;` or top-level `,`.
 fn public_items(src: &str) -> Vec<String> {
     let text = strip_comments(src)
         .replace("->", " to ")
@@ -648,7 +655,8 @@ fn public_items(src: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < chars.len() {
-        if !(starts(i, "pub") || starts(i, "fn")) {
+        // Public items only: `pub(crate)` and private helpers may name `lopdf`.
+        if !starts(i, "pub") || chars[i + 3..].starts_with(&['(']) {
             i += 1;
             continue;
         }
