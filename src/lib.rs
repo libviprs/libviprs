@@ -66,6 +66,9 @@
 //! - **`dwg-acadrust`** — gates `pvec::dwg_acadrust::AcadrustProvider`, the first
 //!   DWG provider behind the replaceable `pvec::DwgProvider` traits. Pure Rust,
 //!   nothing to install; `acadrust` is a git dependency pinned by revision.
+//! - **`pvec-normalized`** — gates `pvec::normalized`, `Normalized2DGeometry`, the thin
+//!   adapter over PVec's public curve model (`pvec-geometry`, with the numeric policy
+//!   under it). Pure Rust; both PVec crates are git dependencies pinned by revision.
 //! - **`serde`** — adds public `Serialize` / `Deserialize` derives to the wire
 //!   and config types ([`PyramidPlan`], [`EngineConfig`], [`TileCoord`],
 //!   [`Layout`], and the rest) so an out-of-process caller can rebuild a job
@@ -260,6 +263,8 @@ pub use convolution::{Combine, ConvolutionError, Kernel, Precision};
 pub use create::{CreateError, SdfParams};
 pub use dedupe::{DedupeDecision, DedupeIndex, DedupeStrategy, LinkResult};
 pub use draw::{Circle, DrawError, DrawOp, Flood, Line, Mask, Paste, Rectangle, Smudge};
+#[cfg(feature = "pvec-normalized")]
+pub use pvec::{FidelityClass, NormalizeError, Normalized2DGeometry, ProvenanceHandle};
 // The TIFF free functions are re-exported at the root (not just behind the
 // module path) because the ported foreign cells call them unqualified
 // (`tiff_page_count(...)`, `decode_tiff_page(...)`). The `_with_limits` twins
