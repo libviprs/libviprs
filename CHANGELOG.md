@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A public Rust API for the vector path** (issue #1035, part of #1028).
+  `vector::convert` is the one engine: `list_views`, `select_view`, `convert`
+  (a view to a vector PMTiles archive, staged, synced and renamed into place,
+  nothing left behind when it fails, is cancelled or passes its deadline),
+  `report` (the same run with no file, for fidelity and budget numbers),
+  `inspect` and `check` (an archive's description and its validation), and
+  `default_decoder`, which is the ACadSharp provider when `dwg-acadsharp` is
+  built and `ConvertError::ProviderNotBuilt` when it is not. Results come back
+  as `Conversion`, `ArchiveInfo` and `CheckReport`, each with a `to_json()` that
+  the `viprs vector` command prints, so the CLI and the library cannot give
+  different answers. `tiler::report_view` and `tiler::MeasureTiles` are the
+  tiler half of `report`. `docs/vector-providers.md` explains the provider
+  dependency and how to build without it.
+
 - **Hardening for large and hostile drawings** (issue #1036). The tiler takes a
   wall-clock `deadline` and a `cancel` token, polled inside a single primitive
   as well as between them (`TilerError::Cancelled`, `DeadlineExceeded`), and a

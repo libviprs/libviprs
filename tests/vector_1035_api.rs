@@ -37,7 +37,13 @@ impl Ladder {
 impl CadDrawing for Ladder {
     fn views(&self) -> Result<Vec<CadView>, CadError> {
         Ok(vec![
-            CadView::new(0, 0, [0.0, 0.0, 100.0, 100.0], u64::from(self.rungs), "Model"),
+            CadView::new(
+                0,
+                0,
+                [0.0, 0.0, 100.0, 100.0],
+                u64::from(self.rungs),
+                "Model",
+            ),
             CadView::new(1, 1, [0.0, 0.0, 10.0, 10.0], 0, "Sheet 1"),
         ])
     }
@@ -49,7 +55,10 @@ impl CadDrawing for Ladder {
         report: &mut DecodeReport,
     ) -> Result<(), CadError> {
         if view > 1 {
-            return Err(CadError::NoSuchView { index: view, views: 2 });
+            return Err(CadError::NoSuchView {
+                index: view,
+                views: 2,
+            });
         }
         std::thread::sleep(self.stall);
         for rung in 0..self.rungs {
@@ -67,10 +76,21 @@ struct PaperOnly;
 
 impl CadDrawing for PaperOnly {
     fn views(&self) -> Result<Vec<CadView>, CadError> {
-        Ok(vec![CadView::new(0, 1, [0.0, 0.0, 10.0, 10.0], 0, "Sheet 1")])
+        Ok(vec![CadView::new(
+            0,
+            1,
+            [0.0, 0.0, 10.0, 10.0],
+            0,
+            "Sheet 1",
+        )])
     }
 
-    fn decode(&self, _: u32, _: &mut dyn PrimitiveSink, _: &mut DecodeReport) -> Result<(), CadError> {
+    fn decode(
+        &self,
+        _: u32,
+        _: &mut dyn PrimitiveSink,
+        _: &mut DecodeReport,
+    ) -> Result<(), CadError> {
         Ok(())
     }
 }
@@ -130,9 +150,14 @@ fn views_are_listed_in_the_drawings_order() {
 fn a_selector_resolves_by_default_index_and_name() {
     let d = Ladder::new(3);
     assert_eq!(select_view(&d, &ViewSelector::Model).unwrap().index(), 0);
-    assert_eq!(select_view(&d, &ViewSelector::Index(1)).unwrap().name(), "Sheet 1");
     assert_eq!(
-        select_view(&d, &ViewSelector::Name("Sheet 1".into())).unwrap().index(),
+        select_view(&d, &ViewSelector::Index(1)).unwrap().name(),
+        "Sheet 1"
+    );
+    assert_eq!(
+        select_view(&d, &ViewSelector::Name("Sheet 1".into()))
+            .unwrap()
+            .index(),
         1
     );
 }
@@ -141,11 +166,23 @@ fn a_selector_resolves_by_default_index_and_name() {
 fn a_selector_that_matches_nothing_says_what_the_drawing_has() {
     let d = Ladder::new(3);
     let by_name = select_view(&d, &ViewSelector::Name("Elevation".into())).unwrap_err();
-    assert!(matches!(by_name, ConvertError::NoSuchViewName { .. }), "{by_name:?}");
+    assert!(
+        matches!(by_name, ConvertError::NoSuchViewName { .. }),
+        "{by_name:?}"
+    );
     let text = by_name.to_string();
-    assert!(text.contains("Elevation") && text.contains("Model") && text.contains("Sheet 1"), "{text}");
+    assert!(
+        text.contains("Elevation") && text.contains("Model") && text.contains("Sheet 1"),
+        "{text}"
+    );
     let by_index = select_view(&d, &ViewSelector::Index(9)).unwrap_err();
-    assert!(matches!(by_index, ConvertError::Cad(CadError::NoSuchView { index: 9, .. })), "{by_index:?}");
+    assert!(
+        matches!(
+            by_index,
+            ConvertError::Cad(CadError::NoSuchView { index: 9, .. })
+        ),
+        "{by_index:?}"
+    );
     assert!(matches!(
         select_view(&PaperOnly, &ViewSelector::Model).unwrap_err(),
         ConvertError::NoModelSpace
@@ -157,8 +194,14 @@ fn a_selector_reads_the_way_a_command_line_spells_it() {
     assert_eq!(ViewSelector::parse(""), ViewSelector::Model);
     assert_eq!(ViewSelector::parse("Model"), ViewSelector::Model);
     assert_eq!(ViewSelector::parse("2"), ViewSelector::Index(2));
-    assert_eq!(ViewSelector::parse("Sheet 1"), ViewSelector::Name("Sheet 1".into()));
-    assert_eq!("model".parse::<ViewSelector>().unwrap(), ViewSelector::Model);
+    assert_eq!(
+        ViewSelector::parse("Sheet 1"),
+        ViewSelector::Name("Sheet 1".into())
+    );
+    assert_eq!(
+        "model".parse::<ViewSelector>().unwrap(),
+        ViewSelector::Model
+    );
     assert_eq!(ViewSelector::Index(4).to_string(), "4");
 }
 
@@ -168,7 +211,10 @@ fn a_layout_is_refused_with_the_tilers_reason() {
     let dest = dir.path().join("sheet.pmtiles");
     let err = convert(&Ladder::new(3), &ViewSelector::Index(1), &dest, &opts(3)).unwrap_err();
     assert!(
-        matches!(err, ConvertError::Tiler(TilerError::ViewNotEnabled { index: 1, .. })),
+        matches!(
+            err,
+            ConvertError::Tiler(TilerError::ViewNotEnabled { index: 1, .. })
+        ),
         "{err:?}"
     );
     assert!(!dest.exists());
@@ -188,7 +234,11 @@ fn a_conversion_is_a_valid_archive_that_inspect_describes() {
     assert!(verdict.tile_entries > 0);
 
     let info = inspect(&dest).unwrap();
-    assert_eq!(info.name.as_deref(), Some("Model"), "the view's name is the default");
+    assert_eq!(
+        info.name.as_deref(),
+        Some("Model"),
+        "the view's name is the default"
+    );
     assert_eq!(info.tile_type, "mvt");
     assert_eq!(info.tile_compression, "gzip");
     assert_eq!(info.min_zoom, 0);
@@ -207,8 +257,17 @@ fn a_conversion_is_a_valid_archive_that_inspect_describes() {
 fn the_name_option_overrides_the_views_name() {
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("named.pmtiles");
-    convert(&Ladder::new(3), &ViewSelector::Model, &dest, &opts(2).with_name("Level 2 plan")).unwrap();
-    assert_eq!(inspect(&dest).unwrap().name.as_deref(), Some("Level 2 plan"));
+    convert(
+        &Ladder::new(3),
+        &ViewSelector::Model,
+        &dest,
+        &opts(2).with_name("Level 2 plan"),
+    )
+    .unwrap();
+    assert_eq!(
+        inspect(&dest).unwrap().name.as_deref(),
+        Some("Level 2 plan")
+    );
 }
 
 #[test]
@@ -254,11 +313,16 @@ fn a_cancelled_conversion_leaves_nothing_behind() {
     let dest = dir.path().join("never.pmtiles");
     let token = CancelToken::new();
     token.cancel();
-    let options = ConvertOptions::new().with_tiler(TilerConfig::default().with_max_zoom(6).with_cancel(token));
+    let options = ConvertOptions::new()
+        .with_tiler(TilerConfig::default().with_max_zoom(6).with_cancel(token));
     let err = convert(&Ladder::new(50), &ViewSelector::Model, &dest, &options).unwrap_err();
     assert!(err.is_cancelled() && !err.is_deadline(), "{err:?}");
     assert!(!dest.exists());
-    assert_eq!(names(dir.path()), Vec::<String>::new(), "no staging files either");
+    assert_eq!(
+        names(dir.path()),
+        Vec::<String>::new(),
+        "no staging files either"
+    );
 }
 
 #[test]
@@ -266,8 +330,11 @@ fn a_conversion_cancelled_while_the_decoder_runs_leaves_nothing_behind() {
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("never.pmtiles");
     let token = CancelToken::new();
-    let options = ConvertOptions::new()
-        .with_tiler(TilerConfig::default().with_max_zoom(6).with_cancel(token.clone()));
+    let options = ConvertOptions::new().with_tiler(
+        TilerConfig::default()
+            .with_max_zoom(6)
+            .with_cancel(token.clone()),
+    );
     let canceller = {
         let token = token.clone();
         std::thread::spawn(move || {
@@ -289,8 +356,11 @@ fn a_conversion_cancelled_while_the_decoder_runs_leaves_nothing_behind() {
 fn a_run_past_its_deadline_leaves_nothing_behind() {
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("never.pmtiles");
-    let options = ConvertOptions::new()
-        .with_tiler(TilerConfig::default().with_max_zoom(6).with_deadline(Duration::from_millis(1)));
+    let options = ConvertOptions::new().with_tiler(
+        TilerConfig::default()
+            .with_max_zoom(6)
+            .with_deadline(Duration::from_millis(1)),
+    );
     let slow = Ladder {
         rungs: 100,
         stall: Duration::from_millis(40),
@@ -321,7 +391,11 @@ fn a_failed_conversion_leaves_an_existing_destination_untouched() {
     token.cancel();
     let options = ConvertOptions::new().with_tiler(TilerConfig::default().with_cancel(token));
     assert!(convert(&Ladder::new(10), &ViewSelector::Model, &dest, &options).is_err());
-    assert_eq!(std::fs::read(&dest).unwrap(), before, "the old archive survives a failed rebuild");
+    assert_eq!(
+        std::fs::read(&dest).unwrap(),
+        before,
+        "the old archive survives a failed rebuild"
+    );
     assert_eq!(names(dir.path()), vec!["out.pmtiles"]);
 }
 
@@ -384,7 +458,10 @@ fn a_file_that_is_not_an_archive_is_a_finding_not_an_error() {
     assert!(!verdict.is_valid());
     assert!(!verdict.findings.is_empty());
     assert_eq!(verdict.to_json()["valid"], false);
-    assert!(matches!(inspect(&p).unwrap_err(), ConvertError::PmTiles(_) | ConvertError::Archive(_)));
+    assert!(matches!(
+        inspect(&p).unwrap_err(),
+        ConvertError::PmTiles(_) | ConvertError::Archive(_)
+    ));
 }
 
 #[test]
@@ -411,10 +488,14 @@ fn a_raster_archive_is_not_a_vector_archive() {
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("raster.pmtiles");
     let mut w = Writer::create(&p, WriterOptions::default().with_tile_type(TileType::Png)).unwrap();
-    w.add_tile(0, 0, 0, b"\x89PNG not really", [1u8; 32]).unwrap();
+    w.add_tile(0, 0, 0, b"\x89PNG not really", [1u8; 32])
+        .unwrap();
     w.finish().unwrap();
     assert!(matches!(inspect(&p).unwrap_err(), ConvertError::Archive(_)));
-    assert!(!check(&p).unwrap().is_valid(), "MVT is what makes it a vector archive");
+    assert!(
+        !check(&p).unwrap().is_valid(),
+        "MVT is what makes it a vector archive"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -424,7 +505,9 @@ fn a_raster_archive_is_not_a_vector_archive() {
 #[cfg(not(feature = "dwg-acadsharp"))]
 #[test]
 fn without_a_provider_the_default_decoder_says_how_to_get_one() {
-    let err = libviprs::vector::convert::default_decoder(false).err().expect("no provider built");
+    let err = libviprs::vector::convert::default_decoder(false)
+        .err()
+        .expect("no provider built");
     assert!(matches!(err, ConvertError::ProviderNotBuilt));
     assert!(err.to_string().contains("dwg-acadsharp"), "{err}");
 }
@@ -444,7 +527,11 @@ fn a_real_dwg_converts_through_the_default_decoder() {
             return;
         }
     };
-    let dwg = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/cad/sample_AC1018.dwg")).unwrap();
+    let dwg = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/cad/sample_AC1018.dwg"
+    ))
+    .unwrap();
     let drawing = decoder.open(CadSource::Bytes(&dwg)).unwrap();
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("sample.pmtiles");

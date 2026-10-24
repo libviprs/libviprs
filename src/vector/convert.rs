@@ -33,6 +33,8 @@
 //! returns [`ConvertError::ProviderNotBuilt`], and everything else in this
 //! module still works (an archive can be inspected and validated with no DWG
 //! reader in the build, and a decoder you wrote yourself converts fine).
+//! `docs/vector-providers.md` covers the provider's native dependency and how
+//! to build without it.
 //!
 //! # Examples
 //!
@@ -121,8 +123,6 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
-#![allow(unused_imports, unused_variables, dead_code)]
-
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -161,7 +161,14 @@ impl ViewSelector {
     /// through its index.
     #[must_use]
     pub fn parse(text: &str) -> Self {
-        unimplemented!("#1035: stubbed so the tests start red")
+        let text = text.trim();
+        if text.is_empty() || text.eq_ignore_ascii_case("model") {
+            return Self::Model;
+        }
+        match text.parse::<u32>() {
+            Ok(n) => Self::Index(n),
+            Err(_) => Self::Name(text.to_owned()),
+        }
     }
 }
 
@@ -256,20 +263,20 @@ impl ConvertError {
     /// Whether the run stopped because the cancel token fired.
     #[must_use]
     pub fn is_cancelled(&self) -> bool {
-        unimplemented!("#1035: stubbed so the tests start red")
+        matches!(self, Self::Tiler(TilerError::Cancelled))
     }
 
     /// Whether the run stopped because it passed its deadline.
     #[must_use]
     pub fn is_deadline(&self) -> bool {
-        unimplemented!("#1035: stubbed so the tests start red")
+        matches!(self, Self::Tiler(TilerError::DeadlineExceeded { .. }))
     }
 }
 
 /// The decoder this build ships, or [`ConvertError::ProviderNotBuilt`].
 ///
 /// With the `dwg-acadsharp` feature this is the ACadSharp provider, bounded by
-/// [`ProviderLimits::hardened`](crate::cad::acadsharp::ProviderLimits::hardened)
+/// `cad::acadsharp::ProviderLimits::hardened`
 /// when `hardened` is set and unbounded otherwise (right for a drawing you made
 /// yourself, wrong for one a stranger uploaded). Without the feature it is
 /// always the error, and `hardened` is ignored.
@@ -280,7 +287,20 @@ impl ConvertError {
 /// library the provider links is missing or does not match.
 #[cfg_attr(not(feature = "dwg-acadsharp"), allow(unused_variables))]
 pub fn default_decoder(hardened: bool) -> Result<Box<dyn CadDecoder>, ConvertError> {
-    unimplemented!("#1035: stubbed so the tests start red")
+    #[cfg(feature = "dwg-acadsharp")]
+    {
+        use crate::cad::acadsharp::{AcadSharpDecoder, ProviderLimits};
+        let decoder = AcadSharpDecoder::new()?;
+        Ok(Box::new(if hardened {
+            decoder.with_limits(ProviderLimits::hardened())
+        } else {
+            decoder
+        }))
+    }
+    #[cfg(not(feature = "dwg-acadsharp"))]
+    {
+        Err(ConvertError::ProviderNotBuilt)
+    }
 }
 
 /// Every view in the drawing, in the drawing's own order.
@@ -289,7 +309,7 @@ pub fn default_decoder(hardened: bool) -> Result<Box<dyn CadDecoder>, ConvertErr
 ///
 /// [`ConvertError::Cad`].
 pub fn list_views(drawing: &dyn CadDrawing) -> Result<Vec<CadView>, ConvertError> {
-    unimplemented!("#1035: stubbed so the tests start red")
+    Ok(drawing.views()?)
 }
 
 /// Resolves a selector against a drawing.
@@ -303,7 +323,33 @@ pub fn select_view(
     drawing: &dyn CadDrawing,
     selector: &ViewSelector,
 ) -> Result<CadView, ConvertError> {
-    unimplemented!("#1035: stubbed so the tests start red")
+    let views = drawing.views()?;
+    match selector {
+        ViewSelector::Model => views
+            .into_iter()
+            .find(|v| v.kind() == ViewKind::Model)
+            .ok_or(ConvertError::NoModelSpace),
+        ViewSelector::Index(index) => {
+            let count = views.len() as u32;
+            views
+                .into_iter()
+                .find(|v| v.index() == *index)
+                .ok_or(ConvertError::Cad(CadError::NoSuchView {
+                    index: *index,
+                    views: count,
+                }))
+        }
+        ViewSelector::Name(name) => {
+            let available: Vec<String> = views.iter().map(|v| v.name().to_owned()).collect();
+            views
+                .into_iter()
+                .find(|v| v.name() == name)
+                .ok_or(ConvertError::NoSuchViewName {
+                    name: name.clone(),
+                    available,
+                })
+        }
+    }
 }
 
 /// The outcome of a conversion or a report.
@@ -328,14 +374,93 @@ impl Conversion {
     /// `viprs vector report --json` print.
     #[must_use]
     pub fn to_json(&self) -> Json {
-        unimplemented!("#1035: stubbed so the tests start red")
+        let t = &self.tiler;
+        let counts: serde_json::Map<String, Json> = self
+            .decode
+            .counts()
+            .iter()
+            .map(|(kind, n)| (format!("{kind:?}").to_lowercase(), json!(n)))
+            .collect();
+        let diagnostics: Vec<Json> = self
+            .decode
+            .diagnostics()
+            .iter()
+            .map(|d| {
+                json!({
+                    "code": d.code().get(),
+                    "name": d.code().name(),
+                    "severity": d.severity().to_string(),
+                    "message": d.message(),
+                })
+            })
+            .chain(t.diagnostics.iter().map(|d| {
+                json!({
+                    "code": d.code().get(),
+                    "name": d.code().name(),
+                    "severity": d.severity().to_string(),
+                    "message": d.message(),
+                })
+            }))
+            .collect();
+        json!({
+            "view": view_json(&self.view),
+            "destination": self.destination.as_ref().map(|p| p.display().to_string()),
+            "bytes": self.bytes,
+            "decode": {
+                "complete": self.decode.is_complete(),
+                "has_errors": self.decode.has_errors(),
+                "primitives": counts,
+                "diagnostics_dropped": self.decode.dropped_diagnostics(),
+            },
+            "tiles": {
+                "written": t.tiles,
+                "per_zoom": t.tiles_per_zoom,
+                "points": t.points,
+                "text": t.text,
+                "largest_tile_bytes": t.largest_tile_bytes,
+                "oversized": t.oversized_count,
+                "world_side": t.world_side,
+            },
+            "fidelity": {
+                "primitives": t.primitives,
+                "drawable": t.drawable,
+                "undrawable": t.undrawable,
+                "culled_subpixel": t.culled_subpixel,
+                "culled_text": t.culled_text,
+                "culled_empty_text": t.culled_empty_text,
+                "curves_capped": t.curves_capped,
+                "dropped_for_point_budget": t.dropped_for_point_budget,
+                "dropped_for_text_budget": t.dropped_for_text_budget,
+                "text_truncated": t.text_truncated,
+                "fonts_substituted": t.fonts_substituted,
+                "glyphs_unavailable": t.glyphs_unavailable.iter()
+                    .map(|(c, n)| (c.to_string(), *n))
+                    .collect::<std::collections::BTreeMap<_, _>>(),
+                "text_codes_ignored": t.text_codes_ignored.iter()
+                    .map(|(c, n)| (c.to_string(), *n))
+                    .collect::<std::collections::BTreeMap<_, _>>(),
+            },
+            "diagnostics": diagnostics,
+            "diagnostics_dropped": t.dropped_diagnostics,
+        })
     }
 }
 
 /// One view as JSON.
 #[must_use]
 pub fn view_json(view: &CadView) -> Json {
-    unimplemented!("#1035: stubbed so the tests start red")
+    json!({
+        "index": view.index(),
+        "name": view.name(),
+        "kind": match view.kind() {
+            ViewKind::Model => "model",
+            ViewKind::Layout => "layout",
+            _ => "unknown",
+        },
+        "enabled": view.kind() == ViewKind::Model,
+        "entities": view.entity_count(),
+        "extents": view.extents().map(|e| json!([e.min_x(), e.min_y(), e.max_x(), e.max_y()])),
+    })
 }
 
 /// Converts one view of `drawing` into a vector PMTiles archive at `dest`.
@@ -355,7 +480,19 @@ pub fn convert(
     dest: impl AsRef<Path>,
     options: &ConvertOptions,
 ) -> Result<Conversion, ConvertError> {
-    unimplemented!("#1035: stubbed so the tests start red")
+    let view = select_view(drawing, selector)?;
+    let dest = dest.as_ref();
+    let name = options.name.as_deref().unwrap_or_else(|| view.name());
+    let (tiler, decode) =
+        build_archive_from_view(drawing, view.index(), &options.tiler, dest, name)?;
+    let bytes = std::fs::metadata(dest)?.len();
+    Ok(Conversion {
+        view,
+        tiler,
+        decode,
+        destination: Some(dest.to_path_buf()),
+        bytes: Some(bytes),
+    })
 }
 
 /// Does everything [`convert`] does except write the archive, and returns the
@@ -369,7 +506,15 @@ pub fn report(
     selector: &ViewSelector,
     options: &ConvertOptions,
 ) -> Result<Conversion, ConvertError> {
-    unimplemented!("#1035: stubbed so the tests start red")
+    let view = select_view(drawing, selector)?;
+    let (tiler, decode) = report_view(drawing, view.index(), &options.tiler)?;
+    Ok(Conversion {
+        view,
+        tiler,
+        decode,
+        destination: None,
+        bytes: None,
+    })
 }
 
 /// What a vector archive says about itself.
@@ -407,7 +552,25 @@ impl ArchiveInfo {
     /// The archive's description as JSON, for `viprs vector info --json`.
     #[must_use]
     pub fn to_json(&self) -> Json {
-        unimplemented!("#1035: stubbed so the tests start red")
+        json!({
+            "name": self.name,
+            "tile_type": self.tile_type,
+            "tile_compression": self.tile_compression,
+            "min_zoom": self.min_zoom,
+            "max_zoom": self.max_zoom,
+            "bounds": self.bounds,
+            "tile_entries": self.tile_entries,
+            "addressed_tiles": self.addressed_tiles,
+            "tile_contents": self.tile_contents,
+            "file_bytes": self.file_bytes,
+            "layers": self.layers.iter().map(|l| json!({
+                "id": l.id,
+                "fields": l.fields.iter()
+                    .map(|(k, v)| (k.clone(), format!("{v:?}")))
+                    .collect::<std::collections::BTreeMap<_, _>>(),
+            })).collect::<Vec<_>>(),
+            "tiler": self.tiler,
+        })
     }
 }
 
@@ -417,7 +580,25 @@ impl ArchiveInfo {
 ///
 /// [`ConvertError::Archive`] when the file is not a readable vector archive.
 pub fn inspect(path: impl AsRef<Path>) -> Result<ArchiveInfo, ConvertError> {
-    unimplemented!("#1035: stubbed so the tests start red")
+    let archive = VectorArchive::try_open(path)?;
+    let reader = archive.pmtiles();
+    let header = reader.header();
+    let (west, south, east, north) = reader.bounds();
+    let metadata = reader.metadata()?;
+    Ok(ArchiveInfo {
+        name: metadata.name.clone(),
+        tile_type: header.tile_type.to_string(),
+        tile_compression: header.tile_compression.to_string(),
+        min_zoom: header.min_zoom,
+        max_zoom: header.max_zoom,
+        bounds: [west, south, east, north],
+        tile_entries: header.tile_entries_count,
+        addressed_tiles: header.addressed_tiles_count,
+        tile_contents: header.tile_contents_count,
+        file_bytes: reader.archive_size(),
+        layers: archive.layers().to_vec(),
+        tiler: metadata.extra.get(TILER_METADATA_KEY).cloned(),
+    })
 }
 
 /// What [`check`] found.
@@ -436,13 +617,18 @@ impl CheckReport {
     /// Whether the archive is sound: no findings.
     #[must_use]
     pub fn is_valid(&self) -> bool {
-        unimplemented!("#1035: stubbed so the tests start red")
+        self.findings.is_empty()
     }
 
     /// The report as JSON, for `viprs vector validate --json`.
     #[must_use]
     pub fn to_json(&self) -> Json {
-        unimplemented!("#1035: stubbed so the tests start red")
+        json!({
+            "valid": self.is_valid(),
+            "findings": self.findings,
+            "tile_entries": self.tile_entries,
+            "addressed_tiles": self.addressed_tiles,
+        })
     }
 }
 
@@ -458,5 +644,23 @@ impl CheckReport {
 /// [`ConvertError::Io`] or [`ConvertError::PmTiles`] when the file cannot be
 /// read at all.
 pub fn check(path: impl AsRef<Path>) -> Result<CheckReport, ConvertError> {
-    unimplemented!("#1035: stubbed so the tests start red")
+    let path = path.as_ref();
+    let reader = FileRangeReader::try_open(path)?;
+    let structural = validate(&reader, &ValidationLimits::default())?;
+    let mut findings: Vec<String> = structural
+        .findings
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    if structural.header.is_some()
+        && findings.is_empty()
+        && let Err(e) = VectorArchive::try_open(path)
+    {
+        findings.push(e.to_string());
+    }
+    Ok(CheckReport {
+        findings,
+        tile_entries: structural.tile_entries,
+        addressed_tiles: structural.addressed_tiles,
+    })
 }
