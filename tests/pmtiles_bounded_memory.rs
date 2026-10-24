@@ -348,6 +348,22 @@ struct Measured {
 /// cell to this file made three unrelated tests fail with peaks that had
 /// nothing to do with the writer.
 fn measure_write(tiles: u64, distinct: u64, sort_buffer_records: usize) -> Measured {
+    measure_write_with(
+        tiles,
+        distinct,
+        sort_buffer_records,
+        Some(DEDUPE_BUDGET_BYTES),
+    )
+}
+
+/// As [`measure_write`], with the dedupe budget chosen by the caller. `None`
+/// leaves it unset, which is the case issue #1263 is about.
+fn measure_write_with(
+    tiles: u64,
+    distinct: u64,
+    sort_buffer_records: usize,
+    dedupe_budget: Option<usize>,
+) -> Measured {
     let scratch = tempfile::tempdir().expect("a scratch directory");
 
     // The smallest zoom whose grid addresses `tiles`, so one zoom holds the
@@ -359,10 +375,12 @@ fn measure_write(tiles: u64, distinct: u64, sort_buffer_records: usize) -> Measu
         .unwrap_or_else(|| panic!("no zoom up to 14 addresses {tiles} tiles"));
     let side: u64 = 1 << zoom;
 
-    let options = WriterOptions::default()
+    let mut options = WriterOptions::default()
         .with_tile_type(TileType::Png)
-        .with_sort_buffer_records(sort_buffer_records)
-        .with_dedupe_memory_bytes(DEDUPE_BUDGET_BYTES);
+        .with_sort_buffer_records(sort_buffer_records);
+    if let Some(budget) = dedupe_budget {
+        options = options.with_dedupe_memory_bytes(budget);
+    }
 
     let (_guard, baseline) = start_measuring();
 
@@ -923,4 +941,94 @@ fn the_flat_index_maps_onto_distinct_tiles() {
         assert!(seen.insert(id), "the flat index handed {id} in twice");
     }
     assert_eq!(seen.len(), 6, "six indices should map onto six tiles");
+}
+
+// ---------------------------------------------------------------------------
+// Issue #1263: the default window must not be paid for up front
+// ---------------------------------------------------------------------------
+
+/// The default dedupe budget, restated (it is private in the writer).
+const DEFAULT_DEDUPE_BYTES: u64 = 8 * 1024 * 1024;
+
+/// A 1,373-tile pyramid with nothing set must not allocate the 8 MiB window.
+/// Before the fix this peaked at about 8.2 MiB.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1263_a_small_pyramid_with_the_default_budget_stays_small() {
+    const TILES: u64 = 1_373;
+    let measured = measure_write_with(TILES, TILES, 4096, None);
+    assert_really_wrote(&measured, TILES, TILES);
+    assert!(
+        measured.add_phase_live < 1024 * 1024,
+        "the add phase left {} bytes live for {TILES} payloads; the window should grow with the payloads, not be sized up front",
+        measured.add_phase_live
+    );
+    assert!(
+        measured.peak < 2 * 1024 * 1024,
+        "peak {} bytes for {TILES} tiles with the default budget",
+        measured.peak
+    );
+}
+
+/// The 21,851-tile cell. Before the fix about 9.0 MiB.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1263_a_mid_size_pyramid_with_the_default_budget_stays_proportionate() {
+    const TILES: u64 = 21_851;
+    let measured = measure_write_with(TILES, TILES, 4096, None);
+    assert_really_wrote(&measured, TILES, TILES);
+    // 65 bytes a payload is the documented cost; allow three times that for
+    // doubling slack plus the fixed pieces.
+    let allowed = 3 * 65 * TILES + 1024 * 1024;
+    assert!(
+        measured.peak < allowed,
+        "peak {} bytes for {TILES} payloads, allowed {allowed}",
+        measured.peak
+    );
+}
+
+/// A small pyramid must not pay more than a large budget-limited one: with the
+/// default budget the footprint should follow the payload count, so ten times
+/// the payloads costs clearly more than one tenth of them.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1263_the_default_footprint_follows_the_payload_count() {
+    let few = measure_write_with(1_000, 1_000, 4096, None);
+    let many = measure_write_with(20_000, 20_000, 4096, None);
+    assert!(
+        few.add_phase_live * 4 < many.add_phase_live,
+        "1000 payloads left {} live, 20000 left {}",
+        few.add_phase_live,
+        many.add_phase_live
+    );
+}
+
+/// Guard, green before and after: a pyramid with far more distinct payloads
+/// than the cap holds still stops at the same 8 MiB bound.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1263_a_large_pyramid_still_hits_the_same_cap() {
+    const TILES: u64 = 262_144;
+    let measured = measure_write_with(TILES, TILES, 4096, None);
+    assert!(
+        measured.add_phase_live <= DEFAULT_DEDUPE_BYTES + 1024 * 1024,
+        "add phase left {} live, above the 8 MiB cap",
+        measured.add_phase_live
+    );
+    assert!(
+        measured.add_phase_live > DEFAULT_DEDUPE_BYTES / 2,
+        "add phase left only {} live; the window should have grown toward its cap",
+        measured.add_phase_live
+    );
+}
+
+/// Guard: growing must not lose a duplicate that a full-size window would have
+/// caught. Every payload repeats once at long range, inside a pyramid small
+/// enough that the cap is never reached.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1263_growth_does_not_cost_dedupe_exactness() {
+    const DISTINCT: u64 = 5_000;
+    let measured = measure_write_with(DISTINCT * 3, DISTINCT, 4096, None);
+    assert_really_wrote(&measured, DISTINCT * 3, DISTINCT);
 }
