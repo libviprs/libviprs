@@ -47,6 +47,7 @@ use crate::pvec::provider::{
     InstancePath, LayerState, LayoutId, LayoutKind, LayoutState, Point3, ProvenanceStub,
     ProviderCaps, ProviderError, RawEntity, RawGeometry, RawVertex, SourceFact, SourceTransform,
 };
+use crate::pvec::units::SourceUnit;
 
 /// What this provider calls itself in [`ProviderError`].
 const NAME: &str = "acadrust";
@@ -100,6 +101,16 @@ impl AcadrustProvider {
             .iter()
             .map(|b| b.name.clone())
             .collect()
+    }
+
+    /// The unit of the drawing's coordinates, read from the header's `$INSUNITS`.
+    ///
+    /// Header only: no inference from the coordinates and no default. The value is
+    /// handed on as the drawing stores it, and the coordinates the cursor yields
+    /// are not scaled by it.
+    #[must_use]
+    pub fn source_unit(&self) -> SourceUnit {
+        SourceUnit::from_insunits(Some(self.doc.header.insertion_units))
     }
 
     fn capabilities() -> ProviderCaps {

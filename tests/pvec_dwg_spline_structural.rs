@@ -332,6 +332,7 @@ fn three_d_and_helix_are_classified_not_projected() {
 /// The emitted semantic types and the module's code never mention a polyline, an arc
 /// or a sampling step.
 #[test]
+#[cfg_attr(miri, ignore)]
 fn no_code_path_turns_a_spline_into_polylines_or_arcs() {
     let src = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/pvec/dwg_spline.rs"),
