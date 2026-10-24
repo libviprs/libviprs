@@ -8,7 +8,6 @@ use libviprs::cad::ItemHandle;
 use libviprs::pvec::pdf_vector::{PdfVectorLimits, PdfVectorPage, extract_page_paths_from_bytes};
 use libviprs::pvec::text_policy::{TextFontOutcome as F, TextReport, shx_outcome};
 use libviprs::pvec::{InstancePath, ProvenanceStub, RawEntity, RawGeometry};
-use lopdf::content::{Content, Operation};
 use lopdf::{Dictionary, Document, Object, Stream, dictionary};
 
 struct Fixture {
@@ -69,11 +68,6 @@ impl Fixture {
         self.kids.push(id.into());
     }
 
-    fn page(&mut self, body: &str) {
-        let s = self.stream(body);
-        self.page_with([0, 0, 200, 100], s.into(), None, Dictionary::new());
-    }
-
     fn bytes(mut self) -> Vec<u8> {
         let n = self.kids.len() as i64;
         self.doc.objects.insert(
@@ -94,13 +88,6 @@ impl Fixture {
         out
     }
 }
-
-fn one_page(body: &str) -> Vec<u8> {
-    let mut f = Fixture::new();
-    f.page(body);
-    f.bytes()
-}
-
 
 fn run(bytes: &[u8]) -> PdfVectorPage {
     extract_page_paths_from_bytes(bytes, 1, &PdfVectorLimits::default()).unwrap()
@@ -145,7 +132,11 @@ fn one_font(make: impl FnOnce(&mut Fixture) -> Dictionary) -> PdfVectorPage {
 fn only(page: &PdfVectorPage, outcome: F) {
     assert_eq!(page.text.pdf.total(), 1);
     assert_eq!(
-        page.text.by_outcome.iter().map(|(k, v)| (*k, *v)).collect::<Vec<_>>(),
+        page.text
+            .by_outcome
+            .iter()
+            .map(|(k, v)| (*k, *v))
+            .collect::<Vec<_>>(),
         vec![(outcome, 1)],
         "wrong bucket"
     );
@@ -191,7 +182,11 @@ fn n5_5_text_never_becomes_geometry() {
         dictionary! {},
         vec![],
     ));
-    let without = run(&with_fonts("10 10 m 50 10 l S 10 20 m 50 20 l S", dictionary! {}, vec![]));
+    let without = run(&with_fonts(
+        "10 10 m 50 10 l S 10 20 m 50 20 l S",
+        dictionary! {},
+        vec![],
+    ));
     assert_eq!(with.text.omitted(), 1);
     // Same entities, same order, apart from the sequence-free fields being equal.
     assert_eq!(with.entities, without.entities);
@@ -208,7 +203,9 @@ fn n5_5_non_embedded_font() {
 
 #[test]
 fn n5_5_standard_font_without_a_descriptor_is_not_embedded() {
-    let page = one_font(|_| dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica" });
+    let page = one_font(
+        |_| dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica" },
+    );
     only(&page, F::NotEmbedded);
 }
 
@@ -259,14 +256,20 @@ fn n5_5_cid_font_with_tounicode_follows_its_embedding() {
 
 #[test]
 fn n5_5_a_font_that_does_not_resolve() {
-    let page = run(&with_fonts("BT /Nope 12 Tf (x) Tj ET BT (y) Tj ET", dictionary! {}, vec![]));
+    let page = run(&with_fonts(
+        "BT /Nope 12 Tf (x) Tj ET BT (y) Tj ET",
+        dictionary! {},
+        vec![],
+    ));
     assert_eq!(page.text.by_outcome.get(&F::Unresolved), Some(&2));
 }
 
 #[test]
 fn n5_5_the_font_is_graphics_state_and_q_restores_it() {
     let mut f = Fixture::new();
-    let arial = f.doc.add_object(dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica" });
+    let arial = f.doc.add_object(
+        dictionary! { "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Helvetica" },
+    );
     let s = f.stream("BT /F1 12 Tf (a) Tj ET q /F2 9 Tf (b) Tj Q (c) Tj");
     let res = dictionary! { "Font" => dictionary! { "F1" => arial } };
     f.page_with([0, 0, 200, 100], s.into(), Some(res), Dictionary::new());
@@ -278,7 +281,9 @@ fn n5_5_the_font_is_graphics_state_and_q_restores_it() {
 
 fn entity(class: &str) -> RawEntity {
     RawEntity {
-        geometry: RawGeometry::Unmapped { reason: format!("no mapping for {class}") },
+        geometry: RawGeometry::Unmapped {
+            reason: format!("no mapping for {class}"),
+        },
         provenance: ProvenanceStub {
             handle: Some(ItemHandle::new(1)),
             class_name: class.into(),
@@ -291,7 +296,13 @@ fn entity(class: &str) -> RawEntity {
 #[test]
 fn n5_5_dwg_text_and_mtext_are_counted_and_other_classes_are_not() {
     let mut r = TextReport::default();
-    r.count_dwg(&[entity("TEXT"), entity("TEXT"), entity("MTEXT"), entity("LINE"), entity("ATTRIB")]);
+    r.count_dwg(&[
+        entity("TEXT"),
+        entity("TEXT"),
+        entity("MTEXT"),
+        entity("LINE"),
+        entity("ATTRIB"),
+    ]);
     assert_eq!((r.dwg.text, r.dwg.mtext, r.omitted()), (2, 1, 3));
 }
 
@@ -307,12 +318,63 @@ fn n5_5_a_missing_shx_font_has_its_own_bucket() {
 
 #[test]
 fn n5_5_outcome_codes_are_stable_and_documented() {
-    let doc = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/docs/pvec-text-policy.md"))
-        .expect("docs/pvec-text-policy.md");
+    let doc = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/docs/pvec-text-policy.md"
+    ))
+    .expect("docs/pvec-text-policy.md");
     for o in F::ALL {
-        assert!(doc.contains(o.code()), "{} is not in the policy doc", o.code());
+        assert!(
+            doc.contains(o.code()),
+            "{} is not in the policy doc",
+            o.code()
+        );
     }
     assert!(doc.contains("Decision: omit text and report the counts"));
     // Exactly one option is chosen.
     assert_eq!(doc.matches("Decision:").count(), 1);
+}
+
+/// Real DWG files, read through the acadrust provider. `g13_text.dwg` holds one `TEXT` and one
+/// `MTEXT`; `sample_AC1018.dwg` holds 29 and 5 (counted by `examples/text_policy_measure.rs`).
+#[cfg(feature = "dwg-acadrust")]
+mod dwg_files {
+    use super::*;
+    use libviprs::cad::CadSource;
+    use libviprs::pvec::dwg_acadrust::AcadrustProvider;
+    use libviprs::pvec::{DwgProvider, EntityScope};
+
+    fn count(rel: &str) -> TextReport {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(rel);
+        let p = AcadrustProvider::open(CadSource::Path(&path)).unwrap();
+        let mut all = Vec::new();
+        for l in p.layouts().unwrap() {
+            all.extend(
+                p.entities(&EntityScope::Layout(l.id))
+                    .unwrap()
+                    .collect_all()
+                    .unwrap(),
+            );
+        }
+        let mut r = TextReport::default();
+        r.count_dwg(&all);
+        r
+    }
+
+    #[test]
+    fn n5_5_g13_text_has_one_text_and_one_mtext() {
+        let r = count("tests/fixtures/cad/g13/g13_text.dwg");
+        assert_eq!((r.dwg.text, r.dwg.mtext), (1, 1));
+    }
+
+    #[test]
+    fn n5_5_a_dwg_without_text_counts_zero() {
+        assert_eq!(count("tests/fixtures/cad/g13/g13_line.dwg").omitted(), 0);
+    }
+
+    #[test]
+    fn n5_5_sample_ac1018_counts() {
+        let r = count("tests/fixtures/cad/sample_AC1018.dwg");
+        assert_eq!((r.dwg.text, r.dwg.mtext), (29, 5));
+    }
 }

@@ -44,6 +44,7 @@ use lopdf::content::{Content, Operation};
 use lopdf::{Dictionary, Document, Object};
 use thiserror::Error;
 
+use super::text_policy::{TextFontOutcome, TextReport, font_outcome};
 use crate::pdf::{PageRotation, PdfError, page_object_id, page_rotation_of, page_visible_box};
 
 /// A page-space point, `[x, y]`.
@@ -167,6 +168,8 @@ pub struct PdfVectorPage {
     pub entities: Vec<PdfPathEntity>,
     /// `Q` operators that had no matching `q`, which are ignored.
     pub unbalanced_restores: u32,
+    /// Text-showing operators seen and omitted, by operator and font outcome (N5.5).
+    pub text: TextReport,
 }
 
 /// Why an extraction failed.
@@ -291,6 +294,8 @@ pub fn extract_page_paths_from_bytes(
         stack: Vec::new(),
         clips: Vec::new(),
         soft_mask: false,
+        text: TextReport::default(),
+        font: TextFontOutcome::Unresolved,
     };
     let resources = inherited_resources(&doc, page_id);
     run.stream(&ops, resources, base, 0)?;
@@ -302,6 +307,7 @@ pub fn extract_page_paths_from_bytes(
         rotation_degrees: rotation.as_degrees(),
         entities: run.out,
         unbalanced_restores: run.unbalanced,
+        text: run.text,
     })
 }
 
@@ -557,6 +563,10 @@ struct Run<'a> {
     clips: Vec<u64>,
     /// A non-`None` `/SMask` is in force.
     soft_mask: bool,
+    /// Text omitted so far (N5.5).
+    text: TextReport,
+    /// The font the last `Tf` named, part of the graphics state.
+    font: TextFontOutcome,
 }
 
 /// What `q` saves and `Q` restores.
@@ -564,6 +574,7 @@ struct Saved {
     ctm: Matrix,
     clips: usize,
     soft_mask: bool,
+    font: TextFontOutcome,
 }
 
 /// The path being built by one stream, in page space, plus the user-space current
@@ -629,6 +640,7 @@ impl Run<'_> {
                         ctm,
                         clips: self.clips.len(),
                         soft_mask: self.soft_mask,
+                        font: self.font,
                     });
                 }
                 "Q" => {
@@ -637,6 +649,7 @@ impl Run<'_> {
                             ctm = saved.ctm;
                             self.clips.truncate(saved.clips);
                             self.soft_mask = saved.soft_mask;
+                            self.font = saved.font;
                         }
                     } else {
                         self.unbalanced += 1;
@@ -708,7 +721,10 @@ impl Run<'_> {
                 "b*" => self.paint(&mut path, op, Some(PdfFillRule::EvenOdd), true, true)?,
                 "gs" => self.ext_gstate(op, resources),
                 "Do" => self.do_xobject(op, resources, &ctm, depth)?,
-                // Colour, text, shading, marked content and the rest are other tasks'.
+                "Tf" => self.font = font_outcome(self.doc, resources, op.operands.first()),
+                // Text is omitted and counted (N5.5, docs/pvec-text-policy.md).
+                "Tj" | "TJ" | "'" | "\"" => self.text.record_pdf(&op.operator, self.font),
+                // Colour, shading, marked content and the rest are other tasks'.
                 _ => {}
             }
         }
