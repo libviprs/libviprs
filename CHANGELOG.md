@@ -19,6 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that is not a stream, a `cm` that overflows and a page box with no extent are typed errors instead
   of a shorter page. Filters other than Flate (alone, or after ASCIIHex/ASCII85) are refused as
   unbounded. Tests in `tests/pvec_pdf_limits.rs`, fuzz target `fuzz_pvec_pdf_vector`.
+- **The hatch and fill policy** (issue #1085, part of #1039). `docs/pvec-hatch-policy.md` records
+  what each fill construct becomes, and `pvec::fill_policy` is the same table as code plus
+  `FillReport`, which counts DWG `HATCH`/`SOLID`/`TRACE` and PDF fills, shadings and patterns with a
+  bucket and a reason. No fill becomes triangles: PDF fills keep their subpath geometry, everything
+  else is counted and reported. `PdfVectorPage` now carries `shading_paints` and
+  `pattern_selections`. No fill component and no kept hatch boundary yet (#1308).
 - **One table from normalized geometry to PVec** (issue #1089, part of #1039).
   `pvec::mapping::NORMALIZED_TO_PVEC` has a row per kind of normalized curve: the PVec type it
   becomes, the conformance class it claims, the PVec capability it needs and what it is classified

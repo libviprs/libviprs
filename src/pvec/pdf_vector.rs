@@ -176,6 +176,11 @@ pub struct PdfVectorPage {
     pub entities: Vec<PdfPathEntity>,
     /// `Q` operators that had no matching `q`, which are ignored.
     pub unbalanced_restores: u32,
+    /// `sh` operators seen, counted and not interpreted (N5.6).
+    pub shading_paints: u32,
+    /// Colour operators (`scn`, `SCN`) that selected a named pattern, counted and not
+    /// interpreted (N5.6).
+    pub pattern_selections: u32,
 }
 
 /// Why an extraction failed.
@@ -335,6 +340,8 @@ pub fn extract_page_paths_from_bytes(
         out: Vec::new(),
         operations: 0,
         unbalanced: 0,
+        shadings: 0,
+        patterns: 0,
         form_path: Vec::new(),
         stack: Vec::new(),
         clips: Vec::new(),
@@ -350,6 +357,8 @@ pub fn extract_page_paths_from_bytes(
         rotation_degrees: rotation.as_degrees(),
         entities: run.out,
         unbalanced_restores: run.unbalanced,
+        shading_paints: run.shadings,
+        pattern_selections: run.patterns,
     })
 }
 
@@ -853,6 +862,8 @@ struct Run<'a> {
     out: Vec<PdfPathEntity>,
     operations: u64,
     unbalanced: u32,
+    shadings: u32,
+    patterns: u32,
     form_path: Vec<String>,
     /// Saved graphics states. Shared across forms so the bound covers the whole expansion.
     stack: Vec<Saved>,
@@ -1014,7 +1025,13 @@ impl Run<'_> {
                 "b*" => self.paint(&mut path, op, Some(PdfFillRule::EvenOdd), true, true)?,
                 "gs" => self.ext_gstate(op, resources),
                 "Do" => self.do_xobject(op, resources, &ctm, depth)?,
-                // Colour, text, shading, marked content and the rest are other tasks'.
+                "sh" => self.shadings = self.shadings.saturating_add(1),
+                "scn" | "SCN" => {
+                    if matches!(op.operands.last(), Some(Object::Name(_))) {
+                        self.patterns = self.patterns.saturating_add(1);
+                    }
+                }
+                // Colour, text, marked content and the rest are other tasks'.
                 _ => {}
             }
             if path.segments.len() > self.limits.max_segments_per_path {
