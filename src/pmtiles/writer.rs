@@ -366,7 +366,10 @@ pub const DEDUPE_WINDOW_WAYS: usize = 8;
 /// `size_of`, so it cannot drift from the types it describes.
 pub const DEDUPE_BYTES_PER_PAYLOAD: usize = 65;
 
-/// How much memory the dedupe window spends when the caller says nothing.
+/// The most memory the dedupe window spends when the caller says nothing.
+///
+/// A ceiling, not an up-front allocation: the window grows as distinct payloads
+/// arrive (issue #1263), so a small pyramid never reaches it.
 ///
 /// Eight mebibytes, which tracks 129056 payloads. The number is a judgement
 /// about which jobs the window should still be exact for rather than an
@@ -555,9 +558,45 @@ fn least_recent(order: u32) -> usize {
     ((order >> (4 * (DEDUPE_WINDOW_WAYS - 1))) & 0xF) as usize
 }
 
+/// How many sets a lazily sized table starts with: 128 slots, about 8 KiB for
+/// the window. A table never starts larger than its cap.
+const INITIAL_SETS: usize = 16;
+
+/// Slots under which a table stays exact: 16384, which is 768 KiB of window.
+const EXACT_BELOW_SLOTS: usize = 16 * 1024;
+
+/// A table grows once more than half of its slots are taken. While it is under
+/// [`EXACT_BELOW_SLOTS`] it also grows when the set a new entry lands in is
+/// full.
+///
+/// The second rule keeps a small pyramid exact: an eviction below the cap
+/// would store a duplicate twice that a cap-sized window would have caught,
+/// and a pyramid that cycles over its payloads pays that on every cycle.
+/// Past the threshold it stops, because chasing the fullest of thousands of
+/// sets all the way to the cap would spend the whole budget on a pyramid that
+/// uses a fraction of it, which is the cost issue #1263 is about. Between the
+/// threshold and the cap a set that overflows evicts, as it always has at the
+/// cap.
+fn wants_growth(len: usize, slots: usize, set_full: bool) -> bool {
+    len * 2 > slots || (set_full && slots < EXACT_BELOW_SLOTS)
+}
+
+/// A set's ways from least to most recently used, so re-inserting in this
+/// order leaves the most recent way most recent.
+fn ways_oldest_first(order: u32) -> impl Iterator<Item = usize> {
+    (0..DEDUPE_WINDOW_WAYS)
+        .rev()
+        .map(move |pos| ((order >> (4 * pos)) & 0xF) as usize)
+}
+
 /// The payloads this writer can still deduplicate against.
 ///
-/// Fixed capacity, [`DEDUPE_WINDOW_WAYS`]-way set associative, LRU inside the
+/// Sized lazily (issue #1263): it starts small and doubles as payloads arrive,
+/// up to the cap the budget buys, so a small pyramid never pays for the 8 MiB
+/// default. Below the cap a doubling splits every set cleanly in two, because
+/// the set is a multiply-shift of the hash, so growing evicts nothing.
+///
+/// Fixed capacity once at the cap, [`DEDUPE_WINDOW_WAYS`]-way set associative, LRU inside the
 /// set. It replaced a `HashMap<[u8; 32], u64>` holding every payload the
 /// writer had ever seen, which was the whole of its remaining unbounded growth
 /// and, at ten million distinct payloads, the largest single allocation in the
@@ -593,15 +632,46 @@ struct DedupeWindow {
     slots: Box<[WindowSlot]>,
     recency: Box<[u32]>,
     sets: usize,
+    max_sets: usize,
+    len: usize,
 }
 
 impl DedupeWindow {
+    /// A window of exactly `sets` sets that never grows.
+    #[cfg(test)]
     fn with_sets(sets: usize) -> Self {
+        Self::sized(sets, sets)
+    }
+
+    /// A window that starts small and grows toward `max_sets`.
+    fn growing(max_sets: usize) -> Self {
+        Self::sized(max_sets.min(INITIAL_SETS), max_sets)
+    }
+
+    fn sized(sets: usize, max_sets: usize) -> Self {
         Self {
             slots: vec![WindowSlot::EMPTY; sets * DEDUPE_WINDOW_WAYS].into_boxed_slice(),
             recency: vec![RECENCY_IDENTITY; sets].into_boxed_slice(),
             sets,
+            max_sets,
+            len: 0,
         }
+    }
+
+    /// Double the set count (or reach the cap) and carry every payload over,
+    /// least recently used first.
+    fn grow(&mut self) {
+        let mut next = Self::sized((self.sets * 2).min(self.max_sets), self.max_sets);
+        for set in 0..self.sets {
+            let base = set * DEDUPE_WINDOW_WAYS;
+            for way in ways_oldest_first(self.recency[set]) {
+                let slot = self.slots[base + way];
+                if !slot.is_empty() {
+                    next.insert_slot(slot);
+                }
+            }
+        }
+        *self = next;
     }
 
     /// Which set a hash lands in.
@@ -632,16 +702,39 @@ impl DedupeWindow {
     /// Remember a payload, evicting the set's least recently used entry if
     /// every way is taken.
     fn insert(&mut self, hash: [u8; 32], data_offset: u64, length: u32) {
-        let set = self.set_of(&hash);
-        let base = set * DEDUPE_WINDOW_WAYS;
-        let way = (0..DEDUPE_WINDOW_WAYS)
-            .find(|way| self.slots[base + way].is_empty())
-            .unwrap_or_else(|| least_recent(self.recency[set]));
-        self.slots[base + way] = WindowSlot {
+        // Below the cap nothing is evicted: grow while the table is getting
+        // full, or while the set this hash lands in has no free way.
+        while self.sets < self.max_sets
+            && (wants_growth(self.len, self.slots.len(), self.set_is_full(&hash)))
+        {
+            self.grow();
+        }
+        self.insert_slot(WindowSlot {
             hash,
             data_offset,
             length,
+        });
+    }
+
+    fn set_is_full(&self, hash: &[u8; 32]) -> bool {
+        let base = self.set_of(hash) * DEDUPE_WINDOW_WAYS;
+        self.slots[base..base + DEDUPE_WINDOW_WAYS]
+            .iter()
+            .all(|slot| !slot.is_empty())
+    }
+
+    fn insert_slot(&mut self, slot: WindowSlot) {
+        let hash = slot.hash;
+        let set = self.set_of(&hash);
+        let base = set * DEDUPE_WINDOW_WAYS;
+        let way = match (0..DEDUPE_WINDOW_WAYS).find(|way| self.slots[base + way].is_empty()) {
+            Some(way) => {
+                self.len += 1;
+                way
+            }
+            None => least_recent(self.recency[set]),
         };
+        self.slots[base + way] = slot;
         self.recency[set] = touch(self.recency[set], way);
     }
 }
@@ -678,10 +771,18 @@ struct RepeatTable {
     slots: Box<[RepeatSlot]>,
     recency: Box<[u32]>,
     sets: usize,
+    max_sets: usize,
+    len: usize,
 }
 
 impl RepeatTable {
-    fn with_sets(sets: usize) -> Self {
+    /// Starts small and grows toward `max_sets`, like [`DedupeWindow`]. Zero
+    /// stays zero.
+    fn growing(max_sets: usize) -> Self {
+        Self::sized(max_sets.min(INITIAL_SETS), max_sets)
+    }
+
+    fn sized(sets: usize, max_sets: usize) -> Self {
         Self {
             slots: vec![
                 RepeatSlot {
@@ -693,7 +794,23 @@ impl RepeatTable {
             .into_boxed_slice(),
             recency: vec![RECENCY_IDENTITY; sets].into_boxed_slice(),
             sets,
+            max_sets,
+            len: 0,
         }
+    }
+
+    fn grow(&mut self) {
+        let mut next = Self::sized((self.sets * 2).min(self.max_sets), self.max_sets);
+        for set in 0..self.sets {
+            let base = set * DEDUPE_WINDOW_WAYS;
+            for way in ways_oldest_first(self.recency[set]) {
+                let slot = self.slots[base + way];
+                if slot.staged != NO_STAGED_OFFSET {
+                    next.place_slot(slot);
+                }
+            }
+        }
+        *self = next;
     }
 
     /// Which set an offset lands in.
@@ -716,13 +833,37 @@ impl RepeatTable {
                 return;
             }
         }
-        let way = (0..DEDUPE_WINDOW_WAYS)
-            .find(|way| self.slots[base + way].staged == NO_STAGED_OFFSET)
-            .unwrap_or_else(|| least_recent(self.recency[set]));
-        self.slots[base + way] = RepeatSlot {
+        while self.sets < self.max_sets
+            && (wants_growth(self.len, self.slots.len(), self.set_is_full(staged)))
+        {
+            self.grow();
+        }
+        self.place_slot(RepeatSlot {
             staged,
             placed: UNPLACED,
+        });
+    }
+
+    fn set_is_full(&self, staged: u64) -> bool {
+        let base = self.set_of(staged) * DEDUPE_WINDOW_WAYS;
+        self.slots[base..base + DEDUPE_WINDOW_WAYS]
+            .iter()
+            .all(|slot| slot.staged != NO_STAGED_OFFSET)
+    }
+
+    fn place_slot(&mut self, slot: RepeatSlot) {
+        let set = self.set_of(slot.staged);
+        let base = set * DEDUPE_WINDOW_WAYS;
+        let way = match (0..DEDUPE_WINDOW_WAYS)
+            .find(|way| self.slots[base + way].staged == NO_STAGED_OFFSET)
+        {
+            Some(way) => {
+                self.len += 1;
+                way
+            }
+            None => least_recent(self.recency[set]),
         };
+        self.slots[base + way] = slot;
         self.recency[set] = touch(self.recency[set], way);
     }
 
@@ -1432,7 +1573,7 @@ impl<W: Write + Seek> Writer<W> {
             staged,
             log: Some(Staging::Real(BufWriter::new(log))),
             log_len: 0,
-            window: Some(DedupeWindow::with_sets(sets)),
+            window: Some(DedupeWindow::growing(sets)),
             // Under `Layout::Arrival` a payload's staged offset is already its
             // final one, so nothing ever asks where a payload was placed and
             // the table has no reader. It is 16.5 of the 65 bytes a tracked
@@ -1445,7 +1586,7 @@ impl<W: Write + Seek> Writer<W> {
             // better answer and it is not this issue's: it moves what
             // `with_dedupe_memory_bytes` means, and the documented 65 bytes a
             // payload is a contract with its own test.
-            repeats: RepeatTable::with_sets(match layout {
+            repeats: RepeatTable::growing(match layout {
                 Layout::TileId => sets,
                 Layout::Arrival => 0,
             }),

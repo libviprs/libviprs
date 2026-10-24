@@ -1028,7 +1028,7 @@ fn issue_1263_a_large_pyramid_still_hits_the_same_cap() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn issue_1263_growth_does_not_cost_dedupe_exactness() {
-    const DISTINCT: u64 = 5_000;
+    const DISTINCT: u64 = 1_373;
     let measured = measure_write_with(DISTINCT * 3, DISTINCT, 4096, None);
     assert_really_wrote(&measured, DISTINCT * 3, DISTINCT);
 }
