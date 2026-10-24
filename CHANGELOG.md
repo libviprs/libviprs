@@ -13,6 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   arc or ellipse whose normal is exactly (0, 0, -1) is now mapped to world space (a mirror about the y
   axis through PVec's `Transform2`, elevation negated) instead of refused. Any other normal is 3D and
   still comes back as `extrusion-not-applied`.
+- **The monochrome line-style component** (issue #1083, part of #1039). `pvec::style` is an
+  independent, optional component keyed by `EntityId`: stroke width (`w 0` is `Thinnest`, never a
+  zero and never absent), dash array and phase, and a visibility flag, all `f64` in source units.
+  `PdfPathEntity` records the raw `w` and `d` next to the path, `PdfVectorPage` counts colour
+  operators, and `pdf_line_styles` builds components and a report whose colour rows read
+  `IgnoredByPolicy { reason: MonochromeProfile }`. A negative or non-finite dash entry (with its
+  index), an all-zero dash array and a non-finite width are refused, not normalized.
+  `dwg_line_style` takes lineweight and linetype as plain values until the provider reports them.
+  Writing into PVec's `LineStyleStream` waits on PVec growing width, phase and visibility fields.
 - **The v1 text capability policy** (issue #1084, part of #1039). v1 omits text and reports the
   counts: `pvec::text_policy` counts every PDF `Tj`, `TJ`, `'` and `"` (on `PdfVectorPage::text`,
   forms expanded) and every DWG `TEXT` and `MTEXT`, and buckets each by font situation (not
