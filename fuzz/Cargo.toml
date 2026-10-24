@@ -55,3 +55,8 @@ doc = false
 name = "fuzz_pmtiles_reader"
 path = "fuzz_targets/fuzz_pmtiles_reader.rs"
 doc = false
+
+[[bin]]
+name = "fuzz_vector_tiler"
+path = "fuzz_targets/fuzz_vector_tiler.rs"
+doc = false

@@ -190,6 +190,11 @@ impl DiagnosticCode {
     /// A view that was asked for and is not enabled: paper space, until the
     /// viewport transform and clipping fixtures pass.
     pub const VIEW_NOT_ENABLED: Self = Self(508);
+    /// A label cut short because it was longer than the output will carry in
+    /// one feature. A viewer lays a string out whole, so an unbounded one is a
+    /// way to stall every client that opens the tile; the cut is named here
+    /// instead of being silent.
+    pub const TEXT_TRUNCATED: Self = Self(509);
 
     /// The lowest code libviprs itself allocates.
     pub const CORE_RANGE_START: u32 = 500;
@@ -301,7 +306,8 @@ impl DiagnosticCode {
             | Self::EMPTY_VIEW
             | Self::FONT_SUBSTITUTED
             | Self::GLYPH_UNAVAILABLE
-            | Self::TEXT_FORMAT_IGNORED => Severity::Warning,
+            | Self::TEXT_FORMAT_IGNORED
+            | Self::TEXT_TRUNCATED => Severity::Warning,
             other if other.is_core_allocated() => Severity::Error,
             _ => Severity::Warning,
         }
@@ -329,6 +335,7 @@ impl DiagnosticCode {
             Self::GLYPH_UNAVAILABLE => "glyph unavailable",
             Self::TEXT_FORMAT_IGNORED => "text format ignored",
             Self::VIEW_NOT_ENABLED => "view not enabled",
+            Self::TEXT_TRUNCATED => "text truncated",
             other if other.is_provider_allocated() => "a code the provider allocated",
             _ => "a code this build has no name for",
         }
@@ -1038,6 +1045,7 @@ mod tests {
             DiagnosticCode::GLYPH_UNAVAILABLE,
             DiagnosticCode::TEXT_FORMAT_IGNORED,
             DiagnosticCode::VIEW_NOT_ENABLED,
+            DiagnosticCode::TEXT_TRUNCATED,
         ] {
             assert!(code.is_core_allocated(), "{code} is a libviprs code");
         }
@@ -1123,6 +1131,7 @@ mod tests {
             (DiagnosticCode::GLYPH_UNAVAILABLE, Warning),
             (DiagnosticCode::TEXT_FORMAT_IGNORED, Warning),
             (DiagnosticCode::VIEW_NOT_ENABLED, Error),
+            (DiagnosticCode::TEXT_TRUNCATED, Warning),
         ] {
             assert_eq!(code.default_severity(), expected, "{code}");
         }

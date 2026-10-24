@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Hardening for large and hostile drawings** (issue #1036). The tiler takes a
+  wall-clock `deadline` and a `cancel` token, polled inside a single primitive
+  as well as between them (`TilerError::Cancelled`, `DeadlineExceeded`), and a
+  cancelled or timed out `build_archive` leaves nothing at its destination.
+  `max_level_bytes` bounds one zoom level by an estimate that counts the
+  bookkeeping around every run and tile, which `max_level_points` does not (a
+  line split over millions of tiles used to reach 6.5 GB before the point
+  budget fired), and `LevelBudgetExceeded` now says whether the limit was
+  points or bytes. `max_text_bytes` cuts one label (16 KiB by default) and
+  reports it as `TEXT_TRUNCATED` (509) and `TilerReport::text_truncated`.
+  `acadsharp::ProviderLimits::hardened()` sets every bound the DWG reader
+  accepts. A worker test runs the conversion in a child under a memory ceiling
+  and a wall-clock supervisor, a mutated-DWG corpus runs 1,920 hostile files
+  through the real decoder in child processes, there is a `fuzz_vector_tiler`
+  target, and `docs/vector-performance-report.md` has the measured numbers.
+  `CancelToken` is now `PartialEq` (two tokens are equal when they are clones).
+
 - **MTEXT formatting, font and glyph warnings, Model Space only, and a bound on
   repeated blocks** (issues #1231, part of #1034). `cad::display_text` reads
   MTEXT codes (`\P`, stacks, font and height changes) out of a string and

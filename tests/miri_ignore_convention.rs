@@ -471,7 +471,12 @@ const EXPECTED_SRC_MODULES: usize = 31;
 /// #1181 adds 4: the cells in `tests/local_ci_docker_slot.rs` run
 /// `tools/local-ci.py` with a stub docker on PATH to see whether it waits for
 /// a Docker slot. It said 37 before this line moved.
-const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 46;
+///
+/// #1036 adds 4: the three `tests/vector_1036_worker.rs` cells, which run a
+/// conversion in a child under `ulimit -v` and a wall clock, and
+/// `tests/vector_1036_dwg_corpus.rs::mutated_drawings_never_take_the_process_down`,
+/// which decodes each mutated drawing in a child. It said 46 before this line moved.
+const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 50;
 
 /// The filesystem-touching tests still allowed to run under Miri, and so still
 /// allowed to end the whole run on their first syscall.
@@ -790,7 +795,8 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1044 adds 20: `tests/spike_transform_matrix.rs`, which reads the spike document, the harness output and the harness source. It said 579 before this line moved.
 /// #1045 adds 26: `tests/spike_pdf_normalization.rs`, which reads the spike document, the harness output and its own directory listing. It said 599 before this line moved.
 /// #1042 adds 20: `tests/spike_dwg_mapping.rs`, which reads the spike document, its results and its own directory listing. It said 625 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 645;
+/// #1036 adds 10: the `tests/vector_1036_*.rs` cells that build an archive in a temp dir, spawn a child that does, or read a committed DWG fixture. It said 645 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 655;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
