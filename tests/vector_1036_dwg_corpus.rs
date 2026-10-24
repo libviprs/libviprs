@@ -21,6 +21,8 @@ use libviprs::vector::tiler::{TilerConfig, build_archive_from_view};
 
 const FILE: &str = "VIPRS_L23_FILE";
 const MUTATIONS: u64 = 40;
+/// The longest one file's mutations may take, in a debug build on a busy host.
+const FILE_WALL: Duration = Duration::from_secs(300);
 /// A drawing that opens and decodes is a pass, and so is one that is refused.
 const EXIT_PROCESSED: i32 = 0;
 
@@ -144,13 +146,23 @@ fn mutated_drawings_never_take_the_process_down() {
     let mut decoded = 0usize;
     for file in fixtures() {
         let t = Instant::now();
-        let out = Command::new(&exe)
+        let mut child = Command::new(&exe)
             .args(["--exact", "child_entry", "--nocapture", "--test-threads=1"])
             .env(FILE, &file)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .output()
+            .spawn()
             .unwrap();
+        // A decoder that hangs on a mutation is a finding, not a stuck suite.
+        // Output is a few dozen short lines, well inside a pipe's buffer.
+        while child.try_wait().unwrap().is_none() {
+            if t.elapsed() >= FILE_WALL {
+                child.kill().ok();
+                panic!("{} did not finish within {FILE_WALL:?}", file.display());
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let out = child.wait_with_output().unwrap();
         let last = String::from_utf8_lossy(&out.stdout)
             .lines()
             .rev()
