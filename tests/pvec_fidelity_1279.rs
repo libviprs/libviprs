@@ -1,9 +1,8 @@
 //! N3.5b (#1279): the view profile hands its field names to the classification, and the
 //! unresolved-block reason is a code of its own.
 
-use libviprs::pvec::{
-    Classification, Exclusion, FidelityClass, LayerStateRule, ReasonCode, ViewProfile,
-};
+use libviprs::pvec::fidelity::Classification;
+use libviprs::pvec::{Exclusion, FidelityClass, LayerStateRule, ReasonCode, ViewProfile};
 
 #[test]
 fn n3_5b_1279_every_exclusion_names_a_field_the_profile_has() {
@@ -23,7 +22,12 @@ fn n3_5b_1279_default_profile_names_every_field_that_can_exclude() {
     fields.sort_unstable();
     assert_eq!(
         fields,
-        vec!["layers.frozen", "layers.off", "nested_inserts.max_depth", "xrefs"]
+        vec![
+            "layers.frozen",
+            "layers.off",
+            "nested_inserts.max_depth",
+            "xrefs"
+        ]
     );
 }
 
