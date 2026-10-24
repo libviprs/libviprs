@@ -208,6 +208,9 @@ fn the_report_names_the_limits_and_the_follow_up() {
         "ulimit -v",
         "#1256",
     ] {
-        assert!(report.contains(needle), "the report no longer names {needle}");
+        assert!(
+            report.contains(needle),
+            "the report no longer names {needle}"
+        );
     }
 }
