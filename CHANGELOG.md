@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The v1 text capability policy** (issue #1084, part of #1039). v1 omits text and reports the
+  counts: `pvec::text_policy` counts every PDF `Tj`, `TJ`, `'` and `"` (on `PdfVectorPage::text`,
+  forms expanded) and every DWG `TEXT` and `MTEXT`, and buckets each by font situation (not
+  embedded, subset, CID without `/ToUnicode`, missing SHX, plus embedded and unresolved). No string
+  or outline reaches geometry and no font dependency is added. The decision, with measurements on
+  26 licensed PDFs and the committed DWG probes, is in `docs/pvec-text-policy.md`.
 - **A fence around what libviprs names from PVec** (issue #1088, part of #1039).
   `tests/pvec_api_surface.rs` scans `src/` for `pvec_*::` paths and fails on any crate root that
   is not `pvec_geometry` or `pvec_numeric`, or any path with a container, block, index or

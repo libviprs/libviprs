@@ -56,6 +56,7 @@ pub mod pdf_vector;
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
 pub mod provenance;
 pub mod provider;
+pub mod text_policy;
 #[cfg(feature = "pvec-normalized")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
 pub mod transform;
@@ -94,6 +95,9 @@ pub use provider::{
     FacetSource, InstancePath, InstanceStep, LayerState, LayoutId, LayoutKind, LayoutState, Point3,
     ProvenanceStub, ProviderCaps, ProviderError, RawEntity, RawGeometry, RawVertex, SourceFact,
     SourceTransform,
+};
+pub use text_policy::{
+    DwgTextCounts, PdfTextOperatorCounts, TextFontOutcome, TextReport, shx_outcome,
 };
 
 #[cfg(feature = "pvec-normalized")]
