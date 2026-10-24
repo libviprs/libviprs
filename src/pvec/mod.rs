@@ -34,6 +34,10 @@ pub mod provider;
 #[cfg_attr(docsrs, doc(cfg(feature = "dwg-acadrust")))]
 pub mod dwg_acadrust;
 
+#[cfg(feature = "pvec-spline")]
+#[cfg_attr(docsrs, doc(cfg(feature = "pvec-spline")))]
+pub mod dwg_spline;
+
 pub use pdf_vector::{
     PdfFillRule, PdfPaintIntent, PdfPathEntity, PdfPathSegment, PdfPoint, PdfProvenance,
     PdfVectorError, PdfVectorLimits, PdfVectorPage, extract_page_paths,
