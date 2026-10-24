@@ -294,6 +294,21 @@ const CELLS: &[Cell] = &[
         runtime_loaders: &[],
         vendored_native: BLAKE3,
     },
+    // The acadrust DWG provider (N4.1, #1072). A pure-Rust reader: no `links`, no
+    // build script of its own beyond what the host cell already has, no runtime
+    // loader. It is a git dependency pinned by revision, so the only thing this cell
+    // adds to the graph is crates, and the claim the feature's Cargo.toml comment
+    // makes is that none of them is native.
+    Cell {
+        label: "host / dwg-acadrust",
+        target: HOST,
+        features: &["--features", "dwg-acadrust"],
+        edges: "normal,build",
+        links: &[RAYON],
+        discovery: &[],
+        runtime_loaders: &[],
+        vendored_native: BLAKE3,
+    },
     // Every remaining feature at once. These are the ones whose Cargo.toml
     // comments say they add no dependencies, so the cell is the check on that.
     Cell {
@@ -857,6 +872,16 @@ fn the_external_library_features_stay_opt_in() {
             asked_for_dwg,
             "{} must reach acadsharp-rs only under `dwg-acadsharp`. It owns a native \
              library through `links`, so it stays opt-in (CONTRIBUTING.md).",
+            cell.label
+        );
+
+        let asked_for_acadrust = cell.features.iter().any(|f| f.contains("dwg-acadrust"))
+            || cell.features.contains(&"--all-features");
+        assert_eq!(
+            contains(graph, "acadrust"),
+            asked_for_acadrust,
+            "{} must reach acadrust only under `dwg-acadrust`. It is pure Rust and ships no \
+             native code, but it is a git dependency, so it stays opt-in (CONTRIBUTING.md).",
             cell.label
         );
 

@@ -181,6 +181,7 @@ pub mod pixel;
 pub mod planner;
 pub mod pmtiles;
 pub(crate) mod poison;
+pub mod pvec;
 pub mod pyramid_migrate;
 pub mod pyramid_reader;
 pub mod radiance;

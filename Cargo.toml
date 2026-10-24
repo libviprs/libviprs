@@ -498,6 +498,8 @@ object-store-sink = []
 # resolves, and a build with no archive still compiles and reports `Unlinked`
 # from `AcadSharpDecoder::new` instead of failing.
 dwg-acadsharp = ["dep:acadsharp-rs"]
+# Red stub: the acadrust provider of N4.1 (issue #1072). The dependency lands with the implementation.
+dwg-acadrust = []
 # Documentation-only deprecated alias for `object-store-sink`. Cargo has no
 # mechanism to mark a feature deprecated, so enabling `s3` emits NO build-time
 # warning: consumers pinned to `features = ["s3"]` get zero automated signal
