@@ -397,50 +397,16 @@ jobs:
       # and rustc takes the last lint-level flag on the command line, so this
       # does win. Verified with `cargo build -v`.
       #
-      # `--cfg sha2_backend="soft"` pins sha2's portable backend (#707), and it
-      # matters locally rather than here. Be exact about that, because the first
-      # version of this comment was not.
-      #
-      # Under Miri, `cpufeatures` does not detect anything at runtime. It
-      # compiles to `cpufeatures-0.3.1/src/miri.rs`, where the detection macro is
-      # replaced by `cfg!(all(target_feature = ...))` and the probe by a constant
-      # `false`. So sha2's backend is chosen at *compile* time, from the
-      # target's baseline features. `rustc --print cfg` settles what those are:
-      # `aarch64-apple-darwin` carries `target_feature="sha2"`, and
-      # `x86_64-unknown-linux-gnu` carries `sse2` but none of `sha`, `ssse3` or
-      # `sse4.1`, which is what sha2's x86 path needs.
-      #
-      # That paragraph is 0.3.1's and only 0.3.1's: in `cpufeatures` 0.3.0
-      # the detection macro is a bare `false`, so Miri never selects the NEON
-      # path, nothing reproduces, and a stale lock reads as though #707 is
-      # already fixed (#731).
-      #
-      # That gives two different facts, not one. On the dev machine the NEON
-      # backend is selected and the run reaches `vld1q_u32(&K32[0])`, a 16 byte
-      # load through a `&u32` whose retag covers four, and aborts about 30
-      # seconds in on a Stacked Borrows violation. On this runner the portable
-      # backend was already being selected, so the flag changes nothing at all
-      # here and costs no coverage: the SIMD path it gives up was never compiled
-      # in the first place. It is set on both sides so the two invocations stay
-      # one string, and so that a runner image moving to arm64 would not quietly
-      # reintroduce the abort.
-      #
-      # The violation itself is on file against Miri as rust-lang/miri#3900,
-      # "SIMD load intrinsics false positive", closed as not planned, so it is
-      # Stacked Borrows being stricter than the model that eventually lands
-      # rather than something that can go wrong at runtime.
-      #
-      # `-Zmiri-tree-borrows` clears it too, measured. It is not used because it
-      # is the larger change of the two: it swaps the aliasing model for the
-      # whole run, and Tree Borrows accepts this pattern by design rather than by
-      # accident, so it would also be a defensible answer. What it is not is a
-      # *safer* one, and the argument that it "changes the model every test is
-      # checked against" is worth discounting while no test is being checked at
-      # all. If the backend pin ever becomes awkward, switching is a one line
-      # change here and in the `Makefile`.
+      # There is no sha2 backend pin here any more. `--cfg sha2_backend="soft"`
+      # used to keep a Miri run off sha2's aarch64 NEON path, where 0.11.0
+      # loaded sixteen bytes through a four byte retag and Stacked Borrows
+      # aborted the run (#707). sha2 0.11.1 fixed the loads, `Cargo.toml` floors
+      # the dependency at 0.11.1, and `tests/dependency_policy.rs` holds a fresh
+      # resolve to that floor (#1248). This runner is x86_64 and never selected
+      # the NEON path anyway, so nothing about its coverage changes.
       - run: 'cargo +nightly miri test --lib -- analyze:: avif:: bands:: cancel:: checksum:: codec:: composite:: dedupe:: encode_tiff:: exr:: extensions:: frames:: freqfilt:: geo:: hex:: jp2k:: jxl:: level_walk:: manifest:: mat:: nifti:: pixel:: radiance:: raster_ops:: resize:: resume:: retry:: sink:: svg:: sync_queue:: textio:: webp::'
         env:
-          RUSTFLAGS: '-A deprecated -A deprecated_in_future --cfg sha2_backend="soft"'
+          RUSTFLAGS: '-A deprecated -A deprecated_in_future'
 
   loom:
     name: Loom
