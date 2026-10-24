@@ -28,6 +28,7 @@
 //! ([`CadSource`](crate::cad::CadSource) and [`ItemHandle`](crate::cad::ItemHandle)).
 
 pub mod classify;
+pub mod limits;
 #[cfg(feature = "pvec-normalized")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
 pub mod normalized;
@@ -47,6 +48,7 @@ pub use classify::{
     ClassSource, Classification, ClassificationReport, ElementClass, ElementRule, ElementRules,
     RuleMatch,
 };
+pub use limits::{Limit, LimitError, SourceGuard, SourceLimits};
 pub use pdf_vector::{
     PdfFillRule, PdfPaintIntent, PdfPathEntity, PdfPathSegment, PdfPoint, PdfProvenance,
     PdfVectorError, PdfVectorLimits, PdfVectorPage, extract_page_paths,
