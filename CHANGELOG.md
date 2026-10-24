@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The hatch and fill policy** (issue #1085, part of #1039). `docs/pvec-hatch-policy.md` records
+  what each fill construct becomes, and `pvec::fill_policy` is the same table as code plus
+  `FillReport`, which counts DWG `HATCH`/`SOLID`/`TRACE` and PDF fills, shadings and patterns with a
+  bucket and a reason. No fill becomes triangles: PDF fills keep their subpath geometry, everything
+  else is counted and reported. `PdfVectorPage` now carries `shading_paints` and
+  `pattern_selections`. No fill component and no kept hatch boundary yet (#1308).
 - **The normalized geometry dump** (issue #1103, part of #1039). `pvec::dump::NormalizedDump`
   writes a line-oriented text dump of `Normalized2DGeometry` records (id, type, fidelity class,
   source-space parameters at round-trip `f64` precision, bounds, optional provenance) as each

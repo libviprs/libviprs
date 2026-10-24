@@ -4,11 +4,11 @@
 //! here. The DWG counts come from the committed `g13_hatch` and `g13_solid` drawings, which are
 //! the in-tree stand-ins until the O2.1/O2.2 corpus is integrated (see the policy doc).
 
+use libviprs::pvec::FidelityClass;
 use libviprs::pvec::fill_policy::{
     FILL_POLICY, FillConstruct, FillDecision, FillReport, policy_for,
 };
 use libviprs::pvec::pdf_vector::{PdfVectorLimits, PdfVectorPage, extract_page_paths_from_bytes};
-use libviprs::pvec::FidelityClass;
 use lopdf::{Dictionary, Document, Object, Stream, dictionary};
 
 fn one_page(body: &str) -> Vec<u8> {
@@ -88,7 +88,16 @@ fn n5_6_the_doc_has_a_row_for_every_construct_and_reason() {
             r.reason
         );
     }
-    for needle in ["HATCH", "SOLID", "TRACE", "f*", "sh", "/Pattern", "g13_hatch", "g13_solid"] {
+    for needle in [
+        "HATCH",
+        "SOLID",
+        "TRACE",
+        "f*",
+        "sh",
+        "/Pattern",
+        "g13_hatch",
+        "g13_solid",
+    ] {
         assert!(doc.contains(needle), "the doc never mentions {needle}");
     }
 }
@@ -198,20 +207,21 @@ mod dwg {
         let es = all("g13_hatch");
         let mut r = FillReport::new();
         r.count_dwg_entities(&es);
-        assert_eq!(r.count(FillConstruct::DwgHatch), 1);
+        assert_eq!(r.count(FillConstruct::DwgHatch), 5);
         assert_eq!(r.count(FillConstruct::DwgSolid), 0);
         // Nothing a hatch brings is a mapped triangle or point set.
-        assert!(es
-            .iter()
-            .filter(|e| e.provenance.class_name.eq_ignore_ascii_case("HATCH"))
-            .all(|e| matches!(e.geometry, RawGeometry::Unmapped { .. })));
+        assert!(
+            es.iter()
+                .filter(|e| e.provenance.class_name.eq_ignore_ascii_case("HATCH"))
+                .all(|e| matches!(e.geometry, RawGeometry::Unmapped { .. }))
+        );
     }
 
     #[test]
     fn n5_6_g13_solid_reports_its_solids() {
         let mut r = FillReport::new();
         r.count_dwg_entities(&all("g13_solid"));
-        assert_eq!(r.count(FillConstruct::DwgSolid), 1);
+        assert_eq!(r.count(FillConstruct::DwgSolid), 3);
         assert_eq!(r.count(FillConstruct::DwgHatch), 0);
     }
 }
