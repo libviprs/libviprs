@@ -293,7 +293,7 @@ impl VectorArchiveOptions {
     }
 }
 
-fn gzip(bytes: &[u8]) -> Result<Vec<u8>, PmTilesError> {
+pub(crate) fn gzip(bytes: &[u8]) -> Result<Vec<u8>, PmTilesError> {
     let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
     enc.write_all(bytes)?;
     Ok(enc.finish()?)

@@ -1,0 +1,19 @@
+# Throwaway measurement harness for N1.3 (#1042). Not a member of any libviprs workspace: the empty
+# [workspace] table below keeps it out of the crate's lockfile and dependency policy.
+#
+# It maps the decoded records of the r0-open corpus (libviprs/pvec-gold-fixtures, tag corpus-r0-open)
+# into PVec's public semantic API and compares the result with each fixture's expected.math.json.
+# PVec and the corpus are staged next to this crate by run.sh from pinned revisions, so nothing here
+# reads a tolerance from anywhere but pvec-numeric.
+[package]
+name = "dwg-mapping-harness"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+pvec-geometry = { path = "../pvec-src/crates/pvec-geometry" }
+pvec-numeric = { path = "../pvec-src/crates/pvec-numeric" }
+serde_json = "1"

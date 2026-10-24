@@ -32,6 +32,7 @@
 
 pub mod archive;
 pub mod clip;
+pub mod convert;
 pub mod mvt;
 pub mod style;
 pub mod tessellate;
@@ -39,4 +40,8 @@ pub mod tiler;
 
 pub use archive::{
     FieldType, LayerSchema, VectorArchive, VectorArchiveOptions, VectorArchiveWriter, VectorError,
+};
+pub use convert::{
+    ArchiveInfo, CheckReport, Conversion, ConvertError, ConvertOptions, ViewSelector, check,
+    convert, default_decoder, inspect, list_views, report, select_view,
 };

@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A public Rust API for the vector path** (issue #1035, part of #1028).
+  `vector::convert` is the one engine: `list_views`, `select_view`, `convert`
+  (a view to a vector PMTiles archive, staged, synced and renamed into place,
+  nothing left behind when it fails, is cancelled or passes its deadline),
+  `report` (the same run with no file, for fidelity and budget numbers),
+  `inspect` and `check` (an archive's description and its validation), and
+  `default_decoder`, which is the ACadSharp provider when `dwg-acadsharp` is
+  built and `ConvertError::ProviderNotBuilt` when it is not. Results come back
+  as `Conversion`, `ArchiveInfo` and `CheckReport`, each with a `to_json()` that
+  the `viprs vector` command prints, so the CLI and the library cannot give
+  different answers. `tiler::report_view` and `tiler::MeasureTiles` are the
+  tiler half of `report`. `docs/vector-providers.md` explains the provider
+  dependency and how to build without it.
+
+- **Hardening for large and hostile drawings** (issue #1036). The tiler takes a
+  wall-clock `deadline` and a `cancel` token, polled inside a single primitive
+  as well as between them (`TilerError::Cancelled`, `DeadlineExceeded`), and a
+  cancelled or timed out `build_archive` leaves nothing at its destination.
+  `max_level_bytes` bounds one zoom level by an estimate that counts the
+  bookkeeping around every run and tile, which `max_level_points` does not (a
+  line split over millions of tiles used to reach 6.5 GB before the point
+  budget fired), and `LevelBudgetExceeded` now says whether the limit was
+  points or bytes. `max_text_bytes` cuts one label (16 KiB by default) and
+  reports it as `TEXT_TRUNCATED` (509) and `TilerReport::text_truncated`.
+  `acadsharp::ProviderLimits::hardened()` sets every bound the DWG reader
+  accepts. A worker test runs the conversion in a child under a memory ceiling
+  and a wall-clock supervisor, a mutated-DWG corpus runs 1,920 hostile files
+  through the real decoder in child processes, there is a `fuzz_vector_tiler`
+  target, and `docs/vector-performance-report.md` has the measured numbers.
+  `CancelToken` is now `PartialEq` (two tokens are equal when they are clones).
+
 - **`pvec`, the replaceable DWG provider traits, and an acadrust provider behind
   `dwg-acadrust`** (issue #1072, part of #1039). `pvec::DwgProvider` and
   `pvec::EntityCursor` are the seam Epic N reads a drawing through: layouts,

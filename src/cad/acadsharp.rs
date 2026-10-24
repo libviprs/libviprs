@@ -84,6 +84,25 @@ pub struct ProviderLimits {
 }
 
 impl ProviderLimits {
+    /// The bounds an untrusted upload is read under.
+    ///
+    /// [`ProviderLimits::default`] sets none, which is right for a drawing you
+    /// made and wrong for one a stranger did. Every field is set here: a
+    /// quarter of a gigabyte of input, ten million entities, a megabyte per
+    /// string, a million points per record, 64 levels of nesting and two
+    /// gigabytes of output.
+    #[must_use]
+    pub const fn hardened() -> Self {
+        Self {
+            max_input_bytes: Some(256 << 20),
+            max_entities: Some(10_000_000),
+            max_string_bytes: Some(1 << 20),
+            max_polyline_points: Some(1_000_000),
+            max_block_depth: Some(64),
+            max_output_bytes: Some(2 << 30),
+        }
+    }
+
     fn to_native(self) -> acs::Limits {
         let mut limits = acs::Limits::new();
         if let Some(v) = self.max_input_bytes {
