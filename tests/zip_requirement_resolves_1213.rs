@@ -391,21 +391,28 @@ fn packfile_round_trips_against_a_live_zip_release_1213() {
 // Controls: the probe can tell yanked from live
 // ---------------------------------------------------------------------------
 
-/// `zip = "=7.2.0"` is the release the manifest's requirement starts at, and
-/// the registry has yanked it (2026-10-13). The probe has to say so, in cargo's
-/// words, or the tests above could pass for want of looking. If this ever goes
-/// red because upstream un-yanked 7.x, the manifest's requirement has become
-/// satisfiable again and the file above it needs a new control.
+/// `zip = "=2.0.0"` is a release the registry has yanked, and the probe has to
+/// say so, in cargo's words, or the tests above could pass for want of looking.
+///
+/// This control used to be `=7.2.0`, the release the manifest's requirement
+/// started at when it broke (#1213). Upstream later un-yanked the 7.x line
+/// (7.0.0 through 7.4.0 are live now), so that control went red with "zip
+/// =7.2.0 resolved" while the probe was working exactly as intended (#1249).
+/// A yanked release can be un-yanked, so the next time this goes red, check the
+/// registry (`https://index.crates.io/zi/p/zip`, entries with `"yanked":true`)
+/// and move the control to a release that is still yanked. Do not loosen the
+/// assertion: the control exists to show that cargo refuses a requirement with
+/// only yanked releases and names the one it refused.
 #[test]
 #[cfg_attr(miri, ignore)] // spawns a process and writes a probe crate, neither of which Miri allows (#714)
 fn control_a_requirement_with_only_yanked_releases_is_refused_1213() {
-    match probe_requirement("zip", "=7.2.0") {
+    match probe_requirement("zip", "=2.0.0") {
         Err(stderr) => assert!(
-            stderr.contains("version 7.2.0 is yanked"),
+            stderr.contains("version 2.0.0 is yanked"),
             "expected cargo to name the yanked release, got:\n{stderr}"
         ),
         Ok(_) => panic!(
-            "zip =7.2.0 resolved, so either 7.2.0 is live again or the probe is not asking the registry"
+            "zip =2.0.0 resolved, so either 2.0.0 is live again or the probe is not asking the registry"
         ),
     }
 }

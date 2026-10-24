@@ -53,8 +53,8 @@ impl DisplayText {
 /// ```
 /// use libviprs::cad::display_text;
 ///
-/// let d = display_text(r"4'-0{\H1x;\S1#4;}""");
-/// assert_eq!(d.text, "4'-0 1/4\"".replace(' ', ""));
+/// let d = display_text(r#"4'-0{\H1x;\S1#4;}""#);
+/// assert_eq!(d.text, "4'-01/4\"");
 /// assert_eq!(d.ignored.get(&'H'), Some(&1));
 ///
 /// let d = display_text(r"Line one\PLine {\fArial|b1;two}");
