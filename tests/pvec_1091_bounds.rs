@@ -32,20 +32,38 @@ fn ellipse() -> Curve {
 }
 fn cubic() -> Curve {
     Curve::Bezier(
-        Bezier::new(vec![p(0.0, 0.0), p(10.0, 30.0), p(20.0, -30.0), p(30.0, 0.0)]).unwrap(),
+        Bezier::new(vec![
+            p(0.0, 0.0),
+            p(10.0, 30.0),
+            p(20.0, -30.0),
+            p(30.0, 0.0),
+        ])
+        .unwrap(),
     )
 }
 fn quartic() -> Curve {
     Curve::Bezier(
-        Bezier::new(vec![p(0.0, 0.0), p(5.0, 20.0), p(10.0, -25.0), p(15.0, 20.0), p(20.0, 0.0)])
-            .unwrap(),
+        Bezier::new(vec![
+            p(0.0, 0.0),
+            p(5.0, 20.0),
+            p(10.0, -25.0),
+            p(15.0, 20.0),
+            p(20.0, 0.0),
+        ])
+        .unwrap(),
     )
 }
 fn bspline() -> Curve {
     Curve::BSpline(
         BSpline::new(
             3,
-            vec![p(0.0, 0.0), p(1.0, 4.0), p(3.0, -3.0), p(5.0, 5.0), p(7.0, 0.0)],
+            vec![
+                p(0.0, 0.0),
+                p(1.0, 4.0),
+                p(3.0, -3.0),
+                p(5.0, 5.0),
+                p(7.0, 0.0),
+            ],
             vec![0.0, 0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0, 1.0],
         )
         .unwrap(),
@@ -89,7 +107,10 @@ fn a_quarter_arc_is_tighter_than_the_full_circle() {
     assert_eq!(m, BoundsMethod::Exact);
     assert!(q.min().x > full.min().x && q.min().y > full.min().y);
     assert!(q.max().x <= full.max().x && q.max().y <= full.max().y);
-    assert!(q.min().x >= -1e-9 && q.min().y >= -1e-9, "first quadrant only");
+    assert!(
+        q.min().x >= -1e-9 && q.min().y >= -1e-9,
+        "first quadrant only"
+    );
     assert_eq!(q.max().x.to_bits(), 10.0f64.to_bits());
     assert_eq!(q.max().y.to_bits(), 10.0f64.to_bits());
 }
@@ -135,14 +156,28 @@ fn closed_form_kinds_are_exact_and_splines_are_labelled_hull() {
     ] {
         assert_eq!(curve_bounds(&c).unwrap().1, BoundsMethod::Exact, "{n}");
     }
-    for (n, c) in [("quartic", quartic()), ("bspline", bspline()), ("nurbs", nurbs())] {
-        assert_eq!(curve_bounds(&c).unwrap().1, BoundsMethod::HullUpperBound, "{n}");
+    for (n, c) in [
+        ("quartic", quartic()),
+        ("bspline", bspline()),
+        ("nurbs", nurbs()),
+    ] {
+        assert_eq!(
+            curve_bounds(&c).unwrap().1,
+            BoundsMethod::HullUpperBound,
+            "{n}"
+        );
     }
 }
 
 #[test]
 fn a_hull_bound_is_never_recorded_as_exact_in_the_report() {
-    let curves = [circle(0.0, 0.0, 1.0), quartic(), bspline(), nurbs(), cubic()];
+    let curves = [
+        circle(0.0, 0.0, 1.0),
+        quartic(),
+        bspline(),
+        nurbs(),
+        cubic(),
+    ];
     let items: Vec<_> = curves
         .iter()
         .enumerate()
@@ -153,16 +188,37 @@ fn a_hull_bound_is_never_recorded_as_exact_in_the_report() {
     assert_eq!(r.exact_count(), 2);
     assert_eq!(r.hull_count(), 3);
     for (e, hull) in r.entries().iter().zip([false, true, true, true, false]) {
-        assert_eq!(e.method() == BoundsMethod::HullUpperBound, hull, "{}", e.id());
+        assert_eq!(
+            e.method() == BoundsMethod::HullUpperBound,
+            hull,
+            "{}",
+            e.id()
+        );
     }
 }
 
 #[test]
 fn a_composite_is_exact_only_when_every_part_is() {
     use pvec_geometry::Composite;
-    let ok = Curve::Composite(Composite::new(vec![arc(1.0, 0.0, FRAC_PI_2), polyline()]).unwrap());
+    // the arc ends at (0, 1), so each tail starts there
+    let tail = Curve::Polyline(Polyline::new(vec![p(0.0, 1.0), p(4.0, 9.0)]).unwrap());
+    let spline = Curve::BSpline(
+        BSpline::new(
+            3,
+            vec![
+                p(0.0, 1.0),
+                p(1.0, 4.0),
+                p(3.0, -3.0),
+                p(5.0, 5.0),
+                p(7.0, 0.0),
+            ],
+            vec![0.0, 0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0, 1.0],
+        )
+        .unwrap(),
+    );
+    let ok = Curve::Composite(Composite::new(vec![arc(1.0, 0.0, FRAC_PI_2), tail]).unwrap());
     assert_eq!(curve_bounds(&ok).unwrap().1, BoundsMethod::Exact);
-    let hull = Curve::Composite(Composite::new(vec![arc(1.0, 0.0, FRAC_PI_2), bspline()]).unwrap());
+    let hull = Curve::Composite(Composite::new(vec![arc(1.0, 0.0, FRAC_PI_2), spline]).unwrap());
     assert_eq!(curve_bounds(&hull).unwrap().1, BoundsMethod::HullUpperBound);
     // a spline trimmed from a longer one is still only a hull
     assert_encloses("composite", &hull);
@@ -172,11 +228,18 @@ fn a_composite_is_exact_only_when_every_part_is() {
 fn the_report_carries_pvec_ids_and_the_drawing_union() {
     let a = circle(0.0, 0.0, 1.0);
     let b = circle(10.0, 20.0, 2.0);
-    let r = bounds_inputs([(EntityId::new(7).unwrap(), &a), (EntityId::new(3).unwrap(), &b)]).unwrap();
+    let r = bounds_inputs([
+        (EntityId::new(7).unwrap(), &a),
+        (EntityId::new(3).unwrap(), &b),
+    ])
+    .unwrap();
     assert_eq!(r.entries()[0].id(), EntityId::new(7).unwrap());
     assert_eq!(r.entries()[1].id(), EntityId::new(3).unwrap());
     let d = r.drawing_bounds().unwrap();
-    assert_eq!((d.min().x, d.min().y, d.max().x, d.max().y), (-1.0, -1.0, 12.0, 22.0));
+    assert_eq!(
+        (d.min().x, d.min().y, d.max().x, d.max().y),
+        (-1.0, -1.0, 12.0, 22.0)
+    );
 }
 
 #[test]
@@ -198,7 +261,19 @@ fn bounds_are_computed_without_sampling_in_src() {
         .filter(|l| !l.trim_start().starts_with("//"))
         .collect::<Vec<_>>()
         .join("\n");
-    for banned in [".eval(", "derivative(", "sample", "tessell", "for i in 0..", "powi(", "cos(", "sin("] {
-        assert!(!code.contains(banned), "src/pvec/bounds.rs contains `{banned}`");
+    for banned in [
+        ".eval(",
+        "derivative(",
+        "sample",
+        "tessell",
+        "for i in 0..",
+        "powi(",
+        "cos(",
+        "sin(",
+    ] {
+        assert!(
+            !code.contains(banned),
+            "src/pvec/bounds.rs contains `{banned}`"
+        );
     }
 }

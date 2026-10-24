@@ -77,7 +77,10 @@ pub mod dwg_acadrust;
 pub mod dwg_spline;
 
 #[cfg(feature = "pvec-normalized")]
-pub use bounds::{BoundsError, BoundsMethod, BoundsReport, EntityBounds, bounds_inputs, curve_bounds};
+pub use bounds::{
+    BoundsError, BoundsMethod, BoundsReport, EntityBounds, bounds_inputs, curve_bounds,
+    pvec_entity_id,
+};
 pub use classify::{
     ClassSource, Classification, ClassificationReport, ElementClass, ElementRule, ElementRules,
     RuleMatch,
