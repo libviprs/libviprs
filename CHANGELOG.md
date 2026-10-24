@@ -15,6 +15,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   byte-layout segment, and `src/pvec/` may not define a curve evaluator, knot insertion or
   tessellation routine (NG-10). The writer funnel `src/pvec/writer.rs` waits on PVec's `pvec`
   facade crate (libviprs/pvec#52), which does not exist yet.
+- **The hatch and fill policy** (issue #1085, part of #1039). `docs/pvec-hatch-policy.md` records
+  what each fill construct becomes, and `pvec::fill_policy` is the same table as code plus
+  `FillReport`, which counts DWG `HATCH`/`SOLID`/`TRACE` and PDF fills, shadings and patterns with a
+  bucket and a reason. No fill becomes triangles: PDF fills keep their subpath geometry, everything
+  else is counted and reported. `PdfVectorPage` now carries `shading_paints` and
+  `pattern_selections`. No fill component and no kept hatch boundary yet (#1308).
+- **One table from normalized geometry to PVec** (issue #1089, part of #1039).
+  `pvec::mapping::NORMALIZED_TO_PVEC` has a row per kind of normalized curve: the PVec type it
+  becomes, the conformance class it claims, the PVec capability it needs and what it is classified
+  as when that capability is missing (only `RequiresPVecCapability`, `RequiresExtension` or
+  `Unsupported`, so tessellation is unrepresentable). A new kind does not compile without a row,
+  and `docs/pvec-mapping.md` is rendered from the table and compared byte for byte by a test.
 - **The normalized geometry dump** (issue #1103, part of #1039). `pvec::dump::NormalizedDump`
   writes a line-oriented text dump of `Normalized2DGeometry` records (id, type, fidelity class,
   source-space parameters at round-trip `f64` precision, bounds, optional provenance) as each
