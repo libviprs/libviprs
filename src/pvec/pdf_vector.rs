@@ -61,6 +61,13 @@ pub struct PdfVectorLimits {
     pub max_graphics_stack: usize,
     /// Most entities returned.
     pub max_entities: usize,
+    /// Most decoded content-stream bytes across the page and every form expansion.
+    /// A compressed stream is cut off while it decodes, so the bound is on memory
+    /// and not only on what is eventually read.
+    pub max_content_bytes: u64,
+    /// Most segments in one path, counted from the path's first operator to the
+    /// operator that paints it.
+    pub max_segments_per_path: usize,
 }
 
 impl Default for PdfVectorLimits {
@@ -70,6 +77,8 @@ impl Default for PdfVectorLimits {
             max_operations: 4_000_000,
             max_graphics_stack: 256,
             max_entities: 1_000_000,
+            max_content_bytes: 64 << 20,
+            max_segments_per_path: 1_000_000,
         }
     }
 }
@@ -229,6 +238,36 @@ pub enum PdfVectorError {
         /// The configured limit.
         limit: usize,
     },
+    /// More decoded content-stream bytes than `max_content_bytes`.
+    #[error("content stream limit max_content_bytes={limit} exceeded ({observed} bytes)")]
+    ContentBytesExceeded {
+        /// The configured limit.
+        limit: u64,
+        /// The count reached when decoding stopped.
+        observed: u64,
+    },
+    /// One path with more segments than `max_segments_per_path`.
+    #[error("path segment limit max_segments_per_path={limit} exceeded ({observed} segments)")]
+    PathSegmentsExceeded {
+        /// The configured limit.
+        limit: usize,
+        /// The count reached.
+        observed: usize,
+    },
+    /// A `/Resources` lookup came back to an object it had already visited.
+    #[error("/Resources reference cycle through object {object}")]
+    ResourceCycle {
+        /// The object number met twice.
+        object: u32,
+    },
+    /// The page box has no usable extent.
+    #[error("page {page}: unusable page box: {detail}")]
+    InvalidPageBox {
+        /// The page.
+        page: usize,
+        /// What is wrong with it.
+        detail: String,
+    },
 }
 
 /// Read the paths of one page of a PDF file. `page` is 1-based.
@@ -272,15 +311,24 @@ pub fn extract_page_paths_from_bytes(
     // No /MediaBox at all: the spec's default, US Letter.
     let [l, b, r, t] = page_visible_box(&doc, page_id).unwrap_or([0.0, 0.0, 612.0, 792.0]);
     let (w, h) = (r - l, t - b);
+    if ![l, b, r, t, w, h].iter().all(|v| v.is_finite()) || w <= 0.0 || h <= 0.0 {
+        return Err(PdfVectorError::InvalidPageBox {
+            page,
+            detail: format!("[{l} {b} {r} {t}] has no finite, positive extent"),
+        });
+    }
     let base = Matrix::translate(-l, -b).then(&rotation_matrix(rotation, w, h));
     let (width, height) = match rotation {
         PageRotation::Quarter | PageRotation::ThreeQuarter => (h, w),
         _ => (w, h),
     };
 
-    let content = page_content(&doc, page_id, page)?;
-    let ops = decode(&content, page)?;
+    let mut content_bytes = 0u64;
+    let content = page_content(&doc, page_id, page, limits, &mut content_bytes)?;
+    let ops = decode(&content, page, limits, 0, 0)?;
+    drop(content);
     let mut run = Run {
+        content_bytes,
         doc: &doc,
         limits,
         page,
@@ -292,7 +340,7 @@ pub fn extract_page_paths_from_bytes(
         clips: Vec::new(),
         soft_mask: false,
     };
-    let resources = inherited_resources(&doc, page_id);
+    let resources = inherited_resources(&doc, page_id)?;
     run.stream(&ops, resources, base, 0)?;
 
     Ok(PdfVectorPage {
@@ -356,16 +404,114 @@ fn stream_error(page: usize, detail: impl Into<String>) -> PdfVectorError {
     }
 }
 
-/// The text of one content stream: decoded when it has a filter, as stored when it
-/// has none. A filter that fails is an error, not a fall back to the raw bytes.
-fn stream_bytes(stream: &lopdf::Stream, page: usize) -> Result<Vec<u8>, PdfVectorError> {
-    if stream.dict.has(b"Filter") {
-        stream
-            .decompressed_content()
-            .map_err(|e| stream_error(page, format!("stream filter: {e}")))
+/// The text of one content stream, decoded when it has a filter and as stored when it
+/// has none. `used` is the running total for the page, and decoding stops as soon as
+/// it would pass `limits.max_content_bytes`, so a stream that inflates to gigabytes is
+/// never held. A filter that fails is an error, not a fall back to the raw bytes.
+///
+/// Only `FlateDecode` is decoded here, either alone or as the last stage after
+/// `ASCIIHexDecode`/`ASCII85Decode` (which can only shrink). Another filter would be
+/// an expansion this function cannot bound, so it is refused, not guessed at.
+fn stream_bytes(
+    stream: &lopdf::Stream,
+    page: usize,
+    limits: &PdfVectorLimits,
+    used: &mut u64,
+) -> Result<Vec<u8>, PdfVectorError> {
+    let over = |observed: u64| PdfVectorError::ContentBytesExceeded {
+        limit: limits.max_content_bytes,
+        observed,
+    };
+    let remaining = limits.max_content_bytes.saturating_sub(*used);
+    let filters: Vec<Vec<u8>> = match stream.dict.get(b"Filter") {
+        Err(_) => Vec::new(),
+        Ok(Object::Name(n)) => vec![n.clone()],
+        Ok(Object::Array(a)) => a
+            .iter()
+            .map(|o| {
+                o.as_name()
+                    .map(<[u8]>::to_vec)
+                    .map_err(|_| stream_error(page, "stream filter: entry is not a name"))
+            })
+            .collect::<Result<_, _>>()?,
+        Ok(_) => {
+            return Err(stream_error(
+                page,
+                "stream filter: /Filter is not a name or array",
+            ));
+        }
+    };
+    let out = if filters.is_empty() {
+        *used = used.saturating_add(stream.content.len() as u64);
+        if stream.content.len() as u64 > remaining {
+            return Err(over(*used));
+        }
+        stream.content.clone()
     } else {
-        Ok(stream.content.clone())
-    }
+        let (last, head) = filters.split_last().expect("not empty");
+        let ascii = |f: &Vec<u8>| {
+            matches!(
+                f.as_slice(),
+                b"ASCIIHexDecode" | b"AHx" | b"ASCII85Decode" | b"A85"
+            )
+        };
+        let flate = matches!(last.as_slice(), b"FlateDecode" | b"Fl");
+        if !head.iter().all(ascii) || !(flate || ascii(last)) {
+            return Err(stream_error(
+                page,
+                format!(
+                    "stream filter: unsupported chain {:?}",
+                    filters
+                        .iter()
+                        .map(|f| String::from_utf8_lossy(f).into_owned())
+                        .collect::<Vec<_>>()
+                ),
+            ));
+        }
+        if stream.dict.get(b"DecodeParms").is_ok() || stream.dict.get(b"DP").is_ok() {
+            return Err(stream_error(
+                page,
+                "stream filter: /DecodeParms is not supported",
+            ));
+        }
+        // The ASCII stages run through lopdf on a copy of the stream with the
+        // trailing Flate filter removed, so what they hand on is at most the raw size.
+        let packed = if head.is_empty() && flate {
+            stream.content.clone()
+        } else {
+            let mut d = stream.dict.clone();
+            if flate {
+                d.set(
+                    "Filter",
+                    Object::Array(head.iter().map(|n| Object::Name(n.clone())).collect()),
+                );
+            }
+            let mut s = lopdf::Stream::new(d, stream.content.clone());
+            s.allows_compression = false;
+            s.decompressed_content()
+                .map_err(|e| stream_error(page, format!("stream filter: {e}")))?
+        };
+        if flate {
+            use std::io::Read;
+            let mut out = Vec::new();
+            flate2::read::ZlibDecoder::new(packed.as_slice())
+                .take(remaining.saturating_add(1))
+                .read_to_end(&mut out)
+                .map_err(|e| stream_error(page, format!("stream filter: {e}")))?;
+            *used = used.saturating_add(out.len() as u64);
+            if out.len() as u64 > remaining {
+                return Err(over(*used));
+            }
+            out
+        } else {
+            *used = used.saturating_add(packed.len() as u64);
+            if packed.len() as u64 > remaining {
+                return Err(over(*used));
+            }
+            packed
+        }
+    };
+    Ok(out)
 }
 
 /// The page's `/Contents` as one logical stream. A page's streams are separate
@@ -374,16 +520,41 @@ fn page_content(
     doc: &Document,
     page_id: lopdf::ObjectId,
     page: usize,
+    limits: &PdfVectorLimits,
+    used: &mut u64,
 ) -> Result<Vec<u8>, PdfVectorError> {
     let mut out = Vec::new();
-    for id in doc.get_page_contents(page_id) {
-        let obj = doc
-            .get_object(id)
+    let bad = || stream_error(page, "/Contents entry is not a stream");
+    let Some(contents) = doc
+        .get_dictionary(page_id)
+        .ok()
+        .and_then(|d| d.get(b"Contents").ok())
+    else {
+        return Ok(out);
+    };
+    fn one<'a>(
+        doc: &'a Document,
+        o: &'a Object,
+        page: usize,
+    ) -> Result<&'a lopdf::Stream, PdfVectorError> {
+        let (_, obj) = doc
+            .dereference(o)
             .map_err(|e| stream_error(page, format!("/Contents: {e}")))?;
-        let stream = obj
-            .as_stream()
-            .map_err(|_| stream_error(page, "/Contents entry is not a stream"))?;
-        out.extend_from_slice(&stream_bytes(stream, page)?);
+        obj.as_stream()
+            .map_err(|_| stream_error(page, "/Contents entry is not a stream"))
+    }
+    let (_, top) = doc
+        .dereference(contents)
+        .map_err(|e| stream_error(page, format!("/Contents: {e}")))?;
+    let streams: Vec<&lopdf::Stream> = match top {
+        Object::Array(items) => items
+            .iter()
+            .map(|o| one(doc, o, page))
+            .collect::<Result<_, _>>()?,
+        other => vec![other.as_stream().map_err(|_| bad())?],
+    };
+    for stream in streams {
+        out.extend_from_slice(&stream_bytes(stream, page, limits, used)?);
         out.push(b'\n');
     }
     Ok(out)
@@ -393,7 +564,19 @@ fn page_content(
 /// string or array comes back as a shorter, valid-looking operation list. This
 /// pass checks the lexical structure first, so a stream that does not tokenize
 /// is an error and not a page with fewer paths.
-fn check_tokens(bytes: &[u8]) -> Result<(), String> {
+///
+/// The same pass counts operators and tracks `q` depth, so a stream that would trip
+/// `max_operations` or `max_graphics_stack` is refused before `Content::decode` builds
+/// an operation list for it, and what is held while refusing does not grow with the
+/// stream. `ops_used` and `depth_base` are what the run has already spent on the page
+/// and how deep the graphics stack already is where this stream starts.
+fn check_tokens(
+    bytes: &[u8],
+    limits: &PdfVectorLimits,
+    ops_used: u64,
+    depth_base: usize,
+) -> Result<(), Scan> {
+    let (mut ops, mut depth) = (0u64, 0usize);
     fn is_space(b: u8) -> bool {
         matches!(b, 0 | b'\t' | b'\n' | 0x0c | b'\r' | b' ')
     }
@@ -426,7 +609,7 @@ fn check_tokens(bytes: &[u8]) -> Result<(), String> {
                     j += 1;
                 }
                 if depth > 0 {
-                    return Err(format!("unterminated string at byte {i}"));
+                    return Err(Scan::Lex(format!("unterminated string at byte {i}")));
                 }
                 i = j;
             }
@@ -436,12 +619,12 @@ fn check_tokens(bytes: &[u8]) -> Result<(), String> {
             }
             b'<' => match bytes[i..].iter().position(|&c| c == b'>') {
                 Some(n) => i += n + 1,
-                None => return Err(format!("unterminated hex string at byte {i}")),
+                None => return Err(Scan::Lex(format!("unterminated hex string at byte {i}"))),
             },
             b'>' if bytes.get(i + 1) == Some(&b'>') => {
                 dicts = dicts
                     .checked_sub(1)
-                    .ok_or_else(|| format!("`>>` without `<<` at byte {i}"))?;
+                    .ok_or_else(|| Scan::Lex(format!("`>>` without `<<` at byte {i}")))?;
                 i += 2;
             }
             b'[' => {
@@ -451,7 +634,7 @@ fn check_tokens(bytes: &[u8]) -> Result<(), String> {
             b']' => {
                 arrays = arrays
                     .checked_sub(1)
-                    .ok_or_else(|| format!("`]` without `[` at byte {i}"))?;
+                    .ok_or_else(|| Scan::Lex(format!("`]` without `[` at byte {i}")))?;
                 i += 1;
             }
             b')' | b'>' | b'{' | b'}' => i += 1,
@@ -466,6 +649,9 @@ fn check_tokens(bytes: &[u8]) -> Result<(), String> {
                 while i < bytes.len() && !is_space(bytes[i]) && !is_delim(bytes[i]) {
                     i += 1;
                 }
+                if is_number_start(bytes[start]) {
+                    check_number(&bytes[start..i]).map_err(Scan::Lex)?;
+                }
                 match &bytes[start..i] {
                     b"BI" => in_inline_image = true,
                     b"ID" if in_inline_image => {
@@ -473,7 +659,7 @@ fn check_tokens(bytes: &[u8]) -> Result<(), String> {
                         let mut j = i;
                         let end = loop {
                             if j + 2 > bytes.len() {
-                                return Err("inline image has no `EI`".to_string());
+                                return Err(Scan::Lex("inline image has no `EI`".to_string()));
                             }
                             if &bytes[j..j + 2] == b"EI"
                                 && j > i
@@ -487,22 +673,99 @@ fn check_tokens(bytes: &[u8]) -> Result<(), String> {
                         in_inline_image = false;
                         i = end;
                     }
+                    tok if !is_operand(tok) => {
+                        ops += 1;
+                        if ops_used + ops > limits.max_operations {
+                            return Err(Scan::Operations(ops_used + ops));
+                        }
+                        match tok {
+                            b"q" => {
+                                depth += 1;
+                                if depth_base + depth > limits.max_graphics_stack {
+                                    return Err(Scan::Stack(depth_base + depth));
+                                }
+                            }
+                            b"Q" => depth = depth.saturating_sub(1),
+                            _ => {}
+                        }
+                    }
                     _ => {}
                 }
             }
         }
     }
     if arrays > 0 {
-        return Err("unterminated array".to_string());
+        return Err(Scan::Lex("unterminated array".to_string()));
     }
     if dicts > 0 {
-        return Err("unterminated dictionary".to_string());
+        return Err(Scan::Lex("unterminated dictionary".to_string()));
     }
     Ok(())
 }
 
-fn decode(bytes: &[u8], page: usize) -> Result<Vec<Operation>, PdfVectorError> {
-    check_tokens(bytes).map_err(|e| stream_error(page, format!("tokenize: {e}")))?;
+/// Why the lexical pass refused a stream.
+enum Scan {
+    Lex(String),
+    Operations(u64),
+    Stack(usize),
+}
+
+fn is_number_start(b: u8) -> bool {
+    b.is_ascii_digit() || matches!(b, b'+' | b'-' | b'.')
+}
+
+/// A PDF number is `[+-]digits[.digits]`. `lopdf` drops what it cannot parse and
+/// carries on, so a malformed or out-of-range literal would otherwise read as a
+/// shorter, valid-looking page.
+fn check_number(tok: &[u8]) -> Result<(), String> {
+    let text = String::from_utf8_lossy(tok);
+    let body = tok
+        .strip_prefix(b"+")
+        .or(tok.strip_prefix(b"-"))
+        .unwrap_or(tok);
+    let (int, frac) = match body.iter().position(|&c| c == b'.') {
+        Some(n) => (&body[..n], Some(&body[n + 1..])),
+        None => (body, None),
+    };
+    let digits = |d: &[u8]| d.iter().all(u8::is_ascii_digit);
+    if !digits(int)
+        || !frac.is_none_or(digits)
+        || (int.is_empty() && frac.is_none_or(<[u8]>::is_empty))
+    {
+        return Err(format!("malformed number `{text}`"));
+    }
+    if frac.is_none() && int.len() > 18 {
+        return Err(format!("integer `{text}` is out of range"));
+    }
+    Ok(())
+}
+
+/// A bare token that is an operand and not an operator.
+fn is_operand(tok: &[u8]) -> bool {
+    matches!(tok, b"true" | b"false" | b"null" | b"BI" | b"ID" | b"EI")
+        || tok
+            .first()
+            .is_some_and(|b| b.is_ascii_digit() || matches!(b, b'+' | b'-' | b'.'))
+}
+
+fn decode(
+    bytes: &[u8],
+    page: usize,
+    limits: &PdfVectorLimits,
+    ops_used: u64,
+    depth_base: usize,
+) -> Result<Vec<Operation>, PdfVectorError> {
+    check_tokens(bytes, limits, ops_used, depth_base).map_err(|e| match e {
+        Scan::Lex(e) => stream_error(page, format!("tokenize: {e}")),
+        Scan::Operations(observed) => PdfVectorError::OperationLimitExceeded {
+            limit: limits.max_operations,
+            observed,
+        },
+        Scan::Stack(observed) => PdfVectorError::GraphicsStackExceeded {
+            limit: limits.max_graphics_stack,
+            observed,
+        },
+    })?;
     Content::decode(bytes)
         .map(|c| c.operations)
         .map_err(|e| stream_error(page, format!("tokenize: {e}")))
@@ -519,20 +782,58 @@ fn as_dict<'a>(doc: &'a Document, obj: &'a Object) -> Option<&'a Dictionary> {
     deref(doc, obj)?.as_dict().ok()
 }
 
-/// `/Resources` of a page, inherited through `/Parent`.
-fn inherited_resources(doc: &Document, page_id: lopdf::ObjectId) -> Option<&Dictionary> {
+/// Follow a chain of indirect references to the dictionary it ends at. A chain that
+/// meets an object twice, or runs past 64 links, is a cycle.
+fn resolve_dict<'a>(
+    doc: &'a Document,
+    obj: &'a Object,
+) -> Result<Option<&'a Dictionary>, PdfVectorError> {
+    let mut seen: Vec<lopdf::ObjectId> = Vec::new();
+    let mut cur = obj;
+    loop {
+        match cur {
+            Object::Reference(id) => {
+                if seen.contains(id) || seen.len() >= 64 {
+                    return Err(PdfVectorError::ResourceCycle { object: id.0 });
+                }
+                seen.push(*id);
+                // `objects.get`, not `get_object`: the latter chases references itself and
+                // reports a loop as "not found", which would read as "no resources".
+                match doc.objects.get(id) {
+                    Some(next) => cur = next,
+                    None => return Ok(None),
+                }
+            }
+            Object::Dictionary(d) => return Ok(Some(d)),
+            _ => return Ok(None),
+        }
+    }
+}
+
+/// `/Resources` of a page, inherited through `/Parent`. A `/Parent` chain that comes
+/// back to a page-tree node it has already visited is a cycle, not "no resources".
+fn inherited_resources(
+    doc: &Document,
+    page_id: lopdf::ObjectId,
+) -> Result<Option<&Dictionary>, PdfVectorError> {
+    let mut seen = vec![page_id];
     let mut current = page_id;
-    for _ in 0..64 {
-        let dict = doc.get_object(current).ok()?.as_dict().ok()?;
+    loop {
+        let Some(dict) = doc.get_object(current).ok().and_then(|o| o.as_dict().ok()) else {
+            return Ok(None);
+        };
         if let Ok(r) = dict.get(b"Resources") {
-            return as_dict(doc, r);
+            return resolve_dict(doc, r);
         }
         current = match dict.get(b"Parent") {
-            Ok(Object::Reference(id)) if *id != current => *id,
-            _ => return None,
+            Ok(Object::Reference(id)) => *id,
+            _ => return Ok(None),
         };
+        if seen.contains(&current) {
+            return Err(PdfVectorError::ResourceCycle { object: current.0 });
+        }
+        seen.push(current);
     }
-    None
 }
 
 fn number(o: &Object) -> Option<f64> {
@@ -547,6 +848,8 @@ struct Run<'a> {
     doc: &'a Document,
     limits: &'a PdfVectorLimits,
     page: usize,
+    /// Decoded content bytes spent so far, for `max_content_bytes`.
+    content_bytes: u64,
     out: Vec<PdfPathEntity>,
     operations: u64,
     unbalanced: u32,
@@ -645,6 +948,9 @@ impl Run<'_> {
                 "cm" => {
                     let v = self.operands(op, 6)?;
                     ctm = Matrix([v[0], v[1], v[2], v[3], v[4], v[5]]).then(&ctm);
+                    if !ctm.0.iter().all(|c| c.is_finite()) {
+                        return Err(self.err("`cm` overflows the current transformation matrix"));
+                    }
                 }
                 "m" => {
                     let v = self.operands(op, 2)?;
@@ -710,6 +1016,18 @@ impl Run<'_> {
                 "Do" => self.do_xobject(op, resources, &ctm, depth)?,
                 // Colour, text, shading, marked content and the rest are other tasks'.
                 _ => {}
+            }
+            if path.segments.len() > self.limits.max_segments_per_path {
+                return Err(PdfVectorError::PathSegmentsExceeded {
+                    limit: self.limits.max_segments_per_path,
+                    observed: path.segments.len(),
+                });
+            }
+            if path.segments.iter().rev().take(5).any(|s| !finite(s)) {
+                return Err(self.err(format!(
+                    "`{}` produced a non-finite coordinate",
+                    op.operator
+                )));
             }
         }
         // A stream that leaves `q` open does not leak into its caller.
@@ -849,14 +1167,20 @@ impl Run<'_> {
             }
             Some(_) => return Err(self.err("form /Matrix is not six numbers")),
         };
-        let bytes = stream_bytes(xobj, self.page)?;
-        let ops = decode(&bytes, self.page)?;
+        let bytes = stream_bytes(xobj, self.page, self.limits, &mut self.content_bytes)?;
+        let ops = decode(
+            &bytes,
+            self.page,
+            self.limits,
+            self.operations,
+            self.stack.len(),
+        )?;
+        drop(bytes);
         // The form's own resources, else the invoker's (PDF 32000-1 7.8.3).
-        let own = xobj
-            .dict
-            .get(b"Resources")
-            .ok()
-            .and_then(|r| as_dict(doc, r));
+        let own = match xobj.dict.get(b"Resources") {
+            Ok(r) => resolve_dict(doc, r)?,
+            Err(_) => None,
+        };
         self.form_path
             .push(String::from_utf8_lossy(name).into_owned());
         // A form runs as if inside `q`/`Q`: what it clips or masks ends with it.
@@ -866,6 +1190,16 @@ impl Run<'_> {
         self.soft_mask = soft_mask;
         self.form_path.pop();
         r
+    }
+}
+
+fn finite(seg: &PdfPathSegment) -> bool {
+    match seg {
+        PdfPathSegment::MoveTo(p) | PdfPathSegment::LineTo(p) => p.iter().all(|c| c.is_finite()),
+        PdfPathSegment::CurveTo { c1, c2, end } => [c1, c2, end]
+            .iter()
+            .all(|p| p.iter().all(|c| c.is_finite())),
+        _ => true,
     }
 }
 

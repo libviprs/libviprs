@@ -191,7 +191,10 @@ fn n5_8_1087_content_bytes_flate_bomb_is_cut_off_while_decoding() {
         ),
         "{err:?}"
     );
-    assert!(peak < 8 * MIB, "peak {peak} grew with the decompressed size");
+    assert!(
+        peak < 8 * MIB,
+        "peak {peak} grew with the decompressed size"
+    );
 }
 
 #[test]
@@ -368,7 +371,10 @@ fn n5_8_1087_form_fan_out_is_bounded_by_total_expansion() {
     assert!(
         matches!(
             err,
-            PdfVectorError::OperationLimitExceeded { limit: 10_000, observed: 10_001 }
+            PdfVectorError::OperationLimitExceeded {
+                limit: 10_000,
+                observed: 10_001
+            }
         ),
         "{err:?}"
     );
@@ -400,7 +406,9 @@ fn n5_8_1087_resources_parent_cycle() {
             "Type" => "Pages", "Kids" => vec![page.into()], "Count" => 1,
         }),
     );
-    let cat = p.doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
+    let cat = p
+        .doc
+        .add_object(dictionary! { "Type" => "Catalog", "Pages" => pages });
     p.doc.trailer.set("Root", cat);
     let mut bytes = Vec::new();
     p.doc.save_to(&mut bytes).unwrap();
@@ -466,7 +474,10 @@ fn n5_8_1087_embedded_font_bytes_are_never_read() {
 
 fn content_error(bytes: &[u8]) {
     let e = refused(bytes, &PdfVectorLimits::default());
-    assert!(matches!(e, PdfVectorError::ContentStream { page: 1, .. }), "{e:?}");
+    assert!(
+        matches!(e, PdfVectorError::ContentStream { page: 1, .. }),
+        "{e:?}"
+    );
 }
 
 #[test]
@@ -505,7 +516,11 @@ fn n5_8_1087_contents_points_at_a_non_stream() {
 #[test]
 fn n5_8_1087_unbalanced_q_and_restore_do_not_panic() {
     // Extra Q is counted (documented N5.1 behaviour), open q is closed at the end.
-    let page = run(&page_bytes("Q Q q q 0 0 m 1 1 l S"), &PdfVectorLimits::default()).unwrap();
+    let page = run(
+        &page_bytes("Q Q q q 0 0 m 1 1 l S"),
+        &PdfVectorLimits::default(),
+    )
+    .unwrap();
     assert_eq!(page.unbalanced_restores, 2);
     assert_eq!(page.entities.len(), 1);
 }
@@ -537,7 +552,9 @@ fn n5_8_1087_non_numeric_operand() {
 #[test]
 fn n5_8_1087_out_of_range_numbers() {
     let huge = "9".repeat(60);
-    let f32_max = "340282350000000000000000000000000000000";
+    // An integer past i64 is refused outright, so it cannot read as a shorter page.
+    content_error(&page_bytes(&format!("{huge} 0 m 1 1 l S")));
+    let f32_max = "340282350000000000000000000000000000000.0";
     // Neither the literal nor what a transform does to it may reach the output as a
     // non-finite coordinate, and neither may panic.
     for body in [
@@ -553,18 +570,18 @@ fn n5_8_1087_out_of_range_numbers() {
             Ok(page) => {
                 for e in &page.entities {
                     for s in &e.segments {
-                        format!("{s:?}").split(|c: char| !(c.is_alphanumeric() || c == '.' || c == '-'))
+                        format!("{s:?}")
+                            .split(|c: char| !(c.is_alphanumeric() || c == '.' || c == '-'))
                             .for_each(|t| assert!(!t.contains("inf") && !t.contains("NaN"), "{t}"));
                     }
                 }
             }
         }
     }
-    // The pure overflow case has to be an error, not a quiet infinity.
-    let overflow = page_bytes(&format!(
-        "{f32_max} 0 0 {f32_max} 0 0 cm {f32_max} 0 0 {f32_max} 0 0 cm 5 5 m 6 6 l S"
-    ));
-    content_error(&overflow);
+    // Nine f32::MAX scales compose past f64::MAX: that has to be an error, not a
+    // quiet infinity in the output.
+    let scale = format!("{f32_max} 0 0 {f32_max} 0 0 cm ");
+    content_error(&page_bytes(&format!("{}5 5 m 6 6 l S", scale.repeat(9))));
 }
 
 fn page_with_media(m: Object) -> Vec<u8> {
@@ -590,7 +607,12 @@ fn n5_8_1087_media_box_with_no_extent() {
 #[test]
 fn n5_8_1087_media_box_with_non_finite_or_junk_entries() {
     let junk = Object::Array(vec![0.into(), 0.into(), Object::Real(f32::NAN), 100.into()]);
-    let inf = Object::Array(vec![0.into(), 0.into(), Object::Real(f32::INFINITY), 100.into()]);
+    let inf = Object::Array(vec![
+        0.into(),
+        0.into(),
+        Object::Real(f32::INFINITY),
+        100.into(),
+    ]);
     let names = Object::Array(vec![
         Object::Name(b"a".to_vec()),
         0.into(),
