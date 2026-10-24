@@ -36,7 +36,8 @@ fn reason_codes_are_enumerated_once_and_stable() {
     for r in ReasonCode::ALL {
         let c = r.code();
         assert!(
-            c.chars().all(|ch| ch.is_ascii_lowercase() || ch == '-'),
+            c.chars()
+                .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-'),
             "{c} is not kebab-case"
         );
         assert!(
@@ -52,7 +53,10 @@ fn reason_codes_are_enumerated_once_and_stable() {
     // The baseline diff keys on these spellings, so pin a few.
     assert_eq!(ReasonCode::Helix.code(), "helix");
     assert_eq!(ReasonCode::Spline3d.code(), "spline-3d");
-    assert_eq!(ReasonCode::UnmappedSourceClass.code(), "unmapped-source-class");
+    assert_eq!(
+        ReasonCode::UnmappedSourceClass.code(),
+        "unmapped-source-class"
+    );
 }
 
 #[test]
@@ -254,7 +258,12 @@ mod spline {
 
     #[test]
     fn missing_knots_need_an_extension() {
-        let e = spline("SPLINE", flat(), SourceFact::NotReportable, SourceFact::Present(false));
+        let e = spline(
+            "SPLINE",
+            flat(),
+            SourceFact::NotReportable,
+            SourceFact::Present(false),
+        );
         let err = extract(&e).unwrap_err();
         let c = err.classification("SPLINE");
         assert_eq!(c.class(), FidelityClass::RequiresExtension);
