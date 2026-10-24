@@ -516,6 +516,7 @@ annotated   fs-detected  tests/view_context_spike_doc.rs::n14_no_row_reads_tbd
 annotated   fs-detected  tests/view_context_spike_doc.rs::n14_paper_space_is_called_in_or_out_with_viewport_evidence
 annotated   fs-detected  tests/view_context_spike_doc.rs::n14_the_decoder_exposure_of_layers_and_block_names_is_recorded
 annotated   fs-detected  tests/view_context_spike_doc.rs::n14_the_paper_space_call_agrees_with_the_layout_row
+annotated   fs-detected  tests/view_context_spike_doc.rs::n14_the_spike_directory_holds_exactly_the_files_listed_here
 annotated   fs-detected  tests/view_context_spike_doc.rs::n14_the_v1_visible_drawing_is_an_applicable_rule_with_two_worked_fixtures
 annotated   fs-detected  tests/view_context_spike_doc.rs::n14_the_xref_decision_is_one_of_three_and_names_its_diagnostic
 annotated   fs-detected  tests/view_context_spike_doc.rs::n14_v1_3_says_what_an_entitys_own_invisible_flag_does

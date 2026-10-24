@@ -610,3 +610,49 @@ fn n14_v1_3_says_what_an_entitys_own_invisible_flag_does() {
         "V1-3 does not say what happens with an entity's own invisible flag"
     );
 }
+
+/// Every file under the spike directory, named here on purpose. The probe
+/// sources, the fixtures and the scripts are what the document's numbers come
+/// from, so a file that appears or disappears without this list moving is a
+/// change to the evidence and should be seen as one.
+const SPIKE_FILES: &[&str] = &[
+    "docs/spikes/view-context/acadrust-probe/Cargo.toml",
+    "docs/spikes/view-context/acadrust-probe/src/main.rs",
+    "docs/spikes/view-context/fixtures/SHA256SUMS",
+    "docs/spikes/view-context/fixtures/vc_anonymous.dwg",
+    "docs/spikes/view-context/fixtures/vc_layers.dwg",
+    "docs/spikes/view-context/fixtures/vc_nested.dwg",
+    "docs/spikes/view-context/fixtures/vc_paper.dwg",
+    "docs/spikes/view-context/probe/Author.cs",
+    "docs/spikes/view-context/probe/Program.cs",
+    "docs/spikes/view-context/probe/ViewContextProbe.csproj",
+    "docs/spikes/view-context/results-x64.txt",
+    "docs/spikes/view-context/results.sh",
+    "docs/spikes/view-context/run.sh",
+    "docs/spikes/view-context/stage.sh",
+];
+
+fn files_under(dir: &std::path::Path, out: &mut Vec<String>) {
+    for entry in std::fs::read_dir(dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display())) {
+        let path = entry.expect("a directory entry").path();
+        if path.is_dir() {
+            files_under(&path, out);
+        } else {
+            let rel = path.strip_prefix(root()).expect("under the crate root");
+            out.push(rel.to_string_lossy().replace('\\', "/"));
+        }
+    }
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn n14_the_spike_directory_holds_exactly_the_files_listed_here() {
+    let mut found = Vec::new();
+    files_under(&root().join("docs/spikes/view-context"), &mut found);
+    found.sort();
+    let want: Vec<String> = SPIKE_FILES.iter().map(|s| s.to_string()).collect();
+    assert_eq!(
+        found, want,
+        "docs/spikes/view-context/ changed: update SPIKE_FILES, and check the document still describes what is there"
+    );
+}
