@@ -402,6 +402,7 @@ fn normalized_geometry_size_is_unchanged_by_style() {
 const PINNED_NORMALIZED_SIZE: usize = 176;
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn the_geometry_entity_sources_name_no_style_field() {
     for f in ["src/pvec/normalized.rs", "src/pvec/pdf_bezier.rs"] {
         let src = std::fs::read_to_string(f).unwrap().to_lowercase();
