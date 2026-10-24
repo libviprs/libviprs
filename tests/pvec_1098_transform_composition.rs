@@ -6,6 +6,8 @@
 #![cfg(feature = "pvec-normalized")]
 
 use libviprs::cad::ItemHandle;
+use libviprs::pvec::ProvenanceStub;
+use libviprs::pvec::provenance::{Provenance, ProvenanceSink, ProvenanceStore};
 use libviprs::pvec::transform::{
     Cell, ComposedTransform, PromotionError, PromotionMatrix, Shape, SourceRow, TransformReason,
     promote, promote_with,
@@ -310,6 +312,39 @@ fn the_composed_matrix_of_a_two_level_nest_equals_the_product_of_the_recorded_le
     let product = i.then(&o).unwrap();
     assert_eq!(c.matrix(), product.matrix());
     assert_eq!(c.source_transform().coefficients(), product.matrix());
+}
+
+#[test]
+fn the_composed_matrix_is_retrievable_from_provenance_and_equals_the_recorded_product() {
+    let outer = st([1.0, 0.0, 0.0, 1.0, 10.0, 5.0]);
+    let inner = st(Transform2::rotate(0.6).unwrap().matrix());
+    let c = ComposedTransform::compose([(step("OUT", 1), outer), (step("IN", 2), inner)]).unwrap();
+
+    let stub = ProvenanceStub {
+        handle: Some(ItemHandle::new(0x4C)),
+        class_name: "CIRCLE".into(),
+        block_path: c.instance_path(),
+        layer: "L".into(),
+    };
+    let mut store = ProvenanceStore::new();
+    let h = store
+        .record(|| Provenance::from_stub(&stub, "plan.dwg", "Model", c.source_transform()))
+        .unwrap();
+    let fx = fixtures();
+    let rec = record(&fx[4].1).with_provenance(h);
+    let out = promote(&rec, &c).unwrap();
+
+    let p = store.get(out.record().provenance().unwrap()).unwrap();
+    let steps: Vec<_> = p
+        .block_path()
+        .steps()
+        .iter()
+        .map(|s| s.block_name.as_str())
+        .collect();
+    assert_eq!(steps, ["OUT", "IN"]);
+    let o = Transform2::new(outer.coefficients()).unwrap();
+    let i = Transform2::new(inner.coefficients()).unwrap();
+    assert_eq!(p.transform().coefficients(), i.then(&o).unwrap().matrix());
 }
 
 // ---- promotion: the matrix ----------------------------------------------------------------

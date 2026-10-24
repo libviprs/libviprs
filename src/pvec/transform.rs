@@ -43,14 +43,15 @@
 //!
 //! [`ComposedTransform::lineage`] keeps each level as given, so a diagnostic can show the nest
 //! that produced a curve and the composed matrix can be recomputed from it. N3.2's provenance
-//! store records the composed map through [`ComposedTransform::source_transform`].
+//! store records the composed map through [`ComposedTransform::source_transform`] and the inserts
+//! through [`ComposedTransform::instance_path`].
 
 use std::fmt;
 
 use pvec_geometry::{Curve, Curve2d, GeometryError, ParamMap, Transform2};
 
 use super::normalized::{FidelityClass, NormalizeError, Normalized2DGeometry};
-use super::provider::{InstanceStep, SourceTransform};
+use super::provider::{InstancePath, InstanceStep, SourceTransform};
 
 /// The three frozen reason codes of the matrix (all `Unsupported`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -241,6 +242,13 @@ impl ComposedTransform {
     pub fn source_transform(&self) -> SourceTransform {
         // A `Transform2` is finite by construction, so this cannot refuse.
         SourceTransform::new(self.composed.matrix()).expect("a Transform2 is finite")
+    }
+
+    /// The inserts of the nest as an [`InstancePath`], outermost first, for a provenance stub.
+    pub fn instance_path(&self) -> InstancePath {
+        self.levels.iter().fold(InstancePath::root(), |path, l| {
+            path.child(l.insert.block_name.clone(), l.insert.insert_handle)
+        })
     }
 
     /// The levels as recorded, outermost first.
