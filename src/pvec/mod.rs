@@ -44,6 +44,7 @@ pub mod provider;
 pub mod transform;
 pub mod units;
 pub mod view_profile;
+pub mod xref;
 
 #[cfg(feature = "dwg-acadrust")]
 #[cfg_attr(docsrs, doc(cfg(feature = "dwg-acadrust")))]

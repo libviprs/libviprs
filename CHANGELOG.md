@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The xref and external-reference policy** (issue #1076, part of #1039). `pvec::xref` gives
+  `XrefPolicy` three named outcomes and no silent one: `ExternalDependency` (the default) omits the
+  geometry but always leaves a report row with the name, path, insert transform and layer, `Reject`
+  fails naming the xref and its resolved path, and `Resolve` clears the path for the caller to open.
+  Attachment paths are confined under a caller-supplied root before anything touches the disk
+  (`..` escapes, absolute, UNC and drive-letter paths get typed refusals), cycles are caught on the
+  resolved-path set and name every file in the chain, and nesting depth and instances count against
+  the same `SourceGuard` as blocks. Opening and flattening the attached drawing waits for N4.4 (#1283).
+
 - **The view-profile options type** (issue #1097, part of #1039). `pvec::ViewProfile`
   makes the view context an explicit input: space (model, or a named paper layout), viewport
   clipping, the off, frozen, viewport-frozen and layer-0 rules, the nested-insert depth and the
