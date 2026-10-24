@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 
 /// Crate roots libviprs may name. `pvec-geometry` and `pvec-numeric` are PVec's semantic
 /// crates (the curve model and the numeric policy under it).
-const ALLOWED_ROOTS: &[&str] = &["pvec_geometry", "pvec_numeric"];
+const ALLOWED_ROOTS: &[&str] = &["pvec_entity", "pvec_geometry", "pvec_numeric"];
 
 /// Path segments that belong to PVec's physical layout. None may appear in a PVec path.
 const PHYSICAL_SEGMENTS: &[&str] = &[
@@ -316,7 +316,7 @@ fn no_pvec_path_under_src_is_outside_the_allowed_surface() {
 
 #[test]
 #[cfg_attr(miri, ignore)]
-fn only_the_two_semantic_crates_are_named_today() {
+fn only_the_semantic_crates_are_named_today() {
     let mut roots = std::collections::BTreeSet::new();
     for f in src_files() {
         for p in pvec_paths(&fs::read_to_string(&f).unwrap()) {
@@ -324,7 +324,7 @@ fn only_the_two_semantic_crates_are_named_today() {
         }
     }
     let roots: Vec<_> = roots.into_iter().collect();
-    assert_eq!(roots, ["pvec_geometry", "pvec_numeric"]);
+    assert_eq!(roots, ["pvec_entity", "pvec_geometry", "pvec_numeric"]);
 }
 
 /// NG-10's prohibited constructs, as the names a function implementing them would carry.
@@ -432,4 +432,42 @@ fn the_pvec_dependencies_stay_semantic_and_optional() {
             "Cargo.toml depends on `{physical}`, a physical-layout crate"
         );
     }
+}
+
+/// P5.1 to P5.3 build the directory, in PVec. libviprs hands over boxes and builds none of it
+/// (issue #1091).
+#[test]
+#[cfg_attr(miri, ignore)]
+fn no_index_directory_or_straddler_type_is_defined_under_src_pvec() {
+    let mut bad = Vec::new();
+    for f in src_files() {
+        if !f.starts_with(root().join("src/pvec")) {
+            continue;
+        }
+        let src = strip_comments(&fs::read_to_string(&f).unwrap());
+        for line in src.lines() {
+            let t = line.trim_start();
+            let t = t
+                .strip_prefix("pub(crate) ")
+                .or_else(|| t.strip_prefix("pub "))
+                .unwrap_or(t);
+            for kw in ["struct ", "enum ", "type ", "trait "] {
+                if let Some(rest) = t.strip_prefix(kw) {
+                    let name: String = rest.chars().take_while(|c| is_ident(*c)).collect();
+                    let l = name.to_lowercase();
+                    if ["index", "directory", "straddl", "quadtree", "rtree"]
+                        .iter()
+                        .any(|w| l.contains(w))
+                    {
+                        bad.push(format!("{}: {kw}{name}", f.display()));
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "spatial-structure types under src/pvec:\n{}",
+        bad.join("\n")
+    );
 }

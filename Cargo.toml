@@ -337,6 +337,9 @@ pvec-numeric = { git = "https://github.com/libviprs/pvec", rev = "4dbbfc37ac156d
 # `docs/adr/pvec-normalized-geometry.md` (the ADR pins fdf87de, so a move is also a
 # change to that pin).
 pvec-geometry = { git = "https://github.com/libviprs/pvec", rev = "4dbbfc37ac156dbb7dac18d02721a742cd2aab0b", version = "0.0.0" }
+# PVec's file-local `EntityId` (issue #1091), the id type the bounds inputs carry. Same pin and
+# same publishing consequence as `pvec-geometry` above.
+pvec-entity = { git = "https://github.com/libviprs/pvec", rev = "4dbbfc37ac156dbb7dac18d02721a742cd2aab0b", version = "0.0.0" }
 # Pure-Rust FFT (MIT OR Apache-2.0) used by the frequency-domain filter
 # operations in `src/freqfilt.rs` (`fwfft`, `invfft`, `freqmult`, `spectrum`,
 # `phasecor`). Chosen over an FFTW binding to keep the crate pure Rust; its
@@ -542,7 +545,7 @@ pvec-spline = ["dep:pvec-numeric"]
 # two PVec crates it needs are the whole of what it adds to the graph. They are git
 # dependencies (PVec is not on crates.io yet), which is why this is a feature and not
 # part of the default build: see the comment on `pvec-geometry` below.
-pvec-normalized = ["dep:pvec-geometry", "dep:pvec-numeric"]
+pvec-normalized = ["dep:pvec-geometry", "dep:pvec-numeric", "dep:pvec-entity"]
 # Documentation-only deprecated alias for `object-store-sink`. Cargo has no
 # mechanism to mark a feature deprecated, so enabling `s3` emits NO build-time
 # warning: consumers pinned to `features = ["s3"]` get zero automated signal
@@ -671,6 +674,7 @@ acadrust = { workspace = true, optional = true }
 pvec-numeric = { workspace = true, optional = true }
 acadsharp-rs = { workspace = true, optional = true }
 pvec-geometry = { workspace = true, optional = true }
+pvec-entity = { workspace = true, optional = true }
 ab_glyph = { workspace = true }
 blake3 = { workspace = true }
 exr = { workspace = true }
@@ -715,3 +719,7 @@ tracing-subscriber = { workspace = true }
 [[test]]
 name = "pvec_dwg_spline_structural"
 required-features = ["pvec-spline"]
+
+[[test]]
+name = "pvec_1091_bounds"
+required-features = ["pvec-normalized"]
