@@ -418,7 +418,7 @@ const EXPECTED_SRC_MODULES: usize = 31;
 /// Nineteen today: six in `tests/dependency_policy.rs`, three in
 /// `tests/pdfium_source_audit.rs` and two in `tests/workspace_layout.rs`. Ten
 /// of those eleven are what #714 is about; the eleventh is the sha2 version
-/// ceiling #731 added, which spawns nothing at run time and is counted anyway,
+/// floor (#731, reworked in #1248), which spawns nothing at run time and is counted anyway,
 /// because this detector reads the call graph rather than the process table and
 /// cannot see that `graphs()` memoizes its `cargo tree` calls across the whole
 /// binary. Then six in `tests/icc_lut_alloc.rs`, which spawn a child on purpose
