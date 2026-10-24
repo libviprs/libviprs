@@ -19,8 +19,8 @@ use libviprs::pvec::provenance::{NoProvenance, ProvenanceStore};
 use libviprs::pvec::transform::ComposedTransform;
 use libviprs::pvec::{
     ArrayGrid, BlockRef, DwgProvider, EntityCursor, EntityScope, FidelityClass, InstancePath,
-    InstanceStep, LayerState, LayoutId, LayoutState, Limit, Normalized2DGeometry, ProviderCaps, ProviderError, ProvenanceStub, RawEntity,
-    RawGeometry, SourceLimits, SourceTransform,
+    InstanceStep, LayerState, LayoutId, LayoutState, Limit, Normalized2DGeometry, ProvenanceStub,
+    ProviderCaps, ProviderError, RawEntity, RawGeometry, SourceLimits, SourceTransform,
 };
 
 fn h(raw: u64) -> ItemHandle {
@@ -151,7 +151,10 @@ impl DwgProvider for Mock {
     }
 }
 
-fn run(mock: &Mock, bounds: FlattenBounds) -> Result<(Flattened, ProvenanceStore, LineageStore), FlattenError> {
+fn run(
+    mock: &Mock,
+    bounds: FlattenBounds,
+) -> Result<(Flattened, ProvenanceStore, LineageStore), FlattenError> {
     let mut store = ProvenanceStore::new();
     let mut lineage = LineageStore::new();
     let out = BlockResolver::new(mock, bounds).flatten(
@@ -193,8 +196,14 @@ fn nested_blocks_001_lands_where_the_fixture_says() {
         panic!("not a line");
     };
     // 0x400e000000000000 is 3.75, 0x4000000000000000 is 2.0, 0x3ff8... is 1.5, 0x4021 is 8.5.
-    assert_eq!(bits(leaf.map_point(*start)), [3.75f64.to_bits(), 2.0f64.to_bits()]);
-    assert_eq!(bits(leaf.map_point(*end)), [1.5f64.to_bits(), 8.5f64.to_bits()]);
+    assert_eq!(
+        bits(leaf.map_point(*start)),
+        [3.75f64.to_bits(), 2.0f64.to_bits()]
+    );
+    assert_eq!(
+        bits(leaf.map_point(*end)),
+        [1.5f64.to_bits(), 8.5f64.to_bits()]
+    );
 }
 
 #[test]
@@ -220,7 +229,10 @@ fn leaf_is_the_composed_transform_applied_once() {
     let mut blocks = Vec::new();
     let names = ["L0", "L1", "L2", "L3", "L4"];
     for i in 0..4 {
-        blocks.push((names[i], vec![insert(0x20 + i as u64, names[i + 1], levels[i + 1])]));
+        blocks.push((
+            names[i],
+            vec![insert(0x20 + i as u64, names[i + 1], levels[i + 1])],
+        ));
     }
     blocks.push(("L4", vec![line(0x99, [0.3, 0.7], [11.1, -4.9])]));
     let mock = Mock::new(vec![insert(0x10, "L0", levels[0])], blocks);
@@ -241,7 +253,10 @@ fn leaf_is_the_composed_transform_applied_once() {
         })
         .collect();
     let composed = ComposedTransform::compose(steps).unwrap();
-    assert_eq!(leaf.matrix().map(f64::to_bits), composed.matrix().map(f64::to_bits));
+    assert_eq!(
+        leaf.matrix().map(f64::to_bits),
+        composed.matrix().map(f64::to_bits)
+    );
 
     let [m00, m01, m10, m11, tx, ty] = composed.matrix();
     let p = [0.3, 0.7];
@@ -252,7 +267,10 @@ fn leaf_is_the_composed_transform_applied_once() {
     // and on this chain it lands on different bits, which is what makes the assertion above bite.
     let mut q = p;
     for m in levels.iter().rev() {
-        q = [m[0] * q[0] + m[1] * q[1] + m[4], m[2] * q[0] + m[3] * q[1] + m[5]];
+        q = [
+            m[0] * q[0] + m[1] * q[1] + m[4],
+            m[2] * q[0] + m[3] * q[1] + m[5],
+        ];
     }
     assert_ne!(bits(q), bits(once), "the chain must be rounding-sensitive");
 }
@@ -260,7 +278,10 @@ fn leaf_is_the_composed_transform_applied_once() {
 fn self_reference() -> Mock {
     Mock::new(
         vec![insert(0x10, "LOOP", ID)],
-        vec![("LOOP", vec![insert(0x11, "LOOP", ID), line(0x12, [0.0, 0.0], [1.0, 1.0])])],
+        vec![(
+            "LOOP",
+            vec![insert(0x11, "LOOP", ID), line(0x12, [0.0, 0.0], [1.0, 1.0])],
+        )],
     )
 }
 
@@ -315,11 +336,15 @@ fn amplifier(depth: usize, fan: u64) -> Mock {
         next_handle
     };
     let step = [1.0, 0.0, 0.0, 1.0, 1.0, 0.0];
-    let model: Vec<RawEntity> = (0..fan).map(|_| insert(handle(), &names[0], step)).collect();
+    let model: Vec<RawEntity> = (0..fan)
+        .map(|_| insert(handle(), &names[0], step))
+        .collect();
     let mut blocks = Vec::new();
     for i in 0..depth {
         let body = if i + 1 < depth {
-            (0..fan).map(|_| insert(handle(), &names[i + 1], step)).collect()
+            (0..fan)
+                .map(|_| insert(handle(), &names[i + 1], step))
+                .collect()
         } else {
             vec![line(handle(), [0.0, 0.0], [1.0, 0.0])]
         };
@@ -349,7 +374,13 @@ fn expanded_instance_ceiling_is_a_typed_error() {
     let mut limits = SourceLimits::default();
     limits.max_expanded_instances = 100;
     let err = run(&mock, FlattenBounds::new(limits, 1_000)).unwrap_err();
-    let FlattenError::Limit { limit, observed, ceiling, block_path } = err else {
+    let FlattenError::Limit {
+        limit,
+        observed,
+        ceiling,
+        block_path,
+    } = err
+    else {
         panic!("wrong error: {err:?}");
     };
     assert_eq!(limit, Limit::ExpandedInstances);
@@ -364,7 +395,13 @@ fn depth_ceiling_is_a_typed_error_naming_the_path() {
     let mut limits = SourceLimits::default();
     limits.max_block_depth = 3;
     let err = run(&mock, FlattenBounds::new(limits, 1_000)).unwrap_err();
-    let FlattenError::Limit { limit, observed, ceiling, block_path } = err else {
+    let FlattenError::Limit {
+        limit,
+        observed,
+        ceiling,
+        block_path,
+    } = err
+    else {
         panic!("wrong error: {err:?}");
     };
     assert_eq!((limit, observed, ceiling), (Limit::BlockDepth, 4, 3));
@@ -389,11 +426,19 @@ fn entities_per_block_ceiling_is_a_typed_error() {
         vec![insert(0x10, "BIG", ID)],
         vec![(
             "BIG",
-            (0..10).map(|i| line(0x20 + i, [0.0, 0.0], [1.0, 1.0])).collect(),
+            (0..10)
+                .map(|i| line(0x20 + i, [0.0, 0.0], [1.0, 1.0]))
+                .collect(),
         )],
     );
     let err = run(&mock, FlattenBounds::new(SourceLimits::default(), 4)).unwrap_err();
-    let FlattenError::EntitiesPerBlock { block, observed, ceiling, block_path } = err else {
+    let FlattenError::EntitiesPerBlock {
+        block,
+        observed,
+        ceiling,
+        block_path,
+    } = err
+    else {
         panic!("wrong error: {err:?}");
     };
     assert_eq!((block.as_str(), observed, ceiling), ("BIG", 5, 4));
@@ -402,7 +447,12 @@ fn entities_per_block_ceiling_is_a_typed_error() {
 
 #[test]
 fn minsert_grid_expands_rows_times_columns_in_the_inserts_frame() {
-    let grid = ArrayGrid { rows: 2, columns: 3, row_spacing: 10.0, column_spacing: 5.0 };
+    let grid = ArrayGrid {
+        rows: 2,
+        columns: 3,
+        row_spacing: 10.0,
+        column_spacing: 5.0,
+    };
     // Rotated 90 degrees: the insert's x axis points along +y.
     let m = [0.0, -1.0, 1.0, 0.0, 100.0, 200.0];
     let mock = Mock::new(
@@ -411,8 +461,11 @@ fn minsert_grid_expands_rows_times_columns_in_the_inserts_frame() {
     );
     let (out, _, _) = run(&mock, FlattenBounds::default()).unwrap();
     assert_eq!(out.instances, 6);
-    let origins: Vec<[f64; 2]> =
-        out.entities.iter().map(|e| e.map_point([0.0, 0.0, 0.0])).collect();
+    let origins: Vec<[f64; 2]> = out
+        .entities
+        .iter()
+        .map(|e| e.map_point([0.0, 0.0, 0.0]))
+        .collect();
     // Row-major: row 0 columns 0..3, then row 1. Columns step along the rotated x (+y), rows along
     // the rotated y (-x).
     assert_eq!(
@@ -430,7 +483,12 @@ fn minsert_grid_expands_rows_times_columns_in_the_inserts_frame() {
 
 #[test]
 fn minsert_grid_counts_toward_the_instance_ceiling() {
-    let grid = ArrayGrid { rows: 100, columns: 100, row_spacing: 1.0, column_spacing: 1.0 };
+    let grid = ArrayGrid {
+        rows: 100,
+        columns: 100,
+        row_spacing: 1.0,
+        column_spacing: 1.0,
+    };
     let mock = Mock::new(
         vec![insert_with(Some(0x10), "CELL", ID, [0.0, 0.0, 1.0], grid)],
         vec![("CELL", vec![line(0x20, [0.0, 0.0], [1.0, 0.0])])],
@@ -438,14 +496,27 @@ fn minsert_grid_counts_toward_the_instance_ceiling() {
     let mut limits = SourceLimits::default();
     limits.max_expanded_instances = 9_999;
     let err = run(&mock, FlattenBounds::new(limits, 1_000)).unwrap_err();
-    assert!(matches!(err, FlattenError::Limit { limit: Limit::ExpandedInstances, observed: 10_000, .. }));
+    assert!(matches!(
+        err,
+        FlattenError::Limit {
+            limit: Limit::ExpandedInstances,
+            observed: 10_000,
+            ..
+        }
+    ));
 }
 
 #[test]
 fn negative_z_normal_mirrors_x_outside_the_inserts_own_map() {
     let m = [1.0, 0.0, 0.0, 1.0, 10.0, 0.0];
     let mock = Mock::new(
-        vec![insert_with(Some(0x10), "B", m, [0.0, 0.0, -1.0], ArrayGrid::SINGLE)],
+        vec![insert_with(
+            Some(0x10),
+            "B",
+            m,
+            [0.0, 0.0, -1.0],
+            ArrayGrid::SINGLE,
+        )],
         vec![("B", vec![line(0x20, [2.0, 3.0], [4.0, 5.0])])],
     );
     let (out, _, _) = run(&mock, FlattenBounds::default()).unwrap();
@@ -456,7 +527,13 @@ fn negative_z_normal_mirrors_x_outside_the_inserts_own_map() {
 #[test]
 fn tilted_normal_is_skipped_and_classified_not_dropped() {
     let mock = Mock::new(
-        vec![insert_with(Some(0x10), "B", ID, [1.0, 0.0, 0.0], ArrayGrid::SINGLE)],
+        vec![insert_with(
+            Some(0x10),
+            "B",
+            ID,
+            [1.0, 0.0, 0.0],
+            ArrayGrid::SINGLE,
+        )],
         vec![("B", vec![line(0x20, [0.0, 0.0], [1.0, 0.0])])],
     );
     let (out, _, _) = run(&mock, FlattenBounds::default()).unwrap();
@@ -494,7 +571,13 @@ fn anonymous_block_with_resolved_content_is_flattened() {
 #[test]
 fn insert_without_a_handle_is_skipped_not_dropped() {
     let mock = Mock::new(
-        vec![insert_with(None, "B", ID, [0.0, 0.0, 1.0], ArrayGrid::SINGLE)],
+        vec![insert_with(
+            None,
+            "B",
+            ID,
+            [0.0, 0.0, 1.0],
+            ArrayGrid::SINGLE,
+        )],
         vec![("B", vec![line(0x20, [0.0, 0.0], [1.0, 0.0])])],
     );
     let (out, _, _) = run(&mock, FlattenBounds::default()).unwrap();
@@ -523,7 +606,10 @@ fn the_walk_is_deterministic_and_depth_first() {
             e.matrix().map(f64::to_bits),
         )
     };
-    assert_eq!(a.entities.iter().map(key).collect::<Vec<_>>(), b.entities.iter().map(key).collect::<Vec<_>>());
+    assert_eq!(
+        a.entities.iter().map(key).collect::<Vec<_>>(),
+        b.entities.iter().map(key).collect::<Vec<_>>()
+    );
     // Layout entities that are plain leaves keep their place between the expanded blocks.
     let mock = Mock::new(
         vec![
@@ -576,7 +662,10 @@ fn every_emitted_entity_has_a_lineage_record_that_resolves_to_the_source() {
         // The provenance record on the same handle carries the same path and the composed map.
         let p = store.get(handle).unwrap();
         assert_eq!(p.block_path(), &rec.block_path());
-        assert_eq!(p.transform().coefficients().map(f64::to_bits), leaf.matrix().map(f64::to_bits));
+        assert_eq!(
+            p.transform().coefficients().map(f64::to_bits),
+            leaf.matrix().map(f64::to_bits)
+        );
         // Each level's recorded transform is the INSERT's own.
         for level in rec.levels() {
             assert_eq!(level.transform, [1.0, 0.0, 0.0, 1.0, 1.0, 0.0]);
@@ -588,7 +677,9 @@ fn every_emitted_entity_has_a_lineage_record_that_resolves_to_the_source() {
 fn a_leaf_a_layout_owns_has_an_empty_lineage() {
     let mock = Mock::new(vec![line(1, [0.0, 0.0], [1.0, 0.0])], vec![]);
     let (out, _, lineage) = run(&mock, FlattenBounds::default()).unwrap();
-    let rec = lineage.get(out.entities[0].lineage_handle().unwrap()).unwrap();
+    let rec = lineage
+        .get(out.entities[0].lineage_handle().unwrap())
+        .unwrap();
     assert_eq!(rec.depth(), 0);
     assert!(rec.block_path().is_root());
 }
@@ -598,7 +689,13 @@ fn a_sink_that_keeps_nothing_records_no_lineage() {
     let mock = amplifier(3, 2);
     let mut lineage = LineageStore::new();
     let out = BlockResolver::new(&mock, FlattenBounds::default())
-        .flatten(&EntityScope::Layout(LayoutId(0)), "f.dwg", "Model", &mut NoProvenance, &mut lineage)
+        .flatten(
+            &EntityScope::Layout(LayoutId(0)),
+            "f.dwg",
+            "Model",
+            &mut NoProvenance,
+            &mut lineage,
+        )
         .unwrap();
     assert_eq!(out.entities.len(), 8);
     assert!(lineage.is_empty());
@@ -611,12 +708,18 @@ fn lineage_recording_does_not_change_the_geometry_record_size() {
     // size whether lineage is on or off. The number is pinned for 64-bit targets, so a field added
     // to `Normalized2DGeometry` for lineage changes it and fails here.
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(std::mem::size_of::<Normalized2DGeometry>(), PINNED_GEOMETRY_SIZE);
+    assert_eq!(
+        std::mem::size_of::<Normalized2DGeometry>(),
+        PINNED_GEOMETRY_SIZE
+    );
     let mock = amplifier(2, 2);
     let _ = run(&mock, FlattenBounds::default()).unwrap();
     #[cfg(target_pointer_width = "64")]
-    assert_eq!(std::mem::size_of::<Normalized2DGeometry>(), PINNED_GEOMETRY_SIZE);
+    assert_eq!(
+        std::mem::size_of::<Normalized2DGeometry>(),
+        PINNED_GEOMETRY_SIZE
+    );
 }
 
 #[cfg(target_pointer_width = "64")]
-const PINNED_GEOMETRY_SIZE: usize = 0;
+const PINNED_GEOMETRY_SIZE: usize = 176;
