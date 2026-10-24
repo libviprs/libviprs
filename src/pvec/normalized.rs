@@ -64,38 +64,7 @@ impl ProvenanceHandle {
     }
 }
 
-/// What became of a source entity (NG-07): the six classes of N3.5.
-///
-/// Fieldless on purpose here. N3.5 owns the reason codes and any growth of the set, hence
-/// `non_exhaustive`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum FidelityClass {
-    /// The PVec value is the source construct, structurally.
-    SupportedExact,
-    /// The PVec value is the same locus under a different but equivalent construct.
-    SupportedEquivalent,
-    /// The mapping needs mathematics PVec has no entry point for yet. No geometry.
-    RequiresPVecCapability,
-    /// The geometry exists and needs an extension to be carried in full.
-    RequiresExtension,
-    /// The source construct has no mapping. No geometry.
-    Unsupported,
-    /// Dropped on purpose by policy. No geometry.
-    IgnoredByPolicy,
-}
-
-impl FidelityClass {
-    /// Whether a record of this class carries a PVec curve (NG-07).
-    pub const fn produces_geometry(self) -> bool {
-        matches!(
-            self,
-            FidelityClass::SupportedExact
-                | FidelityClass::SupportedEquivalent
-                | FidelityClass::RequiresExtension
-        )
-    }
-}
+pub use super::fidelity::FidelityClass;
 
 /// Why a record could not be built.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

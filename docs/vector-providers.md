@@ -32,7 +32,14 @@ libviprs  --(feature dwg-acadsharp)-->  acadsharp-rs  -->  NativeAOT archive
   process with its own memory and wall-clock ceiling. See
   `docs/vector-performance-report.md` for what that was measured to hold.
 
-Supported DWG versions are AC1014 through AC1032 (R14 to 2018).
+Supported DWG versions are AC1014 through AC1032 (R14 to 2018). That is seven
+version stamps, listed in `SUPPORTED_DWG_VERSIONS` (`src/cad/acadsharp.rs`): AC1014,
+AC1015, AC1018, AC1021, AC1024, AC1027 and AC1032, and the probe accepts exactly
+those. That the reader decodes all of them is checked outside this repository, in
+`libviprs/acadsharp-rs-tests`, which keeps one drawing per version
+(`fixtures/dwg/sample_AC1014.dwg` to `sample_AC1032.dwg`) and the records each one
+must produce (`fixtures/expected/SUMMARY.md`). A stamp outside the list, or a drawing
+the native reader refuses anyway, is not opened.
 
 ## Building without it
 

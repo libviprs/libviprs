@@ -30,10 +30,40 @@
 pub mod classify;
 #[cfg(feature = "pvec-normalized")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
+pub mod dump;
+#[cfg(feature = "pvec-normalized")]
+#[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
+pub mod dwg_basic;
+pub mod fidelity;
+pub mod fill_policy;
+#[cfg(feature = "pvec-normalized")]
+#[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
+pub mod flatten;
+pub mod limits;
+#[cfg(feature = "pvec-normalized")]
+#[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
+pub mod mapping;
+#[cfg(feature = "pvec-normalized")]
+#[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
 pub mod normalized;
+pub mod ordering;
+#[cfg(feature = "pvec-normalized")]
+#[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
+pub mod pdf_bezier;
+pub mod pdf_clip;
 pub mod pdf_vector;
+#[cfg(feature = "pvec-normalized")]
+#[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
+pub mod provenance;
 pub mod provider;
+pub mod text_policy;
+#[cfg(feature = "pvec-normalized")]
+#[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
+pub mod transform;
 pub mod units;
+pub mod view;
+pub mod view_profile;
+pub mod xref;
 
 #[cfg(feature = "dwg-acadrust")]
 #[cfg_attr(docsrs, doc(cfg(feature = "dwg-acadrust")))]
@@ -47,6 +77,14 @@ pub use classify::{
     ClassSource, Classification, ClassificationReport, ElementClass, ElementRule, ElementRules,
     RuleMatch,
 };
+pub use fidelity::{
+    Basis, FidelityClass, FidelityReport, ReasonCode, Tally, TallyError, classify_unmapped,
+};
+pub use limits::{Limit, LimitError, SourceGuard, SourceLimits};
+pub use ordering::{
+    EntityId, OrderedEntity, OrderedSource, OrderingBasis, OrderingPolicy, OrderingReport,
+    canonical_cmp, order_entities,
+};
 pub use pdf_vector::{
     PdfFillRule, PdfPaintIntent, PdfPathEntity, PdfPathSegment, PdfPoint, PdfProvenance,
     PdfVectorError, PdfVectorLimits, PdfVectorPage, extract_page_paths,
@@ -58,9 +96,20 @@ pub use provider::{
     ProvenanceStub, ProviderCaps, ProviderError, RawEntity, RawGeometry, RawVertex, SourceFact,
     SourceTransform,
 };
+pub use text_policy::{
+    DwgTextCounts, PdfTextOperatorCounts, TextFontOutcome, TextReport, shx_outcome,
+};
 
 #[cfg(feature = "pvec-normalized")]
-pub use normalized::{
-    FidelityClass, NormalizeError, Normalized2DGeometry, ProvenanceHandle, SourceBounds,
-};
+pub use normalized::{NormalizeError, Normalized2DGeometry, ProvenanceHandle, SourceBounds};
 pub use units::{DrawingExtents, INSUNITS_TABLE, SourceSpace, SourceUnit};
+pub use view::{
+    Decision, EntityState, EntityStates, IgnoredByPolicy, PolicyReason, ViewportFreezeMode,
+    ViewportFreezeNote, ViewportInput, VisibilityDisagreement, VisibilityFilter, VisibilityOutcome,
+    select_layout,
+};
+pub use view_profile::{
+    ExcludedEntity, Exclusion, InsertLayerRule, Knob, LayerStateRule, LayerVisibility,
+    NestedInsertPolicy, SpaceSelection, ViewOutcome, ViewProfile, ViewProfileError, ViewReport,
+    ViewedEntity, ViewportClipping, ViewportFreezeRule, XrefPolicy,
+};

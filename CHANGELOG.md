@@ -9,6 +9,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The v1 text capability policy** (issue #1084, part of #1039). v1 omits text and reports the
+  counts: `pvec::text_policy` counts every PDF `Tj`, `TJ`, `'` and `"` (on `PdfVectorPage::text`,
+  forms expanded) and every DWG `TEXT` and `MTEXT`, and buckets each by font situation (not
+  embedded, subset, CID without `/ToUnicode`, missing SHX, plus embedded and unresolved). No string
+  or outline reaches geometry and no font dependency is added. The decision, with measurements on
+  26 licensed PDFs and the committed DWG probes, is in `docs/pvec-text-policy.md`.
+- **A fence around what libviprs names from PVec** (issue #1088, part of #1039).
+  `tests/pvec_api_surface.rs` scans `src/` for `pvec_*::` paths and fails on any crate root that
+  is not `pvec_geometry` or `pvec_numeric`, or any path with a container, block, index or
+  byte-layout segment, and `src/pvec/` may not define a curve evaluator, knot insertion or
+  tessellation routine (NG-10). The writer funnel `src/pvec/writer.rs` waits on PVec's `pvec`
+  facade crate (libviprs/pvec#52), which does not exist yet.
+- **Limits and malformed-input handling on the PDF vector path** (issue #1087, part of #1039).
+  `pvec::pdf_vector::PdfVectorLimits` gains `max_content_bytes` (decoded bytes across the page and
+  every form, cut off while a Flate stream inflates) and `max_segments_per_path`, and the error
+  type gains `ContentBytesExceeded`, `PathSegmentsExceeded`, `ResourceCycle` and `InvalidPageBox`,
+  each naming the limit and the observed value. Operators and `q` depth are now counted before an
+  operation list is built, so a 10 MiB stream of `q` refuses at the nesting bound without
+  allocating in proportion to the stream. Unparseable or out-of-range number literals, a `/Contents`
+  that is not a stream, a `cm` that overflows and a page box with no extent are typed errors instead
+  of a shorter page. Filters other than Flate (alone, or after ASCIIHex/ASCII85) are refused as
+  unbounded. Tests in `tests/pvec_pdf_limits.rs`, fuzz target `fuzz_pvec_pdf_vector`.
+- **The hatch and fill policy** (issue #1085, part of #1039). `docs/pvec-hatch-policy.md` records
+  what each fill construct becomes, and `pvec::fill_policy` is the same table as code plus
+  `FillReport`, which counts DWG `HATCH`/`SOLID`/`TRACE` and PDF fills, shadings and patterns with a
+  bucket and a reason. No fill becomes triangles: PDF fills keep their subpath geometry, everything
+  else is counted and reported. `PdfVectorPage` now carries `shading_paints` and
+  `pattern_selections`. No fill component and no kept hatch boundary yet (#1308).
+- **One table from normalized geometry to PVec** (issue #1089, part of #1039).
+  `pvec::mapping::NORMALIZED_TO_PVEC` has a row per kind of normalized curve: the PVec type it
+  becomes, the conformance class it claims, the PVec capability it needs and what it is classified
+  as when that capability is missing (only `RequiresPVecCapability`, `RequiresExtension` or
+  `Unsupported`, so tessellation is unrepresentable). A new kind does not compile without a row,
+  and `docs/pvec-mapping.md` is rendered from the table and compared byte for byte by a test.
+- **The normalized geometry dump** (issue #1103, part of #1039). `pvec::dump::NormalizedDump`
+  writes a line-oriented text dump of `Normalized2DGeometry` records (id, type, fidelity class,
+  source-space parameters at round-trip `f64` precision, bounds, optional provenance) as each
+  entity is pushed, so a conversion that fails while writing PVec still leaves a dump of what was
+  normalized. Format in `docs/normalized-dump.md`; it is inspection output, not an interchange
+  format, and nothing reads it back.
+- **Exact extraction of the basic DWG entities** (issue #1073, part of #1039).
+  `pvec::dwg_basic` (feature `pvec-normalized`) turns a `LINE`, `LWPOLYLINE`, 2D `POLYLINE`,
+  `CIRCLE`, `ARC` or `ELLIPSE` into the PVec curve that is that entity: a trimmed line, a polyline
+  (closed ones carry a copy of the first vertex), a composite of polylines and trimmed circles when
+  bulges are present, a circle, a trimmed circle and an ellipse or trimmed ellipse kept as
+  parameters. Nothing is sampled or fitted, and every construction and tolerance is PVec's. A
+  zero radius, coincident vertices, a zero axis ratio, a bad bulge, too many vertices, a 3D entity
+  or a non-+z extrusion normal comes back as a typed `BasicError` with an N3.5 classification and a
+  report row. Eight new `ReasonCode`s, and the PVec pin moves to current main.
+- **The xref and external-reference policy** (issue #1076, part of #1039). `pvec::xref` gives
+  `XrefPolicy` three named outcomes and no silent one: `ExternalDependency` (the default) omits the
+  geometry but always leaves a report row with the name, path, insert transform and layer, `Reject`
+  fails naming the xref and its resolved path, and `Resolve` clears the path for the caller to open.
+  Attachment paths are confined under a caller-supplied root before anything touches the disk
+  (`..` escapes, absolute, UNC and drive-letter paths get typed refusals), cycles are caught on the
+  resolved-path set and name every file in the chain, and nesting depth and instances count against
+  the same `SourceGuard` as blocks. Opening and flattening the attached drawing waits for N4.4 (#1283).
+
+- **The view-profile options type** (issue #1097, part of #1039). `pvec::ViewProfile`
+  makes the view context an explicit input: space (model, or a named paper layout), viewport
+  clipping, the off, frozen, viewport-frozen and layer-0 rules, the nested-insert depth and the
+  xref policy, every field traceable to a row of the N1.4 decision table.
+  `ViewProfile::default_profile()` is the v1 "visible flattened drawing" and a test pins every
+  value. `apply` checks a provider's entities against the profile rather than trusting it: each
+  excluded entity comes back naming the profile field that excluded it, the report counts them per
+  field and per layer, and an absent paper layout is a typed error listing the layouts that exist.
+
+- **Source validation and resource limits for CAD ingestion** (issue #1101,
+  part of #1039). `pvec::SourceLimits` holds documented ceilings (block depth,
+  entity count, polyline vertices, spline control points and knots, MINSERT grid,
+  total expanded instances, cumulative allocation, name length), and
+  `pvec::SourceGuard` meters a walk against them, including a case-insensitive
+  block cycle detector. A breach is a `LimitError` naming the limit and the
+  observed value, never a panic or a truncated result. Wiring the limits into
+  the view-profile options waits on #1097 (tracked in #1277).
 - **Wall and column classification from layer and block rules** (issue #1233,
   part of #1039). `pvec::ElementRules` maps layer and block name globs to
   `ElementClass::Wall` or `Column`, with a small default profile (`A-WALL*`,
@@ -144,6 +219,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pinned by a test; nothing reached it before.
 
 ### Changed
+
+- **The vector JSON has a written-down spelling and a version** (issue #1293,
+  follow-up to #1035). `Conversion::to_json`, `ArchiveInfo::to_json` and
+  `CheckReport::to_json` carry `"v": 1` (`vector::JSON_VERSION`), the primitive
+  count keys are `PrimitiveKind::name()` and the layer field types are the
+  now-public `FieldType::name()`, neither read off a `Debug` string, and
+  `view_json` writes `"extents": null` for a view with no extent where it wrote
+  `[0,0,0,0]`. `tests/vector_1293_json.rs` pins every key.
 
 - **The `sha2` Miri backend pin is gone, and `sha2` is floored at 0.11.1**
   (issues #1248, #707, #731). sha2 0.11.1 loads its aarch64 round constants

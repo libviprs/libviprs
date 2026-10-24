@@ -7,7 +7,7 @@
 #![cfg(feature = "pvec-spline")]
 
 use libviprs::pvec::dwg_spline::{
-    Requires, SplineClass, SplineError, SplineField, SplineForm, TrimState, classify, extract,
+    SplineClass, SplineError, SplineField, SplineForm, TrimState, classify, extract,
 };
 use libviprs::pvec::{InstancePath, Point3, ProvenanceStub, RawEntity, RawGeometry, SourceFact};
 use pvec_numeric::{MAX_CONTROL_POINTS, MAX_DEGREE, MAX_KNOTS};
@@ -259,8 +259,7 @@ fn unreported_facts_name_the_missing_field() {
         assert_eq!(
             extract(&mk(knots, SourceFact::Present(false))).unwrap_err(),
             SplineError::MissingField {
-                field: SplineField::Knots,
-                requires: Requires::Extension
+                field: SplineField::Knots
             }
         );
     }
@@ -268,8 +267,7 @@ fn unreported_facts_name_the_missing_field() {
     assert_eq!(
         extract(&mk(ok, SourceFact::NotReportable)).unwrap_err(),
         SplineError::MissingField {
-            field: SplineField::Periodic,
-            requires: Requires::Extension
+            field: SplineField::Periodic
         }
     );
 }
@@ -283,8 +281,7 @@ fn unreportable_weights_are_not_read_as_non_rational() {
     assert_eq!(
         extract(&e).unwrap_err(),
         SplineError::MissingField {
-            field: SplineField::Weights,
-            requires: Requires::Extension
+            field: SplineField::Weights
         }
     );
 }
@@ -300,8 +297,7 @@ fn three_d_and_helix_are_classified_not_projected() {
     assert_eq!(
         extract(&e).unwrap_err(),
         SplineError::Unsupported3d {
-            class: SplineClass::ThreeD,
-            requires: Requires::PVecCapability
+            class: SplineClass::ThreeD
         }
     );
     let helix = entity(
