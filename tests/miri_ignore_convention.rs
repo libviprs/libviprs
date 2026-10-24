@@ -798,7 +798,8 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1036 adds 10: the `tests/vector_1036_*.rs` cells that build an archive in a temp dir, spawn a child that does, or read a committed DWG fixture. It said 645 before this line moved.
 /// #1035 adds 17: the `tests/vector_1035_api.rs` cells that convert into a temp dir, read a committed fixture or open a missing path. It said 655 before this line moved.
 /// #1072 adds 17: `tests/spike_acadrust_gate0.rs`, which reads the spike document, its results and its own directory listing. It said 672 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 721;
+/// #1091 adds 1: the `tests/pvec_api_surface.rs` check that no index or directory type is defined under `src/pvec`, which walks the source tree. It said 721 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 722;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
