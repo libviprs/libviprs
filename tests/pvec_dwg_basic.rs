@@ -471,23 +471,132 @@ fn a_polyline_of_one_vertex_is_refused() {
     assert!(matches!(err, BasicError::Degenerate { .. }), "{err:?}");
 }
 
-#[test]
-fn a_polyline_with_a_non_plus_z_normal_is_not_mapped() {
-    let mut e = polyline(vec![vertex(0.0, 0.0, 0.0), vertex(1.0, 0.0, 0.0)], false);
-    if let RawGeometry::Polyline { normal, .. } = &mut e.geometry {
-        *normal = [0.0, 0.0, -1.0];
+// ------------------------------------------------ extrusion normal (#1298)
+
+const NEG_Z: Point3 = [0.0, 0.0, -1.0];
+
+fn with_normal(mut e: RawEntity, n: Point3) -> RawEntity {
+    match &mut e.geometry {
+        RawGeometry::Polyline { normal, .. }
+        | RawGeometry::Circle { normal, .. }
+        | RawGeometry::Arc { normal, .. }
+        | RawGeometry::Ellipse { normal, .. } => *normal = n,
+        _ => panic!("no normal"),
     }
-    let err = extract_polyline(&e).unwrap_err();
+    e
+}
+
+/// The end points of a curve, unordered (a mirror may flip the walking direction).
+fn ends(b: &ExactBasic) -> [(f64, f64); 2] {
+    let d = b.curve.domain();
+    let (p0, p1) = (b.curve.eval(d.lo()).unwrap(), b.curve.eval(d.hi()).unwrap());
+    let mut v = [(p0.x, p0.y), (p1.x, p1.y)];
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    v
+}
+
+fn mirrored_ends(b: &ExactBasic) -> [(f64, f64); 2] {
+    let [a, c] = ends(b);
+    let mut v = [(-a.0, a.1), (-c.0, c.1)];
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    v
+}
+
+fn same_ends(a: [(f64, f64); 2], b: [(f64, f64); 2]) -> bool {
+    near_pt(
+        Point2 {
+            x: a[0].0,
+            y: a[0].1,
+        },
+        b[0].0,
+        b[0].1,
+    ) && near_pt(
+        Point2 {
+            x: a[1].0,
+            y: a[1].1,
+        },
+        b[1].0,
+        b[1].1,
+    )
+}
+
+#[test]
+fn issue_1298_arc_with_normal_minus_z_is_mirrored_about_the_y_axis() {
+    let src = arc([3.0, 2.0, 5.0], 2.0, 0.25, 1.75);
+    let flat = extract_arc(&src).unwrap();
+    let b = extract_arc(&with_normal(src, NEG_Z)).expect("a -z normal is mapped, not refused");
+    assert_eq!(b.kind, BasicKind::Arc);
+    assert!(same_ends(ends(&b), mirrored_ends(&flat)), "{:?}", ends(&b));
+    assert_eq!(b.elevation, -5.0, "z flips with the normal");
+    assert_eq!(b.classification.class(), FidelityClass::SupportedEquivalent);
     assert_eq!(
-        err,
-        BasicError::ExtrusionNotApplied {
-            normal: [0.0, 0.0, -1.0]
-        }
+        b.source_range,
+        Some((0.25, 1.75)),
+        "the stored angles stay as stored"
     );
-    assert_eq!(
-        err.classification("LWPOLYLINE").reason(),
-        Some(ReasonCode::ExtrusionNotApplied)
-    );
+}
+
+#[test]
+fn issue_1298_polyline_with_normal_minus_z_is_mirrored_about_the_y_axis() {
+    let vs = vec![
+        vertex(1.0, 0.0, 0.0),
+        vertex(4.0, 1.0, 0.0),
+        vertex(5.0, 3.0, 0.0),
+    ];
+    let b = extract_polyline(&with_normal(polyline(vs, false), NEG_Z)).expect("mapped");
+    let Curve::Polyline(p) = &b.curve else {
+        panic!("{:?}", b.curve.kind());
+    };
+    let pts: Vec<(f64, f64)> = p.vertices().iter().map(|q| (q.x, q.y)).collect();
+    assert_eq!(pts, vec![(-1.0, 0.0), (-4.0, 1.0), (-5.0, 3.0)]);
+}
+
+#[test]
+fn issue_1298_bulged_polyline_with_normal_minus_z_flips_its_sweep() {
+    let vs = vec![vertex(0.0, 0.0, 1.0), vertex(2.0, 0.0, 0.0)];
+    let flat = extract_polyline(&polyline(vs.clone(), false)).unwrap();
+    let b = extract_polyline(&with_normal(polyline(vs, false), NEG_Z)).expect("mapped");
+    assert!(same_ends(ends(&b), mirrored_ends(&flat)));
+    let (c, r, ..) = single_arc(&b);
+    assert!(near_pt(c, -1.0, 0.0) && near(r, 1.0, 1.0), "{c:?} {r}");
+}
+
+#[test]
+fn issue_1298_circle_with_normal_minus_z_moves_its_centre() {
+    let b = extract_circle(&with_normal(circle([1.5, -2.25, 4.0], 2.75), NEG_Z)).expect("mapped");
+    let Curve::Circle(c) = &b.curve else {
+        panic!("{:?}", b.curve.kind());
+    };
+    assert!(near_pt(c.placement().origin(), -1.5, -2.25));
+    assert_eq!(c.radius(), 2.75);
+    assert_eq!(b.elevation, -4.0);
+}
+
+#[test]
+fn issue_1298_ellipse_with_normal_minus_z_is_mirrored() {
+    let src = ellipse([1.0, 2.0, 0.0], [3.0, 1.0, 0.0], 0.5, 0.0, 1.0);
+    let flat = extract_ellipse(&src).unwrap();
+    let b = extract_ellipse(&with_normal(src, NEG_Z)).expect("mapped");
+    assert_eq!(b.kind, BasicKind::EllipticalArc);
+    assert!(same_ends(ends(&b), mirrored_ends(&flat)));
+}
+
+#[test]
+fn issue_1298_a_plus_z_entity_is_unchanged_and_keeps_its_elevation() {
+    let b = extract_circle(&circle([1.0, 1.0, 4.0], 1.0)).unwrap();
+    assert_eq!(b.elevation, 4.0);
+}
+
+#[test]
+fn issue_1298_a_general_normal_is_still_refused_with_its_reason() {
+    for n in [[1.0, 0.0, 0.0], [0.0, 0.6, 0.8], [0.0, 0.0, 0.0]] {
+        let err = extract_arc(&with_normal(arc([0.0; 3], 1.0, 0.0, 1.0), n)).unwrap_err();
+        assert_eq!(err, BasicError::ExtrusionNotApplied { normal: n });
+        assert_eq!(
+            err.classification("ARC").reason(),
+            Some(ReasonCode::ExtrusionNotApplied)
+        );
+    }
 }
 
 // -------------------------------------------------------- CIRCLE, ARC
@@ -715,7 +824,9 @@ fn every_refusal_has_a_classification_that_matches_its_report_row() {
             observed: 4,
         },
         BasicError::NonPlanar,
-        BasicError::ExtrusionNotApplied { normal: Z },
+        BasicError::ExtrusionNotApplied {
+            normal: [1.0, 0.0, 0.0],
+        },
     ];
     for e in errors {
         let c = e.classification("X");
