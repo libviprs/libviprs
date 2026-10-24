@@ -29,6 +29,16 @@ fn p(x: f64, y: f64) -> Point2 {
     Point2::new(x, y)
 }
 
+/// F10, only used by the orientation probe: a closed ring (first vertex repeated at the end), so
+/// "winding" means something. It is not a row of the matrix.
+fn ring() -> Res<Fixture> {
+    Ok(Fixture {
+        id: "F10",
+        row: "closed polyline",
+        curve: Curve::Polyline(Polyline::new(vec![p(0.0, 0.0), p(4.0, 0.0), p(4.0, 3.0), p(0.0, 3.0), p(0.0, 0.0)])?),
+    })
+}
+
 fn fixtures() -> Res<Vec<Fixture>> {
     let circle_frame = Placement2::new(p(3.0, -2.0), Vector2::new(1.0, 0.0))?;
     let circle = Circle::new(circle_frame, 5.0)?;
@@ -123,6 +133,36 @@ fn transforms() -> Vec<Xf> {
     ]
 }
 
+/// The two maps that bracket the NP-07 conditioning bound. `scale(1, k)` turns a circle into an
+/// ellipse whose axis ratio is about `1 / k`, so `k` is the policy's own bound over a fixed factor:
+/// one map inside it (a ratio of a quarter of the bound, give or take the fixture's own shape) and
+/// one outside it (four times the bound). Both sit far above the NP-19 bound, so NP-19 accepts them.
+fn conditioning_transforms() -> Vec<Xf> {
+    let bound = Policy::V1.axis_ratio_max;
+    vec![
+        Xf {
+            id: "T12",
+            class: "inside the NP-07 bound",
+            build: Box::new(move || Transform2::scale(1.0, 4.0 / bound)),
+            band: "conditioning",
+        },
+        Xf {
+            id: "T13",
+            class: "outside the NP-07 bound",
+            build: Box::new(move || Transform2::scale(1.0, 0.25 / bound)),
+            band: "conditioning",
+        },
+    ]
+}
+
+fn derived_from(x: &Xf) -> &'static str {
+    if x.band == "conditioning" {
+        "Policy::V1.axis_ratio_max"
+    } else {
+        "Policy::V1.rel"
+    }
+}
+
 fn kind_name(c: &Curve) -> String {
     match c {
         Curve::Line(_) => "line".into(),
@@ -175,6 +215,40 @@ fn emit(rec: &Rec) {
     );
 }
 
+fn frame_of(c: &Curve) -> Option<Placement2> {
+    match c {
+        Curve::Circle(x) => Some(*x.placement()),
+        Curve::Ellipse(x) => Some(*x.placement()),
+        Curve::Trimmed(t) => frame_of(t.basis()),
+        _ => None,
+    }
+}
+
+fn hand(f: &Placement2) -> &'static str {
+    let (x, y) = (f.x_axis(), f.y_axis());
+    if x.x * y.y - x.y * y.x > 0.0 {
+        "right"
+    } else {
+        "left"
+    }
+}
+
+/// Winding of a ring of vertices, from the sign of the shoelace sum. `open` when the last vertex is
+/// not the first, because an open run has no winding. This reads vertices PVec returned and
+/// evaluates nothing.
+fn winding(v: &[Point2]) -> &'static str {
+    let (first, last) = (v[0], v[v.len() - 1]);
+    if first.x != last.x || first.y != last.y {
+        return "open";
+    }
+    let twice_area: f64 = v.windows(2).map(|w| w[0].x * w[1].y - w[1].x * w[0].y).sum();
+    if twice_area > 0.0 {
+        "ccw"
+    } else {
+        "cw"
+    }
+}
+
 fn sweep(c: &Curve) -> &'static str {
     // Turning direction of the traversal at the middle of the domain: the sign of the cross
     // product of the first and second derivative. Exactly zero means no turning (a straight run).
@@ -210,7 +284,7 @@ fn measure(f: &Fixture, x: &Xf, id: String, m: Transform2) -> Rec {
     };
     if !x.band.is_empty() {
         rec.notes.push(("band".into(), x.band.into()));
-        rec.notes.push(("derived_from".into(), "Policy::V1.rel".into()));
+        rec.notes.push(("derived_from".into(), derived_from(x).into()));
     }
     rec.notes.push((
         "det_sign".into(),
@@ -276,6 +350,39 @@ fn measure(f: &Fixture, x: &Xf, id: String, m: Transform2) -> Rec {
     rec.notes.push(("start_preserved".into(), start_ok.to_string()));
     rec.notes.push(("end_preserved".into(), end_ok.to_string()));
 
+    // Turning direction at the middle of the domain, for every kind that has one. A composite has
+    // joints in the middle, so it is measured per segment below, and a polyline is straight between
+    // its vertices, so its orientation is the winding of a closed ring (probe F10).
+    if !matches!(f.curve, Curve::Composite(_)) {
+        rec.notes.push(("sweep_before".into(), sweep(&f.curve).into()));
+        rec.notes.push(("sweep_after".into(), sweep(&new).into()));
+    }
+    // A conic frame stores only its first axis (the second is the perpendicular a quarter turn on),
+    // so handedness is the sign of the cross product of the two axes the frame hands back.
+    if let (Some(before), Some(after)) = (frame_of(&f.curve), frame_of(&new)) {
+        rec.notes.push(("frame_before".into(), hand(&before).into()));
+        rec.notes.push(("frame_after".into(), hand(&after).into()));
+    }
+    if let (Curve::Polyline(a), Curve::Polyline(b)) = (&f.curve, &new) {
+        rec.notes.push(("ring_winding_before".into(), winding(a.vertices()).into()));
+        rec.notes.push(("ring_winding_after".into(), winding(b.vertices()).into()));
+    }
+    if let (Curve::Composite(a), Curve::Composite(b)) = (&f.curve, &new) {
+        let kinds = |c: &Composite| c.segments().iter().map(kind_name).collect::<Vec<_>>().join("+");
+        let sweeps = |c: &Composite| c.segments().iter().map(|s| sweep(s)).collect::<Vec<_>>().join("+");
+        rec.notes.push(("segments_before".into(), kinds(a)));
+        rec.notes.push(("segments_after".into(), kinds(b)));
+        rec.notes.push(("segment_sweeps_before".into(), sweeps(a)));
+        rec.notes.push(("segment_sweeps_after".into(), sweeps(b)));
+        // Every joint of the image: the end of segment k meets the start of segment k+1 under NP-17.
+        let joints = b.segments().windows(2).all(|w| {
+            let (Ok(e), Ok(st)) = (w[0].eval(w[0].domain().hi()), w[1].eval(w[1].domain().lo())) else { return false };
+            let scale = w[0].bounds().map(|b| b.diagonal()).unwrap_or(0.0);
+            Policy::V1.near_point([e.x, e.y], [st.x, st.y], scale)
+        });
+        rec.notes.push(("joints_kept".into(), (joints && a.segments().len() == b.segments().len()).to_string()));
+    }
+
     match (&f.curve, &new) {
         (Curve::BSpline(a), Curve::BSpline(b)) => {
             spline_notes(&mut rec, a.degree(), a.control_points(), a.knots(), None, b.degree(), b.control_points(), b.knots(), None, &m)
@@ -299,8 +406,6 @@ fn measure(f: &Fixture, x: &Xf, id: String, m: Transform2) -> Rec {
             rec.notes.push(("trim_span_before".into(), fmt_p(a.trim().span)));
             rec.notes.push(("trim_start_after".into(), fmt_p(b.trim().start)));
             rec.notes.push(("trim_span_after".into(), fmt_p(b.trim().span)));
-            rec.notes.push(("sweep_before".into(), sweep(&f.curve).into()));
-            rec.notes.push(("sweep_after".into(), sweep(&new).into()));
             match (a.basis(), b.basis()) {
                 (Curve::Circle(x0), Curve::Circle(x1)) => {
                     rec.notes.push(("centre_before".into(), format!("({},{})", fmt_p(x0.placement().origin().x), fmt_p(x0.placement().origin().y))));
@@ -353,14 +458,11 @@ fn spline_notes(
     }
 }
 
-fn main() -> Res<()> {
-    println!("id\tfixture\ttransform\tclass\toutcome\tresult\trule\terror\tworst_dev\ttol\tratio\tsamples\tnotes");
-    let fx = fixtures()?;
-    let xs = transforms();
-    let mut n = 0usize;
-    for x in &xs {
-        for f in &fx {
-            n += 1;
+/// One record per (transform, fixture), ids handed out in order from `n`.
+fn run(n: &mut usize, xs: &[Xf], fx: &[Fixture]) {
+    for x in xs {
+        for f in fx {
+            *n += 1;
             let id = format!("E{n}");
             match (x.build)() {
                 Ok(m) => emit(&measure(f, x, id, m)),
@@ -369,7 +471,7 @@ fn main() -> Res<()> {
                     let mut notes = vec![("curve_emitted".to_string(), "false".to_string())];
                     if !x.band.is_empty() {
                         notes.push(("band".into(), x.band.into()));
-                        notes.push(("derived_from".into(), "Policy::V1.rel".into()));
+                        notes.push(("derived_from".into(), derived_from(x).into()));
                     }
                     emit(&Rec {
                         id,
@@ -389,6 +491,14 @@ fn main() -> Res<()> {
             }
         }
     }
+}
+
+fn main() -> Res<()> {
+    println!("id\tfixture\ttransform\tclass\toutcome\tresult\trule\terror\tworst_dev\ttol\tratio\tsamples\tnotes");
+    let fx = fixtures()?;
+    let xs = transforms();
+    let mut n = 0usize;
+    run(&mut n, &xs, &fx);
     // The exact rational form on request, for the conic rows (SupportedEquivalent entry point).
     let shear = Transform2::shear(0.7, 0.0)?;
     for f in fx.iter().filter(|f| matches!(f.row, "circle" | "ellipse" | "circular arc" | "elliptical arc")) {
@@ -420,5 +530,10 @@ fn main() -> Res<()> {
             });
         }
     }
+    // Appended after the rational form so no earlier id moves: the two maps that bracket the NP-07
+    // bound, then the closed-ring orientation probe under a rotation (control) and the reflection.
+    run(&mut n, &conditioning_transforms(), &fx);
+    let probe: Vec<Xf> = transforms().into_iter().filter(|x| matches!(x.id, "T2" | "T5")).collect();
+    run(&mut n, &probe, &[ring()?]);
     Ok(())
 }

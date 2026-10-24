@@ -4,11 +4,11 @@
 # `lint: true` rows of `EXPECTED` in `tests/ci_feature_coverage.rs`. That file
 # asserts this list matches, so the local gate and the hosted one cannot drift.
 #
-# Three of the twelve rows are deliberately absent, each for a reason the table
+# Three of the thirteen rows are deliberately absent, each for a reason the table
 # states: `s3` is the deprecated alias for `object-store-sink` and enables
 # nothing else; `pdfium-static` builds PDFium from source and no libviprs code
 # is gated on it; `test-util` only exposes existing doubles to dependents.
-LINTED_FEATURES := pdfium object-store-sink tracing avif svg jxl packfile serde jp2k
+LINTED_FEATURES := pdfium object-store-sink tracing avif svg jxl packfile serde jp2k dwg-acadsharp
 
 ## The gate: the real CI job list, in the container, over a tree provisioned
 ## from git.
@@ -110,11 +110,11 @@ MIRI_TOOLCHAIN ?= nightly-2026-08-20
 ## `-A deprecated_in_future` keep a nightly-only deprecation from stopping the
 ## crate compiling under Miri (#643, and still there after #1157 for the next
 ## one), and
-## `--cfg sha2_backend="soft"` keeps the run off sha2's aarch64 NEON path, which
-## aborts it on a Stacked Borrows violation about 30 seconds in (#707).
-## That abort needs `cpufeatures` 0.3.1 or newer in the resolved graph:
-## below it the Miri shim never selects the NEON path, so a stale lock
-## cannot reproduce #707 and reads as though it is already fixed (#731).
+## There is no sha2 backend pin any more. `--cfg sha2_backend="soft"` used to
+## keep the run off sha2's aarch64 NEON path, which aborted it on a Stacked
+## Borrows violation about 30 seconds in (#707). sha2 0.11.1 fixed the loads
+## and `Cargo.toml` now floors the dependency there (#1248), so the NEON path
+## is checked rather than avoided.
 ##
 ## What this cannot mirror is the compiler. The hosted job resolves whatever
 ## `dtolnay/rust-toolchain@nightly` gives it on the day, and this pins a date,
@@ -152,7 +152,7 @@ miri:
 		echo "error: miri is not installed for '$(MIRI_TOOLCHAIN)'. Run 'rustup component add miri --toolchain $(MIRI_TOOLCHAIN)'." >&2; \
 		exit 1; \
 	}
-	RUSTFLAGS='-A deprecated -A deprecated_in_future --cfg sha2_backend="soft"' cargo +$(MIRI_TOOLCHAIN) miri test --lib -- analyze:: avif:: bands:: cancel:: checksum:: codec:: composite:: dedupe:: encode_tiff:: exr:: extensions:: frames:: freqfilt:: geo:: hex:: jp2k:: jxl:: level_walk:: manifest:: mat:: nifti:: pixel:: radiance:: raster_ops:: resize:: resume:: retry:: sink:: svg:: sync_queue:: textio:: webp::
+	RUSTFLAGS='-A deprecated -A deprecated_in_future' cargo +$(MIRI_TOOLCHAIN) miri test --lib -- analyze:: avif:: bands:: cancel:: checksum:: codec:: composite:: dedupe:: encode_tiff:: exr:: extensions:: frames:: freqfilt:: geo:: hex:: jp2k:: jxl:: level_walk:: manifest:: mat:: nifti:: pixel:: radiance:: raster_ops:: resize:: resume:: retry:: sink:: svg:: sync_queue:: textio:: webp::
 
 ## Run Loom concurrency tests (Loom job)
 loom:
