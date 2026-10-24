@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A fence around what libviprs names from PVec** (issue #1088, part of #1039).
+  `tests/pvec_api_surface.rs` scans `src/` for `pvec_*::` paths and fails on any crate root that
+  is not `pvec_geometry` or `pvec_numeric`, or any path with a container, block, index or
+  byte-layout segment, and `src/pvec/` may not define a curve evaluator, knot insertion or
+  tessellation routine (NG-10). The writer funnel `src/pvec/writer.rs` waits on PVec's `pvec`
+  facade crate (libviprs/pvec#52), which does not exist yet.
 - **Limits and malformed-input handling on the PDF vector path** (issue #1087, part of #1039).
   `pvec::pdf_vector::PdfVectorLimits` gains `max_content_bytes` (decoded bytes across the page and
   every form, cut off while a Flate stream inflates) and `max_segments_per_path`, and the error
