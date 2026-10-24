@@ -227,7 +227,12 @@ impl SourceTransform {
     /// Nothing else is checked: a singular or near-singular map is N3.4's to refuse
     /// under PVec's numeric policy.
     pub fn new(coefficients: [f64; 6]) -> Result<Self, ProviderError> {
-        unimplemented!("N4.1 red stub")
+        for (value, name) in coefficients.iter().zip(COEFFICIENT_NAMES) {
+            if !value.is_finite() {
+                return Err(ProviderError::NonFinite { field: name });
+            }
+        }
+        Ok(Self { coefficients })
     }
 
     /// The six coefficients, in the order above.
@@ -310,7 +315,12 @@ impl InstancePath {
     /// This path with one more INSERT at the end.
     #[must_use]
     pub fn child(&self, block_name: impl Into<String>, insert_handle: ItemHandle) -> Self {
-        unimplemented!("N4.1 red stub")
+        let mut steps = self.steps.clone();
+        steps.push(InstanceStep {
+            block_name: block_name.into(),
+            insert_handle,
+        });
+        Self { steps }
     }
 
     /// The steps, outermost first.
@@ -335,7 +345,16 @@ impl InstancePath {
 impl fmt::Display for InstancePath {
     /// `VC_OUTER@58/VC_MID@55`, or `/` for the empty path. Handles are hex.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        unimplemented!("N4.1 red stub")
+        if self.steps.is_empty() {
+            return f.write_str("/");
+        }
+        for (i, step) in self.steps.iter().enumerate() {
+            if i > 0 {
+                f.write_str("/")?;
+            }
+            write!(f, "{}@{:X}", step.block_name, step.insert_handle.get())?;
+        }
+        Ok(())
     }
 }
 
@@ -467,19 +486,60 @@ impl RawEntity {
     /// a handle: this entity's own path plus one step.
     #[must_use]
     pub fn child_path(&self) -> Option<InstancePath> {
-        unimplemented!("N4.1 red stub")
+        match (&self.geometry, self.provenance.handle) {
+            (RawGeometry::Insert(r), Some(h)) => {
+                Some(self.provenance.block_path.child(r.block_name.clone(), h))
+            }
+            _ => None,
+        }
     }
 
     /// The facets this entity carries as [`SourceFact::NotReportable`].
     #[must_use]
     pub fn not_reportable(&self) -> Vec<Facet> {
-        unimplemented!("N4.1 red stub")
+        let mut out = Vec::new();
+        if let RawGeometry::Spline {
+            knots,
+            weights,
+            periodic,
+            ..
+        } = &self.geometry
+        {
+            if knots.is_not_reportable() {
+                out.push(Facet::KnotMultiplicity);
+            }
+            if weights.is_not_reportable() {
+                out.push(Facet::Weights);
+            }
+            if periodic.is_not_reportable() {
+                out.push(Facet::Periodicity);
+            }
+        }
+        out
     }
 
     /// The facets this entity carries as present or absent, so the provider read them.
     #[must_use]
     pub fn reported(&self) -> Vec<Facet> {
-        unimplemented!("N4.1 red stub")
+        let mut out = Vec::new();
+        if let RawGeometry::Spline {
+            knots,
+            weights,
+            periodic,
+            ..
+        } = &self.geometry
+        {
+            if !knots.is_not_reportable() {
+                out.push(Facet::KnotMultiplicity);
+            }
+            if !weights.is_not_reportable() {
+                out.push(Facet::Weights);
+            }
+            if !periodic.is_not_reportable() {
+                out.push(Facet::Periodicity);
+            }
+        }
+        out
     }
 }
 
@@ -563,7 +623,14 @@ impl ProviderCaps {
     /// Sets the row for `facet`, replacing an earlier one.
     #[must_use]
     pub fn with(mut self, facet: Facet, availability: Availability, source: FacetSource) -> Self {
-        unimplemented!("N4.1 red stub")
+        self.rows.retain(|r| r.facet != facet);
+        self.rows.push(FacetCap {
+            facet,
+            availability,
+            source,
+        });
+        self.rows.sort_by_key(|r| r.facet);
+        self
     }
 
     /// The row for `facet`, when the provider declared one.
@@ -575,7 +642,8 @@ impl ProviderCaps {
     /// Whether `facet` can be read. No row means it cannot.
     #[must_use]
     pub fn availability(&self, facet: Facet) -> Availability {
-        unimplemented!("N4.1 red stub")
+        self.get(facet)
+            .map_or(Availability::CannotReport, |r| r.availability)
     }
 
     /// The rows, ordered by facet.
@@ -589,7 +657,19 @@ impl ProviderCaps {
     /// present or absent value under one it says it cannot.
     #[must_use]
     pub fn violations(&self, entity: &RawEntity) -> Vec<Facet> {
-        unimplemented!("N4.1 red stub")
+        let mut out: Vec<Facet> = entity
+            .not_reportable()
+            .into_iter()
+            .filter(|f| self.availability(*f) == Availability::Reported)
+            .collect();
+        out.extend(
+            entity
+                .reported()
+                .into_iter()
+                .filter(|f| self.availability(*f) == Availability::CannotReport),
+        );
+        out.sort();
+        out
     }
 }
 
@@ -614,7 +694,11 @@ pub trait EntityCursor {
     ///
     /// The first error [`next_entity`](Self::next_entity) returns.
     fn collect_all(&mut self) -> Result<Vec<RawEntity>, ProviderError> {
-        unimplemented!("N4.1 red stub")
+        let mut out = Vec::new();
+        while let Some(e) = self.next_entity()? {
+            out.push(e);
+        }
+        Ok(out)
     }
 }
 
