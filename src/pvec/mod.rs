@@ -29,6 +29,7 @@
 
 pub mod classify;
 pub mod fidelity;
+pub mod limits;
 #[cfg(feature = "pvec-normalized")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
 pub mod normalized;
@@ -54,6 +55,7 @@ pub use classify::{
 pub use fidelity::{
     Basis, FidelityClass, FidelityReport, ReasonCode, Tally, TallyError, classify_unmapped,
 };
+pub use limits::{Limit, LimitError, SourceGuard, SourceLimits};
 pub use pdf_vector::{
     PdfFillRule, PdfPaintIntent, PdfPathEntity, PdfPathSegment, PdfPoint, PdfProvenance,
     PdfVectorError, PdfVectorLimits, PdfVectorPage, extract_page_paths,
