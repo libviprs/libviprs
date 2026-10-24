@@ -50,7 +50,10 @@ fn external_dependency_records_name_path_transform_layer() {
     let row = &r.unresolved[0];
     assert_eq!(row.name, "WING");
     assert_eq!(row.path, "wing.dwg");
-    assert_eq!(row.resolved_path.as_deref(), Some(dir.path().join("wing.dwg").as_path()));
+    assert_eq!(
+        row.resolved_path.as_deref(),
+        Some(dir.path().join("wing.dwg").as_path())
+    );
     assert_eq!(row.layer, "A-XREF");
     assert_eq!(row.transform.coefficients()[4], 10.0);
     assert!(r.resolved.is_empty());
@@ -72,7 +75,9 @@ fn missing_xref_file_still_leaves_a_row_under_external_dependency() {
 fn reject_fails_naming_xref_and_resolved_path() {
     let dir = fixture();
     let mut s = XrefSession::new(dir.path(), "host.dwg", XrefPolicy::Reject);
-    let e = s.admit(&mut guard(), &xref("WING", "wing.dwg")).unwrap_err();
+    let e = s
+        .admit(&mut guard(), &xref("WING", "wing.dwg"))
+        .unwrap_err();
     match &e {
         XrefError::Rejected { name, path } => {
             assert_eq!(name, "WING");
@@ -108,7 +113,9 @@ fn resolve_clears_the_file_and_reports_depth() {
 fn resolve_of_a_missing_file_is_a_typed_error_not_an_omission() {
     let dir = fixture();
     let mut s = XrefSession::new(dir.path(), "host.dwg", XrefPolicy::Resolve);
-    let e = s.admit(&mut guard(), &xref("GONE", "gone.dwg")).unwrap_err();
+    let e = s
+        .admit(&mut guard(), &xref("GONE", "gone.dwg"))
+        .unwrap_err();
     assert!(matches!(e, XrefError::Missing { .. }), "{e:?}");
 }
 
@@ -151,7 +158,8 @@ fn confine_accepts_inner_dotdot_and_subdirectories() {
 fn hostile_path_under_external_dependency_is_recorded_with_its_refusal_and_opens_nothing() {
     let root = Path::new("/nonexistent-root-1076");
     let mut s = XrefSession::new(root, "host.dwg", XrefPolicy::ExternalDependency);
-    s.admit(&mut guard(), &xref("EVIL", "../../etc/passwd")).unwrap();
+    s.admit(&mut guard(), &xref("EVIL", "../../etc/passwd"))
+        .unwrap();
     let r = s.into_report();
     assert_eq!(r.unresolved.len(), 1);
     assert_eq!(r.unresolved[0].path_refusal, Some(PathRefusal::EscapesRoot));
@@ -195,7 +203,10 @@ fn depth_past_the_limit_names_the_limit_and_the_observed_depth() {
     let e = s.admit(&mut g, &xref("L3", "l3.dwg")).unwrap_err();
     let msg = e.to_string();
     assert!(matches!(e, XrefError::Limit(_)), "{msg}");
-    assert!(msg.contains("max_block_depth") && msg.contains("observed 3") && msg.contains("ceiling 2"), "{msg}");
+    assert!(
+        msg.contains("max_block_depth") && msg.contains("observed 3") && msg.contains("ceiling 2"),
+        "{msg}"
+    );
 }
 
 #[test]
@@ -226,6 +237,7 @@ fn every_ok_outcome_is_accounted_for_in_the_report() {
         match out {
             XrefOutcome::Omitted(i) => assert_eq!(r.unresolved[i].name, "WING"),
             XrefOutcome::Resolve(_) => assert!(r.resolved.iter().any(|n| n == "WING")),
+            other => panic!("{other:?}"),
         }
     }
 }

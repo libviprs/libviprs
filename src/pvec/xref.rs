@@ -1,6 +1,20 @@
 //! The xref and external-reference policy (issue #1076, N4.5).
 //!
-//! STUB: red tests first, bodies follow.
+//! An xref is geometry that lives in another file, and the failure mode is silence:
+//! the conversion succeeds and a wing of the building is missing. So the decision is
+//! an explicit input ([`XrefPolicy`]) and every outcome is visible:
+//!
+//! | policy | outcome of [`XrefSession::admit`] |
+//! |---|---|
+//! | `ExternalDependency` (default) | [`XrefOutcome::Omitted`], with a row in [`XrefReport::unresolved`] |
+//! | `Reject` | [`XrefError::Rejected`] naming the xref and its resolved path |
+//! | `Resolve` | [`XrefOutcome::Resolve`], the path to open, depth counted on the shared guard |
+//!
+//! Resolving reaches outside the input file, so it is the caller's decision, hence
+//! the default. The attachment path is confined lexically under a caller-supplied
+//! root by [`confine`] before anything touches the disk. That check does not follow
+//! symlinks, and opening the file is the caller's. Opening through
+//! `DwgProvider` and flattening under N4.4's bounds is #1283.
 
 use std::path::{Path, PathBuf};
 
@@ -144,8 +158,10 @@ pub struct XrefReport {
 /// Applies a policy across one conversion.
 #[derive(Debug)]
 pub struct XrefSession {
-    _root: PathBuf,
-    _policy: XrefPolicy,
+    root: PathBuf,
+    policy: XrefPolicy,
+    /// Files currently open, host first.
+    stack: Vec<PathBuf>,
     report: XrefReport,
 }
 
@@ -154,18 +170,55 @@ pub struct XrefSession {
 /// # Errors
 ///
 /// A [`PathRefusal`].
-pub fn confine(_root: &Path, _attachment: &str) -> Result<PathBuf, PathRefusal> {
-    unimplemented!("N4.5 stub")
+pub fn confine(root: &Path, attachment: &str) -> Result<PathBuf, PathRefusal> {
+    if attachment.is_empty() || attachment.contains('\0') {
+        return Err(PathRefusal::Malformed);
+    }
+    if attachment.starts_with("\\\\") || attachment.starts_with("//") {
+        return Err(PathRefusal::Unc);
+    }
+    if attachment.starts_with('/') || attachment.starts_with('\\') {
+        return Err(PathRefusal::Absolute);
+    }
+    let b = attachment.as_bytes();
+    if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
+        return Err(PathRefusal::DriveLetter);
+    }
+    let mut parts: Vec<&str> = Vec::new();
+    for c in attachment.split(['/', '\\']) {
+        match c {
+            "" | "." => {}
+            ".." => {
+                if parts.pop().is_none() {
+                    return Err(PathRefusal::EscapesRoot);
+                }
+            }
+            c => parts.push(c),
+        }
+    }
+    if parts.is_empty() {
+        return Err(PathRefusal::Malformed);
+    }
+    let mut out = root.to_path_buf();
+    out.extend(parts);
+    Ok(out)
+}
+
+fn key(p: &Path) -> String {
+    p.to_string_lossy().to_ascii_lowercase()
 }
 
 impl XrefSession {
     /// A session for the host drawing at `host` (relative to `root`).
     #[must_use]
     pub fn new(root: impl Into<PathBuf>, host: impl AsRef<Path>, policy: XrefPolicy) -> Self {
-        let _ = host;
+        let root = root.into();
+        let host = host.as_ref();
+        let host = confine(&root, &host.to_string_lossy()).unwrap_or_else(|_| root.join(host));
         Self {
-            _root: root.into(),
-            _policy: policy,
+            root,
+            policy,
+            stack: vec![host],
             report: XrefReport::default(),
         }
     }
@@ -177,15 +230,71 @@ impl XrefSession {
     /// [`XrefError`].
     pub fn admit(
         &mut self,
-        _guard: &mut SourceGuard,
-        _xref: &XrefRef,
+        guard: &mut SourceGuard,
+        xref: &XrefRef,
     ) -> Result<XrefOutcome, XrefError> {
-        unimplemented!("N4.5 stub")
+        let confined = confine(&self.root, &xref.path);
+        let refused = |reason| XrefError::PathRefused {
+            name: xref.name.clone(),
+            path: xref.path.clone(),
+            reason,
+        };
+        match self.policy {
+            XrefPolicy::ExternalDependency => {
+                let (resolved_path, path_refusal) = match confined {
+                    Ok(p) => (Some(p), None),
+                    Err(r) => (None, Some(r)),
+                };
+                self.report.unresolved.push(UnresolvedXref {
+                    name: xref.name.clone(),
+                    path: xref.path.clone(),
+                    resolved_path,
+                    path_refusal,
+                    transform: xref.transform,
+                    layer: xref.layer.clone(),
+                });
+                Ok(XrefOutcome::Omitted(self.report.unresolved.len() - 1))
+            }
+            XrefPolicy::Reject => {
+                let path = confined.map_err(refused)?;
+                Err(XrefError::Rejected {
+                    name: xref.name.clone(),
+                    path,
+                })
+            }
+            XrefPolicy::Resolve => {
+                let path = confined.map_err(refused)?;
+                let k = key(&path);
+                if let Some(first) = self.stack.iter().position(|p| key(p) == k) {
+                    let mut chain = self.stack[first..].to_vec();
+                    chain.push(path);
+                    return Err(XrefError::Cycle { chain });
+                }
+                if !std::fs::metadata(&path).is_ok_and(|m| m.is_file()) {
+                    return Err(XrefError::Missing {
+                        name: xref.name.clone(),
+                        path,
+                    });
+                }
+                guard.enter_block(&path.to_string_lossy(), xref.grid)?;
+                self.stack.push(path.clone());
+                self.report.resolved.push(xref.name.clone());
+                let depth = u32::try_from(self.stack.len() - 1).unwrap_or(u32::MAX);
+                Ok(XrefOutcome::Resolve(ResolvedXref {
+                    name: xref.name.clone(),
+                    path,
+                    depth,
+                }))
+            }
+        }
     }
 
-    /// Leave the nested drawing entered last.
-    pub fn release(&mut self, _guard: &mut SourceGuard) {
-        unimplemented!("N4.5 stub")
+    /// Leave the nested drawing entered last. The host drawing is never left.
+    pub fn release(&mut self, guard: &mut SourceGuard) {
+        if self.stack.len() > 1 {
+            self.stack.pop();
+            guard.exit_block();
+        }
     }
 
     /// The rows so far.
