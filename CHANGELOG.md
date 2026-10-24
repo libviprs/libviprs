@@ -21,7 +21,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as when that capability is missing (only `RequiresPVecCapability`, `RequiresExtension` or
   `Unsupported`, so tessellation is unrepresentable). A new kind does not compile without a row,
   and `docs/pvec-mapping.md` is rendered from the table and compared byte for byte by a test.
-
 - **The normalized geometry dump** (issue #1103, part of #1039). `pvec::dump::NormalizedDump`
   writes a line-oriented text dump of `Normalized2DGeometry` records (id, type, fidelity class,
   source-space parameters at round-trip `f64` precision, bounds, optional provenance) as each
