@@ -1461,6 +1461,54 @@ pub fn build_archive_from_view(
 ) -> Result<(TilerReport, DecodeReport), TilerError> {
     config.validate()?;
     let mut guard = Guard::new(config);
+    let (held, decode) = decode_view_guarded(drawing, view, config, &mut guard)?;
+    let report = build_archive_guarded(&held, config, path.as_ref(), name, &mut guard)?;
+    Ok((report, decode))
+}
+
+/// Decodes one view and tiles it exactly as [`build_archive_from_view`] would,
+/// but keeps nothing: every tile is sized (gzipped, as the archive would store
+/// it) and dropped. The reports are the same ones a build returns, so a
+/// drawing can be checked for fidelity, oversize tiles and budget trouble
+/// without a file being written.
+///
+/// # Errors
+///
+/// [`TilerError`], including the decoder's own, the deadline and the cancel.
+pub fn report_view(
+    drawing: &dyn CadDrawing,
+    view: u32,
+    config: &TilerConfig,
+) -> Result<(TilerReport, DecodeReport), TilerError> {
+    config.validate()?;
+    let mut guard = Guard::new(config);
+    let (held, decode) = decode_view_guarded(drawing, view, config, &mut guard)?;
+    let (report, _) = tile_guarded(&held, config, &mut MeasureTiles, &mut guard)?;
+    Ok((report, decode))
+}
+
+/// A [`TileOutput`] that sizes each tile as the archive would store it and
+/// keeps nothing.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct MeasureTiles;
+
+impl TileOutput for MeasureTiles {
+    fn put(&mut self, _z: u8, _x: u32, _y: u32, tile: &Tile) -> Result<Option<usize>, TilerError> {
+        if tile.is_empty() {
+            return Ok(None);
+        }
+        let encoded = tile.encode().map_err(VectorError::from)?;
+        let stored = crate::vector::archive::gzip(&encoded).map_err(VectorError::from)?;
+        Ok(Some(stored.len()))
+    }
+}
+
+fn decode_view_guarded(
+    drawing: &dyn CadDrawing,
+    view: u32,
+    config: &TilerConfig,
+    guard: &mut Guard,
+) -> Result<(Vec<Primitive>, DecodeReport), TilerError> {
     let views = drawing.views()?;
     let info = views
         .iter()
@@ -1503,8 +1551,7 @@ pub fn build_archive_from_view(
             });
         }
     }
-    let report = build_archive_guarded(&sink.held, config, path.as_ref(), name, &mut guard)?;
-    Ok((report, decode))
+    Ok((sink.held, decode))
 }
 
 /// Holds primitives up to a limit, then refuses, so a block inserted a million
