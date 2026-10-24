@@ -32,11 +32,15 @@ pub mod classify;
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
 pub mod dwg_basic;
 pub mod fidelity;
+#[cfg(feature = "pvec-normalized")]
+#[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
+pub mod flatten;
 pub mod limits;
 #[cfg(feature = "pvec-normalized")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
 pub mod normalized;
 pub mod ordering;
+pub mod pdf_clip;
 pub mod pdf_vector;
 #[cfg(feature = "pvec-normalized")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
