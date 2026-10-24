@@ -451,3 +451,28 @@ still run on this machine, and they are spot checks for iterating rather than
 the gate: each covers part of one job, on this host's architecture and
 filesystem. `tools/local-ci.py --worktree` is the same trade for a whole run.
 The README has the longer version.
+
+## Merging: hosted CI is off, the local gate decides
+
+I disabled GitHub Actions on every repo in the org on 2026-10-24. The required checks never
+report, so a PR sits at BLOCKED, and that is expected rather than a fault. A merge is decided by a
+gate I ran myself, and the evidence goes on the PR first.
+
+The fleet runner lives in the workspace `tools/` directory beside the clones, not in this repo:
+
+```
+tools/gate-fleet.sh hosts                    # read-only: which hosts answer, docker, slots
+tools/gate-fleet.sh local-ci libviprs REF    # REF is a rev or pr/N, runs on every enabled host
+gh pr comment N -F .gate-fleet/runs/RUN/pr-comment.md
+gh pr merge N --merge --admin
+```
+
+It runs the job list on mars and the NAS (native x86_64) and on mercury (native arm64), each job in
+a throw-away container with `--platform` pinned, over `git archive` of the exact sha. It prints a
+pass/fail table and a comment body with repo, sha, stage, toolchain, arch, host, result and seconds.
+Red means no merge. Green means I post that comment and merge with a merge commit and `--admin`
+(branch protection leaves admins out), never a squash. A docs-only PR still gets the run, and the
+comment says which stages ran.
+
+`make ci` above is still the quick check while iterating. The fleet run is the one that counts for
+the merge, because it covers both architectures on native hosts.
