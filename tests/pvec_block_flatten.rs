@@ -730,7 +730,10 @@ use libviprs::pvec::ViewProfile;
 
 #[test]
 fn n3_6a_1277_default_profile_carries_the_default_limits() {
-    assert_eq!(ViewProfile::default_profile().limits, SourceLimits::default());
+    assert_eq!(
+        ViewProfile::default_profile().limits,
+        SourceLimits::default()
+    );
 }
 
 #[test]
