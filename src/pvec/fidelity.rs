@@ -126,16 +126,40 @@ pub enum ReasonCode {
     SplineMalformed,
     /// A spline PVec's numeric policy refused (repeat rules, domain, weight floor). `Unsupported`.
     SplinePolicyRefused,
+    /// A circle, arc or ellipse axis whose radius is zero, negative, not finite or below PVec's
+    /// floor. `Unsupported`.
+    DegenerateRadius,
+    /// Polyline or line end points PVec's length floor treats as the same point. `Unsupported`.
+    CoincidentVertices,
+    /// An ellipse whose minor/major ratio is zero, not finite or outside PVec's bound.
+    /// `Unsupported`.
+    DegenerateAxisRatio,
+    /// A bulge that is not finite or that PVec refuses. `Unsupported`.
+    DegenerateBulge,
+    /// A basic entity PVec refused for another reason (a coordinate, an empty trim, a zero axis
+    /// vector). `Unsupported`.
+    DegenerateGeometry,
+    /// A polyline with more vertices than PVec supports. `Unsupported`.
+    PolylineLimitExceeded,
+    /// A line or polyline with more than one z: PVec's curves are planar.
+    /// `RequiresPVecCapability`.
+    Geometry3d,
+    /// An entity whose extrusion normal is not +z, so its coordinates are in an object
+    /// coordinate system this path does not map out of. `Unsupported`.
+    ExtrusionNotApplied,
     /// A source class the provider saw and does not map. `Unsupported`.
     UnmappedSourceClass,
     /// The only available representation is for display, not the entity's own geometry.
     /// `Unsupported`.
     DisplayFidelityOnly,
+    /// A PDF soft mask is in force: it modulates what is painted, and PVec has no
+    /// construct for it (N5.3). `Unsupported`.
+    PdfSoftMask,
 }
 
 impl ReasonCode {
     /// Every code, in a fixed order.
-    pub const ALL: [ReasonCode; 10] = [
+    pub const ALL: [ReasonCode; 19] = [
         ReasonCode::SplineKnotsNotReported,
         ReasonCode::SplinePeriodicNotReported,
         ReasonCode::SplineWeightsNotReported,
@@ -144,8 +168,17 @@ impl ReasonCode {
         ReasonCode::SplineLimitExceeded,
         ReasonCode::SplineMalformed,
         ReasonCode::SplinePolicyRefused,
+        ReasonCode::DegenerateRadius,
+        ReasonCode::CoincidentVertices,
+        ReasonCode::DegenerateAxisRatio,
+        ReasonCode::DegenerateBulge,
+        ReasonCode::DegenerateGeometry,
+        ReasonCode::PolylineLimitExceeded,
+        ReasonCode::Geometry3d,
+        ReasonCode::ExtrusionNotApplied,
         ReasonCode::UnmappedSourceClass,
         ReasonCode::DisplayFidelityOnly,
+        ReasonCode::PdfSoftMask,
     ];
 
     /// The stable machine-readable spelling.
@@ -160,8 +193,17 @@ impl ReasonCode {
             ReasonCode::SplineLimitExceeded => "spline-limit-exceeded",
             ReasonCode::SplineMalformed => "spline-malformed",
             ReasonCode::SplinePolicyRefused => "spline-policy-refused",
+            ReasonCode::DegenerateRadius => "degenerate-radius",
+            ReasonCode::CoincidentVertices => "coincident-vertices",
+            ReasonCode::DegenerateAxisRatio => "degenerate-axis-ratio",
+            ReasonCode::DegenerateBulge => "degenerate-bulge",
+            ReasonCode::DegenerateGeometry => "degenerate-geometry",
+            ReasonCode::PolylineLimitExceeded => "polyline-limit-exceeded",
+            ReasonCode::Geometry3d => "geometry-3d",
+            ReasonCode::ExtrusionNotApplied => "extrusion-not-applied",
             ReasonCode::UnmappedSourceClass => "unmapped-source-class",
             ReasonCode::DisplayFidelityOnly => "display-fidelity-only",
+            ReasonCode::PdfSoftMask => "pdf-soft-mask",
         }
     }
 
@@ -172,12 +214,22 @@ impl ReasonCode {
             ReasonCode::SplineKnotsNotReported
             | ReasonCode::SplinePeriodicNotReported
             | ReasonCode::SplineWeightsNotReported => FidelityClass::RequiresExtension,
-            ReasonCode::Spline3d | ReasonCode::Helix => FidelityClass::RequiresPVecCapability,
+            ReasonCode::Spline3d | ReasonCode::Helix | ReasonCode::Geometry3d => {
+                FidelityClass::RequiresPVecCapability
+            }
             ReasonCode::SplineLimitExceeded
             | ReasonCode::SplineMalformed
             | ReasonCode::SplinePolicyRefused
+            | ReasonCode::DegenerateRadius
+            | ReasonCode::CoincidentVertices
+            | ReasonCode::DegenerateAxisRatio
+            | ReasonCode::DegenerateBulge
+            | ReasonCode::DegenerateGeometry
+            | ReasonCode::PolylineLimitExceeded
+            | ReasonCode::ExtrusionNotApplied
             | ReasonCode::UnmappedSourceClass
-            | ReasonCode::DisplayFidelityOnly => FidelityClass::Unsupported,
+            | ReasonCode::DisplayFidelityOnly
+            | ReasonCode::PdfSoftMask => FidelityClass::Unsupported,
         }
     }
 }

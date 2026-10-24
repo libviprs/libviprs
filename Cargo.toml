@@ -326,7 +326,7 @@ acadrust = { git = "https://github.com/libviprs/acadrust", rev = "72af48970e306e
 # `pvec::dwg_spline` applies, so the numbers are PVec's and are not copied here. Optional
 # and off by default. Git dependency pinned by a full revision, same consequence as the
 # two above: this crate cannot be published to crates.io while the line below stands.
-pvec-numeric = { git = "https://github.com/libviprs/pvec", rev = "8c84c42f714b6ee24c9c9dcd2ad984a642f34a50" }
+pvec-numeric = { git = "https://github.com/libviprs/pvec", rev = "4dbbfc37ac156dbb7dac18d02721a742cd2aab0b" }
 # PVec's source-neutral curve model and the numeric policy under it (issue #1095),
 # optional and off by default. Both crates (`pvec-numeric` is the entry just above) live in
 # libviprs/pvec, are pure Rust with no dependency besides each other, and are `publish = false` at version 0.0.0 there.
@@ -336,7 +336,7 @@ pvec-numeric = { git = "https://github.com/libviprs/pvec", rev = "8c84c42f714b6e
 # publishes PVec. Moving the revision means re-reading the citations in
 # `docs/adr/pvec-normalized-geometry.md` (the ADR pins fdf87de, so a move is also a
 # change to that pin).
-pvec-geometry = { git = "https://github.com/libviprs/pvec", rev = "8c84c42f714b6ee24c9c9dcd2ad984a642f34a50", version = "0.0.0" }
+pvec-geometry = { git = "https://github.com/libviprs/pvec", rev = "4dbbfc37ac156dbb7dac18d02721a742cd2aab0b", version = "0.0.0" }
 # Pure-Rust FFT (MIT OR Apache-2.0) used by the frequency-domain filter
 # operations in `src/freqfilt.rs` (`fwfft`, `invfft`, `freqmult`, `spectrum`,
 # `phasecor`). Chosen over an FFTW binding to keep the crate pure Rust; its
