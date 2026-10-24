@@ -7,7 +7,7 @@
 #![cfg(feature = "pvec-spline")]
 
 use libviprs::pvec::dwg_spline::{
-    classify, extract, Requires, SplineClass, SplineError, SplineField, SplineForm, TrimState,
+    Requires, SplineClass, SplineError, SplineField, SplineForm, TrimState, classify, extract,
 };
 use libviprs::pvec::{InstancePath, Point3, ProvenanceStub, RawEntity, RawGeometry, SourceFact};
 use pvec_numeric::{MAX_CONTROL_POINTS, MAX_DEGREE, MAX_KNOTS};
@@ -25,7 +25,9 @@ fn entity(class: &str, geometry: RawGeometry) -> RawEntity {
 }
 
 fn pts(n: usize) -> Vec<Point3> {
-    (0..n).map(|i| [i as f64, (i * i) as f64 * 0.5, 0.0]).collect()
+    (0..n)
+        .map(|i| [i as f64, (i * i) as f64 * 0.5, 0.0])
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -71,7 +73,10 @@ fn clamped_spline_keeps_counts_and_knots() {
     let s = extract(&plain(3, 6, knots.clone())).unwrap();
     assert_eq!(s.degree, 3);
     assert_eq!(s.control_points.len(), 6);
-    assert_eq!(s.knots.len(), s.control_points.len() + s.degree as usize + 1);
+    assert_eq!(
+        s.knots.len(),
+        s.control_points.len() + s.degree as usize + 1
+    );
     assert_eq!(bits(&s.knots), bits(&knots));
     assert_eq!((s.domain.lo, s.domain.hi), (0.0, 3.0));
     assert_eq!(s.trim, TrimState::FullDomain);
@@ -99,8 +104,16 @@ fn periodic_flag_is_kept_and_nothing_is_unrolled() {
     }
     let s = extract(&e).unwrap();
     assert!(s.periodic);
-    assert_eq!(s.control_points.len(), 6, "periodicity must not duplicate control points");
-    assert_eq!(bits(&s.knots), bits(&knots), "knots are not rewritten either");
+    assert_eq!(
+        s.control_points.len(),
+        6,
+        "periodicity must not duplicate control points"
+    );
+    assert_eq!(
+        bits(&s.knots),
+        bits(&knots),
+        "knots are not rewritten either"
+    );
 }
 
 #[test]
@@ -160,7 +173,10 @@ fn weight_count_mismatch_is_typed() {
     }
     assert_eq!(
         extract(&e).unwrap_err(),
-        SplineError::WeightCount { expected: 3, observed: 2 }
+        SplineError::WeightCount {
+            expected: 3,
+            observed: 2
+        }
     );
 }
 
@@ -170,7 +186,10 @@ fn too_many_control_points_is_refused_with_limit_and_count() {
     let e = plain(3, n, vec![0.0; n + 4]);
     assert_eq!(
         extract(&e).unwrap_err(),
-        SplineError::TooManyControlPoints { limit: MAX_CONTROL_POINTS, observed: n }
+        SplineError::TooManyControlPoints {
+            limit: MAX_CONTROL_POINTS,
+            observed: n
+        }
     );
 }
 
@@ -180,14 +199,20 @@ fn too_many_knots_is_refused_with_limit_and_count() {
     let e = plain(3, 10, vec![0.0; observed]);
     assert_eq!(
         extract(&e).unwrap_err(),
-        SplineError::TooManyKnots { limit: MAX_KNOTS, observed }
+        SplineError::TooManyKnots {
+            limit: MAX_KNOTS,
+            observed
+        }
     );
 }
 
 #[test]
 fn degree_outside_the_supported_range_is_refused() {
     let e = plain(0, 3, vec![0.0, 0.0, 1.0, 1.0]);
-    assert!(matches!(extract(&e), Err(SplineError::DegreeOutOfRange { degree: 0, .. })));
+    assert!(matches!(
+        extract(&e),
+        Err(SplineError::DegreeOutOfRange { degree: 0, .. })
+    ));
     let d = MAX_DEGREE as u32 + 1;
     let n = MAX_DEGREE + 3;
     let e = plain(d, n, vec![0.0; n + MAX_DEGREE + 2]);
@@ -201,7 +226,10 @@ fn degree_outside_the_supported_range_is_refused() {
 fn knot_structure_errors_are_typed() {
     assert_eq!(
         extract(&plain(2, 3, vec![0.0, 0.0, 0.0, 1.0, 1.0])).unwrap_err(),
-        SplineError::KnotCount { expected: 6, observed: 5 }
+        SplineError::KnotCount {
+            expected: 6,
+            observed: 5
+        }
     );
     assert_eq!(
         extract(&plain(2, 3, vec![0.0, 0.0, 0.0, 1.0, 0.5, 1.0])).unwrap_err(),
@@ -215,26 +243,49 @@ fn knot_structure_errors_are_typed() {
 
 #[test]
 fn a_knot_repeated_beyond_what_the_degree_allows_goes_to_the_policy() {
-    // Interior multiplicity 3 on a cubic (a break in the curve itself).
-    let e = plain(3, 7, vec![0.0, 0.0, 0.0, 0.0, 2.0, 2.0, 2.0, 3.0, 3.0, 3.0, 3.0]);
+    // Interior multiplicity 4 on a cubic: more than the degree.
+    let e = plain(
+        3,
+        8,
+        vec![0.0, 0.0, 0.0, 0.0, 2.0, 2.0, 2.0, 2.0, 3.0, 3.0, 3.0, 3.0],
+    );
     assert!(matches!(extract(&e), Err(SplineError::Policy(_))));
 }
 
 #[test]
 fn unreported_facts_name_the_missing_field() {
-    let mk = |knots, periodic| {
-        spline(2, pts(3), knots, SourceFact::Absent, periodic, false)
-    };
+    let mk = |knots, periodic| spline(2, pts(3), knots, SourceFact::Absent, periodic, false);
     for knots in [SourceFact::NotReportable, SourceFact::Absent] {
         assert_eq!(
             extract(&mk(knots, SourceFact::Present(false))).unwrap_err(),
-            SplineError::MissingField { field: SplineField::Knots, requires: Requires::Extension }
+            SplineError::MissingField {
+                field: SplineField::Knots,
+                requires: Requires::Extension
+            }
         );
     }
     let ok = SourceFact::Present(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0]);
     assert_eq!(
         extract(&mk(ok, SourceFact::NotReportable)).unwrap_err(),
-        SplineError::MissingField { field: SplineField::Periodic, requires: Requires::Extension }
+        SplineError::MissingField {
+            field: SplineField::Periodic,
+            requires: Requires::Extension
+        }
+    );
+}
+
+#[test]
+fn unreportable_weights_are_not_read_as_non_rational() {
+    let mut e = plain(2, 3, vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0]);
+    if let RawGeometry::Spline { weights, .. } = &mut e.geometry {
+        *weights = SourceFact::NotReportable;
+    }
+    assert_eq!(
+        extract(&e).unwrap_err(),
+        SplineError::MissingField {
+            field: SplineField::Weights,
+            requires: Requires::Extension
+        }
     );
 }
 
@@ -248,15 +299,32 @@ fn three_d_and_helix_are_classified_not_projected() {
     assert_eq!(classify(&e), SplineClass::ThreeD);
     assert_eq!(
         extract(&e).unwrap_err(),
-        SplineError::Unsupported3d { class: SplineClass::ThreeD, requires: Requires::PVecCapability }
+        SplineError::Unsupported3d {
+            class: SplineClass::ThreeD,
+            requires: Requires::PVecCapability
+        }
     );
-    let helix = entity("HELIX", RawGeometry::Unmapped { reason: "helix".into() });
+    let helix = entity(
+        "HELIX",
+        RawGeometry::Unmapped {
+            reason: "helix".into(),
+        },
+    );
     assert_eq!(classify(&helix), SplineClass::Helix);
     assert!(matches!(
         extract(&helix),
-        Err(SplineError::Unsupported3d { class: SplineClass::Helix, .. })
+        Err(SplineError::Unsupported3d {
+            class: SplineClass::Helix,
+            ..
+        })
     ));
-    let line = entity("LINE", RawGeometry::Line { start: [0.0; 3], end: [1.0; 3] });
+    let line = entity(
+        "LINE",
+        RawGeometry::Line {
+            start: [0.0; 3],
+            end: [1.0; 3],
+        },
+    );
     assert_eq!(classify(&line), SplineClass::NotSpline);
     assert_eq!(extract(&line).unwrap_err(), SplineError::NotSpline);
 }
@@ -274,7 +342,16 @@ fn no_code_path_turns_a_spline_into_polylines_or_arcs() {
         .map(|l| l.split("//").next().unwrap_or(""))
         .collect::<Vec<_>>()
         .join("\n");
-    for banned in ["Polyline", "RawVertex", "Arc", "tessellat", "flatten", "sample", "resample", "fit"] {
+    for banned in [
+        "Polyline",
+        "RawVertex",
+        "Arc",
+        "tessellat",
+        "flatten",
+        "sample",
+        "resample",
+        "fit",
+    ] {
         assert!(!code.contains(banned), "dwg_spline.rs mentions {banned}");
     }
 }
@@ -286,14 +363,30 @@ fn a_real_drawing_goes_through_unchanged() {
     use libviprs::pvec::dwg_acadrust::AcadrustProvider;
     use libviprs::pvec::{DwgProvider, EntityScope, LayoutKind};
 
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cad/g13/g13_spline.dwg");
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/cad/g13/g13_spline.dwg");
     let p = AcadrustProvider::open(CadSource::Path(&path)).unwrap();
     let layouts = p.layouts().unwrap();
-    let m = layouts.iter().find(|l| l.kind == LayoutKind::Model).unwrap();
-    let all = p.entities(&EntityScope::Layout(m.id)).unwrap().collect_all().unwrap();
+    let m = layouts
+        .iter()
+        .find(|l| l.kind == LayoutKind::Model)
+        .unwrap();
+    let all = p
+        .entities(&EntityScope::Layout(m.id))
+        .unwrap()
+        .collect_all()
+        .unwrap();
     let mut seen = 0;
     for e in &all {
-        let RawGeometry::Spline { degree, control_points, knots, .. } = &e.geometry else { continue };
+        let RawGeometry::Spline {
+            degree,
+            control_points,
+            knots,
+            ..
+        } = &e.geometry
+        else {
+            continue;
+        };
         let s = extract(e).unwrap_or_else(|err| panic!("{err}"));
         seen += 1;
         assert_eq!(s.degree, *degree);
