@@ -387,7 +387,6 @@ const NAMED_FIXTURE: &str =
 
 #[test]
 fn geometry_is_byte_identical_whether_or_not_style_is_computed() {
-    let bytes = one_page(NAMED_FIXTURE);
     let render = |p: &PdfVectorPage| -> String {
         p.entities
             .iter()
