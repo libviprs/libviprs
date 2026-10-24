@@ -48,9 +48,16 @@ fn results() -> BTreeMap<String, Rec> {
 
 fn results_from(file: &str) -> BTreeMap<String, Rec> {
     let p = spike_dir().join(file);
-    let text = fs::read_to_string(&p).unwrap_or_else(|e| panic!("cannot read {}: {e}", p.display()));
-    let mut lines = text.lines().filter(|l| !l.starts_with('#') && !l.trim().is_empty());
-    let header: Vec<&str> = lines.next().expect("empty results file").split('\t').collect();
+    let text =
+        fs::read_to_string(&p).unwrap_or_else(|e| panic!("cannot read {}: {e}", p.display()));
+    let mut lines = text
+        .lines()
+        .filter(|l| !l.starts_with('#') && !l.trim().is_empty());
+    let header: Vec<&str> = lines
+        .next()
+        .expect("empty results file")
+        .split('\t')
+        .collect();
     let col = |name: &str| {
         header
             .iter()
@@ -128,7 +135,10 @@ fn table_rows(sec: &str) -> Vec<Vec<String>> {
                 .map(|c| c.trim().to_string())
                 .collect::<Vec<_>>()
         })
-        .filter(|r| !r.iter().all(|c| c.chars().all(|ch| ch == '-' || ch == ':' || ch == ' ')))
+        .filter(|r| {
+            !r.iter()
+                .all(|c| c.chars().all(|ch| ch == '-' || ch == ':' || ch == ' '))
+        })
         .collect()
 }
 
@@ -208,7 +218,11 @@ fn result_rows(doc: &str) -> Vec<Row> {
         .into_iter()
         .skip(1)
         .map(|c| {
-            assert!(c.len() >= 7, "result row has {} cells, want 7: {c:?}", c.len());
+            assert!(
+                c.len() >= 7,
+                "result row has {} cells, want 7: {c:?}",
+                c.len()
+            );
             Row {
                 dwg_class: c[1].clone(),
                 fixture: c[2].trim_matches('`').to_string(),
@@ -230,9 +244,16 @@ fn ac1_every_corpus_fixture_has_exactly_one_row_that_names_it() {
     let rows = result_rows(&doc());
     for f in FIXTURES {
         let n = rows.iter().filter(|r| r.fixture == *f).count();
-        assert_eq!(n, 1, "fixture `{f}` must have exactly one row in the result table, has {n}");
+        assert_eq!(
+            n, 1,
+            "fixture `{f}` must have exactly one row in the result table, has {n}"
+        );
     }
-    assert_eq!(rows.len(), FIXTURES.len(), "the table has rows that are not corpus fixtures");
+    assert_eq!(
+        rows.len(),
+        FIXTURES.len(),
+        "the table has rows that are not corpus fixtures"
+    );
 }
 
 #[test]
@@ -243,7 +264,10 @@ fn ac1_every_class_the_issue_lists_is_covered_on_a_named_fixture() {
             .iter()
             .find(|r| r.fixture == *fixture)
             .unwrap_or_else(|| panic!("no row for {class} ({fixture})"));
-        assert!(!r.dwg_class.is_empty() && !r.target.is_empty(), "row for {class} is incomplete");
+        assert!(
+            !r.dwg_class.is_empty() && !r.target.is_empty(),
+            "row for {class} is incomplete"
+        );
     }
 }
 
@@ -252,14 +276,38 @@ fn ac1_every_row_is_one_of_the_four_outcomes_and_agrees_with_its_measurement() {
     let doc = doc();
     let data = results();
     for r in result_rows(&doc) {
-        assert!(RESULTS.contains(&r.result.as_str()), "row {}: `{}` is not one of {RESULTS:?}", r.fixture, r.result);
-        let m = data
-            .get(&r.evidence)
-            .unwrap_or_else(|| panic!("row {} cites evidence `{}` that is not in results-x64.tsv", r.fixture, r.evidence));
-        assert_eq!(m.fixture, r.fixture, "evidence {} was measured on another fixture", r.evidence);
-        assert_eq!(m.kind, "row", "evidence {} is a probe, not a row", r.evidence);
-        assert_eq!(m.result, r.result, "row {}: document says {}, measurement says {}", r.fixture, r.result, m.result);
-        assert_eq!(m.worst_dev, r.worst_dev, "row {}: worst deviation differs from the measurement", r.fixture);
+        assert!(
+            RESULTS.contains(&r.result.as_str()),
+            "row {}: `{}` is not one of {RESULTS:?}",
+            r.fixture,
+            r.result
+        );
+        let m = data.get(&r.evidence).unwrap_or_else(|| {
+            panic!(
+                "row {} cites evidence `{}` that is not in results-x64.tsv",
+                r.fixture, r.evidence
+            )
+        });
+        assert_eq!(
+            m.fixture, r.fixture,
+            "evidence {} was measured on another fixture",
+            r.evidence
+        );
+        assert_eq!(
+            m.kind, "row",
+            "evidence {} is a probe, not a row",
+            r.evidence
+        );
+        assert_eq!(
+            m.result, r.result,
+            "row {}: document says {}, measurement says {}",
+            r.fixture, r.result, m.result
+        );
+        assert_eq!(
+            m.worst_dev, r.worst_dev,
+            "row {}: worst deviation differs from the measurement",
+            r.fixture
+        );
         assert!(!m.dwg_class.is_empty());
     }
 }
@@ -270,7 +318,10 @@ fn ac1_every_measured_row_is_in_the_document() {
     let rows = result_rows(&doc);
     for (id, m) in results() {
         if m.kind == "row" {
-            assert!(rows.iter().any(|r| r.evidence == id), "measurement `{id}` is not in the result table");
+            assert!(
+                rows.iter().any(|r| r.evidence == id),
+                "measurement `{id}` is not in the result table"
+            );
         }
     }
 }
@@ -284,10 +335,20 @@ fn ac2_bulge_rows_compare_against_the_expected_arc_parameters() {
     let data = results();
     for id in ["bulge-arc-001", "bulge-arc-neg-001"] {
         let m = &data[id];
-        assert_eq!(m.notes.get("compared_to").map(String::as_str), Some("expected.math.json"), "{id}");
+        assert_eq!(
+            m.notes.get("compared_to").map(String::as_str),
+            Some("expected.math.json"),
+            "{id}"
+        );
         for k in ["centre", "radius", "start_angle", "sweep", "sense"] {
-            assert!(m.notes.contains_key(&format!("expected_{k}")), "{id}: no expected_{k} in the record");
-            assert!(m.notes.contains_key(&format!("candidate_{k}")), "{id}: no candidate_{k} in the record");
+            assert!(
+                m.notes.contains_key(&format!("expected_{k}")),
+                "{id}: no expected_{k} in the record"
+            );
+            assert!(
+                m.notes.contains_key(&format!("candidate_{k}")),
+                "{id}: no candidate_{k} in the record"
+            );
         }
         assert_eq!(
             m.notes.get("pvec_arc_from_expected").map(String::as_str),
@@ -302,14 +363,26 @@ fn ac2_negative_bulge_sweep_sign_is_measured_and_stated() {
     let data = results();
     let m = &data["bulge-arc-neg-001"];
     assert_eq!(m.notes["expected_sense"], "CW");
-    assert_eq!(m.notes["candidate_sense"], "CW", "the sign of the bulge must give a clockwise arc");
-    assert_eq!(m.notes["pvec_sense"], "cw", "PVec must hold it as a reversed trim");
+    assert_eq!(
+        m.notes["candidate_sense"], "CW",
+        "the sign of the bulge must give a clockwise arc"
+    );
+    assert_eq!(
+        m.notes["pvec_sense"], "cw",
+        "PVec must hold it as a reversed trim"
+    );
     let pos = &data["bulge-arc-001"];
     assert_eq!(pos.notes["expected_sense"], "CCW");
     assert_eq!(pos.notes["candidate_sense"], "CCW");
     let d = flat(&section(&doc(), "## Bulge"));
-    assert!(d.contains("negative") && d.contains("clockwise"), "the Bulge section must say what the negative sign does");
-    assert!(d.contains("expected.math.json"), "the Bulge section must name the truth it compared against");
+    assert!(
+        d.contains("negative") && d.contains("clockwise"),
+        "the Bulge section must say what the negative sign does"
+    );
+    assert!(
+        d.contains("expected.math.json"),
+        "the Bulge section must name the truth it compared against"
+    );
     assert!(
         d.contains("never against a second") || d.contains("not against a second"),
         "the Bulge section must say the comparison is not against a second libviprs computation"
@@ -327,12 +400,30 @@ fn ac3_repeated_interior_knot_is_reported_with_what_the_mapping_did() {
     assert_eq!(m.notes["interior_knot"], "0.5");
     assert_eq!(m.notes["interior_multiplicity"], "3");
     assert_eq!(m.notes["degree"], "3");
-    assert_eq!(m.notes["knots_identical"], "true", "the knot vector must go through whole (NG-B3)");
-    assert_eq!(m.notes["two_sided_d1_at_knot"], "refused", "a two-sided derivative at a C0 knot is refused");
-    assert!(m.notes["one_sided_d1_left"] != m.notes["one_sided_d1_right"], "a C0 break has two different one-sided tangents");
+    assert_eq!(
+        m.notes["knots_identical"], "true",
+        "the knot vector must go through whole (NG-B3)"
+    );
+    assert_eq!(
+        m.notes["two_sided_d1_at_knot"], "refused",
+        "a two-sided derivative at a C0 knot is refused"
+    );
+    assert!(
+        m.notes["one_sided_d1_left"] != m.notes["one_sided_d1_right"],
+        "a C0 break has two different one-sided tangents"
+    );
     let d = flat(&section(&doc(), "## Splines"));
-    for needle in ["repeated-knot-c0-001", "multiplicity 3", "NP-14", "NP-16", "P1.2"] {
-        assert!(d.contains(needle), "the Splines section must mention `{needle}`");
+    for needle in [
+        "repeated-knot-c0-001",
+        "multiplicity 3",
+        "NP-14",
+        "NP-16",
+        "P1.2",
+    ] {
+        assert!(
+            d.contains(needle),
+            "the Splines section must mention `{needle}`"
+        );
     }
     assert!(
         d.contains("passed through whole") || d.contains("kept whole"),
@@ -353,7 +444,11 @@ fn ac4_requires_pvec_capability_rows_name_the_missing_capability() {
         if r.result == "RequiresPVecCapability" {
             seen += 1;
             let m = &data[&r.evidence];
-            assert!(m.reason.len() > 8 && m.reason != "-", "row {}: the measurement names no missing capability", r.fixture);
+            assert!(
+                m.reason.len() > 8 && m.reason != "-",
+                "row {}: the measurement names no missing capability",
+                r.fixture
+            );
             assert!(
                 r.target.contains("RequiresPVecCapability") && r.target.contains(&m.reason),
                 "row {}: the target cell must carry the missing capability `{}`",
@@ -362,7 +457,10 @@ fn ac4_requires_pvec_capability_rows_name_the_missing_capability() {
             );
         }
     }
-    assert!(seen >= 3, "bulge (two rows) and a periodic spline are expected to need a PVec capability, found {seen}");
+    assert!(
+        seen >= 3,
+        "bulge (two rows) and a periodic spline are expected to need a PVec capability, found {seen}"
+    );
 }
 
 #[test]
@@ -373,14 +471,30 @@ fn ac4_nothing_is_tessellated_to_make_a_row_green() {
         "the document must say no row was tessellated"
     );
     for (id, m) in results() {
-        assert!(!m.target.to_lowercase().contains("tessellat"), "{id}: a target named tessellation");
-        assert!(!m.reason.to_lowercase().contains("tessellat") || m.reason.to_lowercase().contains("not"), "{id}");
+        assert!(
+            !m.target.to_lowercase().contains("tessellat"),
+            "{id}: a target named tessellation"
+        );
+        assert!(
+            !m.reason.to_lowercase().contains("tessellat")
+                || m.reason.to_lowercase().contains("not"),
+            "{id}"
+        );
     }
     let src = fs::read_to_string(spike_dir().join("harness/src/main.rs")).expect("harness source");
-    for banned in ["flatten", "tessellate", "sample_to_polyline", "discretise", "discretize"] {
+    for banned in [
+        "flatten",
+        "tessellate",
+        "sample_to_polyline",
+        "discretise",
+        "discretize",
+    ] {
         let lower = src.to_lowercase();
         for line in lower.lines().filter(|l| !l.trim_start().starts_with("//")) {
-            assert!(!line.contains(banned), "the harness calls `{banned}`: {line}");
+            assert!(
+                !line.contains(banned),
+                "the harness calls `{banned}`: {line}"
+            );
         }
     }
 }
@@ -395,7 +509,10 @@ fn ac4_the_periodic_spline_is_refused_by_pvec_and_not_rewritten() {
     assert_eq!(m.notes["control_points"], "6");
     assert_eq!(m.notes["knots"], "7");
     let d = flat(&section(&doc(), "## Splines"));
-    assert!(d.contains("periodic") && d.contains("knot insertion"), "the Splines section must say why libviprs cannot unwrap it");
+    assert!(
+        d.contains("periodic") && d.contains("knot insertion"),
+        "the Splines section must say why libviprs cannot unwrap it"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -407,11 +524,21 @@ fn ac5_decision_lists_exact_and_deferred_classes_with_measured_deviations() {
     let doc = doc();
     let dec = flat(&section(&doc, "## Decision"));
     let rows = result_rows(&doc);
-    assert!(dec.contains("phase 4") || dec.contains("Phase 4"), "the decision must address phase 4");
-    assert!(dec.contains("may implement") && dec.contains("deferred"), "the decision must separate what may be implemented from what is deferred");
+    assert!(
+        dec.contains("phase 4") || dec.contains("Phase 4"),
+        "the decision must address phase 4"
+    );
+    assert!(
+        dec.contains("may implement") && dec.contains("deferred"),
+        "the decision must separate what may be implemented from what is deferred"
+    );
     for r in &rows {
         if r.result == "RequiresPVecCapability" {
-            assert!(dec.contains(&r.fixture) || dec.contains(r.dwg_class.as_str()), "deferred class {} is not in the decision", r.fixture);
+            assert!(
+                dec.contains(&r.fixture) || dec.contains(r.dwg_class.as_str()),
+                "deferred class {} is not in the decision",
+                r.fixture
+            );
         }
     }
     // The worst deviation of the exact rows is quoted.
@@ -420,17 +547,30 @@ fn ac5_decision_lists_exact_and_deferred_classes_with_measured_deviations() {
         .values()
         .filter(|m| m.kind == "row" && (m.result == "exact" || m.result == "equivalent"))
         .map(|m| m.worst_dev.clone())
-        .max_by(|a, b| a.parse::<f64>().unwrap_or(0.0).total_cmp(&b.parse::<f64>().unwrap_or(0.0)))
+        .max_by(|a, b| {
+            a.parse::<f64>()
+                .unwrap_or(0.0)
+                .total_cmp(&b.parse::<f64>().unwrap_or(0.0))
+        })
         .expect("no exact rows");
-    assert!(dec.contains(&worst_exact), "the decision must quote the worst measured deviation {worst_exact}");
+    assert!(
+        dec.contains(&worst_exact),
+        "the decision must quote the worst measured deviation {worst_exact}"
+    );
 }
 
 #[test]
 fn ac5_no_measured_row_exceeds_the_p12_tolerance() {
     for (id, m) in results() {
         if m.kind == "row" && (m.result == "exact" || m.result == "equivalent") {
-            let ratio: f64 = m.ratio.parse().unwrap_or_else(|_| panic!("{id}: ratio `{}`", m.ratio));
-            assert!(ratio <= 1.0, "{id}: worst deviation is {ratio} of the NP-04 tolerance");
+            let ratio: f64 = m
+                .ratio
+                .parse()
+                .unwrap_or_else(|_| panic!("{id}: ratio `{}`", m.ratio));
+            assert!(
+                ratio <= 1.0,
+                "{id}: worst deviation is {ratio} of the NP-04 tolerance"
+            );
         }
     }
 }
@@ -452,14 +592,26 @@ fn the_evidence_scope_is_stated_and_not_inflated() {
     ] {
         assert!(d.contains(needle), "the document must say `{needle}`");
     }
-    assert!(!d.contains("DUAL_ORACLE_EQUIVALENT"), "no row may claim a dual-oracle class");
+    assert!(
+        !d.contains("DUAL_ORACLE_EQUIVALENT"),
+        "no row may claim a dual-oracle class"
+    );
     assert!(
         d.contains("not a conformance result") || d.contains("is not conformance evidence"),
         "the document must say this is not conformance evidence"
     );
     let un = flat(&section(&doc(), "## What I could not verify"));
-    for needle in ["3D POLYLINE", "polyface", "closed old-style POLYLINE", "closing segment", "shear"] {
-        assert!(un.contains(needle), "the unverified list must name `{needle}` as not covered by the corpus");
+    for needle in [
+        "3D POLYLINE",
+        "polyface",
+        "closed old-style POLYLINE",
+        "closing segment",
+        "shear",
+    ] {
+        assert!(
+            un.contains(needle),
+            "the unverified list must name `{needle}` as not covered by the corpus"
+        );
     }
 }
 
@@ -467,7 +619,11 @@ fn the_evidence_scope_is_stated_and_not_inflated() {
 fn the_pins_are_cited_and_match_the_run_script() {
     let d = doc();
     let run = fs::read_to_string(spike_dir().join("run.sh")).expect("run.sh");
-    for key in ["corpus_tag=corpus-r0-open", "corpus_rev=f94f7f2", "pvec_rev="] {
+    for key in [
+        "corpus_tag=corpus-r0-open",
+        "corpus_rev=f94f7f2",
+        "pvec_rev=",
+    ] {
         assert!(run.contains(key), "run.sh must pin `{key}`");
     }
     let pvec = run
@@ -476,7 +632,10 @@ fn the_pins_are_cited_and_match_the_run_script() {
         .expect("pvec_rev line")
         .trim()
         .to_string();
-    assert!(d.contains(&pvec), "the document must cite the PVec revision {pvec} that run.sh pins");
+    assert!(
+        d.contains(&pvec),
+        "the document must cite the PVec revision {pvec} that run.sh pins"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -495,7 +654,8 @@ fn the_harness_defines_no_tolerance_of_its_own() {
             n + 1
         );
     }
-    let toml = fs::read_to_string(spike_dir().join("harness/Cargo.toml")).expect("harness manifest");
+    let toml =
+        fs::read_to_string(spike_dir().join("harness/Cargo.toml")).expect("harness manifest");
     let deps: Vec<&str> = toml
         .lines()
         .skip_while(|l| !l.starts_with("[dependencies]"))
@@ -537,7 +697,10 @@ fn gaps_every_gap_is_listed_with_a_pvec_issue_and_the_adr_candidates_are_answere
         "bounds of an arc",
         "angle convention",
     ] {
-        assert!(g.contains(cand), "the NG-11 candidate `{cand}` is not answered");
+        assert!(
+            g.contains(cand),
+            "the NG-11 candidate `{cand}` is not answered"
+        );
     }
 }
 
@@ -545,8 +708,16 @@ fn gaps_every_gap_is_listed_with_a_pvec_issue_and_the_adr_candidates_are_answere
 fn the_document_never_closes_the_parent_epic() {
     let d = doc();
     let lower = d.to_lowercase();
-    for kw in ["closes #1039", "fixes #1039", "resolves #1039", "close #1039"] {
-        assert!(!lower.contains(kw), "`{kw}` must not appear: #1039 is the parent epic");
+    for kw in [
+        "closes #1039",
+        "fixes #1039",
+        "resolves #1039",
+        "close #1039",
+    ] {
+        assert!(
+            !lower.contains(kw),
+            "`{kw}` must not appear: #1039 is the parent epic"
+        );
     }
 }
 
@@ -557,10 +728,20 @@ fn the_document_never_closes_the_parent_epic() {
 #[test]
 fn the_arm64_run_reaches_the_same_verdicts_as_the_native_x64_run() {
     let (x, a) = (results(), results_from("results-arm64.tsv"));
-    assert_eq!(x.keys().collect::<Vec<_>>(), a.keys().collect::<Vec<_>>(), "the two runs measured different records");
+    assert_eq!(
+        x.keys().collect::<Vec<_>>(),
+        a.keys().collect::<Vec<_>>(),
+        "the two runs measured different records"
+    );
     for (id, m) in &x {
-        assert_eq!(m.result, a[id].result, "{id}: x64 and arm64 disagree on the verdict");
+        assert_eq!(
+            m.result, a[id].result,
+            "{id}: x64 and arm64 disagree on the verdict"
+        );
     }
     let d = flat(&doc());
-    assert!(d.contains("results-arm64.tsv") && d.contains("native x86_64"), "the document must say which results came from which machine");
+    assert!(
+        d.contains("results-arm64.tsv") && d.contains("native x86_64"),
+        "the document must say which results came from which machine"
+    );
 }
