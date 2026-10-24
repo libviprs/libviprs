@@ -33,6 +33,10 @@ pub mod provider;
 #[cfg_attr(docsrs, doc(cfg(feature = "dwg-acadrust")))]
 pub mod dwg_acadrust;
 
+#[cfg(feature = "pvec-spline")]
+#[cfg_attr(docsrs, doc(cfg(feature = "pvec-spline")))]
+pub mod dwg_spline;
+
 pub use provider::{
     ArrayGrid, Availability, BlockRef, DwgProvider, EntityCursor, EntityScope, Facet, FacetCap,
     FacetSource, InstancePath, InstanceStep, LayerState, LayoutId, LayoutKind, LayoutState, Point3,
