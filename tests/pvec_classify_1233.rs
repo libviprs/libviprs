@@ -67,7 +67,7 @@ fn fixture() -> Vec<(RawEntity, ElementClass)> {
         (line(6, "A-DOOR", root()), Unclassified),
         (line(7, "A-ANNO-TEXT", root()), Unclassified),
         (line(8, "0", root()), Unclassified),
-        (line(9, "A-WALLET-NOT", root()), Unclassified),
+        (line(9, "A-WAL", root()), Unclassified),
         (insert(10, "0", "COLUMN_RC"), Column),
         (insert(11, "A-FURN", "CHAIR"), Unclassified),
     ]

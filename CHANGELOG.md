@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Wall and column classification from layer and block rules** (issue #1233,
+  part of #1039). `pvec::ElementRules` maps layer and block name globs to
+  `ElementClass::Wall` or `Column`, with a small default profile (`A-WALL*`,
+  `S-WALL*`, `A-COL*`, `S-COL*`, `COLUMN*` blocks) a caller can replace. Every
+  entity gets exactly one class in a fixed order (innermost block rule, then
+  layer rule, then `Unclassified`), tagged `layer-rule` or `block-rule`, and
+  `classify_all` returns the counts for the conversion report. Geometry is never
+  touched. Colour and lineweight rules wait on the provider boundary (#1264).
+
 - **A public Rust API for the vector path** (issue #1035, part of #1028).
   `vector::convert` is the one engine: `list_views`, `select_view`, `convert`
   (a view to a vector PMTiles archive, staged, synced and renamed into place,
