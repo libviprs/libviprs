@@ -33,6 +33,9 @@ pub mod limits;
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
 pub mod normalized;
 pub mod pdf_vector;
+#[cfg(feature = "pvec-normalized")]
+#[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
+pub mod provenance;
 pub mod provider;
 pub mod units;
 
