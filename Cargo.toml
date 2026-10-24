@@ -313,6 +313,14 @@ proptest = "1"
 # crate cannot be published to crates.io while the line below stands: swap it
 # for a registry version in the same change that publishes `acadsharp-rs`.
 acadsharp-rs = { git = "https://github.com/libviprs/acadsharp-rs", rev = "f23f37bd453e02e660ef655faa381c45509d8ac1", version = "0.1.0" }
+# The pure-Rust DWG reader the first `pvec` provider uses (issue #1072), optional and
+# off by default. It is libviprs' own fork of hakanaktt/acadrust (MPL-2.0, a crate
+# dependency and never vendored, so the MPL stays file-level on the fork). It is a git
+# dependency pinned by a full revision for the same reason as `acadsharp-rs` above, and
+# the same consequence follows: this crate cannot be published to crates.io while the
+# line below stands. The revision is the fork's `main` as Gate 0 ran against it
+# (`docs/spikes/acadrust-gate0.md`); moving it means rerunning that gate.
+acadrust = { git = "https://github.com/libviprs/acadrust", rev = "72af48970e306ef1d50dd751b227df2b4fc3fb99", version = "0.5.5" }
 # Pure-Rust FFT (MIT OR Apache-2.0) used by the frequency-domain filter
 # operations in `src/freqfilt.rs` (`fwfft`, `invfft`, `freqmult`, `spectrum`,
 # `phasecor`). Chosen over an FFTW binding to keep the crate pure Rust; its
@@ -502,6 +510,13 @@ object-store-sink = []
 # resolves, and a build with no archive still compiles and reports `Unlinked`
 # from `AcadSharpDecoder::new` instead of failing.
 dwg-acadsharp = ["dep:acadsharp-rs"]
+# The acadrust DWG provider behind `pvec::DwgProvider` (issue #1072), the first one
+# Epic N's analytic path reads through (the decision on #1239). Pure Rust: no `links`
+# key, no native archive, no runtime loader, so unlike `dwg-acadsharp` it needs nothing
+# installed. `pvec` itself is not behind a feature and builds without this one; this
+# only adds `pvec::dwg_acadrust::AcadrustProvider`. The existing `cad::CadDecoder` path,
+# and `dwg-acadsharp` with it, is untouched.
+dwg-acadrust = ["dep:acadrust"]
 # Documentation-only deprecated alias for `object-store-sink`. Cargo has no
 # mechanism to mark a feature deprecated, so enabling `s3` emits NO build-time
 # warning: consumers pinned to `features = ["s3"]` get zero automated signal
@@ -626,6 +641,7 @@ test-util = []
 jp2k = ["dep:hayro-jpeg2000", "dep:openjpeg2-pure"]
 
 [dependencies]
+acadrust = { workspace = true, optional = true }
 acadsharp-rs = { workspace = true, optional = true }
 ab_glyph = { workspace = true }
 blake3 = { workspace = true }
@@ -654,6 +670,12 @@ tracing = { workspace = true, optional = true }
 zip = { workspace = true, optional = true }
 zune-core = { workspace = true, optional = true }
 zune-jpegxl = { workspace = true, optional = true }
+
+# Gate 0 for the acadrust provider (issue #1072): one drawing in, one TSV row out.
+# Run by docs/spikes/acadrust-gate0/run.sh.
+[[example]]
+name = "dwg_gate0"
+required-features = ["dwg-acadrust"]
 
 [dev-dependencies]
 loom = { workspace = true }
