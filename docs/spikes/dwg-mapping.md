@@ -304,8 +304,9 @@ entities.
   libviprs and not a reference implementation for PVec.
 - Rows M24 to M30 overlap with N1.5 and do not extend it. The line, arc and nest rows are `equivalent` only
   under the strict reading of the parameter domain described above.
-- Two runs of one harness on two machines (x64 and arm64) is all the architecture coverage there is, and I
-  have not checked either against a hosted CI run yet...
+- Two runs of one harness on two machines (x64 and arm64) is all the architecture coverage there is. The
+  18 checks of `tests/spike_dwg_mapping.rs` ran by hand in a container, std-only, because the hosted test job stops
+  at an earlier failing binary (see the pull request).
 
 ## Handed on
 
