@@ -4,8 +4,8 @@
 #![cfg(feature = "pvec-normalized")]
 
 use libviprs::pvec::mapping::{
-    AbsentCapability, ConformanceClass, NORMALIZED_TO_PVEC, NormalizedKind, kind_of, render_markdown,
-    row_for,
+    AbsentCapability, ConformanceClass, NORMALIZED_TO_PVEC, NormalizedKind, kind_of,
+    render_markdown, row_for,
 };
 use libviprs::pvec::{FidelityClass, Normalized2DGeometry};
 use pvec_geometry::{Bezier, Curve, Line, Point2, Trimmed};
@@ -30,22 +30,15 @@ fn fixture(kind: NormalizedKind) -> Normalized2DGeometry {
         NormalizedKind::Circle => {
             Normalized2DGeometry::circle([1.0, 2.0], [1.0, 0.0], 3.0, exact).unwrap()
         }
-        NormalizedKind::CircularArc => Normalized2DGeometry::circular_arc(
-            [1.0, 2.0],
-            [1.0, 0.0],
-            3.0,
-            0.25,
-            1.5,
-            true,
-            exact,
-        )
-        .unwrap(),
+        NormalizedKind::CircularArc => {
+            Normalized2DGeometry::circular_arc([1.0, 2.0], [1.0, 0.0], 3.0, 0.25, 1.5, true, exact)
+                .unwrap()
+        }
         NormalizedKind::Ellipse => {
             Normalized2DGeometry::ellipse([0.0, 0.0], [1.0, 0.0], 4.0, 2.0, exact).unwrap()
         }
         NormalizedKind::EllipticalArc => {
-            let e = Normalized2DGeometry::ellipse([0.0, 0.0], [1.0, 0.0], 4.0, 2.0, exact)
-                .unwrap();
+            let e = Normalized2DGeometry::ellipse([0.0, 0.0], [1.0, 0.0], 4.0, 2.0, exact).unwrap();
             let basis = e.geometry().unwrap().clone();
             let c = Curve::trimmed_conic(basis, 0.1, 1.2, true).unwrap();
             Normalized2DGeometry::from_curve(c, exact).unwrap()
@@ -105,13 +98,24 @@ fn the_row_lookup_is_an_exhaustive_match_so_a_new_variant_cannot_lack_a_row() {
         .expect("row_index exists");
     let body = body.split("\n}\n").next().unwrap();
     assert!(body.contains("match kind"), "{body}");
-    assert!(!body.contains("_ =>"), "a wildcard arm defeats the check: {body}");
+    assert!(
+        !body.contains("_ =>"),
+        "a wildcard arm defeats the check: {body}"
+    );
 }
 
 // -- the doc is rendered from the table ---------------------------------------------------------
 
 #[test]
 fn the_doc_is_the_rendered_table_byte_for_byte() {
+    if std::env::var_os("PVEC_MAPPING_BLESS").is_some() {
+        std::fs::write(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/docs/pvec-mapping.md"),
+            render_markdown(),
+        )
+        .unwrap();
+        return;
+    }
     assert_eq!(
         DOC,
         render_markdown(),
@@ -153,7 +157,12 @@ fn no_curve_row_maps_to_a_polyline_or_a_point_set() {
 fn only_the_polyline_row_names_the_polyline_capability() {
     for row in NORMALIZED_TO_PVEC.iter() {
         let is_polyline_cap = row.capability.name == "polyline";
-        assert_eq!(is_polyline_cap, row.kind == NormalizedKind::Polyline, "{:?}", row.kind);
+        assert_eq!(
+            is_polyline_cap,
+            row.kind == NormalizedKind::Polyline,
+            "{:?}",
+            row.kind
+        );
     }
 }
 
@@ -188,7 +197,13 @@ fn the_absent_cell_is_one_of_three_and_none_of_them_is_tessellation() {
 
 #[test]
 fn the_source_never_computes_a_curve() {
-    for word in ["tessellat", "flatten(", "evaluate(", "insert_knot", "subdivide"] {
+    for word in [
+        "tessellat",
+        "flatten(",
+        "evaluate(",
+        "insert_knot",
+        "subdivide",
+    ] {
         let code: String = SRC
             .lines()
             .filter(|l| !l.trim_start().starts_with("//"))
