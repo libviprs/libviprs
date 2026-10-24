@@ -900,15 +900,20 @@ fn the_external_library_features_stay_opt_in() {
 
         let asked_for_pvec = cell.features.iter().any(|f| f.contains("pvec-normalized"))
             || cell.features.contains(&"--all-features");
-        for krate in ["pvec-geometry", "pvec-numeric"] {
-            assert_eq!(
-                contains(graph, krate),
-                asked_for_pvec,
-                "{} must reach {krate} only under `pvec-normalized`. It is pure Rust and \
-                 ships no native code, but it is a git dependency, so it stays opt-in \
-                 (CONTRIBUTING.md).",
-                cell.label
-            );
+        assert_eq!(
+            contains(graph, "pvec-geometry"),
+            asked_for_pvec,
+            "{} must reach pvec-geometry only under `pvec-normalized`. It is pure Rust and \
+             ships no native code, but it is a git dependency, so it stays opt-in \
+             (CONTRIBUTING.md).",
+            cell.label
+        );
+        // `pvec-numeric` is reached by `pvec-spline` as well, so it is asserted only in
+        // the direction that holds: asking for either feature has to bring it in.
+        let asked_for_numeric = asked_for_pvec
+            || cell.features.iter().any(|f| f.contains("pvec-spline"));
+        if asked_for_numeric {
+            assert!(contains(graph, "pvec-numeric"), "{} must reach pvec-numeric", cell.label);
         }
 
         let asked_for_packfile = cell.features.iter().any(|f| f.contains("packfile"))

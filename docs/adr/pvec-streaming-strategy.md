@@ -1,7 +1,8 @@
 # ADR: PVec generation uses a bounded spool with an external sort
 
-Status: accepted for phase 6 on the stand-in measurements in the spike below,
-and provisional on one open item (PVec's real writer inputs, P1.5 and P1.6).
+Status: Frozen by N1.8 (#1047) for phase 6 on the stand-in measurements in the spike below. The
+strategy is settled, and one open item (PVec's real writer inputs, P1.5 and P1.6) can reopen it,
+see Open items. Decides N1.7 (#1046), part of the integration epic #1039.
 Evidence: [docs/spikes/bounded-memory.md](../spikes/bounded-memory.md).
 
 ## Context
@@ -16,8 +17,8 @@ needs a value that traversal order cannot supply.
 
 I measured three strategies on a stand-in layout (a Morton-keyed index over the
 global extents) at 1, 4 and 16 million synthetic entities, native x86_64 on MARS.
-The numeric policy for any geometry comparison is P1.2's, and this ADR defines no
-tolerance of its own.
+The numeric policy for any geometry comparison is P1.2's. This ADR defines no tolerance of its own,
+and libviprs defines no epsilon of its own either.
 
 ## Decision
 
@@ -51,7 +52,7 @@ here, because the host was heavily loaded.
 - Phase 6 needs a rule for deleting the spool after the last pass; the prototype
   does not exercise that.
 
-## Open
+## Open items
 
 - The inputs PVec's real container and index need before the first entity is
   written are not known until P1.5 and P1.6 land. If none depends on a later
@@ -60,3 +61,7 @@ here, because the host was heavily loaded.
   spool, which was not measured.
 - The cost of a second decode of a real DWG, which is the missing figure for
   two-pass.
+- Not measured: the cost of a second decode of a real DWG (the missing figure for `twopass`), more
+  than a few repetitions at 16M entities, an idle host, and any arm64 figure. CPU time varied by up
+  to about 40 percent between runs at 4M, so the CPU ranking is weak. Peak RSS was stable and is the
+  figure the decision rests on.

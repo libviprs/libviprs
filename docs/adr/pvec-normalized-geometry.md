@@ -1,6 +1,6 @@
 # ADR: Normalized2DGeometry is a thin adapter over PVec's public semantic concepts
 
-Status: proposed for N1.8 to freeze. Decides N1.2 (#1041), part of the integration epic #1039.
+Status: Frozen by N1.8 (#1047), except NG-12 (see the freeze record). Decides N1.2 (#1041), part of the integration epic #1039.
 Executable proof: `tests/adr_normalized_geometry.rs`, one test per acceptance criterion, which
 reads this file as text and fails when a clause below goes missing or says something it must not.
 
@@ -296,3 +296,19 @@ clauses cite work that has not landed, and I do not want that to read as settled
 Open items I am handing on: where derived entities take their `EntityKey` so source order is not
 perturbed (N3.7); and whether a closed polyline's repeated first vertex survives the provider boundary
 as a vertex or as a flag (N1.3).
+
+## Freeze record
+
+N1.8 (#1047) froze this ADR in place. Every other N1.8 ADR cites it by clause and none restates it:
+[pvec-semantic-boundary.md](pvec-semantic-boundary.md) is the frozen decision with N1.3's measured
+numbers, and [pvec-provenance.md](pvec-provenance.md) is NG-06 with what N1.4 measured at the decoder
+boundary. Evidence: [docs/spikes/dwg-mapping.md](../spikes/dwg-mapping.md).
+
+- NG-11's candidate list was answered by N1.3: the bulge and the ellipse constructor were real gaps
+  (libviprs/pvec#91 and #92), the line segment, the bounds and the angle convention were not. The two
+  open items below under Status are settled by N1.3 (a closed polyline arrives as a flag with its
+  first vertex copied, and PVec's bounds exist for every kind).
+- NG-12 is not frozen: P3.9 (libviprs/pvec#84) is open, so the side-table rules stay proposed.
+- The PVec pin in NG-03 and NG-09 is still `fdf87de`. N1.3 and N1.5 measured later revisions, and the
+  citations are re-checked in the change that moves the pin.
+- Numeric questions are P1.2's, and libviprs defines no epsilon of its own.

@@ -321,17 +321,22 @@ acadsharp-rs = { git = "https://github.com/libviprs/acadsharp-rs", rev = "f23f37
 # line below stands. The revision is the fork's `main` as Gate 0 ran against it
 # (`docs/spikes/acadrust-gate0.md`); moving it means rerunning that gate.
 acadrust = { git = "https://github.com/libviprs/acadrust", rev = "72af48970e306ef1d50dd751b227df2b4fc3fb99", version = "0.5.5" }
+# PVec's numeric policy (issue #1074): the structural rules and limits for a B-spline
+# (NP-14 knots, NP-15 weights, MAX_DEGREE, MAX_CONTROL_POINTS, MAX_KNOTS) that
+# `pvec::dwg_spline` applies, so the numbers are PVec's and are not copied here. Optional
+# and off by default. Git dependency pinned by a full revision, same consequence as the
+# two above: this crate cannot be published to crates.io while the line below stands.
+pvec-numeric = { git = "https://github.com/libviprs/pvec", rev = "8c84c42f714b6ee24c9c9dcd2ad984a642f34a50" }
 # PVec's source-neutral curve model and the numeric policy under it (issue #1095),
-# optional and off by default. Both crates live in libviprs/pvec, are pure Rust with
-# no dependency besides each other, and are `publish = false` at version 0.0.0 there.
+# optional and off by default. Both crates (`pvec-numeric` is the entry just above) live in
+# libviprs/pvec, are pure Rust with no dependency besides each other, and are `publish = false` at version 0.0.0 there.
 # Git dependencies pinned by a full revision, for the same reason as `acadrust`
 # above and with the same consequence: this crate cannot be published to crates.io
-# while the two lines below stand. Swap them for registry versions in the change that
+# while the lines below stand. Swap them for registry versions in the change that
 # publishes PVec. Moving the revision means re-reading the citations in
 # `docs/adr/pvec-normalized-geometry.md` (the ADR pins fdf87de, so a move is also a
 # change to that pin).
 pvec-geometry = { git = "https://github.com/libviprs/pvec", rev = "8c84c42f714b6ee24c9c9dcd2ad984a642f34a50", version = "0.0.0" }
-pvec-numeric = { git = "https://github.com/libviprs/pvec", rev = "8c84c42f714b6ee24c9c9dcd2ad984a642f34a50", version = "0.0.0" }
 # Pure-Rust FFT (MIT OR Apache-2.0) used by the frequency-domain filter
 # operations in `src/freqfilt.rs` (`fwfft`, `invfft`, `freqmult`, `spectrum`,
 # `phasecor`). Chosen over an FFTW binding to keep the crate pure Rust; its
@@ -528,6 +533,10 @@ dwg-acadsharp = ["dep:acadsharp-rs"]
 # only adds `pvec::dwg_acadrust::AcadrustProvider`. The existing `cad::CadDecoder` path,
 # and `dwg-acadsharp` with it, is untouched.
 dwg-acadrust = ["dep:acadrust"]
+# Exact B-spline extraction from a provider's `RawGeometry::Spline` (issue #1074),
+# validated against PVec's numeric policy. Needs no reader: it works on the boundary
+# types, so any provider's output goes through it.
+pvec-spline = ["dep:pvec-numeric"]
 # `pvec::Normalized2DGeometry`, the thin semantic adapter over PVec's public curve
 # model (issue #1095, ADR `docs/adr/pvec-normalized-geometry.md`). Pure Rust, and the
 # two PVec crates it needs are the whole of what it adds to the graph. They are git
@@ -659,9 +668,9 @@ jp2k = ["dep:hayro-jpeg2000", "dep:openjpeg2-pure"]
 
 [dependencies]
 acadrust = { workspace = true, optional = true }
+pvec-numeric = { workspace = true, optional = true }
 acadsharp-rs = { workspace = true, optional = true }
 pvec-geometry = { workspace = true, optional = true }
-pvec-numeric = { workspace = true, optional = true }
 ab_glyph = { workspace = true }
 blake3 = { workspace = true }
 exr = { workspace = true }
@@ -702,3 +711,7 @@ proptest = { workspace = true }
 tempfile = { workspace = true }
 toml = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+[[test]]
+name = "pvec_dwg_spline_structural"
+required-features = ["pvec-spline"]
