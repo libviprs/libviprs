@@ -556,3 +556,27 @@ fn a_real_dwg_converts_through_the_default_decoder() {
     assert!(check(&dest).unwrap().is_valid());
     assert_eq!(names(dir.path()), vec!["sample.pmtiles"]);
 }
+
+/// The provider note is what a deployer reads to know the library builds and
+/// converts without the DWG reader, so a test holds it to naming the feature,
+/// the error a build without it returns and the entry points that still work.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn the_provider_note_names_the_feature_and_the_error() {
+    let doc = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/vector-providers.md"),
+    )
+    .unwrap();
+    for needle in [
+        "dwg-acadsharp",
+        "ProviderNotBuilt",
+        "default_decoder",
+        "inspect",
+        "check",
+    ] {
+        assert!(
+            doc.contains(needle),
+            "docs/vector-providers.md no longer names {needle}"
+        );
+    }
+}

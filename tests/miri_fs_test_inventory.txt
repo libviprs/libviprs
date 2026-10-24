@@ -738,6 +738,7 @@ annotated   fs-detected  tests/vector_1035_api.rs::a_truncated_archive_is_invali
 annotated   fs-detected  tests/vector_1035_api.rs::the_conversion_says_what_it_wrote
 annotated   fs-detected  tests/vector_1035_api.rs::the_library_call_and_the_function_the_command_line_drives_are_one_engine
 annotated   fs-detected  tests/vector_1035_api.rs::the_name_option_overrides_the_views_name
+annotated   fs-detected  tests/vector_1035_api.rs::the_provider_note_names_the_feature_and_the_error
 annotated   fs-detected  tests/vector_1036_dwg_corpus.rs::child_entry
 annotated   fs-detected  tests/vector_1036_dwg_corpus.rs::mutated_drawings_never_take_the_process_down
 annotated   fs-detected  tests/vector_1036_dwg_corpus.rs::the_pathological_deep_dimension_drawing_ends_inside_a_bound
