@@ -656,3 +656,214 @@ fn the_spike_leaves_the_raster_path_and_the_manifest_alone() {
         "src/pdf.rs must not grow vector extraction in a spike"
     );
 }
+
+// ------------------------------------------------ review of #1238: guards on the pair
+
+const PAIR_CLASSES: [&str; 9] = [
+    "line", "polyline", "arc", "circle", "ellipse", "spline", "text", "hatch", "other",
+];
+
+fn first_number(cell: &str) -> i64 {
+    let tok = cell.split_whitespace().next().unwrap_or("");
+    tok.replace(',', "")
+        .parse()
+        .unwrap_or_else(|_| panic!("cell `{cell}` does not start with a number"))
+}
+
+#[test]
+fn pair_table_agrees_with_results_pair_cell_by_cell() {
+    let pair = results("results-pair.tsv");
+    let get = |f: &str, k: &str| -> i64 {
+        pair.get(&(f.to_string(), k.to_string()))
+            .unwrap_or_else(|| panic!("results-pair.tsv has no {f} {k}"))
+            .parse()
+            .unwrap()
+    };
+    let d = doc();
+    let sec = section(&d, "## Per-class geometry-count difference");
+    let rows = table_rows(&sec);
+    // Every LibreCAD PDF carries one rectangular clip: 1 path and 4 line segments (`W*`).
+    for c in PAIR_CLASSES {
+        let r = rows
+            .iter()
+            .find(|r| r[0].to_lowercase().starts_with(c))
+            .unwrap_or_else(|| panic!("no per-class row for `{c}`"));
+        let want: [i64; 5] = if c == "other" {
+            [get("pair.dwg", "dwg_other"), 0, 0, 0, 0]
+        } else {
+            let f = format!("class_{c}.pdf");
+            [
+                get("pair.dwg", &format!("dwg_{c}")),
+                get(&f, "paths") - 1,
+                get(&f, "segs.line") - 4,
+                get(&f, "segs.cubic"),
+                get(&f, "fill.evenodd") + get(&f, "fill.nonzero"),
+            ]
+        };
+        for (i, w) in want.iter().enumerate() {
+            assert_eq!(
+                first_number(&r[i + 1]),
+                *w,
+                "per-class row `{c}`, column {}: doc says `{}`, results-pair.tsv says {w}",
+                i + 1,
+                r[i + 1]
+            );
+        }
+    }
+    // The whole-drawing sentence.
+    for (key, want) in [
+        ("paths", get("pair.pdf", "paths") - 1),
+        ("segs.line", get("pair.pdf", "segs.line") - 4),
+        ("segs.cubic", get("pair.pdf", "segs.cubic")),
+    ] {
+        let s = format!("{}", want).chars().rev().collect::<Vec<_>>();
+        let mut with_commas = String::new();
+        for (i, ch) in s.iter().enumerate() {
+            if i > 0 && i % 3 == 0 {
+                with_commas.push(',');
+            }
+            with_commas.push(*ch);
+        }
+        let with_commas: String = with_commas.chars().rev().collect();
+        assert!(
+            sec.contains(&with_commas),
+            "the whole-drawing {key} count {with_commas} is not in the section"
+        );
+    }
+}
+
+fn exporter_version(text: &str) -> String {
+    let l = text
+        .lines()
+        .find(|l| l.contains("plotted by librecad "))
+        .expect("results-pair.tsv does not record the LibreCAD version");
+    l.split("plotted by librecad ")
+        .nth(1)
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_string()
+}
+
+#[test]
+fn librecad_version_agrees_in_tsv_doc_and_driver() {
+    let tsv = read("docs/spikes/pdf-normalization/results-pair.tsv");
+    let ver = exporter_version(&tsv);
+    assert!(
+        ver.chars().next().map_or(false, |c| c.is_ascii_digit()),
+        "version `{ver}` is not a version"
+    );
+    let sec = section(&doc(), "## Per-class geometry-count difference");
+    assert!(
+        sec.contains(&format!("LibreCAD {ver} ")),
+        "the doc does not say LibreCAD {ver}, which is what results-pair.tsv records"
+    );
+    let sh = read("docs/spikes/pdf-normalization/pair.sh");
+    assert!(
+        sh.contains(&format!("librecad={ver}")),
+        "pair.sh does not pin the apt package to librecad={ver}"
+    );
+    assert!(
+        sh.contains("acadrust_rev=") && sh.contains("git -C \"$acad\" archive"),
+        "pair.sh must pin acadrust by rev with git archive"
+    );
+    let rev = tsv
+        .lines()
+        .find_map(|l| l.split("written by acadrust ").nth(1))
+        .and_then(|s| s.split_whitespace().next())
+        .expect("results-pair.tsv does not record the acadrust rev");
+    assert!(
+        sh.contains(&format!("acadrust_rev={rev}")),
+        "pair.sh pins a different acadrust rev than the results record ({rev})"
+    );
+}
+
+const LABEL: &str = "open-exporter pair, not AutoCAD-class";
+
+#[test]
+fn the_open_exporter_label_is_in_the_intro_the_section_and_the_tsv() {
+    let d = doc();
+    let intro = &d[..d.find("\n## ").expect("no sections")];
+    assert!(intro.contains(LABEL), "the intro does not carry the label");
+    assert!(
+        section(&d, "## Per-class geometry-count difference").contains(LABEL),
+        "the pair section does not carry the label"
+    );
+    assert!(
+        read("docs/spikes/pdf-normalization/results-pair.tsv").contains(LABEL),
+        "results-pair.tsv does not carry the label"
+    );
+}
+
+#[test]
+fn structurally_exact_is_only_ever_negated_outside_labelling() {
+    let d = doc();
+    let lab = section(&d, "## Labelling");
+    let rest = d.replacen(&lab, "", 1);
+    let flat = rest.replace('\n', " ");
+    for sentence in flat.split(". ") {
+        let low = sentence.to_lowercase();
+        if low.contains("structurally exact") {
+            assert!(
+                ["never", "not ", "cannot", "no "]
+                    .iter()
+                    .any(|n| low.contains(n)),
+                "`structurally exact` outside Labelling without a negation: {sentence}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_dxf_step_is_named_as_part_of_the_measured_loss() {
+    let d = doc();
+    let d = d.replace('\n', " ");
+    let intro = &d[..d.find(" ## What is there today").expect("no first section")];
+    let sec = section(&doc(), "## Per-class geometry-count difference").replace('\n', " ");
+    for (name, text) in [("intro", intro.to_string()), ("pair section", sec)] {
+        assert!(
+            text.contains("DXF writer"),
+            "the {name} does not say the DXF goes through acadrust's DXF writer"
+        );
+        assert!(
+            text.contains("not separately measured"),
+            "the {name} does not say the DXF step is not separately measured"
+        );
+        assert!(
+            !text.contains("measures is LibreCAD's") && !text.contains("below is LibreCAD's"),
+            "the {name} still attributes the whole loss to LibreCAD"
+        );
+    }
+}
+
+#[test]
+fn page_rotate_is_in_the_entry_point_list() {
+    let sec = section(&doc(), "## What is there today");
+    assert!(
+        sec.contains("`page_rotate`"),
+        "page_rotate is an entry point and is not listed"
+    );
+}
+
+#[test]
+fn the_x86_64_harness_pass_over_the_pair_is_recorded_and_arm64_only_is_gone() {
+    let sec = section(&doc(), "## Per-class geometry-count difference");
+    assert!(
+        !sec.contains("Measured on arm64 only"),
+        "stale `arm64 only` wording"
+    );
+    assert!(
+        sec.contains("585"),
+        "the 585-row x86_64 harness result is not recorded"
+    );
+    assert!(sec.contains("x86_64"), "the x86_64 pass is not named");
+    assert!(
+        sec.contains("LibreCAD itself ran on arm64 only"),
+        "the section must say LibreCAD itself ran on arm64 only"
+    );
+    assert!(
+        sec.contains("timestamp"),
+        "the section must say the PDF embeds a timestamp so its sha256 does not reproduce"
+    );
+}
