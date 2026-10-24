@@ -792,8 +792,9 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1209 adds 5: `tests/pdf_info_cropbox.rs`, which writes lopdf-built PDFs to a temp dir. It said 513 before this line moved.
 /// #1242 adds 40: the `tests/vector_103x_*.rs` cells that write archives and tiles to a temp dir or read committed fixtures. It said 523 before this line moved.
 /// #1043 adds 16: `tests/view_context_spike_doc.rs`, which reads the spike document, its probe output, two sources and its own directory listing. It said 563 before this line moved.
-/// #1036 adds 9: the `tests/vector_1036_*.rs` cells that build an archive in a temp dir, spawn a child that does, or read a committed DWG fixture. It said 579 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 588;
+/// #1044 adds 20: `tests/spike_transform_matrix.rs`, which reads the spike document, the harness output and the harness source. It said 579 before this line moved.
+/// #1036 adds 10: the `tests/vector_1036_*.rs` cells that build an archive in a temp dir, spawn a child that does, or read a committed DWG fixture. It said 599 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 609;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
