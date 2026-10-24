@@ -373,6 +373,11 @@ annotated   fs-detected  tests/pmtiles_benchmarks.rs::pmtiles_versus_directory
 annotated   fs-detected  tests/pmtiles_benchmarks.rs::the_brink_cells_root_stops_just_under_the_writers_cutoff
 annotated   fs-detected  tests/pmtiles_benchmarks.rs::the_cold_split_accounts_for_the_whole_combined_row
 annotated   fs-detected  tests/pmtiles_bounded_memory.rs::an_archive_past_four_gibibytes_finalizes_in_bounded_memory
+annotated   fs-detected  tests/pmtiles_bounded_memory.rs::issue_1263_a_large_pyramid_still_hits_the_same_cap
+annotated   fs-detected  tests/pmtiles_bounded_memory.rs::issue_1263_a_mid_size_pyramid_with_the_default_budget_stays_proportionate
+annotated   fs-detected  tests/pmtiles_bounded_memory.rs::issue_1263_a_small_pyramid_with_the_default_budget_stays_small
+annotated   fs-detected  tests/pmtiles_bounded_memory.rs::issue_1263_growth_does_not_cost_dedupe_exactness
+annotated   fs-detected  tests/pmtiles_bounded_memory.rs::issue_1263_the_default_footprint_follows_the_payload_count
 annotated   fs-detected  tests/pmtiles_bounded_memory.rs::one_rss_row
 annotated   fs-detected  tests/pmtiles_bounded_memory.rs::shrinking_the_sort_buffer_past_the_crossover_costs_more_than_it_saves
 annotated   fs-detected  tests/pmtiles_bounded_memory.rs::the_add_phase_footprint_does_not_grow_with_the_distinct_payload_count
