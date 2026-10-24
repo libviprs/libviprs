@@ -327,6 +327,16 @@ acadrust = { git = "https://github.com/libviprs/acadrust", rev = "72af48970e306e
 # and off by default. Git dependency pinned by a full revision, same consequence as the
 # two above: this crate cannot be published to crates.io while the line below stands.
 pvec-numeric = { git = "https://github.com/libviprs/pvec", rev = "8c84c42f714b6ee24c9c9dcd2ad984a642f34a50" }
+# PVec's source-neutral curve model and the numeric policy under it (issue #1095),
+# optional and off by default. Both crates (`pvec-numeric` is the entry just above) live in
+# libviprs/pvec, are pure Rust with no dependency besides each other, and are `publish = false` at version 0.0.0 there.
+# Git dependencies pinned by a full revision, for the same reason as `acadrust`
+# above and with the same consequence: this crate cannot be published to crates.io
+# while the lines below stand. Swap them for registry versions in the change that
+# publishes PVec. Moving the revision means re-reading the citations in
+# `docs/adr/pvec-normalized-geometry.md` (the ADR pins fdf87de, so a move is also a
+# change to that pin).
+pvec-geometry = { git = "https://github.com/libviprs/pvec", rev = "8c84c42f714b6ee24c9c9dcd2ad984a642f34a50", version = "0.0.0" }
 # Pure-Rust FFT (MIT OR Apache-2.0) used by the frequency-domain filter
 # operations in `src/freqfilt.rs` (`fwfft`, `invfft`, `freqmult`, `spectrum`,
 # `phasecor`). Chosen over an FFTW binding to keep the crate pure Rust; its
@@ -527,6 +537,12 @@ dwg-acadrust = ["dep:acadrust"]
 # validated against PVec's numeric policy. Needs no reader: it works on the boundary
 # types, so any provider's output goes through it.
 pvec-spline = ["dep:pvec-numeric"]
+# `pvec::Normalized2DGeometry`, the thin semantic adapter over PVec's public curve
+# model (issue #1095, ADR `docs/adr/pvec-normalized-geometry.md`). Pure Rust, and the
+# two PVec crates it needs are the whole of what it adds to the graph. They are git
+# dependencies (PVec is not on crates.io yet), which is why this is a feature and not
+# part of the default build: see the comment on `pvec-geometry` below.
+pvec-normalized = ["dep:pvec-geometry", "dep:pvec-numeric"]
 # Documentation-only deprecated alias for `object-store-sink`. Cargo has no
 # mechanism to mark a feature deprecated, so enabling `s3` emits NO build-time
 # warning: consumers pinned to `features = ["s3"]` get zero automated signal
@@ -654,6 +670,7 @@ jp2k = ["dep:hayro-jpeg2000", "dep:openjpeg2-pure"]
 acadrust = { workspace = true, optional = true }
 pvec-numeric = { workspace = true, optional = true }
 acadsharp-rs = { workspace = true, optional = true }
+pvec-geometry = { workspace = true, optional = true }
 ab_glyph = { workspace = true }
 blake3 = { workspace = true }
 exr = { workspace = true }
