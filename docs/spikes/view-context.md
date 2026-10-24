@@ -63,6 +63,8 @@ What I could not do:
 | `g13_xref` | `tests/fixtures/cad/g13/g13_xref.dwg` | libviprs-dep `g13_xref.dwg`, written with ACadSharp `DwgWriter`. One INSERT of an xref block. | writer-authored regression fixture. |
 | `sample_AC1018` | `tests/fixtures/cad/sample_AC1018.dwg` | ACadSharp `samples/sample_AC1018.dwg`, AutoCAD-authored. Same drawing as `sample_AC1032`, and the rule numbers are identical on all seven saves. | real-world, AutoCAD-authored. |
 | `sample_AC1032` | external: libviprs/acadsharp-rs-tests@ded7009 `fixtures/dwg/sample_AC1032.dwg` | ACadSharp `samples/sample_AC1032.dwg`, AutoCAD-authored. 19 layers including `Layer_Off`, `Layer_Freeze` and `Layer_vp_freeze`; three paper layouts with viewports; anonymous `*D`, `*T` and `*U` blocks; one dynamic block. | real-world, AutoCAD-authored. |
+| `sample_AC1014` | external: libviprs/acadsharp-rs-tests@ded7009 `fixtures/dwg/sample_AC1014.dwg` | ACadSharp `samples/sample_AC1014.dwg`, AutoCAD-authored. The same drawing as `sample_AC1032` saved as R14. | real-world, AutoCAD-authored. |
+| `sample_AC1015` | external: libviprs/acadsharp-rs-tests@ded7009 `fixtures/dwg/sample_AC1015.dwg` | ACadSharp `samples/sample_AC1015.dwg`, AutoCAD-authored. The same drawing saved as R2000. | real-world, AutoCAD-authored. |
 | `BLOCKVISIBILITYPARAMETER` | external: libviprs/acadsharp-rs-tests@ded7009 `fixtures/dwg/BLOCKVISIBILITYPARAMETER.dwg` | ACadSharp sample. A dynamic block with a visibility parameter, inserted four times. | real-world, AutoCAD-authored. |
 | `AecObjects` | external: libviprs/acadsharp-rs-tests@ded7009 `fixtures/dwg/AecObjects.dwg` | ACadSharp sample. Carries a paper viewport whose view direction is (-1,-1,1). | real-world, AutoCAD-authored. |
 
@@ -130,7 +132,13 @@ anonymous geometry block, placed on the dimension's own layer.
 - **V1-3 Visibility.** An entity is visible only if its effective layer is on
   and thawed. An INSERT that is not visible contributes nothing, whatever its
   block holds. Locked, no-plot and viewport-frozen layers are visible. Colour,
-  lineweight and linetype play no part.
+  lineweight and linetype play no part. An entity's own invisible flag (DXF group
+  60, `Entity.IsInvisible` in ACadSharp) is a separate switch from layer state,
+  and v1 does not read it: the rule probe does not look at it and the decoder
+  does not read it either (no `IsInvisible` anywhere in `libviprs-dep/acadsharp/native`,
+  source read, not run). So an entity that is invisible on a visible layer is
+  drawn by the decoder and counted visible by the rule. No fixture here sets the
+  flag, so this is unmeasured, and the rule is not claimed to cover it.
 - **V1-4 Instances.** Each visible INSERT contributes its block's visible
   leaves once per instance (a MINSERT is rows times columns instances), under
   the composed transform. Identical leaves reached through two INSERTs appear
@@ -206,13 +214,14 @@ Paper space in v1: out
 
 The call, and what justifies it:
 
-- A layout of a real AutoCAD drawing holds no drawing. In `sample_AC1032` the
-  three layouts (`Layout1`, `Layout2`, `MyLayout`) hold two entities each, a
-  paper-image viewport and one user viewport, and nothing else. What shows in a
-  layout is model space seen through those viewports. The decoder emits 2
-  warnings per layout (code 100, "VIEWPORT is not a primitive this version
-  flattens") and no geometry. So "decode the layout view" produces nothing a
-  tile pipeline could draw.
+- A layout of a real AutoCAD drawing (`sample_AC1032`) holds no drawing of
+  its own. In `sample_AC1032` the three layouts (`Layout1`, `Layout2`, `MyLayout`) hold two
+  entities each, a paper-image viewport and one user viewport, and nothing else.
+  What shows in a layout is model space seen through those viewports. On
+  `sample_AC1032` the decoder emits 2 warnings per layout (code 100, "VIEWPORT is
+  not a primitive this version flattens") and no geometry. So "decode the layout
+  view" of `sample_AC1032` produces nothing a tile pipeline could draw. That is
+  one AutoCAD drawing, which is as far as this sentence reaches.
 - To make a layout mean something, v1 would need the viewport transform, the
   clip, the per-viewport layer freezes, and a decoder that returns model space
   filtered by them. The object models have the inputs (below). The decoder does
@@ -237,22 +246,27 @@ paper = Center + s * R(twist') * (model - ViewCenter)
 
 `twist'` is the viewport's twist with a sign I have **not** verified (DXF group
 51 is counterclockwise, but I have no AutoCAD-authored fixture with a nonzero
-twist to say which way the stored value turns the model). For `vc_paper`,
-viewport `4E` (1:1, no twist): `Center (80,100)`, `ViewCenter (50,5)`,
-`Height 80`, `ViewHeight 80`, so `s = 1` and model `(50,5)` lands on paper
-`(80,100)`. Viewport `4F` has `ViewHeight 160`, so `s = 0.5`, and model `(50,5)`
-lands on paper `(200,100)`. These come from fields ACadSharp read back from the
-file and acadrust agrees with them; they are arithmetic on the stored values
-and nothing about AutoCAD's rendering.
+twist to say which way the stored value turns the model).
+
+I have no measurement that checks this map against what AutoCAD draws, so the
+document does not offer one. Evaluating it on the `vc_paper` viewports (`4E`:
+`Center (80,100)`, `ViewCenter (50,5)`, `Height 80`, `ViewHeight 80`) only sends
+`ViewCenter` to `Center`, which is true by construction of the formula for any
+`s` and any twist, and the same is true of viewport `4F` (`ViewHeight 160`). Those
+points say nothing about whether the scale or the twist is right, so I do not cite
+them as evidence. What the call rests on is structural, and measured: a real
+layout holds only VIEWPORT entities, and the decoder has no viewport record (see
+the first bullet above and L2). The fields themselves come from what ACadSharp
+read back from the file, and acadrust agrees with them.
 
 What the real drawings show about those inputs:
 
 | observation | fixture | consequence |
 |---|---|---|
-| Plan viewports with `Height / ViewHeight` of 0.693488, 0.696757 and 1.0, twist 0 | `sample_AC1032` | the common case is an untwisted, rectangular, plan-view clip, which is exact |
-| A viewport with `ViewDirection = (-1,-1,1)` | `AecObjects` | not a 2D affine at all, so it can only be bounded |
-| Viewports on layer `Defpoints` (a no-plot layer) | `AecObjects` | viewport visibility interacts with layer state |
-| `ViewCenter = (0,0)` and `ViewHeight = 0` on every viewport, so `s` is undefined | `sample_AC1014` | the transform cannot be recovered from this provider on AC1014, while the same drawing saved as AC1015 or later reads `ViewHeight 9.228705`. I cannot tell a reader limitation from R14 storage |
+| Model-view viewports (`representsPaper=False`, id 2 in each layout) with `Height / ViewHeight` of 0.693488 (two layouts) and 0.696757 (one), twist 0 | `sample_AC1032` | three layouts of one AutoCAD drawing, all untwisted, rectangular and plan-view, so exact. That is one file, not a corpus, and I do not call it the common case. The `Height / ViewHeight` of 1.0 on the id 1 viewport of each layout is the paper-background viewport (`representsPaper=True`), not a model view, and says nothing about scale |
+| A model-view viewport (handle `BCE`, id 2) with `ViewDirection = (-1,-1,1)`, `scale` 0.006097 | `AecObjects` | not a 2D affine at all, so it can only be bounded |
+| Both model-view viewports (`BCE` and `1040`) are on layer `Defpoints` (a no-plot layer); the paper-background viewport is on layer 0 | `AecObjects` | viewport visibility interacts with layer state |
+| `ViewCenter = (0,0)`, `ViewHeight = 0` and `scale = 0` on every viewport, the model-view one (`representsPaper=False`, id 2) included, so `s` is undefined | `sample_AC1014` | the transform cannot be recovered from this provider on AC1014. The same drawing saved as AC1015 reads `ViewHeight 9.228705` and `ViewCenter (6,4.5)` on that same viewport, and so does AC1018 and AC1032. The paper-background viewport (id 1) differs too (`ViewHeight 0` against 8.993), so it is not a confound of that viewport. I cannot tell a reader limitation from R14 storage. Output: the describe section of `results-x64.txt` for these files |
 | No viewport in any real fixture has a twist, a viewport freeze or a non-rectangular clip | all real fixtures | those three rest on `vc_paper` alone, which is spike-authored |
 
 Exact versus bounded, as the issue asks:
@@ -264,9 +278,11 @@ Exact versus bounded, as the issue asks:
   `vc_paper`), a non-plan view direction, a perspective viewport, and any viewport
   whose `ViewHeight` is zero.
 
-Two more things I measured on `vc_paper`: the clip boundary circle is also an
-ordinary drawn entity in paper space (the decoder emits it as geometry of the
-layout view), and the `FrozenLayers` list survives a write and read through
+Two more things I measured on `vc_paper`, which is spike-authored and not a real
+drawing: the clip boundary circle (handle `50`) is also an ordinary drawn entity
+in paper space, so on `vc_paper` the decoder does emit it, and a paper-space line
+`4D`, as geometry of the layout view (this contrasts with `sample_AC1032`, whose
+layouts yield none), and the `FrozenLayers` list survives a write and read through
 both ACadSharp and acadrust. Neither exposes per-viewport layer property
 overrides (colour, linetype and so on), checked in source and not run.
 
@@ -369,7 +385,7 @@ Where acadrust is named it is 0.5.5 at `d35691f`.
 | L4 | A leaf's handle is the same for every instance. | `block-twice-two-scales` | `vc_nested`: handle `4C` twice, with different coordinates. |
 | L5 | Dynamic-block definition, parameters and the anonymous-to-source link are not exposed. ACadSharp has `BlockRecord.Source`. | `dynamic-block` | `BLOCKVISIBILITYPARAMETER`: 4 instances draw the stored anonymous geometry, 20 records, rule 20. The decoder cannot say what state they are in. |
 | L6 | An INSERT inside a DIMENSION's geometry block (arrowheads, tick blocks) is skipped with no warning. This is not a view-context case, but it breaks the "nothing is silently omitted" principle the xref decision rests on. | none of the table's rows, but it moves the numbers | `Flattener.DimensionBody` `continue`s on `Insert`. On `sample_AC1032` the rule counts 146 leaves and the decoder emitted 134, and the 12 missing are all in `_ArchTick` and `_BoxBlank` instances (6 handles, 2 instances each). |
-| L7 | AC1014 reads every viewport with `ViewCenter (0,0)` and `ViewHeight 0`. | `viewport-clip-exact` on R14 | `sample_AC1014` against `sample_AC1015`. |
+| L7 | AC1014 reads every viewport, the model-view ones (id 2) included, with `ViewCenter (0,0)`, `ViewHeight 0` and `scale 0`. | `viewport-clip-exact` on R14 | `sample_AC1014` against `sample_AC1015`, viewport handles `245`, `256` and `26B`, in the describe section of `results-x64.txt`. Not measured: whether R14 stores the fields at all. |
 
 Cases the real corpus could not exercise, so the evidence is spike-authored
 only: an entity on an off or frozen layer (`sample_AC1032` has `Layer_Off` and
