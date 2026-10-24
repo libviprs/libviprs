@@ -352,6 +352,22 @@ fn dwg_degenerate_linetype_is_refused() {
 }
 
 #[test]
+fn dwg_negative_lineweight_is_refused_not_dropped() {
+    // DWG's negative sentinels (ByLayer and friends) have their own variants, so a negative
+    // `Hundredths` is a corrupt value. It must not quietly become "no width".
+    for h in [-1_i16, -3, i16::MIN] {
+        let r = dwg_line_style(
+            ids(1)[0],
+            &DwgStyleInput {
+                lineweight: Some(DwgLineweight::Hundredths(h)),
+                ..DwgStyleInput::default()
+            },
+        );
+        assert_eq!(r, Err(StyleError::NegativeWidth), "Hundredths({h})");
+    }
+}
+
+#[test]
 fn dwg_invisible_flag_is_carried() {
     let c = dwg_line_style(
         ids(1)[0],
