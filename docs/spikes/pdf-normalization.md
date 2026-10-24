@@ -5,11 +5,11 @@ written (N5.1 to N5.3): can a vector PDF reach PVec as curves, and what has a DW
 thrown away before libviprs ever sees it. This is panel finding 9: PDF equivalence holds only where the
 PDF retained it.
 
-I want to be upfront about one thing. Four of the five acceptance criteria are met and evidenced
-below. The third one (a DWG plus its exported PDF, with a measured per-class geometry-count
-difference) is not, because that pair does not exist anywhere yet. I say exactly why in
-"Per-class geometry-count difference", and the rest of the document is written so it does not lean on
-that pair.
+All five acceptance criteria are now evidenced, with one qualification I want to be upfront about. The
+DWG plus exported PDF pair for the third one (#1240) is an open-exporter pair, not AutoCAD-class: I
+wrote the DWG with acadrust's `DwgWriter` and plotted it to PDF with LibreCAD, headless. The loss it
+measures is LibreCAD's, and I do not claim it is what AutoCAD, or any other exporter, would lose. It is
+in "Per-class geometry-count difference".
 
 ## What is there today
 
@@ -147,12 +147,12 @@ say so in the cell.
 
 | Lost in the export | What the PDF keeps | Detectable from the PDF alone | Evidence |
 |---|---|---|---|
-| Layer identity and state | Optional content groups, when the exporter writes them, and `BDC /OC` marked content tying paths to them. Two of three files have none | partly: present in the Tulsa set (150 optional content groups, 351 `/OC` marked-content spans), absent in both print-driver files (0). Layer on/off state is in the same structure but I did not measure it | R:ocg, R:bdc.oc |
+| Layer identity and state | Optional content groups, when the exporter writes them, and `BDC /OC` marked content tying paths to them. Two of three files have none | partly: present in the Tulsa set (150 optional content groups, 351 `/OC` marked-content spans), absent in both print-driver files (0). Layer on/off state is in the same structure but I did not measure it. Re-checked against the pair: the DWG has three layers and LibreCAD's PDF has 0 optional content groups and 0 `BDC`, so with that exporter the layers are gone entirely, which is the `partly` verdict landing on its no side | R:ocg, R:bdc.oc, P:pair.pdf:ocg, P:pair.pdf:ops.BDC |
 | Block structure and insert transforms | Nothing. There is no INSERT: every insert is already expanded into paths | no: no file calls a Form XObject for vector content, and a `cm` before each path is a driver artifact, not an insert transform. A flattened block and a drawn-in-place shape look the same | R:forms.unique |
 | Entity handles | Nothing | no: no content-stream operator carries an identifier, and marked content in these files is `/OC` only | R:bdc.oc |
 | Model/paper distinction | One page per plotted layout. Viewports may survive as `/VP` entries | partly: three of the four Tulsa pages carry `/VP` and the rest carry none, so a viewport can be seen when written, but nothing says whether a page came from model space or a layout | R:vp_pages |
-| True arc and ellipse parameters | Cubic Beziers, whatever the source entity was | no: a circle arrives as four or more cubics and the centre, radius and trim are gone. A consumer could fit and guess, which is a guess and not a recovery. A quarter circle as one cubic misses the true circle by about 0.027 percent of the radius (a standard result, not measured here), so even a perfect fit would not be exact against the DWG | S2, R:segs.cubic |
-| Spline degree and knots | Cubic Beziers, or lines | no: a degree, a knot vector or a weight set cannot be told from a run of cubics, and a rational spline has been approximated before it reached the stream | S2, R:segs.cubic |
+| True arc and ellipse parameters | Cubic Beziers or dense lines, depending on the exporter and the entity. Re-checked against the pair, LibreCAD writes each circle as exactly four cubics and writes arcs and ellipses as long runs of short lines (no cubics) | no: a circle arrives as four or more cubics and the centre, radius and trim are gone. A consumer could fit and guess, which is a guess and not a recovery. A quarter circle as one cubic misses the true circle by about 0.027 percent of the radius (a standard result, not measured here), so even a perfect fit would not be exact against the DWG. The original wording here (cubics whatever the entity was) was reasoned from the format and the pair corrects it: for this exporter an arc and an ellipse are not cubics at all | S2, R:segs.cubic, P:class_circle.pdf:segs.cubic, P:class_arc.pdf:segs.line, P:class_ellipse.pdf:segs.line |
+| Spline degree and knots | Cubic Beziers, or lines | no: a degree, a knot vector or a weight set cannot be told from a run of cubics, and a rational spline has been approximated before it reached the stream. Re-checked against the pair: LibreCAD wrote the three splines as 117 single-segment line paths and no cubics, so the "or lines" half of this row is the one that happened | S2, R:segs.cubic, P:class_spline.pdf:segs.line |
 | Drawing units | Page size in points and an optional `/UserUnit` or viewport measure | partly: only when the exporter writes `/UserUnit` or a measure dictionary. None of the three files declares `/UserUnit`, so for them it is no. The measure dictionary I did not look for | R:user_unit_pages, R:vp_pages |
 
 Reading the table: a consumer of a PDF-derived drawing can recover almost nothing about what the
@@ -163,25 +163,50 @@ PDF's page, not the drawing.
 
 ## Per-class geometry-count difference
 
-Not met. This criterion needs a DWG and the PDF exported from it, measured per class on both sides,
-and no such pair exists yet. It comes from `libviprs/pvec-gold-fixtures#1` (Epic O), which is open
-and has a README and nothing else, and no DWG-writing SDK is qualified (O1.1 and O1.2 are open).
+Met, for an open-exporter pair, not AutoCAD-class. The loss below is LibreCAD's, and I make no claim
+about any other exporter. An AutoCAD-class pair is still wanted from Epic O
+(`libviprs/pvec-gold-fixtures#1`), and I searched the workspace for a real one first: the acadsharp
+samples, the `wt-spdr-xdata` fixtures and the `acadrust` tests hold DWGs with no PDF beside them, and
+`pdf-candidates` and the iasbuilt uploads hold PDFs with no DWG.
 
-I searched the workspace for a real pair before concluding that:
+Provenance, all recorded in `pdf-normalization/results-pair.tsv` and regenerated by `pair.sh`:
 
-- DWGs: the acadsharp samples (`review-acadsharp-upstream/samples`, including `svg/export_sample.dwg`),
-  the `wt-spdr-xdata` fixtures, and the `acadrust` test files. None has a PDF export next to it.
-  `pdf-definition.pdf` among the samples is a PDF underlay sample (an image page, no paths, which the
-  harness confirms), not an export of any DWG.
-- PDFs: `libviprs/pdf-candidates` (arch, iso, us) and the PDFs under `iasbuilt/server/uploads`. None
-  has a DWG, and none records DWG provenance in its producer fields.
+- DWG: `pair.dwg`, written by acadrust (`libviprs/acadrust` at `d35691f`) with `DwgWriter`, version
+  AC1032, three layers (`WALLS`, `ARCS`, `ANNO`) and 32 entities. I read it back with `DwgReader` and
+  counted the DWG side from that read-back, so the count is of the file and not of the generator.
+- DXF: written by acadrust from the read-back DWG, so the PDF is an export of what the DWG holds.
+- PDF: `pair.pdf`, plotted by LibreCAD 2.2.0-1 (Debian bookworm package, arm64, Qt 5.15.8, offscreen
+  platform, no display) with `librecad dxf2pdf -a`. Its producer field says Qt 5.15.8, not AutoCAD.
+- sha256 of the three files is in the results file. Everything ran in linux/arm64 containers.
 
-I did not build a pair. A PDF I wrote from a DWG's entity list would measure my exporter, not an
-AutoCAD-class one, and the per-class difference is only worth having from a real export. What I can
-give instead is the PDF side of the count on three real plots, in the table above (lines, cubics,
-rects, compound paths), so the day a pair exists only the DWG side and the difference are missing.
-The follow-up is #1240, and the test that checks it is
-`ac3_a_dwg_and_its_exported_pdf_were_measured_per_class`, ignored with that blocker in its message.
+LibreCAD's PDF has no entity classes in it, so I did not attribute path counts to classes by guessing.
+Instead the generator also writes one DWG and DXF per class and each is plotted on its own, so every
+PDF row below is measured for that class alone. Every LibreCAD PDF carries one rectangular clip (a `W*`
+path of four line segments), which I subtract from the line and path counts below.
+
+| class | DWG entities | PDF paths | PDF line segments | PDF cubics | PDF fills | difference |
+|---|---|---|---|---|---|---|
+| line | 6 | 6 | 6 | 0 | 0 | none in count: one entity, one path, one segment |
+| polyline | 4 (18 vertices) | 16 | 16 | 0 | 0 | the 4 polylines became 16 one-segment paths, so polyline identity is gone, and the two closed ones lost their closed flag (no `h`, the closing edge is an explicit line) |
+| arc | 5 | 5 | 7,291 | 0 | 0 | 5 arcs became about 1,458 short lines each, no cubics |
+| circle | 4 | 4 | 0 | 16 | 0 | exactly four cubics per circle, closed |
+| ellipse | 3 | 3 | 6,018 | 0 | 0 | lines, no cubics, and the partial ellipse is just a shorter run |
+| spline | 3 | 117 | 117 | 0 | 0 | 3 splines became 117 one-segment paths (39 each), no cubics |
+| text (outlined to paths) | 4 | 95 | 3,311 | 0 | 0 | LibreCAD strokes its own line font as paths, it does not outline glyphs, so 4 text entities are 95 paths |
+| hatch | 2 | 2 | 8 | 0 | 2 (even-odd) | one filled path per hatch, boundary kept as four lines |
+| other | 0 | 0 | 0 | 0 | 0 | nothing present |
+
+The whole drawing in one PDF has 248 paths, 10,857 line segments, 16 cubics, 2 even-odd fills, 0
+optional content groups, 0 `BDC` and no `/UserUnit`. The per-class segment counts do not add up to
+10,857 (they add up to 16,767) because each class was plotted with fit-to-page on its own, and
+LibreCAD's line density for curves follows the plot scale. So the line counts for arcs, ellipses and
+text are true for those plots and are not apportionments of the whole-drawing plot. I have not worked
+out why the arc density is as high as it is, and I would not read anything into the exact numbers beyond
+"a long run of lines". Measured on arm64 only. The harness counts did not need a second architecture
+for this, but I did not run an x86_64 pass.
+
+What this says about the loss table: the layer, handle, block and units rows hold as written, the arc,
+ellipse and spline rows had to be corrected (above), and nothing in the pair contradicts the rest.
 
 ## Labelling
 
@@ -218,12 +243,12 @@ EPIC P's and not libviprs's.
 
 ## What I could not verify
 
-- The DWG plus exported PDF pair, and so the measured per-class geometry-count difference. The reason
-  and the search are above, and #1240 tracks it. Because of this I do not claim that #1045 is done.
+- An AutoCAD-class pair. The pair that exists is the open-exporter pair above (acadrust DWG, LibreCAD
+  PDF). Its loss is LibreCAD's, and a PDF from AutoCAD or another plotter may keep arcs as cubics or
+  keep layers as optional content. Epic O (`libviprs/pvec-gold-fixtures#1`) is where such a pair belongs.
 - That any of the three real PDFs came from a DWG. Their producer fields say print driver and
-  Acrobat, nothing about AutoCAD, so the loss table is grounded in real PDFs but not in a real DWG
-  export. In particular the arc row's "a circle arrives as cubics" is reasoned from the format, with
-  `segs.cubic` showing cubics exist and not that they were circles.
+  Acrobat, nothing about AutoCAD, so those rows are grounded in real PDFs but not in a real DWG export.
+  The open-exporter pair now shows circles arriving as cubics for LibreCAD, and arcs and ellipses not.
 - Layer state (on, off, frozen) in optional content, and `/Measure` dictionaries: I counted groups
   and viewports, not their settings.
 - Form XObject recursion on a real file: none of the three has one that carries vector content.

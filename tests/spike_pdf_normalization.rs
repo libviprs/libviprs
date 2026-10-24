@@ -30,7 +30,10 @@ fn doc() -> String {
 fn results(file: &str) -> BTreeMap<(String, String), String> {
     let text = read(&format!("docs/spikes/pdf-normalization/{file}"));
     let mut out = BTreeMap::new();
-    for l in text.lines().filter(|l| !l.starts_with('#') && !l.trim().is_empty()) {
+    for l in text
+        .lines()
+        .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+    {
         let f: Vec<&str> = l.splitn(3, '\t').collect();
         assert_eq!(f.len(), 3, "{file}: malformed row `{l}`");
         if f[0] == "fixture" {
@@ -90,7 +93,10 @@ fn table_rows(sec: &str) -> Vec<Vec<String>> {
                 .map(|c| c.trim().to_string())
                 .collect::<Vec<_>>()
         })
-        .filter(|r| !r.iter().all(|c| c.chars().all(|ch| ch == '-' || ch == ':' || ch == ' ')))
+        .filter(|r| {
+            !r.iter()
+                .all(|c| c.chars().all(|ch| ch == '-' || ch == ':' || ch == ' '))
+        })
         .collect()
 }
 
@@ -98,7 +104,9 @@ fn ticked(s: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut rest = s;
     while let Some(a) = rest.find('`') {
-        let Some(b) = rest[a + 1..].find('`') else { break };
+        let Some(b) = rest[a + 1..].find('`') else {
+            break;
+        };
         out.push(rest[a + 1..a + 1 + b].to_string());
         rest = &rest[a + b + 2..];
     }
@@ -117,7 +125,10 @@ fn ac1_states_pdf_rs_does_no_vector_path_extraction_at_the_pinned_revision() {
         low.contains("no vector path extraction"),
         "the document must say in so many words that there is no vector path extraction"
     );
-    assert!(low.contains("new capability"), "the document must say this is new capability, not a refactor");
+    assert!(
+        low.contains("new capability"),
+        "the document must say this is new capability, not a refactor"
+    );
     for entry in [
         "extract_page_image",
         "extract_page_image_dpi",
@@ -133,12 +144,17 @@ fn ac1_states_pdf_rs_does_no_vector_path_extraction_at_the_pinned_revision() {
 
 // ---------------------------------------------------------------- AC 2
 
-const OPERATORS: &[&str] = &["m", "l", "c", "v", "y", "re", "h", "cm", "q", "Q", "W", "W*"];
+const OPERATORS: &[&str] = &[
+    "m", "l", "c", "v", "y", "re", "h", "cm", "q", "Q", "W", "W*",
+];
 const VERDICTS: &[&str] = &["exact", "equivalent", "unsupported for v1"];
 
 fn operator_rows(d: &str) -> Vec<Vec<String>> {
     let rows = table_rows(&section(d, "## Operator mapping"));
-    assert!(rows.len() > 1, "the Operator mapping section holds no table");
+    assert!(
+        rows.len() > 1,
+        "the Operator mapping section holds no table"
+    );
     assert_eq!(
         rows[0].iter().map(|c| c.to_lowercase()).collect::<Vec<_>>(),
         ["operator", "verdict", "maps to", "evidence"],
@@ -157,8 +173,14 @@ fn ac2_every_operator_has_a_row_with_a_verdict() {
             .find(|r| ticked(&r[0]).first().map(String::as_str) == Some(op))
             .unwrap_or_else(|| panic!("no row for operator `{op}`"));
         let verdict = ticked(&r[1]).into_iter().next().unwrap_or_default();
-        assert!(VERDICTS.contains(&verdict.as_str()), "operator `{op}` has verdict `{verdict}`");
-        assert!(!r[2].trim().is_empty(), "operator `{op}` says nothing about what it maps to");
+        assert!(
+            VERDICTS.contains(&verdict.as_str()),
+            "operator `{op}` has verdict `{verdict}`"
+        );
+        assert!(
+            !r[2].trim().is_empty(),
+            "operator `{op}` says nothing about what it maps to"
+        );
     }
 }
 
@@ -166,11 +188,19 @@ fn ac2_every_operator_has_a_row_with_a_verdict() {
 fn ac2_cubics_are_never_flattened() {
     let d = doc();
     let rows = operator_rows(&d);
-    let c = rows.iter().find(|r| ticked(&r[0]).first().map(String::as_str) == Some("c")).expect("row c");
-    assert_eq!(ticked(&c[1])[0], "exact", "`c` is a cubic Bezier and must map exactly");
+    let c = rows
+        .iter()
+        .find(|r| ticked(&r[0]).first().map(String::as_str) == Some("c"))
+        .expect("row c");
+    assert_eq!(
+        ticked(&c[1])[0],
+        "exact",
+        "`c` is a cubic Bezier and must map exactly"
+    );
     for r in &rows {
         assert!(
-            !r[2].to_lowercase().contains("flatten") || r[2].to_lowercase().contains("never flatten"),
+            !r[2].to_lowercase().contains("flatten")
+                || r[2].to_lowercase().contains("never flatten"),
             "row `{}` mentions flattening without saying it never happens",
             r[0]
         );
@@ -182,12 +212,21 @@ fn ac2_every_row_cites_a_passing_synthetic_check() {
     let d = doc();
     let res = results("results-x64.tsv");
     for r in operator_rows(&d) {
-        let ids: Vec<String> = r[3].split(|c: char| c == ',' || c.is_whitespace()).filter(|s| !s.is_empty()).map(String::from).collect();
+        let ids: Vec<String> = r[3]
+            .split(|c: char| c == ',' || c.is_whitespace())
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect();
         assert!(!ids.is_empty(), "operator `{}` cites no check", r[0]);
         for id in ids {
             let v = res
                 .get(&("synthetic".to_string(), id.clone()))
-                .unwrap_or_else(|| panic!("operator `{}` cites {id}, which is not in results-x64.tsv", r[0]));
+                .unwrap_or_else(|| {
+                    panic!(
+                        "operator `{}` cites {id}, which is not in results-x64.tsv",
+                        r[0]
+                    )
+                });
             assert!(v.starts_with("pass"), "{id} does not pass: {v}");
         }
     }
@@ -201,10 +240,17 @@ fn ac2_the_mapper_keeps_every_cubic_on_real_pdfs() {
     let mut total = 0;
     for f in &fx {
         let ops = num(&res, f, "ops.c") + num(&res, f, "ops.v") + num(&res, f, "ops.y");
-        assert_eq!(ops, num(&res, f, "segs.cubic"), "{f}: cubic operators and mapped cubic segments differ");
+        assert_eq!(
+            ops,
+            num(&res, f, "segs.cubic"),
+            "{f}: cubic operators and mapped cubic segments differ"
+        );
         total += ops;
     }
-    assert!(total > 0, "no real PDF carried a single cubic, so the claim was not exercised");
+    assert!(
+        total > 0,
+        "no real PDF carried a single cubic, so the claim was not exercised"
+    );
 }
 
 #[test]
@@ -226,16 +272,25 @@ fn ac2_measured_table_agrees_with_the_results() {
     };
     let mut named = Vec::new();
     for r in &rows[1..] {
-        let fx = ticked(&r[0]).into_iter().next().unwrap_or_else(|| r[0].clone());
+        let fx = ticked(&r[0])
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| r[0].clone());
         for (i, h) in header.iter().enumerate().skip(1) {
             let want = num(&res, &fx, key_of(h));
-            let got: u64 = r[i].replace(',', "").parse().unwrap_or_else(|_| panic!("{fx}: `{}` is not a number", r[i]));
+            let got: u64 = r[i]
+                .replace(',', "")
+                .parse()
+                .unwrap_or_else(|_| panic!("{fx}: `{}` is not a number", r[i]));
             assert_eq!(got, want, "{fx}: column `{h}` differs from the measurement");
         }
         named.push(fx);
     }
     for f in fixtures(&res) {
-        assert!(named.contains(&f), "{f} was measured but is missing from the table");
+        assert!(
+            named.contains(&f),
+            "{f} was measured but is missing from the table"
+        );
     }
 }
 
@@ -244,9 +299,14 @@ fn ac2_fixtures_are_pinned_by_sha256() {
     let d = doc();
     let res = results("results-x64.tsv");
     for f in fixtures(&res) {
-        let h = res.get(&(f.clone(), "sha256".to_string())).unwrap_or_else(|| panic!("{f}: no sha256 in results"));
+        let h = res
+            .get(&(f.clone(), "sha256".to_string()))
+            .unwrap_or_else(|| panic!("{f}: no sha256 in results"));
         assert_eq!(h.len(), 64, "{f}: sha256 is not 64 hex digits");
-        assert!(d.contains(h.as_str()), "{f}: the document does not quote its sha256");
+        assert!(
+            d.contains(h.as_str()),
+            "{f}: the document does not quote its sha256"
+        );
     }
 }
 
@@ -255,12 +315,19 @@ fn ac2_clipping_is_split_into_exact_and_bounded_only() {
     let d = doc();
     let res = results("results-x64.tsv");
     let low = d.to_lowercase();
-    assert!(low.contains("bounded-only") && low.contains("exact"), "clipping must be split exact / bounded-only");
+    assert!(
+        low.contains("bounded-only") && low.contains("exact"),
+        "clipping must be split exact / bounded-only"
+    );
     let mut seen = 0;
     for f in fixtures(&res) {
         let e = num(&res, &f, "clip.exact");
         let b = num(&res, &f, "clip.bounded");
-        assert_eq!(e + b, num(&res, &f, "ops.W") + num(&res, &f, "ops.W*"), "{f}: clip split does not add up to W + W*");
+        assert_eq!(
+            e + b,
+            num(&res, &f, "ops.W") + num(&res, &f, "ops.W*"),
+            "{f}: clip split does not add up to W + W*"
+        );
         seen += e + b;
     }
     assert!(seen > 0, "no clip was measured on any real PDF");
@@ -270,7 +337,10 @@ fn ac2_clipping_is_split_into_exact_and_bounded_only() {
 fn ac2_cm_is_folded_into_the_n15_classes_through_pvec() {
     let d = doc();
     let res = results("results-x64.tsv");
-    assert!(d.contains("transform-matrix.md"), "the document must point at the N1.5 matrix");
+    assert!(
+        d.contains("transform-matrix.md"),
+        "the document must point at the N1.5 matrix"
+    );
     let classes = [
         "translation",
         "rotation",
@@ -281,8 +351,16 @@ fn ac2_cm_is_folded_into_the_n15_classes_through_pvec() {
         "singular",
     ];
     for f in fixtures(&res) {
-        let sum: u64 = classes.iter().map(|c| num(&res, &f, &format!("cm.{c}"))).sum::<u64>() + num(&res, &f, "cm.identity");
-        assert_eq!(sum, num(&res, &f, "ops.cm"), "{f}: cm classes do not add up to the cm count");
+        let sum: u64 = classes
+            .iter()
+            .map(|c| num(&res, &f, &format!("cm.{c}")))
+            .sum::<u64>()
+            + num(&res, &f, "cm.identity");
+        assert_eq!(
+            sum,
+            num(&res, &f, "ops.cm"),
+            "{f}: cm classes do not add up to the cm count"
+        );
     }
 }
 
@@ -296,7 +374,10 @@ fn ac2_winding_and_compound_paths_are_measured() {
         let _ = num(&res, &f, "fill.nonzero");
         let _ = num(&res, &f, "compound.mixed_winding");
     }
-    assert!(compound > 0, "no compound path was found on any real PDF, so subpath winding was not exercised");
+    assert!(
+        compound > 0,
+        "no compound path was found on any real PDF, so subpath winding was not exercised"
+    );
 }
 
 // ---------------------------------------------------------------- AC 3
@@ -306,30 +387,90 @@ fn ac3_states_precisely_whether_a_dwg_pdf_pair_was_measured() {
     let d = doc();
     let sec = section(&d, "## Per-class geometry-count difference");
     let low = sec.to_lowercase();
-    assert!(sec.contains("pvec-gold-fixtures#1"), "the section must name the Epic O tracker");
-    let measured = root().join("docs/spikes/pdf-normalization/results-pair.tsv").exists();
+    assert!(
+        sec.contains("pvec-gold-fixtures#1"),
+        "the section must name the Epic O tracker"
+    );
+    let measured = root()
+        .join("docs/spikes/pdf-normalization/results-pair.tsv")
+        .exists();
     if measured {
-        assert!(low.contains("measured"), "a pair file exists but the section does not report the counts");
+        assert!(
+            low.contains("measured"),
+            "a pair file exists but the section does not report the counts"
+        );
     } else {
         assert!(
             low.contains("not met") || low.contains("not measured"),
             "no pair was measured, and the section must say so plainly"
         );
         assert!(
-            sec.split(|c: char| !c.is_ascii_alphanumeric() && c != '#').any(|w| w.starts_with('#') && w.len() > 2 && w[1..].chars().all(|c| c.is_ascii_digit())),
+            sec.split(|c: char| !c.is_ascii_alphanumeric() && c != '#')
+                .any(|w| w.starts_with('#')
+                    && w.len() > 2
+                    && w[1..].chars().all(|c| c.is_ascii_digit())),
             "the unmet criterion must point at the follow-up issue"
         );
-        assert!(low.contains("searched"), "the section must record where I looked for a pair");
+        assert!(
+            low.contains("searched"),
+            "the section must record where I looked for a pair"
+        );
     }
 }
 
 #[test]
-#[ignore = "blocked on libviprs/pvec-gold-fixtures#1 (Epic O): no DWG-writing SDK is qualified, so no DWG plus its exported PDF exists"]
 fn ac3_a_dwg_and_its_exported_pdf_were_measured_per_class() {
     let p = root().join("docs/spikes/pdf-normalization/results-pair.tsv");
-    assert!(p.exists(), "results-pair.tsv does not exist: no DWG/PDF pair has been measured");
+    assert!(
+        p.exists(),
+        "results-pair.tsv does not exist: no DWG/PDF pair has been measured"
+    );
     let text = fs::read_to_string(p).unwrap();
     assert!(text.lines().any(|l| l.contains("dwg")) && text.lines().any(|l| l.contains("pdf")));
+    // The pair is an open-exporter pair and says so, and records who plotted it.
+    assert!(
+        text.contains("open-exporter pair, not AutoCAD-class"),
+        "the pair is not labelled as an open-exporter pair"
+    );
+    assert!(
+        text.contains("librecad "),
+        "exporter name and version are not recorded"
+    );
+    // The DWG side is counted per class, and the PDF side is measured per class.
+    for c in [
+        "line", "polyline", "arc", "circle", "ellipse", "spline", "text", "hatch", "other",
+    ] {
+        assert!(
+            text.lines()
+                .any(|l| l.starts_with(&format!("pair.dwg\tdwg_{c}\t"))),
+            "no DWG count for class `{c}`"
+        );
+    }
+    for c in [
+        "line", "polyline", "arc", "circle", "ellipse", "spline", "text", "hatch",
+    ] {
+        assert!(
+            text.lines()
+                .any(|l| l.starts_with(&format!("class_{c}.pdf\tsegs.line\t"))),
+            "no PDF measurement for class `{c}`"
+        );
+    }
+    // The document names the pair and fills a row per class.
+    let d = doc();
+    let sec = section(&d, "## Per-class geometry-count difference");
+    assert!(
+        sec.contains("open-exporter pair, not AutoCAD-class"),
+        "the spike section does not carry the label"
+    );
+    let rows = table_rows(&sec);
+    for c in [
+        "line", "polyline", "arc", "circle", "ellipse", "spline", "text", "hatch", "other",
+    ] {
+        assert!(
+            rows.iter().any(|r| r[0].to_lowercase().starts_with(c)),
+            "no per-class row for `{c}`"
+        );
+    }
 }
 
 // ---------------------------------------------------------------- AC 4
@@ -351,7 +492,12 @@ fn ac4_loss_table_has_every_row_and_the_detectable_column_filled() {
     assert!(rows.len() > 1, "the loss table is missing");
     assert_eq!(
         rows[0].iter().map(|c| c.to_lowercase()).collect::<Vec<_>>(),
-        ["lost in the export", "what the pdf keeps", "detectable from the pdf alone", "evidence"],
+        [
+            "lost in the export",
+            "what the pdf keeps",
+            "detectable from the pdf alone",
+            "evidence"
+        ],
         "loss table columns"
     );
     for want in LOSS_ROWS {
@@ -359,14 +505,25 @@ fn ac4_loss_table_has_every_row_and_the_detectable_column_filled() {
             .iter()
             .find(|r| r[0].to_lowercase().starts_with(want))
             .unwrap_or_else(|| panic!("no loss row for `{want}`"));
-        let first = r[2].split_whitespace().next().unwrap_or("").trim_matches(|c: char| !c.is_alphabetic()).to_lowercase();
+        let first = r[2]
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .trim_matches(|c: char| !c.is_alphabetic())
+            .to_lowercase();
         assert!(
             ["yes", "no", "partly"].contains(&first.as_str()),
             "row `{want}`: detectable column must start with yes, no or partly, got `{}`",
             r[2]
         );
-        assert!(r[2].split_whitespace().count() >= 3, "row `{want}`: the detectable verdict gives no reason");
-        assert!(!r[3].trim().is_empty() && r[3].trim() != "-", "row `{want}` cites no evidence");
+        assert!(
+            r[2].split_whitespace().count() >= 3,
+            "row `{want}`: the detectable verdict gives no reason"
+        );
+        assert!(
+            !r[3].trim().is_empty() && r[3].trim() != "-",
+            "row `{want}` cites no evidence"
+        );
     }
 }
 
@@ -374,16 +531,38 @@ fn ac4_loss_table_has_every_row_and_the_detectable_column_filled() {
 fn ac4_loss_evidence_is_in_the_results() {
     let d = doc();
     let res = results("results-x64.tsv");
+    let pair = results("results-pair.tsv");
     let rows = table_rows(&section(&d, "## The loss table"));
     for r in &rows[1..] {
-        for id in r[3].split(|c: char| c == ',' || c.is_whitespace()).filter(|s| !s.is_empty()) {
-            if let Some(key) = id.strip_prefix("R:") {
+        for id in r[3]
+            .split(|c: char| c == ',' || c.is_whitespace())
+            .filter(|s| !s.is_empty())
+        {
+            if let Some(rest) = id.strip_prefix("P:") {
+                // Measured on the open-exporter pair: P:<pair pdf>:<key>.
+                let (f, key) = rest
+                    .split_once(':')
+                    .unwrap_or_else(|| panic!("bad pair evidence id {id}"));
+                assert!(
+                    pair.contains_key(&(f.to_string(), key.to_string())),
+                    "loss row `{}` cites {id}, which results-pair.tsv does not hold",
+                    r[0]
+                );
+            } else if let Some(key) = id.strip_prefix("R:") {
                 // Document-level fact measured on every real PDF.
                 for f in fixtures(&res) {
-                    assert!(res.contains_key(&(f.clone(), key.to_string())), "{f}: results have no `{key}` for loss row `{}`", r[0]);
+                    assert!(
+                        res.contains_key(&(f.clone(), key.to_string())),
+                        "{f}: results have no `{key}` for loss row `{}`",
+                        r[0]
+                    );
                 }
             } else {
-                assert!(res.contains_key(&("synthetic".to_string(), id.to_string())), "loss row `{}` cites unknown {id}", r[0]);
+                assert!(
+                    res.contains_key(&("synthetic".to_string(), id.to_string())),
+                    "loss row `{}` cites unknown {id}",
+                    r[0]
+                );
             }
         }
     }
@@ -400,8 +579,14 @@ fn ac5_never_structurally_exact_and_names_the_class_it_may_claim() {
         low.contains("never labelled structurally exact") || low.contains("never labelled \"structurally exact\""),
         "the document must say a PDF-derived result is never labelled structurally exact against the originating DWG"
     );
-    assert!(low.contains("originating dwg"), "the statement must be about the originating DWG");
-    assert!(sec.contains("EPIC P") || sec.contains("Epic P"), "the class must be attributed to EPIC P");
+    assert!(
+        low.contains("originating dwg"),
+        "the statement must be about the originating DWG"
+    );
+    assert!(
+        sec.contains("EPIC P") || sec.contains("Epic P"),
+        "the class must be attributed to EPIC P"
+    );
     assert!(
         low.contains("display fidelity") || low.contains("geometric exactness"),
         "the document must name the EPIC P conformance class a PDF result may claim"
@@ -414,25 +599,60 @@ fn ac5_never_structurally_exact_and_names_the_class_it_may_claim() {
 fn x64_and_arm64_agree_and_say_what_they_ran_on() {
     let x = read("docs/spikes/pdf-normalization/results-x64.tsv");
     let a = read("docs/spikes/pdf-normalization/results-arm64.tsv");
-    assert!(x.contains("x86_64"), "results-x64.tsv does not record x86_64");
-    assert!(a.contains("aarch64"), "results-arm64.tsv does not record aarch64");
-    let body = |s: &str| s.lines().filter(|l| !l.starts_with('#')).collect::<Vec<_>>().join("\n");
-    assert_eq!(body(&x), body(&a), "the two architectures measured different things");
+    assert!(
+        x.contains("x86_64"),
+        "results-x64.tsv does not record x86_64"
+    );
+    assert!(
+        a.contains("aarch64"),
+        "results-arm64.tsv does not record aarch64"
+    );
+    let body = |s: &str| {
+        s.lines()
+            .filter(|l| !l.starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert_eq!(
+        body(&x),
+        body(&a),
+        "the two architectures measured different things"
+    );
 }
 
 #[test]
 fn the_harness_defines_no_tolerance_and_no_evaluator_of_its_own() {
     let src = read("docs/spikes/pdf-normalization/harness/src/main.rs");
-    for banned in ["1e-", "EPSILON", "epsilon", "f64::EPS", "fn flatten", "fn tessellate", "fn eval"] {
-        assert!(!src.contains(banned), "the harness contains `{banned}`: tolerances and evaluators belong to PVec");
+    for banned in [
+        "1e-",
+        "EPSILON",
+        "epsilon",
+        "f64::EPS",
+        "fn flatten",
+        "fn tessellate",
+        "fn eval",
+    ] {
+        assert!(
+            !src.contains(banned),
+            "the harness contains `{banned}`: tolerances and evaluators belong to PVec"
+        );
     }
-    assert!(src.contains("pvec_numeric::Policy") && src.contains("pvec_geometry"), "the harness must go through PVec");
+    assert!(
+        src.contains("pvec_numeric::Policy") && src.contains("pvec_geometry"),
+        "the harness must go through PVec"
+    );
 }
 
 #[test]
 fn the_spike_leaves_the_raster_path_and_the_manifest_alone() {
     let cargo = read("Cargo.toml");
-    assert!(!cargo.contains("pdf-normalization"), "the spike must not enter the crate manifest");
+    assert!(
+        !cargo.contains("pdf-normalization"),
+        "the spike must not enter the crate manifest"
+    );
     let pdf = read("src/pdf.rs");
-    assert!(!pdf.contains("content stream path"), "src/pdf.rs must not grow vector extraction in a spike");
+    assert!(
+        !pdf.contains("content stream path"),
+        "src/pdf.rs must not grow vector extraction in a spike"
+    );
 }
