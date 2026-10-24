@@ -10,6 +10,7 @@ use std::fmt;
 
 use pvec_numeric::{MAX_CONTROL_POINTS, MAX_DEGREE, MAX_KNOTS, NumericError, Policy};
 
+use super::fidelity::{Classification, ReasonCode};
 use super::provider::{Point3, RawEntity, RawGeometry, SourceFact};
 
 const POLICY: Policy = Policy::V1;
@@ -88,16 +89,6 @@ pub enum SplineField {
     Periodic,
 }
 
-/// What would unblock a refused spline (N3.5's two outcomes).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum Requires {
-    /// The provider has to report more.
-    Extension,
-    /// PVec has to learn to carry it.
-    PVecCapability,
-}
-
 /// Why a spline was refused. Nothing is truncated or repaired.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
@@ -108,15 +99,11 @@ pub enum SplineError {
     MissingField {
         /// The field.
         field: SplineField,
-        /// What would unblock it.
-        requires: Requires,
     },
     /// A `HELIX` or a 3D spline: PVec's curves are planar.
     Unsupported3d {
         /// The classification.
         class: SplineClass,
-        /// What would unblock it.
-        requires: Requires,
     },
     /// Degree outside `1..=limit`.
     DegreeOutOfRange {
@@ -194,6 +181,42 @@ impl fmt::Display for SplineError {
 
 impl std::error::Error for SplineError {}
 
+impl SplineError {
+    /// What became of the entity under N3.5's six classes, with a stable reason code. Total: a
+    /// new variant cannot be added without choosing a code.
+    ///
+    /// A missing fact needs the provider to report more (`RequiresExtension`), a non-planar curve
+    /// needs PVec to learn to carry it (`RequiresPVecCapability`), and the rest is refused as
+    /// `Unsupported`.
+    #[must_use]
+    pub fn classification(&self, source_class: impl Into<String>) -> Classification {
+        let reason = match self {
+            SplineError::NotSpline => ReasonCode::UnmappedSourceClass,
+            SplineError::MissingField { field } => match field {
+                SplineField::Knots => ReasonCode::SplineKnotsNotReported,
+                SplineField::Weights => ReasonCode::SplineWeightsNotReported,
+                SplineField::Periodic => ReasonCode::SplinePeriodicNotReported,
+            },
+            SplineError::Unsupported3d { class } => match class {
+                SplineClass::Helix => ReasonCode::Helix,
+                _ => ReasonCode::Spline3d,
+            },
+            SplineError::DegreeOutOfRange { .. }
+            | SplineError::TooManyControlPoints { .. }
+            | SplineError::TooManyKnots { .. } => ReasonCode::SplineLimitExceeded,
+            SplineError::TooFewControlPoints { .. }
+            | SplineError::KnotCount { .. }
+            | SplineError::NonFiniteKnot { .. }
+            | SplineError::KnotsDecrease { .. }
+            | SplineError::WeightCount { .. }
+            | SplineError::BadWeight { .. }
+            | SplineError::NonFiniteControlPoint { .. } => ReasonCode::SplineMalformed,
+            SplineError::Policy(_) => ReasonCode::SplinePolicyRefused,
+        };
+        Classification::refused(reason, source_class)
+    }
+}
+
 /// Classifies an entity without extracting it.
 ///
 /// A `HELIX` is recognised by the drawing's class name. A spline is planar when every
@@ -217,10 +240,7 @@ pub fn classify(entity: &RawEntity) -> SplineClass {
 }
 
 fn missing(field: SplineField) -> SplineError {
-    SplineError::MissingField {
-        field,
-        requires: Requires::Extension,
-    }
+    SplineError::MissingField { field }
 }
 
 /// Extracts the exact description of a spline entity, or refuses.
@@ -241,10 +261,7 @@ pub fn extract(entity: &RawEntity) -> Result<ExactSpline, SplineError> {
     match classify(entity) {
         SplineClass::NotSpline => return Err(SplineError::NotSpline),
         class @ SplineClass::Helix => {
-            return Err(SplineError::Unsupported3d {
-                class,
-                requires: Requires::PVecCapability,
-            });
+            return Err(SplineError::Unsupported3d { class });
         }
         SplineClass::Planar | SplineClass::ThreeD => {}
     }
@@ -270,7 +287,6 @@ pub fn extract(entity: &RawEntity) -> Result<ExactSpline, SplineError> {
     if classify(entity) == SplineClass::ThreeD {
         return Err(SplineError::Unsupported3d {
             class: SplineClass::ThreeD,
-            requires: Requires::PVecCapability,
         });
     }
 

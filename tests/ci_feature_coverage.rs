@@ -243,7 +243,9 @@ const EXPECTED: &[(&str, Coverage)] = &[
             true,
             true,
             "gates src/pvec/normalized.rs, Normalized2DGeometry of issue \
-             #1095, and tests/pvec_1095_normalized_geometry.rs, 17 tests; \
+             #1095, and tests/pvec_1095_normalized_geometry.rs, 17 tests, and \
+             src/pvec/provenance.rs, the provenance side store of issue \
+             #1096, and tests/pvec_1096_provenance.rs, 12 tests; \
              adds 2 crates (pvec-geometry and pvec-numeric, git \
              dependencies declaring rust-version 1.85)",
         ),
