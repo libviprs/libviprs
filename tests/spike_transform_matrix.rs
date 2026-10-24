@@ -266,6 +266,7 @@ fn is_evidence_id(s: &str) -> bool {
 // ---------------------------------------------------------------- AC 1
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn ac1_matrix_has_every_row_and_every_cell() {
     let d = doc();
     let cells = matrix_cells(&d);
@@ -291,6 +292,7 @@ fn ac1_matrix_has_every_row_and_every_cell() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn ac1_every_cell_names_a_pvec_type_or_an_n35_classification() {
     let d = doc();
     for c in matrix_cells(&d) {
@@ -321,6 +323,7 @@ fn ac1_every_cell_names_a_pvec_type_or_an_n35_classification() {
 // ---------------------------------------------------------------- AC 2
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn ac2_every_cell_cites_a_measurement_and_agrees_with_it() {
     let d = doc();
     let data = results();
@@ -358,6 +361,7 @@ fn ac2_every_cell_cites_a_measurement_and_agrees_with_it() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn ac2_evidence_table_cites_fixture_and_worst_deviation() {
     let d = doc();
     let data = results();
@@ -382,6 +386,7 @@ fn ac2_evidence_table_cites_fixture_and_worst_deviation() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn ac2_no_measured_cell_exceeds_the_p12_tolerance() {
     for (id, rec) in results() {
         if rec.outcome != "ok" {
@@ -400,6 +405,7 @@ fn ac2_no_measured_cell_exceeds_the_p12_tolerance() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn ac2_the_named_cases_are_answered_explicitly() {
     let d = doc();
     let data = results();
@@ -443,6 +449,7 @@ impl CloneTokens for Cell {
 // ---------------------------------------------------------------- AC 3
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn ac3_singular_column_is_a_refusal_with_a_named_diagnostic() {
     let d = doc();
     let data = results();
@@ -479,6 +486,7 @@ fn ac3_singular_column_is_a_refusal_with_a_named_diagnostic() {
 // ---------------------------------------------------------------- AC 4
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn ac4_near_singular_cites_the_conditioning_rule_and_defines_no_threshold() {
     let d = doc();
     let sec = section(&d, "### Singular and near-singular transforms");
@@ -510,6 +518,7 @@ fn ac4_near_singular_cites_the_conditioning_rule_and_defines_no_threshold() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn ac4_the_harness_defines_no_tolerance_of_its_own() {
     let dir = root().join("docs/spikes/transform-matrix/harness/src");
     let mut seen = 0;
@@ -533,6 +542,7 @@ fn ac4_the_harness_defines_no_tolerance_of_its_own() {
 // ---------------------------------------------------------------- AC 5
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn ac5_reflection_states_orientation_and_parameter_direction() {
     let d = doc();
     let sec = section(&d, "### Arc under reflection").to_lowercase();
@@ -555,6 +565,7 @@ fn ac5_reflection_states_orientation_and_parameter_direction() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn ac5_a_mirrored_arc_is_reproducible_from_the_table_and_the_measurement() {
     let d = doc();
     let data = results();
@@ -636,6 +647,7 @@ fn find<'a>(data: &'a BTreeMap<String, Rec>, fixture: &str, transform: &str) -> 
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn ac2_findings_prose_quotes_the_measured_numbers() {
     let d = doc();
     let data = results();
@@ -703,6 +715,7 @@ fn ac2_findings_prose_quotes_the_measured_numbers() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn ac2_largest_deviation_and_ratio_sentences_match_the_results() {
     let d = flat(&section(&doc(), "## Evidence"));
     let data = results();
@@ -723,6 +736,7 @@ fn ac2_largest_deviation_and_ratio_sentences_match_the_results() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn ac2_every_fixture_and_transform_in_the_results_is_defined_in_the_doc() {
     let d = doc();
     for r in results().values() {
@@ -736,6 +750,7 @@ fn ac2_every_fixture_and_transform_in_the_results_is_defined_in_the_doc() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn ac2_bulge_row_shows_what_its_segments_became() {
     let d = doc();
     let data = results();
@@ -760,6 +775,7 @@ fn ac2_bulge_row_shows_what_its_segments_became() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn ac5_reflection_rows_agree_with_their_records() {
     let d = doc();
     let data = results();
@@ -862,6 +878,7 @@ fn row_fixture_or_ring(row: &str) -> &'static str {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn ac3_every_diagnostic_rule_is_the_rule_of_the_records_it_cites() {
     let d = doc();
     let data = results();
@@ -881,6 +898,7 @@ fn ac3_every_diagnostic_rule_is_the_rule_of_the_records_it_cites() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn ac4_the_conic_conditioning_exit_is_bracketed_on_both_sides() {
     let d = doc();
     let data = results();
@@ -914,6 +932,7 @@ fn ac4_the_conic_conditioning_exit_is_bracketed_on_both_sides() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn ac4_cell_type_strings_are_said_to_come_from_the_harness_not_the_registry() {
     let d = flat(&doc());
     assert!(d.contains("kind_name()"), "the spike never says the cell type strings come from the harness's kind_name()");
@@ -926,6 +945,7 @@ fn ac4_cell_type_strings_are_said_to_come_from_the_harness_not_the_registry() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn ac5_arm64_results_are_recorded_and_the_verdicts_are_architecture_independent() {
     let x = results();
     let a = results_from("results-arm64.tsv");
