@@ -164,7 +164,7 @@ impl SourceUnit {
 /// Minimum and maximum corners, unscaled and in the drawing's unit. It carries no
 /// transform and is not a georeference.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct SourceBounds {
+pub struct DrawingExtents {
     /// Smallest `x`, `y`, `z` seen.
     pub min: Point3,
     /// Largest `x`, `y`, `z` seen.
@@ -181,7 +181,7 @@ pub struct SourceSpace {
     /// The unit of every coordinate in the drawing.
     pub unit: SourceUnit,
     /// The bounds in that unit, when the spatial-bounds input (N6.4) has computed them.
-    pub bounds: Option<SourceBounds>,
+    pub bounds: Option<DrawingExtents>,
 }
 
 impl SourceSpace {
@@ -193,7 +193,7 @@ impl SourceSpace {
 
     /// The same drawing with its bounds attached.
     #[must_use]
-    pub fn with_bounds(mut self, bounds: SourceBounds) -> Self {
+    pub fn with_bounds(mut self, bounds: DrawingExtents) -> Self {
         self.bounds = Some(bounds);
         self
     }

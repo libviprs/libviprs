@@ -27,6 +27,9 @@
 //! decoder it has, and this module only reuses two of its plain value types
 //! ([`CadSource`](crate::cad::CadSource) and [`ItemHandle`](crate::cad::ItemHandle)).
 
+#[cfg(feature = "pvec-normalized")]
+#[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
+pub mod normalized;
 pub mod pdf_vector;
 pub mod provider;
 pub mod units;
@@ -50,4 +53,9 @@ pub use provider::{
     ProvenanceStub, ProviderCaps, ProviderError, RawEntity, RawGeometry, RawVertex, SourceFact,
     SourceTransform,
 };
-pub use units::{INSUNITS_TABLE, SourceBounds, SourceSpace, SourceUnit};
+
+#[cfg(feature = "pvec-normalized")]
+pub use normalized::{
+    FidelityClass, NormalizeError, Normalized2DGeometry, ProvenanceHandle, SourceBounds,
+};
+pub use units::{DrawingExtents, INSUNITS_TABLE, SourceSpace, SourceUnit};

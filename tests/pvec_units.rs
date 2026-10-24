@@ -12,7 +12,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use libviprs::pvec::{INSUNITS_TABLE, SourceBounds, SourceSpace, SourceUnit};
+use libviprs::pvec::{INSUNITS_TABLE, DrawingExtents, SourceSpace, SourceUnit};
 
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -54,7 +54,7 @@ fn only_a_named_length_unit_is_physical() {
 
 #[test]
 fn the_handoff_metadata_carries_unit_and_bounds_untouched() {
-    let b = SourceBounds {
+    let b = DrawingExtents {
         min: [0.5, -2.25, 0.0],
         max: [1024.0625, 3.0, 0.0],
     };

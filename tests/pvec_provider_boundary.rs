@@ -246,8 +246,8 @@ fn no_foreign_type_appears_in_any_public_signature_of_the_provider_module() {
         let src = read(file);
         let mut failures = Vec::new();
         let mut locals = local_roots(&src);
-        // `mod.rs` declares the provider module and the feature-gated acadrust one by
-        // name; naming a child module is not naming a reader's type.
+        // `mod.rs` declares the provider module and the feature-gated acadrust and
+        // normalized ones by name; naming a child module is not naming a reader's type.
         let is_mod = file.ends_with("mod.rs");
         if is_mod {
             locals.extend([
@@ -256,6 +256,7 @@ fn no_foreign_type_appears_in_any_public_signature_of_the_provider_module() {
                 "units".to_string(),
                 "pdf_vector".to_string(),
                 "dwg_spline".to_string(),
+                "normalized".to_string(),
             ]);
         }
         for item in public_items(&src) {
