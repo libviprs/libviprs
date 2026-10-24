@@ -5,8 +5,8 @@
 
 use libviprs::cad::ItemHandle;
 use libviprs::pvec::dump::{DUMP_VERSION, NormalizedDump, dump_to_string};
-use libviprs::pvec::provenance::{Provenance, ProvenanceSink, ProvenanceStore};
 use libviprs::pvec::fidelity::{Basis, Classification, ReasonCode, Tally};
+use libviprs::pvec::provenance::{Provenance, ProvenanceSink, ProvenanceStore};
 use libviprs::pvec::{
     FidelityClass, InstancePath, Normalized2DGeometry, ProvenanceStub, SourceTransform,
 };
@@ -48,7 +48,11 @@ fn fixture(store: &mut ProvenanceStore) -> Vec<Normalized2DGeometry> {
     }
     out.push(
         Normalized2DGeometry::polyline(
-            &[[0.0, 0.0], [1.0000000000000002, 3.0], [123456789.12345678, -7.5e-5]],
+            &[
+                [0.0, 0.0],
+                [1.0000000000000002, 3.0],
+                [123456789.12345678, -7.5e-5],
+            ],
             FidelityClass::SupportedExact,
         )
         .unwrap(),
@@ -66,8 +70,14 @@ fn fixture(store: &mut ProvenanceStore) -> Vec<Normalized2DGeometry> {
         .unwrap(),
     );
     out.push(
-        Normalized2DGeometry::ellipse([5.0, 5.0], [1.0, 0.0], 3.0, 1.5, FidelityClass::SupportedExact)
-            .unwrap(),
+        Normalized2DGeometry::ellipse(
+            [5.0, 5.0],
+            [1.0, 0.0],
+            3.0,
+            1.5,
+            FidelityClass::SupportedExact,
+        )
+        .unwrap(),
     );
     out.push(
         Normalized2DGeometry::b_spline(
@@ -92,11 +102,12 @@ fn dump_with_provenance(store: &ProvenanceStore, es: &[Normalized2DGeometry]) ->
 }
 
 fn value_after<'a>(line: &'a str, key: &str) -> &'a str {
-    let start = line.find(key).unwrap_or_else(|| panic!("no {key} in {line}")) + key.len();
+    let start = line
+        .find(key)
+        .unwrap_or_else(|| panic!("no {key} in {line}"))
+        + key.len();
     let rest = &line[start..];
-    let end = rest
-        .find(|c: char| c == ' ' || c == ',' || c == ')')
-        .unwrap_or(rest.len());
+    let end = rest.find([' ', ',', ')']).unwrap_or(rest.len());
     &rest[..end]
 }
 
@@ -107,7 +118,10 @@ fn the_format_has_a_versioned_header_and_an_end_line() {
     let s = dump_with_provenance(&store, &es);
     let first = s.lines().next().unwrap();
     assert_eq!(first, format!("# libviprs normalized dump v{DUMP_VERSION}"));
-    assert!(s.lines().last().unwrap().starts_with("end entities="), "{s}");
+    assert!(
+        s.lines().last().unwrap().starts_with("end entities="),
+        "{s}"
+    );
     assert!(s.ends_with('\n'));
 }
 
@@ -178,8 +192,13 @@ fn every_entity_carries_type_fidelity_and_bounds() {
         assert_eq!(parts[1], i.to_string(), "ids are positions, see #1281");
         assert_eq!(parts[3], e.fidelity().tag());
     }
-    for kind in ["circle", "polyline", "trimmed", "ellipse", "bspline", "none"] {
-        assert!(heads.iter().any(|h| h.split(' ').nth(2) == Some(kind)), "{kind}\n{s}");
+    for kind in [
+        "circle", "polyline", "trimmed", "ellipse", "bspline", "none",
+    ] {
+        assert!(
+            heads.iter().any(|h| h.split(' ').nth(2) == Some(kind)),
+            "{kind}\n{s}"
+        );
     }
     assert!(s.contains("  bounds min=("), "{s}");
     assert!(s.contains("  bounds none"), "{s}");
@@ -210,7 +229,10 @@ fn the_entity_count_equals_the_fidelity_encountered_count() {
     }
     assert_eq!(d.entities_written(), report.encountered());
     let s = d.finish().unwrap();
-    assert!(s.contains(&format!("end entities={}", report.encountered())), "{s}");
+    assert!(
+        s.contains(&format!("end entities={}", report.encountered())),
+        "{s}"
+    );
 }
 
 #[test]
@@ -234,9 +256,16 @@ fn a_failure_after_entity_n_still_leaves_n_entities_in_the_sink() {
         }
         // the PVec writing stage fails here; `d` is dropped, never finished
     }
-    assert_eq!(sink.lines().filter(|l| l.starts_with("entity ")).count(), 3, "{sink}");
+    assert_eq!(
+        sink.lines().filter(|l| l.starts_with("entity ")).count(),
+        3,
+        "{sink}"
+    );
     assert!(sink.starts_with("# libviprs normalized dump"));
-    assert!(!sink.contains("\nend entities="), "an unfinished dump has no end line");
+    assert!(
+        !sink.contains("\nend entities="),
+        "an unfinished dump has no end line"
+    );
 }
 
 #[test]
@@ -265,7 +294,13 @@ fn provenance_is_printed_when_present_and_absent_when_off() {
 #[test]
 fn the_dump_is_independent_of_pvec_serialization() {
     // No PVec codec or container type is named by the writer, and there is no new dependency.
-    for banned in ["pvec_codec", "pvec_container", "pvec_entity", "HashMap", "HashSet"] {
+    for banned in [
+        "pvec_codec",
+        "pvec_container",
+        "pvec_entity",
+        "HashMap",
+        "HashSet",
+    ] {
         assert!(!SRC.contains(banned), "dump.rs mentions {banned}");
     }
 }
@@ -273,7 +308,10 @@ fn the_dump_is_independent_of_pvec_serialization() {
 #[test]
 fn nothing_reads_the_format_back() {
     for banned in ["fn parse", "fn load", "fn read", "FromStr", "fn from_dump"] {
-        assert!(!SRC.contains(banned), "dump.rs has a loader-shaped item: {banned}");
+        assert!(
+            !SRC.contains(banned),
+            "dump.rs has a loader-shaped item: {banned}"
+        );
     }
 }
 
@@ -282,6 +320,9 @@ fn the_document_describes_the_format_and_disclaims_interchange() {
     assert!(DOC.contains("not an interchange format"), "{DOC}");
     assert!(DOC.contains("no loader"), "{DOC}");
     for key in ["entity", "bounds", "provenance", "end entities=", "#1281"] {
-        assert!(DOC.contains(key), "docs/normalized-dump.md does not mention {key}");
+        assert!(
+            DOC.contains(key),
+            "docs/normalized-dump.md does not mention {key}"
+        );
     }
 }
