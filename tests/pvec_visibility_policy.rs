@@ -163,15 +163,15 @@ fn run(p: &Mock, states: &EntityStates) -> libviprs::pvec::VisibilityOutcome {
 fn pvec_1077_frozen_layer_entities_are_dropped_and_counted() {
     // The provider hands back entities on a frozen layer, as a decoder that ignores layer state
     // does. The output must not change because of it.
-    let p = provider(vec![
-        line(1, "WALLS"),
-        line(2, "Frozen"),
-        line(3, "Frozen"),
-    ]);
+    let p = provider(vec![line(1, "WALLS"), line(2, "Frozen"), line(3, "Frozen")]);
     let out = run(&p, &EntityStates::new());
     assert_eq!(out.kept.len(), 1);
     assert_eq!(out.ignored.len(), 2);
-    assert!(out.ignored.iter().all(|r| r.reason == PolicyReason::LayerFrozen));
+    assert!(
+        out.ignored
+            .iter()
+            .all(|r| r.reason == PolicyReason::LayerFrozen)
+    );
     assert_eq!(out.counts_by_reason()[&PolicyReason::LayerFrozen], 2);
 }
 
@@ -308,7 +308,10 @@ fn pvec_1077_missing_layout_is_a_typed_error_naming_the_ones_that_exist() {
 #[test]
 fn pvec_1077_model_is_the_default_and_a_named_paper_layout_is_explicit() {
     let ls = layouts();
-    assert_eq!(select_layout(&ls, &SpaceSelection::Model).unwrap().name, "Model");
+    assert_eq!(
+        select_layout(&ls, &SpaceSelection::Model).unwrap().name,
+        "Model"
+    );
     let paper = select_layout(&ls, &SpaceSelection::PaperLayout("sheet b".into())).unwrap();
     assert_eq!((paper.id, paper.kind), (LayoutId(2), LayoutKind::Paper));
     assert!(matches!(
@@ -410,8 +413,8 @@ fn pvec_1077_viewport_freeze_is_reported_and_not_applied_by_default() {
         },
     );
     let vps = vec![viewport(100, 1, &["walls"]), viewport(200, 2, &[])];
-    let out = VisibilityFilter::run(&p, &profile, &states, vps, ViewportFreezeMode::ReportOnly)
-        .unwrap();
+    let out =
+        VisibilityFilter::run(&p, &profile, &states, vps, ViewportFreezeMode::ReportOnly).unwrap();
     assert_eq!(out.kept.len(), 1);
     assert_eq!(out.ignored_freezes.len(), 1);
     assert_eq!(out.ignored_freezes[0].viewport, h(100));
@@ -429,8 +432,20 @@ fn pvec_1077_viewport_freeze_apply_mode_drops_as_viewport_frozen() {
     profile.space = SpaceSelection::PaperLayout("Sheet A".into());
     let vp = Some(h(100));
     let states = EntityStates::new()
-        .with(h(10), EntityState { viewport: vp, ..EntityState::default() })
-        .with(h(11), EntityState { viewport: vp, ..EntityState::default() });
+        .with(
+            h(10),
+            EntityState {
+                viewport: vp,
+                ..EntityState::default()
+            },
+        )
+        .with(
+            h(11),
+            EntityState {
+                viewport: vp,
+                ..EntityState::default()
+            },
+        );
     let out = VisibilityFilter::run(
         &p,
         &profile,

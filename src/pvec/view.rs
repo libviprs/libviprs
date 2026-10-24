@@ -45,9 +45,7 @@ use super::provider::{
     DwgProvider, EntityScope, InstancePath, LayerState, LayoutId, LayoutKind, LayoutState,
     RawEntity,
 };
-use super::view_profile::{
-    LayerStateRule, SpaceSelection, ViewProfile, ViewProfileError,
-};
+use super::view_profile::{LayerStateRule, SpaceSelection, ViewProfile, ViewProfileError};
 use crate::cad::ItemHandle;
 
 /// Why an entity was dropped by policy. A closed set, one reason per dropped entity.
@@ -386,11 +384,45 @@ impl VisibilityFilter {
             .layer_override
             .clone()
             .unwrap_or_else(|| entity.provenance.layer.clone());
-        let _ = (&layer, state, entity);
-        Decision {
-            layer,
-            dropped: None,
+        let dropped = self.reason(&layer, state);
+        Decision { layer, dropped }
+    }
+
+    fn reason(&self, layer: &str, state: &EntityState) -> Option<PolicyReason> {
+        if state.layout.is_some_and(|l| l != self.layout.id) {
+            return Some(PolicyReason::NotInSelectedLayout);
         }
+        if let Some(ls) = self.layer_state(layer) {
+            if ls.off && self.off == LayerStateRule::Exclude {
+                return Some(PolicyReason::LayerOff);
+            }
+            if ls.frozen && self.frozen == LayerStateRule::Exclude {
+                return Some(PolicyReason::LayerFrozen);
+            }
+        }
+        if self.freeze_mode == ViewportFreezeMode::Apply && self.viewport_freezes(layer, state) {
+            return Some(PolicyReason::ViewportFrozen);
+        }
+        if !state.visible {
+            return Some(PolicyReason::EntityInvisible);
+        }
+        if state.outside_viewport {
+            return Some(PolicyReason::OutsideViewport);
+        }
+        None
+    }
+
+    fn viewport_for(&self, state: &EntityState) -> Option<&ViewportInput> {
+        let h = state.viewport?;
+        self.viewports.iter().find(|v| v.handle == h)
+    }
+
+    fn viewport_freezes(&self, layer: &str, state: &EntityState) -> bool {
+        self.viewport_for(state).is_some_and(|v| {
+            v.frozen_layers
+                .iter()
+                .any(|f| f.eq_ignore_ascii_case(layer))
+        })
     }
 
     /// Filters `entities` (one layout's worth) and records every decision.
@@ -407,28 +439,28 @@ impl VisibilityFilter {
         for e in entities {
             let st = states.get(e.provenance.handle);
             let d = self.decide(&e, &st);
-            if let Some(p) = st.provider_visible {
-                if p != d.dropped.is_none() {
-                    out.disagreements.push(VisibilityDisagreement {
-                        handle: e.provenance.handle,
-                        class_name: e.provenance.class_name.clone(),
-                        layer: d.layer.clone(),
-                        provider_visible: p,
-                        policy_visible: d.dropped.is_none(),
-                        policy_reason: d.dropped,
-                    });
-                }
+            if let Some(p) = st.provider_visible
+                && p != d.dropped.is_none()
+            {
+                out.disagreements.push(VisibilityDisagreement {
+                    handle: e.provenance.handle,
+                    class_name: e.provenance.class_name.clone(),
+                    layer: d.layer.clone(),
+                    provider_visible: p,
+                    policy_visible: d.dropped.is_none(),
+                    policy_reason: d.dropped,
+                });
             }
-            if self.freeze_mode == ViewportFreezeMode::ReportOnly && d.dropped.is_none() {
-                if let Some(vp) = st.viewport.and_then(|h| self.viewports.iter().find(|v| v.handle == h)) {
-                    if vp.frozen_layers.iter().any(|f| f.eq_ignore_ascii_case(&d.layer)) {
-                        out.ignored_freezes.push(ViewportFreezeNote {
-                            entity: e.provenance.handle,
-                            viewport: vp.handle,
-                            layer: d.layer.clone(),
-                        });
-                    }
-                }
+            if self.freeze_mode == ViewportFreezeMode::ReportOnly
+                && d.dropped.is_none()
+                && self.viewport_freezes(&d.layer, &st)
+                && let Some(vp) = self.viewport_for(&st)
+            {
+                out.ignored_freezes.push(ViewportFreezeNote {
+                    entity: e.provenance.handle,
+                    viewport: vp.handle,
+                    layer: d.layer.clone(),
+                });
             }
             match d.dropped {
                 Some(reason) => out.ignored.push(IgnoredByPolicy {
