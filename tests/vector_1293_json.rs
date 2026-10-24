@@ -50,7 +50,12 @@ fn opts() -> ConvertOptions {
 /// Dotted key paths of every object, not descending into maps whose keys are
 /// data (glyph names, layer fields) or into arrays.
 fn keys(v: &Value) -> Vec<String> {
-    const DATA_KEYED: [&str; 3] = ["glyphs_unavailable", "text_codes_ignored", "tiler"];
+    const DATA_KEYED: [&str; 4] = [
+        "glyphs_unavailable",
+        "text_codes_ignored",
+        "tiler",
+        "fields",
+    ];
     fn walk(v: &Value, prefix: &str, out: &mut Vec<String>) {
         if let Value::Object(map) = v {
             for (k, child) in map {

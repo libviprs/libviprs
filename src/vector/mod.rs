@@ -42,6 +42,6 @@ pub use archive::{
     FieldType, LayerSchema, VectorArchive, VectorArchiveOptions, VectorArchiveWriter, VectorError,
 };
 pub use convert::{
-    ArchiveInfo, CheckReport, Conversion, ConvertError, ConvertOptions, ViewSelector, check,
-    convert, default_decoder, inspect, list_views, report, select_view,
+    ArchiveInfo, CheckReport, Conversion, ConvertError, ConvertOptions, JSON_VERSION, ViewSelector,
+    check, convert, default_decoder, inspect, list_views, report, select_view,
 };
