@@ -219,6 +219,7 @@ jobs:
       - run: cargo check --all-targets --features avif
       - run: cargo check --all-targets --features svg
       - run: cargo check --all-targets --features packfile
+      - run: cargo check --all-targets --features dwg-acadrust
 
   docs:
     name: Docs (deny broken, private and redundant intra-doc links)
@@ -266,7 +267,7 @@ jobs:
       - run: cargo test --features dwg-acadsharp --test cad_1030_acadsharp_decoder
       # The acadrust provider needs nothing installed, so its tests are a real lane
       # (the two ACadSharp-written fixtures, read by acadrust; issue #1072).
-      - run: cargo test --features dwg-acadrust --test pvec_provider_acadrust
+      - run: cargo test --features dwg-acadrust
       # The SVG module and its unit tests are behind the non-default `svg`
       # feature, and the `<image xlink:href>` lockdown tests in
       # tests/path_traversal.rs are gated on it too. Bare `cargo test` runs

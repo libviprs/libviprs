@@ -225,6 +225,18 @@ const EXPECTED: &[(&str, Coverage)] = &[
         ),
     ),
     (
+        "dwg-acadrust",
+        cov(
+            true,
+            true,
+            true,
+            "gates src/pvec/dwg_acadrust.rs, the AcadrustProvider of issue \
+             #1072, and tests/pvec_provider_acadrust.rs, 14 tests; adds 10 \
+             crates (acadrust and its pure-Rust tail), the acadrust fork \
+             declaring no rust-version",
+        ),
+    ),
+    (
         "serde",
         cov(
             true,
