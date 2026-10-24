@@ -116,6 +116,7 @@ fn ticked(s: &str) -> Vec<String> {
 // ---------------------------------------------------------------- AC 1
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn ac1_states_pdf_rs_does_no_vector_path_extraction_at_the_pinned_revision() {
     let d = doc();
     assert!(d.contains("adcf1ff2"), "the revision adcf1ff2 is not named");
@@ -164,6 +165,7 @@ fn operator_rows(d: &str) -> Vec<Vec<String>> {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn ac2_every_operator_has_a_row_with_a_verdict() {
     let d = doc();
     let rows = operator_rows(&d);
@@ -185,6 +187,7 @@ fn ac2_every_operator_has_a_row_with_a_verdict() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn ac2_cubics_are_never_flattened() {
     let d = doc();
     let rows = operator_rows(&d);
@@ -208,6 +211,7 @@ fn ac2_cubics_are_never_flattened() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn ac2_every_row_cites_a_passing_synthetic_check() {
     let d = doc();
     let res = results("results-x64.tsv");
@@ -233,6 +237,7 @@ fn ac2_every_row_cites_a_passing_synthetic_check() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn ac2_the_mapper_keeps_every_cubic_on_real_pdfs() {
     let res = results("results-x64.tsv");
     let fx = fixtures(&res);
@@ -254,6 +259,7 @@ fn ac2_the_mapper_keeps_every_cubic_on_real_pdfs() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn ac2_measured_table_agrees_with_the_results() {
     let d = doc();
     let res = results("results-x64.tsv");
@@ -295,6 +301,7 @@ fn ac2_measured_table_agrees_with_the_results() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn ac2_fixtures_are_pinned_by_sha256() {
     let d = doc();
     let res = results("results-x64.tsv");
@@ -311,6 +318,7 @@ fn ac2_fixtures_are_pinned_by_sha256() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn ac2_clipping_is_split_into_exact_and_bounded_only() {
     let d = doc();
     let res = results("results-x64.tsv");
@@ -334,6 +342,7 @@ fn ac2_clipping_is_split_into_exact_and_bounded_only() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn ac2_cm_is_folded_into_the_n15_classes_through_pvec() {
     let d = doc();
     let res = results("results-x64.tsv");
@@ -365,6 +374,7 @@ fn ac2_cm_is_folded_into_the_n15_classes_through_pvec() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn ac2_winding_and_compound_paths_are_measured() {
     let res = results("results-x64.tsv");
     let mut compound = 0;
@@ -383,6 +393,7 @@ fn ac2_winding_and_compound_paths_are_measured() {
 // ---------------------------------------------------------------- AC 3
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn ac3_states_precisely_whether_a_dwg_pdf_pair_was_measured() {
     let d = doc();
     let sec = section(&d, "## Per-class geometry-count difference");
@@ -454,6 +465,7 @@ fn ac3_states_precisely_whether_a_dwg_pdf_pair_was_measured() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn ac3_a_dwg_and_its_exported_pdf_were_measured_per_class() {
     let p = root().join("docs/spikes/pdf-normalization/results-pair.tsv");
     assert!(
@@ -521,6 +533,7 @@ const LOSS_ROWS: &[&str] = &[
 ];
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn ac4_loss_table_has_every_row_and_the_detectable_column_filled() {
     let d = doc();
     let rows = table_rows(&section(&d, "## The loss table"));
@@ -563,6 +576,7 @@ fn ac4_loss_table_has_every_row_and_the_detectable_column_filled() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn ac4_loss_evidence_is_in_the_results() {
     let d = doc();
     let res = results("results-x64.tsv");
@@ -606,6 +620,7 @@ fn ac4_loss_evidence_is_in_the_results() {
 // ---------------------------------------------------------------- AC 5
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn ac5_never_structurally_exact_and_names_the_class_it_may_claim() {
     let d = doc();
     let sec = section(&d, "## Labelling");
@@ -631,6 +646,7 @@ fn ac5_never_structurally_exact_and_names_the_class_it_may_claim() {
 // ---------------------------------------------------------------- scope and harness
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn x64_and_arm64_agree_and_say_what_they_ran_on() {
     let x = read("docs/spikes/pdf-normalization/results-x64.tsv");
     let a = read("docs/spikes/pdf-normalization/results-arm64.tsv");
@@ -656,6 +672,7 @@ fn x64_and_arm64_agree_and_say_what_they_ran_on() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn the_harness_defines_no_tolerance_and_no_evaluator_of_its_own() {
     let src = read("docs/spikes/pdf-normalization/harness/src/main.rs");
     for banned in [
@@ -679,6 +696,7 @@ fn the_harness_defines_no_tolerance_and_no_evaluator_of_its_own() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn the_spike_leaves_the_raster_path_and_the_manifest_alone() {
     let cargo = read("Cargo.toml");
     assert!(
@@ -706,6 +724,7 @@ fn first_number(cell: &str) -> i64 {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn pair_table_agrees_with_results_pair_cell_by_cell() {
     let pair = results("results-pair.tsv");
     let get = |f: &str, k: &str| -> i64 {
@@ -782,6 +801,7 @@ fn exporter_version(text: &str) -> String {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn librecad_version_agrees_in_tsv_doc_and_driver() {
     let tsv = read("docs/spikes/pdf-normalization/results-pair.tsv");
     let ver = exporter_version(&tsv);
@@ -817,6 +837,7 @@ fn librecad_version_agrees_in_tsv_doc_and_driver() {
 const LABEL: &str = "open-exporter pair, not AutoCAD-class";
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn the_open_exporter_label_is_in_the_intro_the_section_and_the_tsv() {
     let d = doc();
     let intro = &d[..d.find("\n## ").expect("no sections")];
@@ -832,6 +853,7 @@ fn the_open_exporter_label_is_in_the_intro_the_section_and_the_tsv() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn structurally_exact_is_only_ever_negated_outside_labelling() {
     let d = doc();
     let lab = section(&d, "## Labelling");
@@ -851,6 +873,7 @@ fn structurally_exact_is_only_ever_negated_outside_labelling() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn the_dxf_step_is_named_as_part_of_the_measured_loss() {
     let d = doc();
     let d = d.replace('\n', " ");
@@ -873,6 +896,7 @@ fn the_dxf_step_is_named_as_part_of_the_measured_loss() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn page_rotate_is_in_the_entry_point_list() {
     let sec = section(&doc(), "## What is there today");
     assert!(
@@ -882,6 +906,7 @@ fn page_rotate_is_in_the_entry_point_list() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn the_x86_64_harness_pass_over_the_pair_is_recorded_and_arm64_only_is_gone() {
     let sec = section(&doc(), "## Per-class geometry-count difference");
     assert!(
