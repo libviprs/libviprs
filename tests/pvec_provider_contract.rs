@@ -381,6 +381,7 @@ fn mock_provider_drives_extraction_with_no_cad_dependency() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads its own source file, which Miri isolation blocks
 fn this_file_names_no_cad_crate() {
     let src = std::fs::read_to_string(file!()).or_else(|_| {
         std::fs::read_to_string(concat!(

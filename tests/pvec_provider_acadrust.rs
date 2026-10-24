@@ -75,6 +75,7 @@ fn xf(e: &RawEntity) -> [f64; 6] {
 // ---- the fixtures are what the notes say they are ----------------------------------
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the DWG fixtures from disk, which Miri isolation blocks
 fn the_fixtures_are_the_ones_n1_4_recorded_and_say_what_they_are() {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/pvec/provider");
     let sums = std::fs::read_to_string(dir.join("SHA256SUMS")).expect("SHA256SUMS");
@@ -133,6 +134,7 @@ fn open_refuses_what_is_not_a_drawing_with_a_typed_error() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the DWG fixtures from disk, which Miri isolation blocks
 fn open_works_from_bytes_and_from_a_path_alike() {
     let bytes = std::fs::read(fixture("vc_nested.dwg")).unwrap();
     let a = AcadrustProvider::open(CadSource::Bytes(&bytes)).unwrap();

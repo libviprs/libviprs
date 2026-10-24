@@ -110,6 +110,7 @@ impl Row {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the Gate 0 table and document, which Miri isolation blocks
 fn every_tier_a_file_has_exactly_one_row() {
     let (_, rows) = rows();
     for f in TIER_A {
@@ -124,6 +125,7 @@ fn every_tier_a_file_has_exactly_one_row() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the Gate 0 table and document, which Miri isolation blocks
 fn rows_are_well_formed() {
     let (rev, rows) = rows();
     assert_eq!(
@@ -169,6 +171,7 @@ fn rows_are_well_formed() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the Gate 0 table and document, which Miri isolation blocks
 fn an_open_failure_on_an_autocad_file_stops_the_work() {
     let (_, rows) = rows();
     let failed: Vec<String> = rows
@@ -186,6 +189,7 @@ fn an_open_failure_on_an_autocad_file_stops_the_work() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the Gate 0 table and document, which Miri isolation blocks
 fn the_document_quotes_the_table_and_agrees_with_it() {
     let doc = read("docs/spikes/acadrust-gate0.md");
     let (rev, rows) = rows();
@@ -252,6 +256,7 @@ fn the_document_quotes_the_table_and_agrees_with_it() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the Gate 0 table and document, which Miri isolation blocks
 fn the_document_says_what_it_could_not_check() {
     let doc = read("docs/spikes/acadrust-gate0.md");
     for needle in [
@@ -272,6 +277,7 @@ fn the_document_says_what_it_could_not_check() {
 /// reader that reports a different count is wrong about count, which is where
 /// "faster" hides "skipped". Versions with no DWG twin (AC1009) are not compared.
 #[test]
+#[cfg_attr(miri, ignore)] // reads the Gate 0 table and document, which Miri isolation blocks
 fn acadrust_exposes_the_counts_autocads_own_dxf_states() {
     let (_, rows) = rows();
     let census = read("docs/spikes/acadrust-gate0/dxf-census.tsv");

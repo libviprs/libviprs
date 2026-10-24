@@ -211,6 +211,7 @@ fn the_scanner_can_fail() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the repository source tree, which Miri isolation blocks
 fn the_scanner_enumerates_the_modules_public_items() {
     // If the enumeration silently found nothing, the checks below would pass for the
     // wrong reason. Pin that the whole trait set from the issue is seen.
@@ -239,6 +240,7 @@ fn the_scanner_enumerates_the_modules_public_items() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the repository source tree, which Miri isolation blocks
 fn no_foreign_type_appears_in_any_public_signature_of_the_provider_module() {
     for file in ["src/pvec/provider.rs", "src/pvec/mod.rs"] {
         let src = read(file);
@@ -272,6 +274,7 @@ fn no_foreign_type_appears_in_any_public_signature_of_the_provider_module() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the repository source tree, which Miri isolation blocks
 fn the_acadrust_provider_names_no_reader_type_in_a_public_signature() {
     let src = read("src/pvec/dwg_acadrust.rs");
     // Only `pub` items: the private helpers below the signatures are where the reader's
@@ -299,6 +302,7 @@ fn the_acadrust_provider_names_no_reader_type_in_a_public_signature() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the repository source tree, which Miri isolation blocks
 fn the_provider_module_stays_out_of_the_cad_decoder_contract() {
     // CadDecoder and Origin are unchanged by N4.1: the traits reuse two value types
     // and nothing else from `cad`.
@@ -336,6 +340,7 @@ fn dependency_line(manifest: &str, key: &str) -> Option<String> {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the repository source tree, which Miri isolation blocks
 fn acadrust_is_a_git_dependency_pinned_by_a_full_revision() {
     let m = manifest();
     let line =
@@ -372,6 +377,7 @@ fn acadrust_is_a_git_dependency_pinned_by_a_full_revision() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the repository source tree, which Miri isolation blocks
 fn acadrust_is_optional_and_only_the_feature_turns_it_on() {
     let m = manifest();
     assert!(
@@ -395,6 +401,7 @@ fn acadrust_is_optional_and_only_the_feature_turns_it_on() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the repository source tree, which Miri isolation blocks
 fn the_gate_zero_harness_pins_the_same_revision_as_the_crate() {
     let m = manifest();
     let line = dependency_line(&m, "acadrust").expect("acadrust git line");
