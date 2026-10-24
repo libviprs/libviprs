@@ -42,7 +42,7 @@
 //! N3.6's `max_block_depth` (it has no clip-specific field), and a path that nests deeper is a
 //! typed [`ClipError`] naming the limit and the observed depth.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use thiserror::Error;
 
@@ -270,14 +270,14 @@ pub fn apply_clip_policy(
     limits: &ClipLimits,
     bounds: &dyn ExactBoundsSource,
 ) -> Result<ClipReport, ClipError> {
-    let by_sequence: HashMap<u64, &PdfPathEntity> = page
+    let by_sequence: BTreeMap<u64, &PdfPathEntity> = page
         .entities
         .iter()
         .map(|e| (e.provenance.sequence, e))
         .collect();
 
     let mut clips = Vec::new();
-    let mut rects: HashMap<u64, Option<ExactBounds>> = HashMap::new();
+    let mut rects: BTreeMap<u64, Option<ExactBounds>> = BTreeMap::new();
     let mut decisions = Vec::new();
     let mut max_depth = 0usize;
 
