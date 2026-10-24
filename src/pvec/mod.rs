@@ -27,6 +27,7 @@
 //! decoder it has, and this module only reuses two of its plain value types
 //! ([`CadSource`](crate::cad::CadSource) and [`ItemHandle`](crate::cad::ItemHandle)).
 
+pub mod pdf_vector;
 pub mod provider;
 
 #[cfg(feature = "dwg-acadrust")]
@@ -37,6 +38,11 @@ pub mod dwg_acadrust;
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-spline")))]
 pub mod dwg_spline;
 
+pub use pdf_vector::{
+    PdfFillRule, PdfPaintIntent, PdfPathEntity, PdfPathSegment, PdfPoint, PdfProvenance,
+    PdfVectorError, PdfVectorLimits, PdfVectorPage, extract_page_paths,
+    extract_page_paths_from_bytes,
+};
 pub use provider::{
     ArrayGrid, Availability, BlockRef, DwgProvider, EntityCursor, EntityScope, Facet, FacetCap,
     FacetSource, InstancePath, InstanceStep, LayerState, LayoutId, LayoutKind, LayoutState, Point3,
