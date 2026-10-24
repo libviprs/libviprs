@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The normalized geometry dump** (issue #1103, part of #1039). `pvec::dump::NormalizedDump`
+  writes a line-oriented text dump of `Normalized2DGeometry` records (id, type, fidelity class,
+  source-space parameters at round-trip `f64` precision, bounds, optional provenance) as each
+  entity is pushed, so a conversion that fails while writing PVec still leaves a dump of what was
+  normalized. Format in `docs/normalized-dump.md`; it is inspection output, not an interchange
+  format, and nothing reads it back.
 - **Exact extraction of the basic DWG entities** (issue #1073, part of #1039).
   `pvec::dwg_basic` (feature `pvec-normalized`) turns a `LINE`, `LWPOLYLINE`, 2D `POLYLINE`,
   `CIRCLE`, `ARC` or `ELLIPSE` into the PVec curve that is that entity: a trimmed line, a polyline

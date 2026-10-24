@@ -251,7 +251,9 @@ const EXPECTED: &[(&str, Coverage)] = &[
              src/pvec/dwg_basic.rs, the basic entity extraction of issue \
              #1073, and tests/pvec_dwg_basic.rs, 39 tests, and \
              src/pvec/pdf_bezier.rs, the PDF segment to PVec mapping of issue \
-             #1081, and tests/pvec_pdf_bezier.rs, 15 tests; \
+             #1081, and tests/pvec_pdf_bezier.rs, 15 tests, and \
+             src/pvec/dump.rs, the inspection dump of issue #1103, and \
+             tests/pvec_1103_normalized_dump.rs, 11 tests; \
              adds 2 crates (pvec-geometry and pvec-numeric, git \
              dependencies declaring rust-version 1.85)",
         ),
