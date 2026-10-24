@@ -21,6 +21,7 @@ struct Totals {
     model: usize,
     all: usize,
     unmapped: usize,
+    classes: std::collections::BTreeMap<String, usize>,
     transcript: String,
 }
 
@@ -29,6 +30,7 @@ fn traverse(p: &AcadrustProvider) -> Result<Totals, String> {
         model: 0,
         all: 0,
         unmapped: 0,
+        classes: std::collections::BTreeMap::new(),
         transcript: String::new(),
     };
     let layouts = p.layouts().map_err(|e| e.to_string())?;
@@ -59,6 +61,9 @@ fn traverse(p: &AcadrustProvider) -> Result<Totals, String> {
         for e in &items {
             if matches!(e.geometry, RawGeometry::Unmapped { .. }) {
                 t.unmapped += 1;
+                *t.classes
+                    .entry(e.provenance.class_name.clone())
+                    .or_default() += 1;
             }
             let _ = writeln!(t.transcript, "{scope:?} {e:?}");
         }
@@ -101,7 +106,7 @@ fn main() {
 
     let fail = |e: String| {
         println!(
-            "{name}\t{tier}\t{source}\t{sha}\t{version}\tOPEN_FAILED\t-\t-\t-\t-\t-\t-\t-\t{}",
+            "{name}\t{tier}\t{source}\t{sha}\t{version}\tOPEN_FAILED\t-\t-\t-\t-\t-\t-\t-\t-\t{}",
             clean(&e)
         );
     };
@@ -124,8 +129,19 @@ fn main() {
     let fresh = AcadrustProvider::open(CadSource::Path(path)).map(|p| traverse(&p));
     let same = matches!(&b, Ok(b) if b.transcript == a.transcript)
         && matches!(&fresh, Ok(Ok(c)) if c.transcript == a.transcript);
+    let mut by_count: Vec<(&String, &usize)> = a.classes.iter().collect();
+    by_count.sort_by(|x, y| y.1.cmp(x.1).then(x.0.cmp(y.0)));
+    let classes = if by_count.is_empty() {
+        "-".to_string()
+    } else {
+        by_count
+            .iter()
+            .map(|(c, n)| format!("{c}:{n}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
     println!(
-        "{name}\t{tier}\t{source}\t{sha}\t{version}\tOPEN_OK\t{layers}\t{layouts}\t{blocks}\t{}\t{}\t{}\t{}\t-",
+        "{name}\t{tier}\t{source}\t{sha}\t{version}\tOPEN_OK\t{layers}\t{layouts}\t{blocks}\t{}\t{}\t{}\t{classes}\t{}\t-",
         a.model,
         a.all,
         a.unmapped,

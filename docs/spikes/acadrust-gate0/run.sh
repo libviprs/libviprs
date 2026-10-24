@@ -54,12 +54,12 @@ ssh -o BatchMode=yes -o LogLevel=ERROR "$NAS" "docker run --rm --platform linux/
 set -u
 cargo build --release --example dwg_gate0 --features dwg-acadrust 2>&1 | tail -2 >&2
 BIN=/target/release/examples/dwg_gate0
-echo "file	tier	source	sha256	version	open	layers	layouts	blocks	model_entities	entities_all_scopes	unmapped	reread_identical	error"
+echo "file	tier	source	sha256	version	open	layers	layouts	blocks	model_entities	entities_all_scopes	unmapped	unmapped_classes	reread_identical	error"
 row() { # tier source path
   out=$("$BIN" "$1" "$2" "$3" 2>/dev/null); rc=$?
   if [ $rc -ne 0 ] || [ -z "$out" ]; then
     sha=$(sha256sum "$3" | cut -d" " -f1)
-    printf "%s\t%s\t%s\t%s\t%s\tOPEN_FAILED\t-\t-\t-\t-\t-\t-\t-\tprocess exit %s\n" \
+    printf "%s\t%s\t%s\t%s\t%s\tOPEN_FAILED\t-\t-\t-\t-\t-\t-\t-\t-\tprocess exit %s\n" \
       "$(basename "$3")" "$1" "$2" "$sha" "$(head -c 6 "$3")" "$rc"
   else
     printf "%s\n" "$out"

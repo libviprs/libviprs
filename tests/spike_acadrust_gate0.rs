@@ -51,7 +51,7 @@ const TIER_A: [&str; 22] = [
     "export_sample.dwg",
 ];
 
-const COLUMNS: [&str; 14] = [
+const COLUMNS: [&str; 15] = [
     "file",
     "tier",
     "source",
@@ -244,4 +244,46 @@ fn the_document_says_what_it_could_not_check() {
             "the document should contain `{needle}`"
         );
     }
+}
+
+/// AutoCAD wrote `sample_AC10xx_ascii.dxf` in the same SAVEAS session as each DWG, so
+/// its census of layers, block records and top-level model-space entities is AutoCAD's
+/// own statement, with no DWG reader in the loop (`dxf_census.py` reads the text). A
+/// reader that reports a different count is wrong about count, which is where
+/// "faster" hides "skipped". Versions with no DWG twin (AC1009) are not compared.
+#[test]
+fn acadrust_exposes_the_counts_autocads_own_dxf_states() {
+    let (_, rows) = rows();
+    let census = read("docs/spikes/acadrust-gate0/dxf-census.tsv");
+    let mut compared = 0;
+    for line in census.lines().skip(1).filter(|l| !l.trim().is_empty()) {
+        let c: Vec<&str> = line.split('\t').collect();
+        assert_eq!(c.len(), 4, "census row: {line}");
+        let Some(r) = rows
+            .iter()
+            .find(|r| r.get("file") == c[0] && r.get("tier") == "A")
+        else {
+            continue;
+        };
+        assert_eq!(
+            r.get("layers"),
+            c[1],
+            "{}: layers against AutoCAD's DXF",
+            c[0]
+        );
+        assert_eq!(
+            r.get("blocks"),
+            c[2],
+            "{}: block records against AutoCAD's DXF",
+            c[0]
+        );
+        assert_eq!(
+            r.get("model_entities"),
+            c[3],
+            "{}: model-space entities against AutoCAD's DXF",
+            c[0]
+        );
+        compared += 1;
+    }
+    assert!(compared >= 6, "only {compared} saves compared");
 }
