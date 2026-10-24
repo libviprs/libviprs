@@ -3,24 +3,26 @@
 //! Same shape as `adr_normalized_geometry.rs`: the ADRs are specifications, so these tests read
 //! them as text at compile time (no filesystem call, fine under Miri) and hold them to the
 //! acceptance criteria of the issue, one test per criterion. std-only on purpose.
+//!
+//! The streaming ADR is deliberately not read here. The pre-push gate pins it as a path nothing
+//! reads (`INERT_IN_LIBVIPRS` in libviprs-tests), and pulling it in would make that pin false. Its
+//! freeze was checked by hand against the N1.7 spike instead, see the pull request.
 
 const VIEW_PROFILE: &str = include_str!("../docs/adr/pvec-view-profile.md");
 const SEMANTIC_BOUNDARY: &str = include_str!("../docs/adr/pvec-semantic-boundary.md");
 const TRANSFORM_MATRIX: &str = include_str!("../docs/adr/pvec-transform-matrix.md");
 const UNSUPPORTED_POLICY: &str = include_str!("../docs/adr/pvec-unsupported-policy.md");
 const PROVENANCE: &str = include_str!("../docs/adr/pvec-provenance.md");
-const STREAMING: &str = include_str!("../docs/adr/pvec-streaming-strategy.md");
 const PDF_POLICY: &str = include_str!("../docs/adr/pvec-pdf-policy.md");
 /// The N1.2 ADR predates the freeze and keeps its clause text; it is frozen in place.
 const NORMALIZED_GEOMETRY: &str = include_str!("../docs/adr/pvec-normalized-geometry.md");
 
-const SEVEN: [(&str, &str); 7] = [
+const SIX: [(&str, &str); 6] = [
     ("pvec-view-profile", VIEW_PROFILE),
     ("pvec-semantic-boundary", SEMANTIC_BOUNDARY),
     ("pvec-transform-matrix", TRANSFORM_MATRIX),
     ("pvec-unsupported-policy", UNSUPPORTED_POLICY),
     ("pvec-provenance", PROVENANCE),
-    ("pvec-streaming-strategy", STREAMING),
     ("pvec-pdf-policy", PDF_POLICY),
 ];
 
@@ -41,7 +43,7 @@ fn section(doc: &str, name: &str) -> String {
 
 #[test]
 fn ac1_seven_files_each_with_a_status_line_and_a_spike_link() {
-    for (name, doc) in SEVEN {
+    for (name, doc) in SIX {
         let status = doc
             .lines()
             .find(|l| l.starts_with("Status:"))
@@ -73,7 +75,7 @@ fn ac1_the_n1_2_adr_is_frozen_in_place() {
 
 #[test]
 fn ac2_every_adr_names_what_is_still_open_and_the_missing_measurement() {
-    for (name, doc) in SEVEN {
+    for (name, doc) in SIX {
         let open = section(doc, "Open items");
         assert!(
             open.trim().len() > 80,
@@ -102,7 +104,7 @@ fn tolerance_shaped(doc: &str) -> Vec<String> {
 
 #[test]
 fn ac3_no_adr_defines_a_tolerance_and_each_cites_the_numeric_policy() {
-    for (name, doc) in SEVEN {
+    for (name, doc) in SIX {
         let bad = tolerance_shaped(doc);
         assert!(
             bad.is_empty(),
@@ -139,17 +141,6 @@ fn ac4_unsupported_policy_lists_six_classes_and_the_tessellation_defect() {
         l.contains("silently tessellating an unsupported curve into canonical pvec is a defect")
     );
     assert!(l.contains("refusal rule"));
-}
-
-#[test]
-fn ac5_streaming_names_one_strategy_and_quotes_all_three_peak_rss_figures() {
-    let doc = STREAMING;
-    assert!(doc.contains("bounded spool with an external sort"));
-    // the 16,000,000 row of the N1.7 spike: direct, twopass, spool
-    for figure in ["612.0", "368.2", "29.8"] {
-        assert!(doc.contains(figure), "peak RSS figure {figure} missing");
-    }
-    assert!(doc.contains("direct") && doc.contains("twopass") && doc.contains("spool"));
 }
 
 #[test]
@@ -201,7 +192,7 @@ fn provenance_is_optional_component_data_outside_the_hot_path() {
 
 #[test]
 fn prose_hygiene() {
-    for (name, doc) in SEVEN {
+    for (name, doc) in SIX {
         assert!(!doc.contains('\u{2014}'), "{name}: no em dashes");
         assert!(!doc.contains(" -- "), "{name}: no `--` as an em dash");
         let l = lower(doc);
