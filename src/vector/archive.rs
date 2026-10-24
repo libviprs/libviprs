@@ -27,7 +27,13 @@ pub enum FieldType {
 }
 
 impl FieldType {
-    fn name(self) -> &'static str {
+    /// The TileJSON spelling: `"String"`, `"Number"` or `"Boolean"`.
+    ///
+    /// This is what `vector_layers` carries and what the JSON for an archive
+    /// description prints. It is written out here and does not follow the
+    /// variant's name, so renaming a variant cannot change a file format.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
         match self {
             Self::String => "String",
             Self::Number => "Number",
