@@ -32,6 +32,9 @@ pub mod fidelity;
 pub mod limits;
 #[cfg(feature = "pvec-normalized")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
+pub mod dwg_basic;
+#[cfg(feature = "pvec-normalized")]
+#[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
 pub mod normalized;
 pub mod pdf_vector;
 #[cfg(feature = "pvec-normalized")]
