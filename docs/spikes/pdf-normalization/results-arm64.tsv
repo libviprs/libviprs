@@ -1,0 +1,217 @@
+# arm64 (this Mac, linux/arm64 container), pvec@1f7561e, lopdf 0.36.0
+fixture	key	value
+synthetic	S1	pass: m l l is one open subpath of two line segments
+synthetic	S2	pass: c keeps its two control points and end point as one cubic segment
+synthetic	S3	pass: v makes the first control point the current point, still one exact cubic
+synthetic	S4	pass: y makes the second control point the end point, still one exact cubic
+synthetic	S5	pass: re is one closed subpath: three line segments plus the closing edge, flagged as a rectangle
+synthetic	S6	pass: h marks the subpath closed; the closing edge is counted once as segs.close
+synthetic	S7	pass: two subpaths in one path, opposite winding detected, f* counted as even-odd
+synthetic	S8	pass: two cm under one q compose to (0,0) -> (16.0,20.0); Q restores the identity
+synthetic	S9	pass: axis-aligned rectangle clip is exact; rotated rectangle and a triangle clip are bounded-only
+synthetic	S10	pass: a zero-length l is refused by PVec (NP-06)
+synthetic	S11	pass: a singular cm is refused by PVec's NP-19 and counted, never silently applied
+synthetic	S12	pass: lopdf reads the operand 0.1 as 0.10000000149011612: operands arrive as f32 and widen, so 'exact' means exact relative to what lopdf delivers
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	pages	6
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	producer	Acrobat Distiller 21.0 (Windows)
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	creator	PScript5.dll Version 5.2.2
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	ocg	0
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	user_unit_pages	0
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	vp_pages	0
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	forms.unique	0
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	ops.m	18416
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	ops.l	45049
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	ops.c	807
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	ops.v	0
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	ops.y	0
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	ops.re	4705
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	ops.h	3585
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	ops.cm	13803
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	ops.q	4584
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	ops.Q	4584
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	ops.W	3421
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	ops.W*	1035
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	ops.S	13766
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	ops.s	2
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	ops.f	1284
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	ops.F	0
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	ops.f*	0
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	ops.B	0
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	ops.B*	0
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	ops.b	0
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	ops.b*	34
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	ops.n	4456
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	ops.Do	1
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	ops.BDC	0
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	ops.BMC	0
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	ops.EMC	0
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	paths	19542
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	subpaths	23121
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	subpaths.closed	8326
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	paths.compound	699
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	compound.mixed_winding	0
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	segs.line	59164
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	segs.close	8284
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	segs.cubic	807
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	segs.rect	4705
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	fill.nonzero	1284
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	fill.evenodd	34
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	stroke	13802
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	clip.exact	3421
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	clip.bounded	1035
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	q.max_depth	2
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	q.unbalanced	0
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	q.unclosed_at_end	0
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	ctm.refused	0
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	forms.do	0
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	forms.skipped_cycle_or_depth	0
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	xobject.image_do	0
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	bdc.oc	0
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	pvec.ok	67752
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	pvec.refused	503
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	cm.identity	576
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	cm.translation	13226
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	cm.rotation	0
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	cm.uniform scale	0
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	cm.non-uniform scale	0
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	cm.reflection	1
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	cm.shear / general affine	0
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	cm.singular	0
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	pvec.refused.line.NP-06	503
+usace_hnc_yc_11-18_large_2019.pdf	pages	4
+usace_hnc_yc_11-18_large_2019.pdf	producer	Acrobat Distiller 11.0 (Windows)
+usace_hnc_yc_11-18_large_2019.pdf	creator	PScript5.dll Version 5.2.2
+usace_hnc_yc_11-18_large_2019.pdf	ocg	0
+usace_hnc_yc_11-18_large_2019.pdf	user_unit_pages	0
+usace_hnc_yc_11-18_large_2019.pdf	vp_pages	0
+usace_hnc_yc_11-18_large_2019.pdf	forms.unique	0
+usace_hnc_yc_11-18_large_2019.pdf	ops.m	21424
+usace_hnc_yc_11-18_large_2019.pdf	ops.l	54044
+usace_hnc_yc_11-18_large_2019.pdf	ops.c	188
+usace_hnc_yc_11-18_large_2019.pdf	ops.v	0
+usace_hnc_yc_11-18_large_2019.pdf	ops.y	0
+usace_hnc_yc_11-18_large_2019.pdf	ops.re	156
+usace_hnc_yc_11-18_large_2019.pdf	ops.h	20
+usace_hnc_yc_11-18_large_2019.pdf	ops.cm	21377
+usace_hnc_yc_11-18_large_2019.pdf	ops.q	939
+usace_hnc_yc_11-18_large_2019.pdf	ops.Q	939
+usace_hnc_yc_11-18_large_2019.pdf	ops.W	27
+usace_hnc_yc_11-18_large_2019.pdf	ops.W*	27
+usace_hnc_yc_11-18_large_2019.pdf	ops.S	21373
+usace_hnc_yc_11-18_large_2019.pdf	ops.s	0
+usace_hnc_yc_11-18_large_2019.pdf	ops.f	133
+usace_hnc_yc_11-18_large_2019.pdf	ops.F	0
+usace_hnc_yc_11-18_large_2019.pdf	ops.f*	0
+usace_hnc_yc_11-18_large_2019.pdf	ops.B	0
+usace_hnc_yc_11-18_large_2019.pdf	ops.B*	0
+usace_hnc_yc_11-18_large_2019.pdf	ops.b	0
+usace_hnc_yc_11-18_large_2019.pdf	ops.b*	0
+usace_hnc_yc_11-18_large_2019.pdf	ops.n	54
+usace_hnc_yc_11-18_large_2019.pdf	ops.Do	0
+usace_hnc_yc_11-18_large_2019.pdf	ops.BDC	0
+usace_hnc_yc_11-18_large_2019.pdf	ops.BMC	0
+usace_hnc_yc_11-18_large_2019.pdf	ops.EMC	0
+usace_hnc_yc_11-18_large_2019.pdf	paths	21560
+usace_hnc_yc_11-18_large_2019.pdf	subpaths	21580
+usace_hnc_yc_11-18_large_2019.pdf	subpaths.closed	176
+usace_hnc_yc_11-18_large_2019.pdf	paths.compound	5
+usace_hnc_yc_11-18_large_2019.pdf	compound.mixed_winding	0
+usace_hnc_yc_11-18_large_2019.pdf	segs.line	54512
+usace_hnc_yc_11-18_large_2019.pdf	segs.close	176
+usace_hnc_yc_11-18_large_2019.pdf	segs.cubic	188
+usace_hnc_yc_11-18_large_2019.pdf	segs.rect	156
+usace_hnc_yc_11-18_large_2019.pdf	fill.nonzero	133
+usace_hnc_yc_11-18_large_2019.pdf	fill.evenodd	0
+usace_hnc_yc_11-18_large_2019.pdf	stroke	21373
+usace_hnc_yc_11-18_large_2019.pdf	clip.exact	27
+usace_hnc_yc_11-18_large_2019.pdf	clip.bounded	27
+usace_hnc_yc_11-18_large_2019.pdf	q.max_depth	1
+usace_hnc_yc_11-18_large_2019.pdf	q.unbalanced	0
+usace_hnc_yc_11-18_large_2019.pdf	q.unclosed_at_end	0
+usace_hnc_yc_11-18_large_2019.pdf	ctm.refused	0
+usace_hnc_yc_11-18_large_2019.pdf	forms.do	0
+usace_hnc_yc_11-18_large_2019.pdf	forms.skipped_cycle_or_depth	0
+usace_hnc_yc_11-18_large_2019.pdf	xobject.image_do	0
+usace_hnc_yc_11-18_large_2019.pdf	bdc.oc	0
+usace_hnc_yc_11-18_large_2019.pdf	pvec.ok	51963
+usace_hnc_yc_11-18_large_2019.pdf	pvec.refused	2913
+usace_hnc_yc_11-18_large_2019.pdf	cm.identity	2085
+usace_hnc_yc_11-18_large_2019.pdf	cm.translation	19292
+usace_hnc_yc_11-18_large_2019.pdf	cm.rotation	0
+usace_hnc_yc_11-18_large_2019.pdf	cm.uniform scale	0
+usace_hnc_yc_11-18_large_2019.pdf	cm.non-uniform scale	0
+usace_hnc_yc_11-18_large_2019.pdf	cm.reflection	0
+usace_hnc_yc_11-18_large_2019.pdf	cm.shear / general affine	0
+usace_hnc_yc_11-18_large_2019.pdf	cm.singular	0
+usace_hnc_yc_11-18_large_2019.pdf	pvec.refused.line.NP-06	2913
+usace_tulsa_bt_bnhq_sample_set.pdf	pages	4
+usace_tulsa_bt_bnhq_sample_set.pdf	producer	Adobe PDF Library 9.0
+usace_tulsa_bt_bnhq_sample_set.pdf	creator	Adobe Acrobat Pro 10.1.8
+usace_tulsa_bt_bnhq_sample_set.pdf	ocg	150
+usace_tulsa_bt_bnhq_sample_set.pdf	user_unit_pages	0
+usace_tulsa_bt_bnhq_sample_set.pdf	vp_pages	3
+usace_tulsa_bt_bnhq_sample_set.pdf	forms.unique	0
+usace_tulsa_bt_bnhq_sample_set.pdf	ops.m	224181
+usace_tulsa_bt_bnhq_sample_set.pdf	ops.l	321936
+usace_tulsa_bt_bnhq_sample_set.pdf	ops.c	110021
+usace_tulsa_bt_bnhq_sample_set.pdf	ops.v	0
+usace_tulsa_bt_bnhq_sample_set.pdf	ops.y	0
+usace_tulsa_bt_bnhq_sample_set.pdf	ops.re	445
+usace_tulsa_bt_bnhq_sample_set.pdf	ops.h	0
+usace_tulsa_bt_bnhq_sample_set.pdf	ops.cm	219864
+usace_tulsa_bt_bnhq_sample_set.pdf	ops.q	204207
+usace_tulsa_bt_bnhq_sample_set.pdf	ops.Q	204207
+usace_tulsa_bt_bnhq_sample_set.pdf	ops.W	2
+usace_tulsa_bt_bnhq_sample_set.pdf	ops.W*	0
+usace_tulsa_bt_bnhq_sample_set.pdf	ops.S	207654
+usace_tulsa_bt_bnhq_sample_set.pdf	ops.s	0
+usace_tulsa_bt_bnhq_sample_set.pdf	ops.f	443
+usace_tulsa_bt_bnhq_sample_set.pdf	ops.F	0
+usace_tulsa_bt_bnhq_sample_set.pdf	ops.f*	12150
+usace_tulsa_bt_bnhq_sample_set.pdf	ops.B	0
+usace_tulsa_bt_bnhq_sample_set.pdf	ops.B*	0
+usace_tulsa_bt_bnhq_sample_set.pdf	ops.b	0
+usace_tulsa_bt_bnhq_sample_set.pdf	ops.b*	0
+usace_tulsa_bt_bnhq_sample_set.pdf	ops.n	2
+usace_tulsa_bt_bnhq_sample_set.pdf	ops.Do	76
+usace_tulsa_bt_bnhq_sample_set.pdf	ops.BDC	354
+usace_tulsa_bt_bnhq_sample_set.pdf	ops.BMC	353
+usace_tulsa_bt_bnhq_sample_set.pdf	ops.EMC	707
+usace_tulsa_bt_bnhq_sample_set.pdf	paths	220249
+usace_tulsa_bt_bnhq_sample_set.pdf	subpaths	224626
+usace_tulsa_bt_bnhq_sample_set.pdf	subpaths.closed	445
+usace_tulsa_bt_bnhq_sample_set.pdf	paths.compound	3634
+usace_tulsa_bt_bnhq_sample_set.pdf	compound.mixed_winding	3565
+usace_tulsa_bt_bnhq_sample_set.pdf	segs.line	323271
+usace_tulsa_bt_bnhq_sample_set.pdf	segs.close	445
+usace_tulsa_bt_bnhq_sample_set.pdf	segs.cubic	110021
+usace_tulsa_bt_bnhq_sample_set.pdf	segs.rect	445
+usace_tulsa_bt_bnhq_sample_set.pdf	fill.nonzero	443
+usace_tulsa_bt_bnhq_sample_set.pdf	fill.evenodd	12150
+usace_tulsa_bt_bnhq_sample_set.pdf	stroke	207654
+usace_tulsa_bt_bnhq_sample_set.pdf	clip.exact	1
+usace_tulsa_bt_bnhq_sample_set.pdf	clip.bounded	1
+usace_tulsa_bt_bnhq_sample_set.pdf	q.max_depth	2
+usace_tulsa_bt_bnhq_sample_set.pdf	q.unbalanced	0
+usace_tulsa_bt_bnhq_sample_set.pdf	q.unclosed_at_end	0
+usace_tulsa_bt_bnhq_sample_set.pdf	ctm.refused	0
+usace_tulsa_bt_bnhq_sample_set.pdf	forms.do	0
+usace_tulsa_bt_bnhq_sample_set.pdf	forms.skipped_cycle_or_depth	0
+usace_tulsa_bt_bnhq_sample_set.pdf	xobject.image_do	76
+usace_tulsa_bt_bnhq_sample_set.pdf	bdc.oc	351
+usace_tulsa_bt_bnhq_sample_set.pdf	pvec.ok	411445
+usace_tulsa_bt_bnhq_sample_set.pdf	pvec.refused	22292
+usace_tulsa_bt_bnhq_sample_set.pdf	cm.identity	647
+usace_tulsa_bt_bnhq_sample_set.pdf	cm.translation	219141
+usace_tulsa_bt_bnhq_sample_set.pdf	cm.rotation	0
+usace_tulsa_bt_bnhq_sample_set.pdf	cm.uniform scale	0
+usace_tulsa_bt_bnhq_sample_set.pdf	cm.non-uniform scale	76
+usace_tulsa_bt_bnhq_sample_set.pdf	cm.reflection	0
+usace_tulsa_bt_bnhq_sample_set.pdf	cm.shear / general affine	0
+usace_tulsa_bt_bnhq_sample_set.pdf	cm.singular	0
+usace_tulsa_bt_bnhq_sample_set.pdf	pvec.refused.cubic.NP-08	110
+usace_tulsa_bt_bnhq_sample_set.pdf	pvec.refused.line.NP-06	22182
+usace_hnc_yc_11-18_large_2019.pdf	sha256	414802e63b491e2661550cbbede13670d8115f3ecf14e0577f4c81d8e3a5ce61
+usace_hnc_std_drawings_fire_station_set1_2021.pdf	sha256	3770864d9ff8083d741e1c82f57354ddc40a7a08e659959b0368f945d583ddca
+usace_tulsa_bt_bnhq_sample_set.pdf	sha256	5d83585ccc744b6411b6dba50cdcbf29a0529849544d61d5e094bbe608aa56bb
+# rustc rustc 1.99.1 (58cf8f9c3 2026-10-13) aarch64

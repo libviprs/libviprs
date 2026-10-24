@@ -793,9 +793,11 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1242 adds 40: the `tests/vector_103x_*.rs` cells that write archives and tiles to a temp dir or read committed fixtures. It said 523 before this line moved.
 /// #1043 adds 16: `tests/view_context_spike_doc.rs`, which reads the spike document, its probe output, two sources and its own directory listing. It said 563 before this line moved.
 /// #1044 adds 20: `tests/spike_transform_matrix.rs`, which reads the spike document, the harness output and the harness source. It said 579 before this line moved.
-/// #1036 adds 10: the `tests/vector_1036_*.rs` cells that build an archive in a temp dir, spawn a child that does, or read a committed DWG fixture. It said 599 before this line moved.
-/// #1035 adds 17: the `tests/vector_1035_api.rs` cells that convert into a temp dir, read a committed fixture or open a missing path. It said 609 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 626;
+/// #1045 adds 26: `tests/spike_pdf_normalization.rs`, which reads the spike document, the harness output and its own directory listing. It said 599 before this line moved.
+/// #1042 adds 20: `tests/spike_dwg_mapping.rs`, which reads the spike document, its results and its own directory listing. It said 625 before this line moved.
+/// #1036 adds 10: the `tests/vector_1036_*.rs` cells that build an archive in a temp dir, spawn a child that does, or read a committed DWG fixture. It said 645 before this line moved.
+/// #1035 adds 17: the `tests/vector_1035_api.rs` cells that convert into a temp dir, read a committed fixture or open a missing path. It said 655 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 672;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
