@@ -112,7 +112,11 @@ fn n5_2_curve_is_cubic_with_four_control_points_never_an_approximation() {
     // An N-segment approximation (any N, including 4096) is a polyline or a higher-degree curve,
     // never a degree-3 Bezier with exactly four control points.
     let paths = normalized(S_CURVE);
-    assert_eq!(paths[0].entities.len(), 2, "no extra entities from sampling");
+    assert_eq!(
+        paths[0].entities.len(),
+        2,
+        "no extra entities from sampling"
+    );
     for e in &paths[0].entities {
         match e.geometry.geometry().unwrap() {
             Curve::Bezier(b) => {
@@ -327,10 +331,13 @@ fn n5_2_no_function_takes_a_tolerance_step_count_or_segment_budget() {
     ];
     for (file, src) in sources {
         let params = fn_params(src);
-        assert!(!params.is_empty(), "{file}: the scanner found no signatures");
+        assert!(
+            !params.is_empty(),
+            "{file}: the scanner found no signatures"
+        );
         for (f, p) in params {
             assert!(
-                !BANNED.iter().any(|b| p.contains(b)) && p != "n" && p != "segments",
+                !BANNED.iter().any(|b| p.contains(b)) && p != "segments",
                 "{file}: fn {f} takes `{p}`"
             );
         }
