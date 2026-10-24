@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Limits and malformed-input handling on the PDF vector path** (issue #1087, part of #1039).
+  `pvec::pdf_vector::PdfVectorLimits` gains `max_content_bytes` (decoded bytes across the page and
+  every form, cut off while a Flate stream inflates) and `max_segments_per_path`, and the error
+  type gains `ContentBytesExceeded`, `PathSegmentsExceeded`, `ResourceCycle` and `InvalidPageBox`,
+  each naming the limit and the observed value. Operators and `q` depth are now counted before an
+  operation list is built, so a 10 MiB stream of `q` refuses at the nesting bound without
+  allocating in proportion to the stream. Unparseable or out-of-range number literals, a `/Contents`
+  that is not a stream, a `cm` that overflows and a page box with no extent are typed errors instead
+  of a shorter page. Filters other than Flate (alone, or after ASCIIHex/ASCII85) are refused as
+  unbounded. Tests in `tests/pvec_pdf_limits.rs`, fuzz target `fuzz_pvec_pdf_vector`.
 - **The hatch and fill policy** (issue #1085, part of #1039). `docs/pvec-hatch-policy.md` records
   what each fill construct becomes, and `pvec::fill_policy` is the same table as code plus
   `FillReport`, which counts DWG `HATCH`/`SOLID`/`TRACE` and PDF fills, shadings and patterns with a
