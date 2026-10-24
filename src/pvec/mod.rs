@@ -27,6 +27,7 @@
 //! decoder it has, and this module only reuses two of its plain value types
 //! ([`CadSource`](crate::cad::CadSource) and [`ItemHandle`](crate::cad::ItemHandle)).
 
+pub mod classify;
 #[cfg(feature = "pvec-normalized")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
 pub mod normalized;
@@ -41,6 +42,10 @@ pub mod dwg_acadrust;
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-spline")))]
 pub mod dwg_spline;
 
+pub use classify::{
+    ClassSource, Classification, ClassificationReport, ElementClass, ElementRule, ElementRules,
+    RuleMatch,
+};
 pub use pdf_vector::{
     PdfFillRule, PdfPaintIntent, PdfPathEntity, PdfPathSegment, PdfPoint, PdfProvenance,
     PdfVectorError, PdfVectorLimits, PdfVectorPage, extract_page_paths,
