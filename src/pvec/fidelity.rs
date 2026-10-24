@@ -144,7 +144,7 @@ pub enum ReasonCode {
     /// A line or polyline with more than one z: PVec's curves are planar.
     /// `RequiresPVecCapability`.
     Geometry3d,
-    /// An entity whose extrusion normal is not +z, so its coordinates are in an object
+    /// An entity whose extrusion normal is neither +z nor -z (-z is mapped, #1298), so its coordinates are in an object
     /// coordinate system this path does not map out of. `Unsupported`.
     ExtrusionNotApplied,
     /// A source class the provider saw and does not map. `Unsupported`.

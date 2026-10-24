@@ -503,8 +503,21 @@ fn mirrored_ends(b: &ExactBasic) -> [(f64, f64); 2] {
 }
 
 fn same_ends(a: [(f64, f64); 2], b: [(f64, f64); 2]) -> bool {
-    near_pt(Point2 { x: a[0].0, y: a[0].1 }, b[0].0, b[0].1)
-        && near_pt(Point2 { x: a[1].0, y: a[1].1 }, b[1].0, b[1].1)
+    near_pt(
+        Point2 {
+            x: a[0].0,
+            y: a[0].1,
+        },
+        b[0].0,
+        b[0].1,
+    ) && near_pt(
+        Point2 {
+            x: a[1].0,
+            y: a[1].1,
+        },
+        b[1].0,
+        b[1].1,
+    )
 }
 
 #[test]
@@ -516,12 +529,20 @@ fn issue_1298_arc_with_normal_minus_z_is_mirrored_about_the_y_axis() {
     assert!(same_ends(ends(&b), mirrored_ends(&flat)), "{:?}", ends(&b));
     assert_eq!(b.elevation, -5.0, "z flips with the normal");
     assert_eq!(b.classification.class(), FidelityClass::SupportedEquivalent);
-    assert_eq!(b.source_range, Some((0.25, 1.75)), "the stored angles stay as stored");
+    assert_eq!(
+        b.source_range,
+        Some((0.25, 1.75)),
+        "the stored angles stay as stored"
+    );
 }
 
 #[test]
 fn issue_1298_polyline_with_normal_minus_z_is_mirrored_about_the_y_axis() {
-    let vs = vec![vertex(1.0, 0.0, 0.0), vertex(4.0, 1.0, 0.0), vertex(5.0, 3.0, 0.0)];
+    let vs = vec![
+        vertex(1.0, 0.0, 0.0),
+        vertex(4.0, 1.0, 0.0),
+        vertex(5.0, 3.0, 0.0),
+    ];
     let b = extract_polyline(&with_normal(polyline(vs, false), NEG_Z)).expect("mapped");
     let Curve::Polyline(p) = &b.curve else {
         panic!("{:?}", b.curve.kind());
@@ -803,7 +824,9 @@ fn every_refusal_has_a_classification_that_matches_its_report_row() {
             observed: 4,
         },
         BasicError::NonPlanar,
-        BasicError::ExtrusionNotApplied { normal: [1.0, 0.0, 0.0] },
+        BasicError::ExtrusionNotApplied {
+            normal: [1.0, 0.0, 0.0],
+        },
     ];
     for e in errors {
         let c = e.classification("X");
