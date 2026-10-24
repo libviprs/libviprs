@@ -9,8 +9,8 @@
 use std::fmt;
 
 use pvec_geometry::{
-    Circle, Composite, Curve, Ellipse, GeometryError, Line, Placement2, Point2, Polyline, Trimmed,
-    Vector2,
+    Circle, Composite, Curve, Curve2d, Ellipse, GeometryError, Line, Placement2, Point2, Polyline,
+    Transform2, Trimmed, Vector2,
 };
 use pvec_numeric::{MAX_POLYLINE_VERTICES, NumericError};
 
@@ -113,7 +113,7 @@ pub enum BasicError {
     },
     /// Different z values on one entity.
     NonPlanar,
-    /// An extrusion normal that is not +z.
+    /// An extrusion normal that is neither +z nor -z.
     ExtrusionNotApplied {
         /// The normal as stored.
         normal: Point3,
@@ -144,7 +144,7 @@ impl fmt::Display for BasicError {
             }
             BasicError::NonPlanar => write!(f, "the entity does not lie in one plane"),
             BasicError::ExtrusionNotApplied { normal } => {
-                write!(f, "extrusion normal {normal:?} is not +z")
+                write!(f, "extrusion normal {normal:?} is neither +z nor -z")
             }
         }
     }
@@ -214,12 +214,35 @@ fn z_of(field: &'static str, z: f64) -> Result<f64, BasicError> {
     }
 }
 
-fn check_normal(normal: Point3) -> Result<(), BasicError> {
+/// Whether an entity's object coordinate system is mirrored against the world's.
+///
+/// The arbitrary axis algorithm turns a normal of exactly (0, 0, -1) into the axes
+/// `Ax = (-1, 0, 0)`, `Ay = (0, 1, 0)`, so a point `(x, y, z)` in the entity's own system is
+/// `(-x, y, -z)` in the world: a mirror about the y axis plus a flipped elevation. Any other
+/// normal tilts the plane out of the drawing's, which PVec's 2D model cannot carry.
+fn ocs_mirrored(normal: Point3) -> Result<bool, BasicError> {
     if normal == [0.0, 0.0, 1.0] {
-        Ok(())
+        Ok(false)
+    } else if normal == [0.0, 0.0, -1.0] {
+        Ok(true)
     } else {
         Err(BasicError::ExtrusionNotApplied { normal })
     }
+}
+
+/// Maps a finished extraction out of a mirrored object coordinate system, through PVec's own
+/// transform. The stored angles and parameters stay as stored, they are the drawing's numbers.
+fn into_world(mut basic: ExactBasic, mirrored: bool) -> Result<ExactBasic, BasicError> {
+    if mirrored {
+        let m = Transform2::mirror_y().map_err(|error| degenerate("normal", error))?;
+        basic.curve = basic
+            .curve
+            .transform(&m)
+            .map_err(|error| degenerate("normal", error))?
+            .0;
+        basic.elevation = -basic.elevation;
+    }
+    Ok(basic)
 }
 
 fn class_of(entity: &RawEntity) -> &str {
@@ -302,7 +325,7 @@ pub fn extract_polyline(entity: &RawEntity) -> Result<ExactBasic, BasicError> {
     else {
         return Err(BasicError::NotBasic);
     };
-    check_normal(*normal)?;
+    let mirrored = ocs_mirrored(*normal)?;
     let n = vertices.len();
     if n > MAX_POLYLINE_VERTICES {
         return Err(BasicError::TooManyVertices {
@@ -380,15 +403,18 @@ pub fn extract_polyline(entity: &RawEntity) -> Result<ExactBasic, BasicError> {
     } else {
         Basis::Equivalent
     };
-    Ok(ExactBasic {
-        kind: BasicKind::Polyline,
-        curve,
-        segments: kinds,
-        closed: *closed,
-        source_range: None,
-        elevation,
-        classification: Classification::supported(basis, class_of(entity)),
-    })
+    into_world(
+        ExactBasic {
+            kind: BasicKind::Polyline,
+            curve,
+            segments: kinds,
+            closed: *closed,
+            source_range: None,
+            elevation,
+            classification: Classification::supported(basis, class_of(entity)),
+        },
+        mirrored,
+    )
 }
 
 /// A circle at `centre` with `radius`, framed on the x axis (a DWG circle has no reference
@@ -415,17 +441,20 @@ pub fn extract_circle(entity: &RawEntity) -> Result<ExactBasic, BasicError> {
     else {
         return Err(BasicError::NotBasic);
     };
-    check_normal(*normal)?;
+    let mirrored = ocs_mirrored(*normal)?;
     let (circle, elevation) = circle_of(center, *radius)?;
-    Ok(ExactBasic {
-        kind: BasicKind::Circle,
-        curve: Curve::Circle(circle),
-        segments: Vec::new(),
-        closed: false,
-        source_range: None,
-        elevation,
-        classification: Classification::supported(Basis::Structural, class_of(entity)),
-    })
+    into_world(
+        ExactBasic {
+            kind: BasicKind::Circle,
+            curve: Curve::Circle(circle),
+            segments: Vec::new(),
+            closed: false,
+            source_range: None,
+            elevation,
+            classification: Classification::supported(Basis::Structural, class_of(entity)),
+        },
+        mirrored,
+    )
 }
 
 /// Extracts an `ARC`: a trimmed circle running counter-clockwise from the start angle to the end
@@ -445,19 +474,22 @@ pub fn extract_arc(entity: &RawEntity) -> Result<ExactBasic, BasicError> {
     else {
         return Err(BasicError::NotBasic);
     };
-    check_normal(*normal)?;
+    let mirrored = ocs_mirrored(*normal)?;
     let (circle, elevation) = circle_of(center, *radius)?;
     let curve = Curve::trimmed_conic(Curve::Circle(circle), *start_angle, *end_angle, true)
         .map_err(|error| degenerate("angles", error))?;
-    Ok(ExactBasic {
-        kind: BasicKind::Arc,
-        curve,
-        segments: Vec::new(),
-        closed: false,
-        source_range: Some((*start_angle, *end_angle)),
-        elevation,
-        classification: Classification::supported(Basis::Equivalent, class_of(entity)),
-    })
+    into_world(
+        ExactBasic {
+            kind: BasicKind::Arc,
+            curve,
+            segments: Vec::new(),
+            closed: false,
+            source_range: Some((*start_angle, *end_angle)),
+            elevation,
+            classification: Classification::supported(Basis::Equivalent, class_of(entity)),
+        },
+        mirrored,
+    )
 }
 
 /// Extracts an `ELLIPSE`: the major-axis vector and the minor/major ratio go to PVec as stored
@@ -478,7 +510,7 @@ pub fn extract_ellipse(entity: &RawEntity) -> Result<ExactBasic, BasicError> {
     else {
         return Err(BasicError::NotBasic);
     };
-    check_normal(*normal)?;
+    let mirrored = ocs_mirrored(*normal)?;
     let elevation = z_of("centre", center[2])?;
     if z_of("major_axis", major_axis[2])? != 0.0 {
         return Err(BasicError::NonPlanar);
@@ -518,15 +550,18 @@ pub fn extract_ellipse(entity: &RawEntity) -> Result<ExactBasic, BasicError> {
     } else {
         (BasicKind::EllipticalArc, Basis::Equivalent)
     };
-    Ok(ExactBasic {
-        kind,
-        curve,
-        segments: Vec::new(),
-        closed: false,
-        source_range: Some((*start_parameter, *end_parameter)),
-        elevation,
-        classification: Classification::supported(basis, class_of(entity)),
-    })
+    into_world(
+        ExactBasic {
+            kind,
+            curve,
+            segments: Vec::new(),
+            closed: false,
+            source_range: Some((*start_parameter, *end_parameter)),
+            elevation,
+            classification: Classification::supported(basis, class_of(entity)),
+        },
+        mirrored,
+    )
 }
 
 /// Extracts whichever basic class the entity's geometry is.

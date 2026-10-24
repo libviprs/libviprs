@@ -38,7 +38,7 @@
 //! When [`EntityState::provider_visible`] differs from the policy answer the filter adds a
 //! [`VisibilityDisagreement`] warning and applies the policy answer.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use super::fidelity::{Classification, FidelityClass};
 use super::provider::{
@@ -165,7 +165,7 @@ impl Default for EntityState {
 /// [`EntityState`] per entity handle. An entity with no entry has the default state.
 #[derive(Debug, Clone, Default)]
 pub struct EntityStates {
-    map: HashMap<ItemHandle, EntityState>,
+    map: BTreeMap<ItemHandle, EntityState>,
 }
 
 impl EntityStates {

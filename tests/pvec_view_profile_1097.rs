@@ -205,6 +205,7 @@ fn n3_3_1097_default_profile_is_pinned_field_by_field() {
         },
         nested_inserts: NestedInsertPolicy { max_depth: 64 },
         xrefs: XrefPolicy::ReportExternal,
+        limits: libviprs::pvec::SourceLimits::default(),
     };
     assert_eq!(ViewProfile::default_profile(), expected);
 }

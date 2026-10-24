@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Basic DWG entities with a -z extrusion normal** (issue #1298, follow-up to #1073). A polyline, circle,
+  arc or ellipse whose normal is exactly (0, 0, -1) is now mapped to world space (a mirror about the y
+  axis through PVec's `Transform2`, elevation negated) instead of refused. Any other normal is 3D and
+  still comes back as `extrusion-not-applied`.
 - **The monochrome line-style component** (issue #1083, part of #1039). `pvec::style` is an
   independent, optional component keyed by `EntityId`: stroke width (`w 0` is `Thinnest`, never a
   zero and never absent), dash array and phase, and a visibility flag, all `f64` in source units.
