@@ -16,7 +16,7 @@ once for four repositories. Panel finding 1 of the epic review says that must no
 is the specification that forbids it, and it lands before any code.
 
 What I read, and pinned: `docs/ISO_PROFILE.md` and `docs/NUMERIC_POLICY.md` in `libviprs/pvec` at
-revision `e64b1a4` (P1.1 and P1.2, accepted as ADR 0001 and 0002 there). Every name and rule number
+revision `fdf87de` (main after P3.7, #83; the profile and policy came in with P1.1 and P1.2, ADR 0001 and 0002 there, and P3.8 added the promotion table to the profile). Every name and rule number
 below is theirs. When that revision moves, the citations in NG-03 and NG-09 are re-checked in the
 same change that moves the pin, and not before.
 
@@ -45,7 +45,8 @@ pub struct Normalized2DGeometry {
     /// A PVec public curve value (P). `None` exactly when `fidelity` is one of the three
     /// classes that produce no geometry (NG-07), and the constructor enforces that.
     geometry: Option<PVecCurve>,
-    /// The extent of `geometry` as PVec reports it, input for the spatial index only (NG-05).
+    /// The box PVec reports for `geometry`, conservative and not always tight, input for the
+    /// spatial index only (NG-05).
     source_bounds: Option<SourceBounds>,
     /// Optional, behind its own handle, resolved through the store of N3.2 (NG-06).
     provenance: Option<ProvenanceHandle>,
@@ -56,14 +57,14 @@ pub struct Normalized2DGeometry {
 
 The record is complete and usable with provenance absent: nothing in `geometry`, `source_bounds`
 or `fidelity` is derived from, or points into, the provenance store, and every consumer in N6 and N7
-has to work on a record whose `provenance` is `None`. `PVecCurve` stands for whatever public type
-P3.1 exports for the curve kinds of NG-03. Its Rust name is PVec's to choose and this ADR never
-names one; I use the profile's construct names instead.
+has to work on a record whose `provenance` is `None`. `PVecCurve` stands for PVec's `Curve` enum from `pvec-geometry` (P3.1, landed), which wraps the
+kinds of NG-03. The sketch keeps the placeholder because N3.1 decides how the record names it, and
+the table below still uses the profile's construct names, not Rust type names.
 
 ### NG-03 The semantic type mapping
 
 The type column is the ISO 10303-42 construct name that `ISO_PROFILE.md` gives the PVec capability
-(libviprs/pvec@e64b1a4), and the section column is the profile section that defines it. A source
+(libviprs/pvec@fdf87de), and the section column is the profile section that defines it. A source
 shape that has no row maps to nothing and is classified under NG-07, never tessellated.
 
 | source shape | PVec semantic type | profile sections | how a source value becomes one |
@@ -98,13 +99,16 @@ geometry (epic, architectural rule); the record carries no CRS and no affine to 
 
 ### NG-05 Source bounds
 
-`source_bounds` is the exact source-space extent of the entity, and it exists for spatial indexing
-input only (N6.4). It is carried, not computed: the adapter takes it from PVec's bounds entry point
-for the stored value. A curve's tight extent needs the mathematics of that curve (an arc's extent is
-not the extent of its end points), so computing it here would be NG-B1. If PVec offers no entry
-point for a kind, `source_bounds` is `None` and the gap is filed under NG-11, not worked around with
-a control-polygon box or a padded box. Nothing may expand, round, union or compare a bound for any
-purpose except handing it to the index builder.
+`source_bounds` is PVec's box for the entity, and it exists for spatial indexing input only (N6.4).
+It is carried, not computed: the adapter takes it from `Curve::bounds` for the stored value, which
+exists for every kind. It is conservative, not tight. PVec computes a closed-form box for lines,
+arcs, ellipses, polylines and Bezier curves up to degree 3, and for splines and higher-degree Bezier
+curves it returns the control hull, which encloses the curve but is not tight (its own doc comment
+says so). So a consumer treats `source_bounds` as an enclosing box that may be larger than the
+curve, which is all an index needs, and never as the curve's extent. Making it tight for a spline
+needs the mathematics of that curve, so computing it here would be NG-B1, and no flag is added to
+say which kind is tight: that would be the adapter restating PVec's rule. Nothing may expand, round,
+union or compare a bound for any purpose except handing it to the index builder.
 
 ### NG-06 Provenance
 
@@ -174,7 +178,7 @@ violates this ADR (NG-V1).
 | NG-B1 | curve evaluator (point, tangent or derivative at a parameter, extent, length) | a second evaluator is a second definition of every curve, and the two will disagree in the last bits that the conformance classes measure | call PVec's evaluator, or `RequiresPVecCapability` |
 | NG-B2 | tessellator (curve to polyline or to tile geometry, inside normalization) | silent tessellation turns an analytic curve into a different locus and loses the fact that it happened; display buffers are PVec's concern | refuse as `Unsupported`, or `RequiresPVecCapability`; the tile path of EPIC L tessellates outside normalization and is untouched |
 | NG-B3 | knot insertion, knot removal, degree elevation, any re-parametrisation of a spline | each changes the structural parameters the exactness classes compare, and needs PVec's knot rules | pass the source knots and control points through whole |
-| NG-B4 | arc-to-NURBS conversion (or any promotion of one curve kind to another) | the promotion table belongs to PVec and the transform ADR; an ad hoc one here would diverge | map to the row in NG-03, or `RequiresExtension` |
+| NG-B4 | arc-to-NURBS conversion (or any promotion of one curve kind to another) | the promotion table lives in PVec's `ISO_PROFILE.md` (P3.8, ADR 0012); an ad hoc one here would diverge | map to the row in NG-03, call PVec's `Curve::to_rational_b_spline` when a spline is wanted, or `RequiresExtension` |
 | NG-B5 | epsilon, tolerance or comparison threshold of any kind, as a constant, a parameter or a default | the numeric policy is the only definition, and a local one is a bug by its own rule | cite and call, per NG-09 |
 | NG-B6 | coordinate equality operator (on points, on records, as `PartialEq` or as a helper) | equality needs the scale term of NP-05, and it is never used to merge or sort; a derived `PartialEq` on `f64` fields would be exact bit comparison passed off as geometric equality | compare through PVec, or compare identities (`EntityKey`) |
 
@@ -186,16 +190,15 @@ closed" test, a "is this arc a full circle" test, a bulge-to-centre computation 
 Where a mapping needs mathematics, the adapter calls PVec. Where PVec has no entry point for it, the
 mapping is `RequiresPVecCapability`, the entity is reported with a stable reason code and the source
 class, and I file the gap against `libviprs/pvec` rather than working around it here. The candidates
-I can see already, from the profile and the prototype's constructors (each is a question for N1.3 to
+I can see already, from the profile and PVec's constructors at the pin (each is a question for N1.3 to
 confirm, not a finding):
 
 - a line segment from two points: the profile wants a unit direction and a trim by length, and
-  producing either is arithmetic on coordinates; the prototype's `Line::new` takes a direction
+  producing either is arithmetic on coordinates; `Line::new` takes a direction
   already, so a segment constructor from two end points is not there;
 - a polyline bulge: centre and radius from a chord and a bulge need trigonometry;
 - an ellipse from a major-axis vector and a ratio: the first semi-axis is the length of a vector and
   the second is a product, and the profile wants an orthonormal frame;
-- bounds of an arc, an ellipse and a spline (NG-05);
 - the angle convention of an arc's trims: the profile says radians, so if a provider reports another
   unit the conversion has a home that is not here.
 
@@ -274,13 +277,14 @@ This is a specification, so it can be accepted before its dependencies finish, b
 clauses cite work that has not landed, and I do not want that to read as settled:
 
 - N3.1 (#1095) implements NG-02. Until it exists, `PVecCurve`, `EntityKey` and `SourceBounds` are
-  placeholders in a sketch, and PVec's in-memory API (P3.1) is not final. This ADR cites construct
-  names for exactly that reason.
+  placeholders in a sketch. PVec's in-memory API (P3.1) has landed at the pin, but this ADR still
+  cites construct names, so the mapping does not depend on a Rust name.
 - N3.5 (#1100) defines the six-way classification. NG-07 relies on its shape and on its rule that
   one enum exists.
 - N1.3 (#1042) confirms or removes each candidate gap in NG-11 against real DWG entities. N1.5
-  (#1044) owns the transform promotion table that NG-B4 defers to, and N1.6 (#1045) adds the Bezier
-  row.
+  (#1044) consumes the promotion table in PVec's `ISO_PROFILE.md` (P3.8) and does not own one; a
+  reader of its issue should know P3.8 settled that an ellipse under shear stays an ellipse, and
+  that `Curve::to_rational_b_spline` is the way to a spline. N1.6 (#1045) adds the Bezier row.
 - N3.2 (#1096) defines the provenance payload and N3.7 (#1102) the entity key and ordering.
 - The semantic-class stream (P3.9, libviprs/pvec#84) is open on the PVec side, and N4.9 (#1233) and
   N6.9 (#1234) are open on this side. NG-12 reserves the place against their issue text, not against
@@ -290,6 +294,5 @@ clauses cite work that has not landed, and I do not want that to read as settled
   so). Nothing here claims more than the profile does.
 
 Open items I am handing on: where derived entities take their `EntityKey` so source order is not
-perturbed (N3.7); whether PVec's bounds are tight or conservative for each kind (NG-05, P3.1); and
-whether a closed polyline's repeated first vertex survives the provider boundary as a vertex or as a
-flag (N1.3).
+perturbed (N3.7); and whether a closed polyline's repeated first vertex survives the provider boundary
+as a vertex or as a flag (N1.3).

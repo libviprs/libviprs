@@ -380,7 +380,11 @@ rav1d = { version = "1.1", default-features = false, features = [
 resvg = { version = "0.48.1", default-features = false, features = ["text"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
-sha2 = "0.11.0"
+# 0.11.1 is the floor on purpose: 0.11.0 loaded sixteen bytes through a four
+# byte retag in its aarch64 backends, which Miri under Stacked Borrows aborts on
+# (#707), and 0.11.1 fixed it (#1248). `tests/dependency_policy.rs` holds a
+# fresh resolve to this floor.
+sha2 = "0.11.1"
 tar = "0.4.45"
 tempfile = "3"
 thiserror = "2"

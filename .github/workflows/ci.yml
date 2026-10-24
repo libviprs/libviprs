@@ -245,6 +245,17 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    env:
+      # Eleven cells run in one `target/`, and each one builds its own copy of
+      # every test binary for its feature set. With full debug info that is
+      # about 11 GB a cell, measured, and the runner ran out of disk in the
+      # `tracing` cell: "No space left on device", then a hang (issue #1261).
+      # `line-tables-only` keeps file and line in a panic backtrace and drops
+      # the variable-level sections, which is about a third of the size
+      # (4.1 GB for the default cell, 3.4 GB for each feature cell after it).
+      # `test` inherits `dev`, but is set explicitly so it cannot drift.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       # Full history, because `tests/changelog_release_claims.rs` answers the
       # CHANGELOG's "has never been in a release" claims with `git grep` over

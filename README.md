@@ -272,6 +272,7 @@ from here for exactly one commit.
 | `frames` | The page model for multi-frame images: how a raster's rows divide into pages |
 | `foreign_stubs` | Typed stubs for the genuinely external formats this build does not link (HEIF/AVIF encode, ImageMagick, DeepZoom buffers) |
 | `cad` | The `CadDecoder` contract and the primitive IR (lines, arcs, splines, text) a CAD drawing decodes into, with curves kept as curves and a structured `DecodeReport` |
+| `vector` | Vector output: MVT tiles, the style and tiling steps that produce them from `cad` primitives, and a vector PMTiles archive writer and reader (`VectorArchiveWriter`, `VectorArchive`) that gzips each tile and records `vector_layers` |
 
 ### Image operations
 
@@ -321,6 +322,7 @@ from here for exactly one commit.
 | `jxl` | off | Enables the JPEG XL loader and lossless encoder: `decode_jxl`, `Raster::encode_jxl`, `Raster::save_jxl`, the `.jxl` row in `Raster::save` and in `encode_to_buffer`. Costs 21 crates (`jxl-oxide`, `zune-jpegxl` and their trees, including `tracing`), which is why it is opt-in; without it every entry point still exists and returns a typed refusal. |
 | `jp2k` | off | Enables the JPEG 2000 loader and encoder: `decode_jp2k`, `Raster::encode_jp2k`, `Raster::save_jp2k`, and the `.jp2` / `.j2k` rows in the content sniffer. Costs **2 crates** (`hayro-jpeg2000` and `openjpeg2-pure-rs`, neither of which has a dependency of its own), so what it buys back is compile time rather than crate count; without it every entry point still exists and returns a typed refusal. |
 | `avif` | off | Enables the AV1 decode inside `decode_avif` (still images only). Costs 16 crates (`rav1d` and its runtime tree); without it the entry point still parses the container, checks the codec and applies all three decode limits, and refuses the decode itself. |
+| `dwg-acadsharp` | off | Enables `cad::acadsharp`, the `acadsharp-rs` DWG provider behind `cad::CadDecoder` (`AcadSharpDecoder`). Needs no .NET at run time: `acadsharp-rs` links a NativeAOT archive its own build script resolves, and a build with no archive still compiles and `AcadSharpDecoder::new` reports `Unlinked` instead of failing. The CAD-neutral `cad` module is not behind a feature. |
 | `serde` | off | Adds public `Serialize` / `Deserialize` derives to the wire and config types (`PyramidPlan`, `EngineConfig`, `TileCoord`, `Layout`, ...) so an out-of-process caller can rebuild a job from JSON. Adds no dependencies. |
 | `test-util` | off | Exposes the crate's test-only sink doubles (`SlowSink`) to dependent crates, chiefly the external `libviprs-tests` suite. Adds no dependencies. |
 
@@ -395,7 +397,7 @@ with the checklist in CONTRIBUTING.md.
 GitHub Actions runs two workflows, eight jobs between them:
 
 **CI**, on every branch push and on pull requests that no push accompanies (`.github/workflows/ci.yml`):
-- `Check & Lint`: `cargo fmt --check`, then `cargo clippy -D warnings` once per feature. That is the default build plus `pdfium`, `object-store-sink`, `tracing`, `avif`, `svg`, `jxl`, `packfile`, `serde` and `jp2k`, because code behind any other `cfg` used to be linted by nothing, and a `cargo build --features s3` for the deprecated alias
+- `Check & Lint`: `cargo fmt --check`, then `cargo clippy -D warnings` once per feature. That is the default build plus `pdfium`, `object-store-sink`, `tracing`, `avif`, `svg`, `jxl`, `packfile`, `serde`, `jp2k` and `dwg-acadsharp`, because code behind any other `cfg` used to be linted by nothing, and a `cargo build --features s3` for the deprecated alias
 - `MSRV`: `cargo check` on the pinned toolchain, once per feature family that declares no `rust-version` of its own, plus a guard that the three written-out MSRV claims still agree. The version stays out of the job name on purpose: branch protection matches a required check by its exact name, so a bump that renamed the job would leave every open PR waiting on a context no run produces (#1011)
 - `Docs (deny broken, private and redundant intra-doc links)`: `cargo doc --no-deps --all-features`, with each of those three denied
 - `Test`: `cargo test`, once per feature that gates code, because a feature nobody names compiles its bodies out and runs zero assertions
@@ -444,7 +446,7 @@ filesystem.
 
 ```sh
 make fmt      # check formatting
-make clippy   # clippy over the default build and each of the nine features CI lints
+make clippy   # clippy over the default build and each of the ten features CI lints
 make test     # bare `cargo test`, which is the Test job's first cell of nine
 make doc      # the Docs job
 make miri     # miri (requires nightly + miri component)
@@ -452,8 +454,8 @@ make loom     # `loom_tests`, which is the Loom job's first invocation of two
 ```
 
 > **Prerequisites:** `make ci` needs Docker running and PyYAML (`pip3 install pyyaml`).
-> Budget disk for it: the whole job list compiles ten clippy feature permutations,
-> nine test ones and seven more under the 1.99 toolchain, and each gets its own
+> Budget disk for it: the whole job list compiles eleven clippy feature permutations,
+> eleven test ones and seven more under the 1.99 toolchain, and each gets its own
 > artifact set on the `libviprs-ci-cargo` volume rather than replacing the last.
 > `make miri` requires a nightly toolchain with the miri component, at or above this
 > crate's MSRV; the `Makefile` pins a dated one and explains why.

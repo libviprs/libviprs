@@ -12,12 +12,14 @@ seven transform classes of the issue.
 
 ## What I measured, and against what
 
-I pushed nine fixtures through one instance of each transform class using PVec's own transform entry
-point (`Curve2d::transform` in `pvec-geometry`, P3.8, libviprs/pvec#49 closed by libviprs/pvec#81),
+I pushed nine fixtures (plus one closed ring for the orientation probe) through one instance of each
+transform class using PVec's own transform entry point (`Curve2d::transform` in `pvec-geometry`, P3.8, libviprs/pvec#49 closed by libviprs/pvec#81),
 at libviprs/pvec revision `1f7561e`. Every promotion target below is what that call returned, and
 every comparison goes through `Policy::V1` of `pvec-numeric`: PVec numeric policy v1, NP-04 for the
 tolerance and NP-05 for equality. The numbers come from `transform-matrix/results-x64.tsv`, written
-by `transform-matrix/run.sh` on native x86_64 (MARS, rustc 1.99.1). Nothing in the harness defines
+by `transform-matrix/run.sh` on native x86_64 (MARS, rustc 1.99.1), and the same harness was run on native
+arm64 into `transform-matrix/results-arm64.tsv` (`run.sh arm64`). The tables and prose quote the x64 file
+unless they say arm64. Nothing in the harness defines
 a tolerance, evaluates a curve or flattens one: it carries no numeric literal of its own for either,
 and a test fails if it grows one.
 
@@ -44,6 +46,7 @@ Fixtures (parameters, not drawings; the probes of O1.6 in libviprs/pvec-gold-fix
 | F7 | elliptical arc | the ellipse of F6, trim 0.4 to 4.0, sense true |
 | F8 | b-spline | degree 3, six control points, clamped knots 0,0,0,0,1,2,3,3,3,3 |
 | F9 | nurbs | degree 2, five control points, knots 0,0,0,1,2,3,3,3, weights 1, 0.7, 1.4, 1, 0.9 |
+| F10 | closed polyline (probe only, not a matrix row) | the ring (0,0) (4,0) (4,3) (0,3) (0,0), counter-clockwise, so a winding exists to flip |
 
 Transform instances (one per class, plus the cases the issue singles out):
 
@@ -60,12 +63,20 @@ Transform instances (one per class, plus the cases the issue singles out):
 | T9 | near-singular, below | scale(1, 0.5 x the policy REL), refused side of the NP-19 bound |
 | T10 | near-singular, above | scale(1, 2 x the policy REL), accepted side of the NP-19 bound |
 | T11 | non-finite coefficient | a NaN in the first entry |
+| T12 | conditioning, inside the NP-07 bound | scale(1, 4 / the policy's axis ratio bound), so a circle comes out at a quarter of the bound |
+| T13 | conditioning, outside the NP-07 bound | scale(1, 0.25 / the policy's axis ratio bound), so a circle comes out at four times the bound |
 
 ## The matrix
 
 Each cell is the exact target PVec semantic type after the transform, or an N3.5 classification with
 its stable reason code, followed by the evidence id of the measurement behind it. The type names are
 the ISO 10303-42 construct names of the PVec profile, as in NG-03.
+
+One caveat on those strings: they are what the harness's own `kind_name()` prints for the Rust enum
+variant PVec returned (so `b_spline_curve_with_knots` and `rational_b_spline_curve`, and `trimmed_curve over
+circle` for a trimmed variant over a circle). They are not read out of PVec's capability registry, whose
+names differ slightly (ISO_PROFILE.md section 13 calls the capability `b_spline_curve`). A cell therefore
+says "this variant came back", and mapping a variant to a registry capability name is a lookup `N1.8` has to do.
 
 | Row | Translation | Rotation | Uniform scale | Non-uniform scale | Reflection | Shear / general affine | Singular |
 |---|---|---|---|---|---|---|---|
@@ -122,14 +133,28 @@ is orientation and parameter direction, and both are reproducible from the recor
 - Reversed flag: the stored canonical form flips from reversed_before=false to
   reversed_after=true.
 - Basis: the new circle is centred at (3.000000000,2.000000000), radius 5.000000000, and its frame is
-  re-expressed right-handed, reference direction (1.000000000,0.000000000).
+  re-expressed right-handed (frame_after=right: PVec's placement stores only the first axis and derives
+  the second a quarter turn on, so a left-handed frame cannot be built), reference direction
+  (1.000000000,0.000000000).
 
-To redo it by hand with only the profile's rules: the basis parameter map is `t' = t0 - t` because the
+To redo it by hand with only the profile's rules: the basis parameter map is `t' = t0 - t` (visible on the
+untrimmed circle, param_scale=-1 in E41, since E40 records the trimmed parameter, scale 1) because the
 determinant is negative, where `t0` is the profile's shift for the image axes (zero here, since the images of
 the two axes are already orthogonal). The trim ends map to {-0.3, -2.1} with the sense inverted by the
 reflection, so sense false, and NP-11 normalises a false-sense pair to the increasing interval starting
 at the smaller end plus the reversed flag. That gives trim start 4.183185307 (which is 2 pi minus 2.1)
-and span 1.800000000, matching the measurement. The ellipse arc F7 behaves the same way (E43).
+and span 1.800000000, matching the measurement. The ellipse arc F7 behaves the same way (E43, with the ellipse basis reversal in E42).
+
+### Bulge composite under non-uniform scale
+
+The matrix cell says `composite_curve`, which is true at the level the cell names, so the record also
+keeps what the segments became. F3 is a trimmed line followed by a trimmed circle (a quarter arc). Under
+the non-uniform scale T4 (E30) the segments come back as trimmed_curve over line+trimmed_curve over ellipse,
+and under the general affine T6 (E48) the same: the arc segment becomes a trimmed ellipse and the line stays
+a line. Under translation, rotation, uniform scale and reflection the arc stays a trimmed circle. In every
+record joints_kept=true: each segment end still meets the next segment start under NP-17, and the segment
+count is unchanged. N3.4 checks the composite's returned segment kinds against those strings, not only the
+top-level kind.
 
 ### Ellipse under shear
 
@@ -176,31 +201,47 @@ conditioning rule matters, see below.
 ### Conditioning exit
 
 A map can pass NP-19 and still produce a conic whose semi-axes are too far apart. PVec numeric policy
-v1, NP-07 refuses that image, and nothing falls back to anything else. Measured on the accepted-side map,
-the circle, the ellipse, both arcs and the bulge composite (which contains an arc) are refused with NP-07
-(E84 to E88), while the line, the polyline, the B-spline and the NURBS are accepted (E82, E83, E89, E90),
-since a hull that goes linear is a legal curve under NP-08. A conic cell in the matrix is therefore
-exact for every map NP-07 allows and `Unsupported` with the code `TRANSFORM_CONIC_ILL_CONDITIONED` for
-the rest. I did not move the line between the two, PVec does.
+v1, NP-07 refuses that image, and nothing falls back to anything else. Measured on the accepted-side map
+of the NP-19 bracket (T10), the circle, the ellipse, both arcs and the bulge composite (which contains an
+arc) are refused with NP-07 (E84 to E88), while the line, the polyline, the B-spline and the NURBS are
+accepted (E82, E83, E89, E90), since a hull that goes linear is a legal curve under NP-08.
+
+That T10 result is far past the NP-07 bound, so it alone does not bracket it. Two more maps do, each
+derived from the policy's axis ratio constant by name: T12 puts a circle at a quarter of the bound and
+T13 at four times the bound (the ellipse and arcs land within a factor of two of that, which the margin
+absorbs). Inside the bound every fixture is accepted and the conics stay conics, with a worst deviation
+under the NP-04 tolerance (E108 to E116). Outside it the circle, the ellipse, both arcs and the bulge
+composite are refused with NP-07 (E119 to E123) and the line, polyline, B-spline and NURBS are still
+accepted (E117, E118, E124, E125). So the bound is bracketed on both sides at the conic rows, but only
+at a factor of four, and the exact line is PVec's rule, which I quote and did not locate. A conic cell in
+the matrix is therefore a result for the maps tested and for whatever NP-07 allows, and `Unsupported`
+with the code `TRANSFORM_CONIC_ILL_CONDITIONED` for the rest. I did not move the line between the two,
+PVec does.
 
 ## Reflection rows
 
-Orientation here means the turning direction of the traversal in source parameter order, as measured by
-the sign of the cross product of the first and second derivative at the middle of the domain. Parameter
-direction is how the transformed curve's own parameter relates to the source parameter (`t_new = offset + scale * t`,
-the `ParamMap` of PVec).
+Orientation here means the turning direction of the traversal, as measured by the sign of the cross
+product of the first and second derivative at the middle of the domain (sweep_before and sweep_after,
+taken on the curve PVec returned, in its own parameter). Where PVec reverses the parameter map
+(param_scale=-1, the untrimmed conics) the new curve runs the same way in its own parameter, so in source
+parameter order the traversal turns the other way, which is what "in source order" below means. A polyline
+is straight between its vertices and a composite has joints in the middle, so a polyline's orientation is the
+winding of a closed ring (F10, E127, with the rotation E126 as control, where it does not flip), and a
+composite's is the sweep of each segment (segment_sweeps_before and segment_sweeps_after). Parameter
+direction is how the transformed curve's own parameter relates to the source parameter
+(`t_new = offset + scale * t`, the `ParamMap` of PVec).
 
 | row | orientation | parameter direction | evidence |
 |---|---|---|---|
-| line | the direction is reflected, nothing turns | unchanged, the trim keeps its numbers (the length of the image of the direction is one), reversed flag stays false | E37 |
-| polyline | vertex order kept, so a closed ring's winding flips | unchanged, vertex i stays at parameter i | E38 |
-| polyline with bulge | segment order and joints kept, every bulge arc turns the other way | unchanged, segment k stays in [k, k+1] | E39 |
-| circular arc | sweep flips ccw to cw, end points and their order kept | the basis parameter reverses (`t' = t0 - t`), the trimmed parameter does not, reversed flag toggles | E40 |
-| circle | the locus is mirrored, the new frame is right-handed | reverses, scale minus one | E41 |
-| ellipse | as the circle, axes re-expressed orthogonal and major first | reverses, scale minus one | E42 |
-| elliptical arc | sweep flips, end points and their order kept | basis reverses, trimmed parameter does not, reversed flag toggles | E43 |
-| b-spline | control points reflected in the same order, so the turning flips | unchanged, knots untouched | E44 |
-| nurbs | as the b-spline, weights unchanged | unchanged, knots and weights untouched | E45 |
+| line | the direction is reflected, nothing turns (straight before and after) | unchanged, the trim keeps its numbers (the length of the image of the direction is one), reversed flag stays false | E37 |
+| polyline | vertex order kept, so a closed ring's winding flips (ccw to cw, E127) | unchanged, vertex i stays at parameter i (the open polyline E38 has scale 1) | E38 E127 |
+| polyline with bulge | segment order and joints kept, every bulge arc turns the other way (straight+ccw to straight+cw) | unchanged, segment k stays in [k, k+1] | E39 |
+| circular arc | sweep flips (ccw to cw), end points and their order kept | the basis parameter reverses (`t' = t0 - t`, scale -1 on the circle E41), the trimmed parameter does not, reversed flag toggles | E40 E41 |
+| circle | the locus is mirrored, the new frame is right-handed, and the new curve still runs ccw, so the traversal turns ccw to cw in source order | reverses, scale minus one | E41 |
+| ellipse | as the circle (right-handed frame, ccw to cw in source order), axes re-expressed orthogonal and major first | reverses, scale minus one | E42 |
+| elliptical arc | sweep flips (ccw to cw), end points and their order kept | basis reverses (scale -1 on the ellipse E42), trimmed parameter does not, reversed flag toggles | E43 E42 |
+| b-spline | control points reflected in the same order, so the turning flips (cw to ccw) | unchanged, knots untouched | E44 |
+| nurbs | as the b-spline (cw to ccw), weights unchanged | unchanged, knots and weights untouched | E45 |
 
 ## Diagnostics
 
@@ -210,7 +251,7 @@ measured against. `N1.8` freezes the names.
 | code | N3.5 class | PVec rule | when |
 |---|---|---|---|
 | `TRANSFORM_SINGULAR` | `Unsupported` | NP-19 | the composed map is singular or near-singular (E55, E73) |
-| `TRANSFORM_CONIC_ILL_CONDITIONED` | `Unsupported` | NP-07 | the map is usable but the image of a circle or ellipse is too eccentric (E84) |
+| `TRANSFORM_CONIC_ILL_CONDITIONED` | `Unsupported` | NP-07 | the map is usable but the image of a circle or ellipse is too eccentric (E84, E119) |
 | `TRANSFORM_NON_FINITE` | `Unsupported` | NP-01 | a coefficient of the map is not a finite number (E91) |
 
 ## Handed on
@@ -230,7 +271,8 @@ measured against. `N1.8` freezes the names.
   exact control-point comparison and the pointwise one is only self-consistency. An independent
   evaluator belongs to the geometry oracle and to the probes of O1.6 (libviprs/pvec-gold-fixtures#7), which
   are not available yet.
-- Only native x86_64 was run. I did not run arm64, so a last-bit difference between the two is not ruled out.
+- Both native x86_64 (MARS) and native arm64 (Apple Silicon, `docker run --platform linux/arm64`) were run, and
+  nothing else was: other architectures and compilers are not covered.
 - Provider-side transform extraction from a real DWG insert (N4.4) is not exercised, because the fixtures are
   built from parameters.
 - The rational form was checked for success and size here. Its locus deviation was measured by PVec in
@@ -241,7 +283,13 @@ measured against. `N1.8` freezes the names.
 Worst observed deviation under the NP-04 tolerance for every measured record. The deviation is in
 coordinate units, the ratio is deviation over tolerance, and a dash is a refusal (no curve, so nothing
 to measure) or the rational-form conversion. The largest deviation of any accepted case is 5.443e-15
-(E33), and the largest ratio is 6.328e-6 (E67).
+(E33), and the largest ratio is 6.328e-6 (E67). These are the x64 values.
+
+The arm64 run (`results-arm64.tsv`, same pinned PVec, same image, same 127 records) agrees on every verdict:
+same kinds, outcomes, rules, notes, parameter maps and trims. The last digits of the deviation and the ratio
+differ in 10 of the 127 records (E6, E7, E15, E42, E46, E48, E49, E50, E67, E70) and nothing else differs,
+so the verdicts are architecture independent. The largest arm64 ratio is 5.691e-6 (E67) and the largest arm64
+deviation is 5.617e-15 (E50), both still far under the tolerance.
 
 | id | fixture | transform | worst deviation | ratio to NP-04 tolerance |
 |---|---|---|---|---|
@@ -352,3 +400,23 @@ to measure) or the rational-form conversion. The largest deviation of any accept
 | E105 | F6 | rational-form | - | - |
 | E106 | F7 | rational-form | - | - |
 | E107 | F7 | rational-form | - | - |
+| E108 | F1 | T12 | 8.882e-16 | 2.691e-6 |
+| E109 | F2 | T12 | 3.388e-21 | 6.787e-12 |
+| E110 | F3 | T12 | 8.470e-22 | 1.412e-12 |
+| E111 | F4 | T12 | 3.388e-21 | 4.641e-12 |
+| E112 | F5 | T12 | 6.776e-21 | 6.776e-12 |
+| E113 | F6 | T12 | 1.776e-15 | 2.599e-6 |
+| E114 | F7 | T12 | 1.554e-15 | 2.635e-6 |
+| E115 | F8 | T12 | 1.694e-21 | 2.420e-12 |
+| E116 | F9 | T12 | 5.082e-21 | 6.353e-12 |
+| E117 | F1 | T13 | 8.882e-16 | 2.691e-6 |
+| E118 | F2 | T13 | 2.118e-22 | 4.242e-13 |
+| E119 | F3 | T13 | - | - |
+| E120 | F4 | T13 | - | - |
+| E121 | F5 | T13 | - | - |
+| E122 | F6 | T13 | - | - |
+| E123 | F7 | T13 | - | - |
+| E124 | F8 | T13 | 1.059e-22 | 1.513e-13 |
+| E125 | F9 | T13 | 3.176e-22 | 3.970e-13 |
+| E126 | F10 | T2 | 9.155e-16 | 1.330e-6 |
+| E127 | F10 | T5 | 0.000e0 | 0.000e0 |

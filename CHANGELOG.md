@@ -105,6 +105,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The `sha2` Miri backend pin is gone, and `sha2` is floored at 0.11.1**
+  (issues #1248, #707, #731). sha2 0.11.1 loads its aarch64 round constants
+  through slices of the right width, which is the fix the pin was waiting for,
+  so `--cfg sha2_backend="soft"` is out of the `Makefile`'s `miri` recipe and
+  `merge-gate.yml`'s `miri` job, and `Cargo.toml` no longer admits 0.11.0. The
+  test that demanded exactly 0.11.0 now demands at least 0.11.1.
+
 - **`PrimitiveKind::ALL` is a `&'static [PrimitiveKind]`** (issue #1107). It
   was `[PrimitiveKind; 8]`, which put the variant count in the public type of a
   `#[non_exhaustive]` enum, so a ninth shape would have broken anyone who

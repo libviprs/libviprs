@@ -261,6 +261,24 @@ const EXPECTED: &[(&str, Coverage)] = &[
         ),
     ),
     (
+        "dwg-acadsharp",
+        cov(
+            true,
+            false,
+            false,
+            "gates `cad::acadsharp::AcadSharpDecoder` (issue #1030), which \
+             compiles without the native NativeAOT archive, so the lint job \
+             type-checks the adapter everywhere. The Test job runs only \
+             `cargo test --features dwg-acadsharp --test \
+             cad_1030_acadsharp_decoder`, not the bare cell this table \
+             means by `test`: without the pinned libviprs-dep archive the \
+             native tests skip, so a whole-suite run would repeat the default \
+             suite for nothing. No MSRV cell: the feature adds one crate, \
+             `acadsharp-rs`, and it declares a rust-version (measured with \
+             `cargo metadata` over the resolve graph)",
+        ),
+    ),
+    (
         "jp2k",
         cov(
             true,

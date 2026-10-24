@@ -34,6 +34,87 @@ fn clause(doc: &str, id: &str) -> String {
     rest[..end].to_string()
 }
 
+/// The pvec revision the ADR cites (`libviprs/pvec` main after P3.7, #83). It moves only together
+/// with `NP_HEADINGS` below and with a re-check of every citation in NG-03 and NG-09.
+const PIN: &str = "fdf87de";
+
+/// The `### NP-nn Title` headings of `docs/NUMERIC_POLICY.md` at `PIN`, lowercased. The numbers are
+/// the index plus one. A citation is only right when the heading it lands on is about the question.
+const NP_HEADINGS: [&str; 20] = [
+    "finite and normal values",
+    "coordinate magnitude",
+    "negative zero",
+    "the tolerance triple",
+    "equality",
+    "degenerate length",
+    "zero radius and conditioning",
+    "coincident control points and degenerate hulls",
+    "orientation",
+    "direction",
+    "periodic parameter normalisation",
+    "trim domains",
+    "parameter domain and unit map",
+    "knots",
+    "weights",
+    "continuity and one-sided derivatives",
+    "composite joints",
+    "maximum counts and dimensions",
+    "affine transforms",
+    "closed flag",
+];
+
+/// (a word from the question cell of the NG-09 row, the rules that row must cite, each with a word
+/// its heading at `PIN` must contain)
+type Ng09Row = (&'static str, &'static [(usize, &'static str)]);
+const NG09_ROWS: &[Ng09Row] = &[
+    ("are two values equal", &[(5, "equality")]),
+    ("finite and normal", &[(1, "finite"), (2, "magnitude")]),
+    ("degenerate", &[(6, "length"), (7, "radius")]),
+    ("direction", &[(10, "direction")]),
+    ("full period", &[(11, "periodic"), (12, "trim")]),
+    (
+        "knots, weights",
+        &[(14, "knots"), (15, "weights"), (18, "counts")],
+    ),
+    ("composite joint", &[(17, "joints"), (20, "closed")]),
+    ("affine map", &[(19, "affine")]),
+];
+
+/// The rule numbers cited in a piece of text, in order.
+fn np_numbers(text: &str) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(i) = rest.find("NP-") {
+        let tail = &rest[i + 3..];
+        let digits: String = tail.chars().take_while(|c| c.is_ascii_digit()).collect();
+        out.push(digits.parse().unwrap_or(0));
+        rest = &tail[digits.len()..];
+    }
+    out
+}
+
+/// Holds one NG-09 row to the headings of the pinned policy: it must cite exactly the expected
+/// rules, and each cited rule's heading must carry the expected word. Err names what is wrong.
+fn check_ng09_row(row: &str, expected: &[(usize, &str)]) -> Result<(), String> {
+    let cells: Vec<&str> = row.split('|').map(str::trim).collect();
+    let cited = np_numbers(cells.get(2).copied().unwrap_or(""));
+    let want: Vec<usize> = expected.iter().map(|(n, _)| *n).collect();
+    if cited != want {
+        return Err(format!(
+            "cites NP-{cited:?}, the pinned policy says {want:?}: {row}"
+        ));
+    }
+    for (n, word) in expected {
+        let heading = NP_HEADINGS[n - 1];
+        if !heading.contains(word) {
+            return Err(format!(
+                "NP-{n:02} is `{heading}` at {PIN}, not about `{word}`: {row}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn lower(s: &str) -> String {
     s.to_lowercase()
 }
@@ -102,8 +183,16 @@ fn ac1_the_mapping_cites_a_pinned_profile_revision_not_a_branch() {
         "NG-03 must name the profile it maps to"
     );
     assert!(
-        t.contains("libviprs/pvec@e64b1a4"),
+        t.contains(&format!("libviprs/pvec@{PIN}")),
         "NG-03 must pin the PVec revision it cites, so the names cannot drift silently"
+    );
+    assert!(
+        doc.contains(&format!("revision `{PIN}`")),
+        "the Context section must name the same pinned revision as NG-03"
+    );
+    assert!(
+        !doc.contains("e64b1a4"),
+        "the old pin is still mentioned, so some citation was not re-checked against the new one"
     );
 }
 
@@ -207,6 +296,105 @@ fn ac3_numeric_questions_are_answered_by_citation() {
         rest = &tail[digits.len()..];
     }
     assert!(seen >= n);
+}
+
+#[test]
+fn ac3_each_row_cites_the_rules_whose_headings_are_about_its_question() {
+    let doc = adr();
+    let t = clause(&doc, "NG-09");
+    for (key, expected) in NG09_ROWS {
+        let row = t
+            .lines()
+            .find(|l| l.starts_with('|') && lower(l.split('|').nth(1).unwrap_or("")).contains(key))
+            .unwrap_or_else(|| panic!("NG-09 has no row for `{key}`"));
+        if let Err(e) = check_ng09_row(row, expected) {
+            panic!("NG-09 row `{key}` {e}");
+        }
+    }
+    let rows = t
+        .lines()
+        .filter(|l| l.starts_with("| ") && !l.contains("question"))
+        .count();
+    assert_eq!(
+        rows,
+        NG09_ROWS.len(),
+        "NG-09 has a row this check does not know"
+    );
+}
+
+#[test]
+fn ac3_the_row_check_rejects_a_swapped_rule_number() {
+    let good = "| are two values equal, are two points equal | PVec numeric policy v1, NP-05 |";
+    let swapped = "| are two values equal, are two points equal | PVec numeric policy v1, NP-09 |";
+    assert!(check_ng09_row(good, &[(5, "equality")]).is_ok());
+    assert!(check_ng09_row(swapped, &[(5, "equality")]).is_err());
+    // right set of numbers, wrong order of meaning: the heading word guards a stale table too
+    assert!(check_ng09_row(good, &[(5, "orientation")]).is_err());
+}
+
+#[test]
+fn every_np_citation_in_the_document_resolves_to_a_heading_at_the_pin() {
+    let doc = adr();
+    for n in np_numbers(&doc) {
+        assert!(
+            (1..=NP_HEADINGS.len()).contains(&n),
+            "NP-{n} is not a rule in PVec numeric policy v1 at {PIN}"
+        );
+    }
+}
+
+// ------------------------------------------------ clauses re-checked at the new pin
+
+#[test]
+fn ng05_says_pvecs_bound_and_not_exact_and_agrees_with_ng02() {
+    let doc = adr();
+    let t = lower(&clause(&doc, "NG-05"));
+    assert!(
+        !t.contains("exact"),
+        "NG-05 calls the bound exact, PVec does not"
+    );
+    for w in ["conservative", "not tight", "spline", "control hull"] {
+        assert!(t.contains(w), "NG-05 does not say `{w}`");
+    }
+    assert!(
+        lower(&clause(&doc, "NG-02")).contains("conservative"),
+        "NG-02 must describe source_bounds the way NG-05 does"
+    );
+}
+
+#[test]
+fn ng_b4_points_at_pvecs_conversion_and_status_has_no_promotion_table_here() {
+    let doc = adr();
+    let row = clause(&doc, "NG-10")
+        .lines()
+        .find(|l| l.contains("NG-B4"))
+        .expect("NG-B4 row")
+        .to_string();
+    assert!(row.contains("Curve::to_rational_b_spline"), "NG-B4: {row}");
+    assert!(
+        row.contains("ISO_PROFILE.md"),
+        "NG-B4 must name the table's home: {row}"
+    );
+    let st = doc
+        .split("## Status and dependencies")
+        .nth(1)
+        .expect("status");
+    assert!(!st.contains("owns the transform promotion table"));
+    assert!(st.contains("ISO_PROFILE.md") && st.contains("P3.8"));
+    assert!(st.contains("ellipse") && st.contains("shear"));
+}
+
+#[test]
+fn ng11_no_longer_lists_bounds_or_calls_p3_1_a_prototype() {
+    let doc = adr();
+    let t = lower(&clause(&doc, "NG-11"));
+    assert!(
+        !t.contains("bounds of an arc"),
+        "bounds() exists for every kind at the pin"
+    );
+    assert!(!t.contains("prototype"), "P3.1 has landed");
+    let st = lower(doc.split("## Status and dependencies").nth(1).unwrap());
+    assert!(!st.contains("not final"), "P3.1 has landed");
 }
 
 #[test]
