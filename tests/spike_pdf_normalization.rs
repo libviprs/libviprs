@@ -391,31 +391,66 @@ fn ac3_states_precisely_whether_a_dwg_pdf_pair_was_measured() {
         sec.contains("pvec-gold-fixtures#1"),
         "the section must name the Epic O tracker"
     );
-    let measured = root()
-        .join("docs/spikes/pdf-normalization/results-pair.tsv")
-        .exists();
-    if measured {
+    // #1240 closes with this PR, so the pair has to exist and the section has to say plainly that
+    // the criterion is met, for which kind of pair, and on which files.
+    let pair = results("results-pair.tsv");
+    assert!(
+        sec.trim_start().starts_with(&format!("Met, for an {LABEL}")),
+        "the section must open by saying the criterion is met, and for which kind of pair"
+    );
+    assert!(
+        !low.contains("not met"),
+        "the section says both met and not met"
+    );
+    assert!(
+        low.contains("searched"),
+        "the section must record where I looked for an AutoCAD-class pair"
+    );
+    for f in ["`pair.dwg`", "`pair.pdf`", "results-pair.tsv"] {
+        assert!(sec.contains(f), "the section does not name {f}");
+    }
+    // The provenance sentence states the entity and layer counts of the DWG; both must be the
+    // read-back counts in results-pair.tsv, not the generator's intent.
+    let entities: i64 = PAIR_CLASSES
+        .iter()
+        .map(|c| {
+            pair.get(&("pair.dwg".to_string(), format!("dwg_{c}")))
+                .unwrap_or_else(|| panic!("results-pair.tsv has no dwg_{c}"))
+                .parse::<i64>()
+                .unwrap()
+        })
+        .sum();
+    let flat = sec.replace('\n', " ");
+    let stated: i64 = flat
+        .split(" entities")
+        .next()
+        .and_then(|s| s.split_whitespace().last())
+        .and_then(|n| n.parse().ok())
+        .expect("the section does not state the DWG's entity count as `<n> entities`");
+    assert_eq!(
+        stated, entities,
+        "the section says the DWG has {stated} entities, the read-back in results-pair.tsv counts {entities}"
+    );
+    let layers: Vec<&str> = pair
+        .keys()
+        .filter(|(f, _)| f == "pair.dwg")
+        .filter_map(|(_, k)| k.strip_prefix("dwg_layer_"))
+        .collect();
+    assert!(!layers.is_empty(), "results-pair.tsv records no DWG layers");
+    for l in &layers {
         assert!(
-            low.contains("measured"),
-            "a pair file exists but the section does not report the counts"
-        );
-    } else {
-        assert!(
-            low.contains("not met") || low.contains("not measured"),
-            "no pair was measured, and the section must say so plainly"
-        );
-        assert!(
-            sec.split(|c: char| !c.is_ascii_alphanumeric() && c != '#')
-                .any(|w| w.starts_with('#')
-                    && w.len() > 2
-                    && w[1..].chars().all(|c| c.is_ascii_digit())),
-            "the unmet criterion must point at the follow-up issue"
-        );
-        assert!(
-            low.contains("searched"),
-            "the section must record where I looked for a pair"
+            sec.contains(&format!("`{l}`")),
+            "layer {l} from results-pair.tsv is not named in the section"
         );
     }
+    let words = ["zero", "one", "two", "three", "four", "five", "six"];
+    let n = words
+        .get(layers.len())
+        .expect("more layers than this check spells out");
+    assert!(
+        flat.contains(&format!("{n} layers")),
+        "the section does not say the DWG has {n} layers, which is what results-pair.tsv records"
+    );
 }
 
 #[test]
