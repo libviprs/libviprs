@@ -164,20 +164,17 @@ fn insert_grid_breach() {
 
 #[test]
 fn nesting_that_is_legal_at_every_level_is_bounded_together() {
-    // Each INSERT is 10 x 10 = 100, under the grid ceiling, and the depth is 3, under the
-    // depth ceiling, but the product 100 * 100 * 100 = 1e6 is not.
+    // Each INSERT is 10 x 10 = 100, under the grid ceiling, and the depth is 2, under the
+    // depth ceiling, but placing the inner grid in every instance of the outer one is
+    // 100 + 100 * 100 = 10100 instances, over the 1000 ceiling.
     let mut l = tight();
     l.max_block_depth = 8;
     let mut g = SourceGuard::new(l);
     g.enter_block("A", grid(10, 10)).unwrap();
-    // 100 so far.
-    g.enter_block("B", grid(10, 10)).unwrap();
-    // 100 + 100 * 100 = 10100 > 1000.
-    let e = g.enter_block("C", grid(10, 10)).unwrap_err();
+    let e = g.enter_block("B", grid(10, 10)).unwrap_err();
     let (limit, observed, ceiling) = exceeded(e);
     assert_eq!(limit, Limit::ExpandedInstances);
-    assert!(observed > ceiling);
-    assert_eq!(ceiling, 1000);
+    assert_eq!((observed, ceiling), (10100, 1000));
 }
 
 #[test]
@@ -224,7 +221,7 @@ fn explicit_charge_counts_against_the_same_ceiling() {
     g.charge(60).unwrap();
     let e = g.charge(60).unwrap_err();
     assert_eq!(exceeded(e), (Limit::AllocationBytes, 120, 100));
-    assert_eq!(g.charge(u64::MAX).is_err(), true, "no overflow on a huge charge");
+    assert!(g.charge(u64::MAX).is_err(), "no overflow on a huge charge");
 }
 
 #[test]
@@ -247,7 +244,10 @@ fn name_lengths_are_checked_for_layer_block_and_class() {
 
     let mut ent = line();
     ent.provenance.class_name = "a_very_long_class_name".to_string();
-    assert_eq!(exceeded(g.check_entity(&ent).unwrap_err()).0, Limit::NameBytes);
+    assert_eq!(
+        exceeded(g.check_entity(&ent).unwrap_err()).0,
+        Limit::NameBytes
+    );
 }
 
 #[test]

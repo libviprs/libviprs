@@ -16,7 +16,7 @@
 
 use thiserror::Error;
 
-use super::provider::{ArrayGrid, RawEntity};
+use super::provider::{ArrayGrid, Point3, RawEntity, RawGeometry, RawVertex, SourceFact};
 
 /// The ceilings for one conversion.
 ///
@@ -54,7 +54,8 @@ pub struct SourceLimits {
     /// half of what the raster ceiling in `pdf` allows.
     pub max_allocation_bytes: u64,
     /// Longest layer, block or class name, in bytes. DWG itself caps names at 255
-    /// characters, so a longer one is not from a conforming writer.
+    /// characters, at most 1020 bytes of UTF-8, so a longer one is not from a
+    /// conforming writer.
     pub max_name_bytes: usize,
 }
 
@@ -166,14 +167,40 @@ pub enum LimitError {
 #[derive(Debug, Clone)]
 pub struct SourceGuard {
     limits: SourceLimits,
+    entities: u64,
+    allocated: u64,
+    expanded: u64,
+    /// Block names entered, outermost first.
+    stack: Vec<String>,
+    /// The instance multiplier at each level of `stack`: the product of the grids
+    /// down to and including that level, saturating.
+    multipliers: Vec<u64>,
+}
+
+fn over(limit: Limit, observed: u64, ceiling: u64) -> LimitError {
+    LimitError::Exceeded {
+        limit,
+        observed,
+        ceiling,
+    }
+}
+
+fn len_u64(n: usize) -> u64 {
+    u64::try_from(n).unwrap_or(u64::MAX)
 }
 
 impl SourceGuard {
     /// A guard with nothing counted yet.
     #[must_use]
     pub fn new(limits: SourceLimits) -> Self {
-        let _ = limits;
-        todo!()
+        Self {
+            limits,
+            entities: 0,
+            allocated: 0,
+            expanded: 0,
+            stack: Vec::new(),
+            multipliers: Vec::new(),
+        }
     }
 
     /// The limits in force.
@@ -185,36 +212,110 @@ impl SourceGuard {
     /// Entities counted so far.
     #[must_use]
     pub fn entities_seen(&self) -> u64 {
-        todo!()
+        self.entities
     }
 
     /// Estimated bytes charged so far.
     #[must_use]
     pub fn allocated_bytes(&self) -> u64 {
-        todo!()
+        self.allocated
     }
 
     /// Instances expanded so far.
     #[must_use]
     pub fn expanded_instances(&self) -> u64 {
-        todo!()
+        self.expanded
     }
 
     /// The current block nesting depth.
     #[must_use]
     pub fn depth(&self) -> u32 {
-        todo!()
+        u32::try_from(self.stack.len()).unwrap_or(u32::MAX)
     }
 
     /// Count one entity and check its sub-element counts, its names and the
     /// allocation it implies.
     ///
+    /// The checks run in that order: names, sub-elements, the entity count, the
+    /// allocation. An entity that breaks a limit is not counted, so asking again
+    /// gives the same refusal.
+    ///
     /// # Errors
     ///
     /// [`LimitError::Exceeded`] naming the first limit passed.
     pub fn check_entity(&mut self, entity: &RawEntity) -> Result<(), LimitError> {
-        let _ = entity;
-        todo!()
+        let prov = &entity.provenance;
+        self.check_name(&prov.layer)?;
+        self.check_name(&prov.class_name)?;
+        let mut bytes = len_u64(std::mem::size_of::<RawEntity>())
+            .saturating_add(len_u64(prov.layer.len()))
+            .saturating_add(len_u64(prov.class_name.len()));
+        let step = |n: usize, each: usize| len_u64(n).saturating_mul(len_u64(each));
+        match &entity.geometry {
+            RawGeometry::Polyline { vertices, .. } => {
+                let n = vertices.len();
+                if n > self.limits.max_polyline_vertices {
+                    return Err(over(
+                        Limit::PolylineVertices,
+                        len_u64(n),
+                        len_u64(self.limits.max_polyline_vertices),
+                    ));
+                }
+                bytes = bytes.saturating_add(step(n, std::mem::size_of::<RawVertex>()));
+            }
+            RawGeometry::Spline {
+                control_points,
+                knots,
+                weights,
+                ..
+            } => {
+                let n = control_points.len();
+                if n > self.limits.max_spline_control_points {
+                    return Err(over(
+                        Limit::SplineControlPoints,
+                        len_u64(n),
+                        len_u64(self.limits.max_spline_control_points),
+                    ));
+                }
+                bytes = bytes.saturating_add(step(n, std::mem::size_of::<Point3>()));
+                for (fact, limit) in [(knots, Limit::SplineKnots), (weights, Limit::SplineWeights)]
+                {
+                    if let SourceFact::Present(v) = fact {
+                        if v.len() > self.limits.max_spline_knots {
+                            return Err(over(
+                                limit,
+                                len_u64(v.len()),
+                                len_u64(self.limits.max_spline_knots),
+                            ));
+                        }
+                        bytes = bytes.saturating_add(step(v.len(), std::mem::size_of::<f64>()));
+                    }
+                }
+            }
+            RawGeometry::Insert(r) => {
+                self.check_name(&r.block_name)?;
+                bytes = bytes.saturating_add(len_u64(r.block_name.len()));
+            }
+            RawGeometry::Unmapped { reason } => {
+                bytes = bytes.saturating_add(len_u64(reason.len()));
+            }
+            _ => {}
+        }
+        let entities = self.entities.saturating_add(1);
+        if entities > self.limits.max_entities {
+            return Err(over(Limit::Entities, entities, self.limits.max_entities));
+        }
+        let allocated = self.allocated.saturating_add(bytes);
+        if allocated > self.limits.max_allocation_bytes {
+            return Err(over(
+                Limit::AllocationBytes,
+                allocated,
+                self.limits.max_allocation_bytes,
+            ));
+        }
+        self.entities = entities;
+        self.allocated = allocated;
+        Ok(())
     }
 
     /// Check a name taken from the source (a layer, a block).
@@ -223,36 +324,90 @@ impl SourceGuard {
     ///
     /// [`LimitError::Exceeded`] with [`Limit::NameBytes`].
     pub fn check_name(&self, name: &str) -> Result<(), LimitError> {
-        let _ = name;
-        todo!()
+        if name.len() > self.limits.max_name_bytes {
+            return Err(over(
+                Limit::NameBytes,
+                len_u64(name.len()),
+                len_u64(self.limits.max_name_bytes),
+            ));
+        }
+        Ok(())
     }
 
     /// Charge `bytes` against the allocation ceiling.
     ///
     /// # Errors
     ///
-    /// [`LimitError::Exceeded`] with [`Limit::AllocationBytes`].
+    /// [`LimitError::Exceeded`] with [`Limit::AllocationBytes`]. The charge is not
+    /// kept when it errors.
     pub fn charge(&mut self, bytes: u64) -> Result<(), LimitError> {
-        let _ = bytes;
-        todo!()
+        let total = self.allocated.saturating_add(bytes);
+        if total > self.limits.max_allocation_bytes {
+            return Err(over(
+                Limit::AllocationBytes,
+                total,
+                self.limits.max_allocation_bytes,
+            ));
+        }
+        self.allocated = total;
+        Ok(())
     }
 
     /// Descend into block `name` through an INSERT that places `grid`.
     ///
     /// Checked in this order: the name, a cycle, the depth, the grid, the
-    /// expanded instance total. On an error nothing is pushed, so the caller does
-    /// not call [`exit_block`](Self::exit_block) for it.
+    /// expanded instance total. Block names compare case-insensitively, as a
+    /// drawing's do. On an error nothing is pushed, so the caller does not call
+    /// [`exit_block`](Self::exit_block) for it.
     ///
     /// # Errors
     ///
     /// [`LimitError::BlockCycle`] or [`LimitError::Exceeded`].
     pub fn enter_block(&mut self, name: &str, grid: ArrayGrid) -> Result<(), LimitError> {
-        let _ = (name, grid);
-        todo!()
+        self.check_name(name)?;
+        if let Some(first) = self.stack.iter().position(|b| b.eq_ignore_ascii_case(name)) {
+            let mut chain: Vec<String> = self.stack[first..].to_vec();
+            chain.push(name.to_string());
+            return Err(LimitError::BlockCycle {
+                block: name.to_string(),
+                chain,
+            });
+        }
+        let depth = len_u64(self.stack.len()) + 1;
+        if depth > u64::from(self.limits.max_block_depth) {
+            return Err(over(
+                Limit::BlockDepth,
+                depth,
+                u64::from(self.limits.max_block_depth),
+            ));
+        }
+        let cells = u64::from(grid.rows).saturating_mul(u64::from(grid.columns));
+        if cells > self.limits.max_insert_grid {
+            return Err(over(Limit::InsertGrid, cells, self.limits.max_insert_grid));
+        }
+        let multiplier = self
+            .multipliers
+            .last()
+            .copied()
+            .unwrap_or(1)
+            .saturating_mul(cells);
+        let expanded = self.expanded.saturating_add(multiplier);
+        if expanded > self.limits.max_expanded_instances {
+            return Err(over(
+                Limit::ExpandedInstances,
+                expanded,
+                self.limits.max_expanded_instances,
+            ));
+        }
+        self.expanded = expanded;
+        self.stack.push(name.to_string());
+        self.multipliers.push(multiplier);
+        Ok(())
     }
 
     /// Leave the block entered last. A call with nothing entered does nothing.
     pub fn exit_block(&mut self) {
-        todo!()
+        self.stack.pop();
+        self.multipliers.pop();
     }
 }
