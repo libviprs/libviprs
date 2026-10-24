@@ -249,7 +249,9 @@ const EXPECTED: &[(&str, Coverage)] = &[
              src/pvec/flatten.rs, the block flattening of issue #1075, and \
              tests/pvec_block_flatten.rs, 24 tests, and \
              src/pvec/dwg_basic.rs, the basic entity extraction of issue \
-             #1073, and tests/pvec_dwg_basic.rs, 39 tests; \
+             #1073, and tests/pvec_dwg_basic.rs, 39 tests, and \
+             src/pvec/pdf_bezier.rs, the PDF segment to PVec mapping of issue \
+             #1081, and tests/pvec_pdf_bezier.rs, 15 tests; \
              adds 2 crates (pvec-geometry and pvec-numeric, git \
              dependencies declaring rust-version 1.85)",
         ),

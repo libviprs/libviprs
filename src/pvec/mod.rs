@@ -40,6 +40,9 @@ pub mod limits;
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
 pub mod normalized;
 pub mod ordering;
+#[cfg(feature = "pvec-normalized")]
+#[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
+pub mod pdf_bezier;
 pub mod pdf_clip;
 pub mod pdf_vector;
 #[cfg(feature = "pvec-normalized")]
