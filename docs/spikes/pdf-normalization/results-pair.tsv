@@ -1,5 +1,5 @@
-# open-exporter pair, not AutoCAD-class: the loss measured is that exporter's
-# dwg written by acadrust d35691f (DwgWriter, AC1032), dxf written from the read-back DWG
+# open-exporter pair, not AutoCAD-class: the loss measured is that pipeline's, acadrust's DXF export then LibreCAD's import and plot
+# dwg written by acadrust d35691f (DwgWriter, AC1032); dxf written from the read-back DWG by acadrust's DXF writer (not separately measured, so the loss is that writer's plus LibreCAD's)
 # pdf plotted by librecad 2.2.0-1 (Debian bookworm, aarch64), Qt 5.15.8+dfsg-11+deb12u3 via 'dxf2pdf -a'; harness pvec@1f7561e, lopdf 0.36.0
 fixture	key	value
 pair.dwg	dwg_arc	5
@@ -602,5 +602,5 @@ pair.pdf	cm.shear / general affine	0
 pair.pdf	cm.singular	0
 pair.dwg	sha256	66fec63ceb63819356dd818f60ce31ebdf023171a3b5a2208e37e96e6bc53ba8
 pair.dxf	sha256	c3063f51e666d8a5d131a04363236fabbd26360ba6324b46e2824a5991ee0768
-pair.pdf	sha256	61127abaf8f5373983555eab199818038777f695f869fa0144d36da9bf7db4b8
+pair.pdf	sha256	f1b1cc80ec59ce6aeedd05b206724d8675cde02afcaa0bd6d1cb11233a6cef79
 # rustc rustc 1.99.1 (58cf8f9c3 2026-10-13) aarch64

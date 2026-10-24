@@ -761,8 +761,8 @@ fn librecad_version_agrees_in_tsv_doc_and_driver() {
     );
     let sh = read("docs/spikes/pdf-normalization/pair.sh");
     assert!(
-        sh.contains(&format!("librecad={ver}")),
-        "pair.sh does not pin the apt package to librecad={ver}"
+        sh.contains(&format!("librecad_ver={ver}\n")) && sh.contains("librecad='$librecad_ver'"),
+        "pair.sh does not pin the apt package to librecad_ver={ver}"
     );
     assert!(
         sh.contains("acadrust_rev=") && sh.contains("git -C \"$acad\" archive"),

@@ -7,9 +7,10 @@ PDF retained it.
 
 All five acceptance criteria are now evidenced, with one qualification I want to be upfront about. The
 DWG plus exported PDF pair for the third one (#1240) is an open-exporter pair, not AutoCAD-class: I
-wrote the DWG with acadrust's `DwgWriter` and plotted it to PDF with LibreCAD, headless. The loss it
-measures is LibreCAD's, and I do not claim it is what AutoCAD, or any other exporter, would lose. It is
-in "Per-class geometry-count difference".
+wrote the DWG with acadrust's `DwgWriter`, exported a DXF through acadrust's DXF writer, and plotted
+that to PDF with LibreCAD, headless. The loss it measures is that pipeline's (acadrust's DXF writer,
+then LibreCAD's import and plot), and the DXF step is not separately measured. I do not claim it is
+what AutoCAD, or any other exporter, would lose. It is in "Per-class geometry-count difference".
 
 ## What is there today
 
@@ -22,6 +23,8 @@ and not a refactor. The entry points that exist are:
 - `render_page_pdfium` and `render_page_pdfium_budgeted`: hand the page to pdfium and get pixels back.
 - `pdf_info` and `pdf_info_with_password`: page count, sizes and encryption state, through
   `lopdf::Document::load`.
+- `page_rotate`: reads a page's `/Rotate` through `lopdf` and returns a `PageRotation`. It reads page
+  attributes and no content stream.
 
 Every one of them that produces pixels returns a `Raster`. Nothing reads a content stream for path
 construction operators. The N1.1 inventory (`docs/pvec-decode-inventory.md`) reached the same
@@ -163,8 +166,10 @@ PDF's page, not the drawing.
 
 ## Per-class geometry-count difference
 
-Met, for an open-exporter pair, not AutoCAD-class. The loss below is LibreCAD's, and I make no claim
-about any other exporter. An AutoCAD-class pair is still wanted from Epic O
+Met, for an open-exporter pair, not AutoCAD-class. LibreCAD plots the DXF, not the DWG, so the loss
+below is that pipeline's: acadrust's DXF writer, then LibreCAD's import and plot. The DXF step is not
+separately measured, so a result such as 39 lines per spline could come from either end. I make no
+claim about any other exporter. An AutoCAD-class pair is still wanted from Epic O
 (`libviprs/pvec-gold-fixtures#1`), and I searched the workspace for a real one first: the acadsharp
 samples, the `wt-spdr-xdata` fixtures and the `acadrust` tests hold DWGs with no PDF beside them, and
 `pdf-candidates` and the iasbuilt uploads hold PDFs with no DWG.
@@ -174,10 +179,15 @@ Provenance, all recorded in `pdf-normalization/results-pair.tsv` and regenerated
 - DWG: `pair.dwg`, written by acadrust (`libviprs/acadrust` at `d35691f`) with `DwgWriter`, version
   AC1032, three layers (`WALLS`, `ARCS`, `ANNO`) and 32 entities. I read it back with `DwgReader` and
   counted the DWG side from that read-back, so the count is of the file and not of the generator.
-- DXF: written by acadrust from the read-back DWG, so the PDF is an export of what the DWG holds.
+- DXF: written by acadrust's DXF writer from the read-back DWG, so the PDF is an export of what the DWG
+  holds, through that writer.
 - PDF: `pair.pdf`, plotted by LibreCAD 2.2.0-1 (Debian bookworm package, arm64, Qt 5.15.8, offscreen
   platform, no display) with `librecad dxf2pdf -a`. Its producer field says Qt 5.15.8, not AutoCAD.
-- sha256 of the three files is in the results file. Everything ran in linux/arm64 containers.
+- sha256 of the three files is in the results file. The DWG and DXF hashes reproduce on a rerun. The PDF
+  embeds a creation timestamp, so its sha256 does not: a rerun gave the identical rows and a different
+  PDF hash. The counts are what I rely on.
+- `pair.sh` pins acadrust by rev (`git archive d35691f`) and the apt package to `librecad=2.2.0-1`, and
+  fails if that version cannot be installed.
 
 LibreCAD's PDF has no entity classes in it, so I did not attribute path counts to classes by guessing.
 Instead the generator also writes one DWG and DXF per class and each is plotted on its own, so every
@@ -202,8 +212,10 @@ optional content groups, 0 `BDC` and no `/UserUnit`. The per-class segment count
 LibreCAD's line density for curves follows the plot scale. So the line counts for arcs, ellipses and
 text are true for those plots and are not apportionments of the whole-drawing plot. I have not worked
 out why the arc density is as high as it is, and I would not read anything into the exact numbers beyond
-"a long run of lines". Measured on arm64 only. The harness counts did not need a second architecture
-for this, but I did not run an x86_64 pass.
+"a long run of lines". Architecture: LibreCAD itself ran on arm64 only. A reviewer ran the harness over the same
+pair PDFs on MARS, native x86_64, and all 585 PDF-side rows were identical to the arm64 ones, so the
+measurement of those PDFs does not depend on the architecture. I did not run that pass myself, and no
+x86_64 pair results file is committed.
 
 What this says about the loss table: the layer, handle, block and units rows hold as written, the arc,
 ellipse and spline rows had to be corrected (above), and nothing in the pair contradicts the rest.
