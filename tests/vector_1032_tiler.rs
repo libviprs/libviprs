@@ -796,6 +796,7 @@ fn text_appears_when_it_is_big_enough_and_carries_what_the_style_needs() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
 fn the_same_input_gives_the_same_tiles_and_the_same_archive() {
     let prims = golden();
     let cfg = small_config(5);
@@ -865,6 +866,7 @@ fn a_single_point_drawing_still_tiles() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
 fn the_archive_is_a_valid_vector_archive_that_carries_the_transform() {
     let dir = std::env::temp_dir().join(format!("tiler1032-arc-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -894,6 +896,7 @@ fn the_archive_is_a_valid_vector_archive_that_carries_the_transform() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
 fn a_failed_run_publishes_nothing() {
     let dir = std::env::temp_dir().join(format!("tiler1032-fail-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

@@ -89,6 +89,7 @@ fn drawing() -> Vec<Primitive> {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
 fn the_committed_viewer_fixture_is_what_the_tiler_makes() {
     let dir = std::env::temp_dir().join(format!("fixture1033-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
