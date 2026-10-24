@@ -28,6 +28,7 @@
 //! ([`CadSource`](crate::cad::CadSource) and [`ItemHandle`](crate::cad::ItemHandle)).
 
 pub mod provider;
+pub mod units;
 
 #[cfg(feature = "dwg-acadrust")]
 #[cfg_attr(docsrs, doc(cfg(feature = "dwg-acadrust")))]
@@ -39,3 +40,4 @@ pub use provider::{
     ProvenanceStub, ProviderCaps, ProviderError, RawEntity, RawGeometry, RawVertex, SourceFact,
     SourceTransform,
 };
+pub use units::{INSUNITS_TABLE, SourceBounds, SourceSpace, SourceUnit};

@@ -162,7 +162,9 @@ mod provider {
         DwgWriter::write_to_vec(&doc).unwrap()
     }
 
-    fn read(bytes: &[u8]) -> (SourceUnit, Vec<([f64; 3], [f64; 3])>) {
+    type Segment = ([f64; 3], [f64; 3]);
+
+    fn read(bytes: &[u8]) -> (SourceUnit, Vec<Segment>) {
         let p = AcadrustProvider::open(CadSource::Bytes(bytes)).unwrap();
         let model = p
             .layouts()

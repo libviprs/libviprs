@@ -250,7 +250,11 @@ fn no_foreign_type_appears_in_any_public_signature_of_the_provider_module() {
         // name; naming a child module is not naming a reader's type.
         let is_mod = file.ends_with("mod.rs");
         if is_mod {
-            locals.extend(["provider".to_string(), "dwg_acadrust".to_string()]);
+            locals.extend([
+                "provider".to_string(),
+                "dwg_acadrust".to_string(),
+                "units".to_string(),
+            ]);
         }
         for item in public_items(&src) {
             if let Some(why) = foreign_in_item_with(&item, is_mod, &locals) {
