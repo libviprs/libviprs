@@ -513,6 +513,7 @@ annotated   fs-detected  tests/spike_dwg_mapping.rs::the_document_never_closes_t
 annotated   fs-detected  tests/spike_dwg_mapping.rs::the_evidence_scope_is_stated_and_not_inflated
 annotated   fs-detected  tests/spike_dwg_mapping.rs::the_harness_defines_no_tolerance_of_its_own
 annotated   fs-detected  tests/spike_dwg_mapping.rs::the_pins_are_cited_and_match_the_run_script
+annotated   fs-detected  tests/spike_dwg_mapping.rs::the_spike_directory_holds_exactly_the_files_listed_here
 annotated   fs-detected  tests/spike_transform_matrix.rs::ac1_every_cell_names_a_pvec_type_or_an_n35_classification
 annotated   fs-detected  tests/spike_transform_matrix.rs::ac1_matrix_has_every_row_and_every_cell
 annotated   fs-detected  tests/spike_transform_matrix.rs::ac2_bulge_row_shows_what_its_segments_became

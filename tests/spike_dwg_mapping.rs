@@ -597,7 +597,9 @@ fn ac5_a_spline_row_that_is_not_exact_is_named_where_the_decision_calls_splines_
     let data = results();
     for r in result_rows(&doc) {
         let m = &data[&r.evidence];
-        if r.result == "equivalent" && m.notes.get("domain_preserved").map(String::as_str) == Some("true") {
+        if r.result == "equivalent"
+            && m.notes.get("domain_preserved").map(String::as_str) == Some("true")
+        {
             assert!(
                 grading.contains("storage form"),
                 "row {} is equivalent with its domain preserved, and the grading rule only names a domain difference",
@@ -798,5 +800,42 @@ fn the_arm64_run_reaches_the_same_verdicts_as_the_native_x64_run() {
     assert!(
         d.contains("results-arm64.tsv") && d.contains("native x86_64"),
         "the document must say which results came from which machine"
+    );
+}
+
+/// Every file under the spike directory, named here on purpose. These are what
+/// the document's numbers come from, so a file that appears or disappears
+/// without this list moving is a change to the evidence and should be seen as
+/// one.
+const SPIKE_FILES: &[&str] = &[
+    "docs/spikes/dwg-mapping/harness/Cargo.toml",
+    "docs/spikes/dwg-mapping/harness/src/main.rs",
+    "docs/spikes/dwg-mapping/results-arm64.tsv",
+    "docs/spikes/dwg-mapping/results-x64.tsv",
+    "docs/spikes/dwg-mapping/run.sh",
+];
+
+fn files_under(dir: &std::path::Path, out: &mut Vec<String>) {
+    for entry in std::fs::read_dir(dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display())) {
+        let path = entry.expect("a directory entry").path();
+        if path.is_dir() {
+            files_under(&path, out);
+        } else {
+            let rel = path.strip_prefix(root()).expect("under the crate root");
+            out.push(rel.to_string_lossy().replace('\\', "/"));
+        }
+    }
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn the_spike_directory_holds_exactly_the_files_listed_here() {
+    let mut found = Vec::new();
+    files_under(&root().join("docs/spikes/dwg-mapping"), &mut found);
+    found.sort();
+    let want: Vec<String> = SPIKE_FILES.iter().map(|s| s.to_string()).collect();
+    assert_eq!(
+        found, want,
+        "docs/spikes/dwg-mapping/ changed: update SPIKE_FILES, and check the document still describes what is there"
     );
 }
