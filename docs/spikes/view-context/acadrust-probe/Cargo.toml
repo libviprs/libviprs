@@ -1,0 +1,12 @@
+[package]
+name = "vc-acadrust-probe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Not a member of any workspace and not part of the libviprs build. run.sh
+# mounts a checkout of libviprs/acadrust next to this directory at /work/acadrust.
+[workspace]
+
+[dependencies]
+acadrust = { path = "../acadrust" }
