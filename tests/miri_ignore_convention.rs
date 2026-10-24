@@ -789,7 +789,8 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1043 adds 16: `tests/view_context_spike_doc.rs`, which reads the spike document, its probe output, two sources and its own directory listing. It said 563 before this line moved.
 /// #1044 adds 20: `tests/spike_transform_matrix.rs`, which reads the spike document, the harness output and the harness source. It said 579 before this line moved.
 /// #1045 adds 26: `tests/spike_pdf_normalization.rs`, which reads the spike document, the harness output and its own directory listing. It said 599 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 625;
+/// #1042 adds 20: `tests/spike_dwg_mapping.rs`, which reads the spike document, its results and its own directory listing. It said 625 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 645;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
