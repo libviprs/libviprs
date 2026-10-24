@@ -60,3 +60,8 @@ doc = false
 name = "fuzz_vector_tiler"
 path = "fuzz_targets/fuzz_vector_tiler.rs"
 doc = false
+
+[[bin]]
+name = "fuzz_pvec_pdf_vector"
+path = "fuzz_targets/fuzz_pvec_pdf_vector.rs"
+doc = false
