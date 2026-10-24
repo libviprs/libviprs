@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The view-profile options type** (issue #1097, part of #1039). `pvec::ViewProfile`
+  makes the view context an explicit input: space (model, or a named paper layout), viewport
+  clipping, the off, frozen, viewport-frozen and layer-0 rules, the nested-insert depth and the
+  xref policy, every field traceable to a row of the N1.4 decision table.
+  `ViewProfile::default_profile()` is the v1 "visible flattened drawing" and a test pins every
+  value. `apply` checks a provider's entities against the profile rather than trusting it: each
+  excluded entity comes back naming the profile field that excluded it, the report counts them per
+  field and per layer, and an absent paper layout is a typed error listing the layouts that exist.
+
 - **Wall and column classification from layer and block rules** (issue #1233,
   part of #1039). `pvec::ElementRules` maps layer and block name globs to
   `ElementClass::Wall` or `Column`, with a small default profile (`A-WALL*`,

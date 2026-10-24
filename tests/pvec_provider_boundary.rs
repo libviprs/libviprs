@@ -258,6 +258,7 @@ fn no_foreign_type_appears_in_any_public_signature_of_the_provider_module() {
                 "pdf_vector".to_string(),
                 "dwg_spline".to_string(),
                 "normalized".to_string(),
+                "view_profile".to_string(),
             ]);
         }
         for item in public_items(&src) {

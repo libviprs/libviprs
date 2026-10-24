@@ -66,7 +66,7 @@ pub use normalized::{
 };
 pub use units::{DrawingExtents, INSUNITS_TABLE, SourceSpace, SourceUnit};
 pub use view_profile::{
-    ExcludedEntity, Exclusion, InsertLayerRule, LayerStateRule, LayerVisibility, Knob,
+    ExcludedEntity, Exclusion, InsertLayerRule, Knob, LayerStateRule, LayerVisibility,
     NestedInsertPolicy, SpaceSelection, ViewOutcome, ViewProfile, ViewProfileError, ViewReport,
     ViewedEntity, ViewportClipping, ViewportFreezeRule, XrefPolicy,
 };

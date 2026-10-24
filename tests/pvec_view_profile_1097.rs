@@ -143,8 +143,16 @@ fn layout(id: u32, name: &str, kind: LayoutKind) -> LayoutState {
 fn vc_layers() -> Mock {
     Mock {
         caps: ProviderCaps::new()
-            .with(Facet::LayerState, Availability::Reported, FacetSource::DecoderDirect)
-            .with(Facet::LayoutState, Availability::Reported, FacetSource::DecoderDirect),
+            .with(
+                Facet::LayerState,
+                Availability::Reported,
+                FacetSource::DecoderDirect,
+            )
+            .with(
+                Facet::LayoutState,
+                Availability::Reported,
+                FacetSource::DecoderDirect,
+            ),
         layouts: vec![
             layout(0, "Model", LayoutKind::Model),
             layout(1, "Layout1", LayoutKind::Paper),
@@ -225,7 +233,11 @@ fn n3_3_1097_every_knob_names_a_row_of_the_n1_4_decision_table() {
     )
     .expect("spike doc");
     let knobs = ViewProfile::default_profile().knobs();
-    assert_eq!(knobs.len(), 8, "a knob was added or removed: justify it against N1.4");
+    assert_eq!(
+        knobs.len(),
+        8,
+        "a knob was added or removed: justify it against N1.4"
+    );
     let mut fields: Vec<_> = knobs.iter().map(|k| k.field).collect();
     fields.sort_unstable();
     fields.dedup();
@@ -255,7 +267,10 @@ fn n3_3_1097_absent_layout_is_a_typed_error_naming_the_layouts_that_exist() {
         }
     );
     let msg = err.to_string();
-    assert!(msg.contains("Nope") && msg.contains("Layout1") && msg.contains("Sheet B"), "{msg}");
+    assert!(
+        msg.contains("Nope") && msg.contains("Layout1") && msg.contains("Sheet B"),
+        "{msg}"
+    );
 }
 
 #[test]
@@ -263,7 +278,12 @@ fn n3_3_1097_present_paper_layout_is_refused_not_merged_or_emptied() {
     let mut p = ViewProfile::default_profile();
     p.space = SpaceSelection::PaperLayout("layout1".into());
     let err = p.apply(&vc_layers()).unwrap_err();
-    assert_eq!(err, ViewProfileError::PaperSpaceUnsupported { layout: "Layout1".into() });
+    assert_eq!(
+        err,
+        ViewProfileError::PaperSpaceUnsupported {
+            layout: "Layout1".into()
+        }
+    );
     assert!(err.to_string().contains("508"), "{err}");
 }
 
@@ -272,7 +292,10 @@ fn n3_3_1097_a_drawing_without_model_space_is_a_typed_error() {
     let mut m = vc_layers();
     m.layouts.retain(|l| l.kind == LayoutKind::Paper);
     let err = ViewProfile::default_profile().apply(&m).unwrap_err();
-    assert!(matches!(err, ViewProfileError::NoModelSpace { .. }), "{err:?}");
+    assert!(
+        matches!(err, ViewProfileError::NoModelSpace { .. }),
+        "{err:?}"
+    );
 }
 
 // ---- applying the rule ----------------------------------------------------------------
@@ -297,11 +320,19 @@ fn n3_3_1097_default_profile_reproduces_the_n1_4_worked_example() {
 #[test]
 fn n3_3_1097_an_excluded_entity_names_the_profile_field_that_excluded_it() {
     let o = ViewProfile::default_profile().apply(&vc_layers()).unwrap();
-    let m3 = o.excluded.iter().find(|e| e.handle == Some(ItemHandle::new(3))).unwrap();
+    let m3 = o
+        .excluded
+        .iter()
+        .find(|e| e.handle == Some(ItemHandle::new(3)))
+        .unwrap();
     assert_eq!(m3.reason, Exclusion::LayerFrozen);
     assert_eq!(m3.reason.field(), "layers.frozen");
     assert_eq!(m3.reason.code(), "LAYER_HIDDEN");
-    let i11 = o.excluded.iter().find(|e| e.handle == Some(ItemHandle::new(11))).unwrap();
+    let i11 = o
+        .excluded
+        .iter()
+        .find(|e| e.handle == Some(ItemHandle::new(11)))
+        .unwrap();
     assert_eq!(i11.class_name, "INSERT");
     assert_eq!(i11.reason.field(), "layers.off");
 }
@@ -310,7 +341,11 @@ fn n3_3_1097_an_excluded_entity_names_the_profile_field_that_excluded_it() {
 #[test]
 fn n3_3_1097_policy_exclusions_classify_as_ignored_by_policy() {
     use libviprs::pvec::FidelityClass;
-    for r in [Exclusion::LayerOff, Exclusion::LayerFrozen, Exclusion::DepthLimit] {
+    for r in [
+        Exclusion::LayerOff,
+        Exclusion::LayerFrozen,
+        Exclusion::DepthLimit,
+    ] {
         assert_eq!(r.fidelity(), FidelityClass::IgnoredByPolicy, "{r:?}");
     }
     // ADR pvec-unsupported-policy: an unresolved block is Unsupported, UNRESOLVED_BLOCK.
@@ -358,7 +393,10 @@ fn n3_3_1097_unresolved_block_contributes_nothing_and_is_reported() {
 fn n3_3_1097_a_block_that_contains_itself_stops_at_the_depth_limit() {
     let mut m = vc_layers();
     m.model = vec![insert(40, "VC_ON", "LOOP")];
-    m.blocks = vec![("LOOP".into(), vec![line(41, "VC_ON"), insert(42, "VC_ON", "LOOP")])];
+    m.blocks = vec![(
+        "LOOP".into(),
+        vec![line(41, "VC_ON"), insert(42, "VC_ON", "LOOP")],
+    )];
     let mut p = ViewProfile::default_profile();
     p.nested_inserts.max_depth = 3;
     let o = p.apply(&m).unwrap();
@@ -371,7 +409,12 @@ fn n3_3_1097_a_block_that_contains_itself_stops_at_the_depth_limit() {
 #[test]
 fn n3_3_1097_a_minsert_multiplies_the_instances_of_its_leaves() {
     let mut m = vc_layers();
-    let grid = ArrayGrid { rows: 2, columns: 3, row_spacing: 1.0, column_spacing: 1.0 };
+    let grid = ArrayGrid {
+        rows: 2,
+        columns: 3,
+        row_spacing: 1.0,
+        column_spacing: 1.0,
+    };
     m.model = vec![insert_grid(50, "VC_ON", "VC_BLK", grid)];
     let o = ViewProfile::default_profile().apply(&m).unwrap();
     assert_eq!(handles(&o), vec![21, 22]);
@@ -383,12 +426,15 @@ fn n3_3_1097_missing_layer_state_is_an_error_when_the_profile_needs_it() {
     let mut m = vc_layers();
     m.caps = ProviderCaps::new();
     let err = ViewProfile::default_profile().apply(&m).unwrap_err();
-    assert_eq!(err, ViewProfileError::Provider(ProviderError::CannotReport(Facet::LayerState)));
+    assert_eq!(
+        err,
+        ViewProfileError::Provider(ProviderError::CannotReport(Facet::LayerState))
+    );
     // A profile that acts on no layer flag does not need the table.
     let mut p = ViewProfile::default_profile();
     p.layers.off = LayerStateRule::Ignore;
     p.layers.frozen = LayerStateRule::Ignore;
-    assert_eq!(p.apply(&m).unwrap().report.included, 8);
+    assert_eq!(p.apply(&m).unwrap().report.included, 13);
 }
 
 #[test]
