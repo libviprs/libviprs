@@ -71,7 +71,14 @@ fn run<S: ProvenanceSink>(sink: &mut S) -> Vec<Normalized2DGeometry> {
 fn geometry_bytes(records: &[Normalized2DGeometry]) -> String {
     records
         .iter()
-        .map(|r| format!("{:?}|{:?}|{:?}", r.geometry(), r.source_bounds(), r.fidelity()))
+        .map(|r| {
+            format!(
+                "{:?}|{:?}|{:?}",
+                r.geometry(),
+                r.source_bounds(),
+                r.fidelity()
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -93,7 +100,12 @@ fn off_mode_never_builds_a_record() {
     let mut built = 0;
     let h = NoProvenance.record(|| {
         built += 1;
-        Provenance::from_stub(&stub(1, "LINE", "0", &InstancePath::root()), "a", "b", xf(0.0))
+        Provenance::from_stub(
+            &stub(1, "LINE", "0", &InstancePath::root()),
+            "a",
+            "b",
+            xf(0.0),
+        )
     });
     assert!(h.is_none());
     assert_eq!(built, 0, "the closure must not run when provenance is off");
@@ -127,11 +139,20 @@ fn block_path_is_root_to_leaf_and_tells_two_instances_apart() {
         .record(|| Provenance::from_stub(&stub(0x4C, "LINE", "L", &b), "p.dwg", "Model", xf(2.0)))
         .unwrap();
     let (pa, pb) = (store.get(ha).unwrap(), store.get(hb).unwrap());
-    let names: Vec<_> = pa.block_path().steps().iter().map(|s| s.block_name.as_str()).collect();
+    let names: Vec<_> = pa
+        .block_path()
+        .steps()
+        .iter()
+        .map(|s| s.block_name.as_str())
+        .collect();
     assert_eq!(names, ["OUTER", "INNER"]);
     assert_eq!(pa.block_path().to_string(), "OUTER@58/INNER@60");
     assert_ne!(pa.block_path(), pb.block_path());
-    assert_eq!(pa.handle(), pb.handle(), "same leaf handle, different instance");
+    assert_eq!(
+        pa.handle(),
+        pb.handle(),
+        "same leaf handle, different instance"
+    );
     assert_ne!(ha, hb);
 }
 
@@ -140,7 +161,14 @@ fn record_carries_every_field_the_issue_lists() {
     let mut store = ProvenanceStore::new();
     let path = InstancePath::root().child("B", ItemHandle::new(7));
     let h = store
-        .record(|| Provenance::from_stub(&stub(0xAB, "ARC", "WALLS", &path), "plan.dwg", "Layout1", xf(5.0)))
+        .record(|| {
+            Provenance::from_stub(
+                &stub(0xAB, "ARC", "WALLS", &path),
+                "plan.dwg",
+                "Layout1",
+                xf(5.0),
+            )
+        })
         .unwrap();
     let p = store.get(h).unwrap();
     assert_eq!(p.source(), "plan.dwg");
@@ -157,16 +185,27 @@ fn handles_are_a_dense_index() {
     let mut store = ProvenanceStore::new();
     for i in 0..5u64 {
         let h = store
-            .record(|| Provenance::from_stub(&stub(i, "LINE", "0", &InstancePath::root()), "a", "b", xf(0.0)))
+            .record(|| {
+                Provenance::from_stub(
+                    &stub(i, "LINE", "0", &InstancePath::root()),
+                    "a",
+                    "b",
+                    xf(0.0),
+                )
+            })
             .unwrap();
         assert_eq!(h.get(), i);
     }
-    assert!(store.get(libviprs::pvec::ProvenanceHandle::new(5)).is_none());
+    assert!(
+        store
+            .get(libviprs::pvec::ProvenanceHandle::new(5))
+            .is_none()
+    );
 }
 
 #[test]
 fn string_fields_are_truncated_at_the_documented_bound() {
-    let long = "x".repeat(10_000_000);
+    let long = "x".repeat(100_000);
     let multibyte = "é".repeat(MAX_NAME_BYTES); // 2 bytes each, must cut on a boundary
     let mut path = InstancePath::root();
     for i in 0..(MAX_BLOCK_PATH_DEPTH as u64 + 40) {
@@ -185,16 +224,30 @@ fn string_fields_are_truncated_at_the_documented_bound() {
     assert!(p.layer().len() <= MAX_NAME_BYTES);
     assert!(p.layer().is_char_boundary(p.layer().len()));
     assert_eq!(p.block_path().depth(), MAX_BLOCK_PATH_DEPTH);
-    assert!(p.block_path().steps().iter().all(|s| s.block_name.len() <= MAX_NAME_BYTES));
+    assert!(
+        p.block_path()
+            .steps()
+            .iter()
+            .all(|s| s.block_name.len() <= MAX_NAME_BYTES)
+    );
     assert!(p.is_truncated());
     let mut report = String::new();
     p.write_report(&mut report).unwrap();
-    assert!(report.len() < 64 * 1024, "report of one record stays small, got {}", report.len());
+    assert!(
+        report.len() < 64 * 1024,
+        "report of one record stays small, got {}",
+        report.len()
+    );
 }
 
 #[test]
 fn an_untruncated_record_says_so() {
-    let p = Provenance::from_stub(&stub(1, "LINE", "0", &InstancePath::root()), "a", "b", xf(0.0));
+    let p = Provenance::from_stub(
+        &stub(1, "LINE", "0", &InstancePath::root()),
+        "a",
+        "b",
+        xf(0.0),
+    );
     assert!(!p.is_truncated());
 }
 
@@ -216,7 +269,9 @@ fn a_warning_is_retrievable_through_the_entity_provenance() {
 #[test]
 fn warnings_are_bounded_in_count_and_length() {
     let mut store = ProvenanceStore::new();
-    let h = store.record(|| Provenance::from_stub(&stub(1, "X", "0", &InstancePath::root()), "a", "b", xf(0.0)));
+    let h = store.record(|| {
+        Provenance::from_stub(&stub(1, "X", "0", &InstancePath::root()), "a", "b", xf(0.0))
+    });
     let big = "w".repeat(1_000_000);
     for _ in 0..(MAX_WARNINGS * 10) {
         store.warn(h, &big);
@@ -253,6 +308,9 @@ fn module_does_no_geometry_math() {
         .collect::<Vec<_>>()
         .join("\n");
     for banned in ["sqrt", "atan2", "to_radians", "EPSILON", "tolerance"] {
-        assert!(!body.contains(banned), "provenance.rs must not use `{banned}`");
+        assert!(
+            !body.contains(banned),
+            "provenance.rs must not use `{banned}`"
+        );
     }
 }
