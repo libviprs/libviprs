@@ -395,13 +395,19 @@ fn geometry_is_byte_identical_whether_or_not_style_is_computed() {
             .collect::<Vec<_>>()
             .join("\n")
     };
-    let without = extract_page_paths_from_bytes(&bytes, 1, &PdfVectorLimits::default()).unwrap();
-    let before = render(&without);
-    let with = extract_page_paths_from_bytes(&bytes, 1, &PdfVectorLimits::default()).unwrap();
+    // Two inputs built independently from the same source text, so the comparison is between
+    // two real extractions and not one value against itself.
+    let bytes_a = one_page(NAMED_FIXTURE);
+    let bytes_b = one_page(NAMED_FIXTURE);
+    let without = extract_page_paths_from_bytes(&bytes_a, 1, &PdfVectorLimits::default()).unwrap();
+    let with = extract_page_paths_from_bytes(&bytes_b, 1, &PdfVectorLimits::default()).unwrap();
+    let before = render(&with);
+    assert!(!before.is_empty());
     let batch = pdf_line_styles(&with, &ids(with.entities.len())).unwrap();
     assert_eq!(batch.components.len(), 2);
+    // Style was computed on `with` only; its geometry must still match the untouched page.
+    assert_eq!(render(&with).as_bytes(), render(&without).as_bytes());
     assert_eq!(render(&with), before);
-    assert_eq!(before.as_bytes(), render(&without).as_bytes());
 }
 
 #[cfg(feature = "pvec-normalized")]

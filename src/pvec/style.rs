@@ -389,7 +389,9 @@ pub fn dwg_line_style(
     input: &DwgStyleInput,
 ) -> Result<LineStyleComponent, StyleError> {
     let width = match input.lineweight {
-        Some(DwgLineweight::Hundredths(h)) if h >= 0 => Some(f64::from(h) / 100.0),
+        // The sentinels have their own variants, so a negative count is a corrupt value.
+        Some(DwgLineweight::Hundredths(h)) if h < 0 => return Err(StyleError::NegativeWidth),
+        Some(DwgLineweight::Hundredths(h)) => Some(f64::from(h) / 100.0),
         _ => None,
     };
     let dash = match &input.linetype_elements {
