@@ -33,6 +33,7 @@ pub mod limits;
 #[cfg(feature = "pvec-normalized")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
 pub mod normalized;
+pub mod ordering;
 pub mod pdf_clip;
 pub mod pdf_vector;
 #[cfg(feature = "pvec-normalized")]
@@ -43,7 +44,9 @@ pub mod provider;
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
 pub mod transform;
 pub mod units;
+pub mod view;
 pub mod view_profile;
+pub mod xref;
 
 #[cfg(feature = "dwg-acadrust")]
 #[cfg_attr(docsrs, doc(cfg(feature = "dwg-acadrust")))]
@@ -61,6 +64,10 @@ pub use fidelity::{
     Basis, FidelityClass, FidelityReport, ReasonCode, Tally, TallyError, classify_unmapped,
 };
 pub use limits::{Limit, LimitError, SourceGuard, SourceLimits};
+pub use ordering::{
+    EntityId, OrderedEntity, OrderedSource, OrderingBasis, OrderingPolicy, OrderingReport,
+    canonical_cmp, order_entities,
+};
 pub use pdf_vector::{
     PdfFillRule, PdfPaintIntent, PdfPathEntity, PdfPathSegment, PdfPoint, PdfProvenance,
     PdfVectorError, PdfVectorLimits, PdfVectorPage, extract_page_paths,
@@ -76,6 +83,11 @@ pub use provider::{
 #[cfg(feature = "pvec-normalized")]
 pub use normalized::{NormalizeError, Normalized2DGeometry, ProvenanceHandle, SourceBounds};
 pub use units::{DrawingExtents, INSUNITS_TABLE, SourceSpace, SourceUnit};
+pub use view::{
+    Decision, EntityState, EntityStates, IgnoredByPolicy, PolicyReason, ViewportFreezeMode,
+    ViewportFreezeNote, ViewportInput, VisibilityDisagreement, VisibilityFilter, VisibilityOutcome,
+    select_layout,
+};
 pub use view_profile::{
     ExcludedEntity, Exclusion, InsertLayerRule, Knob, LayerStateRule, LayerVisibility,
     NestedInsertPolicy, SpaceSelection, ViewOutcome, ViewProfile, ViewProfileError, ViewReport,
