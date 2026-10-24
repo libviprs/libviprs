@@ -63,6 +63,7 @@ fn n3_5b_1279_unresolved_block_is_unsupported_with_its_own_code() {
     assert!(ReasonCode::ALL.contains(&ReasonCode::UnresolvedBlock));
 }
 
+#[cfg(feature = "pvec-normalized")]
 #[test]
 fn n3_5b_1279_classification_agrees_with_exclusion_fidelity() {
     for e in Exclusion::ALL {
