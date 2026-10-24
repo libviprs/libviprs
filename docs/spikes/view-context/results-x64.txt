@@ -898,6 +898,55 @@ shim_emitted_but_hidden_by_rule 0
 shim_visible_by_rule_but_not_emitted 0
   shim warning code=105 handle=4C external reference ../not-resolved/other.dwg is not resolved, and this decoder never resolves one
 
+== describe, layouts and viewports only (the real model-view viewport is id>1, representsPaper=False)
+-- /work/in/AecObjects.dwg
+file AecObjects.dwg version AC1032
+layouts 2
+  layout name=Model paper=False block=*Model_Space entities=1 ext=(0,0,0)..(0,0,0)
+  layout name=Work paper=True block=*Paper_Space entities=3 ext=(-0.044724,-0.001666,-0.001526)..(826.056579,554.018262,0)
+    viewport handle=1FB id=1 layer=0 center=(413.005927,277.008298,0) w=1124.541605 h=560.602343 viewCenter=(413.005927,277.008298) viewHeight=560.602343 viewDir=(0,0,1) twist=0 scale=1 status=32800 nonRect=False off=False representsPaper=True boundary=- frozenInVp=[]
+    viewport handle=BCE id=2 layer=Defpoints center=(206.5,277,0) w=413 h=554 viewCenter=(4313.351365,19391.793797) viewHeight=90862.031481 viewDir=(-1,-1,1) twist=0 scale=0.006097 status=33568 nonRect=False off=False representsPaper=False boundary=- frozenInVp=[]
+    viewport handle=1040 id=3 layer=Defpoints center=(619.5,277,0) w=413 h=554 viewCenter=(26800,20700) viewHeight=72832.621985 viewDir=(0,0,1) twist=0 scale=0.007606 status=33568 nonRect=False off=False representsPaper=False boundary=- frozenInVp=[]
+-- /work/in/sample_AC1014.dwg
+file sample_AC1014.dwg version AC1014
+layouts 4
+  layout name=Model paper=False block=*MODEL_SPACE entities=163 ext=(0,0,0)..(0,0,0)
+  layout name=Layout1 paper=True block=*PAPER_SPACE0 entities=2 ext=(1.05,0.8,0)..(9.45,7.2,0)
+    viewport handle=240 id=1 layer=0 center=(7.616174,4,0) w=24.425049 h=8.993 viewCenter=(0,0) viewHeight=0 viewDir=(0,0,1) twist=0 scale=0 status=0 nonRect=False off=False representsPaper=True boundary=- frozenInVp=[]
+    viewport handle=245 id=2 layer=0 center=(5.25,4,0) w=8.4 h=6.4 viewCenter=(0,0) viewHeight=0 viewDir=(0,0,1) twist=0 scale=0 status=0 nonRect=False off=False representsPaper=False boundary=- frozenInVp=[]
+  layout name=Layout2 paper=True block=*PAPER_SPACE1 entities=2 ext=(1.05,0.8,0)..(9.45,7.2,0)
+    viewport handle=252 id=1 layer=0 center=(7.616577,4,0) w=24.429212 h=8.994532 viewCenter=(0,0) viewHeight=0 viewDir=(0,0,1) twist=0 scale=0 status=0 nonRect=False off=False representsPaper=True boundary=- frozenInVp=[]
+    viewport handle=256 id=2 layer=0 center=(5.25,4,0) w=8.4 h=6.4 viewCenter=(0,0) viewHeight=0 viewDir=(0,0,1) twist=0 scale=0 status=0 nonRect=False off=False representsPaper=False boundary=- frozenInVp=[]
+  layout name=MyLayout paper=True block=*PAPER_SPACE entities=2 ext=(1.136,0.793333,0)..(10.223999,7.14,0)
+    viewport handle=267 id=1 layer=0 center=(7.981303,3.967192,0) w=23.757575 h=8.747244 viewCenter=(0,0) viewHeight=0 viewDir=(0,0,1) twist=0 scale=0 status=0 nonRect=False off=False representsPaper=True boundary=- frozenInVp=[]
+    viewport handle=26B id=2 layer=0 center=(5.68,3.966667,0) w=9.087999 h=6.346667 viewCenter=(0,0) viewHeight=0 viewDir=(0,0,1) twist=0 scale=0 status=0 nonRect=False off=False representsPaper=False boundary=- frozenInVp=[]
+-- /work/in/sample_AC1015.dwg
+file sample_AC1015.dwg version AC1015
+layouts 4
+  layout name=Model paper=False block=*Model_Space entities=163 ext=(0,0,0)..(0,0,0)
+  layout name=Layout1 paper=True block=*Paper_Space0 entities=2 ext=(1.05,0.8,0)..(9.45,7.2,0)
+    viewport handle=240 id=1 layer=0 center=(7.616174,4,0) w=24.425049 h=8.993 viewCenter=(7.616174,4) viewHeight=8.993 viewDir=(0,0,1) twist=0 scale=1 status=819232 nonRect=False off=False representsPaper=True boundary=- frozenInVp=[]
+    viewport handle=245 id=2 layer=0 center=(5.25,4,0) w=8.4 h=6.4 viewCenter=(6,4.5) viewHeight=9.228705 viewDir=(0,0,1) twist=0 scale=0.693488 status=819808 nonRect=False off=False representsPaper=False boundary=- frozenInVp=[]
+  layout name=Layout2 paper=True block=*Paper_Space1 entities=2 ext=(1.05,0.8,0)..(9.45,7.2,0)
+    viewport handle=252 id=1 layer=0 center=(7.616577,4,0) w=24.429212 h=8.994532 viewCenter=(7.616577,4) viewHeight=8.994532 viewDir=(0,0,1) twist=0 scale=1 status=819232 nonRect=False off=False representsPaper=True boundary=- frozenInVp=[]
+    viewport handle=256 id=2 layer=0 center=(5.25,4,0) w=8.4 h=6.4 viewCenter=(6,4.5) viewHeight=9.228705 viewDir=(0,0,1) twist=0 scale=0.693488 status=819808 nonRect=False off=False representsPaper=False boundary=- frozenInVp=[]
+  layout name=MyLayout paper=True block=*Paper_Space entities=2 ext=(1.136,0.793333,0)..(10.223999,7.14,0)
+    viewport handle=267 id=1 layer=0 center=(7.981303,3.967192,0) w=23.757575 h=8.747244 viewCenter=(7.981303,3.967192) viewHeight=8.747244 viewDir=(0,0,1) twist=0 scale=1 status=819232 nonRect=False off=False representsPaper=True boundary=- frozenInVp=[]
+    viewport handle=26B id=2 layer=0 center=(5.68,3.966667,0) w=9.087999 h=6.346667 viewCenter=(6,4.5) viewHeight=9.108871 viewDir=(0,0,1) twist=0 scale=0.696757 status=819808 nonRect=False off=False representsPaper=False boundary=- frozenInVp=[]
+-- /work/in/sample_AC1018.dwg
+file sample_AC1018.dwg version AC1018
+layouts 4
+  layout name=Model paper=False block=*Model_Space entities=163 ext=(0,0,0)..(0,0,0)
+  layout name=Layout1 paper=True block=*Paper_Space0 entities=2 ext=(1.05,0.8,0)..(9.45,7.2,0)
+    viewport handle=240 id=1 layer=0 center=(7.616174,4,0) w=24.425049 h=8.993 viewCenter=(7.616174,4) viewHeight=8.993 viewDir=(0,0,1) twist=0 scale=1 status=819232 nonRect=False off=False representsPaper=True boundary=- frozenInVp=[]
+    viewport handle=245 id=2 layer=0 center=(5.25,4,0) w=8.4 h=6.4 viewCenter=(6,4.5) viewHeight=9.228705 viewDir=(0,0,1) twist=0 scale=0.693488 status=819808 nonRect=False off=False representsPaper=False boundary=- frozenInVp=[]
+  layout name=Layout2 paper=True block=*Paper_Space1 entities=2 ext=(1.05,0.8,0)..(9.45,7.2,0)
+    viewport handle=252 id=1 layer=0 center=(7.616577,4,0) w=24.429212 h=8.994532 viewCenter=(7.616577,4) viewHeight=8.994532 viewDir=(0,0,1) twist=0 scale=1 status=819232 nonRect=False off=False representsPaper=True boundary=- frozenInVp=[]
+    viewport handle=256 id=2 layer=0 center=(5.25,4,0) w=8.4 h=6.4 viewCenter=(6,4.5) viewHeight=9.228705 viewDir=(0,0,1) twist=0 scale=0.693488 status=819808 nonRect=False off=False representsPaper=False boundary=- frozenInVp=[]
+  layout name=MyLayout paper=True block=*Paper_Space entities=2 ext=(1.136,0.793333,0)..(10.223999,7.14,0)
+    viewport handle=267 id=1 layer=0 center=(7.981303,3.967192,0) w=23.757575 h=8.747244 viewCenter=(7.981303,3.967192) viewHeight=8.747244 viewDir=(0,0,1) twist=0 scale=1 status=819232 nonRect=False off=False representsPaper=True boundary=- frozenInVp=[]
+    viewport handle=26B id=2 layer=0 center=(5.68,3.966667,0) w=9.087999 h=6.346667 viewCenter=(6,4.5) viewHeight=9.108871 viewDir=(0,0,1) twist=0 scale=0.696757 status=819808 nonRect=False off=False representsPaper=False boundary=- frozenInVp=[]
+
 == rule, every other drawing (summary lines only)
 -- /work/in/AecObjects.dwg
 rule_visible_leaves 0

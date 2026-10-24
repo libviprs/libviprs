@@ -15,6 +15,12 @@ for f in out/vc_layers out/vc_nested out/vc_paper out/vc_anonymous in/sample_AC1
     echo
   done
 done
+echo "== describe, layouts and viewports only (the real model-view viewport is id>1, representsPaper=False)"
+for f in in/AecObjects in/sample_AC1014 in/sample_AC1015 in/sample_AC1018; do
+  echo "-- /work/$f.dwg"
+  $R describe "/work/$f.dwg" 2>&1 | grep -E '^(file|layouts|  layout |    viewport )'
+done
+echo
 echo "== rule, every other drawing (summary lines only)"
 for f in in/AecObjects in/BLOCKALIGNMENTPARAMETER in/BLOCKBASEPOINTPARAMETER in/BLOCKFLIPPARAMETER in/BLOCKLINEARPARAMETER \
          in/BLOCKLOOKUPPARAMETER in/BLOCKPOINTPARAMETER in/BLOCKPOLARPARAMETER in/BLOCKROTATIONPARAMETER in/BLOCKXYPARAMETER \
