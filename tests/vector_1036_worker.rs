@@ -34,7 +34,9 @@ fn explosive() -> Vec<Primitive> {
 /// The child's side. A plain run of the suite does nothing here.
 #[test]
 fn child_entry() {
-    let Ok(mode) = std::env::var(MODE) else { return };
+    let Ok(mode) = std::env::var(MODE) else {
+        return;
+    };
     let out = PathBuf::from(std::env::var(OUT).unwrap());
     match mode.as_str() {
         // What a naive worker does: every budget switched off. The memory
@@ -119,19 +121,32 @@ fn the_parent_is_still_serviceable(dir: &Path) {
 }
 
 const GIB_KIB: u64 = 1 << 20;
+const CEILING_KIB: u64 = 256 << 10;
 
 #[test]
 fn a_memory_ceiling_stops_a_run_with_every_budget_off() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("a.pmtiles");
-    let o = supervise("unbudgeted", &out, GIB_KIB, Duration::from_secs(120));
+    let o = supervise("unbudgeted", &out, CEILING_KIB, Duration::from_secs(120));
     let status = o.status.unwrap();
     assert!(!o.killed_by_supervisor, "the ceiling did not bite in time");
     assert!(
         !status.success(),
-        "a run with no budget finished inside a 1 GiB ceiling: {status:?}"
+        "a run with no budget finished inside a 256 MiB ceiling: {status:?}"
     );
     assert!(!out.exists(), "a run that died published an archive");
+    // A process that is killed cannot clean up after itself. What it leaves
+    // is a staging file beside the destination, never the destination, and
+    // the worker sweeps those by name.
+    let left: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    eprintln!("MEASURED left behind by a run killed by the ceiling: {left:?}");
+    assert!(
+        left.iter().all(|n| n.starts_with("a.pmtiles.tmp")),
+        "something other than staging files was left: {left:?}"
+    );
     the_parent_is_still_serviceable(dir.path());
 }
 

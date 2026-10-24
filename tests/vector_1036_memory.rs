@@ -8,7 +8,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 
-use libviprs::cad::{Line, Primitive};
+use libviprs::cad::{Line, Polyline, Primitive, Text};
 use libviprs::vector::mvt::Tile;
 use libviprs::vector::tiler::{TileOutput, TilerConfig, TilerError, tile_primitives};
 
@@ -173,5 +173,127 @@ fn a_million_primitives_stay_inside_the_default_budget() {
         peak / MIB,
         cfg.max_level_bytes / MIB
     );
-    eprintln!("MEASURED 1,000,000 primitives, zoom 0..=6: {tiles} tiles, peak working heap {} MiB", peak / MIB);
+    eprintln!(
+        "MEASURED 1,000,000 primitives, zoom 0..=6: {tiles} tiles, peak working heap {} MiB",
+        peak / MIB
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The numbers behind docs/vector-performance-report.md
+// ---------------------------------------------------------------------------
+
+/// Prints the report's table. Ignored because it is a measurement and not a
+/// check: `cargo test --release --test vector_1036_memory -- --ignored
+/// --nocapture performance_report`.
+#[test]
+#[ignore = "a measurement, not a check"]
+fn performance_report() {
+    let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let mut rows: Vec<String> = Vec::new();
+    let mut measure = |name: &str, prims: Vec<Primitive>, cfg: TilerConfig| {
+        let t = std::time::Instant::now();
+        let (r, peak) = peak_of(|| {
+            let mut out = Discard::default();
+            let r = tile_primitives(&prims, &cfg, &mut out);
+            (r, out.tiles)
+        });
+        let took = t.elapsed();
+        let what = match &r.0 {
+            Ok((rep, _)) => format!(
+                "ok, {} tiles, largest {} B, {} oversized, {} dropped for the point budget",
+                r.1, rep.largest_tile_bytes, rep.oversized_count, rep.dropped_for_point_budget
+            ),
+            Err(e) => format!("stopped: {e}"),
+        };
+        rows.push(format!(
+            "| {name} | {} | {:.2?} | {} MiB | {what} |",
+            prims.len(),
+            took,
+            peak / MIB
+        ));
+    };
+    let mut s = 1;
+    let dense = |n: usize, s: &mut u64| -> Vec<Primitive> {
+        (0..n)
+            .map(|_| {
+                let (x, y) = (lcg(s) * 1.0e5, lcg(s) * 1.0e5);
+                line([x, y], [x + lcg(s) * 50.0, y + lcg(s) * 50.0])
+            })
+            .collect()
+    };
+    measure(
+        "1M short lines, zoom 0..=6",
+        dense(1_000_000, &mut s),
+        TilerConfig::default().with_max_zoom(6),
+    );
+    measure(
+        "1M short lines, zoom 0..=12 (default)",
+        dense(1_000_000, &mut s),
+        TilerConfig::default(),
+    );
+    let diagonals = |n: usize, s: &mut u64| -> Vec<Primitive> {
+        (0..n)
+            .map(|_| line([lcg(s) * 1.0e5, 0.0], [lcg(s) * 1.0e5, 1.0e5]))
+            .collect()
+    };
+    measure(
+        "20k long lines, zoom 0..=12 (default)",
+        diagonals(20_000, &mut s),
+        TilerConfig::default(),
+    );
+    let two = vec![
+        line([0.0, 0.0], [1.0e5, 1.0e5]),
+        line([0.0, 1.0e5], [1.0e5, 0.0]),
+    ];
+    measure(
+        "2 corner lines, zoom 0..=16",
+        two.clone(),
+        TilerConfig::default().with_max_zoom(16),
+    );
+    measure(
+        "2 corner lines, zoom 0..=24",
+        two,
+        TilerConfig::default().with_max_zoom(24),
+    );
+    let pts: Vec<[f64; 3]> = (0..2_000_000)
+        .map(|_| [lcg(&mut s) * 1.0e5, lcg(&mut s) * 1.0e5, 0.0])
+        .collect();
+    let poly: Primitive = Polyline::new(&pts, true, [0.0, 0.0, 1.0], &[])
+        .unwrap()
+        .into();
+    measure(
+        "one 2M-vertex random polygon",
+        vec![poly],
+        TilerConfig::default(),
+    );
+    let big = "A".repeat(64 << 20);
+    let text: Primitive = Text::new([0.0, 0.0, 0.0], 10.0, 0.0, &big).unwrap().into();
+    measure(
+        "one 64 MiB label and a line",
+        vec![text, line([0.0, 0.0], [1000.0, 1000.0])],
+        TilerConfig::default(),
+    );
+    let labels: Vec<Primitive> = (0..300_000)
+        .map(|i| {
+            Text::new(
+                [lcg(&mut s) * 1.0e5, lcg(&mut s) * 1.0e5, 0.0],
+                20.0,
+                0.0,
+                format!("T{i}"),
+            )
+            .unwrap()
+            .into()
+        })
+        .collect();
+    measure(
+        "300k short labels, zoom 0..=12 (default)",
+        labels,
+        TilerConfig::default(),
+    );
+    eprintln!("| case | primitives | time | peak working heap | outcome |");
+    eprintln!("|---|---|---|---|---|");
+    for r in rows {
+        eprintln!("{r}");
+    }
 }

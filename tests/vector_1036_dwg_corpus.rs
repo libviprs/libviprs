@@ -109,7 +109,9 @@ fn convert(bytes: &[u8], dir: &Path) {
 /// The child's side: every mutation of one file, in this process.
 #[test]
 fn child_entry() {
-    let Ok(file) = std::env::var(FILE) else { return };
+    let Ok(file) = std::env::var(FILE) else {
+        return;
+    };
     let base = std::fs::read(&file).unwrap();
     let dir = tempfile::tempdir().unwrap();
     for n in 0..MUTATIONS {
@@ -202,10 +204,52 @@ fn the_pathological_deep_dimension_drawing_ends_inside_a_bound() {
     let dir = tempfile::tempdir().unwrap();
     let t = Instant::now();
     convert(&bytes, dir.path());
-    eprintln!("MEASURED g13_dimension_deep under hardened limits: {:?}", t.elapsed());
+    eprintln!(
+        "MEASURED g13_dimension_deep under hardened limits: {:?}",
+        t.elapsed()
+    );
     assert!(
         t.elapsed() < Duration::from_secs(30),
         "took {:?}",
         t.elapsed()
+    );
+}
+
+#[test]
+fn the_provider_limits_actually_bite() {
+    if !native_present() {
+        return;
+    }
+    let bytes = std::fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cad/g13/g13_many_inserts.dwg"),
+    )
+    .unwrap();
+    let decode = |limits: ProviderLimits| {
+        let decoder = AcadSharpDecoder::new().unwrap().with_limits(limits);
+        let drawing = decoder.open(CadSource::Bytes(&bytes)).unwrap();
+        let model = drawing
+            .views()
+            .unwrap()
+            .into_iter()
+            .find(|v| v.kind() == ViewKind::Model)
+            .unwrap();
+        let mut sink = libviprs::cad::CollectSink::new();
+        let mut report = libviprs::cad::DecodeReport::new();
+        let r = drawing.decode(model.index(), &mut sink, &mut report);
+        (r.is_ok(), sink.len())
+    };
+    let (ok, free) = decode(ProviderLimits::default());
+    assert!(ok && free >= 30_000, "the unbounded decode gave {free}");
+    // The same drawing with the entity bound a hundred times under what it
+    // holds: the decode may end in an error or in a short, reported result,
+    // and must not deliver the whole drawing.
+    let tight = ProviderLimits {
+        max_entities: Some(300),
+        ..ProviderLimits::default()
+    };
+    let (_, held) = decode(tight);
+    assert!(
+        held < free / 10,
+        "max_entities=300 still delivered {held} of {free}"
     );
 }

@@ -71,7 +71,9 @@ fn a_deadline_stops_a_tile_explosion_inside_one_primitive() {
     // Two primitives only, so the stop has to come from inside the splitting
     // of one line over its tiles and not from a check between primitives.
     let limit = Duration::from_millis(300);
-    let cfg = TilerConfig::default().with_max_zoom(18).with_deadline(limit);
+    let cfg = TilerConfig::default()
+        .with_max_zoom(18)
+        .with_deadline(limit);
     let mut out = CollectTiles::default();
     let t = Instant::now();
     let err = tile_primitives(&explosive(), &cfg, &mut out).unwrap_err();
@@ -94,7 +96,10 @@ fn a_deadline_stops_a_failed_build_without_a_partial_archive() {
         .with_max_zoom(18)
         .with_deadline(Duration::from_millis(200));
     let err = build_archive(&explosive(), &cfg, &path, "x").unwrap_err();
-    assert!(matches!(err, TilerError::DeadlineExceeded { .. }), "{err:?}");
+    assert!(
+        matches!(err, TilerError::DeadlineExceeded { .. }),
+        "{err:?}"
+    );
     assert!(!path.exists());
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
 }
@@ -146,10 +151,10 @@ fn text_features(out: &CollectTiles) -> Vec<String> {
             for f in &layer.features {
                 assert!(matches!(f.geometry, Geometry::Points(_)));
                 for (k, v) in &f.properties {
-                    if k == "text" {
-                        if let Value::String(s) = v {
-                            found.push(s.clone());
-                        }
+                    if k == "text"
+                        && let Value::String(s) = v
+                    {
+                        found.push(s.clone());
                     }
                 }
             }
@@ -182,7 +187,10 @@ fn one_text_feature_never_carries_more_than_the_configured_bytes() {
     for t in &texts {
         assert!(t.len() <= 255, "a label carried {} bytes", t.len());
     }
-    assert!(texts.iter().any(|t| t == "short"), "a short label is intact");
+    assert!(
+        texts.iter().any(|t| t == "short"),
+        "a short label is intact"
+    );
     assert!(report.text_truncated >= 1, "the cut is counted");
     assert!(
         report
@@ -194,6 +202,23 @@ fn one_text_feature_never_carries_more_than_the_configured_bytes() {
 }
 
 #[test]
+fn the_default_cap_leaves_a_long_general_note_whole() {
+    // The longest label in the fixtures is 8,192 characters.
+    let note = "N".repeat(8192);
+    let prims = vec![
+        line([0.0, 0.0], [20_000.0, 100.0]),
+        Text::new([10.0, 10.0, 0.0], 20.0, 0.0, &note)
+            .unwrap()
+            .into(),
+    ];
+    let mut out = CollectTiles::default();
+    let (report, _) =
+        tile_primitives(&prims, &TilerConfig::default().with_max_zoom(8), &mut out).unwrap();
+    assert_eq!(report.text_truncated, 0);
+    assert!(text_features(&out).iter().all(|t| t.len() == 8192));
+}
+
+#[test]
 fn a_label_inside_the_cap_is_not_reported() {
     let prims = vec![
         line([0.0, 0.0], [1000.0, 100.0]),
@@ -202,8 +227,8 @@ fn a_label_inside_the_cap_is_not_reported() {
             .into(),
     ];
     let mut out = CollectTiles::default();
-    let (report, _) = tile_primitives(&prims, &TilerConfig::default().with_max_zoom(5), &mut out)
-        .unwrap();
+    let (report, _) =
+        tile_primitives(&prims, &TilerConfig::default().with_max_zoom(5), &mut out).unwrap();
     assert_eq!(report.text_truncated, 0);
 }
 
@@ -236,11 +261,17 @@ fn extreme_batches() -> Vec<(&'static str, Vec<Primitive>)> {
         ),
         (
             "subnormal extent",
-            vec![line([0.0, 0.0], [tiny, tiny]), line([0.0, 0.0], [0.0, tiny])],
+            vec![
+                line([0.0, 0.0], [tiny, tiny]),
+                line([0.0, 0.0], [0.0, tiny]),
+            ],
         ),
         (
             "mixed scales",
-            vec![line([0.0, 0.0], [1.0e12, 1.0]), line([0.0, 0.0], [1.0e-9, 1.0e-9])],
+            vec![
+                line([0.0, 0.0], [1.0e12, 1.0]),
+                line([0.0, 0.0], [1.0e-9, 1.0e-9]),
+            ],
         ),
         (
             "coincident points",
@@ -292,7 +323,9 @@ fn extreme_batches() -> Vec<(&'static str, Vec<Primitive>)> {
         (
             "text at the edge of the range",
             vec![
-                Text::new([big, big, 0.0], 1.0e150, 0.0, "X").unwrap().into(),
+                Text::new([big, big, 0.0], 1.0e150, 0.0, "X")
+                    .unwrap()
+                    .into(),
                 Text::new([0.0, 0.0, 0.0], tiny, 1.0e9, "Y").unwrap().into(),
             ],
         ),
@@ -300,15 +333,18 @@ fn extreme_batches() -> Vec<(&'static str, Vec<Primitive>)> {
             "control characters and escapes",
             vec![
                 line([0.0, 0.0], [100.0, 100.0]),
-                Text::new([1.0, 1.0, 0.0], 5.0, 0.0, "\0\u{1}\u{202e}\u{feff}A\u{1f600}")
-                    .unwrap()
-                    .into(),
+                Text::new(
+                    [1.0, 1.0, 0.0],
+                    5.0,
+                    0.0,
+                    "\0\u{1}\u{202e}\u{feff}A\u{1f600}",
+                )
+                .unwrap()
+                .into(),
                 Text::new([1.0, 20.0, 0.0], 5.0, 0.0, "{{{{{\\\\\\\\\\H1;\\S1^;{\\f;")
                     .unwrap()
                     .into(),
-                Text::new([1.0, 40.0, 0.0], 5.0, 0.0, "\\")
-                    .unwrap()
-                    .into(),
+                Text::new([1.0, 40.0, 0.0], 5.0, 0.0, "\\").unwrap().into(),
             ],
         ),
     ];
@@ -372,31 +408,34 @@ fn finite() -> impl Strategy<Value = f64> {
 fn primitive() -> impl Strategy<Value = Primitive> {
     prop_oneof![
         (finite(), finite(), finite(), finite()).prop_filter_map("line", |(a, b, c, d)| {
-            Line::new([a, b, 0.0], [c, d, 0.0]).ok().map(Primitive::from)
+            Line::new([a, b, 0.0], [c, d, 0.0])
+                .ok()
+                .map(Primitive::from)
         }),
         (finite(), finite(), finite()).prop_filter_map("circle", |(x, y, r)| {
             Circle::new([x, y, 0.0], r, Z).ok().map(Primitive::from)
         }),
-        (finite(), finite(), finite(), finite(), finite()).prop_filter_map(
-            "arc",
-            |(x, y, r, a, b)| Arc::new([x, y, 0.0], r, a, b, Z).ok().map(Primitive::from)
-        ),
+        (finite(), finite(), finite(), finite(), finite())
+            .prop_filter_map("arc", |(x, y, r, a, b)| Arc::new([x, y, 0.0], r, a, b, Z)
+                .ok()
+                .map(Primitive::from)),
         (finite(), finite(), finite(), ".{0,64}").prop_filter_map("text", |(x, y, h, s)| {
             Text::new([x, y, 0.0], h, 0.5, &s).ok().map(Primitive::from)
         }),
-        (prop::collection::vec((finite(), finite(), finite()), 0..24), any::<bool>()).prop_filter_map(
-            "polyline",
-            |(pts, closed)| {
+        (
+            prop::collection::vec((finite(), finite(), finite()), 0..24),
+            any::<bool>()
+        )
+            .prop_filter_map("polyline", |(pts, closed)| {
                 let v: Vec<[f64; 3]> = pts.iter().map(|p| [p.0, p.1, 0.0]).collect();
                 let b: Vec<f64> = pts.iter().map(|p| p.2).collect();
                 Polyline::new(&v, closed, Z, &b).ok().map(Primitive::from)
-            }
-        ),
+            }),
     ]
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig { cases: 96, .. ProptestConfig::default() })]
+    #![proptest_config(ProptestConfig { cases: 96, failure_persistence: None, .. ProptestConfig::default() })]
 
     #[test]
     fn arbitrary_batches_never_panic(

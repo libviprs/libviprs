@@ -64,6 +64,18 @@
 //! * **text per tile** ([`TilerConfig::max_text_per_tile`]), tallest kept;
 //! * **points held for one zoom level** ([`TilerConfig::max_level_points`]):
 //!   exceeding it is an error rather than an out-of-memory;
+//! * **bytes held for one zoom level** ([`TilerConfig::max_level_bytes`]):
+//!   an estimate that counts the bookkeeping around every run and tile, which
+//!   the point budget does not, so a line split over millions of tiles stops
+//!   at the budget and not at six gigabytes;
+//! * **one label** ([`TilerConfig::max_text_bytes`]): cut at a character
+//!   boundary, counted and reported;
+//! * **time** ([`TilerConfig::deadline`] and [`TilerConfig::cancel`]): polled
+//!   per primitive, per split of a primitive over its tiles and per tile, so a
+//!   single enormous primitive is stopped inside the primitive. A decoder
+//!   behind [`build_archive_from_view`] cannot be interrupted from here, and is
+//!   stopped at its first primitive after the limit; a decoder stuck inside
+//!   native code is the worker process's to kill (see the performance report);
 //! * **points per curve** ([`crate::vector::tessellate::MAX_POINTS_PER_CURVE`]):
 //!   a curve past it is drawn at the cap and counted;
 //! * **stored bytes per tile** ([`TilerConfig::max_tile_bytes`]): an oversized
@@ -80,14 +92,16 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use serde_json::json;
 use thiserror::Error;
 
 use crate::cad::{
-    CadDrawing, CadError, DecodeReport, Diagnostic, DiagnosticCode, Primitive, PrimitiveSink,
-    ViewKind, display_text,
+    CadDrawing, CadError, DecodeReport, Diagnostic, DiagnosticCode, DisplayText, Primitive,
+    PrimitiveSink, ViewKind, display_text,
 };
+use crate::cancel::CancelToken;
 use crate::vector::archive::{
     FieldType, LayerSchema, VectorArchiveOptions, VectorArchiveWriter, VectorError,
 };
@@ -156,7 +170,10 @@ pub struct TilerConfig {
     /// bookkeeping costs far more than their points.
     pub max_level_bytes: usize,
     /// The longest label one text feature carries, in bytes. A longer one is
-    /// cut at a character boundary and reported.
+    /// cut at a character boundary and reported. The default, 16 KiB, is twice
+    /// the longest label in the fixtures (a general-notes block of 8,192
+    /// characters) and bounds a tile's decoded text at
+    /// `max_text_per_tile * max_text_bytes`, which is 64 MiB.
     pub max_text_bytes: usize,
     /// Wall-clock budget for the whole run, from the moment it starts.
     pub deadline: Option<std::time::Duration>,
@@ -187,7 +204,7 @@ impl Default for TilerConfig {
             max_primitives: 5_000_000,
             oversize: OversizePolicy::Report,
             max_level_bytes: 1 << 30,
-            max_text_bytes: 4096,
+            max_text_bytes: 16 << 10,
             deadline: None,
             cancel: None,
         }
@@ -336,12 +353,14 @@ pub enum TilerError {
     #[error("the drawing's bounds are not finite")]
     NonFiniteBounds,
     /// One zoom level needed more points than it may hold.
-    #[error("zoom {zoom} needs more than {limit} points held at once")]
+    #[error("zoom {zoom} needs more than {limit} {unit} held at once")]
     LevelBudgetExceeded {
         /// The zoom.
         zoom: u8,
         /// The configured limit.
         limit: usize,
+        /// What the limit counts: `"points"` or `"bytes"`.
+        unit: &'static str,
     },
     /// A tile passed the byte budget under [`OversizePolicy::Error`].
     #[error("tile {z}/{x}/{y} is {bytes} bytes, past the {limit} byte budget")]
@@ -621,6 +640,72 @@ impl TileOutput for CollectTiles {
 }
 
 // ---------------------------------------------------------------------------
+// Stopping, and bounding one string
+// ---------------------------------------------------------------------------
+
+/// Polls the deadline and the cancellation token. Cheap enough to call per
+/// primitive and per split: the token is one atomic load, and the clock is read
+/// on one call in 32.
+#[derive(Clone)]
+struct Guard {
+    start: Instant,
+    limit: Option<Duration>,
+    cancel: Option<CancelToken>,
+    tick: u32,
+}
+
+impl Guard {
+    fn new(config: &TilerConfig) -> Self {
+        Self {
+            start: Instant::now(),
+            limit: config.deadline,
+            cancel: config.cancel.clone(),
+            tick: 0,
+        }
+    }
+
+    fn check(&mut self) -> Result<(), TilerError> {
+        if self.cancel.as_ref().is_some_and(CancelToken::is_cancelled) {
+            return Err(TilerError::Cancelled);
+        }
+        self.tick = self.tick.wrapping_add(1);
+        if let Some(limit) = self.limit
+            && self.tick % 32 == 1
+            && self.start.elapsed() >= limit
+        {
+            return Err(TilerError::DeadlineExceeded { limit });
+        }
+        Ok(())
+    }
+}
+
+/// `s` cut to at most `max` bytes at a character boundary, and whether it was.
+fn cut_at(s: &str, max: usize) -> (&str, bool) {
+    if s.len() <= max {
+        return (s, false);
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    (&s[..end], true)
+}
+
+/// What a label displays, held to `max` bytes, and whether it was cut.
+///
+/// The raw string is cut first, at four times the cap, so that a hostile
+/// string is never read (or copied) whole: formatting codes sit in the raw
+/// string and not in what is shown, which is why the raw allowance is larger.
+fn shown(content: &str, max: usize) -> (DisplayText, bool) {
+    let (raw, cut_raw) = cut_at(content, max.saturating_mul(4));
+    let mut d = display_text(raw);
+    let (kept, cut_text) = cut_at(&d.text, max);
+    let keep = kept.len();
+    d.text.truncate(keep);
+    (d, cut_raw || cut_text)
+}
+
+// ---------------------------------------------------------------------------
 // Flattening one primitive
 // ---------------------------------------------------------------------------
 
@@ -638,7 +723,7 @@ enum Flat {
     Undrawable,
 }
 
-fn flatten(p: &Primitive, tol: f64) -> Flat {
+fn flatten(p: &Primitive, tol: f64, max_text: usize) -> Flat {
     match p {
         Primitive::Line(l) => Flat::Lines {
             runs: vec![vec![
@@ -704,7 +789,7 @@ fn flatten(p: &Primitive, tol: f64) -> Flat {
             rotation: t.rotation(),
             // What a person reads: MTEXT formatting is read out of it here, once,
             // so bounds and tiles agree on the string.
-            text: display_text(t.content()).text,
+            text: shown(t.content(), max_text).0.text,
         },
     }
 }
@@ -747,7 +832,7 @@ fn hull_size(points: &[crate::cad::Point3]) -> f64 {
 }
 
 /// A primitive's world box, from a tessellation fine enough for its own size.
-fn primitive_bounds(p: &Primitive) -> Option<[f64; 4]> {
+fn primitive_bounds(p: &Primitive, max_text: usize) -> Option<[f64; 4]> {
     // First pass at a size-relative tolerance: radius for the round things,
     // a generous fraction of the control box for splines.
     let rough = match p {
@@ -760,7 +845,7 @@ fn primitive_bounds(p: &Primitive) -> Option<[f64; 4]> {
         _ => 1.0,
     };
     let tol = (rough * 1e-4).max(f64::MIN_POSITIVE);
-    match flatten(p, tol) {
+    match flatten(p, tol, max_text) {
         Flat::Lines { runs, .. } => {
             let b = bbox_of(&runs)?;
             Some([b[0] - tol, b[1] - tol, b[2] + tol, b[3] + tol])
@@ -815,11 +900,24 @@ struct Level {
     zoom: u8,
     tiles: BTreeMap<(u32, u32), TileBuf>,
     points: usize,
+    runs: usize,
+}
+
+impl Level {
+    /// What this level is estimated to hold, in bytes: the points themselves
+    /// and the bookkeeping around each run and tile.
+    fn estimated_bytes(&self) -> usize {
+        self.points
+            .saturating_mul(std::mem::size_of::<Point>())
+            .saturating_add(self.runs.saturating_mul(LEVEL_RUN_COST))
+            .saturating_add(self.tiles.len().saturating_mul(LEVEL_TILE_COST))
+    }
 }
 
 struct Ctx<'a> {
     config: &'a TilerConfig,
     report: &'a mut TilerReport,
+    guard: &'a mut Guard,
 }
 
 /// Distributes already-flattened runs, in grid coordinates, over the tiles
@@ -846,6 +944,7 @@ fn distribute(
 
     let mut stack = vec![(runs, x0, x1, y0, y1)];
     while let Some((runs, x0, x1, y0, y1)) = stack.pop() {
+        ctx.guard.check()?;
         if x0 == x1 && y0 == y1 {
             emit_runs(ctx, level, x0, y0, &runs)?;
             continue;
@@ -902,13 +1001,22 @@ fn emit_runs(
             continue;
         }
         level.points += pts.len();
+        level.runs += 1;
+        level.tiles.entry((tx, ty)).or_default().lines.push(pts);
         if level.points > ctx.config.max_level_points {
             return Err(TilerError::LevelBudgetExceeded {
                 zoom: level.zoom,
                 limit: ctx.config.max_level_points,
+                unit: "points",
             });
         }
-        level.tiles.entry((tx, ty)).or_default().lines.push(pts);
+        if level.estimated_bytes() > ctx.config.max_level_bytes {
+            return Err(TilerError::LevelBudgetExceeded {
+                zoom: level.zoom,
+                limit: ctx.config.max_level_bytes,
+                unit: "bytes",
+            });
+        }
     }
     Ok(())
 }
@@ -916,13 +1024,22 @@ fn emit_runs(
 /// Reads what a text primitive's formatting and characters say about fidelity
 /// and files it: fonts the output cannot honour, glyphs it cannot draw, codes
 /// it dropped. Once per distinct thing as a diagnostic, always as a count.
-fn note_text(report: &mut TilerReport, t: &crate::cad::Text) {
-    let d = display_text(t.content());
+fn note_text(report: &mut TilerReport, t: &crate::cad::Text, max_text: usize) {
+    let (d, cut) = shown(t.content(), max_text);
     let handle = t.origin().item_handle();
     let with = |diag: Diagnostic| match handle {
         Some(h) => diag.with_entity(h),
         None => diag,
     };
+    if cut {
+        report.text_truncated += 1;
+        report.say(with(Diagnostic::from_code(
+            DiagnosticCode::TEXT_TRUNCATED,
+            format!(
+                "a label is longer than the {max_text} bytes one feature carries, so it is cut there"
+            ),
+        )));
+    }
     for font in &d.fonts {
         let first = !report.fonts_substituted.contains_key(font);
         *report.fonts_substituted.entry(font.clone()).or_default() += 1;
@@ -979,6 +1096,15 @@ pub fn tile_primitives(
     out: &mut dyn TileOutput,
 ) -> Result<(TilerReport, WorldTransform), TilerError> {
     config.validate()?;
+    tile_guarded(primitives, config, out, &mut Guard::new(config))
+}
+
+fn tile_guarded(
+    primitives: &[Primitive],
+    config: &TilerConfig,
+    out: &mut dyn TileOutput,
+    guard: &mut Guard,
+) -> Result<(TilerReport, WorldTransform), TilerError> {
     let mut report = TilerReport {
         primitives: primitives.len() as u64,
         ..TilerReport::default()
@@ -993,12 +1119,14 @@ pub fn tile_primitives(
         f64::NEG_INFINITY,
     ];
     for p in primitives {
+        guard.check()?;
         if let Primitive::Text(t) = p {
-            note_text(&mut report, t);
+            note_text(&mut report, t, config.max_text_bytes);
         }
-        let b = primitive_bounds(p);
+        let b = primitive_bounds(p, config.max_text_bytes);
         match b {
-            None if matches!(p, Primitive::Text(t) if display_text(t.content()).is_blank()) => {
+            None if matches!(p, Primitive::Text(t) if shown(t.content(), config.max_text_bytes).0.is_blank()) =>
+            {
                 // Formatting and nothing else: there is nothing to draw, and
                 // that is not a failure to draw it.
                 report.culled_empty_text += 1;
@@ -1035,14 +1163,17 @@ pub fn tile_primitives(
             zoom,
             tiles: BTreeMap::new(),
             points: 0,
+            runs: 0,
         };
         let mut ctx = Ctx {
             config,
             report: &mut report,
+            guard: &mut *guard,
         };
 
         for (p, bx) in primitives.iter().zip(&boxes) {
             let Some(bx) = bx else { continue };
+            ctx.guard.check()?;
             let is_text = matches!(p, Primitive::Text(_));
             if !is_text
                 && (bx[2] - bx[0]) < config.cull_units * unit
@@ -1051,7 +1182,7 @@ pub fn tile_primitives(
                 ctx.report.culled_subpixel += 1;
                 continue;
             }
-            match flatten(p, tol) {
+            match flatten(p, tol, config.max_text_bytes) {
                 Flat::Undrawable => ctx.report.undrawable += 1,
                 Flat::Lines { runs, capped } => {
                     if capped {
@@ -1115,6 +1246,7 @@ pub fn tile_primitives(
 
         // Write the level.
         for ((tx, ty), buf) in std::mem::take(&mut level.tiles) {
+            ctx.guard.check()?;
             let tile = build_tile(&mut ctx, buf);
             let Some(bytes) = out.put(zoom, tx, ty, &tile)? else {
                 continue;
@@ -1252,6 +1384,22 @@ pub fn build_archive(
     name: &str,
 ) -> Result<TilerReport, TilerError> {
     config.validate()?;
+    build_archive_guarded(
+        primitives,
+        config,
+        path.as_ref(),
+        name,
+        &mut Guard::new(config),
+    )
+}
+
+fn build_archive_guarded(
+    primitives: &[Primitive],
+    config: &TilerConfig,
+    path: &Path,
+    name: &str,
+    guard: &mut Guard,
+) -> Result<TilerReport, TilerError> {
     // The world has to be known before the writer is opened, because the
     // header carries the bounds. A cheap first pass finds them.
     let mut all = [
@@ -1261,7 +1409,10 @@ pub fn build_archive(
         f64::NEG_INFINITY,
     ];
     for p in primitives {
-        if let Some(b) = primitive_bounds(p).filter(|b| b.iter().all(|v| v.is_finite())) {
+        guard.check()?;
+        if let Some(b) =
+            primitive_bounds(p, config.max_text_bytes).filter(|b| b.iter().all(|v| v.is_finite()))
+        {
             all[0] = all[0].min(b[0]);
             all[1] = all[1].min(b[1]);
             all[2] = all[2].max(b[2]);
@@ -1291,7 +1442,7 @@ pub fn build_archive(
         );
     options = options.with_center_zoom(0);
     let mut writer = VectorArchiveWriter::create(path, &options)?;
-    let (report, _) = tile_primitives(primitives, config, &mut writer)?;
+    let (report, _) = tile_guarded(primitives, config, &mut writer, guard)?;
     writer.finish()?;
     Ok(report)
 }
@@ -1309,6 +1460,7 @@ pub fn build_archive_from_view(
     name: &str,
 ) -> Result<(TilerReport, DecodeReport), TilerError> {
     config.validate()?;
+    let mut guard = Guard::new(config);
     let views = drawing.views()?;
     let info = views
         .iter()
@@ -1327,10 +1479,18 @@ pub fn build_archive_from_view(
         held: Vec::new(),
         limit: config.max_primitives,
         exceeded: false,
+        guard: guard.clone(),
+        stopped: None,
     };
     let mut decode = DecodeReport::new();
     match drawing.decode(view, &mut sink, &mut decode) {
         Ok(()) => {}
+        Err(_) if sink.stopped.is_some() => {
+            // The decoder cannot be interrupted from here. This is the first
+            // primitive after the deadline or the cancel, and the decode is
+            // abandoned at that point.
+            return Err(sink.stopped.take().unwrap_or(TilerError::Cancelled));
+        }
         Err(_) if sink.exceeded => {
             return Err(TilerError::TooManyPrimitives {
                 limit: config.max_primitives,
@@ -1343,7 +1503,7 @@ pub fn build_archive_from_view(
             });
         }
     }
-    let report = build_archive(&sink.held, config, path, name)?;
+    let report = build_archive_guarded(&sink.held, config, path.as_ref(), name, &mut guard)?;
     Ok((report, decode))
 }
 
@@ -1353,10 +1513,17 @@ struct BoundedSink {
     held: Vec<Primitive>,
     limit: usize,
     exceeded: bool,
+    guard: Guard,
+    stopped: Option<TilerError>,
 }
 
 impl PrimitiveSink for BoundedSink {
     fn primitive(&mut self, primitive: Primitive) -> Result<(), CadError> {
+        if let Err(e) = self.guard.check() {
+            let why = e.to_string();
+            self.stopped = Some(e);
+            return Err(CadError::sink(why));
+        }
         if self.held.len() >= self.limit {
             self.exceeded = true;
             return Err(CadError::sink(format!(
