@@ -240,6 +240,7 @@ fn result_rows(doc: &str) -> Vec<Row> {
 // ---------------------------------------------------------------------------------------------
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn ac1_every_corpus_fixture_has_exactly_one_row_that_names_it() {
     let rows = result_rows(&doc());
     for f in FIXTURES {
@@ -257,6 +258,7 @@ fn ac1_every_corpus_fixture_has_exactly_one_row_that_names_it() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn ac1_every_class_the_issue_lists_is_covered_on_a_named_fixture() {
     let rows = result_rows(&doc());
     for (class, fixture) in ISSUE_CLASSES {
@@ -272,6 +274,7 @@ fn ac1_every_class_the_issue_lists_is_covered_on_a_named_fixture() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn ac1_every_row_is_one_of_the_four_outcomes_and_agrees_with_its_measurement() {
     let doc = doc();
     let data = results();
@@ -313,6 +316,7 @@ fn ac1_every_row_is_one_of_the_four_outcomes_and_agrees_with_its_measurement() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn ac1_every_measured_row_is_in_the_document() {
     let doc = doc();
     let rows = result_rows(&doc);
@@ -331,6 +335,7 @@ fn ac1_every_measured_row_is_in_the_document() {
 // ---------------------------------------------------------------------------------------------
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn ac2_bulge_rows_compare_against_the_expected_arc_parameters() {
     let data = results();
     for id in ["bulge-arc-001", "bulge-arc-neg-001"] {
@@ -359,6 +364,7 @@ fn ac2_bulge_rows_compare_against_the_expected_arc_parameters() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn ac2_negative_bulge_sweep_sign_is_measured_and_stated() {
     let data = results();
     let m = &data["bulge-arc-neg-001"];
@@ -394,6 +400,7 @@ fn ac2_negative_bulge_sweep_sign_is_measured_and_stated() {
 // ---------------------------------------------------------------------------------------------
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn ac3_repeated_interior_knot_is_reported_with_what_the_mapping_did() {
     let data = results();
     let m = &data["repeated-knot-c0-001"];
@@ -436,6 +443,7 @@ fn ac3_repeated_interior_knot_is_reported_with_what_the_mapping_did() {
 // ---------------------------------------------------------------------------------------------
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn ac4_requires_pvec_capability_rows_name_the_missing_capability() {
     let doc = doc();
     let data = results();
@@ -464,6 +472,7 @@ fn ac4_requires_pvec_capability_rows_name_the_missing_capability() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn ac4_nothing_is_tessellated_to_make_a_row_green() {
     let doc = flat(&doc());
     assert!(
@@ -500,6 +509,7 @@ fn ac4_nothing_is_tessellated_to_make_a_row_green() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn ac4_the_periodic_spline_is_refused_by_pvec_and_not_rewritten() {
     let data = results();
     let m = &data["closed-periodic-001"];
@@ -520,6 +530,7 @@ fn ac4_the_periodic_spline_is_refused_by_pvec_and_not_rewritten() {
 // ---------------------------------------------------------------------------------------------
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn ac5_decision_lists_exact_and_deferred_classes_with_measured_deviations() {
     let doc = doc();
     let dec = flat(&section(&doc, "## Decision"));
@@ -560,6 +571,7 @@ fn ac5_decision_lists_exact_and_deferred_classes_with_measured_deviations() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn ac5_a_spline_row_that_is_not_exact_is_named_where_the_decision_calls_splines_exact() {
     // The decision lets phase 4 implement "every SPLINE that is not periodic" as exact. A SPLINE
     // row graded anything else that is not the periodic one has to be named there as the
@@ -596,6 +608,7 @@ fn ac5_a_spline_row_that_is_not_exact_is_named_where_the_decision_calls_splines_
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn ac5_no_measured_row_exceeds_the_p12_tolerance() {
     for (id, m) in results() {
         if m.kind == "row" && (m.result == "exact" || m.result == "equivalent") {
@@ -616,6 +629,7 @@ fn ac5_no_measured_row_exceeds_the_p12_tolerance() {
 // ---------------------------------------------------------------------------------------------
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn the_evidence_scope_is_stated_and_not_inflated() {
     let d = flat(&doc());
     for needle in [
@@ -652,6 +666,7 @@ fn the_evidence_scope_is_stated_and_not_inflated() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn the_pins_are_cited_and_match_the_run_script() {
     let d = doc();
     let run = fs::read_to_string(spike_dir().join("run.sh")).expect("run.sh");
@@ -679,6 +694,7 @@ fn the_pins_are_cited_and_match_the_run_script() {
 // ---------------------------------------------------------------------------------------------
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn the_harness_defines_no_tolerance_of_its_own() {
     let src = fs::read_to_string(spike_dir().join("harness/src/main.rs")).expect("harness source");
     for (n, line) in src.lines().enumerate() {
@@ -713,6 +729,7 @@ fn the_harness_defines_no_tolerance_of_its_own() {
 // ---------------------------------------------------------------------------------------------
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn gaps_every_gap_is_listed_with_a_pvec_issue_and_the_adr_candidates_are_answered() {
     let doc = doc();
     let gaps = section(&doc, "## PVec gaps");
@@ -741,6 +758,7 @@ fn gaps_every_gap_is_listed_with_a_pvec_issue_and_the_adr_candidates_are_answere
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn the_document_never_closes_the_parent_epic() {
     let d = doc();
     let lower = d.to_lowercase();
@@ -762,6 +780,7 @@ fn the_document_never_closes_the_parent_epic() {
 // ---------------------------------------------------------------------------------------------
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the spike document and its results from disk, blocked by Miri isolation
 fn the_arm64_run_reaches_the_same_verdicts_as_the_native_x64_run() {
     let (x, a) = (results(), results_from("results-arm64.tsv"));
     assert_eq!(
