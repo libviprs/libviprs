@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Source validation and resource limits for CAD ingestion** (issue #1101,
+  part of #1039). `pvec::SourceLimits` holds documented ceilings (block depth,
+  entity count, polyline vertices, spline control points and knots, MINSERT grid,
+  total expanded instances, cumulative allocation, name length), and
+  `pvec::SourceGuard` meters a walk against them, including a case-insensitive
+  block cycle detector. A breach is a `LimitError` naming the limit and the
+  observed value, never a panic or a truncated result. Wiring the limits into
+  the view-profile options waits on #1097 (tracked in #1277).
 - **Wall and column classification from layer and block rules** (issue #1233,
   part of #1039). `pvec::ElementRules` maps layer and block name globs to
   `ElementClass::Wall` or `Column`, with a small default profile (`A-WALL*`,
