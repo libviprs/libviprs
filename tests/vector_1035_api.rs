@@ -206,6 +206,7 @@ fn a_selector_reads_the_way_a_command_line_spells_it() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn a_layout_is_refused_with_the_tilers_reason() {
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("sheet.pmtiles");
@@ -225,6 +226,7 @@ fn a_layout_is_refused_with_the_tilers_reason() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn a_conversion_is_a_valid_archive_that_inspect_describes() {
     let dir = tempfile::tempdir().unwrap();
     let dest = converted(dir.path(), 20);
@@ -254,6 +256,7 @@ fn a_conversion_is_a_valid_archive_that_inspect_describes() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn the_name_option_overrides_the_views_name() {
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("named.pmtiles");
@@ -271,6 +274,7 @@ fn the_name_option_overrides_the_views_name() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn the_conversion_says_what_it_wrote() {
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("a.pmtiles");
@@ -284,6 +288,7 @@ fn the_conversion_says_what_it_wrote() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn the_library_call_and_the_function_the_command_line_drives_are_one_engine() {
     // The CLI calls `convert`. This pins `convert` to the tiler's own entry
     // point byte for byte, so the two cannot drift into separate behaviours.
@@ -301,6 +306,7 @@ fn the_library_call_and_the_function_the_command_line_drives_are_one_engine() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn a_finished_conversion_leaves_only_the_archive() {
     let dir = tempfile::tempdir().unwrap();
     converted(dir.path(), 10);
@@ -308,6 +314,7 @@ fn a_finished_conversion_leaves_only_the_archive() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn a_cancelled_conversion_leaves_nothing_behind() {
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("never.pmtiles");
@@ -326,6 +333,7 @@ fn a_cancelled_conversion_leaves_nothing_behind() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn a_conversion_cancelled_while_the_decoder_runs_leaves_nothing_behind() {
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("never.pmtiles");
@@ -353,6 +361,7 @@ fn a_conversion_cancelled_while_the_decoder_runs_leaves_nothing_behind() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn a_run_past_its_deadline_leaves_nothing_behind() {
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("never.pmtiles");
@@ -371,6 +380,7 @@ fn a_run_past_its_deadline_leaves_nothing_behind() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn a_failed_decode_leaves_nothing_behind_and_keeps_the_partial_report() {
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("never.pmtiles");
@@ -383,6 +393,7 @@ fn a_failed_decode_leaves_nothing_behind_and_keeps_the_partial_report() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn a_failed_conversion_leaves_an_existing_destination_untouched() {
     let dir = tempfile::tempdir().unwrap();
     let dest = converted(dir.path(), 10);
@@ -404,6 +415,7 @@ fn a_failed_conversion_leaves_an_existing_destination_untouched() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn a_report_writes_nothing_and_agrees_with_a_conversion() {
     let dir = tempfile::tempdir().unwrap();
     let d = Ladder::new(30);
@@ -450,6 +462,7 @@ fn a_conversion_serialises_for_a_machine_reader() {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn a_file_that_is_not_an_archive_is_a_finding_not_an_error() {
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("junk.pmtiles");
@@ -465,6 +478,7 @@ fn a_file_that_is_not_an_archive_is_a_finding_not_an_error() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn a_truncated_archive_is_invalid() {
     let dir = tempfile::tempdir().unwrap();
     let dest = converted(dir.path(), 30);
@@ -482,6 +496,7 @@ fn a_missing_file_is_an_error_for_every_reader() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn a_raster_archive_is_not_a_vector_archive() {
     use libviprs::pmtiles::TileType;
     use libviprs::pmtiles::writer::{Writer, WriterOptions};
@@ -514,6 +529,7 @@ fn without_a_provider_the_default_decoder_says_how_to_get_one() {
 
 #[cfg(feature = "dwg-acadsharp")]
 #[test]
+#[cfg_attr(miri, ignore)]
 fn a_real_dwg_converts_through_the_default_decoder() {
     use libviprs::cad::CadSource;
     let decoder = match libviprs::vector::convert::default_decoder(true) {
