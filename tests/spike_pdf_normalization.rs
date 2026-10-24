@@ -406,7 +406,8 @@ fn ac3_states_precisely_whether_a_dwg_pdf_pair_was_measured() {
     // the criterion is met, for which kind of pair, and on which files.
     let pair = results("results-pair.tsv");
     assert!(
-        sec.trim_start().starts_with(&format!("Met, for an {LABEL}")),
+        sec.trim_start()
+            .starts_with(&format!("Met, for an {LABEL}")),
         "the section must open by saying the criterion is met, and for which kind of pair"
     );
     assert!(
@@ -626,7 +627,8 @@ fn ac5_never_structurally_exact_and_names_the_class_it_may_claim() {
     let sec = section(&d, "## Labelling");
     let low = sec.to_lowercase();
     assert!(
-        low.contains("never labelled structurally exact") || low.contains("never labelled \"structurally exact\""),
+        low.contains("never labelled structurally exact")
+            || low.contains("never labelled \"structurally exact\""),
         "the document must say a PDF-derived result is never labelled structurally exact against the originating DWG"
     );
     assert!(
@@ -806,7 +808,7 @@ fn librecad_version_agrees_in_tsv_doc_and_driver() {
     let tsv = read("docs/spikes/pdf-normalization/results-pair.tsv");
     let ver = exporter_version(&tsv);
     assert!(
-        ver.chars().next().map_or(false, |c| c.is_ascii_digit()),
+        ver.chars().next().is_some_and(|c| c.is_ascii_digit()),
         "version `{ver}` is not a version"
     );
     let sec = section(&doc(), "## Per-class geometry-count difference");
@@ -925,5 +927,46 @@ fn the_x86_64_harness_pass_over_the_pair_is_recorded_and_arm64_only_is_gone() {
     assert!(
         sec.contains("timestamp"),
         "the section must say the PDF embeds a timestamp so its sha256 does not reproduce"
+    );
+}
+
+/// Every file under the spike directory, named here on purpose. The harness,
+/// the pair generator and the results files are what the document's numbers
+/// come from, so a file that appears or disappears without this list moving is
+/// a change to the evidence and should be seen as one.
+const SPIKE_FILES: &[&str] = &[
+    "docs/spikes/pdf-normalization/harness/Cargo.toml",
+    "docs/spikes/pdf-normalization/harness/src/main.rs",
+    "docs/spikes/pdf-normalization/pair.sh",
+    "docs/spikes/pdf-normalization/pair/Cargo.toml",
+    "docs/spikes/pdf-normalization/pair/src/main.rs",
+    "docs/spikes/pdf-normalization/results-arm64.tsv",
+    "docs/spikes/pdf-normalization/results-pair.tsv",
+    "docs/spikes/pdf-normalization/results-x64.tsv",
+    "docs/spikes/pdf-normalization/run.sh",
+];
+
+fn files_under(dir: &std::path::Path, out: &mut Vec<String>) {
+    for entry in fs::read_dir(dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display())) {
+        let path = entry.expect("a directory entry").path();
+        if path.is_dir() {
+            files_under(&path, out);
+        } else {
+            let rel = path.strip_prefix(root()).expect("under the crate root");
+            out.push(rel.to_string_lossy().replace('\\', "/"));
+        }
+    }
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn the_spike_directory_holds_exactly_the_files_listed_here() {
+    let mut found = Vec::new();
+    files_under(&root().join("docs/spikes/pdf-normalization"), &mut found);
+    found.sort();
+    let want: Vec<String> = SPIKE_FILES.iter().map(|s| s.to_string()).collect();
+    assert_eq!(
+        found, want,
+        "docs/spikes/pdf-normalization/ changed: update SPIKE_FILES, and check the document still describes what is there"
     );
 }

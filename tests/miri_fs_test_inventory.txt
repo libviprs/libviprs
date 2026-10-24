@@ -516,6 +516,7 @@ annotated   fs-detected  tests/spike_pdf_normalization.rs::structurally_exact_is
 annotated   fs-detected  tests/spike_pdf_normalization.rs::the_dxf_step_is_named_as_part_of_the_measured_loss
 annotated   fs-detected  tests/spike_pdf_normalization.rs::the_harness_defines_no_tolerance_and_no_evaluator_of_its_own
 annotated   fs-detected  tests/spike_pdf_normalization.rs::the_open_exporter_label_is_in_the_intro_the_section_and_the_tsv
+annotated   fs-detected  tests/spike_pdf_normalization.rs::the_spike_directory_holds_exactly_the_files_listed_here
 annotated   fs-detected  tests/spike_pdf_normalization.rs::the_spike_leaves_the_raster_path_and_the_manifest_alone
 annotated   fs-detected  tests/spike_pdf_normalization.rs::the_x86_64_harness_pass_over_the_pair_is_recorded_and_arm64_only_is_gone
 annotated   fs-detected  tests/spike_pdf_normalization.rs::x64_and_arm64_agree_and_say_what_they_ran_on
