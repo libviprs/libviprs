@@ -52,6 +52,7 @@ pub mod pdf_vector;
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
 pub mod provenance;
 pub mod provider;
+pub mod style;
 #[cfg(feature = "pvec-normalized")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
 pub mod transform;
@@ -81,8 +82,8 @@ pub use ordering::{
     canonical_cmp, order_entities,
 };
 pub use pdf_vector::{
-    PdfFillRule, PdfPaintIntent, PdfPathEntity, PdfPathSegment, PdfPoint, PdfProvenance,
-    PdfVectorError, PdfVectorLimits, PdfVectorPage, extract_page_paths,
+    PdfDash, PdfFillRule, PdfPaintIntent, PdfPathEntity, PdfPathSegment, PdfPoint, PdfProvenance,
+    PdfStrokeParams, PdfVectorError, PdfVectorLimits, PdfVectorPage, extract_page_paths,
     extract_page_paths_from_bytes,
 };
 pub use provider::{

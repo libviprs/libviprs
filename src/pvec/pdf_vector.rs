@@ -118,6 +118,26 @@ pub struct PdfPaintIntent {
     pub close: bool,
 }
 
+/// A dash pattern as `d` set it, unvalidated: N5.4 refuses a degenerate one, this only records.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PdfDash {
+    /// The dash array, as written.
+    pub array: Vec<f64>,
+    /// The dash phase.
+    pub phase: f64,
+}
+
+/// The stroke parameters in force when a path was painted: raw `w` and `d` values in the
+/// content stream's own units, never scaled by the CTM and never validated (N5.4 does that).
+/// `None` means the operator was not seen in scope, which is not the same as `w 0`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PdfStrokeParams {
+    /// The last `w` operand.
+    pub width: Option<f64>,
+    /// The last `d` operands.
+    pub dash: Option<PdfDash>,
+}
+
 /// Where an entity came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PdfProvenance {
@@ -148,6 +168,8 @@ pub struct PdfPathEntity {
     /// Whether a soft mask (`/SMask` set through `gs`) was in the graphics state. The mask is
     /// recorded, not evaluated (N5.3).
     pub soft_masked: bool,
+    /// `w` and `d` as they stood when the path was painted (N5.4). Recorded, not interpreted.
+    pub stroke_params: PdfStrokeParams,
     /// Where it came from.
     pub provenance: PdfProvenance,
 }
@@ -167,6 +189,9 @@ pub struct PdfVectorPage {
     pub entities: Vec<PdfPathEntity>,
     /// `Q` operators that had no matching `q`, which are ignored.
     pub unbalanced_restores: u32,
+    /// How many colour operators (`g G rg RG k K cs CS sc SC scn SCN`) ran, by operator, in
+    /// operator order. Counted for the monochrome report (N5.4), never interpreted.
+    pub colour_operators: std::collections::BTreeMap<String, u64>,
 }
 
 /// Why an extraction failed.
@@ -291,6 +316,8 @@ pub fn extract_page_paths_from_bytes(
         stack: Vec::new(),
         clips: Vec::new(),
         soft_mask: false,
+        stroke: PdfStrokeParams::default(),
+        colour_operators: std::collections::BTreeMap::new(),
     };
     let resources = inherited_resources(&doc, page_id);
     run.stream(&ops, resources, base, 0)?;
@@ -302,6 +329,7 @@ pub fn extract_page_paths_from_bytes(
         rotation_degrees: rotation.as_degrees(),
         entities: run.out,
         unbalanced_restores: run.unbalanced,
+        colour_operators: run.colour_operators,
     })
 }
 
@@ -557,6 +585,9 @@ struct Run<'a> {
     clips: Vec<u64>,
     /// A non-`None` `/SMask` is in force.
     soft_mask: bool,
+    /// `w` and `d` in force.
+    stroke: PdfStrokeParams,
+    colour_operators: std::collections::BTreeMap<String, u64>,
 }
 
 /// What `q` saves and `Q` restores.
@@ -564,6 +595,7 @@ struct Saved {
     ctm: Matrix,
     clips: usize,
     soft_mask: bool,
+    stroke: PdfStrokeParams,
 }
 
 /// The path being built by one stream, in page space, plus the user-space current
@@ -629,6 +661,7 @@ impl Run<'_> {
                         ctm,
                         clips: self.clips.len(),
                         soft_mask: self.soft_mask,
+                        stroke: self.stroke.clone(),
                     });
                 }
                 "Q" => {
@@ -637,6 +670,7 @@ impl Run<'_> {
                             ctm = saved.ctm;
                             self.clips.truncate(saved.clips);
                             self.soft_mask = saved.soft_mask;
+                            self.stroke = saved.stroke;
                         }
                     } else {
                         self.unbalanced += 1;
@@ -706,6 +740,14 @@ impl Run<'_> {
                 "B*" => self.paint(&mut path, op, Some(PdfFillRule::EvenOdd), true, false)?,
                 "b" => self.paint(&mut path, op, Some(PdfFillRule::NonZero), true, true)?,
                 "b*" => self.paint(&mut path, op, Some(PdfFillRule::EvenOdd), true, true)?,
+                "w" => self.stroke.width = Some(self.operands(op, 1)?[0]),
+                "d" => self.dash(op)?,
+                "g" | "G" | "rg" | "RG" | "k" | "K" | "cs" | "CS" | "sc" | "SC" | "scn" | "SCN" => {
+                    *self
+                        .colour_operators
+                        .entry(op.operator.clone())
+                        .or_insert(0) += 1;
+                }
                 "gs" => self.ext_gstate(op, resources),
                 "Do" => self.do_xobject(op, resources, &ctm, depth)?,
                 // Colour, text, shading, marked content and the rest are other tasks'.
@@ -763,6 +805,7 @@ impl Run<'_> {
             clip: state.clip,
             active_clips: self.clips.clone(),
             soft_masked: self.soft_mask,
+            stroke_params: self.stroke.clone(),
             provenance: PdfProvenance {
                 page: self.page,
                 operator: op.operator.clone(),
@@ -773,6 +816,23 @@ impl Run<'_> {
         if state.clip.is_some() {
             self.clips.push(sequence);
         }
+        Ok(())
+    }
+
+    /// `d`: the array is kept as written, so a negative entry reaches N5.4's refusal.
+    fn dash(&mut self, op: &Operation) -> Result<(), PdfVectorError> {
+        let [Object::Array(a), phase] = op.operands.as_slice() else {
+            return Err(self.err("`d` takes an array and a phase"));
+        };
+        let array = a
+            .iter()
+            .map(|o| number(o).filter(|v| v.is_finite()))
+            .collect::<Option<Vec<f64>>>()
+            .ok_or_else(|| self.err("`d` has a non-numeric dash entry"))?;
+        let phase = number(phase)
+            .filter(|v| v.is_finite())
+            .ok_or_else(|| self.err("`d` has a non-numeric phase"))?;
+        self.stroke.dash = Some(PdfDash { array, phase });
         Ok(())
     }
 
@@ -861,9 +921,11 @@ impl Run<'_> {
             .push(String::from_utf8_lossy(name).into_owned());
         // A form runs as if inside `q`/`Q`: what it clips or masks ends with it.
         let (clips, soft_mask) = (self.clips.len(), self.soft_mask);
+        let stroke = self.stroke.clone();
         let r = self.stream(&ops, own.or(resources), matrix.then(ctm), observed);
         self.clips.truncate(clips);
         self.soft_mask = soft_mask;
+        self.stroke = stroke;
         self.form_path.pop();
         r
     }
