@@ -309,6 +309,19 @@ const CELLS: &[Cell] = &[
         runtime_loaders: &[],
         vendored_native: BLAKE3,
     },
+    // The PVec normalized-geometry adapter (N3.1, #1095). Pure Rust: the two PVec
+    // crates have no dependency besides each other, no `links`, no build script and
+    // no native source. They are git dependencies, so they stay opt-in.
+    Cell {
+        label: "host / pvec-normalized",
+        target: HOST,
+        features: &["--features", "pvec-normalized"],
+        edges: "normal,build",
+        links: &[RAYON],
+        discovery: &[],
+        runtime_loaders: &[],
+        vendored_native: BLAKE3,
+    },
     // Every remaining feature at once. These are the ones whose Cargo.toml
     // comments say they add no dependencies, so the cell is the check on that.
     Cell {
@@ -884,6 +897,19 @@ fn the_external_library_features_stay_opt_in() {
              native code, but it is a git dependency, so it stays opt-in (CONTRIBUTING.md).",
             cell.label
         );
+
+        let asked_for_pvec = cell.features.iter().any(|f| f.contains("pvec-normalized"))
+            || cell.features.contains(&"--all-features");
+        for krate in ["pvec-geometry", "pvec-numeric"] {
+            assert_eq!(
+                contains(graph, krate),
+                asked_for_pvec,
+                "{} must reach {krate} only under `pvec-normalized`. It is pure Rust and \
+                 ships no native code, but it is a git dependency, so it stays opt-in \
+                 (CONTRIBUTING.md).",
+                cell.label
+            );
+        }
 
         let asked_for_packfile = cell.features.iter().any(|f| f.contains("packfile"))
             || cell.features.contains(&"--all-features");
