@@ -34,6 +34,7 @@ pub mod normalized;
 pub mod pdf_vector;
 pub mod provider;
 pub mod units;
+pub mod view_profile;
 
 #[cfg(feature = "dwg-acadrust")]
 #[cfg_attr(docsrs, doc(cfg(feature = "dwg-acadrust")))]
@@ -64,3 +65,8 @@ pub use normalized::{
     FidelityClass, NormalizeError, Normalized2DGeometry, ProvenanceHandle, SourceBounds,
 };
 pub use units::{DrawingExtents, INSUNITS_TABLE, SourceSpace, SourceUnit};
+pub use view_profile::{
+    ExcludedEntity, Exclusion, InsertLayerRule, LayerStateRule, LayerVisibility, Knob,
+    NestedInsertPolicy, SpaceSelection, ViewOutcome, ViewProfile, ViewProfileError, ViewReport,
+    ViewedEntity, ViewportClipping, ViewportFreezeRule, XrefPolicy,
+};
