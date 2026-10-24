@@ -14,6 +14,7 @@ use libviprs::vector::tiler::{TilerConfig, build_archive_from_view};
 const SAMPLE: &[u8] = include_bytes!("fixtures/cad/sample_AC1018.dwg");
 
 #[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
 fn a_real_dwg_becomes_a_valid_black_line_archive() {
     let decoder = match AcadSharpDecoder::new() {
         Ok(d) => d,

@@ -1,12 +1,28 @@
 //! The archive the web viewer's specs load (issue #1033).
 //!
 //! The viewer's visual regression is only meaningful if the archive under it
-//! does not drift, so the committed bytes are pinned here: this test rebuilds
-//! the archive and fails if it differs. Run with
+//! does not drift, so this test rebuilds the archive and fails if what it
+//! holds differs from the committed one. Run with
 //! `LIBVIPRS_UPDATE_VIEWER_FIXTURE=1` to rewrite it after an intended change,
 //! and regenerate the viewer's snapshots in the same commit.
+//!
+//! What is compared is the archive's *content*: the layer schema, the header
+//! facts a viewer reads, the metadata, and every tile, inflated back to raw
+//! MVT. It is not compared as file bytes, because the tiles are gzipped through
+//! `flate2` and the compressed bytes belong to whichever backend the build
+//! picked: `--features packfile` brings in `zip`, whose default features turn
+//! `flate2` over to zlib-rs, and the same tiles then deflate to a different
+//! (valid) stream, 79939 bytes against 77814 here (issue #1259). A byte-exact
+//! check made this pass or fail by feature set, and said nothing about the
+//! tiler.
+
+use std::collections::BTreeMap;
+use std::path::Path;
 
 use libviprs::cad::{Arc, Circle, Ellipse, Line, Polyline, Primitive, Spline, Text};
+use libviprs::pmtiles::Metadata;
+use libviprs::vector::VectorArchive;
+use libviprs::vector::archive::LayerSchema;
 use libviprs::vector::tiler::{TilerConfig, build_archive};
 
 const Z: [f64; 3] = [0.0, 0.0, 1.0];
@@ -88,7 +104,45 @@ fn drawing() -> Vec<Primitive> {
     p
 }
 
+/// Everything about an archive that does not depend on how its tiles were
+/// compressed.
+#[derive(Debug, PartialEq)]
+struct Content {
+    layers: Vec<LayerSchema>,
+    zooms: (u8, u8),
+    bounds: (f64, f64, f64, f64),
+    addressed_tiles: u64,
+    metadata: Metadata,
+    /// Every tile that exists, as raw MVT.
+    tiles: BTreeMap<(u8, u32, u32), Vec<u8>>,
+}
+
+fn content(path: &Path) -> Content {
+    let archive = VectorArchive::try_open(path).expect("the archive opens");
+    let reader = archive.pmtiles();
+    let (min, max) = (reader.min_zoom(), reader.max_zoom());
+    let mut tiles = BTreeMap::new();
+    for z in min..=max {
+        for x in 0..1u32 << z {
+            for y in 0..1u32 << z {
+                if let Some(bytes) = archive.tile_bytes(z, x, y).expect("a tile reads") {
+                    tiles.insert((z, x, y), bytes);
+                }
+            }
+        }
+    }
+    Content {
+        layers: archive.layers().to_vec(),
+        zooms: (min, max),
+        bounds: reader.bounds(),
+        addressed_tiles: reader.header().addressed_tiles_count,
+        metadata: reader.metadata().expect("the metadata reads").clone(),
+        tiles,
+    }
+}
+
 #[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
 fn the_committed_viewer_fixture_is_what_the_tiler_makes() {
     let dir = std::env::temp_dir().join(format!("fixture1033-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -101,19 +155,31 @@ fn the_committed_viewer_fixture_is_what_the_tiler_makes() {
     )
     .unwrap();
     let bytes = std::fs::read(&built).unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
 
-    let committed = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(FIXTURE);
+    let committed = Path::new(env!("CARGO_MANIFEST_DIR")).join(FIXTURE);
     if std::env::var_os("LIBVIPRS_UPDATE_VIEWER_FIXTURE").is_some() {
         std::fs::write(&committed, &bytes).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
         return;
     }
-    let have = std::fs::read(&committed).expect("the viewer fixture is committed");
     assert!(
-        have == bytes,
-        "{FIXTURE} is stale ({} bytes vs {} rebuilt); rerun with LIBVIPRS_UPDATE_VIEWER_FIXTURE=1 and regenerate the viewer snapshots",
-        have.len(),
-        bytes.len()
+        committed.exists(),
+        "the viewer fixture is committed at {FIXTURE}"
+    );
+    let have = content(&committed);
+    let rebuilt = content(&built);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        !have.tiles.is_empty(),
+        "positive control: the committed fixture holds no tiles, so the comparison below \
+         would pass on two empty archives"
+    );
+    assert!(
+        have == rebuilt,
+        "{FIXTURE} is stale (it holds {} tiles, the tiler makes {}); rerun with \
+         LIBVIPRS_UPDATE_VIEWER_FIXTURE=1 and regenerate the viewer snapshots",
+        have.tiles.len(),
+        rebuilt.tiles.len()
     );
     assert!(
         bytes.len() < 200_000,

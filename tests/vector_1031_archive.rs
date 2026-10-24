@@ -113,6 +113,7 @@ fn scratch(name: &str) -> std::path::PathBuf {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
 fn the_archive_is_labelled_what_it_is() {
     let dir = scratch("labels");
     let path = write_archive(&dir, "a.pmtiles");
@@ -127,6 +128,7 @@ fn the_archive_is_labelled_what_it_is() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
 fn the_header_and_root_sit_inside_the_first_16_kib() {
     let dir = scratch("first16k");
     let path = write_archive(&dir, "a.pmtiles");
@@ -151,6 +153,7 @@ fn the_header_and_root_sit_inside_the_first_16_kib() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
 fn tiles_are_really_gzip_and_inflate_to_the_mvt_that_went_in() {
     let dir = scratch("gzip");
     let path = write_archive(&dir, "a.pmtiles");
@@ -169,6 +172,7 @@ fn tiles_are_really_gzip_and_inflate_to_the_mvt_that_went_in() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
 fn metadata_carries_a_valid_vector_layers() {
     let dir = scratch("meta");
     let path = write_archive(&dir, "a.pmtiles");
@@ -185,6 +189,7 @@ fn metadata_carries_a_valid_vector_layers() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
 fn the_structural_validator_passes_a_vector_archive() {
     let dir = scratch("validate");
     let path = write_archive(&dir, "a.pmtiles");
@@ -221,6 +226,7 @@ fn findings(bytes: &[u8]) -> Vec<Finding> {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
 fn an_mvt_archive_without_vector_layers_is_reported() {
     let f = findings(&raw_mvt_archive(Metadata::default()));
     assert!(
@@ -231,6 +237,7 @@ fn an_mvt_archive_without_vector_layers_is_reported() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
 fn malformed_vector_layers_are_each_reported() {
     use serde_json::json;
     let cases = [
@@ -264,6 +271,7 @@ fn malformed_vector_layers_are_each_reported() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
 fn a_raster_archive_is_not_asked_for_vector_layers() {
     let dir = scratch("raster");
     let path = dir.join("r.pmtiles");
@@ -282,6 +290,7 @@ fn a_raster_archive_is_not_asked_for_vector_layers() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
 fn the_reader_refuses_an_mvt_archive_with_no_vector_layers() {
     let dir = scratch("nolayers");
     let path = dir.join("n.pmtiles");
@@ -294,6 +303,7 @@ fn the_reader_refuses_an_mvt_archive_with_no_vector_layers() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
 fn the_writer_stays_inside_its_declared_schema() {
     let dir = scratch("schema");
     let options = VectorArchiveOptions::new(schema());
@@ -327,6 +337,7 @@ fn the_writer_stays_inside_its_declared_schema() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
 fn an_invalid_declaration_is_refused_before_any_file_exists() {
     let dir = scratch("badschema");
     for layers in [
@@ -343,6 +354,7 @@ fn an_invalid_declaration_is_refused_before_any_file_exists() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
 fn an_empty_tile_is_not_stored() {
     let dir = scratch("empty");
     let mut w =
@@ -365,6 +377,7 @@ fn an_empty_tile_is_not_stored() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
 fn the_same_input_gives_the_same_archive() {
     let dir = scratch("determinism");
     let a = std::fs::read(write_archive(&dir, "a.pmtiles")).unwrap();
@@ -374,6 +387,7 @@ fn the_same_input_gives_the_same_archive() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
 fn an_encoded_tile_is_checked_before_it_is_stored() {
     let dir = scratch("encoded");
     let mut w =
@@ -389,6 +403,7 @@ fn an_encoded_tile_is_checked_before_it_is_stored() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
 fn a_tile_bomb_is_stopped_at_the_ceiling() {
     // A tile that inflates to far more than the reader allows, in an archive
     // that is otherwise valid.
@@ -452,6 +467,7 @@ impl RangeReader for CountingReader {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
 fn local_and_range_readers_return_the_same_tile_bytes() {
     let dir = scratch("same");
     let path = write_archive(&dir, "a.pmtiles");
@@ -484,6 +500,7 @@ fn local_and_range_readers_return_the_same_tile_bytes() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
 fn opening_and_fetching_one_tile_costs_few_round_trips() {
     let dir = scratch("trips");
     let path = write_archive(&dir, "a.pmtiles");
@@ -503,6 +520,7 @@ fn opening_and_fetching_one_tile_costs_few_round_trips() {
 
 #[cfg(feature = "object-store-sink")]
 #[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
 fn an_object_store_range_reader_agrees_with_the_file() {
     use libviprs::pmtiles::range::ObjectStoreRangeReader;
     use libviprs::sink_object_store::DirectoryObjectStore;
@@ -526,6 +544,7 @@ fn an_object_store_range_reader_agrees_with_the_file() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
 fn the_file_range_reader_and_the_validator_agree_on_the_size() {
     let dir = scratch("size");
     let path = write_archive(&dir, "a.pmtiles");
@@ -550,6 +569,7 @@ fn the_file_range_reader_and_the_validator_agree_on_the_size() {
 /// crate's own decoder agreeing with its own encoder proves nothing about a
 /// shared misreading of the spec.
 #[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
 fn write_the_interop_golden_when_asked() {
     let Some(dir) = std::env::var_os("LIBVIPRS_VECTOR_GOLDEN_DIR") else {
         return;

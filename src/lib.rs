@@ -57,6 +57,12 @@
 //!   [`Raster::encode_to_buffer`]'s format route.
 //! - **`jp2k`** — gates the JPEG 2000 loader and encoder: [`decode_jp2k`],
 //!   [`Raster::encode_jp2k`] and [`Raster::save_jp2k`].
+//! - **`dwg-acadsharp`** — gates [`cad::acadsharp`], the `acadsharp-rs` DWG
+//!   provider behind [`cad::CadDecoder`] (`AcadSharpDecoder`). It needs no .NET
+//!   at run time, since `acadsharp-rs` links a NativeAOT archive its own build
+//!   script resolves; a build with no archive still compiles and
+//!   `AcadSharpDecoder::new` answers a `Provider` error carrying `Unlinked`.
+//!   The CAD-neutral [`cad`] core is not behind a feature.
 //! - **`serde`** — adds public `Serialize` / `Deserialize` derives to the wire
 //!   and config types ([`PyramidPlan`], [`EngineConfig`], [`TileCoord`],
 //!   [`Layout`], and the rest) so an out-of-process caller can rebuild a job

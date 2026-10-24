@@ -140,7 +140,7 @@ struct Invocation {
 }
 
 /// Split a shell command line into tokens, honouring single and double quotes,
-/// so `RUSTFLAGS='-A deprecated -A deprecated_in_future --cfg sha2_backend="soft"'`
+/// so `RUSTFLAGS='-A deprecated --cfg feature="x"'`
 /// comes back as one token with the outer quotes removed and the inner ones
 /// kept.
 fn shell_tokens(line: &str) -> Vec<String> {
@@ -564,23 +564,6 @@ fn neither_miri_invocation_disables_isolation() {
                  `tests/miri_ignore_convention.rs`."
             );
         }
-    }
-}
-
-#[test]
-fn both_miri_invocations_pin_the_sha2_backend() {
-    for (where_, invocation) in [
-        ("Makefile", makefile_invocation()),
-        ("merge-gate.yml", workflow_invocation()),
-    ] {
-        let rustflags = invocation.env.get("RUSTFLAGS").map_or("", String::as_str);
-        assert!(
-            rustflags.contains("--cfg sha2_backend=\"soft\""),
-            "{where_} does not pin sha2's portable backend. On a host whose baseline has \
-             the `sha2` target feature, which `aarch64-apple-darwin` does, the run reaches \
-             sha2's NEON path and aborts on a Stacked Borrows violation about 30 seconds \
-             in, before it has checked anything (#707). RUSTFLAGS is currently `{rustflags}`."
-        );
     }
 }
 

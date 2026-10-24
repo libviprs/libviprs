@@ -56,6 +56,7 @@ fn tile_texts(tiles: &CollectTiles) -> Vec<(u8, String, f64)> {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
 fn the_declared_glyph_ranges_are_exactly_the_font_files_shipped() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("web/vector-viewer/public/fonts/Noto Sans Regular");
@@ -245,6 +246,7 @@ fn scratch(name: &str) -> std::path::PathBuf {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
 fn paper_space_is_refused_until_it_is_enabled() {
     let d = Fake {
         views: model_and_layout(),
@@ -278,6 +280,7 @@ fn paper_space_is_refused_until_it_is_enabled() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
 fn a_repeated_block_is_stopped_at_the_primitive_budget_not_at_out_of_memory() {
     let d = Fake {
         views: model_and_layout(),
@@ -303,6 +306,7 @@ fn a_repeated_block_is_stopped_at_the_primitive_budget_not_at_out_of_memory() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
 fn a_decode_that_fails_keeps_what_it_reported() {
     let d = Fake {
         views: model_and_layout(),
@@ -406,6 +410,7 @@ mod native {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
     fn text_and_mtext_are_visible_in_the_tiles() {
         let Some(d) = decoder() else { return };
         let out = tiles_of(&d, "g13_text", 12);
@@ -415,6 +420,7 @@ mod native {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
     fn a_very_long_string_is_one_label_not_a_crash() {
         let Some(d) = decoder() else { return };
         let (prims, _) = decode(&d, "g13_long_text");
@@ -439,6 +445,7 @@ mod native {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
     fn nested_blocks_are_visible() {
         let Some(d) = decoder() else { return };
         for name in [
@@ -470,6 +477,7 @@ mod native {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
     fn a_block_inserted_thirty_thousand_times_stays_inside_its_budgets() {
         let Some(d) = decoder() else { return };
         let (prims, report) = decode(&d, "g13_many_inserts");
@@ -502,6 +510,7 @@ mod native {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
     fn dimensions_are_readable() {
         let Some(d) = decoder() else { return };
         let (prims, _) = decode(&d, "g13_dimension");
@@ -537,6 +546,7 @@ mod native {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
     fn pathological_dimension_nesting_fails_bounded_and_says_so() {
         let Some(d) = decoder() else { return };
         let t = std::time::Instant::now();
@@ -560,6 +570,7 @@ mod native {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
     fn hatches_are_drawn_as_outlines_and_every_gap_is_reported() {
         let Some(d) = decoder() else { return };
         let (prims, report) = decode(&d, "g13_hatch");
@@ -589,6 +600,7 @@ mod native {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
     fn entities_that_are_not_drawn_are_always_in_the_report() {
         let Some(d) = decoder() else { return };
         for name in [
@@ -625,6 +637,7 @@ mod native {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
     fn a_view_with_nothing_drawable_is_an_error_not_an_empty_archive() {
         let Some(d) = decoder() else { return };
         let r = convert(
@@ -637,6 +650,7 @@ mod native {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
     fn layouts_are_not_converted_even_when_the_drawing_has_them() {
         let Some(d) = decoder() else { return };
         let r = convert(&d, "g13_text", 1, &TilerConfig::default().with_max_zoom(2));
@@ -647,6 +661,7 @@ mod native {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
     fn the_real_drawings_formatting_codes_are_read_and_counted() {
         let Some(d) = decoder() else { return };
         let bytes = include_bytes!("fixtures/cad/sample_AC1018.dwg");
