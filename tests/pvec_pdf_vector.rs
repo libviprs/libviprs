@@ -711,6 +711,7 @@ fn n5_1_scanner_can_fail() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the repository source tree, which Miri isolation blocks
 fn n5_1_no_lopdf_type_in_any_public_signature() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let src = std::fs::read_to_string(root.join("src/pvec/pdf_vector.rs")).unwrap();
