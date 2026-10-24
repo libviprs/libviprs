@@ -352,6 +352,16 @@ pub fn select_view(
     }
 }
 
+/// The version of the JSON these types write, the `v` field on every top-level
+/// document ([`Conversion::to_json`], [`ArchiveInfo::to_json`],
+/// [`CheckReport::to_json`]).
+///
+/// It is the number `viprs vector --json` already printed. A key that is added
+/// keeps it; a key that is renamed, removed or changes type bumps it. Every
+/// key name and value spelling is written out in this module and held by
+/// `tests/vector_1293_json.rs`, so none of it follows a Rust type name.
+pub const JSON_VERSION: u32 = 1;
+
 /// The outcome of a conversion or a report.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -379,7 +389,7 @@ impl Conversion {
             .decode
             .counts()
             .iter()
-            .map(|(kind, n)| (format!("{kind:?}").to_lowercase(), json!(n)))
+            .map(|(kind, n)| (kind.name().to_owned(), json!(n)))
             .collect();
         let diagnostics: Vec<Json> = self
             .decode
@@ -403,6 +413,7 @@ impl Conversion {
             }))
             .collect();
         json!({
+            "v": JSON_VERSION,
             "view": view_json(&self.view),
             "destination": self.destination.as_ref().map(|p| p.display().to_string()),
             "bytes": self.bytes,
@@ -446,7 +457,20 @@ impl Conversion {
     }
 }
 
-/// One view as JSON.
+/// The view's box, when somebody set one.
+///
+/// A box with no width and no height is a header nobody filled in, which is
+/// what a model space with nothing in it reports. It is not an extent, so the
+/// text output says "no extents" for it and the JSON says `null`.
+fn set_extents(view: &CadView) -> Option<[f64; 4]> {
+    view.extents()
+        .filter(|e| e.max_x() > e.min_x() || e.max_y() > e.min_y())
+        .map(|e| [e.min_x(), e.min_y(), e.max_x(), e.max_y()])
+}
+
+/// One view as JSON: `index`, `name`, `kind` (`"model"`, `"layout"` or
+/// `"unknown"`), `enabled`, `entities` and `extents`, which is
+/// `[min_x, min_y, max_x, max_y]` or `null` when the view has no extent.
 #[must_use]
 pub fn view_json(view: &CadView) -> Json {
     json!({
@@ -459,7 +483,7 @@ pub fn view_json(view: &CadView) -> Json {
         },
         "enabled": view.kind() == ViewKind::Model,
         "entities": view.entity_count(),
-        "extents": view.extents().map(|e| json!([e.min_x(), e.min_y(), e.max_x(), e.max_y()])),
+        "extents": set_extents(view),
     })
 }
 
@@ -553,6 +577,7 @@ impl ArchiveInfo {
     #[must_use]
     pub fn to_json(&self) -> Json {
         json!({
+            "v": JSON_VERSION,
             "name": self.name,
             "tile_type": self.tile_type,
             "tile_compression": self.tile_compression,
@@ -566,7 +591,7 @@ impl ArchiveInfo {
             "layers": self.layers.iter().map(|l| json!({
                 "id": l.id,
                 "fields": l.fields.iter()
-                    .map(|(k, v)| (k.clone(), format!("{v:?}")))
+                    .map(|(k, v)| (k.clone(), v.name()))
                     .collect::<std::collections::BTreeMap<_, _>>(),
             })).collect::<Vec<_>>(),
             "tiler": self.tiler,
@@ -624,6 +649,7 @@ impl CheckReport {
     #[must_use]
     pub fn to_json(&self) -> Json {
         json!({
+            "v": JSON_VERSION,
             "valid": self.is_valid(),
             "findings": self.findings,
             "tile_entries": self.tile_entries,
@@ -663,4 +689,44 @@ pub fn check(path: impl AsRef<Path>) -> Result<CheckReport, ConvertError> {
         tile_entries: structural.tile_entries,
         addressed_tiles: structural.addressed_tiles,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vector::archive::{FieldType, LayerSchema};
+
+    /// The layer field types are the TileJSON names, written out by
+    /// `FieldType::name` and not read off the variant's `Debug` output.
+    #[test]
+    fn layer_field_types_are_spelled_as_tilejson_names() {
+        let info = ArchiveInfo {
+            name: None,
+            tile_type: "mvt".into(),
+            tile_compression: "gzip".into(),
+            min_zoom: 0,
+            max_zoom: 1,
+            bounds: [0.0; 4],
+            tile_entries: 0,
+            addressed_tiles: 0,
+            tile_contents: 0,
+            file_bytes: None,
+            layers: vec![
+                LayerSchema::new("l")
+                    .with_field("s", FieldType::String)
+                    .with_field("n", FieldType::Number)
+                    .with_field("b", FieldType::Boolean),
+            ],
+            tiler: None,
+        };
+        assert_eq!(
+            info.to_json()["layers"][0]["fields"],
+            json!({"b": "Boolean", "n": "Number", "s": "String"})
+        );
+    }
+
+    #[test]
+    fn the_version_is_one() {
+        assert_eq!(JSON_VERSION, 1);
+    }
 }

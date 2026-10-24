@@ -46,6 +46,7 @@ pub mod provider;
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
 pub mod transform;
 pub mod units;
+pub mod view;
 pub mod view_profile;
 pub mod xref;
 
@@ -84,6 +85,11 @@ pub use provider::{
 #[cfg(feature = "pvec-normalized")]
 pub use normalized::{NormalizeError, Normalized2DGeometry, ProvenanceHandle, SourceBounds};
 pub use units::{DrawingExtents, INSUNITS_TABLE, SourceSpace, SourceUnit};
+pub use view::{
+    Decision, EntityState, EntityStates, IgnoredByPolicy, PolicyReason, ViewportFreezeMode,
+    ViewportFreezeNote, ViewportInput, VisibilityDisagreement, VisibilityFilter, VisibilityOutcome,
+    select_layout,
+};
 pub use view_profile::{
     ExcludedEntity, Exclusion, InsertLayerRule, Knob, LayerStateRule, LayerVisibility,
     NestedInsertPolicy, SpaceSelection, ViewOutcome, ViewProfile, ViewProfileError, ViewReport,
