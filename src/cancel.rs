@@ -51,6 +51,16 @@ pub struct CancelToken {
     flag: Arc<AtomicBool>,
 }
 
+impl PartialEq for CancelToken {
+    /// Two tokens are equal when they are clones of one another, because that
+    /// is the only way two of them can ever observe the same cancellation.
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.flag, &other.flag)
+    }
+}
+
+impl Eq for CancelToken {}
+
 impl CancelToken {
     /// Create a fresh, un-cancelled token.
     pub fn new() -> Self {

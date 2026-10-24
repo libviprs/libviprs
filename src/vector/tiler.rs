@@ -149,7 +149,25 @@ pub struct TilerConfig {
     pub max_primitives: usize,
     /// What to do with a tile past `max_tile_bytes`.
     pub oversize: OversizePolicy,
+    /// The most memory the tiles of one zoom level may take while they are
+    /// assembled, as an estimate (see [`LEVEL_RUN_COST`] and
+    /// [`LEVEL_TILE_COST`]). `max_level_points` counts points only, and a long
+    /// line split over millions of tiles is millions of two-point runs whose
+    /// bookkeeping costs far more than their points.
+    pub max_level_bytes: usize,
+    /// The longest label one text feature carries, in bytes. A longer one is
+    /// cut at a character boundary and reported.
+    pub max_text_bytes: usize,
+    /// Wall-clock budget for the whole run, from the moment it starts.
+    pub deadline: Option<std::time::Duration>,
+    /// Cooperative cancellation, polled as often as the deadline is.
+    pub cancel: Option<crate::cancel::CancelToken>,
 }
+
+/// What one run of a level is estimated to cost beyond its points, in bytes.
+pub const LEVEL_RUN_COST: usize = 64;
+/// What one tile of a level is estimated to cost beyond its runs, in bytes.
+pub const LEVEL_TILE_COST: usize = 160;
 
 impl Default for TilerConfig {
     fn default() -> Self {
@@ -168,6 +186,10 @@ impl Default for TilerConfig {
             max_tile_bytes: 500 << 10,
             max_primitives: 5_000_000,
             oversize: OversizePolicy::Report,
+            max_level_bytes: 1 << 30,
+            max_text_bytes: 4096,
+            deadline: None,
+            cancel: None,
         }
     }
 }
@@ -184,6 +206,34 @@ impl TilerConfig {
     #[must_use]
     pub fn with_extent(mut self, extent: u32) -> Self {
         self.extent = extent;
+        self
+    }
+
+    /// Sets the wall-clock budget.
+    #[must_use]
+    pub fn with_deadline(mut self, deadline: std::time::Duration) -> Self {
+        self.deadline = Some(deadline);
+        self
+    }
+
+    /// Sets the cancellation token.
+    #[must_use]
+    pub fn with_cancel(mut self, cancel: crate::cancel::CancelToken) -> Self {
+        self.cancel = Some(cancel);
+        self
+    }
+
+    /// Sets the byte budget for one zoom level.
+    #[must_use]
+    pub fn with_max_level_bytes(mut self, bytes: usize) -> Self {
+        self.max_level_bytes = bytes;
+        self
+    }
+
+    /// Sets the longest label, in bytes.
+    #[must_use]
+    pub fn with_max_text_bytes(mut self, bytes: usize) -> Self {
+        self.max_text_bytes = bytes;
         self
     }
 
@@ -341,6 +391,15 @@ pub enum TilerError {
         /// The configured limit.
         limit: usize,
     },
+    /// The run was cancelled through [`TilerConfig::cancel`].
+    #[error("the run was cancelled")]
+    Cancelled,
+    /// The run passed [`TilerConfig::deadline`].
+    #[error("the run passed its {limit:?} deadline")]
+    DeadlineExceeded {
+        /// The configured budget.
+        limit: std::time::Duration,
+    },
     /// The archive writer refused something.
     #[error(transparent)]
     Archive(#[from] VectorError),
@@ -497,6 +556,8 @@ pub struct TilerReport {
     pub world_side: f64,
     /// Text that was nothing once its formatting was read out of it.
     pub culled_empty_text: u64,
+    /// Labels cut to [`TilerConfig::max_text_bytes`].
+    pub text_truncated: u64,
     /// Fonts that text asked for, with how many strings asked. The output has
     /// one font, so each of these was substituted.
     pub fonts_substituted: BTreeMap<String, u64>,
