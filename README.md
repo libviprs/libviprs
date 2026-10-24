@@ -271,6 +271,7 @@ from here for exactly one commit.
 | `frames` | The page model for multi-frame images: how a raster's rows divide into pages |
 | `foreign_stubs` | Typed stubs for the genuinely external formats this build does not link (HEIF/AVIF encode, ImageMagick, DeepZoom buffers) |
 | `cad` | The `CadDecoder` contract and the primitive IR (lines, arcs, splines, text) a CAD drawing decodes into, with curves kept as curves and a structured `DecodeReport` |
+| `vector` | Vector output: MVT tiles, the style and tiling steps that produce them from `cad` primitives, and a vector PMTiles archive writer and reader (`VectorArchiveWriter`, `VectorArchive`) that gzips each tile and records `vector_layers` |
 
 ### Image operations
 
@@ -319,6 +320,7 @@ from here for exactly one commit.
 | `jxl` | off | Enables the JPEG XL loader and lossless encoder: `decode_jxl`, `Raster::encode_jxl`, `Raster::save_jxl`, the `.jxl` row in `Raster::save` and in `encode_to_buffer`. Costs 21 crates (`jxl-oxide`, `zune-jpegxl` and their trees, including `tracing`), which is why it is opt-in; without it every entry point still exists and returns a typed refusal. |
 | `jp2k` | off | Enables the JPEG 2000 loader and encoder: `decode_jp2k`, `Raster::encode_jp2k`, `Raster::save_jp2k`, and the `.jp2` / `.j2k` rows in the content sniffer. Costs **2 crates** (`hayro-jpeg2000` and `openjpeg2-pure-rs`, neither of which has a dependency of its own), so what it buys back is compile time rather than crate count; without it every entry point still exists and returns a typed refusal. |
 | `avif` | off | Enables the AV1 decode inside `decode_avif` (still images only). Costs 16 crates (`rav1d` and its runtime tree); without it the entry point still parses the container, checks the codec and applies all three decode limits, and refuses the decode itself. |
+| `dwg-acadsharp` | off | Enables `cad::acadsharp`, the `acadsharp-rs` DWG provider behind `cad::CadDecoder` (`AcadSharpDecoder`). Needs no .NET at run time: `acadsharp-rs` links a NativeAOT archive its own build script resolves, and a build with no archive still compiles and `AcadSharpDecoder::new` reports `Unlinked` instead of failing. The CAD-neutral `cad` module is not behind a feature. |
 | `serde` | off | Adds public `Serialize` / `Deserialize` derives to the wire and config types (`PyramidPlan`, `EngineConfig`, `TileCoord`, `Layout`, ...) so an out-of-process caller can rebuild a job from JSON. Adds no dependencies. |
 | `test-util` | off | Exposes the crate's test-only sink doubles (`SlowSink`) to dependent crates, chiefly the external `libviprs-tests` suite. Adds no dependencies. |
 
