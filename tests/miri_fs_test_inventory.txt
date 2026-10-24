@@ -686,3 +686,12 @@ annotated   fs-detected  tests/vector_1034_fidelity.rs::pathological_dimension_n
 annotated   fs-detected  tests/vector_1034_fidelity.rs::text_and_mtext_are_visible_in_the_tiles
 annotated   fs-detected  tests/vector_1034_fidelity.rs::the_declared_glyph_ranges_are_exactly_the_font_files_shipped
 annotated   fs-detected  tests/vector_1034_fidelity.rs::the_real_drawings_formatting_codes_are_read_and_counted
+annotated   fs-detected  tests/vector_1036_dwg_corpus.rs::child_entry
+annotated   fs-detected  tests/vector_1036_dwg_corpus.rs::mutated_drawings_never_take_the_process_down
+annotated   fs-detected  tests/vector_1036_dwg_corpus.rs::the_pathological_deep_dimension_drawing_ends_inside_a_bound
+annotated   fs-detected  tests/vector_1036_dwg_corpus.rs::the_provider_limits_actually_bite
+annotated   fs-detected  tests/vector_1036_hardening.rs::a_cancelled_build_leaves_nothing_behind
+annotated   fs-detected  tests/vector_1036_hardening.rs::a_deadline_stops_a_failed_build_without_a_partial_archive
+annotated   fs-detected  tests/vector_1036_worker.rs::a_memory_ceiling_stops_a_run_with_every_budget_off
+annotated   fs-detected  tests/vector_1036_worker.rs::a_supervisor_stops_code_that_never_looks_at_a_clock
+annotated   fs-detected  tests/vector_1036_worker.rs::the_library_deadline_ends_a_run_cleanly_inside_the_ceiling

@@ -124,6 +124,7 @@ const GIB_KIB: u64 = 1 << 20;
 const CEILING_KIB: u64 = 256 << 10;
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn a_memory_ceiling_stops_a_run_with_every_budget_off() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("a.pmtiles");
@@ -151,6 +152,7 @@ fn a_memory_ceiling_stops_a_run_with_every_budget_off() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn a_supervisor_stops_code_that_never_looks_at_a_clock() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("a.pmtiles");
@@ -167,6 +169,7 @@ fn a_supervisor_stops_code_that_never_looks_at_a_clock() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn the_library_deadline_ends_a_run_cleanly_inside_the_ceiling() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("a.pmtiles");

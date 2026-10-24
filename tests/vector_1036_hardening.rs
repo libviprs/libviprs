@@ -49,6 +49,7 @@ fn a_cancelled_token_stops_the_run_before_any_tile() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn a_cancelled_build_leaves_nothing_behind() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("a.pmtiles");
@@ -89,6 +90,7 @@ fn a_deadline_stops_a_tile_explosion_inside_one_primitive() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn a_deadline_stops_a_failed_build_without_a_partial_archive() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("a.pmtiles");
