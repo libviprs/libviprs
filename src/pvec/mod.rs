@@ -42,6 +42,7 @@ pub mod provider;
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
 pub mod transform;
 pub mod units;
+pub mod view_profile;
 
 #[cfg(feature = "dwg-acadrust")]
 #[cfg_attr(docsrs, doc(cfg(feature = "dwg-acadrust")))]
@@ -74,3 +75,8 @@ pub use provider::{
 #[cfg(feature = "pvec-normalized")]
 pub use normalized::{NormalizeError, Normalized2DGeometry, ProvenanceHandle, SourceBounds};
 pub use units::{DrawingExtents, INSUNITS_TABLE, SourceSpace, SourceUnit};
+pub use view_profile::{
+    ExcludedEntity, Exclusion, InsertLayerRule, Knob, LayerStateRule, LayerVisibility,
+    NestedInsertPolicy, SpaceSelection, ViewOutcome, ViewProfile, ViewProfileError, ViewReport,
+    ViewedEntity, ViewportClipping, ViewportFreezeRule, XrefPolicy,
+};
