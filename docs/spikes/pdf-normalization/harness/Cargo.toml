@@ -1,0 +1,18 @@
+# Throwaway measurement harness for N1.6 (#1045). Not a member of any libviprs workspace: the empty
+# [workspace] table below keeps it out of the crate's lockfile and dependency policy.
+#
+# It reads real PDFs with lopdf (the version libviprs already depends on), maps path operators into
+# segments, and pushes every segment through PVec's own constructors. PVec is staged next to this
+# crate by run.sh from a pinned revision, so nothing here reads a tolerance from anywhere but pvec-numeric.
+[package]
+name = "pdf-normalization-harness"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+lopdf = "=0.36.0"
+pvec-geometry = { path = "../pvec-src/crates/pvec-geometry" }
+pvec-numeric = { path = "../pvec-src/crates/pvec-numeric" }
