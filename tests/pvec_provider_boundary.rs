@@ -252,6 +252,7 @@ fn no_foreign_type_appears_in_any_public_signature_of_the_provider_module() {
         if is_mod {
             locals.extend([
                 "classify".to_string(),
+                "fidelity".to_string(),
                 "provider".to_string(),
                 "dwg_acadrust".to_string(),
                 "units".to_string(),
