@@ -246,6 +246,12 @@ const EXPECTED: &[(&str, Coverage)] = &[
              #1095, and tests/pvec_1095_normalized_geometry.rs, 17 tests, and \
              src/pvec/provenance.rs, the provenance side store of issue \
              #1096, and tests/pvec_1096_provenance.rs, 12 tests, and \
+             src/pvec/flatten.rs, the block flattening of issue #1075, and \
+             tests/pvec_block_flatten.rs, 24 tests, and \
+             src/pvec/dwg_basic.rs, the basic entity extraction of issue \
+             #1073, and tests/pvec_dwg_basic.rs, 39 tests, and \
+             src/pvec/pdf_bezier.rs, the PDF segment to PVec mapping of issue \
+             #1081, and tests/pvec_pdf_bezier.rs, 15 tests, and \
              src/pvec/dump.rs, the inspection dump of issue #1103, and \
              tests/pvec_1103_normalized_dump.rs, 11 tests; \
              adds 2 crates (pvec-geometry and pvec-numeric, git \
