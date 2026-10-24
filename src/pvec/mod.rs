@@ -28,6 +28,7 @@
 //! ([`CadSource`](crate::cad::CadSource) and [`ItemHandle`](crate::cad::ItemHandle)).
 
 pub mod classify;
+pub mod fidelity;
 pub mod limits;
 #[cfg(feature = "pvec-normalized")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
@@ -51,6 +52,9 @@ pub use classify::{
     ClassSource, Classification, ClassificationReport, ElementClass, ElementRule, ElementRules,
     RuleMatch,
 };
+pub use fidelity::{
+    Basis, FidelityClass, FidelityReport, ReasonCode, Tally, TallyError, classify_unmapped,
+};
 pub use limits::{Limit, LimitError, SourceGuard, SourceLimits};
 pub use pdf_vector::{
     PdfFillRule, PdfPaintIntent, PdfPathEntity, PdfPathSegment, PdfPoint, PdfProvenance,
@@ -65,7 +69,5 @@ pub use provider::{
 };
 
 #[cfg(feature = "pvec-normalized")]
-pub use normalized::{
-    FidelityClass, NormalizeError, Normalized2DGeometry, ProvenanceHandle, SourceBounds,
-};
+pub use normalized::{NormalizeError, Normalized2DGeometry, ProvenanceHandle, SourceBounds};
 pub use units::{DrawingExtents, INSUNITS_TABLE, SourceSpace, SourceUnit};
