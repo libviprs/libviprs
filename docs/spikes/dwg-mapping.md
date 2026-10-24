@@ -63,7 +63,9 @@ How a row is graded, in the vocabulary of N3.5 (#1100) and NG-07:
 - `equivalent`: the same, but the parameter domain differs from the truth record's. PVec's trimmed line
   runs over `[0, length]` and a trimmed arc over `[0, span]` (profile section 8), and the corpus's
   `PARAMETERIZATION_PRESERVED` assertion says "a reparameterised equivalent counts as geometric only". So
-  this is a strict reading, and I flag the consequence for N3.5 in "Handed on".
+  this is a strict reading, and I flag the consequence for N3.5 in "Handed on". One row is equivalent
+  for the other reason the corpus allows: the truth names a different storage form of the same curve
+  (M21, a single-span SPLINE the truth calls a Bezier), with every number bit identical.
 - `RequiresPVecCapability`: no PVec entry point does the conversion without libviprs doing mathematics, so
   the row names the missing capability. The deviation shown is of the candidate computation, which is the
   size of what PVec would have to deliver.
@@ -271,7 +273,9 @@ home by design.
 Phase 4 may implement as exact: CIRCLE, LWPOLYLINE and old-style 2D POLYLINE (open, and closed through the
 flag with the first vertex copied), and every SPLINE that is not periodic (B-spline, NURBS, repeated interior
 knots, any degree the probes cover), each passed through whole with no libviprs arithmetic: bit identical to
-the source or within policy, with worst deviations of 0.000e0 on every one of those rows. Phase 4 may
+the source or within policy, with worst deviations of 0.000e0 on every one of those rows. The one
+non-periodic SPLINE that is not graded exact is the single-span `bezier-d3-001`, which is `equivalent`
+only because the truth names it a Bezier; its data go through bit identical, 0.000e0. Phase 4 may
 implement as equivalent: LINE, ARC and the INSERT-of-LINE and INSERT-of-ARC chains, which differ from the truth
 only by PVec's canonical parameter domain, at worst 1.332e-15 (reflection, ratio 8.882e-6 of the tolerance). The
 non-uniform-scale chains are exact. INSERT chains compose through `Transform2` and `Curve2d::transform` and
