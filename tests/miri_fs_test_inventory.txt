@@ -486,6 +486,8 @@ annotated   fs-detected  tests/pvec_provider_boundary.rs::the_gate_zero_harness_
 annotated   fs-detected  tests/pvec_provider_boundary.rs::the_provider_module_stays_out_of_the_cad_decoder_contract
 annotated   fs-detected  tests/pvec_provider_boundary.rs::the_scanner_enumerates_the_modules_public_items
 annotated   fs-detected  tests/pvec_provider_contract.rs::this_file_names_no_cad_crate
+annotated   fs-detected  tests/pvec_units.rs::nothing_under_src_pvec_refers_to_the_geo_module
+annotated   fs-detected  tests/pvec_units.rs::the_units_doc_has_a_row_for_every_code_including_zero
 annotated   fs-detected  tests/pyramid_migrate.rs::a_layout_pmtiles_cannot_address_is_refused_by_name
 annotated   fs-detected  tests/pyramid_migrate.rs::a_reader_that_will_not_say_what_its_tiles_are_is_refused_rather_than_guessed
 annotated   fs-detected  tests/pyramid_migrate.rs::a_small_sort_buffer_spills_runs_and_produces_the_same_archive

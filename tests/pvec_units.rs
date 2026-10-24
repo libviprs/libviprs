@@ -67,6 +67,7 @@ fn the_handoff_metadata_carries_unit_and_bounds_untouched() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads repository files, which Miri isolation blocks
 fn the_units_doc_has_a_row_for_every_code_including_zero() {
     let doc = fs::read_to_string(root().join("docs/pvec-units.md")).expect("docs/pvec-units.md");
     for (code, _, name) in INSUNITS_TABLE.iter() {
@@ -116,6 +117,7 @@ fn the_scan_can_fail() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads repository files, which Miri isolation blocks
 fn nothing_under_src_pvec_refers_to_the_geo_module() {
     let mut files = Vec::new();
     rs_files(&root().join("src/pvec"), &mut files);
@@ -191,7 +193,6 @@ mod provider {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore)]
     fn coordinates_reach_pvec_bit_identical_to_the_source() {
         let (_, lines) = read(&drawing(4));
         assert_eq!(lines.len(), 1);
@@ -200,7 +201,6 @@ mod provider {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore)]
     fn inches_and_millimetres_differ_in_unit_only() {
         let (inch_unit, inch) = read(&drawing(1));
         let (mm_unit, mm) = read(&drawing(4));
@@ -215,7 +215,6 @@ mod provider {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore)]
     fn code_zero_is_unitless_and_an_unlisted_code_is_unknown_and_neither_fails() {
         let (unit, lines) = read(&drawing(0));
         assert_eq!(unit, SourceUnit::Unitless);
