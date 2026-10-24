@@ -233,6 +233,7 @@ from here for exactly one commit.
 | `sink_object_store` | The `ObjectStore` trait and `ObjectStoreSink`, for user-injected object storage backends on both the write and the read side, plus `DirectoryObjectStore`, a backend that keeps each object as a file under a directory (gated by `object-store-sink`; the deprecated `s3` alias also enables it) |
 | `storage` | `PyramidStorage`: which storage a pyramid lands in, the output path that choice resolves to, and the layouts each one holds |
 | `pmtiles` | PMTiles v3 archive format: 127-byte header, Hilbert TileIDs, directories, metadata, ranged reads, and a streaming bounded-memory `Writer` |
+| `pvec` | The replaceable DWG provider traits for the analytic path (`DwgProvider`, `EntityCursor`, `RawEntity`, `ProviderCaps`, `InstancePath`); the acadrust provider is behind `dwg-acadrust` |
 | `sink_pmtiles` | `PmTilesSink` writing a whole pyramid into one PMTiles v3 archive |
 | `pyramid_reader` | `PyramidReader` and its directory and PMTiles implementations, for reading a generated pyramid back whatever it was stored in |
 | `pyramid_migrate` | Converting a pyramid that already exists into a PMTiles archive, without going back to the source image |
@@ -315,6 +316,7 @@ from here for exactly one commit.
 | `s3` | off | **Deprecated alias** for `object-store-sink`, retained so consumers pinned to the old feature name keep building. Prefer `object-store-sink`; the `s3` alias will be removed in a future release. |
 | `tracing` | off | Emits structured `tracing` spans and events from the engine pipeline. |
 | `packfile` | off | Enables `PackfileSink` for writing tiles into a tar or zip archive. |
+| `dwg-acadrust` | off | Adds `pvec::dwg_acadrust::AcadrustProvider`, the first DWG provider behind `pvec::DwgProvider`. Pure Rust, nothing to install; acadrust is a git dependency pinned by revision. |
 | `svg` | off | Enables the SVG rasteriser behind `decode_svg`. Costs 29 crates (`resvg` and its tree), which is why it is opt-in; without it `decode_svg` returns a typed `Unsupported`. |
 | `jxl` | off | Enables the JPEG XL loader and lossless encoder: `decode_jxl`, `Raster::encode_jxl`, `Raster::save_jxl`, the `.jxl` row in `Raster::save` and in `encode_to_buffer`. Costs 21 crates (`jxl-oxide`, `zune-jpegxl` and their trees, including `tracing`), which is why it is opt-in; without it every entry point still exists and returns a typed refusal. |
 | `jp2k` | off | Enables the JPEG 2000 loader and encoder: `decode_jp2k`, `Raster::encode_jp2k`, `Raster::save_jp2k`, and the `.jp2` / `.j2k` rows in the content sniffer. Costs **2 crates** (`hayro-jpeg2000` and `openjpeg2-pure-rs`, neither of which has a dependency of its own), so what it buys back is compile time rather than crate count; without it every entry point still exists and returns a typed refusal. |
