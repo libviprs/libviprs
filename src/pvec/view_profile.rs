@@ -233,12 +233,12 @@ impl ViewProfile {
 impl Exclusion {
     /// Profile field.
     #[must_use]
-    pub const fn field(self) -> &'static str {
+    pub fn field(self) -> &'static str {
         todo!("N3.3")
     }
     /// Diagnostic code.
     #[must_use]
-    pub const fn code(self) -> &'static str {
+    pub fn code(self) -> &'static str {
         todo!("N3.3")
     }
 }
@@ -247,7 +247,7 @@ impl Exclusion {
 impl Exclusion {
     /// Fidelity class.
     #[must_use]
-    pub const fn fidelity(self) -> super::normalized::FidelityClass {
+    pub fn fidelity(self) -> super::normalized::FidelityClass {
         todo!("N3.3")
     }
 }
