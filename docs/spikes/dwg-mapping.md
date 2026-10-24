@@ -201,7 +201,8 @@ control points plus degree plus one knots (10 here), and the profile says there 
 representation in v1. Turning it into the clamped form needs knot insertion, which NG-B3 forbids in libviprs,
 so the row is `RequiresPVecCapability` (libviprs/pvec#93) and the curve is not rewritten. I flag a doubt: 7
 knots for 6 points is not the usual layout of an unclamped periodic vector, and with no vendor writer in
-the corpus I cannot say what AutoCAD stores. That is the first thing #93 has to settle.
+the corpus I cannot say what AutoCAD stores. That is the first thing #93 had to settle (it is closed now,
+see "Decision").
 
 Weights (M18 to M20). `nonunit-weight-001` carries a weight of 50 among weights of 1 (ratio 50, far inside the
 NP-15 floor) and `nurbs-d2-offconic-001` has weights that do not describe a conic: both are bit identical and
@@ -285,7 +286,10 @@ What is deferred, with the capability named and the issue filed: polyline bulge 
 `bulge-arc-neg-001`, libviprs/pvec#91; the candidate matched the expected arcs to 8.882e-16 and 4.441e-16, so
 the target is real and only the constructor is missing), ELLIPSE and elliptical arcs (`ellipse-001`,
 `elliptical-arc-001`, libviprs/pvec#92 and #94; 2.220e-16 and 4.441e-16), and periodic SPLINE
-(`closed-periodic-001`, libviprs/pvec#93; PVec refuses it under NP-14 today). Until those land they report
+(`closed-periodic-001`, libviprs/pvec#93; PVec at the pinned `d399d76` refuses it under NP-14). libviprs/pvec#93
+has since been closed by libviprs/pvec#98, which adds `BSpline::from_periodic` (an exact unwrap to the
+clamped form) after that pin, so this row has not been measured against it: it moves when the pin does,
+and re-measuring it is phase 4's first step for the class. Until the capabilities land they report
 `RequiresPVecCapability` and are counted, never repaired and never approximated. All of this is a
 reader-to-PVec result on `READER_MAPPING_ONLY` evidence: nothing here says how a vendor writer stores these
 entities.
