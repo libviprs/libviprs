@@ -4,11 +4,11 @@
 # `lint: true` rows of `EXPECTED` in `tests/ci_feature_coverage.rs`. That file
 # asserts this list matches, so the local gate and the hosted one cannot drift.
 #
-# Three of the twelve rows are deliberately absent, each for a reason the table
+# Three of the thirteen rows are deliberately absent, each for a reason the table
 # states: `s3` is the deprecated alias for `object-store-sink` and enables
 # nothing else; `pdfium-static` builds PDFium from source and no libviprs code
 # is gated on it; `test-util` only exposes existing doubles to dependents.
-LINTED_FEATURES := pdfium object-store-sink tracing avif svg jxl packfile serde jp2k
+LINTED_FEATURES := pdfium object-store-sink tracing avif svg jxl packfile serde jp2k dwg-acadsharp
 
 ## The gate: the real CI job list, in the container, over a tree provisioned
 ## from git.
