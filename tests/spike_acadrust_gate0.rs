@@ -313,3 +313,44 @@ fn acadrust_exposes_the_counts_autocads_own_dxf_states() {
     }
     assert!(compared >= 6, "only {compared} saves compared");
 }
+
+/// Every file under the spike directory, named here on purpose. These are what
+/// the document's numbers come from, so a file that appears or disappears
+/// without this list moving is a change to the evidence and should be seen as
+/// one.
+const SPIKE_FILES: &[&str] = &[
+    "docs/spikes/acadrust-gate0/dxf-census.tsv",
+    "docs/spikes/acadrust-gate0/dxf_census.py",
+    "docs/spikes/acadrust-gate0/results-x64.tsv",
+    "docs/spikes/acadrust-gate0/run.sh",
+];
+
+fn files_under(dir: &std::path::Path, out: &mut Vec<String>) {
+    for entry in std::fs::read_dir(dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display())) {
+        let path = entry.expect("a directory entry").path();
+        if path.is_dir() {
+            files_under(&path, out);
+        } else {
+            let rel = path
+                .strip_prefix(env!("CARGO_MANIFEST_DIR"))
+                .expect("under the crate root");
+            out.push(rel.to_string_lossy().replace('\\', "/"));
+        }
+    }
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn the_spike_directory_holds_exactly_the_files_listed_here() {
+    let mut found = Vec::new();
+    files_under(
+        &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs/spikes/acadrust-gate0"),
+        &mut found,
+    );
+    found.sort();
+    let want: Vec<String> = SPIKE_FILES.iter().map(|s| s.to_string()).collect();
+    assert_eq!(
+        found, want,
+        "docs/spikes/acadrust-gate0/ changed: update SPIKE_FILES, and check the document still describes what is there"
+    );
+}

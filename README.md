@@ -397,7 +397,7 @@ with the checklist in CONTRIBUTING.md.
 GitHub Actions runs two workflows, eight jobs between them:
 
 **CI**, on every branch push and on pull requests that no push accompanies (`.github/workflows/ci.yml`):
-- `Check & Lint`: `cargo fmt --check`, then `cargo clippy -D warnings` once per feature. That is the default build plus `pdfium`, `object-store-sink`, `tracing`, `avif`, `svg`, `jxl`, `packfile`, `serde`, `jp2k` and `dwg-acadsharp`, because code behind any other `cfg` used to be linted by nothing, and a `cargo build --features s3` for the deprecated alias
+- `Check & Lint`: `cargo fmt --check`, then `cargo clippy -D warnings` once per feature. That is the default build plus `pdfium`, `object-store-sink`, `tracing`, `avif`, `svg`, `jxl`, `packfile`, `serde`, `jp2k`, `dwg-acadsharp` and `dwg-acadrust`, because code behind any other `cfg` used to be linted by nothing, and a `cargo build --features s3` for the deprecated alias
 - `MSRV`: `cargo check` on the pinned toolchain, once per feature family that declares no `rust-version` of its own, plus a guard that the three written-out MSRV claims still agree. The version stays out of the job name on purpose: branch protection matches a required check by its exact name, so a bump that renamed the job would leave every open PR waiting on a context no run produces (#1011)
 - `Docs (deny broken, private and redundant intra-doc links)`: `cargo doc --no-deps --all-features`, with each of those three denied
 - `Test`: `cargo test`, once per feature that gates code, because a feature nobody names compiles its bodies out and runs zero assertions
@@ -446,7 +446,7 @@ filesystem.
 
 ```sh
 make fmt      # check formatting
-make clippy   # clippy over the default build and each of the ten features CI lints
+make clippy   # clippy over the default build and each of the eleven features CI lints
 make test     # bare `cargo test`, which is the Test job's first cell of nine
 make doc      # the Docs job
 make miri     # miri (requires nightly + miri component)

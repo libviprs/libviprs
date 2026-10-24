@@ -506,7 +506,7 @@ fn the_readme_describes_the_clippy_gate_the_makefile_runs() {
 
     // The spelled-out count beside it, in the `make clippy` line.
     let words = [
-        "", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+        "", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven",
     ];
     let word = words
         .get(linted.len())

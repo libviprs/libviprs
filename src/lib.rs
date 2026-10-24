@@ -63,6 +63,9 @@
 //!   script resolves; a build with no archive still compiles and
 //!   `AcadSharpDecoder::new` answers a `Provider` error carrying `Unlinked`.
 //!   The CAD-neutral [`cad`] core is not behind a feature.
+//! - **`dwg-acadrust`** — gates `pvec::dwg_acadrust::AcadrustProvider`, the first
+//!   DWG provider behind the replaceable `pvec::DwgProvider` traits. Pure Rust,
+//!   nothing to install; `acadrust` is a git dependency pinned by revision.
 //! - **`serde`** — adds public `Serialize` / `Deserialize` derives to the wire
 //!   and config types ([`PyramidPlan`], [`EngineConfig`], [`TileCoord`],
 //!   [`Layout`], and the rest) so an out-of-process caller can rebuild a job

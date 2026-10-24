@@ -510,6 +510,7 @@ annotated   fs-detected  tests/spike_acadrust_gate0.rs::every_tier_a_file_has_ex
 annotated   fs-detected  tests/spike_acadrust_gate0.rs::rows_are_well_formed
 annotated   fs-detected  tests/spike_acadrust_gate0.rs::the_document_quotes_the_table_and_agrees_with_it
 annotated   fs-detected  tests/spike_acadrust_gate0.rs::the_document_says_what_it_could_not_check
+annotated   fs-detected  tests/spike_acadrust_gate0.rs::the_spike_directory_holds_exactly_the_files_listed_here
 annotated   fs-detected  tests/spike_transform_matrix.rs::ac1_every_cell_names_a_pvec_type_or_an_n35_classification
 annotated   fs-detected  tests/spike_transform_matrix.rs::ac1_matrix_has_every_row_and_every_cell
 annotated   fs-detected  tests/spike_transform_matrix.rs::ac2_bulge_row_shows_what_its_segments_became
