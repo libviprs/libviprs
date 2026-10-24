@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The N1.4 view-context probe. It compiles the same adapter, source and
+       wire sources the libviprs-dep NativeAOT shim compiles (so what it
+       decodes is what the shipped decoder decodes, under the JIT), plus the
+       libviprs-dep fixture harness it reuses for limits and the dump, against
+       the pinned and patched ACadSharp source. Nothing here is NativeAOT, and
+       nothing here is shipped. run.sh sets DepDir and AcadSharpProject. -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <AssemblyName>vcprobe</AssemblyName>
+    <RootNamespace>Viprs.Cad.Spike</RootNamespace>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <NoWarn>$(NoWarn);CS0618;CS0162</NoWarn>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Program.cs" />
+    <Compile Include="Author.cs" />
+    <Compile Include="$(DepDir)/native/Probe.cs" />
+    <Compile Include="$(DepDir)/native/Abi.cs" />
+    <Compile Include="$(DepDir)/native/Adapter/**/*.cs" />
+    <Compile Include="$(DepDir)/native/Sources/**/*.cs" />
+    <Compile Include="$(DepDir)/native/Wire/**/*.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="$(AcadSharpProject)" />
+  </ItemGroup>
+
+  <Target Name="RequireInputs" BeforeTargets="BeforeBuild">
+    <Error Condition="'$(DepDir)' == '' Or '$(AcadSharpProject)' == ''"
+           Text="DepDir and AcadSharpProject must be set, see run.sh" />
+  </Target>
+
+</Project>
