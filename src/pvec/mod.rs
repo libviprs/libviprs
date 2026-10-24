@@ -33,6 +33,7 @@ pub mod limits;
 #[cfg(feature = "pvec-normalized")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
 pub mod normalized;
+pub mod ordering;
 pub mod pdf_vector;
 #[cfg(feature = "pvec-normalized")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
@@ -60,6 +61,10 @@ pub use fidelity::{
     Basis, FidelityClass, FidelityReport, ReasonCode, Tally, TallyError, classify_unmapped,
 };
 pub use limits::{Limit, LimitError, SourceGuard, SourceLimits};
+pub use ordering::{
+    EntityId, OrderedEntity, OrderedSource, OrderingBasis, OrderingPolicy, OrderingReport,
+    canonical_cmp, order_entities,
+};
 pub use pdf_vector::{
     PdfFillRule, PdfPaintIntent, PdfPathEntity, PdfPathSegment, PdfPoint, PdfProvenance,
     PdfVectorError, PdfVectorLimits, PdfVectorPage, extract_page_paths,
