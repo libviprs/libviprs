@@ -28,6 +28,9 @@
 //! ([`CadSource`](crate::cad::CadSource) and [`ItemHandle`](crate::cad::ItemHandle)).
 
 pub mod classify;
+#[cfg(feature = "pvec-normalized")]
+#[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
+pub mod dump;
 pub mod fidelity;
 pub mod limits;
 #[cfg(feature = "pvec-normalized")]
