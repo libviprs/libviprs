@@ -1,0 +1,13 @@
+# Throwaway generator for N1.6 follow-up (#1240). Not a member of any libviprs workspace.
+# Writes a DWG with acadrust's DwgWriter, reads it back with DwgReader, counts entities per class
+# on the DWG side, and writes the DXF that the open exporter (LibreCAD) plots to PDF.
+[package]
+name = "pair-gen"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+acadrust = { path = "../acadrust-src" }
