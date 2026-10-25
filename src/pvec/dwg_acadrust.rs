@@ -45,8 +45,8 @@ use crate::cad::{CadSource, ItemHandle};
 use crate::pvec::provider::{
     ArrayGrid, Availability, BlockRef, DwgProvider, EntityCursor, EntityScope, EntityStyle, Facet,
     FacetSource, InstancePath, LayerState, LayoutId, LayoutKind, LayoutState, Point3,
-    ProvenanceStub, ProviderCaps, ProviderError, RawEntity, RawGeometry, RawVertex, SourceFact,
-    SourceTransform,
+    ProvenanceStub, ProviderCaps, ProviderError, RawEntity, RawGeometry, RawVertex, SourceColour,
+    SourceFact, SourceLineweight, SourceTransform,
 };
 use crate::pvec::units::SourceUnit;
 
@@ -289,7 +289,7 @@ impl EntityCursor for AcadrustCursor<'_> {
                         block_path: self.path.clone(),
                         layer: String::new(),
                     },
-                    style: EntityStyle::not_reportable(),
+                    style: EntityStyle::absent(),
                 }));
             };
             if matches!(e, EntityType::Block(_) | EntityType::BlockEnd(_)) {
@@ -309,6 +309,29 @@ fn item_handle(h: acr::Handle) -> Option<ItemHandle> {
     }
 }
 
+/// A stored colour as a fact. `ByLayer` and `None` carry no colour of their own.
+fn fact_colour(c: acr::Color) -> SourceFact<SourceColour> {
+    match c {
+        acr::Color::Index(i) => SourceFact::Present(SourceColour::Aci(i)),
+        acr::Color::Rgb { r, g, b } => SourceFact::Present(SourceColour::True { r, g, b }),
+        acr::Color::ByBlock => SourceFact::Present(SourceColour::ByBlock),
+        acr::Color::ByLayer | acr::Color::None => SourceFact::Absent,
+    }
+}
+
+/// A stored lineweight as a fact. `ByLayer` carries no weight of its own, and a
+/// negative value that is not one of the three markers is not a weight.
+fn fact_lineweight(w: acr::LineWeight) -> SourceFact<SourceLineweight> {
+    match w {
+        acr::LineWeight::Value(v) => u16::try_from(v).map_or(SourceFact::Absent, |h| {
+            SourceFact::Present(SourceLineweight::Hundredths(h))
+        }),
+        acr::LineWeight::Default => SourceFact::Present(SourceLineweight::Default),
+        acr::LineWeight::ByBlock => SourceFact::Present(SourceLineweight::ByBlock),
+        acr::LineWeight::ByLayer => SourceFact::Absent,
+    }
+}
+
 fn p3(v: acr::Vector3) -> Point3 {
     [v.x, v.y, v.z]
 }
@@ -325,6 +348,32 @@ impl AcadrustCursor<'_> {
             .map_or([0.0, 0.0], |r| [r.base_point.x, r.base_point.y]);
         self.base_points.insert(block.to_string(), b);
         b
+    }
+
+    /// The entity's colour and lineweight, BYLAYER resolved through the layer table.
+    ///
+    /// BYBLOCK is handed on as it is: this cursor sees one block definition and does
+    /// not know the INSERT that is drawing it. A BYLAYER entity on a layer the table
+    /// does not have, or on one whose own value is BYLAYER, BYBLOCK or no colour, has
+    /// nothing to resolve to and reports [`SourceFact::Absent`].
+    fn style_of(&self, common: &acr::entities::EntityCommon) -> EntityStyle {
+        let layer = self.doc.layers.get(&common.layer).or_else(|| {
+            self.doc
+                .layers
+                .iter()
+                .find(|l| l.name.eq_ignore_ascii_case(&common.layer))
+        });
+        let colour = match common.color {
+            acr::Color::ByLayer => layer.map_or(SourceFact::Absent, |l| fact_colour(l.color)),
+            c => fact_colour(c),
+        };
+        let lineweight = match common.line_weight {
+            acr::LineWeight::ByLayer => {
+                layer.map_or(SourceFact::Absent, |l| fact_lineweight(l.line_weight))
+            }
+            w => fact_lineweight(w),
+        };
+        EntityStyle { colour, lineweight }
     }
 
     fn convert(&mut self, e: &EntityType) -> RawEntity {
@@ -437,10 +486,11 @@ impl AcadrustCursor<'_> {
             }
             _ => unmapped(format!("no mapping for {class_name}")),
         };
+        let style = self.style_of(common);
         RawEntity {
             geometry,
             provenance,
-            style: EntityStyle::not_reportable(),
+            style,
         }
     }
 }

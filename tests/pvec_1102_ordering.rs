@@ -16,7 +16,7 @@ fn pt(x: f64) -> Point3 {
 
 fn ent(handle: Option<u64>, path: InstancePath, layer: &str, x: f64) -> RawEntity {
     RawEntity {
-        style: libviprs::pvec::EntityStyle::not_reportable(),
+        style: libviprs::pvec::EntityStyle::absent(),
         geometry: RawGeometry::Line {
             start: pt(x),
             end: pt(x + 1.0),

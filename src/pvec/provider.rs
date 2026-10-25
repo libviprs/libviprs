@@ -526,6 +526,15 @@ pub struct EntityStyle {
 }
 
 impl EntityStyle {
+    /// Both facets [`SourceFact::Absent`]: the drawing gives the entity neither.
+    #[must_use]
+    pub fn absent() -> Self {
+        Self {
+            colour: SourceFact::Absent,
+            lineweight: SourceFact::Absent,
+        }
+    }
+
     /// Both facets [`SourceFact::NotReportable`], for a provider that reads neither.
     #[must_use]
     pub fn not_reportable() -> Self {

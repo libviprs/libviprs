@@ -34,7 +34,7 @@ fn prov(handle: u64, class: &str, layer: &str) -> ProvenanceStub {
 
 fn line(handle: u64, layer: &str, a: [f64; 3], b: [f64; 3]) -> RawEntity {
     RawEntity {
-        style: libviprs::pvec::EntityStyle::not_reportable(),
+        style: libviprs::pvec::EntityStyle::absent(),
         geometry: RawGeometry::Line { start: a, end: b },
         provenance: prov(handle, "LINE", layer),
     }
@@ -46,7 +46,7 @@ fn insert(handle: u64, layer: &str, block: &str, at: [f64; 2], rot: f64, scale: 
         SourceTransform::new([c * scale, -s * scale, s * scale, c * scale, at[0], at[1]])
             .expect("finite");
     RawEntity {
-        style: libviprs::pvec::EntityStyle::not_reportable(),
+        style: libviprs::pvec::EntityStyle::absent(),
         geometry: RawGeometry::Insert(BlockRef {
             block_name: block.to_string(),
             transform,
@@ -64,7 +64,7 @@ fn spline(
     periodic: SourceFact<bool>,
 ) -> RawEntity {
     RawEntity {
-        style: libviprs::pvec::EntityStyle::not_reportable(),
+        style: libviprs::pvec::EntityStyle::absent(),
         geometry: RawGeometry::Spline {
             degree: 3,
             control_points: vec![
@@ -522,7 +522,7 @@ fn two_traversals_of_the_same_drawing_are_identical_field_by_field() {
         SourceFact::Present(false),
     ));
     p.layouts[0].1.push(RawEntity {
-        style: libviprs::pvec::EntityStyle::not_reportable(),
+        style: libviprs::pvec::EntityStyle::absent(),
         geometry: RawGeometry::Polyline {
             vertices: vec![
                 RawVertex {
@@ -608,7 +608,14 @@ fn caps_tell_absent_from_cannot_report() {
     assert!(plain.not_reportable().is_empty());
     assert_eq!(
         plain.reported(),
-        vec![Facet::KnotMultiplicity, Facet::Weights, Facet::Periodicity]
+        vec![
+            Facet::KnotMultiplicity,
+            Facet::Weights,
+            Facet::Periodicity,
+            // The hand-built entity carries no style, which is Absent and so reported.
+            Facet::Colour,
+            Facet::Lineweight,
+        ]
     );
 
     // A provider that cannot read knots: the drawing may have them, we cannot say.
@@ -740,7 +747,7 @@ fn a_provider_without_layer_caps_says_so_instead_of_returning_nothing() {
 #[test]
 fn unmapped_entities_are_counted_not_dropped() {
     let hatch = RawEntity {
-        style: libviprs::pvec::EntityStyle::not_reportable(),
+        style: libviprs::pvec::EntityStyle::absent(),
         geometry: RawGeometry::Unmapped {
             reason: "no mapping for HATCH".into(),
         },

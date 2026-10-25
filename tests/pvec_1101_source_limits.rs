@@ -19,7 +19,7 @@ fn stub(layer: &str) -> ProvenanceStub {
 
 fn entity(geometry: RawGeometry) -> RawEntity {
     RawEntity {
-        style: libviprs::pvec::EntityStyle::not_reportable(),
+        style: libviprs::pvec::EntityStyle::absent(),
         geometry,
         provenance: stub("0"),
     }
