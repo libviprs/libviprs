@@ -148,6 +148,9 @@ const TRIMMED_CURVE: CapabilityId = CapabilityId {
     name: "trimmed_curve",
 };
 
+/// Registry geometry capabilities that have no row, each with the reason (issue #1311).
+pub const NOT_MAPPED: [(u16, &str); 0] = [];
+
 /// One row of the table.
 #[derive(Debug, Clone, Copy)]
 pub struct MappingRow {
