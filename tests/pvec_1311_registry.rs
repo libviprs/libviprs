@@ -2,8 +2,18 @@
 //! registry. The registry is a dev-dependency, so `src/` never names it.
 #![cfg(feature = "pvec-normalized")]
 
-use libviprs::pvec::mapping::{NORMALIZED_TO_PVEC, NOT_MAPPED};
+use libviprs::pvec::mapping::NORMALIZED_TO_PVEC;
 use pvec_capabilities::{CapabilityId, Class, Registry};
+
+/// Registry geometry capabilities with no row, and why. A new PVec capability lands here or in
+/// the table, or the second test fails.
+const NOT_MAPPED: [(u16, &str); 5] = [
+    (1, "cartesian_point: a building block of every curve, not a normalized kind"),
+    (2, "direction_vector: a building block of every curve, not a normalized kind"),
+    (3, "axis_placement_2d: carried inside circle and ellipse, not a normalized kind"),
+    (4, "line: only exists bounded, so the Line row uses trimmed_curve"),
+    (13, "affine_transform_2d: libviprs applies transforms before normalizing, no row"),
+];
 
 #[test]
 fn every_row_names_an_id_and_name_the_registry_has() {
