@@ -10,6 +10,8 @@
 //!   layers        ->  LayerState      (off, frozen, locked, as the table stores them)
 //!   Layout objects ->  LayoutState     (model first, then paper layouts in tab order)
 //!   block record's entities -> EntityCursor -> RawEntity   (storage order, not expanded)
+//!   entity invisible flag  ->  EntityFacts      (own flag, and the provider's own answer)
+//!   paper-space viewports  ->  ViewportEntity   (visibility, clip boundary, frozen layer names)
 //! ```
 //!
 //! # Where the facts come from
@@ -43,10 +45,10 @@ use acr::{DwgReader, EntityType};
 
 use crate::cad::{CadSource, ItemHandle};
 use crate::pvec::provider::{
-    ArrayGrid, Availability, BlockRef, DwgProvider, EntityCursor, EntityScope, EntityStyle, Facet,
-    FacetSource, InstancePath, LayerState, LayoutId, LayoutKind, LayoutState, Point3,
-    ProvenanceStub, ProviderCaps, ProviderError, RawEntity, RawGeometry, RawVertex, SourceColour,
-    SourceFact, SourceLineweight, SourceTransform,
+    ArrayGrid, Availability, BlockRef, DwgProvider, EntityCursor, EntityFacts, EntityScope,
+    EntityStyle, Facet, FacetSource, InstancePath, LayerState, LayoutId, LayoutKind, LayoutState,
+    Point3, ProvenanceStub, ProviderCaps, ProviderError, RawEntity, RawGeometry, RawVertex,
+    SourceColour, SourceFact, SourceLineweight, SourceTransform, ViewportEntity,
 };
 use crate::pvec::units::SourceUnit;
 
@@ -237,10 +239,99 @@ impl DwgProvider for AcadrustProvider {
             .collect())
     }
 
+    fn entity_facts(
+        &self,
+        scope: &EntityScope,
+    ) -> Result<BTreeMap<ItemHandle, EntityFacts>, ProviderError> {
+        let (record, _) = self.resolve(scope)?;
+        let mut out = BTreeMap::new();
+        for handle in &record.entity_handles {
+            let Some(e) = self.doc.get_entity(*handle) else {
+                continue;
+            };
+            if matches!(e, EntityType::Block(_) | EntityType::BlockEnd(_)) {
+                continue;
+            }
+            let Some(key) = item_handle(*handle) else {
+                continue;
+            };
+            let common = e.common();
+            // A drawing stores one layer per entity, so there is no second one to report.
+            // That is a fact about the drawing, not a gap in the reader.
+            let layer_hides = self
+                .doc
+                .layers
+                .get(&common.layer)
+                .is_some_and(|l| l.is_off() || l.is_frozen());
+            out.insert(
+                key,
+                EntityFacts {
+                    visible: SourceFact::Present(!common.invisible),
+                    layer_override: SourceFact::Absent,
+                    provider_visible: SourceFact::Present(!common.invisible && !layer_hides),
+                },
+            );
+        }
+        Ok(out)
+    }
+
+    fn viewports(&self) -> Result<Vec<ViewportEntity>, ProviderError> {
+        let mut out = Vec::new();
+        for layout in self.layouts.iter().filter(|l| l.kind == LayoutKind::Paper) {
+            let Some(record) = self.doc.block_records.get(&layout.block_name) else {
+                continue;
+            };
+            for handle in &record.entity_handles {
+                let (Some(EntityType::Viewport(v)), Some(key)) =
+                    (self.doc.get_entity(*handle), item_handle(*handle))
+                else {
+                    continue;
+                };
+                // Viewport id 1 is the paper-space view itself, not a window onto the model.
+                if v.id == 1 {
+                    continue;
+                }
+                out.push(ViewportEntity {
+                    handle: key,
+                    layout: layout.id,
+                    visible: v.status.is_on && !v.common.invisible,
+                    clip: self.viewport_clip(v),
+                    frozen_layers: v
+                        .frozen_layers
+                        .iter()
+                        .filter_map(|h| {
+                            self.doc
+                                .layers
+                                .iter()
+                                .find(|l| l.handle == *h)
+                                .map(|l| l.name.clone())
+                        })
+                        .collect(),
+                });
+            }
+        }
+        Ok(out)
+    }
+
     fn entities<'a>(
         &'a self,
         scope: &EntityScope,
     ) -> Result<Box<dyn EntityCursor + 'a>, ProviderError> {
+        let (record, path) = self.resolve(scope)?;
+        Ok(Box::new(AcadrustCursor {
+            doc: &self.doc,
+            handles: record.entity_handles.iter(),
+            path,
+            base_points: BTreeMap::new(),
+        }))
+    }
+}
+
+impl AcadrustProvider {
+    fn resolve(
+        &self,
+        scope: &EntityScope,
+    ) -> Result<(&acr::tables::BlockRecord, InstancePath), ProviderError> {
         let (block, path) = match scope {
             EntityScope::Layout(id) => {
                 let l = self
@@ -258,12 +349,39 @@ impl DwgProvider for AcadrustProvider {
             .block_records
             .get(&block)
             .ok_or_else(|| ProviderError::NoSuchScope(format!("block {block}")))?;
-        Ok(Box::new(AcadrustCursor {
-            doc: &self.doc,
-            handles: record.entity_handles.iter(),
-            path,
-            base_points: BTreeMap::new(),
-        }))
+        Ok((record, path))
+    }
+
+    /// The viewport's clip boundary: the polyline it is clipped to when it has one, else
+    /// the rectangle its centre, width and height describe.
+    fn viewport_clip(&self, v: &acr::entities::Viewport) -> Vec<[f64; 2]> {
+        if !v.clip_boundary_handle.is_null() {
+            match self.doc.get_entity(v.clip_boundary_handle) {
+                Some(EntityType::LwPolyline(p)) => {
+                    return p
+                        .vertices
+                        .iter()
+                        .map(|q| [q.location.x, q.location.y])
+                        .collect();
+                }
+                Some(EntityType::Polyline2D(p)) => {
+                    return p
+                        .vertices
+                        .iter()
+                        .map(|q| [q.location.x, q.location.y])
+                        .collect();
+                }
+                _ => {}
+            }
+        }
+        let (cx, cy) = (v.center.x, v.center.y);
+        let (hw, hh) = (v.width / 2.0, v.height / 2.0);
+        vec![
+            [cx - hw, cy - hh],
+            [cx + hw, cy - hh],
+            [cx + hw, cy + hh],
+            [cx - hw, cy + hh],
+        ]
     }
 }
 
@@ -353,9 +471,10 @@ impl AcadrustCursor<'_> {
     /// The entity's colour and lineweight, BYLAYER resolved through the layer table.
     ///
     /// BYBLOCK is handed on as it is: this cursor sees one block definition and does
-    /// not know the INSERT that is drawing it. A BYLAYER entity on a layer the table
-    /// does not have, or on one whose own value is BYLAYER, BYBLOCK or no colour, has
-    /// nothing to resolve to and reports [`SourceFact::Absent`].
+    /// not know the INSERT that is drawing it, so a layer whose own value is BYBLOCK
+    /// gives `Present(ByBlock)` too. A BYLAYER entity on a layer the table does not
+    /// have, or on one whose own value is BYLAYER or no colour, has nothing to
+    /// resolve to and reports [`SourceFact::Absent`].
     fn style_of(&self, common: &acr::entities::EntityCommon) -> EntityStyle {
         let layer = self.doc.layers.get(&common.layer).or_else(|| {
             self.doc

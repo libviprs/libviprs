@@ -58,6 +58,7 @@
 //! [`SourceTransform`], which is finite-checked at construction; promotion,
 //! degeneracy and singular handling are P3.8's, applied in N3.4.
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 use thiserror::Error;
@@ -373,6 +374,47 @@ pub struct ProvenanceStub {
     pub layer: String,
 }
 
+/// What a provider reports about one entity beyond its geometry, kept apart from
+/// [`RawEntity`] so the geometry payload stays free of policy inputs.
+///
+/// Each value is a [`SourceFact`]: `Absent` is a fact about the drawing, `NotReportable`
+/// a fact about the provider.
+#[derive(Debug, Clone)]
+pub struct EntityFacts {
+    /// The entity's own visibility flag. `Present(false)` is an invisible entity.
+    pub visible: SourceFact<bool>,
+    /// A layer that replaces the one in [`ProvenanceStub::layer`], when the drawing
+    /// gives the entity a second one.
+    pub layer_override: SourceFact<String>,
+    /// What the provider itself would answer to "is this drawn", layer state
+    /// included. Policy does not trust it, it is compared against.
+    pub provider_visible: SourceFact<bool>,
+}
+
+impl EntityFacts {
+    /// Facts a provider cannot read at all.
+    pub const NOT_REPORTABLE: Self = Self {
+        visible: SourceFact::NotReportable,
+        layer_override: SourceFact::NotReportable,
+        provider_visible: SourceFact::NotReportable,
+    };
+}
+
+/// A paper-space viewport entity, as the drawing stores it. Nothing here is applied.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ViewportEntity {
+    /// The viewport entity's handle.
+    pub handle: ItemHandle,
+    /// The paper layout that holds it.
+    pub layout: LayoutId,
+    /// The viewport's own visibility (its On flag, and not an invisible entity).
+    pub visible: bool,
+    /// The clip boundary, paper-space vertices in order.
+    pub clip: Vec<[f64; 2]>,
+    /// Names of the layers frozen in this viewport only.
+    pub frozen_layers: Vec<String>,
+}
+
 /// One vertex of a polyline: position and the bulge toward the next vertex.
 #[derive(Debug, Clone, Copy)]
 pub struct RawVertex {
@@ -650,11 +692,18 @@ pub enum Facet {
     Colour,
     /// An entity's lineweight, [`EntityStyle::lineweight`] (#1264).
     Lineweight,
+    /// An entity's own visibility flag, from [`DwgProvider::entity_facts`].
+    EntityVisibility,
+    /// A per-entity layer that replaces the one in its provenance, from
+    /// [`DwgProvider::entity_facts`].
+    LayerOverride,
+    /// Paper-space viewport entities, from [`DwgProvider::viewports`].
+    ViewportEntities,
 }
 
 impl Facet {
     /// Every facet.
-    pub const ALL: [Facet; 7] = [
+    pub const ALL: [Facet; 10] = [
         Facet::LayerState,
         Facet::LayoutState,
         Facet::KnotMultiplicity,
@@ -662,6 +711,9 @@ impl Facet {
         Facet::Periodicity,
         Facet::Colour,
         Facet::Lineweight,
+        Facet::EntityVisibility,
+        Facet::LayerOverride,
+        Facet::ViewportEntities,
     ];
 }
 
@@ -844,6 +896,34 @@ pub trait DwgProvider {
     ///
     /// [`ProviderError::CannotReport`] with [`Facet::LayerState`] when the caps say so.
     fn layers(&self) -> Result<Vec<LayerState>, ProviderError>;
+
+    /// Per-entity facts for every entity of `scope`, by handle. An entity with no
+    /// handle has no entry.
+    ///
+    /// The default says the provider cannot report them.
+    ///
+    /// # Errors
+    ///
+    /// [`ProviderError::CannotReport`] with [`Facet::EntityVisibility`] when the caps
+    /// say so, and [`ProviderError::NoSuchScope`] as for [`entities`](Self::entities).
+    fn entity_facts(
+        &self,
+        scope: &EntityScope,
+    ) -> Result<BTreeMap<ItemHandle, EntityFacts>, ProviderError> {
+        let _ = scope;
+        Err(ProviderError::CannotReport(Facet::EntityVisibility))
+    }
+
+    /// Every viewport entity of every paper layout, in storage order.
+    ///
+    /// The default says the provider cannot report them.
+    ///
+    /// # Errors
+    ///
+    /// [`ProviderError::CannotReport`] with [`Facet::ViewportEntities`] when the caps say so.
+    fn viewports(&self) -> Result<Vec<ViewportEntity>, ProviderError> {
+        Err(ProviderError::CannotReport(Facet::ViewportEntities))
+    }
 
     /// Opens one traversal pass.
     ///

@@ -48,6 +48,7 @@ use std::fmt;
 use thiserror::Error;
 
 use super::limits::SourceLimits;
+use super::view::{EntityState, PolicyReason, VisibilityFilter};
 
 use super::provider::{
     DwgProvider, EntityScope, InstancePath, LayerState, LayoutKind, ProviderError, RawEntity,
@@ -427,7 +428,7 @@ impl ViewProfile {
         let mut walk = Walk {
             profile: self,
             provider,
-            layers: layer_table,
+            filter: VisibilityFilter::new(self, model.clone(), layer_table),
             included: Vec::new(),
             excluded: Vec::new(),
         };
@@ -465,28 +466,24 @@ impl ViewProfile {
 struct Walk<'a, P: ?Sized> {
     profile: &'a ViewProfile,
     provider: &'a P,
-    layers: Vec<LayerState>,
+    /// The one implementation of off and frozen (N4.6, #1077), shared with the filter.
+    filter: VisibilityFilter,
     included: Vec<ViewedEntity>,
     excluded: Vec<ExcludedEntity>,
 }
 
 impl<P: DwgProvider + ?Sized> Walk<'_, P> {
-    fn layer_state(&self, name: &str) -> Option<&LayerState> {
-        // Symbol-table names are case-insensitive in a DWG.
-        self.layers
-            .iter()
-            .find(|l| l.name.eq_ignore_ascii_case(name))
-    }
-
-    /// The reason a layer hides an entity under this profile, if it does.
-    fn layer_exclusion(&self, layer: &str) -> Option<Exclusion> {
-        let state = self.layer_state(layer)?;
-        if state.off && self.profile.layers.off == LayerStateRule::Exclude {
-            Some(Exclusion::LayerOff)
-        } else if state.frozen && self.profile.layers.frozen == LayerStateRule::Exclude {
-            Some(Exclusion::LayerFrozen)
-        } else {
-            None
+    /// The reason a layer hides an entity under this profile, if it does. The layer is the
+    /// effective one (V1-2 already applied), handed to the filter as an override.
+    fn layer_exclusion(&self, entity: &RawEntity, layer: &str) -> Option<Exclusion> {
+        let state = EntityState {
+            layer_override: Some(layer.to_string()),
+            ..EntityState::default()
+        };
+        match self.filter.decide(entity, &state).dropped? {
+            PolicyReason::LayerOff => Some(Exclusion::LayerOff),
+            PolicyReason::LayerFrozen => Some(Exclusion::LayerFrozen),
+            _ => None,
         }
     }
 
@@ -508,7 +505,7 @@ impl<P: DwgProvider + ?Sized> Walk<'_, P> {
             _ => entity.provenance.layer.clone(),
         };
 
-        if let Some(reason) = self.layer_exclusion(&effective) {
+        if let Some(reason) = self.layer_exclusion(&entity, &effective) {
             self.exclude(&entity, effective, reason);
             return Ok(());
         }
