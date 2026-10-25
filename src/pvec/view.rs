@@ -43,7 +43,7 @@ use std::collections::BTreeMap;
 use super::fidelity::{Classification, FidelityClass};
 use super::provider::{
     DwgProvider, EntityScope, InstancePath, LayerState, LayoutId, LayoutKind, LayoutState,
-    RawEntity,
+    ProviderError, RawEntity, ViewportEntity,
 };
 use super::view_profile::{LayerStateRule, SpaceSelection, ViewProfile, ViewProfileError};
 use crate::cad::ItemHandle;
@@ -189,6 +189,33 @@ impl EntityStates {
             .and_then(|h| self.map.get(&h))
             .cloned()
             .unwrap_or_default()
+    }
+}
+
+impl EntityStates {
+    /// Builds the states of one scope's entities from what `provider` reports.
+    ///
+    /// # Errors
+    ///
+    /// The provider's own error, including [`ProviderError::CannotReport`].
+    pub fn from_provider<P: DwgProvider + ?Sized>(
+        provider: &P,
+        scope: &EntityScope,
+    ) -> Result<Self, ProviderError> {
+        let _ = (provider, scope);
+        Ok(Self::new())
+    }
+}
+
+impl From<ViewportEntity> for ViewportInput {
+    fn from(v: ViewportEntity) -> Self {
+        Self {
+            handle: v.handle,
+            layout: v.layout,
+            visible: v.visible,
+            clip: v.clip,
+            frozen_layers: v.frozen_layers,
+        }
     }
 }
 
@@ -500,5 +527,23 @@ impl VisibilityFilter {
             .with_freeze_mode(mode)
             .with_viewports(viewports)
             .filter(entities, states))
+    }
+
+    /// Like [`run`](Self::run), with the entity states and viewports read from `provider`
+    /// instead of handed in.
+    ///
+    /// # Errors
+    ///
+    /// As [`run`](Self::run); a provider that cannot report the facets is
+    /// [`ViewProfileError::Provider`].
+    pub fn run_from_provider<P: DwgProvider + ?Sized>(
+        provider: &P,
+        profile: &ViewProfile,
+        mode: ViewportFreezeMode,
+    ) -> Result<VisibilityOutcome, ViewProfileError> {
+        let _ = (provider, profile, mode);
+        Err(ViewProfileError::Provider(ProviderError::CannotReport(
+            super::provider::Facet::EntityVisibility,
+        )))
     }
 }

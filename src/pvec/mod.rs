@@ -100,10 +100,10 @@ pub use pdf_vector::{
     extract_page_paths_from_bytes,
 };
 pub use provider::{
-    ArrayGrid, Availability, BlockRef, DwgProvider, EntityCursor, EntityScope, Facet, FacetCap,
-    FacetSource, InstancePath, InstanceStep, LayerState, LayoutId, LayoutKind, LayoutState, Point3,
-    ProvenanceStub, ProviderCaps, ProviderError, RawEntity, RawGeometry, RawVertex, SourceFact,
-    SourceTransform,
+    ArrayGrid, Availability, BlockRef, DwgProvider, EntityCursor, EntityFacts, EntityScope, Facet,
+    FacetCap, FacetSource, InstancePath, InstanceStep, LayerState, LayoutId, LayoutKind,
+    LayoutState, Point3, ProvenanceStub, ProviderCaps, ProviderError, RawEntity, RawGeometry,
+    RawVertex, SourceFact, SourceTransform, ViewportEntity,
 };
 pub use text_policy::{
     DwgTextCounts, PdfTextOperatorCounts, TextFontOutcome, TextReport, shx_outcome,
