@@ -1,4 +1,5 @@
-//! Wall and column classification from layer and block rules (N4.9, #1233).
+//! Wall and column classification from layer, block, colour and lineweight rules
+//! (N4.9, #1233; colour and lineweight #1264).
 //!
 //! A drawing already says what most of its walls and columns are: they sit on
 //! labelled layers (`A-WALL*`, `S-COL*`) or are inserts of named blocks. An
@@ -19,7 +20,9 @@
 //!    match decides. A column block inside a wall unit is therefore a column, and
 //!    a column block inserted on a wall layer is a column too.
 //! 2. **Layer rules**, in list order, against the entity's own layer name.
-//! 3. Otherwise [`ElementClass::Unclassified`].
+//! 3. **Colour rules**, then 4. **lineweight rules**, in list order each (#1264,
+//!    see below).
+//! 5. Otherwise [`ElementClass::Unclassified`].
 //!
 //! Layer and block names are matched as globs (`*` and `?`), anchored at both
 //! ends and case-insensitively, because DWG symbol-table names are
@@ -32,10 +35,21 @@
 //! An entity no rule matches is `Unclassified`: it is counted, never dropped and
 //! never defaulted to a wall.
 //!
-//! Colour and lineweight rules need those facts on the provider boundary, which
-//! does not carry them yet (#1264).
+//! # Colour and lineweight
+//!
+//! [`RuleMatch::Colour`] and [`RuleMatch::Lineweight`] match what the provider
+//! reports in [`EntityStyle`](super::provider::EntityStyle), exactly: an ACI index
+//! and a true colour are different values even when they look alike, and nothing
+//! is approximated. BYLAYER is resolved by the provider through the layer table,
+//! so it matches as the layer's value. BYBLOCK, the drawing's default weight,
+//! `Absent` and `NotReportable` never match: the first needs the INSERT chain's
+//! colour, which one entity does not carry, and the rest are not a colour or a
+//! weight. The kinds are tried in the order block, layer, colour, lineweight, and
+//! within a kind the earlier rule wins (#1264).
 
-use super::provider::{InstancePath, RawEntity, RawGeometry};
+use super::provider::{
+    InstancePath, RawEntity, RawGeometry, SourceColour, SourceFact, SourceLineweight,
+};
 use crate::cad::ItemHandle;
 
 /// What an entity is, as far as the rules can tell.
@@ -59,6 +73,10 @@ pub enum ClassSource {
     LayerRule,
     /// A block-name rule.
     BlockRule,
+    /// A colour rule.
+    ColourRule,
+    /// A lineweight rule.
+    LineweightRule,
 }
 
 impl ClassSource {
@@ -68,6 +86,8 @@ impl ClassSource {
         match self {
             ClassSource::LayerRule => "layer-rule",
             ClassSource::BlockRule => "block-rule",
+            ClassSource::ColourRule => "colour-rule",
+            ClassSource::LineweightRule => "lineweight-rule",
         }
     }
 }
@@ -80,6 +100,11 @@ pub enum RuleMatch {
     Layer(String),
     /// A block-name glob.
     Block(String),
+    /// An exact colour, as [`EntityStyle::colour`](super::provider::EntityStyle::colour)
+    /// reports it (#1264).
+    Colour(SourceColour),
+    /// An exact lineweight in hundredths of a millimetre (#1264).
+    Lineweight(u16),
 }
 
 /// One rule: a pattern and the class it assigns.
@@ -235,6 +260,45 @@ impl ElementRules {
             })
     }
 
+    fn first_colour_rule(
+        &self,
+        colour: &SourceFact<SourceColour>,
+    ) -> Option<(usize, ElementClass)> {
+        let SourceFact::Present(have) = colour else {
+            return None;
+        };
+        if *have == SourceColour::ByBlock {
+            return None;
+        }
+        self.rules
+            .iter()
+            .enumerate()
+            .find_map(|(i, r)| match &r.matcher {
+                RuleMatch::Colour(c) if r.class != ElementClass::Unclassified && c == have => {
+                    Some((i, r.class))
+                }
+                _ => None,
+            })
+    }
+
+    fn first_lineweight_rule(
+        &self,
+        weight: &SourceFact<SourceLineweight>,
+    ) -> Option<(usize, ElementClass)> {
+        let SourceFact::Present(SourceLineweight::Hundredths(have)) = weight else {
+            return None;
+        };
+        self.rules
+            .iter()
+            .enumerate()
+            .find_map(|(i, r)| match &r.matcher {
+                RuleMatch::Lineweight(w) if r.class != ElementClass::Unclassified && w == have => {
+                    Some((i, r.class))
+                }
+                _ => None,
+            })
+    }
+
     /// Classifies one entity. Pure: the entity is not changed and the same input
     /// and profile always give the same result.
     #[must_use]
@@ -258,6 +322,14 @@ impl ElementRules {
             .or_else(|| {
                 self.first_layer_rule(&prov.layer)
                     .map(|(i, c)| (i, c, ClassSource::LayerRule))
+            })
+            .or_else(|| {
+                self.first_colour_rule(&entity.style.colour)
+                    .map(|(i, c)| (i, c, ClassSource::ColourRule))
+            })
+            .or_else(|| {
+                self.first_lineweight_rule(&entity.style.lineweight)
+                    .map(|(i, c)| (i, c, ClassSource::LineweightRule))
             });
         let (class, source, rule_index) = match hit {
             Some((i, c, s)) => (c, Some(s), Some(i)),

@@ -85,6 +85,7 @@ impl DwgProvider for Mock {
 
 fn line(handle: u64, layer: &str) -> RawEntity {
     RawEntity {
+        style: libviprs::pvec::EntityStyle::absent(),
         geometry: RawGeometry::Line {
             start: [handle as f64, 0.0, 0.0],
             end: [handle as f64, 1.0, 0.0],
@@ -100,6 +101,7 @@ fn line(handle: u64, layer: &str) -> RawEntity {
 
 fn insert_grid(handle: u64, layer: &str, block: &str, grid: ArrayGrid) -> RawEntity {
     RawEntity {
+        style: libviprs::pvec::EntityStyle::absent(),
         geometry: RawGeometry::Insert(BlockRef {
             block_name: block.into(),
             transform: SourceTransform::IDENTITY,

@@ -512,6 +512,81 @@ pub enum RawGeometry {
     },
 }
 
+/// A colour as the drawing states it, after the BYLAYER rule has been applied.
+///
+/// There is no `ByLayer` arm: a provider resolves BYLAYER through the layer table, so
+/// what leaves the boundary is the colour the entity is drawn in, or
+/// [`SourceColour::ByBlock`] when only the enclosing INSERT can say. Two colours are
+/// equal when the drawing wrote the same thing: an ACI index and a true colour that
+/// happen to look alike are different values, nothing is approximated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum SourceColour {
+    /// An AutoCAD Color Index, 1 to 255.
+    Aci(u8),
+    /// A true colour.
+    True {
+        /// Red.
+        r: u8,
+        /// Green.
+        g: u8,
+        /// Blue.
+        b: u8,
+    },
+    /// BYBLOCK: the colour of the INSERT that placed the entity. Left for the
+    /// consumer to resolve along the INSERT chain, because the provider hands out
+    /// one block definition at a time.
+    ByBlock,
+}
+
+/// A lineweight as the drawing states it, after the BYLAYER rule has been applied.
+///
+/// Same shape as [`SourceColour`]: no `ByLayer` arm, and [`SourceLineweight::ByBlock`]
+/// is left for the INSERT chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum SourceLineweight {
+    /// A weight in hundredths of a millimetre (`25` is 0.25 mm).
+    Hundredths(u16),
+    /// The drawing's default weight (`LWDEFAULT`), whatever the viewer makes of it.
+    Default,
+    /// BYBLOCK, see [`SourceColour::ByBlock`].
+    ByBlock,
+}
+
+/// The colour and lineweight facets of one entity.
+///
+/// `Absent` means the drawing gives no usable value (a BYLAYER entity on a layer the
+/// table does not have, or one whose own colour is not a colour). `NotReportable`
+/// means the provider cannot read the facet at all.
+#[derive(Debug, Clone)]
+pub struct EntityStyle {
+    /// The colour.
+    pub colour: SourceFact<SourceColour>,
+    /// The lineweight.
+    pub lineweight: SourceFact<SourceLineweight>,
+}
+
+impl EntityStyle {
+    /// Both facets [`SourceFact::Absent`]: the drawing gives the entity neither.
+    #[must_use]
+    pub fn absent() -> Self {
+        Self {
+            colour: SourceFact::Absent,
+            lineweight: SourceFact::Absent,
+        }
+    }
+
+    /// Both facets [`SourceFact::NotReportable`], for a provider that reads neither.
+    #[must_use]
+    pub fn not_reportable() -> Self {
+        Self {
+            colour: SourceFact::NotReportable,
+            lineweight: SourceFact::NotReportable,
+        }
+    }
+}
+
 /// One entity as the boundary carries it.
 ///
 /// No `PartialEq`, see the module docs.
@@ -521,6 +596,8 @@ pub struct RawEntity {
     pub geometry: RawGeometry,
     /// Where it came from.
     pub provenance: ProvenanceStub,
+    /// Its colour and lineweight (#1264).
+    pub style: EntityStyle,
 }
 
 impl RawEntity {
@@ -557,6 +634,12 @@ impl RawEntity {
                 out.push(Facet::Periodicity);
             }
         }
+        if self.style.colour.is_not_reportable() {
+            out.push(Facet::Colour);
+        }
+        if self.style.lineweight.is_not_reportable() {
+            out.push(Facet::Lineweight);
+        }
         out
     }
 
@@ -581,6 +664,12 @@ impl RawEntity {
                 out.push(Facet::Periodicity);
             }
         }
+        if !self.style.colour.is_not_reportable() {
+            out.push(Facet::Colour);
+        }
+        if !self.style.lineweight.is_not_reportable() {
+            out.push(Facet::Lineweight);
+        }
         out
     }
 }
@@ -599,6 +688,10 @@ pub enum Facet {
     Weights,
     /// A spline's periodicity.
     Periodicity,
+    /// An entity's colour, [`EntityStyle::colour`] (#1264).
+    Colour,
+    /// An entity's lineweight, [`EntityStyle::lineweight`] (#1264).
+    Lineweight,
     /// An entity's own visibility flag, from [`DwgProvider::entity_facts`].
     EntityVisibility,
     /// A per-entity layer that replaces the one in its provenance, from
@@ -610,12 +703,14 @@ pub enum Facet {
 
 impl Facet {
     /// Every facet.
-    pub const ALL: [Facet; 8] = [
+    pub const ALL: [Facet; 10] = [
         Facet::LayerState,
         Facet::LayoutState,
         Facet::KnotMultiplicity,
         Facet::Weights,
         Facet::Periodicity,
+        Facet::Colour,
+        Facet::Lineweight,
         Facet::EntityVisibility,
         Facet::LayerOverride,
         Facet::ViewportEntities,

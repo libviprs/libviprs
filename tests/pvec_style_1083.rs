@@ -59,6 +59,7 @@ fn ids(n: usize) -> Vec<EntityId> {
                 block_path: InstancePath::default(),
                 layer: "0".into(),
             },
+            style: libviprs::pvec::EntityStyle::absent(),
         })
         .collect();
     order_entities("t", "1", &OrderingPolicy::default(), raw)

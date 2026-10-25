@@ -38,6 +38,7 @@ fn stub(handle: u64, class: &str) -> ProvenanceStub {
 
 fn line(handle: u64, a: [f64; 2], b: [f64; 2]) -> RawEntity {
     RawEntity {
+        style: libviprs::pvec::EntityStyle::absent(),
         geometry: RawGeometry::Line {
             start: [a[0], a[1], 0.0],
             end: [b[0], b[1], 0.0],
@@ -54,6 +55,7 @@ fn insert_with(
     grid: ArrayGrid,
 ) -> RawEntity {
     RawEntity {
+        style: libviprs::pvec::EntityStyle::absent(),
         geometry: RawGeometry::Insert(BlockRef {
             block_name: block.to_string(),
             transform: SourceTransform::new(m).unwrap(),

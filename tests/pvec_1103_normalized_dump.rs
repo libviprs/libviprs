@@ -219,6 +219,7 @@ fn ids_can_be_the_n3_7_file_local_ids() {
             block_path: InstancePath::root(),
             layer: "0".into(),
         },
+        style: libviprs::pvec::EntityStyle::absent(),
     };
     let ordered = order_entities(
         "p",

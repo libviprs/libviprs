@@ -79,6 +79,7 @@ fn h(n: u64) -> ItemHandle {
 
 fn line(handle: u64, layer: &str) -> RawEntity {
     RawEntity {
+        style: libviprs::pvec::EntityStyle::absent(),
         geometry: RawGeometry::Line {
             start: [0.0, 0.0, 0.0],
             end: [1.0, 0.0, 0.0],

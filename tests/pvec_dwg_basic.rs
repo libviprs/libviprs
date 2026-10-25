@@ -26,6 +26,7 @@ const TAU: f64 = std::f64::consts::TAU;
 
 fn entity(class: &str, geometry: RawGeometry) -> RawEntity {
     RawEntity {
+        style: libviprs::pvec::EntityStyle::absent(),
         geometry,
         provenance: ProvenanceStub {
             handle: None,

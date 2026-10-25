@@ -8,8 +8,8 @@ use std::collections::BTreeMap;
 
 use libviprs::cad::ItemHandle;
 use libviprs::pvec::{
-    Availability, DwgProvider, EntityCursor, EntityFacts, EntityScope, EntityStates, Facet,
-    FacetSource, InstancePath, LayerState, LayoutId, LayoutKind, LayoutState, PolicyReason,
+    Availability, DwgProvider, EntityCursor, EntityFacts, EntityScope, EntityStates, EntityStyle,
+    Facet, FacetSource, InstancePath, LayerState, LayoutId, LayoutKind, LayoutState, PolicyReason,
     ProvenanceStub, ProviderCaps, ProviderError, RawEntity, RawGeometry, SourceFact,
     SpaceSelection, ViewProfile, ViewProfileError, ViewportEntity, ViewportFreezeMode,
     VisibilityFilter,
@@ -104,6 +104,7 @@ fn line(handle: u64, layer: &str) -> RawEntity {
             block_path: InstancePath::root(),
             layer: layer.into(),
         },
+        style: EntityStyle::absent(),
     }
 }
 
