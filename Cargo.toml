@@ -340,6 +340,10 @@ pvec-geometry = { git = "https://github.com/libviprs/pvec", rev = "4dbbfc37ac156
 # PVec's file-local `EntityId` (issue #1091), the id type the bounds inputs carry. Same pin and
 # same publishing consequence as `pvec-geometry` above.
 pvec-entity = { git = "https://github.com/libviprs/pvec", rev = "4dbbfc37ac156dbb7dac18d02721a742cd2aab0b", version = "0.0.0" }
+# PVec's capability registry (issue #1311), a dev-dependency only: `tests/pvec_1311_registry.rs`
+# checks the ids in `src/pvec/mapping.rs` against it. Same pin as the crates above. It is not in
+# `[dependencies]`, so `src/` cannot name it and the API-surface fence is untouched.
+pvec-capabilities = { git = "https://github.com/libviprs/pvec", rev = "4dbbfc37ac156dbb7dac18d02721a742cd2aab0b", version = "0.0.0" }
 # Pure-Rust FFT (MIT OR Apache-2.0) used by the frequency-domain filter
 # operations in `src/freqfilt.rs` (`fwfft`, `invfft`, `freqmult`, `spectrum`,
 # `phasecor`). Chosen over an FFTW binding to keep the crate pure Rust; its
@@ -711,6 +715,7 @@ required-features = ["dwg-acadrust"]
 
 [dev-dependencies]
 loom = { workspace = true }
+pvec-capabilities = { workspace = true }
 proptest = { workspace = true }
 tempfile = { workspace = true }
 toml = { workspace = true }
