@@ -34,6 +34,7 @@ fn prov(handle: u64, class: &str, layer: &str) -> ProvenanceStub {
 
 fn line(handle: u64, layer: &str, a: [f64; 3], b: [f64; 3]) -> RawEntity {
     RawEntity {
+        style: libviprs::pvec::EntityStyle::not_reportable(),
         geometry: RawGeometry::Line { start: a, end: b },
         provenance: prov(handle, "LINE", layer),
     }
@@ -45,6 +46,7 @@ fn insert(handle: u64, layer: &str, block: &str, at: [f64; 2], rot: f64, scale: 
         SourceTransform::new([c * scale, -s * scale, s * scale, c * scale, at[0], at[1]])
             .expect("finite");
     RawEntity {
+        style: libviprs::pvec::EntityStyle::not_reportable(),
         geometry: RawGeometry::Insert(BlockRef {
             block_name: block.to_string(),
             transform,
@@ -62,6 +64,7 @@ fn spline(
     periodic: SourceFact<bool>,
 ) -> RawEntity {
     RawEntity {
+        style: libviprs::pvec::EntityStyle::not_reportable(),
         geometry: RawGeometry::Spline {
             degree: 3,
             control_points: vec![
@@ -519,6 +522,7 @@ fn two_traversals_of_the_same_drawing_are_identical_field_by_field() {
         SourceFact::Present(false),
     ));
     p.layouts[0].1.push(RawEntity {
+        style: libviprs::pvec::EntityStyle::not_reportable(),
         geometry: RawGeometry::Polyline {
             vertices: vec![
                 RawVertex {
@@ -736,6 +740,7 @@ fn a_provider_without_layer_caps_says_so_instead_of_returning_nothing() {
 #[test]
 fn unmapped_entities_are_counted_not_dropped() {
     let hatch = RawEntity {
+        style: libviprs::pvec::EntityStyle::not_reportable(),
         geometry: RawGeometry::Unmapped {
             reason: "no mapping for HATCH".into(),
         },

@@ -16,6 +16,7 @@ fn pt(x: f64, y: f64) -> Point3 {
 
 fn line(handle: u64, layer: &str, path: InstancePath) -> RawEntity {
     RawEntity {
+        style: libviprs::pvec::EntityStyle::not_reportable(),
         geometry: RawGeometry::Line {
             start: pt(handle as f64, 0.0),
             end: pt(handle as f64, 10.0),
@@ -31,6 +32,7 @@ fn line(handle: u64, layer: &str, path: InstancePath) -> RawEntity {
 
 fn insert(handle: u64, layer: &str, block: &str) -> RawEntity {
     RawEntity {
+        style: libviprs::pvec::EntityStyle::not_reportable(),
         geometry: RawGeometry::Insert(BlockRef {
             block_name: block.into(),
             transform: SourceTransform::IDENTITY,

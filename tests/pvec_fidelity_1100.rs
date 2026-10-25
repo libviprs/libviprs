@@ -10,6 +10,7 @@ use libviprs::pvec::{InstancePath, ProvenanceStub, RawEntity, RawGeometry};
 
 fn entity(class: &str, geometry: RawGeometry) -> RawEntity {
     RawEntity {
+        style: libviprs::pvec::EntityStyle::not_reportable(),
         geometry,
         provenance: ProvenanceStub {
             handle: None,

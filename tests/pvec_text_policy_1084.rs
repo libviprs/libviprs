@@ -281,6 +281,7 @@ fn n5_5_the_font_is_graphics_state_and_q_restores_it() {
 
 fn entity(class: &str) -> RawEntity {
     RawEntity {
+        style: libviprs::pvec::EntityStyle::not_reportable(),
         geometry: RawGeometry::Unmapped {
             reason: format!("no mapping for {class}"),
         },

@@ -35,7 +35,7 @@
 //! Colour and lineweight rules need those facts on the provider boundary, which
 //! does not carry them yet (#1264).
 
-use super::provider::{InstancePath, RawEntity, RawGeometry};
+use super::provider::{InstancePath, RawEntity, RawGeometry, SourceColour};
 use crate::cad::ItemHandle;
 
 /// What an entity is, as far as the rules can tell.
@@ -59,6 +59,10 @@ pub enum ClassSource {
     LayerRule,
     /// A block-name rule.
     BlockRule,
+    /// A colour rule.
+    ColourRule,
+    /// A lineweight rule.
+    LineweightRule,
 }
 
 impl ClassSource {
@@ -68,6 +72,8 @@ impl ClassSource {
         match self {
             ClassSource::LayerRule => "layer-rule",
             ClassSource::BlockRule => "block-rule",
+            ClassSource::ColourRule => "colour-rule",
+            ClassSource::LineweightRule => "lineweight-rule",
         }
     }
 }
@@ -80,6 +86,11 @@ pub enum RuleMatch {
     Layer(String),
     /// A block-name glob.
     Block(String),
+    /// An exact colour, as [`EntityStyle::colour`](super::provider::EntityStyle::colour)
+    /// reports it (#1264).
+    Colour(SourceColour),
+    /// An exact lineweight in hundredths of a millimetre (#1264).
+    Lineweight(u16),
 }
 
 /// One rule: a pattern and the class it assigns.

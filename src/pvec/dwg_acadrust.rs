@@ -43,9 +43,10 @@ use acr::{DwgReader, EntityType};
 
 use crate::cad::{CadSource, ItemHandle};
 use crate::pvec::provider::{
-    ArrayGrid, Availability, BlockRef, DwgProvider, EntityCursor, EntityScope, Facet, FacetSource,
-    InstancePath, LayerState, LayoutId, LayoutKind, LayoutState, Point3, ProvenanceStub,
-    ProviderCaps, ProviderError, RawEntity, RawGeometry, RawVertex, SourceFact, SourceTransform,
+    ArrayGrid, Availability, BlockRef, DwgProvider, EntityCursor, EntityScope, EntityStyle, Facet,
+    FacetSource, InstancePath, LayerState, LayoutId, LayoutKind, LayoutState, Point3,
+    ProvenanceStub, ProviderCaps, ProviderError, RawEntity, RawGeometry, RawVertex, SourceFact,
+    SourceTransform,
 };
 use crate::pvec::units::SourceUnit;
 
@@ -288,6 +289,7 @@ impl EntityCursor for AcadrustCursor<'_> {
                         block_path: self.path.clone(),
                         layer: String::new(),
                     },
+                    style: EntityStyle::not_reportable(),
                 }));
             };
             if matches!(e, EntityType::Block(_) | EntityType::BlockEnd(_)) {
@@ -438,6 +440,7 @@ impl AcadrustCursor<'_> {
         RawEntity {
             geometry,
             provenance,
+            style: EntityStyle::not_reportable(),
         }
     }
 }

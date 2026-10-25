@@ -14,6 +14,7 @@ use pvec_numeric::{MAX_CONTROL_POINTS, MAX_DEGREE, MAX_KNOTS};
 
 fn entity(class: &str, geometry: RawGeometry) -> RawEntity {
     RawEntity {
+        style: libviprs::pvec::EntityStyle::not_reportable(),
         geometry,
         provenance: ProvenanceStub {
             handle: None,
