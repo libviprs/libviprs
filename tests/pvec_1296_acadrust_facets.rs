@@ -36,10 +36,11 @@ fn drawing() -> Drawing {
     let mut doc = CadDocument::new();
     let mut off = acadrust::tables::Layer::new("OffLayer");
     off.turn_off();
+    off.handle = doc.allocate_handle();
     doc.layers.add(off).expect("layer");
     let mut cold = acadrust::tables::Layer::new("ColdInSheet");
+    cold.handle = doc.allocate_handle();
     doc.layers.add(cold.clone()).expect("layer");
-    cold.handle = doc.layers.get("ColdInSheet").expect("layer").handle;
 
     let plain = doc.add_entity(line_on("0", false)).expect("plain").value();
     let hidden = doc.add_entity(line_on("0", true)).expect("hidden").value();

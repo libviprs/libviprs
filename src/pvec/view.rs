@@ -11,8 +11,10 @@
 //! [`LayoutState`]), the [`ViewProfile`] rules for off and frozen layers, and one
 //! [`EntityState`] per entity the caller has facts about (the entity's own visibility flag, a
 //! per-entity layer override, the layout it really belongs to, the viewport it is seen
-//! through, and what the provider claimed). The N4.1 boundary does not carry those per-entity
-//! facts yet, so they come in beside the entity, keyed by handle, see [`EntityStates`].
+//! through, and what the provider claimed). They come in beside the entity, keyed by handle, see
+//! [`EntityStates`]. A provider that reports [`DwgProvider::entity_facts`] and
+//! [`DwgProvider::viewports`] fills them: [`EntityStates::from_provider`] and
+//! [`VisibilityFilter::run_from_provider`] build them without the caller handing anything in.
 //!
 //! # Order, and exactly one reason
 //!
@@ -42,7 +44,7 @@ use std::collections::BTreeMap;
 
 use super::fidelity::{Classification, FidelityClass};
 use super::provider::{
-    DwgProvider, EntityScope, InstancePath, LayerState, LayoutId, LayoutKind, LayoutState,
+    DwgProvider, EntityScope, Facet, InstancePath, LayerState, LayoutId, LayoutKind, LayoutState,
     ProviderError, RawEntity, ViewportEntity,
 };
 use super::view_profile::{LayerStateRule, SpaceSelection, ViewProfile, ViewProfileError};
@@ -202,8 +204,31 @@ impl EntityStates {
         provider: &P,
         scope: &EntityScope,
     ) -> Result<Self, ProviderError> {
-        let _ = (provider, scope);
-        Ok(Self::new())
+        let mut states = Self::new();
+        let layout = match scope {
+            EntityScope::Layout(id) => Some(*id),
+            EntityScope::BlockDefinition { .. } => None,
+        };
+        for (handle, f) in provider.entity_facts(scope)? {
+            if f.visible.is_not_reportable() || f.provider_visible.is_not_reportable() {
+                return Err(ProviderError::CannotReport(Facet::EntityVisibility));
+            }
+            if f.layer_override.is_not_reportable() {
+                return Err(ProviderError::CannotReport(Facet::LayerOverride));
+            }
+            states = states.with(
+                handle,
+                EntityState {
+                    visible: f.visible.present().copied().unwrap_or(true),
+                    layer_override: f.layer_override.present().cloned(),
+                    layout,
+                    viewport: None,
+                    outside_viewport: false,
+                    provider_visible: f.provider_visible.present().copied(),
+                },
+            );
+        }
+        Ok(states)
     }
 }
 
@@ -541,9 +566,14 @@ impl VisibilityFilter {
         profile: &ViewProfile,
         mode: ViewportFreezeMode,
     ) -> Result<VisibilityOutcome, ViewProfileError> {
-        let _ = (provider, profile, mode);
-        Err(ViewProfileError::Provider(ProviderError::CannotReport(
-            super::provider::Facet::EntityVisibility,
-        )))
+        let layouts = provider.layouts()?;
+        let layout = select_layout(&layouts, &profile.space)?;
+        let states = EntityStates::from_provider(provider, &EntityScope::Layout(layout.id))?;
+        let viewports = provider
+            .viewports()?
+            .into_iter()
+            .map(ViewportInput::from)
+            .collect();
+        Self::run(provider, profile, &states, viewports, mode)
     }
 }
