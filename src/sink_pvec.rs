@@ -89,6 +89,7 @@ pub struct PvecSink {
     writer: Mutex<PvecWriter>,
     plan: PyramidPlan,
     format: TileFormat,
+    bilevel: Option<u8>,
     skip_blanks: bool,
     config: Mutex<Option<EngineConfig>>,
     stored: AtomicU64,
@@ -117,6 +118,7 @@ impl PvecSink {
             writer: Mutex::new(writer),
             plan: pyramid.plan.clone(),
             format: options.tile_format,
+            bilevel: options.bilevel_threshold,
             skip_blanks: options.skip_blanks,
             config: Mutex::new(None),
             stored: AtomicU64::new(0),
@@ -182,7 +184,8 @@ impl TileSink for PvecSink {
         if self.skip_blanks && is_blank_tile(&tile.raster) {
             return Ok(());
         }
-        let Some(bytes) = cut_tile(&self.plan, self.format, &self.config, tile)? else {
+        let Some(bytes) = cut_tile(&self.plan, self.format, &self.config, self.bilevel, tile)?
+        else {
             self.dropped.fetch_add(1, Ordering::Relaxed);
             return Ok(());
         };

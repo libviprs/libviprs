@@ -34,6 +34,8 @@ pub(super) struct Decoded {
     pub(super) channels: Channels,
     pub(super) data: Vec<u8>,
     pub(super) notes: Vec<PdfImageNote>,
+    /// The source had one bit per component and the samples are gray: every sample is 0 or 255.
+    pub(super) bilevel: bool,
 }
 
 fn bad(detail: impl Into<String>) -> PdfImageError {
@@ -65,12 +67,20 @@ pub(super) fn decode(image: &PdfImagePlacement, max_pixels: u64) -> Result<Decod
             Err(_) => None,
         };
         let (samples, channels) = colour_samples(raw, space, width, height, &mut notes)?;
+        let one_bit = raw
+            .dict
+            .get(b"BitsPerComponent")
+            .ok()
+            .and_then(|o| o.as_i64().ok())
+            == Some(1)
+            && !filters(&raw.dict).iter().any(|f| f == "DCTDecode");
         Decoded {
             width,
             height,
             channels,
             data: samples,
             notes: Vec::new(),
+            bilevel: one_bit && channels == Channels::Gray,
         }
     };
 
@@ -718,6 +728,7 @@ fn stencil(
         channels: Channels::Rgba,
         data: out,
         notes: Vec::new(),
+        bilevel: false,
     })
 }
 
