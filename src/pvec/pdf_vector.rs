@@ -69,6 +69,12 @@ pub struct PdfVectorLimits {
     /// Most segments in one path, counted from the path's first operator to the
     /// operator that paints it.
     pub max_segments_per_path: usize,
+    /// Most images (image XObjects and inline images) recorded across the page and every form
+    /// expansion (issue #1332).
+    pub max_images: usize,
+    /// Most bytes of encoded image data kept for the bake across the page, so that a page of
+    /// many large images cannot be held in memory twice (issue #1332).
+    pub max_image_bytes: u64,
 }
 
 impl Default for PdfVectorLimits {
@@ -80,6 +86,8 @@ impl Default for PdfVectorLimits {
             max_entities: 1_000_000,
             max_content_bytes: 64 << 20,
             max_segments_per_path: 1_000_000,
+            max_images: 4_096,
+            max_image_bytes: 512 << 20,
         }
     }
 }
@@ -214,21 +222,59 @@ pub struct PdfVectorPage {
 }
 
 /// One image painted by the page: an image XObject invoked with `Do`, or an inline image
-/// (`BI ... ID ... EI`). Counted with its placement, not decoded (issue #1328, R2.4).
+/// (`BI ... ID ... EI`). Counted with its placement (issue #1328, R2.4) and described well enough
+/// for the bake (issue #1332, RL2.1): the dictionary entries the bake rules read, the clips and
+/// the soft-mask flag in force, and where it came from.
 ///
 /// The image is the unit square of image space, so [`ctm`](Self::ctm) is the whole map from that
-/// square into page space. No pixel is read and no bake rule (`/SMask`, `/Decode`, colour
-/// spaces) is applied; those are a follow-up, and the conversion report says no placement is
-/// written for a PDF image.
+/// square into page space. The encoded pixels are kept privately for
+/// [`bake_page_images`](super::pdf_image::bake_page_images), bounded by
+/// [`PdfVectorLimits::max_images`] and [`PdfVectorLimits::max_image_bytes`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct PdfImagePlacement {
     /// The resource name an image XObject was invoked by, or `None` for an inline image.
     pub name: Option<String>,
-    /// The Form XObject names invoked on the way, outermost first. Empty on the page itself.
-    pub form_path: Vec<String>,
     /// `[a b c d e f]` in PDF's row-vector convention, page space (box origin removed and
     /// `/Rotate` applied, like the path coordinates).
     pub ctm: [f64; 6],
+    /// `/Width`, when it is a positive integer that fits.
+    pub width: Option<u32>,
+    /// `/Height`, when it is a positive integer that fits.
+    pub height: Option<u32>,
+    /// `/BitsPerComponent` (1 for an image mask), when present.
+    pub bits_per_component: Option<u32>,
+    /// The colour space family as written: `DeviceRGB`, `Indexed`, `ICCBased`, `Separation` and
+    /// so on. `None` for an image mask or when the entry is missing.
+    pub colour_space: Option<String>,
+    /// `/Decode`, as written.
+    pub decode: Option<Vec<f64>>,
+    /// `/ImageMask true`.
+    pub image_mask: bool,
+    /// The image has an `/SMask` entry (the image key, not the graphics-state kind).
+    pub smask: bool,
+    /// The names of the stream filters, in order.
+    pub filters: Vec<String>,
+    /// The `sequence` of every clip-defining entity in force, outermost first (see
+    /// [`PdfPathEntity::active_clips`]).
+    pub active_clips: Vec<u64>,
+    /// Whether a graphics-state soft mask was in force.
+    pub soft_masked: bool,
+    /// The fill colour in force as sRGB, for an image mask.
+    pub fill_colour: [u8; 3],
+    /// Where it came from. `operator` is `Do` or `BI`, and `sequence` is the number of entities
+    /// painted before the image, so an image painted first has sequence 0 and one painted after
+    /// `n` paths has sequence `n`.
+    pub provenance: PdfProvenance,
+    /// The encoded image, with its dictionary resolved one level deep.
+    pub(crate) raw: Option<RawImage>,
+}
+
+/// An image stream as the bake reads it: the dictionary with the references that matter
+/// (`/ColorSpace`, `/SMask`, `/Decode` arrays) followed, and the encoded bytes.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RawImage {
+    pub(crate) dict: Dictionary,
+    pub(crate) content: Vec<u8>,
 }
 
 /// Why an extraction failed.
@@ -306,6 +352,20 @@ pub enum PdfVectorError {
         limit: usize,
         /// The count reached.
         observed: usize,
+    },
+    /// More images than `max_images` on the page (issue #1332).
+    #[error("image limit max_images={limit} exceeded")]
+    ImageLimitExceeded {
+        /// The configured limit.
+        limit: usize,
+    },
+    /// More encoded image bytes than `max_image_bytes` (issue #1332).
+    #[error("image data limit max_image_bytes={limit} exceeded ({observed} bytes)")]
+    ImageBytesExceeded {
+        /// The configured limit.
+        limit: u64,
+        /// The count reached.
+        observed: u64,
     },
     /// A `/Resources` lookup came back to an object it had already visited.
     #[error("/Resources reference cycle through object {object}")]
@@ -1107,11 +1167,7 @@ impl Run<'_> {
                 // Text is omitted and counted (N5.5, docs/pvec-text-policy.md).
                 "Tj" | "TJ" | "'" | "\"" => self.text.record_pdf(&op.operator, self.font),
                 "sh" => self.shadings = self.shadings.saturating_add(1),
-                "BI" => self.images.push(PdfImagePlacement {
-                    name: None,
-                    form_path: self.form_path.clone(),
-                    ctm: ctm.0,
-                }),
+                "BI" => self.record_image(None, &ctm, "BI", op.operands.first())?,
                 "scn" | "SCN" => {
                     *self
                         .colour_operators
@@ -1241,6 +1297,39 @@ impl Run<'_> {
         }
     }
 
+    /// Record one painted image. Stub: the descriptor fields are filled in by the bake (#1332).
+    fn record_image(
+        &mut self,
+        name: Option<String>,
+        ctm: &Matrix,
+        operator: &str,
+        _stream: Option<&Object>,
+    ) -> Result<(), PdfVectorError> {
+        self.images.push(PdfImagePlacement {
+            name,
+            ctm: ctm.0,
+            width: None,
+            height: None,
+            bits_per_component: None,
+            colour_space: None,
+            decode: None,
+            image_mask: false,
+            smask: false,
+            filters: Vec::new(),
+            active_clips: self.clips.clone(),
+            soft_masked: self.soft_mask,
+            fill_colour: [0, 0, 0],
+            provenance: PdfProvenance {
+                page: self.page,
+                operator: operator.to_string(),
+                form_path: self.form_path.clone(),
+                sequence: self.out.len() as u64,
+            },
+            raw: None,
+        });
+        Ok(())
+    }
+
     fn do_xobject(
         &mut self,
         op: &Operation,
@@ -1276,11 +1365,8 @@ impl Run<'_> {
                 .and_then(|s| s.as_name().ok())
                 .is_some_and(|n| n == b"Image");
             if is_image {
-                self.images.push(PdfImagePlacement {
-                    name: Some(String::from_utf8_lossy(name).into_owned()),
-                    form_path: self.form_path.clone(),
-                    ctm: ctm.0,
-                });
+                let name = String::from_utf8_lossy(name).into_owned();
+                self.record_image(Some(name), ctm, "Do", Some(&Object::Stream(xobj.clone())))?;
             }
             return Ok(());
         }

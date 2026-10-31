@@ -95,7 +95,7 @@ fn an_image_inside_a_form_carries_the_form_path_and_the_form_matrix() {
         Some("q 10 0 0 10 0 0 cm /Im1 Do Q"),
     ));
     assert_eq!(p.images.len(), 1);
-    assert_eq!(p.images[0].form_path, vec!["Fm".to_string()]);
+    assert_eq!(p.images[0].provenance.form_path, vec!["Fm".to_string()]);
     // Form /Matrix (scale 2) then the page's translate, then the cm inside the form.
     assert_eq!(p.images[0].ctm, [20.0, 0.0, 0.0, 20.0, 10.0, 10.0]);
 }
