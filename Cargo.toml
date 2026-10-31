@@ -429,7 +429,9 @@ thiserror = "2"
 # `lzw` and `deflate` features are declared, the exact codecs the encoder
 # drives; feature unification with `image` (which pulls the crate's full
 # default set) keeps the decoder able to read fax/jpeg pages at runtime.
-tiff = { version = "0.10.3", default-features = false, features = [
+# The pin follows `image`'s own `tiff` minor (0.11 for `image` 0.25.10), so
+# one copy resolves; at 0.10.3 the graph carried two (#1367).
+tiff = { version = "0.11.3", default-features = false, features = [
 	"lzw",
 	"deflate",
 ] }

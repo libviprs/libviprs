@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **One `tiff` in the graph** (issue #1367). The direct `tiff` pin moves from 0.10.3 to 0.11.3 so it
+  matches the copy `image` 0.25.10 already pulls (with its default `fax` decoder). Before, every
+  cell resolved both. `dependency_policy` now asserts exactly one `tiff` per cell. `tiff` 0.11 reads
+  RGB+extra TIFFs itself, so the unit test that pinned its refusal is gone; the decode stays byte-exact.
+
 ### Added
 
 - **1-bit tiles for bilevel PDF images** (issue #1332, RL2.1 of EPIC R-L). `RasterPyramidOptions`
