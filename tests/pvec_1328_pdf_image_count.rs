@@ -62,7 +62,7 @@ fn page(bytes: &[u8]) -> PdfVectorPage {
     extract_page_paths_from_bytes(bytes, 1, &PdfVectorLimits::default()).unwrap()
 }
 
-const INLINE: &str = "BI /W 2 /H 2 /CS /G /BPC 8 ID \u{1}\u{2}\u{3}\u{4} EI";
+const INLINE: &str = "BI /W 2 /H 2 /CS /Gray /BPC 8 ID \u{1}\u{2}\u{3}\u{4} EI";
 
 #[test]
 fn n_image_xobjects_and_m_inline_images_are_counted_with_their_ctms() {

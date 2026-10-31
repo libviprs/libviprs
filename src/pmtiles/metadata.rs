@@ -31,7 +31,27 @@
 //! the key visibly ours, so a reader that does not know libviprs can skip it
 //! without wondering whether it was supposed to mean something.
 //!
-//! Two of those fields are types this crate already has:
+//! # The georeference (`geo_transform`)
+//!
+//! When the run is given the source raster's pixel to geographic transform
+//! ([`PmTilesSinkBuilder::geo_transform`](crate::sink_pmtiles::PmTilesSinkBuilder::geo_transform)),
+//! the object carries it under `geo_transform`:
+//!
+//! ```text
+//! "geo_transform": { "coefficients": [a, b, c, d, e, f], "pixel_origin": "corner" }
+//!   geo_x = a*px + b*py + c        geo_y = d*px + e*py + f
+//! ```
+//!
+//! Six JSON numbers in [`GeoTransform`] order, read back bit for bit. `pixel_origin` is `corner`
+//! (GDAL's `PixelIsArea`, `(0, 0)` is the top-left corner of the first pixel) or `centre` (a
+//! world file or `PixelIsPoint`, half a pixel in); an origin this build does not know is a parse
+//! error, never a guess. No CRS is stored with it, and the header bounds still default to the
+//! whole world: the transform describes the **source raster**, and a consumer that needs the
+//! archive's own placement composes it with the drawing's calibration
+//! ([`crate::pvec::raster_placement`]). An archive written without one has no key and reads as
+//! before ([`Reader::geo_transform`](crate::pmtiles::Reader::geo_transform) answers `None`).
+//!
+//! Two of the other fields are types this crate already has:
 //! [`SourceMetadata`] and
 //! [`GenerationSettings`], the same ones
 //! `manifest.json` uses. Reusing them is deliberate: the manifest and this
@@ -43,6 +63,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::geo::{GeoTransform, PixelOrigin};
 use crate::manifest::{GenerationSettings, SourceMetadata};
 use crate::pmtiles::PmTilesError;
 
@@ -204,6 +225,42 @@ impl Metadata {
     }
 }
 
+/// The pixel to geographic transform of the source raster, as the archive stores it
+/// (issue #1328, option D' of ADR 0018 in libviprs/pvec).
+///
+/// `coefficients` are `[a, b, c, d, e, f]` in the order [`GeoTransform`] documents:
+/// `geo_x = a*px + b*py + c`, `geo_y = d*px + e*py + f`. They are JSON numbers and a reader
+/// gets the same bits back (a non-finite coefficient cannot be written, the sink refuses it).
+/// `pixel_origin` names where `(0, 0)` sits, so a consumer never has to guess a half pixel. The
+/// transform describes the **source raster** at level `max_zoom`; no CRS is stored with it.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct GeoTransformMetadata {
+    /// `[a, b, c, d, e, f]`.
+    pub coefficients: [f64; 6],
+    /// Where the pixel origin is.
+    pub pixel_origin: PixelOrigin,
+}
+
+impl GeoTransformMetadata {
+    /// The record for `transform` under `pixel_origin`.
+    #[must_use]
+    pub fn new(transform: GeoTransform, pixel_origin: PixelOrigin) -> Self {
+        let GeoTransform { a, b, c, d, e, f } = transform;
+        Self {
+            coefficients: [a, b, c, d, e, f],
+            pixel_origin,
+        }
+    }
+
+    /// The stored coefficients as a [`GeoTransform`], bit for bit.
+    #[must_use]
+    pub fn transform(&self) -> GeoTransform {
+        let [a, b, c, d, e, f] = self.coefficients;
+        GeoTransform::new(a, b, c, d, e, f)
+    }
+}
+
 /// What libviprs records about the pyramid it produced.
 ///
 /// # Examples
@@ -239,6 +296,11 @@ pub struct LibviprsMetadata {
     /// encoding, concurrency, background colour and blank-tile strategy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation: Option<GenerationSettings>,
+    /// The source raster's pixel to geographic transform, when the run was given one. See
+    /// [`GeoTransformMetadata`]. Absent in an archive written without one, which reads as
+    /// before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geo_transform: Option<GeoTransformMetadata>,
     /// Anything a later libviprs wrote that this build does not know. Kept for
     /// the same reason [`Metadata::extra`] is.
     #[serde(flatten)]
@@ -260,6 +322,7 @@ impl Default for LibviprsMetadata {
             coordinate_convention: COORDINATE_CONVENTION.to_string(),
             source: None,
             generation: None,
+            geo_transform: None,
             extra: serde_json::Map::new(),
         }
     }

@@ -115,7 +115,7 @@ pub mod writer;
 
 pub use directory::Entry;
 pub use header::{Compression, Header, TileType};
-pub use metadata::{LibviprsMetadata, Metadata};
+pub use metadata::{GeoTransformMetadata, LibviprsMetadata, Metadata};
 #[cfg(feature = "object-store-sink")]
 #[cfg_attr(docsrs, doc(cfg(feature = "object-store-sink")))]
 pub use range::ObjectStoreRangeReader;

@@ -80,10 +80,13 @@ use std::sync::Mutex;
 
 use crate::dedupe::{DedupeStrategy, content_digest_for};
 use crate::engine::EngineConfig;
+use crate::geo::{GeoTransform, PixelOrigin};
 use crate::pixel::PixelFormat;
 use crate::planner::{Layout, PyramidPlan, TileCoord};
 use crate::pmtiles::writer::{Writer, WriterOptions};
-use crate::pmtiles::{Compression, Header, LibviprsMetadata, Metadata, PmTilesError, TileType};
+use crate::pmtiles::{
+    Compression, GeoTransformMetadata, Header, LibviprsMetadata, Metadata, PmTilesError, TileType,
+};
 use crate::resume::{ResumeMode, RunLock};
 use crate::sink::{EmissionOrder, SinkError, Tile, TileFormat, TileSink, encode_jpeg, encode_png};
 
@@ -194,6 +197,9 @@ pub struct PmTilesSink {
     /// Captured by [`TileSink::record_engine_config`], spent when the writer
     /// opens.
     engine_config: Mutex<Option<EngineConfig>>,
+    /// The source raster's pixel to geographic transform, stamped into `vnd.libviprs`
+    /// (issue #1328). Set by [`PmTilesSinkBuilder::geo_transform`].
+    geo_transform: Option<GeoTransformMetadata>,
     /// The run's dedupe strategy, which decides the digest algorithm.
     ///
     /// Used for the digest, never for the decision. See the module docs. It is
@@ -252,6 +258,7 @@ impl PmTilesSink {
             options: None,
             resume_mode: ResumeMode::Overwrite,
             ordered_emission: false,
+            geo_transform: None,
         }
     }
 
@@ -375,7 +382,9 @@ impl PmTilesSink {
             bytes_hash: config.as_ref().and_then(|c| c.source_content_hash.clone()),
         };
 
-        metadata.vnd_libviprs = Some(LibviprsMetadata::new(source, generation));
+        let mut vnd = LibviprsMetadata::new(source, generation);
+        vnd.geo_transform = self.geo_transform;
+        metadata.vnd_libviprs = Some(vnd);
         if metadata.name.is_none() {
             metadata.name = self
                 .out_path
@@ -438,9 +447,21 @@ pub struct PmTilesSinkBuilder {
     options: Option<WriterOptions>,
     resume_mode: ResumeMode,
     ordered_emission: bool,
+    geo_transform: Option<GeoTransformMetadata>,
 }
 
 impl PmTilesSinkBuilder {
+    /// Record the source raster's pixel to geographic transform in the archive's `vnd.libviprs`
+    /// metadata (issue #1328), with the pixel origin convention it was written under.
+    ///
+    /// Without this the archive carries no georeference at all: the header bounds default to the
+    /// whole world and nothing downstream can tell where the raster sits. A non-finite
+    /// coefficient is refused by [`build`](Self::build), since JSON has no way to hold it.
+    pub fn geo_transform(mut self, transform: GeoTransform, pixel_origin: PixelOrigin) -> Self {
+        self.geo_transform = Some(GeoTransformMetadata::new(transform, pixel_origin));
+        self
+    }
+
     /// Attach the pyramid plan. Required.
     pub fn plan(mut self, plan: PyramidPlan) -> Self {
         self.plan = Some(plan);
@@ -591,6 +612,15 @@ impl PmTilesSinkBuilder {
                 });
             }
         }
+        if let Some(geo) = &self.geo_transform
+            && let Some(i) = geo.coefficients.iter().position(|c| !c.is_finite())
+        {
+            return Err(SinkError::Unsupported(format!(
+                "geo transform coefficient {i} is {}, and the metadata is JSON, which \
+                 cannot hold a non-finite number",
+                geo.coefficients[i]
+            )));
+        }
         if !layout_is_zxy(plan.layout) {
             return Err(SinkError::Unsupported(format!(
                 "{:?} layout is not addressed by (z, x, y), so it has no PMTiles \
@@ -622,6 +652,7 @@ impl PmTilesSinkBuilder {
             plan,
             tile_format: self.tile_format,
             options,
+            geo_transform: self.geo_transform,
             writer: Mutex::new(WriterState::Pending),
             engine_config: Mutex::new(None),
             dedupe_strategy: Mutex::new(DedupeStrategy::default()),

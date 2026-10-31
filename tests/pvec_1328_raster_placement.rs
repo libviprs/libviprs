@@ -52,14 +52,14 @@ fn the_vector_composes_to_six_coefficients_bit_for_bit() {
 fn the_permutation_is_a_b_d_e_c_f_and_not_the_identity() {
     // A pure translation in pixel space with distinct linear entries, identity calibration:
     // the result must put libviprs's (c, f) in the last two slots and (d, e) in slots 2 and 3.
-    let p = GeoTransform::new(1.0, 2.0, 30.0, 4.0, 8.0, 60.0);
+    let p = GeoTransform::new(1.0, 2.0, 30.0, 3.0, 8.0, 60.0);
     let identity = SourceCalibration::Affine {
         native_crs: "X".to_string(),
         metres_to_native: GeoTransform::new(1.0, 0.0, 0.0, 0.0, 1.0, 0.0),
         metres_per_unit: 1.0,
     };
     let got = pixel_to_source(&p, PixelOrigin::Corner, "X", &identity).unwrap();
-    assert_eq!(bits(got), bits([1.0, 2.0, 4.0, 8.0, 30.0, 60.0]));
+    assert_eq!(bits(got), bits([1.0, 2.0, 3.0, 8.0, 30.0, 60.0]));
 }
 
 #[test]

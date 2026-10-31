@@ -115,7 +115,8 @@ use crate::pmtiles::directory::deserialize_entries;
 use crate::pmtiles::header::HEADER_BYTES;
 use crate::pmtiles::writer::DEFAULT_LEAF_ENTRIES;
 use crate::pmtiles::{
-    Entry, FileRangeReader, Header, Metadata, PmTilesError, RangeReader, TileType, zxy_to_tileid,
+    Entry, FileRangeReader, GeoTransformMetadata, Header, Metadata, PmTilesError, RangeReader,
+    TileType, zxy_to_tileid,
 };
 
 /// The furthest byte the root directory may reach.
@@ -439,6 +440,19 @@ impl<R: RangeReader> Reader<R> {
         }
         let parsed = self.load_metadata()?;
         Ok(self.metadata.get_or_init(|| parsed))
+    }
+
+    /// The source raster's pixel to geographic transform, when the archive carries one
+    /// (issue #1328).
+    ///
+    /// `None` for a foreign archive and for a libviprs archive written without a transform;
+    /// the header bounds are not a substitute, they default to the whole world.
+    pub fn geo_transform(&self) -> Result<Option<&GeoTransformMetadata>, PmTilesError> {
+        Ok(self
+            .metadata()?
+            .vnd_libviprs
+            .as_ref()
+            .and_then(|v| v.geo_transform.as_ref()))
     }
 
     /// Whether the archive holds `(z, x, y)`.

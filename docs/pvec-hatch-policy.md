@@ -23,6 +23,9 @@ Two things this task depends on are not in the tree yet, and I did not fake eith
 | PDF `f* B* b*` (even-odd) | geometry only | `fill-geometry-only-even-odd` | `IgnoredByPolicy` (the fill, not the geometry) | 3 in the test stream `f* B* b*` |
 | PDF `sh` shading | ignored, counted | `fill-shading-requires-extension` | `RequiresExtension` | 2 in the test stream |
 | PDF `/Pattern` colour (`scn`, `SCN` with a name) | ignored, counted | `fill-pattern-requires-extension` | `RequiresExtension` | 2 in the test stream |
+| PDF image XObject (`Do` of an `/Image`) | counted with its CTM, no placement | `image-pdf-xobject-not-placed` | `RequiresExtension` | 2 in the #1328 test stream |
+| PDF inline image (`BI ... EI`) | counted with its CTM, no placement | `image-pdf-inline-not-placed` | `RequiresExtension` | 2 in the #1328 test stream |
+| DWG `IMAGE` | reported with its frame, no placement | `image-dwg-frame-only-not-placed` | `Unsupported` | 1 in the #1328 test drawing |
 
 ### DWG `HATCH`, `SOLID`, `TRACE`
 
@@ -41,6 +44,10 @@ The solid versus pattern split of `HATCH` needs the fill kind from the reader, w
 ### PDF shadings and patterns
 
 `sh` and a colour operator that selects a named pattern are counted (the extraction now keeps `shading_paints` and `pattern_selections` on `PdfVectorPage`) and reported as `RequiresExtension`. "Not in v1, counted and reported" was the expected answer here. Pattern rendering, gradient interpolation, transparency and blend modes stay out of scope.
+
+### Images (issue #1328)
+
+An image is not a fill, but the report that counts the fills is where "this page had pictures and none of them were carried" belongs, so the three image constructs sit in the same table. `PdfVectorPage::images` lists each painted image in content-stream order with the CTM that maps its unit square into page space (and the form path for an image inside a form). A DWG `IMAGE` arrives as `RawGeometry::Unmapped` with its frame in the reason (insertion point, U and V vectors, size in pixels, whether `SHOW_IMAGE` is set and whether its definition resolves as loaded). No placement is written for any of them yet: the PDF bake rules (`/SMask`, `/ImageMask`, `/Indexed`, ICC and Lab colour, `/Decode`, the CTM and the page flip) are the follow-up, and a DWG image has no pixels any reader here will fetch.
 
 ## Report
 
