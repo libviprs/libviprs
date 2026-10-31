@@ -36,6 +36,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::placement::{PlacementError, SourceCalibration, pixel_to_source};
+use super::tiles::{RasterTileError, check_tile_edge, check_tile_len, tile_tags};
 use crate::engine::{BlankTileStrategy, EngineConfig, EngineError};
 use crate::geo::{GeoTransform, PixelOrigin};
 use crate::pixel::PixelFormat;
@@ -43,9 +44,6 @@ use crate::planner::{Layout, PlannerError, PyramidPlan, PyramidPlanner};
 use crate::raster::Raster;
 use crate::sink::{SinkError, Tile, TileFormat, TileSink};
 use crate::{EngineBuilder, EngineKind};
-
-/// The tile edges PVec accepts (RASTER-01).
-pub const TILE_EDGES: [u32; 3] = [256, 512, 1024];
 
 /// The longest attribution, in bytes (RASTER-07).
 const MAX_ATTRIBUTION: usize = 255;
@@ -127,6 +125,9 @@ impl RasterPyramidOptions {
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum RasterPyramidError {
+    /// A tile PVec would refuse: LIMIT-15 on its stored length, or a row the legal table lacks.
+    #[error("a tile PVec would refuse")]
+    Tile(#[source] RasterTileError),
     /// The tile edge is not one PVec accepts.
     #[error("tile size {0} is not 256, 512 or 1024")]
     TileSize(u32),
@@ -160,7 +161,7 @@ pub enum RasterPyramidError {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RasterPyramidReport {
-    /// Pixel conversions, each named (`Gray16 -> Gray8`).
+    /// Pixel conversions, each named (`converted-bit-depth: Gray16 -> Gray8`).
     pub conversions: Vec<String>,
     /// Settings of the requested plan that were forced (`centre off`, `overlap 0`, `layout Google`).
     pub forced: Vec<String>,
@@ -288,9 +289,7 @@ pub fn produce_raster_pyramid(
     options: &RasterPyramidOptions,
 ) -> Result<RasterPyramid, RasterPyramidError> {
     let edge = requested.tile_size;
-    if !TILE_EDGES.contains(&edge) {
-        return Err(RasterPyramidError::TileSize(edge));
-    }
+    check_tile_edge(edge).map_err(|_| RasterPyramidError::TileSize(edge))?;
     if matches!(
         options.blank_strategy,
         BlankTileStrategy::Placeholder | BlankTileStrategy::PlaceholderWithTolerance { .. }
@@ -324,6 +323,15 @@ pub fn produce_raster_pyramid(
 
     let mut report = RasterPyramidReport::default();
     let (source, channels) = eight_bit(raster, codec, &mut report)?;
+    // The pair must be a row of the legal table. A JPEG tile of an RGBA source was flattened, so
+    // it is looked up as RGB.
+    let decoded = match channels {
+        RasterChannels::Gray => PixelFormat::Gray8,
+        RasterChannels::Rgb => PixelFormat::Rgb8,
+        RasterChannels::Rgba => PixelFormat::Rgba8,
+    };
+    let (codec, channels) =
+        tile_tags(options.tile_format, decoded, 8).map_err(RasterPyramidError::Tile)?;
 
     let (width, height) = (raster.width(), raster.height());
     let plan = PyramidPlanner::new(width, height, edge, 0, Layout::Google)
@@ -359,6 +367,10 @@ pub fn produce_raster_pyramid(
         .map_err(RasterPyramidError::Engine)?;
 
     let tiles = crate::poison::recover(&collector.tiles).clone();
+    // LIMIT-15, before anything reaches PVec's writer.
+    for bytes in tiles.values() {
+        check_tile_len(edge, bytes.len()).map_err(RasterPyramidError::Tile)?;
+    }
     report.dropped_padding_tiles = collector.dropped.load(Ordering::Relaxed);
     let in_grid: u64 = plan
         .levels
@@ -434,7 +446,9 @@ fn eight_bit<'a>(
                 ((v * 255 + 32_767) / 65_535) as u8
             })
             .collect();
-        report.conversions.push(format!("{format:?} -> {target:?}"));
+        report
+            .conversions
+            .push(format!("converted-bit-depth: {format:?} -> {target:?}"));
         let mut converted = Raster::new(raster.width(), raster.height(), target, data)
             .map_err(|_| RasterPyramidError::PixelFormat(format))?;
         converted.carry_meta_from(raster);
