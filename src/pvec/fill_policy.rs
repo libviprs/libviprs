@@ -6,7 +6,7 @@
 //! point set: a fill either leaves the geometry it already has (the subpaths N5.2 extracts) or
 //! is counted and reported as not carried. Two things are deliberately not here yet. No fill
 //! component is emitted, because the component stream (N6.6) is not built, so the PDF rows
-//! decide "geometry only" and the winding rule stays on [`PdfPaintIntent`]. And no DWG hatch
+//! decide "geometry only" and the winding rule stays on [`PdfPaintIntent`](super::pdf_vector::PdfPaintIntent). And no DWG hatch
 //! boundary is kept: the provider maps neither `HATCH` nor `SOLID`, so both arrive as
 //! [`RawGeometry::Unmapped`] and are counted here.
 
@@ -34,11 +34,18 @@ pub enum FillConstruct {
     PdfShading,
     /// A PDF colour operator that selected a named pattern (tiling or shading).
     PdfPattern,
+    /// A PDF image XObject painted with `Do`. Counted with its CTM, no placement written (#1328).
+    PdfImageXObject,
+    /// A PDF inline image (`BI ... EI`). Counted with its CTM, no placement written (#1328).
+    PdfInlineImage,
+    /// A DWG `IMAGE`: reported with its frame, no pixels are fetched and no placement written
+    /// (#1328).
+    DwgImage,
 }
 
 impl FillConstruct {
     /// Every construct, in a fixed order.
-    pub const ALL: [FillConstruct; 7] = [
+    pub const ALL: [FillConstruct; 10] = [
         FillConstruct::DwgHatch,
         FillConstruct::DwgSolid,
         FillConstruct::DwgTrace,
@@ -46,6 +53,9 @@ impl FillConstruct {
         FillConstruct::PdfFillEvenOdd,
         FillConstruct::PdfShading,
         FillConstruct::PdfPattern,
+        FillConstruct::PdfImageXObject,
+        FillConstruct::PdfInlineImage,
+        FillConstruct::DwgImage,
     ];
 }
 
@@ -74,7 +84,7 @@ pub struct FillPolicyRow {
 }
 
 /// The decisions, one row per construct.
-pub const FILL_POLICY: [FillPolicyRow; 7] = [
+pub const FILL_POLICY: [FillPolicyRow; 10] = [
     FillPolicyRow {
         construct: FillConstruct::DwgHatch,
         decision: FillDecision::IgnoredCounted,
@@ -116,6 +126,24 @@ pub const FILL_POLICY: [FillPolicyRow; 7] = [
         decision: FillDecision::IgnoredCounted,
         bucket: FidelityClass::RequiresExtension,
         reason: "fill-pattern-requires-extension",
+    },
+    FillPolicyRow {
+        construct: FillConstruct::PdfImageXObject,
+        decision: FillDecision::IgnoredCounted,
+        bucket: FidelityClass::RequiresExtension,
+        reason: "image-pdf-xobject-not-placed",
+    },
+    FillPolicyRow {
+        construct: FillConstruct::PdfInlineImage,
+        decision: FillDecision::IgnoredCounted,
+        bucket: FidelityClass::RequiresExtension,
+        reason: "image-pdf-inline-not-placed",
+    },
+    FillPolicyRow {
+        construct: FillConstruct::DwgImage,
+        decision: FillDecision::IgnoredCounted,
+        bucket: FidelityClass::Unsupported,
+        reason: "image-dwg-frame-only-not-placed",
     },
 ];
 
@@ -180,6 +208,14 @@ impl FillReport {
             FillConstruct::PdfPattern,
             u64::from(page.pattern_selections),
         );
+        for image in &page.images {
+            let construct = if image.name.is_some() {
+                FillConstruct::PdfImageXObject
+            } else {
+                FillConstruct::PdfInlineImage
+            };
+            self.add(construct, 1);
+        }
     }
 
     /// Counts DWG entities the provider did not map, by class name.
@@ -192,6 +228,7 @@ impl FillReport {
                 "HATCH" => self.add(FillConstruct::DwgHatch, 1),
                 "SOLID" => self.add(FillConstruct::DwgSolid, 1),
                 "TRACE" => self.add(FillConstruct::DwgTrace, 1),
+                "IMAGE" => self.add(FillConstruct::DwgImage, 1),
                 _ => {}
             }
         }

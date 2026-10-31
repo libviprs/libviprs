@@ -95,9 +95,9 @@ pub use ordering::{
     canonical_cmp, order_entities,
 };
 pub use pdf_vector::{
-    PdfDash, PdfFillRule, PdfPaintIntent, PdfPathEntity, PdfPathSegment, PdfPoint, PdfProvenance,
-    PdfStrokeParams, PdfVectorError, PdfVectorLimits, PdfVectorPage, extract_page_paths,
-    extract_page_paths_from_bytes,
+    PdfDash, PdfFillRule, PdfImagePlacement, PdfPaintIntent, PdfPathEntity, PdfPathSegment,
+    PdfPoint, PdfProvenance, PdfStrokeParams, PdfVectorError, PdfVectorLimits, PdfVectorPage,
+    extract_page_paths, extract_page_paths_from_bytes,
 };
 pub use provider::{
     ArrayGrid, Availability, BlockRef, DwgProvider, EntityCursor, EntityFacts, EntityScope,

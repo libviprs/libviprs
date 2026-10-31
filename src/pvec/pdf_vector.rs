@@ -209,6 +209,26 @@ pub struct PdfVectorPage {
     /// Colour operators (`scn`, `SCN`) that selected a named pattern, counted and not
     /// interpreted (N5.6).
     pub pattern_selections: u32,
+    /// Images painted, in content-stream order, forms expanded in place (issue #1328).
+    pub images: Vec<PdfImagePlacement>,
+}
+
+/// One image painted by the page: an image XObject invoked with `Do`, or an inline image
+/// (`BI ... ID ... EI`). Counted with its placement, not decoded (issue #1328, R2.4).
+///
+/// The image is the unit square of image space, so [`ctm`](Self::ctm) is the whole map from that
+/// square into page space. No pixel is read and no bake rule (`/SMask`, `/Decode`, colour
+/// spaces) is applied; those are a follow-up, and the conversion report says no placement is
+/// written for a PDF image.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PdfImagePlacement {
+    /// The resource name an image XObject was invoked by, or `None` for an inline image.
+    pub name: Option<String>,
+    /// The Form XObject names invoked on the way, outermost first. Empty on the page itself.
+    pub form_path: Vec<String>,
+    /// `[a b c d e f]` in PDF's row-vector convention, page space (box origin removed and
+    /// `/Rotate` applied, like the path coordinates).
+    pub ctm: [f64; 6],
 }
 
 /// Why an extraction failed.
@@ -370,6 +390,7 @@ pub fn extract_page_paths_from_bytes(
         unbalanced: 0,
         shadings: 0,
         patterns: 0,
+        images: Vec::new(),
         form_path: Vec::new(),
         stack: Vec::new(),
         clips: Vec::new(),
@@ -393,6 +414,7 @@ pub fn extract_page_paths_from_bytes(
         text: run.text,
         shading_paints: run.shadings,
         pattern_selections: run.patterns,
+        images: run.images,
     })
 }
 
@@ -898,6 +920,7 @@ struct Run<'a> {
     unbalanced: u32,
     shadings: u32,
     patterns: u32,
+    images: Vec<PdfImagePlacement>,
     form_path: Vec<String>,
     /// Saved graphics states. Shared across forms so the bound covers the whole expansion.
     stack: Vec<Saved>,
@@ -1084,6 +1107,11 @@ impl Run<'_> {
                 // Text is omitted and counted (N5.5, docs/pvec-text-policy.md).
                 "Tj" | "TJ" | "'" | "\"" => self.text.record_pdf(&op.operator, self.font),
                 "sh" => self.shadings = self.shadings.saturating_add(1),
+                "BI" => self.images.push(PdfImagePlacement {
+                    name: None,
+                    form_path: self.form_path.clone(),
+                    ctm: ctm.0,
+                }),
                 "scn" | "SCN" => {
                     *self
                         .colour_operators
@@ -1241,6 +1269,19 @@ impl Run<'_> {
             .and_then(|s| s.as_name().ok())
             .is_some_and(|n| n == b"Form");
         if !is_form {
+            let is_image = xobj
+                .dict
+                .get(b"Subtype")
+                .ok()
+                .and_then(|s| s.as_name().ok())
+                .is_some_and(|n| n == b"Image");
+            if is_image {
+                self.images.push(PdfImagePlacement {
+                    name: Some(String::from_utf8_lossy(name).into_owned()),
+                    form_path: self.form_path.clone(),
+                    ctm: ctm.0,
+                });
+            }
             return Ok(());
         }
         let observed = depth + 1;

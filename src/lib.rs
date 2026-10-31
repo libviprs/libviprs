@@ -203,6 +203,7 @@ pub mod pyramid_reader;
 pub mod radiance;
 pub mod raster;
 pub(crate) mod raster_ops;
+pub mod raster_pvec;
 pub mod resample;
 pub mod resize;
 pub mod resume;
@@ -301,7 +302,7 @@ pub use foreign_stubs::{
 };
 pub use frames::{FrameDelay, LoopCount, PageLayout};
 pub use freqfilt::FreqfiltError;
-pub use geo::{GeoBounds, GeoCoord, GeoTransform, PixelCoord};
+pub use geo::{GeoBounds, GeoCoord, GeoTransform, PixelCoord, PixelOrigin};
 pub use histogram::HistogramError;
 // The imageio free functions are re-exported at the root (not just behind
 // the module path) because the ported tests import them from the crate

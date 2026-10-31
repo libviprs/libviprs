@@ -2128,3 +2128,123 @@ fn ordered_emission_keeps_no_more_tiles_in_flight_than_the_queue_allows() {
         "the positive control: a run that emitted nothing holds nothing"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Issue #1328 (R2.4, option D'): the GeoTransform in the archive
+// ---------------------------------------------------------------------------
+
+/// Coefficients picked so a decimal round trip that is not correctly rounded
+/// would show: `0.1`, a third, a tiny pixel size, a negative zero and a large
+/// easting. `-0.0` is here on purpose, the stored bits are the caller's.
+fn awkward_transform() -> libviprs::GeoTransform {
+    libviprs::GeoTransform::new(
+        0.1,
+        -0.0,
+        500_123.456_789_012_3,
+        1.0 / 3.0,
+        -2.5e-7,
+        4_999_999.999_999_9,
+    )
+}
+
+fn run_with_transform(
+    dir: &Path,
+    transform: Option<(libviprs::GeoTransform, libviprs::PixelOrigin)>,
+) -> PathBuf {
+    let plan = plan_for(512, 512, 256, Layout::Xyz);
+    let out = dir.join("geo.pmtiles");
+    let mut builder = PmTilesSink::builder(&out).plan(plan.clone());
+    if let Some((t, origin)) = transform {
+        builder = builder.geo_transform(t, origin);
+    }
+    let sink = builder.build().expect("the sink builds");
+    EngineBuilder::new(&gradient(512, 512), plan, sink)
+        .run()
+        .expect("the run succeeds");
+    out
+}
+
+#[test]
+#[cfg_attr(miri, ignore)] // writes an archive to a temp dir, which Miri isolation blocks
+fn issue_1328_the_archive_carries_the_geo_transform_bit_equal() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let t = awkward_transform();
+    let out = run_with_transform(dir.path(), Some((t, libviprs::PixelOrigin::Corner)));
+
+    let meta = walk_metadata(&out);
+    let stored = meta
+        .vnd_libviprs
+        .expect("the namespace is there")
+        .geo_transform
+        .expect("the transform was handed to the sink, so the archive carries it");
+    assert_eq!(stored.pixel_origin, libviprs::PixelOrigin::Corner);
+    let want = [t.a, t.b, t.c, t.d, t.e, t.f];
+    for (i, (got, want)) in stored.coefficients.iter().zip(want).enumerate() {
+        assert_eq!(
+            got.to_bits(),
+            want.to_bits(),
+            "coefficient {i} must be bit-equal"
+        );
+    }
+
+    // The reader exposes it too, without the caller walking the JSON.
+    let reader = libviprs::pmtiles::Reader::try_open(&out).expect("the archive opens");
+    let read = reader
+        .geo_transform()
+        .expect("the metadata parses")
+        .expect("the reader returns the stored transform");
+    assert_eq!(read, &stored);
+    let back = read.transform();
+    assert_eq!(
+        [back.a, back.b, back.c, back.d, back.e, back.f].map(f64::to_bits),
+        want.map(f64::to_bits)
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)] // writes an archive to a temp dir, which Miri isolation blocks
+fn issue_1328_the_json_names_the_coefficient_order_and_the_pixel_origin() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = run_with_transform(
+        dir.path(),
+        Some((
+            libviprs::GeoTransform::new(2.0, 0.0, 10.0, 0.0, -2.0, 20.0),
+            libviprs::PixelOrigin::Centre,
+        )),
+    );
+    let json = walk_metadata_json(&out);
+    let geo = &json["vnd.libviprs"]["geo_transform"];
+    assert_eq!(
+        geo["coefficients"],
+        serde_json::json!([2.0, 0.0, 10.0, 0.0, -2.0, 20.0])
+    );
+    assert_eq!(geo["pixel_origin"], "centre");
+}
+
+#[test]
+#[cfg_attr(miri, ignore)] // writes an archive to a temp dir, which Miri isolation blocks
+fn issue_1328_an_archive_without_a_transform_reads_as_before() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = run_with_transform(dir.path(), None);
+    let json = walk_metadata_json(&out);
+    assert!(
+        json["vnd.libviprs"].get("geo_transform").is_none(),
+        "no transform given, so no key written: {json}"
+    );
+    let reader = libviprs::pmtiles::Reader::try_open(&out).expect("the archive opens");
+    assert_eq!(reader.geo_transform().expect("parses"), None);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)] // writes an archive to a temp dir, which Miri isolation blocks
+fn issue_1328_a_non_finite_transform_is_refused_when_the_sink_is_built() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let plan = plan_for(256, 256, 256, Layout::Xyz);
+    let bad = libviprs::GeoTransform::new(f64::NAN, 0.0, 0.0, 0.0, 1.0, 0.0);
+    let err = PmTilesSink::builder(dir.path().join("bad.pmtiles"))
+        .plan(plan)
+        .geo_transform(bad, libviprs::PixelOrigin::Corner)
+        .build()
+        .expect_err("JSON cannot hold a NaN, so the sink must say no up front");
+    assert!(matches!(err, SinkError::Unsupported(_)), "got {err:?}");
+}

@@ -660,3 +660,38 @@ fn assert_page_sizing_non_exhaustive(v: &PageSizing) {
         _ => {}
     }
 }
+
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_placement_error_non_exhaustive(v: &libviprs::raster_pvec::placement::PlacementError) {
+    use libviprs::raster_pvec::placement::PlacementError as E;
+    match v {
+        E::CrsMismatch { .. } => {}
+        E::ProjectiveCalibration => {}
+        E::SingularCalibration => {}
+        E::SingularRaster => {}
+        E::InvalidUnitScale(_) => {}
+        E::NonFinite => {}
+        _ => {}
+    }
+}
+
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_raster_pyramid_error_non_exhaustive(
+    v: &libviprs::raster_pvec::pyramid::RasterPyramidError,
+) {
+    use libviprs::raster_pvec::pyramid::RasterPyramidError as E;
+    match v {
+        E::TileSize(_) => {}
+        E::PlaceholderBlanks => {}
+        E::RawTiles => {}
+        E::PixelFormat(_) => {}
+        E::Attribution(_) => {}
+        E::Placement(_) => {}
+        E::NonFinitePlacement => {}
+        E::Plan(_) => {}
+        E::Engine(_) => {}
+        _ => {}
+    }
+}

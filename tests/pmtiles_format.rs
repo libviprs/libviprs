@@ -1365,3 +1365,35 @@ fn the_leaf_golden_decodes_and_re_serialises_every_one_of_its_six_leaves() {
         "the archive is supposed to hold two distinct payloads"
     );
 }
+
+#[test]
+fn issue_1328_geo_transform_json_shape_is_pinned_and_older_archives_still_parse() {
+    // An archive written before the key existed reads with no transform.
+    let old = r#"{"vnd.libviprs":{"libviprs_meta_version":1,"libviprs_version":"1.0.0","coordinate_convention":"zxy"}}"#;
+    let meta = Metadata::try_from_json(old.as_bytes()).expect("old metadata parses");
+    assert!(
+        meta.vnd_libviprs
+            .expect("namespace")
+            .geo_transform
+            .is_none()
+    );
+
+    // The wire shape: six coefficients in libviprs order, the pixel origin named.
+    let new = r#"{"vnd.libviprs":{"libviprs_meta_version":1,"libviprs_version":"1.0.0","coordinate_convention":"zxy","geo_transform":{"coefficients":[0.5,0.0,100.0,0.0,-0.5,200.0],"pixel_origin":"corner"}}}"#;
+    let meta = Metadata::try_from_json(new.as_bytes()).expect("new metadata parses");
+    let geo = meta
+        .vnd_libviprs
+        .as_ref()
+        .unwrap()
+        .geo_transform
+        .as_ref()
+        .unwrap();
+    assert_eq!(geo.coefficients, [0.5, 0.0, 100.0, 0.0, -0.5, 200.0]);
+    assert_eq!(geo.pixel_origin, libviprs::PixelOrigin::Corner);
+    let again = String::from_utf8(meta.to_json().unwrap()).unwrap();
+    assert!(again.contains(r#""geo_transform":{"coefficients":[0.5,0.0,100.0,0.0,-0.5,200.0],"pixel_origin":"corner"}"#), "{again}");
+
+    // An origin this build does not know is a parse error, never a guess.
+    let odd = new.replace("corner", "somewhere");
+    assert!(Metadata::try_from_json(odd.as_bytes()).is_err());
+}

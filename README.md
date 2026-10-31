@@ -234,6 +234,7 @@ from here for exactly one commit.
 | `storage` | `PyramidStorage`: which storage a pyramid lands in, the output path that choice resolves to, and the layouts each one holds |
 | `pmtiles` | PMTiles v3 archive format: 127-byte header, Hilbert TileIDs, directories, metadata, ranged reads, and a streaming bounded-memory `Writer` |
 | `pvec` | The replaceable DWG provider traits for the analytic path (`DwgProvider`, `EntityCursor`, `RawEntity`, `ProviderCaps`, `InstancePath`); the acadrust provider is behind `dwg-acadrust` |
+| `raster_pvec` | A raster on its way into a PVec: `placement::pixel_to_source`, which composes the raster's pixel to source map from a stored `GeoTransform` and a calibration, and `pyramid::produce_raster_pyramid`, which cuts the tiles and placement fields a PVec raster stream stores (`docs/pvec-raster-producer.md`) |
 | `sink_pmtiles` | `PmTilesSink` writing a whole pyramid into one PMTiles v3 archive |
 | `pyramid_reader` | `PyramidReader` and its directory and PMTiles implementations, for reading a generated pyramid back whatever it was stored in |
 | `pyramid_migrate` | Converting a pyramid that already exists into a PMTiles archive, without going back to the source image |

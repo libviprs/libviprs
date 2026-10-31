@@ -57,6 +57,23 @@ pub struct GeoCoord {
     pub y: f64,
 }
 
+/// Where a [`GeoTransform`] puts the pixel origin.
+///
+/// GDAL's `PixelIsArea` convention (and a GeoTIFF without `PixelIsPoint`) puts `(0, 0)` at the
+/// top-left **corner** of the first pixel. A world file, and a GeoTIFF marked `PixelIsPoint`, put
+/// it at the **centre** of the first pixel, half a pixel further in. Writing the convention next
+/// to the six coefficients is what stops a consumer from guessing, and a guess is a half-pixel
+/// shift that still renders (issue #1328).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[non_exhaustive]
+pub enum PixelOrigin {
+    /// `(0, 0)` is the top-left corner of the first pixel.
+    Corner,
+    /// `(0, 0)` is the centre of the first pixel.
+    Centre,
+}
+
 /// An affine transform mapping pixel coordinates to geographic coordinates.
 ///
 /// The transform is:

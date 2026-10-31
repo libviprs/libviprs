@@ -603,6 +603,32 @@ impl AcadrustCursor<'_> {
                     Err(err) => unmapped(format!("an INSERT of {}: {err}", i.block_name)),
                 }
             }
+            // An IMAGE has no pixels any reader here will fetch (it names a path), so it is
+            // reported with its frame and no placement is written (issue #1328, ADR 0018).
+            EntityType::RasterImage(img) => {
+                let loaded = img
+                    .definition_handle
+                    .and_then(|h| self.doc.objects.get(&h))
+                    .is_some_and(|o| {
+                        matches!(o, acr::objects::ObjectType::ImageDefinition(d) if d.is_loaded)
+                    });
+                unmapped(format!(
+                    "IMAGE frame insert=({}, {}, {}) u=({}, {}, {}) v=({}, {}, {}) size=({}, {}) \
+                     show_image={} definition_loaded={loaded}; no placement is written",
+                    img.insertion_point.x,
+                    img.insertion_point.y,
+                    img.insertion_point.z,
+                    img.u_vector.x,
+                    img.u_vector.y,
+                    img.u_vector.z,
+                    img.v_vector.x,
+                    img.v_vector.y,
+                    img.v_vector.z,
+                    img.size.x,
+                    img.size.y,
+                    img.is_visible(),
+                ))
+            }
             _ => unmapped(format!("no mapping for {class_name}")),
         };
         let style = self.style_of(common);

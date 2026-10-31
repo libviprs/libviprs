@@ -422,6 +422,10 @@ annotated   fs-detected  tests/pmtiles_sink.rs::blank_tiles_are_stored_as_real_t
 annotated   fs-detected  tests/pmtiles_sink.rs::content_format_is_the_configured_format
 annotated   fs-detected  tests/pmtiles_sink.rs::duplicate_tiles_collapse_to_one_payload_on_the_default_strategy
 annotated   fs-detected  tests/pmtiles_sink.rs::finishing_twice_is_a_typed_error
+annotated   fs-detected  tests/pmtiles_sink.rs::issue_1328_a_non_finite_transform_is_refused_when_the_sink_is_built
+annotated   fs-detected  tests/pmtiles_sink.rs::issue_1328_an_archive_without_a_transform_reads_as_before
+annotated   fs-detected  tests/pmtiles_sink.rs::issue_1328_the_archive_carries_the_geo_transform_bit_equal
+annotated   fs-detected  tests/pmtiles_sink.rs::issue_1328_the_json_names_the_coefficient_order_and_the_pixel_origin
 annotated   fs-detected  tests/pmtiles_sink.rs::overwrite_leaves_the_unrelated_file_beside_the_archive_alone
 annotated   fs-detected  tests/pmtiles_sink.rs::raw_tiles_are_refused_because_the_format_cannot_describe_them
 annotated   fs-detected  tests/pmtiles_sink.rs::resume_is_refused_by_name
