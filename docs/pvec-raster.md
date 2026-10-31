@@ -68,6 +68,10 @@ and returns PVec's `Transform2` order `[a b c d tx ty]`. libviprs's `[a b c d e 
 
 Until the georeference hand-off of #1048 can hand libviprs a calibration, the calibration is an explicit argument (`--source-to-geo` on the commands below).
 
+## The PVec sink
+
+`sink_pvec::PvecSink` (feature `pvec-raster`) is the `TileSink` the commands drive. It streams a pyramid into a PVec writer in any emission order and from any number of workers, with the same artifact bytes whichever, and `finish_to` stages the artifact under a root you give it and renames it into place. PVec's writer holds the encoded pyramid, so the sink is not flat in memory the way the PMTiles sink is; the measured peak is in [pmtiles-benchmarks.md](pmtiles-benchmarks.md).
+
 ## PDF images
 
 `pvec::pdf_image::bake_page_images` turns the images of a PDF page into rasters. It decodes `DeviceGray`, `DeviceRGB` and `DeviceCMYK` at 1 to 16 bits, expands `/Indexed`, reads `/ICCBased` as the device space of its `/N`, converts `/CalGray`, `/CalRGB` and `/Lab` into sRGB, applies `/Decode`, paints `/ImageMask` in the fill colour, writes `/SMask` into alpha, and places the unit square through the CTM: `[A/w -C/h B/w -D/h C+E D+F]`. Clips become `visible_box` and alpha. A `DCTDecode` image is decoded and re-tiled, and the report says the tiles are a re-encode of a lossy source.
@@ -88,4 +92,4 @@ Three commands in `libviprs-cli` put this on the command line (libviprs/libviprs
 | `viprs pmtiles to-pvec` | passes a PMTiles archive into a `.pvec` byte for byte, with its stored `GeoTransform` |
 | `viprs pvec rasters` | lists the rasters of a `.pvec` |
 
-They are not released yet. This page will get their flags and one example each from the regenerated CLI reference when they land, and the sink that writes at bounded memory (libviprs/libviprs#1331) comes with them.
+They are not released yet. This page will get their flags and one example each from the regenerated CLI reference when they land.

@@ -341,9 +341,11 @@ fn only_the_semantic_crates_are_named_today() {
 }
 
 /// The PVec facade (`pvec_facade`, the renamed `pvec` crate; issue #1328) is the writer funnel
-/// for the raster stream, and one file is allowed to name it: `src/raster_pvec/container.rs`.
-/// Everything else in libviprs goes through that file, so the set of PVec writer calls
-/// libviprs makes is the set in that file.
+/// for the raster stream, and two files are allowed to name it: `src/raster_pvec/container.rs`
+/// (the whole-pyramid hand-off) and, since issue #1331, `src/sink_pvec.rs`, which holds the writer
+/// while the engine streams tiles into it and so cannot go through a function in the first file.
+/// Everything else in libviprs goes through those two, so the set of PVec writer calls libviprs
+/// makes is the set in them.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn the_facade_is_named_by_one_file_only() {
@@ -354,8 +356,11 @@ fn the_facade_is_named_by_one_file_only() {
             named_in.insert(f.strip_prefix(root()).unwrap().to_path_buf());
         }
     }
-    let want: std::collections::BTreeSet<PathBuf> =
-        [PathBuf::from("src/raster_pvec/container.rs")].into();
+    let want: std::collections::BTreeSet<PathBuf> = [
+        PathBuf::from("src/raster_pvec/container.rs"),
+        PathBuf::from("src/sink_pvec.rs"),
+    ]
+    .into();
     assert_eq!(named_in, want);
 }
 

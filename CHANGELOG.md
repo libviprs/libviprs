@@ -14,7 +14,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rows, the placement and its georeference composition, the PMTiles key for the stored
   `GeoTransform`, the PDF bake and refusals, and what a DWG `IMAGE` becomes. Its rules table is
   rendered from `raster_pvec::rules::RASTER_PRODUCER_RULES` and a test fails when the page drifts.
-  The CLI reference and the benchmark row wait for the commands and the sink they document.
+  The CLI reference and the benchmark row wait for the commands they document.
+- **The PVec sink** (issue #1331, RL1.3 of EPIC R-L, part of #1329). `sink_pvec::PvecSink` (feature
+  `pvec-raster`) is a `TileSink` that streams a raster pyramid into a PVec writer in any emission
+  order and from any number of workers, with the same artifact bytes whichever; `finish_to` stages
+  the artifact under a caller-supplied root and renames it into place. `skip_blanks` is applied in
+  the sink, because the streaming engines ignore the engine setting. `raster_pvec::pyramid::prepare_raster`
+  is the split of `produce_raster_pyramid` that decides everything but the tiles. The peak heap
+  against the PMTiles sink is measured in `docs/pmtiles-benchmarks.md`; PVec's writer holds the
+  encoded pyramid, so the sink is not flat in memory.
 - **PDF image placements** (issue #1332, RL2.1 of EPIC R-L, ADR 0018 in libviprs/pvec). The
   images of a PDF page now become PVec rasters: `pvec::pdf_image::bake_page_images` decodes each
   image XObject and inline image (`DeviceGray`, `DeviceRGB`, `DeviceCMYK` at 1 to 16 bits,

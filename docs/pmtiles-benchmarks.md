@@ -876,6 +876,19 @@ cannot quietly start paying for it again. The run:
 4 GiB profile: tile_data_length=4563402752 peak_heap_bytes=410369 bound=4425728
 ```
 
+## The PVec sink (issue #1331)
+
+`sink_pvec::PvecSink` streams a raster pyramid into a PVec artifact (`tests/pvec_1331_bounded_memory.rs`, ignored by default, run with `--release --ignored`). The numbers below are one run on MARS (native x86_64, rust 1.99.1, in a container) on the same synthetic A0 sheet for both sinks: 18,720 x 13,240 Gray8 (a 400 dpi A0 scan, a third of it photographic texture so the pyramid has a real size), 512 px tiles, the streaming engine with a 512 MiB budget. Peak is live heap above the baseline that holds the source, from a counting allocator. They are single runs, not a distribution, and the arm64 run has not been done.
+
+| sink | live heap peak | artifact | tiles | wall |
+|---|---|---|---|---|
+| PMTiles (staged temp file, atomic rename) | 360 MiB | 104 MiB | 1,308 (padding included) | 9.7 s |
+| PVec (`PvecSink`, then `finish_to`) | 560 MiB | 106 MiB | 1,308 | 9.3 s, 141 tiles/s |
+
+The PVec sink is **not** inside the engine's budget on this input. The pixel working set is the same 360 MiB for both, and PVec's writer then holds the encoded tiles until `finish` and builds the artifact in memory, which is about twice the artifact (200 MiB here) on top. The test pins that shape (the PVec peak is within the PMTiles peak plus three times the artifact plus 24 bytes a tile, and is never below the artifact) and does not pretend it is flat. Flat needs a writer that emits chunks as they fill, which is PVec's side (libviprs/pvec#218, #220).
+
+A C reference on the same pixels, one run of three on a warm file: GDAL 3.9.3 (`ghcr.io/osgeo/gdal:ubuntu-small-3.9.3`), `gdal_translate -of COG -co BLOCKSIZE=512 -co COMPRESS=DEFLATE -co PREDICTOR=2 -co OVERVIEWS=AUTO -co NUM_THREADS=1`, 2.1 to 2.5 s wall (27 s with a cold read), 404 MiB peak RSS, a 5 MiB file. It is faster and far smaller on this input, and it is not the same experiment: it writes DEFLATE strips with a horizontal predictor and not a PNG per tile, and the texture is a hash that the predictor flattens, so the sizes are not comparable and the 104 MiB of PNG is the cost of independently decodable tiles on this synthetic input. The libvips `dzsave` zip row and the `libviprs-bench` `storage` family row are not done (see the PR).
+
 ## Release readiness
 
 `cargo test --test pmtiles_release_readiness` keeps the four claims honest:

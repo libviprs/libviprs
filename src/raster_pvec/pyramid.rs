@@ -245,6 +245,36 @@ impl RasterPyramid {
     }
 }
 
+/// Encode one tile of the engine's Google grid for PVec, or `None` when it lies beyond its level's
+/// `cols` by `rows` and is pure padding. Shared by the collecting path and the streaming sink.
+pub(crate) fn cut_tile(
+    plan: &PyramidPlan,
+    format: TileFormat,
+    config: &Mutex<Option<EngineConfig>>,
+    tile: &Tile,
+) -> Result<Option<Vec<u8>>, SinkError> {
+    let c = tile.coord;
+    let level = plan
+        .levels
+        .get(c.level as usize)
+        .ok_or(SinkError::InvalidCoord { coord: c })?;
+    // The Google grid is a power of two on a side; past the image it is only padding.
+    if c.col >= level.width.div_ceil(plan.tile_size)
+        || c.row >= level.height.div_ceil(plan.tile_size)
+    {
+        return Ok(None);
+    }
+    Ok(Some(match format {
+        TileFormat::Png => crate::sink::encode_png(&tile.raster)?,
+        TileFormat::Jpeg { quality } => {
+            let background = crate::sink::background_from(config);
+            crate::sink::encode_jpeg(&tile.raster, quality, background)?
+        }
+        TileFormat::Webp => crate::sink::encode_webp(&tile.raster)?,
+        TileFormat::Raw => return Err(SinkError::Unsupported("raw tiles".to_string())),
+    }))
+}
+
 /// The sink the engine cuts into.
 struct Collector {
     plan: PyramidPlan,
@@ -256,29 +286,15 @@ struct Collector {
 
 impl TileSink for Collector {
     fn write_tile(&self, tile: &Tile) -> Result<(), SinkError> {
-        let c = tile.coord;
-        let level = self
-            .plan
-            .levels
-            .get(c.level as usize)
-            .ok_or(SinkError::InvalidCoord { coord: c })?;
-        // The Google grid is a power of two on a side; past the image it is only padding.
-        if c.col >= level.width.div_ceil(self.plan.tile_size)
-            || c.row >= level.height.div_ceil(self.plan.tile_size)
-        {
-            self.dropped.fetch_add(1, Ordering::Relaxed);
-            return Ok(());
-        }
-        let bytes = match self.format {
-            TileFormat::Png => crate::sink::encode_png(&tile.raster)?,
-            TileFormat::Jpeg { quality } => {
-                let background = crate::sink::background_from(&self.config);
-                crate::sink::encode_jpeg(&tile.raster, quality, background)?
+        match cut_tile(&self.plan, self.format, &self.config, tile)? {
+            Some(bytes) => {
+                let c = tile.coord;
+                crate::poison::recover(&self.tiles).insert((c.level, c.col, c.row), bytes);
             }
-            TileFormat::Webp => crate::sink::encode_webp(&tile.raster)?,
-            TileFormat::Raw => return Err(SinkError::Unsupported("raw tiles".to_string())),
-        };
-        crate::poison::recover(&self.tiles).insert((c.level, c.col, c.row), bytes);
+            None => {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+            }
+        }
         Ok(())
     }
 
@@ -287,7 +303,20 @@ impl TileSink for Collector {
     }
 }
 
-/// Cut `raster` into the pyramid PVec stores.
+/// A raster ready to be cut: the pyramid's placement fields and plan (no tiles yet), and the
+/// eight-bit samples the tiles will be cut from.
+#[derive(Debug)]
+pub struct PreparedRaster<'a> {
+    /// The placement fields, the plan and the report so far. [`RasterPyramid::tiles`] is empty.
+    pub pyramid: RasterPyramid,
+    /// The samples to cut: the caller's raster when it was already eight-bit, a converted copy
+    /// otherwise.
+    pub source: std::borrow::Cow<'a, Raster>,
+}
+
+/// Decide everything about the pyramid that does not need a tile: the checks, the placement, the
+/// plan, the conversions. [`produce_raster_pyramid`] cuts the tiles into memory from the result,
+/// and [`PvecSink`](crate::sink_pvec::PvecSink) streams them into a PVec writer.
 ///
 /// `requested` supplies the tile edge and the source size (they must match `raster`); its
 /// layout, centring and overlap are replaced as described in the module docs and the
@@ -298,11 +327,11 @@ impl TileSink for Collector {
 /// A [`RasterPyramidError`] names the rule: a tile edge outside 256, 512 and 1024, the placeholder
 /// blank strategy, raw tiles, a pixel format with no tile encoding, a bad attribution, or a
 /// placement that cannot be composed (the [`PlacementError`] is the `source()`).
-pub fn produce_raster_pyramid(
-    raster: &Raster,
+pub fn prepare_raster<'a>(
+    raster: &'a Raster,
     requested: &PyramidPlan,
     options: &RasterPyramidOptions,
-) -> Result<RasterPyramid, RasterPyramidError> {
+) -> Result<PreparedRaster<'a>, RasterPyramidError> {
     let edge = requested.tile_size;
     check_tile_edge(edge).map_err(|_| RasterPyramidError::TileSize(edge))?;
     if matches!(
@@ -366,6 +395,43 @@ pub fn produce_raster_pyramid(
             .push(format!("overlap {} -> 0", requested.overlap));
     }
 
+    let levels = u8::try_from(plan.levels.len()).expect("a u32 image has at most 32 levels");
+    Ok(PreparedRaster {
+        pyramid: RasterPyramid {
+            width,
+            height,
+            tile_edge: edge,
+            levels,
+            tile_codec: codec,
+            channels,
+            bit_depth: 8,
+            pixel_to_source,
+            visible_box: [0, 0, width, height],
+            band: RasterBand::Underlay,
+            source_digest: Sha256::digest(raster.data()).into(),
+            attribution: options.attribution.clone(),
+            plan,
+            report,
+            tiles: BTreeMap::new(),
+        },
+        source,
+    })
+}
+
+/// Cut `raster` into the pyramid PVec stores, in memory. For a pyramid too large to hold, stream
+/// it into a PVec writer with [`PvecSink`](crate::sink_pvec::PvecSink) instead.
+///
+/// `requested` and the errors are as for [`prepare_raster`], plus the engine's.
+pub fn produce_raster_pyramid(
+    raster: &Raster,
+    requested: &PyramidPlan,
+    options: &RasterPyramidOptions,
+) -> Result<RasterPyramid, RasterPyramidError> {
+    let PreparedRaster {
+        mut pyramid,
+        source,
+    } = prepare_raster(raster, requested, options)?;
+    let (plan, edge) = (pyramid.plan.clone(), pyramid.tile_edge);
     let collector = Collector {
         plan: plan.clone(),
         format: options.tile_format,
@@ -386,31 +452,16 @@ pub fn produce_raster_pyramid(
     for bytes in tiles.values() {
         check_tile_len(edge, bytes.len()).map_err(RasterPyramidError::Tile)?;
     }
-    report.dropped_padding_tiles = collector.dropped.load(Ordering::Relaxed);
     let in_grid: u64 = plan
         .levels
         .iter()
         .map(|l| u64::from(l.width.div_ceil(edge)) * u64::from(l.height.div_ceil(edge)))
         .sum();
-    report.not_stored_tiles = in_grid - tiles.len() as u64;
 
-    Ok(RasterPyramid {
-        width,
-        height,
-        tile_edge: edge,
-        levels: u8::try_from(plan.levels.len()).expect("a u32 image has at most 32 levels"),
-        tile_codec: codec,
-        channels,
-        bit_depth: 8,
-        pixel_to_source,
-        visible_box: [0, 0, width, height],
-        band: RasterBand::Underlay,
-        source_digest: Sha256::digest(raster.data()).into(),
-        attribution: options.attribution.clone(),
-        plan,
-        report,
-        tiles,
-    })
+    pyramid.report.dropped_padding_tiles = collector.dropped.load(Ordering::Relaxed);
+    pyramid.report.not_stored_tiles = in_grid - tiles.len() as u64;
+    pyramid.tiles = tiles;
+    Ok(pyramid)
 }
 
 /// RASTER-07: plain text, at most 255 bytes, no C0 or C1 controls, no U+2028 or U+2029 and no
