@@ -20,8 +20,10 @@
 //! * A 1-bit gray image with no alpha is cut into 1-bit PNG tiles (`bilevel-1-bit-tiles`).
 //! * Streams: no filter, `FlateDecode` (with the TIFF and PNG predictors), `DCTDecode` (decoded
 //!   and re-tiled, because the pyramid is a different grid; reported as a re-encode of a lossy
-//!   source) and Flate over DCT. `JPXDecode`, `JBIG2Decode`, `CCITTFaxDecode` and the rest are
-//!   refused by name.
+//!   source) and Flate over DCT. `JPXDecode`, `JBIG2Decode` and `CCITTFaxDecode` are refused as
+//!   `filter-not-enabled:<name>` (this build has no codec for them yet), and any other filter as
+//!   `unsupported-filter:<name>`. A codec that was tried and refused the stream is `decode-failed`.
+//!   [`PdfImageReport::written_by_filter`] counts the written images by their last filter.
 //! * Refused by name too: `/Separation`, `/DeviceN` and `/Pattern`, an image under a
 //!   graphics-state soft mask, and an image whose CTM is singular or not finite.
 //! * Placement: the unit square through the CTM, `x = A*u + C*v + E` with `(u, v) = (px/w,
@@ -141,9 +143,6 @@ pub enum PdfImageError {
     /// A stream could not be inflated.
     #[error("the image stream could not be inflated")]
     Pdf(#[source] PdfError),
-    /// A `DCTDecode` stream did not decode.
-    #[error("the JPEG did not decode")]
-    Source(#[source] SourceError),
     /// The baked samples do not make a raster.
     #[error("the baked samples are not a raster")]
     Raster(#[source] RasterError),
@@ -236,11 +235,9 @@ impl PdfImageError {
     #[must_use]
     pub fn reason(&self) -> String {
         match self {
-            Self::Decode(_)
-            | Self::Pdf(_)
-            | Self::Source(_)
-            | Self::Raster(_)
-            | Self::Filter { .. } => "decode-failed".to_string(),
+            Self::Decode(_) | Self::Pdf(_) | Self::Raster(_) | Self::Filter { .. } => {
+                "decode-failed".to_string()
+            }
             Self::TooLarge { .. } | Self::StreamTooLarge { .. } => "too-large".to_string(),
             Self::UnsupportedFilter(n) => format!("unsupported-filter:{n}"),
             Self::FilterNotEnabled { filter, .. } => format!("filter-not-enabled:{filter}"),
@@ -345,7 +342,7 @@ pub fn bake_page_images(page: &PdfVectorPage, options: &PdfImageOptions) -> PdfI
     };
     for (index, image) in page.images.iter().enumerate() {
         match bake_one(page, image, &painted, options) {
-            Ok((pyramid, notes)) => {
+            Ok((pyramid, notes, filter)) => {
                 let r = &mut bake.report;
                 r.written += 1;
                 for note in &notes {
@@ -360,6 +357,7 @@ pub fn bake_page_images(page: &PdfVectorPage, options: &PdfImageOptions) -> PdfI
                     };
                     *counter += 1;
                 }
+                *r.written_by_filter.entry(filter).or_insert(0) += 1;
                 bake.written.push(PdfBakedImage {
                     index,
                     pyramid,
@@ -380,7 +378,7 @@ fn bake_one(
     image: &PdfImagePlacement,
     painted: &[u64],
     options: &PdfImageOptions,
-) -> Result<(RasterPyramid, Vec<PdfImageNote>), PdfImageError> {
+) -> Result<(RasterPyramid, Vec<PdfImageNote>, String), PdfImageError> {
     if image.soft_masked {
         return Err(PdfImageError::GraphicsStateSoftMask);
     }
@@ -456,7 +454,7 @@ fn bake_one(
         pyramid.band = RasterBand::Underlay;
         notes.push(PdfImageNote::Interleaved);
     }
-    Ok((pyramid, notes))
+    Ok((pyramid, notes, decoded.filter))
 }
 
 /// `pixel -> page` composed with `page -> source`, `-0.0` normalised, and checked against NP-19:

@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The PDF filter seam** (issue #1362, follow-up 1/6 to #1332, part of #1329). The image decoder
+  now goes through `FilterInput`, `FilterOutput` and one `decode_filter` `match`, with a module per
+  codec under `src/pvec/pdf_filters/` (`dct` moved in, `ccitt`, `jbig2` and `jpx` are stubs). No
+  trait: it meets none of the no-pass-through tests with one implementation per codec. New:
+  `PdfImageError::FilterNotEnabled` and `PdfImageError::Filter(FilterError)`,
+  `PdfImageReport::written_by_filter`, `PdfVectorLimits::max_image_stream_bytes` (64 MiB, an image
+  over it is refused alone as `too-large`), one `DecodeLimits` derived from `max_pixels` in place of
+  the DCT arm's own default budget, and `/DecodeParms` arrays matched to their filter by position.
+  **Changed report keys:** `unsupported-filter:CCITTFaxDecode`, `unsupported-filter:JBIG2Decode` and
+  `unsupported-filter:JPXDecode` are now `filter-not-enabled:CCITTFaxDecode`,
+  `filter-not-enabled:JBIG2Decode` and `filter-not-enabled:JPXDecode`; every other filter keeps
+  `unsupported-filter:<name>`. `PdfImageError::Source` is gone, a bad JPEG is
+  `PdfImageError::Filter` (reason still `decode-failed`). Fuzz target `fuzz_pvec_pdf_image`.
+
 - **1-bit tiles for bilevel PDF images** (issue #1332, RL2.1 of EPIC R-L). `RasterPyramidOptions`
   takes `bilevel_threshold`, which cuts a gray PNG pyramid at one bit per pixel through
   `Raster::encode_png_bilevel` (the collecting path and `PvecSink` both honour it). `bake_page_images`
