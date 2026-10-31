@@ -13,12 +13,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   #1328, R2.4 of EPIC R, ADR 0018 in libviprs/pvec). `PmTilesSink` can now store the source
   raster's `GeoTransform` in `vnd.libviprs` (`PmTilesSinkBuilder::geo_transform`, six coefficients
   and a named pixel origin, bit-equal on the way back through `Reader::geo_transform`; an archive
-  without one reads as before), `pvec::raster_placement::pixel_to_source` composes the raster's
+  without one reads as before), `raster_pvec::placement::pixel_to_source` composes the raster's
   pixel to source map from that transform and a drawing calibration in PVec's `Transform2` order
   (a raster in another CRS or under a projective calibration is a typed refusal, never a
   resample), `PdfVectorPage::images` counts image XObjects and inline images with their CTMs, and
   a DWG `IMAGE` is reported as an `Unmapped` record carrying its frame, and
-  `pvec::raster_pyramid::produce_raster_pyramid` cuts a raster into the tiles and placement fields
+  `raster_pvec::pyramid::produce_raster_pyramid` cuts a raster into the tiles and placement fields
   a PVec raster stream stores (Google layout, centring and overlap forced off, padding tiles
   dropped, `skip_blanks` as a not-stored tile, Placeholder and Raw refused). No placement is written
   for a PDF or DWG image yet, and the hand-off to PVec's writer waits on libviprs/pvec#218. `serde_json` now builds with `float_roundtrip`.

@@ -2165,6 +2165,7 @@ fn run_with_transform(
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // writes an archive to a temp dir, which Miri isolation blocks
 fn issue_1328_the_archive_carries_the_geo_transform_bit_equal() {
     let dir = tempfile::tempdir().expect("tempdir");
     let t = awkward_transform();
@@ -2201,6 +2202,7 @@ fn issue_1328_the_archive_carries_the_geo_transform_bit_equal() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // writes an archive to a temp dir, which Miri isolation blocks
 fn issue_1328_the_json_names_the_coefficient_order_and_the_pixel_origin() {
     let dir = tempfile::tempdir().expect("tempdir");
     let out = run_with_transform(
@@ -2220,6 +2222,7 @@ fn issue_1328_the_json_names_the_coefficient_order_and_the_pixel_origin() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // writes an archive to a temp dir, which Miri isolation blocks
 fn issue_1328_an_archive_without_a_transform_reads_as_before() {
     let dir = tempfile::tempdir().expect("tempdir");
     let out = run_with_transform(dir.path(), None);
@@ -2233,6 +2236,7 @@ fn issue_1328_an_archive_without_a_transform_reads_as_before() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // writes an archive to a temp dir, which Miri isolation blocks
 fn issue_1328_a_non_finite_transform_is_refused_when_the_sink_is_built() {
     let dir = tempfile::tempdir().expect("tempdir");
     let plan = plan_for(256, 256, 256, Layout::Xyz);

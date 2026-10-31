@@ -6,7 +6,7 @@
 //! point set: a fill either leaves the geometry it already has (the subpaths N5.2 extracts) or
 //! is counted and reported as not carried. Two things are deliberately not here yet. No fill
 //! component is emitted, because the component stream (N6.6) is not built, so the PDF rows
-//! decide "geometry only" and the winding rule stays on [`PdfPaintIntent`]. And no DWG hatch
+//! decide "geometry only" and the winding rule stays on [`PdfPaintIntent`](super::pdf_vector::PdfPaintIntent). And no DWG hatch
 //! boundary is kept: the provider maps neither `HATCH` nor `SOLID`, so both arrive as
 //! [`RawGeometry::Unmapped`] and are counted here.
 

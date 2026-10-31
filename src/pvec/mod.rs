@@ -59,8 +59,6 @@ pub mod pdf_vector;
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
 pub mod provenance;
 pub mod provider;
-pub mod raster_placement;
-pub mod raster_pyramid;
 pub mod style;
 pub mod text_policy;
 #[cfg(feature = "pvec-normalized")]

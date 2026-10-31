@@ -203,6 +203,7 @@ pub mod pyramid_reader;
 pub mod radiance;
 pub mod raster;
 pub(crate) mod raster_ops;
+pub mod raster_pvec;
 pub mod resample;
 pub mod resize;
 pub mod resume;

@@ -103,7 +103,7 @@ pub enum PlacementError {
 /// # Examples
 ///
 /// ```
-/// use libviprs::pvec::raster_placement::{SourceCalibration, pixel_to_source};
+/// use libviprs::raster_pvec::placement::{SourceCalibration, pixel_to_source};
 /// use libviprs::{GeoTransform, PixelOrigin};
 ///
 /// // A 0.5 m pixel scan whose rows run down, in a drawing calibrated one to one.
@@ -115,7 +115,7 @@ pub enum PlacementError {
 /// };
 /// let m = pixel_to_source(&pixel_to_native, PixelOrigin::Corner, "EPSG:2056", &calibration)?;
 /// assert_eq!(m, [0.5, 0.0, 0.0, -0.5, 0.0, 100.0]);
-/// # Ok::<(), libviprs::pvec::raster_placement::PlacementError>(())
+/// # Ok::<(), libviprs::raster_pvec::placement::PlacementError>(())
 /// ```
 pub fn pixel_to_source(
     pixel_to_native: &GeoTransform,

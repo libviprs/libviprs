@@ -6,8 +6,8 @@
 
 use std::error::Error;
 
-use libviprs::pvec::raster_placement::{PlacementError, SourceCalibration};
-use libviprs::pvec::raster_pyramid::{
+use libviprs::raster_pvec::placement::{PlacementError, SourceCalibration};
+use libviprs::raster_pvec::pyramid::{
     RasterChannels, RasterCodec, RasterPlacement, RasterPyramidError, RasterPyramidOptions,
     produce_raster_pyramid,
 };

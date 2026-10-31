@@ -22,7 +22,7 @@
 //!   flattens alpha onto the background; each conversion is named in the report;
 //! * the placement is `[a b c d tx ty]` in PVec's `Transform2` order with `-0.0` normalised, either
 //!   given outright or composed from a stored `GeoTransform` and a calibration
-//!   ([`raster_placement`](super::raster_placement)), and `source_digest` is the SHA-256 of the
+//!   ([`placement`](super::placement)), and `source_digest` is the SHA-256 of the
 //!   source samples.
 //!
 //! Nothing is resampled to fit a placement, and a lossless tile decodes to exactly the pixels the
@@ -35,7 +35,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use super::raster_placement::{PlacementError, SourceCalibration, pixel_to_source};
+use super::placement::{PlacementError, SourceCalibration, pixel_to_source};
 use crate::engine::{BlankTileStrategy, EngineConfig, EngineError};
 use crate::geo::{GeoTransform, PixelOrigin};
 use crate::pixel::PixelFormat;

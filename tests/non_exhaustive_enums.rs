@@ -663,8 +663,8 @@ fn assert_page_sizing_non_exhaustive(v: &PageSizing) {
 
 #[deny(unreachable_patterns)]
 #[allow(dead_code)]
-fn assert_placement_error_non_exhaustive(v: &libviprs::pvec::raster_placement::PlacementError) {
-    use libviprs::pvec::raster_placement::PlacementError as E;
+fn assert_placement_error_non_exhaustive(v: &libviprs::raster_pvec::placement::PlacementError) {
+    use libviprs::raster_pvec::placement::PlacementError as E;
     match v {
         E::CrsMismatch { .. } => {}
         E::ProjectiveCalibration => {}
@@ -679,9 +679,9 @@ fn assert_placement_error_non_exhaustive(v: &libviprs::pvec::raster_placement::P
 #[deny(unreachable_patterns)]
 #[allow(dead_code)]
 fn assert_raster_pyramid_error_non_exhaustive(
-    v: &libviprs::pvec::raster_pyramid::RasterPyramidError,
+    v: &libviprs::raster_pvec::pyramid::RasterPyramidError,
 ) {
-    use libviprs::pvec::raster_pyramid::RasterPyramidError as E;
+    use libviprs::raster_pvec::pyramid::RasterPyramidError as E;
     match v {
         E::TileSize(_) => {}
         E::PlaceholderBlanks => {}

@@ -10,7 +10,7 @@
 
 use std::error::Error;
 
-use libviprs::pvec::raster_placement::{PlacementError, SourceCalibration, pixel_to_source};
+use libviprs::raster_pvec::placement::{PlacementError, SourceCalibration, pixel_to_source};
 use libviprs::{GeoTransform, PixelOrigin};
 
 /// P (pixel -> native), rotated and sheared:

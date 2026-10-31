@@ -48,7 +48,7 @@
 //! error, never a guess. No CRS is stored with it, and the header bounds still default to the
 //! whole world: the transform describes the **source raster**, and a consumer that needs the
 //! archive's own placement composes it with the drawing's calibration
-//! ([`crate::pvec::raster_placement`]). An archive written without one has no key and reads as
+//! ([`crate::raster_pvec::placement`]). An archive written without one has no key and reads as
 //! before ([`Reader::geo_transform`](crate::pmtiles::Reader::geo_transform) answers `None`).
 //!
 //! Two of the other fields are types this crate already has:
