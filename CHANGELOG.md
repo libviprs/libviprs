@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The producer rules page** (issue #1345, a slice of #1333, RL2.2 of EPIC R-L). `docs/pvec-raster.md`
+  lists what libviprs promises when it puts a raster into a PVec: the tile grid, the legal tile
+  rows, the placement and its georeference composition, the PMTiles key for the stored
+  `GeoTransform`, the PDF bake and refusals, and what a DWG `IMAGE` becomes. Its rules table is
+  rendered from `raster_pvec::rules::RASTER_PRODUCER_RULES` and a test fails when the page drifts.
+  The CLI reference and the benchmark row wait for the commands they document.
 - **The PVec sink** (issue #1331, RL1.3 of EPIC R-L, part of #1329). `sink_pvec::PvecSink` (feature
   `pvec-raster`) is a `TileSink` that streams a raster pyramid into a PVec writer in any emission
   order and from any number of workers, with the same artifact bytes whichever; `finish_to` stages
