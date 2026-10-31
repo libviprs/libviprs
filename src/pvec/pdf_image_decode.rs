@@ -75,7 +75,7 @@ pub(super) fn decode(image: &PdfImagePlacement, max_pixels: u64) -> Result<Decod
     };
 
     if let Ok(mask) = raw.dict.get(b"SMask") {
-        let alpha = soft_mask(mask, width, height)?;
+        let alpha = soft_mask(mask, width, height, max_pixels)?;
         out = with_alpha(out, &alpha);
     }
     if raw.dict.has(b"Mask") {
@@ -263,6 +263,9 @@ fn unpredict(dict: &Dictionary, data: Vec<u8>) -> Result<Vec<u8>, PdfImageError>
     let columns = usize::try_from(get(b"Columns", 1)).unwrap_or(1).max(1);
     let row = (columns * colors * pbpc as usize).div_ceil(8);
     let bpp = (colors * pbpc as usize).div_ceil(8).max(1);
+    if row == 0 {
+        return Err(bad("a predictor row of no bytes"));
+    }
     if predictor == 2 {
         if pbpc != 8 {
             return Err(bad("a TIFF predictor is read at 8 bits per component only"));
@@ -719,7 +722,12 @@ fn stencil(
 }
 
 /// The image's `/SMask` as one alpha byte per pixel of a `width` by `height` image.
-fn soft_mask(mask: &Object, width: u32, height: u32) -> Result<Vec<u8>, PdfImageError> {
+fn soft_mask(
+    mask: &Object,
+    width: u32,
+    height: u32,
+    max_pixels: u64,
+) -> Result<Vec<u8>, PdfImageError> {
     let Object::Stream(s) = mask else {
         return Err(bad("an /SMask that is not a stream"));
     };
@@ -733,6 +741,13 @@ fn soft_mask(mask: &Object, width: u32, height: u32) -> Result<Vec<u8>, PdfImage
             .ok_or_else(|| bad("a soft mask without /Width and /Height"))
     };
     let (mw, mh) = (dim(b"Width")?, dim(b"Height")?);
+    let pixels = u64::from(mw) * u64::from(mh);
+    if pixels > max_pixels {
+        return Err(PdfImageError::TooLarge {
+            pixels,
+            limit: max_pixels,
+        });
+    }
     let raw = RawImage {
         dict: s.dict.clone(),
         content: s.content.clone(),

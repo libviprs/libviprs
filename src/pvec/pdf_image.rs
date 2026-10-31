@@ -442,7 +442,12 @@ fn clip_plan(
     let mut bx = [0.0, 0.0, f64::from(w), f64::from(h)];
     let mut polygons = Vec::new();
     for seq in &image.active_clips {
-        let Some(entity) = page.entities.iter().find(|e| e.provenance.sequence == *seq) else {
+        // A sequence is the entity's index in the page, so this is a lookup and not a search.
+        let Some(entity) = usize::try_from(*seq)
+            .ok()
+            .and_then(|i| page.entities.get(i))
+            .filter(|e| e.provenance.sequence == *seq)
+        else {
             continue;
         };
         let rule = match entity.clip {
