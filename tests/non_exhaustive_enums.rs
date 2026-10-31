@@ -660,3 +660,18 @@ fn assert_page_sizing_non_exhaustive(v: &PageSizing) {
         _ => {}
     }
 }
+
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_placement_error_non_exhaustive(v: &libviprs::pvec::raster_placement::PlacementError) {
+    use libviprs::pvec::raster_placement::PlacementError as E;
+    match v {
+        E::CrsMismatch { .. } => {}
+        E::ProjectiveCalibration => {}
+        E::SingularCalibration => {}
+        E::SingularRaster => {}
+        E::InvalidUnitScale(_) => {}
+        E::NonFinite => {}
+        _ => {}
+    }
+}
