@@ -12,15 +12,21 @@ use libviprs::raster_pvec::placement::SourceCalibration;
 use libviprs::raster_pvec::pyramid::{
     RasterPlacement, RasterPyramid, RasterPyramidOptions, produce_raster_pyramid,
 };
-use libviprs::{GeoTransform, Layout, PixelFormat, PixelOrigin, PyramidPlanner, Raster, TileFormat};
+use libviprs::{
+    GeoTransform, Layout, PixelFormat, PixelOrigin, PyramidPlanner, Raster, TileFormat,
+};
 use pvec_facade::unstable::{PixelFormat as PvecChannels, TileCodec};
-use pvec_facade::{Bounds2, Manifest, PvecReader, PvecWriter};
+use pvec_facade::{Bounds2, Curve, EntityId, Manifest, PvecReader, PvecWriter};
+use pvec_geometry::{Point2, Polyline};
 use sha2::{Digest, Sha256};
 
 fn manifest() -> Manifest {
     Manifest {
         metres_per_unit: 1.0,
-        bounds: Bounds2 { min: [0.0, 0.0], max: [4000.0, 4000.0] },
+        bounds: Bounds2 {
+            min: [0.0, 0.0],
+            max: [4000.0, 4000.0],
+        },
         capabilities: Vec::new(),
         producer_id: "libviprs-1328".into(),
         producer_version: "1".into(),
@@ -34,7 +40,11 @@ fn scan(w: u32, h: u32, format: PixelFormat) -> Raster {
         for x in 0..w {
             for c in 0..bpp {
                 // The right third is flat so skip_blanks has something to leave out.
-                let v = if x > 2 * w / 3 { 255 } else { ((x * 5 + y * 11 + c as u32 * 31) % 250) as u8 };
+                let v = if x >= 2 * w / 3 {
+                    255
+                } else {
+                    ((x * 5 + y * 11 + c as u32 * 31) % 250) as u8
+                };
                 data.push(v);
             }
         }
@@ -43,7 +53,9 @@ fn scan(w: u32, h: u32, format: PixelFormat) -> Raster {
 }
 
 fn plan(w: u32, h: u32, edge: u32) -> libviprs::PyramidPlan {
-    PyramidPlanner::new(w, h, edge, 0, Layout::Google).unwrap().plan()
+    PyramidPlanner::new(w, h, edge, 0, Layout::Google)
+        .unwrap()
+        .plan()
 }
 
 /// The vector of docs/RASTER.md, composed from a GeoTransform and an identity calibration.
@@ -60,8 +72,24 @@ fn composed() -> RasterPlacement {
     }
 }
 
+/// An artifact needs at least one entity (WRT-01; scan-only sheets are out of v1, ADR 0018), so
+/// the sheet carries its footprint outline.
+fn outline(w: &mut PvecWriter) {
+    let ring = Polyline::new(vec![
+        Point2 { x: 0.0, y: 0.0 },
+        Point2 { x: 400.0, y: 0.0 },
+        Point2 { x: 400.0, y: 300.0 },
+        Point2 { x: 0.0, y: 300.0 },
+        Point2 { x: 0.0, y: 0.0 },
+    ])
+    .unwrap();
+    w.push(EntityId::new(0).unwrap(), &Curve::Polyline(ring))
+        .unwrap();
+}
+
 fn through_pvec(pyramids: &[RasterPyramid]) -> PvecReader {
     let mut w = PvecWriter::new(manifest()).unwrap();
+    outline(&mut w);
     write_rasters(&mut w, pyramids).unwrap();
     PvecReader::open(w.finish().unwrap()).unwrap()
 }
@@ -88,7 +116,10 @@ fn every_tile_comes_back_digest_equal_and_the_placement_bit_equal() {
     );
     assert_eq!((pl.width, pl.height), (w, h));
     assert_eq!(pl.visible_box, [0, 0, w, h]);
-    assert_eq!((pl.tile_edge, u32::from(pl.levels)), (256, u32::from(p.levels)));
+    assert_eq!(
+        (pl.tile_edge, u32::from(pl.levels)),
+        (256, u32::from(p.levels))
+    );
     assert_eq!(pl.tile_codec, TileCodec::Png);
     assert_eq!(pl.pixel_format, PvecChannels::Rgb);
     assert_eq!(pl.bit_depth, 8);
@@ -98,8 +129,15 @@ fn every_tile_comes_back_digest_equal_and_the_placement_bit_equal() {
     let id = pvec_facade::unstable::RasterId::new(0).unwrap();
     let mut seen = 0;
     for (level, col, row, bytes) in p.tiles() {
-        let got = reader.raster_tile(id, level, col, row).unwrap().expect("a stored tile");
-        assert_eq!(digest(&got), digest(bytes), "tile ({level},{col},{row}) is digest-equal");
+        let got = reader
+            .raster_tile(id, level, col, row)
+            .unwrap()
+            .expect("a stored tile");
+        assert_eq!(
+            digest(&got),
+            digest(bytes),
+            "tile ({level},{col},{row}) is digest-equal"
+        );
         assert_eq!(got, bytes);
         seen += 1;
     }
@@ -113,20 +151,34 @@ fn every_tile_comes_back_digest_equal_and_the_placement_bit_equal() {
 #[test]
 fn a_not_stored_tile_comes_back_as_nothing_and_a_lossless_tile_decodes_to_the_cut_pixels() {
     let (w, h) = (768u32, 256u32);
-    let mut o = RasterPyramidOptions::new(RasterPlacement::Explicit([1.0, 0.0, 0.0, -1.0, 0.0, 256.0]));
+    let mut o =
+        RasterPyramidOptions::new(RasterPlacement::Explicit([1.0, 0.0, 0.0, -1.0, 0.0, 256.0]));
     o.skip_blanks = true;
     let p = produce_raster_pyramid(&scan(w, h, PixelFormat::Gray8), &plan(w, h, 256), &o).unwrap();
     let reader = through_pvec(std::slice::from_ref(&p));
     let id = pvec_facade::unstable::RasterId::new(0).unwrap();
     let top = u32::from(p.levels) - 1;
 
-    assert!(p.tile(top, 2, 0).is_none(), "the flat right third was left out");
-    assert_eq!(reader.raster_tile(id, top, 2, 0).unwrap(), None, "a not-stored tile returns no bytes");
+    assert!(
+        p.tile(top, 2, 0).is_none(),
+        "the flat right third was left out"
+    );
+    assert_eq!(
+        reader.raster_tile(id, top, 2, 0).unwrap(),
+        None,
+        "a not-stored tile returns no bytes"
+    );
 
     let stored = reader.raster_tile(id, top, 0, 0).unwrap().expect("stored");
-    let ours = image::load_from_memory(p.tile(top, 0, 0).unwrap()).unwrap().to_luma8();
+    let ours = image::load_from_memory(p.tile(top, 0, 0).unwrap())
+        .unwrap()
+        .to_luma8();
     let theirs = image::load_from_memory(&stored).unwrap().to_luma8();
-    assert_eq!(ours.as_raw(), theirs.as_raw(), "the decoded pixels are the producer's");
+    assert_eq!(
+        ours.as_raw(),
+        theirs.as_raw(),
+        "the decoded pixels are the producer's"
+    );
 }
 
 #[test]
@@ -137,9 +189,12 @@ fn several_rasters_get_dense_ids_in_the_order_given() {
         &RasterPyramidOptions::new(RasterPlacement::Explicit([1.0, 0.0, 0.0, -1.0, 0.0, 200.0])),
     )
     .unwrap();
-    let mut o = RasterPyramidOptions::new(RasterPlacement::Explicit([2.0, 0.0, 0.0, -2.0, 50.0, 400.0]));
+    let mut o = RasterPyramidOptions::new(RasterPlacement::Explicit([
+        2.0, 0.0, 0.0, -2.0, 50.0, 400.0,
+    ]));
     o.tile_format = TileFormat::Jpeg { quality: 80 };
-    let b = produce_raster_pyramid(&scan(300, 200, PixelFormat::Rgb8), &plan(300, 200, 256), &o).unwrap();
+    let b = produce_raster_pyramid(&scan(300, 200, PixelFormat::Rgb8), &plan(300, 200, 256), &o)
+        .unwrap();
     let reader = through_pvec(&[a, b]);
     let placements = reader.raster_placements().unwrap();
     assert_eq!(placements.len(), 2);
@@ -150,15 +205,19 @@ fn several_rasters_get_dense_ids_in_the_order_given() {
 
 #[test]
 fn a_placement_pvec_refuses_is_a_typed_error_with_the_source_intact() {
-    // A singular map: RASTER-05 refuses it at write time, so the producer learns there and then.
+    // A singular map (rows [1 2 0] and [2 4 0], determinant 0): RASTER-05 refuses it at write
+    // time, so the producer learns there and then.
     let p = produce_raster_pyramid(
         &scan(300, 200, PixelFormat::Gray8),
         &plan(300, 200, 256),
-        &RasterPyramidOptions::new(RasterPlacement::Explicit([1.0, 2.0, 0.0, 2.0, 4.0, 0.0])),
+        &RasterPyramidOptions::new(RasterPlacement::Explicit([1.0, 2.0, 2.0, 4.0, 0.0, 0.0])),
     )
     .unwrap();
     let mut w = PvecWriter::new(manifest()).unwrap();
     let err = write_rasters(&mut w, &[p]).expect_err("a singular placement is refused");
     assert!(matches!(err, RasterWriteError::Pvec(_)), "{err:?}");
-    assert!(std::error::Error::source(&err).is_some(), "the PVec error is the source");
+    assert!(
+        std::error::Error::source(&err).is_some(),
+        "the PVec error is the source"
+    );
 }

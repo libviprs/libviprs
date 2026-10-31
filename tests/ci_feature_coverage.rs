@@ -273,6 +273,18 @@ const EXPECTED: &[(&str, Coverage)] = &[
         ),
     ),
     (
+        "pvec-raster",
+        cov(
+            true,
+            true,
+            true,
+            "gates src/raster_pvec/container.rs, the hand-off of a raster pyramid \
+             to PVec's writer (issue #1328), and tests/pvec_1328_raster_container.rs, \
+             4 tests; adds the PVec facade and the pvec crates under it (git \
+             dependencies, pure Rust, declaring rust-version 1.85)",
+        ),
+    ),
+    (
         "serde",
         cov(
             true,
