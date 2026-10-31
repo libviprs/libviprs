@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The PVec sink** (issue #1331, RL1.3 of EPIC R-L, part of #1329). `sink_pvec::PvecSink` (feature
+  `pvec-raster`) is a `TileSink` that streams a raster pyramid into a PVec writer in any emission
+  order and from any number of workers, with the same artifact bytes whichever; `finish_to` stages
+  the artifact under a caller-supplied root and renames it into place. `skip_blanks` is applied in
+  the sink, because the streaming engines ignore the engine setting. `raster_pvec::pyramid::prepare_raster`
+  is the split of `produce_raster_pyramid` that decides everything but the tiles. The peak heap
+  against the PMTiles sink is measured in `docs/pmtiles-benchmarks.md`; PVec's writer holds the
+  encoded pyramid, so the sink is not flat in memory.
 - **Tiles that pass PVec's sniffers** (issue #1330, RL1.1 of EPIC R-L, part of #1329).
   `Raster::encode_png_bilevel(threshold)` writes a 1-bit gray PNG from a `Gray8` raster (an encoding,
   not a new `PixelFormat`). `raster_pvec::tiles` holds the legal `(tile format, pixel format, bit depth)`

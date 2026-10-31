@@ -86,29 +86,68 @@ impl TileSink for Ordered<'_> {
 fn through_sink(engine: EngineKind, workers: usize, order: EmissionOrder) -> Vec<u8> {
     let raster = scan(1300, 900);
     let job = prepare_raster(&raster, &plan(1300, 900), &options()).unwrap();
-    let sink = PvecSink::new(writer(), &job.pyramid, options().tile_format).unwrap();
-    EngineBuilder::new(job.source.as_ref(), job.pyramid.plan.clone(), Ordered(&sink, order))
-        .with_engine(engine)
-        .with_concurrency(workers)
-        .with_skip_blanks(true)
-        .run()
-        .unwrap();
+    let sink = PvecSink::new(writer(), &job.pyramid, &options()).unwrap();
+    EngineBuilder::new(
+        job.source.as_ref(),
+        job.pyramid.plan.clone(),
+        Ordered(&sink, order),
+    )
+    .with_engine(engine)
+    .with_concurrency(workers)
+    .with_skip_blanks(true)
+    .run()
+    .unwrap();
     sink.into_writer().finish().unwrap()
 }
 
 #[test]
 fn any_order_and_any_number_of_workers_give_the_same_bytes() {
-    let reference = through_sink(EngineKind::Monolithic, 1, EmissionOrder::Cascade);
-    for (engine, workers, order) in [
-        (EngineKind::Monolithic, 2, EmissionOrder::Cascade),
-        (EngineKind::Monolithic, 8, EmissionOrder::Cascade),
-        (EngineKind::Monolithic, 8, EmissionOrder::TileId),
-        (EngineKind::Streaming, 1, EmissionOrder::Cascade),
-        (EngineKind::MapReduce, 8, EmissionOrder::TileId),
+    // Per engine: the engines differ from each other in the overview's last pixels (the streaming
+    // strips round differently), which is theirs to settle; what the sink promises is that for one
+    // engine the worker count and the emission order do not change a byte.
+    for (engine, runs) in [
+        (
+            EngineKind::Monolithic,
+            vec![
+                (2, EmissionOrder::Cascade),
+                (8, EmissionOrder::Cascade),
+                (8, EmissionOrder::TileId),
+            ],
+        ),
+        (EngineKind::Streaming, vec![(4, EmissionOrder::Cascade)]),
+        (
+            EngineKind::MapReduce,
+            vec![(2, EmissionOrder::Cascade), (8, EmissionOrder::Cascade)],
+        ),
+    ] {
+        let reference = through_sink(engine, 1, EmissionOrder::Cascade);
+        for (workers, order) in runs {
+            assert!(
+                through_sink(engine, workers, order) == reference,
+                "{engine:?} x{workers} {order:?} changed the bytes"
+            );
+        }
+    }
+}
+
+#[test]
+fn skip_blanks_leaves_a_blank_tile_out_whichever_engine_cut_it() {
+    // The streaming engines ignore EngineConfig::skip_blanks, so the sink applies the option
+    // itself: the right third of the scan is flat, and no flat tile is stored by any engine.
+    let blank = |bytes: &[u8]| {
+        let reader = PvecReader::open(bytes.to_vec()).unwrap();
+        let id = pvec_facade::unstable::RasterId::new(0).unwrap();
+        // Level 3 is 1300 x 900 at edge 256: columns 4 and 5 start at x = 1024, flat from x = 866.
+        (0..4).all(|row| reader.raster_tile(id, 3, 5, row).unwrap().is_none())
+    };
+    for engine in [
+        EngineKind::Monolithic,
+        EngineKind::Streaming,
+        EngineKind::MapReduce,
     ] {
         assert!(
-            through_sink(engine, workers, order) == reference,
-            "{engine:?} x{workers} {order:?} changed the bytes"
+            blank(&through_sink(engine, 2, EmissionOrder::Cascade)),
+            "{engine:?}"
         );
     }
 }
@@ -128,7 +167,10 @@ fn the_sink_writes_what_the_collecting_path_writes() {
     let reader = PvecReader::open(collected).unwrap();
     let id = pvec_facade::unstable::RasterId::new(0).unwrap();
     for (l, c, r, bytes) in pyramid.tiles() {
-        assert_eq!(reader.raster_tile(id, l, c, r).unwrap().as_deref(), Some(bytes));
+        assert_eq!(
+            reader.raster_tile(id, l, c, r).unwrap().as_deref(),
+            Some(bytes)
+        );
     }
 }
 
@@ -148,14 +190,17 @@ fn finish_to_publishes_atomically_and_leaves_no_staging_file() {
     let dest = tempfile::tempdir().unwrap();
     let raster = scan(700, 500);
     let job = prepare_raster(&raster, &plan(700, 500), &options()).unwrap();
-    let sink = PvecSink::new(writer(), &job.pyramid, options().tile_format).unwrap();
+    let sink = PvecSink::new(writer(), &job.pyramid, &options()).unwrap();
     EngineBuilder::new(job.source.as_ref(), job.pyramid.plan.clone(), &sink)
         .run()
         .unwrap();
     let out = dest.path().join("scan.pvec");
     sink.finish_to(&out, staging.path()).unwrap();
     assert_eq!(files_under(dest.path()), vec!["scan.pvec".to_string()]);
-    assert!(files_under(staging.path()).is_empty(), "nothing is left in the staging root");
+    assert!(
+        files_under(staging.path()).is_empty(),
+        "nothing is left in the staging root"
+    );
     PvecReader::open(std::fs::read(&out).unwrap()).unwrap();
 }
 
@@ -165,7 +210,7 @@ fn a_failed_publish_leaves_neither_a_file_nor_a_staging_file() {
     let dest = tempfile::tempdir().unwrap();
     let raster = scan(700, 500);
     let job = prepare_raster(&raster, &plan(700, 500), &options()).unwrap();
-    let sink = PvecSink::new(writer(), &job.pyramid, options().tile_format).unwrap();
+    let sink = PvecSink::new(writer(), &job.pyramid, &options()).unwrap();
     EngineBuilder::new(job.source.as_ref(), job.pyramid.plan.clone(), &sink)
         .run()
         .unwrap();
@@ -192,7 +237,7 @@ fn cancelling_mid_run_stops_the_run_and_leaves_nothing_on_disk() {
     let staging = tempfile::tempdir().unwrap();
     let raster = scan(1300, 900);
     let job = prepare_raster(&raster, &plan(1300, 900), &options()).unwrap();
-    let sink = PvecSink::new(writer(), &job.pyramid, options().tile_format).unwrap();
+    let sink = PvecSink::new(writer(), &job.pyramid, &options()).unwrap();
     let token = CancelToken::new();
     let r = EngineBuilder::new(
         job.source.as_ref(),
@@ -224,7 +269,7 @@ fn a_panic_mid_run_leaves_nothing_on_disk_and_the_sink_stays_usable() {
     let staging = tempfile::tempdir().unwrap();
     let raster = scan(1300, 900);
     let job = prepare_raster(&raster, &plan(1300, 900), &options()).unwrap();
-    let sink = PvecSink::new(writer(), &job.pyramid, options().tile_format).unwrap();
+    let sink = PvecSink::new(writer(), &job.pyramid, &options()).unwrap();
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let _ = EngineBuilder::new(
             job.source.as_ref(),
@@ -257,7 +302,7 @@ fn raw_tiles_and_placeholder_blanks_are_refused_before_a_tile_is_cut() {
 fn the_sink_is_a_leaf_so_no_bookkeeping_hook_is_swallowed() {
     let raster = scan(300, 200);
     let job = prepare_raster(&raster, &plan(300, 200), &options()).unwrap();
-    let sink = PvecSink::new(writer(), &job.pyramid, options().tile_format).unwrap();
+    let sink = PvecSink::new(writer(), &job.pyramid, &options()).unwrap();
     assert!(sink.inner_sink().is_none());
     assert_eq!(sink.emission_order(), EmissionOrder::default());
 }

@@ -244,7 +244,8 @@ pub(crate) fn cut_tile(
         .get(c.level as usize)
         .ok_or(SinkError::InvalidCoord { coord: c })?;
     // The Google grid is a power of two on a side; past the image it is only padding.
-    if c.col >= level.width.div_ceil(plan.tile_size) || c.row >= level.height.div_ceil(plan.tile_size)
+    if c.col >= level.width.div_ceil(plan.tile_size)
+        || c.row >= level.height.div_ceil(plan.tile_size)
     {
         return Ok(None);
     }

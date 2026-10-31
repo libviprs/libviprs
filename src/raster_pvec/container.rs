@@ -83,7 +83,7 @@ pub fn write_rasters(
 
 /// The placement PVec stores for a pyramid: a conversion between the producer's fields and the
 /// facade's.
-fn placement(p: &RasterPyramid) -> Result<Placement, RasterWriteError> {
+pub(crate) fn placement(p: &RasterPyramid) -> Result<Placement, RasterWriteError> {
     Ok(Placement {
         pixel_to_source: p.pixel_to_source,
         width: p.width,
