@@ -116,6 +116,10 @@ pub struct RasterPyramidOptions {
     pub attribution: Option<String>,
     /// The map from pixels into source space.
     pub placement: RasterPlacement,
+    /// How opaque the raster draws, 255 for fully (multiplied into the fragment alpha).
+    pub opacity: u8,
+    /// A row of the artifact's layer stream, or none.
+    pub layer_index: Option<u32>,
 }
 
 impl RasterPyramidOptions {
@@ -128,6 +132,8 @@ impl RasterPyramidOptions {
             blank_strategy: BlankTileStrategy::Emit,
             attribution: None,
             placement,
+            opacity: 255,
+            layer_index: None,
         }
     }
 }
@@ -208,6 +214,10 @@ pub struct RasterPyramid {
     /// Which side of the linework the raster draws on. [`RasterBand::Underlay`] from
     /// [`produce_raster_pyramid`]; a PDF image painted after every path sets it to the overlay.
     pub band: RasterBand,
+    /// How opaque the raster draws: 255 unless the options said otherwise.
+    pub opacity: u8,
+    /// A row of the artifact's layer stream, from the options.
+    pub layer_index: Option<u32>,
     /// SHA-256 of the source samples as the producer received them.
     pub source_digest: [u8; 32],
     /// The attribution, when given.
@@ -408,6 +418,8 @@ pub fn prepare_raster<'a>(
             pixel_to_source,
             visible_box: [0, 0, width, height],
             band: RasterBand::Underlay,
+            opacity: options.opacity,
+            layer_index: options.layer_index,
             source_digest: Sha256::digest(raster.data()).into(),
             attribution: options.attribution.clone(),
             plan,
