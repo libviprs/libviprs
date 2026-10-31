@@ -229,6 +229,15 @@ impl Raster {
         Ok(out)
     }
 
+    /// Red stub (issue #1330).
+    ///
+    /// # Errors
+    ///
+    /// Always, for now.
+    pub fn encode_png_bilevel(&self, _threshold: u8) -> Result<Vec<u8>, EncodeError> {
+        Err(EncodeError::encode("not written yet"))
+    }
+
     /// Encode the raster as an indexed (palette) PNG with at most `max_colours`
     /// palette entries (clamped to 1..=256).
     ///
