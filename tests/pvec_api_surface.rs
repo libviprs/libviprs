@@ -331,7 +331,12 @@ fn only_the_semantic_crates_are_named_today() {
     let roots: Vec<_> = roots.into_iter().collect();
     assert_eq!(
         roots,
-        ["pvec_entity", "pvec_facade", "pvec_geometry", "pvec_numeric"]
+        [
+            "pvec_entity",
+            "pvec_facade",
+            "pvec_geometry",
+            "pvec_numeric"
+        ]
     );
 }
 
