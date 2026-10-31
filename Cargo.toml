@@ -344,6 +344,13 @@ pvec-entity = { git = "https://github.com/libviprs/pvec", rev = "4dbbfc37ac156db
 # checks the ids in `src/pvec/mapping.rs` against it. Same pin as the crates above. It is not in
 # `[dependencies]`, so `src/` cannot name it and the API-surface fence is untouched.
 pvec-capabilities = { git = "https://github.com/libviprs/pvec", rev = "4dbbfc37ac156dbb7dac18d02721a742cd2aab0b", version = "0.0.0" }
+# PVec's facade (the semantic reader and writer), for the raster stream (issue #1328): the
+# adapter in `raster_pvec::container` hands the tiles of a pyramid to its writer untouched and
+# reads them back through its reader. Renamed because `pvec` is this crate's own module, and the
+# fence in `tests/pvec_api_surface.rs` names the facade by this root. `unstable-stream` is the
+# feature that carries `PvecWriter::rasters`. Pure Rust like the crates above, optional and off
+# by default, and pinned by a full revision with the same consequence for publishing.
+pvec-facade = { package = "pvec", git = "https://github.com/libviprs/pvec", rev = "45a3c6548a0433b69c2fbd470a19683fe2c997e7", version = "0.0.0", features = ["unstable-stream"] }
 # Pure-Rust FFT (MIT OR Apache-2.0) used by the frequency-domain filter
 # operations in `src/freqfilt.rs` (`fwfft`, `invfft`, `freqmult`, `spectrum`,
 # `phasecor`). Chosen over an FFTW binding to keep the crate pure Rust; its
@@ -546,6 +553,9 @@ dwg-acadrust = ["dep:acadrust"]
 # validated against PVec's numeric policy. Needs no reader: it works on the boundary
 # types, so any provider's output goes through it.
 pvec-spline = ["dep:pvec-numeric"]
+# `raster_pvec::container`: a raster pyramid written into a PVec's raster stream through the PVec
+# facade and read back (issue #1328). Pure Rust; the facade is a git dependency pinned by revision.
+pvec-raster = ["dep:pvec-facade"]
 # `pvec::Normalized2DGeometry`, the thin semantic adapter over PVec's public curve
 # model (issue #1095, ADR `docs/adr/pvec-normalized-geometry.md`). Pure Rust, and the
 # two PVec crates it needs are the whole of what it adds to the graph. They are git
@@ -678,6 +688,7 @@ jp2k = ["dep:hayro-jpeg2000", "dep:openjpeg2-pure"]
 [dependencies]
 acadrust = { workspace = true, optional = true }
 pvec-numeric = { workspace = true, optional = true }
+pvec-facade = { workspace = true, optional = true }
 acadsharp-rs = { workspace = true, optional = true }
 pvec-geometry = { workspace = true, optional = true }
 pvec-entity = { workspace = true, optional = true }
@@ -730,3 +741,7 @@ required-features = ["pvec-spline"]
 [[test]]
 name = "pvec_1091_bounds"
 required-features = ["pvec-normalized"]
+
+[[test]]
+name = "pvec_1328_raster_container"
+required-features = ["pvec-raster"]
