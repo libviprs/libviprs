@@ -111,6 +111,13 @@ hayro-jpeg2000 = { version = "0.4.1", default-features = false, features = [
 # build script, licence `Apache-2.0 OR MIT`. Chosen on API grounds: byte alignment,
 # end-of-block and the K modes are explicit settings, which is what `/DecodeParms` names.
 hayro-ccitt = "0.4"
+# Pure-Rust JBIG2 decoder (Apache-2.0 OR MIT), for the `JBIG2Decode` filter of PDF image
+# streams (issue #1365). `#![forbid(unsafe_code)]`; its only route to `unsafe` is the optional
+# `simd` feature (`fearless_simd`), which `default-features = false` drops along with `image`.
+# It depends on `hayro-ccitt` (0 dependencies, `forbid(unsafe_code)`) for the MMR coded regions.
+# The crate is a few months old and its README says it is under development, which is why the
+# `jbig2` feature below is not in `default`.
+hayro-jbig2 = { version = "0.3.1", default-features = false, features = ["std"] }
 # Pure-Rust codec facade. The feature list is the crate's decodable
 # format set, and it is edited here once for the whole format wave
 # (issue #563) rather than once per lane: every feature added recompiles
@@ -703,6 +710,13 @@ test-util = []
 # `[workspace.dependencies]` comments above for why these two crates and not
 # the six other JPEG 2000 crates on crates.io.
 jp2k = ["dep:hayro-jpeg2000", "dep:openjpeg2-pure"]
+# Gates `JBIG2Decode` for PDF image streams (`crate::pvec::pdf_filters::jbig2`, issue #1365).
+# With the feature off the filter is refused as `filter-not-enabled:JBIG2Decode`.
+#
+# Not in `default`, and it stays out until 24 hours of `fuzz_pvec_pdf_image --features jbig2`
+# are on record: the crate is young and says it is under development. Lock and binary deltas:
+# TODO measured on MARS.
+jbig2 = ["dep:hayro-jbig2"]
 
 [dependencies]
 acadrust = { workspace = true, optional = true }
@@ -718,6 +732,7 @@ flate2 = { workspace = true }
 gif = { workspace = true }
 hayro-ccitt = { workspace = true }
 hayro-jpeg2000 = { workspace = true, optional = true }
+hayro-jbig2 = { workspace = true, optional = true }
 image = { workspace = true }
 image-webp = { workspace = true }
 jxl-grid = { workspace = true, optional = true }
