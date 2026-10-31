@@ -12,6 +12,7 @@
 
 pub mod placement;
 pub mod pyramid;
+pub mod rules;
 pub mod tiles;
 
 #[cfg(feature = "pvec-raster")]
