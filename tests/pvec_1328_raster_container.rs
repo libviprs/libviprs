@@ -330,8 +330,19 @@ fn the_pinned_writer_sniffs_tiles_before_it_stores_them() {
         outline(&mut w);
         w.rasters(std::slice::from_ref(&placement)).unwrap();
         let refused = w
-            .raster_tiles(RasterId::new(0).unwrap(), vec![TileIn { level: 0, col: 0, row: 0, bytes }])
+            .raster_tiles(
+                RasterId::new(0).unwrap(),
+                vec![TileIn {
+                    level: 0,
+                    col: 0,
+                    row: 0,
+                    bytes,
+                }],
+            )
             .and_then(|()| w.finish().map(|_| ()));
-        assert!(refused.is_err(), "a tile that is not an image of the right size is refused");
+        assert!(
+            refused.is_err(),
+            "a tile that is not an image of the right size is refused"
+        );
     }
 }
