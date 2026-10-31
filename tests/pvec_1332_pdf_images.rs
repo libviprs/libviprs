@@ -502,3 +502,291 @@ fn an_inline_image_mask_still_fails_the_page_because_lopdf_wants_a_colour_space(
     let bytes = pdf(doc(), Resources::images(Vec::new()), &content);
     assert!(extract_page_paths_from_bytes(&bytes, 1, &PdfVectorLimits::default()).is_err());
 }
+
+// ---- close-out of #1332: colour spaces by name, typed refusals, 1-bit tiles ----
+
+fn within(got: &[u8], want: &[u8], tol: i16) {
+    assert_eq!(got.len(), want.len());
+    for (g, w) in got.iter().zip(want) {
+        assert!(
+            (i16::from(*g) - i16::from(*w)).abs() <= tol,
+            "{got:?} vs {want:?}"
+        );
+    }
+}
+
+#[test]
+fn a_cal_rgb_image_goes_through_its_matrix_into_srgb_and_is_reported() {
+    // Gamma 1 and the sRGB primaries with a D65 white: (1,1,1) is white, (0,0,0) black and
+    // (1,0,0) is sRGB red, worked out by hand from the matrix rows.
+    let cs = Object::Array(vec![
+        name("CalRGB"),
+        Object::Dictionary(dictionary! {
+            "WhitePoint" => vec![Object::Real(0.9505), Object::Real(1.0), Object::Real(1.089)],
+            "Gamma" => vec![Object::Real(1.0), Object::Real(1.0), Object::Real(1.0)],
+            "Matrix" => vec![
+                Object::Real(0.4124), Object::Real(0.2126), Object::Real(0.0193),
+                Object::Real(0.3576), Object::Real(0.7152), Object::Real(0.1192),
+                Object::Real(0.1805), Object::Real(0.0722), Object::Real(0.9505),
+            ],
+        }),
+    ]);
+    let s = image(
+        3,
+        1,
+        dictionary! { "ColorSpace" => cs, "BitsPerComponent" => 8 },
+        vec![255, 255, 255, 0, 0, 0, 255, 0, 0],
+    );
+    let b = bake(&one(s, "q 3 0 0 1 0 0 cm /Im1 Do Q"));
+    let p = only(&b);
+    let reader = through_pvec(&b);
+    within(&rgb(&reader, 0, p), &[255, 255, 255, 0, 0, 0, 255, 0, 0], 2);
+    assert!(
+        b.written[0]
+            .notes
+            .contains(&PdfImageNote::ColourSpaceApproximated)
+    );
+    assert_eq!(b.report.colour_approximated, 1);
+}
+
+#[test]
+fn a_lab_image_goes_through_the_cie_formulas_into_srgb_and_is_reported() {
+    // L 100 and L 0 with a and b at the middle of the range: white and black. L byte 128 is
+    // L* 50.2, Y = ((50.2 + 16) / 116)^3 = 0.1859, sRGB 0.4685 = 119.5.
+    let cs = Object::Array(vec![
+        name("Lab"),
+        Object::Dictionary(dictionary! {
+            "WhitePoint" => vec![Object::Real(0.9505), Object::Real(1.0), Object::Real(1.089)],
+            "Range" => vec![(-128).into(), 127.into(), (-128).into(), 127.into()],
+        }),
+    ]);
+    let s = image(
+        3,
+        1,
+        dictionary! { "ColorSpace" => cs, "BitsPerComponent" => 8 },
+        vec![255, 128, 128, 0, 128, 128, 128, 128, 128],
+    );
+    let b = bake(&one(s, "q 3 0 0 1 0 0 cm /Im1 Do Q"));
+    let p = only(&b);
+    let reader = through_pvec(&b);
+    within(
+        &rgb(&reader, 0, p),
+        &[255, 255, 255, 0, 0, 0, 120, 120, 120],
+        3,
+    );
+    assert!(
+        b.written[0]
+            .notes
+            .contains(&PdfImageNote::ColourSpaceApproximated)
+    );
+}
+
+#[test]
+fn a_cal_gray_image_is_reported_approximated() {
+    let cs = Object::Array(vec![
+        name("CalGray"),
+        Object::Dictionary(dictionary! {
+            "WhitePoint" => vec![Object::Real(0.9505), Object::Real(1.0), Object::Real(1.089)],
+            "Gamma" => Object::Real(1.0),
+        }),
+    ]);
+    let s = image(
+        2,
+        1,
+        dictionary! { "ColorSpace" => cs, "BitsPerComponent" => 8 },
+        vec![0, 255],
+    );
+    let b = bake(&one(s, "q 2 0 0 1 0 0 cm /Im1 Do Q"));
+    let p = only(&b);
+    assert_eq!(luma(&through_pvec(&b), 0, p), vec![0, 255]);
+    assert_eq!(b.report.colour_approximated, 1);
+}
+
+#[test]
+fn a_cmyk_image_is_converted_and_reported_approximated() {
+    let s = image(
+        2,
+        1,
+        dictionary! { "ColorSpace" => "DeviceCMYK", "BitsPerComponent" => 8 },
+        vec![0, 0, 0, 0, 0, 0, 0, 255],
+    );
+    let b = bake(&one(s, "q 2 0 0 1 0 0 cm /Im1 Do Q"));
+    let p = only(&b);
+    assert_eq!(rgb(&through_pvec(&b), 0, p), vec![255, 255, 255, 0, 0, 0]);
+    assert_eq!(b.report.colour_approximated, 1);
+}
+
+#[test]
+fn a_decode_array_inverts_a_gray_image() {
+    let s = image(
+        2,
+        1,
+        dictionary! {
+            "ColorSpace" => "DeviceGray", "BitsPerComponent" => 8,
+            "Decode" => vec![1.into(), 0.into()],
+        },
+        vec![0, 255],
+    );
+    let b = bake(&one(s, "q 2 0 0 1 0 0 cm /Im1 Do Q"));
+    let p = only(&b);
+    assert_eq!(luma(&through_pvec(&b), 0, p), vec![255, 0]);
+}
+
+#[test]
+fn ccitt_jbig2_devicen_and_pattern_are_each_refused_by_name_and_counted() {
+    let cases: [(&str, Object, &str, &str); 4] = [
+        (
+            "CCITTFaxDecode",
+            name("DeviceGray"),
+            "unsupported-filter:CCITTFaxDecode",
+            "f",
+        ),
+        (
+            "JBIG2Decode",
+            name("DeviceGray"),
+            "unsupported-filter:JBIG2Decode",
+            "f",
+        ),
+        (
+            "",
+            Object::Array(vec![
+                name("DeviceN"),
+                Object::Array(vec![name("A"), name("B")]),
+                name("DeviceRGB"),
+                Object::Dictionary(dictionary! { "FunctionType" => 2, "N" => 1 }),
+            ]),
+            "unsupported-colour-space:DeviceN",
+            "c",
+        ),
+        ("", name("Pattern"), "unsupported-colour-space:Pattern", "c"),
+    ];
+    for (filter, cs, reason, kind) in cases {
+        let mut extra = dictionary! { "ColorSpace" => cs, "BitsPerComponent" => 1 };
+        if !filter.is_empty() {
+            extra.set("Filter", name(filter));
+        }
+        let b = bake(&one(
+            image(8, 1, extra, vec![0xAA]),
+            "q 8 0 0 1 0 0 cm /Im1 Do Q",
+        ));
+        assert!(b.written.is_empty());
+        assert_eq!(b.report.images, 1);
+        assert_eq!(b.report.refused.get(reason), Some(&1), "{reason}");
+        assert_eq!(b.refused[0].error.reason(), reason);
+        match (&b.refused[0].error, kind) {
+            (PdfImageError::UnsupportedFilter(n), "f") => assert_eq!(n, filter),
+            (PdfImageError::UnsupportedColourSpace(_), "c") => {}
+            (e, _) => panic!("{e:?}"),
+        }
+    }
+}
+
+/// The bit depth byte of a PNG's `IHDR`.
+fn png_depth(bytes: &[u8]) -> u8 {
+    assert_eq!(&bytes[1..4], b"PNG");
+    bytes[24]
+}
+
+fn full_tile(reader: &PvecReader, p: &RasterPyramid) -> Vec<u8> {
+    reader
+        .raster_tile(RasterId::new(0).unwrap(), u32::from(p.levels) - 1, 0, 0)
+        .unwrap()
+        .expect("a stored tile")
+}
+
+/// 10 by 2 at one bit: row 0 is 1011 0010 01, row 1 is 0100 1101 10.
+const BILEVEL_10X2: [u8; 4] = [0b1011_0010, 0b0100_0000, 0b0100_1101, 0b1000_0000];
+const BILEVEL_ROW0: [u8; 10] = [255, 0, 255, 255, 0, 0, 255, 0, 0, 255];
+const BILEVEL_ROW1: [u8; 10] = [0, 255, 0, 0, 255, 255, 0, 255, 255, 0];
+
+fn bilevel(extra: Dictionary) -> Stream {
+    let mut d = dictionary! { "ColorSpace" => "DeviceGray", "BitsPerComponent" => 1 };
+    for (k, v) in extra.iter() {
+        d.set(k.clone(), v.clone());
+    }
+    image(10, 2, d, BILEVEL_10X2.to_vec())
+}
+
+use lopdf::Dictionary;
+
+#[test]
+fn a_one_bit_gray_image_is_written_as_one_bit_tiles_and_the_report_counts_it() {
+    let b = bake(&one(
+        bilevel(Dictionary::new()),
+        "q 10 0 0 2 0 0 cm /Im1 Do Q",
+    ));
+    let p = only(&b);
+    assert_eq!(p.bit_depth, 1);
+    assert!(b.written[0].notes.contains(&PdfImageNote::Bilevel));
+    assert_eq!(b.report.bilevel, 1);
+    let reader = through_pvec(&b);
+    let pl = &reader.raster_placements().unwrap()[0];
+    assert_eq!((pl.bit_depth, pl.pixel_format), (1, Channels::Gray));
+    assert_eq!(png_depth(&full_tile(&reader, p)), 1);
+    let mut want = BILEVEL_ROW0.to_vec();
+    want.extend_from_slice(&BILEVEL_ROW1);
+    assert_eq!(luma(&reader, 0, p), want);
+}
+
+#[test]
+fn a_one_bit_image_with_decode_one_zero_is_inverted_in_its_one_bit_tiles() {
+    let b = bake(&one(
+        bilevel(dictionary! { "Decode" => vec![1.into(), 0.into()] }),
+        "q 10 0 0 2 0 0 cm /Im1 Do Q",
+    ));
+    let p = only(&b);
+    assert_eq!(p.bit_depth, 1);
+    let want: Vec<u8> = BILEVEL_ROW0
+        .iter()
+        .chain(&BILEVEL_ROW1)
+        .map(|v| 255 - v)
+        .collect();
+    assert_eq!(luma(&through_pvec(&b), 0, p), want);
+}
+
+#[test]
+fn a_one_bit_image_with_a_soft_mask_has_alpha_and_so_stays_eight_bit_rgba() {
+    let mut d = doc();
+    let sm = d.add_object(gray8(10, 2, &[255; 20]));
+    let s = bilevel(dictionary! { "SMask" => Object::Reference(sm) });
+    let bytes = pdf(
+        d,
+        Resources::images(vec![("Im1", Object::Stream(s))]),
+        b"q 10 0 0 2 0 0 cm /Im1 Do Q",
+    );
+    let b = bake(&bytes);
+    let p = only(&b);
+    assert_eq!(p.bit_depth, 8);
+    assert_eq!(b.report.bilevel, 0);
+}
+
+#[test]
+fn a_clipped_one_bit_image_has_baked_alpha_and_stays_eight_bit() {
+    let b = bake(&one(
+        bilevel(Dictionary::new()),
+        "q 0 0 m 5 0 l 0 2 l h W n 10 0 0 2 0 0 cm /Im1 Do Q",
+    ));
+    let p = only(&b);
+    assert_eq!(p.bit_depth, 8);
+    assert_eq!(b.report.bilevel, 0);
+}
+
+#[test]
+fn an_eight_bit_gray_image_of_only_black_and_white_is_not_bilevel() {
+    let b = bake(&one(gray8(2, 1, &[0, 255]), "q 2 0 0 1 0 0 cm /Im1 Do Q"));
+    assert_eq!(only(&b).bit_depth, 8);
+    assert_eq!(b.report.bilevel, 0);
+}
+
+#[test]
+fn a_one_bit_image_under_jpeg_tiles_stays_eight_bit_gray() {
+    let mut o = PdfImageOptions::default();
+    o.tile_format = libviprs::TileFormat::Jpeg { quality: 90 };
+    let page = page(&one(
+        bilevel(Dictionary::new()),
+        "q 10 0 0 2 0 0 cm /Im1 Do Q",
+    ));
+    let b = bake_page_images(&page, &o);
+    assert_eq!(only(&b).bit_depth, 8);
+    assert_eq!(b.report.bilevel, 0);
+}
