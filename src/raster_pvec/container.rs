@@ -34,7 +34,8 @@ pub enum RasterWriteError {
 
 /// Write `pyramids` into `writer` as the artifact's raster stream, in order: the first gets
 /// `RasterId` 0, the next 1, and so on. The band is each pyramid's own (the underlay unless a PDF
-/// image was painted after every path) and the opacity 255.
+/// image was painted after every path); the opacity and layer index come from its options (255 and
+/// none unless asked).
 ///
 /// Returns the ids, which are the positions in `pyramids`.
 ///
@@ -103,12 +104,12 @@ pub(crate) fn placement(p: &RasterPyramid) -> Result<Placement, RasterWriteError
             RasterChannels::Rgba => PixelFormat::Rgba,
         },
         bit_depth: p.bit_depth,
-        opacity: 255,
+        opacity: p.opacity,
         band: match p.band {
             RasterBand::Underlay => Band::Underlay,
             RasterBand::Overlay => Band::Overlay,
         },
-        layer_index: None,
+        layer_index: p.layer_index,
         source_digest: Some(p.source_digest),
         attribution: p.attribution.clone().unwrap_or_default(),
     })

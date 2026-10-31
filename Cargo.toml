@@ -757,6 +757,10 @@ name = "pvec_1331_sink"
 required-features = ["pvec-raster"]
 
 [[test]]
+name = "pvec_1347_opacity_layer"
+required-features = ["pvec-raster"]
+
+[[test]]
 name = "pvec_1331_bounded_memory"
 required-features = ["pvec-raster"]
 

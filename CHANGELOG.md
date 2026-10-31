@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Opacity and layer index on a raster placement** (issue #1347, a slice of libviprs-cli#130).
+  `RasterPyramidOptions` takes `opacity` (255 by default) and `layer_index` (none by default),
+  `RasterPyramid` carries them, and `write_rasters` and `PvecSink` store them in the placement.
+
 - **The producer rules page** (issue #1345, a slice of #1333, RL2.2 of EPIC R-L). `docs/pvec-raster.md`
   lists what libviprs promises when it puts a raster into a PVec: the tile grid, the legal tile
   rows, the placement and its georeference composition, the PMTiles key for the stored
