@@ -75,6 +75,10 @@ pub struct PdfVectorLimits {
     /// Most bytes of encoded image data kept for the bake across the page, so that a page of
     /// many large images cannot be held in memory twice (issue #1332).
     pub max_image_bytes: u64,
+    /// Most encoded bytes one image stream may hold. `max_image_bytes` is a page total, so this
+    /// is the cap on any one stream; an image over it is refused alone and the page converts
+    /// (issue #1362).
+    pub max_image_stream_bytes: u64,
 }
 
 impl Default for PdfVectorLimits {
@@ -88,6 +92,7 @@ impl Default for PdfVectorLimits {
             max_segments_per_path: 1_000_000,
             max_images: 4_096,
             max_image_bytes: 512 << 20,
+            max_image_stream_bytes: 64 << 20,
         }
     }
 }
