@@ -675,3 +675,21 @@ fn assert_placement_error_non_exhaustive(v: &libviprs::pvec::raster_placement::P
         _ => {}
     }
 }
+
+#[deny(unreachable_patterns)]
+#[allow(dead_code)]
+fn assert_raster_pyramid_error_non_exhaustive(v: &libviprs::pvec::raster_pyramid::RasterPyramidError) {
+    use libviprs::pvec::raster_pyramid::RasterPyramidError as E;
+    match v {
+        E::TileSize(_) => {}
+        E::PlaceholderBlanks => {}
+        E::RawTiles => {}
+        E::PixelFormat(_) => {}
+        E::Attribution(_) => {}
+        E::Placement(_) => {}
+        E::NonFinitePlacement => {}
+        E::Plan(_) => {}
+        E::Engine(_) => {}
+        _ => {}
+    }
+}

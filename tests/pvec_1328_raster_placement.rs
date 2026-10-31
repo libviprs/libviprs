@@ -220,3 +220,35 @@ fn the_refusal_survives_a_source_chain() {
         Some(PlacementError::CrsMismatch { .. })
     ));
 }
+
+#[test]
+fn the_raster_md_test_vector_comes_out_bit_for_bit() {
+    // docs/RASTER.md section 5 in libviprs/pvec: pixel_to_source [0.5 0.25 0.125 -0.5 100 50],
+    // which is the GeoTransform [0.5 0.25 100 0.125 -0.5 50] under an identity calibration.
+    let geo = GeoTransform::new(0.5, 0.25, 100.0, 0.125, -0.5, 50.0);
+    let identity = SourceCalibration::Affine {
+        native_crs: "EPSG:2056".to_string(),
+        metres_to_native: GeoTransform::new(1.0, 0.0, 0.0, 0.0, 1.0, 0.0),
+        metres_per_unit: 1.0,
+    };
+    let got = pixel_to_source(&geo, PixelOrigin::Corner, "EPSG:2056", &identity).unwrap();
+    assert_eq!(bits(got), bits([0.5, 0.25, 0.125, -0.5, 100.0, 50.0]));
+
+    // The four footprint corners the document lists, through the composed map.
+    let at = |px: f64, py: f64| {
+        (
+            got[0] * px + got[1] * py + got[4],
+            got[2] * px + got[3] * py + got[5],
+        )
+    };
+    assert_eq!(at(0.0, 0.0), (100.0, 50.0));
+    assert_eq!(at(1024.0, 0.0), (612.0, 178.0));
+    assert_eq!(at(1024.0, 512.0), (740.0, -78.0));
+    assert_eq!(at(0.0, 512.0), (228.0, -206.0));
+
+    // A world file puts (0, 0) at the pixel centre, so the same coefficients read as a centre
+    // origin put the corner half a pixel back: tx = 100 - 0.5 * (0.5 + 0.25) = 99.625 and
+    // ty = 50 - 0.5 * (0.125 - 0.5) = 50.1875.
+    let centre = pixel_to_source(&geo, PixelOrigin::Centre, "EPSG:2056", &identity).unwrap();
+    assert_eq!((centre[4], centre[5]), (99.625, 50.1875));
+}
