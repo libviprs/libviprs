@@ -15,7 +15,7 @@ use pvec_facade::PvecWriter;
 use pvec_facade::unstable::{Band, PixelFormat, Placement, RasterId, TileCodec, TileIn};
 use thiserror::Error;
 
-use super::pyramid::{RasterChannels, RasterCodec, RasterPyramid};
+use super::pyramid::{RasterBand, RasterChannels, RasterCodec, RasterPyramid};
 
 /// Why a pyramid could not be written into a PVec.
 #[derive(Debug, Error)]
@@ -33,8 +33,8 @@ pub enum RasterWriteError {
 }
 
 /// Write `pyramids` into `writer` as the artifact's raster stream, in order: the first gets
-/// `RasterId` 0, the next 1, and so on. The band is the underlay (a scan sits below the linework)
-/// and the opacity 255.
+/// `RasterId` 0, the next 1, and so on. The band is each pyramid's own (the underlay unless a PDF
+/// image was painted after every path) and the opacity 255.
 ///
 /// Returns the ids, which are the positions in `pyramids`.
 ///
@@ -43,10 +43,11 @@ pub enum RasterWriteError {
 /// [`RasterWriteError`]: too many rasters, a pyramid whose size does not fit the placement, or a
 /// refusal by PVec's writer (a singular placement map, an attribution that breaks RASTER-07, a
 /// tile the sniffer rejects) with PVec's error as the source.
-pub fn write_rasters(
+pub fn write_rasters<'a>(
     writer: &mut PvecWriter,
-    pyramids: &[RasterPyramid],
+    pyramids: impl IntoIterator<Item = &'a RasterPyramid>,
 ) -> Result<Vec<RasterId>, RasterWriteError> {
+    let pyramids: Vec<&RasterPyramid> = pyramids.into_iter().collect();
     let ids = (0..pyramids.len())
         .map(|i| {
             u32::try_from(i)
@@ -58,13 +59,13 @@ pub fn write_rasters(
 
     let placements = pyramids
         .iter()
-        .map(placement)
+        .map(|p| placement(p))
         .collect::<Result<Vec<_>, _>>()?;
     writer
         .rasters(&placements)
         .map_err(RasterWriteError::Pvec)?;
 
-    for (id, pyramid) in ids.iter().zip(pyramids) {
+    for (id, pyramid) in ids.iter().zip(&pyramids) {
         let tiles = pyramid
             .tiles()
             .map(|(level, col, row, bytes)| TileIn {
@@ -103,7 +104,10 @@ pub(crate) fn placement(p: &RasterPyramid) -> Result<Placement, RasterWriteError
         },
         bit_depth: p.bit_depth,
         opacity: 255,
-        band: Band::Underlay,
+        band: match p.band {
+            RasterBand::Underlay => Band::Underlay,
+            RasterBand::Overlay => Band::Overlay,
+        },
         layer_index: None,
         source_digest: Some(p.source_digest),
         attribution: p.attribution.clone().unwrap_or_default(),

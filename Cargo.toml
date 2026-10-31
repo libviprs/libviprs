@@ -759,3 +759,7 @@ required-features = ["pvec-raster"]
 [[test]]
 name = "pvec_1331_bounded_memory"
 required-features = ["pvec-raster"]
+
+[[test]]
+name = "pvec_1332_pdf_images"
+required-features = ["pvec-raster"]

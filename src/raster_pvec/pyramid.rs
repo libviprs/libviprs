@@ -72,6 +72,17 @@ pub enum RasterChannels {
     Rgba,
 }
 
+/// Which side of the linework a raster draws on (ADR 0018, `band`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum RasterBand {
+    /// Below every hatch fill and every stroke. A scanned underlay.
+    #[default]
+    Underlay,
+    /// Above both.
+    Overlay,
+}
+
 /// Where the placement comes from.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
@@ -191,8 +202,12 @@ pub struct RasterPyramid {
     pub bit_depth: u8,
     /// `[a b c d tx ty]`, `-0.0` normalised.
     pub pixel_to_source: [f64; 6],
-    /// `[x0 y0 x1 y1]`: the whole image, since nothing is clipped here.
+    /// `[x0 y0 x1 y1]`: the whole image unless the producer sets a clip's bounds (a PDF image
+    /// under a clip, issue #1332).
     pub visible_box: [u32; 4],
+    /// Which side of the linework the raster draws on. [`RasterBand::Underlay`] from
+    /// [`produce_raster_pyramid`]; a PDF image painted after every path sets it to the overlay.
+    pub band: RasterBand,
     /// SHA-256 of the source samples as the producer received them.
     pub source_digest: [u8; 32],
     /// The attribution, when given.
@@ -392,6 +407,7 @@ pub fn prepare_raster<'a>(
             bit_depth: 8,
             pixel_to_source,
             visible_box: [0, 0, width, height],
+            band: RasterBand::Underlay,
             source_digest: Sha256::digest(raster.data()).into(),
             attribution: options.attribution.clone(),
             plan,

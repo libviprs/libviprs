@@ -17,6 +17,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is the split of `produce_raster_pyramid` that decides everything but the tiles. The peak heap
   against the PMTiles sink is measured in `docs/pmtiles-benchmarks.md`; PVec's writer holds the
   encoded pyramid, so the sink is not flat in memory.
+- **PDF image placements** (issue #1332, RL2.1 of EPIC R-L, ADR 0018 in libviprs/pvec). The
+  images of a PDF page now become PVec rasters: `pvec::pdf_image::bake_page_images` decodes each
+  image XObject and inline image (`DeviceGray`, `DeviceRGB`, `DeviceCMYK` at 1 to 16 bits,
+  `/Indexed`, `/ICCBased`, `/CalGray`, `/CalRGB`, `/Lab`, `/Decode`, `/ImageMask` in the fill
+  colour, `/SMask` into alpha, Flate with predictors and `DCTDecode`), places the unit square
+  through the CTM, bakes the clips in force into alpha and `visible_box`, and cuts the pyramid. A
+  `RasterId` follows content order and the band follows the paths (underlay before every path,
+  overlay after, interleaved reported). `JPXDecode`, `JBIG2Decode`, `CCITTFaxDecode`,
+  `/Separation`, `/DeviceN`, a graphics-state soft mask and a singular CTM are refused by name,
+  and the report keeps the images on the page equal to the written plus the refused.
+  `PdfVectorPage::images` now carries the entries the bake reads, `PdfVectorLimits` gains
+  `max_images` and `max_image_bytes`, `RasterPyramid` gains a `band`, and
+  `raster_pvec::container::write_rasters` takes any iterator of pyramids.
 - **Tiles that pass PVec's sniffers** (issue #1330, RL1.1 of EPIC R-L, part of #1329).
   `Raster::encode_png_bilevel(threshold)` writes a 1-bit gray PNG from a `Gray8` raster (an encoding,
   not a new `PixelFormat`). `raster_pvec::tiles` holds the legal `(tile format, pixel format, bit depth)`
