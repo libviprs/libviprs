@@ -84,12 +84,12 @@ A DWG `IMAGE` names a file path, and no reader here opens a path a drawing names
 
 ## The commands
 
-Three commands in `libviprs-cli` put this on the command line (libviprs/libviprs-cli#130):
+Three commands in `libviprs-cli` put this on the command line (libviprs-cli#130):
 
 | command | what it does |
 |---|---|
-| `viprs pyramid --storage pvec` | cuts a raster into a pyramid and writes it into a `.pvec` beside a drawing |
+| `viprs pyramid --storage pvec` | cuts a raster into a pyramid and writes it into a copy of a drawing's `.pvec` (`--pvec-into` is required) |
 | `viprs pmtiles to-pvec` | passes a PMTiles archive into a `.pvec` byte for byte, with its stored `GeoTransform` |
-| `viprs pvec rasters` | lists the rasters of a `.pvec` |
+| `viprs pvec rasters` | lists the rasters of a `.pvec` (`--json`), or writes one tile out (`--tile`) |
 
-They are not released yet. This page will get their flags and one example each from the regenerated CLI reference when they land.
+The flags and an example for each are in the [CLI reference on libviprs.org](https://libviprs.org/cli/#pvec). The placement is either `--pixel-to-source` outright, or the raster's own transform composed with the drawing's `--source-to-geo`, and no CRS is stored or checked: you assert that the two share one. They sit behind the `pvec-raster` feature, which is in `full` and not in the default features, so a released binary does not have them until the release builds it.
