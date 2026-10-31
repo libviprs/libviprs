@@ -220,6 +220,9 @@ pub mod sink_object_store;
 #[cfg_attr(docsrs, doc(cfg(feature = "packfile")))]
 pub mod sink_packfile;
 pub mod sink_pmtiles;
+#[cfg(feature = "pvec-raster")]
+#[cfg_attr(docsrs, doc(cfg(feature = "pvec-raster")))]
+pub mod sink_pvec;
 pub mod source;
 pub mod storage;
 pub mod stream_verify;
