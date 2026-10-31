@@ -28,6 +28,11 @@ pub fn pdf(doc: Document, resources: Resources, content: &[u8]) -> Vec<u8> {
     let content = doc.add_object(Stream::new(Dictionary::new(), content.to_vec()));
     let mut xo = Dictionary::new();
     for (name, obj) in resources.xobjects {
+        // A stream is always an indirect object.
+        let obj = match obj {
+            Object::Stream(s) => Object::Reference(doc.add_object(s)),
+            other => other,
+        };
         xo.set(name, obj);
     }
     let mut gs = Dictionary::new();

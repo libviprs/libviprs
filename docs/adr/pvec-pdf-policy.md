@@ -77,3 +77,12 @@ Three real PDFs plus one DWG and PDF pair, native x86_64 and native arm64 (they 
 - Operand precision, the clip policy for non-rectangular clips (N5.2, N5.3) and fill-rule meaning
   (N5.6) are handed on and undecided. The x86_64 pair run was by a reviewer, not me, and no x86_64
   pair results file is committed.
+
+## Images (2026-10-31, issue #1332)
+
+Image XObjects and inline images are no longer only counted. `pvec::pdf_image` bakes them into PVec
+rasters under ADR 0018 (libviprs/pvec): colour spaces into sRGB, `/Decode`, `/ImageMask`, `/SMask`
+into alpha, clips into alpha plus `visible_box`, and the unit square through the CTM into a
+`Transform2` placement. Anything it does not take is refused by name and counted, so the images on a
+page always equal the written plus the refused. The rules and their limits are in
+`docs/pvec-raster-producer.md`, and the producer rules page of libviprs/libviprs#1333 renders them.

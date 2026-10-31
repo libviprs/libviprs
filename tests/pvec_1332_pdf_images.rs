@@ -491,3 +491,14 @@ fn the_image_count_is_limited_and_the_refusal_is_typed() {
         "{e:?}"
     );
 }
+
+#[test]
+fn an_inline_image_mask_still_fails_the_page_because_lopdf_wants_a_colour_space() {
+    // The limit is the parser's, recorded in docs/pvec-raster-producer.md: an inline image with
+    // no /CS (an inline image mask) does not tokenize, so the page is an error, not a silent skip.
+    let mut content = b"BI /W 8 /H 1 /IM true /BPC 1 ID ".to_vec();
+    content.push(0xAA);
+    content.extend_from_slice(b" EI");
+    let bytes = pdf(doc(), Resources::images(Vec::new()), &content);
+    assert!(extract_page_paths_from_bytes(&bytes, 1, &PdfVectorLimits::default()).is_err());
+}

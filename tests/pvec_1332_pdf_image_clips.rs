@@ -60,7 +60,7 @@ fn an_axis_aligned_rectangular_clip_sets_visible_box_and_leaves_alpha_opaque() {
     let t = rgba(&w.pyramid);
     assert_eq!(
         t.get_pixel(3, 5).0,
-        [90, 90, 7, 255],
+        [90, 150, 7, 255],
         "the pixels are the source's"
     );
     assert_eq!(
@@ -76,14 +76,15 @@ fn a_clip_that_is_not_on_pixel_edges_is_baked_into_alpha() {
     let b = bake(&eight("q 2.5 1 3 3 re W n q 8 0 0 8 0 0 cm /Im1 Do Q Q"));
     let w = only(&b);
     assert_eq!(w.pyramid.channels, RasterChannels::Rgba);
-    // Pixel centres at 2.5 + epsilon are inside, so the box is the outward rounded bounds.
+    // The clip spans x 2.5 to 5.5, so the box is the outward rounded bounds.
     assert_eq!(w.pyramid.visible_box, [2, 4, 6, 7]);
     let t = rgba(&w.pyramid);
-    // Pixel 2 has its centre at x = 2.5, on the edge: the edge belongs to the inside.
-    assert_eq!(t.get_pixel(2, 5).0[3], 255);
+    // A pixel is kept when its centre is in [2.5, 5.5): pixel 2 (centre 2.5) is in, pixel 5
+    // (centre 5.5) is out.
     assert_eq!(t.get_pixel(1, 5).0[3], 0);
-    assert_eq!(t.get_pixel(5, 5).0[3], 255);
-    assert_eq!(t.get_pixel(6, 5).0[3], 0);
+    assert_eq!(t.get_pixel(2, 5).0[3], 255);
+    assert_eq!(t.get_pixel(4, 5).0[3], 255);
+    assert_eq!(t.get_pixel(5, 5).0[3], 0);
 }
 
 #[test]

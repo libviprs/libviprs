@@ -1586,7 +1586,7 @@ fn max_decompressed_bytes(stream: &lopdf::Stream) -> Result<usize, PdfError> {
 /// one byte past the cap so an over-limit stream is detected and rejected with
 /// a typed [`PdfError::DecompressionLimitExceeded`] rather than decompressed in
 /// full.
-fn flate_decompress(data: &[u8], max_output: usize) -> Result<Vec<u8>, PdfError> {
+pub(crate) fn flate_decompress(data: &[u8], max_output: usize) -> Result<Vec<u8>, PdfError> {
     use std::io::Read;
     let decoder = flate2::read::ZlibDecoder::new(data);
     let mut out = Vec::new();

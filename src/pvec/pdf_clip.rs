@@ -229,7 +229,7 @@ fn subpath_count(entity: &PdfPathEntity) -> usize {
 
 /// The box of a path that is exactly one axis-aligned rectangle: a move, three lines (or four,
 /// the last back to the start) and an optional close. Exact comparison, no epsilon.
-fn exact_rect(entity: &PdfPathEntity) -> Option<ExactBounds> {
+pub(crate) fn exact_rect(entity: &PdfPathEntity) -> Option<ExactBounds> {
     if subpath_count(entity) != 1 {
         return None;
     }

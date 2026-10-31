@@ -277,6 +277,170 @@ pub(crate) struct RawImage {
     pub(crate) content: Vec<u8>,
 }
 
+impl RawImage {
+    /// The bytes held: the stream, its soft mask and an `Indexed` lookup.
+    fn byte_len(&self) -> u64 {
+        fn walk(o: &Object) -> u64 {
+            match o {
+                Object::String(s, _) => s.len() as u64,
+                Object::Stream(s) => {
+                    s.content.len() as u64 + s.dict.iter().map(|(_, v)| walk(v)).sum::<u64>()
+                }
+                Object::Array(a) => a.iter().map(walk).sum(),
+                Object::Dictionary(d) => d.iter().map(|(_, v)| walk(v)).sum(),
+                _ => 0,
+            }
+        }
+        self.content.len() as u64 + self.dict.iter().map(|(_, v)| walk(v)).sum::<u64>()
+    }
+}
+
+/// Inline image keys and values spelt out (PDF 32000-1 table 93 and 94).
+fn inline_key(key: &[u8]) -> &[u8] {
+    match key {
+        b"BPC" => b"BitsPerComponent",
+        b"CS" => b"ColorSpace",
+        b"D" => b"Decode",
+        b"DP" => b"DecodeParms",
+        b"F" => b"Filter",
+        b"H" => b"Height",
+        b"IM" => b"ImageMask",
+        b"I" => b"Interpolate",
+        b"W" => b"Width",
+        other => other,
+    }
+}
+
+fn inline_value(key: &[u8], value: &Object) -> Object {
+    let spell = |n: &[u8]| -> Vec<u8> {
+        match (key, n) {
+            (b"ColorSpace", b"G") => b"DeviceGray".to_vec(),
+            (b"ColorSpace", b"RGB") => b"DeviceRGB".to_vec(),
+            (b"ColorSpace", b"CMYK") => b"DeviceCMYK".to_vec(),
+            (b"ColorSpace", b"I") => b"Indexed".to_vec(),
+            (b"Filter", b"AHx") => b"ASCIIHexDecode".to_vec(),
+            (b"Filter", b"A85") => b"ASCII85Decode".to_vec(),
+            (b"Filter", b"LZW") => b"LZWDecode".to_vec(),
+            (b"Filter", b"Fl") => b"FlateDecode".to_vec(),
+            (b"Filter", b"RL") => b"RunLengthDecode".to_vec(),
+            (b"Filter", b"CCF") => b"CCITTFaxDecode".to_vec(),
+            (b"Filter", b"DCT") => b"DCTDecode".to_vec(),
+            _ => n.to_vec(),
+        }
+    };
+    match value {
+        Object::Name(n) => Object::Name(spell(n)),
+        Object::Array(a) if matches!(key, b"ColorSpace" | b"Filter") => Object::Array(
+            a.iter()
+                .map(|o| match o {
+                    Object::Name(n) => Object::Name(spell(n)),
+                    other => other.clone(),
+                })
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+/// How deep a reference chain in an image dictionary is followed.
+const IMAGE_REF_DEPTH: u32 = 6;
+
+/// An image stream as the bake reads it: abbreviations spelt out for an inline image, and the
+/// references the bake needs followed (`/ColorSpace` and what is in it, `/SMask`, `/Decode`).
+/// An ICC profile's bytes are dropped (only its `/N` is read), an `Indexed` lookup stream becomes
+/// a string, and a reference that does not resolve is left out.
+fn image_stream(doc: &Document, stream: &lopdf::Stream, inline: bool) -> RawImage {
+    fn resolve(doc: &Document, o: &Object, depth: u32, drop_stream_bytes: bool) -> Option<Object> {
+        if depth == 0 {
+            return None;
+        }
+        match o {
+            Object::Reference(id) => {
+                let target = doc.objects.get(id)?;
+                resolve(doc, target, depth - 1, drop_stream_bytes)
+            }
+            Object::Array(a) => {
+                let is_icc =
+                    a.first().and_then(|f| f.as_name().ok()) == Some(b"ICCBased".as_slice());
+                let is_indexed = a.first().and_then(|f| f.as_name().ok())
+                    == Some(b"Indexed".as_slice())
+                    || a.first().and_then(|f| f.as_name().ok()) == Some(b"I".as_slice());
+                Some(Object::Array(
+                    a.iter()
+                        .enumerate()
+                        .filter_map(|(i, e)| match resolve(doc, e, depth - 1, is_icc) {
+                            // The lookup of an Indexed space is its bytes, as a string.
+                            Some(Object::Stream(s)) if is_indexed && i == 3 => {
+                                Some(Object::String(s.content, lopdf::StringFormat::Literal))
+                            }
+                            other => other,
+                        })
+                        .collect(),
+                ))
+            }
+            Object::Dictionary(d) => {
+                let mut out = Dictionary::new();
+                for (k, v) in d.iter() {
+                    if let Some(v) = resolve(doc, v, depth - 1, false) {
+                        out.set(k.clone(), v);
+                    }
+                }
+                Some(Object::Dictionary(out))
+            }
+            Object::Stream(s) => {
+                let mut dict = Dictionary::new();
+                for (k, v) in s.dict.iter() {
+                    if let Some(v) = resolve(doc, v, depth - 1, false) {
+                        dict.set(k.clone(), v);
+                    }
+                }
+                let content = if drop_stream_bytes {
+                    Vec::new()
+                } else {
+                    s.content.clone()
+                };
+                Some(Object::Stream(lopdf::Stream::new(dict, content)))
+            }
+            other => Some(other.clone()),
+        }
+    }
+    let mut dict = Dictionary::new();
+    for (k, v) in stream.dict.iter() {
+        // The image's own data and its soft mask are what the bake needs; the rest of the
+        // XObject (metadata, thumbnails, optional content) is left behind.
+        let key: &[u8] = if inline { inline_key(k) } else { k };
+        if !matches!(
+            key,
+            b"Width"
+                | b"Height"
+                | b"BitsPerComponent"
+                | b"ColorSpace"
+                | b"Decode"
+                | b"DecodeParms"
+                | b"Filter"
+                | b"ImageMask"
+                | b"SMask"
+                | b"Mask"
+                | b"Interpolate"
+                | b"Intent"
+        ) {
+            continue;
+        }
+        let v = if inline {
+            inline_value(key, v)
+        } else {
+            v.clone()
+        };
+        if let Some(v) = resolve(doc, &v, IMAGE_REF_DEPTH, false) {
+            dict.set(key.to_vec(), v);
+        }
+    }
+    RawImage {
+        dict,
+        content: stream.content.clone(),
+    }
+}
+
 /// Why an extraction failed.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[non_exhaustive]
@@ -459,6 +623,8 @@ pub fn extract_page_paths_from_bytes(
         colour_operators: std::collections::BTreeMap::new(),
         text: TextReport::default(),
         font: TextFontOutcome::Unresolved,
+        fill: [0, 0, 0],
+        image_bytes: 0,
     };
     let resources = inherited_resources(&doc, page_id)?;
     run.stream(&ops, resources, base, 0)?;
@@ -995,10 +1161,15 @@ struct Run<'a> {
     text: TextReport,
     /// The font the last `Tf` named, part of the graphics state.
     font: TextFontOutcome,
+    /// The fill colour in force as sRGB, for an image mask (issue #1332).
+    fill: [u8; 3],
+    /// Encoded image bytes kept so far, for `max_image_bytes`.
+    image_bytes: u64,
 }
 
 /// What `q` saves and `Q` restores.
 struct Saved {
+    fill: [u8; 3],
     ctm: Matrix,
     clips: usize,
     soft_mask: bool,
@@ -1071,6 +1242,7 @@ impl Run<'_> {
                         soft_mask: self.soft_mask,
                         stroke: self.stroke.clone(),
                         font: self.font,
+                        fill: self.fill,
                     });
                 }
                 "Q" => {
@@ -1081,6 +1253,7 @@ impl Run<'_> {
                             self.soft_mask = saved.soft_mask;
                             self.stroke = saved.stroke;
                             self.font = saved.font;
+                            self.fill = saved.fill;
                         }
                     } else {
                         self.unbalanced += 1;
@@ -1160,6 +1333,7 @@ impl Run<'_> {
                         .colour_operators
                         .entry(op.operator.clone())
                         .or_insert(0) += 1;
+                    self.fill_operator(op);
                 }
                 "gs" => self.ext_gstate(op, resources),
                 "Do" => self.do_xobject(op, resources, &ctm, depth)?,
@@ -1167,12 +1341,16 @@ impl Run<'_> {
                 // Text is omitted and counted (N5.5, docs/pvec-text-policy.md).
                 "Tj" | "TJ" | "'" | "\"" => self.text.record_pdf(&op.operator, self.font),
                 "sh" => self.shadings = self.shadings.saturating_add(1),
-                "BI" => self.record_image(None, &ctm, "BI", op.operands.first())?,
+                "BI" => {
+                    let inline = op.operands.first().and_then(|o| o.as_stream().ok());
+                    self.record_image(None, &ctm, "BI", inline)?;
+                }
                 "scn" | "SCN" => {
                     *self
                         .colour_operators
                         .entry(op.operator.clone())
                         .or_insert(0) += 1;
+                    self.fill_operator(op);
                     if matches!(op.operands.last(), Some(Object::Name(_))) {
                         self.patterns = self.patterns.saturating_add(1);
                     }
@@ -1297,35 +1475,113 @@ impl Run<'_> {
         }
     }
 
-    /// Record one painted image. Stub: the descriptor fields are filled in by the bake (#1332).
+    /// Track the fill colour an image mask is painted in: the device operators set it, and a
+    /// `cs` or `sc` with 1, 3 or 4 components is read as gray, RGB or CMYK. A pattern or a colour
+    /// space this does not know leaves it alone. Stroke operators are not the fill.
+    fn fill_operator(&mut self, op: &Operation) {
+        let nums: Vec<f64> = op.operands.iter().filter_map(number).collect();
+        let unit = |v: f64| v.clamp(0.0, 1.0);
+        let byte = |v: f64| (unit(v) * 255.0).round() as u8;
+        let colour = match (op.operator.as_str(), nums.as_slice()) {
+            ("cs", _) => Some([0, 0, 0]),
+            ("g", [g]) | ("sc" | "scn", [g]) => Some([byte(*g); 3]),
+            ("rg", [r, g, b]) | ("sc" | "scn", [r, g, b]) => Some([byte(*r), byte(*g), byte(*b)]),
+            ("k", [c, m, y, k]) | ("sc" | "scn", [c, m, y, k]) => {
+                let rgb = |v: f64| byte((1.0 - unit(v)) * (1.0 - unit(*k)));
+                Some([rgb(*c), rgb(*m), rgb(*y)])
+            }
+            _ => None,
+        };
+        if let Some(c) = colour {
+            self.fill = c;
+        }
+    }
+
+    /// Record one painted image with the entries the bake reads. The encoded bytes are kept,
+    /// bounded by `max_images` and `max_image_bytes`.
     fn record_image(
         &mut self,
         name: Option<String>,
         ctm: &Matrix,
         operator: &str,
-        _stream: Option<&Object>,
+        stream: Option<&lopdf::Stream>,
     ) -> Result<(), PdfVectorError> {
+        if self.images.len() >= self.limits.max_images {
+            return Err(PdfVectorError::ImageLimitExceeded {
+                limit: self.limits.max_images,
+            });
+        }
+        let inline = name.is_none();
+        let raw = stream.map(|s| image_stream(self.doc, s, inline));
+        let kept = raw.as_ref().map_or(0, RawImage::byte_len);
+        self.image_bytes = self.image_bytes.saturating_add(kept);
+        if self.image_bytes > self.limits.max_image_bytes {
+            return Err(PdfVectorError::ImageBytesExceeded {
+                limit: self.limits.max_image_bytes,
+                observed: self.image_bytes,
+            });
+        }
+        let dict = raw.as_ref().map(|r| &r.dict);
+        let int = |key: &[u8]| {
+            dict.and_then(|d| d.get(key).ok())
+                .and_then(|o| o.as_i64().ok())
+                .and_then(|v| u32::try_from(v).ok())
+                .filter(|v| *v > 0)
+        };
+        let image_mask = matches!(
+            dict.and_then(|d| d.get(b"ImageMask").ok()),
+            Some(Object::Boolean(true))
+        );
+        let colour_space = dict
+            .and_then(|d| d.get(b"ColorSpace").ok())
+            .and_then(|o| match o {
+                Object::Name(n) => Some(String::from_utf8_lossy(n).into_owned()),
+                Object::Array(a) => a
+                    .first()
+                    .and_then(|f| f.as_name().ok())
+                    .map(|n| String::from_utf8_lossy(n).into_owned()),
+                _ => None,
+            });
+        let filters = dict
+            .and_then(|d| d.get(b"Filter").ok())
+            .map(|f| match f {
+                Object::Name(n) => vec![String::from_utf8_lossy(n).into_owned()],
+                Object::Array(a) => a
+                    .iter()
+                    .filter_map(|o| o.as_name().ok())
+                    .map(|n| String::from_utf8_lossy(n).into_owned())
+                    .collect(),
+                _ => Vec::new(),
+            })
+            .unwrap_or_default();
         self.images.push(PdfImagePlacement {
             name,
             ctm: ctm.0,
-            width: None,
-            height: None,
-            bits_per_component: None,
-            colour_space: None,
-            decode: None,
-            image_mask: false,
-            smask: false,
-            filters: Vec::new(),
+            width: int(b"Width"),
+            height: int(b"Height"),
+            bits_per_component: if image_mask {
+                Some(1)
+            } else {
+                int(b"BitsPerComponent")
+            },
+            colour_space,
+            decode: dict
+                .and_then(|d| d.get(b"Decode").ok())
+                .and_then(|o| o.as_array().ok())
+                .map(|a| a.iter().filter_map(number).collect()),
+            image_mask,
+            smask: dict.is_some_and(|d| d.has(b"SMask")),
+            filters,
             active_clips: self.clips.clone(),
             soft_masked: self.soft_mask,
-            fill_colour: [0, 0, 0],
+            fill_colour: self.fill,
             provenance: PdfProvenance {
                 page: self.page,
                 operator: operator.to_string(),
                 form_path: self.form_path.clone(),
                 sequence: self.out.len() as u64,
             },
-            raw: None,
+            raw,
         });
         Ok(())
     }
@@ -1366,7 +1622,7 @@ impl Run<'_> {
                 .is_some_and(|n| n == b"Image");
             if is_image {
                 let name = String::from_utf8_lossy(name).into_owned();
-                self.record_image(Some(name), ctm, "Do", Some(&Object::Stream(xobj.clone())))?;
+                self.record_image(Some(name), ctm, "Do", Some(xobj))?;
             }
             return Ok(());
         }
