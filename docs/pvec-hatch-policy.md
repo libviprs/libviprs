@@ -47,7 +47,7 @@ The solid versus pattern split of `HATCH` needs the fill kind from the reader, w
 
 ### Images (issue #1328)
 
-An image is not a fill, but the report that counts the fills is where "this page had pictures and none of them were carried" belongs, so the three image constructs sit in the same table. `PdfVectorPage::images` lists each painted image in content-stream order with the CTM that maps its unit square into page space (and the form path for an image inside a form). A DWG `IMAGE` arrives as `RawGeometry::Unmapped` with its frame in the reason (insertion point, U and V vectors, size in pixels, whether `SHOW_IMAGE` is set and whether its definition resolves as loaded). No placement is written for any of them yet: the PDF bake rules (`/SMask`, `/ImageMask`, `/Indexed`, ICC and Lab colour, `/Decode`, the CTM and the page flip) are the follow-up, and a DWG image has no pixels any reader here will fetch.
+An image is not a fill, but the report that counts the fills is where "this page had pictures and none of them were carried" belongs, so the three image constructs sit in the same table. `PdfVectorPage::images` lists each painted image in content-stream order with the CTM that maps its unit square into page space (and the form path for an image inside a form). A DWG `IMAGE` arrives as `RawGeometry::Unmapped` with its frame in the reason (insertion point, U and V vectors, size in pixels, whether `SHOW_IMAGE` is set and whether its definition resolves as loaded). The fill report does not place them. A PDF image gets its placement from `pvec::pdf_image` (the bake rules of issue #1332, `docs/pvec-raster-producer.md`), and a DWG image has no pixels any reader here will fetch, so it stays a frame in the report.
 
 ## Report
 

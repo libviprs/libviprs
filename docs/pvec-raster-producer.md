@@ -20,9 +20,25 @@ It is affine only when the raster's CRS is the calibration's native CRS and the 
 
 ## Images in the conversion report
 
-`PdfVectorPage::images` lists every painted image in content-stream order, forms expanded, with the CTM that maps the image's unit square into page space and, for an image inside a form, the form path. `FillReport` counts them beside the fill constructs (`PdfImageXObject`, `PdfInlineImage`). A DWG `IMAGE` arrives as `RawGeometry::Unmapped` with its frame in the reason (insertion point, U and V vectors, size, `show_image`, `definition_loaded`) and is counted as `DwgImage`; an image with `SHOW_IMAGE` clear or no loaded definition is reported the same way. No placement is written for any of them: the PDF bake rules (`/SMask`, `/ImageMask`, `/Indexed`, ICC, Lab and CalRGB, `/Decode`, the CTM and the page flip) are the first follow-up, and no reader here fetches the pixels a drawing names.
+`PdfVectorPage::images` lists every painted image in content-stream order, forms expanded, with the CTM that maps the image's unit square into page space, the form path, the clips and soft-mask flag in force and the entries the bake reads. `FillReport` counts them beside the fill constructs (`PdfImageXObject`, `PdfInlineImage`). A DWG `IMAGE` arrives as `RawGeometry::Unmapped` with its frame in the reason (insertion point, U and V vectors, size, `show_image`, `definition_loaded`) and is counted as `DwgImage`; an image with `SHOW_IMAGE` clear or no loaded definition is reported the same way, and no placement is written for it because no reader here fetches the pixels a drawing names. A PDF image gets a placement from `pvec::pdf_image` (next section).
 
 One limit I did not change: `lopdf` only parses inline images with an uncompressed body and a spelled-out device colour space (`/Gray`, `/RGB`, `/CMYK`), so a page with a filtered inline image still fails extraction as it did before.
+
+## PDF image placements (issue #1332)
+
+`pvec::pdf_image::bake_page_images` takes the images `PdfVectorPage::images` recorded and, for each one, decodes the stream, applies the bake rules of ADR 0018 and cuts the pyramid with `produce_raster_pyramid`. It returns the written rasters in content order (a `RasterId` is a position in that list), the refused ones with a typed error each, and a report where the images on the page equal the written plus the refused.
+
+- Colour: `DeviceGray`, `DeviceRGB` and `DeviceCMYK` at 1, 2, 4, 8 and 16 bits, `/Indexed` through its lookup, `/ICCBased` as the device space of its `/N`, `/CalGray`, `/CalRGB` and `/Lab` into sRGB by the standard formulas. 16 bits are reduced to 8 and reported (`bit-depth-reduced`); ICC, Cal, Lab and CMYK are reported `colour-space-approximated`. `/Decode` is applied to every component.
+- `/ImageMask true` is painted in the fill colour in force at the `Do` or `BI` (tracked from `g`, `rg`, `k` and `sc`/`scn` with one, three or four numbers), into RGBA, with `/Decode [1 0]` honoured. The unpainted pixels keep the fill colour and get alpha 0.
+- `/SMask` is resampled to the image size (nearest pixel centre) and written into alpha. An explicit `/Mask` is not applied and the note `explicit-mask-ignored` says so.
+- Streams: no filter, `FlateDecode` with the TIFF and PNG predictors, `DCTDecode` (decoded and re-tiled, `re-encoded-lossy`) and Flate over DCT. `JPXDecode`, `JBIG2Decode`, `CCITTFaxDecode` and every other filter are refused by name (`unsupported-filter:<name>`). I did not wire the `pdfium` decode route the issue allows for those three, so they stay refused until someone does.
+- Refused by name too: `/Separation`, `/DeviceN` and `/Pattern`, an image under a graphics-state soft mask (`gs-soft-mask`), a singular or non-finite CTM (`singular-ctm`), a fully clipped image, and more pixels than `PdfImageOptions::max_pixels`.
+- Placement: the unit square through the CTM, `[A/w -C/h B/w -D/h C+E D+F]` in `Transform2` order, composed with `PdfImageOptions::page_to_source` (the identity by default, because page space is already y-up with the displayed page's lower-left corner as the origin), `-0.0` normalised and checked against NP-19 (finite, linear entries at most 2^20, invertible).
+- Clips: every clip in force is intersected. A rectangle that is axis-aligned in pixel space and lands on pixel edges sets `visible_box` and leaves the pixels alone. Any other clip is rasterised at image resolution into alpha (pixel centres, the clip's own nonzero or even-odd rule, curves cut into 16 chords) and `visible_box` is the clips' bounding box inside the image. There is no anti-aliasing at the clip edge. A baked alpha needs PNG or WebP tiles, so JPEG tiles are refused for it (`raster-04-alpha-needs-lossless`).
+- Band: an image painted before every painted path is the underlay, after every one the overlay, and between paths it is the underlay with `interleaved-draw-order` in the report. That is the v1 limit the ADR records.
+- Limits: `PdfVectorLimits::max_images` and `max_image_bytes` bound what the page keeps for the bake.
+
+One limit that comes from `lopdf` and not from here: its content parser refuses an inline image that has no `/ColorSpace` (an inline image mask) as well as a filtered one, and that fails the page extraction as it did before this task.
 
 ## The pyramid producer (`raster_pvec::pyramid`)
 
