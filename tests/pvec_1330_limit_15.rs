@@ -17,7 +17,11 @@ fn the_cap_itself_passes_and_one_more_byte_is_refused() {
         let cap = max_tile_bytes(edge) as usize;
         assert!(check_tile_len(edge, cap).is_ok());
         match check_tile_len(edge, cap + 1) {
-            Err(RasterTileError::TooLong { len, cap: c, edge: e }) => {
+            Err(RasterTileError::TooLong {
+                len,
+                cap: c,
+                edge: e,
+            }) => {
                 assert_eq!((len, c, e), (cap as u64 + 1, cap as u64, edge));
             }
             other => panic!("{edge}: {other:?}"),
@@ -58,7 +62,9 @@ fn the_worst_honest_tile_stays_under_the_cap() {
 fn the_pyramid_runs_the_check_on_every_tile_it_keeps() {
     // Unreachable for honest output, so the proof is that the check is wired in: a pyramid of
     // noise at the smallest edge still passes, and its largest tile is under the cap.
-    use libviprs::raster_pvec::pyramid::{RasterPlacement, RasterPyramidOptions, produce_raster_pyramid};
+    use libviprs::raster_pvec::pyramid::{
+        RasterPlacement, RasterPyramidOptions, produce_raster_pyramid,
+    };
     use libviprs::{Layout, PyramidPlanner};
     let mut s = 7u32;
     let data: Vec<u8> = (0..300 * 300 * 4)
@@ -68,7 +74,9 @@ fn the_pyramid_runs_the_check_on_every_tile_it_keeps() {
         })
         .collect();
     let r = Raster::new(300, 300, PixelFormat::Rgba8, data).unwrap();
-    let plan = PyramidPlanner::new(300, 300, 256, 0, Layout::Google).unwrap().plan();
+    let plan = PyramidPlanner::new(300, 300, 256, 0, Layout::Google)
+        .unwrap()
+        .plan();
     let o = RasterPyramidOptions::new(RasterPlacement::Explicit([1.0, 0.0, 0.0, -1.0, 0.0, 300.0]));
     let p = produce_raster_pyramid(&r, &plan, &o).unwrap();
     let largest = p.tiles().map(|(_, _, _, b)| b.len()).max().unwrap();

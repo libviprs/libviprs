@@ -91,7 +91,7 @@ pub fn jpeg(bytes: &[u8]) -> Jpeg {
         assert_eq!(bytes[at], 0xFF, "a marker at {at}");
         let marker = bytes[at + 1];
         let len = u16::from_be_bytes([bytes[at + 2], bytes[at + 3]]) as usize;
-        if matches!(marker, 0xC0 | 0xC1 | 0xC2) {
+        if matches!(marker, 0xC0..=0xC2) {
             let d = &bytes[at + 4..];
             return Jpeg {
                 sof_offset: at,

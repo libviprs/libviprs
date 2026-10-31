@@ -23,7 +23,10 @@ const COLOUR_CHUNKS: [&[u8; 4]; 4] = [b"gAMA", b"cHRM", b"sRGB", b"iCCP"];
 
 fn assert_clean_png(bytes: &[u8], what: &str) {
     let h = tile_headers::png(bytes);
-    assert!(h.ends_at_iend, "{what}: IEND is the last chunk and the last byte");
+    assert!(
+        h.ends_at_iend,
+        "{what}: IEND is the last chunk and the last byte"
+    );
     assert_eq!(h.chunks.last(), Some(b"IEND"), "{what}");
     for c in COLOUR_CHUNKS {
         assert!(!h.has(c), "{what}: {}", String::from_utf8_lossy(c));
@@ -38,7 +41,10 @@ fn png_ends_at_iend_with_no_colour_chunk_on_both_writers() {
         // The `image` path.
         assert_clean_png(&r.encode_png(6).unwrap(), &format!("encode_png {pixel:?}"));
         // The sink path the pyramid uses.
-        assert_clean_png(&libviprs::sink::encode_png(&r).unwrap(), &format!("sink {pixel:?}"));
+        assert_clean_png(
+            &libviprs::sink::encode_png(&r).unwrap(),
+            &format!("sink {pixel:?}"),
+        );
     }
     // The hand-rolled writer.
     let g = noise(256, 256, PixelFormat::Gray8);
@@ -55,7 +61,10 @@ fn jpeg_frame_header_is_near_the_start_and_eoi_is_last() {
             let bytes = noise(256, 256, pixel).encode_jpeg(quality).unwrap();
             let h = tile_headers::jpeg(&bytes);
             assert_eq!(h.sof_marker, 0xC0, "baseline");
-            assert_eq!((h.width, h.height, h.precision, h.components), (256, 256, 8, nf));
+            assert_eq!(
+                (h.width, h.height, h.precision, h.components),
+                (256, 256, 8, nf)
+            );
             assert!(h.sof_offset < 64 * 1024, "SOF at {}", h.sof_offset);
             assert!(h.ends_in_eoi, "{pixel:?} q{quality}");
         }
@@ -68,7 +77,10 @@ fn the_jpeg_sof_offset_is_pinned() {
     // test says so, which matters because the sniffer's walk is bounded.
     let gray = noise(256, 256, PixelFormat::Gray8).encode_jpeg(85).unwrap();
     let rgb = noise(256, 256, PixelFormat::Rgb8).encode_jpeg(85).unwrap();
-    let (g, c) = (tile_headers::jpeg(&gray).sof_offset, tile_headers::jpeg(&rgb).sof_offset);
+    let (g, c) = (
+        tile_headers::jpeg(&gray).sof_offset,
+        tile_headers::jpeg(&rgb).sof_offset,
+    );
     assert!(g > 0 && c > g, "gray {g}, rgb {c}");
     assert_eq!((g, c), (PINNED_GRAY_SOF, PINNED_RGB_SOF));
 }

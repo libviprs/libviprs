@@ -229,13 +229,42 @@ impl Raster {
         Ok(out)
     }
 
-    /// Red stub (issue #1330).
+    /// Encode a `Gray8` raster as a 1-bit gray PNG (colour type 0, bit depth 1).
+    ///
+    /// A pixel at or above `threshold` is white (1), below it black (0). Eight pixels pack into
+    /// a byte, most significant bit first, and each row is padded to a whole byte. The file is
+    /// `IHDR`, one `IDAT` and `IEND`, not interlaced, with no colour chunk: it is the form
+    /// PVec's PNG sniffer accepts for a scanned plan (issue #1330). The bilevel form is an
+    /// encoding of `Gray8` and not a [`PixelFormat`], so nothing that matches on one changes.
     ///
     /// # Errors
     ///
-    /// Always, for now.
-    pub fn encode_png_bilevel(&self, _threshold: u8) -> Result<Vec<u8>, EncodeError> {
-        Err(EncodeError::encode("not written yet"))
+    /// [`EncodeError::Encode`] for any format but `Gray8`, or [`EncodeError::Io`] if DEFLATE fails.
+    pub fn encode_png_bilevel(&self, threshold: u8) -> Result<Vec<u8>, EncodeError> {
+        if self.format() != PixelFormat::Gray8 {
+            return Err(EncodeError::encode(format!(
+                "a bilevel PNG is made from Gray8, got {:?}",
+                self.format()
+            )));
+        }
+        let (width, height) = (self.width() as usize, self.height() as usize);
+        let row_bytes = width.div_ceil(8);
+        let mut raw = Vec::with_capacity((row_bytes + 1) * height);
+        for row in self.data().chunks_exact(width) {
+            raw.push(0); // filter type: None
+            raw.extend(row.chunks(8).map(|eight| {
+                eight.iter().enumerate().fold(0u8, |byte, (i, &v)| {
+                    byte | (u8::from(v >= threshold) << (7 - i))
+                })
+            }));
+        }
+        let idat = zlib_compress(&raw, 6)?;
+        let mut out = Vec::with_capacity(idat.len() + 64);
+        out.extend_from_slice(&PNG_SIGNATURE);
+        write_ihdr(&mut out, self.width(), self.height(), 1, 0, 0);
+        write_chunk(&mut out, b"IDAT", &idat);
+        write_chunk(&mut out, b"IEND", &[]);
+        Ok(out)
     }
 
     /// Encode the raster as an indexed (palette) PNG with at most `max_colours`

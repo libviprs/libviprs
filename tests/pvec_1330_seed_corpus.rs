@@ -39,14 +39,35 @@ fn tile(format: PixelFormat) -> Raster {
 
 /// Every seed: file name and bytes. The names say codec, channels and depth.
 fn seeds() -> Vec<(&'static str, Vec<u8>)> {
-    let webp = |r: &Raster| r.encode_webp(libviprs::webp::SaveOptions::default()).unwrap();
+    let webp = |r: &Raster| {
+        r.encode_webp(libviprs::webp::SaveOptions::default())
+            .unwrap()
+    };
     vec![
-        ("png-gray1.png", tile(PixelFormat::Gray8).encode_png_bilevel(128).unwrap()),
-        ("png-gray8.png", tile(PixelFormat::Gray8).encode_png(6).unwrap()),
-        ("png-rgb8.png", tile(PixelFormat::Rgb8).encode_png(6).unwrap()),
-        ("png-rgba8.png", tile(PixelFormat::Rgba8).encode_png(6).unwrap()),
-        ("jpeg-gray8-baseline.jpg", tile(PixelFormat::Gray8).encode_jpeg(85).unwrap()),
-        ("jpeg-rgb8-baseline.jpg", tile(PixelFormat::Rgb8).encode_jpeg(85).unwrap()),
+        (
+            "png-gray1.png",
+            tile(PixelFormat::Gray8).encode_png_bilevel(128).unwrap(),
+        ),
+        (
+            "png-gray8.png",
+            tile(PixelFormat::Gray8).encode_png(6).unwrap(),
+        ),
+        (
+            "png-rgb8.png",
+            tile(PixelFormat::Rgb8).encode_png(6).unwrap(),
+        ),
+        (
+            "png-rgba8.png",
+            tile(PixelFormat::Rgba8).encode_png(6).unwrap(),
+        ),
+        (
+            "jpeg-gray8-baseline.jpg",
+            tile(PixelFormat::Gray8).encode_jpeg(85).unwrap(),
+        ),
+        (
+            "jpeg-rgb8-baseline.jpg",
+            tile(PixelFormat::Rgb8).encode_jpeg(85).unwrap(),
+        ),
         ("webp-vp8l-rgb8.webp", webp(&tile(PixelFormat::Rgb8))),
         ("webp-vp8l-rgba8.webp", webp(&tile(PixelFormat::Rgba8))),
     ]
@@ -141,7 +162,10 @@ fn provenance_names_the_generator_and_every_seed() {
         return;
     }
     let text = std::fs::read_to_string(dir().join("PROVENANCE.md")).expect("PROVENANCE.md");
-    assert!(text.contains("tests/pvec_1330_seed_corpus.rs"), "names the generator");
+    assert!(
+        text.contains("tests/pvec_1330_seed_corpus.rs"),
+        "names the generator"
+    );
     assert!(text.contains("PVEC_SEEDS_BLESS"), "says how to regenerate");
     for (name, _) in seeds() {
         assert!(text.contains(name), "{name} is described");

@@ -42,13 +42,54 @@ fn encode(format: TileFormat, raster: &Raster) -> Vec<u8> {
 #[test]
 fn every_legal_row_round_trips_and_the_header_says_what_the_table_claims() {
     let rows = [
-        (TileFormat::Png, PixelFormat::Gray8, RasterCodec::Png, RasterChannels::Gray),
-        (TileFormat::Png, PixelFormat::Rgb8, RasterCodec::Png, RasterChannels::Rgb),
-        (TileFormat::Png, PixelFormat::Rgba8, RasterCodec::Png, RasterChannels::Rgba),
-        (TileFormat::Jpeg { quality: 85 }, PixelFormat::Gray8, RasterCodec::Jpeg, RasterChannels::Gray),
-        (TileFormat::Jpeg { quality: 85 }, PixelFormat::Rgb8, RasterCodec::Jpeg, RasterChannels::Rgb),
-        (TileFormat::Webp, PixelFormat::Rgb8, RasterCodec::Webp, RasterChannels::Rgb),
-        (TileFormat::Webp, PixelFormat::Rgba8, RasterCodec::Webp, RasterChannels::Rgba),
+        (
+            TileFormat::Png,
+            PixelFormat::Gray8,
+            RasterCodec::Png,
+            RasterChannels::Gray,
+        ),
+        (
+            TileFormat::Png,
+            PixelFormat::Rgb8,
+            RasterCodec::Png,
+            RasterChannels::Rgb,
+        ),
+        (
+            TileFormat::Png,
+            PixelFormat::Rgba8,
+            RasterCodec::Png,
+            RasterChannels::Rgba,
+        ),
+        (
+            TileFormat::Jpeg { quality: 85 },
+            PixelFormat::Gray8,
+            RasterCodec::Jpeg,
+            RasterChannels::Gray,
+        ),
+        (
+            TileFormat::Jpeg { quality: 85 },
+            PixelFormat::Rgb8,
+            RasterCodec::Jpeg,
+            RasterChannels::Rgb,
+        ),
+        (
+            TileFormat::Webp,
+            PixelFormat::Gray8,
+            RasterCodec::Webp,
+            RasterChannels::Gray,
+        ),
+        (
+            TileFormat::Webp,
+            PixelFormat::Rgb8,
+            RasterCodec::Webp,
+            RasterChannels::Rgb,
+        ),
+        (
+            TileFormat::Webp,
+            PixelFormat::Rgba8,
+            RasterCodec::Webp,
+            RasterChannels::Rgba,
+        ),
     ];
     for (format, pixel, codec, channels) in rows {
         assert_eq!(
@@ -65,11 +106,17 @@ fn every_legal_row_round_trips_and_the_header_says_what_the_table_claims() {
         match codec {
             RasterCodec::Png => {
                 let h = tile_headers::png(&bytes);
-                assert_eq!((h.width, h.height, h.bit_depth, h.channels()), (256, 256, 8, n));
+                assert_eq!(
+                    (h.width, h.height, h.bit_depth, h.channels()),
+                    (256, 256, 8, n)
+                );
             }
             RasterCodec::Jpeg => {
                 let h = tile_headers::jpeg(&bytes);
-                assert_eq!((h.width, h.height, h.precision, h.components), (256, 256, 8, n));
+                assert_eq!(
+                    (h.width, h.height, h.precision, h.components),
+                    (256, 256, 8, n)
+                );
             }
             _ => {
                 let h = tile_headers::webp(&bytes);
@@ -99,7 +146,10 @@ fn the_one_bit_writer_packs_a_known_pattern() {
     let raster = Raster::new(8, 8, PixelFormat::Gray8, data).unwrap();
     let bytes = raster.encode_png_bilevel(128).unwrap();
     let h = tile_headers::png(&bytes);
-    assert_eq!((h.width, h.height, h.bit_depth, h.colour_type, h.interlace), (8, 8, 1, 0, 0));
+    assert_eq!(
+        (h.width, h.height, h.bit_depth, h.colour_type, h.interlace),
+        (8, 8, 1, 0, 0)
+    );
     assert_eq!(h.chunks, vec![*b"IHDR", *b"IDAT", *b"IEND"]);
     assert!(h.ends_at_iend);
 
@@ -119,21 +169,34 @@ fn the_one_bit_writer_packs_a_known_pattern() {
         .to_luma8();
     for y in 0..8u32 {
         for x in 0..8u32 {
-            assert_eq!(back.get_pixel(x, y).0[0], if x >= y { 255 } else { 0 }, "({x},{y})");
+            assert_eq!(
+                back.get_pixel(x, y).0[0],
+                if x >= y { 255 } else { 0 },
+                "({x},{y})"
+            );
         }
     }
 }
 
 #[test]
 fn the_threshold_is_inclusive_and_a_non_gray_source_is_refused() {
-    let raster = Raster::new(8, 1, PixelFormat::Gray8, vec![0, 99, 100, 101, 127, 128, 254, 255]).unwrap();
+    let raster = Raster::new(
+        8,
+        1,
+        PixelFormat::Gray8,
+        vec![0, 99, 100, 101, 127, 128, 254, 255],
+    )
+    .unwrap();
     let bytes = raster.encode_png_bilevel(100).unwrap();
     let back = image::load_from_memory(&bytes).unwrap().to_luma8();
     let got: Vec<u8> = back.pixels().map(|p| p.0[0]).collect();
     assert_eq!(got, vec![0, 0, 255, 255, 255, 255, 255, 255]);
 
     let rgb = gradient(8, 8, PixelFormat::Rgb8);
-    assert!(rgb.encode_png_bilevel(128).is_err(), "only Gray8 has a bilevel form");
+    assert!(
+        rgb.encode_png_bilevel(128).is_err(),
+        "only Gray8 has a bilevel form"
+    );
 }
 
 #[test]
@@ -148,12 +211,30 @@ fn a_width_that_is_not_a_multiple_of_eight_pads_each_row() {
 #[test]
 fn every_refusal_is_named_and_keeps_its_source_chain() {
     let jpeg = TileFormat::Jpeg { quality: 85 };
-    assert!(matches!(tile_tags(TileFormat::Raw, PixelFormat::Gray8, 8), Err(RasterTileError::RawTiles)));
-    assert!(matches!(tile_tags(jpeg, PixelFormat::Rgba8, 8), Err(RasterTileError::JpegAlpha)));
-    assert!(matches!(tile_tags(jpeg, PixelFormat::Gray8, 1), Err(RasterTileError::BitDepth { .. })));
-    assert!(matches!(tile_tags(TileFormat::Webp, PixelFormat::Gray8, 1), Err(RasterTileError::BitDepth { .. })));
-    assert!(matches!(tile_tags(TileFormat::Png, PixelFormat::Rgb8, 1), Err(RasterTileError::BitDepth { .. })));
-    assert!(matches!(tile_tags(TileFormat::Png, PixelFormat::Gray8, 4), Err(RasterTileError::BitDepth { .. })));
+    assert!(matches!(
+        tile_tags(TileFormat::Raw, PixelFormat::Gray8, 8),
+        Err(RasterTileError::RawTiles)
+    ));
+    assert!(matches!(
+        tile_tags(jpeg, PixelFormat::Rgba8, 8),
+        Err(RasterTileError::JpegAlpha)
+    ));
+    assert!(matches!(
+        tile_tags(jpeg, PixelFormat::Gray8, 1),
+        Err(RasterTileError::BitDepth { .. })
+    ));
+    assert!(matches!(
+        tile_tags(TileFormat::Webp, PixelFormat::Gray8, 1),
+        Err(RasterTileError::BitDepth { .. })
+    ));
+    assert!(matches!(
+        tile_tags(TileFormat::Png, PixelFormat::Rgb8, 1),
+        Err(RasterTileError::BitDepth { .. })
+    ));
+    assert!(matches!(
+        tile_tags(TileFormat::Png, PixelFormat::Gray8, 4),
+        Err(RasterTileError::BitDepth { .. })
+    ));
     for sixteen in [PixelFormat::Gray16, PixelFormat::Rgb16, PixelFormat::Rgba16] {
         match tile_tags(TileFormat::Png, sixteen, 8) {
             Err(RasterTileError::SixteenBit(f)) => assert_eq!(f, sixteen),
@@ -183,18 +264,29 @@ fn a_tile_edge_outside_the_three_is_refused() {
 
 #[test]
 fn interlace_and_palette_never_come_out_of_the_pyramid_path() {
-    use libviprs::raster_pvec::pyramid::{RasterPlacement, RasterPyramidOptions, produce_raster_pyramid};
+    use libviprs::raster_pvec::pyramid::{
+        RasterPlacement, RasterPyramidOptions, produce_raster_pyramid,
+    };
     use libviprs::{Layout, PyramidPlanner};
 
     // The control: the two encoders exist, and the reader sees what they do.
     let raster = gradient(256, 256, PixelFormat::Rgb8);
-    assert_eq!(tile_headers::png(&raster.encode_png_interlaced().unwrap()).interlace, 1);
-    assert_eq!(tile_headers::png(&raster.encode_png_palette(16).unwrap()).colour_type, 3);
+    assert_eq!(
+        tile_headers::png(&raster.encode_png_interlaced().unwrap()).interlace,
+        1
+    );
+    assert_eq!(
+        tile_headers::png(&raster.encode_png_palette(16).unwrap()).colour_type,
+        3
+    );
 
     for pixel in [PixelFormat::Gray8, PixelFormat::Rgb8, PixelFormat::Rgba8] {
         let r = gradient(600, 300, pixel);
-        let plan = PyramidPlanner::new(600, 300, 256, 0, Layout::Google).unwrap().plan();
-        let opts = RasterPyramidOptions::new(RasterPlacement::Explicit([1.0, 0.0, 0.0, -1.0, 0.0, 300.0]));
+        let plan = PyramidPlanner::new(600, 300, 256, 0, Layout::Google)
+            .unwrap()
+            .plan();
+        let opts =
+            RasterPyramidOptions::new(RasterPlacement::Explicit([1.0, 0.0, 0.0, -1.0, 0.0, 300.0]));
         let p = produce_raster_pyramid(&r, &plan, &opts).unwrap();
         assert!(p.tiles().count() > 0);
         for (l, c, row, bytes) in p.tiles() {

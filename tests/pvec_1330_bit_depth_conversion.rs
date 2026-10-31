@@ -1,7 +1,9 @@
 //! Issue #1330: a 16-bit source is converted to 8 bits before tiling and the report says so,
 //! under the name `converted-bit-depth`. An 8-bit source gets no such line.
 
-use libviprs::raster_pvec::pyramid::{RasterPlacement, RasterPyramidOptions, produce_raster_pyramid};
+use libviprs::raster_pvec::pyramid::{
+    RasterPlacement, RasterPyramidOptions, produce_raster_pyramid,
+};
 use libviprs::{Layout, PixelFormat, PyramidPlanner, Raster};
 
 #[path = "common/tile_headers.rs"]
@@ -11,7 +13,9 @@ fn run(format: PixelFormat) -> libviprs::raster_pvec::pyramid::RasterPyramid {
     let bpp = format.bytes_per_pixel();
     let data: Vec<u8> = (0..300 * 200 * bpp).map(|i| (i % 253) as u8).collect();
     let r = Raster::new(300, 200, format, data).unwrap();
-    let plan = PyramidPlanner::new(300, 200, 256, 0, Layout::Google).unwrap().plan();
+    let plan = PyramidPlanner::new(300, 200, 256, 0, Layout::Google)
+        .unwrap()
+        .plan();
     let o = RasterPyramidOptions::new(RasterPlacement::Explicit([1.0, 0.0, 0.0, -1.0, 0.0, 200.0]));
     produce_raster_pyramid(&r, &plan, &o).unwrap()
 }
