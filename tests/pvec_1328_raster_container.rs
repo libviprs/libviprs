@@ -221,3 +221,84 @@ fn a_placement_pvec_refuses_is_a_typed_error_with_the_source_intact() {
         "the PVec error is the source"
     );
 }
+
+#[test]
+fn every_tile_variant_libviprs_writes_goes_through_the_writer() {
+    // The writer sniffs each tile's header (RASTER-03/04): PNG in gray, RGB and RGBA, baseline
+    // JPEG in gray and RGB, and lossless WebP in RGB and RGBA, edge tiles padded to full squares.
+    let cases = [
+        (
+            TileFormat::Png,
+            PixelFormat::Gray8,
+            PvecChannels::Gray,
+            TileCodec::Png,
+        ),
+        (
+            TileFormat::Png,
+            PixelFormat::Rgb8,
+            PvecChannels::Rgb,
+            TileCodec::Png,
+        ),
+        (
+            TileFormat::Png,
+            PixelFormat::Rgba8,
+            PvecChannels::Rgba,
+            TileCodec::Png,
+        ),
+        (
+            TileFormat::Jpeg { quality: 85 },
+            PixelFormat::Gray8,
+            PvecChannels::Gray,
+            TileCodec::Jpeg,
+        ),
+        (
+            TileFormat::Jpeg { quality: 85 },
+            PixelFormat::Rgb8,
+            PvecChannels::Rgb,
+            TileCodec::Jpeg,
+        ),
+        // An RGBA source under JPEG is flattened, so the placement says RGB.
+        (
+            TileFormat::Jpeg { quality: 85 },
+            PixelFormat::Rgba8,
+            PvecChannels::Rgb,
+            TileCodec::Jpeg,
+        ),
+        (
+            TileFormat::Webp,
+            PixelFormat::Rgb8,
+            PvecChannels::Rgb,
+            TileCodec::Webp,
+        ),
+        (
+            TileFormat::Webp,
+            PixelFormat::Rgba8,
+            PvecChannels::Rgba,
+            TileCodec::Webp,
+        ),
+    ];
+    for (tile_format, source, channels, codec) in cases {
+        let mut o =
+            RasterPyramidOptions::new(RasterPlacement::Explicit([1.0, 0.0, 0.0, -1.0, 0.0, 300.0]));
+        o.tile_format = tile_format;
+        let p = produce_raster_pyramid(&scan(400, 300, source), &plan(400, 300, 256), &o).unwrap();
+        let reader = through_pvec(std::slice::from_ref(&p));
+        let pl = &reader.raster_placements().unwrap()[0];
+        assert_eq!(
+            (pl.tile_codec, pl.pixel_format),
+            (codec, channels),
+            "{tile_format:?} {source:?}"
+        );
+        let id = pvec_facade::unstable::RasterId::new(0).unwrap();
+        let top = u32::from(p.levels) - 1;
+        let got = reader
+            .raster_tile(id, top, 1, 1)
+            .unwrap()
+            .expect("an edge tile is stored");
+        assert_eq!(
+            Some(got.as_slice()),
+            p.tile(top, 1, 1),
+            "{tile_format:?} {source:?}"
+        );
+    }
+}
