@@ -749,5 +749,9 @@ name = "pvec_1328_raster_container"
 required-features = ["pvec-raster"]
 
 [[test]]
+name = "pvec_1330_seed_sniffers"
+required-features = ["pvec-raster"]
+
+[[test]]
 name = "pvec_1332_pdf_images"
 required-features = ["pvec-raster"]

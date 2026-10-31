@@ -22,6 +22,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `PdfVectorPage::images` now carries the entries the bake reads, `PdfVectorLimits` gains
   `max_images` and `max_image_bytes`, `RasterPyramid` gains a `band`, and
   `raster_pvec::container::write_rasters` takes any iterator of pyramids.
+- **Tiles that pass PVec's sniffers** (issue #1330, RL1.1 of EPIC R-L, part of #1329).
+  `Raster::encode_png_bilevel(threshold)` writes a 1-bit gray PNG from a `Gray8` raster (an encoding,
+  not a new `PixelFormat`). `raster_pvec::tiles` holds the legal `(tile format, pixel format, bit depth)`
+  table with a typed refusal for every other combination (rendered to `docs/pvec-raster-tiles.md`),
+  and LIMIT-15 (`2 * 4 * edge^2 + 65,536` bytes) is checked on every tile `produce_raster_pyramid`
+  keeps, before anything reaches PVec's writer. A 16-bit source's conversion is now reported as
+  `converted-bit-depth: Gray16 -> Gray8`. The seed corpus for PVec's fuzz targets is under
+  `tests/fixtures/pvec-raster-seeds/` with its provenance.
 - **The GeoTransform in the PMTiles archive, the raster placement and the image counts** (issue
   #1328, R2.4 of EPIC R, ADR 0018 in libviprs/pvec). `PmTilesSink` can now store the source
   raster's `GeoTransform` in `vnd.libviprs` (`PmTilesSinkBuilder::geo_transform`, six coefficients

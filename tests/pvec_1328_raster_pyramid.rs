@@ -224,7 +224,10 @@ fn a_sixteen_bit_source_is_converted_and_the_conversion_is_named() {
     let p = produce_raster_pyramid(&raster, &plan(w, h, 256), &options()).unwrap();
     assert_eq!(p.channels, RasterChannels::Gray);
     assert_eq!(p.bit_depth, 8);
-    assert_eq!(p.report.conversions, vec!["Gray16 -> Gray8".to_string()]);
+    assert_eq!(
+        p.report.conversions,
+        vec!["converted-bit-depth: Gray16 -> Gray8".to_string()]
+    );
 
     // Rounded scaling, not the clipping cast: 65520 * 255 / 65535 rounds to 255, 32768 to 128.
     let tile = decode_png(p.tile(0, 0, 0).unwrap()).to_luma8();
