@@ -86,6 +86,7 @@ fn hex(b: &[u8]) -> String {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem
 fn bless_the_seeds_when_asked() {
     if std::env::var_os("PVEC_SEEDS_BLESS").is_none() {
         return;
@@ -99,6 +100,7 @@ fn bless_the_seeds_when_asked() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem
 fn the_committed_seeds_equal_what_the_generator_produces_today() {
     if std::env::var_os("PVEC_SEEDS_BLESS").is_some() {
         return;
@@ -115,6 +117,7 @@ fn the_committed_seeds_equal_what_the_generator_produces_today() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem
 fn sha256sums_matches_the_files_and_lists_nothing_else() {
     if std::env::var_os("PVEC_SEEDS_BLESS").is_some() {
         return;
@@ -157,6 +160,7 @@ fn every_seed_is_256_square_and_ends_where_its_stream_ends() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem
 fn provenance_names_the_generator_and_every_seed() {
     if std::env::var_os("PVEC_SEEDS_BLESS").is_some() {
         return;
