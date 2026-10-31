@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **1-bit tiles for bilevel PDF images** (issue #1332, RL2.1 of EPIC R-L). `RasterPyramidOptions`
+  takes `bilevel_threshold`, which cuts a gray PNG pyramid at one bit per pixel through
+  `Raster::encode_png_bilevel` (the collecting path and `PvecSink` both honour it). `bake_page_images`
+  sets it for a 1-bit gray image without alpha and the report counts it (`bilevel`). The refusals of
+  `CCITTFaxDecode`, `JBIG2Decode`, `JPXDecode`, `/DeviceN` and `/Pattern` are tested one by one.
+
 - **Opacity and layer index on a raster placement** (issue #1347, a slice of libviprs-cli#130).
   `RasterPyramidOptions` takes `opacity` (255 by default) and `layer_index` (none by default),
   `RasterPyramid` carries them, and `write_rasters` and `PvecSink` store them in the placement.

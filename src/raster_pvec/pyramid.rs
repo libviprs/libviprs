@@ -120,6 +120,12 @@ pub struct RasterPyramidOptions {
     pub opacity: u8,
     /// A row of the artifact's layer stream, or none.
     pub layer_index: Option<u32>,
+    /// Cut gray PNG tiles at one bit per pixel, a sample at or above this value being white
+    /// ([`Raster::encode_png_bilevel`](crate::Raster::encode_png_bilevel)). Only a `Gray8` source
+    /// with PNG tiles has a 1-bit row in the legal table; anything else is refused. The levels
+    /// below full resolution are averaged first and thresholded after, so they are a rendering
+    /// of the bilevel image and not a copy. `None` writes eight-bit gray.
+    pub bilevel_threshold: Option<u8>,
 }
 
 impl RasterPyramidOptions {
@@ -134,6 +140,7 @@ impl RasterPyramidOptions {
             placement,
             opacity: 255,
             layer_index: None,
+            bilevel_threshold: None,
         }
     }
 }
@@ -204,7 +211,7 @@ pub struct RasterPyramid {
     pub tile_codec: RasterCodec,
     /// The channels of a decoded tile.
     pub channels: RasterChannels,
-    /// Bits per channel. Always 8 from this producer.
+    /// Bits per channel: 8, or 1 when [`RasterPyramidOptions::bilevel_threshold`] was set.
     pub bit_depth: u8,
     /// `[a b c d tx ty]`, `-0.0` normalised.
     pub pixel_to_source: [f64; 6],
@@ -261,6 +268,7 @@ pub(crate) fn cut_tile(
     plan: &PyramidPlan,
     format: TileFormat,
     config: &Mutex<Option<EngineConfig>>,
+    bilevel: Option<u8>,
     tile: &Tile,
 ) -> Result<Option<Vec<u8>>, SinkError> {
     let c = tile.coord;
@@ -275,7 +283,13 @@ pub(crate) fn cut_tile(
         return Ok(None);
     }
     Ok(Some(match format {
-        TileFormat::Png => crate::sink::encode_png(&tile.raster)?,
+        TileFormat::Png => match bilevel {
+            Some(threshold) => tile
+                .raster
+                .encode_png_bilevel(threshold)
+                .map_err(|e| SinkError::Other(e.to_string()))?,
+            None => crate::sink::encode_png(&tile.raster)?,
+        },
         TileFormat::Jpeg { quality } => {
             let background = crate::sink::background_from(config);
             crate::sink::encode_jpeg(&tile.raster, quality, background)?
@@ -289,6 +303,7 @@ pub(crate) fn cut_tile(
 struct Collector {
     plan: PyramidPlan,
     format: TileFormat,
+    bilevel: Option<u8>,
     config: Mutex<Option<EngineConfig>>,
     tiles: Mutex<BTreeMap<(u32, u32, u32), Vec<u8>>>,
     dropped: AtomicU64,
@@ -296,7 +311,7 @@ struct Collector {
 
 impl TileSink for Collector {
     fn write_tile(&self, tile: &Tile) -> Result<(), SinkError> {
-        match cut_tile(&self.plan, self.format, &self.config, tile)? {
+        match cut_tile(&self.plan, self.format, &self.config, self.bilevel, tile)? {
             Some(bytes) => {
                 let c = tile.coord;
                 crate::poison::recover(&self.tiles).insert((c.level, c.col, c.row), bytes);
@@ -384,8 +399,13 @@ pub fn prepare_raster<'a>(
         RasterChannels::Rgb => PixelFormat::Rgb8,
         RasterChannels::Rgba => PixelFormat::Rgba8,
     };
+    let depth = if options.bilevel_threshold.is_some() {
+        1
+    } else {
+        8
+    };
     let (codec, channels) =
-        tile_tags(options.tile_format, decoded, 8).map_err(RasterPyramidError::Tile)?;
+        tile_tags(options.tile_format, decoded, depth).map_err(RasterPyramidError::Tile)?;
 
     let (width, height) = (raster.width(), raster.height());
     let plan = PyramidPlanner::new(width, height, edge, 0, Layout::Google)
@@ -414,7 +434,7 @@ pub fn prepare_raster<'a>(
             levels,
             tile_codec: codec,
             channels,
-            bit_depth: 8,
+            bit_depth: depth,
             pixel_to_source,
             visible_box: [0, 0, width, height],
             band: RasterBand::Underlay,
@@ -447,6 +467,7 @@ pub fn produce_raster_pyramid(
     let collector = Collector {
         plan: plan.clone(),
         format: options.tile_format,
+        bilevel: options.bilevel_threshold,
         config: Mutex::new(None),
         tiles: Mutex::new(BTreeMap::new()),
         dropped: AtomicU64::new(0),

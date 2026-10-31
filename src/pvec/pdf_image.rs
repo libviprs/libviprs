@@ -17,6 +17,7 @@
 //!   in force at the `Do` or `BI`, into RGBA, with the unpainted pixels transparent in that same
 //!   colour. `/SMask` is resampled to the image size by nearest pixel centre and written into
 //!   alpha, and an explicit `/Mask` is ignored and reported.
+//! * A 1-bit gray image with no alpha is cut into 1-bit PNG tiles (`bilevel-1-bit-tiles`).
 //! * Streams: no filter, `FlateDecode` (with the TIFF and PNG predictors), `DCTDecode` (decoded
 //!   and re-tiled, because the pyramid is a different grid; reported as a re-encode of a lossy
 //!   source) and Flate over DCT. `JPXDecode`, `JBIG2Decode`, `CCITTFaxDecode` and the rest are
@@ -100,6 +101,8 @@ pub enum PdfImageNote {
     Clipped,
     /// An explicit `/Mask` (colour key or stencil) was not applied.
     MaskIgnored,
+    /// A 1-bit gray image was cut into 1-bit tiles.
+    Bilevel,
 }
 
 impl PdfImageNote {
@@ -113,6 +116,7 @@ impl PdfImageNote {
             Self::Interleaved => "interleaved-draw-order",
             Self::Clipped => "clipped",
             Self::MaskIgnored => "explicit-mask-ignored",
+            Self::Bilevel => "bilevel-1-bit-tiles",
         }
     }
 }
@@ -233,6 +237,8 @@ pub struct PdfImageReport {
     pub clipped: u64,
     /// Written images whose explicit `/Mask` was ignored.
     pub mask_ignored: u64,
+    /// Written images cut into 1-bit tiles.
+    pub bilevel: u64,
 }
 
 impl PdfImageReport {
@@ -285,6 +291,7 @@ pub fn bake_page_images(page: &PdfVectorPage, options: &PdfImageOptions) -> PdfI
                         PdfImageNote::Interleaved => &mut r.interleaved,
                         PdfImageNote::Clipped => &mut r.clipped,
                         PdfImageNote::MaskIgnored => &mut r.mask_ignored,
+                        PdfImageNote::Bilevel => &mut r.bilevel,
                     };
                     *counter += 1;
                 }
@@ -360,6 +367,15 @@ fn bake_one(
         .plan();
     let mut pyramid_options = RasterPyramidOptions::new(RasterPlacement::Explicit(pixel_to_source));
     pyramid_options.tile_format = options.tile_format;
+    // A 1-bit gray source with no alpha is white or black and nothing between, so it keeps one
+    // bit per pixel (PNG only: a JPEG tile is eight-bit).
+    if decoded.bilevel
+        && decoded.channels == Channels::Gray
+        && options.tile_format == TileFormat::Png
+    {
+        pyramid_options.bilevel_threshold = Some(128);
+        notes.push(PdfImageNote::Bilevel);
+    }
     let mut pyramid =
         produce_raster_pyramid(&raster, &plan, &pyramid_options).map_err(PdfImageError::Pyramid)?;
     pyramid.visible_box = clips.visible_box;
