@@ -144,6 +144,14 @@ const WRITERS: &[(&str, Reach)] = &[
         },
     ),
     (
+        "encode.rs::encode_png_bilevel",
+        Reach::Unrouted {
+            why: "makes the 1-bit PNG tiles of a PVec raster pyramid from a Gray8 \
+                  raster and a threshold, and `Raster::save` has no way to say a \
+                  threshold, so the producer calls it directly (issue #1332)",
+        },
+    ),
+    (
         "encode.rs::save_png",
         Reach::Wired {
             extensions: &["png"],
@@ -771,10 +779,13 @@ fn every_unrouted_writer_is_still_unrouted_and_says_why() {
             _ => None,
         })
         .collect();
+    // DeepZoom (#958), and the 1-bit PNG tile writer the PVec raster pyramid
+    // calls directly (#1332), which `save` cannot reach because it has no way
+    // to be given a threshold.
     assert_eq!(
         unrouted.len(),
-        1,
-        "the sweep found one unrouted writer left; this is {unrouted:?}"
+        2,
+        "the sweep found two unrouted writers; this is {unrouted:?}"
     );
 
     for (key, why) in &unrouted {
