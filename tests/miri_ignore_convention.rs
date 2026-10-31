@@ -801,7 +801,8 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1091 adds 1: the `tests/pvec_api_surface.rs` check that no index or directory type is defined under `src/pvec`, which walks the source tree. It said 726 before this line moved.
 /// #1083 adds 1: the `tests/pvec_style_1083.rs` check that reads the geometry sources. It said 727 before this line moved.
 /// #1328 adds 4: the `tests/pmtiles_sink.rs` cells that write a georeferenced archive to a temp dir and read it back. It said 728 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 732;
+/// #1336 adds 1: the `tests/pvec_api_surface.rs` check that only the raster container names the PVec facade, which walks the source tree. It said 732 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 733;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {

@@ -246,6 +246,17 @@ const CELLS: &[Cell] = &[
         runtime_loaders: &[],
         vendored_native: BLAKE3_RAV1D,
     },
+    // PVec's facade for the raster stream (issue #1328): pure Rust, no `links`, nothing compiled.
+    Cell {
+        label: "host / pvec-raster",
+        target: HOST,
+        features: &["--features", "pvec-raster"],
+        edges: "normal,build",
+        links: &[RAYON],
+        discovery: &[],
+        runtime_loaders: &[],
+        vendored_native: BLAKE3,
+    },
     Cell {
         label: "host / jxl",
         target: HOST,
@@ -898,7 +909,12 @@ fn the_external_library_features_stay_opt_in() {
             cell.label
         );
 
-        let asked_for_pvec = cell.features.iter().any(|f| f.contains("pvec-normalized"))
+        // `pvec-raster` brings the PVec facade, and the facade depends on `pvec-geometry` and
+        // `pvec-numeric` itself, so it reaches both.
+        let asked_for_pvec = cell
+            .features
+            .iter()
+            .any(|f| f.contains("pvec-normalized") || f.contains("pvec-raster"))
             || cell.features.contains(&"--all-features");
         assert_eq!(
             contains(graph, "pvec-geometry"),

@@ -73,6 +73,10 @@
 //!   provider's `RawGeometry::Spline`, validated against PVec's numeric policy
 //!   (`pvec-numeric`). Needs no reader. Pure Rust; the PVec crate is a git dependency
 //!   pinned by revision.
+//! - **`pvec-raster`** — gates `raster_pvec::container`, which hands a raster pyramid's
+//!   tiles (untouched) and placement to PVec's writer and reads them back through its
+//!   reader (issue #1328). Pure Rust; the PVec facade is a git dependency pinned by
+//!   revision.
 //! - **`serde`** — adds public `Serialize` / `Deserialize` derives to the wire
 //!   and config types ([`PyramidPlan`], [`EngineConfig`], [`TileCoord`],
 //!   [`Layout`], and the rest) so an out-of-process caller can rebuild a job

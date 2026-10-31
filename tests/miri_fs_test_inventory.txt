@@ -492,6 +492,7 @@ annotated   fs-detected  tests/pvec_api_surface.rs::no_index_directory_or_stradd
 annotated   fs-detected  tests/pvec_api_surface.rs::no_pvec_path_under_src_is_outside_the_allowed_surface
 annotated   fs-detected  tests/pvec_api_surface.rs::only_the_semantic_crates_are_named_today
 annotated   fs-detected  tests/pvec_api_surface.rs::src_pvec_implements_no_curve_evaluation_knot_insertion_or_tessellation
+annotated   fs-detected  tests/pvec_api_surface.rs::the_facade_is_named_by_one_file_only
 annotated   fs-detected  tests/pvec_api_surface.rs::the_pvec_dependencies_stay_semantic_and_optional
 annotated   fs-detected  tests/pvec_dwg_spline_structural.rs::no_code_path_turns_a_spline_into_polylines_or_arcs
 annotated   fs-detected  tests/pvec_fidelity_1100.rs::there_is_one_enum_for_the_six_classes

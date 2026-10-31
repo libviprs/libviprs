@@ -25,7 +25,12 @@ use std::path::{Path, PathBuf};
 
 /// Crate roots libviprs may name. `pvec-geometry` and `pvec-numeric` are PVec's semantic
 /// crates (the curve model and the numeric policy under it).
-const ALLOWED_ROOTS: &[&str] = &["pvec_entity", "pvec_geometry", "pvec_numeric"];
+const ALLOWED_ROOTS: &[&str] = &[
+    "pvec_entity",
+    "pvec_facade",
+    "pvec_geometry",
+    "pvec_numeric",
+];
 
 /// Path segments that belong to PVec's physical layout. None may appear in a PVec path.
 const PHYSICAL_SEGMENTS: &[&str] = &[
@@ -324,7 +329,34 @@ fn only_the_semantic_crates_are_named_today() {
         }
     }
     let roots: Vec<_> = roots.into_iter().collect();
-    assert_eq!(roots, ["pvec_entity", "pvec_geometry", "pvec_numeric"]);
+    assert_eq!(
+        roots,
+        [
+            "pvec_entity",
+            "pvec_facade",
+            "pvec_geometry",
+            "pvec_numeric"
+        ]
+    );
+}
+
+/// The PVec facade (`pvec_facade`, the renamed `pvec` crate; issue #1328) is the writer funnel
+/// for the raster stream, and one file is allowed to name it: `src/raster_pvec/container.rs`.
+/// Everything else in libviprs goes through that file, so the set of PVec writer calls
+/// libviprs makes is the set in that file.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn the_facade_is_named_by_one_file_only() {
+    let mut named_in = std::collections::BTreeSet::new();
+    for f in src_files() {
+        let src = fs::read_to_string(&f).unwrap();
+        if pvec_paths(&src).iter().any(|p| p[0] == "pvec_facade") {
+            named_in.insert(f.strip_prefix(root()).unwrap().to_path_buf());
+        }
+    }
+    let want: std::collections::BTreeSet<PathBuf> =
+        [PathBuf::from("src/raster_pvec/container.rs")].into();
+    assert_eq!(named_in, want);
 }
 
 /// NG-10's prohibited constructs, as the names a function implementing them would carry.

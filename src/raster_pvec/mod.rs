@@ -8,6 +8,11 @@
 //!
 //! * [`placement`] composes `pixel -> source` from a stored `GeoTransform` and a calibration.
 //! * [`pyramid`] cuts and encodes the pyramid and returns the tiles and placement fields.
+//! * `container` (feature `pvec-raster`) hands them to PVec's writer, tiles untouched.
 
 pub mod placement;
 pub mod pyramid;
+
+#[cfg(feature = "pvec-raster")]
+#[cfg_attr(docsrs, doc(cfg(feature = "pvec-raster")))]
+pub mod container;
