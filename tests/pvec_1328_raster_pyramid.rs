@@ -38,7 +38,9 @@ fn gradient(w: u32, h: u32, format: PixelFormat) -> Raster {
 }
 
 fn plan(w: u32, h: u32, edge: u32) -> PyramidPlan {
-    PyramidPlanner::new(w, h, edge, 0, Layout::Google).unwrap().plan()
+    PyramidPlanner::new(w, h, edge, 0, Layout::Google)
+        .unwrap()
+        .plan()
 }
 
 fn decode_png(bytes: &[u8]) -> image::DynamicImage {
@@ -47,10 +49,8 @@ fn decode_png(bytes: &[u8]) -> image::DynamicImage {
 
 #[test]
 fn the_grid_follows_raster_md_and_padding_tiles_are_dropped() {
-    // 600 x 300 at edge 256: levels = 2 (2^1 * 256 >= 600), level 1 is 600 x 300 = 3 x 2 tiles,
-    // level 0 is 300 x 150 = 2 x 1. The Google grid is 2 x 2 at level 1 and 1 x 1 at level 0,
-    // so the grid is smaller than the Google one at level 0 (cols 2 > 1) - nothing to drop there -
-    // and wider at level 1 (3 > 2). Use a case where the Google grid is the bigger one instead.
+    // 300 x 100 at edge 256: two levels (2 * 256 >= 300). Level 1 is 300 x 100, so 2 x 1 tiles
+    // against a 2 x 2 Google grid, and level 0 is 150 x 50, one tile.
     let raster = gradient(300, 100, PixelFormat::Gray8);
     let p = produce_raster_pyramid(&raster, &plan(300, 100, 256), &options()).unwrap();
     assert_eq!(p.levels, 2);
@@ -68,14 +68,19 @@ fn every_tile_is_the_planners_tile_and_a_lossless_tile_decodes_to_its_pixels() {
     let (w, h) = (700u32, 530u32);
     let raster = gradient(w, h, PixelFormat::Rgb8);
     let p = produce_raster_pyramid(&raster, &plan(w, h, 256), &options()).unwrap();
-    assert_eq!((p.tile_codec, p.channels, p.bit_depth), (RasterCodec::Png, RasterChannels::Rgb, 8));
+    assert_eq!(
+        (p.tile_codec, p.channels, p.bit_depth),
+        (RasterCodec::Png, RasterChannels::Rgb, 8)
+    );
 
     let top = p.levels as u32 - 1;
     let (cols, rows) = p.grid(top).unwrap();
     assert_eq!((cols, rows), (3, 3));
     for row in 0..rows {
         for col in 0..cols {
-            let bytes = p.tile(top, col, row).expect("a full resolution tile is stored");
+            let bytes = p
+                .tile(top, col, row)
+                .expect("a full resolution tile is stored");
             let tile = decode_png(bytes).to_rgb8();
             assert_eq!(tile.dimensions(), (256, 256), "every tile is a full square");
             for ty in 0..256u32 {
@@ -84,7 +89,11 @@ fn every_tile_is_the_planners_tile_and_a_lossless_tile_decodes_to_its_pixels() {
                     let got = tile.get_pixel(tx, ty).0;
                     let want = if x < w && y < h {
                         let off = (y as usize * w as usize + x as usize) * 3;
-                        [raster.data()[off], raster.data()[off + 1], raster.data()[off + 2]]
+                        [
+                            raster.data()[off],
+                            raster.data()[off + 1],
+                            raster.data()[off + 2],
+                        ]
                     } else {
                         [255, 255, 255] // the padded margin is the background
                     };
@@ -115,7 +124,10 @@ fn skip_blanks_leaves_a_tile_not_stored() {
     let skipped = produce_raster_pyramid(&raster, &plan(w, h, 256), &o).unwrap();
 
     assert!(all.tile(1, 1, 0).is_some(), "stored when blanks are kept");
-    assert!(skipped.tile(1, 1, 0).is_none(), "the blank tile is not stored");
+    assert!(
+        skipped.tile(1, 1, 0).is_none(),
+        "the blank tile is not stored"
+    );
     assert!(skipped.tile(1, 0, 0).is_some(), "a tile with content is");
     assert_eq!(skipped.report.not_stored_tiles, 1);
     assert_eq!(all.report.not_stored_tiles, 0);
@@ -132,7 +144,9 @@ fn the_refusals_are_by_name() {
         produce_raster_pyramid(&raster, &p256, &o),
         Err(RasterPyramidError::PlaceholderBlanks)
     ));
-    o.blank_strategy = BlankTileStrategy::PlaceholderWithTolerance { max_channel_delta: 3 };
+    o.blank_strategy = BlankTileStrategy::PlaceholderWithTolerance {
+        max_channel_delta: 3,
+    };
     assert!(matches!(
         produce_raster_pyramid(&raster, &p256, &o),
         Err(RasterPyramidError::PlaceholderBlanks)
@@ -146,7 +160,9 @@ fn the_refusals_are_by_name() {
     ));
 
     for bad in [128, 255, 300, 2048] {
-        let big = PyramidPlanner::new(300, 100, bad, 0, Layout::Google).unwrap().plan();
+        let big = PyramidPlanner::new(300, 100, bad, 0, Layout::Google)
+            .unwrap()
+            .plan();
         assert!(
             matches!(
                 produce_raster_pyramid(&raster, &big, &options()),
@@ -214,8 +230,14 @@ fn a_sixteen_bit_source_is_converted_and_the_conversion_is_named() {
     let tile = decode_png(p.tile(0, 0, 0).unwrap()).to_luma8();
     assert_eq!(tile.get_pixel(0, 0).0[0], 0);
     let mid = (32_768u32 / 16) as usize; // pixel index whose 16-bit value is 32768
-    assert_eq!(tile.get_pixel((mid % 64) as u32, (mid / 64) as u32).0[0], 128);
-    assert_eq!(tile.get_pixel(63, 63).0[0], ((65_520u32 * 255 + 32_767) / 65_535) as u8);
+    assert_eq!(
+        tile.get_pixel((mid % 64) as u32, (mid / 64) as u32).0[0],
+        128
+    );
+    assert_eq!(
+        tile.get_pixel(63, 63).0[0],
+        ((65_520u32 * 255 + 32_767) / 65_535) as u8
+    );
 
     // The digest is of the samples as received, before the conversion.
     let want: [u8; 32] = Sha256::digest(raster.data()).into();
@@ -228,7 +250,10 @@ fn a_jpeg_tile_of_an_rgba_source_says_it_is_rgb() {
     let mut o = options();
     o.tile_format = TileFormat::Jpeg { quality: 90 };
     let p = produce_raster_pyramid(&raster, &plan(300, 100, 256), &o).unwrap();
-    assert_eq!((p.tile_codec, p.channels), (RasterCodec::Jpeg, RasterChannels::Rgb));
+    assert_eq!(
+        (p.tile_codec, p.channels),
+        (RasterCodec::Jpeg, RasterChannels::Rgb)
+    );
     assert_eq!(p.report.conversions.len(), 1);
     let bytes = p.tile(1, 0, 0).unwrap();
     assert_eq!(&bytes[..2], &[0xFF, 0xD8], "a JPEG");
@@ -238,9 +263,8 @@ fn a_jpeg_tile_of_an_rgba_source_says_it_is_rgb() {
 #[test]
 fn the_placement_is_explicit_or_composed_and_normalised() {
     let raster = gradient(300, 100, PixelFormat::Gray8);
-    let mut o = RasterPyramidOptions::new(RasterPlacement::Explicit([
-        1.0, -0.0, 0.0, -1.0, 5.0, 7.0,
-    ]));
+    let mut o =
+        RasterPyramidOptions::new(RasterPlacement::Explicit([1.0, -0.0, 0.0, -1.0, 5.0, 7.0]));
     let p = produce_raster_pyramid(&raster, &plan(300, 100, 256), &o).unwrap();
     assert_eq!(
         p.pixel_to_source.map(f64::to_bits),

@@ -17,8 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pixel to source map from that transform and a drawing calibration in PVec's `Transform2` order
   (a raster in another CRS or under a projective calibration is a typed refusal, never a
   resample), `PdfVectorPage::images` counts image XObjects and inline images with their CTMs, and
-  a DWG `IMAGE` is reported as an `Unmapped` record carrying its frame. No placement is written
-  for a PDF or DWG image yet. `serde_json` now builds with `float_roundtrip`.
+  a DWG `IMAGE` is reported as an `Unmapped` record carrying its frame, and
+  `pvec::raster_pyramid::produce_raster_pyramid` cuts a raster into the tiles and placement fields
+  a PVec raster stream stores (Google layout, centring and overlap forced off, padding tiles
+  dropped, `skip_blanks` as a not-stored tile, Placeholder and Raw refused). No placement is written
+  for a PDF or DWG image yet, and the hand-off to PVec's writer waits on libviprs/pvec#218. `serde_json` now builds with `float_roundtrip`.
 - **Basic DWG entities with a -z extrusion normal** (issue #1298, follow-up to #1073). A polyline, circle,
   arc or ellipse whose normal is exactly (0, 0, -1) is now mapped to world space (a mirror about the y
   axis through PVec's `Transform2`, elevation negated) instead of refused. Any other normal is 3D and
