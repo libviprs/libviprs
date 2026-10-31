@@ -302,3 +302,36 @@ fn every_tile_variant_libviprs_writes_goes_through_the_writer() {
         );
     }
 }
+
+#[test]
+fn the_pinned_writer_sniffs_tiles_before_it_stores_them() {
+    // The one-byte marker `BlankTileStrategy::Placeholder` writes is not a tile, and neither is a
+    // PNG that says it is the wrong size. The pinned PVec revision has to refuse both at write
+    // time (RASTER-03), which is how this test tells a pin without the sniffers from one with.
+    use pvec_facade::unstable::{Band, Placement, RasterId, TileIn};
+    let placement = Placement {
+        pixel_to_source: [1.0, 0.0, 0.0, -1.0, 0.0, 256.0],
+        width: 256,
+        height: 256,
+        visible_box: [0, 0, 256, 256],
+        tile_edge: 256,
+        levels: 1,
+        tile_codec: TileCodec::Png,
+        pixel_format: PvecChannels::Gray,
+        bit_depth: 8,
+        opacity: 255,
+        band: Band::Underlay,
+        layer_index: None,
+        source_digest: None,
+        attribution: String::new(),
+    };
+    for bytes in [vec![0u8], b"\x89PNG\r\n\x1a\n not a png".to_vec()] {
+        let mut w = PvecWriter::new(manifest()).unwrap();
+        outline(&mut w);
+        w.rasters(std::slice::from_ref(&placement)).unwrap();
+        let refused = w
+            .raster_tiles(RasterId::new(0).unwrap(), vec![TileIn { level: 0, col: 0, row: 0, bytes }])
+            .and_then(|()| w.finish().map(|_| ()));
+        assert!(refused.is_err(), "a tile that is not an image of the right size is refused");
+    }
+}
