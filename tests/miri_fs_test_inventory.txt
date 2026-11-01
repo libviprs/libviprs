@@ -530,6 +530,12 @@ annotated   fs-detected  tests/pvec_1378_xref_facet.rs::pvec_1378_nested_xrefs_a
 annotated   fs-detected  tests/pvec_1378_xref_facet.rs::pvec_1378_resolve_opens_and_flattens_the_attached_drawing
 annotated   fs-detected  tests/pvec_1378_xref_facet.rs::pvec_1378_the_flattener_reports_an_xref_insert_instead_of_expanding_it_to_nothing
 annotated   fs-detected  tests/pvec_1378_xref_facet.rs::pvec_1378_the_provider_lists_xref_block_records_and_claims_the_facet
+annotated   fs-detected  tests/pvec_1413_convert.rs::issue_1413_a_conversion_publishes_the_artifact_and_a_report_with_the_fixtures_counts
+annotated   fs-detected  tests/pvec_1413_convert.rs::issue_1413_a_precancelled_run_returns_cancelled_and_creates_no_file
+annotated   fs-detected  tests/pvec_1413_convert.rs::issue_1413_a_unit_pvec_cannot_declare_reaches_the_caller_through_the_source_chain
+annotated   fs-detected  tests/pvec_1413_convert.rs::issue_1413_an_unopenable_source_keeps_the_provider_error_as_the_source
+annotated   fs-detected  tests/pvec_1413_convert.rs::issue_1413_the_report_is_part_of_the_output_and_matches_the_entities_written
+annotated   fs-detected  tests/pvec_1413_convert.rs::issue_1413_two_runs_publish_the_same_bytes
 annotated   fs-detected  tests/pvec_api_surface.rs::no_index_directory_or_straddler_type_is_defined_under_src_pvec
 annotated   fs-detected  tests/pvec_api_surface.rs::no_pvec_path_under_src_is_outside_the_allowed_surface
 annotated   fs-detected  tests/pvec_api_surface.rs::no_writer_call_is_made_outside_the_funnel
