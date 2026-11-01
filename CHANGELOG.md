@@ -16,6 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The provider xref facet and xref open-and-flatten** (issue #1378, part of #1079). `DwgProvider::xref_blocks`
+  and `Facet::XrefAttachments` surface the drawing's xref block records (acadrust fills them),
+  `XrefRef::discover` builds the references from INSERTs so nobody hand-builds one, and
+  `XrefSession::open_and_flatten` opens the cleared file through a provider and flattens it under
+  the shared depth and cycle checks, nested xrefs included. The flattener now reports an INSERT of
+  an xref block as `SkipReason::ExternalReference` instead of expanding it to nothing.
 - **The PDF filter seam** (issue #1362, follow-up 1/6 to #1332, part of #1329). The image decoder
   now goes through `FilterInput`, `FilterOutput` and one `decode_filter` `match`, with a module per
   codec under `src/pvec/pdf_filters/` (`dct` moved in, `ccitt`, `jbig2` and `jpx` are stubs). No

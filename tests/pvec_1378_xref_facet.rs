@@ -10,7 +10,7 @@ use std::fs;
 use std::path::Path;
 
 use acadrust::entities::{Insert, Line};
-use acadrust::tables::BlockRecord;
+use acadrust::tables::{BlockRecord, Layer};
 use acadrust::types::Vector3;
 use acadrust::{CadDocument, DwgWriter, EntityType};
 use libviprs::cad::CadSource;
@@ -39,6 +39,9 @@ fn drawing(len: f64, xrefs: &[(&str, &str)]) -> Vec<u8> {
         0.0, 0.0, 0.0, len, 0.0, 0.0,
     )))
     .unwrap();
+    if !xrefs.is_empty() {
+        doc.layers.add(Layer::new("A-XREF")).unwrap();
+    }
     for (name, path) in xrefs {
         doc.block_records
             .add(xref_record(name, path, false))

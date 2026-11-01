@@ -322,7 +322,19 @@ impl<'a, P: DwgProvider + ?Sized> BlockResolver<'a, P> {
         sink: &mut S,
         lineage: &mut LineageStore,
     ) -> Result<Flattened, FlattenError> {
+        // An xref block record owns no entities, so expanding it would be silent. A provider
+        // that cannot list them leaves the set empty, as before.
+        let xrefs = self
+            .provider
+            .xref_blocks()
+            .map(|v| {
+                v.into_iter()
+                    .map(|x| x.block_name.to_ascii_lowercase())
+                    .collect()
+            })
+            .unwrap_or_default();
         let mut walk = Walk {
+            xrefs,
             guard: SourceGuard::new(self.bounds.limits),
             sink,
             lineage,
@@ -504,6 +516,8 @@ impl GridFrame {
 }
 
 struct Walk<'s, S: ProvenanceSink> {
+    /// Lowercased names of the external-reference block records.
+    xrefs: std::collections::BTreeSet<String>,
     guard: SourceGuard,
     sink: &'s mut S,
     lineage: &'s mut LineageStore,
@@ -533,6 +547,14 @@ impl<S: ProvenanceSink> Walk<'_, S> {
                 reason,
             });
         };
+        if self.xrefs.contains(&r.block_name.to_ascii_lowercase()) {
+            skip(
+                self,
+                SkipReason::ExternalReference,
+                FidelityClass::Unsupported,
+            );
+            return Ok(None);
+        }
         let Some(handle) = entity.provenance.handle else {
             skip(
                 self,

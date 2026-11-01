@@ -13,15 +13,20 @@
 //! Resolving reaches outside the input file, so it is the caller's decision, hence
 //! the default. The attachment path is confined lexically under a caller-supplied
 //! root by [`confine`] before anything touches the disk. That check does not follow
-//! symlinks, and opening the file is the caller's. Opening through
-//! `DwgProvider` and flattening under N4.4's bounds is #1283.
+//! symlinks. [`XrefRef::discover`] builds the references from the provider's xref block
+//! records, and [`XrefSession::open_and_flatten`] opens the cleared file through a provider and
+//! flattens its model space under N4.4's bounds (issue #1378). The flattener reports an INSERT
+//! of an xref block as [`SkipReason::ExternalReference`](super::flatten::SkipReason) rather than
+//! expanding it to nothing.
 
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
 use super::limits::{LimitError, SourceGuard};
-use super::provider::{ArrayGrid, DwgProvider, ProviderError, RawEntity, SourceTransform};
+use super::provider::{
+    ArrayGrid, DwgProvider, ProviderError, RawEntity, RawGeometry, SourceTransform,
+};
 
 /// What to do with an attached drawing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -62,8 +67,25 @@ impl XrefRef {
         provider: &(impl DwgProvider + ?Sized),
         entities: &[RawEntity],
     ) -> Result<Vec<XrefRef>, ProviderError> {
-        let _ = (provider, entities);
-        Ok(Vec::new())
+        let blocks = provider.xref_blocks()?;
+        Ok(entities
+            .iter()
+            .filter_map(|e| {
+                let RawGeometry::Insert(r) = &e.geometry else {
+                    return None;
+                };
+                let att = blocks
+                    .iter()
+                    .find(|b| b.block_name.eq_ignore_ascii_case(&r.block_name))?;
+                Some(XrefRef {
+                    name: att.block_name.clone(),
+                    path: att.path.clone(),
+                    transform: r.transform,
+                    layer: e.provenance.layer.clone(),
+                    grid: r.grid,
+                })
+            })
+            .collect())
     }
 }
 
@@ -384,7 +406,81 @@ impl XrefSession {
         xref: &XrefRef,
         bounds: super::flatten::FlattenBounds,
     ) -> Result<XrefOpened, XrefError> {
-        let _ = (guard, xref, bounds);
-        Ok(XrefOpened::Omitted(0))
+        let resolved = match self.admit(guard, xref)? {
+            XrefOutcome::Resolve(r) => r,
+            XrefOutcome::Omitted(i) => return Ok(XrefOpened::Omitted(i)),
+        };
+        // `admit` entered the nested drawing, so it is left again whatever happens below.
+        let result = self.flatten_resolved::<P>(guard, resolved, bounds);
+        self.release(guard);
+        result.map(XrefOpened::Flattened)
+    }
+
+    fn flatten_resolved<P: DwgProvider>(
+        &mut self,
+        guard: &mut SourceGuard,
+        resolved: ResolvedXref,
+        bounds: super::flatten::FlattenBounds,
+    ) -> Result<FlattenedXref, XrefError> {
+        use super::flatten::{BlockResolver, LineageStore};
+        use super::provenance::NoProvenance;
+        use super::provider::{EntityScope, LayoutKind};
+        use crate::cad::CadSource;
+        let open_error = |detail: String| XrefError::Open {
+            name: resolved.name.clone(),
+            path: resolved.path.clone(),
+            detail,
+        };
+        let provider =
+            P::open(CadSource::Path(&resolved.path)).map_err(|e| open_error(e.to_string()))?;
+        let layout = provider
+            .layouts()
+            .map_err(|e| open_error(e.to_string()))?
+            .into_iter()
+            .find(|l| l.kind == LayoutKind::Model)
+            .ok_or_else(|| open_error("the drawing has no model space".into()))?;
+        let scope = EntityScope::Layout(layout.id);
+        let entities = provider
+            .entities(&scope)
+            .and_then(|mut c| c.collect_all())
+            .map_err(|e| open_error(e.to_string()))?;
+        // A provider that cannot list xref blocks attaches nothing further.
+        let mut nested = Vec::new();
+        for x in XrefRef::discover(&provider, &entities).unwrap_or_default() {
+            if let XrefOpened::Flattened(f) = self.open_and_flatten::<P>(guard, &x, bounds)? {
+                nested.push(f);
+            }
+        }
+        let flattened = BlockResolver::new(&provider, bounds)
+            .flatten(
+                &scope,
+                &resolved.path.to_string_lossy(),
+                &layout.name,
+                &mut NoProvenance,
+                &mut LineageStore::new(),
+            )
+            .map_err(|e| match e {
+                super::flatten::FlattenError::Limit {
+                    limit,
+                    observed,
+                    ceiling,
+                    ..
+                } => XrefError::Limit(LimitError::Exceeded {
+                    limit,
+                    observed,
+                    ceiling,
+                }),
+                other => XrefError::Flatten {
+                    name: resolved.name.clone(),
+                    detail: other.to_string(),
+                },
+            })?;
+        Ok(FlattenedXref {
+            name: resolved.name,
+            path: resolved.path,
+            depth: resolved.depth,
+            flattened,
+            nested,
+        })
     }
 }
