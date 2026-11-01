@@ -1,0 +1,13 @@
+{
+ "schema": 1,
+ "pvec_rev": "b9f441618153d256777121a6a1518b15e7f42099",
+ "container": {"writes": "1.0", "major": 1},
+ "capabilities_written": [5, 6, 7, 8, 9, 10, 11, 12],
+ "providers": {
+  "acadrust": {
+   "crate_rev": "72af48970e306ef1d50dd751b227df2b4fc3fb99",
+   "minimum": "AC1014",
+   "dwg_versions": ["AC1014", "AC1015", "AC1018", "AC1021", "AC1024", "AC1027", "AC1032"]
+  }
+ }
+}
