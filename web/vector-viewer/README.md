@@ -70,5 +70,7 @@ Snapshots are Chromium on Linux with software GL (`e2e/__screenshots__/`).
 
 ## On a phone
 
-The same archive and the same style file work in MapLibre Native. The details, and what a mobile app has to
-do for offline use, are in the L2.4 conformance work.
+The same archive and the same style file work in MapLibre Native, in remote Range mode
+(`pmtiles://https://...`) and in local file mode (`pmtiles://file:///...`).
+
+PMTiles is not handled by MapLibre Native offline-pack caching, so offline means the app downloads the whole archive itself and then opens the local file. `docs/mobile-pmtiles.md` has the details and what was checked on Android.

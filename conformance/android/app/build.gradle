@@ -1,0 +1,35 @@
+plugins { id 'com.android.application' }
+
+// The style is the one the Rust crate and the web viewer use, copied at build time, never edited.
+def sharedStyle = rootProject.file('../../src/vector/black_on_white.style.json')
+def styleDir = layout.buildDirectory.dir('generated/style')
+tasks.register('copySharedStyle', Copy) {
+    from(sharedStyle)
+    into(styleDir)
+}
+
+android {
+    namespace 'org.libviprs.conformance'
+    compileSdk 34
+    defaultConfig {
+        applicationId 'org.libviprs.conformance'
+        minSdk 24
+        targetSdk 34
+        versionCode 1
+        versionName '1'
+        testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
+    }
+    sourceSets.main.assets.srcDir(styleDir)
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+tasks.matching { it.name.startsWith('merge') && it.name.endsWith('Assets') }.configureEach { dependsOn 'copySharedStyle' }
+
+dependencies {
+    implementation 'org.maplibre.gl:android-sdk:13.7.1'
+    androidTestImplementation 'androidx.test:core:1.5.0'
+    androidTestImplementation 'androidx.test:runner:1.5.2'
+    androidTestImplementation 'androidx.test.ext:junit:1.1.5'
+}
