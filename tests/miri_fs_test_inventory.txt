@@ -597,6 +597,8 @@ annotated   not-detected tests/pvec_1439_view_limits.rs::the_default_limits_stil
 annotated   fs-detected  tests/pvec_1437_fuzz_seeds.rs::the_clip_seed_corpus_runs_clean
 annotated   fs-detected  tests/pvec_1437_fuzz_seeds.rs::the_provider_seed_corpus_runs_clean
 annotated   fs-detected  tests/pvec_1437_fuzz_seeds.rs::the_spline_seed_corpus_runs_clean
+annotated   fs-detected  tests/pvec_1446_write_refusal.rs::a_drawing_with_one_unstorable_curve_still_converts_the_rest
+annotated   fs-detected  tests/pvec_1446_write_refusal.rs::the_report_counts_each_entity_pvec_refused_against_that_entity
 annotated   fs-detected  tests/pvec_api_surface.rs::no_index_directory_or_straddler_type_is_defined_under_src_pvec
 annotated   fs-detected  tests/pvec_api_surface.rs::no_pvec_path_under_src_is_outside_the_allowed_surface
 annotated   fs-detected  tests/pvec_api_surface.rs::no_writer_call_is_made_outside_the_funnel
