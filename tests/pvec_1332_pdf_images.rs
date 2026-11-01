@@ -358,7 +358,7 @@ fn refused_reason(bytes: &[u8]) -> (PdfImageError, String) {
 }
 
 #[test]
-fn a_jpx_image_is_refused_by_name() {
+fn a_jpx_image_is_not_enabled_by_name() {
     let s = image(
         2,
         2,
@@ -367,10 +367,10 @@ fn a_jpx_image_is_refused_by_name() {
     );
     let (e, reason) = refused_reason(&one(s, "q 2 0 0 2 0 0 cm /Im1 Do Q"));
     assert!(
-        matches!(&e, PdfImageError::UnsupportedFilter(n) if n == "JPXDecode"),
+        matches!(&e, PdfImageError::FilterNotEnabled { filter, .. } if filter == "JPXDecode"),
         "{e:?}"
     );
-    assert_eq!(reason, "unsupported-filter:JPXDecode");
+    assert_eq!(reason, "filter-not-enabled:JPXDecode");
 }
 
 #[test]
@@ -638,13 +638,13 @@ fn ccitt_jbig2_devicen_and_pattern_are_each_refused_by_name_and_counted() {
         (
             "CCITTFaxDecode",
             name("DeviceGray"),
-            "unsupported-filter:CCITTFaxDecode",
+            "filter-not-enabled:CCITTFaxDecode",
             "f",
         ),
         (
             "JBIG2Decode",
             name("DeviceGray"),
-            "unsupported-filter:JBIG2Decode",
+            "filter-not-enabled:JBIG2Decode",
             "f",
         ),
         (
@@ -674,7 +674,7 @@ fn ccitt_jbig2_devicen_and_pattern_are_each_refused_by_name_and_counted() {
         assert_eq!(b.report.refused.get(reason), Some(&1), "{reason}");
         assert_eq!(b.refused[0].error.reason(), reason);
         match (&b.refused[0].error, kind) {
-            (PdfImageError::UnsupportedFilter(n), "f") => assert_eq!(n, filter),
+            (PdfImageError::FilterNotEnabled { filter: n, .. }, "f") => assert_eq!(n, filter),
             (PdfImageError::UnsupportedColourSpace(_), "c") => {}
             (e, _) => panic!("{e:?}"),
         }

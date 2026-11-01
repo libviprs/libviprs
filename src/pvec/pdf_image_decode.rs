@@ -3,11 +3,85 @@
 //!
 //! Private to [`super::pdf_image`]. It reads only what [`PdfImagePlacement`] recorded, so no
 //! document is needed here.
+//!
+//! # The filter seam (issue #1362)
+//!
+//! A codec stage is [`FilterInput`] in, [`FilterOutput`] out, and [`decode_filter`] is the one
+//! `match` that says which codec a name reaches. Each codec is a small module under
+//! `pdf_filters/`, and the backend is picked at compile time by feature inside that module, so
+//! there is no registry and no option to set.
+//!
+//! There is deliberately no `PdfFilterDecoder` trait. With one implementation per codec it
+//! meets none of the five tests of the no-pass-through rule, and the types here are shaped so
+//! that extracting it is one commit. The test that would justify it, written down so it can be
+//! applied the day it passes: two backends for one filter in one build, or an outside consumer
+//! injecting one.
 
 use lopdf::{Dictionary, Object};
 
 use super::pdf_image::{PdfImageError, PdfImageNote};
 use super::pdf_vector::{PdfImagePlacement, RawImage};
+use crate::source::DecodeLimits;
+
+/// What one filter stage gets: everything the dictionary says that a codec may need.
+// Grouping: these fields vary together per image. Not every codec reads every field yet; the
+// CCITT, JBIG2 and JPX issues (#1363 to #1365) are the readers.
+#[allow(dead_code, reason = "read by the codecs that follow in #1363 to #1365")]
+pub(super) struct FilterInput<'a> {
+    /// `CCITTFaxDecode`, `JBIG2Decode`, `JPXDecode` or `DCTDecode`.
+    pub(super) filter: &'a str,
+    /// This stage's `/DecodeParms` entry, matched to the filter by position.
+    pub(super) parms: Option<&'a Dictionary>,
+    /// The stream after any `FlateDecode` stage.
+    pub(super) data: &'a [u8],
+    pub(super) width: u32,
+    pub(super) height: u32,
+    /// The declared `/BitsPerComponent`.
+    pub(super) bpc: Option<u32>,
+    /// The component count of the declared `/ColorSpace`, when there is one.
+    pub(super) components: Option<usize>,
+    /// The `/JBIG2Globals` stream content, for JBIG2 only.
+    pub(super) globals: Option<&'a [u8]>,
+    /// The one pixel budget, derived once from [`PdfImageOptions::max_pixels`].
+    ///
+    /// [`PdfImageOptions::max_pixels`]: super::pdf_image::PdfImageOptions::max_pixels
+    pub(super) budget: DecodeLimits,
+}
+
+/// What a filter stage hands back.
+pub(super) enum FilterOutput {
+    /// Samples packed at `bpc`, rows padded to bytes, for the colour pipeline to interpret
+    /// (`/ColorSpace`, `/Decode` and `/ImageMask` apply as for an unfiltered image).
+    Packed { data: Vec<u8>, bpc: u32 },
+    /// Eight-bit samples whose channel count the codec fixed. `space_from_codestream` says the
+    /// codestream's colour space is the one to use whatever the dictionary says.
+    Samples {
+        data: Vec<u8>,
+        channels: u8,
+        space_from_codestream: bool,
+        notes: Vec<PdfImageNote>,
+    },
+}
+
+/// Whether `name` is a filter with a codec module.
+fn is_codec(name: &str) -> bool {
+    matches!(
+        name,
+        "DCTDecode" | "CCITTFaxDecode" | "JBIG2Decode" | "JPXDecode"
+    )
+}
+
+/// One `match`, one place that knows which build has which codec.
+fn decode_filter(input: FilterInput<'_>) -> Result<FilterOutput, PdfImageError> {
+    use super::pdf_filters::{ccitt, dct, jbig2, jpx};
+    match input.filter {
+        "DCTDecode" => dct::decode(input),
+        "CCITTFaxDecode" => ccitt::decode(input),
+        "JBIG2Decode" => jbig2::decode(input),
+        "JPXDecode" => jpx::decode(input),
+        other => Err(PdfImageError::UnsupportedFilter(other.to_string())),
+    }
+}
 
 /// The channels of decoded samples.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +110,8 @@ pub(super) struct Decoded {
     pub(super) notes: Vec<PdfImageNote>,
     /// The source had one bit per component and the samples are gray: every sample is 0 or 255.
     pub(super) bilevel: bool,
+    /// The last filter of the chain, or `none`: what `written_by_filter` is keyed by.
+    pub(super) filter: String,
 }
 
 fn bad(detail: impl Into<String>) -> PdfImageError {
@@ -44,6 +120,9 @@ fn bad(detail: impl Into<String>) -> PdfImageError {
 
 /// Decode `image`, refusing by name what the crate does not read.
 pub(super) fn decode(image: &PdfImagePlacement, max_pixels: u64) -> Result<Decoded, PdfImageError> {
+    if let Some((bytes, limit)) = image.stream_over_cap {
+        return Err(PdfImageError::StreamTooLarge { bytes, limit });
+    }
     let raw = image
         .raw
         .as_ref()
@@ -58,22 +137,17 @@ pub(super) fn decode(image: &PdfImagePlacement, max_pixels: u64) -> Result<Decod
             limit: max_pixels,
         });
     }
+    let budget = DecodeLimits::default().with_max_pixels(max_pixels);
     let mut notes = Vec::new();
     let mut out = if image.image_mask {
-        stencil(raw, width, height, image.fill_colour)?
+        stencil(raw, width, height, image.fill_colour, budget)?
     } else {
         let space = match raw.dict.get(b"ColorSpace") {
             Ok(o) => Some(Space::parse(o)?),
             Err(_) => None,
         };
-        let (samples, channels) = colour_samples(raw, space, width, height, &mut notes)?;
-        let one_bit = raw
-            .dict
-            .get(b"BitsPerComponent")
-            .ok()
-            .and_then(|o| o.as_i64().ok())
-            == Some(1)
-            && !filters(&raw.dict).iter().any(|f| f == "DCTDecode");
+        let (samples, channels, one_bit) =
+            colour_samples(raw, space, width, height, budget, &mut notes)?;
         Decoded {
             width,
             height,
@@ -81,11 +155,12 @@ pub(super) fn decode(image: &PdfImagePlacement, max_pixels: u64) -> Result<Decod
             data: samples,
             notes: Vec::new(),
             bilevel: one_bit && channels == Channels::Gray,
+            filter: terminal_filter(raw),
         }
     };
 
     if let Ok(mask) = raw.dict.get(b"SMask") {
-        let alpha = soft_mask(mask, width, height, max_pixels)?;
+        let alpha = soft_mask(mask, width, height, budget)?;
         out = with_alpha(out, &alpha);
     }
     if raw.dict.has(b"Mask") {
@@ -95,14 +170,16 @@ pub(super) fn decode(image: &PdfImagePlacement, max_pixels: u64) -> Result<Decod
     Ok(out)
 }
 
-/// The samples of `raw` as gray or RGB, and whether the bake approximated anything.
+/// The samples of `raw` as gray or RGB, whether the bake approximated anything, and whether the
+/// source was packed at one bit per component.
 fn colour_samples(
     raw: &RawImage,
     space: Option<Space>,
     width: u32,
     height: u32,
+    budget: DecodeLimits,
     notes: &mut Vec<PdfImageNote>,
-) -> Result<(Vec<u8>, Channels), PdfImageError> {
+) -> Result<(Vec<u8>, Channels, bool), PdfImageError> {
     let bpc_declared = raw
         .dict
         .get(b"BitsPerComponent")
@@ -112,27 +189,39 @@ fn colour_samples(
         .transpose()?;
     let filters = filters(&raw.dict);
     check_filters(&filters)?;
-    let packed = unfilter(raw, &filters, space.as_ref(), bpc_declared, width, height)?;
-    let (data, bpc, ncomp, space) = match packed {
-        Packed::Raw(data) => {
+    let unfiltered = unfilter(
+        raw,
+        &filters,
+        space.as_ref(),
+        bpc_declared,
+        width,
+        height,
+        budget,
+    )?;
+    let (data, bpc, ncomp, space, one_bit) = match unfiltered {
+        FilterOutput::Packed { data, bpc } => {
             let space = space.ok_or_else(|| bad("the image has no /ColorSpace"))?;
-            let bpc = bpc_declared.ok_or_else(|| bad("the image has no /BitsPerComponent"))?;
             let n = space.components();
-            (data, bpc, n, space)
+            (data, bpc, n, space, bpc == 1)
         }
-        Packed::Jpeg { data, channels } => {
-            notes.push(PdfImageNote::ReEncodedLossy);
-            // The JPEG says how many components it has; a /ColorSpace that disagrees loses.
-            let natural = if channels == 1 {
-                Space::Gray
-            } else {
-                Space::Rgb
+        FilterOutput::Samples {
+            data,
+            channels,
+            space_from_codestream,
+            notes: codec_notes,
+        } => {
+            notes.extend(codec_notes);
+            // The codec says how many components there are; a /ColorSpace that disagrees loses.
+            let natural = match channels {
+                1 => Space::Gray,
+                4 => Space::Cmyk,
+                _ => Space::Rgb,
             };
             let space = match space {
-                Some(s) if s.components() == usize::from(channels) => s,
+                Some(s) if !space_from_codestream && s.components() == usize::from(channels) => s,
                 _ => natural,
             };
-            (data, 8, usize::from(channels), space)
+            (data, 8, usize::from(channels), space, false)
         }
     };
     if bpc == 16 {
@@ -148,7 +237,7 @@ fn colour_samples(
         Channels::Rgb
     };
     let out = convert(&space, &decode, &data, width, height, ncomp, bpc, channels)?;
-    Ok((out, channels))
+    Ok((out, channels, one_bit))
 }
 
 // ---- filters ----
@@ -165,33 +254,47 @@ fn filters(dict: &Dictionary) -> Vec<String> {
     }
 }
 
+/// The chains the bake reads: nothing, `FlateDecode`, a codec, or `FlateDecode` then a codec.
 fn check_filters(filters: &[String]) -> Result<(), PdfImageError> {
-    let ok = matches!(
-        filters
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>()
-            .as_slice(),
-        [] | ["FlateDecode"] | ["DCTDecode"] | ["FlateDecode", "DCTDecode"]
-    );
+    let ok = match filters
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
+        [] | ["FlateDecode"] => true,
+        [codec] | ["FlateDecode", codec] => is_codec(codec),
+        _ => false,
+    };
     if ok {
         return Ok(());
     }
-    // Refuse by the first name that is not a plain Flate or DCT, so the report says which.
+    // Refuse by the first name that is not a plain Flate or a codec, so the report says which.
     let culprit = filters
         .iter()
-        .find(|f| !matches!(f.as_str(), "FlateDecode" | "DCTDecode"))
+        .find(|f| f.as_str() != "FlateDecode" && !is_codec(f))
         .or_else(|| filters.first())
         .cloned()
         .unwrap_or_default();
     Err(PdfImageError::UnsupportedFilter(culprit))
 }
 
-enum Packed {
-    /// Samples packed at the declared bits per component, rows padded to bytes.
-    Raw(Vec<u8>),
-    /// A JPEG, decoded to eight-bit samples of `channels` components.
-    Jpeg { data: Vec<u8>, channels: u8 },
+/// The last filter of the chain, or `none`.
+fn terminal_filter(raw: &RawImage) -> String {
+    filters(&raw.dict)
+        .pop()
+        .unwrap_or_else(|| "none".to_string())
+}
+
+/// The `/DecodeParms` entry for filter number `index`. An array is matched to the
+/// filters by position, and a `null` or a missing entry is no parameters; a lone dictionary
+/// belongs to the first filter.
+fn parms_for(dict: &Dictionary, index: usize) -> Option<&Dictionary> {
+    match dict.get(b"DecodeParms") {
+        Ok(Object::Dictionary(d)) if index == 0 => Some(d),
+        Ok(Object::Array(a)) => a.get(index).and_then(|o| o.as_dict().ok()),
+        _ => None,
+    }
 }
 
 fn unfilter(
@@ -201,50 +304,51 @@ fn unfilter(
     bpc: Option<u32>,
     width: u32,
     height: u32,
-) -> Result<Packed, PdfImageError> {
-    let has = |name: &str| filters.iter().any(|f| f == name);
+    budget: DecodeLimits,
+) -> Result<FilterOutput, PdfImageError> {
     let ncomp = space.map_or(4, Space::components);
-    let mut data = raw.content.clone();
-    if has("FlateDecode") {
-        let row_bytes = row_bytes(width, ncomp, bpc.unwrap_or(16));
-        let expected = (row_bytes + 1).saturating_mul(height as usize);
-        // A JPEG inside Flate has no row structure, so give it the room of a raw image.
-        let cap = if has("DCTDecode") {
+    let flate = filters.first().is_some_and(|f| f == "FlateDecode");
+    let codec = filters.last().map(String::as_str).filter(|f| is_codec(f));
+    let mut data = std::borrow::Cow::Borrowed(raw.content.as_slice());
+    if flate {
+        let cap = if codec.is_some() {
+            // A codestream inside Flate has no row structure, so give it the room of a raw image.
             (width as usize)
                 .saturating_mul(height as usize)
                 .saturating_mul(4)
                 .saturating_add(1 << 20)
         } else {
-            expected.saturating_add(4096)
+            let row_bytes = row_bytes(width, ncomp, bpc.unwrap_or(16));
+            (row_bytes + 1)
+                .saturating_mul(height as usize)
+                .saturating_add(4096)
         };
-        data = crate::pdf::flate_decompress(&data, cap).map_err(PdfImageError::Pdf)?;
-        if !has("DCTDecode") {
-            data = unpredict(&raw.dict, data)?;
+        let mut inflated = crate::pdf::flate_decompress(&data, cap).map_err(PdfImageError::Pdf)?;
+        if codec.is_none() {
+            inflated = unpredict(parms_for(&raw.dict, 0), inflated)?;
         }
+        data = std::borrow::Cow::Owned(inflated);
     }
-    if has("DCTDecode") {
-        let jpeg = crate::source::decode_bytes(&data).map_err(PdfImageError::Source)?;
-        if (jpeg.width(), jpeg.height()) != (width, height) {
-            return Err(bad(format!(
-                "the JPEG is {}x{} but the image says {width}x{height}",
-                jpeg.width(),
-                jpeg.height()
-            )));
-        }
-        use crate::pixel::PixelFormat;
-        return match jpeg.format() {
-            PixelFormat::Gray8 => Ok(Packed::Jpeg {
-                data: jpeg.data().to_vec(),
-                channels: 1,
-            }),
-            PixelFormat::Rgb8 => Ok(Packed::Jpeg {
-                data: jpeg.data().to_vec(),
-                channels: 3,
-            }),
-            other => Err(bad(format!("a JPEG decoded to {other:?}, not gray or RGB"))),
-        };
+    if let Some(filter) = codec {
+        let index = filters.len() - 1;
+        let globals = None;
+        return decode_filter(FilterInput {
+            filter,
+            parms: parms_for(&raw.dict, index),
+            data: &data,
+            width,
+            height,
+            bpc,
+            components: space.map(Space::components),
+            globals,
+            budget,
+        });
     }
-    Ok(Packed::Raw(data))
+    let bpc = bpc.ok_or_else(|| bad("the image has no /BitsPerComponent"))?;
+    Ok(FilterOutput::Packed {
+        data: data.into_owned(),
+        bpc,
+    })
 }
 
 fn row_bytes(width: u32, ncomp: usize, bpc: u32) -> usize {
@@ -252,12 +356,7 @@ fn row_bytes(width: u32, ncomp: usize, bpc: u32) -> usize {
 }
 
 /// Undo `/Predictor` 2 (TIFF, 8 bits) and 10 to 15 (PNG) from `/DecodeParms`.
-fn unpredict(dict: &Dictionary, data: Vec<u8>) -> Result<Vec<u8>, PdfImageError> {
-    let parms = match dict.get(b"DecodeParms") {
-        Ok(Object::Dictionary(d)) => Some(d),
-        Ok(Object::Array(a)) => a.iter().find_map(|o| o.as_dict().ok()),
-        _ => None,
-    };
+fn unpredict(parms: Option<&Dictionary>, data: Vec<u8>) -> Result<Vec<u8>, PdfImageError> {
     let get = |key: &[u8], default: i64| {
         parms
             .and_then(|d| d.get(key).ok())
@@ -699,13 +798,22 @@ fn stencil(
     width: u32,
     height: u32,
     fill: [u8; 3],
+    budget: DecodeLimits,
 ) -> Result<Decoded, PdfImageError> {
     let filters = filters(&raw.dict);
     check_filters(&filters)?;
     if filters.iter().any(|f| f == "DCTDecode") {
         return Err(bad("an image mask cannot be a JPEG"));
     }
-    let Packed::Raw(data) = unfilter(raw, &filters, Some(&Space::Gray), Some(1), width, height)?
+    let FilterOutput::Packed { data, .. } = unfilter(
+        raw,
+        &filters,
+        Some(&Space::Gray),
+        Some(1),
+        width,
+        height,
+        budget,
+    )?
     else {
         return Err(bad("an image mask cannot be a JPEG"));
     };
@@ -729,6 +837,7 @@ fn stencil(
         data: out,
         notes: Vec::new(),
         bilevel: false,
+        filter: terminal_filter(raw),
     })
 }
 
@@ -737,8 +846,9 @@ fn soft_mask(
     mask: &Object,
     width: u32,
     height: u32,
-    max_pixels: u64,
+    budget: DecodeLimits,
 ) -> Result<Vec<u8>, PdfImageError> {
+    let max_pixels = budget.max_pixels;
     let Object::Stream(s) = mask else {
         return Err(bad("an /SMask that is not a stream"));
     };
@@ -768,7 +878,7 @@ fn soft_mask(
         Err(_) => Space::Gray,
     };
     let mut ignored = Vec::new();
-    let (gray, channels) = colour_samples(&raw, Some(space), mw, mh, &mut ignored)?;
+    let (gray, channels, _) = colour_samples(&raw, Some(space), mw, mh, budget, &mut ignored)?;
     if channels != Channels::Gray {
         return Err(bad("a soft mask that is not a gray image"));
     }

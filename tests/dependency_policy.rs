@@ -1044,3 +1044,33 @@ fn sha2_resolves_to_a_release_with_the_aarch64_provenance_fix() {
         }
     }
 }
+
+/// Exactly one `tiff` resolves in every cell (#1367).
+///
+/// `image` 0.25.10 depends on `tiff` 0.11 with its default features, which
+/// includes the `fax` decoder. The crate's own direct `tiff` pin used to sit at
+/// 0.10.3, so every graph carried two TIFF codecs and two copies of the
+/// decoder surface. The direct pin follows `image` now, so there is one copy,
+/// and this fails the day the two drift apart again.
+///
+/// Every cell has to carry a `tiff` at all, for the same reason the `sha2`
+/// check above does: an empty set satisfies "no duplicates" when the resolve
+/// has stopped working.
+#[test]
+#[cfg_attr(miri, ignore)] // spawns a process, which Miri supports on no target (#714)
+fn exactly_one_tiff_resolves_in_every_cell() {
+    for (cell, graph) in cells() {
+        let found: Vec<&str> = graph
+            .iter()
+            .filter(|(name, _)| name == "tiff")
+            .map(|(_, version)| version.as_str())
+            .collect();
+        assert_eq!(
+            found.len(),
+            1,
+            "{} resolves tiff {found:?}; expected exactly one. `image`'s own `tiff` and the \
+             direct pin in `Cargo.toml` have drifted onto different minors (#1367).",
+            cell.label
+        );
+    }
+}

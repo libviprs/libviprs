@@ -17,6 +17,7 @@ fuzz_target!(|data: &[u8]| {
         max_entities: 10_000,
         max_content_bytes: 1 << 20,
         max_segments_per_path: 10_000,
+        ..PdfVectorLimits::default()
     };
     for page in 1..=2 {
         let _ = extract_page_paths_from_bytes(data, page, &limits);

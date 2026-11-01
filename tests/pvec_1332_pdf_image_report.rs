@@ -97,8 +97,8 @@ fn the_counts_per_outcome_add_up_to_the_images_on_the_page() {
     assert_eq!(r.images, 6);
     assert_eq!(r.written, 4);
     assert_eq!(r.images, r.written + r.refused_total());
-    assert_eq!(r.refused.get("unsupported-filter:JPXDecode"), Some(&1));
-    assert_eq!(r.refused.get("unsupported-filter:JBIG2Decode"), Some(&1));
+    assert_eq!(r.refused.get("filter-not-enabled:JPXDecode"), Some(&1));
+    assert_eq!(r.refused.get("filter-not-enabled:JBIG2Decode"), Some(&1));
     assert_eq!(r.colour_approximated, 1);
     assert_eq!(r.bit_depth_reduced, 1);
     assert_eq!(r.re_encoded_lossy, 1);
