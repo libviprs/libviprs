@@ -797,3 +797,7 @@ required-features = ["pvec-raster"]
 [[test]]
 name = "pvec_1363_pdf_ccitt"
 required-features = ["pvec-raster"]
+
+[[test]]
+name = "pvec_1364_pdf_jpx"
+required-features = ["pvec-raster"]
