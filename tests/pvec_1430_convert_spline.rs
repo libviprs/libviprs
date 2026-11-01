@@ -16,7 +16,7 @@ use libviprs::pvec_convert::PvecConversion;
 
 fn pts(n: usize, z: f64) -> Vec<Vector3> {
     (0..n)
-        .map(|k| Vector3::new(k as f64 * 2.0, ((k * 7) % 5) as f64, z))
+        .map(|k| Vector3::new(k as f64 * 2.0, ((k * 7) % 5) as f64, z * k as f64))
         .collect()
 }
 
