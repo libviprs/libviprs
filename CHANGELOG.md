@@ -24,6 +24,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`expected_loss.toml`, a written reason per entry): primitive counts, N3.5 buckets, extent aspect with
   `/Rotate` composed, and entities outside the page. The exporter is a script, not a trait, while it has one
   backend. See `docs/pvec-dwg-pdf-differential.md`.
+- **A single-span SPLINE is a Bezier** (issue #1375). `Normalized2DGeometry::from_spline` maps a
+  non-rational, non-periodic SPLINE with `degree + 1` control points and knots `0` and `1`, each
+  `degree + 1` times, to PVec's `Bezier` (`SupportedExact`, the knot array is the only thing
+  dropped), which is the class the known-truth corpus states for `bezier-d3-001`.
 - **Periodic SPLINE extraction** (issue #1374). `dwg_spline::extract` takes the one-period layout
   of a non-rational periodic spline (`n` control points, `n + 1` knots), checks it with PVec's
   `BSpline::from_periodic`, and keeps it as authored. `Normalized2DGeometry::from_spline` builds the
