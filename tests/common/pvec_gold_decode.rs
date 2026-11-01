@@ -28,8 +28,7 @@ pub const POLICY: Policy = Policy::V1;
 
 /// Opens a drawing from memory.
 pub fn open(bytes: &[u8]) -> Result<AcadrustProvider, String> {
-    let _ = (bytes, CadSource::Bytes(&[]));
-    Err("the corpus decode path is not wired yet".to_string())
+    AcadrustProvider::open(CadSource::Bytes(bytes)).map_err(|e| format!("does not open: {e}"))
 }
 
 /// Flattens model space under the default view profile's bounds.
