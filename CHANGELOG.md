@@ -16,6 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The text style across the provider boundary** (issue #1381, part of #1086). `DwgProvider::text_styles`
+  and `Facet::TextStyle` report the style of every `TEXT` and `MTEXT` (`TextStyleRef`: style name, SHX
+  font, big font, TrueType family), the acadrust provider fills it, and `TextReport::bucket_dwg_entities`
+  buckets DWG text by its font so a style that names an SHX font that is not installed reaches
+  `TEXT_SHX_MISSING` through a real drawing. `docs/pvec-text-policy.md` re-takes the DWG text numbers on the
+  four corpus fixtures #1313 names.
 - **Exact clip bounds, form boxes, text clips and the empty clip** (issue #1380, part of #1086).
   `pdf_clip::AnalyticBounds` answers `ExactBoundsSource` from PVec's closed-form Bezier extrema, so a
   curve is dropped only when its extent, not its control polygon, lies outside a clip. A Form XObject
