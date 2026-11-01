@@ -16,6 +16,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The conversion API** (issue #1048, slices #1413 to #1417). `libviprs::pvec_convert::PvecConversion`
+  behind the new `pvec-convert` feature (`pvec-write` plus `dwg-acadrust`, acadrust stays the default
+  provider): one call takes a DWG, a view profile and limits and publishes a `.pvec` with its
+  conversion report. The allowed capabilities, `CapabilityPolicy` and the `Strict`, `Default` and
+  `Permissive` profiles gate what may be written (new reason code `capability-not-allowed`), and
+  `probe` returns the same per-class counts without writing. A georeference sidecar
+  (`<dest>.georef.json`) carries the exact drawing box, the unit with its evidence and an opaque
+  calibration id, and nothing of it reaches the artifact. Every entity that did not become geometry
+  makes a `Diagnostic` with a stable code (`docs/pvec-diagnostics.md`), streamed to the observer as
+  `EngineEvent::ConversionDiagnostic` and kept in the report's `diagnostics` section. The classifier
+  and its consumer meet in a bounded queue whose peak depth is reported, the observer hears the
+  stages, and the cancel token is polled per batch. New optional report fields `capabilities`,
+  `georeference` and `diagnostics`, all ignorable, so `schema_version` stays 1.
+  `ReasonCode::CapabilityNotAllowed` is new, `pvec::writer` re-exports PVec's `CapabilityId`, and
+  the spool of #1092 is not built, so there is no spool flush to cancel yet.
+
 - **`CCITTFaxDecode` images in a PDF** (issue #1363, follow-up 2/6 to #1332). Decoded through
   `hayro-ccitt` (plain Rust, no dependencies, in every build, no feature) into 1-bit samples that
   reach the 1-bit PNG tiles and the `Bilevel` note. `usace_swf_gpw_daca67-06-d-0029.pdf` now
