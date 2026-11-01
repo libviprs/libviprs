@@ -211,6 +211,10 @@ pub struct ConversionReport {
     /// when the conversion wrote none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub georeference: Option<String>,
+    /// The diagnostics of the conversion, in entity id order (N7.5). Its own section, never mixed
+    /// into the geometry; absent when the conversion made none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<super::diagnostics::Diagnostic>,
     /// One row per entity, in id order.
     pub entities: Vec<EntityRow>,
 }
@@ -345,6 +349,7 @@ impl ReportBuilder {
             bounds,
             capabilities: None,
             georeference: None,
+            diagnostics: Vec::new(),
             entities: self.rows,
         })
     }

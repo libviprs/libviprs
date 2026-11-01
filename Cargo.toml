@@ -771,6 +771,14 @@ required-features = ["pvec-convert"]
 name = "pvec_1415_georef"
 required-features = ["pvec-convert"]
 
+[[test]]
+name = "pvec_1416_diagnostics"
+required-features = ["pvec-convert"]
+
+[[test]]
+name = "pvec_1417_progress"
+required-features = ["pvec-convert"]
+
 [dev-dependencies]
 loom = { workspace = true }
 pvec-capabilities = { workspace = true }

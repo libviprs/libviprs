@@ -55,6 +55,9 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 mod capability;
 mod georef;
 pub use capability::{CapabilityPolicy, ConversionProfile};
@@ -64,6 +67,8 @@ pub use georef::{
 
 use crate::CancelToken;
 use crate::cad::CadSource;
+use crate::observe::{EngineEvent, EngineObserver};
+use crate::pvec::diagnostics::{Diagnostic, DiagnosticCode};
 use crate::pvec::dwg_acadrust::AcadrustProvider;
 use crate::pvec::dwg_basic::{self, BasicError};
 use crate::pvec::fidelity::{Basis, Classification, FidelityReport, ReasonCode, Tally, TallyError};
@@ -85,9 +90,14 @@ use crate::pvec::{
     ViewProfileError, canonical_cmp, order_entities, select_layout,
 };
 use crate::pvec::{Normalized2DGeometry, ViewedEntity};
+use crate::sync_queue::bounded;
 
-/// How often the conversion looks at the cancel token while it classifies entities.
-const CANCEL_EVERY: usize = 1024;
+/// Entities per batch: the cancel token is looked at, and a progress event is sent, once per batch.
+const BATCH: usize = 256;
+
+/// The queue between the classifier and its consumer holds this many outcomes unless
+/// [`PvecConversion::queue_capacity`] says otherwise.
+const DEFAULT_QUEUE_CAPACITY: usize = 64;
 
 /// Why a conversion failed. Every variant that wraps a lower error keeps it as `source()`.
 #[derive(Debug, Error)]
@@ -135,6 +145,10 @@ pub enum PvecConvertError {
         source_class: String,
         /// The entity's handle, when the drawing gave one.
         handle: Option<u64>,
+        /// The entity's own layer.
+        layer: String,
+        /// The INSERT chain the entity was reached through, spelled `block@HANDLE/...`.
+        block_path: String,
     },
     /// The cancel token fired. Nothing was published.
     #[error("cancelled")]
@@ -152,6 +166,9 @@ pub struct PvecConversionOutput {
     pub fidelity: FidelityReport,
     /// Entities written into the artifact.
     pub written: u64,
+    /// The most outcomes that were waiting for the consumer at once. Never above the capacity set
+    /// with [`PvecConversion::queue_capacity`].
+    pub peak_queue_depth: u32,
 }
 
 /// One conversion, configured the way `EngineBuilder` configures a pyramid run.
@@ -165,6 +182,8 @@ pub struct PvecConversion<'a> {
     gate: Gate,
     calibration: Option<String>,
     control_points: Vec<[f64; 2]>,
+    observer: Option<Arc<dyn EngineObserver>>,
+    queue_capacity: usize,
 }
 
 impl<'a> PvecConversion<'a> {
@@ -181,6 +200,8 @@ impl<'a> PvecConversion<'a> {
             gate: Gate::of(ConversionProfile::Default),
             calibration: None,
             control_points: Vec::new(),
+            observer: None,
+            queue_capacity: DEFAULT_QUEUE_CAPACITY,
         }
     }
 
@@ -217,6 +238,24 @@ impl<'a> PvecConversion<'a> {
     #[must_use]
     pub fn cancel(mut self, cancel: CancelToken) -> Self {
         self.cancel = cancel;
+        self
+    }
+
+    /// Receives each diagnostic as it is made (`EngineEvent::ConversionDiagnostic`), and the one
+    /// the run fails with. Without one, a drawing that converts cleanly makes no diagnostic at all.
+    #[must_use]
+    pub fn observer(mut self, observer: Arc<dyn EngineObserver>) -> Self {
+        self.observer = Some(observer);
+        self
+    }
+
+    /// How many classified entities may wait for the consumer. The classifier blocks when the
+    /// queue is full, so memory stays bounded whatever the consumer's speed; the deepest the queue
+    /// was is [`PvecConversionOutput::peak_queue_depth`]. Tuning it is N8.6's measured decision;
+    /// the default is a placeholder that is safe, not tuned.
+    #[must_use]
+    pub fn queue_capacity(mut self, capacity: usize) -> Self {
+        self.queue_capacity = capacity.max(1);
         self
     }
 
@@ -291,13 +330,19 @@ impl<'a> PvecConversion<'a> {
     ///
     /// [`PvecConvertError`]. After any error the destination and its report are as they were.
     pub fn convert(self) -> Result<PvecConversionOutput, PvecConvertError> {
-        if self.cancel.is_cancelled() {
-            return Err(PvecConvertError::Cancelled);
-        }
-        let provider = AcadrustProvider::open(self.source).map_err(PvecConvertError::Open)?;
-        let declared = provider.source_unit();
-        let unit = self.unit.unwrap_or(declared);
-        self.run(&provider, declared, unit)
+        let observer = self.observer.clone();
+        let result = if self.cancel.is_cancelled() {
+            Err(PvecConvertError::Cancelled)
+        } else {
+            AcadrustProvider::open(self.source)
+                .map_err(PvecConvertError::Open)
+                .and_then(|provider| {
+                    let declared = provider.source_unit();
+                    let unit = self.unit.unwrap_or(declared);
+                    self.run(&provider, declared, unit)
+                })
+        };
+        report_failure(observer.as_deref(), result)
     }
 
     /// Converts with provider `P`. The trait carries no unit, so [`unit`](Self::unit) is required.
@@ -306,13 +351,20 @@ impl<'a> PvecConversion<'a> {
     ///
     /// [`PvecConvertError::UnitRequired`] without a unit, otherwise as [`convert`](Self::convert).
     pub fn convert_with<P: DwgProvider>(self) -> Result<PvecConversionOutput, PvecConvertError> {
-        if self.cancel.is_cancelled() {
-            return Err(PvecConvertError::Cancelled);
-        }
-        let unit = self.unit.ok_or(PvecConvertError::UnitRequired)?;
-        let provider = P::open(self.source).map_err(PvecConvertError::Open)?;
-        // The trait reports no unit, so the drawing's own is unknown; the caller's is applied.
-        self.run(&provider, SourceUnit::Unknown, unit)
+        let observer = self.observer.clone();
+        let result = if self.cancel.is_cancelled() {
+            Err(PvecConvertError::Cancelled)
+        } else {
+            self.unit
+                .ok_or(PvecConvertError::UnitRequired)
+                .and_then(|unit| {
+                    let provider = P::open(self.source).map_err(PvecConvertError::Open)?;
+                    // The trait reports no unit, so the drawing's own is unknown; the caller's is
+                    // applied.
+                    self.run(&provider, SourceUnit::Unknown, unit)
+                })
+        };
+        report_failure(observer.as_deref(), result)
     }
 
     /// Everything a conversion decides about its entities, up to but not including the write.
@@ -323,11 +375,27 @@ impl<'a> PvecConversion<'a> {
             view_profile,
             cancel,
             gate,
+            observer,
+            queue_capacity,
             ..
         } = self;
+        let observer = observer.as_deref();
+        let tell = |event: EngineEvent| {
+            let _ = (&event, observer);
+        };
+        tell(EngineEvent::ConversionSourceOpened {
+            provider: provider.name().to_owned(),
+        });
         let view = view_profile
             .apply(provider)
             .map_err(PvecConvertError::View)?;
+        tell(EngineEvent::ConversionViewResolved {
+            included: view.report.included,
+            excluded: view.excluded.len() as u64,
+        });
+        if cancel.is_cancelled() {
+            return Err(PvecConvertError::Cancelled);
+        }
         let layouts = provider
             .layouts()
             .map_err(|e| PvecConvertError::View(e.into()))?;
@@ -403,30 +471,51 @@ impl<'a> PvecConversion<'a> {
         perm.sort_by(|&a, &b| canonical_cmp(a as u64, &raws[a], b as u64, &raws[b]));
         let ordered = order_entities(provider.name(), "", &OrderingPolicy::new(), raws);
 
-        let mut tally = Tally::new();
-        let mut rows = ReportBuilder::new();
-        let mut geometries: Vec<(EntityId, Normalized2DGeometry)> = Vec::new();
-        for (n, &at) in perm.iter().enumerate() {
-            if n % CANCEL_EVERY == 0 && cancel.is_cancelled() {
-                return Err(PvecConvertError::Cancelled);
+        // The classifying side produces, a consumer thread turns each outcome into a row, a
+        // record, a diagnostic and a tally entry. They meet in a bounded queue, so a slow consumer
+        // makes the producer wait instead of letting outcomes pile up.
+        let (tx, rx) = bounded::<Outcome>(*queue_capacity);
+        let sent = AtomicU64::new(0);
+        let consumed = std::thread::scope(|scope| {
+            let consumer = scope.spawn(|| consume(rx, &sent, observer));
+            let mut failure = None;
+            for (n, &at) in perm.iter().enumerate() {
+                if n.is_multiple_of(BATCH) && cancel.is_cancelled() {
+                    failure = Some(PvecConvertError::Cancelled);
+                    break;
+                }
+                let raw = &ordered.entities[n].entity;
+                let done = match classify_item(&items[at], raw, gate) {
+                    Ok(done) => done,
+                    Err(e) => {
+                        failure = Some(e);
+                        break;
+                    }
+                };
+                let mut diagnostic =
+                    entity_diagnostic(&items[at], raw, &done.classification, &layout.name);
+                if let Some(d) = &mut diagnostic {
+                    d.source = Some(source_name.clone());
+                }
+                let outcome = Outcome {
+                    id: ordered.entities[n].id,
+                    handle: raw.provenance.handle.map(|h| h.get()),
+                    done,
+                    diagnostic,
+                };
+                if tx.send(outcome).is_err() {
+                    break;
+                }
+                sent.fetch_add(1, Ordering::Release);
             }
-            let id = ordered.entities[n].id;
-            let raw = &ordered.entities[n].entity;
-            let done = classify_item(&items[at], raw, gate)?;
-            tally.record(&done.classification);
-            rows.push(EntityRow::new(
-                id,
-                &done.classification,
-                raw.provenance.handle.map(|h| h.get()),
-                done.geometry
-                    .geometry()
-                    .and_then(|_| kind_of(&done.geometry))
-                    .map(|k| row_for(k).pvec_type),
-                done.warnings,
-            ));
-            geometries.push((id, done.geometry));
-        }
-        let fidelity = tally.finish(encountered).map_err(PvecConvertError::Tally)?;
+            drop(tx);
+            let consumed = consumer.join().expect("the consumer thread does not panic");
+            failure.map_or(Ok(consumed), Err)
+        })?;
+        let fidelity = consumed
+            .tally
+            .finish(encountered)
+            .map_err(PvecConvertError::Tally)?;
         let xrefs = XrefSummary {
             unresolved: flat
                 .skipped
@@ -442,12 +531,14 @@ impl<'a> PvecConversion<'a> {
             resolved: Vec::new(),
         };
         Ok(Classified {
-            geometries,
-            rows,
+            geometries: consumed.geometries,
+            rows: consumed.rows,
             fidelity,
             encountered,
             view: ViewSummary::from_report(&view.report),
             xrefs,
+            diagnostics: consumed.diagnostics,
+            peak_queue_depth: consumed.peak,
         })
     }
 
@@ -465,6 +556,8 @@ impl<'a> PvecConversion<'a> {
             encountered,
             view,
             xrefs,
+            diagnostics,
+            peak_queue_depth,
         } = self.classify(provider)?;
         let Self {
             dest,
@@ -473,9 +566,12 @@ impl<'a> PvecConversion<'a> {
             gate,
             calibration,
             control_points,
+            observer,
             ..
         } = self;
-        let _ = (declared, calibration, control_points);
+        let tell = |event: EngineEvent| {
+            let _ = (&event, &observer);
+        };
 
         let artifact = write_geometry(
             &WriteConfig { unit, leaves },
@@ -488,6 +584,10 @@ impl<'a> PvecConversion<'a> {
             other => PvecConvertError::Write(other),
         })?;
 
+        tell(EngineEvent::ConversionArtifactWritten {
+            entities: artifact.written,
+            bytes: artifact.bytes.len() as u64,
+        });
         let mut report = rows
             .finish(
                 encountered,
@@ -500,18 +600,46 @@ impl<'a> PvecConversion<'a> {
             )
             .map_err(PvecConvertError::Report)?;
         report.capabilities = Some(gate.summary());
+        report.diagnostics = diagnostics;
+        let sidecar = georef_path(dest);
+        report.georeference = sidecar
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned());
         let json = report.to_json_string().map_err(PvecConvertError::Report)?;
-        publish(dest, &artifact.bytes, json.as_bytes(), &cancel, &mut |_| {}).map_err(
-            |e| match e {
+        // The sidecar is staged first and moved into place once the pair is published, so a failed
+        // or cancelled run leaves the previous one as it was.
+        let staged = PathBuf::from(format!("{}.partial", sidecar.display()));
+        GeoreferenceHandoff::V1(HandoffV1 {
+            bounds: artifact.bounds.drawing_bounds().map(|b| SourceBox {
+                min: [b.min().x, b.min().y],
+                max: [b.max().x, b.max().y],
+            }),
+            unit: UnitRecord::new(declared, unit),
+            calibration_id: calibration,
+            control_points,
+        })
+        .write_to(&staged)
+        .map_err(PvecConvertError::Georeference)?;
+        let published = publish(dest, &artifact.bytes, json.as_bytes(), &cancel, &mut |_| {})
+            .map_err(|e| match e {
                 PublishError::Cancelled => PvecConvertError::Cancelled,
                 other => PvecConvertError::Publish(other),
-            },
-        )?;
+            })
+            .and_then(|()| {
+                std::fs::rename(&staged, &sidecar)
+                    .map_err(|e| PvecConvertError::Georeference(GeoreferenceError::Io(e)))
+            });
+        if published.is_err() {
+            let _ = std::fs::remove_file(&staged);
+        }
+        published?;
+        tell(EngineEvent::ConversionPublished);
         Ok(PvecConversionOutput {
             artifact: dest.to_path_buf(),
             report,
             fidelity,
             written: artifact.written,
+            peak_queue_depth,
         })
     }
 }
@@ -524,6 +652,74 @@ struct Classified {
     encountered: u64,
     view: ViewSummary,
     xrefs: XrefSummary,
+    diagnostics: Vec<Diagnostic>,
+    peak_queue_depth: u32,
+}
+
+/// One entity's outcome on its way from the classifier to the consumer.
+struct Outcome {
+    id: EntityId,
+    handle: Option<u64>,
+    done: Done,
+    diagnostic: Option<Diagnostic>,
+}
+
+/// What the consumer built from the outcomes.
+struct Consumed {
+    tally: Tally,
+    rows: ReportBuilder,
+    geometries: Vec<(EntityId, Normalized2DGeometry)>,
+    diagnostics: Vec<Diagnostic>,
+    peak: u32,
+}
+
+/// Drains the queue: tallies, rows, records and diagnostics, and the observer's events in order.
+/// The depth is sampled after each receive from the sends that completed, so it can read one low
+/// and never one high.
+fn consume(
+    rx: impl IntoIterator<Item = Outcome>,
+    sent: &AtomicU64,
+    observer: Option<&dyn EngineObserver>,
+) -> Consumed {
+    let mut out = Consumed {
+        tally: Tally::new(),
+        rows: ReportBuilder::new(),
+        geometries: Vec::new(),
+        diagnostics: Vec::new(),
+        peak: 0,
+    };
+    let mut received = 0u64;
+    for Outcome {
+        id,
+        handle,
+        done,
+        diagnostic,
+    } in rx
+    {
+        received += 1;
+        let depth = sent.load(Ordering::Acquire).saturating_sub(received);
+        out.peak = out.peak.max(u32::try_from(depth).unwrap_or(u32::MAX));
+        out.tally.record(&done.classification);
+        if let Some(d) = diagnostic {
+            if let Some(o) = observer {
+                o.on_event(diagnostic_event(&d));
+            }
+            out.diagnostics.push(d);
+        }
+        out.rows.push(EntityRow::new(
+            id,
+            &done.classification,
+            handle,
+            done.geometry
+                .geometry()
+                .and_then(|_| kind_of(&done.geometry))
+                .map(|k| row_for(k).pvec_type),
+            done.warnings,
+        ));
+        out.geometries.push((id, done.geometry));
+        let _ = received;
+    }
+    out
 }
 
 /// The capability gate: which capabilities pass, whether only exact entities do, and what happens
@@ -659,9 +855,9 @@ fn classify_leaf(f: &FlatEntity, gate: &Gate) -> Result<Done, PvecConvertError> 
     // A leaf a layout owns directly has the identity map. A nested one is pushed through the map
     // flattening composed for it, as one level named by its innermost INSERT.
     let path = &f.entity.provenance.block_path;
-    let handle = f.entity.provenance.handle.map(|h| h.get());
+    let prov = &f.entity.provenance;
     let Some(step) = path.steps().last().cloned() else {
-        return gated(record, class, handle, gate);
+        return gated(record, prov, gate);
     };
     let composed = match ComposedTransform::identity().push_inner_coefficients(step, f.matrix()) {
         Ok(c) => c,
@@ -673,7 +869,7 @@ fn classify_leaf(f: &FlatEntity, gate: &Gate) -> Result<Done, PvecConvertError> 
         }
     };
     match promote(&record, &composed) {
-        Ok(p) if p.record().geometry().is_some() => gated(p.record().clone(), class, handle, gate),
+        Ok(p) if p.record().geometry().is_some() => gated(p.record().clone(), prov, gate),
         Ok(p) => {
             let reason = p
                 .reason()
@@ -694,10 +890,10 @@ fn classify_leaf(f: &FlatEntity, gate: &Gate) -> Result<Done, PvecConvertError> 
 /// an exact-only profile its class must be `SupportedExact`.
 fn gated(
     record: Normalized2DGeometry,
-    class: &str,
-    handle: Option<u64>,
+    prov: &ProvenanceStub,
     gate: &Gate,
 ) -> Result<Done, PvecConvertError> {
+    let class = prov.class_name.as_str();
     let row = kind_of(&record).map(row_for);
     let capability = row.map(|r| {
         (
@@ -717,7 +913,9 @@ fn gated(
                     capability: id,
                     name,
                     source_class: class.to_owned(),
-                    handle,
+                    handle: prov.handle.map(|h| h.get()),
+                    layer: prov.layer.clone(),
+                    block_path: prov.block_path.to_string(),
                 });
             }
             CapabilityPolicy::Downgrade => {
@@ -743,4 +941,125 @@ fn gated(
         geometry: record,
         warnings: Vec::new(),
     })
+}
+
+/// The diagnostic for one entity, or `None` for an entity that became geometry: a supported entity
+/// makes none, so a drawing that converts cleanly allocates nothing here.
+fn entity_diagnostic(
+    item: &Item<'_>,
+    raw: &RawEntity,
+    c: &Classification,
+    layout: &str,
+) -> Option<Diagnostic> {
+    if item_is_never_reported() {
+        return None;
+    }
+    let code = match c.class() {
+        FidelityClass::SupportedExact | FidelityClass::SupportedEquivalent => return None,
+        _ if matches!(item, Item::Skipped(_)) => DiagnosticCode::InsertNotExpanded,
+        FidelityClass::RequiresPVecCapability | FidelityClass::RequiresExtension => {
+            DiagnosticCode::EntityRequiresCapability
+        }
+        FidelityClass::IgnoredByPolicy => DiagnosticCode::EntityIgnoredByPolicy,
+        _ => DiagnosticCode::EntityUnsupported,
+    };
+    let id = c
+        .reason()
+        .map(|r| r.code())
+        .or_else(|| c.policy_field())
+        .unwrap_or("");
+    let p = &raw.provenance;
+    let mut d = Diagnostic::new(
+        code,
+        id,
+        format!("{} {}: {id}", p.class_name, c.class().tag()),
+    );
+    d.layout = Some(layout.to_owned());
+    d.handle = p.handle.map(|h| h.get());
+    d.class = Some(p.class_name.clone());
+    d.block_path = Some(p.block_path.to_string());
+    d.layer = Some(p.layer.clone());
+    Some(d)
+}
+
+fn diagnostic_event(d: &Diagnostic) -> EngineEvent {
+    EngineEvent::ConversionDiagnostic {
+        code: d.code.name().to_owned(),
+        severity: format!("{:?}", d.severity).to_lowercase(),
+        message_id: d.message_id.clone(),
+        handle: d.handle,
+        class: d.class.clone(),
+        block_path: d.block_path.clone(),
+        layer: d.layer.clone(),
+    }
+}
+
+/// Tells the observer why a run failed, then hands the result on.
+fn report_failure<T>(
+    observer: Option<&dyn EngineObserver>,
+    result: Result<T, PvecConvertError>,
+) -> Result<T, PvecConvertError> {
+    if let (Err(e), Some(o)) = (&result, observer) {
+        o.on_event(diagnostic_event(&e.diagnostic()));
+    }
+    result
+}
+
+impl PvecConvertError {
+    /// The diagnostic for this failure: its code, severity and stage, a stable message id, and the
+    /// entity's handle, class, layer and block path when the failure is about one entity or one
+    /// INSERT chain.
+    #[must_use]
+    pub fn diagnostic(&self) -> Diagnostic {
+        let d = |code, id: &str| Diagnostic::new(code, id, self.to_string());
+        match self {
+            PvecConvertError::Open(_) => d(DiagnosticCode::SourceOpenFailed, "open"),
+            PvecConvertError::View(_) => d(DiagnosticCode::ViewFailed, "view"),
+            PvecConvertError::Flatten(e) => {
+                let (id, path) = match e {
+                    FlattenError::BlockRecursionLimit { block_path, .. } => {
+                        ("block-recursion", Some(block_path))
+                    }
+                    FlattenError::Limit { block_path, .. } => ("limit", Some(block_path)),
+                    FlattenError::EntitiesPerBlock { block_path, .. } => {
+                        ("entities-per-block", Some(block_path))
+                    }
+                    FlattenError::Compose(_) => ("compose", None),
+                    _ => ("provider", None),
+                };
+                let mut out = d(DiagnosticCode::BlocksFailed, id);
+                out.block_path = path.map(ToString::to_string);
+                out
+            }
+            PvecConvertError::UnitRequired => d(DiagnosticCode::UnitRequired, "unit-required"),
+            PvecConvertError::Write(_) => d(DiagnosticCode::WriteFailed, "write"),
+            PvecConvertError::Tally(_) | PvecConvertError::Report(_) => {
+                d(DiagnosticCode::ReportFailed, "report")
+            }
+            PvecConvertError::Publish(_) => d(DiagnosticCode::PublishFailed, "publish"),
+            PvecConvertError::Georeference(_) => {
+                d(DiagnosticCode::GeoreferenceFailed, "georeference")
+            }
+            PvecConvertError::CapabilityNotAllowed {
+                source_class,
+                handle,
+                layer,
+                block_path,
+                ..
+            } => {
+                let mut out = d(DiagnosticCode::CapabilityRejected, "capability-not-allowed");
+                out.class = Some(source_class.clone());
+                out.handle = *handle;
+                out.layer = Some(layer.clone());
+                out.block_path = Some(block_path.clone());
+                out
+            }
+            PvecConvertError::Cancelled => d(DiagnosticCode::Cancelled, "cancelled"),
+        }
+    }
+}
+
+/// Red-test stub: the diagnostics are not made yet.
+const fn item_is_never_reported() -> bool {
+    true
 }
