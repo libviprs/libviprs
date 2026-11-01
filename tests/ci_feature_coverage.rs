@@ -285,15 +285,16 @@ const EXPECTED: &[(&str, Coverage)] = &[
         ),
     ),
     (
-        "pvec-conformance",
+        "pvec-write",
         cov(
             true,
             true,
             true,
-            "enables dwg-acadrust, pvec-normalized and pvec-spline together for \
-             tests/pvec_known_truth.rs, the known-truth suite of issue #1050, \
-             and the suites that share tests/common/pvec_gold.rs; adds no crate \
-             of its own",
+            "gates src/pvec/writer.rs, the one funnel that writes geometry into a \
+             PVec artifact (issue #1314), src/pvec/publish.rs, the atomic publish of \
+             the artifact and its report, and tests/pvec_1314_writer_funnel.rs and \
+             tests/pvec_1314_publish.rs, 25 tests; adds nothing beyond `pvec-normalized` \
+             and `pvec-raster` (the PVec facade, a git dependency, pure Rust)",
         ),
     ),
     (

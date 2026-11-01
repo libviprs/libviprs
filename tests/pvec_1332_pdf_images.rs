@@ -358,6 +358,7 @@ fn refused_reason(bytes: &[u8]) -> (PdfImageError, String) {
 }
 
 #[test]
+#[cfg(not(feature = "jp2k"))] // with the feature the stream is tried (#1364)
 fn a_jpx_image_is_not_enabled_by_name() {
     let s = image(
         2,
@@ -633,14 +634,8 @@ fn a_decode_array_inverts_a_gray_image() {
 }
 
 #[test]
-fn ccitt_jbig2_devicen_and_pattern_are_each_refused_by_name_and_counted() {
-    let cases: [(&str, Object, &str, &str); 4] = [
-        (
-            "CCITTFaxDecode",
-            name("DeviceGray"),
-            "filter-not-enabled:CCITTFaxDecode",
-            "f",
-        ),
+fn jbig2_devicen_and_pattern_are_each_refused_by_name_and_counted() {
+    let cases: [(&str, Object, &str, &str); 3] = [
         (
             "JBIG2Decode",
             name("DeviceGray"),
