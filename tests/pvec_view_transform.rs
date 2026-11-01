@@ -10,9 +10,9 @@
 //! N1.4 has no fixture there (libviprs/pvec-gold-fixtures#96 asks for one), and v1 does not draw
 //! paper space at all (V1-1), so that row is asserted as the refusal it is and nothing more.
 //!
-//! Needs `--features pvec-conformance`.
+//! Needs `--features dwg-acadrust`.
 
-#![cfg(feature = "pvec-conformance")]
+#![cfg(feature = "dwg-acadrust")]
 
 #[path = "common/pvec_gold_decode.rs"]
 mod decode;

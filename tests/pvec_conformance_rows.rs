@@ -8,9 +8,9 @@
 //! the table covers every row, its class is the row's class, the named suite is the one the class
 //! belongs to, and the named test exists in that file.
 //!
-//! Needs `--features pvec-conformance`.
+//! Needs `--features dwg-acadrust`.
 
-#![cfg(feature = "pvec-conformance")]
+#![cfg(feature = "dwg-acadrust")]
 
 use libviprs::pvec::mapping::{ConformanceClass, NORMALIZED_TO_PVEC, NormalizedKind, row_for};
 

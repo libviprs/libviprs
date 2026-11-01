@@ -549,8 +549,12 @@ dwg-acadsharp = ["dep:acadsharp-rs"]
 # key, no native archive, no runtime loader, so unlike `dwg-acadsharp` it needs nothing
 # installed. `pvec` itself is not behind a feature and builds without this one; this
 # only adds `pvec::dwg_acadrust::AcadrustProvider`. The existing `cad::CadDecoder` path,
-# and `dwg-acadsharp` with it, is untouched.
-dwg-acadrust = ["dep:acadrust"]
+# and `dwg-acadsharp` with it, is untouched. It also enables `pvec-normalized` and
+# `pvec-spline` (no crate beyond the PVec ones those two already name), because the PVec
+# conformance suites in `tests/` (issue #1050) open corpus drawings through this provider and
+# compare them through those two, and CI runs each feature on its own: a suite gated on all
+# three would be compiled out of every cell.
+dwg-acadrust = ["dep:acadrust", "pvec-normalized", "pvec-spline"]
 # Exact B-spline extraction from a provider's `RawGeometry::Spline` (issue #1074),
 # validated against PVec's numeric policy. Needs no reader: it works on the boundary
 # types, so any provider's output goes through it.
@@ -560,12 +564,6 @@ pvec-spline = ["dep:pvec-numeric"]
 # `pvec-geometry` comes with it only so the tests can build the sheet's outline entity: an artifact
 # needs one (WRT-01), and the facade does not re-export the curve constructors.
 pvec-raster = ["dep:pvec-facade", "dep:pvec-geometry"]
-# The PVec conformance suites (EPIC N, phase 2): `tests/pvec_known_truth.rs` and the suites that
-# share its loader for the pinned `pvec-gold-fixtures` corpus (`tests/fixtures/pvec-gold`). They
-# need the acadrust provider (to open the corpus DWGs), the normalized adapter and the spline
-# extraction together, and CI runs every feature on its own, so a suite gated on all three would
-# be compiled out of every cell. This names the combination and adds no crate of its own.
-pvec-conformance = ["dwg-acadrust", "pvec-normalized", "pvec-spline"]
 # `pvec::Normalized2DGeometry`, the thin semantic adapter over PVec's public curve
 # model (issue #1095, ADR `docs/adr/pvec-normalized-geometry.md`). Pure Rust, and the
 # two PVec crates it needs are the whole of what it adds to the graph. They are git
