@@ -566,3 +566,56 @@ fn malformed(c: &Value, regen: Regen, dir: &Path, out: &mut Vec<String>) {
         }
     }
 }
+
+// ---------------------------------------------------------------------------------- measuring
+
+/// Three runs of one figure: the median, with the extremes printed beside it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Stat {
+    pub median: f64,
+    pub min: f64,
+    pub max: f64,
+}
+
+impl Stat {
+    /// The statistics of `samples`.
+    ///
+    /// # Panics
+    ///
+    /// On no samples: a column nobody measured is a hole, never a zero.
+    pub fn of(samples: &[f64]) -> Self {
+        let _ = samples;
+        unimplemented!()
+    }
+
+    /// How far apart the extremes are, as a fraction of the median.
+    pub fn spread(&self) -> f64 {
+        unimplemented!()
+    }
+
+    /// A row whose spread is over 20% is marked unstable and never gates.
+    pub fn unstable(&self) -> bool {
+        unimplemented!()
+    }
+}
+
+/// The poll, counting from 1, at which the one-minute load had been under `ncpu` for three polls
+/// running, or `None` when it never was.
+pub fn quiet_after(loads: impl IntoIterator<Item = f64>, ncpu: usize) -> Option<usize> {
+    let _ = (loads, ncpu);
+    unimplemented!()
+}
+
+/// The columns of `row` that are missing or null. A benchmark row with any is refused, not printed.
+pub fn blank_columns(row: &Value, columns: &[&str]) -> Vec<String> {
+    let _ = (row, columns);
+    unimplemented!()
+}
+
+/// How `cur` compares with the baseline row `base` for a provider cell: more than 10% loss of
+/// entities per second, or more than 15% growth in tracked allocation peak, is a regression. An
+/// unstable row on either side never gates.
+pub fn provider_regressions(base: &Value, cur: &Value) -> Vec<String> {
+    let _ = (base, cur);
+    unimplemented!()
+}
