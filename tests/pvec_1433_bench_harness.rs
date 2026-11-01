@@ -146,3 +146,25 @@ fn the_unattributed_remainder_is_what_no_stage_accounts_for() {
     assert!((r - 0.2).abs() < 1e-12, "{r}");
     assert!(pvec_bench::unattributed(&[0.6, 0.5], 1.0) < 0.0);
 }
+
+#[test]
+fn generation_regressions_are_ten_percent_time_five_percent_bytes_two_points_of_ratio() {
+    let row = |wall: f64, bytes: f64, pct: f64, unstable: bool| json!({"wall_secs": {"median": wall}, "artifact_bytes": bytes, "artifact_pct_of_source": pct, "unstable": unstable});
+    let base = row(1.0, 1000.0, 20.0, false);
+    assert!(pvec_bench::generation_regressions(&base, &row(1.09, 1049.0, 21.9, false)).is_empty());
+    assert_eq!(
+        pvec_bench::generation_regressions(&base, &row(1.2, 1000.0, 20.0, false)).len(),
+        1
+    );
+    assert_eq!(
+        pvec_bench::generation_regressions(&base, &row(1.0, 1060.0, 20.0, false)).len(),
+        1
+    );
+    assert_eq!(
+        pvec_bench::generation_regressions(&base, &row(1.0, 1000.0, 22.5, false)).len(),
+        1
+    );
+    // A noisy wall time does not gate, the deterministic bytes still do.
+    let noisy = pvec_bench::generation_regressions(&base, &row(9.0, 2000.0, 20.0, true));
+    assert_eq!(noisy.len(), 1, "{noisy:?}");
+}

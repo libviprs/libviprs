@@ -824,3 +824,12 @@ pub fn stage_regressions(base: &Value, cur: &Value) -> Vec<String> {
 pub fn unattributed(stage_secs: &[f64], total_secs: f64) -> f64 {
     (total_secs - stage_secs.iter().sum::<f64>()) / total_secs
 }
+
+/// How `cur` compares with the baseline row `base` for a generation cell: more than 10% growth in
+/// wall time or more than 5% growth in artifact bytes, or an artifact more than 2 percentage
+/// points larger against its source drawing, is a regression. An unstable wall time never gates;
+/// the byte figures are deterministic and always do.
+pub fn generation_regressions(base: &Value, cur: &Value) -> Vec<String> {
+    let _ = (base, cur);
+    unimplemented!()
+}
