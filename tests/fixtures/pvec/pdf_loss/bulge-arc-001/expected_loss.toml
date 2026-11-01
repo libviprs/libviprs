@@ -1,0 +1,28 @@
+# The measured loss of the LibreDWG dwg2SVG + rsvg-convert export of this DWG (issue #1405).
+# Every difference between what the DWG says and what the PDF says is listed with why.
+evidence = "REAL_WORLD_DIFFERENTIAL"
+
+[[loss]]
+metric = "count.curve"
+dwg = "1"
+pdf = "0"
+reason = "the exporter drops the bulge: the arc segment of the polyline leaves as a straight segment"
+
+[[loss]]
+metric = "count.line"
+dwg = "0"
+pdf = "1"
+reason = "the exporter drops the bulge: the arc segment of the polyline leaves as a straight segment"
+
+[[loss]]
+metric = "extent.aspect"
+dwg = "1.867"
+pdf = "1.999"
+reason = "without the arc the extent is the chord's, so the ratio changes"
+
+[[loss]]
+metric = "extent.outside_page"
+dwg = "0"
+pdf = "1"
+reason = "the exporter's page box does not enclose this drawing: dwg2SVG 0.14 writes a viewBox the path leaves, so the PDF page edge clips it"
+

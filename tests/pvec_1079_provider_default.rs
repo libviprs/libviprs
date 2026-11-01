@@ -164,3 +164,133 @@ fn the_provider_page_says_acadrust_is_the_default_and_acadsharp_is_opt_in() {
         );
     }
 }
+
+// ---- no LibreDWG in the build (issue #1405, Rom's rule) ---------------------------------------
+//
+// libviprs has no LibreDWG dependency of any kind. Anything LibreDWG produced is committed as a
+// static file with provenance. SCOPE, explicitly: the places a build, a CI row or a script could
+// build or run it, which are the root `Cargo.toml`, every `build.rs`, everything under `tools/`
+// and `scripts/` and `.github/`, the `Makefile`, `run-tests.sh` and any `Dockerfile*`. Out of
+// scope on purpose, because they only name or store it: `docs/`, `src/` comments, `tests/` (the
+// label strings of `pvec_dual_oracle.rs`, this file) and the static pairs under
+// `tests/fixtures/pvec/pdf_loss/` with their `exporter.txt` provenance.
+
+const FORBIDDEN: [&str; 4] = ["libredwg", "dwg2svg", "dwg2pdf", "dwgread"];
+
+fn scoped_files() -> Vec<PathBuf> {
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(rd) = fs::read_dir(dir) else { return };
+        for e in rd.flatten() {
+            let p = e.path();
+            let name = p.file_name().unwrap().to_string_lossy().to_string();
+            if p.is_dir() {
+                if !["target", ".git", "docs", "node_modules"].contains(&name.as_str()) {
+                    walk(&p, out);
+                }
+            } else {
+                out.push(p);
+            }
+        }
+    }
+    let r = root();
+    let mut all = Vec::new();
+    for d in [
+        "tools", "scripts", ".github", "src", "fuzz", "examples", "web",
+    ] {
+        walk(&r.join(d), &mut all);
+    }
+    let mut out: Vec<PathBuf> = all
+        .into_iter()
+        .filter(|p| {
+            let n = p.file_name().unwrap().to_string_lossy().to_string();
+            let top = p.strip_prefix(&r).unwrap().components().next().unwrap();
+            let top = top.as_os_str().to_string_lossy().to_string();
+            ["tools", "scripts", ".github"].contains(&top.as_str()) || n == "build.rs"
+        })
+        .collect();
+    for f in ["Cargo.toml", "Makefile", "run-tests.sh"] {
+        out.push(r.join(f));
+    }
+    if let Ok(rd) = fs::read_dir(&r) {
+        for e in rd.flatten() {
+            if e.file_name().to_string_lossy().starts_with("Dockerfile") {
+                out.push(e.path());
+            }
+        }
+    }
+    out.retain(|p| p.is_file());
+    out
+}
+
+fn forbidden_hits(files: &[(PathBuf, String)]) -> Vec<String> {
+    let mut out = Vec::new();
+    for (p, text) in files {
+        let lower = text.to_ascii_lowercase();
+        for w in FORBIDDEN {
+            if lower.contains(w) {
+                out.push(format!("{} names {w}", p.display()));
+            }
+        }
+    }
+    out
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn nothing_that_builds_or_runs_libredwg_lives_in_libviprs() {
+    let files: Vec<(PathBuf, String)> = scoped_files()
+        .into_iter()
+        .filter_map(|p| fs::read_to_string(&p).ok().map(|t| (p, t)))
+        .collect();
+    assert!(
+        files.len() > 5,
+        "the scope walk found {} files, so it would pass on nothing",
+        files.len()
+    );
+    assert!(
+        files.iter().any(|(p, _)| p.ends_with("Cargo.toml")),
+        "Cargo.toml is in scope"
+    );
+    assert_eq!(forbidden_hits(&files), Vec::<String>::new());
+}
+
+#[test]
+fn the_libredwg_guard_fails_on_a_mention_in_each_kind_of_place() {
+    for place in [
+        "Cargo.toml",
+        "crate/build.rs",
+        "tools/x.sh",
+        ".github/workflows/ci.yml",
+        "Makefile",
+    ] {
+        for word in FORBIDDEN {
+            let hit =
+                forbidden_hits(&[(PathBuf::from(place), format!("run {}", word.to_uppercase()))]);
+            assert_eq!(hit.len(), 1, "{place} / {word}");
+        }
+    }
+    assert!(forbidden_hits(&[(PathBuf::from("Cargo.toml"), "acadrust".into())]).is_empty());
+}
+
+#[test]
+fn the_provider_page_says_libviprs_has_no_libredwg_dependency() {
+    let doc = PROVIDER_DOC
+        .to_ascii_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for needle in [
+        "no libredwg dependency of any kind",
+        "static file",
+        "out-of-tree crate",
+    ] {
+        assert!(
+            doc.contains(needle),
+            "docs/pvec-providers.md lost: {needle}"
+        );
+    }
+    assert!(
+        !doc.contains("planned"),
+        "the page must not call LibreDWG planned work"
+    );
+}

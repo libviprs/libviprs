@@ -16,6 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The DWG to PDF differential, with LibreDWG as the first real exporter** (issue #1405, part of #1086).
+  Six `REAL_WORLD_DIFFERENTIAL` pairs are committed as static files under `tests/fixtures/pvec/pdf_loss/`
+  (the DWG, the exported PDF, `exporter.txt` provenance with versions, options and the tarball sha256), and
+  `tests/pvec_dwg_pdf_differential.rs` asserts each pair measures exactly its recorded loss
+  (`expected_loss.toml`, a written reason per entry): primitive counts, N3.5 buckets, extent aspect with
+  `/Rotate` composed, and entities outside the page. libviprs has no LibreDWG dependency of any kind, and
+  `tests/pvec_1079_provider_default.rs` guards the build side. See `docs/pvec-dwg-pdf-differential.md`.
 - **The conversion API** (issue #1048, slices #1413 to #1417). `libviprs::pvec_convert::PvecConversion`
   behind the new `pvec-convert` feature (`pvec-write` plus `dwg-acadrust`, acadrust stays the default
   provider): one call takes a DWG, a view profile and limits and publishes a `.pvec` with its
