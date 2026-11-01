@@ -144,6 +144,8 @@ pub enum SkipReason {
     BlockNotFound,
     /// The INSERT's normal is not parallel to Z.
     NormalNotZ,
+    /// The INSERT places an external reference: its geometry lives in another file.
+    ExternalReference,
     /// The INSERT has no handle, so no lineage step can name it.
     MissingInsertHandle,
 }
@@ -156,6 +158,7 @@ impl SkipReason {
             Self::AnonymousBlockUnresolved => "anonymous-block-unresolved",
             Self::BlockNotFound => "block-not-found",
             Self::NormalNotZ => "insert-normal-not-z",
+            Self::ExternalReference => "external-reference",
             Self::MissingInsertHandle => "insert-missing-handle",
         }
     }

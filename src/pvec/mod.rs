@@ -107,7 +107,7 @@ pub use provider::{
     EntityStyle, Facet, FacetCap, FacetSource, InstancePath, InstanceStep, LayerState, LayoutId,
     LayoutKind, LayoutState, Point3, ProvenanceStub, ProviderCaps, ProviderError, RawEntity,
     RawGeometry, RawVertex, SourceColour, SourceFact, SourceLineweight, SourceTransform,
-    ViewportEntity,
+    ViewportEntity, XrefAttachment,
 };
 pub use text_policy::{
     DwgTextCounts, PdfTextOperatorCounts, TextFontOutcome, TextReport, shx_outcome,

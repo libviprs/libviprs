@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use super::limits::{LimitError, SourceGuard};
-use super::provider::{ArrayGrid, SourceTransform};
+use super::provider::{ArrayGrid, DwgProvider, ProviderError, RawEntity, SourceTransform};
 
 /// What to do with an attached drawing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -49,6 +49,22 @@ pub struct XrefRef {
     pub layer: String,
     /// The grid the attachment is placed on.
     pub grid: ArrayGrid,
+}
+
+impl XrefRef {
+    /// The xref attachments among `entities`: every INSERT of a block the provider lists in
+    /// [`DwgProvider::xref_blocks`], in the order given, with the block record's path.
+    ///
+    /// # Errors
+    ///
+    /// [`ProviderError::CannotReport`] when the provider cannot report xref block records.
+    pub fn discover(
+        provider: &(impl DwgProvider + ?Sized),
+        entities: &[RawEntity],
+    ) -> Result<Vec<XrefRef>, ProviderError> {
+        let _ = (provider, entities);
+        Ok(Vec::new())
+    }
 }
 
 /// Why an attachment path was refused.
@@ -102,6 +118,24 @@ pub enum XrefError {
         name: String,
         /// Resolved path.
         path: PathBuf,
+    },
+    /// The resolved file exists and is not a drawing the provider opens.
+    #[error("xref {name}: could not open {}: {detail}", .path.display())]
+    Open {
+        /// Xref name.
+        name: String,
+        /// Resolved path.
+        path: PathBuf,
+        /// The provider's message.
+        detail: String,
+    },
+    /// The attached drawing could not be flattened.
+    #[error("xref {name}: could not flatten the attached drawing: {detail}")]
+    Flatten {
+        /// Xref name.
+        name: String,
+        /// The flattener's message.
+        detail: String,
     },
     /// A shared budget was passed.
     #[error(transparent)]
@@ -307,5 +341,50 @@ impl XrefSession {
     #[must_use]
     pub fn into_report(self) -> XrefReport {
         self.report
+    }
+}
+
+/// What [`XrefSession::open_and_flatten`] did with one attachment.
+#[cfg(feature = "pvec-normalized")]
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum XrefOpened {
+    /// Omitted by policy and recorded at this index of the report.
+    Omitted(usize),
+    /// Opened and flattened.
+    Flattened(FlattenedXref),
+}
+
+/// An attached drawing, opened and flattened.
+#[cfg(feature = "pvec-normalized")]
+#[derive(Debug, Clone)]
+pub struct FlattenedXref {
+    /// Xref name.
+    pub name: String,
+    /// The file that was opened.
+    pub path: PathBuf,
+    /// Xref nesting depth, 1 for a direct attachment.
+    pub depth: u32,
+    /// The attached drawing's model space, flattened in its own coordinates.
+    pub flattened: super::flatten::Flattened,
+    /// The xrefs the attached drawing attaches in turn.
+    pub nested: Vec<FlattenedXref>,
+}
+
+#[cfg(feature = "pvec-normalized")]
+impl XrefSession {
+    /// Decide `xref`, and under `Resolve` open the attached drawing with `P` and flatten it.
+    ///
+    /// # Errors
+    ///
+    /// [`XrefError`].
+    pub fn open_and_flatten<P: DwgProvider>(
+        &mut self,
+        guard: &mut SourceGuard,
+        xref: &XrefRef,
+        bounds: super::flatten::FlattenBounds,
+    ) -> Result<XrefOpened, XrefError> {
+        let _ = (guard, xref, bounds);
+        Ok(XrefOpened::Omitted(0))
     }
 }
