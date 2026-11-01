@@ -236,7 +236,7 @@ fn artifact_growth_of_two_percent_in_total_or_five_on_one_fixture_fails() {
         .iter()
         .filter(|(_, r)| {
             r["evidence"] != "QUARANTINED"
-                && r["size"]["artifact_bytes"].as_u64().unwrap_or(0) > 1000
+                && r["size"]["artifact_bytes"].as_u64().unwrap_or(0) > 300
         })
         .map(|(id, _)| id.clone())
         .collect();
