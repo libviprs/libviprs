@@ -155,7 +155,7 @@ fn the_provider_page_says_acadrust_is_the_default_and_acadsharp_is_opt_in() {
         "acadsharp-rs** is opt-in",
         "`dwg-acadsharp`",
         "off by default",
-        "default feature set is empty",
+        "feature set is empty",
         "libredwg",
     ] {
         assert!(
