@@ -1,0 +1,12 @@
+{
+  "cells": {},
+  "detail": "primary: CONVERSION_FAILED: no supported curve in model space; secondary: CONVERSION_FAILED: the drawing holds no curve this converter writes",
+  "evidence_class": "QUARANTINED",
+  "evidence_scope": "STEP_ORACLE",
+  "fixture_id": "mtext-001",
+  "known_truth": false,
+  "oracle_scope": "OPEN_CONVERTERS",
+  "reason": "UNSUPPORTED_ENTITY",
+  "schema_version": "pvec-gold/fixture-verdict/1",
+  "signature_differences": []
+}

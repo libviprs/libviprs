@@ -24,6 +24,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`expected_loss.toml`, a written reason per entry): primitive counts, N3.5 buckets, extent aspect with
   `/Rotate` composed, and entities outside the page. The exporter is a script, not a trait, while it has one
   backend. See `docs/pvec-dwg-pdf-differential.md`.
+- **`JPXDecode` images in a PDF** (issue #1364, follow-up 3/6 to #1332). Decoded through the
+  existing `jp2k` feature (`crate::jp2k::decode_jp2k`), so no crate enters the graph; the jp2k
+  cell of `dependency_policy` is pinned to its two codec crates. Without the feature the reason is
+  still `filter-not-enabled:JPXDecode`. `/SMaskInData` other than 0 is refused
+  (`FilterError::SMaskInData`), and `FilterError::Source` carries the shared decode ceilings.
+  `fuzz_pvec_pdf_image` takes `--features jp2k`.
+
 - **`CCITTFaxDecode` images in a PDF** (issue #1363, follow-up 2/6 to #1332). Decoded through
   `hayro-ccitt` (plain Rust, no dependencies, in every build, no feature) into 1-bit samples that
   reach the 1-bit PNG tiles and the `Bilevel` note. `usace_swf_gpw_daca67-06-d-0029.pdf` now
