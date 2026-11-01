@@ -127,6 +127,29 @@ fn put(doc: &mut CadDocument, owner: acadrust::types::Handle, mut e: EntityType)
     doc.add_entity(e).expect("entity");
 }
 
+/// Adds the two layers a visibility mix hides entities on: one turned off, one frozen.
+fn add_hidden_layers(doc: &mut CadDocument, percent: u64) {
+    if percent == 0 {
+        return;
+    }
+    let mut off = Layer::new("HID_OFF");
+    off.turn_off();
+    off.handle = doc.allocate_handle();
+    doc.layers.add(off).expect("layer");
+    let mut frozen = Layer::new("HID_FRZ");
+    frozen.freeze();
+    frozen.handle = doc.allocate_handle();
+    doc.layers.add(frozen).expect("layer");
+}
+
+/// Puts leaf number `n` on a hidden layer when a fixed hash of `n` falls under `percent`, so the
+/// share is about `percent` over any run of a few hundred leaves. Off and frozen alternate.
+fn maybe_hide(e: &mut EntityType, n: u64, percent: u64) {
+    if percent > 0 && (n.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 33) % 100 < percent {
+        e.common_mut().layer = if n % 2 == 0 { "HID_OFF" } else { "HID_FRZ" }.to_string();
+    }
+}
+
 /// `simple`: flat model space, lines, arcs and circles. Parameter: `entities`.
 fn simple(p: &Value) -> CadDocument {
     let mut doc = CadDocument::new();
@@ -153,13 +176,33 @@ fn block_heavy(p: &Value) -> CadDocument {
     let (depth, fanout, roots) = (param(p, "depth"), param(p, "fanout"), param(p, "roots"));
     let mut doc = CadDocument::new();
     let mut rng = Rng::new(0x42_4C_4B);
+    let hidden = p["hidden"].as_u64().unwrap_or(0);
+    add_hidden_layers(&mut doc, hidden);
     let owners: Vec<_> = (0..depth)
         .map(|d| define_block(&mut doc, &format!("B{d}")))
         .collect();
+    // A block's leaves are drawn once per instance of the block, and the deepest blocks have the
+    // most instances, so a hash would give a lumpy share. Hide leaves deepest first, whole levels
+    // while they fit, until the hidden weight (instances drawn) reaches the share asked for.
+    let weight = |d: u64| fanout.pow(d as u32);
+    let total: u64 = (0..depth).map(|d| 2 * weight(d)).sum();
+    let mut left = total * hidden / 100;
+    let mut hide = vec![[false; 2]; depth as usize];
+    for d in (0..depth).rev() {
+        for slot in hide[d as usize].iter_mut() {
+            if weight(d) <= left {
+                *slot = true;
+                left -= weight(d);
+            }
+        }
+    }
     for d in 0..depth as usize {
-        for _ in 0..2 {
+        for j in 0..2 {
             let (x, y) = (rng.range(0.0, 4.0), rng.range(0.0, 4.0));
-            let l = line(&mut rng, x, y, 2.0);
+            let mut l = line(&mut rng, x, y, 2.0);
+            if hide[d][j] {
+                l.common_mut().layer = if d % 2 == 0 { "HID_OFF" } else { "HID_FRZ" }.to_string();
+            }
             put(&mut doc, owners[d], l);
         }
         if d + 1 < depth as usize {
@@ -208,9 +251,12 @@ fn spline_heavy(p: &Value) -> CadDocument {
 fn paper_space(p: &Value) -> CadDocument {
     let mut doc = CadDocument::new();
     let mut rng = Rng::new(0x50_41_50);
-    for _ in 0..param(p, "model_lines") {
+    let hidden = p["hidden"].as_u64().unwrap_or(0);
+    add_hidden_layers(&mut doc, hidden);
+    for n in 0..param(p, "model_lines") {
         let (x, y) = (rng.range(0.0, 500.0), rng.range(0.0, 500.0));
-        let l = line(&mut rng, x, y, 10.0);
+        let mut l = line(&mut rng, x, y, 10.0);
+        maybe_hide(&mut l, n, hidden);
         doc.add_entity(l).expect("entity");
     }
     doc.add_layout("Sheet A").expect("layout");
@@ -242,17 +288,20 @@ fn large_industrial(p: &Value) -> CadDocument {
     let mut rng = Rng::new(0x50_4C_41_4E_54);
     doc.layers.add(Layer::new("P-PIPE")).expect("layer");
     doc.layers.add(Layer::new("E-EQUIP")).expect("layer");
+    let hidden = p["hidden"].as_u64().unwrap_or(0);
+    add_hidden_layers(&mut doc, hidden);
     let owners: Vec<_> = (0..4)
         .map(|t| define_block(&mut doc, &format!("EQ{t}")))
         .collect();
     for (t, o) in owners.iter().enumerate() {
         for k in 0..parts {
             let a = k as f64;
-            let e = match (k + t as u64) % 3 {
+            let mut e = match (k + t as u64) % 3 {
                 0 => line(&mut rng, a, a, 3.0),
                 1 => circle(a, -a, 1.0 + (k % 4) as f64),
                 _ => arc(&mut rng, a, a, 2.0),
             };
+            maybe_hide(&mut e, k * 4 + t as u64, hidden);
             put(&mut doc, *o, e);
         }
     }
@@ -275,6 +324,9 @@ fn large_industrial(p: &Value) -> CadDocument {
             _ => insert(&format!("EQ{}", i % 4), x, y, rng.range(0.0, 6.0)),
         };
         e.common_mut().layer = if i % 20 >= 17 { "E-EQUIP" } else { "P-PIPE" }.to_string();
+        if i % 20 < 17 {
+            maybe_hide(&mut e, i, hidden);
+        }
         doc.add_entity(e).expect("entity");
     }
     doc
@@ -739,4 +791,20 @@ pub fn baseline_rows() -> Value {
         .ok()
         .and_then(|t| serde_json::from_str::<Value>(&t).ok())
         .map_or_else(|| Value::Object(Default::default()), |v| v["rows"].clone())
+}
+
+/// How `cur` compares with the baseline row `base` for a normalization cell: any single stage
+/// that grew by more than 10% in nanoseconds per entity is a regression. The rows carry
+/// `stage_ns` (stage name to nanoseconds per entity). An unstable row on either side never gates.
+pub fn stage_regressions(base: &Value, cur: &Value) -> Vec<String> {
+    let _ = (base, cur);
+    unimplemented!()
+}
+
+/// The stages' share of a pass: the sum of the stage times against the pass total, as a fraction
+/// of the total that no stage accounts for (it can be negative if the timers overlap). Printed,
+/// never spread over the stages.
+pub fn unattributed(stage_secs: &[f64], total_secs: f64) -> f64 {
+    let _ = (stage_secs, total_secs);
+    unimplemented!()
 }

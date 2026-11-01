@@ -15,7 +15,7 @@ use serde_json::json;
 
 fn params(cell: &str, hidden: u64) -> serde_json::Value {
     match cell {
-        "block_heavy" => json!({"depth": 4, "fanout": 2, "roots": 12, "hidden": hidden}),
+        "block_heavy" => json!({"depth": 8, "fanout": 2, "roots": 2, "hidden": hidden}),
         "paper_space" => json!({"viewports": 2, "model_lines": 2000, "hidden": hidden}),
         _ => json!({"entities": 3000, "parts": 8, "hidden": hidden}),
     }

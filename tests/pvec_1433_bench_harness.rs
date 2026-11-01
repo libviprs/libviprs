@@ -116,3 +116,25 @@ fn the_document_and_the_baseline_describe_the_same_rows() {
         assert!(blank.is_empty(), "{key}: {blank:?}");
     }
 }
+
+#[test]
+fn a_stage_that_grew_ten_percent_is_a_regression() {
+    let row = |a: f64, b: f64, unstable: bool| json!({"stage_ns": {"visibility": a, "bounds": b}, "unstable": unstable});
+    let base = row(100.0, 50.0, false);
+    assert!(pvec_bench::stage_regressions(&base, &row(109.0, 54.0, false)).is_empty());
+    let bad = pvec_bench::stage_regressions(&base, &row(111.0, 50.0, false));
+    assert_eq!(bad.len(), 1);
+    assert!(bad[0].contains("visibility"), "{bad:?}");
+    assert_eq!(
+        pvec_bench::stage_regressions(&base, &row(200.0, 100.0, false)).len(),
+        2
+    );
+    assert!(pvec_bench::stage_regressions(&base, &row(200.0, 100.0, true)).is_empty());
+}
+
+#[test]
+fn the_unattributed_remainder_is_what_no_stage_accounts_for() {
+    let r = pvec_bench::unattributed(&[0.3, 0.5], 1.0);
+    assert!((r - 0.2).abs() < 1e-12, "{r}");
+    assert!(pvec_bench::unattributed(&[0.6, 0.5], 1.0) < 0.0);
+}
