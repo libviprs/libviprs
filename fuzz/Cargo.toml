@@ -21,6 +21,9 @@ flate2 = { workspace = true }
 [features]
 # `cargo fuzz run fuzz_pvec_pdf_image --features jbig2` fuzzes the JBIG2 decoder too (issue #1365).
 jbig2 = ["libviprs/jbig2"]
+# `cargo fuzz run fuzz_pvec_pdf_image --features jp2k` makes the `JPXDecode` arm a codec that
+# tries the stream (#1364) instead of the typed `FilterNotEnabled`.
+jp2k = ["libviprs/jp2k"]
 
 [[bin]]
 name = "fuzz_decode"

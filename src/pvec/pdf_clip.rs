@@ -14,6 +14,21 @@
 //! | `FullyClipped` | the entity's exact bounds lie outside a clip's exact bounds | dropped, `IgnoredByPolicy` with field `OutsideClip` |
 //! | `Unsupported` | a soft mask is in force | `Unsupported` with [`ReasonCode::PdfSoftMask`] |
 //!
+//! # Exact bounds, form boxes, text clips and the empty clip (issue #1380)
+//!
+//! * [`AnalyticBounds`] answers for curves too, from PVec's closed-form Bezier extrema (N6.4), so
+//!   a curve whose control polygon leaves a clip but whose extent does not is kept, and one whose
+//!   polygon overlaps the clip while its extent does not is `FullyClipped`.
+//! * A Form XObject's `/BBox` clips everything the form paints. It is recorded in
+//!   [`ClipReport::form_clips`], exact when its page-space image is axis aligned and display
+//!   fidelity when a rotation or skew in `/Matrix` or the CTM turns it into a quadrilateral.
+//! * Text in a clipping render mode (`Tr` 4 to 7) clips later geometry to glyph outlines, which v1
+//!   does not compute (text is omitted, see `docs/pvec-text-policy.md`). Geometry painted under it
+//!   is kept, `text_clip` is set and the case is `BoundedConservative`, display fidelity.
+//! * An empty path under `W n` is an empty clip region, so it excludes everything after it
+//!   (PDF 32000-1 8.5.4). It is recorded with [`ClipRecord::empty`] and its entities are
+//!   `FullyClipped`.
+//!
 //! # Exactness
 //!
 //! A clip is exact only where the PDF made it exact: a rectangle. A general clip is recorded as
@@ -106,6 +121,56 @@ impl ExactBoundsSource for LinesOnlyBounds {
     }
 }
 
+/// Exact bounds over the analytic extrema of PVec's curves (N6.4, issue #1380).
+///
+/// Straight segments contribute their end points and cubic Beziers contribute the closed-form
+/// extrema of `pvec_geometry`, never a sample and never the control polygon. A path with a
+/// degenerate segment PVec refuses is `None`, and the entity is then retained.
+#[cfg(feature = "pvec-normalized")]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AnalyticBounds;
+
+#[cfg(feature = "pvec-normalized")]
+impl ExactBoundsSource for AnalyticBounds {
+    fn exact_bounds(&self, entity: &PdfPathEntity) -> Option<ExactBounds> {
+        use pvec_geometry::{Bezier, Curve, Point2};
+        let mut acc: Option<ExactBounds> = None;
+        let mut include = |lo: PdfPoint, hi: PdfPoint| {
+            acc = Some(match acc {
+                None => ExactBounds { min: lo, max: hi },
+                Some(b) => ExactBounds {
+                    min: [b.min[0].min(lo[0]), b.min[1].min(lo[1])],
+                    max: [b.max[0].max(hi[0]), b.max[1].max(hi[1])],
+                },
+            });
+        };
+        let mut current: Option<PdfPoint> = None;
+        for seg in &entity.segments {
+            match seg {
+                PdfPathSegment::MoveTo(p) | PdfPathSegment::LineTo(p) => {
+                    include(*p, *p);
+                    current = Some(*p);
+                }
+                PdfPathSegment::CurveTo { c1, c2, end } => {
+                    let pts = [current?, *c1, *c2, *end]
+                        .into_iter()
+                        .map(|p| Point2::checked(p[0], p[1]).ok())
+                        .collect::<Option<Vec<_>>>()?;
+                    let curve = Curve::Bezier(Bezier::new(pts).ok()?);
+                    let (b, method) = super::bounds::curve_bounds(&curve).ok()?;
+                    if method != super::bounds::BoundsMethod::Exact {
+                        return None;
+                    }
+                    include([b.min().x, b.min().y], [b.max().x, b.max().y]);
+                    current = Some(*end);
+                }
+                PdfPathSegment::Close => {}
+            }
+        }
+        acc
+    }
+}
+
 /// The bound on clip nesting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClipLimits {
@@ -171,6 +236,19 @@ pub struct ClipRecord {
     pub rect: Option<ExactBounds>,
     /// `GeometricallyExact` for a rectangle, `DisplayFidelity` otherwise.
     pub conformance: ClipConformance,
+    /// The boundary has no segments: an empty clip region, which excludes everything after it.
+    pub empty: bool,
+}
+
+/// A Form XObject's `/BBox`, recorded as the clip it is.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FormClipRecord {
+    /// The form names invoked on the way, outermost first, ending with this form.
+    pub form_path: Vec<String>,
+    /// The box in page space when it is exactly axis aligned there.
+    pub rect: Option<ExactBounds>,
+    /// `GeometricallyExact` for an axis-aligned box, `DisplayFidelity` for a rotated or skewed one.
+    pub conformance: ClipConformance,
 }
 
 /// What the policy decided for one painted entity.
@@ -190,6 +268,10 @@ pub struct EntityClipDecision {
     pub fill_rule: Option<PdfFillRule>,
     /// Subpaths in the entity, which `fill_rule` governs as a group.
     pub subpaths: usize,
+    /// Indices into [`ClipReport::form_clips`] of the form boxes this entity was painted inside.
+    pub form_clips: Vec<usize>,
+    /// A glyph-outline clip (`Tr` 4 to 7) was in force. Its outline is not computed.
+    pub text_clip: bool,
 }
 
 /// The policy's output for one page.
@@ -199,6 +281,8 @@ pub struct ClipReport {
     pub clips: Vec<ClipRecord>,
     /// Every painted entity, in stream order.
     pub decisions: Vec<EntityClipDecision>,
+    /// Every Form XObject `/BBox`, in stream order.
+    pub form_clips: Vec<FormClipRecord>,
     /// The most clips in force at once.
     pub max_depth: usize,
 }
@@ -260,6 +344,31 @@ pub(crate) fn exact_rect(entity: &PdfPathEntity) -> Option<ExactBounds> {
     })
 }
 
+/// The four page-space corners of a form box as an axis-aligned box, when they are exactly one.
+fn axis_aligned(c: &[PdfPoint; 4]) -> Option<ExactBounds> {
+    let horizontal_first =
+        c[0][1] == c[1][1] && c[1][0] == c[2][0] && c[2][1] == c[3][1] && c[3][0] == c[0][0];
+    let vertical_first =
+        c[0][0] == c[1][0] && c[1][1] == c[2][1] && c[2][0] == c[3][0] && c[3][1] == c[0][1];
+    (horizontal_first || vertical_first).then(|| corner_extent(c))
+}
+
+/// The box enclosing four corners.
+fn corner_extent(c: &[PdfPoint; 4]) -> ExactBounds {
+    let xs = c.iter().map(|p| p[0]);
+    let ys = c.iter().map(|p| p[1]);
+    ExactBounds {
+        min: [
+            xs.clone().fold(f64::INFINITY, f64::min),
+            ys.clone().fold(f64::INFINITY, f64::min),
+        ],
+        max: [
+            xs.fold(f64::NEG_INFINITY, f64::max),
+            ys.fold(f64::NEG_INFINITY, f64::max),
+        ],
+    }
+}
+
 /// Decide every painted entity of a page, and record every clip boundary.
 ///
 /// # Errors
@@ -276,6 +385,30 @@ pub fn apply_clip_policy(
         .map(|e| (e.provenance.sequence, e))
         .collect();
 
+    let form_clips: Vec<FormClipRecord> = page
+        .form_clips
+        .iter()
+        .map(|f| {
+            let rect = axis_aligned(&f.corners);
+            FormClipRecord {
+                form_path: f.form_path.clone(),
+                rect,
+                conformance: if rect.is_some() {
+                    ClipConformance::GeometricallyExact
+                } else {
+                    ClipConformance::DisplayFidelity
+                },
+            }
+        })
+        .collect();
+    // The box of each form clip, enclosing the corners: a superset of the clip, so an entity
+    // disjoint from it is disjoint from the clip.
+    let form_extent: Vec<ExactBounds> = page
+        .form_clips
+        .iter()
+        .map(|f| corner_extent(&f.corners))
+        .collect();
+    let mut empties: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
     let mut clips = Vec::new();
     let mut rects: BTreeMap<u64, Option<ExactBounds>> = BTreeMap::new();
     let mut decisions = Vec::new();
@@ -296,16 +429,21 @@ pub fn apply_clip_policy(
         if let Some(rule) = entity.clip {
             let rect = exact_rect(entity);
             rects.insert(entity.provenance.sequence, rect);
+            let empty = entity.segments.is_empty();
+            if empty {
+                empties.insert(entity.provenance.sequence);
+            }
             clips.push(ClipRecord {
                 sequence: entity.provenance.sequence,
                 rule,
                 subpaths: subpath_count(entity),
                 rect,
-                conformance: if rect.is_some() {
+                conformance: if rect.is_some() || empty {
                     ClipConformance::GeometricallyExact
                 } else {
                     ClipConformance::DisplayFidelity
                 },
+                empty,
             });
         }
 
@@ -314,6 +452,14 @@ pub fn apply_clip_policy(
             continue;
         }
 
+        let seq = entity.provenance.sequence;
+        let in_forms: Vec<usize> = page
+            .form_clips
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| (f.first_sequence..f.end_sequence).contains(&seq))
+            .map(|(i, _)| i)
+            .collect();
         let mut d = EntityClipDecision {
             entity: entity.provenance.sequence,
             case: ClipCase::NoClip,
@@ -322,6 +468,8 @@ pub fn apply_clip_policy(
             conformance: None,
             fill_rule: entity.paint.fill,
             subpaths: subpath_count(entity),
+            form_clips: in_forms.clone(),
+            text_clip: entity.text_clipped,
         };
         if entity.soft_masked {
             d.case = ClipCase::Unsupported;
@@ -329,21 +477,26 @@ pub fn apply_clip_policy(
                 ReasonCode::PdfSoftMask,
                 SOURCE_CLASS,
             ));
-        } else if !entity.active_clips.is_empty() {
-            let outside = !entity.paint.stroke
-                && bounds.exact_bounds(entity).is_some_and(|eb| {
-                    entity.active_clips.iter().any(|c| {
-                        let clip_bounds = match rects.get(c) {
-                            Some(Some(r)) => Some(*r),
-                            _ => by_sequence.get(c).and_then(|ce| bounds.exact_bounds(ce)),
-                        };
-                        clip_bounds.is_some_and(|cb| eb.disjoint(&cb))
-                    })
-                });
-            let all_rect = entity
-                .active_clips
-                .iter()
-                .all(|c| matches!(rects.get(c), Some(Some(_))));
+        } else if !entity.active_clips.is_empty() || !in_forms.is_empty() || entity.text_clipped {
+            // An empty clip region excludes everything, whatever the entity's own extent.
+            let in_empty = entity.active_clips.iter().any(|c| empties.contains(c));
+            let outside = in_empty
+                || (!entity.paint.stroke
+                    && bounds.exact_bounds(entity).is_some_and(|eb| {
+                        entity.active_clips.iter().any(|c| {
+                            let clip_bounds = match rects.get(c) {
+                                Some(Some(r)) => Some(*r),
+                                _ => by_sequence.get(c).and_then(|ce| bounds.exact_bounds(ce)),
+                            };
+                            clip_bounds.is_some_and(|cb| eb.disjoint(&cb))
+                        }) || in_forms.iter().any(|i| eb.disjoint(&form_extent[*i]))
+                    }));
+            let all_rect = !entity.text_clipped
+                && entity
+                    .active_clips
+                    .iter()
+                    .all(|c| matches!(rects.get(c), Some(Some(_))))
+                && in_forms.iter().all(|i| form_clips[*i].rect.is_some());
             if outside {
                 d.case = ClipCase::FullyClipped;
                 d.classification = Some(Classification::ignored_by_policy(
@@ -364,6 +517,7 @@ pub fn apply_clip_policy(
     Ok(ClipReport {
         clips,
         decisions,
+        form_clips,
         max_depth,
     })
 }

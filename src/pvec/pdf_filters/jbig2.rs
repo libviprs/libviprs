@@ -23,6 +23,9 @@
 //! the same fuzz run found a stream that spends about 400 seconds in one symbol dictionary (a
 //! symbol up to 65535 by 65535 pixels, decoded pixel by pixel). That is the open finding behind
 //! `jbig2` not being a default feature, and it is not something this module can bound from outside.
+//! The other fuzz findings (an `export_symbols` loop that never ends, a halftone grid of billions
+//! of cells, empty height classes) are in arithmetic coded data too. All are reported upstream
+//! (`LaurenzV/hayro` #1700, #1701, #1550, #1598) and kept as ignored tests.
 
 #[cfg(feature = "jbig2")]
 use crate::pvec::pdf_image::FilterError;

@@ -285,6 +285,19 @@ const EXPECTED: &[(&str, Coverage)] = &[
         ),
     ),
     (
+        "pvec-write",
+        cov(
+            true,
+            true,
+            true,
+            "gates src/pvec/writer.rs, the one funnel that writes geometry into a \
+             PVec artifact (issue #1314), src/pvec/publish.rs, the atomic publish of \
+             the artifact and its report, and tests/pvec_1314_writer_funnel.rs and \
+             tests/pvec_1314_publish.rs, 25 tests; adds nothing beyond `pvec-normalized` \
+             and `pvec-raster` (the PVec facade, a git dependency, pure Rust)",
+        ),
+    ),
+    (
         "serde",
         cov(
             true,

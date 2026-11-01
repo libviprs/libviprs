@@ -1,0 +1,16 @@
+# The allowed differences between DwgProviders, one entry per fixture, entity and field, each
+# with a written reason (issue #1395, docs/provider-differential.md). A difference that is not
+# listed here fails the suite, and an entry that no longer matches a difference fails it too, so
+# the list cannot rot.
+#
+# There are no entries today: the only provider that is compiled in is acadrust, and the
+# harness is run against a wrapper of itself in the tests. The first entry arrives with the
+# second provider adapter (libviprs-dep#161), and it names the fixture, the entity key
+# (`<instance path>#<handle>`), the field (`class_name`, `layer`, `bucket`, `reason`,
+# `pvec_type`, `present`, or `param:<name>`) and why the two providers differ.
+#
+# [[delta]]
+# fixture = "vc_nested"
+# entity  = "/#4C"
+# field   = "layer"
+# reason  = "ACadSharp reports the effective layer, acadrust the entity's own"

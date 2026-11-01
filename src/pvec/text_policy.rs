@@ -13,7 +13,9 @@ use std::collections::BTreeMap;
 
 use lopdf::{Dictionary, Document, Object};
 
-use super::provider::RawEntity;
+use crate::cad::ItemHandle;
+
+use super::provider::{RawEntity, TextStyleRef};
 
 /// What the font behind a text operator would have meant, had the text been kept. Under v1
 /// every one of these is omitted and counted; the variant only picks the report bucket.
@@ -141,13 +143,49 @@ impl TextReport {
         }
     }
 
-    /// Put `n` already counted DWG text entities in the bucket for their style's SHX font.
-    /// The provider boundary does not carry a text style yet, so the caller supplies it.
+    /// Put `n` already counted DWG text entities in the bucket for their style's SHX font, for a
+    /// caller that already knows the font. [`bucket_dwg_entities`](Self::bucket_dwg_entities)
+    /// reads it from the provider.
     pub fn bucket_dwg(&mut self, shx: &str, installed: &[&str], n: u64) {
         *self
             .by_outcome
             .entry(shx_outcome(shx, installed))
             .or_insert(0) += n;
+    }
+}
+
+impl TextReport {
+    /// Bucket the `TEXT` and `MTEXT` entities of a provider's output by the font their style
+    /// names (issue #1381). `styles` is [`DwgProvider::text_styles`](super::provider::DwgProvider)
+    /// for the same scope.
+    ///
+    /// An entity the provider gave no style for, or whose style names no font, is
+    /// [`TextFontOutcome::Unresolved`]: nothing is said about a font nobody named.
+    pub fn bucket_dwg_entities(
+        &mut self,
+        entities: &[RawEntity],
+        styles: &BTreeMap<ItemHandle, TextStyleRef>,
+        installed: &[&str],
+    ) {
+        for e in entities {
+            let class = e.provenance.class_name.as_str();
+            if !(class.eq_ignore_ascii_case("TEXT") || class.eq_ignore_ascii_case("MTEXT")) {
+                continue;
+            }
+            let style = e.provenance.handle.and_then(|h| styles.get(&h));
+            let font = style.map(|s| {
+                if s.font_file.is_empty() {
+                    s.true_type_font.as_str()
+                } else {
+                    s.font_file.as_str()
+                }
+            });
+            let outcome = match font {
+                Some(f) if !f.is_empty() => shx_outcome(f, installed),
+                _ => TextFontOutcome::Unresolved,
+            };
+            *self.by_outcome.entry(outcome).or_insert(0) += 1;
+        }
     }
 }
 

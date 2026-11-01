@@ -159,11 +159,20 @@ pub enum ReasonCode {
     /// An INSERT of a block the provider does not have, or an xref: nothing to descend into.
     /// `Unsupported`, and `UNRESOLVED_BLOCK` (105) in the diagnostics.
     UnresolvedBlock,
+    /// An INSERT map with a coefficient that is not finite (NP-01). `Unsupported`, and
+    /// `TRANSFORM_NON_FINITE` in the diagnostics.
+    TransformNonFinite,
+    /// An INSERT map that is singular or near singular (NP-19). `Unsupported`, and
+    /// `TRANSFORM_SINGULAR` in the diagnostics.
+    TransformSingular,
+    /// An INSERT map that turns a conic into one too eccentric to keep (NP-07). `Unsupported`,
+    /// and `TRANSFORM_CONIC_ILL_CONDITIONED` in the diagnostics.
+    TransformConicIllConditioned,
 }
 
 impl ReasonCode {
     /// Every code, in a fixed order.
-    pub const ALL: [ReasonCode; 20] = [
+    pub const ALL: [ReasonCode; 23] = [
         ReasonCode::SplineKnotsNotReported,
         ReasonCode::SplinePeriodicNotReported,
         ReasonCode::SplineWeightsNotReported,
@@ -184,6 +193,9 @@ impl ReasonCode {
         ReasonCode::DisplayFidelityOnly,
         ReasonCode::PdfSoftMask,
         ReasonCode::UnresolvedBlock,
+        ReasonCode::TransformNonFinite,
+        ReasonCode::TransformSingular,
+        ReasonCode::TransformConicIllConditioned,
     ];
 
     /// The stable machine-readable spelling.
@@ -210,6 +222,9 @@ impl ReasonCode {
             ReasonCode::DisplayFidelityOnly => "display-fidelity-only",
             ReasonCode::PdfSoftMask => "pdf-soft-mask",
             ReasonCode::UnresolvedBlock => "unresolved-block",
+            ReasonCode::TransformNonFinite => "transform-non-finite",
+            ReasonCode::TransformSingular => "transform-singular",
+            ReasonCode::TransformConicIllConditioned => "transform-conic-ill-conditioned",
         }
     }
 
@@ -236,7 +251,10 @@ impl ReasonCode {
             | ReasonCode::UnmappedSourceClass
             | ReasonCode::DisplayFidelityOnly
             | ReasonCode::PdfSoftMask
-            | ReasonCode::UnresolvedBlock => FidelityClass::Unsupported,
+            | ReasonCode::UnresolvedBlock
+            | ReasonCode::TransformNonFinite
+            | ReasonCode::TransformSingular
+            | ReasonCode::TransformConicIllConditioned => FidelityClass::Unsupported,
         }
     }
 }

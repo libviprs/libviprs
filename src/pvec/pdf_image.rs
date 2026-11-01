@@ -20,8 +20,9 @@
 //! * A 1-bit gray image with no alpha is cut into 1-bit PNG tiles (`bilevel-1-bit-tiles`).
 //! * Streams: no filter, `FlateDecode` (with the TIFF and PNG predictors), `DCTDecode` (decoded
 //!   and re-tiled, because the pyramid is a different grid; reported as a re-encode of a lossy
-//!   source) and Flate over DCT. `JPXDecode`, `JBIG2Decode` and `CCITTFaxDecode` are refused as
-//!   `filter-not-enabled:<name>` (this build has no codec for them yet), and any other filter as
+//!   source), Flate over DCT, and `CCITTFaxDecode` (through `hayro-ccitt`, in every build, issue
+//!   #1363). `JPXDecode` and `JBIG2Decode` are refused as `filter-not-enabled:<name>` (this
+//!   build has no codec for them yet), and any other filter as
 //!   `unsupported-filter:<name>`. A codec that was tried and refused the stream is `decode-failed`.
 //!   [`PdfImageReport::written_by_filter`] counts the written images by their last filter.
 //! * Refused by name too: `/Separation`, `/DeviceN` and `/Pattern`, an image under a
@@ -208,6 +209,10 @@ pub enum FilterError {
     /// The JPEG decoder refused it.
     #[error(transparent)]
     Dct(SourceError),
+    /// A shared decode ceiling, or a refusal that is not the codec's own (`JPXDecode`: width,
+    /// height or allocation over the budget).
+    #[error(transparent)]
+    Source(SourceError),
     /// `CCITTFaxDecode`: the codec's message.
     #[error("CCITT: {0}")]
     Ccitt(String),

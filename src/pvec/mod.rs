@@ -33,6 +33,9 @@ pub mod bounds;
 pub mod classify;
 #[cfg(feature = "pvec-normalized")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
+pub mod differential;
+#[cfg(feature = "pvec-normalized")]
+#[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
 pub mod dump;
 #[cfg(feature = "pvec-normalized")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
@@ -62,6 +65,10 @@ pub mod pdf_vector;
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
 pub mod provenance;
 pub mod provider;
+#[cfg(feature = "pvec-write")]
+#[cfg_attr(docsrs, doc(cfg(feature = "pvec-write")))]
+pub mod publish;
+pub mod report;
 pub mod style;
 pub mod text_policy;
 #[cfg(feature = "pvec-normalized")]
@@ -70,6 +77,9 @@ pub mod transform;
 pub mod units;
 pub mod view;
 pub mod view_profile;
+#[cfg(feature = "pvec-write")]
+#[cfg_attr(docsrs, doc(cfg(feature = "pvec-write")))]
+pub mod writer;
 pub mod xref;
 
 #[cfg(feature = "dwg-acadrust")]
@@ -107,7 +117,7 @@ pub use provider::{
     EntityStyle, Facet, FacetCap, FacetSource, InstancePath, InstanceStep, LayerState, LayoutId,
     LayoutKind, LayoutState, Point3, ProvenanceStub, ProviderCaps, ProviderError, RawEntity,
     RawGeometry, RawVertex, SourceColour, SourceFact, SourceLineweight, SourceTransform,
-    ViewportEntity,
+    TextStyleRef, ViewportEntity, XrefAttachment,
 };
 pub use text_policy::{
     DwgTextCounts, PdfTextOperatorCounts, TextFontOutcome, TextReport, shx_outcome,

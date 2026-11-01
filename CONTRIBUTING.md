@@ -452,6 +452,21 @@ the gate: each covers part of one job, on this host's architecture and
 filesystem. `tools/local-ci.py --worktree` is the same trade for a whole run.
 The README has the longer version.
 
+## The git hooks run on MARS
+
+The pre-commit and pre-push hooks don't run cargo, clippy or docker on this machine. They ship the
+staged tree (pre-commit) or the pushed trees (pre-push) to MARS and run the same checks there in a
+container, so the Mac and MARS give the same answer. The scripts live in libviprs-tests
+(`tools/install-hooks.sh` installs them, `tools/mars-run.sh` does the shipping).
+
+- pre-commit is the lint half of the `check` job: `cargo fmt` and the clippy cells. It runs no tests.
+- pre-push runs the suite (`tools/run-tests.sh`) on MARS.
+- If MARS is down the hook fails and says so. `LIBVIPRS_HOOKS_SKIP_MARS=1 git commit ...` (or `git push`)
+  skips it with a loud banner and runs nothing anywhere. `--no-verify` isn't the answer for that.
+- A test-first commit that is meant to be red passes pre-commit as long as it compiles, since pre-commit
+  runs no tests. To push it, put a `Red-tests: #N` trailer on the tip commit and pre-push runs only the
+  compile and lint half. Only the tip counts, so the fix commit on top gets the full suite again.
+
 ## Merging: hosted CI is off, the local gate decides
 
 I disabled GitHub Actions on every repo in the org on 2026-10-24. The required checks never

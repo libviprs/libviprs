@@ -463,6 +463,92 @@ mod enabled {
     }
 }
 
+/// Streams the fuzz target found that `hayro-jbig2` 0.3.1 cannot decode in bounded time or memory,
+/// reported upstream. Each one lives in arithmetic coded data (the symbol sizes, the export runs,
+/// the halftone grid), so the segment pre-scan cannot see it and nothing here can refuse it before
+/// the decoder runs: that is what `jbig2` being off by default is for. They are `#[ignore]`d
+/// because running one is the finding (an endless loop or gigabytes), and they stay here so the
+/// day an upstream fix lands, `cargo test --features jbig2 -- --ignored` shows it.
+#[cfg(feature = "jbig2")]
+mod known_upstream {
+    use super::*;
+
+    fn hex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    fn bakes_in_bounds(stream: &str, w: i64, h: i64) {
+        let b = bake(&pdf_with(w, h, hex(stream), None, Dictionary::new()));
+        assert_eq!(b.report.images, 1);
+    }
+
+    #[test]
+    #[ignore = "LaurenzV/hayro#1700: export_symbols never ends (8.6 billion iterations in 60 s)"]
+    fn an_export_run_of_zero_never_ends_hayro_1700() {
+        bakes_in_bounds(
+            concat!(
+                "0000000030000100000013000000a30000006d00001ec200001ec2010000000000010001010000005d000003fffdff02",
+                "fefefe00000004000000042a8ade999613e94932eee83551c80ae15399fd6506245d849c71418296d3754909f9d98b18",
+                "667bbfcf8f79d6494c4811cea9ff520ef87046190be51a1ae8bf15dfa2f4c6c025cf5035ffac00000002072001010000",
+                "004f000000a30000006d0000000000000000000c180000005a98f4702d3fedd5814de8a0a8d33ea0bb7c21e2a3553e56",
+                "d595c58c794c355eb6b138beb8a8210221fe35ad84411d042bc434c9132927ffac0000000331000100000000",
+            ),
+            163,
+            109,
+        );
+    }
+
+    #[test]
+    #[ignore = "LaurenzV/hayro#1701: 1.4 GB and 20 s in symbol bitmaps"]
+    fn symbols_of_24000_pixels_across_cost_1_4_gb_hayro_1701() {
+        bakes_in_bounds(
+            concat!(
+                "0000000030000100000013000000a30000006d00001ec200001ec2010000000000010001010000005d000003fffdff02",
+                "fefefe00000004000000fe2a8ade999613e94903eee8357fc80ae15399fd6506245d849c71418296d375fc09f9d98b18",
+                "667bbfa18f79d6494c4855cea9ff520ef87046190be51a1ae8bf15dfa2f4c6c025f85035ff5500000002072001010000",
+                "004f000000a30000006d0000000000000000001b180000005a98f4702d3fedd5814de8a0a8d33ea0bb7c21e2a3553e56",
+                "d595c58c79fd355eb6b138beb8a8210221fe35ad84411d042bc434c9132927ffac0000fc0331000100000000",
+            ),
+            163,
+            109,
+        );
+    }
+
+    #[test]
+    #[ignore = "LaurenzV/hayro#1598: 2^31 empty height classes, 39 s"]
+    fn empty_height_classes_run_to_overflow_hayro_1598() {
+        bakes_in_bounds(
+            concat!(
+                "0000000030000100000013000000a30000006d00001ec200001ec2010000000000010001010000005d000003fffdff02",
+                "fefefe00000004000000fe2ad8de99ef13e94932eee8357fc80ae15399fd6506245d84fc71418296d3754909f9d98b18",
+                "667bbfa1ef79d6494c4811cea9ff520ef87046190be5fe1ae8bf15dfa2f4c6c025f85035ff5500000002072001010000",
+                "004f000000a30000006d00000000000000fd001b180000005a98f4702d3fedd5814de8a0a8d33ea0bb7c21e2a3553e56",
+                "d595c58c794c355eb6b138beb8a8210221fe35ad84411d042bc434c9132927ffac0000ef0331000100000000",
+            ),
+            163,
+            109,
+        );
+    }
+
+    #[test]
+    #[ignore = "LaurenzV/hayro#1550: a 64786x24332 grid, 6.4 GB and 28 s"]
+    fn a_halftone_grid_of_1_6_billion_cells_hayro_1550() {
+        bakes_in_bounds(
+            concat!(
+                "00000000300001000000130000009b0000006500001ec200001ec2010000000000011001010000001c00090900000003",
+                "e9fe4aea9b3fcbf636e6d528b7efc58f9641bfffac00000002172001010000005f0000009b0000006500000000000000",
+                "0000000000fd1200005f0c00003f0000000000090000001e44d543ec5900b651bf1d5af117e9cd03ca8621010a5feb0b",
+                "93bdf2457f5a40ef594395eefb557f0d84764b15892809a54eccf9e86851ffac0000000331000100000000",
+            ),
+            155,
+            101,
+        );
+    }
+}
+
 #[cfg(not(feature = "jbig2"))]
 mod disabled {
     use super::*;

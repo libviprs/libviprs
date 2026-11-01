@@ -13,15 +13,20 @@
 //! Resolving reaches outside the input file, so it is the caller's decision, hence
 //! the default. The attachment path is confined lexically under a caller-supplied
 //! root by [`confine`] before anything touches the disk. That check does not follow
-//! symlinks, and opening the file is the caller's. Opening through
-//! `DwgProvider` and flattening under N4.4's bounds is #1283.
+//! symlinks. [`XrefRef::discover`] builds the references from the provider's xref block
+//! records, and [`XrefSession::open_and_flatten`] opens the cleared file through a provider and
+//! flattens its model space under N4.4's bounds (issue #1378). The flattener reports an INSERT
+//! of an xref block as [`SkipReason::ExternalReference`](super::flatten::SkipReason) rather than
+//! expanding it to nothing.
 
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
 use super::limits::{LimitError, SourceGuard};
-use super::provider::{ArrayGrid, SourceTransform};
+use super::provider::{
+    ArrayGrid, DwgProvider, ProviderError, RawEntity, RawGeometry, SourceTransform,
+};
 
 /// What to do with an attached drawing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -49,6 +54,39 @@ pub struct XrefRef {
     pub layer: String,
     /// The grid the attachment is placed on.
     pub grid: ArrayGrid,
+}
+
+impl XrefRef {
+    /// The xref attachments among `entities`: every INSERT of a block the provider lists in
+    /// [`DwgProvider::xref_blocks`], in the order given, with the block record's path.
+    ///
+    /// # Errors
+    ///
+    /// [`ProviderError::CannotReport`] when the provider cannot report xref block records.
+    pub fn discover(
+        provider: &(impl DwgProvider + ?Sized),
+        entities: &[RawEntity],
+    ) -> Result<Vec<XrefRef>, ProviderError> {
+        let blocks = provider.xref_blocks()?;
+        Ok(entities
+            .iter()
+            .filter_map(|e| {
+                let RawGeometry::Insert(r) = &e.geometry else {
+                    return None;
+                };
+                let att = blocks
+                    .iter()
+                    .find(|b| b.block_name.eq_ignore_ascii_case(&r.block_name))?;
+                Some(XrefRef {
+                    name: att.block_name.clone(),
+                    path: att.path.clone(),
+                    transform: r.transform,
+                    layer: e.provenance.layer.clone(),
+                    grid: r.grid,
+                })
+            })
+            .collect())
+    }
 }
 
 /// Why an attachment path was refused.
@@ -102,6 +140,24 @@ pub enum XrefError {
         name: String,
         /// Resolved path.
         path: PathBuf,
+    },
+    /// The resolved file exists and is not a drawing the provider opens.
+    #[error("xref {name}: could not open {}: {detail}", .path.display())]
+    Open {
+        /// Xref name.
+        name: String,
+        /// Resolved path.
+        path: PathBuf,
+        /// The provider's message.
+        detail: String,
+    },
+    /// The attached drawing could not be flattened.
+    #[error("xref {name}: could not flatten the attached drawing: {detail}")]
+    Flatten {
+        /// Xref name.
+        name: String,
+        /// The flattener's message.
+        detail: String,
     },
     /// A shared budget was passed.
     #[error(transparent)]
@@ -307,5 +363,124 @@ impl XrefSession {
     #[must_use]
     pub fn into_report(self) -> XrefReport {
         self.report
+    }
+}
+
+/// What [`XrefSession::open_and_flatten`] did with one attachment.
+#[cfg(feature = "pvec-normalized")]
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum XrefOpened {
+    /// Omitted by policy and recorded at this index of the report.
+    Omitted(usize),
+    /// Opened and flattened.
+    Flattened(FlattenedXref),
+}
+
+/// An attached drawing, opened and flattened.
+#[cfg(feature = "pvec-normalized")]
+#[derive(Debug, Clone)]
+pub struct FlattenedXref {
+    /// Xref name.
+    pub name: String,
+    /// The file that was opened.
+    pub path: PathBuf,
+    /// Xref nesting depth, 1 for a direct attachment.
+    pub depth: u32,
+    /// The attached drawing's model space, flattened in its own coordinates.
+    pub flattened: super::flatten::Flattened,
+    /// The xrefs the attached drawing attaches in turn.
+    pub nested: Vec<FlattenedXref>,
+}
+
+#[cfg(feature = "pvec-normalized")]
+impl XrefSession {
+    /// Decide `xref`, and under `Resolve` open the attached drawing with `P` and flatten it.
+    ///
+    /// # Errors
+    ///
+    /// [`XrefError`].
+    pub fn open_and_flatten<P: DwgProvider>(
+        &mut self,
+        guard: &mut SourceGuard,
+        xref: &XrefRef,
+        bounds: super::flatten::FlattenBounds,
+    ) -> Result<XrefOpened, XrefError> {
+        let resolved = match self.admit(guard, xref)? {
+            XrefOutcome::Resolve(r) => r,
+            XrefOutcome::Omitted(i) => return Ok(XrefOpened::Omitted(i)),
+        };
+        // `admit` entered the nested drawing, so it is left again whatever happens below.
+        let result = self.flatten_resolved::<P>(guard, resolved, bounds);
+        self.release(guard);
+        result.map(XrefOpened::Flattened)
+    }
+
+    fn flatten_resolved<P: DwgProvider>(
+        &mut self,
+        guard: &mut SourceGuard,
+        resolved: ResolvedXref,
+        bounds: super::flatten::FlattenBounds,
+    ) -> Result<FlattenedXref, XrefError> {
+        use super::flatten::{BlockResolver, LineageStore};
+        use super::provenance::NoProvenance;
+        use super::provider::{EntityScope, LayoutKind};
+        use crate::cad::CadSource;
+        let open_error = |detail: String| XrefError::Open {
+            name: resolved.name.clone(),
+            path: resolved.path.clone(),
+            detail,
+        };
+        let provider =
+            P::open(CadSource::Path(&resolved.path)).map_err(|e| open_error(e.to_string()))?;
+        let layout = provider
+            .layouts()
+            .map_err(|e| open_error(e.to_string()))?
+            .into_iter()
+            .find(|l| l.kind == LayoutKind::Model)
+            .ok_or_else(|| open_error("the drawing has no model space".into()))?;
+        let scope = EntityScope::Layout(layout.id);
+        let entities = provider
+            .entities(&scope)
+            .and_then(|mut c| c.collect_all())
+            .map_err(|e| open_error(e.to_string()))?;
+        // A provider that cannot list xref blocks attaches nothing further.
+        let mut nested = Vec::new();
+        for x in XrefRef::discover(&provider, &entities).unwrap_or_default() {
+            if let XrefOpened::Flattened(f) = self.open_and_flatten::<P>(guard, &x, bounds)? {
+                nested.push(f);
+            }
+        }
+        let flattened = BlockResolver::new(&provider, bounds)
+            .flatten(
+                &scope,
+                &resolved.path.to_string_lossy(),
+                &layout.name,
+                &mut NoProvenance,
+                &mut LineageStore::new(),
+            )
+            .map_err(|e| match e {
+                super::flatten::FlattenError::Limit {
+                    limit,
+                    observed,
+                    ceiling,
+                    ..
+                } => XrefError::Limit(LimitError::Exceeded {
+                    limit,
+                    observed,
+                    ceiling,
+                }),
+                other => XrefError::Flatten {
+                    name: resolved.name.clone(),
+                    detail: other.to_string(),
+                },
+            })?;
+        Ok(FlattenedXref {
+            name: resolved.name,
+            path: resolved.path,
+            depth: resolved.depth,
+            flattened,
+            nested,
+        })
     }
 }

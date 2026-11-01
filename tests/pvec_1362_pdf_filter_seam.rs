@@ -122,17 +122,18 @@ fn the_pixel_budget_is_the_one_the_dct_decoder_runs_under() {
 }
 
 #[test]
-fn the_three_codec_names_report_filter_not_enabled_and_the_error_names_the_feature() {
-    for (filter, feature) in [
-        ("CCITTFaxDecode", "ccitt"),
-        ("JBIG2Decode", "jbig2"),
-        ("JPXDecode", "jp2k"),
-    ] {
-        // A codec that is compiled in decodes (or refuses on its merits); tests/pvec_1365_pdf_jbig2.rs
-        // covers JBIG2 with the feature on.
-        if cfg!(feature = "jbig2") && filter == "JBIG2Decode" {
-            continue;
-        }
+fn the_codec_names_without_a_codec_report_filter_not_enabled_and_the_error_names_the_feature() {
+    // CCITTFaxDecode left this list when #1363 gave it a decoder with no feature.
+    let mut names = Vec::new();
+    // With `jbig2` the JBIG2 stage is a codec that tries the stream (#1365), not a missing one.
+    if !cfg!(feature = "jbig2") {
+        names.push(("JBIG2Decode", "jbig2"));
+    }
+    // With `jp2k` the JPX stage is a codec that tries the stream (#1364), not a missing one.
+    if !cfg!(feature = "jp2k") {
+        names.push(("JPXDecode", "jp2k"));
+    }
+    for (filter, feature) in names {
         let e = refused(&filtered(name(filter), vec![0u8; 4]));
         let reason = format!("filter-not-enabled:{filter}");
         assert_eq!(e.reason(), reason);
@@ -152,14 +153,15 @@ fn the_three_codec_names_report_filter_not_enabled_and_the_error_names_the_featu
 }
 
 #[test]
+#[cfg(not(feature = "jbig2"))]
 fn a_codec_after_flate_is_also_not_enabled_and_is_counted_in_the_report() {
     let bytes = filtered(
-        Object::Array(vec![name("FlateDecode"), name("CCITTFaxDecode")]),
+        Object::Array(vec![name("FlateDecode"), name("JBIG2Decode")]),
         flate(&[0u8; 4]),
     );
     let b = bake(&bytes);
     assert_eq!(
-        b.report.refused.get("filter-not-enabled:CCITTFaxDecode"),
+        b.report.refused.get("filter-not-enabled:JBIG2Decode"),
         Some(&1)
     );
     assert!(b.report.written_by_filter.is_empty());

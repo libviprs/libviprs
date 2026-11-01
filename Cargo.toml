@@ -111,6 +111,13 @@ hayro-jpeg2000 = { version = "0.4.1", default-features = false, features = [
 # The crate is a few months old and its README says it is under development, which is why the
 # `jbig2` feature below is not in `default`.
 hayro-jbig2 = { version = "0.3.1", default-features = false, features = ["std"] }
+# CCITT Group 3 and Group 4 for `CCITTFaxDecode` image streams in a PDF (issue #1363),
+# unconditional because it is the scanned-sheet case: in the corpus it is the one codec whose
+# refusal empties a whole file. Same author and repository as `hayro-jpeg2000` above.
+# `#![forbid(unsafe_code)]`, `no_std` + alloc, no dependencies at all, no `links` key and no
+# build script, licence `Apache-2.0 OR MIT`. Chosen on API grounds: byte alignment,
+# end-of-block and the K modes are explicit settings, which is what `/DecodeParms` names.
+hayro-ccitt = "0.4"
 # Pure-Rust codec facade. The feature list is the crate's decodable
 # format set, and it is edited here once for the whole format wave
 # (issue #563) rather than once per lane: every feature added recompiles
@@ -573,6 +580,10 @@ pvec-raster = ["dep:pvec-facade", "dep:pvec-geometry"]
 # dependencies (PVec is not on crates.io yet), which is why this is a feature and not
 # part of the default build: see the comment on `pvec-geometry` below.
 pvec-normalized = ["dep:pvec-geometry", "dep:pvec-numeric", "dep:pvec-entity"]
+# `pvec::writer` and `pvec::publish`: the one funnel that writes normalized geometry into a PVec
+# artifact through the facade's `PvecWriter`, and the atomic publish of the artifact and its report
+# (issue #1314). Pure Rust, the same git dependencies as `pvec-normalized` and `pvec-raster`.
+pvec-write = ["pvec-normalized", "dep:pvec-facade"]
 # Documentation-only deprecated alias for `object-store-sink`. Cargo has no
 # mechanism to mark a feature deprecated, so enabling `s3` emits NO build-time
 # warning: consumers pinned to `features = ["s3"]` get zero automated signal
@@ -705,12 +716,15 @@ jp2k = ["dep:hayro-jpeg2000", "dep:openjpeg2-pure"]
 # but not their product, and keeps decoding past the end of its data. The module refuses regions
 # larger than the page and symbol dictionaries with more symbols than bits, which closed the first
 # four; the symbol size inside a dictionary is still the decoder's, and the later run died on it
-# (three more OOMs over 1 GB and a 1600 second input). So the clean hours recorded are 0.
+# (three more OOMs over 1 GB and a 1600 second input). Those are reported upstream: LaurenzV/hayro
+# #1700 (export_symbols never ends), #1701 (symbol size unbounded), and comments on #1598 and #1550.
+# The streams are `#[ignore]`d tests in tests/pvec_1365_pdf_jbig2.rs. All of them sit in arithmetic
+# coded data, which a pre-scan of the segment headers cannot read. So the clean hours recorded are 0.
 #
 # It implies `pvec-raster` because the only reader of a PDF image stream is the raster bake that
 # feature belongs to, and so that the one cell `cargo test --features jbig2` runs the decoding
-# tests. Lock delta of `jbig2` itself: +2 entries (`hayro-jbig2` 0.3.1, `hayro-ccitt` 0.4.0, no
-# dependencies of their own beyond each other, no `links`, no build script); everything else
+# tests. Lock delta of `jbig2` itself: +1 entry (`hayro-jbig2` 0.3.1; `hayro-ccitt` 0.4 is
+# already in every build since #1363; neither has a `links` key or a build script); everything else
 # `cargo tree` adds is `pvec-raster`'s. Release binary delta: not measured.
 jbig2 = ["pvec-raster", "dep:hayro-jbig2"]
 
@@ -726,6 +740,7 @@ blake3 = { workspace = true }
 exr = { workspace = true }
 flate2 = { workspace = true }
 gif = { workspace = true }
+hayro-ccitt = { workspace = true }
 hayro-jpeg2000 = { workspace = true, optional = true }
 hayro-jbig2 = { workspace = true, optional = true }
 image = { workspace = true }
@@ -755,6 +770,18 @@ zune-jpegxl = { workspace = true, optional = true }
 [[example]]
 name = "dwg_gate0"
 required-features = ["dwg-acadrust"]
+
+[[example]]
+name = "pvec_writer_memory"
+required-features = ["pvec-write"]
+
+[[test]]
+name = "pvec_1314_writer_funnel"
+required-features = ["pvec-write"]
+
+[[test]]
+name = "pvec_1314_publish"
+required-features = ["pvec-write"]
 
 [dev-dependencies]
 loom = { workspace = true }
@@ -794,4 +821,12 @@ required-features = ["pvec-raster"]
 
 [[test]]
 name = "pvec_1332_pdf_images"
+required-features = ["pvec-raster"]
+
+[[test]]
+name = "pvec_1363_pdf_ccitt"
+required-features = ["pvec-raster"]
+
+[[test]]
+name = "pvec_1364_pdf_jpx"
 required-features = ["pvec-raster"]
