@@ -13,6 +13,14 @@
 //! before anything is decoded, and the caller has already held those to `max_pixels`, so the
 //! page bitmap the decoder allocates is bounded by the same budget as every other codec's.
 //! The globals stream is counted against the per-stream cap by the extraction that kept it.
+//!
+//! `hayro-jbig2` 0.3.1 bounds each bitmap's sides (65535) and the symbol count (65535) but not
+//! what they multiply to, and its arithmetic decoder keeps producing symbols after the data has
+//! run out, so a 134 byte stream found by `fuzz_pvec_pdf_image` made it allocate over 2 GB in
+//! symbol bitmaps. [`prescan`] closes the part that can be closed from outside: a region larger
+//! than the page is refused, and a symbol dictionary may not declare more new symbols than its
+//! own data has bits. The size of each symbol is still the decoder's to bound, which is one of the
+//! reasons `jbig2` is not a default feature.
 
 #[cfg(feature = "jbig2")]
 use crate::pvec::pdf_image::FilterError;
@@ -25,6 +33,100 @@ pub(in crate::pvec) fn decode(input: FilterInput<'_>) -> Result<FilterOutput, Pd
         filter: input.filter.to_string(),
         feature: "jbig2",
     })
+}
+
+/// Refuse what a segment header says before the decoder allocates for it (T.88 7.2 and 7.4).
+///
+/// Walks the sequential segment headers of `stream`. A region segment (text 6 to 7, halftone 22
+/// to 23, generic 38 to 39, refinement 42 to 43) that is wider or taller than the page, or a
+/// symbol dictionary (type 0) whose `SDNUMNEWSYMS` is over eight times its data length, is an
+/// error. A segment of unknown length ends the walk: only an immediate generic region may have
+/// one, and its header is read first.
+#[cfg(feature = "jbig2")]
+fn prescan(stream: &[u8], width: u32, height: u32) -> Result<(), String> {
+    let be32 = |at: usize| -> Option<u32> {
+        Some(u32::from_be_bytes(stream.get(at..at + 4)?.try_into().ok()?))
+    };
+    let mut at = 0;
+    while at < stream.len() {
+        let truncated = || "a segment header runs past the data".to_string();
+        let number = be32(at).ok_or_else(truncated)?;
+        let flags = *stream.get(at + 4).ok_or_else(truncated)?;
+        at += 5;
+        let first = *stream.get(at).ok_or_else(truncated)?;
+        let referred = if first >> 5 == 7 {
+            let n = (be32(at).ok_or_else(truncated)? & 0x1FFF_FFFF) as usize;
+            at += 4 + (n + 1).div_ceil(8);
+            n
+        } else {
+            at += 1;
+            usize::from(first >> 5)
+        };
+        let width_of_number = if number <= 256 {
+            1
+        } else if number <= 65536 {
+            2
+        } else {
+            4
+        };
+        at = at.saturating_add(referred.saturating_mul(width_of_number));
+        at += if flags & 0x40 != 0 { 4 } else { 1 };
+        let length = be32(at).ok_or_else(truncated)?;
+        at += 4;
+        let unknown = length == 0xFFFF_FFFF;
+        let end = if unknown {
+            stream.len()
+        } else {
+            at.saturating_add(length as usize)
+        };
+        let data = stream
+            .get(at..end.min(stream.len()))
+            .ok_or_else(truncated)?;
+        match flags & 0x3F {
+            6 | 7 | 22 | 23 | 38 | 39 | 42 | 43 => {
+                let w = be32(at).ok_or_else(truncated)?;
+                let h = be32(at + 4).ok_or_else(truncated)?;
+                if w > width || h > height {
+                    return Err(format!("a {w}x{h} region on a {width}x{height} page"));
+                }
+            }
+            0 => {
+                let sd = u16::from_be_bytes([
+                    *data.first().ok_or_else(truncated)?,
+                    *data.get(1).ok_or_else(truncated)?,
+                ]);
+                let huffman = sd & 1 != 0;
+                let refagg = sd & 2 != 0;
+                let template = (sd >> 10) & 3;
+                let rtemplate = (sd >> 12) & 1;
+                let mut off = 2;
+                if !huffman {
+                    off += if template == 0 { 8 } else { 2 };
+                }
+                if refagg && rtemplate == 0 {
+                    off += 4;
+                }
+                let symbols = u32::from_be_bytes(
+                    data.get(off + 4..off + 8)
+                        .ok_or_else(truncated)?
+                        .try_into()
+                        .map_err(|_| truncated())?,
+                );
+                if u64::from(symbols) > data.len() as u64 * 8 {
+                    return Err(format!(
+                        "a symbol dictionary of {symbols} symbols in {} bytes",
+                        data.len()
+                    ));
+                }
+            }
+            _ => {}
+        }
+        if unknown {
+            break;
+        }
+        at = end;
+    }
+    Ok(())
 }
 
 /// Collects the decoder's pixels as PDF 1-bit rows, 0 black.
@@ -72,6 +174,9 @@ pub(in crate::pvec) fn decode(input: FilterInput<'_>) -> Result<FilterOutput, Pd
         filter: input.filter.to_string(),
         source,
     };
+    for stream in [input.globals, Some(input.data)].into_iter().flatten() {
+        prescan(stream, input.width, input.height).map_err(|m| fail(FilterError::Jbig2(m)))?;
+    }
     let image = hayro_jbig2::Image::new_embedded(input.data, input.globals)
         .map_err(|e| fail(FilterError::Jbig2(e.to_string())))?;
     if (image.width(), image.height()) != (input.width, input.height) {

@@ -402,6 +402,59 @@ mod enabled {
         assert_eq!(b.refused[0].error.reason(), "decode-failed");
     }
 
+    /// One sequential segment: number, type, page 1, no referred-to segments.
+    fn segment(number: u32, kind: u8, data: &[u8]) -> Vec<u8> {
+        let mut out = number.to_be_bytes().to_vec();
+        out.extend([kind, 0, 1]);
+        out.extend((data.len() as u32).to_be_bytes());
+        out.extend(data);
+        out
+    }
+
+    /// An 8 by 8 page information segment.
+    fn page_info() -> Vec<u8> {
+        let mut d = 8u32.to_be_bytes().to_vec();
+        d.extend(8u32.to_be_bytes());
+        d.extend([0; 8]);
+        d.extend([0, 0, 0]);
+        segment(0, 48, &d)
+    }
+
+    fn refused_reason(stream: Vec<u8>) -> String {
+        let b = bake(&pdf_with(8, 8, stream, None, Dictionary::new()));
+        assert!(b.written.is_empty());
+        let PdfImageError::Filter {
+            source: FilterError::Jbig2(m),
+            ..
+        } = &b.refused[0].error
+        else {
+            panic!("{:?}", b.refused[0].error)
+        };
+        m.clone()
+    }
+
+    #[test]
+    fn a_symbol_dictionary_declaring_more_symbols_than_it_has_bits_is_refused_unread() {
+        // Arithmetic coding, template 0: flags, eight AT bytes, SDNUMEXSYMS, SDNUMNEWSYMS.
+        let mut d = vec![0, 0, 3, 0xFF, 0xFD, 0xFF, 2, 0xFE, 0xFE, 0xFE];
+        d.extend(65_535u32.to_be_bytes());
+        d.extend(65_535u32.to_be_bytes());
+        d.extend([0xAA; 4]);
+        let mut stream = page_info();
+        stream.extend(segment(1, 0, &d));
+        assert!(refused_reason(stream).contains("symbol dictionary"));
+    }
+
+    #[test]
+    fn a_region_larger_than_the_page_is_refused_before_it_is_allocated() {
+        let mut d = 4000u32.to_be_bytes().to_vec();
+        d.extend(4000u32.to_be_bytes());
+        d.extend([0; 9]);
+        let mut stream = page_info();
+        stream.extend(segment(1, 38, &d));
+        assert!(refused_reason(stream).contains("4000x4000"));
+    }
+
     #[test]
     fn garbage_is_a_refusal() {
         let b = bake(&pdf_with(8, 8, vec![0xFF; 64], None, Dictionary::new()));
