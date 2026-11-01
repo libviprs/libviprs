@@ -33,6 +33,9 @@ pub mod bounds;
 pub mod classify;
 #[cfg(feature = "pvec-normalized")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
+pub mod differential;
+#[cfg(feature = "pvec-normalized")]
+#[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
 pub mod dump;
 #[cfg(feature = "pvec-normalized")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
