@@ -388,6 +388,7 @@ fn forbidden_phrases(text: &str) -> Vec<&'static str> {
 // ------------------------------------------------------------------------------------ tests
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the vendored corpus from disk
 fn n2_2_1050_every_fixture_that_is_not_known_truth_is_executed_and_reported() {
     let corpus = Corpus::open();
     let rows = rows(&corpus);
@@ -495,6 +496,7 @@ fn n2_2_1050_the_suite_starts_no_process_and_needs_no_converter() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the vendored corpus from disk
 fn n2_2_1050_the_pin_summary_is_the_index_and_a_bump_reads_as_per_class_changes() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/pvec-gold");
     let summary: Value =
