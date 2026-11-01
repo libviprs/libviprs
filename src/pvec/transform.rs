@@ -77,7 +77,11 @@ impl TransformReason {
     }
     /// The classification reason this refusal carries.
     pub const fn reason_code(self) -> ReasonCode {
-        ReasonCode::UnmappedSourceClass
+        match self {
+            TransformReason::NonFinite => ReasonCode::TransformNonFinite,
+            TransformReason::Singular => ReasonCode::TransformSingular,
+            TransformReason::ConicIllConditioned => ReasonCode::TransformConicIllConditioned,
+        }
     }
 
     /// The PVec rule behind it.
@@ -141,9 +145,14 @@ impl ComposeError {
 
     /// The classification of the INSERT whose map was refused.
     #[must_use]
-    #[allow(clippy::unused_self)]
     pub fn classification(&self, source_class: &str) -> Classification {
-        Classification::refused(ReasonCode::UnmappedSourceClass, source_class)
+        // A refusal outside the frozen three has no matrix code. It is still counted, as an
+        // unmapped class, so nothing is dropped.
+        let reason = self.reason.map_or(
+            ReasonCode::UnmappedSourceClass,
+            TransformReason::reason_code,
+        );
+        Classification::refused(reason, source_class)
     }
 }
 

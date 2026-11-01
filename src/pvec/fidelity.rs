@@ -172,7 +172,7 @@ pub enum ReasonCode {
 
 impl ReasonCode {
     /// Every code, in a fixed order.
-    pub const ALL: [ReasonCode; 20] = [
+    pub const ALL: [ReasonCode; 23] = [
         ReasonCode::SplineKnotsNotReported,
         ReasonCode::SplinePeriodicNotReported,
         ReasonCode::SplineWeightsNotReported,
@@ -193,6 +193,9 @@ impl ReasonCode {
         ReasonCode::DisplayFidelityOnly,
         ReasonCode::PdfSoftMask,
         ReasonCode::UnresolvedBlock,
+        ReasonCode::TransformNonFinite,
+        ReasonCode::TransformSingular,
+        ReasonCode::TransformConicIllConditioned,
     ];
 
     /// The stable machine-readable spelling.
