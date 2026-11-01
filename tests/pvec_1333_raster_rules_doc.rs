@@ -16,6 +16,7 @@ fn block(doc: &str) -> &str {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem
 fn the_table_in_the_page_is_the_rendered_constant_byte_for_byte() {
     if std::env::var_os("PVEC_RASTER_RULES_BLESS").is_some() {
         let a = DOC.find(BEGIN).unwrap() + BEGIN.len();
@@ -107,6 +108,7 @@ fn the_page_names_the_three_commands() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem
 fn the_page_points_at_the_adr_and_every_relative_link_resolves() {
     assert!(DOC.contains("docs/adr/0018-raster-in-pvec.md"));
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs");

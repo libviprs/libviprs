@@ -299,6 +299,7 @@ fn interlace_and_palette_never_come_out_of_the_pyramid_path() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem
 fn the_doc_is_the_rendered_table_byte_for_byte() {
     if std::env::var_os("PVEC_RASTER_TILES_BLESS").is_some() {
         std::fs::write(

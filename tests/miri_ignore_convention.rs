@@ -802,7 +802,8 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1083 adds 1: the `tests/pvec_style_1083.rs` check that reads the geometry sources. It said 727 before this line moved.
 /// #1328 adds 4: the `tests/pmtiles_sink.rs` cells that write a georeferenced archive to a temp dir and read it back. It said 728 before this line moved.
 /// #1336 adds 1: the `tests/pvec_api_surface.rs` check that only the raster container names the PVec facade, which walks the source tree. It said 732 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 733;
+/// #1368 adds 15: the `tests/pvec_1330_*.rs`, `pvec_1331_*.rs`, `pvec_1332_interop_fixture.rs` and `pvec_1333_raster_rules_doc.rs` cells that read committed seeds and docs, write a staging file, or bless a page, which landed without the annotation. It said 733 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 748;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
