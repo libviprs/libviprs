@@ -278,6 +278,19 @@ const CELLS: &[Cell] = &[
         runtime_loaders: &[],
         vendored_native: BLAKE3,
     },
+    // `jp2k` carries the JPEG 2000 loader and encoder, and since #1364 the PDF image path's
+    // `JPXDecode` too. `the_jp2k_cell_adds_only_its_two_codec_crates` pins that the PDF side
+    // added nothing to it.
+    Cell {
+        label: "host / jp2k",
+        target: HOST,
+        features: &["--features", "jp2k"],
+        edges: "normal,build",
+        links: &[RAYON],
+        discovery: &[],
+        runtime_loaders: &[],
+        vendored_native: BLAKE3,
+    },
     // The external-library features. Neither shows up in `links` or in a C
     // compile, which is precisely why a check keyed on those would miss them.
     // `libloading` is the one mechanical trace either of them leaves, and
@@ -1082,6 +1095,29 @@ fn exactly_one_tiff_resolves_in_every_cell() {
             cell.label
         );
     }
+}
+
+/// `JPXDecode` in a PDF is decoded through the `jp2k` feature (issue #1364), so the feature's
+/// cell holds exactly the two codec crates it held before: no lock entry came with the PDF side.
+#[test]
+#[cfg_attr(miri, ignore)] // spawns a process, which Miri supports on no target (#714)
+fn the_jp2k_cell_adds_only_its_two_codec_crates() {
+    let by_label = |label: &str| {
+        cells()
+            .find(|(cell, _)| cell.label == label)
+            .unwrap_or_else(|| panic!("no cell {label}"))
+            .1
+    };
+    let (default, jp2k) = (by_label("host / default"), by_label("host / jp2k"));
+    let added: BTreeSet<&str> = jp2k
+        .difference(default)
+        .map(|(name, _)| name.as_str())
+        .collect();
+    assert_eq!(
+        added,
+        BTreeSet::from(["hayro-jpeg2000", "openjpeg2-pure-rs"]),
+        "the jp2k feature pulls a different set of crates than #1364 measured"
+    );
 }
 
 /// `hayro-ccitt` decodes `CCITTFaxDecode` image streams unconditionally (issue #1363), so it is

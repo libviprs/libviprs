@@ -19,7 +19,7 @@
 
 use lopdf::{Dictionary, Object};
 
-use super::pdf_image::{PdfImageError, PdfImageNote};
+use super::pdf_image::{FilterError, PdfImageError, PdfImageNote};
 use super::pdf_vector::{PdfImagePlacement, RawImage};
 use crate::source::DecodeLimits;
 
@@ -127,6 +127,22 @@ pub(super) fn decode(image: &PdfImagePlacement, max_pixels: u64) -> Result<Decod
         .raw
         .as_ref()
         .ok_or_else(|| bad("the image has no data"))?;
+    // Applying the codestream's alpha is later work (tied to RGBA output and the gray-plus-alpha
+    // question of #1329), so it is refused by name rather than dropped without a word.
+    let smask_in_data = raw
+        .dict
+        .get(b"SMaskInData")
+        .ok()
+        .and_then(|o| o.as_i64().ok())
+        .filter(|&n| n != 0);
+    if let Some(n) = smask_in_data
+        && filters(&raw.dict).last().is_some_and(|f| f == "JPXDecode")
+    {
+        return Err(PdfImageError::Filter {
+            filter: "JPXDecode".to_string(),
+            source: FilterError::SMaskInData(n),
+        });
+    }
     let (Some(width), Some(height)) = (image.width, image.height) else {
         return Err(bad("missing or invalid /Width or /Height"));
     };
@@ -230,7 +246,15 @@ fn colour_samples(
     if space.approximate() {
         notes.push(PdfImageNote::ColourSpaceApproximated);
     }
-    let decode = decode_array(&raw.dict, &space, bpc, ncomp)?;
+    // A JPEG 2000 codestream carries its own range: `/Decode` applies to it only through an
+    // Indexed space.
+    let decode = if filters.last().is_some_and(|f| f == "JPXDecode")
+        && !matches!(space, Space::Indexed { .. })
+    {
+        space.default_decode(bpc)
+    } else {
+        decode_array(&raw.dict, &space, bpc, ncomp)?
+    };
     let channels = if space.gray_output() {
         Channels::Gray
     } else {
