@@ -23,12 +23,14 @@ fn style(name: &str, font: &str) -> TextStyle {
     s
 }
 
-/// A TEXT on style GONE (font nope.shx), an MTEXT on style OK (font txt.shx), a TEXT on a style
-/// the table does not have, and a LINE-free model space otherwise.
+/// A TEXT on style GONE (font nope.shx), an MTEXT on style OK (font txt.shx) and a TEXT on style
+/// BARE, which names no font. The writer rewrites a style the table lacks to Standard, so an
+/// unknown style cannot be built here.
 fn drawing() -> Vec<u8> {
     let mut doc = CadDocument::new();
     doc.text_styles.add(style("GONE", "nope.shx")).unwrap();
     doc.text_styles.add(style("OK", "txt.shx")).unwrap();
+    doc.text_styles.add(style("BARE", "")).unwrap();
     let mut a = Text::new();
     a.value = "a".into();
     a.insertion_point = Vector3::new(1.0, 1.0, 0.0);
@@ -42,7 +44,7 @@ fn drawing() -> Vec<u8> {
     let mut c = Text::new();
     c.value = "c".into();
     c.height = 2.0;
-    c.style = "NOT_IN_THE_TABLE".into();
+    c.style = "BARE".into();
     doc.add_entity(EntityType::Text(c)).unwrap();
     DwgWriter::write_to_vec(&doc).expect("write")
 }
@@ -93,10 +95,10 @@ fn text_and_mtext_carry_their_style_name_and_font_files() {
     let ok = of(text[1]).expect("MTEXT on OK");
     assert_eq!(ok.style_name, "OK");
     assert_eq!(ok.font_file, "txt.shx");
-    // A style the table does not have still reports the name the entity used.
-    let missing = of(text[2]).expect("TEXT on a style that is not in the table");
-    assert_eq!(missing.style_name, "NOT_IN_THE_TABLE");
-    assert!(missing.font_file.is_empty());
+    // A style that names no font still reports its name.
+    let bare = of(text[2]).expect("TEXT on BARE");
+    assert_eq!(bare.style_name, "BARE");
+    assert!(bare.font_file.is_empty() && bare.true_type_font.is_empty());
 }
 
 #[test]
@@ -130,7 +132,7 @@ fn a_missing_shx_font_reaches_text_shx_missing_through_a_real_drawing() {
     assert_eq!(
         n(TextFontOutcome::Unresolved),
         1,
-        "a style the table lacks is unresolved, not missing: {:?}",
+        "a style that names no font is unresolved, not missing: {:?}",
         r.by_outcome
     );
     assert_eq!(r.by_outcome.values().sum::<u64>(), r.dwg.total());
@@ -145,4 +147,5 @@ fn nothing_is_installed_means_every_resolved_style_is_missing() {
     r.count_dwg(&es);
     r.bucket_dwg_entities(&es, &styles, &[]);
     assert_eq!(r.by_outcome.get(&TextFontOutcome::ShxMissing), Some(&2));
+    assert_eq!(r.by_outcome.get(&TextFontOutcome::Unresolved), Some(&1));
 }

@@ -148,10 +148,13 @@ DWG, an SHX font that is present). `TEXT_FONT_UNRESOLVED` is a text operator wit
 (no `Tf`, or a name missing from `/Font`). A CID font with a `/ToUnicode` is bucketed by its embedding,
 like any other font. The font is graphics state, so `q` and `Q` restore it.
 
-The SHX case is the weak one. The PDF cases run on in-memory PDFs, so each is deterministic. The SHX case
-runs on the pure function `shx_outcome` and on hand-built entities, because the provider boundary does
-not carry a text style yet and I have no DWG that names a missing SHX font. A real file for it is a
-follow-up, not something I invented here.
+The PDF cases run on in-memory PDFs, so each is deterministic. The SHX case used to run only on the pure
+function `shx_outcome` and hand-built entities. Since #1381 the provider boundary carries the text style
+(`DwgProvider::text_styles`, `Facet::TextStyle`, `TextStyleRef`), `TextReport::bucket_dwg_entities` reads
+the font from it, and `tests/pvec_1381_text_style.rs` writes a DWG whose style names `nope.shx`, reads it
+back through the acadrust provider and lands in `TEXT_SHX_MISSING` with no hand-built entity. An entity
+on a style the table does not have, or a style that names no font, is `TEXT_FONT_UNRESOLVED`: nothing
+is claimed about a font nobody named.
 
 ## What the report says
 
@@ -184,8 +187,6 @@ the tree for `Raster::text` and the example uses it to measure Vera's outlines, 
 ## Not done
 
 * The measurements on the real `O2.1` and `O2.2` fixtures, once they exist.
-* A DWG fixture that names a missing SHX font, and carrying the text style across the provider
-  boundary so DWG text can be bucketed without the caller supplying the font.
 * Bidirectional and vertical writing, font substitution, and text in the browser add-on (out of scope
   by the issue).
 * Pricing the DWG options.
