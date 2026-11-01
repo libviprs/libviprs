@@ -489,6 +489,7 @@ annotated   fs-detected  tests/pmtiles_writer.rs::two_shuffled_insertion_orders_
 annotated   fs-detected  tests/pvec_1079_provider_default.rs::no_code_in_src_pvec_names_acadsharp
 annotated   fs-detected  tests/pvec_1085_fill_policy.rs::n5_6_the_doc_has_a_row_for_every_construct_and_reason
 annotated   fs-detected  tests/pvec_1089_mapping.rs::the_doc_is_the_rendered_table_byte_for_byte
+annotated   fs-detected  tests/pvec_1093_report.rs::issue_1093_the_doc_names_every_field
 annotated   fs-detected  tests/pvec_1102_ordering.rs::no_hash_iteration_in_emit_path
 annotated   fs-detected  tests/pvec_1314_publish.rs::issue_1314_a_cancel_at_each_step_leaves_the_previous_pair_byte_identical
 annotated   fs-detected  tests/pvec_1314_publish.rs::issue_1314_a_cancel_with_no_previous_artifact_leaves_nothing
