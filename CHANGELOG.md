@@ -24,6 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`expected_loss.toml`, a written reason per entry): primitive counts, N3.5 buckets, extent aspect with
   `/Rotate` composed, and entities outside the page. The exporter is a script, not a trait, while it has one
   backend. See `docs/pvec-dwg-pdf-differential.md`.
+- **`CCITTFaxDecode` images in a PDF** (issue #1363, follow-up 2/6 to #1332). Decoded through
+  `hayro-ccitt` (plain Rust, no dependencies, in every build, no feature) into 1-bit samples that
+  reach the 1-bit PNG tiles and the `Bilevel` note. `usace_swf_gpw_daca67-06-d-0029.pdf` now
+  converts to seven underlays. **Changed report key:** `filter-not-enabled:CCITTFaxDecode` is gone;
+  a fax stream is written (`written_by_filter["CCITTFaxDecode"]`) or refused as `decode-failed`.
+
 - **The provider xref facet and xref open-and-flatten** (issue #1378, part of #1079). `DwgProvider::xref_blocks`
   and `Facet::XrefAttachments` surface the drawing's xref block records (acadrust fills them),
   `XrefRef::discover` builds the references from INSERTs so nobody hand-builds one, and
