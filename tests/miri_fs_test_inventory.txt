@@ -277,6 +277,7 @@ annotated   fs-detected  tests/ci_feature_coverage.rs::test_util_is_only_ever_ga
 annotated   fs-detected  tests/colour_ported_surface.rs::ported_icc_call_site
 annotated   fs-detected  tests/crate_doc_matches_the_crate.rs::every_multi_page_loader_that_refuses_a_page_is_named_in_the_doc
 annotated   fs-detected  tests/crate_doc_matches_the_crate.rs::no_doc_example_under_src_carries_ignore
+annotated   fs-detected  tests/dependency_policy.rs::hayro_ccitt_is_in_every_cell_and_is_plain_rust
 annotated   fs-detected  tests/dependency_policy.rs::vendored_native_code_is_only_the_documented_crates
 annotated   fs-detected  tests/exr_ported_surface.rs::channel_names_and_compression_are_readable_downstream
 annotated   fs-detected  tests/exr_ported_surface.rs::decode_exr_is_public_and_returns_float_bands
@@ -517,6 +518,7 @@ annotated   fs-detected  tests/pvec_1331_sink.rs::finish_to_publishes_atomically
 annotated   fs-detected  tests/pvec_1332_interop_fixture.rs::a_scan_under_linework_and_one_over_it_convert_with_their_bands
 annotated   fs-detected  tests/pvec_1333_raster_rules_doc.rs::the_page_points_at_the_adr_and_every_relative_link_resolves
 annotated   fs-detected  tests/pvec_1333_raster_rules_doc.rs::the_table_in_the_page_is_the_rendered_constant_byte_for_byte
+annotated   fs-detected  tests/pvec_1363_pdf_ccitt.rs::the_scanned_sheet_converts_to_seven_underlays
 annotated   fs-detected  tests/pvec_1378_xref_facet.rs::pvec_1378_a_cycle_through_the_attached_drawings_is_refused
 annotated   fs-detected  tests/pvec_1378_xref_facet.rs::pvec_1378_a_drawing_with_no_xref_reports_an_empty_list_not_an_error
 annotated   fs-detected  tests/pvec_1378_xref_facet.rs::pvec_1378_a_file_that_is_not_a_drawing_is_a_typed_error_and_frees_the_slot
