@@ -1,0 +1,14 @@
+{
+  "downloadedBytes": 79939,
+  "sha256": "50cbe2a19fc1ead41688d2acf2a760030b5621080d67a4479c315bd663b1b64f",
+  "url": "pmtiles:\/\/file:\/\/\/data\/user\/0\/org.libviprs.conformance\/files\/golden.pmtiles",
+  "lineFeatures": 4,
+  "textFeatures": 1,
+  "blackPx": 31875,
+  "whitePx": 2024328,
+  "greyPx": 15237,
+  "colouredPx": 0,
+  "totalPx": 2071440,
+  "width": 1080,
+  "height": 1918
+}
