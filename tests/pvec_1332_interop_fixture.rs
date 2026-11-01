@@ -125,6 +125,7 @@ fn convert(bytes: &[u8]) -> (Vec<u8>, Vec<Band>) {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem
 fn a_scan_under_linework_and_one_over_it_convert_with_their_bands() {
     let (under, b0) = convert(&sheet(true));
     let (over, b1) = convert(&sheet(false));
