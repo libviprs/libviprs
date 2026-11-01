@@ -1,0 +1,49 @@
+{
+  "cells": {
+    "primary": [
+      {
+        "class": "GEOMETRIC_EXACT_REPARAMETERIZED",
+        "entity": "huge-extent-001",
+        "evidence": {
+          "at_unit_parameter": 0.8680339887498949,
+          "direction": "SAME",
+          "estimate_stable": true,
+          "magnitude": 4700000.375,
+          "max_deviation": 2.634178031930877e-09,
+          "measured_in": "EXPECTED_TO_ACTUAL",
+          "scale": 2500000.125,
+          "structural_diff": [
+            "geometry.x_axis[2]"
+          ]
+        }
+      }
+    ],
+    "secondary": [
+      {
+        "class": "GEOMETRIC_EXACT_REPARAMETERIZED",
+        "entity": "huge-extent-001",
+        "evidence": {
+          "at_unit_parameter": 0.8680339887498949,
+          "direction": "SAME",
+          "estimate_stable": true,
+          "magnitude": 4700000.375,
+          "max_deviation": 2.634178031930877e-09,
+          "measured_in": "EXPECTED_TO_ACTUAL",
+          "scale": 2500000.125,
+          "structural_diff": [
+            "geometry.x_axis[2]"
+          ]
+        }
+      }
+    ]
+  },
+  "detail": "",
+  "evidence_class": "KNOWN_TRUTH_EXACT",
+  "evidence_scope": "STEP_ORACLE",
+  "fixture_id": "huge-extent-001",
+  "known_truth": true,
+  "oracle_scope": "OPEN_CONVERTERS",
+  "reason": null,
+  "schema_version": "pvec-gold/fixture-verdict/1",
+  "signature_differences": []
+}

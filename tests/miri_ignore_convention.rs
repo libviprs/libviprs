@@ -479,7 +479,8 @@ const EXPECTED_SRC_MODULES: usize = 31;
 ///
 /// #1368 adds 1: `tests/dependency_policy.rs::exactly_one_tiff_resolves_in_every_cell` (from #1367), which runs `cargo tree`. It said 50 before this line moved.
 /// #1363 adds 1: `tests/dependency_policy.rs::hayro_ccitt_is_in_every_cell_and_is_plain_rust`, which runs `cargo tree`. It said 53 before this line moved.
-const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 54;
+/// #1364 adds 1: `tests/dependency_policy.rs::the_jp2k_cell_adds_only_its_two_codec_crates`, which runs `cargo tree`. It said 54 before this line moved.
+const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 55;
 
 /// The filesystem-touching tests still allowed to run under Miri, and so still
 /// allowed to end the whole run on their first syscall.
@@ -811,8 +812,11 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1314 adds 14: the 13 `tests/pvec_1314_publish.rs` cells that write and kill, and the writer-call fence in `tests/pvec_api_surface.rs`. It said 760 before this line moved.
 /// #1363 adds 2: `tests/pvec_1363_pdf_ccitt.rs::the_scanned_sheet_converts_to_seven_underlays`, which reads the corpus file, and the `hayro-ccitt` check in `tests/dependency_policy.rs`. It said 774 before this line moved.
 /// #1093 adds 1: the `tests/pvec_1093_report.rs` check that reads `docs/pvec-conversion-report.md`. It said 776 before this line moved.
-/// #1295 adds 7: the `tests/local_gate_native_dwg_1295.rs` cells that read the workflow, scripts and docs of the scheduled native lane. It said 777 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 784;
+/// #1364 adds 2: the `tests/pvec_1364_pdf_jpx.rs` corpus cells, which read PDFs from outside the repo. It said 777 before this line moved.
+/// #1382 adds 2: the `tests/pvec_known_truth.rs` cells that read and copy the vendored corpus. It said 779 before this line moved.
+/// #1383 adds 2: the `tests/pvec_dual_oracle.rs` cells that read the vendored corpus. It said 781 before this line moved.
+/// #1295 adds 7: the `tests/local_gate_native_dwg_1295.rs` cells that read the workflow, scripts and docs of the scheduled native lane. It said 783 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 790;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
