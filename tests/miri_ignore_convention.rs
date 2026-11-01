@@ -807,8 +807,9 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1328 adds 4: the `tests/pmtiles_sink.rs` cells that write a georeferenced archive to a temp dir and read it back. It said 728 before this line moved.
 /// #1336 adds 1: the `tests/pvec_api_surface.rs` check that only the raster container names the PVec facade, which walks the source tree. It said 732 before this line moved.
 /// #1368 adds 15: the `tests/pvec_1330_*.rs`, `pvec_1331_*.rs`, `pvec_1332_interop_fixture.rs` and `pvec_1333_raster_rules_doc.rs` cells that read committed seeds and docs, write a staging file, or bless a page, which landed without the annotation. It said 733 before this line moved.
-/// #1363 adds 2: `tests/pvec_1363_pdf_ccitt.rs::the_scanned_sheet_converts_to_seven_underlays`, which reads the corpus file, and the `hayro-ccitt` check in `tests/dependency_policy.rs`. It said 748 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 750;
+/// #1395 adds 2: the `tests/pvec_1079_provider_default.rs` check that walks `src/pvec`, and the `tests/pvec_provider_replacement.rs` check that reads the shipped deltas file. It said 748 before this line moved.
+/// #1363 adds 2: `tests/pvec_1363_pdf_ccitt.rs::the_scanned_sheet_converts_to_seven_underlays`, which reads the corpus file, and the `hayro-ccitt` check in `tests/dependency_policy.rs`. It said 750 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 752;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {

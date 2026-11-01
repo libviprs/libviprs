@@ -22,6 +22,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   converts to seven underlays. **Changed report key:** `filter-not-enabled:CCITTFaxDecode` is gone;
   a fax stream is written (`written_by_filter["CCITTFaxDecode"]`) or refused as `decode-failed`.
 
+- **The provider differential harness** (issue #1395, part of #1079). `pvec::differential` runs any
+  number of `DwgProvider`s over the same fixtures and compares, per entity, the structural parameters,
+  the N3.5 bucket with its reason code and the PVec type of N6.2's table (`Matrix`, `Deltas`,
+  `Verdict`). `tests/fixtures/pvec/provider_deltas.toml` is the allowed-difference list: an unlisted
+  difference fails and so does a stale entry. A run with fewer than two providers is `PARTIAL`, never a
+  pass, agreement is `DUAL_ORACLE_EQUIVALENT` and never source truth, and every result line records the
+  platform and the corpus revision. `docs/pvec-providers.md` records that acadrust is the default
+  provider and acadsharp-rs is opt-in, and `tests/pvec_1079_provider_default.rs` enforces it.
 - **The text style across the provider boundary** (issue #1381, part of #1086). `DwgProvider::text_styles`
   and `Facet::TextStyle` report the style of every `TEXT` and `MTEXT` (`TextStyleRef`: style name, SHX
   font, big font, TrueType family), the acadrust provider fills it, and `TextReport::bucket_dwg_entities`
