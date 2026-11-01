@@ -566,6 +566,10 @@ pvec-raster = ["dep:pvec-facade", "dep:pvec-geometry"]
 # dependencies (PVec is not on crates.io yet), which is why this is a feature and not
 # part of the default build: see the comment on `pvec-geometry` below.
 pvec-normalized = ["dep:pvec-geometry", "dep:pvec-numeric", "dep:pvec-entity"]
+# `pvec::writer` and `pvec::publish`: the one funnel that writes normalized geometry into a PVec
+# artifact through the facade's `PvecWriter`, and the atomic publish of the artifact and its report
+# (issue #1314). Pure Rust, the same git dependencies as `pvec-normalized` and `pvec-raster`.
+pvec-write = ["pvec-normalized", "dep:pvec-facade"]
 # Documentation-only deprecated alias for `object-store-sink`. Cargo has no
 # mechanism to mark a feature deprecated, so enabling `s3` emits NO build-time
 # warning: consumers pinned to `features = ["s3"]` get zero automated signal
@@ -729,6 +733,14 @@ zune-jpegxl = { workspace = true, optional = true }
 [[example]]
 name = "dwg_gate0"
 required-features = ["dwg-acadrust"]
+
+[[test]]
+name = "pvec_1314_writer_funnel"
+required-features = ["pvec-write"]
+
+[[test]]
+name = "pvec_1314_publish"
+required-features = ["pvec-write"]
 
 [dev-dependencies]
 loom = { workspace = true }

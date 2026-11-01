@@ -257,6 +257,17 @@ const CELLS: &[Cell] = &[
         runtime_loaders: &[],
         vendored_native: BLAKE3,
     },
+    // The geometry writer funnel (issue #1314): the same graph as `pvec-raster`.
+    Cell {
+        label: "host / pvec-write",
+        target: HOST,
+        features: &["--features", "pvec-write"],
+        edges: "normal,build",
+        links: &[RAYON],
+        discovery: &[],
+        runtime_loaders: &[],
+        vendored_native: BLAKE3,
+    },
     Cell {
         label: "host / jxl",
         target: HOST,
@@ -911,11 +922,9 @@ fn the_external_library_features_stay_opt_in() {
 
         // `pvec-raster` brings the PVec facade, and the facade depends on `pvec-geometry` and
         // `pvec-numeric` itself, so it reaches both.
-        let asked_for_pvec = cell
-            .features
-            .iter()
-            .any(|f| f.contains("pvec-normalized") || f.contains("pvec-raster"))
-            || cell.features.contains(&"--all-features");
+        let asked_for_pvec = cell.features.iter().any(|f| {
+            f.contains("pvec-normalized") || f.contains("pvec-raster") || f.contains("pvec-write")
+        }) || cell.features.contains(&"--all-features");
         assert_eq!(
             contains(graph, "pvec-geometry"),
             asked_for_pvec,
