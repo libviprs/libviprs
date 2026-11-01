@@ -333,6 +333,7 @@ fn the_walk_descends_into_subdirectories() {
 /// `jbig2` (issue #1365) adds no `unsafe` of this crate's own and none of its dependencies':
 /// `hayro-jbig2` is `forbid(unsafe_code)` and its only way to `unsafe` is the `simd` feature, which
 /// the manifest leaves off.
+#[cfg_attr(miri, ignore)]
 #[test]
 fn the_jbig2_filter_has_no_unsafe_and_the_decoder_is_taken_without_simd() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/pvec/pdf_filters/jbig2.rs");

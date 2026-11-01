@@ -222,41 +222,49 @@ mod enabled {
     use libviprs::pvec::pdf_vector::{PdfVectorLimits, extract_page_paths_from_bytes};
 
     #[test]
+    #[cfg_attr(miri, ignore)] // reads the fixtures from disk
     fn a_generic_region_with_arithmetic_coding_decodes_to_the_reference() {
         check("generic_template0.jbig2", "truchet.png", true);
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // reads the fixtures from disk
     fn a_generic_region_with_mmr_decodes_to_the_reference() {
         check("generic_mmr.jbig2", "truchet.png", true);
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // reads the fixtures from disk
     fn a_symbol_dictionary_and_text_region_with_arithmetic_coding_decode() {
         check("symbol.jbig2", "honeycomb.png", true);
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // reads the fixtures from disk
     fn a_symbol_dictionary_and_text_region_with_huffman_tables_decode() {
         check("huffman_standard_tables.jbig2", "honeycomb.png", true);
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // reads the fixtures from disk
     fn refinement_in_symbols_and_text_decodes() {
         check("symbol_refine_text_refine.jbig2", "honeycomb.png", true);
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // reads the fixtures from disk
     fn a_generic_refinement_region_decodes() {
         check("refine_template0.jbig2", "truchet.png", true);
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // reads the fixtures from disk
     fn a_halftone_region_decodes() {
         check("halftone.jbig2", "maze.png", true);
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // reads the fixtures from disk
     fn a_symbol_dictionary_in_the_globals_stream_decodes() {
         let (_, globals) = embedded("symbol_global.jbig2");
         assert!(globals.is_some(), "the fixture has page 0 segments");
@@ -264,6 +272,7 @@ mod enabled {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // reads the fixtures from disk
     fn a_pattern_dictionary_in_the_globals_stream_decodes() {
         let (_, globals) = embedded("halftone_global.jbig2");
         assert!(globals.is_some());
@@ -271,12 +280,14 @@ mod enabled {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // reads the fixtures from disk
     fn the_same_stream_without_a_globals_object_decodes_alike() {
         check("symbol_global.jbig2", "honeycomb.png", false);
         check("halftone_global.jbig2", "maze.png", false);
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // reads the fixtures from disk
     fn black_pixels_are_zero_and_decode_one_zero_flips_them() {
         let (w, h, want) = reference("truchet.png");
         let (page, globals) = embedded("generic_template0.jbig2");
@@ -288,6 +299,7 @@ mod enabled {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // reads the fixtures from disk
     fn a_flate_compressed_globals_stream_is_inflated_first() {
         use std::io::Write;
         let (w, h, want) = reference("honeycomb.png");
@@ -316,6 +328,7 @@ mod enabled {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // reads the fixtures from disk
     fn a_globals_stream_counts_against_the_per_stream_cap() {
         let (w, h, _) = reference("honeycomb.png");
         let (page, globals) = embedded("symbol_global.jbig2");
@@ -337,6 +350,7 @@ mod enabled {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // reads the fixtures from disk
     fn the_refusals_are_typed() {
         let (w, h, _) = reference("truchet.png");
         let (mut page, globals) = embedded("generic_template0.jbig2");
@@ -372,6 +386,7 @@ mod enabled {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // reads the fixtures from disk
     fn a_page_size_that_disagrees_with_the_dictionary_is_refused() {
         let (w, h, _) = reference("truchet.png");
         let (page, globals) = embedded("generic_template0.jbig2");
@@ -387,6 +402,7 @@ mod enabled {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // reads the fixtures from disk
     fn a_truncated_stream_is_a_refusal_not_a_partial_picture() {
         let (w, h, _) = reference("truchet.png");
         let (mut page, globals) = embedded("generic_template0.jbig2");
@@ -434,6 +450,7 @@ mod enabled {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // reads the fixtures from disk
     fn a_symbol_dictionary_declaring_more_symbols_than_it_has_bits_is_refused_unread() {
         // Arithmetic coding, template 0: flags, eight AT bytes, SDNUMEXSYMS, SDNUMNEWSYMS.
         let mut d = vec![0, 0, 3, 0xFF, 0xFD, 0xFF, 2, 0xFE, 0xFE, 0xFE];
@@ -446,6 +463,7 @@ mod enabled {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // reads the fixtures from disk
     fn a_region_larger_than_the_page_is_refused_before_it_is_allocated() {
         let mut d = 4000u32.to_be_bytes().to_vec();
         d.extend(4000u32.to_be_bytes());
@@ -456,6 +474,7 @@ mod enabled {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // reads the fixtures from disk
     fn garbage_is_a_refusal() {
         let b = bake(&pdf_with(8, 8, vec![0xFF; 64], None, Dictionary::new()));
         assert!(b.written.is_empty());
@@ -487,6 +506,7 @@ mod known_upstream {
 
     #[test]
     #[ignore = "LaurenzV/hayro#1700: export_symbols never ends (8.6 billion iterations in 60 s)"]
+    #[cfg_attr(miri, ignore)] // reads the fixtures from disk
     fn an_export_run_of_zero_never_ends_hayro_1700() {
         bakes_in_bounds(
             concat!(
@@ -503,6 +523,7 @@ mod known_upstream {
 
     #[test]
     #[ignore = "LaurenzV/hayro#1701: 1.4 GB and 20 s in symbol bitmaps"]
+    #[cfg_attr(miri, ignore)] // reads the fixtures from disk
     fn symbols_of_24000_pixels_across_cost_1_4_gb_hayro_1701() {
         bakes_in_bounds(
             concat!(
@@ -519,6 +540,7 @@ mod known_upstream {
 
     #[test]
     #[ignore = "LaurenzV/hayro#1598: 2^31 empty height classes, 39 s"]
+    #[cfg_attr(miri, ignore)] // reads the fixtures from disk
     fn empty_height_classes_run_to_overflow_hayro_1598() {
         bakes_in_bounds(
             concat!(
@@ -535,6 +557,7 @@ mod known_upstream {
 
     #[test]
     #[ignore = "LaurenzV/hayro#1550: a 64786x24332 grid, 6.4 GB and 28 s"]
+    #[cfg_attr(miri, ignore)] // reads the fixtures from disk
     fn a_halftone_grid_of_1_6_billion_cells_hayro_1550() {
         bakes_in_bounds(
             concat!(
@@ -555,6 +578,7 @@ mod disabled {
     use std::error::Error;
 
     #[test]
+    #[cfg_attr(miri, ignore)] // reads the fixtures from disk
     fn without_the_feature_the_reason_is_filter_not_enabled() {
         let (w, h, _) = reference("truchet.png");
         let (page, globals) = embedded("generic_template0.jbig2");
@@ -577,6 +601,7 @@ mod disabled {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // reads the fixtures from disk
     fn the_error_names_the_feature() {
         let b = bake(&pdf_with(8, 8, vec![0; 8], None, Dictionary::new()));
         let e = &b.refused[0].error;
