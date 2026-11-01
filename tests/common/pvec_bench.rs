@@ -584,38 +584,159 @@ impl Stat {
     ///
     /// On no samples: a column nobody measured is a hole, never a zero.
     pub fn of(samples: &[f64]) -> Self {
-        let _ = samples;
-        unimplemented!()
+        assert!(!samples.is_empty(), "a statistic of no samples");
+        let mut v = samples.to_vec();
+        v.sort_by(f64::total_cmp);
+        Self {
+            median: v[v.len() / 2],
+            min: v[0],
+            max: v[v.len() - 1],
+        }
     }
 
     /// How far apart the extremes are, as a fraction of the median.
     pub fn spread(&self) -> f64 {
-        unimplemented!()
+        (self.max - self.min) / self.median
     }
 
     /// A row whose spread is over 20% is marked unstable and never gates.
     pub fn unstable(&self) -> bool {
-        unimplemented!()
+        self.spread() > 0.20
     }
 }
 
 /// The poll, counting from 1, at which the one-minute load had been under `ncpu` for three polls
 /// running, or `None` when it never was.
 pub fn quiet_after(loads: impl IntoIterator<Item = f64>, ncpu: usize) -> Option<usize> {
-    let _ = (loads, ncpu);
-    unimplemented!()
+    let mut run = 0;
+    for (n, load) in loads.into_iter().enumerate() {
+        run = if load < ncpu as f64 { run + 1 } else { 0 };
+        if run == 3 {
+            return Some(n + 1);
+        }
+    }
+    None
 }
 
 /// The columns of `row` that are missing or null. A benchmark row with any is refused, not printed.
 pub fn blank_columns(row: &Value, columns: &[&str]) -> Vec<String> {
-    let _ = (row, columns);
-    unimplemented!()
+    columns
+        .iter()
+        .filter(|c| row.get(**c).is_none_or(Value::is_null))
+        .map(|c| (*c).to_string())
+        .collect()
 }
 
 /// How `cur` compares with the baseline row `base` for a provider cell: more than 10% loss of
 /// entities per second, or more than 15% growth in tracked allocation peak, is a regression. An
 /// unstable row on either side never gates.
 pub fn provider_regressions(base: &Value, cur: &Value) -> Vec<String> {
-    let _ = (base, cur);
-    unimplemented!()
+    let flag = |r: &Value| r["unstable"].as_bool().unwrap_or(false);
+    if flag(base) || flag(cur) {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let eps = |r: &Value| r["entities_per_s"]["median"].as_f64().unwrap_or(f64::NAN);
+    if eps(cur) < eps(base) * 0.90 {
+        out.push(format!(
+            "entities per second fell from {:.0} to {:.0}, more than 10%",
+            eps(base),
+            eps(cur)
+        ));
+    }
+    let peak = |r: &Value| r["tracked_peak"].as_f64().unwrap_or(f64::NAN);
+    if peak(cur) > peak(base) * 1.15 {
+        out.push(format!(
+            "tracked allocation peak grew from {:.0} to {:.0}, more than 15%",
+            peak(base),
+            peak(cur)
+        ));
+    }
+    out
+}
+
+// ------------------------------------------------------------------------------- the host
+
+/// Logical cpus of the host. A container reads the host's `/proc`, so this is the machine's count
+/// and not a cgroup quota.
+pub fn host_cpus() -> usize {
+    std::fs::read_to_string("/proc/cpuinfo")
+        .map(|t| t.lines().filter(|l| l.starts_with("processor")).count())
+        .ok()
+        .filter(|n| *n > 0)
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
+}
+
+/// The one-minute load average, read from `/proc/loadavg`, which a container shares with its host.
+pub fn host_load() -> Option<f64> {
+    std::fs::read_to_string("/proc/loadavg")
+        .ok()?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
+}
+
+/// Waits until the one-minute load has been under the cpu count for three polls, `every` apart,
+/// for at most `polls` polls. Returns the load at the last poll, or says why it gave up.
+pub fn require_quiet(polls: usize, every: std::time::Duration) -> Result<f64, String> {
+    let ncpu = host_cpus();
+    let mut seen = Vec::new();
+    for _ in 0..polls {
+        let Some(load) = host_load() else {
+            return Err("this host reports no load average, so a quiet run cannot be shown".into());
+        };
+        seen.push(load);
+        if quiet_after(seen.iter().copied(), ncpu).is_some() {
+            return Ok(load);
+        }
+        std::thread::sleep(every);
+    }
+    Err(format!(
+        "the host never was quiet: one-minute load {seen:?} against {ncpu} cpus; no number was taken"
+    ))
+}
+
+/// Where a row ran: architecture, OS and the host's name from `LIBVIPRS_BENCH_HOST`, which a run
+/// must set (an x86_64 row comes from a native x64 host, never a local emulation).
+pub fn platform() -> Result<String, String> {
+    let host = std::env::var("LIBVIPRS_BENCH_HOST")
+        .ok()
+        .filter(|h| !h.is_empty())
+        .ok_or("LIBVIPRS_BENCH_HOST is not set: every row names the host it ran on")?;
+    Ok(format!(
+        "{}-{}-{host}",
+        std::env::consts::ARCH,
+        std::env::consts::OS
+    ))
+}
+
+/// Resets the kernel's peak-RSS mark to the current RSS, so one cell's peak is its own. `false`
+/// where the kernel refuses; the row then says its RSS is the process's running high-water mark.
+pub fn reset_peak_rss() -> bool {
+    std::fs::write("/proc/self/clear_refs", "5").is_ok()
+}
+
+/// Process peak resident set, from `VmHWM`.
+pub fn peak_rss() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let kib: u64 = status
+        .lines()
+        .find_map(|l| l.strip_prefix("VmHWM:"))?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()?;
+    Some(kib * 1024)
+}
+
+/// The baseline file, relative to the crate root.
+pub const BASELINE: &str = "tests/fixtures/pvec_bench_baseline.json";
+
+/// The committed baseline rows, `{}` when none is committed yet.
+pub fn baseline_rows() -> Value {
+    std::fs::read_to_string(root().join(BASELINE))
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .map_or_else(|| Value::Object(Default::default()), |v| v["rows"].clone())
 }

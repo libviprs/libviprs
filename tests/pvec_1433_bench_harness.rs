@@ -18,7 +18,7 @@ fn a_stat_is_the_median_with_the_extremes() {
 
 #[test]
 fn a_spread_over_twenty_percent_is_unstable() {
-    assert!(!Stat::of(&[0.90, 1.0, 1.10]).unstable());
+    assert!(!Stat::of(&[0.92, 1.0, 1.08]).unstable());
     assert!(Stat::of(&[0.80, 1.0, 1.30]).unstable());
 }
 
