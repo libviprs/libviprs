@@ -16,6 +16,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Fuzz targets for the conversion path** (issue #1437, part of #1070). `fuzz_pvec_provider` drives an
+  arbitrary in-memory drawing (layers, nested and recursive blocks, spline records, varying capabilities,
+  a cursor that fails part-way) through the view profile, the flattener and the extractors under tight
+  limits, `fuzz_pvec_spline` feeds `dwg_spline::extract` arbitrary degrees, knots, weights and flags, and
+  `fuzz_pvec_clip` feeds `apply_clip_policy` arbitrary clips and compound paths. Each has a seed corpus
+  and `tests/pvec_1437_fuzz_seeds.rs` runs the target bodies on it in the ordinary suite. The provider
+  target found #1439 (fixed): `ViewProfile::apply` ignored the source limits, so a fan-out block bomb
+  exhausted memory before `flatten` could refuse it, and `ViewProfileError::Limit` is new. `convert`
+  also now carries a planar SPLINE (#1430) instead of dropping it as `UNMAPPED_SOURCE_CLASS`.
+  `fuzz_pvec_spool` waits for the spool (pvec#235).
 - **The DWG to PDF differential, with LibreDWG as the first real exporter** (issue #1405, part of #1086).
   Six `REAL_WORLD_DIFFERENTIAL` pairs are committed as static files under `tests/fixtures/pvec/pdf_loss/`
   (the DWG, the exported PDF, `exporter.txt` provenance with versions, options and the tarball sha256), and
