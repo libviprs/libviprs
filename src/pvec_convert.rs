@@ -381,7 +381,9 @@ impl<'a> PvecConversion<'a> {
         } = self;
         let observer = observer.as_deref();
         let tell = |event: EngineEvent| {
-            let _ = (&event, observer);
+            if let Some(o) = observer {
+                o.on_event(event);
+            }
         };
         tell(EngineEvent::ConversionSourceOpened {
             provider: provider.name().to_owned(),
@@ -570,7 +572,9 @@ impl<'a> PvecConversion<'a> {
             ..
         } = self;
         let tell = |event: EngineEvent| {
-            let _ = (&event, &observer);
+            if let Some(o) = &observer {
+                o.on_event(event);
+            }
         };
 
         let artifact = write_geometry(
@@ -717,7 +721,11 @@ fn consume(
             done.warnings,
         ));
         out.geometries.push((id, done.geometry));
-        let _ = received;
+        if received.is_multiple_of(BATCH as u64)
+            && let Some(o) = observer
+        {
+            o.on_event(EngineEvent::ConversionBatchNormalized { entities: received });
+        }
     }
     out
 }
@@ -951,9 +959,6 @@ fn entity_diagnostic(
     c: &Classification,
     layout: &str,
 ) -> Option<Diagnostic> {
-    if item_is_never_reported() {
-        return None;
-    }
     let code = match c.class() {
         FidelityClass::SupportedExact | FidelityClass::SupportedEquivalent => return None,
         _ if matches!(item, Item::Skipped(_)) => DiagnosticCode::InsertNotExpanded,
@@ -1057,9 +1062,4 @@ impl PvecConvertError {
             PvecConvertError::Cancelled => d(DiagnosticCode::Cancelled, "cancelled"),
         }
     }
-}
-
-/// Red-test stub: the diagnostics are not made yet.
-const fn item_is_never_reported() -> bool {
-    true
 }
