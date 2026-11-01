@@ -65,6 +65,7 @@ pub mod provider;
 #[cfg(feature = "pvec-write")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-write")))]
 pub mod publish;
+pub mod report;
 pub mod style;
 pub mod text_policy;
 #[cfg(feature = "pvec-normalized")]
