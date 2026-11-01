@@ -34,6 +34,7 @@ use std::time::Instant;
 
 use libviprs::cad::CadSource;
 use libviprs::pvec::SourceUnit;
+use libviprs::pvec::fidelity::FidelityClass;
 use libviprs::pvec_convert::PvecConversion;
 use pvec_corpus::{conformance, document, regressions};
 use pvec_gold::{Corpus, EvidenceClass, Fixture};
@@ -92,15 +93,40 @@ fn row(fx: &Fixture, dir: &std::path::Path) -> (Value, f64) {
             );
         }
         Err(e) => {
-            r.insert("outcome".into(), json!(format!("refused: {e}")));
+            // Nothing was written, but the classes are still the report: a probe counts them.
+            let probe = PvecConversion::new(CadSource::Bytes(&bytes), &dest)
+                .unit(SourceUnit::Meters)
+                .probe();
+            let (by, reasons, met) = match &probe {
+                Ok(f) => (
+                    FidelityClass::ALL
+                        .iter()
+                        .map(|c| (c.tag().to_string(), json!(f.count(*c))))
+                        .collect::<serde_json::Map<_, _>>(),
+                    f.reasons()
+                        .map(|(r, class, n)| {
+                            json!({"reason": r.code(), "source_class": class, "count": n})
+                        })
+                        .collect::<Vec<_>>(),
+                    f.encountered(),
+                ),
+                Err(_) => (serde_json::Map::new(), Vec::new(), 0),
+            };
+            let mut why = format!("refused: {e}");
+            let mut source = std::error::Error::source(&e);
+            while let Some(cause) = source {
+                why += &format!(" <- {cause}");
+                source = cause.source();
+            }
+            r.insert("outcome".into(), json!(why));
             r.insert(
                 "mathematical".into(),
-                json!({"by_fidelity": {}, "conformance": "NoGeometry"}),
+                json!({"by_fidelity": by, "conformance": "NoGeometry", "reasons": reasons}),
             );
             r.insert("view".into(), json!({}));
             r.insert(
                 "size".into(),
-                json!({"entities": 0, "written": 0, "artifact_bytes": 0}),
+                json!({"entities": met, "written": 0, "artifact_bytes": 0}),
             );
         }
     }
@@ -159,6 +185,7 @@ fn the_baseline_has_one_row_per_fixture_and_no_empty_cell() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn a_fixture_that_moves_from_exact_to_equivalent_fails_the_gate() {
     let mut cur = baseline();
     let id = cur["rows"]
@@ -181,6 +208,7 @@ fn a_fixture_that_moves_from_exact_to_equivalent_fails_the_gate() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn a_quarantined_fixture_is_in_the_report_and_never_gates() {
     let mut cur = baseline();
     let ids: Vec<String> = cur["rows"]
@@ -199,6 +227,7 @@ fn a_quarantined_fixture_is_in_the_report_and_never_gates() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn artifact_growth_of_two_percent_in_total_or_five_on_one_fixture_fails() {
     let base = baseline();
     let gating: Vec<String> = base["rows"]
@@ -235,6 +264,7 @@ fn artifact_growth_of_two_percent_in_total_or_five_on_one_fixture_fails() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn a_dual_oracle_row_is_labelled_as_agreement_and_never_as_truth() {
     let b = baseline();
     for (id, r) in b["rows"].as_object().unwrap() {
