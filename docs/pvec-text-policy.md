@@ -41,9 +41,10 @@ So v1 omits, and the report keeps the omission honest.
 
 ### What I could and could not measure
 
-The issue asks for the numbers on named `O2.1` and `O2.2` fixtures. Both are still open in
-`libviprs/pvec-gold-fixtures` (#11 and #12), so those fixtures do not exist yet. I did not fake them.
-I used what is on hand and labelled it:
+The issue asked for the numbers on named `O2.1` and `O2.2` fixtures, which did not exist when this was
+written (`libviprs/pvec-gold-fixtures` #11 and #12 were open). They have landed since, and the four
+text-bearing DWGs are re-taken under "Re-measured on the corpus fixtures" below. The PDF side and the rest of
+the DWG side still use what was on hand, labelled:
 
 * **PDF.** The 26 licensed candidates under `pdf-candidates/` that are under 3 MB (of 35, each with its
   licence and sha256 in the `CANDIDATES.md` beside it), page 1 of each. They are real-world drawings,
@@ -51,7 +52,7 @@ I used what is on hand and labelled it:
 * **DWG.** The committed fixtures under `tests/fixtures/cad/` and `tests/fixtures/pvec/provider/`,
   read through the acadrust provider. They are writer-made probes, not known-truth drawings.
 
-When `O2.1` and `O2.2` land, rerunning the example on them is the follow-up (see "Not done").
+The PDF numbers are not re-taken: the O2 corpus holds no PDF, so the 26 candidates stay the PDF record.
 
 Native x86_64 on MARS, `cargo run --release --features dwg-acadrust --example text_policy_measure`.
 
@@ -126,6 +127,31 @@ font without a `/ToUnicode` (that case has a test fixture and no real file in th
 The other 46 readable fixtures have no text. `g13_ac1009.dwg` is refused by the provider (old version stamp), so
 it has no count at all, which is reported as the refusal and not as zero.
 
+#### Re-measured on the corpus fixtures (#1381)
+
+The four fixtures #1313 names, from `libviprs/pvec-gold-fixtures` at `1df9d1b`
+(`fixtures/negative/<id>/source.dwg`), read through the acadrust provider with
+`cargo run --release --example text_policy_measure --features "dwg-acadrust pvec-normalized" -- <files>`.
+`VIPRS_INSTALLED_SHX` names the SHX fonts that count as installed; the bucket columns are
+`TEXT_SHX_MISSING` with none installed and `TEXT_FONT_EMBEDDED` (read: available) with `txt.shx`.
+
+| fixture | sha256 | entities | `TEXT` | `MTEXT` | style : font | none installed | `txt.shx` installed |
+|---|---|---|---|---|---|---|---|
+| `text-001` | `e233d9cd...` | 1 | 1 | 0 | `Standard` : `txt` | `TEXT_SHX_MISSING` 1 | `TEXT_FONT_EMBEDDED` 1 |
+| `mtext-001` | `c09f6c0f...` | 1 | 0 | 1 | `Standard` : `txt` | `TEXT_SHX_MISSING` 1 | `TEXT_FONT_EMBEDDED` 1 |
+| `table-001` | `aed7b952...` | 1 | 0 | 0 | none | none | none |
+| `dimension-001` | `48bfc6d5...` | 1 | 0 | 0 | none | none | none |
+
+Two things this shows that the stand-ins could not. First, the real text fixtures use the default
+`Standard` style with the SHX font `txt` (no extension), and `shx_outcome` already compares without the
+extension, so `txt.shx` installed is enough. Second, `table-001` and `dimension-001` hold one entity each
+and the provider reports it as `Unmapped` (an `ACAD_TABLE` and a `DIMENSION`), so the `TEXT` and `MTEXT`
+counters say 0 while the drawing does contain text inside them. Under v1 that text is omitted as part of an
+unmapped entity and counted as one `UnmappedSourceClass`, not as text. If a later version keeps table or
+dimension text, the counters have to learn those two classes first. None of the four names an SHX font that
+is missing from a stock install, so the missing-font outcome is still exercised by a drawing written for
+the purpose (`tests/pvec_1381_text_style.rs`, style `GONE` naming `nope.shx`).
+
 The DWG size delta is not priced. The provider does not carry a string, height or style on
 `RawGeometry::Unmapped`, so there is nothing to price honestly, and the size model above would be
 invented. Under the outline option it would be the same per-glyph arithmetic as the PDF side.
@@ -186,7 +212,8 @@ the tree for `Raster::text` and the example uses it to measure Vera's outlines, 
 
 ## Not done
 
-* The measurements on the real `O2.1` and `O2.2` fixtures, once they exist.
+* The measurements on the rest of the `O2.x` corpus (only the four text-bearing negatives named in #1313
+  are re-taken above).
 * Bidirectional and vertical writing, font substitution, and text in the browser add-on (out of scope
   by the issue).
 * Pricing the DWG options.
