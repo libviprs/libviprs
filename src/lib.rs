@@ -55,6 +55,8 @@
 //!   [`Raster::encode_jxl`], [`Raster::save_jxl`], the `.jxl` row in
 //!   [`Raster::save`]'s extension route and the `"jxl"` row in
 //!   [`Raster::encode_to_buffer`]'s format route.
+//! - **`jbig2`** — decodes `JBIG2Decode` image streams of a PDF page in
+//!   `pvec::pdf_image` through `hayro-jbig2`; implies `pvec-raster`.
 //! - **`jp2k`** — gates the JPEG 2000 loader and encoder: [`decode_jp2k`],
 //!   [`Raster::encode_jp2k`] and [`Raster::save_jp2k`].
 //! - **`dwg-acadsharp`** — gates [`cad::acadsharp`], the `acadsharp-rs` DWG
