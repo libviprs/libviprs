@@ -106,6 +106,22 @@ impl ExactBoundsSource for LinesOnlyBounds {
     }
 }
 
+/// Exact bounds over the analytic extrema of PVec's curves (N6.4, issue #1380).
+///
+/// Straight segments contribute their end points and cubic Beziers contribute the closed-form
+/// extrema of `pvec_geometry`, never a sample and never the control polygon. A path with a
+/// degenerate segment PVec refuses is `None`, and the entity is then retained.
+#[cfg(feature = "pvec-normalized")]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AnalyticBounds;
+
+#[cfg(feature = "pvec-normalized")]
+impl ExactBoundsSource for AnalyticBounds {
+    fn exact_bounds(&self, _entity: &PdfPathEntity) -> Option<ExactBounds> {
+        None
+    }
+}
+
 /// The bound on clip nesting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClipLimits {
@@ -171,6 +187,19 @@ pub struct ClipRecord {
     pub rect: Option<ExactBounds>,
     /// `GeometricallyExact` for a rectangle, `DisplayFidelity` otherwise.
     pub conformance: ClipConformance,
+    /// The boundary has no segments: an empty clip region, which excludes everything after it.
+    pub empty: bool,
+}
+
+/// A Form XObject's `/BBox`, recorded as the clip it is.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FormClipRecord {
+    /// The form names invoked on the way, outermost first, ending with this form.
+    pub form_path: Vec<String>,
+    /// The box in page space when it is exactly axis aligned there.
+    pub rect: Option<ExactBounds>,
+    /// `GeometricallyExact` for an axis-aligned box, `DisplayFidelity` for a rotated or skewed one.
+    pub conformance: ClipConformance,
 }
 
 /// What the policy decided for one painted entity.
@@ -190,6 +219,10 @@ pub struct EntityClipDecision {
     pub fill_rule: Option<PdfFillRule>,
     /// Subpaths in the entity, which `fill_rule` governs as a group.
     pub subpaths: usize,
+    /// Indices into [`ClipReport::form_clips`] of the form boxes this entity was painted inside.
+    pub form_clips: Vec<usize>,
+    /// A glyph-outline clip (`Tr` 4 to 7) was in force. Its outline is not computed.
+    pub text_clip: bool,
 }
 
 /// The policy's output for one page.
@@ -199,6 +232,8 @@ pub struct ClipReport {
     pub clips: Vec<ClipRecord>,
     /// Every painted entity, in stream order.
     pub decisions: Vec<EntityClipDecision>,
+    /// Every Form XObject `/BBox`, in stream order.
+    pub form_clips: Vec<FormClipRecord>,
     /// The most clips in force at once.
     pub max_depth: usize,
 }
@@ -306,6 +341,7 @@ pub fn apply_clip_policy(
                 } else {
                     ClipConformance::DisplayFidelity
                 },
+                empty: false,
             });
         }
 
@@ -322,6 +358,8 @@ pub fn apply_clip_policy(
             conformance: None,
             fill_rule: entity.paint.fill,
             subpaths: subpath_count(entity),
+            form_clips: Vec::new(),
+            text_clip: false,
         };
         if entity.soft_masked {
             d.case = ClipCase::Unsupported;
@@ -364,6 +402,7 @@ pub fn apply_clip_policy(
     Ok(ClipReport {
         clips,
         decisions,
+        form_clips: Vec::new(),
         max_depth,
     })
 }
