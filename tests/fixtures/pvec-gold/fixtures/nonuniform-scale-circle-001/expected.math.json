@@ -1,0 +1,287 @@
+{
+  "schema_version": "pvec-gold/expected.math/1",
+  "fixture_id": "nonuniform-scale-circle-001",
+  "evidence_class": "KNOWN_TRUTH_EXACT",
+  "units": {
+    "name": "metre",
+    "canonical": "metre",
+    "scale_to_canonical": {
+      "decimal": "1.0",
+      "f64_hex": "0x3ff0000000000000"
+    }
+  },
+  "provenance": {
+    "derivation": "AUTHORING_PARAMETERS",
+    "authoring_script": "tools/authoring/author_probes.py",
+    "parameter_file": "tools/authoring/params/transforms/nonuniform-scale-circle-001.json",
+    "parameter_file_sha256": "ad28b8a4fddfced4927cf5b992cc254bc1cba3aafa556bfe89719bd57fa4c7bc",
+    "parameters": {
+      "id": "nonuniform-scale-circle-001",
+      "group": "transforms",
+      "kind": "transform",
+      "description": "A circle of radius 2 scaled by (3, 1, 1). The exact result is an ellipse with semi-major axis 6 along x and semi-minor axis 2. A converter that returns a circle is wrong, not merely different.",
+      "base": {
+        "class": "circle",
+        "center": [
+          "1",
+          "1",
+          "0"
+        ],
+        "radius": "2"
+      },
+      "ops": [
+        {
+          "op": "scale",
+          "s": [
+            "3",
+            "1",
+            "1"
+          ],
+          "classification": "NON_UNIFORM_SCALE"
+        }
+      ],
+      "expect": "ellipse"
+    }
+  },
+  "entities": [
+    {
+      "id": "nonuniform-scale-circle-001",
+      "class": "circle",
+      "geometry": {
+        "center": [
+          {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          },
+          {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ],
+        "normal": [
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          }
+        ],
+        "x_axis": [
+          {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ],
+        "radius": {
+          "decimal": "2.0",
+          "f64_hex": "0x4000000000000000"
+        }
+      },
+      "parameter_domain": {
+        "start": {
+          "decimal": "0.0",
+          "f64_hex": "0x0000000000000000"
+        },
+        "end": {
+          "decimal": "6.283185307179586",
+          "f64_hex": "0x401921fb54442d18"
+        }
+      },
+      "closure": {
+        "closed_by_endpoint": true,
+        "closed_by_knots": false,
+        "periodic": true
+      },
+      "structure": "INSTANCE_PLUS_TRANSFORM",
+      "transform": {
+        "convention": "ROW_MAJOR_COLUMN_VECTOR_PARENT_LEFT",
+        "matrix": [
+          {
+            "decimal": "3.0",
+            "f64_hex": "0x4008000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          }
+        ],
+        "determinant": {
+          "decimal": "3.0",
+          "f64_hex": "0x4008000000000000"
+        },
+        "classification": "NON_UNIFORM_SCALE"
+      },
+      "world": {
+        "class": "ellipse",
+        "geometry": {
+          "center": [
+            {
+              "decimal": "3.0",
+              "f64_hex": "0x4008000000000000"
+            },
+            {
+              "decimal": "1.0",
+              "f64_hex": "0x3ff0000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            }
+          ],
+          "normal": [
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            },
+            {
+              "decimal": "1.0",
+              "f64_hex": "0x3ff0000000000000"
+            }
+          ],
+          "major_axis": [
+            {
+              "decimal": "1.0",
+              "f64_hex": "0x3ff0000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            }
+          ],
+          "semi_major": {
+            "decimal": "6.0",
+            "f64_hex": "0x4018000000000000"
+          },
+          "semi_minor": {
+            "decimal": "2.0",
+            "f64_hex": "0x4000000000000000"
+          }
+        },
+        "parameter_domain": {
+          "start": {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          "end": {
+            "decimal": "6.283185307179586",
+            "f64_hex": "0x401921fb54442d18"
+          }
+        },
+        "closure": {
+          "closed_by_endpoint": true,
+          "closed_by_knots": false,
+          "periodic": true
+        }
+      },
+      "orientation": {
+        "parameter_direction": "START_TO_END",
+        "sense_about_normal": "NOT_APPLICABLE"
+      }
+    }
+  ],
+  "assertions": [
+    {
+      "id": "a1",
+      "kind": "SOURCE_MAPPING",
+      "entity": "nonuniform-scale-circle-001",
+      "claim": "TRANSFORM_PRESERVED",
+      "statement": "Checked in the source mapping, not in the artifact (pvec ADR 0017: PVec is curve-only): the mapping reads the instance plus the stated transform and keeps the matrix and determinant as written while it flattens the instance to the world-space curve."
+    },
+    {
+      "id": "a2",
+      "kind": "GEOMETRIC",
+      "entity": "nonuniform-scale-circle-001",
+      "claim": "WORLD_SPACE_RESULT",
+      "statement": "The world-space curve is the stated ellipse."
+    },
+    {
+      "id": "a3",
+      "kind": "STRUCTURAL",
+      "entity": "nonuniform-scale-circle-001",
+      "claim": "CLASS_PRESERVED",
+      "statement": "A circle under non-uniform scale is an ellipse with the stated axes; a circle is wrong, not merely different."
+    }
+  ]
+}

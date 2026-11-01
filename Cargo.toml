@@ -556,8 +556,12 @@ dwg-acadsharp = ["dep:acadsharp-rs"]
 # key, no native archive, no runtime loader, so unlike `dwg-acadsharp` it needs nothing
 # installed. `pvec` itself is not behind a feature and builds without this one; this
 # only adds `pvec::dwg_acadrust::AcadrustProvider`. The existing `cad::CadDecoder` path,
-# and `dwg-acadsharp` with it, is untouched.
-dwg-acadrust = ["dep:acadrust"]
+# and `dwg-acadsharp` with it, is untouched. It also enables `pvec-normalized` and
+# `pvec-spline` (no crate beyond the PVec ones those two already name), because the PVec
+# conformance suites in `tests/` (issue #1050) open corpus drawings through this provider and
+# compare them through those two, and CI runs each feature on its own: a suite gated on all
+# three would be compiled out of every cell.
+dwg-acadrust = ["dep:acadrust", "pvec-normalized", "pvec-spline"]
 # Exact B-spline extraction from a provider's `RawGeometry::Spline` (issue #1074),
 # validated against PVec's numeric policy. Needs no reader: it works on the boundary
 # types, so any provider's output goes through it.
