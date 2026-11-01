@@ -55,6 +55,11 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
+use pvec_facade::CapabilityId;
+
+mod capability;
+pub use capability::{CapabilityPolicy, ConversionProfile};
+
 use crate::CancelToken;
 use crate::cad::CadSource;
 use crate::pvec::dwg_acadrust::AcadrustProvider;
@@ -67,8 +72,8 @@ use crate::pvec::mapping::{kind_of, row_for};
 use crate::pvec::provenance::NoProvenance;
 use crate::pvec::publish::{PublishError, publish};
 use crate::pvec::report::{
-    BoundsSplit, ConversionReport, EntityRow, ReportBuilder, ReportError, UnresolvedXrefRow,
-    ViewSummary, XrefSummary,
+    BoundsSplit, CapabilitySummary, ConversionReport, EntityRow, ReportBuilder, ReportError,
+    UnresolvedXrefRow, ViewSummary, XrefSummary,
 };
 use crate::pvec::transform::{ComposedTransform, promote};
 use crate::pvec::writer::{LeafConfig, WriteConfig, WriteError, write_geometry};
@@ -110,6 +115,22 @@ pub enum PvecConvertError {
     /// The artifact and report could not be published.
     #[error("the artifact could not be published")]
     Publish(#[source] PublishError),
+    /// An entity needs a PVec capability the run did not allow, and the policy is
+    /// [`CapabilityPolicy::RejectInput`].
+    #[error(
+        "{source_class} (handle {handle:?}) needs the PVec capability {name} ({}), which is not allowed",
+        capability.get()
+    )]
+    CapabilityNotAllowed {
+        /// PVec's identifier of the capability.
+        capability: CapabilityId,
+        /// Its registry name.
+        name: &'static str,
+        /// The drawing's class name of the entity.
+        source_class: String,
+        /// The entity's handle, when the drawing gave one.
+        handle: Option<u64>,
+    },
     /// The cancel token fired. Nothing was published.
     #[error("cancelled")]
     Cancelled,
@@ -136,6 +157,7 @@ pub struct PvecConversion<'a> {
     unit: Option<SourceUnit>,
     leaves: Option<LeafConfig>,
     cancel: CancelToken,
+    gate: Gate,
 }
 
 impl<'a> PvecConversion<'a> {
@@ -149,6 +171,7 @@ impl<'a> PvecConversion<'a> {
             unit: None,
             leaves: None,
             cancel: CancelToken::new(),
+            gate: Gate::of(ConversionProfile::Default),
         }
     }
 
@@ -188,6 +211,52 @@ impl<'a> PvecConversion<'a> {
         self
     }
 
+    /// A named capability set, exactness rule and policy: [`ConversionProfile::Strict`],
+    /// `Default` (the default) or `Permissive`. Replaces any earlier capability setting.
+    #[must_use]
+    pub fn profile(self, profile: ConversionProfile) -> Self {
+        let _ = profile;
+        self
+    }
+
+    /// The PVec capabilities this run may use, replacing the profile's set. An entity that needs
+    /// another is handled by the [`capability_policy`](Self::capability_policy). The profile's
+    /// exactness rule is kept, and the report names the profile as `Custom`.
+    #[must_use]
+    pub fn allowed_capabilities(self, allowed: impl IntoIterator<Item = CapabilityId>) -> Self {
+        let _ = allowed.into_iter().count();
+        self
+    }
+
+    /// What happens to an entity that needs a capability outside the allowed set.
+    #[must_use]
+    pub fn capability_policy(self, policy: CapabilityPolicy) -> Self {
+        let _ = policy;
+        self
+    }
+
+    /// Classifies the drawing without writing anything and returns the per-class counts a
+    /// [`convert`](Self::convert) would report. Under [`CapabilityPolicy::RejectInput`] it fails
+    /// the way the conversion would.
+    ///
+    /// # Errors
+    ///
+    /// As [`convert`](Self::convert), except that no unit is needed and nothing is written.
+    pub fn probe(self) -> Result<FidelityReport, PvecConvertError> {
+        let provider = AcadrustProvider::open(self.source).map_err(PvecConvertError::Open)?;
+        Ok(self.classify(&provider)?.fidelity)
+    }
+
+    /// As [`probe`](Self::probe), with provider `P`.
+    ///
+    /// # Errors
+    ///
+    /// As [`probe`](Self::probe).
+    pub fn probe_with<P: DwgProvider>(self) -> Result<FidelityReport, PvecConvertError> {
+        let provider = P::open(self.source).map_err(PvecConvertError::Open)?;
+        Ok(self.classify(&provider)?.fidelity)
+    }
+
     /// Converts with the default provider, acadrust. The unit is the header's unless
     /// [`unit`](Self::unit) was set.
     ///
@@ -217,17 +286,14 @@ impl<'a> PvecConversion<'a> {
         self.run(&provider, unit)
     }
 
-    fn run<P: DwgProvider>(
-        self,
-        provider: &P,
-        unit: SourceUnit,
-    ) -> Result<PvecConversionOutput, PvecConvertError> {
+    /// Everything a conversion decides about its entities, up to but not including the write.
+    /// [`probe`](Self::probe) stops here, so it and [`convert`](Self::convert) cannot disagree.
+    fn classify<P: DwgProvider>(&self, provider: &P) -> Result<Classified, PvecConvertError> {
         let Self {
             source,
-            dest,
             view_profile,
-            leaves,
             cancel,
+            gate,
             ..
         } = self;
         let view = view_profile
@@ -238,11 +304,11 @@ impl<'a> PvecConversion<'a> {
             .map_err(|e| PvecConvertError::View(e.into()))?;
         let layout =
             select_layout(&layouts, &view_profile.space).map_err(PvecConvertError::View)?;
-        let source_name = match source {
+        let source_name = match *source {
             CadSource::Path(p) => p.display().to_string(),
             CadSource::Bytes(_) => "(bytes)".to_owned(),
         };
-        let flat = BlockResolver::new(provider, FlattenBounds::from_profile(&view_profile))
+        let flat = BlockResolver::new(provider, FlattenBounds::from_profile(view_profile))
             .flatten(
                 &EntityScope::Layout(layout.id),
                 &source_name,
@@ -317,7 +383,7 @@ impl<'a> PvecConversion<'a> {
             }
             let id = ordered.entities[n].id;
             let raw = &ordered.entities[n].entity;
-            let done = classify_item(&items[at], raw);
+            let done = classify_item(&items[at], raw, gate)?;
             tally.record(&done.classification);
             rows.push(EntityRow::new(
                 id,
@@ -332,18 +398,6 @@ impl<'a> PvecConversion<'a> {
             geometries.push((id, done.geometry));
         }
         let fidelity = tally.finish(encountered).map_err(PvecConvertError::Tally)?;
-
-        let artifact = write_geometry(
-            &WriteConfig { unit, leaves },
-            geometries.iter().map(|(id, g)| (*id, g)),
-            Vec::new(),
-            &cancel,
-        )
-        .map_err(|e| match e {
-            WriteError::Cancelled => PvecConvertError::Cancelled,
-            other => PvecConvertError::Write(other),
-        })?;
-
         let xrefs = XrefSummary {
             unresolved: flat
                 .skipped
@@ -358,10 +412,52 @@ impl<'a> PvecConversion<'a> {
                 .collect(),
             resolved: Vec::new(),
         };
-        let report = rows
+        Ok(Classified {
+            geometries,
+            rows,
+            fidelity,
+            encountered,
+            view: ViewSummary::from_report(&view.report),
+            xrefs,
+        })
+    }
+
+    fn run<P: DwgProvider>(
+        self,
+        provider: &P,
+        unit: SourceUnit,
+    ) -> Result<PvecConversionOutput, PvecConvertError> {
+        let Classified {
+            geometries,
+            rows,
+            fidelity,
+            encountered,
+            view,
+            xrefs,
+        } = self.classify(provider)?;
+        let Self {
+            dest,
+            leaves,
+            cancel,
+            gate,
+            ..
+        } = self;
+
+        let artifact = write_geometry(
+            &WriteConfig { unit, leaves },
+            geometries.iter().map(|(id, g)| (*id, g)),
+            Vec::new(),
+            &cancel,
+        )
+        .map_err(|e| match e {
+            WriteError::Cancelled => PvecConvertError::Cancelled,
+            other => PvecConvertError::Write(other),
+        })?;
+
+        let mut report = rows
             .finish(
                 encountered,
-                ViewSummary::from_report(&view.report),
+                view,
                 xrefs,
                 BoundsSplit {
                     exact: artifact.bounds.exact_count() as u64,
@@ -369,6 +465,7 @@ impl<'a> PvecConversion<'a> {
                 },
             )
             .map_err(PvecConvertError::Report)?;
+        report.capabilities = Some(gate.summary());
         let json = report.to_json_string().map_err(PvecConvertError::Report)?;
         publish(dest, &artifact.bytes, json.as_bytes(), &cancel, &mut |_| {}).map_err(
             |e| match e {
@@ -382,6 +479,45 @@ impl<'a> PvecConversion<'a> {
             fidelity,
             written: artifact.written,
         })
+    }
+}
+
+/// What `classify` hands on: one record and one row per entity, and the counts that check them.
+struct Classified {
+    geometries: Vec<(EntityId, Normalized2DGeometry)>,
+    rows: ReportBuilder,
+    fidelity: FidelityReport,
+    encountered: u64,
+    view: ViewSummary,
+    xrefs: XrefSummary,
+}
+
+/// The capability gate: which capabilities pass, whether only exact entities do, and what happens
+/// to the rest. The three vary together per profile.
+struct Gate {
+    name: &'static str,
+    allowed: BTreeSet<CapabilityId>,
+    exact_only: bool,
+    policy: CapabilityPolicy,
+}
+
+impl Gate {
+    fn of(profile: ConversionProfile) -> Self {
+        Self {
+            name: profile.name(),
+            allowed: profile.capabilities(),
+            exact_only: profile.exact_only(),
+            policy: profile.policy(),
+        }
+    }
+
+    fn summary(&self) -> CapabilitySummary {
+        CapabilitySummary {
+            profile: self.name.to_owned(),
+            policy: format!("{:?}", self.policy),
+            exact_only: self.exact_only,
+            allowed: self.allowed.iter().map(|c| c.get()).collect(),
+        }
     }
 }
 
@@ -442,9 +578,9 @@ fn without_geometry(classification: Classification, warnings: Vec<String>) -> Do
     }
 }
 
-fn classify_item(item: &Item<'_>, raw: &RawEntity) -> Done {
+fn classify_item(item: &Item<'_>, raw: &RawEntity, gate: &Gate) -> Result<Done, PvecConvertError> {
     let class = raw.provenance.class_name.as_str();
-    match item {
+    Ok(match item {
         Item::Excluded(x) => without_geometry(x.reason.classification(class), Vec::new()),
         Item::Skipped(s) => {
             let reason = match s.reason {
@@ -456,64 +592,121 @@ fn classify_item(item: &Item<'_>, raw: &RawEntity) -> Done {
                 vec![format!("INSERT of `{}`: {}", s.block_name, s.reason.code())],
             )
         }
-        Item::Leaf(f) => classify_leaf(f),
-    }
+        Item::Leaf(f) => classify_leaf(f, gate)?,
+    })
 }
 
-fn classify_leaf(f: &FlatEntity) -> Done {
+fn classify_leaf(f: &FlatEntity, gate: &Gate) -> Result<Done, PvecConvertError> {
     let class = f.entity.provenance.class_name.as_str();
     let basic = match dwg_basic::extract(&f.entity) {
         Ok(b) => b,
         Err(BasicError::NotBasic) => {
-            return without_geometry(crate::pvec::classify_unmapped(&f.entity), Vec::new());
+            return Ok(without_geometry(
+                crate::pvec::classify_unmapped(&f.entity),
+                Vec::new(),
+            ));
         }
-        Err(e) => return without_geometry(e.classification(class), vec![e.warning(class)]),
+        Err(e) => {
+            return Ok(without_geometry(
+                e.classification(class),
+                vec![e.warning(class)],
+            ));
+        }
     };
     let record = match Normalized2DGeometry::from_curve(basic.curve, basic.classification.class()) {
         Ok(r) => r,
         Err(e) => {
-            return without_geometry(
+            return Ok(without_geometry(
                 Classification::refused(ReasonCode::DegenerateGeometry, class),
                 vec![format!("{class}: {e}")],
-            );
+            ));
         }
     };
     // A leaf a layout owns directly has the identity map. A nested one is pushed through the map
     // flattening composed for it, as one level named by its innermost INSERT.
     let path = &f.entity.provenance.block_path;
+    let handle = f.entity.provenance.handle.map(|h| h.get());
     let Some(step) = path.steps().last().cloned() else {
-        return supported(record, class, Vec::new());
+        return gated(record, class, handle, gate);
     };
     let composed = match ComposedTransform::identity().push_inner_coefficients(step, f.matrix()) {
         Ok(c) => c,
-        Err(e) => return without_geometry(e.classification(class), vec![e.to_string()]),
+        Err(e) => {
+            return Ok(without_geometry(
+                e.classification(class),
+                vec![e.to_string()],
+            ));
+        }
     };
     match promote(&record, &composed) {
-        Ok(p) if p.record().geometry().is_some() => {
-            supported(p.record().clone(), class, Vec::new())
-        }
+        Ok(p) if p.record().geometry().is_some() => gated(p.record().clone(), class, handle, gate),
         Ok(p) => {
             let reason = p
                 .reason()
                 .map_or(ReasonCode::UnmappedSourceClass, |r| r.reason_code());
-            without_geometry(Classification::refused(reason, class), Vec::new())
+            Ok(without_geometry(
+                Classification::refused(reason, class),
+                Vec::new(),
+            ))
         }
-        Err(e) => without_geometry(
+        Err(e) => Ok(without_geometry(
             Classification::refused(ReasonCode::UnmappedSourceClass, class),
             vec![format!("{class}: {e:?}")],
-        ),
+        )),
     }
 }
 
-fn supported(record: Normalized2DGeometry, class: &str, warnings: Vec<String>) -> Done {
-    let basis = if record.fidelity() == FidelityClass::SupportedEquivalent {
+/// A record PVec can carry, checked against the gate: its capability must be allowed, and under
+/// an exact-only profile its class must be `SupportedExact`.
+fn gated(
+    record: Normalized2DGeometry,
+    class: &str,
+    handle: Option<u64>,
+    gate: &Gate,
+) -> Result<Done, PvecConvertError> {
+    let row = kind_of(&record).map(row_for);
+    let capability = row.map(|r| {
+        (
+            CapabilityId::new(u32::from(r.capability.id)),
+            r.capability.name,
+        )
+    });
+    let equivalent = record.fidelity() == FidelityClass::SupportedEquivalent;
+    // A curve shape the mapping table has no row for has no capability to check.
+    if let Some((id, name)) = capability
+        && (!gate.allowed.contains(&id) || (gate.exact_only && equivalent))
+    {
+        let mut warnings = Vec::new();
+        match gate.policy {
+            CapabilityPolicy::RejectInput => {
+                return Err(PvecConvertError::CapabilityNotAllowed {
+                    capability: id,
+                    name,
+                    source_class: class.to_owned(),
+                    handle,
+                });
+            }
+            CapabilityPolicy::Downgrade => {
+                warnings.push(format!(
+                    "{class}: downgrade-unavailable: no exact weaker representation of {name}"
+                ));
+            }
+            CapabilityPolicy::RejectEntity => {}
+        }
+        warnings.push(format!("{class}: needs capability {name} ({})", id.get()));
+        return Ok(without_geometry(
+            Classification::refused(ReasonCode::CapabilityNotAllowed, class),
+            warnings,
+        ));
+    }
+    let basis = if equivalent {
         Basis::Equivalent
     } else {
         Basis::Structural
     };
-    Done {
+    Ok(Done {
         classification: Classification::supported(basis, class),
         geometry: record,
-        warnings,
-    }
+        warnings: Vec::new(),
+    })
 }

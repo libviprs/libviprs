@@ -38,6 +38,11 @@ bytes, whatever order the rows were pushed in and however many workers produced 
 | `bounds` | How the entity boxes were obtained (N6.4). |
 | `exact` | Boxes in closed form, tight. |
 | `hull_upper_bound` | Boxes that are the control hull: enclosing, not tight. |
+| `capabilities` | The capability profile the conversion ran under (N7.2). Optional and ignorable, so it is not a version bump: absent when none was recorded. |
+| `profile` | `Strict`, `Default`, `Permissive` or `Custom`. |
+| `policy` | `RejectInput`, `RejectEntity` or `Downgrade`. |
+| `exact_only` | True when only `SupportedExact` entities passed. |
+| `allowed` | The allowed PVec capability ids, ascending. |
 | `entities` | One row per entity, in id order. |
 | `id` | The entity's id from the ordering pass (`pvec::EntityId`). |
 | `source_class` | The drawing's class name for the entity. |

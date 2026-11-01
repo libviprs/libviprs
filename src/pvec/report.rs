@@ -177,6 +177,20 @@ pub struct BoundsSplit {
     pub hull_upper_bound: u64,
 }
 
+/// The capability profile a conversion ran under (N7.2). Optional and ignorable: a reader that
+/// does not know it loses nothing it needs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapabilitySummary {
+    /// The named profile, or `Custom` when the caller set the capabilities or the policy.
+    pub profile: String,
+    /// What happens to an entity outside the set: `RejectInput`, `RejectEntity` or `Downgrade`.
+    pub policy: String,
+    /// Whether only `SupportedExact` entities passed.
+    pub exact_only: bool,
+    /// The allowed PVec capability ids, ascending.
+    pub allowed: Vec<u32>,
+}
+
 /// The whole report.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConversionReport {
@@ -190,6 +204,9 @@ pub struct ConversionReport {
     pub xrefs: XrefSummary,
     /// The bounds method split.
     pub bounds: BoundsSplit,
+    /// The capability profile the conversion ran under. Absent when none was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<CapabilitySummary>,
     /// One row per entity, in id order.
     pub entities: Vec<EntityRow>,
 }
@@ -322,6 +339,7 @@ impl ReportBuilder {
             view,
             xrefs,
             bounds,
+            capabilities: None,
             entities: self.rows,
         })
     }

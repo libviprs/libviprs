@@ -763,6 +763,10 @@ required-features = ["pvec-write"]
 name = "pvec_1413_convert"
 required-features = ["pvec-convert"]
 
+[[test]]
+name = "pvec_1414_capability"
+required-features = ["pvec-convert"]
+
 [dev-dependencies]
 loom = { workspace = true }
 pvec-capabilities = { workspace = true }
