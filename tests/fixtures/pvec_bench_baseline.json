@@ -1,0 +1,97 @@
+{
+ "rows": {
+  "provider/block_heavy/x86_64-linux-mars": {
+   "advanced_curve_share": 0.0,
+   "allocated_bytes": 68651353,
+   "bench": "provider",
+   "block_frames": 11220,
+   "cell": "block_heavy",
+   "entities": 22440,
+   "entities_per_s": {
+    "max": 397471.9945111739,
+    "median": 389585.38136203954,
+    "min": 384610.11356357456
+   },
+   "peak_rss_bytes": 74412032,
+   "platform": "x86_64-linux-mars",
+   "rss_is_per_cell": true,
+   "tracked_peak": 15244354,
+   "unstable": false,
+   "wall_secs": {
+    "max": 0.0583447996,
+    "median": 0.0575996972,
+    "min": 0.056456807799999995
+   }
+  },
+  "provider/large_industrial/x86_64-linux-mars": {
+   "advanced_curve_share": 0.0,
+   "allocated_bytes": 2367328094,
+   "bench": "provider",
+   "block_frames": 75000,
+   "cell": "large_industrial",
+   "entities": 1025000,
+   "entities_per_s": {
+    "max": 988682.4974360256,
+    "median": 980902.222265469,
+    "min": 937820.6242880306
+   },
+   "peak_rss_bytes": 3450322944,
+   "platform": "x86_64-linux-mars",
+   "rss_is_per_cell": true,
+   "tracked_peak": 1683836880,
+   "unstable": false,
+   "wall_secs": {
+    "max": 1.092959542,
+    "median": 1.044956344,
+    "min": 1.036733231
+   }
+  },
+  "provider/simple/x86_64-linux-mars": {
+   "advanced_curve_share": 0.0,
+   "allocated_bytes": 9258183,
+   "bench": "provider",
+   "block_frames": 0,
+   "cell": "simple",
+   "entities": 1000,
+   "entities_per_s": {
+    "max": 431266.74805163074,
+    "median": 395376.967820822,
+    "min": 374551.7131002797
+   },
+   "peak_rss_bytes": 58736640,
+   "platform": "x86_64-linux-mars",
+   "rss_is_per_cell": true,
+   "tracked_peak": 7718017,
+   "unstable": false,
+   "wall_secs": {
+    "max": 0.002669858299999999,
+    "median": 0.0025292318000000005,
+    "min": 0.002318750528571429
+   }
+  },
+  "provider/spline_heavy/x86_64-linux-mars": {
+   "advanced_curve_share": 1.0,
+   "allocated_bytes": 101479338,
+   "bench": "provider",
+   "block_frames": 0,
+   "cell": "spline_heavy",
+   "entities": 10000,
+   "entities_per_s": {
+    "max": 406904.2040487863,
+    "median": 389985.82102551445,
+    "min": 357994.4563444674
+   },
+   "peak_rss_bytes": 139296768,
+   "platform": "x86_64-linux-mars",
+   "rss_is_per_cell": true,
+   "tracked_peak": 79148295,
+   "unstable": false,
+   "wall_secs": {
+    "max": 0.027933393444444447,
+    "median": 0.025641957888888886,
+    "min": 0.024575809
+   }
+  }
+ },
+ "schema": 1
+}
