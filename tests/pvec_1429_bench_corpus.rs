@@ -25,12 +25,14 @@ use pvec_bench::{
 use serde_json::{Value, json};
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn the_manifest_is_a_good_corpus() {
     let bad = problems(&manifest(), Regen::Small);
     assert!(bad.is_empty(), "{MANIFEST}:\n{}", bad.join("\n"));
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn six_cells_resolve_by_name_to_a_checksum() {
     let m = manifest();
     let c = cells(&m);
@@ -46,6 +48,7 @@ fn six_cells_resolve_by_name_to_a_checksum() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn a_missing_cell_turns_it_red() {
     let mut m = manifest();
     m["cells"].as_object_mut().unwrap().remove("block_heavy");
@@ -57,6 +60,7 @@ fn a_missing_cell_turns_it_red() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn a_drifted_checksum_turns_it_red() {
     let mut m = manifest();
     m["cells"]["simple"]["sha256"] = json!("0".repeat(64));
@@ -68,6 +72,7 @@ fn a_drifted_checksum_turns_it_red() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn two_corpus_revisions_turn_it_red() {
     let mut m = manifest();
     m["cells"]["spline_heavy"]["corpus_revision"] = json!("r1-open");
@@ -79,6 +84,7 @@ fn two_corpus_revisions_turn_it_red() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn a_revision_other_than_the_vendored_pin_turns_it_red() {
     let mut m = manifest();
     m["corpus_revision"] = json!("r9-open");
@@ -90,6 +96,7 @@ fn a_revision_other_than_the_vendored_pin_turns_it_red() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn a_seventh_cell_without_a_measured_count_turns_it_red() {
     let mut m = manifest();
     let mut extra = m["cells"]["simple"].clone();
@@ -110,6 +117,7 @@ fn a_seventh_cell_without_a_measured_count_turns_it_red() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn a_cell_with_no_measured_count_turns_it_red() {
     let mut m = manifest();
     m["cells"]["paper_space"]["entities"] = Value::Null;
@@ -121,6 +129,7 @@ fn a_cell_with_no_measured_count_turns_it_red() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn a_malformed_cell_that_skips_an_n3_6_limit_turns_it_red() {
     let mut m = manifest();
     let inputs = m["cells"]["malformed"]["inputs"].as_array_mut().unwrap();
@@ -133,6 +142,7 @@ fn a_malformed_cell_that_skips_an_n3_6_limit_turns_it_red() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn a_malformed_input_the_limit_does_not_refuse_turns_it_red() {
     let mut m = manifest();
     m["cells"]["malformed"]["inputs"][0]["limits"] = json!({});
@@ -146,6 +156,7 @@ fn a_malformed_input_the_limit_does_not_refuse_turns_it_red() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn the_generators_are_deterministic() {
     let m = manifest();
     let c = cells(&m);
@@ -166,6 +177,7 @@ fn the_generators_are_deterministic() {
 /// Prints the manifest rows for the current generators. Not a test of anything: it is the recorded
 /// command that produces every `bytes`, `sha256` and `entities` figure in the manifest.
 #[test]
+#[cfg_attr(miri, ignore)]
 #[ignore = "regenerates the manifest numbers, minutes in a debug build"]
 fn measure_cells() {
     let m = manifest();
@@ -190,6 +202,7 @@ fn measure_cells() {
 
 /// The full pass, large cell included.
 #[test]
+#[cfg_attr(miri, ignore)]
 #[ignore = "regenerates the 10^6 entity cell"]
 fn the_manifest_is_a_good_corpus_including_the_large_cell() {
     let bad = problems(&manifest(), Regen::All);
