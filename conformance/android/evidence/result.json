@@ -49,5 +49,6 @@
       "width": 1080,
       "height": 1918
     }
-  }
+  },
+  "host": "UGREEN NAS, native x86_64, /dev/kvm (the emulator did not boot on MARS, and a retry there failed for lack of disk for the userdata partition)"
 }

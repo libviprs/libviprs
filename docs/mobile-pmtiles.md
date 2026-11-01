@@ -35,4 +35,15 @@ On Android the instrumented test in `conformance/android/` loads the golden arch
 in both modes in an emulator, and checks rendered pixels (black linework on white and nothing coloured),
 queried features, and the store's request log (ranged `206` reads only in remote mode, one whole-file
 download and no further requests in local mode). `conformance/android/evidence/` has the screenshots and
-the numbers. The iOS run is tracked in #1037.
+the numbers. The recorded run was on the UGREEN NAS (native x86_64 with KVM). The emulator did not boot on MARS, so there is no MARS run. The iOS run is tracked in #1037.
+
+## iOS (not run yet)
+
+I have not run the iOS half, so nothing here claims conformance on iOS. Xcode 26.6 is on mercury but its license is not accepted and the active developer directory is the command line tools, and both need `sudo`:
+
+```sh
+sudo xcodebuild -license accept
+sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+```
+
+After that the plan is the Android one again: an XCTest target using MapLibre Native iOS from Swift Package Manager, the same shared style and golden archive, the same `web/vector-viewer/e2e/server.mjs` store, remote Range mode and then download-then-`pmtiles://file://`, asserting rendered pixels and queried features in an iOS simulator. I will only add that harness once I can build it.
