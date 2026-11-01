@@ -310,6 +310,18 @@ from here for exactly one commit.
 
 `PixelFormat` has 14 carriers, and the signed and 32-bit ones are this release's headline break rather than a footnote: `Gray8`, `Gray16`, `Rgb8`, `Rgba8`, `Rgb16`, `Rgba16`, `RgbaF32`, `Multi8`, `Multi16`, `FloatF32`, `Uint32`, `Int8`, `Int16` and `Int32`.
 
+### The PVec integration documentation
+
+How a DWG or a vector PDF page becomes a PVec artifact: [architecture](docs/pvec-architecture.md),
+[the source-provider API](docs/pvec-provider-api.md), [the ISO mapping](docs/pvec-iso-mapping.md),
+[view and visibility semantics](docs/pvec-view-semantics.md), [the transform promotion matrix](docs/pvec-transform-matrix.md),
+[which DWG entities are carried](docs/pvec-dwg-support.md), [the PDF loss model](docs/pvec-pdf-loss.md),
+[components and style](docs/pvec-components.md), [the georeference handoff](docs/pvec-georeference.md),
+[the conversion API](docs/pvec-conversion-api.md), [resource and security limits](docs/pvec-limits.md),
+[replacing the provider](docs/pvec-provider-replacement.md) and [the benchmarks](docs/pvec-benchmarks.md). Version handling is
+[the compatibility matrix](docs/pvec-version-compatibility.md), and
+[the corpus regression report](docs/pvec-corpus-regression.md) is the per-fixture view.
+
 ## Features
 
 | Feature | Default | Description |
