@@ -699,9 +699,12 @@ jp2k = ["dep:hayro-jpeg2000", "dep:openjpeg2-pure"]
 # With the feature off the filter is refused as `filter-not-enabled:JBIG2Decode`.
 #
 # Not in `default`, and it stays out until 24 hours of `fuzz_pvec_pdf_image --features jbig2`
-# are on record: the crate is young and says it is under development. Lock and binary deltas:
-# TODO measured on MARS.
-jbig2 = ["dep:hayro-jbig2"]
+# are on record: the crate is young and says it is under development.
+#
+# It implies `pvec-raster` because the only reader of a PDF image stream is the raster bake that
+# feature belongs to, and so that the one cell `cargo test --features jbig2` runs the decoding tests.
+# Lock and binary deltas: TODO measured below.
+jbig2 = ["pvec-raster", "dep:hayro-jbig2"]
 
 [dependencies]
 acadrust = { workspace = true, optional = true }

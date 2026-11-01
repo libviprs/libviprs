@@ -80,7 +80,7 @@
 //!
 //! One `cargo metadata --all-features` plus one `cargo tree` per cell below.
 //! Measured warm: the metadata call 0.09 s, a single tree 0.05 to 0.09 s, the
-//! whole file 1.3 s over twenty-one cells, and 1.8 s with other cargo work
+//! whole file 1.3 s over twenty-one cells (twenty-two with `jbig2`), and 1.8 s with other cargo work
 //! running alongside it. The number worth knowing is not that one, though: the
 //! real cost is a *cold* multi-target resolve, where cargo has to fetch every
 //! manifest in four target graphs before it can answer at all.
@@ -251,6 +251,18 @@ const CELLS: &[Cell] = &[
         label: "host / pvec-raster",
         target: HOST,
         features: &["--features", "pvec-raster"],
+        edges: "normal,build",
+        links: &[RAYON],
+        discovery: &[],
+        runtime_loaders: &[],
+        vendored_native: BLAKE3,
+    },
+    // The JBIG2 filter of PDF image streams (issue #1365): `hayro-jbig2` and `hayro-ccitt`, pure
+    // Rust. `jbig2` implies `pvec-raster`, so this cell carries that one too.
+    Cell {
+        label: "host / jbig2",
+        target: HOST,
+        features: &["--features", "jbig2"],
         edges: "normal,build",
         links: &[RAYON],
         discovery: &[],
@@ -751,6 +763,34 @@ fn ships_native_source(manifest: &Manifest) -> bool {
     false
 }
 
+/// `jbig2` (issue #1365) adds the decoder and the CCITT crate it reads MMR regions with, and
+/// nothing that can run `unsafe`: `fearless_simd` is the `simd` feature of `hayro-jbig2`, which
+/// `default-features = false` leaves off. No other cell may carry any of the three.
+#[test]
+#[cfg_attr(miri, ignore)] // reads the resolved graph through a process, as the tests around it do
+fn jbig2_adds_the_decoder_and_its_ccitt_crate_and_never_the_simd_one() {
+    let mut seen = false;
+    for (cell, graph) in cells() {
+        let asked = cell.features.contains(&"jbig2") || cell.features.contains(&"--all-features");
+        assert_eq!(
+            contains(graph, "hayro-jbig2"),
+            asked,
+            "{}: hayro-jbig2 only where jbig2 is asked for",
+            cell.label
+        );
+        assert!(
+            !contains(graph, "fearless_simd"),
+            "{}: fearless_simd is the unsafe simd path of hayro-jbig2",
+            cell.label
+        );
+        if asked {
+            seen = true;
+            assert!(contains(graph, "hayro-ccitt"), "{}", cell.label);
+        }
+    }
+    assert!(seen, "a cell asks for jbig2");
+}
+
 /// Clause 2, the first mechanical proxy: the `links` keys in every resolved
 /// graph are exactly the ones `CONTRIBUTING.md` names, and a new one cannot
 /// appear unnoticed.
@@ -911,11 +951,10 @@ fn the_external_library_features_stay_opt_in() {
 
         // `pvec-raster` brings the PVec facade, and the facade depends on `pvec-geometry` and
         // `pvec-numeric` itself, so it reaches both.
-        let asked_for_pvec = cell
-            .features
-            .iter()
-            .any(|f| f.contains("pvec-normalized") || f.contains("pvec-raster"))
-            || cell.features.contains(&"--all-features");
+        let asked_for_pvec =
+            cell.features.iter().any(|f| {
+                f.contains("pvec-normalized") || f.contains("pvec-raster") || *f == "jbig2"
+            }) || cell.features.contains(&"--all-features");
         assert_eq!(
             contains(graph, "pvec-geometry"),
             asked_for_pvec,

@@ -18,6 +18,10 @@ libviprs = { workspace = true, features = ["pvec-raster"] }
 lopdf = { workspace = true }
 flate2 = { workspace = true }
 
+[features]
+# `cargo fuzz run fuzz_pvec_pdf_image --features jbig2` fuzzes the JBIG2 decoder too (issue #1365).
+jbig2 = ["libviprs/jbig2"]
+
 [[bin]]
 name = "fuzz_decode"
 path = "fuzz_targets/fuzz_decode.rs"

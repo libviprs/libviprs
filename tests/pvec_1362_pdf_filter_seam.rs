@@ -128,6 +128,11 @@ fn the_three_codec_names_report_filter_not_enabled_and_the_error_names_the_featu
         ("JBIG2Decode", "jbig2"),
         ("JPXDecode", "jp2k"),
     ] {
+        // A codec that is compiled in decodes (or refuses on its merits); tests/pvec_1365_pdf_jbig2.rs
+        // covers JBIG2 with the feature on.
+        if cfg!(feature = "jbig2") && filter == "JBIG2Decode" {
+            continue;
+        }
         let e = refused(&filtered(name(filter), vec![0u8; 4]));
         let reason = format!("filter-not-enabled:{filter}");
         assert_eq!(e.reason(), reason);

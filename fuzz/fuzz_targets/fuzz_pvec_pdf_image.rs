@@ -35,8 +35,49 @@ struct Case {
     decode_flip: bool,
     image_mask: bool,
     smask: bool,
+    /// For `JBIG2Decode`: which embedded stream to start from (0 is the raw payload), and the
+    /// bytes of a `/JBIG2Globals` stream (empty for none).
+    jbig2_seed: u8,
+    globals: Vec<u8>,
     payload: Vec<u8>,
 }
+
+/// Valid JBIG2 streams to mutate, with the size of the page each one holds: the whole files of
+/// `tests/fixtures/jbig2/` with the 13 byte file header dropped, which leaves the embedded
+/// organisation a PDF stores. With the payload as a list of `(offset, byte)` patches the fuzzer
+/// edits real symbol dictionaries, halftone grids and MMR runs and not only the segment header.
+const JBIG2_SEEDS: [(&[u8], i64, i64); 6] = [
+    (
+        include_bytes!("../../tests/fixtures/jbig2/generic_template0.jbig2"),
+        163,
+        109,
+    ),
+    (
+        include_bytes!("../../tests/fixtures/jbig2/generic_mmr.jbig2"),
+        163,
+        109,
+    ),
+    (
+        include_bytes!("../../tests/fixtures/jbig2/symbol.jbig2"),
+        163,
+        109,
+    ),
+    (
+        include_bytes!("../../tests/fixtures/jbig2/huffman_standard_tables.jbig2"),
+        163,
+        109,
+    ),
+    (
+        include_bytes!("../../tests/fixtures/jbig2/refine_template0.jbig2"),
+        163,
+        109,
+    ),
+    (
+        include_bytes!("../../tests/fixtures/jbig2/halftone.jbig2"),
+        155,
+        101,
+    ),
+];
 
 const FILTERS: [&str; 7] = [
     "",
@@ -54,9 +95,24 @@ fn name(n: &str) -> Object {
 
 fn build(case: &Case) -> Vec<u8> {
     use std::io::Write;
-    let width = i64::from(case.width % 2048) + 1;
-    let height = i64::from(case.height % 2048) + 1;
+    let mut width = i64::from(case.width % 2048) + 1;
+    let mut height = i64::from(case.height % 2048) + 1;
     let mut payload = case.payload.clone();
+    let codec = FILTERS[usize::from(case.filter) % FILTERS.len()];
+    let seed = usize::from(case.jbig2_seed) % (JBIG2_SEEDS.len() + 1);
+    if codec == "JBIG2Decode" && seed > 0 {
+        let (file, w, h) = JBIG2_SEEDS[seed - 1];
+        payload = file[13..].to_vec();
+        for patch in case.payload.chunks_exact(3) {
+            let at = usize::from(u16::from_be_bytes([patch[0], patch[1]])) % payload.len();
+            payload[at] = patch[2];
+        }
+        // Most of the time the dictionary tells the truth about the page.
+        if case.width % 4 != 0 {
+            (width, height) = (w, h);
+        }
+    }
+    let mut doc = Document::with_version("1.7");
     if case.deflate {
         let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
         let _ = z.write_all(&payload);
@@ -66,7 +122,6 @@ fn build(case: &Case) -> Vec<u8> {
     if case.flate || case.deflate {
         chain.push(name("FlateDecode"));
     }
-    let codec = FILTERS[usize::from(case.filter) % FILTERS.len()];
     if !codec.is_empty() {
         chain.push(name(codec));
     }
@@ -100,6 +155,10 @@ fn build(case: &Case) -> Vec<u8> {
     parms.set("Predictor", i64::from(case.predictor % 17));
     parms.set("Colors", 1);
     parms.set("BitsPerComponent", 8);
+    if codec == "JBIG2Decode" && !case.globals.is_empty() {
+        let g = doc.add_object(Stream::new(Dictionary::new(), case.globals.clone()));
+        parms.set("JBIG2Globals", g);
+    }
     match case.parms % 4 {
         0 => {}
         1 => d.set("DecodeParms", Object::Dictionary(parms)),
@@ -123,7 +182,6 @@ fn build(case: &Case) -> Vec<u8> {
     if case.image_mask {
         d.set("ImageMask", true);
     }
-    let mut doc = Document::with_version("1.7");
     if case.smask {
         let mask = doc.add_object(Stream::new(
             dictionary! {

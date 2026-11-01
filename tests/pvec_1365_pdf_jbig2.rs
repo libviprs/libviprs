@@ -211,12 +211,15 @@ fn check(stream: &str, picture: &str, with_globals: bool) {
     let p = only(&b);
     assert_eq!(p.bit_depth, 1, "{stream}: 1-bit tiles");
     assert!(b.written[0].notes.contains(&PdfImageNote::Bilevel));
+    assert_eq!(b.report.written_by_filter.get("JBIG2Decode"), Some(&1));
     assert_eq!(luma(&through_pvec(&b), p), want, "{stream}");
 }
 
 #[cfg(feature = "jbig2")]
 mod enabled {
     use super::*;
+    use libviprs::pvec::pdf_image::{FilterError, PdfImageError};
+    use libviprs::pvec::pdf_vector::{PdfVectorLimits, extract_page_paths_from_bytes};
 
     #[test]
     fn a_generic_region_with_arithmetic_coding_decodes_to_the_reference() {
@@ -282,6 +285,90 @@ mod enabled {
         let flipped: Vec<u8> = want.iter().map(|v| 255 - v).collect();
         assert_eq!(luma(&through_pvec(&b), only(&b)), flipped);
         assert!(want.contains(&0) && want.contains(&255));
+    }
+
+    #[test]
+    fn a_flate_compressed_globals_stream_is_inflated_first() {
+        use std::io::Write;
+        let (w, h, want) = reference("honeycomb.png");
+        let (page, globals) = embedded("symbol_global.jbig2");
+        let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+        z.write_all(&globals.unwrap()).unwrap();
+        let mut d = doc();
+        let g = d.add_object(Stream::new(
+            dictionary! { "Filter" => "FlateDecode" },
+            z.finish().unwrap(),
+        ));
+        let parms = dictionary! { "JBIG2Globals" => Object::Reference(g) };
+        let s = jbig2(
+            w.into(),
+            h.into(),
+            page,
+            dictionary! { "DecodeParms" => parms },
+        );
+        let bytes = pdf(
+            d,
+            Resources::images(vec![("Im1", Object::Stream(s))]),
+            format!("q {w} 0 0 {h} 0 0 cm /Im1 Do Q").as_bytes(),
+        );
+        let b = bake(&bytes);
+        assert_eq!(luma(&through_pvec(&b), only(&b)), want);
+    }
+
+    #[test]
+    fn a_globals_stream_counts_against_the_per_stream_cap() {
+        let (w, h, _) = reference("honeycomb.png");
+        let (page, globals) = embedded("symbol_global.jbig2");
+        let total = page.len() + globals.as_ref().unwrap().len();
+        let bytes = pdf_with(w.into(), h.into(), page, globals, Dictionary::new());
+        let limits = |cap: usize| PdfVectorLimits {
+            max_image_stream_bytes: cap as u64,
+            ..PdfVectorLimits::default()
+        };
+        let over = extract_page_paths_from_bytes(&bytes, 1, &limits(total - 1)).unwrap();
+        let b = bake_page_images(&over, &PdfImageOptions::default());
+        assert!(matches!(
+            b.refused[0].error,
+            PdfImageError::StreamTooLarge { .. }
+        ));
+        let fits = extract_page_paths_from_bytes(&bytes, 1, &limits(total)).unwrap();
+        let b = bake_page_images(&fits, &PdfImageOptions::default());
+        only(&b);
+    }
+
+    #[test]
+    fn the_refusals_are_typed() {
+        let (w, h, _) = reference("truchet.png");
+        let (mut page, globals) = embedded("generic_template0.jbig2");
+        let wrong = bake(&pdf_with(
+            i64::from(w) + 1,
+            h.into(),
+            page.clone(),
+            globals.clone(),
+            Dictionary::new(),
+        ));
+        assert!(matches!(
+            &wrong.refused[0].error,
+            PdfImageError::Filter {
+                source: FilterError::Parms(_),
+                ..
+            }
+        ));
+        page.truncate(page.len() - 120);
+        let cut = bake(&pdf_with(
+            w.into(),
+            h.into(),
+            page,
+            globals,
+            Dictionary::new(),
+        ));
+        assert!(matches!(
+            &cut.refused[0].error,
+            PdfImageError::Filter {
+                source: FilterError::Jbig2(_),
+                ..
+            }
+        ));
     }
 
     #[test]

@@ -336,6 +336,18 @@ const EXPECTED: &[(&str, Coverage)] = &[
              `openjpeg2-pure-rs` 0.1.1, which declares no rust-version",
         ),
     ),
+    (
+        "jbig2",
+        cov(
+            true,
+            true,
+            true,
+            "gates src/pvec/pdf_filters/jbig2.rs, the JBIG2Decode filter of PDF image \
+             streams (issue #1365), and the decoding half of \
+             tests/pvec_1365_pdf_jbig2.rs, 17 tests; adds `hayro-jbig2` and \
+             `hayro-ccitt`, both `forbid(unsafe_code)`",
+        ),
+    ),
 ];
 
 /// The feature names declared in `Cargo.toml`'s `[features]` table, in
