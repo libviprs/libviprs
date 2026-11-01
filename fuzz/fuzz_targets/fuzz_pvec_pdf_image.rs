@@ -31,6 +31,12 @@ struct Case {
     parms: u8,
     k: i8,
     columns: u16,
+    /// Send `/Columns` equal to `/Width`, so a fax stream reaches the codec instead of the
+    /// `/Columns` check (#1363). Without this nearly every case would stop at the check.
+    columns_match: bool,
+    /// The other fax parameters: `/Rows`, `/EndOfBlock`, `/EndOfLine`, `/EncodedByteAlign`,
+    /// `/BlackIs1`, each present as true, present as false, or absent (#1363).
+    fax_flags: [u8; 5],
     predictor: u8,
     decode_flip: bool,
     image_mask: bool,
@@ -122,7 +128,29 @@ fn build(case: &Case) -> Vec<u8> {
     }
     let mut parms = Dictionary::new();
     parms.set("K", i64::from(case.k));
-    parms.set("Columns", i64::from(case.columns));
+    parms.set(
+        "Columns",
+        if case.columns_match {
+            width
+        } else {
+            i64::from(case.columns)
+        },
+    );
+    for (key, flag) in ["EndOfBlock", "EndOfLine", "EncodedByteAlign", "BlackIs1"]
+        .into_iter()
+        .zip(&case.fax_flags[1..])
+    {
+        match flag % 3 {
+            0 => {}
+            1 => parms.set(key, true),
+            _ => parms.set(key, false),
+        }
+    }
+    match case.fax_flags[0] % 3 {
+        0 => {}
+        1 => parms.set("Rows", height),
+        _ => parms.set("Rows", height + 1),
+    }
     parms.set("Predictor", i64::from(case.predictor % 17));
     parms.set("Colors", 1);
     parms.set("BitsPerComponent", 8);

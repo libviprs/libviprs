@@ -175,6 +175,23 @@ pub struct PdfProvenance {
     pub sequence: u64,
 }
 
+/// A Form XObject's `/BBox` as the clip it is (issue #1380).
+///
+/// The box is mapped through the form's `/Matrix` and the invoker's CTM, so `corners` are the page
+/// space images of the lower left, lower right, upper right and upper left corners. Every entity
+/// whose `sequence` is in `first_sequence..end_sequence` was painted inside the form.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PdfFormClip {
+    /// The form names invoked on the way, outermost first, ending with this form.
+    pub form_path: Vec<String>,
+    /// The box corners in page space.
+    pub corners: [PdfPoint; 4],
+    /// `sequence` of the first entity painted inside the form.
+    pub first_sequence: u64,
+    /// One past the `sequence` of the last entity painted inside the form.
+    pub end_sequence: u64,
+}
+
 /// One painted or clipped path.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PdfPathEntity {
@@ -191,6 +208,9 @@ pub struct PdfPathEntity {
     /// Whether a soft mask (`/SMask` set through `gs`) was in the graphics state. The mask is
     /// recorded, not evaluated (N5.3).
     pub soft_masked: bool,
+    /// Whether a glyph-outline clip (text render mode 4 to 7, applied at `ET`) was in the
+    /// graphics state. The outline is not computed (issue #1380).
+    pub text_clipped: bool,
     /// `w` and `d` as they stood when the path was painted (N5.4). Recorded, not interpreted.
     pub stroke_params: PdfStrokeParams,
     /// Where it came from.
@@ -210,6 +230,8 @@ pub struct PdfVectorPage {
     pub rotation_degrees: i64,
     /// The entities in content-stream order, forms expanded in place.
     pub entities: Vec<PdfPathEntity>,
+    /// The `/BBox` of every Form XObject invoked, in invocation order (issue #1380).
+    pub form_clips: Vec<PdfFormClip>,
     /// `Q` operators that had no matching `q`, which are ignored.
     pub unbalanced_restores: u32,
     /// How many colour operators (`g G rg RG k K cs CS sc SC scn SCN`) ran, by operator, in
@@ -628,6 +650,10 @@ pub fn extract_page_paths_from_bytes(
         stack: Vec::new(),
         clips: Vec::new(),
         soft_mask: false,
+        text_clip: false,
+        render_mode: 0,
+        text_clip_pending: false,
+        form_clips: Vec::new(),
         stroke: PdfStrokeParams::default(),
         colour_operators: std::collections::BTreeMap::new(),
         text: TextReport::default(),
@@ -644,6 +670,7 @@ pub fn extract_page_paths_from_bytes(
         height,
         rotation_degrees: rotation.as_degrees(),
         entities: run.out,
+        form_clips: run.form_clips,
         unbalanced_restores: run.unbalanced,
         colour_operators: run.colour_operators,
         text: run.text,
@@ -1163,6 +1190,14 @@ struct Run<'a> {
     clips: Vec<u64>,
     /// A non-`None` `/SMask` is in force.
     soft_mask: bool,
+    /// A glyph-outline clip is in force (issue #1380).
+    text_clip: bool,
+    /// The text render mode (`Tr`) in force.
+    render_mode: i64,
+    /// Text was shown in a clipping render mode since `BT`; the clip applies at `ET`.
+    text_clip_pending: bool,
+    /// The `/BBox` of every form invoked so far.
+    form_clips: Vec<PdfFormClip>,
     /// `w` and `d` in force.
     stroke: PdfStrokeParams,
     colour_operators: std::collections::BTreeMap<String, u64>,
@@ -1182,6 +1217,8 @@ struct Saved {
     ctm: Matrix,
     clips: usize,
     soft_mask: bool,
+    text_clip: bool,
+    render_mode: i64,
     stroke: PdfStrokeParams,
     font: TextFontOutcome,
 }
@@ -1249,6 +1286,8 @@ impl Run<'_> {
                         ctm,
                         clips: self.clips.len(),
                         soft_mask: self.soft_mask,
+                        text_clip: self.text_clip,
+                        render_mode: self.render_mode,
                         stroke: self.stroke.clone(),
                         font: self.font,
                         fill: self.fill,
@@ -1260,6 +1299,8 @@ impl Run<'_> {
                             ctm = saved.ctm;
                             self.clips.truncate(saved.clips);
                             self.soft_mask = saved.soft_mask;
+                            self.text_clip = saved.text_clip;
+                            self.render_mode = saved.render_mode;
                             self.stroke = saved.stroke;
                             self.font = saved.font;
                             self.fill = saved.fill;
@@ -1348,7 +1389,19 @@ impl Run<'_> {
                 "Do" => self.do_xobject(op, resources, &ctm, depth)?,
                 "Tf" => self.font = font_outcome(self.doc, resources, op.operands.first()),
                 // Text is omitted and counted (N5.5, docs/pvec-text-policy.md).
-                "Tj" | "TJ" | "'" | "\"" => self.text.record_pdf(&op.operator, self.font),
+                "Tr" => self.render_mode = self.operands(op, 1)?[0] as i64,
+                "ET" => {
+                    // A clipping render mode takes effect when the text object ends.
+                    if std::mem::take(&mut self.text_clip_pending) {
+                        self.text_clip = true;
+                    }
+                }
+                "Tj" | "TJ" | "'" | "\"" => {
+                    self.text.record_pdf(&op.operator, self.font);
+                    if (4..=7).contains(&self.render_mode) {
+                        self.text_clip_pending = true;
+                    }
+                }
                 "sh" => self.shadings = self.shadings.saturating_add(1),
                 "BI" => {
                     let inline = op.operands.first().and_then(|o| o.as_stream().ok());
@@ -1412,7 +1465,10 @@ impl Run<'_> {
         if close_first {
             close(&mut state);
         }
-        if state.segments.is_empty() {
+        // An empty path under `W` is an empty clip region, which excludes everything after it
+        // (PDF 32000-1 8.5.4). It is kept so the policy can say so. Painting an empty path with
+        // no clip draws nothing.
+        if state.segments.is_empty() && state.clip.is_none() {
             return Ok(());
         }
         if self.out.len() >= self.limits.max_entities {
@@ -1431,6 +1487,7 @@ impl Run<'_> {
             clip: state.clip,
             active_clips: self.clips.clone(),
             soft_masked: self.soft_mask,
+            text_clipped: self.text_clip,
             stroke_params: self.stroke.clone(),
             provenance: PdfProvenance {
                 page: self.page,
@@ -1679,14 +1736,54 @@ impl Run<'_> {
             .push(String::from_utf8_lossy(name).into_owned());
         // A form runs as if inside `q`/`Q`: what it clips or masks ends with it.
         let (clips, soft_mask) = (self.clips.len(), self.soft_mask);
+        let (text_clip, render_mode) = (self.text_clip, self.render_mode);
         let stroke = self.stroke.clone();
-        let r = self.stream(&ops, own.or(resources), matrix.then(ctm), observed);
+        // The `/BBox` clips everything the form paints (PDF 32000-1 8.10.2).
+        let inner = matrix.then(ctm);
+        let record = form_bbox(doc, xobj).map(|b| {
+            let corners =
+                [[b[0], b[1]], [b[2], b[1]], [b[2], b[3]], [b[0], b[3]]].map(|p| inner.apply(p));
+            self.form_clips.push(PdfFormClip {
+                form_path: self.form_path.clone(),
+                corners,
+                first_sequence: self.out.len() as u64,
+                end_sequence: self.out.len() as u64,
+            });
+            self.form_clips.len() - 1
+        });
+        let r = self.stream(&ops, own.or(resources), inner, observed);
+        if let Some(i) = record {
+            self.form_clips[i].end_sequence = self.out.len() as u64;
+        }
         self.clips.truncate(clips);
         self.soft_mask = soft_mask;
+        self.text_clip = text_clip;
+        self.render_mode = render_mode;
         self.stroke = stroke;
         self.form_path.pop();
         r
     }
+}
+
+/// A form's `/BBox` as `[x0, y0, x1, y1]` with the corners ordered, `None` when it is absent or
+/// not four finite numbers.
+fn form_bbox(doc: &Document, form: &lopdf::Stream) -> Option<[f64; 4]> {
+    let Some(Object::Array(a)) = form.dict.get(b"BBox").ok().and_then(|b| deref(doc, b)) else {
+        return None;
+    };
+    let mut v = [0.0; 4];
+    if a.len() != 4 {
+        return None;
+    }
+    for (slot, o) in v.iter_mut().zip(a) {
+        *slot = deref(doc, o).and_then(number).filter(|n| n.is_finite())?;
+    }
+    Some([
+        v[0].min(v[2]),
+        v[1].min(v[3]),
+        v[0].max(v[2]),
+        v[1].max(v[3]),
+    ])
 }
 
 fn finite(seg: &PdfPathSegment) -> bool {
