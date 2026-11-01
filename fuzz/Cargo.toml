@@ -14,7 +14,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = { workspace = true }
 arbitrary = { workspace = true }
-libviprs = { workspace = true, features = ["pvec-raster"] }
+libviprs = { workspace = true, features = ["pvec-raster", "pvec-normalized", "pvec-spline"] }
 lopdf = { workspace = true }
 flate2 = { workspace = true }
 
@@ -76,4 +76,19 @@ doc = false
 [[bin]]
 name = "fuzz_pvec_pdf_image"
 path = "fuzz_targets/fuzz_pvec_pdf_image.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_pvec_provider"
+path = "fuzz_targets/fuzz_pvec_provider.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_pvec_spline"
+path = "fuzz_targets/fuzz_pvec_spline.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_pvec_clip"
+path = "fuzz_targets/fuzz_pvec_clip.rs"
 doc = false
