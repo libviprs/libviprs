@@ -285,6 +285,17 @@ const EXPECTED: &[(&str, Coverage)] = &[
         ),
     ),
     (
+        "pvec-convert",
+        cov(
+            true,
+            true,
+            true,
+            "gates src/pvec_convert.rs, the conversion API (issue #1048), and \
+             tests/pvec_1413_convert.rs; adds nothing beyond `pvec-write` and \
+             `dwg-acadrust` (git dependencies, pure Rust)",
+        ),
+    ),
+    (
         "pvec-write",
         cov(
             true,

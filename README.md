@@ -234,6 +234,7 @@ from here for exactly one commit.
 | `storage` | `PyramidStorage`: which storage a pyramid lands in, the output path that choice resolves to, and the layouts each one holds |
 | `pmtiles` | PMTiles v3 archive format: 127-byte header, Hilbert TileIDs, directories, metadata, ranged reads, and a streaming bounded-memory `Writer` |
 | `pvec` | The replaceable DWG provider traits for the analytic path (`DwgProvider`, `EntityCursor`, `RawEntity`, `ProviderCaps`, `InstancePath`); the acadrust provider is behind `dwg-acadrust` |
+| `pvec_convert` | The conversion API (feature `pvec-convert`): `PvecConversion`, one call from a DWG, a view profile and resource limits to a published `.pvec` and its conversion report |
 | `raster_pvec` | A raster on its way into a PVec: `placement::pixel_to_source`, which composes the raster's pixel to source map from a stored `GeoTransform` and a calibration, and `pyramid::produce_raster_pyramid`, which cuts the tiles and placement fields a PVec raster stream stores (`docs/pvec-raster-producer.md`) |
 | `sink_pmtiles` | `PmTilesSink` writing a whole pyramid into one PMTiles v3 archive |
 | `sink_pvec` | `PvecSink` (feature `pvec-raster`) streaming a raster pyramid into a PVec writer in any emission order (`docs/pvec-raster.md`) |
@@ -323,6 +324,7 @@ from here for exactly one commit.
 | `pvec-normalized` | off | Adds `pvec::normalized::Normalized2DGeometry`, the thin adapter over PVec's public curve model (`pvec-geometry`, `pvec-numeric`), `pvec::provenance`, the bounded side store of source provenance records behind its optional handle, `pvec::flatten`, the bounded INSERT flattening with its transform lineage, and `pvec::dwg_basic`, exact extraction of `LINE`, `LWPOLYLINE`, `POLYLINE`, `CIRCLE`, `ARC` and `ELLIPSE` (bulges included) into PVec curves, and `pvec::pdf_bezier`, which maps PDF path segments into PVec's Bezier and polyline types with every control point carried verbatim. `pvec::dump`, the text inspection dump of normalized geometry (`docs/normalized-dump.md`, not an interchange format). `pvec::mapping`, the one table from each normalized geometry kind to its PVec capability (`docs/pvec-mapping.md`, rendered from the table). Pure Rust; both PVec crates are git dependencies pinned by revision. |
 | `pvec-spline` | off | Adds `pvec::dwg_spline`, exact B-spline extraction from a provider's `RawGeometry::Spline`, validated against PVec's numeric policy (`pvec-numeric`). Needs no reader, so any provider's output goes through it. Pure Rust; `pvec-numeric` is a git dependency pinned by revision. |
 | `pvec-raster` | off | Adds `raster_pvec::container`, which hands a raster pyramid's tiles (untouched) and placement to PVec's writer and reads them back through its reader (`docs/pvec-raster-producer.md`). Pure Rust; the PVec facade is a git dependency pinned by revision. |
+| `pvec-convert` | off | Adds `pvec_convert`, the conversion API: a DWG, a view profile and limits in, a published `.pvec` and its conversion report out (issue #1048). Joins `pvec-write` and `dwg-acadrust`, so acadrust is the default provider. Pure Rust. |
 | `pvec-write` | off | Adds `pvec::writer`, the one funnel that writes normalized geometry into a PVec artifact through the facade's writer, and `pvec::publish`, the atomic publish of the artifact and its report (issue #1314). Pure Rust; the PVec facade is a git dependency pinned by revision. |
 | `svg` | off | Enables the SVG rasteriser behind `decode_svg`. Costs 29 crates (`resvg` and its tree), which is why it is opt-in; without it `decode_svg` returns a typed `Unsupported`. |
 | `jxl` | off | Enables the JPEG XL loader and lossless encoder: `decode_jxl`, `Raster::encode_jxl`, `Raster::save_jxl`, the `.jxl` row in `Raster::save` and in `encode_to_buffer`. Costs 21 crates (`jxl-oxide`, `zune-jpegxl` and their trees, including `tracing`), which is why it is opt-in; without it every entry point still exists and returns a typed refusal. |
@@ -403,7 +405,7 @@ with the checklist in CONTRIBUTING.md.
 GitHub Actions runs two workflows, eight jobs between them:
 
 **CI**, on every branch push and on pull requests that no push accompanies (`.github/workflows/ci.yml`):
-- `Check & Lint`: `cargo fmt --check`, then `cargo clippy -D warnings` once per feature. That is the default build plus `pdfium`, `object-store-sink`, `tracing`, `avif`, `svg`, `jxl`, `packfile`, `serde`, `jp2k`, `dwg-acadsharp`, `dwg-acadrust`, `pvec-normalized`, `pvec-spline`, `pvec-raster` and `pvec-write`, because code behind any other `cfg` used to be linted by nothing, and a `cargo build --features s3` for the deprecated alias
+- `Check & Lint`: `cargo fmt --check`, then `cargo clippy -D warnings` once per feature. That is the default build plus `pdfium`, `object-store-sink`, `tracing`, `avif`, `svg`, `jxl`, `packfile`, `serde`, `jp2k`, `dwg-acadsharp`, `dwg-acadrust`, `pvec-normalized`, `pvec-spline`, `pvec-raster`, `pvec-write` and `pvec-convert`, because code behind any other `cfg` used to be linted by nothing, and a `cargo build --features s3` for the deprecated alias
 - `MSRV`: `cargo check` on the pinned toolchain, once per feature family that declares no `rust-version` of its own, plus a guard that the three written-out MSRV claims still agree. The version stays out of the job name on purpose: branch protection matches a required check by its exact name, so a bump that renamed the job would leave every open PR waiting on a context no run produces (#1011)
 - `Docs (deny broken, private and redundant intra-doc links)`: `cargo doc --no-deps --all-features`, with each of those three denied
 - `Test`: `cargo test`, once per feature that gates code, because a feature nobody names compiles its bodies out and runs zero assertions
@@ -452,7 +454,7 @@ filesystem.
 
 ```sh
 make fmt      # check formatting
-make clippy   # clippy over the default build and each of the fifteen features CI lints
+make clippy   # clippy over the default build and each of the sixteen features CI lints
 make test     # bare `cargo test`, which is the Test job's first cell of nine
 make doc      # the Docs job
 make miri     # miri (requires nightly + miri component)
