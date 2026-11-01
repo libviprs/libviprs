@@ -376,6 +376,7 @@ fn issue_1093_the_schema_cannot_change_without_the_version_changing() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn issue_1093_the_doc_names_every_field() {
     let doc = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),

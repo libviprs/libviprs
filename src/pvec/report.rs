@@ -21,12 +21,12 @@
 //! know. Adding a field is a version bump unless it is optional and ignorable, and
 //! `tests/pvec_1093_report.rs` pins the full field list so a change cannot slip in unnoticed.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::fidelity::Classification;
+use super::fidelity::{Classification, FidelityClass};
 use super::ordering::EntityId;
 use super::view_profile::ViewReport;
 use super::xref::XrefReport;
@@ -262,10 +262,67 @@ impl ReportBuilder {
         xrefs: XrefSummary,
         bounds: BoundsSplit,
     ) -> Result<ConversionReport, ReportError> {
-        let _ = (&mut self, view, xrefs, bounds);
-        Err(ReportError::CountMismatch {
-            rows: 0,
+        let rows = self.rows.len() as u64;
+        if rows != encountered {
+            return Err(ReportError::CountMismatch { rows, encountered });
+        }
+        self.rows.sort_by_key(|r| r.id);
+        let mut seen = BTreeSet::new();
+        let mut totals = Totals {
             encountered,
+            by_fidelity: FidelityClass::ALL
+                .iter()
+                .map(|c| (c.tag().to_owned(), 0))
+                .collect(),
+            by_source_class: BTreeMap::new(),
+            by_semantic_type: BTreeMap::new(),
+        };
+        for r in &self.rows {
+            if !seen.insert(r.id) {
+                return Err(ReportError::DuplicateId(r.id));
+            }
+            let class = FidelityClass::ALL
+                .into_iter()
+                .find(|c| c.tag() == r.fidelity)
+                .ok_or_else(|| ReportError::UnknownClass {
+                    id: r.id,
+                    class: r.fidelity.clone(),
+                })?;
+            let refusing = matches!(
+                class,
+                FidelityClass::RequiresPVecCapability
+                    | FidelityClass::RequiresExtension
+                    | FidelityClass::Unsupported
+            );
+            let consistent = r.reason.is_some() == refusing
+                && r.policy_field.is_some() == (class == FidelityClass::IgnoredByPolicy)
+                && match class {
+                    FidelityClass::SupportedExact | FidelityClass::SupportedEquivalent => {
+                        r.semantic_type.is_some()
+                    }
+                    // The geometry may exist in part, so a type is allowed but not required.
+                    FidelityClass::RequiresExtension => true,
+                    _ => r.semantic_type.is_none(),
+                };
+            if !consistent {
+                return Err(ReportError::Inconsistent(r.id));
+            }
+            *totals.by_fidelity.entry(r.fidelity.clone()).or_default() += 1;
+            *totals
+                .by_source_class
+                .entry(r.source_class.clone())
+                .or_default() += 1;
+            if let Some(t) = &r.semantic_type {
+                *totals.by_semantic_type.entry(t.clone()).or_default() += 1;
+            }
+        }
+        Ok(ConversionReport {
+            schema_version: SCHEMA_VERSION,
+            totals,
+            view,
+            xrefs,
+            bounds,
+            entities: self.rows,
         })
     }
 }
@@ -277,7 +334,7 @@ impl ConversionReport {
     ///
     /// [`ReportError::Json`] if serialising fails.
     pub fn to_json_string(&self) -> Result<String, ReportError> {
-        Ok(String::new())
+        serde_json::to_string_pretty(self).map_err(ReportError::Json)
     }
 
     /// Reads a report, refusing a `schema_version` other than [`SCHEMA_VERSION`].
@@ -286,7 +343,12 @@ impl ConversionReport {
     ///
     /// [`ReportError::Schema`] for malformed JSON or another version.
     pub fn from_json_slice(bytes: &[u8]) -> Result<Self, ReportError> {
-        let _ = bytes;
-        Err(ReportError::Schema(None))
+        let report: ConversionReport =
+            serde_json::from_slice(bytes).map_err(|e| ReportError::Schema(Some(e)))?;
+        if report.schema_version == SCHEMA_VERSION {
+            Ok(report)
+        } else {
+            Err(ReportError::Schema(None))
+        }
     }
 }
