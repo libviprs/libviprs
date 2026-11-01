@@ -1,0 +1,74 @@
+{
+  "issue": "libviprs/libviprs#1038",
+  "epic": "libviprs/libviprs#1028",
+  "release_ready": false,
+  "criteria": [
+    {
+      "id": "recognisable",
+      "text": "Drawings are visually recognisable and correct.",
+      "status": "met",
+      "evidence": [
+        "tests/vector_1032_dwg_e2e.rs",
+        "tests/vector_1036_dwg_corpus.rs",
+        "scripts/tile-fidelity.py"
+      ],
+      "caveat": "No customer drawings were used. By Rom's decision the stand-in is the pinned gold corpus plus the synthetic g13 fixtures: sample_AC1018.dwg and the real drawings convert through the real decoder (vector_1032_dwg_e2e, vector_1036_dwg_corpus) and the tiles are compared with the source in scripts/tile-fidelity.py. A customer-like set can replace the stand-in later; this row does not claim one was checked."
+    },
+    {
+      "id": "reported",
+      "text": "ACadSharp notifications and unsupported content are reported.",
+      "status": "met",
+      "evidence": [
+        "tests/vector_1034_fidelity.rs",
+        "tests/vector_1038_entity_matrix.rs"
+      ]
+    },
+    {
+      "id": "no_silent_loss",
+      "text": "Material geometry is never silently omitted without a warning.",
+      "status": "met",
+      "evidence": [
+        "tests/vector_1038_entity_matrix.rs"
+      ],
+      "caveat": "Held for the committed fixture set. A solid hatch is drawn as an outline and a patterned hatch has no pattern lines, both reported (codes 103 and 104), and 2D SOLID is not drawn, reported as code 100; the fix needs libviprs-dep#165."
+    },
+    {
+      "id": "dwg_versions",
+      "text": "ACadSharp's pinned DWG-version capability (AC1014 through AC1032) is enforced explicitly rather than assumed.",
+      "status": "met",
+      "evidence": [
+        "tests/vector_1294_dwg_versions.rs",
+        "docs/vector-providers.md"
+      ]
+    },
+    {
+      "id": "conformance",
+      "text": "Web and mobile conformance are green.",
+      "status": "not_met",
+      "evidence": [
+        "web/vector-viewer/e2e",
+        "conformance/android/evidence"
+      ],
+      "blocker": "Web is green and Android passes in an emulator (libviprs/libviprs#1403, merged; the recorded run was on the NAS). iOS is blocked on two sudo commands on mercury that Rom has to run: sudo xcodebuild -license accept, and sudo xcode-select -s /Applications/Xcode.app/Contents/Developer."
+    },
+    {
+      "id": "raster_regression",
+      "text": "The raster regression suite is green.",
+      "status": "met",
+      "evidence": [
+        "tools/vector-release-gate.sh"
+      ],
+      "caveat": "Green means the fleet run on the release candidate, recorded on the release PR. This row says the gate script runs it, not that a particular sha passed."
+    },
+    {
+      "id": "entity_matrix",
+      "text": "The supported-entity matrix and docs are published.",
+      "status": "met",
+      "evidence": [
+        "docs/vector-entities.md",
+        "docs/vector-providers.md",
+        "tests/vector_1038_entity_matrix.rs"
+      ]
+    }
+  ]
+}
