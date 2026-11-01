@@ -257,10 +257,34 @@ const CELLS: &[Cell] = &[
         runtime_loaders: &[],
         vendored_native: BLAKE3,
     },
+    // The geometry writer funnel (issue #1314): the same graph as `pvec-raster`.
+    Cell {
+        label: "host / pvec-write",
+        target: HOST,
+        features: &["--features", "pvec-write"],
+        edges: "normal,build",
+        links: &[RAYON],
+        discovery: &[],
+        runtime_loaders: &[],
+        vendored_native: BLAKE3,
+    },
     Cell {
         label: "host / jxl",
         target: HOST,
         features: &["--features", "jxl"],
+        edges: "normal,build",
+        links: &[RAYON],
+        discovery: &[],
+        runtime_loaders: &[],
+        vendored_native: BLAKE3,
+    },
+    // `jp2k` carries the JPEG 2000 loader and encoder, and since #1364 the PDF image path's
+    // `JPXDecode` too. `the_jp2k_cell_adds_only_its_two_codec_crates` pins that the PDF side
+    // added nothing to it.
+    Cell {
+        label: "host / jp2k",
+        target: HOST,
+        features: &["--features", "jp2k"],
         edges: "normal,build",
         links: &[RAYON],
         discovery: &[],
@@ -911,11 +935,12 @@ fn the_external_library_features_stay_opt_in() {
 
         // `pvec-raster` brings the PVec facade, and the facade depends on `pvec-geometry` and
         // `pvec-numeric` itself, so it reaches both.
-        let asked_for_pvec = cell
-            .features
-            .iter()
-            .any(|f| f.contains("pvec-normalized") || f.contains("pvec-raster"))
-            || cell.features.contains(&"--all-features");
+        let asked_for_pvec = cell.features.iter().any(|f| {
+            f.contains("pvec-normalized")
+                || f.contains("pvec-raster")
+                || f.contains("pvec-write")
+                || f.contains("dwg-acadrust")
+        }) || cell.features.contains(&"--all-features");
         assert_eq!(
             contains(graph, "pvec-geometry"),
             asked_for_pvec,
@@ -1070,6 +1095,55 @@ fn exactly_one_tiff_resolves_in_every_cell() {
             1,
             "{} resolves tiff {found:?}; expected exactly one. `image`'s own `tiff` and the \
              direct pin in `Cargo.toml` have drifted onto different minors (#1367).",
+            cell.label
+        );
+    }
+}
+
+/// `JPXDecode` in a PDF is decoded through the `jp2k` feature (issue #1364), so the feature's
+/// cell holds exactly the two codec crates it held before: no lock entry came with the PDF side.
+#[test]
+#[cfg_attr(miri, ignore)] // spawns a process, which Miri supports on no target (#714)
+fn the_jp2k_cell_adds_only_its_two_codec_crates() {
+    let by_label = |label: &str| {
+        cells()
+            .find(|(cell, _)| cell.label == label)
+            .unwrap_or_else(|| panic!("no cell {label}"))
+            .1
+    };
+    let (default, jp2k) = (by_label("host / default"), by_label("host / jp2k"));
+    let added: BTreeSet<&str> = jp2k
+        .difference(default)
+        .map(|(name, _)| name.as_str())
+        .collect();
+    assert_eq!(
+        added,
+        BTreeSet::from(["hayro-jpeg2000", "openjpeg2-pure-rs"]),
+        "the jp2k feature pulls a different set of crates than #1364 measured"
+    );
+}
+
+/// `hayro-ccitt` decodes `CCITTFaxDecode` image streams unconditionally (issue #1363), so it is
+/// in every cell, and it is plain Rust: no `links` key, no build script, no native source, and no
+/// dependencies of its own. The last one is what keeps "+1 lock entry" true.
+#[test]
+#[cfg_attr(miri, ignore)] // spawns a process, which Miri supports on no target (#714)
+fn hayro_ccitt_is_in_every_cell_and_is_plain_rust() {
+    for (cell, graph) in cells() {
+        let found: Vec<&(String, String)> =
+            graph.iter().filter(|(n, _)| n == "hayro-ccitt").collect();
+        assert_eq!(
+            found.len(),
+            1,
+            "hayro-ccitt must resolve exactly once for {}",
+            cell.label
+        );
+        let manifest = manifest_of(found[0]);
+        assert!(manifest.links.is_none(), "{}: a `links` key", cell.label);
+        assert!(!manifest.has_build_script, "{}: a build script", cell.label);
+        assert!(
+            !ships_native_source(manifest),
+            "{}: native source",
             cell.label
         );
     }

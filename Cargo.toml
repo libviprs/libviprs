@@ -104,6 +104,13 @@ gif = { version = "0.14", default-features = false, features = ["std"] }
 hayro-jpeg2000 = { version = "0.4.1", default-features = false, features = [
     "std",
 ] }
+# CCITT Group 3 and Group 4 for `CCITTFaxDecode` image streams in a PDF (issue #1363),
+# unconditional because it is the scanned-sheet case: in the corpus it is the one codec whose
+# refusal empties a whole file. Same author and repository as `hayro-jpeg2000` above.
+# `#![forbid(unsafe_code)]`, `no_std` + alloc, no dependencies at all, no `links` key and no
+# build script, licence `Apache-2.0 OR MIT`. Chosen on API grounds: byte alignment,
+# end-of-block and the K modes are explicit settings, which is what `/DecodeParms` names.
+hayro-ccitt = "0.4"
 # Pure-Rust codec facade. The feature list is the crate's decodable
 # format set, and it is edited here once for the whole format wave
 # (issue #563) rather than once per lane: every feature added recompiles
@@ -549,12 +556,16 @@ dwg-acadsharp = ["dep:acadsharp-rs"]
 # key, no native archive, no runtime loader, so unlike `dwg-acadsharp` it needs nothing
 # installed. `pvec` itself is not behind a feature and builds without this one; this
 # only adds `pvec::dwg_acadrust::AcadrustProvider`. The existing `cad::CadDecoder` path,
-# and `dwg-acadsharp` with it, is untouched.
-dwg-acadrust = ["dep:acadrust"]
+# and `dwg-acadsharp` with it, is untouched. It also enables `pvec-normalized` and
+# `pvec-spline` (no crate beyond the PVec ones those two already name), because the PVec
+# conformance suites in `tests/` (issue #1050) open corpus drawings through this provider and
+# compare them through those two, and CI runs each feature on its own: a suite gated on all
+# three would be compiled out of every cell.
+dwg-acadrust = ["dep:acadrust", "pvec-normalized", "pvec-spline"]
 # Exact B-spline extraction from a provider's `RawGeometry::Spline` (issue #1074),
 # validated against PVec's numeric policy. Needs no reader: it works on the boundary
 # types, so any provider's output goes through it.
-pvec-spline = ["dep:pvec-numeric"]
+pvec-spline = ["dep:pvec-numeric", "dep:pvec-geometry"]
 # `raster_pvec::container`: a raster pyramid written into a PVec's raster stream through the PVec
 # facade and read back (issue #1328). Pure Rust; the facade is a git dependency pinned by revision.
 # `pvec-geometry` comes with it only so the tests can build the sheet's outline entity: an artifact
@@ -566,6 +577,10 @@ pvec-raster = ["dep:pvec-facade", "dep:pvec-geometry"]
 # dependencies (PVec is not on crates.io yet), which is why this is a feature and not
 # part of the default build: see the comment on `pvec-geometry` below.
 pvec-normalized = ["dep:pvec-geometry", "dep:pvec-numeric", "dep:pvec-entity"]
+# `pvec::writer` and `pvec::publish`: the one funnel that writes normalized geometry into a PVec
+# artifact through the facade's `PvecWriter`, and the atomic publish of the artifact and its report
+# (issue #1314). Pure Rust, the same git dependencies as `pvec-normalized` and `pvec-raster`.
+pvec-write = ["pvec-normalized", "dep:pvec-facade"]
 # Documentation-only deprecated alias for `object-store-sink`. Cargo has no
 # mechanism to mark a feature deprecated, so enabling `s3` emits NO build-time
 # warning: consumers pinned to `features = ["s3"]` get zero automated signal
@@ -701,6 +716,7 @@ blake3 = { workspace = true }
 exr = { workspace = true }
 flate2 = { workspace = true }
 gif = { workspace = true }
+hayro-ccitt = { workspace = true }
 hayro-jpeg2000 = { workspace = true, optional = true }
 image = { workspace = true }
 image-webp = { workspace = true }
@@ -729,6 +745,18 @@ zune-jpegxl = { workspace = true, optional = true }
 [[example]]
 name = "dwg_gate0"
 required-features = ["dwg-acadrust"]
+
+[[example]]
+name = "pvec_writer_memory"
+required-features = ["pvec-write"]
+
+[[test]]
+name = "pvec_1314_writer_funnel"
+required-features = ["pvec-write"]
+
+[[test]]
+name = "pvec_1314_publish"
+required-features = ["pvec-write"]
 
 [dev-dependencies]
 loom = { workspace = true }
@@ -768,4 +796,12 @@ required-features = ["pvec-raster"]
 
 [[test]]
 name = "pvec_1332_pdf_images"
+required-features = ["pvec-raster"]
+
+[[test]]
+name = "pvec_1363_pdf_ccitt"
+required-features = ["pvec-raster"]
+
+[[test]]
+name = "pvec_1364_pdf_jpx"
 required-features = ["pvec-raster"]

@@ -1,0 +1,985 @@
+{
+  "entities": [
+    {
+      "class": "circle",
+      "closure": {
+        "closed_by_endpoint": true,
+        "closed_by_knots": false,
+        "periodic": true
+      },
+      "geometry": {
+        "center": [
+          {
+            "decimal": "1.5000005e+6",
+            "f64_hex": "0x4136e36080000000",
+            "precision": 8
+          },
+          {
+            "decimal": "-2.20000025e+6",
+            "f64_hex": "0xc140c8e020000000",
+            "precision": 9
+          },
+          {
+            "decimal": "0e+0",
+            "f64_hex": "0x0000000000000000",
+            "precision": 1
+          }
+        ],
+        "normal": [
+          {
+            "decimal": "0e+0",
+            "f64_hex": "0x0000000000000000",
+            "precision": 1
+          },
+          {
+            "decimal": "0e+0",
+            "f64_hex": "0x0000000000000000",
+            "precision": 1
+          },
+          {
+            "decimal": "1e+0",
+            "f64_hex": "0x3ff0000000000000",
+            "precision": 1
+          }
+        ],
+        "radius": {
+          "decimal": "2.500000125e+6",
+          "f64_hex": "0x414312d010000000",
+          "precision": 10
+        },
+        "x_axis": [
+          {
+            "decimal": "1e+0",
+            "f64_hex": "0x3ff0000000000000",
+            "precision": 1
+          },
+          {
+            "decimal": "0e+0",
+            "f64_hex": "0x0000000000000000",
+            "precision": 1
+          },
+          {
+            "decimal": "0e+0",
+            "f64_hex": "0x0000000000000000",
+            "precision": 1
+          }
+        ]
+      },
+      "parameter_domain": {
+        "end": {
+          "decimal": "6.283185307179586e+0",
+          "f64_hex": "0x401921fb54442d18",
+          "precision": 16
+        },
+        "start": {
+          "decimal": "0e+0",
+          "f64_hex": "0x0000000000000000",
+          "precision": 1
+        }
+      },
+      "samples": [
+        {
+          "curvature": {
+            "decimal": "3.99999980000e-7",
+            "f64_hex": "0x3e9ad7f2843813c2",
+            "precision": 12
+          },
+          "derivative_exclusion": null,
+          "parameter": {
+            "decimal": "0.00000000000e+0",
+            "f64_hex": "0x0000000000000000",
+            "precision": 12
+          },
+          "point": [
+            {
+              "decimal": "4.00000062500e+6",
+              "f64_hex": "0x414e848050000000",
+              "precision": 12
+            },
+            {
+              "decimal": "-2.20000025000e+6",
+              "f64_hex": "0xc140c8e020000000",
+              "precision": 12
+            },
+            {
+              "decimal": "0.00000000000e+0",
+              "f64_hex": "0x0000000000000000",
+              "precision": 12
+            }
+          ],
+          "tangent": [
+            {
+              "decimal": "0.00000000000e+0",
+              "f64_hex": "0x0000000000000000",
+              "precision": 12
+            },
+            {
+              "decimal": "1.00000000000e+0",
+              "f64_hex": "0x3ff0000000000000",
+              "precision": 12
+            },
+            {
+              "decimal": "0.00000000000e+0",
+              "f64_hex": "0x0000000000000000",
+              "precision": 12
+            }
+          ]
+        },
+        {
+          "curvature": {
+            "decimal": "3.99999980000e-7",
+            "f64_hex": "0x3e9ad7f2843813c2",
+            "precision": 12
+          },
+          "derivative_exclusion": null,
+          "parameter": {
+            "decimal": "3.92699081699e-1",
+            "f64_hex": "0x3fd921fb54444081",
+            "precision": 12
+          },
+          "point": [
+            {
+              "decimal": "3.80969944676e+6",
+              "f64_hex": "0x414d10d1b92f6e83",
+              "precision": 12
+            },
+            {
+              "decimal": "-1.24329162125e+6",
+              "f64_hex": "0xc132f89b9f0a3d71",
+              "precision": 12
+            },
+            {
+              "decimal": "0.00000000000e+0",
+              "f64_hex": "0x0000000000000000",
+              "precision": 12
+            }
+          ],
+          "tangent": [
+            {
+              "decimal": "-3.82683432365e-1",
+              "f64_hex": "0xbfd87de2a6aea312",
+              "precision": 12
+            },
+            {
+              "decimal": "9.23879532511e-1",
+              "f64_hex": "0x3fed906bcf32832f",
+              "precision": 12
+            },
+            {
+              "decimal": "0.00000000000e+0",
+              "f64_hex": "0x0000000000000000",
+              "precision": 12
+            }
+          ]
+        },
+        {
+          "curvature": {
+            "decimal": "3.99999980000e-7",
+            "f64_hex": "0x3e9ad7f2843813c2",
+            "precision": 12
+          },
+          "derivative_exclusion": null,
+          "parameter": {
+            "decimal": "7.85398163397e-1",
+            "f64_hex": "0x3fe921fb54441d52",
+            "precision": 12
+          },
+          "point": [
+            {
+              "decimal": "3.26776754135e+6",
+              "f64_hex": "0x4148ee5bc54af4f1",
+              "precision": 12
+            },
+            {
+              "decimal": "-4.32233208645e+5",
+              "f64_hex": "0xc11a61a4d5a708ee",
+              "precision": 12
+            },
+            {
+              "decimal": "0.00000000000e+0",
+              "f64_hex": "0x0000000000000000",
+              "precision": 12
+            }
+          ],
+          "tangent": [
+            {
+              "decimal": "-7.07106781187e-1",
+              "f64_hex": "0xbfe6a09e667f4bb8",
+              "precision": 12
+            },
+            {
+              "decimal": "7.07106781187e-1",
+              "f64_hex": "0x3fe6a09e667f4bb8",
+              "precision": 12
+            },
+            {
+              "decimal": "0.00000000000e+0",
+              "f64_hex": "0x0000000000000000",
+              "precision": 12
+            }
+          ]
+        },
+        {
+          "curvature": {
+            "decimal": "3.99999980000e-7",
+            "f64_hex": "0x3e9ad7f2843813c2",
+            "precision": 12
+          },
+          "derivative_exclusion": null,
+          "parameter": {
+            "decimal": "1.17809724510e+0",
+            "f64_hex": "0x3ff2d97c7f336528",
+            "precision": 12
+          },
+          "point": [
+            {
+              "decimal": "2.45670912875e+6",
+              "f64_hex": "0x4142be42907ae148",
+              "precision": 12
+            },
+            {
+              "decimal": "1.09698696763e+5",
+              "f64_hex": "0x40fac82b25f0f5a1",
+              "precision": 12
+            },
+            {
+              "decimal": "0.00000000000e+0",
+              "f64_hex": "0x0000000000000000",
+              "precision": 12
+            }
+          ],
+          "tangent": [
+            {
+              "decimal": "-9.23879532511e-1",
+              "f64_hex": "0xbfed906bcf32832f",
+              "precision": 12
+            },
+            {
+              "decimal": "3.82683432365e-1",
+              "f64_hex": "0x3fd87de2a6aea312",
+              "precision": 12
+            },
+            {
+              "decimal": "0.00000000000e+0",
+              "f64_hex": "0x0000000000000000",
+              "precision": 12
+            }
+          ]
+        },
+        {
+          "curvature": {
+            "decimal": "3.99999980000e-7",
+            "f64_hex": "0x3e9ad7f2843813c2",
+            "precision": 12
+          },
+          "derivative_exclusion": null,
+          "parameter": {
+            "decimal": "1.57079632679e+0",
+            "f64_hex": "0x3ff921fb5443d6f4",
+            "precision": 12
+          },
+          "point": [
+            {
+              "decimal": "1.50000050000e+6",
+              "f64_hex": "0x4136e36080000000",
+              "precision": 12
+            },
+            {
+              "decimal": "2.99999875000e+5",
+              "f64_hex": "0x41124f7f80000000",
+              "precision": 12
+            },
+            {
+              "decimal": "0.00000000000e+0",
+              "f64_hex": "0x0000000000000000",
+              "precision": 12
+            }
+          ],
+          "tangent": [
+            {
+              "decimal": "-1.00000000000e+0",
+              "f64_hex": "0xbff0000000000000",
+              "precision": 12
+            },
+            {
+              "decimal": "6.12323399574e-17",
+              "f64_hex": "0x3c91a62633146647",
+              "precision": 12
+            },
+            {
+              "decimal": "0.00000000000e+0",
+              "f64_hex": "0x0000000000000000",
+              "precision": 12
+            }
+          ]
+        },
+        {
+          "curvature": {
+            "decimal": "3.99999980000e-7",
+            "f64_hex": "0x3e9ad7f2843813c2",
+            "precision": 12
+          },
+          "derivative_exclusion": null,
+          "parameter": {
+            "decimal": "1.96349540849e+0",
+            "f64_hex": "0x3fff6a7a2954f8ac",
+            "precision": 12
+          },
+          "point": [
+            {
+              "decimal": "5.43291871252e+5",
+              "f64_hex": "0x41209477be14bdfd",
+              "precision": 12
+            },
+            {
+              "decimal": "1.09698696763e+5",
+              "f64_hex": "0x40fac82b25f0f5a1",
+              "precision": 12
+            },
+            {
+              "decimal": "0.00000000000e+0",
+              "f64_hex": "0x0000000000000000",
+              "precision": 12
+            }
+          ],
+          "tangent": [
+            {
+              "decimal": "-9.23879532511e-1",
+              "f64_hex": "0xbfed906bcf32832f",
+              "precision": 12
+            },
+            {
+              "decimal": "-3.82683432365e-1",
+              "f64_hex": "0xbfd87de2a6aea312",
+              "precision": 12
+            },
+            {
+              "decimal": "0.00000000000e+0",
+              "f64_hex": "0x0000000000000000",
+              "precision": 12
+            }
+          ]
+        },
+        {
+          "curvature": {
+            "decimal": "3.99999980000e-7",
+            "f64_hex": "0x3e9ad7f2843813c2",
+            "precision": 12
+          },
+          "derivative_exclusion": null,
+          "parameter": {
+            "decimal": "2.35619449019e+0",
+            "f64_hex": "0x4002d97c7f330d32",
+            "precision": 12
+          },
+          "point": [
+            {
+              "decimal": "-2.67766541355e+5",
+              "f64_hex": "0xc11057da2a58f712",
+              "precision": 12
+            },
+            {
+              "decimal": "-4.32233208645e+5",
+              "f64_hex": "0xc11a61a4d5a708ee",
+              "precision": 12
+            },
+            {
+              "decimal": "0.00000000000e+0",
+              "f64_hex": "0x0000000000000000",
+              "precision": 12
+            }
+          ],
+          "tangent": [
+            {
+              "decimal": "-7.07106781187e-1",
+              "f64_hex": "0xbfe6a09e667f4bb8",
+              "precision": 12
+            },
+            {
+              "decimal": "-7.07106781187e-1",
+              "f64_hex": "0xbfe6a09e667f4bb8",
+              "precision": 12
+            },
+            {
+              "decimal": "0.00000000000e+0",
+              "f64_hex": "0x0000000000000000",
+              "precision": 12
+            }
+          ]
+        },
+        {
+          "curvature": {
+            "decimal": "3.99999980000e-7",
+            "f64_hex": "0x3e9ad7f2843813c2",
+            "precision": 12
+          },
+          "derivative_exclusion": null,
+          "parameter": {
+            "decimal": "2.74889357189e+0",
+            "f64_hex": "0x4005fdbbe9bb9e0e",
+            "precision": 12
+          },
+          "point": [
+            {
+              "decimal": "-8.09698446763e+5",
+              "f64_hex": "0xc128b5c4e4be1eb4",
+              "precision": 12
+            },
+            {
+              "decimal": "-1.24329162125e+6",
+              "f64_hex": "0xc132f89b9f0a3d71",
+              "precision": 12
+            },
+            {
+              "decimal": "0.00000000000e+0",
+              "f64_hex": "0x0000000000000000",
+              "precision": 12
+            }
+          ],
+          "tangent": [
+            {
+              "decimal": "-3.82683432365e-1",
+              "f64_hex": "0xbfd87de2a6aea312",
+              "precision": 12
+            },
+            {
+              "decimal": "-9.23879532511e-1",
+              "f64_hex": "0xbfed906bcf32832f",
+              "precision": 12
+            },
+            {
+              "decimal": "0.00000000000e+0",
+              "f64_hex": "0x0000000000000000",
+              "precision": 12
+            }
+          ]
+        },
+        {
+          "curvature": {
+            "decimal": "3.99999980000e-7",
+            "f64_hex": "0x3e9ad7f2843813c2",
+            "precision": 12
+          },
+          "derivative_exclusion": null,
+          "parameter": {
+            "decimal": "3.14159265359e+0",
+            "f64_hex": "0x400921fb54442eea",
+            "precision": 12
+          },
+          "point": [
+            {
+              "decimal": "-9.99999625000e+5",
+              "f64_hex": "0xc12e847f40000000",
+              "precision": 12
+            },
+            {
+              "decimal": "-2.20000025000e+6",
+              "f64_hex": "0xc140c8e020000000",
+              "precision": 12
+            },
+            {
+              "decimal": "0.00000000000e+0",
+              "f64_hex": "0x0000000000000000",
+              "precision": 12
+            }
+          ],
+          "tangent": [
+            {
+              "decimal": "-1.22464679915e-16",
+              "f64_hex": "0xbca1a626331485f8",
+              "precision": 12
+            },
+            {
+              "decimal": "-1.00000000000e+0",
+              "f64_hex": "0xbff0000000000000",
+              "precision": 12
+            },
+            {
+              "decimal": "0.00000000000e+0",
+              "f64_hex": "0x0000000000000000",
+              "precision": 12
+            }
+          ]
+        },
+        {
+          "curvature": {
+            "decimal": "3.99999980000e-7",
+            "f64_hex": "0x3e9ad7f2843813c2",
+            "precision": 12
+          },
+          "derivative_exclusion": null,
+          "parameter": {
+            "decimal": "3.53429173529e+0",
+            "f64_hex": "0x400c463abeccbfc6",
+            "precision": 12
+          },
+          "point": [
+            {
+              "decimal": "-8.09698446763e+5",
+              "f64_hex": "0xc128b5c4e4be1eb4",
+              "precision": 12
+            },
+            {
+              "decimal": "-3.15670887875e+6",
+              "f64_hex": "0xc1481572707ae148",
+              "precision": 12
+            },
+            {
+              "decimal": "0.00000000000e+0",
+              "f64_hex": "0x0000000000000000",
+              "precision": 12
+            }
+          ],
+          "tangent": [
+            {
+              "decimal": "3.82683432365e-1",
+              "f64_hex": "0x3fd87de2a6aea312",
+              "precision": 12
+            },
+            {
+              "decimal": "-9.23879532511e-1",
+              "f64_hex": "0xbfed906bcf32832f",
+              "precision": 12
+            },
+            {
+              "decimal": "0.00000000000e+0",
+              "f64_hex": "0x0000000000000000",
+              "precision": 12
+            }
+          ]
+        },
+        {
+          "curvature": {
+            "decimal": "3.99999980000e-7",
+            "f64_hex": "0x3e9ad7f2843813c2",
+            "precision": 12
+          },
+          "derivative_exclusion": null,
+          "parameter": {
+            "decimal": "3.92699081699e+0",
+            "f64_hex": "0x400f6a7a295550a2",
+            "precision": 12
+          },
+          "point": [
+            {
+              "decimal": "-2.67766541355e+5",
+              "f64_hex": "0xc11057da2a58f712",
+              "precision": 12
+            },
+            {
+              "decimal": "-3.96776729135e+6",
+              "f64_hex": "0xc14e458ba54af4f1",
+              "precision": 12
+            },
+            {
+              "decimal": "0.00000000000e+0",
+              "f64_hex": "0x0000000000000000",
+              "precision": 12
+            }
+          ],
+          "tangent": [
+            {
+              "decimal": "7.07106781187e-1",
+              "f64_hex": "0x3fe6a09e667f4bb8",
+              "precision": 12
+            },
+            {
+              "decimal": "-7.07106781187e-1",
+              "f64_hex": "0xbfe6a09e667f4bb8",
+              "precision": 12
+            },
+            {
+              "decimal": "0.00000000000e+0",
+              "f64_hex": "0x0000000000000000",
+              "precision": 12
+            }
+          ]
+        },
+        {
+          "curvature": {
+            "decimal": "3.99999980000e-7",
+            "f64_hex": "0x3e9ad7f2843813c2",
+            "precision": 12
+          },
+          "derivative_exclusion": null,
+          "parameter": {
+            "decimal": "4.31968989869e+0",
+            "f64_hex": "0x4011475cc9eef0bf",
+            "precision": 12
+          },
+          "point": [
+            {
+              "decimal": "5.43291871252e+5",
+              "f64_hex": "0x41209477be14bdfd",
+              "precision": 12
+            },
+            {
+              "decimal": "-4.50969919676e+6",
+              "f64_hex": "0xc1513400cc97b741",
+              "precision": 12
+            },
+            {
+              "decimal": "0.00000000000e+0",
+              "f64_hex": "0x0000000000000000",
+              "precision": 12
+            }
+          ],
+          "tangent": [
+            {
+              "decimal": "9.23879532511e-1",
+              "f64_hex": "0x3fed906bcf32832f",
+              "precision": 12
+            },
+            {
+              "decimal": "-3.82683432365e-1",
+              "f64_hex": "0xbfd87de2a6aea312",
+              "precision": 12
+            },
+            {
+              "decimal": "0.00000000000e+0",
+              "f64_hex": "0x0000000000000000",
+              "precision": 12
+            }
+          ]
+        },
+        {
+          "curvature": {
+            "decimal": "3.99999980000e-7",
+            "f64_hex": "0x3e9ad7f2843813c2",
+            "precision": 12
+          },
+          "derivative_exclusion": null,
+          "parameter": {
+            "decimal": "4.71238898038e+0",
+            "f64_hex": "0x4012d97c7f330d32",
+            "precision": 12
+          },
+          "point": [
+            {
+              "decimal": "1.50000050000e+6",
+              "f64_hex": "0x4136e36080000000",
+              "precision": 12
+            },
+            {
+              "decimal": "-4.70000037500e+6",
+              "f64_hex": "0xc151edd818000000",
+              "precision": 12
+            },
+            {
+              "decimal": "0.00000000000e+0",
+              "f64_hex": "0x0000000000000000",
+              "precision": 12
+            }
+          ],
+          "tangent": [
+            {
+              "decimal": "1.00000000000e+0",
+              "f64_hex": "0x3ff0000000000000",
+              "precision": 12
+            },
+            {
+              "decimal": "-1.83697019872e-16",
+              "f64_hex": "0xbcaa79394c9e79b9",
+              "precision": 12
+            },
+            {
+              "decimal": "0.00000000000e+0",
+              "f64_hex": "0x0000000000000000",
+              "precision": 12
+            }
+          ]
+        },
+        {
+          "curvature": {
+            "decimal": "3.99999980000e-7",
+            "f64_hex": "0x3e9ad7f2843813c2",
+            "precision": 12
+          },
+          "derivative_exclusion": null,
+          "parameter": {
+            "decimal": "5.10508806208e+0",
+            "f64_hex": "0x40146b9c347755a0",
+            "precision": 12
+          },
+          "point": [
+            {
+              "decimal": "2.45670912875e+6",
+              "f64_hex": "0x4142be42907ae148",
+              "precision": 12
+            },
+            {
+              "decimal": "-4.50969919676e+6",
+              "f64_hex": "0xc1513400cc97b741",
+              "precision": 12
+            },
+            {
+              "decimal": "0.00000000000e+0",
+              "f64_hex": "0x0000000000000000",
+              "precision": 12
+            }
+          ],
+          "tangent": [
+            {
+              "decimal": "9.23879532511e-1",
+              "f64_hex": "0x3fed906bcf32832f",
+              "precision": 12
+            },
+            {
+              "decimal": "3.82683432365e-1",
+              "f64_hex": "0x3fd87de2a6aea312",
+              "precision": 12
+            },
+            {
+              "decimal": "0.00000000000e+0",
+              "f64_hex": "0x0000000000000000",
+              "precision": 12
+            }
+          ]
+        },
+        {
+          "curvature": {
+            "decimal": "3.99999980000e-7",
+            "f64_hex": "0x3e9ad7f2843813c2",
+            "precision": 12
+          },
+          "derivative_exclusion": null,
+          "parameter": {
+            "decimal": "5.49778714378e+0",
+            "f64_hex": "0x4015fdbbe9bb9e0e",
+            "precision": 12
+          },
+          "point": [
+            {
+              "decimal": "3.26776754135e+6",
+              "f64_hex": "0x4148ee5bc54af4f1",
+              "precision": 12
+            },
+            {
+              "decimal": "-3.96776729135e+6",
+              "f64_hex": "0xc14e458ba54af4f1",
+              "precision": 12
+            },
+            {
+              "decimal": "0.00000000000e+0",
+              "f64_hex": "0x0000000000000000",
+              "precision": 12
+            }
+          ],
+          "tangent": [
+            {
+              "decimal": "7.07106781187e-1",
+              "f64_hex": "0x3fe6a09e667f4bb8",
+              "precision": 12
+            },
+            {
+              "decimal": "7.07106781187e-1",
+              "f64_hex": "0x3fe6a09e667f4bb8",
+              "precision": 12
+            },
+            {
+              "decimal": "0.00000000000e+0",
+              "f64_hex": "0x0000000000000000",
+              "precision": 12
+            }
+          ]
+        },
+        {
+          "curvature": {
+            "decimal": "3.99999980000e-7",
+            "f64_hex": "0x3e9ad7f2843813c2",
+            "precision": 12
+          },
+          "derivative_exclusion": null,
+          "parameter": {
+            "decimal": "5.89048622548e+0",
+            "f64_hex": "0x40178fdb9effe67c",
+            "precision": 12
+          },
+          "point": [
+            {
+              "decimal": "3.80969944676e+6",
+              "f64_hex": "0x414d10d1b92f6e83",
+              "precision": 12
+            },
+            {
+              "decimal": "-3.15670887875e+6",
+              "f64_hex": "0xc1481572707ae148",
+              "precision": 12
+            },
+            {
+              "decimal": "0.00000000000e+0",
+              "f64_hex": "0x0000000000000000",
+              "precision": 12
+            }
+          ],
+          "tangent": [
+            {
+              "decimal": "3.82683432365e-1",
+              "f64_hex": "0x3fd87de2a6aea312",
+              "precision": 12
+            },
+            {
+              "decimal": "9.23879532511e-1",
+              "f64_hex": "0x3fed906bcf32832f",
+              "precision": 12
+            },
+            {
+              "decimal": "0.00000000000e+0",
+              "f64_hex": "0x0000000000000000",
+              "precision": 12
+            }
+          ]
+        },
+        {
+          "curvature": {
+            "decimal": "3.99999980000e-7",
+            "f64_hex": "0x3e9ad7f2843813c2",
+            "precision": 12
+          },
+          "derivative_exclusion": null,
+          "parameter": {
+            "decimal": "6.28318530718e+0",
+            "f64_hex": "0x401921fb54442eea",
+            "precision": 12
+          },
+          "point": [
+            {
+              "decimal": "4.00000062500e+6",
+              "f64_hex": "0x414e848050000000",
+              "precision": 12
+            },
+            {
+              "decimal": "-2.20000025000e+6",
+              "f64_hex": "0xc140c8e020000000",
+              "precision": 12
+            },
+            {
+              "decimal": "0.00000000000e+0",
+              "f64_hex": "0x0000000000000000",
+              "precision": 12
+            }
+          ],
+          "tangent": [
+            {
+              "decimal": "2.44929359829e-16",
+              "f64_hex": "0x3cb1a626331436bd",
+              "precision": 12
+            },
+            {
+              "decimal": "1.00000000000e+0",
+              "f64_hex": "0x3ff0000000000000",
+              "precision": 12
+            },
+            {
+              "decimal": "0.00000000000e+0",
+              "f64_hex": "0x0000000000000000",
+              "precision": 12
+            }
+          ]
+        }
+      ],
+      "structure": "CURVE_ONLY",
+      "transform": {
+        "classification": "IDENTITY",
+        "convention": "ROW_MAJOR_COLUMN_VECTOR_PARENT_LEFT",
+        "determinant": {
+          "decimal": "1e+0",
+          "f64_hex": "0x3ff0000000000000",
+          "precision": 1
+        },
+        "matrix": [
+          {
+            "decimal": "1e+0",
+            "f64_hex": "0x3ff0000000000000",
+            "precision": 1
+          },
+          {
+            "decimal": "0e+0",
+            "f64_hex": "0x0000000000000000",
+            "precision": 1
+          },
+          {
+            "decimal": "0e+0",
+            "f64_hex": "0x0000000000000000",
+            "precision": 1
+          },
+          {
+            "decimal": "0e+0",
+            "f64_hex": "0x0000000000000000",
+            "precision": 1
+          },
+          {
+            "decimal": "0e+0",
+            "f64_hex": "0x0000000000000000",
+            "precision": 1
+          },
+          {
+            "decimal": "1e+0",
+            "f64_hex": "0x3ff0000000000000",
+            "precision": 1
+          },
+          {
+            "decimal": "0e+0",
+            "f64_hex": "0x0000000000000000",
+            "precision": 1
+          },
+          {
+            "decimal": "0e+0",
+            "f64_hex": "0x0000000000000000",
+            "precision": 1
+          },
+          {
+            "decimal": "0e+0",
+            "f64_hex": "0x0000000000000000",
+            "precision": 1
+          },
+          {
+            "decimal": "0e+0",
+            "f64_hex": "0x0000000000000000",
+            "precision": 1
+          },
+          {
+            "decimal": "1e+0",
+            "f64_hex": "0x3ff0000000000000",
+            "precision": 1
+          },
+          {
+            "decimal": "0e+0",
+            "f64_hex": "0x0000000000000000",
+            "precision": 1
+          },
+          {
+            "decimal": "0e+0",
+            "f64_hex": "0x0000000000000000",
+            "precision": 1
+          },
+          {
+            "decimal": "0e+0",
+            "f64_hex": "0x0000000000000000",
+            "precision": 1
+          },
+          {
+            "decimal": "0e+0",
+            "f64_hex": "0x0000000000000000",
+            "precision": 1
+          },
+          {
+            "decimal": "1e+0",
+            "f64_hex": "0x3ff0000000000000",
+            "precision": 1
+          }
+        ]
+      }
+    }
+  ],
+  "schema_version": "pvec-gold/signature/1",
+  "units": {
+    "canonical": "metre"
+  },
+  "versions": {
+    "evaluator": "1",
+    "occt": "7.6.3",
+    "policy": "PVec numeric policy v1",
+    "schema": "pvec-gold/signature/1"
+  }
+}

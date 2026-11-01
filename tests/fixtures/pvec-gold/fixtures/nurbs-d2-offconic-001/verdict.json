@@ -1,0 +1,31 @@
+{
+  "cells": {
+    "primary": [
+      {
+        "class": "STRUCTURAL_EXACT",
+        "entity": "nurbs-d2-offconic-001",
+        "evidence": {
+          "fields_compared": 44
+        }
+      }
+    ],
+    "secondary": [
+      {
+        "class": "STRUCTURAL_EXACT",
+        "entity": "nurbs-d2-offconic-001",
+        "evidence": {
+          "fields_compared": 44
+        }
+      }
+    ]
+  },
+  "detail": "",
+  "evidence_class": "KNOWN_TRUTH_EXACT",
+  "evidence_scope": "STEP_ORACLE",
+  "fixture_id": "nurbs-d2-offconic-001",
+  "known_truth": true,
+  "oracle_scope": "OPEN_CONVERTERS",
+  "reason": null,
+  "schema_version": "pvec-gold/fixture-verdict/1",
+  "signature_differences": []
+}

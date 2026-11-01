@@ -95,6 +95,72 @@ fn authored_interior_multiplicity_survives_byte_for_byte() {
     assert_eq!(s.knots.len(), 7 + 3 + 1);
 }
 
+/// The layout `closed-periodic-001` stores (#1374): `n` unique control points and `n + 1` knots of
+/// one period, periodic and closed.
+fn periodic_one_period(knots: Vec<f64>) -> RawEntity {
+    spline(
+        3,
+        vec![
+            [3.0, 0.0, 0.0],
+            [1.5, 2.6, 0.0],
+            [-1.5, 2.6, 0.0],
+            [-3.0, 0.0, 0.0],
+            [-1.5, -2.6, 0.0],
+            [1.5, -2.6, 0.0],
+        ],
+        SourceFact::Present(knots),
+        SourceFact::Absent,
+        SourceFact::Present(true),
+        true,
+    )
+}
+
+#[test]
+fn periodic_one_period_layout_is_extracted_as_authored_1374() {
+    let knots = vec![0.0, 0.1, 0.25, 0.4, 0.6, 0.8, 1.0];
+    let s = extract(&periodic_one_period(knots.clone())).unwrap();
+    assert!(s.periodic && s.closed);
+    assert_eq!(s.degree, 3);
+    assert_eq!(
+        s.control_points.len(),
+        6,
+        "no point is duplicated to close it"
+    );
+    assert_eq!(
+        bits(&s.knots),
+        bits(&knots),
+        "the seven knots are not rewritten"
+    );
+    assert_eq!((s.domain.lo, s.domain.hi), (0.0, 1.0));
+    assert!(matches!(s.form, SplineForm::NonRational));
+}
+
+#[test]
+fn periodic_one_period_layout_still_refuses_what_pvec_refuses_1374() {
+    let decreasing = extract(&periodic_one_period(vec![
+        0.0, 0.1, 0.05, 0.4, 0.6, 0.8, 1.0,
+    ]));
+    assert_eq!(
+        decreasing.unwrap_err(),
+        SplineError::KnotsDecrease { index: 2 }
+    );
+    let nan = extract(&periodic_one_period(vec![
+        0.0,
+        0.1,
+        f64::NAN,
+        0.4,
+        0.6,
+        0.8,
+        1.0,
+    ]));
+    assert_eq!(nan.unwrap_err(), SplineError::NonFiniteKnot { index: 2 });
+    // Eight knots is neither one period (7) nor the clamped layout (10).
+    let wrong = extract(&periodic_one_period(vec![
+        0.0, 0.1, 0.25, 0.4, 0.6, 0.8, 0.9, 1.0,
+    ]));
+    assert!(matches!(wrong.unwrap_err(), SplineError::KnotCount { .. }));
+}
+
 #[test]
 fn periodic_flag_is_kept_and_nothing_is_unrolled() {
     // Uniform unclamped knots, the stored form of a periodic cubic.

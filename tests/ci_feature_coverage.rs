@@ -268,8 +268,8 @@ const EXPECTED: &[(&str, Coverage)] = &[
             true,
             "gates src/pvec/dwg_spline.rs, exact B-spline extraction of issue \
              #1074, and tests/pvec_dwg_spline_structural.rs, 16 tests (17 with \
-             `dwg-acadrust`); adds 1 crate (pvec-numeric, a git dependency \
-             declaring rust-version 1.85)",
+             `dwg-acadrust`); adds 2 crates (pvec-numeric and pvec-geometry, \
+             git dependencies declaring rust-version 1.85)",
         ),
     ),
     (
@@ -282,6 +282,19 @@ const EXPECTED: &[(&str, Coverage)] = &[
              to PVec's writer (issue #1328), and tests/pvec_1328_raster_container.rs, \
              4 tests; adds the PVec facade and the pvec crates under it (git \
              dependencies, pure Rust, declaring rust-version 1.85)",
+        ),
+    ),
+    (
+        "pvec-write",
+        cov(
+            true,
+            true,
+            true,
+            "gates src/pvec/writer.rs, the one funnel that writes geometry into a \
+             PVec artifact (issue #1314), src/pvec/publish.rs, the atomic publish of \
+             the artifact and its report, and tests/pvec_1314_writer_funnel.rs and \
+             tests/pvec_1314_publish.rs, 25 tests; adds nothing beyond `pvec-normalized` \
+             and `pvec-raster` (the PVec facade, a git dependency, pure Rust)",
         ),
     ),
     (
