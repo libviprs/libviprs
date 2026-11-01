@@ -208,6 +208,10 @@ pub enum FilterError {
     /// The JPEG decoder refused it.
     #[error(transparent)]
     Dct(SourceError),
+    /// A shared decode ceiling, or a refusal that is not the codec's own (`JPXDecode`: width,
+    /// height or allocation over the budget).
+    #[error(transparent)]
+    Source(SourceError),
     /// `CCITTFaxDecode`: the codec's message.
     #[error("CCITT: {0}")]
     Ccitt(String),

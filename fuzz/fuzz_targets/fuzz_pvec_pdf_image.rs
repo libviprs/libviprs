@@ -35,6 +35,10 @@ struct Case {
     decode_flip: bool,
     image_mask: bool,
     smask: bool,
+    /// For `JPXDecode` with the `jp2k` feature: start from a valid JP2 file (so the fuzzer gets
+    /// past the container parser) and let `payload` mutate it, as (offset, byte) pairs (#1364).
+    #[cfg_attr(not(feature = "jp2k"), allow(dead_code))]
+    mutate_valid_jp2: bool,
     payload: Vec<u8>,
 }
 
@@ -52,11 +56,33 @@ fn name(n: &str) -> Object {
     Object::Name(n.as_bytes().to_vec())
 }
 
+/// A small lossless JP2 file, encoded once.
+#[cfg(feature = "jp2k")]
+fn valid_jp2() -> &'static Vec<u8> {
+    static JP2: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    JP2.get_or_init(|| {
+        let px: Vec<u8> = (0..8 * 8 * 3).map(|i| (i * 5) as u8).collect();
+        libviprs::raster::Raster::new(8, 8, libviprs::pixel::PixelFormat::Rgb8, px)
+            .ok()
+            .and_then(|r| r.encode_jp2k(Default::default()).ok())
+            .unwrap_or_default()
+    })
+}
+
 fn build(case: &Case) -> Vec<u8> {
     use std::io::Write;
     let width = i64::from(case.width % 2048) + 1;
     let height = i64::from(case.height % 2048) + 1;
     let mut payload = case.payload.clone();
+    #[cfg(feature = "jp2k")]
+    if case.mutate_valid_jp2 && FILTERS[usize::from(case.filter) % FILTERS.len()] == "JPXDecode" {
+        let mut valid = valid_jp2().clone();
+        for pair in case.payload.chunks_exact(3) {
+            let at = usize::from(u16::from_le_bytes([pair[0], pair[1]])) % valid.len();
+            valid[at] = pair[2];
+        }
+        payload = valid;
+    }
     if case.deflate {
         let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
         let _ = z.write_all(&payload);

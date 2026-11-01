@@ -428,6 +428,7 @@ fn image_stream(doc: &Document, stream: &lopdf::Stream, inline: bool) -> RawImag
                 | b"Filter"
                 | b"ImageMask"
                 | b"SMask"
+                | b"SMaskInData"
                 | b"Mask"
                 | b"Interpolate"
                 | b"Intent"
