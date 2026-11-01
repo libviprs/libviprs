@@ -79,6 +79,7 @@ fn guard() -> SourceGuard {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn pvec_1378_the_provider_lists_xref_block_records_and_claims_the_facet() {
     let dir = tempfile::tempdir().unwrap();
     write(
@@ -99,6 +100,7 @@ fn pvec_1378_the_provider_lists_xref_block_records_and_claims_the_facet() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn pvec_1378_a_drawing_with_no_xref_reports_an_empty_list_not_an_error() {
     let dir = tempfile::tempdir().unwrap();
     write(dir.path(), "plain.dwg", &drawing(5.0, &[]));
@@ -107,6 +109,7 @@ fn pvec_1378_a_drawing_with_no_xref_reports_an_empty_list_not_an_error() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn pvec_1378_discovery_builds_the_xref_ref_from_the_insert_and_the_block_record() {
     let dir = tempfile::tempdir().unwrap();
     write(
@@ -161,6 +164,7 @@ fn pvec_1378_a_provider_without_the_facet_cannot_discover() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn pvec_1378_the_flattener_reports_an_xref_insert_instead_of_expanding_it_to_nothing() {
     let dir = tempfile::tempdir().unwrap();
     write(
@@ -198,6 +202,7 @@ fn flatten_len(o: &XrefOpened) -> usize {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn pvec_1378_resolve_opens_and_flattens_the_attached_drawing() {
     let dir = tempfile::tempdir().unwrap();
     write(
@@ -236,6 +241,7 @@ fn pvec_1378_resolve_opens_and_flattens_the_attached_drawing() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn pvec_1378_external_dependency_opens_nothing_and_leaves_a_row() {
     let dir = tempfile::tempdir().unwrap();
     write(
@@ -257,6 +263,7 @@ fn pvec_1378_external_dependency_opens_nothing_and_leaves_a_row() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn pvec_1378_a_file_that_is_not_a_drawing_is_a_typed_error_and_frees_the_slot() {
     let dir = tempfile::tempdir().unwrap();
     write(
@@ -280,6 +287,7 @@ fn pvec_1378_a_file_that_is_not_a_drawing_is_a_typed_error_and_frees_the_slot() 
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn pvec_1378_nested_xrefs_are_flattened_one_level_deeper() {
     let dir = tempfile::tempdir().unwrap();
     write(
@@ -315,6 +323,7 @@ fn pvec_1378_nested_xrefs_are_flattened_one_level_deeper() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn pvec_1378_a_cycle_through_the_attached_drawings_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     write(
@@ -337,6 +346,7 @@ fn pvec_1378_a_cycle_through_the_attached_drawings_is_refused() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn pvec_1378_depth_past_the_shared_limit_names_the_limit() {
     let dir = tempfile::tempdir().unwrap();
     write(
