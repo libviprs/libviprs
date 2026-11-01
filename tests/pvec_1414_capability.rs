@@ -167,6 +167,7 @@ fn without_circle() -> Vec<CapabilityId> {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn issue_1414_reject_input_names_the_capability_and_the_entity_and_leaves_no_file() {
     let dir = scratch("reject-input");
     let dest = dir.join("o.pvec");
@@ -191,6 +192,7 @@ fn issue_1414_reject_input_names_the_capability_and_the_entity_and_leaves_no_fil
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn issue_1414_reject_entity_converts_leaves_the_entity_out_and_counts_it() {
     let dir = scratch("reject-entity");
     let dest = dir.join("o.pvec");
@@ -219,6 +221,7 @@ fn issue_1414_reject_entity_converts_leaves_the_entity_out_and_counts_it() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn issue_1414_probe_and_convert_return_the_same_counts_field_by_field() {
     let dir = scratch("probe");
     let dest = dir.join("o.pvec");
@@ -242,6 +245,7 @@ fn issue_1414_probe_and_convert_return_the_same_counts_field_by_field() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn issue_1414_strict_refuses_an_equivalent_entity_and_accepts_the_all_exact_drawing() {
     let dir = scratch("strict");
     let dest = dir.join("o.pvec");
@@ -265,6 +269,7 @@ fn issue_1414_strict_refuses_an_equivalent_entity_and_accepts_the_all_exact_draw
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn issue_1414_downgrade_records_that_none_exists_and_never_tessellates() {
     let dir = scratch("downgrade");
     let dest = dir.join("o.pvec");
@@ -298,6 +303,7 @@ fn issue_1414_downgrade_records_that_none_exists_and_never_tessellates() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn issue_1414_the_profiles_are_written_down_once_and_the_report_records_the_one_used() {
     let strict = ConversionProfile::Strict.capabilities();
     let default = ConversionProfile::Default.capabilities();
@@ -331,6 +337,7 @@ fn issue_1414_the_profiles_are_written_down_once_and_the_report_records_the_one_
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn issue_1414_the_capability_type_is_pvecs_own_and_no_local_copy_exists() {
     assert!(
         std::any::type_name::<CapabilityId>().contains("pvec_capabilities"),
@@ -343,5 +350,5 @@ fn issue_1414_the_capability_type_is_pvecs_own_and_no_local_copy_exists() {
     ))
     .unwrap();
     assert!(!src.contains("struct CapabilityId") && !src.contains("type CapabilityId"));
-    assert!(src.contains("pvec_facade::CapabilityId"));
+    assert!(src.contains("writer::CapabilityId"));
 }

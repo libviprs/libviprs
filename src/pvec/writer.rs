@@ -33,6 +33,9 @@
 //! rescaling would change every coordinate. The caller that wants a policy for unitless drawings
 //! (N7.2) passes the unit it chose.
 
+/// PVec's capability identifier, re-exported here because this file is the one place the crate
+/// names the facade. The conversion API takes its allowed capabilities in this type.
+pub use pvec_facade::CapabilityId;
 use pvec_facade::components::Stream;
 use pvec_facade::{Bounds2, EntityId as PvecEntityId, Manifest, PvecError, PvecWriter};
 use thiserror::Error;
