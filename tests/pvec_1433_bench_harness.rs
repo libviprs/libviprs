@@ -78,3 +78,41 @@ fn an_unstable_row_never_gates() {
     assert!(provider_regressions(&base, &row(10.0, 9999, true)).is_empty());
     assert!(provider_regressions(&row(1000.0, 1000, true), &row(10.0, 9999, false)).is_empty());
 }
+
+/// The document names every baseline row's cell and the platform it ran on, and the baseline's
+/// rows each carry the columns the harness refuses to print blank.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn the_document_and_the_baseline_describe_the_same_rows() {
+    let doc = std::fs::read_to_string(pvec_bench::root().join("docs/pvec-benchmarks.md")).unwrap();
+    let rows = pvec_bench::baseline_rows();
+    let rows = rows.as_object().expect("the baseline has rows");
+    assert!(!rows.is_empty(), "no baseline row is committed");
+    for (key, row) in rows {
+        let mut parts = key.split('/');
+        let (bench, cell, platform) = (parts.next(), parts.next().unwrap(), parts.next().unwrap());
+        assert_eq!(bench, Some("provider"), "{key}");
+        assert!(
+            doc.contains(&format!("| {cell} |")),
+            "{key}: the document has no row for {cell}"
+        );
+        assert!(
+            doc.contains(platform),
+            "{key}: the document never names {platform}"
+        );
+        assert_eq!(row["platform"], platform, "{key}");
+        let blank = blank_columns(
+            row,
+            &[
+                "cell",
+                "entities",
+                "entities_per_s",
+                "tracked_peak",
+                "peak_rss_bytes",
+                "block_frames",
+                "platform",
+            ],
+        );
+        assert!(blank.is_empty(), "{key}: {blank:?}");
+    }
+}

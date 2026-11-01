@@ -92,7 +92,19 @@ fn stat_json(s: Stat) -> Value {
 
 fn measure(cell: &str, bytes: &[u8], platform: &str) -> Value {
     let rss_reset = reset_peak_rss();
-    let runs: Vec<Run> = (0..3).map(|_| extract(bytes)).collect();
+    // A cell that takes milliseconds is run in a batch, so a sample is at least a quarter second
+    // and the clock's granularity and the first-touch cost are not the figure.
+    let reps = (0.25 / extract(bytes).secs).ceil().max(1.0) as usize;
+    let runs: Vec<Run> = (0..3)
+        .map(|_| {
+            let batch: Vec<Run> = (0..reps).map(|_| extract(bytes)).collect();
+            Run {
+                secs: batch.iter().map(|r| r.secs).sum::<f64>() / reps as f64,
+                tracked_peak: batch.iter().map(|r| r.tracked_peak).max().unwrap_or(0),
+                ..batch.into_iter().next().expect("one run")
+            }
+        })
+        .collect();
     let rss = peak_rss();
     let leaves = runs[0].leaves;
     assert!(

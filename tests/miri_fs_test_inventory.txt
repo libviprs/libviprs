@@ -587,6 +587,7 @@ annotated   not-detected tests/pvec_1429_bench_corpus.rs::the_manifest_is_a_good
 annotated   not-detected tests/pvec_1429_bench_corpus.rs::two_corpus_revisions_turn_it_red
 annotated   fs-detected  tests/pvec_1430_convert_spline.rs::no_spline_is_reported_as_an_unmapped_source_class
 annotated   fs-detected  tests/pvec_1430_convert_spline.rs::planar_splines_are_written_and_a_3d_one_is_refused_by_name
+annotated   fs-detected  tests/pvec_1433_bench_harness.rs::the_document_and_the_baseline_describe_the_same_rows
 annotated   fs-detected  tests/pvec_api_surface.rs::no_index_directory_or_straddler_type_is_defined_under_src_pvec
 annotated   fs-detected  tests/pvec_api_surface.rs::no_pvec_path_under_src_is_outside_the_allowed_surface
 annotated   fs-detected  tests/pvec_api_surface.rs::no_writer_call_is_made_outside_the_funnel
@@ -609,6 +610,7 @@ annotated   fs-detected  tests/pvec_known_truth.rs::n2_1_1050_a_vendored_file_th
 annotated   fs-detected  tests/pvec_pdf_vector.rs::n5_1_no_lopdf_type_in_any_public_signature
 annotated   fs-detected  tests/pvec_provider_acadrust.rs::open_works_from_bytes_and_from_a_path_alike
 annotated   fs-detected  tests/pvec_provider_acadrust.rs::the_fixtures_are_the_ones_n1_4_recorded_and_say_what_they_are
+annotated   fs-detected  tests/pvec_provider_bench.rs::provider_bench
 annotated   fs-detected  tests/pvec_provider_boundary.rs::acadrust_is_a_git_dependency_pinned_by_a_full_revision
 annotated   fs-detected  tests/pvec_provider_boundary.rs::acadrust_is_optional_and_only_the_feature_turns_it_on
 annotated   fs-detected  tests/pvec_provider_boundary.rs::no_foreign_type_appears_in_any_public_signature_of_the_provider_module
