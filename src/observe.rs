@@ -257,6 +257,37 @@ pub enum EngineEvent {
     /// Emitted by the engine at the end of pyramid generation.
     Finished { total_tiles: u64, levels: u32 },
 
+    /// A conversion opened its source (issue #1417). `provider` is the provider's name.
+    ConversionSourceOpened { provider: String },
+
+    /// A conversion applied its view profile: `included` leaves are drawn, `excluded` were not.
+    ConversionViewResolved { included: u64, excluded: u64 },
+
+    /// A conversion has classified `entities` entities so far, reported every 256.
+    ConversionBatchNormalized { entities: u64 },
+
+    /// A conversion wrote its artifact (`entities` of them, `bytes` long); it is not published yet.
+    ConversionArtifactWritten { entities: u64, bytes: u64 },
+
+    /// A conversion published its artifact and report. The last event of a successful run.
+    ConversionPublished,
+
+    /// A conversion made a diagnostic about one entity or about the run (issue #1416).
+    ///
+    /// Emitted by `pvec_convert` for each entity that did not become geometry, as it is
+    /// classified. `code` is the stable `DiagnosticCode` name, `severity` is `info`, `warning` or
+    /// `error`, and `message_id` is the stable identifier under it. The durable copy is the
+    /// `diagnostics` section of the conversion report.
+    ConversionDiagnostic {
+        code: String,
+        severity: String,
+        message_id: String,
+        handle: Option<u64>,
+        class: Option<String>,
+        block_path: Option<String>,
+        layer: Option<String>,
+    },
+
     /// The entire pipeline is complete, control is returning to the caller.
     ///
     /// Callers emit this as the last event after all post-processing
@@ -328,6 +359,12 @@ impl EngineEvent {
             Self::MemorySnapshot { .. } => "memory_snapshot",
             Self::CheckpointFlushed { .. } => "checkpoint_flushed",
             Self::Finished { .. } => "finished",
+            Self::ConversionSourceOpened { .. } => "conversion_source_opened",
+            Self::ConversionViewResolved { .. } => "conversion_view_resolved",
+            Self::ConversionBatchNormalized { .. } => "conversion_batch_normalized",
+            Self::ConversionArtifactWritten { .. } => "conversion_artifact_written",
+            Self::ConversionPublished => "conversion_published",
+            Self::ConversionDiagnostic { .. } => "conversion_diagnostic",
             Self::PipelineComplete => "pipeline_complete",
         }
     }

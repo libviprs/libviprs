@@ -581,6 +581,11 @@ pvec-normalized = ["dep:pvec-geometry", "dep:pvec-numeric", "dep:pvec-entity"]
 # artifact through the facade's `PvecWriter`, and the atomic publish of the artifact and its report
 # (issue #1314). Pure Rust, the same git dependencies as `pvec-normalized` and `pvec-raster`.
 pvec-write = ["pvec-normalized", "dep:pvec-facade"]
+# `pvec_convert`: the conversion API (issue #1048). One call takes a DWG and a view profile and
+# publishes a `.pvec` artifact with its conversion report. Acadrust is the default provider
+# (`tests/pvec_1079_provider_default.rs`), so the feature pulls it in; `acadsharp-rs` stays opt-in.
+# Pure Rust, no new dependency beyond the two features it joins.
+pvec-convert = ["pvec-write", "dwg-acadrust"]
 # Documentation-only deprecated alias for `object-store-sink`. Cargo has no
 # mechanism to mark a feature deprecated, so enabling `s3` emits NO build-time
 # warning: consumers pinned to `features = ["s3"]` get zero automated signal
@@ -757,6 +762,26 @@ required-features = ["pvec-write"]
 [[test]]
 name = "pvec_1314_publish"
 required-features = ["pvec-write"]
+
+[[test]]
+name = "pvec_1413_convert"
+required-features = ["pvec-convert"]
+
+[[test]]
+name = "pvec_1414_capability"
+required-features = ["pvec-convert"]
+
+[[test]]
+name = "pvec_1415_georef"
+required-features = ["pvec-convert"]
+
+[[test]]
+name = "pvec_1416_diagnostics"
+required-features = ["pvec-convert"]
+
+[[test]]
+name = "pvec_1417_progress"
+required-features = ["pvec-convert"]
 
 [dev-dependencies]
 loom = { workspace = true }
