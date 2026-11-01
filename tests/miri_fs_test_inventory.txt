@@ -963,4 +963,12 @@ annotated   not-detected tests/pmtiles_writer.rs::what_the_gzip_level_costs_at_t
 annotated   not-detected tests/pvec_view_profile_1097_fixture.rs::n3_3_1097_vc_layers_dwg_gives_the_worked_example_counts
 annotated   not-detected tests/sample_kind_spine.rs::the_walk_descends_into_subdirectories
 annotated   not-detected tests/unsafe_inventory.rs::the_walk_descends_into_subdirectories
+annotated   fs-detected  tests/vector_1391_limits.rs::max_block_depth_stops_a_decode_with_nested_blocks
+annotated   fs-detected  tests/vector_1391_limits.rs::max_output_bytes_stops_a_decode_that_emits_a_lot
+annotated   fs-detected  tests/vector_1391_limits.rs::max_polyline_points_stops_a_decode_with_a_long_polyline
+annotated   fs-detected  tests/vector_1391_limits.rs::max_string_bytes_stops_a_decode_with_a_long_string
+annotated   fs-detected  tests/vector_1391_limits.rs::the_provider_docs_carry_the_worker_pattern
+annotated   fs-detected  tests/vector_1392_cgroup_lane.rs::the_child_modes_the_lane_drives_still_exist
+annotated   fs-detected  tests/vector_1392_cgroup_lane.rs::the_lane_runs_the_unbudgeted_child_under_a_memory_cgroup_and_checks_the_result
+annotated   fs-detected  tests/vector_1392_cgroup_lane.rs::the_scheduler_runs_the_lane_and_the_report_calls_it_one
 annotated   not-detected tests/workspace_layout.rs::root_workspace_contains_both_crates
