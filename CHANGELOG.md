@@ -24,6 +24,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   display fidelity, and an empty path under `W n` is kept as an empty clip that excludes everything
   after it. New fields: `PdfPathEntity::text_clipped`, `ClipRecord::empty`,
   `EntityClipDecision::{form_clips, text_clip}`.
+- **Reason codes for the three frozen transform refusals** (issue #1379, part of #1079). `ReasonCode`
+  gains `TransformNonFinite`, `TransformSingular` and `TransformConicIllConditioned`
+  (`transform-non-finite`, `transform-singular`, `transform-conic-ill-conditioned`, all `Unsupported`),
+  `TransformReason::reason_code` maps onto them and `ComposeError::classification` gives a refused INSERT
+  map a classification of its own instead of a generic code.
 - **The PDF filter seam** (issue #1362, follow-up 1/6 to #1332, part of #1329). The image decoder
   now goes through `FilterInput`, `FilterOutput` and one `decode_filter` `match`, with a module per
   codec under `src/pvec/pdf_filters/` (`dct` moved in, `ccitt`, `jbig2` and `jpx` are stubs). No
