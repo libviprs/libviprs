@@ -594,6 +594,9 @@ annotated   not-detected tests/pvec_1436_normalization_mix.rs::a_zero_mix_hides_
 annotated   not-detected tests/pvec_1439_view_limits.rs::a_drawing_inside_the_limits_is_walked_as_before
 annotated   not-detected tests/pvec_1439_view_limits.rs::a_fan_out_past_the_instance_limit_is_refused_naming_it
 annotated   not-detected tests/pvec_1439_view_limits.rs::the_default_limits_still_admit_an_ordinary_drawing
+annotated   fs-detected  tests/pvec_1437_fuzz_seeds.rs::the_clip_seed_corpus_runs_clean
+annotated   fs-detected  tests/pvec_1437_fuzz_seeds.rs::the_provider_seed_corpus_runs_clean
+annotated   fs-detected  tests/pvec_1437_fuzz_seeds.rs::the_spline_seed_corpus_runs_clean
 annotated   fs-detected  tests/pvec_1446_write_refusal.rs::a_drawing_with_one_unstorable_curve_still_converts_the_rest
 annotated   fs-detected  tests/pvec_1446_write_refusal.rs::the_report_counts_each_entity_pvec_refused_against_that_entity
 annotated   fs-detected  tests/pvec_api_surface.rs::no_index_directory_or_straddler_type_is_defined_under_src_pvec
@@ -606,6 +609,14 @@ annotated   fs-detected  tests/pvec_api_surface.rs::the_pvec_dependencies_stay_s
 annotated   fs-detected  tests/pvec_bounded_memory_bench.rs::bounded_memory_bench
 annotated   fs-detected  tests/pvec_bounded_memory_bench.rs::bounded_memory_child
 annotated   fs-detected  tests/pvec_bounded_memory_bench.rs::bounded_memory_gen
+annotated   fs-detected  tests/pvec_corpus_regression.rs::a_dual_oracle_row_is_labelled_as_agreement_and_never_as_truth
+annotated   fs-detected  tests/pvec_corpus_regression.rs::a_fixture_that_moves_from_exact_to_equivalent_fails_the_gate
+annotated   fs-detected  tests/pvec_corpus_regression.rs::a_quarantined_fixture_is_in_the_report_and_never_gates
+annotated   fs-detected  tests/pvec_corpus_regression.rs::artifact_growth_of_two_percent_in_total_or_five_on_one_fixture_fails
+annotated   fs-detected  tests/pvec_corpus_regression.rs::corpus_report
+annotated   fs-detected  tests/pvec_corpus_regression.rs::the_baseline_has_one_row_per_fixture_and_no_empty_cell
+annotated   fs-detected  tests/pvec_corpus_regression.rs::the_corpus_does_not_regress
+annotated   fs-detected  tests/pvec_corpus_regression.rs::the_document_has_a_row_for_every_fixture
 annotated   fs-detected  tests/pvec_dual_oracle.rs::n2_2_1050_every_fixture_that_is_not_known_truth_is_executed_and_reported
 annotated   fs-detected  tests/pvec_dual_oracle.rs::n2_2_1050_the_pin_summary_is_the_index_and_a_bump_reads_as_per_class_changes
 annotated   fs-detected  tests/pvec_dwg_pdf_differential.rs::a_loss_entry_that_no_longer_matches_fails_the_run
@@ -616,6 +627,7 @@ annotated   fs-detected  tests/pvec_dwg_pdf_differential.rs::the_pairs_are_real_
 annotated   fs-detected  tests/pvec_dwg_pdf_differential.rs::the_rotated_pair_swaps_the_pdf_extent_and_a_rotation_blind_comparison_would_fail
 annotated   fs-detected  tests/pvec_dwg_spline_structural.rs::no_code_path_turns_a_spline_into_polylines_or_arcs
 annotated   fs-detected  tests/pvec_fidelity_1100.rs::there_is_one_enum_for_the_six_classes
+annotated   fs-detected  tests/pvec_generation_bench.rs::generation_bench
 annotated   fs-detected  tests/pvec_known_truth.rs::n2_1_1050_a_failing_run_leaves_no_state_behind
 annotated   fs-detected  tests/pvec_known_truth.rs::n2_1_1050_a_vendored_file_that_moved_is_caught_by_the_pin
 annotated   fs-detected  tests/pvec_normalization_bench.rs::normalization_bench
@@ -636,6 +648,13 @@ annotated   fs-detected  tests/pvec_style_1083.rs::the_geometry_entity_sources_n
 annotated   fs-detected  tests/pvec_text_policy_1084.rs::n5_5_outcome_codes_are_stable_and_documented
 annotated   fs-detected  tests/pvec_units.rs::nothing_under_src_pvec_refers_to_the_geo_module
 annotated   fs-detected  tests/pvec_units.rs::the_units_doc_has_a_row_for_every_code_including_zero
+annotated   fs-detected  tests/pvec_version_compat.rs::a_drawing_below_the_minimum_is_rejected_at_conversion_start
+annotated   fs-detected  tests/pvec_version_compat.rs::changing_the_document_without_the_pin_turns_it_red
+annotated   fs-detected  tests/pvec_version_compat.rs::changing_the_pin_without_the_document_turns_it_red
+annotated   fs-detected  tests/pvec_version_compat.rs::changing_what_the_code_does_without_the_pin_turns_it_red
+annotated   fs-detected  tests/pvec_version_compat.rs::the_container_outcomes_in_the_table_are_what_the_reader_does
+annotated   fs-detected  tests/pvec_version_compat.rs::the_document_and_the_pin_agree
+annotated   fs-detected  tests/pvec_version_compat.rs::the_pin_and_the_code_agree
 annotated   fs-detected  tests/pvec_view_profile_1097.rs::n3_3_1097_every_knob_names_a_row_of_the_n1_4_decision_table
 annotated   fs-detected  tests/pvec_xref_policy.rs::depth_past_the_limit_names_the_limit_and_the_observed_depth
 annotated   fs-detected  tests/pvec_xref_policy.rs::every_ok_outcome_is_accounted_for_in_the_report
