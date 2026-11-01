@@ -48,7 +48,11 @@ use crate::pvec::provider::{
     ArrayGrid, Availability, BlockRef, DwgProvider, EntityCursor, EntityFacts, EntityScope,
     EntityStyle, Facet, FacetSource, InstancePath, LayerState, LayoutId, LayoutKind, LayoutState,
     Point3, ProvenanceStub, ProviderCaps, ProviderError, RawEntity, RawGeometry, RawVertex,
+<<<<<<< HEAD
     SourceColour, SourceFact, SourceLineweight, SourceTransform, ViewportEntity, XrefAttachment,
+=======
+    SourceColour, SourceFact, SourceLineweight, SourceTransform, TextStyleRef, ViewportEntity,
+>>>>>>> origin/main
 };
 use crate::pvec::units::SourceUnit;
 
@@ -313,6 +317,7 @@ impl DwgProvider for AcadrustProvider {
         Ok(out)
     }
 
+<<<<<<< HEAD
     fn xref_blocks(&self) -> Result<Vec<XrefAttachment>, ProviderError> {
         Ok(self
             .doc
@@ -326,6 +331,40 @@ impl DwgProvider for AcadrustProvider {
                 unloaded: b.flags.is_xref_unloaded,
             })
             .collect())
+=======
+    fn text_styles(
+        &self,
+        scope: &EntityScope,
+    ) -> Result<BTreeMap<ItemHandle, TextStyleRef>, ProviderError> {
+        let (record, _) = self.resolve(scope)?;
+        let mut out = BTreeMap::new();
+        for handle in &record.entity_handles {
+            let (Some(e), Some(key)) = (self.doc.get_entity(*handle), item_handle(*handle)) else {
+                continue;
+            };
+            let name = match e {
+                EntityType::Text(t) => &t.style,
+                EntityType::MText(m) => &m.style,
+                _ => continue,
+            };
+            let entry = self.doc.text_styles.get(name).or_else(|| {
+                self.doc
+                    .text_styles
+                    .iter()
+                    .find(|s| s.name.eq_ignore_ascii_case(name))
+            });
+            out.insert(
+                key,
+                TextStyleRef {
+                    style_name: name.clone(),
+                    font_file: entry.map(|s| s.font_file.clone()).unwrap_or_default(),
+                    big_font_file: entry.map(|s| s.big_font_file.clone()).unwrap_or_default(),
+                    true_type_font: entry.map(|s| s.true_type_font.clone()).unwrap_or_default(),
+                },
+            );
+        }
+        Ok(out)
+>>>>>>> origin/main
     }
 
     fn entities<'a>(

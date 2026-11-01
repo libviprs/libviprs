@@ -415,6 +415,7 @@ pub struct ViewportEntity {
     pub frozen_layers: Vec<String>,
 }
 
+<<<<<<< HEAD
 /// An external-reference block record, as the drawing stores it (issue #1378).
 ///
 /// An INSERT of this block places the attached drawing. The path is verbatim: confining it
@@ -430,6 +431,20 @@ pub struct XrefAttachment {
     pub overlay: bool,
     /// The drawing marks the xref as unloaded.
     pub unloaded: bool,
+=======
+/// The text style a `TEXT` or `MTEXT` entity names, with the fonts its table entry points at
+/// (issue #1381). Nothing is looked up on disk: whether a font is installed is the caller's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextStyleRef {
+    /// The style name the entity used, whether or not the style table has it.
+    pub style_name: String,
+    /// The SHX font file of the style, empty when the table lacks the style or names none.
+    pub font_file: String,
+    /// The SHX big font file, empty when there is none.
+    pub big_font_file: String,
+    /// The TrueType family of the style, empty when there is none.
+    pub true_type_font: String,
+>>>>>>> origin/main
 }
 
 /// One vertex of a polyline: position and the bulge toward the next vertex.
@@ -716,8 +731,13 @@ pub enum Facet {
     LayerOverride,
     /// Paper-space viewport entities, from [`DwgProvider::viewports`].
     ViewportEntities,
+<<<<<<< HEAD
     /// The drawing's external-reference block records, from [`DwgProvider::xref_blocks`].
     XrefAttachments,
+=======
+    /// The text style of `TEXT` and `MTEXT` entities, from [`DwgProvider::text_styles`].
+    TextStyle,
+>>>>>>> origin/main
 }
 
 impl Facet {
@@ -733,7 +753,11 @@ impl Facet {
         Facet::EntityVisibility,
         Facet::LayerOverride,
         Facet::ViewportEntities,
+<<<<<<< HEAD
         Facet::XrefAttachments,
+=======
+        Facet::TextStyle,
+>>>>>>> origin/main
     ];
 }
 
@@ -945,15 +969,31 @@ pub trait DwgProvider {
         Err(ProviderError::CannotReport(Facet::ViewportEntities))
     }
 
+<<<<<<< HEAD
     /// The drawing's external-reference block records, in the block table's order.
+=======
+    /// The text style of every `TEXT` and `MTEXT` entity of `scope`, by handle. An entity with no
+    /// handle has no entry.
+>>>>>>> origin/main
     ///
     /// The default says the provider cannot report them.
     ///
     /// # Errors
     ///
+<<<<<<< HEAD
     /// [`ProviderError::CannotReport`] with [`Facet::XrefAttachments`] when the caps say so.
     fn xref_blocks(&self) -> Result<Vec<XrefAttachment>, ProviderError> {
         Err(ProviderError::CannotReport(Facet::XrefAttachments))
+=======
+    /// [`ProviderError::CannotReport`] with [`Facet::TextStyle`] when the caps say so, and
+    /// [`ProviderError::NoSuchScope`] as for [`entities`](Self::entities).
+    fn text_styles(
+        &self,
+        scope: &EntityScope,
+    ) -> Result<BTreeMap<ItemHandle, TextStyleRef>, ProviderError> {
+        let _ = scope;
+        Err(ProviderError::CannotReport(Facet::TextStyle))
+>>>>>>> origin/main
     }
 
     /// Opens one traversal pass.
