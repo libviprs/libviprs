@@ -89,20 +89,25 @@ fn the_document_and_the_baseline_describe_the_same_rows() {
     let rows = rows.as_object().expect("the baseline has rows");
     assert!(!rows.is_empty(), "no baseline row is committed");
     for (key, row) in rows {
-        let mut parts = key.split('/');
-        let (bench, cell, platform) = (parts.next(), parts.next().unwrap(), parts.next().unwrap());
-        assert_eq!(bench, Some("provider"), "{key}");
+        let parts: Vec<&str> = key.split('/').collect();
+        let platform = *parts.last().unwrap();
+        // The word each kind of row is found under in the document's tables.
+        let name = match parts[..] {
+            ["provider", cell, _] | ["normalization", cell, _] => cell,
+            ["normalization", "transform", class, _] => class,
+            ["normalization", cell, _mix, _] => cell,
+            _ => panic!("{key}: a baseline key this suite does not know"),
+        };
         assert!(
-            doc.contains(&format!("| {cell} |")),
-            "{key}: the document has no row for {cell}"
+            doc.contains(&format!("| {name} |")) || doc.contains(&format!("`{name}`")),
+            "{key}: the document has no row for {name}"
         );
         assert!(
             doc.contains(platform),
             "{key}: the document never names {platform}"
         );
         assert_eq!(row["platform"], platform, "{key}");
-        let blank = blank_columns(
-            row,
+        let required: &[&str] = if parts[0] == "provider" {
             &[
                 "cell",
                 "entities",
@@ -111,8 +116,11 @@ fn the_document_and_the_baseline_describe_the_same_rows() {
                 "peak_rss_bytes",
                 "block_frames",
                 "platform",
-            ],
-        );
+            ]
+        } else {
+            &["cell", "stage_ns", "platform"]
+        };
+        let blank = blank_columns(row, required);
         assert!(blank.is_empty(), "{key}: {blank:?}");
     }
 }

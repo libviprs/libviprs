@@ -1,5 +1,433 @@
 {
  "rows": {
+  "normalization/block_heavy/mix0/x86_64-linux-mars": {
+   "bench": "normalization",
+   "cell": "block_heavy",
+   "kept": 22440,
+   "leaves": 22440,
+   "mix": 0,
+   "pass_secs": {
+    "max": 0.021469109599999998,
+    "median": 0.0213341396,
+    "min": 0.020867616
+   },
+   "platform": "x86_64-linux-mars",
+   "promoted": 22440,
+   "stage_ns": {
+    "bounds": 23.457450980392156,
+    "records": 103.31484402852048,
+    "transform": 172.54206327985736,
+    "visibility": 650.9741934046345
+   },
+   "stage_share": {
+    "bounds": 0.024673373750680815,
+    "records": 0.10867019450833629,
+    "transform": 0.18148582378264738,
+    "visibility": 0.684717601641643
+   },
+   "unattributed": 0.0004530063166926457,
+   "unstable": false
+  },
+  "normalization/block_heavy/mix50/x86_64-linux-mars": {
+   "bench": "normalization",
+   "cell": "block_heavy",
+   "kept": 11220,
+   "leaves": 22440,
+   "mix": 50,
+   "pass_secs": {
+    "max": 0.019840295692307695,
+    "median": 0.019706365000000003,
+    "min": 0.019691652923076928
+   },
+   "platform": "x86_64-linux-mars",
+   "promoted": 11220,
+   "stage_ns": {
+    "bounds": 21.202742355683533,
+    "records": 97.90218702865762,
+    "transform": 162.59482380364733,
+    "visibility": 737.3280851501439
+   },
+   "stage_share": {
+    "bounds": 0.012071976198084691,
+    "records": 0.055741509835098374,
+    "transform": 0.09257485706150895,
+    "visibility": 0.8396090415847483
+   },
+   "unattributed": 2.6153205599863774e-06,
+   "unstable": false
+  },
+  "normalization/block_heavy/mix90/x86_64-linux-mars": {
+   "bench": "normalization",
+   "cell": "block_heavy",
+   "kept": 2244,
+   "leaves": 22440,
+   "mix": 90,
+   "pass_secs": {
+    "max": 0.019188857142857146,
+    "median": 0.019163044714285715,
+    "min": 0.01914268114285714
+   },
+   "platform": "x86_64-linux-mars",
+   "promoted": 2244,
+   "stage_ns": {
+    "bounds": 22.658167812579574,
+    "records": 111.56547619047618,
+    "transform": 167.68089508530684,
+    "visibility": 823.7742010440543
+   },
+   "stage_share": {
+    "bounds": 0.002653280276151762,
+    "records": 0.013064360716373782,
+    "transform": 0.01963549812577129,
+    "visibility": 0.964642798002134
+   },
+   "unattributed": 4.0628795692515955e-06,
+   "unstable": false
+  },
+  "normalization/large_industrial/mix0/x86_64-linux-mars": {
+   "bench": "normalization",
+   "cell": "large_industrial",
+   "kept": 1025000,
+   "leaves": 1025000,
+   "mix": 0,
+   "pass_secs": {
+    "max": 0.772904193,
+    "median": 0.772014974,
+    "min": 0.767231168
+   },
+   "platform": "x86_64-linux-mars",
+   "promoted": 1025000,
+   "stage_ns": {
+    "bounds": 49.419374634146344,
+    "records": 134.57247512195121,
+    "transform": 197.42016682926828,
+    "visibility": 371.14573951219506
+   },
+   "stage_share": {
+    "bounds": 0.06561382966128841,
+    "records": 0.17867112898771315,
+    "transform": 0.2621136607643053,
+    "visibility": 0.4927681402718492
+   },
+   "unattributed": 0.0008332403148440519,
+   "unstable": false
+  },
+  "normalization/large_industrial/mix50/x86_64-linux-mars": {
+   "bench": "normalization",
+   "cell": "large_industrial",
+   "kept": 462536,
+   "leaves": 1025000,
+   "mix": 50,
+   "pass_secs": {
+    "max": 0.622700343,
+    "median": 0.621347987,
+    "min": 0.620700824
+   },
+   "platform": "x86_64-linux-mars",
+   "promoted": 462536,
+   "stage_ns": {
+    "bounds": 52.0977934690489,
+    "records": 154.2448998564436,
+    "transform": 202.27477428783922,
+    "visibility": 421.17103317073173
+   },
+   "stage_share": {
+    "bounds": 0.038781979670274525,
+    "records": 0.11482103506034212,
+    "transform": 0.1505748259549765,
+    "visibility": 0.6947802488012245
+   },
+   "unattributed": 0.001041910513182631,
+   "unstable": false
+  },
+  "normalization/large_industrial/mix90/x86_64-linux-mars": {
+   "bench": "normalization",
+   "cell": "large_industrial",
+   "kept": 92516,
+   "leaves": 1025000,
+   "mix": 90,
+   "pass_secs": {
+    "max": 0.419221317,
+    "median": 0.41902507,
+    "min": 0.415982492
+   },
+   "platform": "x86_64-linux-mars",
+   "promoted": 92516,
+   "stage_ns": {
+    "bounds": 49.034588611699604,
+    "records": 165.96860002594147,
+    "transform": 180.97681482122013,
+    "visibility": 372.563876097561
+   },
+   "stage_share": {
+    "bounds": 0.010826283019295243,
+    "records": 0.0366439912533157,
+    "transform": 0.03995763547035503,
+    "visibility": 0.9113487481787187
+   },
+   "unattributed": 0.0012233420783152571,
+   "unstable": false
+  },
+  "normalization/paper_space/mix0/x86_64-linux-mars": {
+   "bench": "normalization",
+   "cell": "paper_space",
+   "kept": 2000,
+   "leaves": 2000,
+   "mix": 0,
+   "pass_secs": {
+    "max": 0.0008213291245674736,
+    "median": 0.0008212907266435979,
+    "min": 0.0008210347543252597
+   },
+   "platform": "x86_64-linux-mars",
+   "promoted": 2000,
+   "stage_ns": {
+    "bounds": 21.94578719723182,
+    "records": 94.09136678200696,
+    "transform": 160.98310726643598,
+    "visibility": 133.5812474048443
+   },
+   "stage_share": {
+    "bounds": 0.05344218919144152,
+    "records": 0.2291304740929779,
+    "transform": 0.3920246559323327,
+    "visibility": 0.32529588627100714
+   },
+   "unattributed": 0.000106794512240809,
+   "unstable": false
+  },
+  "normalization/paper_space/mix50/x86_64-linux-mars": {
+   "bench": "normalization",
+   "cell": "paper_space",
+   "kept": 990,
+   "leaves": 2000,
+   "mix": 50,
+   "pass_secs": {
+    "max": 0.0006465645396419429,
+    "median": 0.0006416900230179027,
+    "min": 0.0006276097493606141
+   },
+   "platform": "x86_64-linux-mars",
+   "promoted": 990,
+   "stage_ns": {
+    "bounds": 22.920605027254656,
+    "records": 100.13520369939808,
+    "transform": 167.45302901134087,
+    "visibility": 176.94570460358057
+   },
+   "stage_share": {
+    "bounds": 0.03536193202796459,
+    "records": 0.1544886909666637,
+    "transform": 0.2583466982103949,
+    "visibility": 0.5514990049912118
+   },
+   "unattributed": 0.00030367380376487726,
+   "unstable": false
+  },
+  "normalization/paper_space/mix90/x86_64-linux-mars": {
+   "bench": "normalization",
+   "cell": "paper_space",
+   "kept": 196,
+   "leaves": 2000,
+   "mix": 90,
+   "pass_secs": {
+    "max": 0.0004251916373626375,
+    "median": 0.00042393089890109856,
+    "min": 0.00041557950769230764
+   },
+   "platform": "x86_64-linux-mars",
+   "promoted": 196,
+   "stage_ns": {
+    "bounds": 23.809845256784033,
+    "records": 102.40030275846598,
+    "transform": 170.45733348284378,
+    "visibility": 182.85999450549465
+   },
+   "stage_share": {
+    "bounds": 0.01100823196050732,
+    "records": 0.04734370481766108,
+    "transform": 0.07880915840114716,
+    "visibility": 0.8626877398156116
+   },
+   "unattributed": 0.00015116500507287334,
+   "unstable": false
+  },
+  "normalization/pdf_clip/x86_64-linux-mars": {
+   "bench": "normalization",
+   "cell": "pdf_clip",
+   "clips": 200,
+   "entities": 20200,
+   "ns_per_entity": {
+    "max": 55.96201000000001,
+    "median": 52.149680000000004,
+    "min": 51.743919999999996
+   },
+   "platform": "x86_64-linux-mars",
+   "stage_ns": {
+    "clip": 52.149680000000004
+   },
+   "unstable": false
+  },
+  "normalization/transform/identity/x86_64-linux-mars": {
+   "bench": "normalization",
+   "cell": "large_industrial",
+   "class": "identity",
+   "entities": 200000,
+   "geometry": 200000,
+   "identity_bounds_moved": 9948,
+   "identity_max_ulps": 4,
+   "ns_per_entity": {
+    "max": 166.7406,
+    "median": 166.501675,
+    "min": 165.990175
+   },
+   "platform": "x86_64-linux-mars",
+   "refused": 0,
+   "stage_ns": {
+    "transform": 166.501675
+   },
+   "unstable": false
+  },
+  "normalization/transform/non_uniform_scale/x86_64-linux-mars": {
+   "bench": "normalization",
+   "cell": "large_industrial",
+   "class": "non_uniform_scale",
+   "entities": 200000,
+   "geometry": 200000,
+   "identity_bounds_moved": null,
+   "identity_max_ulps": null,
+   "ns_per_entity": {
+    "max": 164.81580499999998,
+    "median": 164.37877,
+    "min": 164.25767000000002
+   },
+   "platform": "x86_64-linux-mars",
+   "refused": 0,
+   "stage_ns": {
+    "transform": 164.37877
+   },
+   "unstable": false
+  },
+  "normalization/transform/reflection/x86_64-linux-mars": {
+   "bench": "normalization",
+   "cell": "large_industrial",
+   "class": "reflection",
+   "entities": 200000,
+   "geometry": 200000,
+   "identity_bounds_moved": null,
+   "identity_max_ulps": null,
+   "ns_per_entity": {
+    "max": 165.498315,
+    "median": 165.15547500000002,
+    "min": 164.83445
+   },
+   "platform": "x86_64-linux-mars",
+   "refused": 0,
+   "stage_ns": {
+    "transform": 165.15547500000002
+   },
+   "unstable": false
+  },
+  "normalization/transform/rotation/x86_64-linux-mars": {
+   "bench": "normalization",
+   "cell": "large_industrial",
+   "class": "rotation",
+   "entities": 200000,
+   "geometry": 200000,
+   "identity_bounds_moved": null,
+   "identity_max_ulps": null,
+   "ns_per_entity": {
+    "max": 204.93332,
+    "median": 204.14545999999999,
+    "min": 203.54214
+   },
+   "platform": "x86_64-linux-mars",
+   "refused": 0,
+   "stage_ns": {
+    "transform": 204.14545999999999
+   },
+   "unstable": false
+  },
+  "normalization/transform/shear/x86_64-linux-mars": {
+   "bench": "normalization",
+   "cell": "large_industrial",
+   "class": "shear",
+   "entities": 200000,
+   "geometry": 200000,
+   "identity_bounds_moved": null,
+   "identity_max_ulps": null,
+   "ns_per_entity": {
+    "max": 219.53782000000004,
+    "median": 218.89673,
+    "min": 218.81247
+   },
+   "platform": "x86_64-linux-mars",
+   "refused": 0,
+   "stage_ns": {
+    "transform": 218.89673
+   },
+   "unstable": false
+  },
+  "normalization/transform/singular/x86_64-linux-mars": {
+   "bench": "normalization",
+   "cell": "large_industrial",
+   "class": "singular",
+   "entities": 200000,
+   "geometry": 0,
+   "identity_bounds_moved": null,
+   "identity_max_ulps": null,
+   "ns_per_entity": {
+    "max": 25.245990000000003,
+    "median": 24.84054,
+    "min": 24.630039999999997
+   },
+   "platform": "x86_64-linux-mars",
+   "refused": 200000,
+   "stage_ns": {
+    "transform": 24.84054
+   },
+   "unstable": false
+  },
+  "normalization/transform/translation/x86_64-linux-mars": {
+   "bench": "normalization",
+   "cell": "large_industrial",
+   "class": "translation",
+   "entities": 200000,
+   "geometry": 200000,
+   "identity_bounds_moved": null,
+   "identity_max_ulps": null,
+   "ns_per_entity": {
+    "max": 166.98027,
+    "median": 166.545855,
+    "min": 165.68281000000002
+   },
+   "platform": "x86_64-linux-mars",
+   "refused": 0,
+   "stage_ns": {
+    "transform": 166.545855
+   },
+   "unstable": false
+  },
+  "normalization/transform/uniform_scale/x86_64-linux-mars": {
+   "bench": "normalization",
+   "cell": "large_industrial",
+   "class": "uniform_scale",
+   "entities": 200000,
+   "geometry": 200000,
+   "identity_bounds_moved": null,
+   "identity_max_ulps": null,
+   "ns_per_entity": {
+    "max": 166.821915,
+    "median": 166.564995,
+    "min": 166.303495
+   },
+   "platform": "x86_64-linux-mars",
+   "refused": 0,
+   "stage_ns": {
+    "transform": 166.564995
+   },
+   "unstable": false
+  },
   "provider/block_heavy/x86_64-linux-mars": {
    "advanced_curve_share": 0.0,
    "allocated_bytes": 68651353,

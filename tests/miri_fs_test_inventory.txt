@@ -588,6 +588,9 @@ annotated   not-detected tests/pvec_1429_bench_corpus.rs::two_corpus_revisions_t
 annotated   fs-detected  tests/pvec_1430_convert_spline.rs::no_spline_is_reported_as_an_unmapped_source_class
 annotated   fs-detected  tests/pvec_1430_convert_spline.rs::planar_splines_are_written_and_a_3d_one_is_refused_by_name
 annotated   fs-detected  tests/pvec_1433_bench_harness.rs::the_document_and_the_baseline_describe_the_same_rows
+annotated   not-detected tests/pvec_1436_normalization_mix.rs::a_fifty_percent_mix_keeps_about_half
+annotated   not-detected tests/pvec_1436_normalization_mix.rs::a_ninety_percent_mix_keeps_about_a_tenth
+annotated   not-detected tests/pvec_1436_normalization_mix.rs::a_zero_mix_hides_nothing_and_is_the_pinned_cell
 annotated   fs-detected  tests/pvec_api_surface.rs::no_index_directory_or_straddler_type_is_defined_under_src_pvec
 annotated   fs-detected  tests/pvec_api_surface.rs::no_pvec_path_under_src_is_outside_the_allowed_surface
 annotated   fs-detected  tests/pvec_api_surface.rs::no_writer_call_is_made_outside_the_funnel
@@ -607,6 +610,7 @@ annotated   fs-detected  tests/pvec_dwg_spline_structural.rs::no_code_path_turns
 annotated   fs-detected  tests/pvec_fidelity_1100.rs::there_is_one_enum_for_the_six_classes
 annotated   fs-detected  tests/pvec_known_truth.rs::n2_1_1050_a_failing_run_leaves_no_state_behind
 annotated   fs-detected  tests/pvec_known_truth.rs::n2_1_1050_a_vendored_file_that_moved_is_caught_by_the_pin
+annotated   fs-detected  tests/pvec_normalization_bench.rs::normalization_bench
 annotated   fs-detected  tests/pvec_pdf_vector.rs::n5_1_no_lopdf_type_in_any_public_signature
 annotated   fs-detected  tests/pvec_provider_acadrust.rs::open_works_from_bytes_and_from_a_path_alike
 annotated   fs-detected  tests/pvec_provider_acadrust.rs::the_fixtures_are_the_ones_n1_4_recorded_and_say_what_they_are

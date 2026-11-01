@@ -797,14 +797,30 @@ pub fn baseline_rows() -> Value {
 /// that grew by more than 10% in nanoseconds per entity is a regression. The rows carry
 /// `stage_ns` (stage name to nanoseconds per entity). An unstable row on either side never gates.
 pub fn stage_regressions(base: &Value, cur: &Value) -> Vec<String> {
-    let _ = (base, cur);
-    unimplemented!()
+    let flag = |r: &Value| r["unstable"].as_bool().unwrap_or(false);
+    if flag(base) || flag(cur) {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let Some(stages) = cur["stage_ns"].as_object() else {
+        return vec!["the row has no stage_ns".into()];
+    };
+    for (name, now) in stages {
+        let (Some(now), Some(was)) = (now.as_f64(), base["stage_ns"][name].as_f64()) else {
+            continue;
+        };
+        if now > was * 1.10 {
+            out.push(format!(
+                "stage {name} grew from {was:.1} to {now:.1} ns per entity, more than 10%"
+            ));
+        }
+    }
+    out
 }
 
 /// The stages' share of a pass: the sum of the stage times against the pass total, as a fraction
 /// of the total that no stage accounts for (it can be negative if the timers overlap). Printed,
 /// never spread over the stages.
 pub fn unattributed(stage_secs: &[f64], total_secs: f64) -> f64 {
-    let _ = (stage_secs, total_secs);
-    unimplemented!()
+    (total_secs - stage_secs.iter().sum::<f64>()) / total_secs
 }
