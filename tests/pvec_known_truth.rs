@@ -32,11 +32,7 @@ use serde_json::{Value, json};
 /// Disagreements that are known and recorded, one per line: fixture, the text of the problem, and
 /// where it is written down. A gap is waived only while it is still real: when a fix makes the
 /// problem disappear the suite fails until its row is deleted, so this list cannot go stale.
-const KNOWN_GAPS: &[(&str, &str, &str)] = &[(
-    "bezier-d3-001",
-    "the mapping lands in Some(BSpline), the truth is bezier",
-    "docs/spikes/dwg-mapping.md M21: a single-span SPLINE maps to a B-spline and is graded equivalent (#1375)",
-)];
+const KNOWN_GAPS: &[(&str, &str, &str)] = &[];
 
 /// Runs one fixture against `truth` and returns every disagreement that is not a recorded gap,
 /// each naming the property, plus a line for every recorded gap that no longer exists.

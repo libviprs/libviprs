@@ -275,8 +275,12 @@ impl Normalized2DGeometry {
         Self::from_curve(Curve::RationalBSpline(s), fidelity)
     }
 
-    /// The record for an extracted spline (#1374): the constructor its form calls for, with the
-    /// class that goes with it. A rational spline and a plain one pass through whole
+    /// The record for an extracted spline (#1374, #1375): the constructor its form calls for, with
+    /// the class that goes with it. A rational spline and a plain one pass through whole
+    /// (`SupportedExact`). A non-rational, non-periodic spline of one span (`degree + 1` control
+    /// points, knots `0` repeated `degree + 1` times and then `1` repeated `degree + 1` times) is
+    /// the Bezier it is (profile section 10): the control points and the degree go through
+    /// unchanged and the knot array, which a Bezier does not carry, is the only thing dropped
     /// (`SupportedExact`). A non-rational periodic spline of one period (`n + 1` knots) is
     /// unwrapped by PVec's `BSpline::from_periodic` into the clamped, closed curve, which is the
     /// same locus under a different knot vector, so it is `SupportedEquivalent`.
@@ -285,6 +289,12 @@ impl Normalized2DGeometry {
         use super::dwg_spline::SplineForm;
         let degree = s.degree as usize;
         let pts: Vec<[f64; 2]> = s.control_points.iter().map(|p| [p[0], p[1]]).collect();
+        // One span: `degree + 1` points, knots `0` and `1`, each `degree + 1` times.
+        let n = pts.len();
+        let single_span = n == degree + 1
+            && s.knots.len() == 2 * n
+            && s.knots[..n].iter().all(|k| *k == 0.0)
+            && s.knots[n..].iter().all(|k| *k == 1.0);
         match &s.form {
             SplineForm::Rational(w) => {
                 Self::rational_b_spline(degree, &pts, &s.knots, w, FidelityClass::SupportedExact)
@@ -297,6 +307,11 @@ impl Normalized2DGeometry {
                 )
                 .map_err(refuse("knots"))?;
                 Self::from_curve(Curve::BSpline(un.curve), FidelityClass::SupportedEquivalent)
+            }
+            SplineForm::NonRational if !s.periodic && single_span => {
+                let b = pvec_geometry::Bezier::new(points("control_points", &pts)?)
+                    .map_err(refuse("control_points"))?;
+                Self::from_curve(Curve::Bezier(b), FidelityClass::SupportedExact)
             }
             SplineForm::NonRational => {
                 Self::b_spline(degree, &pts, &s.knots, FidelityClass::SupportedExact)
