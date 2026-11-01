@@ -97,7 +97,13 @@ fn the_counts_per_outcome_add_up_to_the_images_on_the_page() {
     assert_eq!(r.images, 6);
     assert_eq!(r.written, 4);
     assert_eq!(r.images, r.written + r.refused_total());
-    assert_eq!(r.refused.get("filter-not-enabled:JPXDecode"), Some(&1));
+    // With `jp2k` the three-byte JPX stream is tried and refused (#1364), without it never tried.
+    let jpx_reason = if cfg!(feature = "jp2k") {
+        "decode-failed"
+    } else {
+        "filter-not-enabled:JPXDecode"
+    };
+    assert_eq!(r.refused.get(jpx_reason), Some(&1));
     assert_eq!(r.refused.get("filter-not-enabled:JBIG2Decode"), Some(&1));
     assert_eq!(r.colour_approximated, 1);
     assert_eq!(r.bit_depth_reduced, 1);
@@ -121,18 +127,18 @@ fn the_counts_per_outcome_add_up_to_the_images_on_the_page() {
 #[test]
 fn every_refusal_keeps_its_source_chain() {
     use std::error::Error;
-    let jpx = image(
+    let jbig2 = image(
         1,
         1,
-        dictionary! { "ColorSpace" => "DeviceGray", "BitsPerComponent" => 8, "Filter" => "JPXDecode" },
+        dictionary! { "ColorSpace" => "DeviceGray", "BitsPerComponent" => 8, "Filter" => "JBIG2Decode" },
         vec![1],
     );
     let b = bake_page_images(
-        &page(&one(jpx, "q 4 0 0 4 0 0 cm /Im1 Do Q")),
+        &page(&one(jbig2, "q 4 0 0 4 0 0 cm /Im1 Do Q")),
         &PdfImageOptions::default(),
     );
     let e = &b.refused[0].error;
-    assert!(e.to_string().contains("JPXDecode"));
+    assert!(e.to_string().contains("JBIG2Decode"));
     // A refusal that wraps another error exposes it; a leaf has no source and says so.
     assert!(e.source().is_none());
 
