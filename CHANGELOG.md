@@ -16,6 +16,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The DWG to PDF differential, with LibreDWG as the first real exporter** (issue #1405, part of #1086).
+  `tools/dwg-pdf-export/` builds LibreDWG 0.14 `dwg2SVG` plus `rsvg-convert` and `qpdf` into a pinned image and
+  exports DWGs to vector PDFs in a container on MARS. Six `REAL_WORLD_DIFFERENTIAL` pairs are committed under
+  `tests/fixtures/pvec/pdf_loss/` with the exporter, versions and options, and
+  `tests/pvec_dwg_pdf_differential.rs` asserts that each pair measures exactly its recorded loss
+  (`expected_loss.toml`, a written reason per entry): primitive counts, N3.5 buckets, extent aspect with
+  `/Rotate` composed, and entities outside the page. The exporter is a script, not a trait, while it has one
+  backend. See `docs/pvec-dwg-pdf-differential.md`.
 - **The provider xref facet and xref open-and-flatten** (issue #1378, part of #1079). `DwgProvider::xref_blocks`
   and `Facet::XrefAttachments` surface the drawing's xref block records (acadrust fills them),
   `XrefRef::discover` builds the references from INSERTs so nobody hand-builds one, and
