@@ -75,6 +75,10 @@ pub struct PdfVectorLimits {
     /// Most bytes of encoded image data kept for the bake across the page, so that a page of
     /// many large images cannot be held in memory twice (issue #1332).
     pub max_image_bytes: u64,
+    /// Most encoded bytes one image stream may hold. `max_image_bytes` is a page total, so this
+    /// is the cap on any one stream; an image over it is refused alone and the page converts
+    /// (issue #1362).
+    pub max_image_stream_bytes: u64,
 }
 
 impl Default for PdfVectorLimits {
@@ -88,6 +92,7 @@ impl Default for PdfVectorLimits {
             max_segments_per_path: 1_000_000,
             max_images: 4_096,
             max_image_bytes: 512 << 20,
+            max_image_stream_bytes: 64 << 20,
         }
     }
 }
@@ -265,6 +270,9 @@ pub struct PdfImagePlacement {
     /// painted before the image, so an image painted first has sequence 0 and one painted after
     /// `n` paths has sequence `n`.
     pub provenance: PdfProvenance,
+    /// The encoded size and the cap, when the stream was over
+    /// [`PdfVectorLimits::max_image_stream_bytes`] and its bytes were not kept.
+    pub(crate) stream_over_cap: Option<(u64, u64)>,
     /// The encoded image, with its dictionary resolved one level deep.
     pub(crate) raw: Option<RawImage>,
 }
@@ -1513,7 +1521,11 @@ impl Run<'_> {
         }
         let inline = name.is_none();
         let raw = stream.map(|s| image_stream(self.doc, s, inline));
-        let kept = raw.as_ref().map_or(0, RawImage::byte_len);
+        let held = raw.as_ref().map_or(0, RawImage::byte_len);
+        // One stream over its cap is refused alone by the bake, and its bytes are not kept.
+        let cap = self.limits.max_image_stream_bytes;
+        let over = (held > cap).then_some((held, cap));
+        let kept = if over.is_some() { 0 } else { held };
         self.image_bytes = self.image_bytes.saturating_add(kept);
         if self.image_bytes > self.limits.max_image_bytes {
             return Err(PdfVectorError::ImageBytesExceeded {
@@ -1581,7 +1593,8 @@ impl Run<'_> {
                 form_path: self.form_path.clone(),
                 sequence: self.out.len() as u64,
             },
-            raw,
+            stream_over_cap: over,
+            raw: if over.is_some() { None } else { raw },
         });
         Ok(())
     }

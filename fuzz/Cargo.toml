@@ -14,7 +14,9 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = { workspace = true }
 arbitrary = { workspace = true }
-libviprs = { workspace = true }
+libviprs = { workspace = true, features = ["pvec-raster"] }
+lopdf = { workspace = true }
+flate2 = { workspace = true }
 
 [[bin]]
 name = "fuzz_decode"
@@ -64,4 +66,9 @@ doc = false
 [[bin]]
 name = "fuzz_pvec_pdf_vector"
 path = "fuzz_targets/fuzz_pvec_pdf_vector.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_pvec_pdf_image"
+path = "fuzz_targets/fuzz_pvec_pdf_image.rs"
 doc = false
