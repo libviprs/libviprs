@@ -1817,13 +1817,9 @@ mod tests {
         let im = ramp_multi8(6, 4, 5);
         let bytes = rgb_plus_extra_multiband8(&im, 5);
 
-        // Invariant pin: the raw `tiff` crate must still refuse RGB+extra.
-        let mut raw = Decoder::new(Cursor::new(&bytes)).unwrap();
-        assert!(
-            raw.read_image().is_err(),
-            "tiff crate unexpectedly accepts RGB+extra; revisit the encode layout"
-        );
-
+        // `tiff` 0.10 refused RGB+extra here and this test pinned that. 0.11
+        // reads it (#1367), so the pin is gone; the decode below must stay
+        // byte-exact either way.
         // Our decode path relabels the photometric and recovers the exact
         // N-band samples vips stored.
         let back = Raster::tiff_load(&bytes).unwrap();
