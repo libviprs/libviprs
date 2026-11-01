@@ -15,9 +15,9 @@
 //!   calls converter agreement source truth or exactness.
 //!
 //! Set `PVEC_CONFORMANCE_REPORT_DIR` to also write the report to
-//! `<dir>/dual-oracle.txt` (the local gate collects it). Needs `--features pvec-conformance`.
+//! `<dir>/dual-oracle.txt` (the local gate collects it). Needs `--features dwg-acadrust`.
 
-#![cfg(feature = "pvec-conformance")]
+#![cfg(feature = "dwg-acadrust")]
 
 #[path = "common/pvec_gold_decode.rs"]
 mod decode;
