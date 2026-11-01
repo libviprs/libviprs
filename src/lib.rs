@@ -77,9 +77,10 @@
 //!   tiles (untouched) and placement to PVec's writer and reads them back through its
 //!   reader (issue #1328). Pure Rust; the PVec facade is a git dependency pinned by
 //!   revision.
-//! - **`pvec-conformance`** — enables `dwg-acadrust`, `pvec-normalized` and `pvec-spline`
-//!   together so the PVec conformance suites in `tests/` (known truth over the pinned
-//!   `pvec-gold-fixtures` corpus, issue #1050) have a CI cell. Adds no crate and no code.
+//! - **`pvec-write`** — gates `pvec::writer`, the one funnel that writes normalized geometry into a
+//!   PVec artifact through the facade's `PvecWriter`, and `pvec::publish`, the atomic publish of
+//!   the artifact and its report (issue #1314). Pure Rust; the PVec facade is a git dependency
+//!   pinned by revision.
 //! - **`serde`** — adds public `Serialize` / `Deserialize` derives to the wire
 //!   and config types ([`PyramidPlan`], [`EngineConfig`], [`TileCoord`],
 //!   [`Layout`], and the rest) so an out-of-process caller can rebuild a job

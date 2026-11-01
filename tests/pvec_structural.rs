@@ -12,9 +12,9 @@
 //! the fixture may claim instead. Structural exactness is never asserted on a property the decoder
 //! does not expose, and the record says which class applies instead of skipping quietly.
 //!
-//! Needs `--features pvec-conformance`.
+//! Needs `--features dwg-acadrust`.
 
-#![cfg(feature = "pvec-conformance")]
+#![cfg(feature = "dwg-acadrust")]
 
 #[path = "common/pvec_gold_decode.rs"]
 mod decode;

@@ -17,9 +17,9 @@
 //! Nothing here runs a converter or needs one: the corpus is read from the repository, into
 //! memory, and nothing is written, so a failing run leaves nothing behind.
 //!
-//! Needs `--features pvec-conformance`.
+//! Needs `--features dwg-acadrust`.
 
-#![cfg(feature = "pvec-conformance")]
+#![cfg(feature = "dwg-acadrust")]
 
 #[path = "common/pvec_gold.rs"]
 mod pvec_gold;

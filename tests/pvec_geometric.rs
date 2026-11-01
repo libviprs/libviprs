@@ -10,9 +10,9 @@
 //! The expectations are the pinned corpus' `expected.math.json` records. The few numbers computed
 //! in this file are labelled `truth side`: they turn a truth record's parameters into points.
 //!
-//! Needs `--features pvec-conformance`.
+//! Needs `--features dwg-acadrust`.
 
-#![cfg(feature = "pvec-conformance")]
+#![cfg(feature = "dwg-acadrust")]
 
 #[path = "common/pvec_gold_decode.rs"]
 mod decode;
