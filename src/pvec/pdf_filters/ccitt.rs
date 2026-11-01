@@ -66,7 +66,10 @@ fn int(parms: Option<&Dictionary>, key: &[u8], default: i64) -> Result<i64, PdfI
     match parms.and_then(|d| d.get(key).ok()) {
         None => Ok(default),
         Some(o) => o.as_i64().map_err(|_| {
-            parms_err(&format!("/{} is not an integer", String::from_utf8_lossy(key)))
+            parms_err(&format!(
+                "/{} is not an integer",
+                String::from_utf8_lossy(key)
+            ))
         }),
     }
 }
@@ -75,7 +78,10 @@ fn flag(parms: Option<&Dictionary>, key: &[u8], default: bool) -> Result<bool, P
     match parms.and_then(|d| d.get(key).ok()) {
         None => Ok(default),
         Some(o) => o.as_bool().map_err(|_| {
-            parms_err(&format!("/{} is not a boolean", String::from_utf8_lossy(key)))
+            parms_err(&format!(
+                "/{} is not a boolean",
+                String::from_utf8_lossy(key)
+            ))
         }),
     }
 }

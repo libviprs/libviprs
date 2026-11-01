@@ -122,12 +122,9 @@ fn the_pixel_budget_is_the_one_the_dct_decoder_runs_under() {
 }
 
 #[test]
-fn the_three_codec_names_report_filter_not_enabled_and_the_error_names_the_feature() {
-    for (filter, feature) in [
-        ("CCITTFaxDecode", "ccitt"),
-        ("JBIG2Decode", "jbig2"),
-        ("JPXDecode", "jp2k"),
-    ] {
+fn the_codec_names_without_a_codec_report_filter_not_enabled_and_the_error_names_the_feature() {
+    // CCITTFaxDecode left this list when #1363 gave it a decoder with no feature.
+    for (filter, feature) in [("JBIG2Decode", "jbig2"), ("JPXDecode", "jp2k")] {
         let e = refused(&filtered(name(filter), vec![0u8; 4]));
         let reason = format!("filter-not-enabled:{filter}");
         assert_eq!(e.reason(), reason);
@@ -149,12 +146,12 @@ fn the_three_codec_names_report_filter_not_enabled_and_the_error_names_the_featu
 #[test]
 fn a_codec_after_flate_is_also_not_enabled_and_is_counted_in_the_report() {
     let bytes = filtered(
-        Object::Array(vec![name("FlateDecode"), name("CCITTFaxDecode")]),
+        Object::Array(vec![name("FlateDecode"), name("JBIG2Decode")]),
         flate(&[0u8; 4]),
     );
     let b = bake(&bytes);
     assert_eq!(
-        b.report.refused.get("filter-not-enabled:CCITTFaxDecode"),
+        b.report.refused.get("filter-not-enabled:JBIG2Decode"),
         Some(&1)
     );
     assert!(b.report.written_by_filter.is_empty());

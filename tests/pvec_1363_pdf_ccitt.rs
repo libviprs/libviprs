@@ -70,10 +70,7 @@ fn ccitt(w: i64, h: i64, parms: Dictionary, extra: Dictionary, data: &[u8]) -> V
 }
 
 fn bake(bytes: &[u8]) -> PdfImageBake {
-    // One tile per image, so a tile read back is the whole picture.
-    let mut options = PdfImageOptions::default();
-    options.tile_edge = 2048;
-    bake_page_images(&page(bytes), &options)
+    bake_page_images(&page(bytes), &PdfImageOptions::default())
 }
 
 fn through_pvec(b: &PdfImageBake) -> PvecReader {
@@ -102,25 +99,34 @@ fn through_pvec(b: &PdfImageBake) -> PvecReader {
     PvecReader::open(w.finish().unwrap()).unwrap()
 }
 
-fn tile_bytes(reader: &PvecReader, p: &RasterPyramid) -> Vec<u8> {
+fn tile_bytes(reader: &PvecReader, p: &RasterPyramid, col: u32, row: u32) -> Vec<u8> {
     reader
-        .raster_tile(RasterId::new(0).unwrap(), u32::from(p.levels) - 1, 0, 0)
+        .raster_tile(RasterId::new(0).unwrap(), u32::from(p.levels) - 1, col, row)
         .unwrap()
         .expect("a stored tile")
 }
 
-/// The gray samples of the one raster `b` wrote, read back through PVec.
+/// The gray samples of the one raster `b` wrote, every tile of the full resolution level read
+/// back through PVec and stitched.
 fn luma(b: &PdfImageBake) -> Vec<u8> {
     assert!(b.refused.is_empty(), "{:?}", b.refused);
     assert_eq!(b.written.len(), 1);
     let p = &b.written[0].pyramid;
-    let t = image::load_from_memory(&tile_bytes(&through_pvec(b), p))
-        .unwrap()
-        .to_luma8();
-    let stride = t.width() as usize;
-    let mut out = Vec::new();
-    for y in 0..p.height as usize {
-        out.extend_from_slice(&t.as_raw()[y * stride..y * stride + p.width as usize]);
+    let reader = through_pvec(b);
+    let (w, h, edge) = (p.width as usize, p.height as usize, p.tile_edge as usize);
+    let mut out = vec![0u8; w * h];
+    for row in 0..h.div_ceil(edge) {
+        for col in 0..w.div_ceil(edge) {
+            let t = image::load_from_memory(&tile_bytes(&reader, p, col as u32, row as u32))
+                .unwrap()
+                .to_luma8();
+            for y in 0..edge.min(h - row * edge) {
+                let n = edge.min(w - col * edge);
+                let at = (row * edge + y) * w + col * edge;
+                let from = y * t.width() as usize;
+                out[at..at + n].copy_from_slice(&t.as_raw()[from..from + n]);
+            }
+        }
     }
     out
 }
@@ -312,7 +318,7 @@ fn the_written_image_is_bilevel_with_one_bit_tiles_and_counted_by_filter() {
     assert_eq!(b.report.written_by_filter.get("CCITTFaxDecode"), Some(&1));
     assert!(b.report.refused.is_empty());
     // The tile is a PNG of one bit per sample: IHDR bit depth is byte 24 of the file.
-    let bytes = tile_bytes(&through_pvec(&b), &b.written[0].pyramid);
+    let bytes = tile_bytes(&through_pvec(&b), &b.written[0].pyramid, 0, 0);
     assert_eq!(&bytes[1..4], b"PNG");
     assert_eq!(bytes[24], 1, "bit depth");
 }

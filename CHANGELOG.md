@@ -16,6 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`CCITTFaxDecode` images in a PDF** (issue #1363, follow-up 2/6 to #1332). Decoded through
+  `hayro-ccitt` (plain Rust, no dependencies, in every build, no feature) into 1-bit samples that
+  reach the 1-bit PNG tiles and the `Bilevel` note. `usace_swf_gpw_daca67-06-d-0029.pdf` now
+  converts to seven underlays. **Changed report key:** `filter-not-enabled:CCITTFaxDecode` is gone;
+  a fax stream is written (`written_by_filter["CCITTFaxDecode"]`) or refused as `decode-failed`.
+
 - **The PDF filter seam** (issue #1362, follow-up 1/6 to #1332, part of #1329). The image decoder
   now goes through `FilterInput`, `FilterOutput` and one `decode_filter` `match`, with a module per
   codec under `src/pvec/pdf_filters/` (`dct` moved in, `ccitt`, `jbig2` and `jpx` are stubs). No
