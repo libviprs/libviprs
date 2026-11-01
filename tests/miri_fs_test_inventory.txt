@@ -494,6 +494,7 @@ annotated   fs-detected  tests/pmtiles_writer.rs::two_entries_at_one_offset_are_
 annotated   fs-detected  tests/pmtiles_writer.rs::two_orders_stop_agreeing_once_the_window_cannot_hold_the_tile_set
 annotated   fs-detected  tests/pmtiles_writer.rs::two_shuffled_insertion_orders_produce_a_byte_identical_archive
 annotated   fs-detected  tests/pvec_1079_provider_default.rs::no_code_in_src_pvec_names_acadsharp
+annotated   fs-detected  tests/pvec_1079_provider_default.rs::nothing_that_builds_or_runs_libredwg_lives_in_libviprs
 annotated   fs-detected  tests/pvec_1085_fill_policy.rs::n5_6_the_doc_has_a_row_for_every_construct_and_reason
 annotated   fs-detected  tests/pvec_1089_mapping.rs::the_doc_is_the_rendered_table_byte_for_byte
 annotated   fs-detected  tests/pvec_1093_report.rs::issue_1093_the_doc_names_every_field
@@ -580,6 +581,12 @@ annotated   fs-detected  tests/pvec_api_surface.rs::the_facade_is_named_by_the_f
 annotated   fs-detected  tests/pvec_api_surface.rs::the_pvec_dependencies_stay_semantic_and_optional
 annotated   fs-detected  tests/pvec_dual_oracle.rs::n2_2_1050_every_fixture_that_is_not_known_truth_is_executed_and_reported
 annotated   fs-detected  tests/pvec_dual_oracle.rs::n2_2_1050_the_pin_summary_is_the_index_and_a_bump_reads_as_per_class_changes
+annotated   fs-detected  tests/pvec_dwg_pdf_differential.rs::a_loss_entry_that_no_longer_matches_fails_the_run
+annotated   fs-detected  tests/pvec_dwg_pdf_differential.rs::an_injected_extra_difference_fails_the_run
+annotated   fs-detected  tests/pvec_dwg_pdf_differential.rs::every_fixture_has_a_loss_file_with_at_least_one_written_reason
+annotated   fs-detected  tests/pvec_dwg_pdf_differential.rs::every_pair_measures_exactly_its_recorded_loss
+annotated   fs-detected  tests/pvec_dwg_pdf_differential.rs::the_pairs_are_real_world_differential_and_nothing_labels_them_known_truth
+annotated   fs-detected  tests/pvec_dwg_pdf_differential.rs::the_rotated_pair_swaps_the_pdf_extent_and_a_rotation_blind_comparison_would_fail
 annotated   fs-detected  tests/pvec_dwg_spline_structural.rs::no_code_path_turns_a_spline_into_polylines_or_arcs
 annotated   fs-detected  tests/pvec_fidelity_1100.rs::there_is_one_enum_for_the_six_classes
 annotated   fs-detected  tests/pvec_known_truth.rs::n2_1_1050_a_failing_run_leaves_no_state_behind
@@ -792,6 +799,11 @@ annotated   fs-detected  tests/vector_1293_json.rs::every_document_carries_the_f
 annotated   fs-detected  tests/vector_1294_dwg_versions.rs::the_note_and_the_list_in_code_name_the_same_ends
 annotated   fs-detected  tests/vector_1294_dwg_versions.rs::the_note_says_what_the_claim_rests_on
 annotated   fs-detected  tests/vector_1294_dwg_versions.rs::the_note_states_the_range_the_probe_accepts
+annotated   fs-detected  tests/vector_1391_limits.rs::max_block_depth_stops_a_decode_with_nested_blocks
+annotated   fs-detected  tests/vector_1391_limits.rs::max_output_bytes_stops_a_decode_that_emits_a_lot
+annotated   fs-detected  tests/vector_1391_limits.rs::max_polyline_points_stops_a_decode_with_a_long_polyline
+annotated   fs-detected  tests/vector_1391_limits.rs::max_string_bytes_stops_a_decode_with_a_long_string
+annotated   fs-detected  tests/vector_1391_limits.rs::the_provider_docs_carry_the_worker_pattern
 annotated   fs-detected  tests/view_context_spike_doc.rs::n14_a_provider_limitation_names_the_provider_version
 annotated   fs-detected  tests/view_context_spike_doc.rs::n14_diagnostic_names_exist_unless_marked_proposed
 annotated   fs-detected  tests/view_context_spike_doc.rs::n14_every_cited_figure_is_in_the_committed_probe_output

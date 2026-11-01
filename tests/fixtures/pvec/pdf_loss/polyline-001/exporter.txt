@@ -1,0 +1,7 @@
+exporter: LibreDWG dwg2SVG 0.14, rsvg-convert 2.54.7, qpdf 11.3.0
+options: dwg2SVG defaults; rsvg-convert -f pdf; page rotation 0
+platform: linux/amd64 native (MARS)
+provenance: provenance only, nothing in libviprs builds or runs this
+libredwg-tarball: libredwg-0.14.tar.xz from https://ftp.gnu.org/gnu/libredwg/, sha256 62ebb73b984f865960f20ed26619ea5f8789d5e3fd088fa40a2598384da81275
+built-with: ./configure --disable-shared --enable-static --disable-bindings --disable-python --disable-docs --disable-werror --disable-trace, CFLAGS="-O2 -ffp-contract=off"
+base-image: debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 (rsvg-convert and qpdf from its apt packages)
