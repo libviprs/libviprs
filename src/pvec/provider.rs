@@ -415,6 +415,20 @@ pub struct ViewportEntity {
     pub frozen_layers: Vec<String>,
 }
 
+/// The text style a `TEXT` or `MTEXT` entity names, with the fonts its table entry points at
+/// (issue #1381). Nothing is looked up on disk: whether a font is installed is the caller's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextStyleRef {
+    /// The style name the entity used, whether or not the style table has it.
+    pub style_name: String,
+    /// The SHX font file of the style, empty when the table lacks the style or names none.
+    pub font_file: String,
+    /// The SHX big font file, empty when there is none.
+    pub big_font_file: String,
+    /// The TrueType family of the style, empty when there is none.
+    pub true_type_font: String,
+}
+
 /// One vertex of a polyline: position and the bulge toward the next vertex.
 #[derive(Debug, Clone, Copy)]
 pub struct RawVertex {
@@ -699,11 +713,13 @@ pub enum Facet {
     LayerOverride,
     /// Paper-space viewport entities, from [`DwgProvider::viewports`].
     ViewportEntities,
+    /// The text style of `TEXT` and `MTEXT` entities, from [`DwgProvider::text_styles`].
+    TextStyle,
 }
 
 impl Facet {
     /// Every facet.
-    pub const ALL: [Facet; 10] = [
+    pub const ALL: [Facet; 11] = [
         Facet::LayerState,
         Facet::LayoutState,
         Facet::KnotMultiplicity,
@@ -714,6 +730,7 @@ impl Facet {
         Facet::EntityVisibility,
         Facet::LayerOverride,
         Facet::ViewportEntities,
+        Facet::TextStyle,
     ];
 }
 
@@ -923,6 +940,23 @@ pub trait DwgProvider {
     /// [`ProviderError::CannotReport`] with [`Facet::ViewportEntities`] when the caps say so.
     fn viewports(&self) -> Result<Vec<ViewportEntity>, ProviderError> {
         Err(ProviderError::CannotReport(Facet::ViewportEntities))
+    }
+
+    /// The text style of every `TEXT` and `MTEXT` entity of `scope`, by handle. An entity with no
+    /// handle has no entry.
+    ///
+    /// The default says the provider cannot report them.
+    ///
+    /// # Errors
+    ///
+    /// [`ProviderError::CannotReport`] with [`Facet::TextStyle`] when the caps say so, and
+    /// [`ProviderError::NoSuchScope`] as for [`entities`](Self::entities).
+    fn text_styles(
+        &self,
+        scope: &EntityScope,
+    ) -> Result<BTreeMap<ItemHandle, TextStyleRef>, ProviderError> {
+        let _ = scope;
+        Err(ProviderError::CannotReport(Facet::TextStyle))
     }
 
     /// Opens one traversal pass.

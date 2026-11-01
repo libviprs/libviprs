@@ -24,6 +24,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pass, agreement is `DUAL_ORACLE_EQUIVALENT` and never source truth, and every result line records the
   platform and the corpus revision. `docs/pvec-providers.md` records that acadrust is the default
   provider and acadsharp-rs is opt-in, and `tests/pvec_1079_provider_default.rs` enforces it.
+- **The text style across the provider boundary** (issue #1381, part of #1086). `DwgProvider::text_styles`
+  and `Facet::TextStyle` report the style of every `TEXT` and `MTEXT` (`TextStyleRef`: style name, SHX
+  font, big font, TrueType family), the acadrust provider fills it, and `TextReport::bucket_dwg_entities`
+  buckets DWG text by its font so a style that names an SHX font that is not installed reaches
+  `TEXT_SHX_MISSING` through a real drawing. `docs/pvec-text-policy.md` re-takes the DWG text numbers on the
+  four corpus fixtures #1313 names.
+- **Exact clip bounds, form boxes, text clips and the empty clip** (issue #1380, part of #1086).
+  `pdf_clip::AnalyticBounds` answers `ExactBoundsSource` from PVec's closed-form Bezier extrema, so a
+  curve is dropped only when its extent, not its control polygon, lies outside a clip. A Form XObject
+  `/BBox` is recorded as a clip (`PdfVectorPage::form_clips`, `ClipReport::form_clips`, exact when its
+  page-space image is axis aligned), text in render mode 4 to 7 marks later geometry `text_clip` as
+  display fidelity, and an empty path under `W n` is kept as an empty clip that excludes everything
+  after it. New fields: `PdfPathEntity::text_clipped`, `ClipRecord::empty`,
+  `EntityClipDecision::{form_clips, text_clip}`.
+- **Reason codes for the three frozen transform refusals** (issue #1379, part of #1079). `ReasonCode`
+  gains `TransformNonFinite`, `TransformSingular` and `TransformConicIllConditioned`
+  (`transform-non-finite`, `transform-singular`, `transform-conic-ill-conditioned`, all `Unsupported`),
+  `TransformReason::reason_code` maps onto them and `ComposeError::classification` gives a refused INSERT
+  map a classification of its own instead of a generic code.
 - **The PDF filter seam** (issue #1362, follow-up 1/6 to #1332, part of #1329). The image decoder
   now goes through `FilterInput`, `FilterOutput` and one `decode_filter` `match`, with a module per
   codec under `src/pvec/pdf_filters/` (`dct` moved in, `ccitt`, `jbig2` and `jpx` are stubs). No
