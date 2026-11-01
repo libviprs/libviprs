@@ -511,6 +511,8 @@ annotated   fs-detected  tests/pvec_api_surface.rs::the_facade_is_named_by_one_f
 annotated   fs-detected  tests/pvec_api_surface.rs::the_pvec_dependencies_stay_semantic_and_optional
 annotated   fs-detected  tests/pvec_dwg_spline_structural.rs::no_code_path_turns_a_spline_into_polylines_or_arcs
 annotated   fs-detected  tests/pvec_fidelity_1100.rs::there_is_one_enum_for_the_six_classes
+annotated   fs-detected  tests/pvec_known_truth.rs::n2_1_1050_a_failing_run_leaves_no_state_behind
+annotated   fs-detected  tests/pvec_known_truth.rs::n2_1_1050_a_vendored_file_that_moved_is_caught_by_the_pin
 annotated   fs-detected  tests/pvec_pdf_vector.rs::n5_1_no_lopdf_type_in_any_public_signature
 annotated   fs-detected  tests/pvec_provider_acadrust.rs::open_works_from_bytes_and_from_a_path_alike
 annotated   fs-detected  tests/pvec_provider_acadrust.rs::the_fixtures_are_the_ones_n1_4_recorded_and_say_what_they_are

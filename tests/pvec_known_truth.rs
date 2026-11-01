@@ -211,6 +211,7 @@ fn n2_1_1050_a_wrong_weight_and_a_wrong_class_are_both_caught() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the vendored corpus from disk
 fn n2_1_1050_a_vendored_file_that_moved_is_caught_by_the_pin() {
     let dir = tempfile::tempdir().unwrap();
     let from = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/pvec-gold");
@@ -289,6 +290,7 @@ fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads the vendored corpus from disk
 fn n2_1_1050_a_failing_run_leaves_no_state_behind() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/pvec-gold");
     let snapshot = |dir: &std::path::Path| {
