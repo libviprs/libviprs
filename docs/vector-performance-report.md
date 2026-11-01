@@ -127,9 +127,11 @@ the environment), the way a worker pool would, and checks what the parent sees:
 * **Memory ceiling.** With every budget switched off (what a naive worker does)
   and `ulimit -v` at 256 MiB, a zoom 24 tile explosion dies and the parent
   carries on and serves the next job. Under a real cgroup the same child is
-  OOM-killed: run by hand with `docker run --memory=256m`, it exits 137 after
+  OOM-killed: run with `docker run --memory=256m`, it exits 137 after
   42 s, `memory.events` shows `oom_kill 1`, and the destination file is not
-  there. That cgroup run is a manual measurement, not a test in the suite.
+  there. That run is a lane now: `tools/cgroup-worker-lane.sh` does it every night
+  on MARS after the native cells (a test binary cannot make its own cgroup), and fails
+  unless the exit is 137, docker reports OOMKilled and no destination exists.
 * **Wall clock.** A child that never reads a clock (a stand in for a native
   decoder that does not come back) is killed by the supervisor at 1.5 s and
   gone by 10 s at the latest, with signal 9, and the destination is absent.

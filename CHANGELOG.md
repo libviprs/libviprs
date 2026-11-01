@@ -16,6 +16,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The DWG to PDF differential, with LibreDWG as the first real exporter** (issue #1405, part of #1086).
+  Six `REAL_WORLD_DIFFERENTIAL` pairs are committed as static files under `tests/fixtures/pvec/pdf_loss/`
+  (the DWG, the exported PDF, `exporter.txt` provenance with versions, options and the tarball sha256), and
+  `tests/pvec_dwg_pdf_differential.rs` asserts each pair measures exactly its recorded loss
+  (`expected_loss.toml`, a written reason per entry): primitive counts, N3.5 buckets, extent aspect with
+  `/Rotate` composed, and entities outside the page. libviprs has no LibreDWG dependency of any kind, and
+  `tests/pvec_1079_provider_default.rs` guards the build side. See `docs/pvec-dwg-pdf-differential.md`.
+- **The conversion API** (issue #1048, slices #1413 to #1417). `libviprs::pvec_convert::PvecConversion`
+  behind the new `pvec-convert` feature (`pvec-write` plus `dwg-acadrust`, acadrust stays the default
+  provider): one call takes a DWG, a view profile and limits and publishes a `.pvec` with its
+  conversion report. The allowed capabilities, `CapabilityPolicy` and the `Strict`, `Default` and
+  `Permissive` profiles gate what may be written (new reason code `capability-not-allowed`), and
+  `probe` returns the same per-class counts without writing. A georeference sidecar
+  (`<dest>.georef.json`) carries the exact drawing box, the unit with its evidence and an opaque
+  calibration id, and nothing of it reaches the artifact. Every entity that did not become geometry
+  makes a `Diagnostic` with a stable code (`docs/pvec-diagnostics.md`), streamed to the observer as
+  `EngineEvent::ConversionDiagnostic` and kept in the report's `diagnostics` section. The classifier
+  and its consumer meet in a bounded queue whose peak depth is reported, the observer hears the
+  stages, and the cancel token is polled per batch. New optional report fields `capabilities`,
+  `georeference` and `diagnostics`, all ignorable, so `schema_version` stays 1.
+  `ReasonCode::CapabilityNotAllowed` is new, `pvec::writer` re-exports PVec's `CapabilityId`, and
+  the spool of #1092 is not built, so there is no spool flush to cancel yet.
+
 - **A single-span SPLINE is a Bezier** (issue #1375). `Normalized2DGeometry::from_spline` maps a
   non-rational, non-periodic SPLINE with `degree + 1` control points and knots `0` and `1`, each
   `degree + 1` times, to PVec's `Bezier` (`SupportedExact`, the knot array is the only thing
