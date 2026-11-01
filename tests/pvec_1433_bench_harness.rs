@@ -89,20 +89,25 @@ fn the_document_and_the_baseline_describe_the_same_rows() {
     let rows = rows.as_object().expect("the baseline has rows");
     assert!(!rows.is_empty(), "no baseline row is committed");
     for (key, row) in rows {
-        let mut parts = key.split('/');
-        let (bench, cell, platform) = (parts.next(), parts.next().unwrap(), parts.next().unwrap());
-        assert_eq!(bench, Some("provider"), "{key}");
+        let parts: Vec<&str> = key.split('/').collect();
+        let platform = *parts.last().unwrap();
+        // The word each kind of row is found under in the document's tables.
+        let name = match parts[..] {
+            ["provider", cell, _] | ["normalization", cell, _] => cell,
+            ["normalization", "transform", class, _] => class,
+            ["normalization", cell, _mix, _] => cell,
+            _ => panic!("{key}: a baseline key this suite does not know"),
+        };
         assert!(
-            doc.contains(&format!("| {cell} |")),
-            "{key}: the document has no row for {cell}"
+            doc.contains(&format!("| {name} |")) || doc.contains(&format!("`{name}`")),
+            "{key}: the document has no row for {name}"
         );
         assert!(
             doc.contains(platform),
             "{key}: the document never names {platform}"
         );
         assert_eq!(row["platform"], platform, "{key}");
-        let blank = blank_columns(
-            row,
+        let required: &[&str] = if parts[0] == "provider" {
             &[
                 "cell",
                 "entities",
@@ -111,8 +116,33 @@ fn the_document_and_the_baseline_describe_the_same_rows() {
                 "peak_rss_bytes",
                 "block_frames",
                 "platform",
-            ],
-        );
+            ]
+        } else {
+            &["cell", "stage_ns", "platform"]
+        };
+        let blank = blank_columns(row, required);
         assert!(blank.is_empty(), "{key}: {blank:?}");
     }
+}
+
+#[test]
+fn a_stage_that_grew_ten_percent_is_a_regression() {
+    let row = |a: f64, b: f64, unstable: bool| json!({"stage_ns": {"visibility": a, "bounds": b}, "unstable": unstable});
+    let base = row(100.0, 50.0, false);
+    assert!(pvec_bench::stage_regressions(&base, &row(109.0, 54.0, false)).is_empty());
+    let bad = pvec_bench::stage_regressions(&base, &row(111.0, 50.0, false));
+    assert_eq!(bad.len(), 1);
+    assert!(bad[0].contains("visibility"), "{bad:?}");
+    assert_eq!(
+        pvec_bench::stage_regressions(&base, &row(200.0, 100.0, false)).len(),
+        2
+    );
+    assert!(pvec_bench::stage_regressions(&base, &row(200.0, 100.0, true)).is_empty());
+}
+
+#[test]
+fn the_unattributed_remainder_is_what_no_stage_accounts_for() {
+    let r = pvec_bench::unattributed(&[0.3, 0.5], 1.0);
+    assert!((r - 0.2).abs() < 1e-12, "{r}");
+    assert!(pvec_bench::unattributed(&[0.6, 0.5], 1.0) < 0.0);
 }

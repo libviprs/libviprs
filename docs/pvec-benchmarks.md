@@ -97,3 +97,61 @@ that each own a block name, so each leaf costs a copy proportional to its depth,
 `InstancePath::child` copies the whole parent path again for every INSERT. I did not change the
 provider to chase the number, that is out of scope here, and it is the first thing worth looking
 at when N8.6 tunes.
+
+## View and transform normalization (N8.3, #1436)
+
+`tests/pvec_normalization_bench.rs` measures what libviprs does between the provider and PVec, one stage at a time, on `block_heavy`, `paper_space` and `large_industrial`, each at three visibility mixes. The stages, and the public call each one is:
+
+- **visibility** (`visibility`): `ViewProfile::apply`, layer state and layout filtering.
+- **records** (`records`): the plumbing that turns a kept leaf into a `Normalized2DGeometry`. It is not one of the four stages, I time it as a fifth line so the pass adds up.
+- **transform** (`transform`): `push_inner_coefficients` and `promote`, with the seven non-singular N1.5 classes cycled over the entities.
+- **bounds** (`bounds`): `bounds_inputs`, exact source bounds.
+- **clipping** (`clip`): `apply_clip_policy`. The DWG path has no clip stage in v1 (model space only, no viewport clip), so this one is measured on a generated PDF page of 200 clips and 20,000 stroked lines, as its own pass.
+
+```text
+LIBVIPRS_BENCH_HOST=mars cargo test --release --features pvec-convert \
+    --test pvec_normalization_bench -- --ignored --nocapture normalization_bench
+```
+
+The benchmark asserts its own outputs: the kept count equals an independent count from the layer names, an identity promotion leaves every bound within 4 ulps of what it was (see below), a singular matrix is refused for every entity, the stage times add up to the pass within 5% (the remainder is in the row as `unattributed`), and the 90% mix is not slower than the 0% mix. A stage that grew more than 10% in nanoseconds per entity against the baseline fails the run.
+
+The mixes hide leaves on an off or frozen layer (`hidden` in the generator, 0, 50 or 90 percent of the leaves drawn), so the kept share is what the profile reports, not what the label says.
+
+Measured on MARS (x86_64-linux-mars, native), release build, nanoseconds per entity (visibility per leaf met, the others per kept leaf; bounds per promoted entity), the slower of two runs, which is the committed baseline:
+
+| cell | mix | leaves | kept | visibility | records | transform | bounds | pass (ms) | unattributed |
+|---|---|---|---|---|---|---|---|---|---|
+| block_heavy | 0% | 22,440 | 22,440 | 651 | 103 | 173 | 23 | 21.33 | 0.045% |
+| block_heavy | 50% | 22,440 | 11,220 | 737 | 98 | 163 | 21 | 19.71 | 0.000% |
+| block_heavy | 90% | 22,440 | 2,244 | 824 | 112 | 168 | 23 | 19.16 | 0.000% |
+| paper_space | 0% | 2,000 | 2,000 | 134 | 94 | 161 | 22 | 0.82 | 0.011% |
+| paper_space | 50% | 2,000 | 990 | 177 | 100 | 167 | 23 | 0.64 | 0.030% |
+| paper_space | 90% | 2,000 | 196 | 183 | 102 | 170 | 24 | 0.42 | 0.015% |
+| large_industrial | 0% | 1,025,000 | 1,025,000 | 371 | 135 | 197 | 49 | 772.01 | 0.083% |
+| large_industrial | 50% | 1,025,000 | 462,536 | 421 | 154 | 202 | 52 | 621.35 | 0.104% |
+| large_industrial | 90% | 1,025,000 | 92,516 | 373 | 166 | 181 | 49 | 419.03 | 0.122% |
+
+Stage share of the pass at the 0% mix: block_heavy visibility 68%, records 11%, transform 18%, bounds 2%; paper_space visibility 33%, records 23%, transform 39%, bounds 5%; large_industrial visibility 49%, records 18%, transform 26%, bounds 7%.
+
+Filtering pays for itself on every cell: the 90% mix finishes the pass faster than the 0% mix (block_heavy 19.2 against 21.3 ms, paper_space 0.42 against 0.82 ms, large_industrial 419 against 772 ms). Visibility is the biggest line on `block_heavy`, and I have not isolated why (my guess is that `ViewProfile::apply` walks the blocks itself, which is a second walk after the provider's).
+
+### Transform classes
+
+One row per class of the N1.5 matrix, over the first 200,000 kept leaves of `large_industrial` (lines, polylines, circles and arcs), composition and promotion only. The singular row is the cost of the refusal, not of a conversion: every one of the 200,000 entities was refused and none produced geometry.
+
+| class | ns per entity | geometry | refused |
+|---|---|---|---|
+| identity | 167 | 200,000 | 0 |
+| translation | 167 | 200,000 | 0 |
+| rotation | 204 | 200,000 | 0 |
+| uniform_scale | 167 | 200,000 | 0 |
+| non_uniform_scale | 164 | 200,000 | 0 |
+| reflection | 165 | 200,000 | 0 |
+| shear | 219 | 200,000 | 0 |
+| singular | 25 | 0 | 200,000 |
+
+One thing the equality check turned up: an identity promotion is not a bit-for-bit passthrough. 9,948 of the 200,000 bounds came back a few units in the last place away from the box of the untouched curve (I did not chase which entity kinds), at most 4 ulps. That is far inside P1.2's tolerance, so the benchmark checks for at most 4 ulps and reports the count rather than demanding bit equality, and I did not change PVec's behaviour to hide it.
+
+### Clipping
+
+The `pdf_clip` row: `apply_clip_policy` with the analytic bounds source over 20,200 paths and 200 clips: 52 ns per painted path.
