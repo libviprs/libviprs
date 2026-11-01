@@ -65,6 +65,9 @@ pub mod pdf_vector;
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
 pub mod provenance;
 pub mod provider;
+#[cfg(feature = "pvec-write")]
+#[cfg_attr(docsrs, doc(cfg(feature = "pvec-write")))]
+pub mod publish;
 pub mod style;
 pub mod text_policy;
 #[cfg(feature = "pvec-normalized")]
@@ -73,6 +76,9 @@ pub mod transform;
 pub mod units;
 pub mod view;
 pub mod view_profile;
+#[cfg(feature = "pvec-write")]
+#[cfg_attr(docsrs, doc(cfg(feature = "pvec-write")))]
+pub mod writer;
 pub mod xref;
 
 #[cfg(feature = "dwg-acadrust")]
