@@ -50,6 +50,7 @@ use std::fmt;
 
 use pvec_geometry::{Curve, Curve2d, GeometryError, ParamMap, Transform2};
 
+use super::fidelity::{Classification, ReasonCode};
 use super::normalized::{FidelityClass, NormalizeError, Normalized2DGeometry};
 use super::provider::{InstancePath, InstanceStep, SourceTransform};
 
@@ -74,6 +75,11 @@ impl TransformReason {
             TransformReason::ConicIllConditioned => "TRANSFORM_CONIC_ILL_CONDITIONED",
         }
     }
+    /// The classification reason this refusal carries.
+    pub const fn reason_code(self) -> ReasonCode {
+        ReasonCode::UnmappedSourceClass
+    }
+
     /// The PVec rule behind it.
     pub const fn rule(self) -> &'static str {
         match self {
@@ -131,6 +137,13 @@ impl ComposeError {
     /// PVec's refusal.
     pub fn error(&self) -> &GeometryError {
         &self.error
+    }
+
+    /// The classification of the INSERT whose map was refused.
+    #[must_use]
+    #[allow(clippy::unused_self)]
+    pub fn classification(&self, source_class: &str) -> Classification {
+        Classification::refused(ReasonCode::UnmappedSourceClass, source_class)
     }
 }
 
