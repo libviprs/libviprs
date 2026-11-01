@@ -308,3 +308,21 @@ fn corpus_report() {
         std::fs::write(&out, serde_json::to_string_pretty(&now).unwrap() + "\n").unwrap();
     }
 }
+
+/// The document lists every fixture the corpus has, and the command that regenerates the baseline.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn the_document_has_a_row_for_every_fixture() {
+    let doc = std::fs::read_to_string(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs/pvec-corpus-regression.md"),
+    )
+    .expect("docs/pvec-corpus-regression.md");
+    for fx in Corpus::open().all() {
+        assert!(
+            doc.contains(&format!("| {} |", fx.id)),
+            "the document has no row for {}",
+            fx.id
+        );
+    }
+    assert!(doc.contains("LIBVIPRS_CORPUS_BASELINE_OUT=tests/fixtures/pvec_corpus_baseline.json"));
+}

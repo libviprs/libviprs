@@ -611,6 +611,7 @@ annotated   fs-detected  tests/pvec_corpus_regression.rs::artifact_growth_of_two
 annotated   fs-detected  tests/pvec_corpus_regression.rs::corpus_report
 annotated   fs-detected  tests/pvec_corpus_regression.rs::the_baseline_has_one_row_per_fixture_and_no_empty_cell
 annotated   fs-detected  tests/pvec_corpus_regression.rs::the_corpus_does_not_regress
+annotated   fs-detected  tests/pvec_corpus_regression.rs::the_document_has_a_row_for_every_fixture
 annotated   fs-detected  tests/pvec_dual_oracle.rs::n2_2_1050_every_fixture_that_is_not_known_truth_is_executed_and_reported
 annotated   fs-detected  tests/pvec_dual_oracle.rs::n2_2_1050_the_pin_summary_is_the_index_and_a_bump_reads_as_per_class_changes
 annotated   fs-detected  tests/pvec_dwg_pdf_differential.rs::a_loss_entry_that_no_longer_matches_fails_the_run
