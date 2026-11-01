@@ -776,6 +776,7 @@ annotated   not-detected src/source.rs::decode_file_not_found
 annotated   not-detected tests/case_only_path_collisions.rs::no_two_tracked_paths_differ_only_in_case
 annotated   not-detected tests/changelog_release_claims.rs::every_release_claim_in_the_changelog_is_true_of_the_tags
 annotated   not-detected tests/dependency_policy.rs::every_links_key_is_on_the_allowlist
+annotated   not-detected tests/dependency_policy.rs::exactly_one_tiff_resolves_in_every_cell
 annotated   not-detected tests/dependency_policy.rs::library_discovery_is_confined_to_packfile
 annotated   not-detected tests/dependency_policy.rs::runtime_library_loaders_are_confined_to_the_pdfium_features
 annotated   not-detected tests/dependency_policy.rs::sha2_resolves_to_a_release_with_the_aarch64_provenance_fix

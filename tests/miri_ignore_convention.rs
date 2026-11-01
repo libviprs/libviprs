@@ -476,7 +476,9 @@ const EXPECTED_SRC_MODULES: usize = 31;
 /// conversion in a child under `ulimit -v` and a wall clock, and
 /// `tests/vector_1036_dwg_corpus.rs::mutated_drawings_never_take_the_process_down`,
 /// which decodes each mutated drawing in a child. It said 46 before this line moved.
-const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 50;
+///
+/// #1368 adds 1: `tests/dependency_policy.rs::exactly_one_tiff_resolves_in_every_cell` (from #1367), which runs `cargo tree`. It said 50 before this line moved.
+const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 51;
 
 /// The filesystem-touching tests still allowed to run under Miri, and so still
 /// allowed to end the whole run on their first syscall.
