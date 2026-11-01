@@ -1,0 +1,62 @@
+{
+  "cells": {
+    "primary": [
+      {
+        "class": "GEOMETRIC_EXACT_REPARAMETERIZED",
+        "entity": "shear-chain-001",
+        "evidence": {
+          "at_unit_parameter": 0.9577880217510295,
+          "direction": "SAME",
+          "estimate_stable": true,
+          "magnitude": 5.000000000000001,
+          "max_deviation": 1.2560739669470201e-15,
+          "measured_in": "ACTUAL_TO_EXPECTED",
+          "scale": 4.919667163538607,
+          "structural_diff": [
+            "geometry.end[0]",
+            "geometry.start[0]",
+            "geometry.start[1]",
+            "parameter_domain.end",
+            "transform"
+          ]
+        }
+      }
+    ],
+    "secondary": [
+      {
+        "class": "GEOMETRIC_EXACT_REPARAMETERIZED",
+        "entity": "shear-chain-001",
+        "evidence": {
+          "at_unit_parameter": 0.8055339887498949,
+          "direction": "SAME",
+          "estimate_stable": true,
+          "magnitude": 5.0,
+          "max_deviation": 8.881784197001252e-16,
+          "measured_in": "EXPECTED_TO_ACTUAL",
+          "scale": 4.919667163538607,
+          "structural_diff": [
+            "geometry.end[0]",
+            "geometry.end[1]",
+            "geometry.start[0]",
+            "geometry.start[1]",
+            "parameter_domain.end",
+            "transform"
+          ]
+        }
+      }
+    ]
+  },
+  "detail": "",
+  "evidence_class": "KNOWN_TRUTH_EXACT",
+  "evidence_scope": "STEP_ORACLE",
+  "fixture_id": "shear-chain-001",
+  "known_truth": true,
+  "oracle_scope": "OPEN_CONVERTERS",
+  "reason": null,
+  "schema_version": "pvec-gold/fixture-verdict/1",
+  "signature_differences": [
+    "entities[0].geometry.end[0]",
+    "entities[0].geometry.end[1]",
+    "entities[0].parameter_domain.end"
+  ]
+}

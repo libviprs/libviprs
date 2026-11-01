@@ -16,6 +16,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A single-span SPLINE is a Bezier** (issue #1375). `Normalized2DGeometry::from_spline` maps a
+  non-rational, non-periodic SPLINE with `degree + 1` control points and knots `0` and `1`, each
+  `degree + 1` times, to PVec's `Bezier` (`SupportedExact`, the knot array is the only thing
+  dropped), which is the class the known-truth corpus states for `bezier-d3-001`.
+- **Periodic SPLINE extraction** (issue #1374). `dwg_spline::extract` takes the one-period layout
+  of a non-rational periodic spline (`n` control points, `n + 1` knots), checks it with PVec's
+  `BSpline::from_periodic`, and keeps it as authored. `Normalized2DGeometry::from_spline` builds the
+  record (`SupportedEquivalent`, the unwrap changes the knot vector and not the locus). `pvec-spline`
+  now also pulls `pvec-geometry`.
+- **`JPXDecode` images in a PDF** (issue #1364, follow-up 3/6 to #1332). Decoded through the
+  existing `jp2k` feature (`crate::jp2k::decode_jp2k`), so no crate enters the graph; the jp2k
+  cell of `dependency_policy` is pinned to its two codec crates. Without the feature the reason is
+  still `filter-not-enabled:JPXDecode`. `/SMaskInData` other than 0 is refused
+  (`FilterError::SMaskInData`), and `FilterError::Source` carries the shared decode ceilings.
+  `fuzz_pvec_pdf_image` takes `--features jp2k`.
+
+- **`CCITTFaxDecode` images in a PDF** (issue #1363, follow-up 2/6 to #1332). Decoded through
+  `hayro-ccitt` (plain Rust, no dependencies, in every build, no feature) into 1-bit samples that
+  reach the 1-bit PNG tiles and the `Bilevel` note. `usace_swf_gpw_daca67-06-d-0029.pdf` now
+  converts to seven underlays. **Changed report key:** `filter-not-enabled:CCITTFaxDecode` is gone;
+  a fax stream is written (`written_by_filter["CCITTFaxDecode"]`) or refused as `decode-failed`.
+
+- **The provider xref facet and xref open-and-flatten** (issue #1378, part of #1079). `DwgProvider::xref_blocks`
+  and `Facet::XrefAttachments` surface the drawing's xref block records (acadrust fills them),
+  `XrefRef::discover` builds the references from INSERTs so nobody hand-builds one, and
+  `XrefSession::open_and_flatten` opens the cleared file through a provider and flattens it under
+  the shared depth and cycle checks, nested xrefs included. The flattener now reports an INSERT of
+  an xref block as `SkipReason::ExternalReference` instead of expanding it to nothing.
+- **The provider differential harness** (issue #1395, part of #1079). `pvec::differential` runs any
+  number of `DwgProvider`s over the same fixtures and compares, per entity, the structural parameters,
+  the N3.5 bucket with its reason code and the PVec type of N6.2's table (`Matrix`, `Deltas`,
+  `Verdict`). `tests/fixtures/pvec/provider_deltas.toml` is the allowed-difference list: an unlisted
+  difference fails and so does a stale entry. A run with fewer than two providers is `PARTIAL`, never a
+  pass, agreement is `DUAL_ORACLE_EQUIVALENT` and never source truth, and every result line records the
+  platform and the corpus revision. `docs/pvec-providers.md` records that acadrust is the default
+  provider and acadsharp-rs is opt-in, and `tests/pvec_1079_provider_default.rs` enforces it.
+- **The text style across the provider boundary** (issue #1381, part of #1086). `DwgProvider::text_styles`
+  and `Facet::TextStyle` report the style of every `TEXT` and `MTEXT` (`TextStyleRef`: style name, SHX
+  font, big font, TrueType family), the acadrust provider fills it, and `TextReport::bucket_dwg_entities`
+  buckets DWG text by its font so a style that names an SHX font that is not installed reaches
+  `TEXT_SHX_MISSING` through a real drawing. `docs/pvec-text-policy.md` re-takes the DWG text numbers on the
+  four corpus fixtures #1313 names.
+- **Exact clip bounds, form boxes, text clips and the empty clip** (issue #1380, part of #1086).
+  `pdf_clip::AnalyticBounds` answers `ExactBoundsSource` from PVec's closed-form Bezier extrema, so a
+  curve is dropped only when its extent, not its control polygon, lies outside a clip. A Form XObject
+  `/BBox` is recorded as a clip (`PdfVectorPage::form_clips`, `ClipReport::form_clips`, exact when its
+  page-space image is axis aligned), text in render mode 4 to 7 marks later geometry `text_clip` as
+  display fidelity, and an empty path under `W n` is kept as an empty clip that excludes everything
+  after it. New fields: `PdfPathEntity::text_clipped`, `ClipRecord::empty`,
+  `EntityClipDecision::{form_clips, text_clip}`.
 - **Reason codes for the three frozen transform refusals** (issue #1379, part of #1079). `ReasonCode`
   gains `TransformNonFinite`, `TransformSingular` and `TransformConicIllConditioned`
   (`transform-non-finite`, `transform-singular`, `transform-conic-ill-conditioned`, all `Unsupported`),

@@ -13,10 +13,8 @@
 //!   `docs/adr/pvec-semantic-boundary.md` (via `pvec-normalized-geometry.md`) forbids: curve
 //!   evaluation, knot insertion, tessellation.
 //!
-//! Not here yet: the writer funnel `src/pvec/writer.rs` and its allowlist of PVec writer
-//! calls. They wait on the `pvec` facade crate (libviprs/pvec#52, P7.1), which does not
-//! exist yet. When it lands, `pvec` goes on [`ALLOWED_ROOTS`] and the funnel's own paths get
-//! a second, narrower list.
+//! * Every PVec writer call sits in the funnel `src/pvec/writer.rs` (issue #1314), apart from the
+//!   two raster-stream files that predate it ([`RASTER_WRITERS`]).
 //!
 //! Nothing here needs a feature, a network or a PVec checkout.
 
@@ -214,9 +212,23 @@ fn flatten_group(s: &str) -> Vec<Vec<String>> {
     leaves
 }
 
+/// Facade types whose names match [`PHYSICAL_SEGMENTS`] but are the facade's semantic surface:
+/// `Manifest` is what a file says about itself (units, bounds, producer), and `components::Stream`
+/// is a component stream payload the writer attaches. Exact paths, so nothing else gets through.
+const FACADE_SEMANTIC_TYPES: &[&[&str]] = &[
+    &["pvec_facade", "Manifest"],
+    &["pvec_facade", "components", "Stream"],
+];
+
 /// The reason a path is outside the allowed surface, or `None` when it is inside.
 fn violation(path: &[String]) -> Option<String> {
     let root = path[0].as_str();
+    if FACADE_SEMANTIC_TYPES
+        .iter()
+        .any(|t| t.iter().copied().eq(path.iter().map(String::as_str)))
+    {
+        return None;
+    }
     if PHYSICAL_ROOTS.contains(&root) {
         return Some(format!("`{root}` is a physical-layout crate"));
     }
@@ -255,6 +267,10 @@ fn the_scanner_flags_a_physical_import() {
         "use pvec_geometry::index::Node;",
         "use pvec_geometry::{Curve, layout::BlockHeader};",
         "let h = pvec_geometry::header::read(b);",
+        // The exemption is for the two exact facade paths and nothing near them.
+        "use pvec_facade::unstable::Stream;",
+        "use pvec_geometry::Manifest;",
+        "use pvec_facade::components::Stream::Inner;",
     ] {
         assert!(!scan(bad).is_empty(), "scanner let `{bad}` through");
     }
@@ -263,6 +279,7 @@ fn the_scanner_flags_a_physical_import() {
 #[test]
 fn the_scanner_accepts_the_semantic_surface() {
     for good in [
+        "use pvec_facade::{Manifest, components::Stream};",
         "use pvec_geometry::{Curve, Point2};",
         "use pvec_geometry::{Bezier, Curve, Point2, Polyline};",
         "use pvec_numeric::{MAX_CONTROL_POINTS, MAX_DEGREE, NumericError, Policy};",
@@ -340,15 +357,15 @@ fn only_the_semantic_crates_are_named_today() {
     );
 }
 
-/// The PVec facade (`pvec_facade`, the renamed `pvec` crate; issue #1328) is the writer funnel
-/// for the raster stream, and two files are allowed to name it: `src/raster_pvec/container.rs`
-/// (the whole-pyramid hand-off) and, since issue #1331, `src/sink_pvec.rs`, which holds the writer
-/// while the engine streams tiles into it and so cannot go through a function in the first file.
-/// Everything else in libviprs goes through those two, so the set of PVec writer calls libviprs
-/// makes is the set in them.
+/// The PVec facade (`pvec_facade`, the renamed `pvec` crate) is named by four files. The geometry
+/// funnel `src/pvec/writer.rs` (issue #1314) is the one writer for entities, and
+/// `src/pvec/publish.rs` reads an artifact back before it is published and opens published ones.
+/// The raster stream predates the funnel and keeps its two files: `src/raster_pvec/container.rs`
+/// (the whole-pyramid hand-off, issue #1328) and `src/sink_pvec.rs` (issue #1331), which holds the
+/// writer while the engine streams tiles into it and so cannot go through a function in the first.
 #[test]
 #[cfg_attr(miri, ignore)]
-fn the_facade_is_named_by_one_file_only() {
+fn the_facade_is_named_by_the_funnel_and_the_raster_files_only() {
     let mut named_in = std::collections::BTreeSet::new();
     for f in src_files() {
         let src = fs::read_to_string(&f).unwrap();
@@ -357,11 +374,99 @@ fn the_facade_is_named_by_one_file_only() {
         }
     }
     let want: std::collections::BTreeSet<PathBuf> = [
+        PathBuf::from("src/pvec/publish.rs"),
+        PathBuf::from("src/pvec/writer.rs"),
         PathBuf::from("src/raster_pvec/container.rs"),
         PathBuf::from("src/sink_pvec.rs"),
     ]
     .into();
     assert_eq!(named_in, want);
+}
+
+/// Identifiers that write into a PVec artifact (issue #1314). The writer type, and the calls that
+/// only a writer has.
+const WRITER_CALLS: &[&str] = &[
+    "PvecWriter",
+    "ContainerWriter",
+    "new_indexed",
+    "push_composite",
+    "raster_tiles",
+];
+
+/// The funnel for geometry. Nothing else under `src/` may name a writer call.
+const GEOMETRY_FUNNEL: &str = "src/pvec/writer.rs";
+
+/// The raster stream's two files, which predate the funnel and write tiles, not entities. They
+/// leave this list when the raster stream moves into the funnel.
+const RASTER_WRITERS: &[&str] = &["src/raster_pvec/container.rs", "src/sink_pvec.rs"];
+
+/// The writer calls a source text makes, as the names from [`WRITER_CALLS`] it contains.
+fn writer_calls(src: &str) -> Vec<&'static str> {
+    let text = strip_comments(src);
+    let chars: Vec<char> = text.chars().collect();
+    WRITER_CALLS
+        .iter()
+        .copied()
+        .filter(|name| {
+            let n: Vec<char> = name.chars().collect();
+            (0..chars.len().saturating_sub(n.len() - 1)).any(|i| {
+                chars[i..i + n.len()] == n[..]
+                    && (i == 0 || !is_ident(chars[i - 1]))
+                    && chars.get(i + n.len()).is_none_or(|c| !is_ident(*c))
+            })
+        })
+        .collect()
+}
+
+#[test]
+fn the_writer_call_check_can_fail() {
+    // The mutation check: a writer call in any other file has to be found.
+    for bad in [
+        "let mut w = pvec_facade::PvecWriter::new(m)?;",
+        "fn f(w: &mut PvecWriter) {}",
+        "let w = PvecWriter::new_indexed(m, 8, None)?;",
+        "w.push_composite(id, &[], b, false)?;",
+        "w.raster_tiles(id, tiles)?;",
+    ] {
+        assert!(!writer_calls(bad).is_empty(), "`{bad}` was not flagged");
+    }
+    for ok in [
+        "// PvecWriter is only named in a comment",
+        "let reader = pvec_facade::PvecReader::open(bytes)?;",
+        "struct MyPvecWriterStats;",
+    ] {
+        assert!(writer_calls(ok).is_empty(), "`{ok}` was flagged");
+    }
+}
+
+/// A writer call outside the funnel turns this red. Geometry has exactly one place that writes it.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn no_writer_call_is_made_outside_the_funnel() {
+    let mut bad = Vec::new();
+    let mut in_funnel = 0;
+    for f in src_files() {
+        let rel = f
+            .strip_prefix(root())
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        let calls = writer_calls(&fs::read_to_string(&f).unwrap());
+        if rel == GEOMETRY_FUNNEL {
+            in_funnel = calls.len();
+        } else if !calls.is_empty() && !RASTER_WRITERS.contains(&rel.as_str()) {
+            bad.push(format!("{rel}: {}", calls.join(", ")));
+        }
+    }
+    assert!(
+        in_funnel > 0,
+        "the funnel makes no writer call, so it is not the funnel"
+    );
+    assert!(
+        bad.is_empty(),
+        "PVec writer calls outside {GEOMETRY_FUNNEL}:\n{}",
+        bad.join("\n")
+    );
 }
 
 /// NG-10's prohibited constructs, as the names a function implementing them would carry.
