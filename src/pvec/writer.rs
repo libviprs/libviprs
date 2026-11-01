@@ -7,10 +7,11 @@
 //!
 //! # What the funnel decides, and what it leaves to PVec
 //!
-//! It maps. An entity's id is the one [`order_entities`](super::ordering::order_entities) gave it,
-//! carried over unchanged ([`pvec_entity_id`]), and an entity that carries no geometry (an
-//! unsupported or ignored one) is counted in [`GeometryArtifact::skipped`] and leaves its id
-//! unused. The drawing unit must be one PVec can declare, and the drawing box that the manifest
+//! It maps. An entity that carries no geometry (an unsupported or ignored one) is counted in
+//! [`GeometryArtifact::skipped`] and not written. The others get PVec's file-local ids **dense from
+//! zero, in the order given** (Tier 0 needs ids `0..n` with no gaps), and
+//! [`GeometryArtifact::source_ids`] is the way back: element `i` is the libviprs id of PVec entity
+//! `i`. Component streams refer to entities by PVec's id, so they are built through it. The drawing unit must be one PVec can declare, and the drawing box that the manifest
 //! needs is the union of the entity boxes PVec itself reports ([`bounds_inputs`]).
 //!
 //! Everything about layout is PVec's. With a [`LeafConfig`] the funnel asks `PvecWriter::new_indexed`
@@ -33,10 +34,10 @@
 //! (N7.2) passes the unit it chose.
 
 use pvec_facade::components::Stream;
-use pvec_facade::{Bounds2, Manifest, PvecError, PvecWriter};
+use pvec_facade::{Bounds2, EntityId as PvecEntityId, Manifest, PvecError, PvecWriter};
 use thiserror::Error;
 
-use super::bounds::{BoundsError, BoundsReport, bounds_inputs, pvec_entity_id};
+use super::bounds::{BoundsError, BoundsReport, bounds_inputs};
 use super::normalized::Normalized2DGeometry;
 use super::ordering::EntityId;
 use super::units::SourceUnit;
@@ -75,6 +76,8 @@ pub struct GeometryArtifact {
     pub written: u64,
     /// Entities that carried no geometry and were not written.
     pub skipped: u64,
+    /// The libviprs id of each written entity; the index is the entity's PVec id.
+    pub source_ids: Vec<EntityId>,
 }
 
 /// Why a write failed.
@@ -131,9 +134,18 @@ pub fn write_geometry<'a>(
     let metres_per_unit = metres_per_unit(config.unit)?;
     let mut skipped = 0u64;
     let mut curves = Vec::new();
+    let mut source_ids = Vec::new();
     for (id, geometry) in items {
         match geometry.geometry() {
-            Some(curve) => curves.push((pvec_entity_id(id).map_err(WriteError::Bounds)?, curve)),
+            Some(curve) => {
+                let next = curves.len() as u64;
+                let pvec_id = u32::try_from(next)
+                    .ok()
+                    .and_then(|n| PvecEntityId::new(n).ok())
+                    .ok_or(WriteError::Bounds(BoundsError::IdOutOfRange(next)))?;
+                curves.push((pvec_id, curve));
+                source_ids.push(id);
+            }
             None => skipped += 1,
         }
     }
@@ -172,5 +184,6 @@ pub fn write_geometry<'a>(
         bounds,
         written,
         skipped,
+        source_ids,
     })
 }
