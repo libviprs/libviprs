@@ -16,6 +16,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Exact clip bounds, form boxes, text clips and the empty clip** (issue #1380, part of #1086).
+  `pdf_clip::AnalyticBounds` answers `ExactBoundsSource` from PVec's closed-form Bezier extrema, so a
+  curve is dropped only when its extent, not its control polygon, lies outside a clip. A Form XObject
+  `/BBox` is recorded as a clip (`PdfVectorPage::form_clips`, `ClipReport::form_clips`, exact when its
+  page-space image is axis aligned), text in render mode 4 to 7 marks later geometry `text_clip` as
+  display fidelity, and an empty path under `W n` is kept as an empty clip that excludes everything
+  after it. New fields: `PdfPathEntity::text_clipped`, `ClipRecord::empty`,
+  `EntityClipDecision::{form_clips, text_clip}`.
 - **Reason codes for the three frozen transform refusals** (issue #1379, part of #1079). `ReasonCode`
   gains `TransformNonFinite`, `TransformSingular` and `TransformConicIllConditioned`
   (`transform-non-finite`, `transform-singular`, `transform-conic-ill-conditioned`, all `Unsupported`),
