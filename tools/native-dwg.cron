@@ -1,0 +1,5 @@
+# Nightly native DWG cells on MARS (issue #1295). Not installed by anything in
+# this repo: copy the line below into devshell's crontab after reading
+# CONTRIBUTING.md, "The native DWG lane". Needs a checkout of this repo on MARS
+# at the path used here, or change the path.
+17 3 * * * /work/nas-work/native-dwg-sched/src/tools/scheduled-native-dwg.sh main

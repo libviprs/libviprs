@@ -268,8 +268,8 @@ const EXPECTED: &[(&str, Coverage)] = &[
             true,
             "gates src/pvec/dwg_spline.rs, exact B-spline extraction of issue \
              #1074, and tests/pvec_dwg_spline_structural.rs, 16 tests (17 with \
-             `dwg-acadrust`); adds 1 crate (pvec-numeric, a git dependency \
-             declaring rust-version 1.85)",
+             `dwg-acadrust`); adds 2 crates (pvec-numeric and pvec-geometry, \
+             git dependencies declaring rust-version 1.85)",
         ),
     ),
     (

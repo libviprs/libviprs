@@ -1,0 +1,12 @@
+{
+  "cells": {},
+  "detail": "secondary: CONVERSION_FAILED: SPLINE without control points and knots",
+  "evidence_class": "QUARANTINED",
+  "evidence_scope": "STEP_ORACLE",
+  "fixture_id": "coincident-control-points-001",
+  "known_truth": false,
+  "oracle_scope": "OPEN_CONVERTERS",
+  "reason": "UNSUPPORTED_ENTITY",
+  "schema_version": "pvec-gold/fixture-verdict/1",
+  "signature_differences": []
+}

@@ -1,0 +1,218 @@
+{
+  "schema_version": "pvec-gold/expected.math/1",
+  "fixture_id": "polyline-001",
+  "evidence_class": "KNOWN_TRUTH_EXACT",
+  "units": {
+    "name": "metre",
+    "canonical": "metre",
+    "scale_to_canonical": {
+      "decimal": "1.0",
+      "f64_hex": "0x3ff0000000000000"
+    }
+  },
+  "provenance": {
+    "derivation": "AUTHORING_PARAMETERS",
+    "authoring_script": "tools/authoring/author_probes.py",
+    "parameter_file": "tools/authoring/params/polyline-001.json",
+    "parameter_file_sha256": "3e16a822c823bc404b1cdb6de0d38163ad011d31fe76c7c1acf9a940a086767c",
+    "parameters": {
+      "id": "polyline-001",
+      "kind": "polyline",
+      "description": "Five vertices that are neither sorted nor symmetric, so vertex identity and order are checkable. All bulges are zero.",
+      "vertices": [
+        [
+          "0",
+          "0",
+          "0"
+        ],
+        [
+          "4",
+          "1",
+          "0"
+        ],
+        [
+          "2.5",
+          "3.25",
+          "0"
+        ],
+        [
+          "-1.5",
+          "2",
+          "0"
+        ],
+        [
+          "0.75",
+          "-1.25",
+          "0"
+        ]
+      ]
+    }
+  },
+  "entities": [
+    {
+      "id": "polyline-001",
+      "class": "polyline",
+      "geometry": {
+        "vertices": [
+          [
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            }
+          ],
+          [
+            {
+              "decimal": "4.0",
+              "f64_hex": "0x4010000000000000"
+            },
+            {
+              "decimal": "1.0",
+              "f64_hex": "0x3ff0000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            }
+          ],
+          [
+            {
+              "decimal": "2.5",
+              "f64_hex": "0x4004000000000000"
+            },
+            {
+              "decimal": "3.25",
+              "f64_hex": "0x400a000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            }
+          ],
+          [
+            {
+              "decimal": "-1.5",
+              "f64_hex": "0xbff8000000000000"
+            },
+            {
+              "decimal": "2.0",
+              "f64_hex": "0x4000000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            }
+          ],
+          [
+            {
+              "decimal": "0.75",
+              "f64_hex": "0x3fe8000000000000"
+            },
+            {
+              "decimal": "-1.25",
+              "f64_hex": "0xbff4000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            }
+          ]
+        ],
+        "bulges": [
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ]
+      },
+      "parameter_domain": {
+        "start": {
+          "decimal": "0.0",
+          "f64_hex": "0x0000000000000000"
+        },
+        "end": {
+          "decimal": "4.0",
+          "f64_hex": "0x4010000000000000"
+        }
+      },
+      "closure": {
+        "closed_by_endpoint": false,
+        "closed_by_knots": false,
+        "periodic": false
+      },
+      "structure": "CURVE_ONLY"
+    }
+  ],
+  "assertions": [
+    {
+      "id": "a1",
+      "kind": "STRUCTURAL",
+      "entity": "polyline-001",
+      "claim": "CLASS_PRESERVED",
+      "statement": "The semantic class stays polyline; it is not rewritten into another class."
+    },
+    {
+      "id": "a2",
+      "kind": "STRUCTURAL",
+      "entity": "polyline-001",
+      "claim": "VERTEX_ORDER_PRESERVED",
+      "statement": "Vertices keep identity and order."
+    },
+    {
+      "id": "a3",
+      "kind": "GEOMETRIC",
+      "entity": "polyline-001",
+      "claim": "PARAMETERIZATION_PRESERVED",
+      "statement": "The parameter domain is kept; a reparameterised equivalent counts as geometric only."
+    }
+  ],
+  "derivative_exclusions": [
+    {
+      "entity": "polyline-001",
+      "parameter": {
+        "decimal": "1.0",
+        "f64_hex": "0x3ff0000000000000"
+      },
+      "reason": "POLYLINE_VERTEX"
+    },
+    {
+      "entity": "polyline-001",
+      "parameter": {
+        "decimal": "2.0",
+        "f64_hex": "0x4000000000000000"
+      },
+      "reason": "POLYLINE_VERTEX"
+    },
+    {
+      "entity": "polyline-001",
+      "parameter": {
+        "decimal": "3.0",
+        "f64_hex": "0x4008000000000000"
+      },
+      "reason": "POLYLINE_VERTEX"
+    }
+  ]
+}

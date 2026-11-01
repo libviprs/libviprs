@@ -1,0 +1,1393 @@
+{
+ "corpus_revision": "r2-open",
+ "fixtures": [
+  {
+   "evidence_class": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "expects_rejection": false,
+   "files": {
+    "expected.math.json": {
+     "bytes": 3250,
+     "sha256": "6d2fe3988208c5ad230679d0ecd5bb01156a1ddb8ea112ac05987947833f9372"
+    },
+    "primary.signature.json": {
+     "bytes": 27609,
+     "sha256": "fe7557297fdad79ef97d6970ebb9f57b1faf29f9e9d34925190cfeadfb580f5f"
+    },
+    "source.dwg": {
+     "bytes": 20755,
+     "sha256": "9d7bedeb21f9e7e2c0d1b1549fdc732eb4de8d6150eb142fe01989cd8f01dca1"
+    },
+    "verdict.json": {
+     "bytes": 1338,
+     "sha256": "923018fb79089490107228b84c87b63786ba1934d1a504f21dec7bff1a3e3aa3"
+    }
+   },
+   "group": "curves",
+   "id": "arc-seam-001",
+   "status": "ACCEPTED",
+   "step_verdict": "KNOWN_TRUTH_EXACT"
+  },
+  {
+   "evidence_class": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "expects_rejection": false,
+   "files": {
+    "expected.math.json": {
+     "bytes": 3382,
+     "sha256": "340f878a22f780cdd5d42e22b16cd503a3f5a53d5ab10dba8f2bcbc9c2f2f897"
+    },
+    "primary.signature.json": {
+     "bytes": 27602,
+     "sha256": "a3756c9c8295cc9fcb0dac0442fc07a974ec1b65f67d3b0e4833651fd00cf9d1"
+    },
+    "source.dwg": {
+     "bytes": 20691,
+     "sha256": "f9c6beb5da3a5b495ce00d982639637f724386ebc4fe6260f4807d721c9c0eb0"
+    },
+    "verdict.json": {
+     "bytes": 1336,
+     "sha256": "a7deb71eb432a0081f36fe619671546c732236b9d79d59b052fc49383f194928"
+    }
+   },
+   "group": "edge",
+   "id": "arc-tiny-sweep-001",
+   "status": "ACCEPTED",
+   "step_verdict": "KNOWN_TRUTH_EXACT"
+  },
+  {
+   "evidence_class": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "expects_rejection": false,
+   "files": {
+    "expected.math.json": {
+     "bytes": 3874,
+     "sha256": "965622a3eef06a5f6bf2a176f377d7d0797fd23201da4ac2dd011c30cec12b5e"
+    },
+    "primary.signature.json": {
+     "bytes": 28201,
+     "sha256": "465fbb53bd9935fd86d97e8be47e786664adc2556c81140d9eb091e494747ff8"
+    },
+    "source.dwg": {
+     "bytes": 20723,
+     "sha256": "d2d1812b915f43291298f8e08fe4a09999136f6c6a1e8d88734a2d0238884cc5"
+    },
+    "verdict.json": {
+     "bytes": 1719,
+     "sha256": "40d79e76209e1dcb00358fceb6ac3a157c2d80237312e7a9024fc8e0ef7cfb54"
+    }
+   },
+   "group": "curves",
+   "id": "bezier-d3-001",
+   "status": "ACCEPTED",
+   "step_verdict": "KNOWN_TRUTH_EXACT"
+  },
+  {
+   "evidence_class": "DUAL_ORACLE_EQUIVALENT",
+   "evidence_scope": "STEP_ORACLE",
+   "expects_rejection": false,
+   "files": {
+    "primary.signature.json": {
+     "bytes": 54485,
+     "sha256": "730d1219b7b80bcaf747e0a925e31fa7725d260772d4480451e07d6eba05ba42"
+    },
+    "source.dwg": {
+     "bytes": 37071,
+     "sha256": "36dc72bad541b911b051936287eeb8abf9a9e80e92f371033dfc1d49a0e965bf"
+    },
+    "verdict.json": {
+     "bytes": 321,
+     "sha256": "f62a9bc032604b0a2154fd4b99d03011469d77ae3df1c9f4d2b8dbf4eca786b7"
+    }
+   },
+   "group": "real-world",
+   "id": "blocks-dynamic-linear-001",
+   "status": "ACCEPTED",
+   "step_verdict": "DUAL_ORACLE_EQUIVALENT"
+  },
+  {
+   "evidence_class": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "expects_rejection": false,
+   "files": {
+    "expected.math.json": {
+     "bytes": 6553,
+     "sha256": "eb30a52b6320501d09328f02ab2117d9a56fb9d532d2d11d254ba375fffc7205"
+    },
+    "primary.signature.json": {
+     "bytes": 32819,
+     "sha256": "0a77cfacac1359d35a38af1f6cf40a889f53d474ef89ac1284b3641c18b4fe75"
+    },
+    "source.dwg": {
+     "bytes": 20755,
+     "sha256": "703053ee5e8fc3edbdd4314583816ffee9899535ff35939a1cdb7c8bde182e92"
+    },
+    "verdict.json": {
+     "bytes": 662,
+     "sha256": "c83a08c903fb55dc9947e3905dfc044d7600734efeb060f46aeaf5a3371bd392"
+    }
+   },
+   "group": "curves",
+   "id": "bspline-d3-001",
+   "status": "ACCEPTED",
+   "step_verdict": "KNOWN_TRUTH_EXACT"
+  },
+  {
+   "evidence_class": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "expects_rejection": false,
+   "files": {
+    "expected.math.json": {
+     "bytes": 7347,
+     "sha256": "fc17564b207fab9682b508f14c4ef31455dcdedd72d5ce391cde78e2a8f7fc50"
+    },
+    "primary.signature.json": {
+     "bytes": 35027,
+     "sha256": "a46ccaa859a11f861ac9b4bcdf19700e47fbe555bf77b28b5ce9682990086578"
+    },
+    "source.dwg": {
+     "bytes": 20789,
+     "sha256": "4e69904d92919e984eac306663bdaf3b07bb9d555468d74c68ffaaaa98fe2708"
+    },
+    "verdict.json": {
+     "bytes": 662,
+     "sha256": "9deeaf3321c48ea6ca8b3705b8519fd103d56686da42278ec92dad04e716fda7"
+    }
+   },
+   "group": "curves",
+   "id": "bspline-d5-001",
+   "status": "ACCEPTED",
+   "step_verdict": "KNOWN_TRUTH_EXACT"
+  },
+  {
+   "evidence_class": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "expects_rejection": false,
+   "files": {
+    "expected.math.json": {
+     "bytes": 5725,
+     "sha256": "358e3cfdd7d23c8905030e911379423645630d260123d2dedd654270f7dab439"
+    },
+    "primary.signature.json": {
+     "bytes": 28808,
+     "sha256": "6249aacad39c16893859e277064cbbbd24ac521fa36be2a55c9a2f991511f99a"
+    },
+    "source.dwg": {
+     "bytes": 20755,
+     "sha256": "8626d2f5ac9a882fc0de2f3b0e6b792b349dc4f68811e5165aee1c7bf2434681"
+    },
+    "verdict.json": {
+     "bytes": 698,
+     "sha256": "c07a8df948aa90e213cdcb6457ec1ad359867defa3e6d305211f258fd6ddf398"
+    }
+   },
+   "group": "edge",
+   "id": "bspline-nonunit-domain-001",
+   "status": "ACCEPTED",
+   "step_verdict": "KNOWN_TRUTH_EXACT"
+  },
+  {
+   "evidence_class": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "expects_rejection": false,
+   "files": {
+    "expected.math.json": {
+     "bytes": 4912,
+     "sha256": "0e9095d8c58d4f77c40cd47b9dc5eb84598ce5439fd499eb51fc4e341f7f7143"
+    },
+    "primary.signature.json": {
+     "bytes": 27713,
+     "sha256": "6e977b824987d7be1cdda7acccd7943f41486154b62e8c7bc78df196182504a7"
+    },
+    "source.dwg": {
+     "bytes": 20723,
+     "sha256": "bb96f380d577028c0a3c3d2239a86f6681e44acff7981b4ba664e6186239fd18"
+    },
+    "verdict.json": {
+     "bytes": 5606,
+     "sha256": "03b80e003151c3f7364a97f138019d2b96eca8ed576b29bcd62a644dc823a954"
+    }
+   },
+   "group": "curves",
+   "id": "bulge-arc-001",
+   "status": "ACCEPTED",
+   "step_verdict": "KNOWN_TRUTH_EXACT"
+  },
+  {
+   "evidence_class": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "expects_rejection": false,
+   "files": {
+    "expected.math.json": {
+     "bytes": 5172,
+     "sha256": "827c7ab87a38cc36a6169187e2a7aa7d454d6311b345387a669dd5fa9f3925a4"
+    },
+    "primary.signature.json": {
+     "bytes": 27734,
+     "sha256": "817fc8068538917d7324b26d339ac89a85e83a5e02c43a982318b532cb7390fe"
+    },
+    "source.dwg": {
+     "bytes": 20723,
+     "sha256": "39d03d7551d26307ae629c3922363e10894a8a204d3500373571d74d30b0b989"
+    },
+    "verdict.json": {
+     "bytes": 8305,
+     "sha256": "46fbb54bcb15927e6953b0c712168aee327159126f32f206b87ca96274473400"
+    }
+   },
+   "group": "curves",
+   "id": "bulge-arc-neg-001",
+   "status": "ACCEPTED",
+   "step_verdict": "KNOWN_TRUTH_EXACT"
+  },
+  {
+   "evidence_class": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "expects_rejection": false,
+   "files": {
+    "expected.math.json": {
+     "bytes": 2883,
+     "sha256": "f94047294db98e3efed1a60f055f132427b5b97637b311a2bdd83ab7f67d211f"
+    },
+    "primary.signature.json": {
+     "bytes": 27377,
+     "sha256": "6ad1f47fe57a810c9214e4cf37d589a670737d885e7c5158e993ee7d04136210"
+    },
+    "source.dwg": {
+     "bytes": 20691,
+     "sha256": "27e9ce322e461d4d0cafa49ce823b0a88db254710bb0878d2eafa5657c7270e2"
+    },
+    "verdict.json": {
+     "bytes": 1304,
+     "sha256": "38f4567eb4bd92b073596a1b1c4b2d2145fac8bf9cf18c52cb6157395f2dc08c"
+    }
+   },
+   "group": "curves",
+   "id": "circle-001",
+   "status": "ACCEPTED",
+   "step_verdict": "KNOWN_TRUTH_EXACT"
+  },
+  {
+   "evidence_class": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "expects_rejection": false,
+   "files": {
+    "expected.math.json": {
+     "bytes": 6885,
+     "sha256": "59fdb5c4780da69ffbee9dabc98232398e9484cd118ebecda56fbe9e0bc5b919"
+    },
+    "primary.signature.json": {
+     "bytes": 30141,
+     "sha256": "78953625695be6375a9deff82f65db953b73ee7213453f9bdff7c3c4f3232649"
+    },
+    "source.dwg": {
+     "bytes": 20755,
+     "sha256": "6624459da6246ba134c6a1cb920cc21884b9599e30eec777cdc83153b7861fa6"
+    },
+    "verdict.json": {
+     "bytes": 686,
+     "sha256": "81029a2bb91e4b4deb31c01fb7a1c8f5bfc24d5f355c063d81ddce54ad06fe0b"
+    }
+   },
+   "group": "curves",
+   "id": "closed-by-endpoint-001",
+   "status": "ACCEPTED",
+   "step_verdict": "KNOWN_TRUTH_EXACT"
+  },
+  {
+   "evidence_class": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "expects_rejection": false,
+   "files": {
+    "expected.math.json": {
+     "bytes": 6907,
+     "sha256": "9cf4c5f9d7912aaf28489f0fdfe1c1d2d8a315d24807fd149981a6425a3f0f4e"
+    },
+    "primary.signature.json": {
+     "bytes": 35505,
+     "sha256": "2f20c917a296855ce2ef4b0288fa3fb7441eba68b82cbff6778d8f8f5a2897ff"
+    },
+    "source.dwg": {
+     "bytes": 20821,
+     "sha256": "8ba9cfa5dd3f22bf5b8fe13f6167c14ffdd549164db565bacd124fcbf7fcb435"
+    },
+    "verdict.json": {
+     "bytes": 677,
+     "sha256": "2c9c910a0045cfda0965f9b94f8a7e323f23517107df72fe896d27e5603c02ba"
+    }
+   },
+   "group": "curves",
+   "id": "closed-periodic-001",
+   "status": "ACCEPTED",
+   "step_verdict": "KNOWN_TRUTH_EXACT"
+  },
+  {
+   "evidence_class": "QUARANTINED",
+   "evidence_scope": "REJECTION_EXPECTED",
+   "expects_rejection": false,
+   "files": {
+    "source.dwg": {
+     "bytes": 20691,
+     "sha256": "c14f31c157b8decd060f51cef4c6df587e71181184efd15aad4800b3e8aebe4f"
+    },
+    "verdict.json": {
+     "bytes": 399,
+     "sha256": "00d52f3eeca0086866b6e0e746fc9a94ea808f5db1aa85bc7a14a326dabf186d"
+    }
+   },
+   "group": "degenerate",
+   "id": "coincident-control-points-001",
+   "status": "ACCEPTED",
+   "step_verdict": "QUARANTINED"
+  },
+  {
+   "evidence_class": "QUARANTINED",
+   "evidence_scope": "STEP_ORACLE",
+   "expects_rejection": false,
+   "files": {
+    "source.dwg": {
+     "bytes": 20723,
+     "sha256": "48bfc6d5f3b5e0462d1db39872fd901811270fe324ea3f7f105e230ba4744344"
+    },
+    "verdict.json": {
+     "bytes": 455,
+     "sha256": "cbd67937a2b94d9366d38ba0d41fd5cabee3ba6572167f3544919b1497d3ecf3"
+    }
+   },
+   "group": "negative",
+   "id": "dimension-001",
+   "status": "ACCEPTED",
+   "step_verdict": "QUARANTINED"
+  },
+  {
+   "evidence_class": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "expects_rejection": false,
+   "files": {
+    "expected.math.json": {
+     "bytes": 3178,
+     "sha256": "54a23e1dcdee2d2fbfd884f03dcd3a825bc2e3884eb74db4581ae74b038189fe"
+    },
+    "primary.signature.json": {
+     "bytes": 27504,
+     "sha256": "9a1c2ca968a5ae3100d89e6029ade2f64bd5b1bcf1ae3f6ed93ae8988064fe78"
+    },
+    "source.dwg": {
+     "bytes": 20723,
+     "sha256": "f9651591169c2662cf44be5e7c3b89fbc2f13f82a960203c45c85d6db4586683"
+    },
+    "verdict.json": {
+     "bytes": 1341,
+     "sha256": "3693d1a50657c5a1604b2678aa46c1638b18715001d2c1f8d47208fc4a37ea16"
+    }
+   },
+   "group": "curves",
+   "id": "ellipse-001",
+   "status": "ACCEPTED",
+   "step_verdict": "KNOWN_TRUTH_EXACT"
+  },
+  {
+   "evidence_class": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "expects_rejection": false,
+   "files": {
+    "expected.math.json": {
+     "bytes": 3509,
+     "sha256": "bc65acf5704c4f390d42bcb634e41c988ac7e9898b749bf04f88e810fa86ea01"
+    },
+    "primary.signature.json": {
+     "bytes": 27769,
+     "sha256": "c6e6a607b26ffa272e46be36030c58f2c238f926580131de500dcdb47e838778"
+    },
+    "source.dwg": {
+     "bytes": 20723,
+     "sha256": "0fe4fcb19a65a8c2296bc89f13516cd05172c34b2aa9bfc1064289493c2de1fd"
+    },
+    "verdict.json": {
+     "bytes": 1360,
+     "sha256": "430e827ce136c96ad81f6d7d92ddeb336e43d24cde902f9af47b710ada6b095f"
+    }
+   },
+   "group": "curves",
+   "id": "elliptical-arc-001",
+   "status": "ACCEPTED",
+   "step_verdict": "KNOWN_TRUTH_EXACT"
+  },
+  {
+   "evidence_class": "QUARANTINED",
+   "evidence_scope": "STEP_ORACLE",
+   "expects_rejection": false,
+   "files": {
+    "source.dwg": {
+     "bytes": 20659,
+     "sha256": "ee0d0622437de96b62baf81776ce58a11b0f937d84b00f1c1f310d19d7433c46"
+    },
+    "verdict.json": {
+     "bytes": 451,
+     "sha256": "dd7ed706ddae023b3b107ee540ac7a58253f09e9bf8355eb1021baa24a592f02"
+    }
+   },
+   "group": "negative",
+   "id": "empty-001",
+   "status": "ACCEPTED",
+   "step_verdict": "QUARANTINED"
+  },
+  {
+   "evidence_class": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "expects_rejection": false,
+   "files": {
+    "expected.math.json": {
+     "bytes": 16635,
+     "sha256": "d308c0127720f3003b39554ff8223f77d000c3efc1b286ba85b1a038d958d146"
+    },
+    "primary.signature.json": {
+     "bytes": 26826,
+     "sha256": "ebf802720cd9b9733732263a4ac70d6d17850e27c6c311c2659de0cab784625f"
+    },
+    "source.dwg": {
+     "bytes": 21203,
+     "sha256": "f08d1c84596c9ce6765ad1a3922081c11bcec418127892ebf7b1eb31fddb1289"
+    },
+    "verdict.json": {
+     "bytes": 1684,
+     "sha256": "5ce82329cd1c992a069a99417f2fe1e4349e244a2432f49146227663f949c7a7"
+    }
+   },
+   "group": "edge",
+   "id": "general-affine-chain-001",
+   "status": "ACCEPTED",
+   "step_verdict": "KNOWN_TRUTH_EXACT"
+  },
+  {
+   "evidence_class": "QUARANTINED",
+   "evidence_scope": "STEP_ORACLE",
+   "expects_rejection": false,
+   "files": {
+    "source.dwg": {
+     "bytes": 20723,
+     "sha256": "2a88b6432f7d39d949ae2f52b7a2b33f4b21b1a5aee3a6b643dee4b3773c4140"
+    },
+    "verdict.json": {
+     "bytes": 451,
+     "sha256": "c90c52a796eeaf8e4f2aacef83bbd28e85fc7383fd80d3f937801272ef71fffa"
+    }
+   },
+   "group": "negative",
+   "id": "hatch-001",
+   "status": "ACCEPTED",
+   "step_verdict": "QUARANTINED"
+  },
+  {
+   "evidence_class": "QUARANTINED",
+   "evidence_scope": "STEP_ORACLE",
+   "expects_rejection": false,
+   "files": {
+    "source.dwg": {
+     "bytes": 20755,
+     "sha256": "2a25452af45c27c6960660d9261f944ef04494968c625be5241e0c61827e3202"
+    },
+    "verdict.json": {
+     "bytes": 460,
+     "sha256": "df2089c595b70c88ac058a63fcc7c36782321f10fcf7b8e3f2c1ea82f2151ba4"
+    }
+   },
+   "group": "negative",
+   "id": "hatch-gradient-001",
+   "status": "ACCEPTED",
+   "step_verdict": "QUARANTINED"
+  },
+  {
+   "evidence_class": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "expects_rejection": false,
+   "files": {
+    "expected.math.json": {
+     "bytes": 3152,
+     "sha256": "df7838345f2b87f89f0a5b6522a9dc3da5173bd61b500070c6b2bdc6778bd8dd"
+    },
+    "primary.signature.json": {
+     "bytes": 27397,
+     "sha256": "e0e8d9ebc9c63a136c2639c2514aaa97f3f2e20508a4408a9e400c667cfa1a70"
+    },
+    "source.dwg": {
+     "bytes": 20755,
+     "sha256": "1cb48c5d921317f44128255603fb3faddf9af01490f95799f79edcf96d6bde3e"
+    },
+    "verdict.json": {
+     "bytes": 1347,
+     "sha256": "a6e0ce60a850a5a9376afe5d3c1122899ebdc338ff78f6d7bacc50557789e427"
+    }
+   },
+   "group": "edge",
+   "id": "huge-extent-001",
+   "status": "ACCEPTED",
+   "step_verdict": "KNOWN_TRUTH_EXACT"
+  },
+  {
+   "evidence_class": "QUARANTINED",
+   "evidence_scope": "STEP_ORACLE",
+   "expects_rejection": false,
+   "files": {
+    "source.dwg": {
+     "bytes": 20723,
+     "sha256": "91cb55e1f6f00ca55f25cadef3ea632f2d890b2266891b7b2513a043adea6611"
+    },
+    "verdict.json": {
+     "bytes": 451,
+     "sha256": "36d7839ca25e5f224d4614acb3a9948455bd4f5356454552b62d044623086338"
+    }
+   },
+   "group": "negative",
+   "id": "image-001",
+   "status": "ACCEPTED",
+   "step_verdict": "QUARANTINED"
+  },
+  {
+   "evidence_class": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "expects_rejection": false,
+   "files": {
+    "expected.math.json": {
+     "bytes": 4683,
+     "sha256": "a117564978c3144cb2f97e87f7679993c85c4399c0c2e28f265a151180815829"
+    },
+    "primary.signature.json": {
+     "bytes": 79948,
+     "sha256": "048f5a50c4eda79055e663184c6681c1845b485687a3daa9125da85ece5e13e2"
+    },
+    "source.dwg": {
+     "bytes": 20755,
+     "sha256": "89d2a00a7f784fd05c7acf3ce9cbb227f705f165aaaad080fcc0a7262e38c709"
+    },
+    "verdict.json": {
+     "bytes": 10453,
+     "sha256": "c16a055627bc39636e8129faf47048050013a93b08b02d3a634dfab4e67ac9af"
+    }
+   },
+   "group": "curves",
+   "id": "large-coords-001",
+   "status": "ACCEPTED",
+   "step_verdict": "KNOWN_TRUTH_EXACT"
+  },
+  {
+   "evidence_class": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "READER_MAPPING_ONLY",
+   "expects_rejection": false,
+   "files": {
+    "expected.math.json": {
+     "bytes": 6582,
+     "sha256": "f108d0fda48fa9b1de50a06d2739e2762d052b665d7e0fca7a7a7a01cca3f728"
+    },
+    "primary.signature.json": {
+     "bytes": 79866,
+     "sha256": "445cfd63a91754768ad956f2a52d74763f83f558a33a6df5c69db0ed6a30e789"
+    },
+    "source.dwg": {
+     "bytes": 20851,
+     "sha256": "27de1eed38ad29b57e5708b7a5b575955e0a836cba1ba8f265fad69a77ecf217"
+    },
+    "verdict.json": {
+     "bytes": 10320,
+     "sha256": "6f37b4f1edefb9a2bd96b8a694c1cb7933b94d319630dfc379a663cfd3518bac"
+    }
+   },
+   "group": "curves",
+   "id": "layer-state-001",
+   "status": "ACCEPTED",
+   "step_verdict": "QUARANTINED"
+  },
+  {
+   "evidence_class": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "expects_rejection": false,
+   "files": {
+    "expected.math.json": {
+     "bytes": 2519,
+     "sha256": "d99f4c11195e3bedb97f369685f0163ae522c55c286fafb39c641d3b27e1683f"
+    },
+    "primary.signature.json": {
+     "bytes": 26790,
+     "sha256": "71b477906816edd2a47269064dfe9701219cda0a7a5f5b6a68c5aa817fb81380"
+    },
+    "source.dwg": {
+     "bytes": 20691,
+     "sha256": "3eca180bec811026d5b968ca979ceb0b36b3d4504f56f09aa635431801b2b957"
+    },
+    "verdict.json": {
+     "bytes": 1328,
+     "sha256": "b00ac252bd2b52fc067578e7cfb2078f598319789e024abf0e21bc17215dcf98"
+    }
+   },
+   "group": "curves",
+   "id": "line-001",
+   "status": "ACCEPTED",
+   "step_verdict": "KNOWN_TRUTH_EXACT"
+  },
+  {
+   "evidence_class": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "expects_rejection": false,
+   "files": {
+    "expected.math.json": {
+     "bytes": 4935,
+     "sha256": "98d02d643a76c2f86cefdc1f33b406c1ceae573705870bd211ef5500c42be03d"
+    },
+    "primary.signature.json": {
+     "bytes": 106503,
+     "sha256": "19e34ae44b0c2b3cd38e4dd8fc36ef3f9f438583a08c44e055e33b57b27535c5"
+    },
+    "source.dwg": {
+     "bytes": 20723,
+     "sha256": "2571b5a5f08e7aaf8c5b02fdf14db2c6d64359aedff64be8eda83035ddd9f27f"
+    },
+    "verdict.json": {
+     "bytes": 1325,
+     "sha256": "d2b5af738d0b351958c53e854e1a488291feaaf4cbbd6a4e5196f378a5f387a8"
+    }
+   },
+   "group": "curves",
+   "id": "lwpolyline-closed-001",
+   "status": "ACCEPTED",
+   "step_verdict": "KNOWN_TRUTH_EXACT"
+  },
+  {
+   "evidence_class": "QUARANTINED",
+   "evidence_scope": "STEP_ORACLE",
+   "expects_rejection": false,
+   "files": {
+    "source.dwg": {
+     "bytes": 20691,
+     "sha256": "6fb6a5a476227b75100dc81fd22274c2973e77dec15ddc86a3222e166a99f82c"
+    },
+    "verdict.json": {
+     "bytes": 450,
+     "sha256": "3da4ba6edc9cd3da417704e2f8edfea366527727ff2ac2a6bf140329782c26e6"
+    }
+   },
+   "group": "negative",
+   "id": "mesh-001",
+   "status": "ACCEPTED",
+   "step_verdict": "QUARANTINED"
+  },
+  {
+   "evidence_class": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "READER_MAPPING_ONLY",
+   "expects_rejection": false,
+   "files": {
+    "expected.math.json": {
+     "bytes": 39317,
+     "sha256": "fafc06c84d1fe9dcd35ad77047ba88d7f82691336eea3a0eb6881bacd217e13d"
+    },
+    "primary.signature.json": {
+     "bytes": 274623,
+     "sha256": "244748b494e1fdedb0cbe7a19720876173d11b245975253f7f518aaf5e16155e"
+    },
+    "source.dwg": {
+     "bytes": 21491,
+     "sha256": "2e506489009126345c45b1fff28e8fae89a8277561107a65a5f9f637795c4e4b"
+    },
+    "verdict.json": {
+     "bytes": 9233,
+     "sha256": "fc7198d305c0c5669ca9d418e7b3dfcd1c2aacf5b1cf8663f8fb142855d4a79e"
+    }
+   },
+   "group": "mixed",
+   "id": "mixed-entity-001",
+   "status": "ACCEPTED",
+   "step_verdict": "QUARANTINED"
+  },
+  {
+   "evidence_class": "QUARANTINED",
+   "evidence_scope": "STEP_ORACLE",
+   "expects_rejection": false,
+   "files": {
+    "source.dwg": {
+     "bytes": 20723,
+     "sha256": "c09f6c0f55bbeee472849f3546a6a9106721461b2c9353be8e68841155c52d67"
+    },
+    "verdict.json": {
+     "bytes": 451,
+     "sha256": "e24ab7374e9e22de47b5e35ba89a4c4a4915e5989ff6eb83c9f23dfb8ae8e31c"
+    }
+   },
+   "group": "negative",
+   "id": "mtext-001",
+   "status": "ACCEPTED",
+   "step_verdict": "QUARANTINED"
+  },
+  {
+   "evidence_class": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "expects_rejection": true,
+   "files": {
+    "expected.math.json": {
+     "bytes": 5253,
+     "sha256": "dddef110f3d8699aca973cf3d1a2cd31283affe124d5da4d7c3412fcbcb8a4e0"
+    },
+    "source.dwg": {
+     "bytes": 20883,
+     "sha256": "e89ed4e9988b3fab7e74ac87aacaf378ddd9c7f414b21558c3eadd87fb731be1"
+    },
+    "verdict.json": {
+     "bytes": 652,
+     "sha256": "b1f2a6fcdff535dc7f7b04ce4d040cf6227189dcd899d86aa2dc00bcb22b1ee5"
+    }
+   },
+   "group": "transforms",
+   "id": "near-singular-001",
+   "status": "ACCEPTED",
+   "step_verdict": "QUARANTINED"
+  },
+  {
+   "evidence_class": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "expects_rejection": false,
+   "files": {
+    "expected.math.json": {
+     "bytes": 13367,
+     "sha256": "c7bff2967f0962ebb1893041bcc57abfda38c85948f3ce3942a74a567a9ff37a"
+    },
+    "primary.signature.json": {
+     "bytes": 26823,
+     "sha256": "c672bc5bb5c8efd7b8c18ab51169dd67c62fc17f056adb2f0311c1068a63d5f4"
+    },
+    "source.dwg": {
+     "bytes": 21077,
+     "sha256": "8c1e7b6c8e101c53fc8d87adba3114d5887fbc5c053004ad9ad8ae99fc0b7f0e"
+    },
+    "verdict.json": {
+     "bytes": 1659,
+     "sha256": "50fb1e4833cdbaf35d49042daa5bb093564aec6f7b933189563713aeeb8ca18e"
+    }
+   },
+   "group": "blocks",
+   "id": "nested-blocks-001",
+   "status": "ACCEPTED",
+   "step_verdict": "KNOWN_TRUTH_EXACT"
+  },
+  {
+   "evidence_class": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "expects_rejection": false,
+   "files": {
+    "expected.math.json": {
+     "bytes": 7640,
+     "sha256": "9d9e1c1e5564f909314b4c74d94fc964b443c23a0212f673e6398cf6eaf6e733"
+    },
+    "primary.signature.json": {
+     "bytes": 27500,
+     "sha256": "782bf9a565f76b14f6a29baf1f76bd4571da30f6e10bbb0c16897ff18b5fd455"
+    },
+    "source.dwg": {
+     "bytes": 20915,
+     "sha256": "ae90b0c005f51bd089b9e8373c91115acaeb03cc0994518f3b94ed0540eccbb3"
+    },
+    "verdict.json": {
+     "bytes": 2225,
+     "sha256": "9bbf883856612525b7711e7b7e20f850503ec6dec4c5166e12c8e95c6ca47eea"
+    }
+   },
+   "group": "transforms",
+   "id": "nonuniform-scale-circle-001",
+   "status": "ACCEPTED",
+   "step_verdict": "KNOWN_TRUTH_EXACT"
+  },
+  {
+   "evidence_class": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "expects_rejection": false,
+   "files": {
+    "expected.math.json": {
+     "bytes": 12395,
+     "sha256": "4871cc827251f04a9fb261a7a69002ed7d2639e1e7c4ac69e2878623935ca9f1"
+    },
+    "primary.signature.json": {
+     "bytes": 27550,
+     "sha256": "899b7c83bbef9a17698171ba98ca503acac4e11a253d7c3e77f4403462f11bf3"
+    },
+    "source.dwg": {
+     "bytes": 21043,
+     "sha256": "9fd8cc060c04daa78d1b31bab78e6c27dce4cba89f271840b6dc29dc2973c4a3"
+    },
+    "verdict.json": {
+     "bytes": 2485,
+     "sha256": "d0c152f9bd4585b3e59f30f732e33a55b41fe5fb80575fcda39ca872ce1481cb"
+    }
+   },
+   "group": "transforms",
+   "id": "nonuniform-scale-rotated-001",
+   "status": "ACCEPTED",
+   "step_verdict": "KNOWN_TRUTH_EXACT"
+  },
+  {
+   "evidence_class": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "expects_rejection": false,
+   "files": {
+    "expected.math.json": {
+     "bytes": 6350,
+     "sha256": "20f633fa9e4bd4fef43c5810d73ddac6a645872e7815b078b92be9630eeb655d"
+    },
+    "primary.signature.json": {
+     "bytes": 32190,
+     "sha256": "82c1f9185c44be3272944fa446486458dc1d365f41b4f5ce33df5095b2c58ed8"
+    },
+    "source.dwg": {
+     "bytes": 20723,
+     "sha256": "ce408295cfbfbf685c340591e53e869b3a04d0178ba321d6dd443da00d57b3ba"
+    },
+    "verdict.json": {
+     "bytes": 674,
+     "sha256": "79c4416e25c4276bbf6b259a26dd8cc086150cd04601eb156c2fb6226f1f2b88"
+    }
+   },
+   "group": "curves",
+   "id": "nonunit-weight-001",
+   "status": "ACCEPTED",
+   "step_verdict": "KNOWN_TRUTH_EXACT"
+  },
+  {
+   "evidence_class": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "expects_rejection": false,
+   "files": {
+    "expected.math.json": {
+     "bytes": 6421,
+     "sha256": "b656f2000669b33ca99e114412fbe59bcaa07e272eea66dac35a4f67af80c352"
+    },
+    "primary.signature.json": {
+     "bytes": 32195,
+     "sha256": "8204f71d2101879bd8b9821cc7adec01409eeb1df2977f95ebeed04e40f6f8ef"
+    },
+    "source.dwg": {
+     "bytes": 20755,
+     "sha256": "b7719ceb970a9ab7d6e1b41286db49cd5cb59783ed445cde0fff14cdf40ef4ce"
+    },
+    "verdict.json": {
+     "bytes": 683,
+     "sha256": "b07e4d44b64c5ee3e2bcec46dc66ac311bdec798eebf56a037f1f94f6f8fcc45"
+    }
+   },
+   "group": "curves",
+   "id": "nurbs-d2-offconic-001",
+   "status": "ACCEPTED",
+   "step_verdict": "KNOWN_TRUTH_EXACT"
+  },
+  {
+   "evidence_class": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "expects_rejection": false,
+   "files": {
+    "expected.math.json": {
+     "bytes": 6899,
+     "sha256": "b8ff6b5114f069fcd12775b2e2bed62e5a74ba5792d1d2b287e0f2c1f27ca0df"
+    },
+    "primary.signature.json": {
+     "bytes": 33008,
+     "sha256": "bf189406db9fb435e36e2cec9d10ad08d2d3c9807f6e3abdd7b3944cbf019e77"
+    },
+    "source.dwg": {
+     "bytes": 20755,
+     "sha256": "d343b892f5172639da510cc16ed625f604cdffa6ae7b2caf46c7ee78eb6ed76d"
+    },
+    "verdict.json": {
+     "bytes": 656,
+     "sha256": "f0914c5fb4f1ed2b48bb9149083a6af1bb07f0505e7636a57fc045a810c84251"
+    }
+   },
+   "group": "curves",
+   "id": "nurbs-d3-001",
+   "status": "ACCEPTED",
+   "step_verdict": "KNOWN_TRUTH_EXACT"
+  },
+  {
+   "evidence_class": "QUARANTINED",
+   "evidence_scope": "STEP_ORACLE",
+   "expects_rejection": false,
+   "files": {
+    "source.dwg": {
+     "bytes": 20723,
+     "sha256": "4702b8f287c84656e9247ad7f105902d8189d496a80d9ee179e980b7cfae2f34"
+    },
+    "verdict.json": {
+     "bytes": 449,
+     "sha256": "6f08d9b4afe0914d697a5cac7d677db822b79fe148e39426028908b98ddaeec5"
+    }
+   },
+   "group": "negative",
+   "id": "ole-001",
+   "status": "ACCEPTED",
+   "step_verdict": "QUARANTINED"
+  },
+  {
+   "evidence_class": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "expects_rejection": false,
+   "files": {
+    "expected.math.json": {
+     "bytes": 5186,
+     "sha256": "a4866da7c7d3183fdd7e05bf70efc4aa76edfb19687080a4b5ee2089a35c1f50"
+    },
+    "primary.signature.json": {
+     "bytes": 106487,
+     "sha256": "021207c25dcf4f600070c1a89b597eac73e8412258aaf0baf703c1216571d873"
+    },
+    "source.dwg": {
+     "bytes": 20723,
+     "sha256": "fddbb9a48053edf60b567e7a48463203f44e889348022363f5207587dd4fb3a6"
+    },
+    "verdict.json": {
+     "bytes": 8460,
+     "sha256": "0bc1406b610b8bb68e91a56ab2b0ba4a03c954690b67040e6588f609d374dcb0"
+    }
+   },
+   "group": "curves",
+   "id": "polyline-001",
+   "status": "ACCEPTED",
+   "step_verdict": "KNOWN_TRUTH_EXACT"
+  },
+  {
+   "evidence_class": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "expects_rejection": false,
+   "files": {
+    "expected.math.json": {
+     "bytes": 5334,
+     "sha256": "bde791885f9a9d84799d0db995f5df1288f48a285096e5a74ffaa2f46d8afa06"
+    },
+    "primary.signature.json": {
+     "bytes": 106495,
+     "sha256": "94ea45e1e421001f48cd13f5259d89f48b25989ba0fa5013be99a8573775607d"
+    },
+    "source.dwg": {
+     "bytes": 20789,
+     "sha256": "c8b8e65cbbe9e67dbb12ba8e773d4bac0ee31d18769168f8f9da83d48c935a54"
+    },
+    "verdict.json": {
+     "bytes": 1300,
+     "sha256": "3c4cfb188f02ad083b872d6622dec66625a37f0630f378473b4b204ea0f1ae87"
+    }
+   },
+   "group": "curves",
+   "id": "polyline2d-001",
+   "status": "ACCEPTED",
+   "step_verdict": "KNOWN_TRUTH_EXACT"
+  },
+  {
+   "evidence_class": "QUARANTINED",
+   "evidence_scope": "STEP_ORACLE",
+   "expects_rejection": false,
+   "files": {
+    "source.dwg": {
+     "bytes": 20659,
+     "sha256": "127449daa46deac73968e67eb27b34ae0b3a14b1cb6193398f2a6564442dcf55"
+    },
+    "verdict.json": {
+     "bytes": 451,
+     "sha256": "f954fe9f49f90f6581f1678ee95c8bed1dfa3fc62c52d5aba9f7a8b59f3339d3"
+    }
+   },
+   "group": "negative",
+   "id": "proxy-001",
+   "status": "ACCEPTED",
+   "step_verdict": "QUARANTINED"
+  },
+  {
+   "evidence_class": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "expects_rejection": false,
+   "files": {
+    "expected.math.json": {
+     "bytes": 7971,
+     "sha256": "37f5991b7b06d07ffdf3b3bc627cd92c9d9e383f7df9bfa2feeacd502875fe64"
+    },
+    "primary.signature.json": {
+     "bytes": 27620,
+     "sha256": "63864ffb4fb08437af860711495ac9a1e293cd50578dd9ab3b347d77a633a28c"
+    },
+    "source.dwg": {
+     "bytes": 20883,
+     "sha256": "2b5f057dbfb2dab163a9c6a0f90871f7fd4bc7ca5261d1358bf991027e6ae046"
+    },
+    "verdict.json": {
+     "bytes": 1528,
+     "sha256": "9468f90be3ef4e6dd259abb3c22e9ac74067d498e917fc57a772c792ce797c3d"
+    }
+   },
+   "group": "transforms",
+   "id": "reflection-001",
+   "status": "ACCEPTED",
+   "step_verdict": "KNOWN_TRUTH_EXACT"
+  },
+  {
+   "evidence_class": "QUARANTINED",
+   "evidence_scope": "STEP_ORACLE",
+   "expects_rejection": false,
+   "files": {
+    "source.dwg": {
+     "bytes": 21659,
+     "sha256": "c62aa0484e53ebd0be6353596431ae8ef892eab47dc04a119251df0d18172568"
+    },
+    "verdict.json": {
+     "bytes": 452,
+     "sha256": "3811f5d259f08a44eb6d3c8ec2cae0f3fee09f90af385b842bcdd692a90f0461"
+    }
+   },
+   "group": "negative",
+   "id": "region-001",
+   "status": "ACCEPTED",
+   "step_verdict": "QUARANTINED"
+  },
+  {
+   "evidence_class": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "expects_rejection": false,
+   "files": {
+    "expected.math.json": {
+     "bytes": 6430,
+     "sha256": "556712f19e67c3a0da67b51cf0b6f99a4707b0ed1d1fe7fb56927fe304ca15ee"
+    },
+    "primary.signature.json": {
+     "bytes": 29382,
+     "sha256": "a27e47f2e134cdd01343b6676a30c33922ff4fcb7f42f766388578d5c0fc33a6"
+    },
+    "source.dwg": {
+     "bytes": 20755,
+     "sha256": "bb814c57fef950e70a844b65001c61b83263d6a8847da78e494206a3c867c739"
+    },
+    "verdict.json": {
+     "bytes": 680,
+     "sha256": "073a4eb0738180a936af2174e5c85bcb3a39c31f31b9753be3898a8ece79720c"
+    }
+   },
+   "group": "curves",
+   "id": "repeated-knot-c0-001",
+   "status": "ACCEPTED",
+   "step_verdict": "KNOWN_TRUTH_EXACT"
+  },
+  {
+   "evidence_class": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "expects_rejection": false,
+   "files": {
+    "expected.math.json": {
+     "bytes": 6394,
+     "sha256": "85e4f5f959d5f368b9bed9f4d766e5efcacff33c55cc610fbb95bb70a20fb8fe"
+    },
+    "primary.signature.json": {
+     "bytes": 26880,
+     "sha256": "2582cd7cda4ce61226b44efcc70eb71f30e849be4c7c240101a532fbc8a5dddc"
+    },
+    "source.dwg": {
+     "bytes": 20883,
+     "sha256": "07066e4133da04a520d2c682ddbe30a5b9fd6134a96c72902b5adce893d86349"
+    },
+    "verdict.json": {
+     "bytes": 1784,
+     "sha256": "ff6e8827e8c9ca565c3aabe5df4dae90ca924cdd4b523de1e2344d5867d185c3"
+    }
+   },
+   "group": "transforms",
+   "id": "rotation-irrational-001",
+   "status": "ACCEPTED",
+   "step_verdict": "KNOWN_TRUTH_EXACT"
+  },
+  {
+   "evidence_class": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "expects_rejection": false,
+   "files": {
+    "expected.math.json": {
+     "bytes": 14214,
+     "sha256": "ed4c6a3277680fccadba208424556be9af0a467919263f5285d68af9234d5b1c"
+    },
+    "primary.signature.json": {
+     "bytes": 26823,
+     "sha256": "cd3ec859abbe3a256a13176d6c8fdbf736dcb98f8703caf3e8cf4fa3a384c78a"
+    },
+    "source.dwg": {
+     "bytes": 21106,
+     "sha256": "a67001359899ce960a491a8b78a19ca5184ed1ea153e7ce47414d9d1b7b78301"
+    },
+    "verdict.json": {
+     "bytes": 1749,
+     "sha256": "1252b635d73889965dfa7f09b2e515bcd6533894e6a1bc50667941efaba8e509"
+    }
+   },
+   "group": "edge",
+   "id": "shear-chain-001",
+   "status": "ACCEPTED",
+   "step_verdict": "KNOWN_TRUTH_EXACT"
+  },
+  {
+   "evidence_class": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "expects_rejection": true,
+   "files": {
+    "expected.math.json": {
+     "bytes": 5163,
+     "sha256": "7d260757661b6b396be434d42d04cb4ae3768b1307b86474456512b453b0c32d"
+    },
+    "source.dwg": {
+     "bytes": 20851,
+     "sha256": "1394adbee5a986320b5aa8c035c802c2740782b10db676e3fb9b6e00bbb2d8c8"
+    },
+    "verdict.json": {
+     "bytes": 622,
+     "sha256": "fec3509ff382df3a53a7cd3fddeb1b520bd0fe154ba95fffcc0704328abbc7ab"
+    }
+   },
+   "group": "edge",
+   "id": "singular-001",
+   "status": "ACCEPTED",
+   "step_verdict": "QUARANTINED"
+  },
+  {
+   "evidence_class": "QUARANTINED",
+   "evidence_scope": "STEP_ORACLE",
+   "expects_rejection": false,
+   "files": {
+    "source.dwg": {
+     "bytes": 21659,
+     "sha256": "4b4c851bfba669195ba861b2c72c09f41352f0586b436c3f28282049b51e8844"
+    },
+    "verdict.json": {
+     "bytes": 453,
+     "sha256": "232b5b734832d22b801a26363b51f0d8da18e025721d95f03cc9fd0b5fa69432"
+    }
+   },
+   "group": "negative",
+   "id": "solid3d-001",
+   "status": "ACCEPTED",
+   "step_verdict": "QUARANTINED"
+  },
+  {
+   "evidence_class": "QUARANTINED",
+   "evidence_scope": "STEP_ORACLE",
+   "expects_rejection": false,
+   "files": {
+    "source.dwg": {
+     "bytes": 20818,
+     "sha256": "aed7b9529f242132349187c04ca9a7c0be6d9c62e6c123fae416f88abb6b1e74"
+    },
+    "verdict.json": {
+     "bytes": 451,
+     "sha256": "feb8ebc808fd87a00f54fb8493c36756b7275448d607180914a1e09a09c2425d"
+    }
+   },
+   "group": "negative",
+   "id": "table-001",
+   "status": "ACCEPTED",
+   "step_verdict": "QUARANTINED"
+  },
+  {
+   "evidence_class": "QUARANTINED",
+   "evidence_scope": "STEP_ORACLE",
+   "expects_rejection": false,
+   "files": {
+    "source.dwg": {
+     "bytes": 20723,
+     "sha256": "e233d9cd474d7d996b7376d64ff27e5b39fe5880df07ccc108c413903e41200c"
+    },
+    "verdict.json": {
+     "bytes": 450,
+     "sha256": "f635ecad292c4fceeaef062abe1da65a7e7d57d3abe209c78376a0b6bbf7e48f"
+    }
+   },
+   "group": "negative",
+   "id": "text-001",
+   "status": "ACCEPTED",
+   "step_verdict": "QUARANTINED"
+  },
+  {
+   "evidence_class": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "READER_MAPPING_ONLY",
+   "expects_rejection": false,
+   "files": {
+    "expected.math.json": {
+     "bytes": 2719,
+     "sha256": "2dbe987ccd19ac51845fe8611add948515024e3023e73dbc6d5648165d9dc642"
+    },
+    "primary.signature.json": {
+     "bytes": 251,
+     "sha256": "a773dd31f46f33055d14d03048d0b26c7fd9c9293a8941cec7bff6cfa2cf6ac4"
+    },
+    "source.dwg": {
+     "bytes": 20723,
+     "sha256": "d4b9f16977914a1b022186808453e2867f80c295720e1cac7f2b22afa805f610"
+    },
+    "verdict.json": {
+     "bytes": 9168,
+     "sha256": "5792c78208d8685b504cfe9ebb26a3d277d7b24c0cfd7a6699dd5d7099c9d8b9"
+    }
+   },
+   "group": "edge",
+   "id": "tiny-extent-001",
+   "status": "ACCEPTED",
+   "step_verdict": "QUARANTINED"
+  },
+  {
+   "evidence_class": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "expects_rejection": false,
+   "files": {
+    "expected.math.json": {
+     "bytes": 2904,
+     "sha256": "57f68fc85563b611928a73177a05b8099dde40a428fa0719979029e4c397f02c"
+    },
+    "primary.signature.json": {
+     "bytes": 27349,
+     "sha256": "bab335564648c4594ea0bcff46160f05552250a1a2f76e51f47ac73f67d5e860"
+    },
+    "source.dwg": {
+     "bytes": 20723,
+     "sha256": "01ff577b359ef66e3c7094c7842818fa57e8434e12c6cdb84706c55163887f8b"
+    },
+    "verdict.json": {
+     "bytes": 1329,
+     "sha256": "3c2eb65a5a0f8297ce2674a561303e5c55e3f10e703270c9b1ff0f30cc803c28"
+    }
+   },
+   "group": "curves",
+   "id": "tiny-radius-001",
+   "status": "ACCEPTED",
+   "step_verdict": "KNOWN_TRUTH_EXACT"
+  },
+  {
+   "evidence_class": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "expects_rejection": false,
+   "files": {
+    "expected.math.json": {
+     "bytes": 6147,
+     "sha256": "158201b897af18dcb468000f16b9157055550717213bb3458b238f0c6e3c3c0f"
+    },
+    "primary.signature.json": {
+     "bytes": 26798,
+     "sha256": "bf1b9825aeff07e3779810e737773820b6a7f9f70602f52dfa1d30099e00e9fd"
+    },
+    "source.dwg": {
+     "bytes": 20883,
+     "sha256": "55d0bbbaa4d9aa48a20b837abd6483aa0611784d4a4414d7112c61e385ccab6f"
+    },
+    "verdict.json": {
+     "bytes": 1787,
+     "sha256": "4397282f7152e5240e62e5c26c883d3c9fe40adae8ba25771f6eb32f137e1f5e"
+    }
+   },
+   "group": "transforms",
+   "id": "translation-001",
+   "status": "ACCEPTED",
+   "step_verdict": "KNOWN_TRUTH_EXACT"
+  },
+  {
+   "evidence_class": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "expects_rejection": false,
+   "files": {
+    "expected.math.json": {
+     "bytes": 7096,
+     "sha256": "9a0565b7a146bee951771aabfa866b5ffdc82f0c1730e2e3617289f9ebcd2531"
+    },
+    "primary.signature.json": {
+     "bytes": 27377,
+     "sha256": "5d5c4ff7d0ba01a8a06a41bcbf1f4e6ae7543c68f0c6b6114788c09686835fff"
+    },
+    "source.dwg": {
+     "bytes": 20883,
+     "sha256": "834ea1539c7dbbf5ce02b8c2738b335e907b642227a3607f69d69d55bfbe2fa3"
+    },
+    "verdict.json": {
+     "bytes": 1573,
+     "sha256": "4bab73872e86aee733462647a0e554534d6b277ae9f8328ab6d8a054ae515296"
+    }
+   },
+   "group": "transforms",
+   "id": "uniform-scale-001",
+   "status": "ACCEPTED",
+   "step_verdict": "KNOWN_TRUTH_EXACT"
+  },
+  {
+   "evidence_class": "QUARANTINED",
+   "evidence_scope": "STEP_ORACLE",
+   "expects_rejection": false,
+   "files": {
+    "source.dwg": {
+     "bytes": 20723,
+     "sha256": "39f218d8e8b8f61498aa83882fd3dcae8f08c12ba2e7def0acc9badbd4ca9325"
+    },
+    "verdict.json": {
+     "bytes": 453,
+     "sha256": "d6a9db919ca688ea573d6d8f0447bdc2a19273bd4c39b57ccedbad80b10ea813"
+    }
+   },
+   "group": "negative",
+   "id": "wipeout-001",
+   "status": "ACCEPTED",
+   "step_verdict": "QUARANTINED"
+  },
+  {
+   "evidence_class": "QUARANTINED",
+   "evidence_scope": "STEP_ORACLE",
+   "expects_rejection": false,
+   "files": {
+    "source.dwg": {
+     "bytes": 20818,
+     "sha256": "77160ff3d7059056bf3a0c049f39a48f05f1277129444e31f2960d14ac911384"
+    },
+    "verdict.json": {
+     "bytes": 450,
+     "sha256": "6c50441012ba9105724ca1418f78761102e9b323328e742de4c9b99d1a7789e9"
+    }
+   },
+   "group": "negative",
+   "id": "xref-001",
+   "status": "ACCEPTED",
+   "step_verdict": "QUARANTINED"
+  },
+  {
+   "evidence_class": "QUARANTINED",
+   "evidence_scope": "REJECTION_EXPECTED",
+   "expects_rejection": false,
+   "files": {
+    "source.dwg": {
+     "bytes": 20691,
+     "sha256": "9283da563dc3d812a345030adfc55e5c627a909169b7b9c94da11b5b3341eb32"
+    },
+    "verdict.json": {
+     "bytes": 402,
+     "sha256": "5c325d810c0d9681e4159f217dac6bef941e6ea612a37a7d75f22fb3819ccf86"
+    }
+   },
+   "group": "degenerate",
+   "id": "zero-length-segment-001",
+   "status": "ACCEPTED",
+   "step_verdict": "QUARANTINED"
+  },
+  {
+   "evidence_class": "QUARANTINED",
+   "evidence_scope": "REJECTION_EXPECTED",
+   "expects_rejection": false,
+   "files": {
+    "primary.signature.json": {
+     "bytes": 27367,
+     "sha256": "3907416d65aacfc6dcf078cd70c8ef9f39f9689976eabc37c2bf2688f1d93b23"
+    },
+    "source.dwg": {
+     "bytes": 20691,
+     "sha256": "318e9c759ae5e24d90e10c1b3d0bfe663139fbf8ec2ff8cdb60eeb06a89eff3f"
+    },
+    "verdict.json": {
+     "bytes": 8447,
+     "sha256": "813ee1e427185f8e869fcfb7a35b31586ea6516b8118914074a691411e214272"
+    }
+   },
+   "group": "degenerate",
+   "id": "zero-radius-001",
+   "status": "ACCEPTED",
+   "step_verdict": "QUARANTINED"
+  }
+ ],
+ "oracle_scope": "OPEN_CONVERTERS"
+}

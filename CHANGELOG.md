@@ -16,6 +16,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A single-span SPLINE is a Bezier** (issue #1375). `Normalized2DGeometry::from_spline` maps a
+  non-rational, non-periodic SPLINE with `degree + 1` control points and knots `0` and `1`, each
+  `degree + 1` times, to PVec's `Bezier` (`SupportedExact`, the knot array is the only thing
+  dropped), which is the class the known-truth corpus states for `bezier-d3-001`.
+- **Periodic SPLINE extraction** (issue #1374). `dwg_spline::extract` takes the one-period layout
+  of a non-rational periodic spline (`n` control points, `n + 1` knots), checks it with PVec's
+  `BSpline::from_periodic`, and keeps it as authored. `Normalized2DGeometry::from_spline` builds the
+  record (`SupportedEquivalent`, the unwrap changes the knot vector and not the locus). `pvec-spline`
+  now also pulls `pvec-geometry`.
+- **`JPXDecode` images in a PDF** (issue #1364, follow-up 3/6 to #1332). Decoded through the
+  existing `jp2k` feature (`crate::jp2k::decode_jp2k`), so no crate enters the graph; the jp2k
+  cell of `dependency_policy` is pinned to its two codec crates. Without the feature the reason is
+  still `filter-not-enabled:JPXDecode`. `/SMaskInData` other than 0 is refused
+  (`FilterError::SMaskInData`), and `FilterError::Source` carries the shared decode ceilings.
+  `fuzz_pvec_pdf_image` takes `--features jp2k`.
+
 - **`CCITTFaxDecode` images in a PDF** (issue #1363, follow-up 2/6 to #1332). Decoded through
   `hayro-ccitt` (plain Rust, no dependencies, in every build, no feature) into 1-bit samples that
   reach the 1-bit PNG tiles and the `Bilevel` note. `usace_swf_gpw_daca67-06-d-0029.pdf` now

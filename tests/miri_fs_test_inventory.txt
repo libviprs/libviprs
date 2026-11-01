@@ -316,6 +316,13 @@ annotated   fs-detected  tests/local_ci_docker_slot.rs::listing_and_printing_tak
 annotated   fs-detected  tests/local_ci_docker_slot.rs::the_docker_slot_comes_from_the_shared_pool_and_is_handed_down
 annotated   fs-detected  tests/local_ci_invocation.rs::the_host_architecture_comes_from_the_daemon_and_degrades_rather_than_refusing
 annotated   fs-detected  tests/local_gate_is_the_job_list.rs::the_workflow_directory_holds_only_files_this_guard_has_classified
+annotated   fs-detected  tests/local_gate_native_dwg_1295.rs::contributing_documents_the_lane_and_the_install_step
+annotated   fs-detected  tests/local_gate_native_dwg_1295.rs::every_test_that_requires_the_native_archive_is_run_by_the_cell
+annotated   fs-detected  tests/local_gate_native_dwg_1295.rs::make_native_dwg_is_the_entry_and_make_ci_stays_off_the_network
+annotated   fs-detected  tests/local_gate_native_dwg_1295.rs::the_cell_script_verifies_the_archive_and_requires_it
+annotated   fs-detected  tests/local_gate_native_dwg_1295.rs::the_mars_scheduler_only_drives_docker_and_has_a_cron_entry
+annotated   fs-detected  tests/local_gate_native_dwg_1295.rs::the_pin_names_the_release_and_a_sha256
+annotated   fs-detected  tests/local_gate_native_dwg_1295.rs::the_workflow_is_scheduled_and_calls_the_one_script
 annotated   fs-detected  tests/miri_ignore_convention.rs::filesystem_touching_tests_match_the_recorded_inventory
 annotated   fs-detected  tests/miri_ignore_convention.rs::no_filesystem_touching_test_runs_under_miri_outside_the_named_exceptions
 annotated   fs-detected  tests/miri_ignore_convention.rs::no_process_spawning_test_can_run_under_miri
@@ -520,6 +527,8 @@ annotated   fs-detected  tests/pvec_1332_interop_fixture.rs::a_scan_under_linewo
 annotated   fs-detected  tests/pvec_1333_raster_rules_doc.rs::the_page_points_at_the_adr_and_every_relative_link_resolves
 annotated   fs-detected  tests/pvec_1333_raster_rules_doc.rs::the_table_in_the_page_is_the_rendered_constant_byte_for_byte
 annotated   fs-detected  tests/pvec_1363_pdf_ccitt.rs::the_scanned_sheet_converts_to_seven_underlays
+annotated   fs-detected  tests/pvec_1364_pdf_jpx.rs::the_hoskins_creek_sheet_writes_23_images
+annotated   fs-detected  tests/pvec_1364_pdf_jpx.rs::the_tm11b3_report_writes_4_images_with_cmyk_approximated
 annotated   fs-detected  tests/pvec_1378_xref_facet.rs::pvec_1378_a_cycle_through_the_attached_drawings_is_refused
 annotated   fs-detected  tests/pvec_1378_xref_facet.rs::pvec_1378_a_drawing_with_no_xref_reports_an_empty_list_not_an_error
 annotated   fs-detected  tests/pvec_1378_xref_facet.rs::pvec_1378_a_file_that_is_not_a_drawing_is_a_typed_error_and_frees_the_slot
@@ -543,8 +552,12 @@ annotated   fs-detected  tests/pvec_api_surface.rs::only_the_semantic_crates_are
 annotated   fs-detected  tests/pvec_api_surface.rs::src_pvec_implements_no_curve_evaluation_knot_insertion_or_tessellation
 annotated   fs-detected  tests/pvec_api_surface.rs::the_facade_is_named_by_the_funnel_and_the_raster_files_only
 annotated   fs-detected  tests/pvec_api_surface.rs::the_pvec_dependencies_stay_semantic_and_optional
+annotated   fs-detected  tests/pvec_dual_oracle.rs::n2_2_1050_every_fixture_that_is_not_known_truth_is_executed_and_reported
+annotated   fs-detected  tests/pvec_dual_oracle.rs::n2_2_1050_the_pin_summary_is_the_index_and_a_bump_reads_as_per_class_changes
 annotated   fs-detected  tests/pvec_dwg_spline_structural.rs::no_code_path_turns_a_spline_into_polylines_or_arcs
 annotated   fs-detected  tests/pvec_fidelity_1100.rs::there_is_one_enum_for_the_six_classes
+annotated   fs-detected  tests/pvec_known_truth.rs::n2_1_1050_a_failing_run_leaves_no_state_behind
+annotated   fs-detected  tests/pvec_known_truth.rs::n2_1_1050_a_vendored_file_that_moved_is_caught_by_the_pin
 annotated   fs-detected  tests/pvec_pdf_vector.rs::n5_1_no_lopdf_type_in_any_public_signature
 annotated   fs-detected  tests/pvec_provider_acadrust.rs::open_works_from_bytes_and_from_a_path_alike
 annotated   fs-detected  tests/pvec_provider_acadrust.rs::the_fixtures_are_the_ones_n1_4_recorded_and_say_what_they_are
@@ -816,6 +829,7 @@ annotated   not-detected tests/dependency_policy.rs::library_discovery_is_confin
 annotated   not-detected tests/dependency_policy.rs::runtime_library_loaders_are_confined_to_the_pdfium_features
 annotated   not-detected tests/dependency_policy.rs::sha2_resolves_to_a_release_with_the_aarch64_provenance_fix
 annotated   not-detected tests/dependency_policy.rs::the_external_library_features_stay_opt_in
+annotated   not-detected tests/dependency_policy.rs::the_jp2k_cell_adds_only_its_two_codec_crates
 annotated   not-detected tests/icc_lut_alloc.rs::a_lut_export_survives_a_ceiling_at_the_promised_cms_bound
 annotated   not-detected tests/icc_lut_alloc.rs::a_lut_import_survives_a_ceiling_at_the_promised_cms_bound
 annotated   not-detected tests/icc_lut_alloc.rs::refusing_the_crate_s_own_device_plane_reports_an_error_rather_than_aborting

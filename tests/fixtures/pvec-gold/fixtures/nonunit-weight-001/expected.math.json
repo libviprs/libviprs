@@ -1,0 +1,271 @@
+{
+  "schema_version": "pvec-gold/expected.math/1",
+  "fixture_id": "nonunit-weight-001",
+  "evidence_class": "KNOWN_TRUTH_EXACT",
+  "units": {
+    "name": "metre",
+    "canonical": "metre",
+    "scale_to_canonical": {
+      "decimal": "1.0",
+      "f64_hex": "0x3ff0000000000000"
+    }
+  },
+  "provenance": {
+    "derivation": "AUTHORING_PARAMETERS",
+    "authoring_script": "tools/authoring/author_probes.py",
+    "parameter_file": "tools/authoring/params/nonunit-weight-001.json",
+    "parameter_file_sha256": "40d8a924b74c127345ea0123d11167042f14cfce417c10f989017c279fbd34c8",
+    "parameters": {
+      "id": "nonunit-weight-001",
+      "kind": "nurbs",
+      "description": "A clamped quadratic NURBS with one weight (50) far from 1.0 and the rest exactly 1.",
+      "degree": 2,
+      "control_points": [
+        [
+          "0",
+          "0",
+          "0"
+        ],
+        [
+          "1",
+          "1",
+          "0"
+        ],
+        [
+          "2",
+          "3",
+          "0"
+        ],
+        [
+          "3",
+          "1",
+          "0"
+        ],
+        [
+          "4",
+          "0",
+          "0"
+        ]
+      ],
+      "weights": [
+        "1",
+        "1",
+        "50",
+        "1",
+        "1"
+      ],
+      "knots": [
+        [
+          "0",
+          3
+        ],
+        [
+          "0.45",
+          1
+        ],
+        [
+          "0.8",
+          1
+        ],
+        [
+          "1",
+          3
+        ]
+      ]
+    }
+  },
+  "entities": [
+    {
+      "id": "nonunit-weight-001",
+      "class": "nurbs",
+      "geometry": {
+        "degree": 2,
+        "control_points": [
+          [
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            }
+          ],
+          [
+            {
+              "decimal": "1.0",
+              "f64_hex": "0x3ff0000000000000"
+            },
+            {
+              "decimal": "1.0",
+              "f64_hex": "0x3ff0000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            }
+          ],
+          [
+            {
+              "decimal": "2.0",
+              "f64_hex": "0x4000000000000000"
+            },
+            {
+              "decimal": "3.0",
+              "f64_hex": "0x4008000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            }
+          ],
+          [
+            {
+              "decimal": "3.0",
+              "f64_hex": "0x4008000000000000"
+            },
+            {
+              "decimal": "1.0",
+              "f64_hex": "0x3ff0000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            }
+          ],
+          [
+            {
+              "decimal": "4.0",
+              "f64_hex": "0x4010000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            }
+          ]
+        ],
+        "knots": [
+          {
+            "value": {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            },
+            "multiplicity": 3
+          },
+          {
+            "value": {
+              "decimal": "0.45",
+              "f64_hex": "0x3fdccccccccccccd"
+            },
+            "multiplicity": 1
+          },
+          {
+            "value": {
+              "decimal": "0.8",
+              "f64_hex": "0x3fe999999999999a"
+            },
+            "multiplicity": 1
+          },
+          {
+            "value": {
+              "decimal": "1.0",
+              "f64_hex": "0x3ff0000000000000"
+            },
+            "multiplicity": 3
+          }
+        ],
+        "weights": [
+          {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          },
+          {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          },
+          {
+            "decimal": "50.0",
+            "f64_hex": "0x4049000000000000"
+          },
+          {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          },
+          {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          }
+        ],
+        "weights_all_unit": false
+      },
+      "parameter_domain": {
+        "start": {
+          "decimal": "0.0",
+          "f64_hex": "0x0000000000000000"
+        },
+        "end": {
+          "decimal": "1.0",
+          "f64_hex": "0x3ff0000000000000"
+        }
+      },
+      "closure": {
+        "closed_by_endpoint": false,
+        "closed_by_knots": false,
+        "periodic": false
+      },
+      "structure": "CURVE_ONLY"
+    }
+  ],
+  "assertions": [
+    {
+      "id": "a1",
+      "kind": "STRUCTURAL",
+      "entity": "nonunit-weight-001",
+      "claim": "CLASS_PRESERVED",
+      "statement": "The semantic class stays nurbs; it is not rewritten into another class."
+    },
+    {
+      "id": "a2",
+      "kind": "STRUCTURAL",
+      "entity": "nonunit-weight-001",
+      "claim": "DEGREE_PRESERVED",
+      "statement": "The degree is not elevated or reduced."
+    },
+    {
+      "id": "a3",
+      "kind": "STRUCTURAL",
+      "entity": "nonunit-weight-001",
+      "claim": "CONTROL_POINTS_PRESERVED",
+      "statement": "The control points are kept, not resampled."
+    },
+    {
+      "id": "a4",
+      "kind": "STRUCTURAL",
+      "entity": "nonunit-weight-001",
+      "claim": "KNOTS_PRESERVED",
+      "statement": "Knot values and multiplicities are kept, none collapsed or inserted."
+    },
+    {
+      "id": "a5",
+      "kind": "STRUCTURAL",
+      "entity": "nonunit-weight-001",
+      "claim": "WEIGHTS_PRESERVED",
+      "statement": "Weights are kept as stated, not renormalised."
+    },
+    {
+      "id": "a6",
+      "kind": "GEOMETRIC",
+      "entity": "nonunit-weight-001",
+      "claim": "PARAMETERIZATION_PRESERVED",
+      "statement": "The parameter domain is kept; a reparameterised equivalent counts as geometric only."
+    }
+  ]
+}

@@ -18,6 +18,11 @@ libviprs = { workspace = true, features = ["pvec-raster"] }
 lopdf = { workspace = true }
 flate2 = { workspace = true }
 
+[features]
+# `cargo fuzz run fuzz_pvec_pdf_image --features jp2k` makes the `JPXDecode` arm a codec that
+# tries the stream (#1364) instead of the typed `FilterNotEnabled`.
+jp2k = ["libviprs/jp2k"]
+
 [[bin]]
 name = "fuzz_decode"
 path = "fuzz_targets/fuzz_decode.rs"

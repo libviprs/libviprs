@@ -1,0 +1,28 @@
+name: Native DWG
+
+# The cells that need the pinned libviprs-dep ACadSharp archive: the real-DWG
+# decoder tests and the dwg-acadsharp builds of the vector tests (issue #1295).
+#
+# Hosted Actions are off in every repo, so this file is not run by GitHub. It
+# is here because the workflow files are the job list: `tools/local-ci.py`
+# reads it, `make native-dwg` hands it to the runner, and the schedule below
+# is what `tools/scheduled-native-dwg.sh` implements on MARS (see
+# `tools/native-dwg.cron`). It is deliberately not part of `make ci`, which
+# stays off the network; `tests/local_gate_native_dwg_1295.rs` holds that.
+#
+# The job calls one script on purpose. The commands live in
+# `tools/native-dwg-cell.sh` so the runner and the scheduler cannot disagree.
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+jobs:
+  native-dwg:
+    name: Native DWG cells
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: tools/native-dwg-cell.sh
