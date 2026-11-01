@@ -336,3 +336,23 @@ fn the_pairs_are_real_world_differential_and_nothing_labels_them_known_truth() {
         }
     }
 }
+
+#[test]
+fn the_page_names_the_exporter_and_every_pair() {
+    // Also what keeps `docs/pvec-dwg-pdf-differential.md` from being an inert doc to the pre-push gate.
+    let doc = include_str!("../docs/pvec-dwg-pdf-differential.md");
+    for id in FIXTURES {
+        assert!(
+            doc.contains(id) || id.ends_with("-rot90"),
+            "the page does not mention {id}"
+        );
+    }
+    for needle in [
+        "dwg2SVG",
+        "rsvg-convert",
+        "REAL_WORLD_DIFFERENTIAL",
+        "expected_loss.toml",
+    ] {
+        assert!(doc.contains(needle), "the page lost {needle}");
+    }
+}

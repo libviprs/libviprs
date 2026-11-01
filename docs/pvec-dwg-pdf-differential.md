@@ -37,6 +37,9 @@ for a metric that no longer differs and an entry with no reason each fail the ru
 file. The rotated pair (`polyline-001-rot90`) must show the PDF aspect inverted while the DWG side is
 unchanged.
 
+The pairs: `line-001`, `circle-001`, `bulge-arc-001`, `ellipse-001`, `polyline-001` and `polyline-001-rot90`
+(the same polyline with `/Rotate 90`).
+
 ## What the first run showed
 
 * The exporter writes a circle or an ellipse as four cubic Beziers.
