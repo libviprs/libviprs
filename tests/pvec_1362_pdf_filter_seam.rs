@@ -123,11 +123,12 @@ fn the_pixel_budget_is_the_one_the_dct_decoder_runs_under() {
 
 #[test]
 fn the_three_codec_names_report_filter_not_enabled_and_the_error_names_the_feature() {
-    for (filter, feature) in [
-        ("CCITTFaxDecode", "ccitt"),
-        ("JBIG2Decode", "jbig2"),
-        ("JPXDecode", "jp2k"),
-    ] {
+    let mut names = vec![("CCITTFaxDecode", "ccitt"), ("JBIG2Decode", "jbig2")];
+    // With `jp2k` the JPX stage is a codec that tries the stream (#1364), not a missing one.
+    if !cfg!(feature = "jp2k") {
+        names.push(("JPXDecode", "jp2k"));
+    }
+    for (filter, feature) in names {
         let e = refused(&filtered(name(filter), vec![0u8; 4]));
         let reason = format!("filter-not-enabled:{filter}");
         assert_eq!(e.reason(), reason);
