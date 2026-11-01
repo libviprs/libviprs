@@ -536,6 +536,13 @@ annotated   fs-detected  tests/pvec_1413_convert.rs::issue_1413_a_unit_pvec_cann
 annotated   fs-detected  tests/pvec_1413_convert.rs::issue_1413_an_unopenable_source_keeps_the_provider_error_as_the_source
 annotated   fs-detected  tests/pvec_1413_convert.rs::issue_1413_the_report_is_part_of_the_output_and_matches_the_entities_written
 annotated   fs-detected  tests/pvec_1413_convert.rs::issue_1413_two_runs_publish_the_same_bytes
+annotated   fs-detected  tests/pvec_1414_capability.rs::issue_1414_downgrade_records_that_none_exists_and_never_tessellates
+annotated   fs-detected  tests/pvec_1414_capability.rs::issue_1414_probe_and_convert_return_the_same_counts_field_by_field
+annotated   fs-detected  tests/pvec_1414_capability.rs::issue_1414_reject_entity_converts_leaves_the_entity_out_and_counts_it
+annotated   fs-detected  tests/pvec_1414_capability.rs::issue_1414_reject_input_names_the_capability_and_the_entity_and_leaves_no_file
+annotated   fs-detected  tests/pvec_1414_capability.rs::issue_1414_strict_refuses_an_equivalent_entity_and_accepts_the_all_exact_drawing
+annotated   fs-detected  tests/pvec_1414_capability.rs::issue_1414_the_capability_type_is_pvecs_own_and_no_local_copy_exists
+annotated   fs-detected  tests/pvec_1414_capability.rs::issue_1414_the_profiles_are_written_down_once_and_the_report_records_the_one_used
 annotated   fs-detected  tests/pvec_api_surface.rs::no_index_directory_or_straddler_type_is_defined_under_src_pvec
 annotated   fs-detected  tests/pvec_api_surface.rs::no_pvec_path_under_src_is_outside_the_allowed_surface
 annotated   fs-detected  tests/pvec_api_surface.rs::no_writer_call_is_made_outside_the_funnel

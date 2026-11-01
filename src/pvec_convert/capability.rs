@@ -2,7 +2,7 @@
 //!
 //! A caller says before the run which PVec capabilities it may use, and an entity that needs one
 //! outside that set is refused instead of reshaped. The identifiers are PVec's own
-//! ([`pvec_facade::CapabilityId`], re-exported from its registry): libviprs declares no
+//! ([`pvec::writer::CapabilityId`](crate::pvec::writer::CapabilityId), PVec's own type re-exported from its registry): libviprs declares no
 //! capability vocabulary, it only looks up which identifier each normalized kind needs in
 //! [`NORMALIZED_TO_PVEC`](crate::pvec::mapping::NORMALIZED_TO_PVEC).
 //!
@@ -31,9 +31,8 @@
 
 use std::collections::BTreeSet;
 
-use pvec_facade::CapabilityId;
-
 use crate::pvec::mapping::{ConformanceClass, NORMALIZED_TO_PVEC};
+use crate::pvec::writer::CapabilityId;
 
 /// What happens to an entity that needs a capability outside the allowed set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

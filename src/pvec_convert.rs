@@ -55,8 +55,6 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
-use pvec_facade::CapabilityId;
-
 mod capability;
 pub use capability::{CapabilityPolicy, ConversionProfile};
 
@@ -76,7 +74,7 @@ use crate::pvec::report::{
     UnresolvedXrefRow, ViewSummary, XrefSummary,
 };
 use crate::pvec::transform::{ComposedTransform, promote};
-use crate::pvec::writer::{LeafConfig, WriteConfig, WriteError, write_geometry};
+use crate::pvec::writer::{CapabilityId, LeafConfig, WriteConfig, WriteError, write_geometry};
 use crate::pvec::{
     DwgProvider, EntityId, EntityScope, EntityStyle, ExcludedEntity, FidelityClass, OrderingPolicy,
     ProvenanceStub, ProviderError, RawEntity, RawGeometry, SourceLimits, SourceUnit, ViewProfile,
