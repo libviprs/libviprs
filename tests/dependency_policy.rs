@@ -936,7 +936,10 @@ fn the_external_library_features_stay_opt_in() {
         // `pvec-raster` brings the PVec facade, and the facade depends on `pvec-geometry` and
         // `pvec-numeric` itself, so it reaches both.
         let asked_for_pvec = cell.features.iter().any(|f| {
-            f.contains("pvec-normalized") || f.contains("pvec-raster") || f.contains("pvec-write")
+            f.contains("pvec-normalized")
+                || f.contains("pvec-raster")
+                || f.contains("pvec-write")
+                || f.contains("dwg-acadrust")
         }) || cell.features.contains(&"--all-features");
         assert_eq!(
             contains(graph, "pvec-geometry"),
