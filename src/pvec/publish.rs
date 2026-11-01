@@ -201,3 +201,30 @@ pub fn open_published(path: &Path) -> Result<PvecReader, OpenError> {
     let bytes = fs::read(path).map_err(OpenError::Io)?;
     PvecReader::open(bytes).map_err(OpenError::Pvec)
 }
+
+/// Why a streamed publish failed: the publish itself, or the producer of the artifact.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum StreamedPublishError<E: std::error::Error + 'static> {
+    /// The publish failed.
+    #[error(transparent)]
+    Publish(PublishError),
+    /// The producer failed or was cancelled.
+    #[error("the producer of the artifact failed")]
+    Produce(#[source] E),
+}
+
+/// Stub: red tests first.
+///
+/// # Errors
+///
+/// None yet.
+pub fn publish_streamed<E: std::error::Error + 'static>(
+    _dest: &Path,
+    _report: &[u8],
+    _cancel: &CancelToken,
+    _at: &mut dyn FnMut(Stage),
+    _produce: impl FnOnce(&mut dyn io::Write) -> Result<(), E>,
+) -> Result<(), StreamedPublishError<E>> {
+    unimplemented!("pvec#235 sink")
+}

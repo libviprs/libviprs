@@ -38,6 +38,9 @@
 pub use pvec_facade::CapabilityId;
 use pvec_facade::components::Stream;
 use pvec_facade::{Bounds2, EntityId as PvecEntityId, Manifest, PvecError, PvecWriter};
+use std::io::Write;
+use std::path::PathBuf;
+
 use thiserror::Error;
 
 use super::bounds::{BoundsError, BoundsReport, bounds_inputs};
@@ -189,4 +192,44 @@ pub fn write_geometry<'a>(
         skipped,
         source_ids,
     })
+}
+
+/// Where a streamed write keeps its spill files, and how much memory it may use before it spills.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpillConfig {
+    /// The directory the spill files go under. Nothing is written anywhere else.
+    pub root: PathBuf,
+    /// The memory budget in bytes.
+    pub budget: u64,
+}
+
+/// What a streamed write leaves behind besides the bytes: the same facts as [`GeometryArtifact`].
+#[derive(Debug)]
+pub struct StreamedArtifact {
+    /// Bytes written to the sink.
+    pub length: u64,
+    /// One box per written entity and the drawing box.
+    pub bounds: BoundsReport,
+    /// Entities written.
+    pub written: u64,
+    /// Entities that carried no geometry.
+    pub skipped: u64,
+    /// The libviprs id of each written entity.
+    pub source_ids: Vec<EntityId>,
+}
+
+/// Stub: red tests first.
+///
+/// # Errors
+///
+/// None yet.
+pub fn write_geometry_to<'a>(
+    _config: &WriteConfig,
+    _items: impl IntoIterator<Item = (EntityId, &'a Normalized2DGeometry)>,
+    _streams: Vec<Stream>,
+    _spill: &SpillConfig,
+    _cancel: &CancelToken,
+    _out: &mut dyn Write,
+) -> Result<StreamedArtifact, WriteError> {
+    unimplemented!("pvec#235 sink")
 }

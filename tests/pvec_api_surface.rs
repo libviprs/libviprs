@@ -389,6 +389,8 @@ const WRITER_CALLS: &[&str] = &[
     "PvecWriter",
     "ContainerWriter",
     "new_indexed",
+    "with_spill",
+    "finish_to",
     "push_composite",
     "raster_tiles",
 ];
