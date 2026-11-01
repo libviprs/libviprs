@@ -156,6 +156,37 @@ One thing the equality check turned up: an identity promotion is not a bit-for-b
 
 The `pdf_clip` row: `apply_clip_policy` with the analytic bounds source over 20,200 paths and 200 clips: 52 ns per painted path.
 
+## Artifact generation and size (N8.5, #1442)
+
+`tests/pvec_generation_bench.rs` measures what producing the artifact costs once the entities are normalized. The input to every measurement is the same: the kept leaves of a cell through the view profile, ordered, and turned into records (not timed). Only `write_geometry`, the one funnel, is timed, written three ways: plain, with PVec's spatial directory (leaf size 256), and with the directory and Tier 0 blocks (preview bound 2% of a 600 unit span). Two writes of a cell are asserted byte for byte identical.
+
+```text
+LIBVIPRS_BENCH_HOST=mars cargo test --release --features pvec-convert \
+    --test pvec_generation_bench -- --ignored --nocapture generation_bench
+```
+
+**How the split is taken.** The facade does not expose its directory, so the size split is the difference between the three writes: geometry is the plain artifact, the spatial index is what the directory adds, Tier 0 is what the preview blocks add. It sums to the artifact by construction (the run asserts it), and it is not a stream by stream measurement of the file. No component or provenance stream is written yet (#1093), so those columns are zero. The compression ratio is the artifact over the source DWG, because the writer's compression is PVec's own and the facade does not expose a raw size to compare it with.
+
+Measured on MARS (x86_64-linux-mars, native), release build, median of three batched samples, the wall time is the full write with Tier 0:
+
+| cell | entities | wall (ms) | plain wall (ms) | artifact bytes | bytes per entity | % of source DWG | geometry | spatial index | Tier 0 | Tier 0 share |
+|---|---|---|---|---|---|---|---|---|---|---|
+| simple | 1,000 | 1.12 | 0.84 | 37,040 | 37.0 | 55% | 33,520 | 1,440 | 2,080 | 5.6% |
+| block_heavy | 22,440 | 14.90 | 8.94 | 104,752 | 4.7 | 452% | 38,056 | 19,720 | 46,976 | 44.8% |
+| spline_heavy | 10,000 | 15.82 | 14.92 | 1,872,248 | 187.2 | 85% | 1,872,248 | 0 | 0 | 0.0% |
+| paper_space | 2,000 | 1.95 | 1.84 | 70,440 | 35.2 | 63% | 64,568 | 1,456 | 4,416 | 6.3% |
+| large_industrial | 1,025,000 | 1002.06 | 810.90 | 13,565,128 | 13.2 | 69% | 9,277,464 | 2,843,000 | 1,444,664 | 10.6% |
+
+The `malformed` cell has no artifact: its inputs are refused (`tests/pvec_1429_bench_corpus.rs`), and what a refusal costs is a conversion that stops early.
+
+Things to read in the table:
+
+- **Writing is cheap next to everything before it.** One million entities take 0.81 s to write plain and 1.00 s with the directory and Tier 0, against about 8 s for the whole conversion (docs section above).
+- **`spline_heavy` gets no index and no Tier 0.** Its spatial index and Tier 0 columns are zero. That is consistent with PVec's container rule that an advanced curve is never given a spatial cell (`docs/CONTAINER.md` in `libviprs/pvec`): a drawing of B-splines is one flat geometry stream. I measured the effect and did not change anything.
+- **`block_heavy` is 4.5 times its source.** A DWG stores a block once and PVec stores the flattened leaves, so a drawing that is mostly INSERTs grows. That is the cost of the visible flattened drawing (N1.4), not of the writer.
+- **Determinism holds** on every cell: two writes are byte identical.
+- **EPIC L.** No cell has both a PVec artifact and an EPIC L tile derivative: the L numbers in `docs/vector-performance-report.md` are on the g13 drawings, which are not in this corpus. So no side by side is printed here, and no verdict; N8.7 owns that decision.
+
 ## Bounded-memory generation (N8.4, #1440)
 
 `tests/pvec_bounded_memory_bench.rs` measures what a whole conversion (`PvecConversion::convert`) holds in memory, and how that moves with the drawing. Every variant runs in a child process of the test binary and the drawing is written to disk by another child first, so one run's RSS cannot leak into the next and the drawing's own construction is not in the peak. Two bases are reported because they answer different questions: the counting allocator's live-heap peak above where the conversion started (the drawing's bytes are already held and excluded), and the kernel's `VmHWM` for the child.

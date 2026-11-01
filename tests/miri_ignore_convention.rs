@@ -826,7 +826,7 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1405 adds 1 more: the `tests/pvec_1079_provider_default.rs` guard that scans the build files for LibreDWG. It said 831 before this line moved.
 /// #1392 adds 3: the `tests/vector_1392_cgroup_lane.rs` cells that read the lane script, the scheduler and the report. It said 838 before this line moved.
 /// #1038 adds 5: the two `tests/vector_1038_entity_matrix.rs` cells and the three `tests/vector_1038_release_gate.rs` cells, which read the matrix, the gate record and the g13 drawings. It said 841 before this line moved. #1430 adds 2: the two `tests/pvec_1430_convert_spline.rs` cells.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 873;
+const EXPECTED_FS_TOUCHING_TESTS: usize = 874;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {

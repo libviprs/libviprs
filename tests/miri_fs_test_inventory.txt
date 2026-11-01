@@ -625,6 +625,7 @@ annotated   fs-detected  tests/pvec_dwg_pdf_differential.rs::the_pairs_are_real_
 annotated   fs-detected  tests/pvec_dwg_pdf_differential.rs::the_rotated_pair_swaps_the_pdf_extent_and_a_rotation_blind_comparison_would_fail
 annotated   fs-detected  tests/pvec_dwg_spline_structural.rs::no_code_path_turns_a_spline_into_polylines_or_arcs
 annotated   fs-detected  tests/pvec_fidelity_1100.rs::there_is_one_enum_for_the_six_classes
+annotated   fs-detected  tests/pvec_generation_bench.rs::generation_bench
 annotated   fs-detected  tests/pvec_known_truth.rs::n2_1_1050_a_failing_run_leaves_no_state_behind
 annotated   fs-detected  tests/pvec_known_truth.rs::n2_1_1050_a_vendored_file_that_moved_is_caught_by_the_pin
 annotated   fs-detected  tests/pvec_normalization_bench.rs::normalization_bench
