@@ -186,3 +186,36 @@ Things to read in the table:
 - **`block_heavy` is 4.5 times its source.** A DWG stores a block once and PVec stores the flattened leaves, so a drawing that is mostly INSERTs grows. That is the cost of the visible flattened drawing (N1.4), not of the writer.
 - **Determinism holds** on every cell: two writes are byte identical.
 - **EPIC L.** No cell has both a PVec artifact and an EPIC L tile derivative: the L numbers in `docs/vector-performance-report.md` are on the g13 drawings, which are not in this corpus. So no side by side is printed here, and no verdict; N8.7 owns that decision.
+
+## Bounded-memory generation (N8.4, #1440)
+
+`tests/pvec_bounded_memory_bench.rs` measures what a whole conversion (`PvecConversion::convert`) holds in memory, and how that moves with the drawing. Every variant runs in a child process of the test binary and the drawing is written to disk by another child first, so one run's RSS cannot leak into the next and the drawing's own construction is not in the peak. Two bases are reported because they answer different questions: the counting allocator's live-heap peak above where the conversion started (the drawing's bytes are already held and excluded), and the kernel's `VmHWM` for the child.
+
+```text
+LIBVIPRS_BENCH_HOST=mars cargo test --release --features pvec-convert \
+    --test pvec_bounded_memory_bench -- --ignored --nocapture bounded_memory_bench
+```
+
+**Only one strategy exists to measure.** The spool and the streaming sink are not built (pvec#235), so the two-pass bounds-then-index and the external-sort spooling strategies have no code, and their rows print as "not built". The strategy measured is the direct, in-memory one: the classifier, the report rows, the records and the facade's writer all hold their entities until the artifact is sealed. Bytes spilled, bytes re-read and spill count are zero for it by construction.
+
+Measured on MARS (x86_64-linux-mars, native), release build, three runs per variant, the largest peak of the three, wall time the median:
+
+| cell | scale | entities | wall (s) | tracked peak (MiB) | peak RSS (MiB) | tracked bytes per entity | artifact (bytes) |
+|---|---|---|---|---|---|---|---|
+| large_industrial | 0.5 | 512,500 | 3.97 | 1,396 | 1,603 | 2,855 | 11,096,408 |
+| large_industrial | 1.0 | 1,025,000 | 8.16 | 2,725 | 3,149 | 2,788 | 22,172,760 |
+| large_industrial | 2.0 | 2,050,000 | 16.84 | 5,384 | 6,211 | 2,754 | 43,901,552 |
+| spline_heavy | 0.5 | 5,000 | 0.08 | 50 | 57 | 10,576 | 938,416 |
+| spline_heavy | 1.0 | 10,000 | 0.11 | 101 | 103 | 10,542 | 1,872,248 |
+| spline_heavy | 2.0 | 20,000 | 0.21 | 201 | 182 | 10,524 | 3,740,048 |
+| block_heavy | 0.5 | 11,220 | 0.14 | 28 | 48 | 2,625 | 355,936 |
+| block_heavy | 1.0 | 22,440 | 0.25 | 56 | 84 | 2,594 | 706,824 |
+| block_heavy | 2.0 | 44,880 | 0.50 | 111 | 157 | 2,584 | 1,399,112 |
+
+**Against the criterion, it fails, and it fails by about a factor of two.** The ceiling is 1.5 GiB process peak RSS and 1.0 GiB tracked peak for the `large_industrial` cell (more than 10^6 entities, 1,025,000 here). Measured: 3.08 GiB RSS and 2.66 GiB tracked. Boundedness fails the same way: doubling the entity count moved the tracked peak by 97.6% on `large_industrial`, 99.7% on `spline_heavy` and 99.3% on `block_heavy`, against a criterion of under 10%. The curve is linear, about 2.8 KB of tracked heap per entity on `large_industrial` and 10.5 KB on `spline_heavy` (a spline carries its control points and knots). The ceiling flags in the rows (`within_rss_ceiling`, `within_tracked_ceiling`) are false for `large_industrial` at every scale of 0.5 and above.
+
+For comparison, the facade's writer alone costs about 310 bytes per entity (`docs/adr/pvec-tiers-and-spool-rescope.md`). The other roughly 2.5 KB per entity is libviprs: the flattened leaves with their provenance stubs, the view outcome, the records, the report rows and the diagnostics. A spool that moves only the writer's state would not reach the ceiling, and the decision on where the memory goes has to wait for the numbers of a strategy that exists.
+
+`block_heavy` is on the clean side of the N7.5 allocation check: 22,440 entities in 11,220 instances at depth 8 hold a tracked peak of 56 MiB.
+
+**The written decision (which strategy libviprs ships, with the three tables) is not made here.** It needs the two-pass and the external-sort numbers, and neither strategy is built, so #1064 stays open on that line rather than closing on a decision written without the numbers.

@@ -97,6 +97,7 @@ fn the_document_and_the_baseline_describe_the_same_rows() {
             ["normalization", "transform", class, _] => class,
             ["normalization", cell, _mix, _] => cell,
             ["generation", cell, _] => cell,
+            ["bounded_memory", _strategy, cell, _scale, _] => cell,
             _ => panic!("{key}: a baseline key this suite does not know"),
         };
         assert!(
@@ -115,6 +116,15 @@ fn the_document_and_the_baseline_describe_the_same_rows() {
                 "wall_secs",
                 "artifact_bytes",
                 "split",
+                "platform",
+            ]
+        } else if parts[0] == "bounded_memory" {
+            &[
+                "cell",
+                "entities",
+                "wall_secs",
+                "tracked_peak",
+                "peak_rss_bytes",
                 "platform",
             ]
         } else if parts[0] == "provider" {
@@ -176,5 +186,23 @@ fn generation_regressions_are_ten_percent_time_five_percent_bytes_two_points_of_
     );
     // A noisy wall time does not gate, the deterministic bytes still do.
     let noisy = pvec_bench::generation_regressions(&base, &row(9.0, 2000.0, 20.0, true));
+    assert_eq!(noisy.len(), 1, "{noisy:?}");
+}
+
+#[test]
+fn ten_percent_more_rss_or_wall_time_is_a_regression_unless_the_wall_row_is_unstable() {
+    let row = |rss: u64, wall: f64, unstable: bool| json!({"peak_rss_bytes": rss, "wall_secs": {"median": wall}, "unstable": unstable});
+    let base = row(1000, 10.0, false);
+    assert!(pvec_bench::memory_regressions(&base, &row(1090, 10.9, false)).is_empty());
+    assert_eq!(
+        pvec_bench::memory_regressions(&base, &row(1200, 10.0, false)).len(),
+        1
+    );
+    assert_eq!(
+        pvec_bench::memory_regressions(&base, &row(1000, 12.0, false)).len(),
+        1
+    );
+    // The RSS still gates when the wall time is too noisy to.
+    let noisy = pvec_bench::memory_regressions(&base, &row(1200, 99.0, true));
     assert_eq!(noisy.len(), 1, "{noisy:?}");
 }

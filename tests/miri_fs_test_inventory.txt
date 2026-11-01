@@ -601,6 +601,9 @@ annotated   fs-detected  tests/pvec_api_surface.rs::only_the_semantic_crates_are
 annotated   fs-detected  tests/pvec_api_surface.rs::src_pvec_implements_no_curve_evaluation_knot_insertion_or_tessellation
 annotated   fs-detected  tests/pvec_api_surface.rs::the_facade_is_named_by_the_funnel_and_the_raster_files_only
 annotated   fs-detected  tests/pvec_api_surface.rs::the_pvec_dependencies_stay_semantic_and_optional
+annotated   fs-detected  tests/pvec_bounded_memory_bench.rs::bounded_memory_bench
+annotated   fs-detected  tests/pvec_bounded_memory_bench.rs::bounded_memory_child
+annotated   fs-detected  tests/pvec_bounded_memory_bench.rs::bounded_memory_gen
 annotated   fs-detected  tests/pvec_dual_oracle.rs::n2_2_1050_every_fixture_that_is_not_known_truth_is_executed_and_reported
 annotated   fs-detected  tests/pvec_dual_oracle.rs::n2_2_1050_the_pin_summary_is_the_index_and_a_bump_reads_as_per_class_changes
 annotated   fs-detected  tests/pvec_dwg_pdf_differential.rs::a_loss_entry_that_no_longer_matches_fails_the_run
@@ -611,6 +614,7 @@ annotated   fs-detected  tests/pvec_dwg_pdf_differential.rs::the_pairs_are_real_
 annotated   fs-detected  tests/pvec_dwg_pdf_differential.rs::the_rotated_pair_swaps_the_pdf_extent_and_a_rotation_blind_comparison_would_fail
 annotated   fs-detected  tests/pvec_dwg_spline_structural.rs::no_code_path_turns_a_spline_into_polylines_or_arcs
 annotated   fs-detected  tests/pvec_fidelity_1100.rs::there_is_one_enum_for_the_six_classes
+annotated   fs-detected  tests/pvec_generation_bench.rs::generation_bench
 annotated   fs-detected  tests/pvec_known_truth.rs::n2_1_1050_a_failing_run_leaves_no_state_behind
 annotated   fs-detected  tests/pvec_known_truth.rs::n2_1_1050_a_vendored_file_that_moved_is_caught_by_the_pin
 annotated   fs-detected  tests/pvec_normalization_bench.rs::normalization_bench
