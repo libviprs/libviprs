@@ -814,7 +814,8 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1093 adds 1: the `tests/pvec_1093_report.rs` check that reads `docs/pvec-conversion-report.md`. It said 776 before this line moved.
 /// #1364 adds 2: the `tests/pvec_1364_pdf_jpx.rs` corpus cells, which read PDFs from outside the repo. It said 777 before this line moved.
 /// #1382 adds 2: the `tests/pvec_known_truth.rs` cells that read and copy the vendored corpus. It said 779 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 781;
+/// #1383 adds 2: the `tests/pvec_dual_oracle.rs` cells that read the vendored corpus. It said 781 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 783;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
