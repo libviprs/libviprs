@@ -96,8 +96,8 @@ fn the_checks_fail_on_a_mutated_manifest() {
     assert_ne!(defaulted, MANIFEST, "the mutation must change the manifest");
     assert!(!manifest_complaints(&defaulted).is_empty());
     let leaked = MANIFEST.replacen(
-        "pvec-spline = [\"dep:pvec-numeric\"]",
-        "pvec-spline = [\"dep:pvec-numeric\", \"dep:acadsharp-rs\"]",
+        "pvec-spline = [\"dep:pvec-numeric\", \"dep:pvec-geometry\"]",
+        "pvec-spline = [\"dep:pvec-numeric\", \"dep:pvec-geometry\", \"dep:acadsharp-rs\"]",
         1,
     );
     assert_ne!(leaked, MANIFEST);

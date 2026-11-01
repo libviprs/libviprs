@@ -71,12 +71,21 @@ const GATE_WORKFLOWS: &[(&str, &str)] = &[("ci.yml", CI_YML), ("merge-gate.yml",
 /// A new file in `.github/workflows/` fails
 /// `the_workflow_directory_holds_only_files_this_guard_has_classified` until
 /// somebody decides, in writing, which of these two lists it belongs in.
-const NOT_A_GATE: &[(&str, &str)] = &[(
-    "publish.yml",
-    "runs on a release tag and publishes the crate. It reacts to a decision \
-     that has already been made rather than making one, so a developer has \
-     nothing to run locally for it.",
-)];
+const NOT_A_GATE: &[(&str, &str)] = &[
+    (
+        "publish.yml",
+        "runs on a release tag and publishes the crate. It reacts to a decision \
+         that has already been made rather than making one, so a developer has \
+         nothing to run locally for it.",
+    ),
+    (
+        "native-dwg.yml",
+        "the native DWG cells need the pinned libviprs-dep archive off the \
+         network, so they are a scheduled job on MARS and not part of `make ci`. \
+         It is still a workflow file, so tools/local-ci.py runs it for \
+         `make native-dwg`, and tests/local_gate_native_dwg_1295.rs holds its shape (#1295).",
+    ),
+];
 
 /// A job a hosted run holds behind a job-level `if:`, and what covers it here.
 ///

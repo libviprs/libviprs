@@ -8,6 +8,7 @@
 
 use std::fmt;
 
+use pvec_geometry::{BSpline, Point2};
 use pvec_numeric::{MAX_CONTROL_POINTS, MAX_DEGREE, MAX_KNOTS, NumericError, Policy};
 
 use super::fidelity::{Classification, ReasonCode};
@@ -252,8 +253,13 @@ fn missing(field: SplineField) -> SplineError {
 /// points or rounded.
 ///
 /// Periodic and closed splines come back with the flags set and the control points and
-/// knots exactly as the drawing stores them. Turning a periodic spline into PVec's
-/// unwrapped form is the codec side's call, and it needs the flag to make it.
+/// knots exactly as the drawing stores them. A non-rational periodic spline stores one
+/// period: `n` control points and `n + 1` knots, and its domain is `[knots[0], knots[n]]`.
+/// That layout is checked by `BSpline::from_periodic` (the exact unwrap), whose refusals
+/// come back as [`SplineError::Policy`]; the unwrapped curve is built by
+/// `Normalized2DGeometry::from_spline`, which needs the flag to make it. A periodic spline
+/// with the clamped layout (`n + degree + 1` knots) is taken as authored, and a rational
+/// periodic one with one period of knots is refused, since PVec has no rational unwrap.
 ///
 /// # Errors
 /// See [`SplineError`].
@@ -321,7 +327,9 @@ pub fn extract(entity: &RawEntity) -> Result<ExactSpline, SplineError> {
             needed: p + 1,
         });
     }
-    if knots.len() != n + p + 1 {
+    // One period of a non-rational periodic spline: `n + 1` knots, validated by the unwrap.
+    let one_period = periodic && knots.len() == n + 1 && matches!(weights, SourceFact::Absent);
+    if !one_period && knots.len() != n + p + 1 {
         return Err(SplineError::KnotCount {
             expected: n + p + 1,
             observed: knots.len(),
@@ -355,9 +363,16 @@ pub fn extract(entity: &RawEntity) -> Result<ExactSpline, SplineError> {
             SplineForm::Rational(w.clone())
         }
     };
-    let (lo, hi) = POLICY
-        .validate_knots(p, n, knots)
-        .map_err(SplineError::Policy)?;
+    let (lo, hi) = if one_period {
+        let points = control_points.iter().map(|q| Point2::new(q[0], q[1]));
+        BSpline::from_periodic(p, points.collect(), knots.clone())
+            .map_err(|e| SplineError::Policy(e.as_numeric().unwrap_or(NumericError::BadKnots)))?;
+        (knots[0], knots[n])
+    } else {
+        POLICY
+            .validate_knots(p, n, knots)
+            .map_err(SplineError::Policy)?
+    };
 
     Ok(ExactSpline {
         degree: *degree,

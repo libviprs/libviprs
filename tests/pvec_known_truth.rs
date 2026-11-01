@@ -32,18 +32,11 @@ use serde_json::{Value, json};
 /// Disagreements that are known and recorded, one per line: fixture, the text of the problem, and
 /// where it is written down. A gap is waived only while it is still real: when a fix makes the
 /// problem disappear the suite fails until its row is deleted, so this list cannot go stale.
-const KNOWN_GAPS: &[(&str, &str, &str)] = &[
-    (
-        "bezier-d3-001",
-        "the mapping lands in Some(BSpline), the truth is bezier",
-        "docs/spikes/dwg-mapping.md M21: a single-span SPLINE maps to a B-spline and is graded equivalent (#1375)",
-    ),
-    (
-        "closed-periodic-001",
-        "mapping: spline extraction refused: ",
-        "docs/spikes/dwg-mapping.md M17: periodic SPLINE (pvec#93, unwrap in pvec#98) is not used by dwg_spline::extract yet (#1374)",
-    ),
-];
+const KNOWN_GAPS: &[(&str, &str, &str)] = &[(
+    "bezier-d3-001",
+    "the mapping lands in Some(BSpline), the truth is bezier",
+    "docs/spikes/dwg-mapping.md M21: a single-span SPLINE maps to a B-spline and is graded equivalent (#1375)",
+)];
 
 /// Runs one fixture against `truth` and returns every disagreement that is not a recorded gap,
 /// each naming the property, plus a line for every recorded gap that no longer exists.
@@ -987,23 +980,7 @@ mod mapping {
             out.push("closed state: the mapping changed a flag".into());
         }
         // The mapped record and the class it lands in (profile sections 11 and 12).
-        let pts: Vec<[f64; 2]> = s.control_points.iter().map(|p| [p[0], p[1]]).collect();
-        let record = match &s.form {
-            SplineForm::NonRational => Normalized2DGeometry::b_spline(
-                degree as usize,
-                &pts,
-                &s.knots,
-                FidelityClass::SupportedExact,
-            ),
-            SplineForm::Rational(w) => Normalized2DGeometry::rational_b_spline(
-                degree as usize,
-                &pts,
-                &s.knots,
-                w,
-                FidelityClass::SupportedExact,
-            ),
-            _ => return,
-        };
+        let record = Normalized2DGeometry::from_spline(&s);
         let record = match record {
             Ok(r) => r,
             Err(e) => {

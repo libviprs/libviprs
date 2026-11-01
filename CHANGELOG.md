@@ -24,6 +24,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`expected_loss.toml`, a written reason per entry): primitive counts, N3.5 buckets, extent aspect with
   `/Rotate` composed, and entities outside the page. The exporter is a script, not a trait, while it has one
   backend. See `docs/pvec-dwg-pdf-differential.md`.
+- **Periodic SPLINE extraction** (issue #1374). `dwg_spline::extract` takes the one-period layout
+  of a non-rational periodic spline (`n` control points, `n + 1` knots), checks it with PVec's
+  `BSpline::from_periodic`, and keeps it as authored. `Normalized2DGeometry::from_spline` builds the
+  record (`SupportedEquivalent`, the unwrap changes the knot vector and not the locus). `pvec-spline`
+  now also pulls `pvec-geometry`.
 - **`JPXDecode` images in a PDF** (issue #1364, follow-up 3/6 to #1332). Decoded through the
   existing `jp2k` feature (`crate::jp2k::decode_jp2k`), so no crate enters the graph; the jp2k
   cell of `dependency_policy` is pinned to its two codec crates. Without the feature the reason is
