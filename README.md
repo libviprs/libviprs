@@ -318,7 +318,7 @@ How a DWG or a vector PDF page becomes a PVec artifact: [architecture](docs/pvec
 [which DWG entities are carried](docs/pvec-dwg-support.md), [the PDF loss model](docs/pvec-pdf-loss.md),
 [components and style](docs/pvec-components.md), [the georeference handoff](docs/pvec-georeference.md),
 [the conversion API](docs/pvec-conversion-api.md), [resource and security limits](docs/pvec-limits.md),
-[replacing the provider](docs/pvec-provider-replacement.md) and [the benchmarks](docs/pvec-benchmarks.md). Version handling is
+[replacing the provider](docs/pvec-provider-replacement.md) and [the benchmarks](docs/pvec-benchmarks.md). The contract is frozen in [the integration contract](docs/pvec-integration-contract.md), version handling is
 [the compatibility matrix](docs/pvec-version-compatibility.md), and
 [the corpus regression report](docs/pvec-corpus-regression.md) is the per-fixture view.
 
