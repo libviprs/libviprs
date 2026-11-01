@@ -49,6 +49,7 @@ use crate::pvec::provider::{
     EntityStyle, Facet, FacetSource, InstancePath, LayerState, LayoutId, LayoutKind, LayoutState,
     Point3, ProvenanceStub, ProviderCaps, ProviderError, RawEntity, RawGeometry, RawVertex,
     SourceColour, SourceFact, SourceLineweight, SourceTransform, TextStyleRef, ViewportEntity,
+    XrefAttachment,
 };
 use crate::pvec::units::SourceUnit;
 
@@ -311,6 +312,21 @@ impl DwgProvider for AcadrustProvider {
             }
         }
         Ok(out)
+    }
+
+    fn xref_blocks(&self) -> Result<Vec<XrefAttachment>, ProviderError> {
+        Ok(self
+            .doc
+            .block_records
+            .iter()
+            .filter(|b| b.flags.is_xref || b.flags.is_xref_overlay)
+            .map(|b| XrefAttachment {
+                block_name: b.name.clone(),
+                path: b.xref_path.clone(),
+                overlay: b.flags.is_xref_overlay,
+                unloaded: b.flags.is_xref_unloaded,
+            })
+            .collect())
     }
 
     fn text_styles(

@@ -415,6 +415,23 @@ pub struct ViewportEntity {
     pub frozen_layers: Vec<String>,
 }
 
+/// An external-reference block record, as the drawing stores it (issue #1378).
+///
+/// An INSERT of this block places the attached drawing. The path is verbatim: confining it
+/// under a root is [`XrefSession`](super::xref::XrefSession)'s job, and opening it is the
+/// caller's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct XrefAttachment {
+    /// The block record's name, which the INSERTs spell.
+    pub block_name: String,
+    /// The attachment path, verbatim.
+    pub path: String,
+    /// An overlay: nested overlays are not pulled in by the drawing that attaches this one.
+    pub overlay: bool,
+    /// The drawing marks the xref as unloaded.
+    pub unloaded: bool,
+}
+
 /// The text style a `TEXT` or `MTEXT` entity names, with the fonts its table entry points at
 /// (issue #1381). Nothing is looked up on disk: whether a font is installed is the caller's.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -713,13 +730,15 @@ pub enum Facet {
     LayerOverride,
     /// Paper-space viewport entities, from [`DwgProvider::viewports`].
     ViewportEntities,
+    /// The drawing's external-reference block records, from [`DwgProvider::xref_blocks`].
+    XrefAttachments,
     /// The text style of `TEXT` and `MTEXT` entities, from [`DwgProvider::text_styles`].
     TextStyle,
 }
 
 impl Facet {
     /// Every facet.
-    pub const ALL: [Facet; 11] = [
+    pub const ALL: [Facet; 12] = [
         Facet::LayerState,
         Facet::LayoutState,
         Facet::KnotMultiplicity,
@@ -730,6 +749,7 @@ impl Facet {
         Facet::EntityVisibility,
         Facet::LayerOverride,
         Facet::ViewportEntities,
+        Facet::XrefAttachments,
         Facet::TextStyle,
     ];
 }
@@ -940,6 +960,17 @@ pub trait DwgProvider {
     /// [`ProviderError::CannotReport`] with [`Facet::ViewportEntities`] when the caps say so.
     fn viewports(&self) -> Result<Vec<ViewportEntity>, ProviderError> {
         Err(ProviderError::CannotReport(Facet::ViewportEntities))
+    }
+
+    /// The drawing's external-reference block records, in the block table's order.
+    ///
+    /// The default says the provider cannot report them.
+    ///
+    /// # Errors
+    ///
+    /// [`ProviderError::CannotReport`] with [`Facet::XrefAttachments`] when the caps say so.
+    fn xref_blocks(&self) -> Result<Vec<XrefAttachment>, ProviderError> {
+        Err(ProviderError::CannotReport(Facet::XrefAttachments))
     }
 
     /// The text style of every `TEXT` and `MTEXT` entity of `scope`, by handle. An entity with no
