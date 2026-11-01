@@ -47,7 +47,7 @@ use std::fmt;
 
 use thiserror::Error;
 
-use super::limits::{LimitError, SourceLimits};
+use super::limits::{Limit, LimitError, SourceGuard, SourceLimits, over};
 use super::view::{EntityState, PolicyReason, VisibilityFilter};
 
 use super::provider::{
@@ -434,6 +434,8 @@ impl ViewProfile {
             filter: VisibilityFilter::new(self, model.clone(), layer_table),
             included: Vec::new(),
             excluded: Vec::new(),
+            guard: SourceGuard::new(self.limits),
+            expanded: 0,
         };
         let mut cursor = provider.entities(&EntityScope::Layout(model.id))?;
         let mut top = Vec::new();
@@ -473,6 +475,11 @@ struct Walk<'a, P: ?Sized> {
     filter: VisibilityFilter,
     included: Vec<ViewedEntity>,
     excluded: Vec<ExcludedEntity>,
+    /// N3.6's meter (issue #1439): every entity the walk visits is counted against the profile's
+    /// limits, so a drawing that fans out is refused here and not expanded until memory runs out.
+    guard: SourceGuard,
+    /// Instances of blocks placed so far, the product of the grids down to each INSERT, summed.
+    expanded: u64,
 }
 
 impl<P: DwgProvider + ?Sized> Walk<'_, P> {
@@ -497,6 +504,7 @@ impl<P: DwgProvider + ?Sized> Walk<'_, P> {
         container_layer: Option<&str>,
         instances: u64,
     ) -> Result<(), ViewProfileError> {
+        self.guard.check_entity(&entity)?;
         // V1-2: a leaf (or INSERT) on layer "0" inside an INSERT takes that INSERT's layer.
         let effective = match container_layer {
             Some(c)
@@ -550,7 +558,20 @@ impl<P: DwgProvider + ?Sized> Walk<'_, P> {
         }
         drop(cursor);
         let n = u64::from(block.grid.rows.max(1)) * u64::from(block.grid.columns.max(1));
+        let limits = self.guard.limits();
+        if n > limits.max_insert_grid {
+            return Err(over(Limit::InsertGrid, n, limits.max_insert_grid).into());
+        }
         let child_instances = instances.saturating_mul(n);
+        self.expanded = self.expanded.saturating_add(child_instances);
+        if self.expanded > limits.max_expanded_instances {
+            return Err(over(
+                Limit::ExpandedInstances,
+                self.expanded,
+                limits.max_expanded_instances,
+            )
+            .into());
+        }
         for c in children {
             self.visit(c, depth + 1, Some(&effective), child_instances)?;
         }
