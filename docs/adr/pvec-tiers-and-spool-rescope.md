@@ -28,7 +28,7 @@ libviprs would be a second copy of that decision.
 * No `src/pvec/tiers.rs`, no `TierAssignment`, no preview request type in libviprs.
 * The funnel (`src/pvec/writer.rs`) passes PVec the two numbers `new_indexed` takes, as
   `LeafConfig { cell_capacity, tier0_max_error }`. Both come from the caller. libviprs defines no
-  tolerance, so there is no numeric tolerance literal in the funnel (a test over its source holds that).
+  tolerance, so the only float literals in the funnel are the six unit factors.
 * The report (`#1093`, N6.7) records preview coverage as display fidelity, read back from PVec's
   Tier 0 leaves, and never gives a preview a geometric-exactness class.
 
@@ -39,7 +39,7 @@ libviprs would be a second copy of that decision.
 | one tier assignment per entity | PVec assigns, one Tier 0 entry per entity id; the test reads the leaves back and counts |
 | canonical geometry for a deferred entity is still the analytic curve | `tests/pvec_1314_writer_funnel.rs` reads the indexed artifact back and compares the curve kinds |
 | every preview resolves to one canonical entity | PVec's `P5.4` replacement identity; libviprs holds no preview |
-| no tolerance literal in `tiers.rs` | there is no `tiers.rs`; the same check runs over `writer.rs` |
+| no tolerance literal in `tiers.rs` | there is no `tiers.rs`; `writer.rs` has no tolerance, only the six unit factors |
 | the report labels preview coverage as display fidelity | `#1093`, from the Tier 0 leaves |
 
 This does not contradict `#1092`'s intent (a complete drawing before every curve is refined), only
@@ -79,6 +79,7 @@ and the bound comes from PVec, not from a libviprs spool.
 
 * No libviprs spool code is written now. N6.3 closes only after pvec#235 merges, the pin moves, and
   the numbers from `examples/pvec_writer_memory.rs` meet the criterion.
+* The funnel assigns PVec ids dense from zero (Tier 0 needs `0..n` with no gaps) and returns the way back in `source_ids`.
 * The funnel today returns `Vec<u8>`. When #235 lands it gains a sink variant that calls
   `finish_to`, and `publish` takes the stream instead of a slice, writing straight into the
   `.pvec.partial` file. The cancel token, the stages and the cleanup do not change.

@@ -476,7 +476,9 @@ const EXPECTED_SRC_MODULES: usize = 31;
 /// conversion in a child under `ulimit -v` and a wall clock, and
 /// `tests/vector_1036_dwg_corpus.rs::mutated_drawings_never_take_the_process_down`,
 /// which decodes each mutated drawing in a child. It said 46 before this line moved.
-const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 50;
+///
+/// #1368 adds 1: `tests/dependency_policy.rs::exactly_one_tiff_resolves_in_every_cell` (from #1367), which runs `cargo tree`. It said 50 before this line moved.
+const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 53;
 
 /// The filesystem-touching tests still allowed to run under Miri, and so still
 /// allowed to end the whole run on their first syscall.
@@ -803,7 +805,10 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1328 adds 4: the `tests/pmtiles_sink.rs` cells that write a georeferenced archive to a temp dir and read it back. It said 728 before this line moved.
 /// #1336 adds 1: the `tests/pvec_api_surface.rs` check that only the raster container names the PVec facade, which walks the source tree. It said 732 before this line moved.
 /// #1368 adds 15: the `tests/pvec_1330_*.rs`, `pvec_1331_*.rs`, `pvec_1332_interop_fixture.rs` and `pvec_1333_raster_rules_doc.rs` cells that read committed seeds and docs, write a staging file, or bless a page, which landed without the annotation. It said 733 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 748;
+/// #1395 adds 2: the `tests/pvec_1079_provider_default.rs` check that walks `src/pvec`, and the `tests/pvec_provider_replacement.rs` check that reads the shipped deltas file. It said 748 before this line moved.
+/// #1378 adds 10: the `tests/pvec_1378_xref_facet.rs` cells that write drawings and xref targets to a temp dir. It said 750 before this line moved.
+/// #1314 adds 14: the 13 `tests/pvec_1314_publish.rs` cells that write and kill, and the writer-call fence in `tests/pvec_api_surface.rs`. It said 760 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 774;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {

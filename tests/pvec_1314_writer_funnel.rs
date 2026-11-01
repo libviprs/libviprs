@@ -108,7 +108,7 @@ fn issue_1314_every_geometry_kind_reads_back_as_the_kind_that_went_in() {
 }
 
 #[test]
-fn issue_1314_the_entity_ids_are_the_libviprs_ids() {
+fn issue_1314_the_pvec_ids_are_dense_and_source_ids_map_them_back() {
     let art = write(&config(), &mixed()).unwrap();
     let r = PvecReader::open(art.bytes).unwrap();
     let got: Vec<u32> = r
@@ -121,23 +121,55 @@ fn issue_1314_the_entity_ids_are_the_libviprs_ids() {
 }
 
 #[test]
-fn issue_1314_an_entity_without_geometry_is_counted_and_not_written() {
+fn issue_1314_an_entity_without_geometry_is_counted_and_leaves_no_gap_in_the_ids() {
     let mut geoms = mixed();
     geoms.insert(
         2,
         Normalized2DGeometry::without_geometry(FidelityClass::Unsupported).unwrap(),
     );
+    let all = ids(geoms.len());
     let art = write(&config(), &geoms).unwrap();
     assert_eq!((art.written, art.skipped), (5, 1));
+    // The libviprs ids of the five written entities, skipping index 2.
+    let want: Vec<_> = [0, 1, 3, 4, 5].iter().map(|i| all[*i]).collect();
+    assert_eq!(art.source_ids, want);
     let r = PvecReader::open(art.bytes).unwrap();
-    assert_eq!(r.entity_count().unwrap(), 5);
     let got: Vec<u32> = r
         .entities()
         .unwrap()
         .iter()
         .map(|(id, _)| id.index())
         .collect();
-    assert_eq!(got, [0, 1, 3, 4, 5], "the skipped entity's id stays unused");
+    assert_eq!(
+        got,
+        [0, 1, 2, 3, 4],
+        "PVec's ids are dense, as Tier 0 needs"
+    );
+}
+
+#[test]
+fn issue_1314_an_indexed_write_with_a_skipped_entity_still_gets_its_tier0_blocks() {
+    let mut geoms: Vec<_> = (0..20)
+        .map(|i| {
+            let x = f64::from(i) * 10.0;
+            Normalized2DGeometry::polyline(&[[x, 0.0], [x + 4.0, 3.0]], EXACT).unwrap()
+        })
+        .collect();
+    geoms.insert(
+        7,
+        Normalized2DGeometry::without_geometry(FidelityClass::IgnoredByPolicy).unwrap(),
+    );
+    let c = WriteConfig {
+        leaves: Some(LeafConfig {
+            cell_capacity: 8,
+            tier0_max_error: Some(0.05),
+        }),
+        ..config()
+    };
+    let art = write(&c, &geoms).unwrap();
+    let r = PvecReader::open(art.bytes).unwrap();
+    let dir = r.spatial_directory().unwrap().expect("a directory");
+    assert!(!r.tier0_leaves(&dir).unwrap().is_empty());
 }
 
 #[test]
@@ -194,22 +226,6 @@ fn issue_1314_a_cancelled_write_returns_cancelled_and_no_bytes() {
         &token,
     );
     assert!(matches!(r, Err(WriteError::Cancelled)));
-}
-
-#[test]
-fn issue_1314_pvecs_refusal_comes_back_with_its_rule_as_the_source() {
-    // The same id twice: the facade refuses the second push.
-    let geoms = mixed();
-    let id = ids(1)[0];
-    let r = write_geometry(
-        &config(),
-        [(id, &geoms[0]), (id, &geoms[1])],
-        Vec::new(),
-        &CancelToken::new(),
-    );
-    let err = r.expect_err("a duplicate id is refused");
-    assert!(matches!(err, WriteError::Pvec(_)), "{err:?}");
-    assert!(std::error::Error::source(&err).is_some());
 }
 
 #[test]

@@ -33,6 +33,9 @@ pub mod bounds;
 pub mod classify;
 #[cfg(feature = "pvec-normalized")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
+pub mod differential;
+#[cfg(feature = "pvec-normalized")]
+#[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
 pub mod dump;
 #[cfg(feature = "pvec-normalized")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
@@ -114,7 +117,7 @@ pub use provider::{
     EntityStyle, Facet, FacetCap, FacetSource, InstancePath, InstanceStep, LayerState, LayoutId,
     LayoutKind, LayoutState, Point3, ProvenanceStub, ProviderCaps, ProviderError, RawEntity,
     RawGeometry, RawVertex, SourceColour, SourceFact, SourceLineweight, SourceTransform,
-    ViewportEntity,
+    TextStyleRef, ViewportEntity, XrefAttachment,
 };
 pub use text_policy::{
     DwgTextCounts, PdfTextOperatorCounts, TextFontOutcome, TextReport, shx_outcome,

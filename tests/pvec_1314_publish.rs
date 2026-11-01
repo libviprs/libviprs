@@ -66,6 +66,7 @@ fn both_or_neither(dest: &Path) -> bool {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn issue_1314_a_publish_leaves_exactly_the_artifact_and_its_report() {
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("plan.pvec");
@@ -85,6 +86,7 @@ fn issue_1314_a_publish_leaves_exactly_the_artifact_and_its_report() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn issue_1314_the_stages_arrive_in_order_and_commit_comes_last() {
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("plan.pvec");
@@ -99,6 +101,7 @@ fn issue_1314_the_stages_arrive_in_order_and_commit_comes_last() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn issue_1314_the_in_progress_file_has_the_partial_suffix() {
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("plan.pvec");
@@ -113,6 +116,7 @@ fn issue_1314_the_in_progress_file_has_the_partial_suffix() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn issue_1314_the_reader_path_refuses_a_partial_by_name_before_any_parse() {
     let dir = tempfile::tempdir().unwrap();
     // A file that does not exist: the refusal has to be the name, not a failed open.
@@ -128,6 +132,7 @@ fn issue_1314_the_reader_path_refuses_a_partial_by_name_before_any_parse() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn issue_1314_a_truncated_artifact_is_rejected_by_pvecs_reader() {
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("plan.pvec");
@@ -145,6 +150,7 @@ fn issue_1314_a_truncated_artifact_is_rejected_by_pvecs_reader() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn issue_1314_bytes_that_are_not_a_complete_artifact_are_not_publishable() {
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("plan.pvec");
@@ -161,6 +167,7 @@ fn issue_1314_bytes_that_are_not_a_complete_artifact_are_not_publishable() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn issue_1314_a_cancel_at_each_step_leaves_the_previous_pair_byte_identical() {
     for stage in BEFORE_COMMIT {
         let dir = tempfile::tempdir().unwrap();
@@ -195,6 +202,7 @@ fn issue_1314_a_cancel_at_each_step_leaves_the_previous_pair_byte_identical() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn issue_1314_a_cancel_with_no_previous_artifact_leaves_nothing() {
     for stage in BEFORE_COMMIT {
         let dir = tempfile::tempdir().unwrap();
@@ -216,6 +224,7 @@ fn issue_1314_a_cancel_with_no_previous_artifact_leaves_nothing() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn issue_1314_a_panic_at_each_step_removes_the_partials_and_keeps_the_previous_pair() {
     for stage in BEFORE_COMMIT {
         let dir = tempfile::tempdir().unwrap();
@@ -246,6 +255,7 @@ fn issue_1314_a_panic_at_each_step_removes_the_partials_and_keeps_the_previous_p
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn issue_1314_an_io_failure_leaves_nothing_and_names_its_source() {
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("no-such-dir").join("plan.pvec");
@@ -263,6 +273,7 @@ fn issue_1314_an_io_failure_leaves_nothing_and_names_its_source() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn issue_1314_the_pair_is_both_present_or_both_absent_on_every_path() {
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("plan.pvec");
@@ -315,6 +326,7 @@ fn kill_at(stage: &str, dest: &Path) {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn issue_1314_a_kill_before_the_commit_leaves_no_file_at_the_destination() {
     for stage in BEFORE_COMMIT {
         let dir = tempfile::tempdir().unwrap();
@@ -335,6 +347,7 @@ fn issue_1314_a_kill_before_the_commit_leaves_no_file_at_the_destination() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn issue_1314_a_rerun_after_a_kill_writes_the_bytes_a_clean_run_writes() {
     let clean_dir = tempfile::tempdir().unwrap();
     let clean = clean_dir.path().join("plan.pvec");
