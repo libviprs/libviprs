@@ -1,0 +1,53 @@
+{
+  "issue": 1037,
+  "platform": "android",
+  "maplibre_native_android": "13.7.1",
+  "android_release": "14",
+  "emulator": "Android 34 default x86_64 (pixel_5 AVD), KVM, swiftshader_indirect",
+  "golden_bytes": 79939,
+  "tests": {
+    "remoteRangeMode": "passed",
+    "missingArchiveRendersBlank": "passed",
+    "localFileMode": "passed"
+  },
+  "metrics": {
+    "remoteRangeMode": {
+      "rangedRequests": 19,
+      "rangedBytes": 18729,
+      "lineFeatures": 4,
+      "textFeatures": 1,
+      "blackPx": 31875,
+      "whitePx": 2024328,
+      "greyPx": 15237,
+      "colouredPx": 0,
+      "totalPx": 2071440,
+      "width": 1080,
+      "height": 1918
+    },
+    "localFileMode": {
+      "downloadedBytes": 79939,
+      "sha256": "50cbe2a19fc1ead41688d2acf2a760030b5621080d67a4479c315bd663b1b64f",
+      "url": "pmtiles://file:///data/user/0/org.libviprs.conformance/files/golden.pmtiles",
+      "lineFeatures": 4,
+      "textFeatures": 1,
+      "blackPx": 31875,
+      "whitePx": 2024328,
+      "greyPx": 15237,
+      "colouredPx": 0,
+      "totalPx": 2071440,
+      "width": 1080,
+      "height": 1918
+    },
+    "missingArchiveRendersBlank": {
+      "lineFeatures": 0,
+      "textFeatures": 0,
+      "blackPx": 0,
+      "whitePx": 2071440,
+      "greyPx": 0,
+      "colouredPx": 0,
+      "totalPx": 2071440,
+      "width": 1080,
+      "height": 1918
+    }
+  }
+}
