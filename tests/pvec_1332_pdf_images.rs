@@ -358,6 +358,7 @@ fn refused_reason(bytes: &[u8]) -> (PdfImageError, String) {
 }
 
 #[test]
+#[cfg(not(feature = "jp2k"))] // with the feature the stream is tried (#1364)
 fn a_jpx_image_is_not_enabled_by_name() {
     let s = image(
         2,
