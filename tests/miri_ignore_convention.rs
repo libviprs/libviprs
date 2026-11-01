@@ -811,8 +811,9 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1378 adds 10: the `tests/pvec_1378_xref_facet.rs` cells that write drawings and xref targets to a temp dir. It said 750 before this line moved.
 /// #1314 adds 14: the 13 `tests/pvec_1314_publish.rs` cells that write and kill, and the writer-call fence in `tests/pvec_api_surface.rs`. It said 760 before this line moved.
 /// #1363 adds 2: `tests/pvec_1363_pdf_ccitt.rs::the_scanned_sheet_converts_to_seven_underlays`, which reads the corpus file, and the `hayro-ccitt` check in `tests/dependency_policy.rs`. It said 774 before this line moved.
-/// #1364 adds 2: the `tests/pvec_1364_pdf_jpx.rs` corpus cells, which read PDFs from outside the repo. It said 776 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 778;
+/// #1093 adds 1: the `tests/pvec_1093_report.rs` check that reads `docs/pvec-conversion-report.md`. It said 776 before this line moved.
+/// #1364 adds 2: the `tests/pvec_1364_pdf_jpx.rs` corpus cells, which read PDFs from outside the repo. It said 777 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 779;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
