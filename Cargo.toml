@@ -554,7 +554,7 @@ dwg-acadrust = ["dep:acadrust"]
 # Exact B-spline extraction from a provider's `RawGeometry::Spline` (issue #1074),
 # validated against PVec's numeric policy. Needs no reader: it works on the boundary
 # types, so any provider's output goes through it.
-pvec-spline = ["dep:pvec-numeric"]
+pvec-spline = ["dep:pvec-numeric", "dep:pvec-geometry"]
 # `raster_pvec::container`: a raster pyramid written into a PVec's raster stream through the PVec
 # facade and read back (issue #1328). Pure Rust; the facade is a git dependency pinned by revision.
 # `pvec-geometry` comes with it only so the tests can build the sheet's outline entity: an artifact

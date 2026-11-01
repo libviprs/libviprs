@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Periodic SPLINE extraction** (issue #1374). `dwg_spline::extract` takes the one-period layout
+  of a non-rational periodic spline (`n` control points, `n + 1` knots), checks it with PVec's
+  `BSpline::from_periodic`, and keeps it as authored. `Normalized2DGeometry::from_spline` builds the
+  record (`SupportedEquivalent`, the unwrap changes the knot vector and not the locus). `pvec-spline`
+  now also pulls `pvec-geometry`.
 - **The PDF filter seam** (issue #1362, follow-up 1/6 to #1332, part of #1329). The image decoder
   now goes through `FilterInput`, `FilterOutput` and one `decode_filter` `match`, with a module per
   codec under `src/pvec/pdf_filters/` (`dct` moved in, `ccitt`, `jbig2` and `jpx` are stubs). No

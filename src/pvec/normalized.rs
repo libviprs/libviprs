@@ -275,6 +275,35 @@ impl Normalized2DGeometry {
         Self::from_curve(Curve::RationalBSpline(s), fidelity)
     }
 
+    /// The record for an extracted spline (#1374): the constructor its form calls for, with the
+    /// class that goes with it. A rational spline and a plain one pass through whole
+    /// (`SupportedExact`). A non-rational periodic spline of one period (`n + 1` knots) is
+    /// unwrapped by PVec's `BSpline::from_periodic` into the clamped, closed curve, which is the
+    /// same locus under a different knot vector, so it is `SupportedEquivalent`.
+    #[cfg(feature = "pvec-spline")]
+    pub fn from_spline(s: &super::dwg_spline::ExactSpline) -> Result<Self, NormalizeError> {
+        use super::dwg_spline::SplineForm;
+        let degree = s.degree as usize;
+        let pts: Vec<[f64; 2]> = s.control_points.iter().map(|p| [p[0], p[1]]).collect();
+        match &s.form {
+            SplineForm::Rational(w) => {
+                Self::rational_b_spline(degree, &pts, &s.knots, w, FidelityClass::SupportedExact)
+            }
+            SplineForm::NonRational if s.periodic && s.knots.len() == pts.len() + 1 => {
+                let un = BSpline::from_periodic(
+                    degree,
+                    points("control_points", &pts)?,
+                    s.knots.clone(),
+                )
+                .map_err(refuse("knots"))?;
+                Self::from_curve(Curve::BSpline(un.curve), FidelityClass::SupportedEquivalent)
+            }
+            SplineForm::NonRational => {
+                Self::b_spline(degree, &pts, &s.knots, FidelityClass::SupportedExact)
+            }
+        }
+    }
+
     fn check_class(fidelity: FidelityClass) -> Result<(), NormalizeError> {
         if fidelity.produces_geometry() {
             Ok(())

@@ -980,23 +980,7 @@ mod mapping {
             out.push("closed state: the mapping changed a flag".into());
         }
         // The mapped record and the class it lands in (profile sections 11 and 12).
-        let pts: Vec<[f64; 2]> = s.control_points.iter().map(|p| [p[0], p[1]]).collect();
-        let record = match &s.form {
-            SplineForm::NonRational => Normalized2DGeometry::b_spline(
-                degree as usize,
-                &pts,
-                &s.knots,
-                FidelityClass::SupportedExact,
-            ),
-            SplineForm::Rational(w) => Normalized2DGeometry::rational_b_spline(
-                degree as usize,
-                &pts,
-                &s.knots,
-                w,
-                FidelityClass::SupportedExact,
-            ),
-            _ => return,
-        };
+        let record = Normalized2DGeometry::from_spline(&s);
         let record = match record {
             Ok(r) => r,
             Err(e) => {
