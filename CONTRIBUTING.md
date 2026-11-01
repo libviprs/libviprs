@@ -465,7 +465,8 @@ script does not run it.
 - By hand: `make native-dwg` (the runner reads the workflow, same as `make ci`).
 - Every night, on MARS: `tools/scheduled-native-dwg.sh` clones `main` inside a container, runs the
   script, keeps the log and appends a line to `/work/nas-work/native-dwg-sched/results.tsv`. The host
-  runs only docker.
+  runs only docker. It then runs `tools/cgroup-worker-lane.sh`, the cgroup form of the worker test
+  (the unbudgeted child under `docker run --memory=256m` has to exit 137, OOM-killed, with no destination).
 - Installing the schedule is a deliberate step, because MARS is shared. The entry is in
   `tools/native-dwg.cron`. Copy this repo's `tools/` to
   `/work/nas-work/native-dwg-sched/src/tools/` (or edit the path in the entry), then add the line to
