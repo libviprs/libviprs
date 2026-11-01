@@ -18,8 +18,9 @@ itself.
 
 ## Offline
 
-PMTiles is not handled by MapLibre Native offline-pack caching. MapLibre Native's own PMTiles page says
-the same thing ("PMTiles sources do not support offline pack downloads or caching", in
+PMTiles is not handled by MapLibre Native offline-pack caching.
+
+MapLibre Native's own PMTiles page says the same thing ("PMTiles sources do not support offline pack downloads or caching", in
 `platform/android/docs/data/PMTiles.md` of maplibre-native), so don't expect an offline region
 (`OfflineManager` on Android, `MLNOfflineStorage` on iOS) to download or hold the drawing. (The ambient cache that newer releases keep for PMTiles
 sources is a size-limited cache of what you looked at, not something you can download ahead of time.)
