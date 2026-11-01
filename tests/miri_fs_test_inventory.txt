@@ -591,6 +591,9 @@ annotated   fs-detected  tests/pvec_1433_bench_harness.rs::the_document_and_the_
 annotated   not-detected tests/pvec_1436_normalization_mix.rs::a_fifty_percent_mix_keeps_about_half
 annotated   not-detected tests/pvec_1436_normalization_mix.rs::a_ninety_percent_mix_keeps_about_a_tenth
 annotated   not-detected tests/pvec_1436_normalization_mix.rs::a_zero_mix_hides_nothing_and_is_the_pinned_cell
+annotated   not-detected tests/pvec_1439_view_limits.rs::a_drawing_inside_the_limits_is_walked_as_before
+annotated   not-detected tests/pvec_1439_view_limits.rs::a_fan_out_past_the_instance_limit_is_refused_naming_it
+annotated   not-detected tests/pvec_1439_view_limits.rs::the_default_limits_still_admit_an_ordinary_drawing
 annotated   fs-detected  tests/pvec_api_surface.rs::no_index_directory_or_straddler_type_is_defined_under_src_pvec
 annotated   fs-detected  tests/pvec_api_surface.rs::no_pvec_path_under_src_is_outside_the_allowed_surface
 annotated   fs-detected  tests/pvec_api_surface.rs::no_writer_call_is_made_outside_the_funnel
