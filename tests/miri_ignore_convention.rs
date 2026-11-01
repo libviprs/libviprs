@@ -816,11 +816,12 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1382 adds 2: the `tests/pvec_known_truth.rs` cells that read and copy the vendored corpus. It said 779 before this line moved.
 /// #1383 adds 2: the `tests/pvec_dual_oracle.rs` cells that read the vendored corpus. It said 781 before this line moved.
 /// #1295 adds 7: the `tests/local_gate_native_dwg_1295.rs` cells that read the workflow, scripts and docs of the scheduled native lane. It said 783 before this line moved.
-/// #1413 adds 6: the `tests/pvec_1413_convert.rs` cells that convert real drawings into a scratch folder. It said 790 before this line moved.
-/// #1414 adds 7: the `tests/pvec_1414_capability.rs` cells that convert into a scratch folder. It said 796 before this line moved.
-/// #1415 adds 8: the `tests/pvec_1415_georef.rs` cells that read and write the sidecar. It said 803 before this line moved.
-/// #1416 and #1417 add 11: the `tests/pvec_1416_diagnostics.rs` and `tests/pvec_1417_progress.rs` cells. It said 811 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 822;
+/// #1391 adds 5: the `tests/vector_1391_limits.rs` cells that read the g13 drawings and the provider docs. It said 790 before this line moved.
+/// #1413 adds 6: the `tests/pvec_1413_convert.rs` cells that convert real drawings into a scratch folder. It said 795 before this line moved.
+/// #1414 adds 7: the `tests/pvec_1414_capability.rs` cells that convert into a scratch folder. It said 801 before this line moved.
+/// #1415 adds 8: the `tests/pvec_1415_georef.rs` cells that read and write the sidecar. It said 808 before this line moved.
+/// #1416 and #1417 add 11: the `tests/pvec_1416_diagnostics.rs` and `tests/pvec_1417_progress.rs` cells. It said 816 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 827;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
