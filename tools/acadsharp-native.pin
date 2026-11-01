@@ -1,0 +1,5 @@
+# The libviprs-dep archive the native DWG cells run against (issue #1295).
+# Change the URL and the digest together, in one reviewable commit. The digest
+# is the one GitHub reports for the release asset.
+url=https://github.com/libviprs/libviprs-dep/releases/download/acadsharp-3.7.1-viprs.1/acadsharp-linux-x64.tgz
+sha256=4cbdbbdd03c4431780ddca80a1d660e6940ff561734d666e162d6fb50438136e
