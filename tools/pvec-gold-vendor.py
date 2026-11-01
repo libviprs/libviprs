@@ -6,9 +6,12 @@
 Reads the r2-open manifest at <git-ref> with `git show` / `git archive` (no working tree needed),
 copies for every fixture the files the suites use (source.dwg, expected.math.json, the first
 oracle's signature and the verdict), checks each against the sha256 the upstream manifest records,
-and writes `index.json` (the trimmed manifest) and `PIN.json` (corpus revision, gold commit and the
-sha256 of the upstream manifest) next to them. Bumping the pin is re-running this and committing
-the diff.
+and writes `index.json` (the trimmed manifest) `PIN.json` (corpus revision, gold commit and the
+sha256 of the upstream manifest) and `summary.json` (fixture ids per evidence class and scope, the
+readable face of the pin) next to them. Bumping the pin is re-running this and committing the diff.
+When an `index.json` is already there, it also prints the per-class change summary against it, so a
+bump is reviewed as "which fixtures moved from which class to which" and not as an opaque hash
+change.
 
 It only reads files and writes under <dest>, so it needs no container.
 """
@@ -37,6 +40,10 @@ def main():
     out = {"corpus_revision": manifest["corpus_revision"], "oracle_scope": manifest["oracle_scope"],
            "fixtures": []}
     dest.mkdir(parents=True, exist_ok=True)
+    previous = None
+    if (dest / "index.json").exists():
+        previous = {f["id"]: (f["evidence_class"], f["evidence_scope"])
+                    for f in json.loads((dest / "index.json").read_text())["fixtures"]}
     for fx in manifest["fixtures"]:
         if fx["id"] in SKIP:
             continue
@@ -61,6 +68,17 @@ def main():
             "step_verdict": (fx.get("step_oracle") or {}).get("verdict"),
             "files": files})
     (dest / "index.json").write_text(json.dumps(out, indent=1, sort_keys=True) + "\n")
+    summary = {"corpus_revision": out["corpus_revision"], "by_class": {}}
+    for f in out["fixtures"]:
+        key = f"{f['evidence_class']} / {f['evidence_scope']}"
+        summary["by_class"].setdefault(key, []).append(f["id"])
+    summary["by_class"] = {k: sorted(v) for k, v in sorted(summary["by_class"].items())}
+    (dest / "summary.json").write_text(json.dumps(summary, indent=1) + "\n")
+    if previous is not None:
+        now = {f["id"]: (f["evidence_class"], f["evidence_scope"]) for f in out["fixtures"]}
+        for i in sorted(set(previous) | set(now)):
+            if previous.get(i) != now.get(i):
+                print(f"{i}: {previous.get(i)} -> {now.get(i)}")
     pin = {"corpus_revision": manifest["corpus_revision"], "gold_commit": commit,
            "upstream_manifest_sha256": hashlib.sha256(raw).hexdigest(),
            "skipped": sorted(SKIP), "vendored_by": "tools/pvec-gold-vendor.py"}

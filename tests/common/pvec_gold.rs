@@ -72,6 +72,16 @@ pub enum EvidenceScope {
 }
 
 impl EvidenceScope {
+    /// The name the corpus manifest uses.
+    pub fn tag(self) -> &'static str {
+        match self {
+            Self::StepOracle => "STEP_ORACLE",
+            Self::ReaderMappingOnly => "READER_MAPPING_ONLY",
+            Self::ReaderCensusOnly => "READER_CENSUS_ONLY",
+            Self::RejectionExpected => "REJECTION_EXPECTED",
+        }
+    }
+
     fn parse(tag: &str) -> Self {
         match tag {
             "STEP_ORACLE" => Self::StepOracle,
