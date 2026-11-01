@@ -31,10 +31,20 @@ struct Case {
     parms: u8,
     k: i8,
     columns: u16,
+    /// Send `/Columns` equal to `/Width`, so a fax stream reaches the codec instead of the
+    /// `/Columns` check (#1363). Without this nearly every case would stop at the check.
+    columns_match: bool,
+    /// The other fax parameters: `/Rows`, `/EndOfBlock`, `/EndOfLine`, `/EncodedByteAlign`,
+    /// `/BlackIs1`, each present as true, present as false, or absent (#1363).
+    fax_flags: [u8; 5],
     predictor: u8,
     decode_flip: bool,
     image_mask: bool,
     smask: bool,
+    /// For `JPXDecode` with the `jp2k` feature: start from a valid JP2 file (so the fuzzer gets
+    /// past the container parser) and let `payload` mutate it, as (offset, byte) pairs (#1364).
+    #[cfg_attr(not(feature = "jp2k"), allow(dead_code))]
+    mutate_valid_jp2: bool,
     payload: Vec<u8>,
 }
 
@@ -52,11 +62,33 @@ fn name(n: &str) -> Object {
     Object::Name(n.as_bytes().to_vec())
 }
 
+/// A small lossless JP2 file, encoded once.
+#[cfg(feature = "jp2k")]
+fn valid_jp2() -> &'static Vec<u8> {
+    static JP2: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    JP2.get_or_init(|| {
+        let px: Vec<u8> = (0..8 * 8 * 3).map(|i| (i * 5) as u8).collect();
+        libviprs::raster::Raster::new(8, 8, libviprs::pixel::PixelFormat::Rgb8, px)
+            .ok()
+            .and_then(|r| r.encode_jp2k(Default::default()).ok())
+            .unwrap_or_default()
+    })
+}
+
 fn build(case: &Case) -> Vec<u8> {
     use std::io::Write;
     let width = i64::from(case.width % 2048) + 1;
     let height = i64::from(case.height % 2048) + 1;
     let mut payload = case.payload.clone();
+    #[cfg(feature = "jp2k")]
+    if case.mutate_valid_jp2 && FILTERS[usize::from(case.filter) % FILTERS.len()] == "JPXDecode" {
+        let mut valid = valid_jp2().clone();
+        for pair in case.payload.chunks_exact(3) {
+            let at = usize::from(u16::from_le_bytes([pair[0], pair[1]])) % valid.len();
+            valid[at] = pair[2];
+        }
+        payload = valid;
+    }
     if case.deflate {
         let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
         let _ = z.write_all(&payload);
@@ -96,7 +128,29 @@ fn build(case: &Case) -> Vec<u8> {
     }
     let mut parms = Dictionary::new();
     parms.set("K", i64::from(case.k));
-    parms.set("Columns", i64::from(case.columns));
+    parms.set(
+        "Columns",
+        if case.columns_match {
+            width
+        } else {
+            i64::from(case.columns)
+        },
+    );
+    for (key, flag) in ["EndOfBlock", "EndOfLine", "EncodedByteAlign", "BlackIs1"]
+        .into_iter()
+        .zip(&case.fax_flags[1..])
+    {
+        match flag % 3 {
+            0 => {}
+            1 => parms.set(key, true),
+            _ => parms.set(key, false),
+        }
+    }
+    match case.fax_flags[0] % 3 {
+        0 => {}
+        1 => parms.set("Rows", height),
+        _ => parms.set("Rows", height + 1),
+    }
     parms.set("Predictor", i64::from(case.predictor % 17));
     parms.set("Colors", 1);
     parms.set("BitsPerComponent", 8);

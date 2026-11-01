@@ -77,6 +77,10 @@
 //!   tiles (untouched) and placement to PVec's writer and reads them back through its
 //!   reader (issue #1328). Pure Rust; the PVec facade is a git dependency pinned by
 //!   revision.
+//! - **`pvec-write`** — gates `pvec::writer`, the one funnel that writes normalized geometry into a
+//!   PVec artifact through the facade's `PvecWriter`, and `pvec::publish`, the atomic publish of
+//!   the artifact and its report (issue #1314). Pure Rust; the PVec facade is a git dependency
+//!   pinned by revision.
 //! - **`serde`** — adds public `Serialize` / `Deserialize` derives to the wire
 //!   and config types ([`PyramidPlan`], [`EngineConfig`], [`TileCoord`],
 //!   [`Layout`], and the rest) so an out-of-process caller can rebuild a job

@@ -1,0 +1,1536 @@
+{
+  "schema_version": "pvec-gold/expected.math/1",
+  "fixture_id": "mixed-entity-001",
+  "evidence_class": "KNOWN_TRUTH_EXACT",
+  "units": {
+    "name": "metre",
+    "canonical": "metre",
+    "scale_to_canonical": {
+      "decimal": "1.0",
+      "f64_hex": "0x3ff0000000000000"
+    }
+  },
+  "provenance": {
+    "derivation": "AUTHORING_PARAMETERS",
+    "authoring_script": "tools/authoring/author_corpus.py",
+    "parameter_file": "tools/authoring/corpus-params/mixed/mixed-entity-001.json",
+    "parameter_file_sha256": "b8a2c0a8c0984a5c7f2632ae216688ad1a41735323dacac67103d5a04d08b705",
+    "parameters": {
+      "id": "mixed-entity-001",
+      "group": "mixed",
+      "kind": "mixed",
+      "description": "Seven entities in one model space: a line, a circle, a circular arc, an ellipse, a bulged polyline and a rational B-spline are stored as they are, and a line is reached through three nested block instances (translate, rotate, non-uniform scale) while a circle is reached through one uniform scale. Eight entity records, seven curve classes, two block chains.",
+      "entities": [
+        {
+          "name": "line",
+          "class": "line",
+          "start": [
+            "0.5",
+            "0.25",
+            "0"
+          ],
+          "end": [
+            "3.75",
+            "2.5",
+            "0"
+          ]
+        },
+        {
+          "name": "circle",
+          "class": "circle",
+          "center": [
+            "10",
+            "0",
+            "0"
+          ],
+          "radius": "2"
+        },
+        {
+          "name": "arc",
+          "class": "circular_arc",
+          "center": [
+            "0",
+            "10",
+            "0"
+          ],
+          "radius": "3",
+          "start_angle": "0.5",
+          "sweep_angle": "2"
+        },
+        {
+          "name": "ellipse",
+          "class": "ellipse",
+          "center": [
+            "10",
+            "10",
+            "0"
+          ],
+          "major_axis": [
+            "0.96",
+            "0.28",
+            "0"
+          ],
+          "semi_major": "3",
+          "semi_minor": "2"
+        },
+        {
+          "name": "polyline",
+          "class": "polyline",
+          "vertices": [
+            [
+              "20",
+              "0",
+              "0"
+            ],
+            [
+              "24",
+              "0",
+              "0"
+            ],
+            [
+              "24",
+              "3",
+              "0"
+            ],
+            [
+              "20",
+              "3",
+              "0"
+            ]
+          ],
+          "bulges": [
+            "0",
+            "0.4",
+            "0",
+            "0"
+          ]
+        },
+        {
+          "name": "nurbs",
+          "class": "nurbs",
+          "degree": 2,
+          "control_points": [
+            [
+              "20",
+              "10",
+              "0"
+            ],
+            [
+              "21",
+              "11.5",
+              "0"
+            ],
+            [
+              "22.5",
+              "12",
+              "0"
+            ],
+            [
+              "23.5",
+              "10.5",
+              "0"
+            ],
+            [
+              "25",
+              "11",
+              "0"
+            ]
+          ],
+          "weights": [
+            "1",
+            "0.6",
+            "1.7",
+            "0.9",
+            "1"
+          ],
+          "knots": [
+            [
+              "0",
+              3
+            ],
+            [
+              "0.4",
+              1
+            ],
+            [
+              "0.7",
+              1
+            ],
+            [
+              "1",
+              3
+            ]
+          ]
+        },
+        {
+          "name": "nested-line",
+          "kind": "transform",
+          "base": {
+            "class": "line",
+            "start": [
+              "0.5",
+              "0.25",
+              "0"
+            ],
+            "end": [
+              "3.75",
+              "2.5",
+              "0"
+            ]
+          },
+          "ops": [
+            {
+              "op": "translate",
+              "v": [
+                "30",
+                "1",
+                "0"
+              ],
+              "classification": "TRANSLATION"
+            },
+            {
+              "op": "rotate_z",
+              "cos_sin": [
+                "0",
+                "1"
+              ],
+              "classification": "ROTATION"
+            },
+            {
+              "op": "scale",
+              "s": [
+                "2",
+                "1",
+                "1"
+              ],
+              "classification": "NON_UNIFORM_SCALE"
+            }
+          ],
+          "composed_classification": "GENERAL_AFFINE",
+          "expect": "line"
+        },
+        {
+          "name": "scaled-circle",
+          "kind": "transform",
+          "base": {
+            "class": "circle",
+            "center": [
+              "1",
+              "-2",
+              "0"
+            ],
+            "radius": "1.5"
+          },
+          "ops": [
+            {
+              "op": "scale",
+              "s": [
+                "2.5",
+                "2.5",
+                "2.5"
+              ],
+              "classification": "UNIFORM_SCALE"
+            }
+          ],
+          "expect": "similarity"
+        }
+      ]
+    }
+  },
+  "entities": [
+    {
+      "id": "mixed-entity-001.line",
+      "class": "line",
+      "geometry": {
+        "start": [
+          {
+            "decimal": "0.5",
+            "f64_hex": "0x3fe0000000000000"
+          },
+          {
+            "decimal": "0.25",
+            "f64_hex": "0x3fd0000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ],
+        "end": [
+          {
+            "decimal": "3.75",
+            "f64_hex": "0x400e000000000000"
+          },
+          {
+            "decimal": "2.5",
+            "f64_hex": "0x4004000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ]
+      },
+      "parameter_domain": {
+        "start": {
+          "decimal": "0.0",
+          "f64_hex": "0x0000000000000000"
+        },
+        "end": {
+          "decimal": "1.0",
+          "f64_hex": "0x3ff0000000000000"
+        }
+      },
+      "closure": {
+        "closed_by_endpoint": false,
+        "closed_by_knots": false,
+        "periodic": false
+      },
+      "structure": "CURVE_ONLY"
+    },
+    {
+      "id": "mixed-entity-001.circle",
+      "class": "circle",
+      "geometry": {
+        "center": [
+          {
+            "decimal": "10.0",
+            "f64_hex": "0x4024000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ],
+        "normal": [
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          }
+        ],
+        "x_axis": [
+          {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ],
+        "radius": {
+          "decimal": "2.0",
+          "f64_hex": "0x4000000000000000"
+        }
+      },
+      "parameter_domain": {
+        "start": {
+          "decimal": "0.0",
+          "f64_hex": "0x0000000000000000"
+        },
+        "end": {
+          "decimal": "6.283185307179586",
+          "f64_hex": "0x401921fb54442d18"
+        }
+      },
+      "closure": {
+        "closed_by_endpoint": true,
+        "closed_by_knots": false,
+        "periodic": true
+      },
+      "structure": "CURVE_ONLY"
+    },
+    {
+      "id": "mixed-entity-001.arc",
+      "class": "circular_arc",
+      "geometry": {
+        "center": [
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "10.0",
+            "f64_hex": "0x4024000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ],
+        "normal": [
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          }
+        ],
+        "x_axis": [
+          {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ],
+        "radius": {
+          "decimal": "3.0",
+          "f64_hex": "0x4008000000000000"
+        },
+        "start_angle": {
+          "decimal": "0.5",
+          "f64_hex": "0x3fe0000000000000"
+        },
+        "sweep_angle": {
+          "decimal": "2.0",
+          "f64_hex": "0x4000000000000000"
+        }
+      },
+      "parameter_domain": {
+        "start": {
+          "decimal": "0.5",
+          "f64_hex": "0x3fe0000000000000"
+        },
+        "end": {
+          "decimal": "2.5",
+          "f64_hex": "0x4004000000000000"
+        }
+      },
+      "closure": {
+        "closed_by_endpoint": false,
+        "closed_by_knots": false,
+        "periodic": false
+      },
+      "structure": "CURVE_ONLY"
+    },
+    {
+      "id": "mixed-entity-001.ellipse",
+      "class": "ellipse",
+      "geometry": {
+        "center": [
+          {
+            "decimal": "10.0",
+            "f64_hex": "0x4024000000000000"
+          },
+          {
+            "decimal": "10.0",
+            "f64_hex": "0x4024000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ],
+        "normal": [
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          }
+        ],
+        "major_axis": [
+          {
+            "decimal": "0.96",
+            "f64_hex": "0x3feeb851eb851eb8"
+          },
+          {
+            "decimal": "0.28",
+            "f64_hex": "0x3fd1eb851eb851ec"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ],
+        "semi_major": {
+          "decimal": "3.0",
+          "f64_hex": "0x4008000000000000"
+        },
+        "semi_minor": {
+          "decimal": "2.0",
+          "f64_hex": "0x4000000000000000"
+        }
+      },
+      "parameter_domain": {
+        "start": {
+          "decimal": "0.0",
+          "f64_hex": "0x0000000000000000"
+        },
+        "end": {
+          "decimal": "6.283185307179586",
+          "f64_hex": "0x401921fb54442d18"
+        }
+      },
+      "closure": {
+        "closed_by_endpoint": true,
+        "closed_by_knots": false,
+        "periodic": true
+      },
+      "structure": "CURVE_ONLY"
+    },
+    {
+      "id": "mixed-entity-001.polyline",
+      "class": "polyline",
+      "geometry": {
+        "vertices": [
+          [
+            {
+              "decimal": "20.0",
+              "f64_hex": "0x4034000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            }
+          ],
+          [
+            {
+              "decimal": "24.0",
+              "f64_hex": "0x4038000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            }
+          ],
+          [
+            {
+              "decimal": "24.0",
+              "f64_hex": "0x4038000000000000"
+            },
+            {
+              "decimal": "3.0",
+              "f64_hex": "0x4008000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            }
+          ],
+          [
+            {
+              "decimal": "20.0",
+              "f64_hex": "0x4034000000000000"
+            },
+            {
+              "decimal": "3.0",
+              "f64_hex": "0x4008000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            }
+          ]
+        ],
+        "bulges": [
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.4",
+            "f64_hex": "0x3fd999999999999a"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ]
+      },
+      "parameter_domain": {
+        "start": {
+          "decimal": "0.0",
+          "f64_hex": "0x0000000000000000"
+        },
+        "end": {
+          "decimal": "3.0",
+          "f64_hex": "0x4008000000000000"
+        }
+      },
+      "closure": {
+        "closed_by_endpoint": false,
+        "closed_by_knots": false,
+        "periodic": false
+      },
+      "structure": "CURVE_ONLY"
+    },
+    {
+      "id": "mixed-entity-001.nurbs",
+      "class": "nurbs",
+      "geometry": {
+        "degree": 2,
+        "control_points": [
+          [
+            {
+              "decimal": "20.0",
+              "f64_hex": "0x4034000000000000"
+            },
+            {
+              "decimal": "10.0",
+              "f64_hex": "0x4024000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            }
+          ],
+          [
+            {
+              "decimal": "21.0",
+              "f64_hex": "0x4035000000000000"
+            },
+            {
+              "decimal": "11.5",
+              "f64_hex": "0x4027000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            }
+          ],
+          [
+            {
+              "decimal": "22.5",
+              "f64_hex": "0x4036800000000000"
+            },
+            {
+              "decimal": "12.0",
+              "f64_hex": "0x4028000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            }
+          ],
+          [
+            {
+              "decimal": "23.5",
+              "f64_hex": "0x4037800000000000"
+            },
+            {
+              "decimal": "10.5",
+              "f64_hex": "0x4025000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            }
+          ],
+          [
+            {
+              "decimal": "25.0",
+              "f64_hex": "0x4039000000000000"
+            },
+            {
+              "decimal": "11.0",
+              "f64_hex": "0x4026000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            }
+          ]
+        ],
+        "knots": [
+          {
+            "value": {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            },
+            "multiplicity": 3
+          },
+          {
+            "value": {
+              "decimal": "0.4",
+              "f64_hex": "0x3fd999999999999a"
+            },
+            "multiplicity": 1
+          },
+          {
+            "value": {
+              "decimal": "0.7",
+              "f64_hex": "0x3fe6666666666666"
+            },
+            "multiplicity": 1
+          },
+          {
+            "value": {
+              "decimal": "1.0",
+              "f64_hex": "0x3ff0000000000000"
+            },
+            "multiplicity": 3
+          }
+        ],
+        "weights": [
+          {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          },
+          {
+            "decimal": "0.6",
+            "f64_hex": "0x3fe3333333333333"
+          },
+          {
+            "decimal": "1.7",
+            "f64_hex": "0x3ffb333333333333"
+          },
+          {
+            "decimal": "0.9",
+            "f64_hex": "0x3feccccccccccccd"
+          },
+          {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          }
+        ],
+        "weights_all_unit": false
+      },
+      "parameter_domain": {
+        "start": {
+          "decimal": "0.0",
+          "f64_hex": "0x0000000000000000"
+        },
+        "end": {
+          "decimal": "1.0",
+          "f64_hex": "0x3ff0000000000000"
+        }
+      },
+      "closure": {
+        "closed_by_endpoint": false,
+        "closed_by_knots": false,
+        "periodic": false
+      },
+      "structure": "CURVE_ONLY"
+    },
+    {
+      "id": "mixed-entity-001.nested-line",
+      "class": "line",
+      "geometry": {
+        "start": [
+          {
+            "decimal": "0.5",
+            "f64_hex": "0x3fe0000000000000"
+          },
+          {
+            "decimal": "0.25",
+            "f64_hex": "0x3fd0000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ],
+        "end": [
+          {
+            "decimal": "3.75",
+            "f64_hex": "0x400e000000000000"
+          },
+          {
+            "decimal": "2.5",
+            "f64_hex": "0x4004000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ]
+      },
+      "parameter_domain": {
+        "start": {
+          "decimal": "0.0",
+          "f64_hex": "0x0000000000000000"
+        },
+        "end": {
+          "decimal": "1.0",
+          "f64_hex": "0x3ff0000000000000"
+        }
+      },
+      "closure": {
+        "closed_by_endpoint": false,
+        "closed_by_knots": false,
+        "periodic": false
+      },
+      "structure": "INSTANCE_PLUS_TRANSFORM",
+      "transform_chain": {
+        "order": "OUTERMOST_FIRST",
+        "transforms": [
+          {
+            "convention": "ROW_MAJOR_COLUMN_VECTOR_PARENT_LEFT",
+            "matrix": [
+              {
+                "decimal": "1.0",
+                "f64_hex": "0x3ff0000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "30.0",
+                "f64_hex": "0x403e000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "1.0",
+                "f64_hex": "0x3ff0000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "1.0",
+                "f64_hex": "0x3ff0000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "1.0",
+                "f64_hex": "0x3ff0000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "1.0",
+                "f64_hex": "0x3ff0000000000000"
+              }
+            ],
+            "determinant": {
+              "decimal": "1.0",
+              "f64_hex": "0x3ff0000000000000"
+            },
+            "classification": "TRANSLATION"
+          },
+          {
+            "convention": "ROW_MAJOR_COLUMN_VECTOR_PARENT_LEFT",
+            "matrix": [
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "-1.0",
+                "f64_hex": "0xbff0000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "1.0",
+                "f64_hex": "0x3ff0000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "1.0",
+                "f64_hex": "0x3ff0000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "1.0",
+                "f64_hex": "0x3ff0000000000000"
+              }
+            ],
+            "determinant": {
+              "decimal": "1.0",
+              "f64_hex": "0x3ff0000000000000"
+            },
+            "classification": "ROTATION"
+          },
+          {
+            "convention": "ROW_MAJOR_COLUMN_VECTOR_PARENT_LEFT",
+            "matrix": [
+              {
+                "decimal": "2.0",
+                "f64_hex": "0x4000000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "1.0",
+                "f64_hex": "0x3ff0000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "1.0",
+                "f64_hex": "0x3ff0000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "1.0",
+                "f64_hex": "0x3ff0000000000000"
+              }
+            ],
+            "determinant": {
+              "decimal": "2.0",
+              "f64_hex": "0x4000000000000000"
+            },
+            "classification": "NON_UNIFORM_SCALE"
+          }
+        ],
+        "composed": {
+          "convention": "ROW_MAJOR_COLUMN_VECTOR_PARENT_LEFT",
+          "matrix": [
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            },
+            {
+              "decimal": "-1.0",
+              "f64_hex": "0xbff0000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            },
+            {
+              "decimal": "30.0",
+              "f64_hex": "0x403e000000000000"
+            },
+            {
+              "decimal": "2.0",
+              "f64_hex": "0x4000000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            },
+            {
+              "decimal": "1.0",
+              "f64_hex": "0x3ff0000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            },
+            {
+              "decimal": "1.0",
+              "f64_hex": "0x3ff0000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            },
+            {
+              "decimal": "1.0",
+              "f64_hex": "0x3ff0000000000000"
+            }
+          ],
+          "determinant": {
+            "decimal": "2.0",
+            "f64_hex": "0x4000000000000000"
+          },
+          "classification": "GENERAL_AFFINE"
+        }
+      },
+      "world": {
+        "class": "line",
+        "geometry": {
+          "start": [
+            {
+              "decimal": "29.75",
+              "f64_hex": "0x403dc00000000000"
+            },
+            {
+              "decimal": "2.0",
+              "f64_hex": "0x4000000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            }
+          ],
+          "end": [
+            {
+              "decimal": "27.5",
+              "f64_hex": "0x403b800000000000"
+            },
+            {
+              "decimal": "8.5",
+              "f64_hex": "0x4021000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            }
+          ]
+        },
+        "parameter_domain": {
+          "start": {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          "end": {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          }
+        },
+        "closure": {
+          "closed_by_endpoint": false,
+          "closed_by_knots": false,
+          "periodic": false
+        }
+      },
+      "orientation": {
+        "parameter_direction": "START_TO_END",
+        "sense_about_normal": "NOT_APPLICABLE"
+      }
+    },
+    {
+      "id": "mixed-entity-001.scaled-circle",
+      "class": "circle",
+      "geometry": {
+        "center": [
+          {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          },
+          {
+            "decimal": "-2.0",
+            "f64_hex": "0xc000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ],
+        "normal": [
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          }
+        ],
+        "x_axis": [
+          {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ],
+        "radius": {
+          "decimal": "1.5",
+          "f64_hex": "0x3ff8000000000000"
+        }
+      },
+      "parameter_domain": {
+        "start": {
+          "decimal": "0.0",
+          "f64_hex": "0x0000000000000000"
+        },
+        "end": {
+          "decimal": "6.283185307179586",
+          "f64_hex": "0x401921fb54442d18"
+        }
+      },
+      "closure": {
+        "closed_by_endpoint": true,
+        "closed_by_knots": false,
+        "periodic": true
+      },
+      "structure": "INSTANCE_PLUS_TRANSFORM",
+      "transform": {
+        "convention": "ROW_MAJOR_COLUMN_VECTOR_PARENT_LEFT",
+        "matrix": [
+          {
+            "decimal": "2.5",
+            "f64_hex": "0x4004000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "2.5",
+            "f64_hex": "0x4004000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "2.5",
+            "f64_hex": "0x4004000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          }
+        ],
+        "determinant": {
+          "decimal": "15.625",
+          "f64_hex": "0x402f400000000000"
+        },
+        "classification": "UNIFORM_SCALE"
+      },
+      "world": {
+        "class": "circle",
+        "geometry": {
+          "center": [
+            {
+              "decimal": "2.5",
+              "f64_hex": "0x4004000000000000"
+            },
+            {
+              "decimal": "-5.0",
+              "f64_hex": "0xc014000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            }
+          ],
+          "normal": [
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            },
+            {
+              "decimal": "1.0",
+              "f64_hex": "0x3ff0000000000000"
+            }
+          ],
+          "x_axis": [
+            {
+              "decimal": "1.0",
+              "f64_hex": "0x3ff0000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            }
+          ],
+          "radius": {
+            "decimal": "3.75",
+            "f64_hex": "0x400e000000000000"
+          }
+        },
+        "parameter_domain": {
+          "start": {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          "end": {
+            "decimal": "6.283185307179586",
+            "f64_hex": "0x401921fb54442d18"
+          }
+        },
+        "closure": {
+          "closed_by_endpoint": true,
+          "closed_by_knots": false,
+          "periodic": true
+        }
+      },
+      "orientation": {
+        "parameter_direction": "START_TO_END",
+        "sense_about_normal": "CCW"
+      }
+    }
+  ],
+  "assertions": [
+    {
+      "id": "a1",
+      "kind": "STRUCTURAL",
+      "entity": "mixed-entity-001.line",
+      "claim": "CLASS_PRESERVED",
+      "statement": "The semantic class stays line; it is not rewritten into another class."
+    },
+    {
+      "id": "a2",
+      "kind": "GEOMETRIC",
+      "entity": "mixed-entity-001.line",
+      "claim": "PARAMETERIZATION_PRESERVED",
+      "statement": "The parameter domain is kept; a reparameterised equivalent counts as geometric only."
+    },
+    {
+      "id": "a3",
+      "kind": "STRUCTURAL",
+      "entity": "mixed-entity-001.circle",
+      "claim": "CLASS_PRESERVED",
+      "statement": "The semantic class stays circle; it is not rewritten into another class."
+    },
+    {
+      "id": "a4",
+      "kind": "GEOMETRIC",
+      "entity": "mixed-entity-001.circle",
+      "claim": "PARAMETERIZATION_PRESERVED",
+      "statement": "The parameter domain is kept; a reparameterised equivalent counts as geometric only."
+    },
+    {
+      "id": "a5",
+      "kind": "STRUCTURAL",
+      "entity": "mixed-entity-001.arc",
+      "claim": "CLASS_PRESERVED",
+      "statement": "The semantic class stays circular_arc; it is not rewritten into another class."
+    },
+    {
+      "id": "a6",
+      "kind": "GEOMETRIC",
+      "entity": "mixed-entity-001.arc",
+      "claim": "PARAMETERIZATION_PRESERVED",
+      "statement": "The parameter domain is kept; a reparameterised equivalent counts as geometric only."
+    },
+    {
+      "id": "a7",
+      "kind": "STRUCTURAL",
+      "entity": "mixed-entity-001.ellipse",
+      "claim": "CLASS_PRESERVED",
+      "statement": "The semantic class stays ellipse; it is not rewritten into another class."
+    },
+    {
+      "id": "a8",
+      "kind": "GEOMETRIC",
+      "entity": "mixed-entity-001.ellipse",
+      "claim": "PARAMETERIZATION_PRESERVED",
+      "statement": "The parameter domain is kept; a reparameterised equivalent counts as geometric only."
+    },
+    {
+      "id": "a9",
+      "kind": "STRUCTURAL",
+      "entity": "mixed-entity-001.polyline",
+      "claim": "CLASS_PRESERVED",
+      "statement": "The semantic class stays polyline; it is not rewritten into another class."
+    },
+    {
+      "id": "a10",
+      "kind": "STRUCTURAL",
+      "entity": "mixed-entity-001.polyline",
+      "claim": "VERTEX_ORDER_PRESERVED",
+      "statement": "Vertices keep identity and order."
+    },
+    {
+      "id": "a11",
+      "kind": "GEOMETRIC",
+      "entity": "mixed-entity-001.polyline",
+      "claim": "PARAMETERIZATION_PRESERVED",
+      "statement": "The parameter domain is kept; a reparameterised equivalent counts as geometric only."
+    },
+    {
+      "id": "a12",
+      "kind": "STRUCTURAL",
+      "entity": "mixed-entity-001.nurbs",
+      "claim": "CLASS_PRESERVED",
+      "statement": "The semantic class stays nurbs; it is not rewritten into another class."
+    },
+    {
+      "id": "a13",
+      "kind": "STRUCTURAL",
+      "entity": "mixed-entity-001.nurbs",
+      "claim": "DEGREE_PRESERVED",
+      "statement": "The degree is not elevated or reduced."
+    },
+    {
+      "id": "a14",
+      "kind": "STRUCTURAL",
+      "entity": "mixed-entity-001.nurbs",
+      "claim": "CONTROL_POINTS_PRESERVED",
+      "statement": "The control points are kept, not resampled."
+    },
+    {
+      "id": "a15",
+      "kind": "STRUCTURAL",
+      "entity": "mixed-entity-001.nurbs",
+      "claim": "KNOTS_PRESERVED",
+      "statement": "Knot values and multiplicities are kept, none collapsed or inserted."
+    },
+    {
+      "id": "a16",
+      "kind": "STRUCTURAL",
+      "entity": "mixed-entity-001.nurbs",
+      "claim": "WEIGHTS_PRESERVED",
+      "statement": "Weights are kept as stated, not renormalised."
+    },
+    {
+      "id": "a17",
+      "kind": "GEOMETRIC",
+      "entity": "mixed-entity-001.nurbs",
+      "claim": "PARAMETERIZATION_PRESERVED",
+      "statement": "The parameter domain is kept; a reparameterised equivalent counts as geometric only."
+    },
+    {
+      "id": "a18",
+      "kind": "SOURCE_MAPPING",
+      "entity": "mixed-entity-001.nested-line",
+      "claim": "TRANSFORM_PRESERVED",
+      "statement": "Checked in the source mapping, not in the artifact (pvec ADR 0017: PVec is curve-only): the mapping reads the instance plus the stated transform and keeps the matrix and determinant as written while it flattens the instance to the world-space curve."
+    },
+    {
+      "id": "a19",
+      "kind": "GEOMETRIC",
+      "entity": "mixed-entity-001.nested-line",
+      "claim": "WORLD_SPACE_RESULT",
+      "statement": "The world-space curve is the stated line."
+    },
+    {
+      "id": "a20",
+      "kind": "SOURCE_MAPPING",
+      "entity": "mixed-entity-001.scaled-circle",
+      "claim": "TRANSFORM_PRESERVED",
+      "statement": "Checked in the source mapping, not in the artifact (pvec ADR 0017: PVec is curve-only): the mapping reads the instance plus the stated transform and keeps the matrix and determinant as written while it flattens the instance to the world-space curve."
+    },
+    {
+      "id": "a21",
+      "kind": "GEOMETRIC",
+      "entity": "mixed-entity-001.scaled-circle",
+      "claim": "WORLD_SPACE_RESULT",
+      "statement": "The world-space curve is the stated circle."
+    }
+  ],
+  "derivative_exclusions": [
+    {
+      "entity": "mixed-entity-001.polyline",
+      "parameter": {
+        "decimal": "1.0",
+        "f64_hex": "0x3ff0000000000000"
+      },
+      "reason": "POLYLINE_VERTEX"
+    },
+    {
+      "entity": "mixed-entity-001.polyline",
+      "parameter": {
+        "decimal": "2.0",
+        "f64_hex": "0x4000000000000000"
+      },
+      "reason": "POLYLINE_VERTEX"
+    }
+  ]
+}
