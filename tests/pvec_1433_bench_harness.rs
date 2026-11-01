@@ -96,6 +96,7 @@ fn the_document_and_the_baseline_describe_the_same_rows() {
             ["provider", cell, _] | ["normalization", cell, _] => cell,
             ["normalization", "transform", class, _] => class,
             ["normalization", cell, _mix, _] => cell,
+            ["generation", cell, _] => cell,
             _ => panic!("{key}: a baseline key this suite does not know"),
         };
         assert!(
@@ -107,7 +108,16 @@ fn the_document_and_the_baseline_describe_the_same_rows() {
             "{key}: the document never names {platform}"
         );
         assert_eq!(row["platform"], platform, "{key}");
-        let required: &[&str] = if parts[0] == "provider" {
+        let required: &[&str] = if parts[0] == "generation" {
+            &[
+                "cell",
+                "entities",
+                "wall_secs",
+                "artifact_bytes",
+                "split",
+                "platform",
+            ]
+        } else if parts[0] == "provider" {
             &[
                 "cell",
                 "entities",

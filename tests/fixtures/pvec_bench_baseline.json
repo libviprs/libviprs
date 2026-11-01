@@ -1,5 +1,205 @@
 {
  "rows": {
+  "generation/block_heavy/x86_64-linux-mars": {
+   "artifact_bytes": 104752,
+   "artifact_pct_of_source": 451.7898731993444,
+   "bench": "generation",
+   "bytes_per_entity": 4.668092691622103,
+   "cell": "block_heavy",
+   "deterministic": true,
+   "entities": 22440,
+   "indexed_wall_secs": {
+    "max": 0.00960729904347826,
+    "median": 0.00939248352173913,
+    "min": 0.009366805217391303
+   },
+   "plain_wall_secs": {
+    "max": 0.008956436136363637,
+    "median": 0.008938838772727274,
+    "min": 0.00891562259090909
+   },
+   "platform": "x86_64-linux-mars",
+   "split": {
+    "components": 0,
+    "geometry": 38056,
+    "provenance": 0,
+    "spatial_index": 19720,
+    "tier0": 46976
+   },
+   "tier0_refused": null,
+   "tier0_share": 0.4484496716053154,
+   "tier0_wall_secs": {
+    "max": 0.015240363705882354,
+    "median": 0.01489749111764706,
+    "min": 0.014862081999999999
+   },
+   "unstable": false,
+   "wall_secs": {
+    "max": 0.015240363705882354,
+    "median": 0.01489749111764706,
+    "min": 0.014862081999999999
+   }
+  },
+  "generation/large_industrial/x86_64-linux-mars": {
+   "artifact_bytes": 13565128,
+   "artifact_pct_of_source": 69.29498825469972,
+   "bench": "generation",
+   "bytes_per_entity": 13.234271219512195,
+   "cell": "large_industrial",
+   "deterministic": true,
+   "entities": 1025000,
+   "indexed_wall_secs": {
+    "max": 0.827199389,
+    "median": 0.819664851,
+    "min": 0.818050257
+   },
+   "plain_wall_secs": {
+    "max": 0.811619374,
+    "median": 0.810898292,
+    "min": 0.810201071
+   },
+   "platform": "x86_64-linux-mars",
+   "split": {
+    "components": 0,
+    "geometry": 9277464,
+    "provenance": 0,
+    "spatial_index": 2843000,
+    "tier0": 1444664
+   },
+   "tier0_refused": null,
+   "tier0_share": 0.10649836846360757,
+   "tier0_wall_secs": {
+    "max": 1.023176592,
+    "median": 1.002061558,
+    "min": 0.99628769
+   },
+   "unstable": false,
+   "wall_secs": {
+    "max": 1.023176592,
+    "median": 1.002061558,
+    "min": 0.99628769
+   }
+  },
+  "generation/paper_space/x86_64-linux-mars": {
+   "artifact_bytes": 70440,
+   "artifact_pct_of_source": 63.21173778435859,
+   "bench": "generation",
+   "bytes_per_entity": 35.22,
+   "cell": "paper_space",
+   "deterministic": true,
+   "entities": 2000,
+   "indexed_wall_secs": {
+    "max": 0.0014775360429447853,
+    "median": 0.0014749364662576688,
+    "min": 0.0014729396871165643
+   },
+   "plain_wall_secs": {
+    "max": 0.0018830633139534883,
+    "median": 0.00183987811627907,
+    "min": 0.0018391782441860465
+   },
+   "platform": "x86_64-linux-mars",
+   "split": {
+    "components": 0,
+    "geometry": 64568,
+    "provenance": 0,
+    "spatial_index": 1456,
+    "tier0": 4416
+   },
+   "tier0_refused": null,
+   "tier0_share": 0.06269165247018739,
+   "tier0_wall_secs": {
+    "max": 0.001972839534883721,
+    "median": 0.001952557015503876,
+    "min": 0.0019474760387596898
+   },
+   "unstable": false,
+   "wall_secs": {
+    "max": 0.001972839534883721,
+    "median": 0.001952557015503876,
+    "min": 0.0019474760387596898
+   }
+  },
+  "generation/simple/x86_64-linux-mars": {
+   "artifact_bytes": 37040,
+   "artifact_pct_of_source": 55.20119225037258,
+   "bench": "generation",
+   "bytes_per_entity": 37.04,
+   "cell": "simple",
+   "deterministic": true,
+   "entities": 1000,
+   "indexed_wall_secs": {
+    "max": 0.0008468477204301075,
+    "median": 0.0008459937132616487,
+    "min": 0.000844338577060932
+   },
+   "plain_wall_secs": {
+    "max": 0.0008428712717391305,
+    "median": 0.0008411854565217391,
+    "min": 0.0008396115289855073
+   },
+   "platform": "x86_64-linux-mars",
+   "split": {
+    "components": 0,
+    "geometry": 33520,
+    "provenance": 0,
+    "spatial_index": 1440,
+    "tier0": 2080
+   },
+   "tier0_refused": null,
+   "tier0_share": 0.056155507559395246,
+   "tier0_wall_secs": {
+    "max": 0.0011205321838565021,
+    "median": 0.001119072995515695,
+    "min": 0.0011168719910313902
+   },
+   "unstable": false,
+   "wall_secs": {
+    "max": 0.0011205321838565021,
+    "median": 0.001119072995515695,
+    "min": 0.0011168719910313902
+   }
+  },
+  "generation/spline_heavy/x86_64-linux-mars": {
+   "artifact_bytes": 1872248,
+   "artifact_pct_of_source": 85.4941335595827,
+   "bench": "generation",
+   "bytes_per_entity": 187.2248,
+   "cell": "spline_heavy",
+   "deterministic": true,
+   "entities": 10000,
+   "indexed_wall_secs": {
+    "max": 0.016081353375,
+    "median": 0.01577872925,
+    "min": 0.0157776783125
+   },
+   "plain_wall_secs": {
+    "max": 0.015736025823529412,
+    "median": 0.014918694294117645,
+    "min": 0.014809391529411764
+   },
+   "platform": "x86_64-linux-mars",
+   "split": {
+    "components": 0,
+    "geometry": 1872248,
+    "provenance": 0,
+    "spatial_index": 0,
+    "tier0": 0
+   },
+   "tier0_refused": null,
+   "tier0_share": 0.0,
+   "tier0_wall_secs": {
+    "max": 0.015928337,
+    "median": 0.015824312625,
+    "min": 0.01577658975
+   },
+   "unstable": false,
+   "wall_secs": {
+    "max": 0.015928337,
+    "median": 0.015824312625,
+    "min": 0.01577658975
+   }
+  },
   "normalization/block_heavy/mix0/x86_64-linux-mars": {
    "bench": "normalization",
    "cell": "block_heavy",
