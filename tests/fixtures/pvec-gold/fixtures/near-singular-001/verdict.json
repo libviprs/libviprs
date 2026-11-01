@@ -1,0 +1,12 @@
+{
+  "cells": {},
+  "detail": "primary: CONVERSION_FAILED: NEAR_SINGULAR_TRANSFORM: the composed map of block PROBE_NEAR_SINGULAR_001_L1 has |ad - bc| = 1E-12 with big = 1 (PVec numeric policy NP-19); secondary: CONVERSION_FAILED: NEAR_SINGULAR_TRANSFORM: INSERT of PROBE_NEAR_SINGULAR_001_L1 maps the plane with |ad - bc| <= REL * big^2 (NP-19); no curve is written",
+  "evidence_class": "QUARANTINED",
+  "evidence_scope": "STEP_ORACLE",
+  "fixture_id": "near-singular-001",
+  "known_truth": true,
+  "oracle_scope": "OPEN_CONVERTERS",
+  "reason": "UNSUPPORTED_ENTITY",
+  "schema_version": "pvec-gold/fixture-verdict/1",
+  "signature_differences": []
+}

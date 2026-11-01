@@ -1,0 +1,116 @@
+{
+  "schema_version": "pvec-gold/expected.math/1",
+  "fixture_id": "tiny-radius-001",
+  "evidence_class": "KNOWN_TRUTH_EXACT",
+  "units": {
+    "name": "metre",
+    "canonical": "metre",
+    "scale_to_canonical": {
+      "decimal": "1.0",
+      "f64_hex": "0x3ff0000000000000"
+    }
+  },
+  "provenance": {
+    "derivation": "AUTHORING_PARAMETERS",
+    "authoring_script": "tools/authoring/author_probes.py",
+    "parameter_file": "tools/authoring/params/tiny-radius-001.json",
+    "parameter_file_sha256": "e0db5f4fb2c976125d7b7f5b4dd6e415a852c5d43ee5907c0989060adf1fe10b",
+    "parameters": {
+      "id": "tiny-radius-001",
+      "kind": "circle",
+      "description": "A full circle of radius 1e-5 m.",
+      "center": [
+        "0.5",
+        "0.5",
+        "0"
+      ],
+      "radius": "0.00001"
+    }
+  },
+  "entities": [
+    {
+      "id": "tiny-radius-001",
+      "class": "circle",
+      "geometry": {
+        "center": [
+          {
+            "decimal": "0.5",
+            "f64_hex": "0x3fe0000000000000"
+          },
+          {
+            "decimal": "0.5",
+            "f64_hex": "0x3fe0000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ],
+        "normal": [
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          }
+        ],
+        "x_axis": [
+          {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ],
+        "radius": {
+          "decimal": "1e-05",
+          "f64_hex": "0x3ee4f8b588e368f1"
+        }
+      },
+      "parameter_domain": {
+        "start": {
+          "decimal": "0.0",
+          "f64_hex": "0x0000000000000000"
+        },
+        "end": {
+          "decimal": "6.283185307179586",
+          "f64_hex": "0x401921fb54442d18"
+        }
+      },
+      "closure": {
+        "closed_by_endpoint": true,
+        "closed_by_knots": false,
+        "periodic": true
+      },
+      "structure": "CURVE_ONLY"
+    }
+  ],
+  "assertions": [
+    {
+      "id": "a1",
+      "kind": "STRUCTURAL",
+      "entity": "tiny-radius-001",
+      "claim": "CLASS_PRESERVED",
+      "statement": "The semantic class stays circle; it is not rewritten into another class."
+    },
+    {
+      "id": "a2",
+      "kind": "GEOMETRIC",
+      "entity": "tiny-radius-001",
+      "claim": "PARAMETERIZATION_PRESERVED",
+      "statement": "The parameter domain is kept; a reparameterised equivalent counts as geometric only."
+    }
+  ]
+}

@@ -478,7 +478,9 @@ const EXPECTED_SRC_MODULES: usize = 31;
 /// which decodes each mutated drawing in a child. It said 46 before this line moved.
 ///
 /// #1368 adds 1: `tests/dependency_policy.rs::exactly_one_tiff_resolves_in_every_cell` (from #1367), which runs `cargo tree`. It said 50 before this line moved.
-const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 51;
+/// #1363 adds 1: `tests/dependency_policy.rs::hayro_ccitt_is_in_every_cell_and_is_plain_rust`, which runs `cargo tree`. It said 53 before this line moved.
+/// #1364 adds 1: `tests/dependency_policy.rs::the_jp2k_cell_adds_only_its_two_codec_crates`, which runs `cargo tree`. It said 54 before this line moved.
+const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 55;
 
 /// The filesystem-touching tests still allowed to run under Miri, and so still
 /// allowed to end the whole run on their first syscall.
@@ -805,7 +807,17 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1328 adds 4: the `tests/pmtiles_sink.rs` cells that write a georeferenced archive to a temp dir and read it back. It said 728 before this line moved.
 /// #1336 adds 1: the `tests/pvec_api_surface.rs` check that only the raster container names the PVec facade, which walks the source tree. It said 732 before this line moved.
 /// #1368 adds 15: the `tests/pvec_1330_*.rs`, `pvec_1331_*.rs`, `pvec_1332_interop_fixture.rs` and `pvec_1333_raster_rules_doc.rs` cells that read committed seeds and docs, write a staging file, or bless a page, which landed without the annotation. It said 733 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 748;
+/// #1395 adds 2: the `tests/pvec_1079_provider_default.rs` check that walks `src/pvec`, and the `tests/pvec_provider_replacement.rs` check that reads the shipped deltas file. It said 748 before this line moved.
+/// #1378 adds 10: the `tests/pvec_1378_xref_facet.rs` cells that write drawings and xref targets to a temp dir. It said 750 before this line moved.
+/// #1314 adds 14: the 13 `tests/pvec_1314_publish.rs` cells that write and kill, and the writer-call fence in `tests/pvec_api_surface.rs`. It said 760 before this line moved.
+/// #1363 adds 2: `tests/pvec_1363_pdf_ccitt.rs::the_scanned_sheet_converts_to_seven_underlays`, which reads the corpus file, and the `hayro-ccitt` check in `tests/dependency_policy.rs`. It said 774 before this line moved.
+/// #1093 adds 1: the `tests/pvec_1093_report.rs` check that reads `docs/pvec-conversion-report.md`. It said 776 before this line moved.
+/// #1364 adds 2: the `tests/pvec_1364_pdf_jpx.rs` corpus cells, which read PDFs from outside the repo. It said 777 before this line moved.
+/// #1382 adds 2: the `tests/pvec_known_truth.rs` cells that read and copy the vendored corpus. It said 779 before this line moved.
+/// #1383 adds 2: the `tests/pvec_dual_oracle.rs` cells that read the vendored corpus. It said 781 before this line moved.
+/// #1295 adds 7: the `tests/local_gate_native_dwg_1295.rs` cells that read the workflow, scripts and docs of the scheduled native lane. It said 783 before this line moved.
+/// #1391 adds 5: the `tests/vector_1391_limits.rs` cells that read the g13 drawings and the provider docs. It said 790 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 795;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {

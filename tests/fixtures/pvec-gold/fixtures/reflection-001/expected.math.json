@@ -1,0 +1,301 @@
+{
+  "schema_version": "pvec-gold/expected.math/1",
+  "fixture_id": "reflection-001",
+  "evidence_class": "KNOWN_TRUTH_EXACT",
+  "units": {
+    "name": "metre",
+    "canonical": "metre",
+    "scale_to_canonical": {
+      "decimal": "1.0",
+      "f64_hex": "0x3ff0000000000000"
+    }
+  },
+  "provenance": {
+    "derivation": "AUTHORING_PARAMETERS",
+    "authoring_script": "tools/authoring/author_probes.py",
+    "parameter_file": "tools/authoring/params/transforms/reflection-001.json",
+    "parameter_file_sha256": "a20dd45749ea33bf7c83bfeb4843a0051d6d0e8f7e42f08e8187dcb3239e02df",
+    "parameters": {
+      "id": "reflection-001",
+      "group": "transforms",
+      "kind": "transform",
+      "description": "A counter-clockwise arc reflected across the y axis (x to -x), determinant -1. Start maps to start, so the parameter direction is kept while the sense about the source normal flips to clockwise. A silent reversal fails.",
+      "base": {
+        "class": "circular_arc",
+        "center": [
+          "2",
+          "1",
+          "0"
+        ],
+        "radius": "1.5",
+        "start_angle": "0.4",
+        "sweep_angle": "2.1"
+      },
+      "ops": [
+        {
+          "op": "scale",
+          "s": [
+            "-1",
+            "1",
+            "1"
+          ],
+          "classification": "REFLECTION"
+        }
+      ],
+      "expect": "similarity"
+    }
+  },
+  "entities": [
+    {
+      "id": "reflection-001",
+      "class": "circular_arc",
+      "geometry": {
+        "center": [
+          {
+            "decimal": "2.0",
+            "f64_hex": "0x4000000000000000"
+          },
+          {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ],
+        "normal": [
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          }
+        ],
+        "x_axis": [
+          {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ],
+        "radius": {
+          "decimal": "1.5",
+          "f64_hex": "0x3ff8000000000000"
+        },
+        "start_angle": {
+          "decimal": "0.4",
+          "f64_hex": "0x3fd999999999999a"
+        },
+        "sweep_angle": {
+          "decimal": "2.1",
+          "f64_hex": "0x4000cccccccccccd"
+        }
+      },
+      "parameter_domain": {
+        "start": {
+          "decimal": "0.4",
+          "f64_hex": "0x3fd999999999999a"
+        },
+        "end": {
+          "decimal": "2.5",
+          "f64_hex": "0x4004000000000000"
+        }
+      },
+      "closure": {
+        "closed_by_endpoint": false,
+        "closed_by_knots": false,
+        "periodic": false
+      },
+      "structure": "INSTANCE_PLUS_TRANSFORM",
+      "transform": {
+        "convention": "ROW_MAJOR_COLUMN_VECTOR_PARENT_LEFT",
+        "matrix": [
+          {
+            "decimal": "-1.0",
+            "f64_hex": "0xbff0000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          }
+        ],
+        "determinant": {
+          "decimal": "-1.0",
+          "f64_hex": "0xbff0000000000000"
+        },
+        "classification": "REFLECTION"
+      },
+      "world": {
+        "class": "circular_arc",
+        "geometry": {
+          "center": [
+            {
+              "decimal": "-2.0",
+              "f64_hex": "0xc000000000000000"
+            },
+            {
+              "decimal": "1.0",
+              "f64_hex": "0x3ff0000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            }
+          ],
+          "normal": [
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            },
+            {
+              "decimal": "-1.0",
+              "f64_hex": "0xbff0000000000000"
+            }
+          ],
+          "x_axis": [
+            {
+              "decimal": "-1.0",
+              "f64_hex": "0xbff0000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            }
+          ],
+          "radius": {
+            "decimal": "1.5",
+            "f64_hex": "0x3ff8000000000000"
+          },
+          "start_angle": {
+            "decimal": "0.4",
+            "f64_hex": "0x3fd999999999999a"
+          },
+          "sweep_angle": {
+            "decimal": "2.1",
+            "f64_hex": "0x4000cccccccccccd"
+          }
+        },
+        "parameter_domain": {
+          "start": {
+            "decimal": "0.4",
+            "f64_hex": "0x3fd999999999999a"
+          },
+          "end": {
+            "decimal": "2.5",
+            "f64_hex": "0x4004000000000000"
+          }
+        },
+        "closure": {
+          "closed_by_endpoint": false,
+          "closed_by_knots": false,
+          "periodic": false
+        }
+      },
+      "orientation": {
+        "parameter_direction": "START_TO_END",
+        "sense_about_normal": "CW"
+      }
+    }
+  ],
+  "assertions": [
+    {
+      "id": "a1",
+      "kind": "SOURCE_MAPPING",
+      "entity": "reflection-001",
+      "claim": "TRANSFORM_PRESERVED",
+      "statement": "Checked in the source mapping, not in the artifact (pvec ADR 0017: PVec is curve-only): the mapping reads the instance plus the stated transform and keeps the matrix and determinant as written while it flattens the instance to the world-space curve."
+    },
+    {
+      "id": "a2",
+      "kind": "GEOMETRIC",
+      "entity": "reflection-001",
+      "claim": "WORLD_SPACE_RESULT",
+      "statement": "The world-space curve is the stated circular_arc."
+    },
+    {
+      "id": "a3",
+      "kind": "STRUCTURAL",
+      "entity": "reflection-001",
+      "claim": "ORIENTATION_PRESERVED",
+      "statement": "The determinant is negative; parameter direction runs start to end and the sense about the source normal flips. A silent reversal fails."
+    }
+  ]
+}
