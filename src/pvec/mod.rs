@@ -54,6 +54,7 @@ pub mod ordering;
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
 pub mod pdf_bezier;
 pub mod pdf_clip;
+mod pdf_filters;
 pub mod pdf_image;
 mod pdf_image_decode;
 pub mod pdf_vector;

@@ -76,6 +76,7 @@ fn seed(name: &str) -> Vec<u8> {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem
 fn every_seed_passes_the_sniffer_for_its_codec_and_comes_back_byte_equal() {
     let cases = [
         ("png-gray1.png", TileCodec::Png, Channels::Gray, 1),
@@ -105,6 +106,7 @@ fn every_seed_passes_the_sniffer_for_its_codec_and_comes_back_byte_equal() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem
 fn the_sniffers_check_depth_and_channels_so_the_pass_above_means_something() {
     // A 1-bit tile under an 8-bit placement, an RGB tile under a gray one, a gray JPEG under RGB.
     assert!(
