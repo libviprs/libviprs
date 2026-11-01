@@ -22,6 +22,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   converts to seven underlays. **Changed report key:** `filter-not-enabled:CCITTFaxDecode` is gone;
   a fax stream is written (`written_by_filter["CCITTFaxDecode"]`) or refused as `decode-failed`.
 
+- **The provider xref facet and xref open-and-flatten** (issue #1378, part of #1079). `DwgProvider::xref_blocks`
+  and `Facet::XrefAttachments` surface the drawing's xref block records (acadrust fills them),
+  `XrefRef::discover` builds the references from INSERTs so nobody hand-builds one, and
+  `XrefSession::open_and_flatten` opens the cleared file through a provider and flattens it under
+  the shared depth and cycle checks, nested xrefs included. The flattener now reports an INSERT of
+  an xref block as `SkipReason::ExternalReference` instead of expanding it to nothing.
 - **The provider differential harness** (issue #1395, part of #1079). `pvec::differential` runs any
   number of `DwgProvider`s over the same fixtures and compares, per entity, the structural parameters,
   the N3.5 bucket with its reason code and the PVec type of N6.2's table (`Matrix`, `Deltas`,
