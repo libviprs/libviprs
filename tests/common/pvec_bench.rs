@@ -824,3 +824,35 @@ pub fn stage_regressions(base: &Value, cur: &Value) -> Vec<String> {
 pub fn unattributed(stage_secs: &[f64], total_secs: f64) -> f64 {
     (total_secs - stage_secs.iter().sum::<f64>()) / total_secs
 }
+
+/// More than 10% growth in process peak RSS or in wall time against the baseline at an unchanged
+/// fixture, even below the ceiling. An unstable row on either side never gates the wall time.
+pub fn memory_regressions(base: &Value, cur: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    let (b, c) = (
+        base["peak_rss_bytes"].as_f64(),
+        cur["peak_rss_bytes"].as_f64(),
+    );
+    if let (Some(b), Some(c)) = (b, c)
+        && c > b * 1.10
+    {
+        out.push(format!(
+            "peak RSS grew from {b:.0} to {c:.0} bytes, more than 10%"
+        ));
+    }
+    let flag = |r: &Value| r["unstable"].as_bool().unwrap_or(false);
+    let (bw, cw) = (
+        base["wall_secs"]["median"].as_f64(),
+        cur["wall_secs"]["median"].as_f64(),
+    );
+    if let (Some(bw), Some(cw)) = (bw, cw)
+        && !flag(base)
+        && !flag(cur)
+        && cw > bw * 1.10
+    {
+        out.push(format!(
+            "wall time grew from {bw:.3}s to {cw:.3}s, more than 10%"
+        ));
+    }
+    out
+}
