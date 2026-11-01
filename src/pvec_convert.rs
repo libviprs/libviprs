@@ -475,7 +475,6 @@ impl<'a> PvecConversion<'a> {
             control_points,
             ..
         } = self;
-        let _ = (declared, calibration, control_points);
 
         let artifact = write_geometry(
             &WriteConfig { unit, leaves },
@@ -500,13 +499,38 @@ impl<'a> PvecConversion<'a> {
             )
             .map_err(PvecConvertError::Report)?;
         report.capabilities = Some(gate.summary());
+        let sidecar = georef_path(dest);
+        report.georeference = sidecar
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned());
         let json = report.to_json_string().map_err(PvecConvertError::Report)?;
-        publish(dest, &artifact.bytes, json.as_bytes(), &cancel, &mut |_| {}).map_err(
-            |e| match e {
+        // The sidecar is staged first and moved into place once the pair is published, so a failed
+        // or cancelled run leaves the previous one as it was.
+        let staged = PathBuf::from(format!("{}.partial", sidecar.display()));
+        GeoreferenceHandoff::V1(HandoffV1 {
+            bounds: artifact.bounds.drawing_bounds().map(|b| SourceBox {
+                min: [b.min().x, b.min().y],
+                max: [b.max().x, b.max().y],
+            }),
+            unit: UnitRecord::new(declared, unit),
+            calibration_id: calibration,
+            control_points,
+        })
+        .write_to(&staged)
+        .map_err(PvecConvertError::Georeference)?;
+        let published = publish(dest, &artifact.bytes, json.as_bytes(), &cancel, &mut |_| {})
+            .map_err(|e| match e {
                 PublishError::Cancelled => PvecConvertError::Cancelled,
                 other => PvecConvertError::Publish(other),
-            },
-        )?;
+            })
+            .and_then(|()| {
+                std::fs::rename(&staged, &sidecar)
+                    .map_err(|e| PvecConvertError::Georeference(GeoreferenceError::Io(e)))
+            });
+        if published.is_err() {
+            let _ = std::fs::remove_file(&staged);
+        }
+        published?;
         Ok(PvecConversionOutput {
             artifact: dest.to_path_buf(),
             report,
