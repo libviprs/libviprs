@@ -47,7 +47,7 @@ use std::fmt;
 
 use thiserror::Error;
 
-use super::limits::SourceLimits;
+use super::limits::{LimitError, SourceLimits};
 use super::view::{EntityState, PolicyReason, VisibilityFilter};
 
 use super::provider::{
@@ -253,6 +253,9 @@ pub enum ViewProfileError {
     /// The provider failed, or cannot report something the profile needs.
     #[error("provider: {0}")]
     Provider(#[from] ProviderError),
+    /// The drawing went past one of N3.6's limits while the profile was applied (issue #1439).
+    #[error("source limit: {0}")]
+    Limit(#[from] LimitError),
 }
 
 impl ViewProfile {
