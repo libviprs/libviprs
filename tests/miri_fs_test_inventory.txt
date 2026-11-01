@@ -642,6 +642,13 @@ annotated   fs-detected  tests/pvec_style_1083.rs::the_geometry_entity_sources_n
 annotated   fs-detected  tests/pvec_text_policy_1084.rs::n5_5_outcome_codes_are_stable_and_documented
 annotated   fs-detected  tests/pvec_units.rs::nothing_under_src_pvec_refers_to_the_geo_module
 annotated   fs-detected  tests/pvec_units.rs::the_units_doc_has_a_row_for_every_code_including_zero
+annotated   fs-detected  tests/pvec_version_compat.rs::a_drawing_below_the_minimum_is_rejected_at_conversion_start
+annotated   fs-detected  tests/pvec_version_compat.rs::changing_the_document_without_the_pin_turns_it_red
+annotated   fs-detected  tests/pvec_version_compat.rs::changing_the_pin_without_the_document_turns_it_red
+annotated   fs-detected  tests/pvec_version_compat.rs::changing_what_the_code_does_without_the_pin_turns_it_red
+annotated   fs-detected  tests/pvec_version_compat.rs::the_container_outcomes_in_the_table_are_what_the_reader_does
+annotated   fs-detected  tests/pvec_version_compat.rs::the_document_and_the_pin_agree
+annotated   fs-detected  tests/pvec_version_compat.rs::the_pin_and_the_code_agree
 annotated   fs-detected  tests/pvec_view_profile_1097.rs::n3_3_1097_every_knob_names_a_row_of_the_n1_4_decision_table
 annotated   fs-detected  tests/pvec_xref_policy.rs::depth_past_the_limit_names_the_limit_and_the_observed_depth
 annotated   fs-detected  tests/pvec_xref_policy.rs::every_ok_outcome_is_accounted_for_in_the_report
