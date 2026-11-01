@@ -17,6 +17,7 @@ fn read(rel: &str) -> String {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
 fn docs_say_pmtiles_skips_offline_pack_caching() {
     for rel in ["docs/mobile-pmtiles.md", "web/vector-viewer/README.md"] {
         assert!(
@@ -27,6 +28,7 @@ fn docs_say_pmtiles_skips_offline_pack_caching() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
 fn docs_tell_apps_to_download_the_whole_archive() {
     let d = read("docs/mobile-pmtiles.md");
     assert!(
@@ -37,6 +39,7 @@ fn docs_tell_apps_to_download_the_whole_archive() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
 fn harness_runs_both_modes_against_the_shared_style_and_golden() {
     let t = read(
         "conformance/android/app/src/androidTest/java/org/libviprs/conformance/Issue1037ConformanceTest.java",
@@ -64,6 +67,7 @@ fn harness_runs_both_modes_against_the_shared_style_and_golden() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
 fn recorded_android_result_passed_both_modes_on_the_committed_golden() {
     let v: Value = serde_json::from_str(&read("conformance/android/evidence/result.json")).unwrap();
     let golden = fs::metadata(
