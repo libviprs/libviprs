@@ -104,6 +104,13 @@ gif = { version = "0.14", default-features = false, features = ["std"] }
 hayro-jpeg2000 = { version = "0.4.1", default-features = false, features = [
     "std",
 ] }
+# CCITT Group 3 and Group 4 for `CCITTFaxDecode` image streams in a PDF (issue #1363),
+# unconditional because it is the scanned-sheet case: in the corpus it is the one codec whose
+# refusal empties a whole file. Same author and repository as `hayro-jpeg2000` above.
+# `#![forbid(unsafe_code)]`, `no_std` + alloc, no dependencies at all, no `links` key and no
+# build script, licence `Apache-2.0 OR MIT`. Chosen on API grounds: byte alignment,
+# end-of-block and the K modes are explicit settings, which is what `/DecodeParms` names.
+hayro-ccitt = "0.4"
 # Pure-Rust codec facade. The feature list is the crate's decodable
 # format set, and it is edited here once for the whole format wave
 # (issue #563) rather than once per lane: every feature added recompiles
@@ -701,6 +708,7 @@ blake3 = { workspace = true }
 exr = { workspace = true }
 flate2 = { workspace = true }
 gif = { workspace = true }
+hayro-ccitt = { workspace = true }
 hayro-jpeg2000 = { workspace = true, optional = true }
 image = { workspace = true }
 image-webp = { workspace = true }
@@ -768,4 +776,8 @@ required-features = ["pvec-raster"]
 
 [[test]]
 name = "pvec_1332_pdf_images"
+required-features = ["pvec-raster"]
+
+[[test]]
+name = "pvec_1363_pdf_ccitt"
 required-features = ["pvec-raster"]

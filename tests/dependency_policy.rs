@@ -1074,3 +1074,29 @@ fn exactly_one_tiff_resolves_in_every_cell() {
         );
     }
 }
+
+/// `hayro-ccitt` decodes `CCITTFaxDecode` image streams unconditionally (issue #1363), so it is
+/// in every cell, and it is plain Rust: no `links` key, no build script, no native source, and no
+/// dependencies of its own. The last one is what keeps "+1 lock entry" true.
+#[test]
+#[cfg_attr(miri, ignore)] // spawns a process, which Miri supports on no target (#714)
+fn hayro_ccitt_is_in_every_cell_and_is_plain_rust() {
+    for (cell, graph) in cells() {
+        let found: Vec<&(String, String)> =
+            graph.iter().filter(|(n, _)| n == "hayro-ccitt").collect();
+        assert_eq!(
+            found.len(),
+            1,
+            "hayro-ccitt must resolve exactly once for {}",
+            cell.label
+        );
+        let manifest = manifest_of(found[0]);
+        assert!(manifest.links.is_none(), "{}: a `links` key", cell.label);
+        assert!(!manifest.has_build_script, "{}: a build script", cell.label);
+        assert!(
+            !ships_native_source(manifest),
+            "{}: native source",
+            cell.label
+        );
+    }
+}
