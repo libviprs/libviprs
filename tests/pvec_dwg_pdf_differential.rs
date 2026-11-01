@@ -1,7 +1,7 @@
 //! Issue #1405 (N5.7b, slice of #1086 and #1302): the DWG to PDF differential.
 //!
 //! This measures a loss profile on purpose. The DWG is the reference, the PDF is what a real exporter
-//! (LibreDWG `dwg2SVG`, then `rsvg-convert`, see `tools/dwg-pdf-export/`) made of it, and the suite
+//! (LibreDWG `dwg2SVG`, then `rsvg-convert`, committed as static files) made of it, and the suite
 //! never asserts that the two are equal: it asserts that the measured difference is exactly the
 //! recorded expected loss in `expected_loss.toml`, with a written reason per entry. A fixture with no
 //! such file fails, an unlisted difference fails, and so does an entry that no longer matches.

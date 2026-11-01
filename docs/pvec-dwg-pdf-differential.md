@@ -7,16 +7,15 @@ is a recorded loss profile (`tests/pvec_dwg_pdf_differential.rs`, issue #1405).
 ## The exporter
 
 The first real exporter is GNU LibreDWG's `dwg2SVG` followed by `rsvg-convert` for the SVG to PDF step, and
-`qpdf --rotate` when a pair is meant to carry `/Rotate`. All of it runs in a throw-away container on MARS
-(`tools/dwg-pdf-export/export.sh`, image recipe in the `Dockerfile` beside it, LibreDWG 0.14 pinned by
-tarball sha256 and the base image by digest). LibreDWG is GPL, so it exists only in that image and meets
-libviprs through files. Each pair's `exporter.txt` names the exporter, the versions and the options, and
-the platform (native x86_64).
+`qpdf --rotate` when a pair is meant to carry `/Rotate`. It ran once, in a throw-away container on MARS
+(native x86_64), and its output is committed as static files. **libviprs has no LibreDWG dependency of any
+kind**: nothing here builds or runs the exporter, LibreDWG is GPL and stays out of the tree, and the generator
+lives outside libviprs. Each pair's `exporter.txt` is provenance only: the exporter, the versions, the options,
+the platform, the sha256 of the LibreDWG tarball, how it was configured and the base image digest.
 
-The exporter is a concrete script, not a trait. There is one backend; a trait that one script implements
-would be a pass-through wrapper, so the seam is extracted when a second exporter exists. Swapping the
-exporter means changing `export.sh` and re-recording the loss files: nothing in the Rust side names it.
-The acadrust default for the DWG side is unchanged (`docs/pvec-providers.md`).
+The exporter was a script, not a trait, and the Rust side does not name it: there is one backend, and a trait
+that one script implements would be a pass-through wrapper. A different exporter means new static pairs and
+re-recorded loss files. The acadrust default for the DWG side is unchanged (`docs/pvec-providers.md`).
 
 ## What is committed, and what is compared
 
@@ -53,12 +52,9 @@ The pairs: `line-001`, `circle-001`, `bulge-arc-001`, `ellipse-001`, `polyline-0
 The rendered-image axis (`render_page_pdfium` against a render of the DWG-derived PVec) needs pdfium and is
 #1406. The pairs are flat drawings; block-bearing pairs wait for a transform-aware bounds comparison.
 
-## Regenerating a pair
+## Adding or refreshing a pair
 
-```text
-tools/dwg-pdf-export/export.sh OUT_DIR ID=PATH_TO_DWG[:ROTATE] ...
-```
-
-then copy `exported.pdf` and `exporter.txt` next to the `source.dwg`, run
+Produce the PDF outside libviprs, commit it next to its `source.dwg` with an `exporter.txt` that records the
+exporter, versions, options and the sha256 of whatever was built, run
 `PDF_LOSS_PRINT=1 cargo test --features "dwg-acadrust pvec-normalized" --test pvec_dwg_pdf_differential -- --nocapture`
-and update the loss file with a reason for each difference. Scratch on MARS is renamed to `<name>.superseded`.
+and write the loss file with a reason for each difference.
