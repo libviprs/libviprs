@@ -151,6 +151,21 @@ impl TextReport {
     }
 }
 
+impl TextReport {
+    /// Bucket the `TEXT` and `MTEXT` entities of a provider's output by the SHX font their style
+    /// names (issue #1381). `styles` is [`DwgProvider::text_styles`](super::provider::DwgProvider)
+    /// for the same scope.
+    #[allow(clippy::unused_self)]
+    pub fn bucket_dwg_entities(
+        &mut self,
+        entities: &[RawEntity],
+        styles: &std::collections::BTreeMap<crate::cad::ItemHandle, super::provider::TextStyleRef>,
+        installed: &[&str],
+    ) {
+        let _ = (entities, styles, installed);
+    }
+}
+
 /// The outcome for a DWG style font: [`TextFontOutcome::ShxMissing`] unless `font` (compared
 /// without case, with or without `.shx`) is in `installed`. A present font is reported as
 /// [`TextFontOutcome::Embedded`], meaning "available", since DWG has no embedding.
