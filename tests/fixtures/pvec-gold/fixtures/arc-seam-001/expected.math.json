@@ -1,0 +1,126 @@
+{
+  "schema_version": "pvec-gold/expected.math/1",
+  "fixture_id": "arc-seam-001",
+  "evidence_class": "KNOWN_TRUTH_EXACT",
+  "units": {
+    "name": "metre",
+    "canonical": "metre",
+    "scale_to_canonical": {
+      "decimal": "1.0",
+      "f64_hex": "0x3ff0000000000000"
+    }
+  },
+  "provenance": {
+    "derivation": "AUTHORING_PARAMETERS",
+    "authoring_script": "tools/authoring/author_probes.py",
+    "parameter_file": "tools/authoring/params/arc-seam-001.json",
+    "parameter_file_sha256": "200dfbed0961269a6c36f60b815be4f9fd9f74400f1229c223ab874f9b07c14c",
+    "parameters": {
+      "id": "arc-seam-001",
+      "kind": "circular_arc",
+      "description": "A counter-clockwise arc from 5.5 rad with a sweep of 1.5 rad, so it ends at 7.0 rad and crosses the 0/2pi seam (2pi is about 6.2832).",
+      "center": [
+        "0",
+        "0",
+        "0"
+      ],
+      "radius": "3",
+      "start_angle": "5.5",
+      "sweep_angle": "1.5"
+    }
+  },
+  "entities": [
+    {
+      "id": "arc-seam-001",
+      "class": "circular_arc",
+      "geometry": {
+        "center": [
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ],
+        "normal": [
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          }
+        ],
+        "x_axis": [
+          {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ],
+        "radius": {
+          "decimal": "3.0",
+          "f64_hex": "0x4008000000000000"
+        },
+        "start_angle": {
+          "decimal": "5.5",
+          "f64_hex": "0x4016000000000000"
+        },
+        "sweep_angle": {
+          "decimal": "1.5",
+          "f64_hex": "0x3ff8000000000000"
+        }
+      },
+      "parameter_domain": {
+        "start": {
+          "decimal": "5.5",
+          "f64_hex": "0x4016000000000000"
+        },
+        "end": {
+          "decimal": "7.0",
+          "f64_hex": "0x401c000000000000"
+        }
+      },
+      "closure": {
+        "closed_by_endpoint": false,
+        "closed_by_knots": false,
+        "periodic": false
+      },
+      "structure": "CURVE_ONLY"
+    }
+  ],
+  "assertions": [
+    {
+      "id": "a1",
+      "kind": "STRUCTURAL",
+      "entity": "arc-seam-001",
+      "claim": "CLASS_PRESERVED",
+      "statement": "The semantic class stays circular_arc; it is not rewritten into another class."
+    },
+    {
+      "id": "a2",
+      "kind": "GEOMETRIC",
+      "entity": "arc-seam-001",
+      "claim": "PARAMETERIZATION_PRESERVED",
+      "statement": "The parameter domain is kept; a reparameterised equivalent counts as geometric only."
+    }
+  ]
+}

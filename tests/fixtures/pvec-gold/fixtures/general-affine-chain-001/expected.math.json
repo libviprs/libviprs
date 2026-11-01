@@ -1,0 +1,590 @@
+{
+  "schema_version": "pvec-gold/expected.math/1",
+  "fixture_id": "general-affine-chain-001",
+  "evidence_class": "KNOWN_TRUTH_EXACT",
+  "units": {
+    "name": "metre",
+    "canonical": "metre",
+    "scale_to_canonical": {
+      "decimal": "1.0",
+      "f64_hex": "0x3ff0000000000000"
+    }
+  },
+  "provenance": {
+    "derivation": "AUTHORING_PARAMETERS",
+    "authoring_script": "tools/authoring/author_probes.py",
+    "parameter_file": "tools/authoring/corpus-params/edge/general-affine-chain-001.json",
+    "parameter_file_sha256": "68829f39843333fb3a94e72ccaed62a82777720d5fc635f1021189d69e40aa55",
+    "parameters": {
+      "id": "general-affine-chain-001",
+      "group": "edge",
+      "kind": "transform",
+      "description": "A line under a general affine map (mixed rotation, scale, shear and translation), carried as a four-level INSERT chain: a translation, then the rotation, non-uniform scale and rotation of the 2x2 part's singular value decomposition. A single INSERT cannot store the map, the chain reaches the same world-space line. The angles and scales are derived values (tools/authoring/chain_svd.py), compared under PVec numeric policy v1 and not exact.",
+      "base": {
+        "class": "line",
+        "start": [
+          "0.5",
+          "0.25",
+          "0"
+        ],
+        "end": [
+          "3.75",
+          "2.5",
+          "0"
+        ]
+      },
+      "ops": [
+        {
+          "op": "translate",
+          "v": [
+            "1",
+            "2",
+            "0"
+          ],
+          "classification": "TRANSLATION"
+        },
+        {
+          "op": "rotate_z",
+          "cos_sin": [
+            "-0.980088316503653685057607649301785748943",
+            "-0.1985620604572634859515281568833875823215"
+          ],
+          "classification": "ROTATION"
+        },
+        {
+          "op": "scale",
+          "s": [
+            "1.249155480094796970603766165265138517449",
+            "0.8886003525483980412918440385180889228237",
+            "1"
+          ],
+          "classification": "NON_UNIFORM_SCALE"
+        },
+        {
+          "op": "rotate_z",
+          "cos_sin": [
+            "-0.9256251861224766110900929344268634357314",
+            "0.37844156063483636910828239084126518975"
+          ],
+          "classification": "ROTATION"
+        }
+      ],
+      "composed_classification": "GENERAL_AFFINE",
+      "chain_of": "general-affine-001",
+      "chain_matrix": [
+        "1.2",
+        "0.3",
+        "0",
+        "1",
+        "-0.1",
+        "0.9",
+        "0",
+        "2",
+        "0",
+        "0",
+        "1",
+        "0",
+        "0",
+        "0",
+        "0",
+        "1"
+      ],
+      "expect": "line"
+    }
+  },
+  "entities": [
+    {
+      "id": "general-affine-chain-001",
+      "class": "line",
+      "geometry": {
+        "start": [
+          {
+            "decimal": "0.5",
+            "f64_hex": "0x3fe0000000000000"
+          },
+          {
+            "decimal": "0.25",
+            "f64_hex": "0x3fd0000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ],
+        "end": [
+          {
+            "decimal": "3.75",
+            "f64_hex": "0x400e000000000000"
+          },
+          {
+            "decimal": "2.5",
+            "f64_hex": "0x4004000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ]
+      },
+      "parameter_domain": {
+        "start": {
+          "decimal": "0.0",
+          "f64_hex": "0x0000000000000000"
+        },
+        "end": {
+          "decimal": "1.0",
+          "f64_hex": "0x3ff0000000000000"
+        }
+      },
+      "closure": {
+        "closed_by_endpoint": false,
+        "closed_by_knots": false,
+        "periodic": false
+      },
+      "structure": "INSTANCE_PLUS_TRANSFORM",
+      "transform_chain": {
+        "order": "OUTERMOST_FIRST",
+        "transforms": [
+          {
+            "convention": "ROW_MAJOR_COLUMN_VECTOR_PARENT_LEFT",
+            "matrix": [
+              {
+                "decimal": "1.0",
+                "f64_hex": "0x3ff0000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "1.0",
+                "f64_hex": "0x3ff0000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "1.0",
+                "f64_hex": "0x3ff0000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "2.0",
+                "f64_hex": "0x4000000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "1.0",
+                "f64_hex": "0x3ff0000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "1.0",
+                "f64_hex": "0x3ff0000000000000"
+              }
+            ],
+            "determinant": {
+              "decimal": "1.0",
+              "f64_hex": "0x3ff0000000000000"
+            },
+            "classification": "TRANSLATION"
+          },
+          {
+            "convention": "ROW_MAJOR_COLUMN_VECTOR_PARENT_LEFT",
+            "matrix": [
+              {
+                "decimal": "-0.9800883165036537",
+                "f64_hex": "0xbfef5ce22c52657f"
+              },
+              {
+                "decimal": "0.1985620604572635",
+                "f64_hex": "0x3fc96a7b49f1f60e"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "-0.1985620604572635",
+                "f64_hex": "0xbfc96a7b49f1f60e"
+              },
+              {
+                "decimal": "-0.9800883165036537",
+                "f64_hex": "0xbfef5ce22c52657f"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "1.0",
+                "f64_hex": "0x3ff0000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "1.0",
+                "f64_hex": "0x3ff0000000000000"
+              }
+            ],
+            "determinant": {
+              "decimal": "1.0",
+              "f64_hex": "0x3ff0000000000000"
+            },
+            "classification": "ROTATION"
+          },
+          {
+            "convention": "ROW_MAJOR_COLUMN_VECTOR_PARENT_LEFT",
+            "matrix": [
+              {
+                "decimal": "1.249155480094797",
+                "f64_hex": "0x3ff3fc8a74ea0575"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "0.8886003525483981",
+                "f64_hex": "0x3fec6f6a01ad1a22"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "1.0",
+                "f64_hex": "0x3ff0000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "1.0",
+                "f64_hex": "0x3ff0000000000000"
+              }
+            ],
+            "determinant": {
+              "decimal": "1.11",
+              "f64_hex": "0x3ff1c28f5c28f5c3"
+            },
+            "classification": "NON_UNIFORM_SCALE"
+          },
+          {
+            "convention": "ROW_MAJOR_COLUMN_VECTOR_PARENT_LEFT",
+            "matrix": [
+              {
+                "decimal": "-0.9256251861224766",
+                "f64_hex": "0xbfed9eb8b5d7ff97"
+              },
+              {
+                "decimal": "-0.37844156063483636",
+                "f64_hex": "0xbfd83862f397ecb8"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "0.37844156063483636",
+                "f64_hex": "0x3fd83862f397ecb8"
+              },
+              {
+                "decimal": "-0.9256251861224766",
+                "f64_hex": "0xbfed9eb8b5d7ff97"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "1.0",
+                "f64_hex": "0x3ff0000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "0.0",
+                "f64_hex": "0x0000000000000000"
+              },
+              {
+                "decimal": "1.0",
+                "f64_hex": "0x3ff0000000000000"
+              }
+            ],
+            "determinant": {
+              "decimal": "0.9999999999999999",
+              "f64_hex": "0x3fefffffffffffff"
+            },
+            "classification": "ROTATION"
+          }
+        ],
+        "composed": {
+          "convention": "ROW_MAJOR_COLUMN_VECTOR_PARENT_LEFT",
+          "matrix": [
+            {
+              "decimal": "1.2",
+              "f64_hex": "0x3ff3333333333333"
+            },
+            {
+              "decimal": "0.3",
+              "f64_hex": "0x3fd3333333333333"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            },
+            {
+              "decimal": "1.0",
+              "f64_hex": "0x3ff0000000000000"
+            },
+            {
+              "decimal": "-0.1",
+              "f64_hex": "0xbfb999999999999a"
+            },
+            {
+              "decimal": "0.9",
+              "f64_hex": "0x3feccccccccccccd"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            },
+            {
+              "decimal": "2.0",
+              "f64_hex": "0x4000000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            },
+            {
+              "decimal": "1.0",
+              "f64_hex": "0x3ff0000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            },
+            {
+              "decimal": "1.0",
+              "f64_hex": "0x3ff0000000000000"
+            }
+          ],
+          "determinant": {
+            "decimal": "1.11",
+            "f64_hex": "0x3ff1c28f5c28f5c3"
+          },
+          "classification": "GENERAL_AFFINE"
+        }
+      },
+      "world": {
+        "class": "line",
+        "geometry": {
+          "start": [
+            {
+              "decimal": "1.675",
+              "f64_hex": "0x3ffacccccccccccd"
+            },
+            {
+              "decimal": "2.175",
+              "f64_hex": "0x4001666666666666"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            }
+          ],
+          "end": [
+            {
+              "decimal": "6.25",
+              "f64_hex": "0x4019000000000000"
+            },
+            {
+              "decimal": "3.875",
+              "f64_hex": "0x400f000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            }
+          ]
+        },
+        "parameter_domain": {
+          "start": {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          "end": {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          }
+        },
+        "closure": {
+          "closed_by_endpoint": false,
+          "closed_by_knots": false,
+          "periodic": false
+        }
+      },
+      "orientation": {
+        "parameter_direction": "START_TO_END",
+        "sense_about_normal": "NOT_APPLICABLE"
+      }
+    }
+  ],
+  "assertions": [
+    {
+      "id": "a1",
+      "kind": "SOURCE_MAPPING",
+      "entity": "general-affine-chain-001",
+      "claim": "TRANSFORM_PRESERVED",
+      "statement": "Checked in the source mapping, not in the artifact (pvec ADR 0017: PVec is curve-only): the mapping reads the instance plus the stated transform and keeps the matrix and determinant as written while it flattens the instance to the world-space curve."
+    },
+    {
+      "id": "a2",
+      "kind": "GEOMETRIC",
+      "entity": "general-affine-chain-001",
+      "claim": "WORLD_SPACE_RESULT",
+      "statement": "The world-space curve is the stated line."
+    }
+  ]
+}
