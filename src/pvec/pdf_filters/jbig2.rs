@@ -19,8 +19,10 @@
 //! run out, so a 134 byte stream found by `fuzz_pvec_pdf_image` made it allocate over 2 GB in
 //! symbol bitmaps. [`prescan`] closes the part that can be closed from outside: a region larger
 //! than the page is refused, and a symbol dictionary may not declare more new symbols than its
-//! own data has bits. The size of each symbol is still the decoder's to bound, which is one of the
-//! reasons `jbig2` is not a default feature.
+//! own data has bits. The size of each symbol is still the decoder's to bound, and it does not:
+//! the same fuzz run found a stream that spends about 400 seconds in one symbol dictionary (a
+//! symbol up to 65535 by 65535 pixels, decoded pixel by pixel). That is the open finding behind
+//! `jbig2` not being a default feature, and it is not something this module can bound from outside.
 
 #[cfg(feature = "jbig2")]
 use crate::pvec::pdf_image::FilterError;

@@ -699,11 +699,19 @@ jp2k = ["dep:hayro-jpeg2000", "dep:openjpeg2-pure"]
 # With the feature off the filter is refused as `filter-not-enabled:JBIG2Decode`.
 #
 # Not in `default`, and it stays out until 24 hours of `fuzz_pvec_pdf_image --features jbig2`
-# are on record: the crate is young and says it is under development.
+# are on record. The record today is NOT clean: a first run (about 25 minutes, 4 workers) and a
+# second (3.9 hours wall, 4 workers, 2026-10-31, MARS) found four memory blow-ups and two
+# long-running inputs in `hayro-jbig2` 0.3.1, which bounds each bitmap side and the symbol count
+# but not their product, and keeps decoding past the end of its data. The module refuses regions
+# larger than the page and symbol dictionaries with more symbols than bits, which closed the first
+# four; the symbol size inside a dictionary is still the decoder's, and the later run died on it
+# (three more OOMs over 1 GB and a 1600 second input). So the clean hours recorded are 0.
 #
 # It implies `pvec-raster` because the only reader of a PDF image stream is the raster bake that
-# feature belongs to, and so that the one cell `cargo test --features jbig2` runs the decoding tests.
-# Lock and binary deltas: TODO measured below.
+# feature belongs to, and so that the one cell `cargo test --features jbig2` runs the decoding
+# tests. Lock delta of `jbig2` itself: +2 entries (`hayro-jbig2` 0.3.1, `hayro-ccitt` 0.4.0, no
+# dependencies of their own beyond each other, no `links`, no build script); everything else
+# `cargo tree` adds is `pvec-raster`'s. Release binary delta: not measured.
 jbig2 = ["pvec-raster", "dep:hayro-jbig2"]
 
 [dependencies]
