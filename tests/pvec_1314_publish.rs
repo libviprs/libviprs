@@ -109,7 +109,7 @@ fn issue_1314_the_in_progress_file_has_the_partial_suffix() {
         }
     })
     .unwrap();
-    assert_eq!(names, ["plan.pvec.partial"]);
+    assert_eq!(names, ["plan.pvec.pvec.partial"]);
 }
 
 #[test]

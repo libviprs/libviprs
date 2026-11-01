@@ -212,9 +212,23 @@ fn flatten_group(s: &str) -> Vec<Vec<String>> {
     leaves
 }
 
+/// Facade types whose names match [`PHYSICAL_SEGMENTS`] but are the facade's semantic surface:
+/// `Manifest` is what a file says about itself (units, bounds, producer), and `components::Stream`
+/// is a component stream payload the writer attaches. Exact paths, so nothing else gets through.
+const FACADE_SEMANTIC_TYPES: &[&[&str]] = &[
+    &["pvec_facade", "Manifest"],
+    &["pvec_facade", "components", "Stream"],
+];
+
 /// The reason a path is outside the allowed surface, or `None` when it is inside.
 fn violation(path: &[String]) -> Option<String> {
     let root = path[0].as_str();
+    if FACADE_SEMANTIC_TYPES
+        .iter()
+        .any(|t| t.iter().copied().eq(path.iter().map(String::as_str)))
+    {
+        return None;
+    }
     if PHYSICAL_ROOTS.contains(&root) {
         return Some(format!("`{root}` is a physical-layout crate"));
     }
@@ -253,6 +267,10 @@ fn the_scanner_flags_a_physical_import() {
         "use pvec_geometry::index::Node;",
         "use pvec_geometry::{Curve, layout::BlockHeader};",
         "let h = pvec_geometry::header::read(b);",
+        // The exemption is for the two exact facade paths and nothing near them.
+        "use pvec_facade::unstable::Stream;",
+        "use pvec_geometry::Manifest;",
+        "use pvec_facade::components::Stream::Inner;",
     ] {
         assert!(!scan(bad).is_empty(), "scanner let `{bad}` through");
     }
@@ -261,6 +279,7 @@ fn the_scanner_flags_a_physical_import() {
 #[test]
 fn the_scanner_accepts_the_semantic_surface() {
     for good in [
+        "use pvec_facade::{Manifest, components::Stream};",
         "use pvec_geometry::{Curve, Point2};",
         "use pvec_geometry::{Bezier, Curve, Point2, Polyline};",
         "use pvec_numeric::{MAX_CONTROL_POINTS, MAX_DEGREE, NumericError, Policy};",

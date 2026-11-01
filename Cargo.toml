@@ -734,6 +734,10 @@ zune-jpegxl = { workspace = true, optional = true }
 name = "dwg_gate0"
 required-features = ["dwg-acadrust"]
 
+[[example]]
+name = "pvec_writer_memory"
+required-features = ["pvec-write"]
+
 [[test]]
 name = "pvec_1314_writer_funnel"
 required-features = ["pvec-write"]
