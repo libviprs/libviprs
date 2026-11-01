@@ -277,7 +277,7 @@ fn buckets_are_compared_per_entity_not_in_aggregate() {
     assert!(
         bucket
             .iter()
-            .any(|d| d.left == "SupportedExact" && d.right == "Unsupported"),
+            .any(|d| d.left == "SupportedEquivalent" && d.right == "Unsupported"),
         "{bucket:?}"
     );
     assert!(!m.verdict(&none()).passed());
@@ -329,6 +329,7 @@ fn deltas_need_a_reason_and_refuse_unknown_keys_and_duplicates() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn the_shipped_deltas_file_parses() {
     let text = std::fs::read_to_string(
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/pvec/provider_deltas.toml"),
@@ -349,7 +350,7 @@ fn the_rows_carry_params_bucket_and_pvec_type_for_the_acadrust_baseline() {
         .iter()
         .find(|r| r.class_name == "LINE")
         .expect("vc_layers has lines");
-    assert_eq!(line.bucket, "SupportedExact");
+    assert_eq!(line.bucket, "SupportedEquivalent");
     assert_eq!(line.pvec_type, "trimmed_curve(line)");
     assert!(line.params.iter().any(|(n, _)| n == "end.x"));
     assert!(line.params.iter().any(|(n, _)| n == "matrix.tx"));

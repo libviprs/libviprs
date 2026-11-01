@@ -16,6 +16,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The provider differential harness** (issue #1395, part of #1079). `pvec::differential` runs any
+  number of `DwgProvider`s over the same fixtures and compares, per entity, the structural parameters,
+  the N3.5 bucket with its reason code and the PVec type of N6.2's table (`Matrix`, `Deltas`,
+  `Verdict`). `tests/fixtures/pvec/provider_deltas.toml` is the allowed-difference list: an unlisted
+  difference fails and so does a stale entry. A run with fewer than two providers is `PARTIAL`, never a
+  pass, agreement is `DUAL_ORACLE_EQUIVALENT` and never source truth, and every result line records the
+  platform and the corpus revision. `docs/pvec-providers.md` records that acadrust is the default
+  provider and acadsharp-rs is opt-in, and `tests/pvec_1079_provider_default.rs` enforces it.
 - **The PDF filter seam** (issue #1362, follow-up 1/6 to #1332, part of #1329). The image decoder
   now goes through `FilterInput`, `FilterOutput` and one `decode_filter` `match`, with a module per
   codec under `src/pvec/pdf_filters/` (`dct` moved in, `ccitt`, `jbig2` and `jpx` are stubs). No
