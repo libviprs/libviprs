@@ -1,0 +1,136 @@
+{
+  "schema_version": "pvec-gold/expected.math/1",
+  "fixture_id": "elliptical-arc-001",
+  "evidence_class": "KNOWN_TRUTH_EXACT",
+  "units": {
+    "name": "metre",
+    "canonical": "metre",
+    "scale_to_canonical": {
+      "decimal": "1.0",
+      "f64_hex": "0x3ff0000000000000"
+    }
+  },
+  "provenance": {
+    "derivation": "AUTHORING_PARAMETERS",
+    "authoring_script": "tools/authoring/author_probes.py",
+    "parameter_file": "tools/authoring/params/elliptical-arc-001.json",
+    "parameter_file_sha256": "1e846dd5e37b11b80ebaf367c090cb2db51ba222f5e2bb5b9347f57a097dd11e",
+    "parameters": {
+      "id": "elliptical-arc-001",
+      "kind": "elliptical_arc",
+      "description": "The same near-circular, rotated ellipse as ellipse-001, cut to an arc from 0.3 rad (eccentric anomaly) with a sweep of 2.2 rad.",
+      "center": [
+        "2",
+        "1",
+        "0"
+      ],
+      "major_axis": [
+        "0.96",
+        "0.28",
+        "0"
+      ],
+      "semi_major": "3",
+      "semi_minor": "2.94",
+      "start_angle": "0.3",
+      "sweep_angle": "2.2"
+    }
+  },
+  "entities": [
+    {
+      "id": "elliptical-arc-001",
+      "class": "elliptical_arc",
+      "geometry": {
+        "center": [
+          {
+            "decimal": "2.0",
+            "f64_hex": "0x4000000000000000"
+          },
+          {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ],
+        "normal": [
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          }
+        ],
+        "major_axis": [
+          {
+            "decimal": "0.96",
+            "f64_hex": "0x3feeb851eb851eb8"
+          },
+          {
+            "decimal": "0.28",
+            "f64_hex": "0x3fd1eb851eb851ec"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ],
+        "semi_major": {
+          "decimal": "3.0",
+          "f64_hex": "0x4008000000000000"
+        },
+        "semi_minor": {
+          "decimal": "2.94",
+          "f64_hex": "0x4007851eb851eb85"
+        },
+        "start_angle": {
+          "decimal": "0.3",
+          "f64_hex": "0x3fd3333333333333"
+        },
+        "sweep_angle": {
+          "decimal": "2.2",
+          "f64_hex": "0x400199999999999a"
+        }
+      },
+      "parameter_domain": {
+        "start": {
+          "decimal": "0.3",
+          "f64_hex": "0x3fd3333333333333"
+        },
+        "end": {
+          "decimal": "2.5",
+          "f64_hex": "0x4004000000000000"
+        }
+      },
+      "closure": {
+        "closed_by_endpoint": false,
+        "closed_by_knots": false,
+        "periodic": false
+      },
+      "structure": "CURVE_ONLY"
+    }
+  ],
+  "assertions": [
+    {
+      "id": "a1",
+      "kind": "STRUCTURAL",
+      "entity": "elliptical-arc-001",
+      "claim": "CLASS_PRESERVED",
+      "statement": "The semantic class stays elliptical_arc; it is not rewritten into another class."
+    },
+    {
+      "id": "a2",
+      "kind": "GEOMETRIC",
+      "entity": "elliptical-arc-001",
+      "claim": "PARAMETERIZATION_PRESERVED",
+      "statement": "The parameter domain is kept; a reparameterised equivalent counts as geometric only."
+    }
+  ]
+}

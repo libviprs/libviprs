@@ -452,6 +452,26 @@ the gate: each covers part of one job, on this host's architecture and
 filesystem. `tools/local-ci.py --worktree` is the same trade for a whole run.
 The README has the longer version.
 
+## The native DWG lane
+
+Some tests need the pinned `acadsharp-linux-x64.tgz` from libviprs-dep and are skipped without it.
+Hosted CI cannot run them (it is off), and `make ci` stays off the network, so they run as their own
+job: `.github/workflows/native-dwg.yml`, one step, `tools/native-dwg-cell.sh`. That script downloads
+the archive named in `tools/acadsharp-native.pin`, checks its SHA-256, and runs every test file that
+insists on it with `LIBVIPRS_REQUIRE_ACADSHARP_NATIVE=1`, so a missing archive fails instead of
+skipping. `tests/local_gate_native_dwg_1295.rs` fails if a new test file requires the archive and the
+script does not run it.
+
+- By hand: `make native-dwg` (the runner reads the workflow, same as `make ci`).
+- Every night, on MARS: `tools/scheduled-native-dwg.sh` clones `main` inside a container, runs the
+  script, keeps the log and appends a line to `/work/nas-work/native-dwg-sched/results.tsv`. The host
+  runs only docker.
+- Installing the schedule is a deliberate step, because MARS is shared. The entry is in
+  `tools/native-dwg.cron`. Copy this repo's `tools/` to
+  `/work/nas-work/native-dwg-sched/src/tools/` (or edit the path in the entry), then add the line to
+  devshell's crontab with `crontab -e`. Nothing in this repo installs it.
+- Bumping the archive means changing the URL and the digest in `tools/acadsharp-native.pin` together.
+
 ## The git hooks run on MARS
 
 The pre-commit and pre-push hooks don't run cargo, clippy or docker on this machine. They ship the

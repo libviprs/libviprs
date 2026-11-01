@@ -1,0 +1,160 @@
+{
+  "schema_version": "pvec-gold/expected.math/1",
+  "fixture_id": "bezier-d3-001",
+  "evidence_class": "KNOWN_TRUTH_EXACT",
+  "units": {
+    "name": "metre",
+    "canonical": "metre",
+    "scale_to_canonical": {
+      "decimal": "1.0",
+      "f64_hex": "0x3ff0000000000000"
+    }
+  },
+  "provenance": {
+    "derivation": "AUTHORING_PARAMETERS",
+    "authoring_script": "tools/authoring/author_probes.py",
+    "parameter_file": "tools/authoring/params/bezier-d3-001.json",
+    "parameter_file_sha256": "1a33fae522edd77ad2e81631fa6c62cd1b6ba71bf329025068973639b012480b",
+    "parameters": {
+      "id": "bezier-d3-001",
+      "kind": "bezier",
+      "description": "A cubic Bezier with four control points and no interior knots.",
+      "degree": 3,
+      "control_points": [
+        [
+          "0",
+          "0",
+          "0"
+        ],
+        [
+          "1",
+          "2.5",
+          "0"
+        ],
+        [
+          "3",
+          "2.5",
+          "0"
+        ],
+        [
+          "4",
+          "0",
+          "0"
+        ]
+      ]
+    }
+  },
+  "entities": [
+    {
+      "id": "bezier-d3-001",
+      "class": "bezier",
+      "geometry": {
+        "degree": 3,
+        "control_points": [
+          [
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            }
+          ],
+          [
+            {
+              "decimal": "1.0",
+              "f64_hex": "0x3ff0000000000000"
+            },
+            {
+              "decimal": "2.5",
+              "f64_hex": "0x4004000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            }
+          ],
+          [
+            {
+              "decimal": "3.0",
+              "f64_hex": "0x4008000000000000"
+            },
+            {
+              "decimal": "2.5",
+              "f64_hex": "0x4004000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            }
+          ],
+          [
+            {
+              "decimal": "4.0",
+              "f64_hex": "0x4010000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            }
+          ]
+        ]
+      },
+      "parameter_domain": {
+        "start": {
+          "decimal": "0.0",
+          "f64_hex": "0x0000000000000000"
+        },
+        "end": {
+          "decimal": "1.0",
+          "f64_hex": "0x3ff0000000000000"
+        }
+      },
+      "closure": {
+        "closed_by_endpoint": false,
+        "closed_by_knots": false,
+        "periodic": false
+      },
+      "structure": "CURVE_ONLY"
+    }
+  ],
+  "assertions": [
+    {
+      "id": "a1",
+      "kind": "STRUCTURAL",
+      "entity": "bezier-d3-001",
+      "claim": "CLASS_PRESERVED",
+      "statement": "The semantic class stays bezier; it is not rewritten into another class."
+    },
+    {
+      "id": "a2",
+      "kind": "STRUCTURAL",
+      "entity": "bezier-d3-001",
+      "claim": "DEGREE_PRESERVED",
+      "statement": "The degree is not elevated or reduced."
+    },
+    {
+      "id": "a3",
+      "kind": "STRUCTURAL",
+      "entity": "bezier-d3-001",
+      "claim": "CONTROL_POINTS_PRESERVED",
+      "statement": "The control points are kept, not resampled."
+    },
+    {
+      "id": "a4",
+      "kind": "GEOMETRIC",
+      "entity": "bezier-d3-001",
+      "claim": "PARAMETERIZATION_PRESERVED",
+      "statement": "The parameter domain is kept; a reparameterised equivalent counts as geometric only."
+    }
+  ]
+}

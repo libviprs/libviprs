@@ -1,0 +1,244 @@
+{
+  "schema_version": "pvec-gold/expected.math/1",
+  "fixture_id": "translation-001",
+  "evidence_class": "KNOWN_TRUTH_EXACT",
+  "units": {
+    "name": "metre",
+    "canonical": "metre",
+    "scale_to_canonical": {
+      "decimal": "1.0",
+      "f64_hex": "0x3ff0000000000000"
+    }
+  },
+  "provenance": {
+    "derivation": "AUTHORING_PARAMETERS",
+    "authoring_script": "tools/authoring/author_probes.py",
+    "parameter_file": "tools/authoring/params/transforms/translation-001.json",
+    "parameter_file_sha256": "19e662b978c3653292b63d9fc3e533b2fcfb967ee1988052cd0e0430db4ffcb0",
+    "parameters": {
+      "id": "translation-001",
+      "group": "transforms",
+      "kind": "transform",
+      "description": "A line translated by (3.5, -1.25, 2).",
+      "base": {
+        "class": "line",
+        "start": [
+          "0.5",
+          "0.25",
+          "0"
+        ],
+        "end": [
+          "3.75",
+          "2.5",
+          "0"
+        ]
+      },
+      "ops": [
+        {
+          "op": "translate",
+          "v": [
+            "3.5",
+            "-1.25",
+            "2"
+          ],
+          "classification": "TRANSLATION"
+        }
+      ],
+      "expect": "line"
+    }
+  },
+  "entities": [
+    {
+      "id": "translation-001",
+      "class": "line",
+      "geometry": {
+        "start": [
+          {
+            "decimal": "0.5",
+            "f64_hex": "0x3fe0000000000000"
+          },
+          {
+            "decimal": "0.25",
+            "f64_hex": "0x3fd0000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ],
+        "end": [
+          {
+            "decimal": "3.75",
+            "f64_hex": "0x400e000000000000"
+          },
+          {
+            "decimal": "2.5",
+            "f64_hex": "0x4004000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ]
+      },
+      "parameter_domain": {
+        "start": {
+          "decimal": "0.0",
+          "f64_hex": "0x0000000000000000"
+        },
+        "end": {
+          "decimal": "1.0",
+          "f64_hex": "0x3ff0000000000000"
+        }
+      },
+      "closure": {
+        "closed_by_endpoint": false,
+        "closed_by_knots": false,
+        "periodic": false
+      },
+      "structure": "INSTANCE_PLUS_TRANSFORM",
+      "transform": {
+        "convention": "ROW_MAJOR_COLUMN_VECTOR_PARENT_LEFT",
+        "matrix": [
+          {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "3.5",
+            "f64_hex": "0x400c000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "-1.25",
+            "f64_hex": "0xbff4000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          },
+          {
+            "decimal": "2.0",
+            "f64_hex": "0x4000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          }
+        ],
+        "determinant": {
+          "decimal": "1.0",
+          "f64_hex": "0x3ff0000000000000"
+        },
+        "classification": "TRANSLATION"
+      },
+      "world": {
+        "class": "line",
+        "geometry": {
+          "start": [
+            {
+              "decimal": "4.0",
+              "f64_hex": "0x4010000000000000"
+            },
+            {
+              "decimal": "-1.0",
+              "f64_hex": "0xbff0000000000000"
+            },
+            {
+              "decimal": "2.0",
+              "f64_hex": "0x4000000000000000"
+            }
+          ],
+          "end": [
+            {
+              "decimal": "7.25",
+              "f64_hex": "0x401d000000000000"
+            },
+            {
+              "decimal": "1.25",
+              "f64_hex": "0x3ff4000000000000"
+            },
+            {
+              "decimal": "2.0",
+              "f64_hex": "0x4000000000000000"
+            }
+          ]
+        },
+        "parameter_domain": {
+          "start": {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          "end": {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          }
+        },
+        "closure": {
+          "closed_by_endpoint": false,
+          "closed_by_knots": false,
+          "periodic": false
+        }
+      },
+      "orientation": {
+        "parameter_direction": "START_TO_END",
+        "sense_about_normal": "NOT_APPLICABLE"
+      }
+    }
+  ],
+  "assertions": [
+    {
+      "id": "a1",
+      "kind": "SOURCE_MAPPING",
+      "entity": "translation-001",
+      "claim": "TRANSFORM_PRESERVED",
+      "statement": "Checked in the source mapping, not in the artifact (pvec ADR 0017: PVec is curve-only): the mapping reads the instance plus the stated transform and keeps the matrix and determinant as written while it flattens the instance to the world-space curve."
+    },
+    {
+      "id": "a2",
+      "kind": "GEOMETRIC",
+      "entity": "translation-001",
+      "claim": "WORLD_SPACE_RESULT",
+      "statement": "The world-space curve is the stated line."
+    }
+  ]
+}
