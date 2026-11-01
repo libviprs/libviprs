@@ -214,8 +214,8 @@ impl<'a> PvecConversion<'a> {
     /// A named capability set, exactness rule and policy: [`ConversionProfile::Strict`],
     /// `Default` (the default) or `Permissive`. Replaces any earlier capability setting.
     #[must_use]
-    pub fn profile(self, profile: ConversionProfile) -> Self {
-        let _ = profile;
+    pub fn profile(mut self, profile: ConversionProfile) -> Self {
+        self.gate = Gate::of(profile);
         self
     }
 
@@ -223,15 +223,17 @@ impl<'a> PvecConversion<'a> {
     /// another is handled by the [`capability_policy`](Self::capability_policy). The profile's
     /// exactness rule is kept, and the report names the profile as `Custom`.
     #[must_use]
-    pub fn allowed_capabilities(self, allowed: impl IntoIterator<Item = CapabilityId>) -> Self {
-        let _ = allowed.into_iter().count();
+    pub fn allowed_capabilities(mut self, allowed: impl IntoIterator<Item = CapabilityId>) -> Self {
+        self.gate.allowed = allowed.into_iter().collect();
+        self.gate.name = "Custom";
         self
     }
 
     /// What happens to an entity that needs a capability outside the allowed set.
     #[must_use]
-    pub fn capability_policy(self, policy: CapabilityPolicy) -> Self {
-        let _ = policy;
+    pub fn capability_policy(mut self, policy: CapabilityPolicy) -> Self {
+        self.gate.policy = policy;
+        self.gate.name = "Custom";
         self
     }
 
