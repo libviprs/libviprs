@@ -123,6 +123,7 @@ jobs:
       - run: cargo clippy --all-targets --features pvec-normalized -- -D warnings -W clippy::incompatible_msrv -W deprecated
       - run: cargo clippy --all-targets --features pvec-spline -- -D warnings -W clippy::incompatible_msrv -W deprecated
       - run: cargo clippy --all-targets --features pvec-raster -- -D warnings -W clippy::incompatible_msrv -W deprecated
+      - run: cargo clippy --all-targets --features pvec-conformance -- -D warnings -W clippy::incompatible_msrv -W deprecated
       # Same for the SVG rasteriser: `svg` is non-default because it costs 29
       # crates, so the default clippy job never sees `src/svg.rs` at all
       # (issue #502).
@@ -226,6 +227,7 @@ jobs:
       - run: cargo check --all-targets --features pvec-normalized
       - run: cargo check --all-targets --features pvec-spline
       - run: cargo check --all-targets --features pvec-raster
+      - run: cargo check --all-targets --features pvec-conformance
 
   docs:
     name: Docs (deny broken, private and redundant intra-doc links)
@@ -291,6 +293,8 @@ jobs:
       - run: cargo test --features pvec-spline
       # A raster pyramid through PVec's writer and reader (issue #1328): pure Rust, a real lane.
       - run: cargo test --features pvec-raster
+      # The conformance suites over the pinned gold corpus (issue #1050): pure Rust, a real lane.
+      - run: cargo test --features pvec-conformance
       # The SVG module and its unit tests are behind the non-default `svg`
       # feature, and the `<image xlink:href>` lockdown tests in
       # tests/path_traversal.rs are gated on it too. Bare `cargo test` runs

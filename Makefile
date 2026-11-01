@@ -8,7 +8,7 @@
 # states: `s3` is the deprecated alias for `object-store-sink` and enables
 # nothing else; `pdfium-static` builds PDFium from source and no libviprs code
 # is gated on it; `test-util` only exposes existing doubles to dependents.
-LINTED_FEATURES := pdfium object-store-sink tracing avif svg jxl packfile serde jp2k dwg-acadsharp dwg-acadrust pvec-normalized pvec-spline pvec-raster
+LINTED_FEATURES := pdfium object-store-sink tracing avif svg jxl packfile serde jp2k dwg-acadsharp dwg-acadrust pvec-normalized pvec-spline pvec-raster pvec-conformance
 
 ## The gate: the real CI job list, in the container, over a tree provisioned
 ## from git.

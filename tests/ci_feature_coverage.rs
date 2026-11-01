@@ -285,6 +285,18 @@ const EXPECTED: &[(&str, Coverage)] = &[
         ),
     ),
     (
+        "pvec-conformance",
+        cov(
+            true,
+            true,
+            true,
+            "enables dwg-acadrust, pvec-normalized and pvec-spline together for \
+             tests/pvec_known_truth.rs, the known-truth suite of issue #1050, \
+             and the suites that share tests/common/pvec_gold.rs; adds no crate \
+             of its own",
+        ),
+    ),
+    (
         "serde",
         cov(
             true,

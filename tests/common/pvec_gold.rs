@@ -171,21 +171,10 @@ pub struct Corpus {
     fixtures: Vec<Fixture>,
 }
 
-fn sha256_hex(data: &[u8]) -> String {
-    Sha256::digest(data)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
-}
-
-fn root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/pvec-gold")
-}
-
 impl Corpus {
     /// Opens the vendored slice and checks it against its own index.
     pub fn open() -> Corpus {
-        Self::open_at(&root())
+        Self::open_at(&Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/pvec-gold"))
     }
 
     /// As [`open`](Self::open), from another root (the tests point it at a tampered copy).
@@ -220,7 +209,10 @@ impl Corpus {
                 let data = fs::read(&path).unwrap_or_else(|e| {
                     panic!("{id}: the index lists {name} but {}: {e}", path.display())
                 });
-                let got = sha256_hex(&data);
+                let got: String = Sha256::digest(&data)
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect();
                 assert_eq!(
                     got, want,
                     "{id}/{name} no longer matches the pinned corpus revision {revision}"
