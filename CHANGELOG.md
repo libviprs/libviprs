@@ -16,6 +16,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The PVec integration documentation** (issue #1451, part of #1070). Twelve pages next to `docs/pvec-benchmarks.md`:
+  architecture, the provider API, the ISO mapping, view semantics, the transform matrix, DWG support, the PDF loss
+  model, components, the georeference handoff, the conversion API, limits and provider replacement, all linked from
+  the README. The mapping table, the transform matrix, the v1 view profile and the resource limits are rendered from the
+  code and `tests/pvec_docs_tables.rs` fails when a page differs (`DOCS_BLESS=1` rewrites them); a link check covers
+  `README.md` and `docs/`.
 - **The DWG to PDF differential, with LibreDWG as the first real exporter** (issue #1405, part of #1086).
   Six `REAL_WORLD_DIFFERENTIAL` pairs are committed as static files under `tests/fixtures/pvec/pdf_loss/`
   (the DWG, the exported PDF, `exporter.txt` provenance with versions, options and the tarball sha256), and
