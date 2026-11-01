@@ -1,9 +1,10 @@
 //! Issue #1363: `CCITTFaxDecode` images of a PDF page become PVec rasters.
 //!
 //! Every stream is encoded outside the crate under test. The bytes in `common/ccitt_fixtures.rs`
-//! come from libtiff (`tiffcp -c g4`, `g3:1d`, `g3:2d`, `g3:1d:fill`, Debian bookworm
+//! come from libtiff (`tiffcp -c g4`, `g3:1d`, `g3:2d`, Debian bookworm
 //! `libtiff-tools`, the generator is `tests/common/ccitt_gen.py`), so a decoder bug cannot hide
-//! behind an encoder with the same bug. The picture is `ink_small` / `ink_wide` below; the
+//! behind an encoder with the same bug. The `EncodedByteAlign` stream is the `g3:1d` strip with
+//! its EOLs removed and each row padded to a byte (`byte_aligned` in the generator). The picture is `ink_small` / `ink_wide` below; the
 //! expected gray samples are worked out by hand from the PDF rules:
 //!
 //! * `/BlackIs1 false` (the default): a black pixel is a 0 bit, so ink is gray 0.
@@ -69,7 +70,10 @@ fn ccitt(w: i64, h: i64, parms: Dictionary, extra: Dictionary, data: &[u8]) -> V
 }
 
 fn bake(bytes: &[u8]) -> PdfImageBake {
-    bake_page_images(&page(bytes), &PdfImageOptions::default())
+    // One tile per image, so a tile read back is the whole picture.
+    let mut options = PdfImageOptions::default();
+    options.tile_edge = 2048;
+    bake_page_images(&page(bytes), &options)
 }
 
 fn through_pvec(b: &PdfImageBake) -> PvecReader {
@@ -125,6 +129,20 @@ fn decoded(bytes: &[u8]) -> Vec<u8> {
     luma(&bake(bytes))
 }
 
+/// `got` equals `want`, and if not, say where the first pixel differs.
+fn same_picture(w: usize, got: &[u8], want: &[u8]) {
+    assert_eq!(got.len(), want.len(), "sample count");
+    if let Some(i) = got.iter().zip(want).position(|(a, b)| a != b) {
+        panic!(
+            "first difference at x {} y {}: got {} want {}",
+            i % w,
+            i / w,
+            got[i],
+            want[i]
+        );
+    }
+}
+
 fn filter_error(e: &PdfImageError) -> &FilterError {
     e.source()
         .and_then(|s| s.downcast_ref::<FilterError>())
@@ -148,19 +166,19 @@ fn small_parms(k: i64) -> Dictionary {
 #[test]
 fn a_group_4_stream_decodes_to_the_picture() {
     let pdf = ccitt(40, 8, small_parms(-1), dictionary! {}, G4_SMALL);
-    assert_eq!(decoded(&pdf), picture(40, 8, ink_small, 0));
+    same_picture(40, &decoded(&pdf), &picture(40, 8, ink_small, 0));
 }
 
 #[test]
 fn a_group_3_one_dimensional_stream_decodes_to_the_picture() {
     let pdf = ccitt(40, 8, small_parms(0), dictionary! {}, G3_1D_SMALL);
-    assert_eq!(decoded(&pdf), picture(40, 8, ink_small, 0));
+    same_picture(40, &decoded(&pdf), &picture(40, 8, ink_small, 0));
 }
 
 #[test]
 fn a_group_3_mixed_stream_decodes_to_the_picture() {
     let pdf = ccitt(40, 8, small_parms(K4), dictionary! {}, G3_2D_SMALL);
-    assert_eq!(decoded(&pdf), picture(40, 8, ink_small, 0));
+    same_picture(40, &decoded(&pdf), &picture(40, 8, ink_small, 0));
 }
 
 // ---- polarity ----
@@ -171,7 +189,7 @@ fn black_is_1_true_reads_the_ink_as_white_and_decode_1_0_puts_it_back() {
     p.set("BlackIs1", true);
     let plain = ccitt(40, 8, p.clone(), dictionary! {}, G4_SMALL);
     // The same black and white geometry, the opposite gray: 1 bits are white in DeviceGray.
-    assert_eq!(decoded(&plain), picture(40, 8, ink_small, 255));
+    same_picture(40, &decoded(&plain), &picture(40, 8, ink_small, 255));
     let flipped = ccitt(
         40,
         8,
@@ -180,7 +198,7 @@ fn black_is_1_true_reads_the_ink_as_white_and_decode_1_0_puts_it_back() {
         G4_SMALL,
     );
     // The shape of the corpus file: BlackIs1 true with /Decode [1 0] is black ink again.
-    assert_eq!(decoded(&flipped), picture(40, 8, ink_small, 0));
+    same_picture(40, &decoded(&flipped), &picture(40, 8, ink_small, 0));
 }
 
 #[test]
@@ -211,7 +229,7 @@ fn columns_absent_means_1728() {
         dictionary! {},
         G4_WIDE,
     );
-    assert_eq!(decoded(&pdf), picture(1728, 4, ink_wide, 0));
+    same_picture(1728, &decoded(&pdf), &picture(1728, 4, ink_wide, 0));
 }
 
 #[test]
@@ -223,7 +241,7 @@ fn rows_absent_with_end_of_block_stops_at_the_marker() {
         dictionary! {},
         G4_SMALL,
     );
-    assert_eq!(decoded(&pdf), picture(40, 8, ink_small, 0));
+    same_picture(40, &decoded(&pdf), &picture(40, 8, ink_small, 0));
 }
 
 #[test]
@@ -233,12 +251,12 @@ fn encoded_byte_align_true_reads_rows_that_start_on_a_byte() {
         8,
         dictionary! {
             "K" => 0, "Columns" => 40, "Rows" => 8,
-            "EndOfLine" => true, "EncodedByteAlign" => true,
+            "EncodedByteAlign" => true,
         },
         dictionary! {},
-        G3_1D_FILL_SMALL,
+        G3_1D_ALIGNED_SMALL,
     );
-    assert_eq!(decoded(&pdf), picture(40, 8, ink_small, 0));
+    same_picture(40, &decoded(&pdf), &picture(40, 8, ink_small, 0));
 }
 
 // ---- refusals that are typed, never a silent resize ----
@@ -275,14 +293,11 @@ fn rows_that_disagree_with_height_are_parms() {
 
 #[test]
 fn garbage_is_a_refusal_not_a_panic() {
-    let e = refusal(&ccitt(
-        40,
-        8,
-        small_parms(-1),
-        dictionary! {},
-        &[0xFF, 0x00, 0xAA, 0x55, 0x01, 0x02, 0x03],
-    ));
-    assert_eq!(e.reason(), "decode-failed");
+    // Zero bits are no G4 code, and an empty stream has no rows: both are refusals.
+    for junk in [&[0u8; 7][..], &[][..]] {
+        let e = refusal(&ccitt(40, 8, small_parms(-1), dictionary! {}, junk));
+        assert_eq!(e.reason(), "decode-failed");
+    }
 }
 
 // ---- what the report says ----
@@ -310,7 +325,7 @@ fn a_flate_stage_in_front_of_the_fax_stage_takes_the_second_decode_parms() {
     z.write_all(G4_SMALL).unwrap();
     let flated = z.finish().unwrap();
     let pdf = ccitt_chain(&flated);
-    assert_eq!(decoded(&pdf), picture(40, 8, ink_small, 0));
+    same_picture(40, &decoded(&pdf), &picture(40, 8, ink_small, 0));
 }
 
 fn ccitt_chain(data: &[u8]) -> Vec<u8> {

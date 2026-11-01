@@ -33,16 +33,41 @@ cases = [
     ('G4_SMALL', 40, 8, ink_small, 'g4', ()),
     ('G3_1D_SMALL', 40, 8, ink_small, 'g3:1d', ()),
     ('G3_2D_SMALL', 40, 8, ink_small, 'g3:2d', ()),
-    ('G3_1D_FILL_SMALL', 40, 8, ink_small, 'g3:1d:fill', ()),
     ('G4_WIDE', 1728, 4, ink_wide, 'g4', ()),
 ]
+
+def byte_aligned(strip):
+    # Re-pack a libtiff G3 1D strip (EOL before every row, RTC at the end) the way /EncodedByteAlign
+    # true means it: no EOLs, every row starts on a byte boundary, zero padded.
+    bits = ''.join(f'{b:08b}' for b in strip)
+    ones = [i for i in range(11, len(bits)) if bits[i] == '1' and bits[i-11:i] == '0' * 11]
+    rows = []
+    starts = [-1] if ones[0] - 11 > 0 else []
+    for a, b in zip(starts + ones, (starts + ones)[1:]):
+        row = bits[a + 1:b - 11]
+        if row:
+            rows.append(row)
+    if bits[ones[-1] + 1:].strip('0'):
+        rows.append(bits[ones[-1] + 1:])  # libtiff writes no RTC, so the last row has no EOL after it
+    assert len(rows) == 8, len(rows)
+    out = ''.join(r + '0' * (-len(r) % 8) for r in rows)
+    return bytes(int(out[i:i+8], 2) for i in range(0, len(out), 8))
+
 out = ['//! CCITT fixtures for tests/pvec_1363_pdf_ccitt.rs. Generated, not hand-edited: see the header of the test.\n#![allow(dead_code)]\n']
 for n, w, h, ink, comp, ex in cases:
     s, info = make(w, h, ink, n.lower(), comp, ex)
+    if n == 'G3_1D_SMALL':
+        aligned = byte_aligned(s)
     print(n, len(s), file=sys.stderr)
     out.append(f'/// `{n}`: {w} by {h}, tiffcp -c {comp}, {len(s)} bytes.')
     out.append(f'pub const {n}: &[u8] = &[')
     for i in range(0, len(s), 16):
         out.append('    ' + ' '.join(f'0x{b:02X},' for b in s[i:i+16]))
     out.append('];\n')
+    if n == 'G3_1D_SMALL':
+        out.append(f'/// `G3_1D_ALIGNED_SMALL`: the rows of `G3_1D_SMALL` without EOLs, each padded to a byte (re-packed by `byte_aligned`).')
+        out.append('pub const G3_1D_ALIGNED_SMALL: &[u8] = &[')
+        for i in range(0, len(aligned), 16):
+            out.append('    ' + ' '.join(f'0x{b:02X},' for b in aligned[i:i+16]))
+        out.append('];\n')
 open('ccitt_fixtures.rs', 'w').write('\n'.join(out))
