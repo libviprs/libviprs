@@ -104,8 +104,11 @@ fn issue_1413_the_report_is_part_of_the_output_and_matches_the_entities_written(
 fn issue_1413_two_runs_publish_the_same_bytes() {
     let dir = scratch("det");
     let path = fixture("vc_nested.dwg");
-    let a = dir.join("a.pvec");
-    let b = dir.join("b.pvec");
+    // The report names its sidecar by file name, so the two runs use the same name in two folders.
+    fs::create_dir_all(dir.join("a")).unwrap();
+    fs::create_dir_all(dir.join("b")).unwrap();
+    let a = dir.join("a/o.pvec");
+    let b = dir.join("b/o.pvec");
     PvecConversion::new(CadSource::Path(&path), &a)
         .unit(SourceUnit::Meters)
         .convert()

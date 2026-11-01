@@ -43,6 +43,7 @@ bytes, whatever order the rows were pushed in and however many workers produced 
 | `policy` | `RejectInput`, `RejectEntity` or `Downgrade`. |
 | `exact_only` | True when only `SupportedExact` entities passed. |
 | `allowed` | The allowed PVec capability ids, ascending. |
+| `georeference` | The file name of the georeference sidecar (N7.3) published beside the artifact, `<artifact>.georef.json`. Optional and ignorable, so it is not a version bump: absent when the conversion wrote none. |
 | `entities` | One row per entity, in id order. |
 | `id` | The entity's id from the ordering pass (`pvec::EntityId`). |
 | `source_class` | The drawing's class name for the entity. |

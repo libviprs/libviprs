@@ -207,6 +207,10 @@ pub struct ConversionReport {
     /// The capability profile the conversion ran under. Absent when none was recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<CapabilitySummary>,
+    /// The file name of the georeference sidecar published beside the artifact (N7.3). Absent
+    /// when the conversion wrote none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub georeference: Option<String>,
     /// One row per entity, in id order.
     pub entities: Vec<EntityRow>,
 }
@@ -340,6 +344,7 @@ impl ReportBuilder {
             xrefs,
             bounds,
             capabilities: None,
+            georeference: None,
             entities: self.rows,
         })
     }

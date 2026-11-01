@@ -58,7 +58,11 @@ use thiserror::Error;
 use pvec_facade::CapabilityId;
 
 mod capability;
+mod georef;
 pub use capability::{CapabilityPolicy, ConversionProfile};
+pub use georef::{
+    GeoreferenceError, GeoreferenceHandoff, HandoffV1, SourceBox, UnitRecord, georef_path,
+};
 
 use crate::CancelToken;
 use crate::cad::CadSource;
@@ -115,6 +119,9 @@ pub enum PvecConvertError {
     /// The artifact and report could not be published.
     #[error("the artifact could not be published")]
     Publish(#[source] PublishError),
+    /// The georeference sidecar could not be built or written.
+    #[error("the georeference sidecar could not be produced")]
+    Georeference(#[source] GeoreferenceError),
     /// An entity needs a PVec capability the run did not allow, and the policy is
     /// [`CapabilityPolicy::RejectInput`].
     #[error(
@@ -158,6 +165,8 @@ pub struct PvecConversion<'a> {
     leaves: Option<LeafConfig>,
     cancel: CancelToken,
     gate: Gate,
+    calibration: Option<String>,
+    control_points: Vec<[f64; 2]>,
 }
 
 impl<'a> PvecConversion<'a> {
@@ -172,6 +181,8 @@ impl<'a> PvecConversion<'a> {
             leaves: None,
             cancel: CancelToken::new(),
             gate: Gate::of(ConversionProfile::Default),
+            calibration: None,
+            control_points: Vec::new(),
         }
     }
 
@@ -208,6 +219,22 @@ impl<'a> PvecConversion<'a> {
     #[must_use]
     pub fn cancel(mut self, cancel: CancelToken) -> Self {
         self.cancel = cancel;
+        self
+    }
+
+    /// The identifier of the calibration record the application holds for this drawing. It goes
+    /// into the georeference sidecar and nowhere else: the artifact's bytes do not depend on it.
+    #[must_use]
+    pub fn calibration(mut self, id: impl Into<String>) -> Self {
+        self.calibration = Some(id.into());
+        self
+    }
+
+    /// Control points in source space (drawing coordinates, no world coordinates), for the
+    /// georeference sidecar.
+    #[must_use]
+    pub fn control_points(mut self, points: impl IntoIterator<Item = [f64; 2]>) -> Self {
+        self.control_points = points.into_iter().collect();
         self
     }
 
@@ -270,8 +297,9 @@ impl<'a> PvecConversion<'a> {
             return Err(PvecConvertError::Cancelled);
         }
         let provider = AcadrustProvider::open(self.source).map_err(PvecConvertError::Open)?;
-        let unit = self.unit.unwrap_or_else(|| provider.source_unit());
-        self.run(&provider, unit)
+        let declared = provider.source_unit();
+        let unit = self.unit.unwrap_or(declared);
+        self.run(&provider, declared, unit)
     }
 
     /// Converts with provider `P`. The trait carries no unit, so [`unit`](Self::unit) is required.
@@ -285,7 +313,8 @@ impl<'a> PvecConversion<'a> {
         }
         let unit = self.unit.ok_or(PvecConvertError::UnitRequired)?;
         let provider = P::open(self.source).map_err(PvecConvertError::Open)?;
-        self.run(&provider, unit)
+        // The trait reports no unit, so the drawing's own is unknown; the caller's is applied.
+        self.run(&provider, SourceUnit::Unknown, unit)
     }
 
     /// Everything a conversion decides about its entities, up to but not including the write.
@@ -427,8 +456,10 @@ impl<'a> PvecConversion<'a> {
     fn run<P: DwgProvider>(
         self,
         provider: &P,
+        declared: SourceUnit,
         unit: SourceUnit,
     ) -> Result<PvecConversionOutput, PvecConvertError> {
+        georef::check_finite(&self.control_points).map_err(PvecConvertError::Georeference)?;
         let Classified {
             geometries,
             rows,
@@ -442,8 +473,11 @@ impl<'a> PvecConversion<'a> {
             leaves,
             cancel,
             gate,
+            calibration,
+            control_points,
             ..
         } = self;
+        let _ = (declared, calibration, control_points);
 
         let artifact = write_geometry(
             &WriteConfig { unit, leaves },
