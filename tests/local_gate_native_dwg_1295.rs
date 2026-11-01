@@ -124,6 +124,8 @@ fn every_test_that_requires_the_native_archive_is_run_by_the_cell() {
     for e in std::fs::read_dir(dir).unwrap() {
         let p = e.unwrap().path();
         if p.extension().is_some_and(|x| x == "rs")
+            && p.file_stem()
+                .is_some_and(|n| n != "local_gate_native_dwg_1295")
             && std::fs::read_to_string(&p)
                 .unwrap()
                 .contains("LIBVIPRS_REQUIRE_ACADSHARP_NATIVE")
