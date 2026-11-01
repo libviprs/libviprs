@@ -185,6 +185,7 @@ fn files_under(dir: &Path) -> Vec<String> {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem
 fn finish_to_publishes_atomically_and_leaves_no_staging_file() {
     let staging = tempfile::tempdir().unwrap();
     let dest = tempfile::tempdir().unwrap();
@@ -205,6 +206,7 @@ fn finish_to_publishes_atomically_and_leaves_no_staging_file() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem
 fn a_failed_publish_leaves_neither_a_file_nor_a_staging_file() {
     let staging = tempfile::tempdir().unwrap();
     let dest = tempfile::tempdir().unwrap();
@@ -233,6 +235,7 @@ impl TileSink for CancelAfter<'_> {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem
 fn cancelling_mid_run_stops_the_run_and_leaves_nothing_on_disk() {
     let staging = tempfile::tempdir().unwrap();
     let raster = scan(1300, 900);
@@ -265,6 +268,7 @@ impl TileSink for PanicAfter<'_> {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem
 fn a_panic_mid_run_leaves_nothing_on_disk_and_the_sink_stays_usable() {
     let staging = tempfile::tempdir().unwrap();
     let raster = scan(1300, 900);

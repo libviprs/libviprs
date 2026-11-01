@@ -140,6 +140,7 @@ fn peak_above_baseline<T>(f: impl FnOnce() -> T) -> (u64, T) {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem
 #[ignore = "memory gate: run with --release --ignored on the gate host"]
 fn the_pvec_sink_peaks_within_the_pmtiles_sink_plus_the_encoded_pyramid() {
     let (w, h) = match std::env::var("LIBVIPRS_1331_SCAN").as_deref() {
