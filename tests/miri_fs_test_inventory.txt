@@ -572,6 +572,8 @@ annotated   fs-detected  tests/pvec_1417_progress.rs::issue_1417_a_precancelled_
 annotated   fs-detected  tests/pvec_1417_progress.rs::issue_1417_a_stalled_consumer_never_sees_more_than_the_configured_capacity_queued
 annotated   fs-detected  tests/pvec_1417_progress.rs::issue_1417_the_events_carry_the_counts_of_the_run
 annotated   fs-detected  tests/pvec_1417_progress.rs::issue_1417_two_runs_over_the_same_input_report_the_same_events_in_the_same_order
+annotated   fs-detected  tests/pvec_1430_convert_spline.rs::no_spline_is_reported_as_an_unmapped_source_class
+annotated   fs-detected  tests/pvec_1430_convert_spline.rs::planar_splines_are_written_and_a_3d_one_is_refused_by_name
 annotated   fs-detected  tests/pvec_api_surface.rs::no_index_directory_or_straddler_type_is_defined_under_src_pvec
 annotated   fs-detected  tests/pvec_api_surface.rs::no_pvec_path_under_src_is_outside_the_allowed_surface
 annotated   fs-detected  tests/pvec_api_surface.rs::no_writer_call_is_made_outside_the_funnel

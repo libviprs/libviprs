@@ -34,6 +34,7 @@ fn drawing() -> Vec<u8> {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn planar_splines_are_written_and_a_3d_one_is_refused_by_name() {
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("s.pvec");
@@ -59,6 +60,7 @@ fn planar_splines_are_written_and_a_3d_one_is_refused_by_name() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn no_spline_is_reported_as_an_unmapped_source_class() {
     let dir = tempfile::tempdir().unwrap();
     let bytes = drawing();
