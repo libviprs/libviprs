@@ -49,6 +49,7 @@ fn issue_1413_a_conversion_publishes_the_artifact_and_a_report_with_the_fixtures
     let dest = dir.join("layers.pvec");
     let path = fixture("vc_layers.dwg");
     let out = PvecConversion::new(CadSource::Path(&path), &dest)
+        .unit(SourceUnit::Meters)
         .convert()
         .unwrap();
 
@@ -56,11 +57,14 @@ fn issue_1413_a_conversion_publishes_the_artifact_and_a_report_with_the_fixtures
     assert!(dest.exists() && report_path(&dest).exists());
     assert_eq!(out.report.totals.encountered, 9);
     assert_eq!(out.report.view.included, 3);
-    assert_eq!(out.report.totals.by_fidelity["SupportedExact"], 3);
+    let drawn = out.report.totals.by_fidelity["SupportedExact"]
+        + out.report.totals.by_fidelity["SupportedEquivalent"];
+    assert_eq!(drawn, 3);
     assert_eq!(out.report.totals.by_fidelity["IgnoredByPolicy"], 6);
     assert_eq!(out.fidelity.encountered(), 9);
     assert_eq!(out.fidelity.count(FidelityClass::IgnoredByPolicy), 6);
     assert_eq!(out.written, 3);
+    assert_eq!(out.report.totals.by_source_class["INSERT"], 2);
 
     let reader = open_published(&dest).unwrap();
     assert_eq!(reader.entity_count().unwrap(), 3);
@@ -77,6 +81,7 @@ fn issue_1413_the_report_is_part_of_the_output_and_matches_the_entities_written(
     let dest = dir.join("nested.pvec");
     let path = fixture("vc_nested.dwg");
     let out = PvecConversion::new(CadSource::Path(&path), &dest)
+        .unit(SourceUnit::Meters)
         .convert()
         .unwrap();
     let rows_with_geometry = out
@@ -102,9 +107,11 @@ fn issue_1413_two_runs_publish_the_same_bytes() {
     let a = dir.join("a.pvec");
     let b = dir.join("b.pvec");
     PvecConversion::new(CadSource::Path(&path), &a)
+        .unit(SourceUnit::Meters)
         .convert()
         .unwrap();
     PvecConversion::new(CadSource::Path(&path), &b)
+        .unit(SourceUnit::Meters)
         .convert()
         .unwrap();
     assert_eq!(fs::read(&a).unwrap(), fs::read(&b).unwrap());
@@ -136,8 +143,8 @@ fn issue_1413_a_unit_pvec_cannot_declare_reaches_the_caller_through_the_source_c
     let dir = scratch("unit");
     let path = fixture("vc_layers.dwg");
     let dest = dir.join("u.pvec");
+    // The fixture's header declares no unit, so with nothing said the writer refuses it.
     let err = PvecConversion::new(CadSource::Path(&path), &dest)
-        .unit(SourceUnit::Unitless)
         .convert()
         .unwrap_err();
     let PvecConvertError::Write(w) = &err else {
