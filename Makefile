@@ -1,4 +1,4 @@
-.PHONY: ci fmt clippy test miri loom doc
+.PHONY: ci fmt clippy test miri loom doc native-dwg
 
 # The features CI's Check & Lint job runs clippy against, which is exactly the
 # `lint: true` rows of `EXPECTED` in `tests/ci_feature_coverage.rs`. That file
@@ -39,6 +39,13 @@ ci:
 	$(MAKE) miri
 	@echo ""
 	@echo "All CI checks passed."
+
+## The native DWG cells (issue #1295). They need the pinned libviprs-dep archive
+## from the network, so they are not part of `ci`: `tools/scheduled-native-dwg.sh`
+## runs this on MARS every night, and you can run it by hand before touching the
+## DWG path. `tests/local_gate_native_dwg_1295.rs` holds the two apart.
+native-dwg:
+	tools/local-ci.py --workflow native-dwg.yml
 
 ## Build the docs and fail on any bad intra-doc link (Docs job).
 ##
