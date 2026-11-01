@@ -44,7 +44,7 @@ set -e
 printf '%s\t%s\t%s\t%ss\n' "$stamp" "$ref" "$([ $status -eq 0 ] && echo pass || echo FAIL)" "$(( $(date +%s) - start ))" >>"$out/results.tsv"
 [ $status -eq 0 ] || { tail -n 40 "$out/$stamp.log" >&2; }
 
-# The cgroup form of the worker test (#1392, part of #1256). Its result is its
+# tools/cgroup-worker-lane.sh: the cgroup form of the worker test (#1392, part of #1256). Its result is its
 # own line in results.tsv, and it decides the exit status together with the cells.
 lane_status=0
 "$(dirname "$0")/cgroup-worker-lane.sh" "$ref" >>"$out/$stamp.log" 2>&1 || lane_status=$?
