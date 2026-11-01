@@ -354,6 +354,7 @@ fn ccitt_chain(data: &[u8]) -> Vec<u8> {
 /// nothing. The content stream of page N is `q 1584 0 0 H 0 0 cm /Im0 Do Q`; the image is 8800
 /// by ROWS, so the placement is `[a/w, -c/h, b/w, -d/h, c+e, d+f]` with c = e = 0.
 #[test]
+#[cfg_attr(miri, ignore)] // reads a 5 MB file from outside the repo
 fn the_scanned_sheet_converts_to_seven_underlays() {
     let Some(dir) = std::env::var_os("LIBVIPRS_PDF_CANDIDATES") else {
         eprintln!("LIBVIPRS_PDF_CANDIDATES is not set: the 5 MB corpus file is not in the repo");
