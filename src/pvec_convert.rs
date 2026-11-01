@@ -71,6 +71,7 @@ use crate::observe::{EngineEvent, EngineObserver};
 use crate::pvec::diagnostics::{Diagnostic, DiagnosticCode};
 use crate::pvec::dwg_acadrust::AcadrustProvider;
 use crate::pvec::dwg_basic::{self, BasicError};
+use crate::pvec::dwg_spline::{self, SplineError};
 use crate::pvec::fidelity::{Basis, Classification, FidelityReport, ReasonCode, Tally, TallyError};
 use crate::pvec::flatten::{
     BlockResolver, FlatEntity, FlattenBounds, FlattenError, LineageStore, SkipReason, SkippedInsert,
@@ -838,12 +839,7 @@ fn classify_leaf(f: &FlatEntity, gate: &Gate) -> Result<Done, PvecConvertError> 
     let class = f.entity.provenance.class_name.as_str();
     let basic = match dwg_basic::extract(&f.entity) {
         Ok(b) => b,
-        Err(BasicError::NotBasic) => {
-            return Ok(without_geometry(
-                crate::pvec::classify_unmapped(&f.entity),
-                Vec::new(),
-            ));
-        }
+        Err(BasicError::NotBasic) => return classify_spline_leaf(f, gate),
         Err(e) => {
             return Ok(without_geometry(
                 e.classification(class),
@@ -860,6 +856,17 @@ fn classify_leaf(f: &FlatEntity, gate: &Gate) -> Result<Done, PvecConvertError> 
             ));
         }
     };
+    promote_leaf(f, record, gate)
+}
+
+/// Pushes `record` through the map flattening composed for its leaf, and checks it against the
+/// gate. A leaf a layout owns directly has the identity map.
+fn promote_leaf(
+    f: &FlatEntity,
+    record: Normalized2DGeometry,
+    gate: &Gate,
+) -> Result<Done, PvecConvertError> {
+    let class = f.entity.provenance.class_name.as_str();
     // A leaf a layout owns directly has the identity map. A nested one is pushed through the map
     // flattening composed for it, as one level named by its innermost INSERT.
     let path = &f.entity.provenance.block_path;
@@ -892,6 +899,38 @@ fn classify_leaf(f: &FlatEntity, gate: &Gate) -> Result<Done, PvecConvertError> 
             vec![format!("{class}: {e:?}")],
         )),
     }
+}
+
+/// A leaf the basic extractor does not take: a SPLINE goes through the exact spline extractor
+/// (#1430), anything else is an unmapped source class. The record's own class is the entity's, so
+/// a one-span spline that became a Bezier is exact and an unwrapped periodic one is equivalent.
+fn classify_spline_leaf(f: &FlatEntity, gate: &Gate) -> Result<Done, PvecConvertError> {
+    let class = f.entity.provenance.class_name.as_str();
+    let spline = match dwg_spline::extract(&f.entity) {
+        Ok(s) => s,
+        Err(SplineError::NotSpline) => {
+            return Ok(without_geometry(
+                crate::pvec::classify_unmapped(&f.entity),
+                Vec::new(),
+            ));
+        }
+        Err(e) => {
+            return Ok(without_geometry(
+                e.classification(class),
+                vec![format!("{class}: {e}")],
+            ));
+        }
+    };
+    let record = match Normalized2DGeometry::from_spline(&spline) {
+        Ok(r) => r,
+        Err(e) => {
+            return Ok(without_geometry(
+                Classification::refused(ReasonCode::DegenerateGeometry, class),
+                vec![format!("{class}: {e}")],
+            ));
+        }
+    };
+    promote_leaf(f, record, gate)
 }
 
 /// A record PVec can carry, checked against the gate: its capability must be allowed, and under
