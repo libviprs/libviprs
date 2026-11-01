@@ -46,9 +46,10 @@
       "text": "Web and mobile conformance are green.",
       "status": "not_met",
       "evidence": [
-        "web/vector-viewer/e2e"
+        "web/vector-viewer/e2e",
+        "conformance/android/evidence"
       ],
-      "blocker": "Web is green. Android passes in an emulator (draft PR libviprs/libviprs#1403, not yet gated or merged). iOS is blocked on two sudo commands on mercury that Rom has to run: sudo xcodebuild -license accept, and sudo xcode-select -s /Applications/Xcode.app/Contents/Developer."
+      "blocker": "Web is green and Android passes in an emulator (libviprs/libviprs#1403, merged; the recorded run was on the NAS). iOS is blocked on two sudo commands on mercury that Rom has to run: sudo xcodebuild -license accept, and sudo xcode-select -s /Applications/Xcode.app/Contents/Developer."
     },
     {
       "id": "raster_regression",
