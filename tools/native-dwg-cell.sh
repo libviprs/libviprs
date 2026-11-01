@@ -41,4 +41,5 @@ cargo test --features dwg-acadsharp \
   --test vector_1035_api \
   --test vector_1036_dwg_corpus \
   --test vector_1292_hardened \
+  --test vector_1038_entity_matrix \
   --test vector_1391_limits

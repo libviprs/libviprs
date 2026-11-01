@@ -965,6 +965,11 @@ annotated   not-detected tests/pmtiles_writer.rs::what_the_gzip_level_costs_at_t
 annotated   not-detected tests/pvec_view_profile_1097_fixture.rs::n3_3_1097_vc_layers_dwg_gives_the_worked_example_counts
 annotated   not-detected tests/sample_kind_spine.rs::the_walk_descends_into_subdirectories
 annotated   not-detected tests/unsafe_inventory.rs::the_walk_descends_into_subdirectories
+annotated   fs-detected  tests/vector_1038_entity_matrix.rs::no_row_is_both_empty_and_unreported
+annotated   fs-detected  tests/vector_1038_entity_matrix.rs::the_entity_matrix_matches_what_the_decoder_does
+annotated   fs-detected  tests/vector_1038_release_gate.rs::met_means_evidence_on_disk_and_not_met_means_a_blocker
+annotated   fs-detected  tests/vector_1038_release_gate.rs::release_ready_is_the_conjunction_of_the_rows
+annotated   fs-detected  tests/vector_1038_release_gate.rs::the_gate_lists_exactly_the_acceptance_criteria
 annotated   fs-detected  tests/vector_1391_limits.rs::max_block_depth_stops_a_decode_with_nested_blocks
 annotated   fs-detected  tests/vector_1391_limits.rs::max_output_bytes_stops_a_decode_that_emits_a_lot
 annotated   fs-detected  tests/vector_1391_limits.rs::max_polyline_points_stops_a_decode_with_a_long_polyline
