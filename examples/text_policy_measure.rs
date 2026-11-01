@@ -142,23 +142,52 @@ fn dwg(path: &std::path::Path) {
         }
     };
     let (mut all, mut other) = (Vec::new(), 0usize);
+    let mut styles = std::collections::BTreeMap::new();
     for l in p.layouts().unwrap() {
-        match p
-            .entities(&EntityScope::Layout(l.id))
-            .and_then(|mut c| c.collect_all())
-        {
+        let scope = EntityScope::Layout(l.id);
+        match p.entities(&scope).and_then(|mut c| c.collect_all()) {
             Ok(v) => all.extend(v),
             Err(_) => other += 1,
+        }
+        if let Ok(s) = p.text_styles(&scope) {
+            styles.extend(s);
         }
     }
     let mut r = TextReport::default();
     r.count_dwg(&all);
+    // `VIPRS_INSTALLED_SHX=txt.shx,simplex.shx` names the fonts that count as installed; with
+    // none, every style that names a font is TEXT_SHX_MISSING.
+    let installed_env = std::env::var("VIPRS_INSTALLED_SHX").unwrap_or_default();
+    let installed: Vec<&str> = installed_env.split(',').filter(|s| !s.is_empty()).collect();
+    r.bucket_dwg_entities(&all, &styles, &installed);
+    let mut by_style: std::collections::BTreeMap<(String, String), u64> = Default::default();
+    for v in styles.values() {
+        let font = if v.font_file.is_empty() {
+            &v.true_type_font
+        } else {
+            &v.font_file
+        };
+        *by_style
+            .entry((v.style_name.clone(), font.clone()))
+            .or_insert(0) += 1;
+    }
+    let styles_text: Vec<String> = by_style
+        .iter()
+        .map(|((s, f), n)| format!("{s}:{f}x{n}"))
+        .collect();
+    let buckets: Vec<String> = r
+        .by_outcome
+        .iter()
+        .map(|(o, n)| format!("{}={n}", o.code()))
+        .collect();
     println!(
-        "{}\tentities={}\tTEXT={}\tMTEXT={}\tlayouts_unreadable={other}",
+        "{}\tentities={}\tTEXT={}\tMTEXT={}\tlayouts_unreadable={other}\tstyles={}\tbuckets={}",
         path.file_name().unwrap().to_string_lossy(),
         all.len(),
         r.dwg.text,
-        r.dwg.mtext
+        r.dwg.mtext,
+        styles_text.join(";"),
+        buckets.join(",")
     );
 }
 
