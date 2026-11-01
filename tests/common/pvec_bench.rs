@@ -825,6 +825,51 @@ pub fn unattributed(stage_secs: &[f64], total_secs: f64) -> f64 {
     (total_secs - stage_secs.iter().sum::<f64>()) / total_secs
 }
 
+/// How `cur` compares with the baseline row `base` for a generation cell: more than 10% growth in
+/// wall time or more than 5% growth in artifact bytes, or an artifact more than 2 percentage
+/// points larger against its source drawing, is a regression. An unstable wall time never gates;
+/// the byte figures are deterministic and always do.
+pub fn generation_regressions(base: &Value, cur: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    let unstable = |r: &Value| r["unstable"].as_bool().unwrap_or(false);
+    let num = |r: &Value, path: &[&str]| {
+        path.iter()
+            .try_fold(r, |v, k| v.get(*k))
+            .and_then(Value::as_f64)
+    };
+    if !unstable(base)
+        && !unstable(cur)
+        && let (Some(b), Some(c)) = (
+            num(base, &["wall_secs", "median"]),
+            num(cur, &["wall_secs", "median"]),
+        )
+        && c > b * 1.10
+    {
+        out.push(format!(
+            "generation wall time grew from {b:.4}s to {c:.4}s, more than 10%"
+        ));
+    }
+    if let (Some(b), Some(c)) = (
+        num(base, &["artifact_bytes"]),
+        num(cur, &["artifact_bytes"]),
+    ) && c > b * 1.05
+    {
+        out.push(format!(
+            "artifact bytes grew from {b:.0} to {c:.0}, more than 5%"
+        ));
+    }
+    if let (Some(b), Some(c)) = (
+        num(base, &["artifact_pct_of_source"]),
+        num(cur, &["artifact_pct_of_source"]),
+    ) && c > b + 2.0
+    {
+        out.push(format!(
+            "the artifact went from {b:.1}% to {c:.1}% of its source, more than 2 points"
+        ));
+    }
+    out
+}
+
 /// More than 10% growth in process peak RSS or in wall time against the baseline at an unchanged
 /// fixture, even below the ceiling. An unstable row on either side never gates the wall time.
 pub fn memory_regressions(base: &Value, cur: &Value) -> Vec<String> {

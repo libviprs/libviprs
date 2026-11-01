@@ -784,6 +784,8 @@ name = "pvec_1417_progress"
 required-features = ["pvec-convert"]
 
 [dev-dependencies]
+# Runs the fuzz targets' bodies on their seed corpus in the ordinary suite (tests/pvec_1437_fuzz_seeds.rs).
+arbitrary = { workspace = true }
 loom = { workspace = true }
 pvec-capabilities = { workspace = true }
 proptest = { workspace = true }
