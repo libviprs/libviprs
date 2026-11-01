@@ -601,6 +601,9 @@ annotated   fs-detected  tests/pvec_api_surface.rs::only_the_semantic_crates_are
 annotated   fs-detected  tests/pvec_api_surface.rs::src_pvec_implements_no_curve_evaluation_knot_insertion_or_tessellation
 annotated   fs-detected  tests/pvec_api_surface.rs::the_facade_is_named_by_the_funnel_and_the_raster_files_only
 annotated   fs-detected  tests/pvec_api_surface.rs::the_pvec_dependencies_stay_semantic_and_optional
+annotated   fs-detected  tests/pvec_bounded_memory_bench.rs::bounded_memory_bench
+annotated   fs-detected  tests/pvec_bounded_memory_bench.rs::bounded_memory_child
+annotated   fs-detected  tests/pvec_bounded_memory_bench.rs::bounded_memory_gen
 annotated   fs-detected  tests/pvec_dual_oracle.rs::n2_2_1050_every_fixture_that_is_not_known_truth_is_executed_and_reported
 annotated   fs-detected  tests/pvec_dual_oracle.rs::n2_2_1050_the_pin_summary_is_the_index_and_a_bump_reads_as_per_class_changes
 annotated   fs-detected  tests/pvec_dwg_pdf_differential.rs::a_loss_entry_that_no_longer_matches_fails_the_run
