@@ -168,11 +168,15 @@ pub enum ReasonCode {
     /// An INSERT map that turns a conic into one too eccentric to keep (NP-07). `Unsupported`,
     /// and `TRANSFORM_CONIC_ILL_CONDITIONED` in the diagnostics.
     TransformConicIllConditioned,
+    /// The entity maps to a PVec capability the caller did not allow (N7.2), or to an equivalent
+    /// rather than exact construct under a profile that allows exact ones only.
+    /// `RequiresPVecCapability`, and `capability-not-allowed` in the diagnostics.
+    CapabilityNotAllowed,
 }
 
 impl ReasonCode {
     /// Every code, in a fixed order.
-    pub const ALL: [ReasonCode; 23] = [
+    pub const ALL: [ReasonCode; 24] = [
         ReasonCode::SplineKnotsNotReported,
         ReasonCode::SplinePeriodicNotReported,
         ReasonCode::SplineWeightsNotReported,
@@ -196,6 +200,7 @@ impl ReasonCode {
         ReasonCode::TransformNonFinite,
         ReasonCode::TransformSingular,
         ReasonCode::TransformConicIllConditioned,
+        ReasonCode::CapabilityNotAllowed,
     ];
 
     /// The stable machine-readable spelling.
@@ -225,6 +230,7 @@ impl ReasonCode {
             ReasonCode::TransformNonFinite => "transform-non-finite",
             ReasonCode::TransformSingular => "transform-singular",
             ReasonCode::TransformConicIllConditioned => "transform-conic-ill-conditioned",
+            ReasonCode::CapabilityNotAllowed => "capability-not-allowed",
         }
     }
 
@@ -235,9 +241,10 @@ impl ReasonCode {
             ReasonCode::SplineKnotsNotReported
             | ReasonCode::SplinePeriodicNotReported
             | ReasonCode::SplineWeightsNotReported => FidelityClass::RequiresExtension,
-            ReasonCode::Spline3d | ReasonCode::Helix | ReasonCode::Geometry3d => {
-                FidelityClass::RequiresPVecCapability
-            }
+            ReasonCode::Spline3d
+            | ReasonCode::Helix
+            | ReasonCode::Geometry3d
+            | ReasonCode::CapabilityNotAllowed => FidelityClass::RequiresPVecCapability,
             ReasonCode::SplineLimitExceeded
             | ReasonCode::SplineMalformed
             | ReasonCode::SplinePolicyRefused

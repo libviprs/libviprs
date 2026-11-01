@@ -81,6 +81,9 @@
 //!   PVec artifact through the facade's `PvecWriter`, and `pvec::publish`, the atomic publish of
 //!   the artifact and its report (issue #1314). Pure Rust; the PVec facade is a git dependency
 //!   pinned by revision.
+//! - **`pvec-convert`** — gates `pvec_convert`, the conversion API: a DWG, a view profile and
+//!   resource limits in, a published `.pvec` artifact and its conversion report out (issue
+//!   #1048). Joins `pvec-write` and `dwg-acadrust`; acadrust is the default provider.
 //! - **`serde`** — adds public `Serialize` / `Deserialize` derives to the wire
 //!   and config types ([`PyramidPlan`], [`EngineConfig`], [`TileCoord`],
 //!   [`Layout`], and the rest) so an out-of-process caller can rebuild a job
@@ -206,6 +209,9 @@ pub mod planner;
 pub mod pmtiles;
 pub(crate) mod poison;
 pub mod pvec;
+#[cfg(feature = "pvec-convert")]
+#[cfg_attr(docsrs, doc(cfg(feature = "pvec-convert")))]
+pub mod pvec_convert;
 pub mod pyramid_migrate;
 pub mod pyramid_reader;
 pub mod radiance;
