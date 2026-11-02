@@ -588,7 +588,7 @@ pub enum SourceLineweight {
 /// A linetype as the drawing states it, after the BYLAYER rule has been applied.
 ///
 /// There is no `ByLayer` arm, see [`SourceColour`]. `Continuous` is a pattern with no elements,
-/// which a consumer reads as a solid line.
+/// which a consumer reads as a solid line. A name the linetype table lacks is `Absent`.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum SourceLinetype {
