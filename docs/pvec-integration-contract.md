@@ -84,3 +84,8 @@ that would bound it is not built (pvec#235). Making PVec the default now would m
 stay, and the caller picks the path that fits the drawing and the use. This is the outcome to revisit when the spool
 lands and the bounded-memory benchmark has a strategy that passes its ceiling: the decision is this page and one
 line of the pin, and the test will say when they disagree.
+
+Since this was recorded the writer's spill has landed (#1314, #1417): a spilled conversion adds 24 bytes an entity in the
+writer instead of 391 to 419 (`docs/adr/pvec-tiers-and-spool-rescope.md`). The bounded-memory benchmark has not been re-run
+with it, and libviprs' own per-entity state is still in memory, so the figures above stand and the outcome is not
+revisited here. Re-running it, and then confirming or changing the outcome, is the owner's call on #1070.

@@ -196,7 +196,7 @@ LIBVIPRS_BENCH_HOST=mars cargo test --release --features pvec-convert \
     --test pvec_bounded_memory_bench -- --ignored --nocapture bounded_memory_bench
 ```
 
-**Only one strategy exists to measure.** The spool and the streaming sink are not built (pvec#235), so the two-pass bounds-then-index and the external-sort spooling strategies have no code, and their rows print as "not built". The strategy measured is the direct, in-memory one: the classifier, the report rows, the records and the facade's writer all hold their entities until the artifact is sealed. Bytes spilled, bytes re-read and spill count are zero for it by construction.
+**Only one strategy was measured.** The writer's spill and streaming sink have landed since (pvec#235, libviprs #1314 and #1417), but this benchmark has not been re-run with `PvecConversion::spill`, and the two-pass bounds-then-index and external-sort strategies still have no code, so their rows print as "not built". The strategy measured is the direct, in-memory one: the classifier, the report rows, the records and the facade's writer all hold their entities until the artifact is sealed. Bytes spilled, bytes re-read and spill count are zero for it by construction.
 
 Measured on MARS (x86_64-linux-mars, native), release build, three runs per variant, the largest peak of the three, wall time the median:
 
@@ -225,7 +225,7 @@ For comparison, the facade's writer alone costs about 310 bytes per entity (`doc
 #1064 asks for each default to be set from the curve that chose it, and for a knob with no curve to be deleted rather than defaulted.
 Looking at what the code actually exposes, the conversion has **one tunable that can be swept**: `PvecConversion::queue_capacity`
 (default 64, the bound of the queue between the classifier and its consumer, `src/sync_queue.rs`). There is no provider or normalization
-worker count (the classifier is one thread and the consumer another), no spool buffer or spill threshold (the spool is not built, pvec#235),
+worker count (the classifier is one thread and the consumer another), no spool buffer or spill threshold in the swept set (the spill budget, `SpillConfig::budget`, exists since #1417 and was not swept),
 and PVec's chunk size is PVec's. The two other constants in the conversion code are not throughput knobs, they set how often the run
 looks at the cancel token. So the table has three constants and says which of them was swept.
 
@@ -236,7 +236,7 @@ looks at the cancel token. So the table has three constants and says which of th
 | entities per batch (cancel poll, progress event) | `BATCH` | `src/pvec_convert.rs` | 256 | not swept | not a throughput knob: it bounds how long a cancel waits, one batch of classifications |
 | entities between cancel checks while writing | `CANCEL_EVERY` | `src/pvec/writer.rs` | 1024 | not swept | not a throughput knob: it bounds how long a cancel waits during the write |
 | provider and normalization worker count | none | none | none | none | no such knob exists: one classifier thread, one consumer |
-| spool buffer and spill threshold | none | none | none | none | no spool: pvec#235 |
+| spool buffer and spill threshold | none | none | none | none | not swept: `SpillConfig::budget` exists since #1417 |
 | PVec chunk size | none | none | none | none | PVec's own, not exposed by the facade |
 <!-- defaults:end -->
 
