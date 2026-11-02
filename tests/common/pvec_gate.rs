@@ -6,6 +6,12 @@
 //! set, leaves the gate's artifacts there: `<name>.actual` (what this run computed) and
 //! `<name>.diff` (empty when the baseline holds). `PVEC_GATE_BLESS=1` rewrites the baseline, which
 //! is how a deliberate change is recorded.
+//!
+//! A baseline is the x86_64 one. A line that comes out differently on another architecture is kept
+//! in `<name>.<arch>.baseline` next to it (only the differing lines), and that file replaces the
+//! line of the same fixture when the suite runs there. Blessing on x86_64 writes the base file and
+//! blessing elsewhere writes the override, so a divergence between architectures is a checked-in,
+//! reviewable row and not a flaky gate.
 
 #![allow(dead_code)] // each gate suite uses its own part
 
@@ -18,6 +24,19 @@ pub fn baseline_path(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/pvec-gate")
         .join(format!("{name}.baseline"))
+}
+
+/// The override file for this architecture, `None` on x86_64 where the base file is the truth.
+pub fn arch_override_path(name: &str) -> Option<PathBuf> {
+    (std::env::consts::ARCH != "x86_64").then(|| {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/pvec-gate")
+            .join(format!("{name}.{}.baseline", std::env::consts::ARCH))
+    })
+}
+
+fn first_word(l: &str) -> &str {
+    l.split_whitespace().next().unwrap_or("")
 }
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
@@ -62,16 +81,42 @@ pub fn check(gate: &str, name: &str, actual: &str) {
     lines.sort_unstable();
     let actual = &(lines.join("\n") + "\n");
     let path = baseline_path(name);
+    let base_text = || {
+        fs::read_to_string(&path).unwrap_or_else(|e| {
+            panic!(
+                "{gate} gate: the baseline {} is missing ({e}); PVEC_GATE_BLESS=1 writes it",
+                path.display()
+            )
+        })
+    };
     if std::env::var_os("PVEC_GATE_BLESS").is_some() {
-        fs::write(&path, actual).unwrap();
+        match arch_override_path(name) {
+            None => fs::write(&path, actual).unwrap(),
+            Some(over) => {
+                let base = base_text();
+                let changed: Vec<&str> = actual
+                    .lines()
+                    .filter(|l| !base.lines().any(|b| b == *l))
+                    .collect();
+                if changed.is_empty() {
+                    let _ = fs::remove_file(&over);
+                } else {
+                    fs::write(&over, changed.join("\n") + "\n").unwrap();
+                }
+            }
+        }
         return;
     }
-    let baseline = fs::read_to_string(&path).unwrap_or_else(|e| {
-        panic!(
-            "{gate} gate: the baseline {} is missing ({e}); PVEC_GATE_BLESS=1 writes it",
-            path.display()
-        )
-    });
+    let mut baseline = base_text();
+    if let Some(over) = arch_override_path(name).filter(|p| p.exists()) {
+        let rows = fs::read_to_string(over).unwrap();
+        let keep: Vec<&str> = baseline
+            .lines()
+            .filter(|l| !rows.lines().any(|r| first_word(r) == first_word(l)))
+            .chain(rows.lines())
+            .collect();
+        baseline = keep.join("\n") + "\n";
+    }
     let changes = diff(&baseline, actual);
     if let Some(out) = std::env::var_os("PVEC_GATE_OUT") {
         let out = PathBuf::from(out);

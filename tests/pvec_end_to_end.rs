@@ -319,17 +319,15 @@ fn differs(class: &str, g: &Value, t: &Value, curve: &Curve) -> Problems {
 fn spline(out: &mut Problems, class: &str, g: &Value, t: &Value, curve: &Curve) {
     let degree = g["degree"].as_u64().unwrap_or(0) as usize;
     let want_cps = points(&g["control_points"]);
-    let (got_degree, cps, knots, weights): (
-        usize,
-        Vec<[f64; 2]>,
-        Option<Vec<f64>>,
-        Option<Vec<f64>>,
-    ) = match curve {
+    let (got_degree, cps, knots, weights) = match curve {
         Curve::BSpline(s) => (
             s.degree(),
-            s.control_points().iter().map(|p| [p.x, p.y]).collect(),
+            s.control_points()
+                .iter()
+                .map(|p| [p.x, p.y])
+                .collect::<Vec<[f64; 2]>>(),
             Some(s.knots().to_vec()),
-            None,
+            None::<Vec<f64>>,
         ),
         Curve::RationalBSpline(s) => (
             s.degree(),
