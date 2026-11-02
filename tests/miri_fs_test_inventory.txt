@@ -515,6 +515,7 @@ annotated   fs-detected  tests/pvec_1314_publish.rs::issue_1314_the_stages_arriv
 annotated   fs-detected  tests/pvec_1314_spool.rs::issue_1314_a_cancel_during_the_flush_of_a_streamed_publish_keeps_the_previous_pair
 annotated   fs-detected  tests/pvec_1314_spool.rs::issue_1314_a_cancel_during_the_flush_returns_cancelled_and_leaves_no_spool_file
 annotated   fs-detected  tests/pvec_1314_spool.rs::issue_1314_a_failing_sink_is_a_pvec_error_with_the_io_error_underneath_and_no_spool_left
+annotated   fs-detected  tests/pvec_1314_spool.rs::issue_1314_a_panic_during_the_flush_leaves_no_spool_file
 annotated   fs-detected  tests/pvec_1314_spool.rs::issue_1314_a_producer_error_is_returned_as_the_producers_and_leaves_nothing
 annotated   fs-detected  tests/pvec_1314_spool.rs::issue_1314_a_streamed_publish_refuses_bytes_that_are_not_an_artifact
 annotated   fs-detected  tests/pvec_1314_spool.rs::issue_1314_a_streamed_publish_writes_the_pair_and_leaves_nothing_else
