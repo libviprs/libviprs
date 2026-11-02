@@ -467,7 +467,7 @@ filesystem.
 
 ```sh
 make fmt      # check formatting
-make clippy   # clippy over the default build and each of the sixteen features CI lints
+make clippy   # clippy over the default build and each of the seventeen features CI lints
 make test     # bare `cargo test`, which is the Test job's first cell of nine
 make doc      # the Docs job
 make miri     # miri (requires nightly + miri component)
@@ -475,7 +475,7 @@ make loom     # `loom_tests`, which is the Loom job's first invocation of two
 ```
 
 > **Prerequisites:** `make ci` needs Docker running and PyYAML (`pip3 install pyyaml`).
-> Budget disk for it: the whole job list compiles sixteen clippy feature permutations,
+> Budget disk for it: the whole job list compiles seventeen clippy feature permutations,
 > sixteen test ones and nine more under the 1.99 toolchain, and each gets its own
 > artifact set on the `libviprs-ci-cargo` volume rather than replacing the last.
 > `make miri` requires a nightly toolchain with the miri component, at or above this
