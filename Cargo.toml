@@ -755,6 +755,10 @@ required-features = ["dwg-acadrust"]
 name = "pvec_writer_memory"
 required-features = ["pvec-write"]
 
+[[example]]
+name = "pvec_drift"
+required-features = ["pvec-write"]
+
 [[test]]
 name = "pvec_1314_writer_funnel"
 required-features = ["pvec-write"]
