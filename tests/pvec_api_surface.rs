@@ -623,6 +623,7 @@ fn no_index_directory_or_straddler_type_is_defined_under_src_pvec() {
 /// Issue #1093: no component row carries a provider-specific type. `pvec::components` is the
 /// place rows are built, so it may name neither a DWG reader nor a PDF library.
 #[test]
+#[cfg_attr(miri, ignore)]
 fn issue_1093_components_name_no_provider_specific_type() {
     let src = fs::read_to_string(root().join("src/pvec/components.rs")).unwrap();
     let code = strip_comments(&src);
