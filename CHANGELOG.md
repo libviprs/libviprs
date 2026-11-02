@@ -27,6 +27,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A conversion reports each chunk it writes** (issue #1463, follow-up to #1048). `write_geometry` and
+  `write_geometry_to` take one more plain argument, `on_chunk(entities, bytes)`, called after each batch of
+  1024 pushed entities and after each write the flush makes to the sink. `PvecConversion` forwards it as
+  `EngineEvent::ConversionChunkWritten { chunk, entities, bytes }`, before `ConversionArtifactWritten`. A
+  cancel that fires on a chunk stops the write there, in the flush too, and leaves no spool file and no
+  artifact. For a fixed input, config and budget the events are the same in every run.
+
 - **Property tests for the conversion path** (issue #1457, part of #1070). `tests/pvec_normalization_proptest.rs`: a composed
   transform equals the sequential application of its levels and composition is associative (within `Policy::V1`), a
   singular transform never produces geometry, every entity of a generated drawing lands in exactly one of the six
