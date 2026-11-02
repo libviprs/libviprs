@@ -8,11 +8,11 @@
 //! conversion started (the drawing's bytes are already held and are excluded), and the kernel's
 //! `VmHWM` for the whole child.
 //!
-//! The spool and the streaming sink are not built (pvec#235), so the one strategy there is to
-//! measure is the direct in-memory one. The two-pass and external-sort rows are printed as "not
-//! built". Bytes spilled, bytes re-read and spill count are therefore zero by construction for the
-//! strategy that exists, and the ceilings and the boundedness check are reported against the
-//! criterion, not asserted: today they do not hold, and the document says so.
+//! Two strategies are measured: the direct in-memory one and the spill (`PvecConversion::spill`). The
+//! two-pass strategy has no code and prints a row saying so. The spill bytes are the peak size of
+//! the files in the spill root, sampled while the conversion runs, since the facade does not report
+//! them. The ceilings and the boundedness check are reported against the criterion, not asserted:
+//! today they do not hold, and the document says so.
 //!
 //! ```text
 //! LIBVIPRS_BENCH_HOST=mars cargo test --release --features pvec-convert \
@@ -32,6 +32,7 @@ use std::time::{Duration, Instant};
 
 use libviprs::cad::CadSource;
 use libviprs::pvec::SourceUnit;
+use libviprs::pvec::writer::{LeafConfig, SpillConfig};
 use libviprs::pvec_convert::PvecConversion;
 use pvec_bench::{
     Stat, baseline_rows, blank_columns, cells, generate, host_cpus, host_load, manifest,
@@ -113,14 +114,47 @@ fn bounded_memory_child() {
     let bytes = std::fs::read(env("LIBVIPRS_BM_FILE")).unwrap();
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("out.pvec");
+    let spill_root = dir.path().join("spill");
+    std::fs::create_dir(&spill_root).unwrap();
+    let budget = std::env::var("LIBVIPRS_BM_BUDGET")
+        .ok()
+        .map(|b| b.parse::<u64>().unwrap());
+    // The spill is only bounded for an indexed write, so the spill strategy sets leaves.
+    let mut conversion =
+        PvecConversion::new(CadSource::Bytes(&bytes), &dest).unit(SourceUnit::Meters);
+    if let Some(budget) = budget {
+        conversion = conversion
+            .leaves(LeafConfig {
+                cell_capacity: 256,
+                tier0_max_error: None,
+            })
+            .spill(SpillConfig {
+                root: spill_root.clone(),
+                budget,
+            });
+    }
+    // The most the spill files held at once, sampled while the conversion runs.
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let sampler = {
+        let (stop, root) = (stop.clone(), spill_root.clone());
+        std::thread::spawn(move || {
+            let (mut peak, mut files) = (0u64, 0u64);
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let sizes: Vec<u64> = walk(&root);
+                peak = peak.max(sizes.iter().sum());
+                files = files.max(sizes.len() as u64);
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            (peak, files)
+        })
+    };
     let rss_reset = reset_peak_rss();
     let m = pvec_alloc::mark();
     let t = Instant::now();
-    let out = PvecConversion::new(CadSource::Bytes(&bytes), &dest)
-        .unit(SourceUnit::Meters)
-        .convert()
-        .expect("converts");
+    let out = conversion.convert().expect("converts");
     let wall = t.elapsed().as_secs_f64();
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let (spilled_peak, spill_files) = sampler.join().unwrap();
     let (tracked_peak, allocated) = pvec_alloc::since(m);
     println!(
         "CHILD {}",
@@ -133,26 +167,46 @@ fn bounded_memory_child() {
             "allocated_bytes": allocated,
             "peak_rss_bytes": peak_rss(),
             "rss_is_per_run": rss_reset,
+            "spilled_peak_on_disk": spilled_peak,
+            "spill_files_peak": spill_files,
         })
     );
 }
 
-fn variant(dir: &Path, cell: &str, scale: f64, platform: &str) -> Value {
+/// The sizes of the regular files under `dir`.
+fn walk(dir: &Path) -> Vec<u64> {
+    let mut out = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            match e.metadata() {
+                Ok(m) if m.is_dir() => out.extend(walk(&e.path())),
+                Ok(m) => out.push(m.len()),
+                Err(_) => {}
+            }
+        }
+    }
+    out
+}
+
+fn variant(dir: &Path, cell: &str, scale: f64, platform: &str, budget: Option<u64>) -> Value {
     let f = file(dir, cell, scale);
-    child(
-        "bounded_memory_gen",
-        &[
-            ("LIBVIPRS_BM_CELL", cell.to_string()),
-            ("LIBVIPRS_BM_SCALE", scale.to_string()),
-            ("LIBVIPRS_BM_FILE", f.display().to_string()),
-        ],
-    );
+    if !f.exists() {
+        child(
+            "bounded_memory_gen",
+            &[
+                ("LIBVIPRS_BM_CELL", cell.to_string()),
+                ("LIBVIPRS_BM_SCALE", scale.to_string()),
+                ("LIBVIPRS_BM_FILE", f.display().to_string()),
+            ],
+        );
+    }
+    let mut envs = vec![("LIBVIPRS_BM_FILE", f.display().to_string())];
+    if let Some(b) = budget {
+        envs.push(("LIBVIPRS_BM_BUDGET", b.to_string()));
+    }
     let runs: Vec<Value> = (0..3)
         .map(|_| {
-            let text = child(
-                "bounded_memory_child",
-                &[("LIBVIPRS_BM_FILE", f.display().to_string())],
-            );
+            let text = child("bounded_memory_child", &envs);
             // libtest prints "test name ... " before the child's own output, on the same line.
             let line = text
                 .lines()
@@ -177,10 +231,10 @@ fn variant(dir: &Path, cell: &str, scale: f64, platform: &str) -> Value {
         .filter_map(|r| r["peak_rss_bytes"].as_u64())
         .max();
     let entities = runs[0]["entities"].as_u64().unwrap();
-    std::fs::rename(&f, f.with_extension("dwg.done")).ok();
     json!({
         "bench": "bounded_memory",
-        "strategy": "direct",
+        "strategy": if budget.is_some() { "spill" } else { "direct" },
+        "spill_budget": budget,
         "cell": cell,
         "scale": scale,
         "entities": entities,
@@ -190,9 +244,11 @@ fn variant(dir: &Path, cell: &str, scale: f64, platform: &str) -> Value {
         "peak_rss_bytes": rss,
         "allocated_bytes": runs[0]["allocated_bytes"],
         "rss_is_per_run": runs[0]["rss_is_per_run"],
-        "bytes_spilled": 0,
-        "bytes_reread": 0,
-        "spill_count": 0,
+        // Peak bytes on disk in the spill root, sampled every 5 ms: the facade does not report what it
+        // spilled, so this is a lower bound on the bytes written and the files are the peak open at once.
+        "bytes_spilled": runs.iter().filter_map(|r| r["spilled_peak_on_disk"].as_u64()).max().unwrap_or(0),
+        "bytes_reread": if budget.is_some() { json!("not exposed by the facade") } else { json!(0) },
+        "spill_count": runs.iter().filter_map(|r| r["spill_files_peak"].as_u64()).max().unwrap_or(0),
         "tracked_bytes_per_entity": tracked as f64 / entities as f64,
         "within_rss_ceiling": rss.is_some_and(|r| r <= RSS_CEILING),
         "within_tracked_ceiling": tracked <= TRACKED_CEILING,
@@ -210,35 +266,57 @@ fn bounded_memory_bench() {
         .unwrap_or_else(|e| panic!("refusing to run: {e}"));
     let dir = tempfile::tempdir().unwrap();
     let mut rows = Vec::new();
-    for cell in ["large_industrial", "spline_heavy", "block_heavy"] {
-        for scale in [0.5, 1.0, 2.0] {
-            let row = variant(dir.path(), cell, scale, &platform);
-            println!("ROW {row}");
-            rows.push(row);
+    const MIB: u64 = 1 << 20;
+    for budget in [None, Some(64 * MIB)] {
+        for cell in ["large_industrial", "spline_heavy", "block_heavy"] {
+            for scale in [0.5, 1.0, 2.0] {
+                let row = variant(dir.path(), cell, scale, &platform, budget);
+                println!("ROW {row}");
+                rows.push(row);
+            }
         }
     }
-    for s in ["two_pass", "external_sort_spool"] {
-        println!(
-            "ROW {}",
-            json!({"bench": "bounded_memory", "strategy": s, "status": "not built (pvec#235)", "platform": platform})
-        );
+    // The knob is the budget: the same drawing at a doubled and a quadrupled budget.
+    for budget in [128 * MIB, 256 * MIB] {
+        let mut row = variant(dir.path(), "large_industrial", 1.0, &platform, Some(budget));
+        row["strategy"] = json!("spill_budget");
+        println!("ROW {row}");
+        rows.push(row);
     }
+    let mut at64 = rows
+        .iter()
+        .find(|r| r["strategy"] == "spill" && r["cell"] == "large_industrial" && r["scale"] == 1.0)
+        .unwrap()
+        .clone();
+    at64["strategy"] = json!("spill_budget");
+    rows.push(at64);
+    // The two-pass strategy has no code: the spill replaced the need for a second pass over the input.
+    println!(
+        "ROW {}",
+        json!({"bench": "bounded_memory", "strategy": "two_pass", "status": "no code", "platform": platform})
+    );
     // Boundedness: doubling the entity count at a fixed configuration should move the tracked peak
     // by under 10%. Reported as the measured growth per cell.
-    for cell in ["large_industrial", "spline_heavy", "block_heavy"] {
+    for (strategy, cell) in ["direct", "spill"]
+        .into_iter()
+        .flat_map(|st| ["large_industrial", "spline_heavy", "block_heavy"].map(move |c| (st, c)))
+    {
         let at = |s: f64| {
             rows.iter()
-                .find(|r| r["cell"] == cell && r["scale"] == s)
+                .find(|r| r["strategy"] == strategy && r["cell"] == cell && r["scale"] == s)
                 .unwrap()["tracked_peak"]
                 .as_f64()
                 .unwrap()
         };
         println!(
-            "BOUNDEDNESS {cell}: doubling the entities moved the tracked peak by {:.1}% (criterion: under 10%)",
+            "BOUNDEDNESS {strategy} {cell}: doubling the entities moved the tracked peak by {:.1}% (criterion: under 10%)",
             (at(2.0) / at(1.0) - 1.0) * 100.0
         );
     }
     for r in &rows {
+        if r.get("status").is_some() {
+            continue;
+        }
         let blank = blank_columns(
             r,
             &[
@@ -262,13 +340,17 @@ fn bounded_memory_bench() {
         after < host_cpus() as f64,
         "discarding the run: the one-minute load rose to {after} (it was {before})"
     );
-    let key = |r: &Value| {
-        format!(
-            "bounded_memory/{}/{}/x{}/{platform}",
-            r["strategy"].as_str().unwrap(),
+    let key = |r: &Value| match r["strategy"].as_str().unwrap() {
+        "spill_budget" => format!(
+            "bounded_memory/spill_budget/{}/b{}MiB/{platform}",
+            r["cell"].as_str().unwrap(),
+            r["spill_budget"].as_u64().unwrap() / MIB
+        ),
+        strategy => format!(
+            "bounded_memory/{strategy}/{}/x{}/{platform}",
             r["cell"].as_str().unwrap(),
             r["scale"]
-        )
+        ),
     };
     if let Ok(out) = std::env::var("LIBVIPRS_BENCH_BASELINE_OUT") {
         let map: serde_json::Map<String, Value> =
