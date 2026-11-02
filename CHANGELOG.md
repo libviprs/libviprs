@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Property tests for the conversion path** (issue #1457, part of #1070). `tests/pvec_normalization_proptest.rs`: a composed
+  transform equals the sequential application of its levels and composition is associative (within `Policy::V1`), a
+  singular transform never produces geometry, every entity of a generated drawing lands in exactly one of the six
+  classes, the reported bounds contain every exact entity and stay within every entity's box, and a drawing converts to
+  byte-identical output twice. Each property asserts that it ran every case.
 - **The PVec integration documentation** (issue #1451, part of #1070). Twelve pages next to `docs/pvec-benchmarks.md`:
   architecture, the provider API, the ISO mapping, view semantics, the transform matrix, DWG support, the PDF loss
   model, components, the georeference handoff, the conversion API, limits and provider replacement, all linked from

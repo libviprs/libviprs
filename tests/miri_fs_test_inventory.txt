@@ -642,6 +642,9 @@ annotated   fs-detected  tests/pvec_integration_contract.rs::the_pins_are_the_co
 annotated   fs-detected  tests/pvec_known_truth.rs::n2_1_1050_a_failing_run_leaves_no_state_behind
 annotated   fs-detected  tests/pvec_known_truth.rs::n2_1_1050_a_vendored_file_that_moved_is_caught_by_the_pin
 annotated   fs-detected  tests/pvec_normalization_bench.rs::normalization_bench
+annotated   fs-detected  tests/pvec_normalization_proptest.rs::every_entity_lands_in_exactly_one_of_the_six_classes
+annotated   fs-detected  tests/pvec_normalization_proptest.rs::the_reported_bounds_contain_every_exact_entity_and_stay_within_every_box
+annotated   fs-detected  tests/pvec_normalization_proptest.rs::the_same_drawing_converts_to_byte_identical_output_twice
 annotated   fs-detected  tests/pvec_pdf_vector.rs::n5_1_no_lopdf_type_in_any_public_signature
 annotated   fs-detected  tests/pvec_provider_acadrust.rs::open_works_from_bytes_and_from_a_path_alike
 annotated   fs-detected  tests/pvec_provider_acadrust.rs::the_fixtures_are_the_ones_n1_4_recorded_and_say_what_they_are
