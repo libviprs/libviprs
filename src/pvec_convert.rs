@@ -405,6 +405,9 @@ impl<'a> PvecConversion<'a> {
         tell(EngineEvent::ConversionSourceOpened {
             provider: provider.name().to_owned(),
         });
+        if cancel.is_cancelled() {
+            return Err(PvecConvertError::Cancelled);
+        }
         let view = view_profile
             .apply(provider)
             .map_err(PvecConvertError::View)?;
@@ -668,6 +671,9 @@ impl<'a> PvecConversion<'a> {
                     let artifact =
                         write_geometry_to(&config, items(), Vec::new(), spill, &cancel, out)
                             .map_err(write_error)?;
+                    tell(EngineEvent::ConversionSpoolSpilled {
+                        bytes: artifact.length,
+                    });
                     let (report, json) = seal(&artifact.bounds, artifact.written, artifact.length)?;
                     sealed = Some((report, artifact.written));
                     Ok(json.into_bytes())
