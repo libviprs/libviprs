@@ -27,6 +27,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Property tests for the conversion path** (issue #1457, part of #1070). `tests/pvec_normalization_proptest.rs`: a composed
+  transform equals the sequential application of its levels and composition is associative (within `Policy::V1`), a
+  singular transform never produces geometry, every entity of a generated drawing lands in exactly one of the six
+  classes, the reported bounds contain every exact entity and stay within every entity's box, and a drawing converts to
+  byte-identical output twice. Each property asserts that it ran every case.
+- **The PVec integration documentation** (issue #1451, part of #1070). Twelve pages next to `docs/pvec-benchmarks.md`:
+  architecture, the provider API, the ISO mapping, view semantics, the transform matrix, DWG support, the PDF loss
+  model, components, the georeference handoff, the conversion API, limits and provider replacement, all linked from
+  the README. The mapping table, the transform matrix, the v1 view profile and the resource limits are rendered from the
+  code and `tests/pvec_docs_tables.rs` fails when a page differs (`DOCS_BLESS=1` rewrites them); a link check covers
+  `README.md` and `docs/`.
 - **Fuzz targets for the conversion path** (issue #1437, part of #1070). `fuzz_pvec_provider` drives an
   arbitrary in-memory drawing (layers, nested and recursive blocks, spline records, varying capabilities,
   a cursor that fails part-way) through the view profile, the flattener and the extractors under tight

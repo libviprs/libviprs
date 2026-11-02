@@ -219,3 +219,42 @@ For comparison, the facade's writer alone costs about 310 bytes per entity (`doc
 `block_heavy` is on the clean side of the N7.5 allocation check: 22,440 entities in 11,220 instances at depth 8 hold a tracked peak of 56 MiB.
 
 **The written decision (which strategy libviprs ships, with the three tables) is not made here.** It needs the two-pass and the external-sort numbers, and neither strategy is built, so #1064 stays open on that line rather than closing on a decision written without the numbers.
+
+## Tuning the conversion queue (N8.6, #1443)
+
+#1064 asks for each default to be set from the curve that chose it, and for a knob with no curve to be deleted rather than defaulted.
+Looking at what the code actually exposes, the conversion has **one tunable that can be swept**: `PvecConversion::queue_capacity`
+(default 64, the bound of the queue between the classifier and its consumer, `src/sync_queue.rs`). There is no provider or normalization
+worker count (the classifier is one thread and the consumer another), no spool buffer or spill threshold (the spool is not built, pvec#235),
+and PVec's chunk size is PVec's. The two other constants in the conversion code are not throughput knobs, they set how often the run
+looks at the cancel token. So the table has three constants and says which of them was swept.
+
+<!-- defaults:begin -->
+| knob | constant | file | value | chosen on | curve |
+|---|---|---|---|---|---|
+| queue capacity | `DEFAULT_QUEUE_CAPACITY` | `src/pvec_convert.rs` | 64 | `large_industrial`, 1,025,000 entities | swept 1 to 4096 twice, see below: no capacity is distinguishable from 64 |
+| entities per batch (cancel poll, progress event) | `BATCH` | `src/pvec_convert.rs` | 256 | not swept | not a throughput knob: it bounds how long a cancel waits, one batch of classifications |
+| entities between cancel checks while writing | `CANCEL_EVERY` | `src/pvec/writer.rs` | 1024 | not swept | not a throughput knob: it bounds how long a cancel waits during the write |
+| provider and normalization worker count | none | none | none | none | no such knob exists: one classifier thread, one consumer |
+| spool buffer and spill threshold | none | none | none | none | no spool: pvec#235 |
+| PVec chunk size | none | none | none | none | PVec's own, not exposed by the facade |
+<!-- defaults:end -->
+
+`tests/pvec_defaults_table.rs` fails if a `const NAME: usize` in `src/pvec_convert.rs` or `src/pvec/writer.rs` has no row, if a row
+names a constant that is not there, and if a value moved.
+
+### The sweep, and what I am not claiming from it
+
+`tests/pvec_queue_sweep.rs` converts `large_industrial` at capacity 1, 2, 4, 8, 16, 32, 64, 128, 256, 1024 and 4096, three times each,
+and hashes the artifact.
+
+- **Determinism holds.** The artifact is byte for byte identical at every capacity, in both sweeps I took. Any difference would reject the
+  tuning whatever its speed, and there is none.
+- **The queue is bounded as asked.** `peak_queue_depth` reached the capacity at the small capacities and one below it at 64 and above (the depth is
+  sampled after each receive from the sends that completed, so it can read one low and never one high), and never went over.
+- **The timing curve is not published.** I took the sweep twice on MARS, and in both runs every row came out unstable (a spread over 20%
+  across its three runs, with outliers of 22 to 26 seconds against medians of 7 to 17). Both runs overlapped other jobs on the host,
+  including my own pre-push gates, so a capacity that looked 50% faster in one run was 50% slower in the other. A number like that does not
+  choose a default. So the default stays 64, which is what the code had, and the curve that would justify keeping or changing it has not been
+  measured cleanly: #1064 stays open on that line, and the sweep is `LIBVIPRS_BENCH_HOST=mars cargo test --release --features pvec-convert
+  --test pvec_queue_sweep -- --ignored --nocapture queue_sweep`, to be taken when the host is idle.
