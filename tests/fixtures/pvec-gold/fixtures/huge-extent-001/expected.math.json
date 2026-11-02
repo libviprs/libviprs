@@ -1,0 +1,117 @@
+{
+  "schema_version": "pvec-gold/expected.math/1",
+  "fixture_id": "huge-extent-001",
+  "evidence_class": "KNOWN_TRUTH_EXACT",
+  "units": {
+    "name": "metre",
+    "canonical": "metre",
+    "scale_to_canonical": {
+      "decimal": "1.0",
+      "f64_hex": "0x3ff0000000000000"
+    }
+  },
+  "provenance": {
+    "derivation": "AUTHORING_PARAMETERS",
+    "authoring_script": "tools/authoring/author_probes.py",
+    "parameter_file": "tools/authoring/corpus-params/edge/huge-extent-001.json",
+    "parameter_file_sha256": "2b4d12b240f98cf28a23d99bb3249970f8b404f9e71d2a91fc036021a0d71118",
+    "parameters": {
+      "id": "huge-extent-001",
+      "group": "edge",
+      "kind": "circle",
+      "description": "A circle of radius 2.5e6 m centred 1.5e6 m east and 2.2e6 m south of the origin, so the drawing extent is above 1e6 in both directions and the centre alone is beyond the exact integer range a float32 keeps.",
+      "center": [
+        "1500000.5",
+        "-2200000.25",
+        "0"
+      ],
+      "radius": "2500000.125"
+    }
+  },
+  "entities": [
+    {
+      "id": "huge-extent-001",
+      "class": "circle",
+      "geometry": {
+        "center": [
+          {
+            "decimal": "1500000.5",
+            "f64_hex": "0x4136e36080000000"
+          },
+          {
+            "decimal": "-2200000.25",
+            "f64_hex": "0xc140c8e020000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ],
+        "normal": [
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          }
+        ],
+        "x_axis": [
+          {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ],
+        "radius": {
+          "decimal": "2500000.125",
+          "f64_hex": "0x414312d010000000"
+        }
+      },
+      "parameter_domain": {
+        "start": {
+          "decimal": "0.0",
+          "f64_hex": "0x0000000000000000"
+        },
+        "end": {
+          "decimal": "6.283185307179586",
+          "f64_hex": "0x401921fb54442d18"
+        }
+      },
+      "closure": {
+        "closed_by_endpoint": true,
+        "closed_by_knots": false,
+        "periodic": true
+      },
+      "structure": "CURVE_ONLY"
+    }
+  ],
+  "assertions": [
+    {
+      "id": "a1",
+      "kind": "STRUCTURAL",
+      "entity": "huge-extent-001",
+      "claim": "CLASS_PRESERVED",
+      "statement": "The semantic class stays circle; it is not rewritten into another class."
+    },
+    {
+      "id": "a2",
+      "kind": "GEOMETRIC",
+      "entity": "huge-extent-001",
+      "claim": "PARAMETERIZATION_PRESERVED",
+      "statement": "The parameter domain is kept; a reparameterised equivalent counts as geometric only."
+    }
+  ]
+}

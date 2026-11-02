@@ -813,8 +813,23 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1363 adds 2: `tests/pvec_1363_pdf_ccitt.rs::the_scanned_sheet_converts_to_seven_underlays`, which reads the corpus file, and the `hayro-ccitt` check in `tests/dependency_policy.rs`. It said 774 before this line moved.
 /// #1093 adds 1: the `tests/pvec_1093_report.rs` check that reads `docs/pvec-conversion-report.md`. It said 776 before this line moved.
 /// #1364 adds 2: the `tests/pvec_1364_pdf_jpx.rs` corpus cells, which read PDFs from outside the repo. It said 777 before this line moved.
-/// #1365 adds 18: the `tests/pvec_1365_pdf_jbig2.rs` cells, which read the committed JBIG2 fixtures, and the `jbig2` check in `tests/unsafe_inventory.rs`. It said 779 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 797;
+/// #1382 adds 2: the `tests/pvec_known_truth.rs` cells that read and copy the vendored corpus. It said 779 before this line moved.
+/// #1383 adds 2: the `tests/pvec_dual_oracle.rs` cells that read the vendored corpus. It said 781 before this line moved.
+/// #1295 adds 7: the `tests/local_gate_native_dwg_1295.rs` cells that read the workflow, scripts and docs of the scheduled native lane. It said 783 before this line moved.
+/// #1391 adds 5: the `tests/vector_1391_limits.rs` cells that read the g13 drawings and the provider docs. It said 790 before this line moved.
+/// #1405 adds 6: the `tests/pvec_dwg_pdf_differential.rs` cells that read the committed DWG and PDF pairs and their loss files. It said 827 before this line moved.
+/// #1413 adds 6: the `tests/pvec_1413_convert.rs` cells that convert real drawings into a scratch folder. It said 795 before this line moved.
+/// #1414 adds 7: the `tests/pvec_1414_capability.rs` cells that convert into a scratch folder. It said 801 before this line moved.
+/// #1415 adds 8: the `tests/pvec_1415_georef.rs` cells that read and write the sidecar. It said 808 before this line moved.
+/// #1416 and #1417 add 11: the `tests/pvec_1416_diagnostics.rs` and `tests/pvec_1417_progress.rs` cells. It said 816 before this line moved.
+/// #1393 adds 4: the `tests/vector_1037_conformance.rs` cells that read the docs, the Android harness sources and the recorded result. It said 827 before this line moved.
+/// #1405 adds 1 more: the `tests/pvec_1079_provider_default.rs` guard that scans the build files for LibreDWG. It said 831 before this line moved.
+/// #1392 adds 3: the `tests/vector_1392_cgroup_lane.rs` cells that read the lane script, the scheduler and the report. It said 838 before this line moved.
+/// #1038 adds 5: the two `tests/vector_1038_entity_matrix.rs` cells and the three `tests/vector_1038_release_gate.rs` cells, which read the matrix, the gate record and the g13 drawings. It said 841 before this line moved. #1430 adds 2: the two `tests/pvec_1430_convert_spline.rs` cells.
+/// #1314 adds 8: the `tests/pvec_1314_spool.rs` cells that spill, stream and cancel through a temp dir. It said 891 before this line moved.
+/// #1417 adds 4: the `tests/pvec_1417_convert_spool.rs` cells that convert into a temp dir through a spill root. It said 899 before this line moved.
+/// #1365 adds 18: the `tests/pvec_1365_pdf_jbig2.rs` cells, which read the committed JBIG2 fixtures, and the `jbig2` check in `tests/unsafe_inventory.rs`. It said 903 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 921;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {

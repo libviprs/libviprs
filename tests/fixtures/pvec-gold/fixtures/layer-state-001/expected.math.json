@@ -1,0 +1,267 @@
+{
+  "schema_version": "pvec-gold/expected.math/1",
+  "fixture_id": "layer-state-001",
+  "evidence_class": "KNOWN_TRUTH_EXACT",
+  "units": {
+    "name": "metre",
+    "canonical": "metre",
+    "scale_to_canonical": {
+      "decimal": "1.0",
+      "f64_hex": "0x3ff0000000000000"
+    }
+  },
+  "provenance": {
+    "derivation": "AUTHORING_PARAMETERS",
+    "authoring_script": "tools/authoring/author_probes.py",
+    "parameter_file": "tools/authoring/params/layer-state-001.json",
+    "parameter_file_sha256": "e6ed8a080609cf7f15739ef4b62abaa5338ea1113a422bef40a1e919629cf97d",
+    "parameters": {
+      "id": "layer-state-001",
+      "kind": "layers",
+      "description": "One drawing with three lines, each on its own layer: SHOWN_L (on, thawed), OFF_L (off, thawed) and FROZEN_L (on, frozen). Each line is different, so a mapper that drops or moves the wrong one is visible. This records what the DWG says about layer state. Whether an off or frozen layer is drawn is libviprs policy and not a PVec capability.",
+      "layers": [
+        {
+          "name": "SHOWN_L",
+          "on": true,
+          "frozen": false,
+          "curve": {
+            "start": [
+              "0",
+              "0",
+              "0"
+            ],
+            "end": [
+              "4",
+              "1",
+              "0"
+            ]
+          }
+        },
+        {
+          "name": "OFF_L",
+          "on": false,
+          "frozen": false,
+          "curve": {
+            "start": [
+              "0",
+              "2",
+              "0"
+            ],
+            "end": [
+              "3",
+              "3.5",
+              "0"
+            ]
+          }
+        },
+        {
+          "name": "FROZEN_L",
+          "on": true,
+          "frozen": true,
+          "curve": {
+            "start": [
+              "0",
+              "5",
+              "0"
+            ],
+            "end": [
+              "5.5",
+              "4",
+              "0"
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "entities": [
+    {
+      "id": "layer-state-001.shown-l",
+      "class": "line",
+      "geometry": {
+        "start": [
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ],
+        "end": [
+          {
+            "decimal": "4.0",
+            "f64_hex": "0x4010000000000000"
+          },
+          {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ]
+      },
+      "parameter_domain": {
+        "start": {
+          "decimal": "0.0",
+          "f64_hex": "0x0000000000000000"
+        },
+        "end": {
+          "decimal": "1.0",
+          "f64_hex": "0x3ff0000000000000"
+        }
+      },
+      "closure": {
+        "closed_by_endpoint": false,
+        "closed_by_knots": false,
+        "periodic": false
+      },
+      "structure": "CURVE_ONLY",
+      "layer": {
+        "name": "SHOWN_L",
+        "on": true,
+        "frozen": false
+      }
+    },
+    {
+      "id": "layer-state-001.off-l",
+      "class": "line",
+      "geometry": {
+        "start": [
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "2.0",
+            "f64_hex": "0x4000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ],
+        "end": [
+          {
+            "decimal": "3.0",
+            "f64_hex": "0x4008000000000000"
+          },
+          {
+            "decimal": "3.5",
+            "f64_hex": "0x400c000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ]
+      },
+      "parameter_domain": {
+        "start": {
+          "decimal": "0.0",
+          "f64_hex": "0x0000000000000000"
+        },
+        "end": {
+          "decimal": "1.0",
+          "f64_hex": "0x3ff0000000000000"
+        }
+      },
+      "closure": {
+        "closed_by_endpoint": false,
+        "closed_by_knots": false,
+        "periodic": false
+      },
+      "structure": "CURVE_ONLY",
+      "layer": {
+        "name": "OFF_L",
+        "on": false,
+        "frozen": false
+      }
+    },
+    {
+      "id": "layer-state-001.frozen-l",
+      "class": "line",
+      "geometry": {
+        "start": [
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "5.0",
+            "f64_hex": "0x4014000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ],
+        "end": [
+          {
+            "decimal": "5.5",
+            "f64_hex": "0x4016000000000000"
+          },
+          {
+            "decimal": "4.0",
+            "f64_hex": "0x4010000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ]
+      },
+      "parameter_domain": {
+        "start": {
+          "decimal": "0.0",
+          "f64_hex": "0x0000000000000000"
+        },
+        "end": {
+          "decimal": "1.0",
+          "f64_hex": "0x3ff0000000000000"
+        }
+      },
+      "closure": {
+        "closed_by_endpoint": false,
+        "closed_by_knots": false,
+        "periodic": false
+      },
+      "structure": "CURVE_ONLY",
+      "layer": {
+        "name": "FROZEN_L",
+        "on": true,
+        "frozen": true
+      }
+    }
+  ],
+  "assertions": [
+    {
+      "id": "a1",
+      "kind": "STRUCTURAL",
+      "entity": "layer-state-001.shown-l",
+      "claim": "LAYER_STATE_PRESERVED",
+      "statement": "The entity stays on layer SHOWN_L, which is on and thawed; it is neither dropped nor moved to another layer."
+    },
+    {
+      "id": "a2",
+      "kind": "STRUCTURAL",
+      "entity": "layer-state-001.off-l",
+      "claim": "LAYER_STATE_PRESERVED",
+      "statement": "The entity stays on layer OFF_L, which is off and thawed; it is neither dropped nor moved to another layer."
+    },
+    {
+      "id": "a3",
+      "kind": "STRUCTURAL",
+      "entity": "layer-state-001.frozen-l",
+      "claim": "LAYER_STATE_PRESERVED",
+      "statement": "The entity stays on layer FROZEN_L, which is on and frozen; it is neither dropped nor moved to another layer."
+    }
+  ]
+}

@@ -77,10 +77,34 @@ Rom chose to stream in pvec first (libviprs/pvec#235: `finish_to(impl Write)` wi
 layout, byte-identical to `finish()`). So N6.3 and the 1.5 GiB criterion of `#1064` stay as written,
 and the bound comes from PVec, not from a libviprs spool.
 
-* No libviprs spool code is written now. N6.3 closes only after pvec#235 merges, the pin moves, and
-  the numbers from `examples/pvec_writer_memory.rs` meet the criterion.
-* The funnel assigns PVec ids dense from zero (Tier 0 needs `0..n` with no gaps) and returns the way back in `source_ids`.
-* The funnel today returns `Vec<u8>`. When #235 lands it gains a sink variant that calls
-  `finish_to`, and `publish` takes the stream instead of a slice, writing straight into the
-  `.pvec.partial` file. The cancel token, the stages and the cleanup do not change.
-* Until then `#1064` N8.4 and N8.6 stay blocked, and everything else in `#1314` carries on.
+* No libviprs spool code is written: the bound comes from PVec (pvec#235, merged at `ff67ecb8`), and the pin
+  is there. The funnel's `write_geometry_to` hands PVec a spill root and a budget (`SpillConfig`) and streams the
+  artifact to a sink through `finish_to`; `publish_streamed` writes that stream into the `.pvec.partial` file.
+  The cancel token, the stages and the cleanup are the ones of `write_geometry` and `publish`.
+* Through this funnel (`examples/pvec_writer_memory.rs`, release, MARS native x86_64, `rust:1.99.1`, load average
+  about 5, two-point polylines, 64 MiB budget, the sink discards the bytes). "Added" is the peak resident set
+  during the write minus the resident set before it, so it leaves out the caller's own geometry (about 440 bytes
+  an entity), and "peak" is the whole process:
+
+  | entities | layout | mode | added | peak | artifact |
+  |---|---|---|---|---|---|
+  | 1,000,000 | plain | memory | 150.7 MB | 580 MiB | 2.86 MB |
+  | 1,000,000 | indexed, Tier 0 | memory | 399.4 MB | 829 MiB | 4.10 MB |
+  | 1,000,000 | plain | spill | 22.3 MB | 452 MiB | 2.86 MB |
+  | 1,000,000 | indexed, Tier 0 | spill | 22.6 MB | 452 MiB | 4.10 MB |
+  | 4,000,000 | plain | memory | 536.6 MB | 2,248 MiB | 11.4 MB |
+  | 4,000,000 | indexed, Tier 0 | memory | 1,492 MB | 3,203 MiB | 17.4 MB |
+  | 4,000,000 | plain | spill | 91.4 MB | 1,803 MiB | 11.4 MB |
+  | 4,000,000 | indexed, Tier 0 | spill | 90.6 MB | 1,802 MiB | 17.4 MB |
+
+  The streamed write adds 24 bytes an entity instead of 391 to 419, and the artifact is the in-memory one byte
+  for byte (the tests hold that for every budget). The 24 bytes are libviprs's own: a reference to each curve
+  and `GeometryArtifact::source_ids`, the map from PVec's dense ids back to the libviprs ids that the component
+  streams and the report need. PVec's writer itself is flat (85 MiB at 1M and 83 MiB at 4M in its own harness,
+  `docs/BENCHMARKS.md` in `libviprs/pvec`). So the peak of the whole process at 1,000,000 entities, 452 MiB with
+  the caller's geometry in it, is far under the 1.5 GiB of `#1064` N8.4, and the writer's own added memory
+  is linear at 24 bytes an entity, not flat: whether "doubling the entities moves the tracked peak by under 10
+  percent" can be read as the writer's addition or as the process is N8.4's call, and the first does not hold
+  for as long as the id map is returned to the caller.
+* The funnel assigns PVec ids dense from zero (Tier 0 needs `0..n` with no gaps) and returns the way back in
+  `source_ids`.

@@ -1,0 +1,181 @@
+{
+ "corpus_revision": "r2-open",
+ "generators": "tests/common/pvec_bench.rs",
+ "measure_command": "cargo test --release --features pvec-convert --test pvec_1429_bench_corpus -- --ignored --nocapture measure_cells",
+ "cells": {
+  "simple": {
+   "source": "synthetic",
+   "generator": "simple",
+   "params": {
+    "entities": 1000
+   },
+   "unit": "meters",
+   "provider": "acadrust",
+   "evidence_class": "SYNTHETIC_STAND_IN",
+   "corpus_revision": "r2-open",
+   "bytes": 67100,
+   "sha256": "fb6f022b149eb57aec4b222fd332f2ef7272552d1234ef5bfe7331490d5391e6",
+   "entities": {
+    "encountered": 1000,
+    "written": 1000,
+    "artifact_bytes": 33520
+   }
+  },
+  "block_heavy": {
+   "source": "synthetic",
+   "generator": "block_heavy",
+   "params": {
+    "depth": 8,
+    "fanout": 2,
+    "roots": 44
+   },
+   "unit": "meters",
+   "provider": "acadrust",
+   "evidence_class": "SYNTHETIC_STAND_IN",
+   "corpus_revision": "r2-open",
+   "bytes": 23186,
+   "sha256": "2414fa0c92f0e39732cf475fda3d811eb95453b20251452ab287afe5353eee42",
+   "entities": {
+    "encountered": 22440,
+    "written": 22440,
+    "artifact_bytes": 706824
+   }
+  },
+  "spline_heavy": {
+   "source": "synthetic",
+   "generator": "spline_heavy",
+   "params": {
+    "splines": 10000
+   },
+   "unit": "meters",
+   "provider": "acadrust",
+   "evidence_class": "SYNTHETIC_STAND_IN",
+   "corpus_revision": "r2-open",
+   "bytes": 2189914,
+   "sha256": "0c7eac111fd394ddd71dbd306afaee9d911e22be0d770316216e3a24f3f0d976",
+   "entities": {
+    "encountered": 10000,
+    "written": 10000,
+    "artifact_bytes": 1872248
+   }
+  },
+  "paper_space": {
+   "source": "synthetic",
+   "generator": "paper_space",
+   "params": {
+    "viewports": 20,
+    "model_lines": 2000
+   },
+   "unit": "meters",
+   "provider": "acadrust",
+   "evidence_class": "SYNTHETIC_STAND_IN",
+   "corpus_revision": "r2-open",
+   "bytes": 111435,
+   "sha256": "19b2b81af8e9cd1f3c5628645d4417bac576c51ad910413b4d462ae0aef57ea4",
+   "entities": {
+    "encountered": 2000,
+    "written": 2000,
+    "artifact_bytes": 64568
+   }
+  },
+  "large_industrial": {
+   "source": "synthetic",
+   "generator": "large_industrial",
+   "params": {
+    "entities": 500000,
+    "parts": 8
+   },
+   "unit": "meters",
+   "provider": "acadrust",
+   "evidence_class": "SYNTHETIC_STAND_IN",
+   "corpus_revision": "r2-open",
+   "bytes": 19575915,
+   "sha256": "2f7e18f865ac6a091319f94f36b1c658b6126d348fe259ac5926ceaec1a74a49",
+   "entities": {
+    "encountered": 1025000,
+    "written": 1025000,
+    "artifact_bytes": 22172760
+   }
+  },
+  "malformed": {
+   "source": "synthetic",
+   "unit": "meters",
+   "provider": "acadrust",
+   "evidence_class": "SYNTHETIC_STAND_IN",
+   "corpus_revision": "r2-open",
+   "entities": null,
+   "inputs": [
+    {
+     "id": "recursion-70",
+     "kind": "block_recursion",
+     "params": {
+      "levels": 70
+     },
+     "limit": "max_block_depth",
+     "limits": {},
+     "sha256": "1f54da5273b8b6100dd6d20c2e94b0448b57dd1b20baaec273e7840cc43181ba"
+    },
+    {
+     "id": "entities-2000",
+     "kind": "entity_count",
+     "params": {
+      "entities": 2000
+     },
+     "limit": "max_entities",
+     "limits": {
+      "max_entities": 1000
+     },
+     "sha256": "04048e795bc28a2429c46f901d9211e6efe737a9bf68b27cb9b1032a8ae427d8"
+    },
+    {
+     "id": "control-points-2000",
+     "kind": "control_points",
+     "params": {
+      "points": 2000
+     },
+     "limit": "max_spline_control_points",
+     "limits": {
+      "max_spline_control_points": 1024
+     },
+     "sha256": "0b646a65c9677c8fabba3e40f6c82944cdad4c7ffd02a3768880659003861c87"
+    },
+    {
+     "id": "knots-1000",
+     "kind": "knots",
+     "params": {
+      "points": 1000
+     },
+     "limit": "max_spline_knots",
+     "limits": {
+      "max_spline_control_points": 4096,
+      "max_spline_knots": 512
+     },
+     "sha256": "4e04948785a569fc7878021fa58a7df05ffd10a4874962dfd527a1377e5beea3"
+    },
+    {
+     "id": "name-200",
+     "kind": "name_length",
+     "params": {
+      "bytes": 200
+     },
+     "limit": "max_name_bytes",
+     "limits": {
+      "max_name_bytes": 64
+     },
+     "sha256": "1e033b517e0a7ea95638c9df01c2224ae0f68ec821abd4042cd26bd7ea838359"
+    },
+    {
+     "id": "truncated-half",
+     "kind": "truncated",
+     "params": {
+      "entities": 1000,
+      "keep_percent": 50
+     },
+     "limit": "open",
+     "limits": {},
+     "sha256": "60846e04052811db79786958f9d63c0ba1279c2e05845a0daed0801bcf596186"
+    }
+   ]
+  }
+ }
+}

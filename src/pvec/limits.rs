@@ -177,7 +177,7 @@ pub struct SourceGuard {
     multipliers: Vec<u64>,
 }
 
-fn over(limit: Limit, observed: u64, ceiling: u64) -> LimitError {
+pub(super) fn over(limit: Limit, observed: u64, ceiling: u64) -> LimitError {
     LimitError::Exceeded {
         limit,
         observed,

@@ -1,0 +1,235 @@
+{
+  "schema_version": "pvec-gold/expected.math/1",
+  "fixture_id": "bspline-nonunit-domain-001",
+  "evidence_class": "KNOWN_TRUTH_EXACT",
+  "units": {
+    "name": "metre",
+    "canonical": "metre",
+    "scale_to_canonical": {
+      "decimal": "1.0",
+      "f64_hex": "0x3ff0000000000000"
+    }
+  },
+  "provenance": {
+    "derivation": "AUTHORING_PARAMETERS",
+    "authoring_script": "tools/authoring/author_probes.py",
+    "parameter_file": "tools/authoring/corpus-params/edge/bspline-nonunit-domain-001.json",
+    "parameter_file_sha256": "8dbeacfc8b628431e04b0c1d084ccf8b6568ac6abee1d26df37fe570b76d01a5",
+    "parameters": {
+      "id": "bspline-nonunit-domain-001",
+      "group": "edge",
+      "kind": "bspline",
+      "description": "A clamped quadratic B-spline whose parameter domain is [2, 5] and not [0, 1], so both domain endpoints (2 and 5) are non-trivial and a converter that rescales the knots to the unit interval shows.",
+      "degree": 2,
+      "control_points": [
+        [
+          "0",
+          "0",
+          "0"
+        ],
+        [
+          "1",
+          "2",
+          "0"
+        ],
+        [
+          "2.5",
+          "2.5",
+          "0"
+        ],
+        [
+          "4",
+          "1",
+          "0"
+        ],
+        [
+          "5",
+          "0",
+          "0"
+        ]
+      ],
+      "knots": [
+        [
+          "2",
+          3
+        ],
+        [
+          "3.5",
+          1
+        ],
+        [
+          "4.25",
+          1
+        ],
+        [
+          "5",
+          3
+        ]
+      ]
+    }
+  },
+  "entities": [
+    {
+      "id": "bspline-nonunit-domain-001",
+      "class": "bspline",
+      "geometry": {
+        "degree": 2,
+        "control_points": [
+          [
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            }
+          ],
+          [
+            {
+              "decimal": "1.0",
+              "f64_hex": "0x3ff0000000000000"
+            },
+            {
+              "decimal": "2.0",
+              "f64_hex": "0x4000000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            }
+          ],
+          [
+            {
+              "decimal": "2.5",
+              "f64_hex": "0x4004000000000000"
+            },
+            {
+              "decimal": "2.5",
+              "f64_hex": "0x4004000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            }
+          ],
+          [
+            {
+              "decimal": "4.0",
+              "f64_hex": "0x4010000000000000"
+            },
+            {
+              "decimal": "1.0",
+              "f64_hex": "0x3ff0000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            }
+          ],
+          [
+            {
+              "decimal": "5.0",
+              "f64_hex": "0x4014000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            }
+          ]
+        ],
+        "knots": [
+          {
+            "value": {
+              "decimal": "2.0",
+              "f64_hex": "0x4000000000000000"
+            },
+            "multiplicity": 3
+          },
+          {
+            "value": {
+              "decimal": "3.5",
+              "f64_hex": "0x400c000000000000"
+            },
+            "multiplicity": 1
+          },
+          {
+            "value": {
+              "decimal": "4.25",
+              "f64_hex": "0x4011000000000000"
+            },
+            "multiplicity": 1
+          },
+          {
+            "value": {
+              "decimal": "5.0",
+              "f64_hex": "0x4014000000000000"
+            },
+            "multiplicity": 3
+          }
+        ]
+      },
+      "parameter_domain": {
+        "start": {
+          "decimal": "2.0",
+          "f64_hex": "0x4000000000000000"
+        },
+        "end": {
+          "decimal": "5.0",
+          "f64_hex": "0x4014000000000000"
+        }
+      },
+      "closure": {
+        "closed_by_endpoint": false,
+        "closed_by_knots": false,
+        "periodic": false
+      },
+      "structure": "CURVE_ONLY"
+    }
+  ],
+  "assertions": [
+    {
+      "id": "a1",
+      "kind": "STRUCTURAL",
+      "entity": "bspline-nonunit-domain-001",
+      "claim": "CLASS_PRESERVED",
+      "statement": "The semantic class stays bspline; it is not rewritten into another class."
+    },
+    {
+      "id": "a2",
+      "kind": "STRUCTURAL",
+      "entity": "bspline-nonunit-domain-001",
+      "claim": "DEGREE_PRESERVED",
+      "statement": "The degree is not elevated or reduced."
+    },
+    {
+      "id": "a3",
+      "kind": "STRUCTURAL",
+      "entity": "bspline-nonunit-domain-001",
+      "claim": "CONTROL_POINTS_PRESERVED",
+      "statement": "The control points are kept, not resampled."
+    },
+    {
+      "id": "a4",
+      "kind": "STRUCTURAL",
+      "entity": "bspline-nonunit-domain-001",
+      "claim": "KNOTS_PRESERVED",
+      "statement": "Knot values and multiplicities are kept, none collapsed or inserted."
+    },
+    {
+      "id": "a5",
+      "kind": "GEOMETRIC",
+      "entity": "bspline-nonunit-domain-001",
+      "claim": "PARAMETERIZATION_PRESERVED",
+      "statement": "The parameter domain is kept; a reparameterised equivalent counts as geometric only."
+    }
+  ]
+}

@@ -1,0 +1,195 @@
+{
+  "schema_version": "pvec-gold/expected.math/1",
+  "fixture_id": "bulge-arc-neg-001",
+  "evidence_class": "KNOWN_TRUTH_EXACT",
+  "units": {
+    "name": "metre",
+    "canonical": "metre",
+    "scale_to_canonical": {
+      "decimal": "1.0",
+      "f64_hex": "0x3ff0000000000000"
+    }
+  },
+  "provenance": {
+    "derivation": "AUTHORING_PARAMETERS",
+    "authoring_script": "tools/authoring/author_probes.py",
+    "parameter_file": "tools/authoring/params/bulge-arc-neg-001.json",
+    "parameter_file_sha256": "e13f358a1abd0739e7b2dd4334545c81e63071fa6c2785ea7e7fa13f77e9597c",
+    "parameters": {
+      "id": "bulge-arc-neg-001",
+      "kind": "bulge_arc",
+      "description": "Two polyline vertices joined by a bulge of -3/10. A negative bulge is a clockwise arc, so the sweep is negative (4*atan(-0.3), about -66.8 degrees) and the centre lies on the right of the chord. The sign is what a mapper has to get right, and the derived arc is in the record so centre, radius, start angle and sweep sign are all checkable.",
+      "p0": [
+        "3",
+        "-1",
+        "0"
+      ],
+      "p1": [
+        "0.5",
+        "2.5",
+        "0"
+      ],
+      "bulge": "-0.3"
+    }
+  },
+  "entities": [
+    {
+      "id": "bulge-arc-neg-001",
+      "class": "polyline",
+      "geometry": {
+        "vertices": [
+          [
+            {
+              "decimal": "3.0",
+              "f64_hex": "0x4008000000000000"
+            },
+            {
+              "decimal": "-1.0",
+              "f64_hex": "0xbff0000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            }
+          ],
+          [
+            {
+              "decimal": "0.5",
+              "f64_hex": "0x3fe0000000000000"
+            },
+            {
+              "decimal": "2.5",
+              "f64_hex": "0x4004000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            }
+          ]
+        ],
+        "bulges": [
+          {
+            "decimal": "-0.3",
+            "f64_hex": "0xbfd3333333333333"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ]
+      },
+      "parameter_domain": {
+        "start": {
+          "decimal": "0.0",
+          "f64_hex": "0x0000000000000000"
+        },
+        "end": {
+          "decimal": "1.0",
+          "f64_hex": "0x3ff0000000000000"
+        }
+      },
+      "closure": {
+        "closed_by_endpoint": false,
+        "closed_by_knots": false,
+        "periodic": false
+      },
+      "structure": "CURVE_ONLY"
+    },
+    {
+      "id": "bulge-arc-neg-001-equivalent-arc",
+      "class": "circular_arc",
+      "geometry": {
+        "center": [
+          {
+            "decimal": "4.404166666666667",
+            "f64_hex": "0x40119dddddddddde"
+          },
+          {
+            "decimal": "2.6458333333333335",
+            "f64_hex": "0x40052aaaaaaaaaab"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ],
+        "normal": [
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          }
+        ],
+        "x_axis": [
+          {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ],
+        "radius": {
+          "decimal": "3.906889392115193",
+          "f64_hex": "0x400f414f39c1cae7"
+        },
+        "start_angle": {
+          "decimal": "3.1789285506168805",
+          "f64_hex": "0x40096e721789c2ef"
+        },
+        "sweep_angle": {
+          "decimal": "1.1658271779114684",
+          "f64_hex": "0x3ff2a73a661eaf06"
+        }
+      },
+      "parameter_domain": {
+        "start": {
+          "decimal": "3.1789285506168805",
+          "f64_hex": "0x40096e721789c2ef"
+        },
+        "end": {
+          "decimal": "4.344755728528349",
+          "f64_hex": "0x40116107a54c8d39"
+        }
+      },
+      "closure": {
+        "closed_by_endpoint": false,
+        "closed_by_knots": false,
+        "periodic": false
+      },
+      "structure": "CURVE_ONLY",
+      "orientation": {
+        "parameter_direction": "REVERSED_AGAINST_SOURCE",
+        "sense_about_normal": "CW"
+      }
+    }
+  ],
+  "assertions": [
+    {
+      "id": "a1",
+      "kind": "STRUCTURAL",
+      "entity": "bulge-arc-neg-001",
+      "claim": "VERTEX_ORDER_PRESERVED",
+      "statement": "Two vertices with bulge -0.3 kept as a bulge segment, not split or flattened."
+    },
+    {
+      "id": "a2",
+      "kind": "GEOMETRIC",
+      "entity": "bulge-arc-neg-001-equivalent-arc",
+      "claim": "WORLD_SPACE_RESULT",
+      "statement": "The arc the bulge describes: neither a quarter nor a half circle."
+    }
+  ]
+}

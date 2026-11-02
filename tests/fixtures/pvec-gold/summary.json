@@ -1,0 +1,72 @@
+{
+ "corpus_revision": "r2-open",
+ "by_class": {
+  "DUAL_ORACLE_EQUIVALENT / STEP_ORACLE": [
+   "blocks-dynamic-linear-001"
+  ],
+  "KNOWN_TRUTH_EXACT / READER_MAPPING_ONLY": [
+   "layer-state-001",
+   "mixed-entity-001",
+   "tiny-extent-001"
+  ],
+  "KNOWN_TRUTH_EXACT / STEP_ORACLE": [
+   "arc-seam-001",
+   "arc-tiny-sweep-001",
+   "bezier-d3-001",
+   "bspline-d3-001",
+   "bspline-d5-001",
+   "bspline-nonunit-domain-001",
+   "bulge-arc-001",
+   "bulge-arc-neg-001",
+   "circle-001",
+   "closed-by-endpoint-001",
+   "closed-periodic-001",
+   "ellipse-001",
+   "elliptical-arc-001",
+   "general-affine-chain-001",
+   "huge-extent-001",
+   "large-coords-001",
+   "line-001",
+   "lwpolyline-closed-001",
+   "near-singular-001",
+   "nested-blocks-001",
+   "nonuniform-scale-circle-001",
+   "nonuniform-scale-rotated-001",
+   "nonunit-weight-001",
+   "nurbs-d2-offconic-001",
+   "nurbs-d3-001",
+   "polyline-001",
+   "polyline2d-001",
+   "reflection-001",
+   "repeated-knot-c0-001",
+   "rotation-irrational-001",
+   "shear-chain-001",
+   "singular-001",
+   "tiny-radius-001",
+   "translation-001",
+   "uniform-scale-001"
+  ],
+  "QUARANTINED / REJECTION_EXPECTED": [
+   "coincident-control-points-001",
+   "zero-length-segment-001",
+   "zero-radius-001"
+  ],
+  "QUARANTINED / STEP_ORACLE": [
+   "dimension-001",
+   "empty-001",
+   "hatch-001",
+   "hatch-gradient-001",
+   "image-001",
+   "mesh-001",
+   "mtext-001",
+   "ole-001",
+   "proxy-001",
+   "region-001",
+   "solid3d-001",
+   "table-001",
+   "text-001",
+   "wipeout-001",
+   "xref-001"
+  ]
+ }
+}

@@ -1,0 +1,12 @@
+{
+  "cells": {},
+  "detail": "",
+  "evidence_class": "DUAL_ORACLE_EQUIVALENT",
+  "evidence_scope": "STEP_ORACLE",
+  "fixture_id": "blocks-dynamic-linear-001",
+  "known_truth": false,
+  "oracle_scope": "OPEN_CONVERTERS",
+  "reason": null,
+  "schema_version": "pvec-gold/fixture-verdict/1",
+  "signature_differences": []
+}

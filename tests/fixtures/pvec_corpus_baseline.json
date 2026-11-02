@@ -1,0 +1,1709 @@
+{
+ "corpus_revision": "r2-open",
+ "rows": {
+  "arc-seam-001": {
+   "evidence": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "fixture": "arc-seam-001",
+   "group": "curves",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 1,
+     "SupportedExact": 0,
+     "Unsupported": 0
+    },
+    "conformance": "SupportedEquivalent"
+   },
+   "outcome": "converted",
+   "size": {
+    "artifact_bytes": 344,
+    "entities": 1,
+    "written": 1
+   },
+   "view": {
+    "excluded_by_field": {},
+    "included": 1,
+    "space": "Model",
+    "xrefs_unresolved": 0
+   },
+   "what_the_class_means": "independently authored expectation"
+  },
+  "arc-tiny-sweep-001": {
+   "evidence": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "fixture": "arc-tiny-sweep-001",
+   "group": "edge",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 1,
+     "SupportedExact": 0,
+     "Unsupported": 0
+    },
+    "conformance": "SupportedEquivalent"
+   },
+   "outcome": "converted",
+   "size": {
+    "artifact_bytes": 360,
+    "entities": 1,
+    "written": 1
+   },
+   "view": {
+    "excluded_by_field": {},
+    "included": 1,
+    "space": "Model",
+    "xrefs_unresolved": 0
+   },
+   "what_the_class_means": "independently authored expectation"
+  },
+  "bezier-d3-001": {
+   "evidence": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "fixture": "bezier-d3-001",
+   "group": "curves",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 0,
+     "SupportedExact": 1,
+     "Unsupported": 0
+    },
+    "conformance": "SupportedExact"
+   },
+   "outcome": "converted",
+   "size": {
+    "artifact_bytes": 888,
+    "entities": 1,
+    "written": 1
+   },
+   "view": {
+    "excluded_by_field": {},
+    "included": 1,
+    "space": "Model",
+    "xrefs_unresolved": 0
+   },
+   "what_the_class_means": "independently authored expectation"
+  },
+  "blocks-dynamic-linear-001": {
+   "evidence": "DUAL_ORACLE_EQUIVALENT",
+   "evidence_scope": "STEP_ORACLE",
+   "fixture": "blocks-dynamic-linear-001",
+   "group": "real-world",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 0,
+     "SupportedExact": 2,
+     "Unsupported": 0
+    },
+    "conformance": "SupportedExact"
+   },
+   "outcome": "converted",
+   "size": {
+    "artifact_bytes": 368,
+    "entities": 2,
+    "written": 2
+   },
+   "view": {
+    "excluded_by_field": {},
+    "included": 2,
+    "space": "Model",
+    "xrefs_unresolved": 0
+   },
+   "what_the_class_means": "converter agreement, not source truth"
+  },
+  "bspline-d3-001": {
+   "evidence": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "fixture": "bspline-d3-001",
+   "group": "curves",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 0,
+     "SupportedExact": 1,
+     "Unsupported": 0
+    },
+    "conformance": "SupportedExact"
+   },
+   "outcome": "converted",
+   "size": {
+    "artifact_bytes": 928,
+    "entities": 1,
+    "written": 1
+   },
+   "view": {
+    "excluded_by_field": {},
+    "included": 1,
+    "space": "Model",
+    "xrefs_unresolved": 0
+   },
+   "what_the_class_means": "independently authored expectation"
+  },
+  "bspline-d5-001": {
+   "evidence": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "fixture": "bspline-d5-001",
+   "group": "curves",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 0,
+     "SupportedExact": 1,
+     "Unsupported": 0
+    },
+    "conformance": "SupportedExact"
+   },
+   "outcome": "converted",
+   "size": {
+    "artifact_bytes": 944,
+    "entities": 1,
+    "written": 1
+   },
+   "view": {
+    "excluded_by_field": {},
+    "included": 1,
+    "space": "Model",
+    "xrefs_unresolved": 0
+   },
+   "what_the_class_means": "independently authored expectation"
+  },
+  "bspline-nonunit-domain-001": {
+   "evidence": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "fixture": "bspline-nonunit-domain-001",
+   "group": "edge",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 0,
+     "SupportedExact": 1,
+     "Unsupported": 0
+    },
+    "conformance": "SupportedExact"
+   },
+   "outcome": "converted",
+   "size": {
+    "artifact_bytes": 904,
+    "entities": 1,
+    "written": 1
+   },
+   "view": {
+    "excluded_by_field": {},
+    "included": 1,
+    "space": "Model",
+    "xrefs_unresolved": 0
+   },
+   "what_the_class_means": "independently authored expectation"
+  },
+  "bulge-arc-001": {
+   "evidence": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "fixture": "bulge-arc-001",
+   "group": "curves",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 1,
+     "SupportedExact": 0,
+     "Unsupported": 0
+    },
+    "conformance": "NoGeometry",
+    "reasons": []
+   },
+   "outcome": "refused: the artifact could not be written <- PVec's writer refused: write refused: WRT-08 <- write refused: WRT-08",
+   "size": {
+    "artifact_bytes": 0,
+    "entities": 1,
+    "written": 0
+   },
+   "view": {},
+   "what_the_class_means": "independently authored expectation"
+  },
+  "bulge-arc-neg-001": {
+   "evidence": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "fixture": "bulge-arc-neg-001",
+   "group": "curves",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 1,
+     "SupportedExact": 0,
+     "Unsupported": 0
+    },
+    "conformance": "NoGeometry",
+    "reasons": []
+   },
+   "outcome": "refused: the artifact could not be written <- PVec's writer refused: write refused: WRT-08 <- write refused: WRT-08",
+   "size": {
+    "artifact_bytes": 0,
+    "entities": 1,
+    "written": 0
+   },
+   "view": {},
+   "what_the_class_means": "independently authored expectation"
+  },
+  "circle-001": {
+   "evidence": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "fixture": "circle-001",
+   "group": "curves",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 0,
+     "SupportedExact": 1,
+     "Unsupported": 0
+    },
+    "conformance": "SupportedExact"
+   },
+   "outcome": "converted",
+   "size": {
+    "artifact_bytes": 360,
+    "entities": 1,
+    "written": 1
+   },
+   "view": {
+    "excluded_by_field": {},
+    "included": 1,
+    "space": "Model",
+    "xrefs_unresolved": 0
+   },
+   "what_the_class_means": "independently authored expectation"
+  },
+  "closed-by-endpoint-001": {
+   "evidence": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "fixture": "closed-by-endpoint-001",
+   "group": "curves",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 0,
+     "SupportedExact": 1,
+     "Unsupported": 0
+    },
+    "conformance": "SupportedExact"
+   },
+   "outcome": "converted",
+   "size": {
+    "artifact_bytes": 912,
+    "entities": 1,
+    "written": 1
+   },
+   "view": {
+    "excluded_by_field": {},
+    "included": 1,
+    "space": "Model",
+    "xrefs_unresolved": 0
+   },
+   "what_the_class_means": "independently authored expectation"
+  },
+  "closed-periodic-001": {
+   "evidence": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "fixture": "closed-periodic-001",
+   "group": "curves",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 1,
+     "SupportedExact": 0,
+     "Unsupported": 0
+    },
+    "conformance": "SupportedEquivalent"
+   },
+   "outcome": "converted",
+   "size": {
+    "artifact_bytes": 976,
+    "entities": 1,
+    "written": 1
+   },
+   "view": {
+    "excluded_by_field": {},
+    "included": 1,
+    "space": "Model",
+    "xrefs_unresolved": 0
+   },
+   "what_the_class_means": "independently authored expectation"
+  },
+  "coincident-control-points-001": {
+   "evidence": "QUARANTINED",
+   "evidence_scope": "REJECTION_EXPECTED",
+   "fixture": "coincident-control-points-001",
+   "group": "degenerate",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 0,
+     "SupportedExact": 0,
+     "Unsupported": 1
+    },
+    "conformance": "NoGeometry",
+    "reasons": [
+     {
+      "count": 1,
+      "reason": "degenerate-geometry",
+      "source_class": "SPLINE"
+     }
+    ]
+   },
+   "outcome": "refused: the artifact could not be written <- no entity carries geometry",
+   "size": {
+    "artifact_bytes": 0,
+    "entities": 1,
+    "written": 0
+   },
+   "view": {},
+   "what_the_class_means": "runs and reports, never gates"
+  },
+  "dimension-001": {
+   "evidence": "QUARANTINED",
+   "evidence_scope": "STEP_ORACLE",
+   "fixture": "dimension-001",
+   "group": "negative",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 0,
+     "SupportedExact": 0,
+     "Unsupported": 1
+    },
+    "conformance": "NoGeometry",
+    "reasons": [
+     {
+      "count": 1,
+      "reason": "unmapped-source-class",
+      "source_class": "DIMENSION_LINEAR"
+     }
+    ]
+   },
+   "outcome": "refused: the artifact could not be written <- no entity carries geometry",
+   "size": {
+    "artifact_bytes": 0,
+    "entities": 1,
+    "written": 0
+   },
+   "view": {},
+   "what_the_class_means": "runs and reports, never gates"
+  },
+  "ellipse-001": {
+   "evidence": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "fixture": "ellipse-001",
+   "group": "curves",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 0,
+     "SupportedExact": 1,
+     "Unsupported": 0
+    },
+    "conformance": "SupportedExact"
+   },
+   "outcome": "converted",
+   "size": {
+    "artifact_bytes": 384,
+    "entities": 1,
+    "written": 1
+   },
+   "view": {
+    "excluded_by_field": {},
+    "included": 1,
+    "space": "Model",
+    "xrefs_unresolved": 0
+   },
+   "what_the_class_means": "independently authored expectation"
+  },
+  "elliptical-arc-001": {
+   "evidence": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "fixture": "elliptical-arc-001",
+   "group": "curves",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 1,
+     "SupportedExact": 0,
+     "Unsupported": 0
+    },
+    "conformance": "SupportedEquivalent"
+   },
+   "outcome": "converted",
+   "size": {
+    "artifact_bytes": 384,
+    "entities": 1,
+    "written": 1
+   },
+   "view": {
+    "excluded_by_field": {},
+    "included": 1,
+    "space": "Model",
+    "xrefs_unresolved": 0
+   },
+   "what_the_class_means": "independently authored expectation"
+  },
+  "empty-001": {
+   "evidence": "QUARANTINED",
+   "evidence_scope": "STEP_ORACLE",
+   "fixture": "empty-001",
+   "group": "negative",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 0,
+     "SupportedExact": 0,
+     "Unsupported": 0
+    },
+    "conformance": "NoGeometry",
+    "reasons": []
+   },
+   "outcome": "refused: the artifact could not be written <- no entity carries geometry",
+   "size": {
+    "artifact_bytes": 0,
+    "entities": 0,
+    "written": 0
+   },
+   "view": {},
+   "what_the_class_means": "runs and reports, never gates"
+  },
+  "general-affine-chain-001": {
+   "evidence": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "fixture": "general-affine-chain-001",
+   "group": "edge",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 1,
+     "SupportedExact": 0,
+     "Unsupported": 0
+    },
+    "conformance": "SupportedEquivalent"
+   },
+   "outcome": "converted",
+   "size": {
+    "artifact_bytes": 360,
+    "entities": 1,
+    "written": 1
+   },
+   "view": {
+    "excluded_by_field": {},
+    "included": 1,
+    "space": "Model",
+    "xrefs_unresolved": 0
+   },
+   "what_the_class_means": "independently authored expectation"
+  },
+  "hatch-001": {
+   "evidence": "QUARANTINED",
+   "evidence_scope": "STEP_ORACLE",
+   "fixture": "hatch-001",
+   "group": "negative",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 0,
+     "SupportedExact": 0,
+     "Unsupported": 1
+    },
+    "conformance": "NoGeometry",
+    "reasons": [
+     {
+      "count": 1,
+      "reason": "unmapped-source-class",
+      "source_class": "HATCH"
+     }
+    ]
+   },
+   "outcome": "refused: the artifact could not be written <- no entity carries geometry",
+   "size": {
+    "artifact_bytes": 0,
+    "entities": 1,
+    "written": 0
+   },
+   "view": {},
+   "what_the_class_means": "runs and reports, never gates"
+  },
+  "hatch-gradient-001": {
+   "evidence": "QUARANTINED",
+   "evidence_scope": "STEP_ORACLE",
+   "fixture": "hatch-gradient-001",
+   "group": "negative",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 0,
+     "SupportedExact": 0,
+     "Unsupported": 1
+    },
+    "conformance": "NoGeometry",
+    "reasons": [
+     {
+      "count": 1,
+      "reason": "unmapped-source-class",
+      "source_class": "HATCH"
+     }
+    ]
+   },
+   "outcome": "refused: the artifact could not be written <- no entity carries geometry",
+   "size": {
+    "artifact_bytes": 0,
+    "entities": 1,
+    "written": 0
+   },
+   "view": {},
+   "what_the_class_means": "runs and reports, never gates"
+  },
+  "huge-extent-001": {
+   "evidence": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "fixture": "huge-extent-001",
+   "group": "edge",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 0,
+     "SupportedExact": 1,
+     "Unsupported": 0
+    },
+    "conformance": "SupportedExact"
+   },
+   "outcome": "converted",
+   "size": {
+    "artifact_bytes": 376,
+    "entities": 1,
+    "written": 1
+   },
+   "view": {
+    "excluded_by_field": {},
+    "included": 1,
+    "space": "Model",
+    "xrefs_unresolved": 0
+   },
+   "what_the_class_means": "independently authored expectation"
+  },
+  "image-001": {
+   "evidence": "QUARANTINED",
+   "evidence_scope": "STEP_ORACLE",
+   "fixture": "image-001",
+   "group": "negative",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 0,
+     "SupportedExact": 0,
+     "Unsupported": 1
+    },
+    "conformance": "NoGeometry",
+    "reasons": [
+     {
+      "count": 1,
+      "reason": "unmapped-source-class",
+      "source_class": "IMAGE"
+     }
+    ]
+   },
+   "outcome": "refused: the artifact could not be written <- no entity carries geometry",
+   "size": {
+    "artifact_bytes": 0,
+    "entities": 1,
+    "written": 0
+   },
+   "view": {},
+   "what_the_class_means": "runs and reports, never gates"
+  },
+  "large-coords-001": {
+   "evidence": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "fixture": "large-coords-001",
+   "group": "curves",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 0,
+     "SupportedExact": 1,
+     "Unsupported": 0
+    },
+    "conformance": "SupportedExact"
+   },
+   "outcome": "converted",
+   "size": {
+    "artifact_bytes": 368,
+    "entities": 1,
+    "written": 1
+   },
+   "view": {
+    "excluded_by_field": {},
+    "included": 1,
+    "space": "Model",
+    "xrefs_unresolved": 0
+   },
+   "what_the_class_means": "independently authored expectation"
+  },
+  "layer-state-001": {
+   "evidence": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "READER_MAPPING_ONLY",
+   "fixture": "layer-state-001",
+   "group": "curves",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 2,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 1,
+     "SupportedExact": 0,
+     "Unsupported": 0
+    },
+    "conformance": "SupportedEquivalent"
+   },
+   "outcome": "converted",
+   "size": {
+    "artifact_bytes": 344,
+    "entities": 3,
+    "written": 1
+   },
+   "view": {
+    "excluded_by_field": {
+     "layers.frozen": 1,
+     "layers.off": 1
+    },
+    "included": 1,
+    "space": "Model",
+    "xrefs_unresolved": 0
+   },
+   "what_the_class_means": "independently authored expectation"
+  },
+  "line-001": {
+   "evidence": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "fixture": "line-001",
+   "group": "curves",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 1,
+     "SupportedExact": 0,
+     "Unsupported": 0
+    },
+    "conformance": "SupportedEquivalent"
+   },
+   "outcome": "converted",
+   "size": {
+    "artifact_bytes": 352,
+    "entities": 1,
+    "written": 1
+   },
+   "view": {
+    "excluded_by_field": {},
+    "included": 1,
+    "space": "Model",
+    "xrefs_unresolved": 0
+   },
+   "what_the_class_means": "independently authored expectation"
+  },
+  "lwpolyline-closed-001": {
+   "evidence": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "fixture": "lwpolyline-closed-001",
+   "group": "curves",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 0,
+     "SupportedExact": 1,
+     "Unsupported": 0
+    },
+    "conformance": "SupportedExact"
+   },
+   "outcome": "converted",
+   "size": {
+    "artifact_bytes": 368,
+    "entities": 1,
+    "written": 1
+   },
+   "view": {
+    "excluded_by_field": {},
+    "included": 1,
+    "space": "Model",
+    "xrefs_unresolved": 0
+   },
+   "what_the_class_means": "independently authored expectation"
+  },
+  "mesh-001": {
+   "evidence": "QUARANTINED",
+   "evidence_scope": "STEP_ORACLE",
+   "fixture": "mesh-001",
+   "group": "negative",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 0,
+     "SupportedExact": 0,
+     "Unsupported": 1
+    },
+    "conformance": "NoGeometry",
+    "reasons": [
+     {
+      "count": 1,
+      "reason": "unmapped-source-class",
+      "source_class": "MESH"
+     }
+    ]
+   },
+   "outcome": "refused: the artifact could not be written <- no entity carries geometry",
+   "size": {
+    "artifact_bytes": 0,
+    "entities": 1,
+    "written": 0
+   },
+   "view": {},
+   "what_the_class_means": "runs and reports, never gates"
+  },
+  "mixed-entity-001": {
+   "evidence": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "READER_MAPPING_ONLY",
+   "fixture": "mixed-entity-001",
+   "group": "mixed",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 4,
+     "SupportedExact": 4,
+     "Unsupported": 0
+    },
+    "conformance": "NoGeometry",
+    "reasons": []
+   },
+   "outcome": "refused: the artifact could not be written <- PVec's writer refused: write refused: WRT-08 <- write refused: WRT-08",
+   "size": {
+    "artifact_bytes": 0,
+    "entities": 8,
+    "written": 0
+   },
+   "view": {},
+   "what_the_class_means": "independently authored expectation"
+  },
+  "mtext-001": {
+   "evidence": "QUARANTINED",
+   "evidence_scope": "STEP_ORACLE",
+   "fixture": "mtext-001",
+   "group": "negative",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 0,
+     "SupportedExact": 0,
+     "Unsupported": 1
+    },
+    "conformance": "NoGeometry",
+    "reasons": [
+     {
+      "count": 1,
+      "reason": "unmapped-source-class",
+      "source_class": "MTEXT"
+     }
+    ]
+   },
+   "outcome": "refused: the artifact could not be written <- no entity carries geometry",
+   "size": {
+    "artifact_bytes": 0,
+    "entities": 1,
+    "written": 0
+   },
+   "view": {},
+   "what_the_class_means": "runs and reports, never gates"
+  },
+  "near-singular-001": {
+   "evidence": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "fixture": "near-singular-001",
+   "group": "transforms",
+   "mathematical": {
+    "by_fidelity": {},
+    "conformance": "NoGeometry",
+    "reasons": []
+   },
+   "outcome": "refused: blocks could not be expanded <- insert of block `PROBE_NEAR_SINGULAR_001_L1` (handle 53, level 0): TRANSFORM_SINGULAR (NP-19): SingularTransform (NP-19)",
+   "size": {
+    "artifact_bytes": 0,
+    "entities": 0,
+    "written": 0
+   },
+   "view": {},
+   "what_the_class_means": "independently authored expectation"
+  },
+  "nested-blocks-001": {
+   "evidence": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "fixture": "nested-blocks-001",
+   "group": "blocks",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 1,
+     "SupportedExact": 0,
+     "Unsupported": 0
+    },
+    "conformance": "SupportedEquivalent"
+   },
+   "outcome": "converted",
+   "size": {
+    "artifact_bytes": 352,
+    "entities": 1,
+    "written": 1
+   },
+   "view": {
+    "excluded_by_field": {},
+    "included": 1,
+    "space": "Model",
+    "xrefs_unresolved": 0
+   },
+   "what_the_class_means": "independently authored expectation"
+  },
+  "nonuniform-scale-circle-001": {
+   "evidence": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "fixture": "nonuniform-scale-circle-001",
+   "group": "transforms",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 0,
+     "SupportedExact": 1,
+     "Unsupported": 0
+    },
+    "conformance": "SupportedExact"
+   },
+   "outcome": "converted",
+   "size": {
+    "artifact_bytes": 360,
+    "entities": 1,
+    "written": 1
+   },
+   "view": {
+    "excluded_by_field": {},
+    "included": 1,
+    "space": "Model",
+    "xrefs_unresolved": 0
+   },
+   "what_the_class_means": "independently authored expectation"
+  },
+  "nonuniform-scale-rotated-001": {
+   "evidence": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "fixture": "nonuniform-scale-rotated-001",
+   "group": "transforms",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 0,
+     "SupportedExact": 1,
+     "Unsupported": 0
+    },
+    "conformance": "SupportedExact"
+   },
+   "outcome": "converted",
+   "size": {
+    "artifact_bytes": 384,
+    "entities": 1,
+    "written": 1
+   },
+   "view": {
+    "excluded_by_field": {},
+    "included": 1,
+    "space": "Model",
+    "xrefs_unresolved": 0
+   },
+   "what_the_class_means": "independently authored expectation"
+  },
+  "nonunit-weight-001": {
+   "evidence": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "fixture": "nonunit-weight-001",
+   "group": "curves",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 0,
+     "SupportedExact": 1,
+     "Unsupported": 0
+    },
+    "conformance": "SupportedExact"
+   },
+   "outcome": "converted",
+   "size": {
+    "artifact_bytes": 928,
+    "entities": 1,
+    "written": 1
+   },
+   "view": {
+    "excluded_by_field": {},
+    "included": 1,
+    "space": "Model",
+    "xrefs_unresolved": 0
+   },
+   "what_the_class_means": "independently authored expectation"
+  },
+  "nurbs-d2-offconic-001": {
+   "evidence": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "fixture": "nurbs-d2-offconic-001",
+   "group": "curves",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 0,
+     "SupportedExact": 1,
+     "Unsupported": 0
+    },
+    "conformance": "SupportedExact"
+   },
+   "outcome": "converted",
+   "size": {
+    "artifact_bytes": 936,
+    "entities": 1,
+    "written": 1
+   },
+   "view": {
+    "excluded_by_field": {},
+    "included": 1,
+    "space": "Model",
+    "xrefs_unresolved": 0
+   },
+   "what_the_class_means": "independently authored expectation"
+  },
+  "nurbs-d3-001": {
+   "evidence": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "fixture": "nurbs-d3-001",
+   "group": "curves",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 0,
+     "SupportedExact": 1,
+     "Unsupported": 0
+    },
+    "conformance": "SupportedExact"
+   },
+   "outcome": "converted",
+   "size": {
+    "artifact_bytes": 952,
+    "entities": 1,
+    "written": 1
+   },
+   "view": {
+    "excluded_by_field": {},
+    "included": 1,
+    "space": "Model",
+    "xrefs_unresolved": 0
+   },
+   "what_the_class_means": "independently authored expectation"
+  },
+  "ole-001": {
+   "evidence": "QUARANTINED",
+   "evidence_scope": "STEP_ORACLE",
+   "fixture": "ole-001",
+   "group": "negative",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 0,
+     "SupportedExact": 0,
+     "Unsupported": 1
+    },
+    "conformance": "NoGeometry",
+    "reasons": [
+     {
+      "count": 1,
+      "reason": "unmapped-source-class",
+      "source_class": "OLE2FRAME"
+     }
+    ]
+   },
+   "outcome": "refused: the artifact could not be written <- no entity carries geometry",
+   "size": {
+    "artifact_bytes": 0,
+    "entities": 1,
+    "written": 0
+   },
+   "view": {},
+   "what_the_class_means": "runs and reports, never gates"
+  },
+  "polyline-001": {
+   "evidence": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "fixture": "polyline-001",
+   "group": "curves",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 0,
+     "SupportedExact": 1,
+     "Unsupported": 0
+    },
+    "conformance": "SupportedExact"
+   },
+   "outcome": "converted",
+   "size": {
+    "artifact_bytes": 368,
+    "entities": 1,
+    "written": 1
+   },
+   "view": {
+    "excluded_by_field": {},
+    "included": 1,
+    "space": "Model",
+    "xrefs_unresolved": 0
+   },
+   "what_the_class_means": "independently authored expectation"
+  },
+  "polyline2d-001": {
+   "evidence": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "fixture": "polyline2d-001",
+   "group": "curves",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 0,
+     "SupportedExact": 1,
+     "Unsupported": 0
+    },
+    "conformance": "SupportedExact"
+   },
+   "outcome": "converted",
+   "size": {
+    "artifact_bytes": 376,
+    "entities": 1,
+    "written": 1
+   },
+   "view": {
+    "excluded_by_field": {},
+    "included": 1,
+    "space": "Model",
+    "xrefs_unresolved": 0
+   },
+   "what_the_class_means": "independently authored expectation"
+  },
+  "proxy-001": {
+   "evidence": "QUARANTINED",
+   "evidence_scope": "STEP_ORACLE",
+   "fixture": "proxy-001",
+   "group": "negative",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 0,
+     "SupportedExact": 0,
+     "Unsupported": 0
+    },
+    "conformance": "NoGeometry",
+    "reasons": []
+   },
+   "outcome": "refused: the artifact could not be written <- no entity carries geometry",
+   "size": {
+    "artifact_bytes": 0,
+    "entities": 0,
+    "written": 0
+   },
+   "view": {},
+   "what_the_class_means": "runs and reports, never gates"
+  },
+  "reflection-001": {
+   "evidence": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "fixture": "reflection-001",
+   "group": "transforms",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 1,
+     "SupportedExact": 0,
+     "Unsupported": 0
+    },
+    "conformance": "SupportedEquivalent"
+   },
+   "outcome": "converted",
+   "size": {
+    "artifact_bytes": 360,
+    "entities": 1,
+    "written": 1
+   },
+   "view": {
+    "excluded_by_field": {},
+    "included": 1,
+    "space": "Model",
+    "xrefs_unresolved": 0
+   },
+   "what_the_class_means": "independently authored expectation"
+  },
+  "region-001": {
+   "evidence": "QUARANTINED",
+   "evidence_scope": "STEP_ORACLE",
+   "fixture": "region-001",
+   "group": "negative",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 0,
+     "SupportedExact": 0,
+     "Unsupported": 1
+    },
+    "conformance": "NoGeometry",
+    "reasons": [
+     {
+      "count": 1,
+      "reason": "unmapped-source-class",
+      "source_class": "REGION"
+     }
+    ]
+   },
+   "outcome": "refused: the artifact could not be written <- no entity carries geometry",
+   "size": {
+    "artifact_bytes": 0,
+    "entities": 1,
+    "written": 0
+   },
+   "view": {},
+   "what_the_class_means": "runs and reports, never gates"
+  },
+  "repeated-knot-c0-001": {
+   "evidence": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "fixture": "repeated-knot-c0-001",
+   "group": "curves",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 0,
+     "SupportedExact": 1,
+     "Unsupported": 0
+    },
+    "conformance": "SupportedExact"
+   },
+   "outcome": "converted",
+   "size": {
+    "artifact_bytes": 920,
+    "entities": 1,
+    "written": 1
+   },
+   "view": {
+    "excluded_by_field": {},
+    "included": 1,
+    "space": "Model",
+    "xrefs_unresolved": 0
+   },
+   "what_the_class_means": "independently authored expectation"
+  },
+  "rotation-irrational-001": {
+   "evidence": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "fixture": "rotation-irrational-001",
+   "group": "transforms",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 1,
+     "SupportedExact": 0,
+     "Unsupported": 0
+    },
+    "conformance": "SupportedEquivalent"
+   },
+   "outcome": "converted",
+   "size": {
+    "artifact_bytes": 376,
+    "entities": 1,
+    "written": 1
+   },
+   "view": {
+    "excluded_by_field": {},
+    "included": 1,
+    "space": "Model",
+    "xrefs_unresolved": 0
+   },
+   "what_the_class_means": "independently authored expectation"
+  },
+  "shear-chain-001": {
+   "evidence": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "fixture": "shear-chain-001",
+   "group": "edge",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 1,
+     "SupportedExact": 0,
+     "Unsupported": 0
+    },
+    "conformance": "SupportedEquivalent"
+   },
+   "outcome": "converted",
+   "size": {
+    "artifact_bytes": 352,
+    "entities": 1,
+    "written": 1
+   },
+   "view": {
+    "excluded_by_field": {},
+    "included": 1,
+    "space": "Model",
+    "xrefs_unresolved": 0
+   },
+   "what_the_class_means": "independently authored expectation"
+  },
+  "singular-001": {
+   "evidence": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "fixture": "singular-001",
+   "group": "edge",
+   "mathematical": {
+    "by_fidelity": {},
+    "conformance": "NoGeometry",
+    "reasons": []
+   },
+   "outcome": "refused: blocks could not be expanded <- insert of block `PROBE_SINGULAR_001_L1` (handle 53, level 0): TRANSFORM_SINGULAR (NP-19): SingularTransform (NP-19)",
+   "size": {
+    "artifact_bytes": 0,
+    "entities": 0,
+    "written": 0
+   },
+   "view": {},
+   "what_the_class_means": "independently authored expectation"
+  },
+  "solid3d-001": {
+   "evidence": "QUARANTINED",
+   "evidence_scope": "STEP_ORACLE",
+   "fixture": "solid3d-001",
+   "group": "negative",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 0,
+     "SupportedExact": 0,
+     "Unsupported": 1
+    },
+    "conformance": "NoGeometry",
+    "reasons": [
+     {
+      "count": 1,
+      "reason": "unmapped-source-class",
+      "source_class": "3DSOLID"
+     }
+    ]
+   },
+   "outcome": "refused: the artifact could not be written <- no entity carries geometry",
+   "size": {
+    "artifact_bytes": 0,
+    "entities": 1,
+    "written": 0
+   },
+   "view": {},
+   "what_the_class_means": "runs and reports, never gates"
+  },
+  "table-001": {
+   "evidence": "QUARANTINED",
+   "evidence_scope": "STEP_ORACLE",
+   "fixture": "table-001",
+   "group": "negative",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 0,
+     "SupportedExact": 0,
+     "Unsupported": 1
+    },
+    "conformance": "NoGeometry",
+    "reasons": [
+     {
+      "count": 1,
+      "reason": "unmapped-source-class",
+      "source_class": "ACAD_TABLE"
+     }
+    ]
+   },
+   "outcome": "refused: the artifact could not be written <- no entity carries geometry",
+   "size": {
+    "artifact_bytes": 0,
+    "entities": 1,
+    "written": 0
+   },
+   "view": {},
+   "what_the_class_means": "runs and reports, never gates"
+  },
+  "text-001": {
+   "evidence": "QUARANTINED",
+   "evidence_scope": "STEP_ORACLE",
+   "fixture": "text-001",
+   "group": "negative",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 0,
+     "SupportedExact": 0,
+     "Unsupported": 1
+    },
+    "conformance": "NoGeometry",
+    "reasons": [
+     {
+      "count": 1,
+      "reason": "unmapped-source-class",
+      "source_class": "TEXT"
+     }
+    ]
+   },
+   "outcome": "refused: the artifact could not be written <- no entity carries geometry",
+   "size": {
+    "artifact_bytes": 0,
+    "entities": 1,
+    "written": 0
+   },
+   "view": {},
+   "what_the_class_means": "runs and reports, never gates"
+  },
+  "tiny-extent-001": {
+   "evidence": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "READER_MAPPING_ONLY",
+   "fixture": "tiny-extent-001",
+   "group": "edge",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 1,
+     "SupportedExact": 0,
+     "Unsupported": 0
+    },
+    "conformance": "SupportedEquivalent"
+   },
+   "outcome": "converted",
+   "size": {
+    "artifact_bytes": 360,
+    "entities": 1,
+    "written": 1
+   },
+   "view": {
+    "excluded_by_field": {},
+    "included": 1,
+    "space": "Model",
+    "xrefs_unresolved": 0
+   },
+   "what_the_class_means": "independently authored expectation"
+  },
+  "tiny-radius-001": {
+   "evidence": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "fixture": "tiny-radius-001",
+   "group": "curves",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 0,
+     "SupportedExact": 1,
+     "Unsupported": 0
+    },
+    "conformance": "SupportedExact"
+   },
+   "outcome": "converted",
+   "size": {
+    "artifact_bytes": 368,
+    "entities": 1,
+    "written": 1
+   },
+   "view": {
+    "excluded_by_field": {},
+    "included": 1,
+    "space": "Model",
+    "xrefs_unresolved": 0
+   },
+   "what_the_class_means": "independently authored expectation"
+  },
+  "translation-001": {
+   "evidence": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "fixture": "translation-001",
+   "group": "transforms",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 1,
+     "SupportedExact": 0,
+     "Unsupported": 0
+    },
+    "conformance": "SupportedEquivalent"
+   },
+   "outcome": "converted",
+   "size": {
+    "artifact_bytes": 352,
+    "entities": 1,
+    "written": 1
+   },
+   "view": {
+    "excluded_by_field": {},
+    "included": 1,
+    "space": "Model",
+    "xrefs_unresolved": 0
+   },
+   "what_the_class_means": "independently authored expectation"
+  },
+  "uniform-scale-001": {
+   "evidence": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "STEP_ORACLE",
+   "fixture": "uniform-scale-001",
+   "group": "transforms",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 0,
+     "SupportedExact": 1,
+     "Unsupported": 0
+    },
+    "conformance": "SupportedExact"
+   },
+   "outcome": "converted",
+   "size": {
+    "artifact_bytes": 360,
+    "entities": 1,
+    "written": 1
+   },
+   "view": {
+    "excluded_by_field": {},
+    "included": 1,
+    "space": "Model",
+    "xrefs_unresolved": 0
+   },
+   "what_the_class_means": "independently authored expectation"
+  },
+  "wipeout-001": {
+   "evidence": "QUARANTINED",
+   "evidence_scope": "STEP_ORACLE",
+   "fixture": "wipeout-001",
+   "group": "negative",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 0,
+     "SupportedExact": 0,
+     "Unsupported": 1
+    },
+    "conformance": "NoGeometry",
+    "reasons": [
+     {
+      "count": 1,
+      "reason": "unmapped-source-class",
+      "source_class": "WIPEOUT"
+     }
+    ]
+   },
+   "outcome": "refused: the artifact could not be written <- no entity carries geometry",
+   "size": {
+    "artifact_bytes": 0,
+    "entities": 1,
+    "written": 0
+   },
+   "view": {},
+   "what_the_class_means": "runs and reports, never gates"
+  },
+  "xref-001": {
+   "evidence": "QUARANTINED",
+   "evidence_scope": "STEP_ORACLE",
+   "fixture": "xref-001",
+   "group": "negative",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 0,
+     "SupportedExact": 0,
+     "Unsupported": 1
+    },
+    "conformance": "NoGeometry",
+    "reasons": [
+     {
+      "count": 1,
+      "reason": "unresolved-block",
+      "source_class": "INSERT"
+     }
+    ]
+   },
+   "outcome": "refused: the artifact could not be written <- no entity carries geometry",
+   "size": {
+    "artifact_bytes": 0,
+    "entities": 1,
+    "written": 0
+   },
+   "view": {},
+   "what_the_class_means": "runs and reports, never gates"
+  },
+  "zero-length-segment-001": {
+   "evidence": "QUARANTINED",
+   "evidence_scope": "REJECTION_EXPECTED",
+   "fixture": "zero-length-segment-001",
+   "group": "degenerate",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 0,
+     "SupportedExact": 0,
+     "Unsupported": 1
+    },
+    "conformance": "NoGeometry",
+    "reasons": [
+     {
+      "count": 1,
+      "reason": "coincident-vertices",
+      "source_class": "LINE"
+     }
+    ]
+   },
+   "outcome": "refused: the artifact could not be written <- no entity carries geometry",
+   "size": {
+    "artifact_bytes": 0,
+    "entities": 1,
+    "written": 0
+   },
+   "view": {},
+   "what_the_class_means": "runs and reports, never gates"
+  },
+  "zero-radius-001": {
+   "evidence": "QUARANTINED",
+   "evidence_scope": "REJECTION_EXPECTED",
+   "fixture": "zero-radius-001",
+   "group": "degenerate",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 0,
+     "SupportedExact": 0,
+     "Unsupported": 1
+    },
+    "conformance": "NoGeometry",
+    "reasons": [
+     {
+      "count": 1,
+      "reason": "degenerate-radius",
+      "source_class": "CIRCLE"
+     }
+    ]
+   },
+   "outcome": "refused: the artifact could not be written <- no entity carries geometry",
+   "size": {
+    "artifact_bytes": 0,
+    "entities": 1,
+    "written": 0
+   },
+   "view": {},
+   "what_the_class_means": "runs and reports, never gates"
+  }
+ },
+ "schema": 1
+}

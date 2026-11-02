@@ -1,0 +1,294 @@
+{
+  "schema_version": "pvec-gold/expected.math/1",
+  "fixture_id": "closed-periodic-001",
+  "evidence_class": "KNOWN_TRUTH_EXACT",
+  "units": {
+    "name": "metre",
+    "canonical": "metre",
+    "scale_to_canonical": {
+      "decimal": "1.0",
+      "f64_hex": "0x3ff0000000000000"
+    }
+  },
+  "provenance": {
+    "derivation": "AUTHORING_PARAMETERS",
+    "authoring_script": "tools/authoring/author_probes.py",
+    "parameter_file": "tools/authoring/params/closed-periodic-001.json",
+    "parameter_file_sha256": "61e7bd9a86644fac6b0f33c031b01e1836259c8e6ea498f36f66fd93c6394be0",
+    "parameters": {
+      "id": "closed-periodic-001",
+      "kind": "bspline",
+      "description": "A periodic cubic B-spline with six unique control points, closed by its knot vector alone. First and last control points are different points.",
+      "degree": 3,
+      "periodic": true,
+      "control_points": [
+        [
+          "3",
+          "0",
+          "0"
+        ],
+        [
+          "1.5",
+          "2.6",
+          "0"
+        ],
+        [
+          "-1.5",
+          "2.6",
+          "0"
+        ],
+        [
+          "-3",
+          "0",
+          "0"
+        ],
+        [
+          "-1.5",
+          "-2.6",
+          "0"
+        ],
+        [
+          "1.5",
+          "-2.6",
+          "0"
+        ]
+      ],
+      "knots": [
+        [
+          "0",
+          1
+        ],
+        [
+          "0.1",
+          1
+        ],
+        [
+          "0.25",
+          1
+        ],
+        [
+          "0.4",
+          1
+        ],
+        [
+          "0.6",
+          1
+        ],
+        [
+          "0.8",
+          1
+        ],
+        [
+          "1",
+          1
+        ]
+      ]
+    }
+  },
+  "entities": [
+    {
+      "id": "closed-periodic-001",
+      "class": "bspline",
+      "geometry": {
+        "degree": 3,
+        "control_points": [
+          [
+            {
+              "decimal": "3.0",
+              "f64_hex": "0x4008000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            }
+          ],
+          [
+            {
+              "decimal": "1.5",
+              "f64_hex": "0x3ff8000000000000"
+            },
+            {
+              "decimal": "2.6",
+              "f64_hex": "0x4004cccccccccccd"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            }
+          ],
+          [
+            {
+              "decimal": "-1.5",
+              "f64_hex": "0xbff8000000000000"
+            },
+            {
+              "decimal": "2.6",
+              "f64_hex": "0x4004cccccccccccd"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            }
+          ],
+          [
+            {
+              "decimal": "-3.0",
+              "f64_hex": "0xc008000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            }
+          ],
+          [
+            {
+              "decimal": "-1.5",
+              "f64_hex": "0xbff8000000000000"
+            },
+            {
+              "decimal": "-2.6",
+              "f64_hex": "0xc004cccccccccccd"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            }
+          ],
+          [
+            {
+              "decimal": "1.5",
+              "f64_hex": "0x3ff8000000000000"
+            },
+            {
+              "decimal": "-2.6",
+              "f64_hex": "0xc004cccccccccccd"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            }
+          ]
+        ],
+        "knots": [
+          {
+            "value": {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            },
+            "multiplicity": 1
+          },
+          {
+            "value": {
+              "decimal": "0.1",
+              "f64_hex": "0x3fb999999999999a"
+            },
+            "multiplicity": 1
+          },
+          {
+            "value": {
+              "decimal": "0.25",
+              "f64_hex": "0x3fd0000000000000"
+            },
+            "multiplicity": 1
+          },
+          {
+            "value": {
+              "decimal": "0.4",
+              "f64_hex": "0x3fd999999999999a"
+            },
+            "multiplicity": 1
+          },
+          {
+            "value": {
+              "decimal": "0.6",
+              "f64_hex": "0x3fe3333333333333"
+            },
+            "multiplicity": 1
+          },
+          {
+            "value": {
+              "decimal": "0.8",
+              "f64_hex": "0x3fe999999999999a"
+            },
+            "multiplicity": 1
+          },
+          {
+            "value": {
+              "decimal": "1.0",
+              "f64_hex": "0x3ff0000000000000"
+            },
+            "multiplicity": 1
+          }
+        ]
+      },
+      "parameter_domain": {
+        "start": {
+          "decimal": "0.0",
+          "f64_hex": "0x0000000000000000"
+        },
+        "end": {
+          "decimal": "1.0",
+          "f64_hex": "0x3ff0000000000000"
+        }
+      },
+      "closure": {
+        "closed_by_endpoint": false,
+        "closed_by_knots": true,
+        "periodic": true
+      },
+      "structure": "CURVE_ONLY"
+    }
+  ],
+  "assertions": [
+    {
+      "id": "a1",
+      "kind": "STRUCTURAL",
+      "entity": "closed-periodic-001",
+      "claim": "CLASS_PRESERVED",
+      "statement": "The semantic class stays bspline; it is not rewritten into another class."
+    },
+    {
+      "id": "a2",
+      "kind": "STRUCTURAL",
+      "entity": "closed-periodic-001",
+      "claim": "DEGREE_PRESERVED",
+      "statement": "The degree is not elevated or reduced."
+    },
+    {
+      "id": "a3",
+      "kind": "STRUCTURAL",
+      "entity": "closed-periodic-001",
+      "claim": "CONTROL_POINTS_PRESERVED",
+      "statement": "The control points are kept, not resampled."
+    },
+    {
+      "id": "a4",
+      "kind": "STRUCTURAL",
+      "entity": "closed-periodic-001",
+      "claim": "KNOTS_PRESERVED",
+      "statement": "Knot values and multiplicities are kept, none collapsed or inserted."
+    },
+    {
+      "id": "a5",
+      "kind": "GEOMETRIC",
+      "entity": "closed-periodic-001",
+      "claim": "PARAMETERIZATION_PRESERVED",
+      "statement": "The parameter domain is kept; a reparameterised equivalent counts as geometric only."
+    },
+    {
+      "id": "a6",
+      "kind": "STRUCTURAL",
+      "entity": "closed-periodic-001",
+      "claim": "CLOSURE_KIND_PRESERVED",
+      "statement": "Closed by knot periodicity, not by endpoint coincidence."
+    }
+  ]
+}

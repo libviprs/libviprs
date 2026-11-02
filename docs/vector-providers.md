@@ -64,6 +64,29 @@ In the command line, `viprs vector info` and `viprs vector validate` work in eve
 build. `views`, `build` and `report` open a DWG, so a build without the feature
 exits 1 with the same message instead of a generic "unsupported format".
 
+## Running an uploaded drawing: the worker is the sandbox
+
+This is the one thing to read before you put `viprs vector build` (or `build_archive_from_view`)
+behind an upload form. The library cannot stop a native call that does not return, and a static
+library is packaging, not a sandbox, so the limits that always hold are the process's.
+
+1. Open the drawing with `ProviderLimits::hardened()` (`--hardened` on the CLI). It bounds input
+   size, entities, string length, points per record, block depth and output bytes, and
+   `tests/vector_1391_limits.rs` shows each of those bites.
+2. Run each conversion in a child process, never in the service process.
+3. Give the child a memory ceiling. `ulimit -v` works, and a container or cgroup limit
+   (`docker run --memory=256m`) is stronger, because the child is then OOM-killed (exit 137)
+   instead of failing an allocation.
+4. Give the child a wall-clock limit and kill it from the parent when it passes. Set
+   `TilerConfig::deadline` as well, so a run that is still handing over primitives stops by itself
+   with exit code 3 before the supervisor has to.
+5. A killed process cannot clean up. It leaves `<dest>.tmp.data` and `<dest>.tmp.idx` beside the
+   destination and never the destination itself, because the archive is renamed into place only
+   when whole. After you reap the child, sweep those two names.
+
+`docs/vector-performance-report.md` has the measurements behind each step, and
+`tests/vector_1036_worker.rs` is a worker that does all of it.
+
 ## Writing another provider
 
 Implement `CadDecoder` (probe and open) and `CadDrawing` (views and decode). The

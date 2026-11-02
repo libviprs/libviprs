@@ -280,6 +280,17 @@ const CELLS: &[Cell] = &[
         runtime_loaders: &[],
         vendored_native: BLAKE3,
     },
+    // The conversion API (issue #1048): `pvec-write` plus the acadrust provider, both pure Rust.
+    Cell {
+        label: "host / pvec-convert",
+        target: HOST,
+        features: &["--features", "pvec-convert"],
+        edges: "normal,build",
+        links: &[RAYON],
+        discovery: &[],
+        runtime_loaders: &[],
+        vendored_native: BLAKE3,
+    },
     Cell {
         label: "host / jxl",
         target: HOST,
@@ -963,7 +974,10 @@ fn the_external_library_features_stay_opt_in() {
             cell.label
         );
 
-        let asked_for_acadrust = cell.features.iter().any(|f| f.contains("dwg-acadrust"))
+        let asked_for_acadrust = cell
+            .features
+            .iter()
+            .any(|f| f.contains("dwg-acadrust") || f.contains("pvec-convert"))
             || cell.features.contains(&"--all-features");
         assert_eq!(
             contains(graph, "acadrust"),
@@ -980,6 +994,8 @@ fn the_external_library_features_stay_opt_in() {
                 || f.contains("pvec-raster")
                 || f.contains("pvec-write")
                 || *f == "jbig2"
+                || f.contains("dwg-acadrust")
+                || f.contains("pvec-convert")
         }) || cell.features.contains(&"--all-features");
         assert_eq!(
             contains(graph, "pvec-geometry"),

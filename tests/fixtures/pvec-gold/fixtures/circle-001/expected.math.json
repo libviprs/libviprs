@@ -1,0 +1,116 @@
+{
+  "schema_version": "pvec-gold/expected.math/1",
+  "fixture_id": "circle-001",
+  "evidence_class": "KNOWN_TRUTH_EXACT",
+  "units": {
+    "name": "metre",
+    "canonical": "metre",
+    "scale_to_canonical": {
+      "decimal": "1.0",
+      "f64_hex": "0x3ff0000000000000"
+    }
+  },
+  "provenance": {
+    "derivation": "AUTHORING_PARAMETERS",
+    "authoring_script": "tools/authoring/author_probes.py",
+    "parameter_file": "tools/authoring/params/circle-001.json",
+    "parameter_file_sha256": "5dc9c00f3abd27762805dfd29f0107a6c0cf3855600686e763413052c189a41e",
+    "parameters": {
+      "id": "circle-001",
+      "kind": "circle",
+      "description": "A full circle with an off-origin centre.",
+      "center": [
+        "1.5",
+        "-2.25",
+        "0"
+      ],
+      "radius": "2.75"
+    }
+  },
+  "entities": [
+    {
+      "id": "circle-001",
+      "class": "circle",
+      "geometry": {
+        "center": [
+          {
+            "decimal": "1.5",
+            "f64_hex": "0x3ff8000000000000"
+          },
+          {
+            "decimal": "-2.25",
+            "f64_hex": "0xc002000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ],
+        "normal": [
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          }
+        ],
+        "x_axis": [
+          {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ],
+        "radius": {
+          "decimal": "2.75",
+          "f64_hex": "0x4006000000000000"
+        }
+      },
+      "parameter_domain": {
+        "start": {
+          "decimal": "0.0",
+          "f64_hex": "0x0000000000000000"
+        },
+        "end": {
+          "decimal": "6.283185307179586",
+          "f64_hex": "0x401921fb54442d18"
+        }
+      },
+      "closure": {
+        "closed_by_endpoint": true,
+        "closed_by_knots": false,
+        "periodic": true
+      },
+      "structure": "CURVE_ONLY"
+    }
+  ],
+  "assertions": [
+    {
+      "id": "a1",
+      "kind": "STRUCTURAL",
+      "entity": "circle-001",
+      "claim": "CLASS_PRESERVED",
+      "statement": "The semantic class stays circle; it is not rewritten into another class."
+    },
+    {
+      "id": "a2",
+      "kind": "GEOMETRIC",
+      "entity": "circle-001",
+      "claim": "PARAMETERIZATION_PRESERVED",
+      "statement": "The parameter domain is kept; a reparameterised equivalent counts as geometric only."
+    }
+  ]
+}

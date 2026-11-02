@@ -1,0 +1,28 @@
+# The measured loss of the LibreDWG dwg2SVG + rsvg-convert export of this DWG (issue #1405).
+# Every difference between what the DWG says and what the PDF says is listed with why.
+evidence = "REAL_WORLD_DIFFERENTIAL"
+
+[[loss]]
+metric = "bucket.SupportedEquivalent"
+dwg = "0"
+pdf = "4"
+reason = "the DWG holds one polyline entity; the PDF has its four segments as separate line segments with no polyline"
+
+[[loss]]
+metric = "bucket.SupportedExact"
+dwg = "1"
+pdf = "0"
+reason = "the DWG holds one polyline entity; the PDF has its four segments as separate line segments with no polyline"
+
+[[loss]]
+metric = "extent.aspect"
+dwg = "1.222"
+pdf = "1.223"
+reason = "the exporter rounds coordinates to three decimals, which moves the extent ratio in the third place"
+
+[[loss]]
+metric = "extent.outside_page"
+dwg = "0"
+pdf = "1"
+reason = "the exporter's page box does not enclose this drawing: dwg2SVG 0.14 writes a viewBox the path leaves, so the PDF page edge clips it"
+

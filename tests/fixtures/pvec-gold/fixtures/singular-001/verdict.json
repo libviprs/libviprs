@@ -1,0 +1,12 @@
+{
+  "cells": {},
+  "detail": "primary: CONVERSION_FAILED: SINGULAR_TRANSFORM: the composed map of block PROBE_SINGULAR_001_L1 has |ad - bc| = 0 exactly, so it maps the plane onto a line or a point (PVec numeric policy NP-19); secondary: CONVERSION_FAILED: INSERT of PROBE_SINGULAR_001_L1 has a singular matrix; no geometry is written for it",
+  "evidence_class": "QUARANTINED",
+  "evidence_scope": "STEP_ORACLE",
+  "fixture_id": "singular-001",
+  "known_truth": true,
+  "oracle_scope": "OPEN_CONVERTERS",
+  "reason": "UNSUPPORTED_ENTITY",
+  "schema_version": "pvec-gold/fixture-verdict/1",
+  "signature_differences": []
+}

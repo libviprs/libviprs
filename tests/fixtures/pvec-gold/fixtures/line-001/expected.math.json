@@ -1,0 +1,102 @@
+{
+  "schema_version": "pvec-gold/expected.math/1",
+  "fixture_id": "line-001",
+  "evidence_class": "KNOWN_TRUTH_EXACT",
+  "units": {
+    "name": "metre",
+    "canonical": "metre",
+    "scale_to_canonical": {
+      "decimal": "1.0",
+      "f64_hex": "0x3ff0000000000000"
+    }
+  },
+  "provenance": {
+    "derivation": "AUTHORING_PARAMETERS",
+    "authoring_script": "tools/authoring/author_probes.py",
+    "parameter_file": "tools/authoring/params/line-001.json",
+    "parameter_file_sha256": "cf720c6704204448dd8d328055e291507b97a9d0e8c0bd42b0d6a92330f9e61f",
+    "parameters": {
+      "id": "line-001",
+      "kind": "line",
+      "description": "One straight segment between two points with no symmetry, so start and end identity are checkable.",
+      "start": [
+        "0.5",
+        "0.25",
+        "0"
+      ],
+      "end": [
+        "3.75",
+        "2.5",
+        "0"
+      ]
+    }
+  },
+  "entities": [
+    {
+      "id": "line-001",
+      "class": "line",
+      "geometry": {
+        "start": [
+          {
+            "decimal": "0.5",
+            "f64_hex": "0x3fe0000000000000"
+          },
+          {
+            "decimal": "0.25",
+            "f64_hex": "0x3fd0000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ],
+        "end": [
+          {
+            "decimal": "3.75",
+            "f64_hex": "0x400e000000000000"
+          },
+          {
+            "decimal": "2.5",
+            "f64_hex": "0x4004000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ]
+      },
+      "parameter_domain": {
+        "start": {
+          "decimal": "0.0",
+          "f64_hex": "0x0000000000000000"
+        },
+        "end": {
+          "decimal": "1.0",
+          "f64_hex": "0x3ff0000000000000"
+        }
+      },
+      "closure": {
+        "closed_by_endpoint": false,
+        "closed_by_knots": false,
+        "periodic": false
+      },
+      "structure": "CURVE_ONLY"
+    }
+  ],
+  "assertions": [
+    {
+      "id": "a1",
+      "kind": "STRUCTURAL",
+      "entity": "line-001",
+      "claim": "CLASS_PRESERVED",
+      "statement": "The semantic class stays line; it is not rewritten into another class."
+    },
+    {
+      "id": "a2",
+      "kind": "GEOMETRIC",
+      "entity": "line-001",
+      "claim": "PARAMETERIZATION_PRESERVED",
+      "statement": "The parameter domain is kept; a reparameterised equivalent counts as geometric only."
+    }
+  ]
+}

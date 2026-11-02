@@ -16,6 +16,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Property tests for the conversion path** (issue #1457, part of #1070). `tests/pvec_normalization_proptest.rs`: a composed
+  transform equals the sequential application of its levels and composition is associative (within `Policy::V1`), a
+  singular transform never produces geometry, every entity of a generated drawing lands in exactly one of the six
+  classes, the reported bounds contain every exact entity and stay within every entity's box, and a drawing converts to
+  byte-identical output twice. Each property asserts that it ran every case.
+- **The PVec integration documentation** (issue #1451, part of #1070). Twelve pages next to `docs/pvec-benchmarks.md`:
+  architecture, the provider API, the ISO mapping, view semantics, the transform matrix, DWG support, the PDF loss
+  model, components, the georeference handoff, the conversion API, limits and provider replacement, all linked from
+  the README. The mapping table, the transform matrix, the v1 view profile and the resource limits are rendered from the
+  code and `tests/pvec_docs_tables.rs` fails when a page differs (`DOCS_BLESS=1` rewrites them); a link check covers
+  `README.md` and `docs/`.
+- **Fuzz targets for the conversion path** (issue #1437, part of #1070). `fuzz_pvec_provider` drives an
+  arbitrary in-memory drawing (layers, nested and recursive blocks, spline records, varying capabilities,
+  a cursor that fails part-way) through the view profile, the flattener and the extractors under tight
+  limits, `fuzz_pvec_spline` feeds `dwg_spline::extract` arbitrary degrees, knots, weights and flags, and
+  `fuzz_pvec_clip` feeds `apply_clip_policy` arbitrary clips and compound paths. Each has a seed corpus
+  and `tests/pvec_1437_fuzz_seeds.rs` runs the target bodies on it in the ordinary suite. The provider
+  target found #1439 (fixed): `ViewProfile::apply` ignored the source limits, so a fan-out block bomb
+  exhausted memory before `flatten` could refuse it, and `ViewProfileError::Limit` is new. `convert`
+  also now carries a planar SPLINE (#1430) instead of dropping it as `UNMAPPED_SOURCE_CLASS`.
+  `fuzz_pvec_spool` waits for the spool (pvec#235).
+- **The DWG to PDF differential, with LibreDWG as the first real exporter** (issue #1405, part of #1086).
+  Six `REAL_WORLD_DIFFERENTIAL` pairs are committed as static files under `tests/fixtures/pvec/pdf_loss/`
+  (the DWG, the exported PDF, `exporter.txt` provenance with versions, options and the tarball sha256), and
+  `tests/pvec_dwg_pdf_differential.rs` asserts each pair measures exactly its recorded loss
+  (`expected_loss.toml`, a written reason per entry): primitive counts, N3.5 buckets, extent aspect with
+  `/Rotate` composed, and entities outside the page. libviprs has no LibreDWG dependency of any kind, and
+  `tests/pvec_1079_provider_default.rs` guards the build side. See `docs/pvec-dwg-pdf-differential.md`.
+- **The conversion API** (issue #1048, slices #1413 to #1417). `libviprs::pvec_convert::PvecConversion`
+  behind the new `pvec-convert` feature (`pvec-write` plus `dwg-acadrust`, acadrust stays the default
+  provider): one call takes a DWG, a view profile and limits and publishes a `.pvec` with its
+  conversion report. The allowed capabilities, `CapabilityPolicy` and the `Strict`, `Default` and
+  `Permissive` profiles gate what may be written (new reason code `capability-not-allowed`), and
+  `probe` returns the same per-class counts without writing. A georeference sidecar
+  (`<dest>.georef.json`) carries the exact drawing box, the unit with its evidence and an opaque
+  calibration id, and nothing of it reaches the artifact. Every entity that did not become geometry
+  makes a `Diagnostic` with a stable code (`docs/pvec-diagnostics.md`), streamed to the observer as
+  `EngineEvent::ConversionDiagnostic` and kept in the report's `diagnostics` section. The classifier
+  and its consumer meet in a bounded queue whose peak depth is reported, the observer hears the
+  stages, and the cancel token is polled per batch. New optional report fields `capabilities`,
+  `georeference` and `diagnostics`, all ignorable, so `schema_version` stays 1.
+  `ReasonCode::CapabilityNotAllowed` is new, `pvec::writer` re-exports PVec's `CapabilityId`, and
+  the spool of #1092 is not built, so there is no spool flush to cancel yet.
+
+- **A single-span SPLINE is a Bezier** (issue #1375). `Normalized2DGeometry::from_spline` maps a
+  non-rational, non-periodic SPLINE with `degree + 1` control points and knots `0` and `1`, each
+  `degree + 1` times, to PVec's `Bezier` (`SupportedExact`, the knot array is the only thing
+  dropped), which is the class the known-truth corpus states for `bezier-d3-001`.
+- **Periodic SPLINE extraction** (issue #1374). `dwg_spline::extract` takes the one-period layout
+  of a non-rational periodic spline (`n` control points, `n + 1` knots), checks it with PVec's
+  `BSpline::from_periodic`, and keeps it as authored. `Normalized2DGeometry::from_spline` builds the
+  record (`SupportedEquivalent`, the unwrap changes the knot vector and not the locus). `pvec-spline`
+  now also pulls `pvec-geometry`.
 - **`JPXDecode` images in a PDF** (issue #1364, follow-up 3/6 to #1332). Decoded through the
   existing `jp2k` feature (`crate::jp2k::decode_jp2k`), so no crate enters the graph; the jp2k
   cell of `dependency_policy` is pinned to its two codec crates. Without the feature the reason is

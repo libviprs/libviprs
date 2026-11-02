@@ -404,7 +404,12 @@ fn acadrust_is_optional_and_only_the_feature_turns_it_on() {
         .lines()
         .find(|l| l.starts_with("dwg-acadrust ="))
         .expect("a dwg-acadrust feature");
-    assert_eq!(feature.trim(), "dwg-acadrust = [\"dep:acadrust\"]");
+    // It turns acadrust on, and with it the two PVec features the conformance suites compare
+    // through (#1050); nothing else, and no other dependency.
+    assert_eq!(
+        feature.trim(),
+        "dwg-acadrust = [\"dep:acadrust\", \"pvec-normalized\", \"pvec-spline\"]"
+    );
     let default = m
         .lines()
         .find(|l| l.starts_with("default ="))

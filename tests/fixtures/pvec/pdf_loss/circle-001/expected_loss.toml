@@ -1,0 +1,22 @@
+# The measured loss of the LibreDWG dwg2SVG + rsvg-convert export of this DWG (issue #1405).
+# Every difference between what the DWG says and what the PDF says is listed with why.
+evidence = "REAL_WORLD_DIFFERENTIAL"
+
+[[loss]]
+metric = "bucket.SupportedExact"
+dwg = "1"
+pdf = "4"
+reason = "the exporter writes the circle as four cubic Beziers; the DWG holds one circle entity"
+
+[[loss]]
+metric = "count.curve"
+dwg = "1"
+pdf = "4"
+reason = "the exporter writes the circle as four cubic Beziers; the DWG holds one circle entity"
+
+[[loss]]
+metric = "extent.outside_page"
+dwg = "0"
+pdf = "1"
+reason = "the exporter's page box does not enclose this drawing: dwg2SVG 0.14 writes a viewBox the path leaves, so the PDF page edge clips it"
+

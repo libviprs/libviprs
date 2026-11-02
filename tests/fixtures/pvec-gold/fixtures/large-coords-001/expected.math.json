@@ -1,0 +1,187 @@
+{
+  "schema_version": "pvec-gold/expected.math/1",
+  "fixture_id": "large-coords-001",
+  "evidence_class": "KNOWN_TRUTH_EXACT",
+  "units": {
+    "name": "metre",
+    "canonical": "metre",
+    "scale_to_canonical": {
+      "decimal": "1.0",
+      "f64_hex": "0x3ff0000000000000"
+    }
+  },
+  "provenance": {
+    "derivation": "AUTHORING_PARAMETERS",
+    "authoring_script": "tools/authoring/author_probes.py",
+    "parameter_file": "tools/authoring/params/large-coords-001.json",
+    "parameter_file_sha256": "f8daf3f990972c9583f070cab3cf8c4fe70035558b5a132cfe9a4b6673ae97b0",
+    "parameters": {
+      "id": "large-coords-001",
+      "kind": "polyline",
+      "description": "Four vertices with features of 1e-4 m at an origin offset of 1e7 m, so the f64 spacing there (about 1.9e-9) is what resolves them.",
+      "vertices": [
+        [
+          "10000000",
+          "10000000",
+          "0"
+        ],
+        [
+          "10000000.0001",
+          "10000000",
+          "0"
+        ],
+        [
+          "10000000.0001",
+          "10000000.0001",
+          "0"
+        ],
+        [
+          "10000000.0003",
+          "10000000.0002",
+          "0"
+        ]
+      ]
+    }
+  },
+  "entities": [
+    {
+      "id": "large-coords-001",
+      "class": "polyline",
+      "geometry": {
+        "vertices": [
+          [
+            {
+              "decimal": "10000000.0",
+              "f64_hex": "0x416312d000000000"
+            },
+            {
+              "decimal": "10000000.0",
+              "f64_hex": "0x416312d000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            }
+          ],
+          [
+            {
+              "decimal": "10000000.0001",
+              "f64_hex": "0x416312d00000d1b7"
+            },
+            {
+              "decimal": "10000000.0",
+              "f64_hex": "0x416312d000000000"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            }
+          ],
+          [
+            {
+              "decimal": "10000000.0001",
+              "f64_hex": "0x416312d00000d1b7"
+            },
+            {
+              "decimal": "10000000.0001",
+              "f64_hex": "0x416312d00000d1b7"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            }
+          ],
+          [
+            {
+              "decimal": "10000000.0003",
+              "f64_hex": "0x416312d000027525"
+            },
+            {
+              "decimal": "10000000.0002",
+              "f64_hex": "0x416312d00001a36e"
+            },
+            {
+              "decimal": "0.0",
+              "f64_hex": "0x0000000000000000"
+            }
+          ]
+        ],
+        "bulges": [
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ]
+      },
+      "parameter_domain": {
+        "start": {
+          "decimal": "0.0",
+          "f64_hex": "0x0000000000000000"
+        },
+        "end": {
+          "decimal": "3.0",
+          "f64_hex": "0x4008000000000000"
+        }
+      },
+      "closure": {
+        "closed_by_endpoint": false,
+        "closed_by_knots": false,
+        "periodic": false
+      },
+      "structure": "CURVE_ONLY"
+    }
+  ],
+  "assertions": [
+    {
+      "id": "a1",
+      "kind": "STRUCTURAL",
+      "entity": "large-coords-001",
+      "claim": "CLASS_PRESERVED",
+      "statement": "The semantic class stays polyline; it is not rewritten into another class."
+    },
+    {
+      "id": "a2",
+      "kind": "STRUCTURAL",
+      "entity": "large-coords-001",
+      "claim": "VERTEX_ORDER_PRESERVED",
+      "statement": "Vertices keep identity and order."
+    },
+    {
+      "id": "a3",
+      "kind": "GEOMETRIC",
+      "entity": "large-coords-001",
+      "claim": "PARAMETERIZATION_PRESERVED",
+      "statement": "The parameter domain is kept; a reparameterised equivalent counts as geometric only."
+    }
+  ],
+  "derivative_exclusions": [
+    {
+      "entity": "large-coords-001",
+      "parameter": {
+        "decimal": "1.0",
+        "f64_hex": "0x3ff0000000000000"
+      },
+      "reason": "POLYLINE_VERTEX"
+    },
+    {
+      "entity": "large-coords-001",
+      "parameter": {
+        "decimal": "2.0",
+        "f64_hex": "0x4000000000000000"
+      },
+      "reason": "POLYLINE_VERTEX"
+    }
+  ]
+}

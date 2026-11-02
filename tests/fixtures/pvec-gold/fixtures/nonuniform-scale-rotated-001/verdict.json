@@ -1,0 +1,82 @@
+{
+  "cells": {
+    "primary": [
+      {
+        "class": "GEOMETRIC_EXACT_REPARAMETERIZED",
+        "entity": "nonuniform-scale-rotated-001",
+        "evidence": {
+          "at_unit_parameter": 0.7430339887498949,
+          "direction": "SAME",
+          "estimate_stable": true,
+          "magnitude": 7.94772623121773,
+          "max_deviation": 5.515473566030869e-15,
+          "measured_in": "EXPECTED_TO_ACTUAL",
+          "scale": 6.0,
+          "structural_diff": [
+            "class",
+            "geometry.center[0]",
+            "geometry.center[1]",
+            "geometry.major_axis#len",
+            "geometry.major_axis[0]",
+            "geometry.major_axis[1]",
+            "geometry.major_axis[2]",
+            "geometry.radius",
+            "geometry.semi_major",
+            "geometry.semi_minor",
+            "geometry.x_axis#len",
+            "geometry.x_axis[0]",
+            "geometry.x_axis[1]",
+            "geometry.x_axis[2]",
+            "transform"
+          ]
+        }
+      }
+    ],
+    "secondary": [
+      {
+        "class": "GEOMETRIC_EXACT_REPARAMETERIZED",
+        "entity": "nonuniform-scale-rotated-001",
+        "evidence": {
+          "at_unit_parameter": 0.7430339887498949,
+          "direction": "SAME",
+          "estimate_stable": true,
+          "magnitude": 7.947726231217728,
+          "max_deviation": 5.347542221830668e-15,
+          "measured_in": "EXPECTED_TO_ACTUAL",
+          "scale": 6.0,
+          "structural_diff": [
+            "class",
+            "geometry.center[0]",
+            "geometry.center[1]",
+            "geometry.major_axis#len",
+            "geometry.major_axis[0]",
+            "geometry.major_axis[1]",
+            "geometry.major_axis[2]",
+            "geometry.radius",
+            "geometry.semi_major",
+            "geometry.semi_minor",
+            "geometry.x_axis#len",
+            "geometry.x_axis[0]",
+            "geometry.x_axis[1]",
+            "geometry.x_axis[2]",
+            "transform"
+          ]
+        }
+      }
+    ]
+  },
+  "detail": "",
+  "evidence_class": "KNOWN_TRUTH_EXACT",
+  "evidence_scope": "STEP_ORACLE",
+  "fixture_id": "nonuniform-scale-rotated-001",
+  "known_truth": true,
+  "oracle_scope": "OPEN_CONVERTERS",
+  "reason": null,
+  "schema_version": "pvec-gold/fixture-verdict/1",
+  "signature_differences": [
+    "entities[0].geometry.center[0]",
+    "entities[0].geometry.center[1]",
+    "entities[0].geometry.major_axis[0]",
+    "entities[0].geometry.major_axis[1]"
+  ]
+}

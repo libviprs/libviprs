@@ -340,7 +340,7 @@ acadrust = { git = "https://github.com/libviprs/acadrust", rev = "72af48970e306e
 # `pvec::dwg_spline` applies, so the numbers are PVec's and are not copied here. Optional
 # and off by default. Git dependency pinned by a full revision, same consequence as the
 # two above: this crate cannot be published to crates.io while the line below stands.
-pvec-numeric = { git = "https://github.com/libviprs/pvec", rev = "b9f441618153d256777121a6a1518b15e7f42099" }
+pvec-numeric = { git = "https://github.com/libviprs/pvec", rev = "ff67ecb85b5367c5db56f7d03f162c02437414a8" }
 # PVec's source-neutral curve model and the numeric policy under it (issue #1095),
 # optional and off by default. Both crates (`pvec-numeric` is the entry just above) live in
 # libviprs/pvec, are pure Rust with no dependency besides each other, and are `publish = false` at version 0.0.0 there.
@@ -350,21 +350,21 @@ pvec-numeric = { git = "https://github.com/libviprs/pvec", rev = "b9f441618153d2
 # publishes PVec. Moving the revision means re-reading the citations in
 # `docs/adr/pvec-normalized-geometry.md` (the ADR pins fdf87de, so a move is also a
 # change to that pin).
-pvec-geometry = { git = "https://github.com/libviprs/pvec", rev = "b9f441618153d256777121a6a1518b15e7f42099", version = "0.0.0" }
+pvec-geometry = { git = "https://github.com/libviprs/pvec", rev = "ff67ecb85b5367c5db56f7d03f162c02437414a8", version = "0.0.0" }
 # PVec's file-local `EntityId` (issue #1091), the id type the bounds inputs carry. Same pin and
 # same publishing consequence as `pvec-geometry` above.
-pvec-entity = { git = "https://github.com/libviprs/pvec", rev = "b9f441618153d256777121a6a1518b15e7f42099", version = "0.0.0" }
+pvec-entity = { git = "https://github.com/libviprs/pvec", rev = "ff67ecb85b5367c5db56f7d03f162c02437414a8", version = "0.0.0" }
 # PVec's capability registry (issue #1311), a dev-dependency only: `tests/pvec_1311_registry.rs`
 # checks the ids in `src/pvec/mapping.rs` against it. Same pin as the crates above. It is not in
 # `[dependencies]`, so `src/` cannot name it and the API-surface fence is untouched.
-pvec-capabilities = { git = "https://github.com/libviprs/pvec", rev = "b9f441618153d256777121a6a1518b15e7f42099", version = "0.0.0" }
+pvec-capabilities = { git = "https://github.com/libviprs/pvec", rev = "ff67ecb85b5367c5db56f7d03f162c02437414a8", version = "0.0.0" }
 # PVec's facade (the semantic reader and writer), for the raster stream (issue #1328): the
 # adapter in `raster_pvec::container` hands the tiles of a pyramid to its writer untouched and
 # reads them back through its reader. Renamed because `pvec` is this crate's own module, and the
 # fence in `tests/pvec_api_surface.rs` names the facade by this root. `unstable-stream` is the
 # feature that carries `PvecWriter::rasters`. Pure Rust like the crates above, optional and off
 # by default, and pinned by a full revision with the same consequence for publishing.
-pvec-facade = { package = "pvec", git = "https://github.com/libviprs/pvec", rev = "b9f441618153d256777121a6a1518b15e7f42099", version = "0.0.0", features = ["unstable-stream"] }
+pvec-facade = { package = "pvec", git = "https://github.com/libviprs/pvec", rev = "ff67ecb85b5367c5db56f7d03f162c02437414a8", version = "0.0.0", features = ["unstable-stream"] }
 # Pure-Rust FFT (MIT OR Apache-2.0) used by the frequency-domain filter
 # operations in `src/freqfilt.rs` (`fwfft`, `invfft`, `freqmult`, `spectrum`,
 # `phasecor`). Chosen over an FFTW binding to keep the crate pure Rust; its
@@ -563,12 +563,16 @@ dwg-acadsharp = ["dep:acadsharp-rs"]
 # key, no native archive, no runtime loader, so unlike `dwg-acadsharp` it needs nothing
 # installed. `pvec` itself is not behind a feature and builds without this one; this
 # only adds `pvec::dwg_acadrust::AcadrustProvider`. The existing `cad::CadDecoder` path,
-# and `dwg-acadsharp` with it, is untouched.
-dwg-acadrust = ["dep:acadrust"]
+# and `dwg-acadsharp` with it, is untouched. It also enables `pvec-normalized` and
+# `pvec-spline` (no crate beyond the PVec ones those two already name), because the PVec
+# conformance suites in `tests/` (issue #1050) open corpus drawings through this provider and
+# compare them through those two, and CI runs each feature on its own: a suite gated on all
+# three would be compiled out of every cell.
+dwg-acadrust = ["dep:acadrust", "pvec-normalized", "pvec-spline"]
 # Exact B-spline extraction from a provider's `RawGeometry::Spline` (issue #1074),
 # validated against PVec's numeric policy. Needs no reader: it works on the boundary
 # types, so any provider's output goes through it.
-pvec-spline = ["dep:pvec-numeric"]
+pvec-spline = ["dep:pvec-numeric", "dep:pvec-geometry"]
 # `raster_pvec::container`: a raster pyramid written into a PVec's raster stream through the PVec
 # facade and read back (issue #1328). Pure Rust; the facade is a git dependency pinned by revision.
 # `pvec-geometry` comes with it only so the tests can build the sheet's outline entity: an artifact
@@ -584,6 +588,11 @@ pvec-normalized = ["dep:pvec-geometry", "dep:pvec-numeric", "dep:pvec-entity"]
 # artifact through the facade's `PvecWriter`, and the atomic publish of the artifact and its report
 # (issue #1314). Pure Rust, the same git dependencies as `pvec-normalized` and `pvec-raster`.
 pvec-write = ["pvec-normalized", "dep:pvec-facade"]
+# `pvec_convert`: the conversion API (issue #1048). One call takes a DWG and a view profile and
+# publishes a `.pvec` artifact with its conversion report. Acadrust is the default provider
+# (`tests/pvec_1079_provider_default.rs`), so the feature pulls it in; `acadsharp-rs` stays opt-in.
+# Pure Rust, no new dependency beyond the two features it joins.
+pvec-convert = ["pvec-write", "dwg-acadrust"]
 # Documentation-only deprecated alias for `object-store-sink`. Cargo has no
 # mechanism to mark a feature deprecated, so enabling `s3` emits NO build-time
 # warning: consumers pinned to `features = ["s3"]` get zero automated signal
@@ -780,10 +789,40 @@ name = "pvec_1314_writer_funnel"
 required-features = ["pvec-write"]
 
 [[test]]
+name = "pvec_1314_spool"
+required-features = ["pvec-write"]
+
+[[test]]
 name = "pvec_1314_publish"
 required-features = ["pvec-write"]
 
+[[test]]
+name = "pvec_1413_convert"
+required-features = ["pvec-convert"]
+
+[[test]]
+name = "pvec_1414_capability"
+required-features = ["pvec-convert"]
+
+[[test]]
+name = "pvec_1415_georef"
+required-features = ["pvec-convert"]
+
+[[test]]
+name = "pvec_1416_diagnostics"
+required-features = ["pvec-convert"]
+
+[[test]]
+name = "pvec_1417_convert_spool"
+required-features = ["pvec-convert"]
+
+[[test]]
+name = "pvec_1417_progress"
+required-features = ["pvec-convert"]
+
 [dev-dependencies]
+# Runs the fuzz targets' bodies on their seed corpus in the ordinary suite (tests/pvec_1437_fuzz_seeds.rs).
+arbitrary = { workspace = true }
 loom = { workspace = true }
 pvec-capabilities = { workspace = true }
 proptest = { workspace = true }

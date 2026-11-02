@@ -1,0 +1,31 @@
+{
+  "cells": {
+    "primary": [
+      {
+        "class": "STRUCTURAL_EXACT",
+        "entity": "closed-by-endpoint-001",
+        "evidence": {
+          "fields_compared": 47
+        }
+      }
+    ],
+    "secondary": [
+      {
+        "class": "STRUCTURAL_EXACT",
+        "entity": "closed-by-endpoint-001",
+        "evidence": {
+          "fields_compared": 47
+        }
+      }
+    ]
+  },
+  "detail": "",
+  "evidence_class": "KNOWN_TRUTH_EXACT",
+  "evidence_scope": "STEP_ORACLE",
+  "fixture_id": "closed-by-endpoint-001",
+  "known_truth": true,
+  "oracle_scope": "OPEN_CONVERTERS",
+  "reason": null,
+  "schema_version": "pvec-gold/fixture-verdict/1",
+  "signature_differences": []
+}

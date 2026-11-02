@@ -1,0 +1,126 @@
+{
+  "schema_version": "pvec-gold/expected.math/1",
+  "fixture_id": "ellipse-001",
+  "evidence_class": "KNOWN_TRUTH_EXACT",
+  "units": {
+    "name": "metre",
+    "canonical": "metre",
+    "scale_to_canonical": {
+      "decimal": "1.0",
+      "f64_hex": "0x3ff0000000000000"
+    }
+  },
+  "provenance": {
+    "derivation": "AUTHORING_PARAMETERS",
+    "authoring_script": "tools/authoring/author_probes.py",
+    "parameter_file": "tools/authoring/params/ellipse-001.json",
+    "parameter_file_sha256": "ae16ecbef802c4206a7a292c347501c184fad21da8f1c182d5c759e66ae770e4",
+    "parameters": {
+      "id": "ellipse-001",
+      "kind": "ellipse",
+      "description": "A full ellipse with axis ratio 0.98 (near 1, not 1) and a major axis along (0.96, 0.28), which is not axis-aligned.",
+      "center": [
+        "2",
+        "1",
+        "0"
+      ],
+      "major_axis": [
+        "0.96",
+        "0.28",
+        "0"
+      ],
+      "semi_major": "3",
+      "semi_minor": "2.94"
+    }
+  },
+  "entities": [
+    {
+      "id": "ellipse-001",
+      "class": "ellipse",
+      "geometry": {
+        "center": [
+          {
+            "decimal": "2.0",
+            "f64_hex": "0x4000000000000000"
+          },
+          {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ],
+        "normal": [
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          }
+        ],
+        "major_axis": [
+          {
+            "decimal": "0.96",
+            "f64_hex": "0x3feeb851eb851eb8"
+          },
+          {
+            "decimal": "0.28",
+            "f64_hex": "0x3fd1eb851eb851ec"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ],
+        "semi_major": {
+          "decimal": "3.0",
+          "f64_hex": "0x4008000000000000"
+        },
+        "semi_minor": {
+          "decimal": "2.94",
+          "f64_hex": "0x4007851eb851eb85"
+        }
+      },
+      "parameter_domain": {
+        "start": {
+          "decimal": "0.0",
+          "f64_hex": "0x0000000000000000"
+        },
+        "end": {
+          "decimal": "6.283185307179586",
+          "f64_hex": "0x401921fb54442d18"
+        }
+      },
+      "closure": {
+        "closed_by_endpoint": true,
+        "closed_by_knots": false,
+        "periodic": true
+      },
+      "structure": "CURVE_ONLY"
+    }
+  ],
+  "assertions": [
+    {
+      "id": "a1",
+      "kind": "STRUCTURAL",
+      "entity": "ellipse-001",
+      "claim": "CLASS_PRESERVED",
+      "statement": "The semantic class stays ellipse; it is not rewritten into another class."
+    },
+    {
+      "id": "a2",
+      "kind": "GEOMETRIC",
+      "entity": "ellipse-001",
+      "claim": "PARAMETERIZATION_PRESERVED",
+      "statement": "The parameter domain is kept; a reparameterised equivalent counts as geometric only."
+    }
+  ]
+}

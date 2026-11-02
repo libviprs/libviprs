@@ -27,7 +27,9 @@ A provider implements `DwgProvider` and nothing else. It is held to acadrust's a
 [provider-differential.md](provider-differential.md), which is generic over `DwgProvider`, so a second
 provider is one more `Matrix::run` and needs no trait of its own.
 
-LibreDWG is the planned open alternative for a second lineage. It is GPL, so it stays outside this crate
-behind a process boundary, the way `pvec-oracle-libredwg` does for the corpus: a provider over it reads
-the JSON the container writes, and nothing links it. That is a future adapter, not something this crate
-ships.
+libviprs has no LibreDWG dependency of any kind: no Cargo feature, build script, CI row, script or test builds
+or runs it. The `DwgProvider` seam stays pluggable, so an out-of-tree crate can implement it and be held to
+acadrust's answers by the same harness. Anything LibreDWG produced for a test, such as the exported PDFs of
+[pvec-dwg-pdf-differential.md](pvec-dwg-pdf-differential.md), is committed as a static file with its
+provenance (the exporter, versions, options and the sha256 of the source tarball in `exporter.txt`), and the
+tests only read it. `tests/pvec_1079_provider_default.rs` checks the build side of that.

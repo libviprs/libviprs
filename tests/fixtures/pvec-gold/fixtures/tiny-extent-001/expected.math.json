@@ -1,0 +1,103 @@
+{
+  "schema_version": "pvec-gold/expected.math/1",
+  "fixture_id": "tiny-extent-001",
+  "evidence_class": "KNOWN_TRUTH_EXACT",
+  "units": {
+    "name": "metre",
+    "canonical": "metre",
+    "scale_to_canonical": {
+      "decimal": "1.0",
+      "f64_hex": "0x3ff0000000000000"
+    }
+  },
+  "provenance": {
+    "derivation": "AUTHORING_PARAMETERS",
+    "authoring_script": "tools/authoring/author_probes.py",
+    "parameter_file": "tools/authoring/corpus-params/edge/tiny-extent-001.json",
+    "parameter_file_sha256": "f36a41cb605b840dceecc53064e01ac19b8df228a04eb2ef8ee84a101e01e0b3",
+    "parameters": {
+      "id": "tiny-extent-001",
+      "group": "edge",
+      "kind": "line",
+      "description": "A valid straight segment 5e-9 m long (3e-9, 4e-9), well under any drawing tolerance but not zero, so a pipeline that snaps short segments to nothing shows. It is not the degenerate case: the end points differ.",
+      "start": [
+        "0",
+        "0",
+        "0"
+      ],
+      "end": [
+        "0.000000003",
+        "0.000000004",
+        "0"
+      ]
+    }
+  },
+  "entities": [
+    {
+      "id": "tiny-extent-001",
+      "class": "line",
+      "geometry": {
+        "start": [
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ],
+        "end": [
+          {
+            "decimal": "3e-09",
+            "f64_hex": "0x3e29c511dc3a41df"
+          },
+          {
+            "decimal": "4e-09",
+            "f64_hex": "0x3e312e0be826d695"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ]
+      },
+      "parameter_domain": {
+        "start": {
+          "decimal": "0.0",
+          "f64_hex": "0x0000000000000000"
+        },
+        "end": {
+          "decimal": "1.0",
+          "f64_hex": "0x3ff0000000000000"
+        }
+      },
+      "closure": {
+        "closed_by_endpoint": false,
+        "closed_by_knots": false,
+        "periodic": false
+      },
+      "structure": "CURVE_ONLY"
+    }
+  ],
+  "assertions": [
+    {
+      "id": "a1",
+      "kind": "STRUCTURAL",
+      "entity": "tiny-extent-001",
+      "claim": "CLASS_PRESERVED",
+      "statement": "The semantic class stays line; it is not rewritten into another class."
+    },
+    {
+      "id": "a2",
+      "kind": "GEOMETRIC",
+      "entity": "tiny-extent-001",
+      "claim": "PARAMETERIZATION_PRESERVED",
+      "statement": "The parameter domain is kept; a reparameterised equivalent counts as geometric only."
+    }
+  ]
+}

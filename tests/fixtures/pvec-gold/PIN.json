@@ -1,0 +1,10 @@
+{
+ "corpus_revision": "r2-open",
+ "gold_commit": "1df9d1b3e75047fa3978ebd809d0128cdfb28a68",
+ "skipped": [
+  "arch-aecobjects-001",
+  "general-sample-ac1032-001"
+ ],
+ "upstream_manifest_sha256": "5ac9f3c0cd1db9a9a72ef9aed7759f53cf540b1287e8a8ab3658a9d949e20685",
+ "vendored_by": "tools/pvec-gold-vendor.py"
+}

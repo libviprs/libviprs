@@ -1,0 +1,127 @@
+{
+  "schema_version": "pvec-gold/expected.math/1",
+  "fixture_id": "arc-tiny-sweep-001",
+  "evidence_class": "KNOWN_TRUTH_EXACT",
+  "units": {
+    "name": "metre",
+    "canonical": "metre",
+    "scale_to_canonical": {
+      "decimal": "1.0",
+      "f64_hex": "0x3ff0000000000000"
+    }
+  },
+  "provenance": {
+    "derivation": "AUTHORING_PARAMETERS",
+    "authoring_script": "tools/authoring/author_probes.py",
+    "parameter_file": "tools/authoring/corpus-params/edge/arc-tiny-sweep-001.json",
+    "parameter_file_sha256": "c2c74d08b0c0e71a2b70f068d853cc6aedeee02074ed0c382676640269485d30",
+    "parameters": {
+      "id": "arc-tiny-sweep-001",
+      "group": "edge",
+      "kind": "circular_arc",
+      "description": "An arc of radius 1000 m that starts exactly at angle 0 and sweeps only 1e-6 rad, so its end sits on the same side of the 0/2pi seam as its start and the chord is about a millimetre.",
+      "center": [
+        "0",
+        "0",
+        "0"
+      ],
+      "radius": "1000",
+      "start_angle": "0",
+      "sweep_angle": "0.000001"
+    }
+  },
+  "entities": [
+    {
+      "id": "arc-tiny-sweep-001",
+      "class": "circular_arc",
+      "geometry": {
+        "center": [
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ],
+        "normal": [
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          }
+        ],
+        "x_axis": [
+          {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ],
+        "radius": {
+          "decimal": "1000.0",
+          "f64_hex": "0x408f400000000000"
+        },
+        "start_angle": {
+          "decimal": "0.0",
+          "f64_hex": "0x0000000000000000"
+        },
+        "sweep_angle": {
+          "decimal": "1e-06",
+          "f64_hex": "0x3eb0c6f7a0b5ed8d"
+        }
+      },
+      "parameter_domain": {
+        "start": {
+          "decimal": "0.0",
+          "f64_hex": "0x0000000000000000"
+        },
+        "end": {
+          "decimal": "1e-06",
+          "f64_hex": "0x3eb0c6f7a0b5ed8d"
+        }
+      },
+      "closure": {
+        "closed_by_endpoint": false,
+        "closed_by_knots": false,
+        "periodic": false
+      },
+      "structure": "CURVE_ONLY"
+    }
+  ],
+  "assertions": [
+    {
+      "id": "a1",
+      "kind": "STRUCTURAL",
+      "entity": "arc-tiny-sweep-001",
+      "claim": "CLASS_PRESERVED",
+      "statement": "The semantic class stays circular_arc; it is not rewritten into another class."
+    },
+    {
+      "id": "a2",
+      "kind": "GEOMETRIC",
+      "entity": "arc-tiny-sweep-001",
+      "claim": "PARAMETERIZATION_PRESERVED",
+      "statement": "The parameter domain is kept; a reparameterised equivalent counts as geometric only."
+    }
+  ]
+}
