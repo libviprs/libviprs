@@ -1,6 +1,6 @@
 //! Memory of the PVec writer funnel against the entity count (issue #1314, N6.3).
 //!
-//! `cargo run --release --features pvec-write --example pvec_writer_memory -- 1000000 [indexed]`
+//! `cargo run --release --features pvec-write --example pvec_writer_memory -- 1000000 [indexed] [spill]`
 //!
 //! Builds `n` two-point polylines (and the ids and geometry for them) first, then resets the
 //! kernel's peak-RSS mark and runs `write_geometry`, so the figure printed is what the funnel and
@@ -9,7 +9,9 @@
 
 use libviprs::CancelToken;
 use libviprs::cad::ItemHandle;
-use libviprs::pvec::writer::{LeafConfig, WriteConfig, write_geometry};
+use libviprs::pvec::writer::{
+    LeafConfig, SpillConfig, WriteConfig, write_geometry, write_geometry_to,
+};
 use libviprs::pvec::{
     EntityStyle, FidelityClass, InstancePath, Normalized2DGeometry, OrderingPolicy, ProvenanceStub,
     RawEntity, RawGeometry, SourceUnit, order_entities,
@@ -30,7 +32,9 @@ fn main() {
         .next()
         .and_then(|a| a.parse().ok())
         .unwrap_or(1_000_000);
-    let indexed = args.next().as_deref() == Some("indexed");
+    let rest: Vec<String> = args.collect();
+    let indexed = rest.iter().any(|a| a == "indexed");
+    let spilled = rest.iter().any(|a| a == "spill");
 
     // The ids come from the ordering pass, which is the only way to make one, from the leanest
     // entity there is. Its entities are dropped as soon as the ids are taken.
@@ -79,18 +83,39 @@ fn main() {
             tier0_max_error: Some(0.05),
         }),
     };
-    let art = write_geometry(
-        &config,
-        ids.into_iter().zip(&geoms),
-        Vec::new(),
-        &CancelToken::new(),
-    )
-    .unwrap();
+    let (length, written) = if spilled {
+        let root = std::env::temp_dir().join(format!("pvec-memory-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut sink = std::io::sink();
+        let spill = SpillConfig {
+            root: root.clone(),
+            budget: 64 << 20,
+        };
+        let art = write_geometry_to(
+            &config,
+            ids.into_iter().zip(&geoms),
+            Vec::new(),
+            &spill,
+            &CancelToken::new(),
+            &mut sink,
+        )
+        .unwrap();
+        let _ = std::fs::remove_dir(&root);
+        (art.length, art.written)
+    } else {
+        let art = write_geometry(
+            &config,
+            ids.into_iter().zip(&geoms),
+            Vec::new(),
+            &CancelToken::new(),
+        )
+        .unwrap();
+        (art.bytes.len() as u64, art.written)
+    };
     let peak = status_kb("VmHWM:");
     println!(
-        "entities={n} indexed={indexed} rss_before_kb={before} peak_kb={peak} added_mb={:.1} artifact_bytes={} bytes_per_entity_added={:.0}",
+        "entities={n} indexed={indexed} spill={spilled} written={written} rss_before_kb={before} peak_kb={peak} added_mb={:.1} artifact_bytes={length} bytes_per_entity_added={:.0}",
         (peak - before) as f64 / 1024.0,
-        art.bytes.len(),
         (peak - before) as f64 * 1024.0 / n as f64,
     );
 }

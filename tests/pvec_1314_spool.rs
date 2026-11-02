@@ -245,23 +245,17 @@ fn issue_1314_a_streamed_publish_writes_the_pair_and_leaves_nothing_else() {
         &CancelToken::new(),
     )
     .unwrap();
-    publish_streamed(
-        &dest,
-        b"{\"v\":1}",
-        &CancelToken::new(),
-        &mut |_| {},
-        |out| {
-            write_geometry_to(
-                &indexed(),
-                all.iter().copied().zip(&geoms),
-                Vec::new(),
-                &spill_in(root.path(), 4096),
-                &CancelToken::new(),
-                out,
-            )
-            .map(|_| ())
-        },
-    )
+    publish_streamed(&dest, &CancelToken::new(), &mut |_| {}, |out| {
+        write_geometry_to(
+            &indexed(),
+            all.iter().copied().zip(&geoms),
+            Vec::new(),
+            &spill_in(root.path(), 4096),
+            &CancelToken::new(),
+            out,
+        )
+        .map(|_| b"{\"v\":1}".to_vec())
+    })
     .unwrap();
     assert_eq!(fs::read(&dest).unwrap(), memory.bytes);
     assert_eq!(fs::read(report_path(&dest)).unwrap(), b"{\"v\":1}");
@@ -289,7 +283,7 @@ fn issue_1314_a_cancel_during_the_flush_of_a_streamed_publish_keeps_the_previous
     publish(&dest, &old, b"old", &CancelToken::new(), &mut |_| {}).unwrap();
 
     let token = CancelToken::new();
-    let r = publish_streamed(&dest, b"new", &token, &mut |_| {}, |out| {
+    let r = publish_streamed(&dest, &token, &mut |_| {}, |out| {
         struct Tap<'a, 'b> {
             inner: &'a mut dyn Write,
             token: &'b CancelToken,
@@ -319,7 +313,7 @@ fn issue_1314_a_cancel_during_the_flush_of_a_streamed_publish_keeps_the_previous
                 seen: 0,
             },
         )
-        .map(|_| ())
+        .map(|_| b"new".to_vec())
     });
     assert!(
         matches!(r, Err(StreamedPublishError::Produce(WriteError::Cancelled))),
@@ -341,8 +335,9 @@ fn issue_1314_a_streamed_publish_refuses_bytes_that_are_not_an_artifact() {
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("plan.pvec");
     let r: Result<(), StreamedPublishError<io::Error>> =
-        publish_streamed(&dest, b"r", &CancelToken::new(), &mut |_| {}, |out| {
-            out.write_all(b"not an artifact")
+        publish_streamed(&dest, &CancelToken::new(), &mut |_| {}, |out| {
+            out.write_all(b"not an artifact")?;
+            Ok(b"r".to_vec())
         });
     assert!(
         matches!(
@@ -362,13 +357,10 @@ fn issue_1314_a_producer_error_is_returned_as_the_producers_and_leaves_nothing()
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("plan.pvec");
     let mut seen = Vec::new();
-    let r: Result<(), StreamedPublishError<io::Error>> = publish_streamed(
-        &dest,
-        b"r",
-        &CancelToken::new(),
-        &mut |s| seen.push(s),
-        |_| Err(io::Error::other("boom")),
-    );
+    let r: Result<(), StreamedPublishError<io::Error>> =
+        publish_streamed(&dest, &CancelToken::new(), &mut |s| seen.push(s), |_| {
+            Err(io::Error::other("boom"))
+        });
     assert!(matches!(r, Err(StreamedPublishError::Produce(_))), "{r:?}");
     assert!(entries(dir.path()).is_empty());
     assert_eq!(seen.first(), Some(&Stage::ArtifactWriting));

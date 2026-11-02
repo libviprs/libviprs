@@ -68,6 +68,7 @@ pub use georef::{
 use crate::CancelToken;
 use crate::cad::CadSource;
 use crate::observe::{EngineEvent, EngineObserver};
+use crate::pvec::bounds::BoundsReport;
 use crate::pvec::diagnostics::{Diagnostic, DiagnosticCode};
 use crate::pvec::dwg_acadrust::AcadrustProvider;
 use crate::pvec::dwg_basic::{self, BasicError};
@@ -78,7 +79,7 @@ use crate::pvec::flatten::{
 };
 use crate::pvec::mapping::{kind_of, row_for};
 use crate::pvec::provenance::NoProvenance;
-use crate::pvec::publish::{PublishError, publish};
+use crate::pvec::publish::{PublishError, StreamedPublishError, publish, publish_streamed};
 use crate::pvec::report::{
     BoundsSplit, CapabilitySummary, ConversionReport, EntityRow, ReportBuilder, ReportError,
     UnresolvedXrefRow, ViewSummary, XrefSummary,
@@ -86,6 +87,7 @@ use crate::pvec::report::{
 use crate::pvec::transform::{ComposedTransform, promote};
 use crate::pvec::writer::{
     CapabilityId, LeafConfig, SpillConfig, WriteConfig, WriteError, write_geometry,
+    write_geometry_to,
 };
 use crate::pvec::{
     DwgProvider, EntityId, EntityScope, EntityStyle, ExcludedEntity, FidelityClass, OrderingPolicy,
@@ -579,6 +581,7 @@ impl<'a> PvecConversion<'a> {
         let Self {
             dest,
             leaves,
+            spill,
             cancel,
             gate,
             calibration,
@@ -592,72 +595,108 @@ impl<'a> PvecConversion<'a> {
             }
         };
 
-        let artifact = write_geometry(
-            &WriteConfig { unit, leaves },
-            geometries.iter().map(|(id, g)| (*id, g)),
-            Vec::new(),
-            &cancel,
-        )
-        .map_err(|e| match e {
-            WriteError::Cancelled => PvecConvertError::Cancelled,
-            other => PvecConvertError::Write(other),
-        })?;
-
-        tell(EngineEvent::ConversionArtifactWritten {
-            entities: artifact.written,
-            bytes: artifact.bytes.len() as u64,
-        });
-        let mut report = rows
-            .finish(
-                encountered,
-                view,
-                xrefs,
-                BoundsSplit {
-                    exact: artifact.bounds.exact_count() as u64,
-                    hull_upper_bound: artifact.bounds.hull_count() as u64,
-                },
-            )
-            .map_err(PvecConvertError::Report)?;
-        report.capabilities = Some(gate.summary());
-        report.diagnostics = diagnostics;
         let sidecar = georef_path(dest);
-        report.georeference = sidecar
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned());
-        let json = report.to_json_string().map_err(PvecConvertError::Report)?;
         // The sidecar is staged first and moved into place once the pair is published, so a failed
         // or cancelled run leaves the previous one as it was.
         let staged = PathBuf::from(format!("{}.partial", sidecar.display()));
-        GeoreferenceHandoff::V1(HandoffV1 {
-            bounds: artifact.bounds.drawing_bounds().map(|b| SourceBox {
-                min: [b.min().x, b.min().y],
-                max: [b.max().x, b.max().y],
-            }),
-            unit: UnitRecord::new(declared, unit),
-            calibration_id: calibration,
-            control_points,
-        })
-        .write_to(&staged)
-        .map_err(PvecConvertError::Georeference)?;
-        let published = publish(dest, &artifact.bytes, json.as_bytes(), &cancel, &mut |_| {})
-            .map_err(|e| match e {
-                PublishError::Cancelled => PvecConvertError::Cancelled,
-                other => PvecConvertError::Publish(other),
-            })
-            .and_then(|()| {
-                std::fs::rename(&staged, &sidecar)
-                    .map_err(|e| PvecConvertError::Georeference(GeoreferenceError::Io(e)))
+        let write_error = |e: WriteError| match e {
+            WriteError::Cancelled => PvecConvertError::Cancelled,
+            other => PvecConvertError::Write(other),
+        };
+        // What both paths do once the artifact is written: tell the observer, close the report against
+        // what went in, and stage the georeference sidecar. It runs once, so it takes the rows.
+        let seal = |bounds: &BoundsReport,
+                    written: u64,
+                    length: u64|
+         -> Result<(ConversionReport, String), PvecConvertError> {
+            tell(EngineEvent::ConversionArtifactWritten {
+                entities: written,
+                bytes: length,
             });
+            let mut report = rows
+                .finish(
+                    encountered,
+                    view,
+                    xrefs,
+                    BoundsSplit {
+                        exact: bounds.exact_count() as u64,
+                        hull_upper_bound: bounds.hull_count() as u64,
+                    },
+                )
+                .map_err(PvecConvertError::Report)?;
+            report.capabilities = Some(gate.summary());
+            report.diagnostics = diagnostics;
+            report.georeference = sidecar
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned());
+            let json = report.to_json_string().map_err(PvecConvertError::Report)?;
+            GeoreferenceHandoff::V1(HandoffV1 {
+                bounds: bounds.drawing_bounds().map(|b| SourceBox {
+                    min: [b.min().x, b.min().y],
+                    max: [b.max().x, b.max().y],
+                }),
+                unit: UnitRecord::new(declared, unit),
+                calibration_id: calibration,
+                control_points,
+            })
+            .write_to(&staged)
+            .map_err(PvecConvertError::Georeference)?;
+            Ok((report, json))
+        };
+        let config = WriteConfig { unit, leaves };
+        let items = || geometries.iter().map(|(id, g)| (*id, g));
+        let published = match &spill {
+            None => write_geometry(&config, items(), Vec::new(), &cancel)
+                .map_err(write_error)
+                .and_then(|artifact| {
+                    let (report, json) = seal(
+                        &artifact.bounds,
+                        artifact.written,
+                        artifact.bytes.len() as u64,
+                    )?;
+                    publish(dest, &artifact.bytes, json.as_bytes(), &cancel, &mut |_| {}).map_err(
+                        |e| match e {
+                            PublishError::Cancelled => PvecConvertError::Cancelled,
+                            other => PvecConvertError::Publish(other),
+                        },
+                    )?;
+                    Ok((report, artifact.written))
+                }),
+            Some(spill) => {
+                let mut sealed = None;
+                publish_streamed(dest, &cancel, &mut |_| {}, |out| {
+                    let artifact =
+                        write_geometry_to(&config, items(), Vec::new(), spill, &cancel, out)
+                            .map_err(write_error)?;
+                    let (report, json) = seal(&artifact.bounds, artifact.written, artifact.length)?;
+                    sealed = Some((report, artifact.written));
+                    Ok(json.into_bytes())
+                })
+                .map_err(|e| match e {
+                    StreamedPublishError::Produce(e) => e,
+                    StreamedPublishError::Publish(PublishError::Cancelled) => {
+                        PvecConvertError::Cancelled
+                    }
+                    StreamedPublishError::Publish(other) => PvecConvertError::Publish(other),
+                })
+                .map(|()| sealed.expect("the producer sealed the report before the commit"))
+            }
+        }
+        .and_then(|done| {
+            std::fs::rename(&staged, &sidecar)
+                .map_err(|e| PvecConvertError::Georeference(GeoreferenceError::Io(e)))?;
+            Ok(done)
+        });
         if published.is_err() {
             let _ = std::fs::remove_file(&staged);
         }
-        published?;
+        let (report, written) = published?;
         tell(EngineEvent::ConversionPublished);
         Ok(PvecConversionOutput {
             artifact: dest.to_path_buf(),
             report,
             fidelity,
-            written: artifact.written,
+            written,
             peak_queue_depth,
         })
     }
