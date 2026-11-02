@@ -303,7 +303,9 @@ impl<'a> PvecConversion<'a> {
     }
 
     /// Classifies the drawing without writing anything and returns the per-class counts a
-    /// [`convert`](Self::convert) would report. Under [`CapabilityPolicy::RejectInput`] it fails
+    /// [`convert`](Self::convert) would report, before PVec's writer has seen anything: an entity
+    /// counted as supported here can still come back as `pvec-cannot-store` from the conversion,
+    /// because the rule is PVec's and is not copied. Under [`CapabilityPolicy::RejectInput`] it fails
     /// the way the conversion would.
     ///
     /// # Errors
@@ -311,7 +313,10 @@ impl<'a> PvecConversion<'a> {
     /// As [`convert`](Self::convert), except that no unit is needed and nothing is written.
     pub fn probe(self) -> Result<FidelityReport, PvecConvertError> {
         let provider = AcadrustProvider::open(self.source).map_err(PvecConvertError::Open)?;
-        Ok(self.classify(&provider)?.fidelity)
+        let c = self.classify(&provider)?;
+        c.tally
+            .finish(c.encountered)
+            .map_err(PvecConvertError::Tally)
     }
 
     /// As [`probe`](Self::probe), with provider `P`.
@@ -321,7 +326,10 @@ impl<'a> PvecConversion<'a> {
     /// As [`probe`](Self::probe).
     pub fn probe_with<P: DwgProvider>(self) -> Result<FidelityReport, PvecConvertError> {
         let provider = P::open(self.source).map_err(PvecConvertError::Open)?;
-        Ok(self.classify(&provider)?.fidelity)
+        let c = self.classify(&provider)?;
+        c.tally
+            .finish(c.encountered)
+            .map_err(PvecConvertError::Tally)
     }
 
     /// Converts with the default provider, acadrust. The unit is the header's unless
@@ -515,10 +523,6 @@ impl<'a> PvecConversion<'a> {
             let consumed = consumer.join().expect("the consumer thread does not panic");
             failure.map_or(Ok(consumed), Err)
         })?;
-        let fidelity = consumed
-            .tally
-            .finish(encountered)
-            .map_err(PvecConvertError::Tally)?;
         let xrefs = XrefSummary {
             unresolved: flat
                 .skipped
@@ -535,8 +539,9 @@ impl<'a> PvecConversion<'a> {
         };
         Ok(Classified {
             geometries: consumed.geometries,
+            stored: consumed.stored,
             rows: consumed.rows,
-            fidelity,
+            tally: consumed.tally,
             encountered,
             view: ViewSummary::from_report(&view.report),
             xrefs,
@@ -554,8 +559,9 @@ impl<'a> PvecConversion<'a> {
         georef::check_finite(&self.control_points).map_err(PvecConvertError::Georeference)?;
         let Classified {
             geometries,
-            rows,
-            fidelity,
+            stored,
+            mut rows,
+            mut tally,
             encountered,
             view,
             xrefs,
@@ -588,6 +594,20 @@ impl<'a> PvecConversion<'a> {
             WriteError::Cancelled => PvecConvertError::Cancelled,
             other => PvecConvertError::Write(other),
         })?;
+
+        // The tally is sealed here and not at classification: an entity the classifier called
+        // supported can still be one PVec's container refuses, and it is counted as that.
+        for (id, rule) in &artifact.refused {
+            let from = &stored
+                .iter()
+                .find(|(s, _)| s == id)
+                .expect("a refused entity was written from a stored classification")
+                .1;
+            let to = Classification::refused(ReasonCode::PvecCannotStore, from.source_class());
+            tally.reclassify(from, &to);
+            rows.refuse(*id, &to, format!("PVec's writer refused it ({rule})"));
+        }
+        let fidelity = tally.finish(encountered).map_err(PvecConvertError::Tally)?;
 
         tell(EngineEvent::ConversionArtifactWritten {
             entities: artifact.written,
@@ -652,8 +672,10 @@ impl<'a> PvecConversion<'a> {
 /// What `classify` hands on: one record and one row per entity, and the counts that check them.
 struct Classified {
     geometries: Vec<(EntityId, Normalized2DGeometry)>,
+    /// The classification of each entity in `geometries`, for one the writer then refuses.
+    stored: Vec<(EntityId, Classification)>,
     rows: ReportBuilder,
-    fidelity: FidelityReport,
+    tally: Tally,
     encountered: u64,
     view: ViewSummary,
     xrefs: XrefSummary,
@@ -674,6 +696,7 @@ struct Consumed {
     tally: Tally,
     rows: ReportBuilder,
     geometries: Vec<(EntityId, Normalized2DGeometry)>,
+    stored: Vec<(EntityId, Classification)>,
     diagnostics: Vec<Diagnostic>,
     peak: u32,
 }
@@ -690,6 +713,7 @@ fn consume(
         tally: Tally::new(),
         rows: ReportBuilder::new(),
         geometries: Vec::new(),
+        stored: Vec::new(),
         diagnostics: Vec::new(),
         peak: 0,
     };
@@ -721,6 +745,9 @@ fn consume(
                 .map(|k| row_for(k).pvec_type),
             done.warnings,
         ));
+        if done.geometry.geometry().is_some() {
+            out.stored.push((id, done.classification));
+        }
         out.geometries.push((id, done.geometry));
         if received.is_multiple_of(BATCH as u64)
             && let Some(o) = observer
