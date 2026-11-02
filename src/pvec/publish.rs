@@ -126,22 +126,27 @@ fn write_synced(path: &Path, bytes: &[u8]) -> io::Result<File> {
     Ok(f)
 }
 
-/// Publish `artifact` at `dest` and `report` at [`report_path`]`(dest)`, both or neither.
+/// Publish the artifact `produce` writes at `dest` and `report` at [`report_path`]`(dest)`, both or
+/// neither. `produce` is handed the `.pvec.partial` file to write the artifact into, so the artifact never
+/// has to exist in memory; it is synced, then read back and opened with PVec's reader (a truncated file or
+/// one whose digest does not verify is refused before anything is committed), and then the pair is renamed
+/// into place.
 ///
-/// `at` is told each [`Stage`] before the step runs. It is how a caller shows progress, and how the
-/// tests stop the publish at every step.
+/// `at` is told each [`Stage`] before the step runs, and cancellation is checked at every stage up to
+/// [`Stage::Committing`] and again when `produce` returns. If `produce` fails, or the token fired while it
+/// ran, both partials are removed and `dest` and its report are as they were.
 ///
 /// # Errors
 ///
-/// [`PublishError`]. After any error `dest` and its report are as they were before the call.
-pub fn publish(
+/// [`StreamedPublishError::Produce`] with the producer's error, or [`StreamedPublishError::Publish`].
+pub fn publish_streamed<E: std::error::Error + 'static>(
     dest: &Path,
-    artifact: &[u8],
     report: &[u8],
     cancel: &CancelToken,
     at: &mut dyn FnMut(Stage),
-) -> Result<(), PublishError> {
-    PvecReader::open(artifact.to_vec()).map_err(PublishError::NotAnArtifact)?;
+    produce: impl FnOnce(&mut dyn Write) -> Result<(), E>,
+) -> Result<(), StreamedPublishError<E>> {
+    use StreamedPublishError::{Produce, Publish};
     let report_dest = report_path(dest);
     let artifact_partial = with_suffix(dest, PARTIAL_SUFFIX);
     let report_partial = with_suffix(&report_dest, ".partial");
@@ -158,29 +163,58 @@ pub fn publish(
         }
     };
 
-    step(Stage::ArtifactWriting)?;
-    let artifact_file = write_synced(&artifact_partial, artifact).map_err(PublishError::Io)?;
-    step(Stage::ArtifactSyncing)?;
-    artifact_file.sync_all().map_err(PublishError::Io)?;
+    step(Stage::ArtifactWriting).map_err(Publish)?;
+    let mut artifact_file =
+        File::create(&artifact_partial).map_err(|e| Publish(PublishError::Io(e)))?;
+    produce(&mut artifact_file).map_err(Produce)?;
+    step(Stage::ArtifactSyncing).map_err(Publish)?;
+    artifact_file
+        .sync_all()
+        .map_err(|e| Publish(PublishError::Io(e)))?;
     drop(artifact_file);
+    // Completeness is proven by the artifact: read it back and let PVec's reader say.
+    let written = fs::read(&artifact_partial).map_err(|e| Publish(PublishError::Io(e)))?;
+    PvecReader::open(written).map_err(|e| Publish(PublishError::NotAnArtifact(e)))?;
 
-    step(Stage::ReportWriting)?;
-    let report_file = write_synced(&report_partial, report).map_err(PublishError::Io)?;
-    step(Stage::ReportSyncing)?;
-    report_file.sync_all().map_err(PublishError::Io)?;
+    step(Stage::ReportWriting).map_err(Publish)?;
+    let report_file =
+        write_synced(&report_partial, report).map_err(|e| Publish(PublishError::Io(e)))?;
+    step(Stage::ReportSyncing).map_err(Publish)?;
+    report_file
+        .sync_all()
+        .map_err(|e| Publish(PublishError::Io(e)))?;
     drop(report_file);
 
-    step(Stage::Committing)?;
+    step(Stage::Committing).map_err(Publish)?;
     partials.armed = false;
     let renamed = fs::rename(&report_partial, &report_dest)
         .and_then(|()| fs::rename(&artifact_partial, dest));
     if let Err(e) = renamed {
         let _ = fs::remove_file(&artifact_partial);
         let _ = fs::remove_file(&report_partial);
-        return Err(PublishError::Io(e));
+        return Err(Publish(PublishError::Io(e)));
     }
     at(Stage::Committed);
     Ok(())
+}
+
+/// Publish `artifact` at `dest` and `report` at [`report_path`]`(dest)`, both or neither: the artifact in
+/// memory, through [`publish_streamed`].
+///
+/// # Errors
+///
+/// [`PublishError`]. After any error `dest` and its report are as they were before the call.
+pub fn publish(
+    dest: &Path,
+    artifact: &[u8],
+    report: &[u8],
+    cancel: &CancelToken,
+    at: &mut dyn FnMut(Stage),
+) -> Result<(), PublishError> {
+    publish_streamed(dest, report, cancel, at, |out| out.write_all(artifact)).map_err(|e| match e {
+        StreamedPublishError::Publish(p) => p,
+        StreamedPublishError::Produce(io) => PublishError::Io(io),
+    })
 }
 
 /// Open the artifact at `path` with PVec's reader.
@@ -212,19 +246,4 @@ pub enum StreamedPublishError<E: std::error::Error + 'static> {
     /// The producer failed or was cancelled.
     #[error("the producer of the artifact failed")]
     Produce(#[source] E),
-}
-
-/// Stub: red tests first.
-///
-/// # Errors
-///
-/// None yet.
-pub fn publish_streamed<E: std::error::Error + 'static>(
-    _dest: &Path,
-    _report: &[u8],
-    _cancel: &CancelToken,
-    _at: &mut dyn FnMut(Stage),
-    _produce: impl FnOnce(&mut dyn io::Write) -> Result<(), E>,
-) -> Result<(), StreamedPublishError<E>> {
-    unimplemented!("pvec#235 sink")
 }

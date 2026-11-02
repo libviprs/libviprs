@@ -22,9 +22,13 @@
 //!
 //! # Memory
 //!
-//! The facade's writer keeps what it is given until `finish`, and `finish` returns the artifact
-//! as one `Vec<u8>`. Peak memory is therefore linear in the entity count, and this funnel cannot
-//! change that. The measured curve is in the ADR above.
+//! [`write_geometry`] returns the artifact as one `Vec<u8>` from a writer that keeps what it is given
+//! until `finish`, so its peak memory is linear in the entity count. [`write_geometry_to`] is the bounded
+//! path: PVec's `with_spill` keeps the pushes in files under a root the caller names and `finish_to`
+//! builds one block at a time and streams the artifact to a sink, so an indexed write stays inside its
+//! budget however many entities it has (85 MiB at 1M and 83 MiB at 4M for a 64 MiB budget, against
+//! 561 and 2,160 MiB in memory, `docs/BENCHMARKS.md` in `libviprs/pvec`). The curve through this
+//! funnel is in `docs/adr/pvec-tiers-and-spool-rescope.md`.
 //!
 //! # Units
 //!
@@ -38,7 +42,7 @@
 pub use pvec_facade::CapabilityId;
 use pvec_facade::components::Stream;
 use pvec_facade::{Bounds2, EntityId as PvecEntityId, Manifest, PvecError, PvecWriter};
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::PathBuf;
 
 use thiserror::Error;
@@ -121,22 +125,24 @@ fn metres_per_unit(unit: SourceUnit) -> Result<f64, WriteError> {
     }
 }
 
-/// Write `items` (in the order given, ids from [`order_entities`](super::ordering::order_entities))
-/// and then `streams` as one artifact.
-///
-/// The result is deterministic: the same items, config and streams give the same bytes.
-///
-/// # Errors
-///
-/// [`WriteError`]: an unsupported unit, nothing to write, a cancellation (checked every
-/// [`CANCEL_EVERY`] entities and before the artifact is sealed), or PVec's refusal with its rule
-/// as the `source()`.
-pub fn write_geometry<'a>(
+/// What `prepare` hands on: the writer with everything pushed, and the facts about what went in.
+struct Prepared {
+    writer: PvecWriter,
+    bounds: BoundsReport,
+    written: u64,
+    skipped: u64,
+    source_ids: Vec<EntityId>,
+}
+
+/// Maps `items` onto PVec ids, builds the manifest from PVec's own boxes, and pushes everything into a
+/// writer, with a spill root and budget when the write streams. The write is cancelled between entities.
+fn prepare<'a>(
     config: &WriteConfig,
     items: impl IntoIterator<Item = (EntityId, &'a Normalized2DGeometry)>,
     streams: Vec<Stream>,
+    spill: Option<&SpillConfig>,
     cancel: &CancelToken,
-) -> Result<GeometryArtifact, WriteError> {
+) -> Result<Prepared, WriteError> {
     let metres_per_unit = metres_per_unit(config.unit)?;
     let mut skipped = 0u64;
     let mut curves = Vec::new();
@@ -172,6 +178,11 @@ pub fn write_geometry<'a>(
         None => PvecWriter::new(manifest),
     }
     .map_err(WriteError::Pvec)?;
+    if let Some(s) = spill {
+        writer = writer
+            .with_spill(&s.root, s.budget)
+            .map_err(WriteError::Pvec)?;
+    }
     for (n, (id, curve)) in curves.iter().enumerate() {
         if n % CANCEL_EVERY == 0 && cancel.is_cancelled() {
             return Err(WriteError::Cancelled);
@@ -184,13 +195,38 @@ pub fn write_geometry<'a>(
     if cancel.is_cancelled() {
         return Err(WriteError::Cancelled);
     }
-    let written = curves.len() as u64;
-    Ok(GeometryArtifact {
-        bytes: writer.finish().map_err(WriteError::Pvec)?,
+    Ok(Prepared {
+        writer,
         bounds,
-        written,
+        written: curves.len() as u64,
         skipped,
         source_ids,
+    })
+}
+
+/// Write `items` (in the order given, ids from [`order_entities`](super::ordering::order_entities))
+/// and then `streams` as one artifact held in memory.
+///
+/// The result is deterministic: the same items, config and streams give the same bytes.
+///
+/// # Errors
+///
+/// [`WriteError`]: an unsupported unit, nothing to write, a cancellation (checked every
+/// [`CANCEL_EVERY`] entities and before the artifact is sealed), or PVec's refusal with its rule
+/// as the `source()`.
+pub fn write_geometry<'a>(
+    config: &WriteConfig,
+    items: impl IntoIterator<Item = (EntityId, &'a Normalized2DGeometry)>,
+    streams: Vec<Stream>,
+    cancel: &CancelToken,
+) -> Result<GeometryArtifact, WriteError> {
+    let p = prepare(config, items, streams, None, cancel)?;
+    Ok(GeometryArtifact {
+        bytes: p.writer.finish().map_err(WriteError::Pvec)?,
+        bounds: p.bounds,
+        written: p.written,
+        skipped: p.skipped,
+        source_ids: p.source_ids,
     })
 }
 
@@ -218,18 +254,66 @@ pub struct StreamedArtifact {
     pub source_ids: Vec<EntityId>,
 }
 
-/// Stub: red tests first.
+/// A sink that stops writing once the cancel token has fired, so a flush ends at the next write.
+struct CancelWrite<'a> {
+    inner: &'a mut dyn Write,
+    cancel: &'a CancelToken,
+}
+
+impl Write for CancelWrite<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if self.cancel.is_cancelled() {
+            // Not `Interrupted`: `write_all` retries that kind forever.
+            return Err(io::Error::other("cancelled"));
+        }
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// Write `items` and `streams` as one artifact straight to `out`, keeping the writer's pushes in files under
+/// `spill.root` and its memory inside `spill.budget` (PVec's `with_spill` and `finish_to`, pvec#235). The
+/// bytes are the ones [`write_geometry`] returns, whatever the budget.
+///
+/// The memory is bounded for an indexed write ([`WriteConfig::leaves`] set). A plain write spills too, but
+/// holds one block per geometry type, which is the whole drawing, so it is not flat.
+///
+/// A cancel is seen between entities and at every write to `out`, so a flush ends at the next write with
+/// [`WriteError::Cancelled`]. PVec removes its spill files on success, on error and on drop, so none is left
+/// whichever way this ends. What `out` has received on an error is a prefix of the artifact, which the caller
+/// discards (`publish_streamed` does).
 ///
 /// # Errors
 ///
-/// None yet.
+/// [`WriteError`], as for [`write_geometry`]; a failing `out` or spill file is [`WriteError::Pvec`] with
+/// PVec's `Io` error and the `io::Error` as its source.
 pub fn write_geometry_to<'a>(
-    _config: &WriteConfig,
-    _items: impl IntoIterator<Item = (EntityId, &'a Normalized2DGeometry)>,
-    _streams: Vec<Stream>,
-    _spill: &SpillConfig,
-    _cancel: &CancelToken,
-    _out: &mut dyn Write,
+    config: &WriteConfig,
+    items: impl IntoIterator<Item = (EntityId, &'a Normalized2DGeometry)>,
+    streams: Vec<Stream>,
+    spill: &SpillConfig,
+    cancel: &CancelToken,
+    out: &mut dyn Write,
 ) -> Result<StreamedArtifact, WriteError> {
-    unimplemented!("pvec#235 sink")
+    let p = prepare(config, items, streams, Some(spill), cancel)?;
+    let length = p
+        .writer
+        .finish_to(&mut CancelWrite { inner: out, cancel })
+        .map_err(|e| {
+            if cancel.is_cancelled() {
+                WriteError::Cancelled
+            } else {
+                WriteError::Pvec(e)
+            }
+        })?;
+    Ok(StreamedArtifact {
+        length,
+        bounds: p.bounds,
+        written: p.written,
+        skipped: p.skipped,
+        source_ids: p.source_ids,
+    })
 }
