@@ -2,7 +2,7 @@
 
 This is the shape of the integration. Each stage has a page of its own, listed in the last section, and the decisions
 behind it are the ADRs in `docs/adr/`. Every tolerance anywhere in it is `pvec_numeric::Policy::V1`
-(frozen in the integration contract once N8.7 lands); libviprs defines none.
+([frozen in the integration contract](pvec-integration-contract.md)); libviprs defines none.
 
 ```text
 a DWG, or a vector PDF page
@@ -49,4 +49,4 @@ are not built. Peak memory is therefore linear in the entity count: about 2.8 KB
 [transform matrix](pvec-transform-matrix.md), [DWG support](pvec-dwg-support.md), [PDF loss model](pvec-pdf-loss.md),
 [components](pvec-components.md), [georeference handoff](pvec-georeference.md), [conversion API](pvec-conversion-api.md),
 [limits](pvec-limits.md), [provider replacement](pvec-provider-replacement.md), [benchmarks](pvec-benchmarks.md),
-[version compatibility](pvec-version-compatibility.md).
+[version compatibility](pvec-version-compatibility.md), [the frozen contract](pvec-integration-contract.md).
