@@ -542,7 +542,11 @@ impl AcadrustCursor<'_> {
             }
             w => fact_lineweight(w),
         };
-        EntityStyle { colour, lineweight }
+        EntityStyle {
+            colour,
+            lineweight,
+            linetype: SourceFact::Absent,
+        }
     }
 
     fn convert(&mut self, e: &EntityType) -> RawEntity {

@@ -845,3 +845,11 @@ required-features = ["pvec-raster"]
 [[test]]
 name = "pvec_1093_components"
 required-features = ["pvec-write"]
+
+[[test]]
+name = "pvec_1093_dwg_style"
+required-features = ["dwg-acadrust"]
+
+[[test]]
+name = "pvec_1093_regions"
+required-features = ["pvec-write"]

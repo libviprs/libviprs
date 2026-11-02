@@ -376,7 +376,9 @@ fn the_facade_is_named_by_the_funnel_and_the_raster_files_only() {
         }
     }
     let want: std::collections::BTreeSet<PathBuf> = [
+        PathBuf::from("src/pvec/components.rs"),
         PathBuf::from("src/pvec/publish.rs"),
+        PathBuf::from("src/pvec/regions.rs"),
         PathBuf::from("src/pvec/writer.rs"),
         PathBuf::from("src/raster_pvec/container.rs"),
         PathBuf::from("src/sink_pvec.rs"),

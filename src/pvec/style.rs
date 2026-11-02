@@ -44,6 +44,7 @@ use std::fmt;
 use super::fidelity::Classification;
 use super::ordering::EntityId;
 use super::pdf_vector::PdfVectorPage;
+use super::provider::EntityStyle;
 
 /// Why a style value was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -414,4 +415,14 @@ pub fn dwg_line_style(
         }
     };
     LineStyleComponent::new(entity, width, dash, input.visible)
+}
+
+/// The plain values [`dwg_line_style`] takes, read from what a provider reported for one entity.
+///
+/// A facet the drawing does not give, the provider cannot read, or that is BYBLOCK (left for the
+/// INSERT chain) contributes nothing, so the component carries no width or dash for it.
+#[must_use]
+pub fn dwg_style_input(style: &EntityStyle, visible: bool) -> DwgStyleInput {
+    let _ = (style, visible);
+    todo!("N5.4b")
 }

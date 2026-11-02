@@ -124,7 +124,7 @@ fn write(f: &Fixture, streams: Vec<Stream>) -> GeometryArtifact {
     .unwrap()
 }
 
-fn of<'a>(streams: &'a [Stream], cap: pvec_facade::CapabilityId) -> Option<&'a Stream> {
+fn of(streams: &[Stream], cap: pvec_facade::CapabilityId) -> Option<&Stream> {
     streams.iter().find(|s| s.capability == cap)
 }
 

@@ -585,7 +585,26 @@ pub enum SourceLineweight {
     ByBlock,
 }
 
-/// The colour and lineweight facets of one entity.
+/// A linetype as the drawing states it, after the BYLAYER rule has been applied.
+///
+/// There is no `ByLayer` arm, see [`SourceColour`]. `Continuous` is a pattern with no elements,
+/// which a consumer reads as a solid line.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum SourceLinetype {
+    /// A pattern: signed element lengths (positive pen down, negative pen up, zero a dot), and the
+    /// entity's own linetype scale. The header's global scale is not applied here.
+    Pattern {
+        /// The elements, in drawing units before scaling.
+        elements: Vec<f64>,
+        /// The entity's `linetype_scale`.
+        scale: f64,
+    },
+    /// BYBLOCK, see [`SourceColour::ByBlock`].
+    ByBlock,
+}
+
+/// The colour, lineweight and linetype facets of one entity.
 ///
 /// `Absent` means the drawing gives no usable value (a BYLAYER entity on a layer the
 /// table does not have, or one whose own colour is not a colour). `NotReportable`
@@ -596,6 +615,8 @@ pub struct EntityStyle {
     pub colour: SourceFact<SourceColour>,
     /// The lineweight.
     pub lineweight: SourceFact<SourceLineweight>,
+    /// The linetype (#1093).
+    pub linetype: SourceFact<SourceLinetype>,
 }
 
 impl EntityStyle {
@@ -605,6 +626,7 @@ impl EntityStyle {
         Self {
             colour: SourceFact::Absent,
             lineweight: SourceFact::Absent,
+            linetype: SourceFact::Absent,
         }
     }
 
@@ -614,6 +636,7 @@ impl EntityStyle {
         Self {
             colour: SourceFact::NotReportable,
             lineweight: SourceFact::NotReportable,
+            linetype: SourceFact::NotReportable,
         }
     }
 }
@@ -671,6 +694,9 @@ impl RawEntity {
         if self.style.lineweight.is_not_reportable() {
             out.push(Facet::Lineweight);
         }
+        if self.style.linetype.is_not_reportable() {
+            out.push(Facet::Linetype);
+        }
         out
     }
 
@@ -701,6 +727,9 @@ impl RawEntity {
         if !self.style.lineweight.is_not_reportable() {
             out.push(Facet::Lineweight);
         }
+        if !self.style.linetype.is_not_reportable() {
+            out.push(Facet::Linetype);
+        }
         out
     }
 }
@@ -723,6 +752,8 @@ pub enum Facet {
     Colour,
     /// An entity's lineweight, [`EntityStyle::lineweight`] (#1264).
     Lineweight,
+    /// An entity's linetype, [`EntityStyle::linetype`] (#1093).
+    Linetype,
     /// An entity's own visibility flag, from [`DwgProvider::entity_facts`].
     EntityVisibility,
     /// A per-entity layer that replaces the one in its provenance, from
@@ -738,7 +769,7 @@ pub enum Facet {
 
 impl Facet {
     /// Every facet.
-    pub const ALL: [Facet; 12] = [
+    pub const ALL: [Facet; 13] = [
         Facet::LayerState,
         Facet::LayoutState,
         Facet::KnotMultiplicity,
@@ -746,6 +777,7 @@ impl Facet {
         Facet::Periodicity,
         Facet::Colour,
         Facet::Lineweight,
+        Facet::Linetype,
         Facet::EntityVisibility,
         Facet::LayerOverride,
         Facet::ViewportEntities,

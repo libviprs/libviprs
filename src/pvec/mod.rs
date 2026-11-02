@@ -72,6 +72,9 @@ pub mod provider;
 #[cfg(feature = "pvec-write")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-write")))]
 pub mod publish;
+#[cfg(feature = "pvec-write")]
+#[cfg_attr(docsrs, doc(cfg(feature = "pvec-write")))]
+pub mod regions;
 pub mod report;
 pub mod style;
 pub mod text_policy;
@@ -120,8 +123,8 @@ pub use provider::{
     ArrayGrid, Availability, BlockRef, DwgProvider, EntityCursor, EntityFacts, EntityScope,
     EntityStyle, Facet, FacetCap, FacetSource, InstancePath, InstanceStep, LayerState, LayoutId,
     LayoutKind, LayoutState, Point3, ProvenanceStub, ProviderCaps, ProviderError, RawEntity,
-    RawGeometry, RawVertex, SourceColour, SourceFact, SourceLineweight, SourceTransform,
-    TextStyleRef, ViewportEntity, XrefAttachment,
+    RawGeometry, RawVertex, SourceColour, SourceFact, SourceLinetype, SourceLineweight,
+    SourceTransform, TextStyleRef, ViewportEntity, XrefAttachment,
 };
 pub use text_policy::{
     DwgTextCounts, PdfTextOperatorCounts, TextFontOutcome, TextReport, shx_outcome,
