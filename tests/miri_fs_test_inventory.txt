@@ -630,6 +630,13 @@ annotated   fs-detected  tests/pvec_dwg_pdf_differential.rs::the_rotated_pair_sw
 annotated   fs-detected  tests/pvec_dwg_spline_structural.rs::no_code_path_turns_a_spline_into_polylines_or_arcs
 annotated   fs-detected  tests/pvec_fidelity_1100.rs::there_is_one_enum_for_the_six_classes
 annotated   fs-detected  tests/pvec_generation_bench.rs::generation_bench
+annotated   fs-detected  tests/pvec_integration_contract.rs::a_baseline_that_moved_or_vanished_fails
+annotated   fs-detected  tests/pvec_integration_contract.rs::a_blank_pin_fails
+annotated   fs-detected  tests/pvec_integration_contract.rs::changing_a_pinned_value_in_code_without_the_document_turns_it_red
+annotated   fs-detected  tests/pvec_integration_contract.rs::changing_the_document_without_the_code_turns_it_red
+annotated   fs-detected  tests/pvec_integration_contract.rs::the_decision_names_one_admissible_outcome_and_its_runs
+annotated   fs-detected  tests/pvec_integration_contract.rs::the_document_is_the_pins
+annotated   fs-detected  tests/pvec_integration_contract.rs::the_pins_are_the_code_and_none_is_blank
 annotated   fs-detected  tests/pvec_known_truth.rs::n2_1_1050_a_failing_run_leaves_no_state_behind
 annotated   fs-detected  tests/pvec_known_truth.rs::n2_1_1050_a_vendored_file_that_moved_is_caught_by_the_pin
 annotated   fs-detected  tests/pvec_normalization_bench.rs::normalization_bench
