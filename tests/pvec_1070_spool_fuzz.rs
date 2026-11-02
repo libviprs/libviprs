@@ -62,6 +62,7 @@ fn issue_1070_the_seeds_reach_both_a_finished_write_and_a_failing_sink() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn issue_1070_the_target_is_registered_with_the_fuzz_crate() {
     let manifest =
         std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fuzz/Cargo.toml"))
