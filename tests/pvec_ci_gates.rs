@@ -218,4 +218,22 @@ fn n2_8_1060_the_baselines_are_checked_in_sorted_with_one_line_per_accepted_fixt
             "{name}: one sorted line per non-quarantined fixture"
         );
     }
+    // An architecture override holds only rows of fixtures the base has, each one different.
+    for entry in std::fs::read_dir(dir.join("pvec-gate")).unwrap().flatten() {
+        let file = entry.file_name().to_string_lossy().into_owned();
+        let parts: Vec<&str> = file.trim_end_matches(".baseline").split('.').collect();
+        if parts.len() != 2 {
+            continue;
+        }
+        let base = std::fs::read_to_string(dir.join(format!("pvec-gate/{}.baseline", parts[0])))
+            .unwrap_or_else(|_| panic!("{file}: there is no base baseline for it"));
+        for row in std::fs::read_to_string(entry.path()).unwrap().lines() {
+            let id = row.split(' ').next().unwrap();
+            let there = base.lines().find(|l| l.split(' ').next() == Some(id));
+            assert!(
+                there.is_some_and(|b| b != row),
+                "{file}: `{id}` is not a differing row"
+            );
+        }
+    }
 }
