@@ -365,3 +365,38 @@ fn issue_1314_a_producer_error_is_returned_as_the_producers_and_leaves_nothing()
     assert!(entries(dir.path()).is_empty());
     assert_eq!(seen.first(), Some(&Stage::ArtifactWriting));
 }
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1314_a_panic_during_the_flush_leaves_no_spool_file() {
+    struct Boom(usize);
+    impl Write for Boom {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            assert!(self.0 > buf.len(), "boom in the sink");
+            self.0 -= buf.len();
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let geoms = drawing(3000);
+    let all = ids(geoms.len());
+    let root = tempfile::tempdir().unwrap();
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = write_geometry_to(
+            &indexed(),
+            all.into_iter().zip(&geoms),
+            Vec::new(),
+            &spill_in(root.path(), 4096),
+            &CancelToken::new(),
+            &mut Boom(256),
+        );
+    }));
+    assert!(r.is_err(), "the sink was meant to panic");
+    assert!(
+        entries(root.path()).is_empty(),
+        "{:?}",
+        entries(root.path())
+    );
+}
