@@ -617,6 +617,10 @@ annotated   fs-detected  tests/pvec_corpus_regression.rs::the_corpus_does_not_re
 annotated   fs-detected  tests/pvec_corpus_regression.rs::the_document_has_a_row_for_every_fixture
 annotated   fs-detected  tests/pvec_defaults_table.rs::a_constant_with_no_row_a_row_with_no_constant_and_a_moved_value_all_fail
 annotated   fs-detected  tests/pvec_defaults_table.rs::the_defaults_table_and_the_code_name_the_same_constants_with_the_same_values
+annotated   fs-detected  tests/pvec_docs_tables.rs::changing_one_code_row_without_the_document_turns_it_red
+annotated   fs-detected  tests/pvec_docs_tables.rs::no_relative_link_in_the_readme_or_the_docs_is_dead
+annotated   fs-detected  tests/pvec_docs_tables.rs::the_code_backed_tables_equal_the_code
+annotated   fs-detected  tests/pvec_docs_tables.rs::the_thirteen_pages_exist_and_the_readme_links_each
 annotated   fs-detected  tests/pvec_dual_oracle.rs::n2_2_1050_every_fixture_that_is_not_known_truth_is_executed_and_reported
 annotated   fs-detected  tests/pvec_dual_oracle.rs::n2_2_1050_the_pin_summary_is_the_index_and_a_bump_reads_as_per_class_changes
 annotated   fs-detected  tests/pvec_dwg_pdf_differential.rs::a_loss_entry_that_no_longer_matches_fails_the_run
