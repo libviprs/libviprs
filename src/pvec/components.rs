@@ -19,16 +19,20 @@
 //! entity on the layout itself is its own source entity. The row holds the source handle, since the
 //! stream carries nothing else; the block path, layer and warnings are in the conversion report.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use pvec_capabilities::Registry;
 use pvec_facade::EntityId as PvecEntityId;
-use pvec_facade::components::Stream;
+use pvec_facade::components::{
+    LAYER_FROZEN, LAYER_LOCKED, LAYER_OFF, LayerStream, LineStyleDef, LineStyleStream,
+    ProvenanceRecord, ProvenanceStream, Stream, StrokeWidth,
+};
 use thiserror::Error;
 
 use super::ordering::EntityId;
 use super::provider::{LayerState, ProvenanceStub};
-use super::style::LineStyleComponent;
+use super::style::{LineStyleComponent, StrokeWidth as StyleWidth};
+use crate::cad::ItemHandle;
 
 /// Which streams a run writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,7 +77,7 @@ pub struct ComponentSource<'a> {
 pub enum ComponentsError {
     /// PVec refused a payload; the rule it names is the message.
     #[error("PVec refused a component stream: {0}")]
-    Refused(&'static str),
+    Refused(String),
 }
 
 /// The streams `select` asks for, built from `rows` and mapped onto the artifact written with
@@ -88,8 +92,130 @@ pub fn build_streams(
     layers: &[LayerState],
     rows: &[ComponentSource<'_>],
 ) -> Result<Vec<Stream>, ComponentsError> {
-    let _ = (select, source_ids, layers, rows, Registry::v1());
-    let _: Option<PvecEntityId> = None;
-    let _ = BTreeMap::<u64, u32>::new();
-    todo!("N6.6")
+    if select == StreamSelection::NONE {
+        return Ok(Vec::new());
+    }
+    let registry = Registry::v1();
+    // The artifact's id for each libviprs id that was written.
+    let pvec_ids: BTreeMap<EntityId, PvecEntityId> = source_ids
+        .iter()
+        .enumerate()
+        .filter_map(|(n, id)| Some((*id, PvecEntityId::new(u32::try_from(n).ok()?).ok()?)))
+        .collect();
+    let written: Vec<(PvecEntityId, &ComponentSource<'_>)> = rows
+        .iter()
+        .filter_map(|r| Some((*pvec_ids.get(&r.id)?, r)))
+        .collect();
+    let mut out = Vec::new();
+    if select.layer && !written.is_empty() {
+        let mut names: Vec<String> = Vec::new();
+        let mut index: BTreeMap<&str, u32> = BTreeMap::new();
+        let mut assignments = Vec::with_capacity(written.len());
+        for (id, r) in &written {
+            let name = r.stub.layer.as_str();
+            let n = match index.get(name) {
+                Some(n) => *n,
+                None => {
+                    let n = u32::try_from(names.len()).unwrap_or(u32::MAX);
+                    names.push(name.to_owned());
+                    index.insert(name, n);
+                    n
+                }
+            };
+            assignments.push((*id, n));
+        }
+        let flags = names
+            .iter()
+            .map(|n| {
+                layers.iter().find(|l| &l.name == n).map_or(0, |l| {
+                    (if l.off { LAYER_OFF } else { 0 })
+                        | (if l.frozen { LAYER_FROZEN } else { 0 })
+                        | (if l.locked { LAYER_LOCKED } else { 0 })
+                })
+            })
+            .collect();
+        let stream = LayerStream {
+            names,
+            flags,
+            assignments,
+        };
+        out.push(
+            stream
+                .into_stream(&registry)
+                .map_err(|e| ComponentsError::Refused(e.to_string()))?,
+        );
+    }
+    if select.line_style {
+        let mut styles: Vec<LineStyleDef> = Vec::new();
+        let mut assignments = Vec::new();
+        for (id, r) in &written {
+            let Some(c) = r.style else { continue };
+            let def = LineStyleDef {
+                name: String::new(),
+                dashes: c
+                    .dash
+                    .as_ref()
+                    .map_or_else(Vec::new, |d| d.array().to_vec()),
+                width: c.width.map(|w| match w {
+                    StyleWidth::Thinnest => StrokeWidth::Thinnest,
+                    StyleWidth::Width(v) => StrokeWidth::Width(v),
+                }),
+                phase: c.dash.as_ref().map_or(0.0, |d| d.phase()),
+                visible: c.visible,
+            };
+            let n = match styles.iter().position(|s| *s == def) {
+                Some(n) => n,
+                None => {
+                    styles.push(def);
+                    styles.len() - 1
+                }
+            };
+            assignments.push((*id, u32::try_from(n).unwrap_or(u32::MAX)));
+        }
+        if !assignments.is_empty() {
+            let stream = LineStyleStream {
+                styles,
+                assignments,
+            };
+            out.push(
+                stream
+                    .into_stream(&registry)
+                    .map_err(|e| ComponentsError::Refused(e.to_string()))?,
+            );
+        }
+    }
+    if select.provenance {
+        // One row per source entity: the outermost INSERT when there is one, else the entity.
+        let mut seen: BTreeSet<(Option<u64>, u64)> = BTreeSet::new();
+        let mut records = Vec::new();
+        for (id, r) in &written {
+            let handle = match r.stub.block_path.steps().first() {
+                Some(step) => Some(step.insert_handle.get()),
+                None => r.stub.handle.map(ItemHandle::get),
+            };
+            // An entity with no handle is its own source entity, keyed by its id.
+            let key = match handle {
+                Some(h) => (Some(h), 0),
+                None => (None, r.id.get()),
+            };
+            if !seen.insert(key) {
+                continue;
+            }
+            records.push(ProvenanceRecord {
+                entity: *id,
+                // 1 is a DWG source entity.
+                source_kind: 1,
+                handle: handle.map_or_else(Vec::new, |h| h.to_be_bytes().to_vec()),
+            });
+        }
+        if !records.is_empty() {
+            let stream = ProvenanceStream { records };
+            out.push(
+                stream
+                    .into_stream(&registry)
+                    .map_err(|e| ComponentsError::Refused(e.to_string()))?,
+            );
+        }
+    }
+    Ok(out)
 }

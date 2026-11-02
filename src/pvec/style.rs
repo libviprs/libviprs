@@ -44,7 +44,7 @@ use std::fmt;
 use super::fidelity::Classification;
 use super::ordering::EntityId;
 use super::pdf_vector::PdfVectorPage;
-use super::provider::EntityStyle;
+use super::provider::{EntityStyle, SourceColour, SourceLinetype, SourceLineweight};
 
 /// Why a style value was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -423,6 +423,29 @@ pub fn dwg_line_style(
 /// INSERT chain) contributes nothing, so the component carries no width or dash for it.
 #[must_use]
 pub fn dwg_style_input(style: &EntityStyle, visible: bool) -> DwgStyleInput {
-    let _ = (style, visible);
-    todo!("N5.4b")
+    DwgStyleInput {
+        lineweight: match style.lineweight.present() {
+            Some(SourceLineweight::Hundredths(h)) => Some(DwgLineweight::Hundredths(
+                i16::try_from(*h).unwrap_or(i16::MAX),
+            )),
+            Some(SourceLineweight::Default) => Some(DwgLineweight::Default),
+            Some(SourceLineweight::ByBlock) => Some(DwgLineweight::ByBlock),
+            _ => None,
+        },
+        linetype_elements: match style.linetype.present() {
+            Some(SourceLinetype::Pattern { elements, .. }) if !elements.is_empty() => {
+                Some(elements.clone())
+            }
+            _ => None,
+        },
+        linetype_scale: match style.linetype.present() {
+            Some(SourceLinetype::Pattern { scale, .. }) => *scale,
+            _ => 1.0,
+        },
+        colour_index: match style.colour.present() {
+            Some(SourceColour::Aci(i)) => Some(i16::from(*i)),
+            _ => None,
+        },
+        visible,
+    }
 }

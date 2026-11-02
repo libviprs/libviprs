@@ -1,8 +1,15 @@
 //! Derived room and corridor regions (issue #1093, N6.9).
 //!
-//! Stub: the types are here, the derivation follows the red tests.
+//! Walls in, faces out: the empty space the walls enclose is labelled room or corridor by
+//! documented rules, every label says it is a guess, and nothing here changes the source geometry.
 
-use pvec_facade::components::{Origin, RegionKind, Stream};
+use std::collections::BTreeMap;
+
+use pvec_capabilities::Registry;
+use pvec_facade::EntityId as PvecEntityId;
+use pvec_facade::components::{
+    Origin, RegionKind, RegionRecord, SemanticClassStream, SourceTag, Stream,
+};
 use thiserror::Error;
 
 use super::ordering::EntityId;
@@ -134,7 +141,26 @@ impl RegionsError {
     }
 }
 
+type P = [f64; 2];
+
+/// One undirected edge of the wall graph.
+struct Edge {
+    a: usize,
+    b: usize,
+    what: BoundaryRef,
+}
+
 /// Builds the regions the walls enclose.
+///
+/// Wall ends within a hair of each other are one node. A wall end with nothing else on it (a door
+/// jamb) is joined to the nearest other loose end within [`RegionConfig::gap_tolerance`], and the
+/// joining segment is a [`DerivedSegment`]. Walls that stay loose are dropped, the faces of what is
+/// left are traced, and the face around each connected piece is discarded. A face is a corridor
+/// when its smallest enclosing rectangle is at most [`RegionConfig::corridor_max_width`] across and
+/// [`RegionConfig::corridor_min_aspect`] times longer than wide, and a room otherwise. Its
+/// confidence is 0.5 plus half the margin by which it clears that test, so a face right at a
+/// threshold scores about 0.5 and a clear case near 1. Walls must meet at their ends: a wall that
+/// passes through a junction is not split, and an obstacle inside a room (a column) is not a hole.
 ///
 /// # Errors
 ///
@@ -145,18 +171,342 @@ pub fn derive_regions(
     explicit: &[ExplicitRoom],
     config: &RegionConfig,
 ) -> Result<Regions, RegionsError> {
-    let _ = (walls, labels, explicit, config);
-    todo!("N6.9")
+    let good = |v: f64| v.is_finite() && v >= 0.0;
+    if !good(config.gap_tolerance) {
+        return Err(RegionsError::BadConfig("gap_tolerance"));
+    }
+    if !good(config.corridor_max_width) || !good(config.corridor_min_aspect) {
+        return Err(RegionsError::BadConfig("corridor thresholds"));
+    }
+    /// Index of the node at `p`, adding it when no node is within `snap`.
+    fn node_at(nodes: &mut Vec<P>, p: P, snap: f64) -> usize {
+        if let Some(i) = nodes
+            .iter()
+            .position(|q| (q[0] - p[0]).hypot(q[1] - p[1]) <= snap)
+        {
+            return i;
+        }
+        nodes.push(p);
+        nodes.len() - 1
+    }
+
+    fn signed_area(poly: &[P]) -> f64 {
+        let n = poly.len();
+        (0..n)
+            .map(|i| {
+                let (p, q) = (poly[i], poly[(i + 1) % n]);
+                p[0] * q[1] - q[0] * p[1]
+            })
+            .sum::<f64>()
+            / 2.0
+    }
+
+    fn inside(poly: &[P], pt: P) -> bool {
+        let n = poly.len();
+        let mut c = false;
+        for i in 0..n {
+            let (p, q) = (poly[i], poly[(i + 1) % n]);
+            if (p[1] > pt[1]) != (q[1] > pt[1])
+                && pt[0] < (q[0] - p[0]) * (pt[1] - p[1]) / (q[1] - p[1]) + p[0]
+            {
+                c = !c;
+            }
+        }
+        c
+    }
+
+    /// The side lengths of the smallest rectangle, aligned to one polygon edge, that holds `poly`.
+    fn min_rect(poly: &[P]) -> (f64, f64) {
+        let n = poly.len();
+        let mut best = (f64::INFINITY, 0.0, 0.0);
+        for i in 0..n {
+            let (p, q) = (poly[i], poly[(i + 1) % n]);
+            let len = (q[0] - p[0]).hypot(q[1] - p[1]);
+            if len == 0.0 {
+                continue;
+            }
+            let (ux, uy) = ((q[0] - p[0]) / len, (q[1] - p[1]) / len);
+            let (mut lo, mut hi, mut lo_v, mut hi_v) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+            for v in poly {
+                let (dx, dy) = (v[0] - p[0], v[1] - p[1]);
+                let (s, t) = (dx * ux + dy * uy, -dx * uy + dy * ux);
+                lo = lo.min(s);
+                hi = hi.max(s);
+                lo_v = lo_v.min(t);
+                hi_v = hi_v.max(t);
+            }
+            let (w, h) = (hi - lo, hi_v - lo_v);
+            if w * h < best.0 {
+                best = (w * h, w, h);
+            }
+        }
+        (best.1.min(best.2), best.1.max(best.2))
+    }
+
+    /// Whether `pt` lies on the polygon's outline.
+    fn on_ring(poly: &[P], pt: P) -> bool {
+        let n = poly.len();
+        (0..n).any(|i| {
+            let (p, q) = (poly[i], poly[(i + 1) % n]);
+            let cross = (q[0] - p[0]) * (pt[1] - p[1]) - (q[1] - p[1]) * (pt[0] - p[0]);
+            let len = (q[0] - p[0]).hypot(q[1] - p[1]);
+            len > 0.0
+                && cross.abs() <= 1e-9 * len
+                && pt[0] >= p[0].min(q[0]) - 1e-9
+                && pt[0] <= p[0].max(q[0]) + 1e-9
+                && pt[1] >= p[1].min(q[1]) - 1e-9
+                && pt[1] <= p[1].max(q[1]) + 1e-9
+        })
+    }
+
+    let snap = 1e-9_f64.max(config.gap_tolerance * 1e-6);
+    let mut nodes: Vec<P> = Vec::new();
+    let mut edges: Vec<Edge> = Vec::new();
+    for w in walls {
+        let (a, b) = (
+            node_at(&mut nodes, w.start, snap),
+            node_at(&mut nodes, w.end, snap),
+        );
+        if a != b {
+            edges.push(Edge {
+                a,
+                b,
+                what: BoundaryRef::Source(w.entity),
+            });
+        }
+    }
+    // Close gaps between loose ends, nearest pair first, each end used once.
+    let mut degree = vec![0usize; nodes.len()];
+    for e in &edges {
+        degree[e.a] += 1;
+        degree[e.b] += 1;
+    }
+    let loose: Vec<usize> = (0..nodes.len()).filter(|i| degree[*i] == 1).collect();
+    let mut pairs: Vec<(f64, usize, usize)> = Vec::new();
+    for (k, &i) in loose.iter().enumerate() {
+        for &j in &loose[k + 1..] {
+            let d = (nodes[i][0] - nodes[j][0]).hypot(nodes[i][1] - nodes[j][1]);
+            if d <= config.gap_tolerance {
+                pairs.push((d, i, j));
+            }
+        }
+    }
+    pairs.sort_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)).then(x.2.cmp(&y.2)));
+    let mut used = vec![false; nodes.len()];
+    let mut derived = Vec::new();
+    for (_, i, j) in pairs {
+        if used[i] || used[j] {
+            continue;
+        }
+        used[i] = true;
+        used[j] = true;
+        edges.push(Edge {
+            a: i,
+            b: j,
+            what: BoundaryRef::Derived(derived.len()),
+        });
+        derived.push(DerivedSegment {
+            start: nodes[i],
+            end: nodes[j],
+        });
+    }
+    // Drop what still dangles, repeatedly: a dead-end wall encloses nothing.
+    loop {
+        let mut degree = vec![0usize; nodes.len()];
+        for e in &edges {
+            degree[e.a] += 1;
+            degree[e.b] += 1;
+        }
+        let before = edges.len();
+        edges.retain(|e| degree[e.a] > 1 && degree[e.b] > 1);
+        if edges.len() == before {
+            break;
+        }
+    }
+    // Half-edges 2k (a to b) and 2k+1 (b to a), sorted by angle around each node.
+    let origin = |h: usize| {
+        if h.is_multiple_of(2) {
+            edges[h / 2].a
+        } else {
+            edges[h / 2].b
+        }
+    };
+    let target = |h: usize| {
+        if h.is_multiple_of(2) {
+            edges[h / 2].b
+        } else {
+            edges[h / 2].a
+        }
+    };
+    let angle = |h: usize| {
+        let (p, q) = (nodes[origin(h)], nodes[target(h)]);
+        (q[1] - p[1]).atan2(q[0] - p[0])
+    };
+    let mut around: Vec<Vec<usize>> = vec![Vec::new(); nodes.len()];
+    for h in 0..edges.len() * 2 {
+        around[origin(h)].push(h);
+    }
+    for list in &mut around {
+        list.sort_by(|x, y| angle(*x).total_cmp(&angle(*y)));
+    }
+    // The next half-edge of a face keeps the face on its left: at the target, turn to the
+    // neighbour just clockwise of the reverse edge.
+    let next = |h: usize| {
+        let twin = h ^ 1;
+        let list = &around[target(h)];
+        let at = list.iter().position(|x| *x == twin).unwrap_or(0);
+        list[(at + list.len() - 1) % list.len()]
+    };
+    let mut seen = vec![false; edges.len() * 2];
+    let mut faces: Vec<(Vec<usize>, Vec<P>)> = Vec::new();
+    for start in 0..edges.len() * 2 {
+        if seen[start] {
+            continue;
+        }
+        let mut ring = Vec::new();
+        let mut h = start;
+        while !seen[h] {
+            seen[h] = true;
+            ring.push(h);
+            h = next(h);
+        }
+        let poly: Vec<P> = ring.iter().map(|h| nodes[origin(*h)]).collect();
+        if signed_area(&poly) > 0.0 {
+            if faces.len() >= config.max_faces {
+                return Err(RegionsError::TooManyFaces {
+                    limit: config.max_faces,
+                });
+            }
+            faces.push((ring, poly));
+        }
+    }
+    let mut report = RegionReport {
+        gaps_closed: derived.len() as u64,
+        ..RegionReport::default()
+    };
+    let mut regions = Vec::new();
+    // A face is the explicit room when every midpoint of its edges is in or on the explicit polygon.
+    let explicit_hit = |poly: &[P]| {
+        explicit.iter().any(|x| {
+            poly.iter().zip(poly.iter().cycle().skip(1)).all(|(p, q)| {
+                let m = [(p[0] + q[0]) / 2.0, (p[1] + q[1]) / 2.0];
+                inside(&x.polygon, m) || on_ring(&x.polygon, m)
+            })
+        })
+    };
+    for (ring, poly) in &faces {
+        if explicit_hit(poly) {
+            continue;
+        }
+        let area = signed_area(poly);
+        let (short, long) = min_rect(poly);
+        let corridor = short > 0.0
+            && short <= config.corridor_max_width
+            && long / short >= config.corridor_min_aspect;
+        let kind = if area > 0.0 && short > 0.0 {
+            Some(if corridor {
+                RegionKind::Corridor
+            } else {
+                RegionKind::Room
+            })
+        } else {
+            None
+        };
+        let margin = if corridor {
+            ((long / short) / config.corridor_min_aspect.max(f64::MIN_POSITIVE) - 1.0).min(1.0)
+        } else if config.corridor_max_width > 0.0 {
+            ((short / config.corridor_max_width) - 1.0).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        let label = labels
+            .iter()
+            .find(|l| inside(poly, l.at))
+            .map(|l| l.text.clone());
+        match kind {
+            Some(RegionKind::Corridor) => report.corridors += 1,
+            Some(RegionKind::Room) => report.rooms += 1,
+            _ => {
+                report.unlabelled += 1;
+                if !config.keep_unlabelled {
+                    continue;
+                }
+            }
+        }
+        regions.push(Region {
+            kind,
+            origin: Origin {
+                source: SourceTag::Inferred,
+                confidence: Some((0.5 + margin.max(0.0) / 2.0).clamp(0.0, 1.0)),
+            },
+            boundary: ring.iter().map(|h| edges[h / 2].what).collect(),
+            label,
+        });
+    }
+    for x in explicit {
+        report.rooms += 1;
+        regions.push(Region {
+            kind: Some(RegionKind::Room),
+            origin: Origin {
+                source: SourceTag::Explicit,
+                confidence: None,
+            },
+            boundary: x.boundary.iter().map(|e| BoundaryRef::Source(*e)).collect(),
+            label: x.name.clone(),
+        });
+    }
+    Ok(Regions {
+        regions,
+        derived,
+        report,
+    })
 }
 
 /// The semantic class stream for `regions`: PVec entity `i` is `source_ids[i]`, and the derived
 /// segments were appended after the source geometry, so `Derived(n)` is entity
-/// `source_ids.len() + n`. A region that points at an entity that was not written is left out.
+/// `source_ids.len() + n`. A region that points at an entity that was not written, or whose ring
+/// PVec cannot hold, is left out.
 ///
 /// # Errors
 ///
 /// A message when PVec's encoder refuses the payload.
 pub fn semantic_stream(regions: &Regions, source_ids: &[EntityId]) -> Result<Stream, String> {
-    let _ = (regions, source_ids, RegionKind::Room);
-    todo!("N6.9")
+    let pos: BTreeMap<EntityId, usize> = source_ids
+        .iter()
+        .enumerate()
+        .map(|(n, e)| (*e, n))
+        .collect();
+    let pvec = |n: usize| {
+        u32::try_from(n)
+            .ok()
+            .and_then(|n| PvecEntityId::new(n).ok())
+    };
+    let records = regions
+        .regions
+        .iter()
+        .filter_map(|r| {
+            let kind = r.kind?;
+            let outer: Option<Vec<PvecEntityId>> = r
+                .boundary
+                .iter()
+                .map(|b| match b {
+                    BoundaryRef::Source(e) => pvec(*pos.get(e)?),
+                    BoundaryRef::Derived(n) => pvec(source_ids.len() + n),
+                })
+                .collect();
+            Some(RegionRecord {
+                kind,
+                origin: r.origin,
+                outer: outer?,
+                holes: Vec::new(),
+            })
+        })
+        .collect();
+    let stream = SemanticClassStream {
+        elements: Vec::new(),
+        regions: records,
+    };
+    stream
+        .into_stream(&Registry::v1())
+        .map_err(|e| e.to_string())
 }

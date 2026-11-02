@@ -853,3 +853,7 @@ required-features = ["dwg-acadrust"]
 [[test]]
 name = "pvec_1093_regions"
 required-features = ["pvec-write"]
+
+[[example]]
+name = "pvec_components_cost"
+required-features = ["pvec-write"]
