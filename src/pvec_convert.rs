@@ -84,7 +84,9 @@ use crate::pvec::report::{
     UnresolvedXrefRow, ViewSummary, XrefSummary,
 };
 use crate::pvec::transform::{ComposedTransform, promote};
-use crate::pvec::writer::{CapabilityId, LeafConfig, WriteConfig, WriteError, write_geometry};
+use crate::pvec::writer::{
+    CapabilityId, LeafConfig, SpillConfig, WriteConfig, WriteError, write_geometry,
+};
 use crate::pvec::{
     DwgProvider, EntityId, EntityScope, EntityStyle, ExcludedEntity, FidelityClass, OrderingPolicy,
     ProvenanceStub, ProviderError, RawEntity, RawGeometry, SourceLimits, SourceUnit, ViewProfile,
@@ -179,6 +181,7 @@ pub struct PvecConversion<'a> {
     view_profile: ViewProfile,
     unit: Option<SourceUnit>,
     leaves: Option<LeafConfig>,
+    spill: Option<SpillConfig>,
     cancel: CancelToken,
     gate: Gate,
     calibration: Option<String>,
@@ -197,6 +200,7 @@ impl<'a> PvecConversion<'a> {
             view_profile: ViewProfile::default_profile(),
             unit: None,
             leaves: None,
+            spill: None,
             cancel: CancelToken::new(),
             gate: Gate::of(ConversionProfile::Default),
             calibration: None,
@@ -232,6 +236,16 @@ impl<'a> PvecConversion<'a> {
     #[must_use]
     pub fn leaves(mut self, leaves: LeafConfig) -> Self {
         self.leaves = Some(leaves);
+        self
+    }
+
+    /// Stream the artifact through PVec's spill writer: its pushes are kept in files under `spill.root` and its
+    /// memory stays inside `spill.budget`, and the artifact is written straight into the `.pvec.partial` file.
+    /// The bytes and the report are those of a conversion without it. The memory is bounded when
+    /// [`PvecConversion::leaves`] is set too (a plain artifact holds one block per geometry type).
+    #[must_use]
+    pub fn spill(mut self, spill: SpillConfig) -> Self {
+        self.spill = Some(spill);
         self
     }
 
