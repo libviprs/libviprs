@@ -512,6 +512,14 @@ annotated   fs-detected  tests/pvec_1314_publish.rs::issue_1314_the_in_progress_
 annotated   fs-detected  tests/pvec_1314_publish.rs::issue_1314_the_pair_is_both_present_or_both_absent_on_every_path
 annotated   fs-detected  tests/pvec_1314_publish.rs::issue_1314_the_reader_path_refuses_a_partial_by_name_before_any_parse
 annotated   fs-detected  tests/pvec_1314_publish.rs::issue_1314_the_stages_arrive_in_order_and_commit_comes_last
+annotated   fs-detected  tests/pvec_1314_spool.rs::issue_1314_a_cancel_during_the_flush_of_a_streamed_publish_keeps_the_previous_pair
+annotated   fs-detected  tests/pvec_1314_spool.rs::issue_1314_a_cancel_during_the_flush_returns_cancelled_and_leaves_no_spool_file
+annotated   fs-detected  tests/pvec_1314_spool.rs::issue_1314_a_failing_sink_is_a_pvec_error_with_the_io_error_underneath_and_no_spool_left
+annotated   fs-detected  tests/pvec_1314_spool.rs::issue_1314_a_producer_error_is_returned_as_the_producers_and_leaves_nothing
+annotated   fs-detected  tests/pvec_1314_spool.rs::issue_1314_a_streamed_publish_refuses_bytes_that_are_not_an_artifact
+annotated   fs-detected  tests/pvec_1314_spool.rs::issue_1314_a_streamed_publish_writes_the_pair_and_leaves_nothing_else
+annotated   fs-detected  tests/pvec_1314_spool.rs::issue_1314_the_spill_files_stay_under_the_root_and_are_gone_after
+annotated   fs-detected  tests/pvec_1314_spool.rs::issue_1314_the_streamed_artifact_is_the_in_memory_one_for_every_budget
 annotated   fs-detected  tests/pvec_1330_raster_tiles.rs::the_doc_is_the_rendered_table_byte_for_byte
 annotated   fs-detected  tests/pvec_1330_seed_corpus.rs::bless_the_seeds_when_asked
 annotated   fs-detected  tests/pvec_1330_seed_corpus.rs::provenance_names_the_generator_and_every_seed

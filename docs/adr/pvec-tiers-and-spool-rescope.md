@@ -77,10 +77,14 @@ Rom chose to stream in pvec first (libviprs/pvec#235: `finish_to(impl Write)` wi
 layout, byte-identical to `finish()`). So N6.3 and the 1.5 GiB criterion of `#1064` stay as written,
 and the bound comes from PVec, not from a libviprs spool.
 
-* No libviprs spool code is written now. N6.3 closes only after pvec#235 merges, the pin moves, and
-  the numbers from `examples/pvec_writer_memory.rs` meet the criterion.
-* The funnel assigns PVec ids dense from zero (Tier 0 needs `0..n` with no gaps) and returns the way back in `source_ids`.
-* The funnel today returns `Vec<u8>`. When #235 lands it gains a sink variant that calls
-  `finish_to`, and `publish` takes the stream instead of a slice, writing straight into the
-  `.pvec.partial` file. The cancel token, the stages and the cleanup do not change.
-* Until then `#1064` N8.4 and N8.6 stay blocked, and everything else in `#1314` carries on.
+* No libviprs spool code is written: the bound comes from PVec (pvec#235, merged at `ff67ecb8`), and the pin
+  is there. The funnel's `write_geometry_to` hands PVec a spill root and a budget (`SpillConfig`) and streams the
+  artifact to a sink through `finish_to`; `publish_streamed` writes that stream into the `.pvec.partial` file.
+  The cancel token, the stages and the cleanup are the ones of `write_geometry` and `publish`.
+* Through PVec's own harness, with a 64 MiB budget, the indexed writer peaks at 85 MiB at 1M entities and 83 MiB
+  at 4M, against 561 and 2,160 MiB in memory (`docs/BENCHMARKS.md` in `libviprs/pvec`). The plain writer without
+  cells still holds one block per geometry type and is not flat, so the bounded write is the indexed one. The
+  figures through this funnel, against the 1.5 GiB criterion of `#1064` N8.4, are in `docs/pvec-benchmarks.md`
+  once that page has them.
+* The funnel assigns PVec ids dense from zero (Tier 0 needs `0..n` with no gaps) and returns the way back in
+  `source_ids`.
