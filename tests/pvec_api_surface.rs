@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 /// Crate roots libviprs may name. `pvec-geometry` and `pvec-numeric` are PVec's semantic
 /// crates (the curve model and the numeric policy under it).
 const ALLOWED_ROOTS: &[&str] = &[
+    "pvec_capabilities",
     "pvec_entity",
     "pvec_facade",
     "pvec_geometry",
@@ -349,6 +350,7 @@ fn only_the_semantic_crates_are_named_today() {
     assert_eq!(
         roots,
         [
+            "pvec_capabilities",
             "pvec_entity",
             "pvec_facade",
             "pvec_geometry",
@@ -614,4 +616,15 @@ fn no_index_directory_or_straddler_type_is_defined_under_src_pvec() {
         "spatial-structure types under src/pvec:\n{}",
         bad.join("\n")
     );
+}
+
+/// Issue #1093: no component row carries a provider-specific type. `pvec::components` is the
+/// place rows are built, so it may name neither a DWG reader nor a PDF library.
+#[test]
+fn issue_1093_components_name_no_provider_specific_type() {
+    let src = fs::read_to_string(root().join("src/pvec/components.rs")).unwrap();
+    let code = strip_comments(&src);
+    for banned in ["lopdf", "acadrust", "acadsharp", "dwg_acadrust"] {
+        assert!(!code.contains(banned), "components.rs names `{banned}`");
+    }
 }
