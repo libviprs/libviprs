@@ -47,24 +47,19 @@ const GATES: &[Gate] = &[
 /// The text of one job: from its key at two spaces to the next key at two spaces.
 fn job_block(job: &str) -> &str {
     let head = format!("\n  {job}:\n");
-    let start = CI_YML
+    let from = CI_YML
         .find(&head)
         .unwrap_or_else(|| panic!("ci.yml has no job `{job}`"))
-        + 1;
-    let rest = &CI_YML[start + head.len() - 1..];
+        + head.len();
+    let rest = &CI_YML[from..];
+    // The next job key: a line indented by exactly two spaces that is not a comment.
     let end = rest
-        .lines()
-        .skip(1)
-        .scan(0, |at, l| {
-            let here = *at;
-            *at += l.len() + 1;
-            Some((here, l))
-        })
-        .find(|(_, l)| {
-            l.starts_with("  ")
-                && !l.starts_with("   ")
-                && !l.trim().is_empty()
-                && !l.trim_start().starts_with('#')
+        .match_indices("\n  ")
+        .find(|(at, _)| {
+            rest[at + 3..]
+                .chars()
+                .next()
+                .is_some_and(|c| c != ' ' && c != '#')
         })
         .map_or(rest.len(), |(at, _)| at);
     &rest[..end]
@@ -201,16 +196,26 @@ fn n2_8_1060_only_the_fidelity_gate_reads_the_fixture_expectations() {
 
 #[test]
 #[cfg_attr(miri, ignore)] // reads the baselines from disk
-fn n2_8_1060_the_baselines_are_checked_in_sorted_and_not_empty() {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/pvec-gate");
+fn n2_8_1060_the_baselines_are_checked_in_sorted_with_one_line_per_accepted_fixture() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let index: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("pvec-gold/index.json")).unwrap()).unwrap();
+    let mut want: Vec<&str> = index["fixtures"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["evidence_class"] != "QUARANTINED")
+        .map(|f| f["id"].as_str().unwrap())
+        .collect();
+    want.sort_unstable();
+    assert!(want.len() >= 30, "the corpus slice is not empty");
     for name in ["classification", "view-decisions", "determinism"] {
-        let text = std::fs::read_to_string(dir.join(format!("{name}.baseline")))
+        let text = std::fs::read_to_string(dir.join(format!("pvec-gate/{name}.baseline")))
             .unwrap_or_else(|e| panic!("{name}.baseline is not checked in: {e}"));
         let ids: Vec<&str> = text.lines().map(|l| l.split(' ').next().unwrap()).collect();
-        assert!(ids.len() >= 50, "{name}: only {} lines", ids.len());
-        let mut sorted = ids.clone();
-        sorted.sort();
-        sorted.dedup();
-        assert_eq!(ids, sorted, "{name}: one sorted line per fixture");
+        assert_eq!(
+            ids, want,
+            "{name}: one sorted line per non-quarantined fixture"
+        );
     }
 }
