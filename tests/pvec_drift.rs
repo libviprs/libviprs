@@ -4,7 +4,7 @@
 //! Every drift kind is shown by writing a deliberately perturbed artifact with PVec's public writer
 //! and checking that the library names the kind and the entity. An unperturbed artifact passes. The
 //! committed digests (`tests/fixtures/pvec-drift/`) are what makes a real change fail the ordinary
-//! suite; `PVEC_DRIFT_BLESS=1` rewrites them (see `docs/pvec-drift-check.md`).
+//! suite; `PVEC_GATE_BLESS=1` rewrites them (see `docs/pvec-drift-check.md`).
 //!
 //! Needs `--features pvec-convert`.
 
@@ -22,7 +22,7 @@ use libviprs::pvec::SourceUnit;
 use libviprs::pvec::drift::{self, Against, DriftKind, DriftReport};
 use libviprs::pvec_convert::PvecConversion;
 use pvec_facade::{Bounds2, Curve, EntityId, Manifest, PvecReader, PvecWriter};
-use pvec_geometry::{Circle, Ellipse, Placement2, Point2, Polyline};
+use pvec_geometry::{Circle, Curve2d, Ellipse, Placement2, Point2, Polyline};
 use pvec_gold::{Corpus, EvidenceClass, Fixture};
 use serde_json::{Value, json};
 
@@ -30,12 +30,39 @@ fn dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/pvec-drift")
 }
 
+/// The sections of a dump file, `== <fixture>` followed by the dump, as (fixture, dump).
+fn sections(text: &str) -> Vec<(&str, &str)> {
+    text.split("== ")
+        .filter(|s| !s.is_empty())
+        .map(|s| s.split_once('\n').expect("a section has a heading line"))
+        .collect()
+}
+
+fn override_path() -> Option<PathBuf> {
+    (std::env::consts::ARCH != "x86_64")
+        .then(|| dir().join(format!("accepted.{}.dump", std::env::consts::ARCH)))
+}
+
+/// The accepted output for this architecture: `accepted.dump` is the x86_64 one, and an
+/// `accepted.<arch>.dump` replaces the sections of the fixtures whose geometry comes out in other
+/// bits there (#1471, `docs/adr/pvec-artifact-reproducibility.md`).
 fn accepted_file() -> String {
-    std::fs::read_to_string(dir().join("accepted.dump")).unwrap_or_else(|e| {
+    let base = std::fs::read_to_string(dir().join("accepted.dump")).unwrap_or_else(|e| {
         panic!(
-            "tests/fixtures/pvec-drift/accepted.dump is missing ({e}); PVEC_DRIFT_BLESS=1 writes it"
+            "tests/fixtures/pvec-drift/accepted.dump is missing ({e}); PVEC_GATE_BLESS=1 writes it"
         )
-    })
+    });
+    let over = override_path()
+        .filter(|p| p.exists())
+        .map(|p| std::fs::read_to_string(p).unwrap());
+    let over = over.as_deref().map(sections).unwrap_or_default();
+    sections(&base)
+        .into_iter()
+        .map(|(id, body)| {
+            let body = over.iter().find(|(o, _)| *o == id).map_or(body, |(_, b)| b);
+            format!("== {id}\n{body}")
+        })
+        .collect()
 }
 
 // ------------------------------------------------------------------------------- the artifacts
@@ -79,6 +106,17 @@ impl Art {
         }
         w.finish().unwrap()
     }
+}
+
+/// Sets the manifest bounds to those of the geometry, as a writer would after the edit.
+fn refit(art: &mut Art) {
+    let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
+    for (_, c) in &art.curves {
+        let b = c.bounds().unwrap();
+        lo = [lo[0].min(b.min().x), lo[1].min(b.min().y)];
+        hi = [hi[0].max(b.max().x), hi[1].max(b.max().y)];
+    }
+    art.manifest.bounds = Bounds2 { min: lo, max: hi };
 }
 
 fn pt(x: f64, y: f64) -> Point2 {
@@ -215,6 +253,7 @@ fn n_1471_a_changed_radius_is_caught() {
         panic!("circle-001 is not a circle")
     };
     art.curves[0].1 = Curve::Circle(Circle::new(*c.placement(), c.radius() * 1.001).unwrap());
+    refit(&mut art);
     let r = drift::check(
         fx_id,
         "KNOWN_TRUTH_EXACT",
@@ -235,6 +274,7 @@ fn n_1471_a_changed_radius_is_caught() {
 fn n_1471_a_dropped_entity_is_caught() {
     let (truth, mut art) = three_polylines();
     art.curves.pop();
+    refit(&mut art);
     let r = report_for_truth(&truth, &art);
     assert_eq!(
         kinds(&r),
@@ -249,7 +289,7 @@ fn n_1471_an_extra_entity_is_caught() {
     let (truth, mut art) = three_polylines();
     art.curves.push((
         3,
-        Curve::Polyline(Polyline::new(vec![pt(8.0, 8.0), pt(9.0, 9.0)]).unwrap()),
+        Curve::Polyline(Polyline::new(vec![pt(0.5, 0.5), pt(0.6, 0.6)]).unwrap()),
     ));
     let r = report_for_truth(&truth, &art);
     assert_eq!(
@@ -323,6 +363,7 @@ fn n_1471_a_swapped_class_is_caught_even_when_the_geometry_would_pass() {
     )
     .unwrap();
     art.curves[0].1 = Curve::Ellipse(e);
+    refit(&mut art);
     let r = drift::check(
         &fx.id,
         "KNOWN_TRUTH_EXACT",
@@ -483,6 +524,7 @@ fn n_1471_a_quarantined_fixture_reports_drift_and_never_gates() {
 fn n_1471_the_reports_are_machine_readable_and_for_people() {
     let (truth, mut art) = three_polylines();
     art.curves.pop();
+    refit(&mut art);
     let r = report_for_truth(&truth, &art);
     let j: Value = serde_json::from_str(&r.to_json()).expect("the machine report is json");
     assert_eq!(j["fixture"], "three-polylines");
@@ -510,7 +552,7 @@ fn n_1471_the_digest_is_over_the_canonical_dump_and_moves_with_one_bit() {
         unreachable!()
     };
     let mut v = p.vertices().to_vec();
-    v[0] = pt(f64::from_bits(v[0].x.to_bits() + 1), v[0].y);
+    v[1] = pt(f64::from_bits(v[1].x.to_bits() + 1), v[1].y);
     b.curves[0].1 = Curve::Polyline(Polyline::new(v).unwrap());
     let b = drift::canonical_dump("f", &b.write()).unwrap();
     assert_ne!(drift::digest(&a), drift::digest(&b));
@@ -522,9 +564,11 @@ fn n_1471_the_digest_is_over_the_canonical_dump_and_moves_with_one_bit() {
 
 // ----------------------------------------------------------- the committed digests, the suite
 
-fn digests() -> String {
+/// The accepted dumps (one `== <fixture>` section each) and the digest lines, for every fixture the
+/// conversion produces an artifact for.
+fn current() -> (String, String) {
     let corpus = Corpus::open();
-    let mut out = String::new();
+    let (mut dumps, mut digests) = (String::new(), String::new());
     for fx in corpus
         .all()
         .iter()
@@ -532,36 +576,47 @@ fn digests() -> String {
     {
         if let Some(bytes) = convert(fx) {
             let dump = drift::canonical_dump(&fx.id, &bytes).unwrap();
-            out.push_str(&format!("{} {}\n", fx.id, drift::digest(&dump)));
+            dumps.push_str(&format!("== {}\n{dump}", fx.id));
+            digests.push_str(&format!("{} {}\n", fx.id, drift::digest(&dump)));
         }
     }
-    out
+    (dumps, digests)
 }
 
 #[test]
 #[cfg_attr(miri, ignore)]
 fn n_1471_the_digest_of_every_converted_fixture_matches_the_committed_one() {
-    let actual = digests();
-    let path = dir().join("digest.baseline");
-    let baseline = std::fs::read_to_string(&path).unwrap_or_else(|e| {
-        panic!(
-            "{} is missing ({e}); PVEC_DRIFT_BLESS=1 writes it",
-            path.display()
-        )
-    });
-    let changes = pvec_gate::diff(&baseline, &actual);
-    assert!(
-        changes.is_empty(),
-        "the PVec output drifted from tests/fixtures/pvec-drift/digest.baseline:\n{}",
-        changes.join("\n")
-    );
+    let (dumps, digests) = current();
+    if std::env::var_os("PVEC_GATE_BLESS").is_some() {
+        // x86_64 writes the accepted output, any other architecture writes only the sections that
+        // differ from it (the digest rows are written by `check` the same way)
+        let base = std::fs::read_to_string(dir().join("accepted.dump")).ok();
+        match (override_path(), base) {
+            (Some(over), Some(base)) => {
+                let base = sections(&base);
+                let changed: String = sections(&dumps)
+                    .into_iter()
+                    .filter(|s| !base.contains(s))
+                    .map(|(id, body)| format!("== {id}\n{body}"))
+                    .collect();
+                if changed.is_empty() {
+                    let _ = std::fs::remove_file(over);
+                } else {
+                    std::fs::write(over, changed).unwrap();
+                }
+            }
+            _ => std::fs::write(dir().join("accepted.dump"), &dumps).unwrap(),
+        }
+    }
+    pvec_gate::check("geometry drift", "drift", &digests);
 }
 
 #[test]
 #[cfg_attr(miri, ignore)]
 fn n_1471_the_accepted_dump_hashes_to_the_committed_digest() {
     let accepted = accepted_file();
-    let baseline = std::fs::read_to_string(dir().join("digest.baseline")).unwrap();
+    let baseline = pvec_gate::baseline_text("geometry drift", "drift");
+    assert!(baseline.lines().count() >= 30);
     for line in baseline.lines() {
         let (id, want) = line.split_once(' ').unwrap();
         let section = drift::accepted_section(&accepted, id)
@@ -571,6 +626,33 @@ fn n_1471_the_accepted_dump_hashes_to_the_committed_digest() {
             want,
             "{id}: the accepted dump and its digest disagree"
         );
+    }
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn n_1471_the_fixtures_whose_bits_differ_between_architectures_agree_within_the_numeric_policy() {
+    // The x86_64 and aarch64 accepted outputs of these fixtures hash differently, and neither is a
+    // drift from the other: a check against either gives a clean report on both architectures.
+    let Ok(over) = std::fs::read_to_string(dir().join("accepted.aarch64.dump")) else {
+        panic!("tests/fixtures/pvec-drift/accepted.aarch64.dump is missing");
+    };
+    let base = std::fs::read_to_string(dir().join("accepted.dump")).unwrap();
+    let corpus = Corpus::open();
+    assert!(!sections(&over).is_empty());
+    for (id, arm) in sections(&over) {
+        let fx = corpus.get(id);
+        let x64 = drift::accepted_section(&base, id).unwrap();
+        assert_ne!(drift::digest(x64), drift::digest(arm));
+        let bytes = convert(fx).unwrap();
+        let truth = fx
+            .has("expected.math.json")
+            .then(|| fx.json("expected.math.json"));
+        for accepted in [x64, arm] {
+            let r =
+                drift::check(id, fx.class.tag(), truth.as_ref(), Some(accepted), &bytes).unwrap();
+            assert!(r.is_clean(), "{}", r.to_text());
+        }
     }
 }
 
@@ -626,6 +708,7 @@ fn n_1471_the_example_prints_both_reports_and_fails_on_drift() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn n_1471_the_library_uses_pvecs_public_api_and_none_of_its_maths() {
     let src =
         std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/pvec/drift.rs"))

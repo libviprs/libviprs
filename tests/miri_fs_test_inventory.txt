@@ -635,6 +635,17 @@ annotated   fs-detected  tests/pvec_docs_tables.rs::changing_one_code_row_withou
 annotated   fs-detected  tests/pvec_docs_tables.rs::no_relative_link_in_the_readme_or_the_docs_is_dead
 annotated   fs-detected  tests/pvec_docs_tables.rs::the_code_backed_tables_equal_the_code
 annotated   fs-detected  tests/pvec_docs_tables.rs::the_thirteen_pages_exist_and_the_readme_links_each
+annotated   fs-detected  tests/pvec_drift.rs::n_1471_a_changed_radius_is_caught
+annotated   fs-detected  tests/pvec_drift.rs::n_1471_a_fixture_with_no_truth_is_checked_against_the_accepted_output
+annotated   fs-detected  tests/pvec_drift.rs::n_1471_a_quarantined_fixture_reports_drift_and_never_gates
+annotated   fs-detected  tests/pvec_drift.rs::n_1471_a_swapped_class_is_caught_even_when_the_geometry_would_pass
+annotated   fs-detected  tests/pvec_drift.rs::n_1471_every_converted_fixture_has_no_drift_against_its_truth_or_its_accepted_output
+annotated   fs-detected  tests/pvec_drift.rs::n_1471_every_drift_kind_is_caught_against_the_accepted_output
+annotated   fs-detected  tests/pvec_drift.rs::n_1471_the_accepted_dump_hashes_to_the_committed_digest
+annotated   fs-detected  tests/pvec_drift.rs::n_1471_the_digest_of_every_converted_fixture_matches_the_committed_one
+annotated   fs-detected  tests/pvec_drift.rs::n_1471_the_example_prints_both_reports_and_fails_on_drift
+annotated   fs-detected  tests/pvec_drift.rs::n_1471_the_fixtures_whose_bits_differ_between_architectures_agree_within_the_numeric_policy
+annotated   fs-detected  tests/pvec_drift.rs::n_1471_the_library_uses_pvecs_public_api_and_none_of_its_maths
 annotated   fs-detected  tests/pvec_dual_oracle.rs::n2_2_1050_every_fixture_that_is_not_known_truth_is_executed_and_reported
 annotated   fs-detected  tests/pvec_dual_oracle.rs::n2_2_1050_the_pin_summary_is_the_index_and_a_bump_reads_as_per_class_changes
 annotated   fs-detected  tests/pvec_dwg_pdf_differential.rs::a_loss_entry_that_no_longer_matches_fails_the_run

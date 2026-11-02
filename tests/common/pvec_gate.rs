@@ -74,6 +74,28 @@ pub fn diff(baseline: &str, actual: &str) -> Vec<String> {
     out
 }
 
+/// The baseline `name` as it applies on this architecture: the base file with the rows of the
+/// architecture's override file replacing the rows of the same fixture.
+pub fn baseline_text(gate: &str, name: &str) -> String {
+    let path = baseline_path(name);
+    let mut baseline = fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!(
+            "{gate} gate: the baseline {} is missing ({e}); PVEC_GATE_BLESS=1 writes it",
+            path.display()
+        )
+    });
+    if let Some(over) = arch_override_path(name).filter(|p| p.exists()) {
+        let rows = fs::read_to_string(over).unwrap();
+        let keep: Vec<&str> = baseline
+            .lines()
+            .filter(|l| !rows.lines().any(|r| first_word(r) == first_word(l)))
+            .chain(rows.lines())
+            .collect();
+        baseline = keep.join("\n") + "\n";
+    }
+    baseline
+}
+
 /// Compares `actual` with the checked-in baseline `name`, panicking with the gate named and the
 /// differing lines when they disagree.
 pub fn check(gate: &str, name: &str, actual: &str) {
@@ -107,17 +129,7 @@ pub fn check(gate: &str, name: &str, actual: &str) {
         }
         return;
     }
-    let mut baseline = base_text();
-    if let Some(over) = arch_override_path(name).filter(|p| p.exists()) {
-        let rows = fs::read_to_string(over).unwrap();
-        let keep: Vec<&str> = baseline
-            .lines()
-            .filter(|l| !rows.lines().any(|r| first_word(r) == first_word(l)))
-            .chain(rows.lines())
-            .collect();
-        baseline = keep.join("\n") + "\n";
-    }
-    let changes = diff(&baseline, actual);
+    let changes = diff(&baseline_text(gate, name), actual);
     if let Some(out) = std::env::var_os("PVEC_GATE_OUT") {
         let out = PathBuf::from(out);
         fs::create_dir_all(&out).unwrap();

@@ -15,8 +15,8 @@
 //! `compare`. Converting one fixture twice gives the same bytes, for the artifact and the report.
 //!
 //! Only public API is used: the conversion API, `open_published`, PVec's `PvecReader` and the
-//! curve types it hands back. No container offset or private module path appears here. The tolerance
-//! is `Policy::V1`'s, there is no literal epsilon.
+//! curve types it hands back. No container offset or private module path appears here. The comparison itself is
+//! `libviprs::pvec::drift` (shared with the drift check, #1475), whose tolerance is `Policy::V1`'s.
 //!
 //! Nothing runs a converter. Every artifact is written under a temporary directory that is removed
 //! when the run ends, including when it fails. Set `PVEC_GATE_OUT` to also write the determinism
@@ -35,17 +35,15 @@ use std::path::Path;
 
 use libviprs::cad::CadSource;
 use libviprs::pvec::SourceUnit;
+use libviprs::pvec::drift::{differs, live, target};
 use libviprs::pvec::publish::{open_published, report_path};
 use libviprs::pvec::report::ConversionReport;
 use libviprs::pvec::writer::WriteError;
 use libviprs::pvec_convert::{PvecConversion, PvecConvertError};
 use pvec_facade::PvecReader;
 use pvec_geometry::{Curve, Curve2d};
-use pvec_gold::{Corpus, EvidenceClass, Fixture, num, nums, points};
-use pvec_numeric::Policy;
+use pvec_gold::{Corpus, EvidenceClass, Fixture};
 use serde_json::Value;
-
-const POLICY: Policy = Policy::V1;
 
 // -------------------------------------------------------------------------------------- stages
 
@@ -182,250 +180,6 @@ fn entities(reader: &PvecReader) -> Result<Vec<Curve>, Failure> {
 // ------------------------------------------------------------------------------ the comparison
 
 type Problems = Vec<String>;
-
-fn near(a: f64, b: f64, scale: f64) -> bool {
-    POLICY.near(a, b, scale)
-}
-
-fn near_pt(a: [f64; 2], b: [f64; 2], scale: f64) -> bool {
-    POLICY.near_point(a, b, scale)
-}
-
-fn scale_of(values: &[f64]) -> f64 {
-    values.iter().fold(0.0_f64, |m, v| m.max(v.abs())).max(1.0)
-}
-
-fn end_points(c: &Curve) -> [[f64; 2]; 2] {
-    let d = c.domain();
-    let at = |u: f64| {
-        let p = c.eval(u).expect("a re-read curve evaluates");
-        [p.x, p.y]
-    };
-    [at(d.lo()), at(d.hi())]
-}
-
-/// The radii and the first axis of a conic's truth record.
-fn conic_frame(class: &str, g: &Value) -> (f64, f64, [f64; 2]) {
-    let (rx, ry, axis) = match class {
-        "circle" | "circular_arc" => (num(&g["radius"]), num(&g["radius"]), nums(&g["x_axis"])),
-        _ => (
-            num(&g["semi_major"]),
-            num(&g["semi_minor"]),
-            nums(&g["major_axis"]),
-        ),
-    };
-    let n = axis[0].hypot(axis[1]);
-    (rx, ry, [axis[0] / n, axis[1] / n])
-}
-
-/// Whether `curve` is what the truth record `class`/`g` describes. Returns the reasons it is not.
-fn differs(class: &str, g: &Value, t: &Value, curve: &Curve) -> Problems {
-    let mut out = Problems::new();
-    match class {
-        "line" => {
-            let (s, e) = (nums(&g["start"]), nums(&g["end"]));
-            let got = end_points(curve);
-            let sc = scale_of(&[s[0], s[1], e[0], e[1]]);
-            if !near_pt(got[0], [s[0], s[1]], sc) || !near_pt(got[1], [e[0], e[1]], sc) {
-                out.push(format!(
-                    "line: runs {:?} to {:?}, truth {s:?} to {e:?}",
-                    got[0], got[1]
-                ));
-            }
-        }
-        "circle" | "ellipse" => {
-            let c = nums(&g["center"]);
-            let (rx, ry, u) = conic_frame(class, g);
-            let sc = scale_of(&[c[0], c[1], rx, ry]);
-            let d = curve.domain();
-            for k in 0..8 {
-                let p = curve.eval(d.lo() + d.width() * f64::from(k) / 8.0).unwrap();
-                let (dx, dy) = (p.x - c[0], p.y - c[1]);
-                let (s, q) = (dx * u[0] + dy * u[1], -dx * u[1] + dy * u[0]);
-                if !near((s / rx).hypot(q / ry), 1.0, sc.max(1.0)) {
-                    out.push(format!(
-                        "{class}: the point ({}, {}) is off the truth",
-                        p.x, p.y
-                    ));
-                    break;
-                }
-            }
-        }
-        "circular_arc" | "elliptical_arc" => {
-            let c = nums(&g["center"]);
-            let (rx, ry, ax) = conic_frame(class, g);
-            // The y axis follows the normal, so a reflected frame is honoured.
-            let nz = g.get("normal").map_or(1.0, |n| nums(n)[2]);
-            let ay = [-nz * ax[1], nz * ax[0]];
-            let (a, sweep) = (num(&g["start_angle"]), num(&g["sweep_angle"]));
-            let at = |th: f64| {
-                [
-                    c[0] + rx * th.cos() * ax[0] + ry * th.sin() * ay[0],
-                    c[1] + rx * th.cos() * ax[1] + ry * th.sin() * ay[1],
-                ]
-            };
-            let got = end_points(curve);
-            let sc = scale_of(&[rx, ry, c[0], c[1]]);
-            if !near_pt(got[0], at(a), sc) || !near_pt(got[1], at(a + sweep), sc) {
-                out.push(format!(
-                    "{class}: runs {:?} to {:?}, truth {:?} to {:?}",
-                    got[0],
-                    got[1],
-                    at(a),
-                    at(a + sweep)
-                ));
-            }
-        }
-        "polyline" => {
-            let v = points(&g["vertices"]);
-            let closed = t["closure"]["closed_by_endpoint"]
-                .as_bool()
-                .unwrap_or(false);
-            let got = end_points(curve);
-            let (first, last) = (&v[0], if closed { &v[0] } else { &v[v.len() - 1] });
-            let sc = scale_of(&v.iter().flatten().copied().collect::<Vec<_>>());
-            if !near_pt(got[0], [first[0], first[1]], sc)
-                || !near_pt(got[1], [last[0], last[1]], sc)
-            {
-                out.push(format!(
-                    "polyline: runs {:?} to {:?}, truth {first:?} to {last:?}",
-                    got[0], got[1]
-                ));
-            }
-            if let Curve::Polyline(p) = curve {
-                let want = v.len() + usize::from(closed);
-                if p.vertices().len() != want {
-                    out.push(format!(
-                        "polyline: {} vertices, truth {want}",
-                        p.vertices().len()
-                    ));
-                }
-                for (i, (a, w)) in p.vertices().iter().zip(&v).enumerate() {
-                    if !near_pt([a.x, a.y], [w[0], w[1]], sc) {
-                        out.push(format!(
-                            "polyline: vertex {i} is ({}, {}), truth {w:?}",
-                            a.x, a.y
-                        ));
-                    }
-                }
-            }
-        }
-        "bspline" | "nurbs" | "bezier" => spline(&mut out, class, g, t, curve),
-        other => out.push(format!("no comparison for the truth class {other}")),
-    }
-    out
-}
-
-fn spline(out: &mut Problems, class: &str, g: &Value, t: &Value, curve: &Curve) {
-    let degree = g["degree"].as_u64().unwrap_or(0) as usize;
-    let want_cps = points(&g["control_points"]);
-    let (got_degree, cps, knots, weights) = match curve {
-        Curve::BSpline(s) => (
-            s.degree(),
-            s.control_points()
-                .iter()
-                .map(|p| [p.x, p.y])
-                .collect::<Vec<[f64; 2]>>(),
-            Some(s.knots().to_vec()),
-            None::<Vec<f64>>,
-        ),
-        Curve::RationalBSpline(s) => (
-            s.degree(),
-            s.control_points().iter().map(|p| [p.x, p.y]).collect(),
-            Some(s.knots().to_vec()),
-            Some(s.weights().to_vec()),
-        ),
-        Curve::Bezier(b) => (
-            b.degree(),
-            b.control_points().iter().map(|p| [p.x, p.y]).collect(),
-            None,
-            None,
-        ),
-        other => {
-            out.push(format!("{class}: came back as {:?}", other.kind()));
-            return;
-        }
-    };
-    if got_degree != degree {
-        out.push(format!("degree: re-read {got_degree}, truth {degree}"));
-    }
-    if t["closure"]["periodic"].as_bool().unwrap_or(false) {
-        // Not comparable structurally: PVec stores a clamped spline, so a periodic source comes back
-        // with its control points and knots rewritten. The weaker class it may claim is
-        // SupportedEquivalent (checked in `policy`), and what is asserted here is what survives the
-        // rewrite: the degree (above) and that the curve still closes on itself.
-        let [a, b] = end_points(curve);
-        let sc = scale_of(&[a[0], a[1], b[0], b[1]]);
-        if !near_pt(a, b, sc) {
-            out.push(format!(
-                "closed state: a periodic source's curve runs {a:?} to {b:?}"
-            ));
-        }
-        return;
-    }
-    if cps.len() != want_cps.len() {
-        out.push(format!(
-            "control points: re-read {}, truth {}",
-            cps.len(),
-            want_cps.len()
-        ));
-    } else {
-        for (i, (a, w)) in cps.iter().zip(&want_cps).enumerate() {
-            if a[0] != w[0] || a[1] != w[1] {
-                out.push(format!(
-                    "control point {i}: re-read ({}, {}), truth ({}, {})",
-                    a[0], a[1], w[0], w[1]
-                ));
-            }
-        }
-    }
-    if let (Some(got), Some(list)) = (&knots, g.get("knots").and_then(Value::as_array)) {
-        let want: Vec<f64> = list
-            .iter()
-            .flat_map(|k| {
-                let m = k["multiplicity"].as_u64().unwrap_or(1) as usize;
-                std::iter::repeat_n(num(&k["value"]), m)
-            })
-            .collect();
-        if *got != want {
-            out.push(format!(
-                "knots: re-read {got:?}, truth (with multiplicities) {want:?}"
-            ));
-        }
-    }
-    // A non-rational spline has no weight array at all, not a row of ones.
-    match (&weights, g.get("weights")) {
-        (None, None) => {}
-        (Some(w), Some(want)) if *w == nums(want) => {}
-        (Some(w), Some(want)) => out.push(format!("weights: re-read {w:?}, truth {want}")),
-        (None, Some(_)) => out.push("weights: the truth has weights and the artifact none".into()),
-        (Some(_), None) => out.push("weights: a weight array on a non-rational spline".into()),
-    }
-}
-
-/// The geometry a truth entity says the artifact holds: the world result when the entity is
-/// instanced under a transform, the curve itself otherwise.
-fn target(t: &Value) -> (&str, &Value) {
-    match t.get("world") {
-        Some(w) => (w["class"].as_str().unwrap_or("?"), &w["geometry"]),
-        None => (t["class"].as_str().unwrap_or("?"), &t["geometry"]),
-    }
-}
-
-/// The truth entities the artifact is expected to hold: not an equivalent form of another, and not
-/// on a layer that is off or frozen (the view profile excludes those, and says so in the report).
-fn live(truth: &Value) -> Vec<&Value> {
-    truth["entities"]
-        .as_array()
-        .expect("a truth record lists entities")
-        .iter()
-        .filter(|e| !e["id"].as_str().is_some_and(|i| i.contains("-equivalent-")))
-        .filter(|e| {
-            let l = &e["layer"];
-            l["on"].as_bool().unwrap_or(true) && !l["frozen"].as_bool().unwrap_or(false)
-        })
-        .collect()
-}
 
 /// What the report must say about a known-truth fixture: an entity the view profile drops is counted
 /// as ignored by policy (and is absent from the artifact, which the entity count checks), and a

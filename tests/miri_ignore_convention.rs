@@ -480,7 +480,7 @@ const EXPECTED_SRC_MODULES: usize = 31;
 /// #1368 adds 1: `tests/dependency_policy.rs::exactly_one_tiff_resolves_in_every_cell` (from #1367), which runs `cargo tree`. It said 50 before this line moved.
 /// #1363 adds 1: `tests/dependency_policy.rs::hayro_ccitt_is_in_every_cell_and_is_plain_rust`, which runs `cargo tree`. It said 53 before this line moved.
 /// #1364 adds 1: `tests/dependency_policy.rs::the_jp2k_cell_adds_only_its_two_codec_crates`, which runs `cargo tree`. It said 54 before this line moved.
-const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 56;
+const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 57;
 
 /// The filesystem-touching tests still allowed to run under Miri, and so still
 /// allowed to end the whole run on their first syscall.
@@ -828,7 +828,7 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1038 adds 5: the two `tests/vector_1038_entity_matrix.rs` cells and the three `tests/vector_1038_release_gate.rs` cells, which read the matrix, the gate record and the g13 drawings. It said 841 before this line moved. #1430 adds 2: the two `tests/pvec_1430_convert_spline.rs` cells.
 /// #1314 adds 8: the `tests/pvec_1314_spool.rs` cells that spill, stream and cancel through a temp dir. It said 891 before this line moved.
 /// #1417 adds 4: the `tests/pvec_1417_convert_spool.rs` cells that convert into a temp dir through a spill root. It said 899 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 913;
+const EXPECTED_FS_TOUCHING_TESTS: usize = 924;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
