@@ -183,7 +183,7 @@ fn measure(id: &str) -> Measured {
             &d_curves,
             page.rotation_degrees,
         );
-        for (k, d, p) in r {
+        for (k, (d, p)) in r {
             m.insert(k, (d, p));
         }
     }
@@ -205,11 +205,11 @@ mod raster_axis {
     use pvec_geometry::{Curve, Curve2d};
 
     /// DPI of the pdfium render, recorded in every `expected_loss.toml` under `[raster]`.
-    pub const DPI: u32 = 96;
+    pub const DPI: u32 = 288;
     /// A pixel is ink when its darkest colour channel is below this.
     pub const INK_BELOW: u8 = 128;
     /// A pixel counts as covered by the other side when ink lies within this many pixels.
-    pub const TOLERANCE_PX: i64 = 3;
+    pub const TOLERANCE_PX: i64 = 2;
     const SAMPLES: usize = 2048;
 
     struct Ink {
@@ -379,7 +379,7 @@ fn load_loss(id: &str) -> Loss {
         .unwrap_or_else(|e| panic!("{id}: expected_loss.toml is required: {e}"));
     let doc: toml::Table = text.parse().unwrap();
     let evidence = doc["evidence"].as_str().unwrap().to_string();
-    let entries = doc
+    let entries: Vec<(String, String, String, String)> = doc
         .get("loss")
         .and_then(|l| l.as_array())
         .map(|a| {
@@ -439,6 +439,7 @@ fn check(measured: &Measured, loss: &Loss) -> Vec<String> {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn every_pair_measures_exactly_its_recorded_loss() {
+    let mut failed = Vec::new();
     for id in FIXTURES {
         let measured = measure(id);
         if std::env::var_os("PDF_LOSS_PRINT").is_some() {
@@ -448,10 +449,12 @@ fn every_pair_measures_exactly_its_recorded_loss() {
                 }
             }
         }
-        let loss = load_loss(id);
-        let failures = check(&measured, &loss);
-        assert!(failures.is_empty(), "{id}: {failures:#?}");
+        let failures = check(&measured, &load_loss(id));
+        if !failures.is_empty() {
+            failed.push(format!("{id}: {failures:#?}"));
+        }
     }
+    assert!(failed.is_empty(), "{failed:#?}");
 }
 
 #[test]
@@ -560,4 +563,98 @@ fn the_page_names_the_exporter_and_every_pair() {
     ] {
         assert!(doc.contains(needle), "the page lost {needle}");
     }
+}
+
+#[cfg(feature = "pdfium")]
+fn raster_header(id: &str) -> toml::Table {
+    let text = std::fs::read_to_string(dir(id).join("expected_loss.toml")).unwrap();
+    let doc: toml::Table = text.parse().unwrap();
+    doc.get("raster")
+        .and_then(|r| r.as_table())
+        .unwrap_or_else(|| panic!("{id}: expected_loss.toml needs a [raster] table"))
+        .clone()
+}
+
+#[test]
+#[cfg(feature = "pdfium")]
+#[cfg_attr(miri, ignore)]
+fn the_raster_axis_names_its_dpi_threshold_and_the_platforms_it_was_measured_on() {
+    let platform = match std::env::consts::ARCH {
+        "x86_64" => "linux/amd64",
+        "aarch64" => "linux/arm64",
+        other => other,
+    };
+    for id in FIXTURES {
+        let r = raster_header(id);
+        assert_eq!(
+            r["dpi"].as_integer(),
+            Some(i64::from(raster_axis::DPI)),
+            "{id}"
+        );
+        assert_eq!(
+            r["ink_below"].as_integer(),
+            Some(i64::from(raster_axis::INK_BELOW)),
+            "{id}"
+        );
+        assert_eq!(
+            r["tolerance_px"].as_integer(),
+            Some(raster_axis::TOLERANCE_PX),
+            "{id}"
+        );
+        let platforms: Vec<&str> = r["platforms"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{id}: platforms"))
+            .iter()
+            .filter_map(|p| p.as_str())
+            .collect();
+        for want in ["linux/amd64", "linux/arm64"] {
+            assert!(platforms.contains(&want), "{id}: not measured on {want}");
+        }
+        if cfg!(target_os = "linux") {
+            assert!(platforms.contains(&platform), "{id}: {platform}");
+        }
+    }
+}
+
+#[test]
+#[cfg(feature = "pdfium")]
+#[cfg_attr(miri, ignore)]
+fn every_pair_has_a_raster_loss_entry_with_a_written_reason() {
+    for id in FIXTURES {
+        let loss = load_loss(id);
+        let raster: Vec<_> = loss
+            .entries
+            .iter()
+            .filter(|e| e.0.starts_with("raster."))
+            .collect();
+        assert!(!raster.is_empty(), "{id}: no raster entry");
+        assert!(raster.iter().all(|e| !e.3.trim().is_empty()), "{id}");
+    }
+}
+
+#[test]
+#[cfg(feature = "pdfium")]
+#[cfg_attr(miri, ignore)]
+fn an_injected_raster_difference_fails_the_run() {
+    let id = "line-001";
+    let mut measured = measure(id);
+    let loss = load_loss(id);
+    assert!(check(&measured, &loss).is_empty());
+    measured.get_mut("raster.ink_aspect").unwrap().1 = "9.99".into();
+    assert!(!check(&measured, &loss).is_empty());
+}
+
+#[test]
+#[cfg(feature = "pdfium")]
+#[cfg_attr(miri, ignore)]
+fn pdfium_paints_the_rotated_pair_turned_a_quarter() {
+    let plain: f64 = measure("polyline-001")["raster.ink_aspect"]
+        .1
+        .parse()
+        .unwrap();
+    let turned: f64 = measure("polyline-001-rot90")["raster.ink_aspect"]
+        .1
+        .parse()
+        .unwrap();
+    assert!((plain * turned - 1.0).abs() < 0.05, "{plain} and {turned}");
 }
