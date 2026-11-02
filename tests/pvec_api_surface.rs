@@ -357,12 +357,14 @@ fn only_the_semantic_crates_are_named_today() {
     );
 }
 
-/// The PVec facade (`pvec_facade`, the renamed `pvec` crate) is named by four files. The geometry
+/// The PVec facade (`pvec_facade`, the renamed `pvec` crate) is named by five files. The geometry
 /// funnel `src/pvec/writer.rs` (issue #1314) is the one writer for entities, and
 /// `src/pvec/publish.rs` reads an artifact back before it is published and opens published ones.
 /// The raster stream predates the funnel and keeps its two files: `src/raster_pvec/container.rs`
 /// (the whole-pyramid hand-off, issue #1328) and `src/sink_pvec.rs` (issue #1331), which holds the
 /// writer while the engine streams tiles into it and so cannot go through a function in the first.
+/// `src/pvec/drift.rs` (#1475) only reads: it opens an artifact from bytes, which `publish.rs` does
+/// not offer, and writes nothing (the writer-call fence below covers that).
 #[test]
 #[cfg_attr(miri, ignore)]
 fn the_facade_is_named_by_the_funnel_and_the_raster_files_only() {
@@ -374,6 +376,7 @@ fn the_facade_is_named_by_the_funnel_and_the_raster_files_only() {
         }
     }
     let want: std::collections::BTreeSet<PathBuf> = [
+        PathBuf::from("src/pvec/drift.rs"),
         PathBuf::from("src/pvec/publish.rs"),
         PathBuf::from("src/pvec/writer.rs"),
         PathBuf::from("src/raster_pvec/container.rs"),

@@ -74,6 +74,9 @@ which writes the base files, and then on arm64, which writes only the rows that 
 PVEC_GATE_BLESS=1 cargo test --features pvec-convert --test pvec_drift -- n_1471_the_digest_of_every
 ```
 
+The suite runs in the mathematical-fidelity gate (`pvec-gate-fidelity` in `ci.yml`), next to the known-truth
+suites it shares its comparison with.
+
 ## What it catches and what it cannot
 
 It catches any change to the stored geometry, the unit or the bounds of a fixture that converts, and

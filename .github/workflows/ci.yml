@@ -472,9 +472,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # The known-truth, structural and geometric suites (N2.1, N2.4, N2.5). A structural parameter, or a comparison governed by the shared numeric policy, regressing turns this red. Artifact: the conformance report.
+      # The known-truth, structural and geometric suites (N2.1, N2.4, N2.5), and the drift check that reads each converted artifact back and names the entity that moved (#1475). A structural parameter, or a comparison governed by the shared numeric policy, regressing turns this red. Artifact: the conformance report.
       - run: mkdir -p "$PVEC_GATE_OUT"
-      - run: cargo test --features pvec-convert --test pvec_known_truth --test pvec_structural --test pvec_geometric 2>&1 | tee "$PVEC_GATE_OUT/conformance-report.txt"
+      - run: cargo test --features pvec-convert --test pvec_known_truth --test pvec_structural --test pvec_geometric --test pvec_drift 2>&1 | tee "$PVEC_GATE_OUT/conformance-report.txt"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

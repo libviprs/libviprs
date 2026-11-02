@@ -21,7 +21,12 @@ const GATES: &[Gate] = &[
     Gate {
         job: "pvec-gate-fidelity",
         name: "PVec gate: mathematical fidelity",
-        suites: &["pvec_known_truth", "pvec_structural", "pvec_geometric"],
+        suites: &[
+            "pvec_known_truth",
+            "pvec_structural",
+            "pvec_geometric",
+            "pvec_drift",
+        ],
         out: "fidelity",
     },
     Gate {
