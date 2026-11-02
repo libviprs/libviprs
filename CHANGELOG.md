@@ -14,6 +14,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whole raster was gigabytes passed. They now check `width * height * 4` and, under `AutoAdjustDpi`, lower the DPI
   until the raster fits. `StripSource` gains `resident_bytes()` (default `0`), and `EngineBuilder::run` returns
   `BudgetExceeded` under `BudgetPolicy::Error` when a source's resident bytes alone are over `with_memory_budget`.
+- **One unstorable curve no longer fails a whole drawing** (issue #1446). PVec's writer refuses a curve its
+  container cannot store exactly and deterministically (`WRT-08`, for example an arc on a rotated frame),
+  and `convert` used to return `Write(..)` for the entire drawing. The writer funnel now skips that curve,
+  writes the rest under dense ids with a drawing box that matches what was written, and returns the
+  refused ids in `GeometryArtifact::refused`. The report moves each one from its supported class to
+  `RequiresPVecCapability` with the new reason code `pvec-cannot-store`, and the tally is sealed after the
+  write so the counts still add up. `probe` cannot predict this (the rule is PVec's and is not copied),
+  so a probe can count as supported what the conversion then refuses.
 
 ### Changed
 
