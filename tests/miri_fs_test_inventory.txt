@@ -642,6 +642,13 @@ annotated   fs-detected  tests/pvec_dwg_pdf_differential.rs::every_pair_measures
 annotated   fs-detected  tests/pvec_dwg_pdf_differential.rs::the_pairs_are_real_world_differential_and_nothing_labels_them_known_truth
 annotated   fs-detected  tests/pvec_dwg_pdf_differential.rs::the_rotated_pair_swaps_the_pdf_extent_and_a_rotation_blind_comparison_would_fail
 annotated   fs-detected  tests/pvec_dwg_spline_structural.rs::no_code_path_turns_a_spline_into_polylines_or_arcs
+annotated   fs-detected  tests/pvec_end_to_end.rs::n2_3_1050_a_perturbed_expectation_fails_at_the_compare_stage_naming_the_property
+annotated   fs-detected  tests/pvec_end_to_end.rs::n2_3_1050_a_refusal_the_truth_expects_is_met_and_no_curve_comes_out
+annotated   not-detected tests/pvec_end_to_end.rs::n2_3_1050_an_ordering_perturbation_turns_the_determinism_check_red
+annotated   fs-detected  tests/pvec_end_to_end.rs::n2_3_1050_each_stage_is_named_when_it_is_the_one_that_fails
+annotated   fs-detected  tests/pvec_end_to_end.rs::n2_3_1050_every_accepted_fixture_is_converted_re_read_and_compared
+annotated   fs-detected  tests/pvec_end_to_end.rs::n2_3_1050_the_comparison_runs_on_the_re_read_artifact_not_on_the_normalization
+annotated   fs-detected  tests/pvec_end_to_end.rs::n2_3_1050_two_conversions_of_one_fixture_are_byte_identical
 annotated   fs-detected  tests/pvec_fidelity_1100.rs::there_is_one_enum_for_the_six_classes
 annotated   fs-detected  tests/pvec_generation_bench.rs::generation_bench
 annotated   fs-detected  tests/pvec_integration_contract.rs::a_baseline_that_moved_or_vanished_fails
