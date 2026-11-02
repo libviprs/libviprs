@@ -71,7 +71,7 @@ pub enum EngineError {
     /// previously-written tiles.
     #[error("Verify mode requires an on-disk sink or EngineConfig::checkpoint_root")]
     VerifyRequiresOnDiskSink,
-    #[error("budget exceeded: worst-case strip {strip_bytes} bytes > budget {budget_bytes} bytes")]
+    #[error("budget exceeded: worst-case allocation {strip_bytes} bytes (a strip, or what a source holds resident) > budget {budget_bytes} bytes")]
     BudgetExceeded { strip_bytes: u64, budget_bytes: u64 },
     /// The [`EngineKind`](crate::EngineKind) requested through
     /// [`EngineBuilder::with_engine`](crate::EngineBuilder::with_engine) is

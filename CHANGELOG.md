@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A memory budget now covers the cached `PdfiumStripSource`** (issue #1466). `.budget(..)` and
+  `new_with_budget` on a cached source (the default of `new()`) checked only the worst-case strip, so a page whose
+  whole raster was gigabytes passed. They now check `width * height * 4` and, under `AutoAdjustDpi`, lower the DPI
+  until the raster fits. `StripSource` gains `resident_bytes()` (default `0`), and `EngineBuilder::run` returns
+  `BudgetExceeded` under `BudgetPolicy::Error` when a source's resident bytes alone are over `with_memory_budget`.
+
 ### Changed
 
 - **One `tiff` in the graph** (issue #1367). The direct `tiff` pin moves from 0.10.3 to 0.11.3 so it
