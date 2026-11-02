@@ -126,9 +126,10 @@ fn write_synced(path: &Path, bytes: &[u8]) -> io::Result<File> {
     Ok(f)
 }
 
-/// Publish the artifact `produce` writes at `dest` and `report` at [`report_path`]`(dest)`, both or
-/// neither. `produce` is handed the `.pvec.partial` file to write the artifact into, so the artifact never
-/// has to exist in memory; it is synced, then read back and opened with PVec's reader (a truncated file or
+/// Publish the artifact `produce` writes at `dest`, and the report it returns at [`report_path`]`(dest)`,
+/// both or neither. `produce` is handed the `.pvec.partial` file to write the artifact into, so the artifact
+/// never has to exist in memory, and returns the report bytes once it knows them (the report counts what went
+/// into the artifact). The file is synced, then read back and opened with PVec's reader (a truncated file or
 /// one whose digest does not verify is refused before anything is committed), and then the pair is renamed
 /// into place.
 ///
@@ -141,10 +142,9 @@ fn write_synced(path: &Path, bytes: &[u8]) -> io::Result<File> {
 /// [`StreamedPublishError::Produce`] with the producer's error, or [`StreamedPublishError::Publish`].
 pub fn publish_streamed<E: std::error::Error + 'static>(
     dest: &Path,
-    report: &[u8],
     cancel: &CancelToken,
     at: &mut dyn FnMut(Stage),
-    produce: impl FnOnce(&mut dyn Write) -> Result<(), E>,
+    produce: impl FnOnce(&mut dyn Write) -> Result<Vec<u8>, E>,
 ) -> Result<(), StreamedPublishError<E>> {
     use StreamedPublishError::{Produce, Publish};
     let report_dest = report_path(dest);
@@ -166,7 +166,7 @@ pub fn publish_streamed<E: std::error::Error + 'static>(
     step(Stage::ArtifactWriting).map_err(Publish)?;
     let mut artifact_file =
         File::create(&artifact_partial).map_err(|e| Publish(PublishError::Io(e)))?;
-    produce(&mut artifact_file).map_err(Produce)?;
+    let report = produce(&mut artifact_file).map_err(Produce)?;
     step(Stage::ArtifactSyncing).map_err(Publish)?;
     artifact_file
         .sync_all()
@@ -178,7 +178,7 @@ pub fn publish_streamed<E: std::error::Error + 'static>(
 
     step(Stage::ReportWriting).map_err(Publish)?;
     let report_file =
-        write_synced(&report_partial, report).map_err(|e| Publish(PublishError::Io(e)))?;
+        write_synced(&report_partial, &report).map_err(|e| Publish(PublishError::Io(e)))?;
     step(Stage::ReportSyncing).map_err(Publish)?;
     report_file
         .sync_all()
@@ -211,7 +211,11 @@ pub fn publish(
     cancel: &CancelToken,
     at: &mut dyn FnMut(Stage),
 ) -> Result<(), PublishError> {
-    publish_streamed(dest, report, cancel, at, |out| out.write_all(artifact)).map_err(|e| match e {
+    publish_streamed(dest, cancel, at, |out| {
+        out.write_all(artifact)?;
+        Ok(report.to_vec())
+    })
+    .map_err(|e| match e {
         StreamedPublishError::Publish(p) => p,
         StreamedPublishError::Produce(io) => PublishError::Io(io),
     })

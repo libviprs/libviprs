@@ -784,6 +784,10 @@ name = "pvec_1416_diagnostics"
 required-features = ["pvec-convert"]
 
 [[test]]
+name = "pvec_1417_convert_spool"
+required-features = ["pvec-convert"]
+
+[[test]]
 name = "pvec_1417_progress"
 required-features = ["pvec-convert"]
 
