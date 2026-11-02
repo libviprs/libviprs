@@ -11,7 +11,10 @@
 //! [`GeometryArtifact::skipped`] and not written. The others get PVec's file-local ids **dense from
 //! zero, in the order given** (Tier 0 needs ids `0..n` with no gaps), and
 //! [`GeometryArtifact::source_ids`] is the way back: element `i` is the libviprs id of PVec entity
-//! `i`. Component streams refer to entities by PVec's id, so they are built through it. The drawing unit must be one PVec can declare, and the drawing box that the manifest
+//! `i`. A curve PVec's container refuses (`WRT-08`, one it cannot store exactly and
+//! deterministically) is not written and takes no id: it comes back in
+//! [`GeometryArtifact::refused`] with the rule, and the drawing box is that of what was written.
+//! Component streams refer to entities by PVec's id, so they are built through it. The drawing unit must be one PVec can declare, and the drawing box that the manifest
 //! needs is the union of the entity boxes PVec itself reports ([`bounds_inputs`]).
 //!
 //! Everything about layout is PVec's. With a [`LeafConfig`] the funnel asks `PvecWriter::new_indexed`
@@ -53,6 +56,9 @@ use super::ordering::EntityId;
 use super::units::SourceUnit;
 use crate::cancel::CancelToken;
 
+/// The writer rule for a curve PVec's container cannot store exactly and deterministically.
+const REFUSED_UNSTORABLE: &str = "WRT-08";
+
 /// How often the write looks at the cancel token, in entities.
 const CANCEL_EVERY: usize = 1024;
 
@@ -88,6 +94,10 @@ pub struct GeometryArtifact {
     pub skipped: u64,
     /// The libviprs id of each written entity; the index is the entity's PVec id.
     pub source_ids: Vec<EntityId>,
+    /// Entities PVec's writer refused (a curve its container cannot store exactly and
+    /// deterministically), each with the writer rule that refused it. They are not written and
+    /// take no PVec id.
+    pub refused: Vec<(EntityId, String)>,
 }
 
 /// Why a write failed.
@@ -132,6 +142,7 @@ struct Prepared {
     written: u64,
     skipped: u64,
     source_ids: Vec<EntityId>,
+    refused: Vec<(EntityId, String)>,
 }
 
 /// Maps `items` onto PVec ids, builds the manifest from PVec's own boxes, and pushes everything into a
@@ -145,62 +156,92 @@ fn prepare<'a>(
 ) -> Result<Prepared, WriteError> {
     let metres_per_unit = metres_per_unit(config.unit)?;
     let mut skipped = 0u64;
-    let mut curves = Vec::new();
-    let mut source_ids = Vec::new();
+    let mut kept = Vec::new();
     for (id, geometry) in items {
         match geometry.geometry() {
-            Some(curve) => {
-                let next = curves.len() as u64;
-                let pvec_id = u32::try_from(next)
-                    .ok()
-                    .and_then(|n| PvecEntityId::new(n).ok())
-                    .ok_or(WriteError::Bounds(BoundsError::IdOutOfRange(next)))?;
-                curves.push((pvec_id, curve));
-                source_ids.push(id);
-            }
+            Some(curve) => kept.push((id, curve)),
             None => skipped += 1,
         }
     }
-    let bounds = bounds_inputs(curves.iter().copied()).map_err(WriteError::Bounds)?;
-    let drawing = bounds.drawing_bounds().ok_or(WriteError::NoGeometry)?;
-    let manifest = Manifest {
-        metres_per_unit,
-        bounds: Bounds2 {
-            min: [drawing.min().x, drawing.min().y],
-            max: [drawing.max().x, drawing.max().y],
-        },
-        capabilities: Vec::new(),
-        producer_id: "libviprs".to_owned(),
-        producer_version: env!("CARGO_PKG_VERSION").to_owned(),
-    };
-    let mut writer = match config.leaves {
-        Some(l) => PvecWriter::new_indexed(manifest, l.cell_capacity, l.tier0_max_error),
-        None => PvecWriter::new(manifest),
-    }
-    .map_err(WriteError::Pvec)?;
-    if let Some(s) = spill {
-        writer = writer
-            .with_spill(&s.root, s.budget)
-            .map_err(WriteError::Pvec)?;
-    }
-    for (n, (id, curve)) in curves.iter().enumerate() {
-        if n % CANCEL_EVERY == 0 && cancel.is_cancelled() {
-            return Err(WriteError::Cancelled);
+    let mut refused = Vec::new();
+    // A curve PVec refuses is dropped and the rest are written again, so the manifest box is the
+    // union of what is in the file and the ids stay dense. The common run is one pass, and a
+    // second one only follows a refusal, which the first pass names.
+    let (mut writer, bounds, written) = loop {
+        let curves = kept
+            .iter()
+            .enumerate()
+            .map(|(n, (_, curve))| {
+                let n = n as u64;
+                u32::try_from(n)
+                    .ok()
+                    .and_then(|n| PvecEntityId::new(n).ok())
+                    .map(|id| (id, *curve))
+                    .ok_or(WriteError::Bounds(BoundsError::IdOutOfRange(n)))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let bounds = bounds_inputs(curves.iter().copied()).map_err(WriteError::Bounds)?;
+        let drawing = bounds.drawing_bounds().ok_or(WriteError::NoGeometry)?;
+        let manifest = Manifest {
+            metres_per_unit,
+            bounds: Bounds2 {
+                min: [drawing.min().x, drawing.min().y],
+                max: [drawing.max().x, drawing.max().y],
+            },
+            capabilities: Vec::new(),
+            producer_id: "libviprs".to_owned(),
+            producer_version: env!("CARGO_PKG_VERSION").to_owned(),
+        };
+        let mut writer = match config.leaves {
+            Some(l) => PvecWriter::new_indexed(manifest, l.cell_capacity, l.tier0_max_error),
+            None => PvecWriter::new(manifest),
         }
-        writer.push(*id, curve).map_err(WriteError::Pvec)?;
-    }
+        .map_err(WriteError::Pvec)?;
+        if let Some(s) = spill {
+            writer = writer
+                .with_spill(&s.root, s.budget)
+                .map_err(WriteError::Pvec)?;
+        }
+        // Positions in `kept` of the curves this pass could not write. Later curves are pushed
+        // under the id they would have if the refused ones were already gone.
+        let mut refused_here = Vec::new();
+        let mut next = 0u32;
+        for (n, (_, curve)) in curves.iter().enumerate() {
+            if n % CANCEL_EVERY == 0 && cancel.is_cancelled() {
+                return Err(WriteError::Cancelled);
+            }
+            let dense = PvecEntityId::new(next)
+                .map_err(|_| WriteError::Bounds(BoundsError::IdOutOfRange(u64::from(next))))?;
+            match writer.push(dense, curve) {
+                Ok(()) => next += 1,
+                Err(PvecError::Write { rule }) if rule == REFUSED_UNSTORABLE => {
+                    refused_here.push((n, rule));
+                }
+                Err(e) => return Err(WriteError::Pvec(e)),
+            }
+        }
+        if !refused_here.is_empty() {
+            for (n, rule) in refused_here.into_iter().rev() {
+                refused.push((kept.remove(n).0, rule));
+            }
+            continue;
+        }
+        break (writer, bounds, curves.len() as u64);
+    };
     for stream in streams {
         writer.components(stream).map_err(WriteError::Pvec)?;
     }
     if cancel.is_cancelled() {
         return Err(WriteError::Cancelled);
     }
+    refused.sort_by_key(|(id, _)| *id);
     Ok(Prepared {
         writer,
         bounds,
-        written: curves.len() as u64,
+        written,
         skipped,
-        source_ids,
+        source_ids: kept.iter().map(|(id, _)| *id).collect(),
+        refused,
     })
 }
 
@@ -227,6 +268,7 @@ pub fn write_geometry<'a>(
         written: p.written,
         skipped: p.skipped,
         source_ids: p.source_ids,
+        refused: p.refused,
     })
 }
 
@@ -252,6 +294,8 @@ pub struct StreamedArtifact {
     pub skipped: u64,
     /// The libviprs id of each written entity.
     pub source_ids: Vec<EntityId>,
+    /// Entities PVec's writer refused, with the rule, as for [`GeometryArtifact::refused`].
+    pub refused: Vec<(EntityId, String)>,
 }
 
 /// A sink that stops writing once the cancel token has fired, so a flush ends at the next write.
@@ -315,5 +359,6 @@ pub fn write_geometry_to<'a>(
         written: p.written,
         skipped: p.skipped,
         source_ids: p.source_ids,
+        refused: p.refused,
     })
 }

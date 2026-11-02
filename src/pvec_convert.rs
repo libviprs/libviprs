@@ -319,7 +319,9 @@ impl<'a> PvecConversion<'a> {
     }
 
     /// Classifies the drawing without writing anything and returns the per-class counts a
-    /// [`convert`](Self::convert) would report. Under [`CapabilityPolicy::RejectInput`] it fails
+    /// [`convert`](Self::convert) would report, before PVec's writer has seen anything: an entity
+    /// counted as supported here can still come back as `pvec-cannot-store` from the conversion,
+    /// because the rule is PVec's and is not copied. Under [`CapabilityPolicy::RejectInput`] it fails
     /// the way the conversion would.
     ///
     /// # Errors
@@ -327,7 +329,10 @@ impl<'a> PvecConversion<'a> {
     /// As [`convert`](Self::convert), except that no unit is needed and nothing is written.
     pub fn probe(self) -> Result<FidelityReport, PvecConvertError> {
         let provider = AcadrustProvider::open(self.source).map_err(PvecConvertError::Open)?;
-        Ok(self.classify(&provider)?.fidelity)
+        let c = self.classify(&provider)?;
+        c.tally
+            .finish(c.encountered)
+            .map_err(PvecConvertError::Tally)
     }
 
     /// As [`probe`](Self::probe), with provider `P`.
@@ -337,7 +342,10 @@ impl<'a> PvecConversion<'a> {
     /// As [`probe`](Self::probe).
     pub fn probe_with<P: DwgProvider>(self) -> Result<FidelityReport, PvecConvertError> {
         let provider = P::open(self.source).map_err(PvecConvertError::Open)?;
-        Ok(self.classify(&provider)?.fidelity)
+        let c = self.classify(&provider)?;
+        c.tally
+            .finish(c.encountered)
+            .map_err(PvecConvertError::Tally)
     }
 
     /// Converts with the default provider, acadrust. The unit is the header's unless
@@ -531,10 +539,6 @@ impl<'a> PvecConversion<'a> {
             let consumed = consumer.join().expect("the consumer thread does not panic");
             failure.map_or(Ok(consumed), Err)
         })?;
-        let fidelity = consumed
-            .tally
-            .finish(encountered)
-            .map_err(PvecConvertError::Tally)?;
         let xrefs = XrefSummary {
             unresolved: flat
                 .skipped
@@ -551,8 +555,9 @@ impl<'a> PvecConversion<'a> {
         };
         Ok(Classified {
             geometries: consumed.geometries,
+            stored: consumed.stored,
             rows: consumed.rows,
-            fidelity,
+            tally: consumed.tally,
             encountered,
             view: ViewSummary::from_report(&view.report),
             xrefs,
@@ -570,8 +575,9 @@ impl<'a> PvecConversion<'a> {
         georef::check_finite(&self.control_points).map_err(PvecConvertError::Georeference)?;
         let Classified {
             geometries,
-            rows,
-            fidelity,
+            stored,
+            mut rows,
+            mut tally,
             encountered,
             view,
             xrefs,
@@ -605,54 +611,71 @@ impl<'a> PvecConversion<'a> {
         };
         // What both paths do once the artifact is written: tell the observer, close the report against
         // what went in, and stage the georeference sidecar. It runs once, so it takes the rows.
-        let seal = |bounds: &BoundsReport,
-                    written: u64,
-                    length: u64|
-         -> Result<(ConversionReport, String), PvecConvertError> {
-            tell(EngineEvent::ConversionArtifactWritten {
-                entities: written,
-                bytes: length,
-            });
-            let mut report = rows
-                .finish(
-                    encountered,
-                    view,
-                    xrefs,
-                    BoundsSplit {
-                        exact: bounds.exact_count() as u64,
-                        hull_upper_bound: bounds.hull_count() as u64,
-                    },
-                )
-                .map_err(PvecConvertError::Report)?;
-            report.capabilities = Some(gate.summary());
-            report.diagnostics = diagnostics;
-            report.georeference = sidecar
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned());
-            let json = report.to_json_string().map_err(PvecConvertError::Report)?;
-            GeoreferenceHandoff::V1(HandoffV1 {
-                bounds: bounds.drawing_bounds().map(|b| SourceBox {
-                    min: [b.min().x, b.min().y],
-                    max: [b.max().x, b.max().y],
-                }),
-                unit: UnitRecord::new(declared, unit),
-                calibration_id: calibration,
-                control_points,
-            })
-            .write_to(&staged)
-            .map_err(PvecConvertError::Georeference)?;
-            Ok((report, json))
-        };
+        // The tally is sealed here and not at classification: an entity the classifier called
+        // supported can still be one PVec's container refuses, and it is counted as that.
+        let seal =
+            |bounds: &BoundsReport,
+             written: u64,
+             length: u64,
+             refused: &[(EntityId, String)]|
+             -> Result<(ConversionReport, FidelityReport, String), PvecConvertError> {
+                for (id, rule) in refused {
+                    let from = &stored
+                        .iter()
+                        .find(|(s, _)| s == id)
+                        .expect("a refused entity was written from a stored classification")
+                        .1;
+                    let to =
+                        Classification::refused(ReasonCode::PvecCannotStore, from.source_class());
+                    tally.reclassify(from, &to);
+                    rows.refuse(*id, &to, format!("PVec's writer refused it ({rule})"));
+                }
+                let fidelity = tally.finish(encountered).map_err(PvecConvertError::Tally)?;
+                tell(EngineEvent::ConversionArtifactWritten {
+                    entities: written,
+                    bytes: length,
+                });
+                let mut report = rows
+                    .finish(
+                        encountered,
+                        view,
+                        xrefs,
+                        BoundsSplit {
+                            exact: bounds.exact_count() as u64,
+                            hull_upper_bound: bounds.hull_count() as u64,
+                        },
+                    )
+                    .map_err(PvecConvertError::Report)?;
+                report.capabilities = Some(gate.summary());
+                report.diagnostics = diagnostics;
+                report.georeference = sidecar
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned());
+                let json = report.to_json_string().map_err(PvecConvertError::Report)?;
+                GeoreferenceHandoff::V1(HandoffV1 {
+                    bounds: bounds.drawing_bounds().map(|b| SourceBox {
+                        min: [b.min().x, b.min().y],
+                        max: [b.max().x, b.max().y],
+                    }),
+                    unit: UnitRecord::new(declared, unit),
+                    calibration_id: calibration,
+                    control_points,
+                })
+                .write_to(&staged)
+                .map_err(PvecConvertError::Georeference)?;
+                Ok((report, fidelity, json))
+            };
         let config = WriteConfig { unit, leaves };
         let items = || geometries.iter().map(|(id, g)| (*id, g));
         let published = match &spill {
             None => write_geometry(&config, items(), Vec::new(), &cancel)
                 .map_err(write_error)
                 .and_then(|artifact| {
-                    let (report, json) = seal(
+                    let (report, fidelity, json) = seal(
                         &artifact.bounds,
                         artifact.written,
                         artifact.bytes.len() as u64,
+                        &artifact.refused,
                     )?;
                     publish(dest, &artifact.bytes, json.as_bytes(), &cancel, &mut |_| {}).map_err(
                         |e| match e {
@@ -660,7 +683,7 @@ impl<'a> PvecConversion<'a> {
                             other => PvecConvertError::Publish(other),
                         },
                     )?;
-                    Ok((report, artifact.written))
+                    Ok((report, fidelity, artifact.written))
                 }),
             Some(spill) => {
                 let mut sealed = None;
@@ -668,8 +691,13 @@ impl<'a> PvecConversion<'a> {
                     let artifact =
                         write_geometry_to(&config, items(), Vec::new(), spill, &cancel, out)
                             .map_err(write_error)?;
-                    let (report, json) = seal(&artifact.bounds, artifact.written, artifact.length)?;
-                    sealed = Some((report, artifact.written));
+                    let (report, fidelity, json) = seal(
+                        &artifact.bounds,
+                        artifact.written,
+                        artifact.length,
+                        &artifact.refused,
+                    )?;
+                    sealed = Some((report, fidelity, artifact.written));
                     Ok(json.into_bytes())
                 })
                 .map_err(|e| match e {
@@ -690,7 +718,7 @@ impl<'a> PvecConversion<'a> {
         if published.is_err() {
             let _ = std::fs::remove_file(&staged);
         }
-        let (report, written) = published?;
+        let (report, fidelity, written) = published?;
         tell(EngineEvent::ConversionPublished);
         Ok(PvecConversionOutput {
             artifact: dest.to_path_buf(),
@@ -705,8 +733,10 @@ impl<'a> PvecConversion<'a> {
 /// What `classify` hands on: one record and one row per entity, and the counts that check them.
 struct Classified {
     geometries: Vec<(EntityId, Normalized2DGeometry)>,
+    /// The classification of each entity in `geometries`, for one the writer then refuses.
+    stored: Vec<(EntityId, Classification)>,
     rows: ReportBuilder,
-    fidelity: FidelityReport,
+    tally: Tally,
     encountered: u64,
     view: ViewSummary,
     xrefs: XrefSummary,
@@ -727,6 +757,7 @@ struct Consumed {
     tally: Tally,
     rows: ReportBuilder,
     geometries: Vec<(EntityId, Normalized2DGeometry)>,
+    stored: Vec<(EntityId, Classification)>,
     diagnostics: Vec<Diagnostic>,
     peak: u32,
 }
@@ -743,6 +774,7 @@ fn consume(
         tally: Tally::new(),
         rows: ReportBuilder::new(),
         geometries: Vec::new(),
+        stored: Vec::new(),
         diagnostics: Vec::new(),
         peak: 0,
     };
@@ -774,6 +806,9 @@ fn consume(
                 .map(|k| row_for(k).pvec_type),
             done.warnings,
         ));
+        if done.geometry.geometry().is_some() {
+            out.stored.push((id, done.classification));
+        }
         out.geometries.push((id, done.geometry));
         if received.is_multiple_of(BATCH as u64)
             && let Some(o) = observer
