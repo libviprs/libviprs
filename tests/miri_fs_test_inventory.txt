@@ -619,6 +619,8 @@ annotated   fs-detected  tests/pvec_api_surface.rs::the_pvec_dependencies_stay_s
 annotated   fs-detected  tests/pvec_bounded_memory_bench.rs::bounded_memory_bench
 annotated   fs-detected  tests/pvec_bounded_memory_bench.rs::bounded_memory_child
 annotated   fs-detected  tests/pvec_bounded_memory_bench.rs::bounded_memory_gen
+annotated   fs-detected  tests/pvec_ci_gates.rs::n2_8_1060_only_the_fidelity_gate_reads_the_fixture_expectations
+annotated   fs-detected  tests/pvec_ci_gates.rs::n2_8_1060_the_baselines_are_checked_in_sorted_with_one_line_per_accepted_fixture
 annotated   fs-detected  tests/pvec_corpus_regression.rs::a_dual_oracle_row_is_labelled_as_agreement_and_never_as_truth
 annotated   fs-detected  tests/pvec_corpus_regression.rs::a_fixture_that_moves_from_exact_to_equivalent_fails_the_gate
 annotated   fs-detected  tests/pvec_corpus_regression.rs::a_quarantined_fixture_is_in_the_report_and_never_gates
@@ -650,6 +652,11 @@ annotated   fs-detected  tests/pvec_end_to_end.rs::n2_3_1050_every_accepted_fixt
 annotated   fs-detected  tests/pvec_end_to_end.rs::n2_3_1050_the_comparison_runs_on_the_re_read_artifact_not_on_the_normalization
 annotated   fs-detected  tests/pvec_end_to_end.rs::n2_3_1050_two_conversions_of_one_fixture_are_byte_identical
 annotated   fs-detected  tests/pvec_fidelity_1100.rs::there_is_one_enum_for_the_six_classes
+annotated   not-detected tests/pvec_gate_classification.rs::n2_8_1060_reclassifying_one_entity_is_a_one_line_baseline_diff
+annotated   not-detected tests/pvec_gate_classification.rs::n2_8_1060_the_classification_of_every_fixture_matches_the_checked_in_baseline
+annotated   fs-detected  tests/pvec_gate_determinism.rs::n2_8_1060_the_digest_of_every_conversion_matches_the_checked_in_baseline
+annotated   fs-detected  tests/pvec_gate_determinism.rs::n2_8_1060_two_runs_of_the_whole_corpus_give_the_same_digests
+annotated   not-detected tests/pvec_gate_view.rs::n2_8_1060_the_view_decisions_for_every_fixture_match_the_checked_in_baseline
 annotated   fs-detected  tests/pvec_generation_bench.rs::generation_bench
 annotated   fs-detected  tests/pvec_integration_contract.rs::a_baseline_that_moved_or_vanished_fails
 annotated   fs-detected  tests/pvec_integration_contract.rs::a_blank_pin_fails
