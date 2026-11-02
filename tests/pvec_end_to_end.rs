@@ -472,31 +472,31 @@ fn policy(c: &Converted, truth: &Value) -> Result<(), Failure> {
 
 /// Stage five against a known-truth record: every truth entity has a distinct re-read curve that
 /// is the one it describes, and nothing else was written.
-fn compare_to_truth(curves: &[Curve], truth: &Value) -> Result<(), Failure> {
+fn compare_to_truth(curves: &[Curve], refused: usize, truth: &Value) -> Result<(), Failure> {
     let entities = live(truth);
-    if entities.len() != curves.len() {
+    if entities.len() != curves.len() + refused {
         return fail(
             Stage::Compare,
             format!(
-                "entity count: the truth has {}, the artifact holds {}",
+                "entity count: the truth has {}, the artifact holds {} and the report counts {refused} refused",
                 entities.len(),
                 curves.len()
             ),
         );
     }
-    let mut claimed = vec![false; curves.len()];
-    for t in entities {
-        let (class, g) = target(t);
-        let id = t["id"].as_str().unwrap_or("?");
+    // Every curve the artifact holds is one truth entity, each truth entity used once. What is left
+    // over is exactly the entities the report says PVec's writer refused.
+    let mut claimed = vec![false; entities.len()];
+    for curve in curves {
         let mut reasons = Problems::new();
-        let hit = curves.iter().enumerate().find(|(i, c)| {
+        let hit = entities.iter().enumerate().find(|(i, t)| {
             if claimed[*i] {
                 return false;
             }
-            let why = differs(class, g, t, c);
-            let ok = why.is_empty();
-            reasons.extend(why);
-            ok
+            let (class, g) = target(t);
+            let why = differs(class, g, t, curve);
+            reasons.extend(why.clone());
+            why.is_empty()
         });
         match hit {
             Some((i, _)) => claimed[i] = true,
@@ -505,12 +505,24 @@ fn compare_to_truth(curves: &[Curve], truth: &Value) -> Result<(), Failure> {
                 reasons.dedup();
                 return fail(
                     Stage::Compare,
-                    format!("{id}: no re-read curve matches ({})", reasons.join("; ")),
+                    format!(
+                        "no truth entity matches a re-read curve ({})",
+                        reasons.join("; ")
+                    ),
                 );
             }
         }
     }
     Ok(())
+}
+
+/// How many entities the report says PVec's writer refused after the classifier accepted them.
+fn refused_by_writer(report: &ConversionReport) -> usize {
+    report
+        .entities
+        .iter()
+        .filter(|r| r.reason.as_deref() == Some("pvec-cannot-store"))
+        .count()
 }
 
 /// Stage five against a fixture with no source truth: the artifact holds exactly the geometry the
@@ -583,7 +595,7 @@ fn run(fx: &Fixture, truth: Option<&Value>, dir: &Path) -> Result<Option<Convert
     };
     match truth {
         Some(t) => {
-            compare_to_truth(&c.curves, t)?;
+            compare_to_truth(&c.curves, refused_by_writer(&c.report), t)?;
             policy(&c, t)?;
         }
         None => compare_to_report(&c)?,
@@ -613,9 +625,16 @@ fn first_difference(a: &[u8], b: &[u8]) -> Option<usize> {
 /// tracked. A gap is waived only while it is real: once a fix makes the fixture pass, the suite
 /// fails until its row is deleted, so this list cannot go stale.
 const KNOWN_GAPS: &[(&str, &str, &str)] = &[
-    ("bulge-arc-001", "WRT-08", "libviprs/libviprs#1446"),
-    ("bulge-arc-neg-001", "WRT-08", "libviprs/libviprs#1446"),
-    ("mixed-entity-001", "WRT-08", "libviprs/libviprs#1446"),
+    (
+        "bulge-arc-001",
+        "no geometry reached the writer",
+        "libviprs/libviprs#1480",
+    ),
+    (
+        "bulge-arc-neg-001",
+        "no geometry reached the writer",
+        "libviprs/libviprs#1480",
+    ),
 ];
 
 fn gap(id: &str) -> Option<&'static (&'static str, &'static str, &'static str)> {
@@ -686,12 +705,12 @@ fn n2_3_1050_the_comparison_runs_on_the_re_read_artifact_not_on_the_normalizatio
     let dir = tempfile::tempdir().unwrap();
     let c = run(fx, Some(&truth), dir.path()).unwrap().unwrap();
     let reader = PvecReader::open(c.artifact.clone()).unwrap();
-    assert!(compare_to_truth(&entities(&reader).unwrap(), &truth).is_ok());
+    assert!(compare_to_truth(&entities(&reader).unwrap(), 0, &truth).is_ok());
     // A different artifact (another fixture's) in the same slot is a compare failure.
     let other = run(corpus.get("line-001"), None, dir.path())
         .unwrap()
         .unwrap();
-    let f = compare_to_truth(&other.curves, &truth).unwrap_err();
+    let f = compare_to_truth(&other.curves, 0, &truth).unwrap_err();
     assert_eq!(f.stage, Stage::Compare, "{f}");
 }
 
@@ -787,7 +806,7 @@ fn n2_3_1050_each_stage_is_named_when_it_is_the_one_that_fails() {
     assert_eq!(f.stage, Stage::Read, "{f}");
 
     // compare: reported with the stage and the entity
-    let f = compare_to_truth(&[], &corpus.get("line-001").truth().unwrap()).unwrap_err();
+    let f = compare_to_truth(&[], 0, &corpus.get("line-001").truth().unwrap()).unwrap_err();
     assert_eq!(f.stage, Stage::Compare, "{f}");
     assert!(f.to_string().starts_with("[compare]"), "{f}");
 }
@@ -845,7 +864,8 @@ fn n2_3_1050_two_conversions_of_one_fixture_are_byte_identical() {
         // The comparison is repeated against the second artifact.
         if let Some(t) = truth_of(fx) {
             let reread = entities(&PvecReader::open(b.artifact.clone()).unwrap()).unwrap();
-            compare_to_truth(&reread, &t).unwrap_or_else(|f| panic!("{}: {f}", fx.id));
+            compare_to_truth(&reread, refused_by_writer(&b.report), &t)
+                .unwrap_or_else(|f| panic!("{}: {f}", fx.id));
         }
         digests.insert(
             fx.id.clone(),
