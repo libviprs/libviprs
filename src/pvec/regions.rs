@@ -14,6 +14,13 @@ use thiserror::Error;
 
 use super::ordering::EntityId;
 
+/// Distance by basic arithmetic and a correctly rounded `sqrt`: libm `hypot` differs in the last bit between
+/// architectures, and these lengths decide which regions exist (`tests/pvec_1471_reproducibility.rs`).
+fn dist(a: [f64; 2], b: [f64; 2]) -> f64 {
+    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+    (dx * dx + dy * dy).sqrt()
+}
+
 /// One wall segment, by the entity it came from.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WallEdge {
@@ -180,10 +187,7 @@ pub fn derive_regions(
     }
     /// Index of the node at `p`, adding it when no node is within `snap`.
     fn node_at(nodes: &mut Vec<P>, p: P, snap: f64) -> usize {
-        if let Some(i) = nodes
-            .iter()
-            .position(|q| (q[0] - p[0]).hypot(q[1] - p[1]) <= snap)
-        {
+        if let Some(i) = nodes.iter().position(|q| dist(p, *q) <= snap) {
             return i;
         }
         nodes.push(p);
@@ -221,7 +225,7 @@ pub fn derive_regions(
         let mut best = (f64::INFINITY, 0.0, 0.0);
         for i in 0..n {
             let (p, q) = (poly[i], poly[(i + 1) % n]);
-            let len = (q[0] - p[0]).hypot(q[1] - p[1]);
+            let len = dist(p, q);
             if len == 0.0 {
                 continue;
             }
@@ -249,7 +253,7 @@ pub fn derive_regions(
         (0..n).any(|i| {
             let (p, q) = (poly[i], poly[(i + 1) % n]);
             let cross = (q[0] - p[0]) * (pt[1] - p[1]) - (q[1] - p[1]) * (pt[0] - p[0]);
-            let len = (q[0] - p[0]).hypot(q[1] - p[1]);
+            let len = dist(p, q);
             len > 0.0
                 && cross.abs() <= 1e-9 * len
                 && pt[0] >= p[0].min(q[0]) - 1e-9
@@ -285,7 +289,7 @@ pub fn derive_regions(
     let mut pairs: Vec<(f64, usize, usize)> = Vec::new();
     for (k, &i) in loose.iter().enumerate() {
         for &j in &loose[k + 1..] {
-            let d = (nodes[i][0] - nodes[j][0]).hypot(nodes[i][1] - nodes[j][1]);
+            let d = dist(nodes[i], nodes[j]);
             if d <= config.gap_tolerance {
                 pairs.push((d, i, j));
             }
