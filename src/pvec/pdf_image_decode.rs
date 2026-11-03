@@ -20,7 +20,7 @@
 use lopdf::{Dictionary, Object};
 
 use super::pdf_image::{FilterError, PdfImageError, PdfImageNote};
-use super::pdf_vector::{PdfImagePlacement, PdfVectorLimits, RawImage};
+use super::pdf_vector::{PdfImagePlacement, RawImage};
 use crate::source::DecodeLimits;
 
 /// What one filter stage gets: everything the dictionary says that a codec may need.
@@ -334,13 +334,14 @@ fn unfilter(
     let flate = filters.first().is_some_and(|f| f == "FlateDecode");
     let codec = filters.last().map(String::as_str).filter(|f| is_codec(f));
     let mut data = std::borrow::Cow::Borrowed(raw.content.as_slice());
+    // The room a codestream inside Flate has: no row structure, so the room of a raw image.
+    let codestream_room = (width as usize)
+        .saturating_mul(height as usize)
+        .saturating_mul(4)
+        .saturating_add(1 << 20);
     if flate {
         let cap = if codec.is_some() {
-            // A codestream inside Flate has no row structure, so give it the room of a raw image.
-            (width as usize)
-                .saturating_mul(height as usize)
-                .saturating_mul(4)
-                .saturating_add(1 << 20)
+            codestream_room
         } else {
             let row_bytes = row_bytes(width, ncomp, bpc.unwrap_or(16));
             (row_bytes + 1)
@@ -358,7 +359,8 @@ fn unfilter(
         let parms = parms_for(&raw.dict, index);
         // The shared symbol and pattern dictionaries of a JBIG2 image. The extraction kept the
         // stream (its encoded bytes count against the per-stream cap); a Flate stage on it is
-        // undone here, with the same cap as the room an inflated image stream gets.
+        // undone here, with the room a codestream inside Flate gets, which follows the image's
+        // own size and so the caller's pixel limits, not a default.
         let globals = match parms.and_then(|p| p.get(b"JBIG2Globals").ok()) {
             Some(Object::Stream(g)) if filter == "JBIG2Decode" => {
                 let flate = match g.dict.get(b"Filter") {
@@ -369,9 +371,8 @@ fn unfilter(
                     _ => false,
                 };
                 if flate {
-                    let cap = PdfVectorLimits::default().max_image_stream_bytes as usize;
                     Some(
-                        crate::pdf::flate_decompress(&g.content, cap)
+                        crate::pdf::flate_decompress(&g.content, codestream_room)
                             .map_err(PdfImageError::Pdf)?,
                     )
                 } else {
