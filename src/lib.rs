@@ -56,7 +56,9 @@
 //!   [`Raster::save`]'s extension route and the `"jxl"` row in
 //!   [`Raster::encode_to_buffer`]'s format route.
 //! - **`jbig2`** — decodes `JBIG2Decode` image streams of a PDF page in
-//!   `pvec::pdf_image` through `hayro-jbig2`; implies `pvec-raster`.
+//!   `pvec::pdf_image` through `hayro-jbig2`; implies `pvec-raster`. Do not enable it on
+//!   untrusted PDFs yet: `hayro-jbig2` 0.3.1 can still spend 1.4 GB on a 236 byte stream or run
+//!   for 1600 seconds on one input (`LaurenzV/hayro` #1700, #1701, #1598, #1550 are open).
 //! - **`jp2k`** — gates the JPEG 2000 loader and encoder: [`decode_jp2k`],
 //!   [`Raster::encode_jp2k`] and [`Raster::save_jp2k`].
 //! - **`dwg-acadsharp`** — gates [`cad::acadsharp`], the `acadsharp-rs` DWG
