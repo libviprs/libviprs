@@ -13,7 +13,7 @@ written by this build declares, the DWG versions the provider takes, and the pro
 
 ## The PVec container
 
-This build links `pvec` at revision `ff67ecb85b5367c5db56f7d03f162c02437414a8` and writes container version 1.0.
+This build links `pvec` at revision `240fcd3da4f0ee52ace31c8837b52d349b5548dd` and writes container version 1.0.
 
 | direction | container version | outcome |
 |---|---|---|
@@ -53,9 +53,11 @@ the capability list from the curves it is given and a drawing that holds only so
 | acadrust (default) | AC1014 to AC1032 (R14, 2000, 2004, 2007, 2010, 2013, 2018) | AC1014 | reads |
 | acadrust (default) | below AC1014, or an unknown stamp | AC1014 | refuses |
 
-- The provider is `acadrust` at revision `72af48970e306ef1d50dd751b227df2b4fc3fb99` of the `libviprs/acadrust` fork.
+- The provider is `acadrust` at revision `f1e00c11f6371c8cfcff2c726620a51a45a2ad1b` of the `libviprs/acadrust` fork.
   `acadsharp-rs` is opt-in (the `dwg-acadsharp` feature) and takes the same DWG versions through `cad::CadDecoder`
   (`docs/vector-providers.md`); it is not the default.
+- Since acadrust 0.6.8 (upstream #267), a pre-2007 DWG's text decodes every `\U+XXXX` escape, which applies to
+  layer, block and style names in AC1014 to AC1018 files, so such a name can read differently than it did at 0.5.5.
 - A drawing below the minimum is refused at conversion start with the typed open error, before any traversal, and
   nothing is written.
 - Each entity mapping needs the provider facets it reads (`docs/pvec-providers.md`); none of them raises the

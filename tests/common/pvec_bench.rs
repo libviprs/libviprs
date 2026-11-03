@@ -278,7 +278,7 @@ fn paper_space(p: &Value) -> CadDocument {
             80.0,
         );
         vp.id = 2 + v as i16;
-        doc.add_entity_to_layout(EntityType::Viewport(vp), "Sheet A")
+        doc.add_entity_to_layout(EntityType::Viewport(Box::new(vp)), "Sheet A")
             .expect("viewport");
     }
     doc
