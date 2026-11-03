@@ -5,8 +5,8 @@ blocks-dynamic-linear-001 artifact=67f5789ad9daf8b5c8a77e950f223472dea2718aed0b8
 bspline-d3-001 artifact=961f0155c859decbc8dc904fd50297f14315eb8bdf955b8b7559f0f2d3cd07bf report=819000473731688a233a6b8dca04f9c9f71e18d7ad7ea32ceed36dd97ff3f824
 bspline-d5-001 artifact=0b623862a4f194f18028535e0dfdc3a374af89eb57955fa56ce0310bb58b29bc report=36e4d86eb4a472dad4e857762cdb105985784c435f976e67362eb3dfb64a5907
 bspline-nonunit-domain-001 artifact=970646fbb7a4a32b2e0a0b8e3b8ac18db8b613a1405b0544d38d38f0c2441ae2 report=a76e7d1f15b94d546fccc2e0c2991309d6c894a955a08dcc7247a80f67106408
-bulge-arc-001 no-artifact: the artifact could not be written: PVec's writer refused: write refused: WRT-08: write refused: WRT-08
-bulge-arc-neg-001 no-artifact: the artifact could not be written: PVec's writer refused: write refused: WRT-08: write refused: WRT-08
+bulge-arc-001 no-artifact: the artifact could not be written: no entity carries geometry
+bulge-arc-neg-001 no-artifact: the artifact could not be written: no entity carries geometry
 circle-001 artifact=0784409626a9eb4dc0ad33094e5264495ddfded7c80b5a3be8c7c4ba8aa181ab report=c36a78c576153d02066269a96b55c2489c5ce54b482e45664d2aa605f4431fc6
 closed-by-endpoint-001 artifact=02ae04bb51a6455e727251652cd91bfb949b8c6f0fbf559f742fc3929b05a2c5 report=91e3836fa46e97a3ae243762f7948d18079140224a648ec739035e9f1430e2e0
 closed-periodic-001 artifact=75dc00e61e28830b9b0e64d9d213c079868174e90ab9caf2e54e1a0605130afe report=ee37ae34c5f2086955671f295f6d1985b985041c7ad8c5081d7ffc6708f2e430
@@ -18,7 +18,7 @@ large-coords-001 artifact=8486c94a7fad0882f3320ca2af0770ca2d007aaf864054322d3c4d
 layer-state-001 artifact=daef4a18253808f60d8b6cd4145debd9990c10fe37237a3208ad29fbd09717fe report=99941f310d3d522d2957ffd4069993965cf8f8c7373407120e8ddb361f121720
 line-001 artifact=8a6a504627cf89a590fb8468821f8dcb2a83f728940ad453975bba1bed9a07ea report=38c2caeedc0ca36a30f3c58e1a1a1f43a49c795ea1c0642c7d38795d7aad48a4
 lwpolyline-closed-001 artifact=ccd09118c2e39e13cb78f55c706bc6d95a27d05180ab7d04455a5734b8f0e3c7 report=c05fc3097bdf9a6d2ac69476403da030b74aecfdb28d5d0eb47162db3c164d37
-mixed-entity-001 no-artifact: the artifact could not be written: PVec's writer refused: write refused: WRT-08: write refused: WRT-08
+mixed-entity-001 artifact=16c4b0e64ff29393d56a4f1510d784ad603730f20d92b19c14695e16f5775f55 report=98f3ac4a11a325775d95163ab29e02d2c89311403e381d28aaa6f2ccb3dffd0f
 near-singular-001 no-artifact: blocks could not be expanded: insert of block `PROBE_NEAR_SINGULAR_001_L1` (handle 53, level 0): TRANSFORM_SINGULAR (NP-19): SingularTransform (NP-19)
 nested-blocks-001 artifact=ceb09a090aafe3f59f952362d4b23d226a21000d8d4dd2e75bd2d436fc4d949e report=b009f6ed5c39b5eb6f802cfb00fc3ace6816364d7261b9740b56d68dbd05dd55
 nonuniform-scale-circle-001 artifact=2c0f75f12b136d7a299ea1fff098e96dac9f7a219b1f040adbfe0cd67149ab2e report=34bd5297e2a9e47cbd6733c984539d0cbb07683f067a7d7d83fcb80f9f2662a5
