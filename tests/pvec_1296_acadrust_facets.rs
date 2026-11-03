@@ -54,7 +54,7 @@ fn drawing() -> Drawing {
     vp.id = 2;
     vp.freeze_layer(cold.handle);
     let viewport = doc
-        .add_entity_to_layout(EntityType::Viewport(vp), "Sheet A")
+        .add_entity_to_layout(EntityType::Viewport(Box::new(vp)), "Sheet A")
         .expect("viewport")
         .value();
 

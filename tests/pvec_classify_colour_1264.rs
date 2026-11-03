@@ -32,7 +32,11 @@ fn styled(
             block_path: InstancePath::root(),
             layer: layer.into(),
         },
-        style: EntityStyle { colour, lineweight },
+        style: EntityStyle {
+            colour,
+            lineweight,
+            linetype: SourceFact::Absent,
+        },
     }
 }
 
