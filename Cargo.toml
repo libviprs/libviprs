@@ -334,7 +334,7 @@ acadsharp-rs = { git = "https://github.com/libviprs/acadsharp-rs", rev = "f23f37
 # the same consequence follows: this crate cannot be published to crates.io while the
 # line below stands. The revision is the fork's `main` as Gate 0 ran against it
 # (`docs/spikes/acadrust-gate0.md`); moving it means rerunning that gate.
-acadrust = { git = "https://github.com/libviprs/acadrust", rev = "72af48970e306ef1d50dd751b227df2b4fc3fb99", version = "0.5.5" }
+acadrust = { git = "https://github.com/libviprs/acadrust", rev = "f1e00c11f6371c8cfcff2c726620a51a45a2ad1b", version = "0.6.8" }
 # PVec's numeric policy (issue #1074): the structural rules and limits for a B-spline
 # (NP-14 knots, NP-15 weights, MAX_DEGREE, MAX_CONTROL_POINTS, MAX_KNOTS) that
 # `pvec::dwg_spline` applies, so the numbers are PVec's and are not copied here. Optional

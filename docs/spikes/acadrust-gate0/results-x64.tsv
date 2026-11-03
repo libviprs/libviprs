@@ -1,9 +1,9 @@
-# acadrust 72af48970e306ef1d50dd751b227df2b4fc3fb99
-# libviprs e19b68bcdb3979cb6e96a04dcdf2ce84cd9c64bc (AcadrustProvider over acadrust, release build, example dwg_gate0)
-# host devshell@192.168.0.100 (MARS), native x86_64, rust:1.99.1-bookworm, one process per file
+# acadrust f1e00c11f6371c8cfcff2c726620a51a45a2ad1b
+# libviprs 4586847649ffc8c6ee48fd68a7fee7d2cff249d1 (AcadrustProvider over acadrust, release build, example dwg_gate0)
+# host rom@192.168.0.10 (UGREEN NAS, HIGARA), native x86_64, rust:1.99.1-bookworm, one process per file
 # corpus ACadSharp samples at d7dc111023477d8a9fffc2153139459c95b4f345 (MIT); tier A AutoCAD-authored, B and S ACadSharp-writer
 file	tier	source	sha256	version	open	layers	layouts	blocks	model_entities	entities_all_scopes	unmapped	unmapped_classes	reread_identical	error
-AecObjects.dwg	A	autocad	dc196e99b8944d169493c9f3205d45f8a579c0c96e81dbc7fc2f90cd971f7a7e	AC1032	OPEN_OK	7	2	6	4	15	9	UNKNOWN:4,VIEWPORT:3,ATTDEF:2	yes	-
+AecObjects.dwg	A	autocad	dc196e99b8944d169493c9f3205d45f8a579c0c96e81dbc7fc2f90cd971f7a7e	AC1032	OPEN_OK	7	2	6	4	15	9	EXTENDED_ENTITY:4,VIEWPORT:3,ATTDEF:2	yes	-
 BLOCKALIGNMENTPARAMETER.dwg	A	autocad	d7aa1418c6ed4af5930b6ea1b45a8343803b64b3985ceb188edf8cabb6e80c92	AC1032	OPEN_OK	1	3	4	1	2	0	-	yes	-
 BLOCKBASEPOINTPARAMETER.dwg	A	autocad	04374431ecb1df0ec1c63ed49289d06f2d82a620b0c70c4993527eede7a622d9	AC1032	OPEN_OK	1	3	4	1	2	0	-	yes	-
 BLOCKFLIPPARAMETER.dwg	A	autocad	a1e6ebbe7a858e0def9822d31fea51c8ef35dedd687a6ef81cfc1f8b6d177019	AC1032	OPEN_OK	1	3	6	2	8	0	-	yes	-

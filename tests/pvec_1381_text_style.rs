@@ -40,7 +40,7 @@ fn drawing() -> Vec<u8> {
     let mut b = MText::new();
     b.value = "b".into();
     b.style = "OK".into();
-    doc.add_entity(EntityType::MText(b)).unwrap();
+    doc.add_entity(EntityType::MText(Box::new(b))).unwrap();
     let mut c = Text::new();
     c.value = "c".into();
     c.height = 2.0;
