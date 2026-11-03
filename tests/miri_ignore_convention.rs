@@ -836,7 +836,8 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1365 adds 18: the `tests/pvec_1365_pdf_jbig2.rs` cells, which read the committed JBIG2 fixtures, and the `jbig2` check in `tests/unsafe_inventory.rs`. It said 903 before this line moved.
 /// #1050 adds 6: the `tests/pvec_end_to_end.rs` cells that convert fixtures into a temp dir and read the vendored corpus. It said 937 before this line moved.
 /// #1064 adds 5: the `tests/pvec_1064_memory_decision.rs` cells that read the benchmark document and baseline. It said 937 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 942;
+/// #1070 adds 4: the `tests/pvec_1070_spool_fuzz.rs` cells that stream through a temp dir and read the seed corpus (two more drive the body in memory and are annotated, not detected). It said 942 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 946;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
