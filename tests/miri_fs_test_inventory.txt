@@ -500,6 +500,9 @@ annotated   fs-detected  tests/pvec_1064_memory_decision.rs::the_baseline_has_sp
 annotated   fs-detected  tests/pvec_1064_memory_decision.rs::the_budget_sweep_is_recorded
 annotated   fs-detected  tests/pvec_1064_memory_decision.rs::the_decision_names_a_strategy_and_cites_figures
 annotated   fs-detected  tests/pvec_1064_memory_decision.rs::the_spill_strategy_is_measured_not_marked_unbuilt
+annotated   fs-detected  tests/pvec_1070_spool_fuzz.rs::issue_1070_a_budget_of_zero_still_streams_the_same_bytes
+annotated   fs-detected  tests/pvec_1070_spool_fuzz.rs::issue_1070_a_sink_that_fails_on_the_last_byte_fails_the_write_plain_and_indexed
+annotated   fs-detected  tests/pvec_1070_spool_fuzz.rs::issue_1070_the_crafted_seeds_sit_on_the_edges_they_were_made_for
 annotated   fs-detected  tests/pvec_1070_spool_fuzz.rs::issue_1070_the_seeds_reach_both_a_finished_write_and_a_failing_sink
 annotated   fs-detected  tests/pvec_1070_spool_fuzz.rs::issue_1070_the_spool_seed_corpus_runs_clean
 annotated   fs-detected  tests/pvec_1070_spool_fuzz.rs::issue_1070_the_target_is_registered_with_the_fuzz_crate

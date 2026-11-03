@@ -49,47 +49,47 @@ impl Write for FailAfter {
     }
 }
 
-fn coord(u: &mut Unstructured<'_>) -> AResult<f64> {
-    if u.ratio(1, 16)? {
-        u.arbitrary()
-    } else {
-        Ok(f64::from(u.int_in_range(0..=255u8)?))
-    }
-}
-
-fn geometry(u: &mut Unstructured<'_>) -> AResult<Option<Normalized2DGeometry>> {
-    let n = u.int_in_range(2..=6usize)?;
-    let mut pts = Vec::with_capacity(n);
-    for _ in 0..n {
-        pts.push([coord(u)?, coord(u)?]);
-    }
-    Ok(Normalized2DGeometry::polyline(&pts, FidelityClass::SupportedExact).ok())
-}
-
-fn ids(n: usize) -> Vec<EntityId> {
-    let raw = (0..n)
-        .map(|i| RawEntity {
-            style: EntityStyle::absent(),
-            geometry: RawGeometry::Line {
-                start: [i as f64, 0.0, 0.0],
-                end: [i as f64 + 1.0, 0.0, 0.0],
-            },
-            provenance: ProvenanceStub {
-                handle: Some(ItemHandle::new(i as u64 + 1)),
-                class_name: "LINE".into(),
-                block_path: InstancePath::root(),
-                layer: "0".into(),
-            },
-        })
-        .collect();
-    order_entities("t", "1", &OrderingPolicy::new(), raw)
-        .entities
-        .into_iter()
-        .map(|o| o.id)
-        .collect()
-}
-
 fn decode(data: &[u8]) -> AResult<Outcome> {
+    fn coord(u: &mut Unstructured<'_>) -> AResult<f64> {
+        if u.ratio(1, 16)? {
+            u.arbitrary()
+        } else {
+            Ok(f64::from(u.int_in_range(0..=255u8)?))
+        }
+    }
+
+    fn geometry(u: &mut Unstructured<'_>) -> AResult<Option<Normalized2DGeometry>> {
+        let n = u.int_in_range(2..=6usize)?;
+        let mut pts = Vec::with_capacity(n);
+        for _ in 0..n {
+            pts.push([coord(u)?, coord(u)?]);
+        }
+        Ok(Normalized2DGeometry::polyline(&pts, FidelityClass::SupportedExact).ok())
+    }
+
+    fn ids(n: usize) -> Vec<EntityId> {
+        let raw = (0..n)
+            .map(|i| RawEntity {
+                style: EntityStyle::absent(),
+                geometry: RawGeometry::Line {
+                    start: [i as f64, 0.0, 0.0],
+                    end: [i as f64 + 1.0, 0.0, 0.0],
+                },
+                provenance: ProvenanceStub {
+                    handle: Some(ItemHandle::new(i as u64 + 1)),
+                    class_name: "LINE".into(),
+                    block_path: InstancePath::root(),
+                    layer: "0".into(),
+                },
+            })
+            .collect();
+        order_entities("t", "1", &OrderingPolicy::new(), raw)
+            .entities
+            .into_iter()
+            .map(|o| o.id)
+            .collect()
+    }
+
     let mut u = Unstructured::new(data);
     let indexed = u.arbitrary::<bool>()?;
     let budget = [0u64, 1, 64, 4096, 1 << 20][u.int_in_range(0..=4usize)?];
@@ -121,6 +121,7 @@ fn decode(data: &[u8]) -> AResult<Outcome> {
         all.iter().copied().zip(&geoms),
         Vec::new(),
         &CancelToken::new(),
+        &mut |_, _| {},
     );
 
     let root = tempfile::tempdir().expect("a scratch directory");
@@ -138,6 +139,7 @@ fn decode(data: &[u8]) -> AResult<Outcome> {
                 Vec::new(),
                 &spill,
                 &CancelToken::new(),
+                &mut |_, _| {},
                 &mut sink,
             );
             assert!(
@@ -154,6 +156,7 @@ fn decode(data: &[u8]) -> AResult<Outcome> {
                 Vec::new(),
                 &spill,
                 &CancelToken::new(),
+                &mut |_, _| {},
                 &mut sink,
             )
             .expect("the in-memory write finished, so the streamed one must");
@@ -172,6 +175,7 @@ fn decode(data: &[u8]) -> AResult<Outcome> {
                 Vec::new(),
                 &spill,
                 &CancelToken::new(),
+                &mut |_, _| {},
                 &mut Vec::new(),
             );
             assert!(
