@@ -4618,9 +4618,13 @@ mod tests {
     #[test]
     fn icc_export_attaches_profile() {
         let exported = srgb_profiled_fixture().icc_import().icc_export();
+        // The encoder stamps the creation time into the header (bytes 24..36), so two encodings of
+        // the same profile made in different seconds differ there and nowhere else. Comparing them
+        // whole failed about once a second boundary was crossed between the two.
+        let unstamped = |p: &[u8]| [&p[..24], &p[36..]].concat();
         assert_eq!(
-            exported.icc_profile(),
-            Some(srgb_profile_bytes().as_slice())
+            exported.icc_profile().map(unstamped),
+            Some(unstamped(&srgb_profile_bytes()))
         );
     }
 

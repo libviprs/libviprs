@@ -35,6 +35,9 @@ pub mod diagnostics;
 #[cfg(feature = "pvec-normalized")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
 pub mod differential;
+#[cfg(feature = "pvec-write")]
+#[cfg_attr(docsrs, doc(cfg(feature = "pvec-write")))]
+pub mod drift;
 #[cfg(feature = "pvec-normalized")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
 pub mod dump;
