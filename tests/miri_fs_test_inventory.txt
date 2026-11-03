@@ -647,9 +647,13 @@ annotated   fs-detected  tests/pvec_dual_oracle.rs::n2_2_1050_every_fixture_that
 annotated   fs-detected  tests/pvec_dual_oracle.rs::n2_2_1050_the_pin_summary_is_the_index_and_a_bump_reads_as_per_class_changes
 annotated   fs-detected  tests/pvec_dwg_pdf_differential.rs::a_loss_entry_that_no_longer_matches_fails_the_run
 annotated   fs-detected  tests/pvec_dwg_pdf_differential.rs::an_injected_extra_difference_fails_the_run
+annotated   fs-detected  tests/pvec_dwg_pdf_differential.rs::an_injected_raster_difference_fails_the_run
 annotated   fs-detected  tests/pvec_dwg_pdf_differential.rs::every_fixture_has_a_loss_file_with_at_least_one_written_reason
+annotated   fs-detected  tests/pvec_dwg_pdf_differential.rs::every_pair_has_a_raster_loss_entry_with_a_written_reason
 annotated   fs-detected  tests/pvec_dwg_pdf_differential.rs::every_pair_measures_exactly_its_recorded_loss
+annotated   fs-detected  tests/pvec_dwg_pdf_differential.rs::pdfium_paints_the_rotated_pair_turned_a_quarter
 annotated   fs-detected  tests/pvec_dwg_pdf_differential.rs::the_pairs_are_real_world_differential_and_nothing_labels_them_known_truth
+annotated   fs-detected  tests/pvec_dwg_pdf_differential.rs::the_raster_axis_names_its_dpi_threshold_and_the_platforms_it_was_measured_on
 annotated   fs-detected  tests/pvec_dwg_pdf_differential.rs::the_rotated_pair_swaps_the_pdf_extent_and_a_rotation_blind_comparison_would_fail
 annotated   fs-detected  tests/pvec_dwg_spline_structural.rs::no_code_path_turns_a_spline_into_polylines_or_arcs
 annotated   fs-detected  tests/pvec_fidelity_1100.rs::there_is_one_enum_for_the_six_classes
