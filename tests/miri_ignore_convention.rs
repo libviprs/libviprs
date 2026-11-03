@@ -480,7 +480,8 @@ const EXPECTED_SRC_MODULES: usize = 31;
 /// #1368 adds 1: `tests/dependency_policy.rs::exactly_one_tiff_resolves_in_every_cell` (from #1367), which runs `cargo tree`. It said 50 before this line moved.
 /// #1363 adds 1: `tests/dependency_policy.rs::hayro_ccitt_is_in_every_cell_and_is_plain_rust`, which runs `cargo tree`. It said 53 before this line moved.
 /// #1364 adds 1: `tests/dependency_policy.rs::the_jp2k_cell_adds_only_its_two_codec_crates`, which runs `cargo tree`. It said 54 before this line moved.
-const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 56;
+/// #1365 adds 1: `tests/dependency_policy.rs::jbig2_adds_the_decoder_and_its_ccitt_crate_and_never_the_simd_one`, which runs `cargo tree`. It said 56 before this line moved.
+const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 57;
 
 /// The filesystem-touching tests still allowed to run under Miri, and so still
 /// allowed to end the whole run on their first syscall.
@@ -832,8 +833,9 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1314 adds 1 more: the panic-during-the-flush cell of `tests/pvec_1314_spool.rs`. It said 905 before this line moved.
 /// #1048 adds 3: the `tests/pvec_1048_audit.rs` and `tests/pvec_1048_spool_event.rs` cells. It said 906 before this line moved.
 /// #1463 adds 4: the `tests/pvec_1463_chunk_events.rs` cells that convert into a temp dir through a spill root. It said 909 before this line moved.
-/// #1050 adds 6: the `tests/pvec_end_to_end.rs` cells that convert fixtures into a temp dir and read the vendored corpus. It said 913 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 919;
+/// #1365 adds 18: the `tests/pvec_1365_pdf_jbig2.rs` cells, which read the committed JBIG2 fixtures, and the `jbig2` check in `tests/unsafe_inventory.rs`. It said 903 before this line moved.
+/// #1050 adds 6: the `tests/pvec_end_to_end.rs` cells that convert fixtures into a temp dir and read the vendored corpus. It said 931 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 937;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
