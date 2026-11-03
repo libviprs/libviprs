@@ -834,7 +834,7 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1314 adds 1 more: the panic-during-the-flush cell of `tests/pvec_1314_spool.rs`. It said 905 before this line moved.
 /// #1048 adds 3: the `tests/pvec_1048_audit.rs` and `tests/pvec_1048_spool_event.rs` cells. It said 906 before this line moved.
 /// #1463 adds 4: the `tests/pvec_1463_chunk_events.rs` cells that convert into a temp dir through a spill root. It said 909 before this line moved.
-/// #1365 adds 18: the `tests/pvec_1365_pdf_jbig2.rs` cells, which read the committed JBIG2 fixtures, and the `jbig2` check in `tests/unsafe_inventory.rs`. It said 903 before this line moved.
+/// #1365 adds 18: the `tests/pvec_1365_pdf_jbig2.rs` cells, which read the committed JBIG2 fixtures, and the `jbig2` check in `tests/unsafe_inventory.rs`. It said 913 before this line moved.
 /// #1050 adds 6: the `tests/pvec_end_to_end.rs` cells that convert fixtures into a temp dir and read the vendored corpus. It said 937 before this line moved.
 /// #1064 adds 5: the `tests/pvec_1064_memory_decision.rs` cells that read the benchmark document and baseline. It said 937 before this line moved.
 /// #1070 adds 4: the `tests/pvec_1070_spool_fuzz.rs` cells that stream through a temp dir and read the seed corpus (two more drive the body in memory and are annotated, not detected). It said 942 before this line moved.
@@ -842,9 +842,12 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1475 and #1471 add 14: the eleven `tests/pvec_drift.rs` cells and the three `tests/pvec_1471_reproducibility.rs` cells. It said 950 before this line moved.
 /// #1406 adds 4: the `tests/pvec_dwg_pdf_differential.rs` raster cells that read the exported PDFs and the loss files. It said 964 before this line moved.
 /// #1093 adds 1: `tests/pvec_api_surface.rs::issue_1093_components_name_no_provider_specific_type`, which scans the source tree. It said 968 before this line moved.
+/// #1495 adds 1: `tests/pvec_1365_pdf_jbig2.rs::the_decoder_is_hayro_jbig2_0_4_and_decodes_strictly_1495`, which reads the manifest and the module. It said 969 before this line moved.
+/// #1495 adds 1 more: `tests/pvec_1365_pdf_jbig2.rs::a_stream_that_lenient_decoding_repairs_is_refused_1495`, which reads the fixtures. It said 970 before this line moved.
+/// #1489 adds 4: the `tests/pvec_1489_image_reason_keys.rs` cells that read the docs. It said 971 before this line moved.
 /// #1489 adds 4: the `tests/pvec_1489_image_reason_keys.rs` cells that read the docs. It said 969 before this line moved.
-/// #1490 adds 1: the `tests/pvec_1490_fill_report_images.rs` cell that reads `docs/pvec-hatch-policy.md`. It said 973 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 974;
+/// #1490 adds 1: the `tests/pvec_1490_fill_report_images.rs` cell that reads `docs/pvec-hatch-policy.md`. It said 975 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 976;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
