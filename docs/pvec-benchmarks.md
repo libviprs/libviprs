@@ -196,7 +196,7 @@ LIBVIPRS_BENCH_HOST=mars cargo test --release --features pvec-convert \
     --test pvec_bounded_memory_bench -- --ignored --nocapture bounded_memory_bench
 ```
 
-**Only one strategy exists to measure.** The spool and the streaming sink are not built (pvec#235), so the two-pass bounds-then-index and the external-sort spooling strategies have no code, and their rows print as "not built". The strategy measured is the direct, in-memory one: the classifier, the report rows, the records and the facade's writer all hold their entities until the artifact is sealed. Bytes spilled, bytes re-read and spill count are zero for it by construction.
+**Two strategies exist to measure.** The direct one holds the classifier, the report rows, the records and the facade's writer until the artifact is sealed. The spill one (`PvecConversion::spill`, #1417, pvec#235) streams the artifact through PVec's spill writer into the `.pvec.partial` file, with an indexed write (`LeafConfig`, cell capacity 256) because the spill is only bounded for those. The two-pass bounds-then-index strategy has no code, so it has no row. Spill bytes are the peak size of the files in the spill root, sampled every 5 ms (the facade does not report what it spilled, so it is a lower bound), and bytes re-read are not exposed by the facade. The artifacts differ in size between the two strategies because the spill rows are indexed and the direct rows are not, so their artifact bytes are not comparable.
 
 Measured on MARS (x86_64-linux-mars, native), release build, three runs per variant, the largest peak of the three, wall time the median:
 
@@ -214,18 +214,36 @@ Measured on MARS (x86_64-linux-mars, native), release build, three runs per vari
 
 **Against the criterion, it fails, and it fails by about a factor of two.** The ceiling is 1.5 GiB process peak RSS and 1.0 GiB tracked peak for the `large_industrial` cell (more than 10^6 entities, 1,025,000 here). Measured: 3.08 GiB RSS and 2.66 GiB tracked. Boundedness fails the same way: doubling the entity count moved the tracked peak by 97.6% on `large_industrial`, 99.7% on `spline_heavy` and 99.3% on `block_heavy`, against a criterion of under 10%. The curve is linear, about 2.8 KB of tracked heap per entity on `large_industrial` and 10.5 KB on `spline_heavy` (a spline carries its control points and knots). The ceiling flags in the rows (`within_rss_ceiling`, `within_tracked_ceiling`) are false for `large_industrial` at every scale of 0.5 and above.
 
-For comparison, the facade's writer alone costs about 310 bytes per entity (`docs/adr/pvec-tiers-and-spool-rescope.md`). The other roughly 2.5 KB per entity is libviprs: the flattened leaves with their provenance stubs, the view outcome, the records, the report rows and the diagnostics. A spool that moves only the writer's state would not reach the ceiling, and the decision on where the memory goes has to wait for the numbers of a strategy that exists.
+For comparison, the facade's writer alone costs about 310 bytes per entity (`docs/adr/pvec-tiers-and-spool-rescope.md`). The other roughly 2.5 KB per entity is libviprs: the flattened leaves with their provenance stubs, the view outcome, the records, the report rows and the diagnostics. A spool that moves only the writer's state would not reach the ceiling, and the spill measured below confirms it: the peak did not move (see the Decision section).
+
+The spill strategy, same host and method (three runs per variant, the largest peak of the three, wall time the median, rounded up to the MiB), budget 64 MiB. MARS carried other jobs at a load of about 15 on 28 cpus, so most rows are marked unstable and none of the wall times should be read as a curve. These rows are the baseline's, and `tests/pvec_1064_memory_decision.rs` fails if the two disagree:
+
+| strategy | cell | scale | entities | wall (s) | tracked peak (MiB) | peak RSS (MiB) | spilled, peak on disk (MiB) | spill files |
+|---|---|---|---|---|---|---|---|---|
+| spill | large_industrial | 0.5 | 512,500 | 8.9 | 1,396 | 1,571 | 131 | 11 |
+| spill | large_industrial | 1.0 | 1,025,000 | 17.5 | 2,725 | 3,117 | 262 | 16 |
+| spill | large_industrial | 2.0 | 2,050,000 | 28.1 | 5,384 | 6,181 | 522 | 26 |
+| spill | spline_heavy | 1.0 | 10,000 | 0.4 | 101 | 82 | 6 | 5 |
+| spill | block_heavy | 1.0 | 22,440 | 1.4 | 56 | 81 | 3 | 5 |
+
+The budget sweep on `large_industrial` at scale 1.0 (budgets 64, 128 and 256 MiB, same three runs) gives a tracked peak of 2,725 MiB and a process peak RSS of 3,117 MiB at every budget. The spill files do move with the budget (262, 262, 117 MiB on disk, 16, 11, 5 files), the peak does not.
+
+### Decision
+
+**libviprs ships the spill strategy** for the artifact: it is the only one with code, its bytes are the in-memory conversion's for the same configuration (`tests/pvec_1314_spool.rs`), and it takes the artifact out of memory (24 bytes an entity instead of 391 to 419 for the funnel, `docs/adr/pvec-tiers-and-spool-rescope.md`). The two-pass strategy has no code, and the numbers above give no reason to build it: the spill already removes the second pass over the writer's input.
+
+**It does not meet the N8.4 criteria, and I am not claiming it does.** The tracked peak and the peak RSS are within about 1% with and without the spill, at every scale and every budget (2,725 MiB tracked and 3,149 MiB RSS direct, 2,725 and 3,117 MiB with the spill, at 1,025,000 entities) against ceilings of 1,024 and 1,536 MiB, and doubling the entities still moves the tracked peak by 97.6% against a criterion of under 10%. The peak is reached before the writer runs, while the classifier's flattened leaves, view outcome, records and report rows are all alive, and that is the roughly 2.5 KB an entity that sits in libviprs. The spill also costs wall time: 17.5 s against 8.16 s direct at 1,025,000 entities, though the spill rows were taken under load and are marked unstable, so I read that as slower, not as a factor. The criterion that the buffer is the knob also fails, because the peak does not move with the buffer. Meeting the ceiling needs the classifier to hand entities to the writer as it goes instead of collecting them, which is a change in `src/pvec_convert.rs`, not a tuning of the spill. That work is tracked in #1481.
+
+All rows in this section are x86_64 native on MARS. I took no arm64 rows.
 
 `block_heavy` is on the clean side of the N7.5 allocation check: 22,440 entities in 11,220 instances at depth 8 hold a tracked peak of 56 MiB.
-
-**The written decision (which strategy libviprs ships, with the three tables) is not made here.** It needs the two-pass and the external-sort numbers, and neither strategy is built, so #1064 stays open on that line rather than closing on a decision written without the numbers.
 
 ## Tuning the conversion queue (N8.6, #1443)
 
 #1064 asks for each default to be set from the curve that chose it, and for a knob with no curve to be deleted rather than defaulted.
 Looking at what the code actually exposes, the conversion has **one tunable that can be swept**: `PvecConversion::queue_capacity`
 (default 64, the bound of the queue between the classifier and its consumer, `src/sync_queue.rs`). There is no provider or normalization
-worker count (the classifier is one thread and the consumer another), no spool buffer or spill threshold (the spool is not built, pvec#235),
+worker count (the classifier is one thread and the consumer another), the spill budget (`SpillConfig::budget`) is set by the caller, and the sweep above shows the peak does not move with it,
 and PVec's chunk size is PVec's. The two other constants in the conversion code are not throughput knobs, they set how often the run
 looks at the cancel token. So the table has three constants and says which of them was swept.
 
@@ -236,7 +254,7 @@ looks at the cancel token. So the table has three constants and says which of th
 | entities per batch (cancel poll, progress event) | `BATCH` | `src/pvec_convert.rs` | 256 | not swept | not a throughput knob: it bounds how long a cancel waits, one batch of classifications |
 | entities between cancel checks while writing | `CANCEL_EVERY` | `src/pvec/writer.rs` | 1024 | not swept | not a throughput knob: it bounds how long a cancel waits during the write |
 | provider and normalization worker count | none | none | none | none | no such knob exists: one classifier thread, one consumer |
-| spool buffer and spill threshold | none | none | none | none | no spool: pvec#235 |
+| spool buffer and spill threshold | none | none | none | none | caller-set `SpillConfig::budget`; the peak is the same at 64, 128 and 256 MiB |
 | PVec chunk size | none | none | none | none | PVec's own, not exposed by the facade |
 <!-- defaults:end -->
 
