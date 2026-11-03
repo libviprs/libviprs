@@ -1,0 +1,244 @@
+{
+  "schema_version": "pvec-gold/expected.math/1",
+  "fixture_id": "viewport-clipped-bounded-001",
+  "evidence_class": "KNOWN_TRUTH_EXACT",
+  "units": {
+    "name": "metre",
+    "canonical": "metre",
+    "scale_to_canonical": {
+      "decimal": "1.0",
+      "f64_hex": "0x3ff0000000000000"
+    }
+  },
+  "provenance": {
+    "derivation": "AUTHORING_PARAMETERS",
+    "authoring_script": "tools/authoring/author_probes.py",
+    "parameter_file": "tools/authoring/params-r3/viewport-clipped-bounded-001.json",
+    "parameter_file_sha256": "008afadc2aba3b651ce338dcc01e87a6a30e18fe940ba66ac4a67114d3d9c896",
+    "parameters": {
+      "id": "viewport-clipped-bounded-001",
+      "kind": "viewport_clipped_bounded",
+      "description": "The same line and viewport, but the clip is recorded as bounded only: a reader that reports just the bounding box of the clip is right, and one that reports the polygon is also right. Nothing may report a clip outside the bounds.",
+      "layout": "Layout1",
+      "model_curve": {
+        "start": [
+          "1",
+          "1",
+          "0"
+        ],
+        "end": [
+          "9",
+          "7",
+          "0"
+        ]
+      },
+      "viewport": {
+        "center": [
+          "100",
+          "75"
+        ],
+        "width": "80",
+        "height": "60",
+        "view_center": [
+          "5",
+          "4"
+        ],
+        "view_height": "10"
+      },
+      "clip": {
+        "exactness": "BOUNDED_ONLY",
+        "polygon": [
+          [
+            "70",
+            "55"
+          ],
+          [
+            "130",
+            "60"
+          ],
+          [
+            "120",
+            "95"
+          ],
+          [
+            "85",
+            "100"
+          ]
+        ]
+      }
+    }
+  },
+  "entities": [
+    {
+      "id": "viewport-clipped-bounded-001-model-line",
+      "class": "line",
+      "geometry": {
+        "start": [
+          {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          },
+          {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ],
+        "end": [
+          {
+            "decimal": "9.0",
+            "f64_hex": "0x4022000000000000"
+          },
+          {
+            "decimal": "7.0",
+            "f64_hex": "0x401c000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ]
+      },
+      "parameter_domain": {
+        "start": {
+          "decimal": "0.0",
+          "f64_hex": "0x0000000000000000"
+        },
+        "end": {
+          "decimal": "1.0",
+          "f64_hex": "0x3ff0000000000000"
+        }
+      },
+      "closure": {
+        "closed_by_endpoint": false,
+        "closed_by_knots": false,
+        "periodic": false
+      },
+      "structure": "CURVE_ONLY"
+    }
+  ],
+  "assertions": [
+    {
+      "id": "a1",
+      "kind": "STRUCTURAL",
+      "entity": "viewport-clipped-bounded-001-model-line",
+      "claim": "VIEWPORT_COUNT_PRESERVED",
+      "statement": "The layout Layout1 keeps exactly 1 viewport(s); none is dropped or merged."
+    },
+    {
+      "id": "a2",
+      "kind": "STRUCTURAL",
+      "entity": "viewport-clipped-bounded-001-vp",
+      "claim": "VIEWPORT_CLIP_PRESERVED",
+      "statement": "The clip is bounded only: a reader may report the polygon or only its bounding box, never anything outside the bounds."
+    }
+  ],
+  "viewports": [
+    {
+      "id": "viewport-clipped-bounded-001-vp",
+      "layout": "Layout1",
+      "paper": {
+        "center": [
+          {
+            "decimal": "100.0",
+            "f64_hex": "0x4059000000000000"
+          },
+          {
+            "decimal": "75.0",
+            "f64_hex": "0x4052c00000000000"
+          }
+        ],
+        "width": {
+          "decimal": "80.0",
+          "f64_hex": "0x4054000000000000"
+        },
+        "height": {
+          "decimal": "60.0",
+          "f64_hex": "0x404e000000000000"
+        }
+      },
+      "view": {
+        "center": [
+          {
+            "decimal": "5.0",
+            "f64_hex": "0x4014000000000000"
+          },
+          {
+            "decimal": "4.0",
+            "f64_hex": "0x4010000000000000"
+          }
+        ],
+        "height": {
+          "decimal": "10.0",
+          "f64_hex": "0x4024000000000000"
+        }
+      },
+      "clip": {
+        "polygon": [
+          [
+            {
+              "decimal": "70.0",
+              "f64_hex": "0x4051800000000000"
+            },
+            {
+              "decimal": "55.0",
+              "f64_hex": "0x404b800000000000"
+            }
+          ],
+          [
+            {
+              "decimal": "130.0",
+              "f64_hex": "0x4060400000000000"
+            },
+            {
+              "decimal": "60.0",
+              "f64_hex": "0x404e000000000000"
+            }
+          ],
+          [
+            {
+              "decimal": "120.0",
+              "f64_hex": "0x405e000000000000"
+            },
+            {
+              "decimal": "95.0",
+              "f64_hex": "0x4057c00000000000"
+            }
+          ],
+          [
+            {
+              "decimal": "85.0",
+              "f64_hex": "0x4055400000000000"
+            },
+            {
+              "decimal": "100.0",
+              "f64_hex": "0x4059000000000000"
+            }
+          ]
+        ],
+        "bounded_only": true,
+        "bounds": [
+          {
+            "decimal": "70.0",
+            "f64_hex": "0x4051800000000000"
+          },
+          {
+            "decimal": "55.0",
+            "f64_hex": "0x404b800000000000"
+          },
+          {
+            "decimal": "130.0",
+            "f64_hex": "0x4060400000000000"
+          },
+          {
+            "decimal": "100.0",
+            "f64_hex": "0x4059000000000000"
+          }
+        ]
+      }
+    }
+  ]
+}

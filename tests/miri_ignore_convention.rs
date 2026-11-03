@@ -844,7 +844,8 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1093 adds 1: `tests/pvec_api_surface.rs::issue_1093_components_name_no_provider_specific_type`, which scans the source tree. It said 968 before this line moved.
 /// #1495 adds 1: `tests/pvec_1365_pdf_jbig2.rs::the_decoder_is_hayro_jbig2_0_4_and_decodes_strictly_1495`, which reads the manifest and the module. It said 969 before this line moved.
 /// #1495 adds 1 more: `tests/pvec_1365_pdf_jbig2.rs::a_stream_that_lenient_decoding_repairs_is_refused_1495`, which reads the fixtures. It said 970 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 971;
+/// #1505 adds 1: `tests/pvec_corpus_regression.rs::the_document_agrees_with_the_baseline`, which reads the corpus-regression page and the baseline.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 972;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
