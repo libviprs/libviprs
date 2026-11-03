@@ -16,9 +16,10 @@
 //! not covered by `max_pixels`, see the warning below.
 //! The globals stream is counted against the per-stream cap by the extraction that kept it.
 //!
-//! `hayro-jbig2` 0.4.0 still bounds each bitmap's sides (65535) and the symbol count (65535) but not
+//! `hayro-jbig2` 0.4.0 bounds each bitmap's sides (65535) and the symbol count (`1 << 20`, 16
+//! times the 65535 of 0.3.1, so the ceiling on symbol bitmaps is 16 times higher too) but not
 //! what they multiply to, and its arithmetic decoder keeps producing symbols after the data has
-//! run out, so a 134 byte stream found by `fuzz_pvec_pdf_image` made it allocate over 2 GB in
+//! run out, so a 134 byte stream found by `fuzz_pvec_pdf_image` made 0.3.1 allocate over 2 GB in
 //! symbol bitmaps. [`prescan`] closes the part that can be closed from outside: a region larger
 //! than the page is refused, and a symbol dictionary may not declare more new symbols than its
 //! own data has bits. The size of each symbol is still the decoder's to bound, and it does not:

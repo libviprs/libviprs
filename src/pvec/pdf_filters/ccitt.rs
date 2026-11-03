@@ -1,10 +1,11 @@
 //! `CCITTFaxDecode` through `hayro-ccitt` (issue #1363), unconditional: no feature.
 //!
-//! The codec hands back the colour changes of each row; [`Rows`] packs them into one bit per sample, rows padded to bytes,
-//! which is what the colour pipeline reads for any 1-bit gray image. `/BlackIs1 false` (the
-//! default) makes a black pixel a 0 bit, the DeviceGray convention, so a plain scan reads black
-//! on white with no `/Decode`. The output is allocated once at `ceil(width / 8) * height`, and
-//! the pixel budget has already bounded `width * height`, so a hostile stream cannot grow it.
+//! The codec hands back the colour changes of each row; [`Rows`] packs them into one bit per
+//! sample, rows padded to bytes, which is what the colour pipeline reads for any 1-bit gray image.
+//! `/BlackIs1 false` (the default) makes a black pixel a 0 bit, the DeviceGray convention, so a
+//! plain scan reads black on white with no `/Decode`. The output is allocated once at `ceil(width /
+//! 8) * height`, and the pixel budget has already bounded `width * height`, so a hostile stream
+//! cannot grow it.
 //!
 //! `/Columns` (default 1728) and `/Rows` have to agree with `/Width` and `/Height`: a mismatch
 //! is [`FilterError::Parms`], never a silent resize.

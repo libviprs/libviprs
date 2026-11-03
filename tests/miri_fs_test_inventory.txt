@@ -561,6 +561,7 @@ annotated   fs-detected  tests/pvec_1365_pdf_jbig2.rs::a_globals_stream_counts_a
 annotated   fs-detected  tests/pvec_1365_pdf_jbig2.rs::a_halftone_region_decodes
 annotated   fs-detected  tests/pvec_1365_pdf_jbig2.rs::a_page_size_that_disagrees_with_the_dictionary_is_refused
 annotated   fs-detected  tests/pvec_1365_pdf_jbig2.rs::a_pattern_dictionary_in_the_globals_stream_decodes
+annotated   fs-detected  tests/pvec_1365_pdf_jbig2.rs::a_stream_that_lenient_decoding_repairs_is_refused_1495
 annotated   fs-detected  tests/pvec_1365_pdf_jbig2.rs::a_symbol_dictionary_and_text_region_with_arithmetic_coding_decode
 annotated   fs-detected  tests/pvec_1365_pdf_jbig2.rs::a_symbol_dictionary_and_text_region_with_huffman_tables_decode
 annotated   fs-detected  tests/pvec_1365_pdf_jbig2.rs::a_symbol_dictionary_in_the_globals_stream_decodes
