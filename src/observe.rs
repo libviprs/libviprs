@@ -269,6 +269,19 @@ pub enum EngineEvent {
     /// A conversion wrote its artifact (`entities` of them, `bytes` long); it is not published yet.
     ConversionArtifactWritten { entities: u64, bytes: u64 },
 
+    /// A conversion wrote chunk number `chunk` (from 1) of its artifact: a batch of 1024 pushed entities
+    /// (`bytes` is 0) or a write the flush made (`bytes` so far). `entities` is the count pushed so far.
+    /// Emitted before `ConversionArtifactWritten` (issue #1463).
+    ConversionChunkWritten {
+        chunk: u64,
+        entities: u64,
+        bytes: u64,
+    },
+
+    /// A conversion streamed its artifact through the spill writer: `bytes` long. Emitted before
+    /// `ConversionArtifactWritten`, and only when a spill root was given (issue #1048).
+    ConversionSpoolSpilled { bytes: u64 },
+
     /// A conversion published its artifact and report. The last event of a successful run.
     ConversionPublished,
 
@@ -363,6 +376,8 @@ impl EngineEvent {
             Self::ConversionViewResolved { .. } => "conversion_view_resolved",
             Self::ConversionBatchNormalized { .. } => "conversion_batch_normalized",
             Self::ConversionArtifactWritten { .. } => "conversion_artifact_written",
+            Self::ConversionChunkWritten { .. } => "conversion_chunk_written",
+            Self::ConversionSpoolSpilled { .. } => "conversion_spool_spilled",
             Self::ConversionPublished => "conversion_published",
             Self::ConversionDiagnostic { .. } => "conversion_diagnostic",
             Self::PipelineComplete => "pipeline_complete",

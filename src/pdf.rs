@@ -44,7 +44,7 @@ pub enum PdfError {
     #[error("pdfium error: {0}")]
     Pdfium(String),
     #[error(
-        "budget exceeded: worst-case strip {strip_bytes} bytes > budget {budget_bytes} bytes (at DPI {dpi})"
+        "budget exceeded: worst-case allocation {strip_bytes} bytes (a strip, or the whole page for a cached source) > budget {budget_bytes} bytes (at DPI {dpi})"
     )]
     BudgetExceeded {
         strip_bytes: u64,
