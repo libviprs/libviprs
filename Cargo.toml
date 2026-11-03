@@ -327,8 +327,8 @@ proptest = "1"
 # crate cannot be published to crates.io while the line below stands: swap it
 # for a registry version in the same change that publishes `acadsharp-rs`.
 acadsharp-rs = { git = "https://github.com/libviprs/acadsharp-rs", rev = "f23f37bd453e02e660ef655faa381c45509d8ac1", version = "0.1.0" }
-# The pure-Rust DWG reader the first `pvec` provider uses (issue #1072), optional and
-# off by default. It is libviprs' own fork of hakanaktt/acadrust (MPL-2.0, a crate
+# The pure-Rust DWG reader the first `pvec` provider uses (issue #1072), optional, and on
+# by default through the `dwg-acadrust` feature. It is libviprs' own fork of hakanaktt/acadrust (MPL-2.0, a crate
 # dependency and never vendored, so the MPL stays file-level on the fork). It is a git
 # dependency pinned by a full revision for the same reason as `acadsharp-rs` above, and
 # the same consequence follows: this crate cannot be published to crates.io while the
@@ -538,7 +538,11 @@ deprecated_in_future = "deny"
 incompatible_msrv = "warn"
 
 [features]
-default = []
+# acadrust is the default DWG provider (Rom's decision, 2026-11-03), so `dwg-acadrust` is the
+# one default feature. It is pure Rust and needs nothing installed. acadsharp-rs is an
+# experiment and `dwg-acadsharp` is never reachable from `default`
+# (`tests/pvec_1079_provider_default.rs` holds both).
+default = ["dwg-acadrust"]
 pdfium = ["dep:pdfium-render"]
 pdfium-static = ["pdfium", "pdfium-render/static"]
 # `object-store-sink` gates both halves of the injected-backend seam. Writing:
@@ -551,7 +555,8 @@ pdfium-static = ["pdfium", "pdfium-render/static"]
 # The name reflects that this is a generic object-store seam requiring an
 # injected backend, not a ready-to-use S3 client.
 object-store-sink = []
-# The `acadsharp-rs` DWG provider behind `cad::CadDecoder` (issue #1030). The
+# EXPERIMENTAL. The `acadsharp-rs` DWG provider behind `cad::CadDecoder` (issue #1030). It is
+# opt-in, kept and not removed, and acadrust is the default provider instead. The
 # CAD-neutral core (`cad`) is not behind a feature and builds without this one;
 # this feature only adds `cad::acadsharp::AcadSharpDecoder`. It needs no .NET at
 # run time: `acadsharp-rs` links a NativeAOT archive that its own build script
@@ -559,7 +564,7 @@ object-store-sink = []
 # from `AcadSharpDecoder::new` instead of failing.
 dwg-acadsharp = ["dep:acadsharp-rs"]
 # The acadrust DWG provider behind `pvec::DwgProvider` (issue #1072), the first one
-# Epic N's analytic path reads through (the decision on #1239). Pure Rust: no `links`
+# Epic N's analytic path reads through (the decision on #1239), and a default feature. Pure Rust: no `links`
 # key, no native archive, no runtime loader, so unlike `dwg-acadsharp` it needs nothing
 # installed. `pvec` itself is not behind a feature and builds without this one; this
 # only adds `pvec::dwg_acadrust::AcadrustProvider`. The existing `cad::CadDecoder` path,

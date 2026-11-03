@@ -59,7 +59,8 @@
 //!   `pvec::pdf_image` through `hayro-jbig2`; implies `pvec-raster`.
 //! - **`jp2k`** — gates the JPEG 2000 loader and encoder: [`decode_jp2k`],
 //!   [`Raster::encode_jp2k`] and [`Raster::save_jp2k`].
-//! - **`dwg-acadsharp`** — gates [`cad::acadsharp`], the `acadsharp-rs` DWG
+//! - **`dwg-acadsharp`** — experimental, off by default; acadrust is the default
+//!   DWG provider. Gates [`cad::acadsharp`], the `acadsharp-rs` DWG
 //!   provider behind [`cad::CadDecoder`] (`AcadSharpDecoder`). It needs no .NET
 //!   at run time, since `acadsharp-rs` links a NativeAOT archive its own build
 //!   script resolves; a build with no archive still compiles and
@@ -67,7 +68,8 @@
 //!   The CAD-neutral [`cad`] core is not behind a feature.
 //! - **`dwg-acadrust`** — gates `pvec::dwg_acadrust::AcadrustProvider`, the first
 //!   DWG provider behind the replaceable `pvec::DwgProvider` traits. Pure Rust,
-//!   nothing to install; `acadrust` is a git dependency pinned by revision.
+//!   nothing to install; `acadrust` is a git dependency pinned by revision, on our fork.
+//!   On by default.
 //! - **`pvec-normalized`** — gates `pvec::normalized`, `Normalized2DGeometry`, the thin
 //!   adapter over PVec's public curve model (`pvec-geometry`, with the numeric policy
 //!   under it). Pure Rust; both PVec crates are git dependencies pinned by revision.

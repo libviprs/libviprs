@@ -732,7 +732,7 @@ annotated   fs-detected  tests/pvec_provider_acadrust.rs::open_works_from_bytes_
 annotated   fs-detected  tests/pvec_provider_acadrust.rs::the_fixtures_are_the_ones_n1_4_recorded_and_say_what_they_are
 annotated   fs-detected  tests/pvec_provider_bench.rs::provider_bench
 annotated   fs-detected  tests/pvec_provider_boundary.rs::acadrust_is_a_git_dependency_pinned_by_a_full_revision
-annotated   fs-detected  tests/pvec_provider_boundary.rs::acadrust_is_optional_and_only_the_feature_turns_it_on
+annotated   fs-detected  tests/pvec_provider_boundary.rs::acadrust_is_optional_and_the_default_dwg_acadrust_feature_turns_it_on
 annotated   fs-detected  tests/pvec_provider_boundary.rs::no_foreign_type_appears_in_any_public_signature_of_the_provider_module
 annotated   fs-detected  tests/pvec_provider_boundary.rs::the_acadrust_provider_names_no_reader_type_in_a_public_signature
 annotated   fs-detected  tests/pvec_provider_boundary.rs::the_gate_zero_harness_pins_the_same_revision_as_the_crate
