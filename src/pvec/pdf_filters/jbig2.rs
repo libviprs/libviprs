@@ -11,7 +11,9 @@
 //!
 //! Limits: the page size is read from the stream and compared with `/Width` and `/Height`
 //! before anything is decoded, and the caller has already held those to `max_pixels`, so the
-//! page bitmap the decoder allocates is bounded by the same budget as every other codec's.
+//! page bitmap the decoder allocates is bounded by the same budget as every other codec's. That
+//! is the page bitmap only: the decoder's own working memory (symbol bitmaps, halftone grids) is
+//! not covered by `max_pixels`, see the warning below.
 //! The globals stream is counted against the per-stream cap by the extraction that kept it.
 //!
 //! `hayro-jbig2` 0.3.1 bounds each bitmap's sides (65535) and the symbol count (65535) but not
@@ -26,6 +28,9 @@
 //! The other fuzz findings (an `export_symbols` loop that never ends, a halftone grid of billions
 //! of cells, empty height classes) are in arithmetic coded data too. All are reported upstream
 //! (`LaurenzV/hayro` #1700, #1701, #1550, #1598) and kept as ignored tests.
+//!
+//! Do not enable `jbig2` on untrusted PDFs yet: a small crafted stream can still allocate several
+//! GB (6.4 GB in #1550) or never return (#1700) in `hayro-jbig2` 0.3.1.
 
 #[cfg(feature = "jbig2")]
 use crate::pvec::pdf_image::FilterError;
