@@ -629,12 +629,12 @@ impl<'a> PvecConversion<'a> {
         };
         // What both paths do once the artifact is written: tell the observer, close the report against
         // what went in, and stage the georeference sidecar. It runs once, so it takes the rows.
+        // With no `written` (PVec refused every curve) there is no artifact, so the report is closed
+        // against nothing written, the observer is not told, and no sidecar is staged.
         // The tally is sealed here and not at classification: an entity the classifier called
         // supported can still be one PVec's container refuses, and it is counted as that.
         let seal =
-            |bounds: &BoundsReport,
-             written: u64,
-             length: u64,
+            |written: Option<(&BoundsReport, u64, u64)>,
              refused: &[(EntityId, String)]|
              -> Result<(ConversionReport, FidelityReport, String), PvecConvertError> {
                 for (id, rule) in refused {
@@ -649,27 +649,31 @@ impl<'a> PvecConversion<'a> {
                     rows.refuse(*id, &to, format!("PVec's writer refused it ({rule})"));
                 }
                 let fidelity = tally.finish(encountered).map_err(PvecConvertError::Tally)?;
-                tell(EngineEvent::ConversionArtifactWritten {
-                    entities: written,
-                    bytes: length,
-                });
+                if let Some((_, entities, bytes)) = written {
+                    tell(EngineEvent::ConversionArtifactWritten { entities, bytes });
+                }
                 let mut report = rows
                     .finish(
                         encountered,
                         view,
                         xrefs,
                         BoundsSplit {
-                            exact: bounds.exact_count() as u64,
-                            hull_upper_bound: bounds.hull_count() as u64,
+                            exact: written.map_or(0, |(b, ..)| b.exact_count() as u64),
+                            hull_upper_bound: written.map_or(0, |(b, ..)| b.hull_count() as u64),
                         },
                     )
                     .map_err(PvecConvertError::Report)?;
                 report.capabilities = Some(gate.summary());
                 report.diagnostics = diagnostics;
-                report.georeference = sidecar
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned());
+                report.georeference = written.and(
+                    sidecar
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned()),
+                );
                 let json = report.to_json_string().map_err(PvecConvertError::Report)?;
+                let Some((bounds, ..)) = written else {
+                    return Ok((report, fidelity, json));
+                };
                 GeoreferenceHandoff::V1(HandoffV1 {
                     bounds: bounds.drawing_bounds().map(|b| SourceBox {
                         min: [b.min().x, b.min().y],
@@ -695,13 +699,22 @@ impl<'a> PvecConversion<'a> {
         };
         let items = || geometries.iter().map(|(id, g)| (*id, g));
         let published = match &spill {
-            None => write_geometry(&config, items(), Vec::new(), &cancel, &mut on_chunk)
-                .map_err(write_error)
-                .and_then(|artifact| {
+            None => match write_geometry(&config, items(), Vec::new(), &cancel, &mut on_chunk) {
+                Err(WriteError::AllRefused(refused)) => {
+                    seal(None, &refused).and_then(|(report, fidelity, _)| {
+                        Err(PvecConvertError::NothingStorable {
+                            report: Box::new(report),
+                            fidelity: Box::new(fidelity),
+                        })
+                    })
+                }
+                written => written.map_err(write_error).and_then(|artifact| {
                     let (report, fidelity, json) = seal(
-                        &artifact.bounds,
-                        artifact.written,
-                        artifact.bytes.len() as u64,
+                        Some((
+                            &artifact.bounds,
+                            artifact.written,
+                            artifact.bytes.len() as u64,
+                        )),
                         &artifact.refused,
                     )?;
                     publish(dest, &artifact.bytes, json.as_bytes(), &cancel, &mut |_| {}).map_err(
@@ -712,10 +725,11 @@ impl<'a> PvecConversion<'a> {
                     )?;
                     Ok((report, fidelity, artifact.written))
                 }),
+            },
             Some(spill) => {
                 let mut sealed = None;
                 publish_streamed(dest, &cancel, &mut |_| {}, |out| {
-                    let artifact = write_geometry_to(
+                    let artifact = match write_geometry_to(
                         &config,
                         items(),
                         Vec::new(),
@@ -723,15 +737,21 @@ impl<'a> PvecConversion<'a> {
                         &cancel,
                         &mut on_chunk,
                         out,
-                    )
-                    .map_err(write_error)?;
+                    ) {
+                        Err(WriteError::AllRefused(refused)) => {
+                            let (report, fidelity, _) = seal(None, &refused)?;
+                            return Err(PvecConvertError::NothingStorable {
+                                report: Box::new(report),
+                                fidelity: Box::new(fidelity),
+                            });
+                        }
+                        other => other.map_err(write_error)?,
+                    };
                     tell(EngineEvent::ConversionSpoolSpilled {
                         bytes: artifact.length,
                     });
                     let (report, fidelity, json) = seal(
-                        &artifact.bounds,
-                        artifact.written,
-                        artifact.length,
+                        Some((&artifact.bounds, artifact.written, artifact.length)),
                         &artifact.refused,
                     )?;
                     sealed = Some((report, fidelity, artifact.written));
