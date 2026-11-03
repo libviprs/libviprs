@@ -40,7 +40,7 @@ capability not allowed, cancelled. After any error the destination, its report a
 ## Progress, cancellation, backpressure
 
 The classifier and its consumer meet in a bounded queue (default 64, `queue_capacity`), the observer hears the stages as `EngineEvent`s, and the
-cancel token is polled once per batch of 256 entities and during the write. Cancel during a spool flush is open: there is no spool yet.
+cancel token is polled once per batch of 256 entities and during the write. A cancel that fires during a spool flush stops the write there (#1463).
 
 ## What it writes
 

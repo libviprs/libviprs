@@ -14,9 +14,10 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = { workspace = true }
 arbitrary = { workspace = true }
-libviprs = { workspace = true, features = ["pvec-raster", "pvec-normalized", "pvec-spline"] }
+libviprs = { workspace = true, features = ["pvec-raster", "pvec-normalized", "pvec-spline", "pvec-write"] }
 lopdf = { workspace = true }
 flate2 = { workspace = true }
+tempfile = { workspace = true }
 
 [features]
 # `cargo fuzz run fuzz_pvec_pdf_image --features jbig2` fuzzes the JBIG2 decoder too (issue #1365).
@@ -93,4 +94,9 @@ doc = false
 [[bin]]
 name = "fuzz_pvec_clip"
 path = "fuzz_targets/fuzz_pvec_clip.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_pvec_spool"
+path = "fuzz_targets/fuzz_pvec_spool.rs"
 doc = false
