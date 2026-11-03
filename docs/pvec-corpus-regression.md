@@ -1,7 +1,7 @@
 # Corpus regression report
 
 This is the conversion equivalent of `docs/pmtiles-benchmarks.md`: every fixture of the pinned
-`pvec-gold-fixtures` revision (`r2-open`, vendored under `tests/fixtures/pvec-gold/`, 57 fixtures) goes through
+`pvec-gold-fixtures` revision (`r3-open`, vendored under `tests/fixtures/pvec-gold/`, 60 fixtures) goes through
 `PvecConversion`, and three sections are recorded for each one. The deterministic columns are the
 committed baseline, `tests/fixtures/pvec_corpus_baseline.json`, and the diff against it runs in the ordinary
 suite (`tests/pvec_corpus_regression.rs`, `the_corpus_does_not_regress`). Nothing in it runs a converter.
@@ -37,9 +37,9 @@ LIBVIPRS_BENCH_HOST=mars LIBVIPRS_CORPUS_BASELINE_OUT=tests/fixtures/pvec_corpus
 
 ## The current report
 
-57 fixtures: 38 `KNOWN_TRUTH_EXACT`, 18 `QUARANTINED`, 1 `DUAL_ORACLE_EQUIVALENT`, 0 `REAL_WORLD_DIFFERENTIAL`.
-34 convert; the other 23 are refused, and every refusal is in the baseline with its error chain. Total `.pvec`
-bytes over the corpus: 18,024. Timings and RSS below were taken on MARS (native x86_64), release build, one run each, and are
+60 fixtures: 41 `KNOWN_TRUTH_EXACT`, 18 `QUARANTINED`, 1 `DUAL_ORACLE_EQUIVALENT`, 0 `REAL_WORLD_DIFFERENTIAL`.
+38 convert; the other 22 are refused, and every refusal is in the baseline with its error chain. Total `.pvec`
+bytes over the corpus: 20,440. Timings and RSS below were taken on MARS (native x86_64), release build, one run each, and are
 not gated: peak RSS of the whole run 9596928 bytes.
 
 | fixture | evidence class | conformance | leaves kept | entities | .pvec bytes | wall (ms) | platform |
@@ -71,7 +71,7 @@ not gated: peak RSS of the whole run 9596928 bytes.
 | line-001 | KNOWN_TRUTH_EXACT | SupportedEquivalent | 1 | 1 | 352 | 9.9 | x86_64-linux-mars |
 | lwpolyline-closed-001 | KNOWN_TRUTH_EXACT | SupportedExact | 1 | 1 | 368 | 2.4 | x86_64-linux-mars |
 | mesh-001 | QUARANTINED | NoGeometry | null | 1 | 0 | 0.9 | x86_64-linux-mars |
-| mixed-entity-001 | KNOWN_TRUTH_EXACT | NoGeometry | null | 8 | 0 | 0.8 | x86_64-linux-mars |
+| mixed-entity-001 | KNOWN_TRUTH_EXACT | SupportedEquivalent | 8 | 8 | 1384 | 3.5 | x86_64-linux-mars |
 | mtext-001 | QUARANTINED | NoGeometry | null | 1 | 0 | 0.8 | x86_64-linux-mars |
 | near-singular-001 | KNOWN_TRUTH_EXACT | NoGeometry | null | 0 | 0 | 0.7 | x86_64-linux-mars |
 | nested-blocks-001 | KNOWN_TRUTH_EXACT | SupportedEquivalent | 1 | 1 | 352 | 2.6 | x86_64-linux-mars |
@@ -111,9 +111,10 @@ The `QUARANTINED` fixtures are the entity classes the mapping does not carry yet
 IMAGE, MESH, REGION, 3DSOLID and the rest), refused with their reason code. Two things in the table are not that and are
 worth reading:
 
-- `bulge-arc-001`, `bulge-arc-neg-001` and `mixed-entity-001` are `KNOWN_TRUTH_EXACT`. The classifier calls their
-  entities supported, and then PVec's container refuses the curve with `WRT-08` ("a curve the container cannot store exactly
-  and deterministically"), which fails the whole conversion instead of being counted against the one entity. That is a
-  defect of the conversion path (#1446), and it is why these rows say `NoGeometry` with a refusal.
+- `bulge-arc-001` and `bulge-arc-neg-001` are `KNOWN_TRUTH_EXACT` and are refused with "no entity carries geometry":
+  PVec's writer refuses every curve of the fixture (`WRT-08`), the conversion then has nothing to write and fails
+  as a whole, which is why these rows say `NoGeometry` with a refusal (open issue #1480). `mixed-entity-001` used to
+  be refused alongside them (#1446, closed); it now converts, with 7 of its 8 entities written, and its row is
+  `SupportedEquivalent`.
 - `singular-001` and `near-singular-001` are refused at block expansion with `TRANSFORM_SINGULAR (NP-19)`, which is the
   expected outcome for a singular transform.
