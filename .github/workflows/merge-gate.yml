@@ -148,7 +148,8 @@ jobs:
   # lives is a single feature flag away: `src/avif.rs` carries ten real blocks,
   # a dav1d FFI boundary with an `unsafe extern "C"`, a raw pointer `as_ref()`
   # and pointer arithmetic with an unaligned read. All of it is behind
-  # `#[cfg(feature = "avif")]`, and `default = []`, so a bare `cargo miri test`
+  # `#[cfg(feature = "avif")]`, and `avif` is not a default feature (`default` is only
+  # `dwg-acadrust`, pure Rust), so a bare `cargo miri test`
   # compiles every one of them out. Running Miri with `--features avif` would
   # not, and that is the interesting case rather than a hazard to avoid.
   #

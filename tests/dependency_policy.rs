@@ -406,6 +406,18 @@ const CELLS: &[Cell] = &[
     // contributor's machine. `generator` is loom's coroutine crate; it
     // assembles its own vendored stack-switching `.s` files, so it lands under
     // clause 3 the same way blake3 does.
+    // Opting out of the defaults drops acadrust, and with it the PVec git crates and
+    // everything they bring, which is the build for a caller that wants no DWG reader.
+    Cell {
+        label: "host / no default features",
+        target: HOST,
+        features: &["--no-default-features"],
+        edges: "normal,build",
+        links: &[RAYON],
+        discovery: &[],
+        runtime_loaders: &[],
+        vendored_native: BLAKE3,
+    },
     Cell {
         label: "host / default + dev-dependencies",
         target: HOST,
@@ -509,7 +521,8 @@ const CELLS: &[Cell] = &[
         runtime_loaders: LIBLOADING,
         vendored_native: BLAKE3_RAV1D_ZSTD,
     },
-    // wasm32 is where the third `links` key lives. `packfile` is what puts it
+    // wasm32 is where the third `links` key lives. The default build has it too now, through
+    // acadrust (`dwg-acadrust` is a default feature). `packfile` also puts it
     // there: `zip` turns on `getrandom`'s `wasm_js` backend and pulls `time`'s
     // wasm clock through `js-sys`, and both reach `wasm-bindgen`. It is also
     // the one target where the pdfium features carry no `libloading`, since
@@ -520,7 +533,7 @@ const CELLS: &[Cell] = &[
         target: WASM,
         features: &[],
         edges: "normal,build",
-        links: &[RAYON],
+        links: &[RAYON, WASM_BINDGEN],
         discovery: &[],
         runtime_loaders: &[],
         vendored_native: BLAKE3,
@@ -974,29 +987,30 @@ fn the_external_library_features_stay_opt_in() {
             cell.label
         );
 
-        let asked_for_acadrust = cell
-            .features
-            .iter()
-            .any(|f| f.contains("dwg-acadrust") || f.contains("pvec-convert"))
-            || cell.features.contains(&"--all-features");
+        // acadrust is the default DWG provider, so `dwg-acadrust` is a default feature and
+        // every cell reaches acadrust unless it opts out of the defaults.
+        let no_defaults = cell.features.contains(&"--no-default-features");
         assert_eq!(
             contains(graph, "acadrust"),
-            asked_for_acadrust,
-            "{} must reach acadrust only under `dwg-acadrust`. It is pure Rust and ships no \
-             native code, but it is a git dependency, so it stays opt-in (CONTRIBUTING.md).",
+            !no_defaults,
+            "{} must reach acadrust through the default `dwg-acadrust` feature, and only \
+             there. It is pure Rust and ships no native code, but it is a git dependency \
+             (CONTRIBUTING.md).",
             cell.label
         );
 
         // `pvec-raster` brings the PVec facade, and the facade depends on `pvec-geometry` and
         // `pvec-numeric` itself, so it reaches both.
-        let asked_for_pvec = cell.features.iter().any(|f| {
-            f.contains("pvec-normalized")
-                || f.contains("pvec-raster")
-                || f.contains("pvec-write")
-                || *f == "jbig2"
-                || f.contains("dwg-acadrust")
-                || f.contains("pvec-convert")
-        }) || cell.features.contains(&"--all-features");
+        let asked_for_pvec = !no_defaults
+            || cell.features.iter().any(|f| {
+                f.contains("pvec-normalized")
+                    || f.contains("pvec-raster")
+                    || f.contains("pvec-write")
+                    || *f == "jbig2"
+                    || f.contains("dwg-acadrust")
+                    || f.contains("pvec-convert")
+            })
+            || cell.features.contains(&"--all-features");
         assert_eq!(
             contains(graph, "pvec-geometry"),
             asked_for_pvec,
