@@ -115,6 +115,7 @@ fn issue_1314_the_streamed_artifact_is_the_in_memory_one_for_every_budget() {
         all.iter().copied().zip(&geoms),
         Vec::new(),
         &CancelToken::new(),
+        &mut |_, _| {},
     )
     .unwrap();
     for budget in [0u64, 1, 4096, 1 << 20, 64 << 20] {
@@ -126,6 +127,7 @@ fn issue_1314_the_streamed_artifact_is_the_in_memory_one_for_every_budget() {
             Vec::new(),
             &spill_in(root.path(), budget),
             &CancelToken::new(),
+            &mut |_, _| {},
             &mut sink,
         )
         .unwrap();
@@ -153,6 +155,7 @@ fn issue_1314_the_spill_files_stay_under_the_root_and_are_gone_after() {
         Vec::new(),
         &spill_in(root.path(), 4096),
         &CancelToken::new(),
+        &mut |_, _| {},
         &mut sink,
     )
     .unwrap();
@@ -184,6 +187,7 @@ fn issue_1314_a_cancel_during_the_flush_returns_cancelled_and_leaves_no_spool_fi
             Vec::new(),
             &spill_in(root.path(), 4096),
             &token,
+            &mut |_, _| {},
             &mut sink,
         );
         assert!(
@@ -222,6 +226,7 @@ fn issue_1314_a_failing_sink_is_a_pvec_error_with_the_io_error_underneath_and_no
         Vec::new(),
         &spill_in(root.path(), 4096),
         &CancelToken::new(),
+        &mut |_, _| {},
         &mut Full(64),
     );
     let err = r.expect_err("the sink fills up");
@@ -243,6 +248,7 @@ fn issue_1314_a_streamed_publish_writes_the_pair_and_leaves_nothing_else() {
         all.iter().copied().zip(&geoms),
         Vec::new(),
         &CancelToken::new(),
+        &mut |_, _| {},
     )
     .unwrap();
     publish_streamed(&dest, &CancelToken::new(), &mut |_| {}, |out| {
@@ -252,6 +258,7 @@ fn issue_1314_a_streamed_publish_writes_the_pair_and_leaves_nothing_else() {
             Vec::new(),
             &spill_in(root.path(), 4096),
             &CancelToken::new(),
+            &mut |_, _| {},
             out,
         )
         .map(|_| b"{\"v\":1}".to_vec())
@@ -277,6 +284,7 @@ fn issue_1314_a_cancel_during_the_flush_of_a_streamed_publish_keeps_the_previous
         all.iter().copied().take(10).zip(&geoms),
         Vec::new(),
         &CancelToken::new(),
+        &mut |_, _| {},
     )
     .unwrap()
     .bytes;
@@ -307,6 +315,7 @@ fn issue_1314_a_cancel_during_the_flush_of_a_streamed_publish_keeps_the_previous
             Vec::new(),
             &spill_in(root.path(), 4096),
             &token,
+            &mut |_, _| {},
             &mut Tap {
                 inner: out,
                 token: &token,
@@ -364,4 +373,40 @@ fn issue_1314_a_producer_error_is_returned_as_the_producers_and_leaves_nothing()
     assert!(matches!(r, Err(StreamedPublishError::Produce(_))), "{r:?}");
     assert!(entries(dir.path()).is_empty());
     assert_eq!(seen.first(), Some(&Stage::ArtifactWriting));
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1314_a_panic_during_the_flush_leaves_no_spool_file() {
+    struct Boom(usize);
+    impl Write for Boom {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            assert!(self.0 > buf.len(), "boom in the sink");
+            self.0 -= buf.len();
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let geoms = drawing(3000);
+    let all = ids(geoms.len());
+    let root = tempfile::tempdir().unwrap();
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = write_geometry_to(
+            &indexed(),
+            all.into_iter().zip(&geoms),
+            Vec::new(),
+            &spill_in(root.path(), 4096),
+            &CancelToken::new(),
+            &mut |_, _| {},
+            &mut Boom(256),
+        );
+    }));
+    assert!(r.is_err(), "the sink was meant to panic");
+    assert!(
+        entries(root.path()).is_empty(),
+        "{:?}",
+        entries(root.path())
+    );
 }

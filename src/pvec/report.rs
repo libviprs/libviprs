@@ -272,6 +272,18 @@ impl ReportBuilder {
         self.rows.push(row);
     }
 
+    /// Rewrites the row of `id` to a refusing class, for an entity the writer refused after it was
+    /// classified. The row loses its semantic type and gains `warning`. Nothing happens when no
+    /// row has that id.
+    pub fn refuse(&mut self, id: EntityId, classification: &Classification, warning: String) {
+        if let Some(r) = self.rows.iter_mut().find(|r| r.id == id.get()) {
+            r.fidelity = classification.class().tag().to_owned();
+            r.reason = classification.reason().map(|c| c.code().to_owned());
+            r.semantic_type = None;
+            r.warnings.push(warning);
+        }
+    }
+
     /// Closes the report against the number of entities the conversion saw arrive, counted
     /// independently of the rows.
     ///
