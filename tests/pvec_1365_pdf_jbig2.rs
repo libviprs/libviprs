@@ -349,6 +349,47 @@ mod enabled {
         only(&b);
     }
 
+    /// #1492: the Flate stage on `/JBIG2Globals` gets the room an image stream of this size gets,
+    /// not the default per-stream cap, so a deflate bomb in the globals is refused while inflating.
+    #[test]
+    fn a_flate_bomb_in_the_globals_is_capped_by_the_image_size_1492() {
+        use flate2::{Compression, write::ZlibEncoder};
+        use std::io::Write;
+        let mut z = ZlibEncoder::new(Vec::new(), Compression::best());
+        z.write_all(&vec![0u8; 8 << 20]).unwrap();
+        let bomb = z.finish().unwrap();
+        assert!(
+            bomb.len() < 64 << 10,
+            "the bomb has to be small on the wire"
+        );
+        let mut d = doc();
+        let id = d.add_object(Stream::new(dictionary! { "Filter" => "FlateDecode" }, bomb));
+        let bytes = pdf(
+            d,
+            Resources::images(vec![(
+                "Im1",
+                Object::Stream(jbig2(
+                    163,
+                    109,
+                    vec![0; 16],
+                    dictionary! { "DecodeParms" => dictionary! { "JBIG2Globals" => Object::Reference(id) } },
+                )),
+            )]),
+            b"q 163 0 0 109 0 0 cm /Im1 Do Q",
+        );
+        let limits = PdfVectorLimits {
+            max_image_stream_bytes: 2 << 20,
+            ..PdfVectorLimits::default()
+        };
+        let page = extract_page_paths_from_bytes(&bytes, 1, &limits).unwrap();
+        let b = bake_page_images(&page, &PdfImageOptions::default());
+        assert!(
+            matches!(b.refused[0].error, PdfImageError::Pdf(_)),
+            "the inflate should have hit its cap, got {:?}",
+            b.refused[0].error
+        );
+    }
+
     #[test]
     #[cfg_attr(miri, ignore)] // reads the fixtures from disk
     fn the_refusals_are_typed() {
