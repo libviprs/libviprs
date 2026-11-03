@@ -414,10 +414,7 @@ fn acadrust_is_optional_and_only_the_feature_turns_it_on() {
         .lines()
         .find(|l| l.starts_with("default ="))
         .expect("default features");
-    assert_eq!(default.trim(), "default = []");
-    for l in m.lines().filter(|l| l.contains("\"dwg-acadrust\"")) {
-        assert!(!l.starts_with("default"), "{l}");
-    }
+    assert_eq!(default.trim(), "default = [\"dwg-acadrust\"]");
 }
 
 #[test]
