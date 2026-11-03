@@ -522,6 +522,24 @@ mod enabled {
         assert!(refused_reason(stream).contains("4000x4000"));
     }
 
+    /// #1493: an intermediate region (types 4, 20, 36, 40) larger than the page is refused by the
+    /// prescan like the immediate and lossless forms are, whatever else the segment holds.
+    #[test]
+    fn an_oversized_intermediate_region_is_refused_before_it_is_allocated_1493() {
+        for kind in [4u8, 20, 36, 40] {
+            let mut d = 1_000_000u32.to_be_bytes().to_vec();
+            d.extend(1_000_000u32.to_be_bytes());
+            d.extend([0; 9]);
+            let mut stream = page_info();
+            stream.extend(segment(1, kind, &d));
+            let reason = refused_reason(stream);
+            assert!(
+                reason.contains("1000000x1000000 region on a 8x8 page"),
+                "type {kind}: {reason}"
+            );
+        }
+    }
+
     #[test]
     #[cfg_attr(miri, ignore)] // reads the fixtures from disk
     fn garbage_is_a_refusal() {

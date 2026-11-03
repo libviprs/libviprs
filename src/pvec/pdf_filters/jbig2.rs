@@ -42,11 +42,12 @@ pub(in crate::pvec) fn decode(input: FilterInput<'_>) -> Result<FilterOutput, Pd
 
 /// Refuse what a segment header says before the decoder allocates for it (T.88 7.2 and 7.4).
 ///
-/// Walks the sequential segment headers of `stream`. A region segment (text 6 to 7, halftone 22
-/// to 23, generic 38 to 39, refinement 42 to 43) that is wider or taller than the page, or a
-/// symbol dictionary (type 0) whose `SDNUMNEWSYMS` is over eight times its data length, is an
-/// error. A segment of unknown length ends the walk: only an immediate generic region may have
-/// one, and its header is read first.
+/// Walks the sequential segment headers of `stream`. A region segment (text 4 and 6 to 7,
+/// halftone 20 and 22 to 23, generic 36 and 38 to 39, refinement 40 and 42 to 43, so the
+/// intermediate forms too) that is wider or taller than the page, or a symbol dictionary (type 0)
+/// whose `SDNUMNEWSYMS` is over eight times its data length, is an error. A segment of unknown
+/// length ends the walk: only an immediate generic region may have one, and its header is read
+/// first.
 #[cfg(feature = "jbig2")]
 fn prescan(stream: &[u8], width: u32, height: u32) -> Result<(), String> {
     let be32 = |at: usize| -> Option<u32> {
@@ -88,7 +89,7 @@ fn prescan(stream: &[u8], width: u32, height: u32) -> Result<(), String> {
             .get(at..end.min(stream.len()))
             .ok_or_else(truncated)?;
         match flags & 0x3F {
-            6 | 7 | 22 | 23 | 38 | 39 | 42 | 43 => {
+            4 | 6 | 7 | 20 | 22 | 23 | 36 | 38 | 39 | 40 | 42 | 43 => {
                 let w = be32(at).ok_or_else(truncated)?;
                 let h = be32(at + 4).ok_or_else(truncated)?;
                 if w > width || h > height {
