@@ -110,6 +110,10 @@ pub enum WriteError {
     /// No entity carried geometry, so there is no artifact to write.
     #[error("no entity carries geometry")]
     NoGeometry,
+    /// Entities carried geometry and PVec's writer refused every one, so there is no artifact to
+    /// write. Each is listed with the writer rule that refused it, in id order.
+    #[error("PVec's writer refused every curve")]
+    AllRefused(Vec<(EntityId, String)>),
     /// The cancel token fired. Nothing was written.
     #[error("cancelled")]
     Cancelled,

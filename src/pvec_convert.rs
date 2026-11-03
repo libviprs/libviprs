@@ -128,6 +128,16 @@ pub enum PvecConvertError {
     /// The writer refused.
     #[error("the artifact could not be written")]
     Write(#[source] WriteError),
+    /// PVec's writer refused every curve, so there is no artifact. The report and the counts say
+    /// what each entity was, with the refused ones counted as `pvec-cannot-store`; nothing was
+    /// published.
+    #[error("PVec's writer refused every curve, so no artifact was written")]
+    NothingStorable {
+        /// The conversion report, as it would have been published beside the artifact.
+        report: Box<ConversionReport>,
+        /// Entities per fidelity class, counted independently of the report rows.
+        fidelity: Box<FidelityReport>,
+    },
     /// The class counts disagree with the entities met.
     #[error("the class counts do not add up")]
     Tally(#[source] TallyError),
@@ -1192,6 +1202,9 @@ impl PvecConvertError {
             }
             PvecConvertError::UnitRequired => d(DiagnosticCode::UnitRequired, "unit-required"),
             PvecConvertError::Write(_) => d(DiagnosticCode::WriteFailed, "write"),
+            PvecConvertError::NothingStorable { .. } => {
+                d(DiagnosticCode::WriteFailed, "nothing-storable")
+            }
             PvecConvertError::Tally(_) | PvecConvertError::Report(_) => {
                 d(DiagnosticCode::ReportFailed, "report")
             }
