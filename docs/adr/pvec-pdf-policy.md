@@ -86,3 +86,7 @@ into alpha, clips into alpha plus `visible_box`, and the unit square through the
 `Transform2` placement. Anything it does not take is refused by name and counted, so the images on a
 page always equal the written plus the refused. The rules and their limits are in
 `docs/pvec-raster-producer.md`, and the producer rules page of libviprs/libviprs#1333 renders them.
+
+## Image codecs (2026-11-01, issue #1366)
+
+This answers open question 5 of epic #1329: pdfium is not required for image streams, and I wired no pdfium decode route. pdfium has no raw-stream decode call (its image API works on page objects after it has loaded the document and applied its own `/Decode`, masks and colour conversion, so it cannot sit behind a bytes-in seam and would replace the bake rules), it costs 11 to 73 MB of native artefact, and it has no wasm32 story. The decoders are small Rust crates, chosen by feature at compile time with one module per codec: `hayro-ccitt` in every build, `hayro-jpeg2000` behind `jp2k`, and `hayro-jbig2` behind the non-default `jbig2` feature (the crate says it is under development, so it stays off by default). `jbig2dec` (AGPL) and `openjpeg-sys` (C) are out. A pdfium whole-page render as a separate fallback producer (option E) is undecided, and gets its own issue if wanted. The per-codec story and the corpus counts are in `docs/pvec-raster-producer.md`.
