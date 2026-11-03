@@ -110,14 +110,14 @@ hayro-jpeg2000 = { version = "0.4.1", default-features = false, features = [
 # It depends on `hayro-ccitt` (0 dependencies, `forbid(unsafe_code)`) for the MMR coded regions.
 # The crate is a few months old and its README says it is under development, which is why the
 # `jbig2` feature below is not in `default`.
-hayro-jbig2 = { version = "0.3.1", default-features = false, features = ["std"] }
+hayro-jbig2 = { version = "0.4.0", default-features = false, features = ["std"] }
 # CCITT Group 3 and Group 4 for `CCITTFaxDecode` image streams in a PDF (issue #1363),
 # unconditional because it is the scanned-sheet case: in the corpus it is the one codec whose
 # refusal empties a whole file. Same author and repository as `hayro-jpeg2000` above.
 # `#![forbid(unsafe_code)]`, `no_std` + alloc, no dependencies at all, no `links` key and no
 # build script, licence `Apache-2.0 OR MIT`. Chosen on API grounds: byte alignment,
 # end-of-block and the K modes are explicit settings, which is what `/DecodeParms` names.
-hayro-ccitt = "0.4"
+hayro-ccitt = "0.5"
 # Pure-Rust codec facade. The feature list is the crate's decodable
 # format set, and it is edited here once for the whole format wave
 # (issue #563) rather than once per lane: every feature added recompiles
@@ -721,7 +721,7 @@ jp2k = ["dep:hayro-jpeg2000", "dep:openjpeg2-pure"]
 # Not in `default`, and it stays out until 24 hours of `fuzz_pvec_pdf_image --features jbig2`
 # are on record. The record today is NOT clean: a first run (about 25 minutes, 4 workers) and a
 # second (3.9 hours wall, 4 workers, 2026-10-31, MARS) found four memory blow-ups and two
-# long-running inputs in `hayro-jbig2` 0.3.1, which bounds each bitmap side and the symbol count
+# long-running inputs in `hayro-jbig2` 0.3.1 (0.4.0 fixes none of them), which bounds each bitmap side and the symbol count
 # but not their product, and keeps decoding past the end of its data. The module refuses regions
 # larger than the page and symbol dictionaries with more symbols than bits, which closed the first
 # four; the symbol size inside a dictionary is still the decoder's, and the later run died on it
@@ -732,7 +732,7 @@ jp2k = ["dep:hayro-jpeg2000", "dep:openjpeg2-pure"]
 #
 # It implies `pvec-raster` because the only reader of a PDF image stream is the raster bake that
 # feature belongs to, and so that the one cell `cargo test --features jbig2` runs the decoding
-# tests. Lock delta of `jbig2` itself: +1 entry (`hayro-jbig2` 0.3.1; `hayro-ccitt` 0.4 is
+# tests. Lock delta of `jbig2` itself: +1 entry (`hayro-jbig2` 0.4.0; `hayro-ccitt` 0.5 is
 # already in every build since #1363; neither has a `links` key or a build script); everything else
 # `cargo tree` adds is `pvec-raster`'s. Release binary delta: not measured.
 jbig2 = ["pvec-raster", "dep:hayro-jbig2"]
