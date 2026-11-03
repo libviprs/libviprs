@@ -32,6 +32,7 @@ fn documented(docs: &str, key: &str) -> bool {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn every_refusal_key_is_in_a_doc() {
     let docs = docs();
     let every_variant = vec![
@@ -62,6 +63,7 @@ fn every_refusal_key_is_in_a_doc() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn the_five_keys_the_blueprint_hit_or_could_hit_are_named() {
     let docs = docs();
     for key in [
@@ -76,6 +78,7 @@ fn the_five_keys_the_blueprint_hit_or_could_hit_are_named() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn every_note_key_is_in_a_doc() {
     let docs = docs();
     for n in [
@@ -96,6 +99,7 @@ fn every_note_key_is_in_a_doc() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn a_real_refusal_from_a_page_is_reported_under_a_documented_key() {
     // An 8 by 8 image under a clip that leaves nothing of it.
     let bytes = one(
