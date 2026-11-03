@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A memory budget now covers the cached `PdfiumStripSource`** (issue #1466). `.budget(..)` and
+  `new_with_budget` on a cached source (the default of `new()`) checked only the worst-case strip, so a page whose
+  whole raster was gigabytes passed. They now check `width * height * 4` and, under `AutoAdjustDpi`, lower the DPI
+  until the raster fits. `StripSource` gains `resident_bytes()` (default `0`), and `EngineBuilder::run` returns
+  `BudgetExceeded` under `BudgetPolicy::Error` when a source's resident bytes alone are over `with_memory_budget`.
 - **One unstorable curve no longer fails a whole drawing** (issue #1446). PVec's writer refuses a curve its
   container cannot store exactly and deterministically (`WRT-08`, for example an arc on a rotated frame),
   and `convert` used to return `Write(..)` for the entire drawing. The writer funnel now skips that curve,
