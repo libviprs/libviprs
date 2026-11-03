@@ -327,8 +327,8 @@ proptest = "1"
 # crate cannot be published to crates.io while the line below stands: swap it
 # for a registry version in the same change that publishes `acadsharp-rs`.
 acadsharp-rs = { git = "https://github.com/libviprs/acadsharp-rs", rev = "f23f37bd453e02e660ef655faa381c45509d8ac1", version = "0.1.0" }
-# The pure-Rust DWG reader the first `pvec` provider uses (issue #1072), optional and
-# off by default. It is libviprs' own fork of hakanaktt/acadrust (MPL-2.0, a crate
+# The pure-Rust DWG reader the first `pvec` provider uses (issue #1072), optional, and on
+# by default through the `dwg-acadrust` feature. It is libviprs' own fork of hakanaktt/acadrust (MPL-2.0, a crate
 # dependency and never vendored, so the MPL stays file-level on the fork). It is a git
 # dependency pinned by a full revision for the same reason as `acadsharp-rs` above, and
 # the same consequence follows: this crate cannot be published to crates.io while the

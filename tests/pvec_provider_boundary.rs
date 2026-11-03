@@ -393,7 +393,7 @@ fn acadrust_is_a_git_dependency_pinned_by_a_full_revision() {
 
 #[test]
 #[cfg_attr(miri, ignore)] // reads the repository source tree, which Miri isolation blocks
-fn acadrust_is_optional_and_only_the_feature_turns_it_on() {
+fn acadrust_is_optional_and_the_default_dwg_acadrust_feature_turns_it_on() {
     let m = manifest();
     assert!(
         m.lines()

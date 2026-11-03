@@ -273,7 +273,7 @@ means this crate cannot be published to crates.io until that line in the root
 
 ### `dwg-acadrust` is a pinned git dependency, and it is a default feature
 
-`--features dwg-acadrust` pulls `acadrust`, libviprs' fork of a pure-Rust DWG and
+The default `dwg-acadrust` feature pulls `acadrust` (`--no-default-features` leaves it out), libviprs' fork of a pure-Rust DWG and
 DXF reader, for the first provider behind `pvec::DwgProvider` (issue #1072). It
 declares no `links` key, has no native archive and loads nothing at run time, so
 `tests/dependency_policy.rs` has a cell for it that adds no `links` entry and no

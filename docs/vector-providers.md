@@ -48,15 +48,19 @@ the native reader refuses anyway, is not opened.
 
 ## Building without it
 
-The feature is off by default. A plain `cargo build` has no DWG reader and no native
-dependency, and everything that does not read a DWG still works:
+The `dwg-acadsharp` feature is off by default. A plain `cargo build` has the pure-Rust
+acadrust reader (the default `dwg-acadrust` feature, behind `pvec::DwgProvider`) and no
+native dependency. It has no tile-path decoder yet, since acadrust is not a `CadDecoder`
+(libviprs#1485). `--no-default-features` drops acadrust too, for a build with no DWG
+reader at all, and everything that does not read a DWG still works:
 
 ```text
-cargo build                              # no provider
-cargo build --features dwg-acadsharp     # with the ACadSharp provider
+cargo build                              # acadrust (pvec path), no tile-path decoder
+cargo build --features dwg-acadsharp     # plus the ACadSharp CadDecoder
+cargo build --no-default-features        # no DWG reader at all
 ```
 
-Without the feature:
+Without the `dwg-acadsharp` feature:
 
 * `vector::convert::default_decoder` returns `ConvertError::ProviderNotBuilt`, whose
   message names the `dwg-acadsharp` feature to rebuild with.
