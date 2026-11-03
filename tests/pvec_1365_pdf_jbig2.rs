@@ -349,6 +349,55 @@ mod enabled {
         only(&b);
     }
 
+    /// #1492: the Flate stage on `/JBIG2Globals` gets the room an image stream of this size gets,
+    /// and never more than the default per-stream cap (64 MiB), so a deflate bomb in the globals
+    /// is refused while inflating. The first case is a small image, where the room is the bound;
+    /// the second is a large one, where the room is over 64 MiB and the cap is the bound.
+    #[test]
+    fn a_flate_bomb_in_the_globals_is_capped_1492() {
+        use flate2::{Compression, write::ZlibEncoder};
+        use libviprs::pdf::PdfError;
+        use std::io::Write;
+        for (w, h, inflated) in [
+            (163i64, 109i64, 8usize << 20),
+            (4096, 4096, (64 << 20) + (512 << 10)),
+        ] {
+            let mut z = ZlibEncoder::new(Vec::new(), Compression::best());
+            z.write_all(&vec![0u8; inflated]).unwrap();
+            let bomb = z.finish().unwrap();
+            assert!(
+                bomb.len() < 128 << 10,
+                "the bomb has to be small on the wire"
+            );
+            let mut d = doc();
+            let id = d.add_object(Stream::new(dictionary! { "Filter" => "FlateDecode" }, bomb));
+            let bytes = pdf(
+                d,
+                Resources::images(vec![(
+                    "Im1",
+                    Object::Stream(jbig2(
+                        w,
+                        h,
+                        vec![0; 16],
+                        dictionary! { "DecodeParms" => dictionary! { "JBIG2Globals" => Object::Reference(id) } },
+                    )),
+                )]),
+                format!("q {w} 0 0 {h} 0 0 cm /Im1 Do Q").as_bytes(),
+            );
+            let page =
+                extract_page_paths_from_bytes(&bytes, 1, &PdfVectorLimits::default()).unwrap();
+            let b = bake_page_images(&page, &PdfImageOptions::default());
+            assert!(
+                matches!(
+                    b.refused[0].error,
+                    PdfImageError::Pdf(PdfError::DecompressionLimitExceeded { .. })
+                ),
+                "{w}x{h}: the inflate should have hit its cap, got {:?}",
+                b.refused[0].error
+            );
+        }
+    }
+
     #[test]
     #[cfg_attr(miri, ignore)] // reads the fixtures from disk
     fn the_refusals_are_typed() {
@@ -471,6 +520,24 @@ mod enabled {
         let mut stream = page_info();
         stream.extend(segment(1, 38, &d));
         assert!(refused_reason(stream).contains("4000x4000"));
+    }
+
+    /// #1493: an intermediate region (types 4, 20, 36, 40) larger than the page is refused by the
+    /// prescan like the immediate and lossless forms are, whatever else the segment holds.
+    #[test]
+    fn an_oversized_intermediate_region_is_refused_before_it_is_allocated_1493() {
+        for kind in [4u8, 20, 36, 40] {
+            let mut d = 1_000_000u32.to_be_bytes().to_vec();
+            d.extend(1_000_000u32.to_be_bytes());
+            d.extend([0; 9]);
+            let mut stream = page_info();
+            stream.extend(segment(1, kind, &d));
+            let reason = refused_reason(stream);
+            assert!(
+                reason.contains("1000000x1000000 region on a 8x8 page"),
+                "type {kind}: {reason}"
+            );
+        }
     }
 
     #[test]

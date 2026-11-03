@@ -293,3 +293,62 @@ fn issue_1093_a_name_of_255_bytes_and_a_dash_array_of_16_are_held() {
             .any(|s| LineStyleStream::decode(&s.payload).is_ok())
     );
 }
+
+fn square() -> Vec<([f64; 2], [f64; 2])> {
+    vec![
+        ([0.0, 0.0], [5.0, 0.0]),
+        ([5.0, 0.0], [5.0, 5.0]),
+        ([5.0, 5.0], [0.0, 5.0]),
+        ([0.0, 5.0], [0.0, 0.0]),
+    ]
+}
+
+fn one_room(segs: &[([f64; 2], [f64; 2])]) {
+    let out = derive_regions(&walls(segs), &[], &[], &config()).unwrap();
+    assert_eq!(out.report.rooms, 1, "{:?}", out.report);
+    assert_eq!(out.regions.len(), 1);
+    assert_eq!(out.regions[0].boundary.len(), 4);
+}
+
+#[test]
+fn issue_1093_a_room_with_a_doubled_wall_is_still_one_room() {
+    let mut segs = square();
+    segs.push(segs[1]);
+    one_room(&segs);
+}
+
+#[test]
+fn issue_1093_a_room_with_a_reversed_duplicate_wall_is_still_one_room() {
+    let mut segs = square();
+    let (a, b) = segs[2];
+    segs.push((b, a));
+    one_room(&segs);
+}
+
+#[test]
+fn issue_1093_a_room_with_every_wall_doubled_is_still_one_room() {
+    let mut segs = square();
+    segs.extend(square().into_iter().map(|(a, b)| (b, a)));
+    segs.extend(square());
+    one_room(&segs);
+}
+
+#[test]
+fn issue_1093_a_square_drawn_twenty_thousand_times_is_one_room() {
+    let segs: Vec<_> = (0..20_000).flat_map(|_| square()).collect();
+    one_room(&segs);
+}
+
+#[test]
+fn issue_1093_more_distinct_walls_than_the_edge_cap_are_refused_with_a_named_reason() {
+    // Every pair of 300 points: 44850 distinct walls on 300 nodes.
+    let pts: Vec<[f64; 2]> = (0..300)
+        .map(|i| [i as f64 * 3.0, (i * i % 97) as f64 * 3.0])
+        .collect();
+    let segs: Vec<_> = (0..300)
+        .flat_map(|i| (i + 1..300).map(move |j| (i, j)))
+        .map(|(i, j)| (pts[i], pts[j]))
+        .collect();
+    let err = derive_regions(&walls(&segs), &[], &[], &config()).unwrap_err();
+    assert_eq!(err.reason_code(), "regions.edge-limit");
+}

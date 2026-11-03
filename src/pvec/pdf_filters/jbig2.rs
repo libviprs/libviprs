@@ -11,7 +11,9 @@
 //!
 //! Limits: the page size is read from the stream and compared with `/Width` and `/Height`
 //! before anything is decoded, and the caller has already held those to `max_pixels`, so the
-//! page bitmap the decoder allocates is bounded by the same budget as every other codec's.
+//! page bitmap the decoder allocates is bounded by the same budget as every other codec's. That
+//! is the page bitmap only: the decoder's own working memory (symbol bitmaps, halftone grids) is
+//! not covered by `max_pixels`, see the warning below.
 //! The globals stream is counted against the per-stream cap by the extraction that kept it.
 //!
 //! `hayro-jbig2` 0.3.1 bounds each bitmap's sides (65535) and the symbol count (65535) but not
@@ -26,6 +28,9 @@
 //! The other fuzz findings (an `export_symbols` loop that never ends, a halftone grid of billions
 //! of cells, empty height classes) are in arithmetic coded data too. All are reported upstream
 //! (`LaurenzV/hayro` #1700, #1701, #1550, #1598) and kept as ignored tests.
+//!
+//! Do not enable `jbig2` on untrusted PDFs yet: a small crafted stream can still allocate several
+//! GB (6.4 GB in #1550) or never return (#1700) in `hayro-jbig2` 0.3.1.
 
 #[cfg(feature = "jbig2")]
 use crate::pvec::pdf_image::FilterError;
@@ -42,11 +47,12 @@ pub(in crate::pvec) fn decode(input: FilterInput<'_>) -> Result<FilterOutput, Pd
 
 /// Refuse what a segment header says before the decoder allocates for it (T.88 7.2 and 7.4).
 ///
-/// Walks the sequential segment headers of `stream`. A region segment (text 6 to 7, halftone 22
-/// to 23, generic 38 to 39, refinement 42 to 43) that is wider or taller than the page, or a
-/// symbol dictionary (type 0) whose `SDNUMNEWSYMS` is over eight times its data length, is an
-/// error. A segment of unknown length ends the walk: only an immediate generic region may have
-/// one, and its header is read first.
+/// Walks the sequential segment headers of `stream`. A region segment (text 4 and 6 to 7,
+/// halftone 20 and 22 to 23, generic 36 and 38 to 39, refinement 40 and 42 to 43, so the
+/// intermediate forms too) that is wider or taller than the page, or a symbol dictionary (type 0)
+/// whose `SDNUMNEWSYMS` is over eight times its data length, is an error. A segment of unknown
+/// length ends the walk: only an immediate generic region may have one, and its header is read
+/// first.
 #[cfg(feature = "jbig2")]
 fn prescan(stream: &[u8], width: u32, height: u32) -> Result<(), String> {
     let be32 = |at: usize| -> Option<u32> {
@@ -88,7 +94,7 @@ fn prescan(stream: &[u8], width: u32, height: u32) -> Result<(), String> {
             .get(at..end.min(stream.len()))
             .ok_or_else(truncated)?;
         match flags & 0x3F {
-            6 | 7 | 22 | 23 | 38 | 39 | 42 | 43 => {
+            4 | 6 | 7 | 20 | 22 | 23 | 36 | 38 | 39 | 40 | 42 | 43 => {
                 let w = be32(at).ok_or_else(truncated)?;
                 let h = be32(at + 4).ok_or_else(truncated)?;
                 if w > width || h > height {
