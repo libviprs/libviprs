@@ -191,6 +191,26 @@ pub struct CapabilitySummary {
     pub allowed: Vec<u32>,
 }
 
+/// What a PDF page conversion did beside its vector entities: the images, the fills and the text
+/// (issue #1491). Every map is keyed by the reason or note key a `docs/pvec-*.md` page names.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct PdfSummary {
+    /// The 1-based page converted.
+    pub page: u64,
+    /// Images on the page.
+    pub images: u64,
+    /// Images written as raster blocks.
+    pub rasters: u64,
+    /// Images refused, by reason key.
+    pub images_refused: BTreeMap<String, u64>,
+    /// Written images that carry a note, by note key.
+    pub image_notes: BTreeMap<String, u64>,
+    /// Fills, shadings, patterns and images the fill policy counted, by reason key.
+    pub fills: BTreeMap<String, u64>,
+    /// Text items omitted.
+    pub text_omitted: u64,
+}
+
 /// The whole report.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConversionReport {
@@ -215,6 +235,9 @@ pub struct ConversionReport {
     /// into the geometry; absent when the conversion made none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<super::diagnostics::Diagnostic>,
+    /// The images, fills and text of a PDF page. Absent for a DWG.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pdf: Option<PdfSummary>,
     /// One row per entity, in id order.
     pub entities: Vec<EntityRow>,
 }
@@ -362,6 +385,7 @@ impl ReportBuilder {
             capabilities: None,
             georeference: None,
             diagnostics: Vec::new(),
+            pdf: None,
             entities: self.rows,
         })
     }

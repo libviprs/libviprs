@@ -26,6 +26,8 @@ One limit I did not change: `lopdf` only parses inline images with an uncompress
 
 ## PDF image placements (issue #1332)
 
+`pvec_convert::PdfConversion` is the one call that runs this and the vector side together: `PdfConversion::new(CadSource::Bytes(&pdf), &dest).convert()` writes the page's paths and rasters into one `.pvec` and its report beside it. The report's `pdf` section counts the images, the refusals by the keys below, the notes, the fills and the omitted text. The coordinates are points, unscaled.
+
 `pvec::pdf_image::bake_page_images` takes the images `PdfVectorPage::images` recorded and, for each one, decodes the stream, applies the bake rules of ADR 0018 and cuts the pyramid with `produce_raster_pyramid`. It returns the written rasters in content order (a `RasterId` is a position in that list), the refused ones with a typed error each, and a report where the images on the page equal the written plus the refused.
 
 - Colour: `DeviceGray`, `DeviceRGB` and `DeviceCMYK` at 1, 2, 4, 8 and 16 bits, `/Indexed` through its lookup, `/ICCBased` as the device space of its `/N`, `/CalGray`, `/CalRGB` and `/Lab` into sRGB by the standard formulas. 16 bits are reduced to 8 and reported (`bit-depth-reduced`); ICC, Cal, Lab and CMYK are reported `colour-space-approximated`. `/Decode` is applied to every component.

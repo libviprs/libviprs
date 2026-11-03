@@ -105,6 +105,11 @@ impl OrderingPolicy {
 pub struct EntityId(u64);
 
 impl EntityId {
+    /// The id at position `n`, for a producer that numbers its own entities (the PDF conversion).
+    pub(crate) fn at(n: u64) -> Self {
+        Self(n)
+    }
+
     /// The raw id.
     #[must_use]
     pub fn get(self) -> u64 {
@@ -223,7 +228,7 @@ pub fn order_entities(
         .into_iter()
         .enumerate()
         .map(|(n, (_, entity))| OrderedEntity {
-            id: EntityId(n as u64),
+            id: EntityId::at(n as u64),
             entity,
         })
         .collect();

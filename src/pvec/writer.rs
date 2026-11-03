@@ -135,8 +135,11 @@ fn metres_per_unit(unit: SourceUnit) -> Result<f64, WriteError> {
     }
 }
 
-/// What `prepare` hands on: the writer with everything pushed, and the facts about what went in.
-struct Prepared {
+/// An artifact whose geometry is written and that is not sealed yet: the writer with everything pushed, and
+/// the facts about what went in. [`open_geometry`] makes one so that a caller can add raster blocks through
+/// [`OpenArtifact::rasters`] before [`OpenArtifact::finish`] seals it, while the geometry still goes through
+/// this one funnel and the facade's writer stays inside it.
+pub struct OpenArtifact {
     writer: PvecWriter,
     bounds: BoundsReport,
     written: u64,
@@ -152,10 +155,11 @@ fn prepare<'a>(
     config: &WriteConfig,
     items: impl IntoIterator<Item = (EntityId, &'a Normalized2DGeometry)>,
     streams: Vec<Stream>,
+    area: Option<[f64; 4]>,
     spill: Option<&SpillConfig>,
     cancel: &CancelToken,
     on_chunk: &mut dyn FnMut(u64, u64),
-) -> Result<Prepared, WriteError> {
+) -> Result<OpenArtifact, WriteError> {
     let metres_per_unit = metres_per_unit(config.unit)?;
     let mut skipped = 0u64;
     let mut kept = Vec::new();
@@ -186,9 +190,17 @@ fn prepare<'a>(
         let drawing = bounds.drawing_bounds().ok_or(WriteError::NoGeometry)?;
         let manifest = Manifest {
             metres_per_unit,
+            // The drawing's box, grown to take in `area` when the caller has content of its own beyond the
+            // entities (a page's rasters).
             bounds: Bounds2 {
-                min: [drawing.min().x, drawing.min().y],
-                max: [drawing.max().x, drawing.max().y],
+                min: [
+                    area.map_or(drawing.min().x, |a| a[0].min(drawing.min().x)),
+                    area.map_or(drawing.min().y, |a| a[1].min(drawing.min().y)),
+                ],
+                max: [
+                    area.map_or(drawing.max().x, |a| a[2].max(drawing.max().x)),
+                    area.map_or(drawing.max().y, |a| a[3].max(drawing.max().y)),
+                ],
             },
             capabilities: Vec::new(),
             producer_id: "libviprs".to_owned(),
@@ -243,7 +255,7 @@ fn prepare<'a>(
         return Err(WriteError::Cancelled);
     }
     refused.sort_by_key(|(id, _)| *id);
-    Ok(Prepared {
+    Ok(OpenArtifact {
         writer,
         bounds,
         written,
@@ -275,15 +287,60 @@ pub fn write_geometry<'a>(
     cancel: &CancelToken,
     on_chunk: &mut dyn FnMut(u64, u64),
 ) -> Result<GeometryArtifact, WriteError> {
-    let p = prepare(config, items, streams, None, cancel, on_chunk)?;
-    Ok(GeometryArtifact {
-        bytes: p.writer.finish().map_err(WriteError::Pvec)?,
-        bounds: p.bounds,
-        written: p.written,
-        skipped: p.skipped,
-        source_ids: p.source_ids,
-        refused: p.refused,
-    })
+    open_geometry(config, items, streams, None, cancel, on_chunk)?.finish()
+}
+
+/// As [`write_geometry`] up to the seal: the entities and `streams` are written and the artifact is handed
+/// back open, so raster blocks can be added with [`OpenArtifact::rasters`] before [`OpenArtifact::finish`].
+/// The manifest box is the entities' box, grown to take in `area` (`[min x, min y, max x, max y]`) when one
+/// is given.
+///
+/// # Errors
+///
+/// As [`write_geometry`].
+pub fn open_geometry<'a>(
+    config: &WriteConfig,
+    items: impl IntoIterator<Item = (EntityId, &'a Normalized2DGeometry)>,
+    streams: Vec<Stream>,
+    area: Option<[f64; 4]>,
+    cancel: &CancelToken,
+    on_chunk: &mut dyn FnMut(u64, u64),
+) -> Result<OpenArtifact, WriteError> {
+    prepare(config, items, streams, area, None, cancel, on_chunk)
+}
+
+impl OpenArtifact {
+    /// Writes the raster pyramids into the artifact, `RasterId` by position (see
+    /// [`write_rasters`](crate::raster_pvec::container::write_rasters)). Returns how many were written.
+    ///
+    /// # Errors
+    ///
+    /// [`RasterWriteError`](crate::raster_pvec::container::RasterWriteError).
+    #[cfg(feature = "pvec-raster")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "pvec-raster")))]
+    pub fn rasters<'a>(
+        &mut self,
+        pyramids: impl IntoIterator<Item = &'a crate::raster_pvec::pyramid::RasterPyramid>,
+    ) -> Result<usize, crate::raster_pvec::container::RasterWriteError> {
+        crate::raster_pvec::container::write_rasters(&mut self.writer, pyramids)
+            .map(|ids| ids.len())
+    }
+
+    /// Seals the artifact.
+    ///
+    /// # Errors
+    ///
+    /// [`WriteError::Pvec`] when PVec refuses to seal it.
+    pub fn finish(self) -> Result<GeometryArtifact, WriteError> {
+        Ok(GeometryArtifact {
+            bytes: self.writer.finish().map_err(WriteError::Pvec)?,
+            bounds: self.bounds,
+            written: self.written,
+            skipped: self.skipped,
+            source_ids: self.source_ids,
+            refused: self.refused,
+        })
+    }
 }
 
 /// Where a streamed write keeps its spill files, and how much memory it may use before it spills.
@@ -367,7 +424,7 @@ pub fn write_geometry_to<'a>(
     on_chunk: &mut dyn FnMut(u64, u64),
     out: &mut dyn Write,
 ) -> Result<StreamedArtifact, WriteError> {
-    let p = prepare(config, items, streams, Some(spill), cancel, on_chunk)?;
+    let p = prepare(config, items, streams, None, Some(spill), cancel, on_chunk)?;
     let length = p
         .writer
         .finish_to(&mut ChunkWrite {
