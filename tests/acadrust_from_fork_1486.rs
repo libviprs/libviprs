@@ -35,6 +35,11 @@ fn manifest_complaints(text: &str) -> Vec<String> {
             if name != "acadrust" && renamed != Some("acadrust") {
                 continue;
             }
+            // `workspace = true` inherits the entry in `[workspace.dependencies]`, which this
+            // scan checks as its own table.
+            if spec.get("workspace").and_then(toml::Value::as_bool) == Some(true) {
+                continue;
+            }
             let git = spec.get("git").and_then(toml::Value::as_str);
             match (git, spec.get("path")) {
                 (_, Some(_)) => {}
@@ -122,6 +127,10 @@ fn the_scan_catches_a_registry_acadrust() {
     );
     assert!(!manifest_complaints("[dependencies]\nacadrust = { git = \"https://github.com/libviprs/acadrust\", branch = \"main\" }\n").is_empty());
     assert!(manifest_complaints("[dependencies]\nacadrust = { git = \"https://github.com/libviprs/acadrust\", rev = \"72af48970e306ef1d50dd751b227df2b4fc3fb99\", version = \"0.5.5\" }\n").is_empty());
+    assert!(
+        manifest_complaints("[dependencies]\nacadrust = { workspace = true, optional = true }\n")
+            .is_empty()
+    );
     assert!(
         manifest_complaints("[dependencies]\nacadrust = { path = \"../acadrust\" }\n").is_empty()
     );
