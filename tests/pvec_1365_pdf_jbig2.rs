@@ -537,6 +537,29 @@ mod enabled {
         assert!(refused_reason(stream).contains("4000x4000"));
     }
 
+    /// #1495: the decoder is `hayro-jbig2` 0.4 (with `hayro-ccitt` 0.5, so one copy of that crate)
+    /// and the call site asks for strict decoding, which 0.3 has no setting for.
+    #[test]
+    #[cfg_attr(miri, ignore)] // reads the manifest and the module from disk
+    fn the_decoder_is_hayro_jbig2_0_4_and_decodes_strictly_1495() {
+        let root = env!("CARGO_MANIFEST_DIR");
+        let manifest = std::fs::read_to_string(format!("{root}/Cargo.toml")).unwrap();
+        assert!(
+            manifest.contains("hayro-jbig2 = { version = \"0.4"),
+            "hayro-jbig2 is not 0.4"
+        );
+        assert!(
+            manifest.contains("hayro-ccitt = \"0.5\""),
+            "hayro-ccitt is not 0.5"
+        );
+        let module =
+            std::fs::read_to_string(format!("{root}/src/pvec/pdf_filters/jbig2.rs")).unwrap();
+        assert!(
+            module.contains("strict: true"),
+            "the decode settings are not strict"
+        );
+    }
+
     #[test]
     #[cfg_attr(miri, ignore)] // reads the fixtures from disk
     fn garbage_is_a_refusal() {
