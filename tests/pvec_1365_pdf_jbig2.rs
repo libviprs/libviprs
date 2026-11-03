@@ -390,6 +390,29 @@ mod enabled {
         );
     }
 
+    /// #1493: an intermediate region (types 4, 20, 36, 40) larger than the page is refused by the
+    /// prescan like the immediate and lossless forms are.
+    #[test]
+    fn an_oversized_intermediate_region_is_refused_before_decoding_1493() {
+        for kind in [4u8, 20, 36, 40] {
+            let mut seg = Vec::new();
+            seg.extend_from_slice(&0u32.to_be_bytes());
+            seg.push(kind);
+            seg.push(0); // no referred-to segments
+            seg.push(1); // page association
+            seg.extend_from_slice(&17u32.to_be_bytes());
+            seg.extend_from_slice(&1_000_000u32.to_be_bytes());
+            seg.extend_from_slice(&1_000_000u32.to_be_bytes());
+            seg.extend_from_slice(&[0; 9]);
+            let b = bake(&pdf_with(163, 109, seg, None, Dictionary::new()));
+            let err = format!("{:?}", b.refused[0].error);
+            assert!(
+                err.contains("1000000x1000000 region on a 163x109 page"),
+                "type {kind} got {err}"
+            );
+        }
+    }
+
     #[test]
     #[cfg_attr(miri, ignore)] // reads the fixtures from disk
     fn the_refusals_are_typed() {
