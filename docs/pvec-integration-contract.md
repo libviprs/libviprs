@@ -86,6 +86,4 @@ lands and the bounded-memory benchmark has a strategy that passes its ceiling: t
 line of the pin, and the test will say when they disagree.
 
 Since this was recorded the writer's spill has landed (#1314, #1417): a spilled conversion adds 24 bytes an entity in the
-writer instead of 391 to 419 (`docs/adr/pvec-tiers-and-spool-rescope.md`). The bounded-memory benchmark has not been re-run
-with it, and libviprs' own per-entity state is still in memory, so the figures above stand and the outcome is not
-revisited here. Re-running it, and then confirming or changing the outcome, is the owner's call on #1070.
+writer instead of 391 to 419 (`docs/adr/pvec-tiers-and-spool-rescope.md`). I have since re-run the bounded-memory benchmark with the spill (`docs/pvec-benchmarks.md`, #1064). The tracked peak (2,724 MiB) and the peak RSS (3,116 MiB) at 1,025,000 entities are the same with and without it, at every budget I tried, because libviprs' own per-entity state is what sits in memory before the writer runs. So the figures above stand and the outcome stays "both ship, the caller chooses"... The thing that would change it is the classifier streaming into the writer, which is #1481.
