@@ -138,6 +138,9 @@ jobs:
       # the default clippy job compiles `src/jp2k.rs` with every real body
       # cfg'd out (issue #772).
       - run: cargo clippy --all-targets --features jp2k -- -D warnings -W clippy::incompatible_msrv -W deprecated
+      # And for JBIG2 (issue #1365): non-default because the decoder is young, so the default
+      # job compiles `pdf_filters/jbig2.rs` with the real body cfg'd out.
+      - run: cargo clippy --all-targets --features jbig2 -- -D warnings -W clippy::incompatible_msrv -W deprecated
       # The remaining four features gate code that no job named until #816.
       # `avif` is the worst of them: the real decode bodies in `src/avif.rs` are
       # `#[cfg(feature = "avif")]`, so nothing here type-checked them at all,
@@ -221,6 +224,7 @@ jobs:
       # `object-store-sink` add none, which is why they are not here (issues
       # #772, #816).
       - run: cargo check --all-targets --features jp2k
+      - run: cargo check --all-targets --features jbig2
       - run: cargo check --all-targets --features avif
       - run: cargo check --all-targets --features svg
       - run: cargo check --all-targets --features packfile
@@ -315,6 +319,8 @@ jobs:
       # `tests/jp2k_ported_surface.rs` run zero assertions against the codec
       # unless the feature is named (issue #772). Measured: 24 tests.
       - run: cargo test --features jp2k
+      # And JBIG2: bare `cargo test` runs the feature-off half of tests/pvec_1365_pdf_jbig2.rs only.
+      - run: cargo test --features jbig2
       # And the four that nothing named until #816, with what each one is
       # worth, measured by diffing the test list against a default run:
       #   avif      10 tests that are `ignore`d without it, and they are the
@@ -457,3 +463,81 @@ jobs:
       - name: Run object-store sink integration tests
         working-directory: libviprs-tests
         run: cargo test --features object-store-sink
+
+  # The four PVec gates (issue #1060, N2.8). Four jobs, so a red check says which property
+  # regressed without reading a log. Each runs its own suites, publishes its own artifact
+  # directory, and passes on a runner with no CAD converter installed: the corpus is read from the
+  # repository. The classification, view and determinism baselines are checked in under
+  # tests/fixtures/pvec-gate/; PVEC_GATE_BLESS=1 rewrites one when a change is deliberate.
+  pvec-gate-fidelity:
+    name: PVec gate: mathematical fidelity
+    runs-on: ubuntu-latest
+    env:
+      PVEC_GATE_OUT: target/pvec-gates/fidelity
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The known-truth, structural and geometric suites (N2.1, N2.4, N2.5), and the drift check that reads each converted artifact back and names the entity that moved (#1475). A structural parameter, or a comparison governed by the shared numeric policy, regressing turns this red. Artifact: the conformance report.
+      - run: mkdir -p "$PVEC_GATE_OUT"
+      - run: cargo test --features pvec-convert --test pvec_known_truth --test pvec_structural --test pvec_geometric --test pvec_drift 2>&1 | tee "$PVEC_GATE_OUT/conformance-report.txt"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pvec-gate-fidelity
+          path: target/pvec-gates/fidelity
+
+  pvec-gate-view:
+    name: PVec gate: visibility and view correctness
+    runs-on: ubuntu-latest
+    env:
+      PVEC_GATE_OUT: target/pvec-gates/view
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The view, visibility and transform cases (N2.6) and the checked-in include/exclude decisions. An entity's include decision or promoted type changing turns this red. Artifact: the view-decision diff.
+      - run: mkdir -p "$PVEC_GATE_OUT"
+      - run: cargo test --features pvec-convert --test pvec_view_transform --test pvec_gate_view 2>&1 | tee "$PVEC_GATE_OUT/view-report.txt"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pvec-gate-view
+          path: target/pvec-gates/view
+
+  pvec-gate-classification:
+    name: PVec gate: unsupported-classification stability
+    runs-on: ubuntu-latest
+    env:
+      PVEC_GATE_OUT: target/pvec-gates/classification
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Any entity's class among the six fidelity values changing against the checked-in baseline (N2.1, N2.2). Artifact: the classification diff.
+      - run: mkdir -p "$PVEC_GATE_OUT"
+      - run: cargo test --features pvec-convert --test pvec_gate_classification --test pvec_dual_oracle 2>&1 | tee "$PVEC_GATE_OUT/classification-report.txt"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pvec-gate-classification
+          path: target/pvec-gates/classification
+
+  pvec-gate-determinism:
+    name: PVec gate: deterministic output
+    runs-on: ubuntu-latest
+    env:
+      PVEC_GATE_OUT: target/pvec-gates/determinism
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Two conversions of one fixture differing byte for byte, or a digest moving against the checked-in set (N2.3). Artifact: the digest set.
+      - run: mkdir -p "$PVEC_GATE_OUT"
+      - run: cargo test --features pvec-convert --test pvec_gate_determinism 2>&1 | tee "$PVEC_GATE_OUT/determinism-report.txt"
+      - run: cargo test --features pvec-convert --test pvec_end_to_end -- byte_identical determinism 2>&1 | tee -a "$PVEC_GATE_OUT/determinism-report.txt"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pvec-gate-determinism
+          path: target/pvec-gates/determinism

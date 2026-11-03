@@ -70,6 +70,7 @@ fn write(
         items.iter().map(|(i, r)| (*i, r)),
         Vec::new(),
         &CancelToken::new(),
+        &mut |_, _| {},
     )
     .map(|a| a.bytes)
     .map_err(|e| {
