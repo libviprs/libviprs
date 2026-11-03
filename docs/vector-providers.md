@@ -6,7 +6,12 @@ encoder, the PMTiles writer and the whole of `libviprs::vector::convert`, works 
 `cad::Primitive` values and never sees a parser. A provider is whatever sits on the
 other side of that trait.
 
-The provider libviprs ships is ACadSharp, reached through the `acadsharp-rs` crate.
+> **ACadSharp is experimental.** acadrust is libviprs' default DWG provider (the `dwg-acadrust`
+> feature, on by default). The ACadSharp provider described here is kept, opt-in and not removed,
+> and it is the only path that needs a native library. `viprs vector` still reads through it until
+> a `CadDecoder` over acadrust lands (libviprs/libviprs#1485).
+
+The provider libviprs ships for the tile path today is ACadSharp, reached through the `acadsharp-rs` crate.
 It is behind the `dwg-acadsharp` Cargo feature, and it is the only thing in the
 library that needs a native binary.
 

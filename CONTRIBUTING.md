@@ -254,7 +254,7 @@ stays opt-in.
 Its `bindings` feature would pull `bindgen` and run libclang over the PDFium
 headers at build time. Nothing here enables it, and nothing should.
 
-### `dwg-acadsharp` is an external native library, and it is opt-in
+### `dwg-acadsharp` is an external native library, and it is opt-in and experimental
 
 `--features dwg-acadsharp` pulls `acadsharp-rs`, which links a NativeAOT build
 of ACadSharp. That library does not come down with the crate: `acadsharp-rs`'s
@@ -271,7 +271,7 @@ The dependency is a git dependency while `acadsharp-rs` is unpublished, which
 means this crate cannot be published to crates.io until that line in the root
 `Cargo.toml` becomes a registry version.
 
-### `dwg-acadrust` is a pinned git dependency, and it is opt-in
+### `dwg-acadrust` is a pinned git dependency, and it is a default feature
 
 `--features dwg-acadrust` pulls `acadrust`, libviprs' fork of a pure-Rust DWG and
 DXF reader, for the first provider behind `pvec::DwgProvider` (issue #1072). It
