@@ -377,9 +377,9 @@ const EXPECTED: &[(&str, Coverage)] = &[
 /// The feature names declared in `Cargo.toml`'s `[features]` table, in
 /// declaration order, with `default` dropped.
 ///
-/// `default = []` is the empty set rather than a feature with code behind it,
-/// and giving it a row would mean asserting cells for the jobs that already run
-/// bare.
+/// `default` is a list of other features (`dwg-acadrust`) rather than a feature with
+/// code behind it, and giving it a row would mean asserting cells for the jobs that
+/// already run bare.
 fn declared_features() -> Vec<&'static str> {
     let mut out = Vec::new();
     let mut inside = false;
