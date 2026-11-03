@@ -561,12 +561,14 @@ annotated   fs-detected  tests/pvec_1365_pdf_jbig2.rs::a_globals_stream_counts_a
 annotated   fs-detected  tests/pvec_1365_pdf_jbig2.rs::a_halftone_region_decodes
 annotated   fs-detected  tests/pvec_1365_pdf_jbig2.rs::a_page_size_that_disagrees_with_the_dictionary_is_refused
 annotated   fs-detected  tests/pvec_1365_pdf_jbig2.rs::a_pattern_dictionary_in_the_globals_stream_decodes
+annotated   fs-detected  tests/pvec_1365_pdf_jbig2.rs::a_stream_that_lenient_decoding_repairs_is_refused_1495
 annotated   fs-detected  tests/pvec_1365_pdf_jbig2.rs::a_symbol_dictionary_and_text_region_with_arithmetic_coding_decode
 annotated   fs-detected  tests/pvec_1365_pdf_jbig2.rs::a_symbol_dictionary_and_text_region_with_huffman_tables_decode
 annotated   fs-detected  tests/pvec_1365_pdf_jbig2.rs::a_symbol_dictionary_in_the_globals_stream_decodes
 annotated   fs-detected  tests/pvec_1365_pdf_jbig2.rs::a_truncated_stream_is_a_refusal_not_a_partial_picture
 annotated   fs-detected  tests/pvec_1365_pdf_jbig2.rs::black_pixels_are_zero_and_decode_one_zero_flips_them
 annotated   fs-detected  tests/pvec_1365_pdf_jbig2.rs::refinement_in_symbols_and_text_decodes
+annotated   fs-detected  tests/pvec_1365_pdf_jbig2.rs::the_decoder_is_hayro_jbig2_0_4_and_decodes_strictly_1495
 annotated   fs-detected  tests/pvec_1365_pdf_jbig2.rs::the_refusals_are_typed
 annotated   fs-detected  tests/pvec_1365_pdf_jbig2.rs::the_same_stream_without_a_globals_object_decodes_alike
 annotated   fs-detected  tests/pvec_1365_pdf_jbig2.rs::without_the_feature_the_reason_is_filter_not_enabled

@@ -467,6 +467,38 @@ mod enabled {
         assert_eq!(b.refused[0].error.reason(), "decode-failed");
     }
 
+    /// #1495: strict decoding refuses streams that lenient decoding repairs. Each of these is a
+    /// valid fixture with one byte changed, and each still gives a picture in lenient mode: a
+    /// reserved segment type, a segment that refers to one that is not there, a wrong flag.
+    #[test]
+    #[cfg_attr(miri, ignore)] // reads the fixtures from disk
+    fn a_stream_that_lenient_decoding_repairs_is_refused_1495() {
+        let (w, h, _) = reference("truchet.png");
+        for (name, at, xor) in [
+            ("generic_template0.jbig2", 34, 0xFF),
+            ("generic_template0.jbig2", 37, 0x01),
+            ("generic_template0.jbig2", 527, 0x01),
+            ("generic_mmr.jbig2", 34, 0xFF),
+            ("symbol.jbig2", 30, 0x01),
+        ] {
+            let (mut page, globals) = embedded(name);
+            page[at] ^= xor;
+            let b = bake(&pdf_with(
+                w.into(),
+                h.into(),
+                page,
+                globals,
+                Dictionary::new(),
+            ));
+            assert!(b.written.is_empty(), "{name} byte {at}: written");
+            assert_eq!(
+                b.refused[0].error.reason(),
+                "decode-failed",
+                "{name} byte {at}"
+            );
+        }
+    }
+
     /// One sequential segment: number, type, page 1, no referred-to segments.
     fn segment(number: u32, kind: u8, data: &[u8]) -> Vec<u8> {
         let mut out = number.to_be_bytes().to_vec();
@@ -522,6 +554,29 @@ mod enabled {
         assert!(refused_reason(stream).contains("4000x4000"));
     }
 
+    /// #1495: the decoder is `hayro-jbig2` 0.4 (with `hayro-ccitt` 0.5, so one copy of that crate)
+    /// and the call site asks for strict decoding, which 0.3 has no setting for.
+    #[test]
+    #[cfg_attr(miri, ignore)] // reads the manifest and the module from disk
+    fn the_decoder_is_hayro_jbig2_0_4_and_decodes_strictly_1495() {
+        let root = env!("CARGO_MANIFEST_DIR");
+        let manifest = std::fs::read_to_string(format!("{root}/Cargo.toml")).unwrap();
+        assert!(
+            manifest.contains("hayro-jbig2 = { version = \"0.4"),
+            "hayro-jbig2 is not 0.4"
+        );
+        assert!(
+            manifest.contains("hayro-ccitt = \"0.5\""),
+            "hayro-ccitt is not 0.5"
+        );
+        let module =
+            std::fs::read_to_string(format!("{root}/src/pvec/pdf_filters/jbig2.rs")).unwrap();
+        assert!(
+            module.contains("strict: true"),
+            "the decode settings are not strict"
+        );
+    }
+
     /// #1493: an intermediate region (types 4, 20, 36, 40) larger than the page is refused by the
     /// prescan like the immediate and lossless forms are, whatever else the segment holds.
     #[test]
@@ -549,12 +604,13 @@ mod enabled {
     }
 }
 
-/// Streams the fuzz target found that `hayro-jbig2` 0.3.1 cannot decode in bounded time or memory,
-/// reported upstream. Each one lives in arithmetic coded data (the symbol sizes, the export runs,
-/// the halftone grid), so the segment pre-scan cannot see it and nothing here can refuse it before
-/// the decoder runs: that is what `jbig2` being off by default is for. They are `#[ignore]`d
-/// because running one is the finding (an endless loop or gigabytes), and they stay here so the
-/// day an upstream fix lands, `cargo test --features jbig2 -- --ignored` shows it.
+/// Streams the fuzz target found that `hayro-jbig2` cannot decode in bounded time or memory
+/// (measured on 0.3.1, and 0.4.0 fixes none), reported upstream. Each one lives in arithmetic
+/// coded data (the symbol sizes, the export runs, the halftone grid), so the segment pre-scan
+/// cannot see it and nothing here can refuse it before the decoder runs: that is what `jbig2`
+/// being off by default is for. They are `#[ignore]`d because running one is the finding (an
+/// endless loop or gigabytes), and they stay here so the day an upstream fix lands,
+/// `cargo test --features jbig2 -- --ignored` shows it.
 #[cfg(feature = "jbig2")]
 mod known_upstream {
     use super::*;
