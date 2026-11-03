@@ -26,6 +26,7 @@ nonuniform-scale-rotated-001 SupportedExact=1 SupportedEquivalent=0 RequiresPVec
 nonunit-weight-001 SupportedExact=1 SupportedEquivalent=0 RequiresPVecCapability=0 RequiresExtension=0 Unsupported=0 IgnoredByPolicy=0
 nurbs-d2-offconic-001 SupportedExact=1 SupportedEquivalent=0 RequiresPVecCapability=0 RequiresExtension=0 Unsupported=0 IgnoredByPolicy=0
 nurbs-d3-001 SupportedExact=1 SupportedEquivalent=0 RequiresPVecCapability=0 RequiresExtension=0 Unsupported=0 IgnoredByPolicy=0
+paper-space-multi-viewport-001 SupportedExact=0 SupportedEquivalent=1 RequiresPVecCapability=0 RequiresExtension=0 Unsupported=0 IgnoredByPolicy=0
 polyline-001 SupportedExact=1 SupportedEquivalent=0 RequiresPVecCapability=0 RequiresExtension=0 Unsupported=0 IgnoredByPolicy=0
 polyline2d-001 SupportedExact=1 SupportedEquivalent=0 RequiresPVecCapability=0 RequiresExtension=0 Unsupported=0 IgnoredByPolicy=0
 reflection-001 SupportedExact=0 SupportedEquivalent=1 RequiresPVecCapability=0 RequiresExtension=0 Unsupported=0 IgnoredByPolicy=0
@@ -37,3 +38,5 @@ tiny-extent-001 SupportedExact=0 SupportedEquivalent=1 RequiresPVecCapability=0 
 tiny-radius-001 SupportedExact=1 SupportedEquivalent=0 RequiresPVecCapability=0 RequiresExtension=0 Unsupported=0 IgnoredByPolicy=0
 translation-001 SupportedExact=0 SupportedEquivalent=1 RequiresPVecCapability=0 RequiresExtension=0 Unsupported=0 IgnoredByPolicy=0
 uniform-scale-001 SupportedExact=1 SupportedEquivalent=0 RequiresPVecCapability=0 RequiresExtension=0 Unsupported=0 IgnoredByPolicy=0
+viewport-clipped-001 SupportedExact=0 SupportedEquivalent=1 RequiresPVecCapability=0 RequiresExtension=0 Unsupported=0 IgnoredByPolicy=0
+viewport-clipped-bounded-001 SupportedExact=0 SupportedEquivalent=1 RequiresPVecCapability=0 RequiresExtension=0 Unsupported=0 IgnoredByPolicy=0
