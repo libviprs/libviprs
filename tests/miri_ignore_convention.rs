@@ -481,7 +481,8 @@ const EXPECTED_SRC_MODULES: usize = 31;
 /// #1363 adds 1: `tests/dependency_policy.rs::hayro_ccitt_is_in_every_cell_and_is_plain_rust`, which runs `cargo tree`. It said 53 before this line moved.
 /// #1364 adds 1: `tests/dependency_policy.rs::the_jp2k_cell_adds_only_its_two_codec_crates`, which runs `cargo tree`. It said 54 before this line moved.
 /// #1365 adds 1: `tests/dependency_policy.rs::jbig2_adds_the_decoder_and_its_ccitt_crate_and_never_the_simd_one`, which runs `cargo tree`. It said 56 before this line moved.
-const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 57;
+/// #1475 adds 1: `tests/pvec_drift.rs::n_1471_the_example_prints_both_reports_and_fails_on_drift`, which runs the `pvec_drift` example. It said 57 before this line moved.
+const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 58;
 
 /// The filesystem-touching tests still allowed to run under Miri, and so still
 /// allowed to end the whole run on their first syscall.
