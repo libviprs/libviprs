@@ -216,23 +216,23 @@ Measured on MARS (x86_64-linux-mars, native), release build, three runs per vari
 
 For comparison, the facade's writer alone costs about 310 bytes per entity (`docs/adr/pvec-tiers-and-spool-rescope.md`). The other roughly 2.5 KB per entity is libviprs: the flattened leaves with their provenance stubs, the view outcome, the records, the report rows and the diagnostics. A spool that moves only the writer's state would not reach the ceiling, and the decision on where the memory goes has to wait for the numbers of a strategy that exists.
 
-The spill strategy, same host and method, budget 64 MiB (one run, taken while MARS carried other jobs at a load of about 15 on 28 cpus, so most rows are marked unstable and none of the wall times should be read as a curve):
+The spill strategy, same host and method (three runs per variant, the largest peak of the three, wall time the median, rounded up to the MiB), budget 64 MiB. MARS carried other jobs at a load of about 15 on 28 cpus, so most rows are marked unstable and none of the wall times should be read as a curve. These rows are the baseline's, and `tests/pvec_1064_memory_decision.rs` fails if the two disagree:
 
 | strategy | cell | scale | entities | wall (s) | tracked peak (MiB) | peak RSS (MiB) | spilled, peak on disk (MiB) | spill files |
 |---|---|---|---|---|---|---|---|---|
-| spill | large_industrial | 0.5 | 512,500 | 8.9 | 1,395 | 1,570 | 130 | 11 |
-| spill | large_industrial | 1.0 | 1,025,000 | 17.5 | 2,724 | 3,116 | 261 | 16 |
-| spill | large_industrial | 2.0 | 2,050,000 | 28.1 | 5,383 | 6,180 | 521 | 26 |
-| spill | spline_heavy | 1.0 | 10,000 | 0.4 | 100 | 81 | 5 | 5 |
-| spill | block_heavy | 1.0 | 22,440 | 1.4 | 55 | 80 | 2 | 5 |
+| spill | large_industrial | 0.5 | 512,500 | 8.9 | 1,396 | 1,571 | 131 | 11 |
+| spill | large_industrial | 1.0 | 1,025,000 | 17.5 | 2,725 | 3,117 | 262 | 16 |
+| spill | large_industrial | 2.0 | 2,050,000 | 28.1 | 5,384 | 6,181 | 522 | 26 |
+| spill | spline_heavy | 1.0 | 10,000 | 0.4 | 101 | 82 | 6 | 5 |
+| spill | block_heavy | 1.0 | 22,440 | 1.4 | 56 | 81 | 3 | 5 |
 
-The budget sweep on `large_industrial` at scale 1.0 (budgets 64, 128 and 256 MiB) gives a tracked peak of 2,724 MiB and a process peak RSS of 3,116 MiB at every budget. The spill files do move with the budget (261, 261 and 116 MiB on disk, 16, 11 and 5 files), the peak does not.
+The budget sweep on `large_industrial` at scale 1.0 (budgets 64, 128 and 256 MiB, same three runs) gives a tracked peak of 2,725 MiB and a process peak RSS of 3,117 MiB at every budget. The spill files do move with the budget (262, 262, 117 MiB on disk, 16, 11, 5 files), the peak does not.
 
 ### Decision
 
 **libviprs ships the spill strategy** for the artifact: it is the only one with code, its bytes are the in-memory conversion's for the same configuration (`tests/pvec_1314_spool.rs`), and it takes the artifact out of memory (24 bytes an entity instead of 391 to 419 for the funnel, `docs/adr/pvec-tiers-and-spool-rescope.md`). The two-pass strategy has no code, and the numbers above give no reason to build it: the spill already removes the second pass over the writer's input.
 
-**It does not meet the N8.4 criteria, and I am not claiming it does.** The tracked peak and the peak RSS are the same with and without the spill, to the MiB, at every scale and every budget: 2,724 MiB tracked and 3,116 MiB RSS at 1,025,000 entities against ceilings of 1,024 and 1,536 MiB, and doubling the entities still moves the tracked peak by 97.6% against a criterion of under 10%. The peak is reached before the writer runs, while the classifier's flattened leaves, view outcome, records and report rows are all alive, and that is the roughly 2.5 KB an entity that sits in libviprs. The criterion that the buffer is the knob also fails, because the peak does not move with the buffer. Meeting the ceiling needs the classifier to hand entities to the writer as it goes instead of collecting them, which is a change in `src/pvec_convert.rs`, not a tuning of the spill. That work is tracked in #1481.
+**It does not meet the N8.4 criteria, and I am not claiming it does.** The tracked peak and the peak RSS are within about 1% with and without the spill, at every scale and every budget (2,725 MiB tracked and 3,149 MiB RSS direct, 2,725 and 3,117 MiB with the spill, at 1,025,000 entities) against ceilings of 1,024 and 1,536 MiB, and doubling the entities still moves the tracked peak by 97.6% against a criterion of under 10%. The peak is reached before the writer runs, while the classifier's flattened leaves, view outcome, records and report rows are all alive, and that is the roughly 2.5 KB an entity that sits in libviprs. The spill also costs wall time: 17.5 s against 8.16 s direct at 1,025,000 entities, though the spill rows were taken under load and are marked unstable, so I read that as slower, not as a factor. The criterion that the buffer is the knob also fails, because the peak does not move with the buffer. Meeting the ceiling needs the classifier to hand entities to the writer as it goes instead of collecting them, which is a change in `src/pvec_convert.rs`, not a tuning of the spill. That work is tracked in #1481.
 
 All rows in this section are x86_64 native on MARS. I took no arm64 rows.
 

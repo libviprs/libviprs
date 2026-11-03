@@ -500,6 +500,7 @@ annotated   fs-detected  tests/pvec_1064_memory_decision.rs::the_baseline_has_sp
 annotated   fs-detected  tests/pvec_1064_memory_decision.rs::the_budget_sweep_is_recorded
 annotated   fs-detected  tests/pvec_1064_memory_decision.rs::the_decision_names_a_strategy_and_cites_figures
 annotated   fs-detected  tests/pvec_1064_memory_decision.rs::the_spill_strategy_is_measured_not_marked_unbuilt
+annotated   fs-detected  tests/pvec_1064_memory_decision.rs::the_spill_table_agrees_with_the_baseline
 annotated   fs-detected  tests/pvec_1079_provider_default.rs::no_code_in_src_pvec_names_acadsharp
 annotated   fs-detected  tests/pvec_1079_provider_default.rs::nothing_that_builds_or_runs_libredwg_lives_in_libviprs
 annotated   fs-detected  tests/pvec_1085_fill_policy.rs::n5_6_the_doc_has_a_row_for_every_construct_and_reason
