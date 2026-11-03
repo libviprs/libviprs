@@ -23,8 +23,8 @@ Two things this task depends on are not in the tree yet, and I did not fake eith
 | PDF `f* B* b*` (even-odd) | geometry only | `fill-geometry-only-even-odd` | `IgnoredByPolicy` (the fill, not the geometry) | 3 in the test stream `f* B* b*` |
 | PDF `sh` shading | ignored, counted | `fill-shading-requires-extension` | `RequiresExtension` | 2 in the test stream |
 | PDF `/Pattern` colour (`scn`, `SCN` with a name) | ignored, counted | `fill-pattern-requires-extension` | `RequiresExtension` | 2 in the test stream |
-| PDF image XObject (`Do` of an `/Image`) | counted with its CTM, no placement | `image-pdf-xobject-not-placed` | `RequiresExtension` | 2 in the #1328 test stream |
-| PDF inline image (`BI ... EI`) | counted with its CTM, no placement | `image-pdf-inline-not-placed` | `RequiresExtension` | 2 in the #1328 test stream |
+| PDF image XObject (`Do` of an `/Image`) | counted with its CTM, placed by the raster bake (#1332) | `image-pdf-xobject-baked` | `RequiresExtension` | 2 in the #1328 test stream |
+| PDF inline image (`BI ... EI`) | counted with its CTM, placed by the raster bake (#1332) | `image-pdf-inline-baked` | `RequiresExtension` | 2 in the #1328 test stream |
 | DWG `IMAGE` | reported with its frame, no placement | `image-dwg-frame-only-not-placed` | `Unsupported` | 1 in the #1328 test drawing |
 
 ### DWG `HATCH`, `SOLID`, `TRACE`

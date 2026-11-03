@@ -115,7 +115,7 @@ fn a_form_xobject_is_not_an_image_and_a_pdf_without_images_reports_zero() {
 }
 
 #[test]
-fn the_report_counts_images_and_says_no_placement_is_written() {
+fn the_report_counts_images_and_says_the_raster_bake_places_them() {
     let body = format!("q 10 0 0 10 0 0 cm /Im1 Do Q /Im1 Do {INLINE}");
     let p = page(&pdf(&body, 1, None));
     let mut report = FillReport::new();
@@ -128,7 +128,7 @@ fn the_report_counts_images_and_says_no_placement_is_written() {
     ] {
         let row = policy_for(c);
         assert_eq!(row.decision, FillDecision::IgnoredCounted, "{c:?}");
-        assert!(row.reason.contains("not-placed"), "{}", row.reason);
+        assert!(row.reason.ends_with("-baked"), "{}", row.reason);
     }
 }
 
