@@ -172,11 +172,15 @@ pub enum ReasonCode {
     /// rather than exact construct under a profile that allows exact ones only.
     /// `RequiresPVecCapability`, and `capability-not-allowed` in the diagnostics.
     CapabilityNotAllowed,
+    /// A curve the classifier accepted and PVec's writer then refused (`WRT-08`: its container
+    /// cannot store it exactly and deterministically). `RequiresPVecCapability`, and the rule is
+    /// in the row's warnings.
+    PvecCannotStore,
 }
 
 impl ReasonCode {
     /// Every code, in a fixed order.
-    pub const ALL: [ReasonCode; 24] = [
+    pub const ALL: [ReasonCode; 25] = [
         ReasonCode::SplineKnotsNotReported,
         ReasonCode::SplinePeriodicNotReported,
         ReasonCode::SplineWeightsNotReported,
@@ -201,6 +205,7 @@ impl ReasonCode {
         ReasonCode::TransformSingular,
         ReasonCode::TransformConicIllConditioned,
         ReasonCode::CapabilityNotAllowed,
+        ReasonCode::PvecCannotStore,
     ];
 
     /// The stable machine-readable spelling.
@@ -231,6 +236,7 @@ impl ReasonCode {
             ReasonCode::TransformSingular => "transform-singular",
             ReasonCode::TransformConicIllConditioned => "transform-conic-ill-conditioned",
             ReasonCode::CapabilityNotAllowed => "capability-not-allowed",
+            ReasonCode::PvecCannotStore => "pvec-cannot-store",
         }
     }
 
@@ -244,7 +250,8 @@ impl ReasonCode {
             ReasonCode::Spline3d
             | ReasonCode::Helix
             | ReasonCode::Geometry3d
-            | ReasonCode::CapabilityNotAllowed => FidelityClass::RequiresPVecCapability,
+            | ReasonCode::CapabilityNotAllowed
+            | ReasonCode::PvecCannotStore => FidelityClass::RequiresPVecCapability,
             ReasonCode::SplineLimitExceeded
             | ReasonCode::SplineMalformed
             | ReasonCode::SplinePolicyRefused
@@ -436,6 +443,18 @@ impl Tally {
         if let Some(r) = c.reason {
             *self.reasons.entry((r, c.source_class.clone())).or_insert(0) += 1;
         }
+    }
+
+    /// Moves one entity from the class `from` put it in to the one `to` does, for an entity the
+    /// writer refused after it was classified.
+    pub fn reclassify(&mut self, from: &Classification, to: &Classification) {
+        self.counts[from.class.index()] -= 1;
+        if let Some(r) = from.reason
+            && let Some(n) = self.reasons.get_mut(&(r, from.source_class.clone()))
+        {
+            *n -= 1;
+        }
+        self.record(to);
     }
 
     /// Closes the tally against the number of entities the conversion saw arrive, counted
