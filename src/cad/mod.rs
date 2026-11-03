@@ -195,6 +195,8 @@
 //! # Ok::<(), CadError>(())
 //! ```
 
+#[cfg(feature = "dwg-acadrust")]
+pub mod acadrust;
 #[cfg(feature = "dwg-acadsharp")]
 pub mod acadsharp;
 mod decoder;
