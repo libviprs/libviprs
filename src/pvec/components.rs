@@ -71,13 +71,6 @@ pub struct ComponentSource<'a> {
     pub style: Option<&'a LineStyleComponent>,
 }
 
-/// PVec's bounds on a component payload, repeated here because the facade does not export them.
-/// `tests/pvec_1093_degrade.rs` holds each one against the encoder, one past it and at it.
-const MAX_NAME: usize = 255;
-const MAX_DASHES: usize = 16;
-const MAX_TABLE: usize = 65_536;
-const MAX_RECORDS: usize = 1 << 20;
-
 /// A row or table entry left out of a stream because PVec cannot hold it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DroppedRow {
@@ -124,6 +117,12 @@ pub fn build_streams(
     layers: &[LayerState],
     rows: &[ComponentSource<'_>],
 ) -> Result<BuiltStreams, ComponentsError> {
+    // PVec's bounds on a component payload, repeated because the facade does not export them.
+    // `tests/pvec_1093_degrade.rs` holds each one against the encoder, one past it and at it.
+    const MAX_NAME: usize = 255;
+    const MAX_DASHES: usize = 16;
+    const MAX_TABLE: usize = 65_536;
+    const MAX_RECORDS: usize = 1 << 20;
     let mut dropped = Vec::new();
     if select == StreamSelection::NONE {
         return Ok(BuiltStreams {
@@ -204,6 +203,9 @@ pub fn build_streams(
     }
     if select.line_style {
         let mut styles: Vec<LineStyleDef> = Vec::new();
+        // The table index of each style seen, keyed on the bit patterns of its numbers.
+        let mut seen_styles: BTreeMap<(Vec<u64>, Option<(bool, u64)>, u64, bool), usize> =
+            BTreeMap::new();
         let mut assignments = Vec::new();
         for (id, r) in &written {
             let Some(c) = r.style else { continue };
@@ -228,14 +230,25 @@ pub fn build_streams(
                 skip(r, "line-style", "stream-full");
                 continue;
             }
-            let n = match styles.iter().position(|s| *s == def) {
-                Some(n) => n,
+            let key = (
+                def.dashes.iter().map(|d| d.to_bits()).collect(),
+                match &def.width {
+                    None => None,
+                    Some(StrokeWidth::Thinnest) => Some((false, 0)),
+                    Some(StrokeWidth::Width(v)) => Some((true, v.to_bits())),
+                },
+                def.phase.to_bits(),
+                def.visible,
+            );
+            let n = match seen_styles.get(&key) {
+                Some(n) => *n,
                 None => {
                     if styles.len() >= MAX_TABLE {
                         skip(r, "line-style", "table-full");
                         continue;
                     }
                     styles.push(def);
+                    seen_styles.insert(key, styles.len() - 1);
                     styles.len() - 1
                 }
             };
