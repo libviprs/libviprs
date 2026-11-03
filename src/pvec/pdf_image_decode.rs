@@ -20,7 +20,7 @@
 use lopdf::{Dictionary, Object};
 
 use super::pdf_image::{FilterError, PdfImageError, PdfImageNote};
-use super::pdf_vector::{PdfImagePlacement, RawImage};
+use super::pdf_vector::{PdfImagePlacement, PdfVectorLimits, RawImage};
 use crate::source::DecodeLimits;
 
 /// What one filter stage gets: everything the dictionary says that a codec may need.
@@ -355,16 +355,40 @@ fn unfilter(
     }
     if let Some(filter) = codec {
         let index = filters.len() - 1;
-        let globals = None;
+        let parms = parms_for(&raw.dict, index);
+        // The shared symbol and pattern dictionaries of a JBIG2 image. The extraction kept the
+        // stream (its encoded bytes count against the per-stream cap); a Flate stage on it is
+        // undone here, with the same cap as the room an inflated image stream gets.
+        let globals = match parms.and_then(|p| p.get(b"JBIG2Globals").ok()) {
+            Some(Object::Stream(g)) if filter == "JBIG2Decode" => {
+                let flate = match g.dict.get(b"Filter") {
+                    Ok(Object::Name(n)) => n.as_slice() == b"FlateDecode",
+                    Ok(Object::Array(a)) => {
+                        a.len() == 1 && a[0].as_name().ok() == Some(b"FlateDecode".as_slice())
+                    }
+                    _ => false,
+                };
+                if flate {
+                    let cap = PdfVectorLimits::default().max_image_stream_bytes as usize;
+                    Some(
+                        crate::pdf::flate_decompress(&g.content, cap)
+                            .map_err(PdfImageError::Pdf)?,
+                    )
+                } else {
+                    Some(g.content.clone())
+                }
+            }
+            _ => None,
+        };
         return decode_filter(FilterInput {
             filter,
-            parms: parms_for(&raw.dict, index),
+            parms,
             data: &data,
             width,
             height,
             bpc,
             components: space.map(Space::components),
-            globals,
+            globals: globals.as_deref(),
             budget,
         });
     }

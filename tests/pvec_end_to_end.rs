@@ -349,7 +349,20 @@ fn run(fx: &Fixture, truth: Option<&Value>, dir: &Path) -> Result<Option<Convert
     };
     match truth {
         Some(t) => {
-            compare_to_truth(&c.curves, refused_by_writer(&c.report), t)?;
+            // The report declares how many entities PVec's writer refused, and the comparison
+            // subtracts them, so a regression that refuses more would absorb itself. Pin the count:
+            // only `mixed-entity-001` has an entity the container cannot store (#1446).
+            let expected = usize::from(fx.id == "mixed-entity-001");
+            let refused = refused_by_writer(&c.report);
+            if refused != expected {
+                return fail(
+                    Stage::Compare,
+                    format!(
+                        "the report counts {refused} entities refused by the writer, expected {expected}"
+                    ),
+                );
+            }
+            compare_to_truth(&c.curves, refused, t)?;
             policy(&c, t)?;
         }
         None => compare_to_report(&c)?,
@@ -533,11 +546,9 @@ fn n2_3_1050_each_stage_is_named_when_it_is_the_one_that_fails() {
     // normalization: a transform the mapping refuses, for a truth that did not expect it
     let corpus = Corpus::open();
     let singular = corpus.get("singular-001");
-    let f = run(singular, None, dir.path()).map(|_| ());
     // With no truth the refusal is not expected, so it is reported, at normalization.
-    if let Err(f) = f {
-        assert_eq!(f.stage, Stage::Normalization, "{f}");
-    }
+    let f = run(singular, None, dir.path()).map(|_| ()).unwrap_err();
+    assert_eq!(f.stage, Stage::Normalization, "{f}");
 
     // write: a unit PVec cannot declare is refused by the writer, not rescaled
     let dwg = corpus.get("line-001").dwg();

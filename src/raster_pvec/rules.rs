@@ -137,7 +137,7 @@ pub const RASTER_PRODUCER_RULES: &[ProducerRule] = &[
     },
     ProducerRule {
         id: "pdf-colour-and-mask-bake",
-        rule: "PDF images are baked before tiling: `/SMask` into alpha, `/ImageMask` into RGBA in the fill colour, `/Indexed`, `/ICCBased`, `/CalGray`, `/CalRGB` and `/Lab` into sRGB (approximated, reported), `/Decode` applied, the unit square through the CTM. `JPXDecode`, `JBIG2Decode`, `CCITTFaxDecode`, `/Separation`, `/DeviceN`, a graphics-state soft mask and a singular CTM are refused by name.",
+        rule: "PDF images are baked before tiling: `/SMask` into alpha, `/ImageMask` into RGBA in the fill colour, `/Indexed`, `/ICCBased`, `/CalGray`, `/CalRGB` and `/Lab` into sRGB (approximated, reported), `/Decode` applied, the unit square through the CTM. `CCITTFaxDecode` decodes in every build, `JPXDecode` behind `jp2k` and `JBIG2Decode` behind `jbig2` (`filter-not-enabled:<name>` without the feature, `decode-failed` when the codec refuses the stream, `unsupported-filter:<name>` for any other filter). `/Separation`, `/DeviceN`, a graphics-state soft mask and a singular CTM are refused by name.",
         source: "ADR 0018 Producers (M17)",
     },
     ProducerRule {

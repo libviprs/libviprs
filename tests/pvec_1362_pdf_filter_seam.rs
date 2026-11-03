@@ -124,7 +124,11 @@ fn the_pixel_budget_is_the_one_the_dct_decoder_runs_under() {
 #[test]
 fn the_codec_names_without_a_codec_report_filter_not_enabled_and_the_error_names_the_feature() {
     // CCITTFaxDecode left this list when #1363 gave it a decoder with no feature.
-    let mut names = vec![("JBIG2Decode", "jbig2")];
+    let mut names = Vec::new();
+    // With `jbig2` the JBIG2 stage is a codec that tries the stream (#1365), not a missing one.
+    if !cfg!(feature = "jbig2") {
+        names.push(("JBIG2Decode", "jbig2"));
+    }
     // With `jp2k` the JPX stage is a codec that tries the stream (#1364), not a missing one.
     if !cfg!(feature = "jp2k") {
         names.push(("JPXDecode", "jp2k"));
@@ -149,6 +153,7 @@ fn the_codec_names_without_a_codec_report_filter_not_enabled_and_the_error_names
 }
 
 #[test]
+#[cfg(not(feature = "jbig2"))]
 fn a_codec_after_flate_is_also_not_enabled_and_is_counted_in_the_report() {
     let bytes = filtered(
         Object::Array(vec![name("FlateDecode"), name("JBIG2Decode")]),
