@@ -6,7 +6,7 @@ acadrust, I run it over the AutoCAD-authored saves and the upstream MIT samples 
 provider back to the existing decoder with the traits unchanged, and I stop and report instead of
 shipping. This is that run.
 
-Gate 0: PASS. All 22 AutoCAD-authored files open through `AcadrustProvider`, no `OPEN_FAILED` in Tier A.
+Gate 0: PASS, rerun at the 0.6.8 pin (libviprs#1487) with every Tier A count unchanged. All 22 AutoCAD-authored files open through `AcadrustProvider`, no `OPEN_FAILED` in Tier A.
 
 `OPEN_FAILED` means `AcadrustProvider::open` returned an error, or the process running it died,
 for that file. A reader panic counts, because the provider catches it and reports it as an open
@@ -15,11 +15,11 @@ fails if the two disagree, if a Tier A row is `OPEN_FAILED`, or if a corpus file
 
 ## What I ran
 
-- acadrust: libviprs/acadrust at `72af48970e306ef1d50dd751b227df2b4fc3fb99` (fork `main`), the same
+- acadrust: libviprs/acadrust at `f1e00c11f6371c8cfcff2c726620a51a45a2ad1b` (fork `main`, version 0.6.8, after the upstream sync), the same
   full rev `Cargo.toml` pins for the `dwg-acadrust` feature. A test checks the two stay equal.
-- Provider: `AcadrustProvider` at libviprs `e19b68bc` (branch `feat/1072-provider-traits`), release build,
+- Provider: `AcadrustProvider` at libviprs `45868476` plus the pin bump (libviprs#1487), release build,
   through `examples/dwg_gate0.rs`, one process per file so a crash is one row.
-- Host: MARS, native x86_64, `rust:1.99.1-bookworm`, in a container, by `acadrust-gate0/run.sh`.
+- Host: the UGREEN NAS (HIGARA, MARS was out of disk), native x86_64, `rust:1.99.1-bookworm`, in a container, by `acadrust-gate0/run.sh`.
 - Corpus: ACadSharp `samples/` at `d7dc111023477d8a9fffc2153139459c95b4f345` (MIT). Tier A is the
   AutoCAD-authored set and decides. Tier B is the 50 `g11_*`/`g13_*` regression files
   already in `tests/fixtures/cad/g13` (ACadSharp `DwgWriter`), and Tier S the two spike fixtures
@@ -101,7 +101,7 @@ Tier S: 2 of 2 open. Rows are in the TSV.
   reason, which is the behaviour I wanted either way: a curve that cannot be reported is not rebuilt
   from points. N4.3 decides what to do with it.
 - **Four entities of `AecObjects.dwg` have no entity behind their handle.** A block lists four handles
-  the document has no entity for, so they come back `Unmapped` with class `UNKNOWN`. Likely
+  the document has no entity for, so they come back `Unmapped` (class `UNKNOWN` at the old pin, `EXTENDED_ENTITY` at 0.6.8; the counts did not move). Likely
   proxy objects, but I did not chase it...
 - **`geoloc.dwg` yields no entities at all** (0 in model space, 0 in every scope). I have no second
   reading of that file, so I cannot say whether it is empty or the reader loses its contents. The

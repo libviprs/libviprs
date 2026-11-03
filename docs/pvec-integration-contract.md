@@ -9,7 +9,7 @@ them to its recorded hash.
 ## The five pins
 
 **1. PVec: the revision, the container version and the capability set this build writes.** This build links
-`pvec` at revision `ff67ecb85b5367c5db56f7d03f162c02437414a8` and writes container version 1.0. The capabilities it
+`pvec` at revision `240fcd3da4f0ee52ace31c8837b52d349b5548dd` and writes container version 1.0. The capabilities it
 can write are the ones the mapping table (`pvec::mapping::NORMALIZED_TO_PVEC`) gives its ten kinds, ids 5 to 12 of
 PVec's registry. What a build does with other container versions is `docs/pvec-version-compatibility.md`.
 
@@ -36,7 +36,7 @@ the pin with the policy PVec exports, so a change of PVec's policy is a red test
 `tests/common/pvec_gold.rs`.
 
 **5. The provider compatibility range.** The default provider is `acadrust`, at revision
-`72af48970e306ef1d50dd751b227df2b4fc3fb99`, and it takes DWG versions AC1014 to AC1032. A drawing below AC1014 is
+`f1e00c11f6371c8cfcff2c726620a51a45a2ad1b`, and it takes DWG versions AC1014 to AC1032. A drawing below AC1014 is
 refused at conversion start. `docs/pvec-version-compatibility.md` has the table.
 
 ## The baselines it was frozen against

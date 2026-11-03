@@ -1,11 +1,11 @@
 {
  "schema": 1,
- "pvec_rev": "ff67ecb85b5367c5db56f7d03f162c02437414a8",
+ "pvec_rev": "240fcd3da4f0ee52ace31c8837b52d349b5548dd",
  "container": {"writes": "1.0", "major": 1},
  "capabilities_written": [5, 6, 7, 8, 9, 10, 11, 12],
  "providers": {
   "acadrust": {
-   "crate_rev": "72af48970e306ef1d50dd751b227df2b4fc3fb99",
+   "crate_rev": "f1e00c11f6371c8cfcff2c726620a51a45a2ad1b",
    "minimum": "AC1014",
    "dwg_versions": ["AC1014", "AC1015", "AC1018", "AC1021", "AC1024", "AC1027", "AC1032"]
   }
