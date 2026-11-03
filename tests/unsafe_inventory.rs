@@ -48,7 +48,8 @@ const CARGO_TOML: &str = include_str!("../Cargo.toml");
 ///
 /// `avif.rs` is the dav1d FFI boundary: an `unsafe extern "C"` block, a raw pointer
 /// `as_ref()`, and pointer arithmetic with an unaligned read. It is behind
-/// `#[cfg(feature = "avif")]`, and `default = []`, so a default build (and so a bare
+/// `#[cfg(feature = "avif")]`, and `avif` is not a default feature (`default` is only
+/// `dwg-acadrust`, pure Rust), so a default build (and so a bare
 /// `cargo miri test`) compiles all of it out. That last clause is what
 /// [`the_crates_own_unsafe_stays_out_of_a_default_build`] holds to the manifest.
 const ALLOWED: [(&str, &str); 1] = [(

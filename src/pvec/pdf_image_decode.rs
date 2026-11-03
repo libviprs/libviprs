@@ -360,7 +360,8 @@ fn unfilter(
         // The shared symbol and pattern dictionaries of a JBIG2 image. The extraction kept the
         // stream (its encoded bytes count against the per-stream cap); a Flate stage on it is
         // undone here, with the room a codestream inside Flate gets, which follows the image's
-        // own size and so the caller's pixel limits, not a default.
+        // own size and so the caller's pixel limits, but never more than the 64 MiB default
+        // per-stream cap, which is what this inflate was held to before.
         let globals = match parms.and_then(|p| p.get(b"JBIG2Globals").ok()) {
             Some(Object::Stream(g)) if filter == "JBIG2Decode" => {
                 let flate = match g.dict.get(b"Filter") {
@@ -372,7 +373,7 @@ fn unfilter(
                 };
                 if flate {
                     Some(
-                        crate::pdf::flate_decompress(&g.content, codestream_room)
+                        crate::pdf::flate_decompress(&g.content, codestream_room.min(64 << 20))
                             .map_err(PdfImageError::Pdf)?,
                     )
                 } else {

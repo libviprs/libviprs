@@ -46,17 +46,15 @@ fn default_closure(manifest: &str) -> (BTreeSet<String>, BTreeSet<String>) {
     (seen, deps)
 }
 
-/// Every complaint about `manifest`, empty when it keeps acadrust the default and acadsharp-rs opt-in.
+/// Every complaint about `manifest`, empty when acadrust is on by default and acadsharp-rs is opt-in.
 fn manifest_complaints(manifest: &str) -> Vec<String> {
     let mut out = Vec::new();
     let (features, deps) = default_closure(manifest);
-    for provider in ["acadsharp-rs", "acadrust"] {
-        if deps.contains(provider) {
-            out.push(format!("the default feature set switches on {provider}"));
-        }
+    if !features.contains("dwg-acadrust") || !deps.contains("acadrust") {
+        out.push("the default feature set does not switch on acadrust".into());
     }
-    if features.contains("dwg-acadsharp") || features.contains("dwg-acadrust") {
-        out.push("the default feature set contains a DWG provider feature".into());
+    if deps.contains("acadsharp-rs") || features.contains("dwg-acadsharp") {
+        out.push("the default feature set switches on acadsharp-rs".into());
     }
     let doc: toml::Table = manifest.parse().unwrap();
     let dep = &doc["dependencies"]["acadsharp-rs"];
@@ -86,15 +84,22 @@ fn manifest_complaints(manifest: &str) -> Vec<String> {
 }
 
 #[test]
-fn cargo_defaults_leave_both_providers_off_and_acadsharp_opt_in() {
+fn cargo_defaults_switch_acadrust_on_and_leave_acadsharp_opt_in() {
     assert_eq!(manifest_complaints(MANIFEST), Vec::<String>::new());
 }
 
 #[test]
 fn the_checks_fail_on_a_mutated_manifest() {
-    let defaulted = MANIFEST.replacen("default = []", "default = [\"dwg-acadsharp\"]", 1);
+    let defaulted = MANIFEST.replacen(
+        "default = [\"dwg-acadrust\"]",
+        "default = [\"dwg-acadsharp\"]",
+        1,
+    );
     assert_ne!(defaulted, MANIFEST, "the mutation must change the manifest");
     assert!(!manifest_complaints(&defaulted).is_empty());
+    let emptied = MANIFEST.replacen("default = [\"dwg-acadrust\"]", "default = []", 1);
+    assert_ne!(emptied, MANIFEST);
+    assert!(!manifest_complaints(&emptied).is_empty());
     let leaked = MANIFEST.replacen(
         "pvec-spline = [\"dep:pvec-numeric\", \"dep:pvec-geometry\"]",
         "pvec-spline = [\"dep:pvec-numeric\", \"dep:pvec-geometry\", \"dep:acadsharp-rs\"]",
@@ -155,7 +160,8 @@ fn the_provider_page_says_acadrust_is_the_default_and_acadsharp_is_opt_in() {
         "acadsharp-rs** is opt-in",
         "`dwg-acadsharp`",
         "off by default",
-        "feature set is empty",
+        "experimental",
+        "default feature set includes `dwg-acadrust`",
         "libredwg",
     ] {
         assert!(

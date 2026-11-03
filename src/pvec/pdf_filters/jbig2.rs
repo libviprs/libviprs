@@ -29,8 +29,9 @@
 //! of cells, empty height classes) are in arithmetic coded data too. All are reported upstream
 //! (`LaurenzV/hayro` #1700, #1701, #1550, #1598) and kept as ignored tests.
 //!
-//! Do not enable `jbig2` on untrusted PDFs yet: a 236 byte stream can still spend 1.4 GB and a
-//! crafted one can run for 1600 seconds before `hayro-jbig2` returns (measured on 0.3.1; the 0.4.0 changelog fixes none of the four).
+//! Do not enable `jbig2` on untrusted PDFs yet: a small crafted stream can still allocate several
+//! GB (6.4 GB in #1550) or never return (#1700) in `hayro-jbig2` (measured on 0.3.1, and the
+//! 0.4.0 changelog fixes none of the four findings).
 
 #[cfg(feature = "jbig2")]
 use crate::pvec::pdf_image::FilterError;
@@ -47,11 +48,12 @@ pub(in crate::pvec) fn decode(input: FilterInput<'_>) -> Result<FilterOutput, Pd
 
 /// Refuse what a segment header says before the decoder allocates for it (T.88 7.2 and 7.4).
 ///
-/// Walks the sequential segment headers of `stream`. A region segment (text 4 and 6 to 7, halftone
-/// 20 and 22 to 23, generic 36 and 38 to 39, refinement 40 and 42 to 43, so the intermediate
-/// forms too) that is wider or taller than the page, or a symbol dictionary (type 0) whose `SDNUMNEWSYMS` is over eight times its data length, is an
-/// error. A segment of unknown length ends the walk: only an immediate generic region may have
-/// one, and its header is read first.
+/// Walks the sequential segment headers of `stream`. A region segment (text 4 and 6 to 7,
+/// halftone 20 and 22 to 23, generic 36 and 38 to 39, refinement 40 and 42 to 43, so the
+/// intermediate forms too) that is wider or taller than the page, or a symbol dictionary (type 0)
+/// whose `SDNUMNEWSYMS` is over eight times its data length, is an error. A segment of unknown
+/// length ends the walk: only an immediate generic region may have one, and its header is read
+/// first.
 #[cfg(feature = "jbig2")]
 fn prescan(stream: &[u8], width: u32, height: u32) -> Result<(), String> {
     let be32 = |at: usize| -> Option<u32> {
