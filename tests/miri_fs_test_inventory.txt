@@ -654,6 +654,7 @@ annotated   fs-detected  tests/pvec_1489_image_reason_keys.rs::a_real_refusal_fr
 annotated   fs-detected  tests/pvec_1489_image_reason_keys.rs::every_note_key_is_in_a_doc
 annotated   fs-detected  tests/pvec_1489_image_reason_keys.rs::every_refusal_key_is_in_a_doc
 annotated   fs-detected  tests/pvec_1489_image_reason_keys.rs::the_five_keys_the_blueprint_hit_or_could_hit_are_named
+annotated   fs-detected  tests/pvec_1490_fill_report_images.rs::the_hatch_policy_doc_matches_the_code
 annotated   fs-detected  tests/pvec_api_surface.rs::no_index_directory_or_straddler_type_is_defined_under_src_pvec
 annotated   fs-detected  tests/pvec_api_surface.rs::no_pvec_path_under_src_is_outside_the_allowed_surface
 annotated   fs-detected  tests/pvec_api_surface.rs::no_writer_call_is_made_outside_the_funnel
