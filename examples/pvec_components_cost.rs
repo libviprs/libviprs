@@ -85,6 +85,7 @@ fn main() {
                 ids.iter().copied().zip(&geoms),
                 streams,
                 &CancelToken::new(),
+                &mut |_, _| {},
             )
             .unwrap();
             let wrote = t.elapsed().as_secs_f64();

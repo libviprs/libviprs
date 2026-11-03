@@ -120,6 +120,7 @@ fn write(f: &Fixture, streams: Vec<Stream>) -> GeometryArtifact {
         f.ids.iter().copied().zip(&f.geoms),
         streams,
         &CancelToken::new(),
+        &mut |_, _| {},
     )
     .unwrap()
 }
