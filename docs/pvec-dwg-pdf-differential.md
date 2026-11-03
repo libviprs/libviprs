@@ -29,6 +29,8 @@ re-recorded loss files. The acadrust default for the DWG side is unchanged (`doc
 | buckets | N3.5 class of each basic entity | N3.5 class of each drawn segment |
 | extent aspect | exact bounds (N6.4) of the entities, width over height | the same over the painted paths, page origin removed and `/Rotate` composed by the extractor |
 | outside the page | 0 | paths whose exact bounds leave the page box |
+| rendered ink aspect (`pdfium`) | the DWG's sampled extent in the displayed orientation | width over height of the pixels `render_page_pdfium` painted dark |
+| rendered ink outside the other | share of the DWG's ink with no PDF ink within the tolerance | share of the PDF's ink with no DWG ink within the tolerance |
 
 Aspect is compared to three decimals. A metric where the sides differ must be in `expected_loss.toml` with
 the DWG value, the PDF value and a written reason. An unlisted difference, a wrong recorded value, an entry
@@ -47,10 +49,20 @@ The pairs: `line-001`, `circle-001`, `bulge-arc-001`, `ellipse-001`, `polyline-0
 * Its page box does not enclose the drawing in all six pairs, so the PDF page clips part of an entity.
 * A polyline is no longer one entity: its segments are separate.
 
+## The rendered-image axis
+
+Under the `pdfium` feature the suite also renders page 1 of each exported PDF with `render_page_pdfium` and
+draws the DWG's own curves into the same pixel frame (#1406). libviprs has no rasteriser for DWG-derived
+PVec, so the DWG side is a point-sampling one-pixel-line drawer inside the test, not product code. The frame
+is the box of the pixels pdfium painted dark; the DWG's extent is mapped onto it with `/Rotate` composed,
+so the comparison is shape against shape. Each loss file records the DPI, the ink threshold, the tolerance
+and the platforms under `[raster]`, and the raster numbers were measured at 288 DPI with a 2 pixel
+tolerance on native x64 and on arm64 with the same values. Without the `pdfium` feature the raster entries
+are not checked. The test needs libpdfium at runtime: use the libviprs-dep release the CI image carries.
+
 ## Not here
 
-The rendered-image axis (`render_page_pdfium` against a render of the DWG-derived PVec) needs pdfium and is
-#1406. The pairs are flat drawings; block-bearing pairs wait for a transform-aware bounds comparison.
+The pairs are flat drawings; block-bearing pairs wait for a transform-aware bounds comparison.
 
 ## Adding or refreshing a pair
 

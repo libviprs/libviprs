@@ -415,7 +415,7 @@ with the checklist in CONTRIBUTING.md.
 
 ## CI
 
-GitHub Actions runs two workflows, eight jobs between them:
+GitHub Actions runs two workflows, twelve jobs between them:
 
 **CI**, on every branch push and on pull requests that no push accompanies (`.github/workflows/ci.yml`):
 - `Check & Lint`: `cargo fmt --check`, then `cargo clippy -D warnings` once per feature. That is the default build plus `pdfium`, `object-store-sink`, `tracing`, `avif`, `svg`, `jxl`, `packfile`, `serde`, `jp2k`, `jbig2`, `dwg-acadsharp`, `dwg-acadrust`, `pvec-normalized`, `pvec-spline`, `pvec-raster`, `pvec-write` and `pvec-convert`, because code behind any other `cfg` used to be linted by nothing, and a `cargo build --features s3` for the deprecated alias
@@ -423,6 +423,10 @@ GitHub Actions runs two workflows, eight jobs between them:
 - `Docs (deny broken, private and redundant intra-doc links)`: `cargo doc --no-deps --all-features`, with each of those three denied
 - `Test`: `cargo test`, once per feature that gates code, because a feature nobody names compiles its bodies out and runs zero assertions
 - `Integration Tests (libviprs-tests)`: compiles the sibling repo's ported cells against this crate, then runs its suite
+- `PVec gate: mathematical fidelity`: the known-truth, structural and geometric suites (#1060). Its artifact is the conformance report
+- `PVec gate: visibility and view correctness`: the view and transform cases plus the checked-in include and exclude decisions. Its artifact is the view-decision diff
+- `PVec gate: unsupported-classification stability`: every entity's class among the six fidelity values against a checked-in baseline. Its artifact is the classification diff
+- `PVec gate: deterministic output`: two conversions of one fixture byte for byte, and the checked-in digest set. A deliberate change to any baseline is rewritten with `PVEC_GATE_BLESS=1`, so it shows up as a diff in the pull request. None of the four needs a CAD converter
 
 **Merge Gate** (`.github/workflows/merge-gate.yml`):
 - `Loom` and `pdfium-render source audit (#149)`, on every branch push and on pull requests into `main` or `release`

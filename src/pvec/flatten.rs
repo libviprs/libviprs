@@ -483,9 +483,17 @@ impl GridFrame {
             let (row, col) = (index / self.columns, index % self.columns);
             // Spacings run along the INSERT's own (rotated) axes, which are the unit directions of
             // the linear part's two columns.
+            // Basic arithmetic and `sqrt` only: libm's `hypot` gives another last bit on x86_64
+            // and on arm64, and this result goes into a stored translation (#1471).
             let unit = |x: f64, y: f64| {
-                let n = x.hypot(y);
-                if n > 0.0 { (x / n, y / n) } else { (0.0, 0.0) }
+                let m = x.abs().max(y.abs());
+                if m > 0.0 && m.is_finite() {
+                    let (sx, sy) = (x / m, y / m);
+                    let n = (sx * sx + sy * sy).sqrt();
+                    (sx / n, sy / n)
+                } else {
+                    (0.0, 0.0)
+                }
             };
             let (ux, uy) = unit(m[0], m[2]);
             let (vx, vy) = unit(m[1], m[3]);

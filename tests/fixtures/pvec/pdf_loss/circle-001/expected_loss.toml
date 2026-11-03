@@ -20,3 +20,17 @@ dwg = "0"
 pdf = "1"
 reason = "the exporter's page box does not enclose this drawing: dwg2SVG 0.14 writes a viewBox the path leaves, so the PDF page edge clips it"
 
+[[loss]]
+metric = "raster.ink_aspect"
+dwg = "1.00"
+pdf = "4.50"
+reason = "pdfium paints only what the exporter's page box keeps (extent.outside_page is 1), so the painted ink box is narrower or taller than the DWG's own extent; the page rotation is composed on both sides"
+
+# The rendered-image axis (issue #1406): pdfium renders page 1, the DWG's curves are drawn into the
+# same pixel frame, and every number above named raster.* was measured at this DPI and tolerance on
+# each of these platforms (the same values on both).
+[raster]
+dpi = 288
+ink_below = 128
+tolerance_px = 2
+platforms = ["linux/amd64", "linux/arm64"]
