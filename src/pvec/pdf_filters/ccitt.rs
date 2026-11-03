@@ -1,10 +1,11 @@
 //! `CCITTFaxDecode` through `hayro-ccitt` (issue #1363), unconditional: no feature.
 //!
-//! The codec hands back runs; [`Rows`] packs them into one bit per sample, rows padded to bytes,
-//! which is what the colour pipeline reads for any 1-bit gray image. `/BlackIs1 false` (the
-//! default) makes a black pixel a 0 bit, the DeviceGray convention, so a plain scan reads black
-//! on white with no `/Decode`. The output is allocated once at `ceil(width / 8) * height`, and
-//! the pixel budget has already bounded `width * height`, so a hostile stream cannot grow it.
+//! The codec hands back the colour changes of each row; [`Rows`] packs them into one bit per
+//! sample, rows padded to bytes, which is what the colour pipeline reads for any 1-bit gray image.
+//! `/BlackIs1 false` (the default) makes a black pixel a 0 bit, the DeviceGray convention, so a
+//! plain scan reads black on white with no `/Decode`. The output is allocated once at `ceil(width /
+//! 8) * height`, and the pixel budget has already bounded `width * height`, so a hostile stream
+//! cannot grow it.
 //!
 //! `/Columns` (default 1728) and `/Rows` have to agree with `/Width` and `/Height`: a mismatch
 //! is [`FilterError::Parms`], never a silent resize.
@@ -28,14 +29,12 @@ fn parms_err(detail: &str) -> PdfImageError {
     refuse(FilterError::Parms(detail.to_string()))
 }
 
-/// The runs of the codec, packed. The codec's [`Decoder`] trait needs a named type.
+/// The rows of the codec, packed. The codec's [`Decoder`] trait needs a named type.
 struct Rows {
     data: Vec<u8>,
     row_bytes: usize,
     width: usize,
     height: usize,
-    /// Next pixel in the current row.
-    x: usize,
     /// Rows finished.
     y: usize,
     /// `/BlackIs1`: a black pixel is a 1 bit.
@@ -43,22 +42,33 @@ struct Rows {
 }
 
 impl Decoder for Rows {
-    fn push_pixels(&mut self, white: bool, count: u32) {
-        let from = self.x;
-        self.x = self.x.saturating_add(count as usize).min(self.width);
-        // A white pixel is a 1 bit unless `/BlackIs1` turns the convention round.
-        if white == self.black_is_1 || self.y >= self.height {
-            return;
+    fn push_row(&mut self, changes: &[u32]) {
+        if self.y < self.height {
+            let width = self.width;
+            let row = &mut self.data[self.y * self.row_bytes..(self.y + 1) * self.row_bytes];
+            // The row starts white and `changes` flips it. A white pixel is a 1 bit unless
+            // `/BlackIs1` turns the convention round, and the padding past the width stays 0.
+            let mut set = |from: usize, to: usize| {
+                for x in from..to.min(width) {
+                    row[x / 8] |= 0x80 >> (x % 8);
+                }
+            };
+            let mut at = 0;
+            for run in changes.chunks(2) {
+                let start = run[0] as usize;
+                let end = run.get(1).map_or(width, |&e| e as usize);
+                if self.black_is_1 {
+                    set(start, end);
+                } else {
+                    set(at, start);
+                }
+                at = end;
+            }
+            if !self.black_is_1 {
+                set(at, width);
+            }
         }
-        let row = &mut self.data[self.y * self.row_bytes..(self.y + 1) * self.row_bytes];
-        for x in from..self.x {
-            row[x / 8] |= 0x80 >> (x % 8);
-        }
-    }
-
-    fn next_line(&mut self) {
         self.y = (self.y + 1).min(self.height);
-        self.x = 0;
     }
 }
 
@@ -109,9 +119,10 @@ pub(in crate::pvec) fn decode(input: FilterInput<'_>) -> Result<FilterOutput, Pd
     let encoding = match k {
         ..=-1 => EncodingMode::Group4,
         0 => EncodingMode::Group3_1D,
-        positive => EncodingMode::Group3_2D {
-            k: u32::try_from(positive).map_err(|_| parms_err("/K is out of range"))?,
-        },
+        positive => {
+            u32::try_from(positive).map_err(|_| parms_err("/K is out of range"))?;
+            EncodingMode::Group3_2D
+        }
     };
     let settings = DecodeSettings {
         columns: input.width,
@@ -120,8 +131,8 @@ pub(in crate::pvec) fn decode(input: FilterInput<'_>) -> Result<FilterOutput, Pd
         end_of_line: flag(parms, b"EndOfLine", false)?,
         rows_are_byte_aligned: flag(parms, b"EncodedByteAlign", false)?,
         encoding,
-        // The runs are inverted here, where `/BlackIs1` is read once, not inside the codec.
-        invert_black: false,
+        // Lenient, as before: a scan with a damaged tail is a short scan, not a refusal.
+        strict: false,
     };
     let width = input.width as usize;
     let height = input.height as usize;
@@ -132,7 +143,6 @@ pub(in crate::pvec) fn decode(input: FilterInput<'_>) -> Result<FilterOutput, Pd
         row_bytes,
         width,
         height,
-        x: 0,
         y: 0,
         black_is_1: flag(parms, b"BlackIs1", false)?,
     };
