@@ -77,9 +77,45 @@ fn the_budget_sweep_is_recorded() {
     let b: serde_json::Value =
         serde_json::from_str(&read("tests/fixtures/pvec_bench_baseline.json"))
             .expect("the baseline parses");
-    for budget in [64u64, 128] {
+    for budget in [64u64, 128, 256] {
         let key =
             format!("bounded_memory/spill_budget/large_industrial/b{budget}MiB/x86_64-linux-mars");
         assert!(b["rows"][&key].is_object(), "{key} is in the baseline");
     }
+}
+
+/// The spill rows in the document are the baseline's, rounded up to the MiB, so the page and the
+/// file cannot drift apart by a rerun that only touched one of them.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn the_spill_table_agrees_with_the_baseline() {
+    let b: serde_json::Value =
+        serde_json::from_str(&read("tests/fixtures/pvec_bench_baseline.json"))
+            .expect("the baseline parses");
+    let doc = read("docs/pvec-benchmarks.md");
+    let up = |bytes: &serde_json::Value| {
+        ((bytes.as_f64().unwrap() / 1_048_576.0).ceil() as u64).to_string()
+    };
+    let mut checked = 0;
+    for line in section(&doc).lines().filter(|l| l.starts_with("| spill |")) {
+        let c: Vec<&str> = line.split('|').map(str::trim).collect();
+        let key = format!("bounded_memory/spill/{}/x{}/x86_64-linux-mars", c[2], c[3]);
+        let r = &b["rows"][&key];
+        assert!(r.is_object(), "{key} is not in the baseline");
+        let want = [
+            up(&r["tracked_peak"]),
+            up(&r["peak_rss_bytes"]),
+            up(&r["bytes_spilled"]),
+            r["spill_count"].to_string(),
+        ];
+        let got = [
+            c[6].replace(',', ""),
+            c[7].replace(',', ""),
+            c[8].replace(',', ""),
+            c[9].to_string(),
+        ];
+        assert_eq!(got, want, "{key}: the document and the baseline disagree");
+        checked += 1;
+    }
+    assert!(checked >= 5, "the spill table has its rows ({checked})");
 }

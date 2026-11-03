@@ -340,6 +340,7 @@ How a DWG or a vector PDF page becomes a PVec artifact: [architecture](docs/pvec
 | `pvec-write` | off | Adds `pvec::writer`, the one funnel that writes normalized geometry into a PVec artifact through the facade's writer, and `pvec::publish`, the atomic publish of the artifact and its report (issue #1314). Pure Rust; the PVec facade is a git dependency pinned by revision. |
 | `svg` | off | Enables the SVG rasteriser behind `decode_svg`. Costs 29 crates (`resvg` and its tree), which is why it is opt-in; without it `decode_svg` returns a typed `Unsupported`. |
 | `jxl` | off | Enables the JPEG XL loader and lossless encoder: `decode_jxl`, `Raster::encode_jxl`, `Raster::save_jxl`, the `.jxl` row in `Raster::save` and in `encode_to_buffer`. Costs 21 crates (`jxl-oxide`, `zune-jpegxl` and their trees, including `tracing`), which is why it is opt-in; without it every entry point still exists and returns a typed refusal. |
+| `jbig2` | off | Decodes `JBIG2Decode` image streams in a PDF through `hayro-jbig2` when `pvec::pdf_image` bakes a page, 1 bit per pixel with 0 as black. Implies `pvec-raster`. Costs **2 crates** (`hayro-jbig2` and `hayro-ccitt`, both `forbid(unsafe_code)`). Stays off by default until 24 hours of its fuzz target are clean, which they are not yet; without it the filter is refused as `filter-not-enabled:JBIG2Decode`. |
 | `jp2k` | off | Enables the JPEG 2000 loader and encoder: `decode_jp2k`, `Raster::encode_jp2k`, `Raster::save_jp2k`, and the `.jp2` / `.j2k` rows in the content sniffer. Costs **2 crates** (`hayro-jpeg2000` and `openjpeg2-pure-rs`, neither of which has a dependency of its own), so what it buys back is compile time rather than crate count; without it every entry point still exists and returns a typed refusal. |
 | `avif` | off | Enables the AV1 decode inside `decode_avif` (still images only). Costs 16 crates (`rav1d` and its runtime tree); without it the entry point still parses the container, checks the codec and applies all three decode limits, and refuses the decode itself. |
 | `dwg-acadsharp` | off | Enables `cad::acadsharp`, the `acadsharp-rs` DWG provider behind `cad::CadDecoder` (`AcadSharpDecoder`). Needs no .NET at run time: `acadsharp-rs` links a NativeAOT archive its own build script resolves, and a build with no archive still compiles and `AcadSharpDecoder::new` reports `Unlinked` instead of failing. The CAD-neutral `cad` module is not behind a feature. |
@@ -417,7 +418,7 @@ with the checklist in CONTRIBUTING.md.
 GitHub Actions runs two workflows, eight jobs between them:
 
 **CI**, on every branch push and on pull requests that no push accompanies (`.github/workflows/ci.yml`):
-- `Check & Lint`: `cargo fmt --check`, then `cargo clippy -D warnings` once per feature. That is the default build plus `pdfium`, `object-store-sink`, `tracing`, `avif`, `svg`, `jxl`, `packfile`, `serde`, `jp2k`, `dwg-acadsharp`, `dwg-acadrust`, `pvec-normalized`, `pvec-spline`, `pvec-raster`, `pvec-write` and `pvec-convert`, because code behind any other `cfg` used to be linted by nothing, and a `cargo build --features s3` for the deprecated alias
+- `Check & Lint`: `cargo fmt --check`, then `cargo clippy -D warnings` once per feature. That is the default build plus `pdfium`, `object-store-sink`, `tracing`, `avif`, `svg`, `jxl`, `packfile`, `serde`, `jp2k`, `jbig2`, `dwg-acadsharp`, `dwg-acadrust`, `pvec-normalized`, `pvec-spline`, `pvec-raster`, `pvec-write` and `pvec-convert`, because code behind any other `cfg` used to be linted by nothing, and a `cargo build --features s3` for the deprecated alias
 - `MSRV`: `cargo check` on the pinned toolchain, once per feature family that declares no `rust-version` of its own, plus a guard that the three written-out MSRV claims still agree. The version stays out of the job name on purpose: branch protection matches a required check by its exact name, so a bump that renamed the job would leave every open PR waiting on a context no run produces (#1011)
 - `Docs (deny broken, private and redundant intra-doc links)`: `cargo doc --no-deps --all-features`, with each of those three denied
 - `Test`: `cargo test`, once per feature that gates code, because a feature nobody names compiles its bodies out and runs zero assertions
@@ -466,7 +467,7 @@ filesystem.
 
 ```sh
 make fmt      # check formatting
-make clippy   # clippy over the default build and each of the sixteen features CI lints
+make clippy   # clippy over the default build and each of the seventeen features CI lints
 make test     # bare `cargo test`, which is the Test job's first cell of nine
 make doc      # the Docs job
 make miri     # miri (requires nightly + miri component)
@@ -474,8 +475,8 @@ make loom     # `loom_tests`, which is the Loom job's first invocation of two
 ```
 
 > **Prerequisites:** `make ci` needs Docker running and PyYAML (`pip3 install pyyaml`).
-> Budget disk for it: the whole job list compiles fifteen clippy feature permutations,
-> fifteen test ones and nine more under the 1.99 toolchain, and each gets its own
+> Budget disk for it: the whole job list compiles seventeen clippy feature permutations,
+> sixteen test ones and nine more under the 1.99 toolchain, and each gets its own
 > artifact set on the `libviprs-ci-cargo` volume rather than replacing the last.
 > `make miri` requires a nightly toolchain with the miri component, at or above this
 > crate's MSRV; the `Makefile` pins a dated one and explains why.
