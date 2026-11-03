@@ -931,6 +931,7 @@ fn n2_3_1050_an_ordering_perturbation_turns_the_determinism_check_red() {
             order.iter().map(|&i| (ids[i], &geoms[i])),
             Vec::new(),
             &CancelToken::new(),
+            &mut |_, _| {},
         )
         .unwrap()
         .bytes

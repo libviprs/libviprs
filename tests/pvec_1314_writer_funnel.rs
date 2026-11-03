@@ -80,6 +80,7 @@ fn write(
         ids.into_iter().zip(geoms),
         Vec::new(),
         &CancelToken::new(),
+        &mut |_, _| {},
     )
 }
 
@@ -224,6 +225,7 @@ fn issue_1314_a_cancelled_write_returns_cancelled_and_no_bytes() {
         ids(5).into_iter().zip(&geoms),
         Vec::new(),
         &token,
+        &mut |_, _| {},
     );
     assert!(matches!(r, Err(WriteError::Cancelled)));
 }

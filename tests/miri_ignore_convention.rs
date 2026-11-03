@@ -831,8 +831,9 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1446 adds 2: the `tests/pvec_1446_write_refusal.rs` cells that convert a drawing into a temp dir. It said 903 before this line moved.
 /// #1314 adds 1 more: the panic-during-the-flush cell of `tests/pvec_1314_spool.rs`. It said 905 before this line moved.
 /// #1048 adds 3: the `tests/pvec_1048_audit.rs` and `tests/pvec_1048_spool_event.rs` cells. It said 906 before this line moved.
-/// #1050 adds 6: the `tests/pvec_end_to_end.rs` cells that convert fixtures into a temp dir and read the vendored corpus. It said 909 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 915;
+/// #1463 adds 4: the `tests/pvec_1463_chunk_events.rs` cells that convert into a temp dir through a spill root. It said 909 before this line moved.
+/// #1050 adds 6: the `tests/pvec_end_to_end.rs` cells that convert fixtures into a temp dir and read the vendored corpus. It said 913 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 919;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {

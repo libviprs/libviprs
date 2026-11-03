@@ -171,6 +171,20 @@ pub trait StripSource: Send + Sync {
     fn permits_concurrent_strips(&self) -> bool {
         false
     }
+
+    /// Bytes this source holds for as long as it lives, before the engine
+    /// asks it for a strip. Defaults to `0`, which is right for a source that
+    /// only produces a strip when asked.
+    ///
+    /// A source that keeps a whole raster (the cached
+    /// [`PdfiumStripSource`]) reports its size here, because
+    /// [`EngineBuilder::with_memory_budget`](crate::EngineBuilder::with_memory_budget)
+    /// only governs the engine's own strips: [`EngineBuilder::run`](crate::EngineBuilder::run)
+    /// refuses a source whose resident bytes alone are over the budget when
+    /// the policy is [`BudgetPolicy::Error`].
+    fn resident_bytes(&self) -> u64 {
+        0
+    }
 }
 
 /// [`StripSource`] backed by an in-memory [`Raster`].
@@ -381,14 +395,20 @@ impl PdfiumStripSource {
     /// Open a [`PdfiumRenderMode::CachedFullPage`] source with a worst-case
     /// strip budget check.
     ///
-    /// Computes the worst-case minimum aligned strip
-    /// (`width × min_strip_height × 4` bytes for RGBA8) and applies the
-    /// caller's [`BudgetPolicy`]:
+    /// A cached source holds the whole page, so the allocation checked is the
+    /// full raster (`width × height × 4` bytes for RGBA8) and `min_strip_height`
+    /// does not enter into it. The caller's [`BudgetPolicy`] applies:
     ///
-    /// - [`BudgetPolicy::Error`] — error if the strip exceeds the budget at
+    /// - [`BudgetPolicy::Error`] — error if the raster exceeds the budget at
     ///   `dpi_hint`.
-    /// - [`BudgetPolicy::AutoAdjustDpi`] — proportionally reduce DPI until
-    ///   the worst-case strip fits, or error at the `min_dpi` floor.
+    /// - [`BudgetPolicy::AutoAdjustDpi`] — reduce DPI until the whole raster
+    ///   fits, or error at the `min_dpi` floor.
+    ///
+    /// Without a budget nothing is checked: [`new`](Self::new) renders and
+    /// keeps the whole page whatever its size, and
+    /// [`EngineBuilder::with_memory_budget`](crate::EngineBuilder::with_memory_budget)
+    /// refuses to run it when that raster alone is over the budget. Use
+    /// [`new_streaming`](Self::new_streaming) for pages that do not fit.
     pub fn new_with_budget(
         path: impl Into<std::path::PathBuf>,
         page: usize,
@@ -602,8 +622,10 @@ impl PdfiumStripSourceBuilder {
         self
     }
 
-    /// Check the worst-case strip (`width x min_strip_height x 4` bytes)
-    /// against `budget_bytes` under `policy`; see
+    /// Check the worst-case allocation against `budget_bytes` under `policy`:
+    /// `width x min_strip_height x 4` bytes for [`PdfiumRenderMode::Streaming`],
+    /// the whole raster (`width x height x 4`) for
+    /// [`PdfiumRenderMode::CachedFullPage`], whichever mode is set; see
     /// [`PdfiumStripSource::new_with_budget`]. The DPI given to
     /// [`PdfiumStripSource::builder`] is then the hint.
     #[must_use]
@@ -638,7 +660,12 @@ impl PdfiumStripSourceBuilder {
                 &path,
                 page,
                 dpi,
-                min_strip_height,
+                // A cached source holds the whole page, so the whole page is
+                // the allocation the budget has to cover (issue #1466).
+                match mode {
+                    PdfiumRenderMode::CachedFullPage => None,
+                    PdfiumRenderMode::Streaming => Some(min_strip_height),
+                },
                 budget_bytes,
                 policy,
                 sizing,
@@ -723,7 +750,9 @@ fn load_streaming_source(
 }
 
 /// Shared budget-policy resolution used by both the cached and streaming
-/// `*_with_budget` constructors.
+/// `*_with_budget` constructors. `rows` is the height of the allocation the
+/// budget has to cover: the worst-case strip for a streaming source, or `None`
+/// for the whole page, which is what a cached source holds.
 ///
 /// Acquires `pdfium-render`'s thread-safety lock internally so the inner calls
 /// to [`probe_page_dims`] / [`resolve_dpi_under_budget`] (which assume
@@ -734,7 +763,7 @@ fn resolve_budget_dpi(
     path: &std::path::Path,
     page: usize,
     dpi_hint: u32,
-    min_strip_height: u32,
+    rows: Option<u32>,
     budget_bytes: u64,
     policy: BudgetPolicy,
     sizing: crate::pdf::PageSizing,
@@ -743,8 +772,8 @@ fn resolve_budget_dpi(
     let _lock = crate::pdf::pdfium_lock();
     match policy {
         BudgetPolicy::Error => {
-            let (width, _, _, _) = probe_page_dims(pdfium, path, page, dpi_hint, sizing)?;
-            let strip_bytes = width as u64 * min_strip_height as u64 * 4;
+            let (width, height, _, _) = probe_page_dims(pdfium, path, page, dpi_hint, sizing)?;
+            let strip_bytes = width as u64 * rows.map_or(u64::from(height), u64::from) * 4;
             if strip_bytes > budget_bytes {
                 return Err(crate::pdf::PdfError::BudgetExceeded {
                     strip_bytes,
@@ -760,7 +789,7 @@ fn resolve_budget_dpi(
             page,
             dpi_hint,
             min_dpi,
-            min_strip_height,
+            rows,
             budget_bytes,
             sizing,
         ),
@@ -798,9 +827,9 @@ fn probe_page_dims(
     Ok((width, height, w_pts, h_pts))
 }
 
-/// Find the largest DPI ≤ `dpi_hint` whose worst-case minimum-aligned
-/// strip fits within `budget_bytes`, or error if even `min_dpi` would
-/// not fit.
+/// Find the largest DPI ≤ `dpi_hint` whose worst-case allocation (`rows`
+/// rows of the page, or the whole page when `None`) fits within
+/// `budget_bytes`, or error if even `min_dpi` would not fit.
 ///
 /// **Caller must hold `pdfium-render`'s thread-safety lock** — this function
 /// calls [`probe_page_dims`] internally, which is not standalone-locked.
@@ -812,7 +841,7 @@ fn resolve_dpi_under_budget(
     page: usize,
     dpi_hint: u32,
     min_dpi: u32,
-    min_strip_height: u32,
+    rows: Option<u32>,
     budget_bytes: u64,
     sizing: crate::pdf::PageSizing,
 ) -> Result<u32, crate::pdf::PdfError> {
@@ -821,56 +850,51 @@ fn resolve_dpi_under_budget(
             "min_dpi must be at least 1".into(),
         ));
     }
-    // Anchor: probe once at dpi_hint to get the natural width-per-DPI ratio,
-    // then solve `width * min_strip_height * 4 ≤ budget` for the largest DPI
-    // that fits, capped above by dpi_hint and below by min_dpi.
-    let (anchor_w, _, _, _) = probe_page_dims(pdfium, path, page, dpi_hint, sizing)?;
+    let bytes_at = |dpi: u32| -> Result<(u32, u64), crate::pdf::PdfError> {
+        let (w, h, _, _) = probe_page_dims(pdfium, path, page, dpi, sizing)?;
+        Ok((w, u64::from(w) * rows.map_or(u64::from(h), u64::from) * 4))
+    };
+    // Anchor: probe once at dpi_hint to get the natural size-per-DPI ratio,
+    // then solve for the largest DPI that fits, capped above by dpi_hint and
+    // below by min_dpi.
+    let (anchor_w, at_hint) = bytes_at(dpi_hint)?;
     if anchor_w == 0 {
         return Err(crate::pdf::PdfError::Pdfium(
             "page width is 0; cannot resolve DPI".into(),
         ));
     }
-    let strip_at_hint = anchor_w as u64 * min_strip_height as u64 * 4;
-    if strip_at_hint <= budget_bytes {
+    if at_hint <= budget_bytes {
         return Ok(dpi_hint);
     }
-    // width(dpi) ≈ width(dpi_hint) * dpi / dpi_hint; solve for dpi.
-    // Resolved DPI = dpi_hint * (budget / strip_at_hint).
-    let ratio = budget_bytes as f64 / strip_at_hint as f64;
-    let resolved = (dpi_hint as f64 * ratio).floor() as u32;
-    let resolved = resolved.max(1);
+    // A strip grows with the width, so linearly with the DPI; the whole page
+    // grows with width and height, so with its square. Resolved DPI is
+    // dpi_hint * (budget / at_hint) to that power.
+    let ratio = budget_bytes as f64 / at_hint as f64;
+    let ratio = if rows.is_none() { ratio.sqrt() } else { ratio };
+    let resolved = ((dpi_hint as f64 * ratio).floor() as u32).max(1);
     if resolved < min_dpi {
         return Err(crate::pdf::PdfError::BudgetExceeded {
-            strip_bytes: strip_at_hint,
+            strip_bytes: at_hint,
             budget_bytes,
             dpi: dpi_hint,
         });
     }
-    // Verify: width may round differently than the linear estimate suggests.
-    let (verified_w, _, _, _) = probe_page_dims(pdfium, path, page, resolved, sizing)?;
-    let verified_strip = verified_w as u64 * min_strip_height as u64 * 4;
-    if verified_strip > budget_bytes {
-        // Step down by 1 DPI in case rounding pushed us just over.
-        let stepped = resolved.saturating_sub(1).max(1);
-        if stepped < min_dpi {
+    // Verify: the size rounds, so the estimate can land just over. Step down
+    // a DPI at a time until it fits or the floor is hit.
+    let mut dpi = resolved;
+    loop {
+        let (_, bytes) = bytes_at(dpi)?;
+        if bytes <= budget_bytes {
+            return Ok(dpi);
+        }
+        if dpi <= min_dpi {
             return Err(crate::pdf::PdfError::BudgetExceeded {
-                strip_bytes: verified_strip,
+                strip_bytes: bytes,
                 budget_bytes,
-                dpi: resolved,
+                dpi,
             });
         }
-        let (vw2, _, _, _) = probe_page_dims(pdfium, path, page, stepped, sizing)?;
-        let strip2 = vw2 as u64 * min_strip_height as u64 * 4;
-        if strip2 > budget_bytes {
-            return Err(crate::pdf::PdfError::BudgetExceeded {
-                strip_bytes: strip2,
-                budget_bytes,
-                dpi: stepped,
-            });
-        }
-        Ok(stepped)
-    } else {
-        Ok(resolved)
+        dpi -= 1;
     }
 }
 
@@ -891,6 +915,15 @@ impl StripSource for PdfiumStripSource {
 
     fn format(&self) -> PixelFormat {
         PixelFormat::Rgba8
+    }
+
+    fn resident_bytes(&self) -> u64 {
+        match &self.state {
+            PdfiumSourceState::CachedFullPage { .. } => {
+                u64::from(self.width) * u64::from(self.height) * 4
+            }
+            PdfiumSourceState::Streaming(_) => 0,
+        }
     }
 
     fn permits_concurrent_strips(&self) -> bool {
