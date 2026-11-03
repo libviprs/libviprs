@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The PDF image refusal keys are documented** (issue #1489). `docs/pvec-raster-producer.md` now lists `fully-clipped`, `too-large`, `invalid-placement`, `unsupported-colour-space:<name>` and `pyramid-refused` beside the keys it already named, so a reader of a conversion report can look each one up. A test walks every `PdfImageError` variant and checks its key is in a docs/pvec page.
 - **A memory budget now covers the cached `PdfiumStripSource`** (issue #1466). `.budget(..)` and
   `new_with_budget` on a cached source (the default of `new()`) checked only the worst-case strip, so a page whose
   whole raster was gigabytes passed. They now check `width * height * 4` and, under `AutoAdjustDpi`, lower the DPI
