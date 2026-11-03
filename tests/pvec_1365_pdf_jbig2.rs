@@ -350,44 +350,52 @@ mod enabled {
     }
 
     /// #1492: the Flate stage on `/JBIG2Globals` gets the room an image stream of this size gets,
-    /// not the default per-stream cap, so a deflate bomb in the globals is refused while inflating.
+    /// and never more than the default per-stream cap (64 MiB), so a deflate bomb in the globals
+    /// is refused while inflating. The first case is a small image, where the room is the bound;
+    /// the second is a large one, where the room is over 64 MiB and the cap is the bound.
     #[test]
-    fn a_flate_bomb_in_the_globals_is_capped_by_the_image_size_1492() {
+    fn a_flate_bomb_in_the_globals_is_capped_1492() {
         use flate2::{Compression, write::ZlibEncoder};
+        use libviprs::pdf::PdfError;
         use std::io::Write;
-        let mut z = ZlibEncoder::new(Vec::new(), Compression::best());
-        z.write_all(&vec![0u8; 8 << 20]).unwrap();
-        let bomb = z.finish().unwrap();
-        assert!(
-            bomb.len() < 64 << 10,
-            "the bomb has to be small on the wire"
-        );
-        let mut d = doc();
-        let id = d.add_object(Stream::new(dictionary! { "Filter" => "FlateDecode" }, bomb));
-        let bytes = pdf(
-            d,
-            Resources::images(vec![(
-                "Im1",
-                Object::Stream(jbig2(
-                    163,
-                    109,
-                    vec![0; 16],
-                    dictionary! { "DecodeParms" => dictionary! { "JBIG2Globals" => Object::Reference(id) } },
-                )),
-            )]),
-            b"q 163 0 0 109 0 0 cm /Im1 Do Q",
-        );
-        let limits = PdfVectorLimits {
-            max_image_stream_bytes: 2 << 20,
-            ..PdfVectorLimits::default()
-        };
-        let page = extract_page_paths_from_bytes(&bytes, 1, &limits).unwrap();
-        let b = bake_page_images(&page, &PdfImageOptions::default());
-        assert!(
-            matches!(b.refused[0].error, PdfImageError::Pdf(_)),
-            "the inflate should have hit its cap, got {:?}",
-            b.refused[0].error
-        );
+        for (w, h, inflated) in [
+            (163i64, 109i64, 8usize << 20),
+            (4096, 4096, (64 << 20) + (512 << 10)),
+        ] {
+            let mut z = ZlibEncoder::new(Vec::new(), Compression::best());
+            z.write_all(&vec![0u8; inflated]).unwrap();
+            let bomb = z.finish().unwrap();
+            assert!(
+                bomb.len() < 128 << 10,
+                "the bomb has to be small on the wire"
+            );
+            let mut d = doc();
+            let id = d.add_object(Stream::new(dictionary! { "Filter" => "FlateDecode" }, bomb));
+            let bytes = pdf(
+                d,
+                Resources::images(vec![(
+                    "Im1",
+                    Object::Stream(jbig2(
+                        w,
+                        h,
+                        vec![0; 16],
+                        dictionary! { "DecodeParms" => dictionary! { "JBIG2Globals" => Object::Reference(id) } },
+                    )),
+                )]),
+                format!("q {w} 0 0 {h} 0 0 cm /Im1 Do Q").as_bytes(),
+            );
+            let page =
+                extract_page_paths_from_bytes(&bytes, 1, &PdfVectorLimits::default()).unwrap();
+            let b = bake_page_images(&page, &PdfImageOptions::default());
+            assert!(
+                matches!(
+                    b.refused[0].error,
+                    PdfImageError::Pdf(PdfError::DecompressionLimitExceeded { .. })
+                ),
+                "{w}x{h}: the inflate should have hit its cap, got {:?}",
+                b.refused[0].error
+            );
+        }
     }
 
     #[test]
