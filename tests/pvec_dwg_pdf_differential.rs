@@ -53,13 +53,8 @@ fn fmt(v: f64) -> String {
     format!("{v:.3}")
 }
 
-fn measure(id: &str) -> Measured {
-    let mut m = Measured::new();
-    let mut put = |k: &str, d: String, p: String| {
-        m.insert(k.to_string(), (d, p));
-    };
-
-    // DWG side: acadrust, flattened, each basic entity through PVec's exact bounds.
+/// The DWG of a pair through acadrust, flattened. The pairs are flat drawings.
+fn flatten_dwg(id: &str) -> libviprs::pvec::flatten::Flattened {
     let provider = AcadrustProvider::open(CadSource::Path(&dir(id).join("source.dwg"))).unwrap();
     let layout = provider
         .layouts()
@@ -67,7 +62,7 @@ fn measure(id: &str) -> Measured {
         .into_iter()
         .find(|l| l.kind == LayoutKind::Model)
         .unwrap();
-    let flat = BlockResolver::new(&provider, FlattenBounds::default())
+    BlockResolver::new(&provider, FlattenBounds::default())
         .flatten(
             &EntityScope::Layout(layout.id),
             id,
@@ -75,10 +70,22 @@ fn measure(id: &str) -> Measured {
             &mut NoProvenance,
             &mut LineageStore::new(),
         )
-        .unwrap();
+        .unwrap()
+}
+
+fn measure(id: &str) -> Measured {
+    let mut m = Measured::new();
+    let mut put = |k: &str, d: String, p: String| {
+        m.insert(k.to_string(), (d, p));
+    };
+
+    // DWG side: acadrust, flattened, each basic entity through PVec's exact bounds.
+    let flat = flatten_dwg(id);
     let (mut d_line, mut d_curve) = (0u64, 0u64);
     let mut d_buckets: BTreeMap<&str, u64> = BTreeMap::new();
     let mut d_box: Option<[f64; 4]> = None;
+    #[cfg(feature = "pdfium")]
+    let mut d_curves: Vec<Curve> = Vec::new();
     for leaf in &flat.entities {
         assert_eq!(
             leaf.matrix(),
@@ -101,6 +108,8 @@ fn measure(id: &str) -> Measured {
                     }
                     _ => d_curve += 1,
                 }
+                #[cfg(feature = "pdfium")]
+                d_curves.push(b.curve.clone());
                 let (bb, method) = curve_bounds(&b.curve).unwrap();
                 assert_eq!(method, BoundsMethod::Exact, "{id}");
                 let (lo, hi) = (bb.min(), bb.max());
@@ -167,7 +176,196 @@ fn measure(id: &str) -> Measured {
     let aspect = |b: [f64; 4]| fmt((b[2] - b[0]) / (b[3] - b[1]));
     put("extent.aspect", aspect(d_box), aspect(p_box));
     put("extent.outside_page", "0".into(), outside.to_string());
+    #[cfg(feature = "pdfium")]
+    {
+        let r = raster_axis::measure(
+            &dir(id).join("exported.pdf"),
+            &d_curves,
+            page.rotation_degrees,
+        );
+        for (k, (d, p)) in r {
+            m.insert(k, (d, p));
+        }
+    }
     m
+}
+
+/// The rendered-image axis (issue #1406): pdfium renders the exported PDF, and the DWG's own curves are
+/// drawn by a small point-sampling rasteriser into the same pixel frame. libviprs has no rasteriser for
+/// DWG-derived PVec, so this one lives in the test and draws one-pixel lines only.
+///
+/// The frame is the PDF's ink box (the pixels pdfium painted dark), and the DWG's extent is mapped onto
+/// it with the page's `/Rotate` composed, so the two are compared shape against shape: a stretch the
+/// exporter applied shows in `raster.ink_aspect`, and what is painted where the other side has nothing
+/// shows in the two `outside` fractions. Nothing here claims the sides are equal.
+#[cfg(feature = "pdfium")]
+mod raster_axis {
+    use std::path::Path;
+
+    use pvec_geometry::{Curve, Curve2d};
+
+    /// DPI of the pdfium render, recorded in every `expected_loss.toml` under `[raster]`.
+    pub const DPI: u32 = 288;
+    /// A pixel is ink when its darkest colour channel is below this.
+    pub const INK_BELOW: u8 = 128;
+    /// A pixel counts as covered by the other side when ink lies within this many pixels.
+    pub const TOLERANCE_PX: i64 = 2;
+    const SAMPLES: usize = 2048;
+
+    struct Ink {
+        w: usize,
+        h: usize,
+        on: Vec<bool>,
+    }
+
+    fn pdf_ink(pdf: &Path) -> Ink {
+        let r = libviprs::pdf::render_page_pdfium(pdf, 1, DPI).unwrap();
+        let (w, h) = (r.width() as usize, r.height() as usize);
+        let ch = r.format().channels();
+        let colour = ch.min(3);
+        let dark = |x: usize, y: usize| {
+            let px = &r.data()[(y * w + x) * ch..][..ch];
+            px[..colour].iter().min().copied().unwrap_or(255) < INK_BELOW
+        };
+        let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0, 0);
+        for y in 0..h {
+            for x in 0..w {
+                if dark(x, y) {
+                    (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+                }
+            }
+        }
+        assert!(x0 <= x1, "{}: pdfium painted nothing", pdf.display());
+        let (cw, chh) = (x1 - x0 + 1, y1 - y0 + 1);
+        let mut on = vec![false; cw * chh];
+        for y in 0..chh {
+            for x in 0..cw {
+                on[y * cw + x] = dark(x0 + x, y0 + y);
+            }
+        }
+        Ink { w: cw, h: chh, on }
+    }
+
+    fn dwg_ink(curves: &[Curve], rotation: i64, w: usize, h: usize) -> Ink {
+        let polylines: Vec<Vec<(f64, f64)>> = curves
+            .iter()
+            .map(|c| {
+                let d = c.domain();
+                (0..=SAMPLES)
+                    .map(|i| {
+                        let t = d.lo() + (d.hi() - d.lo()) * i as f64 / SAMPLES as f64;
+                        let p = c.eval(t).unwrap();
+                        (p.x, p.y)
+                    })
+                    .collect()
+            })
+            .collect();
+        let all = polylines.iter().flatten();
+        let lo = all
+            .clone()
+            .fold((f64::MAX, f64::MAX), |a, p| (a.0.min(p.0), a.1.min(p.1)));
+        let hi = all.fold((f64::MIN, f64::MIN), |a, p| (a.0.max(p.0), a.1.max(p.1)));
+        let unit = |v: f64, lo: f64, hi: f64| if hi > lo { (v - lo) / (hi - lo) } else { 0.5 };
+        let to_px = |p: &(f64, f64)| {
+            let (u, v) = (unit(p.0, lo.0, hi.0), unit(p.1, lo.1, hi.1));
+            // /Rotate is clockwise, y up here.
+            let (u, v) = match rotation.rem_euclid(360) {
+                90 => (v, 1.0 - u),
+                180 => (1.0 - u, 1.0 - v),
+                270 => (1.0 - v, u),
+                _ => (u, v),
+            };
+            (u * (w - 1) as f64, (1.0 - v) * (h - 1) as f64)
+        };
+        let mut on = vec![false; w * h];
+        for line in &polylines {
+            for pair in line.windows(2) {
+                let (a, b) = (to_px(&pair[0]), to_px(&pair[1]));
+                let steps = ((b.0 - a.0).abs().max((b.1 - a.1).abs()) * 2.0)
+                    .ceil()
+                    .max(1.0) as usize;
+                for k in 0..=steps {
+                    let f = k as f64 / steps as f64;
+                    let (x, y) = (a.0 + (b.0 - a.0) * f, a.1 + (b.1 - a.1) * f);
+                    on[(y.round() as usize).min(h - 1) * w + (x.round() as usize).min(w - 1)] =
+                        true;
+                }
+            }
+        }
+        Ink { w, h, on }
+    }
+
+    /// The fraction of `a`'s ink with no ink of `b` within [`TOLERANCE_PX`].
+    fn outside(a: &Ink, b: &Ink) -> f64 {
+        let (mut total, mut far) = (0u64, 0u64);
+        for y in 0..a.h {
+            for x in 0..a.w {
+                if !a.on[y * a.w + x] {
+                    continue;
+                }
+                total += 1;
+                let near = (-TOLERANCE_PX..=TOLERANCE_PX).any(|dy| {
+                    (-TOLERANCE_PX..=TOLERANCE_PX).any(|dx| {
+                        let (nx, ny) = (x as i64 + dx, y as i64 + dy);
+                        nx >= 0
+                            && ny >= 0
+                            && (nx as usize) < b.w
+                            && (ny as usize) < b.h
+                            && b.on[ny as usize * b.w + nx as usize]
+                    })
+                });
+                far += u64::from(!near);
+            }
+        }
+        far as f64 / total.max(1) as f64
+    }
+
+    /// `(metric, dwg side, pdf side)` for the raster axis of one pair.
+    pub fn measure(pdf: &Path, curves: &[Curve], rotation: i64) -> Vec<(String, (String, String))> {
+        let pdf_side = pdf_ink(pdf);
+        let dwg_side = dwg_ink(curves, rotation, pdf_side.w, pdf_side.h);
+        let f2 = |v: f64| format!("{v:.2}");
+        vec![
+            (
+                "raster.ink_aspect".into(),
+                // The DWG's own sampled extent in the displayed orientation, against what pdfium painted.
+                (
+                    f2(dwg_aspect(curves, rotation)),
+                    f2(pdf_side.w as f64 / pdf_side.h as f64),
+                ),
+            ),
+            (
+                "raster.ink_outside_other".into(),
+                (
+                    f2(outside(&dwg_side, &pdf_side)),
+                    f2(outside(&pdf_side, &dwg_side)),
+                ),
+            ),
+        ]
+    }
+
+    fn dwg_aspect(curves: &[Curve], rotation: i64) -> f64 {
+        let (mut lo, mut hi) = ((f64::MAX, f64::MAX), (f64::MIN, f64::MIN));
+        for c in curves {
+            let d = c.domain();
+            for i in 0..=SAMPLES {
+                let p = c
+                    .eval(d.lo() + (d.hi() - d.lo()) * i as f64 / SAMPLES as f64)
+                    .unwrap();
+                (lo, hi) = (
+                    (lo.0.min(p.x), lo.1.min(p.y)),
+                    (hi.0.max(p.x), hi.1.max(p.y)),
+                );
+            }
+        }
+        let (w, h) = (hi.0 - lo.0, hi.1 - lo.1);
+        // Pixel extent of a drawn extent is its length plus the one-pixel line itself, ignored here.
+        if rotation.rem_euclid(180) == 90 {
+            h / w
+        } else {
+            w / h
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -181,7 +379,7 @@ fn load_loss(id: &str) -> Loss {
         .unwrap_or_else(|e| panic!("{id}: expected_loss.toml is required: {e}"));
     let doc: toml::Table = text.parse().unwrap();
     let evidence = doc["evidence"].as_str().unwrap().to_string();
-    let entries = doc
+    let entries: Vec<(String, String, String, String)> = doc
         .get("loss")
         .and_then(|l| l.as_array())
         .map(|a| {
@@ -197,6 +395,13 @@ fn load_loss(id: &str) -> Loss {
                 .collect()
         })
         .unwrap_or_default();
+    // Without pdfium the raster axis is not measured, so its entries are not checked either.
+    let entries = entries
+        .into_iter()
+        .filter(|e: &(String, String, String, String)| {
+            cfg!(feature = "pdfium") || !e.0.starts_with("raster.")
+        })
+        .collect();
     Loss { evidence, entries }
 }
 
@@ -234,6 +439,7 @@ fn check(measured: &Measured, loss: &Loss) -> Vec<String> {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn every_pair_measures_exactly_its_recorded_loss() {
+    let mut failed = Vec::new();
     for id in FIXTURES {
         let measured = measure(id);
         if std::env::var_os("PDF_LOSS_PRINT").is_some() {
@@ -243,10 +449,12 @@ fn every_pair_measures_exactly_its_recorded_loss() {
                 }
             }
         }
-        let loss = load_loss(id);
-        let failures = check(&measured, &loss);
-        assert!(failures.is_empty(), "{id}: {failures:#?}");
+        let failures = check(&measured, &load_loss(id));
+        if !failures.is_empty() {
+            failed.push(format!("{id}: {failures:#?}"));
+        }
     }
+    assert!(failed.is_empty(), "{failed:#?}");
 }
 
 #[test]
@@ -355,4 +563,98 @@ fn the_page_names_the_exporter_and_every_pair() {
     ] {
         assert!(doc.contains(needle), "the page lost {needle}");
     }
+}
+
+#[cfg(feature = "pdfium")]
+fn raster_header(id: &str) -> toml::Table {
+    let text = std::fs::read_to_string(dir(id).join("expected_loss.toml")).unwrap();
+    let doc: toml::Table = text.parse().unwrap();
+    doc.get("raster")
+        .and_then(|r| r.as_table())
+        .unwrap_or_else(|| panic!("{id}: expected_loss.toml needs a [raster] table"))
+        .clone()
+}
+
+#[test]
+#[cfg(feature = "pdfium")]
+#[cfg_attr(miri, ignore)]
+fn the_raster_axis_names_its_dpi_threshold_and_the_platforms_it_was_measured_on() {
+    let platform = match std::env::consts::ARCH {
+        "x86_64" => "linux/amd64",
+        "aarch64" => "linux/arm64",
+        other => other,
+    };
+    for id in FIXTURES {
+        let r = raster_header(id);
+        assert_eq!(
+            r["dpi"].as_integer(),
+            Some(i64::from(raster_axis::DPI)),
+            "{id}"
+        );
+        assert_eq!(
+            r["ink_below"].as_integer(),
+            Some(i64::from(raster_axis::INK_BELOW)),
+            "{id}"
+        );
+        assert_eq!(
+            r["tolerance_px"].as_integer(),
+            Some(raster_axis::TOLERANCE_PX),
+            "{id}"
+        );
+        let platforms: Vec<&str> = r["platforms"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{id}: platforms"))
+            .iter()
+            .filter_map(|p| p.as_str())
+            .collect();
+        for want in ["linux/amd64", "linux/arm64"] {
+            assert!(platforms.contains(&want), "{id}: not measured on {want}");
+        }
+        if cfg!(target_os = "linux") {
+            assert!(platforms.contains(&platform), "{id}: {platform}");
+        }
+    }
+}
+
+#[test]
+#[cfg(feature = "pdfium")]
+#[cfg_attr(miri, ignore)]
+fn every_pair_has_a_raster_loss_entry_with_a_written_reason() {
+    for id in FIXTURES {
+        let loss = load_loss(id);
+        let raster: Vec<_> = loss
+            .entries
+            .iter()
+            .filter(|e| e.0.starts_with("raster."))
+            .collect();
+        assert!(!raster.is_empty(), "{id}: no raster entry");
+        assert!(raster.iter().all(|e| !e.3.trim().is_empty()), "{id}");
+    }
+}
+
+#[test]
+#[cfg(feature = "pdfium")]
+#[cfg_attr(miri, ignore)]
+fn an_injected_raster_difference_fails_the_run() {
+    let id = "line-001";
+    let mut measured = measure(id);
+    let loss = load_loss(id);
+    assert!(check(&measured, &loss).is_empty());
+    measured.get_mut("raster.ink_aspect").unwrap().1 = "9.99".into();
+    assert!(!check(&measured, &loss).is_empty());
+}
+
+#[test]
+#[cfg(feature = "pdfium")]
+#[cfg_attr(miri, ignore)]
+fn pdfium_paints_the_rotated_pair_turned_a_quarter() {
+    let plain: f64 = measure("polyline-001")["raster.ink_aspect"]
+        .1
+        .parse()
+        .unwrap();
+    let turned: f64 = measure("polyline-001-rot90")["raster.ink_aspect"]
+        .1
+        .parse()
+        .unwrap();
+    assert!((plain * turned - 1.0).abs() < 0.05, "{plain} and {turned}");
 }
