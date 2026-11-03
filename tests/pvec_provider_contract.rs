@@ -615,6 +615,7 @@ fn caps_tell_absent_from_cannot_report() {
             // The hand-built entity carries no style, which is Absent and so reported.
             Facet::Colour,
             Facet::Lineweight,
+            Facet::Linetype,
         ]
     );
 
