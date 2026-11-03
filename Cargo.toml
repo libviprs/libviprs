@@ -104,6 +104,13 @@ gif = { version = "0.14", default-features = false, features = ["std"] }
 hayro-jpeg2000 = { version = "0.4.1", default-features = false, features = [
     "std",
 ] }
+# Pure-Rust JBIG2 decoder (Apache-2.0 OR MIT), for the `JBIG2Decode` filter of PDF image
+# streams (issue #1365). `#![forbid(unsafe_code)]`; its only route to `unsafe` is the optional
+# `simd` feature (`fearless_simd`), which `default-features = false` drops along with `image`.
+# It depends on `hayro-ccitt` (0 dependencies, `forbid(unsafe_code)`) for the MMR coded regions.
+# The crate is a few months old and its README says it is under development, which is why the
+# `jbig2` feature below is not in `default`.
+hayro-jbig2 = { version = "0.3.1", default-features = false, features = ["std"] }
 # CCITT Group 3 and Group 4 for `CCITTFaxDecode` image streams in a PDF (issue #1363),
 # unconditional because it is the scanned-sheet case: in the corpus it is the one codec whose
 # refusal empties a whole file. Same author and repository as `hayro-jpeg2000` above.
@@ -708,6 +715,27 @@ test-util = []
 # `[workspace.dependencies]` comments above for why these two crates and not
 # the six other JPEG 2000 crates on crates.io.
 jp2k = ["dep:hayro-jpeg2000", "dep:openjpeg2-pure"]
+# Gates `JBIG2Decode` for PDF image streams (`crate::pvec::pdf_filters::jbig2`, issue #1365).
+# With the feature off the filter is refused as `filter-not-enabled:JBIG2Decode`.
+#
+# Not in `default`, and it stays out until 24 hours of `fuzz_pvec_pdf_image --features jbig2`
+# are on record. The record today is NOT clean: a first run (about 25 minutes, 4 workers) and a
+# second (3.9 hours wall, 4 workers, 2026-10-31, MARS) found four memory blow-ups and two
+# long-running inputs in `hayro-jbig2` 0.3.1, which bounds each bitmap side and the symbol count
+# but not their product, and keeps decoding past the end of its data. The module refuses regions
+# larger than the page and symbol dictionaries with more symbols than bits, which closed the first
+# four; the symbol size inside a dictionary is still the decoder's, and the later run died on it
+# (three more OOMs over 1 GB and a 1600 second input). Those are reported upstream: LaurenzV/hayro
+# #1700 (export_symbols never ends), #1701 (symbol size unbounded), and comments on #1598 and #1550.
+# The streams are `#[ignore]`d tests in tests/pvec_1365_pdf_jbig2.rs. All of them sit in arithmetic
+# coded data, which a pre-scan of the segment headers cannot read. So the clean hours recorded are 0.
+#
+# It implies `pvec-raster` because the only reader of a PDF image stream is the raster bake that
+# feature belongs to, and so that the one cell `cargo test --features jbig2` runs the decoding
+# tests. Lock delta of `jbig2` itself: +1 entry (`hayro-jbig2` 0.3.1; `hayro-ccitt` 0.4 is
+# already in every build since #1363; neither has a `links` key or a build script); everything else
+# `cargo tree` adds is `pvec-raster`'s. Release binary delta: not measured.
+jbig2 = ["pvec-raster", "dep:hayro-jbig2"]
 
 [dependencies]
 acadrust = { workspace = true, optional = true }
@@ -723,6 +751,7 @@ flate2 = { workspace = true }
 gif = { workspace = true }
 hayro-ccitt = { workspace = true }
 hayro-jpeg2000 = { workspace = true, optional = true }
+hayro-jbig2 = { workspace = true, optional = true }
 image = { workspace = true }
 image-webp = { workspace = true }
 jxl-grid = { workspace = true, optional = true }
