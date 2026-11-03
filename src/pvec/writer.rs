@@ -146,13 +146,15 @@ struct Prepared {
 }
 
 /// Maps `items` onto PVec ids, builds the manifest from PVec's own boxes, and pushes everything into a
-/// writer, with a spill root and budget when the write streams. The write is cancelled between entities.
+/// writer, with a spill root and budget when the write streams. The write is cancelled between entities,
+/// and `on_chunk` is called after each batch of [`CANCEL_EVERY`] pushed entities (and the last, short one).
 fn prepare<'a>(
     config: &WriteConfig,
     items: impl IntoIterator<Item = (EntityId, &'a Normalized2DGeometry)>,
     streams: Vec<Stream>,
     spill: Option<&SpillConfig>,
     cancel: &CancelToken,
+    on_chunk: &mut dyn FnMut(u64, u64),
 ) -> Result<Prepared, WriteError> {
     let metres_per_unit = metres_per_unit(config.unit)?;
     let mut skipped = 0u64;
@@ -219,6 +221,12 @@ fn prepare<'a>(
                 }
                 Err(e) => return Err(WriteError::Pvec(e)),
             }
+            if (n + 1) % CANCEL_EVERY == 0 || n + 1 == curves.len() {
+                on_chunk(n as u64 + 1, 0);
+                if cancel.is_cancelled() {
+                    return Err(WriteError::Cancelled);
+                }
+            }
         }
         if !refused_here.is_empty() {
             for (n, rule) in refused_here.into_iter().rev() {
@@ -255,13 +263,19 @@ fn prepare<'a>(
 /// [`WriteError`]: an unsupported unit, nothing to write, a cancellation (checked every
 /// [`CANCEL_EVERY`] entities and before the artifact is sealed), or PVec's refusal with its rule
 /// as the `source()`.
+///
+/// `on_chunk(entities, bytes)` is called after each batch of [`CANCEL_EVERY`] entities is pushed, with the
+/// entities pushed so far in the pass and `0` bytes (nothing is written out until the end). If a pass has
+/// to restart because PVec refused a curve, the batches of the new pass are reported again. A cancel that
+/// fires inside `on_chunk` stops the write before the next batch.
 pub fn write_geometry<'a>(
     config: &WriteConfig,
     items: impl IntoIterator<Item = (EntityId, &'a Normalized2DGeometry)>,
     streams: Vec<Stream>,
     cancel: &CancelToken,
+    on_chunk: &mut dyn FnMut(u64, u64),
 ) -> Result<GeometryArtifact, WriteError> {
-    let p = prepare(config, items, streams, None, cancel)?;
+    let p = prepare(config, items, streams, None, cancel, on_chunk)?;
     Ok(GeometryArtifact {
         bytes: p.writer.finish().map_err(WriteError::Pvec)?,
         bounds: p.bounds,
@@ -298,19 +312,26 @@ pub struct StreamedArtifact {
     pub refused: Vec<(EntityId, String)>,
 }
 
-/// A sink that stops writing once the cancel token has fired, so a flush ends at the next write.
-struct CancelWrite<'a> {
+/// A sink that reports each write as a chunk and stops writing once the cancel token has fired, so a
+/// flush ends at the next write.
+struct ChunkWrite<'a> {
     inner: &'a mut dyn Write,
     cancel: &'a CancelToken,
+    on_chunk: &'a mut dyn FnMut(u64, u64),
+    entities: u64,
+    bytes: u64,
 }
 
-impl Write for CancelWrite<'_> {
+impl Write for ChunkWrite<'_> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         if self.cancel.is_cancelled() {
             // Not `Interrupted`: `write_all` retries that kind forever.
             return Err(io::Error::other("cancelled"));
         }
-        self.inner.write(buf)
+        let n = self.inner.write(buf)?;
+        self.bytes += n as u64;
+        (self.on_chunk)(self.entities, self.bytes);
+        Ok(n)
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -326,7 +347,10 @@ impl Write for CancelWrite<'_> {
 /// holds one block per geometry type, which is the whole drawing, so it is not flat.
 ///
 /// A cancel is seen between entities and at every write to `out`, so a flush ends at the next write with
-/// [`WriteError::Cancelled`]. PVec removes its spill files on success, on error and on drop, so none is left
+/// [`WriteError::Cancelled`], and one that fires on the last write is seen once the flush returns.
+/// `on_chunk(entities, bytes)` is called after each batch of pushed entities (bytes `0`) and after each write
+/// the flush makes to `out` (all entities, bytes written so far); for a fixed input, config and budget the
+/// calls are the same every run. PVec removes its spill files on success, on error and on drop, so none is left
 /// whichever way this ends. What `out` has received on an error is a prefix of the artifact, which the caller
 /// discards (`publish_streamed` does).
 ///
@@ -340,12 +364,19 @@ pub fn write_geometry_to<'a>(
     streams: Vec<Stream>,
     spill: &SpillConfig,
     cancel: &CancelToken,
+    on_chunk: &mut dyn FnMut(u64, u64),
     out: &mut dyn Write,
 ) -> Result<StreamedArtifact, WriteError> {
-    let p = prepare(config, items, streams, Some(spill), cancel)?;
+    let p = prepare(config, items, streams, Some(spill), cancel, on_chunk)?;
     let length = p
         .writer
-        .finish_to(&mut CancelWrite { inner: out, cancel })
+        .finish_to(&mut ChunkWrite {
+            inner: out,
+            cancel,
+            on_chunk,
+            entities: p.written,
+            bytes: 0,
+        })
         .map_err(|e| {
             if cancel.is_cancelled() {
                 WriteError::Cancelled
@@ -353,6 +384,9 @@ pub fn write_geometry_to<'a>(
                 WriteError::Pvec(e)
             }
         })?;
+    if cancel.is_cancelled() {
+        return Err(WriteError::Cancelled);
+    }
     Ok(StreamedArtifact {
         length,
         bounds: p.bounds,

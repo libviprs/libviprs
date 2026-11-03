@@ -615,6 +615,10 @@ annotated   fs-detected  tests/pvec_1437_fuzz_seeds.rs::the_provider_seed_corpus
 annotated   fs-detected  tests/pvec_1437_fuzz_seeds.rs::the_spline_seed_corpus_runs_clean
 annotated   fs-detected  tests/pvec_1446_write_refusal.rs::a_drawing_with_one_unstorable_curve_still_converts_the_rest
 annotated   fs-detected  tests/pvec_1446_write_refusal.rs::the_report_counts_each_entity_pvec_refused_against_that_entity
+annotated   fs-detected  tests/pvec_1463_chunk_events.rs::issue_1463_a_cancel_on_the_last_chunk_of_the_flush_leaves_no_spool_file_and_no_artifact
+annotated   fs-detected  tests/pvec_1463_chunk_events.rs::issue_1463_a_cancel_on_the_second_chunk_stops_there_and_leaves_no_spool_file_and_no_artifact
+annotated   fs-detected  tests/pvec_1463_chunk_events.rs::issue_1463_a_spilled_conversion_reports_each_chunk_before_the_artifact_is_written
+annotated   fs-detected  tests/pvec_1463_chunk_events.rs::issue_1463_two_runs_see_the_same_chunk_events_in_the_same_order
 annotated   fs-detected  tests/pvec_1471_reproducibility.rs::n_1471_no_geometry_libviprs_computes_goes_through_libm_hypot
 annotated   fs-detected  tests/pvec_1471_reproducibility.rs::n_1471_the_adr_says_artifacts_are_reproducible_per_architecture_only
 annotated   fs-detected  tests/pvec_1471_reproducibility.rs::n_1471_the_architecture_overrides_are_exactly_the_fixtures_the_adr_lists

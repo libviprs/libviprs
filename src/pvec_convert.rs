@@ -669,9 +669,18 @@ impl<'a> PvecConversion<'a> {
                 Ok((report, fidelity, json))
             };
         let config = WriteConfig { unit, leaves };
+        let mut chunk = 0u64;
+        let mut on_chunk = |entities: u64, bytes: u64| {
+            chunk += 1;
+            tell(EngineEvent::ConversionChunkWritten {
+                chunk,
+                entities,
+                bytes,
+            });
+        };
         let items = || geometries.iter().map(|(id, g)| (*id, g));
         let published = match &spill {
-            None => write_geometry(&config, items(), Vec::new(), &cancel)
+            None => write_geometry(&config, items(), Vec::new(), &cancel, &mut on_chunk)
                 .map_err(write_error)
                 .and_then(|artifact| {
                     let (report, fidelity, json) = seal(
@@ -691,9 +700,16 @@ impl<'a> PvecConversion<'a> {
             Some(spill) => {
                 let mut sealed = None;
                 publish_streamed(dest, &cancel, &mut |_| {}, |out| {
-                    let artifact =
-                        write_geometry_to(&config, items(), Vec::new(), spill, &cancel, out)
-                            .map_err(write_error)?;
+                    let artifact = write_geometry_to(
+                        &config,
+                        items(),
+                        Vec::new(),
+                        spill,
+                        &cancel,
+                        &mut on_chunk,
+                        out,
+                    )
+                    .map_err(write_error)?;
                     tell(EngineEvent::ConversionSpoolSpilled {
                         bytes: artifact.length,
                     });
