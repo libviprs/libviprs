@@ -3,7 +3,7 @@
 //! Walls in, faces out: the empty space the walls enclose is labelled room or corridor by
 //! documented rules, every label says it is a guess, and nothing here changes the source geometry.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use pvec_capabilities::Registry;
 use pvec_facade::EntityId as PvecEntityId;
@@ -123,13 +123,14 @@ pub struct Regions {
 }
 
 /// The most distinct wall ends the step takes, and the most close pairs of loose ends it keeps.
-/// Finding the node for an end and pairing loose ends both scan every node, so this bounds the
-/// work at about the square of it and the memory at its pairs; a plan past it is refused with
-/// `regions.node-limit` rather than left to run.
+/// Finding the node for an end scans the nodes, so each wall costs at most this much; a plan past
+/// it is refused with `regions.node-limit`. Distinct walls are capped separately by [`MAX_EDGES`].
 pub const MAX_NODES: usize = 20_000;
 
-/// PVec's bound on the entities in one region ring, repeated because the facade does not export it.
-const MAX_RING: usize = 4_096;
+/// The most distinct walls (after a wall drawn twice is counted once) the step traces. Tracing is
+/// linear in them plus the sort of the walls around each end, so this bounds the time and the
+/// memory of the face walk; past it the step refuses with `regions.edge-limit`.
+pub const MAX_EDGES: usize = 40_000;
 
 /// Why the step refused.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -147,6 +148,12 @@ pub enum RegionsError {
         /// The limit.
         limit: usize,
     },
+    /// More distinct walls than [`MAX_EDGES`].
+    #[error("the walls have more than {limit} distinct segments")]
+    TooManyEdges {
+        /// The limit.
+        limit: usize,
+    },
     /// A tolerance or limit that is not a usable number.
     #[error("bad region configuration: {0}")]
     BadConfig(&'static str),
@@ -159,6 +166,7 @@ impl RegionsError {
         match self {
             RegionsError::TooManyFaces { .. } => "regions.face-limit",
             RegionsError::TooManyNodes { .. } => "regions.node-limit",
+            RegionsError::TooManyEdges { .. } => "regions.edge-limit",
             RegionsError::BadConfig(_) => "regions.bad-config",
         }
     }
@@ -282,6 +290,7 @@ pub fn derive_regions(
     let snap = 1e-9_f64.max(config.gap_tolerance * 1e-6);
     let mut nodes: Vec<P> = Vec::new();
     let mut edges: Vec<Edge> = Vec::new();
+    let mut joined: BTreeSet<(usize, usize)> = BTreeSet::new();
     for w in walls {
         let (a, b) = (
             node_at(&mut nodes, w.start, snap),
@@ -290,12 +299,16 @@ pub fn derive_regions(
         if nodes.len() > MAX_NODES {
             return Err(RegionsError::TooManyNodes { limit: MAX_NODES });
         }
-        if a != b {
+        // A wall drawn twice (or drawn again the other way round) is one edge, the first one kept.
+        if a != b && joined.insert((a.min(b), a.max(b))) {
             edges.push(Edge {
                 a,
                 b,
                 what: BoundaryRef::Source(w.entity),
             });
+            if edges.len() > MAX_EDGES {
+                return Err(RegionsError::TooManyEdges { limit: MAX_EDGES });
+            }
         }
     }
     // Close gaps between loose ends, nearest pair first, each end used once.
@@ -321,7 +334,7 @@ pub fn derive_regions(
     let mut used = vec![false; nodes.len()];
     let mut derived = Vec::new();
     for (_, i, j) in pairs {
-        if used[i] || used[j] {
+        if used[i] || used[j] || joined.contains(&(i.min(j), i.max(j))) {
             continue;
         }
         used[i] = true;
@@ -375,12 +388,19 @@ pub fn derive_regions(
     for list in &mut around {
         list.sort_by(|x, y| angle(*x).total_cmp(&angle(*y)));
     }
+    // Where each half-edge sits in the list of its origin, so `next` does not scan the list.
+    let mut slot = vec![0usize; edges.len() * 2];
+    for list in &around {
+        for (k, h) in list.iter().enumerate() {
+            slot[*h] = k;
+        }
+    }
     // The next half-edge of a face keeps the face on its left: at the target, turn to the
     // neighbour just clockwise of the reverse edge.
     let next = |h: usize| {
         let twin = h ^ 1;
         let list = &around[target(h)];
-        let at = list.iter().position(|x| *x == twin).unwrap_or(0);
+        let at = slot[twin];
         list[(at + list.len() - 1) % list.len()]
     };
     let mut seen = vec![false; edges.len() * 2];
@@ -523,6 +543,8 @@ pub fn semantic_stream(
     regions: &Regions,
     source_ids: &[EntityId],
 ) -> Result<SemanticStream, String> {
+    // PVec's bound on the entities in one region ring, repeated because the facade does not export it.
+    const MAX_RING: usize = 4_096;
     let pos: BTreeMap<EntityId, usize> = source_ids
         .iter()
         .enumerate()
