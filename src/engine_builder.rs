@@ -760,6 +760,23 @@ impl<'a, S: TileSink> EngineBuilder<'a, S> {
 
         let kind = resolve_engine_kind(engine_kind, &source, &plan, memory_budget_bytes);
 
+        // A source that keeps its raster resident (the cached pdfium source)
+        // has spent that memory before the engine starts, and the budget only
+        // governs the engine's strips (issue #1466). Under `Error` a source
+        // that alone is over the budget is refused rather than run silently.
+        // `AutoAdjustDpi` cannot act here, since the source is already built
+        // at its DPI; that policy is applied when the source is constructed.
+        if let (EngineSource::Strip(strip), Some(budget)) = (&source, memory_budget_bytes) {
+            let resident = strip.resident_bytes();
+            if resident > budget && matches!(budget_policy.unwrap_or_default(), BudgetPolicy::Error)
+            {
+                return Err(EngineError::BudgetExceeded {
+                    strip_bytes: resident,
+                    budget_bytes: budget,
+                });
+            }
+        }
+
         // A sink that asked for an emission order only the monolithic engine
         // can produce is refused here, before anything touches the output
         // (issue #1145). The streaming and MapReduce engines render a strip at

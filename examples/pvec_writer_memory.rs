@@ -97,6 +97,7 @@ fn main() {
             Vec::new(),
             &spill,
             &CancelToken::new(),
+            &mut |_, _| {},
             &mut sink,
         )
         .unwrap();
@@ -108,6 +109,7 @@ fn main() {
             ids.into_iter().zip(&geoms),
             Vec::new(),
             &CancelToken::new(),
+            &mut |_, _| {},
         )
         .unwrap();
         (art.bytes.len() as u64, art.written)
