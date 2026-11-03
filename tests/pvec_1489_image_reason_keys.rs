@@ -12,6 +12,7 @@ mod fixture;
 
 use fixture::*;
 use libviprs::pvec::pdf_image::{PdfImageError, PdfImageNote, PdfImageOptions, bake_page_images};
+use libviprs::raster::RasterError;
 use libviprs::raster_pvec::pyramid::RasterPyramidError;
 
 fn docs() -> String {
@@ -35,12 +36,21 @@ fn documented(docs: &str, key: &str) -> bool {
 #[cfg_attr(miri, ignore)]
 fn every_refusal_key_is_in_a_doc() {
     let docs = docs();
+    // `PdfImageError` is `#[non_exhaustive]`, so a match here could not be exhaustive. The match in
+    // `PdfImageError::reason` is, so a new variant fails to compile there and has to pick a key, and
+    // this list then looks that key up. `Pdf` and `Filter` wrap codec errors that cannot be built from
+    // here, and `reason` gives both `decode-failed`, which `Decode` covers.
     let every_variant = vec![
         PdfImageError::Decode("x".into()),
         PdfImageError::TooLarge {
             pixels: 2,
             limit: 1,
         },
+        PdfImageError::StreamTooLarge { bytes: 2, limit: 1 },
+        PdfImageError::Raster(RasterError::ZeroDimension {
+            width: 0,
+            height: 0,
+        }),
         PdfImageError::UnsupportedFilter("LZWDecode".into()),
         PdfImageError::FilterNotEnabled {
             filter: "JBIG2Decode".into(),
