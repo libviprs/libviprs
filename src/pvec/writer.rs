@@ -139,7 +139,7 @@ fn metres_per_unit(unit: SourceUnit) -> Result<f64, WriteError> {
 /// the facts about what went in. [`open_geometry`] makes one so that a caller can add raster blocks through
 /// [`OpenArtifact::rasters`] before [`OpenArtifact::finish`] seals it, while the geometry still goes through
 /// this one funnel and the facade's writer stays inside it.
-pub struct OpenArtifact {
+pub(crate) struct OpenArtifact {
     writer: PvecWriter,
     bounds: BoundsReport,
     written: u64,
@@ -298,7 +298,7 @@ pub fn write_geometry<'a>(
 /// # Errors
 ///
 /// As [`write_geometry`].
-pub fn open_geometry<'a>(
+pub(crate) fn open_geometry<'a>(
     config: &WriteConfig,
     items: impl IntoIterator<Item = (EntityId, &'a Normalized2DGeometry)>,
     streams: Vec<Stream>,
@@ -311,14 +311,14 @@ pub fn open_geometry<'a>(
 
 impl OpenArtifact {
     /// Writes the raster pyramids into the artifact, `RasterId` by position (see
-    /// [`write_rasters`](crate::raster_pvec::container::write_rasters)). Returns how many were written.
+    /// [`write_rasters`](crate::raster_pvec::container::write_rasters)). Returns how many were written. Call
+    /// it once: the ids are positions within the call, so a second call would start again at 0.
     ///
     /// # Errors
     ///
     /// [`RasterWriteError`](crate::raster_pvec::container::RasterWriteError).
-    #[cfg(feature = "pvec-raster")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "pvec-raster")))]
-    pub fn rasters<'a>(
+    #[cfg(all(feature = "pvec-raster", feature = "pvec-convert"))]
+    pub(crate) fn rasters<'a>(
         &mut self,
         pyramids: impl IntoIterator<Item = &'a crate::raster_pvec::pyramid::RasterPyramid>,
     ) -> Result<usize, crate::raster_pvec::container::RasterWriteError> {
@@ -331,7 +331,7 @@ impl OpenArtifact {
     /// # Errors
     ///
     /// [`WriteError::Pvec`] when PVec refuses to seal it.
-    pub fn finish(self) -> Result<GeometryArtifact, WriteError> {
+    pub(crate) fn finish(self) -> Result<GeometryArtifact, WriteError> {
         Ok(GeometryArtifact {
             bytes: self.writer.finish().map_err(WriteError::Pvec)?,
             bounds: self.bounds,

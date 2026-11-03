@@ -192,7 +192,7 @@ pub struct CapabilitySummary {
 }
 
 /// What a PDF page conversion did beside its vector entities: the images, the fills and the text
-/// (issue #1491). Every map is keyed by the reason or note key a `docs/pvec-*.md` page names.
+/// (issue #1491). The page's coordinates are in points. Every map is keyed by the reason or note key a `docs/pvec-*.md` page names.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct PdfSummary {
     /// The 1-based page converted.

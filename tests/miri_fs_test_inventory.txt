@@ -660,6 +660,7 @@ annotated   fs-detected  tests/pvec_1491_pdf_conversion.rs::a_missing_page_and_a
 annotated   fs-detected  tests/pvec_1491_pdf_conversion.rs::a_page_without_a_path_is_refused_and_nothing_is_published
 annotated   fs-detected  tests/pvec_1491_pdf_conversion.rs::a_pdf_converts_to_an_artifact_with_an_entity_and_a_raster
 annotated   fs-detected  tests/pvec_1491_pdf_conversion.rs::a_refused_image_is_a_report_line_under_its_key_and_the_vectors_still_convert
+annotated   fs-detected  tests/pvec_1491_pdf_conversion.rs::the_image_notes_are_the_bakes_own_note_keys
 annotated   fs-detected  tests/pvec_1491_pdf_conversion.rs::the_report_counts_the_image_and_the_vector_entities
 annotated   fs-detected  tests/pvec_1491_pdf_conversion.rs::the_same_pdf_twice_gives_the_same_bytes
 annotated   fs-detected  tests/pvec_api_surface.rs::no_index_directory_or_straddler_type_is_defined_under_src_pvec

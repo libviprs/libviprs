@@ -23,9 +23,15 @@ Two things this task depends on are not in the tree yet, and I did not fake eith
 | PDF `f* B* b*` (even-odd) | geometry only | `fill-geometry-only-even-odd` | `IgnoredByPolicy` (the fill, not the geometry) | 3 in the test stream `f* B* b*` |
 | PDF `sh` shading | ignored, counted | `fill-shading-requires-extension` | `RequiresExtension` | 2 in the test stream |
 | PDF `/Pattern` colour (`scn`, `SCN` with a name) | ignored, counted | `fill-pattern-requires-extension` | `RequiresExtension` | 2 in the test stream |
-| PDF image XObject (`Do` of an `/Image`) | counted with its CTM, placed by the raster bake (#1332) | `image-pdf-xobject-baked` | `RequiresExtension` | 2 in the #1328 test stream |
-| PDF inline image (`BI ... EI`) | counted with its CTM, placed by the raster bake (#1332) | `image-pdf-inline-baked` | `RequiresExtension` | 2 in the #1328 test stream |
+| PDF image XObject (`Do` of an `/Image`) | counted with its CTM, left to the raster bake (#1332) | `image-pdf-xobject-raster-bake` | `RequiresExtension` | 2 in the #1328 test stream |
+| PDF inline image (`BI ... EI`) | counted with its CTM, left to the raster bake (#1332) | `image-pdf-inline-raster-bake` | `RequiresExtension` | 2 in the #1328 test stream |
 | DWG `IMAGE` | reported with its frame, no placement | `image-dwg-frame-only-not-placed` | `Unsupported` | 1 in the #1328 test drawing |
+
+### PDF images
+
+The fill report counts every image on the page, written or refused, and it knows nothing about the bake: `fill_policy` is not behind a feature and a caller may never run `bake_page_images`. So the two image rows say which step owns the image (`image-pdf-xobject-raster-bake`, `image-pdf-inline-raster-bake`), not that one was placed. Which images were placed is in the conversion report's `pdf` section: `rasters` counts the written ones and `images_refused` the refused ones by key (`docs/pvec-raster-producer.md`).
+
+The decision and bucket columns read the same way. The decision is `IgnoredCounted` because the fill path itself carries no pixels, it only counts. The bucket is `RequiresExtension` because the pixels are carried by an extension, the raster stream (`pvec-raster`), and not by the geometry.
 
 ### DWG `HATCH`, `SOLID`, `TRACE`
 

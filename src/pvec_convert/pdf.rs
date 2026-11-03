@@ -14,7 +14,7 @@
 //! manifest says `metres_per_unit` 1.0 and a reader that wants metres multiplies by 0.0254 / 72. The
 //! manifest box is the displayed page (after `/Rotate`) grown to take in any path that leaves it.
 //!
-//! The vectors go through the geometry funnel ([`open_geometry`](crate::pvec::writer::open_geometry)),
+//! The vectors go through the geometry funnel (`pvec::writer::open_geometry`),
 //! which is the one writer for entities, and the rasters are added to the open artifact before it is
 //! sealed. Entities get ids from 0 in content-stream order, the ones with a curve first. A writer
 //! refusal is reported as `pvec-cannot-store` and moves the later PVec ids down by one. The artifact
@@ -38,7 +38,7 @@ use crate::pvec::fill_policy::FillReport;
 use crate::pvec::mapping::{kind_of, row_for};
 use crate::pvec::ordering::EntityId;
 use crate::pvec::pdf_bezier::{PdfNormalizedEntity, normalize_page};
-use crate::pvec::pdf_image::{PdfImageOptions, PdfImageReport, bake_page_images};
+use crate::pvec::pdf_image::{PdfImageNote, PdfImageOptions, PdfImageReport, bake_page_images};
 use crate::pvec::pdf_vector::{PdfVectorError, PdfVectorLimits, extract_page_paths_from_bytes};
 use crate::pvec::publish::{PublishError, publish};
 use crate::pvec::report::{
@@ -149,7 +149,9 @@ impl<'a> PdfConversion<'a> {
         self
     }
 
-    /// The cancel token, polled between the steps and before anything is published.
+    /// The cancel token, polled before the page is read, between the steps and before anything is
+    /// published. It is not polled inside the image bake, which runs to the end of the page once it
+    /// starts, so a cancel during a heavy page is seen when the bake returns.
     #[must_use]
     pub fn cancel(mut self, cancel: CancelToken) -> Self {
         self.cancel = cancel;
@@ -283,11 +285,11 @@ impl<'a> PdfConversion<'a> {
                 },
             )
             .map_err(PdfConvertError::Report)?;
-        let counted = |pairs: &[(&str, u64)]| -> BTreeMap<String, u64> {
+        let counted = |pairs: &[(PdfImageNote, u64)]| -> BTreeMap<String, u64> {
             pairs
                 .iter()
                 .filter(|(_, n)| *n > 0)
-                .map(|(k, n)| ((*k).to_owned(), *n))
+                .map(|(k, n)| (k.as_str().to_owned(), *n))
                 .collect()
         };
         let r = &bake.report;
@@ -297,13 +299,13 @@ impl<'a> PdfConversion<'a> {
             rasters,
             images_refused: r.refused.clone(),
             image_notes: counted(&[
-                ("colour-space-approximated", r.colour_approximated),
-                ("bit-depth-reduced", r.bit_depth_reduced),
-                ("re-encoded-lossy", r.re_encoded_lossy),
-                ("interleaved-draw-order", r.interleaved),
-                ("clipped", r.clipped),
-                ("mask-ignored", r.mask_ignored),
-                ("bilevel", r.bilevel),
+                (PdfImageNote::ColourSpaceApproximated, r.colour_approximated),
+                (PdfImageNote::BitDepthReduced, r.bit_depth_reduced),
+                (PdfImageNote::ReEncodedLossy, r.re_encoded_lossy),
+                (PdfImageNote::Interleaved, r.interleaved),
+                (PdfImageNote::Clipped, r.clipped),
+                (PdfImageNote::MaskIgnored, r.mask_ignored),
+                (PdfImageNote::Bilevel, r.bilevel),
             ]),
             fills: fills
                 .rows()

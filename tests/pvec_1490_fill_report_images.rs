@@ -72,4 +72,7 @@ fn the_hatch_policy_doc_matches_the_code() {
         assert!(!doc.contains("`image-pdf-xobject-not-placed`"));
         assert!(!doc.contains("`image-pdf-inline-not-placed`"));
     }
+    // The doc says what the rows do and do not know, and where the placed count is.
+    assert!(doc.contains("counts every image"));
+    assert!(doc.contains("`rasters`") && doc.contains("`images_refused`"));
 }

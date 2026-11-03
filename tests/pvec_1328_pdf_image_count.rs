@@ -128,7 +128,7 @@ fn the_report_counts_images_and_says_the_raster_bake_places_them() {
     ] {
         let row = policy_for(c);
         assert_eq!(row.decision, FillDecision::IgnoredCounted, "{c:?}");
-        assert!(row.reason.ends_with("-baked"), "{}", row.reason);
+        assert!(row.reason.ends_with("-raster-bake"), "{}", row.reason);
     }
 }
 
