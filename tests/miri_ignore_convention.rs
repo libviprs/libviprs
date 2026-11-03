@@ -840,7 +840,8 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1070 adds 4: the `tests/pvec_1070_spool_fuzz.rs` cells that stream through a temp dir and read the seed corpus (two more drive the body in memory and are annotated, not detected). It said 942 before this line moved.
 /// #1060 adds 4: the `tests/pvec_ci_gates.rs` cells that read the baselines and the two `tests/pvec_gate_determinism.rs` cells that convert into a temp dir. It said 946 before this line moved.
 /// #1475 and #1471 add 14: the eleven `tests/pvec_drift.rs` cells and the three `tests/pvec_1471_reproducibility.rs` cells. It said 950 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 964;
+/// #1406 adds 4: the `tests/pvec_dwg_pdf_differential.rs` raster cells that read the exported PDFs and the loss files. It said 964 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 968;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
