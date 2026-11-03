@@ -36,8 +36,8 @@
    }
   },
   "corpus": {
-   "revision": "r2-open",
-   "gold_commit": "1df9d1b3e75047fa3978ebd809d0128cdfb28a68"
+   "revision": "r3-open",
+   "gold_commit": "871f390905500097895a3d21d1083e7d42a87807"
   },
   "provider": {
    "name": "acadrust",

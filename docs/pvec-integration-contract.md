@@ -31,8 +31,8 @@ the pin with the policy PVec exports, so a change of PVec's policy is a red test
 | `viewport_clipping` | unsupported |
 | `xrefs` | report-external |
 
-**4. The accepted fixture corpus revision.** `r2-open` of `libviprs/pvec-gold-fixtures`, gold commit
-`1df9d1b3e75047fa3978ebd809d0128cdfb28a68`, vendored under `tests/fixtures/pvec-gold/` and held to its own index by
+**4. The accepted fixture corpus revision.** `r3-open` of `libviprs/pvec-gold-fixtures`, gold commit
+`871f390905500097895a3d21d1083e7d42a87807`, vendored under `tests/fixtures/pvec-gold/` and held to its own index by
 `tests/common/pvec_gold.rs`.
 
 **5. The provider compatibility range.** The default provider is `acadrust`, at revision

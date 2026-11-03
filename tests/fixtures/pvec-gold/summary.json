@@ -1,5 +1,5 @@
 {
- "corpus_revision": "r2-open",
+ "corpus_revision": "r3-open",
  "by_class": {
   "DUAL_ORACLE_EQUIVALENT / STEP_ORACLE": [
    "blocks-dynamic-linear-001"
@@ -7,7 +7,10 @@
   "KNOWN_TRUTH_EXACT / READER_MAPPING_ONLY": [
    "layer-state-001",
    "mixed-entity-001",
-   "tiny-extent-001"
+   "paper-space-multi-viewport-001",
+   "tiny-extent-001",
+   "viewport-clipped-001",
+   "viewport-clipped-bounded-001"
   ],
   "KNOWN_TRUTH_EXACT / STEP_ORACLE": [
    "arc-seam-001",

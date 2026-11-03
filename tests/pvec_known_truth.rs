@@ -80,10 +80,14 @@ fn known_truth_ids(corpus: &Corpus) -> Vec<String> {
 #[test]
 fn n2_1_1050_the_pinned_corpus_is_the_revision_the_pin_names() {
     let corpus = Corpus::open();
-    assert_eq!(corpus.revision, "r2-open");
+    assert_eq!(corpus.revision, "r3-open");
     assert_eq!(corpus.gold_commit.len(), 40, "the pin names a full commit");
     assert_eq!(corpus.upstream_manifest_sha256.len(), 64);
-    assert_eq!(known_truth_ids(&corpus).len(), 38, "r2-open has 38");
+    assert_eq!(
+        known_truth_ids(&corpus).len(),
+        41,
+        "r2-open has 38 and r3-open adds 3"
+    );
 }
 
 #[test]
@@ -217,7 +221,7 @@ fn n2_1_1050_a_vendored_file_that_moved_is_caught_by_the_pin() {
         .downcast::<String>()
         .unwrap();
     assert!(msg.contains("line-001/expected.math.json"), "{msg}");
-    assert!(msg.contains("r2-open"), "{msg}");
+    assert!(msg.contains("r3-open"), "{msg}");
 }
 
 #[test]
