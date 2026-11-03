@@ -525,7 +525,6 @@ mod enabled {
     /// #1493: an intermediate region (types 4, 20, 36, 40) larger than the page is refused by the
     /// prescan like the immediate and lossless forms are, whatever else the segment holds.
     #[test]
-    #[cfg_attr(miri, ignore)] // reads the fixtures from disk
     fn an_oversized_intermediate_region_is_refused_before_it_is_allocated_1493() {
         for kind in [4u8, 20, 36, 40] {
             let mut d = 1_000_000u32.to_be_bytes().to_vec();
