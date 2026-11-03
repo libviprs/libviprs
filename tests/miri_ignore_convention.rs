@@ -845,7 +845,6 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1495 adds 1: `tests/pvec_1365_pdf_jbig2.rs::the_decoder_is_hayro_jbig2_0_4_and_decodes_strictly_1495`, which reads the manifest and the module. It said 969 before this line moved.
 /// #1495 adds 1 more: `tests/pvec_1365_pdf_jbig2.rs::a_stream_that_lenient_decoding_repairs_is_refused_1495`, which reads the fixtures. It said 970 before this line moved.
 /// #1489 adds 4: the `tests/pvec_1489_image_reason_keys.rs` cells that read the docs. It said 971 before this line moved.
-/// #1489 adds 4: the `tests/pvec_1489_image_reason_keys.rs` cells that read the docs. It said 969 before this line moved.
 /// #1490 adds 1: the `tests/pvec_1490_fill_report_images.rs` cell that reads `docs/pvec-hatch-policy.md`. It said 975 before this line moved.
 const EXPECTED_FS_TOUCHING_TESTS: usize = 976;
 
