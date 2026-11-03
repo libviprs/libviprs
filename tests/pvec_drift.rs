@@ -69,14 +69,25 @@ fn accepted_file() -> String {
 
 /// A converted fixture, or `None` when the conversion refuses it (no artifact to check).
 fn convert(fx: &Fixture) -> Option<Vec<u8>> {
+    convert_counting(fx).map(|c| c.0)
+}
+
+/// [`convert`] with the number of entities the report says PVec's writer refused.
+fn convert_counting(fx: &Fixture) -> Option<(Vec<u8>, usize)> {
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join(format!("{}.pvec", fx.id));
     let dwg = fx.dwg();
-    PvecConversion::new(CadSource::Bytes(&dwg), &dest)
+    let out = PvecConversion::new(CadSource::Bytes(&dwg), &dest)
         .unit(SourceUnit::Meters)
         .convert()
         .ok()?;
-    Some(std::fs::read(&dest).unwrap())
+    let refused = out
+        .report
+        .entities
+        .iter()
+        .filter(|r| r.reason.as_deref() == Some("pvec-cannot-store"))
+        .count();
+    Some((std::fs::read(&dest).unwrap(), refused))
 }
 
 /// An artifact opened for editing: PVec's own manifest and curves, written back with PVec's writer.
@@ -207,13 +218,22 @@ fn n_1471_every_converted_fixture_has_no_drift_against_its_truth_or_its_accepted
         .iter()
         .filter(|f| f.class != EvidenceClass::Quarantined)
     {
-        let Some(bytes) = convert(fx) else { continue };
+        let Some((bytes, refused)) = convert_counting(fx) else {
+            continue;
+        };
         let truth = fx
             .has("expected.math.json")
             .then(|| fx.json("expected.math.json"));
         let section = drift::accepted_section(&accepted, &fx.id);
-        let r = drift::check(&fx.id, fx.class.tag(), truth.as_ref(), section, &bytes)
-            .unwrap_or_else(|e| panic!("{}: {e}", fx.id));
+        let r = drift::check_refused(
+            &fx.id,
+            fx.class.tag(),
+            truth.as_ref(),
+            section,
+            &bytes,
+            refused,
+        )
+        .unwrap_or_else(|e| panic!("{}: {e}", fx.id));
         assert!(r.is_clean(), "{}", r.to_text());
         assert!(section.is_some(), "{} has no accepted dump", fx.id);
         checked += 1;
@@ -644,13 +664,20 @@ fn n_1471_the_fixtures_whose_bits_differ_between_architectures_agree_within_the_
         let fx = corpus.get(id);
         let x64 = drift::accepted_section(&base, id).unwrap();
         assert_ne!(drift::digest(x64), drift::digest(arm));
-        let bytes = convert(fx).unwrap();
+        let (bytes, refused) = convert_counting(fx).unwrap();
         let truth = fx
             .has("expected.math.json")
             .then(|| fx.json("expected.math.json"));
         for accepted in [x64, arm] {
-            let r =
-                drift::check(id, fx.class.tag(), truth.as_ref(), Some(accepted), &bytes).unwrap();
+            let r = drift::check_refused(
+                id,
+                fx.class.tag(),
+                truth.as_ref(),
+                Some(accepted),
+                &bytes,
+                refused,
+            )
+            .unwrap();
             assert!(r.is_clean(), "{}", r.to_text());
         }
     }

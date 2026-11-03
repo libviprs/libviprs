@@ -37,6 +37,12 @@ Entity `i` of the fixture's live entities (layer on and thawed, no `-equivalent-
 under id `i`, the converter assigns ids in drawing order. A curve found under another id is a
 reorder, not a drop plus an extra.
 
+An entity PVec's writer refuses (the report's `pvec-cannot-store`, #1446) is in the drawing and not in
+the artifact, and the ids after it move down by one. `drift::check_refused` takes the number the report
+counts, and a fixture entity with no curve is read as one of those up to that count, so
+`mixed-entity-001` (its polyline is refused) checks clean. A drop beyond the count is still drift. The
+example reads the count from the `FILE.pvec.report.json` beside the artifact.
+
 ## Running it
 
 ```text

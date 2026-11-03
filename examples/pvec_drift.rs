@@ -58,7 +58,18 @@ fn main() -> ExitCode {
             .unwrap_or_default();
         let file = std::fs::read_to_string(&accepted).ok();
         let section = file.as_deref().and_then(|f| drift::accepted_section(f, id));
-        drift::check_fixture(Path::new(fixture), Path::new(pvec), section).map(Some)
+        // The report the conversion published beside the artifact says how many entities PVec's
+        // writer refused; without one the artifact is read as holding everything.
+        let refused = std::fs::read(format!("{pvec}.report.json"))
+            .ok()
+            .and_then(|b| libviprs::pvec::report::ConversionReport::from_json_slice(&b).ok())
+            .map_or(0, |r| {
+                r.entities
+                    .iter()
+                    .filter(|e| e.reason.as_deref() == Some("pvec-cannot-store"))
+                    .count()
+            });
+        drift::check_fixture(Path::new(fixture), Path::new(pvec), section, refused).map(Some)
     })();
     match outcome {
         Ok(None) => ExitCode::SUCCESS,

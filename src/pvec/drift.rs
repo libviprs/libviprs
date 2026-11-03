@@ -217,11 +217,13 @@ impl std::error::Error for DriftError {}
 
 /// Checks the `.pvec` at `pvec` against the fixture directory `fixture_dir` (one directory of the
 /// pinned corpus: `verdict.json`, and `expected.math.json` for a known-truth fixture). `accepted` is
-/// the fixture's accepted dump, when there is one ([`accepted_section`]).
+/// the fixture's accepted dump, when there is one ([`accepted_section`]), and `refused` the number of
+/// entities the conversion report counts as refused by PVec's writer ([`check_refused`]).
 pub fn check_fixture(
     fixture_dir: &Path,
     pvec: &Path,
     accepted: Option<&str>,
+    refused: usize,
 ) -> Result<DriftReport, DriftError> {
     let read = |name: &str| -> Result<Option<Value>, DriftError> {
         let p = fixture_dir.join(name);
@@ -242,7 +244,7 @@ pub fn check_fixture(
     let truth = read("expected.math.json")?;
     let bytes =
         std::fs::read(pvec).map_err(|e| DriftError::Io(format!("{}: {e}", pvec.display())))?;
-    check(id, class, truth.as_ref(), accepted, &bytes)
+    check_refused(id, class, truth.as_ref(), accepted, &bytes, refused)
 }
 
 /// Checks artifact bytes. `truth` is the fixture's `expected.math.json` (used when the evidence class
@@ -254,6 +256,22 @@ pub fn check(
     accepted: Option<&str>,
     pvec: &[u8],
 ) -> Result<DriftReport, DriftError> {
+    check_refused(fixture, evidence_class, truth, accepted, pvec, 0)
+}
+
+/// [`check`] for a conversion whose report counts `refused` entities as refused by PVec's writer
+/// (`ReasonCode::PvecCannotStore`, "pvec-cannot-store"). Those entities are in the drawing and not
+/// in the artifact, and every entity after one holds an id one lower, so the truth is read with them
+/// taken out: a truth entity with no curve is a refusal for as long as the report counted one, and a
+/// dropped entity beyond that count is still drift.
+pub fn check_refused(
+    fixture: &str,
+    evidence_class: &str,
+    truth: Option<&Value>,
+    accepted: Option<&str>,
+    pvec: &[u8],
+    refused: usize,
+) -> Result<DriftReport, DriftError> {
     let art = Artifact::read(pvec)?;
     let mut drifts = Vec::new();
     if evidence_class == "KNOWN_TRUTH_EXACT" {
@@ -262,7 +280,7 @@ pub fn check(
                 "{fixture} is known truth and has no expected.math.json"
             ))
         })?;
-        against_truth(&art, t, &mut drifts);
+        against_truth(&art, t, refused, &mut drifts);
     } else if accepted.is_none() {
         return Err(DriftError::Fixture(format!(
             "{fixture} is {evidence_class}: it has no truth, so it needs an accepted dump to be checked against"
@@ -818,9 +836,26 @@ fn push(
 
 /// Entity `i` of the live truth belongs under id `i`: the converter assigns ids in drawing order, so
 /// an entity found under another id is a reorder, and a truth entity found nowhere is dropped.
-fn against_truth(art: &Artifact, truth: &Value, out: &mut Vec<Drift>) {
+fn against_truth(art: &Artifact, truth: &Value, refused: usize, out: &mut Vec<Drift>) {
     use Against::Truth;
-    let want = live(truth);
+    let mut want = live(truth);
+    if refused > 0 {
+        // The writer's refusals leave no curve: walk the artifact in id order and let a truth entity
+        // that does not match the next curve be one of them, up to the count the report gave.
+        let mut next = art.curves.iter().map(|(_, c)| c).peekable();
+        let mut left = refused;
+        want.retain(|t| {
+            if next.peek().is_some_and(|c| is(t, c)) {
+                next.next();
+                return true;
+            }
+            if left > 0 {
+                left -= 1;
+                return false;
+            }
+            true
+        });
+    }
     let n = art
         .curves
         .iter()
