@@ -20,6 +20,7 @@ fn section(doc: &str) -> &str {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn the_spill_strategy_is_measured_not_marked_unbuilt() {
     let s = section(&read("docs/pvec-benchmarks.md")).to_string();
     assert!(
@@ -33,6 +34,7 @@ fn the_spill_strategy_is_measured_not_marked_unbuilt() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn the_decision_names_a_strategy_and_cites_figures() {
     let s = section(&read("docs/pvec-benchmarks.md")).to_string();
     let at = s.find("### Decision").expect("a Decision heading");
@@ -49,6 +51,7 @@ fn the_decision_names_a_strategy_and_cites_figures() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn the_baseline_has_spill_rows_for_every_cell_from_the_native_host() {
     let b: serde_json::Value =
         serde_json::from_str(&read("tests/fixtures/pvec_bench_baseline.json"))
@@ -69,6 +72,7 @@ fn the_baseline_has_spill_rows_for_every_cell_from_the_native_host() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn the_budget_sweep_is_recorded() {
     let b: serde_json::Value =
         serde_json::from_str(&read("tests/fixtures/pvec_bench_baseline.json"))
