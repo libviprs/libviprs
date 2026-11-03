@@ -133,9 +133,12 @@ fn of(streams: &[Stream], cap: pvec_facade::CapabilityId) -> Option<&Stream> {
 fn issue_1093_all_streams_off_writes_the_same_geometry_as_all_streams_on() {
     let f = flattened_blocks();
     let styles = styles_for(&f);
-    let with = build_streams(StreamSelection::ALL, &f.ids, &layers(), &rows(&f, &styles)).unwrap();
-    let without =
-        build_streams(StreamSelection::NONE, &f.ids, &layers(), &rows(&f, &styles)).unwrap();
+    let with = build_streams(StreamSelection::ALL, &f.ids, &layers(), &rows(&f, &styles))
+        .unwrap()
+        .streams;
+    let without = build_streams(StreamSelection::NONE, &f.ids, &layers(), &rows(&f, &styles))
+        .unwrap()
+        .streams;
     assert!(without.is_empty());
     assert_eq!(with.len(), 3);
     let (a, b) = (write(&f, with), write(&f, without));
@@ -166,7 +169,9 @@ fn issue_1093_every_subset_of_streams_builds_writes_and_decodes() {
             line_style: mask & 2 != 0,
             provenance: mask & 4 != 0,
         };
-        let built = build_streams(select, &f.ids, &layers(), &rows(&f, &styles)).unwrap();
+        let built = build_streams(select, &f.ids, &layers(), &rows(&f, &styles))
+            .unwrap()
+            .streams;
         assert_eq!(built.len(), mask.count_ones() as usize, "mask {mask}");
         for s in &built {
             if s.capability == LayerStream::CAPABILITY {
@@ -194,7 +199,8 @@ fn issue_1093_provenance_rows_equal_the_source_entities_not_the_curves() {
         &layers(),
         &rows(&f, &[]),
     )
-    .unwrap();
+    .unwrap()
+    .streams;
     let p = ProvenanceStream::decode(&of(&built, ProvenanceStream::CAPABILITY).unwrap().payload)
         .unwrap();
     // Eight curves, four source entities: two root lines and the two INSERTs.
@@ -225,7 +231,8 @@ fn issue_1093_width_phase_and_visibility_round_trip_through_the_line_style_strea
         &layers(),
         &rows(&f, &styles),
     )
-    .unwrap();
+    .unwrap()
+    .streams;
     let s =
         LineStyleStream::decode(&of(&built, LineStyleStream::CAPABILITY).unwrap().payload).unwrap();
     assert_eq!(s.assignments.len(), 8);
@@ -253,7 +260,8 @@ fn issue_1093_the_layer_stream_names_layers_flags_them_and_maps_through_the_writ
         &layers(),
         &rows(&f, &[]),
     )
-    .unwrap();
+    .unwrap()
+    .streams;
     let l = LayerStream::decode(&of(&built, LayerStream::CAPABILITY).unwrap().payload).unwrap();
     let wall = l.names.iter().position(|n| n == "A-WALL").unwrap();
     assert_eq!(l.flags[wall], LAYER_OFF | LAYER_FROZEN);
@@ -263,6 +271,8 @@ fn issue_1093_the_layer_stream_names_layers_flags_them_and_maps_through_the_writ
 
 #[test]
 fn issue_1093_an_empty_run_builds_no_stream() {
-    let built = build_streams(StreamSelection::ALL, &[], &[], &[]).unwrap();
+    let built = build_streams(StreamSelection::ALL, &[], &[], &[])
+        .unwrap()
+        .streams;
     assert!(built.is_empty());
 }

@@ -4,17 +4,14 @@
 #![cfg(feature = "pvec-write")]
 
 use libviprs::cad::ItemHandle;
-use libviprs::pvec::components::{ComponentSource, StreamSelection, build_streams};
+use libviprs::pvec::components::{ComponentSource, DroppedRow, StreamSelection, build_streams};
 use libviprs::pvec::regions::{RegionConfig, WallEdge, derive_regions, semantic_stream};
 use libviprs::pvec::style::{DashPattern, LineStyleComponent};
 use libviprs::pvec::{
     EntityId, EntityStyle, InstancePath, LayerState, OrderingPolicy, ProvenanceStub, RawEntity,
     RawGeometry, order_entities,
 };
-use pvec_facade::EntityId as PvecId;
-use pvec_facade::components::{
-    EntityGeometry, LayerStream, LineStyleStream, SemanticClassStream, Stream,
-};
+use pvec_facade::components::{LayerStream, LineStyleStream, Stream};
 
 /// Minted ids and stubs for lines on the given layers, in the order given.
 fn minted(layer_of: impl Fn(usize) -> String, n: usize) -> (Vec<EntityId>, Vec<ProvenanceStub>) {
@@ -94,9 +91,17 @@ fn issue_1093_a_layer_name_past_the_bound_drops_its_row_and_not_the_streams() {
         &sources(&ids, &stubs, &[]),
     )
     .expect("one bad name does not refuse the streams");
-    let layer = layer_stream(&out);
+    let layer = layer_stream(&out.streams);
     assert_eq!(layer.assignments.len(), 2, "the two good rows stay");
     assert!(layer.names.iter().all(|n| n.len() <= 255));
+    assert_eq!(
+        out.dropped,
+        vec![DroppedRow {
+            entity: ids[1],
+            stream: "layer",
+            reason: "name-too-long"
+        }]
+    );
 }
 
 #[test]
@@ -126,6 +131,7 @@ fn issue_1093_a_dash_array_past_the_bound_drops_that_style_and_not_the_streams()
     )
     .expect("one bad dash array does not refuse the streams");
     let line = out
+        .streams
         .iter()
         .find_map(|s| LineStyleStream::decode(&s.payload).ok())
         .expect("a line style stream");
@@ -135,6 +141,14 @@ fn issue_1093_a_dash_array_past_the_bound_drops_that_style_and_not_the_streams()
         "only the entity with a holdable style"
     );
     assert_eq!(line.styles.len(), 1);
+    assert_eq!(
+        out.dropped,
+        vec![DroppedRow {
+            entity: ids[0],
+            stream: "line-style",
+            reason: "too-many-dashes"
+        }]
+    );
 }
 
 #[test]
@@ -142,9 +156,11 @@ fn issue_1093_more_layer_names_than_a_table_holds_keep_the_first_ones() {
     let (ids, stubs) = minted(|i| format!("L{i}"), 65_537);
     let out = build_streams(StreamSelection::ALL, &ids, &[], &sources(&ids, &stubs, &[]))
         .expect("an over-full table is cut, not refused");
-    let layer = layer_stream(&out);
+    let layer = layer_stream(&out.streams);
     assert_eq!(layer.names.len(), 65_536);
     assert_eq!(layer.assignments.len(), 65_536);
+    assert_eq!(out.dropped.len(), 1);
+    assert_eq!(out.dropped[0].reason, "table-full");
 }
 
 #[test]
@@ -153,7 +169,10 @@ fn issue_1093_more_entities_than_a_stream_holds_keep_the_first_ones() {
     let (ids, stubs) = minted(|_| "0".into(), n);
     let out = build_streams(StreamSelection::ALL, &ids, &[], &sources(&ids, &stubs, &[]))
         .expect("an over-long stream is cut, not refused");
-    assert_eq!(layer_stream(&out).assignments.len(), 1 << 20);
+    assert_eq!(layer_stream(&out.streams).assignments.len(), 1 << 20);
+    assert!(out.dropped.iter().all(|d| d.reason == "stream-full"));
+    // One layer row and one provenance row each lose the last entity.
+    assert_eq!(out.dropped.len(), 2);
 }
 
 fn config() -> RegionConfig {
@@ -196,14 +215,6 @@ fn walls(segs: &[([f64; 2], [f64; 2])]) -> Vec<WallEdge> {
         .collect()
 }
 
-struct Ends(Vec<([f64; 2], [f64; 2])>);
-
-impl EntityGeometry for Ends {
-    fn endpoints(&self, entity: PvecId) -> Option<([f64; 2], [f64; 2])> {
-        self.0.get(entity.index() as usize).copied()
-    }
-}
-
 #[test]
 fn issue_1093_a_room_with_more_walls_than_a_ring_holds_is_left_out_not_a_failed_stream() {
     let n = 5000usize;
@@ -217,10 +228,10 @@ fn issue_1093_a_room_with_more_walls_than_a_ring_holds_is_left_out_not_a_failed_
     let w = walls(&segs);
     let out = derive_regions(&w, &[], &[], &config()).unwrap();
     let ids: Vec<_> = w.iter().map(|e| e.entity).collect();
-    assert!(
-        semantic_stream(&out, &ids).is_ok(),
-        "the region PVec cannot hold is left out as the docs say"
-    );
+    let sem = semantic_stream(&out, &ids).expect("the region PVec cannot hold is left out");
+    assert!(sem.stream.is_none(), "nothing else was derived");
+    assert_eq!(sem.dropped.len(), 1);
+    assert_eq!(sem.dropped[0].reason, "ring-too-long");
 }
 
 #[test]
@@ -240,10 +251,10 @@ fn issue_1093_a_region_on_a_derived_segment_never_points_at_an_entity_that_was_n
         "the gap is closed by a derived segment"
     );
     let ids: Vec<_> = w.iter().map(|e| e.entity).collect();
-    let stream = semantic_stream(&out, &ids).unwrap();
-    let s = SemanticClassStream::decode(&stream.payload).unwrap();
-    s.validate(&Ends(segs), 1e-9)
-        .expect("every entity the stream names exists in the geometry written");
+    let sem = semantic_stream(&out, &ids).unwrap();
+    assert_eq!(sem.dropped.len(), 1);
+    assert_eq!(sem.dropped[0].reason, "derived-boundary");
+    assert!(sem.stream.is_none(), "an empty region set emits no stream");
 }
 
 #[test]
@@ -254,4 +265,31 @@ fn issue_1093_the_derivation_refuses_an_input_past_the_node_cap_with_a_named_rea
     let w = walls(&segs);
     let err = derive_regions(&w, &[], &[], &config()).unwrap_err();
     assert_eq!(err.reason_code(), "regions.node-limit");
+}
+
+#[test]
+fn issue_1093_a_name_of_255_bytes_and_a_dash_array_of_16_are_held() {
+    let at = "L".repeat(255);
+    let (ids, stubs) = minted(|_| at.clone(), 1);
+    let style = LineStyleComponent::new(
+        ids[0],
+        None,
+        Some(DashPattern::new(vec![1.0; 16], 0.0).unwrap()),
+        true,
+    )
+    .unwrap();
+    let out = build_streams(
+        StreamSelection::ALL,
+        &ids,
+        &[],
+        &sources(&ids, &stubs, &[style]),
+    )
+    .unwrap();
+    assert!(out.dropped.is_empty(), "{:?}", out.dropped);
+    assert_eq!(layer_stream(&out.streams).names, vec![at]);
+    assert!(
+        out.streams
+            .iter()
+            .any(|s| LineStyleStream::decode(&s.payload).is_ok())
+    );
 }

@@ -253,7 +253,7 @@ fn issue_1093_the_semantic_stream_validates_against_the_geometry_it_points_at() 
     let w = walls(&segs);
     let out = derive_regions(&w, &[], &[], &config()).unwrap();
     let ids: Vec<_> = w.iter().map(|e| e.entity).collect();
-    let stream = semantic_stream(&out, &ids).unwrap();
+    let stream = semantic_stream(&out, &ids).unwrap().stream.unwrap();
     let s = SemanticClassStream::decode(&stream.payload).unwrap();
     assert_eq!(s.regions_of(RegionKind::Room).len(), 2);
     assert_eq!(s.regions_of(RegionKind::Corridor).len(), 1);

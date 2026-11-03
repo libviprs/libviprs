@@ -77,7 +77,7 @@ fn main() {
         let mut best = (f64::MAX, f64::MAX, 0usize);
         for _ in 0..3 {
             let t = Instant::now();
-            let streams = build_streams(select, &ids, &[], &rows).unwrap();
+            let streams = build_streams(select, &ids, &[], &rows).unwrap().streams;
             let built = t.elapsed().as_secs_f64();
             let t = Instant::now();
             let art = write_geometry(

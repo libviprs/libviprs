@@ -122,6 +122,15 @@ pub struct Regions {
     pub report: RegionReport,
 }
 
+/// The most distinct wall ends the step takes, and the most close pairs of loose ends it keeps.
+/// Finding the node for an end and pairing loose ends both scan every node, so this bounds the
+/// work at about the square of it and the memory at its pairs; a plan past it is refused with
+/// `regions.node-limit` rather than left to run.
+pub const MAX_NODES: usize = 20_000;
+
+/// PVec's bound on the entities in one region ring, repeated because the facade does not export it.
+const MAX_RING: usize = 4_096;
+
 /// Why the step refused.
 #[derive(Debug, Error, PartialEq, Eq)]
 #[non_exhaustive]
@@ -129,6 +138,12 @@ pub enum RegionsError {
     /// More faces than [`RegionConfig::max_faces`].
     #[error("the walls enclose more than {limit} faces")]
     TooManyFaces {
+        /// The limit.
+        limit: usize,
+    },
+    /// More wall ends than [`MAX_NODES`], or more close pairs of loose ends than that.
+    #[error("the walls have more than {limit} distinct ends")]
+    TooManyNodes {
         /// The limit.
         limit: usize,
     },
@@ -143,6 +158,7 @@ impl RegionsError {
     pub fn reason_code(&self) -> &'static str {
         match self {
             RegionsError::TooManyFaces { .. } => "regions.face-limit",
+            RegionsError::TooManyNodes { .. } => "regions.node-limit",
             RegionsError::BadConfig(_) => "regions.bad-config",
         }
     }
@@ -271,6 +287,9 @@ pub fn derive_regions(
             node_at(&mut nodes, w.start, snap),
             node_at(&mut nodes, w.end, snap),
         );
+        if nodes.len() > MAX_NODES {
+            return Err(RegionsError::TooManyNodes { limit: MAX_NODES });
+        }
         if a != b {
             edges.push(Edge {
                 a,
@@ -292,6 +311,9 @@ pub fn derive_regions(
             let d = dist(nodes[i], nodes[j]);
             if d <= config.gap_tolerance {
                 pairs.push((d, i, j));
+                if pairs.len() > MAX_NODES {
+                    return Err(RegionsError::TooManyNodes { limit: MAX_NODES });
+                }
             }
         }
     }
@@ -466,51 +488,103 @@ pub fn derive_regions(
     })
 }
 
-/// The semantic class stream for `regions`: PVec entity `i` is `source_ids[i]`, and the derived
-/// segments were appended after the source geometry, so `Derived(n)` is entity
-/// `source_ids.len() + n`. A region that points at an entity that was not written, or whose ring
-/// PVec cannot hold, is left out.
+/// A region left out of the semantic class stream, and why.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DroppedRegion {
+    /// Its position in [`Regions::regions`].
+    pub region: usize,
+    /// `unlabelled` (no kind), `derived-boundary`, `unwritten-boundary`, `no-boundary` or
+    /// `ring-too-long`.
+    pub reason: &'static str,
+}
+
+/// The semantic class stream and the regions it could not hold.
+#[derive(Debug)]
+pub struct SemanticStream {
+    /// The stream, or `None` when no region is left to write.
+    pub stream: Option<Stream>,
+    /// Every region left out, for the conversion report.
+    pub dropped: Vec<DroppedRegion>,
+}
+
+/// The semantic class stream for `regions`: PVec entity `i` is `source_ids[i]`.
+///
+/// A region is left out, and listed in [`SemanticStream::dropped`], when it has no kind (the
+/// unlabelled ones [`RegionConfig::keep_unlabelled`] keeps in `regions` are not a class PVec can
+/// name), when its ring is empty or longer than PVec's 4096 references, when it points at an
+/// entity that was not written, or when it runs along a [`BoundaryRef::Derived`] segment: derived
+/// segments are not written as geometry, so a reference to one would name an entity the artifact
+/// does not have. When nothing is left no stream is emitted.
 ///
 /// # Errors
 ///
 /// A message when PVec's encoder refuses the payload.
-pub fn semantic_stream(regions: &Regions, source_ids: &[EntityId]) -> Result<Stream, String> {
+pub fn semantic_stream(
+    regions: &Regions,
+    source_ids: &[EntityId],
+) -> Result<SemanticStream, String> {
     let pos: BTreeMap<EntityId, usize> = source_ids
         .iter()
         .enumerate()
         .map(|(n, e)| (*e, n))
         .collect();
-    let pvec = |n: usize| {
-        u32::try_from(n)
-            .ok()
-            .and_then(|n| PvecEntityId::new(n).ok())
-    };
-    let records = regions
-        .regions
-        .iter()
-        .filter_map(|r| {
-            let kind = r.kind?;
-            let outer: Option<Vec<PvecEntityId>> = r
-                .boundary
-                .iter()
-                .map(|b| match b {
-                    BoundaryRef::Source(e) => pvec(*pos.get(e)?),
-                    BoundaryRef::Derived(n) => pvec(source_ids.len() + n),
-                })
-                .collect();
-            Some(RegionRecord {
-                kind,
-                origin: r.origin,
-                outer: outer?,
-                holes: Vec::new(),
-            })
-        })
-        .collect();
+    let mut dropped = Vec::new();
+    let mut records = Vec::new();
+    'regions: for (n, r) in regions.regions.iter().enumerate() {
+        let mut skip = |reason| dropped.push(DroppedRegion { region: n, reason });
+        let Some(kind) = r.kind else {
+            skip("unlabelled");
+            continue;
+        };
+        if r.boundary.is_empty() {
+            skip("no-boundary");
+            continue;
+        }
+        if r.boundary.len() > MAX_RING {
+            skip("ring-too-long");
+            continue;
+        }
+        let mut outer = Vec::with_capacity(r.boundary.len());
+        for b in &r.boundary {
+            match b {
+                BoundaryRef::Source(e) => {
+                    let id = pos
+                        .get(e)
+                        .and_then(|p| u32::try_from(*p).ok())
+                        .and_then(|p| PvecEntityId::new(p).ok());
+                    let Some(id) = id else {
+                        skip("unwritten-boundary");
+                        continue 'regions;
+                    };
+                    outer.push(id);
+                }
+                BoundaryRef::Derived(_) => {
+                    skip("derived-boundary");
+                    continue 'regions;
+                }
+            }
+        }
+        records.push(RegionRecord {
+            kind,
+            origin: r.origin,
+            outer,
+            holes: Vec::new(),
+        });
+    }
+    if records.is_empty() {
+        return Ok(SemanticStream {
+            stream: None,
+            dropped,
+        });
+    }
     let stream = SemanticClassStream {
         elements: Vec::new(),
         regions: records,
-    };
-    stream
-        .into_stream(&Registry::v1())
-        .map_err(|e| e.to_string())
+    }
+    .into_stream(&Registry::v1())
+    .map_err(|e| e.to_string())?;
+    Ok(SemanticStream {
+        stream: Some(stream),
+        dropped,
+    })
 }
