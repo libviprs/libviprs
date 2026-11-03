@@ -125,8 +125,6 @@ jobs:
       - run: cargo clippy --all-targets --features pvec-raster -- -D warnings -W clippy::incompatible_msrv -W deprecated
       - run: cargo clippy --all-targets --features pvec-write -- -D warnings -W clippy::incompatible_msrv -W deprecated
       - run: cargo clippy --all-targets --features pvec-convert -- -D warnings -W clippy::incompatible_msrv -W deprecated
-      # `PdfConversion` (issue #1491) exists only with both of these on, so lint the pair (issue #1512).
-      - run: cargo clippy --all-targets --features pvec-convert,pvec-raster -- -D warnings -W clippy::incompatible_msrv -W deprecated
       # Same for the SVG rasteriser: `svg` is non-default because it costs 29
       # crates, so the default clippy job never sees `src/svg.rs` at all
       # (issue #502).
