@@ -46,9 +46,9 @@ page and the pin moving with it.
 
 | baseline | sha256 |
 |---|---|
-| `tests/fixtures/pvec_bench_corpus.json` | `781b90f9cdebb44df472aadbfdff7739dc8e1e3468c320e49b2fd902cfb43622` |
+| `tests/fixtures/pvec_bench_corpus.json` | `97eca65c287aaea1c014489cd5cc02e685e17b7f26b3961837414317e18bc5e5` |
 | `tests/fixtures/pvec_bench_baseline.json` | `7b6fe2a29d8cb1cb9a8ac3a28f87b627b77a9adcdf414989b7b82ddab9829532` |
-| `tests/fixtures/pvec_corpus_baseline.json` | `85cea1e0a1cfa6ef547368cb2d44ab71c1ed641bc8aca13694b5f29ac2d01099` |
+| `tests/fixtures/pvec_corpus_baseline.json` | `743d9c5ea8d21abe5587e28281b756b0bfb3ef716da4da8b0e6a6a3258b789df` |
 
 ## The EPIC L decision
 

@@ -1,5 +1,5 @@
 {
- "corpus_revision": "r2-open",
+ "corpus_revision": "r3-open",
  "generators": "tests/common/pvec_bench.rs",
  "measure_command": "cargo test --release --features pvec-convert --test pvec_1429_bench_corpus -- --ignored --nocapture measure_cells",
  "cells": {
@@ -12,9 +12,9 @@
    "unit": "meters",
    "provider": "acadrust",
    "evidence_class": "SYNTHETIC_STAND_IN",
-   "corpus_revision": "r2-open",
-   "bytes": 67100,
-   "sha256": "fb6f022b149eb57aec4b222fd332f2ef7272552d1234ef5bfe7331490d5391e6",
+   "corpus_revision": "r3-open",
+   "bytes": 67163,
+   "sha256": "c174851b44a4537eb92591d2de44af0ae93f6e208db24d9398b86cc5d1d63671",
    "entities": {
     "encountered": 1000,
     "written": 1000,
@@ -32,9 +32,9 @@
    "unit": "meters",
    "provider": "acadrust",
    "evidence_class": "SYNTHETIC_STAND_IN",
-   "corpus_revision": "r2-open",
-   "bytes": 23186,
-   "sha256": "2414fa0c92f0e39732cf475fda3d811eb95453b20251452ab287afe5353eee42",
+   "corpus_revision": "r3-open",
+   "bytes": 23379,
+   "sha256": "36c2e4ac22160e619b1793d99700c9638024542c6fa27b9f75513d43fb5baa83",
    "entities": {
     "encountered": 22440,
     "written": 22440,
@@ -50,9 +50,9 @@
    "unit": "meters",
    "provider": "acadrust",
    "evidence_class": "SYNTHETIC_STAND_IN",
-   "corpus_revision": "r2-open",
-   "bytes": 2189914,
-   "sha256": "0c7eac111fd394ddd71dbd306afaee9d911e22be0d770316216e3a24f3f0d976",
+   "corpus_revision": "r3-open",
+   "bytes": 2189978,
+   "sha256": "5a4a105e598b09e27164cc41016f78ff133148b55c3d66aa647a1ee77e0df572",
    "entities": {
     "encountered": 10000,
     "written": 10000,
@@ -69,9 +69,9 @@
    "unit": "meters",
    "provider": "acadrust",
    "evidence_class": "SYNTHETIC_STAND_IN",
-   "corpus_revision": "r2-open",
-   "bytes": 111435,
-   "sha256": "19b2b81af8e9cd1f3c5628645d4417bac576c51ad910413b4d462ae0aef57ea4",
+   "corpus_revision": "r3-open",
+   "bytes": 111563,
+   "sha256": "48f5a1f8ca4c15b7117efedd0ee2395bed411a7333102c4e0e2db85250ffaf11",
    "entities": {
     "encountered": 2000,
     "written": 2000,
@@ -88,9 +88,9 @@
    "unit": "meters",
    "provider": "acadrust",
    "evidence_class": "SYNTHETIC_STAND_IN",
-   "corpus_revision": "r2-open",
-   "bytes": 19575915,
-   "sha256": "2f7e18f865ac6a091319f94f36b1c658b6126d348fe259ac5926ceaec1a74a49",
+   "corpus_revision": "r3-open",
+   "bytes": 19821856,
+   "sha256": "f45ce8a0a08f6e784f1fdbdba124b1dcbc80ed07ca4f675c0caf479d4773b4bd",
    "entities": {
     "encountered": 1025000,
     "written": 1025000,
@@ -102,7 +102,7 @@
    "unit": "meters",
    "provider": "acadrust",
    "evidence_class": "SYNTHETIC_STAND_IN",
-   "corpus_revision": "r2-open",
+   "corpus_revision": "r3-open",
    "entities": null,
    "inputs": [
     {
@@ -113,7 +113,7 @@
      },
      "limit": "max_block_depth",
      "limits": {},
-     "sha256": "1f54da5273b8b6100dd6d20c2e94b0448b57dd1b20baaec273e7840cc43181ba"
+     "sha256": "984ea1429e3cbdbf8fbc7b1e3d7400bf964d3b78a97094a8d55a95cacb4776c1"
     },
     {
      "id": "entities-2000",
@@ -125,7 +125,7 @@
      "limits": {
       "max_entities": 1000
      },
-     "sha256": "04048e795bc28a2429c46f901d9211e6efe737a9bf68b27cb9b1032a8ae427d8"
+     "sha256": "98e3fbb599b762eb785f9a8e5729bb74c29502ba3a5dbc62dadd79dd9d3c2d93"
     },
     {
      "id": "control-points-2000",
@@ -137,7 +137,7 @@
      "limits": {
       "max_spline_control_points": 1024
      },
-     "sha256": "0b646a65c9677c8fabba3e40f6c82944cdad4c7ffd02a3768880659003861c87"
+     "sha256": "8369b5142032507c6c1c05fad6e7c3ce8330e4a4004ed5014e44857d1cc15bef"
     },
     {
      "id": "knots-1000",
@@ -150,7 +150,7 @@
       "max_spline_control_points": 4096,
       "max_spline_knots": 512
      },
-     "sha256": "4e04948785a569fc7878021fa58a7df05ffd10a4874962dfd527a1377e5beea3"
+     "sha256": "5d3cf970788e1d81ac8e2ba5f72875c59cbf31bc60d9cd07976f71a420f20bde"
     },
     {
      "id": "name-200",
@@ -162,7 +162,7 @@
      "limits": {
       "max_name_bytes": 64
      },
-     "sha256": "1e033b517e0a7ea95638c9df01c2224ae0f68ec821abd4042cd26bd7ea838359"
+     "sha256": "b2e4ad60e7c7d555a809760d938efd133f10490b3a23caace9ee84432b611580"
     },
     {
      "id": "truncated-half",
@@ -173,7 +173,7 @@
      },
      "limit": "open",
      "limits": {},
-     "sha256": "60846e04052811db79786958f9d63c0ba1279c2e05845a0daed0801bcf596186"
+     "sha256": "37382cb28f1555b0a57e3f4aecc73f5a2823d7cca69d5083b3ef8dd247fb51d6"
     }
    ]
   }

@@ -81,6 +81,7 @@ not gated: peak RSS of the whole run 9596928 bytes.
 | nurbs-d2-offconic-001 | KNOWN_TRUTH_EXACT | SupportedExact | 1 | 1 | 936 | 2.1 | x86_64-linux-mars |
 | nurbs-d3-001 | KNOWN_TRUTH_EXACT | SupportedExact | 1 | 1 | 952 | 2.1 | x86_64-linux-mars |
 | ole-001 | QUARANTINED | NoGeometry | null | 1 | 0 | 0.8 | x86_64-linux-mars |
+| paper-space-multi-viewport-001 | KNOWN_TRUTH_EXACT | SupportedEquivalent | 1 | 1 | 344 | 3.0 | x86_64-linux-mars |
 | polyline-001 | KNOWN_TRUTH_EXACT | SupportedExact | 1 | 1 | 368 | 1.7 | x86_64-linux-mars |
 | polyline2d-001 | KNOWN_TRUTH_EXACT | SupportedExact | 1 | 1 | 376 | 1.7 | x86_64-linux-mars |
 | proxy-001 | QUARANTINED | NoGeometry | null | 0 | 0 | 0.6 | x86_64-linux-mars |
@@ -97,6 +98,8 @@ not gated: peak RSS of the whole run 9596928 bytes.
 | tiny-radius-001 | KNOWN_TRUTH_EXACT | SupportedExact | 1 | 1 | 368 | 1.8 | x86_64-linux-mars |
 | translation-001 | KNOWN_TRUTH_EXACT | SupportedEquivalent | 1 | 1 | 352 | 1.7 | x86_64-linux-mars |
 | uniform-scale-001 | KNOWN_TRUTH_EXACT | SupportedExact | 1 | 1 | 360 | 1.8 | x86_64-linux-mars |
+| viewport-clipped-001 | KNOWN_TRUTH_EXACT | SupportedEquivalent | 1 | 1 | 344 | 1.2 | x86_64-linux-mars |
+| viewport-clipped-bounded-001 | KNOWN_TRUTH_EXACT | SupportedEquivalent | 1 | 1 | 344 | 1.0 | x86_64-linux-mars |
 | wipeout-001 | QUARANTINED | NoGeometry | null | 1 | 0 | 0.6 | x86_64-linux-mars |
 | xref-001 | QUARANTINED | NoGeometry | null | 1 | 0 | 0.9 | x86_64-linux-mars |
 | zero-length-segment-001 | QUARANTINED | NoGeometry | null | 1 | 0 | 0.6 | x86_64-linux-mars |
