@@ -36,7 +36,7 @@ the pin with the policy PVec exports, so a change of PVec's policy is a red test
 `tests/common/pvec_gold.rs`.
 
 **5. The provider compatibility range.** The default provider is `acadrust`, at revision
-`72af48970e306ef1d50dd751b227df2b4fc3fb99`, and it takes DWG versions AC1014 to AC1032. A drawing below AC1014 is
+`f1e00c11f6371c8cfcff2c726620a51a45a2ad1b`, and it takes DWG versions AC1014 to AC1032. A drawing below AC1014 is
 refused at conversion start. `docs/pvec-version-compatibility.md` has the table.
 
 ## The baselines it was frozen against
