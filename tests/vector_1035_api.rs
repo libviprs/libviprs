@@ -517,14 +517,14 @@ fn a_raster_archive_is_not_a_vector_archive() {
 // Providers
 // ---------------------------------------------------------------------------
 
-#[cfg(not(feature = "dwg-acadsharp"))]
+#[cfg(not(any(feature = "dwg-acadrust", feature = "dwg-acadsharp")))]
 #[test]
 fn without_a_provider_the_default_decoder_says_how_to_get_one() {
     let err = libviprs::vector::convert::default_decoder(false)
         .err()
         .expect("no provider built");
     assert!(matches!(err, ConvertError::ProviderNotBuilt));
-    assert!(err.to_string().contains("dwg-acadsharp"), "{err}");
+    assert!(err.to_string().contains("dwg-acadrust"), "{err}");
 }
 
 #[cfg(feature = "dwg-acadsharp")]
@@ -532,7 +532,8 @@ fn without_a_provider_the_default_decoder_says_how_to_get_one() {
 #[cfg_attr(miri, ignore)]
 fn a_real_dwg_converts_through_the_default_decoder() {
     use libviprs::cad::CadSource;
-    let decoder = match libviprs::vector::convert::default_decoder(true) {
+    use libviprs::vector::convert::{ProviderKind, decoder_for};
+    let decoder = match decoder_for(ProviderKind::AcadSharp, true) {
         Ok(d) => d,
         Err(e) => {
             assert!(
@@ -555,6 +556,25 @@ fn a_real_dwg_converts_through_the_default_decoder() {
     assert!(done.tiler.tiles > 5 && done.decode.is_complete());
     assert!(check(&dest).unwrap().is_valid());
     assert_eq!(names(dir.path()), vec!["sample.pmtiles"]);
+}
+
+#[cfg(feature = "dwg-acadrust")]
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_real_dwg_converts_through_the_default_decoder_with_no_native_library() {
+    use libviprs::cad::CadSource;
+    let decoder = libviprs::vector::convert::default_decoder(true).expect("acadrust is built");
+    let dwg = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/cad/sample_AC1018.dwg"
+    ))
+    .unwrap();
+    let drawing = decoder.open(CadSource::Bytes(&dwg)).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("sample.pmtiles");
+    let done = convert(drawing.as_ref(), &ViewSelector::Model, &dest, &opts(6)).unwrap();
+    assert!(done.tiler.tiles > 5 && done.decode.is_complete());
+    assert!(check(&dest).unwrap().is_valid());
 }
 
 /// The provider note is what a deployer reads to know the library builds and

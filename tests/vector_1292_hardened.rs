@@ -1,4 +1,4 @@
-//! `default_decoder(hardened)` applies the hardened provider limits only when
+//! `decoder_for(ProviderKind::AcadSharp, hardened)` applies the hardened provider limits only when
 //! asked (issue #1292).
 //!
 //! The decoder comes back as a `Box<dyn CadDecoder>`, so a test cannot read its
@@ -15,7 +15,7 @@ use std::io::Write;
 
 use libviprs::cad::acadsharp::ProviderLimits;
 use libviprs::cad::{CadDecoder, CadError, CadSource};
-use libviprs::vector::convert::default_decoder;
+use libviprs::vector::convert::{ProviderKind, decoder_for};
 
 /// A DWG version stamp followed by zeros, one byte past the hardened input cap.
 fn oversized_drawing(dir: &std::path::Path) -> std::path::PathBuf {
@@ -28,7 +28,7 @@ fn oversized_drawing(dir: &std::path::Path) -> std::path::PathBuf {
 }
 
 fn decoder(hardened: bool) -> Option<Box<dyn CadDecoder>> {
-    match default_decoder(hardened) {
+    match decoder_for(ProviderKind::AcadSharp, hardened) {
         Ok(d) => Some(d),
         Err(e) => {
             assert!(

@@ -29,7 +29,8 @@
 //!
 //! Every function here takes a [`CadDrawing`] or a [`CadDecoder`]. No provider
 //! type appears in a signature. [`default_decoder`] is the one convenience that
-//! names a provider, and it does so by feature: without `dwg-acadsharp` it
+//! names a provider, and it does so by feature: acadrust when `dwg-acadrust` is
+//! on (the default), else ACadSharp when `dwg-acadsharp` is, and with neither it
 //! returns [`ConvertError::ProviderNotBuilt`], and everything else in this
 //! module still works (an archive can be inspected and validated with no DWG
 //! reader in the build, and a decoder you wrote yourself converts fine).

@@ -85,6 +85,26 @@ fn read_head(source: CadSource<'_>) -> Result<Vec<u8>, ProviderError> {
     }
 }
 
+/// A TEXT or MTEXT entity's own fields, in the coordinates of the block it sits in.
+///
+/// `RawGeometry` has no text variant (a text entity comes through the cursor as
+/// `Unmapped`), so the `cad::CadDecoder` over this provider asks for it by handle.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextFact {
+    /// The insertion point.
+    pub position: Point3,
+    /// The text height.
+    pub height: f64,
+    /// The rotation in radians.
+    pub rotation: f64,
+    /// The stored string, with its escapes and (for MTEXT) its formatting codes.
+    pub content: String,
+    /// True for MTEXT, whose content carries formatting codes.
+    pub multiline: bool,
+    /// The extrusion normal.
+    pub normal: Point3,
+}
+
 /// The first provider.
 pub struct AcadrustProvider {
     doc: acr::CadDocument,
@@ -115,6 +135,55 @@ impl AcadrustProvider {
     #[must_use]
     pub fn source_unit(&self) -> SourceUnit {
         SourceUnit::from_insunits(Some(self.doc.header.insertion_units))
+    }
+
+    /// The model space extents the header stores, as `[min_x, min_y, max_x, max_y]`. A drawing
+    /// that never set them reads back the inverted box, which is not a usable extent.
+    #[must_use]
+    pub fn model_space_extents(&self) -> [f64; 4] {
+        let h = &self.doc.header;
+        [
+            h.model_space_extents_min.x,
+            h.model_space_extents_min.y,
+            h.model_space_extents_max.x,
+            h.model_space_extents_max.y,
+        ]
+    }
+
+    /// The text fields of the TEXT or MTEXT entity with this handle, or [`None`] for any other
+    /// entity.
+    #[must_use]
+    pub fn text_fact(&self, handle: ItemHandle) -> Option<TextFact> {
+        match self.doc.get_entity(acr::Handle::new(handle.get()))? {
+            EntityType::Text(t) => Some(TextFact {
+                position: p3(t.insertion_point),
+                height: t.height,
+                rotation: t.rotation,
+                content: t.value.clone(),
+                multiline: false,
+                normal: p3(t.normal),
+            }),
+            EntityType::MText(m) => Some(TextFact {
+                position: p3(m.insertion_point),
+                height: m.height,
+                rotation: m.rotation,
+                content: m.value.clone(),
+                multiline: true,
+                normal: p3(m.normal),
+            }),
+            _ => None,
+        }
+    }
+
+    /// The anonymous block a DIMENSION entity draws itself from, which holds its lines and text.
+    #[must_use]
+    pub fn dimension_block(&self, handle: ItemHandle) -> Option<String> {
+        match self.doc.get_entity(acr::Handle::new(handle.get()))? {
+            EntityType::Dimension(d) if !d.base().block_name.is_empty() => {
+                Some(d.base().block_name.clone())
+            }
+            _ => None,
+        }
     }
 
     fn capabilities() -> ProviderCaps {
