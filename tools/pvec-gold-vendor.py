@@ -3,7 +3,7 @@
 
     tools/pvec-gold-vendor.py <gold-checkout> <git-ref> [dest]
 
-Reads the r2-open manifest at <git-ref> with `git show` / `git archive` (no working tree needed),
+Reads the r2-open manifest (and r3-open's, when the ref has one) at <git-ref> with `git show` / `git archive` (no working tree needed),
 copies for every fixture the files the suites use (source.dwg, expected.math.json, the first
 oracle's signature and the verdict), checks each against the sha256 the upstream manifest records,
 and writes `index.json` (the trimmed manifest) `PIN.json` (corpus revision, gold commit and the
@@ -67,6 +67,37 @@ def main():
             "expects_rejection": fx["expects_rejection"],
             "step_verdict": (fx.get("step_oracle") or {}).get("verdict"),
             "files": files})
+    # r3-open (pvec-gold-fixtures#96) includes r2-open unchanged and adds fixtures of its own. Its entries carry
+    # no STEP evidence and no `generated` block, so they are read from their own artifacts. A fixture with no
+    # source.dwg (the large generated drawing) has nothing to vendor and stays out of the index.
+    r3raw = None
+    # Only "the ref has no r3-open manifest" means an r2-only pin. Any other git failure is a real error.
+    has_r3 = subprocess.run(["git", "-C", gold, "cat-file", "-e", f"{commit}:corpus/r3-open/manifest.json"],
+                            capture_output=True).returncode == 0
+    if has_r3:
+        r3raw = git(gold, "show", f"{commit}:corpus/r3-open/manifest.json")
+    if r3raw is not None:
+        r3 = json.loads(r3raw)
+        for fx in r3["fixtures"]:
+            if "source.dwg" not in fx["artifacts"]:
+                continue
+            files = {}
+            d = dest / "fixtures" / fx["id"]
+            d.mkdir(parents=True, exist_ok=True)
+            for name in ARTIFACTS:
+                a = fx["artifacts"][name]
+                data = git(gold, "show", f"{commit}:{a['path']}")
+                got = hashlib.sha256(data).hexdigest()
+                if got != a["sha256"]:
+                    sys.exit(f"{fx['id']}/{name}: sha256 {got} does not match the manifest's {a['sha256']}")
+                (d / name).write_bytes(data)
+                files[name] = {"sha256": got, "bytes": len(data)}
+            out["fixtures"].append({
+                "id": fx["id"], "group": fx["group"], "evidence_class": fx["evidence_class"],
+                "evidence_scope": fx["evidence_scope"], "status": fx["status"],
+                "expects_rejection": fx.get("expects_rejection", False), "step_verdict": None,
+                "files": files})
+        out["corpus_revision"] = r3["corpus_revision"]
     (dest / "index.json").write_text(json.dumps(out, indent=1, sort_keys=True) + "\n")
     summary = {"corpus_revision": out["corpus_revision"], "by_class": {}}
     for f in out["fixtures"]:
@@ -79,9 +110,11 @@ def main():
         for i in sorted(set(previous) | set(now)):
             if previous.get(i) != now.get(i):
                 print(f"{i}: {previous.get(i)} -> {now.get(i)}")
-    pin = {"corpus_revision": manifest["corpus_revision"], "gold_commit": commit,
+    pin = {"corpus_revision": out["corpus_revision"], "gold_commit": commit,
            "upstream_manifest_sha256": hashlib.sha256(raw).hexdigest(),
            "skipped": sorted(SKIP), "vendored_by": "tools/pvec-gold-vendor.py"}
+    if r3raw is not None:
+        pin["r3_manifest_sha256"] = hashlib.sha256(r3raw).hexdigest()
     (dest / "PIN.json").write_text(json.dumps(pin, indent=1, sort_keys=True) + "\n")
 
 

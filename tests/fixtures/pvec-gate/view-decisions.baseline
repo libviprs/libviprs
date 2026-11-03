@@ -26,6 +26,7 @@ nonuniform-scale-rotated-001 included=1 excluded=0
 nonunit-weight-001 included=1 excluded=0
 nurbs-d2-offconic-001 included=1 excluded=0
 nurbs-d3-001 included=1 excluded=0
+paper-space-multi-viewport-001 included=1 excluded=0
 polyline-001 included=1 excluded=0
 polyline2d-001 included=1 excluded=0
 reflection-001 included=1 excluded=0
@@ -37,3 +38,5 @@ tiny-extent-001 included=1 excluded=0
 tiny-radius-001 included=1 excluded=0
 translation-001 included=1 excluded=0
 uniform-scale-001 included=1 excluded=0
+viewport-clipped-001 included=1 excluded=0
+viewport-clipped-bounded-001 included=1 excluded=0

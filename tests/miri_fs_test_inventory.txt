@@ -677,6 +677,7 @@ annotated   fs-detected  tests/pvec_corpus_regression.rs::artifact_growth_of_two
 annotated   fs-detected  tests/pvec_corpus_regression.rs::corpus_report
 annotated   fs-detected  tests/pvec_corpus_regression.rs::the_baseline_has_one_row_per_fixture_and_no_empty_cell
 annotated   fs-detected  tests/pvec_corpus_regression.rs::the_corpus_does_not_regress
+annotated   fs-detected  tests/pvec_corpus_regression.rs::the_document_agrees_with_the_baseline
 annotated   fs-detected  tests/pvec_corpus_regression.rs::the_document_has_a_row_for_every_fixture
 annotated   fs-detected  tests/pvec_defaults_table.rs::a_constant_with_no_row_a_row_with_no_constant_and_a_moved_value_all_fail
 annotated   fs-detected  tests/pvec_defaults_table.rs::the_defaults_table_and_the_code_name_the_same_constants_with_the_same_values
