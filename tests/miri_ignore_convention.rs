@@ -833,6 +833,8 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1048 adds 3: the `tests/pvec_1048_audit.rs` and `tests/pvec_1048_spool_event.rs` cells. It said 906 before this line moved.
 /// #1463 adds 4: the `tests/pvec_1463_chunk_events.rs` cells that convert into a temp dir through a spill root. It said 909 before this line moved.
 /// #1050 adds 6: the `tests/pvec_end_to_end.rs` cells that convert fixtures into a temp dir and read the vendored corpus. It said 913 before this line moved.
+/// #1060 adds 4: the `tests/pvec_ci_gates.rs` cells that read the baselines and the two `tests/pvec_gate_determinism.rs` cells that convert into a temp dir. It said 919 before this line moved.
+/// #1475 and #1471 add 14: the eleven `tests/pvec_drift.rs` cells and the three `tests/pvec_1471_reproducibility.rs` cells. It said 923 before this line moved.
 const EXPECTED_FS_TOUCHING_TESTS: usize = 937;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
