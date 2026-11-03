@@ -146,7 +146,12 @@ fn add_hidden_layers(doc: &mut CadDocument, percent: u64) {
 /// share is about `percent` over any run of a few hundred leaves. Off and frozen alternate.
 fn maybe_hide(e: &mut EntityType, n: u64, percent: u64) {
     if percent > 0 && (n.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 33) % 100 < percent {
-        e.common_mut().layer = if n % 2 == 0 { "HID_OFF" } else { "HID_FRZ" }.to_string();
+        e.common_mut().layer = if n.is_multiple_of(2) {
+            "HID_OFF"
+        } else {
+            "HID_FRZ"
+        }
+        .to_string();
     }
 }
 
@@ -197,10 +202,10 @@ fn block_heavy(p: &Value) -> CadDocument {
         }
     }
     for d in 0..depth as usize {
-        for j in 0..2 {
+        for &hidden in &hide[d] {
             let (x, y) = (rng.range(0.0, 4.0), rng.range(0.0, 4.0));
             let mut l = line(&mut rng, x, y, 2.0);
-            if hide[d][j] {
+            if hidden {
                 l.common_mut().layer = if d % 2 == 0 { "HID_OFF" } else { "HID_FRZ" }.to_string();
             }
             put(&mut doc, owners[d], l);
@@ -355,13 +360,13 @@ fn nested_chain(levels: u64) -> CadDocument {
     let owners: Vec<_> = (0..levels)
         .map(|d| define_block(&mut doc, &format!("N{d}")))
         .collect();
-    for d in 0..levels as usize {
+    for (d, &owner) in owners.iter().enumerate() {
         let e = if d + 1 < levels as usize {
             insert(&format!("N{}", d + 1), 0.0, 0.0, 0.0)
         } else {
             EntityType::Line(Line::from_coords(0.0, 0.0, 0.0, 1.0, 1.0, 0.0))
         };
-        put(&mut doc, owners[d], e);
+        put(&mut doc, owner, e);
     }
     doc.add_entity(insert("N0", 0.0, 0.0, 0.0)).expect("root");
     doc
@@ -492,10 +497,16 @@ pub fn limits_for(input: &Value) -> libviprs::pvec::SourceLimits {
 /// Which limit refused a conversion, by field name, or `open` when the provider could not read it.
 pub fn refused_by(e: &libviprs::pvec_convert::PvecConvertError) -> String {
     use libviprs::pvec::flatten::FlattenError;
+    use libviprs::pvec::limits::LimitError;
+    use libviprs::pvec::view_profile::ViewProfileError;
     use libviprs::pvec_convert::PvecConvertError as E;
     match e {
         E::Flatten(FlattenError::Limit { limit, .. }) => limit.name().to_string(),
         E::Flatten(FlattenError::BlockRecursionLimit { .. }) => "max_block_depth".to_string(),
+        // The view profile meters the walk since #1439, so a count limit can trip there first.
+        E::View(ViewProfileError::Limit(LimitError::Exceeded { limit, .. })) => {
+            limit.name().to_string()
+        }
         E::Open(_) => "open".to_string(),
         other => format!("other: {other}"),
     }
