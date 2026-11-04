@@ -34,6 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **One call turns a PDF page into a `.pvec` with its vectors and its rasters** (issue #1491). `pvec_convert::PdfConversion` (features `pvec-convert` and `pvec-raster`) runs `extract_page_paths_from_bytes`, `normalize_page`, `bake_page_images` and `write_rasters` and publishes the artifact and its report together, both or neither, the way `PvecConversion` does for a DWG. It takes `page`, `limits`, `image_options`, `cancel` and `observer`. The coordinates are the page's own, in points, with `metres_per_unit` 1.0 because PVec cannot declare points. The report gains an optional `pdf` section (page, images, rasters written, images refused by key, image notes, fills, omitted text), absent for a DWG, so `schema_version` stays 1. A page with no path is refused with `PdfConvertError::NoGeometry`, since PVec's artifact needs one entity.
 - **A conversion reports each chunk it writes** (issue #1463, follow-up to #1048). `write_geometry` and
   `write_geometry_to` take one more plain argument, `on_chunk(entities, bytes)`, called after each batch of
   1024 pushed entities and after each write the flush makes to the sink. `PvecConversion` forwards it as
