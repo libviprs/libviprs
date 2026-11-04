@@ -852,7 +852,8 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1485 adds 4: the three `tests/cad_1485_acadrust_decoder.rs` cells that read or write a drawing, and the acadrust conversion cell in `tests/vector_1035_api.rs`. It said 984 before this line moved.
 /// #1515 adds 5: the `tests/pvec_1481_memory.rs` cells that read the stage rows in the baseline and the page. It said 988 before this line moved.
 /// #1515 adds 3 more: the stage recorder's own cell and the two stage benchmark cells. It said 993 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 996;
+/// Dropping the benchmark requirement removes 1: the `tests/pmtiles_release_readiness.rs` benchmark-doc check. It said 996 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 995;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
