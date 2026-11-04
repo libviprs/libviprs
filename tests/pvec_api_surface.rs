@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 /// Crate roots libviprs may name. `pvec-geometry` and `pvec-numeric` are PVec's semantic
 /// crates (the curve model and the numeric policy under it).
 const ALLOWED_ROOTS: &[&str] = &[
+    "pvec_capabilities",
     "pvec_entity",
     "pvec_facade",
     "pvec_geometry",
@@ -349,6 +350,7 @@ fn only_the_semantic_crates_are_named_today() {
     assert_eq!(
         roots,
         [
+            "pvec_capabilities",
             "pvec_entity",
             "pvec_facade",
             "pvec_geometry",
@@ -357,12 +359,14 @@ fn only_the_semantic_crates_are_named_today() {
     );
 }
 
-/// The PVec facade (`pvec_facade`, the renamed `pvec` crate) is named by four files. The geometry
+/// The PVec facade (`pvec_facade`, the renamed `pvec` crate) is named by five files. The geometry
 /// funnel `src/pvec/writer.rs` (issue #1314) is the one writer for entities, and
 /// `src/pvec/publish.rs` reads an artifact back before it is published and opens published ones.
 /// The raster stream predates the funnel and keeps its two files: `src/raster_pvec/container.rs`
 /// (the whole-pyramid hand-off, issue #1328) and `src/sink_pvec.rs` (issue #1331), which holds the
 /// writer while the engine streams tiles into it and so cannot go through a function in the first.
+/// `src/pvec/drift.rs` (#1475) only reads: it opens an artifact from bytes, which `publish.rs` does
+/// not offer, and writes nothing (the writer-call fence below covers that).
 #[test]
 #[cfg_attr(miri, ignore)]
 fn the_facade_is_named_by_the_funnel_and_the_raster_files_only() {
@@ -374,7 +378,10 @@ fn the_facade_is_named_by_the_funnel_and_the_raster_files_only() {
         }
     }
     let want: std::collections::BTreeSet<PathBuf> = [
+        PathBuf::from("src/pvec/components.rs"),
+        PathBuf::from("src/pvec/drift.rs"),
         PathBuf::from("src/pvec/publish.rs"),
+        PathBuf::from("src/pvec/regions.rs"),
         PathBuf::from("src/pvec/writer.rs"),
         PathBuf::from("src/raster_pvec/container.rs"),
         PathBuf::from("src/sink_pvec.rs"),
@@ -614,4 +621,16 @@ fn no_index_directory_or_straddler_type_is_defined_under_src_pvec() {
         "spatial-structure types under src/pvec:\n{}",
         bad.join("\n")
     );
+}
+
+/// Issue #1093: no component row carries a provider-specific type. `pvec::components` is the
+/// place rows are built, so it may name neither a DWG reader nor a PDF library.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1093_components_name_no_provider_specific_type() {
+    let src = fs::read_to_string(root().join("src/pvec/components.rs")).unwrap();
+    let code = strip_comments(&src);
+    for banned in ["lopdf", "acadrust", "acadsharp", "dwg_acadrust"] {
+        assert!(!code.contains(banned), "components.rs names `{banned}`");
+    }
 }

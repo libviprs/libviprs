@@ -334,13 +334,14 @@ fn unfilter(
     let flate = filters.first().is_some_and(|f| f == "FlateDecode");
     let codec = filters.last().map(String::as_str).filter(|f| is_codec(f));
     let mut data = std::borrow::Cow::Borrowed(raw.content.as_slice());
+    // The room a codestream inside Flate has: no row structure, so the room of a raw image.
+    let codestream_room = (width as usize)
+        .saturating_mul(height as usize)
+        .saturating_mul(4)
+        .saturating_add(1 << 20);
     if flate {
         let cap = if codec.is_some() {
-            // A codestream inside Flate has no row structure, so give it the room of a raw image.
-            (width as usize)
-                .saturating_mul(height as usize)
-                .saturating_mul(4)
-                .saturating_add(1 << 20)
+            codestream_room
         } else {
             let row_bytes = row_bytes(width, ncomp, bpc.unwrap_or(16));
             (row_bytes + 1)
@@ -355,16 +356,41 @@ fn unfilter(
     }
     if let Some(filter) = codec {
         let index = filters.len() - 1;
-        let globals = None;
+        let parms = parms_for(&raw.dict, index);
+        // The shared symbol and pattern dictionaries of a JBIG2 image. The extraction kept the
+        // stream (its encoded bytes count against the per-stream cap); a Flate stage on it is
+        // undone here, with the room a codestream inside Flate gets, which follows the image's
+        // own size and so the caller's pixel limits, but never more than the 64 MiB default
+        // per-stream cap, which is what this inflate was held to before.
+        let globals = match parms.and_then(|p| p.get(b"JBIG2Globals").ok()) {
+            Some(Object::Stream(g)) if filter == "JBIG2Decode" => {
+                let flate = match g.dict.get(b"Filter") {
+                    Ok(Object::Name(n)) => n.as_slice() == b"FlateDecode",
+                    Ok(Object::Array(a)) => {
+                        a.len() == 1 && a[0].as_name().ok() == Some(b"FlateDecode".as_slice())
+                    }
+                    _ => false,
+                };
+                if flate {
+                    Some(
+                        crate::pdf::flate_decompress(&g.content, codestream_room.min(64 << 20))
+                            .map_err(PdfImageError::Pdf)?,
+                    )
+                } else {
+                    Some(g.content.clone())
+                }
+            }
+            _ => None,
+        };
         return decode_filter(FilterInput {
             filter,
-            parms: parms_for(&raw.dict, index),
+            parms,
             data: &data,
             width,
             height,
             bpc,
             components: space.map(Space::components),
-            globals,
+            globals: globals.as_deref(),
             budget,
         });
     }

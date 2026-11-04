@@ -48,7 +48,8 @@ const CARGO_TOML: &str = include_str!("../Cargo.toml");
 ///
 /// `avif.rs` is the dav1d FFI boundary: an `unsafe extern "C"` block, a raw pointer
 /// `as_ref()`, and pointer arithmetic with an unaligned read. It is behind
-/// `#[cfg(feature = "avif")]`, and `default = []`, so a default build (and so a bare
+/// `#[cfg(feature = "avif")]`, and `avif` is not a default feature (`default` is only
+/// `dwg-acadrust`, pure Rust), so a default build (and so a bare
 /// `cargo miri test`) compiles all of it out. That last clause is what
 /// [`the_crates_own_unsafe_stays_out_of_a_default_build`] holds to the manifest.
 const ALLOWED: [(&str, &str); 1] = [(
@@ -328,4 +329,25 @@ fn the_walk_descends_into_subdirectories() {
          subdirectory of `src/` would be invisible to this inventory and it \
          would report a clean tree. Found: {found:?}"
     );
+}
+
+/// `jbig2` (issue #1365) adds no `unsafe` of this crate's own and none of its dependencies':
+/// `hayro-jbig2` is `forbid(unsafe_code)` and its only way to `unsafe` is the `simd` feature, which
+/// the manifest leaves off.
+#[cfg_attr(miri, ignore)]
+#[test]
+fn the_jbig2_filter_has_no_unsafe_and_the_decoder_is_taken_without_simd() {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/pvec/pdf_filters/jbig2.rs");
+    let code = scan::mask_literals_and_comments(&fs::read_to_string(src).unwrap());
+    assert!(!code.contains("unsafe"), "the jbig2 module has an unsafe");
+    let manifest: toml::Value = CARGO_TOML.parse().unwrap();
+    let dep = &manifest["workspace"]["dependencies"]["hayro-jbig2"];
+    assert_eq!(dep["default-features"].as_bool(), Some(false));
+    let features: Vec<&str> = dep["features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(toml::Value::as_str)
+        .collect();
+    assert_eq!(features, ["std"], "no simd, no image");
 }

@@ -309,6 +309,98 @@ fn corpus_report() {
     }
 }
 
+/// The document's numbers are the baseline's: the counts in "The current report" and every table row's
+/// conformance, leaves kept, entities met and `.pvec` bytes. A baseline that moved without the page fails here.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn the_document_agrees_with_the_baseline() {
+    let doc = std::fs::read_to_string(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docs/pvec-corpus-regression.md"),
+    )
+    .expect("docs/pvec-corpus-regression.md");
+    let b = baseline();
+    let rows = b["rows"].as_object().unwrap();
+    let mut bad = Vec::new();
+    let count = |class: &str| rows.values().filter(|r| r["evidence"] == class).count();
+    let converted = rows
+        .values()
+        .filter(|r| r["outcome"] == "converted")
+        .count();
+    let bytes: u64 = rows
+        .values()
+        .map(|r| r["size"]["artifact_bytes"].as_u64().unwrap())
+        .sum();
+    let revision = b["corpus_revision"].as_str().unwrap();
+    let want = [
+        format!(
+            "(`{revision}`, vendored under `tests/fixtures/pvec-gold/`, {} fixtures)",
+            rows.len()
+        ),
+        format!(
+            "{} fixtures: {} `KNOWN_TRUTH_EXACT`, {} `QUARANTINED`, {} `DUAL_ORACLE_EQUIVALENT`, {} `REAL_WORLD_DIFFERENTIAL`.",
+            rows.len(),
+            count("KNOWN_TRUTH_EXACT"),
+            count("QUARANTINED"),
+            count("DUAL_ORACLE_EQUIVALENT"),
+            count("REAL_WORLD_DIFFERENTIAL")
+        ),
+        format!(
+            "{converted} convert; the other {} are refused",
+            rows.len() - converted
+        ),
+        format!("Total `.pvec`\nbytes over the corpus: {}", {
+            let s = bytes.to_string();
+            let mut out = String::new();
+            for (i, c) in s.chars().enumerate() {
+                if i > 0 && (s.len() - i).is_multiple_of(3) {
+                    out.push(',');
+                }
+                out.push(c);
+            }
+            out
+        }),
+    ];
+    let flat = doc.replace("\n", " ");
+    for w in &want {
+        if !flat.contains(&w.replace('\n', " ")) {
+            bad.push(format!("the page does not say: {w}"));
+        }
+    }
+    for (id, r) in rows {
+        let line = doc
+            .lines()
+            .find(|l| l.starts_with(&format!("| {id} | ")) && l.contains("-linux-"));
+        let Some(line) = line else {
+            bad.push(format!("{id}: no report row"));
+            continue;
+        };
+        let cells: Vec<&str> = line.split('|').map(str::trim).collect();
+        let expect = [
+            r["mathematical"]["conformance"]
+                .as_str()
+                .unwrap()
+                .to_string(),
+            r["view"]["included"].to_string(),
+            r["size"]["entities"].to_string(),
+            r["size"]["artifact_bytes"].to_string(),
+        ];
+        for (k, e) in expect.iter().enumerate() {
+            if cells.get(3 + k) != Some(&e.as_str()) {
+                bad.push(format!(
+                    "{id}: column {} reads {:?}, the baseline says {e}",
+                    3 + k,
+                    cells.get(3 + k)
+                ));
+            }
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "docs/pvec-corpus-regression.md is stale:\n{}",
+        bad.join("\n")
+    );
+}
+
 /// The document lists every fixture the corpus has, and the command that regenerates the baseline.
 #[test]
 #[cfg_attr(miri, ignore)]

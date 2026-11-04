@@ -480,7 +480,9 @@ const EXPECTED_SRC_MODULES: usize = 31;
 /// #1368 adds 1: `tests/dependency_policy.rs::exactly_one_tiff_resolves_in_every_cell` (from #1367), which runs `cargo tree`. It said 50 before this line moved.
 /// #1363 adds 1: `tests/dependency_policy.rs::hayro_ccitt_is_in_every_cell_and_is_plain_rust`, which runs `cargo tree`. It said 53 before this line moved.
 /// #1364 adds 1: `tests/dependency_policy.rs::the_jp2k_cell_adds_only_its_two_codec_crates`, which runs `cargo tree`. It said 54 before this line moved.
-const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 56;
+/// #1365 adds 1: `tests/dependency_policy.rs::jbig2_adds_the_decoder_and_its_ccitt_crate_and_never_the_simd_one`, which runs `cargo tree`. It said 56 before this line moved.
+/// #1475 adds 1: `tests/pvec_drift.rs::n_1471_the_example_prints_both_reports_and_fails_on_drift`, which runs the `pvec_drift` example. It said 57 before this line moved.
+const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 58;
 
 /// The filesystem-touching tests still allowed to run under Miri, and so still
 /// allowed to end the whole run on their first syscall.
@@ -828,7 +830,25 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1038 adds 5: the two `tests/vector_1038_entity_matrix.rs` cells and the three `tests/vector_1038_release_gate.rs` cells, which read the matrix, the gate record and the g13 drawings. It said 841 before this line moved. #1430 adds 2: the two `tests/pvec_1430_convert_spline.rs` cells.
 /// #1314 adds 8: the `tests/pvec_1314_spool.rs` cells that spill, stream and cancel through a temp dir. It said 891 before this line moved.
 /// #1417 adds 4: the `tests/pvec_1417_convert_spool.rs` cells that convert into a temp dir through a spill root. It said 899 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 903;
+/// #1446 adds 2: the `tests/pvec_1446_write_refusal.rs` cells that convert a drawing into a temp dir. It said 903 before this line moved.
+/// #1314 adds 1 more: the panic-during-the-flush cell of `tests/pvec_1314_spool.rs`. It said 905 before this line moved.
+/// #1048 adds 3: the `tests/pvec_1048_audit.rs` and `tests/pvec_1048_spool_event.rs` cells. It said 906 before this line moved.
+/// #1463 adds 4: the `tests/pvec_1463_chunk_events.rs` cells that convert into a temp dir through a spill root. It said 909 before this line moved.
+/// #1365 adds 18: the `tests/pvec_1365_pdf_jbig2.rs` cells, which read the committed JBIG2 fixtures, and the `jbig2` check in `tests/unsafe_inventory.rs`. It said 913 before this line moved.
+/// #1050 adds 6: the `tests/pvec_end_to_end.rs` cells that convert fixtures into a temp dir and read the vendored corpus. It said 937 before this line moved.
+/// #1064 adds 5: the `tests/pvec_1064_memory_decision.rs` cells that read the benchmark document and baseline. It said 937 before this line moved.
+/// #1070 adds 4: the `tests/pvec_1070_spool_fuzz.rs` cells that stream through a temp dir and read the seed corpus (two more drive the body in memory and are annotated, not detected). It said 942 before this line moved.
+/// #1060 adds 4: the `tests/pvec_ci_gates.rs` cells that read the baselines and the two `tests/pvec_gate_determinism.rs` cells that convert into a temp dir. It said 946 before this line moved.
+/// #1475 and #1471 add 14: the eleven `tests/pvec_drift.rs` cells and the three `tests/pvec_1471_reproducibility.rs` cells. It said 950 before this line moved.
+/// #1406 adds 4: the `tests/pvec_dwg_pdf_differential.rs` raster cells that read the exported PDFs and the loss files. It said 964 before this line moved.
+/// #1093 adds 1: `tests/pvec_api_surface.rs::issue_1093_components_name_no_provider_specific_type`, which scans the source tree. It said 968 before this line moved.
+/// #1495 adds 1: `tests/pvec_1365_pdf_jbig2.rs::the_decoder_is_hayro_jbig2_0_4_and_decodes_strictly_1495`, which reads the manifest and the module. It said 969 before this line moved.
+/// #1495 adds 1 more: `tests/pvec_1365_pdf_jbig2.rs::a_stream_that_lenient_decoding_repairs_is_refused_1495`, which reads the fixtures. It said 970 before this line moved.
+/// #1505 adds 1: `tests/pvec_corpus_regression.rs::the_document_agrees_with_the_baseline`, which reads the corpus-regression page and the baseline.
+/// #1489 adds 4: the `tests/pvec_1489_image_reason_keys.rs` cells that read the docs. It said 972 before this line moved.
+/// #1490 adds 1: the `tests/pvec_1490_fill_report_images.rs` cell that reads `docs/pvec-hatch-policy.md`. It said 976 before this line moved.
+/// #1491 adds 7: the `tests/pvec_1491_pdf_conversion.rs` cells that convert generated PDFs into a temp dir. It said 977 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 984;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {

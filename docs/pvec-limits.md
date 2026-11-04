@@ -40,4 +40,4 @@ limit, each refused by the limit it names), `tests/pvec_1439_view_limits.rs` for
 ## What is not bounded yet
 
 Memory, in the large. The limits bound what a single drawing may ask for, not what a conversion holds: peak memory is linear in the
-entities until the spool exists (`docs/pvec-benchmarks.md`).
+entities of the in-memory path. The writer's spill (`PvecConversion::spill`, #1314 and #1417) moves the writer's share out of memory, but the whole conversion was re-measured with it (`docs/pvec-benchmarks.md`, #1064) and the peak did not move: libviprs' own per-entity state is what sits in memory, and streaming that is #1481.

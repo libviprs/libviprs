@@ -80,7 +80,7 @@
 //!
 //! One `cargo metadata --all-features` plus one `cargo tree` per cell below.
 //! Measured warm: the metadata call 0.09 s, a single tree 0.05 to 0.09 s, the
-//! whole file 1.3 s over twenty-one cells, and 1.8 s with other cargo work
+//! whole file 1.3 s over twenty-one cells (twenty-two with `jbig2`), and 1.8 s with other cargo work
 //! running alongside it. The number worth knowing is not that one, though: the
 //! real cost is a *cold* multi-target resolve, where cargo has to fetch every
 //! manifest in four target graphs before it can answer at all.
@@ -257,6 +257,18 @@ const CELLS: &[Cell] = &[
         runtime_loaders: &[],
         vendored_native: BLAKE3,
     },
+    // The JBIG2 filter of PDF image streams (issue #1365): `hayro-jbig2` and `hayro-ccitt`, pure
+    // Rust. `jbig2` implies `pvec-raster`, so this cell carries that one too.
+    Cell {
+        label: "host / jbig2",
+        target: HOST,
+        features: &["--features", "jbig2"],
+        edges: "normal,build",
+        links: &[RAYON],
+        discovery: &[],
+        runtime_loaders: &[],
+        vendored_native: BLAKE3,
+    },
     // The geometry writer funnel (issue #1314): the same graph as `pvec-raster`.
     Cell {
         label: "host / pvec-write",
@@ -394,6 +406,18 @@ const CELLS: &[Cell] = &[
     // contributor's machine. `generator` is loom's coroutine crate; it
     // assembles its own vendored stack-switching `.s` files, so it lands under
     // clause 3 the same way blake3 does.
+    // Opting out of the defaults drops acadrust, and with it the PVec git crates and
+    // everything they bring, which is the build for a caller that wants no DWG reader.
+    Cell {
+        label: "host / no default features",
+        target: HOST,
+        features: &["--no-default-features"],
+        edges: "normal,build",
+        links: &[RAYON],
+        discovery: &[],
+        runtime_loaders: &[],
+        vendored_native: BLAKE3,
+    },
     Cell {
         label: "host / default + dev-dependencies",
         target: HOST,
@@ -497,7 +521,8 @@ const CELLS: &[Cell] = &[
         runtime_loaders: LIBLOADING,
         vendored_native: BLAKE3_RAV1D_ZSTD,
     },
-    // wasm32 is where the third `links` key lives. `packfile` is what puts it
+    // wasm32 is where the third `links` key lives. The default build has it too now, through
+    // acadrust (`dwg-acadrust` is a default feature). `packfile` also puts it
     // there: `zip` turns on `getrandom`'s `wasm_js` backend and pulls `time`'s
     // wasm clock through `js-sys`, and both reach `wasm-bindgen`. It is also
     // the one target where the pdfium features carry no `libloading`, since
@@ -508,7 +533,7 @@ const CELLS: &[Cell] = &[
         target: WASM,
         features: &[],
         edges: "normal,build",
-        links: &[RAYON],
+        links: &[RAYON, WASM_BINDGEN],
         discovery: &[],
         runtime_loaders: &[],
         vendored_native: BLAKE3,
@@ -786,6 +811,34 @@ fn ships_native_source(manifest: &Manifest) -> bool {
     false
 }
 
+/// `jbig2` (issue #1365) adds the decoder and the CCITT crate it reads MMR regions with, and
+/// nothing that can run `unsafe`: `fearless_simd` is the `simd` feature of `hayro-jbig2`, which
+/// `default-features = false` leaves off. No other cell may carry any of the three.
+#[test]
+#[cfg_attr(miri, ignore)] // reads the resolved graph through a process, as the tests around it do
+fn jbig2_adds_the_decoder_and_its_ccitt_crate_and_never_the_simd_one() {
+    let mut seen = false;
+    for (cell, graph) in cells() {
+        let asked = cell.features.contains(&"jbig2") || cell.features.contains(&"--all-features");
+        assert_eq!(
+            contains(graph, "hayro-jbig2"),
+            asked,
+            "{}: hayro-jbig2 only where jbig2 is asked for",
+            cell.label
+        );
+        assert!(
+            !contains(graph, "fearless_simd"),
+            "{}: fearless_simd is the unsafe simd path of hayro-jbig2",
+            cell.label
+        );
+        if asked {
+            seen = true;
+            assert!(contains(graph, "hayro-ccitt"), "{}", cell.label);
+        }
+    }
+    assert!(seen, "a cell asks for jbig2");
+}
+
 /// Clause 2, the first mechanical proxy: the `links` keys in every resolved
 /// graph are exactly the ones `CONTRIBUTING.md` names, and a new one cannot
 /// appear unnoticed.
@@ -934,28 +987,30 @@ fn the_external_library_features_stay_opt_in() {
             cell.label
         );
 
-        let asked_for_acadrust = cell
-            .features
-            .iter()
-            .any(|f| f.contains("dwg-acadrust") || f.contains("pvec-convert"))
-            || cell.features.contains(&"--all-features");
+        // acadrust is the default DWG provider, so `dwg-acadrust` is a default feature and
+        // every cell reaches acadrust unless it opts out of the defaults.
+        let no_defaults = cell.features.contains(&"--no-default-features");
         assert_eq!(
             contains(graph, "acadrust"),
-            asked_for_acadrust,
-            "{} must reach acadrust only under `dwg-acadrust`. It is pure Rust and ships no \
-             native code, but it is a git dependency, so it stays opt-in (CONTRIBUTING.md).",
+            !no_defaults,
+            "{} must reach acadrust through the default `dwg-acadrust` feature, and only \
+             there. It is pure Rust and ships no native code, but it is a git dependency \
+             (CONTRIBUTING.md).",
             cell.label
         );
 
         // `pvec-raster` brings the PVec facade, and the facade depends on `pvec-geometry` and
         // `pvec-numeric` itself, so it reaches both.
-        let asked_for_pvec = cell.features.iter().any(|f| {
-            f.contains("pvec-normalized")
-                || f.contains("pvec-raster")
-                || f.contains("pvec-write")
-                || f.contains("dwg-acadrust")
-                || f.contains("pvec-convert")
-        }) || cell.features.contains(&"--all-features");
+        let asked_for_pvec = !no_defaults
+            || cell.features.iter().any(|f| {
+                f.contains("pvec-normalized")
+                    || f.contains("pvec-raster")
+                    || f.contains("pvec-write")
+                    || *f == "jbig2"
+                    || f.contains("dwg-acadrust")
+                    || f.contains("pvec-convert")
+            })
+            || cell.features.contains(&"--all-features");
         assert_eq!(
             contains(graph, "pvec-geometry"),
             asked_for_pvec,

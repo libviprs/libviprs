@@ -9,7 +9,7 @@ them to its recorded hash.
 ## The five pins
 
 **1. PVec: the revision, the container version and the capability set this build writes.** This build links
-`pvec` at revision `b9f441618153d256777121a6a1518b15e7f42099` and writes container version 1.0. The capabilities it
+`pvec` at revision `240fcd3da4f0ee52ace31c8837b52d349b5548dd` and writes container version 1.0. The capabilities it
 can write are the ones the mapping table (`pvec::mapping::NORMALIZED_TO_PVEC`) gives its ten kinds, ids 5 to 12 of
 PVec's registry. What a build does with other container versions is `docs/pvec-version-compatibility.md`.
 
@@ -31,12 +31,12 @@ the pin with the policy PVec exports, so a change of PVec's policy is a red test
 | `viewport_clipping` | unsupported |
 | `xrefs` | report-external |
 
-**4. The accepted fixture corpus revision.** `r2-open` of `libviprs/pvec-gold-fixtures`, gold commit
-`1df9d1b3e75047fa3978ebd809d0128cdfb28a68`, vendored under `tests/fixtures/pvec-gold/` and held to its own index by
+**4. The accepted fixture corpus revision.** `r3-open` of `libviprs/pvec-gold-fixtures`, gold commit
+`871f390905500097895a3d21d1083e7d42a87807`, vendored under `tests/fixtures/pvec-gold/` and held to its own index by
 `tests/common/pvec_gold.rs`.
 
 **5. The provider compatibility range.** The default provider is `acadrust`, at revision
-`72af48970e306ef1d50dd751b227df2b4fc3fb99`, and it takes DWG versions AC1014 to AC1032. A drawing below AC1014 is
+`f1e00c11f6371c8cfcff2c726620a51a45a2ad1b`, and it takes DWG versions AC1014 to AC1032. A drawing below AC1014 is
 refused at conversion start. `docs/pvec-version-compatibility.md` has the table.
 
 ## The baselines it was frozen against
@@ -46,9 +46,9 @@ page and the pin moving with it.
 
 | baseline | sha256 |
 |---|---|
-| `tests/fixtures/pvec_bench_corpus.json` | `781b90f9cdebb44df472aadbfdff7739dc8e1e3468c320e49b2fd902cfb43622` |
-| `tests/fixtures/pvec_bench_baseline.json` | `130d5f80fa1589b43a2780e48a063fbcd665fe8df8738d377a511fe964ba3e82` |
-| `tests/fixtures/pvec_corpus_baseline.json` | `85cea1e0a1cfa6ef547368cb2d44ab71c1ed641bc8aca13694b5f29ac2d01099` |
+| `tests/fixtures/pvec_bench_corpus.json` | `97eca65c287aaea1c014489cd5cc02e685e17b7f26b3961837414317e18bc5e5` |
+| `tests/fixtures/pvec_bench_baseline.json` | `7b6fe2a29d8cb1cb9a8ac3a28f87b627b77a9adcdf414989b7b82ddab9829532` |
+| `tests/fixtures/pvec_corpus_baseline.json` | `743d9c5ea8d21abe5587e28281b756b0bfb3ef716da4da8b0e6a6a3258b789df` |
 
 ## The EPIC L decision
 
@@ -78,9 +78,12 @@ What the numbers say, in `docs/pvec-benchmarks.md` for the PVec side and `docs/v
 
 The two are not the same drawing, so I draw no conclusion about which is faster: no cell has both a PVec artifact
 and an L derivative. What decides the outcome is the memory column. PVec's conversion holds the whole drawing until
-the artifact is sealed, so it misses its own 1.5 GiB ceiling at a million entities by a factor of two, and the spool
-that would bound it is not built (pvec#235). Making PVec the default now would make a drawing of that size need over
+the artifact is sealed, so it misses its own 1.5 GiB ceiling at a million entities by a factor of two. The writer's
+spill (pvec#235, #1314, #1417) exists now but does not move that peak, see the paragraph below. Making PVec the default now would make a drawing of that size need over
 3 GiB where the L path stays under 600 MiB. EPIC L cannot carry what PVec exists for, the analytic geometry. So both
-stay, and the caller picks the path that fits the drawing and the use. This is the outcome to revisit when the spool
-lands and the bounded-memory benchmark has a strategy that passes its ceiling: the decision is this page and one
+stay, and the caller picks the path that fits the drawing and the use. This is the outcome to revisit when the
+bounded-memory benchmark has a strategy that passes its ceiling: the decision is this page and one
 line of the pin, and the test will say when they disagree.
+
+Since this was recorded the writer's spill has landed (#1314, #1417): a spilled conversion adds 24 bytes an entity in the
+writer instead of 391 to 419 (`docs/adr/pvec-tiers-and-spool-rescope.md`). I have since re-run the bounded-memory benchmark with the spill (`docs/pvec-benchmarks.md`, #1064). The tracked peak and the peak RSS at 1,025,000 entities are within about 1% with and without it (2,725 and 3,149 MiB direct, 2,725 and 3,117 MiB spilled), at every budget I tried, because libviprs' own per-entity state is what sits in memory before the writer runs. So the figures above stand and the outcome stays "both ship, the caller chooses"... The thing that would change it is the classifier streaming into the writer, which is #1481.
