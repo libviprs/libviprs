@@ -85,7 +85,7 @@ use crate::pvec::flatten::{
 use crate::pvec::mapping::{kind_of, row_for};
 use crate::pvec::ordering::key_cmp;
 use crate::pvec::provenance::NoProvenance;
-use crate::pvec::publish::{PublishError, StreamedPublishError, publish, publish_streamed};
+use crate::pvec::publish::{PublishError, StreamedPublishError, publish_streamed_with};
 use crate::pvec::report::{
     BoundsSplit, CapabilitySummary, ConversionReport, EntityRow, ReportBuilder, ReportError,
     UnresolvedXrefRow, ViewSummary, XrefSummary,
@@ -636,58 +636,55 @@ impl<'a> PvecConversion<'a> {
         // what went in, and stage the georeference sidecar. It runs once, so it takes the rows.
         // The tally is sealed here and not at classification: an entity the classifier called
         // supported can still be one PVec's container refuses, and it is counted as that.
-        let seal =
-            |bounds: &BoundsReport,
-             written: u64,
-             length: u64,
-             refused: &[(EntityId, String)]|
-             -> Result<(ConversionReport, FidelityReport, String), PvecConvertError> {
-                for (id, rule) in refused {
-                    let from = &stored
-                        .iter()
-                        .find(|(s, _)| s == id)
-                        .expect("a refused entity was written from a stored classification")
-                        .1;
-                    let to =
-                        Classification::refused(ReasonCode::PvecCannotStore, from.source_class());
-                    tally.reclassify(from, &to);
-                    rows.refuse(*id, &to, format!("PVec's writer refused it ({rule})"));
-                }
-                let fidelity = tally.finish(encountered).map_err(PvecConvertError::Tally)?;
-                tell(EngineEvent::ConversionArtifactWritten {
-                    entities: written,
-                    bytes: length,
-                });
-                let mut report = rows
-                    .finish(
-                        encountered,
-                        view,
-                        xrefs,
-                        BoundsSplit {
-                            exact: bounds.exact_count() as u64,
-                            hull_upper_bound: bounds.hull_count() as u64,
-                        },
-                    )
-                    .map_err(PvecConvertError::Report)?;
-                report.capabilities = Some(gate.summary());
-                report.diagnostics = diagnostics;
-                report.georeference = sidecar
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned());
-                let json = report.to_json_string().map_err(PvecConvertError::Report)?;
-                GeoreferenceHandoff::V1(HandoffV1 {
-                    bounds: bounds.drawing_bounds().map(|b| SourceBox {
-                        min: [b.min().x, b.min().y],
-                        max: [b.max().x, b.max().y],
-                    }),
-                    unit: UnitRecord::new(declared, unit),
-                    calibration_id: calibration,
-                    control_points,
-                })
-                .write_to(&staged)
-                .map_err(PvecConvertError::Georeference)?;
-                Ok((report, fidelity, json))
-            };
+        let seal = |bounds: &BoundsReport,
+                    written: u64,
+                    length: u64,
+                    refused: &[(EntityId, String)]|
+         -> Result<(ConversionReport, FidelityReport), PvecConvertError> {
+            for (id, rule) in refused {
+                let from = &stored
+                    .iter()
+                    .find(|(s, _)| s == id)
+                    .expect("a refused entity was written from a stored classification")
+                    .1;
+                let to = Classification::refused(ReasonCode::PvecCannotStore, from.source_class());
+                tally.reclassify(from, &to);
+                rows.refuse(*id, &to, format!("PVec's writer refused it ({rule})"));
+            }
+            let fidelity = tally.finish(encountered).map_err(PvecConvertError::Tally)?;
+            tell(EngineEvent::ConversionArtifactWritten {
+                entities: written,
+                bytes: length,
+            });
+            let mut report = rows
+                .finish(
+                    encountered,
+                    view,
+                    xrefs,
+                    BoundsSplit {
+                        exact: bounds.exact_count() as u64,
+                        hull_upper_bound: bounds.hull_count() as u64,
+                    },
+                )
+                .map_err(PvecConvertError::Report)?;
+            report.capabilities = Some(gate.summary());
+            report.diagnostics = diagnostics;
+            report.georeference = sidecar
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned());
+            GeoreferenceHandoff::V1(HandoffV1 {
+                bounds: bounds.drawing_bounds().map(|b| SourceBox {
+                    min: [b.min().x, b.min().y],
+                    max: [b.max().x, b.max().y],
+                }),
+                unit: UnitRecord::new(declared, unit),
+                calibration_id: calibration,
+                control_points,
+            })
+            .write_to(&staged)
+            .map_err(PvecConvertError::Georeference)?;
+            Ok((report, fidelity))
+        };
         let config = WriteConfig { unit, leaves };
         let mut chunk = 0u64;
         let mut on_chunk = |entities: u64, bytes: u64| {
@@ -700,6 +697,17 @@ impl<'a> PvecConversion<'a> {
         };
         // The writer takes what it keeps out of the geometry, so the geometry goes the moment the
         // write returns and the report below is built without it.
+        // The report is written from the sealed value straight into its partial file, so the whole
+        // of it never exists as one string.
+        let write_report = |sealed: &(ConversionReport, FidelityReport, u64),
+                            out: &mut dyn std::io::Write| {
+            sealed.0.write_json(out).map_err(std::io::Error::other)
+        };
+        let publish_error = |e: StreamedPublishError<PvecConvertError>| match e {
+            StreamedPublishError::Produce(e) => e,
+            StreamedPublishError::Publish(PublishError::Cancelled) => PvecConvertError::Cancelled,
+            StreamedPublishError::Publish(other) => PvecConvertError::Publish(other),
+        };
         let published = match &spill {
             None => {
                 let written = write_geometry(
@@ -711,24 +719,31 @@ impl<'a> PvecConversion<'a> {
                 );
                 drop(geometries);
                 written.map_err(write_error).and_then(|artifact| {
-                    let (report, fidelity, json) = seal(
-                        &artifact.bounds,
-                        artifact.written,
-                        artifact.bytes.len() as u64,
-                        &artifact.refused,
-                    )?;
-                    publish(dest, &artifact.bytes, json.as_bytes(), &cancel, &mut |_| {}).map_err(
-                        |e| match e {
-                            PublishError::Cancelled => PvecConvertError::Cancelled,
-                            other => PvecConvertError::Publish(other),
+                    publish_streamed_with(
+                        dest,
+                        &cancel,
+                        &mut |_| {},
+                        |out| {
+                            out.write_all(&artifact.bytes)
+                                .map_err(|e| PvecConvertError::Publish(PublishError::Io(e)))?;
+                            let (report, fidelity) = seal(
+                                &artifact.bounds,
+                                artifact.written,
+                                artifact.bytes.len() as u64,
+                                &artifact.refused,
+                            )?;
+                            Ok((report, fidelity, artifact.written))
                         },
-                    )?;
-                    Ok((report, fidelity, artifact.written))
+                        write_report,
+                    )
+                    .map_err(publish_error)
                 })
             }
-            Some(spill) => {
-                let mut sealed = None;
-                publish_streamed(dest, &cancel, &mut |_| {}, |out| {
+            Some(spill) => publish_streamed_with(
+                dest,
+                &cancel,
+                &mut |_| {},
+                |out| {
                     let written = write_geometry_to(
                         &config,
                         geometries.iter().map(|(id, g)| (*id, g)),
@@ -743,24 +758,17 @@ impl<'a> PvecConversion<'a> {
                     tell(EngineEvent::ConversionSpoolSpilled {
                         bytes: artifact.length,
                     });
-                    let (report, fidelity, json) = seal(
+                    let (report, fidelity) = seal(
                         &artifact.bounds,
                         artifact.written,
                         artifact.length,
                         &artifact.refused,
                     )?;
-                    sealed = Some((report, fidelity, artifact.written));
-                    Ok(json.into_bytes())
-                })
-                .map_err(|e| match e {
-                    StreamedPublishError::Produce(e) => e,
-                    StreamedPublishError::Publish(PublishError::Cancelled) => {
-                        PvecConvertError::Cancelled
-                    }
-                    StreamedPublishError::Publish(other) => PvecConvertError::Publish(other),
-                })
-                .map(|()| sealed.expect("the producer sealed the report before the commit"))
-            }
+                    Ok((report, fidelity, artifact.written))
+                },
+                write_report,
+            )
+            .map_err(publish_error),
         }
         .and_then(|done| {
             std::fs::rename(&staged, &sidecar)

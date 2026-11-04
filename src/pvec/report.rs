@@ -401,6 +401,16 @@ impl ConversionReport {
         serde_json::to_string_pretty(self).map_err(ReportError::Json)
     }
 
+    /// Writes the same bytes as [`to_json_string`](Self::to_json_string) to `out`, without building
+    /// the string.
+    ///
+    /// # Errors
+    ///
+    /// [`ReportError::Json`] when serialisation or `out` fails.
+    pub fn write_json(&self, out: &mut dyn std::io::Write) -> Result<(), ReportError> {
+        serde_json::to_writer_pretty(out, self).map_err(ReportError::Json)
+    }
+
     /// Reads a report, refusing a `schema_version` other than [`SCHEMA_VERSION`].
     ///
     /// # Errors
