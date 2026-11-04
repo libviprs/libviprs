@@ -537,6 +537,111 @@
    "within_rss_ceiling": false,
    "within_tracked_ceiling": false
   },
+  "bounded_memory_stages/direct/large_industrial/x0.5/x86_64-linux-mars": {
+   "bench": "bounded_memory_stages",
+   "cell": "large_industrial",
+   "entities": 512500,
+   "platform": "x86_64-linux-mars",
+   "scale": 0.5,
+   "stages": {
+    "classify": {
+     "held": 536065963,
+     "peak": 1055921746
+    },
+    "flatten": {
+     "held": 570083494,
+     "peak": 570085667
+    },
+    "open": {
+     "held": 217653056,
+     "peak": 279284499
+    },
+    "report": {
+     "held": 498183452,
+     "peak": 805053559
+    },
+    "view": {
+     "held": 387167477,
+     "peak": 452181761
+    },
+    "write": {
+     "held": 534347537,
+     "peak": 664070987
+    }
+   },
+   "strategy": "direct",
+   "tracked_peak": 1055921746
+  },
+  "bounded_memory_stages/direct/large_industrial/x1.0/x86_64-linux-mars": {
+   "bench": "bounded_memory_stages",
+   "cell": "large_industrial",
+   "entities": 1025000,
+   "platform": "x86_64-linux-mars",
+   "scale": 1.0,
+   "stages": {
+    "classify": {
+     "held": 1071819935,
+     "peak": 2112262374
+    },
+    "flatten": {
+     "held": 1139788418,
+     "peak": 1139790591
+    },
+    "open": {
+     "held": 434929484,
+     "peak": 556389027
+    },
+    "report": {
+     "held": 996188688,
+     "peak": 1610113252
+    },
+    "view": {
+     "held": 773957045,
+     "peak": 903983041
+    },
+    "write": {
+     "held": 1068500645,
+     "peak": 1327966735
+    }
+   },
+   "strategy": "direct",
+   "tracked_peak": 2112262374
+  },
+  "bounded_memory_stages/direct/large_industrial/x2.0/x86_64-linux-mars": {
+   "bench": "bounded_memory_stages",
+   "cell": "large_industrial",
+   "entities": 2050000,
+   "platform": "x86_64-linux-mars",
+   "scale": 2.0,
+   "stages": {
+    "classify": {
+     "held": 2143323823,
+     "peak": 4224938662
+    },
+    "flatten": {
+     "held": 2279194210,
+     "peak": 2279196383
+    },
+    "open": {
+     "held": 869478284,
+     "peak": 1112417987
+    },
+    "report": {
+     "held": 1992195104,
+     "peak": 3220355819
+    },
+    "view": {
+     "held": 1547532125,
+     "peak": 1807581545
+    },
+    "write": {
+     "held": 2136378893,
+     "peak": 2655754175
+    }
+   },
+   "strategy": "direct",
+   "tracked_peak": 4224938662
+  },
   "generation/block_heavy/x86_64-linux-mars": {
    "artifact_bytes": 104752,
    "artifact_pct_of_source": 451.7898731993444,
@@ -1177,6 +1282,8 @@
     "median": 389585.38136203954,
     "min": 384610.11356357456
    },
+   "open_only_held": 234793,
+   "open_only_tracked_peak": 397791,
    "peak_rss_bytes": 74412032,
    "platform": "x86_64-linux-mars",
    "rss_is_per_cell": true,
@@ -1200,6 +1307,8 @@
     "median": 980902.222265469,
     "min": 937820.6242880306
    },
+   "open_only_held": 434724324,
+   "open_only_tracked_peak": 556183867,
    "peak_rss_bytes": 3450322944,
    "platform": "x86_64-linux-mars",
    "rss_is_per_cell": true,
@@ -1223,6 +1332,8 @@
     "median": 395376.967820822,
     "min": 374551.7131002797
    },
+   "open_only_held": 987425,
+   "open_only_tracked_peak": 1779339,
    "peak_rss_bytes": 58736640,
    "platform": "x86_64-linux-mars",
    "rss_is_per_cell": true,
@@ -1246,6 +1357,8 @@
     "median": 389985.82102551445,
     "min": 357994.4563444674
    },
+   "open_only_held": 17840260,
+   "open_only_tracked_peak": 27810769,
    "peak_rss_bytes": 139296768,
    "platform": "x86_64-linux-mars",
    "rss_is_per_cell": true,

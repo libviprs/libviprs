@@ -22,6 +22,8 @@
 mod pvec_alloc;
 #[path = "common/pvec_bench.rs"]
 mod pvec_bench;
+#[path = "common/pvec_stages.rs"]
+mod pvec_stages;
 
 use std::time::{Duration, Instant};
 
@@ -106,6 +108,9 @@ fn measure(cell: &str, bytes: &[u8], platform: &str) -> Value {
         })
         .collect();
     let rss = peak_rss();
+    // What opening the drawing alone holds and peaks at (the document, before any flatten), largest of
+    // three runs (#1515).
+    let opens: Vec<(u64, u64)> = (0..3).map(|_| pvec_stages::open_only(bytes)).collect();
     let leaves = runs[0].leaves;
     assert!(
         runs.iter().all(|r| r.leaves == leaves),
@@ -127,6 +132,8 @@ fn measure(cell: &str, bytes: &[u8], platform: &str) -> Value {
         "allocated_bytes": runs[0].allocated,
         "tracked_peak": runs.iter().map(|r| r.tracked_peak).max(),
         "peak_rss_bytes": rss,
+        "open_only_held": opens.iter().map(|o| o.0).max(),
+        "open_only_tracked_peak": opens.iter().map(|o| o.1).max(),
         "rss_is_per_cell": rss_reset,
         "block_frames": runs[0].instances,
         "advanced_curve_share": runs[0].splines as f64 / leaves as f64,
@@ -143,6 +150,8 @@ fn measure(cell: &str, bytes: &[u8], platform: &str) -> Value {
             "allocated_bytes",
             "tracked_peak",
             "peak_rss_bytes",
+            "open_only_held",
+            "open_only_tracked_peak",
             "block_frames",
             "advanced_curve_share",
             "platform",
