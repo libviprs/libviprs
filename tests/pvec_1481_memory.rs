@@ -6,6 +6,20 @@
 
 use std::path::PathBuf;
 
+#[cfg(all(feature = "pvec-convert", feature = "dwg-acadrust"))]
+#[path = "common/pvec_alloc.rs"]
+mod pvec_alloc;
+#[cfg(all(feature = "pvec-convert", feature = "dwg-acadrust"))]
+#[path = "common/pvec_bench.rs"]
+mod pvec_bench;
+#[cfg(all(feature = "pvec-convert", feature = "dwg-acadrust"))]
+#[path = "common/pvec_stages.rs"]
+mod pvec_stages;
+
+#[cfg(all(feature = "pvec-convert", feature = "dwg-acadrust"))]
+#[global_allocator]
+static ALLOC: pvec_alloc::Counting = pvec_alloc::Counting;
+
 const STAGES: [&str; 6] = ["open", "view", "flatten", "classify", "write", "report"];
 const SCALES: [&str; 3] = ["0.5", "1.0", "2.0"];
 
@@ -146,4 +160,53 @@ fn the_document_says_what_the_open_alone_costs() {
         "the open share is stated in words"
     );
     assert!(s.contains("MiB"), "the share cites the measured figure");
+}
+
+/// The stage recorder itself, on a small drawing: every stage is there, a stage never holds more
+/// than it peaked at, and opening the drawing leaves something held for the later stages to sit on.
+#[cfg(all(feature = "pvec-convert", feature = "dwg-acadrust"))]
+mod live {
+    use super::{pvec_bench, pvec_stages};
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn the_recorder_splits_a_small_conversion_into_every_stage() {
+        let m = pvec_bench::manifest();
+        let c = &pvec_bench::cells(&m)["block_heavy"];
+        let bytes = pvec_bench::generate(c["generator"].as_str().unwrap(), &c["params"]);
+        let dir = tempfile::tempdir().unwrap();
+        let r = pvec_stages::measure(
+            &bytes,
+            &dir.path().join("out.pvec"),
+            libviprs::pvec::SourceUnit::Meters,
+        );
+        assert!(
+            r["entities"].as_u64().unwrap() > 0,
+            "the drawing has entities"
+        );
+        let mut top = 0;
+        for stage in pvec_stages::STAGES {
+            let (held, peak) = (
+                r["stages"][stage]["held"].as_u64().unwrap(),
+                r["stages"][stage]["peak"].as_u64().unwrap(),
+            );
+            assert!(held <= peak, "{stage}: held {held} over peak {peak}");
+            top = top.max(peak);
+        }
+        assert!(
+            r["stages"]["open"]["held"].as_u64().unwrap() > 0,
+            "an opened drawing holds heap"
+        );
+        assert!(
+            r["stages"]["flatten"]["held"].as_u64().unwrap()
+                > r["stages"]["open"]["held"].as_u64().unwrap(),
+            "the flattened leaves sit on top of the document"
+        );
+        assert_eq!(r["tracked_peak"].as_u64(), Some(top));
+        let (held, peak) = pvec_stages::open_only(&bytes);
+        assert!(
+            held > 0 && peak >= held,
+            "open alone: held {held}, peak {peak}"
+        );
+    }
 }
