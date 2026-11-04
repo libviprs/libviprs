@@ -1126,9 +1126,10 @@ const SPLIT_GUARD_CELL: Cell = Cell {
 
 /// The harness measures something, at a size that costs milliseconds.
 ///
-/// Every `#[ignore]`d test above is invisible to CI by construction, so this is
-/// the one that keeps the harness compiling and working. It is also the
-/// positive control on the numbers: a row of zeroes and an empty pyramid
+/// Every `#[ignore]`d test above is invisible to the default suite by
+/// construction, and so is this one now that benchmarks are opt-in (run it with
+/// `--ignored`). It is the check that the harness works, and the positive
+/// control on the numbers: a row of zeroes and an empty pyramid
 /// satisfy every shape assertion, so this asserts the tile counts match the
 /// plan, that both backends produced the same tiles, and that the
 /// filesystem-entry gap the whole issue is about is really there.

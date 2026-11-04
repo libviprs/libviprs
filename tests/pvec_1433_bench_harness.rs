@@ -10,7 +10,7 @@ use pvec_bench::{Stat, blank_columns, provider_regressions, quiet_after};
 use serde_json::json;
 
 #[test]
-#[ignore = "benchmark plumbing, opt-in: cargo test --test pvec_1433_bench_harness -- --ignored"]
+#[ignore = "benchmark plumbing, opt-in: cargo test --features pvec-convert,dwg-acadrust --test pvec_1433_bench_harness -- --ignored"]
 fn a_stat_is_the_median_with_the_extremes() {
     let s = Stat::of(&[3.0, 1.0, 2.0]);
     assert_eq!((s.median, s.min, s.max), (2.0, 1.0, 3.0));
@@ -18,21 +18,21 @@ fn a_stat_is_the_median_with_the_extremes() {
 }
 
 #[test]
-#[ignore = "benchmark plumbing, opt-in: cargo test --test pvec_1433_bench_harness -- --ignored"]
+#[ignore = "benchmark plumbing, opt-in: cargo test --features pvec-convert,dwg-acadrust --test pvec_1433_bench_harness -- --ignored"]
 fn a_spread_over_twenty_percent_is_unstable() {
     assert!(!Stat::of(&[0.92, 1.0, 1.08]).unstable());
     assert!(Stat::of(&[0.80, 1.0, 1.30]).unstable());
 }
 
 #[test]
-#[ignore = "benchmark plumbing, opt-in: cargo test --test pvec_1433_bench_harness -- --ignored"]
+#[ignore = "benchmark plumbing, opt-in: cargo test --features pvec-convert,dwg-acadrust --test pvec_1433_bench_harness -- --ignored"]
 #[should_panic]
 fn no_samples_is_a_panic_not_a_zero() {
     let _ = Stat::of(&[]);
 }
 
 #[test]
-#[ignore = "benchmark plumbing, opt-in: cargo test --test pvec_1433_bench_harness -- --ignored"]
+#[ignore = "benchmark plumbing, opt-in: cargo test --features pvec-convert,dwg-acadrust --test pvec_1433_bench_harness -- --ignored"]
 fn quiet_needs_three_polls_in_a_row_under_the_cpu_count() {
     assert_eq!(quiet_after([1.0, 2.0, 3.0], 28), Some(3));
     assert_eq!(
@@ -48,7 +48,7 @@ fn quiet_needs_three_polls_in_a_row_under_the_cpu_count() {
 }
 
 #[test]
-#[ignore = "benchmark plumbing, opt-in: cargo test --test pvec_1433_bench_harness -- --ignored"]
+#[ignore = "benchmark plumbing, opt-in: cargo test --features pvec-convert,dwg-acadrust --test pvec_1433_bench_harness -- --ignored"]
 fn a_blank_column_is_named() {
     let row = json!({"a": 1, "b": null});
     assert_eq!(blank_columns(&row, &["a", "b", "c"]), vec!["b", "c"]);
@@ -60,7 +60,7 @@ fn row(eps: f64, peak: u64, unstable: bool) -> serde_json::Value {
 }
 
 #[test]
-#[ignore = "benchmark plumbing, opt-in: cargo test --test pvec_1433_bench_harness -- --ignored"]
+#[ignore = "benchmark plumbing, opt-in: cargo test --features pvec-convert,dwg-acadrust --test pvec_1433_bench_harness -- --ignored"]
 fn ten_percent_less_throughput_or_fifteen_percent_more_peak_is_a_regression() {
     let base = row(1000.0, 1000, false);
     assert!(provider_regressions(&base, &row(905.0, 1140, false)).is_empty());
@@ -79,7 +79,7 @@ fn ten_percent_less_throughput_or_fifteen_percent_more_peak_is_a_regression() {
 }
 
 #[test]
-#[ignore = "benchmark plumbing, opt-in: cargo test --test pvec_1433_bench_harness -- --ignored"]
+#[ignore = "benchmark plumbing, opt-in: cargo test --features pvec-convert,dwg-acadrust --test pvec_1433_bench_harness -- --ignored"]
 fn an_unstable_row_never_gates() {
     let base = row(1000.0, 1000, false);
     assert!(provider_regressions(&base, &row(10.0, 9999, true)).is_empty());
@@ -89,7 +89,7 @@ fn an_unstable_row_never_gates() {
 /// The document names every baseline row's cell and the platform it ran on, and the baseline's
 /// rows each carry the columns the harness refuses to print blank.
 #[test]
-#[ignore = "benchmark plumbing, opt-in: cargo test --test pvec_1433_bench_harness -- --ignored"]
+#[ignore = "benchmark plumbing, opt-in: cargo test --features pvec-convert,dwg-acadrust --test pvec_1433_bench_harness -- --ignored"]
 #[cfg_attr(miri, ignore)]
 fn the_document_and_the_baseline_describe_the_same_rows() {
     let doc = std::fs::read_to_string(pvec_bench::root().join("docs/pvec-benchmarks.md")).unwrap();
@@ -154,7 +154,7 @@ fn the_document_and_the_baseline_describe_the_same_rows() {
 }
 
 #[test]
-#[ignore = "benchmark plumbing, opt-in: cargo test --test pvec_1433_bench_harness -- --ignored"]
+#[ignore = "benchmark plumbing, opt-in: cargo test --features pvec-convert,dwg-acadrust --test pvec_1433_bench_harness -- --ignored"]
 fn a_stage_that_grew_ten_percent_is_a_regression() {
     let row = |a: f64, b: f64, unstable: bool| json!({"stage_ns": {"visibility": a, "bounds": b}, "unstable": unstable});
     let base = row(100.0, 50.0, false);
@@ -170,7 +170,7 @@ fn a_stage_that_grew_ten_percent_is_a_regression() {
 }
 
 #[test]
-#[ignore = "benchmark plumbing, opt-in: cargo test --test pvec_1433_bench_harness -- --ignored"]
+#[ignore = "benchmark plumbing, opt-in: cargo test --features pvec-convert,dwg-acadrust --test pvec_1433_bench_harness -- --ignored"]
 fn the_unattributed_remainder_is_what_no_stage_accounts_for() {
     let r = pvec_bench::unattributed(&[0.3, 0.5], 1.0);
     assert!((r - 0.2).abs() < 1e-12, "{r}");
@@ -178,7 +178,7 @@ fn the_unattributed_remainder_is_what_no_stage_accounts_for() {
 }
 
 #[test]
-#[ignore = "benchmark plumbing, opt-in: cargo test --test pvec_1433_bench_harness -- --ignored"]
+#[ignore = "benchmark plumbing, opt-in: cargo test --features pvec-convert,dwg-acadrust --test pvec_1433_bench_harness -- --ignored"]
 fn generation_regressions_are_ten_percent_time_five_percent_bytes_two_points_of_ratio() {
     let row = |wall: f64, bytes: f64, pct: f64, unstable: bool| json!({"wall_secs": {"median": wall}, "artifact_bytes": bytes, "artifact_pct_of_source": pct, "unstable": unstable});
     let base = row(1.0, 1000.0, 20.0, false);
@@ -201,7 +201,7 @@ fn generation_regressions_are_ten_percent_time_five_percent_bytes_two_points_of_
 }
 
 #[test]
-#[ignore = "benchmark plumbing, opt-in: cargo test --test pvec_1433_bench_harness -- --ignored"]
+#[ignore = "benchmark plumbing, opt-in: cargo test --features pvec-convert,dwg-acadrust --test pvec_1433_bench_harness -- --ignored"]
 fn ten_percent_more_rss_or_wall_time_is_a_regression_unless_the_wall_row_is_unstable() {
     let row = |rss: u64, wall: f64, unstable: bool| json!({"peak_rss_bytes": rss, "wall_secs": {"median": wall}, "unstable": unstable});
     let base = row(1000, 10.0, false);

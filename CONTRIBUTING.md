@@ -439,13 +439,15 @@ removed. `src/arithmetic.rs`'s `try_scratch` is the one copy left, held open on
 
 Benchmarks and profiling are on-demand tools. No hook, CI job, release step or
 issue template requires a benchmark run, a profile or a baseline capture. The
-benchmark corpus and harness tests are `#[ignore]`d so the default suite never
+benchmark corpus and harness tests are `#[ignore]`d (the manifest and malformed-input refusal checks in `pvec_1429_bench_corpus` stay in the default suite, they guard the limits) so the default suite never
 depends on them; run one when you want the numbers:
 
 ```text
 cargo test --release --test pmtiles_benchmarks -- --ignored --nocapture
 cargo test --release --features pvec-convert --test pvec_1429_bench_corpus -- --ignored
 cargo test --release --features pvec-convert,dwg-acadrust --test pvec_1433_bench_harness -- --ignored
+cargo test --release --features pvec-convert,dwg-acadrust --test pvec_1436_normalization_mix -- --ignored
+cargo test --release --test pvec_1064_memory_decision -- --ignored
 ```
 
 ## Before you push
