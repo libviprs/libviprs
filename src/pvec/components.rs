@@ -100,6 +100,10 @@ pub enum ComponentsError {
     Refused(String),
 }
 
+/// A line style as bit patterns, the key the style table is deduplicated on: its dash lengths, its width
+/// (`None`, or a flag for thinnest against explicit and the width's bits), its phase and its visibility.
+type StyleKey = (Vec<u64>, Option<(bool, u64)>, u64, bool);
+
 /// The streams `select` asks for, built from `rows` and mapped onto the artifact written with
 /// `source_ids`. A stream with no row is not emitted.
 ///
@@ -204,8 +208,7 @@ pub fn build_streams(
     if select.line_style {
         let mut styles: Vec<LineStyleDef> = Vec::new();
         // The table index of each style seen, keyed on the bit patterns of its numbers.
-        let mut seen_styles: BTreeMap<(Vec<u64>, Option<(bool, u64)>, u64, bool), usize> =
-            BTreeMap::new();
+        let mut seen_styles: BTreeMap<StyleKey, usize> = BTreeMap::new();
         let mut assignments = Vec::new();
         for (id, r) in &written {
             let Some(c) = r.style else { continue };
