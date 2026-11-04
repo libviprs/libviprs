@@ -13,24 +13,18 @@ use libviprs::pvec::differential::{Deltas, Fixture, Matrix, Verdict};
 use libviprs::pvec::dwg_acadrust::AcadrustProvider;
 use pvec_gold::{Corpus, EvidenceClass};
 
-/// Every non-rejection fixture of the pinned corpus that carries a drawing.
-fn corpus_fixtures(c: &Corpus) -> Vec<Fixture> {
+fn matrix(c: &Corpus, only: &[&str]) -> (Matrix, Vec<Fixture>) {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/pvec-gold/fixtures");
-    c.all()
+    let fx: Vec<_> = c
+        .all()
         .iter()
         .filter(|f| !f.expects_rejection && f.has("source.dwg"))
+        .filter(|f| only.is_empty() || only.contains(&f.id.as_str()))
         .map(|f| Fixture {
             id: f.id.clone(),
             path: root.join(&f.id).join("source.dwg"),
             evidence: f.class.tag().to_string(),
         })
-        .collect()
-}
-
-fn matrix(c: &Corpus, only: &[&str]) -> (Matrix, Vec<Fixture>) {
-    let fx: Vec<_> = corpus_fixtures(c)
-        .into_iter()
-        .filter(|f| only.is_empty() || only.contains(&f.id.as_str()))
         .collect();
     let mut m = Matrix::new(c.revision.clone());
     m.run::<AcadrustProvider>(&fx).expect("the corpus runs");
