@@ -228,6 +228,37 @@ The spill strategy, same host and method (three runs per variant, the largest pe
 
 The budget sweep on `large_industrial` at scale 1.0 (budgets 64, 128 and 256 MiB, same three runs) gives a tracked peak of 2,725 MiB and a process peak RSS of 3,117 MiB at every budget. The spill files do move with the budget (262, 262, 117 MiB on disk, 16, 11, 5 files), the peak does not.
 
+### Peak by stage
+
+Where the conversion's tracked heap sits, stage by stage (#1515, a slice of #1481). `tests/pvec_bounded_memory_bench.rs::bounded_memory_stages_bench` does it with public calls only, so `src/` carries nothing for it, in two passes per run. Pass A opens the provider, applies the view profile and flattens the model space by hand, keeping each result alive, so `open`, `view` and `flatten` are cumulative: what is held once that stage is done. Pass B runs `PvecConversion::convert` with an observer that reads the allocator at the events the conversion already emits: `classify` ends at the first write event, `write` at `ConversionArtifactWritten`, and `report` at `ConversionPublished`. All figures are MiB of tracked heap above where the pass started, three runs per scale, the largest of the three. *Held* is the live heap when the stage ended and *peak* the most it reached during the stage, so a stage that frees what it consumed shows a held figure under its peak. The last column is held bytes per entity. `classify` is the stage that holds the document, the view outcome, the flattened leaves and every classified record at once. Direct strategy, `large_industrial`, MARS (x86_64-linux-mars), release build. These rows are the baseline's, and `tests/pvec_1481_memory.rs` fails if the two disagree:
+
+| kind | cell | scale | stage | held (MiB) | peak (MiB) | held bytes per entity |
+|---|---|---|---|---|---|---|
+| stage | large_industrial | 0.5 | open | 208 | 267 | 425 |
+| stage | large_industrial | 0.5 | view | 370 | 432 | 755 |
+| stage | large_industrial | 0.5 | flatten | 544 | 544 | 1112 |
+| stage | large_industrial | 0.5 | classify | 512 | 1,008 | 1046 |
+| stage | large_industrial | 0.5 | write | 510 | 634 | 1043 |
+| stage | large_industrial | 0.5 | report | 476 | 768 | 972 |
+| stage | large_industrial | 1.0 | open | 415 | 531 | 424 |
+| stage | large_industrial | 1.0 | view | 739 | 863 | 755 |
+| stage | large_industrial | 1.0 | flatten | 1,087 | 1,087 | 1112 |
+| stage | large_industrial | 1.0 | classify | 1,023 | 2,015 | 1046 |
+| stage | large_industrial | 1.0 | write | 1,020 | 1,267 | 1042 |
+| stage | large_industrial | 1.0 | report | 951 | 1,536 | 972 |
+| stage | large_industrial | 2.0 | open | 830 | 1,061 | 424 |
+| stage | large_industrial | 2.0 | view | 1,476 | 1,724 | 755 |
+| stage | large_industrial | 2.0 | flatten | 2,174 | 2,174 | 1112 |
+| stage | large_industrial | 2.0 | classify | 2,045 | 4,030 | 1046 |
+| stage | large_industrial | 2.0 | write | 2,038 | 2,533 | 1042 |
+| stage | large_industrial | 2.0 | report | 1,900 | 3,072 | 972 |
+
+What opening the drawing alone costs: at 1,025,000 entities the acadrust document holds 415 MiB (424 bytes an entity, 531 MiB at its peak while it is built) and that is 21% of the conversion's 2,015 MiB tracked peak. It grows in step with the entities (208, 415 and 830 MiB at 0.5, 1 and 2), as expected for a whole-file parse. The provider bench now carries the same figure per cell as `open_only_held` and `open_only_tracked_peak` (415 and 531 MiB on `large_industrial`, measured separately from the flatten, which the 1.57 GiB figure further up bundled with it). So the document alone sits well under the 1.0 GiB ceiling: it is a floor of about 40% of that ceiling, not the blocker.
+
+What this shows about the rest. The view outcome adds 324 MiB (755 bytes an entity held, cumulative) and the flattened leaves another 348 MiB, so 1,087 MiB is held before classification starts. The peak, 2,015 MiB, is reached inside `classify`, about 930 MiB above that, and the stage ends holding 1,023 MiB, so the peak sits about 990 MiB above where classification leaves off: that much is built and freed again before the first write event. After the write the report stage peaks at 1,536 MiB. All six peaks scale linearly with the entities. I am not proposing a cut here: the next steps pick from these figures.
+
+The older rows in the table above (2,725 MiB tracked at 1,025,000 entities) are from before the code moved: the plain `bounded_memory_child` on today's main gives 2,015 MiB tracked and 2.4 GiB RSS at the same size, twice, and the stage run's total agrees with it to 0.01%. I did not retake those rows here, that is the last step of #1481.
+
 ### Decision
 
 **libviprs ships the spill strategy** for the artifact: it is the only one with code, its bytes are the in-memory conversion's for the same configuration (`tests/pvec_1314_spool.rs`), and it takes the artifact out of memory (24 bytes an entity instead of 391 to 419 for the funnel, `docs/adr/pvec-tiers-and-spool-rescope.md`). The two-pass strategy has no code, and the numbers above give no reason to build it: the spill already removes the second pass over the writer's input.
