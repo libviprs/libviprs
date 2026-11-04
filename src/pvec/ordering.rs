@@ -41,7 +41,8 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fmt;
 
-use super::provider::RawEntity;
+use super::provider::{InstancePath, RawEntity};
+use crate::cad::ItemHandle;
 
 /// Where an ordering came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -183,23 +184,37 @@ pub struct OrderedSource {
     pub report: OrderingReport,
 }
 
+/// The first three keys of the canonical order (block path, handle, arrival index), from the
+/// parts of an entity that hold them. A producer that keeps its entities where they are can sort
+/// positions with this and get the permutation [`canonical_cmp`] gives, without copying an
+/// entity or allocating a key.
+pub(crate) fn key_cmp(
+    a: (&InstancePath, Option<ItemHandle>, u64),
+    b: (&InstancePath, Option<ItemHandle>, u64),
+) -> Ordering {
+    a.0.steps()
+        .iter()
+        .map(|s| (s.block_name.as_str(), s.insert_handle.get()))
+        .cmp(
+            b.0.steps()
+                .iter()
+                .map(|s| (s.block_name.as_str(), s.insert_handle.get())),
+        )
+        .then_with(|| a.1.cmp(&b.1))
+        .then_with(|| a.2.cmp(&b.2))
+}
+
 /// The canonical total order over `(index, entity)` pairs; see the module docs for the keys.
 #[must_use]
 pub fn canonical_cmp(ia: u64, a: &RawEntity, ib: u64, b: &RawEntity) -> Ordering {
     let (pa, pb) = (&a.provenance, &b.provenance);
-    let path = |p: &super::provider::InstancePath| -> Vec<(String, u64)> {
-        p.steps()
-            .iter()
-            .map(|s| (s.block_name.clone(), s.insert_handle.get()))
-            .collect()
-    };
-    path(&pa.block_path)
-        .cmp(&path(&pb.block_path))
-        .then_with(|| pa.handle.cmp(&pb.handle))
-        .then_with(|| ia.cmp(&ib))
-        .then_with(|| pa.class_name.cmp(&pb.class_name))
-        .then_with(|| pa.layer.cmp(&pb.layer))
-        .then_with(|| format!("{:?}", a.geometry).cmp(&format!("{:?}", b.geometry)))
+    key_cmp(
+        (&pa.block_path, pa.handle, ia),
+        (&pb.block_path, pb.handle, ib),
+    )
+    .then_with(|| pa.class_name.cmp(&pb.class_name))
+    .then_with(|| pa.layer.cmp(&pb.layer))
+    .then_with(|| format!("{:?}", a.geometry).cmp(&format!("{:?}", b.geometry)))
 }
 
 /// Orders and numbers one source's entities.
@@ -240,5 +255,58 @@ pub fn order_entities(
             basis,
             entities: count,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pvec::provider::{EntityStyle, ProvenanceStub, RawGeometry};
+
+    fn ent(handle: Option<u64>, path: InstancePath) -> RawEntity {
+        RawEntity {
+            style: EntityStyle::absent(),
+            geometry: RawGeometry::Unmapped {
+                reason: "fixture".into(),
+            },
+            provenance: ProvenanceStub {
+                handle: handle.map(ItemHandle::new),
+                class_name: "LINE".into(),
+                block_path: path,
+                layer: "0".into(),
+            },
+        }
+    }
+
+    // classify sorts positions with `key_cmp` instead of copying every entity, so the two have to
+    // give the same permutation. The fixture mixes nested and sibling paths, a path that is a
+    // prefix of another, repeated handles and missing ones.
+    #[test]
+    fn key_cmp_gives_the_permutation_canonical_cmp_gives() {
+        let a = InstancePath::root().child("B", ItemHandle::new(0x50));
+        let b = InstancePath::root().child("B", ItemHandle::new(0x51));
+        let c = InstancePath::root().child("A", ItemHandle::new(0x90));
+        let ab = a.child("C", ItemHandle::new(0x60));
+        let all = vec![
+            ent(Some(0x21), a.clone()),
+            ent(None, InstancePath::root()),
+            ent(Some(0x20), b.clone()),
+            ent(Some(0x20), a.clone()),
+            ent(Some(0x10), ab.clone()),
+            ent(Some(0x20), a.clone()),
+            ent(Some(0x05), c),
+            ent(Some(0x10), InstancePath::root()),
+            ent(Some(0x10), ab),
+            ent(None, b),
+        ];
+        let mut by_entity: Vec<usize> = (0..all.len()).collect();
+        by_entity.sort_by(|&x, &y| canonical_cmp(x as u64, &all[x], y as u64, &all[y]));
+        let mut by_key: Vec<usize> = (0..all.len()).collect();
+        let key = |i: usize| {
+            let p = &all[i].provenance;
+            (&p.block_path, p.handle, i as u64)
+        };
+        by_key.sort_by(|&x, &y| key_cmp(key(x), key(y)));
+        assert_eq!(by_key, by_entity);
     }
 }

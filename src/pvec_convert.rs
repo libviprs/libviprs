@@ -83,6 +83,7 @@ use crate::pvec::flatten::{
     BlockResolver, FlatEntity, FlattenBounds, FlattenError, LineageStore, SkipReason, SkippedInsert,
 };
 use crate::pvec::mapping::{kind_of, row_for};
+use crate::pvec::ordering::key_cmp;
 use crate::pvec::provenance::NoProvenance;
 use crate::pvec::publish::{PublishError, StreamedPublishError, publish, publish_streamed};
 use crate::pvec::report::{
@@ -95,9 +96,9 @@ use crate::pvec::writer::{
     write_geometry_to,
 };
 use crate::pvec::{
-    DwgProvider, EntityId, EntityScope, EntityStyle, ExcludedEntity, FidelityClass, OrderingPolicy,
-    ProvenanceStub, ProviderError, RawEntity, RawGeometry, SourceLimits, SourceUnit, ViewProfile,
-    ViewProfileError, canonical_cmp, order_entities, select_layout,
+    DwgProvider, EntityId, EntityScope, EntityStyle, ExcludedEntity, FidelityClass, ProvenanceStub,
+    ProviderError, RawEntity, RawGeometry, SourceLimits, SourceUnit, ViewProfile, ViewProfileError,
+    select_layout,
 };
 use crate::pvec::{Normalized2DGeometry, ViewedEntity};
 use crate::sync_queue::bounded;
@@ -454,6 +455,7 @@ impl<'a> PvecConversion<'a> {
         // the composed maps, so a flattened leaf is drawn when the view pass kept the same one.
         let kept: BTreeSet<(Option<u64>, String, String)> =
             view.included.iter().map(leaf_key).collect();
+        drop(view.included);
         let excluded_inserts: BTreeSet<u64> = view
             .excluded
             .iter()
@@ -461,7 +463,6 @@ impl<'a> PvecConversion<'a> {
             .collect();
 
         let mut items: Vec<Item<'_>> = Vec::new();
-        let mut raws: Vec<RawEntity> = Vec::new();
         for f in &flat.entities {
             let p = &f.entity.provenance;
             if kept.contains(&(
@@ -470,19 +471,10 @@ impl<'a> PvecConversion<'a> {
                 p.class_name.clone(),
             )) {
                 items.push(Item::Leaf(f));
-                raws.push(f.entity.clone());
             }
         }
-        for x in &view.excluded {
-            items.push(Item::Excluded(x));
-            raws.push(stub(
-                x.handle.map(|h| h.get()),
-                &x.class_name,
-                x.block_path.clone(),
-                &x.layer,
-                x.reason.code(),
-            ));
-        }
+        drop(kept);
+        items.extend(view.excluded.iter().map(Item::Excluded));
         for s in &flat.skipped {
             if s.insert_handle
                 .is_some_and(|h| excluded_inserts.contains(&h.get()))
@@ -490,21 +482,19 @@ impl<'a> PvecConversion<'a> {
                 continue;
             }
             items.push(Item::Skipped(s));
-            raws.push(stub(
-                s.insert_handle.map(|h| h.get()),
-                "INSERT",
-                s.block_path.clone(),
-                "",
-                s.reason.code(),
-            ));
         }
-        let encountered = raws.len() as u64;
+        let encountered = items.len() as u64;
 
-        // Ids are positions in the canonical order. `order_entities` hands the ids back without
-        // the permutation, so the same stable sort is run here to pair each id with its item.
-        let mut perm: Vec<usize> = (0..raws.len()).collect();
-        perm.sort_by(|&a, &b| canonical_cmp(a as u64, &raws[a], b as u64, &raws[b]));
-        let ordered = order_entities(provider.name(), "", &OrderingPolicy::new(), raws);
+        // Ids are positions in the canonical order, which is decided by block path, handle and
+        // arrival position alone (arrival positions are all different, so no later key is ever
+        // reached). Positions are sorted by those keys read in place, so no second copy of an
+        // entity is made to number them.
+        let mut perm: Vec<usize> = (0..items.len()).collect();
+        perm.sort_by(|&a, &b| {
+            let (pa, ha) = items[a].key();
+            let (pb, hb) = items[b].key();
+            key_cmp((pa, ha, a as u64), (pb, hb, b as u64))
+        });
 
         // The classifying side produces, a consumer thread turns each outcome into a row, a
         // record, a diagnostic and a tally entry. They meet in a bounded queue, so a slow consumer
@@ -519,7 +509,32 @@ impl<'a> PvecConversion<'a> {
                     failure = Some(PvecConvertError::Cancelled);
                     break;
                 }
-                let raw = &ordered.entities[n].entity;
+                // A leaf is classified where it sits; an excluded or skipped one has no entity of
+                // its own, so its stand-in is made for the moment it is classified.
+                let stand_in;
+                let raw: &RawEntity = match &items[at] {
+                    Item::Leaf(f) => &f.entity,
+                    Item::Excluded(x) => {
+                        stand_in = stub(
+                            x.handle.map(|h| h.get()),
+                            &x.class_name,
+                            x.block_path.clone(),
+                            &x.layer,
+                            x.reason.code(),
+                        );
+                        &stand_in
+                    }
+                    Item::Skipped(s) => {
+                        stand_in = stub(
+                            s.insert_handle.map(|h| h.get()),
+                            "INSERT",
+                            s.block_path.clone(),
+                            "",
+                            s.reason.code(),
+                        );
+                        &stand_in
+                    }
+                };
                 let done = match classify_item(&items[at], raw, gate) {
                     Ok(done) => done,
                     Err(e) => {
@@ -533,7 +548,7 @@ impl<'a> PvecConversion<'a> {
                     d.source = Some(source_name.clone());
                 }
                 let outcome = Outcome {
-                    id: ordered.entities[n].id,
+                    id: EntityId::at(n as u64),
                     handle: raw.provenance.handle.map(|h| h.get()),
                     done,
                     diagnostic,
@@ -881,6 +896,17 @@ enum Item<'a> {
     Leaf(&'a FlatEntity),
     Excluded(&'a ExcludedEntity),
     Skipped(&'a SkippedInsert),
+}
+
+impl Item<'_> {
+    /// The block path and handle the canonical order starts from.
+    fn key(&self) -> (&crate::pvec::InstancePath, Option<crate::cad::ItemHandle>) {
+        match self {
+            Item::Leaf(f) => (&f.entity.provenance.block_path, f.entity.provenance.handle),
+            Item::Excluded(x) => (&x.block_path, x.handle),
+            Item::Skipped(s) => (&s.block_path, s.insert_handle),
+        }
+    }
 }
 
 /// One entity's outcome: its class, its record (with geometry when it has any) and the warnings.
