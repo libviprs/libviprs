@@ -195,6 +195,9 @@
 //! # Ok::<(), CadError>(())
 //! ```
 
+/// The default tile-path decoder, over acadrust (feature `dwg-acadrust`), pure Rust.
+#[cfg(feature = "dwg-acadrust")]
+pub mod acadrust;
 #[cfg(feature = "dwg-acadsharp")]
 pub mod acadsharp;
 mod decoder;

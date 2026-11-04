@@ -151,6 +151,70 @@ fn stack(arg: &str) -> String {
     arg.to_owned()
 }
 
+/// Decodes the transport escapes the native reader hands through, so the string
+/// a [`Text`] carries is the one a person reads.
+///
+/// `\U+XXXX` (MIF) becomes the character, and `%%c`, `%%d` and `%%p` become
+/// the diameter, degree and plus-minus signs. Anything else that looks like an
+/// escape is left alone for [`Text::new`] to refuse, which reports it: a gap
+/// that is visible beats a guess. `\\U+XXXX` is a literal backslash followed by
+/// `U+XXXX` and is not touched, which is the same rule `undecoded_escape`
+/// applies.
+#[cfg(any(feature = "dwg-acadsharp", feature = "dwg-acadrust"))]
+pub(crate) fn decode_escapes(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    let mut copied = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' if bytes.get(i + 1) == Some(&b'\\') => {
+                i += 2;
+            }
+            b'\\' if bytes.get(i + 1) == Some(&b'U') && bytes.get(i + 2) == Some(&b'+') => {
+                let hex = text.get(i + 3..i + 7);
+                let ch = hex
+                    .filter(|h| h.bytes().all(|b| b.is_ascii_hexdigit()))
+                    .and_then(|h| u32::from_str_radix(h, 16).ok())
+                    .and_then(char::from_u32);
+                if let Some(ch) = ch {
+                    out.push_str(&text[copied..i]);
+                    out.push(ch);
+                    i += 7;
+                    copied = i;
+                } else {
+                    i += 3;
+                }
+            }
+            b'%' if bytes.get(i + 1) == Some(&b'%') => {
+                let ch = match bytes.get(i + 2) {
+                    Some(b'c' | b'C') => Some('\u{2205}'),
+                    Some(b'd' | b'D') => Some('\u{b0}'),
+                    Some(b'p' | b'P') => Some('\u{b1}'),
+                    _ => None,
+                };
+                if let Some(ch) = ch {
+                    out.push_str(&text[copied..i]);
+                    out.push(ch);
+                    i += 3;
+                    copied = i;
+                } else {
+                    // `%%%` is a literal percent; step over all three so the
+                    // `%%c` hiding in `%%%c` is not read as a code.
+                    i += if bytes.get(i + 2) == Some(&b'%') {
+                        3
+                    } else {
+                        2
+                    };
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    out.push_str(&text[copied..]);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,5 +324,32 @@ mod tests {
         assert!(display_text(r"\A1;").is_blank());
         assert!(display_text("  \\P ").is_blank());
         assert!(!display_text("x").is_blank());
+    }
+}
+
+#[cfg(all(test, any(feature = "dwg-acadsharp", feature = "dwg-acadrust")))]
+mod escape_tests {
+    use super::decode_escapes;
+
+    #[test]
+    fn mif_and_percent_codes_decode() {
+        assert_eq!(decode_escapes(r"90\U+00B0"), "90\u{b0}");
+        assert_eq!(decode_escapes("%%c45,6"), "\u{2205}45,6");
+        assert_eq!(decode_escapes("%%d %%P"), "\u{b0} \u{b1}");
+        assert_eq!(decode_escapes(r"\U+2205\U+0041"), "\u{2205}A");
+    }
+
+    #[test]
+    fn a_doubled_backslash_and_a_literal_percent_are_left_alone() {
+        assert_eq!(decode_escapes(r"\\U+0041"), r"\\U+0041");
+        assert_eq!(decode_escapes("%%%c"), "%%%c");
+    }
+
+    #[test]
+    fn what_cannot_be_decoded_is_left_for_the_constructor_to_refuse() {
+        assert_eq!(decode_escapes(r"\U+12"), r"\U+12");
+        assert_eq!(decode_escapes(r"\U+D800"), r"\U+D800");
+        assert_eq!(decode_escapes("%%127"), "%%127");
+        assert_eq!(decode_escapes("plain é text"), "plain é text");
     }
 }

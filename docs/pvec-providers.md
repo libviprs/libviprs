@@ -8,9 +8,11 @@ seam names a reader.
 * **acadrust** is the default provider and the only one Epic N builds on (`pvec::dwg_acadrust::AcadrustProvider`,
   feature `dwg-acadrust`). It is pure Rust, needs no native library and is the provider every test and
   every report names first. The decision is on the closed #1239.
+* The tile path reads acadrust by default too: `cad::acadrust::AcadrustDecoder` is a `cad::CadDecoder` over
+  `AcadrustProvider`, and `vector::convert::default_decoder` returns it.
 * **acadsharp-rs** is opt-in, experimental and documented as such. It is the ACadSharp decoder behind
-  `cad::CadDecoder` (the tile path), reached only through the feature `dwg-acadsharp`, which is off by
-  default and is not enabled by any other feature. It owns a native library, so a build with the feature
+  `cad::CadDecoder` (the tile path), chosen with `decoder_for(ProviderKind::AcadSharp, ..)` and reached only
+  through the feature `dwg-acadsharp`, which is off by default and is not enabled by any other feature. It owns a native library, so a build with the feature
   off never fetches or links it. It is not a `pvec::DwgProvider` today: a second `DwgProvider` over it
   waits on libviprs-dep#161 and a released wire version 3.
 * Cargo's default feature set includes `dwg-acadrust` and nothing else, so `cargo build` has the
