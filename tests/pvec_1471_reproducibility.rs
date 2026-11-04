@@ -120,3 +120,88 @@ fn n_1471_no_geometry_libviprs_computes_goes_through_libm_hypot() {
         "libm hypot is architecture-dependent in the last bit: {offenders:?}"
     );
 }
+
+/// #1513: the digest rows are Linux rows. On a Mac the two bit-exact tests are ignored, and the
+/// attribute says why, so the skip is a visible decision and not a quiet cfg.
+#[test]
+#[cfg_attr(miri, ignore)] // reads files
+fn n_1513_the_bit_exact_digest_tests_are_gated_to_linux() {
+    for (file, name) in [
+        (
+            "tests/pvec_drift.rs",
+            "n_1471_the_digest_of_every_converted_fixture_matches_the_committed_one",
+        ),
+        (
+            "tests/pvec_gate_determinism.rs",
+            "n2_8_1060_the_digest_of_every_conversion_matches_the_checked_in_baseline",
+        ),
+    ] {
+        let text = std::fs::read_to_string(root().join(file)).unwrap();
+        let before = text
+            .split(&format!("fn {name}("))
+            .next()
+            .unwrap_or_else(|| panic!("{file} has no {name}"));
+        let attrs: Vec<&str> = before
+            .lines()
+            .rev()
+            .take_while(|l| l.starts_with('#'))
+            .collect();
+        assert!(
+            attrs.iter().any(|l| l.contains(
+                "cfg_attr(not(target_os = \"linux\"), ignore = \"bit-exact Linux rows, #1513\")"
+            )),
+            "{file}: {name} must be ignored off Linux with the reason `bit-exact Linux rows, #1513`, got {attrs:?}"
+        );
+    }
+}
+
+#[test]
+#[cfg_attr(miri, ignore)] // reads files
+fn n_1513_the_other_pvec_gates_are_not_gated_by_os() {
+    // Only the two digest tests are bit-exact. The policy-tolerance checks keep running on a Mac.
+    for file in ["tests/pvec_drift.rs", "tests/pvec_gate_determinism.rs"] {
+        let text = std::fs::read_to_string(root().join(file)).unwrap();
+        assert_eq!(
+            text.matches("not(target_os").count(),
+            1,
+            "{file}: exactly one test is gated by OS"
+        );
+    }
+}
+
+#[test]
+#[cfg_attr(miri, ignore)] // reads files
+fn n_1513_the_adr_records_what_a_mac_does() {
+    let text = adr();
+    let body = text
+        .split("## macOS")
+        .nth(1)
+        .expect("the ADR has a `## macOS` section");
+    let body = body.split("\n## ").next().unwrap();
+    for needle in [
+        "#1513",
+        "Linux only",
+        "aarch64-apple-darwin",
+        "ulp",
+        "elliptical-arc-001",
+        "nonuniform-scale-rotated-001",
+        "general-affine-chain-001",
+        "libm",
+    ] {
+        assert!(
+            body.contains(needle),
+            "the macOS section does not mention {needle}"
+        );
+    }
+}
+
+#[test]
+#[cfg_attr(miri, ignore)] // reads files
+fn n_1513_the_drift_doc_says_the_digest_tests_are_linux_only() {
+    let doc = std::fs::read_to_string(root().join("docs/pvec-drift-check.md")).unwrap();
+    assert!(
+        doc.contains("#1513") && doc.contains("Linux only"),
+        "docs/pvec-drift-check.md must say the digest tests are Linux only (#1513)"
+    );
+    assert!(!doc.contains('\u{2014}'), "no em dashes");
+}
