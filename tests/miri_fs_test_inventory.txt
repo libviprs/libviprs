@@ -643,6 +643,11 @@ annotated   not-detected tests/pvec_1439_view_limits.rs::the_default_limits_stil
 annotated   fs-detected  tests/pvec_1437_fuzz_seeds.rs::the_clip_seed_corpus_runs_clean
 annotated   fs-detected  tests/pvec_1437_fuzz_seeds.rs::the_provider_seed_corpus_runs_clean
 annotated   fs-detected  tests/pvec_1437_fuzz_seeds.rs::the_spline_seed_corpus_runs_clean
+annotated   fs-detected  tests/pvec_1481_memory.rs::the_baseline_has_a_stage_row_per_scale_with_every_stage
+annotated   fs-detected  tests/pvec_1481_memory.rs::the_document_says_what_the_open_alone_costs
+annotated   fs-detected  tests/pvec_1481_memory.rs::the_provider_rows_carry_what_opening_alone_costs
+annotated   fs-detected  tests/pvec_1481_memory.rs::the_stage_rows_are_consistent_with_themselves
+annotated   fs-detected  tests/pvec_1481_memory.rs::the_stage_table_agrees_with_the_baseline
 annotated   fs-detected  tests/pvec_api_surface.rs::issue_1093_components_name_no_provider_specific_type
 annotated   fs-detected  tests/pvec_1446_write_refusal.rs::a_drawing_with_one_unstorable_curve_still_converts_the_rest
 annotated   fs-detected  tests/pvec_1446_write_refusal.rs::the_report_counts_each_entity_pvec_refused_against_that_entity
