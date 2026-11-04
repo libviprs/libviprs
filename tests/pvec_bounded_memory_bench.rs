@@ -18,6 +18,10 @@
 //! LIBVIPRS_BENCH_HOST=mars cargo test --release --features pvec-convert \
 //!     --test pvec_bounded_memory_bench -- --ignored --nocapture bounded_memory_bench
 //! ```
+//!
+//! `bounded_memory_stages_bench` splits the direct conversion's tracked peak by stage (open, view,
+//! flatten, classify, write, report) on `large_industrial` at three scales, through
+//! `common/pvec_stages.rs` (#1515, slice of #1481).
 
 #![cfg(all(feature = "pvec-convert", feature = "dwg-acadrust"))]
 
@@ -25,6 +29,8 @@
 mod pvec_alloc;
 #[path = "common/pvec_bench.rs"]
 mod pvec_bench;
+#[path = "common/pvec_stages.rs"]
+mod pvec_stages;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -374,4 +380,99 @@ fn bounded_memory_bench() {
         }
     }
     assert!(regressions.is_empty(), "{}", regressions.join("\n"));
+}
+
+/// Child: split one conversion's tracked heap by stage and print the figures.
+#[test]
+#[cfg_attr(miri, ignore)]
+#[ignore = "a child of bounded_memory_stages_bench"]
+fn bounded_memory_stages_child() {
+    let bytes = std::fs::read(env("LIBVIPRS_BM_FILE")).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let dest = dir.path().join("out.pvec");
+    let figures = pvec_stages::measure(&bytes, &dest, SourceUnit::Meters);
+    println!("CHILD {figures}");
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+#[ignore = "takes numbers: needs a quiet host, run with --ignored --nocapture"]
+fn bounded_memory_stages_bench() {
+    let platform = platform().unwrap_or_else(|e| panic!("refusing to run: {e}"));
+    let before = require_quiet(30, Duration::from_secs(20))
+        .unwrap_or_else(|e| panic!("refusing to run: {e}"));
+    let dir = tempfile::tempdir().unwrap();
+    let cell = "large_industrial";
+    let mut map = serde_json::Map::new();
+    for scale in [0.5, 1.0, 2.0] {
+        let f = file(dir.path(), cell, scale);
+        child(
+            "bounded_memory_gen",
+            &[
+                ("LIBVIPRS_BM_CELL", cell.to_string()),
+                ("LIBVIPRS_BM_SCALE", scale.to_string()),
+                ("LIBVIPRS_BM_FILE", f.display().to_string()),
+            ],
+        );
+        let runs: Vec<Value> = (0..3)
+            .map(|_| {
+                let text = child(
+                    "bounded_memory_stages_child",
+                    &[("LIBVIPRS_BM_FILE", f.display().to_string())],
+                );
+                let line = text
+                    .lines()
+                    .find_map(|l| l.split_once("CHILD ").map(|x| x.1))
+                    .unwrap_or_else(|| panic!("no CHILD line in the output of the child: {text}"));
+                serde_json::from_str(line).unwrap()
+            })
+            .collect();
+        // The largest of the three runs per figure, as the other rows do, so a held figure never
+        // exceeds its peak and the total is still the largest stage peak.
+        let mut stages = serde_json::Map::new();
+        for name in pvec_stages::STAGES {
+            let top = |col: &str| {
+                runs.iter()
+                    .map(|r| r["stages"][name][col].as_u64().unwrap())
+                    .max()
+                    .unwrap()
+            };
+            stages.insert(
+                name.to_owned(),
+                json!({"held": top("held"), "peak": top("peak")}),
+            );
+        }
+        let tracked = stages
+            .values()
+            .map(|v| v["peak"].as_u64().unwrap())
+            .max()
+            .unwrap();
+        let row = json!({
+            "bench": "bounded_memory_stages",
+            "strategy": "direct",
+            "cell": cell,
+            "scale": scale,
+            "entities": runs[0]["entities"],
+            "stages": stages,
+            "tracked_peak": tracked,
+            "platform": platform,
+        });
+        println!("ROW {row}");
+        map.insert(
+            format!("bounded_memory_stages/direct/{cell}/x{scale:?}/{platform}"),
+            row,
+        );
+    }
+    let after = host_load().unwrap_or(f64::MAX);
+    assert!(
+        after < host_cpus() as f64,
+        "discarding the run: the one-minute load rose to {after} (it was {before})"
+    );
+    if let Ok(out) = std::env::var("LIBVIPRS_BENCH_BASELINE_OUT") {
+        std::fs::write(
+            &out,
+            serde_json::to_string_pretty(&json!({"schema": 1, "rows": map})).unwrap(),
+        )
+        .unwrap();
+    }
 }

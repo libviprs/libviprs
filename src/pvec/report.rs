@@ -240,7 +240,8 @@ pub struct ComponentsSummary {
     pub streams: Vec<String>,
     /// Rows left out because PVec cannot hold them, keyed `stream.reason` (`layer.name-too-long`).
     pub dropped: BTreeMap<String, u64>,
-    /// DWG colour indices seen and dropped under the monochrome policy.
+    /// DWG colour indices seen and dropped under the monochrome policy. Counted only when the line style
+    /// stream is selected, because that is the pass that reads an entity's style.
     pub colours_ignored: u64,
     /// The region step, when it ran (#1526).
     #[serde(default, skip_serializing_if = "Option::is_none")]

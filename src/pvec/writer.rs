@@ -362,9 +362,7 @@ impl OpenArtifact {
             refused: self.refused,
         })
     }
-}
 
-impl OpenArtifact {
     /// Seals the artifact straight into `out`, as [`write_geometry_to`] does: a cancel is seen at every
     /// write, and `on_chunk` hears each one. The writer must have been opened with a spill config.
     ///
