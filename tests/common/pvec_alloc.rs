@@ -64,6 +64,11 @@ pub struct Mark {
     total: u64,
 }
 
+/// The live heap now, in bytes.
+pub fn live() -> u64 {
+    LIVE.load(Ordering::Relaxed)
+}
+
 /// Starts a measurement.
 pub fn mark() -> Mark {
     let live = LIVE.load(Ordering::Relaxed);
