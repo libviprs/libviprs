@@ -12,7 +12,10 @@
 //!
 //! # What crosses, and what is said about the rest
 //!
-//! Lines, polylines (bulges verbatim), arcs, circles, ellipses, splines and text cross. The
+//! Lines, polylines (bulges verbatim), arcs, circles, ellipses, splines and text cross. So do the
+//! loops of a HATCH (as polygons, when their edges are straight, circular or a polyline), the
+//! lines of a LEADER or MULTILEADER, the text of a MULTILEADER or TOLERANCE, and the visible
+//! attributes of an INSERT. The
 //! block transform of an INSERT is applied to the geometry, so a primitive from an expanded
 //! INSERT already sits in the view's coordinates ([`Origin::from_expanded_insert`] says so).
 //! A transform that keeps shapes (a rotation, a uniform scale, a mirror) is exact for every
@@ -21,7 +24,7 @@
 //! [`DiagnosticCode::NON_UNIFORM_BLOCK_SCALE`]: an arc that has become an ellipse is not an arc
 //! any more, and a made-up approximation would be a silent error.
 //!
-//! Anything this reader does not flatten (hatches, dimensions, leaders, solids, images...) is
+//! Anything this reader does not flatten (solids, points, mlines, images...) is
 //! reported with [`DiagnosticCode::UNSUPPORTED_ENTITY`] and its class name, never dropped
 //! quietly. An entity with an extrusion normal other than +Z inside an INSERT is reported the
 //! same way.
@@ -45,10 +48,10 @@ use std::collections::HashMap;
 use super::text::{decode_escapes, display_text};
 use super::{
     Arc, CadDecoder, CadDrawing, CadError, CadSource, CadView, Circle, DecodeReport, Diagnostic,
-    DiagnosticCode, Ellipse, ItemHandle, Line, Origin, Polyline, Primitive, PrimitiveSink, Spline,
-    Text,
+    DiagnosticCode, Ellipse, ItemHandle, Line, Origin, Polygon, Polyline, Primitive, PrimitiveSink,
+    Spline, Text,
 };
-use crate::pvec::dwg_acadrust::AcadrustProvider;
+use crate::pvec::dwg_acadrust::{AcadrustProvider, TextFact};
 use crate::pvec::flatten::{BlockResolver, FlatEntity, FlattenBounds, LineageStore, SkipReason};
 use crate::pvec::provenance::NoProvenance;
 use crate::pvec::{DwgProvider, EntityScope, InstancePath, LayoutKind, ProviderError, RawGeometry};
@@ -256,6 +259,7 @@ impl CadDrawing for AcadrustDrawing {
             report,
         };
         self.emit(&flat.entities, IDENTITY, true, &mut run)?;
+        self.emit_attributes(&EntityScope::Layout(layout.id), &mut run)?;
         report.mark_complete();
         sink.finish()
     }
@@ -324,6 +328,21 @@ impl AcadrustDrawing {
                 self.emit_dimension_block(&block, handle, leaf, matrix, run)?;
                 continue;
             }
+            if let Some((drawn, notes)) = convert_drawn(&self.provider, leaf, matrix) {
+                for p in drawn {
+                    let kind = p.kind();
+                    run.sink.primitive(p)?;
+                    run.report.record(kind);
+                }
+                for d in notes {
+                    let mut d = d.with_view(run.view);
+                    if let Some(h) = prov.handle {
+                        d = d.with_entity(h);
+                    }
+                    run.report.push(d);
+                }
+                continue;
+            }
             match convert(&self.provider, leaf, matrix) {
                 Ok(Some(p)) => {
                     let kind = p.kind();
@@ -337,6 +356,39 @@ impl AcadrustDrawing {
                         d = d.with_entity(h);
                     }
                     run.report.push(d);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The visible attributes of each INSERT that sits directly in the view. The block walk
+    /// expands an INSERT into its definition's entities, which do not include the attribute
+    /// values the INSERT carries, so they are read from the INSERT itself. They are stored in the
+    /// view's own coordinates.
+    fn emit_attributes(&self, scope: &EntityScope, run: &mut Run<'_>) -> Result<(), CadError> {
+        let Ok(mut cursor) = self.provider.entities(scope) else {
+            return Ok(());
+        };
+        while let Ok(Some(e)) = cursor.next_entity() {
+            let (RawGeometry::Insert(_), Some(handle)) = (&e.geometry, e.provenance.handle) else {
+                continue;
+            };
+            let state = run.hidden.get(&handle).copied().unwrap_or_default();
+            if state.flag || state.layer {
+                continue;
+            }
+            let map = Map::new(IDENTITY);
+            let origin = Origin::from_handle(handle);
+            for fact in self.provider.attribute_texts(handle) {
+                match text_primitive(&fact, &map, origin, "ATTRIB") {
+                    Ok(Some(p)) => {
+                        let kind = p.kind();
+                        run.sink.primitive(p)?;
+                        run.report.record(kind);
+                    }
+                    Ok(None) => {}
+                    Err(d) => run.report.push(d.with_view(run.view).with_entity(handle)),
                 }
             }
         }
@@ -435,6 +487,124 @@ fn refused(code: DiagnosticCode, class: &str, why: &str) -> Diagnostic {
     Diagnostic::from_code(code, format!("{class}: {why}"))
 }
 
+/// Off the +Z plane, inside a block map, is a 3D placement this 2D map cannot carry.
+fn flat_normal(map: &Map, class: &str, n: [f64; 3]) -> Result<(), Diagnostic> {
+    if map.identity || is_plus_z(n) {
+        Ok(())
+    } else {
+        Err(refused(
+            DiagnosticCode::UNSUPPORTED_ENTITY,
+            class,
+            "an extrusion normal off +Z inside an INSERT",
+        ))
+    }
+}
+
+fn origin_of(leaf: &FlatEntity) -> Origin {
+    leaf.entity
+        .provenance
+        .handle
+        .map_or(Origin::UNKNOWN, Origin::from_handle)
+        .with_expanded_insert(!leaf.entity.provenance.block_path.is_root())
+}
+
+/// A TEXT, MTEXT, MULTILEADER, TOLERANCE or ATTRIB string as a [`Text`], or nothing when it
+/// shows no characters.
+fn text_primitive(
+    fact: &TextFact,
+    map: &Map,
+    origin: Origin,
+    class: &str,
+) -> Result<Option<Primitive>, Diagnostic> {
+    flat_normal(map, class, fact.normal)?;
+    let shown = if fact.multiline {
+        display_text(&fact.content).text
+    } else {
+        fact.content.clone()
+    };
+    let content = decode_escapes(&shown);
+    if content.trim().is_empty() {
+        return Ok(None);
+    }
+    let text = Text::new(
+        map.point(fact.position),
+        fact.height * map.scale,
+        map.angle(fact.rotation),
+        content,
+    )
+    .map_err(|e| e.to_diagnostic())?;
+    Ok(Some(text.with_origin(origin).into()))
+}
+
+/// What a HATCH, LEADER, MULTILEADER or TOLERANCE leaf draws, and what it says it left out, or
+/// [`None`] when the leaf is some other entity.
+fn convert_drawn(
+    provider: &AcadrustProvider,
+    leaf: &FlatEntity,
+    matrix: [f64; 6],
+) -> Option<(Vec<Primitive>, Vec<Diagnostic>)> {
+    if !matches!(leaf.entity.geometry, RawGeometry::Unmapped { .. }) {
+        return None;
+    }
+    let class = leaf.entity.provenance.class_name.as_str();
+    let fact = provider.drawn_fact(leaf.entity.provenance.handle?)?;
+    let (map, origin) = (Map::new(matrix), origin_of(leaf));
+    let (mut drawn, mut notes) = (Vec::new(), Vec::new());
+    for why in &fact.skipped {
+        notes.push(refused(DiagnosticCode::UNSUPPORTED_ENTITY, class, why));
+    }
+    if !fact.rings.is_empty() {
+        let bulged = fact.rings.iter().flatten().any(|v| v.bulge != 0.0);
+        if let Err(d) = flat_normal(&map, class, fact.normal) {
+            notes.push(d);
+        } else if !map.similarity && bulged {
+            notes.push(refused(
+                DiagnosticCode::NON_UNIFORM_BLOCK_SCALE,
+                class,
+                "an INSERT that scales X and Y unequally cannot carry a bulged hatch loop",
+            ));
+        } else {
+            let sign = if map.mirror { -1.0 } else { 1.0 };
+            let normal = if map.identity {
+                fact.normal
+            } else {
+                [0.0, 0.0, 1.0]
+            };
+            for ring in &fact.rings {
+                let points: Vec<[f64; 3]> = ring
+                    .iter()
+                    .map(|v| map.point([v.x, v.y, fact.elevation]))
+                    .collect();
+                let bulges: Vec<f64> = if bulged {
+                    ring.iter().map(|v| v.bulge * sign).collect()
+                } else {
+                    Vec::new()
+                };
+                match Polygon::new(&points, normal, &bulges) {
+                    Ok(p) => drawn.push(p.with_origin(origin).into()),
+                    Err(e) => notes.push(e.to_diagnostic()),
+                }
+            }
+        }
+    }
+    for stroke in &fact.strokes {
+        for pair in stroke.windows(2) {
+            match Line::new(map.point(pair[0]), map.point(pair[1])) {
+                Ok(l) => drawn.push(l.with_origin(origin).into()),
+                Err(e) => notes.push(e.to_diagnostic()),
+            }
+        }
+    }
+    for text in &fact.texts {
+        match text_primitive(text, &map, origin, class) {
+            Ok(Some(p)) => drawn.push(p),
+            Ok(None) => {}
+            Err(d) => notes.push(d),
+        }
+    }
+    Some((drawn, notes))
+}
+
 fn convert(
     provider: &AcadrustProvider,
     leaf: &FlatEntity,
@@ -443,11 +613,7 @@ fn convert(
     let entity = &leaf.entity;
     let class = entity.provenance.class_name.as_str();
     let map = Map::new(matrix);
-    let origin = entity
-        .provenance
-        .handle
-        .map_or(Origin::UNKNOWN, Origin::from_handle);
-    let origin = origin.with_expanded_insert(!entity.provenance.block_path.is_root());
+    let origin = origin_of(leaf);
     let bad = |e: CadError| e.to_diagnostic();
     let unmoved = |code, why: &str| refused(code, class, why);
     let curve = |what: &str| {
@@ -456,17 +622,7 @@ fn convert(
             &format!("an INSERT that scales X and Y unequally cannot carry {what}"),
         )
     };
-    // Off the +Z plane, inside a block map, is a 3D placement this 2D map cannot carry.
-    let flat_normal = |n: [f64; 3]| {
-        if map.identity || is_plus_z(n) {
-            Ok(())
-        } else {
-            Err(unmoved(
-                DiagnosticCode::UNSUPPORTED_ENTITY,
-                "an extrusion normal off +Z inside an INSERT",
-            ))
-        }
-    };
+    let flat_normal = |n: [f64; 3]| flat_normal(&map, class, n);
     let primitive: Primitive = match &entity.geometry {
         RawGeometry::Line { start, end } => Line::new(map.point(*start), map.point(*end))
             .map_err(bad)?
@@ -616,22 +772,7 @@ fn convert(
             let Some(fact) = entity.provenance.handle.and_then(|h| provider.text_fact(h)) else {
                 return Err(unmoved(DiagnosticCode::UNSUPPORTED_ENTITY, reason));
             };
-            flat_normal(fact.normal)?;
-            let shown = if fact.multiline {
-                display_text(&fact.content).text
-            } else {
-                fact.content.clone()
-            };
-            let content = decode_escapes(&shown);
-            if content.trim().is_empty() {
-                return Ok(None);
-            }
-            let rotation = map.angle(fact.rotation);
-            let at = map.point(fact.position);
-            Text::new(at, fact.height * map.scale, rotation, content)
-                .map_err(bad)?
-                .with_origin(origin)
-                .into()
+            return text_primitive(&fact, &map, origin, class);
         }
         // `Insert` never reaches a leaf: the walk expanded it or listed it as skipped.
         _ => {

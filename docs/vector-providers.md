@@ -51,9 +51,8 @@ the native reader refuses anyway, is not opened.
 ## Building without it
 
 The `dwg-acadsharp` feature is off by default. A plain `cargo build` has the pure-Rust
-acadrust reader (the default `dwg-acadrust` feature, behind `pvec::DwgProvider`) and no
-native dependency. It has no tile-path decoder yet, since acadrust is not a `CadDecoder`
-(libviprs#1485). `--no-default-features` drops acadrust too, for a build with no DWG
+acadrust reader (the default `dwg-acadrust` feature, behind `pvec::DwgProvider` and the
+tile-path `CadDecoder`) and no native dependency. `--no-default-features` drops acadrust too, for a build with no DWG
 reader at all, and everything that does not read a DWG still works:
 
 ```text
@@ -66,8 +65,9 @@ cargo build --no-default-features        # no DWG reader at all
 whenever `dwg-acadrust` is on, which it is by default, and needs no native library. With both
 features on, acadrust still wins; `vector::convert::decoder_for(ProviderKind::AcadSharp, ..)`
 asks for ACadSharp by name. acadrust draws lines, polylines, arcs, circles, ellipses, splines
-and text, expands INSERTs and draws DIMENSIONs from their blocks, and reports every other
-entity class it does not flatten (hatches, multileaders, solids, points and the rest) as an
+and text, hatch loops as polygons, leader lines, multileader and tolerance text and block
+attributes, expands INSERTs and draws DIMENSIONs from their blocks, and reports every other
+entity class it does not flatten (solids, points, mlines and the rest) as an
 `UNSUPPORTED_ENTITY` diagnostic instead of dropping it quietly.
 
 Without `dwg-acadrust` and without `dwg-acadsharp`:

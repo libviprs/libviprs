@@ -105,6 +105,115 @@ pub struct TextFact {
     pub normal: Point3,
 }
 
+/// What a HATCH, LEADER, MULTILEADER or TOLERANCE draws, read by handle for the
+/// `cad::CadDecoder` over this provider. Like [`TextFact`], these classes come through the cursor
+/// as `Unmapped`, so the decoder asks for their geometry here.
+///
+/// Hatch rings are in the hatch's own plane at `elevation`; strokes and texts are as stored.
+#[derive(Debug, Clone, Default)]
+pub struct DrawnFact {
+    /// One closed ring per hatch boundary loop made of straight and circular spans, with the
+    /// bulge of the span leaving each vertex.
+    pub rings: Vec<Vec<RawVertex>>,
+    /// The plane height of the hatch rings.
+    pub elevation: f64,
+    /// The hatch's extrusion normal.
+    pub normal: Point3,
+    /// Open runs of points: a leader's lines.
+    pub strokes: Vec<Vec<Point3>>,
+    /// Text the entity shows.
+    pub texts: Vec<TextFact>,
+    /// What the entity has that this reading leaves out, each in a sentence.
+    pub skipped: Vec<String>,
+}
+
+/// A circular boundary edge as its start point, end point and the bulge of the span, or
+/// [`None`] for a degenerate or full-circle edge.
+fn arc_span(e: &acr::entities::CircularArcEdge) -> Option<([f64; 2], [f64; 2], f64)> {
+    use std::f64::consts::TAU;
+    let (a0, a1) = if e.counter_clockwise {
+        (e.start_angle, e.end_angle)
+    } else {
+        (-e.start_angle, -e.end_angle)
+    };
+    let sweep = if e.counter_clockwise {
+        (a1 - a0).rem_euclid(TAU)
+    } else {
+        -((a0 - a1).rem_euclid(TAU))
+    };
+    if e.radius.is_nan() || e.radius <= 0.0 || sweep == 0.0 {
+        return None;
+    }
+    let at = |a: f64| {
+        [
+            e.center.x + e.radius * a.cos(),
+            e.center.y + e.radius * a.sin(),
+        ]
+    };
+    Some((at(a0), at(a1), (sweep / 4.0).tan()))
+}
+
+fn hatch_rings(h: &acr::entities::Hatch, out: &mut DrawnFact) {
+    use acr::entities::BoundaryEdge;
+    out.elevation = h.elevation;
+    out.normal = p3(h.normal);
+    for (n, path) in h.paths.iter().enumerate() {
+        let mut ring: Vec<RawVertex> = Vec::new();
+        let mut end: Option<[f64; 2]> = None;
+        let mut whole = true;
+        for edge in &path.edges {
+            let span = match edge {
+                BoundaryEdge::Polyline(pl) => {
+                    ring.extend(pl.vertices.iter().map(|v| RawVertex {
+                        x: v.x,
+                        y: v.y,
+                        bulge: v.z,
+                    }));
+                    end = pl.vertices.last().map(|v| [v.x, v.y]);
+                    continue;
+                }
+                BoundaryEdge::Line(l) => Some(([l.start.x, l.start.y], [l.end.x, l.end.y], 0.0)),
+                BoundaryEdge::CircularArc(a) => arc_span(a),
+                BoundaryEdge::EllipticArc(_) | BoundaryEdge::Spline(_) => None,
+            };
+            let Some((from, to, bulge)) = span else {
+                whole = false;
+                break;
+            };
+            // Edges run head to tail, so a gap means this reading would draw a wrong shape.
+            let tolerance = 1e-6 * (1.0 + from[0].abs().max(from[1].abs()));
+            if end.is_some_and(|e| {
+                (e[0] - from[0]).abs() > tolerance || (e[1] - from[1]).abs() > tolerance
+            }) {
+                whole = false;
+                break;
+            }
+            ring.push(RawVertex {
+                x: from[0],
+                y: from[1],
+                bulge,
+            });
+            end = Some(to);
+        }
+        if whole && ring.len() >= 2 {
+            out.rings.push(ring);
+        } else {
+            out.skipped.push(format!(
+                "boundary loop {n} has elliptic or spline edges, or edges that do not join"
+            ));
+        }
+    }
+}
+
+/// The angle of `along`, or `fallback` when it has no direction in the plane.
+fn angle_of(along: acr::Vector3, fallback: f64) -> f64 {
+    if along.x == 0.0 && along.y == 0.0 {
+        fallback
+    } else {
+        along.y.atan2(along.x)
+    }
+}
+
 /// The first provider.
 pub struct AcadrustProvider {
     doc: acr::CadDocument,
@@ -173,6 +282,76 @@ impl AcadrustProvider {
             }),
             _ => None,
         }
+    }
+
+    /// What the HATCH, LEADER, MULTILEADER or TOLERANCE with this handle draws, or [`None`] for
+    /// any other entity.
+    #[must_use]
+    pub fn drawn_fact(&self, handle: ItemHandle) -> Option<DrawnFact> {
+        let mut out = DrawnFact::default();
+        match self.doc.get_entity(acr::Handle::new(handle.get()))? {
+            EntityType::Hatch(h) => hatch_rings(h, &mut out),
+            EntityType::Leader(l) => out
+                .strokes
+                .push(l.vertices.iter().copied().map(p3).collect()),
+            EntityType::MultiLeader(m) => {
+                let c = &m.context;
+                // A leader line is stored as its points from the arrow tip; it ends at the root's
+                // connection point, where the text or block attaches.
+                for root in &c.leader_roots {
+                    for line in &root.lines {
+                        let mut run: Vec<Point3> = line.points.iter().copied().map(p3).collect();
+                        run.push(p3(root.connection_point));
+                        out.strokes.push(run);
+                    }
+                }
+                if c.has_text_contents && !c.text_string.is_empty() {
+                    out.texts.push(TextFact {
+                        position: p3(c.text_location),
+                        height: c.text_height,
+                        rotation: angle_of(c.text_direction, c.text_rotation),
+                        content: c.text_string.clone(),
+                        multiline: true,
+                        normal: p3(c.text_normal),
+                    });
+                }
+                if c.has_block_contents {
+                    out.skipped.push("its block content is not drawn".into());
+                }
+            }
+            EntityType::Tolerance(t) => out.texts.push(TextFact {
+                position: p3(t.insertion_point),
+                height: t.text_height,
+                rotation: angle_of(t.direction, 0.0),
+                content: t.text.clone(),
+                multiline: true,
+                normal: p3(t.normal),
+            }),
+            _ => return None,
+        }
+        Some(out)
+    }
+
+    /// The text of the visible attributes of the INSERT with this handle, in the coordinates the
+    /// INSERT sits in.
+    #[must_use]
+    pub fn attribute_texts(&self, handle: ItemHandle) -> Vec<TextFact> {
+        let Some(EntityType::Insert(i)) = self.doc.get_entity(acr::Handle::new(handle.get()))
+        else {
+            return Vec::new();
+        };
+        i.attributes
+            .iter()
+            .filter(|a| a.is_visible())
+            .map(|a| TextFact {
+                position: p3(a.insertion_point),
+                height: a.height,
+                rotation: a.rotation,
+                content: a.value.clone(),
+                multiline: false,
+                normal: p3(a.normal),
+            })
+            .collect()
     }
 
     /// The anonymous block a DIMENSION entity draws itself from, which holds its lines and text.
@@ -756,5 +935,52 @@ impl AcadrustCursor<'_> {
             provenance,
             style,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::arc_span;
+    use acadrust::entities::CircularArcEdge;
+    use acadrust::types::Vector2;
+    use std::f64::consts::{FRAC_PI_2, PI};
+
+    fn edge(start: f64, end: f64, counter_clockwise: bool) -> CircularArcEdge {
+        CircularArcEdge {
+            center: Vector2 { x: 0.0, y: 0.0 },
+            radius: 2.0,
+            start_angle: start,
+            end_angle: end,
+            counter_clockwise,
+        }
+    }
+
+    #[test]
+    fn a_counter_clockwise_quarter_turn_has_a_bulge_of_tan_an_eighth() {
+        let (from, to, bulge) = arc_span(&edge(0.0, FRAC_PI_2, true)).unwrap();
+        assert!((from[0] - 2.0).abs() < 1e-12 && from[1].abs() < 1e-12);
+        assert!(to[0].abs() < 1e-12 && (to[1] - 2.0).abs() < 1e-12);
+        assert!((bulge - (FRAC_PI_2 / 4.0).tan()).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_clockwise_edge_runs_from_the_negated_angles_and_bulges_negative() {
+        // Stored as 270 and 90 degrees, it runs clockwise from 90 to 270 degrees: a half turn
+        // through 0 degrees.
+        let (from, to, bulge) = arc_span(&edge(1.5 * PI, FRAC_PI_2, false)).unwrap();
+        assert!(
+            from[0].abs() < 1e-9 && (from[1] - 2.0).abs() < 1e-9,
+            "{from:?}"
+        );
+        assert!(to[0].abs() < 1e-9 && (to[1] + 2.0).abs() < 1e-9, "{to:?}");
+        assert!((bulge + 1.0).abs() < 1e-9, "{bulge}");
+    }
+
+    #[test]
+    fn an_edge_with_no_sweep_or_no_radius_is_not_a_span() {
+        assert!(arc_span(&edge(1.0, 1.0, true)).is_none());
+        let mut e = edge(0.0, 1.0, true);
+        e.radius = 0.0;
+        assert!(arc_span(&e).is_none());
     }
 }

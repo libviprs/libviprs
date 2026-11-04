@@ -271,10 +271,12 @@ The dependency is a git dependency while `acadsharp-rs` is unpublished, which
 means this crate cannot be published to crates.io until that line in the root
 `Cargo.toml` becomes a registry version.
 
+<!-- OWNER DECISION NEEDED: the sentence above promises a registry version, and acadrust is git-only by rule, so whether and how this crate is published to crates.io is undecided. Left as it was on purpose. -->
+
 ### `dwg-acadrust` is a pinned git dependency, and it is a default feature
 
 The default `dwg-acadrust` feature pulls `acadrust` (`--no-default-features` leaves it out), libviprs' fork of a pure-Rust DWG and
-DXF reader, for the first provider behind `pvec::DwgProvider` (issue #1072). It
+DXF reader, for the first provider behind `pvec::DwgProvider` (issue #1072) and for the tile-path decoder `cad::acadrust::AcadrustDecoder` (issue #1485). It
 declares no `links` key, has no native archive and loads nothing at run time, so
 `tests/dependency_policy.rs` has a host cell for it that adds no `links` entry and no
 vendored C beyond what the default cell already has. Being a default feature, it is in
