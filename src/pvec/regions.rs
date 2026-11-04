@@ -537,6 +537,12 @@ pub struct SemanticStream {
 /// segments are not written as geometry, so a reference to one would name an entity the artifact
 /// does not have. When nothing is left no stream is emitted.
 ///
+/// Both drops are decided, not gaps. Writing the closing segments would make the geometry differ
+/// with the step off (#1234 asks for byte-identical), so those rooms stay dropped and counted. PVec
+/// has no region kind for a face no rule labels, so `keep_unlabelled` faces are reported as
+/// `unlabelled` and not written; a kind for them is worth adding only when a consumer asks for
+/// regions on real drawings, and then it is a PVec change first.
+///
 /// # Errors
 ///
 /// [`ComponentsError::Refused`] when PVec's encoder refuses the payload.

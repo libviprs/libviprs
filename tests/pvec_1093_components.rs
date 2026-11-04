@@ -8,7 +8,7 @@
 
 use libviprs::CancelToken;
 use libviprs::cad::ItemHandle;
-use libviprs::pvec::components::{ComponentSource, StreamSelection, build_streams};
+use libviprs::pvec::components::{ComponentSource, StreamSelection, build_streams, source_handle};
 use libviprs::pvec::style::{DashPattern, LineStyleComponent};
 use libviprs::pvec::writer::{GeometryArtifact, WriteConfig, write_geometry};
 use libviprs::pvec::{
@@ -94,7 +94,8 @@ fn rows<'a>(f: &'a Fixture, styles: &'a [LineStyleComponent]) -> Vec<ComponentSo
         .enumerate()
         .map(|(i, (id, stub))| ComponentSource {
             id: *id,
-            stub,
+            layer: &stub.layer,
+            source: source_handle(stub),
             style: styles.get(i),
         })
         .collect()

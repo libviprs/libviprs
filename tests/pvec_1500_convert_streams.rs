@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 use libviprs::cad::CadSource;
 use libviprs::cad::ItemHandle;
-use libviprs::pvec::components::{ComponentSource, StreamSelection, build_streams};
+use libviprs::pvec::components::{ComponentSource, StreamSelection, build_streams, source_handle};
 use libviprs::pvec::publish::open_published;
 use libviprs::pvec::report::ConversionReport;
 use libviprs::pvec::style::{DwgStyleInput, dwg_line_style};
@@ -329,7 +329,8 @@ fn issue_1525_two_linetypes_with_the_same_dashes_keep_their_own_names_in_the_tab
         .zip(&styles)
         .map(|(o, s)| ComponentSource {
             id: o.id,
-            stub: &o.entity.provenance,
+            layer: &o.entity.provenance.layer,
+            source: source_handle(&o.entity.provenance),
             style: Some(s),
         })
         .collect();

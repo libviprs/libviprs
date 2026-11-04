@@ -4,7 +4,9 @@
 #![cfg(feature = "pvec-write")]
 
 use libviprs::cad::ItemHandle;
-use libviprs::pvec::components::{ComponentSource, DroppedRow, StreamSelection, build_streams};
+use libviprs::pvec::components::{
+    ComponentSource, DroppedRow, StreamSelection, build_streams, source_handle,
+};
 use libviprs::pvec::regions::{RegionConfig, WallEdge, derive_regions, semantic_stream};
 use libviprs::pvec::style::{DashPattern, LineStyleComponent};
 use libviprs::pvec::{
@@ -50,7 +52,8 @@ fn sources<'a>(
         .enumerate()
         .map(|(i, (id, stub))| ComponentSource {
             id: *id,
-            stub,
+            layer: &stub.layer,
+            source: source_handle(stub),
             style: styles.get(i),
         })
         .collect()

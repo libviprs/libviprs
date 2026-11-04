@@ -65,10 +65,23 @@ impl StreamSelection {
 pub struct ComponentSource<'a> {
     /// The entity's libviprs id.
     pub id: EntityId,
-    /// Where it came from, which also names its layer.
-    pub stub: &'a ProvenanceStub,
+    /// Its layer's name.
+    pub layer: &'a str,
+    /// The handle of the source entity it belongs to, from [`source_handle`]; `None` when the drawing
+    /// gave none, in which case the entity is its own source entity.
+    pub source: Option<u64>,
     /// Its line style, when the run computed one.
     pub style: Option<&'a LineStyleComponent>,
+}
+
+/// The handle of the source entity `stub` belongs to: the outermost INSERT when it was reached through
+/// one (every curve one INSERT instance flattens into shares it), else its own handle.
+#[must_use]
+pub fn source_handle(stub: &ProvenanceStub) -> Option<u64> {
+    match stub.block_path.steps().first() {
+        Some(step) => Some(step.insert_handle.get()),
+        None => stub.handle.map(ItemHandle::get),
+    }
 }
 
 /// A row or table entry left out of a stream because PVec cannot hold it.
@@ -139,14 +152,19 @@ pub fn build_streams(
     }
     let registry = Registry::v1();
     // The artifact's id for each libviprs id that was written.
-    let pvec_ids: BTreeMap<EntityId, PvecEntityId> = source_ids
+    // Sorted by libviprs id and searched, which costs 12 bytes an entity where a map costs several times that.
+    let mut pvec_ids: Vec<(EntityId, PvecEntityId)> = source_ids
         .iter()
         .enumerate()
         .filter_map(|(n, id)| Some((*id, PvecEntityId::new(u32::try_from(n).ok()?).ok()?)))
         .collect();
+    pvec_ids.sort_unstable_by_key(|(id, _)| *id);
     let written: Vec<(PvecEntityId, &ComponentSource<'_>)> = rows
         .iter()
-        .filter_map(|r| Some((*pvec_ids.get(&r.id)?, r)))
+        .filter_map(|r| {
+            let at = pvec_ids.binary_search_by_key(&r.id, |(id, _)| *id).ok()?;
+            Some((pvec_ids[at].1, r))
+        })
         .collect();
     let mut out = Vec::new();
     let mut stream_names = Vec::new();
@@ -162,7 +180,7 @@ pub fn build_streams(
         let mut index: BTreeMap<&str, u32> = BTreeMap::new();
         let mut assignments = Vec::with_capacity(written.len());
         for (id, r) in &written {
-            let name = r.stub.layer.as_str();
+            let name = r.layer;
             if name.len() > MAX_NAME {
                 skip(r, "layer", "name-too-long");
                 continue;
@@ -285,10 +303,7 @@ pub fn build_streams(
         let mut seen: BTreeSet<(Option<u64>, u64)> = BTreeSet::new();
         let mut records = Vec::new();
         for (id, r) in &written {
-            let handle = match r.stub.block_path.steps().first() {
-                Some(step) => Some(step.insert_handle.get()),
-                None => r.stub.handle.map(ItemHandle::get),
-            };
+            let handle = r.source;
             // An entity with no handle is its own source entity, keyed by its id.
             let key = match handle {
                 Some(h) => (Some(h), 0),

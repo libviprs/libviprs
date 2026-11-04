@@ -11,7 +11,7 @@ use std::time::Instant;
 
 use libviprs::CancelToken;
 use libviprs::cad::ItemHandle;
-use libviprs::pvec::components::{ComponentSource, StreamSelection, build_streams};
+use libviprs::pvec::components::{ComponentSource, StreamSelection, build_streams, source_handle};
 use libviprs::pvec::style::{DashPattern, LineStyleComponent};
 use libviprs::pvec::writer::{WriteConfig, write_geometry};
 use libviprs::pvec::{
@@ -65,7 +65,8 @@ fn main() {
         .zip(&styles)
         .map(|((id, stub), style)| ComponentSource {
             id: *id,
-            stub,
+            layer: &stub.layer,
+            source: source_handle(stub),
             style: Some(style),
         })
         .collect();

@@ -50,7 +50,7 @@
 //!
 //! Needs the `pvec-convert` feature.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
@@ -74,7 +74,10 @@ use crate::CancelToken;
 use crate::cad::CadSource;
 use crate::observe::{EngineEvent, EngineObserver};
 use crate::pvec::bounds::BoundsReport;
-use crate::pvec::components::{ComponentSource, ComponentsError, StreamSelection, build_streams};
+use crate::pvec::classify::{ElementClass, ElementRules};
+use crate::pvec::components::{
+    ComponentSource, ComponentsError, StreamSelection, build_streams, source_handle,
+};
 use crate::pvec::diagnostics::{Diagnostic, DiagnosticCode};
 use crate::pvec::dwg_acadrust::AcadrustProvider;
 use crate::pvec::dwg_basic::{self, BasicError};
@@ -86,12 +89,14 @@ use crate::pvec::flatten::{
 use crate::pvec::mapping::{kind_of, row_for};
 use crate::pvec::provenance::NoProvenance;
 use crate::pvec::publish::{PublishError, StreamedPublishError, publish, publish_streamed};
-use crate::pvec::regions::RegionConfig;
+use crate::pvec::regions::{RegionConfig, WallEdge, derive_regions, semantic_stream};
 use crate::pvec::report::{
     BoundsSplit, CapabilitySummary, ComponentsSummary, ConversionReport, EntityRow, RegionsSummary,
     ReportBuilder, ReportError, UnresolvedXrefRow, ViewSummary, XrefSummary,
 };
-use crate::pvec::style::{LineStyleComponent, StyleReport, dwg_line_style, dwg_style_input};
+use crate::pvec::style::{
+    DwgStyleInput, LineStyleComponent, StyleReport, dwg_line_style, dwg_style_input,
+};
 use crate::pvec::transform::{ComposedTransform, promote};
 use crate::pvec::writer::{
     CapabilityId, LeafConfig, OpenArtifact, SpillConfig, WriteConfig, WriteError, open_geometry,
@@ -103,6 +108,7 @@ use crate::pvec::{
 };
 use crate::pvec::{Normalized2DGeometry, ViewedEntity};
 use crate::sync_queue::bounded;
+use pvec_geometry::{Curve, Curve2d};
 
 /// Entities per batch: the cancel token is looked at, and a progress event is sent, once per batch.
 const BATCH: usize = 256;
@@ -276,6 +282,7 @@ impl<'a> PvecConversion<'a> {
     /// Derive rooms and corridors from the `Wall` linework and write them as PVec's semantic class
     /// stream (#1526). `None` (the default) skips the step. The geometry is the same bytes either way:
     /// the door gaps the step closes are counted in the report and not written as segments.
+    /// Room labels come from text, which the provider does not report yet, so none are used.
     #[must_use]
     pub fn regions(mut self, config: Option<RegionConfig>) -> Self {
         self.regions = config;
@@ -434,6 +441,7 @@ impl<'a> PvecConversion<'a> {
             observer,
             queue_capacity,
             components,
+            regions,
             ..
         } = self;
         let observer = observer.as_deref();
@@ -538,6 +546,10 @@ impl<'a> PvecConversion<'a> {
         // makes the producer wait instead of letting outcomes pile up.
         let mut style_report = StyleReport::default();
         let mut style_bad = 0u64;
+        let mut tables = SideTables::default();
+        let rules = regions.is_some().then(ElementRules::default_profile);
+        let mut walls: Vec<WallEdge> = Vec::new();
+        let mut walls_skipped = 0u64;
         let (tx, rx) = bounded::<Outcome>(*queue_capacity);
         let sent = AtomicU64::new(0);
         let consumed = std::thread::scope(|scope| {
@@ -565,21 +577,66 @@ impl<'a> PvecConversion<'a> {
                 let side = (*components != StreamSelection::NONE
                     && done.geometry.geometry().is_some())
                 .then(|| {
-                    let style = components.line_style.then(|| {
+                    let layer = match tables.layer_ix.get(raw.provenance.layer.as_str()) {
+                        Some(n) => *n,
+                        None => {
+                            let n = u32::try_from(tables.layers.len()).unwrap_or(u32::MAX);
+                            tables.layers.push(raw.provenance.layer.clone());
+                            tables.layer_ix.insert(raw.provenance.layer.clone(), n);
+                            n
+                        }
+                    };
+                    let mut style = NO_STYLE;
+                    if components.line_style {
                         let input = dwg_style_input(&raw.style, true);
                         style_report.count_colour(
                             &raw.provenance.class_name,
                             u64::from(input.colour_index.is_some()),
                         );
-                        let c = dwg_line_style(id, &input).ok();
-                        style_bad += u64::from(c.is_none());
-                        c
-                    });
+                        // Entities mostly share a style, so the last one seen is tried first and the
+                        // table is searched by the style's exact spelling after that.
+                        style = match &tables.last {
+                            Some((last, n)) if *last == input => *n,
+                            _ => {
+                                let key = format!("{input:?}");
+                                let n = match tables.style_ix.get(&key) {
+                                    Some(n) => *n,
+                                    None => match dwg_line_style(id, &input) {
+                                        Ok(c) => {
+                                            let n = u32::try_from(tables.styles.len())
+                                                .unwrap_or(NO_STYLE - 1);
+                                            tables.styles.push(c);
+                                            tables.style_ix.insert(key, n);
+                                            n
+                                        }
+                                        Err(_) => NO_STYLE,
+                                    },
+                                };
+                                tables.last = Some((input, n));
+                                n
+                            }
+                        };
+                        style_bad += u64::from(style == NO_STYLE);
+                    }
                     Side {
-                        stub: lean_stub(&raw.provenance),
-                        style: style.flatten(),
+                        layer,
+                        source: source_handle(&raw.provenance),
+                        style,
                     }
                 });
+                if let Some(rules) = &rules
+                    && done.geometry.geometry().is_some()
+                    && rules.classify(raw).class == ElementClass::Wall
+                {
+                    match done.geometry.geometry().and_then(straight_edge) {
+                        Some((start, end)) => walls.push(WallEdge {
+                            entity: id,
+                            start,
+                            end,
+                        }),
+                        None => walls_skipped += 1,
+                    }
+                }
                 let outcome = Outcome {
                     id,
                     handle: raw.provenance.handle.map(|h| h.get()),
@@ -621,8 +678,11 @@ impl<'a> PvecConversion<'a> {
             diagnostics: consumed.diagnostics,
             peak_queue_depth: consumed.peak,
             sides: consumed.sides,
+            tables,
             style_report,
             style_bad,
+            walls,
+            walls_skipped,
         })
     }
 
@@ -644,8 +704,11 @@ impl<'a> PvecConversion<'a> {
             diagnostics,
             peak_queue_depth,
             sides,
+            tables,
             style_report,
             style_bad,
+            walls,
+            walls_skipped,
         } = self.classify(provider)?;
         let Self {
             dest,
@@ -766,8 +829,12 @@ impl<'a> PvecConversion<'a> {
                 .iter()
                 .map(|(id, s)| ComponentSource {
                     id: *id,
-                    stub: &s.stub,
-                    style: s.style.as_ref(),
+                    layer: tables
+                        .layers
+                        .get(s.layer as usize)
+                        .map_or("", String::as_str),
+                    source: s.source,
+                    style: tables.styles.get(s.style as usize),
                 })
                 .collect();
             let built = build_streams(select, open.source_ids(), &layers, &rows)
@@ -789,8 +856,34 @@ impl<'a> PvecConversion<'a> {
                     .dropped
                     .insert("line-style.bad-style".to_owned(), style_bad);
             }
-            open.components(built.streams, &cancel)
-                .map_err(write_error)?;
+            let mut streams = built.streams;
+            if let (Some(config), Some(found)) = (&regions, summary.regions.as_mut()) {
+                found.walls_skipped = walls_skipped;
+                match derive_regions(&walls, &[], &[], config) {
+                    Ok(r) => {
+                        found.rooms = r.report.rooms;
+                        found.corridors = r.report.corridors;
+                        found.gaps_closed = r.report.gaps_closed;
+                        found.unlabelled = r.report.unlabelled;
+                        // The closing segments are counted, never written: a region on one is left
+                        // out as `derived-boundary`, so the geometry is the same with the step off.
+                        let sem = semantic_stream(&r, open.source_ids())
+                            .map_err(PvecConvertError::Components)?;
+                        for d in &sem.dropped {
+                            *summary
+                                .dropped
+                                .entry(format!("semantic-class.{}", d.reason))
+                                .or_default() += 1;
+                        }
+                        if let Some(stream) = sem.stream {
+                            summary.streams.push("semantic-class".to_owned());
+                            streams.push(stream);
+                        }
+                    }
+                    Err(e) => found.refused = Some(e.reason_code().to_owned()),
+                }
+            }
+            open.components(streams, &cancel).map_err(write_error)?;
             Ok((open, Some(summary)))
         };
         let published = match &spill {
@@ -875,32 +968,53 @@ struct Classified {
     peak_queue_depth: u32,
     /// What the component streams need of each written entity; empty when they are off.
     sides: Vec<(EntityId, Side)>,
+    /// The layer names and line styles the sides index into.
+    tables: SideTables,
     style_report: StyleReport,
     /// Entities whose line style the DWG facts could not make into a component.
     style_bad: u64,
+    /// The wall entities that are one straight edge, for the region step; empty when it is off.
+    walls: Vec<WallEdge>,
+    /// Wall entities that are not one straight edge, so bound no region.
+    walls_skipped: u64,
 }
 
-/// What the component streams read off one written entity: where it came from and its line style.
+/// What the component streams read off one written entity, in a few words: its layer and line style are
+/// indexes into [`SideTables`], so a drawing's thousands of entities share its few names and styles.
 struct Side {
-    stub: ProvenanceStub,
-    style: Option<LineStyleComponent>,
+    layer: u32,
+    /// The handle of the source entity it belongs to ([`source_handle`]).
+    source: Option<u64>,
+    /// `NO_STYLE` when the run built no style for it.
+    style: u32,
 }
 
-/// The provenance a stream reads: the handle, the layer and the outermost INSERT. The class name and
-/// the rest of the block path are in the report, so they are not kept per entity.
-fn lean_stub(p: &ProvenanceStub) -> ProvenanceStub {
-    ProvenanceStub {
-        handle: p.handle,
-        class_name: String::new(),
-        block_path: p
-            .block_path
-            .steps()
-            .first()
-            .map_or_else(crate::pvec::InstancePath::root, |s| {
-                crate::pvec::InstancePath::root().child(String::new(), s.insert_handle)
-            }),
-        layer: p.layer.clone(),
+const NO_STYLE: u32 = u32::MAX;
+
+/// The distinct layer names and line styles of the written entities, and how to find them again.
+#[derive(Default)]
+struct SideTables {
+    layers: Vec<String>,
+    layer_ix: HashMap<String, u32>,
+    styles: Vec<LineStyleComponent>,
+    style_ix: HashMap<String, u32>,
+    last: Option<(DwgStyleInput, u32)>,
+}
+
+/// The two ends of a wall drawn as one straight edge: a line, or a polyline of two vertices. A wall
+/// drawn any other way is more than one edge, which a region ring cannot name twice.
+fn straight_edge(curve: &Curve) -> Option<([f64; 2], [f64; 2])> {
+    let straight = match curve {
+        Curve::Trimmed(t) => matches!(t.basis(), Curve::Line(_)),
+        Curve::Polyline(p) => p.vertices().len() == 2,
+        _ => false,
+    };
+    if !straight {
+        return None;
     }
+    let d = curve.domain();
+    let at = |u: f64| curve.eval(u).ok().map(|p| [p.x, p.y]);
+    Some((at(d.lo())?, at(d.hi())?))
 }
 
 /// One entity's outcome on its way from the classifier to the consumer.
