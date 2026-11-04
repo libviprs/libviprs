@@ -852,7 +852,8 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1515 adds 5: the `tests/pvec_1481_memory.rs` cells that read the stage rows in the baseline and the page. It said 984 before this line moved.
 /// #1515 adds 3 more: the stage recorder's own cell and the two stage benchmark cells. It said 989 before this line moved.
 /// #1518 adds 2: the `tests/pvec_1481_classify.rs` cells that convert generated drawings into a temp dir and read the output pin. It said 992 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 994;
+/// #1519 adds 1: `tests/pvec_1481_classify.rs::a_cancel_mid_write_leaves_the_previous_pair_and_no_partial_1519`, which converts into a temp dir. It said 994 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 995;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
