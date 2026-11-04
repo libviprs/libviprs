@@ -9,7 +9,7 @@ them to its recorded hash.
 ## The five pins
 
 **1. PVec: the revision, the container version and the capability set this build writes.** This build links
-`pvec` at revision `ff67ecb85b5367c5db56f7d03f162c02437414a8` and writes container version 1.0. The capabilities it
+`pvec` at revision `240fcd3da4f0ee52ace31c8837b52d349b5548dd` and writes container version 1.0. The capabilities it
 can write are the ones the mapping table (`pvec::mapping::NORMALIZED_TO_PVEC`) gives its ten kinds, ids 5 to 12 of
 PVec's registry. What a build does with other container versions is `docs/pvec-version-compatibility.md`.
 
@@ -31,8 +31,8 @@ the pin with the policy PVec exports, so a change of PVec's policy is a red test
 | `viewport_clipping` | unsupported |
 | `xrefs` | report-external |
 
-**4. The accepted fixture corpus revision.** `r2-open` of `libviprs/pvec-gold-fixtures`, gold commit
-`1df9d1b3e75047fa3978ebd809d0128cdfb28a68`, vendored under `tests/fixtures/pvec-gold/` and held to its own index by
+**4. The accepted fixture corpus revision.** `r3-open` of `libviprs/pvec-gold-fixtures`, gold commit
+`871f390905500097895a3d21d1083e7d42a87807`, vendored under `tests/fixtures/pvec-gold/` and held to its own index by
 `tests/common/pvec_gold.rs`.
 
 **5. The provider compatibility range.** The default provider is `acadrust`, at revision
@@ -46,9 +46,9 @@ page and the pin moving with it.
 
 | baseline | sha256 |
 |---|---|
-| `tests/fixtures/pvec_bench_corpus.json` | `781b90f9cdebb44df472aadbfdff7739dc8e1e3468c320e49b2fd902cfb43622` |
+| `tests/fixtures/pvec_bench_corpus.json` | `97eca65c287aaea1c014489cd5cc02e685e17b7f26b3961837414317e18bc5e5` |
 | `tests/fixtures/pvec_bench_baseline.json` | `7b6fe2a29d8cb1cb9a8ac3a28f87b627b77a9adcdf414989b7b82ddab9829532` |
-| `tests/fixtures/pvec_corpus_baseline.json` | `85cea1e0a1cfa6ef547368cb2d44ab71c1ed641bc8aca13694b5f29ac2d01099` |
+| `tests/fixtures/pvec_corpus_baseline.json` | `743d9c5ea8d21abe5587e28281b756b0bfb3ef716da4da8b0e6a6a3258b789df` |
 
 ## The EPIC L decision
 

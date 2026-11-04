@@ -60,10 +60,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 mod capability;
 mod georef;
+#[cfg(feature = "pvec-raster")]
+mod pdf;
 pub use capability::{CapabilityPolicy, ConversionProfile};
 pub use georef::{
     GeoreferenceError, GeoreferenceHandoff, HandoffV1, SourceBox, UnitRecord, georef_path,
 };
+#[cfg(feature = "pvec-raster")]
+#[cfg_attr(docsrs, doc(cfg(feature = "pvec-raster")))]
+pub use pdf::{PdfConversion, PdfConversionOutput, PdfConvertError};
 
 use crate::CancelToken;
 use crate::cad::CadSource;

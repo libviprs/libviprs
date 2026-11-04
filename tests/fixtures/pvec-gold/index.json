@@ -1,5 +1,5 @@
 {
- "corpus_revision": "r2-open",
+ "corpus_revision": "r3-open",
  "fixtures": [
   {
    "evidence_class": "KNOWN_TRUTH_EXACT",
@@ -1387,6 +1387,63 @@
    "id": "zero-radius-001",
    "status": "ACCEPTED",
    "step_verdict": "QUARANTINED"
+  },
+  {
+   "evidence_class": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "READER_MAPPING_ONLY",
+   "expects_rejection": false,
+   "files": {
+    "expected.math.json": {
+     "bytes": 5790,
+     "sha256": "489051b6e228f047d4f2d37b68f2b31121e4f536bec2b93e7bd37c933420fcca"
+    },
+    "source.dwg": {
+     "bytes": 20883,
+     "sha256": "bb07f1bda7b6f5b035fe1f3092a9aa4e0ca38bb1406b26f36ed6b0de1f5a2f7d"
+    }
+   },
+   "group": "viewports",
+   "id": "viewport-clipped-001",
+   "status": "ACCEPTED",
+   "step_verdict": null
+  },
+  {
+   "evidence_class": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "READER_MAPPING_ONLY",
+   "expects_rejection": false,
+   "files": {
+    "expected.math.json": {
+     "bytes": 5896,
+     "sha256": "a1c0844f0b1d60a8cc5e0d3f6e6032a803ae6acffce1989b62ddf51eccf874de"
+    },
+    "source.dwg": {
+     "bytes": 20883,
+     "sha256": "bb07f1bda7b6f5b035fe1f3092a9aa4e0ca38bb1406b26f36ed6b0de1f5a2f7d"
+    }
+   },
+   "group": "viewports",
+   "id": "viewport-clipped-bounded-001",
+   "status": "ACCEPTED",
+   "step_verdict": null
+  },
+  {
+   "evidence_class": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "READER_MAPPING_ONLY",
+   "expects_rejection": false,
+   "files": {
+    "expected.math.json": {
+     "bytes": 25465,
+     "sha256": "26fd4da52aa6077772abe6d35e42dda7ded83e4fef1fa857b2e7f3bc3045a138"
+    },
+    "source.dwg": {
+     "bytes": 21491,
+     "sha256": "8abc2af72df15e3f8f42b72996fae2a7ab8bf0fc04186330f2c57e127e292d50"
+    }
+   },
+   "group": "viewports",
+   "id": "paper-space-multi-viewport-001",
+   "status": "ACCEPTED",
+   "step_verdict": null
   }
  ],
  "oracle_scope": "OPEN_CONVERTERS"

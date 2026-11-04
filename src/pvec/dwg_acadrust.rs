@@ -48,8 +48,8 @@ use crate::pvec::provider::{
     ArrayGrid, Availability, BlockRef, DwgProvider, EntityCursor, EntityFacts, EntityScope,
     EntityStyle, Facet, FacetSource, InstancePath, LayerState, LayoutId, LayoutKind, LayoutState,
     Point3, ProvenanceStub, ProviderCaps, ProviderError, RawEntity, RawGeometry, RawVertex,
-    SourceColour, SourceFact, SourceLineweight, SourceTransform, TextStyleRef, ViewportEntity,
-    XrefAttachment,
+    SourceColour, SourceFact, SourceLinetype, SourceLineweight, SourceTransform, TextStyleRef,
+    ViewportEntity, XrefAttachment,
 };
 use crate::pvec::units::SourceUnit;
 
@@ -790,7 +790,38 @@ impl AcadrustCursor<'_> {
             }
             w => fact_lineweight(w),
         };
-        EntityStyle { colour, lineweight }
+        let linetype = {
+            // An empty name is BYLAYER, as the drawing stores it.
+            let name =
+                if common.linetype.is_empty() || common.linetype.eq_ignore_ascii_case("ByLayer") {
+                    layer.map(|l| l.line_type.as_str())
+                } else {
+                    Some(common.linetype.as_str())
+                };
+            match name {
+                None => SourceFact::Absent,
+                Some(n) if n.eq_ignore_ascii_case("ByBlock") => {
+                    SourceFact::Present(SourceLinetype::ByBlock)
+                }
+                Some(n) if n.eq_ignore_ascii_case("Continuous") => {
+                    SourceFact::Present(SourceLinetype::Pattern {
+                        elements: Vec::new(),
+                        scale: common.linetype_scale,
+                    })
+                }
+                Some(n) => self.doc.line_types.get(n).map_or(SourceFact::Absent, |t| {
+                    SourceFact::Present(SourceLinetype::Pattern {
+                        elements: t.elements.iter().map(|e| e.length).collect(),
+                        scale: common.linetype_scale,
+                    })
+                }),
+            }
+        };
+        EntityStyle {
+            colour,
+            lineweight,
+            linetype,
+        }
     }
 
     fn convert(&mut self, e: &EntityType) -> RawEntity {

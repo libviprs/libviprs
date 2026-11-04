@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The PDF image refusal keys are documented** (issue #1489). `docs/pvec-raster-producer.md` now lists `fully-clipped`, `too-large`, `invalid-placement`, `unsupported-colour-space:<name>` and `pyramid-refused` beside the keys it already named, so a reader of a conversion report can look each one up. A test walks every `PdfImageError` variant and checks its key is in a docs/pvec page.
+- **The fill report no longer says a PDF image is not placed** (issue #1490). `FILL_POLICY` reported the PDF image XObject and inline image rows as `image-pdf-xobject-not-placed` and `image-pdf-inline-not-placed`, although `bake_page_images` has written their placements since #1332, so on the mixed blueprint the report said 89 images were not placed while the artifact held 82 rasters. The reasons are now `image-pdf-xobject-raster-bake` and `image-pdf-inline-raster-bake`: the report counts every image and says which step owns it, and the conversion report's `pdf` section says which were placed. `docs/pvec-hatch-policy.md` explains the decision and bucket columns for these rows. The DWG `IMAGE` row is unchanged, it really is frame only.
 - **A memory budget now covers the cached `PdfiumStripSource`** (issue #1466). `.budget(..)` and
   `new_with_budget` on a cached source (the default of `new()`) checked only the worst-case strip, so a page whose
   whole raster was gigabytes passed. They now check `width * height * 4` and, under `AutoAdjustDpi`, lower the DPI
@@ -42,6 +44,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **One call turns a PDF page into a `.pvec` with its vectors and its rasters** (issue #1491). `pvec_convert::PdfConversion` (features `pvec-convert` and `pvec-raster`) runs `extract_page_paths_from_bytes`, `normalize_page`, `bake_page_images` and `write_rasters` and publishes the artifact and its report together, both or neither, the way `PvecConversion` does for a DWG. It takes `page`, `limits`, `image_options`, `cancel` and `observer`. The coordinates are the page's own, in points, with `metres_per_unit` 1.0 because PVec cannot declare points. The report gains an optional `pdf` section (page, images, rasters written, images refused by key, image notes, fills, omitted text), absent for a DWG, so `schema_version` stays 1. A page with no path is refused with `PdfConvertError::NoGeometry`, since PVec's artifact needs one entity.
 - **A conversion reports each chunk it writes** (issue #1463, follow-up to #1048). `write_geometry` and
   `write_geometry_to` take one more plain argument, `on_chunk(entities, bytes)`, called after each batch of
   1024 pushed entities and after each write the flush makes to the sink. `PvecConversion` forwards it as

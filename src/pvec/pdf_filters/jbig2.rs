@@ -5,18 +5,21 @@
 //! and PDF's `DeviceGray` calls it 0, so every bit is inverted on the way out, and a
 //! `/Decode [1 0]` on the image flips it back in the colour pipeline as for any other 1-bit image.
 //!
-//! `hayro-jbig2` 0.3.1 has no lenient mode to switch off: a stream it cannot decode in full is an
-//! error, so a picture is never returned part way. Newer, unreleased code adds
-//! `DecodeSettings { strict }`, and when that ships it is passed `true` here.
+//! The decoder runs with `DecodeSettings { strict: true }`: lenient mode skips a broken immediate
+//! region and carries on, and a stream the decoder cannot read in full is an error, so a picture is
+//! never returned part way.
 //!
 //! Limits: the page size is read from the stream and compared with `/Width` and `/Height`
 //! before anything is decoded, and the caller has already held those to `max_pixels`, so the
-//! page bitmap the decoder allocates is bounded by the same budget as every other codec's.
+//! page bitmap the decoder allocates is bounded by the same budget as every other codec's. That
+//! is the page bitmap only: the decoder's own working memory (symbol bitmaps, halftone grids) is
+//! not covered by `max_pixels`, see the warning below.
 //! The globals stream is counted against the per-stream cap by the extraction that kept it.
 //!
-//! `hayro-jbig2` 0.3.1 bounds each bitmap's sides (65535) and the symbol count (65535) but not
+//! `hayro-jbig2` 0.4.0 bounds each bitmap's sides (65535) and the symbol count (`1 << 20`, 16
+//! times the 65535 of 0.3.1, so the ceiling on symbol bitmaps is 16 times higher too) but not
 //! what they multiply to, and its arithmetic decoder keeps producing symbols after the data has
-//! run out, so a 134 byte stream found by `fuzz_pvec_pdf_image` made it allocate over 2 GB in
+//! run out, so a 134 byte stream found by `fuzz_pvec_pdf_image` made 0.3.1 allocate over 2 GB in
 //! symbol bitmaps. [`prescan`] closes the part that can be closed from outside: a region larger
 //! than the page is refused, and a symbol dictionary may not declare more new symbols than its
 //! own data has bits. The size of each symbol is still the decoder's to bound, and it does not:
@@ -26,6 +29,10 @@
 //! The other fuzz findings (an `export_symbols` loop that never ends, a halftone grid of billions
 //! of cells, empty height classes) are in arithmetic coded data too. All are reported upstream
 //! (`LaurenzV/hayro` #1700, #1701, #1550, #1598) and kept as ignored tests.
+//!
+//! Do not enable `jbig2` on untrusted PDFs yet: a small crafted stream can still allocate several
+//! GB (6.4 GB in #1550) or never return (#1700) in `hayro-jbig2` (measured on 0.3.1, and the
+//! 0.4.0 changelog fixes none of the four findings).
 
 #[cfg(feature = "jbig2")]
 use crate::pvec::pdf_image::FilterError;
@@ -42,11 +49,12 @@ pub(in crate::pvec) fn decode(input: FilterInput<'_>) -> Result<FilterOutput, Pd
 
 /// Refuse what a segment header says before the decoder allocates for it (T.88 7.2 and 7.4).
 ///
-/// Walks the sequential segment headers of `stream`. A region segment (text 6 to 7, halftone 22
-/// to 23, generic 38 to 39, refinement 42 to 43) that is wider or taller than the page, or a
-/// symbol dictionary (type 0) whose `SDNUMNEWSYMS` is over eight times its data length, is an
-/// error. A segment of unknown length ends the walk: only an immediate generic region may have
-/// one, and its header is read first.
+/// Walks the sequential segment headers of `stream`. A region segment (text 4 and 6 to 7,
+/// halftone 20 and 22 to 23, generic 36 and 38 to 39, refinement 40 and 42 to 43, so the
+/// intermediate forms too) that is wider or taller than the page, or a symbol dictionary (type 0)
+/// whose `SDNUMNEWSYMS` is over eight times its data length, is an error. A segment of unknown
+/// length ends the walk: only an immediate generic region may have one, and its header is read
+/// first.
 #[cfg(feature = "jbig2")]
 fn prescan(stream: &[u8], width: u32, height: u32) -> Result<(), String> {
     let be32 = |at: usize| -> Option<u32> {
@@ -88,7 +96,7 @@ fn prescan(stream: &[u8], width: u32, height: u32) -> Result<(), String> {
             .get(at..end.min(stream.len()))
             .ok_or_else(truncated)?;
         match flags & 0x3F {
-            6 | 7 | 22 | 23 | 38 | 39 | 42 | 43 => {
+            4 | 6 | 7 | 20 | 22 | 23 | 36 | 38 | 39 | 40 | 42 | 43 => {
                 let w = be32(at).ok_or_else(truncated)?;
                 let h = be32(at + 4).ok_or_else(truncated)?;
                 if w > width || h > height {
@@ -182,7 +190,13 @@ pub(in crate::pvec) fn decode(input: FilterInput<'_>) -> Result<FilterOutput, Pd
     for stream in [input.globals, Some(input.data)].into_iter().flatten() {
         prescan(stream, input.width, input.height).map_err(|m| fail(FilterError::Jbig2(m)))?;
     }
-    let image = hayro_jbig2::Image::new_embedded(input.data, input.globals)
+    let settings = hayro_jbig2::DecodeSettings { strict: true };
+    let globals = input
+        .globals
+        .map(|g| hayro_jbig2::Globals::new(g, &settings))
+        .transpose()
+        .map_err(|e| fail(FilterError::Jbig2(e.to_string())))?;
+    let image = hayro_jbig2::Page::new_embedded(input.data, globals.as_ref(), &settings)
         .map_err(|e| fail(FilterError::Jbig2(e.to_string())))?;
     if (image.width(), image.height()) != (input.width, input.height) {
         return Err(fail(FilterError::Parms(format!(

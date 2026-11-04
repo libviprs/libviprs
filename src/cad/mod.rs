@@ -195,6 +195,7 @@
 //! # Ok::<(), CadError>(())
 //! ```
 
+/// The default tile-path decoder, over acadrust (feature `dwg-acadrust`).
 #[cfg(feature = "dwg-acadrust")]
 pub mod acadrust;
 #[cfg(feature = "dwg-acadsharp")]

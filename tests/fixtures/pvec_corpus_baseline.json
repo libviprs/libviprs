@@ -1,5 +1,5 @@
 {
- "corpus_revision": "r2-open",
+ "corpus_revision": "r3-open",
  "rows": {
   "arc-seam-001": {
    "evidence": "KNOWN_TRUTH_EXACT",
@@ -228,7 +228,7 @@
     "conformance": "NoGeometry",
     "reasons": []
    },
-   "outcome": "refused: the artifact could not be written <- PVec's writer refused: write refused: WRT-08 <- write refused: WRT-08",
+   "outcome": "refused: the artifact could not be written <- no entity carries geometry",
    "size": {
     "artifact_bytes": 0,
     "entities": 1,
@@ -254,7 +254,7 @@
     "conformance": "NoGeometry",
     "reasons": []
    },
-   "outcome": "refused: the artifact could not be written <- PVec's writer refused: write refused: WRT-08 <- write refused: WRT-08",
+   "outcome": "refused: the artifact could not be written <- no entity carries geometry",
    "size": {
     "artifact_bytes": 0,
     "entities": 1,
@@ -823,21 +823,25 @@
     "by_fidelity": {
      "IgnoredByPolicy": 0,
      "RequiresExtension": 0,
-     "RequiresPVecCapability": 0,
-     "SupportedEquivalent": 4,
+     "RequiresPVecCapability": 1,
+     "SupportedEquivalent": 3,
      "SupportedExact": 4,
      "Unsupported": 0
     },
-    "conformance": "NoGeometry",
-    "reasons": []
+    "conformance": "SupportedEquivalent"
    },
-   "outcome": "refused: the artifact could not be written <- PVec's writer refused: write refused: WRT-08 <- write refused: WRT-08",
+   "outcome": "converted",
    "size": {
-    "artifact_bytes": 0,
+    "artifact_bytes": 1384,
     "entities": 8,
-    "written": 0
+    "written": 7
    },
-   "view": {},
+   "view": {
+    "excluded_by_field": {},
+    "included": 8,
+    "space": "Model",
+    "xrefs_unresolved": 0
+   },
    "what_the_class_means": "independently authored expectation"
   },
   "mtext-001": {
@@ -1102,6 +1106,36 @@
    },
    "view": {},
    "what_the_class_means": "runs and reports, never gates"
+  },
+  "paper-space-multi-viewport-001": {
+   "evidence": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "READER_MAPPING_ONLY",
+   "fixture": "paper-space-multi-viewport-001",
+   "group": "viewports",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 1,
+     "SupportedExact": 0,
+     "Unsupported": 0
+    },
+    "conformance": "SupportedEquivalent"
+   },
+   "outcome": "converted",
+   "size": {
+    "artifact_bytes": 344,
+    "entities": 1,
+    "written": 1
+   },
+   "view": {
+    "excluded_by_field": {},
+    "included": 1,
+    "space": "Model",
+    "xrefs_unresolved": 0
+   },
+   "what_the_class_means": "independently authored expectation"
   },
   "polyline-001": {
    "evidence": "KNOWN_TRUTH_EXACT",
@@ -1565,6 +1599,66 @@
    "outcome": "converted",
    "size": {
     "artifact_bytes": 360,
+    "entities": 1,
+    "written": 1
+   },
+   "view": {
+    "excluded_by_field": {},
+    "included": 1,
+    "space": "Model",
+    "xrefs_unresolved": 0
+   },
+   "what_the_class_means": "independently authored expectation"
+  },
+  "viewport-clipped-001": {
+   "evidence": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "READER_MAPPING_ONLY",
+   "fixture": "viewport-clipped-001",
+   "group": "viewports",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 1,
+     "SupportedExact": 0,
+     "Unsupported": 0
+    },
+    "conformance": "SupportedEquivalent"
+   },
+   "outcome": "converted",
+   "size": {
+    "artifact_bytes": 344,
+    "entities": 1,
+    "written": 1
+   },
+   "view": {
+    "excluded_by_field": {},
+    "included": 1,
+    "space": "Model",
+    "xrefs_unresolved": 0
+   },
+   "what_the_class_means": "independently authored expectation"
+  },
+  "viewport-clipped-bounded-001": {
+   "evidence": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "READER_MAPPING_ONLY",
+   "fixture": "viewport-clipped-bounded-001",
+   "group": "viewports",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 1,
+     "SupportedExact": 0,
+     "Unsupported": 0
+    },
+    "conformance": "SupportedEquivalent"
+   },
+   "outcome": "converted",
+   "size": {
+    "artifact_bytes": 344,
     "entities": 1,
     "written": 1
    },

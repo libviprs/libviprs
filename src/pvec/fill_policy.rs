@@ -34,9 +34,9 @@ pub enum FillConstruct {
     PdfShading,
     /// A PDF colour operator that selected a named pattern (tiling or shading).
     PdfPattern,
-    /// A PDF image XObject painted with `Do`. Counted with its CTM, no placement written (#1328).
+    /// A PDF image XObject painted with `Do`. Counted with its CTM here, every one, refused or not. The raster bake (`bake_page_images`, #1332) is what writes a placement, and only when the caller runs it.
     PdfImageXObject,
-    /// A PDF inline image (`BI ... EI`). Counted with its CTM, no placement written (#1328).
+    /// A PDF inline image (`BI ... EI`). Counted with its CTM here, every one, refused or not. The raster bake (`bake_page_images`, #1332) is what writes a placement, and only when the caller runs it.
     PdfInlineImage,
     /// A DWG `IMAGE`: reported with its frame, no pixels are fetched and no placement written
     /// (#1328).
@@ -131,13 +131,13 @@ pub const FILL_POLICY: [FillPolicyRow; 10] = [
         construct: FillConstruct::PdfImageXObject,
         decision: FillDecision::IgnoredCounted,
         bucket: FidelityClass::RequiresExtension,
-        reason: "image-pdf-xobject-not-placed",
+        reason: "image-pdf-xobject-raster-bake",
     },
     FillPolicyRow {
         construct: FillConstruct::PdfInlineImage,
         decision: FillDecision::IgnoredCounted,
         bucket: FidelityClass::RequiresExtension,
-        reason: "image-pdf-inline-not-placed",
+        reason: "image-pdf-inline-raster-bake",
     },
     FillPolicyRow {
         construct: FillConstruct::DwgImage,

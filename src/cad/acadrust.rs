@@ -41,7 +41,8 @@
 //! size), so a hostile block tree is refused with a typed error. [`AcadrustDecoder::hardened`]
 //! adds the 256 MiB input cap the ACadSharp provider's hardened profile has, checked before the
 //! file is read. acadrust has no streaming reader, so the input cap is the one limit that has to
-//! be applied up front.
+//! be applied up front. A block bomb is held by the INSERT walk's limits, which
+//! [`AcadrustDecoder::with_limits`] can tighten.
 
 use std::collections::HashMap;
 

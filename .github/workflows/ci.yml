@@ -125,6 +125,8 @@ jobs:
       - run: cargo clippy --all-targets --features pvec-raster -- -D warnings -W clippy::incompatible_msrv -W deprecated
       - run: cargo clippy --all-targets --features pvec-write -- -D warnings -W clippy::incompatible_msrv -W deprecated
       - run: cargo clippy --all-targets --features pvec-convert -- -D warnings -W clippy::incompatible_msrv -W deprecated
+      # `PdfConversion` (issue #1491) exists only with both of these on, so lint the pair (issue #1512).
+      - run: cargo clippy --all-targets --features pvec-convert,pvec-raster -- -D warnings -W clippy::incompatible_msrv -W deprecated
       # Same for the SVG rasteriser: `svg` is non-default because it costs 29
       # crates, so the default clippy job never sees `src/svg.rs` at all
       # (issue #502).
@@ -234,6 +236,7 @@ jobs:
       - run: cargo check --all-targets --features pvec-raster
       - run: cargo check --all-targets --features pvec-write
       - run: cargo check --all-targets --features pvec-convert
+      - run: cargo check --all-targets --features pvec-convert,pvec-raster
 
   docs:
     name: Docs (deny broken, private and redundant intra-doc links)
@@ -303,6 +306,8 @@ jobs:
       - run: cargo test --features pvec-write
       # The conversion API (issue #1048): the writer funnel plus the acadrust provider, both pure Rust.
       - run: cargo test --features pvec-convert
+      # One call from a PDF page to a .pvec (issue #1491): needs both features, so neither cell above builds it.
+      - run: cargo test --features pvec-convert,pvec-raster --test pvec_1491_pdf_conversion
       # The SVG module and its unit tests are behind the non-default `svg`
       # feature, and the `<image xlink:href>` lockdown tests in
       # tests/path_traversal.rs are gated on it too. Bare `cargo test` runs
