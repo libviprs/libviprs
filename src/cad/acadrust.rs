@@ -37,7 +37,7 @@
 //!
 //! # Limits
 //!
-//! The INSERT walk always runs under the default [`FlattenBounds`] (depth, instance count, grid
+//! The INSERT walk always runs under [`FlattenBounds`], the default [`SourceLimits`] unless [`AcadrustDecoder::with_limits`] says otherwise (depth, instance count, grid
 //! size), so a hostile block tree is refused with a typed error. [`AcadrustDecoder::hardened`]
 //! adds the 256 MiB input cap the ACadSharp provider's hardened profile has, checked before the
 //! file is read. acadrust has no streaming reader, so the input cap is the one limit that has to
@@ -53,6 +53,7 @@ use super::{
 };
 use crate::pvec::dwg_acadrust::{AcadrustProvider, TextFact};
 use crate::pvec::flatten::{BlockResolver, FlatEntity, FlattenBounds, LineageStore, SkipReason};
+use crate::pvec::limits::SourceLimits;
 use crate::pvec::provenance::NoProvenance;
 use crate::pvec::{DwgProvider, EntityScope, InstancePath, LayoutKind, ProviderError, RawGeometry};
 
@@ -62,9 +63,16 @@ const NAME: &str = "acadrust";
 const HARDENED_MAX_INPUT_BYTES: u64 = 256 << 20;
 
 /// A DWG reader that needs nothing installed.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct AcadrustDecoder {
     max_input_bytes: Option<u64>,
+    limits: Option<SourceLimits>,
+}
+
+impl Default for AcadrustDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AcadrustDecoder {
@@ -73,6 +81,7 @@ impl AcadrustDecoder {
     pub const fn new() -> Self {
         Self {
             max_input_bytes: None,
+            limits: None,
         }
     }
 
@@ -82,7 +91,17 @@ impl AcadrustDecoder {
     pub const fn hardened() -> Self {
         Self {
             max_input_bytes: Some(HARDENED_MAX_INPUT_BYTES),
+            limits: None,
         }
+    }
+
+    /// The same decoder with the INSERT walk held to `limits` (depth, entity count, expanded
+    /// instances, grid size) instead of the defaults. The defaults allow ten million expanded
+    /// instances, which is right for a large survey and slow to refuse for a block bomb.
+    #[must_use]
+    pub const fn with_limits(mut self, limits: SourceLimits) -> Self {
+        self.limits = Some(limits);
+        self
     }
 }
 
@@ -118,12 +137,16 @@ impl CadDecoder for AcadrustDecoder {
             }
         }
         let provider = AcadrustProvider::open(source).map_err(translate)?;
-        Ok(Box::new(AcadrustDrawing { provider }))
+        Ok(Box::new(AcadrustDrawing {
+            provider,
+            limits: self.limits,
+        }))
     }
 }
 
 struct AcadrustDrawing {
     provider: AcadrustProvider,
+    limits: Option<SourceLimits>,
 }
 
 /// Why the drawing would hide an entity.
@@ -136,6 +159,12 @@ struct Hidden {
 }
 
 impl AcadrustDrawing {
+    fn bounds(&self) -> FlattenBounds {
+        self.limits.map_or_else(FlattenBounds::default, |limits| {
+            FlattenBounds::new(limits, FlattenBounds::default().max_entities_per_block)
+        })
+    }
+
     fn scopes(&self) -> Result<Vec<EntityScope>, CadError> {
         let mut scopes: Vec<EntityScope> = self
             .provider
@@ -215,7 +244,7 @@ impl CadDrawing for AcadrustDrawing {
                 views: u32::try_from(layouts.len()).unwrap_or(u32::MAX),
             });
         };
-        let flat = BlockResolver::new(&self.provider, FlattenBounds::default())
+        let flat = BlockResolver::new(&self.provider, self.bounds())
             .flatten(
                 &EntityScope::Layout(layout.id),
                 NAME,
@@ -415,7 +444,7 @@ impl AcadrustDrawing {
             name: block.to_owned(),
             reached_via: leaf.entity.provenance.block_path.child(block, handle),
         };
-        match BlockResolver::new(&self.provider, FlattenBounds::default()).flatten(
+        match BlockResolver::new(&self.provider, self.bounds()).flatten(
             &scope,
             NAME,
             block,

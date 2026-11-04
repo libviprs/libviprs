@@ -267,11 +267,10 @@ feature never makes a build fail for want of a library. No .NET runtime is
 needed at run time. The CAD-neutral core, `libviprs::cad`, is not behind a
 feature and does not depend on any of this.
 
-The dependency is a git dependency while `acadsharp-rs` is unpublished, which
-means this crate cannot be published to crates.io until that line in the root
-`Cargo.toml` becomes a registry version.
-
-<!-- OWNER DECISION NEEDED: the sentence above promises a registry version, and acadrust is git-only by rule, so whether and how this crate is published to crates.io is undecided. Left as it was on purpose. -->
+`acadsharp-rs` is a git dependency, and so is `acadrust`. This crate is not published to
+crates.io: `dwg-acadrust` is a default feature, and acadrust is never taken from a registry. The
+acadsharp-rs tile-path decoder stays experimental (it is also kept in the CLI's `full` feature so
+the native lane keeps compiling), chosen with `decoder_for(ProviderKind::AcadSharp, ..)`.
 
 ### `dwg-acadrust` is a pinned git dependency, and it is a default feature
 

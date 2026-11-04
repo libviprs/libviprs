@@ -13,6 +13,7 @@ use libviprs::cad::{
     CadDecoder, CadError, CadSource, CollectSink, DecodeReport, DiagnosticCode, Primitive,
     PrimitiveKind, ViewKind,
 };
+use libviprs::pvec::SourceLimits;
 use libviprs::vector::convert::{ProviderKind, decoder_for, default_decoder};
 
 fn cad(name: &str) -> PathBuf {
@@ -346,4 +347,83 @@ fn a_hatch_loop_is_a_polygon_that_knows_its_hatch() {
     assert_eq!(polygons.len(), 8);
     assert!(polygons.iter().all(|g| g.vertices().len() >= 3));
     assert!(polygons.iter().all(|g| g.origin().item_handle().is_some()));
+}
+
+/// A drawing written with acadrust's own `DwgWriter`: `levels` blocks, each inserting the next one
+/// twice, instanced once from Model Space, so `2^levels` leaves from a few hundred bytes.
+fn block_bomb(levels: usize) -> Vec<u8> {
+    use acadrust::entities::{Insert, Line};
+    use acadrust::tables::BlockRecord;
+    use acadrust::types::{Handle, Vector3};
+    use acadrust::{CadDocument, DwgWriter, EntityType};
+
+    let mut doc = CadDocument::new();
+    let owners: Vec<Handle> = (0..levels)
+        .map(|d| {
+            let mut r = BlockRecord::new(format!("B{d}"));
+            r.handle = doc.allocate_handle();
+            let h = r.handle;
+            doc.block_records.add(r).unwrap();
+            h
+        })
+        .collect();
+    for (d, owner) in owners.iter().enumerate() {
+        let mut leaf = EntityType::Line(Line::from_coords(0.0, 0.0, 0.0, 1.0, 1.0, 0.0));
+        leaf.common_mut().owner_handle = *owner;
+        doc.add_entity(leaf).unwrap();
+        if d + 1 < levels {
+            for k in 0..2 {
+                let mut i = EntityType::Insert(Insert::new(
+                    format!("B{}", d + 1),
+                    Vector3::new(f64::from(k), 0.0, 0.0),
+                ));
+                i.common_mut().owner_handle = *owner;
+                doc.add_entity(i).unwrap();
+            }
+        }
+    }
+    doc.add_entity(EntityType::Insert(Insert::new(
+        "B0",
+        Vector3::new(0.0, 0.0, 0.0),
+    )))
+    .unwrap();
+    DwgWriter::write_to_vec(&doc).unwrap()
+}
+
+/// #1256: a block bomb has to end as a typed, bounded decode error on the tile path, not as an
+/// expansion that runs until memory does.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_block_bomb_ends_as_a_bounded_decode_error() {
+    let bytes = block_bomb(40);
+    let mut limits = SourceLimits::default();
+    limits.max_expanded_instances = 10_000;
+    let decoder = AcadrustDecoder::new().with_limits(limits);
+    let drawing = decoder
+        .open(CadSource::Bytes(&bytes))
+        .expect("the bomb is a well formed drawing");
+    let started = std::time::Instant::now();
+    let mut sink = CollectSink::new();
+    let mut report = DecodeReport::new();
+    let err = drawing
+        .decode(0, &mut sink, &mut report)
+        .expect_err("2^40 instances must be refused");
+    assert!(matches!(err, CadError::Provider { .. }), "{err:?}");
+    assert!(
+        report
+            .diagnostics()
+            .iter()
+            .any(|d| d.code() == DiagnosticCode::DECODE_FAILED),
+        "the refusal is in the report"
+    );
+    assert!(
+        sink.len() < 1_000_000,
+        "{} primitives were delivered",
+        sink.len()
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(20),
+        "the refusal took {:?}",
+        started.elapsed()
+    );
 }
