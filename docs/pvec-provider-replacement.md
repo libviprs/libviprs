@@ -27,5 +27,5 @@ The same fixtures drive the end to end suites: `--test pvec_known_truth`, `--tes
 
 ## Today
 
-`AcadrustProvider` is the only implementation. A second one over `acadsharp-rs` waits on libviprs-dep#161 and a released wire version 3, so
-until then the harness reports partial.
+`AcadrustProvider` is the only implementation. A second one over `acadsharp-rs` waits on a released wire version 3 (libviprs-dep#161 merged on 2026-11-01, the release has not
+been cut), so until then the harness reports partial. `tests/pvec_1079_corpus_matrix.rs` runs the matrix over the pinned corpus revision.

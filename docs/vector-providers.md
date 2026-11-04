@@ -8,10 +8,12 @@ other side of that trait.
 
 > **ACadSharp is experimental.** acadrust is libviprs' default DWG provider (the `dwg-acadrust`
 > feature, on by default). The ACadSharp provider described here is kept, opt-in and not removed,
-> and it is the only path that needs a native library. `viprs vector` still reads through it until
-> a `CadDecoder` over acadrust lands (libviprs/libviprs#1485).
+> and it is the only path that needs a native library. The core's `default_decoder` returns the
+> acadrust `CadDecoder` (libviprs/libviprs#1485); `viprs vector` follows once its `--provider` flag
+> lands (libviprs/libviprs-cli#140).
 
-The provider libviprs ships for the tile path today is ACadSharp, reached through the `acadsharp-rs` crate.
+The default provider for the tile path is acadrust (`cad::acadrust`, feature `dwg-acadrust`), pure Rust, with nothing
+to install. The rest of this note is about the experimental ACadSharp provider, reached through the `acadsharp-rs` crate.
 It is behind the `dwg-acadsharp` Cargo feature, and it is the only thing in the
 library that needs a native binary.
 
@@ -49,21 +51,29 @@ the native reader refuses anyway, is not opened.
 ## Building without it
 
 The `dwg-acadsharp` feature is off by default. A plain `cargo build` has the pure-Rust
-acadrust reader (the default `dwg-acadrust` feature, behind `pvec::DwgProvider`) and no
-native dependency. It has no tile-path decoder yet, since acadrust is not a `CadDecoder`
-(libviprs#1485). `--no-default-features` drops acadrust too, for a build with no DWG
+acadrust reader (the default `dwg-acadrust` feature, behind `pvec::DwgProvider` and the
+tile-path `CadDecoder`) and no native dependency. `--no-default-features` drops acadrust too, for a build with no DWG
 reader at all, and everything that does not read a DWG still works:
 
 ```text
-cargo build                              # acadrust (pvec path), no tile-path decoder
-cargo build --features dwg-acadsharp     # plus the ACadSharp CadDecoder
+cargo build                              # acadrust: the PVec provider and the tile-path CadDecoder
+cargo build --features dwg-acadsharp     # plus the experimental ACadSharp CadDecoder
 cargo build --no-default-features        # no DWG reader at all
 ```
 
-Without the `dwg-acadsharp` feature:
+`vector::convert::default_decoder` returns the acadrust decoder (`cad::acadrust::AcadrustDecoder`)
+whenever `dwg-acadrust` is on, which it is by default, and needs no native library. With both
+features on, acadrust still wins; `vector::convert::decoder_for(ProviderKind::AcadSharp, ..)`
+asks for ACadSharp by name. acadrust draws lines, polylines, arcs, circles, ellipses, splines
+and text, hatch loops as polygons, leader lines, multileader and tolerance text and block
+attributes, expands INSERTs and draws DIMENSIONs from their blocks, and reports every other
+entity class it does not flatten (solids, points, mlines and the rest) as an
+`UNSUPPORTED_ENTITY` diagnostic instead of dropping it quietly.
+
+Without `dwg-acadrust` and without `dwg-acadsharp`:
 
 * `vector::convert::default_decoder` returns `ConvertError::ProviderNotBuilt`, whose
-  message names the `dwg-acadsharp` feature to rebuild with.
+  message names the `dwg-acadrust` feature to rebuild with.
 * `inspect` and `check` (archive info and validation) are unaffected, because they
   read a PMTiles file and not a drawing.
 * `convert` and `report` take any `CadDrawing`, so a decoder you wrote yourself, or

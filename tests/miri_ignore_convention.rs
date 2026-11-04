@@ -849,9 +849,10 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1489 adds 4: the `tests/pvec_1489_image_reason_keys.rs` cells that read the docs. It said 972 before this line moved.
 /// #1490 adds 1: the `tests/pvec_1490_fill_report_images.rs` cell that reads `docs/pvec-hatch-policy.md`. It said 976 before this line moved.
 /// #1491 adds 7: the `tests/pvec_1491_pdf_conversion.rs` cells that convert generated PDFs into a temp dir. It said 977 before this line moved.
-/// #1515 adds 5: the `tests/pvec_1481_memory.rs` cells that read the stage rows in the baseline and the page. It said 984 before this line moved.
-/// #1515 adds 3 more: the stage recorder's own cell and the two stage benchmark cells. It said 989 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 992;
+/// #1485 adds 4: the three `tests/cad_1485_acadrust_decoder.rs` cells that read or write a drawing, and the acadrust conversion cell in `tests/vector_1035_api.rs`. It said 984 before this line moved.
+/// #1515 adds 5: the `tests/pvec_1481_memory.rs` cells that read the stage rows in the baseline and the page. It said 988 before this line moved.
+/// #1515 adds 3 more: the stage recorder's own cell and the two stage benchmark cells. It said 993 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 996;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
