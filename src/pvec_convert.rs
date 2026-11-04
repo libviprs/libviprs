@@ -564,7 +564,20 @@ impl<'a> PvecConversion<'a> {
                         c
                     });
                     Side {
-                        stub: lean_stub(&raw.provenance),
+                        // Only the handle, the layer and the outermost INSERT are read; the class name and
+                        // the rest of the block path are in the report, so they are not kept per entity.
+                        stub: ProvenanceStub {
+                            handle: raw.provenance.handle,
+                            class_name: String::new(),
+                            block_path: raw.provenance.block_path.steps().first().map_or_else(
+                                crate::pvec::InstancePath::root,
+                                |s| {
+                                    crate::pvec::InstancePath::root()
+                                        .child(String::new(), s.insert_handle)
+                                },
+                            ),
+                            layer: raw.provenance.layer.clone(),
+                        },
                         style: style.flatten(),
                     }
                 });
@@ -870,23 +883,6 @@ struct Classified {
 struct Side {
     stub: ProvenanceStub,
     style: Option<LineStyleComponent>,
-}
-
-/// The provenance a stream reads: the handle, the layer and the outermost INSERT. The class name and
-/// the rest of the block path are in the report, so they are not kept per entity.
-fn lean_stub(p: &ProvenanceStub) -> ProvenanceStub {
-    ProvenanceStub {
-        handle: p.handle,
-        class_name: String::new(),
-        block_path: p
-            .block_path
-            .steps()
-            .first()
-            .map_or_else(crate::pvec::InstancePath::root, |s| {
-                crate::pvec::InstancePath::root().child(String::new(), s.insert_handle)
-            }),
-        layer: p.layer.clone(),
-    }
 }
 
 /// One entity's outcome on its way from the classifier to the consumer.
