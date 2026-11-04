@@ -643,6 +643,15 @@ annotated   not-detected tests/pvec_1439_view_limits.rs::the_default_limits_stil
 annotated   fs-detected  tests/pvec_1437_fuzz_seeds.rs::the_clip_seed_corpus_runs_clean
 annotated   fs-detected  tests/pvec_1437_fuzz_seeds.rs::the_provider_seed_corpus_runs_clean
 annotated   fs-detected  tests/pvec_1437_fuzz_seeds.rs::the_spline_seed_corpus_runs_clean
+annotated   fs-detected  tests/pvec_1500_convert_streams.rs::issue_1525_a_conversion_with_no_option_writes_geometry_only
+annotated   fs-detected  tests/pvec_1500_convert_streams.rs::issue_1525_a_curve_the_writer_refuses_moves_no_stream_row_onto_a_stranger
+annotated   fs-detected  tests/pvec_1500_convert_streams.rs::issue_1525_a_row_pvec_cannot_hold_is_counted_in_the_report_and_costs_only_its_row
+annotated   fs-detected  tests/pvec_1500_convert_streams.rs::issue_1525_each_stream_can_be_dropped_on_its_own_and_the_rest_still_read
+annotated   fs-detected  tests/pvec_1500_convert_streams.rs::issue_1525_geometry_is_identical_with_every_stream_on_and_off
+annotated   fs-detected  tests/pvec_1500_convert_streams.rs::issue_1525_the_component_summary_is_json_round_trippable
+annotated   fs-detected  tests/pvec_1500_convert_streams.rs::issue_1525_the_linetype_name_and_the_colour_count_come_from_a_dwg_conversion
+annotated   fs-detected  tests/pvec_1500_convert_streams.rs::issue_1525_the_streams_are_the_same_bytes_spilled_or_in_memory
+annotated   fs-detected  tests/pvec_1500_convert_streams.rs::issue_1525_the_three_streams_are_written_and_read_back_through_pvecs_reader
 annotated   fs-detected  tests/pvec_api_surface.rs::issue_1093_components_name_no_provider_specific_type
 annotated   fs-detected  tests/pvec_1446_write_refusal.rs::a_drawing_with_one_unstorable_curve_still_converts_the_rest
 annotated   fs-detected  tests/pvec_1446_write_refusal.rs::the_report_counts_each_entity_pvec_refused_against_that_entity

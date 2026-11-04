@@ -74,6 +74,7 @@ use crate::CancelToken;
 use crate::cad::CadSource;
 use crate::observe::{EngineEvent, EngineObserver};
 use crate::pvec::bounds::BoundsReport;
+use crate::pvec::components::StreamSelection;
 use crate::pvec::diagnostics::{Diagnostic, DiagnosticCode};
 use crate::pvec::dwg_acadrust::AcadrustProvider;
 use crate::pvec::dwg_basic::{self, BasicError};
@@ -86,8 +87,8 @@ use crate::pvec::mapping::{kind_of, row_for};
 use crate::pvec::provenance::NoProvenance;
 use crate::pvec::publish::{PublishError, StreamedPublishError, publish, publish_streamed};
 use crate::pvec::report::{
-    BoundsSplit, CapabilitySummary, ConversionReport, EntityRow, ReportBuilder, ReportError,
-    UnresolvedXrefRow, ViewSummary, XrefSummary,
+    BoundsSplit, CapabilitySummary, ComponentsSummary, ConversionReport, EntityRow, ReportBuilder,
+    ReportError, UnresolvedXrefRow, ViewSummary, XrefSummary,
 };
 use crate::pvec::transform::{ComposedTransform, promote};
 use crate::pvec::writer::{
@@ -195,6 +196,7 @@ pub struct PvecConversion<'a> {
     control_points: Vec<[f64; 2]>,
     observer: Option<Arc<dyn EngineObserver>>,
     queue_capacity: usize,
+    components: StreamSelection,
 }
 
 impl<'a> PvecConversion<'a> {
@@ -214,7 +216,16 @@ impl<'a> PvecConversion<'a> {
             control_points: Vec::new(),
             observer: None,
             queue_capacity: DEFAULT_QUEUE_CAPACITY,
+            components: StreamSelection::NONE,
         }
+    }
+
+    /// The component streams to write beside the geometry: layer, line style and provenance, each
+    /// on its own (#1525). Off by default, and the geometry is the same bytes either way.
+    #[must_use]
+    pub fn components(mut self, select: StreamSelection) -> Self {
+        self.components = select;
+        self
     }
 
     /// The view profile (N3.3).
@@ -601,6 +612,7 @@ impl<'a> PvecConversion<'a> {
             calibration,
             control_points,
             observer,
+            components: select,
             ..
         } = self;
         let tell = |event: EngineEvent| {
@@ -656,6 +668,8 @@ impl<'a> PvecConversion<'a> {
                     .map_err(PvecConvertError::Report)?;
                 report.capabilities = Some(gate.summary());
                 report.diagnostics = diagnostics;
+                report.components =
+                    (select != StreamSelection::NONE).then(ComponentsSummary::default);
                 report.georeference = sidecar
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned());

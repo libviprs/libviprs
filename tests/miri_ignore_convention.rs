@@ -848,7 +848,7 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1489 adds 4: the `tests/pvec_1489_image_reason_keys.rs` cells that read the docs. It said 972 before this line moved.
 /// #1490 adds 1: the `tests/pvec_1490_fill_report_images.rs` cell that reads `docs/pvec-hatch-policy.md`. It said 976 before this line moved.
 /// #1491 adds 7: the `tests/pvec_1491_pdf_conversion.rs` cells that convert generated PDFs into a temp dir. It said 977 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 984;
+const EXPECTED_FS_TOUCHING_TESTS: usize = 993;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
