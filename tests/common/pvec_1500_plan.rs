@@ -3,7 +3,7 @@
 //! The named fixture is `plan`: two root lines, two INSERTs (100 and 200) of a block of three
 //! lines, and twelve wall lines forming two 5 x 5 rooms under a 10 x 2 corridor, with a 0.3 door
 //! gap in the bottom wall of the first room. Sixteen source entities, twenty curves. The other
-//! byte strings select a variant (`huge`, `polywall`, `longlayer`).
+//! byte strings select a variant (`huge`, `polywall`, `nowalls`, `longlayer`).
 
 #![allow(dead_code)]
 
@@ -144,6 +144,7 @@ impl DwgProvider for Mock {
                 });
                 v
             }
+            CadSource::Bytes(b"nowalls") => plan().into_iter().take(4).collect(),
             CadSource::Bytes(b"longlayer") => {
                 let mut v = plan();
                 v[1].provenance.layer = "L".repeat(300);

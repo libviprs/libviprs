@@ -211,6 +211,27 @@ pub struct PdfSummary {
     pub text_omitted: u64,
 }
 
+/// What the derived regions found (#1526). Region records the stream could not hold are in
+/// [`ComponentsSummary::dropped`] under `semantic-class.<reason>`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct RegionsSummary {
+    /// Rooms found.
+    pub rooms: u64,
+    /// Corridors found.
+    pub corridors: u64,
+    /// Door gaps closed. The closing segments are counted and never written as geometry.
+    pub gaps_closed: u64,
+    /// Faces no rule labelled. They are counted and never written: PVec has no region kind for them.
+    pub unlabelled: u64,
+    /// Wall entities that are not one straight edge (arcs, polylines of several segments), which
+    /// bound no region.
+    pub walls_skipped: u64,
+    /// The reason code when the step refused (`regions.node-limit`), in which case it found nothing
+    /// and the geometry is unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refused: Option<String>,
+}
+
 /// What the component streams of a conversion did (#1525). Optional and ignorable: a reader that
 /// does not know it loses nothing it needs.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -221,6 +242,9 @@ pub struct ComponentsSummary {
     pub dropped: BTreeMap<String, u64>,
     /// DWG colour indices seen and dropped under the monochrome policy.
     pub colours_ignored: u64,
+    /// The region step, when it ran (#1526).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub regions: Option<RegionsSummary>,
 }
 
 /// The whole report.

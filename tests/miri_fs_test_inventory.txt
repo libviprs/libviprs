@@ -643,6 +643,15 @@ annotated   not-detected tests/pvec_1439_view_limits.rs::the_default_limits_stil
 annotated   fs-detected  tests/pvec_1437_fuzz_seeds.rs::the_clip_seed_corpus_runs_clean
 annotated   fs-detected  tests/pvec_1437_fuzz_seeds.rs::the_provider_seed_corpus_runs_clean
 annotated   fs-detected  tests/pvec_1437_fuzz_seeds.rs::the_spline_seed_corpus_runs_clean
+annotated   fs-detected  tests/pvec_1500_component_free_conformance.rs::issue_1526_every_corpus_curve_in_a_component_free_artifact_is_the_decoded_one
+annotated   fs-detected  tests/pvec_1500_convert_regions.rs::issue_1526_a_drawing_with_no_walls_gives_no_regions_and_no_error
+annotated   fs-detected  tests/pvec_1500_convert_regions.rs::issue_1526_a_plan_past_the_node_cap_converts_and_the_report_names_the_refusal
+annotated   fs-detected  tests/pvec_1500_convert_regions.rs::issue_1526_the_geometry_is_identical_with_the_region_step_on_and_off
+annotated   fs-detected  tests/pvec_1500_convert_regions.rs::issue_1526_the_region_counts_survive_the_report_json
+annotated   fs-detected  tests/pvec_1500_convert_regions.rs::issue_1526_the_room_on_a_door_gap_is_dropped_and_counted_not_written_as_geometry
+annotated   fs-detected  tests/pvec_1500_convert_regions.rs::issue_1526_the_rooms_and_the_corridor_are_counted_and_the_stream_reads_back
+annotated   fs-detected  tests/pvec_1500_convert_regions.rs::issue_1526_the_streams_and_the_regions_are_the_same_bytes_spilled_or_in_memory
+annotated   fs-detected  tests/pvec_1500_convert_regions.rs::issue_1526_walls_that_are_not_one_straight_edge_are_counted_not_silently_lost
 annotated   fs-detected  tests/pvec_1500_convert_streams.rs::issue_1525_a_conversion_with_no_option_writes_geometry_only
 annotated   fs-detected  tests/pvec_1500_convert_streams.rs::issue_1525_a_curve_the_writer_refuses_moves_no_stream_row_onto_a_stranger
 annotated   fs-detected  tests/pvec_1500_convert_streams.rs::issue_1525_a_row_pvec_cannot_hold_is_counted_in_the_report_and_costs_only_its_row
