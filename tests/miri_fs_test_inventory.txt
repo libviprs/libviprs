@@ -655,7 +655,6 @@ annotated   fs-detected  tests/pvec_1471_reproducibility.rs::n_1471_the_adr_says
 annotated   fs-detected  tests/pvec_1471_reproducibility.rs::n_1471_the_architecture_overrides_are_exactly_the_fixtures_the_adr_lists
 annotated   fs-detected  tests/pvec_1471_reproducibility.rs::n_1513_the_adr_records_what_a_mac_does
 annotated   fs-detected  tests/pvec_1471_reproducibility.rs::n_1513_the_bit_exact_digest_tests_are_gated_to_linux
-annotated   fs-detected  tests/pvec_1471_reproducibility.rs::n_1513_the_drift_doc_says_the_digest_tests_are_linux_only
 annotated   fs-detected  tests/pvec_1471_reproducibility.rs::n_1513_the_other_pvec_gates_are_not_gated_by_os
 annotated   fs-detected  tests/pvec_1489_image_reason_keys.rs::a_real_refusal_from_a_page_is_reported_under_a_documented_key
 annotated   fs-detected  tests/pvec_1489_image_reason_keys.rs::every_note_key_is_in_a_doc

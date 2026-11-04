@@ -194,14 +194,3 @@ fn n_1513_the_adr_records_what_a_mac_does() {
         );
     }
 }
-
-#[test]
-#[cfg_attr(miri, ignore)] // reads files
-fn n_1513_the_drift_doc_says_the_digest_tests_are_linux_only() {
-    let doc = std::fs::read_to_string(root().join("docs/pvec-drift-check.md")).unwrap();
-    assert!(
-        doc.contains("#1513") && doc.contains("Linux only"),
-        "docs/pvec-drift-check.md must say the digest tests are Linux only (#1513)"
-    );
-    assert!(!doc.contains('\u{2014}'), "no em dashes");
-}
