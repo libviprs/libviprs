@@ -1,5 +1,6 @@
-//! N8.4b and N8.4c (#1518, #1519, slices of #1481): classify holds each entity once, the geometry
-//! goes as soon as the writer has it, and the output does not move.
+//! N8.4b to N8.4d (#1518, #1519, #1520, slices of #1481): classify holds each entity once, the
+//! geometry goes as soon as the writer has it, the report is written without being built as one
+//! string, and the output does not move.
 //!
 //! The budget test converts `large_industrial` at a twentieth of the manifest's size and reads the
 //! counting allocator: the tracked peak of the whole conversion, minus what the opened provider
@@ -117,6 +118,32 @@ fn classify_is_byte_identical_on_the_cells_1518() {
         .unwrap_or_else(|e| panic!("{PIN}: {e}"));
     let pinned: Value = serde_json::from_str(&text).unwrap();
     assert_eq!(Value::Object(now), pinned, "the output moved against {PIN}");
+}
+
+/// Bytes an entity that the report stage may add to the heap it started from (the rows are already
+/// held then), measured from the live heap when the artifact was written to the stage's peak. The code before
+/// #1520 measured 593 here, 156 after.
+const REPORT_BYTES_PER_ENTITY: u64 = 250;
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn the_report_stage_adds_no_whole_report_string_1520() {
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let bytes = drawing("large_industrial");
+    let dir = tempfile::tempdir().unwrap();
+    let v = pvec_stages::measure(&bytes, &dir.path().join("out.pvec"), SourceUnit::Meters);
+    let entities = v["entities"].as_u64().unwrap();
+    let added = v["stages"]["report"]["peak"].as_u64().unwrap()
+        - v["stages"]["write"]["held"].as_u64().unwrap();
+    println!(
+        "1520 added {added} entities {entities} per_entity {}",
+        added / entities
+    );
+    assert!(
+        added / entities <= REPORT_BYTES_PER_ENTITY,
+        "the report stage adds {} bytes an entity, budget {REPORT_BYTES_PER_ENTITY}",
+        added / entities
+    );
 }
 
 /// Cancels on the first chunk the writer reports.

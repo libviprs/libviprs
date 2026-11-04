@@ -853,7 +853,8 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1515 adds 3 more: the stage recorder's own cell and the two stage benchmark cells. It said 989 before this line moved.
 /// #1518 adds 2: the `tests/pvec_1481_classify.rs` cells that convert generated drawings into a temp dir and read the output pin. It said 992 before this line moved.
 /// #1519 adds 1: `tests/pvec_1481_classify.rs::a_cancel_mid_write_leaves_the_previous_pair_and_no_partial_1519`, which converts into a temp dir. It said 994 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 995;
+/// #1520 adds 1: `tests/pvec_1481_classify.rs::the_report_stage_adds_no_whole_report_string_1520`, which converts into a temp dir. It said 995 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 996;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
