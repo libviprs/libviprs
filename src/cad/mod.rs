@@ -209,8 +209,8 @@ pub use decoder::{
     CadDecoder, CadDrawing, CadSource, CadView, CollectSink, Extents, PrimitiveSink, ViewKind,
 };
 pub use primitive::{
-    Arc, Circle, Ellipse, ItemHandle, Line, Origin, Point3, Polygon, Polyline, Primitive,
-    PrimitiveKind, Spline, Text, Vector3, undecoded_escape,
+    Arc, Circle, Ellipse, Fill, ItemHandle, Line, Origin, Point3, Polygon, Polyline, Primitive,
+    PrimitiveKind, Spline, Text, TextAnchor, Vector3, undecoded_escape,
 };
 pub use report::{DecodeReport, Diagnostic, DiagnosticCode, PrimitiveCounts, Severity};
 pub use text::{DisplayText, display_text};

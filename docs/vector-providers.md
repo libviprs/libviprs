@@ -65,9 +65,10 @@ cargo build --no-default-features        # no DWG reader at all
 whenever `dwg-acadrust` is on, which it is by default, and needs no native library. With both
 features on, acadrust still wins; `vector::convert::decoder_for(ProviderKind::AcadSharp, ..)`
 asks for ACadSharp by name. acadrust draws lines, polylines, arcs, circles, ellipses, splines
-and text, hatch loops as polygons, leader lines, multileader and tolerance text and block
+and text, hatch loops as polygons (filled when the hatch is solid) and 2D SOLID as a filled
+polygon, MTEXT at its attachment point, leader lines, multileader and tolerance text and block
 attributes, expands INSERTs and draws DIMENSIONs from their blocks, and reports every other
-entity class it does not flatten (solids, points, mlines and the rest) as an
+entity class it does not flatten (points, mlines and the rest) as an
 `UNSUPPORTED_ENTITY` diagnostic instead of dropping it quietly.
 
 Without `dwg-acadrust` and without `dwg-acadsharp`:

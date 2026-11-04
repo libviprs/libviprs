@@ -70,6 +70,57 @@ pub fn clip_slab(points: &[[f64; 2]], axis: usize, lo: f64, hi: f64) -> Vec<Vec<
     out
 }
 
+/// Clips a closed ring to the slab `lo <= p[axis] <= hi`, Sutherland-Hodgman against its two
+/// edges.
+///
+/// The ring is given without its first point repeated, and comes back the same way. The result
+/// is empty when the ring has nothing in the slab, and a ring that is only partly inside gains
+/// zero-width bridges along the slab edge where it leaves and re-enters, which fill the same
+/// area as the ring itself and are why this is for filling and not for stroking. Where an edge
+/// crosses a slab boundary the point is computed from that edge's own endpoints, in ring order,
+/// so two neighbouring slabs agree on it to the last bit.
+#[must_use]
+pub fn clip_ring_slab(ring: &[[f64; 2]], axis: usize, lo: f64, hi: f64) -> Vec<[f64; 2]> {
+    let half = |input: &[[f64; 2]], edge: f64, keep_above: bool| -> Vec<[f64; 2]> {
+        let inside = |p: [f64; 2]| {
+            if keep_above {
+                p[axis] >= edge
+            } else {
+                p[axis] <= edge
+            }
+        };
+        let cross = |a: [f64; 2], b: [f64; 2]| {
+            let t = (edge - a[axis]) / (b[axis] - a[axis]);
+            let mut q = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+            q[axis] = edge;
+            q
+        };
+        let mut out = Vec::with_capacity(input.len() + 2);
+        for (i, &b) in input.iter().enumerate() {
+            let a = input[(i + input.len() - 1) % input.len()];
+            match (inside(a), inside(b)) {
+                (true, true) => out.push(b),
+                (false, true) => {
+                    out.push(cross(a, b));
+                    out.push(b);
+                }
+                (true, false) => out.push(cross(a, b)),
+                (false, false) => {}
+            }
+        }
+        out
+    };
+    if ring.len() < 3 {
+        return Vec::new();
+    }
+    let above = half(ring, lo, true);
+    if above.len() < 3 {
+        return Vec::new();
+    }
+    let both = half(&above, hi, false);
+    if both.len() < 3 { Vec::new() } else { both }
+}
+
 fn flush(cur: &mut Vec<[f64; 2]>, out: &mut Vec<Vec<[f64; 2]>>) {
     if cur.len() >= 2 {
         out.push(std::mem::take(cur));
@@ -173,6 +224,41 @@ mod tests {
         let left = clip_slab(&line, 0, 0.0, 4.0);
         let right = clip_slab(&line, 0, 4.0, 8.0);
         assert_eq!(left[0].last(), right[0].first());
+    }
+
+    #[test]
+    fn a_ring_across_a_slab_is_cut_at_both_edges() {
+        let ring = [[-5.0, 0.0], [15.0, 0.0], [15.0, 4.0], [-5.0, 4.0]];
+        let out = clip_ring_slab(&ring, 0, 0.0, 10.0);
+        assert_eq!(out.len(), 4);
+        assert!(out.iter().all(|p| (0.0..=10.0).contains(&p[0])));
+    }
+
+    #[test]
+    fn a_ring_outside_or_a_sliver_is_nothing() {
+        let ring = [[11.0, 0.0], [20.0, 0.0], [20.0, 4.0]];
+        assert!(clip_ring_slab(&ring, 0, 0.0, 10.0).is_empty());
+        assert!(clip_ring_slab(&ring[..2], 0, 0.0, 30.0).is_empty());
+    }
+
+    #[test]
+    fn a_ring_inside_comes_back_unchanged() {
+        let ring = [[1.0, 1.0], [5.0, 1.0], [3.0, 6.0]];
+        assert_eq!(clip_ring_slab(&ring, 0, 0.0, 10.0), ring.to_vec());
+    }
+
+    #[test]
+    fn neighbouring_slabs_agree_on_a_ring_crossing() {
+        let ring = [[0.3, 0.1], [7.9, 3.7], [2.0, 9.0]];
+        let left = clip_ring_slab(&ring, 0, 0.0, 4.0);
+        let right = clip_ring_slab(&ring, 0, 4.0, 8.0);
+        let on_edge = |r: &[[f64; 2]]| {
+            let mut v: Vec<_> = r.iter().filter(|p| p[0] == 4.0).copied().collect();
+            v.sort_by(|a, b| a[1].total_cmp(&b[1]));
+            v
+        };
+        assert_eq!(on_edge(&left), on_edge(&right));
+        assert!(!on_edge(&left).is_empty());
     }
 
     #[test]

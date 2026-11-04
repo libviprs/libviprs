@@ -98,15 +98,15 @@ use serde_json::json;
 use thiserror::Error;
 
 use crate::cad::{
-    CadDrawing, CadError, DecodeReport, Diagnostic, DiagnosticCode, DisplayText, Primitive,
-    PrimitiveSink, ViewKind, display_text,
+    CadDrawing, CadError, DecodeReport, Diagnostic, DiagnosticCode, DisplayText, Fill, Primitive,
+    PrimitiveSink, TextAnchor, ViewKind, display_text,
 };
 use crate::cancel::CancelToken;
 use crate::vector::archive::{
     FieldType, LayerSchema, VectorArchiveOptions, VectorArchiveWriter, VectorError,
 };
-use crate::vector::clip::{clip_slab, simplify};
-use crate::vector::mvt::{Feature, Geometry, Layer, Point, Tile, Value};
+use crate::vector::clip::{clip_ring_slab, clip_slab, simplify};
+use crate::vector::mvt::{Feature, Geometry, Layer, Point, Polygon, Tile, Value};
 use crate::vector::style::glyph_available;
 use crate::vector::tessellate;
 
@@ -547,6 +547,13 @@ pub struct TilerReport {
     pub tiles_per_zoom: Vec<u64>,
     /// Line points written, after clipping and simplification.
     pub points: u64,
+    /// Fill polygons written (an outer ring with its holes counts once), per tile.
+    pub fills: u64,
+    /// Fill ring points written, after clipping.
+    pub fill_points: u64,
+    /// Fills whose rings on one tile were too many to nest, so each ring is drawn filled on its
+    /// own and an island in it is not a hole.
+    pub fills_unnested: u64,
     /// Text features written.
     pub text: u64,
     /// (primitive, zoom) pairs skipped for being smaller than `cull_units`.
@@ -714,11 +721,17 @@ enum Flat {
         runs: Vec<Vec<[f64; 2]>>,
         capped: bool,
     },
+    /// One closed ring of a solid fill, without its first point repeated.
+    Ring {
+        points: Vec<[f64; 2]>,
+        capped: bool,
+    },
     Text {
         at: [f64; 2],
         height: f64,
         rotation: f64,
         text: String,
+        anchor: TextAnchor,
     },
     Undrawable,
 }
@@ -747,12 +760,20 @@ fn flatten(p: &Primitive, tol: f64, max_text: usize) -> Flat {
             }
         }
         Primitive::Polygon(pg) => {
-            // A closed boundary, drawn as an outline until solid fills land.
             let v: Vec<[f64; 3]> = pg.vertices().iter().map(|p| p.into_array()).collect();
-            let t = tessellate::bulge_run(&v, pg.bulges(), pg.normal().into_array(), true, tol);
-            Flat::Lines {
-                runs: vec![t.points],
-                capped: t.capped,
+            let mut t = tessellate::bulge_run(&v, pg.bulges(), pg.normal().into_array(), true, tol);
+            if matches!(pg.fill(), Fill::Solid { .. }) {
+                // A closed run repeats its first point, and a ring does not.
+                t.points.pop();
+                Flat::Ring {
+                    points: t.points,
+                    capped: t.capped,
+                }
+            } else {
+                Flat::Lines {
+                    runs: vec![t.points],
+                    capped: t.capped,
+                }
             }
         }
         Primitive::Arc(a) => {
@@ -790,7 +811,20 @@ fn flatten(p: &Primitive, tol: f64, max_text: usize) -> Flat {
             // What a person reads: MTEXT formatting is read out of it here, once,
             // so bounds and tiles agree on the string.
             text: shown(t.content(), max_text).0.text,
+            anchor: t.anchor(),
         },
+    }
+}
+
+/// `Some(opens)` for a polygon that is a loop of a solid fill, and whether it opens the fill.
+/// A loop that says it joins the fill before it but follows something else opens its own.
+fn solid_loop(p: &Primitive) -> Option<bool> {
+    match p {
+        Primitive::Polygon(pg) => match pg.fill() {
+            Fill::Solid { opens } => Some(opens),
+            Fill::Outline => None,
+        },
+        _ => None,
     }
 }
 
@@ -850,11 +884,16 @@ fn primitive_bounds(p: &Primitive, max_text: usize) -> Option<[f64; 4]> {
             let b = bbox_of(&runs)?;
             Some([b[0] - tol, b[1] - tol, b[2] + tol, b[3] + tol])
         }
+        Flat::Ring { points, .. } => {
+            let b = bbox_of(&[points])?;
+            Some([b[0] - tol, b[1] - tol, b[2] + tol, b[3] + tol])
+        }
         Flat::Text {
             at,
             height,
             rotation,
             text,
+            ..
         } => {
             if text.trim().is_empty() {
                 return None;
@@ -885,10 +924,13 @@ fn primitive_bounds(p: &Primitive, max_text: usize) -> Option<[f64; 4]> {
 #[derive(Default)]
 struct TileBuf {
     lines: Vec<Vec<Point>>,
+    /// One entry per fill: its rings on this tile, which are filled together by even-odd.
+    fills: Vec<Vec<Vec<Point>>>,
     text: Vec<TextFeature>,
 }
 
 struct TextFeature {
+    anchor: TextAnchor,
     at: Point,
     text: String,
     height: f64,
@@ -927,10 +969,14 @@ struct Ctx<'a> {
 /// each half (plus the buffer) and the halves recursed into, so a long line
 /// costs `points * log(grid)` rather than `points * tiles`. The stack is
 /// explicit and its depth is at most `2 * zoom`.
+///
+/// With `filled` the runs are the closed rings of one fill: they are clipped as rings
+/// and every tile gets the clipped rings as one group, to be filled together.
 fn distribute(
     ctx: &mut Ctx<'_>,
     level: &mut Level,
     runs: Vec<Vec<[f64; 2]>>,
+    filled: bool,
 ) -> Result<(), TilerError> {
     let Some(b) = bbox_of(&runs) else {
         return Ok(());
@@ -946,7 +992,11 @@ fn distribute(
     while let Some((runs, x0, x1, y0, y1)) = stack.pop() {
         ctx.guard.check()?;
         if x0 == x1 && y0 == y1 {
-            emit_runs(ctx, level, x0, y0, &runs)?;
+            if filled {
+                emit_fill(ctx, level, x0, y0, &runs)?;
+            } else {
+                emit_runs(ctx, level, x0, y0, &runs)?;
+            }
             continue;
         }
         let split_x = (x1 - x0) >= (y1 - y0);
@@ -959,7 +1009,14 @@ fn distribute(
             let hi_edge = f64::from(h1) + 1.0 + buf;
             let mut part: Vec<Vec<[f64; 2]>> = Vec::new();
             for run in &runs {
-                part.extend(clip_slab(run, axis, lo_edge, hi_edge));
+                if filled {
+                    let ring = clip_ring_slab(run, axis, lo_edge, hi_edge);
+                    if !ring.is_empty() {
+                        part.push(ring);
+                    }
+                } else {
+                    part.extend(clip_slab(run, axis, lo_edge, hi_edge));
+                }
             }
             if part.is_empty() {
                 continue;
@@ -1019,6 +1076,165 @@ fn emit_runs(
         }
     }
     Ok(())
+}
+
+/// Files the rings of one fill on tile `(tx, ty)`, quantised. A ring that collapses to fewer than
+/// three points, or to no area, is counted and dropped; the others are one group, so the tile
+/// can nest them by even-odd.
+fn emit_fill(
+    ctx: &mut Ctx<'_>,
+    level: &mut Level,
+    tx: u32,
+    ty: u32,
+    rings: &[Vec<[f64; 2]>],
+) -> Result<(), TilerError> {
+    let e = f64::from(ctx.config.extent);
+    let (ox, oy) = (f64::from(tx), f64::from(ty));
+    let mut group: Vec<Vec<Point>> = Vec::with_capacity(rings.len());
+    for ring in rings {
+        let mut pts: Vec<Point> = Vec::with_capacity(ring.len());
+        for p in ring {
+            let q = [
+                ((p[0] - ox) * e).round() as i32,
+                ((p[1] - oy) * e).round() as i32,
+            ];
+            if pts.last() != Some(&q) {
+                pts.push(q);
+            }
+        }
+        if pts.len() > 1 && pts.first() == pts.last() {
+            pts.pop();
+        }
+        if pts.len() < 3 || ring_area(&pts) == 0.0 {
+            ctx.report.degenerate_after_quantisation += 1;
+            continue;
+        }
+        level.points += pts.len();
+        level.runs += 1;
+        group.push(pts);
+    }
+    if !group.is_empty() {
+        level.tiles.entry((tx, ty)).or_default().fills.push(group);
+    }
+    if level.points > ctx.config.max_level_points {
+        return Err(TilerError::LevelBudgetExceeded {
+            zoom: level.zoom,
+            limit: ctx.config.max_level_points,
+            unit: "points",
+        });
+    }
+    if level.estimated_bytes() > ctx.config.max_level_bytes {
+        return Err(TilerError::LevelBudgetExceeded {
+            zoom: level.zoom,
+            limit: ctx.config.max_level_bytes,
+            unit: "bytes",
+        });
+    }
+    Ok(())
+}
+
+/// The area of a ring, as the shoelace sum's magnitude.
+fn ring_area(ring: &[Point]) -> f64 {
+    let n = ring.len();
+    let twice: i64 = (0..n)
+        .map(|i| {
+            let (a, b) = (ring[i], ring[(i + 1) % n]);
+            i64::from(a[0]) * i64::from(b[1]) - i64::from(b[0]) * i64::from(a[1])
+        })
+        .sum();
+    twice.unsigned_abs() as f64 / 2.0
+}
+
+/// Whether `p` is inside `ring` by the even-odd rule.
+fn ring_contains(ring: &[Point], p: [f64; 2]) -> bool {
+    let n = ring.len();
+    let mut inside = false;
+    for i in 0..n {
+        let (a, b) = (ring[i], ring[(i + 1) % n]);
+        let (ay, by) = (f64::from(a[1]), f64::from(b[1]));
+        if (ay > p[1]) != (by > p[1]) {
+            let x = f64::from(a[0]) + (p[1] - ay) / (by - ay) * (f64::from(b[0]) - f64::from(a[0]));
+            if p[0] < x {
+                inside = !inside;
+            }
+        }
+    }
+    inside
+}
+
+/// The most rings of one fill on one tile that are nested. Nesting compares every ring with
+/// every other, and a hostile hatch can have as many loops as it likes.
+const MAX_NESTED_RINGS: usize = 2048;
+
+/// Turns the rings of one fill into polygons by even-odd: a ring inside an even number of others
+/// is an outer ring, a ring inside an odd number is a hole of the smallest ring around it. The
+/// encoder fixes each ring's winding, so none is chosen here.
+///
+/// The probe for "inside" is the middle of the ring's first span, so two rings that share a
+/// corner are not mistaken for one another's holes. Returns whether the rings were too many to
+/// nest, in which case each is its own polygon.
+fn nest_rings(rings: Vec<Vec<Point>>) -> (Vec<Polygon>, bool) {
+    let n = rings.len();
+    if n == 1 || n > MAX_NESTED_RINGS {
+        let polygons = rings
+            .into_iter()
+            .map(|exterior| Polygon {
+                exterior,
+                holes: Vec::new(),
+            })
+            .collect();
+        return (polygons, n > MAX_NESTED_RINGS);
+    }
+    let areas: Vec<f64> = rings.iter().map(|r| ring_area(r)).collect();
+    let probes: Vec<[f64; 2]> = rings
+        .iter()
+        .map(|r| {
+            let (a, b) = (r[0], r[1]);
+            [
+                (f64::from(a[0]) + f64::from(b[0])) / 2.0,
+                (f64::from(a[1]) + f64::from(b[1])) / 2.0,
+            ]
+        })
+        .collect();
+    let mut depth = vec![0usize; n];
+    let mut parent: Vec<Option<usize>> = vec![None; n];
+    for i in 0..n {
+        for j in 0..n {
+            if i != j && areas[j] > areas[i] && ring_contains(&rings[j], probes[i]) {
+                depth[i] += 1;
+                if parent[i].is_none_or(|p| areas[j] < areas[p]) {
+                    parent[i] = Some(j);
+                }
+            }
+        }
+    }
+    let mut slot: Vec<Option<usize>> = vec![None; n];
+    let mut polygons: Vec<Polygon> = Vec::new();
+    let mut holes: Vec<(usize, Vec<Point>)> = Vec::new();
+    for (i, ring) in rings.into_iter().enumerate() {
+        match parent[i] {
+            Some(p) if depth[i] % 2 == 1 => holes.push((p, ring)),
+            _ => {
+                slot[i] = Some(polygons.len());
+                polygons.push(Polygon {
+                    exterior: ring,
+                    holes: Vec::new(),
+                });
+            }
+        }
+    }
+    for (p, hole) in holes {
+        match slot[p] {
+            Some(at) => polygons[at].holes.push(hole),
+            // Its container is itself a hole, which an odd depth rules out; keep the ring filled
+            // rather than lose it.
+            None => polygons.push(Polygon {
+                exterior: hole,
+                holes: Vec::new(),
+            }),
+        }
+    }
+    (polygons, false)
 }
 
 /// Reads what a text primitive's formatting and characters say about fidelity
@@ -1171,10 +1387,36 @@ fn tile_guarded(
             guard: &mut *guard,
         };
 
-        for (p, bx) in primitives.iter().zip(&boxes) {
+        let mut joined_until = 0;
+        for (index, (p, bx)) in primitives.iter().zip(&boxes).enumerate() {
+            // A loop that joins the fill before it was drawn with that fill.
+            if index < joined_until {
+                continue;
+            }
             let Some(bx) = bx else { continue };
             ctx.guard.check()?;
             let is_text = matches!(p, Primitive::Text(_));
+            // A solid loop opens a fill, and the loops after it that say they join it are the
+            // rest of the same fill: one box, one cull, one clip.
+            let mut bx = *bx;
+            if solid_loop(p).is_some() {
+                joined_until = index + 1;
+                while primitives
+                    .get(joined_until)
+                    .is_some_and(|q| solid_loop(q) == Some(false))
+                {
+                    if let Some(b) = boxes[joined_until] {
+                        bx = [
+                            bx[0].min(b[0]),
+                            bx[1].min(b[1]),
+                            bx[2].max(b[2]),
+                            bx[3].max(b[3]),
+                        ];
+                    }
+                    joined_until += 1;
+                }
+            }
+            let bx = &bx;
             if !is_text
                 && (bx[2] - bx[0]) < config.cull_units * unit
                 && (bx[3] - bx[1]) < config.cull_units * unit
@@ -1182,8 +1424,29 @@ fn tile_guarded(
                 ctx.report.culled_subpixel += 1;
                 continue;
             }
+            if solid_loop(p).is_some() {
+                let mut rings: Vec<Vec<[f64; 2]>> = Vec::new();
+                for q in &primitives[index..joined_until] {
+                    if let Flat::Ring { points, capped } = flatten(q, tol, config.max_text_bytes) {
+                        if capped {
+                            ctx.report.curves_capped += 1;
+                        }
+                        rings.push(
+                            points
+                                .iter()
+                                .map(|q| {
+                                    let uv = world.unit(*q);
+                                    [uv[0] * scale, uv[1] * scale]
+                                })
+                                .collect(),
+                        );
+                    }
+                }
+                distribute(&mut ctx, &mut level, rings, true)?;
+                continue;
+            }
             match flatten(p, tol, config.max_text_bytes) {
-                Flat::Undrawable => ctx.report.undrawable += 1,
+                Flat::Undrawable | Flat::Ring { .. } => ctx.report.undrawable += 1,
                 Flat::Lines { runs, capped } => {
                     if capped {
                         ctx.report.curves_capped += 1;
@@ -1199,13 +1462,14 @@ fn tile_guarded(
                                 .collect()
                         })
                         .collect();
-                    distribute(&mut ctx, &mut level, grid)?;
+                    distribute(&mut ctx, &mut level, grid, false)?;
                 }
                 Flat::Text {
                     at,
                     height,
                     rotation,
                     text,
+                    anchor,
                 } => {
                     let height_units = height / unit;
                     if height_units < config.min_text_units {
@@ -1234,6 +1498,7 @@ fn tile_guarded(
                         .or_default()
                         .text
                         .push(TextFeature {
+                            anchor,
                             at: local,
                             text,
                             height,
@@ -1318,10 +1583,51 @@ fn build_tile(ctx: &mut Ctx<'_>, mut buf: TileBuf) -> Tile {
         ctx.report.dropped_for_text_budget += (before - buf.text.len()) as u64;
     }
 
+    // Fills are held to the same point budget, by the same rule: the largest fills are kept.
+    let fill_points = |g: &Vec<Vec<Point>>| g.iter().map(Vec::len).sum::<usize>();
+    let total: usize = buf.fills.iter().map(fill_points).sum();
+    if total > cfg.max_points_per_tile {
+        let mut order: Vec<usize> = (0..buf.fills.len()).collect();
+        order.sort_by_key(|&i| std::cmp::Reverse(fill_points(&buf.fills[i])));
+        let mut kept = 0usize;
+        let mut keep = vec![false; buf.fills.len()];
+        for i in order {
+            let n = fill_points(&buf.fills[i]);
+            if kept + n > cfg.max_points_per_tile {
+                continue;
+            }
+            kept += n;
+            keep[i] = true;
+        }
+        let before = buf.fills.len();
+        let mut it = keep.iter();
+        buf.fills.retain(|_| *it.next().unwrap_or(&false));
+        ctx.report.dropped_for_point_budget += (before - buf.fills.len()) as u64;
+    }
+
     ctx.report.points += buf.lines.iter().map(|l| l.len() as u64).sum::<u64>();
+    ctx.report.fill_points += buf.fills.iter().map(fill_points).sum::<usize>() as u64;
     ctx.report.text += buf.text.len() as u64;
 
     let mut layers = Vec::new();
+    if !buf.fills.is_empty() {
+        let mut polygons: Vec<Polygon> = Vec::new();
+        for group in std::mem::take(&mut buf.fills) {
+            let (nested, unnested) = nest_rings(group);
+            ctx.report.fills_unnested += u64::from(unnested);
+            polygons.extend(nested);
+        }
+        ctx.report.fills += polygons.len() as u64;
+        layers.push(Layer {
+            name: "fills".into(),
+            extent: cfg.extent,
+            features: vec![Feature {
+                id: None,
+                geometry: Geometry::Polygons(polygons),
+                properties: Vec::new(),
+            }],
+        });
+    }
     if !buf.lines.is_empty() {
         layers.push(Layer {
             name: "lines".into(),
@@ -1340,15 +1646,24 @@ fn build_tile(ctx: &mut Ctx<'_>, mut buf: TileBuf) -> Tile {
             features: buf
                 .text
                 .into_iter()
-                .map(|t| Feature {
-                    id: None,
-                    geometry: Geometry::Points(vec![t.at]),
-                    properties: vec![
+                .map(|t| {
+                    let mut properties = vec![
                         ("text".into(), Value::String(t.text)),
                         ("height".into(), Value::Double(t.height)),
                         ("h0".into(), Value::Double(t.h0)),
                         ("rotation".into(), Value::Double(t.rotation)),
-                    ],
+                    ];
+                    // The style's default is the bottom-left, so only a label that is attached
+                    // somewhere else says so.
+                    if t.anchor != TextAnchor::BottomLeft {
+                        properties
+                            .push(("anchor".into(), Value::String(t.anchor.style_name().into())));
+                    }
+                    Feature {
+                        id: None,
+                        geometry: Geometry::Points(vec![t.at]),
+                        properties,
+                    }
                 })
                 .collect(),
         });
@@ -1356,16 +1671,22 @@ fn build_tile(ctx: &mut Ctx<'_>, mut buf: TileBuf) -> Tile {
     Tile { layers }
 }
 
-/// The layers every tiler archive declares.
+/// Every layer, and every property, a tiler archive may declare.
+///
+/// An archive declares only what it uses: the `fills` layer when a solid fill was tiled, and the
+/// text `anchor` property when a label is attached anywhere but its bottom-left. A drawing with
+/// neither is declared exactly as it was before fills, so its archive is byte for byte the same.
 #[must_use]
 pub fn layer_schema() -> Vec<LayerSchema> {
     vec![
+        LayerSchema::new("fills"),
         LayerSchema::new("lines"),
         LayerSchema::new("text")
             .with_field("text", FieldType::String)
             .with_field("height", FieldType::Number)
             .with_field("h0", FieldType::Number)
-            .with_field("rotation", FieldType::Number),
+            .with_field("rotation", FieldType::Number)
+            .with_field("anchor", FieldType::String),
     ]
 }
 
@@ -1425,7 +1746,21 @@ fn build_archive_guarded(
     let world = WorldTransform::from_bounds(all, config.margin)?;
     let (lon0, lat0) = world.lon_lat([all[0], all[1]]);
     let (lon1, lat1) = world.lon_lat([all[2], all[3]]);
-    let mut options = VectorArchiveOptions::new(layer_schema())
+    let filled = primitives.iter().any(|p| solid_loop(p).is_some());
+    let anchored = primitives
+        .iter()
+        .any(|p| matches!(p, Primitive::Text(t) if t.anchor() != TextAnchor::BottomLeft));
+    let schema: Vec<LayerSchema> = layer_schema()
+        .into_iter()
+        .filter(|l| filled || l.id != "fills")
+        .map(|mut l| {
+            if !anchored {
+                l.fields.remove("anchor");
+            }
+            l
+        })
+        .collect();
+    let mut options = VectorArchiveOptions::new(schema)
         .with_name(name)
         .with_bounds_degrees([lon0, lat0.min(lat1), lon1, lat0.max(lat1)])
         .with_center_degrees((lon0 + lon1) / 2.0, (lat0 + lat1) / 2.0)

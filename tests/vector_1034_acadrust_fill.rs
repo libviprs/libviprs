@@ -16,8 +16,9 @@ use libviprs::cad::acadrust::AcadrustDecoder;
 use libviprs::cad::{
     CadDecoder, CadSource, CollectSink, DecodeReport, DiagnosticCode, Primitive, PrimitiveKind,
 };
+use libviprs::vector::VectorArchive;
 use libviprs::vector::mvt::{Geometry, Polygon, Value};
-use libviprs::vector::tiler::{CollectTiles, TilerConfig, tile_primitives};
+use libviprs::vector::tiler::{CollectTiles, TilerConfig, build_archive, tile_primitives};
 
 const EXTENT: f64 = 4096.0;
 
@@ -294,4 +295,32 @@ fn a_fill_across_four_tiles_is_closed_and_inside_each_tile() {
         }
         assert!(filled_area(&polys) > 0.0, "tile {x}/{y} fills nothing");
     }
+}
+
+#[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
+fn an_archive_declares_the_fills_layer_and_the_anchor_only_when_it_uses_them() {
+    let built = |entities: Vec<EntityType>| {
+        let (prims, _) = decode(&drawing(entities));
+        let dir =
+            std::env::temp_dir().join(format!("fill1034-{}-{}", std::process::id(), prims.len()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("a.pmtiles");
+        build_archive(&prims, &TilerConfig::default().with_max_zoom(1), &path, "a").unwrap();
+        let layers = VectorArchive::try_open(&path).unwrap().layers().to_vec();
+        let _ = std::fs::remove_dir_all(&dir);
+        layers
+    };
+    let plain = built(vec![frame()]);
+    assert!(plain.iter().all(|l| l.id != "fills"));
+    let filled = built(vec![
+        frame(),
+        hatch(true, &[square(100.0, 100.0, 900.0, 900.0)]),
+    ]);
+    assert!(filled.iter().any(|l| l.id == "fills"));
+    let mut mtext = MText::with_value("Room 12", Vector3::new(500.0, 500.0, 0.0)).with_height(60.0);
+    mtext.attachment_point = AttachmentPoint::MiddleCenter;
+    let anchored = built(vec![frame(), EntityType::MText(Box::new(mtext))]);
+    let text = anchored.iter().find(|l| l.id == "text").unwrap();
+    assert!(text.fields.contains_key("anchor"));
 }

@@ -20,6 +20,16 @@
       }
     },
     {
+      "id": "fills",
+      "type": "fill",
+      "source": "drawing",
+      "source-layer": "fills",
+      "paint": {
+        "fill-color": "#000000",
+        "fill-opacity": 1
+      }
+    },
+    {
       "id": "linework",
       "type": "line",
       "source": "drawing",
@@ -55,7 +65,7 @@
         "text-rotate": ["get", "rotation"],
         "text-rotation-alignment": "map",
         "text-pitch-alignment": "map",
-        "text-anchor": "bottom-left",
+        "text-anchor": ["coalesce", ["get", "anchor"], "bottom-left"],
         "text-allow-overlap": true,
         "text-ignore-placement": true,
         "text-keep-upright": false,

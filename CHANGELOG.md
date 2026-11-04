@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Solid hatches, 2D SOLID and the MTEXT anchor on the acadrust path** (issues #1034, #1527). A HATCH with the solid flag
+  now reaches the tiles as a filled polygon in a new `fills` layer, with its islands as holes by even-odd (the hatch style
+  decides which loops join), a 2D SOLID is filled in its visible vertex order, and a patterned hatch stays an outline and
+  says so with code 103. `cad::Polygon` gains `Fill` (`with_fill`, `fill`), `cad::Text` gains `TextAnchor` (`with_anchor`,
+  `anchor`) and the tiler clips a fill per tile as a ring (`vector::clip::clip_ring_slab`). The `fills` layer and the text
+  `anchor` property are declared only by an archive that uses them, so every other archive is byte for byte what it was.
+  `black_on_white.style.json` gains a black `fills` layer and reads `anchor` for `text-anchor`. ACadSharp keeps drawing
+  outlines, which `docs/vector-entities.md` records as a gap of the experimental provider.
 - **A `CadDecoder` over acadrust, so `default_decoder` picks it** (issue #1485). `cad::acadrust::AcadrustDecoder`
   (feature `dwg-acadrust`) reads a drawing through `AcadrustProvider` and the PVec block walk, so INSERTs are expanded
   under the walk's bounds, layer and invisible state is applied, and DIMENSIONs are drawn from their blocks. It crosses

@@ -22,10 +22,21 @@ on nearly every drawing and is left out of the last column.
 | Refused | The file is not opened (an unsupported version, or over a limit). |
 | Fails, bounded | The decode stops with an error on purpose, and the report says why (code 504). |
 
-Known gaps that stay open: a solid HATCH is drawn as an outline and a patterned one has no pattern
-lines (codes 103 and 104), and 2D SOLID is not drawn. Both need a field on the wire record from
-libviprs-dep (libviprs-dep#165, #1034). MTEXT is anchored at its bottom-left because the attachment point
-is not on the wire either.
+Known gaps that stay open, on the experimental ACadSharp provider only: a solid HATCH is drawn as an
+outline and a patterned one has no pattern lines (codes 103 and 104), and 2D SOLID is not drawn. Both need
+a field on the wire record from libviprs-dep. MTEXT is anchored at its bottom-left because the attachment
+point is not on that wire either. The rows below are what ACadSharp does with the g13 fixtures.
+
+On the default acadrust provider (`tests/vector_1034_acadrust_fill.rs`, drawings built in memory with
+acadrust's own writer):
+
+| Entity | Result | Drawn as | Report codes |
+| --- | --- | --- | --- |
+| HATCH, solid | Drawn | Polygon, filled in the `fills` layer; loops are filled together by even-odd, so an island is a hole | |
+| HATCH, solid, a loop with an elliptic or spline edge | Drawn, with a reported gap | outlines | 100 |
+| HATCH, pattern | Drawn, with a reported gap | Polygon outline, no pattern lines | 103 |
+| SOLID (2D) | Drawn | Polygon, filled, in its visible vertex order (first, second, fourth, third) | |
+| MTEXT | Drawn | Text, attached at its attachment point (the `anchor` property) | |
 
 | Fixture | Entity | Result | Drawn as | Report codes |
 | --- | --- | --- | --- | --- |

@@ -43,7 +43,7 @@ use acadrust as acr;
 use acr::objects::ObjectType;
 use acr::{DwgReader, EntityType};
 
-use crate::cad::{CadSource, ItemHandle};
+use crate::cad::{CadSource, Fill, ItemHandle};
 use crate::pvec::provider::{
     ArrayGrid, Availability, BlockRef, DwgProvider, EntityCursor, EntityFacts, EntityScope,
     EntityStyle, Facet, FacetSource, InstancePath, LayerState, LayoutId, LayoutKind, LayoutState,
@@ -103,6 +103,9 @@ pub struct TextFact {
     pub multiline: bool,
     /// The extrusion normal.
     pub normal: Point3,
+    /// The MTEXT attachment point as its DXF number (71), 1 to 9, or [`None`] for anything that
+    /// is not MTEXT.
+    pub attachment: Option<u8>,
 }
 
 /// What a HATCH, LEADER, MULTILEADER or TOLERANCE draws, read by handle for the
@@ -119,6 +122,10 @@ pub struct DrawnFact {
     pub elevation: f64,
     /// The hatch's extrusion normal.
     pub normal: Point3,
+    /// How each ring is drawn, one per ring: filled (a solid HATCH or a 2D SOLID) or an outline.
+    pub fills: Vec<Fill>,
+    /// A HATCH that is a pattern, whose lines this reading does not draw.
+    pub pattern_only: bool,
     /// Open runs of points: a leader's lines.
     pub strokes: Vec<Vec<Point3>>,
     /// Text the entity shows.
@@ -157,6 +164,9 @@ fn hatch_rings(h: &acr::entities::Hatch, out: &mut DrawnFact) {
     use acr::entities::BoundaryEdge;
     out.elevation = h.elevation;
     out.normal = p3(h.normal);
+    out.pattern_only = !h.is_solid;
+    // Whether each ring that made it was flagged as an outer loop.
+    let mut external: Vec<bool> = Vec::new();
     for (n, path) in h.paths.iter().enumerate() {
         let mut ring: Vec<RawVertex> = Vec::new();
         let mut end: Option<[f64; 2]> = None;
@@ -197,11 +207,46 @@ fn hatch_rings(h: &acr::entities::Hatch, out: &mut DrawnFact) {
         }
         if whole && ring.len() >= 2 {
             out.rings.push(ring);
+            external.push(path.flags.is_external() || path.flags.is_outermost());
         } else {
             out.skipped.push(format!(
                 "boundary loop {n} has elliptic or spline edges, or edges that do not join"
             ));
         }
+    }
+    out.fills = hatch_fills(h, &external, out.skipped.is_empty());
+}
+
+/// How each ring of a solid HATCH is drawn.
+///
+/// A loop that could not be read leaves a hole in the picture where the fill would have been, so
+/// a hatch with one is drawn as outlines, and the skipped loop is already reported. Otherwise the
+/// hatch style decides: "normal" fills the loops together by even-odd, so an island is a hole,
+/// "outer" fills only the loops flagged as outer (or all of them when none is), and "ignore" fills
+/// each loop by itself.
+fn hatch_fills(h: &acr::entities::Hatch, external: &[bool], all_read: bool) -> Vec<Fill> {
+    use acr::entities::HatchStyleType;
+    if !h.is_solid || !all_read {
+        return vec![Fill::Outline; external.len()];
+    }
+    match h.style {
+        HatchStyleType::Normal => (0..external.len())
+            .map(|i| Fill::Solid { opens: i == 0 })
+            .collect(),
+        HatchStyleType::Outer => {
+            let any = external.iter().any(|e| *e);
+            external
+                .iter()
+                .map(|e| {
+                    if *e || !any {
+                        Fill::Solid { opens: true }
+                    } else {
+                        Fill::Outline
+                    }
+                })
+                .collect()
+        }
+        HatchStyleType::Ignore => vec![Fill::Solid { opens: true }; external.len()],
     }
 }
 
@@ -271,6 +316,7 @@ impl AcadrustProvider {
                 content: t.value.clone(),
                 multiline: false,
                 normal: p3(t.normal),
+                attachment: None,
             }),
             EntityType::MText(m) => Some(TextFact {
                 position: p3(m.insertion_point),
@@ -279,6 +325,7 @@ impl AcadrustProvider {
                 content: m.value.clone(),
                 multiline: true,
                 normal: p3(m.normal),
+                attachment: Some(m.attachment_point as u8),
             }),
             _ => None,
         }
@@ -313,6 +360,7 @@ impl AcadrustProvider {
                         content: c.text_string.clone(),
                         multiline: true,
                         normal: p3(c.text_normal),
+                        attachment: None,
                     });
                 }
                 if c.has_block_contents {
@@ -326,7 +374,26 @@ impl AcadrustProvider {
                 content: t.text.clone(),
                 multiline: true,
                 normal: p3(t.normal),
+                attachment: None,
             }),
+            EntityType::Solid(s) => {
+                // The stored order of a quadrilateral is first, second, third, fourth, and it is
+                // drawn first, second, fourth, third.
+                let corners = s.boundary_corners();
+                out.elevation = corners.first().map_or(0.0, |c| c.z);
+                out.normal = p3(s.normal);
+                out.rings.push(
+                    corners
+                        .iter()
+                        .map(|c| RawVertex {
+                            x: c.x,
+                            y: c.y,
+                            bulge: 0.0,
+                        })
+                        .collect(),
+                );
+                out.fills.push(Fill::Solid { opens: true });
+            }
             _ => return None,
         }
         Some(out)
@@ -350,6 +417,7 @@ impl AcadrustProvider {
                 content: a.value.clone(),
                 multiline: false,
                 normal: p3(a.normal),
+                attachment: None,
             })
             .collect()
     }
