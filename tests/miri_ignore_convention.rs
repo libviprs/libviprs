@@ -846,7 +846,8 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1495 adds 1 more: `tests/pvec_1365_pdf_jbig2.rs::a_stream_that_lenient_decoding_repairs_is_refused_1495`, which reads the fixtures. It said 970 before this line moved.
 /// #1505 adds 1: `tests/pvec_corpus_regression.rs::the_document_agrees_with_the_baseline`, which reads the corpus-regression page and the baseline.
 /// #1489 adds 4: the `tests/pvec_1489_image_reason_keys.rs` cells that read the docs. It said 972 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 976;
+/// #1490 adds 1: the `tests/pvec_1490_fill_report_images.rs` cell that reads `docs/pvec-hatch-policy.md`. It said 976 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 977;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
