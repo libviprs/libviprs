@@ -267,19 +267,23 @@ feature never makes a build fail for want of a library. No .NET runtime is
 needed at run time. The CAD-neutral core, `libviprs::cad`, is not behind a
 feature and does not depend on any of this.
 
-The dependency is a git dependency while `acadsharp-rs` is unpublished, which
-means this crate cannot be published to crates.io until that line in the root
-`Cargo.toml` becomes a registry version.
+`acadsharp-rs` is a git dependency, and so is `acadrust`. This crate is not published to
+crates.io: `dwg-acadrust` is a default feature, and acadrust is never taken from a registry. The
+acadsharp-rs tile-path decoder stays experimental (it is also kept in the CLI's `full` feature so
+the native lane keeps compiling), chosen with `decoder_for(ProviderKind::AcadSharp, ..)`.
 
 ### `dwg-acadrust` is a pinned git dependency, and it is a default feature
 
 The default `dwg-acadrust` feature pulls `acadrust` (`--no-default-features` leaves it out), libviprs' fork of a pure-Rust DWG and
-DXF reader, for the first provider behind `pvec::DwgProvider` (issue #1072). It
+DXF reader, for the first provider behind `pvec::DwgProvider` (issue #1072) and for the tile-path decoder `cad::acadrust::AcadrustDecoder` (issue #1485). It
 declares no `links` key, has no native archive and loads nothing at run time, so
-`tests/dependency_policy.rs` has a cell for it that adds no `links` entry and no
-vendored C. It is a git dependency pinned by a full 40 digit `rev`, for the same
-reason as `acadsharp-rs` above, so it also blocks publishing to crates.io until
-that line becomes a registry version. Moving the `rev` means rerunning Gate 0
+`tests/dependency_policy.rs` has a host cell for it that adds no `links` entry and no
+vendored C beyond what the default cell already has. Being a default feature, it is in
+the default wasm32 cell too, and that cell now picks up `wasm-bindgen`, which is the
+one `links` key the wasm32 cells carry. It is a git dependency pinned by a full 40 digit
+`rev` and never a registry version (`tests/acadrust_from_fork_1486.rs` scans the
+manifests and holds that).
+Moving the `rev` means rerunning Gate 0
 (`docs/spikes/acadrust-gate0/run.sh`), and a test checks the table records the
 revision `Cargo.toml` names. acadrust is MPL-2.0: keep it a crate dependency on
 the fork and never copy its files into this tree.

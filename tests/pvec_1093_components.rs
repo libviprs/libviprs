@@ -276,3 +276,47 @@ fn issue_1093_an_empty_run_builds_no_stream() {
         .streams;
     assert!(built.is_empty());
 }
+
+#[test]
+fn issue_1500_every_stream_subset_reads_back_through_pvec_reader() {
+    let f = flattened_blocks();
+    let styles = styles_for(&f);
+    for mask in 0..8u8 {
+        let select = StreamSelection {
+            layer: mask & 1 != 0,
+            line_style: mask & 2 != 0,
+            provenance: mask & 4 != 0,
+        };
+        let built = build_streams(select, &f.ids, &layers(), &rows(&f, &styles))
+            .unwrap()
+            .streams;
+        let r = PvecReader::open(write(&f, built).bytes).unwrap();
+        let (read, skipped) = r.streams().unwrap();
+        assert!(skipped.is_empty(), "mask {mask}: nothing is stepped over");
+        assert_eq!(read.len(), mask.count_ones() as usize, "mask {mask}");
+        let has = |cap| of(&read, cap).is_some();
+        assert_eq!(has(LayerStream::CAPABILITY), select.layer, "mask {mask}");
+        assert_eq!(
+            has(LineStyleStream::CAPABILITY),
+            select.line_style,
+            "mask {mask}"
+        );
+        assert_eq!(
+            has(ProvenanceStream::CAPABILITY),
+            select.provenance,
+            "mask {mask}"
+        );
+        if let Some(s) = of(&read, LayerStream::CAPABILITY) {
+            let l = LayerStream::decode(&s.payload).unwrap();
+            assert_eq!(l.assignments.len(), 8, "mask {mask}: one row per curve");
+        }
+        if let Some(s) = of(&read, LineStyleStream::CAPABILITY) {
+            let l = LineStyleStream::decode(&s.payload).unwrap();
+            assert_eq!(l.assignments.len(), 8, "mask {mask}: one row per curve");
+        }
+        if let Some(s) = of(&read, ProvenanceStream::CAPABILITY) {
+            let p = ProvenanceStream::decode(&s.payload).unwrap();
+            assert_eq!(p.records.len(), 4, "mask {mask}: one row per source entity");
+        }
+    }
+}
