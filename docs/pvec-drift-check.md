@@ -73,6 +73,10 @@ The files are the x86_64 ones. Two fixtures come out in other bits on arm64 (`hy
 and `accepted.aarch64.dump` next to the base files. The drift check calls both outputs the same
 drawing, because they agree far inside `Policy::V1`.
 
+These two digest tests are bit-exact, so they are Linux only (#1513): on macOS they are ignored, because the libm
+on a Mac rounds differently and the last bit of three fixtures moves (the ADR has the measured ulps).
+Every other check in the suite still runs on a Mac, and a Mac is not a place to bless.
+
 Regenerate after a deliberate change, then read the diff before committing it. Run it on x86_64 first,
 which writes the base files, and then on arm64, which writes only the rows that differ:
 

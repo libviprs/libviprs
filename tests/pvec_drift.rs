@@ -605,6 +605,7 @@ fn current() -> (String, String) {
 
 #[test]
 #[cfg_attr(miri, ignore)]
+#[cfg_attr(not(target_os = "linux"), ignore = "bit-exact Linux rows, #1513")]
 fn n_1471_the_digest_of_every_converted_fixture_matches_the_committed_one() {
     let (dumps, digests) = current();
     if std::env::var_os("PVEC_GATE_BLESS").is_some() {
