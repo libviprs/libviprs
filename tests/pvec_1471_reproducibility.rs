@@ -80,7 +80,10 @@ fn n_1471_the_architecture_overrides_are_exactly_the_fixtures_the_adr_lists() {
             .map(str::to_owned)
             .collect()
     };
-    assert_eq!(gate("determinism.aarch64.baseline"), listed);
+    // Since the pin moved to afd2fe6 (pvec#261, `detmath::hypot`) the general affine chain's artifact
+    // bytes agree across architectures. Its drift digest still differs, so it stays in the other two.
+    let artifact_rows: BTreeSet<String> = ["nonuniform-scale-rotated-001".to_owned()].into();
+    assert_eq!(gate("determinism.aarch64.baseline"), artifact_rows);
     assert_eq!(gate("drift.aarch64.baseline"), listed);
     let dump =
         std::fs::read_to_string(root().join("tests/fixtures/pvec-drift/accepted.aarch64.dump"))

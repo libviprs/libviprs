@@ -63,6 +63,11 @@ division and `sqrt` now, which IEEE 754 rounds correctly, and a test scans `src/
 - `general-affine-chain-001`
 - `nonuniform-scale-rotated-001`
 
+With the pvec crates at afd2fe6 (`detmath::hypot`, pvec#261) the artifact bytes of
+`general-affine-chain-001` agree across architectures, so only `nonuniform-scale-rotated-001` keeps an
+arm64 row in `determinism.aarch64.baseline`. Both fixtures still have an arm64 row in the drift digest
+and the accepted dump, since the rest of their arithmetic differs in the last bit.
+
 ## Consequences
 
 - A fixture that turns a circle into an ellipse or normalises a rotated direction can hit this, so a
