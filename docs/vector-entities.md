@@ -32,7 +32,7 @@ acadrust's own writer):
 
 | Entity | Result | Drawn as | Report codes |
 | --- | --- | --- | --- |
-| HATCH, solid | Drawn | Polygon, filled in the `fills` layer; loops are filled together by even-odd, so an island is a hole | |
+| HATCH, solid | Drawn | Polygon, filled in the `fills` layer; the normal and outer styles fill loops together by even-odd, so an island is a hole, and ignore fills each loop on its own | |
 | HATCH, solid, a loop with an elliptic or spline edge | Drawn, with a reported gap | outlines | 100 |
 | HATCH, pattern | Drawn, with a reported gap | Polygon outline, no pattern lines | 103 |
 | SOLID (2D) | Drawn | Polygon, filled, in its visible vertex order (first, second, fourth, third) | |

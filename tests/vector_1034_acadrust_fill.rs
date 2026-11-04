@@ -8,7 +8,7 @@
 
 use acadrust::entities::{
     AttachmentPoint, BoundaryEdge, BoundaryPath, BoundaryPathFlags, Hatch, HatchPattern,
-    HatchPatternLine, Line, MText, PolylineEdge, Solid,
+    HatchPatternLine, HatchStyleType, Line, MText, PolylineEdge, Solid,
 };
 use acadrust::types::{Vector2, Vector3};
 use acadrust::{CadDocument, DwgWriter, EntityType};
@@ -323,4 +323,76 @@ fn an_archive_declares_the_fills_layer_and_the_anchor_only_when_it_uses_them() {
     let anchored = built(vec![frame(), EntityType::MText(Box::new(mtext))]);
     let text = anchored.iter().find(|l| l.id == "text").unwrap();
     assert!(text.fields.contains_key("anchor"));
+}
+
+fn styled(style: HatchStyleType, rings: &[Vec<(f64, f64)>]) -> EntityType {
+    let EntityType::Hatch(mut h) = hatch(true, rings) else {
+        unreachable!()
+    };
+    h.style = style;
+    EntityType::Hatch(h)
+}
+
+#[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
+fn an_outer_style_hatch_keeps_its_island_as_a_hole() {
+    // Outer is AutoCAD's default island detection, and an island in it is not filled.
+    let (prims, _) = decode(&drawing(vec![
+        frame(),
+        styled(
+            HatchStyleType::Outer,
+            &[
+                square(100.0, 100.0, 900.0, 900.0),
+                square(400.0, 400.0, 600.0, 600.0),
+            ],
+        ),
+    ]));
+    let polys = fills(&tiles(&prims, 0), 0, 0, 0);
+    assert_eq!(polys.len(), 1, "outer and island are one polygon");
+    assert_eq!(polys[0].holes.len(), 1, "with the island as its hole");
+    let mid = 500.0 * scale() + 0.02 / 1.04 * EXTENT;
+    assert!(!covers(&polys, [mid, mid]), "the island pixel is empty");
+}
+
+#[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
+fn an_ignore_style_hatch_fills_every_loop_on_its_own() {
+    let (prims, _) = decode(&drawing(vec![
+        frame(),
+        styled(
+            HatchStyleType::Ignore,
+            &[
+                square(100.0, 100.0, 900.0, 900.0),
+                square(400.0, 400.0, 600.0, 600.0),
+            ],
+        ),
+    ]));
+    let polys = fills(&tiles(&prims, 0), 0, 0, 0);
+    assert_eq!(polys.len(), 2, "two loops, two polygons");
+    assert!(polys.iter().all(|p| p.holes.is_empty()), "no holes");
+    let mid = 500.0 * scale() + 0.02 / 1.04 * EXTENT;
+    assert!(covers(&polys[..1], [mid, mid]) || covers(&polys[1..], [mid, mid]));
+}
+
+#[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
+fn a_fill_with_too_many_rings_to_nest_is_filled_ring_by_ring_and_counted() {
+    // 2049 small squares in one hatch, one past what a tile nests.
+    let rings: Vec<Vec<(f64, f64)>> = (0..2049)
+        .map(|i| {
+            let (x, y) = (
+                f64::from(i % 50) * 19.0 + 20.0,
+                f64::from(i / 50) * 19.0 + 20.0,
+            );
+            square(x, y, x + 10.0, y + 10.0)
+        })
+        .collect();
+    let (prims, _) = decode(&drawing(vec![frame(), hatch(true, &rings)]));
+    let mut out = CollectTiles::default();
+    let (report, _) =
+        tile_primitives(&prims, &TilerConfig::default().with_max_zoom(0), &mut out).unwrap();
+    assert_eq!(report.fills_unnested, 1, "the fallback is counted");
+    let polys = fills(&out, 0, 0, 0);
+    assert_eq!(polys.len(), 2049, "every ring is still drawn");
+    assert!(polys.iter().all(|p| p.holes.is_empty()));
 }

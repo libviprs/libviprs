@@ -165,8 +165,6 @@ fn hatch_rings(h: &acr::entities::Hatch, out: &mut DrawnFact) {
     out.elevation = h.elevation;
     out.normal = p3(h.normal);
     out.pattern_only = !h.is_solid;
-    // Whether each ring that made it was flagged as an outer loop.
-    let mut external: Vec<bool> = Vec::new();
     for (n, path) in h.paths.iter().enumerate() {
         let mut ring: Vec<RawVertex> = Vec::new();
         let mut end: Option<[f64; 2]> = None;
@@ -207,46 +205,32 @@ fn hatch_rings(h: &acr::entities::Hatch, out: &mut DrawnFact) {
         }
         if whole && ring.len() >= 2 {
             out.rings.push(ring);
-            external.push(path.flags.is_external() || path.flags.is_outermost());
         } else {
             out.skipped.push(format!(
                 "boundary loop {n} has elliptic or spline edges, or edges that do not join"
             ));
         }
     }
-    out.fills = hatch_fills(h, &external, out.skipped.is_empty());
+    out.fills = hatch_fills(h, out.rings.len(), out.skipped.is_empty());
 }
 
 /// How each ring of a solid HATCH is drawn.
 ///
 /// A loop that could not be read leaves a hole in the picture where the fill would have been, so
 /// a hatch with one is drawn as outlines, and the skipped loop is already reported. Otherwise the
-/// hatch style decides: "normal" fills the loops together by even-odd, so an island is a hole,
-/// "outer" fills only the loops flagged as outer (or all of them when none is), and "ignore" fills
-/// each loop by itself.
-fn hatch_fills(h: &acr::entities::Hatch, external: &[bool], all_read: bool) -> Vec<Fill> {
+/// hatch style decides. "Normal" and "outer" fill the loops together by even-odd, so an island is
+/// a hole: outer is AutoCAD's default island detection, and an island in it is not filled.
+/// "Ignore" fills each loop by itself, so an island is filled over.
+fn hatch_fills(h: &acr::entities::Hatch, rings: usize, all_read: bool) -> Vec<Fill> {
     use acr::entities::HatchStyleType;
     if !h.is_solid || !all_read {
-        return vec![Fill::Outline; external.len()];
+        return vec![Fill::Outline; rings];
     }
     match h.style {
-        HatchStyleType::Normal => (0..external.len())
-            .map(|i| Fill::Solid { opens: i == 0 })
-            .collect(),
-        HatchStyleType::Outer => {
-            let any = external.iter().any(|e| *e);
-            external
-                .iter()
-                .map(|e| {
-                    if *e || !any {
-                        Fill::Solid { opens: true }
-                    } else {
-                        Fill::Outline
-                    }
-                })
-                .collect()
+        HatchStyleType::Normal | HatchStyleType::Outer => {
+            (0..rings).map(|i| Fill::Solid { opens: i == 0 }).collect()
         }
-        HatchStyleType::Ignore => vec![Fill::Solid { opens: true }; external.len()],
+        HatchStyleType::Ignore => vec![Fill::Solid { opens: true }; rings],
     }
 }
 

@@ -51,8 +51,8 @@ use std::collections::HashMap;
 use super::text::{decode_escapes, display_text};
 use super::{
     Arc, CadDecoder, CadDrawing, CadError, CadSource, CadView, Circle, DecodeReport, Diagnostic,
-    DiagnosticCode, Ellipse, ItemHandle, Line, Origin, Polygon, Polyline, Primitive, PrimitiveSink,
-    Spline, Text, TextAnchor,
+    DiagnosticCode, Ellipse, Fill, ItemHandle, Line, Origin, Polygon, Polyline, Primitive,
+    PrimitiveSink, Spline, Text, TextAnchor,
 };
 use crate::pvec::dwg_acadrust::{AcadrustProvider, TextFact};
 use crate::pvec::flatten::{BlockResolver, FlatEntity, FlattenBounds, LineageStore, SkipReason};
@@ -606,6 +606,9 @@ fn convert_drawn(
             } else {
                 [0.0, 0.0, 1.0]
             };
+            // The first loop that is built opens the fill. If the one that should have opened it
+            // was refused, the next loop opens it instead of becoming a fill of its own.
+            let mut opened = false;
             for (ring, fill) in fact.rings.iter().zip(&fact.fills) {
                 let points: Vec<[f64; 3]> = ring
                     .iter()
@@ -617,7 +620,14 @@ fn convert_drawn(
                     Vec::new()
                 };
                 match Polygon::new(&points, normal, &bulges) {
-                    Ok(p) => drawn.push(p.with_origin(origin).with_fill(*fill).into()),
+                    Ok(p) => {
+                        let fill = match *fill {
+                            Fill::Solid { .. } if !opened => Fill::Solid { opens: true },
+                            other => other,
+                        };
+                        opened = opened || matches!(fill, Fill::Solid { opens: true });
+                        drawn.push(p.with_origin(origin).with_fill(fill).into());
+                    }
                     Err(e) => notes.push(e.to_diagnostic()),
                 }
             }

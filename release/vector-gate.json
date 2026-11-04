@@ -31,7 +31,7 @@
         "tests/vector_1038_entity_matrix.rs",
         "tests/vector_1034_acadrust_fill.rs"
       ],
-      "caveat": "Held for the committed fixture set. On the default acadrust provider a solid hatch and a 2D SOLID are filled and a patterned hatch has no pattern lines, reported as code 103 (libviprs#1034). On the experimental ACadSharp provider a solid hatch is still drawn as an outline and a patterned hatch has no pattern lines (codes 103 and 104), and 2D SOLID is not drawn (code 100); that is a documented gap of the experiment, tracked in #1488."
+      "caveat": "Held for the committed fixture set. On the default acadrust provider a solid hatch and a 2D SOLID are filled and a patterned hatch has no pattern lines, reported as code 103 (libviprs#1034). On the experimental ACadSharp provider a solid hatch is still drawn as an outline and a patterned hatch has no pattern lines (codes 103 and 104), and 2D SOLID is not drawn (code 100); that is a documented gap of the experiment, recorded in docs/vector-entities.md."
     },
     {
       "id": "dwg_versions",

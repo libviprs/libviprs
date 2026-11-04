@@ -1162,20 +1162,25 @@ fn ring_contains(ring: &[Point], p: [f64; 2]) -> bool {
     inside
 }
 
-/// The most rings of one fill on one tile that are nested. Nesting compares every ring with
-/// every other, and a hostile hatch can have as many loops as it likes.
+/// The most rings of one fill on one tile that are nested, and the most ring-times-point work
+/// nesting them may do. Nesting asks every ring whether it sits inside every ring that could
+/// hold it, and a hostile hatch can have as many loops, of as many points, as it likes.
 const MAX_NESTED_RINGS: usize = 2048;
+const MAX_NEST_WORK: usize = 1 << 24;
 
 /// Turns the rings of one fill into polygons by even-odd: a ring inside an even number of others
 /// is an outer ring, a ring inside an odd number is a hole of the smallest ring around it. The
 /// encoder fixes each ring's winding, so none is chosen here.
 ///
 /// The probe for "inside" is the middle of the ring's first span, so two rings that share a
-/// corner are not mistaken for one another's holes. Returns whether the rings were too many to
-/// nest, in which case each is its own polygon.
+/// corner are not mistaken for one another's holes, and a ring is only tested against rings whose
+/// box holds its own, which keeps a fill of many small loops from costing rings times points.
+/// Returns whether the fill was too big to nest (more than [`MAX_NESTED_RINGS`] rings, or more
+/// than `MAX_NEST_WORK` candidate tests times points), in which case each ring is its own
+/// polygon.
 fn nest_rings(rings: Vec<Vec<Point>>) -> (Vec<Polygon>, bool) {
     let n = rings.len();
-    if n == 1 || n > MAX_NESTED_RINGS {
+    let alone = |rings: Vec<Vec<Point>>, unnested: bool| {
         let polygons = rings
             .into_iter()
             .map(|exterior| Polygon {
@@ -1183,9 +1188,45 @@ fn nest_rings(rings: Vec<Vec<Point>>) -> (Vec<Polygon>, bool) {
                 holes: Vec::new(),
             })
             .collect();
-        return (polygons, n > MAX_NESTED_RINGS);
+        (polygons, unnested)
+    };
+    if n == 1 {
+        return alone(rings, false);
     }
+    if n > MAX_NESTED_RINGS {
+        return alone(rings, true);
+    }
+    let boxes: Vec<[i32; 4]> = rings
+        .iter()
+        .map(|r| {
+            r.iter()
+                .fold([i32::MAX, i32::MAX, i32::MIN, i32::MIN], |b, p| {
+                    [
+                        b[0].min(p[0]),
+                        b[1].min(p[1]),
+                        b[2].max(p[0]),
+                        b[3].max(p[1]),
+                    ]
+                })
+        })
+        .collect();
+    let holds = |j: usize, i: usize| {
+        boxes[j][0] <= boxes[i][0]
+            && boxes[j][1] <= boxes[i][1]
+            && boxes[j][2] >= boxes[i][2]
+            && boxes[j][3] >= boxes[i][3]
+    };
     let areas: Vec<f64> = rings.iter().map(|r| ring_area(r)).collect();
+    let candidates: Vec<(usize, usize)> = (0..n)
+        .flat_map(|i| (0..n).map(move |j| (i, j)))
+        .filter(|&(i, j)| i != j && areas[j] > areas[i] && holds(j, i))
+        .collect();
+    let work = candidates
+        .iter()
+        .fold(0usize, |w, &(_, j)| w.saturating_add(rings[j].len()));
+    if work > MAX_NEST_WORK {
+        return alone(rings, true);
+    }
     let probes: Vec<[f64; 2]> = rings
         .iter()
         .map(|r| {
@@ -1198,13 +1239,11 @@ fn nest_rings(rings: Vec<Vec<Point>>) -> (Vec<Polygon>, bool) {
         .collect();
     let mut depth = vec![0usize; n];
     let mut parent: Vec<Option<usize>> = vec![None; n];
-    for i in 0..n {
-        for j in 0..n {
-            if i != j && areas[j] > areas[i] && ring_contains(&rings[j], probes[i]) {
-                depth[i] += 1;
-                if parent[i].is_none_or(|p| areas[j] < areas[p]) {
-                    parent[i] = Some(j);
-                }
+    for (i, j) in candidates {
+        if ring_contains(&rings[j], probes[i]) {
+            depth[i] += 1;
+            if parent[i].is_none_or(|p| areas[j] < areas[p]) {
+                parent[i] = Some(j);
             }
         }
     }
@@ -1393,11 +1432,11 @@ fn tile_guarded(
             if index < joined_until {
                 continue;
             }
-            let Some(bx) = bx else { continue };
-            ctx.guard.check()?;
             let is_text = matches!(p, Primitive::Text(_));
             // A solid loop opens a fill, and the loops after it that say they join it are the
-            // rest of the same fill: one box, one cull, one clip.
+            // rest of the same fill: one box, one cull, one clip. The box is the union of the
+            // loops that have one, so a loop that has none (the opener included) does not turn
+            // the loops after it into fills of their own.
             let mut bx = *bx;
             if solid_loop(p).is_some() {
                 joined_until = index + 1;
@@ -1406,16 +1445,20 @@ fn tile_guarded(
                     .is_some_and(|q| solid_loop(q) == Some(false))
                 {
                     if let Some(b) = boxes[joined_until] {
-                        bx = [
-                            bx[0].min(b[0]),
-                            bx[1].min(b[1]),
-                            bx[2].max(b[2]),
-                            bx[3].max(b[3]),
-                        ];
+                        bx = Some(bx.map_or(b, |a| {
+                            [
+                                a[0].min(b[0]),
+                                a[1].min(b[1]),
+                                a[2].max(b[2]),
+                                a[3].max(b[3]),
+                            ]
+                        }));
                     }
                     joined_until += 1;
                 }
             }
+            let Some(bx) = bx else { continue };
+            ctx.guard.check()?;
             let bx = &bx;
             if !is_text
                 && (bx[2] - bx[0]) < config.cull_units * unit
