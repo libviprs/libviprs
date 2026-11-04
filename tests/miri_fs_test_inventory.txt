@@ -627,6 +627,12 @@ annotated   fs-detected  tests/pvec_1433_bench_harness.rs::the_document_and_the_
 annotated   fs-detected  tests/pvec_1437_fuzz_seeds.rs::the_clip_seed_corpus_runs_clean
 annotated   fs-detected  tests/pvec_1437_fuzz_seeds.rs::the_provider_seed_corpus_runs_clean
 annotated   fs-detected  tests/pvec_1437_fuzz_seeds.rs::the_spline_seed_corpus_runs_clean
+annotated   fs-detected  tests/pvec_1481_memory.rs::the_baseline_has_a_stage_row_per_scale_with_every_stage
+annotated   fs-detected  tests/pvec_1481_memory.rs::the_document_says_what_the_open_alone_costs
+annotated   fs-detected  tests/pvec_1481_memory.rs::the_provider_rows_carry_what_opening_alone_costs
+annotated   fs-detected  tests/pvec_1481_memory.rs::the_recorder_splits_a_small_conversion_into_every_stage
+annotated   fs-detected  tests/pvec_1481_memory.rs::the_stage_rows_are_consistent_with_themselves
+annotated   fs-detected  tests/pvec_1481_memory.rs::the_stage_table_agrees_with_the_baseline
 annotated   fs-detected  tests/pvec_1446_write_refusal.rs::a_drawing_with_one_unstorable_curve_still_converts_the_rest
 annotated   fs-detected  tests/pvec_1446_write_refusal.rs::the_report_counts_each_entity_pvec_refused_against_that_entity
 annotated   fs-detected  tests/pvec_1463_chunk_events.rs::issue_1463_a_cancel_on_the_last_chunk_of_the_flush_leaves_no_spool_file_and_no_artifact
@@ -659,6 +665,8 @@ annotated   fs-detected  tests/pvec_api_surface.rs::the_pvec_dependencies_stay_s
 annotated   fs-detected  tests/pvec_bounded_memory_bench.rs::bounded_memory_bench
 annotated   fs-detected  tests/pvec_bounded_memory_bench.rs::bounded_memory_child
 annotated   fs-detected  tests/pvec_bounded_memory_bench.rs::bounded_memory_gen
+annotated   fs-detected  tests/pvec_bounded_memory_bench.rs::bounded_memory_stages_bench
+annotated   fs-detected  tests/pvec_bounded_memory_bench.rs::bounded_memory_stages_child
 annotated   fs-detected  tests/pvec_ci_gates.rs::n2_8_1060_only_the_fidelity_gate_reads_the_fixture_expectations
 annotated   fs-detected  tests/pvec_ci_gates.rs::n2_8_1060_the_baselines_are_checked_in_sorted_with_one_line_per_accepted_fixture
 annotated   fs-detected  tests/pvec_corpus_regression.rs::a_dual_oracle_row_is_labelled_as_agreement_and_never_as_truth

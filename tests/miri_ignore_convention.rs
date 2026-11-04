@@ -482,7 +482,8 @@ const EXPECTED_SRC_MODULES: usize = 31;
 /// #1364 adds 1: `tests/dependency_policy.rs::the_jp2k_cell_adds_only_its_two_codec_crates`, which runs `cargo tree`. It said 54 before this line moved.
 /// #1365 adds 1: `tests/dependency_policy.rs::jbig2_adds_the_decoder_and_its_ccitt_crate_and_never_the_simd_one`, which runs `cargo tree`. It said 56 before this line moved.
 /// #1475 adds 1: `tests/pvec_drift.rs::n_1471_the_example_prints_both_reports_and_fails_on_drift`, which runs the `pvec_drift` example. It said 57 before this line moved.
-const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 58;
+/// #1515 adds 1: `tests/pvec_bounded_memory_bench.rs::bounded_memory_stages_bench`, which runs its children. It said 58 before this line moved.
+const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 59;
 
 /// The filesystem-touching tests still allowed to run under Miri, and so still
 /// allowed to end the whole run on their first syscall.
@@ -849,7 +850,10 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1490 adds 1: the `tests/pvec_1490_fill_report_images.rs` cell that reads `docs/pvec-hatch-policy.md`. It said 976 before this line moved.
 /// #1491 adds 7: the `tests/pvec_1491_pdf_conversion.rs` cells that convert generated PDFs into a temp dir. It said 977 before this line moved.
 /// #1485 adds 4: the three `tests/cad_1485_acadrust_decoder.rs` cells that read or write a drawing, and the acadrust conversion cell in `tests/vector_1035_api.rs`. It said 984 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 989;
+/// #1515 adds 5: the `tests/pvec_1481_memory.rs` cells that read the stage rows in the baseline and the page. It said 988 before this line moved.
+/// #1515 adds 3 more: the stage recorder's own cell and the two stage benchmark cells. It said 993 before this line moved.
+/// #1034 adds 1: the `tests/vector_1034_acadrust_fill.rs` cell that builds an archive in a temp dir. It said 996 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 997;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
