@@ -50,7 +50,7 @@
 //!
 //! Needs the `pvec-convert` feature.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
@@ -74,7 +74,7 @@ use crate::CancelToken;
 use crate::cad::CadSource;
 use crate::observe::{EngineEvent, EngineObserver};
 use crate::pvec::bounds::BoundsReport;
-use crate::pvec::components::StreamSelection;
+use crate::pvec::components::{ComponentSource, ComponentsError, StreamSelection, build_streams};
 use crate::pvec::diagnostics::{Diagnostic, DiagnosticCode};
 use crate::pvec::dwg_acadrust::AcadrustProvider;
 use crate::pvec::dwg_basic::{self, BasicError};
@@ -90,10 +90,10 @@ use crate::pvec::report::{
     BoundsSplit, CapabilitySummary, ComponentsSummary, ConversionReport, EntityRow, ReportBuilder,
     ReportError, UnresolvedXrefRow, ViewSummary, XrefSummary,
 };
+use crate::pvec::style::{LineStyleComponent, StyleReport, dwg_line_style, dwg_style_input};
 use crate::pvec::transform::{ComposedTransform, promote};
 use crate::pvec::writer::{
-    CapabilityId, LeafConfig, SpillConfig, WriteConfig, WriteError, write_geometry,
-    write_geometry_to,
+    CapabilityId, LeafConfig, OpenArtifact, SpillConfig, WriteConfig, WriteError, open_geometry,
 };
 use crate::pvec::{
     DwgProvider, EntityId, EntityScope, EntityStyle, ExcludedEntity, FidelityClass, OrderingPolicy,
@@ -132,6 +132,9 @@ pub enum PvecConvertError {
     /// The class counts disagree with the entities met.
     #[error("the class counts do not add up")]
     Tally(#[source] TallyError),
+    /// A component stream could not be built.
+    #[error("a component stream could not be built")]
+    Components(#[source] ComponentsError),
     /// The report could not be built.
     #[error("the report could not be built")]
     Report(#[source] ReportError),
@@ -418,6 +421,7 @@ impl<'a> PvecConversion<'a> {
             gate,
             observer,
             queue_capacity,
+            components,
             ..
         } = self;
         let observer = observer.as_deref();
@@ -520,6 +524,8 @@ impl<'a> PvecConversion<'a> {
         // The classifying side produces, a consumer thread turns each outcome into a row, a
         // record, a diagnostic and a tally entry. They meet in a bounded queue, so a slow consumer
         // makes the producer wait instead of letting outcomes pile up.
+        let mut style_report = StyleReport::default();
+        let mut style_bad = 0u64;
         let (tx, rx) = bounded::<Outcome>(*queue_capacity);
         let sent = AtomicU64::new(0);
         let consumed = std::thread::scope(|scope| {
@@ -543,11 +549,31 @@ impl<'a> PvecConversion<'a> {
                 if let Some(d) = &mut diagnostic {
                     d.source = Some(source_name.clone());
                 }
+                let id = ordered.entities[n].id;
+                let side = (*components != StreamSelection::NONE
+                    && done.geometry.geometry().is_some())
+                .then(|| {
+                    let style = components.line_style.then(|| {
+                        let input = dwg_style_input(&raw.style, true);
+                        style_report.count_colour(
+                            &raw.provenance.class_name,
+                            u64::from(input.colour_index.is_some()),
+                        );
+                        let c = dwg_line_style(id, &input).ok();
+                        style_bad += u64::from(c.is_none());
+                        c
+                    });
+                    Side {
+                        stub: lean_stub(&raw.provenance),
+                        style: style.flatten(),
+                    }
+                });
                 let outcome = Outcome {
-                    id: ordered.entities[n].id,
+                    id,
                     handle: raw.provenance.handle.map(|h| h.get()),
                     done,
                     diagnostic,
+                    side,
                 };
                 if tx.send(outcome).is_err() {
                     break;
@@ -582,6 +608,9 @@ impl<'a> PvecConversion<'a> {
             xrefs,
             diagnostics: consumed.diagnostics,
             peak_queue_depth: consumed.peak,
+            sides: consumed.sides,
+            style_report,
+            style_bad,
         })
     }
 
@@ -602,6 +631,9 @@ impl<'a> PvecConversion<'a> {
             xrefs,
             diagnostics,
             peak_queue_depth,
+            sides,
+            style_report,
+            style_bad,
         } = self.classify(provider)?;
         let Self {
             dest,
@@ -637,7 +669,8 @@ impl<'a> PvecConversion<'a> {
             |bounds: &BoundsReport,
              written: u64,
              length: u64,
-             refused: &[(EntityId, String)]|
+             refused: &[(EntityId, String)],
+             components: Option<ComponentsSummary>|
              -> Result<(ConversionReport, FidelityReport, String), PvecConvertError> {
                 for (id, rule) in refused {
                     let from = &stored
@@ -668,8 +701,7 @@ impl<'a> PvecConversion<'a> {
                     .map_err(PvecConvertError::Report)?;
                 report.capabilities = Some(gate.summary());
                 report.diagnostics = diagnostics;
-                report.components =
-                    (select != StreamSelection::NONE).then(ComponentsSummary::default);
+                report.components = components;
                 report.georeference = sidecar
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned());
@@ -698,37 +730,80 @@ impl<'a> PvecConversion<'a> {
             });
         };
         let items = || geometries.iter().map(|(id, g)| (*id, g));
+        // The geometry is written first, then the streams against the ids the writer kept, because a
+        // refused curve moves every id after it. The streams go in after the geometry, so they cannot
+        // change a geometry block.
+        let open = |spill: Option<&SpillConfig>,
+                    on_chunk: &mut dyn FnMut(u64, u64)|
+         -> Result<(OpenArtifact, Option<ComponentsSummary>), PvecConvertError> {
+            let mut open =
+                open_geometry(&config, items(), Vec::new(), None, spill, &cancel, on_chunk)
+                    .map_err(write_error)?;
+            if select == StreamSelection::NONE {
+                return Ok((open, None));
+            }
+            let layers = if select.layer {
+                provider
+                    .layers()
+                    .map_err(|e| PvecConvertError::View(e.into()))?
+            } else {
+                Vec::new()
+            };
+            let rows: Vec<ComponentSource<'_>> = sides
+                .iter()
+                .map(|(id, s)| ComponentSource {
+                    id: *id,
+                    stub: &s.stub,
+                    style: s.style.as_ref(),
+                })
+                .collect();
+            let built = build_streams(select, open.source_ids(), &layers, &rows)
+                .map_err(PvecConvertError::Components)?;
+            let mut summary = ComponentsSummary {
+                streams: built.names.iter().map(|n| (*n).to_owned()).collect(),
+                dropped: BTreeMap::new(),
+                colours_ignored: style_report.colour_total(),
+            };
+            for d in &built.dropped {
+                *summary
+                    .dropped
+                    .entry(format!("{}.{}", d.stream, d.reason))
+                    .or_default() += 1;
+            }
+            if style_bad > 0 {
+                summary
+                    .dropped
+                    .insert("line-style.bad-style".to_owned(), style_bad);
+            }
+            open.components(built.streams, &cancel)
+                .map_err(write_error)?;
+            Ok((open, Some(summary)))
+        };
         let published = match &spill {
-            None => write_geometry(&config, items(), Vec::new(), &cancel, &mut on_chunk)
-                .map_err(write_error)
-                .and_then(|artifact| {
-                    let (report, fidelity, json) = seal(
-                        &artifact.bounds,
-                        artifact.written,
-                        artifact.bytes.len() as u64,
-                        &artifact.refused,
-                    )?;
-                    publish(dest, &artifact.bytes, json.as_bytes(), &cancel, &mut |_| {}).map_err(
-                        |e| match e {
-                            PublishError::Cancelled => PvecConvertError::Cancelled,
-                            other => PvecConvertError::Publish(other),
-                        },
-                    )?;
-                    Ok((report, fidelity, artifact.written))
-                }),
+            None => open(None, &mut on_chunk).and_then(|(open, summary)| {
+                let artifact = open.finish().map_err(write_error)?;
+                let (report, fidelity, json) = seal(
+                    &artifact.bounds,
+                    artifact.written,
+                    artifact.bytes.len() as u64,
+                    &artifact.refused,
+                    summary,
+                )?;
+                publish(dest, &artifact.bytes, json.as_bytes(), &cancel, &mut |_| {}).map_err(
+                    |e| match e {
+                        PublishError::Cancelled => PvecConvertError::Cancelled,
+                        other => PvecConvertError::Publish(other),
+                    },
+                )?;
+                Ok((report, fidelity, artifact.written))
+            }),
             Some(spill) => {
                 let mut sealed = None;
                 publish_streamed(dest, &cancel, &mut |_| {}, |out| {
-                    let artifact = write_geometry_to(
-                        &config,
-                        items(),
-                        Vec::new(),
-                        spill,
-                        &cancel,
-                        &mut on_chunk,
-                        out,
-                    )
-                    .map_err(write_error)?;
+                    let (open, summary) = open(Some(spill), &mut on_chunk)?;
+                    let artifact = open
+                        .seal_into(&cancel, &mut on_chunk, out)
+                        .map_err(write_error)?;
                     tell(EngineEvent::ConversionSpoolSpilled {
                         bytes: artifact.length,
                     });
@@ -737,6 +812,7 @@ impl<'a> PvecConversion<'a> {
                         artifact.written,
                         artifact.length,
                         &artifact.refused,
+                        summary,
                     )?;
                     sealed = Some((report, fidelity, artifact.written));
                     Ok(json.into_bytes())
@@ -783,6 +859,34 @@ struct Classified {
     xrefs: XrefSummary,
     diagnostics: Vec<Diagnostic>,
     peak_queue_depth: u32,
+    /// What the component streams need of each written entity; empty when they are off.
+    sides: Vec<(EntityId, Side)>,
+    style_report: StyleReport,
+    /// Entities whose line style the DWG facts could not make into a component.
+    style_bad: u64,
+}
+
+/// What the component streams read off one written entity: where it came from and its line style.
+struct Side {
+    stub: ProvenanceStub,
+    style: Option<LineStyleComponent>,
+}
+
+/// The provenance a stream reads: the handle, the layer and the outermost INSERT. The class name and
+/// the rest of the block path are in the report, so they are not kept per entity.
+fn lean_stub(p: &ProvenanceStub) -> ProvenanceStub {
+    ProvenanceStub {
+        handle: p.handle,
+        class_name: String::new(),
+        block_path: p
+            .block_path
+            .steps()
+            .first()
+            .map_or_else(crate::pvec::InstancePath::root, |s| {
+                crate::pvec::InstancePath::root().child(String::new(), s.insert_handle)
+            }),
+        layer: p.layer.clone(),
+    }
 }
 
 /// One entity's outcome on its way from the classifier to the consumer.
@@ -791,6 +895,7 @@ struct Outcome {
     handle: Option<u64>,
     done: Done,
     diagnostic: Option<Diagnostic>,
+    side: Option<Side>,
 }
 
 /// What the consumer built from the outcomes.
@@ -800,6 +905,7 @@ struct Consumed {
     geometries: Vec<(EntityId, Normalized2DGeometry)>,
     stored: Vec<(EntityId, Classification)>,
     diagnostics: Vec<Diagnostic>,
+    sides: Vec<(EntityId, Side)>,
     peak: u32,
 }
 
@@ -817,6 +923,7 @@ fn consume(
         geometries: Vec::new(),
         stored: Vec::new(),
         diagnostics: Vec::new(),
+        sides: Vec::new(),
         peak: 0,
     };
     let mut received = 0u64;
@@ -825,6 +932,7 @@ fn consume(
         handle,
         done,
         diagnostic,
+        side,
     } in rx
     {
         received += 1;
@@ -847,6 +955,9 @@ fn consume(
                 .map(|k| row_for(k).pvec_type),
             done.warnings,
         ));
+        if let Some(side) = side {
+            out.sides.push((id, side));
+        }
         if done.geometry.geometry().is_some() {
             out.stored.push((id, done.classification));
         }
@@ -1205,7 +1316,9 @@ impl PvecConvertError {
                 out
             }
             PvecConvertError::UnitRequired => d(DiagnosticCode::UnitRequired, "unit-required"),
-            PvecConvertError::Write(_) => d(DiagnosticCode::WriteFailed, "write"),
+            PvecConvertError::Write(_) | PvecConvertError::Components(_) => {
+                d(DiagnosticCode::WriteFailed, "write")
+            }
             PvecConvertError::Tally(_) | PvecConvertError::Report(_) => {
                 d(DiagnosticCode::ReportFailed, "report")
             }
