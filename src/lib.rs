@@ -70,7 +70,9 @@
 //!   `AcadSharpDecoder::new` answers a `Provider` error carrying `Unlinked`.
 //!   The CAD-neutral [`cad`] core is not behind a feature.
 //! - **`dwg-acadrust`** — gates `pvec::dwg_acadrust::AcadrustProvider`, the first
-//!   DWG provider behind the replaceable `pvec::DwgProvider` traits. Pure Rust,
+//!   DWG provider behind the replaceable `pvec::DwgProvider` traits, and
+//!   `cad::acadrust::AcadrustDecoder`, the [`cad::CadDecoder`] over it that
+//!   `vector::convert::default_decoder` returns. Pure Rust,
 //!   nothing to install; `acadrust` is a git dependency pinned by revision, on our fork.
 //!   On by default.
 //! - **`pvec-normalized`** — gates `pvec::normalized`, `Normalized2DGeometry`, the thin
