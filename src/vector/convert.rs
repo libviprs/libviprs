@@ -29,7 +29,8 @@
 //!
 //! Every function here takes a [`CadDrawing`] or a [`CadDecoder`]. No provider
 //! type appears in a signature. [`default_decoder`] is the one convenience that
-//! names a provider, and it does so by feature: without `dwg-acadsharp` it
+//! names a provider, and it does so by feature: acadrust when `dwg-acadrust` is
+//! on (the default), else ACadSharp when `dwg-acadsharp` is, and with neither it
 //! returns [`ConvertError::ProviderNotBuilt`], and everything else in this
 //! module still works (an archive can be inspected and validated with no DWG
 //! reader in the build, and a decoder you wrote yourself converts fine).
@@ -239,7 +240,7 @@ pub enum ConvertError {
     },
     /// No provider that reads drawings was compiled into this build.
     #[error(
-        "this build has no DWG provider: rebuild with the `dwg-acadsharp` feature (an archive can still be inspected and validated without one)"
+        "this build has no DWG provider: rebuild with the `dwg-acadrust` feature (or the experimental `dwg-acadsharp`) (an archive can still be inspected and validated without one)"
     )]
     ProviderNotBuilt,
     /// The drawing could not be opened or read.
@@ -273,33 +274,79 @@ impl ConvertError {
     }
 }
 
-/// The decoder this build ships, or [`ConvertError::ProviderNotBuilt`].
+/// Which DWG provider a decoder should be built on.
 ///
-/// With the `dwg-acadsharp` feature this is the ACadSharp provider, bounded by
-/// `cad::acadsharp::ProviderLimits::hardened`
-/// when `hardened` is set and unbounded otherwise (right for a drawing you made
-/// yourself, wrong for one a stranger uploaded). Without the feature it is
-/// always the error, and `hardened` is ignored.
+/// `viprs vector --provider` and [`default_decoder`] both choose through this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ProviderKind {
+    /// The pure Rust reader, the default (the `dwg-acadrust` feature).
+    Acadrust,
+    /// The ACadSharp native archive, experimental (the `dwg-acadsharp` feature).
+    AcadSharp,
+}
+
+/// The decoder for the provider you name, or [`ConvertError::ProviderNotBuilt`] when this build
+/// does not have it.
+///
+/// `hardened` bounds the decoder for a drawing a stranger uploaded: the ACadSharp provider takes
+/// `cad::acadsharp::ProviderLimits::hardened`, and the acadrust provider refuses an input over
+/// 256 MiB before reading it. Unset, neither applies, which is right for a drawing you made
+/// yourself.
 ///
 /// # Errors
 ///
-/// [`ConvertError::ProviderNotBuilt`], or [`ConvertError::Cad`] when the native
-/// library the provider links is missing or does not match.
-#[cfg_attr(not(feature = "dwg-acadsharp"), allow(unused_variables))]
-pub fn default_decoder(hardened: bool) -> Result<Box<dyn CadDecoder>, ConvertError> {
-    #[cfg(feature = "dwg-acadsharp")]
-    {
-        use crate::cad::acadsharp::{AcadSharpDecoder, ProviderLimits};
-        let decoder = AcadSharpDecoder::new()?;
-        Ok(Box::new(if hardened {
-            decoder.with_limits(ProviderLimits::hardened())
-        } else {
-            decoder
-        }))
+/// [`ConvertError::ProviderNotBuilt`], or [`ConvertError::Cad`] when the ACadSharp native
+/// library is missing or does not match.
+#[cfg_attr(
+    not(any(feature = "dwg-acadrust", feature = "dwg-acadsharp")),
+    allow(unused_variables)
+)]
+pub fn decoder_for(
+    kind: ProviderKind,
+    hardened: bool,
+) -> Result<Box<dyn CadDecoder>, ConvertError> {
+    match kind {
+        #[cfg(feature = "dwg-acadrust")]
+        ProviderKind::Acadrust => {
+            use crate::cad::acadrust::AcadrustDecoder;
+            Ok(Box::new(if hardened {
+                AcadrustDecoder::hardened()
+            } else {
+                AcadrustDecoder::new()
+            }))
+        }
+        #[cfg(feature = "dwg-acadsharp")]
+        ProviderKind::AcadSharp => {
+            use crate::cad::acadsharp::{AcadSharpDecoder, ProviderLimits};
+            let decoder = AcadSharpDecoder::new()?;
+            Ok(Box::new(if hardened {
+                decoder.with_limits(ProviderLimits::hardened())
+            } else {
+                decoder
+            }))
+        }
+        #[allow(unreachable_patterns)]
+        _ => Err(ConvertError::ProviderNotBuilt),
     }
-    #[cfg(not(feature = "dwg-acadsharp"))]
-    {
-        Err(ConvertError::ProviderNotBuilt)
+}
+
+/// The decoder this build ships, or [`ConvertError::ProviderNotBuilt`].
+///
+/// acadrust when the `dwg-acadrust` feature is on (it is a default feature), otherwise ACadSharp
+/// when `dwg-acadsharp` is on. With both, acadrust wins: ACadSharp is the experimental choice
+/// and has to be asked for with [`decoder_for`]. Without either it is always the error, and
+/// `hardened` is ignored. See [`decoder_for`] for what `hardened` does.
+///
+/// # Errors
+///
+/// [`ConvertError::ProviderNotBuilt`], or [`ConvertError::Cad`] when the native library the
+/// ACadSharp provider links is missing or does not match.
+pub fn default_decoder(hardened: bool) -> Result<Box<dyn CadDecoder>, ConvertError> {
+    if cfg!(feature = "dwg-acadrust") {
+        decoder_for(ProviderKind::Acadrust, hardened)
+    } else {
+        decoder_for(ProviderKind::AcadSharp, hardened)
     }
 }
 
