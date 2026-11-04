@@ -236,7 +236,8 @@ pub enum FilterError {
 }
 
 impl PdfImageError {
-    /// The stable reason the report counts it under.
+    /// The stable reason the report counts it under. Every key is named in
+    /// `docs/pvec-raster-producer.md`, and `tests/pvec_1489_image_reason_keys.rs` keeps it that way.
     #[must_use]
     pub fn reason(&self) -> String {
         match self {
