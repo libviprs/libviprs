@@ -95,7 +95,7 @@ fn checkbox_labels(template: &str) -> Vec<String> {
         // `- label:` only. A bare `label:` is the block's own
         // `attributes.label`, which is the heading "The three deliverables" and
         // not an option anybody ticks. Accepting it made this parser report
-        // five labels for three options, and the count is not the damage: a form
+        // four labels for three options, and the count is not the damage: a form
         // that kept the heading and deleted all three options came back with a
         // non-empty list, so `!labels.is_empty()` could not catch it and the
         // per-item assertion below reported the miss instead of the
