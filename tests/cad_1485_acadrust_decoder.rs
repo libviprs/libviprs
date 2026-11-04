@@ -273,8 +273,9 @@ fn acadsharp_is_not_built_unless_asked_for() {
 
 /// The ACadSharp adapter's answers on `sample_AC1018.dwg` are in `cad_1030_acadsharp_decoder.rs`:
 /// 90 lines, 25 polylines, 3 arcs, 15 circles, 1 ellipse, 2 splines, 8 polygons, 70 texts.
-/// Dimensions are drawn from their blocks here, so the shapes that need no hatch, leader or
-/// solid support agree exactly, and the rest is reported, not missing quietly.
+/// Dimensions are drawn from their blocks here, hatches cross as polygons, and multileaders,
+/// leaders, tolerances and block attributes cross as lines and text. What is still short of the
+/// ACadSharp adapter is named in `the_sample_names_what_it_still_does_not_draw`.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn the_sample_agrees_with_the_acadsharp_adapter_where_the_entities_are_supported() {
@@ -284,15 +285,65 @@ fn the_sample_agrees_with_the_acadsharp_adapter_where_the_entities_are_supported
     assert_eq!(c.get(PrimitiveKind::Arc), 3);
     assert_eq!(c.get(PrimitiveKind::Ellipse), 1);
     assert_eq!(c.get(PrimitiveKind::Spline), 2);
-    assert!(c.get(PrimitiveKind::Line) >= 60 && c.get(PrimitiveKind::Text) >= 40);
-    // What this reader does not draw yet is named by class, so a gap is a line in the report.
+    assert_eq!(c.get(PrimitiveKind::Polygon), 8, "one per hatch loop");
+    assert!(c.get(PrimitiveKind::Line) >= 84, "lines: {c:?}");
+    assert!(c.get(PrimitiveKind::Text) >= 65, "texts: {c:?}");
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn the_sample_names_what_it_still_does_not_draw() {
+    let (_, report) = model(&AcadrustDecoder::new(), &cad("sample_AC1018.dwg"));
     let said = |class: &str| {
         report.diagnostics().iter().any(|d| {
             d.code() == DiagnosticCode::UNSUPPORTED_ENTITY && d.message().starts_with(class)
         })
     };
-    for class in ["HATCH", "MULTILEADER", "SOLID"] {
+    for class in ["SOLID", "POINT", "MLINE"] {
         assert!(said(class), "{class} is not drawn and was not reported");
     }
-    assert!(!said("DIMENSION"), "a dimension is drawn from its block");
+    for class in ["HATCH", "MULTILEADER", "LEADER", "TOLERANCE", "DIMENSION"] {
+        assert!(!said(class), "{class} is drawn and should not be reported");
+    }
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn multileader_text_and_block_attributes_cross_as_text() {
+    let (sink, _) = model(&AcadrustDecoder::new(), &cad("sample_AC1018.dwg"));
+    let texts: Vec<String> = sink
+        .collected()
+        .iter()
+        .filter_map(|p| match p {
+            Primitive::Text(t) => Some(t.content().to_owned()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        texts.iter().any(|t| t == "MLeader text, hello!"),
+        "the multileader's text is drawn"
+    );
+    assert!(
+        texts
+            .iter()
+            .any(|t| t.contains("MULTILEADER") && t.contains("123")),
+        "a stacked multileader keeps its paragraphs"
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_hatch_loop_is_a_polygon_that_knows_its_hatch() {
+    let (sink, _) = model(&AcadrustDecoder::new(), &cad("sample_AC1018.dwg"));
+    let polygons: Vec<_> = sink
+        .collected()
+        .iter()
+        .filter_map(|p| match p {
+            Primitive::Polygon(g) => Some(g),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(polygons.len(), 8);
+    assert!(polygons.iter().all(|g| g.vertices().len() >= 3));
+    assert!(polygons.iter().all(|g| g.origin().item_handle().is_some()));
 }
