@@ -1,18 +1,18 @@
 {
   "block_heavy": {
-    "artifact": "53759a200d718b417e7f38c51be1b5e84cab4ec4992f3dcf99e1b713e15f2757",
+    "artifact": "61a6d086501c4dcc604dfaa865395a759496a5ecc9d6642b48c96662a2fd166d",
     "report": "3a8ba26ca863dd688ca0c17d4fd028f8cee38f68da93c2202066f82df1bfe301"
   },
   "large_industrial": {
-    "artifact": "04a6645c50f701db0206d606e73504065a4d2de0ac33636d627ba0ae297f78e9",
+    "artifact": "b3b021b1f18c664563db4da5f9d01c24f237c08099c5df212399dd2e302cd71e",
     "report": "ed24232a52c6a0b3f4f5ae5aa1df93e131d47bfb3df2fa0bd15143436b8a729d"
   },
   "paper_space": {
-    "artifact": "a42e7a0ea1b040efc98c1f7cf7f3d9bd85fb979c5684ca904ad90861e0d9db94",
+    "artifact": "2f5cead2aaa77ef516abba803740cefee146fec1b2440c5f583d8f71cbb6c9c1",
     "report": "02d0e6f8b3413a6c3556d8f1b2f31e916fb1d1acc5b511982c5c1ff007478326"
   },
   "simple": {
-    "artifact": "a5154a5dc40f67339947a6e0c19e51695dea1834fadc1c29fa987dee0a839cd4",
+    "artifact": "d1b949030fd6635f37b13cda24420e876e4c1fd86f9e198b88b8de7058671959",
     "report": "3d38a4a2b95bcca76e9ce641cb736c96e89a1fed5f81eec9a9d7c7c900e0e6c6"
   },
   "spline_heavy": {
