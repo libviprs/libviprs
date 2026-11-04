@@ -287,8 +287,9 @@ fn the_sample_agrees_with_the_acadsharp_adapter_where_the_entities_are_supported
     assert_eq!(c.get(PrimitiveKind::Ellipse), 1);
     assert_eq!(c.get(PrimitiveKind::Spline), 2);
     assert_eq!(c.get(PrimitiveKind::Polygon), 8, "one per hatch loop");
-    assert!(c.get(PrimitiveKind::Line) >= 84, "lines: {c:?}");
-    assert!(c.get(PrimitiveKind::Text) >= 65, "texts: {c:?}");
+    assert_eq!(c.get(PrimitiveKind::Line), 86, "lines: {c:?}");
+    assert_eq!(c.get(PrimitiveKind::Circle), 12, "circles: {c:?}");
+    assert_eq!(c.get(PrimitiveKind::Text), 67, "texts: {c:?}");
 }
 
 #[test]

@@ -282,8 +282,7 @@ vendored C beyond what the default cell already has. Being a default feature, it
 the default wasm32 cell too, and that cell now picks up `wasm-bindgen`, which is the
 one `links` key the wasm32 cells carry. It is a git dependency pinned by a full 40 digit
 `rev` and never a registry version (`tests/acadrust_from_fork_1486.rs` scans the
-manifests and holds that), so what blocks publishing to crates.io is that a crate with a
-git dependency cannot be published, not a line waiting to become a registry version.
+manifests and holds that).
 Moving the `rev` means rerunning Gate 0
 (`docs/spikes/acadrust-gate0/run.sh`), and a test checks the table records the
 revision `Cargo.toml` names. acadrust is MPL-2.0: keep it a crate dependency on
