@@ -698,11 +698,19 @@ impl<'a> PvecConversion<'a> {
                 bytes,
             });
         };
-        let items = || geometries.iter().map(|(id, g)| (*id, g));
+        // The writer takes what it keeps out of the geometry, so the geometry goes the moment the
+        // write returns and the report below is built without it.
         let published = match &spill {
-            None => write_geometry(&config, items(), Vec::new(), &cancel, &mut on_chunk)
-                .map_err(write_error)
-                .and_then(|artifact| {
+            None => {
+                let written = write_geometry(
+                    &config,
+                    geometries.iter().map(|(id, g)| (*id, g)),
+                    Vec::new(),
+                    &cancel,
+                    &mut on_chunk,
+                );
+                drop(geometries);
+                written.map_err(write_error).and_then(|artifact| {
                     let (report, fidelity, json) = seal(
                         &artifact.bounds,
                         artifact.written,
@@ -716,20 +724,22 @@ impl<'a> PvecConversion<'a> {
                         },
                     )?;
                     Ok((report, fidelity, artifact.written))
-                }),
+                })
+            }
             Some(spill) => {
                 let mut sealed = None;
                 publish_streamed(dest, &cancel, &mut |_| {}, |out| {
-                    let artifact = write_geometry_to(
+                    let written = write_geometry_to(
                         &config,
-                        items(),
+                        geometries.iter().map(|(id, g)| (*id, g)),
                         Vec::new(),
                         spill,
                         &cancel,
                         &mut on_chunk,
                         out,
-                    )
-                    .map_err(write_error)?;
+                    );
+                    drop(geometries);
+                    let artifact = written.map_err(write_error)?;
                     tell(EngineEvent::ConversionSpoolSpilled {
                         bytes: artifact.length,
                     });
