@@ -551,8 +551,8 @@ pub struct TilerReport {
     pub fills: u64,
     /// Fill ring points written, after clipping.
     pub fill_points: u64,
-    /// Fills whose rings on one tile were too many to nest, so each ring is drawn filled on its
-    /// own and an island in it is not a hole.
+    /// Fills (counted per zoom) that were too big to nest, past 2048 rings or the nesting work
+    /// budget, so each ring is drawn filled on its own and an island in it is not a hole.
     pub fills_unnested: u64,
     /// Text features written.
     pub text: u64,
@@ -828,7 +828,7 @@ fn solid_loop(p: &Primitive) -> Option<bool> {
     }
 }
 
-fn bbox_of(runs: &[Vec<[f64; 2]>]) -> Option<[f64; 4]> {
+fn bbox_of<'a>(runs: impl IntoIterator<Item = &'a Vec<[f64; 2]>>) -> Option<[f64; 4]> {
     let mut b = [
         f64::INFINITY,
         f64::INFINITY,
@@ -836,7 +836,7 @@ fn bbox_of(runs: &[Vec<[f64; 2]>]) -> Option<[f64; 4]> {
         f64::NEG_INFINITY,
     ];
     let mut any = false;
-    for p in runs.iter().flatten() {
+    for p in runs.into_iter().flatten() {
         any = true;
         b[0] = b[0].min(p[0]);
         b[1] = b[1].min(p[1]);
@@ -925,8 +925,17 @@ fn primitive_bounds(p: &Primitive, max_text: usize) -> Option<[f64; 4]> {
 struct TileBuf {
     lines: Vec<Vec<Point>>,
     /// One entry per fill: its rings on this tile, which are filled together by even-odd.
-    fills: Vec<Vec<Vec<Point>>>,
+    fills: Vec<FillGroup>,
     text: Vec<TextFeature>,
+}
+
+/// The rings of one fill on one tile, each with the number it had before it was clipped, and for
+/// every ring of the whole fill the ring it is a hole of (none for an outer ring). The nesting is
+/// worked out once, on the whole rings, because a ring clipped to a tile edge can no longer be
+/// told from the edge of the ring around it.
+struct FillGroup {
+    rings: Vec<(usize, Vec<Point>)>,
+    holes_of: std::sync::Arc<[Option<usize>]>,
 }
 
 struct TextFeature {
@@ -970,15 +979,16 @@ struct Ctx<'a> {
 /// costs `points * log(grid)` rather than `points * tiles`. The stack is
 /// explicit and its depth is at most `2 * zoom`.
 ///
-/// With `filled` the runs are the closed rings of one fill: they are clipped as rings
-/// and every tile gets the clipped rings as one group, to be filled together.
+/// With `holes_of` the runs are the closed rings of one fill, numbered, and `holes_of` says which
+/// ring each is a hole of: they are clipped as rings and every tile gets the clipped rings as one
+/// group, to be filled together.
 fn distribute(
     ctx: &mut Ctx<'_>,
     level: &mut Level,
-    runs: Vec<Vec<[f64; 2]>>,
-    filled: bool,
+    runs: Vec<(usize, Vec<[f64; 2]>)>,
+    holes_of: Option<&std::sync::Arc<[Option<usize>]>>,
 ) -> Result<(), TilerError> {
-    let Some(b) = bbox_of(&runs) else {
+    let Some(b) = bbox_of(runs.iter().map(|(_, r)| r)) else {
         return Ok(());
     };
     let n = 1u64 << level.zoom;
@@ -992,8 +1002,8 @@ fn distribute(
     while let Some((runs, x0, x1, y0, y1)) = stack.pop() {
         ctx.guard.check()?;
         if x0 == x1 && y0 == y1 {
-            if filled {
-                emit_fill(ctx, level, x0, y0, &runs)?;
+            if let Some(holes_of) = holes_of {
+                emit_fill(ctx, level, x0, y0, &runs, holes_of)?;
             } else {
                 emit_runs(ctx, level, x0, y0, &runs)?;
             }
@@ -1007,15 +1017,19 @@ fn distribute(
         for (h0, h1) in halves {
             let lo_edge = f64::from(h0) - buf;
             let hi_edge = f64::from(h1) + 1.0 + buf;
-            let mut part: Vec<Vec<[f64; 2]>> = Vec::new();
-            for run in &runs {
-                if filled {
+            let mut part: Vec<(usize, Vec<[f64; 2]>)> = Vec::new();
+            for (id, run) in &runs {
+                if holes_of.is_some() {
                     let ring = clip_ring_slab(run, axis, lo_edge, hi_edge);
                     if !ring.is_empty() {
-                        part.push(ring);
+                        part.push((*id, ring));
                     }
                 } else {
-                    part.extend(clip_slab(run, axis, lo_edge, hi_edge));
+                    part.extend(
+                        clip_slab(run, axis, lo_edge, hi_edge)
+                            .into_iter()
+                            .map(|piece| (*id, piece)),
+                    );
                 }
             }
             if part.is_empty() {
@@ -1036,11 +1050,11 @@ fn emit_runs(
     level: &mut Level,
     tx: u32,
     ty: u32,
-    runs: &[Vec<[f64; 2]>],
+    runs: &[(usize, Vec<[f64; 2]>)],
 ) -> Result<(), TilerError> {
     let e = f64::from(ctx.config.extent);
     let (ox, oy) = (f64::from(tx), f64::from(ty));
-    for run in runs {
+    for (_, run) in runs {
         let local: Vec<[f64; 2]> = run
             .iter()
             .map(|p| [(p[0] - ox) * e, (p[1] - oy) * e])
@@ -1086,12 +1100,22 @@ fn emit_fill(
     level: &mut Level,
     tx: u32,
     ty: u32,
-    rings: &[Vec<[f64; 2]>],
+    rings: &[(usize, Vec<[f64; 2]>)],
+    holes_of: &std::sync::Arc<[Option<usize>]>,
 ) -> Result<(), TilerError> {
     let e = f64::from(ctx.config.extent);
     let (ox, oy) = (f64::from(tx), f64::from(ty));
-    let mut group: Vec<Vec<Point>> = Vec::with_capacity(rings.len());
-    for ring in rings {
+    let area = |ring: &[Point]| -> i64 {
+        let n = ring.len();
+        (0..n)
+            .map(|i| {
+                let (a, b) = (ring[i], ring[(i + 1) % n]);
+                i64::from(a[0]) * i64::from(b[1]) - i64::from(b[0]) * i64::from(a[1])
+            })
+            .sum()
+    };
+    let mut group: Vec<(usize, Vec<Point>)> = Vec::with_capacity(rings.len());
+    for (id, ring) in rings {
         let mut pts: Vec<Point> = Vec::with_capacity(ring.len());
         for p in ring {
             let q = [
@@ -1105,16 +1129,24 @@ fn emit_fill(
         if pts.len() > 1 && pts.first() == pts.last() {
             pts.pop();
         }
-        if pts.len() < 3 || ring_area(&pts) == 0.0 {
+        if pts.len() < 3 || area(&pts) == 0 {
             ctx.report.degenerate_after_quantisation += 1;
             continue;
         }
         level.points += pts.len();
         level.runs += 1;
-        group.push(pts);
+        group.push((*id, pts));
     }
     if !group.is_empty() {
-        level.tiles.entry((tx, ty)).or_default().fills.push(group);
+        level
+            .tiles
+            .entry((tx, ty))
+            .or_default()
+            .fills
+            .push(FillGroup {
+                rings: group,
+                holes_of: holes_of.clone(),
+            });
     }
     if level.points > ctx.config.max_level_points {
         return Err(TilerError::LevelBudgetExceeded {
@@ -1133,128 +1165,108 @@ fn emit_fill(
     Ok(())
 }
 
-/// The area of a ring, as the shoelace sum's magnitude.
-fn ring_area(ring: &[Point]) -> f64 {
-    let n = ring.len();
-    let twice: i64 = (0..n)
-        .map(|i| {
-            let (a, b) = (ring[i], ring[(i + 1) % n]);
-            i64::from(a[0]) * i64::from(b[1]) - i64::from(b[0]) * i64::from(a[1])
-        })
-        .sum();
-    twice.unsigned_abs() as f64 / 2.0
-}
-
-/// Whether `p` is inside `ring` by the even-odd rule.
-fn ring_contains(ring: &[Point], p: [f64; 2]) -> bool {
-    let n = ring.len();
-    let mut inside = false;
-    for i in 0..n {
-        let (a, b) = (ring[i], ring[(i + 1) % n]);
-        let (ay, by) = (f64::from(a[1]), f64::from(b[1]));
-        if (ay > p[1]) != (by > p[1]) {
-            let x = f64::from(a[0]) + (p[1] - ay) / (by - ay) * (f64::from(b[0]) - f64::from(a[0]));
-            if p[0] < x {
-                inside = !inside;
-            }
-        }
-    }
-    inside
-}
-
-/// The most rings of one fill on one tile that are nested, and the most ring-times-point work
-/// nesting them may do. Nesting asks every ring whether it sits inside every ring that could
-/// hold it, and a hostile hatch can have as many loops, of as many points, as it likes.
-const MAX_NESTED_RINGS: usize = 2048;
-const MAX_NEST_WORK: usize = 1 << 24;
-
-/// Turns the rings of one fill into polygons by even-odd: a ring inside an even number of others
-/// is an outer ring, a ring inside an odd number is a hole of the smallest ring around it. The
-/// encoder fixes each ring's winding, so none is chosen here.
+/// Works out, for the whole rings of one fill and before any is clipped, which ring each is a
+/// hole of, by even-odd: a ring inside an even number of others is an outer ring (`None`), a ring
+/// inside an odd number is a hole of the smallest ring around it. Returns whether the fill was
+/// too big to nest, in which case every ring is an outer ring and is filled on its own.
 ///
 /// The probe for "inside" is the middle of the ring's first span, so two rings that share a
 /// corner are not mistaken for one another's holes, and a ring is only tested against rings whose
 /// box holds its own, which keeps a fill of many small loops from costing rings times points.
-/// Returns whether the fill was too big to nest (more than [`MAX_NESTED_RINGS`] rings, or more
-/// than `MAX_NEST_WORK` candidate tests times points), in which case each ring is its own
-/// polygon.
-fn nest_rings(rings: Vec<Vec<Point>>) -> (Vec<Polygon>, bool) {
+fn nest_fill(rings: &[Vec<[f64; 2]>]) -> (Vec<Option<usize>>, bool) {
+    // Nesting asks each ring whether it sits inside every ring that could hold it, and a hostile
+    // hatch can have as many loops, of as many points, as it likes.
+    const MAX_NESTED_RINGS: usize = 2048;
+    const MAX_NEST_WORK: usize = 1 << 24;
     let n = rings.len();
-    let alone = |rings: Vec<Vec<Point>>, unnested: bool| {
-        let polygons = rings
-            .into_iter()
-            .map(|exterior| Polygon {
-                exterior,
-                holes: Vec::new(),
-            })
-            .collect();
-        (polygons, unnested)
-    };
     if n == 1 {
-        return alone(rings, false);
+        return (vec![None], false);
     }
     if n > MAX_NESTED_RINGS {
-        return alone(rings, true);
+        return (vec![None; n], true);
     }
-    let boxes: Vec<[i32; 4]> = rings
+    let boxes: Vec<[f64; 4]> = rings
+        .iter()
+        .map(|r| bbox_of([r]).unwrap_or([0.0; 4]))
+        .collect();
+    let areas: Vec<f64> = rings
         .iter()
         .map(|r| {
-            r.iter()
-                .fold([i32::MAX, i32::MAX, i32::MIN, i32::MIN], |b, p| {
-                    [
-                        b[0].min(p[0]),
-                        b[1].min(p[1]),
-                        b[2].max(p[0]),
-                        b[3].max(p[1]),
-                    ]
+            let twice: f64 = (0..r.len())
+                .map(|i| {
+                    let (a, b) = (r[i], r[(i + 1) % r.len()]);
+                    a[0] * b[1] - b[0] * a[1]
                 })
+                .sum();
+            twice.abs() / 2.0
         })
         .collect();
-    let holds = |j: usize, i: usize| {
-        boxes[j][0] <= boxes[i][0]
+    // Whether ring `j` could hold ring `i`: it is larger and its box holds the other's.
+    let could_hold = |j: usize, i: usize| {
+        i != j
+            && areas[j] > areas[i]
+            && boxes[j][0] <= boxes[i][0]
             && boxes[j][1] <= boxes[i][1]
             && boxes[j][2] >= boxes[i][2]
             && boxes[j][3] >= boxes[i][3]
     };
-    let areas: Vec<f64> = rings.iter().map(|r| ring_area(r)).collect();
-    let candidates: Vec<(usize, usize)> = (0..n)
-        .flat_map(|i| (0..n).map(move |j| (i, j)))
-        .filter(|&(i, j)| i != j && areas[j] > areas[i] && holds(j, i))
-        .collect();
-    let work = candidates
-        .iter()
-        .fold(0usize, |w, &(_, j)| w.saturating_add(rings[j].len()));
-    if work > MAX_NEST_WORK {
-        return alone(rings, true);
-    }
-    let probes: Vec<[f64; 2]> = rings
-        .iter()
-        .map(|r| {
-            let (a, b) = (r[0], r[1]);
-            [
-                (f64::from(a[0]) + f64::from(b[0])) / 2.0,
-                (f64::from(a[1]) + f64::from(b[1])) / 2.0,
-            ]
-        })
-        .collect();
-    let mut depth = vec![0usize; n];
-    let mut parent: Vec<Option<usize>> = vec![None; n];
-    for (i, j) in candidates {
-        if ring_contains(&rings[j], probes[i]) {
-            depth[i] += 1;
-            if parent[i].is_none_or(|p| areas[j] < areas[p]) {
-                parent[i] = Some(j);
+    // The work is counted first, without keeping the pairs, so a fill past the budget costs
+    // only the count.
+    let mut work = 0usize;
+    for i in 0..n {
+        for j in (0..n).filter(|&j| could_hold(j, i)) {
+            work = work.saturating_add(rings[j].len());
+            if work > MAX_NEST_WORK {
+                return (vec![None; n], true);
             }
         }
     }
-    let mut slot: Vec<Option<usize>> = vec![None; n];
+    let inside = |ring: &[[f64; 2]], p: [f64; 2]| {
+        let mut inside = false;
+        for i in 0..ring.len() {
+            let (a, b) = (ring[i], ring[(i + 1) % ring.len()]);
+            if (a[1] > p[1]) != (b[1] > p[1]) {
+                let x = a[0] + (p[1] - a[1]) / (b[1] - a[1]) * (b[0] - a[0]);
+                if p[0] < x {
+                    inside = !inside;
+                }
+            }
+        }
+        inside
+    };
+    let mut holes_of: Vec<Option<usize>> = vec![None; n];
+    for i in 0..n {
+        let (a, b) = (rings[i][0], rings[i][1]);
+        let probe = [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
+        let mut depth = 0usize;
+        let mut smallest: Option<usize> = None;
+        for j in (0..n).filter(|&j| could_hold(j, i)) {
+            if inside(&rings[j], probe) {
+                depth += 1;
+                if smallest.is_none_or(|s| areas[j] < areas[s]) {
+                    smallest = Some(j);
+                }
+            }
+        }
+        if depth % 2 == 1 {
+            holes_of[i] = smallest;
+        }
+    }
+    (holes_of, false)
+}
+
+/// The polygons of one fill's rings on one tile: each outer ring with the holes that were cut
+/// from it. A hole whose outer ring did not survive on this tile has nothing to be a hole of
+/// and is dropped.
+fn polygons_of(group: FillGroup) -> Vec<Polygon> {
+    let mut slot: Vec<Option<usize>> = vec![None; group.holes_of.len()];
     let mut polygons: Vec<Polygon> = Vec::new();
     let mut holes: Vec<(usize, Vec<Point>)> = Vec::new();
-    for (i, ring) in rings.into_iter().enumerate() {
-        match parent[i] {
-            Some(p) if depth[i] % 2 == 1 => holes.push((p, ring)),
-            _ => {
-                slot[i] = Some(polygons.len());
+    for (id, ring) in group.rings {
+        match group.holes_of[id] {
+            Some(outer) => holes.push((outer, ring)),
+            None => {
+                slot[id] = Some(polygons.len());
                 polygons.push(Polygon {
                     exterior: ring,
                     holes: Vec::new(),
@@ -1262,18 +1274,12 @@ fn nest_rings(rings: Vec<Vec<Point>>) -> (Vec<Polygon>, bool) {
             }
         }
     }
-    for (p, hole) in holes {
-        match slot[p] {
-            Some(at) => polygons[at].holes.push(hole),
-            // Its container is itself a hole, which an odd depth rules out; keep the ring filled
-            // rather than lose it.
-            None => polygons.push(Polygon {
-                exterior: hole,
-                holes: Vec::new(),
-            }),
+    for (outer, hole) in holes {
+        if let Some(at) = slot[outer] {
+            polygons[at].holes.push(hole);
         }
     }
-    (polygons, false)
+    polygons
 }
 
 /// Reads what a text primitive's formatting and characters say about fidelity
@@ -1485,7 +1491,11 @@ fn tile_guarded(
                         );
                     }
                 }
-                distribute(&mut ctx, &mut level, rings, true)?;
+                let (holes_of, unnested) = nest_fill(&rings);
+                ctx.report.fills_unnested += u64::from(unnested);
+                let holes_of: std::sync::Arc<[Option<usize>]> = holes_of.into();
+                let numbered = rings.into_iter().enumerate().collect();
+                distribute(&mut ctx, &mut level, numbered, Some(&holes_of))?;
                 continue;
             }
             match flatten(p, tol, config.max_text_bytes) {
@@ -1505,7 +1515,8 @@ fn tile_guarded(
                                 .collect()
                         })
                         .collect();
-                    distribute(&mut ctx, &mut level, grid, false)?;
+                    let numbered = grid.into_iter().map(|r| (0, r)).collect();
+                    distribute(&mut ctx, &mut level, numbered, None)?;
                 }
                 Flat::Text {
                     at,
@@ -1627,7 +1638,7 @@ fn build_tile(ctx: &mut Ctx<'_>, mut buf: TileBuf) -> Tile {
     }
 
     // Fills are held to the same point budget, by the same rule: the largest fills are kept.
-    let fill_points = |g: &Vec<Vec<Point>>| g.iter().map(Vec::len).sum::<usize>();
+    let fill_points = |g: &FillGroup| g.rings.iter().map(|(_, r)| r.len()).sum::<usize>();
     let total: usize = buf.fills.iter().map(fill_points).sum();
     if total > cfg.max_points_per_tile {
         let mut order: Vec<usize> = (0..buf.fills.len()).collect();
@@ -1656,9 +1667,7 @@ fn build_tile(ctx: &mut Ctx<'_>, mut buf: TileBuf) -> Tile {
     if !buf.fills.is_empty() {
         let mut polygons: Vec<Polygon> = Vec::new();
         for group in std::mem::take(&mut buf.fills) {
-            let (nested, unnested) = nest_rings(group);
-            ctx.report.fills_unnested += u64::from(unnested);
-            polygons.extend(nested);
+            polygons.extend(polygons_of(group));
         }
         ctx.report.fills += polygons.len() as u64;
         layers.push(Layer {

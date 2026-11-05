@@ -898,11 +898,14 @@ annotated   fs-detected  tests/vector_1032_tiler.rs::the_same_input_gives_the_sa
 annotated   fs-detected  tests/vector_1033_fixture.rs::the_committed_viewer_fixture_is_what_the_tiler_makes
 annotated   not-detected tests/vector_1034_acadrust_fill.rs::a_2d_solid_is_filled_in_its_visible_vertex_order
 annotated   not-detected tests/vector_1034_acadrust_fill.rs::a_fill_across_four_tiles_is_closed_and_inside_each_tile
+annotated   not-detected tests/vector_1034_acadrust_fill.rs::a_fill_too_heavy_to_nest_is_drawn_ring_by_ring_and_counted
 annotated   not-detected tests/vector_1034_acadrust_fill.rs::a_fill_with_too_many_rings_to_nest_is_filled_ring_by_ring_and_counted
+annotated   not-detected tests/vector_1034_acadrust_fill.rs::a_loop_that_cannot_be_built_does_not_turn_the_rest_into_separate_fills
 annotated   not-detected tests/vector_1034_acadrust_fill.rs::a_patterned_hatch_stays_an_outline_and_says_pattern_only
 annotated   not-detected tests/vector_1034_acadrust_fill.rs::a_solid_hatch_square_is_a_filled_polygon_of_its_own_area
 annotated   fs-detected  tests/vector_1034_acadrust_fill.rs::an_archive_declares_the_fills_layer_and_the_anchor_only_when_it_uses_them
 annotated   not-detected tests/vector_1034_acadrust_fill.rs::an_ignore_style_hatch_fills_every_loop_on_its_own
+annotated   not-detected tests/vector_1034_acadrust_fill.rs::an_island_across_a_tile_edge_is_a_hole_whichever_vertex_comes_first
 annotated   not-detected tests/vector_1034_acadrust_fill.rs::an_island_is_a_hole_by_even_odd
 annotated   not-detected tests/vector_1034_acadrust_fill.rs::an_mtext_attachment_point_moves_its_anchor
 annotated   not-detected tests/vector_1034_acadrust_fill.rs::an_outer_style_hatch_keeps_its_island_as_a_hole

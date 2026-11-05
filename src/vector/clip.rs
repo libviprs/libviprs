@@ -77,8 +77,10 @@ pub fn clip_slab(points: &[[f64; 2]], axis: usize, lo: f64, hi: f64) -> Vec<Vec<
 /// is empty when the ring has nothing in the slab, and a ring that is only partly inside gains
 /// zero-width bridges along the slab edge where it leaves and re-enters, which fill the same
 /// area as the ring itself and are why this is for filling and not for stroking. Where an edge
-/// crosses a slab boundary the point is computed from that edge's own endpoints, in ring order,
-/// so two neighbouring slabs agree on it to the last bit.
+/// crosses a slab boundary the point is computed from that edge's own endpoints, so two
+/// neighbouring slabs agree on it to the last bit when the edge crosses only the boundary they
+/// share. An edge that also crosses the slab's other boundary is cut a second time from a point
+/// the first cut already moved, and its two cuts can differ in the last bit or so.
 #[must_use]
 pub fn clip_ring_slab(ring: &[[f64; 2]], axis: usize, lo: f64, hi: f64) -> Vec<[f64; 2]> {
     let half = |input: &[[f64; 2]], edge: f64, keep_above: bool| -> Vec<[f64; 2]> {

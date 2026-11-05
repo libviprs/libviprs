@@ -396,3 +396,107 @@ fn a_fill_with_too_many_rings_to_nest_is_filled_ring_by_ring_and_counted() {
     assert_eq!(polys.len(), 2049, "every ring is still drawn");
     assert!(polys.iter().all(|p| p.holes.is_empty()));
 }
+
+#[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
+fn an_island_across_a_tile_edge_is_a_hole_whichever_vertex_comes_first() {
+    // The island crosses x = 500, the edge between the two tiles of zoom 1. Starting at (600, 200)
+    // puts its first vertex off the left tile, so its clipped ring begins on the tile edge.
+    let outer = square(100.0, 100.0, 900.0, 900.0);
+    for island in [
+        vec![
+            (400.0, 200.0),
+            (600.0, 200.0),
+            (600.0, 300.0),
+            (400.0, 300.0),
+        ],
+        vec![
+            (600.0, 200.0),
+            (600.0, 300.0),
+            (400.0, 300.0),
+            (400.0, 200.0),
+        ],
+        vec![
+            (600.0, 300.0),
+            (400.0, 300.0),
+            (400.0, 200.0),
+            (600.0, 200.0),
+        ],
+    ] {
+        let (prims, _) = decode(&drawing(vec![
+            frame(),
+            hatch(true, &[outer.clone(), island.clone()]),
+        ]));
+        let t = tiles(&prims, 1);
+        for x in [0, 1] {
+            let polys = fills(&t, 1, x, 1);
+            assert_eq!(
+                polys.len(),
+                1,
+                "tile {x}/1, island starting at {:?}",
+                island[0]
+            );
+            assert_eq!(
+                polys[0].holes.len(),
+                1,
+                "tile {x}/1, island starting at {:?}",
+                island[0]
+            );
+        }
+    }
+}
+
+#[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
+fn a_loop_that_cannot_be_built_does_not_turn_the_rest_into_separate_fills() {
+    // The first loop has a non-finite vertex, so Polygon::new refuses it. The outer loop and its
+    // island that follow are still one fill, and the island is still a hole.
+    let broken = vec![(f64::NAN, 0.0), (10.0, 0.0), (10.0, 10.0)];
+    let (prims, report) = decode(&drawing(vec![
+        frame(),
+        hatch(
+            true,
+            &[
+                broken,
+                square(100.0, 100.0, 900.0, 900.0),
+                square(400.0, 400.0, 600.0, 600.0),
+            ],
+        ),
+    ]));
+    assert!(
+        report
+            .diagnostics()
+            .iter()
+            .any(|d| d.code() == DiagnosticCode::NON_FINITE_GEOMETRY)
+    );
+    let polys = fills(&tiles(&prims, 0), 0, 0, 0);
+    assert_eq!(polys.len(), 1);
+    assert_eq!(polys[0].holes.len(), 1);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
+fn a_fill_too_heavy_to_nest_is_drawn_ring_by_ring_and_counted() {
+    // 2000 nested rings of 16 vertices is under the ring cap and over the nesting work budget.
+    let ring = |r: f64| -> Vec<(f64, f64)> {
+        (0..16)
+            .map(|i| {
+                let t = f64::from(i) / 16.0 * std::f64::consts::TAU;
+                (500.0 + r * t.cos(), 500.0 + r * t.sin())
+            })
+            .collect()
+    };
+    let rings: Vec<_> = (0..2000)
+        .map(|k| ring(450.0 - f64::from(k) * 0.2))
+        .collect();
+    let (prims, _) = decode(&drawing(vec![frame(), hatch(true, &rings)]));
+    let mut out = CollectTiles::default();
+    let (report, _) =
+        tile_primitives(&prims, &TilerConfig::default().with_max_zoom(0), &mut out).unwrap();
+    assert_eq!(report.fills_unnested, 1, "the budget fallback is counted");
+    assert_eq!(
+        fills(&out, 0, 0, 0).len(),
+        2000,
+        "every ring is still drawn"
+    );
+}
