@@ -144,7 +144,9 @@ pub(crate) struct OpenArtifact {
     bounds: BoundsReport,
     written: u64,
     skipped: u64,
-    source_ids: Vec<EntityId>,
+    /// The libviprs id of each entity written; the index is the entity's PVec id. A component stream is
+    /// built against these, because a refused curve moves every id after it.
+    pub(crate) source_ids: Vec<EntityId>,
     refused: Vec<(EntityId, String)>,
 }
 
@@ -320,12 +322,6 @@ impl OpenArtifact {
     ) -> Result<usize, crate::raster_pvec::container::RasterWriteError> {
         crate::raster_pvec::container::write_rasters(&mut self.writer, pyramids)
             .map(|ids| ids.len())
-    }
-
-    /// The libviprs id of each entity written; the index is the entity's PVec id. A component stream is
-    /// built against these, because a refused curve moves every id after it.
-    pub(crate) fn source_ids(&self) -> &[EntityId] {
-        &self.source_ids
     }
 
     /// Adds component streams after the geometry.
