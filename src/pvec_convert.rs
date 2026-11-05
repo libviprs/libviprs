@@ -837,7 +837,7 @@ impl<'a> PvecConversion<'a> {
                     style: tables.styles.get(s.style as usize),
                 })
                 .collect();
-            let built = build_streams(select, open.source_ids(), &layers, &rows)
+            let built = build_streams(select, &open.source_ids, &layers, &rows)
                 .map_err(PvecConvertError::Components)?;
             let mut summary = ComponentsSummary {
                 streams: built.names.iter().map(|n| (*n).to_owned()).collect(),

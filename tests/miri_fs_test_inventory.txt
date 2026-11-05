@@ -636,7 +636,9 @@ annotated   fs-detected  tests/pvec_1500_convert_regions.rs::issue_1526_the_stre
 annotated   fs-detected  tests/pvec_1500_convert_regions.rs::issue_1526_walls_that_are_not_one_straight_edge_are_counted_not_silently_lost
 annotated   fs-detected  tests/pvec_1500_convert_streams.rs::issue_1525_a_conversion_with_no_option_writes_geometry_only
 annotated   fs-detected  tests/pvec_1500_convert_streams.rs::issue_1525_a_curve_the_writer_refuses_moves_no_stream_row_onto_a_stranger
+annotated   fs-detected  tests/pvec_1500_convert_streams.rs::issue_1525_a_linetype_name_pvec_cannot_hold_costs_only_its_style_row
 annotated   fs-detected  tests/pvec_1500_convert_streams.rs::issue_1525_a_row_pvec_cannot_hold_is_counted_in_the_report_and_costs_only_its_row
+annotated   fs-detected  tests/pvec_1500_convert_streams.rs::issue_1525_a_style_the_dwg_facts_cannot_make_is_counted_as_bad_style
 annotated   fs-detected  tests/pvec_1500_convert_streams.rs::issue_1525_each_stream_can_be_dropped_on_its_own_and_the_rest_still_read
 annotated   fs-detected  tests/pvec_1500_convert_streams.rs::issue_1525_geometry_is_identical_with_every_stream_on_and_off
 annotated   fs-detected  tests/pvec_1500_convert_streams.rs::issue_1525_the_component_summary_is_json_round_trippable
@@ -674,7 +676,6 @@ annotated   fs-detected  tests/pvec_1491_pdf_conversion.rs::a_refused_image_is_a
 annotated   fs-detected  tests/pvec_1491_pdf_conversion.rs::the_image_notes_are_the_bakes_own_note_keys
 annotated   fs-detected  tests/pvec_1491_pdf_conversion.rs::the_report_counts_the_image_and_the_vector_entities
 annotated   fs-detected  tests/pvec_1491_pdf_conversion.rs::the_same_pdf_twice_gives_the_same_bytes
-annotated   fs-detected  tests/pvec_api_surface.rs::issue_1093_components_name_no_provider_specific_type
 annotated   fs-detected  tests/pvec_api_surface.rs::no_index_directory_or_straddler_type_is_defined_under_src_pvec
 annotated   fs-detected  tests/pvec_api_surface.rs::no_pvec_path_under_src_is_outside_the_allowed_surface
 annotated   fs-detected  tests/pvec_api_surface.rs::no_writer_call_is_made_outside_the_funnel

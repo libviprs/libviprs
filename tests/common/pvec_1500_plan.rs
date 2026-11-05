@@ -3,7 +3,7 @@
 //! The named fixture is `plan`: two root lines, two INSERTs (100 and 200) of a block of three
 //! lines, and twelve wall lines forming two 5 x 5 rooms under a 10 x 2 corridor, with a 0.3 door
 //! gap in the bottom wall of the first room. Sixteen source entities, twenty curves. The other
-//! byte strings select a variant (`huge`, `polywall`, `nowalls`, `longlayer`).
+//! byte strings select a variant (`huge`, `polywall`, `nowalls`, `longlayer`, `longlinetype`, `badstyle`).
 
 #![allow(dead_code)]
 
@@ -64,6 +64,17 @@ pub fn insert(handle: u64, at: [f64; 2]) -> RawEntity {
             grid: ArrayGrid::SINGLE,
         }),
         provenance: stub(handle, "INSERT", "A-DOOR"),
+    }
+}
+
+pub fn linetype(name: String, scale: f64) -> EntityStyle {
+    EntityStyle {
+        linetype: SourceFact::Present(SourceLinetype::Pattern {
+            name,
+            elements: vec![0.5, -0.25],
+            scale,
+        }),
+        ..EntityStyle::absent()
     }
 }
 
@@ -148,6 +159,17 @@ impl DwgProvider for Mock {
             CadSource::Bytes(b"longlayer") => {
                 let mut v = plan();
                 v[1].provenance.layer = "L".repeat(300);
+                v
+            }
+            CadSource::Bytes(b"longlinetype") => {
+                let mut v = plan();
+                v[0].style = linetype("L".repeat(300), 1.0);
+                v
+            }
+            // A linetype scale of zero is not one a dash pattern can be scaled by.
+            CadSource::Bytes(b"badstyle") => {
+                let mut v = plan();
+                v[0].style = linetype("DASHED".into(), 0.0);
                 v
             }
             _ => plan(),
