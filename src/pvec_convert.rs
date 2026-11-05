@@ -867,7 +867,7 @@ impl<'a> PvecConversion<'a> {
                         found.unlabelled = r.report.unlabelled;
                         // The closing segments are counted, never written: a region on one is left
                         // out as `derived-boundary`, so the geometry is the same with the step off.
-                        let sem = semantic_stream(&r, open.source_ids())
+                        let sem = semantic_stream(&r, &open.source_ids)
                             .map_err(PvecConvertError::Components)?;
                         for d in &sem.dropped {
                             *summary
