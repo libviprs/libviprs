@@ -896,7 +896,3 @@ required-features = ["pvec-write"]
 [[example]]
 name = "pvec_components_cost"
 required-features = ["pvec-write"]
-
-[[example]]
-name = "pvec_convert_streams_cost"
-required-features = ["pvec-convert"]

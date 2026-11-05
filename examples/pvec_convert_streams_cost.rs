@@ -10,23 +10,31 @@
 //! The drawing is large (about 3 GiB resident at a million entities), so run it on a build host and
 //! not on a laptop.
 
+#[cfg(feature = "pvec-convert")]
 #[path = "../tests/common/pvec_alloc.rs"]
 mod alloc;
+#[cfg(feature = "pvec-convert")]
 #[path = "../tests/common/pvec_bench.rs"]
 mod bench;
 
-use std::time::Instant;
-
-use libviprs::cad::CadSource;
-use libviprs::pvec::SourceUnit;
-use libviprs::pvec::components::StreamSelection;
-use libviprs::pvec::regions::RegionConfig;
-use libviprs::pvec_convert::PvecConversion;
-
+#[cfg(feature = "pvec-convert")]
 #[global_allocator]
 static ALLOC: alloc::Counting = alloc::Counting;
 
+#[cfg(not(feature = "pvec-convert"))]
 fn main() {
+    eprintln!("build with --features pvec-convert");
+}
+
+#[cfg(feature = "pvec-convert")]
+fn main() {
+    use libviprs::cad::CadSource;
+    use libviprs::pvec::SourceUnit;
+    use libviprs::pvec::components::StreamSelection;
+    use libviprs::pvec::regions::RegionConfig;
+    use libviprs::pvec_convert::PvecConversion;
+    use std::time::Instant;
+
     let n: u64 = std::env::args()
         .nth(1)
         .and_then(|a| a.parse().ok())
