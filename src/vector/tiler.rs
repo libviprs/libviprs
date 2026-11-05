@@ -1170,10 +1170,11 @@ fn emit_fill(
 /// inside an odd number is a hole of the smallest ring around it. Returns whether the fill was
 /// too big to nest, in which case every ring is an outer ring and is filled on its own.
 ///
-/// The probe for "inside" is the middle of the ring's first span that is not on the other ring's
-/// boundary, so two rings that share a corner or an edge are not mistaken for one another's holes,
-/// and a ring is only tested against rings whose
-/// box holds its own, which keeps a fill of many small loops from costing rings times points.
+/// The probe for "inside" is one point strictly inside the ring, so two rings that share a corner
+/// or an edge are not mistaken for one another's holes,
+/// and a ring is only tested against rings whose box holds its own, which keeps a fill of many
+/// small loops from costing rings times points. Two identical rings are neither inside the other
+/// (a ring must be strictly larger), so both are drawn filled; even-odd would leave nothing.
 fn nest_fill(rings: &[Vec<[f64; 2]>]) -> (Vec<Option<usize>>, bool) {
     // Nesting asks each ring whether it sits inside every ring that could hold it, and a hostile
     // hatch can have as many loops, of as many points, as it likes.
@@ -1248,17 +1249,35 @@ fn nest_fill(rings: &[Vec<[f64; 2]>]) -> (Vec<Option<usize>>, bool) {
         }
         Some(inside)
     };
-    // A ring is inside another when the middle of its first span that is not on the other's
-    // boundary is: an island that touches the ring around it can have its first span along that
-    // ring's edge, where the test cannot tell. Two rings that are the same ring are not inside
-    // one another.
+    // One point strictly inside each ring, found by cutting it with a horizontal line that passes
+    // between two vertex heights, so it crosses edges and never a vertex. A ring inside another is
+    // inside it wherever it is, so this one point says; a point on the other ring's boundary
+    // would not, which is why the middle of a span (that may lie along the edge of the ring
+    // around it) is not used. A ring with no area has none and is not inside anything.
+    let interior: Vec<Option<[f64; 2]>> = rings
+        .iter()
+        .map(|r| {
+            let mut ys: Vec<f64> = r.iter().map(|p| p[1]).collect();
+            ys.sort_by(f64::total_cmp);
+            ys.dedup();
+            let y = (ys.get(ys.len() / 2 - usize::from(ys.len() > 1)).copied()?
+                + ys.get(ys.len() / 2).copied()?)
+                / 2.0;
+            let mut xs: Vec<f64> = (0..r.len())
+                .filter_map(|k| {
+                    let (a, b) = (r[k], r[(k + 1) % r.len()]);
+                    ((a[1] > y) != (b[1] > y))
+                        .then(|| a[0] + (y - a[1]) / (b[1] - a[1]) * (b[0] - a[0]))
+                })
+                .collect();
+            xs.sort_by(f64::total_cmp);
+            let (first, second) = (xs.first()?, xs.get(1)?);
+            Some([(first + second) / 2.0, y])
+        })
+        .collect();
     let contains = |j: usize, i: usize| {
-        let r = &rings[i];
-        (0..r.len())
-            .find_map(|k| {
-                let (a, b) = (r[k], r[(k + 1) % r.len()]);
-                side(&rings[j], [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0])
-            })
+        interior[i]
+            .and_then(|p| side(&rings[j], p))
             .unwrap_or(false)
     };
     let mut holes_of: Vec<Option<usize>> = vec![None; n];

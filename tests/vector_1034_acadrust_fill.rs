@@ -528,3 +528,54 @@ fn an_island_touching_the_outer_loop_is_a_hole_on_every_edge_and_start() {
         }
     }
 }
+
+#[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
+fn islands_along_a_dense_outer_edge_nest_in_bounded_time() {
+    use libviprs::cad::{Fill, Polygon as CadPolygon};
+    // An outer loop of 8192 points and 32 islands of 8000 points each, whose first spans all lie
+    // along the outer loop's bottom edge, where a point test cannot tell inside from outside.
+    let run = |from: [f64; 2], to: [f64; 2], n: usize| -> Vec<[f64; 3]> {
+        (0..n)
+            .map(|k| {
+                let t = k as f64 / n as f64;
+                [
+                    from[0] + (to[0] - from[0]) * t,
+                    from[1] + (to[1] - from[1]) * t,
+                    0.0,
+                ]
+            })
+            .collect()
+    };
+    let mut outer = run([0.0, 0.0], [1000.0, 0.0], 2048);
+    outer.extend(run([1000.0, 0.0], [1000.0, 1000.0], 2048));
+    outer.extend(run([1000.0, 1000.0], [0.0, 1000.0], 2048));
+    outer.extend(run([0.0, 1000.0], [0.0, 0.0], 2048));
+    let mut prims: Vec<Primitive> = vec![
+        CadPolygon::straight(&outer)
+            .unwrap()
+            .with_fill(Fill::Solid { opens: true })
+            .into(),
+    ];
+    for k in 0..32 {
+        let x = 10.0 + f64::from(k) * 30.0;
+        let mut island = run([x, 0.0], [x + 20.0, 0.0], 8000);
+        island.extend([[x + 20.0, 0.0, 0.0], [x + 20.0, 20.0, 0.0], [x, 20.0, 0.0]]);
+        prims.push(
+            CadPolygon::straight(&island)
+                .unwrap()
+                .with_fill(Fill::Solid { opens: false })
+                .into(),
+        );
+    }
+    let started = std::time::Instant::now();
+    let t = tiles(&prims, 0);
+    assert!(
+        started.elapsed().as_secs_f64() < 3.0,
+        "nesting took {:?}",
+        started.elapsed()
+    );
+    let polys = fills(&t, 0, 0, 0);
+    assert_eq!(polys.len(), 1, "one outer loop");
+    assert_eq!(polys[0].holes.len(), 32, "with every island as a hole");
+}
