@@ -68,6 +68,29 @@ With the pvec crates at afd2fe6 (`detmath::hypot`, pvec#261) the artifact bytes 
 arm64 row in `determinism.aarch64.baseline`. Both fixtures still have an arm64 row in the drift digest
 and the accepted dump, since the rest of their arithmetic differs in the last bit.
 
+## macOS
+
+The rows above are Linux rows, and so is the gate. The fleet is x86_64 and arm64 Linux, and nothing in it runs
+a Mac. Issue #1513 reported the digest tests red on Apple silicon, also on plain `main`, so I measured it
+instead of guessing, on `aarch64-apple-darwin` (macOS 26.4.1, rustc 1.99.1) with the pvec crates at afd2fe6.
+The same two suites are green on arm64 Linux in a container on the same machine.
+
+- `elliptical-arc-001`: one stored bound (the second of the four) is 1 ulp lower than on Linux, `2.016167142459582`
+  against `2.0161671424595826`. I read this as Apple's libm rounding `sin` and `cos` differently from glibc, through `sin_cos` in the conic
+  path of pvec (pvec#262 only replaced `hypot`), but I did not isolate the call. This is the only fixture where the artifact bytes differ.
+- `nonuniform-scale-rotated-001`: `ay` is 1 ulp from the Linux arm64 value and `ry` is 1 ulp from the
+  x86_64 one. The drift digest differs and the artifact bytes match Linux arm64.
+- `general-affine-chain-001`: identical to the Linux arm64 row, so the drift digest differs from the x86_64 one
+  in `trim.span`, `b.dx` (1 ulp) and `b.dy` (2 ulp).
+
+Every difference is within `Policy::V1`, and the drift check (the report, not the digest) stays green on a Mac.
+I did not add a macOS row. A row nothing re-runs goes stale with the next OS update, and the person nearest
+re-blesses it, which is how a determinism baseline stops meaning anything. The two bit-exact tests,
+`n_1471_the_digest_of_every_converted_fixture_matches_the_committed_one` and
+`n2_8_1060_the_digest_of_every_conversion_matches_the_checked_in_baseline`, are Linux only: they are ignored
+elsewhere with the reason `bit-exact Linux rows, #1513`. The tolerance checks still run on a Mac.
+The real fix is a deterministic `sin` and `cos` in pvec's `detmath`, which would also make macOS agree.
+
 ## Consequences
 
 - A fixture that turns a circle into an ellipse or normalises a rotated direction can hit this, so a
