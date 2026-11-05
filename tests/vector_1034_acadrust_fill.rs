@@ -531,10 +531,12 @@ fn an_island_touching_the_outer_loop_is_a_hole_on_every_edge_and_start() {
 
 #[test]
 #[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
-fn islands_along_a_dense_outer_edge_nest_in_bounded_time() {
+fn islands_along_a_dense_outer_edge_cost_no_more_than_islands_away_from_it() {
     use libviprs::cad::{Fill, Polygon as CadPolygon};
-    // An outer loop of 8192 points and 32 islands of 8000 points each, whose first spans all lie
-    // along the outer loop's bottom edge, where a point test cannot tell inside from outside.
+    // An outer loop of 8192 points and 32 islands of 8000 points each. With `lift` at zero the
+    // islands' first spans all lie along the outer loop's bottom edge, where a point test cannot
+    // tell inside from outside; lifted one unit they are plain islands. The same fill, so the
+    // same machine and the same tessellation: the first may not cost much more than the second.
     let run = |from: [f64; 2], to: [f64; 2], n: usize| -> Vec<[f64; 3]> {
         (0..n)
             .map(|k| {
@@ -547,35 +549,44 @@ fn islands_along_a_dense_outer_edge_nest_in_bounded_time() {
             })
             .collect()
     };
-    let mut outer = run([0.0, 0.0], [1000.0, 0.0], 2048);
-    outer.extend(run([1000.0, 0.0], [1000.0, 1000.0], 2048));
-    outer.extend(run([1000.0, 1000.0], [0.0, 1000.0], 2048));
-    outer.extend(run([0.0, 1000.0], [0.0, 0.0], 2048));
-    let mut prims: Vec<Primitive> = vec![
-        CadPolygon::straight(&outer)
-            .unwrap()
-            .with_fill(Fill::Solid { opens: true })
-            .into(),
-    ];
-    for k in 0..32 {
-        let x = 10.0 + f64::from(k) * 30.0;
-        let mut island = run([x, 0.0], [x + 20.0, 0.0], 8000);
-        island.extend([[x + 20.0, 0.0, 0.0], [x + 20.0, 20.0, 0.0], [x, 20.0, 0.0]]);
-        prims.push(
-            CadPolygon::straight(&island)
+    let fill_with = |lift: f64| -> (Vec<Primitive>, f64) {
+        let mut outer = run([0.0, 0.0], [1000.0, 0.0], 2048);
+        outer.extend(run([1000.0, 0.0], [1000.0, 1000.0], 2048));
+        outer.extend(run([1000.0, 1000.0], [0.0, 1000.0], 2048));
+        outer.extend(run([0.0, 1000.0], [0.0, 0.0], 2048));
+        let mut prims: Vec<Primitive> = vec![
+            CadPolygon::straight(&outer)
                 .unwrap()
-                .with_fill(Fill::Solid { opens: false })
+                .with_fill(Fill::Solid { opens: true })
                 .into(),
-        );
-    }
-    let started = std::time::Instant::now();
-    let t = tiles(&prims, 0);
+        ];
+        for k in 0..32 {
+            let x = 10.0 + f64::from(k) * 30.0;
+            let mut island = run([x, lift], [x + 20.0, lift], 8000);
+            island.extend([
+                [x + 20.0, lift, 0.0],
+                [x + 20.0, lift + 20.0, 0.0],
+                [x, lift + 20.0, 0.0],
+            ]);
+            prims.push(
+                CadPolygon::straight(&island)
+                    .unwrap()
+                    .with_fill(Fill::Solid { opens: false })
+                    .into(),
+            );
+        }
+        let started = std::time::Instant::now();
+        let t = tiles(&prims, 0);
+        let took = started.elapsed().as_secs_f64();
+        let polys = fills(&t, 0, 0, 0);
+        assert_eq!(polys.len(), 1, "one outer loop");
+        assert_eq!(polys[0].holes.len(), 32, "with every island as a hole");
+        (prims, took)
+    };
+    let (_, away) = fill_with(1.0);
+    let (_, along) = fill_with(0.0);
     assert!(
-        started.elapsed().as_secs_f64() < 3.0,
-        "nesting took {:?}",
-        started.elapsed()
+        along < 10.0 * away + 0.2,
+        "islands along the edge took {along:.3} s, the same islands away from it {away:.3} s"
     );
-    let polys = fills(&t, 0, 0, 0);
-    assert_eq!(polys.len(), 1, "one outer loop");
-    assert_eq!(polys[0].holes.len(), 32, "with every island as a hole");
 }

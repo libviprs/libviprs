@@ -1171,9 +1171,9 @@ fn emit_fill(
 /// too big to nest, in which case every ring is an outer ring and is filled on its own.
 ///
 /// The probe for "inside" is one point strictly inside the ring, so two rings that share a corner
-/// or an edge are not mistaken for one another's holes,
-/// and a ring is only tested against rings whose box holds its own, which keeps a fill of many
-/// small loops from costing rings times points. Two identical rings are neither inside the other
+/// or an edge are not mistaken for one another's holes, and a ring is only tested against rings
+/// whose box holds its own, which keeps a fill of many small loops from costing rings times
+/// points. Two identical rings are neither inside the other
 /// (a ring must be strictly larger), so both are drawn filled; even-odd would leave nothing.
 fn nest_fill(rings: &[Vec<[f64; 2]>]) -> (Vec<Option<usize>>, bool) {
     // Nesting asks each ring whether it sits inside every ring that could hold it, and a hostile
@@ -1271,8 +1271,16 @@ fn nest_fill(rings: &[Vec<[f64; 2]>]) -> (Vec<Option<usize>>, bool) {
                 })
                 .collect();
             xs.sort_by(f64::total_cmp);
-            let (first, second) = (xs.first()?, xs.get(1)?);
-            Some([(first + second) / 2.0, y])
+            // The widest stretch of the cut that is inside the ring (the gaps between the first
+            // and second crossing, the third and fourth, and so on), so a sliver where two
+            // crossings nearly meet is not the one that is used.
+            let (lo, hi) = xs
+                .iter()
+                .step_by(2)
+                .zip(xs.iter().skip(1).step_by(2))
+                .map(|(lo, hi)| (*lo, *hi))
+                .max_by(|a, b| (a.1 - a.0).total_cmp(&(b.1 - b.0)))?;
+            Some([(lo + hi) / 2.0, y])
         })
         .collect();
     let contains = |j: usize, i: usize| {

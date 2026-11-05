@@ -910,7 +910,7 @@ annotated   not-detected tests/vector_1034_acadrust_fill.rs::an_island_is_a_hole
 annotated   not-detected tests/vector_1034_acadrust_fill.rs::an_island_touching_the_outer_loop_is_a_hole_on_every_edge_and_start
 annotated   not-detected tests/vector_1034_acadrust_fill.rs::an_mtext_attachment_point_moves_its_anchor
 annotated   not-detected tests/vector_1034_acadrust_fill.rs::an_outer_style_hatch_keeps_its_island_as_a_hole
-annotated   not-detected tests/vector_1034_acadrust_fill.rs::islands_along_a_dense_outer_edge_nest_in_bounded_time
+annotated   not-detected tests/vector_1034_acadrust_fill.rs::islands_along_a_dense_outer_edge_cost_no_more_than_islands_away_from_it
 annotated   fs-detected  tests/vector_1034_fidelity.rs::a_block_inserted_thirty_thousand_times_stays_inside_its_budgets
 annotated   fs-detected  tests/vector_1034_fidelity.rs::a_decode_that_fails_keeps_what_it_reported
 annotated   fs-detected  tests/vector_1034_fidelity.rs::a_repeated_block_is_stopped_at_the_primitive_budget_not_at_out_of_memory
