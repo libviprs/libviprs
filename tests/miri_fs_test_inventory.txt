@@ -641,6 +641,9 @@ annotated   fs-detected  tests/pvec_1463_chunk_events.rs::issue_1463_two_runs_se
 annotated   fs-detected  tests/pvec_1471_reproducibility.rs::n_1471_no_geometry_libviprs_computes_goes_through_libm_hypot
 annotated   fs-detected  tests/pvec_1471_reproducibility.rs::n_1471_the_adr_says_artifacts_are_reproducible_per_architecture_only
 annotated   fs-detected  tests/pvec_1471_reproducibility.rs::n_1471_the_architecture_overrides_are_exactly_the_fixtures_the_adr_lists
+annotated   fs-detected  tests/pvec_1471_reproducibility.rs::n_1513_the_adr_records_what_a_mac_does
+annotated   fs-detected  tests/pvec_1471_reproducibility.rs::n_1513_the_bit_exact_digest_tests_are_gated_to_linux
+annotated   fs-detected  tests/pvec_1471_reproducibility.rs::n_1513_the_other_pvec_gates_are_not_gated_by_os
 annotated   fs-detected  tests/pvec_1489_image_reason_keys.rs::a_real_refusal_from_a_page_is_reported_under_a_documented_key
 annotated   fs-detected  tests/pvec_1489_image_reason_keys.rs::every_note_key_is_in_a_doc
 annotated   fs-detected  tests/pvec_1489_image_reason_keys.rs::every_refusal_key_is_in_a_doc
