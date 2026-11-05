@@ -500,3 +500,31 @@ fn a_fill_too_heavy_to_nest_is_drawn_ring_by_ring_and_counted() {
         "every ring is still drawn"
     );
 }
+
+#[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
+fn an_island_touching_the_outer_loop_is_a_hole_on_every_edge_and_start() {
+    let outer = square(100.0, 100.0, 900.0, 900.0);
+    for (x0, y0, x1, y1) in [
+        (400.0, 100.0, 600.0, 200.0),
+        (400.0, 800.0, 600.0, 900.0),
+        (100.0, 400.0, 200.0, 600.0),
+        (800.0, 400.0, 900.0, 600.0),
+    ] {
+        let corners = square(x0, y0, x1, y1);
+        for start in 0..4 {
+            let island: Vec<_> = (0..4).map(|k| corners[(start + k) % 4]).collect();
+            let (prims, _) = decode(&drawing(vec![
+                frame(),
+                hatch(true, &[outer.clone(), island]),
+            ]));
+            let polys = fills(&tiles(&prims, 0), 0, 0, 0);
+            assert_eq!(
+                polys.len(),
+                1,
+                "island {x0},{y0} to {x1},{y1} starting at corner {start}"
+            );
+            assert_eq!(polys[0].holes.len(), 1, "island {x0},{y0} start {start}");
+        }
+    }
+}

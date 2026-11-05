@@ -907,6 +907,7 @@ annotated   fs-detected  tests/vector_1034_acadrust_fill.rs::an_archive_declares
 annotated   not-detected tests/vector_1034_acadrust_fill.rs::an_ignore_style_hatch_fills_every_loop_on_its_own
 annotated   not-detected tests/vector_1034_acadrust_fill.rs::an_island_across_a_tile_edge_is_a_hole_whichever_vertex_comes_first
 annotated   not-detected tests/vector_1034_acadrust_fill.rs::an_island_is_a_hole_by_even_odd
+annotated   not-detected tests/vector_1034_acadrust_fill.rs::an_island_touching_the_outer_loop_is_a_hole_on_every_edge_and_start
 annotated   not-detected tests/vector_1034_acadrust_fill.rs::an_mtext_attachment_point_moves_its_anchor
 annotated   not-detected tests/vector_1034_acadrust_fill.rs::an_outer_style_hatch_keeps_its_island_as_a_hole
 annotated   fs-detected  tests/vector_1034_fidelity.rs::a_block_inserted_thirty_thousand_times_stays_inside_its_budgets

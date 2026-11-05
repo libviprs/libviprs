@@ -1170,8 +1170,9 @@ fn emit_fill(
 /// inside an odd number is a hole of the smallest ring around it. Returns whether the fill was
 /// too big to nest, in which case every ring is an outer ring and is filled on its own.
 ///
-/// The probe for "inside" is the middle of the ring's first span, so two rings that share a
-/// corner are not mistaken for one another's holes, and a ring is only tested against rings whose
+/// The probe for "inside" is the middle of the ring's first span that is not on the other ring's
+/// boundary, so two rings that share a corner or an edge are not mistaken for one another's holes,
+/// and a ring is only tested against rings whose
 /// box holds its own, which keeps a fill of many small loops from costing rings times points.
 fn nest_fill(rings: &[Vec<[f64; 2]>]) -> (Vec<Option<usize>>, bool) {
     // Nesting asks each ring whether it sits inside every ring that could hold it, and a hostile
@@ -1221,10 +1222,23 @@ fn nest_fill(rings: &[Vec<[f64; 2]>]) -> (Vec<Option<usize>>, bool) {
             }
         }
     }
-    let inside = |ring: &[[f64; 2]], p: [f64; 2]| {
+    // Where `p` is against `ring`: Some(true) strictly inside, Some(false) strictly outside, None
+    // on the boundary, which says nothing either way.
+    let side = |ring: &[[f64; 2]], p: [f64; 2]| -> Option<bool> {
         let mut inside = false;
         for i in 0..ring.len() {
             let (a, b) = (ring[i], ring[(i + 1) % ring.len()]);
+            let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+            let len2 = dx * dx + dy * dy;
+            let t = if len2 == 0.0 {
+                0.0
+            } else {
+                (((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / len2).clamp(0.0, 1.0)
+            };
+            let (qx, qy) = (a[0] + t * dx - p[0], a[1] + t * dy - p[1]);
+            if qx * qx + qy * qy < 1e-18 * (1.0 + p[0] * p[0] + p[1] * p[1]) {
+                return None;
+            }
             if (a[1] > p[1]) != (b[1] > p[1]) {
                 let x = a[0] + (p[1] - a[1]) / (b[1] - a[1]) * (b[0] - a[0]);
                 if p[0] < x {
@@ -1232,16 +1246,27 @@ fn nest_fill(rings: &[Vec<[f64; 2]>]) -> (Vec<Option<usize>>, bool) {
                 }
             }
         }
-        inside
+        Some(inside)
+    };
+    // A ring is inside another when the middle of its first span that is not on the other's
+    // boundary is: an island that touches the ring around it can have its first span along that
+    // ring's edge, where the test cannot tell. Two rings that are the same ring are not inside
+    // one another.
+    let contains = |j: usize, i: usize| {
+        let r = &rings[i];
+        (0..r.len())
+            .find_map(|k| {
+                let (a, b) = (r[k], r[(k + 1) % r.len()]);
+                side(&rings[j], [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0])
+            })
+            .unwrap_or(false)
     };
     let mut holes_of: Vec<Option<usize>> = vec![None; n];
-    for i in 0..n {
-        let (a, b) = (rings[i][0], rings[i][1]);
-        let probe = [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
+    for (i, hole_of) in holes_of.iter_mut().enumerate() {
         let mut depth = 0usize;
         let mut smallest: Option<usize> = None;
         for j in (0..n).filter(|&j| could_hold(j, i)) {
-            if inside(&rings[j], probe) {
+            if contains(j, i) {
                 depth += 1;
                 if smallest.is_none_or(|s| areas[j] < areas[s]) {
                     smallest = Some(j);
@@ -1249,7 +1274,7 @@ fn nest_fill(rings: &[Vec<[f64; 2]>]) -> (Vec<Option<usize>>, bool) {
             }
         }
         if depth % 2 == 1 {
-            holes_of[i] = smallest;
+            *hole_of = smallest;
         }
     }
     (holes_of, false)
