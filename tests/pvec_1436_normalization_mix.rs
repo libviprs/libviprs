@@ -30,6 +30,7 @@ fn kept(cell: &str, hidden: u64) -> f64 {
 }
 
 #[test]
+#[ignore = "benchmark plumbing, opt-in: cargo test --features pvec-convert,dwg-acadrust --test pvec_1436_normalization_mix -- --ignored"]
 #[cfg_attr(miri, ignore)]
 fn a_zero_mix_hides_nothing_and_is_the_pinned_cell() {
     for cell in ["block_heavy", "paper_space", "large_industrial"] {
@@ -43,6 +44,7 @@ fn a_zero_mix_hides_nothing_and_is_the_pinned_cell() {
 }
 
 #[test]
+#[ignore = "benchmark plumbing, opt-in: cargo test --features pvec-convert,dwg-acadrust --test pvec_1436_normalization_mix -- --ignored"]
 #[cfg_attr(miri, ignore)]
 fn a_fifty_percent_mix_keeps_about_half() {
     for cell in ["block_heavy", "paper_space", "large_industrial"] {
@@ -52,6 +54,7 @@ fn a_fifty_percent_mix_keeps_about_half() {
 }
 
 #[test]
+#[ignore = "benchmark plumbing, opt-in: cargo test --features pvec-convert,dwg-acadrust --test pvec_1436_normalization_mix -- --ignored"]
 #[cfg_attr(miri, ignore)]
 fn a_ninety_percent_mix_keeps_about_a_tenth() {
     for cell in ["block_heavy", "paper_space", "large_industrial"] {

@@ -1,15 +1,14 @@
-//! The EPIC issue form still asks for all four things a feature has to deliver
+//! The EPIC issue form still asks for all three things a feature has to deliver
 //! (libviprs-org#85, which absorbed libviprs#1117).
 //!
-//! An epic is where the four live, because three of them are not things one PR
-//! does: the benchmark capture happens on the measurement host, the libviprs.org
-//! page is a different repository, and the end-to-end suite is a third. So the
-//! checklist rides on the issue that owns all four, and this file is what stops
-//! it quietly becoming three.
+//! An epic is where the three live, because none of them is a thing one PR
+//! does: the libviprs.org page is a different repository, the end-to-end suite
+//! is a second, and the CLI is a third. So the checklist rides on the issue that
+//! owns all three, and this file is what stops it quietly going missing.
 //!
 //! # Why a test rather than trust
 //!
-//! The four items were not invented here. They are what EPIC F ended up
+//! The three items were not invented here. They are what EPIC F ended up
 //! delivering, and it delivered them because the campaign ran long enough for
 //! somebody to notice each one was missing, not because anything asked. A
 //! checklist written down and then edited down is worse than no checklist,
@@ -20,7 +19,7 @@
 //!
 //! The canonical wording lives in libviprs-org (`EPIC_CHECKLIST.md`,
 //! libviprs-org#85) and the form here is the mechanism that puts it in front of
-//! whoever opens the epic. This test checks the mechanism still carries the four,
+//! whoever opens the epic. This test checks the mechanism still carries the three,
 //! not that the two copies are word for word identical: the form is deliberately
 //! terse and the doc is deliberately not, so a text comparison would either
 //! force the doc into checkbox labels or go red on every edit to it.
@@ -28,7 +27,7 @@
 //! # What a naive version of this test would miss
 //!
 //! Matching each item's phrase against the whole file passes on a template that
-//! moved the four into the description prose, where they render as a paragraph
+//! moved the three into the description prose, where they render as a paragraph
 //! nobody ticks and GitHub tracks as nothing. The point of the form is the
 //! checkbox: an unticked box is visible on the issue, in the sub-issue rollup and
 //! to anybody skimming, and a sentence is not. So the search is scoped to the
@@ -56,19 +55,12 @@
 /// rather than a test that quietly stops having anything to check.
 const TEMPLATE: &str = include_str!("../.github/ISSUE_TEMPLATE/epic.yml");
 
-/// The four deliverables, each as the fragments its label has to contain.
+/// The three deliverables, each as the fragments its label has to contain.
 ///
 /// Fragments rather than a whole sentence, so rewording a label for clarity does
-/// not red the build, while dropping the subject of the item does. The second
-/// item carries three: a benchmark checkbox that forgot either comparison is the
-/// specific way this one gets hollowed out, because running a benchmark at all
-/// feels like having done it.
+/// not red the build, while dropping the subject of the item does.
 const REQUIRED_ITEMS: &[(&str, &[&str])] = &[
     ("end-to-end tests", &["libviprs-tests", "fixture"]),
-    (
-        "benchmarks with both comparisons",
-        &["benchmark", "previous", "librar"],
-    ),
     ("CLI commands", &["CLI", "command"]),
     ("documentation", &["libviprs.org", "document"]),
 ];
@@ -101,10 +93,10 @@ fn checkbox_labels(template: &str) -> Vec<String> {
         }
 
         // `- label:` only. A bare `label:` is the block's own
-        // `attributes.label`, which is the heading "The four deliverables" and
+        // `attributes.label`, which is the heading "The three deliverables" and
         // not an option anybody ticks. Accepting it made this parser report
-        // five labels for four options, and the count is not the damage: a form
-        // that kept the heading and deleted all four options came back with a
+        // four labels for three options, and the count is not the damage: a form
+        // that kept the heading and deleted all three options came back with a
         // non-empty list, so `!labels.is_empty()` could not catch it and the
         // per-item assertion below reported the miss instead of the
         // no-checkboxes-block one.
@@ -133,10 +125,10 @@ fn every_item_has_a_checkbox(template: &str) -> bool {
 }
 
 /// Which checkbox satisfies which required item, one box per item, or `None` if
-/// the four cannot be given a box each.
+/// the three cannot be given a box each.
 ///
-/// The assignment matters because coverage on its own does not distinguish four
-/// boxes from one box carrying every fragment, and "four boxes is a lot, fold
+/// The assignment matters because coverage on its own does not distinguish three
+/// boxes from one box carrying every fragment, and "three boxes is a lot, fold
 /// them into one" is the likeliest edit this form ever receives. It passes
 /// every per-item check, and then the issue rollup shows a single tick for the
 /// whole epic, which is exactly the invisibility this file's header argues
@@ -187,12 +179,12 @@ fn a_distinct_checkbox_per_item(template: &str) -> Option<Vec<usize>> {
 }
 
 #[test]
-fn the_form_asks_for_all_four_deliverables() {
+fn the_form_asks_for_all_three_deliverables() {
     let labels = checkbox_labels(TEMPLATE);
 
     assert!(
         !labels.is_empty(),
-        "the epic form has no checkboxes block, so the four deliverables are \
+        "the epic form has no checkboxes block, so the three deliverables are \
          prose at best and nobody ticks prose"
     );
 
@@ -210,13 +202,13 @@ fn the_form_asks_for_all_four_deliverables() {
     }
 }
 
-/// Four items, four boxes. Coverage is not enough on its own.
+/// Three items, three boxes. Coverage is not enough on its own.
 #[test]
-fn the_four_deliverables_get_four_separate_checkboxes() {
+fn the_three_deliverables_get_three_separate_checkboxes() {
     let labels = checkbox_labels(TEMPLATE);
     let assignment = a_distinct_checkbox_per_item(TEMPLATE).unwrap_or_else(|| {
         panic!(
-            "the four deliverables do not have a checkbox each. Some of them \
+            "the three deliverables do not have a checkbox each. Some of them \
              share one, which ticks all of its items at once and shows the epic \
              a single box in the sub-issue rollup. The labels present are \
              {labels:#?}"
@@ -241,12 +233,12 @@ fn the_four_deliverables_get_four_separate_checkboxes() {
 /// The control for the assertion above, and it is the one that matters, because
 /// the mutation it rules out passes everything else in this file.
 ///
-/// Fold the four options into one box carrying every fragment and the per-item
+/// Fold the three options into one box carrying every fragment and the per-item
 /// checks all go green, `deleting_an_item_reddens_the_check` included: its
-/// controls delete the combined line, which breaks the predicate four times
+/// controls delete the combined line, which breaks the predicate three times
 /// over, so each one still reddens and the suite reports nothing wrong.
 #[test]
-fn one_checkbox_carrying_everything_is_not_four_checkboxes() {
+fn one_checkbox_carrying_everything_is_not_three_checkboxes() {
     let combined_label: String = REQUIRED_ITEMS
         .iter()
         .flat_map(|(_, fragments)| fragments.iter())
@@ -274,8 +266,8 @@ fn one_checkbox_carrying_everything_is_not_four_checkboxes() {
     );
     assert!(
         a_distinct_checkbox_per_item(&folded).is_none(),
-        "one checkbox carrying every fragment was accepted as four separate \
-         ones, so the_four_deliverables_get_four_separate_checkboxes cannot \
+        "one checkbox carrying every fragment was accepted as three separate \
+         ones, so the_three_deliverables_get_three_separate_checkboxes cannot \
          fail and is not guarding anything. The folded labels were {:#?}",
         checkbox_labels(&folded)
     );
@@ -374,7 +366,7 @@ fn the_form_points_at_the_canonical_checklist() {
     // Terse labels are the right call on a form and they are not the whole
     // standard: each item has a trap behind it that a one-line label cannot
     // carry, and those live in libviprs-org. A form that does not link out
-    // leaves whoever opens the epic with four sentences and no reasons.
+    // leaves whoever opens the epic with three sentences and no reasons.
     assert!(
         TEMPLATE.contains("EPIC_CHECKLIST.md"),
         "the epic form does not link to EPIC_CHECKLIST.md in libviprs-org, so the \
