@@ -273,6 +273,7 @@ annotated   fs-detected  src/stream_verify.rs::stream_verify_rejects_unknown_alg
 annotated   fs-detected  src/stream_verify.rs::stream_verify_rejects_wrong_format_strip
 annotated   fs-detected  src/stream_verify.rs::stream_verify_reports_missing_tile
 annotated   fs-detected  src/stream_verify.rs::stream_verify_without_skip_blanks_still_demands_every_tile
+annotated   not-detected tests/cad_1485_acadrust_decoder.rs::a_hatch_loop_or_a_solid_is_a_polygon_that_knows_its_entity
 annotated   fs-detected  tests/cad_1485_acadrust_decoder.rs::every_g13_fixture_decodes_to_the_end_and_counts_what_it_delivered
 annotated   fs-detected  tests/cad_1485_acadrust_decoder.rs::path_and_bytes_give_the_same_primitives
 annotated   fs-detected  tests/cad_1485_acadrust_decoder.rs::the_hardened_decoder_refuses_a_file_past_the_input_cap_and_the_plain_one_does_not
@@ -895,6 +896,21 @@ annotated   fs-detected  tests/vector_1032_tiler.rs::a_failed_run_publishes_noth
 annotated   fs-detected  tests/vector_1032_tiler.rs::the_archive_is_a_valid_vector_archive_that_carries_the_transform
 annotated   fs-detected  tests/vector_1032_tiler.rs::the_same_input_gives_the_same_tiles_and_the_same_archive
 annotated   fs-detected  tests/vector_1033_fixture.rs::the_committed_viewer_fixture_is_what_the_tiler_makes
+annotated   not-detected tests/vector_1034_acadrust_fill.rs::a_2d_solid_is_filled_in_its_visible_vertex_order
+annotated   not-detected tests/vector_1034_acadrust_fill.rs::a_fill_across_four_tiles_is_closed_and_inside_each_tile
+annotated   not-detected tests/vector_1034_acadrust_fill.rs::a_fill_too_heavy_to_nest_is_drawn_ring_by_ring_and_counted
+annotated   not-detected tests/vector_1034_acadrust_fill.rs::a_fill_with_too_many_rings_to_nest_is_filled_ring_by_ring_and_counted
+annotated   not-detected tests/vector_1034_acadrust_fill.rs::a_loop_that_cannot_be_built_does_not_turn_the_rest_into_separate_fills
+annotated   not-detected tests/vector_1034_acadrust_fill.rs::a_patterned_hatch_stays_an_outline_and_says_pattern_only
+annotated   not-detected tests/vector_1034_acadrust_fill.rs::a_solid_hatch_square_is_a_filled_polygon_of_its_own_area
+annotated   fs-detected  tests/vector_1034_acadrust_fill.rs::an_archive_declares_the_fills_layer_and_the_anchor_only_when_it_uses_them
+annotated   not-detected tests/vector_1034_acadrust_fill.rs::an_ignore_style_hatch_fills_every_loop_on_its_own
+annotated   not-detected tests/vector_1034_acadrust_fill.rs::an_island_across_a_tile_edge_is_a_hole_whichever_vertex_comes_first
+annotated   not-detected tests/vector_1034_acadrust_fill.rs::an_island_is_a_hole_by_even_odd
+annotated   not-detected tests/vector_1034_acadrust_fill.rs::an_island_touching_the_outer_loop_is_a_hole_on_every_edge_and_start
+annotated   not-detected tests/vector_1034_acadrust_fill.rs::an_mtext_attachment_point_moves_its_anchor
+annotated   not-detected tests/vector_1034_acadrust_fill.rs::an_outer_style_hatch_keeps_its_island_as_a_hole
+annotated   not-detected tests/vector_1034_acadrust_fill.rs::islands_along_a_dense_outer_edge_cost_no_more_than_islands_away_from_it
 annotated   fs-detected  tests/vector_1034_fidelity.rs::a_block_inserted_thirty_thousand_times_stays_inside_its_budgets
 annotated   fs-detected  tests/vector_1034_fidelity.rs::a_decode_that_fails_keeps_what_it_reported
 annotated   fs-detected  tests/vector_1034_fidelity.rs::a_repeated_block_is_stopped_at_the_primitive_budget_not_at_out_of_memory
@@ -1024,7 +1040,6 @@ annotated   not-detected src/pmtiles/range.rs::opening_something_that_is_not_the
 annotated   not-detected src/pmtiles/writer.rs::widening_settles_where_a_doubling_loop_settles
 annotated   not-detected src/source.rs::decode_file_not_found
 annotated   not-detected tests/cad_1485_acadrust_decoder.rs::a_block_bomb_ends_as_a_bounded_decode_error
-annotated   not-detected tests/cad_1485_acadrust_decoder.rs::a_hatch_loop_is_a_polygon_that_knows_its_hatch
 annotated   not-detected tests/cad_1485_acadrust_decoder.rs::a_view_that_is_not_there_is_named
 annotated   not-detected tests/cad_1485_acadrust_decoder.rs::acadsharp_is_not_built_unless_asked_for
 annotated   not-detected tests/cad_1485_acadrust_decoder.rs::an_insert_is_expanded_into_the_view_and_says_so
