@@ -217,6 +217,44 @@ fn issue_1525_a_row_pvec_cannot_hold_is_counted_in_the_report_and_costs_only_its
 
 #[test]
 #[cfg_attr(miri, ignore)]
+fn issue_1525_a_linetype_name_pvec_cannot_hold_costs_only_its_style_row() {
+    let (out, dest, dir) = convert("long-linetype", b"longlinetype", StreamSelection::ALL);
+    let c = out.report.components.unwrap();
+    assert_eq!(
+        c.dropped.get("line-style.name-too-long"),
+        Some(&1),
+        "{:?}",
+        c.dropped
+    );
+    let streams = streams_of(&dest);
+    let style =
+        LineStyleStream::decode(&of(&streams, LineStyleStream::CAPABILITY).unwrap().payload)
+            .unwrap();
+    // Every other entity keeps its row, and nothing in the table carries the long name.
+    assert_eq!(style.assignments.len() as u64, GEOMETRY - 1);
+    assert!(style.styles.iter().all(|s| s.name.len() <= 255));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1525_a_style_the_dwg_facts_cannot_make_is_counted_as_bad_style() {
+    let (out, dest, dir) = convert("bad-style", b"badstyle", StreamSelection::ALL);
+    let c = out.report.components.unwrap();
+    assert_eq!(
+        c.dropped.get("line-style.bad-style"),
+        Some(&1),
+        "{:?}",
+        c.dropped
+    );
+    // Costs its own row: the other streams and the geometry are whole.
+    assert_eq!(streams_of(&dest).len(), 3);
+    assert_eq!(out.written, GEOMETRY);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
 fn issue_1525_a_curve_the_writer_refuses_moves_no_stream_row_onto_a_stranger() {
     let bytes = pvec_gold::Corpus::open().get("mixed-entity-001").dwg();
     let dir = scratch("refused");

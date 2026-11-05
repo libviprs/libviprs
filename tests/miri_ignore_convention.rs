@@ -855,7 +855,8 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1513 adds 3: the `tests/pvec_1471_reproducibility.rs` cells that read the ADR and the two pvec test files. It said 996 before this line moved.
 /// Dropping the benchmark requirement removes 1: the `tests/pmtiles_release_readiness.rs` benchmark-doc check. It said 999 before this line moved.
 /// #1525 adds 9: the `tests/pvec_1500_convert_streams.rs` cells that convert a small plan into a temp dir and read the streams back. It said 998 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 1007;
+/// #1525 adds 2 more: the line-style name-too-long and bad-style cells of `tests/pvec_1500_convert_streams.rs`. It said 1007 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 1009;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
