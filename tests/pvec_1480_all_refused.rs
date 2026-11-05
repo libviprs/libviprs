@@ -18,10 +18,10 @@ use pvec_gold::Corpus;
 
 const FIXTURES: [&str; 2] = ["bulge-arc-001", "bulge-arc-neg-001"];
 
-fn convert(
+fn nothing_storable(
     id: &str,
     spill: Option<&std::path::Path>,
-) -> (Result<(), PvecConvertError>, tempfile::TempDir) {
+) -> (PvecConvertError, tempfile::TempDir) {
     let bytes = Corpus::open().get(id).dwg();
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("out.pvec");
@@ -33,18 +33,11 @@ fn convert(
             budget: 1 << 20,
         });
     }
-    (conversion.convert().map(|_| ()), dir)
-}
-
-fn nothing_storable(
-    id: &str,
-    spill: Option<&std::path::Path>,
-) -> (PvecConvertError, tempfile::TempDir) {
-    let (out, dir) = convert(id, spill);
-    (
-        out.expect_err("every curve is refused, so there is no artifact"),
-        dir,
-    )
+    let err = conversion
+        .convert()
+        .map(|_| ())
+        .expect_err("every curve is refused, so there is no artifact");
+    (err, dir)
 }
 
 #[test]

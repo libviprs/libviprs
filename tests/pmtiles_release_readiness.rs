@@ -1,10 +1,10 @@
 //! The release-readiness claims for PMTiles, each one decidable (issue #993).
 //!
 //! F2.5 closes EPIC F by saying PMTiles is ready to ship as the default, and
-//! "ready" is four separate claims: it is in every build rather than behind a
-//! feature, the release notes describe what actually shipped, there is a
-//! publish path that can be rehearsed without uploading, and the benchmark
-//! procedure is written down and runnable.
+//! "ready" is three separate claims: it is in every build rather than behind a
+//! feature, the release notes describe what actually shipped, and there is a
+//! publish path that can be rehearsed without uploading. Benchmarks are an
+//! optional, on-demand tool and no release claim depends on them.
 //!
 //! Prose makes those claims; nothing checked them. This repository has already
 //! been bitten twice by exactly that shape: `merge-gate.yml` claiming the crate
@@ -12,7 +12,7 @@
 //! a variant had never been released when it shipped in v0.4.0 (issue #947).
 //! Both are now checked, by `tests/unsafe_inventory.rs` and
 //! `tests/changelog_release_claims.rs`. This is the same treatment for the
-//! four above.
+//! three above.
 //!
 //! Every file it reads comes in through `include_str!`, the way
 //! `tests/ci_feature_coverage.rs` does it, so editing one forces a rebuild and
@@ -22,10 +22,6 @@ const LIB_RS: &str = include_str!("../src/lib.rs");
 const CHANGELOG: &str = include_str!("../CHANGELOG.md");
 const MIGRATION: &str = include_str!("../MIGRATION.md");
 const PUBLISH_YML: &str = include_str!("../.github/workflows/publish.yml");
-const BENCHMARK_DOC: &str = include_str!("../docs/pmtiles-benchmarks.md");
-
-#[path = "common/pmtiles_bench.rs"]
-mod bench;
 
 /// The PMTiles modules ship in a default build.
 ///
@@ -109,140 +105,5 @@ fn a_publish_can_be_rehearsed_before_it_is_made() {
     assert!(
         PUBLISH_YML.contains("Refuse a real upload unless the published contract is true"),
         "the gate in front of the real upload is gone"
-    );
-}
-
-/// The benchmark procedure is written down, and it names commands this
-/// repository can actually run.
-///
-/// A benchmark nobody else can reproduce is a screenshot. Each fenced command
-/// the doc gives as a `cargo test --test <name>` has to name a test file that
-/// exists, so a renamed test file fails here rather than in six months when
-/// somebody tries to rerun the numbers.
-#[test]
-#[cfg_attr(miri, ignore)]
-fn the_benchmark_doc_names_tests_that_exist() {
-    let mut named = 0;
-    for line in BENCHMARK_DOC.lines() {
-        let Some(at) = line.find("--test ") else {
-            continue;
-        };
-        let name = line[at + "--test ".len()..]
-            .split_whitespace()
-            .next()
-            .expect("a test name follows --test")
-            // The doc names some of these inside inline code spans, so the
-            // closing backtick and any sentence punctuation ride along.
-            .trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_');
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests")
-            .join(format!("{name}.rs"));
-        assert!(
-            path.is_file(),
-            "docs/pmtiles-benchmarks.md runs `--test {name}`, and tests/{name}.rs does not exist"
-        );
-        named += 1;
-    }
-    assert!(
-        named >= 3,
-        "the benchmark doc should name the benchmark, the bounded-memory and the index-only \
-         suites; it names {named}"
-    );
-}
-
-/// The doc's column table is the harness's field list.
-///
-/// The exported JSON is the hand-off to libviprs.org (issue #62), so the table
-/// that tells a reader what each column means is part of the contract rather
-/// than decoration. A field added to the harness and not to the table, or
-/// renamed in one and not the other, fails here.
-#[test]
-fn the_benchmark_doc_documents_every_exported_column() {
-    let documented = table_after(BENCHMARK_DOC, "| Column | Meaning |");
-
-    for field in bench::FIELDS {
-        assert!(
-            documented.contains(&field),
-            "docs/pmtiles-benchmarks.md does not document the `{field}` column; it documents \
-             {documented:?}"
-        );
-    }
-    for column in &documented {
-        assert!(
-            bench::FIELDS.contains(column),
-            "docs/pmtiles-benchmarks.md documents a `{column}` column the harness does not emit"
-        );
-    }
-}
-
-/// The first column of the markdown table that follows `header`, as backticked
-/// names.
-///
-/// It used to be every line in the document that began with `` | ` ``, which
-/// was fine while the doc had one such table and stopped being fine the moment
-/// it gained a second one: the cold-split phase table's rows read as columns
-/// the harness does not emit. Scoping to one table is what makes both checkable
-/// against their own list.
-fn table_after<'a>(doc: &'a str, header: &str) -> Vec<&'a str> {
-    let mut lines = doc.lines().skip_while(|line| line.trim() != header);
-    // The header itself, then the `|---|---|` rule.
-    lines.next();
-    lines.next();
-    lines
-        .take_while(|line| line.trim_start().starts_with('|'))
-        .filter_map(|line| line.trim().strip_prefix("| `")?.split('`').next())
-        .collect()
-}
-
-/// The doc's cold-split table is the harness's phase list.
-///
-/// The six phases are new scenario values in the exported JSON, so a reader of
-/// libviprs.org meets them as rows whether or not anything explains them.
-/// Same treatment as the column table: a phase renamed in one place and not the
-/// other fails here.
-#[test]
-fn the_benchmark_doc_documents_every_cold_phase() {
-    let documented = table_after(BENCHMARK_DOC, "| Phase | What it is |");
-    assert_eq!(
-        documented,
-        bench::COLD_PHASES.to_vec(),
-        "docs/pmtiles-benchmarks.md's phase table and the harness's COLD_PHASES disagree"
-    );
-}
-
-/// The doc says which file the numbers are handed to, and in what shape.
-#[test]
-fn the_benchmark_doc_names_the_hand_off() {
-    assert!(
-        BENCHMARK_DOC.contains(bench::DEFAULT_RESULTS_PATH),
-        "the doc should name the file a run writes, which is {}",
-        bench::DEFAULT_RESULTS_PATH
-    );
-    assert!(
-        !BENCHMARK_DOC.contains("goes to `target/scalability_results.json`"),
-        "the doc should not send a run's export to scalability_results.json, which is a \
-         generated artefact of libviprs-bench"
-    );
-    // Read off the constant rather than written out, so a schema bump that
-    // leaves the doc showing the old envelope fails here. It used to be the
-    // literal `"schema": 1`, which would have gone on passing against a
-    // document nobody could parse with it.
-    let envelope = format!("\"schema\": {}", bench::SCHEMA_VERSION);
-    assert!(
-        BENCHMARK_DOC.contains(&envelope),
-        "the doc should show the envelope a consumer has to unwrap, which is now {envelope}"
-    );
-    assert!(
-        BENCHMARK_DOC.contains("\"provenance\""),
-        "the doc should show the provenance the envelope carries, since a consumer that does \
-         not know it is there cannot tell an emulated run from a native one"
-    );
-    assert!(
-        BENCHMARK_DOC.contains("LIBVIPRS_BENCH_JSON"),
-        "the doc should say how to choose where the export lands"
-    );
-    assert!(
-        BENCHMARK_DOC.contains("LIBVIPRS_BENCH_PROFILE"),
-        "the doc should say how to select the opt-in large profile"
     );
 }

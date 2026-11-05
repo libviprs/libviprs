@@ -1,9 +1,6 @@
-//! Measurement plumbing shared by the PMTiles benchmark and the release
-//! readiness guards (issue #993).
+//! Measurement plumbing for the PMTiles benchmark (issue #993).
 //!
-//! `tests/pmtiles_benchmarks.rs` measures with it and
-//! `tests/pmtiles_release_readiness.rs` checks the documented column table
-//! against [`FIELDS`]. The bounded-memory guards do **not** use it, whatever
+//! `tests/pmtiles_benchmarks.rs` measures with it. The bounded-memory guards do **not** use it, whatever
 //! an earlier version of this sentence said: they install their own counting
 //! allocator and share nothing with this.
 //!
