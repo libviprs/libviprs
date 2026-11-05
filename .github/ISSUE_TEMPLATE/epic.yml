@@ -6,8 +6,8 @@ body:
   - type: markdown
     attributes:
       value: |
-        An epic owns four deliverables that no single PR can own, because they land in
-        four different repositories. The checklist below is the short form. The reasons
+        An epic owns three deliverables that no single PR can own, because they land in
+        three different repositories. The checklist below is the short form. The reasons
         behind each item, and the trap each one has actually hit, are in
         [`EPIC_CHECKLIST.md`](https://github.com/libviprs/libviprs-org/blob/main/EPIC_CHECKLIST.md)
         in libviprs-org. Read it before filing, not before closing.
@@ -53,7 +53,7 @@ body:
   - type: checkboxes
     id: deliverables
     attributes:
-      label: The four deliverables
+      label: The three deliverables
       description: >
         Every one of these, or the epic is not done. A feature that has landed in
         libviprs and carries none of them is code rather than a shipped feature. Tick
@@ -61,8 +61,6 @@ body:
         exists is not.
       options:
         - label: End-to-end tests in libviprs-tests, with fixtures committed beside them (unit tests in the library crate are not this)
-          required: false
-        - label: Benchmarks captured, both the regression against the previous libviprs release and a comparison against a library offering the same feature, preferably a C one
           required: false
         - label: CLI commands in libviprs-cli, so the feature is reachable without writing Rust
           required: false
