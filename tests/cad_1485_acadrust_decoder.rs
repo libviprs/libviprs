@@ -293,7 +293,9 @@ fn the_sample_agrees_with_the_acadsharp_adapter_where_the_entities_are_supported
         8 + 13,
         "one per hatch loop and per SOLID"
     );
-    assert_eq!(c.get(PrimitiveKind::Line), 86, "lines: {c:?}");
+    // 86 before #1523. The adapter's 90 has the 3DFACE's edges in it; this reader also draws
+    // the sample's 3D polylines as lines, so it ends above the adapter on lines.
+    assert_eq!(c.get(PrimitiveKind::Line), 94, "lines: {c:?}");
     assert_eq!(c.get(PrimitiveKind::Circle), 12, "circles: {c:?}");
     assert_eq!(c.get(PrimitiveKind::Text), 67, "texts: {c:?}");
 }
@@ -307,10 +309,36 @@ fn the_sample_names_what_it_still_does_not_draw() {
             d.code() == DiagnosticCode::UNSUPPORTED_ENTITY && d.message().starts_with(class)
         })
     };
-    for class in ["POINT", "MLINE"] {
+    // Every class below stays out of scope (#1523), and the report says so with a reason.
+    for class in [
+        "POINT",
+        "MLINE",
+        "ATTDEF",
+        "POLYLINE",
+        "MESH",
+        "3DSOLID",
+        "REGION",
+        "RAY",
+        "XLINE",
+        "SHAPE",
+        "WIPEOUT",
+        "IMAGE",
+        "PDFUNDERLAY",
+        "ACAD_TABLE",
+    ] {
         assert!(said(class), "{class} is not drawn and was not reported");
+        assert!(
+            report
+                .diagnostics()
+                .iter()
+                .any(|d| d.code() == DiagnosticCode::UNSUPPORTED_ENTITY
+                    && d.message().starts_with(class)
+                    && d.message().contains("out of scope: ")),
+            "{class} is reported without a reason"
+        );
     }
     for class in [
+        "3DFACE",
         "HATCH",
         "SOLID",
         "MULTILEADER",

@@ -360,6 +360,44 @@ impl AcadrustProvider {
                 normal: p3(t.normal),
                 attachment: None,
             }),
+            // A 3D polyline is its vertices joined in order, seen from above like every other
+            // 3D line here.
+            EntityType::Polyline(p) => {
+                let mut run: Vec<Point3> = p.vertices.iter().map(|v| p3(v.location)).collect();
+                if p.is_closed() {
+                    run.extend(run.first().copied());
+                }
+                out.strokes.push(run);
+            }
+            EntityType::Polyline3D(p) => {
+                let mut run: Vec<Point3> = p.vertices.iter().map(|v| p3(v.position)).collect();
+                if p.is_closed() {
+                    run.extend(run.first().copied());
+                }
+                out.strokes.push(run);
+            }
+            // A 3DFACE is the edges its flags leave visible. A triangle repeats a corner, which
+            // makes one edge a point, and a point is not drawn.
+            EntityType::Face3D(f) => {
+                let c = [
+                    f.first_corner,
+                    f.second_corner,
+                    f.third_corner,
+                    f.fourth_corner,
+                ];
+                let hidden = [
+                    f.invisible_edges.is_first_invisible(),
+                    f.invisible_edges.is_second_invisible(),
+                    f.invisible_edges.is_third_invisible(),
+                    f.invisible_edges.is_fourth_invisible(),
+                ];
+                for i in 0..4 {
+                    let (a, b) = (c[i], c[(i + 1) % 4]);
+                    if !hidden[i] && a != b {
+                        out.strokes.push(vec![p3(a), p3(b)]);
+                    }
+                }
+            }
             EntityType::Solid(s) => {
                 // The stored order of a quadrilateral is first, second, third, fourth, and it is
                 // drawn first, second, fourth, third.

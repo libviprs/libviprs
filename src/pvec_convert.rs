@@ -234,7 +234,7 @@ impl<'a> PvecConversion<'a> {
     }
 
     /// The component streams to write beside the geometry: layer, line style and provenance, each
-    /// on its own (#1525). Off by default, and the geometry is the same bytes either way.
+    /// on its own (#1525). Off by default, and the decoded geometry and the manifest box are the same either way.
     #[must_use]
     pub fn components(mut self, select: StreamSelection) -> Self {
         self.components = select;
