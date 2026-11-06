@@ -826,11 +826,13 @@ impl<'a> PvecConversion<'a> {
                 bytes,
             });
         };
-        let items = || geometries.iter().map(|(id, g)| (*id, g));
         // The geometry is written first, then the streams against the ids the writer kept, because a
         // refused curve moves every id after it. The streams go in after the geometry, so they cannot
         // change a geometry block.
-        let open = |spill: Option<&SpillConfig>,
+        // The writer takes what it keeps out of the geometry, so the geometry goes the moment the
+        // open call returns, whether it succeeded or not, and the report is built without it.
+        let open = |geometries: Vec<(EntityId, Normalized2DGeometry)>,
+                    spill: Option<&SpillConfig>,
                     on_chunk: &mut dyn FnMut(u64, u64)|
          -> Result<
             (
@@ -840,9 +842,17 @@ impl<'a> PvecConversion<'a> {
             ),
             PvecConvertError,
         > {
-            let mut open =
-                open_geometry(&config, items(), Vec::new(), None, spill, &cancel, on_chunk)
-                    .map_err(write_error)?;
+            let opened = open_geometry(
+                &config,
+                geometries.iter().map(|(id, g)| (*id, g)),
+                Vec::new(),
+                None,
+                spill,
+                &cancel,
+                on_chunk,
+            );
+            drop(geometries);
+            let mut open = opened.map_err(write_error)?;
             if select == StreamSelection::NONE && regions.is_none() {
                 return Ok((open, None, None));
             }
@@ -921,7 +931,7 @@ impl<'a> PvecConversion<'a> {
             Ok((open, summary, found))
         };
         let published = match &spill {
-            None => match open(None, &mut on_chunk) {
+            None => match open(geometries, None, &mut on_chunk) {
                 Err(PvecConvertError::Write(WriteError::AllRefused(refused))) => {
                     seal(None, &refused, None, None).and_then(|(report, fidelity, _)| {
                         Err(PvecConvertError::NothingStorable {
@@ -954,7 +964,8 @@ impl<'a> PvecConversion<'a> {
             Some(spill) => {
                 let mut sealed = None;
                 publish_streamed(dest, &cancel, &mut |_| {}, |out| {
-                    let (open, summary, found) = match open(Some(spill), &mut on_chunk) {
+                    let (open, summary, found) = match open(geometries, Some(spill), &mut on_chunk)
+                    {
                         Err(PvecConvertError::Write(WriteError::AllRefused(refused))) => {
                             let (report, fidelity, _) = seal(None, &refused, None, None)?;
                             return Err(PvecConvertError::NothingStorable {

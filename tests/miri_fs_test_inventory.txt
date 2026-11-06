@@ -626,6 +626,8 @@ annotated   fs-detected  tests/pvec_1433_bench_harness.rs::the_document_and_the_
 annotated   fs-detected  tests/pvec_1437_fuzz_seeds.rs::the_clip_seed_corpus_runs_clean
 annotated   fs-detected  tests/pvec_1437_fuzz_seeds.rs::the_provider_seed_corpus_runs_clean
 annotated   fs-detected  tests/pvec_1437_fuzz_seeds.rs::the_spline_seed_corpus_runs_clean
+annotated   fs-detected  tests/pvec_1481_classify.rs::a_cancel_mid_spilled_write_leaves_the_previous_pair_and_no_partial_1519
+annotated   fs-detected  tests/pvec_1481_classify.rs::a_cancel_mid_write_leaves_the_previous_pair_and_no_partial_1519
 annotated   fs-detected  tests/pvec_1481_classify.rs::classify_is_byte_identical_on_the_cells_1518
 annotated   fs-detected  tests/pvec_1481_classify.rs::classify_peak_above_the_opened_provider_stays_under_budget_1518
 annotated   fs-detected  tests/pvec_1500_convert_streams.rs::issue_1525_a_conversion_with_no_option_writes_geometry_only
