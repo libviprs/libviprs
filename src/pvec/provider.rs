@@ -1024,6 +1024,14 @@ pub trait DwgProvider {
         Err(ProviderError::CannotReport(Facet::TextStyle))
     }
 
+    /// What the `TEXT` or `MTEXT` entity with this handle says and where it is anchored, in the
+    /// coordinates of the block it sits in, or `None` for any other entity (#1526). The conversion
+    /// reads room names off it. The default has no text to give.
+    fn text_anchor(&self, handle: ItemHandle) -> Option<(String, Point3)> {
+        let _ = handle;
+        None
+    }
+
     /// Opens one traversal pass.
     ///
     /// # Errors

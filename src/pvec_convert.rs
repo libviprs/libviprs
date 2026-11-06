@@ -86,9 +86,10 @@ use crate::pvec::flatten::{
 use crate::pvec::mapping::{kind_of, row_for};
 use crate::pvec::provenance::NoProvenance;
 use crate::pvec::publish::{PublishError, StreamedPublishError, publish, publish_streamed};
+use crate::pvec::regions::RegionConfig;
 use crate::pvec::report::{
-    BoundsSplit, CapabilitySummary, ComponentsSummary, ConversionReport, EntityRow, ReportBuilder,
-    ReportError, UnresolvedXrefRow, ViewSummary, XrefSummary,
+    BoundsSplit, CapabilitySummary, ComponentsSummary, ConversionReport, EntityRow, RegionsSummary,
+    ReportBuilder, ReportError, UnresolvedXrefRow, ViewSummary, XrefSummary,
 };
 use crate::pvec::style::{LineStyleComponent, StyleReport, dwg_line_style, dwg_style_input};
 use crate::pvec::transform::{ComposedTransform, promote};
@@ -200,6 +201,7 @@ pub struct PvecConversion<'a> {
     observer: Option<Arc<dyn EngineObserver>>,
     queue_capacity: usize,
     components: StreamSelection,
+    regions: Option<RegionConfig>,
 }
 
 impl<'a> PvecConversion<'a> {
@@ -220,6 +222,7 @@ impl<'a> PvecConversion<'a> {
             observer: None,
             queue_capacity: DEFAULT_QUEUE_CAPACITY,
             components: StreamSelection::NONE,
+            regions: None,
         }
     }
 
@@ -228,6 +231,17 @@ impl<'a> PvecConversion<'a> {
     #[must_use]
     pub fn components(mut self, select: StreamSelection) -> Self {
         self.components = select;
+        self
+    }
+
+    /// Derive rooms and corridors from the wall linework and write them as PVec's semantic class
+    /// stream (#1526). Off (`None`) by default. The walls are the straight lines the default
+    /// [`ElementRules`] call a wall, the room names come from TEXT, and the geometry is the same
+    /// bytes either way: the segments that close a door gap are never written as geometry, so a room
+    /// that runs along one is left out of the stream and counted in the report.
+    #[must_use]
+    pub fn regions(mut self, config: Option<RegionConfig>) -> Self {
+        self.regions = config;
         self
     }
 
@@ -658,6 +672,7 @@ impl<'a> PvecConversion<'a> {
             control_points,
             observer,
             components: select,
+            regions,
             ..
         } = self;
         let tell = |event: EngineEvent| {
@@ -715,6 +730,7 @@ impl<'a> PvecConversion<'a> {
                 report.capabilities = Some(gate.summary());
                 report.diagnostics = diagnostics;
                 report.components = components;
+                report.regions = regions.map(|_| RegionsSummary::default());
                 report.georeference = sidecar
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned());
