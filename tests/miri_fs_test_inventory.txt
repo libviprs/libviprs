@@ -646,6 +646,11 @@ annotated   fs-detected  tests/pvec_1471_reproducibility.rs::n_1471_the_architec
 annotated   fs-detected  tests/pvec_1471_reproducibility.rs::n_1513_the_adr_records_what_a_mac_does
 annotated   fs-detected  tests/pvec_1471_reproducibility.rs::n_1513_the_bit_exact_digest_tests_are_gated_to_linux
 annotated   fs-detected  tests/pvec_1471_reproducibility.rs::n_1513_the_other_pvec_gates_are_not_gated_by_os
+annotated   not-detected tests/pvec_1480_all_refused.rs::a_drawing_with_nothing_to_draw_still_says_no_geometry
+annotated   fs-detected  tests/pvec_1480_all_refused.rs::a_streamed_conversion_answers_the_same_and_leaves_its_spill_root_empty
+annotated   fs-detected  tests/pvec_1480_all_refused.rs::an_all_refused_drawing_is_not_reported_as_having_no_geometry
+annotated   fs-detected  tests/pvec_1480_all_refused.rs::no_artifact_report_or_sidecar_is_left_behind
+annotated   fs-detected  tests/pvec_1480_all_refused.rs::the_report_counts_the_refused_entity_as_pvec_cannot_store
 annotated   fs-detected  tests/pvec_1489_image_reason_keys.rs::a_real_refusal_from_a_page_is_reported_under_a_documented_key
 annotated   fs-detected  tests/pvec_1489_image_reason_keys.rs::every_note_key_is_in_a_doc
 annotated   fs-detected  tests/pvec_1489_image_reason_keys.rs::every_refusal_key_is_in_a_doc

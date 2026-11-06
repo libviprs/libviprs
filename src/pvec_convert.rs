@@ -129,6 +129,16 @@ pub enum PvecConvertError {
     /// The writer refused.
     #[error("the artifact could not be written")]
     Write(#[source] WriteError),
+    /// PVec's writer refused every curve, so there is no artifact. The report and the counts say
+    /// what each entity was, with the refused ones counted as `pvec-cannot-store`; nothing was
+    /// published.
+    #[error("PVec's writer refused every curve, so no artifact was written")]
+    NothingStorable {
+        /// The conversion report, as it would have been published beside the artifact.
+        report: Box<ConversionReport>,
+        /// Entities per fidelity class, counted independently of the report rows.
+        fidelity: Box<FidelityReport>,
+    },
     /// The class counts disagree with the entities met.
     #[error("the class counts do not add up")]
     Tally(#[source] TallyError),
@@ -490,11 +500,16 @@ impl<'a> PvecConversion<'a> {
         // reached). Positions are sorted by those keys read in place, so no second copy of an
         // entity is made to number them.
         let mut perm: Vec<usize> = (0..items.len()).collect();
-        perm.sort_by(|&a, &b| {
-            let (pa, ha) = items[a].key();
-            let (pb, hb) = items[b].key();
-            key_cmp((pa, ha, a as u64), (pb, hb, b as u64))
-        });
+        let key = |i: usize| match &items[i] {
+            Item::Leaf(f) => (
+                &f.entity.provenance.block_path,
+                f.entity.provenance.handle,
+                i as u64,
+            ),
+            Item::Excluded(x) => (&x.block_path, x.handle, i as u64),
+            Item::Skipped(s) => (&s.block_path, s.insert_handle, i as u64),
+        };
+        perm.sort_by(|&a, &b| key_cmp(key(a), key(b)));
 
         // The classifying side produces, a consumer thread turns each outcome into a row, a
         // record, a diagnostic and a tally entry. They meet in a bounded queue, so a slow consumer
@@ -634,12 +649,12 @@ impl<'a> PvecConversion<'a> {
         };
         // What both paths do once the artifact is written: tell the observer, close the report against
         // what went in, and stage the georeference sidecar. It runs once, so it takes the rows.
+        // With no `written` (PVec refused every curve) there is no artifact, so the report is closed
+        // against nothing written, the observer is not told, and no sidecar is staged.
         // The tally is sealed here and not at classification: an entity the classifier called
         // supported can still be one PVec's container refuses, and it is counted as that.
         let seal =
-            |bounds: &BoundsReport,
-             written: u64,
-             length: u64,
+            |written: Option<(&BoundsReport, u64, u64)>,
              refused: &[(EntityId, String)]|
              -> Result<(ConversionReport, FidelityReport, String), PvecConvertError> {
                 for (id, rule) in refused {
@@ -654,27 +669,31 @@ impl<'a> PvecConversion<'a> {
                     rows.refuse(*id, &to, format!("PVec's writer refused it ({rule})"));
                 }
                 let fidelity = tally.finish(encountered).map_err(PvecConvertError::Tally)?;
-                tell(EngineEvent::ConversionArtifactWritten {
-                    entities: written,
-                    bytes: length,
-                });
+                if let Some((_, entities, bytes)) = written {
+                    tell(EngineEvent::ConversionArtifactWritten { entities, bytes });
+                }
                 let mut report = rows
                     .finish(
                         encountered,
                         view,
                         xrefs,
                         BoundsSplit {
-                            exact: bounds.exact_count() as u64,
-                            hull_upper_bound: bounds.hull_count() as u64,
+                            exact: written.map_or(0, |(b, ..)| b.exact_count() as u64),
+                            hull_upper_bound: written.map_or(0, |(b, ..)| b.hull_count() as u64),
                         },
                     )
                     .map_err(PvecConvertError::Report)?;
                 report.capabilities = Some(gate.summary());
                 report.diagnostics = diagnostics;
-                report.georeference = sidecar
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned());
+                report.georeference = written.and(
+                    sidecar
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned()),
+                );
                 let json = report.to_json_string().map_err(PvecConvertError::Report)?;
+                let Some((bounds, ..)) = written else {
+                    return Ok((report, fidelity, json));
+                };
                 GeoreferenceHandoff::V1(HandoffV1 {
                     bounds: bounds.drawing_bounds().map(|b| SourceBox {
                         min: [b.min().x, b.min().y],
@@ -700,13 +719,22 @@ impl<'a> PvecConversion<'a> {
         };
         let items = || geometries.iter().map(|(id, g)| (*id, g));
         let published = match &spill {
-            None => write_geometry(&config, items(), Vec::new(), &cancel, &mut on_chunk)
-                .map_err(write_error)
-                .and_then(|artifact| {
+            None => match write_geometry(&config, items(), Vec::new(), &cancel, &mut on_chunk) {
+                Err(WriteError::AllRefused(refused)) => {
+                    seal(None, &refused).and_then(|(report, fidelity, _)| {
+                        Err(PvecConvertError::NothingStorable {
+                            report: Box::new(report),
+                            fidelity: Box::new(fidelity),
+                        })
+                    })
+                }
+                written => written.map_err(write_error).and_then(|artifact| {
                     let (report, fidelity, json) = seal(
-                        &artifact.bounds,
-                        artifact.written,
-                        artifact.bytes.len() as u64,
+                        Some((
+                            &artifact.bounds,
+                            artifact.written,
+                            artifact.bytes.len() as u64,
+                        )),
                         &artifact.refused,
                     )?;
                     publish(dest, &artifact.bytes, json.as_bytes(), &cancel, &mut |_| {}).map_err(
@@ -717,10 +745,11 @@ impl<'a> PvecConversion<'a> {
                     )?;
                     Ok((report, fidelity, artifact.written))
                 }),
+            },
             Some(spill) => {
                 let mut sealed = None;
                 publish_streamed(dest, &cancel, &mut |_| {}, |out| {
-                    let artifact = write_geometry_to(
+                    let artifact = match write_geometry_to(
                         &config,
                         items(),
                         Vec::new(),
@@ -728,15 +757,21 @@ impl<'a> PvecConversion<'a> {
                         &cancel,
                         &mut on_chunk,
                         out,
-                    )
-                    .map_err(write_error)?;
+                    ) {
+                        Err(WriteError::AllRefused(refused)) => {
+                            let (report, fidelity, _) = seal(None, &refused)?;
+                            return Err(PvecConvertError::NothingStorable {
+                                report: Box::new(report),
+                                fidelity: Box::new(fidelity),
+                            });
+                        }
+                        other => other.map_err(write_error)?,
+                    };
                     tell(EngineEvent::ConversionSpoolSpilled {
                         bytes: artifact.length,
                     });
                     let (report, fidelity, json) = seal(
-                        &artifact.bounds,
-                        artifact.written,
-                        artifact.length,
+                        Some((&artifact.bounds, artifact.written, artifact.length)),
                         &artifact.refused,
                     )?;
                     sealed = Some((report, fidelity, artifact.written));
@@ -784,6 +819,118 @@ struct Classified {
     xrefs: XrefSummary,
     diagnostics: Vec<Diagnostic>,
     peak_queue_depth: u32,
+}
+
+/// One entity's outcome on its way from the classifier to the consumer.
+struct Outcome {
+    id: EntityId,
+    handle: Option<u64>,
+    done: Done,
+    diagnostic: Option<Diagnostic>,
+}
+
+/// What the consumer built from the outcomes.
+struct Consumed {
+    tally: Tally,
+    rows: ReportBuilder,
+    geometries: Vec<(EntityId, Normalized2DGeometry)>,
+    stored: Vec<(EntityId, Classification)>,
+    diagnostics: Vec<Diagnostic>,
+    peak: u32,
+}
+
+/// Drains the queue: tallies, rows, records and diagnostics, and the observer's events in order.
+/// The depth is sampled after each receive from the sends that completed, so it can read one low
+/// and never one high.
+fn consume(
+    rx: impl IntoIterator<Item = Outcome>,
+    sent: &AtomicU64,
+    observer: Option<&dyn EngineObserver>,
+) -> Consumed {
+    let mut out = Consumed {
+        tally: Tally::new(),
+        rows: ReportBuilder::new(),
+        geometries: Vec::new(),
+        stored: Vec::new(),
+        diagnostics: Vec::new(),
+        peak: 0,
+    };
+    let mut received = 0u64;
+    for Outcome {
+        id,
+        handle,
+        done,
+        diagnostic,
+    } in rx
+    {
+        received += 1;
+        let depth = sent.load(Ordering::Acquire).saturating_sub(received);
+        out.peak = out.peak.max(u32::try_from(depth).unwrap_or(u32::MAX));
+        out.tally.record(&done.classification);
+        if let Some(d) = diagnostic {
+            if let Some(o) = observer {
+                o.on_event(diagnostic_event(&d));
+            }
+            out.diagnostics.push(d);
+        }
+        out.rows.push(EntityRow::new(
+            id,
+            &done.classification,
+            handle,
+            done.geometry
+                .geometry()
+                .and_then(|_| kind_of(&done.geometry))
+                .map(|k| row_for(k).pvec_type),
+            done.warnings,
+        ));
+        if done.geometry.geometry().is_some() {
+            out.stored.push((id, done.classification));
+        }
+        out.geometries.push((id, done.geometry));
+        if received.is_multiple_of(BATCH as u64)
+            && let Some(o) = observer
+        {
+            o.on_event(EngineEvent::ConversionBatchNormalized { entities: received });
+        }
+    }
+    out
+}
+
+/// The capability gate: which capabilities pass, whether only exact entities do, and what happens
+/// to the rest. The three vary together per profile.
+struct Gate {
+    name: &'static str,
+    allowed: BTreeSet<CapabilityId>,
+    exact_only: bool,
+    policy: CapabilityPolicy,
+}
+
+impl Gate {
+    fn of(profile: ConversionProfile) -> Self {
+        Self {
+            name: profile.name(),
+            allowed: profile.capabilities(),
+            exact_only: profile.exact_only(),
+            policy: profile.policy(),
+        }
+    }
+
+    fn summary(&self) -> CapabilitySummary {
+        CapabilitySummary {
+            profile: self.name.to_owned(),
+            policy: format!("{:?}", self.policy),
+            exact_only: self.exact_only,
+            allowed: self.allowed.iter().map(|c| c.get()).collect(),
+        }
+    }
+}
+
+/// What the conversion met: a drawn leaf, a leaf the profile excluded, or an INSERT that was not
+/// expanded.
+enum Item<'a> {
+    Leaf(&'a FlatEntity),
+    Excluded(&'a ExcludedEntity),
+    Skipped(&'a SkippedInsert),
 }
 
 /// One entity's outcome on its way from the classifier to the consumer.
@@ -1218,6 +1365,9 @@ impl PvecConvertError {
             }
             PvecConvertError::UnitRequired => d(DiagnosticCode::UnitRequired, "unit-required"),
             PvecConvertError::Write(_) => d(DiagnosticCode::WriteFailed, "write"),
+            PvecConvertError::NothingStorable { .. } => {
+                d(DiagnosticCode::WriteFailed, "nothing-storable")
+            }
             PvecConvertError::Tally(_) | PvecConvertError::Report(_) => {
                 d(DiagnosticCode::ReportFailed, "report")
             }

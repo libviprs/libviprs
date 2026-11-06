@@ -51,8 +51,8 @@ not gated: peak RSS of the whole run 9596928 bytes.
 | bspline-d3-001 | KNOWN_TRUTH_EXACT | SupportedExact | 1 | 1 | 928 | 1.7 | x86_64-linux-mars |
 | bspline-d5-001 | KNOWN_TRUTH_EXACT | SupportedExact | 1 | 1 | 944 | 2.0 | x86_64-linux-mars |
 | bspline-nonunit-domain-001 | KNOWN_TRUTH_EXACT | SupportedExact | 1 | 1 | 904 | 2.1 | x86_64-linux-mars |
-| bulge-arc-001 | KNOWN_TRUTH_EXACT | NoGeometry | null | 1 | 0 | 0.9 | x86_64-linux-mars |
-| bulge-arc-neg-001 | KNOWN_TRUTH_EXACT | NoGeometry | null | 1 | 0 | 0.7 | x86_64-linux-mars |
+| bulge-arc-001 | KNOWN_TRUTH_EXACT | NoGeometry | null | 1 | 0 | 1.9 | x86_64-linux-mars |
+| bulge-arc-neg-001 | KNOWN_TRUTH_EXACT | NoGeometry | null | 1 | 0 | 1.2 | x86_64-linux-mars |
 | circle-001 | KNOWN_TRUTH_EXACT | SupportedExact | 1 | 1 | 360 | 5.4 | x86_64-linux-mars |
 | closed-by-endpoint-001 | KNOWN_TRUTH_EXACT | SupportedExact | 1 | 1 | 912 | 2.2 | x86_64-linux-mars |
 | closed-periodic-001 | KNOWN_TRUTH_EXACT | SupportedEquivalent | 1 | 1 | 976 | 8.2 | x86_64-linux-mars |
@@ -111,10 +111,10 @@ The `QUARANTINED` fixtures are the entity classes the mapping does not carry yet
 IMAGE, MESH, REGION, 3DSOLID and the rest), refused with their reason code. Two things in the table are not that and are
 worth reading:
 
-- `bulge-arc-001` and `bulge-arc-neg-001` are `KNOWN_TRUTH_EXACT` and are refused with "no entity carries geometry":
-  PVec's writer refuses every curve of the fixture (`WRT-08`), the conversion then has nothing to write and fails
-  as a whole, which is why these rows say `NoGeometry` with a refusal (open issue #1480). `mixed-entity-001` used to
-  be refused alongside them (#1446, closed); it now converts, with 7 of its 8 entities written, and its row is
-  `SupportedEquivalent`.
+- `bulge-arc-001` and `bulge-arc-neg-001` are `KNOWN_TRUTH_EXACT`. The classifier calls their one polyline supported,
+  and then PVec's container refuses the curve with `WRT-08` ("a curve the container cannot store exactly and
+  deterministically"). It is the only entity, so nothing is left to write: the conversion returns
+  `NothingStorable` with a report that counts the entity as `pvec-cannot-store`, and publishes no artifact (#1480).
+  `mixed-entity-001` hits the same refusal on one of eight entities and converts the other seven (#1446).
 - `singular-001` and `near-singular-001` are refused at block expansion with `TRANSFORM_SINGULAR (NP-19)`, which is the
   expected outcome for a singular transform.
