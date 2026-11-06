@@ -595,6 +595,8 @@ pub enum SourceLinetype {
     /// A pattern: signed element lengths (positive pen down, negative pen up, zero a dot), and the
     /// entity's own linetype scale. The header's global scale is not applied here.
     Pattern {
+        /// The linetype's name in the drawing's table (`DASHED`, `Continuous`).
+        name: String,
         /// The elements, in drawing units before scaling.
         elements: Vec<f64>,
         /// The entity's `linetype_scale`.

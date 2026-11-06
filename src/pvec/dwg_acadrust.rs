@@ -895,12 +895,14 @@ impl AcadrustCursor<'_> {
                 }
                 Some(n) if n.eq_ignore_ascii_case("Continuous") => {
                     SourceFact::Present(SourceLinetype::Pattern {
+                        name: n.to_owned(),
                         elements: Vec::new(),
                         scale: common.linetype_scale,
                     })
                 }
                 Some(n) => self.doc.line_types.get(n).map_or(SourceFact::Absent, |t| {
                     SourceFact::Present(SourceLinetype::Pattern {
+                        name: n.to_owned(),
                         elements: t.elements.iter().map(|e| e.length).collect(),
                         scale: common.linetype_scale,
                     })

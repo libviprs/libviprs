@@ -224,6 +224,7 @@ impl<'a> PdfConversion<'a> {
             items,
             Vec::new(),
             Some(area),
+            None,
             &self.cancel,
             &mut |_, _| {},
         )
