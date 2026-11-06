@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **arm64 benchmark rows and a clean queue-capacity curve** (issues #1064, #1070). `docs/pvec-benchmarks.md` gains the provider, block-recursion, normalization and generation rows from mercury (aarch64, native), carried in `tests/fixtures/pvec_bench_baseline.json` under `aarch64-linux-mercury`, and the queue-capacity sweep taken on an idle host: capacities of 32 and above are flat within 0.5 percent, 16 and below are slower, and the default of 64 stays.
 - **Twenty minutes of clean fuzz per conversion target** (issue #1070). `docs/pvec-limits.md` records 20 minutes each on `fuzz_pvec_provider`, `fuzz_pvec_spline`, `fuzz_pvec_clip` and `fuzz_pvec_spool` on arm64 with no crash.
 - **The finite-value mutation line of N7.6** (issue #1070). `tests/pvec_normalization_proptest.rs` gains `composition_is_associative_when_a_level_is_not_finite`, which feeds NaN and infinite coefficients to composition and needs both groupings to refuse them or agree. With PVec's `Transform2::new` validation removed in a scratch copy of the pinned rev (nothing in `libviprs/pvec` touched), it goes red; unmutated it is green.
+- **3D polylines and 3DFACE edges on the acadrust path, and a reason for every class left out** (issue #1523). The
+  sample's 3D polylines and the visible edges of its 3DFACE now cross as lines (`sample_AC1018.dwg` goes from 86 to 94
+  lines). POINT, ATTDEF, polyface and polygon meshes, MESH, 3DSOLID, REGION, RAY, XLINE, MLINE, SHAPE, WIPEOUT, IMAGE,
+  PDFUNDERLAY and ACAD_TABLE stay out of scope, and each diagnostic now says why after `out of scope:`.
 - **Solid hatches, 2D SOLID and the MTEXT anchor on the acadrust path** (issues #1034, #1527). A HATCH with the solid flag
   now reaches the tiles as a filled polygon in a new `fills` layer, with its islands as holes by even-odd (the normal and
   outer styles, outer being AutoCAD's default; the ignore style fills each loop on its own), a 2D SOLID is filled in its visible vertex order, and a patterned hatch stays an outline and
@@ -37,6 +41,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whole raster was gigabytes passed. They now check `width * height * 4` and, under `AutoAdjustDpi`, lower the DPI
   until the raster fits. `StripSource` gains `resident_bytes()` (default `0`), and `EngineBuilder::run` returns
   `BudgetExceeded` under `BudgetPolicy::Error` when a source's resident bytes alone are over `with_memory_budget`.
+- **A drawing PVec refuses every curve of is no longer "no geometry"** (issue #1480). When the writer
+  refuses all of a drawing's curves (`bulge-arc-001`, one bulge polyline), `convert` used to return
+  `Write(NoGeometry)` with no report. The writer funnel now returns the new `WriteError::AllRefused`
+  with the refused ids, and `convert` returns the new `PvecConvertError::NothingStorable`, which carries
+  the report and the fidelity counts with each entity counted as `pvec-cannot-store`. Nothing is
+  published, so there is no artifact and no sidecar. `NoGeometry` keeps meaning that nothing carried
+  geometry in the first place.
 - **One unstorable curve no longer fails a whole drawing** (issue #1446). PVec's writer refuses a curve its
   container cannot store exactly and deterministically (`WRT-08`, for example an arc on a rotated frame),
   and `convert` used to return `Write(..)` for the entire drawing. The writer funnel now skips that curve,

@@ -855,7 +855,8 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1513 adds 3: the `tests/pvec_1471_reproducibility.rs` cells that read the ADR and the two pvec test files. It said 996 before this line moved.
 /// Dropping the benchmark requirement removes 1: the `tests/pmtiles_release_readiness.rs` benchmark-doc check. It said 999 before this line moved.
 /// #1034 adds 1: the `tests/vector_1034_acadrust_fill.rs` cell that builds an archive in a temp dir. It said 998 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 999;
+/// #1480 adds 4: the `tests/pvec_1480_all_refused.rs` cells that convert a drawing PVec refuses into a temp dir. It said 999 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 1003;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
