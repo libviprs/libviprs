@@ -667,6 +667,10 @@ impl DwgProvider for AcadrustProvider {
             .collect())
     }
 
+    fn text_anchor(&self, handle: ItemHandle) -> Option<(String, Point3)> {
+        self.text_fact(handle).map(|t| (t.content, t.position))
+    }
+
     fn text_styles(
         &self,
         scope: &EntityScope,
@@ -895,12 +899,14 @@ impl AcadrustCursor<'_> {
                 }
                 Some(n) if n.eq_ignore_ascii_case("Continuous") => {
                     SourceFact::Present(SourceLinetype::Pattern {
+                        name: n.to_owned(),
                         elements: Vec::new(),
                         scale: common.linetype_scale,
                     })
                 }
                 Some(n) => self.doc.line_types.get(n).map_or(SourceFact::Absent, |t| {
                     SourceFact::Present(SourceLinetype::Pattern {
+                        name: n.to_owned(),
                         elements: t.elements.iter().map(|e| e.length).collect(),
                         scale: common.linetype_scale,
                     })
