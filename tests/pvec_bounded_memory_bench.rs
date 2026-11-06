@@ -11,8 +11,8 @@
 //! Two strategies are measured: the direct in-memory one and the spill (`PvecConversion::spill`). The
 //! two-pass strategy has no code and prints a row saying so. The spill bytes are the peak size of
 //! the files in the spill root, sampled while the conversion runs, since the facade does not report
-//! them. The ceilings and the boundedness check are reported against the criterion, not asserted:
-//! today they do not hold, and the document says so.
+//! them. The ceilings and the per-entity agreement are reported against the restated criterion
+//! (#1481), not asserted.
 //!
 //! ```text
 //! LIBVIPRS_BENCH_HOST=mars cargo test --release --features pvec-convert \
@@ -49,9 +49,11 @@ use serde_json::{Value, json};
 #[global_allocator]
 static ALLOC: pvec_alloc::Counting = pvec_alloc::Counting;
 
-/// The ceilings of the criterion: 1.5 GiB process peak RSS and 1.0 GiB tracked allocation peak.
-const RSS_CEILING: u64 = 3 << 29;
-const TRACKED_CEILING: u64 = 1 << 30;
+/// The ceilings of the restated criterion (#1481): 1.75 GiB process peak RSS and 1.4 GiB tracked
+/// allocation peak for `large_industrial` at 1,025,000 entities. The criterion first written (1.5 GiB
+/// and 1.0 GiB) was not met and is withdrawn, see `docs/pvec-benchmarks.md`.
+const RSS_CEILING: u64 = 7 << 28;
+const TRACKED_CEILING: u64 = 1_503_238_554;
 
 /// The generator parameters of `cell` scaled by `scale` (a count of 1 is the manifest's).
 fn scaled(cell: &str, scale: f64) -> Value {

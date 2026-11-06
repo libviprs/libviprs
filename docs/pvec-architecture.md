@@ -39,9 +39,8 @@ public types (`docs/adr/pvec-semantic-boundary.md`). A mapping that needs mathem
 
 ## What is not built
 
-The whole-conversion spool (the writer's spill is built, #1314 and #1417, but the classifier's and the report's own state is not), the conversion's call to the component and provenance streams (#1093) and to the derived room regions
-are not built (the functions exist, `pvec::components` and `pvec::regions`). Peak memory of the in-memory path is therefore linear in the entity count: about 2.8 KB per entity measured, which misses the
-1.5 GiB ceiling at a million entities (`docs/pvec-benchmarks.md`). Every page below says where this touches it.
+The whole-conversion spool is not built (the writer's spill is, #1314 and #1417, but the classifier's and the report's own state is not). The conversion's calls to the component and provenance streams (#1093) and to the derived room regions are built (#1529 and #1539). Peak memory of the in-memory path is therefore linear in the entity count: about 2.8 KB per entity when it was first measured and about 1.35 KB tracked after #1481, which missed the
+original 1.5 GiB ceiling at a million entities and is held to a restated one (1.4 GiB tracked, 1.75 GiB RSS, `docs/pvec-benchmarks.md`). Every page below says where this touches it.
 
 ## The pages
 

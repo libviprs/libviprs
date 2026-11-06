@@ -53,4 +53,4 @@ That is 80 minutes of clean fuzz time in total, 20 minutes per target, on arm64 
 ## What is not bounded yet
 
 Memory, in the large. The limits bound what a single drawing may ask for, not what a conversion holds: peak memory is linear in the
-entities of the in-memory path. The writer's spill (`PvecConversion::spill`, #1314 and #1417) moves the writer's share out of memory, but the whole conversion was re-measured with it (`docs/pvec-benchmarks.md`, #1064) and the peak did not move: libviprs' own per-entity state is what sits in memory, and streaming that is #1481.
+entities of the in-memory path. The writer's spill (`PvecConversion::spill`, #1314 and #1417) moves the writer's share out of memory, but the whole conversion was re-measured with it (`docs/pvec-benchmarks.md`, #1064) and the peak did not move: libviprs' own per-entity state is what sits in memory. #1481 cut the tracked peak at a million entities from 2,015 to 1,323 MiB and restated the criterion as a linear budget (`docs/pvec-benchmarks.md`, "After the stack").
