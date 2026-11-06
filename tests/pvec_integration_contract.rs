@@ -237,7 +237,6 @@ fn doc_problems(doc: &str, pin: &Value) -> Vec<String> {
         ("the tracked peak after #1481", "tracked"),
         ("the process peak after #1481", "rss_arm64"),
         ("the x64 process peak after #1481", "rss_x64"),
-        ("the x64 process peak after #1481", "rss_x64"),
     ] {
         must(
             &mut out,
