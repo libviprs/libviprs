@@ -56,7 +56,7 @@
  },
  "frozen_against": {
   "tests/fixtures/pvec_bench_corpus.json": "97eca65c287aaea1c014489cd5cc02e685e17b7f26b3961837414317e18bc5e5",
-  "tests/fixtures/pvec_bench_baseline.json": "e39162345db9e2ffca6219a11bb7ff5081c2292e5984c036d0b8f6fc59e473b4",
+  "tests/fixtures/pvec_bench_baseline.json": "fbe3bf55f324cbed7748e4d39fd8ac5d9f6f9c365e381fb57fb2394b9c827892",
   "tests/fixtures/pvec_corpus_baseline.json": "743d9c5ea8d21abe5587e28281b756b0bfb3ef716da4da8b0e6a6a3258b789df"
  },
  "epic_l": {

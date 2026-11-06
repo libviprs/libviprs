@@ -642,6 +642,46 @@
    "strategy": "direct",
    "tracked_peak": 4224938662
   },
+  "generation/block_heavy/aarch64-linux-mercury": {
+   "artifact_bytes": 104744,
+   "artifact_pct_of_source": 448.0260062449206,
+   "bench": "generation",
+   "bytes_per_entity": 4.667736185383244,
+   "cell": "block_heavy",
+   "deterministic": true,
+   "entities": 22440,
+   "indexed_wall_secs": {
+    "max": 0.018443622357142857,
+    "median": 0.0179022935,
+    "min": 0.016720241214285714
+   },
+   "plain_wall_secs": {
+    "max": 0.013696042684210527,
+    "median": 0.013672804,
+    "min": 0.013074737578947369
+   },
+   "platform": "aarch64-linux-mercury",
+   "split": {
+    "components": 0,
+    "geometry": 38056,
+    "provenance": 0,
+    "spatial_index": 19712,
+    "tier0": 46976
+   },
+   "tier0_refused": null,
+   "tier0_share": 0.4484839227067899,
+   "tier0_wall_secs": {
+    "max": 0.02398336090909091,
+    "median": 0.023725527363636364,
+    "min": 0.023563620454545454
+   },
+   "unstable": false,
+   "wall_secs": {
+    "max": 0.02398336090909091,
+    "median": 0.023725527363636364,
+    "min": 0.023563620454545454
+   }
+  },
   "generation/block_heavy/x86_64-linux-mars": {
    "artifact_bytes": 104752,
    "artifact_pct_of_source": 451.7898731993444,
@@ -680,6 +720,46 @@
     "max": 0.015240363705882354,
     "median": 0.01489749111764706,
     "min": 0.014862081999999999
+   }
+  },
+  "generation/large_industrial/aarch64-linux-mercury": {
+   "artifact_bytes": 13565120,
+   "artifact_pct_of_source": 68.43516570799424,
+   "bench": "generation",
+   "bytes_per_entity": 13.234263414634146,
+   "cell": "large_industrial",
+   "deterministic": true,
+   "entities": 1025000,
+   "indexed_wall_secs": {
+    "max": 1.864595545,
+    "median": 1.783512489,
+    "min": 1.654415632
+   },
+   "plain_wall_secs": {
+    "max": 1.083002041,
+    "median": 1.058001301,
+    "min": 1.023915851
+   },
+   "platform": "aarch64-linux-mercury",
+   "split": {
+    "components": 0,
+    "geometry": 9277464,
+    "provenance": 0,
+    "spatial_index": 2842992,
+    "tier0": 1444664
+   },
+   "tier0_refused": null,
+   "tier0_share": 0.1064984312707886,
+   "tier0_wall_secs": {
+    "max": 1.936831931,
+    "median": 1.8531600350000001,
+    "min": 1.472696413
+   },
+   "unstable": true,
+   "wall_secs": {
+    "max": 1.936831931,
+    "median": 1.8531600350000001,
+    "min": 1.472696413
    }
   },
   "generation/large_industrial/x86_64-linux-mars": {
@@ -722,6 +802,46 @@
     "min": 0.99628769
    }
   },
+  "generation/paper_space/aarch64-linux-mercury": {
+   "artifact_bytes": 70440,
+   "artifact_pct_of_source": 63.13921282145514,
+   "bench": "generation",
+   "bytes_per_entity": 35.22,
+   "cell": "paper_space",
+   "deterministic": true,
+   "entities": 2000,
+   "indexed_wall_secs": {
+    "max": 0.002074267049586777,
+    "median": 0.0020683328925619835,
+    "min": 0.0020676314628099175
+   },
+   "plain_wall_secs": {
+    "max": 0.0024057254615384616,
+    "median": 0.0024011393846153847,
+    "min": 0.002394085798076923
+   },
+   "platform": "aarch64-linux-mercury",
+   "split": {
+    "components": 0,
+    "geometry": 64568,
+    "provenance": 0,
+    "spatial_index": 1456,
+    "tier0": 4416
+   },
+   "tier0_refused": null,
+   "tier0_share": 0.06269165247018739,
+   "tier0_wall_secs": {
+    "max": 0.002759259426666667,
+    "median": 0.0025593571733333333,
+    "min": 0.0025146477866666668
+   },
+   "unstable": false,
+   "wall_secs": {
+    "max": 0.002759259426666667,
+    "median": 0.0025593571733333333,
+    "min": 0.0025146477866666668
+   }
+  },
   "generation/paper_space/x86_64-linux-mars": {
    "artifact_bytes": 70440,
    "artifact_pct_of_source": 63.21173778435859,
@@ -760,6 +880,46 @@
     "max": 0.001972839534883721,
     "median": 0.001952557015503876,
     "min": 0.0019474760387596898
+   }
+  },
+  "generation/simple/aarch64-linux-mercury": {
+   "artifact_bytes": 37040,
+   "artifact_pct_of_source": 55.1494126230216,
+   "bench": "generation",
+   "bytes_per_entity": 37.04,
+   "cell": "simple",
+   "deterministic": true,
+   "entities": 1000,
+   "indexed_wall_secs": {
+    "max": 0.001293173111111111,
+    "median": 0.0012838165555555555,
+    "min": 0.00128101184057971
+   },
+   "plain_wall_secs": {
+    "max": 0.0012957150555555554,
+    "median": 0.001291122523809524,
+    "min": 0.0012676784047619047
+   },
+   "platform": "aarch64-linux-mercury",
+   "split": {
+    "components": 0,
+    "geometry": 33520,
+    "provenance": 0,
+    "spatial_index": 1440,
+    "tier0": 2080
+   },
+   "tier0_refused": null,
+   "tier0_share": 0.056155507559395246,
+   "tier0_wall_secs": {
+    "max": 0.0017104913548387096,
+    "median": 0.0016921101612903228,
+    "min": 0.0016658231548387096
+   },
+   "unstable": false,
+   "wall_secs": {
+    "max": 0.0017104913548387096,
+    "median": 0.0016921101612903228,
+    "min": 0.0016658231548387096
    }
   },
   "generation/simple/x86_64-linux-mars": {
@@ -802,6 +962,46 @@
     "min": 0.0011168719910313902
    }
   },
+  "generation/spline_heavy/aarch64-linux-mercury": {
+   "artifact_bytes": 1872248,
+   "artifact_pct_of_source": 85.49163507578615,
+   "bench": "generation",
+   "bytes_per_entity": 187.2248,
+   "cell": "spline_heavy",
+   "deterministic": true,
+   "entities": 10000,
+   "indexed_wall_secs": {
+    "max": 0.03521510566666666,
+    "median": 0.02854875722222222,
+    "min": 0.02840260166666667
+   },
+   "plain_wall_secs": {
+    "max": 0.026885373400000002,
+    "median": 0.0266803346,
+    "min": 0.026586615
+   },
+   "platform": "aarch64-linux-mercury",
+   "split": {
+    "components": 0,
+    "geometry": 1872248,
+    "provenance": 0,
+    "spatial_index": 0,
+    "tier0": 0
+   },
+   "tier0_refused": null,
+   "tier0_share": 0.0,
+   "tier0_wall_secs": {
+    "max": 0.028034828499999997,
+    "median": 0.0277703321,
+    "min": 0.027748445
+   },
+   "unstable": false,
+   "wall_secs": {
+    "max": 0.028034828499999997,
+    "median": 0.0277703321,
+    "min": 0.027748445
+   }
+  },
   "generation/spline_heavy/x86_64-linux-mars": {
    "artifact_bytes": 1872248,
    "artifact_pct_of_source": 85.4941335595827,
@@ -842,6 +1042,34 @@
     "min": 0.01577658975
    }
   },
+  "normalization/block_heavy/mix0/aarch64-linux-mercury": {
+   "bench": "normalization",
+   "cell": "block_heavy",
+   "kept": 22440,
+   "leaves": 22440,
+   "mix": 0,
+   "pass_secs": {
+    "max": 0.026194276500000002,
+    "median": 0.025957831875,
+    "min": 0.025890228749999997
+   },
+   "platform": "aarch64-linux-mercury",
+   "promoted": 22440,
+   "stage_ns": {
+    "bounds": 28.210962566844923,
+    "records": 119.64751559714796,
+    "transform": 180.53962789661318,
+    "visibility": 828.2345699643494
+   },
+   "stage_share": {
+    "bounds": 0.024387784120356165,
+    "records": 0.10343276214011614,
+    "transform": 0.1560727132184648,
+    "visibility": 0.7159913755316284
+   },
+   "unattributed": 0.00011536498943451764,
+   "unstable": false
+  },
   "normalization/block_heavy/mix0/x86_64-linux-mars": {
    "bench": "normalization",
    "cell": "block_heavy",
@@ -868,6 +1096,34 @@
     "visibility": 0.684717601641643
    },
    "unattributed": 0.0004530063166926457,
+   "unstable": false
+  },
+  "normalization/block_heavy/mix50/aarch64-linux-mercury": {
+   "bench": "normalization",
+   "cell": "block_heavy",
+   "kept": 11220,
+   "leaves": 22440,
+   "mix": 50,
+   "pass_secs": {
+    "max": 0.025477921900000006,
+    "median": 0.025423118600000006,
+    "min": 0.025403593800000002
+   },
+   "platform": "aarch64-linux-mercury",
+   "promoted": 11220,
+   "stage_ns": {
+    "bounds": 28.355249554367198,
+    "records": 123.91913547237077,
+    "transform": 180.98460784313727,
+    "visibility": 967.5062477718361
+   },
+   "stage_share": {
+    "bounds": 0.012514039091962538,
+    "records": 0.05468930550479356,
+    "transform": 0.07987404424884363,
+    "visibility": 0.8539802115386425
+   },
+   "unattributed": -0.0010576003842422386,
    "unstable": false
   },
   "normalization/block_heavy/mix50/x86_64-linux-mars": {
@@ -898,6 +1154,34 @@
    "unattributed": 2.6153205599863774e-06,
    "unstable": false
   },
+  "normalization/block_heavy/mix90/aarch64-linux-mercury": {
+   "bench": "normalization",
+   "cell": "block_heavy",
+   "kept": 2244,
+   "leaves": 22440,
+   "mix": 90,
+   "pass_secs": {
+    "max": 0.024802137636363634,
+    "median": 0.024759721545454548,
+    "min": 0.02475270245454545
+   },
+   "platform": "aarch64-linux-mercury",
+   "promoted": 2244,
+   "stage_ns": {
+    "bounds": 29.484078755469127,
+    "records": 138.26401717711877,
+    "transform": 182.98719818505919,
+    "visibility": 1068.5250445632798
+   },
+   "stage_share": {
+    "bounds": 0.0026721735382124667,
+    "records": 0.012531015503379667,
+    "transform": 0.01658432514975743,
+    "visibility": 0.9684156566939214
+   },
+   "unattributed": -0.00020317088527098084,
+   "unstable": false
+  },
   "normalization/block_heavy/mix90/x86_64-linux-mars": {
    "bench": "normalization",
    "cell": "block_heavy",
@@ -924,6 +1208,34 @@
     "visibility": 0.964642798002134
    },
    "unattributed": 4.0628795692515955e-06,
+   "unstable": false
+  },
+  "normalization/large_industrial/mix0/aarch64-linux-mercury": {
+   "bench": "normalization",
+   "cell": "large_industrial",
+   "kept": 1025000,
+   "leaves": 1025000,
+   "mix": 0,
+   "pass_secs": {
+    "max": 1.012090346,
+    "median": 1.004568033,
+    "min": 0.997457212
+   },
+   "platform": "aarch64-linux-mercury",
+   "promoted": 1025000,
+   "stage_ns": {
+    "bounds": 69.51225951219513,
+    "records": 173.0177931707317,
+    "transform": 248.22155902439027,
+    "visibility": 487.1478390243903
+   },
+   "stage_share": {
+    "bounds": 0.07092607335634779,
+    "records": 0.1765368120169916,
+    "transform": 0.2532701515896236,
+    "visibility": 0.4970559669401704
+   },
+   "unattributed": 0.00221099609686662,
    "unstable": false
   },
   "normalization/large_industrial/mix0/x86_64-linux-mars": {
@@ -954,6 +1266,34 @@
    "unattributed": 0.0008332403148440519,
    "unstable": false
   },
+  "normalization/large_industrial/mix50/aarch64-linux-mercury": {
+   "bench": "normalization",
+   "cell": "large_industrial",
+   "kept": 462536,
+   "leaves": 1025000,
+   "mix": 50,
+   "pass_secs": {
+    "max": 0.786545477,
+    "median": 0.785458366,
+    "min": 0.783077233
+   },
+   "platform": "aarch64-linux-mercury",
+   "promoted": 462536,
+   "stage_ns": {
+    "bounds": 59.48428446650639,
+    "records": 184.74200710863587,
+    "transform": 247.1019747652075,
+    "visibility": 544.840952195122
+   },
+   "stage_share": {
+    "bounds": 0.03502874778725064,
+    "records": 0.10878976238442664,
+    "transform": 0.14551192519859163,
+    "visibility": 0.7110013721592979
+   },
+   "unattributed": -0.00033180752956691716,
+   "unstable": false
+  },
   "normalization/large_industrial/mix50/x86_64-linux-mars": {
    "bench": "normalization",
    "cell": "large_industrial",
@@ -980,6 +1320,34 @@
     "visibility": 0.6947802488012245
    },
    "unattributed": 0.001041910513182631,
+   "unstable": false
+  },
+  "normalization/large_industrial/mix90/aarch64-linux-mercury": {
+   "bench": "normalization",
+   "cell": "large_industrial",
+   "kept": 92516,
+   "leaves": 1025000,
+   "mix": 90,
+   "pass_secs": {
+    "max": 0.595919171,
+    "median": 0.594904727,
+    "min": 0.593512704
+   },
+   "platform": "aarch64-linux-mercury",
+   "promoted": 92516,
+   "stage_ns": {
+    "bounds": 56.114293743784856,
+    "records": 182.76947771196333,
+    "transform": 213.8452159626443,
+    "visibility": 539.4302136585366
+   },
+   "stage_share": {
+    "bounds": 0.008726556983636138,
+    "records": 0.028423208343409247,
+    "transform": 0.033255919985318926,
+    "visibility": 0.9294193572612174
+   },
+   "unattributed": 0.0001749574264184458,
    "unstable": false
   },
   "normalization/large_industrial/mix90/x86_64-linux-mars": {
@@ -1010,6 +1378,34 @@
    "unattributed": 0.0012233420783152571,
    "unstable": false
   },
+  "normalization/paper_space/mix0/aarch64-linux-mercury": {
+   "bench": "normalization",
+   "cell": "paper_space",
+   "kept": 2000,
+   "leaves": 2000,
+   "mix": 0,
+   "pass_secs": {
+    "max": 0.0010674752695652176,
+    "median": 0.001065473656521739,
+    "min": 0.0010642145695652174
+   },
+   "platform": "aarch64-linux-mercury",
+   "promoted": 2000,
+   "stage_ns": {
+    "bounds": 28.006043478260867,
+    "records": 109.92069565217399,
+    "transform": 178.8851282608697,
+    "visibility": 215.86046739130433
+   },
+   "stage_share": {
+    "bounds": 0.05257012842473681,
+    "records": 0.20633207584129745,
+    "transform": 0.33578517341262837,
+    "visibility": 0.40519156164965225
+   },
+   "unattributed": 0.00012106067168514347,
+   "unstable": false
+  },
   "normalization/paper_space/mix0/x86_64-linux-mars": {
    "bench": "normalization",
    "cell": "paper_space",
@@ -1036,6 +1432,34 @@
     "visibility": 0.32529588627100714
    },
    "unattributed": 0.000106794512240809,
+   "unstable": false
+  },
+  "normalization/paper_space/mix50/aarch64-linux-mercury": {
+   "bench": "normalization",
+   "cell": "paper_space",
+   "kept": 990,
+   "leaves": 2000,
+   "mix": 50,
+   "pass_secs": {
+    "max": 0.0008967423505535053,
+    "median": 0.0008785564022140222,
+    "min": 0.0008780529077490777
+   },
+   "platform": "aarch64-linux-mercury",
+   "promoted": 990,
+   "stage_ns": {
+    "bounds": 28.116687166871735,
+    "records": 110.55811249021583,
+    "transform": 180.009038726751,
+    "visibility": 281.48915498154986
+   },
+   "stage_share": {
+    "bounds": 0.031683247911068205,
+    "records": 0.12458224775266084,
+    "transform": 0.2028429226517327,
+    "visibility": 0.6407992799828853
+   },
+   "unattributed": 9.230170165298503e-05,
    "unstable": false
   },
   "normalization/paper_space/mix50/x86_64-linux-mars": {
@@ -1066,6 +1490,34 @@
    "unattributed": 0.00030367380376487726,
    "unstable": false
   },
+  "normalization/paper_space/mix90/aarch64-linux-mercury": {
+   "bench": "normalization",
+   "cell": "paper_space",
+   "kept": 196,
+   "leaves": 2000,
+   "mix": 90,
+   "pass_secs": {
+    "max": 0.0006971890945558744,
+    "median": 0.0006932162550143267,
+    "min": 0.000693127702005731
+   },
+   "platform": "aarch64-linux-mercury",
+   "promoted": 196,
+   "stage_ns": {
+    "bounds": 29.63794514940639,
+    "records": 116.06235015496165,
+    "transform": 184.9305742354249,
+    "visibility": 314.17632808022915
+   },
+   "stage_share": {
+    "bounds": 0.008379834153144024,
+    "records": 0.03281547491973099,
+    "transform": 0.05228728017838269,
+    "visibility": 0.9064309320725207
+   },
+   "unattributed": 8.64786762216128e-05,
+   "unstable": false
+  },
   "normalization/paper_space/mix90/x86_64-linux-mars": {
    "bench": "normalization",
    "cell": "paper_space",
@@ -1094,6 +1546,22 @@
    "unattributed": 0.00015116500507287334,
    "unstable": false
   },
+  "normalization/pdf_clip/aarch64-linux-mercury": {
+   "bench": "normalization",
+   "cell": "pdf_clip",
+   "clips": 200,
+   "entities": 20200,
+   "ns_per_entity": {
+    "max": 78.59059,
+    "median": 61.9704,
+    "min": 61.872899999999994
+   },
+   "platform": "aarch64-linux-mercury",
+   "stage_ns": {
+    "clip": 61.9704
+   },
+   "unstable": true
+  },
   "normalization/pdf_clip/x86_64-linux-mars": {
    "bench": "normalization",
    "cell": "pdf_clip",
@@ -1107,6 +1575,26 @@
    "platform": "x86_64-linux-mars",
    "stage_ns": {
     "clip": 52.149680000000004
+   },
+   "unstable": false
+  },
+  "normalization/transform/identity/aarch64-linux-mercury": {
+   "bench": "normalization",
+   "cell": "large_industrial",
+   "class": "identity",
+   "entities": 200000,
+   "geometry": 200000,
+   "identity_bounds_moved": 59,
+   "identity_max_ulps": 4,
+   "ns_per_entity": {
+    "max": 216.637035,
+    "median": 216.09183,
+    "min": 215.876835
+   },
+   "platform": "aarch64-linux-mercury",
+   "refused": 0,
+   "stage_ns": {
+    "transform": 216.09183
    },
    "unstable": false
   },
@@ -1130,6 +1618,26 @@
    },
    "unstable": false
   },
+  "normalization/transform/non_uniform_scale/aarch64-linux-mercury": {
+   "bench": "normalization",
+   "cell": "large_industrial",
+   "class": "non_uniform_scale",
+   "entities": 200000,
+   "geometry": 200000,
+   "identity_bounds_moved": null,
+   "identity_max_ulps": null,
+   "ns_per_entity": {
+    "max": 217.751185,
+    "median": 217.43223,
+    "min": 217.29098
+   },
+   "platform": "aarch64-linux-mercury",
+   "refused": 0,
+   "stage_ns": {
+    "transform": 217.43223
+   },
+   "unstable": false
+  },
   "normalization/transform/non_uniform_scale/x86_64-linux-mars": {
    "bench": "normalization",
    "cell": "large_industrial",
@@ -1147,6 +1655,26 @@
    "refused": 0,
    "stage_ns": {
     "transform": 164.37877
+   },
+   "unstable": false
+  },
+  "normalization/transform/reflection/aarch64-linux-mercury": {
+   "bench": "normalization",
+   "cell": "large_industrial",
+   "class": "reflection",
+   "entities": 200000,
+   "geometry": 200000,
+   "identity_bounds_moved": null,
+   "identity_max_ulps": null,
+   "ns_per_entity": {
+    "max": 217.54452,
+    "median": 217.37223,
+    "min": 217.082235
+   },
+   "platform": "aarch64-linux-mercury",
+   "refused": 0,
+   "stage_ns": {
+    "transform": 217.37223
    },
    "unstable": false
   },
@@ -1170,6 +1698,26 @@
    },
    "unstable": false
   },
+  "normalization/transform/rotation/aarch64-linux-mercury": {
+   "bench": "normalization",
+   "cell": "large_industrial",
+   "class": "rotation",
+   "entities": 200000,
+   "geometry": 200000,
+   "identity_bounds_moved": null,
+   "identity_max_ulps": null,
+   "ns_per_entity": {
+    "max": 258.18645999999995,
+    "median": 251.05739499999999,
+    "min": 250.93968500000003
+   },
+   "platform": "aarch64-linux-mercury",
+   "refused": 0,
+   "stage_ns": {
+    "transform": 251.05739499999999
+   },
+   "unstable": false
+  },
   "normalization/transform/rotation/x86_64-linux-mars": {
    "bench": "normalization",
    "cell": "large_industrial",
@@ -1187,6 +1735,26 @@
    "refused": 0,
    "stage_ns": {
     "transform": 204.14545999999999
+   },
+   "unstable": false
+  },
+  "normalization/transform/shear/aarch64-linux-mercury": {
+   "bench": "normalization",
+   "cell": "large_industrial",
+   "class": "shear",
+   "entities": 200000,
+   "geometry": 200000,
+   "identity_bounds_moved": null,
+   "identity_max_ulps": null,
+   "ns_per_entity": {
+    "max": 270.56609,
+    "median": 270.20005,
+    "min": 270.17484
+   },
+   "platform": "aarch64-linux-mercury",
+   "refused": 0,
+   "stage_ns": {
+    "transform": 270.20005
    },
    "unstable": false
   },
@@ -1210,6 +1778,26 @@
    },
    "unstable": false
   },
+  "normalization/transform/singular/aarch64-linux-mercury": {
+   "bench": "normalization",
+   "cell": "large_industrial",
+   "class": "singular",
+   "entities": 200000,
+   "geometry": 0,
+   "identity_bounds_moved": null,
+   "identity_max_ulps": null,
+   "ns_per_entity": {
+    "max": 55.66548999999999,
+    "median": 54.652165000000004,
+    "min": 54.494045
+   },
+   "platform": "aarch64-linux-mercury",
+   "refused": 200000,
+   "stage_ns": {
+    "transform": 54.652165000000004
+   },
+   "unstable": false
+  },
   "normalization/transform/singular/x86_64-linux-mars": {
    "bench": "normalization",
    "cell": "large_industrial",
@@ -1227,6 +1815,26 @@
    "refused": 200000,
    "stage_ns": {
     "transform": 24.84054
+   },
+   "unstable": false
+  },
+  "normalization/transform/translation/aarch64-linux-mercury": {
+   "bench": "normalization",
+   "cell": "large_industrial",
+   "class": "translation",
+   "entities": 200000,
+   "geometry": 200000,
+   "identity_bounds_moved": null,
+   "identity_max_ulps": null,
+   "ns_per_entity": {
+    "max": 223.82505999999998,
+    "median": 221.303845,
+    "min": 218.931795
+   },
+   "platform": "aarch64-linux-mercury",
+   "refused": 0,
+   "stage_ns": {
+    "transform": 221.303845
    },
    "unstable": false
   },
@@ -1250,6 +1858,26 @@
    },
    "unstable": false
   },
+  "normalization/transform/uniform_scale/aarch64-linux-mercury": {
+   "bench": "normalization",
+   "cell": "large_industrial",
+   "class": "uniform_scale",
+   "entities": 200000,
+   "geometry": 200000,
+   "identity_bounds_moved": null,
+   "identity_max_ulps": null,
+   "ns_per_entity": {
+    "max": 216.67995,
+    "median": 216.02704500000002,
+    "min": 215.857875
+   },
+   "platform": "aarch64-linux-mercury",
+   "refused": 0,
+   "stage_ns": {
+    "transform": 216.02704500000002
+   },
+   "unstable": false
+  },
   "normalization/transform/uniform_scale/x86_64-linux-mars": {
    "bench": "normalization",
    "cell": "large_industrial",
@@ -1269,6 +1897,31 @@
     "transform": 166.564995
    },
    "unstable": false
+  },
+  "provider/block_heavy/aarch64-linux-mercury": {
+   "advanced_curve_share": 0.0,
+   "allocated_bytes": 69626753,
+   "bench": "provider",
+   "block_frames": 11220,
+   "cell": "block_heavy",
+   "entities": 22440,
+   "entities_per_s": {
+    "max": 497223.62646781467,
+    "median": 497094.3946546173,
+    "min": 495272.5331798277
+   },
+   "open_only_held": 234705,
+   "open_only_tracked_peak": 397599,
+   "peak_rss_bytes": 31064064,
+   "platform": "aarch64-linux-mercury",
+   "rss_is_per_cell": true,
+   "tracked_peak": 15958815,
+   "unstable": false,
+   "wall_secs": {
+    "max": 0.0453083878,
+    "median": 0.045142331599999995,
+    "min": 0.04513059879999999
+   }
   },
   "provider/block_heavy/x86_64-linux-mars": {
    "advanced_curve_share": 0.0,
@@ -1293,6 +1946,31 @@
     "max": 0.0583447996,
     "median": 0.0575996972,
     "min": 0.056456807799999995
+   }
+  },
+  "provider/large_industrial/aarch64-linux-mercury": {
+   "advanced_curve_share": 0.0,
+   "allocated_bytes": 1536819959,
+   "bench": "provider",
+   "block_frames": 75000,
+   "cell": "large_industrial",
+   "entities": 1025000,
+   "entities_per_s": {
+    "max": 788150.1318566712,
+    "median": 754139.1621353958,
+    "min": 735916.3755922354
+   },
+   "open_only_held": 434724236,
+   "open_only_tracked_peak": 556183659,
+   "peak_rss_bytes": 1237401600,
+   "platform": "aarch64-linux-mercury",
+   "rss_is_per_cell": true,
+   "tracked_peak": 800557138,
+   "unstable": false,
+   "wall_secs": {
+    "max": 1.392821296,
+    "median": 1.359165591,
+    "min": 1.300513644
    }
   },
   "provider/large_industrial/x86_64-linux-mars": {
@@ -1320,6 +1998,31 @@
     "min": 1.036733231
    }
   },
+  "provider/simple/aarch64-linux-mercury": {
+   "advanced_curve_share": 0.0,
+   "allocated_bytes": 3190142,
+   "bench": "provider",
+   "block_frames": 0,
+   "cell": "simple",
+   "entities": 1000,
+   "entities_per_s": {
+    "max": 493536.0283974049,
+    "median": 491965.7147453507,
+    "min": 337148.5089827273
+   },
+   "open_only_held": 987337,
+   "open_only_tracked_peak": 1779131,
+   "peak_rss_bytes": 12632064,
+   "platform": "aarch64-linux-mercury",
+   "rss_is_per_cell": true,
+   "tracked_peak": 1779139,
+   "unstable": true,
+   "wall_secs": {
+    "max": 0.0029660519722222224,
+    "median": 0.0020326619722222227,
+    "min": 0.0020261945277777783
+   }
+  },
   "provider/simple/x86_64-linux-mars": {
    "advanced_curve_share": 0.0,
    "allocated_bytes": 9258183,
@@ -1343,6 +2046,31 @@
     "max": 0.002669858299999999,
     "median": 0.0025292318000000005,
     "min": 0.002318750528571429
+   }
+  },
+  "provider/spline_heavy/aarch64-linux-mercury": {
+   "advanced_curve_share": 1.0,
+   "allocated_bytes": 50269926,
+   "bench": "provider",
+   "block_frames": 0,
+   "cell": "spline_heavy",
+   "entities": 10000,
+   "entities_per_s": {
+    "max": 352117.3282481123,
+    "median": 349896.8787806601,
+    "min": 348479.3831078569
+   },
+   "open_only_held": 17840172,
+   "open_only_tracked_peak": 27810425,
+   "peak_rss_bytes": 59084800,
+   "platform": "aarch64-linux-mercury",
+   "rss_is_per_cell": true,
+   "tracked_peak": 27810425,
+   "unstable": false,
+   "wall_secs": {
+    "max": 0.028696102222222217,
+    "median": 0.02857984911111111,
+    "min": 0.028399624777777775
    }
   },
   "provider/spline_heavy/x86_64-linux-mars": {

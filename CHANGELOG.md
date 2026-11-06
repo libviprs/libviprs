@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **arm64 benchmark rows and a clean queue-capacity curve** (issues #1064, #1070). `docs/pvec-benchmarks.md` gains the provider, block-recursion, normalization and generation rows from mercury (aarch64, native), carried in `tests/fixtures/pvec_bench_baseline.json` under `aarch64-linux-mercury`, and the queue-capacity sweep taken on an idle host: capacities of 32 and above are flat within 0.5 percent, 16 and below are slower, and the default of 64 stays.
+- **The finite-value mutation line of N7.6** (issue #1070). `tests/pvec_normalization_proptest.rs` gains `composition_is_associative_when_a_level_is_not_finite`, which feeds NaN and infinite coefficients to composition and needs both groupings to refuse them or agree. With PVec's `Transform2::new` validation removed in a scratch copy of the pinned rev (nothing in `libviprs/pvec` touched), it goes red; unmutated it is green.
 - **Solid hatches, 2D SOLID and the MTEXT anchor on the acadrust path** (issues #1034, #1527). A HATCH with the solid flag
   now reaches the tiles as a filled polygon in a new `fills` layer, with its islands as holes by even-odd (the normal and
   outer styles, outer being AutoCAD's default; the ignore style fills each loop on its own), a 2D SOLID is filled in its visible vertex order, and a patterned hatch stays an outline and
