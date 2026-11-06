@@ -172,6 +172,7 @@ func localFileMode(_ window: UIWindow) async throws {
     let s = try await render(window: window, archiveUrl: "file://" + f.path, expectContent: true)
 
     try check(try await goldenLog().count == 1, "opening the local file asked the store for nothing more")
+    // The source URL is pmtiles://file:// plus the app's Documents path; only the in-app part is recorded.
     try save("local-file", s, ["downloadedBytes": data.count, "sha256": hex, "url": "Documents/golden.pmtiles"])
     try assertBlackOnWhiteDrawing(s)
 }
