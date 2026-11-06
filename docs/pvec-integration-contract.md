@@ -48,7 +48,7 @@ page and the pin moving with it.
 |---|---|
 | `tests/fixtures/pvec_bench_corpus.json` | `97eca65c287aaea1c014489cd5cc02e685e17b7f26b3961837414317e18bc5e5` |
 | `tests/fixtures/pvec_bench_baseline.json` | `fbe3bf55f324cbed7748e4d39fd8ac5d9f6f9c365e381fb57fb2394b9c827892` |
-| `tests/fixtures/pvec_corpus_baseline.json` | `743d9c5ea8d21abe5587e28281b756b0bfb3ef716da4da8b0e6a6a3258b789df` |
+| `tests/fixtures/pvec_corpus_baseline.json` | `2619fb5cf2baf5d98f3695555fd23c39d2a714adb608f3e3fa2619b511f17bad` |
 
 ## The EPIC L decision
 
