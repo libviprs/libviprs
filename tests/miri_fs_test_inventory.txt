@@ -991,10 +991,13 @@ annotated   fs-detected  tests/vector_1036_worker.rs::a_memory_ceiling_stops_a_r
 annotated   fs-detected  tests/vector_1036_worker.rs::a_supervisor_stops_code_that_never_looks_at_a_clock
 annotated   fs-detected  tests/vector_1036_worker.rs::the_library_deadline_ends_a_run_cleanly_inside_the_ceiling
 annotated   fs-detected  tests/vector_1036_worker.rs::the_report_names_the_limits_and_the_follow_up
+annotated   fs-detected  tests/vector_1037_conformance.rs::docs_no_longer_say_ios_was_not_run
 annotated   fs-detected  tests/vector_1037_conformance.rs::docs_say_pmtiles_skips_offline_pack_caching
 annotated   fs-detected  tests/vector_1037_conformance.rs::docs_tell_apps_to_download_the_whole_archive
 annotated   fs-detected  tests/vector_1037_conformance.rs::harness_runs_both_modes_against_the_shared_style_and_golden
+annotated   fs-detected  tests/vector_1037_conformance.rs::ios_harness_runs_both_modes_against_the_shared_style_and_golden
 annotated   fs-detected  tests/vector_1037_conformance.rs::recorded_android_result_passed_both_modes_on_the_committed_golden
+annotated   fs-detected  tests/vector_1037_conformance.rs::recorded_ios_result_passed_both_modes_on_the_committed_golden
 annotated   fs-detected  tests/vector_1038_entity_matrix.rs::no_row_is_both_empty_and_unreported
 annotated   fs-detected  tests/vector_1038_entity_matrix.rs::the_entity_matrix_matches_what_the_decoder_does
 annotated   fs-detected  tests/vector_1038_release_gate.rs::met_means_evidence_on_disk_and_not_met_means_a_blocker

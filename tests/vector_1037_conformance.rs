@@ -154,5 +154,8 @@ fn docs_no_longer_say_ios_was_not_run() {
         !d.contains("not run yet"),
         "the iOS section must report the run"
     );
-    assert!(d.contains("conformance/ios/"), "docs point at the iOS harness");
+    assert!(
+        d.contains("conformance/ios/"),
+        "docs point at the iOS harness"
+    );
 }
