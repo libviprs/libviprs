@@ -110,6 +110,10 @@ pub enum WriteError {
     /// No entity carried geometry, so there is no artifact to write.
     #[error("no entity carries geometry")]
     NoGeometry,
+    /// Entities carried geometry and PVec's writer refused every one, so there is no artifact to
+    /// write. Each is listed with the writer rule that refused it, in id order.
+    #[error("PVec's writer refused every curve")]
+    AllRefused(Vec<(EntityId, String)>),
     /// The cancel token fired. Nothing was written.
     #[error("cancelled")]
     Cancelled,
@@ -187,7 +191,15 @@ fn prepare<'a>(
             })
             .collect::<Result<Vec<_>, _>>()?;
         let bounds = bounds_inputs(curves.iter().copied()).map_err(WriteError::Bounds)?;
-        let drawing = bounds.drawing_bounds().ok_or(WriteError::NoGeometry)?;
+        let Some(drawing) = bounds.drawing_bounds() else {
+            // Nothing is left to write: either nothing carried geometry, or PVec refused all of it.
+            refused.sort_by_key(|(id, _)| *id);
+            return Err(if refused.is_empty() {
+                WriteError::NoGeometry
+            } else {
+                WriteError::AllRefused(refused)
+            });
+        };
         let manifest = Manifest {
             metres_per_unit,
             // The drawing's box, grown to take in `area` when the caller has content of its own beyond the

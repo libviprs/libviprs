@@ -133,6 +133,26 @@ fn convert(dwg: &[u8], dir: &Path, name: &str) -> Result<Option<Converted>, Fail
     {
         Ok(o) => o,
         Err(PvecConvertError::Write(WriteError::NoGeometry)) => return Ok(None),
+        // PVec refused every curve: the conversion hands back the report and publishes nothing, so
+        // the comparison runs on a report with no curves behind it.
+        Err(PvecConvertError::NothingStorable { report, .. }) => {
+            if dest.exists() || report_path(&dest).exists() {
+                return fail(
+                    Stage::Write,
+                    "a conversion with nothing storable left files behind",
+                );
+            }
+            let report_bytes = report
+                .to_json_string()
+                .or_else(|e| fail(Stage::Write, e.to_string()))?
+                .into_bytes();
+            return Ok(Some(Converted {
+                artifact: Vec::new(),
+                report_bytes,
+                report: *report,
+                curves: Vec::new(),
+            }));
+        }
         Err(e) => return fail(stage_of(&e), describe(&e)),
     };
     let artifact = std::fs::read(&dest).or_else(|e| fail(Stage::Write, e.to_string()))?;
@@ -351,8 +371,12 @@ fn run(fx: &Fixture, truth: Option<&Value>, dir: &Path) -> Result<Option<Convert
         Some(t) => {
             // The report declares how many entities PVec's writer refused, and the comparison
             // subtracts them, so a regression that refuses more would absorb itself. Pin the count:
-            // only `mixed-entity-001` has an entity the container cannot store (#1446).
-            let expected = usize::from(fx.id == "mixed-entity-001");
+            // `mixed-entity-001` has an entity the container cannot store (#1446), and each bulge
+            // fixture is one bulge polyline the container refuses whole (#1480).
+            let expected = usize::from(matches!(
+                fx.id.as_str(),
+                "mixed-entity-001" | "bulge-arc-001" | "bulge-arc-neg-001"
+            ));
             let refused = refused_by_writer(&c.report);
             if refused != expected {
                 return fail(
@@ -391,18 +415,7 @@ fn first_difference(a: &[u8], b: &[u8]) -> Option<usize> {
 /// Drawings that cannot be converted today, each with the text of the failure and where it is
 /// tracked. A gap is waived only while it is real: once a fix makes the fixture pass, the suite
 /// fails until its row is deleted, so this list cannot go stale.
-const KNOWN_GAPS: &[(&str, &str, &str)] = &[
-    (
-        "bulge-arc-001",
-        "no geometry reached the writer",
-        "libviprs/libviprs#1480",
-    ),
-    (
-        "bulge-arc-neg-001",
-        "no geometry reached the writer",
-        "libviprs/libviprs#1480",
-    ),
-];
+const KNOWN_GAPS: &[(&str, &str, &str)] = &[];
 
 fn gap(id: &str) -> Option<&'static (&'static str, &'static str, &'static str)> {
     KNOWN_GAPS.iter().find(|g| g.0 == id)
@@ -628,7 +641,12 @@ fn n2_3_1050_two_conversions_of_one_fixture_are_byte_identical() {
         );
         // The comparison is repeated against the second artifact.
         if let Some(t) = truth_of(fx) {
-            let reread = entities(&PvecReader::open(b.artifact.clone()).unwrap()).unwrap();
+            // An all-refused conversion has no artifact to open.
+            let reread = if b.artifact.is_empty() {
+                Vec::new()
+            } else {
+                entities(&PvecReader::open(b.artifact.clone()).unwrap()).unwrap()
+            };
             compare_to_truth(&reread, refused_by_writer(&b.report), &t)
                 .unwrap_or_else(|f| panic!("{}: {f}", fx.id));
         }

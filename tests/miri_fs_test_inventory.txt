@@ -626,6 +626,7 @@ annotated   fs-detected  tests/pvec_1433_bench_harness.rs::the_document_and_the_
 annotated   fs-detected  tests/pvec_1437_fuzz_seeds.rs::the_clip_seed_corpus_runs_clean
 annotated   fs-detected  tests/pvec_1437_fuzz_seeds.rs::the_provider_seed_corpus_runs_clean
 annotated   fs-detected  tests/pvec_1437_fuzz_seeds.rs::the_spline_seed_corpus_runs_clean
+annotated   fs-detected  tests/pvec_1481_classify.rs::a_cancel_mid_spilled_write_leaves_the_previous_pair_and_no_partial_1519
 annotated   fs-detected  tests/pvec_1481_classify.rs::a_cancel_mid_write_leaves_the_previous_pair_and_no_partial_1519
 annotated   fs-detected  tests/pvec_1481_classify.rs::classify_is_byte_identical_on_the_cells_1518
 annotated   fs-detected  tests/pvec_1481_classify.rs::classify_peak_above_the_opened_provider_stays_under_budget_1518
@@ -647,6 +648,11 @@ annotated   fs-detected  tests/pvec_1471_reproducibility.rs::n_1471_the_architec
 annotated   fs-detected  tests/pvec_1471_reproducibility.rs::n_1513_the_adr_records_what_a_mac_does
 annotated   fs-detected  tests/pvec_1471_reproducibility.rs::n_1513_the_bit_exact_digest_tests_are_gated_to_linux
 annotated   fs-detected  tests/pvec_1471_reproducibility.rs::n_1513_the_other_pvec_gates_are_not_gated_by_os
+annotated   not-detected tests/pvec_1480_all_refused.rs::a_drawing_with_nothing_to_draw_still_says_no_geometry
+annotated   fs-detected  tests/pvec_1480_all_refused.rs::a_streamed_conversion_answers_the_same_and_leaves_its_spill_root_empty
+annotated   fs-detected  tests/pvec_1480_all_refused.rs::an_all_refused_drawing_is_not_reported_as_having_no_geometry
+annotated   fs-detected  tests/pvec_1480_all_refused.rs::no_artifact_report_or_sidecar_is_left_behind
+annotated   fs-detected  tests/pvec_1480_all_refused.rs::the_report_counts_the_refused_entity_as_pvec_cannot_store
 annotated   fs-detected  tests/pvec_1489_image_reason_keys.rs::a_real_refusal_from_a_page_is_reported_under_a_documented_key
 annotated   fs-detected  tests/pvec_1489_image_reason_keys.rs::every_note_key_is_in_a_doc
 annotated   fs-detected  tests/pvec_1489_image_reason_keys.rs::every_refusal_key_is_in_a_doc

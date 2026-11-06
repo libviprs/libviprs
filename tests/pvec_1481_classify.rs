@@ -23,6 +23,7 @@ use std::sync::{Arc, Mutex};
 use libviprs::cad::CadSource;
 use libviprs::pvec::SourceUnit;
 use libviprs::pvec::publish::report_path;
+use libviprs::pvec::writer::{LeafConfig, SpillConfig};
 use libviprs::pvec_convert::{PvecConversion, PvecConvertError};
 use libviprs::{CancelToken, EngineEvent, EngineObserver};
 use pvec_bench::{CELLS, cells, generate, manifest, sha256_hex};
@@ -130,19 +131,28 @@ impl EngineObserver for CancelOnChunk {
     }
 }
 
-#[test]
-#[cfg_attr(miri, ignore)]
-fn a_cancel_mid_write_leaves_the_previous_pair_and_no_partial_1519() {
+/// Converts `simple` twice into one directory, the second time cancelled at the first chunk, and
+/// checks the first pair is untouched and no partial is left. `spilled` takes the spill path.
+fn a_cancel_mid_write_leaves_the_previous_pair(spilled: bool) {
     let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     let bytes = drawing("simple");
     let dir = tempfile::tempdir().unwrap();
     let dest = dir.path().join("cell.pvec");
-    let convert = |token: CancelToken| {
-        PvecConversion::new(CadSource::Bytes(&bytes), &dest)
-            .unit(SourceUnit::Meters)
-            .cancel(token.clone())
-            .observer(Arc::new(CancelOnChunk(token)))
-            .convert()
+    let spill_root = tempfile::tempdir().unwrap();
+    let conversion = || {
+        let c = PvecConversion::new(CadSource::Bytes(&bytes), &dest).unit(SourceUnit::Meters);
+        if spilled {
+            c.leaves(LeafConfig {
+                cell_capacity: 256,
+                tier0_max_error: None,
+            })
+            .spill(SpillConfig {
+                root: spill_root.path().to_path_buf(),
+                budget: 1 << 20,
+            })
+        } else {
+            c
+        }
     };
     let listing = || {
         let mut v: Vec<_> = std::fs::read_dir(dir.path())
@@ -153,19 +163,33 @@ fn a_cancel_mid_write_leaves_the_previous_pair_and_no_partial_1519() {
         v
     };
     // The first run is not cancelled in time to matter: a token nobody fires.
-    let first = PvecConversion::new(CadSource::Bytes(&bytes), &dest)
-        .unit(SourceUnit::Meters)
-        .convert()
-        .expect("converts");
+    let first = conversion().convert().expect("converts");
     drop(first);
     let (artifact, report, names) = (
         std::fs::read(&dest).unwrap(),
         std::fs::read(report_path(&dest)).unwrap(),
         listing(),
     );
-    let err = convert(CancelToken::new()).expect_err("the cancel stops the write");
+    let token = CancelToken::new();
+    let err = conversion()
+        .cancel(token.clone())
+        .observer(Arc::new(CancelOnChunk(token)))
+        .convert()
+        .expect_err("the cancel stops the write");
     assert!(matches!(err, PvecConvertError::Cancelled), "{err:?}");
     assert_eq!(std::fs::read(&dest).unwrap(), artifact);
     assert_eq!(std::fs::read(report_path(&dest)).unwrap(), report);
     assert_eq!(listing(), names, "no partial file is left");
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_cancel_mid_write_leaves_the_previous_pair_and_no_partial_1519() {
+    a_cancel_mid_write_leaves_the_previous_pair(false);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_cancel_mid_spilled_write_leaves_the_previous_pair_and_no_partial_1519() {
+    a_cancel_mid_write_leaves_the_previous_pair(true);
 }

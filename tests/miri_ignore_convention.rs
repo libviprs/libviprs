@@ -855,9 +855,10 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1513 adds 3: the `tests/pvec_1471_reproducibility.rs` cells that read the ADR and the two pvec test files. It said 996 before this line moved.
 /// Dropping the benchmark requirement removes 1: the `tests/pmtiles_release_readiness.rs` benchmark-doc check. It said 999 before this line moved.
 /// #1034 adds 1: the `tests/vector_1034_acadrust_fill.rs` cell that builds an archive in a temp dir. It said 998 before this line moved.
-/// #1518 adds 2: the `tests/pvec_1481_classify.rs` cells that convert generated drawings into a temp dir and read the output pin. It said 999 before this line moved.
-/// #1519 adds 1: `tests/pvec_1481_classify.rs::a_cancel_mid_write_leaves_the_previous_pair_and_no_partial_1519`, which converts into a temp dir. It said 1001 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 1002;
+/// #1480 adds 4: the `tests/pvec_1480_all_refused.rs` cells that convert a drawing PVec refuses into a temp dir. It said 999 before this line moved.
+/// #1518 adds 2: the `tests/pvec_1481_classify.rs` cells that convert generated drawings into a temp dir and read the output pin. It said 1003 before this line moved.
+/// #1519 adds 2: `tests/pvec_1481_classify.rs::a_cancel_mid_write_leaves_the_previous_pair_and_no_partial_1519` and its spilled twin `a_cancel_mid_spilled_write_leaves_the_previous_pair_and_no_partial_1519`, which convert into a temp dir. It said 1005 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 1007;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
