@@ -327,12 +327,15 @@ fn the_sample_names_what_it_still_does_not_draw() {
         "ACAD_TABLE",
     ] {
         assert!(said(class), "{class} is not drawn and was not reported");
-    }
-    for d in report.diagnostics() {
-        let m = d.message();
-        if d.code() == DiagnosticCode::UNSUPPORTED_ENTITY && m.starts_with("POINT") {
-            assert!(m.contains("out of scope:"), "no reason given: {m}");
-        }
+        assert!(
+            report
+                .diagnostics()
+                .iter()
+                .any(|d| d.code() == DiagnosticCode::UNSUPPORTED_ENTITY
+                    && d.message().starts_with(class)
+                    && d.message().contains("out of scope: ")),
+            "{class} is reported without a reason"
+        );
     }
     for class in [
         "3DFACE",

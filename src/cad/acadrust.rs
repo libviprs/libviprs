@@ -668,36 +668,6 @@ fn convert_drawn(
     Some((drawn, notes))
 }
 
-/// Why a class this reader does not draw stays out (issue #1523), or [`None`] for a class nobody
-/// has looked at yet. The diagnostic carries the reason, so a report says why and not only what.
-fn out_of_scope(class: &str) -> Option<&'static str> {
-    Some(match class {
-        "POINT" => {
-            "a point has no primitive kind, and its look depends on PDMODE and PDSIZE, which this model does not carry"
-        }
-        "ATTDEF" => {
-            "an attribute definition is a template that shows only in the block editor; an INSERT draws its ATTRIB"
-        }
-        "POLYLINE" => "a polyface or polygon mesh is a 3D surface and this model is a 2D view",
-        "MESH" | "3DSOLID" | "REGION" => {
-            "a solid or surface needs its ACIS body or subdivision faces evaluated, and there is no 2D view of it without a 3D renderer"
-        }
-        "RAY" | "XLINE" => "an infinite line has no extent until a view clips it",
-        "MLINE" => {
-            "its lines come from an MLINESTYLE offset table and joint miters this reader does not evaluate"
-        }
-        "SHAPE" => "its outline lives in a compiled SHX shape file that is not in the drawing",
-        "WIPEOUT" => "a mask hides what is under it, which a list of primitives cannot express",
-        "IMAGE" | "PDFUNDERLAY" => {
-            "raster and underlay content is a file the drawing names, not geometry in it"
-        }
-        "ACAD_TABLE" => {
-            "a table is drawn from its style, merged cells and cell contents, which are not evaluated"
-        }
-        _ => return None,
-    })
-}
-
 fn convert(
     provider: &AcadrustProvider,
     leaf: &FlatEntity,
@@ -863,10 +833,44 @@ fn convert(
         }
         RawGeometry::Unmapped { reason } => {
             let Some(fact) = entity.provenance.handle.and_then(|h| provider.text_fact(h)) else {
-                let why = out_of_scope(class).map_or_else(
-                    || reason.clone(),
-                    |why| format!("{reason}; out of scope: {why}"),
-                );
+                // Why a class this reader does not draw stays out (issue #1523), so a report
+                // says why and not only what. A class nobody has looked at yet gets no reason.
+                let out_of_scope = match class {
+                    "POINT" => {
+                        "a point has no primitive kind, and its look depends on PDMODE and PDSIZE, which this model does not carry"
+                    }
+                    "ATTDEF" => {
+                        "an attribute definition is a template that shows only in the block editor; an INSERT draws its ATTRIB"
+                    }
+                    "POLYLINE" => {
+                        "a polyface or polygon mesh is a 3D surface and this model is a 2D view"
+                    }
+                    "MESH" | "3DSOLID" | "REGION" => {
+                        "a solid or surface needs its ACIS body or subdivision faces evaluated, and there is no 2D view of it without a 3D renderer"
+                    }
+                    "RAY" | "XLINE" => "an infinite line has no extent until a view clips it",
+                    "MLINE" => {
+                        "its lines come from an MLINESTYLE offset table and joint miters this reader does not evaluate"
+                    }
+                    "SHAPE" => {
+                        "its outline lives in a compiled SHX shape file that is not in the drawing"
+                    }
+                    "WIPEOUT" => {
+                        "a mask hides what is under it, which a list of primitives cannot express"
+                    }
+                    "IMAGE" | "PDFUNDERLAY" => {
+                        "raster and underlay content is a file the drawing names, not geometry in it"
+                    }
+                    "ACAD_TABLE" => {
+                        "a table is drawn from its style, merged cells and cell contents, which are not evaluated"
+                    }
+                    _ => "",
+                };
+                let why = if out_of_scope.is_empty() {
+                    reason.clone()
+                } else {
+                    format!("{reason}; out of scope: {out_of_scope}")
+                };
                 return Err(unmoved(DiagnosticCode::UNSUPPORTED_ENTITY, &why));
             };
             return text_primitive(&fact, &map, origin, class);
