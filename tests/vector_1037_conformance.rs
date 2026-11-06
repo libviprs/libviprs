@@ -89,3 +89,73 @@ fn recorded_android_result_passed_both_modes_on_the_committed_golden() {
     }
     assert!(v["maplibre_native_android"].is_string());
 }
+
+#[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
+fn ios_harness_runs_both_modes_against_the_shared_style_and_golden() {
+    let t = read("conformance/ios/Sources/Conformance/main.swift");
+    for needle in [
+        "remoteRangeMode",
+        "localFileMode",
+        "missingArchiveRendersBlank",
+        "pmtiles://file://",
+        "visibleFeatures",
+        "/__log",
+    ] {
+        assert!(t.contains(needle), "the iOS harness must cover {needle}");
+    }
+    let r = read("conformance/ios/run.sh");
+    assert!(
+        r.contains("src/vector/black_on_white.style.json"),
+        "the iOS harness must use the shared style, not a copy"
+    );
+    assert!(
+        r.contains("web/vector-viewer/e2e/server.mjs"),
+        "the iOS harness must reuse the Range/CORS server"
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
+fn recorded_ios_result_passed_both_modes_on_the_committed_golden() {
+    let v: Value = serde_json::from_str(&read("conformance/ios/evidence/result.json")).unwrap();
+    let golden = fs::metadata(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("web/vector-viewer/e2e/fixtures/golden.pmtiles"),
+    )
+    .unwrap()
+    .len();
+    assert_eq!(
+        v["golden_bytes"].as_u64(),
+        Some(golden),
+        "result is for this golden"
+    );
+    for mode in [
+        "remoteRangeMode",
+        "localFileMode",
+        "missingArchiveRendersBlank",
+    ] {
+        assert_eq!(v["tests"][mode].as_str(), Some("passed"), "{mode}");
+    }
+    assert!(v["maplibre_native_ios"].is_string());
+    let m = &v["metrics"];
+    assert_eq!(m["remoteRangeMode"]["colouredPx"].as_u64(), Some(0));
+    assert!(m["remoteRangeMode"]["rangedRequests"].as_u64() >= Some(2));
+    assert_eq!(
+        m["remoteRangeMode"]["blackPx"], m["localFileMode"]["blackPx"],
+        "same pixels in both modes"
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)] // touches the filesystem, which Miri isolation blocks
+fn docs_no_longer_say_ios_was_not_run() {
+    let d = read("docs/mobile-pmtiles.md");
+    assert!(
+        !d.contains("not run yet"),
+        "the iOS section must report the run"
+    );
+    assert!(
+        d.contains("conformance/ios/"),
+        "docs point at the iOS harness"
+    );
+}

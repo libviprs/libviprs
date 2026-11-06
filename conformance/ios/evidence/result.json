@@ -1,0 +1,53 @@
+{
+  "issue": 1037,
+  "platform": "ios",
+  "maplibre_native_ios": "7.0.0",
+  "ios_release": "27.2",
+  "simulator": "iPhone 17 (iOS-27-2), on an arm64 Mac",
+  "golden_bytes": 79939,
+  "tests": {
+    "remoteRangeMode": "passed",
+    "localFileMode": "passed",
+    "missingArchiveRendersBlank": "passed"
+  },
+  "metrics": {
+    "remoteRangeMode": {
+      "blackPx": 41809,
+      "colouredPx": 0,
+      "greyPx": 18648,
+      "height": 2532,
+      "lineFeatures": 4,
+      "rangedBytes": 18166,
+      "rangedRequests": 18,
+      "textFeatures": 2,
+      "totalPx": 2962440,
+      "whitePx": 2901983,
+      "width": 1170
+    },
+    "localFileMode": {
+      "blackPx": 41809,
+      "colouredPx": 0,
+      "downloadedBytes": 79939,
+      "greyPx": 18648,
+      "height": 2532,
+      "lineFeatures": 4,
+      "sha256": "50cbe2a19fc1ead41688d2acf2a760030b5621080d67a4479c315bd663b1b64f",
+      "textFeatures": 2,
+      "totalPx": 2962440,
+      "url": "Documents/golden.pmtiles",
+      "whitePx": 2901983,
+      "width": 1170
+    },
+    "missingArchiveRendersBlank": {
+      "blackPx": 0,
+      "colouredPx": 0,
+      "greyPx": 0,
+      "height": 2532,
+      "lineFeatures": 0,
+      "textFeatures": 0,
+      "totalPx": 2962440,
+      "whitePx": 2962440,
+      "width": 1170
+    }
+  }
+}

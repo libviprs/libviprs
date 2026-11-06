@@ -35,15 +35,10 @@ On Android the instrumented test in `conformance/android/` loads the golden arch
 in both modes in an emulator, and checks rendered pixels (black linework on white and nothing coloured),
 queried features, and the store's request log (ranged `206` reads only in remote mode, one whole-file
 download and no further requests in local mode). `conformance/android/evidence/` has the screenshots and
-the numbers. The recorded run was on the UGREEN NAS (native x86_64 with KVM). The emulator did not boot on MARS, so there is no MARS run. The iOS run is tracked in #1037.
+the numbers. The recorded run was on the UGREEN NAS (native x86_64 with KVM). The emulator did not boot on MARS, so there is no MARS run. The iOS run is below.
 
-## iOS (not run yet)
+## iOS
 
-I have not run the iOS half, so nothing here claims conformance on iOS. Xcode 26.6 is on mercury but its license is not accepted and the active developer directory is the command line tools, and both need `sudo`:
+`conformance/ios/` is a SwiftPM executable using MapLibre Native iOS 7.0.0 (the `maplibre-gl-native-distribution` package). `run.sh` builds it for the simulator, wraps it into an `.app`, starts the same `web/vector-viewer/e2e/server.mjs` store and runs the app in a booted iOS simulator. It needs Xcode, so it runs on a Mac and not in a container: `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer conformance/ios/run.sh`. It makes the same three checks as the Android test with the same style, golden archive, camera and thresholds, and it leaves the numbers in `conformance/ios/evidence/`.
 
-```sh
-sudo xcodebuild -license accept
-sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
-```
-
-After that the plan is the Android one again: an XCTest target using MapLibre Native iOS from Swift Package Manager, the same shared style and golden archive, the same `web/vector-viewer/e2e/server.mjs` store, remote Range mode and then download-then-`pmtiles://file://`, asserting rendered pixels and queried features in an iOS simulator. I will only add that harness once I can build it.
+The recorded run was an iPhone 17 simulator on iOS 27.2, on an arm64 Mac (jupiter). Remote Range mode made 18 ranged `206` reads and no whole-file `200`. Local file mode downloaded the archive once (79939 bytes, checksum matches the store's ETag) and opened it as `pmtiles://file://...` with no further requests. Both modes drew identical pixels (41809 black, 0 coloured), and the missing-archive control drew a blank map. The screenshots are not committed.
