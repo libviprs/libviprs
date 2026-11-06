@@ -33,6 +33,8 @@ const CROSS_PLATFORM_LAYOUT: &[&str] = &[
 
 const CROSS_PLATFORM_PAINT: &[&str] = &[
     "background-color",
+    "fill-color",
+    "fill-opacity",
     "line-color",
     "line-opacity",
     "line-width",

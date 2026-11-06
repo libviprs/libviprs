@@ -286,7 +286,13 @@ fn the_sample_agrees_with_the_acadsharp_adapter_where_the_entities_are_supported
     assert_eq!(c.get(PrimitiveKind::Arc), 3);
     assert_eq!(c.get(PrimitiveKind::Ellipse), 1);
     assert_eq!(c.get(PrimitiveKind::Spline), 2);
-    assert_eq!(c.get(PrimitiveKind::Polygon), 8, "one per hatch loop");
+    // The ACadSharp adapter's 8 are the hatch loops. This reader also fills the sample's 2D
+    // SOLIDs (#1034), each of which is one more polygon.
+    assert_eq!(
+        c.get(PrimitiveKind::Polygon),
+        8 + 13,
+        "one per hatch loop and per SOLID"
+    );
     assert_eq!(c.get(PrimitiveKind::Line), 86, "lines: {c:?}");
     assert_eq!(c.get(PrimitiveKind::Circle), 12, "circles: {c:?}");
     assert_eq!(c.get(PrimitiveKind::Text), 67, "texts: {c:?}");
@@ -301,10 +307,17 @@ fn the_sample_names_what_it_still_does_not_draw() {
             d.code() == DiagnosticCode::UNSUPPORTED_ENTITY && d.message().starts_with(class)
         })
     };
-    for class in ["SOLID", "POINT", "MLINE"] {
+    for class in ["POINT", "MLINE"] {
         assert!(said(class), "{class} is not drawn and was not reported");
     }
-    for class in ["HATCH", "MULTILEADER", "LEADER", "TOLERANCE", "DIMENSION"] {
+    for class in [
+        "HATCH",
+        "SOLID",
+        "MULTILEADER",
+        "LEADER",
+        "TOLERANCE",
+        "DIMENSION",
+    ] {
         assert!(!said(class), "{class} is drawn and should not be reported");
     }
 }
@@ -335,7 +348,7 @@ fn multileader_text_and_block_attributes_cross_as_text() {
 
 #[test]
 #[cfg_attr(miri, ignore)]
-fn a_hatch_loop_is_a_polygon_that_knows_its_hatch() {
+fn a_hatch_loop_or_a_solid_is_a_polygon_that_knows_its_entity() {
     let (sink, _) = model(&AcadrustDecoder::new(), &cad("sample_AC1018.dwg"));
     let polygons: Vec<_> = sink
         .collected()
@@ -345,7 +358,7 @@ fn a_hatch_loop_is_a_polygon_that_knows_its_hatch() {
             _ => None,
         })
         .collect();
-    assert_eq!(polygons.len(), 8);
+    assert_eq!(polygons.len(), 8 + 13);
     assert!(polygons.iter().all(|g| g.vertices().len() >= 3));
     assert!(polygons.iter().all(|g| g.origin().item_handle().is_some()));
 }

@@ -371,8 +371,12 @@ fn run(fx: &Fixture, truth: Option<&Value>, dir: &Path) -> Result<Option<Convert
         Some(t) => {
             // The report declares how many entities PVec's writer refused, and the comparison
             // subtracts them, so a regression that refuses more would absorb itself. Pin the count:
-            // only `mixed-entity-001` has an entity the container cannot store (#1446).
-            let expected = usize::from(fx.id == "mixed-entity-001");
+            // `mixed-entity-001` has an entity the container cannot store (#1446), and each bulge
+            // fixture is one bulge polyline the container refuses whole (#1480).
+            let expected = usize::from(matches!(
+                fx.id.as_str(),
+                "mixed-entity-001" | "bulge-arc-001" | "bulge-arc-neg-001"
+            ));
             let refused = refused_by_writer(&c.report);
             if refused != expected {
                 return fail(
