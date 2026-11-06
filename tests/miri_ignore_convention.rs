@@ -860,7 +860,8 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1525 adds 2 more: the line-style name-too-long and bad-style cells of `tests/pvec_1500_convert_streams.rs`. It said 1012 before this line moved.
 /// #1526 adds 10: the `tests/pvec_1526_regions.rs` cells that convert a plan or a DWG into a temp dir and read the class stream back. It said 1014 before this line moved.
 /// #1526 adds 1 more: the `tests/pvec_1526_corpus_geometry.rs` cell that converts the corpus into a temp dir. It said 1024 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 1025;
+/// #1526 adds 1 more: the `tests/pvec_1526_streams_bench.rs` benchmark, which writes a drawing into a temp dir. It said 1025 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 1026;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {

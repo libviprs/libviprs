@@ -638,6 +638,7 @@ annotated   fs-detected  tests/pvec_1500_convert_streams.rs::issue_1525_the_line
 annotated   fs-detected  tests/pvec_1500_convert_streams.rs::issue_1525_the_streams_are_the_same_bytes_spilled_or_in_memory
 annotated   fs-detected  tests/pvec_1500_convert_streams.rs::issue_1525_the_three_streams_are_written_and_read_back_through_pvecs_reader
 annotated   fs-detected  tests/pvec_1526_corpus_geometry.rs::issue_1526_the_corpus_geometry_is_the_same_with_every_stream_and_the_regions_step_on_or_off
+annotated   fs-detected  tests/pvec_1526_streams_bench.rs::streams_cost
 annotated   fs-detected  tests/pvec_1526_regions.rs::issue_1526_a_conversion_with_no_regions_option_writes_no_class_stream_and_no_section
 annotated   fs-detected  tests/pvec_1526_regions.rs::issue_1526_a_dwg_with_walls_and_a_text_gives_one_named_room
 annotated   fs-detected  tests/pvec_1526_regions.rs::issue_1526_a_plan_past_the_node_limit_still_converts_and_the_report_says_why_no_regions
