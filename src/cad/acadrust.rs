@@ -13,7 +13,9 @@
 //! # What crosses, and what is said about the rest
 //!
 //! Lines, polylines (bulges verbatim), arcs, circles, ellipses, splines and text cross. So do the
-//! loops of a HATCH (as polygons, when their edges are straight, circular or a polyline), the
+//! loops of a HATCH (as polygons, when their edges are straight, circular or a polyline; a solid
+//! hatch's loops are marked [`super::Fill::Solid`] and a patterned one stays an outline and says so with
+//! [`DiagnosticCode::HATCH_PATTERN_ONLY`]), a 2D SOLID (as a filled polygon), the
 //! lines of a LEADER or MULTILEADER, the text of a MULTILEADER or TOLERANCE, and the visible
 //! attributes of an INSERT. The
 //! block transform of an INSERT is applied to the geometry, so a primitive from an expanded
@@ -24,7 +26,7 @@
 //! [`DiagnosticCode::NON_UNIFORM_BLOCK_SCALE`]: an arc that has become an ellipse is not an arc
 //! any more, and a made-up approximation would be a silent error.
 //!
-//! Anything this reader does not flatten (solids, points, mlines, images...) is
+//! Anything this reader does not flatten (points, mlines, images...) is
 //! reported with [`DiagnosticCode::UNSUPPORTED_ENTITY`] and its class name, never dropped
 //! quietly. An entity with an extrusion normal other than +Z inside an INSERT is reported the
 //! same way.
@@ -49,8 +51,8 @@ use std::collections::HashMap;
 use super::text::{decode_escapes, display_text};
 use super::{
     Arc, CadDecoder, CadDrawing, CadError, CadSource, CadView, Circle, DecodeReport, Diagnostic,
-    DiagnosticCode, Ellipse, ItemHandle, Line, Origin, Polygon, Polyline, Primitive, PrimitiveSink,
-    Spline, Text,
+    DiagnosticCode, Ellipse, Fill, ItemHandle, Line, Origin, Polygon, Polyline, Primitive,
+    PrimitiveSink, Spline, Text, TextAnchor,
 };
 use crate::pvec::dwg_acadrust::{AcadrustProvider, TextFact};
 use crate::pvec::flatten::{BlockResolver, FlatEntity, FlattenBounds, LineageStore, SkipReason};
@@ -563,7 +565,11 @@ fn text_primitive(
         content,
     )
     .map_err(|e| e.to_diagnostic())?;
-    Ok(Some(text.with_origin(origin).into()))
+    let anchor = fact
+        .attachment
+        .and_then(TextAnchor::from_attachment)
+        .unwrap_or_default();
+    Ok(Some(text.with_origin(origin).with_anchor(anchor).into()))
 }
 
 /// What a HATCH, LEADER, MULTILEADER or TOLERANCE leaf draws, and what it says it left out, or
@@ -600,7 +606,10 @@ fn convert_drawn(
             } else {
                 [0.0, 0.0, 1.0]
             };
-            for ring in &fact.rings {
+            // The first loop that is built opens the fill. If the one that should have opened it
+            // was refused, the next loop opens it instead of becoming a fill of its own.
+            let mut opened = false;
+            for (ring, fill) in fact.rings.iter().zip(&fact.fills) {
                 let points: Vec<[f64; 3]> = ring
                     .iter()
                     .map(|v| map.point([v.x, v.y, fact.elevation]))
@@ -611,11 +620,25 @@ fn convert_drawn(
                     Vec::new()
                 };
                 match Polygon::new(&points, normal, &bulges) {
-                    Ok(p) => drawn.push(p.with_origin(origin).into()),
+                    Ok(p) => {
+                        let fill = match *fill {
+                            Fill::Solid { .. } if !opened => Fill::Solid { opens: true },
+                            other => other,
+                        };
+                        opened = opened || matches!(fill, Fill::Solid { opens: true });
+                        drawn.push(p.with_origin(origin).with_fill(fill).into());
+                    }
                     Err(e) => notes.push(e.to_diagnostic()),
                 }
             }
         }
+    }
+    if fact.pattern_only {
+        notes.push(refused(
+            DiagnosticCode::HATCH_PATTERN_ONLY,
+            class,
+            "a patterned hatch is drawn as its boundary, without its pattern lines",
+        ));
     }
     for stroke in &fact.strokes {
         for pair in stroke.windows(2) {

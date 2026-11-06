@@ -20,6 +20,7 @@ fn section(doc: &str) -> &str {
 }
 
 #[test]
+#[ignore = "benchmark plumbing, opt-in: cargo test --test pvec_1064_memory_decision -- --ignored"]
 #[cfg_attr(miri, ignore)]
 fn the_spill_strategy_is_measured_not_marked_unbuilt() {
     let s = section(&read("docs/pvec-benchmarks.md")).to_string();
@@ -34,6 +35,7 @@ fn the_spill_strategy_is_measured_not_marked_unbuilt() {
 }
 
 #[test]
+#[ignore = "benchmark plumbing, opt-in: cargo test --test pvec_1064_memory_decision -- --ignored"]
 #[cfg_attr(miri, ignore)]
 fn the_decision_names_a_strategy_and_cites_figures() {
     let s = section(&read("docs/pvec-benchmarks.md")).to_string();
@@ -51,6 +53,7 @@ fn the_decision_names_a_strategy_and_cites_figures() {
 }
 
 #[test]
+#[ignore = "benchmark plumbing, opt-in: cargo test --test pvec_1064_memory_decision -- --ignored"]
 #[cfg_attr(miri, ignore)]
 fn the_baseline_has_spill_rows_for_every_cell_from_the_native_host() {
     let b: serde_json::Value =
@@ -72,6 +75,7 @@ fn the_baseline_has_spill_rows_for_every_cell_from_the_native_host() {
 }
 
 #[test]
+#[ignore = "benchmark plumbing, opt-in: cargo test --test pvec_1064_memory_decision -- --ignored"]
 #[cfg_attr(miri, ignore)]
 fn the_budget_sweep_is_recorded() {
     let b: serde_json::Value =
@@ -87,6 +91,7 @@ fn the_budget_sweep_is_recorded() {
 /// The spill rows in the document are the baseline's, rounded up to the MiB, so the page and the
 /// file cannot drift apart by a rerun that only touched one of them.
 #[test]
+#[ignore = "benchmark plumbing, opt-in: cargo test --test pvec_1064_memory_decision -- --ignored"]
 #[cfg_attr(miri, ignore)]
 fn the_spill_table_agrees_with_the_baseline() {
     let b: serde_json::Value =
