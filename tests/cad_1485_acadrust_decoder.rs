@@ -293,7 +293,8 @@ fn the_sample_agrees_with_the_acadsharp_adapter_where_the_entities_are_supported
         8 + 13,
         "one per hatch loop and per SOLID"
     );
-    assert_eq!(c.get(PrimitiveKind::Line), 86, "lines: {c:?}");
+    // 86 before #1523; the 3DFACE's four visible edges are the other four of the adapter's 90.
+    assert_eq!(c.get(PrimitiveKind::Line), 90, "lines: {c:?}");
     assert_eq!(c.get(PrimitiveKind::Circle), 12, "circles: {c:?}");
     assert_eq!(c.get(PrimitiveKind::Text), 67, "texts: {c:?}");
 }
@@ -311,6 +312,7 @@ fn the_sample_names_what_it_still_does_not_draw() {
         assert!(said(class), "{class} is not drawn and was not reported");
     }
     for class in [
+        "3DFACE",
         "HATCH",
         "SOLID",
         "MULTILEADER",
