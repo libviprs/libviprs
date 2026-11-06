@@ -224,6 +224,32 @@ pub struct ComponentsSummary {
     pub colours_ignored: u64,
 }
 
+/// What the room and corridor step of a conversion found (#1526). Optional and ignorable, like
+/// [`ComponentsSummary`]: the regions are a guess from the wall linework, and the decoded geometry and
+/// the manifest box are the same whether or not the step ran.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct RegionsSummary {
+    /// Rooms found.
+    pub rooms: u64,
+    /// Corridors found.
+    pub corridors: u64,
+    /// Gaps between wall ends the step closed. The closing segments are never written as geometry.
+    pub gaps_closed: u64,
+    /// Faces no rule could label.
+    pub unlabelled: u64,
+    /// Regions that found a text label inside them.
+    pub labelled: u64,
+    /// Regions written to PVec's semantic class stream.
+    pub written: u64,
+    /// Regions left out of that stream, keyed by reason (`derived-boundary`, `unlabelled`,
+    /// `unwritten-boundary`, `no-boundary`, `ring-too-long`).
+    pub dropped: BTreeMap<String, u64>,
+    /// The reason code when the step refused (`regions.node-limit`, `regions.edge-limit`,
+    /// `regions.face-limit`). The conversion carries on without regions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refused: Option<String>,
+}
+
 /// The whole report.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConversionReport {
@@ -251,6 +277,9 @@ pub struct ConversionReport {
     /// What the component streams did (#1525). Absent when the conversion wrote none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub components: Option<ComponentsSummary>,
+    /// What the room and corridor step found (#1526). Absent when the step was not asked for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub regions: Option<RegionsSummary>,
     /// The images, fills and text of a PDF page. Absent for a DWG.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pdf: Option<PdfSummary>,
@@ -402,6 +431,7 @@ impl ReportBuilder {
             georeference: None,
             diagnostics: Vec::new(),
             components: None,
+            regions: None,
             pdf: None,
             entities: self.rows,
         })
