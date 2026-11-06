@@ -1126,13 +1126,15 @@ const SPLIT_GUARD_CELL: Cell = Cell {
 
 /// The harness measures something, at a size that costs milliseconds.
 ///
-/// Every `#[ignore]`d test above is invisible to CI by construction, so this is
-/// the one that keeps the harness compiling and working. It is also the
-/// positive control on the numbers: a row of zeroes and an empty pyramid
+/// Every `#[ignore]`d test above is invisible to the default suite by
+/// construction, and so is this one now that benchmarks are opt-in (run it with
+/// `--ignored`). It is the check that the harness works, and the positive
+/// control on the numbers: a row of zeroes and an empty pyramid
 /// satisfy every shape assertion, so this asserts the tile counts match the
 /// plan, that both backends produced the same tiles, and that the
 /// filesystem-entry gap the whole issue is about is really there.
 #[test]
+#[ignore = "benchmark plumbing, opt-in: cargo test --test pmtiles_benchmarks -- --ignored"]
 #[cfg_attr(miri, ignore)]
 fn both_backends_measure_the_same_pyramid() {
     let profile = Profile::Ci;
@@ -1201,6 +1203,7 @@ fn both_backends_measure_the_same_pyramid() {
 
 /// Every read scenario produces a usable row at CI size.
 #[test]
+#[ignore = "benchmark plumbing, opt-in: cargo test --test pmtiles_benchmarks -- --ignored"]
 #[cfg_attr(miri, ignore)]
 fn every_read_scenario_reports_a_row() {
     let profile = Profile::Ci;
@@ -1337,6 +1340,7 @@ fn every_read_scenario_reports_a_row() {
 /// shrank would leave a guard that passes against a split with a phase
 /// missing.
 #[test]
+#[ignore = "benchmark plumbing, opt-in: cargo test --test pmtiles_benchmarks -- --ignored"]
 #[cfg_attr(miri, ignore)]
 fn the_cold_split_accounts_for_the_whole_combined_row() {
     let profile = Profile::Ci;
@@ -1493,6 +1497,7 @@ fn the_cold_split_accounts_for_the_whole_combined_row() {
 /// one entry. The benchmark's source is a gradient, whose tiles are distinct,
 /// so the two numbers are the same here.
 #[test]
+#[ignore = "benchmark plumbing, opt-in: cargo test --test pmtiles_benchmarks -- --ignored"]
 fn the_large_profile_reaches_the_leaf_directory_path() {
     let biggest = Profile::Large
         .canvases()
@@ -1611,6 +1616,7 @@ fn brink_search() -> (Cell, usize) {
 /// entries already spill into leaves; a `<=` would move the brink by one and
 /// nothing else in this file would notice.
 #[test]
+#[ignore = "benchmark plumbing, opt-in: cargo test --test pmtiles_benchmarks -- --ignored"]
 fn the_writers_root_only_cutoff_is_the_one_this_file_copied() {
     const WRITER: &str = include_str!("../src/pmtiles/writer.rs");
     let declaration = format!("const ROOT_ONLY_MAX_ENTRIES: u64 = {ROOT_ONLY_MAX_ENTRIES};");
@@ -1635,6 +1641,7 @@ fn the_writers_root_only_cutoff_is_the_one_this_file_copied() {
 /// archive came out as, and it fails the day the planner's rounding changes
 /// and some other cell gets closer to the cutoff.
 #[test]
+#[ignore = "benchmark plumbing, opt-in: cargo test --test pmtiles_benchmarks -- --ignored"]
 fn the_brink_cell_is_the_largest_root_the_search_space_reaches() {
     let (found, tiles) = brink_search();
     let configured = Cell {
@@ -1746,6 +1753,7 @@ fn the_brink_cells_root_stops_just_under_the_writers_cutoff() {
 /// a chart that silently stops drawing there, and nothing else in either
 /// repository would catch it.
 #[test]
+#[ignore = "benchmark plumbing, opt-in: cargo test --test pmtiles_benchmarks -- --ignored"]
 #[cfg_attr(miri, ignore)]
 fn the_exported_json_carries_every_field_the_site_reads() {
     let rows = vec![
@@ -1910,6 +1918,7 @@ fn the_exported_json_carries_every_field_the_site_reads() {
 /// the mistake issue #1021 exists to correct, so the shape of the attestation
 /// is checked the same way the row shape is: parsed back, key by key.
 #[test]
+#[ignore = "benchmark plumbing, opt-in: cargo test --test pmtiles_benchmarks -- --ignored"]
 #[cfg_attr(miri, ignore)]
 fn the_envelope_says_which_host_produced_the_numbers() {
     let provenance = bench::Provenance::capture();
@@ -2017,6 +2026,7 @@ fn the_envelope_says_which_host_produced_the_numbers() {
 /// A clean flag attached to no commit is worse than a hole, because a hole says
 /// nobody can reproduce this and a `false` says the tree was pristine.
 #[test]
+#[ignore = "benchmark plumbing, opt-in: cargo test --test pmtiles_benchmarks -- --ignored"]
 #[cfg_attr(miri, ignore)]
 fn a_repository_with_no_commits_publishes_holes_rather_than_half_an_attestation() {
     let dir = tempfile::tempdir().expect("a scratch directory");
@@ -2049,6 +2059,7 @@ fn a_repository_with_no_commits_publishes_holes_rather_than_half_an_attestation(
 }
 
 #[test]
+#[ignore = "benchmark plumbing, opt-in: cargo test --test pmtiles_benchmarks -- --ignored"]
 #[cfg_attr(miri, ignore)]
 fn a_repository_with_a_commit_is_read_back() {
     let dir = tempfile::tempdir().expect("a scratch directory");
@@ -2098,6 +2109,7 @@ fn a_repository_with_a_commit_is_read_back() {
 
 /// A run taken under conditions that spoil it says so out loud.
 #[test]
+#[ignore = "benchmark plumbing, opt-in: cargo test --test pmtiles_benchmarks -- --ignored"]
 fn a_run_whose_conditions_spoil_it_warns() {
     let mut prov = bench::Provenance::unknown();
     // Nothing known at all: the commit warning fires and nothing else claims
@@ -2144,6 +2156,7 @@ fn a_run_whose_conditions_spoil_it_warns() {
 /// developed on, which is the one place the miss would look like "this
 /// platform has no load average".
 #[test]
+#[ignore = "benchmark plumbing, opt-in: cargo test --test pmtiles_benchmarks -- --ignored"]
 fn a_load_average_parses_on_both_platforms_spellings() {
     let linux = bench::parse_load_average("0.52 0.58 0.59 1/523 12345\n")
         .expect("the Linux spelling parses");
@@ -2162,6 +2175,7 @@ fn a_load_average_parses_on_both_platforms_spellings() {
 
 /// A row measured on a platform with no `/proc` publishes a hole.
 #[test]
+#[ignore = "benchmark plumbing, opt-in: cargo test --test pmtiles_benchmarks -- --ignored"]
 fn a_platform_without_a_peak_rss_reports_null_not_a_flattering_zero() {
     assert_eq!(phase_peak_rss(false), None);
     let row = Measurement::new(
@@ -2193,6 +2207,7 @@ fn a_platform_without_a_peak_rss_reports_null_not_a_flattering_zero() {
 
 /// A pyramid the harness cannot stat is a hole, not one entry of nothing.
 #[test]
+#[ignore = "benchmark plumbing, opt-in: cargo test --test pmtiles_benchmarks -- --ignored"]
 #[cfg_attr(miri, ignore)]
 fn an_unmeasurable_pyramid_publishes_no_entry_count() {
     let missing = std::path::Path::new("/this/path/does/not/exist/pyramid.pmtiles");
@@ -2235,6 +2250,7 @@ fn an_unmeasurable_pyramid_publishes_no_entry_count() {
 /// levels. Nothing checked either. This is the three-line guard that settles
 /// it, and it is the shape of guard this repository already writes.
 #[test]
+#[ignore = "benchmark plumbing, opt-in: cargo test --test pmtiles_benchmarks -- --ignored"]
 fn the_eight_thousand_pixel_cell_plans_the_tile_count_the_doc_publishes() {
     assert_eq!(coordinates(&plan_for(8192, 8192, 64)).len(), 21_851);
     // The 21845 the prose used to carry, and where it comes from: the levels
@@ -2258,6 +2274,7 @@ fn the_eight_thousand_pixel_cell_plans_the_tile_count_the_doc_publishes() {
 /// for a ten-minute benchmark run, which is the only reason the bug cost ten
 /// minutes rather than one afternoon.
 #[test]
+#[ignore = "benchmark plumbing, opt-in: cargo test --test pmtiles_benchmarks -- --ignored"]
 fn a_child_row_file_splices_into_the_document() {
     let one = bench::rows_to_json(&[sample_row("generate", PMTILES)]);
     let two = bench::rows_to_json(&[
@@ -2321,6 +2338,7 @@ fn sample_row(scenario: &str, storage: &str) -> Measurement {
 /// format change on one side is a child that panics on a spec it cannot read,
 /// inside a process whose stderr the parent only prints on failure.
 #[test]
+#[ignore = "benchmark plumbing, opt-in: cargo test --test pmtiles_benchmarks -- --ignored"]
 fn a_cell_spec_round_trips_through_its_string_form() {
     let cell = Cell {
         width: 8192,

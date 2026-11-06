@@ -491,6 +491,29 @@ pub struct Polygon {
     normal: Vector3,
     vertices: Vec<Point3>,
     bulges: Vec<f64>,
+    fill: Fill,
+}
+
+/// How a [`Polygon`] is drawn: as an outline, or as part of a solid fill.
+///
+/// A solid hatch is one fill made of several loops (an outer loop and its
+/// islands), and the loops are filled together by even-odd: a loop inside one
+/// other loop is a hole. A decoder says which loops belong together by
+/// emitting them one after another, the first with `opens` set. A polygon that
+/// is a whole fill by itself (a 2D SOLID) is `Solid { opens: true }` and the
+/// next polygon opens its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Fill {
+    /// Only the boundary is drawn. This is what every hatch loop was before
+    /// fills, and what a patterned hatch stays.
+    #[default]
+    Outline,
+    /// The inside is drawn.
+    Solid {
+        /// True for the first loop of a fill, false for each loop that joins the
+        /// fill before it.
+        opens: bool,
+    },
 }
 
 impl Polygon {
@@ -512,7 +535,21 @@ impl Polygon {
             normal: vector("normal", normal)?,
             vertices,
             bulges,
+            fill: Fill::Outline,
         })
+    }
+
+    /// The same polygon, drawn as `fill` says.
+    #[must_use]
+    pub const fn with_fill(mut self, fill: Fill) -> Self {
+        self.fill = fill;
+        self
+    }
+
+    /// How this is drawn.
+    #[must_use]
+    pub const fn fill(&self) -> Fill {
+        self.fill
     }
 
     /// A ring of straight spans in the XY plane.
@@ -1091,6 +1128,71 @@ pub struct Text {
     height: f64,
     rotation: f64,
     content: String,
+    anchor: TextAnchor,
+}
+
+/// Which point of a label's box sits on its [`Text::position`].
+///
+/// TEXT and a bare string sit on their bottom-left corner, which is the
+/// default. MTEXT carries a nine-way attachment point, and a label attached at
+/// its top-left hangs below its insertion point, so the anchor has to cross.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TextAnchor {
+    /// Top left.
+    TopLeft,
+    /// Top centre.
+    TopCenter,
+    /// Top right.
+    TopRight,
+    /// Middle left.
+    MiddleLeft,
+    /// Middle centre.
+    MiddleCenter,
+    /// Middle right.
+    MiddleRight,
+    /// Bottom left.
+    #[default]
+    BottomLeft,
+    /// Bottom centre.
+    BottomCenter,
+    /// Bottom right.
+    BottomRight,
+}
+
+impl TextAnchor {
+    /// The anchor of a DXF attachment point (code 71), 1 to 9 reading across the
+    /// top row first, or [`None`] for any other number.
+    #[must_use]
+    pub const fn from_attachment(code: u8) -> Option<Self> {
+        Some(match code {
+            1 => Self::TopLeft,
+            2 => Self::TopCenter,
+            3 => Self::TopRight,
+            4 => Self::MiddleLeft,
+            5 => Self::MiddleCenter,
+            6 => Self::MiddleRight,
+            7 => Self::BottomLeft,
+            8 => Self::BottomCenter,
+            9 => Self::BottomRight,
+            _ => return None,
+        })
+    }
+
+    /// The name a style's `text-anchor` takes for this anchor.
+    #[must_use]
+    pub const fn style_name(self) -> &'static str {
+        match self {
+            Self::TopLeft => "top-left",
+            Self::TopCenter => "top",
+            Self::TopRight => "top-right",
+            Self::MiddleLeft => "left",
+            Self::MiddleCenter => "center",
+            Self::MiddleRight => "right",
+            Self::BottomLeft => "bottom-left",
+            Self::BottomCenter => "bottom",
+            Self::BottomRight => "bottom-right",
+        }
+    }
 }
 
 impl Text {
@@ -1150,7 +1252,21 @@ impl Text {
             height: positive("height", height)?,
             rotation: scalar("rotation", rotation)?,
             content,
+            anchor: TextAnchor::BottomLeft,
         })
+    }
+
+    /// The same text, attached at `anchor` instead of its bottom-left corner.
+    #[must_use]
+    pub const fn with_anchor(mut self, anchor: TextAnchor) -> Self {
+        self.anchor = anchor;
+        self
+    }
+
+    /// Which point of the label sits on [`Text::position`].
+    #[must_use]
+    pub const fn anchor(&self) -> TextAnchor {
+        self.anchor
     }
 
     /// The same text, attributed to the entity it came from.

@@ -895,7 +895,7 @@ A C reference on the same pixels, one run of three on a warm file: GDAL 3.9.3 (`
 
 ## Release readiness
 
-`cargo test --test pmtiles_release_readiness` keeps the four claims honest:
+`cargo test --test pmtiles_release_readiness` keeps the three claims honest:
 
 1. **PMTiles is in every build.** The `pmtiles`, `sink_pmtiles` and
    `pyramid_reader` modules are not behind a Cargo feature, so "PMTiles is the
@@ -906,9 +906,11 @@ A C reference on the same pixels, one run of three on a warm file: GDAL 3.9.3 (`
 3. **A publish can be rehearsed.** `publish.yml` offers a `dry_run` input, a
    step honours it with `cargo publish --dry-run --locked`, and the real upload
    stays behind the published-contract gate.
-4. **This document is runnable.** Every `--test` command above names a test
-   file that exists, and the column table above is checked against the field
-   list the harness actually emits.
+
+This document is not checked by that test and no release depends on it. The
+benchmarks are an optional, on-demand tool: the plumbing tests in
+`tests/pmtiles_benchmarks.rs` are `#[ignore]`d and run with
+`cargo test --release --test pmtiles_benchmarks -- --ignored --nocapture`.
 
 The feature matrix, the doctests and the intra-doc link gate are not repeated
 here. They are `tests/ci_feature_coverage.rs`, `make doc` and
