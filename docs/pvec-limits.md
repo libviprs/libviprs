@@ -37,7 +37,20 @@ Raise one with `SourceLimits` when a legitimate input trips it, or use `SourceLi
 limit, each refused by the limit it names), `tests/pvec_1439_view_limits.rs` for the view walk, and the fuzz targets `fuzz_pvec_provider`,
 `fuzz_pvec_spline` and `fuzz_pvec_clip` under tight limits. The PDF vector path has its own `PdfVectorLimits` (`docs/pvec-pdf-loss.md`).
 
+### Clean fuzz time (#1070)
+
+The acceptance bar is 60 seconds per target. On top of that I ran each of the four conversion targets for 20 minutes, on mercury (aarch64, native), in a `rust:1.99.1-bookworm` container with nightly `cargo fuzz` (AddressSanitizer on, 3 GiB rss limit), starting from a copy of the committed seed corpus, at libviprs main 97df887c:
+
+| target | runs in 1,201 s | result |
+|---|---|---|
+| `fuzz_pvec_provider` | 632,756 | no crash |
+| `fuzz_pvec_spline` | 12,202,522 | no crash |
+| `fuzz_pvec_clip` | 8,198,203 | no crash |
+| `fuzz_pvec_spool` | 87,172 | no crash |
+
+That is 80 minutes of clean fuzz time in total, 20 minutes per target, on arm64 only. I took no x86_64 fuzz run this time because the NAS was carrying the pre-commit hooks of other jobs for the whole window. It is minutes per target, not a soak run, and the out-of-scope line for multi-hour soaks stands.
+
 ## What is not bounded yet
 
 Memory, in the large. The limits bound what a single drawing may ask for, not what a conversion holds: peak memory is linear in the
-entities of the in-memory path. The writer's spill (`PvecConversion::spill`, #1314 and #1417) moves the writer's share out of memory, but the whole conversion was re-measured with it (`docs/pvec-benchmarks.md`, #1064) and the peak did not move: libviprs' own per-entity state is what sits in memory, and streaming that is #1481.
+entities of the in-memory path. The writer's spill (`PvecConversion::spill`, #1314 and #1417) moves the writer's share out of memory, but the whole conversion was re-measured with it (`docs/pvec-benchmarks.md`, #1064) and the peak did not move: libviprs' own per-entity state is what sits in memory. #1481 cut the tracked peak at a million entities from 2,015 to 1,323 MiB and restated the criterion as a linear budget (`docs/pvec-benchmarks.md`, "After the stack").

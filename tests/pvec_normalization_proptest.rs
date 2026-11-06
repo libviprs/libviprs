@@ -144,6 +144,61 @@ fn composition_is_associative() {
     );
 }
 
+/// A matrix whose coefficient `at` is not a finite number. Composition must refuse it, so a nest
+/// that holds one has no product to compare.
+fn hostile_matrix() -> impl Strategy<Value = [f64; 6]> {
+    (
+        matrix(),
+        0usize..6,
+        prop_oneof![Just(f64::NAN), Just(f64::INFINITY), Just(f64::NEG_INFINITY)],
+    )
+        .prop_map(|(mut m, at, bad)| {
+            m[at] = bad;
+            m
+        })
+}
+
+static ASSOCIATIVE_HOSTILE: AtomicU32 = AtomicU32::new(0);
+
+/// Associativity over levels that may be non-finite. Both groupings must agree: either both refuse
+/// the nest, or both produce the same matrix. A composition that lets a NaN through produces a
+/// matrix that equals nothing, `close` is false on it, and this property goes red; it is the case
+/// that fails when the finite check in PVec's `Transform2` is removed.
+#[test]
+fn composition_is_associative_when_a_level_is_not_finite() {
+    run(
+        &ASSOCIATIVE_HOSTILE,
+        (
+            prop_oneof![matrix(), hostile_matrix()],
+            prop_oneof![matrix(), hostile_matrix()],
+            prop_oneof![matrix(), hostile_matrix()],
+            [-20.0f64..20.0, -20.0f64..20.0],
+        ),
+        |(a, b, c, p)| {
+            let nest = |ms: &[[f64; 6]]| {
+                ms.iter().try_fold(ComposedTransform::identity(), |acc, m| {
+                    acc.push_inner_coefficients(step(), *m)
+                })
+            };
+            let abc = nest(&[a, b, c]);
+            let grouped = nest(&[a, b]).and_then(|ab| nest(&[ab.matrix(), c]));
+            let any_bad = [a, b, c].iter().any(|m| m.iter().any(|x| !x.is_finite()));
+            prop_assert_eq!(
+                abc.is_err(),
+                any_bad,
+                "a nest with a non-finite level must be refused, and only such a nest"
+            );
+            prop_assert_eq!(abc.is_err(), grouped.is_err());
+            if let (Ok(x), Ok(y)) = (abc, grouped) {
+                let (x, y) = (apply(x.matrix(), p), apply(y.matrix(), p));
+                let scale = x[0].abs().max(x[1].abs()).max(1.0);
+                prop_assert!(close(x[0], y[0], scale) && close(x[1], y[1], scale));
+            }
+            Ok(())
+        },
+    );
+}
+
 static SINGULAR: AtomicU32 = AtomicU32::new(0);
 
 #[test]

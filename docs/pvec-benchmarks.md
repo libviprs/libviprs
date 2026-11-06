@@ -16,7 +16,7 @@ convention of `docs/pmtiles-benchmarks.md`: `#[ignore]`d harness tests run with 
   a row. If that never happens the run refuses and prints the loads it saw, and it checks again at
   the end and discards the run if the host got busy. A number taken under load is not reported.
 - Every row names its platform (`<arch>-<os>-<host>`, from `LIBVIPRS_BENCH_HOST`, which a run must
-  set). x86_64 rows come from the native x64 host (MARS) and never from a local emulation.
+  set). x86_64 rows come from a native x64 host (MARS, or the NAS) and never from a local emulation; arm64 rows come from mercury (native).
 - A row with a blank column is not published, the harness fails instead.
 
 ## Provider extraction (N8.2, #1433)
@@ -267,7 +267,7 @@ The older rows in the table above (2,725 MiB tracked at 1,025,000 entities) are 
 
 **It does not meet the N8.4 criteria, and I am not claiming it does.** The tracked peak and the peak RSS are within about 1% with and without the spill, at every scale and every budget (2,725 MiB tracked and 3,149 MiB RSS direct, 2,725 and 3,117 MiB with the spill, at 1,025,000 entities) against ceilings of 1,024 and 1,536 MiB, and doubling the entities still moves the tracked peak by 97.6% against a criterion of under 10%. The peak is reached before the writer runs, while the classifier's flattened leaves, view outcome, records and report rows are all alive, and that is the roughly 2.5 KB an entity that sits in libviprs. The spill also costs wall time: 17.5 s against 8.16 s direct at 1,025,000 entities, though the spill rows were taken under load and are marked unstable, so I read that as slower, not as a factor. The criterion that the buffer is the knob also fails, because the peak does not move with the buffer. Meeting the ceiling needs the classifier to hand entities to the writer as it goes instead of collecting them, which is a change in `src/pvec_convert.rs`, not a tuning of the spill. That work was done in part by #1524, #1528 and #1537 and the rest is withdrawn, see "After the stack" below.
 
-All rows in this section are x86_64 native on MARS. I took no arm64 rows.
+The rows up to here are x86_64 native on MARS, from before the memory PRs. The rows after the stack, on arm64 (mercury) and x86_64 (the NAS), are under "After the stack" at the end of this section.
 
 `block_heavy` is on the clean side of the N7.5 allocation check: 22,440 entities in 11,220 instances at depth 8 hold a tracked peak of 56 MiB.
 
@@ -317,6 +317,97 @@ The only routes to a bounded peak, none taken here:
 
 I did not add an entity cap or the flag.
 
+## arm64 rows (mercury, #1064)
+
+The tables above (apart from the bounded-memory rows after the stack) are x86_64 native on MARS. These are the same four harnesses on arm64, taken on mercury (aarch64-linux-mercury, native Apple silicon under Colima, 6 cpus, 12 GiB), release build, `rust:1.99.1-bookworm` container, at libviprs main 97df887c. The host was idle (load 1 to 3 on 6 cpus) and the harness's own quiet-host check passed. The committed baseline carries these rows under the `aarch64-linux-mercury` platform, so they gate only a run on that host. x86_64 rows are not compared with them: different machines and core counts.
+
+```text
+LIBVIPRS_BENCH_HOST=mercury cargo test --release --features pvec-convert \
+    --test pvec_provider_bench -- --ignored --nocapture provider_bench
+```
+
+(and the same for `pvec_normalization_bench`, `pvec_generation_bench` and `pvec_queue_sweep`.)
+
+### Provider extraction, arm64
+
+| cell | entities | entities/s (median) | allocated bytes | tracked peak | peak RSS | block frames | note |
+|---|---|---|---|---|---|---|---|
+| simple | 1,000 | 491,966 | 3,190,142 | 1,779,139 | 12,632,064 | 0 | unstable, never gates |
+| block_heavy | 22,440 | 497,094 | 69,626,753 | 15,958,815 | 31,064,064 | 11,220 |  |
+| spline_heavy | 10,000 | 349,897 | 50,269,926 | 27,810,425 | 59,084,800 | 0 |  |
+| large_industrial | 1,025,000 | 754,139 | 1,536,819,959 | 800,557,138 | 1,237,401,600 | 75,000 |  |
+
+Advanced-curve overhead on arm64 (`RATIO` line of the run): advanced_curve_cost_vs_simple=1.406 (spline_heavy 2858 ns per entity, simple 2033). The `simple` row is marked unstable (min 337,149 against median 491,966 entities/s, a small cell where one slow sample is a large share), so it does not gate.
+
+The block recursion sweep, arm64 (about 2^16 instances per point):
+
+| depth | instances | ns per instance |
+|---|---|---|
+| 1 | 65535 | 1398.7 |
+| 2 | 65535 | 1768.9 |
+| 3 | 65541 | 2358.4 |
+| 4 | 65535 | 2386.5 |
+| 5 | 65565 | 2974.9 |
+| 6 | 65583 | 3275.8 |
+| 7 | 65659 | 3633.6 |
+| 8 | 65535 | 3970.2 |
+| 9 | 65919 | 4546.3 |
+| 10 | 66495 | 5288.1 |
+| 11 | 67551 | 5685.9 |
+| 12 | 69615 | 6112.6 |
+| 13 | 73719 | 6694.6 |
+| 14 | 81915 | 7227.3 |
+| 15 | 98301 | 8130.4 |
+| 16 | 65535 | 8162.1 |
+
+Same shape as on MARS: time per instance is not flat, it grows from 1.4 microseconds at depth 1 to 8.2 at depth 16 (a factor of 5.8, against 6.7 on MARS), so the cause stated above (the per-leaf copy of the instance path) is not specific to x86_64.
+
+### Normalization, arm64
+
+Nanoseconds per entity, same definitions as the MARS table. `pass` is the median wall time of the whole pass.
+
+| cell | mix | leaves | kept | visibility | records | transform | bounds | pass (ms) | unattributed |
+|---|---|---|---|---|---|---|---|---|---|
+| block_heavy | 0% | 22,440 | 22,440 | 828 | 120 | 181 | 28 | 25.96 | 0.012% |
+| block_heavy | 50% | 22,440 | 11,220 | 968 | 124 | 181 | 28 | 25.42 | -0.106% |
+| block_heavy | 90% | 22,440 | 2,244 | 1,069 | 138 | 183 | 29 | 24.76 | -0.020% |
+| paper_space | 0% | 2,000 | 2,000 | 216 | 110 | 179 | 28 | 1.07 | 0.012% |
+| paper_space | 50% | 2,000 | 990 | 281 | 111 | 180 | 28 | 0.88 | 0.009% |
+| paper_space | 90% | 2,000 | 196 | 314 | 116 | 185 | 30 | 0.69 | 0.009% |
+| large_industrial | 0% | 1,025,000 | 1,025,000 | 487 | 173 | 248 | 70 | 1004.57 | 0.221% |
+| large_industrial | 50% | 1,025,000 | 462,536 | 545 | 185 | 247 | 59 | 785.46 | -0.033% |
+| large_industrial | 90% | 1,025,000 | 92,516 | 539 | 183 | 214 | 56 | 594.90 | 0.017% |
+
+The 90%-hidden pass is not slower than the 0% pass on any cell (block_heavy 24.76 ms against 25.96, paper_space 0.69 against 1.07, large_industrial 595 against 1,005), which is the rule that filtering has to pay for itself. The N1.5 promotion classes on `large_industrial` (200,000 entities each, nanoseconds per entity):
+
+| class | ns per entity (median) | min | max | refused |
+|---|---|---|---|---|
+| identity | 216.1 | 215.9 | 216.6 | 0 |
+| translation | 221.3 | 218.9 | 223.8 | 0 |
+| rotation | 251.1 | 250.9 | 258.2 | 0 |
+| uniform_scale | 216.0 | 215.9 | 216.7 | 0 |
+| non_uniform_scale | 217.4 | 217.3 | 217.8 | 0 |
+| reflection | 217.4 | 217.1 | 217.5 | 0 |
+| shear | 270.2 | 270.2 | 270.6 | 0 |
+| singular | 54.7 | 54.5 | 55.7 | 200,000 |
+
+The identity class moves no bound by more than 4 ulps (59 bounds moved), the same as on MARS. The PDF clip pass (200 clips, 20,200 entities) came out at 62.0 ns per entity, marked unstable (max 78.6), so it does not gate.
+
+### Generation and size, arm64
+
+Median of three batched samples; `plain` is the write without Tier 0, `with Tier 0` the full write. Every cell is byte-identical across two runs.
+
+| cell | entities | artefact bytes | bytes per entity | plain (s) | with Tier 0 (s) | Tier 0 share of bytes | note |
+|---|---|---|---|---|---|---|---|
+| simple | 1,000 | 37,040 | 37.0 | 0.0013 | 0.0017 | 5.6% |  |
+| block_heavy | 22,440 | 104,744 | 4.7 | 0.0137 | 0.0237 | 44.8% |  |
+| spline_heavy | 10,000 | 1,872,248 | 187.2 | 0.0267 | 0.0278 | 0.0% |  |
+| paper_space | 2,000 | 70,440 | 35.2 | 0.0024 | 0.0026 | 6.3% |  |
+| large_industrial | 1,025,000 | 13,565,120 | 13.2 | 1.0580 | 1.8532 | 10.6% | unstable, never gates |
+
+The artefact bytes equal the MARS rows for `simple`, `spline_heavy` and `paper_space`, and are 8 bytes smaller for `block_heavy` (104,744 against 104,752) and `large_industrial` (13,565,120 against 13,565,128). I have not isolated the 8 bytes. The MARS rows were taken at an earlier main, so code drift is possible, but I did not check, and an architecture effect is not ruled out either. Building one commit on both hosts and comparing the artefacts byte for byte is the check that would settle it. The size split sums to the artefact size on every row; the harness fails otherwise.
+
+
 ## Tuning the conversion queue (N8.6, #1443)
 
 #1064 asks for each default to be set from the curve that chose it, and for a knob with no curve to be deleted rather than defaulted.
@@ -329,7 +420,7 @@ looks at the cancel token. So the table has three constants and says which of th
 <!-- defaults:begin -->
 | knob | constant | file | value | chosen on | curve |
 |---|---|---|---|---|---|
-| queue capacity | `DEFAULT_QUEUE_CAPACITY` | `src/pvec_convert.rs` | 64 | `large_industrial`, 1,025,000 entities | swept 1 to 4096 twice, see below: no capacity is distinguishable from 64 |
+| queue capacity | `DEFAULT_QUEUE_CAPACITY` | `src/pvec_convert.rs` | 64 | `large_industrial`, 1,025,000 entities | swept 1 to 4096 on an idle arm64 host, see below: 32 and above are flat, 64 stays |
 | entities per batch (cancel poll, progress event) | `BATCH` | `src/pvec_convert.rs` | 256 | not swept | not a throughput knob: it bounds how long a cancel waits, one batch of classifications |
 | entities between cancel checks while writing | `CANCEL_EVERY` | `src/pvec/writer.rs` | 1024 | not swept | not a throughput knob: it bounds how long a cancel waits during the write |
 | provider and normalization worker count | none | none | none | none | no such knob exists: one classifier thread, one consumer |
@@ -349,9 +440,20 @@ and hashes the artifact.
   tuning whatever its speed, and there is none.
 - **The queue is bounded as asked.** `peak_queue_depth` reached the capacity at the small capacities and one below it at 64 and above (the depth is
   sampled after each receive from the sends that completed, so it can read one low and never one high), and never went over.
-- **The timing curve is not published.** I took the sweep twice on MARS, and in both runs every row came out unstable (a spread over 20%
-  across its three runs, with outliers of 22 to 26 seconds against medians of 7 to 17). Both runs overlapped other jobs on the host,
-  including my own pre-push gates, so a capacity that looked 50% faster in one run was 50% slower in the other. A number like that does not
-  choose a default. So the default stays 64, which is what the code had, and the curve that would justify keeping or changing it has not been
-  measured cleanly: #1064 stays open on that line, and the sweep is `LIBVIPRS_BENCH_HOST=mars cargo test --release --features pvec-convert
-  --test pvec_queue_sweep -- --ignored --nocapture queue_sweep`, to be taken when the host is idle.
+- **The timing curve, taken on an idle host.** The two sweeps on MARS were unusable (every row unstable, other jobs on the host), so I took a third on mercury (aarch64-linux-mercury, native, idle: load 1 to 3 on 6 cpus), `large_industrial` at 1,025,000 entities, release build, three runs per capacity. Every row is stable (the largest spread is 4.3 percent of the median, at capacity 8) and the artifact hash is again identical at every capacity.
+
+| capacity | peak queue depth | wall time, median (s) | min | max | against 64 |
+|---|---|---|---|---|---|
+| 1 | 1 | 40.55 | 39.94 | 40.60 | +413.6% |
+| 2 | 2 | 24.37 | 24.03 | 24.78 | +208.7% |
+| 4 | 4 | 15.91 | 15.86 | 16.09 | +101.5% |
+| 8 | 8 | 11.61 | 11.20 | 11.70 | +47.0% |
+| 16 | 16 | 8.88 | 8.75 | 8.95 | +12.4% |
+| 32 | 32 | 7.90 | 7.87 | 7.92 | +0.1% |
+| 64 (default) | 64 | 7.89 | 7.82 | 8.00 | 0 |
+| 128 | 128 | 7.91 | 7.91 | 7.93 | +0.2% |
+| 256 | 256 | 7.89 | 7.85 | 8.01 | -0.1% |
+| 1024 | 1023 | 7.93 | 7.90 | 8.06 | +0.4% |
+| 4096 | 4095 | 7.87 | 7.76 | 8.05 | -0.3% |
+
+  The curve is a knee: capacities 1 to 16 are clearly slower (the classifier stalls on a full queue), and from 32 up the wall time is flat within 0.5 percent. The default of 64 sits on the flat part with one doubling of margin, so it **stays 64**, now chosen from a measured curve and not only kept. Nothing above 64 buys anything, and the larger the queue the more entities can sit in it, so I did not raise it. This is one arm64 host; the same sweep on x86_64 is `LIBVIPRS_BENCH_HOST=<host> cargo test --release --features pvec-convert --test pvec_queue_sweep -- --ignored --nocapture queue_sweep` and I have not published an x86_64 curve. The harness's verdict line only asks whether a capacity is faster than 64 beyond the noise, so it prints "not distinguishable from the default" for the slower ones too; I read the table, not that label.
