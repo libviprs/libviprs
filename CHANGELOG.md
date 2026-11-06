@@ -67,6 +67,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The memory criterion of the conversion is restated** (issue #1481). The conversion's memory is linear in the entities, and the original ceilings (1.5 GiB RSS, 1.0 GiB tracked, under 10% growth on doubling) were not met and are withdrawn. After #1518, #1519 and #1520 `large_industrial` (1,025,000 entities) peaks at 1,323 MiB tracked (2,015 MiB before) and 1,706 MiB RSS on arm64 (1,687 MiB on x64), about 1,353 bytes an entity, and the benchmark now checks 1.4 GiB tracked, 1.75 GiB RSS and 1,450 bytes an entity instead. `docs/pvec-benchmarks.md` says what is not done and what a drawing needs. No code changes.
 - **Breaking, public structs and one enum (issue #1525).** `regions::semantic_stream` returns `ComponentsError` where it returned `String`.
   `LineStyleComponent` gains `name`, `DwgStyleInput` gains `linetype_name`, `ConversionReport` gains `components` and `BuiltStreams` gains
   `names`; none of those structs is `#[non_exhaustive]`, so a literal of any of them needs the new field. `SourceLinetype::Pattern` gains a

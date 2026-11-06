@@ -1,5 +1,31 @@
 {
  "rows": {
+  "bounded_memory/direct/block_heavy/x0.5/aarch64-linux-mercury": {
+   "allocated_bytes": 83566062,
+   "artifact_bytes": 355928,
+   "bench": "bounded_memory",
+   "bytes_reread": 0,
+   "bytes_spilled": 0,
+   "cell": "block_heavy",
+   "entities": 11220,
+   "peak_rss_bytes": 35618816,
+   "platform": "aarch64-linux-mercury",
+   "rss_is_per_run": true,
+   "scale": 0.5,
+   "spill_budget": null,
+   "spill_count": 0,
+   "strategy": "direct",
+   "tracked_bytes_per_entity": 1571.412834224599,
+   "tracked_peak": 17631252,
+   "unstable": false,
+   "wall_secs": {
+    "max": 0.106484338,
+    "median": 0.104160896,
+    "min": 0.100556338
+   },
+   "within_rss_ceiling": true,
+   "within_tracked_ceiling": true
+  },
   "bounded_memory/direct/block_heavy/x0.5/x86_64-linux-mars": {
    "allocated_bytes": 106938851,
    "artifact_bytes": 355936,
@@ -21,6 +47,58 @@
     "max": 0.148945299,
     "median": 0.135048417,
     "min": 0.1207801
+   },
+   "within_rss_ceiling": true,
+   "within_tracked_ceiling": true
+  },
+  "bounded_memory/direct/block_heavy/x0.5/x86_64-linux-nas": {
+   "allocated_bytes": 83572000,
+   "artifact_bytes": 355928,
+   "bench": "bounded_memory",
+   "bytes_reread": 0,
+   "bytes_spilled": 0,
+   "cell": "block_heavy",
+   "entities": 11220,
+   "peak_rss_bytes": 37310464,
+   "platform": "x86_64-linux-nas",
+   "rss_is_per_run": true,
+   "scale": 0.5,
+   "spill_budget": null,
+   "spill_count": 0,
+   "strategy": "direct",
+   "tracked_bytes_per_entity": 1571.4185383244208,
+   "tracked_peak": 17631316,
+   "unstable": true,
+   "wall_secs": {
+    "max": 0.250250715,
+    "median": 0.209445688,
+    "min": 0.1780307
+   },
+   "within_rss_ceiling": true,
+   "within_tracked_ceiling": true
+  },
+  "bounded_memory/direct/block_heavy/x1.0/aarch64-linux-mercury": {
+   "allocated_bytes": 165732271,
+   "artifact_bytes": 706824,
+   "bench": "bounded_memory",
+   "bytes_reread": 0,
+   "bytes_spilled": 0,
+   "cell": "block_heavy",
+   "entities": 22440,
+   "peak_rss_bytes": 63107072,
+   "platform": "aarch64-linux-mercury",
+   "rss_is_per_run": true,
+   "scale": 1.0,
+   "spill_budget": null,
+   "spill_count": 0,
+   "strategy": "direct",
+   "tracked_bytes_per_entity": 1560.3519607843136,
+   "tracked_peak": 35014298,
+   "unstable": false,
+   "wall_secs": {
+    "max": 0.195496465,
+    "median": 0.194903428,
+    "min": 0.188251975
    },
    "within_rss_ceiling": true,
    "within_tracked_ceiling": true
@@ -50,6 +128,58 @@
    "within_rss_ceiling": true,
    "within_tracked_ceiling": true
   },
+  "bounded_memory/direct/block_heavy/x1.0/x86_64-linux-nas": {
+   "allocated_bytes": 165732554,
+   "artifact_bytes": 706824,
+   "bench": "bounded_memory",
+   "bytes_reread": 0,
+   "bytes_spilled": 0,
+   "cell": "block_heavy",
+   "entities": 22440,
+   "peak_rss_bytes": 64991232,
+   "platform": "x86_64-linux-nas",
+   "rss_is_per_run": true,
+   "scale": 1.0,
+   "spill_budget": null,
+   "spill_count": 0,
+   "strategy": "direct",
+   "tracked_bytes_per_entity": 1560.355882352941,
+   "tracked_peak": 35014386,
+   "unstable": true,
+   "wall_secs": {
+    "max": 0.494890258,
+    "median": 0.427476949,
+    "min": 0.327637309
+   },
+   "within_rss_ceiling": true,
+   "within_tracked_ceiling": true
+  },
+  "bounded_memory/direct/block_heavy/x2.0/aarch64-linux-mercury": {
+   "allocated_bytes": 330000105,
+   "artifact_bytes": 1399120,
+   "bench": "bounded_memory",
+   "bytes_reread": 0,
+   "bytes_spilled": 0,
+   "cell": "block_heavy",
+   "entities": 44880,
+   "peak_rss_bytes": 118181888,
+   "platform": "aarch64-linux-mercury",
+   "rss_is_per_run": true,
+   "scale": 2.0,
+   "spill_budget": null,
+   "spill_count": 0,
+   "strategy": "direct",
+   "tracked_bytes_per_entity": 1554.8352495543672,
+   "tracked_peak": 69781006,
+   "unstable": false,
+   "wall_secs": {
+    "max": 0.397668926,
+    "median": 0.39753401,
+    "min": 0.368206715
+   },
+   "within_rss_ceiling": true,
+   "within_tracked_ceiling": true
+  },
   "bounded_memory/direct/block_heavy/x2.0/x86_64-linux-mars": {
    "allocated_bytes": 420263822,
    "artifact_bytes": 1399112,
@@ -71,6 +201,58 @@
     "max": 0.503602005,
     "median": 0.501224239,
     "min": 0.48565438
+   },
+   "within_rss_ceiling": true,
+   "within_tracked_ceiling": true
+  },
+  "bounded_memory/direct/block_heavy/x2.0/x86_64-linux-nas": {
+   "allocated_bytes": 330012111,
+   "artifact_bytes": 1399120,
+   "bench": "bounded_memory",
+   "bytes_reread": 0,
+   "bytes_spilled": 0,
+   "cell": "block_heavy",
+   "entities": 44880,
+   "peak_rss_bytes": 119775232,
+   "platform": "x86_64-linux-nas",
+   "rss_is_per_run": true,
+   "scale": 2.0,
+   "spill_budget": null,
+   "spill_count": 0,
+   "strategy": "direct",
+   "tracked_bytes_per_entity": 1554.837210338681,
+   "tracked_peak": 69781094,
+   "unstable": false,
+   "wall_secs": {
+    "max": 1.043551529,
+    "median": 0.960677423,
+    "min": 0.890138538
+   },
+   "within_rss_ceiling": true,
+   "within_tracked_ceiling": true
+  },
+  "bounded_memory/direct/large_industrial/x0.5/aarch64-linux-mercury": {
+   "allocated_bytes": 2012195152,
+   "artifact_bytes": 11123312,
+   "bench": "bounded_memory",
+   "bytes_reread": 0,
+   "bytes_spilled": 0,
+   "cell": "large_industrial",
+   "entities": 512500,
+   "peak_rss_bytes": 898838528,
+   "platform": "aarch64-linux-mercury",
+   "rss_is_per_run": true,
+   "scale": 0.5,
+   "spill_budget": null,
+   "spill_count": 0,
+   "strategy": "direct",
+   "tracked_bytes_per_entity": 1353.483767804878,
+   "tracked_peak": 693660431,
+   "unstable": false,
+   "wall_secs": {
+    "max": 3.517801644,
+    "median": 3.3001584680000002,
+    "min": 3.273676869
    },
    "within_rss_ceiling": true,
    "within_tracked_ceiling": true
@@ -100,6 +282,58 @@
    "within_rss_ceiling": false,
    "within_tracked_ceiling": false
   },
+  "bounded_memory/direct/large_industrial/x0.5/x86_64-linux-nas": {
+   "allocated_bytes": 2012258245,
+   "artifact_bytes": 11123312,
+   "bench": "bounded_memory",
+   "bytes_reread": 0,
+   "bytes_spilled": 0,
+   "cell": "large_industrial",
+   "entities": 512500,
+   "peak_rss_bytes": 899776512,
+   "platform": "x86_64-linux-nas",
+   "rss_is_per_run": true,
+   "scale": 0.5,
+   "spill_budget": null,
+   "spill_count": 0,
+   "strategy": "direct",
+   "tracked_bytes_per_entity": 1353.4838985365855,
+   "tracked_peak": 693660498,
+   "unstable": false,
+   "wall_secs": {
+    "max": 7.758462505,
+    "median": 7.204295952,
+    "min": 6.317657659
+   },
+   "within_rss_ceiling": true,
+   "within_tracked_ceiling": true
+  },
+  "bounded_memory/direct/large_industrial/x1.0/aarch64-linux-mercury": {
+   "allocated_bytes": 4023925010,
+   "artifact_bytes": 22225400,
+   "bench": "bounded_memory",
+   "bytes_reread": 0,
+   "bytes_spilled": 0,
+   "cell": "large_industrial",
+   "entities": 1025000,
+   "peak_rss_bytes": 1788096512,
+   "platform": "aarch64-linux-mercury",
+   "rss_is_per_run": true,
+   "scale": 1.0,
+   "spill_budget": null,
+   "spill_count": 0,
+   "strategy": "direct",
+   "tracked_bytes_per_entity": 1353.2386390243903,
+   "tracked_peak": 1387069605,
+   "unstable": false,
+   "wall_secs": {
+    "max": 6.926259137,
+    "median": 6.701381162,
+    "min": 6.523870737
+   },
+   "within_rss_ceiling": true,
+   "within_tracked_ceiling": true
+  },
   "bounded_memory/direct/large_industrial/x1.0/x86_64-linux-mars": {
    "allocated_bytes": 7180287125,
    "artifact_bytes": 22172760,
@@ -121,6 +355,58 @@
     "max": 8.208905141,
     "median": 8.160119227,
     "min": 8.113144571
+   },
+   "within_rss_ceiling": false,
+   "within_tracked_ceiling": false
+  },
+  "bounded_memory/direct/large_industrial/x1.0/x86_64-linux-nas": {
+   "allocated_bytes": 4024045474,
+   "artifact_bytes": 22225400,
+   "bench": "bounded_memory",
+   "bytes_reread": 0,
+   "bytes_spilled": 0,
+   "cell": "large_industrial",
+   "entities": 1025000,
+   "peak_rss_bytes": 1768919040,
+   "platform": "x86_64-linux-nas",
+   "rss_is_per_run": true,
+   "scale": 1.0,
+   "spill_budget": null,
+   "spill_count": 0,
+   "strategy": "direct",
+   "tracked_bytes_per_entity": 1353.2387502439024,
+   "tracked_peak": 1387069719,
+   "unstable": false,
+   "wall_secs": {
+    "max": 15.091623077,
+    "median": 14.54138751,
+    "min": 13.412833938
+   },
+   "within_rss_ceiling": true,
+   "within_tracked_ceiling": true
+  },
+  "bounded_memory/direct/large_industrial/x2.0/aarch64-linux-mercury": {
+   "allocated_bytes": 8038484609,
+   "artifact_bytes": 44004416,
+   "bench": "bounded_memory",
+   "bytes_reread": 0,
+   "bytes_spilled": 0,
+   "cell": "large_industrial",
+   "entities": 2050000,
+   "peak_rss_bytes": 3487875072,
+   "platform": "aarch64-linux-mercury",
+   "rss_is_per_run": true,
+   "scale": 2.0,
+   "spill_budget": null,
+   "spill_count": 0,
+   "strategy": "direct",
+   "tracked_bytes_per_entity": 1353.1141341463415,
+   "tracked_peak": 2773883975,
+   "unstable": false,
+   "wall_secs": {
+    "max": 14.984114711,
+    "median": 14.144531962,
+    "min": 14.075669635
    },
    "within_rss_ceiling": false,
    "within_tracked_ceiling": false
@@ -150,6 +436,58 @@
    "within_rss_ceiling": false,
    "within_tracked_ceiling": false
   },
+  "bounded_memory/direct/large_industrial/x2.0/x86_64-linux-nas": {
+   "allocated_bytes": 8038797612,
+   "artifact_bytes": 44004416,
+   "bench": "bounded_memory",
+   "bytes_reread": 0,
+   "bytes_spilled": 0,
+   "cell": "large_industrial",
+   "entities": 2050000,
+   "peak_rss_bytes": 3545374720,
+   "platform": "x86_64-linux-nas",
+   "rss_is_per_run": true,
+   "scale": 2.0,
+   "spill_budget": null,
+   "spill_count": 0,
+   "strategy": "direct",
+   "tracked_bytes_per_entity": 1353.1141770731708,
+   "tracked_peak": 2773884063,
+   "unstable": true,
+   "wall_secs": {
+    "max": 33.199450498,
+    "median": 30.549528385,
+    "min": 26.589325463
+   },
+   "within_rss_ceiling": false,
+   "within_tracked_ceiling": false
+  },
+  "bounded_memory/direct/spline_heavy/x0.5/aarch64-linux-mercury": {
+   "allocated_bytes": 66705551,
+   "artifact_bytes": 938416,
+   "bench": "bounded_memory",
+   "bytes_reread": 0,
+   "bytes_spilled": 0,
+   "cell": "spline_heavy",
+   "entities": 5000,
+   "peak_rss_bytes": 32731136,
+   "platform": "aarch64-linux-mercury",
+   "rss_is_per_run": true,
+   "scale": 0.5,
+   "spill_budget": null,
+   "spill_count": 0,
+   "strategy": "direct",
+   "tracked_bytes_per_entity": 4106.135,
+   "tracked_peak": 20530675,
+   "unstable": true,
+   "wall_secs": {
+    "max": 0.061477945,
+    "median": 0.051232975,
+    "min": 0.051164893
+   },
+   "within_rss_ceiling": true,
+   "within_tracked_ceiling": true
+  },
   "bounded_memory/direct/spline_heavy/x0.5/x86_64-linux-mars": {
    "allocated_bytes": 100702680,
    "artifact_bytes": 938416,
@@ -171,6 +509,58 @@
     "max": 0.087537454,
     "median": 0.076068992,
     "min": 0.05398791
+   },
+   "within_rss_ceiling": true,
+   "within_tracked_ceiling": true
+  },
+  "bounded_memory/direct/spline_heavy/x0.5/x86_64-linux-nas": {
+   "allocated_bytes": 66704072,
+   "artifact_bytes": 938416,
+   "bench": "bounded_memory",
+   "bytes_reread": 0,
+   "bytes_spilled": 0,
+   "cell": "spline_heavy",
+   "entities": 5000,
+   "peak_rss_bytes": 33914880,
+   "platform": "x86_64-linux-nas",
+   "rss_is_per_run": true,
+   "scale": 0.5,
+   "spill_budget": null,
+   "spill_count": 0,
+   "strategy": "direct",
+   "tracked_bytes_per_entity": 4106.1494,
+   "tracked_peak": 20530747,
+   "unstable": true,
+   "wall_secs": {
+    "max": 0.190377142,
+    "median": 0.183157335,
+    "min": 0.127016435
+   },
+   "within_rss_ceiling": true,
+   "within_tracked_ceiling": true
+  },
+  "bounded_memory/direct/spline_heavy/x1.0/aarch64-linux-mercury": {
+   "allocated_bytes": 132303614,
+   "artifact_bytes": 1872248,
+   "bench": "bounded_memory",
+   "bytes_reread": 0,
+   "bytes_spilled": 0,
+   "cell": "spline_heavy",
+   "entities": 10000,
+   "peak_rss_bytes": 55951360,
+   "platform": "aarch64-linux-mercury",
+   "rss_is_per_run": true,
+   "scale": 1.0,
+   "spill_budget": null,
+   "spill_count": 0,
+   "strategy": "direct",
+   "tracked_bytes_per_entity": 3984.2679,
+   "tracked_peak": 39842679,
+   "unstable": false,
+   "wall_secs": {
+    "max": 0.124128674,
+    "median": 0.111807426,
+    "min": 0.10192137
    },
    "within_rss_ceiling": true,
    "within_tracked_ceiling": true
@@ -200,6 +590,58 @@
    "within_rss_ceiling": true,
    "within_tracked_ceiling": true
   },
+  "bounded_memory/direct/spline_heavy/x1.0/x86_64-linux-nas": {
+   "allocated_bytes": 132295219,
+   "artifact_bytes": 1872248,
+   "bench": "bounded_memory",
+   "bytes_reread": 0,
+   "bytes_spilled": 0,
+   "cell": "spline_heavy",
+   "entities": 10000,
+   "peak_rss_bytes": 57552896,
+   "platform": "x86_64-linux-nas",
+   "rss_is_per_run": true,
+   "scale": 1.0,
+   "spill_budget": null,
+   "spill_count": 0,
+   "strategy": "direct",
+   "tracked_bytes_per_entity": 3984.2775,
+   "tracked_peak": 39842775,
+   "unstable": false,
+   "wall_secs": {
+    "max": 0.246120849,
+    "median": 0.222274975,
+    "min": 0.204814759
+   },
+   "within_rss_ceiling": true,
+   "within_tracked_ceiling": true
+  },
+  "bounded_memory/direct/spline_heavy/x2.0/aarch64-linux-mercury": {
+   "allocated_bytes": 263765607,
+   "artifact_bytes": 3740048,
+   "bench": "bounded_memory",
+   "bytes_reread": 0,
+   "bytes_spilled": 0,
+   "cell": "spline_heavy",
+   "entities": 20000,
+   "peak_rss_bytes": 101711872,
+   "platform": "aarch64-linux-mercury",
+   "rss_is_per_run": true,
+   "scale": 2.0,
+   "spill_budget": null,
+   "spill_count": 0,
+   "strategy": "direct",
+   "tracked_bytes_per_entity": 3947.8269,
+   "tracked_peak": 78956538,
+   "unstable": false,
+   "wall_secs": {
+    "max": 0.221930322,
+    "median": 0.214709873,
+    "min": 0.192787735
+   },
+   "within_rss_ceiling": true,
+   "within_tracked_ceiling": true
+  },
   "bounded_memory/direct/spline_heavy/x2.0/x86_64-linux-mars": {
    "allocated_bytes": 398650152,
    "artifact_bytes": 3740048,
@@ -221,6 +663,58 @@
     "max": 0.254459902,
     "median": 0.211557522,
     "min": 0.206993475
+   },
+   "within_rss_ceiling": true,
+   "within_tracked_ceiling": true
+  },
+  "bounded_memory/direct/spline_heavy/x2.0/x86_64-linux-nas": {
+   "allocated_bytes": 263761618,
+   "artifact_bytes": 3740048,
+   "bench": "bounded_memory",
+   "bytes_reread": 0,
+   "bytes_spilled": 0,
+   "cell": "spline_heavy",
+   "entities": 20000,
+   "peak_rss_bytes": 103321600,
+   "platform": "x86_64-linux-nas",
+   "rss_is_per_run": true,
+   "scale": 2.0,
+   "spill_budget": null,
+   "spill_count": 0,
+   "strategy": "direct",
+   "tracked_bytes_per_entity": 3947.8313,
+   "tracked_peak": 78956626,
+   "unstable": true,
+   "wall_secs": {
+    "max": 0.438671165,
+    "median": 0.372853271,
+    "min": 0.358186214
+   },
+   "within_rss_ceiling": true,
+   "within_tracked_ceiling": true
+  },
+  "bounded_memory/spill/block_heavy/x0.5/aarch64-linux-mercury": {
+   "allocated_bytes": 104883200,
+   "artifact_bytes": 366720,
+   "bench": "bounded_memory",
+   "bytes_reread": "not exposed by the facade",
+   "bytes_spilled": 1290951,
+   "cell": "block_heavy",
+   "entities": 11220,
+   "peak_rss_bytes": 35438592,
+   "platform": "aarch64-linux-mercury",
+   "rss_is_per_run": true,
+   "scale": 0.5,
+   "spill_budget": 67108864,
+   "spill_count": 5,
+   "strategy": "spill",
+   "tracked_bytes_per_entity": 1571.4106951871659,
+   "tracked_peak": 17631228,
+   "unstable": false,
+   "wall_secs": {
+    "max": 0.100367334,
+    "median": 0.096960233,
+    "min": 0.096556028
    },
    "within_rss_ceiling": true,
    "within_tracked_ceiling": true
@@ -251,6 +745,58 @@
    "within_rss_ceiling": true,
    "within_tracked_ceiling": true
   },
+  "bounded_memory/spill/block_heavy/x0.5/x86_64-linux-nas": {
+   "allocated_bytes": 104888191,
+   "artifact_bytes": 366720,
+   "bench": "bounded_memory",
+   "bytes_reread": "not exposed by the facade",
+   "bytes_spilled": 1316806,
+   "cell": "block_heavy",
+   "entities": 11220,
+   "peak_rss_bytes": 37580800,
+   "platform": "x86_64-linux-nas",
+   "rss_is_per_run": true,
+   "scale": 0.5,
+   "spill_budget": 67108864,
+   "spill_count": 5,
+   "strategy": "spill",
+   "tracked_bytes_per_entity": 1571.4185383244208,
+   "tracked_peak": 17631316,
+   "unstable": true,
+   "wall_secs": {
+    "max": 0.224036328,
+    "median": 0.222328332,
+    "min": 0.175674686
+   },
+   "within_rss_ceiling": true,
+   "within_tracked_ceiling": true
+  },
+  "bounded_memory/spill/block_heavy/x1.0/aarch64-linux-mercury": {
+   "allocated_bytes": 208473168,
+   "artifact_bytes": 729368,
+   "bench": "bounded_memory",
+   "bytes_reread": "not exposed by the facade",
+   "bytes_spilled": 2595056,
+   "cell": "block_heavy",
+   "entities": 22440,
+   "peak_rss_bytes": 63062016,
+   "platform": "aarch64-linux-mercury",
+   "rss_is_per_run": true,
+   "scale": 1.0,
+   "spill_budget": 67108864,
+   "spill_count": 5,
+   "strategy": "spill",
+   "tracked_bytes_per_entity": 1560.3519607843136,
+   "tracked_peak": 35014298,
+   "unstable": false,
+   "wall_secs": {
+    "max": 0.1935077,
+    "median": 0.191946797,
+    "min": 0.189438515
+   },
+   "within_rss_ceiling": true,
+   "within_tracked_ceiling": true
+  },
   "bounded_memory/spill/block_heavy/x1.0/x86_64-linux-mars": {
    "allocated_bytes": 254764637,
    "artifact_bytes": 729328,
@@ -273,6 +819,58 @@
     "max": 1.527260955,
     "median": 1.414490211,
     "min": 0.772858596
+   },
+   "within_rss_ceiling": true,
+   "within_tracked_ceiling": true
+  },
+  "bounded_memory/spill/block_heavy/x1.0/x86_64-linux-nas": {
+   "allocated_bytes": 208486428,
+   "artifact_bytes": 729368,
+   "bench": "bounded_memory",
+   "bytes_reread": "not exposed by the facade",
+   "bytes_spilled": 2629818,
+   "cell": "block_heavy",
+   "entities": 22440,
+   "peak_rss_bytes": 64745472,
+   "platform": "x86_64-linux-nas",
+   "rss_is_per_run": true,
+   "scale": 1.0,
+   "spill_budget": 67108864,
+   "spill_count": 5,
+   "strategy": "spill",
+   "tracked_bytes_per_entity": 1560.355882352941,
+   "tracked_peak": 35014386,
+   "unstable": true,
+   "wall_secs": {
+    "max": 0.557241667,
+    "median": 0.466830664,
+    "min": 0.460938763
+   },
+   "within_rss_ceiling": true,
+   "within_tracked_ceiling": true
+  },
+  "bounded_memory/spill/block_heavy/x2.0/aarch64-linux-mercury": {
+   "allocated_bytes": 415604624,
+   "artifact_bytes": 1449640,
+   "bench": "bounded_memory",
+   "bytes_reread": "not exposed by the facade",
+   "bytes_spilled": 5250854,
+   "cell": "block_heavy",
+   "entities": 44880,
+   "peak_rss_bytes": 118202368,
+   "platform": "aarch64-linux-mercury",
+   "rss_is_per_run": true,
+   "scale": 2.0,
+   "spill_budget": 67108864,
+   "spill_count": 5,
+   "strategy": "spill",
+   "tracked_bytes_per_entity": 1554.8352495543672,
+   "tracked_peak": 69781006,
+   "unstable": false,
+   "wall_secs": {
+    "max": 0.425878043,
+    "median": 0.387321021,
+    "min": 0.387155099
    },
    "within_rss_ceiling": true,
    "within_tracked_ceiling": true
@@ -303,6 +901,58 @@
    "within_rss_ceiling": true,
    "within_tracked_ceiling": true
   },
+  "bounded_memory/spill/block_heavy/x2.0/x86_64-linux-nas": {
+   "allocated_bytes": 415618541,
+   "artifact_bytes": 1449640,
+   "bench": "bounded_memory",
+   "bytes_reread": "not exposed by the facade",
+   "bytes_spilled": 5250854,
+   "cell": "block_heavy",
+   "entities": 44880,
+   "peak_rss_bytes": 120037376,
+   "platform": "x86_64-linux-nas",
+   "rss_is_per_run": true,
+   "scale": 2.0,
+   "spill_budget": 67108864,
+   "spill_count": 5,
+   "strategy": "spill",
+   "tracked_bytes_per_entity": 1554.837210338681,
+   "tracked_peak": 69781094,
+   "unstable": false,
+   "wall_secs": {
+    "max": 0.781255192,
+    "median": 0.776126246,
+    "min": 0.775757974
+   },
+   "within_rss_ceiling": true,
+   "within_tracked_ceiling": true
+  },
+  "bounded_memory/spill/large_industrial/x0.5/aarch64-linux-mercury": {
+   "allocated_bytes": 4038305740,
+   "artifact_bytes": 13677400,
+   "bench": "bounded_memory",
+   "bytes_reread": "not exposed by the facade",
+   "bytes_spilled": 136902320,
+   "cell": "large_industrial",
+   "entities": 512500,
+   "peak_rss_bytes": 899567616,
+   "platform": "aarch64-linux-mercury",
+   "rss_is_per_run": true,
+   "scale": 0.5,
+   "spill_budget": 67108864,
+   "spill_count": 11,
+   "strategy": "spill",
+   "tracked_bytes_per_entity": 1353.483367804878,
+   "tracked_peak": 693660226,
+   "unstable": false,
+   "wall_secs": {
+    "max": 3.494990831,
+    "median": 3.470633242,
+    "min": 3.4222417800000002
+   },
+   "within_rss_ceiling": true,
+   "within_tracked_ceiling": true
+  },
   "bounded_memory/spill/large_industrial/x0.5/x86_64-linux-mars": {
    "allocated_bytes": 5601024175,
    "artifact_bytes": 13604488,
@@ -329,6 +979,58 @@
    "within_rss_ceiling": false,
    "within_tracked_ceiling": false
   },
+  "bounded_memory/spill/large_industrial/x0.5/x86_64-linux-nas": {
+   "allocated_bytes": 4038393653,
+   "artifact_bytes": 13677400,
+   "bench": "bounded_memory",
+   "bytes_reread": "not exposed by the facade",
+   "bytes_spilled": 136902320,
+   "cell": "large_industrial",
+   "entities": 512500,
+   "peak_rss_bytes": 899076096,
+   "platform": "x86_64-linux-nas",
+   "rss_is_per_run": true,
+   "scale": 0.5,
+   "spill_budget": 67108864,
+   "spill_count": 11,
+   "strategy": "spill",
+   "tracked_bytes_per_entity": 1353.4839453658537,
+   "tracked_peak": 693660522,
+   "unstable": false,
+   "wall_secs": {
+    "max": 5.694522087,
+    "median": 5.582005525,
+    "min": 5.386817055
+   },
+   "within_rss_ceiling": true,
+   "within_tracked_ceiling": true
+  },
+  "bounded_memory/spill/large_industrial/x1.0/aarch64-linux-mercury": {
+   "allocated_bytes": 8462662532,
+   "artifact_bytes": 28478920,
+   "bench": "bounded_memory",
+   "bytes_reread": "not exposed by the facade",
+   "bytes_spilled": 274821612,
+   "cell": "large_industrial",
+   "entities": 1025000,
+   "peak_rss_bytes": 1787908096,
+   "platform": "aarch64-linux-mercury",
+   "rss_is_per_run": true,
+   "scale": 1.0,
+   "spill_budget": 67108864,
+   "spill_count": 16,
+   "strategy": "spill",
+   "tracked_bytes_per_entity": 1353.238664390244,
+   "tracked_peak": 1387069631,
+   "unstable": false,
+   "wall_secs": {
+    "max": 7.221126021,
+    "median": 7.090582366,
+    "min": 7.08489415
+   },
+   "within_rss_ceiling": true,
+   "within_tracked_ceiling": true
+  },
   "bounded_memory/spill/large_industrial/x1.0/x86_64-linux-mars": {
    "allocated_bytes": 11610521414,
    "artifact_bytes": 28340040,
@@ -351,6 +1053,58 @@
     "max": 23.280388672,
     "median": 17.47706791,
     "min": 17.286156864
+   },
+   "within_rss_ceiling": false,
+   "within_tracked_ceiling": false
+  },
+  "bounded_memory/spill/large_industrial/x1.0/x86_64-linux-nas": {
+   "allocated_bytes": 8462925760,
+   "artifact_bytes": 28478920,
+   "bench": "bounded_memory",
+   "bytes_reread": "not exposed by the facade",
+   "bytes_spilled": 274821612,
+   "cell": "large_industrial",
+   "entities": 1025000,
+   "peak_rss_bytes": 1769340928,
+   "platform": "x86_64-linux-nas",
+   "rss_is_per_run": true,
+   "scale": 1.0,
+   "spill_budget": 67108864,
+   "spill_count": 16,
+   "strategy": "spill",
+   "tracked_bytes_per_entity": 1353.2387502439024,
+   "tracked_peak": 1387069719,
+   "unstable": false,
+   "wall_secs": {
+    "max": 12.363796472,
+    "median": 11.686343244,
+    "min": 11.564855309
+   },
+   "within_rss_ceiling": true,
+   "within_tracked_ceiling": true
+  },
+  "bounded_memory/spill/large_industrial/x2.0/aarch64-linux-mercury": {
+   "allocated_bytes": 16173928137,
+   "artifact_bytes": 54310312,
+   "bench": "bounded_memory",
+   "bytes_reread": "not exposed by the facade",
+   "bytes_spilled": 547200329,
+   "cell": "large_industrial",
+   "entities": 2050000,
+   "peak_rss_bytes": 3545972736,
+   "platform": "aarch64-linux-mercury",
+   "rss_is_per_run": true,
+   "scale": 2.0,
+   "spill_budget": 67108864,
+   "spill_count": 26,
+   "strategy": "spill",
+   "tracked_bytes_per_entity": 1353.1141009756097,
+   "tracked_peak": 2773883907,
+   "unstable": false,
+   "wall_secs": {
+    "max": 15.185637571000001,
+    "median": 14.570467833,
+    "min": 14.462262002
    },
    "within_rss_ceiling": false,
    "within_tracked_ceiling": false
@@ -381,6 +1135,58 @@
    "within_rss_ceiling": false,
    "within_tracked_ceiling": false
   },
+  "bounded_memory/spill/large_industrial/x2.0/x86_64-linux-nas": {
+   "allocated_bytes": 16174408120,
+   "artifact_bytes": 54310312,
+   "bench": "bounded_memory",
+   "bytes_reread": "not exposed by the facade",
+   "bytes_spilled": 547200329,
+   "cell": "large_industrial",
+   "entities": 2050000,
+   "peak_rss_bytes": 3545526272,
+   "platform": "x86_64-linux-nas",
+   "rss_is_per_run": true,
+   "scale": 2.0,
+   "spill_budget": 67108864,
+   "spill_count": 26,
+   "strategy": "spill",
+   "tracked_bytes_per_entity": 1353.1141980487805,
+   "tracked_peak": 2773884106,
+   "unstable": false,
+   "wall_secs": {
+    "max": 24.665829995,
+    "median": 22.507393547,
+    "min": 22.25401041
+   },
+   "within_rss_ceiling": false,
+   "within_tracked_ceiling": false
+  },
+  "bounded_memory/spill/spline_heavy/x0.5/aarch64-linux-mercury": {
+   "allocated_bytes": 160274188,
+   "artifact_bytes": 938416,
+   "bench": "bounded_memory",
+   "bytes_reread": "not exposed by the facade",
+   "bytes_spilled": 3048868,
+   "cell": "spline_heavy",
+   "entities": 5000,
+   "peak_rss_bytes": 31449088,
+   "platform": "aarch64-linux-mercury",
+   "rss_is_per_run": true,
+   "scale": 0.5,
+   "spill_budget": 67108864,
+   "spill_count": 5,
+   "strategy": "spill",
+   "tracked_bytes_per_entity": 3918.2814,
+   "tracked_peak": 19591407,
+   "unstable": false,
+   "wall_secs": {
+    "max": 0.070287546,
+    "median": 0.062693016,
+    "min": 0.06129836
+   },
+   "within_rss_ceiling": true,
+   "within_tracked_ceiling": true
+  },
   "bounded_memory/spill/spline_heavy/x0.5/x86_64-linux-mars": {
    "allocated_bytes": 193364149,
    "artifact_bytes": 938416,
@@ -403,6 +1209,58 @@
     "max": 2.038119927,
     "median": 1.266400999,
     "min": 0.445559192
+   },
+   "within_rss_ceiling": true,
+   "within_tracked_ceiling": true
+  },
+  "bounded_memory/spill/spline_heavy/x0.5/x86_64-linux-nas": {
+   "allocated_bytes": 160282178,
+   "artifact_bytes": 938416,
+   "bench": "bounded_memory",
+   "bytes_reread": "not exposed by the facade",
+   "bytes_spilled": 3048868,
+   "cell": "spline_heavy",
+   "entities": 5000,
+   "peak_rss_bytes": 33087488,
+   "platform": "x86_64-linux-nas",
+   "rss_is_per_run": true,
+   "scale": 0.5,
+   "spill_budget": 67108864,
+   "spill_count": 5,
+   "strategy": "spill",
+   "tracked_bytes_per_entity": 3918.3194,
+   "tracked_peak": 19591597,
+   "unstable": true,
+   "wall_secs": {
+    "max": 0.202865958,
+    "median": 0.183655433,
+    "min": 0.157770368
+   },
+   "within_rss_ceiling": true,
+   "within_tracked_ceiling": true
+  },
+  "bounded_memory/spill/spline_heavy/x1.0/aarch64-linux-mercury": {
+   "allocated_bytes": 319302186,
+   "artifact_bytes": 1872248,
+   "bench": "bounded_memory",
+   "bytes_reread": "not exposed by the facade",
+   "bytes_spilled": 6095356,
+   "cell": "spline_heavy",
+   "entities": 10000,
+   "peak_rss_bytes": 55078912,
+   "platform": "aarch64-linux-mercury",
+   "rss_is_per_run": true,
+   "scale": 1.0,
+   "spill_budget": 67108864,
+   "spill_count": 5,
+   "strategy": "spill",
+   "tracked_bytes_per_entity": 3894.1013,
+   "tracked_peak": 38941013,
+   "unstable": false,
+   "wall_secs": {
+    "max": 0.123902293,
+    "median": 0.121388145,
+    "min": 0.119581282
    },
    "within_rss_ceiling": true,
    "within_tracked_ceiling": true
@@ -433,6 +1291,58 @@
    "within_rss_ceiling": true,
    "within_tracked_ceiling": true
   },
+  "bounded_memory/spill/spline_heavy/x1.0/x86_64-linux-nas": {
+   "allocated_bytes": 319302748,
+   "artifact_bytes": 1872248,
+   "bench": "bounded_memory",
+   "bytes_reread": "not exposed by the facade",
+   "bytes_spilled": 6095356,
+   "cell": "spline_heavy",
+   "entities": 10000,
+   "peak_rss_bytes": 56774656,
+   "platform": "x86_64-linux-nas",
+   "rss_is_per_run": true,
+   "scale": 1.0,
+   "spill_budget": 67108864,
+   "spill_count": 5,
+   "strategy": "spill",
+   "tracked_bytes_per_entity": 3894.1203,
+   "tracked_peak": 38941203,
+   "unstable": true,
+   "wall_secs": {
+    "max": 0.278476333,
+    "median": 0.260221772,
+    "min": 0.226058722
+   },
+   "within_rss_ceiling": true,
+   "within_tracked_ceiling": true
+  },
+  "bounded_memory/spill/spline_heavy/x2.0/aarch64-linux-mercury": {
+   "allocated_bytes": 637640286,
+   "artifact_bytes": 3740048,
+   "bench": "bounded_memory",
+   "bytes_reread": "not exposed by the facade",
+   "bytes_spilled": 12186498,
+   "cell": "spline_heavy",
+   "entities": 20000,
+   "peak_rss_bytes": 101715968,
+   "platform": "aarch64-linux-mercury",
+   "rss_is_per_run": true,
+   "scale": 2.0,
+   "spill_budget": 67108864,
+   "spill_count": 5,
+   "strategy": "spill",
+   "tracked_bytes_per_entity": 3881.51545,
+   "tracked_peak": 77630309,
+   "unstable": false,
+   "wall_secs": {
+    "max": 0.283860208,
+    "median": 0.24531627,
+    "min": 0.237622659
+   },
+   "within_rss_ceiling": true,
+   "within_tracked_ceiling": true
+  },
   "bounded_memory/spill/spline_heavy/x2.0/x86_64-linux-mars": {
    "allocated_bytes": 769046182,
    "artifact_bytes": 3740048,
@@ -455,6 +1365,58 @@
     "max": 1.951250836,
     "median": 1.218951325,
     "min": 1.161218898
+   },
+   "within_rss_ceiling": true,
+   "within_tracked_ceiling": true
+  },
+  "bounded_memory/spill/spline_heavy/x2.0/x86_64-linux-nas": {
+   "allocated_bytes": 637641101,
+   "artifact_bytes": 3740048,
+   "bench": "bounded_memory",
+   "bytes_reread": "not exposed by the facade",
+   "bytes_spilled": 12186498,
+   "cell": "spline_heavy",
+   "entities": 20000,
+   "peak_rss_bytes": 103309312,
+   "platform": "x86_64-linux-nas",
+   "rss_is_per_run": true,
+   "scale": 2.0,
+   "spill_budget": 67108864,
+   "spill_count": 5,
+   "strategy": "spill",
+   "tracked_bytes_per_entity": 3881.52665,
+   "tracked_peak": 77630533,
+   "unstable": true,
+   "wall_secs": {
+    "max": 0.55848048,
+    "median": 0.440367618,
+    "min": 0.432550319
+   },
+   "within_rss_ceiling": true,
+   "within_tracked_ceiling": true
+  },
+  "bounded_memory/spill_budget/large_industrial/b128MiB/aarch64-linux-mercury": {
+   "allocated_bytes": 8447013364,
+   "artifact_bytes": 28478920,
+   "bench": "bounded_memory",
+   "bytes_reread": "not exposed by the facade",
+   "bytes_spilled": 274821612,
+   "cell": "large_industrial",
+   "entities": 1025000,
+   "peak_rss_bytes": 1788137472,
+   "platform": "aarch64-linux-mercury",
+   "rss_is_per_run": true,
+   "scale": 1.0,
+   "spill_budget": 134217728,
+   "spill_count": 11,
+   "strategy": "spill_budget",
+   "tracked_bytes_per_entity": 1353.2385980487804,
+   "tracked_peak": 1387069563,
+   "unstable": false,
+   "wall_secs": {
+    "max": 7.157826363,
+    "median": 7.12290154,
+    "min": 7.11649269
    },
    "within_rss_ceiling": true,
    "within_tracked_ceiling": true
@@ -485,6 +1447,58 @@
    "within_rss_ceiling": false,
    "within_tracked_ceiling": false
   },
+  "bounded_memory/spill_budget/large_industrial/b128MiB/x86_64-linux-nas": {
+   "allocated_bytes": 8447187874,
+   "artifact_bytes": 28478920,
+   "bench": "bounded_memory",
+   "bytes_reread": "not exposed by the facade",
+   "bytes_spilled": 274821612,
+   "cell": "large_industrial",
+   "entities": 1025000,
+   "peak_rss_bytes": 1768996864,
+   "platform": "x86_64-linux-nas",
+   "rss_is_per_run": true,
+   "scale": 1.0,
+   "spill_budget": 134217728,
+   "spill_count": 11,
+   "strategy": "spill_budget",
+   "tracked_bytes_per_entity": 1353.2387502439024,
+   "tracked_peak": 1387069719,
+   "unstable": false,
+   "wall_secs": {
+    "max": 12.481096559,
+    "median": 11.788778195999999,
+    "min": 11.469524962
+   },
+   "within_rss_ceiling": true,
+   "within_tracked_ceiling": true
+  },
+  "bounded_memory/spill_budget/large_industrial/b256MiB/aarch64-linux-mercury": {
+   "allocated_bytes": 8099734591,
+   "artifact_bytes": 28478920,
+   "bench": "bounded_memory",
+   "bytes_reread": "not exposed by the facade",
+   "bytes_spilled": 122496612,
+   "cell": "large_industrial",
+   "entities": 1025000,
+   "peak_rss_bytes": 1788350464,
+   "platform": "aarch64-linux-mercury",
+   "rss_is_per_run": true,
+   "scale": 1.0,
+   "spill_budget": 268435456,
+   "spill_count": 5,
+   "strategy": "spill_budget",
+   "tracked_bytes_per_entity": 1353.2387063414635,
+   "tracked_peak": 1387069674,
+   "unstable": false,
+   "wall_secs": {
+    "max": 7.21876874,
+    "median": 6.922894104,
+    "min": 6.817046516
+   },
+   "within_rss_ceiling": true,
+   "within_tracked_ceiling": true
+  },
   "bounded_memory/spill_budget/large_industrial/b256MiB/x86_64-linux-mars": {
    "allocated_bytes": 11247163872,
    "artifact_bytes": 28340040,
@@ -511,6 +1525,58 @@
    "within_rss_ceiling": false,
    "within_tracked_ceiling": false
   },
+  "bounded_memory/spill_budget/large_industrial/b256MiB/x86_64-linux-nas": {
+   "allocated_bytes": 8099865303,
+   "artifact_bytes": 28478920,
+   "bench": "bounded_memory",
+   "bytes_reread": "not exposed by the facade",
+   "bytes_spilled": 122496612,
+   "cell": "large_industrial",
+   "entities": 1025000,
+   "peak_rss_bytes": 1769369600,
+   "platform": "x86_64-linux-nas",
+   "rss_is_per_run": true,
+   "scale": 1.0,
+   "spill_budget": 268435456,
+   "spill_count": 5,
+   "strategy": "spill_budget",
+   "tracked_bytes_per_entity": 1353.238792195122,
+   "tracked_peak": 1387069762,
+   "unstable": false,
+   "wall_secs": {
+    "max": 12.166705613,
+    "median": 11.294565891,
+    "min": 11.017676491
+   },
+   "within_rss_ceiling": true,
+   "within_tracked_ceiling": true
+  },
+  "bounded_memory/spill_budget/large_industrial/b64MiB/aarch64-linux-mercury": {
+   "allocated_bytes": 8462662532,
+   "artifact_bytes": 28478920,
+   "bench": "bounded_memory",
+   "bytes_reread": "not exposed by the facade",
+   "bytes_spilled": 274821612,
+   "cell": "large_industrial",
+   "entities": 1025000,
+   "peak_rss_bytes": 1787908096,
+   "platform": "aarch64-linux-mercury",
+   "rss_is_per_run": true,
+   "scale": 1.0,
+   "spill_budget": 67108864,
+   "spill_count": 16,
+   "strategy": "spill_budget",
+   "tracked_bytes_per_entity": 1353.238664390244,
+   "tracked_peak": 1387069631,
+   "unstable": false,
+   "wall_secs": {
+    "max": 7.221126021,
+    "median": 7.090582366,
+    "min": 7.08489415
+   },
+   "within_rss_ceiling": true,
+   "within_tracked_ceiling": true
+  },
   "bounded_memory/spill_budget/large_industrial/b64MiB/x86_64-linux-mars": {
    "allocated_bytes": 11610521414,
    "artifact_bytes": 28340040,
@@ -536,6 +1602,32 @@
    },
    "within_rss_ceiling": false,
    "within_tracked_ceiling": false
+  },
+  "bounded_memory/spill_budget/large_industrial/b64MiB/x86_64-linux-nas": {
+   "allocated_bytes": 8462925760,
+   "artifact_bytes": 28478920,
+   "bench": "bounded_memory",
+   "bytes_reread": "not exposed by the facade",
+   "bytes_spilled": 274821612,
+   "cell": "large_industrial",
+   "entities": 1025000,
+   "peak_rss_bytes": 1769340928,
+   "platform": "x86_64-linux-nas",
+   "rss_is_per_run": true,
+   "scale": 1.0,
+   "spill_budget": 67108864,
+   "spill_count": 16,
+   "strategy": "spill_budget",
+   "tracked_bytes_per_entity": 1353.2387502439024,
+   "tracked_peak": 1387069719,
+   "unstable": false,
+   "wall_secs": {
+    "max": 12.363796472,
+    "median": 11.686343244,
+    "min": 11.564855309
+   },
+   "within_rss_ceiling": true,
+   "within_tracked_ceiling": true
   },
   "bounded_memory_stages/direct/large_industrial/x0.5/x86_64-linux-mars": {
    "bench": "bounded_memory_stages",
@@ -572,6 +1664,41 @@
    "strategy": "direct",
    "tracked_peak": 1055921746
   },
+  "bounded_memory_stages/direct/large_industrial/x0.5/x86_64-linux-nas": {
+   "bench": "bounded_memory_stages",
+   "cell": "large_industrial",
+   "entities": 512500,
+   "platform": "x86_64-linux-nas",
+   "scale": 0.5,
+   "stages": {
+    "classify": {
+     "held": 536065963,
+     "peak": 693615366
+    },
+    "flatten": {
+     "held": 569925638,
+     "peak": 569927811
+    },
+    "open": {
+     "held": 217495200,
+     "peak": 278212635
+    },
+    "report": {
+     "held": 360714460,
+     "peak": 439956262
+    },
+    "view": {
+     "held": 387009621,
+     "peak": 452023905
+    },
+    "write": {
+     "held": 396905617,
+     "peak": 664070987
+    }
+   },
+   "strategy": "direct",
+   "tracked_peak": 693615366
+  },
   "bounded_memory_stages/direct/large_industrial/x1.0/x86_64-linux-mars": {
    "bench": "bounded_memory_stages",
    "cell": "large_industrial",
@@ -607,6 +1734,41 @@
    "strategy": "direct",
    "tracked_peak": 2112262374
   },
+  "bounded_memory_stages/direct/large_industrial/x1.0/x86_64-linux-nas": {
+   "bench": "bounded_memory_stages",
+   "cell": "large_industrial",
+   "entities": 1025000,
+   "platform": "x86_64-linux-nas",
+   "scale": 1.0,
+   "stages": {
+    "classify": {
+     "held": 1071819935,
+     "peak": 1387024523
+    },
+    "flatten": {
+     "held": 1139630562,
+     "peak": 1139632735
+    },
+    "open": {
+     "held": 434771628,
+     "peak": 556231171
+    },
+    "report": {
+     "held": 721250704,
+     "peak": 879716114
+    },
+    "view": {
+     "held": 773799189,
+     "peak": 903825185
+    },
+    "write": {
+     "held": 793615469,
+     "peak": 1327966735
+    }
+   },
+   "strategy": "direct",
+   "tracked_peak": 1387024523
+  },
   "bounded_memory_stages/direct/large_industrial/x2.0/x86_64-linux-mars": {
    "bench": "bounded_memory_stages",
    "cell": "large_industrial",
@@ -641,6 +1803,41 @@
    },
    "strategy": "direct",
    "tracked_peak": 4224938662
+  },
+  "bounded_memory_stages/direct/large_industrial/x2.0/x86_64-linux-nas": {
+   "bench": "bounded_memory_stages",
+   "cell": "large_industrial",
+   "entities": 2050000,
+   "platform": "x86_64-linux-nas",
+   "scale": 2.0,
+   "stages": {
+    "classify": {
+     "held": 2143323823,
+     "peak": 2773838867
+    },
+    "flatten": {
+     "held": 2279036354,
+     "peak": 2279038527
+    },
+    "open": {
+     "held": 869320428,
+     "peak": 1112260131
+    },
+    "report": {
+     "held": 1442319136,
+     "peak": 1758806602
+    },
+    "view": {
+     "held": 1547374269,
+     "peak": 1807423689
+    },
+    "write": {
+     "held": 1586605957,
+     "peak": 2655754175
+    }
+   },
+   "strategy": "direct",
+   "tracked_peak": 2773838867
   },
   "generation/block_heavy/x86_64-linux-mars": {
    "artifact_bytes": 104752,

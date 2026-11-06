@@ -47,8 +47,8 @@ page and the pin moving with it.
 | baseline | sha256 |
 |---|---|
 | `tests/fixtures/pvec_bench_corpus.json` | `97eca65c287aaea1c014489cd5cc02e685e17b7f26b3961837414317e18bc5e5` |
-| `tests/fixtures/pvec_bench_baseline.json` | `e39162345db9e2ffca6219a11bb7ff5081c2292e5984c036d0b8f6fc59e473b4` |
-| `tests/fixtures/pvec_corpus_baseline.json` | `743d9c5ea8d21abe5587e28281b756b0bfb3ef716da4da8b0e6a6a3258b789df` |
+| `tests/fixtures/pvec_bench_baseline.json` | `ba119789e513653a398a60fdb6bcc95f2a8a396023b25a93ebde6e8db38d2b6f` |
+| `tests/fixtures/pvec_corpus_baseline.json` | `2619fb5cf2baf5d98f3695555fd23c39d2a714adb608f3e3fa2619b511f17bad` |
 
 ## The EPIC L decision
 
@@ -71,14 +71,14 @@ What the numbers say, in `docs/pvec-benchmarks.md` for the PVec side and `docs/v
 | | PVec (1,025,000 entities, `large_industrial`) | EPIC L (1,000,000 short lines, zoom 0 to 12) |
 |---|---|---|
 | conversion wall time | 8.2 s end to end (1.05 s of it the provider, 1.0 s the writer) | 12.1 s |
-| peak memory | 2.66 GiB tracked heap, 3.07 GiB process peak | 573 MiB working heap |
-| shape of the memory | linear, about 2.8 KB per entity, doubling the drawing doubles the peak | bounded by the level byte budget, a hostile drawing is stopped |
+| peak memory | 2.66 GiB tracked heap, 3.07 GiB process peak when this was decided; 1,323 MiB tracked and 1,706 MiB process peak (arm64), 1,687 MiB (x64) after #1481 | 573 MiB working heap |
+| shape of the memory | linear, about 2.8 KB per entity when this was decided and about 1.35 KB tracked after #1481, doubling the drawing doubles the peak | bounded by the level byte budget, a hostile drawing is stopped |
 | output | 22.2 MB `.pvec` with the analytic curves and a report | 5,510,529 tiles |
 | what a curve is | an exact or equivalent PVec curve (EPIC P's classes) | tessellated, display fidelity |
 
 The two are not the same drawing, so I draw no conclusion about which is faster: no cell has both a PVec artifact
 and an L derivative. What decides the outcome is the memory column. PVec's conversion holds the whole drawing until
-the artifact is sealed, so it misses its own 1.5 GiB ceiling at a million entities by a factor of two. The writer's
+the artifact is sealed, so it missed its own 1.5 GiB ceiling at a million entities by a factor of two. After #1481 (#1524, #1528, #1537) it is 1,323 MiB tracked and 1,706 MiB process peak (arm64), 1,687 MiB (x64) at 1,025,000 entities, which is still linear and still over the original 1.0 GiB and 1.5 GiB. The criterion is restated to 1.4 GiB tracked, 1.75 GiB RSS and at most 1,450 bytes an entity (`docs/pvec-benchmarks.md`), and the bounded-memory claim is withdrawn. The writer's
 spill (pvec#235, #1314, #1417) exists now but does not move that peak, see the paragraph below. Making PVec the default now would make a drawing of that size need over
 3 GiB where the L path stays under 600 MiB. EPIC L cannot carry what PVec exists for, the analytic geometry. So both
 stay, and the caller picks the path that fits the drawing and the use. This is the outcome to revisit when the
@@ -86,4 +86,4 @@ bounded-memory benchmark has a strategy that passes its ceiling: the decision is
 line of the pin, and the test will say when they disagree.
 
 Since this was recorded the writer's spill has landed (#1314, #1417): a spilled conversion adds 24 bytes an entity in the
-writer instead of 391 to 419 (`docs/adr/pvec-tiers-and-spool-rescope.md`). I have since re-run the bounded-memory benchmark with the spill (`docs/pvec-benchmarks.md`, #1064). The tracked peak and the peak RSS at 1,025,000 entities are within about 1% with and without it (2,725 and 3,149 MiB direct, 2,725 and 3,117 MiB spilled), at every budget I tried, because libviprs' own per-entity state is what sits in memory before the writer runs. So the figures above stand and the outcome stays "both ship, the caller chooses"... The thing that would change it is the classifier streaming into the writer, which is #1481.
+writer instead of 391 to 419 (`docs/adr/pvec-tiers-and-spool-rescope.md`). I have since re-run the bounded-memory benchmark with the spill (`docs/pvec-benchmarks.md`, #1064). The tracked peak and the peak RSS at 1,025,000 entities are within about 1% with and without it (2,725 and 3,149 MiB direct, 2,725 and 3,117 MiB spilled), at every budget I tried, because libviprs' own per-entity state is what sits in memory before the writer runs. So the figures above stand and the outcome stays "both ship, the caller chooses"... What would change it is a PVec writer that takes geometry as it is classified, or the report rows out of memory, both listed under "Not done" in `docs/pvec-benchmarks.md`. #1481 closes without either.

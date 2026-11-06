@@ -189,6 +189,8 @@ Things to read in the table:
 
 ## Bounded-memory generation (N8.4, #1440)
 
+The tables from here to the Decision are from before #1524, #1528 and #1537 (x64, MARS) and stay as the record of where the conversion started. The figures after the stack, the restated criterion and what is not done are under "After the stack" at the end of this section.
+
 `tests/pvec_bounded_memory_bench.rs` measures what a whole conversion (`PvecConversion::convert`) holds in memory, and how that moves with the drawing. Every variant runs in a child process of the test binary and the drawing is written to disk by another child first, so one run's RSS cannot leak into the next and the drawing's own construction is not in the peak. Two bases are reported because they answer different questions: the counting allocator's live-heap peak above where the conversion started (the drawing's bytes are already held and excluded), and the kernel's `VmHWM` for the child.
 
 ```text
@@ -257,17 +259,63 @@ What opening the drawing alone costs: at 1,025,000 entities the acadrust documen
 
 What this shows about the rest. The view outcome adds 324 MiB (755 bytes an entity held, cumulative) and the flattened leaves another 348 MiB, so 1,087 MiB is held before classification starts. The peak, 2,015 MiB, is reached inside `classify`, about 930 MiB above that (that compares a pass B peak with the pass A figure for what is held before classification, so read it as an estimate), and the stage ends holding 1,023 MiB, so the peak sits about 990 MiB above where classification leaves off: that much is built and freed again before the first write event. After the write the report stage peaks at 1,536 MiB. All six peaks scale linearly with the entities. I am not proposing a cut here: the next steps pick from these figures.
 
-The older rows in the table above (2,725 MiB tracked at 1,025,000 entities) are from before the code moved: the plain `bounded_memory_child` on today's main gives 2,015 MiB tracked and 2.4 GiB RSS at the same size, twice, and the stage run's total agrees with it to 0.01%. I did not retake those rows here, that is the last step of #1481.
+The older rows in the table above (2,725 MiB tracked at 1,025,000 entities) are from before the code moved: the plain `bounded_memory_child` on today's main gives 2,015 MiB tracked and 2.4 GiB RSS at the same size, twice, and the stage run's total agrees with it to 0.01%. They are retaken after the stack in "After the stack" below.
 
 ### Decision
 
 **libviprs ships the spill strategy** for the artifact: it is the only one with code, its bytes are the in-memory conversion's for the same configuration (`tests/pvec_1314_spool.rs`), and it takes the artifact out of memory (24 bytes an entity instead of 391 to 419 for the funnel, `docs/adr/pvec-tiers-and-spool-rescope.md`). The two-pass strategy has no code, and the numbers above give no reason to build it: the spill already removes the second pass over the writer's input.
 
-**It does not meet the N8.4 criteria, and I am not claiming it does.** The tracked peak and the peak RSS are within about 1% with and without the spill, at every scale and every budget (2,725 MiB tracked and 3,149 MiB RSS direct, 2,725 and 3,117 MiB with the spill, at 1,025,000 entities) against ceilings of 1,024 and 1,536 MiB, and doubling the entities still moves the tracked peak by 97.6% against a criterion of under 10%. The peak is reached before the writer runs, while the classifier's flattened leaves, view outcome, records and report rows are all alive, and that is the roughly 2.5 KB an entity that sits in libviprs. The spill also costs wall time: 17.5 s against 8.16 s direct at 1,025,000 entities, though the spill rows were taken under load and are marked unstable, so I read that as slower, not as a factor. The criterion that the buffer is the knob also fails, because the peak does not move with the buffer. Meeting the ceiling needs the classifier to hand entities to the writer as it goes instead of collecting them, which is a change in `src/pvec_convert.rs`, not a tuning of the spill. That work is tracked in #1481.
+**It does not meet the N8.4 criteria, and I am not claiming it does.** The tracked peak and the peak RSS are within about 1% with and without the spill, at every scale and every budget (2,725 MiB tracked and 3,149 MiB RSS direct, 2,725 and 3,117 MiB with the spill, at 1,025,000 entities) against ceilings of 1,024 and 1,536 MiB, and doubling the entities still moves the tracked peak by 97.6% against a criterion of under 10%. The peak is reached before the writer runs, while the classifier's flattened leaves, view outcome, records and report rows are all alive, and that is the roughly 2.5 KB an entity that sits in libviprs. The spill also costs wall time: 17.5 s against 8.16 s direct at 1,025,000 entities, though the spill rows were taken under load and are marked unstable, so I read that as slower, not as a factor. The criterion that the buffer is the knob also fails, because the peak does not move with the buffer. Meeting the ceiling needs the classifier to hand entities to the writer as it goes instead of collecting them, which is a change in `src/pvec_convert.rs`, not a tuning of the spill. That work was done in part by #1524, #1528 and #1537 and the rest is withdrawn, see "After the stack" below.
 
 All rows in this section are x86_64 native on MARS. I took no arm64 rows.
 
 `block_heavy` is on the clean side of the N7.5 allocation check: 22,440 entities in 11,220 instances at depth 8 hold a tracked peak of 56 MiB.
+
+### After the stack (N8.4 close-out, #1481)
+
+Everything above this heading was taken before #1524, #1528 and #1537, on MARS (x86_64, native). Those three change the conversion: classify now reads each entity where it sits instead of copying it three times (#1518), the geometry is dropped the moment the write returns (#1519), and the report JSON is written straight into its partial file instead of being built as one String (#1520). The rows below are the code at the tip of #1537, three runs per variant, the largest peak of the three, `large_industrial`, direct strategy.
+
+| scale | entities | tracked peak (MiB) | peak RSS, arm64 (MiB) | peak RSS, x64 (MiB) | tracked bytes per entity | RSS bytes per entity, x64 |
+|---|---|---|---|---|---|---|
+| 0.5 | 512,500 | 662 | 858 | 859 | 1,354 | 1,756 |
+| 1.0 | 1,025,000 | 1,323 | 1,706 | 1,687 | 1,353 | 1,726 |
+| 2.0 | 2,050,000 | 2,646 | 3,327 | 3,382 | 1,353 | 1,729 |
+
+Both sets are the bounded-memory bench, native, on a host the bench found quiet: mercury (aarch64-linux-mercury, Colima) and the NAS (x86_64-linux-nas). The process RSS is `VmHWM` of each run's own child. The tracked heap is the same on both architectures to 0.01%, so one column carries it. The 2.0 row on the NAS is marked unstable (its wall time varied), which does not touch the peaks. Both sets of rows are in `tests/fixtures/pvec_bench_baseline.json`.
+
+Where the heap sits at 1,025,000 entities, x64 (the NAS), MiB held at the end of the stage and peak during it, against the same stages before the stack (the table in "Peak by stage"):
+
+| stage | held before | peak before | held after | peak after |
+|---|---|---|---|---|
+| open | 415 | 531 | 415 | 530 |
+| view (cumulative) | 739 | 863 | 738 | 862 |
+| flatten (cumulative) | 1,087 | 1,087 | 1,087 | 1,087 |
+| classify | 1,023 | 2,015 | 1,022 | 1,323 |
+| write | 1,020 | 1,267 | 757 | 1,266 |
+| report | 951 | 1,536 | 688 | 839 |
+
+The top of the conversion went from 2,015 MiB (in classify) to 1,323 MiB, 34% lower, and the report stage from 1,536 to 839. What opening the drawing alone costs is now measured at all three scales instead of quoted: the acadrust document holds 207, 415 and 829 MiB at 0.5, 1.0 and 2.0, which is 424.4, 424.2 and 424.1 bytes an entity. That is about 31% of the 1,353 bytes an entity the whole conversion peaks at.
+
+The spill strategy still does not move any of this: it peaks at the same 1,323 MiB tracked at 64, 128 and 256 MiB budgets, and at 1,705 MiB RSS on mercury.
+
+**The original criteria were not met.** The ceilings were 1.5 GiB process peak RSS and 1.0 GiB tracked heap for 1,025,000 entities, and under 10% growth when the entities double. After the stack the tracked peak is 1,323 MiB (over 1.0 GiB), and doubling the entities still doubles it (+100.0%, 1,323 to 2,646 MiB). The peak RSS is 1,706 MiB on arm64 and 1,687 MiB on x64, over 1.5 GiB. Memory is linear in the entities because the provider's opened document (about 424 bytes an entity) and the report rows, which the public `ConversionReport::entities` returns, stay resident, and because the writer needs the whole drawing's bounds before its first push and re-reads every curve PVec refuses, so the geometry has to exist in full before the write. **The bounded-memory claim is withdrawn for the in-memory path.** The strategy decision above stands (libviprs ships the spill, it takes the artifact out of memory) but it does not bound the peak.
+
+### The criterion, restated
+
+What I hold the conversion to instead, and what the bench now checks (`RSS_CEILING` and `TRACKED_CEILING` in `tests/pvec_bounded_memory_bench.rs`): converting `large_industrial` (1,025,000 entities) peaks at or below **1.4 GiB tracked heap and 1.75 GiB process RSS** (the largest of three runs on a quiet native host), the tracked cost is at most **1,450 bytes per entity**, and the per-entity figures at the 0.5, 1.0 and 2.0 scales agree **within 10%** (no superlinear term). Measured: 1,323 MiB (1.29 GiB) tracked and 1,706 MiB (1.67 GiB) RSS on arm64 and 1,687 MiB (1.65 GiB) on x64, 1,353 bytes an entity, and the three scales differ by 0.03% in tracked bytes an entity (3% in RSS bytes an entity). I did not have to move any of the numbers I set out to write. The RSS margin is thin, 5% on arm64 and 6% on x64.
+
+### What a drawing needs
+
+Budget a host by the entities: about 1,350 bytes of tracked heap and 1,750 bytes of process RSS an entity, so a drawing of 1,000,000 entities needs about 1.3 GiB of heap and 1.7 GiB of RSS, and 2,000,000 about 2.6 GiB and 3.3 GiB. A drawing past what the host has is killed by the operating system when the allocator cannot get more. There is no guard, deliberately: no entity cap and no allocation limit, because either would be a number I picked without a case for it, and a conversion that stops early with a refusal is a different product from one that runs. A caller that cannot size its hosts should convert through EPIC L (`docs/pvec-integration-contract.md`), whose working heap is bounded by a byte budget.
+
+### Not done
+
+The only routes to a bounded peak, none taken here:
+
+* **A PVec writer change**: a bounds pre-pass, or no re-read of the curves PVec refuses, so that geometry can stream into the writer as it is classified. That is in `libviprs/pvec`, and it would still leave the document (424 bytes an entity) and the rows.
+* **The report rows out of memory.** Either rows written to disk as they are produced, or a summary mode, `report_rows(false)`, that keeps the totals and no rows. The mode is additive in 0.6.x, with `ConversionReport::close` then checking the totals instead of `rows.len()`. Rows to disk changes what `ConversionReport::entities` returns, which is a breaking change and so waits for 0.7.
+
+I did not add an entity cap or the flag.
 
 ## Tuning the conversion queue (N8.6, #1443)
 
