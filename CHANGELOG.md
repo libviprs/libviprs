@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Rooms and corridors from the conversion** (issue #1526). `PvecConversion::regions(Some(RegionConfig))` classifies the walls with the
+  default element rules, reads room names off TEXT (`DwgProvider::text_anchor`, defaulted), derives the regions and writes PVec's
+  semantic class stream. The report gets an optional `regions` section with the counts, what was dropped by reason and any
+  refusal (`regions.node-limit`), and the geometry is the same bytes with the step on and off. A room that runs along a door-gap
+  segment is dropped as `derived-boundary`, since those segments are not written as geometry.
 - **Solid hatches, 2D SOLID and the MTEXT anchor on the acadrust path** (issues #1034, #1527). A HATCH with the solid flag
   now reaches the tiles as a filled polygon in a new `fills` layer, with its islands as holes by even-odd (the normal and
   outer styles, outer being AutoCAD's default; the ignore style fills each loop on its own), a 2D SOLID is filled in its visible vertex order, and a patterned hatch stays an outline and

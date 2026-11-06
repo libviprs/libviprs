@@ -74,6 +74,7 @@ use crate::CancelToken;
 use crate::cad::CadSource;
 use crate::observe::{EngineEvent, EngineObserver};
 use crate::pvec::bounds::BoundsReport;
+use crate::pvec::classify::{ElementClass, ElementRules};
 use crate::pvec::components::{ComponentSource, ComponentsError, StreamSelection, build_streams};
 use crate::pvec::diagnostics::{Diagnostic, DiagnosticCode};
 use crate::pvec::dwg_acadrust::AcadrustProvider;
@@ -86,7 +87,7 @@ use crate::pvec::flatten::{
 use crate::pvec::mapping::{kind_of, row_for};
 use crate::pvec::provenance::NoProvenance;
 use crate::pvec::publish::{PublishError, StreamedPublishError, publish, publish_streamed};
-use crate::pvec::regions::RegionConfig;
+use crate::pvec::regions::{RegionConfig, RoomLabel, WallEdge, derive_regions, semantic_stream};
 use crate::pvec::report::{
     BoundsSplit, CapabilitySummary, ComponentsSummary, ConversionReport, EntityRow, RegionsSummary,
     ReportBuilder, ReportError, UnresolvedXrefRow, ViewSummary, XrefSummary,
@@ -436,6 +437,7 @@ impl<'a> PvecConversion<'a> {
             observer,
             queue_capacity,
             components,
+            regions,
             ..
         } = self;
         let observer = observer.as_deref();
@@ -540,6 +542,10 @@ impl<'a> PvecConversion<'a> {
         // makes the producer wait instead of letting outcomes pile up.
         let mut style_report = StyleReport::default();
         let mut style_bad = 0u64;
+        // The wall lines and the room names the regions step reads, in canonical order.
+        let rules = regions.is_some().then(ElementRules::default_profile);
+        let mut walls: Vec<WallEdge> = Vec::new();
+        let mut labels: Vec<RoomLabel> = Vec::new();
         let (tx, rx) = bounded::<Outcome>(*queue_capacity);
         let sent = AtomicU64::new(0);
         let consumed = std::thread::scope(|scope| {
@@ -564,6 +570,33 @@ impl<'a> PvecConversion<'a> {
                     d.source = Some(source_name.clone());
                 }
                 let id = ordered.entities[n].id;
+                if let (Some(rules), Item::Leaf(f)) = (&rules, &items[at]) {
+                    match &raw.geometry {
+                        RawGeometry::Line { start, end }
+                            if done.geometry.geometry().is_some()
+                                && rules.classify(raw).class == ElementClass::Wall =>
+                        {
+                            walls.push(WallEdge {
+                                entity: id,
+                                start: f.map_point(*start),
+                                end: f.map_point(*end),
+                            });
+                        }
+                        RawGeometry::Unmapped { .. }
+                            if matches!(raw.provenance.class_name.as_str(), "TEXT" | "MTEXT") =>
+                        {
+                            let anchor =
+                                raw.provenance.handle.and_then(|h| provider.text_anchor(h));
+                            if let Some((text, at)) = anchor.filter(|(t, _)| !t.trim().is_empty()) {
+                                labels.push(RoomLabel {
+                                    at: f.map_point(at),
+                                    text: text.trim().to_owned(),
+                                });
+                            }
+                        }
+                        _ => {}
+                    }
+                }
                 let side = (*components != StreamSelection::NONE
                     && done.geometry.geometry().is_some())
                 .then(|| {
@@ -638,6 +671,8 @@ impl<'a> PvecConversion<'a> {
             sides: consumed.sides,
             style_report,
             style_bad,
+            walls,
+            labels,
         })
     }
 
@@ -661,6 +696,8 @@ impl<'a> PvecConversion<'a> {
             sides,
             style_report,
             style_bad,
+            walls,
+            labels,
         } = self.classify(provider)?;
         let Self {
             dest,
@@ -698,7 +735,8 @@ impl<'a> PvecConversion<'a> {
              written: u64,
              length: u64,
              refused: &[(EntityId, String)],
-             components: Option<ComponentsSummary>|
+             components: Option<ComponentsSummary>,
+             found: Option<RegionsSummary>|
              -> Result<(ConversionReport, FidelityReport, String), PvecConvertError> {
                 for (id, rule) in refused {
                     let from = &stored
@@ -730,7 +768,7 @@ impl<'a> PvecConversion<'a> {
                 report.capabilities = Some(gate.summary());
                 report.diagnostics = diagnostics;
                 report.components = components;
-                report.regions = regions.map(|_| RegionsSummary::default());
+                report.regions = found;
                 report.georeference = sidecar
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned());
@@ -764,52 +802,87 @@ impl<'a> PvecConversion<'a> {
         // change a geometry block.
         let open = |spill: Option<&SpillConfig>,
                     on_chunk: &mut dyn FnMut(u64, u64)|
-         -> Result<(OpenArtifact, Option<ComponentsSummary>), PvecConvertError> {
+         -> Result<
+            (
+                OpenArtifact,
+                Option<ComponentsSummary>,
+                Option<RegionsSummary>,
+            ),
+            PvecConvertError,
+        > {
             let mut open =
                 open_geometry(&config, items(), Vec::new(), None, spill, &cancel, on_chunk)
                     .map_err(write_error)?;
-            if select == StreamSelection::NONE {
-                return Ok((open, None));
+            if select == StreamSelection::NONE && regions.is_none() {
+                return Ok((open, None, None));
             }
-            let layers = if select.layer {
-                provider
-                    .layers()
-                    .map_err(|e| PvecConvertError::View(e.into()))?
-            } else {
-                Vec::new()
-            };
-            let rows: Vec<ComponentSource<'_>> = sides
-                .iter()
-                .map(|(id, s)| ComponentSource {
-                    id: *id,
-                    stub: &s.stub,
-                    style: s.style.as_ref(),
-                })
-                .collect();
-            let built = build_streams(select, &open.source_ids, &layers, &rows)
-                .map_err(PvecConvertError::Components)?;
-            let mut summary = ComponentsSummary {
-                streams: built.names.iter().map(|n| (*n).to_owned()).collect(),
-                dropped: BTreeMap::new(),
-                colours_ignored: style_report.colour_total(),
-            };
-            for d in &built.dropped {
-                *summary
-                    .dropped
-                    .entry(format!("{}.{}", d.stream, d.reason))
-                    .or_default() += 1;
+            let mut streams = Vec::new();
+            let mut summary = None;
+            if select != StreamSelection::NONE {
+                let layers = if select.layer {
+                    provider
+                        .layers()
+                        .map_err(|e| PvecConvertError::View(e.into()))?
+                } else {
+                    Vec::new()
+                };
+                let rows: Vec<ComponentSource<'_>> = sides
+                    .iter()
+                    .map(|(id, s)| ComponentSource {
+                        id: *id,
+                        stub: &s.stub,
+                        style: s.style.as_ref(),
+                    })
+                    .collect();
+                let built = build_streams(select, &open.source_ids, &layers, &rows)
+                    .map_err(PvecConvertError::Components)?;
+                let mut made = ComponentsSummary {
+                    streams: built.names.iter().map(|n| (*n).to_owned()).collect(),
+                    dropped: BTreeMap::new(),
+                    colours_ignored: style_report.colour_total(),
+                };
+                for d in &built.dropped {
+                    *made
+                        .dropped
+                        .entry(format!("{}.{}", d.stream, d.reason))
+                        .or_default() += 1;
+                }
+                if style_bad > 0 {
+                    made.dropped
+                        .insert("line-style.bad-style".to_owned(), style_bad);
+                }
+                streams = built.streams;
+                summary = Some(made);
             }
-            if style_bad > 0 {
-                summary
-                    .dropped
-                    .insert("line-style.bad-style".to_owned(), style_bad);
+            let mut found = None;
+            if let Some(config) = &regions {
+                let mut report = RegionsSummary::default();
+                match derive_regions(&walls, &labels, &[], config) {
+                    // A plan past a limit converts without regions, and the report says which limit.
+                    Err(e) => report.refused = Some(e.reason_code().to_owned()),
+                    Ok(derived) => {
+                        report.rooms = derived.report.rooms;
+                        report.corridors = derived.report.corridors;
+                        report.gaps_closed = derived.report.gaps_closed;
+                        report.unlabelled = derived.report.unlabelled;
+                        report.labelled =
+                            derived.regions.iter().filter(|r| r.label.is_some()).count() as u64;
+                        let class = semantic_stream(&derived, &open.source_ids)
+                            .map_err(PvecConvertError::Components)?;
+                        for d in &class.dropped {
+                            *report.dropped.entry(d.reason.to_owned()).or_default() += 1;
+                        }
+                        report.written = (derived.regions.len() - class.dropped.len()) as u64;
+                        streams.extend(class.stream);
+                    }
+                }
+                found = Some(report);
             }
-            open.components(built.streams, &cancel)
-                .map_err(write_error)?;
-            Ok((open, Some(summary)))
+            open.components(streams, &cancel).map_err(write_error)?;
+            Ok((open, summary, found))
         };
         let published = match &spill {
-            None => open(None, &mut on_chunk).and_then(|(open, summary)| {
+            None => open(None, &mut on_chunk).and_then(|(open, summary, found)| {
                 let artifact = open.finish().map_err(write_error)?;
                 let (report, fidelity, json) = seal(
                     &artifact.bounds,
@@ -817,6 +890,7 @@ impl<'a> PvecConversion<'a> {
                     artifact.bytes.len() as u64,
                     &artifact.refused,
                     summary,
+                    found,
                 )?;
                 publish(dest, &artifact.bytes, json.as_bytes(), &cancel, &mut |_| {}).map_err(
                     |e| match e {
@@ -829,7 +903,7 @@ impl<'a> PvecConversion<'a> {
             Some(spill) => {
                 let mut sealed = None;
                 publish_streamed(dest, &cancel, &mut |_| {}, |out| {
-                    let (open, summary) = open(Some(spill), &mut on_chunk)?;
+                    let (open, summary, found) = open(Some(spill), &mut on_chunk)?;
                     let artifact = open
                         .seal_into(&cancel, &mut on_chunk, out)
                         .map_err(write_error)?;
@@ -842,6 +916,7 @@ impl<'a> PvecConversion<'a> {
                         artifact.length,
                         &artifact.refused,
                         summary,
+                        found,
                     )?;
                     sealed = Some((report, fidelity, artifact.written));
                     Ok(json.into_bytes())
@@ -893,6 +968,9 @@ struct Classified {
     style_report: StyleReport,
     /// Entities whose line style the DWG facts could not make into a component.
     style_bad: u64,
+    /// The straight wall leaves and the text anchors the regions step reads; empty when it is off.
+    walls: Vec<WallEdge>,
+    labels: Vec<RoomLabel>,
 }
 
 /// What the component streams read off one written entity: where it came from and its line style.
