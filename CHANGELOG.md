@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The vector release gate is ready** (issue #1038). `release/vector-gate.json` flips the web and mobile conformance row to met now that the iOS run is recorded beside web and Android, and `release_ready` is true. The raster regression row keeps its caveat: it says the gate script runs the suite, not that a given sha passed.
 - **iOS PMTiles conformance harness** (issue #1037). `conformance/ios/` runs the golden archive with the shared black on white style in MapLibre Native iOS 7.0.0 on a simulator, in remote Range mode and as a downloaded `pmtiles://file://` archive, and records the result. `docs/mobile-pmtiles.md` reports the run.
 - **The conversion writes the layer, line style and provenance streams** (issue #1525). `PvecConversion::components(StreamSelection)` writes
   any of the three beside the geometry, each on its own and off by default, and the decoded geometry and the manifest box are the same either way. The

@@ -1,7 +1,7 @@
 {
   "issue": "libviprs/libviprs#1038",
   "epic": "libviprs/libviprs#1028",
-  "release_ready": false,
+  "release_ready": true,
   "criteria": [
     {
       "id": "recognisable",
@@ -45,12 +45,12 @@
     {
       "id": "conformance",
       "text": "Web and mobile conformance are green.",
-      "status": "not_met",
+      "status": "met",
       "evidence": [
         "web/vector-viewer/e2e",
-        "conformance/android/evidence"
-      ],
-      "blocker": "Web is green and Android passes in an emulator (libviprs/libviprs#1403, merged; the recorded run was on the NAS). iOS is blocked on two sudo commands on mercury that Rom has to run: sudo xcodebuild -license accept, and sudo xcode-select -s /Applications/Xcode.app/Contents/Developer."
+        "conformance/android/evidence",
+        "conformance/ios/evidence"
+      ]
     },
     {
       "id": "raster_regression",
