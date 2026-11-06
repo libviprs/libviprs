@@ -211,6 +211,19 @@ pub struct PdfSummary {
     pub text_omitted: u64,
 }
 
+/// What the component streams of a conversion did (#1525). Optional and ignorable: a reader that
+/// does not know it loses nothing it needs.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ComponentsSummary {
+    /// The streams written, by name (`layer`, `line-style`, `provenance`), in file order.
+    pub streams: Vec<String>,
+    /// Rows left out because PVec cannot hold them, keyed `stream.reason` (`layer.name-too-long`).
+    pub dropped: BTreeMap<String, u64>,
+    /// DWG colour indices seen and dropped under the monochrome policy. Counted only when the line style
+    /// stream is selected, because that is the pass that reads an entity's style.
+    pub colours_ignored: u64,
+}
+
 /// The whole report.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConversionReport {
@@ -235,6 +248,9 @@ pub struct ConversionReport {
     /// into the geometry; absent when the conversion made none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<super::diagnostics::Diagnostic>,
+    /// What the component streams did (#1525). Absent when the conversion wrote none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub components: Option<ComponentsSummary>,
     /// The images, fills and text of a PDF page. Absent for a DWG.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pdf: Option<PdfSummary>,
@@ -385,6 +401,7 @@ impl ReportBuilder {
             capabilities: None,
             georeference: None,
             diagnostics: Vec::new(),
+            components: None,
             pdf: None,
             entities: self.rows,
         })

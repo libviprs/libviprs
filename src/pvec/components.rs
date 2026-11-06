@@ -87,6 +87,8 @@ pub struct DroppedRow {
 pub struct BuiltStreams {
     /// The streams, in the order layer, line style, provenance.
     pub streams: Vec<Stream>,
+    /// The name of each stream in `streams` (`layer`, `line-style`, `provenance`), for the conversion report.
+    pub names: Vec<&'static str>,
     /// Every row left out, for the conversion report.
     pub dropped: Vec<DroppedRow>,
 }
@@ -101,8 +103,8 @@ pub enum ComponentsError {
 }
 
 /// A line style as bit patterns, the key the style table is deduplicated on: its dash lengths, its width
-/// (`None`, or a flag for thinnest against explicit and the width's bits), its phase and its visibility.
-type StyleKey = (Vec<u64>, Option<(bool, u64)>, u64, bool);
+/// (`None`, or a flag for thinnest against explicit and the width's bits), its phase, its visibility and its name.
+type StyleKey = (Vec<u64>, Option<(bool, u64)>, u64, bool, String);
 
 /// The streams `select` asks for, built from `rows` and mapped onto the artifact written with
 /// `source_ids`. A stream with no row is not emitted.
@@ -131,6 +133,7 @@ pub fn build_streams(
     if select == StreamSelection::NONE {
         return Ok(BuiltStreams {
             streams: Vec::new(),
+            names: Vec::new(),
             dropped,
         });
     }
@@ -146,6 +149,7 @@ pub fn build_streams(
         .filter_map(|r| Some((*pvec_ids.get(&r.id)?, r)))
         .collect();
     let mut out = Vec::new();
+    let mut stream_names = Vec::new();
     let mut skip = |r: &ComponentSource<'_>, stream, reason| {
         dropped.push(DroppedRow {
             entity: r.id,
@@ -198,6 +202,7 @@ pub fn build_streams(
             assignments,
         };
         if !stream.assignments.is_empty() {
+            stream_names.push("layer");
             out.push(
                 stream
                     .into_stream(&registry)
@@ -213,7 +218,7 @@ pub fn build_streams(
         for (id, r) in &written {
             let Some(c) = r.style else { continue };
             let def = LineStyleDef {
-                name: String::new(),
+                name: c.name.clone(),
                 dashes: c
                     .dash
                     .as_ref()
@@ -225,6 +230,10 @@ pub fn build_streams(
                 phase: c.dash.as_ref().map_or(0.0, |d| d.phase()),
                 visible: c.visible,
             };
+            if def.name.len() > MAX_NAME {
+                skip(r, "line-style", "name-too-long");
+                continue;
+            }
             if def.dashes.len() > MAX_DASHES {
                 skip(r, "line-style", "too-many-dashes");
                 continue;
@@ -242,6 +251,7 @@ pub fn build_streams(
                 },
                 def.phase.to_bits(),
                 def.visible,
+                def.name.clone(),
             );
             let n = match seen_styles.get(&key) {
                 Some(n) => *n,
@@ -262,6 +272,7 @@ pub fn build_streams(
                 styles,
                 assignments,
             };
+            stream_names.push("line-style");
             out.push(
                 stream
                     .into_stream(&registry)
@@ -299,6 +310,7 @@ pub fn build_streams(
         }
         if !records.is_empty() {
             let stream = ProvenanceStream { records };
+            stream_names.push("provenance");
             out.push(
                 stream
                     .into_stream(&registry)
@@ -308,6 +320,7 @@ pub fn build_streams(
     }
     Ok(BuiltStreams {
         streams: out,
+        names: stream_names,
         dropped,
     })
 }

@@ -288,6 +288,7 @@ fn key_paths(v: &serde_json::Value, prefix: &str, out: &mut Vec<String>) {
                         | "totals.by_semantic_type"
                         | "view.excluded_by_field"
                         | "view.excluded_by_layer"
+                        | "components.dropped"
                 ) {
                     continue;
                 }
