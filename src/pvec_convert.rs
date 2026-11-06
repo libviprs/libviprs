@@ -90,7 +90,7 @@ use crate::pvec::report::{
     BoundsSplit, CapabilitySummary, ComponentsSummary, ConversionReport, EntityRow, ReportBuilder,
     ReportError, UnresolvedXrefRow, ViewSummary, XrefSummary,
 };
-use crate::pvec::style::{LineStyleComponent, StyleReport, dwg_line_style, dwg_style_input};
+use crate::pvec::style::{LineStyleComponent, dwg_line_style, dwg_style_input};
 use crate::pvec::transform::{ComposedTransform, promote};
 use crate::pvec::writer::{
     CapabilityId, LeafConfig, OpenArtifact, SpillConfig, WriteConfig, WriteError, open_geometry,
@@ -129,6 +129,16 @@ pub enum PvecConvertError {
     /// The writer refused.
     #[error("the artifact could not be written")]
     Write(#[source] WriteError),
+    /// PVec's writer refused every curve, so there is no artifact. The report and the counts say
+    /// what each entity was, with the refused ones counted as `pvec-cannot-store`; nothing was
+    /// published.
+    #[error("PVec's writer refused every curve, so no artifact was written")]
+    NothingStorable {
+        /// The conversion report, as it would have been published beside the artifact.
+        report: Box<ConversionReport>,
+        /// Entities per fidelity class, counted independently of the report rows.
+        fidelity: Box<FidelityReport>,
+    },
     /// The class counts disagree with the entities met.
     #[error("the class counts do not add up")]
     Tally(#[source] TallyError),
@@ -524,8 +534,6 @@ impl<'a> PvecConversion<'a> {
         // The classifying side produces, a consumer thread turns each outcome into a row, a
         // record, a diagnostic and a tally entry. They meet in a bounded queue, so a slow consumer
         // makes the producer wait instead of letting outcomes pile up.
-        let mut style_report = StyleReport::default();
-        let mut style_bad = 0u64;
         let (tx, rx) = bounded::<Outcome>(*queue_capacity);
         let sent = AtomicU64::new(0);
         let consumed = std::thread::scope(|scope| {
@@ -553,16 +561,15 @@ impl<'a> PvecConversion<'a> {
                 let side = (*components != StreamSelection::NONE
                     && done.geometry.geometry().is_some())
                 .then(|| {
-                    let style = components.line_style.then(|| {
+                    // Counted per kept entity in `open`, once the writer has said which it kept.
+                    let (style, colour, bad_style) = if components.line_style {
                         let input = dwg_style_input(&raw.style, true);
-                        style_report.count_colour(
-                            &raw.provenance.class_name,
-                            u64::from(input.colour_index.is_some()),
-                        );
                         let c = dwg_line_style(id, &input).ok();
-                        style_bad += u64::from(c.is_none());
-                        c
-                    });
+                        let bad = c.is_none();
+                        (c, input.colour_index.is_some(), bad)
+                    } else {
+                        (None, false, false)
+                    };
                     Side {
                         // Only the handle, the layer and the outermost INSERT are read; the class name and
                         // the rest of the block path are in the report, so they are not kept per entity.
@@ -578,7 +585,9 @@ impl<'a> PvecConversion<'a> {
                             ),
                             layer: raw.provenance.layer.clone(),
                         },
-                        style: style.flatten(),
+                        style,
+                        colour,
+                        bad_style,
                     }
                 });
                 let outcome = Outcome {
@@ -622,8 +631,6 @@ impl<'a> PvecConversion<'a> {
             diagnostics: consumed.diagnostics,
             peak_queue_depth: consumed.peak,
             sides: consumed.sides,
-            style_report,
-            style_bad,
         })
     }
 
@@ -645,8 +652,6 @@ impl<'a> PvecConversion<'a> {
             diagnostics,
             peak_queue_depth,
             sides,
-            style_report,
-            style_bad,
         } = self.classify(provider)?;
         let Self {
             dest,
@@ -676,12 +681,12 @@ impl<'a> PvecConversion<'a> {
         };
         // What both paths do once the artifact is written: tell the observer, close the report against
         // what went in, and stage the georeference sidecar. It runs once, so it takes the rows.
+        // With no `written` (PVec refused every curve) there is no artifact, so the report is closed
+        // against nothing written, the observer is not told, and no sidecar is staged.
         // The tally is sealed here and not at classification: an entity the classifier called
         // supported can still be one PVec's container refuses, and it is counted as that.
         let seal =
-            |bounds: &BoundsReport,
-             written: u64,
-             length: u64,
+            |written: Option<(&BoundsReport, u64, u64)>,
              refused: &[(EntityId, String)],
              components: Option<ComponentsSummary>|
              -> Result<(ConversionReport, FidelityReport, String), PvecConvertError> {
@@ -697,28 +702,32 @@ impl<'a> PvecConversion<'a> {
                     rows.refuse(*id, &to, format!("PVec's writer refused it ({rule})"));
                 }
                 let fidelity = tally.finish(encountered).map_err(PvecConvertError::Tally)?;
-                tell(EngineEvent::ConversionArtifactWritten {
-                    entities: written,
-                    bytes: length,
-                });
+                if let Some((_, entities, bytes)) = written {
+                    tell(EngineEvent::ConversionArtifactWritten { entities, bytes });
+                }
                 let mut report = rows
                     .finish(
                         encountered,
                         view,
                         xrefs,
                         BoundsSplit {
-                            exact: bounds.exact_count() as u64,
-                            hull_upper_bound: bounds.hull_count() as u64,
+                            exact: written.map_or(0, |(b, ..)| b.exact_count() as u64),
+                            hull_upper_bound: written.map_or(0, |(b, ..)| b.hull_count() as u64),
                         },
                     )
                     .map_err(PvecConvertError::Report)?;
                 report.capabilities = Some(gate.summary());
                 report.diagnostics = diagnostics;
                 report.components = components;
-                report.georeference = sidecar
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned());
+                report.georeference = written.and(
+                    sidecar
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned()),
+                );
                 let json = report.to_json_string().map_err(PvecConvertError::Report)?;
+                let Some((bounds, ..)) = written else {
+                    return Ok((report, fidelity, json));
+                };
                 GeoreferenceHandoff::V1(HandoffV1 {
                     bounds: bounds.drawing_bounds().map(|b| SourceBox {
                         min: [b.min().x, b.min().y],
@@ -772,11 +781,20 @@ impl<'a> PvecConversion<'a> {
                 .collect();
             let built = build_streams(select, &open.source_ids, &layers, &rows)
                 .map_err(PvecConvertError::Components)?;
+            // Only the entities the writer kept: one it refused has no row, so it is not counted here.
+            let kept: BTreeSet<EntityId> = open.source_ids.iter().copied().collect();
+            let kept_sides = || {
+                sides
+                    .iter()
+                    .filter(|(id, _)| kept.contains(id))
+                    .map(|(_, s)| s)
+            };
             let mut summary = ComponentsSummary {
                 streams: built.names.iter().map(|n| (*n).to_owned()).collect(),
                 dropped: BTreeMap::new(),
-                colours_ignored: style_report.colour_total(),
+                colours_ignored: kept_sides().filter(|s| s.colour).count() as u64,
             };
+            let style_bad = kept_sides().filter(|s| s.bad_style).count() as u64;
             for d in &built.dropped {
                 *summary
                     .dropped
@@ -793,27 +811,48 @@ impl<'a> PvecConversion<'a> {
             Ok((open, Some(summary)))
         };
         let published = match &spill {
-            None => open(None, &mut on_chunk).and_then(|(open, summary)| {
-                let artifact = open.finish().map_err(write_error)?;
-                let (report, fidelity, json) = seal(
-                    &artifact.bounds,
-                    artifact.written,
-                    artifact.bytes.len() as u64,
-                    &artifact.refused,
-                    summary,
-                )?;
-                publish(dest, &artifact.bytes, json.as_bytes(), &cancel, &mut |_| {}).map_err(
-                    |e| match e {
-                        PublishError::Cancelled => PvecConvertError::Cancelled,
-                        other => PvecConvertError::Publish(other),
-                    },
-                )?;
-                Ok((report, fidelity, artifact.written))
-            }),
+            None => match open(None, &mut on_chunk) {
+                Err(PvecConvertError::Write(WriteError::AllRefused(refused))) => {
+                    seal(None, &refused, None).and_then(|(report, fidelity, _)| {
+                        Err(PvecConvertError::NothingStorable {
+                            report: Box::new(report),
+                            fidelity: Box::new(fidelity),
+                        })
+                    })
+                }
+                opened => opened.and_then(|(open, summary)| {
+                    let artifact = open.finish().map_err(write_error)?;
+                    let (report, fidelity, json) = seal(
+                        Some((
+                            &artifact.bounds,
+                            artifact.written,
+                            artifact.bytes.len() as u64,
+                        )),
+                        &artifact.refused,
+                        summary,
+                    )?;
+                    publish(dest, &artifact.bytes, json.as_bytes(), &cancel, &mut |_| {}).map_err(
+                        |e| match e {
+                            PublishError::Cancelled => PvecConvertError::Cancelled,
+                            other => PvecConvertError::Publish(other),
+                        },
+                    )?;
+                    Ok((report, fidelity, artifact.written))
+                }),
+            },
             Some(spill) => {
                 let mut sealed = None;
                 publish_streamed(dest, &cancel, &mut |_| {}, |out| {
-                    let (open, summary) = open(Some(spill), &mut on_chunk)?;
+                    let (open, summary) = match open(Some(spill), &mut on_chunk) {
+                        Err(PvecConvertError::Write(WriteError::AllRefused(refused))) => {
+                            let (report, fidelity, _) = seal(None, &refused, None)?;
+                            return Err(PvecConvertError::NothingStorable {
+                                report: Box::new(report),
+                                fidelity: Box::new(fidelity),
+                            });
+                        }
+                        opened => opened?,
+                    };
                     let artifact = open
                         .seal_into(&cancel, &mut on_chunk, out)
                         .map_err(write_error)?;
@@ -821,9 +860,7 @@ impl<'a> PvecConversion<'a> {
                         bytes: artifact.length,
                     });
                     let (report, fidelity, json) = seal(
-                        &artifact.bounds,
-                        artifact.written,
-                        artifact.length,
+                        Some((&artifact.bounds, artifact.written, artifact.length)),
                         &artifact.refused,
                         summary,
                     )?;
@@ -874,15 +911,16 @@ struct Classified {
     peak_queue_depth: u32,
     /// What the component streams need of each written entity; empty when they are off.
     sides: Vec<(EntityId, Side)>,
-    style_report: StyleReport,
-    /// Entities whose line style the DWG facts could not make into a component.
-    style_bad: u64,
 }
 
 /// What the component streams read off one written entity: where it came from and its line style.
 struct Side {
     stub: ProvenanceStub,
     style: Option<LineStyleComponent>,
+    /// The entity carries a DWG colour index (read only when the line style stream is on).
+    colour: bool,
+    /// The line style stream is on and the DWG facts could not make a component of this entity.
+    bad_style: bool,
 }
 
 /// One entity's outcome on its way from the classifier to the consumer.
@@ -1314,6 +1352,9 @@ impl PvecConvertError {
             PvecConvertError::UnitRequired => d(DiagnosticCode::UnitRequired, "unit-required"),
             PvecConvertError::Write(_) | PvecConvertError::Components(_) => {
                 d(DiagnosticCode::WriteFailed, "write")
+            }
+            PvecConvertError::NothingStorable { .. } => {
+                d(DiagnosticCode::WriteFailed, "nothing-storable")
             }
             PvecConvertError::Tally(_) | PvecConvertError::Report(_) => {
                 d(DiagnosticCode::ReportFailed, "report")

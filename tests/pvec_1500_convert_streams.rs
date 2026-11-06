@@ -276,6 +276,8 @@ fn issue_1525_a_curve_the_writer_refuses_moves_no_stream_row_onto_a_stranger() {
         LayerStream::decode(&of(&streams, LayerStream::CAPABILITY).unwrap().payload).unwrap();
     // One layer row for each written entity, each naming an entity that is in the file, in order.
     assert_eq!(layer.assignments.len() as u64, out.written);
+    // Colours are counted for the entities the writer kept, so a refused one adds nothing.
+    assert!(out.report.components.as_ref().unwrap().colours_ignored <= out.written);
     for (n, (id, _)) in layer.assignments.iter().enumerate() {
         assert_eq!(id.index() as usize, n);
     }
