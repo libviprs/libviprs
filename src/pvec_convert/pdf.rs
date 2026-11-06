@@ -228,7 +228,7 @@ impl<'a> PdfConversion<'a> {
             &mut |_, _| {},
         )
         .map_err(|e| match e {
-            WriteError::NoGeometry => PdfConvertError::NoGeometry,
+            WriteError::NoGeometry | WriteError::AllRefused(_) => PdfConvertError::NoGeometry,
             WriteError::Cancelled => PdfConvertError::Cancelled,
             other => PdfConvertError::Write(other),
         })?;

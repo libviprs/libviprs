@@ -26,9 +26,19 @@
 //! [`DiagnosticCode::NON_UNIFORM_BLOCK_SCALE`]: an arc that has become an ellipse is not an arc
 //! any more, and a made-up approximation would be a silent error.
 //!
-//! Anything this reader does not flatten (points, mlines, images...) is
-//! reported with [`DiagnosticCode::UNSUPPORTED_ENTITY`] and its class name, never dropped
-//! quietly. An entity with an extrusion normal other than +Z inside an INSERT is reported the
+//! A 3D polyline and the visible edges of a 3DFACE cross as lines, seen from above.
+//!
+//! Anything this reader does not flatten is reported with [`DiagnosticCode::UNSUPPORTED_ENTITY`]
+//! and its class name, never dropped quietly. These classes stay out of scope on purpose
+//! (issue #1523), each with the reason its diagnostic carries: POINT (no primitive kind, look
+//! set by PDMODE), ATTDEF (a template, not drawn in an INSERT), polyface and polygon meshes,
+//! MESH, 3DSOLID and REGION (3D bodies), RAY and XLINE (infinite), MLINE (style offsets),
+//! SHAPE (SHX outline), WIPEOUT (a mask), IMAGE and PDFUNDERLAY (files the drawing names) and
+//! ACAD_TABLE (cell layout). Also out: hatch loops with elliptic or spline edges, a
+//! MULTILEADER's block content, and attributes of INSERTs nested in blocks. The adapter's
+//! three extra circles, four lines and three texts are not attributed to a class: its output
+//! needs the .NET library, which this default build does not have, and nothing in the drawing's
+//! census gives a class that would draw exactly those. An entity with an extrusion normal other than +Z inside an INSERT is reported the
 //! same way.
 //!
 //! # Layers
@@ -572,7 +582,7 @@ fn text_primitive(
     Ok(Some(text.with_origin(origin).with_anchor(anchor).into()))
 }
 
-/// What a HATCH, LEADER, MULTILEADER or TOLERANCE leaf draws, and what it says it left out, or
+/// What a HATCH, LEADER, MULTILEADER, TOLERANCE, 3D polyline or 3DFACE leaf draws, and what it says it left out, or
 /// [`None`] when the leaf is some other entity.
 fn convert_drawn(
     provider: &AcadrustProvider,
@@ -823,7 +833,45 @@ fn convert(
         }
         RawGeometry::Unmapped { reason } => {
             let Some(fact) = entity.provenance.handle.and_then(|h| provider.text_fact(h)) else {
-                return Err(unmoved(DiagnosticCode::UNSUPPORTED_ENTITY, reason));
+                // Why a class this reader does not draw stays out (issue #1523), so a report
+                // says why and not only what. A class nobody has looked at yet gets no reason.
+                let out_of_scope = match class {
+                    "POINT" => {
+                        "a point has no primitive kind, and its look depends on PDMODE and PDSIZE, which this model does not carry"
+                    }
+                    "ATTDEF" => {
+                        "an attribute definition is a template that shows only in the block editor; an INSERT draws its ATTRIB"
+                    }
+                    "POLYLINE" => {
+                        "a polyface or polygon mesh is a 3D surface and this model is a 2D view"
+                    }
+                    "MESH" | "3DSOLID" | "REGION" => {
+                        "a solid or surface needs its ACIS body or subdivision faces evaluated, and there is no 2D view of it without a 3D renderer"
+                    }
+                    "RAY" | "XLINE" => "an infinite line has no extent until a view clips it",
+                    "MLINE" => {
+                        "its lines come from an MLINESTYLE offset table and joint miters this reader does not evaluate"
+                    }
+                    "SHAPE" => {
+                        "its outline lives in a compiled SHX shape file that is not in the drawing"
+                    }
+                    "WIPEOUT" => {
+                        "a mask hides what is under it, which a list of primitives cannot express"
+                    }
+                    "IMAGE" | "PDFUNDERLAY" => {
+                        "raster and underlay content is a file the drawing names, not geometry in it"
+                    }
+                    "ACAD_TABLE" => {
+                        "a table is drawn from its style, merged cells and cell contents, which are not evaluated"
+                    }
+                    _ => "",
+                };
+                let why = if out_of_scope.is_empty() {
+                    reason.clone()
+                } else {
+                    format!("{reason}; out of scope: {out_of_scope}")
+                };
+                return Err(unmoved(DiagnosticCode::UNSUPPORTED_ENTITY, &why));
             };
             return text_primitive(&fact, &map, origin, class);
         }

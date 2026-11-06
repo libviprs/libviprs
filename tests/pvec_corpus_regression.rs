@@ -35,7 +35,7 @@ use std::time::Instant;
 use libviprs::cad::CadSource;
 use libviprs::pvec::SourceUnit;
 use libviprs::pvec::fidelity::FidelityClass;
-use libviprs::pvec_convert::PvecConversion;
+use libviprs::pvec_convert::{PvecConversion, PvecConvertError};
 use pvec_corpus::{conformance, document, regressions};
 use pvec_gold::{Corpus, EvidenceClass, Fixture};
 use serde_json::{Value, json};
@@ -97,8 +97,15 @@ fn row(fx: &Fixture, dir: &std::path::Path) -> (Value, f64) {
             let probe = PvecConversion::new(CadSource::Bytes(&bytes), &dest)
                 .unit(SourceUnit::Meters)
                 .probe();
-            let (by, reasons, met) = match &probe {
-                Ok(f) => (
+            // A drawing PVec refused every curve of carries its own counts, with the refused entities in
+            // `pvec-cannot-store`; the probe cannot see that refusal.
+            let counted = match (&e, &probe) {
+                (PvecConvertError::NothingStorable { fidelity, .. }, _) => Some(&**fidelity),
+                (_, Ok(f)) => Some(f),
+                _ => None,
+            };
+            let (by, reasons, met) = match counted {
+                Some(f) => (
                     FidelityClass::ALL
                         .iter()
                         .map(|c| (c.tag().to_string(), json!(f.count(*c))))
@@ -110,7 +117,7 @@ fn row(fx: &Fixture, dir: &std::path::Path) -> (Value, f64) {
                         .collect::<Vec<_>>(),
                     f.encountered(),
                 ),
-                Err(_) => (serde_json::Map::new(), Vec::new(), 0),
+                None => (serde_json::Map::new(), Vec::new(), 0),
             };
             let mut why = format!("refused: {e}");
             let mut source = std::error::Error::source(&e);
