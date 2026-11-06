@@ -155,6 +155,8 @@ pub struct LineStyleComponent {
     pub dash: Option<DashPattern>,
     /// Whether the source marked the entity visible.
     pub visible: bool,
+    /// The linetype's name in the source (`DASHED`), empty when the source gave none.
+    pub name: String,
 }
 
 impl LineStyleComponent {
@@ -174,6 +176,7 @@ impl LineStyleComponent {
             width,
             dash,
             visible,
+            name: String::new(),
         })
     }
 }
@@ -356,6 +359,8 @@ pub struct DwgStyleInput {
     pub lineweight: Option<DwgLineweight>,
     /// The linetype pattern: positive is pen down, negative pen up, zero a dot.
     pub linetype_elements: Option<Vec<f64>>,
+    /// The linetype's name in the drawing's table, when the provider reported one.
+    pub linetype_name: Option<String>,
     /// The linetype scale (entity scale times global scale).
     pub linetype_scale: f64,
     /// DWG colour index, counted and dropped under the monochrome profile.
@@ -369,6 +374,7 @@ impl Default for DwgStyleInput {
         DwgStyleInput {
             lineweight: None,
             linetype_elements: None,
+            linetype_name: None,
             linetype_scale: 1.0,
             colour_index: None,
             visible: true,
@@ -414,7 +420,9 @@ pub fn dwg_line_style(
             Some(DashPattern::new(out, 0.0)?)
         }
     };
-    LineStyleComponent::new(entity, width, dash, input.visible)
+    let mut c = LineStyleComponent::new(entity, width, dash, input.visible)?;
+    c.name = input.linetype_name.clone().unwrap_or_default();
+    Ok(c)
 }
 
 /// The plain values [`dwg_line_style`] takes, read from what a provider reported for one entity.
@@ -436,6 +444,10 @@ pub fn dwg_style_input(style: &EntityStyle, visible: bool) -> DwgStyleInput {
             Some(SourceLinetype::Pattern { elements, .. }) if !elements.is_empty() => {
                 Some(elements.clone())
             }
+            _ => None,
+        },
+        linetype_name: match style.linetype.present() {
+            Some(SourceLinetype::Pattern { name, .. }) => Some(name.clone()),
             _ => None,
         },
         linetype_scale: match style.linetype.present() {

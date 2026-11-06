@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The conversion writes the layer, line style and provenance streams** (issue #1525). `PvecConversion::components(StreamSelection)` writes
+  any of the three beside the geometry, each on its own and off by default, and the decoded geometry and the manifest box are the same either way. The
+  report gets an optional `components` section: the streams written, the rows PVec could not hold keyed `stream.reason`, and the colour
+  indices the monochrome profile ignored. It is documented as ignorable, so the schema version does not move. The line style stream
+  carries the DWG linetype name.
+- **Rooms and corridors from the conversion** (issue #1526). `PvecConversion::regions(Some(RegionConfig))` classifies the walls with the
+  default element rules, reads room names off TEXT (`DwgProvider::text_anchor`, defaulted), derives the regions and writes PVec's
+  semantic class stream. The report gets an optional `regions` section with the counts, what was dropped by reason and any
+  refusal (`regions.node-limit`), and the decoded geometry and the manifest box are the same with the step on and off. A room that runs along a door-gap
+  segment is dropped as `derived-boundary`, since those segments are not written as geometry.
 - **3D polylines and 3DFACE edges on the acadrust path, and a reason for every class left out** (issue #1523). The
   sample's 3D polylines and the visible edges of its 3DFACE now cross as lines (`sample_AC1018.dwg` goes from 86 to 94
   lines). POINT, ATTDEF, polyface and polygon meshes, MESH, 3DSOLID, REGION, RAY, XLINE, MLINE, SHAPE, WIPEOUT, IMAGE,
@@ -57,6 +67,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking, public structs and one enum (issue #1525).** `regions::semantic_stream` returns `ComponentsError` where it returned `String`.
+  `LineStyleComponent` gains `name`, `DwgStyleInput` gains `linetype_name`, `ConversionReport` gains `components` and `BuiltStreams` gains
+  `names`; none of those structs is `#[non_exhaustive]`, so a literal of any of them needs the new field. `SourceLinetype::Pattern` gains a
+  `name`. The enum is `#[non_exhaustive]` but its variant is not, so a `Pattern { .. }` built by hand needs the field.
 - **One `tiff` in the graph** (issue #1367). The direct `tiff` pin moves from 0.10.3 to 0.11.3 so it
   matches the copy `image` 0.25.10 already pulls (with its default `fax` decoder). Before, every
   cell resolved both. `dependency_policy` now asserts exactly one `tiff` per cell. `tiff` 0.11 reads

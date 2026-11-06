@@ -595,6 +595,8 @@ pub enum SourceLinetype {
     /// A pattern: signed element lengths (positive pen down, negative pen up, zero a dot), and the
     /// entity's own linetype scale. The header's global scale is not applied here.
     Pattern {
+        /// The linetype's name in the drawing's table (`DASHED`, `Continuous`).
+        name: String,
         /// The elements, in drawing units before scaling.
         elements: Vec<f64>,
         /// The entity's `linetype_scale`.
@@ -1020,6 +1022,14 @@ pub trait DwgProvider {
     ) -> Result<BTreeMap<ItemHandle, TextStyleRef>, ProviderError> {
         let _ = scope;
         Err(ProviderError::CannotReport(Facet::TextStyle))
+    }
+
+    /// What the `TEXT` or `MTEXT` entity with this handle says and where it is anchored, in the
+    /// coordinates of the block it sits in, or `None` for any other entity (#1526). The conversion
+    /// reads room names off it. The default has no text to give.
+    fn text_anchor(&self, handle: ItemHandle) -> Option<(String, Point3)> {
+        let _ = handle;
+        None
     }
 
     /// Opens one traversal pass.
