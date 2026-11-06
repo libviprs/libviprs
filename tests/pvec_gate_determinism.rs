@@ -63,6 +63,7 @@ fn digests() -> String {
 
 #[test]
 #[cfg_attr(miri, ignore)]
+#[cfg_attr(not(target_os = "linux"), ignore = "bit-exact Linux rows, #1513")]
 fn n2_8_1060_the_digest_of_every_conversion_matches_the_checked_in_baseline() {
     pvec_gate::check("deterministic output", "determinism", &digests());
 }

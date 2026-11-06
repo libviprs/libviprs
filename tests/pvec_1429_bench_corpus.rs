@@ -32,6 +32,7 @@ fn the_manifest_is_a_good_corpus() {
 }
 
 #[test]
+#[ignore = "benchmark plumbing, opt-in: cargo test --features pvec-convert --test pvec_1429_bench_corpus -- --ignored"]
 #[cfg_attr(miri, ignore)]
 fn six_cells_resolve_by_name_to_a_checksum() {
     let m = manifest();
@@ -48,6 +49,7 @@ fn six_cells_resolve_by_name_to_a_checksum() {
 }
 
 #[test]
+#[ignore = "benchmark plumbing, opt-in: cargo test --features pvec-convert --test pvec_1429_bench_corpus -- --ignored"]
 #[cfg_attr(miri, ignore)]
 fn a_missing_cell_turns_it_red() {
     let mut m = manifest();
@@ -72,6 +74,7 @@ fn a_drifted_checksum_turns_it_red() {
 }
 
 #[test]
+#[ignore = "benchmark plumbing, opt-in: cargo test --features pvec-convert --test pvec_1429_bench_corpus -- --ignored"]
 #[cfg_attr(miri, ignore)]
 fn two_corpus_revisions_turn_it_red() {
     let mut m = manifest();
@@ -84,6 +87,7 @@ fn two_corpus_revisions_turn_it_red() {
 }
 
 #[test]
+#[ignore = "benchmark plumbing, opt-in: cargo test --features pvec-convert --test pvec_1429_bench_corpus -- --ignored"]
 #[cfg_attr(miri, ignore)]
 fn a_revision_other_than_the_vendored_pin_turns_it_red() {
     let mut m = manifest();
@@ -96,6 +100,7 @@ fn a_revision_other_than_the_vendored_pin_turns_it_red() {
 }
 
 #[test]
+#[ignore = "benchmark plumbing, opt-in: cargo test --features pvec-convert --test pvec_1429_bench_corpus -- --ignored"]
 #[cfg_attr(miri, ignore)]
 fn a_seventh_cell_without_a_measured_count_turns_it_red() {
     let mut m = manifest();
@@ -117,6 +122,7 @@ fn a_seventh_cell_without_a_measured_count_turns_it_red() {
 }
 
 #[test]
+#[ignore = "benchmark plumbing, opt-in: cargo test --features pvec-convert --test pvec_1429_bench_corpus -- --ignored"]
 #[cfg_attr(miri, ignore)]
 fn a_cell_with_no_measured_count_turns_it_red() {
     let mut m = manifest();
@@ -129,6 +135,7 @@ fn a_cell_with_no_measured_count_turns_it_red() {
 }
 
 #[test]
+#[ignore = "benchmark plumbing, opt-in: cargo test --features pvec-convert --test pvec_1429_bench_corpus -- --ignored"]
 #[cfg_attr(miri, ignore)]
 fn a_malformed_cell_that_skips_an_n3_6_limit_turns_it_red() {
     let mut m = manifest();
@@ -156,6 +163,7 @@ fn a_malformed_input_the_limit_does_not_refuse_turns_it_red() {
 }
 
 #[test]
+#[ignore = "benchmark plumbing, opt-in: cargo test --features pvec-convert --test pvec_1429_bench_corpus -- --ignored"]
 #[cfg_attr(miri, ignore)]
 fn the_generators_are_deterministic() {
     let m = manifest();
