@@ -220,15 +220,21 @@
     "by_fidelity": {
      "IgnoredByPolicy": 0,
      "RequiresExtension": 0,
-     "RequiresPVecCapability": 0,
-     "SupportedEquivalent": 1,
+     "RequiresPVecCapability": 1,
+     "SupportedEquivalent": 0,
      "SupportedExact": 0,
      "Unsupported": 0
     },
     "conformance": "NoGeometry",
-    "reasons": []
+    "reasons": [
+     {
+      "count": 1,
+      "reason": "pvec-cannot-store",
+      "source_class": "LWPOLYLINE"
+     }
+    ]
    },
-   "outcome": "refused: the artifact could not be written <- no entity carries geometry",
+   "outcome": "refused: PVec's writer refused every curve, so no artifact was written",
    "size": {
     "artifact_bytes": 0,
     "entities": 1,
@@ -246,15 +252,21 @@
     "by_fidelity": {
      "IgnoredByPolicy": 0,
      "RequiresExtension": 0,
-     "RequiresPVecCapability": 0,
-     "SupportedEquivalent": 1,
+     "RequiresPVecCapability": 1,
+     "SupportedEquivalent": 0,
      "SupportedExact": 0,
      "Unsupported": 0
     },
     "conformance": "NoGeometry",
-    "reasons": []
+    "reasons": [
+     {
+      "count": 1,
+      "reason": "pvec-cannot-store",
+      "source_class": "LWPOLYLINE"
+     }
+    ]
    },
-   "outcome": "refused: the artifact could not be written <- no entity carries geometry",
+   "outcome": "refused: PVec's writer refused every curve, so no artifact was written",
    "size": {
     "artifact_bytes": 0,
     "entities": 1,

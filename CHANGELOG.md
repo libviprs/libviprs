@@ -34,6 +34,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whole raster was gigabytes passed. They now check `width * height * 4` and, under `AutoAdjustDpi`, lower the DPI
   until the raster fits. `StripSource` gains `resident_bytes()` (default `0`), and `EngineBuilder::run` returns
   `BudgetExceeded` under `BudgetPolicy::Error` when a source's resident bytes alone are over `with_memory_budget`.
+- **A drawing PVec refuses every curve of is no longer "no geometry"** (issue #1480). When the writer
+  refuses all of a drawing's curves (`bulge-arc-001`, one bulge polyline), `convert` used to return
+  `Write(NoGeometry)` with no report. The writer funnel now returns the new `WriteError::AllRefused`
+  with the refused ids, and `convert` returns the new `PvecConvertError::NothingStorable`, which carries
+  the report and the fidelity counts with each entity counted as `pvec-cannot-store`. Nothing is
+  published, so there is no artifact and no sidecar. `NoGeometry` keeps meaning that nothing carried
+  geometry in the first place.
 - **One unstorable curve no longer fails a whole drawing** (issue #1446). PVec's writer refuses a curve its
   container cannot store exactly and deterministically (`WRT-08`, for example an arc on a rotated frame),
   and `convert` used to return `Write(..)` for the entire drawing. The writer funnel now skips that curve,
