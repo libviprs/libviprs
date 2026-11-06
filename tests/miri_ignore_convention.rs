@@ -863,7 +863,8 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1526 adds 1 more: the `tests/pvec_1526_streams_bench.rs` benchmark, which writes a drawing into a temp dir. It said 1025 before this line moved.
 /// #1518 adds 2: the `tests/pvec_1481_classify.rs` cells that convert generated drawings into a temp dir and read the output pin. It said 1026 before this line moved.
 /// #1519 adds 2: `tests/pvec_1481_classify.rs::a_cancel_mid_write_leaves_the_previous_pair_and_no_partial_1519` and its spilled twin `a_cancel_mid_spilled_write_leaves_the_previous_pair_and_no_partial_1519`, which convert into a temp dir. It said 1028 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 1030;
+/// #1520 adds 1: `tests/pvec_1481_classify.rs::the_report_stage_adds_no_whole_report_string_1520`, which converts into a temp dir. It said 1030 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 1031;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {

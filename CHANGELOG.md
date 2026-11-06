@@ -38,6 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `NON_UNIFORM_BLOCK_SCALE`, and reports every entity class it does not flatten. `vector::convert::default_decoder`
   returns it when `dwg-acadrust` is on (acadrust wins over ACadSharp), and `decoder_for(ProviderKind, hardened)` picks a
   provider by name. The hardened profile refuses an input over 256 MiB before reading it.
+- **The report is written straight into its partial file** (issue #1520, a slice of #1481). `ConversionReport::write_json(&mut dyn Write)` writes the bytes `to_json_string` returns without building the string, and `pvec::publish::publish_streamed_with` takes a report writer and hands back the value the producer sealed, so a conversion no longer holds the whole report as one String (or two). `publish_streamed` is unchanged and sits on top of it. A report that fails to serialise or write now surfaces as `PvecConvertError::Publish(PublishError::Io)` and no longer as `PvecConvertError::Report`; the bytes of the report are unchanged.
 
 ### Fixed
 
