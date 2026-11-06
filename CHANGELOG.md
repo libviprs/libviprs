@@ -60,7 +60,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking, public structs and one enum (issue #1525).** `regions::semantic_stream` returns `ComponentsError` where it returned `String`.
   `LineStyleComponent` gains `name`, `DwgStyleInput` gains `linetype_name`, `ConversionReport` gains `components` and `BuiltStreams` gains
   `names`; none of those structs is `#[non_exhaustive]`, so a literal of any of them needs the new field. `SourceLinetype::Pattern` gains a
-  `name` and the enum is not `#[non_exhaustive]` either, so a `Pattern { .. }` built by hand needs it.
+  `name`. The enum is `#[non_exhaustive]` but its variant is not, so a `Pattern { .. }` built by hand needs the field.
 - **One `tiff` in the graph** (issue #1367). The direct `tiff` pin moves from 0.10.3 to 0.11.3 so it
   matches the copy `image` 0.25.10 already pulls (with its default `fax` decoder). Before, every
   cell resolved both. `dependency_policy` now asserts exactly one `tiff` per cell. `tiff` 0.11 reads
