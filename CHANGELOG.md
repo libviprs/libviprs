@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The conversion writes the layer, line style and provenance streams** (issue #1525). `PvecConversion::components(StreamSelection)` writes
+  any of the three beside the geometry, each on its own and off by default, and the geometry blocks are the same bytes either way. The
+  report gets an optional `components` section: the streams written, the rows PVec could not hold keyed `stream.reason`, and the colour
+  indices the monochrome profile ignored. It is documented as ignorable, so the schema version does not move. The line style stream
+  carries the DWG linetype name.
 - **Rooms and corridors from the conversion** (issue #1526). `PvecConversion::regions(Some(RegionConfig))` classifies the walls with the
   default element rules, reads room names off TEXT (`DwgProvider::text_anchor`, defaulted), derives the regions and writes PVec's
   semantic class stream. The report gets an optional `regions` section with the counts, what was dropped by reason and any
@@ -39,6 +44,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whole raster was gigabytes passed. They now check `width * height * 4` and, under `AutoAdjustDpi`, lower the DPI
   until the raster fits. `StripSource` gains `resident_bytes()` (default `0`), and `EngineBuilder::run` returns
   `BudgetExceeded` under `BudgetPolicy::Error` when a source's resident bytes alone are over `with_memory_budget`.
+- **A drawing PVec refuses every curve of is no longer "no geometry"** (issue #1480). When the writer
+  refuses all of a drawing's curves (`bulge-arc-001`, one bulge polyline), `convert` used to return
+  `Write(NoGeometry)` with no report. The writer funnel now returns the new `WriteError::AllRefused`
+  with the refused ids, and `convert` returns the new `PvecConvertError::NothingStorable`, which carries
+  the report and the fidelity counts with each entity counted as `pvec-cannot-store`. Nothing is
+  published, so there is no artifact and no sidecar. `NoGeometry` keeps meaning that nothing carried
+  geometry in the first place.
 - **One unstorable curve no longer fails a whole drawing** (issue #1446). PVec's writer refuses a curve its
   container cannot store exactly and deterministically (`WRT-08`, for example an arc on a rotated frame),
   and `convert` used to return `Write(..)` for the entire drawing. The writer funnel now skips that curve,
@@ -50,6 +62,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking, public structs and one enum (issue #1525).** `regions::semantic_stream` returns `ComponentsError` where it returned `String`.
+  `LineStyleComponent` gains `name`, `DwgStyleInput` gains `linetype_name`, `ConversionReport` gains `components` and `BuiltStreams` gains
+  `names`; none of those structs is `#[non_exhaustive]`, so a literal of any of them needs the new field. `SourceLinetype::Pattern` gains a
+  `name` and the enum is not `#[non_exhaustive]` either, so a `Pattern { .. }` built by hand needs it.
 - **One `tiff` in the graph** (issue #1367). The direct `tiff` pin moves from 0.10.3 to 0.11.3 so it
   matches the copy `image` 0.25.10 already pulls (with its default `fax` decoder). Before, every
   cell resolved both. `dependency_policy` now asserts exactly one `tiff` per cell. `tiff` 0.11 reads

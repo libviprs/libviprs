@@ -855,10 +855,12 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1513 adds 3: the `tests/pvec_1471_reproducibility.rs` cells that read the ADR and the two pvec test files. It said 996 before this line moved.
 /// Dropping the benchmark requirement removes 1: the `tests/pmtiles_release_readiness.rs` benchmark-doc check. It said 999 before this line moved.
 /// #1034 adds 1: the `tests/vector_1034_acadrust_fill.rs` cell that builds an archive in a temp dir. It said 998 before this line moved.
-/// #1525 adds 9: the `tests/pvec_1500_convert_streams.rs` cells that convert a small plan into a temp dir and read the streams back. It said 999 before this line moved.
-/// #1525 adds 2 more: the line-style name-too-long and bad-style cells of `tests/pvec_1500_convert_streams.rs`. It said 1008 before this line moved.
-/// #1526 adds 10: the `tests/pvec_1526_regions.rs` cells that convert a plan or a DWG into a temp dir and read the class stream back. It said 1010 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 1020;
+/// #1480 adds 4: the `tests/pvec_1480_all_refused.rs` cells that convert a drawing PVec refuses into a temp dir. It said 999 before this line moved.
+/// #1525 adds 9: the `tests/pvec_1500_convert_streams.rs` cells that convert a small plan into a temp dir and read the streams back. It said 1003 before this line moved.
+/// #1525 adds 2 more: the line-style name-too-long and bad-style cells of `tests/pvec_1500_convert_streams.rs`. It said 1012 before this line moved.
+/// #1526 adds 10: the `tests/pvec_1526_regions.rs` cells that convert a plan or a DWG into a temp dir and read the class stream back. It said 1014 before this line moved.
+/// #1526 adds 1 more: the `tests/pvec_1526_corpus_geometry.rs` cell that converts the corpus into a temp dir. It said 1024 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 1025;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
