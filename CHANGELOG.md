@@ -57,6 +57,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The memory criterion of the conversion is restated** (issue #1481). The conversion's memory is linear in the entities, and the original ceilings (1.5 GiB RSS, 1.0 GiB tracked, under 10% growth on doubling) were not met and are withdrawn. After #1518, #1519 and #1520 `large_industrial` (1,025,000 entities) peaks at 1,323 MiB tracked (2,015 MiB before) and 1,706 MiB RSS on arm64 (1,687 MiB on x64), about 1,353 bytes an entity, and the benchmark now checks 1.4 GiB tracked, 1.75 GiB RSS and 1,450 bytes an entity instead. `docs/pvec-benchmarks.md` says what is not done and what a drawing needs. No code changes.
 - **One `tiff` in the graph** (issue #1367). The direct `tiff` pin moves from 0.10.3 to 0.11.3 so it
   matches the copy `image` 0.25.10 already pulls (with its default `fax` decoder). Before, every
   cell resolved both. `dependency_policy` now asserts exactly one `tiff` per cell. `tiff` 0.11 reads

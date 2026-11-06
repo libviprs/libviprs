@@ -23,8 +23,8 @@ fn rows() -> Value {
     b["rows"].clone()
 }
 
-fn direct(scale: &str) -> Value {
-    let key = format!("bounded_memory/direct/large_industrial/x{scale}/{ARM}");
+fn direct(platform: &str, scale: &str) -> Value {
+    let key = format!("bounded_memory/direct/large_industrial/x{scale}/{platform}");
     let r = rows()[&key].clone();
     assert!(!r.is_null(), "no baseline row {key}");
     r
@@ -33,35 +33,43 @@ fn direct(scale: &str) -> Value {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn the_restated_criterion_holds_on_the_three_scale_rows() {
-    let mut per_entity = Vec::new();
-    for scale in SCALES {
-        let r = direct(scale);
-        let (tracked, entities) = (
-            r["tracked_peak"].as_f64().unwrap(),
-            r["entities"].as_f64().unwrap(),
-        );
-        per_entity.push(tracked / entities);
+    for platform in [ARM, NAS] {
+        let mut per_entity = Vec::new();
+        for scale in SCALES {
+            let r = direct(platform, scale);
+            let (tracked, entities) = (
+                r["tracked_peak"].as_f64().unwrap(),
+                r["entities"].as_f64().unwrap(),
+            );
+            per_entity.push(tracked / entities);
+            assert!(
+                r["peak_rss_bytes"].as_u64().is_some(),
+                "{platform} x{scale}: no RSS"
+            );
+            assert!(
+                tracked / entities <= 1450.0,
+                "{platform} x{scale}: {}",
+                tracked / entities
+            );
+        }
+        let one = direct(platform, "1.0");
+        assert_eq!(one["entities"], 1_025_000);
         assert!(
-            r["peak_rss_bytes"].as_u64().is_some(),
-            "x{scale} has no RSS"
+            one["tracked_peak"].as_f64().unwrap() <= 1.4 * GIB,
+            "{platform}"
         );
         assert!(
-            tracked / entities <= 1450.0,
-            "x{scale}: {}",
-            tracked / entities
+            one["peak_rss_bytes"].as_f64().unwrap() <= 1.75 * GIB,
+            "{platform}"
+        );
+        let (lo, hi) = per_entity
+            .iter()
+            .fold((f64::MAX, 0f64), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
+        assert!(
+            hi <= lo * 1.10,
+            "{platform}: per-entity figures differ by more than 10%: {per_entity:?}"
         );
     }
-    let one = direct("1.0");
-    assert_eq!(one["entities"], 1_025_000);
-    assert!(one["tracked_peak"].as_f64().unwrap() <= 1.4 * GIB);
-    assert!(one["peak_rss_bytes"].as_f64().unwrap() <= 1.75 * GIB);
-    let (lo, hi) = per_entity
-        .iter()
-        .fold((f64::MAX, 0f64), |(lo, hi), v| (lo.min(*v), hi.max(*v)));
-    assert!(
-        hi <= lo * 1.10,
-        "the per-entity figures differ by more than 10%: {per_entity:?}"
-    );
 }
 
 #[test]
