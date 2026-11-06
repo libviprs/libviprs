@@ -667,6 +667,10 @@ impl DwgProvider for AcadrustProvider {
             .collect())
     }
 
+    fn text_anchor(&self, handle: ItemHandle) -> Option<(String, Point3)> {
+        self.text_fact(handle).map(|t| (t.content, t.position))
+    }
+
     fn text_styles(
         &self,
         scope: &EntityScope,

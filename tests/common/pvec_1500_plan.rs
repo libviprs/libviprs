@@ -3,7 +3,8 @@
 //! The named fixture is `plan`: two root lines, two INSERTs (100 and 200) of a block of three
 //! lines, and twelve wall lines forming two 5 x 5 rooms under a 10 x 2 corridor, with a 0.3 door
 //! gap in the bottom wall of the first room. Sixteen source entities, twenty curves. The other
-//! byte strings select a variant (`huge`, `polywall`, `longlayer`, `longlinetype`, `badstyle`).
+//! byte strings select a variant (`huge`, `polywall`, `longlayer`, `longlinetype`, `badstyle`, and for #1526 `labelled`: the plan plus a
+//! TEXT at the centre of each room).
 
 #![allow(dead_code)]
 
@@ -140,6 +141,19 @@ impl DwgProvider for Mock {
                     )
                 })
                 .collect(),
+            CadSource::Bytes(b"labelled") => {
+                let mut v = plan();
+                for h in [3000u64, 3001] {
+                    v.push(RawEntity {
+                        style: EntityStyle::absent(),
+                        geometry: RawGeometry::Unmapped {
+                            reason: "text".into(),
+                        },
+                        provenance: stub(h, "TEXT", "0"),
+                    });
+                }
+                v
+            }
             CadSource::Bytes(b"polywall") => {
                 let mut v = plan();
                 let vertex = |x: f64, y: f64| RawVertex { x, y, bulge: 0.0 };
@@ -187,6 +201,14 @@ impl DwgProvider for Mock {
 
     fn caps(&self) -> &ProviderCaps {
         &self.caps
+    }
+
+    fn text_anchor(&self, handle: ItemHandle) -> Option<(String, [f64; 3])> {
+        match handle.get() {
+            3000 => Some(("Room A".into(), [2.5, 2.5, 0.0])),
+            3001 => Some(("Room B".into(), [7.5, 2.5, 0.0])),
+            _ => None,
+        }
     }
 
     fn layouts(&self) -> Result<Vec<LayoutState>, ProviderError> {
