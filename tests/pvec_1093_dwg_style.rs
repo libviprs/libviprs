@@ -80,6 +80,7 @@ fn issue_1093_a_linetype_is_read_as_its_elements_and_the_entity_scale() {
     assert_eq!(
         at(&all, 1.0).style.linetype.present(),
         Some(&SourceLinetype::Pattern {
+            name: "DASHED".into(),
             elements: vec![0.5, -0.25],
             scale: 2.0
         })
@@ -92,6 +93,7 @@ fn issue_1093_bylayer_resolves_through_the_layer_and_byblock_is_left_alone() {
     assert_eq!(
         at(&all, 2.0).style.linetype.present(),
         Some(&SourceLinetype::Pattern {
+            name: "DASHED".into(),
             elements: vec![0.5, -0.25],
             scale: 2.0
         })

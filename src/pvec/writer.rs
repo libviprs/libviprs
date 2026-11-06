@@ -148,7 +148,9 @@ pub(crate) struct OpenArtifact {
     bounds: BoundsReport,
     written: u64,
     skipped: u64,
-    source_ids: Vec<EntityId>,
+    /// The libviprs id of each entity written; the index is the entity's PVec id. A component stream is
+    /// built against these, because a refused curve moves every id after it.
+    pub(crate) source_ids: Vec<EntityId>,
     refused: Vec<(EntityId, String)>,
 }
 
@@ -158,7 +160,6 @@ pub(crate) struct OpenArtifact {
 fn prepare<'a>(
     config: &WriteConfig,
     items: impl IntoIterator<Item = (EntityId, &'a Normalized2DGeometry)>,
-    streams: Vec<Stream>,
     area: Option<[f64; 4]>,
     spill: Option<&SpillConfig>,
     cancel: &CancelToken,
@@ -177,7 +178,7 @@ fn prepare<'a>(
     // A curve PVec refuses is dropped and the rest are written again, so the manifest box is the
     // union of what is in the file and the ids stay dense. The common run is one pass, and a
     // second one only follows a refusal, which the first pass names.
-    let (mut writer, bounds, written) = loop {
+    let (writer, bounds, written) = loop {
         let curves = kept
             .iter()
             .enumerate()
@@ -260,12 +261,6 @@ fn prepare<'a>(
         }
         break (writer, bounds, curves.len() as u64);
     };
-    for stream in streams {
-        writer.components(stream).map_err(WriteError::Pvec)?;
-    }
-    if cancel.is_cancelled() {
-        return Err(WriteError::Cancelled);
-    }
     refused.sort_by_key(|(id, _)| *id);
     Ok(OpenArtifact {
         writer,
@@ -299,7 +294,7 @@ pub fn write_geometry<'a>(
     cancel: &CancelToken,
     on_chunk: &mut dyn FnMut(u64, u64),
 ) -> Result<GeometryArtifact, WriteError> {
-    open_geometry(config, items, streams, None, cancel, on_chunk)?.finish()
+    open_geometry(config, items, streams, None, None, cancel, on_chunk)?.finish()
 }
 
 /// As [`write_geometry`] up to the seal: the entities and `streams` are written and the artifact is handed
@@ -315,10 +310,13 @@ pub(crate) fn open_geometry<'a>(
     items: impl IntoIterator<Item = (EntityId, &'a Normalized2DGeometry)>,
     streams: Vec<Stream>,
     area: Option<[f64; 4]>,
+    spill: Option<&SpillConfig>,
     cancel: &CancelToken,
     on_chunk: &mut dyn FnMut(u64, u64),
 ) -> Result<OpenArtifact, WriteError> {
-    prepare(config, items, streams, area, None, cancel, on_chunk)
+    let mut open = prepare(config, items, area, spill, cancel, on_chunk)?;
+    open.components(streams, cancel)?;
+    Ok(open)
 }
 
 impl OpenArtifact {
@@ -338,6 +336,25 @@ impl OpenArtifact {
             .map(|ids| ids.len())
     }
 
+    /// Adds component streams after the geometry.
+    ///
+    /// # Errors
+    ///
+    /// [`WriteError::Pvec`] when PVec refuses a stream, [`WriteError::Cancelled`] when the token fired.
+    pub(crate) fn components(
+        &mut self,
+        streams: Vec<Stream>,
+        cancel: &CancelToken,
+    ) -> Result<(), WriteError> {
+        for stream in streams {
+            self.writer.components(stream).map_err(WriteError::Pvec)?;
+        }
+        if cancel.is_cancelled() {
+            return Err(WriteError::Cancelled);
+        }
+        Ok(())
+    }
+
     /// Seals the artifact.
     ///
     /// # Errors
@@ -346,6 +363,47 @@ impl OpenArtifact {
     pub(crate) fn finish(self) -> Result<GeometryArtifact, WriteError> {
         Ok(GeometryArtifact {
             bytes: self.writer.finish().map_err(WriteError::Pvec)?,
+            bounds: self.bounds,
+            written: self.written,
+            skipped: self.skipped,
+            source_ids: self.source_ids,
+            refused: self.refused,
+        })
+    }
+
+    /// Seals the artifact straight into `out`, as [`write_geometry_to`] does: a cancel is seen at every
+    /// write, and `on_chunk` hears each one. The writer must have been opened with a spill config.
+    ///
+    /// # Errors
+    ///
+    /// As [`write_geometry_to`].
+    pub(crate) fn seal_into(
+        self,
+        cancel: &CancelToken,
+        on_chunk: &mut dyn FnMut(u64, u64),
+        out: &mut dyn Write,
+    ) -> Result<StreamedArtifact, WriteError> {
+        let length = self
+            .writer
+            .finish_to(&mut ChunkWrite {
+                inner: out,
+                cancel,
+                on_chunk,
+                entities: self.written,
+                bytes: 0,
+            })
+            .map_err(|e| {
+                if cancel.is_cancelled() {
+                    WriteError::Cancelled
+                } else {
+                    WriteError::Pvec(e)
+                }
+            })?;
+        if cancel.is_cancelled() {
+            return Err(WriteError::Cancelled);
+        }
+        Ok(StreamedArtifact {
+            length,
             bounds: self.bounds,
             written: self.written,
             skipped: self.skipped,
@@ -436,32 +494,6 @@ pub fn write_geometry_to<'a>(
     on_chunk: &mut dyn FnMut(u64, u64),
     out: &mut dyn Write,
 ) -> Result<StreamedArtifact, WriteError> {
-    let p = prepare(config, items, streams, None, Some(spill), cancel, on_chunk)?;
-    let length = p
-        .writer
-        .finish_to(&mut ChunkWrite {
-            inner: out,
-            cancel,
-            on_chunk,
-            entities: p.written,
-            bytes: 0,
-        })
-        .map_err(|e| {
-            if cancel.is_cancelled() {
-                WriteError::Cancelled
-            } else {
-                WriteError::Pvec(e)
-            }
-        })?;
-    if cancel.is_cancelled() {
-        return Err(WriteError::Cancelled);
-    }
-    Ok(StreamedArtifact {
-        length,
-        bounds: p.bounds,
-        written: p.written,
-        skipped: p.skipped,
-        source_ids: p.source_ids,
-        refused: p.refused,
-    })
+    open_geometry(config, items, streams, None, Some(spill), cancel, on_chunk)?
+        .seal_into(cancel, on_chunk, out)
 }

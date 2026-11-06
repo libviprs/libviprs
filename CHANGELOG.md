@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The conversion writes the layer, line style and provenance streams** (issue #1525). `PvecConversion::components(StreamSelection)` writes
+  any of the three beside the geometry, each on its own and off by default, and the decoded geometry and the manifest box are the same either way. The
+  report gets an optional `components` section: the streams written, the rows PVec could not hold keyed `stream.reason`, and the colour
+  indices the monochrome profile ignored. It is documented as ignorable, so the schema version does not move. The line style stream
+  carries the DWG linetype name.
+- **Rooms and corridors from the conversion** (issue #1526). `PvecConversion::regions(Some(RegionConfig))` classifies the walls with the
+  default element rules, reads room names off TEXT (`DwgProvider::text_anchor`, defaulted), derives the regions and writes PVec's
+  semantic class stream. The report gets an optional `regions` section with the counts, what was dropped by reason and any
+  refusal (`regions.node-limit`), and the decoded geometry and the manifest box are the same with the step on and off. A room that runs along a door-gap
+  segment is dropped as `derived-boundary`, since those segments are not written as geometry.
 - **arm64 benchmark rows and a clean queue-capacity curve** (issues #1064, #1070). `docs/pvec-benchmarks.md` gains the provider, block-recursion, normalization and generation rows from mercury (aarch64, native), carried in `tests/fixtures/pvec_bench_baseline.json` under `aarch64-linux-mercury`, and the queue-capacity sweep taken on an idle host: capacities of 32 and above are flat within 0.5 percent, 16 and below are slower, and the default of 64 stays.
 - **Twenty minutes of clean fuzz per conversion target** (issue #1070). `docs/pvec-limits.md` records 20 minutes each on `fuzz_pvec_provider`, `fuzz_pvec_spline`, `fuzz_pvec_clip` and `fuzz_pvec_spool` on arm64 with no crash.
 - **The finite-value mutation line of N7.6** (issue #1070). `tests/pvec_normalization_proptest.rs` gains `composition_is_associative_when_a_level_is_not_finite`, which feeds NaN and infinite coefficients to composition and needs both groupings to refuse them or agree. With PVec's `Transform2::new` validation removed in a scratch copy of the pinned rev (nothing in `libviprs/pvec` touched), it goes red; unmutated it is green.
@@ -59,6 +69,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking, public structs and one enum (issue #1525).** `regions::semantic_stream` returns `ComponentsError` where it returned `String`.
+  `LineStyleComponent` gains `name`, `DwgStyleInput` gains `linetype_name`, `ConversionReport` gains `components` and `BuiltStreams` gains
+  `names`; none of those structs is `#[non_exhaustive]`, so a literal of any of them needs the new field. `SourceLinetype::Pattern` gains a
+  `name`. The enum is `#[non_exhaustive]` but its variant is not, so a `Pattern { .. }` built by hand needs the field.
 - **One `tiff` in the graph** (issue #1367). The direct `tiff` pin moves from 0.10.3 to 0.11.3 so it
   matches the copy `image` 0.25.10 already pulls (with its default `fax` decoder). Before, every
   cell resolved both. `dependency_policy` now asserts exactly one `tiff` per cell. `tiff` 0.11 reads
