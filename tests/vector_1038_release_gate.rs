@@ -76,3 +76,30 @@ fn release_ready_is_the_conjunction_of_the_rows() {
         .all(|c| c["status"] == "met");
     assert_eq!(g["release_ready"].as_bool().unwrap(), all_met);
 }
+
+#[test]
+#[cfg_attr(miri, ignore)] // reads files, which Miri's isolation refuses
+fn conformance_is_met_with_web_android_and_ios_evidence() {
+    let g = gate();
+    let row = g["criteria"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == "conformance")
+        .expect("the conformance row");
+    assert_eq!(row["status"], "met");
+    let evidence: Vec<&str> = row["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e.as_str().unwrap())
+        .collect();
+    for dir in [
+        "web/vector-viewer/e2e",
+        "conformance/android/evidence",
+        "conformance/ios/evidence",
+    ] {
+        assert!(evidence.contains(&dir), "conformance evidence misses {dir}");
+    }
+    assert!(row.get("blocker").is_none(), "a met row carries no blocker");
+}
