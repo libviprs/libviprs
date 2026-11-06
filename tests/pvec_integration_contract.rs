@@ -233,6 +233,20 @@ fn doc_problems(doc: &str, pin: &Value) -> Vec<String> {
             format!("`{path}` | `{}`", hash.as_str().unwrap()),
         );
     }
+    for (what, key) in [
+        ("the tracked peak after #1481", "tracked"),
+        ("the process peak after #1481", "rss_arm64"),
+    ] {
+        must(
+            &mut out,
+            doc,
+            what,
+            pin["memory_after_1481"][key]
+                .as_str()
+                .unwrap_or_else(|| panic!("the pin has no memory_after_1481.{key}"))
+                .to_string(),
+        );
+    }
     let outcome = pin["epic_l"]["outcome"].as_str().unwrap();
     if !OUTCOMES.contains(&outcome) {
         out.push(format!(
