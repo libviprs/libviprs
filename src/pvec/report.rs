@@ -225,8 +225,8 @@ pub struct ComponentsSummary {
 }
 
 /// What the room and corridor step of a conversion found (#1526). Optional and ignorable, like
-/// [`ComponentsSummary`]: the regions are a guess from the wall linework, and the geometry is the same
-/// bytes whether or not the step ran.
+/// [`ComponentsSummary`]: the regions are a guess from the wall linework, and the decoded geometry and
+/// the manifest box are the same whether or not the step ran.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct RegionsSummary {
     /// Rooms found.
