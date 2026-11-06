@@ -12,6 +12,7 @@ use pvec_facade::components::{
 };
 use thiserror::Error;
 
+use super::components::ComponentsError;
 use super::ordering::EntityId;
 
 /// Distance by basic arithmetic and a correctly rounded `sqrt`: libm `hypot` differs in the last bit between
@@ -538,11 +539,11 @@ pub struct SemanticStream {
 ///
 /// # Errors
 ///
-/// A message when PVec's encoder refuses the payload.
+/// [`ComponentsError::Refused`] when PVec's encoder refuses the payload.
 pub fn semantic_stream(
     regions: &Regions,
     source_ids: &[EntityId],
-) -> Result<SemanticStream, String> {
+) -> Result<SemanticStream, ComponentsError> {
     // PVec's bound on the entities in one region ring, repeated because the facade does not export it.
     const MAX_RING: usize = 4_096;
     let pos: BTreeMap<EntityId, usize> = source_ids
@@ -604,7 +605,7 @@ pub fn semantic_stream(
         regions: records,
     }
     .into_stream(&Registry::v1())
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| ComponentsError::Refused(e.to_string()))?;
     Ok(SemanticStream {
         stream: Some(stream),
         dropped,
