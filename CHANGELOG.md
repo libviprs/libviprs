@@ -10,15 +10,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **The conversion writes the layer, line style and provenance streams** (issue #1525). `PvecConversion::components(StreamSelection)` writes
-  any of the three beside the geometry, each on its own and off by default, and the geometry blocks are the same bytes either way. The
+  any of the three beside the geometry, each on its own and off by default, and the decoded geometry and the manifest box are the same either way. The
   report gets an optional `components` section: the streams written, the rows PVec could not hold keyed `stream.reason`, and the colour
   indices the monochrome profile ignored. It is documented as ignorable, so the schema version does not move. The line style stream
   carries the DWG linetype name.
 - **Rooms and corridors from the conversion** (issue #1526). `PvecConversion::regions(Some(RegionConfig))` classifies the walls with the
   default element rules, reads room names off TEXT (`DwgProvider::text_anchor`, defaulted), derives the regions and writes PVec's
   semantic class stream. The report gets an optional `regions` section with the counts, what was dropped by reason and any
-  refusal (`regions.node-limit`), and the geometry is the same bytes with the step on and off. A room that runs along a door-gap
+  refusal (`regions.node-limit`), and the decoded geometry and the manifest box are the same with the step on and off. A room that runs along a door-gap
   segment is dropped as `derived-boundary`, since those segments are not written as geometry.
+- **3D polylines and 3DFACE edges on the acadrust path, and a reason for every class left out** (issue #1523). The
+  sample's 3D polylines and the visible edges of its 3DFACE now cross as lines (`sample_AC1018.dwg` goes from 86 to 94
+  lines). POINT, ATTDEF, polyface and polygon meshes, MESH, 3DSOLID, REGION, RAY, XLINE, MLINE, SHAPE, WIPEOUT, IMAGE,
+  PDFUNDERLAY and ACAD_TABLE stay out of scope, and each diagnostic now says why after `out of scope:`.
 - **Solid hatches, 2D SOLID and the MTEXT anchor on the acadrust path** (issues #1034, #1527). A HATCH with the solid flag
   now reaches the tiles as a filled polygon in a new `fills` layer, with its islands as holes by even-odd (the normal and
   outer styles, outer being AutoCAD's default; the ignore style fills each loop on its own), a 2D SOLID is filled in its visible vertex order, and a patterned hatch stays an outline and

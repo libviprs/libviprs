@@ -1,6 +1,6 @@
 //! Issue #1526 (part of #1500 and #1093, N6.9): `PvecConversion::regions` derives rooms and
 //! corridors from the wall linework, writes PVec's semantic class stream and reports what it found,
-//! and the geometry is the same bytes with the step on and off. Needs `--features pvec-convert`.
+//! and the decoded geometry and the manifest box are the same with the step on and off. Needs `--features pvec-convert`.
 //!
 //! The named fixture is `plan` in `common/pvec_1500_plan.rs`: twelve wall lines forming two 5 x 5
 //! rooms under a 10 x 2 corridor, with a 0.3 door gap in the bottom wall of the first room.

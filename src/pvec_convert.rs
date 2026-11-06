@@ -238,7 +238,7 @@ impl<'a> PvecConversion<'a> {
     }
 
     /// The component streams to write beside the geometry: layer, line style and provenance, each
-    /// on its own (#1525). Off by default, and the geometry is the same bytes either way.
+    /// on its own (#1525). Off by default, and the decoded geometry and the manifest box are the same either way.
     #[must_use]
     pub fn components(mut self, select: StreamSelection) -> Self {
         self.components = select;
@@ -247,9 +247,10 @@ impl<'a> PvecConversion<'a> {
 
     /// Derive rooms and corridors from the wall linework and write them as PVec's semantic class
     /// stream (#1526). Off (`None`) by default. The walls are the straight lines the default
-    /// [`ElementRules`] call a wall, the room names come from TEXT, and the geometry is the same
-    /// bytes either way: the segments that close a door gap are never written as geometry, so a room
-    /// that runs along one is left out of the stream and counted in the report.
+    /// [`ElementRules`] call a wall, the room names come from TEXT, and the decoded
+    /// geometry and the manifest box are the same either way: the segments that close a door gap are
+    /// never written as geometry, so a room that runs along one is left out of the stream and counted
+    /// in the report. Explicit rooms are not passed, so only inferred regions come out.
     #[must_use]
     pub fn regions(mut self, config: Option<RegionConfig>) -> Self {
         self.regions = config;

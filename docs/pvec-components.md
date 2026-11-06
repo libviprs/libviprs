@@ -60,6 +60,8 @@ closed), `tests/pvec_1526_corpus_geometry.rs` checks on the whole pinned corpus 
 every option on and off and that a plain artifact holds no stream, and `tests/pvec_end_to_end.rs` (which asks for no stream) is the
 geometry conformance run against a component-free artifact.
 
+The conversion passes no explicit rooms to `derive_regions`, so a drawn room boundary or tagged block is exercised at library level only (`tests/pvec_1093_regions.rs`). "Same geometry" with the options on and off means the same decoded entities and the same manifest box: the reader API does not expose the container's block bytes, so those are not compared.
+
 An unlabelled face gets no PVec kind. It is counted (`unlabelled`) and, with `keep_unlabelled`, listed as dropped `unlabelled`. A kind for
 it would be added when a consumer needs to tell "a space the rules could not label" from "no space"; until one does, adding one would
 only be a guess written into the artifact.
