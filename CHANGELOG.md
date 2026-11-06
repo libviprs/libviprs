@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **3D polylines and 3DFACE edges on the acadrust path, and a reason for every class left out** (issue #1523). The
+  sample's 3D polylines and the visible edges of its 3DFACE now cross as lines (`sample_AC1018.dwg` goes from 86 to 94
+  lines). POINT, ATTDEF, polyface and polygon meshes, MESH, 3DSOLID, REGION, RAY, XLINE, MLINE, SHAPE, WIPEOUT, IMAGE,
+  PDFUNDERLAY and ACAD_TABLE stay out of scope, and each diagnostic now says why after `out of scope:`.
 - **Solid hatches, 2D SOLID and the MTEXT anchor on the acadrust path** (issues #1034, #1527). A HATCH with the solid flag
   now reaches the tiles as a filled polygon in a new `fills` layer, with its islands as holes by even-odd (the normal and
   outer styles, outer being AutoCAD's default; the ignore style fills each loop on its own), a 2D SOLID is filled in its visible vertex order, and a patterned hatch stays an outline and
