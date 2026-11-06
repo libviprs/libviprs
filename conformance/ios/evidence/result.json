@@ -3,7 +3,7 @@
   "platform": "ios",
   "maplibre_native_ios": "7.0.0",
   "ios_release": "27.2",
-  "simulator": "iPhone 17 (iOS-27-2), arm64 Mac, no GPU passthrough beyond the host's Metal",
+  "simulator": "iPhone 17 (iOS-27-2), on an arm64 Mac",
   "golden_bytes": 79939,
   "tests": {
     "remoteRangeMode": "passed",

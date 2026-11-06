@@ -85,7 +85,7 @@ const result = {
   platform: 'ios',
   maplibre_native_ios: /exact: "([\d.]+)"/.exec(fs.readFileSync(pkg, 'utf8'))[1],
   ios_release: t.system,
-  simulator: `${sim} (${runtime}), arm64 Mac, no GPU passthrough beyond the host's Metal`,
+  simulator: `${sim} (${runtime}), on an arm64 Mac`,
   golden_bytes: fs.statSync(golden).size,
   tests,
   metrics,
