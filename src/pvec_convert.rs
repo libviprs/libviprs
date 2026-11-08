@@ -99,20 +99,23 @@ use crate::pvec::publish::{PublishError, StreamedPublishError, publish_streamed_
 use crate::pvec::regions::{RegionConfig, RoomLabel, WallEdge, derive_regions, semantic_stream};
 use crate::pvec::report::{
     BoundsSplit, CapabilitySummary, ComponentsSummary, ConversionReport, EntityRow, RegionsSummary,
-    ReportBuilder, ReportError, UnresolvedXrefRow, ViewSummary, XrefSummary,
+    ReportBuilder, ReportError, SheetPlotSummary, SheetSummary, UnresolvedXrefRow, ViewSummary,
+    XrefSummary,
 };
 use crate::pvec::style::{LineStyleComponent, dwg_line_style, dwg_style_input};
 use crate::pvec::transform::{ComposedTransform, promote};
 use crate::pvec::writer::{
-    CapabilityId, LeafConfig, OpenArtifact, SpillConfig, WriteConfig, WriteError, open_geometry,
+    CapabilityId, LeafConfig, OpenArtifact, SpillConfig, WriteConfig, WriteError, metres_per_unit,
+    open_geometry,
 };
 use crate::pvec::{
-    DwgProvider, EntityId, EntityScope, EntityStyle, ExcludedEntity, FidelityClass, ProvenanceStub,
-    ProviderError, RawEntity, RawGeometry, SourceLimits, SourceUnit, ViewProfile, ViewProfileError,
-    select_layout,
+    DwgProvider, EntityId, EntityScope, EntityStyle, ExcludedEntity, FidelityClass, LayoutKind,
+    PolicyReason, ProvenanceStub, ProviderError, RawEntity, RawGeometry, SourceFact, SourceLimits,
+    SourceUnit, ViewProfile, ViewProfileError, select_layout,
 };
 use crate::pvec::{Normalized2DGeometry, ViewedEntity};
 use crate::sync_queue::bounded;
+use pvec_geometry::{Curve, Curve2d, Line, Point2, Trimmed};
 
 /// Entities per batch: the cancel token is looked at, and a progress event is sent, once per batch.
 const BATCH: usize = 256;
@@ -275,7 +278,8 @@ impl<'a> PvecConversion<'a> {
         self
     }
 
-    /// The drawing's unit, overriding what the provider reads.
+    /// The drawing's unit, overriding what the provider reads. A paper sheet whose plot settings
+    /// name inches or millimetres is in that unit instead (P-6, #1562).
     #[must_use]
     pub fn unit(mut self, unit: SourceUnit) -> Self {
         self.unit = Some(unit);
@@ -382,7 +386,7 @@ impl<'a> PvecConversion<'a> {
     /// As [`convert`](Self::convert), except that no unit is needed and nothing is written.
     pub fn probe(self) -> Result<FidelityReport, PvecConvertError> {
         let provider = AcadrustProvider::open(self.source).map_err(PvecConvertError::Open)?;
-        let c = self.classify(&provider)?;
+        let c = self.classify(&provider, Some(self.unit.unwrap_or(provider.source_unit())))?;
         c.tally
             .finish(c.encountered)
             .map_err(PvecConvertError::Tally)
@@ -395,7 +399,7 @@ impl<'a> PvecConversion<'a> {
     /// As [`probe`](Self::probe).
     pub fn probe_with<P: DwgProvider>(self) -> Result<FidelityReport, PvecConvertError> {
         let provider = P::open(self.source).map_err(PvecConvertError::Open)?;
-        let c = self.classify(&provider)?;
+        let c = self.classify(&provider, self.unit)?;
         c.tally
             .finish(c.encountered)
             .map_err(PvecConvertError::Tally)
@@ -444,7 +448,14 @@ impl<'a> PvecConversion<'a> {
 
     /// Everything a conversion decides about its entities, up to but not including the write.
     /// [`probe`](Self::probe) stops here, so it and [`convert`](Self::convert) cannot disagree.
-    fn classify<P: DwgProvider>(&self, provider: &P) -> Result<Classified, PvecConvertError> {
+    ///
+    /// `unit` is the drawing's unit, when there is one; a paper sheet whose plot settings name
+    /// inches or millimetres is in that unit instead (P-6, #1562).
+    fn classify<P: DwgProvider>(
+        &self,
+        provider: &P,
+        unit: Option<SourceUnit>,
+    ) -> Result<Classified, PvecConvertError> {
         let Self {
             source,
             view_profile,
@@ -454,6 +465,7 @@ impl<'a> PvecConversion<'a> {
             queue_capacity,
             components,
             regions,
+            calibration: caller_calibration,
             ..
         } = self;
         let observer = observer.as_deref();
@@ -483,6 +495,195 @@ impl<'a> PvecConversion<'a> {
             .map_err(|e| PvecConvertError::View(e.into()))?;
         let layout =
             select_layout(&layouts, &view_profile.space).map_err(PvecConvertError::View)?;
+
+        // The paper sheet (#1562): its frame and unit (P-6), its print flags (P-8) and the plot
+        // scale as the calibration (P-9). Zero or missing plot settings are not trusted for any of
+        // it: the frame is then the kept geometry's extent, in the drawing's unit, and nothing is
+        // cut.
+        let mut sheet: Option<Sheet> = None;
+        if layout.kind == LayoutKind::Paper {
+            let fact = match provider.layout_plot(layout.id) {
+                Ok(f) => f,
+                Err(ProviderError::CannotReport(_)) => SourceFact::NotReportable,
+                Err(e) => return Err(PvecConvertError::View(e.into())),
+            };
+            let text = |v: f64| format!("{v}");
+            let mut summary = SheetSummary {
+                layout: layout.name.clone(),
+                frame: "extents".into(),
+                unit_source: "drawing".into(),
+                calibration: if caller_calibration.is_some() {
+                    "caller".into()
+                } else {
+                    "none".into()
+                },
+                ..SheetSummary::default()
+            };
+            let mut plot_unit = None;
+            let mut frame_box = None;
+            let mut drop_widths = false;
+            let mut written = None;
+            match &fact {
+                SourceFact::Absent => summary.frame_reason = Some("plot-settings-absent".into()),
+                SourceFact::Present(p) => {
+                    summary.plot = Some(SheetPlotSummary {
+                        paper_size: p.paper_size.clone(),
+                        paper_width: text(p.paper_width),
+                        paper_height: text(p.paper_height),
+                        paper_units: p.paper_units,
+                        rotation: p.rotation,
+                        plot_type: p.plot_type,
+                        scale_numerator: text(p.scale_numerator),
+                        scale_denominator: text(p.scale_denominator),
+                        style_sheet: p.style_sheet.clone(),
+                        print_lineweights: p.print_lineweights,
+                        scale_lineweights: p.scale_lineweights,
+                        plot_plot_styles: p.plot_plot_styles,
+                    });
+                    let sized = |v: f64| v.is_finite() && v > 0.0;
+                    if !(sized(p.paper_width) && sized(p.paper_height)) {
+                        summary.frame_reason = Some("paper-size-zero".into());
+                    } else {
+                        let sheet_unit = match p.paper_units {
+                            0 => Some(SourceUnit::Inches),
+                            1 => Some(SourceUnit::Millimeters),
+                            _ => {
+                                summary.notes.push("paper-units-fallback".into());
+                                unit
+                            }
+                        };
+                        // Millimetres of paper in the sheet unit: exact for millimetres, one
+                        // division for inches, through PVec's own metres otherwise.
+                        let to_unit = |mm: f64| match sheet_unit {
+                            Some(SourceUnit::Millimeters) => Some(mm),
+                            Some(SourceUnit::Inches) => Some(mm / 25.4),
+                            Some(u) => metres_per_unit(u).ok().map(|m| mm * 0.001 / m),
+                            None => None,
+                        };
+                        let (w, h) = if matches!(p.rotation, 1 | 3) {
+                            (p.paper_height, p.paper_width)
+                        } else {
+                            (p.paper_width, p.paper_height)
+                        };
+                        // UNMEASURED (the print profile ADR's open item): the paper's lower left
+                        // is taken to sit at -(margin + plot origin) from the paper-space origin.
+                        // No fixture with non-zero margins and origin has measured it, so the
+                        // report says `position: unmeasured`.
+                        let placed = (
+                            to_unit(p.margins[0] + p.origin[0]),
+                            to_unit(p.margins[1] + p.origin[1]),
+                            to_unit(w),
+                            to_unit(h),
+                        );
+                        match placed {
+                            (Some(dx), Some(dy), Some(w), Some(h)) => {
+                                let (x0, y0) = (0.0 - dx, 0.0 - dy);
+                                frame_box = Some([x0, y0, x0 + w, y0 + h]);
+                                plot_unit = sheet_unit;
+                            }
+                            _ => summary.frame_reason = Some("unit-not-declarable".into()),
+                        }
+                    }
+                    if let (Some(b), Some(sheet_unit)) = (frame_box, plot_unit) {
+                        summary.frame = "paper".into();
+                        summary.position = Some("unmeasured".into());
+                        summary.sheet_box = Some(b.map(text));
+                        if matches!(p.paper_units, 0 | 1) {
+                            summary.unit_source = "plot-paper-units".into();
+                        }
+                        drop_widths = !p.print_lineweights;
+                        summary.widths_dropped = drop_widths;
+                        if p.plot_type != 5 {
+                            summary.notes.push("plot-type-not-applied".into());
+                        }
+                        if p.rotation != 0 {
+                            summary.notes.push("rotation-not-applied".into());
+                        }
+                        // P-9: the plot scale is the calibration record, never applied to a
+                        // coordinate. A caller's calibration wins.
+                        let (n, d) = (p.scale_numerator, p.scale_denominator);
+                        if caller_calibration.is_some() {
+                            summary.notes.push("caller-calibration".into());
+                        } else if !(sized(n) && sized(d)) {
+                            summary.notes.push("scale-zero".into());
+                        } else {
+                            // Both sides integral after scaling by one power of ten up to 10^6
+                            // reduce exactly; anything else is rounded at 10^6 and the record
+                            // carries the rounding as its uncertainty.
+                            let integral = |v: f64| {
+                                (v.fract() == 0.0 && (1.0..9.0e15).contains(&v)).then_some(v as u64)
+                            };
+                            let exact = [1.0, 10.0, 100.0, 1e3, 1e4, 1e5, 1e6]
+                                .into_iter()
+                                .find_map(|k| Some((integral(n * k)?, integral(d * k)?)));
+                            let uncertain = exact.is_none();
+                            let ratio = exact.or_else(|| {
+                                Some((integral((n * 1e6).round())?, integral((d * 1e6).round())?))
+                            });
+                            let reduced = ratio.and_then(|(a, b)| {
+                                let (mut x, mut y) = (a, b);
+                                while y != 0 {
+                                    (x, y) = (y, x % y);
+                                }
+                                Some((u32::try_from(a / x).ok()?, u32::try_from(b / x).ok()?))
+                            });
+                            let paper = metres_per_unit(sheet_unit).ok();
+                            let claim = reduced.zip(paper).map(|((num, den), paper)| {
+                                let raw = n / d;
+                                let note = if uncertain {
+                                    format!("plot scale {n}:{d} as stored, written as {num}:{den}")
+                                } else {
+                                    format!("plot scale {num}:{den}")
+                                };
+                                ScaleClaim {
+                                    metres_per_source_unit: paper * f64::from(den) / f64::from(num),
+                                    provenance: ScaleProvenance::PlanScale {
+                                        numerator: num,
+                                        denominator: den,
+                                        paper_metres_per_unit: paper,
+                                    },
+                                    uncertainty: uncertain.then(|| {
+                                        (f64::from(num) / f64::from(den) - raw).abs() / raw
+                                    }),
+                                    note: if note.len() <= 255 {
+                                        note
+                                    } else {
+                                        format!("plot scale written as {num}:{den}")
+                                    },
+                                }
+                            });
+                            match claim.map(|c| Calibration::new(Some(c), None, None)) {
+                                Some(Ok(c)) => {
+                                    if uncertain {
+                                        summary.notes.push("scale-not-reduced".into());
+                                    }
+                                    summary.calibration = if uncertain {
+                                        "plot-scale-uncertain".into()
+                                    } else {
+                                        "plot-scale".into()
+                                    };
+                                    summary.scale = reduced.map(|(a, b)| format!("{a}:{b}"));
+                                    written = Some(c);
+                                }
+                                _ => summary.notes.push("scale-refused".into()),
+                            }
+                        }
+                    }
+                }
+                _ => summary.frame_reason = Some("plot-settings-not-reportable".into()),
+            }
+            summary.unit = plot_unit
+                .or(unit)
+                .map_or("Unknown", SourceUnit::name)
+                .into();
+            sheet = Some(Sheet {
+                summary,
+                frame: frame_box,
+                unit: plot_unit,
+                calibration: written,
+                drop_widths,
+            });
+        }
         let source_name = match *source {
             CadSource::Path(p) => p.display().to_string(),
             CadSource::Bytes(_) => "(bytes)".to_owned(),
@@ -529,7 +730,6 @@ impl<'a> PvecConversion<'a> {
             }
             items.push(Item::Skipped(s));
         }
-        let encountered = items.len() as u64;
 
         // Ids are positions in the canonical order, which is decided by block path, handle and
         // arrival position alone (arrival positions are all different, so no later key is ever
@@ -556,6 +756,107 @@ impl<'a> PvecConversion<'a> {
         let mut labels: Vec<RoomLabel> = Vec::new();
         let (tx, rx) = bounded::<Outcome>(*queue_capacity);
         let sent = AtomicU64::new(0);
+        /// The pieces of a line or straight polyline inside the sheet `b`, `[min x, min y, max x,
+        /// max y]`, as point lists; `None` for a curve that is not cut (P-7). Cut on x, then on y,
+        /// Liang-Barsky per segment: a crossing point is computed once, from its segment's own
+        /// ends, and lies exactly on the edge it was cut on. A closed polyline's pieces are joined
+        /// back across the point where it closed.
+        fn sheet_cut(curve: &Curve, b: [f64; 4]) -> Option<Vec<Vec<[f64; 2]>>> {
+            let points: Vec<[f64; 2]> = match curve {
+                Curve::Polyline(p) => p.vertices().iter().map(|v| [v.x, v.y]).collect(),
+                Curve::Trimmed(t) if matches!(t.basis(), Curve::Line(_)) => {
+                    let (a, z) = (t.eval(0.0).ok()?, t.eval(t.trim().span).ok()?);
+                    vec![[a.x, a.y], [z.x, z.y]]
+                }
+                _ => return None,
+            };
+            let mut pieces = vec![points.clone()];
+            for (axis, lo, hi) in [(0, b[0], b[2]), (1, b[1], b[3])] {
+                let mut out: Vec<Vec<[f64; 2]>> = Vec::new();
+                for piece in &pieces {
+                    let mut cur: Vec<[f64; 2]> = Vec::new();
+                    for w in piece.windows(2) {
+                        let (a, z) = (w[0], w[1]);
+                        let (da, dz) = (a[axis], z[axis]);
+                        // The part inside, as parameters and the edge each end was cut on.
+                        let (mut t0, mut e0, mut t1, mut e1) = (0.0f64, None, 1.0f64, None);
+                        if da == dz {
+                            if da < lo || da > hi {
+                                if cur.len() >= 2 {
+                                    out.push(std::mem::take(&mut cur));
+                                }
+                                cur.clear();
+                                continue;
+                            }
+                        } else {
+                            let (ta, tb) = ((lo - da) / (dz - da), (hi - da) / (dz - da));
+                            let ((enter, ee), (leave, le)) = if ta < tb {
+                                ((ta, lo), (tb, hi))
+                            } else {
+                                ((tb, hi), (ta, lo))
+                            };
+                            if enter > t0 {
+                                (t0, e0) = (enter, Some(ee));
+                            }
+                            if leave < t1 {
+                                (t1, e1) = (leave, Some(le));
+                            }
+                            if t0 >= t1 {
+                                if cur.len() >= 2 {
+                                    out.push(std::mem::take(&mut cur));
+                                }
+                                cur.clear();
+                                continue;
+                            }
+                        }
+                        let at = |t: f64, edge: Option<f64>, end: [f64; 2]| match edge {
+                            None => end,
+                            Some(e) => {
+                                let mut q = [a[0] + (z[0] - a[0]) * t, a[1] + (z[1] - a[1]) * t];
+                                q[axis] = e;
+                                q
+                            }
+                        };
+                        let (p0, p1) = (at(t0, e0, a), at(t1, e1, z));
+                        if cur.last() != Some(&p0) {
+                            if cur.len() >= 2 {
+                                out.push(std::mem::take(&mut cur));
+                            }
+                            cur.clear();
+                            cur.push(p0);
+                        }
+                        cur.push(p1);
+                        if e1.is_some() {
+                            out.push(std::mem::take(&mut cur));
+                        }
+                    }
+                    if cur.len() >= 2 {
+                        out.push(cur);
+                    }
+                }
+                pieces = out;
+            }
+            let closed = points.len() > 2 && points.first() == points.last();
+            if closed
+                && pieces.len() > 1
+                && pieces[0].first() == points.first()
+                && pieces[pieces.len() - 1].last() == points.last()
+            {
+                let first = pieces.remove(0);
+                let last = pieces.len() - 1;
+                pieces[last].extend_from_slice(&first[1..]);
+                let joined = pieces.pop().expect("one piece at least");
+                pieces.insert(0, joined);
+            }
+            Some(pieces)
+        }
+        let frame = sheet.as_ref().and_then(|s| s.frame);
+        let drop_widths = sheet.as_ref().is_some_and(|s| s.drop_widths);
+        // What the sheet clip did: outside, crossing, cut and the pieces the cut ones became.
+        let mut clipped = [0u64; 4];
+        let mut viewports = 0u64;
+        // Ids are dense over what is written to the report, so a cut entity's pieces each take one.
+        let mut next_id = 0u64;
         let consumed = std::thread::scope(|scope| {
             let consumer = scope.spawn(|| consume(rx, &sent, observer));
             let mut failure = None;
@@ -590,94 +891,253 @@ impl<'a> PvecConversion<'a> {
                         &stand_in
                     }
                 };
-                let done = match classify_item(&items[at], raw, gate) {
+                let mut done = match classify_item(&items[at], raw, gate) {
                     Ok(done) => done,
                     Err(e) => {
                         failure = Some(e);
                         break;
                     }
                 };
-                let mut diagnostic =
-                    entity_diagnostic(&items[at], raw, &done.classification, &layout.name);
-                if let Some(d) = &mut diagnostic {
-                    d.source = Some(source_name.clone());
+                // A viewport on the sheet shows model space, which is not drawn yet (#1563): it is
+                // reported, never dropped.
+                if sheet.is_some()
+                    && matches!(items[at], Item::Leaf(_))
+                    && raw.provenance.class_name == "VIEWPORT"
+                {
+                    viewports += 1;
+                    done = without_geometry(
+                        Classification::refused(ReasonCode::ViewNotEnabled, "VIEWPORT"),
+                        vec![
+                            "VIEW_NOT_ENABLED (508): model space through a viewport is not drawn yet (#1563)"
+                                .to_owned(),
+                        ],
+                    );
                 }
-                let id = EntityId::at(n as u64);
-                if let (Some(rules), Item::Leaf(f)) = (&rules, &items[at]) {
-                    match &raw.geometry {
-                        RawGeometry::Line { start, end }
-                            if done.geometry.geometry().is_some()
-                                && rules.classify(raw).class == ElementClass::Wall =>
-                        {
-                            walls.push(WallEdge {
-                                entity: id,
-                                start: f.map_point(*start),
-                                end: f.map_point(*end),
-                            });
-                        }
-                        RawGeometry::Unmapped { .. }
-                            if matches!(raw.provenance.class_name.as_str(), "TEXT" | "MTEXT") =>
-                        {
-                            let anchor =
-                                raw.provenance.handle.and_then(|h| provider.text_anchor(h));
-                            if let Some((text, at)) = anchor.filter(|(t, _)| !t.trim().is_empty()) {
-                                labels.push(RoomLabel {
-                                    at: f.map_point(at),
-                                    text: text.trim().to_owned(),
-                                });
+                // P-7: nothing is drawn outside the sheet. A line or a straight polyline is cut
+                // exactly and may become several pieces, each its own entity and row; any other
+                // curve is kept when wholly inside, dropped when wholly outside and refused when
+                // it crosses the edge. PVec's own box decides inside and outside.
+                let mut more: Vec<Done> = Vec::new();
+                let mut whole = true;
+                if let (Some(b), Some(bounds), Some(curve)) = (
+                    frame,
+                    done.geometry.source_bounds(),
+                    done.geometry.geometry(),
+                ) {
+                    let (lo, hi) = (bounds.min(), bounds.max());
+                    let class = raw.provenance.class_name.as_str();
+                    if hi.x < b[0] || lo.x > b[2] || hi.y < b[1] || lo.y > b[3] {
+                        clipped[0] += 1;
+                        whole = false;
+                        done = without_geometry(
+                            Classification::ignored_by_policy("viewport_clipping", class),
+                            vec![format!(
+                                "{}: wholly outside the sheet",
+                                PolicyReason::OutsideViewport.code()
+                            )],
+                        );
+                    } else if !(lo.x >= b[0] && hi.x <= b[2] && lo.y >= b[1] && hi.y <= b[3]) {
+                        whole = false;
+                        match sheet_cut(curve, b) {
+                            None => {
+                                clipped[1] += 1;
+                                done = without_geometry(
+                                    Classification::refused(ReasonCode::ViewNotEnabled, class),
+                                    vec![
+                                        "VIEW_NOT_ENABLED (508): the curve crosses the sheet edge, and a curve is not cut until curve splitting lands (#1565)"
+                                            .to_owned(),
+                                    ],
+                                );
+                            }
+                            Some(pieces) if pieces.is_empty() => {
+                                clipped[0] += 1;
+                                done = without_geometry(
+                                    Classification::ignored_by_policy("viewport_clipping", class),
+                                    vec![format!(
+                                        "{}: wholly outside the sheet",
+                                        PolicyReason::OutsideViewport.code()
+                                    )],
+                                );
+                            }
+                            Some(pieces) => {
+                                let line = matches!(curve, Curve::Trimmed(_));
+                                let fidelity = done.geometry.fidelity();
+                                let built: Result<Vec<Normalized2DGeometry>, String> = pieces
+                                    .iter()
+                                    .map(|p| {
+                                        if line {
+                                            let a = Point2::checked(p[0][0], p[0][1])
+                                                .map_err(|e| e.to_string())?;
+                                            let z = Point2::checked(p[1][0], p[1][1])
+                                                .map_err(|e| e.to_string())?;
+                                            let l = Line::new(a, a.vector_to(z))
+                                                .map_err(|e| e.to_string())?;
+                                            let t = Trimmed::new(
+                                                Curve::Line(l),
+                                                0.0,
+                                                a.distance(z),
+                                                true,
+                                            )
+                                            .map_err(|e| e.to_string())?;
+                                            Normalized2DGeometry::from_curve(
+                                                Curve::Trimmed(t),
+                                                fidelity,
+                                            )
+                                            .map_err(|e| e.to_string())
+                                        } else {
+                                            Normalized2DGeometry::polyline(p, fidelity)
+                                                .map_err(|e| e.to_string())
+                                        }
+                                    })
+                                    .collect();
+                                match built {
+                                    Err(e) => {
+                                        done = without_geometry(
+                                            Classification::refused(
+                                                ReasonCode::DegenerateGeometry,
+                                                class,
+                                            ),
+                                            vec![format!(
+                                                "{class}: a piece cut at the sheet edge is degenerate: {e}"
+                                            )],
+                                        );
+                                    }
+                                    Ok(records) => {
+                                        clipped[2] += 1;
+                                        clipped[3] += records.len() as u64;
+                                        let mut gated_pieces = Vec::with_capacity(records.len());
+                                        for r in records {
+                                            match gated(r, &raw.provenance, gate) {
+                                                Ok(d) => gated_pieces.push(d),
+                                                Err(e) => {
+                                                    failure = Some(e);
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        if failure.is_some() {
+                                            break;
+                                        }
+                                        let mut it = gated_pieces.into_iter();
+                                        if let Some(first) = it.next() {
+                                            done = first;
+                                        }
+                                        more = it.collect();
+                                    }
+                                }
                             }
                         }
-                        _ => {}
                     }
                 }
-                let side = (*components != StreamSelection::NONE
-                    && done.geometry.geometry().is_some())
-                .then(|| {
-                    // Counted per kept entity in `open`, once the writer has said which it kept.
-                    let (style, colour, bad_style) = if components.line_style {
-                        let input = dwg_style_input(&raw.style, true);
-                        let c = dwg_line_style(id, &input).ok();
-                        let bad = c.is_none();
-                        (c, input.colour_index.is_some(), bad)
-                    } else {
-                        (None, false, false)
-                    };
-                    Side {
-                        // Only the handle, the layer and the outermost INSERT are read; the class name and
-                        // the rest of the block path are in the report, so they are not kept per entity.
-                        stub: ProvenanceStub {
-                            handle: raw.provenance.handle,
-                            class_name: String::new(),
-                            block_path: raw.provenance.block_path.steps().first().map_or_else(
-                                crate::pvec::InstancePath::root,
-                                |s| {
-                                    crate::pvec::InstancePath::root()
-                                        .child(String::new(), s.insert_handle)
-                                },
-                            ),
-                            layer: raw.provenance.layer.clone(),
-                        },
-                        style,
-                        colour,
-                        bad_style,
+                let mut stop = false;
+                for done in std::iter::once(done).chain(more) {
+                    let mut diagnostic =
+                        entity_diagnostic(&items[at], raw, &done.classification, &layout.name);
+                    if let Some(d) = &mut diagnostic {
+                        d.source = Some(source_name.clone());
                     }
-                });
-                let outcome = Outcome {
-                    id,
-                    handle: raw.provenance.handle.map(|h| h.get()),
-                    done,
-                    diagnostic,
-                    side,
-                };
-                if tx.send(outcome).is_err() {
+                    let id = EntityId::at(next_id);
+                    next_id += 1;
+                    if let (Some(rules), Item::Leaf(f), true) = (&rules, &items[at], whole) {
+                        match &raw.geometry {
+                            RawGeometry::Line { start, end }
+                                if done.geometry.geometry().is_some()
+                                    && rules.classify(raw).class == ElementClass::Wall =>
+                            {
+                                walls.push(WallEdge {
+                                    entity: id,
+                                    start: f.map_point(*start),
+                                    end: f.map_point(*end),
+                                });
+                            }
+                            RawGeometry::Unmapped { .. }
+                                if matches!(
+                                    raw.provenance.class_name.as_str(),
+                                    "TEXT" | "MTEXT"
+                                ) =>
+                            {
+                                let anchor =
+                                    raw.provenance.handle.and_then(|h| provider.text_anchor(h));
+                                if let Some((text, at)) =
+                                    anchor.filter(|(t, _)| !t.trim().is_empty())
+                                {
+                                    labels.push(RoomLabel {
+                                        at: f.map_point(at),
+                                        text: text.trim().to_owned(),
+                                    });
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    let side = (*components != StreamSelection::NONE
+                        && done.geometry.geometry().is_some())
+                    .then(|| {
+                        // Counted per kept entity in `open`, once the writer has said which it kept.
+                        let (style, colour, bad_style) = if components.line_style {
+                            let mut input = dwg_style_input(&raw.style, true);
+                            // P-8: a layout that does not print lineweights has none on its sheet.
+                            if drop_widths {
+                                input.lineweight = None;
+                            }
+                            let c = dwg_line_style(id, &input).ok();
+                            let bad = c.is_none();
+                            (c, input.colour_index.is_some(), bad)
+                        } else {
+                            (None, false, false)
+                        };
+                        Side {
+                            // Only the handle, the layer and the outermost INSERT are read; the class name and
+                            // the rest of the block path are in the report, so they are not kept per entity.
+                            stub: ProvenanceStub {
+                                handle: raw.provenance.handle,
+                                class_name: String::new(),
+                                block_path: raw.provenance.block_path.steps().first().map_or_else(
+                                    crate::pvec::InstancePath::root,
+                                    |s| {
+                                        crate::pvec::InstancePath::root()
+                                            .child(String::new(), s.insert_handle)
+                                    },
+                                ),
+                                layer: raw.provenance.layer.clone(),
+                            },
+                            style,
+                            colour,
+                            bad_style,
+                        }
+                    });
+                    let outcome = Outcome {
+                        id,
+                        handle: raw.provenance.handle.map(|h| h.get()),
+                        done,
+                        diagnostic,
+                        side,
+                    };
+                    if tx.send(outcome).is_err() {
+                        stop = true;
+                        break;
+                    }
+                    sent.fetch_add(1, Ordering::Release);
+                }
+                if stop {
                     break;
                 }
-                sent.fetch_add(1, Ordering::Release);
             }
             drop(tx);
             let consumed = consumer.join().expect("the consumer thread does not panic");
             failure.map_or(Ok(consumed), Err)
         })?;
+        let encountered = next_id;
+        let sheet = sheet.map(|mut s| {
+            for (key, n) in ["outside", "crossing", "cut", "pieces"]
+                .into_iter()
+                .zip(clipped)
+            {
+                s.summary.clip.insert(key.to_owned(), n);
+            }
+            s.summary.viewports = viewports;
+            s
+        });
         let xrefs = XrefSummary {
             unresolved: flat
                 .skipped
@@ -705,6 +1165,7 @@ impl<'a> PvecConversion<'a> {
             sides: consumed.sides,
             walls,
             labels,
+            sheet,
         })
     }
 
@@ -726,7 +1187,8 @@ impl<'a> PvecConversion<'a> {
             sides,
             walls,
             labels,
-        } = self.classify(provider)?;
+            sheet,
+        } = self.classify(provider, Some(unit))?;
         let Self {
             dest,
             leaves,
@@ -739,6 +1201,18 @@ impl<'a> PvecConversion<'a> {
             regions,
             ..
         } = self;
+        // A sheet is in the unit its plot settings name, its box is the paper (so the writer
+        // never refuses for bounds), and its plot scale is the calibration unless the caller gave
+        // one (#1562).
+        let (unit, area, calibration, sheet) = match sheet {
+            Some(s) => (
+                s.unit.unwrap_or(unit),
+                s.frame,
+                calibration.or(s.calibration),
+                Some(s.summary),
+            ),
+            None => (unit, None, calibration, None),
+        };
         let tell = |event: EngineEvent| {
             if let Some(o) = &observer {
                 o.on_event(event);
@@ -789,6 +1263,7 @@ impl<'a> PvecConversion<'a> {
             report.diagnostics = diagnostics;
             report.components = components;
             report.regions = found;
+            report.sheet = sheet.clone();
             Ok((report, fidelity))
         };
         let config = WriteConfig { unit, leaves };
@@ -821,7 +1296,7 @@ impl<'a> PvecConversion<'a> {
                 &config,
                 geometries.iter().map(|(id, g)| (*id, g)),
                 Vec::new(),
-                None,
+                area,
                 spill,
                 &cancel,
                 on_chunk,
@@ -1020,6 +1495,20 @@ struct Classified {
     /// The straight wall leaves and the text anchors the regions step reads; empty when it is off.
     walls: Vec<WallEdge>,
     labels: Vec<RoomLabel>,
+    /// The paper sheet, for a paper layout under the print profile.
+    sheet: Option<Sheet>,
+}
+
+/// A paper sheet as `classify` worked it out (#1562): the report's section, the frame to clip to
+/// and to hand the writer, the unit the plot settings put the sheet in, the calibration the plot
+/// scale gives and whether widths print.
+struct Sheet {
+    summary: SheetSummary,
+    /// `[min x, min y, max x, max y]` in the sheet unit, `None` when the frame is the extents.
+    frame: Option<[f64; 4]>,
+    unit: Option<SourceUnit>,
+    calibration: Option<Calibration>,
+    drop_widths: bool,
 }
 
 /// What the component streams read off one written entity: where it came from and its line style.

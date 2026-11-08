@@ -81,11 +81,13 @@ An entity excluded by `layer-no-plot` is counted per layer under `LAYER_HIDDEN` 
 same counter as an off or frozen layer, so the report still tells "nothing was on Defpoints" from
 "the print rule dropped it".
 
-Until the slice that implements a print rule lands, asking for it is refused, never ignored: a
-paper layout is `PaperSpaceUnsupported` (508) until slice 3, and on any other space
-`layers.no_plot = exclude`, `layers.frozen_in_viewport = apply` and `viewport_clipping = exact` are
-refused with `RuleNotEnabled` until the slices that apply them land (the no-plot rule also waits
-for the provider to report plottability, #1560).
+Until the slice that implements a print rule lands, asking for it is refused, never ignored. Since
+slice 3 (#1562) a paper layout is drawn under the print rules (`viewport_clipping = exact`) and stays
+`PaperSpaceUnsupported` (508) under the default ones, and `layers.no_plot = exclude` is applied
+from the provider's plottable flag (#1560) in either space. On model space
+`layers.frozen_in_viewport = apply` and `viewport_clipping = exact` are refused with
+`RuleNotEnabled`, since model space has no viewport for them to act on. Until slice 4 each viewport
+of a sheet is reported `Unsupported` with `VIEW_NOT_ENABLED` (reason `view-not-enabled`).
 
 [pvec-unsupported-policy.md](pvec-unsupported-policy.md) is amended to match: paper space is no
 longer `Unsupported` as a whole. `VIEW_NOT_ENABLED` (508) stays, per viewport (a non-plan view
@@ -147,7 +149,9 @@ measurement that is missing:
   margins, but nothing has measured it; the plot-settings fixture above is that measurement.
 - Whether acadrust's reader fills every `Layout.plot_*` field for R2000 to R2018, and whether
   `plot_paper_units = 2` occurs in real files. The fields exist; not measured on real drawings.
-- Whether pvec's writer refuses an entity whose bounds leave the manifest box. If it does, the box
-  is the union of the sheet and the kept geometry. Not measured; slice 3 measures it.
+- Whether pvec's writer refuses an entity whose bounds leave the manifest box. Slice 3 does not
+  depend on it: the sheet is handed to the writer as the area its box must take in, so the box is
+  the union of the sheet and the kept geometry, which the clip keeps inside the sheet anyway. Not
+  measured.
 - That AutoCAD cuts paper-space entities at the paper edge on PLOT. Stated from experience, not
   measured.

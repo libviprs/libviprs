@@ -873,7 +873,8 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1554 removes 8 and adds 6: `tests/pvec_1415_georef.rs` goes with the sidecar it tested, and the `tests/pvec_1554_sidecar_retired.rs` cells convert into a temp dir and import an old sidecar. It said 1065 before this line moved.
 /// #1556 adds 1: `tests/pvec_1416_diagnostics.rs::issue_1556_a_retired_code_is_listed_as_retired_and_is_gone_from_the_closed_set`, which reads the diagnostics document. It said 1063 before this line moved.
 /// #1559 adds 3: the `tests/pvec_1559_print_profile.rs` cells that read the print profile ADR, the spike and the unsupported policy. It said 1064 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 1067;
+/// #1562 adds 15: the `tests/pvec_1562_paper_sheet.rs` cells that convert a sheet into a temp dir and read the artifact back. Two `tests/pvec_1559_print_profile.rs` cells are renamed, not added. It said 1067 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 1082;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
