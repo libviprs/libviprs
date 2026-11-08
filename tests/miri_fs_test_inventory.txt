@@ -688,6 +688,7 @@ annotated   fs-detected  tests/pvec_1559_print_profile.rs::issue_1559_the_adr_ho
 annotated   fs-detected  tests/pvec_1559_print_profile.rs::issue_1559_the_unsupported_policy_no_longer_refuses_paper_space_as_a_whole
 annotated   fs-detected  tests/pvec_1562_paper_sheet.rs::issue_1562_a_caller_calibration_wins_over_the_plot_scale
 annotated   fs-detected  tests/pvec_1562_paper_sheet.rs::issue_1562_a_decimal_plot_scale_is_reduced_to_coprime_integers
+annotated   fs-detected  tests/pvec_1562_paper_sheet.rs::issue_1562_a_decimal_ratio_that_is_not_a_binary_fraction_still_reduces
 annotated   fs-detected  tests/pvec_1562_paper_sheet.rs::issue_1562_a_plot_scale_that_does_not_reduce_is_written_with_its_uncertainty
 annotated   fs-detected  tests/pvec_1562_paper_sheet.rs::issue_1562_a_real_layout_converts_to_its_sheet
 annotated   fs-detected  tests/pvec_1562_paper_sheet.rs::issue_1562_a_viewport_and_a_no_plot_line_never_vanish

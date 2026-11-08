@@ -285,8 +285,8 @@ pub struct SheetSummary {
     pub layout: String,
     /// `paper` when the frame is the paper sheet, `extents` when it is the kept geometry's extent.
     pub frame: String,
-    /// Why the frame is the extents: `plot-settings-absent`, `plot-settings-not-reportable` or
-    /// `paper-size-zero`.
+    /// Why the frame is the extents: `plot-settings-absent`, `plot-settings-not-reportable`,
+    /// `paper-size-zero` or `unit-not-declarable` (the sheet unit is one PVec cannot declare).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frame_reason: Option<String>,
     /// Where the paper frame's position came from: `unmeasured`, because the formula from the plot
