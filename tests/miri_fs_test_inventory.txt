@@ -764,7 +764,6 @@ annotated   fs-detected  tests/pvec_drift.rs::n_1471_every_drift_kind_is_caught_
 annotated   fs-detected  tests/pvec_drift.rs::n_1471_the_accepted_dump_hashes_to_the_committed_digest
 annotated   fs-detected  tests/pvec_drift.rs::n_1471_the_digest_of_every_converted_fixture_matches_the_committed_one
 annotated   fs-detected  tests/pvec_drift.rs::n_1471_the_example_prints_both_reports_and_fails_on_drift
-annotated   fs-detected  tests/pvec_drift.rs::n_1471_the_fixtures_whose_bits_differ_between_architectures_agree_within_the_numeric_policy
 annotated   fs-detected  tests/pvec_drift.rs::n_1471_the_library_uses_pvecs_public_api_and_none_of_its_maths
 annotated   fs-detected  tests/pvec_dual_oracle.rs::n2_2_1050_every_fixture_that_is_not_known_truth_is_executed_and_reported
 annotated   fs-detected  tests/pvec_dual_oracle.rs::n2_2_1050_the_pin_summary_is_the_index_and_a_bump_reads_as_per_class_changes
