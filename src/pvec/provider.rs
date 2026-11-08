@@ -166,6 +166,53 @@ pub struct LayerState {
     pub frozen: bool,
     /// Locked.
     pub locked: bool,
+    /// The layer prints. `false` is a no-plot layer (`Defpoints` is one by default); a print
+    /// leaves it out, a model-space view keeps it (#1560).
+    pub plottable: bool,
+}
+
+/// A layout's plot settings, as the drawing stores them (#1560). Nothing here is applied: which
+/// of these places, scales or drops anything is the print profile's.
+///
+/// The codes are the drawing's own numbers, unmapped, so a value this crate has no name for
+/// still crosses the boundary.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LayoutPlot {
+    /// The paper size's name (`ISO_A3_(420.00_x_297.00_MM)`), empty when there is none.
+    pub paper_size: String,
+    /// The paper's width in millimetres; zero when the drawing does not say.
+    pub paper_width: f64,
+    /// The paper's height in millimetres; zero when the drawing does not say.
+    pub paper_height: f64,
+    /// The plot paper units code: 0 inches, 1 millimetres, 2 pixels.
+    pub paper_units: i16,
+    /// What is plotted: 0 display, 1 extents, 2 limits, 3 a named view, 4 a window, 5 the layout.
+    pub plot_type: i16,
+    /// The plot window, `[min_x, min_y, max_x, max_y]`, used when `plot_type` is a window.
+    pub window: [f64; 4],
+    /// Paper units of the plot scale.
+    pub scale_numerator: f64,
+    /// Drawing units of the plot scale.
+    pub scale_denominator: f64,
+    /// The plot rotation code: 0 none, 1 a quarter turn, 2 a half turn, 3 three quarters.
+    pub rotation: i16,
+    /// The unprintable margins in millimetres, `[left, bottom, right, top]`.
+    pub margins: [f64; 4],
+    /// The plot origin in millimetres.
+    pub origin: [f64; 2],
+    /// The plot style table the layout names (`monochrome.ctb`), empty when it names none. The
+    /// file itself is not read.
+    pub style_sheet: String,
+    /// Lineweights print.
+    pub print_lineweights: bool,
+    /// Lineweights scale with the plot scale.
+    pub scale_lineweights: bool,
+    /// Plot styles apply.
+    pub plot_plot_styles: bool,
+    /// Viewport borders print.
+    pub plot_viewport_borders: bool,
+    /// What the viewports show is drawn before the paper-space entities.
+    pub draw_viewports_first: bool,
 }
 
 /// A value the drawing may not have, or the provider may not be able to read.
@@ -401,18 +448,80 @@ impl EntityFacts {
 }
 
 /// A paper-space viewport entity, as the drawing stores it. Nothing here is applied.
+///
+/// The view fields (#1560) are what a model-to-paper map needs; whether a view can be mapped
+/// exactly (plan, untwisted, not perspective, a positive height) is the print profile's call.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ViewportEntity {
     /// The viewport entity's handle.
     pub handle: ItemHandle,
     /// The paper layout that holds it.
     pub layout: LayoutId,
+    /// The viewport's number. In an AutoCAD drawing 1 is the paper-space view itself, not a
+    /// window onto the model; a DWG does not store the number, so the reader gives 1 to the first
+    /// viewport of the layout's list. Every viewport is listed, 1 included: which one is the paper
+    /// view is the print profile's call (#1560).
+    pub id: i16,
     /// The viewport's own visibility (its On flag, and not an invisible entity).
     pub visible: bool,
-    /// The clip boundary, paper-space vertices in order.
-    pub clip: Vec<[f64; 2]>,
+    /// What the viewport is clipped to.
+    pub clip: ViewportClip,
     /// Names of the layers frozen in this viewport only.
     pub frozen_layers: Vec<String>,
+    /// The viewport's own layer: a viewport on a no-plot layer does not print.
+    pub layer: String,
+    /// The centre of the viewport on the sheet, paper-space units.
+    pub center: [f64; 2],
+    /// The viewport's width on the sheet, paper-space units.
+    pub width: f64,
+    /// The viewport's height on the sheet, paper-space units.
+    pub height: f64,
+    /// The centre of the view, in the view's own coordinates (DCS), model units.
+    pub view_center: [f64; 2],
+    /// How much model space the viewport's height shows, model units.
+    pub view_height: f64,
+    /// The view target point, model coordinates.
+    pub view_target: Point3,
+    /// The view direction from the target, model coordinates; plan view is `[0, 0, 1]`.
+    pub view_direction: Point3,
+    /// The twist angle in radians, as stored (its sign against AutoCAD is not measured yet).
+    pub twist: f64,
+    /// A perspective view.
+    pub perspective: bool,
+    /// The viewport is hidden when plotting.
+    pub hide_plot: bool,
+    /// The drawing switches non-rectangular clipping on. [`clip`](Self::clip) says what the
+    /// boundary is, whichever way this is set.
+    pub non_rectangular_clipping: bool,
+}
+
+/// What a viewport is clipped to (#1560).
+///
+/// A boundary entity that is not a polyline used to come back as the viewport's rectangle,
+/// which is wrong on a print. Each kind is named here instead, so the print profile can refuse
+/// what it cannot clip.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum ViewportClip {
+    /// No boundary entity: the viewport's own rectangle, corners counter-clockwise from the
+    /// lower left, paper-space units.
+    Rectangle([[f64; 2]; 4]),
+    /// An LWPOLYLINE or 2D POLYLINE boundary: its vertices in order, with their bulges, paper-space
+    /// units. The last vertex joins the first.
+    Polygon(Vec<RawVertex>),
+    /// A CIRCLE boundary, by handle.
+    Circle(ItemHandle),
+    /// An ELLIPSE boundary, by handle.
+    Ellipse(ItemHandle),
+    /// A SPLINE boundary, by handle.
+    Spline(ItemHandle),
+    /// The boundary handle names an entity of another class, or none.
+    Other {
+        /// The boundary handle.
+        handle: ItemHandle,
+        /// The class name, or `UNKNOWN` when the handle names no entity.
+        class_name: String,
+    },
 }
 
 /// An external-reference block record, as the drawing stores it (issue #1378).
@@ -447,7 +556,7 @@ pub struct TextStyleRef {
 }
 
 /// One vertex of a polyline: position and the bulge toward the next vertex.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RawVertex {
     /// X.
     pub x: f64,
@@ -767,11 +876,13 @@ pub enum Facet {
     XrefAttachments,
     /// The text style of `TEXT` and `MTEXT` entities, from [`DwgProvider::text_styles`].
     TextStyle,
+    /// A layout's plot settings, from [`DwgProvider::layout_plot`] (#1560).
+    LayoutPlot,
 }
 
 impl Facet {
     /// Every facet.
-    pub const ALL: [Facet; 13] = [
+    pub const ALL: [Facet; 14] = [
         Facet::LayerState,
         Facet::LayoutState,
         Facet::KnotMultiplicity,
@@ -785,6 +896,7 @@ impl Facet {
         Facet::ViewportEntities,
         Facet::XrefAttachments,
         Facet::TextStyle,
+        Facet::LayoutPlot,
     ];
 }
 
@@ -960,6 +1072,20 @@ pub trait DwgProvider {
     ///
     /// [`ProviderError::CannotReport`] with [`Facet::LayoutState`] when the caps say so.
     fn layouts(&self) -> Result<Vec<LayoutState>, ProviderError>;
+
+    /// The plot settings of one layout (#1560). [`SourceFact::Absent`] when the drawing has
+    /// none for it, as a drawing before R2000 has none at all.
+    ///
+    /// The default says the provider cannot report them.
+    ///
+    /// # Errors
+    ///
+    /// [`ProviderError::CannotReport`] with [`Facet::LayoutPlot`] when the caps say so, and
+    /// [`ProviderError::NoSuchScope`] for a layout [`layouts`](Self::layouts) did not list.
+    fn layout_plot(&self, layout: LayoutId) -> Result<SourceFact<LayoutPlot>, ProviderError> {
+        let _ = layout;
+        Err(ProviderError::CannotReport(Facet::LayoutPlot))
+    }
 
     /// The layer table, in the drawing's own order.
     ///

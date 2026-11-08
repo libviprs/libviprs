@@ -11,7 +11,7 @@ use libviprs::pvec::{
     Availability, DwgProvider, EntityCursor, EntityScope, EntityState, EntityStates, Facet,
     FacetSource, FidelityClass, InstancePath, LayerState, LayoutId, LayoutKind, LayoutState,
     PolicyReason, ProvenanceStub, ProviderCaps, ProviderError, RawEntity, RawGeometry,
-    SpaceSelection, ViewProfile, ViewProfileError, ViewportFreezeMode, ViewportInput,
+    SpaceSelection, ViewProfile, ViewProfileError, ViewportClip, ViewportFreezeMode, ViewportInput,
     VisibilityFilter, select_layout,
 };
 
@@ -100,6 +100,7 @@ fn layer(name: &str, off: bool, frozen: bool) -> LayerState {
         off,
         frozen,
         locked: false,
+        plottable: true,
     }
 }
 
@@ -395,7 +396,7 @@ fn viewport(handle: u64, layout: u32, frozen: &[&str]) -> ViewportInput {
         handle: h(handle),
         layout: LayoutId(layout),
         visible: true,
-        clip: vec![[0.0, 0.0], [10.0, 0.0], [10.0, 5.0], [0.0, 5.0]],
+        clip: ViewportClip::Rectangle([[0.0, 0.0], [10.0, 0.0], [10.0, 5.0], [0.0, 5.0]]),
         frozen_layers: frozen.iter().map(|s| (*s).to_string()).collect(),
     }
 }
@@ -421,7 +422,7 @@ fn pvec_1077_viewport_freeze_is_reported_and_not_applied_by_default() {
     assert_eq!(out.ignored_freezes[0].viewport, h(100));
     // Only the selected layout's viewports are collected, with their boundary intact.
     assert_eq!(out.viewports.len(), 1);
-    assert_eq!(out.viewports[0].clip.len(), 4);
+    assert!(matches!(out.viewports[0].clip, ViewportClip::Rectangle(_)));
     assert!(out.viewports[0].visible);
 }
 
