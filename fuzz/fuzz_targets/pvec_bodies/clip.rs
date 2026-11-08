@@ -106,6 +106,8 @@ fn build(u: &mut Unstructured<'_>) -> AResult<PdfVectorPage> {
         shading_paints: 0,
         pattern_selections: 0,
         images: Vec::new(),
+        viewports: Vec::new(),
+        user_unit: 1.0,
     })
 }
 

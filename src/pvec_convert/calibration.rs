@@ -446,6 +446,86 @@ impl Georeference {
             m[1][2] / w,
         ])
     }
+
+    /// The affine that best puts each control point's source on its world position, and the
+    /// largest distance left between them. Two points give a similarity (scale, rotation and
+    /// shift, no shear), which meets both exactly; three or more give the least-squares affine.
+    /// Only `+ - * /` and a correctly rounded square root are used, in point order, so the same
+    /// points give the same bits everywhere.
+    ///
+    /// # Errors
+    ///
+    /// [`CalibrationError::Evidence`] for fewer than two points, [`CalibrationError::TooMany`]
+    /// for more than 1,024, [`CalibrationError::Degenerate`] when the source points are all in one
+    /// place or on one line.
+    pub fn fit(points: &[ControlPoint]) -> Result<([f64; 6], f64), CalibrationError> {
+        let n = points.len();
+        if n < 2 {
+            return Err(CalibrationError::Evidence);
+        }
+        if n > 1024 {
+            return Err(CalibrationError::TooMany { count: n });
+        }
+        let affine = if let [p, q] = points {
+            // w = alpha * z + beta over complex numbers, alpha = (w1 - w0) / (z1 - z0).
+            let (zx, zy) = (q.source[0] - p.source[0], q.source[1] - p.source[1]);
+            let (wx, wy) = (q.world[0] - p.world[0], q.world[1] - p.world[1]);
+            let den = zx * zx + zy * zy;
+            if den.is_nan() || den <= 0.0 {
+                return Err(CalibrationError::Degenerate);
+            }
+            let (re, im) = ((wx * zx + wy * zy) / den, (wy * zx - wx * zy) / den);
+            [
+                re,
+                -im,
+                im,
+                re,
+                p.world[0] - (re * p.source[0] - im * p.source[1]),
+                p.world[1] - (im * p.source[0] + re * p.source[1]),
+            ]
+        } else {
+            // Centred normal equations: [suu suv; suv svv] [a b]^T = [sux svx]^T, and the same
+            // for c and d against y.
+            let count = n as f64;
+            let mean = |f: fn(&ControlPoint) -> f64| points.iter().map(f).sum::<f64>() / count;
+            let (mx, my) = (mean(|p| p.source[0]), mean(|p| p.source[1]));
+            let (mwx, mwy) = (mean(|p| p.world[0]), mean(|p| p.world[1]));
+            let (mut suu, mut suv, mut svv) = (0.0, 0.0, 0.0);
+            let (mut sux, mut svx, mut suy, mut svy) = (0.0, 0.0, 0.0, 0.0);
+            for p in points {
+                let (u, v) = (p.source[0] - mx, p.source[1] - my);
+                let (x, y) = (p.world[0] - mwx, p.world[1] - mwy);
+                suu += u * u;
+                suv += u * v;
+                svv += v * v;
+                sux += u * x;
+                svx += v * x;
+                suy += u * y;
+                svy += v * y;
+            }
+            let det = suu * svv - suv * suv;
+            if det.is_nan() || det <= 1e-10 * suu * svv {
+                return Err(CalibrationError::Degenerate);
+            }
+            let (a, b) = ((sux * svv - svx * suv) / det, (svx * suu - sux * suv) / det);
+            let (c, d) = ((suy * svv - svy * suv) / det, (svy * suu - suy * suv) / det);
+            [a, b, c, d, mwx - a * mx - b * my, mwy - c * mx - d * my]
+        };
+        let [a, b, c, d, tx, ty] = affine;
+        let residual = points.iter().fold(0.0f64, |worst, p| {
+            let ex = a * p.source[0] + b * p.source[1] + tx - p.world[0];
+            let ey = c * p.source[0] + d * p.source[1] + ty - p.world[1];
+            worst.max((ex * ex + ey * ey).sqrt())
+        });
+        // Two points meet exactly by construction, and a residual too small to be a normal
+        // number is noise, not evidence.
+        let residual = if n == 2 || residual < f64::MIN_POSITIVE {
+            0.0
+        } else {
+            residual
+        };
+        Ok((affine, residual))
+    }
 }
 
 /// NP-01: finite, and zero or normal.
