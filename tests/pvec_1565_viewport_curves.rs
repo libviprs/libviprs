@@ -274,6 +274,7 @@ const RING: u64 = 0x44;
 const PAPER_RING: u64 = 0x45;
 const RATIONAL_IN: u64 = 0x46;
 const CORNER_DOT: u64 = 0x47;
+const RATIONAL_AROUND: u64 = 0x48;
 
 /// The triangle T is clipped to, in paper units: its apex is above A's centre.
 const TRIANGLE: [[f64; 2]; 3] = [[260.0, 60.0], [340.0, 60.0], [300.0, 140.0]];
@@ -333,6 +334,25 @@ fn drawing() -> Mock {
             ),
             // Paper (265, 130) r 2 through T: inside the triangle's box, outside the triangle.
             circle(CORNER_DOT, [1.5, 8.0], 0.2),
+            // Paper (250..350, 50..150) through T: its box holds the whole triangle, and the curve
+            // runs through it.
+            ent(
+                RATIONAL_AROUND,
+                "SPLINE",
+                RawGeometry::Spline {
+                    degree: 2,
+                    control_points: vec![
+                        [0.0, 0.0, 0.0],
+                        [10.0, 2.0, 0.0],
+                        [10.0, 8.0, 0.0],
+                        [0.0, 10.0, 0.0],
+                    ],
+                    knots: SourceFact::Present(vec![0.0, 0.0, 0.0, 1.0, 2.0, 2.0, 2.0]),
+                    weights: SourceFact::Present(vec![1.0, 0.5, 0.5, 1.0]),
+                    periodic: SourceFact::Present(false),
+                    closed: false,
+                },
+            ),
         ],
         viewports,
     }
@@ -625,5 +645,17 @@ fn issue_1565_a_polygon_keeps_what_is_inside_it_and_drops_what_is_only_inside_it
     assert_eq!(corner.len(), 1, "{corner:#?}");
     assert_eq!(corner[0].fidelity, "IgnoredByPolicy", "{:?}", corner[0]);
     assert_eq!(corner[0].policy_field.as_deref(), Some("viewport_clipping"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1565_a_rational_spline_whose_box_holds_the_polygon_is_refused_not_dropped() {
+    let (out, dir) = convert("polygon-around");
+    let report = out.expect("the sheet converts").report;
+    let r = rows(&report, RATIONAL_AROUND, Some(VP_T));
+    assert_eq!(r.len(), 1, "{r:#?}");
+    assert_eq!(r[0].fidelity, "Unsupported", "{:?}", r[0]);
+    assert_eq!(r[0].reason.as_deref(), Some("view-not-enabled"));
     let _ = fs::remove_dir_all(dir);
 }
