@@ -312,7 +312,13 @@ fn negative_zero_is_stored_as_zero() {
         affine: [0.5, -0.0, -0.0, 0.5, -0.0, 180_000.0],
         ..georeference()
     };
-    let c = Calibration::new(None, Some(g), None).unwrap();
+    let s = ScaleClaim {
+        uncertainty: Some(-0.0),
+        ..plan_scale()
+    };
+    let c = Calibration::new(Some(s), Some(g), None).unwrap();
     let affine = c.georeference().unwrap().affine;
     assert!(affine.iter().all(|v| !(*v == 0.0 && v.is_sign_negative())));
+    let u = c.scale().unwrap().uncertainty.unwrap();
+    assert!(!u.is_sign_negative());
 }
