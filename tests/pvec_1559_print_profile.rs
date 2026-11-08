@@ -175,4 +175,32 @@ mod with_a_drawing {
             }
         }
     }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn issue_1559_applying_viewport_freezes_is_refused_not_ignored() {
+        let mut p = ViewProfile::default_profile();
+        p.layers.frozen_in_viewport = libviprs::pvec::ViewportFreezeRule::Apply;
+        match p.apply(&sample()) {
+            Err(ViewProfileError::RuleNotEnabled { field }) => {
+                assert_eq!(field, "layers.frozen_in_viewport")
+            }
+            other => {
+                panic!("applying viewport freezes must be refused until it lands, got {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn issue_1559_exact_viewport_clipping_is_refused_not_ignored() {
+        let mut p = ViewProfile::default_profile();
+        p.viewport_clipping = libviprs::pvec::ViewportClipping::Exact;
+        match p.apply(&sample()) {
+            Err(ViewProfileError::RuleNotEnabled { field }) => {
+                assert_eq!(field, "viewport_clipping")
+            }
+            other => panic!("exact clipping must be refused until it lands, got {other:?}"),
+        }
+    }
 }
