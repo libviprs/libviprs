@@ -176,9 +176,9 @@ pub enum ReasonCode {
     /// cannot store it exactly and deterministically). `RequiresPVecCapability`, and the rule is
     /// in the row's warnings.
     PvecCannotStore,
-    /// A view the print profile cannot draw yet (`VIEW_NOT_ENABLED`, 508): a viewport on a paper
-    /// sheet until model space through viewports lands (#1563), or a curve crossing the sheet edge
-    /// until curves are split (#1565). `Unsupported`.
+    /// A view the print profile cannot draw yet (`VIEW_NOT_ENABLED`, 508): a viewport it cannot
+    /// map (#1563), or a curve crossing the sheet or a viewport edge that cannot be cut exactly
+    /// yet, a rational spline (#1565). `Unsupported`.
     ViewNotEnabled,
 }
 
