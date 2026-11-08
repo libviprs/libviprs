@@ -67,6 +67,7 @@ fn main() {
             id: *id,
             stub,
             style: Some(style),
+            viewport: None,
         })
         .collect();
     let config = WriteConfig {

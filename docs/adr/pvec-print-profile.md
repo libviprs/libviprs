@@ -86,8 +86,11 @@ slice 3 (#1562) a paper layout is drawn under the print rules (`viewport_clippin
 `PaperSpaceUnsupported` (508) under the default ones, and `layers.no_plot = exclude` is applied
 from the provider's plottable flag (#1560) in either space. On model space
 `layers.frozen_in_viewport = apply` and `viewport_clipping = exact` are refused with
-`RuleNotEnabled`, since model space has no viewport for them to act on. Until slice 4 each viewport
-of a sheet is reported `Unsupported` with `VIEW_NOT_ENABLED` (reason `view-not-enabled`).
+`RuleNotEnabled`, since model space has no viewport for them to act on. Since slice 4 (#1563) model
+space shows through each viewport the profile can map; the rest are refused per viewport as below,
+plus a target off the origin (the view centre is in display coordinates whose origin is the target,
+and no reference print measures it), and the paper view (number 1, showing paper space 1:1 centred on
+itself, as AutoCAD writes it) is not a window onto the model.
 
 [pvec-unsupported-policy.md](pvec-unsupported-policy.md) is amended to match: paper space is no
 longer `Unsupported` as a whole. `VIEW_NOT_ENABLED` (508) stays, per viewport (a non-plan view

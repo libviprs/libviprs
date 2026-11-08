@@ -69,6 +69,9 @@ pub struct ComponentSource<'a> {
     pub stub: &'a ProvenanceStub,
     /// Its line style, when the run computed one.
     pub style: Option<&'a LineStyleComponent>,
+    /// The viewport a model-space entity was drawn through on a sheet (#1563): its provenance row
+    /// is then kind 2, the source handle followed by this one.
+    pub viewport: Option<ItemHandle>,
 }
 
 /// A row or table entry left out of a stream because PVec cannot hold it.
@@ -281,8 +284,9 @@ pub fn build_streams(
         }
     }
     if select.provenance {
-        // One row per source entity: the outermost INSERT when there is one, else the entity.
-        let mut seen: BTreeSet<(Option<u64>, u64)> = BTreeSet::new();
+        // One row per source entity: the outermost INSERT when there is one, else the entity. A
+        // model entity seen through a viewport is a source entity per viewport (#1563).
+        let mut seen: BTreeSet<(Option<u64>, u64, Option<u64>)> = BTreeSet::new();
         let mut records = Vec::new();
         for (id, r) in &written {
             let handle = match r.stub.block_path.steps().first() {
@@ -290,9 +294,10 @@ pub fn build_streams(
                 None => r.stub.handle.map(ItemHandle::get),
             };
             // An entity with no handle is its own source entity, keyed by its id.
+            let viewport = r.viewport.map(ItemHandle::get);
             let key = match handle {
-                Some(h) => (Some(h), 0),
-                None => (None, r.id.get()),
+                Some(h) => (Some(h), 0, viewport),
+                None => (None, r.id.get(), viewport),
             };
             if !seen.insert(key) {
                 continue;
@@ -301,11 +306,24 @@ pub fn build_streams(
                 skip(r, "provenance", "stream-full");
                 continue;
             }
+            // 1 is a DWG source entity; 2 is one seen through a viewport, its 8 byte handle
+            // followed by the viewport's, with a source that has no handle written as the null
+            // handle 0 so the layout stays 16 bytes.
+            let (source_kind, bytes) = match viewport {
+                Some(v) => {
+                    let mut b = handle.unwrap_or(0).to_be_bytes().to_vec();
+                    b.extend_from_slice(&v.to_be_bytes());
+                    (2, b)
+                }
+                None => (
+                    1,
+                    handle.map_or_else(Vec::new, |h| h.to_be_bytes().to_vec()),
+                ),
+            };
             records.push(ProvenanceRecord {
                 entity: *id,
-                // 1 is a DWG source entity.
-                source_kind: 1,
-                handle: handle.map_or_else(Vec::new, |h| h.to_be_bytes().to_vec()),
+                source_kind,
+                handle: bytes,
             });
         }
         if !records.is_empty() {

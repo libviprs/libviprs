@@ -425,6 +425,15 @@ impl ViewProfile {
         if self.viewport_clipping == ViewportClipping::Exact {
             out.push("viewport_clipping");
         }
+        // A layer frozen in a viewport is dropped inside it (P-3, #1563), and on a sheet a
+        // VIEWPORT entity is a window rather than geometry of its own, so it is counted under the
+        // space it opens onto (P-1).
+        if self.layers.frozen_in_viewport == ViewportFreezeRule::Apply {
+            out.push("layers.frozen_in_viewport");
+        }
+        if matches!(self.space, SpaceSelection::PaperLayout(_)) {
+            out.push("space");
+        }
         out.push(Exclusion::DepthLimit.field());
         out.push(Exclusion::Unresolved.field());
         out

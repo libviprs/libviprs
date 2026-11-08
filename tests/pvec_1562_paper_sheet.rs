@@ -590,7 +590,7 @@ fn issue_1562_a_viewport_and_a_no_plot_line_never_vanish() {
     let r = row_of(&report, VIEWPORT);
     assert_eq!(r.fidelity, "Unsupported");
     assert_eq!(r.reason.as_deref(), Some("view-not-enabled"));
-    assert_eq!(report.sheet.as_ref().unwrap().viewports, 1);
+    assert_eq!(report.sheet.as_ref().unwrap().viewports.len(), 1);
     let r = row_of(&report, NO_PLOT_LINE);
     assert_eq!(r.fidelity, "IgnoredByPolicy");
     assert_eq!(r.policy_field.as_deref(), Some("layers.no_plot"));
@@ -1057,10 +1057,10 @@ mod with_a_drawing {
             row_of(report, hidden).policy_field.as_deref(),
             Some("layers.no_plot")
         );
-        assert_eq!(
-            row_of(report, vp).reason.as_deref(),
-            Some("view-not-enabled")
-        );
+        // Since #1563 a viewport is placed rather than refused, and the sheet lists it.
+        assert_eq!(row_of(report, vp).reason, None);
+        let sheet = report.sheet.as_ref().unwrap();
+        assert!(sheet.viewports.iter().any(|v| v.handle == vp), "{sheet:#?}");
         assert_eq!(row_of(report, crossing).fidelity, "SupportedEquivalent");
         let curves = written(report, &dir);
         assert_eq!(curves.len(), 1);
@@ -1103,11 +1103,12 @@ mod with_a_drawing {
                     .view_profile(ViewProfile::print_profile(layout))
                     .probe()
                     .unwrap_or_else(|e| panic!("{layout}: {e:?}"));
+            // Since #1563 the paper view and the viewport onto the model are both placed, so
+            // neither is refused.
             let reasons: Vec<_> = probed.reasons().collect();
-            assert_eq!(
-                reasons,
-                [(ReasonCode::ViewNotEnabled, "VIEWPORT", 2)],
-                "{layout}"
+            assert!(
+                !reasons.iter().any(|(_, class, _)| *class == "VIEWPORT"),
+                "{layout}: {reasons:?}"
             );
         }
     }

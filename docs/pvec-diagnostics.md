@@ -36,11 +36,15 @@ nothing emits and on one that is emitted and not written down.
 | `CANCELLED` | The caller cancelled the run. | info | `cancelled` | `a_precancelled_run` |
 
 The print profile (#1562) uses `ENTITY_UNSUPPORTED` with the message id `view-not-enabled` for what
-it cannot draw yet, `VIEW_NOT_ENABLED` (508) in the row's warning: each VIEWPORT of a sheet, until
-model space through viewports lands (#1563), and a curve that crosses the sheet edge, until curves
-are split (#1565). An entity wholly outside the sheet is `ENTITY_IGNORED_BY_POLICY` with the message
-id `viewport_clipping` and an `OUTSIDE_VIEWPORT` warning, and one on a no-plot layer has
-`layers.no_plot`.
+it cannot draw yet, `VIEW_NOT_ENABLED` (508) in the row's warning: a VIEWPORT whose view it cannot map
+(non-plan, perspective, a zero view height, a twist, a target off the origin, a clip that is not its
+rectangle, or one the provider reports nothing about, #1563), and a curve that crosses the sheet or
+a viewport edge, until curves are split (#1565). An entity wholly outside the sheet or its viewport is
+`ENTITY_IGNORED_BY_POLICY` with the message id `viewport_clipping` and an `OUTSIDE_VIEWPORT` warning,
+one on a no-plot layer has `layers.no_plot`, one on a layer frozen in the viewport it is seen through
+has `layers.frozen_in_viewport`, and a VIEWPORT that is drawn, off or hidden when plotting has `space`;
+the sheet's own paper view has `space` too, with a `PAPER_VIEW` warning, so it is never dropped
+silently.
 
 ## Fields
 

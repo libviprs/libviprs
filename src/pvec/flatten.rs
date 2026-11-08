@@ -208,6 +208,27 @@ impl FlatEntity {
         let [a, b, c, d, tx, ty] = self.matrix;
         [a * p[0] + b * p[1] + tx, c * p[0] + d * p[1] + ty]
     }
+
+    /// This leaf with `outer` composed after its map, so `outer` applies last: a viewport's map
+    /// onto the sheet (#1563). The matrix stays private, so composing is done here.
+    #[cfg(feature = "pvec-convert")]
+    #[must_use]
+    pub(crate) fn through(&self, outer: [f64; 6]) -> FlatEntity {
+        let [p, q, r, s, u, v] = outer;
+        let [a, b, c, d, tx, ty] = self.matrix;
+        FlatEntity {
+            entity: self.entity.clone(),
+            matrix: [
+                p * a + q * c,
+                p * b + q * d,
+                r * a + s * c,
+                r * b + s * d,
+                p * tx + q * ty + u,
+                r * tx + s * ty + v,
+            ],
+            lineage: self.lineage,
+        }
+    }
 }
 
 /// The per-level transforms of one leaf, outermost first.
