@@ -282,3 +282,37 @@ fn a_projective_matrix_is_refused_with_a_typed_error() {
         Err(CalibrationError::Projective)
     ));
 }
+
+#[test]
+fn a_scale_derived_from_the_georeference_needs_the_georeference() {
+    let s = ScaleClaim {
+        provenance: ScaleProvenance::Georeference,
+        ..plan_scale()
+    };
+    assert!(matches!(
+        refused(Some(s.clone()), None),
+        CalibrationError::Evidence
+    ));
+    assert!(Calibration::new(Some(s), Some(georeference()), None).is_ok());
+}
+
+#[test]
+fn a_fitted_georeference_needs_two_points() {
+    let g = Georeference {
+        method: GeoreferenceMethod::Fitted,
+        control_points: georeference().control_points[..1].to_vec(),
+        ..georeference()
+    };
+    assert!(matches!(refused(None, Some(g)), CalibrationError::Evidence));
+}
+
+#[test]
+fn negative_zero_is_stored_as_zero() {
+    let g = Georeference {
+        affine: [0.5, -0.0, -0.0, 0.5, -0.0, 180_000.0],
+        ..georeference()
+    };
+    let c = Calibration::new(None, Some(g), None).unwrap();
+    let affine = c.georeference().unwrap().affine;
+    assert!(affine.iter().all(|v| !(*v == 0.0 && v.is_sign_negative())));
+}
