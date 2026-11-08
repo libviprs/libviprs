@@ -61,6 +61,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 mod calibration;
 mod capability;
 mod georef;
+mod layouts;
 #[cfg(feature = "pvec-raster")]
 mod pdf;
 pub use crate::pvec::writer::recalibrate;
@@ -74,6 +75,7 @@ pub use georef::{
     GeoreferenceError, GeoreferenceHandoff, HandoffV1, SidecarImport, SourceBox, UnitRecord,
     georef_path, import_sidecar,
 };
+pub use layouts::{LayoutSetError, LayoutSetOutput, PvecLayoutSet, SheetOutcome, SheetSkip};
 #[cfg(feature = "pvec-raster")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-raster")))]
 pub use pdf::{PdfConversion, PdfConversionOutput, PdfConvertError};
