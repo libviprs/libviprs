@@ -43,7 +43,7 @@ crosses the sheet or a viewport edge and cannot be cut exactly yet (a rational s
 `ENTITY_IGNORED_BY_POLICY` with the message id `viewport_clipping` and an `OUTSIDE_VIEWPORT` warning,
 one on a no-plot layer has `layers.no_plot`, one on a layer frozen in the viewport it is seen through
 has `layers.frozen_in_viewport`, and a VIEWPORT that is drawn, off or hidden when plotting has `space`;
-the sheet's own paper view has `space` too, with a `PAPER_VIEW` warning, so it is never dropped
+the sheet's own paper view has `space` too, with a `PAPER_VIEW` warning (`PolicyReason::PaperView`, #1582), so it is never dropped
 silently.
 
 ## Fields
