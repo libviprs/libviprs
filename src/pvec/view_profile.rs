@@ -433,7 +433,8 @@ impl ViewProfile {
     /// [`ViewProfileError::LayoutNotFound`] for a paper layout the drawing does not have,
     /// [`ViewProfileError::PaperSpaceUnsupported`] for one it does (v1 draws model space only),
     /// [`ViewProfileError::NoModelSpace`], [`ViewProfileError::RuleNotEnabled`] for
-    /// `layers.no_plot = exclude` until the provider reports plottability, and
+    /// `layers.no_plot = exclude`, `layers.frozen_in_viewport = apply` and
+    /// `viewport_clipping = exact` until the slices that apply them land, and
     /// [`ViewProfileError::Provider`] when the provider fails or cannot report layer state while
     /// the profile acts on it.
     pub fn apply<P: DwgProvider + ?Sized>(
@@ -472,12 +473,26 @@ impl ViewProfile {
             }
         };
 
-        // P-3's no-plot rule needs the layer's plottable flag, which the provider boundary does
-        // not carry yet (#1560). Refused rather than drawn, so the knob never lies.
-        if self.layers.no_plot == LayerStateRule::Exclude {
-            return Err(ViewProfileError::RuleNotEnabled {
-                field: "layers.no_plot",
-            });
+        // The print rules (P-3, P-7) land with the sheet and the viewports (#1562, #1563); the
+        // no-plot one also needs the plottable flag from the provider (#1560). Until then each is
+        // refused rather than dropped, so a knob never says something the drawing did not get.
+        for (asked, field) in [
+            (
+                self.layers.no_plot == LayerStateRule::Exclude,
+                "layers.no_plot",
+            ),
+            (
+                self.layers.frozen_in_viewport == ViewportFreezeRule::Apply,
+                "layers.frozen_in_viewport",
+            ),
+            (
+                self.viewport_clipping == ViewportClipping::Exact,
+                "viewport_clipping",
+            ),
+        ] {
+            if asked {
+                return Err(ViewProfileError::RuleNotEnabled { field });
+            }
         }
 
         let needs_layers = self.layers.off == LayerStateRule::Exclude

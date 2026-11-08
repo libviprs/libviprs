@@ -82,8 +82,10 @@ same counter as an off or frozen layer, so the report still tells "nothing was o
 "the print rule dropped it".
 
 Until the slice that implements a print rule lands, asking for it is refused, never ignored: a
-paper layout is `PaperSpaceUnsupported` (508) until slice 3, and `layers.no_plot = exclude` is
-refused with `RuleNotEnabled` until the provider reports plottability (#1560) and slice 3 applies it.
+paper layout is `PaperSpaceUnsupported` (508) until slice 3, and on any other space
+`layers.no_plot = exclude`, `layers.frozen_in_viewport = apply` and `viewport_clipping = exact` are
+refused with `RuleNotEnabled` until the slices that apply them land (the no-plot rule also waits
+for the provider to report plottability, #1560).
 
 [pvec-unsupported-policy.md](pvec-unsupported-policy.md) is amended to match: paper space is no
 longer `Unsupported` as a whole. `VIEW_NOT_ENABLED` (508) stays, per viewport (a non-plan view
@@ -94,7 +96,15 @@ Rejected: amending V1-1 and V1-3 in place (every caller of the default profile w
 behaviour); one profile with a `space` switch that flips the rules (the rules are the profile); a
 pvec clip-region capability (pvec is curve-only, and a reader without the capability would draw
 model geometry over the title block); millimetres always (rescales authored coordinates, against
-`docs/pvec-units.md`); the geometry extent as the box (sheets of a set would not share a frame).
+`docs/pvec-units.md`); the geometry extent as the box (sheets of a set would not share a frame);
+keeping a crossing curve whole and calling it approximate (not a fidelity class, and it draws over
+the title block); a pvec change for per-region scales (reopens ADR 0019, no consumer).
+
+Dissents kept: bake the rotation, since the 90 degree cases are exact in f64 (I'd rather report it
+and let the consumer rotate); write the single viewport's scale as the file's record (a reader of
+`effective_scale()` would measure the title block a hundred times too big, and `recalibrate`
+exists for an application that wants it); keep lineweights when `print_lineweights` is false (a
+print without lineweights has none, and the report says the flag did it).
 
 ## Fixtures
 
