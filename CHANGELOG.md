@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A painted PDF path says what colour it was filled with** (issue #1544). `PdfPathEntity` gains `fill_colour: [u8; 3]`, the sRGB fill colour in force when the path was painted, taken from the same state the image masks already use, so `q`/`Q` and gray, RGB and CMYK all apply. Black until a colour operator sets it. A converter can now tell a white `re f` over a scan from a grey building fill. Code that builds a `PdfPathEntity` by hand needs the new field.
 - **The vector release gate is ready** (issue #1038). `release/vector-gate.json` flips the web and mobile conformance row to met now that the iOS run is recorded beside web and Android, and `release_ready` is true. The raster regression row keeps its caveat: it says the gate script runs the suite, not that a given sha passed.
 - **iOS PMTiles conformance harness** (issue #1037). `conformance/ios/` runs the golden archive with the shared black on white style in MapLibre Native iOS 7.0.0 on a simulator, in remote Range mode and as a downloaded `pmtiles://file://` archive, and records the result. `docs/mobile-pmtiles.md` reports the run.
 - **The conversion writes the layer, line style and provenance streams** (issue #1525). `PvecConversion::components(StreamSelection)` writes
