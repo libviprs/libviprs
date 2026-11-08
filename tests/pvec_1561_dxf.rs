@@ -8,7 +8,8 @@
 //! The twins in `tests/fixtures/pvec-dxf` are written from gold fixtures' `source.dwg` by the
 //! pinned acadrust's own DXF writer, so a twin is the same drawing as its DWG by construction and
 //! the gate baselines carry a row for each next to the DWG's. `PVEC_DXF_TWINS_BLESS=1` rewrites
-//! them. They are a round trip through one implementation, not known truth about DXF.
+//! them; run that with `--test pvec_1561_dxf the_twins_are` so no other cell reads a twin while it
+//! is being written. They are a round trip through one implementation, not known truth about DXF.
 //!
 //! Needs `--features pvec-convert`.
 
@@ -24,20 +25,8 @@ use std::path::Path;
 
 use libviprs::cad::CadSource;
 use libviprs::pvec::dwg_acadrust::AcadrustProvider;
-use libviprs::pvec::{DwgProvider, EntityScope, LayoutKind, ProviderError, RawEntity};
+use libviprs::pvec::{DwgProvider, EntityScope, LayoutKind, ProviderError};
 use pvec_gold::Corpus;
-
-fn model(p: &AcadrustProvider) -> Vec<RawEntity> {
-    let layouts = p.layouts().unwrap();
-    let m = layouts
-        .iter()
-        .find(|l| l.kind == LayoutKind::Model)
-        .expect("model space");
-    p.entities(&EntityScope::Layout(m.id))
-        .unwrap()
-        .collect_all()
-        .unwrap()
-}
 
 /// What a drawing looks like through the provider with the handles left out, which a writer is
 /// free to renumber: layers, layouts and every model-space entity's geometry and style.
@@ -49,13 +38,20 @@ fn shape(p: &AcadrustProvider) -> String {
         .map(|l| format!("{} off={} frozen={}", l.name, l.off, l.frozen))
         .collect();
     layers.sort();
-    let layouts: Vec<String> = p
-        .layouts()
-        .unwrap()
+    let all = p.layouts().unwrap();
+    let layouts: Vec<String> = all
         .iter()
         .map(|l| format!("{} {:?}", l.name, l.kind))
         .collect();
-    let entities: Vec<String> = model(p)
+    let model = all
+        .iter()
+        .find(|l| l.kind == LayoutKind::Model)
+        .expect("model space");
+    let entities: Vec<String> = p
+        .entities(&EntityScope::Layout(model.id))
+        .unwrap()
+        .collect_all()
+        .unwrap()
         .iter()
         .map(|e| format!("{:?} {:?}", e.geometry, e.style))
         .collect();
@@ -115,12 +111,10 @@ fn the_twins_are_the_listed_gold_drawings_written_by_the_pinned_dxf_writer() {
 
 #[test]
 fn probe_accepts_text_and_binary_dxf_beside_the_dwg_stamps() {
-    let yes: [&[u8]; 8] = [
+    let yes: [&[u8]; 6] = [
         b"0\nSECTION\n",
         b"  0\nSECTION\n  2\nHEADER\n",
         b"  0\r\nSECTION\r\n  2\r\nHEADER\r\n",
-        b"\xEF\xBB\xBF  0\nSECTION\n",
-        b"\n\n  0\nSECTION\n",
         b"999\nwritten by hand\n  0\nSECTION\n",
         b"AutoCAD Binary DXF\r\n\x1a\x00\x00\x00SECTION\x00",
         b"AC1032\0\0\0\0",
@@ -132,8 +126,13 @@ fn probe_accepts_text_and_binary_dxf_beside_the_dwg_stamps() {
             String::from_utf8_lossy(bytes)
         );
     }
-    let no: [&[u8]; 9] = [
+    // The reader cannot open a byte order mark, a blank line before the first pair or a
+    // padded value, so none of them is sniffed as a DXF.
+    let no: [&[u8]; 12] = [
         b"",
+        b"\xEF\xBB\xBF  0\nSECTION\n",
+        b"\n\n  0\nSECTION\n",
+        b"  0\nSECTION \n",
         b"0",
         b"0\nSECT",
         b"  0\nENTITIES\n",

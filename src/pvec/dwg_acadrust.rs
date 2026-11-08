@@ -40,10 +40,12 @@
 //! A DXF opens too (#1561). acadrust's DXF reader yields the same `CadDocument` its
 //! DWG reader does, so everything after the open is the DWG path unchanged. The sniff
 //! looks at the first kilobyte: the binary form's 22 byte sentinel, or the text form's
-//! first group pair being `0` and `SECTION`, after an optional UTF-8 byte order mark,
-//! blank lines and `999` comment pairs. No DXF version is gated here: the version sits
-//! in the header section, not at a fixed offset, and the reader refuses what it cannot
-//! read with an [`Open`](ProviderError::Open) error.
+//! first group pair being `0` and `SECTION`, after any `999` comment pairs. It takes what
+//! acadrust's text reader takes and no more: the code line may carry spaces, the value
+//! line only its line end, and a byte order mark or a blank line before the first pair
+//! is not a DXF (the reader could not open it). No DXF version is gated here: the
+//! version sits in the header section, not at a fixed offset, and the reader refuses
+//! what it cannot read with an [`Open`](ProviderError::Open) error.
 
 use std::collections::BTreeMap;
 use std::io::{Cursor, Read};
@@ -80,16 +82,14 @@ fn dxf_sniffed(head: &[u8]) -> bool {
     if head.starts_with(b"AutoCAD Binary DXF\r\n\x1a\x00") {
         return true;
     }
-    let text = head.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(head);
     // A pair needs the line after its value to have begun, so a value cut off at the end
-    // of the head (`SECT`) is never taken for a whole one.
-    let mut lines = text
-        .split(|b| *b == b'\n')
-        .map(<[u8]>::trim_ascii)
-        .peekable();
-    while lines.next_if(|l| l.is_empty()).is_some() {}
+    // of the head (`SECT`) is never taken for a whole one. The reader trims a code line
+    // and only drops the `\r` of a value line, so the sniff does the same.
+    let mut lines = head.split(|b| *b == b'\n').peekable();
     loop {
-        match (lines.next(), lines.next(), lines.peek()) {
+        let code = lines.next().map(<[u8]>::trim_ascii);
+        let value = lines.next().map(|v| v.strip_suffix(b"\r").unwrap_or(v));
+        match (code, value, lines.peek()) {
             (Some(b"999"), Some(_), Some(_)) => {}
             (Some(b"0"), Some(b"SECTION"), Some(_)) => return true,
             _ => return false,
@@ -553,8 +553,8 @@ impl DwgProvider for AcadrustProvider {
 
     fn open(source: CadSource<'_>) -> Result<Self, ProviderError> {
         let head = read_head(source)?;
-        let dxf = !stamp_supported(&head);
-        if dxf && !dxf_sniffed(&head) {
+        let dwg = stamp_supported(&head);
+        if !dwg && !dxf_sniffed(&head) {
             return Err(ProviderError::Unrecognised {
                 provider: NAME,
                 detail: format!(
@@ -563,12 +563,12 @@ impl DwgProvider for AcadrustProvider {
                 ),
             });
         }
-        let result = catch_unwind(AssertUnwindSafe(|| match (source, dxf) {
-            (CadSource::Path(p), false) => DwgReader::from_file(p).and_then(|mut r| r.read()),
-            (CadSource::Bytes(b), false) => DwgReader::from_stream(Cursor::new(b)).read(),
-            (CadSource::Path(p), true) => DxfReader::from_file(p).and_then(DxfReader::read),
+        let result = catch_unwind(AssertUnwindSafe(|| match (source, dwg) {
+            (CadSource::Path(p), true) => DwgReader::from_file(p).and_then(|mut r| r.read()),
+            (CadSource::Bytes(b), true) => DwgReader::from_stream(Cursor::new(b)).read(),
+            (CadSource::Path(p), false) => DxfReader::from_file(p).and_then(DxfReader::read),
             // The DXF reader wants an owned stream, so the bytes are copied once here.
-            (CadSource::Bytes(b), true) => {
+            (CadSource::Bytes(b), false) => {
                 DxfReader::from_reader(Cursor::new(b.to_vec())).and_then(DxfReader::read)
             }
         }));
